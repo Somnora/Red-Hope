@@ -101,6 +101,9 @@ public:
 	// Colony-held solids: sum of building stores (deposit piles are not
 	// collected yet, so they do not count toward quota).
 	double GetTotalSolid(FName Resource) const;
+	// Network-instant pool (fluids/gases/abstract per hybrid logistics).
+	double GetStock(FName Resource) const;
+	void AddStock(FName Resource, double Delta);
 	// Quota progress vs DT_Quotas Q1: resource -> (have, need).
 	TMap<FName, TPair<double, double>> GetQuotaProgress() const;
 

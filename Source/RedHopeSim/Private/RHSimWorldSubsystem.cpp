@@ -480,6 +480,19 @@ bool URHSimWorldSubsystem::IsInCoverage(const FVector& LocationCm) const
 	return false;
 }
 
+double URHSimWorldSubsystem::GetStock(FName Resource) const
+{
+	const double* Found = Stocks.Find(Resource);
+	return Found ? *Found : 0.0;
+}
+
+void URHSimWorldSubsystem::AddStock(FName Resource, double Delta)
+{
+	double& Amount = Stocks.FindOrAdd(Resource);
+	Amount += Delta;
+	OnStockChanged.Broadcast(Resource, Amount);
+}
+
 double URHSimWorldSubsystem::GetTotalSolid(FName Resource) const
 {
 	double Total = 0.0;
