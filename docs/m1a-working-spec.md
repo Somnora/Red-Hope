@@ -39,6 +39,15 @@ Gates B and C are order-independent; A lands first (both depend on its schema).
 - **Headless proof:** `RHSimCommandlet` grows up — creates a minimal world, initializes the sim chain, era-runs N sols, prints the ledger table (`-run=RHSim -sols=100`). Standing-order headless requirement, CI-runnable.
 - `SpeedTiers` config row becomes `0;1;3;8;60`.
 
+## 5b. Gate B architecture (locked 2026-07-05 after engine-header study; MassAI enable director-approved)
+
+- **Determinism ruling:** MassAI's stock StateTree ticking is signal/frame-driven — it would let acceleration change outcomes. We therefore use MassAI's *data plumbing* but *not* its scheduling: **our own processor constructs `FMassStateTreeExecutionContext(Owner, Tree, InstanceData, MassContext)` per entity and ticks it inside the sim sub-step loop** (the 5.6+ context needs no signal subsystem; the engine's `MassStateTreeProcessors.cpp` per-entity flow is the template). Decisions stay locked to sim time.
+- **Storage:** per-entity `FStateTreeInstanceData` lives in `UMassStateTreeSubsystem` (engine storage, `AllocateInstanceData` at spawn, handle in `FMassStateTreeInstanceFragment`); the tree asset rides a `FMassStateTreeSharedFragment` const-shared fragment.
+- **Tree shape (scaffolding parity):** two states — **Work** (wraps the claim-by-class + dig/haul/build execution, calling the same sim API as the M0-c switch) and **Charge** (pad seek/dock/resume), with `FRHNeedsChargeCondition` (battery < seek fraction, mid-delivery exempt, pad exists) driving Work→Charge and task-success driving Charge→Work. Movement integration + battery drain stay in the processor. M1-b/c add Repair/Survey/Shelter as new states, which is the point of the port.
+- **Tasks get fragments via `TStateTreeExternalDataHandle<>`** (resolved by the Mass context; our query declares every fragment the tree needs). The sim subsystem is fetched via `Context.GetWorld()` inside tasks for now — promoting it to a declared external dependency is an M1-b refinement (needs Mass subsystem traits).
+- **Asset authoring:** StateTree assets are editor-GUI things and MCP cannot author them (same class of gap as UMG). The tree is built **programmatically** by a `WITH_EDITOR` dev command (`RH.BuildRobotStateTree`) against `StateTreeEditorModule`, then compiled — the asset is reproducible from code, which suits the toolchain.
+- **Fallback preserved for free:** robots spawn with StateTree fragments only when the tree asset exists; the M0-c `RHRobotTaskProcessor` keeps running for entities *without* the fragment (its query excludes it). Legacy brain and StateTree brain are A/B-testable against the same driver — that is the Gate B parity instrument.
+
 ## 6. Out of M1-a
 
 Wear/repair/survey behavior (M1-b — StateTree states land as scaffolding only), storms (M1-c), Q2/Habitat/manifest-composer (M1-d), any UI beyond command deck v1, any terrain work (deferred to M2 by director call).

@@ -45,6 +45,10 @@
 		{
 			"Name": "MassGameplay",
 			"Enabled": true
+		},
+		{
+			"Name": "MassAI",
+			"Enabled": true
 		}
 	]
 }
