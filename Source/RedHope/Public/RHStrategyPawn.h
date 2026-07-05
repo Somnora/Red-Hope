@@ -1,0 +1,47 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Pawn.h"
+#include "RHStrategyPawn.generated.h"
+
+class UCameraComponent;
+
+// Orbital <-> ground strategic camera. One zoom parameter ZoomT drives
+// distance/pitch/FOV through designer-tunable ranges (CT_CameraRig curves
+// replace the linear lerps in the M0 camera pass). Free 360 orbit by
+// construction - the prototype's constrained band cannot exist here.
+UCLASS()
+class REDHOPE_API ARHStrategyPawn : public APawn
+{
+	GENERATED_BODY()
+
+public:
+	ARHStrategyPawn();
+
+	virtual void Tick(float DeltaTime) override;
+
+	// Input surface (wired to Enhanced Input in the M0 UI pass; callable from
+	// BP/console meanwhile).
+	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddZoom(float Delta);
+	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddOrbit(float DeltaYawDeg);
+	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddPan(FVector2D PlanarDeltaCm);
+
+	// 0 = ground register (25 m), 1 = orbital register (3000 m).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RedHope|Camera", meta = (ClampMin = "0", ClampMax = "1"))
+	float ZoomT = 0.85f;
+
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MinDistanceCm = 2500.f;    // 25 m
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MaxDistanceCm = 300000.f;  // 3000 m
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MinPitchDeg = 30.f;
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MaxPitchDeg = 84.f;
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float GroundFovDeg = 55.f;
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float OrbitalFovDeg = 40.f;
+	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float ZoomInterpSpeed = 6.f;
+
+private:
+	UPROPERTY(VisibleAnywhere) TObjectPtr<UCameraComponent> Camera;
+
+	FVector FocusPointCm = FVector::ZeroVector;
+	float OrbitYawDeg = 0.f;
+	float SmoothedZoomT = 0.85f;
+};

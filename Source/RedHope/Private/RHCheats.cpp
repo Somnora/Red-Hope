@@ -1,0 +1,114 @@
+// Console commands for scaffold testing and the hardware stress benchmark.
+// All are RH.* and development-only conveniences; shipping builds strip them.
+
+#include "CoreMinimal.h"
+#include "RedHope.h"
+#include "RHAgentVisualizerSubsystem.h"
+#include "RHAgentSubsystem.h"
+#include "RHSimClockSubsystem.h"
+#include "Engine/World.h"
+#include "HAL/PlatformMemory.h"
+#include "Misc/CoreDelegates.h"
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSpawnDummies(
+	TEXT("RH.SpawnDummies"),
+	TEXT("RH.SpawnDummies <Count> [ExtentM=300] - spawn wandering dummy agents for the hardware stress test."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const int32 Count = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 100;
+		const float ExtentCm = (Args.Num() > 1 ? FCString::Atof(*Args[1]) : 300.f) * 100.f;
+
+		URHAgentSubsystem* Agents = World->GetSubsystem<URHAgentSubsystem>();
+		URHAgentVisualizerSubsystem* Viz = World->GetSubsystem<URHAgentVisualizerSubsystem>();
+		if (!Agents || !Viz)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.SpawnDummies: subsystems unavailable (PIE running?)"));
+			return;
+		}
+		const TArray<FMassEntityHandle> Handles = Agents->SpawnDummyAgents(Count, FVector::ZeroVector, ExtentCm);
+		Viz->TrackEntities(Handles);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSetSpeed(
+	TEXT("RH.SetSpeed"),
+	TEXT("RH.SetSpeed <0|1|3|8> - set sim speed tier."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		if (URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>())
+		{
+			Clock->SetSpeed(FCString::Atof(*Args[0]));
+		}
+	}));
+
+// Frame-time + memory sampler. Samples every rendered frame for the given
+// duration, then logs avg/p95/worst ms and process memory. Output lands in
+// the log so the MCP log reader can lift it into the build log verbatim.
+struct FRHBenchmarkSampler
+{
+	TArray<float> FrameMs;
+	double EndTime = 0.0;
+	double LastTime = 0.0;
+	FDelegateHandle Handle;
+	FString Label;
+
+	void Start(const FString& InLabel, float Seconds)
+	{
+		Label = InLabel;
+		FrameMs.Reset();
+		FrameMs.Reserve(20000);
+		LastTime = FPlatformTime::Seconds();
+		EndTime = LastTime + Seconds;
+		Handle = FCoreDelegates::OnEndFrame.AddRaw(this, &FRHBenchmarkSampler::OnFrame);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Benchmark] '%s' sampling %.0f s..."), *Label, Seconds);
+	}
+
+	void OnFrame()
+	{
+		const double Now = FPlatformTime::Seconds();
+		FrameMs.Add(static_cast<float>((Now - LastTime) * 1000.0));
+		LastTime = Now;
+
+		if (Now >= EndTime)
+		{
+			FCoreDelegates::OnEndFrame.Remove(Handle);
+			Report();
+		}
+	}
+
+	void Report()
+	{
+		if (FrameMs.Num() < 2)
+		{
+			return;
+		}
+		FrameMs.RemoveAt(0); // first sample spans the command frame itself
+		TArray<float> Sorted = FrameMs;
+		Sorted.Sort();
+
+		float Sum = 0.f;
+		for (float Ms : Sorted) { Sum += Ms; }
+		const float Avg = Sum / Sorted.Num();
+		const float P95 = Sorted[FMath::Min(Sorted.Num() - 1, (int32)(Sorted.Num() * 0.95f))];
+		const float Worst = Sorted.Last();
+
+		const FPlatformMemoryStats MemStats = FPlatformMemory::GetStats();
+		UE_LOG(LogRedHope, Display,
+			TEXT("[RH.Benchmark] '%s' RESULT: frames=%d avg=%.2f ms (%.0f fps) p95=%.2f ms worst=%.2f ms | mem used=%.0f MB peak=%.0f MB"),
+			*Label, Sorted.Num(), Avg, Avg > 0.f ? 1000.f / Avg : 0.f, P95, Worst,
+			MemStats.UsedPhysical / (1024.0 * 1024.0), MemStats.PeakUsedPhysical / (1024.0 * 1024.0));
+	}
+};
+
+static FRHBenchmarkSampler GRHBenchmarkSampler;
+
+static FAutoConsoleCommandWithWorldAndArgs GRHBenchmark(
+	TEXT("RH.Benchmark"),
+	TEXT("RH.Benchmark <LabelNoSpaces> [Seconds=10] - sample frame time + memory and log the result."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const FString Label = Args.Num() > 0 ? Args[0] : TEXT("unlabeled");
+		const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 10.f;
+		GRHBenchmarkSampler.Start(Label, Seconds);
+	}));

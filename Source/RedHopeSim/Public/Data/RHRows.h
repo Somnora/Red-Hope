@@ -1,0 +1,136 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/DataTable.h"
+#include "RHRows.generated.h"
+
+// Row structs backing docs/data/RH_*.csv. Column headers in the CSVs match
+// these property names exactly; the CSVs are the balance source of truth.
+// Semicolon-list columns (Inputs, Requirements, ...) stay FString here and are
+// parsed by the definition registry, keeping the CSV format designer-editable.
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHConfigRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Value;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Unit;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHResourceRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Category;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StorageType;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 FootprintX = 1;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 FootprintY = 1;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerDraw_W = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerIdle_W = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerGenPeak_W = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float StorageWh = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CoverageRadius_m = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LinkRange_m = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CostStruct_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float BuildTime_s = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 LoadPriority = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool RequiresDeposit = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool ImportOnly = false;
+	// Director directive: import-only is a Phase 1 rule, not a world law.
+	// A non-empty UnlockTech flips this definition to locally-producible once
+	// that tech exists. All checks go through CanFabricateLocally(); never
+	// branch on ImportOnly directly.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockTech;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHRecipeRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Building;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Inputs;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Outputs;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float BatchTime_h = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerDraw_W = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHRobotRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName RobotClass;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Battery_Wh = 1000.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float DrawMove_W = 50.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float DrawWork_W = 50.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float DrawIdle_W = 5.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Speed_mps = 3.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Cargo_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float WorkRate = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float WearPerActiveSol = 5.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 StartingCount = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockTech;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHManifestItemRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Mass_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Category;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Effect;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockTech;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHQuotaRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Requirements;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 DeadlineSol = 10;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float OnTimeAward_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LateAward_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHDepositRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Type;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Mass_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LocX_m = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LocY_m = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SurfaceVisible = true;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
