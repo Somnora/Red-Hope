@@ -34,6 +34,25 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - The full M0 spec (`docs/m0-vertical-slice-spec.md` + `docs/data/*.csv`): units/clock doctrine (20-min sol, sol-hour energy), speed tiers 1×/3×/8× + era-mode integrator plan, expansion headroom (World Partition + authored sectors through v1), robot roster, chains, quota/manifest numbers, slice map. First-pass balance explicitly not judged until play; tuning from data, not rework.
 - **Director directive — import-only is a Phase 1 rule, not a law of the world:** approved for the slice, but must be architected as removable. A late-game tech (Phase 3 independence milestone) unlocks local photovoltaic/robotics fabrication. The data/tech schema must flip a resource from import-only to locally-producible without a rewrite; never hardcode import-only as permanent. (Implementation: `ImportOnly` flag + `UnlockTech` FName column + single `CanFabricateLocally()` gate — see architecture proposal §10.)
 
+## Approved — 2026-07-05 (Step 4 go: architecture + scaffold, director-approved with conditions)
+
+- **UE 5.8 architecture proposal adopted** (`docs/ue-architecture-proposal.md`): two-module split (RedHopeSim pure sim / RedHope presentation, dependency-enforced); sim-outcome-in-C++ vs looks-in-BP rule; MassEntity substrate + StateTree decision layer (Behavior Trees rejected); command-queue-in / event-bus-out seam with the latency queue built into the seam; MPC + CurveTable atmosphere dial; versioned binary save owned by sim; curve-driven camera; fixed-timestep clock, no time dilation.
+- **Director conditions, both honored:** (1) explicit OK gates for every destructive/compile step (TopDown deletion, plugin enable + restart, each compile), with the git baseline commit landing before any deletion; (2) the hardware benchmark ran empirically before any population design — 200/500 agents at 1×/8×, numbers logged in the build log (500 agents @8× adds +1.6 ms over the 46 ms editor floor).
+
+## Directives — 2026-07-05 (director)
+
+- **Mars sky per rover imagery:** Mars has no oxygen-rich atmosphere → no clouds, ever. Sky referencing comes from Mars rover photography: butterscotch dust dome, cool sunset aureole. Implemented session 6 as the habitability-0 endpoints of the atmosphere dial.
+- **M0 progression approved stepwise:** M0-a (definitions/power/territory), then M0-b ("move forward with M0-b"), then M0-c ("please continue building this game"). Each stage verified in-engine before the next began.
+
+## Accepted behaviors & known issues — 2026-07-05 (M0-c verification, agent-logged)
+
+- **Accepted (reads as intended drama):** at night on an empty bank the whole grid sheds, charge pads included — docked robots wait for sunrise. Whether the Lander should hold a reserve for pads is an M1 balance question, not an M0 bug.
+- **Accepted (player's lesson):** with no charge pad built, robots work until they die where they stand. The sim never rescues a colony that skipped power infrastructure.
+- **Known issue (M1 fix):** battery packs' arrive-half-charged credit is clamped away while the bank is under construction (capacity counts only completed storage). Fix: credit the charge at construction completion.
+- **Known issue (M1 balance pass):** `RH_Buildings` notes describe the Lander as "trickle gen", but generation multiplies by the solar curve → 0 W at night. Reconcile the data note with the sim rule.
+- **Known limitation (logged M1 task):** manifest cargo effects are name-keyed in `ApplyManifestItemEffect` at slice scale; the CSV `Effect` column is display text. Data-driven effect verbs are the M1 design.
+- **Cleanup queued:** hand-placed `GB_Dep_*` gray-box markers in L_Slice duplicate the sim-spawned deposit visuals.
+
 ## Pending — awaiting director review
 
-- 2026-07-04 (agent-proposed): **UE 5.8 architecture proposal** (`docs/ue-architecture-proposal.md`): two-module split (RedHopeSim pure sim / RedHope presentation, dependency-enforced); sim-outcome-in-C++ vs looks-in-BP rule; **MassEntity substrate + StateTree decision layer, Behavior Trees rejected** (with logged SoA fallback and end-of-scaffold checkpoint); command-queue-in / event-bus-out seam with the latency queue built into the seam; MPC + CurveTable atmosphere dial (MCP-buildable, verified); versioned binary save owned by sim, presentation saves nothing; curve-driven orbital↔ground camera; fixed-timestep clock, no time dilation; MCP capability map with on-disk C++ fallback workflow.
+- 2026-07-05 (agent-delivered): **M0-c slice finale verification** — full loop green in one scripted SIE run (see build log session 8). M0 is complete pending director review; M1 scope proposal is the natural next step.
