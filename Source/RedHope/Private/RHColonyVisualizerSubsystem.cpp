@@ -15,6 +15,8 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		AddedHandle = Sim->OnBuildingAdded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingAdded);
 		CompletedHandle = Sim->OnBuildingCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingCompleted);
 		RejectedHandle = Sim->OnCommandRejected.AddUObject(this, &URHColonyVisualizerSubsystem::HandleCommandRejected);
+		Sim->OnQuotaMet.AddUObject(this, &URHColonyVisualizerSubsystem::HandleQuotaMet);
+		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
@@ -145,6 +147,40 @@ void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, 
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Orange,
 			FString::Printf(TEXT("Order rejected: %s (%s)"), *Cmd.Target.ToString(), *Reason));
+	}
+}
+
+void URHColonyVisualizerSubsystem::HandleQuotaMet(int32 Sol, double AwardKg)
+{
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 12.f, FColor::Green,
+			FString::Printf(TEXT("CEO TRANSMISSION: Quota met (Sol %d). Ship authorized: %.0f kg. RH.Manifest / RH.Launch"), Sol, AwardKg));
+	}
+}
+
+void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	// The landing beat, gray-box edition: a second lander on the east pad.
+	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(FVector(4000.f, -4000.f, 450.f), FRotator::ZeroRotator);
+	if (Ship)
+	{
+		Ship->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+		Ship->GetStaticMeshComponent()->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+		Ship->SetActorScale3D(FVector(6.f, 6.f, 9.f));
+#if WITH_EDITOR
+		Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
+#endif
+	}
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 15.f, FColor::Cyan,
+			FString::Printf(TEXT("SUPPLY SHIP LANDED: %d items transferred. The Program continues."), Items.Num()));
 	}
 }
 

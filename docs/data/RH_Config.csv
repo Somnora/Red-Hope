@@ -17,6 +17,8 @@ ShipAwardOnTime_kg,10000,kg,Q1 on-time manifest budget
 ShipAwardLate_kg,6000,kg,Q1 late manifest budget
 PilesCapacity_kg,500,kg,Dig-site pile cap
 HopperCapacity_kg,200,kg,Building input hopper cap
+ChargeSeekFraction,0.25,fraction,Robots break off work to seek a charge pad below this battery fraction
+ChargeResumeFraction,0.90,fraction,Robots resume work above this battery fraction
 WearDegradeThreshold,50,wear,Work rate degrades linearly past this
 WearHaltThreshold,100,wear,Robot halts (destruction is M1+)
 RepairWearPerPart,25,wear,Maintenance bot repair per spare part

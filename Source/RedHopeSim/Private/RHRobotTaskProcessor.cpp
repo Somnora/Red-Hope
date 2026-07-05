@@ -81,15 +81,72 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 
 			for (int32 Step = 0; Step < Steps; ++Step)
 			{
-				if (Battery.ChargeWh <= 0.f)
+				// Charging etiquette: below the seek threshold, break off
+				// (unless mid-delivery - finish the drop first) and head for
+				// the nearest pad. With no pad built, keep working: a dead
+				// robot is the player's lesson, not a stuck sim.
+				const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+				const ERHTaskType Current = (ERHTaskType)Task.TaskType;
+				const bool bMidDelivery = (Current == ERHTaskType::Haul && Task.Phase == 2);
+				if (Current != ERHTaskType::Charge && !bMidDelivery && ChargeFrac < Sim->GetChargeSeekFraction())
 				{
-					break; // drained: halts in place (charging etiquette = M0-c)
+					int32 PadId = 0;
+					FVector PadLoc;
+					if (Sim->FindNearestChargePad(Transform.GetLocation(), PadId, PadLoc))
+					{
+						// Put the claim back before leaving.
+						if (Current == ERHTaskType::Dig)
+						{
+							Sim->ReleaseDigClaim(Task.DigDepositId);
+						}
+						else if (Current == ERHTaskType::Haul || Current == ERHTaskType::Build)
+						{
+							Sim->AbandonTask(Task.TaskId);
+						}
+						Task = FRHTaskFragment();
+						Task.TaskType = (uint8)ERHTaskType::Charge;
+						Task.DigDepositId = PadId; // slot reused: pad building id
+						Task.TargetCm = PadLoc;
+						Task.Phase = 0;
+					}
+				}
+
+				if (Battery.ChargeWh <= 0.f && Current != ERHTaskType::Charge)
+				{
+					break; // drained away from a pad: halted where it stands
 				}
 
 				float DrawW = Robot.DrawIdleW;
 
 				switch ((ERHTaskType)Task.TaskType)
 				{
+				case ERHTaskType::Charge:
+				{
+					if (Task.Phase == 0)
+					{
+						DrawW = Robot.DrawMoveW;
+						if (Battery.ChargeWh <= 0.f)
+						{
+							break; // died en route to the pad
+						}
+						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						{
+							Task.Phase = 1;
+						}
+					}
+					else
+					{
+						DrawW = 0.f; // docked; pad supplies the robot
+						const float Granted = (float)Sim->RequestChargeWh(Task.DigDepositId, SubDt);
+						Battery.ChargeWh = FMath::Min(Battery.CapacityWh, Battery.ChargeWh + Granted);
+						if (Battery.ChargeWh >= Battery.CapacityWh * Sim->GetChargeResumeFraction())
+						{
+							Task = FRHTaskFragment(); // topped up: back to work
+						}
+					}
+					break;
+				}
+
 				case ERHTaskType::None:
 				{
 					// Claim by class.

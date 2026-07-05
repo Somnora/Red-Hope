@@ -33,6 +33,8 @@ private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
+	void HandleQuotaMet(int32 Sol, double AwardKg);
+	void HandleShipArrived(const TArray<FName>& Items);
 	void SpawnDepositMarkers();
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
 

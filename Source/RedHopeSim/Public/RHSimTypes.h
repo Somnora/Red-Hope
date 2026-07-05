@@ -13,9 +13,21 @@ UENUM()
 enum class ERHTaskType : uint8
 {
 	None,
-	Dig,   // excavator: standing designation on a deposit
-	Haul,  // hauler: move AmountKg of Resource from A to B
-	Build  // fabricator: work down a construction site's timer
+	Dig,    // excavator: standing designation on a deposit
+	Haul,   // hauler: move AmountKg of Resource from A to B
+	Build,  // fabricator: work down a construction site's timer
+	Charge  // any robot: dock at a pad and refill (self-issued, never on the board)
+};
+
+// The slice's quota arc: meet Q1 -> CEO transmission -> compose manifest ->
+// ship transit -> arrival (slice win).
+UENUM()
+enum class ERHQuotaPhase : uint8
+{
+	Open,
+	AwaitingManifest,
+	ShipInbound,
+	Completed
 };
 
 // A place solids can be: a building (Id > 0) or a deposit pile (Id > 0 in

@@ -14,6 +14,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	RecipesTable = Cast<UDataTable>(RecipesTablePath.TryLoad());
 	DepositsTable = Cast<UDataTable>(DepositsTablePath.TryLoad());
 	QuotasTable = Cast<UDataTable>(QuotasTablePath.TryLoad());
+	ManifestTable = Cast<UDataTable>(ManifestTablePath.TryLoad());
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d solarCurve=%s"),
@@ -39,6 +40,11 @@ const FRHRobotRow* URHDefinitionsSubsystem::GetRobot(FName Name) const
 const FRHQuotaRow* URHDefinitionsSubsystem::GetQuota(FName Name) const
 {
 	return QuotasTable ? QuotasTable->FindRow<FRHQuotaRow>(Name, TEXT("GetQuota"), false) : nullptr;
+}
+
+const FRHManifestItemRow* URHDefinitionsSubsystem::GetManifestItem(FName Name) const
+{
+	return ManifestTable ? ManifestTable->FindRow<FRHManifestItemRow>(Name, TEXT("GetManifestItem"), false) : nullptr;
 }
 
 bool URHDefinitionsSubsystem::IsSolidResource(FName Name) const

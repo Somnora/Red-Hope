@@ -1,5 +1,6 @@
 Name,Building,Inputs,Outputs,BatchTime_h,PowerDraw_W,SliceActive,Notes
 SmeltRegolith,Forge,Regolith:100,Struct:25,2,800,TRUE,"Base chain; 12.5 kg Struct/h at full duty"
+DrillIce,IceDrill,,Ice:40,1,250,TRUE,"Extraction recipe: no hopper inputs; draws 40 kg/h from the attached deposit"
 SmeltOre,Forge,Ore:100,Struct:60,2,800,TRUE,"Richer yield rewards prospecting + longer haul"
 MakeShielding,Forge,Struct:40;Ore:60,Shielding:50,3,800,FALSE,Dormant; habitat chain M1
 MakeHabSegment,Forge,Struct:120;Shielding:30,HabSegment:1,4,800,FALSE,Dormant; habitat chain M1

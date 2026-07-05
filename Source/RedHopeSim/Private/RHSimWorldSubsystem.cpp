@@ -30,6 +30,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier0_s"), OrderLagSeconds);
 	PileCapKg = Defs->GetConfigScalar(FName("PilesCapacity_kg"), PileCapKg);
 	HaulLoadMinKg = FMath::Max(25.0, PileCapKg / 5.0);
+	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
+	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
 
 	// Deposits from data.
 	Defs->ForEachDeposit([this](FName RowName, const FRHDepositRow& Row)
@@ -109,10 +111,12 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 		SpawnStartingFleet();
 	}
 
-	// Fixed order: orders land, work is posted, factories run, power settles.
+	// Fixed order: orders land, work is posted, factories run, the quota
+	// arc advances, power settles.
 	StepUplink();
 	StepTaskBoard();
 	StepProduction(SubDt);
+	StepQuota();
 	StepPower(SubDt);
 }
 
@@ -198,7 +202,10 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		}
 	}
 
-	// Haul: production outputs -> Stockpile/Lander store.
+	// Haul: production outputs -> demanding consumer (recipe wants it and the
+	// hopper holds under two batches), else -> Stockpile/Lander store. This
+	// routes drill ice to the Water Plant and Forge Struct to stores with
+	// one rule.
 	for (const FRHBuildingInstance& B : Buildings)
 	{
 		for (const auto& Out : B.OutputKg)
@@ -208,12 +215,36 @@ void URHSimWorldSubsystem::StepTaskBoard()
 				continue;
 			}
 			int32 DestId = 0;
-			for (const FRHBuildingInstance& S : Buildings)
+			for (const FRHBuildingInstance& C : Buildings)
 			{
-				if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id)
+				if (C.bUnderConstruction || C.Id == B.Id)
 				{
-					DestId = S.Id;
+					continue;
+				}
+				if (Defs->FindRunnableRecipe(C.DefName, [&](const TMap<FName, double>& Inputs)
+					{
+						const double* Need = Inputs.Find(Out.Key);
+						if (!Need)
+						{
+							return false;
+						}
+						const double* Have = C.InputKg.Find(Out.Key);
+						return (!Have || *Have < *Need * 2.0);
+					}))
+				{
+					DestId = C.Id;
 					break;
+				}
+			}
+			if (DestId == 0)
+			{
+				for (const FRHBuildingInstance& S : Buildings)
+				{
+					if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id)
+					{
+						DestId = S.Id;
+						break;
+					}
 				}
 			}
 			if (DestId != 0)
@@ -234,6 +265,60 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			}
 		}
 	}
+
+	// Haul: construction sites want their Struct delivered before the
+	// fabricator can work (site-delivery rule, replaces M0-b's colony-wide
+	// instant deduction).
+	for (const FRHBuildingInstance& Site : Buildings)
+	{
+		if (!Site.bUnderConstruction)
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs->GetBuilding(Site.DefName);
+		if (!Def || Def->CostStruct_kg <= 0.0)
+		{
+			continue;
+		}
+		const double* Delivered = Site.InputKg.Find(NAME_Struct);
+		const double NeedKg = Def->CostStruct_kg - (Delivered ? *Delivered : 0.0);
+		if (NeedKg <= 0.0)
+		{
+			continue;
+		}
+		// Source: any completed building holding Struct.
+		int32 SourceId = 0;
+		for (const FRHBuildingInstance& S : Buildings)
+		{
+			if (S.bUnderConstruction || S.Id == Site.Id)
+			{
+				continue;
+			}
+			const double* InS = S.InputKg.Find(NAME_Struct);
+			const double* OutS = S.OutputKg.Find(NAME_Struct);
+			if ((InS && *InS > 0.0) || (OutS && *OutS > 0.0))
+			{
+				SourceId = S.Id;
+				break;
+			}
+		}
+		if (SourceId != 0)
+		{
+			FRHSiteRef From; From.BuildingId = SourceId;
+			FRHSiteRef To; To.BuildingId = Site.Id;
+			if (!HasOpenTask(ERHTaskType::Haul, From, To))
+			{
+				FRHTask T;
+				T.Id = NextTaskId++;
+				T.Type = ERHTaskType::Haul;
+				T.From = From;
+				T.To = To;
+				T.Resource = NAME_Struct;
+				T.AmountKg = FMath::Min(NeedKg, 200.0);
+				Tasks.Add(T);
+			}
+		}
+	}
 }
 
 void URHSimWorldSubsystem::StepProduction(float SubDt)
@@ -246,7 +331,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 		}
 		if (B.BatchRemaining_h > 0.0)
 		{
-			if (!Power.bDeficit) // deficit stalls batches (priority shedding: M0-c)
+			if (B.bPowered) // shed buildings stall (priority shedding, M0-c)
 			{
 				B.BatchRemaining_h -= SubDt / 50.0;
 				if (B.BatchRemaining_h <= 0.0)
@@ -278,11 +363,34 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 			continue;
 		}
 
+		if (!B.bPowered)
+		{
+			continue; // shed buildings do not start new batches either
+		}
+
+		// Extraction buildings (RequiresDeposit): the recipe has no hopper
+		// inputs; the batch draws its output mass from the attached deposit.
+		const FRHBuildingRow* BDef = Defs->GetBuilding(B.DefName);
+		const bool bExtractor = BDef && BDef->RequiresDeposit;
+
 		// Idle: try to start a batch whose inputs are covered - solids from
-		// the hopper, fluids from the network pool.
+		// the hopper, fluids from the network pool, extraction from ground.
 		if (const FRHRecipeRow* Recipe = Defs->FindRunnableRecipe(B.DefName,
 			[&](const TMap<FName, double>& Inputs)
 			{
+				if (Inputs.Num() == 0)
+				{
+					if (!bExtractor || B.AttachedDepositId == 0)
+					{
+						return false;
+					}
+					const FRHDepositState* D = nullptr;
+					for (const FRHDepositState& Dep : Deposits)
+					{
+						if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
+					}
+					return D && D->RemainingKg > 0.0;
+				}
 				for (const auto& In : Inputs)
 				{
 					if (Defs->IsSolidResource(In.Key))
@@ -298,10 +406,29 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 						return false;
 					}
 				}
-				return Inputs.Num() > 0;
+				return true;
 			}))
 		{
 			const TMap<FName, double> Inputs = URHDefinitionsSubsystem::ParseResourceList(Recipe->Inputs);
+			const TMap<FName, double> Outputs = URHDefinitionsSubsystem::ParseResourceList(Recipe->Outputs);
+
+			if (Inputs.Num() == 0 && bExtractor)
+			{
+				// Draw the output mass from the ground now (committed batch).
+				double OutMassKg = 0.0;
+				for (const auto& O : Outputs)
+				{
+					OutMassKg += O.Value;
+				}
+				if (FRHDepositState* D = FindDeposit(B.AttachedDepositId))
+				{
+					if (D->RemainingKg < OutMassKg)
+					{
+						continue; // not enough left for a full batch
+					}
+					D->RemainingKg -= OutMassKg;
+				}
+			}
 			for (const auto& In : Inputs)
 			{
 				if (Defs->IsSolidResource(In.Key))
@@ -314,7 +441,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				}
 			}
 			B.ActiveRecipe = FName(*Recipe->Outputs); // display only; outputs cached:
-			PendingOutputs.Add(B.Id, URHDefinitionsSubsystem::ParseResourceList(Recipe->Outputs));
+			PendingOutputs.Add(B.Id, Outputs);
 			B.BatchRemaining_h = Recipe->BatchTime_h;
 			UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d batch started (%s -> %s)"),
 				*B.DefName.ToString(), B.Id, *Recipe->Inputs, *Recipe->Outputs);
@@ -322,22 +449,141 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 	}
 }
 
+void URHSimWorldSubsystem::StepQuota()
+{
+	const FRHQuotaRow* Quota = Defs->GetQuota(NAME_Q1);
+	if (!Quota)
+	{
+		return;
+	}
+
+	if (QuotaPhase == ERHQuotaPhase::Open)
+	{
+		for (const auto& Req : GetQuotaProgress())
+		{
+			if (Req.Value.Key < Req.Value.Value)
+			{
+				return;
+			}
+		}
+		QuotaPhase = ERHQuotaPhase::AwaitingManifest;
+		QuotaMetSol = Clock->GetSol();
+		const bool bOnTime = QuotaMetSol <= Quota->DeadlineSol;
+		AwardMassKg = bOnTime ? Quota->OnTimeAward_kg : Quota->LateAward_kg;
+		UE_LOG(LogRedHopeSim, Display,
+			TEXT("=== CEO TRANSMISSION (Sol %d): Quota Q1 met%s. Supply ship authorized: %.0f kg manifest budget. Compose and launch. ==="),
+			QuotaMetSol, bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg);
+		OnQuotaMet.Broadcast(QuotaMetSol, AwardMassKg);
+	}
+	else if (QuotaPhase == ERHQuotaPhase::ShipInbound)
+	{
+		if (Clock->GetSimSecondsTotal() >= ShipArrivalSimSeconds)
+		{
+			QuotaPhase = ERHQuotaPhase::Completed;
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== SHIP LANDED (Sol %d). Cargo transfer: %d items, %.0f kg. ==="),
+				Clock->GetSol(), ManifestItems.Num(), GetManifestMassKg());
+			for (const FName& Item : ManifestItems)
+			{
+				ApplyManifestItemEffect(Item);
+			}
+			// Slice end card.
+			UE_LOG(LogRedHopeSim, Display,
+				TEXT("=== THE PROGRAM CONTINUES: sols elapsed %d | quota met sol %d (deadline %d) | fleet + colony operational ==="),
+				Clock->GetSol(), QuotaMetSol, Quota->DeadlineSol);
+			OnShipArrived.Broadcast(ManifestItems);
+		}
+	}
+}
+
+void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
+{
+	// Mechanical effects keyed by row name at slice scale (the CSV Effect
+	// column stays display text; data-driven effect verbs are an M1 task).
+	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+
+	if (ItemName == FName("SolarPack"))       { ImportStock.FindOrAdd(FName("SolarArray"))++; }
+	else if (ItemName == FName("BatteryPack")) { ImportStock.FindOrAdd(FName("BatteryBank"))++; }
+	else if (ItemName == FName("PartsCrate"))  { AddStock(FName("SpareParts"), 10); }
+	else if (ItemName == FName("Toolkit"))     { FabricatorSpeedMul += 0.15; }
+	else if (ItemName == FName("ComputeCore"))
+	{
+		OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier2_s"), 8.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("Compute core online: order lag now %.0f sim-s"), OrderLagSeconds);
+	}
+	else if (ItemName == FName("AdvExcavator") || ItemName == FName("ExtraHauler"))
+	{
+		const FName RobotRow = (ItemName == FName("AdvExcavator")) ? FName("RC_E2") : FName("RC_H");
+		if (const FRHRobotRow* Row = Defs->GetRobot(RobotRow))
+		{
+			if (Agents)
+			{
+				TArray<FMassEntityHandle> NewUnits;
+				const FMassEntityHandle H = Agents->SpawnRobot(RobotRow, *Row, FVector(3000.f, -3000.f, 50.f));
+				if (H.IsValid())
+				{
+					NewUnits.Add(H);
+					OnRobotsSpawned.Broadcast(NewUnits);
+				}
+			}
+		}
+	}
+	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); }
+	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); }
+	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); }
+	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
+}
+
 void URHSimWorldSubsystem::StepPower(float SubDt)
 {
 	const float Solar = Defs->EvalSolarCurve(Clock->GetSolFraction());
 
-	double GenW = 0.0, LoadW = 0.0, CapWh = 0.0;
-	for (const FRHBuildingInstance& B : Buildings)
+	// Pass 1: generation, storage, and each building's wanted draw.
+	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; };
+	TArray<FLoadEntry> Loads;
+	double GenW = 0.0, CapWh = 0.0;
+	for (FRHBuildingInstance& B : Buildings)
 	{
 		if (B.bUnderConstruction)
 		{
+			B.bPowered = false;
 			continue;
 		}
-		if (const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName))
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		if (!Def)
 		{
-			GenW += Def->PowerGenPeak_W * Solar;
-			LoadW += (B.BatchRemaining_h > 0.0) ? Def->PowerDraw_W : Def->PowerIdle_W;
-			CapWh += Def->StorageWh;
+			continue;
+		}
+		GenW += Def->PowerGenPeak_W * Solar;
+		CapWh += Def->StorageWh;
+		FLoadEntry E;
+		E.B = &B;
+		E.WantW = (B.BatchRemaining_h > 0.0) ? Def->PowerDraw_W : Def->PowerIdle_W;
+		E.Priority = Def->LoadPriority;
+		Loads.Add(E);
+	}
+
+	// Pass 2: shedding. While the bank holds charge every load is served;
+	// once it empties, loads shed lowest LoadPriority first until demand
+	// fits generation (spec: Forge sheds first, charge pads last).
+	double LoadW = 0.0;
+	for (const FLoadEntry& E : Loads)
+	{
+		E.B->bPowered = true;
+		LoadW += E.WantW;
+	}
+	Power.ShedCount = 0;
+	if (Power.BatteryWh <= 0.0 && LoadW > GenW)
+	{
+		Loads.Sort([](const FLoadEntry& A, const FLoadEntry& B) { return A.Priority < B.Priority; });
+		for (FLoadEntry& E : Loads)
+		{
+			if (LoadW <= GenW)
+			{
+				break;
+			}
+			E.B->bPowered = false;
+			LoadW -= E.WantW;
+			++Power.ShedCount;
 		}
 	}
 
@@ -346,7 +592,7 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	Power.BatteryCapWh = CapWh;
 	const double DeltaWh = (GenW - LoadW) * (SubDt / 50.0);
 	Power.BatteryWh = FMath::Clamp(Power.BatteryWh + DeltaWh, 0.0, CapWh);
-	Power.bDeficit = (DeltaWh < 0.0) && (Power.BatteryWh <= 0.0);
+	Power.bDeficit = Power.ShedCount > 0;
 }
 
 void URHSimWorldSubsystem::EnqueueCommand(FRHCommand Command)
@@ -368,7 +614,27 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown building '%s'"), *Cmd.Target.ToString()));
 			return;
 		}
-		if (!IsInCoverage(Cmd.Location))
+		// Pylon-like defs (they project coverage and link by range) are the
+		// territory extenders: their rule is link range to the nearest node,
+		// not the coverage union. Everything else must sit inside coverage.
+		if (Def->CoverageRadius_m > 0.f && Def->LinkRange_m > 0.f)
+		{
+			double NearestNodeCm = TNumericLimits<double>::Max();
+			for (const FRHBuildingInstance& B : Buildings)
+			{
+				const FRHBuildingRow* NodeDef = B.bUnderConstruction ? nullptr : Defs->GetBuilding(B.DefName);
+				if (NodeDef && NodeDef->CoverageRadius_m > 0.f)
+				{
+					NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(B.LocationCm, Cmd.Location));
+				}
+			}
+			if (NearestNodeCm > Def->LinkRange_m * 100.0)
+			{
+				OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No grid node within %.0f m link range"), Def->LinkRange_m));
+				return;
+			}
+		}
+		else if (!IsInCoverage(Cmd.Location))
 		{
 			OnCommandRejected.Broadcast(Cmd, TEXT("Outside grid coverage - extend pylons first"));
 			return;
@@ -386,14 +652,13 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		}
 		else if (Def->CostStruct_kg > 0.0)
 		{
+			// Materials are delivered to the site by haulers (task board);
+			// this only rejects orders the colony cannot possibly fill.
 			if (GetTotalSolid(NAME_Struct) < Def->CostStruct_kg)
 			{
 				OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Insufficient Struct (%.0f needed)"), Def->CostStruct_kg));
 				return;
 			}
-			TakeStructFromStores(Def->CostStruct_kg);
-			// Site-delivery of materials (hauling to the construction site)
-			// is the M0-c refinement; cost is deducted colony-wide here.
 		}
 		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0);
 	}
@@ -435,7 +700,23 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	}
 	if (Def)
 	{
-		Power.BatteryWh += Def->StorageWh * 0.5; // packs arrive half-charged (manifest realism: M0-c)
+		Power.BatteryWh += Def->StorageWh * 0.5; // packs arrive half-charged
+	}
+	// Extraction buildings bind to the deposit under them (within 12 m).
+	if (Def && Def->RequiresDeposit)
+	{
+		for (const FRHDepositState& D : Deposits)
+		{
+			if (FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
+			{
+				Instance.AttachedDepositId = D.Id;
+				break;
+			}
+		}
+		if (Instance.AttachedDepositId == 0)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("%s placed with no deposit within 12 m - it will never produce"), *DefName.ToString());
+		}
 	}
 
 	const int32 NewId = Instance.Id;
@@ -656,10 +937,21 @@ bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLo
 	}
 	else if (FRHBuildingInstance* B = FindBuilding(T->From.BuildingId))
 	{
+		// Outputs first, then held inputs (stores like the Lander keep their
+		// starter Struct in InputKg).
 		if (double* Out = B->OutputKg.Find(T->Resource))
 		{
 			Taken = FMath::Min(WantKg, *Out);
 			*Out -= Taken;
+		}
+		if (Taken < WantKg)
+		{
+			if (double* In = B->InputKg.Find(T->Resource))
+			{
+				const double More = FMath::Min(WantKg - Taken, *In);
+				*In -= More;
+				Taken += More;
+			}
 		}
 	}
 
@@ -730,16 +1022,136 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	{
 		return true;
 	}
-	B->BuildRemaining_s -= Seconds;
+	// Fabrication waits for materials on site (haulers are bringing them).
+	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
+	if (Def && Def->CostStruct_kg > 0.0)
+	{
+		const double* Delivered = B->InputKg.Find(NAME_Struct);
+		if (!Delivered || *Delivered + 0.5 < Def->CostStruct_kg)
+		{
+			return false; // standing by for materials; no work progress
+		}
+	}
+	B->BuildRemaining_s -= Seconds * FabricatorSpeedMul;
 	if (B->BuildRemaining_s <= 0.0)
 	{
 		B->bUnderConstruction = false;
 		B->BuildRemaining_s = 0.0;
+		// The delivered Struct becomes the structure.
+		if (Def && Def->CostStruct_kg > 0.0)
+		{
+			double& Held = B->InputKg.FindOrAdd(NAME_Struct);
+			Held = FMath::Max(0.0, Held - Def->CostStruct_kg);
+			OnStockChanged.Broadcast(NAME_Struct, GetTotalSolid(NAME_Struct));
+		}
 		UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d construction complete"), *B->DefName.ToString(), B->Id);
 		OnBuildingCompleted.Broadcast(*B);
 		return true;
 	}
 	return false;
+}
+
+bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm) const
+{
+	const FName NAME_ChargePad(TEXT("ChargePad"));
+	double BestDist = TNumericLimits<double>::Max();
+	OutBuildingId = 0;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (!B.bUnderConstruction && B.DefName == NAME_ChargePad)
+		{
+			const double Dist = FVector::DistXY(B.LocationCm, RobotPosCm);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				OutBuildingId = B.Id;
+				OutLocationCm = B.LocationCm;
+			}
+		}
+	}
+	return OutBuildingId != 0;
+}
+
+double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt)
+{
+	FRHBuildingInstance* Pad = FindBuilding(PadBuildingId);
+	if (!Pad || Pad->bUnderConstruction || !Pad->bPowered)
+	{
+		return 0.0;
+	}
+	const FRHBuildingRow* Def = Defs->GetBuilding(Pad->DefName);
+	const double RateW = Def ? Def->PowerDraw_W : 500.0;
+	const double WantWh = RateW * (SubDt / 50.0);
+	// Grid energy: from the bank if it holds charge, else from live surplus.
+	if (Power.BatteryWh >= WantWh)
+	{
+		Power.BatteryWh -= WantWh;
+		return WantWh;
+	}
+	if (Power.GenW > Power.LoadW)
+	{
+		return WantWh; // absorbed by generation surplus (slice approximation)
+	}
+	return 0.0; // night + empty bank: robot waits docked
+}
+
+double URHSimWorldSubsystem::GetManifestMassKg() const
+{
+	double Total = 0.0;
+	for (const FName& Item : ManifestItems)
+	{
+		if (const FRHManifestItemRow* Row = Defs->GetManifestItem(Item))
+		{
+			Total += Row->Mass_kg;
+		}
+	}
+	return Total;
+}
+
+int32 URHSimWorldSubsystem::GetImportStock(FName DefName) const
+{
+	const int32* Found = ImportStock.Find(DefName);
+	return Found ? *Found : 0;
+}
+
+bool URHSimWorldSubsystem::AddManifestItem(FName ItemName, FString& OutError)
+{
+	if (QuotaPhase != ERHQuotaPhase::AwaitingManifest)
+	{
+		OutError = TEXT("No manifest is open (quota not met, or ship already launched)");
+		return false;
+	}
+	const FRHManifestItemRow* Row = Defs->GetManifestItem(ItemName);
+	if (!Row || !Row->SliceActive)
+	{
+		OutError = FString::Printf(TEXT("Unknown manifest item '%s'"), *ItemName.ToString());
+		return false;
+	}
+	if (GetManifestMassKg() + Row->Mass_kg > AwardMassKg)
+	{
+		OutError = FString::Printf(TEXT("Over budget: %.0f + %.0f > %.0f kg"),
+			GetManifestMassKg(), Row->Mass_kg, AwardMassKg);
+		return false;
+	}
+	ManifestItems.Add(ItemName);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Manifest: +%s (%.0f kg) -> %.0f / %.0f kg"),
+		*ItemName.ToString(), Row->Mass_kg, GetManifestMassKg(), AwardMassKg);
+	return true;
+}
+
+bool URHSimWorldSubsystem::LaunchShip(FString& OutError)
+{
+	if (QuotaPhase != ERHQuotaPhase::AwaitingManifest)
+	{
+		OutError = TEXT("No manifest is open");
+		return false;
+	}
+	const double TransitSols = Defs->GetConfigScalar(FName("ShipTransitSols"), 3.0);
+	ShipArrivalSimSeconds = Clock->GetSimSecondsTotal() + TransitSols * URHSimClockSubsystem::SolLengthSimSeconds;
+	QuotaPhase = ERHQuotaPhase::ShipInbound;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Ship launched: %d items, %.0f/%.0f kg, arrival in %.0f sols"),
+		ManifestItems.Num(), GetManifestMassKg(), AwardMassKg, TransitSols);
+	return true;
 }
 
 void URHSimWorldSubsystem::CompleteTask(int32 TaskId)
@@ -806,24 +1218,3 @@ bool URHSimWorldSubsystem::HasOpenTask(ERHTaskType Type, const FRHSiteRef& From,
 	return false;
 }
 
-double URHSimWorldSubsystem::TakeStructFromStores(double Kg)
-{
-	double Left = Kg;
-	for (FRHBuildingInstance& B : Buildings)
-	{
-		for (TMap<FName, double>* Store : { &B.OutputKg, &B.InputKg })
-		{
-			if (double* Have = Store->Find(NAME_Struct))
-			{
-				const double Take = FMath::Min(Left, *Have);
-				*Have -= Take;
-				Left -= Take;
-				if (Left <= 0.0)
-				{
-					return Kg;
-				}
-			}
-		}
-	}
-	return Kg - Left;
-}

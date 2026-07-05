@@ -26,6 +26,7 @@ public:
 	const FRHBuildingRow* GetBuilding(FName Name) const;
 	const FRHRobotRow* GetRobot(FName Name) const;
 	const FRHQuotaRow* GetQuota(FName Name) const;
+	const FRHManifestItemRow* GetManifestItem(FName Name) const;
 
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.
@@ -66,6 +67,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath RecipesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Recipes.DT_Recipes"));
 	UPROPERTY(Config) FSoftObjectPath DepositsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Deposits.DT_Deposits"));
 	UPROPERTY(Config) FSoftObjectPath QuotasTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Quotas.DT_Quotas"));
+	UPROPERTY(Config) FSoftObjectPath ManifestTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_ManifestItems.DT_ManifestItems"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -75,5 +77,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> RecipesTable;
 	UPROPERTY() TObjectPtr<UDataTable> DepositsTable;
 	UPROPERTY() TObjectPtr<UDataTable> QuotasTable;
+	UPROPERTY() TObjectPtr<UDataTable> ManifestTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

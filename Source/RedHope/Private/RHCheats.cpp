@@ -148,8 +148,27 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		UE_LOG(LogRedHope, Display, TEXT("[RH.Status] Sol %d %.0f%% | gen %.0f W load %.0f W battery %.0f/%.0f Wh%s | buildings %d | tasks %d | uplink %d"),
 			Clock->GetSol(), Clock->GetSolFraction() * 100.f,
 			P.GenW, P.LoadW, P.BatteryWh, P.BatteryCapWh,
-			P.bDeficit ? TEXT(" DEFICIT") : TEXT(""),
+			P.ShedCount > 0 ? *FString::Printf(TEXT(" SHED:%d"), P.ShedCount) : TEXT(""),
 			Sim->GetBuildings().Num(), Sim->GetOpenTaskCount(), Sim->GetUplinkQueue().Num());
+
+		switch (Sim->GetQuotaPhase())
+		{
+		case ERHQuotaPhase::AwaitingManifest:
+			UE_LOG(LogRedHope, Display, TEXT("  QUOTA MET. Manifest: %.0f / %.0f kg [%d items] - RH.Manifest <Item>, RH.Launch"),
+				Sim->GetManifestMassKg(), Sim->GetAwardMassKg(), Sim->GetManifestItems().Num());
+			break;
+		case ERHQuotaPhase::ShipInbound:
+			UE_LOG(LogRedHope, Display, TEXT("  SHIP INBOUND: arrival at t=%.0f (now %.0f)"),
+				Sim->GetShipEtaSimSeconds(), Clock->GetSimSecondsTotal());
+			break;
+		case ERHQuotaPhase::Completed:
+			UE_LOG(LogRedHope, Display, TEXT("  SLICE COMPLETE - the Program continues."));
+			break;
+		default:
+			break;
+		}
+		UE_LOG(LogRedHope, Display, TEXT("  import stock: solar %d, battery %d"),
+			Sim->GetImportStock(FName("SolarArray")), Sim->GetImportStock(FName("BatteryBank")));
 
 		for (const auto& Q : Sim->GetQuotaProgress())
 		{
@@ -200,6 +219,42 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDig(
 			Cmd.Verb = FName("Dig");
 			Cmd.Target = FName(*Args[0]);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHManifest(
+	TEXT("RH.Manifest"),
+	TEXT("RH.Manifest <ItemRowName> - add an item to the open manifest (e.g. RH.Manifest SolarPack)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Manifest <ItemRowName>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Error;
+			if (!Sim->AddManifestItem(FName(*Args[0]), Error))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Manifest: %s"), *Error);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHLaunch(
+	TEXT("RH.Launch"),
+	TEXT("RH.Launch - confirm the manifest and launch the supply ship."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Error;
+			if (!Sim->LaunchShip(Error))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Launch: %s"), *Error);
+			}
 		}
 	}));
 
