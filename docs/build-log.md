@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-05 — Session 4 (Step 4 scaffold, part 1: repo, sources, template removal, first compile)
+
+- `git init` (branch main); baseline commit `557d902` = pristine pre-scaffold restore point (director requirement: lands before any deletion).
+- Wrote Source tree: `RedHopeSim` (sim clock w/ fixed 0.1 s sub-steps + speed tiers, sim-world subsystem w/ stocks ledger + uplink latency queue, Mass fragments + dummy-agent spawner, wander processor with per-sub-step integration, DataTable row structs incl. `ImportOnly`+`UnlockTech` per directive, commandlet stub) and `RedHope` (GameMode/GameState/PC, strategy pawn w/ exponential zoom mapping, atmosphere subsystem [MPC writer + `RH.Sun`-tagged sun driver + `RH.Habitability` scrub CVar], ISM agent visualizer, `RH.SpawnDummies`/`RH.SetSpeed`/`RH.Benchmark` console commands).
+- All Mass API usage verified against the 5.8 engine headers before compiling. 5.8 restructured Mass: **MassCore is engine-core** (`Runtime/Mass/MassCore`, owns `FTransformFragment` + `FMassEntityHandle`); `ConfigureQueries` now takes `TSharedRef<FMassEntityManager>`; `ForEachEntityChunk` dropped its EntityManager arg; the **processing-phase ticker (`MassSimulationSubsystem`) is in the MassGameplay plugin** — hence MassGameplay is required for agents to tick at all.
+- Director-approved deletions executed with `L_Slice` open (never the open level): `Content/TopDown`, `Characters`, `LevelPrototyping`, `Cursor`, and their `__ExternalActors__`/`__ExternalObjects__` subfolders. `L_Slice` created by duplicating the engine OpenWorld template (World Partition) — MCP has no new-level tool. Config retargeted (startup/default map → `L_Slice`, GlobalDefaultGameMode → `/Script/RedHope.RHGameMode`).
+- `.uproject`: added Modules (RedHope, RedHopeSim), enabled MassGameplay (director-approved, one restart).
+- Session moved from the in-editor Terminal plugin to an external terminal for the build (editor quit kills in-editor sessions; `.mcp.json` → `http://127.0.0.1:8000/mcp` reconnects externally).
+- **Compile: success** (red_hopeEditor, Development, arm64; 32 s; 2 iterations). Gotcha for the record: `FMassEntityHandle` needed an explicit `#include "Mass/EntityHandle.h"` — not reliably visible via `MassEntityTypes.h` in a fresh TU. `ExecutionFlags` is `uint8` in 5.8.
+- Next (pending director reopening the editor): CSV→DataTable imports, MPC_Atmosphere + curves + sky rig, gray-box slice map, 200/500-agent benchmark @1×/8× (frame ms + memory, logged here), PIE-Simulate smoke test + captures.
+
 ## 2026-07-04 — Session 3 (Step 3: architecture + toolchain stress tests)
 
 - Logged Step 2 approval + import-only-is-removable directive in design-decisions.md.
