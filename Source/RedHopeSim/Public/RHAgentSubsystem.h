@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "MassEntityTypes.h"
+#include "MassArchetypeTypes.h"
+#include "Mass/EntityHandle.h"
 #include "RHAgentSubsystem.generated.h"
 
 // Owns agent entity lifecycles. Scaffold scope: dummy-agent spawning for the

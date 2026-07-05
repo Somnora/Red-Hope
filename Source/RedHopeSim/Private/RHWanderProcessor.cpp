@@ -9,7 +9,7 @@
 URHWanderProcessor::URHWanderProcessor()
 	: EntityQuery(*this)
 {
-	ExecutionFlags = (int32)EProcessorExecutionFlags::All;
+	ExecutionFlags = (uint8)EProcessorExecutionFlags::All;
 	bRequiresGameThreadExecution = true; // reads world subsystems (clock, sim world)
 }
 
