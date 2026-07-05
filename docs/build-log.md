@@ -1,5 +1,24 @@
 # Build Log — The Red Hope
 
+## 2026-07-05 — Session 5 (Step 4 scaffold, part 2: content, benchmark, smoke test)
+
+- **Content built via MCP:** 8 DataTables imported from `docs/data/RH_*.csv` against the compiled `FRH*Row` structs (row values spot-verified; `ImportOnly`/`UnlockTech` live). `CT_SolarDiurnal` (diurnal curve), `CT_AtmosphereDial` (FogDensity, SunIntensityMul), `CT_CameraRig` (Distance/Pitch/FOV) populated. `MPC_Atmosphere` (Habitability/TimeOfSol/DustAmount/SkyTint) + `M_MarsDial` MPC-driven material. Sun tagged `RH.Sun`.
+- **Gray-box L_Slice:** Mars ground plane (5×5 km) + lander, 3 solar arrays, battery, pylon, charge pad, Forge, stockpile, 6 deposit markers at `RH_Deposits` coordinates. **Gotcha:** duplicating the engine OpenWorld template does not bring its World Partition landscape proxies (external actors stay under `/Engine`); the orphaned Landscape actor was removed and a plane used instead — real terrain is an M0 map-pass task.
+- **Console-exec gap workaround:** MCP has no console-command tool, so `BP_StressDriver` (authored via the Blueprint graph DSL) fires the benchmark sequence from BeginPlay: baseline → 200 agents → 8× → 500 agents → 8×, via `RH.SpawnDummies` / `RH.SetSpeed` / `RH.Benchmark`.
+- **Hardware benchmark (director-required) — PIE Simulate, in-editor viewport, Lumen defaults, this Mac (arm64):**
+
+  | Phase | avg ms | fps | p95 ms | worst ms | memory |
+  |---|---|---|---|---|---|
+  | 0 agents, 1× (baseline) | 46.29 | 22 | 50.73 | 58.08 | 6,214 MB |
+  | 200 agents, 1× | 46.73 | 21 | 51.51 | 56.95 | 6,217 MB |
+  | 200 agents, 8× | 46.91 | 21 | 51.44 | 58.75 | 6,222 MB |
+  | 500 agents, 1× | 47.77 | 21 | 52.47 | 202.82 | 6,233 MB |
+  | 500 agents, 8× | 47.91 | 21 | 88.67 | 190.05 | 7,342 MB |
+
+  **Reading:** agent cost is in the noise — +1.6 ms at 500 agents × 8× sub-stepping (≈4,000 agent-updates/frame-equivalent) over an empty world. The 46 ms floor is the in-editor Lumen viewport on this hardware, not the sim. Memory +19 MB for 500 agents+instances (the 1.1 GB jump in the last phase coincides with the HighResShot capture, not agents). The p95/worst spikes at 500 appear at capture/GC moments. **Conclusion: population targets for M2–M4 (hundreds of agents) are not hardware-limited on this machine; the budget pressure is rendering quality settings, which are tunable.** Numbers are in-editor Simulate — packaged builds will run faster; deltas are the architecture signal.
+- **Smoke test:** PIE-Simulate ran the full 95 s sequence unattended; sim clock speed tiers exercised (1×/8×); Mass wander processor + battery drain sub-stepping live; ISM visualizer tracked 200→500 entities; atmosphere subsystem wrote MPC + drove the tagged sun. Captures: `docs/media/scaffold-graybox-editor.png` (first layout), `scaffold-graybox-grounded.png` (grounded pass), `scaffold-sie-500-agents.png` (live Simulate, 500 agents).
+- Editor sky is still Earth-blue (template sky rig); Mars-ifying the sky/fog via the dial curves is the M0 look pass, deliberately not scaffold scope.
+
 ## 2026-07-05 — Session 4 (Step 4 scaffold, part 1: repo, sources, template removal, first compile)
 
 - `git init` (branch main); baseline commit `557d902` = pristine pre-scaffold restore point (director requirement: lands before any deletion).
