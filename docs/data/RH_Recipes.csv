@@ -1,0 +1,7 @@
+Name,Building,Inputs,Outputs,BatchTime_h,PowerDraw_W,SliceActive,Notes
+SmeltRegolith,Forge,Regolith:100,Struct:25,2,800,TRUE,"Base chain; 12.5 kg Struct/h at full duty"
+SmeltOre,Forge,Ore:100,Struct:60,2,800,TRUE,"Richer yield rewards prospecting + longer haul"
+MakeShielding,Forge,Struct:40;Ore:60,Shielding:50,3,800,FALSE,Dormant; habitat chain M1
+MakeHabSegment,Forge,Struct:120;Shielding:30,HabSegment:1,4,800,FALSE,Dormant; habitat chain M1
+MeltIce,WaterPlant,Ice:50,Water:45,1,300,TRUE,90% yield; continuous while fed
+Electrolysis,Electrolyzer,Water:10,Oxygen:8.9;Hydrogen:1.1,1,600,TRUE,"True 8:1 mass stoichiometry; hard-sci anchor"

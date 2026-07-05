@@ -1,0 +1,7 @@
+Name,Type,Mass_kg,LocX_m,LocY_m,SurfaceVisible,SliceActive,Notes
+Regolith_A,Regolith,60000,20,-30,TRUE,TRUE,"Adjacent to landing flat; the first dig zone"
+Regolith_B,Regolith,100000,-300,40,TRUE,TRUE,Reserve patch west
+Ore_A,Ore,8000,-160,-150,TRUE,TRUE,"220 m SW; surface-visible; uncomfortable without forward pad"
+Ore_B,Ore,15000,-80,-440,FALSE,TRUE,"450 m S; scout-only"
+Ice_A,Ice,30000,130,130,FALSE,TRUE,"180 m NE behind ridge; scout-only; the first go-look moment"
+Ice_B,Ice,60000,60,700,FALSE,TRUE,"700 m N; visible on survey, out of practical reach -- M1 expansion bait"

@@ -1,0 +1,11 @@
+Name,DisplayName,Mass_kg,Category,Effect,SliceActive,Notes
+SoilPallet,Earth Soil Pallet,1000,Future,Dormant until Phase 2 greenhouse,TRUE,"Purchasable now, pays off later -- the signature gamble"
+SeedVault,Seed Vault,200,Future,Dormant until Phase 2 greenhouse,TRUE,Cheap future bet
+PartsCrate,Spare Parts Crate,500,Operations,+10 SpareParts,TRUE,Fleet longevity
+Toolkit,Specialty Toolkit,300,Operations,+15% fabricator build speed,TRUE,Immediate quality-of-life
+AdvExcavator,Advanced Excavator RC-E2,2500,Fleet,+1 RC-E2 unit,TRUE,Biggest single production jump
+ExtraHauler,Hauler RC-H,1800,Fleet,+1 RC-H unit,TRUE,Logistics throughput
+SolarPack,Solar Array Flat-Pack,400,Power,+1 deployable SolarArray,TRUE,"Import-only rule: power growth is manifest-gated"
+BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,TRUE,Night resilience
+ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,TRUE,Latency-to-autonomy on the manifest
+LuxuryGoods,Luxury Goods,300,Future,Dormant until Phase 2 morale,TRUE,Morale bet for the first crew

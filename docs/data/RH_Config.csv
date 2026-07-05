@@ -1,0 +1,26 @@
+Name,Value,Unit,Notes
+SolLengthSimSeconds,1200,s,"One sol = 20 real minutes at 1x; sol-hour = 50 s"
+SimTickSeconds,0.1,s,Fixed timestep; presentation interpolates
+SpeedTiers,0;1;3;8,multiplier,"Pause/1x/3x/8x in M0; 60 era mode is M1+"
+EraModeStepSimMinutes,1,min,Ledger integration step for era mode (M1+)
+CellSizeMeters,2,m,Placement grid cell
+OrderLagTier0_s,45,s,Landing-state uplink lag
+OrderLagTier1_s,20,s,After Lander Compute Module
+OrderLagTier2_s,8,s,After manifest Compute Core
+OrderLagDiegeticLabel0,11 min,label,UI fiction label for tier 0
+SunriseSolHour,6,h,Solar curve start
+SunsetSolHour,18,h,Solar curve end
+DustFactor,1.0,factor,Clear-sky in M0; storms drive this at M1
+QuotaDeadlineSol,10,sol,Soft deadline for Q1
+ShipTransitSols,3,sol,Manifest confirm to touchdown
+ShipAwardOnTime_kg,10000,kg,Q1 on-time manifest budget
+ShipAwardLate_kg,6000,kg,Q1 late manifest budget
+PilesCapacity_kg,500,kg,Dig-site pile cap
+HopperCapacity_kg,200,kg,Building input hopper cap
+WearDegradeThreshold,50,wear,Work rate degrades linearly past this
+WearHaltThreshold,100,wear,Robot halts (destruction is M1+)
+RepairWearPerPart,25,wear,Maintenance bot repair per spare part
+StarterStruct_kg,400,kg,Lander stock
+StarterSolarPacks,6,count,Lander stock
+StarterBatteryPacks,2,count,Lander stock
+StarterSpareParts,6,count,Lander stock

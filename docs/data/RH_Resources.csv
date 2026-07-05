@@ -1,0 +1,17 @@
+Name,DisplayName,Category,StorageType,SliceActive,Notes
+Power,Power,Energy,GridBuffer,TRUE,"Flow (W) + stock (Wh in batteries); special-cased, not pooled"
+Regolith,Regolith,Solid,Stockpile,TRUE,Bulk feedstock; dug from surface patches
+Ore,Ore,Solid,Stockpile,TRUE,"Fe-rich in slice; Fe/Al/Si/rare split is post-M0"
+Struct,Structural Materials,Solid,Stockpile,TRUE,Forge output; all local construction consumes this
+Shielding,Radiation Shielding,Solid,Stockpile,FALSE,Dormant; habitat chain activates M1
+HabSegment,Habitat Segment,Solid,Stockpile,FALSE,Dormant; Phase 1 exit chain M1
+Ice,Ice,Solid,Stockpile,TRUE,Drilled from subsurface deposits
+Water,Water,Fluid,Tank,TRUE,Network-instant within connected buildings (hybrid logistics rule)
+Oxygen,Oxygen,Gas,Tank,TRUE,Reserve stock; quota line; no consumer until humans (M2)
+Hydrogen,Hydrogen,Gas,Tank,TRUE,"Banked fuel; no slice consumer, labeled future (hoppers/return ships)"
+SpareParts,Spare Parts,Solid,Stockpile,TRUE,Maintenance consumable; import-only
+Soil,Earth Soil,Solid,Stockpile,FALSE,Dormant; greenhouse economy M2; manifest item now
+Seeds,Seeds,Solid,Stockpile,FALSE,Dormant; manifest item now
+Luxury,Luxury Goods,Solid,Stockpile,FALSE,Dormant; morale economy M2
+Research,Research Points,Abstract,Ledger,FALSE,Dormant; acquisition model due M1
+Hope,Hope,Abstract,Ledger,FALSE,"Derived non-spendable index (approved); no slice inputs yet"

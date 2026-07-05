@@ -1,0 +1,7 @@
+Name,DisplayName,Class,Battery_Wh,DrawMove_W,DrawWork_W,DrawIdle_W,Speed_mps,Cargo_kg,WorkRate,WearPerActiveSol,StartingCount,SliceActive,Notes
+RC_E,Excavator RC-E,Excavator,2000,100,120,5,2.5,50,50,8,2,TRUE,"WorkRate = kg dug/h; one RC-E exactly feeds one Forge (50 kg/h appetite)"
+RC_H,Hauler RC-H,Hauler,1500,80,30,5,4.0,200,0,6,2,TRUE,"10 s load/unload; ~2.5 kg/s sustained on a 100 m loop"
+RC_F,Fabricator RC-F,Fabricator,2500,90,150,5,2.5,50,1.0,7,1,TRUE,"WorkRate = build speed multiplier; consumes Struct delivered to site"
+RC_S,Scout RC-S,Scout,800,60,40,3,7.0,0,60,4,1,TRUE,"WorkRate = survey radius m; reveals deposits; long theoretical range, thin margins"
+RC_M,Maintenance RC-M,Maintenance,1200,70,80,5,3.5,20,25,3,1,TRUE,"WorkRate = wear removed per spare part; carries 2 parts"
+RC_E2,Advanced Excavator RC-E2,Excavator,3000,110,130,5,2.5,60,100,8,0,TRUE,"Manifest-only; double dig rate; the fleet-growth temptation"

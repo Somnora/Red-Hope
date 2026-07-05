@@ -1,0 +1,3 @@
+Name,Requirements,DeadlineSol,OnTimeAward_kg,LateAward_kg,SliceActive,Notes
+Q1,Struct:300;Water:200;Oxygen:50,10,10000,6000,TRUE,"First CEO quota; soft deadline -- late reduces award tier, never fails"
+Q2,Struct:600;Oxygen:150;Hydrogen:40,22,12000,8000,FALSE,"Dormant M1 draft; H2 line makes fuel banking pay off"

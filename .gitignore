@@ -1,0 +1,18 @@
+# UE generated / local
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+.vs/
+.vscode/
+.idea/
+*.xcworkspace/
+*.xcodeproj/
+Makefile
+CMakeLists.txt
+.DS_Store
+
+# Plugins build artifacts
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
