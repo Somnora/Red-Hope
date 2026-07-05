@@ -21,9 +21,15 @@ struct FRHRobotSaveState
 	float CargoKg = 0.f;   // in-flight cargo at save time (returned to source)
 };
 
+class UStateTree;
+
 // Owns agent entity lifecycles: the working robot archetype plus the
 // benchmark wander-dummies. Save/load round-trips robots through
 // FRHRobotSaveState; the sim world owns when that happens.
+// Brains (M1-a Gate B): when RH.BrainMode=1 and the ST_RobotBrain asset
+// exists, robots spawn with StateTree fragments and think via
+// URHRobotBrainProcessor; otherwise they fall back to the legacy switch
+// processor. Same driver, two brains - the Gate B parity instrument.
 UCLASS()
 class REDHOPESIM_API URHAgentSubsystem : public UWorldSubsystem
 {
@@ -54,8 +60,13 @@ public:
 	int32 GetAgentCount() const { return SpawnedCount; }
 
 private:
+	// Resolves (once) whether robots get the StateTree brain this session.
+	UStateTree* ResolveBrainTree();
+
 	int32 SpawnedCount = 0;
 	FMassArchetypeHandle DummyArchetype;
 	FMassArchetypeHandle RobotArchetype;
 	TArray<FMassEntityHandle> RobotHandles;
+	UPROPERTY() TObjectPtr<UStateTree> BrainTree;
+	bool bBrainTreeResolved = false;
 };

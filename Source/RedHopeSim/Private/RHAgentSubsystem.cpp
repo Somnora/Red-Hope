@@ -4,6 +4,16 @@
 #include "Data/RHRows.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
+#include "MassStateTreeFragments.h"
+#include "MassStateTreeSubsystem.h"
+#include "MassStateTreeProcessors.h"
+#include "StateTree.h"
+
+// 0 = legacy switch processor for every robot (A/B baseline);
+// 1 = StateTree brain when /Game/RedHope/AI/ST_RobotBrain exists.
+static TAutoConsoleVariable<int32> CVarRHBrainMode(
+	TEXT("RH.BrainMode"), 1,
+	TEXT("Robot decision layer: 0=legacy switch, 1=StateTree (falls back to legacy if the tree asset is missing)."));
 
 TArray<FMassEntityHandle> URHAgentSubsystem::SpawnDummyAgents(int32 Count, const FVector& CenterCm, float ExtentCm)
 {
@@ -52,6 +62,18 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow
 	return SpawnRobotWithState(RowName, Def, PosCm, Def.Battery_Wh, 0.f);
 }
 
+UStateTree* URHAgentSubsystem::ResolveBrainTree()
+{
+	if (!bBrainTreeResolved)
+	{
+		bBrainTreeResolved = true;
+		BrainTree = LoadObject<UStateTree>(nullptr, TEXT("/Game/RedHope/AI/ST_RobotBrain.ST_RobotBrain"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("Robot brain: %s"),
+			BrainTree ? TEXT("StateTree (ST_RobotBrain)") : TEXT("legacy switch (no ST_RobotBrain asset)"));
+	}
+	return CVarRHBrainMode.GetValueOnGameThread() != 0 ? BrainTree.Get() : nullptr;
+}
+
 FMassEntityHandle URHAgentSubsystem::SpawnRobotWithState(FName RowName, const FRHRobotRow& Def, const FVector& PosCm, float ChargeWh, float Wear)
 {
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
@@ -61,40 +83,91 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobotWithState(FName RowName, const FR
 	}
 	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
 
-	if (!RobotArchetype.IsValid())
+	// Fragment values shared by both brain paths.
+	FTransformFragment TransformFrag;
+	TransformFrag.GetMutableTransform().SetLocation(PosCm);
+
+	FRHBatteryFragment BatteryFrag;
+	BatteryFrag.CapacityWh = Def.Battery_Wh;
+	BatteryFrag.ChargeWh = FMath::Clamp(ChargeWh, 0.f, Def.Battery_Wh);
+	BatteryFrag.DrawMoveW = Def.DrawMove_W;
+
+	FRHWearFragment WearFrag;
+	WearFrag.Wear = FMath::Clamp(Wear, 0.f, 100.f);
+
+	FRHRobotFragment RobotFrag;
+	RobotFrag.DefName = RowName;
+	RobotFrag.RobotClass = Def.RobotClass;
+	RobotFrag.SpeedMps = Def.Speed_mps;
+	RobotFrag.CargoCapKg = Def.Cargo_kg;
+	RobotFrag.WorkRate = Def.WorkRate;
+	RobotFrag.DrawMoveW = Def.DrawMove_W;
+	RobotFrag.DrawWorkW = Def.DrawWork_W;
+	RobotFrag.DrawIdleW = Def.DrawIdle_W;
+
+	FMassEntityHandle Entity;
+
+	if (UStateTree* Tree = ResolveBrainTree())
 	{
-		TArray<const UScriptStruct*> Fragments;
-		Fragments.Add(FTransformFragment::StaticStruct());
-		Fragments.Add(FRHBatteryFragment::StaticStruct());
-		Fragments.Add(FRHWearFragment::StaticStruct());
-		Fragments.Add(FRHRobotFragment::StaticStruct());
-		Fragments.Add(FRHTaskFragment::StaticStruct());
-		RobotArchetype = EntityManager.CreateArchetype(Fragments);
+		// StateTree brain: instance data allocated up front so the handle
+		// rides in with the fragments; entity composition (incl. the const
+		// shared tree fragment) is derived from the instance list.
+		UMassStateTreeSubsystem* StateTreeSubsystem = GetWorld()->GetSubsystem<UMassStateTreeSubsystem>();
+		if (!StateTreeSubsystem)
+		{
+			return FMassEntityHandle();
+		}
+		FMassStateTreeInstanceFragment InstanceFrag;
+		InstanceFrag.InstanceHandle = StateTreeSubsystem->AllocateInstanceData(Tree);
+
+		FMassStateTreeSharedFragment SharedFrag;
+		SharedFrag.StateTree = Tree;
+		FMassArchetypeSharedFragmentValues SharedValues;
+		SharedValues.Add(EntityManager.GetOrCreateConstSharedFragment(SharedFrag));
+
+		TArray<FInstancedStruct> Fragments;
+		Fragments.Add(FInstancedStruct::Make(TransformFrag));
+		Fragments.Add(FInstancedStruct::Make(BatteryFrag));
+		Fragments.Add(FInstancedStruct::Make(WearFrag));
+		Fragments.Add(FInstancedStruct::Make(RobotFrag));
+		Fragments.Add(FInstancedStruct::Make(FRHTaskFragment()));
+		Fragments.Add(FInstancedStruct::Make(InstanceFrag));
+		Entity = EntityManager.CreateEntity(Fragments, SharedValues);
+
+		// Pre-apply the engine's "already activated" tag: MassAI's activation
+		// processor otherwise matches this entity, REALLOCATES its instance
+		// data over ours, Starts the tree on wall-clock cadence, and wires it
+		// into signal ticking. Our brain processor owns Start + Tick on the
+		// fixed sim step; the engine machinery must never see these robots.
+		if (Entity.IsValid())
+		{
+			EntityManager.AddTagToEntity(Entity, FMassStateTreeActivatedTag::StaticStruct());
+		}
+	}
+	else
+	{
+		if (!RobotArchetype.IsValid())
+		{
+			TArray<const UScriptStruct*> Fragments;
+			Fragments.Add(FTransformFragment::StaticStruct());
+			Fragments.Add(FRHBatteryFragment::StaticStruct());
+			Fragments.Add(FRHWearFragment::StaticStruct());
+			Fragments.Add(FRHRobotFragment::StaticStruct());
+			Fragments.Add(FRHTaskFragment::StaticStruct());
+			RobotArchetype = EntityManager.CreateArchetype(Fragments);
+		}
+		Entity = EntityManager.CreateEntity(RobotArchetype);
+		EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity) = TransformFrag;
+		EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity) = BatteryFrag;
+		EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity) = WearFrag;
+		EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity) = RobotFrag;
 	}
 
-	const FMassEntityHandle Entity = EntityManager.CreateEntity(RobotArchetype);
-
-	EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetMutableTransform().SetLocation(PosCm);
-
-	FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
-	Battery.CapacityWh = Def.Battery_Wh;
-	Battery.ChargeWh = FMath::Clamp(ChargeWh, 0.f, Def.Battery_Wh);
-	Battery.DrawMoveW = Def.DrawMove_W;
-
-	EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear = FMath::Clamp(Wear, 0.f, 100.f);
-
-	FRHRobotFragment& Robot = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity);
-	Robot.DefName = RowName;
-	Robot.RobotClass = Def.RobotClass;
-	Robot.SpeedMps = Def.Speed_mps;
-	Robot.CargoCapKg = Def.Cargo_kg;
-	Robot.WorkRate = Def.WorkRate;
-	Robot.DrawMoveW = Def.DrawMove_W;
-	Robot.DrawWorkW = Def.DrawWork_W;
-	Robot.DrawIdleW = Def.DrawIdle_W;
-
-	RobotHandles.Add(Entity);
-	++SpawnedCount;
+	if (Entity.IsValid())
+	{
+		RobotHandles.Add(Entity);
+		++SpawnedCount;
+	}
 	return Entity;
 }
 

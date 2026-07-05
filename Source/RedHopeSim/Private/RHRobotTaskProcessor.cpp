@@ -1,32 +1,15 @@
 #include "RHRobotTaskProcessor.h"
 #include "RedHopeSim.h"
 #include "RHAgentFragments.h"
+#include "RHRobotMovement.h"
 #include "RHSimTypes.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Mass/EntityFragments.h"
 #include "MassExecutionContext.h"
+#include "MassStateTreeFragments.h"
 
-namespace
-{
-	constexpr float ArriveDistCm = 300.f;
-
-	// Move toward target on the plain; returns true when arrived.
-	bool MoveToward(FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt)
-	{
-		FVector Pos = Transform.GetLocation();
-		const FVector To = TargetCm - Pos;
-		const float DistCm = To.Size2D();
-		if (DistCm <= ArriveDistCm)
-		{
-			return true;
-		}
-		Pos += To.GetSafeNormal2D() * FMath::Min(SpeedMps * 100.f * Dt, DistCm);
-		Transform.SetLocation(Pos);
-		Transform.SetRotation(FRotationMatrix::MakeFromX(To).ToQuat());
-		return false;
-	}
-}
+using RH::MoveToward;
 
 URHRobotTaskProcessor::URHRobotTaskProcessor()
 	: EntityQuery(*this)
@@ -41,6 +24,9 @@ void URHRobotTaskProcessor::ConfigureQueries(const TSharedRef<FMassEntityManager
 	EntityQuery.AddRequirement<FRHBatteryFragment>(EMassFragmentAccess::ReadWrite);
 	EntityQuery.AddRequirement<FRHRobotFragment>(EMassFragmentAccess::ReadOnly);
 	EntityQuery.AddRequirement<FRHTaskFragment>(EMassFragmentAccess::ReadWrite);
+	// Legacy brain runs only robots WITHOUT the StateTree fragment; the brain
+	// processor requires it. One archetype bit splits the A/B cleanly.
+	EntityQuery.AddRequirement<FMassStateTreeInstanceFragment>(EMassFragmentAccess::None, EMassFragmentPresence::None);
 }
 
 void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
