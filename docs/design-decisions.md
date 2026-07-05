@@ -53,6 +53,12 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Known limitation (logged M1 task):** manifest cargo effects are name-keyed in `ApplyManifestItemEffect` at slice scale; the CSV `Effect` column is display text. Data-driven effect verbs are the M1 design.
 - **Cleanup queued:** hand-placed `GB_Dep_*` gray-box markers in L_Slice duplicate the sim-spawned deposit visuals.
 
+## Approved — 2026-07-05 (M1 scope, director-approved)
+
+- **M1 scope proposal adopted as written** (`docs/m1-scope-proposal.md`): fleet wear/maintenance/scouting, dust storms, full latency arc (ComputeModule), save/load, era-mode 60× integrator + headless ledger, StateTree robot brain, data-driven manifest verbs, Ore→Shielding→HabSegment→Habitat exit arc with Q2, logged balance fixes; stages M1-a..d each ending in a verified run.
+- **Director calls on the two flagged options:** (1) the **playability strand stays in M1** — hand-playable from M1-a, diegetic panels accreting per stage, manifest composer as the M1-d set-piece; (2) **heightmap terrain stays deferred to M2** — M1 remains systems-focused on the flat gray-box plane.
+- M0-c verification reviewed and passed ("move onto the next step", 2026-07-05).
+
 ## Pending — awaiting director review
 
-- 2026-07-05 (agent-proposed): **M1 scope proposal** (`docs/m1-scope-proposal.md`) — "Phase 1 complete" per brief §8: fleet wear/maintenance/scouting, dust storms, full latency arc (ComputeModule), save/load, era-mode 60× integrator + headless ledger, StateTree robot brain, data-driven manifest verbs, Ore→Shielding→HabSegment→Habitat exit arc with Q2, playable-UI strand (M0 is script-only), logged balance fixes. Four stages (M1-a..d), each with scripted/hand-played verification. M0-c verification itself was reviewed and passed ("move onto the next step", 2026-07-05).
+- (nothing — M1-a working spec in progress)
