@@ -25,6 +25,21 @@ public:
 
 	const FRHBuildingRow* GetBuilding(FName Name) const;
 	const FRHRobotRow* GetRobot(FName Name) const;
+	const FRHQuotaRow* GetQuota(FName Name) const;
+
+	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
+	// fluids/gases/abstract flow instantly in the colony-wide pool.
+	bool IsSolidResource(FName Name) const;
+
+	// All robot rows (for starting-fleet spawn).
+	void ForEachRobot(TFunctionRef<void(FName, const FRHRobotRow&)> Fn) const;
+	// All slice-active deposits.
+	void ForEachDeposit(TFunctionRef<void(FName, const FRHDepositRow&)> Fn) const;
+	// First slice-active recipe of a building whose inputs the predicate
+	// accepts. Recipe Inputs/Outputs strings parse as "Res:Kg;Res:Kg".
+	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const;
+
+	static TMap<FName, double> ParseResourceList(const FString& List);
 
 	// Config scalars from DT_Config (Value column parsed as double).
 	double GetConfigScalar(FName Name, double Default) const;
@@ -44,13 +59,21 @@ public:
 	}
 
 private:
+	UPROPERTY(Config) FSoftObjectPath ResourcesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Resources.DT_Resources"));
 	UPROPERTY(Config) FSoftObjectPath BuildingsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Buildings.DT_Buildings"));
 	UPROPERTY(Config) FSoftObjectPath RobotsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Robots.DT_Robots"));
 	UPROPERTY(Config) FSoftObjectPath ConfigTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Config.DT_Config"));
+	UPROPERTY(Config) FSoftObjectPath RecipesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Recipes.DT_Recipes"));
+	UPROPERTY(Config) FSoftObjectPath DepositsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Deposits.DT_Deposits"));
+	UPROPERTY(Config) FSoftObjectPath QuotasTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Quotas.DT_Quotas"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
+	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
 	UPROPERTY() TObjectPtr<UDataTable> BuildingsTable;
 	UPROPERTY() TObjectPtr<UDataTable> RobotsTable;
 	UPROPERTY() TObjectPtr<UDataTable> ConfigTable;
+	UPROPERTY() TObjectPtr<UDataTable> RecipesTable;
+	UPROPERTY() TObjectPtr<UDataTable> DepositsTable;
+	UPROPERTY() TObjectPtr<UDataTable> QuotasTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

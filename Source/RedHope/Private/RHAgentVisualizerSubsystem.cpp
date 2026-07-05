@@ -1,10 +1,21 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RedHope.h"
+#include "RHSimWorldSubsystem.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
+
+void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+	Super::OnWorldBeginPlay(InWorld);
+	// The sim's starting fleet gets visuals the same way dummies do.
+	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
+	{
+		Sim->OnRobotsSpawned.AddUObject(this, &URHAgentVisualizerSubsystem::TrackEntities);
+	}
+}
 
 void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>& Entities)
 {

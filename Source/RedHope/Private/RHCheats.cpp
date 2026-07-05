@@ -136,7 +136,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 	TEXT("RH.Status"),
-	TEXT("RH.Status - log colony power state, clock, and uplink queue."),
+	TEXT("RH.Status - log colony power, economy, tasks, quota, and uplink."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
@@ -145,15 +145,61 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		if (!Sim || !Clock) { return; }
 
 		const FRHPowerState& P = Sim->GetPower();
-		UE_LOG(LogRedHope, Display, TEXT("[RH.Status] Sol %d %.0f%% | gen %.0f W load %.0f W battery %.0f/%.0f Wh%s | buildings %d | uplink %d queued"),
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Status] Sol %d %.0f%% | gen %.0f W load %.0f W battery %.0f/%.0f Wh%s | buildings %d | tasks %d | uplink %d"),
 			Clock->GetSol(), Clock->GetSolFraction() * 100.f,
 			P.GenW, P.LoadW, P.BatteryWh, P.BatteryCapWh,
 			P.bDeficit ? TEXT(" DEFICIT") : TEXT(""),
-			Sim->GetBuildings().Num(), Sim->GetUplinkQueue().Num());
+			Sim->GetBuildings().Num(), Sim->GetOpenTaskCount(), Sim->GetUplinkQueue().Num());
+
+		for (const auto& Q : Sim->GetQuotaProgress())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  quota %s: %.0f / %.0f kg"),
+				*Q.Key.ToString(), Q.Value.Key, Q.Value.Value);
+		}
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.bDesignated)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("  dig %s: %.0f kg underground, %.0f kg on pile, %d claims"),
+					*D.RowName.ToString(), D.RemainingKg, D.PileKg, D.DigClaims);
+			}
+		}
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.bUnderConstruction)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("  site %s #%d: %.0f s remaining"),
+					*B.DefName.ToString(), B.Id, B.BuildRemaining_s);
+			}
+			else if (B.BatchRemaining_h > 0.0)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("  batch %s #%d: %.2f h remaining"),
+					*B.DefName.ToString(), B.Id, B.BatchRemaining_h);
+			}
+		}
 		for (const FRHCommand& C : Sim->GetUplinkQueue())
 		{
 			UE_LOG(LogRedHope, Display, TEXT("  queued: %s %s, executes at t=%.0f (now %.0f)"),
 				*C.Verb.ToString(), *C.Target.ToString(), C.ExecuteAtSimSeconds, Clock->GetSimSecondsTotal());
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDig(
+	TEXT("RH.Dig"),
+	TEXT("RH.Dig <DepositRowName> - transmit a dig designation through the uplink (e.g. RH.Dig Regolith_A)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Dig <DepositRowName>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Dig");
+			Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
 		}
 	}));
 

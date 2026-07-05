@@ -13,12 +13,41 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
 	{
 		AddedHandle = Sim->OnBuildingAdded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingAdded);
+		CompletedHandle = Sim->OnBuildingCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingCompleted);
 		RejectedHandle = Sim->OnCommandRejected.AddUObject(this, &URHColonyVisualizerSubsystem::HandleCommandRejected);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
 			HandleBuildingAdded(B);
 		}
+		SpawnDepositMarkers();
+	}
+}
+
+void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
+{
+	UWorld* World = GetWorld();
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	for (const FRHDepositState& D : Sim->GetDeposits())
+	{
+		// Footprint scales gently with mass: 60 t ~ 16 m across.
+		const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
+		AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(D.LocationCm + FVector(0, 0, 20.f), FRotator::ZeroRotator);
+		if (!Actor)
+		{
+			continue;
+		}
+		Actor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+		Actor->GetStaticMeshComponent()->SetStaticMesh(Cube);
+		Actor->SetActorScale3D(FVector(Side, Side, 0.4f));
+#if WITH_EDITOR
+		Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
+#endif
 	}
 }
 
@@ -29,21 +58,16 @@ void URHColonyVisualizerSubsystem::Deinitialize()
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
 			Sim->OnBuildingAdded.Remove(AddedHandle);
+			Sim->OnBuildingCompleted.Remove(CompletedHandle);
 			Sim->OnCommandRejected.Remove(RejectedHandle);
 		}
 	}
 	Super::Deinitialize();
 }
 
-void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance& Instance)
+FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instance) const
 {
-	UWorld* World = GetWorld();
-	if (!World || BuildingVisuals.Contains(Instance.Id))
-	{
-		return;
-	}
-
-	const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(Instance.DefName) : nullptr;
 
 	// Gray-box shape from footprint (2 m cells / 1 m base cube => scale = cells x 2).
@@ -66,7 +90,23 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			Scale.Z = 2.f + (Def->FootprintX + Def->FootprintY) * 0.25f;
 		}
 	}
+	// Construction sites read as foundations until a fabricator finishes them.
+	if (Instance.bUnderConstruction)
+	{
+		Scale.Z = FMath::Min(Scale.Z, 0.4f);
+	}
+	return Scale;
+}
 
+void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance& Instance)
+{
+	UWorld* World = GetWorld();
+	if (!World || BuildingVisuals.Contains(Instance.Id))
+	{
+		return;
+	}
+
+	const FVector Scale = ScaleFor(Instance);
 	const FVector Location = Instance.LocationCm + FVector(0, 0, Scale.Z * 50.f);
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, FRotator::ZeroRotator);
 	if (!Actor)
@@ -81,6 +121,19 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	Actor->SetActorLabel(FString::Printf(TEXT("Sim_%s_%d"), *Instance.DefName.ToString(), Instance.Id));
 #endif
 	BuildingVisuals.Add(Instance.Id, Actor);
+}
+
+void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
+{
+	if (TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(Instance.Id))
+	{
+		if (AStaticMeshActor* Actor = *Found)
+		{
+			const FVector Scale = ScaleFor(Instance); // no longer under construction: full height
+			Actor->SetActorScale3D(Scale);
+			Actor->SetActorLocation(Instance.LocationCm + FVector(0, 0, Scale.Z * 50.f));
+		}
+	}
 }
 
 void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason)

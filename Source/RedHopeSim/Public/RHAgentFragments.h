@@ -25,8 +25,8 @@ struct REDHOPESIM_API FRHWearFragment : public FMassFragment
 	float Wear = 0.f; // 0..100; degrades work past 50, halts at 100 (RH_Config)
 };
 
-// Scaffold/stress-test behavior: wander between random points. Replaced by
-// the task system's MoveTarget in M0 proper.
+// Benchmark-harness behavior: wander between random points. Real robots do
+// not carry this fragment, so the wander processor never touches them.
 USTRUCT()
 struct REDHOPESIM_API FRHWanderFragment : public FMassFragment
 {
@@ -34,4 +34,38 @@ struct REDHOPESIM_API FRHWanderFragment : public FMassFragment
 
 	FVector Target = FVector::ZeroVector;
 	float SpeedMps = 3.f;
+};
+
+// Definition-derived constants, baked at spawn so work steps do no table
+// lookups. Source of truth remains DT_Robots.
+USTRUCT()
+struct REDHOPESIM_API FRHRobotFragment : public FMassFragment
+{
+	GENERATED_BODY()
+
+	FName DefName;
+	FName RobotClass;      // Excavator / Hauler / Fabricator / Scout / Maintenance
+	float SpeedMps = 3.f;
+	float CargoCapKg = 0.f;
+	float WorkRate = 0.f;  // class-specific meaning per DT_Robots
+	float DrawMoveW = 80.f;
+	float DrawWorkW = 80.f;
+	float DrawIdleW = 5.f;
+};
+
+// Current assignment + execution phase. The task board owns the truth;
+// this mirrors the claim so the work processor runs without board access
+// on the hot path.
+USTRUCT()
+struct REDHOPESIM_API FRHTaskFragment : public FMassFragment
+{
+	GENERATED_BODY()
+
+	uint8 TaskType = 0;    // ERHTaskType
+	uint8 Phase = 0;       // 0 ToFrom/ToSite, 1 Working/Loading, 2 ToDest, 3 Unloading
+	int32 TaskId = 0;
+	int32 DigDepositId = 0;
+	FVector TargetCm = FVector::ZeroVector;
+	FName CargoResource;
+	float CargoKg = 0.f;
 };

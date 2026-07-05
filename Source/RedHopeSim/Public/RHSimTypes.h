@@ -1,0 +1,62 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "MassEntityTypes.h"
+#include "Mass/EntityHandle.h"
+#include "RHSimTypes.generated.h"
+
+// Solid resources are physical (approved hybrid logistics): they sit in
+// site inventories and move by hauler. These types are the sim's spatial
+// economy vocabulary.
+
+UENUM()
+enum class ERHTaskType : uint8
+{
+	None,
+	Dig,   // excavator: standing designation on a deposit
+	Haul,  // hauler: move AmountKg of Resource from A to B
+	Build  // fabricator: work down a construction site's timer
+};
+
+// A place solids can be: a building (Id > 0) or a deposit pile (Id > 0 in
+// deposit space). Exactly one side is set.
+USTRUCT()
+struct REDHOPESIM_API FRHSiteRef
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 BuildingId = 0;
+	UPROPERTY() int32 DepositId = 0;
+
+	bool IsValid() const { return BuildingId > 0 || DepositId > 0; }
+};
+
+// One claimable unit of colony work. Plain data; the task board in
+// URHSimWorldSubsystem owns lifecycle, Mass processors claim and execute.
+struct FRHTask
+{
+	int32 Id = 0;
+	ERHTaskType Type = ERHTaskType::None;
+	FRHSiteRef From;
+	FRHSiteRef To;
+	FName Resource;
+	double AmountKg = 0.0;
+	FMassEntityHandle ClaimedBy;
+};
+
+// A subsurface resource body, from DT_Deposits. Dug material moves
+// Remaining -> Pile (capped); haulers collect from the pile.
+USTRUCT()
+struct REDHOPESIM_API FRHDepositState
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 Id = 0;
+	UPROPERTY() FName RowName;
+	UPROPERTY() FName Type;           // Regolith / Ore / Ice
+	UPROPERTY() double RemainingKg = 0.0;
+	UPROPERTY() double PileKg = 0.0;
+	UPROPERTY() FVector LocationCm = FVector::ZeroVector;
+	UPROPERTY() bool bDesignated = false;
+	UPROPERTY() int32 DigClaims = 0;  // excavators currently working it
+};

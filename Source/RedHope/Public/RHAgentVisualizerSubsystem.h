@@ -28,6 +28,8 @@ public:
 		return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 	}
 
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+
 	void TrackEntities(const TArray<FMassEntityHandle>& Entities);
 
 private:

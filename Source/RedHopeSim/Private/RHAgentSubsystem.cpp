@@ -1,6 +1,7 @@
 #include "RHAgentSubsystem.h"
 #include "RedHopeSim.h"
 #include "RHAgentFragments.h"
+#include "Data/RHRows.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
 
@@ -44,4 +45,46 @@ TArray<FMassEntityHandle> URHAgentSubsystem::SpawnDummyAgents(int32 Count, const
 	SpawnedCount += Count;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Spawned %d dummy agents (total %d)"), Count, SpawnedCount);
 	return Handles;
+}
+
+FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow& Def, const FVector& PosCm)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return FMassEntityHandle();
+	}
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+
+	if (!RobotArchetype.IsValid())
+	{
+		TArray<const UScriptStruct*> Fragments;
+		Fragments.Add(FTransformFragment::StaticStruct());
+		Fragments.Add(FRHBatteryFragment::StaticStruct());
+		Fragments.Add(FRHRobotFragment::StaticStruct());
+		Fragments.Add(FRHTaskFragment::StaticStruct());
+		RobotArchetype = EntityManager.CreateArchetype(Fragments);
+	}
+
+	const FMassEntityHandle Entity = EntityManager.CreateEntity(RobotArchetype);
+
+	EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetMutableTransform().SetLocation(PosCm);
+
+	FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
+	Battery.CapacityWh = Def.Battery_Wh;
+	Battery.ChargeWh = Def.Battery_Wh;
+	Battery.DrawMoveW = Def.DrawMove_W;
+
+	FRHRobotFragment& Robot = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity);
+	Robot.DefName = RowName;
+	Robot.RobotClass = Def.RobotClass;
+	Robot.SpeedMps = Def.Speed_mps;
+	Robot.CargoCapKg = Def.Cargo_kg;
+	Robot.WorkRate = Def.WorkRate;
+	Robot.DrawMoveW = Def.DrawMove_W;
+	Robot.DrawWorkW = Def.DrawWork_W;
+	Robot.DrawIdleW = Def.DrawIdle_W;
+
+	++SpawnedCount;
+	return Entity;
 }

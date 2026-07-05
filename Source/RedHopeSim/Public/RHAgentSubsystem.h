@@ -25,9 +25,13 @@ public:
 	// from these; sim never knows about the visuals).
 	TArray<FMassEntityHandle> SpawnDummyAgents(int32 Count, const FVector& CenterCm, float ExtentCm);
 
+	// Spawns one working robot with definition-derived fragment constants.
+	FMassEntityHandle SpawnRobot(FName RowName, const struct FRHRobotRow& Def, const FVector& PosCm);
+
 	int32 GetAgentCount() const { return SpawnedCount; }
 
 private:
 	int32 SpawnedCount = 0;
 	FMassArchetypeHandle DummyArchetype;
+	FMassArchetypeHandle RobotArchetype;
 };

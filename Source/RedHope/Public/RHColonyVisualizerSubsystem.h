@@ -31,9 +31,13 @@ public:
 
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
+	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
+	void SpawnDepositMarkers();
+	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	FDelegateHandle AddedHandle;
+	FDelegateHandle CompletedHandle;
 	FDelegateHandle RejectedHandle;
 };
