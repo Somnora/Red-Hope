@@ -2,7 +2,6 @@
 #include "RedHopeSim.h"
 #include "RHAgentFragments.h"
 #include "RHSimClockSubsystem.h"
-#include "RHSimWorldSubsystem.h"
 #include "Mass/EntityFragments.h"
 #include "MassExecutionContext.h"
 
@@ -33,15 +32,10 @@ void URHWanderProcessor::Execute(FMassEntityManager& EntityManager, FMassExecuti
 		return;
 	}
 
-	const int32 Steps = Clock->ConsumeSubSteps();
+	const int32 Steps = Clock->GetStepsThisFrame();
 	if (Steps == 0)
 	{
 		return; // paused, or no whole sub-step accumulated this frame
-	}
-
-	if (URHSimWorldSubsystem* SimWorld = World->GetSubsystem<URHSimWorldSubsystem>())
-	{
-		SimWorld->ProcessDueCommands(Clock->GetSimSecondsTotal());
 	}
 
 	const float SubDt = URHSimClockSubsystem::SubStepSeconds;

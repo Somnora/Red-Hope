@@ -34,9 +34,11 @@ public:
 		return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 	}
 
-	// Consumed once per sim frame by the root sim driver (the wander processor
-	// in the scaffold; URHSimWorldSubsystem batch driver in M0 proper).
-	int32 ConsumeSubSteps();
+	// Whole sub-steps accumulated this rendered frame, published (not
+	// consumed) so multiple sim systems advance the same timeline. Readers
+	// that tick before the clock in a frame see the previous frame's count -
+	// acceptable jitter until the M0-b single-driver refactor.
+	int32 GetStepsThisFrame() const { return StepsThisFrame; }
 
 	void SetSpeed(float NewSpeed);
 	float GetSpeed() const { return Speed; }
@@ -54,6 +56,6 @@ private:
 	float Speed = 1.f;
 	float Accumulator = 0.f;
 	double SimSecondsTotal = 0.0;
-	int32 PendingSubSteps = 0;
+	int32 StepsThisFrame = 0;
 	int32 LastSol = 0;
 };

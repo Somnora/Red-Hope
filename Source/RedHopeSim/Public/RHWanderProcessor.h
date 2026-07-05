@@ -5,10 +5,9 @@
 #include "RHWanderProcessor.generated.h"
 
 // Scaffold/stress movement: integrates wander motion in fixed sim sub-steps
-// consumed from the sim clock, so 8x speed really does execute 8x the work
+// published by the sim clock, so 8x speed really does execute 8x the work
 // per real second - the honest cost model the stress test must measure.
-// Acts as the root sim driver in the scaffold (sole ConsumeSubSteps caller;
-// also pumps the uplink queue). M0 moves that role to a dedicated driver.
+// Replaced by the task-driven movement processor in M0-b.
 UCLASS()
 class REDHOPESIM_API URHWanderProcessor : public UMassProcessor
 {

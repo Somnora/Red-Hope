@@ -6,6 +6,7 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimClockSubsystem.h"
+#include "RHSimWorldSubsystem.h"
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/CoreDelegates.h"
@@ -111,4 +112,60 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBenchmark(
 		const FString Label = Args.Num() > 0 ? Args[0] : TEXT("unlabeled");
 		const float Seconds = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 10.f;
 		GRHBenchmarkSampler.Start(Label, Seconds);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
+	TEXT("RH.Build"),
+	TEXT("RH.Build <DefName> <Xm> <Ym> - transmit a Build order through the uplink (subject to signal lag + coverage)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Build <DefName> <Xm> <Ym>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Build");
+			Cmd.Target = FName(*Args[0]);
+			Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
+	TEXT("RH.Status"),
+	TEXT("RH.Status - log colony power state, clock, and uplink queue."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>();
+		if (!Sim || !Clock) { return; }
+
+		const FRHPowerState& P = Sim->GetPower();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Status] Sol %d %.0f%% | gen %.0f W load %.0f W battery %.0f/%.0f Wh%s | buildings %d | uplink %d queued"),
+			Clock->GetSol(), Clock->GetSolFraction() * 100.f,
+			P.GenW, P.LoadW, P.BatteryWh, P.BatteryCapWh,
+			P.bDeficit ? TEXT(" DEFICIT") : TEXT(""),
+			Sim->GetBuildings().Num(), Sim->GetUplinkQueue().Num());
+		for (const FRHCommand& C : Sim->GetUplinkQueue())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  queued: %s %s, executes at t=%.0f (now %.0f)"),
+				*C.Verb.ToString(), *C.Target.ToString(), C.ExecuteAtSimSeconds, Clock->GetSimSecondsTotal());
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHLag(
+	TEXT("RH.Lag"),
+	TEXT("RH.Lag <SimSeconds> - set uplink order lag (latency-tier test knob)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			Sim->SetOrderLagSeconds(FCString::Atod(*Args[0]));
+			UE_LOG(LogRedHope, Display, TEXT("Order lag set to %s sim-s"), *Args[0]);
+		}
 	}));

@@ -3,16 +3,17 @@
 
 void URHSimClockSubsystem::Tick(float DeltaTime)
 {
+	StepsThisFrame = 0;
 	if (Speed <= 0.f)
 	{
 		return; // Paused: camera/UI stay live, sim time frozen, uplink countdowns frozen.
 	}
 
 	Accumulator += DeltaTime * Speed;
-	while (Accumulator >= SubStepSeconds && PendingSubSteps < MaxSubStepsPerFrame)
+	while (Accumulator >= SubStepSeconds && StepsThisFrame < MaxSubStepsPerFrame)
 	{
 		Accumulator -= SubStepSeconds;
-		++PendingSubSteps;
+		++StepsThisFrame;
 		SimSecondsTotal += SubStepSeconds;
 	}
 	// Anything past the cap is dropped with a warning: the "sim struggling"
@@ -29,13 +30,6 @@ void URHSimClockSubsystem::Tick(float DeltaTime)
 		LastSol = Sol;
 		OnSolElapsed.Broadcast(Sol);
 	}
-}
-
-int32 URHSimClockSubsystem::ConsumeSubSteps()
-{
-	const int32 Steps = PendingSubSteps;
-	PendingSubSteps = 0;
-	return Steps;
 }
 
 void URHSimClockSubsystem::SetSpeed(float NewSpeed)
