@@ -8,6 +8,7 @@
 class URHDefinitionsSubsystem;
 class URHSimClockSubsystem;
 class URHAgentSubsystem;
+struct FRHRobotRow;
 
 // A strategic order. Presentation can only reach the sim through these:
 // commands enter the uplink queue, wait out the signal lag, then apply at a
