@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-05 — Session 6 (Mars sky pass + M0-a: definitions, power, territory)
+
+- **Mars sky (director directive, rover-referenced):** VolumetricCloud + template SkySphere deleted (no clouds on Mars). SkyAtmosphere inverted from Earth: thin warm Rayleigh (butterscotch dust dome), cool high-anisotropy Mie lobe (blue sunset aureole per rover photos), reddish ground albedo, warm dust fog, 0.357° solar disk at 7 lux. Captures: `docs/media/mars-sky-midday.png`, `mars-sky-sunset.png`. Logged as the habitability-0 endpoints for the dial curves.
+- **M0-a systems (compiled clean, 22.5 s, first try):** `URHDefinitionsSubsystem` (DT/CT registry; sole owner of `CanFabricateLocally`); sim world rewritten as tickable colony owner — data-driven buildings, power ledger (gen × `CT_SolarDiurnal`, idle loads, battery Wh clamp, deficit flag), coverage-disc territory with Build rejection, uplink queue pumped at sub-step boundaries; clock refactored to published per-frame step counts (multi-reader timeline; single-driver refactor queued for M0-b); colony visualizer (gray boxes from sim events + coverage disc debug draw + on-screen rejection toasts); console commands `RH.Build` / `RH.Status` / `RH.Lag`. Hand-placed gray-box colony + StressDriver removed from L_Slice (sim spawns the colony; BP kept as benchmark harness).
+- **M0-a smoke test (SIE, scripted via BP_M0aTest — kept as regression harness):** all six checks passed in one run:
+  1. Bootstrap: Lander #1 at (0,0); lag 45 sim-s from DT_Config; sol length 1200.
+  2. Night power: gen 0 W at sol 0–17%, battery draining at exactly load × sol-hour rate (23 Wh over 48 sim-s at ~25 W — units doctrine verified).
+  3. Uplink: Build Pylon queued visibly ("executes at t=56, now 27"), landed after 45 sim-s.
+  4. Territory chaining: SolarArray at (50,0) accepted only because the new pylon's 40 m disc covers it.
+  5. Territory rejection: Stockpile at (200,0) traveled the 45 s uplink and was rejected on arrival — "Outside grid coverage - extend pylons first."
+  6. Sunrise: at sol 37%, gen 278 W (curve × panel + lander trickle), battery charging 889→1256 Wh.
+- Next (M0-b): single sim driver ordering, Struct costs + build time, dig/haul/production loops, robots as task-driven agents, deposit visuals from data, quota tracking.
+
 ## 2026-07-05 — Session 5 (Step 4 scaffold, part 2: content, benchmark, smoke test)
 
 - **Content built via MCP:** 8 DataTables imported from `docs/data/RH_*.csv` against the compiled `FRH*Row` structs (row values spot-verified; `ImportOnly`/`UnlockTech` live). `CT_SolarDiurnal` (diurnal curve), `CT_AtmosphereDial` (FogDensity, SunIntensityMul), `CT_CameraRig` (Distance/Pitch/FOV) populated. `MPC_Atmosphere` (Habitability/TimeOfSol/DustAmount/SkyTint) + `M_MarsDial` MPC-driven material. Sun tagged `RH.Sun`.
