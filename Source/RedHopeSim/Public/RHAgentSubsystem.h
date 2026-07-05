@@ -7,8 +7,23 @@
 #include "Mass/EntityHandle.h"
 #include "RHAgentSubsystem.generated.h"
 
-// Owns agent entity lifecycles. Scaffold scope: dummy-agent spawning for the
-// hardware stress test; M0 replaces dummies with the real robot archetypes.
+// Snapshot of one robot for the sim-owned save payload. Task claims are not
+// saved (robots re-claim from the board after load); cargo is recorded so the
+// sim can return it to the source site in the saved copy - mass conservation.
+struct FRHRobotSaveState
+{
+	FName DefName;
+	FVector PosCm = FVector::ZeroVector;
+	float ChargeWh = 0.f;
+	float Wear = 0.f;
+	int32 TaskId = 0;      // open claim at save time (not restored)
+	FName CargoResource;
+	float CargoKg = 0.f;   // in-flight cargo at save time (returned to source)
+};
+
+// Owns agent entity lifecycles: the working robot archetype plus the
+// benchmark wander-dummies. Save/load round-trips robots through
+// FRHRobotSaveState; the sim world owns when that happens.
 UCLASS()
 class REDHOPESIM_API URHAgentSubsystem : public UWorldSubsystem
 {
@@ -25,8 +40,16 @@ public:
 	// from these; sim never knows about the visuals).
 	TArray<FMassEntityHandle> SpawnDummyAgents(int32 Count, const FVector& CenterCm, float ExtentCm);
 
-	// Spawns one working robot with definition-derived fragment constants.
+	// Spawns one working robot with definition-derived fragment constants,
+	// fully charged and unworn.
 	FMassEntityHandle SpawnRobot(FName RowName, const struct FRHRobotRow& Def, const FVector& PosCm);
+	// Save/load path: spawn with explicit battery + wear.
+	FMassEntityHandle SpawnRobotWithState(FName RowName, const struct FRHRobotRow& Def, const FVector& PosCm, float ChargeWh, float Wear);
+
+	// Reads every live robot's fragments into save states.
+	void CollectRobotStates(TArray<FRHRobotSaveState>& OutStates) const;
+	// Destroys all robot entities (load path; dummies are untouched).
+	void DespawnAllRobots();
 
 	int32 GetAgentCount() const { return SpawnedCount; }
 
@@ -34,4 +57,5 @@ private:
 	int32 SpawnedCount = 0;
 	FMassArchetypeHandle DummyArchetype;
 	FMassArchetypeHandle RobotArchetype;
+	TArray<FMassEntityHandle> RobotHandles;
 };

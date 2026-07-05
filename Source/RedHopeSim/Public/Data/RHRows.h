@@ -42,10 +42,16 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerDraw_W = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerIdle_W = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerGenPeak_W = 0.f;
+	// Curve-independent generation (the Lander's RTG trickle). Solar scaling
+	// applies only to PowerGenPeak_W.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float PowerGenBase_W = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float StorageWh = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CoverageRadius_m = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LinkRange_m = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CostStruct_kg = 0.f;
+	// Multi-resource construction bill ("Struct:250" or "Struct:600;HabSegment:4").
+	// Empty falls back to CostStruct_kg. Read via URHDefinitionsSubsystem::GetBuildCost.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString CostResources;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float BuildTime_s = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 LoadPriority = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool RequiresDeposit = false;

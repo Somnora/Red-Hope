@@ -17,6 +17,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		RejectedHandle = Sim->OnCommandRejected.AddUObject(this, &URHColonyVisualizerSubsystem::HandleCommandRejected);
 		Sim->OnQuotaMet.AddUObject(this, &URHColonyVisualizerSubsystem::HandleQuotaMet);
 		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
+		Sim->OnColonyReloaded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleColonyReloaded);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
@@ -24,6 +25,49 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		}
 		SpawnDepositMarkers();
 	}
+}
+
+void URHColonyVisualizerSubsystem::HandleColonyReloaded()
+{
+	// Everything visual is disposable; the sim state walk rebuilds it all.
+	for (auto& Pair : BuildingVisuals)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->Destroy();
+		}
+	}
+	BuildingVisuals.Reset();
+	for (AStaticMeshActor* Marker : DepositMarkers)
+	{
+		if (Marker)
+		{
+			Marker->Destroy();
+		}
+	}
+	DepositMarkers.Reset();
+	if (ShipVisual)
+	{
+		ShipVisual->Destroy();
+		ShipVisual = nullptr;
+	}
+
+	UWorld* World = GetWorld();
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		HandleBuildingAdded(B);
+	}
+	SpawnDepositMarkers();
+	if (Sim->GetQuotaPhase() == ERHQuotaPhase::Completed)
+	{
+		HandleShipArrived(Sim->GetManifestItems());
+	}
+	UE_LOG(LogRedHope, Display, TEXT("Colony visuals rebuilt from loaded state (%d buildings)"), Sim->GetBuildings().Num());
 }
 
 void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
@@ -50,6 +94,7 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
 #if WITH_EDITOR
 		Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
 #endif
+		DepositMarkers.Add(Actor);
 	}
 }
 
@@ -167,6 +212,10 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 		return;
 	}
 	// The landing beat, gray-box edition: a second lander on the east pad.
+	if (ShipVisual)
+	{
+		return; // already on the pad (reload path re-fires the arrival state)
+	}
 	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(FVector(4000.f, -4000.f, 450.f), FRotator::ZeroRotator);
 	if (Ship)
 	{
@@ -176,6 +225,7 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 #if WITH_EDITOR
 		Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
 #endif
+		ShipVisual = Ship;
 	}
 	if (GEngine)
 	{

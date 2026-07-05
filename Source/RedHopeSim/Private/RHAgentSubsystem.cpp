@@ -49,6 +49,11 @@ TArray<FMassEntityHandle> URHAgentSubsystem::SpawnDummyAgents(int32 Count, const
 
 FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow& Def, const FVector& PosCm)
 {
+	return SpawnRobotWithState(RowName, Def, PosCm, Def.Battery_Wh, 0.f);
+}
+
+FMassEntityHandle URHAgentSubsystem::SpawnRobotWithState(FName RowName, const FRHRobotRow& Def, const FVector& PosCm, float ChargeWh, float Wear)
+{
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
 	if (!MassSubsystem)
 	{
@@ -61,6 +66,7 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow
 		TArray<const UScriptStruct*> Fragments;
 		Fragments.Add(FTransformFragment::StaticStruct());
 		Fragments.Add(FRHBatteryFragment::StaticStruct());
+		Fragments.Add(FRHWearFragment::StaticStruct());
 		Fragments.Add(FRHRobotFragment::StaticStruct());
 		Fragments.Add(FRHTaskFragment::StaticStruct());
 		RobotArchetype = EntityManager.CreateArchetype(Fragments);
@@ -72,8 +78,10 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow
 
 	FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
 	Battery.CapacityWh = Def.Battery_Wh;
-	Battery.ChargeWh = Def.Battery_Wh;
+	Battery.ChargeWh = FMath::Clamp(ChargeWh, 0.f, Def.Battery_Wh);
 	Battery.DrawMoveW = Def.DrawMove_W;
+
+	EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear = FMath::Clamp(Wear, 0.f, 100.f);
 
 	FRHRobotFragment& Robot = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity);
 	Robot.DefName = RowName;
@@ -85,6 +93,58 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobot(FName RowName, const FRHRobotRow
 	Robot.DrawWorkW = Def.DrawWork_W;
 	Robot.DrawIdleW = Def.DrawIdle_W;
 
+	RobotHandles.Add(Entity);
 	++SpawnedCount;
 	return Entity;
+}
+
+void URHAgentSubsystem::CollectRobotStates(TArray<FRHRobotSaveState>& OutStates) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	OutStates.Reserve(OutStates.Num() + RobotHandles.Num());
+
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (!EntityManager.IsEntityValid(Entity))
+		{
+			continue;
+		}
+		FRHRobotSaveState State;
+		State.DefName = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity).DefName;
+		State.PosCm = EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform().GetLocation();
+		State.ChargeWh = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity).ChargeWh;
+		State.Wear = EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear;
+		const FRHTaskFragment& Task = EntityManager.GetFragmentDataChecked<FRHTaskFragment>(Entity);
+		State.TaskId = Task.TaskId;
+		State.CargoResource = Task.CargoResource;
+		State.CargoKg = Task.CargoKg;
+		OutStates.Add(State);
+	}
+}
+
+void URHAgentSubsystem::DespawnAllRobots()
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+	int32 Destroyed = 0;
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (EntityManager.IsEntityValid(Entity))
+		{
+			EntityManager.DestroyEntity(Entity);
+			++Destroyed;
+		}
+	}
+	SpawnedCount = FMath::Max(0, SpawnedCount - Destroyed);
+	RobotHandles.Reset();
+	UE_LOG(LogRedHopeSim, Display, TEXT("Despawned %d robots (load path)"), Destroyed);
 }

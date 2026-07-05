@@ -42,6 +42,22 @@ public:
 
 	static TMap<FName, double> ParseResourceList(const FString& List);
 
+	// Construction bill of materials: CostResources when set, else the legacy
+	// single-resource CostStruct_kg. Empty map = free to build (Lander, packs).
+	static TMap<FName, double> GetBuildCost(const FRHBuildingRow& Def)
+	{
+		if (!Def.CostResources.IsEmpty())
+		{
+			return ParseResourceList(Def.CostResources);
+		}
+		TMap<FName, double> Cost;
+		if (Def.CostStruct_kg > 0.f)
+		{
+			Cost.Add(FName(TEXT("Struct")), Def.CostStruct_kg);
+		}
+		return Cost;
+	}
+
 	// Config scalars from DT_Config (Value column parsed as double).
 	double GetConfigScalar(FName Name, double Default) const;
 

@@ -1,7 +1,7 @@
 Name,Value,Unit,Notes
 SolLengthSimSeconds,1200,s,"One sol = 20 real minutes at 1x; sol-hour = 50 s"
 SimTickSeconds,0.1,s,Fixed timestep; presentation interpolates
-SpeedTiers,0;1;3;8,multiplier,"Pause/1x/3x/8x in M0; 60 era mode is M1+"
+SpeedTiers,0;1;3;8;60,multiplier,"Pause/1x/3x/8x agent band; 60 = era-mode ledger integrator (M1-a)"
 EraModeStepSimMinutes,1,min,Ledger integration step for era mode (M1+)
 CellSizeMeters,2,m,Placement grid cell
 OrderLagTier0_s,45,s,Landing-state uplink lag
@@ -26,3 +26,4 @@ StarterStruct_kg,400,kg,Lander stock
 StarterSolarPacks,6,count,Lander stock
 StarterBatteryPacks,2,count,Lander stock
 StarterSpareParts,6,count,Lander stock
+AutosaveEverySols,1,sols,"Autosave to slot 'auto' every N sol boundaries; 0 disables"

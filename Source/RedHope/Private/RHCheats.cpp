@@ -33,7 +33,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSpawnDummies(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSetSpeed(
 	TEXT("RH.SetSpeed"),
-	TEXT("RH.SetSpeed <0|1|3|8> - set sim speed tier."),
+	TEXT("RH.SetSpeed <0|1|3|8|60> - set sim speed tier (60 = era mode; auto-drops on agent-fidelity events)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1) { return; }
@@ -268,5 +268,39 @@ static FAutoConsoleCommandWithWorldAndArgs GRHLag(
 		{
 			Sim->SetOrderLagSeconds(FCString::Atod(*Args[0]));
 			UE_LOG(LogRedHope, Display, TEXT("Order lag set to %s sim-s"), *Args[0]);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSave(
+	TEXT("RH.Save"),
+	TEXT("RH.Save [Slot=quick] - snapshot the colony to Saved/SaveGames/RH_<Slot>.sav."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const FString Slot = Args.Num() > 0 ? Args[0] : TEXT("quick");
+			FString Error;
+			if (!Sim->SaveColony(Slot, Error))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Save: %s"), *Error);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHLoad(
+	TEXT("RH.Load"),
+	TEXT("RH.Load [Slot=quick] - replace the running colony with the snapshot."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const FString Slot = Args.Num() > 0 ? Args[0] : TEXT("quick");
+			FString Error;
+			if (!Sim->LoadColony(Slot, Error))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Load: %s"), *Error);
+			}
 		}
 	}));

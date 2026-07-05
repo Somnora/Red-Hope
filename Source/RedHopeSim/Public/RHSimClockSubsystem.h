@@ -6,9 +6,13 @@
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnSolElapsed, int32 /*NewSol*/);
 
-// The single authoritative timeline. Accumulates real dt x speed into fixed
-// 0.1 s sim sub-steps; sim systems consume whole sub-steps so acceleration
-// changes how fast we watch, never what happens (determinism invariant).
+// The single authoritative timeline. Two integration bands, one clock:
+//  - Agent band (speed <= EraSpeedThreshold): real dt x speed accumulates into
+//    fixed 0.1 s sub-steps; Mass processors and the sim world consume whole
+//    sub-steps, so acceleration changes how fast we watch, never what happens.
+//  - Era band (speed > threshold, M1): sub-steps stop publishing (agents park)
+//    and the clock publishes whole sim-minutes instead; the sim world's ledger
+//    integrator consumes those. Same timeline, coarser integrator.
 // No global time dilation anywhere - presentation runs at native frame time.
 UCLASS()
 class REDHOPESIM_API URHSimClockSubsystem : public UTickableWorldSubsystem
@@ -23,6 +27,11 @@ public:
 	// Frame-budget guard: cap sub-steps executed per rendered frame so a slow
 	// frame can't spiral. 32 = 3.2 sim-s per frame >> 8x at 30 fps needs ~2.7.
 	static constexpr int32 MaxSubStepsPerFrame = 32;
+	// Speeds above this are era mode (tier 60). Between the agent tiers and
+	// this line nothing is offered in UI; the constant just splits the bands.
+	static constexpr float EraSpeedThreshold = 16.f;
+	static constexpr float EraStepSimSeconds = 60.f;
+	static constexpr int32 MaxEraStepsPerFrame = 4;
 
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override
@@ -35,10 +44,13 @@ public:
 	}
 
 	// Whole sub-steps accumulated this rendered frame, published (not
-	// consumed) so multiple sim systems advance the same timeline. Readers
-	// that tick before the clock in a frame see the previous frame's count -
-	// acceptable jitter until the M0-b single-driver refactor.
+	// consumed) so multiple sim systems advance the same timeline. Zero while
+	// paused or in era mode - parked Mass processors need no special casing.
 	int32 GetStepsThisFrame() const { return StepsThisFrame; }
+	// Whole era steps (1 sim-minute each) accumulated this frame. Zero in the
+	// agent band. Consumed only by the sim world's ledger integrator.
+	int32 GetEraStepsThisFrame() const { return EraStepsThisFrame; }
+	bool IsEraMode() const { return Speed > EraSpeedThreshold; }
 
 	void SetSpeed(float NewSpeed);
 	float GetSpeed() const { return Speed; }
@@ -50,12 +62,20 @@ public:
 		return static_cast<float>(FMath::Fmod(SimSecondsTotal, (double)SolLengthSimSeconds) / SolLengthSimSeconds);
 	}
 
+	// Headless/save-load drivers only: advance or set the timeline directly
+	// (fires sol events; publishes no steps - the caller integrates).
+	void Debug_AdvanceSimSeconds(double Seconds);
+	void Debug_SetSimSeconds(double Seconds);
+
 	FRHOnSolElapsed OnSolElapsed;
 
 private:
+	void BroadcastSolIfElapsed();
+
 	float Speed = 1.f;
 	float Accumulator = 0.f;
 	double SimSecondsTotal = 0.0;
 	int32 StepsThisFrame = 0;
+	int32 EraStepsThisFrame = 0;
 	int32 LastSol = 0;
 };

@@ -31,6 +31,9 @@ public:
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 
 	void TrackEntities(const TArray<FMassEntityHandle>& Entities);
+	// Load path: forget every tracked entity and instance; the reload's
+	// OnRobotsSpawned broadcasts repopulate from scratch.
+	void ResetTracking();
 
 private:
 	void EnsureMeshComponent();

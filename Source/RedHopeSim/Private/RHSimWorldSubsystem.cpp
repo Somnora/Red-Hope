@@ -3,6 +3,11 @@
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHAgentSubsystem.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Serialization/MemoryWriter.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/NameAsStringProxyArchive.h"
 
 namespace
 {
@@ -10,6 +15,46 @@ namespace
 	const FName NAME_Lander(TEXT("Lander"));
 	const FName NAME_Stockpile(TEXT("Stockpile"));
 	const FName NAME_Q1(TEXT("Q1"));
+
+	// Save format: versioned binary, sim-owned (approved architecture). Bump
+	// the version on any payload change; old versions refuse loudly.
+	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
+	constexpr uint32 RHSaveVersion = 1;
+
+	FString SaveSlotToPath(const FString& Slot)
+	{
+		return FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), *Slot);
+	}
+
+	void SerializeSite(FArchive& Ar, FRHSiteRef& Site)
+	{
+		Ar << Site.BuildingId;
+		Ar << Site.DepositId;
+	}
+
+	void SerializeResourceMap(FArchive& Ar, TMap<FName, double>& Map)
+	{
+		int32 Num = Map.Num();
+		Ar << Num;
+		if (Ar.IsLoading())
+		{
+			Map.Reset();
+			for (int32 i = 0; i < Num; ++i)
+			{
+				FName Key; double Value = 0.0;
+				Ar << Key; Ar << Value;
+				Map.Add(Key, Value);
+			}
+		}
+		else
+		{
+			for (auto& Pair : Map)
+			{
+				FName Key = Pair.Key;
+				Ar << Key; Ar << Pair.Value;
+			}
+		}
+	}
 }
 
 void URHSimWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -32,6 +77,11 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HaulLoadMinKg = FMath::Max(25.0, PileCapKg / 5.0);
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
+	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
+	if (Clock)
+	{
+		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
+	}
 
 	// Deposits from data.
 	Defs->ForEachDeposit([this](FName RowName, const FRHDepositRow& Row)
@@ -64,11 +114,6 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 void URHSimWorldSubsystem::SpawnStartingFleet()
 {
-	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
-	if (!Agents)
-	{
-		return;
-	}
 	TArray<FMassEntityHandle> All;
 	int32 Slot = 0;
 	Defs->ForEachRobot([&](FName RowName, const FRHRobotRow& Row)
@@ -78,16 +123,51 @@ void URHSimWorldSubsystem::SpawnStartingFleet()
 			// Deploy ring south of the lander.
 			const float Angle = Slot * 0.8f;
 			const FVector Pos(-800.f + 250.f * Slot, -600.f + 150.f * FMath::Sin(Angle), 50.f);
-			const FMassEntityHandle H = Agents->SpawnRobot(RowName, Row, Pos);
-			if (H.IsValid())
-			{
-				All.Add(H);
-			}
+			SpawnRobotTracked(RowName, Row, Pos, Row.Battery_Wh, 0.f, All);
 			++Slot;
 		}
 	});
 	UE_LOG(LogRedHopeSim, Display, TEXT("Starting fleet deployed: %d robots"), All.Num());
 	OnRobotsSpawned.Broadcast(All);
+}
+
+void URHSimWorldSubsystem::DeployFleetOnce()
+{
+	if (!bFleetDeployed)
+	{
+		bFleetDeployed = true;
+		SpawnStartingFleet();
+	}
+}
+
+FMassEntityHandle URHSimWorldSubsystem::SpawnRobotTracked(FName RowName, const FRHRobotRow& Row, const FVector& PosCm, float ChargeWh, float Wear, TArray<FMassEntityHandle>& OutSpawned)
+{
+	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+	if (!Agents)
+	{
+		return FMassEntityHandle();
+	}
+	const FMassEntityHandle H = Agents->SpawnRobotWithState(RowName, Row, PosCm, ChargeWh, Wear);
+	if (H.IsValid())
+	{
+		FleetCounts.FindOrAdd(RowName)++;
+		OutSpawned.Add(H);
+	}
+	return H;
+}
+
+void URHSimWorldSubsystem::HandleSolElapsed(int32 NewSol)
+{
+	if (AutosaveEverySols > 0.0 && NewSol != LastAutosaveSol
+		&& (NewSol % FMath::Max(1, (int32)AutosaveEverySols)) == 0)
+	{
+		LastAutosaveSol = NewSol;
+		FString Error;
+		if (!SaveColony(TEXT("auto"), Error))
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Autosave failed: %s"), *Error);
+		}
+	}
 }
 
 void URHSimWorldSubsystem::Tick(float DeltaTime)
@@ -101,15 +181,29 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 	{
 		StepSim(URHSimClockSubsystem::SubStepSeconds);
 	}
+
+	// Era band: agent sub-steps stop publishing; the ledger integrator runs.
+	// Any agent-fidelity event yanks the throttle back to 1x (auto-drop).
+	if (Clock->IsEraMode())
+	{
+		FString Why;
+		if (!CanEnterEraMode(Why))
+		{
+			Clock->SetSpeed(1.f);
+			UE_LOG(LogRedHopeSim, Display, TEXT("ERA DROP: %s - returning to 1x"), *Why);
+			return;
+		}
+	}
+	const int32 EraSteps = Clock->GetEraStepsThisFrame();
+	for (int32 i = 0; i < EraSteps; ++i)
+	{
+		EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+	}
 }
 
 void URHSimWorldSubsystem::StepSim(float SubDt)
 {
-	if (!bFleetDeployed)
-	{
-		bFleetDeployed = true;
-		SpawnStartingFleet();
-	}
+	DeployFleetOnce();
 
 	// Fixed order: orders land, work is posted, factories run, the quota
 	// arc advances, power settles.
@@ -118,6 +212,163 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepProduction(SubDt);
 	StepQuota();
 	StepPower(SubDt);
+}
+
+bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.bUnderConstruction)
+		{
+			OutReason = FString::Printf(TEXT("construction in progress (%s #%d)"), *B.DefName.ToString(), B.Id);
+			return false;
+		}
+	}
+	if (QuotaPhase == ERHQuotaPhase::ShipInbound)
+	{
+		OutReason = TEXT("supply ship inbound");
+		return false;
+	}
+	if (QuotaPhase == ERHQuotaPhase::Open && Defs && Clock)
+	{
+		if (const FRHQuotaRow* Quota = Defs->GetQuota(NAME_Q1))
+		{
+			const double DeadlineSimSeconds = (double)(Quota->DeadlineSol + 1) * URHSimClockSubsystem::SolLengthSimSeconds;
+			if (DeadlineSimSeconds - Clock->GetSimSecondsTotal() < URHSimClockSubsystem::SolLengthSimSeconds)
+			{
+				OutReason = TEXT("quota deadline within one sol");
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
+{
+	DeployFleetOnce();
+
+	// Same spine as StepSim at a coarser dt: the sub-step functions are
+	// already dimensionally honest, so era mode is the same integrator run
+	// at 1 sim-minute. Only dig/haul need the abstract stand-in (agents park).
+	StepUplink();
+	EraLogistics(DtSimSeconds);
+	StepProduction(DtSimSeconds);
+	StepQuota();
+	StepPower(DtSimSeconds);
+}
+
+void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
+{
+	// Aggregate dig rate of the parked excavator fleet (kg per sol-hour).
+	double DigRateKgPerH = 0.0;
+	for (const auto& Fleet : FleetCounts)
+	{
+		if (const FRHRobotRow* Row = Defs->GetRobot(Fleet.Key))
+		{
+			if (Row->RobotClass == FName("Excavator"))
+			{
+				DigRateKgPerH += (double)Fleet.Value * Row->WorkRate;
+			}
+		}
+	}
+	double DigBudgetKg = DigRateKgPerH * (DtSimSeconds / 50.0); // sol-hour = 50 sim-s
+
+	// Ground -> demanding hopper at fleet rate (piles are an agent-band
+	// fidelity detail; era mode digs straight into the chain).
+	for (FRHDepositState& D : Deposits)
+	{
+		if (DigBudgetKg <= 0.0)
+		{
+			break;
+		}
+		if (!D.bDesignated || D.RemainingKg <= 0.0)
+		{
+			continue;
+		}
+		for (FRHBuildingInstance& B : Buildings)
+		{
+			if (B.bUnderConstruction)
+			{
+				continue;
+			}
+			const bool bWants = Defs->FindRunnableRecipe(B.DefName, [&](const TMap<FName, double>& Inputs)
+			{
+				const double* Need = Inputs.Find(D.Type);
+				if (!Need)
+				{
+					return false;
+				}
+				const double* Have = B.InputKg.Find(D.Type);
+				return (!Have || *Have < *Need * 2.0);
+			}) != nullptr;
+			if (!bWants)
+			{
+				continue;
+			}
+			const double TakeKg = FMath::Min3(DigBudgetKg, D.RemainingKg, 200.0);
+			D.RemainingKg -= TakeKg;
+			B.InputKg.FindOrAdd(D.Type) += TakeKg;
+			DigBudgetKg -= TakeKg;
+			break;
+		}
+	}
+
+	// Finished outputs teleport to demanders, else to a store. Haulers are
+	// not modeled above the agent band (M1 acceptance: <=5% divergence over
+	// 10 sols vs the agent sim; the paired-run harness owns that bar).
+	for (FRHBuildingInstance& B : Buildings)
+	{
+		if (B.bUnderConstruction || B.DefName == NAME_Stockpile || B.DefName == NAME_Lander)
+		{
+			continue;
+		}
+		for (auto& Out : B.OutputKg)
+		{
+			if (Out.Value <= 0.0)
+			{
+				continue;
+			}
+			FRHBuildingInstance* Dest = nullptr;
+			for (FRHBuildingInstance& C : Buildings)
+			{
+				if (C.bUnderConstruction || C.Id == B.Id)
+				{
+					continue;
+				}
+				if (Defs->FindRunnableRecipe(C.DefName, [&](const TMap<FName, double>& Inputs)
+					{
+						const double* Need = Inputs.Find(Out.Key);
+						if (!Need)
+						{
+							return false;
+						}
+						const double* Have = C.InputKg.Find(Out.Key);
+						return (!Have || *Have < *Need * 2.0);
+					}))
+				{
+					Dest = &C;
+					break;
+				}
+			}
+			if (!Dest)
+			{
+				for (FRHBuildingInstance& S : Buildings)
+				{
+					if (!S.bUnderConstruction && S.Id != B.Id && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
+					{
+						Dest = &S;
+						break;
+					}
+				}
+			}
+			if (Dest)
+			{
+				Dest->InputKg.FindOrAdd(Out.Key) += Out.Value;
+				Out.Value = 0.0;
+			}
+		}
+	}
 }
 
 void URHSimWorldSubsystem::StepUplink()
@@ -266,9 +517,8 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		}
 	}
 
-	// Haul: construction sites want their Struct delivered before the
-	// fabricator can work (site-delivery rule, replaces M0-b's colony-wide
-	// instant deduction).
+	// Haul: construction sites want their bill of materials delivered before
+	// the fabricator can work (site-delivery rule; multi-resource since M1-a).
 	for (const FRHBuildingInstance& Site : Buildings)
 	{
 		if (!Site.bUnderConstruction)
@@ -276,46 +526,49 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			continue;
 		}
 		const FRHBuildingRow* Def = Defs->GetBuilding(Site.DefName);
-		if (!Def || Def->CostStruct_kg <= 0.0)
+		if (!Def)
 		{
 			continue;
 		}
-		const double* Delivered = Site.InputKg.Find(NAME_Struct);
-		const double NeedKg = Def->CostStruct_kg - (Delivered ? *Delivered : 0.0);
-		if (NeedKg <= 0.0)
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
 		{
-			continue;
-		}
-		// Source: any completed building holding Struct.
-		int32 SourceId = 0;
-		for (const FRHBuildingInstance& S : Buildings)
-		{
-			if (S.bUnderConstruction || S.Id == Site.Id)
+			const double* Delivered = Site.InputKg.Find(Cost.Key);
+			const double NeedKg = Cost.Value - (Delivered ? *Delivered : 0.0);
+			if (NeedKg <= 0.0)
 			{
 				continue;
 			}
-			const double* InS = S.InputKg.Find(NAME_Struct);
-			const double* OutS = S.OutputKg.Find(NAME_Struct);
-			if ((InS && *InS > 0.0) || (OutS && *OutS > 0.0))
+			// Source: any completed building holding that resource.
+			int32 SourceId = 0;
+			for (const FRHBuildingInstance& S : Buildings)
 			{
-				SourceId = S.Id;
-				break;
+				if (S.bUnderConstruction || S.Id == Site.Id)
+				{
+					continue;
+				}
+				const double* InS = S.InputKg.Find(Cost.Key);
+				const double* OutS = S.OutputKg.Find(Cost.Key);
+				if ((InS && *InS > 0.0) || (OutS && *OutS > 0.0))
+				{
+					SourceId = S.Id;
+					break;
+				}
 			}
-		}
-		if (SourceId != 0)
-		{
-			FRHSiteRef From; From.BuildingId = SourceId;
-			FRHSiteRef To; To.BuildingId = Site.Id;
-			if (!HasOpenTask(ERHTaskType::Haul, From, To))
+			if (SourceId != 0)
 			{
-				FRHTask T;
-				T.Id = NextTaskId++;
-				T.Type = ERHTaskType::Haul;
-				T.From = From;
-				T.To = To;
-				T.Resource = NAME_Struct;
-				T.AmountKg = FMath::Min(NeedKg, 200.0);
-				Tasks.Add(T);
+				FRHSiteRef From; From.BuildingId = SourceId;
+				FRHSiteRef To; To.BuildingId = Site.Id;
+				if (!HasOpenTask(ERHTaskType::Haul, From, To, Cost.Key))
+				{
+					FRHTask T;
+					T.Id = NextTaskId++;
+					T.Type = ERHTaskType::Haul;
+					T.From = From;
+					T.To = To;
+					T.Resource = Cost.Key;
+					T.AmountKg = FMath::Min(NeedKg, 200.0);
+					Tasks.Add(T);
+				}
 			}
 		}
 	}
@@ -499,8 +752,6 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 {
 	// Mechanical effects keyed by row name at slice scale (the CSV Effect
 	// column stays display text; data-driven effect verbs are an M1 task).
-	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
-
 	if (ItemName == FName("SolarPack"))       { ImportStock.FindOrAdd(FName("SolarArray"))++; }
 	else if (ItemName == FName("BatteryPack")) { ImportStock.FindOrAdd(FName("BatteryBank"))++; }
 	else if (ItemName == FName("PartsCrate"))  { AddStock(FName("SpareParts"), 10); }
@@ -515,15 +766,11 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		const FName RobotRow = (ItemName == FName("AdvExcavator")) ? FName("RC_E2") : FName("RC_H");
 		if (const FRHRobotRow* Row = Defs->GetRobot(RobotRow))
 		{
-			if (Agents)
+			TArray<FMassEntityHandle> NewUnits;
+			SpawnRobotTracked(RobotRow, *Row, FVector(3000.f, -3000.f, 50.f), Row->Battery_Wh, 0.f, NewUnits);
+			if (NewUnits.Num() > 0)
 			{
-				TArray<FMassEntityHandle> NewUnits;
-				const FMassEntityHandle H = Agents->SpawnRobot(RobotRow, *Row, FVector(3000.f, -3000.f, 50.f));
-				if (H.IsValid())
-				{
-					NewUnits.Add(H);
-					OnRobotsSpawned.Broadcast(NewUnits);
-				}
+				OnRobotsSpawned.Broadcast(NewUnits);
 			}
 		}
 	}
@@ -553,7 +800,7 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		{
 			continue;
 		}
-		GenW += Def->PowerGenPeak_W * Solar;
+		GenW += Def->PowerGenBase_W + Def->PowerGenPeak_W * Solar;
 		CapWh += Def->StorageWh;
 		FLoadEntry E;
 		E.B = &B;
@@ -650,14 +897,19 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			}
 			--Stock;
 		}
-		else if (Def->CostStruct_kg > 0.0)
+		else
 		{
 			// Materials are delivered to the site by haulers (task board);
 			// this only rejects orders the colony cannot possibly fill.
-			if (GetTotalSolid(NAME_Struct) < Def->CostStruct_kg)
+			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
 			{
-				OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Insufficient Struct (%.0f needed)"), Def->CostStruct_kg));
-				return;
+				const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
+				if (Available < Cost.Value)
+				{
+					OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"),
+						*Cost.Key.ToString(), Cost.Value, Available));
+					return;
+				}
 			}
 		}
 		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0);
@@ -698,9 +950,12 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 		Instance.bUnderConstruction = true;
 		Instance.BuildRemaining_s = Def->BuildTime_s;
 	}
-	if (Def)
+	if (Def && !Instance.bUnderConstruction)
 	{
-		Power.BatteryWh += Def->StorageWh * 0.5; // packs arrive half-charged
+		// Packs arrive half-charged. Constructed storage gets its credit at
+		// completion instead (M0-c bug: crediting at order time clamped the
+		// energy away because capacity only counts completed banks).
+		Power.BatteryWh += Def->StorageWh * 0.5;
 	}
 	// Extraction buildings bind to the deposit under them (within 12 m).
 	if (Def && Def->RequiresDeposit)
@@ -1022,12 +1277,14 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	{
 		return true;
 	}
-	// Fabrication waits for materials on site (haulers are bringing them).
+	// Fabrication waits for the full bill of materials on site (haulers are
+	// bringing it; multi-resource since M1-a).
 	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
-	if (Def && Def->CostStruct_kg > 0.0)
+	const TMap<FName, double> Cost = Def ? URHDefinitionsSubsystem::GetBuildCost(*Def) : TMap<FName, double>();
+	for (const auto& Line : Cost)
 	{
-		const double* Delivered = B->InputKg.Find(NAME_Struct);
-		if (!Delivered || *Delivered + 0.5 < Def->CostStruct_kg)
+		const double* Delivered = B->InputKg.Find(Line.Key);
+		if (!Delivered || *Delivered + 0.5 < Line.Value)
 		{
 			return false; // standing by for materials; no work progress
 		}
@@ -1037,12 +1294,16 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	{
 		B->bUnderConstruction = false;
 		B->BuildRemaining_s = 0.0;
-		// The delivered Struct becomes the structure.
-		if (Def && Def->CostStruct_kg > 0.0)
+		// The delivered materials become the structure.
+		for (const auto& Line : Cost)
 		{
-			double& Held = B->InputKg.FindOrAdd(NAME_Struct);
-			Held = FMath::Max(0.0, Held - Def->CostStruct_kg);
-			OnStockChanged.Broadcast(NAME_Struct, GetTotalSolid(NAME_Struct));
+			double& Held = B->InputKg.FindOrAdd(Line.Key);
+			Held = FMath::Max(0.0, Held - Line.Value);
+			OnStockChanged.Broadcast(Line.Key, GetTotalSolid(Line.Key));
+		}
+		if (Def)
+		{
+			Power.BatteryWh += Def->StorageWh * 0.5; // constructed storage arrives half-charged
 		}
 		UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d construction complete"), *B->DefName.ToString(), B->Id);
 		OnBuildingCompleted.Broadcast(*B);
@@ -1205,16 +1466,298 @@ FRHTask* URHSimWorldSubsystem::FindTask(int32 Id)
 	return nullptr;
 }
 
-bool URHSimWorldSubsystem::HasOpenTask(ERHTaskType Type, const FRHSiteRef& From, const FRHSiteRef& To) const
+bool URHSimWorldSubsystem::HasOpenTask(ERHTaskType Type, const FRHSiteRef& From, const FRHSiteRef& To, FName Resource) const
 {
 	for (const FRHTask& T : Tasks)
 	{
 		if (T.Type == Type && T.From.BuildingId == From.BuildingId && T.From.DepositId == From.DepositId
-			&& T.To.BuildingId == To.BuildingId && T.To.DepositId == To.DepositId)
+			&& T.To.BuildingId == To.BuildingId && T.To.DepositId == To.DepositId
+			&& (Resource.IsNone() || T.Resource == Resource))
 		{
 			return true;
 		}
 	}
 	return false;
+}
+
+// --- Save / load ---
+
+bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
+{
+	if (!Clock || !Defs)
+	{
+		OutError = TEXT("Sim not initialized");
+		return false;
+	}
+
+	// Snapshot copies: claims cleared, in-flight hauler cargo returned to its
+	// source so mass is conserved without serializing robot intent.
+	TArray<FRHBuildingInstance> SavedBuildings = Buildings;
+	TArray<FRHDepositState> SavedDeposits = Deposits;
+	for (FRHDepositState& D : SavedDeposits)
+	{
+		D.DigClaims = 0;
+	}
+	TArray<FRHTask> SavedTasks;
+	for (const FRHTask& T : Tasks)
+	{
+		FRHTask Copy = T;
+		Copy.ClaimedBy = FMassEntityHandle();
+		SavedTasks.Add(Copy);
+	}
+
+	TArray<FRHRobotSaveState> Robots;
+	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
+	{
+		Agents->CollectRobotStates(Robots);
+	}
+	for (FRHRobotSaveState& R : Robots)
+	{
+		if (R.CargoKg <= 0.f || R.TaskId == 0)
+		{
+			continue;
+		}
+		for (const FRHTask& T : SavedTasks)
+		{
+			if (T.Id != R.TaskId)
+			{
+				continue;
+			}
+			if (T.From.DepositId > 0)
+			{
+				for (FRHDepositState& D : SavedDeposits)
+				{
+					if (D.Id == T.From.DepositId)
+					{
+						D.PileKg += R.CargoKg;
+						break;
+					}
+				}
+			}
+			else if (T.From.BuildingId > 0)
+			{
+				for (FRHBuildingInstance& B : SavedBuildings)
+				{
+					if (B.Id == T.From.BuildingId)
+					{
+						B.OutputKg.FindOrAdd(R.CargoResource) += R.CargoKg;
+						break;
+					}
+				}
+			}
+			break;
+		}
+		R.CargoKg = 0.f;
+		R.TaskId = 0;
+	}
+
+	TArray<uint8> Bytes;
+	FMemoryWriter Raw(Bytes);
+	FNameAsStringProxyArchive Ar(Raw);
+
+	uint32 Magic = RHSaveMagic, Version = RHSaveVersion;
+	double SimSeconds = Clock->GetSimSecondsTotal();
+	float Speed = Clock->GetSpeed();
+	Ar << Magic << Version << SimSeconds << Speed;
+
+	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
+	uint8 Phase = (uint8)QuotaPhase;
+	Ar << Phase << AwardMassKg << QuotaMetSol << ShipArrivalSimSeconds << ManifestItems;
+	Ar << Power.BatteryWh;
+	SerializeResourceMap(Ar, Stocks);
+	Ar << ImportStock;
+
+	int32 Num = UplinkQueue.Num();
+	Ar << Num;
+	for (FRHCommand& C : UplinkQueue)
+	{
+		Ar << C.Verb << C.Target << C.Location << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+	}
+
+	Num = SavedBuildings.Num();
+	Ar << Num;
+	for (FRHBuildingInstance& B : SavedBuildings)
+	{
+		Ar << B.Id << B.DefName << B.LocationCm << B.bUnderConstruction << B.bPowered
+		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
+		SerializeResourceMap(Ar, B.InputKg);
+		SerializeResourceMap(Ar, B.OutputKg);
+	}
+
+	Num = PendingOutputs.Num();
+	Ar << Num;
+	for (auto& P : PendingOutputs)
+	{
+		int32 BuildingId = P.Key;
+		Ar << BuildingId;
+		SerializeResourceMap(Ar, P.Value);
+	}
+
+	Num = SavedDeposits.Num();
+	Ar << Num;
+	for (FRHDepositState& D : SavedDeposits)
+	{
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.bDesignated;
+	}
+
+	Num = SavedTasks.Num();
+	Ar << Num;
+	for (FRHTask& T : SavedTasks)
+	{
+		uint8 Type = (uint8)T.Type;
+		Ar << T.Id << Type;
+		SerializeSite(Ar, T.From);
+		SerializeSite(Ar, T.To);
+		Ar << T.Resource << T.AmountKg;
+	}
+
+	Num = Robots.Num();
+	Ar << Num;
+	for (FRHRobotSaveState& R : Robots)
+	{
+		Ar << R.DefName << R.PosCm << R.ChargeWh << R.Wear;
+	}
+
+	const FString Path = SaveSlotToPath(Slot);
+	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
+	{
+		OutError = FString::Printf(TEXT("Could not write %s"), *Path);
+		return false;
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Colony saved: slot '%s' (%d bytes, sol %d, %d buildings, %d robots)"),
+		*Slot, Bytes.Num(), Clock->GetSol(), SavedBuildings.Num(), Robots.Num());
+	return true;
+}
+
+bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
+{
+	if (!Clock || !Defs)
+	{
+		OutError = TEXT("Sim not initialized");
+		return false;
+	}
+	const FString Path = SaveSlotToPath(Slot);
+	TArray<uint8> Bytes;
+	if (!FFileHelper::LoadFileToArray(Bytes, *Path))
+	{
+		OutError = FString::Printf(TEXT("No save at %s"), *Path);
+		return false;
+	}
+
+	FMemoryReader Raw(Bytes);
+	FNameAsStringProxyArchive Ar(Raw);
+
+	uint32 Magic = 0, Version = 0;
+	double SimSeconds = 0.0;
+	float Speed = 1.f;
+	Ar << Magic << Version << SimSeconds << Speed;
+	if (Magic != RHSaveMagic || Version != RHSaveVersion)
+	{
+		OutError = FString::Printf(TEXT("Save format mismatch (magic %08x version %u; expected %08x/%u)"),
+			Magic, Version, RHSaveMagic, RHSaveVersion);
+		return false;
+	}
+
+	// Tear down the live colony before applying the snapshot.
+	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
+	{
+		Agents->DespawnAllRobots();
+	}
+	Buildings.Reset();
+	Deposits.Reset();
+	Tasks.Reset();
+	UplinkQueue.Reset();
+	Stocks.Reset();
+	ImportStock.Reset();
+	PendingOutputs.Reset();
+	ManifestItems.Reset();
+	FleetCounts.Reset();
+	bFleetDeployed = true; // robots respawn explicitly below
+
+	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
+	uint8 Phase = 0;
+	Ar << Phase << AwardMassKg << QuotaMetSol << ShipArrivalSimSeconds << ManifestItems;
+	QuotaPhase = (ERHQuotaPhase)Phase;
+	Ar << Power.BatteryWh;
+	SerializeResourceMap(Ar, Stocks);
+	Ar << ImportStock;
+
+	int32 Num = 0;
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHCommand C;
+		Ar << C.Verb << C.Target << C.Location << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+		UplinkQueue.Add(MoveTemp(C));
+	}
+
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHBuildingInstance B;
+		Ar << B.Id << B.DefName << B.LocationCm << B.bUnderConstruction << B.bPowered
+		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
+		SerializeResourceMap(Ar, B.InputKg);
+		SerializeResourceMap(Ar, B.OutputKg);
+		Buildings.Add(MoveTemp(B));
+	}
+
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		int32 BuildingId = 0;
+		TMap<FName, double> Outputs;
+		Ar << BuildingId;
+		SerializeResourceMap(Ar, Outputs);
+		PendingOutputs.Add(BuildingId, MoveTemp(Outputs));
+	}
+
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHDepositState D;
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.bDesignated;
+		Deposits.Add(MoveTemp(D));
+	}
+
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHTask T;
+		uint8 Type = 0;
+		Ar << T.Id << Type;
+		SerializeSite(Ar, T.From);
+		SerializeSite(Ar, T.To);
+		Ar << T.Resource << T.AmountKg;
+		T.Type = (ERHTaskType)Type;
+		Tasks.Add(MoveTemp(T));
+	}
+
+	Ar << Num;
+	TArray<FMassEntityHandle> Respawned;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHRobotSaveState R;
+		Ar << R.DefName << R.PosCm << R.ChargeWh << R.Wear;
+		if (const FRHRobotRow* Row = Defs->GetRobot(R.DefName))
+		{
+			SpawnRobotTracked(R.DefName, *Row, R.PosCm, R.ChargeWh, R.Wear, Respawned);
+		}
+	}
+
+	// Loads land at 1x regardless of the saved speed: give the player a calm
+	// frame before they choose a tier again.
+	Clock->Debug_SetSimSeconds(SimSeconds);
+	Clock->SetSpeed(1.f);
+	LastAutosaveSol = Clock->GetSol();
+
+	OnColonyReloaded.Broadcast();
+	if (Respawned.Num() > 0)
+	{
+		OnRobotsSpawned.Broadcast(Respawned);
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Colony loaded: slot '%s' (sol %d, %d buildings, %d robots, %d tasks)"),
+		*Slot, Clock->GetSol(), Buildings.Num(), Respawned.Num(), Tasks.Num());
+	return true;
 }
 

@@ -66,6 +66,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnCommandRejected, const FRHCommand&, co
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntityHandle>&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnShipArrived, const TArray<FName>& /*Items*/);
+DECLARE_MULTICAST_DELEGATE(FRHOnColonyReloaded);
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
@@ -157,7 +158,30 @@ public:
 	// Confirm the manifest and launch the ship (AwaitingManifest only).
 	bool LaunchShip(FString& OutError);
 
+	// --- Save / load (sim-owned, versioned binary; M1-a) ---
+	// Snapshot the whole colony to Saved/SaveGames/RH_<Slot>.sav. Task claims
+	// are cleared and in-flight hauler cargo returned to its source in the
+	// saved copy, so a load never depends on robot intent.
+	bool SaveColony(const FString& Slot, FString& OutError);
+	// Despawn everything, apply the snapshot, respawn robots, then broadcast
+	// OnColonyReloaded followed by OnRobotsSpawned - presentation rebuilds
+	// entirely from those two events.
+	bool LoadColony(const FString& Slot, FString& OutError);
+
+	// --- Era mode (tier 60, M1-a): ledger integration at 1 sim-min steps ---
+	// One coarse step: uplink -> abstracted logistics -> production -> quota
+	// -> power, reusing the sub-step functions at dt = 60 s. Agents are parked
+	// (the clock publishes zero sub-steps in the era band).
+	void EraStep(float DtSimSeconds);
+	// False (with reason) while any agent-fidelity event is live; the sim
+	// auto-drops the clock to 1x when era mode is engaged against this.
+	bool CanEnterEraMode(FString& OutReason) const;
+	// Headless driver (commandlet): deploy the fleet without waiting for a
+	// first agent sub-step.
+	void Debug_DeployFleet() { DeployFleetOnce(); }
+
 	FRHOnStockChanged OnStockChanged;
+	FRHOnColonyReloaded OnColonyReloaded;
 	FRHOnCommandExecuted OnCommandExecuted;
 	FRHOnBuildingAdded OnBuildingAdded;
 	FRHOnBuildingCompleted OnBuildingCompleted;
@@ -177,10 +201,19 @@ private:
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant);
 	void SpawnStartingFleet();
+	void DeployFleetOnce();
+	// All sim-initiated robot spawns go through here so FleetCounts (the era
+	// integrator's aggregate-rate source) stays true.
+	FMassEntityHandle SpawnRobotTracked(FName RowName, const FRHRobotRow& Row, const FVector& PosCm, float ChargeWh, float Wear, TArray<FMassEntityHandle>& OutSpawned);
+	void HandleSolElapsed(int32 NewSol);
+	// Era-band stand-in for dig + haul: deposits feed demanding hoppers at the
+	// parked excavator fleet's aggregate rate; finished outputs transfer to
+	// demanders/stores instantly (haulers are not modeled above the agent band).
+	void EraLogistics(float DtSimSeconds);
 	FRHBuildingInstance* FindBuilding(int32 Id);
 	FRHDepositState* FindDeposit(int32 Id);
 	FRHTask* FindTask(int32 Id);
-	bool HasOpenTask(ERHTaskType Type, const FRHSiteRef& From, const FRHSiteRef& To) const;
+	bool HasOpenTask(ERHTaskType Type, const FRHSiteRef& From, const FRHSiteRef& To, FName Resource = NAME_None) const;
 
 	TMap<FName, double> Stocks;             // fluids/gases/abstract (network-instant)
 	TMap<int32, TMap<FName, double>> PendingOutputs; // building id -> outputs owed when its batch completes
@@ -199,6 +232,11 @@ private:
 	int32 NextBuildingId = 1;
 	int32 NextTaskId = 1;
 	bool bFleetDeployed = false;
+	// Fleet composition ledger (row name -> live count), maintained by
+	// SpawnRobotTracked; feeds era-mode aggregate rates and the save payload.
+	TMap<FName, int32> FleetCounts;
+	double AutosaveEverySols = 0.0;
+	int32 LastAutosaveSol = -1;
 
 	// Quota arc state
 	ERHQuotaPhase QuotaPhase = ERHQuotaPhase::Open;

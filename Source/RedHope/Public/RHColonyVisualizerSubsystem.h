@@ -35,10 +35,15 @@ private:
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
 	void HandleQuotaMet(int32 Sol, double AwardKg);
 	void HandleShipArrived(const TArray<FName>& Items);
+	// Load path: drop every mirror actor and rebuild from a full state walk.
+	// The visualizer owning zero authoritative state is what makes this safe.
+	void HandleColonyReloaded();
 	void SpawnDepositMarkers();
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
+	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
+	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
 	FDelegateHandle AddedHandle;
 	FDelegateHandle CompletedHandle;
 	FDelegateHandle RejectedHandle;

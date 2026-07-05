@@ -14,6 +14,16 @@ void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
 	{
 		Sim->OnRobotsSpawned.AddUObject(this, &URHAgentVisualizerSubsystem::TrackEntities);
+		Sim->OnColonyReloaded.AddUObject(this, &URHAgentVisualizerSubsystem::ResetTracking);
+	}
+}
+
+void URHAgentVisualizerSubsystem::ResetTracking()
+{
+	Tracked.Reset();
+	if (MeshComponent)
+	{
+		MeshComponent->ClearInstances();
 	}
 }
 
