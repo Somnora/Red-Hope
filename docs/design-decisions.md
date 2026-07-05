@@ -55,4 +55,4 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 
 ## Pending — awaiting director review
 
-- 2026-07-05 (agent-delivered): **M0-c slice finale verification** — full loop green in one scripted SIE run (see build log session 8). M0 is complete pending director review; M1 scope proposal is the natural next step.
+- 2026-07-05 (agent-proposed): **M1 scope proposal** (`docs/m1-scope-proposal.md`) — "Phase 1 complete" per brief §8: fleet wear/maintenance/scouting, dust storms, full latency arc (ComputeModule), save/load, era-mode 60× integrator + headless ledger, StateTree robot brain, data-driven manifest verbs, Ore→Shielding→HabSegment→Habitat exit arc with Q2, playable-UI strand (M0 is script-only), logged balance fixes. Four stages (M1-a..d), each with scripted/hand-played verification. M0-c verification itself was reviewed and passed ("move onto the next step", 2026-07-05).
