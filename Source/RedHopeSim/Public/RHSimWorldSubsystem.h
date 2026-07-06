@@ -99,6 +99,14 @@ public:
 
 	// --- Territory ---
 	bool IsInCoverage(const FVector& LocationCm) const;
+	// True if a Build order for Def at LocationCm would be accepted right now
+	// (link/coverage rule, import stock, material sufficiency). The placement
+	// ghost polls this every frame; ExecuteCommand runs the SAME check at
+	// uplink execution - the authoritative gate stays at the seam, and the
+	// world may have changed during the signal delay (that is the game).
+	bool CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason) const;
+	// Nearest slice deposit within MaxDistCm of a point, or nullptr (click-to-dig).
+	const FRHDepositState* FindDepositNear(const FVector& LocationCm, double MaxDistCm) const;
 
 	// --- Reads (out) ---
 	const TArray<FRHBuildingInstance>& GetBuildings() const { return Buildings; }

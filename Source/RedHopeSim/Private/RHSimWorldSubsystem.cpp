@@ -851,66 +851,97 @@ void URHSimWorldSubsystem::EnqueueCommand(FRHCommand Command)
 	UplinkQueue.Add(MoveTemp(Command));
 }
 
+bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
+	if (!Def)
+	{
+		OutReason = FString::Printf(TEXT("Unknown building '%s'"), *DefName.ToString());
+		return false;
+	}
+	// Pylon-like defs (they project coverage and link by range) are the
+	// territory extenders: their rule is link range to the nearest node,
+	// not the coverage union. Everything else must sit inside coverage.
+	if (Def->CoverageRadius_m > 0.f && Def->LinkRange_m > 0.f)
+	{
+		double NearestNodeCm = TNumericLimits<double>::Max();
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			const FRHBuildingRow* NodeDef = B.bUnderConstruction ? nullptr : Defs->GetBuilding(B.DefName);
+			if (NodeDef && NodeDef->CoverageRadius_m > 0.f)
+			{
+				NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(B.LocationCm, LocationCm));
+			}
+		}
+		if (NearestNodeCm > Def->LinkRange_m * 100.0)
+		{
+			OutReason = FString::Printf(TEXT("No grid node within %.0f m link range"), Def->LinkRange_m);
+			return false;
+		}
+	}
+	else if (!IsInCoverage(LocationCm))
+	{
+		OutReason = TEXT("Outside grid coverage - extend pylons first");
+		return false;
+	}
+	if (Def->ImportOnly)
+	{
+		// Imported hardware: needs flat-pack stock, never Struct.
+		const int32* Stock = ImportStock.Find(DefName);
+		if (!Stock || *Stock <= 0)
+		{
+			OutReason = TEXT("No imported units in stock (manifest required)");
+			return false;
+		}
+	}
+	else
+	{
+		// Materials are delivered to the site by haulers (task board);
+		// this only rejects orders the colony cannot possibly fill.
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
+		{
+			const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
+			if (Available < Cost.Value)
+			{
+				OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"),
+					*Cost.Key.ToString(), Cost.Value, Available);
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+const FRHDepositState* URHSimWorldSubsystem::FindDepositNear(const FVector& LocationCm, double MaxDistCm) const
+{
+	const FRHDepositState* Best = nullptr;
+	double BestDist = MaxDistCm;
+	for (const FRHDepositState& D : Deposits)
+	{
+		const double Dist = FVector::DistXY(D.LocationCm, LocationCm);
+		if (Dist <= BestDist)
+		{
+			BestDist = Dist;
+			Best = &D;
+		}
+	}
+	return Best;
+}
+
 void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 {
 	if (Cmd.Verb == FName("Build"))
 	{
+		FString Reason;
+		if (!CanPlaceBuilding(Cmd.Target, Cmd.Location, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 		const FRHBuildingRow* Def = Defs->GetBuilding(Cmd.Target);
-		if (!Def)
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown building '%s'"), *Cmd.Target.ToString()));
-			return;
-		}
-		// Pylon-like defs (they project coverage and link by range) are the
-		// territory extenders: their rule is link range to the nearest node,
-		// not the coverage union. Everything else must sit inside coverage.
-		if (Def->CoverageRadius_m > 0.f && Def->LinkRange_m > 0.f)
-		{
-			double NearestNodeCm = TNumericLimits<double>::Max();
-			for (const FRHBuildingInstance& B : Buildings)
-			{
-				const FRHBuildingRow* NodeDef = B.bUnderConstruction ? nullptr : Defs->GetBuilding(B.DefName);
-				if (NodeDef && NodeDef->CoverageRadius_m > 0.f)
-				{
-					NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(B.LocationCm, Cmd.Location));
-				}
-			}
-			if (NearestNodeCm > Def->LinkRange_m * 100.0)
-			{
-				OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No grid node within %.0f m link range"), Def->LinkRange_m));
-				return;
-			}
-		}
-		else if (!IsInCoverage(Cmd.Location))
-		{
-			OnCommandRejected.Broadcast(Cmd, TEXT("Outside grid coverage - extend pylons first"));
-			return;
-		}
 		if (Def->ImportOnly)
 		{
-			// Imported hardware: consumes flat-pack stock, never Struct.
-			int32& Stock = ImportStock.FindOrAdd(Cmd.Target);
-			if (Stock <= 0)
-			{
-				OnCommandRejected.Broadcast(Cmd, TEXT("No imported units in stock (manifest required)"));
-				return;
-			}
-			--Stock;
-		}
-		else
-		{
-			// Materials are delivered to the site by haulers (task board);
-			// this only rejects orders the colony cannot possibly fill.
-			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
-			{
-				const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
-				if (Available < Cost.Value)
-				{
-					OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"),
-						*Cost.Key.ToString(), Cost.Value, Available));
-					return;
-				}
-			}
+			--ImportStock.FindOrAdd(Cmd.Target); // consumption happens at execution, not preview
 		}
 		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0);
 	}

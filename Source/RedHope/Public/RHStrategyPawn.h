@@ -26,6 +26,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddOrbit(float DeltaYawDeg);
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddPan(FVector2D PlanarDeltaCm);
 
+	// Current camera distance (cm) - pan speed scales with it so a screen-width
+	// drag covers similar ground at every register.
+	float GetViewDistanceCm() const
+	{
+		return MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, SmoothedZoomT);
+	}
+
 	// 0 = ground register (25 m), 1 = orbital register (3000 m).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RedHope|Camera", meta = (ClampMin = "0", ClampMax = "1"))
 	float ZoomT = 0.85f;

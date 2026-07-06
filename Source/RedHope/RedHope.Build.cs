@@ -15,6 +15,8 @@ public class RedHope : ModuleRules
 			"Engine",
 			"InputCore",
 			"EnhancedInput",
+			"Slate",
+			"SlateCore",
 			"MassEntity",
 			"MassCore",
 			"StateTreeModule",

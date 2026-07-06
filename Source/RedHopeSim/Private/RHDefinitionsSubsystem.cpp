@@ -84,6 +84,22 @@ void URHDefinitionsSubsystem::ForEachDeposit(TFunctionRef<void(FName, const FRHD
 	}
 }
 
+void URHDefinitionsSubsystem::ForEachBuilding(TFunctionRef<void(FName, const FRHBuildingRow&)> Fn) const
+{
+	if (!BuildingsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : BuildingsTable->GetRowMap())
+	{
+		const FRHBuildingRow* Row = reinterpret_cast<const FRHBuildingRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
 const FRHRecipeRow* URHDefinitionsSubsystem::FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const
 {
 	if (!RecipesTable)

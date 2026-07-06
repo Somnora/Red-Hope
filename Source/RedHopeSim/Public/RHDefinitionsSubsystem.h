@@ -36,6 +36,8 @@ public:
 	void ForEachRobot(TFunctionRef<void(FName, const FRHRobotRow&)> Fn) const;
 	// All slice-active deposits.
 	void ForEachDeposit(TFunctionRef<void(FName, const FRHDepositRow&)> Fn) const;
+	// All slice-active building defs (the command deck's build palette).
+	void ForEachBuilding(TFunctionRef<void(FName, const FRHBuildingRow&)> Fn) const;
 	// First slice-active recipe of a building whose inputs the predicate
 	// accepts. Recipe Inputs/Outputs strings parse as "Res:Kg;Res:Kg".
 	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const;
