@@ -109,39 +109,52 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobotWithState(FName RowName, const FR
 
 	if (UStateTree* Tree = ResolveBrainTree())
 	{
-		// StateTree brain: instance data allocated up front so the handle
-		// rides in with the fragments; entity composition (incl. the const
-		// shared tree fragment) is derived from the instance list.
+		// StateTree brain. The composition must EXPLICITLY carry the
+		// const-shared tree fragment: CreateEntity(FragmentInstanceList, ...)
+		// derives an archetype with an empty const-shared bitset and never
+		// reconciles it with the passed shared values (verified 5.8 source),
+		// so queries with AddConstSharedRequirement silently match nothing.
+		// The engine's "already activated" tag is baked in for the same
+		// reason MassAI's activation processor must never see these robots:
+		// it would reallocate our instance data and Start trees on wall-clock
+		// cadence. Our brain processor owns Start + Tick on the fixed sim step.
 		UMassStateTreeSubsystem* StateTreeSubsystem = GetWorld()->GetSubsystem<UMassStateTreeSubsystem>();
 		if (!StateTreeSubsystem)
 		{
 			return FMassEntityHandle();
 		}
-		FMassStateTreeInstanceFragment InstanceFrag;
-		InstanceFrag.InstanceHandle = StateTreeSubsystem->AllocateInstanceData(Tree);
+		if (!STRobotArchetype.IsValid())
+		{
+			FMassFragmentBitSet Fragments;
+			Fragments.Add<FTransformFragment>();
+			Fragments.Add<FRHBatteryFragment>();
+			Fragments.Add<FRHWearFragment>();
+			Fragments.Add<FRHRobotFragment>();
+			Fragments.Add<FRHTaskFragment>();
+			Fragments.Add<FMassStateTreeInstanceFragment>();
+			FMassTagBitSet Tags;
+			Tags.Add<FMassStateTreeActivatedTag>();
+			FMassConstSharedFragmentBitSet ConstShared;
+			ConstShared.Add<FMassStateTreeSharedFragment>();
+			const FMassArchetypeCompositionDescriptor Composition(
+				MoveTemp(Fragments), MoveTemp(Tags), FMassChunkFragmentBitSet(), FMassSharedFragmentBitSet(), MoveTemp(ConstShared));
+			STRobotArchetype = EntityManager.CreateArchetype(Composition);
+		}
 
 		FMassStateTreeSharedFragment SharedFrag;
 		SharedFrag.StateTree = Tree;
 		FMassArchetypeSharedFragmentValues SharedValues;
 		SharedValues.Add(EntityManager.GetOrCreateConstSharedFragment(SharedFrag));
 
-		TArray<FInstancedStruct> Fragments;
-		Fragments.Add(FInstancedStruct::Make(TransformFrag));
-		Fragments.Add(FInstancedStruct::Make(BatteryFrag));
-		Fragments.Add(FInstancedStruct::Make(WearFrag));
-		Fragments.Add(FInstancedStruct::Make(RobotFrag));
-		Fragments.Add(FInstancedStruct::Make(FRHTaskFragment()));
-		Fragments.Add(FInstancedStruct::Make(InstanceFrag));
-		Entity = EntityManager.CreateEntity(Fragments, SharedValues);
-
-		// Pre-apply the engine's "already activated" tag: MassAI's activation
-		// processor otherwise matches this entity, REALLOCATES its instance
-		// data over ours, Starts the tree on wall-clock cadence, and wires it
-		// into signal ticking. Our brain processor owns Start + Tick on the
-		// fixed sim step; the engine machinery must never see these robots.
+		Entity = EntityManager.CreateEntity(STRobotArchetype, SharedValues);
 		if (Entity.IsValid())
 		{
-			EntityManager.AddTagToEntity(Entity, FMassStateTreeActivatedTag::StaticStruct());
+			EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity) = TransformFrag;
+			EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity) = BatteryFrag;
+			EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity) = WearFrag;
+			EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity) = RobotFrag;
+			FMassStateTreeInstanceFragment& InstanceFrag = EntityManager.GetFragmentDataChecked<FMassStateTreeInstanceFragment>(Entity);
+			InstanceFrag.InstanceHandle = StateTreeSubsystem->AllocateInstanceData(Tree);
 		}
 	}
 	else

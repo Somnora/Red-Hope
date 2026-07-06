@@ -66,6 +66,11 @@ private:
 	int32 SpawnedCount = 0;
 	FMassArchetypeHandle DummyArchetype;
 	FMassArchetypeHandle RobotArchetype;
+	// StateTree-brained variant: same fragments plus the ST instance fragment,
+	// with the const-shared tree fragment and the engine's activated tag baked
+	// into the composition (a query's AddConstSharedRequirement only matches
+	// archetypes whose composition carries the bit - Gate B lesson).
+	FMassArchetypeHandle STRobotArchetype;
 	TArray<FMassEntityHandle> RobotHandles;
 	UPROPERTY() TObjectPtr<UStateTree> BrainTree;
 	bool bBrainTreeResolved = false;

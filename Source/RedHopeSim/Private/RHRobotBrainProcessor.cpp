@@ -25,15 +25,19 @@ void URHRobotBrainProcessor::ConfigureQueries(const TSharedRef<FMassEntityManage
 	EntityQuery.AddRequirement<FRHRobotFragment>(EMassFragmentAccess::ReadOnly);
 	EntityQuery.AddRequirement<FRHTaskFragment>(EMassFragmentAccess::ReadWrite);
 	EntityQuery.AddRequirement<FMassStateTreeInstanceFragment>(EMassFragmentAccess::ReadWrite);
+	// Only matches archetypes whose COMPOSITION carries the const-shared bit -
+	// the ST spawn path builds its archetype explicitly for this reason.
+	// (Mass prunes processors with zero matching archetypes: a composition
+	// mismatch here fails silently, with Execute never even called.)
 	EntityQuery.AddConstSharedRequirement<FMassStateTreeSharedFragment>();
-	EntityQuery.AddSubsystemRequirement<UMassStateTreeSubsystem>(EMassFragmentAccess::ReadWrite);
 }
 
 void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
 	UWorld* World = EntityManager.GetWorld();
 	URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
-	if (!Clock)
+	UMassStateTreeSubsystem* StateTreeSubsystemPtr = World ? World->GetSubsystem<UMassStateTreeSubsystem>() : nullptr;
+	if (!Clock || !StateTreeSubsystemPtr)
 	{
 		return;
 	}
@@ -44,10 +48,12 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 	}
 	const float SubDt = URHSimClockSubsystem::SubStepSeconds;
 
+	int32 Matched = 0;
 	EntityQuery.ForEachEntityChunk(Context,
-		[Steps, SubDt](FMassExecutionContext& ChunkContext)
+		[Steps, SubDt, &Matched, StateTreeSubsystemPtr](FMassExecutionContext& ChunkContext)
 	{
-		UMassStateTreeSubsystem& StateTreeSubsystem = ChunkContext.GetMutableSubsystemChecked<UMassStateTreeSubsystem>();
+		Matched += ChunkContext.GetNumEntities();
+		UMassStateTreeSubsystem& StateTreeSubsystem = *StateTreeSubsystemPtr;
 		const FMassStateTreeSharedFragment& Shared = ChunkContext.GetConstSharedFragment<FMassStateTreeSharedFragment>();
 		const UStateTree* StateTree = Shared.StateTree;
 		if (!StateTree)
@@ -73,7 +79,12 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 			}
 			if (StateTreeContext.GetStateTreeRunStatus() != EStateTreeRunStatus::Running)
 			{
-				StateTreeContext.Start();
+				if (StateTreeContext.Start() == EStateTreeRunStatus::Failed)
+				{
+					UE_LOG(LogRedHopeSim, Warning, TEXT("Robot entity %d: StateTree Start failed"),
+						ChunkContext.GetEntity(i).Index);
+					continue;
+				}
 			}
 
 			for (int32 Step = 0; Step < Steps; ++Step)
@@ -92,4 +103,12 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 			}
 		}
 	});
+
+	// Ops signal: which brain population is live (logs only on change).
+	static int32 LastMatched = -1;
+	if (Matched != LastMatched)
+	{
+		LastMatched = Matched;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Brain processor: %d StateTree robots matched"), Matched);
+	}
 }
