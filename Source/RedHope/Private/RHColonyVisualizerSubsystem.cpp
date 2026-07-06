@@ -7,12 +7,15 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Math/RotationMatrix.h"
 #include "DrawDebugHelpers.h"
 
 namespace RHCanon
 {
-	// The director's reference palette, distilled.
-	const FLinearColor BoneWhite(0.62f, 0.60f, 0.54f);
+	// The director's reference palette, distilled. Bone sits darker than the
+	// sunlit regolith so white hulls separate from the ground instead of
+	// washing into it.
+	const FLinearColor BoneWhite(0.52f, 0.50f, 0.45f);
 	const FLinearColor DarkSlate(0.10f, 0.11f, 0.13f);
 	const FLinearColor HazYellow(0.85f, 0.62f, 0.05f);
 	const FLinearColor RustBeam(0.48f, 0.16f, 0.07f);
@@ -22,6 +25,9 @@ namespace RHCanon
 	const FLinearColor IceGlow(0.8f, 2.8f, 5.0f);
 	const FLinearColor AmberGlow(4.5f, 2.2f, 0.2f);
 }
+
+// The Lander body rides this high on its legs so the descent engine + gear read.
+static constexpr float GLanderLiftCm = 210.f;
 
 FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 {
@@ -52,7 +58,8 @@ FLinearColor URHColonyVisualizerSubsystem::BodyFor(FName DefName) const
 	// Reference sheet: heavy industry sits on dark slate; habitats, power and
 	// processing wear bone-white hulls.
 	if (DefName == FName("Forge") || DefName == FName("IceDrill")
-		|| DefName == FName("ChargePad") || DefName == FName("Stockpile"))
+		|| DefName == FName("ChargePad") || DefName == FName("Stockpile")
+		|| DefName == FName("ComputeModule"))
 	{
 		return RHCanon::DarkSlate;
 	}
@@ -118,16 +125,59 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 	using namespace RHCanon;
 	const float TopZ = ScaleM.Z * 100.f; // box top above ground (actor center at Z*50)
 
+	// Foundation apron: every built structure sits on a dark plinth - kills the
+	// floating-box-on-a-table read and ties the structure to the site. The
+	// Lander stands on its own legs instead.
+	if (DefName != FName("Lander"))
+	{
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, 8.f), FRotator::ZeroRotator,
+			FVector(ScaleM.X + 0.7f, ScaleM.Y + 0.7f, 0.16f), FLinearColor(0.055f, 0.06f, 0.075f));
+	}
+
+	// Every machine wears a band of its function color at the hull's top edge -
+	// the color identity that reads at strategic zoom (canon: one saturated
+	// accent per function). The strong emissive floor keeps the hue saturated
+	// under midday exposure. Flat decks, the mast, and the Lander carry their
+	// color elsewhere.
+	if (DefName != FName("Lander") && DefName != FName("ChargePad")
+		&& DefName != FName("Stockpile") && DefName != FName("Pylon"))
+	{
+		const FLinearColor Hue = TintFor(DefName);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ - 30.f), FRotator::ZeroRotator,
+			FVector(ScaleM.X + 0.14f, ScaleM.Y + 0.14f, 0.5f), Hue, Hue * 0.9f);
+	}
+
 	if (DefName == FName("Lander"))
 	{
-		// Reference: bone-white hull, dark articulated legs, dome + dish.
-		AddAccent(Actor, Cone, BaseCm + FVector(0, 0, TopZ), FRotator::ZeroRotator, FVector(3.2f, 3.2f, 2.8f), BoneWhite);
-		AddAccent(Actor, Sphere, BaseCm + FVector(180.f, 180.f, TopZ + 60.f), FRotator::ZeroRotator, FVector(0.9f), DarkSlate);
+		// A descent-stage lander: bone hull up on four splayed legs, an engine bell
+		// with an ember at the throat, propellant spheres, and an ascent capsule
+		// with a comms dish. The (raised) base box is the descent stage body.
+		const float Lift = GLanderLiftCm;
+		const float BodyTop = Lift + ScaleM.Z * 100.f;
+		const float BodyMid = Lift + ScaleM.Z * 50.f;
+		const float HalfX = ScaleM.X * 50.f;
+		const float HalfY = ScaleM.Y * 50.f;
+		// Descent engine bell (the default cone already opens downward) + throat ember.
+		AddAccent(Actor, Cone, BaseCm + FVector(0, 0, (Lift + 20.f) * 0.5f), FRotator::ZeroRotator, FVector(2.4f, 2.4f, (Lift - 20.f) / 100.f), DarkSlate);
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, 45.f), FRotator::ZeroRotator, FVector(0.8f, 0.8f, 0.6f), FLinearColor(0.95f, 0.4f, 0.08f), FLinearColor(4.0f, 1.2f, 0.15f));
+		// Four splayed landing legs down to footpads.
 		for (int32 Leg = 0; Leg < 4; ++Leg)
 		{
-			const FVector Out = FRotator(0, Leg * 90.f + 45.f, 0).Vector() * (ScaleM.X * 50.f + 60.f);
-			AddAccent(Actor, Cube, BaseCm + Out + FVector(0, 0, 70.f), FRotator(0, Leg * 90.f + 45.f, 22.f), FVector(0.3f, 0.3f, 1.8f), DarkSlate);
+			const FVector Dir = FRotator(0, Leg * 90.f + 45.f, 0).Vector();
+			const FVector Att = BaseCm + Dir * (HalfX * 0.7f) + FVector(0, 0, Lift + 20.f);
+			const FVector Foot = BaseCm + Dir * (HalfX + 200.f);
+			const FVector LegVec = Foot - Att;
+			AddAccent(Actor, Cube, (Att + Foot) * 0.5f, FRotationMatrix::MakeFromZ(LegVec.GetSafeNormal()).Rotator(), FVector(0.28f, 0.28f, LegVec.Size() / 100.f), DarkSlate);
+			AddAccent(Actor, Cyl, Foot + FVector(0, 0, 15.f), FRotator::ZeroRotator, FVector(1.1f, 1.1f, 0.25f), DarkSlate);
 		}
+		// Propellant spheres flanking the descent stage.
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, HalfY + 30.f, BodyMid), FRotator::ZeroRotator, FVector(1.5f, 1.5f, 1.7f), BoneWhite);
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, -HalfY - 30.f, BodyMid), FRotator::ZeroRotator, FVector(1.5f, 1.5f, 1.7f), BoneWhite);
+		// Ascent / crew capsule: drum + dome, with a comms mast + dish.
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, BodyTop + 70.f), FRotator::ZeroRotator, FVector(1.7f, 1.7f, 1.4f), BoneWhite);
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, BodyTop + 150.f), FRotator::ZeroRotator, FVector(1.6f, 1.6f, 1.0f), BoneWhite);
+		AddAccent(Actor, Cyl, BaseCm + FVector(HalfX * 0.5f, HalfY * 0.5f, BodyTop + 40.f), FRotator::ZeroRotator, FVector(0.12f, 0.12f, 1.6f), DarkSlate);
+		AddAccent(Actor, Cyl, BaseCm + FVector(HalfX * 0.5f, HalfY * 0.5f, BodyTop + 125.f), FRotator(35.f, 0, 0), FVector(1.3f, 1.3f, 0.1f), BoneWhite);
 	}
 	else if (DefName == FName("BatteryBank"))
 	{
@@ -135,6 +185,18 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		AddAccent(Actor, Cube, BaseCm + FVector(0, ScaleM.Y * 50.f + 6.f, ScaleM.Z * 50.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.75f, 0.08f, ScaleM.Z * 0.6f), TintFor(DefName), TealGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(0, -ScaleM.Y * 50.f - 6.f, ScaleM.Z * 50.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.75f, 0.08f, ScaleM.Z * 0.6f), TintFor(DefName), TealGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ + 10.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.9f, ScaleM.Y * 0.9f, 0.15f), HazYellow);
+		// Greeble: dark rack rails framing the teal cells top and bottom, plus a
+		// row of bone coolant fins across the roof.
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			const float Sy = Side == 0 ? 1.f : -1.f;
+			AddAccent(Actor, Cube, BaseCm + FVector(0, Sy * (ScaleM.Y * 50.f + 10.f), 24.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.85f, 0.14f, 0.14f), DarkSlate);
+			AddAccent(Actor, Cube, BaseCm + FVector(0, Sy * (ScaleM.Y * 50.f + 10.f), TopZ - 12.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.85f, 0.14f, 0.14f), DarkSlate);
+		}
+		for (int32 F = 0; F < 4; ++F)
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector((F - 1.5f) * ScaleM.X * 24.f, 0, TopZ + 34.f), FRotator::ZeroRotator, FVector(0.06f, ScaleM.Y * 0.8f, 0.5f), BoneWhite);
+		}
 	}
 	else if (DefName == FName("Pylon"))
 	{
@@ -160,6 +222,17 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, -110.f, 110.f), FRotator::ZeroRotator, FVector(0.1f, 1.4f, 1.6f), TintFor(DefName), FurnaceGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, 110.f, 110.f), FRotator::ZeroRotator, FVector(0.1f, 1.4f, 1.6f), TintFor(DefName), FurnaceGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 50.f - 30.f, ScaleM.Y * 50.f - 30.f, 90.f), FRotator::ZeroRotator, FVector(0.7f, 0.7f, 1.8f), HazYellow);
+		// Greeble: rear exhaust chimney with a rust cap, a slag chute off the
+		// furnace face, and a railed catwalk down the east flank.
+		AddAccent(Actor, Cyl, BaseCm + FVector(ScaleM.X * 30.f, ScaleM.Y * 50.f - 45.f, TopZ + 130.f), FRotator::ZeroRotator, FVector(0.55f, 0.55f, 3.4f), DarkSlate);
+		AddAccent(Actor, Cyl, BaseCm + FVector(ScaleM.X * 30.f, ScaleM.Y * 50.f - 45.f, TopZ + 300.f), FRotator::ZeroRotator, FVector(0.75f, 0.75f, 0.3f), RustBeam);
+		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 95.f, 0.f, 60.f), FRotator(30.f, 0, 0), FVector(1.4f, 0.9f, 0.08f), DarkSlate);
+		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 50.f + 42.f, 0.f, TopZ * 0.62f), FRotator::ZeroRotator, FVector(0.16f, ScaleM.Y * 0.95f, 0.06f), BoneWhite);
+		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 50.f + 70.f, 0.f, TopZ * 0.62f + 55.f), FRotator::ZeroRotator, FVector(0.05f, ScaleM.Y * 0.95f, 0.02f), HazYellow);
+		// Control annex off the north flank - a second mass so the smelter
+		// reads as a works, not a single box - with a lit crew-window band.
+		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 25.f, ScaleM.Y * 50.f + 120.f, 105.f), FRotator::ZeroRotator, FVector(2.4f, 1.7f, 2.1f), BoneWhite);
+		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 25.f, ScaleM.Y * 50.f + 207.f, 140.f), FRotator::ZeroRotator, FVector(2.0f, 0.06f, 0.5f), FLinearColor(0.9f, 0.75f, 0.4f), FLinearColor(2.2f, 1.6f, 0.6f));
 	}
 	else if (DefName == FName("IceDrill"))
 	{
@@ -167,6 +240,16 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, TopZ + 150.f), FRotator::ZeroRotator, FVector(0.7f, 0.7f, 3.0f), BoneWhite);
 		AddAccent(Actor, Cone, BaseCm + FVector(0, 0, TopZ + 320.f), FRotator::ZeroRotator, FVector(1.2f, 1.2f, 1.0f), DarkSlate);
 		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, 0, 120.f), FRotator::ZeroRotator, FVector(0.1f, 1.6f, 1.2f), TintFor(DefName), IceGlow);
+		// Greeble: a 4-strut derrick leaning in around the drill mast, plus a
+		// spoil auger running out to a small ice pile.
+		for (int32 S = 0; S < 4; ++S)
+		{
+			const float Ang = S * 90.f + 45.f;
+			const FVector Foot = FRotator(0, Ang, 0).Vector() * (ScaleM.X * 45.f);
+			AddAccent(Actor, Cube, BaseCm + Foot + FVector(0, 0, TopZ + 120.f), FRotator(18.f, Ang, 0), FVector(0.12f, 0.12f, 3.0f), DarkSlate);
+		}
+		AddAccent(Actor, Cyl, BaseCm + FVector(ScaleM.X * 50.f + 80.f, -40.f, 45.f), FRotator(52.f, 0, 0), FVector(0.35f, 0.35f, 2.2f), DarkSlate);
+		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 50.f + 150.f, -40.f, 20.f), FRotator(0, 25.f, 0), FVector(0.9f, 0.9f, 0.35f), FLinearColor(0.75f, 0.90f, 1.00f));
 	}
 	else if (DefName == FName("WaterPlant"))
 	{
@@ -178,13 +261,32 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 			AddAccent(Actor, Sphere, TankCm + FVector(0, 0, 320.f), FRotator::ZeroRotator, FVector(1.35f, 1.35f, 0.9f), BoneWhite);
 		}
 		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, 0, 120.f), FRotator::ZeroRotator, FVector(0.1f, 1.6f, 1.2f), TintFor(DefName), IceGlow);
+		// Greeble: header pipe running along the tank tops, a riser back to the
+		// block, and a valve wheel on each tank.
+		AddAccent(Actor, Cyl, BaseCm + FVector(0.f, ScaleM.Y * 50.f + 110.f, 250.f), FRotator(90.f, 0, 0), FVector(0.3f, 0.3f, 4.4f), DarkSlate);
+		AddAccent(Actor, Cyl, BaseCm + FVector(0.f, ScaleM.Y * 50.f + 55.f, 150.f), FRotator(0, 0, 90.f), FVector(0.28f, 0.28f, 1.2f), DarkSlate);
+		for (int32 V = 0; V < 3; ++V)
+		{
+			AddAccent(Actor, Sphere, BaseCm + FVector((V - 1) * 190.f, ScaleM.Y * 50.f + 110.f, 305.f), FRotator::ZeroRotator, FVector(0.4f), HazYellow);
+		}
 	}
 	else if (DefName == FName("Electrolyzer"))
 	{
-		// Twin gas tanks lying along Y: O2 and H2, with a teal process strip.
-		AddAccent(Actor, Cyl, BaseCm + FVector(-80.f, 0, TopZ + 55.f), FRotator(90.f, 0, 0), FVector(1.1f, 1.1f, 2.6f), BoneWhite);
-		AddAccent(Actor, Cyl, BaseCm + FVector(80.f, 0, TopZ + 55.f), FRotator(90.f, 0, 0), FVector(1.1f, 1.1f, 2.6f), BoneWhite);
-		AddAccent(Actor, Cube, BaseCm + FVector(0, -ScaleM.Y * 50.f - 4.f, 130.f), FRotator::ZeroRotator, FVector(1.8f, 0.1f, 0.5f), TintFor(DefName), TealGlow);
+		// Gas works: the slim hall is flanked by two BIG horizontal storage
+		// tanks (O2 and H2) on dark cradles with domed ends, piped back into
+		// the hall. The tanks are half the building's mass - composition, not
+		// roof greeble.
+		const float TankLen = ScaleM.X * 0.72f;
+		for (int32 T = 0; T < 2; ++T)
+		{
+			const float Ty = (T == 0 ? 1.f : -1.f) * (ScaleM.Y * 50.f + 105.f);
+			AddAccent(Actor, Cyl, BaseCm + FVector(0, Ty, 100.f), FRotator(90.f, 0, 0), FVector(1.9f, 1.9f, TankLen), BoneWhite);
+			AddAccent(Actor, Sphere, BaseCm + FVector(TankLen * 50.f, Ty, 100.f), FRotator::ZeroRotator, FVector(1.85f), BoneWhite);
+			AddAccent(Actor, Sphere, BaseCm + FVector(-TankLen * 50.f, Ty, 100.f), FRotator::ZeroRotator, FVector(1.85f), BoneWhite);
+			AddAccent(Actor, Cube, BaseCm + FVector(0, Ty, 24.f), FRotator::ZeroRotator, FVector(TankLen * 0.55f, 1.5f, 0.5f), DarkSlate);
+			AddAccent(Actor, Cyl, BaseCm + FVector(0, Ty * 0.5f, 168.f), FRotator(0, 0, 90.f), FVector(0.24f, 0.24f, FMath::Abs(Ty) / 100.f), DarkSlate);
+		}
+		AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, 0, 110.f), FRotator::ZeroRotator, FVector(0.1f, ScaleM.Y * 0.7f, 0.55f), TintFor(DefName), TealGlow);
 	}
 	else if (DefName == FName("Stockpile"))
 	{
@@ -195,8 +297,16 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 	}
 	else if (DefName == FName("ComputeModule"))
 	{
-		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ + 120.f), FRotator::ZeroRotator, FVector(0.12f, 0.12f, 2.4f), DarkSlate);
-		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 240.f), FRotator::ZeroRotator, FVector(0.45f), TintFor(DefName), FLinearColor(3.5f, 0.9f, 2.0f));
+		// Server tower: dark rack body, three magenta status strips on the south
+		// face, a bone cooling collar on the roof, and the uplink dish on a mast.
+		for (int32 R = 0; R < 3; ++R)
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector(-ScaleM.X * 50.f - 4.f, 0, 55.f + R * 60.f), FRotator::ZeroRotator,
+				FVector(0.08f, ScaleM.Y * 0.72f, 0.14f), TintFor(DefName), FLinearColor(3.5f, 0.9f, 2.0f));
+		}
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ + 26.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.72f, ScaleM.Y * 0.72f, 0.5f), BoneWhite);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ + 130.f), FRotator::ZeroRotator, FVector(0.12f, 0.12f, 1.8f), DarkSlate);
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, TopZ + 215.f), FRotator(30.f, 0, 0), FVector(1.1f, 1.1f, 0.1f), BoneWhite);
 	}
 	else if (DefName == FName("Habitat"))
 	{
@@ -219,12 +329,17 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 	Label->SetText(FText::FromString(Text));
 	Label->SetWorldSize(220.f);
 	Label->SetHorizontalAlignment(EHTA_Center);
+	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Color * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
-	// Lying flat on the ground, top toward +X: readable from the strategic
-	// camera's default heading.
+	// Lie flat on the ground, glyph face pointing UP (+Z) so the top-down camera
+	// reads the front of the text, not the mirrored back; glyph-up toward world
+	// +X reads upright at the default north-looking camera heading (confirmed in
+	// an oblique capture - the -Forward variant rendered it upside down). Built
+	// from axes so it stays a pure rotation, never a reflection - the old Euler
+	// combo faced the text into the ground and read backwards + upside down.
 	Label->SetWorldLocationAndRotation(
 		Actor->GetActorLocation() * FVector(1, 1, 0) + FVector(-SouthOffsetCm, 0, 12.f),
-		FRotator(-90.f, 180.f, 0.f));
+		FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 }
 
 void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -364,6 +479,27 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 		{
 			Scale = FVector(0.6f, 0.6f, 6.f); // tall mast
 		}
+		else if (N == FName("Lander"))
+		{
+			// The visual body is narrower than the sim footprint - the splayed
+			// legs span the rest. A boxy descent stage, not a slab on stilts.
+			Scale.X *= 0.6f;
+			Scale.Y *= 0.6f;
+			Scale.Z = 2.2f;
+		}
+		else if (N == FName("Electrolyzer"))
+		{
+			// Slim process hall; the twin gas tanks alongside carry the mass.
+			Scale.Y *= 0.55f;
+			Scale.Z = 1.8f;
+		}
+		else if (N == FName("WaterPlant"))
+		{
+			// The tank farm is the building; the process block plays support.
+			Scale.X *= 0.75f;
+			Scale.Y *= 0.75f;
+			Scale.Z = 2.4f;
+		}
 		else
 		{
 			Scale.Z = 2.f + (Def->FootprintX + Def->FootprintY) * 0.25f;
@@ -389,7 +525,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// Solar arrays read as panels: tilted toward the equatorial sun, raised so
 	// the low corner clears the ground.
 	const bool bPanel = Instance.DefName == FName("SolarArray") && !Instance.bUnderConstruction;
-	const FVector Location = Instance.LocationCm + FVector(0, 0, bPanel ? 70.f : Scale.Z * 50.f);
+	// The Lander rides up on its legs so its descent engine + gear are visible.
+	const bool bLander = Instance.DefName == FName("Lander") && !Instance.bUnderConstruction;
+	const float LiftZ = bPanel ? 70.f : (bLander ? GLanderLiftCm + Scale.Z * 50.f : Scale.Z * 50.f);
+	const FVector Location = Instance.LocationCm + FVector(0, 0, LiftZ);
 	const FRotator Facing = bPanel ? FRotator(0.f, 0.f, -18.f) : FRotator::ZeroRotator;
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, Facing);
 	if (!Actor)
@@ -407,12 +546,26 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// label in the function hue so "which block is the Forge" never needs asking.
 	const FLinearColor Tint = TintFor(Instance.DefName);
 	const FLinearColor Body = BodyFor(Instance.DefName);
-	ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body);
+	// The panel glass keeps a faint blue self-glow so it reads PV-blue even in
+	// the orange grade / shadow, instead of washing to a flat slab.
+	const FLinearColor BodyGlow = bPanel ? FLinearColor(0.05f, 0.10f, 0.30f) : FLinearColor::Black;
+	ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body, Instance.bUnderConstruction ? FLinearColor::Black : BodyGlow);
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
 	if (bPanel)
 	{
-		AddAccent(Actor, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"), Instance.LocationCm + FVector(0, 0, 35.f),
-			FRotator::ZeroRotator, FVector(0.3f, 0.3f, 0.7f), RHCanon::DarkSlate);
+		// A mounted PV array, not a bare slab: bone-white frame lip, dark cell-seam
+		// mullions on the tilted glass, and a dark A-frame mount + torque tube.
+		const TCHAR* Cube = TEXT("/Engine/BasicShapes/Cube.Cube");
+		const TCHAR* Cyl = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
+		const float HalfY = Scale.Y * 50.f;
+		const FVector Panel = Instance.LocationCm + FVector(0, 0, 70.f);
+		AddAccent(Actor, Cube, Panel + FVector(0, 0, -6.f), Facing, FVector(Scale.X + 0.35f, Scale.Y + 0.35f, 0.1f), RHCanon::BoneWhite);
+		AddAccent(Actor, Cube, Panel + FVector(0, 0, 9.f), Facing, FVector(Scale.X + 0.4f, 0.14f, 0.12f), RHCanon::DarkSlate);
+		AddAccent(Actor, Cube, Panel + FVector(0, HalfY * 0.5f, 9.f), Facing, FVector(Scale.X + 0.4f, 0.1f, 0.1f), RHCanon::DarkSlate);
+		AddAccent(Actor, Cube, Panel + FVector(0, -HalfY * 0.5f, 9.f), Facing, FVector(Scale.X + 0.4f, 0.1f, 0.1f), RHCanon::DarkSlate);
+		AddAccent(Actor, Cyl, Instance.LocationCm + FVector(0, 0, 38.f), FRotator(0, 0, 90.f), FVector(0.28f, 0.28f, Scale.Y * 0.85f), RHCanon::DarkSlate);
+		AddAccent(Actor, Cube, Instance.LocationCm + FVector(0, HalfY * 0.55f, 32.f), FRotator(0, 0, -18.f), FVector(0.3f, 0.3f, 1.5f), RHCanon::DarkSlate);
+		AddAccent(Actor, Cube, Instance.LocationCm + FVector(0, -HalfY * 0.55f, 26.f), FRotator(0, 0, -18.f), FVector(0.3f, 0.3f, 1.1f), RHCanon::DarkSlate);
 	}
 	else if (!Instance.bUnderConstruction)
 	{

@@ -188,6 +188,10 @@ public:
 	// Headless driver (commandlet): deploy the fleet without waiting for a
 	// first agent sub-step.
 	void Debug_DeployFleet() { DeployFleetOnce(); }
+	// QA/visual driver: place one completed instance of every building type on a
+	// grid so the full canon silhouette set is on screen at once (RH.Showcase).
+	// Bypasses the economy - completed, no cost, no uplink lag.
+	void Debug_Showcase();
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnColonyReloaded OnColonyReloaded;

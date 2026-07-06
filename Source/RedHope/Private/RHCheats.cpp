@@ -134,6 +134,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHShowcase(
+	TEXT("RH.Showcase"),
+	TEXT("RH.Showcase - instantly place one completed instance of every building type on a grid (visual QA)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
+		{
+			Sim->Debug_Showcase();
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 	TEXT("RH.Status"),
 	TEXT("RH.Status - log colony power, economy, tasks, quota, and uplink."),

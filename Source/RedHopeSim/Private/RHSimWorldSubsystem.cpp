@@ -1035,6 +1035,40 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	OnBuildingAdded.Broadcast(Added);
 }
 
+void URHSimWorldSubsystem::Debug_Showcase()
+{
+	if (!Defs)
+	{
+		return;
+	}
+	// Lay the whole canon set out on a grid north of the Lander so every
+	// silhouette + glow is visible in one frame. Lander already sits at origin.
+	TArray<FName> Names;
+	Defs->ForEachBuilding([&Names](FName Name, const FRHBuildingRow&)
+	{
+		if (Name != NAME_Lander)
+		{
+			Names.Add(Name);
+		}
+	});
+	Names.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+
+	const int32 Cols = 4;
+	const float SpacingCm = 1400.f;    // 14 m centres: big silhouettes clear each other
+	const float OriginXCm = 1600.f;    // start north of the Lander
+	for (int32 i = 0; i < Names.Num(); ++i)
+	{
+		const int32 Row = i / Cols;
+		const int32 Col = i % Cols;
+		const FVector Loc(
+			OriginXCm + Row * SpacingCm,
+			(Col - (Cols - 1) * 0.5f) * SpacingCm,
+			0.f);
+		AddBuilding(Names[i], Loc, /*bInstant*/ true);
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("[Showcase] placed %d building types"), Names.Num());
+}
+
 bool URHSimWorldSubsystem::IsInCoverage(const FVector& LocationCm) const
 {
 	for (const FRHBuildingInstance& B : Buildings)
