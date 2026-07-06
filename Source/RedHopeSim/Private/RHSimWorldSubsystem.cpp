@@ -81,6 +81,14 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
+		// Mission clock at landing (StartSolHour, sol-hour = 50 sim-s). Default
+		// 6 = dawn: the colony wakes with the sun instead of five real minutes
+		// of darkness (director's first-play feedback).
+		const double StartHour = Defs->GetConfigScalar(FName("StartSolHour"), 0.0);
+		if (StartHour > 0.0)
+		{
+			Clock->Debug_SetSimSeconds(StartHour * 50.0);
+		}
 	}
 
 	// Deposits from data.

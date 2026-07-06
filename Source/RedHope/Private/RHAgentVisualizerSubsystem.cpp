@@ -69,12 +69,13 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	MeshComponent->SetStaticMesh(Cube);
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComponent->SetCastShadow(true);
-	// Rover safety-orange: the fleet must read against the regolith from any
-	// altitude (legibility pass; per-class hues arrive with M1-b's fleet panel).
+	// Canon rover: bone-white body (director's ConstructionDrone reference) -
+	// reads bright against the rust regolith. Per-class detailing arrives
+	// with M1-b's fleet panel.
 	if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
 	{
 		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, MeshComponent);
-		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(1.0f, 0.42f, 0.06f));
+		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.62f, 0.60f, 0.54f));
 		MeshComponent->SetMaterial(0, Mid);
 	}
 }

@@ -40,16 +40,20 @@ private:
 	void HandleColonyReloaded();
 	void SpawnDepositMarkers();
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
-	// Legibility pass (gray-box, pre-art): one hue per function family so a
-	// player can read the colony at a glance. Presentation-only, like ScaleFor.
+	// Canon visual language (director's reference set, ~/Martians/assets):
+	// bone-white or dark-slate industrial bodies, hazard-yellow details, and
+	// ONE saturated glowing accent per function - furnace orange, battery
+	// teal, ice blue. TintFor = the function accent (labels + glows);
+	// BodyFor = the box albedo. Presentation-only, like ScaleFor.
 	FLinearColor TintFor(FName DefName) const;
-	void ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color) const;
-	void ApplyTint(UStaticMeshComponent* Mesh, const FLinearColor& Color) const;
+	FLinearColor BodyFor(FName DefName) const;
+	void ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
+	void ApplyTint(UStaticMeshComponent* Mesh, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
 	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const;
 	// Silhouette pass (director: "no boring rectangles"): each family gets a
-	// distinct primitive-composed form - chimneys, masts, domes, tanks. World-
-	// space accents (buildings never move), added only once construction ends.
-	void AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color) const;
+	// distinct primitive-composed form per the reference sheet. World-space
+	// accents (buildings never move), added only once construction ends.
+	void AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
 	void BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;

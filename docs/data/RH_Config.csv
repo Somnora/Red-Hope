@@ -27,3 +27,4 @@ StarterSolarPacks,6,count,Lander stock
 StarterBatteryPacks,2,count,Lander stock
 StarterSpareParts,6,count,Lander stock
 AutosaveEverySols,1,sols,"Autosave to slot 'auto' every N sol boundaries; 0 disables"
+StartSolHour,6,sol-hour,"Mission clock at landing; 6 = dawn - the colony wakes with the sun (first-play readability)"
