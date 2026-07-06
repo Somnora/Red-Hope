@@ -72,6 +72,12 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Director calls on the two flagged options:** (1) the **playability strand stays in M1** — hand-playable from M1-a, diegetic panels accreting per stage, manifest composer as the M1-d set-piece; (2) **heightmap terrain stays deferred to M2** — M1 remains systems-focused on the flat gray-box plane.
 - M0-c verification reviewed and passed ("move onto the next step", 2026-07-05).
 
+## Approved — 2026-07-06 (Gate C hand-played sign-off — M1-a closed, director verdict)
+
+- The director hand-played the Gate C run (dig → power spine → Forge → 8× → Struct climbing/spending) with zero order rejections and ruled: **"controls are fine — functionally it's working."** Camera and command deck ship as the M1-a baseline. M1-a (Spine + Hands) is closed: Gates A, B, C all verified.
+- **Director direction attached to the verdict:** gameplay and game UI should keep improving — the playability strand carries explicit weight going into M1-b+ (inspection card, fleet panel, visible-feedback fixes), while the diegetic skin remains the M1-d set-piece per the approved scope.
+- **Findings from the run, queued as M1-b work:** placement/dig/confirmation prompts render invisibly under the help box (same GEngine-debug channel as the rejection toasts fixed in `924e1df`) → all player-facing prompts move to the deck's Slate notice channel; the paused state at session start is too easy to miss → prominent PAUSED treatment.
+
 ## Pending — awaiting director review
 
-- (nothing — M1-a working spec in progress)
+- **M1-b working spec** (`docs/m1b-working-spec.md`): Z-model coordinate + fleet reality (wear/repair/survey) + footprint validation + inspection card + UI feedback batch.
