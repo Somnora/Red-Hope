@@ -6,6 +6,7 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
@@ -68,6 +69,14 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	MeshComponent->SetStaticMesh(Cube);
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComponent->SetCastShadow(true);
+	// Rover safety-orange: the fleet must read against the regolith from any
+	// altitude (legibility pass; per-class hues arrive with M1-b's fleet panel).
+	if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
+	{
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, MeshComponent);
+		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(1.0f, 0.42f, 0.06f));
+		MeshComponent->SetMaterial(0, Mid);
+	}
 }
 
 void URHAgentVisualizerSubsystem::Tick(float DeltaTime)

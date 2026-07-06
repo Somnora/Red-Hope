@@ -36,14 +36,112 @@ FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 
 void URHColonyVisualizerSubsystem::ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color) const
 {
+	if (Actor)
+	{
+		ApplyTint(Actor->GetStaticMeshComponent(), Color);
+	}
+}
+
+void URHColonyVisualizerSubsystem::ApplyTint(UStaticMeshComponent* Mesh, const FLinearColor& Color) const
+{
 	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
-	if (!Base || !Actor)
+	if (!Base || !Mesh)
 	{
 		return;
 	}
-	UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Actor->GetStaticMeshComponent());
+	UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Mesh);
 	Mid->SetVectorParameterValue(FName("Tint"), Color);
-	Actor->GetStaticMeshComponent()->SetMaterial(0, Mid);
+	Mesh->SetMaterial(0, Mid);
+}
+
+void URHColonyVisualizerSubsystem::AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color) const
+{
+	UStaticMesh* Shape = LoadObject<UStaticMesh>(nullptr, ShapePath);
+	if (!Actor || !Shape)
+	{
+		return;
+	}
+	UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(Actor);
+	Mesh->SetupAttachment(Actor->GetRootComponent());
+	// Absolute: the parent carries a non-uniform footprint scale that would
+	// smear any child shape. Buildings never move, so world-space is safe.
+	Mesh->SetAbsolute(true, true, true);
+	Mesh->RegisterComponent();
+	Mesh->SetStaticMesh(Shape);
+	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Mesh->SetWorldLocationAndRotation(WorldCm, Rot);
+	Mesh->SetWorldScale3D(Scale);
+	ApplyTint(Mesh, Color);
+}
+
+void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const
+{
+	static const TCHAR* Cyl = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
+	static const TCHAR* Cone = TEXT("/Engine/BasicShapes/Cone.Cone");
+	static const TCHAR* Sphere = TEXT("/Engine/BasicShapes/Sphere.Sphere");
+	static const TCHAR* Cube = TEXT("/Engine/BasicShapes/Cube.Cube");
+
+	const FLinearColor Tint = TintFor(DefName);
+	const FLinearColor Steel(0.35f, 0.36f, 0.40f);
+	const float TopZ = ScaleM.Z * 100.f; // box top above ground (actor center at Z*50)
+
+	if (DefName == FName("Lander"))
+	{
+		// Return-vehicle nose cone + comms dish: the colony's monument.
+		AddAccent(Actor, Cone, BaseCm + FVector(0, 0, TopZ), FRotator::ZeroRotator, FVector(3.2f, 3.2f, 2.8f), Tint);
+		AddAccent(Actor, Sphere, BaseCm + FVector(180.f, 180.f, TopZ + 60.f), FRotator::ZeroRotator, FVector(0.9f), Steel);
+	}
+	else if (DefName == FName("BatteryBank"))
+	{
+		AddAccent(Actor, Cyl, BaseCm + FVector(-55.f, 0, TopZ), FRotator::ZeroRotator, FVector(0.55f, 0.55f, 0.9f), Steel);
+		AddAccent(Actor, Cyl, BaseCm + FVector(55.f, 0, TopZ), FRotator::ZeroRotator, FVector(0.55f, 0.55f, 0.9f), Steel);
+	}
+	else if (DefName == FName("Pylon"))
+	{
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 40.f), FRotator::ZeroRotator, FVector(0.8f), Tint);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ - 70.f), FRotator::ZeroRotator, FVector(2.4f, 0.25f, 0.25f), Steel);
+	}
+	else if (DefName == FName("ChargePad"))
+	{
+		AddAccent(Actor, Cyl, BaseCm + FVector(-130.f, -130.f, 60.f), FRotator::ZeroRotator, FVector(0.35f, 0.35f, 1.2f), Tint);
+		AddAccent(Actor, Sphere, BaseCm + FVector(-130.f, -130.f, 130.f), FRotator::ZeroRotator, FVector(0.5f), Tint);
+	}
+	else if (DefName == FName("Forge"))
+	{
+		// The smelter reads by its stacks.
+		AddAccent(Actor, Cyl, BaseCm + FVector(120.f, 160.f, TopZ + 150.f), FRotator::ZeroRotator, FVector(1.0f, 1.0f, 3.0f), Steel);
+		AddAccent(Actor, Cyl, BaseCm + FVector(-100.f, 160.f, TopZ + 90.f), FRotator::ZeroRotator, FVector(0.7f, 0.7f, 1.8f), Steel);
+	}
+	else if (DefName == FName("IceDrill"))
+	{
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, TopZ + 150.f), FRotator::ZeroRotator, FVector(0.7f, 0.7f, 3.0f), Tint);
+		AddAccent(Actor, Cone, BaseCm + FVector(0, 0, TopZ + 320.f), FRotator::ZeroRotator, FVector(1.2f, 1.2f, 1.0f), Steel);
+	}
+	else if (DefName == FName("WaterPlant"))
+	{
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 60.f), FRotator::ZeroRotator, FVector(2.6f), Tint);
+	}
+	else if (DefName == FName("Electrolyzer"))
+	{
+		// Twin gas tanks lying along Y: O2 and H2.
+		AddAccent(Actor, Cyl, BaseCm + FVector(-80.f, 0, TopZ + 55.f), FRotator(90.f, 0, 0), FVector(1.1f, 1.1f, 2.6f), FLinearColor(0.75f, 0.85f, 0.95f));
+		AddAccent(Actor, Cyl, BaseCm + FVector(80.f, 0, TopZ + 55.f), FRotator(90.f, 0, 0), FVector(1.1f, 1.1f, 2.6f), FLinearColor(0.9f, 0.55f, 0.75f));
+	}
+	else if (DefName == FName("Stockpile"))
+	{
+		AddAccent(Actor, Cube, BaseCm + FVector(-90.f, -60.f, 65.f), FRotator(0, 20.f, 0), FVector(0.9f), Steel);
+		AddAccent(Actor, Cube, BaseCm + FVector(70.f, 80.f, 65.f), FRotator(0, -15.f, 0), FVector(0.9f), Steel);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, -10.f, 155.f), FRotator(0, 35.f, 0), FVector(0.8f), Steel);
+	}
+	else if (DefName == FName("ComputeModule"))
+	{
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ + 120.f), FRotator::ZeroRotator, FVector(0.12f, 0.12f, 2.4f), Steel);
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 240.f), FRotator::ZeroRotator, FVector(0.45f), Tint);
+	}
+	else if (DefName == FName("Habitat"))
+	{
+		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 30.f), FRotator::ZeroRotator, FVector(5.5f, 5.5f, 3.5f), Tint);
+	}
 }
 
 void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const
@@ -228,8 +326,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	}
 
 	const FVector Scale = ScaleFor(Instance);
-	const FVector Location = Instance.LocationCm + FVector(0, 0, Scale.Z * 50.f);
-	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, FRotator::ZeroRotator);
+	// Solar arrays read as panels: tilted toward the equatorial sun, raised so
+	// the low corner clears the ground.
+	const bool bPanel = Instance.DefName == FName("SolarArray") && !Instance.bUnderConstruction;
+	const FVector Location = Instance.LocationCm + FVector(0, 0, bPanel ? 70.f : Scale.Z * 50.f);
+	const FRotator Facing = bPanel ? FRotator(0.f, 0.f, -18.f) : FRotator::ZeroRotator;
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, Facing);
 	if (!Actor)
 	{
 		return;
@@ -246,21 +348,31 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	const FLinearColor Tint = TintFor(Instance.DefName);
 	ApplyTint(Actor, Instance.bUnderConstruction ? Tint * 0.25f : Tint);
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
+	if (bPanel)
+	{
+		AddAccent(Actor, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"), Instance.LocationCm + FVector(0, 0, 35.f),
+			FRotator::ZeroRotator, FVector(0.3f, 0.3f, 0.7f), FLinearColor(0.35f, 0.36f, 0.40f));
+	}
+	else if (!Instance.bUnderConstruction)
+	{
+		BuildSilhouette(Actor, Instance.DefName, Instance.LocationCm, Scale);
+	}
 	BuildingVisuals.Add(Instance.Id, Actor);
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
 {
+	// Foundation -> finished form: rebuild the visual outright so the full
+	// treatment (height, hue, tilt, silhouette accents) applies in one path.
 	if (TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(Instance.Id))
 	{
 		if (AStaticMeshActor* Actor = *Found)
 		{
-			const FVector Scale = ScaleFor(Instance); // no longer under construction: full height
-			Actor->SetActorScale3D(Scale);
-			Actor->SetActorLocation(Instance.LocationCm + FVector(0, 0, Scale.Z * 50.f));
-			ApplyTint(Actor, TintFor(Instance.DefName)); // dim site -> full family hue
+			Actor->Destroy();
 		}
+		BuildingVisuals.Remove(Instance.Id);
 	}
+	HandleBuildingAdded(Instance);
 }
 
 void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason)
@@ -296,17 +408,28 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 	{
 		return; // already on the pad (reload path re-fires the arrival state)
 	}
-	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(FVector(4000.f, -4000.f, 450.f), FRotator::ZeroRotator);
+	// A rocket, not a box: cylinder hull + nose cone + landing legs.
+	const FVector PadCm(4000.f, -4000.f, 0.f);
+	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(PadCm + FVector(0, 0, 400.f), FRotator::ZeroRotator);
 	if (Ship)
 	{
 		Ship->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
-		Ship->GetStaticMeshComponent()->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
-		Ship->SetActorScale3D(FVector(6.f, 6.f, 9.f));
+		Ship->GetStaticMeshComponent()->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")));
+		Ship->SetActorScale3D(FVector(4.f, 4.f, 7.f));
 #if WITH_EDITOR
 		Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
 #endif
 		const FLinearColor ShipColor(0.92f, 0.92f, 0.98f);
+		const FLinearColor Steel(0.35f, 0.36f, 0.40f);
 		ApplyTint(Ship, ShipColor);
+		AddAccent(Ship, TEXT("/Engine/BasicShapes/Cone.Cone"), PadCm + FVector(0, 0, 800.f), FRotator::ZeroRotator, FVector(4.f, 4.f, 3.f), ShipColor);
+		for (int32 Leg = 0; Leg < 4; ++Leg)
+		{
+			const float Angle = Leg * 90.f + 45.f;
+			const FVector Out = FRotator(0, Angle, 0).Vector() * 260.f;
+			AddAccent(Ship, TEXT("/Engine/BasicShapes/Cube.Cube"), PadCm + Out + FVector(0, 0, 90.f),
+				FRotator(0, Angle, 25.f), FVector(0.35f, 0.35f, 2.4f), Steel);
+		}
 		AddLabel(Ship, TEXT("Supply Ship"), ShipColor, 620.f);
 		ShipVisual = Ship;
 	}

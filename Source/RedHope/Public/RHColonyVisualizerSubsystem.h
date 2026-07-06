@@ -44,7 +44,13 @@ private:
 	// player can read the colony at a glance. Presentation-only, like ScaleFor.
 	FLinearColor TintFor(FName DefName) const;
 	void ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color) const;
+	void ApplyTint(UStaticMeshComponent* Mesh, const FLinearColor& Color) const;
 	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const;
+	// Silhouette pass (director: "no boring rectangles"): each family gets a
+	// distinct primitive-composed form - chimneys, masts, domes, tanks. World-
+	// space accents (buildings never move), added only once construction ends.
+	void AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color) const;
+	void BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
