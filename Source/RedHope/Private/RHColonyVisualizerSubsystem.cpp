@@ -571,6 +571,27 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	{
 		BuildSilhouette(Actor, Instance.DefName, Instance.LocationCm, Scale);
 	}
+	else
+	{
+		// Construction site: hazard corner posts + a lit work lamp on a mast.
+		// A dim foundation slab alone reads as a finished flat deck from the
+		// strategic camera - and disappears entirely at night while the robots
+		// are still working it.
+		const TCHAR* Cube = TEXT("/Engine/BasicShapes/Cube.Cube");
+		const TCHAR* Sphere = TEXT("/Engine/BasicShapes/Sphere.Sphere");
+		const float Hx = Scale.X * 50.f;
+		const float Hy = Scale.Y * 50.f;
+		for (int32 C = 0; C < 4; ++C)
+		{
+			const FVector Corner((C & 1) ? Hx : -Hx, (C & 2) ? Hy : -Hy, 0.f);
+			AddAccent(Actor, Cube, Instance.LocationCm + Corner + FVector(0, 0, 85.f), FRotator::ZeroRotator,
+				FVector(0.14f, 0.14f, 1.7f), RHCanon::HazYellow, FLinearColor(0.4f, 0.28f, 0.02f));
+		}
+		AddAccent(Actor, Cube, Instance.LocationCm + FVector(0, 0, 105.f), FRotator::ZeroRotator,
+			FVector(0.09f, 0.09f, 2.1f), RHCanon::DarkSlate);
+		AddAccent(Actor, Sphere, Instance.LocationCm + FVector(0, 0, 225.f), FRotator::ZeroRotator,
+			FVector(0.28f), RHCanon::HazYellow, FLinearColor(3.2f, 2.2f, 0.35f));
+	}
 	BuildingVisuals.Add(Instance.Id, Actor);
 }
 

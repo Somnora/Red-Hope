@@ -50,6 +50,10 @@ void URHSimClockSubsystem::Tick(float DeltaTime)
 void URHSimClockSubsystem::SetSpeed(float NewSpeed)
 {
 	Speed = FMath::Clamp(NewSpeed, 0.f, 64.f);
+	if (Speed > 0.f && Speed <= EraSpeedThreshold)
+	{
+		LastAgentSpeed = Speed;
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Sim speed set to %.0fx%s"), Speed, IsEraMode() ? TEXT(" (era mode)") : TEXT(""));
 }
 

@@ -54,6 +54,9 @@ public:
 
 	void SetSpeed(float NewSpeed);
 	float GetSpeed() const { return Speed; }
+	// Last running agent-band speed (1x..threshold). The era auto-drop restores
+	// this instead of dumping the player to 1x when era mode is refused.
+	float GetLastAgentSpeed() const { return LastAgentSpeed; }
 	double GetSimSecondsTotal() const { return SimSecondsTotal; }
 	int32 GetSol() const { return static_cast<int32>(SimSecondsTotal / SolLengthSimSeconds); }
 	// 0..1 through the current sol; drives sun angle + TimeOfSol MPC scalar.
@@ -73,6 +76,7 @@ private:
 	void BroadcastSolIfElapsed();
 
 	float Speed = 1.f;
+	float LastAgentSpeed = 1.f;
 	float Accumulator = 0.f;
 	double SimSecondsTotal = 0.0;
 	int32 StepsThisFrame = 0;

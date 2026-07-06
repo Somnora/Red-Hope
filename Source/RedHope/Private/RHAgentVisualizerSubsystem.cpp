@@ -69,13 +69,17 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	MeshComponent->SetStaticMesh(Cube);
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComponent->SetCastShadow(true);
-	// Canon rover: bone-white body (director's ConstructionDrone reference) -
-	// reads bright against the rust regolith. Per-class detailing arrives
-	// with M1-b's fleet panel.
+	// Canon: bone-white body (humanoid android chassis lands with the deferred
+	// art pass; this instanced block is the stand-in). Reads bright against
+	// the rust regolith.
 	if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
 	{
 		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, MeshComponent);
 		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.62f, 0.60f, 0.54f));
+		// Warm self-glow: a powered unit - the night shift stays visible
+		// instead of vanishing until sunrise. 0.1 proved invisible in footage;
+		// site lamps sit at ~3.2, so this reads as a dim unit, not a light.
+		Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor(0.60f, 0.50f, 0.28f));
 		MeshComponent->SetMaterial(0, Mid);
 	}
 }

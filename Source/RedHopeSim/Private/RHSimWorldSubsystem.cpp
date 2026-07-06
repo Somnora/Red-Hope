@@ -197,8 +197,16 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 		FString Why;
 		if (!CanEnterEraMode(Why))
 		{
-			Clock->SetSpeed(1.f);
-			UE_LOG(LogRedHopeSim, Display, TEXT("ERA DROP: %s - returning to 1x"), *Why);
+			// Refusing era mode is not a punishment: hold the player's last
+			// agent-band speed (not 1x) and surface the reason as a toast -
+			// the silent drop read as a speed-control bug in the field.
+			const float Restore = FMath::Max(1.f, Clock->GetLastAgentSpeed());
+			Clock->SetSpeed(Restore);
+			UE_LOG(LogRedHopeSim, Display, TEXT("ERA REFUSED: %s - holding %.0fx"), *Why, Restore);
+			FRHCommand SpeedCmd;
+			SpeedCmd.Verb = FName("SetSpeed");
+			SpeedCmd.Target = FName("EraMode");
+			OnCommandRejected.Broadcast(SpeedCmd, FString::Printf(TEXT("era mode unavailable: %s"), *Why));
 			return;
 		}
 	}

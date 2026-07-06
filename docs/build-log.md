@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-06 — Session 12 (demo reel + recording-review fix batch — verified on director footage)
+
+- **Demo pipeline root cause + fix:** recording #2 showed "no movement but the sun" because the `BP_DemoReel_Driver` had been placed in a deliberately-unsaved level — quitting the editor for the compile discarded it, so Play had no driver. Re-placed and **saved into L_Slice** (OFPA external actor; `save_actor` failed on the fresh package, `save_assets []` = Save All worked). Rule: demo drivers get saved, then removed by commit when retired.
+- **Fix batch (compiled clean, verified against recording #3 — 163 s, one full sol):**
+  - Construction sites: 4 hazard corner posts + mast work lamp — verified legible day AND night; the site→completed swap reads clearly in footage.
+  - Era refusal now restores `LastAgentSpeed` + broadcasts a toast instead of silently dumping to 1× — compiled in, **still unexercised** (the one 60× press on record legitimately engaged era: nothing was under construction).
+  - Robot night glow: 0.1 emissive proved invisible in footage → bumped to (0.6, 0.5, 0.28) this commit, **pending next compile + footage check**.
+- **Reel v2 first act verified from the sim log:** 9 uplink orders in one burst, every one executed at exactly +45 sim-s; fabrication times per DataTable (Solar 60 s, ChargePad 120 s, Forge 400 s, Pylon 90 s); Forge batching 25 kg Struct per 100 sim-s; the Delay-150 pylon beat fired on time. Manifest/launch act not reached — director stopped at ~163 s; the full arc needs the ~12-min run.
+- **Accidental stress test, passed:** `RH.Showcase` was run pre-recording (double idle load). Overnight the bank hit 0/10000 → **SHED:13** in the readout, construction froze, and dawn restored loads + resumed building with no errors — the load-shed system's first end-to-end showing in footage. The sol-1 autosave fired mid-recording (slot 'auto', 19 buildings, 7 robots).
+- Notes for later: era→agent speed drop dumped 43 sim-s with a warning (accumulator flush; fold into M1-c era work); showcase IceDrill correctly warns "no deposit within 12 m"; SolarArray glass glow reads oddly bright at night (helps legibility; art-pass item).
+
 ## 2026-07-06 — Session 11 (Gate C visual rounds: designed gray-box — committed `ed1b71e`)
 
 - **Director-driven iteration, screenshot-verified each round** (director played + screenshotted; agent diagnosed + fixed + compiled on editor-close gates — 6 compile cycles, all clean, ~13 s each once warm):
