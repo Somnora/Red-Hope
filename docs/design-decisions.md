@@ -52,6 +52,10 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
   5. **Sliced-ant-farm camera:** each floor a horizontal slice from above, surrounding un-excavated rock as a cut/sliced slab; elevator-panel floor selector + focus-depth slicing + shaft-section HUD widget; orbital-to-ground zoom pillar preserved.
   - **Milestone:** Z-model coordinate → **M1-b** (front, before fleet realism); radiation/flares → **M1-c**; full vault + borer + spoil loop + life-support → **M1-d** (the Phase 1 exit). Flat-terrain-until-M2 unaffected (shaft needs no heightmap). Revises the logged M1-d habitat chain: Shielding's role flips to the surface tax; Habitat becomes per-floor build-out; borer/H₂/O₂-fill are net-new.
 
+## Directives — 2026-07-06 (director)
+
+- **Gate C look accepted; bespoke building-art pass deferred.** The "designed gray-box" state (panel-seam/panel-variation/dirt material, greeble, foundation plinths, function-color bands, composed multi-mass Lander/Electrolyzer/WaterPlant/Forge/ComputeModule — committed `ed1b71e`) ships as the Gate C visual baseline. The director wants a deeper pass on overall building design "later on when it makes more sense to improve our art design" — i.e. a real art milestone (bespoke meshes/textures), not further primitive polish. Until then the standing gray-box order stands; visual work stays maintenance-only.
+
 ## Accepted behaviors & known issues — 2026-07-05 (M0-c verification, agent-logged)
 
 - **Accepted (reads as intended drama):** at night on an empty bank the whole grid sheds, charge pads included — docked robots wait for sunrise. Whether the Lander should hold a reserve for pads is an M1 balance question, not an M0 bug.
