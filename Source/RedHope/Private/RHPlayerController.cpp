@@ -106,8 +106,9 @@ void ARHPlayerController::SetupInputComponent()
 	IA_Click = MakeAction(TEXT("IA_Click"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_Click, EKeys::LeftMouseButton);
 
+	// Escape only: the right mouse button is drag-orbit, with click-no-drag
+	// cancel handled in Tick (a bound Started event would fire on drag starts).
 	IA_Cancel = MakeAction(TEXT("IA_Cancel"), EInputActionValueType::Boolean);
-	Mapping->MapKey(IA_Cancel, EKeys::RightMouseButton);
 	Mapping->MapKey(IA_Cancel, EKeys::Escape);
 
 	IA_Pause = MakeAction(TEXT("IA_Pause"), EInputActionValueType::Boolean);
@@ -194,6 +195,34 @@ bool ARHPlayerController::CursorToGround(FVector& OutCm) const
 void ARHPlayerController::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Mouse-drag camera (director feedback, Gate C hand-play): right-drag
+	// orbits, middle-drag pans; a right CLICK (under the drag threshold)
+	// still cancels the active placement/dig mode.
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		float DX = 0.f, DY = 0.f;
+		GetInputMouseDelta(DX, DY);
+		if (IsInputKeyDown(EKeys::RightMouseButton))
+		{
+			RmbDragPx += FMath::Abs(DX) + FMath::Abs(DY);
+			Cam->AddOrbit(DX * 0.6f);
+		}
+		else if (WasInputKeyJustReleased(EKeys::RightMouseButton))
+		{
+			if (RmbDragPx < 4.f)
+			{
+				CancelModes();
+			}
+			RmbDragPx = 0.f;
+		}
+		if (IsInputKeyDown(EKeys::MiddleMouseButton))
+		{
+			// Drag right/up moves the world with the cursor (focus goes opposite).
+			const float CmPerPx = Cam->GetViewDistanceCm() * 0.0016f;
+			Cam->AddPan(FVector2D(-DY, DX) * -CmPerPx);
+		}
+	}
 
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;

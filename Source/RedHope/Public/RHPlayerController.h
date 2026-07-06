@@ -66,4 +66,5 @@ private:
 	FName PendingBuildDef;
 	bool bDigMode = false;
 	float LastNonZeroSpeed = 1.f;
+	float RmbDragPx = 0.f; // accumulated right-drag distance: click-vs-drag disambiguation
 };

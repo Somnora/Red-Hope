@@ -69,6 +69,21 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	[
 		SNew(SOverlay)
 
+		// Controls hint, top left - discoverability until the diegetic pass.
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top).Padding(8.f)
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(DeckBg)
+			.Padding(FMargin(10.f, 6.f))
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("WASD pan   wheel zoom   RMB-drag orbit   MMB-drag pan\nSpace pause   1/2/3/4 speed   Esc/right-click cancel order")))
+				.Font(DeckFont(9))
+				.ColorAndOpacity(ReadoutFg)
+			]
+		]
+
 		// Colony readout, top right.
 		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(8.f)
 		[

@@ -34,8 +34,10 @@ public:
 	}
 
 	// 0 = ground register (25 m), 1 = orbital register (3000 m).
+	// Default 0.45 ~= 215 m: the whole starting colony in frame with readable
+	// 3D depth on the gray-boxes - the classic strategy opening shot.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "RedHope|Camera", meta = (ClampMin = "0", ClampMax = "1"))
-	float ZoomT = 0.85f;
+	float ZoomT = 0.45f;
 
 	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MinDistanceCm = 2500.f;    // 25 m
 	UPROPERTY(EditAnywhere, Category = "RedHope|Camera") float MaxDistanceCm = 300000.f;  // 3000 m
@@ -50,5 +52,5 @@ private:
 
 	FVector FocusPointCm = FVector::ZeroVector;
 	float OrbitYawDeg = 0.f;
-	float SmoothedZoomT = 0.85f;
+	float SmoothedZoomT = 0.45f;
 };
