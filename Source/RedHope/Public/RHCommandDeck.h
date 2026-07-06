@@ -21,6 +21,8 @@ public:
 
 private:
 	FText GetStatusText() const;
+	FText GetNoticeText() const;
+	EVisibility GetNoticeVisibility() const;
 	FText GetBuildLabel(FName DefName) const;
 	FReply HandleBuild(FName DefName);
 	FReply HandleDig();

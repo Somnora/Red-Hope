@@ -1,6 +1,7 @@
 #include "RHCommandDeck.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
+#include "RHColonyVisualizerSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -84,7 +85,8 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// Colony readout, top right.
+		// Colony readout, top right. The notice line beneath it is the visible
+		// rejection channel - GEngine debug messages hide under the Slate deck.
 		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(8.f)
 		[
 			SNew(SBorder)
@@ -92,10 +94,22 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			.BorderBackgroundColor(DeckBg)
 			.Padding(FMargin(10.f, 6.f))
 			[
-				SNew(STextBlock)
-				.Text(this, &SRHCommandDeck::GetStatusText)
-				.Font(DeckFont(10))
-				.ColorAndOpacity(ReadoutFg)
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetStatusText)
+					.Font(DeckFont(10))
+					.ColorAndOpacity(ReadoutFg)
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetNoticeText)
+					.Font(DeckFont(10))
+					.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.08f))
+					.Visibility(this, &SRHCommandDeck::GetNoticeVisibility)
+				]
 			]
 		]
 
@@ -189,6 +203,18 @@ FText SRHCommandDeck::GetStatusText() const
 		break;
 	}
 	return FText::FromString(Text);
+}
+
+FText SRHCommandDeck::GetNoticeText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	return Viz ? Viz->GetNoticeText() : FText::GetEmpty();
+}
+
+EVisibility SRHCommandDeck::GetNoticeVisibility() const
+{
+	return GetNoticeText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
 FText SRHCommandDeck::GetBuildLabel(FName DefName) const

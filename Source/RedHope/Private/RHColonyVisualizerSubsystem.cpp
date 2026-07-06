@@ -612,14 +612,23 @@ void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInst
 
 void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason)
 {
-	// Toast stand-in until the UI pass.
 	UE_LOG(LogRedHope, Warning, TEXT("ORDER REJECTED: %s %s - %s"),
 		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
-	if (GEngine)
+	LastNotice = FString::Printf(TEXT("REJECTED %s %s: %s"),
+		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
+	LastNoticeRealSeconds = FPlatformTime::Seconds();
+}
+
+FText URHColonyVisualizerSubsystem::GetNoticeText() const
+{
+	// Real seconds, not sim seconds: the notice must survive a pause and not
+	// flash past at 8x.
+	constexpr double NoticeHoldSeconds = 12.0;
+	if (FPlatformTime::Seconds() - LastNoticeRealSeconds > NoticeHoldSeconds)
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 6.f, FColor::Orange,
-			FString::Printf(TEXT("Order rejected: %s (%s)"), *Cmd.Target.ToString(), *Reason));
+		return FText::GetEmpty();
 	}
+	return FText::FromString(LastNotice);
 }
 
 void URHColonyVisualizerSubsystem::HandleQuotaMet(int32 Sol, double AwardKg)

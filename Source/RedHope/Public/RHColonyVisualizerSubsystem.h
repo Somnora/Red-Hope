@@ -29,6 +29,11 @@ public:
 		return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 	}
 
+	// Last order-rejection notice, empty once stale. The visualizer already
+	// listens on the sim's rejection seam; the deck polls this rather than
+	// wiring its own delegate (debug messages hide under the Slate overlay).
+	FText GetNoticeText() const;
+
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
@@ -62,4 +67,6 @@ private:
 	FDelegateHandle AddedHandle;
 	FDelegateHandle CompletedHandle;
 	FDelegateHandle RejectedHandle;
+	FString LastNotice;
+	double LastNoticeRealSeconds = -1.0e9;
 };
