@@ -40,6 +40,11 @@ private:
 	void HandleColonyReloaded();
 	void SpawnDepositMarkers();
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
+	// Legibility pass (gray-box, pre-art): one hue per function family so a
+	// player can read the colony at a glance. Presentation-only, like ScaleFor.
+	FLinearColor TintFor(FName DefName) const;
+	void ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color) const;
+	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;

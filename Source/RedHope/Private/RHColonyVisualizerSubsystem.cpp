@@ -5,7 +5,69 @@
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextRenderComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "DrawDebugHelpers.h"
+
+FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
+{
+	// One hue per function family. Deliberately saturated: the Mars light is
+	// dim and dusty, and these must read from 200 m up.
+	static const TMap<FName, FLinearColor> Palette = {
+		{ FName("Lander"),        FLinearColor(0.85f, 0.85f, 0.90f) },  // off-white: home
+		{ FName("SolarArray"),    FLinearColor(0.08f, 0.22f, 0.70f) },  // PV blue
+		{ FName("BatteryBank"),   FLinearColor(0.12f, 0.60f, 0.25f) },  // charge green
+		{ FName("Pylon"),         FLinearColor(0.95f, 0.60f, 0.05f) },  // amber mast
+		{ FName("ChargePad"),     FLinearColor(0.95f, 0.85f, 0.15f) },  // pad yellow
+		{ FName("Forge"),         FLinearColor(0.75f, 0.15f, 0.08f) },  // furnace red
+		{ FName("IceDrill"),      FLinearColor(0.50f, 0.85f, 0.95f) },  // ice cyan
+		{ FName("WaterPlant"),    FLinearColor(0.15f, 0.40f, 0.85f) },  // water blue
+		{ FName("Electrolyzer"),  FLinearColor(0.55f, 0.25f, 0.80f) },  // O2/H2 violet
+		{ FName("Stockpile"),     FLinearColor(0.45f, 0.33f, 0.20f) },  // crate brown
+		{ FName("ComputeModule"), FLinearColor(0.90f, 0.25f, 0.55f) },  // silicon magenta
+		{ FName("Habitat"),       FLinearColor(0.95f, 0.95f, 0.95f) },
+	};
+	if (const FLinearColor* Found = Palette.Find(DefName))
+	{
+		return *Found;
+	}
+	return FLinearColor(0.5f, 0.5f, 0.5f);
+}
+
+void URHColonyVisualizerSubsystem::ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color) const
+{
+	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+	if (!Base || !Actor)
+	{
+		return;
+	}
+	UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Actor->GetStaticMeshComponent());
+	Mid->SetVectorParameterValue(FName("Tint"), Color);
+	Actor->GetStaticMeshComponent()->SetMaterial(0, Mid);
+}
+
+void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const
+{
+	if (!Actor)
+	{
+		return;
+	}
+	UTextRenderComponent* Label = NewObject<UTextRenderComponent>(Actor);
+	Label->SetupAttachment(Actor->GetRootComponent());
+	// Absolute: the parent actor carries a non-uniform footprint scale that
+	// would smear the glyphs.
+	Label->SetAbsolute(true, true, true);
+	Label->RegisterComponent();
+	Label->SetText(FText::FromString(Text));
+	Label->SetWorldSize(220.f);
+	Label->SetHorizontalAlignment(EHTA_Center);
+	Label->SetTextRenderColor((Color * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
+	// Lying flat on the ground, top toward +X: readable from the strategic
+	// camera's default heading.
+	Label->SetWorldLocationAndRotation(
+		Actor->GetActorLocation() * FVector(1, 1, 0) + FVector(-SouthOffsetCm, 0, 12.f),
+		FRotator(-90.f, 180.f, 0.f));
+}
 
 void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
@@ -94,6 +156,18 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
 #if WITH_EDITOR
 		Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
 #endif
+		// Ground-truth colors: regolith rust, ore slate, ice pale blue.
+		FLinearColor DepColor(0.55f, 0.30f, 0.12f);
+		if (D.Type == FName("Ore"))
+		{
+			DepColor = FLinearColor(0.30f, 0.32f, 0.40f);
+		}
+		else if (D.Type == FName("Ice"))
+		{
+			DepColor = FLinearColor(0.75f, 0.90f, 1.00f);
+		}
+		ApplyTint(Actor, DepColor);
+		AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
 		DepositMarkers.Add(Actor);
 	}
 }
@@ -167,6 +241,11 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 #if WITH_EDITOR
 	Actor->SetActorLabel(FString::Printf(TEXT("Sim_%s_%d"), *Instance.DefName.ToString(), Instance.Id));
 #endif
+	// Legibility: family hue (construction sites sit dim until finished) + a
+	// ground label so "which block is the Forge" never needs asking again.
+	const FLinearColor Tint = TintFor(Instance.DefName);
+	ApplyTint(Actor, Instance.bUnderConstruction ? Tint * 0.25f : Tint);
+	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
 	BuildingVisuals.Add(Instance.Id, Actor);
 }
 
@@ -179,6 +258,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInst
 			const FVector Scale = ScaleFor(Instance); // no longer under construction: full height
 			Actor->SetActorScale3D(Scale);
 			Actor->SetActorLocation(Instance.LocationCm + FVector(0, 0, Scale.Z * 50.f));
+			ApplyTint(Actor, TintFor(Instance.DefName)); // dim site -> full family hue
 		}
 	}
 }
@@ -225,6 +305,9 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 #if WITH_EDITOR
 		Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
 #endif
+		const FLinearColor ShipColor(0.92f, 0.92f, 0.98f);
+		ApplyTint(Ship, ShipColor);
+		AddLabel(Ship, TEXT("Supply Ship"), ShipColor, 620.f);
 		ShipVisual = Ship;
 	}
 	if (GEngine)
