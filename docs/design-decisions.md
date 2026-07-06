@@ -43,6 +43,8 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 
 - **Mars sky per rover imagery:** Mars has no oxygen-rich atmosphere → no clouds, ever. Sky referencing comes from Mars rover photography: butterscotch dust dome, cool sunset aureole. Implemented session 6 as the habitability-0 endpoints of the atmosphere dial.
 - **M0 progression approved stepwise:** M0-a (definitions/power/territory), then M0-b ("move forward with M0-b"), then M0-c ("please continue building this game"). Each stage verified in-engine before the next began.
+- **Canon visual language from the director's reference set** (`~/Martians/assets/sprites`): bone-white / dark-slate industrial bodies, hazard-yellow trim, one saturated glowing accent per function (furnace-orange, cell-teal, ice-blue). Reference designs outrank agent taste per source-of-truth ordering. Applied session (canon pass) as the gray-box legibility language; real art pass still deferred.
+- **Underground habitation is now explicit and core** (2026-07-05): surface structures pay a radiation/shielding tax; the colony houses people underground — bored vertical shaft, habitable floors off a central spine, lift as connective element; mining borers double as habitat excavators; 5 subsurface floors to start (data-expandable); the Phase 1 exit habitat is substantially underground. **Implementation approach pending director ruling** on `docs/m1-underground-proposal.md` (Z-model, spoil→Forge loop, radiation/flares, floor-slice camera, shaft-as-vertical-trunk, milestone placement). Flat-terrain-until-M2 confirmed unaffected (shaft needs no heightmap). Note: this revises the logged M1-d habitat chain (§7 of the proposal).
 
 ## Accepted behaviors & known issues — 2026-07-05 (M0-c verification, agent-logged)
 
