@@ -78,6 +78,10 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Director direction attached to the verdict:** gameplay and game UI should keep improving — the playability strand carries explicit weight going into M1-b+ (inspection card, fleet panel, visible-feedback fixes), while the diegetic skin remains the M1-d set-piece per the approved scope.
 - **Findings from the run, queued as M1-b work:** placement/dig/confirmation prompts render invisibly under the help box (same GEngine-debug channel as the rejection toasts fixed in `924e1df`) → all player-facing prompts move to the deck's Slate notice channel; the paused state at session start is too easy to miss → prominent PAUSED treatment.
 
+## Approved — 2026-07-06 (M1-b begin, director: "move onto Gate A")
+
+- **M1-b working spec adopted** (`docs/m1b-working-spec.md`): Gate A (Z-model + footprint validation) begins; Gates B (fleet reality) and C (player's eyes) follow on its verification.
+
 ## Pending — awaiting director review
 
-- **M1-b working spec** (`docs/m1b-working-spec.md`): Z-model coordinate + fleet reality (wear/repair/survey) + footprint validation + inspection card + UI feedback batch.
+- (nothing — M1-b Gate A in progress)

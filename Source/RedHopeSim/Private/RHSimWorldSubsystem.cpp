@@ -18,8 +18,9 @@ namespace
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
+	// v2 (M1-b): Level on commands, buildings, deposits, robots.
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 1;
+	constexpr uint32 RHSaveVersion = 2;
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -78,6 +79,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
+	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
+	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -304,7 +307,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 		}
 		for (FRHBuildingInstance& B : Buildings)
 		{
-			if (B.bUnderConstruction)
+			if (B.bUnderConstruction || B.Level != D.Level)
 			{
 				continue;
 			}
@@ -348,7 +351,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			FRHBuildingInstance* Dest = nullptr;
 			for (FRHBuildingInstance& C : Buildings)
 			{
-				if (C.bUnderConstruction || C.Id == B.Id)
+				if (C.bUnderConstruction || C.Id == B.Id || C.Level != B.Level)
 				{
 					continue;
 				}
@@ -371,7 +374,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			{
 				for (FRHBuildingInstance& S : Buildings)
 				{
-					if (!S.bUnderConstruction && S.Id != B.Id && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
+					if (!S.bUnderConstruction && S.Id != B.Id && S.Level == B.Level && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
 					{
 						Dest = &S;
 						break;
@@ -420,7 +423,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		int32 DestId = 0;
 		for (const FRHBuildingInstance& B : Buildings)
 		{
-			if (B.bUnderConstruction)
+			if (B.bUnderConstruction || B.Level != D.Level)
 			{
 				continue;
 			}
@@ -445,7 +448,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		{
 			for (const FRHBuildingInstance& B : Buildings)
 			{
-				if (!B.bUnderConstruction && (B.DefName == NAME_Stockpile || B.DefName == NAME_Lander))
+				if (!B.bUnderConstruction && B.Level == D.Level && (B.DefName == NAME_Stockpile || B.DefName == NAME_Lander))
 				{
 					DestId = B.Id;
 					break;
@@ -484,7 +487,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			int32 DestId = 0;
 			for (const FRHBuildingInstance& C : Buildings)
 			{
-				if (C.bUnderConstruction || C.Id == B.Id)
+				if (C.bUnderConstruction || C.Id == B.Id || C.Level != B.Level)
 				{
 					continue;
 				}
@@ -507,7 +510,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			{
 				for (const FRHBuildingInstance& S : Buildings)
 				{
-					if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id)
+					if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id && S.Level == B.Level)
 					{
 						DestId = S.Id;
 						break;
@@ -558,7 +561,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			int32 SourceId = 0;
 			for (const FRHBuildingInstance& S : Buildings)
 			{
-				if (S.bUnderConstruction || S.Id == Site.Id)
+				if (S.bUnderConstruction || S.Id == Site.Id || S.Level != Site.Level)
 				{
 					continue;
 				}
@@ -867,12 +870,21 @@ void URHSimWorldSubsystem::EnqueueCommand(FRHCommand Command)
 	UplinkQueue.Add(MoveTemp(Command));
 }
 
-bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason) const
+bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level) const
 {
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
 	if (!Def)
 	{
 		OutReason = FString::Printf(TEXT("Unknown building '%s'"), *DefName.ToString());
+		return false;
+	}
+	// Z-model: only the surface is buildable until the shaft exists (M1-d
+	// replaces this with the trunk-connectivity rule).
+	if (Level != 0)
+	{
+		OutReason = (Level > 0 || Level < -MaxDepth)
+			? FString::Printf(TEXT("No such floor (%d)"), Level)
+			: FString::Printf(TEXT("Floor %d is not connected - no shaft"), Level);
 		return false;
 	}
 	// Pylon-like defs (they project coverage and link by range) are the
@@ -883,7 +895,7 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 		double NearestNodeCm = TNumericLimits<double>::Max();
 		for (const FRHBuildingInstance& B : Buildings)
 		{
-			const FRHBuildingRow* NodeDef = B.bUnderConstruction ? nullptr : Defs->GetBuilding(B.DefName);
+			const FRHBuildingRow* NodeDef = (B.bUnderConstruction || B.Level != Level) ? nullptr : Defs->GetBuilding(B.DefName);
 			if (NodeDef && NodeDef->CoverageRadius_m > 0.f)
 			{
 				NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(B.LocationCm, LocationCm));
@@ -895,10 +907,35 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 			return false;
 		}
 	}
-	else if (!IsInCoverage(LocationCm))
+	else if (!IsInCoverage(LocationCm, Level))
 	{
 		OutReason = TEXT("Outside grid coverage - extend pylons first");
 		return false;
+	}
+	// Footprint overlap: one cell, one structure (the demo-era gap - two
+	// buildings could interpenetrate). Half-extents in cm match the ghost box
+	// (FootprintX cells x 2 m); strict < keeps edge-adjacent placement legal.
+	{
+		const double HalfX = FMath::Max(1, Def->FootprintX) * 100.0;
+		const double HalfY = FMath::Max(1, Def->FootprintY) * 100.0;
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			if (B.Level != Level)
+			{
+				continue;
+			}
+			const FRHBuildingRow* BDef = Defs->GetBuilding(B.DefName);
+			if (!BDef)
+			{
+				continue;
+			}
+			if (FMath::Abs(B.LocationCm.X - LocationCm.X) < HalfX + FMath::Max(1, BDef->FootprintX) * 100.0
+				&& FMath::Abs(B.LocationCm.Y - LocationCm.Y) < HalfY + FMath::Max(1, BDef->FootprintY) * 100.0)
+			{
+				OutReason = FString::Printf(TEXT("Footprint overlaps %s #%d"), *B.DefName.ToString(), B.Id);
+				return false;
+			}
+		}
 	}
 	if (Def->ImportOnly)
 	{
@@ -928,12 +965,16 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 	return true;
 }
 
-const FRHDepositState* URHSimWorldSubsystem::FindDepositNear(const FVector& LocationCm, double MaxDistCm) const
+const FRHDepositState* URHSimWorldSubsystem::FindDepositNear(const FVector& LocationCm, double MaxDistCm, int32 Level) const
 {
 	const FRHDepositState* Best = nullptr;
 	double BestDist = MaxDistCm;
 	for (const FRHDepositState& D : Deposits)
 	{
+		if (D.Level != Level)
+		{
+			continue;
+		}
 		const double Dist = FVector::DistXY(D.LocationCm, LocationCm);
 		if (Dist <= BestDist)
 		{
@@ -949,7 +990,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	if (Cmd.Verb == FName("Build"))
 	{
 		FString Reason;
-		if (!CanPlaceBuilding(Cmd.Target, Cmd.Location, Reason))
+		if (!CanPlaceBuilding(Cmd.Target, Cmd.Location, Reason, Cmd.Level))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -959,7 +1000,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		{
 			--ImportStock.FindOrAdd(Cmd.Target); // consumption happens at execution, not preview
 		}
-		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0);
+		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0, Cmd.Level);
 	}
 	else if (Cmd.Verb == FName("Dig"))
 	{
@@ -984,12 +1025,14 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	OnCommandExecuted.Broadcast(Cmd);
 }
 
-void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant)
+void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level)
 {
 	FRHBuildingInstance Instance;
 	Instance.Id = NextBuildingId++;
 	Instance.DefName = DefName;
 	Instance.LocationCm = LocationCm;
+	Instance.Level = Level;
+	Instance.LocationCm.Z = Level * FloorHeightCm; // Z is derived, never authored
 
 	const FRHBuildingRow* Def = Defs->GetBuilding(DefName);
 	if (!bInstant && Def && Def->BuildTime_s > 0.0)
@@ -1009,7 +1052,7 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	{
 		for (const FRHDepositState& D : Deposits)
 		{
-			if (FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
+			if (D.Level == Level && FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
 			{
 				Instance.AttachedDepositId = D.Id;
 				break;
@@ -1077,11 +1120,11 @@ void URHSimWorldSubsystem::Debug_Showcase()
 	UE_LOG(LogRedHopeSim, Display, TEXT("[Showcase] placed %d building types"), Names.Num());
 }
 
-bool URHSimWorldSubsystem::IsInCoverage(const FVector& LocationCm) const
+bool URHSimWorldSubsystem::IsInCoverage(const FVector& LocationCm, int32 Level) const
 {
 	for (const FRHBuildingInstance& B : Buildings)
 	{
-		if (B.bUnderConstruction)
+		if (B.bUnderConstruction || B.Level != Level)
 		{
 			continue;
 		}
@@ -1172,6 +1215,31 @@ FVector URHSimWorldSubsystem::GetSiteLocation(const FRHSiteRef& Site) const
 	return FVector::ZeroVector;
 }
 
+int32 URHSimWorldSubsystem::GetSiteLevel(const FRHSiteRef& Site) const
+{
+	if (Site.BuildingId > 0)
+	{
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			if (B.Id == Site.BuildingId)
+			{
+				return B.Level;
+			}
+		}
+	}
+	if (Site.DepositId > 0)
+	{
+		for (const FRHDepositState& D : Deposits)
+		{
+			if (D.Id == Site.DepositId)
+			{
+				return D.Level;
+			}
+		}
+	}
+	return 0;
+}
+
 double URHSimWorldSubsystem::DigDeposit(int32 DepositId, double Kg)
 {
 	FRHDepositState* D = FindDeposit(DepositId);
@@ -1205,13 +1273,13 @@ void URHSimWorldSubsystem::ReleaseDigClaim(int32 DepositId)
 	}
 }
 
-int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm)
+int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm, int32 RobotLevel)
 {
 	int32 BestId = 0;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHDepositState& D : Deposits)
 	{
-		if (D.bDesignated && D.RemainingKg > 0.0 && D.DigClaims < 2)
+		if (D.Level == RobotLevel && D.bDesignated && D.RemainingKg > 0.0 && D.DigClaims < 2)
 		{
 			const double Dist = FVector::DistXY(D.LocationCm, RobotPosCm);
 			if (Dist < BestDist)
@@ -1228,13 +1296,13 @@ int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm)
 	return BestId;
 }
 
-bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask)
+bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel)
 {
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
 	{
-		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid())
+		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid() && GetSiteLevel(T.From) == RobotLevel)
 		{
 			const double Dist = FVector::DistXY(GetSiteLocation(T.From), RobotPosCm);
 			if (Dist < BestDist)
@@ -1326,13 +1394,13 @@ bool URHSimWorldSubsystem::IsDepositSpent(int32 DepositId) const
 	return true;
 }
 
-bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask)
+bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel)
 {
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
 	{
-		if (T.Type == ERHTaskType::Build && !T.ClaimedBy.IsValid())
+		if (T.Type == ERHTaskType::Build && !T.ClaimedBy.IsValid() && GetSiteLevel(T.To) == RobotLevel)
 		{
 			const double Dist = FVector::DistXY(GetSiteLocation(T.To), RobotPosCm);
 			if (Dist < BestDist)
@@ -1393,14 +1461,14 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	return false;
 }
 
-bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm) const
+bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm, int32 RobotLevel) const
 {
 	const FName NAME_ChargePad(TEXT("ChargePad"));
 	double BestDist = TNumericLimits<double>::Max();
 	OutBuildingId = 0;
 	for (const FRHBuildingInstance& B : Buildings)
 	{
-		if (!B.bUnderConstruction && B.DefName == NAME_ChargePad)
+		if (!B.bUnderConstruction && B.DefName == NAME_ChargePad && B.Level == RobotLevel)
 		{
 			const double Dist = FVector::DistXY(B.LocationCm, RobotPosCm);
 			if (Dist < BestDist)
@@ -1652,14 +1720,14 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHCommand& C : UplinkQueue)
 	{
-		Ar << C.Verb << C.Target << C.Location << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+		Ar << C.Verb << C.Target << C.Location << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
 	}
 
 	Num = SavedBuildings.Num();
 	Ar << Num;
 	for (FRHBuildingInstance& B : SavedBuildings)
 	{
-		Ar << B.Id << B.DefName << B.LocationCm << B.bUnderConstruction << B.bPowered
+		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
@@ -1678,7 +1746,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHDepositState& D : SavedDeposits)
 	{
-		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.bDesignated;
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDesignated;
 	}
 
 	Num = SavedTasks.Num();
@@ -1696,7 +1764,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHRobotSaveState& R : Robots)
 	{
-		Ar << R.DefName << R.PosCm << R.ChargeWh << R.Wear;
+		Ar << R.DefName << R.PosCm << R.Level << R.ChargeWh << R.Wear;
 	}
 
 	const FString Path = SaveSlotToPath(Slot);
@@ -1768,7 +1836,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHCommand C;
-		Ar << C.Verb << C.Target << C.Location << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+		Ar << C.Verb << C.Target << C.Location << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
 		UplinkQueue.Add(MoveTemp(C));
 	}
 
@@ -1776,7 +1844,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHBuildingInstance B;
-		Ar << B.Id << B.DefName << B.LocationCm << B.bUnderConstruction << B.bPowered
+		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
@@ -1797,7 +1865,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHDepositState D;
-		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.bDesignated;
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDesignated;
 		Deposits.Add(MoveTemp(D));
 	}
 
@@ -1819,7 +1887,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHRobotSaveState R;
-		Ar << R.DefName << R.PosCm << R.ChargeWh << R.Wear;
+		Ar << R.DefName << R.PosCm << R.Level << R.ChargeWh << R.Wear;
 		if (const FRHRobotRow* Row = Defs->GetRobot(R.DefName))
 		{
 			SpawnRobotTracked(R.DefName, *Row, R.PosCm, R.ChargeWh, R.Wear, Respawned);

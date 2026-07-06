@@ -69,6 +69,10 @@ struct REDHOPESIM_API FRHDepositState
 	UPROPERTY() double RemainingKg = 0.0;
 	UPROPERTY() double PileKg = 0.0;
 	UPROPERTY() FVector LocationCm = FVector::ZeroVector;
+	// Z-model (M1-b): 0 = surface, -1..-MaxDepth = shaft floors. The sim
+	// reasons in floors; LocationCm.Z is derived presentation. Deposits stay
+	// surface-accessed through Phase 1 (underground spec §7).
+	UPROPERTY() int32 Level = 0;
 	UPROPERTY() bool bDesignated = false;
 	UPROPERTY() int32 DigClaims = 0;  // excavators currently working it
 };

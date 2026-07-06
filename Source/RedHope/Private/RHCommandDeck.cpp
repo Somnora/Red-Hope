@@ -46,6 +46,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 
 	// Build palette: every slice-active, constructable def, straight from data.
 	TSharedRef<SHorizontalBox> Palette = SNew(SHorizontalBox);
+	int32 MaxDepth = 5;
 	if (const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr)
 	{
 		if (const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>())
@@ -64,6 +65,41 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				];
 			});
 		}
+		if (const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			MaxDepth = Sim->GetMaxDepth();
+		}
+	}
+
+	// Shaft section strip (Z-model, M1-b): the elevator panel's home. Gate A
+	// stub - SURF is the only floor until the shaft is bored (M1-d); the dark
+	// rows below it are the colony's chartered depth, straight from DT_Config.
+	TSharedRef<SVerticalBox> ShaftStrip = SNew(SVerticalBox);
+	ShaftStrip->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+	[
+		SNew(STextBlock).Text(FText::FromString(TEXT("SHAFT"))).Font(DeckFont(8)).ColorAndOpacity(ReadoutFg)
+	];
+	auto AddFloorCell = [&ShaftStrip](const FString& Label, bool bActive)
+	{
+		ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(bActive ? FLinearColor(0.05f, 0.28f, 0.24f, 0.9f) : FLinearColor(0.02f, 0.05f, 0.07f, 0.9f))
+			.Padding(FMargin(9.f, 4.f))
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Label))
+				.Font(DeckFont(9))
+				.Justification(ETextJustify::Center)
+				.ColorAndOpacity(bActive ? ReadoutFg : FLinearColor(0.32f, 0.39f, 0.43f, 1.f))
+			]
+		];
+	};
+	AddFloorCell(TEXT("SURF"), true);
+	for (int32 Floor = 1; Floor <= MaxDepth; ++Floor)
+	{
+		AddFloorCell(FString::Printf(TEXT("-%d"), Floor), false);
 	}
 
 	ChildSlot
@@ -110,6 +146,18 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.08f))
 					.Visibility(this, &SRHCommandDeck::GetNoticeVisibility)
 				]
+			]
+		]
+
+		// Shaft strip, left edge - the vertical map beside the sliced territory.
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(8.f)
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(DeckBg)
+			.Padding(FMargin(5.f, 5.f))
+			[
+				ShaftStrip
 			]
 		]
 

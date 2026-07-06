@@ -14,6 +14,9 @@ struct FRHRobotSaveState
 {
 	FName DefName;
 	FVector PosCm = FVector::ZeroVector;
+	// Z-model (M1-b): dormant until the shaft lets robots descend (M1-d);
+	// serialized now so the v2 save format survives that milestone unchanged.
+	int32 Level = 0;
 	float ChargeWh = 0.f;
 	float Wear = 0.f;
 	int32 TaskId = 0;      // open claim at save time (not restored)

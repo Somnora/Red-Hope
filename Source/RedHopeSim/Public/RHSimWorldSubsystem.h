@@ -21,6 +21,9 @@ struct REDHOPESIM_API FRHCommand
 	UPROPERTY() FName Verb;                     // Build, Dig, ...
 	UPROPERTY() FName Target;                   // definition/deposit row name
 	UPROPERTY() FVector Location = FVector::ZeroVector;
+	// Z-model (M1-b): the floor an order targets. 0 = surface; subsurface
+	// floors become orderable when the shaft exists (M1-d).
+	UPROPERTY() int32 Level = 0;
 	UPROPERTY() double Value = 0.0;
 	UPROPERTY() double IssuedAtSimSeconds = 0.0;
 	UPROPERTY() double ExecuteAtSimSeconds = 0.0;
@@ -36,6 +39,9 @@ struct REDHOPESIM_API FRHBuildingInstance
 	UPROPERTY() int32 Id = 0;
 	UPROPERTY() FName DefName;
 	UPROPERTY() FVector LocationCm = FVector::ZeroVector;
+	// Z-model (M1-b): the floor this structure occupies. Sim reasons in
+	// floors; LocationCm.Z = Level x FloorHeightCm, presentation-only.
+	UPROPERTY() int32 Level = 0;
 	UPROPERTY() bool bUnderConstruction = false;
 	UPROPERTY() bool bPowered = true;           // false when shed by priority
 	UPROPERTY() double BuildRemaining_s = 0.0;
@@ -98,15 +104,22 @@ public:
 	const TArray<FRHCommand>& GetUplinkQueue() const { return UplinkQueue; }
 
 	// --- Territory ---
-	bool IsInCoverage(const FVector& LocationCm) const;
+	// Every spatial query is per-level 2D (Z-model, M1-b): the shaft is the
+	// only cross-level connector and it does not exist until M1-d. Level
+	// defaults to the surface so agent-band callers stay unchanged until
+	// robots can descend.
+	bool IsInCoverage(const FVector& LocationCm, int32 Level = 0) const;
 	// True if a Build order for Def at LocationCm would be accepted right now
-	// (link/coverage rule, import stock, material sufficiency). The placement
-	// ghost polls this every frame; ExecuteCommand runs the SAME check at
-	// uplink execution - the authoritative gate stays at the seam, and the
-	// world may have changed during the signal delay (that is the game).
-	bool CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason) const;
+	// (link/coverage rule, footprint overlap, import stock, material
+	// sufficiency). The placement ghost polls this every frame; ExecuteCommand
+	// runs the SAME check at uplink execution - the authoritative gate stays
+	// at the seam, and the world may have changed during the signal delay
+	// (that is the game).
+	bool CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level = 0) const;
 	// Nearest slice deposit within MaxDistCm of a point, or nullptr (click-to-dig).
-	const FRHDepositState* FindDepositNear(const FVector& LocationCm, double MaxDistCm) const;
+	const FRHDepositState* FindDepositNear(const FVector& LocationCm, double MaxDistCm, int32 Level = 0) const;
+	int32 GetMaxDepth() const { return MaxDepth; }
+	double GetFloorHeightCm() const { return FloorHeightCm; }
 
 	// --- Reads (out) ---
 	const TArray<FRHBuildingInstance>& GetBuildings() const { return Buildings; }
@@ -129,9 +142,9 @@ public:
 	bool IsDepositWorkable(int32 DepositId) const; // designated, mass left, pile below cap
 	bool IsDepositSpent(int32 DepositId) const;    // no mass left underground or undesignated
 	void ReleaseDigClaim(int32 DepositId);
-	int32 TryClaimDig(const FVector& RobotPosCm);
+	int32 TryClaimDig(const FVector& RobotPosCm, int32 RobotLevel = 0);
 	// Hauler: claim nearest open haul task; then load at From / unload at To.
-	bool TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask);
+	bool TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel = 0);
 	// Loads up to CargoCapKg from the task's From site. Returns false if the
 	// task is gone or nothing could be loaded; otherwise sets the loaded mass
 	// and the dropoff location.
@@ -140,13 +153,13 @@ public:
 	void HaulUnload(int32 TaskId, float CargoKg);
 	// Fabricator: claim nearest construction; apply work seconds. Work only
 	// progresses once the site's materials are delivered.
-	bool TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask);
+	bool TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel = 0);
 	bool ApplyBuildWork(int32 BuildingId, double Seconds); // true when completed
 	void CompleteTask(int32 TaskId);
 	void AbandonTask(int32 TaskId);
 	// Charging: pads only (design rule). Returns false if no completed,
 	// powered pad exists.
-	bool FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm) const;
+	bool FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm, int32 RobotLevel = 0) const;
 	// Grants up to the pad's transfer rate x dt from grid energy. Zero when
 	// the pad is shed/unbuilt or the grid has nothing to give (night, empty
 	// bank) - the robot waits docked. Multiple robots may share a pad at
@@ -212,7 +225,9 @@ private:
 	void StepPower(float SubDt);
 	void ApplyManifestItemEffect(FName ItemName);
 	void ExecuteCommand(const FRHCommand& Cmd);
-	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant);
+	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0);
+	// The floor a task site sits on (building/deposit lookup; 0 if gone).
+	int32 GetSiteLevel(const FRHSiteRef& Site) const;
 	void SpawnStartingFleet();
 	void DeployFleetOnce();
 	// All sim-initiated robot spawns go through here so FleetCounts (the era
@@ -242,6 +257,9 @@ private:
 	float ChargeSeekFraction = 0.25f;
 	float ChargeResumeFraction = 0.9f;
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this
+	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
+	double FloorHeightCm = 400.0;
+	int32 MaxDepth = 5;
 	int32 NextBuildingId = 1;
 	int32 NextTaskId = 1;
 	bool bFleetDeployed = false;
