@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 20b (M1-d Gate A1: the shaft/excavation model + save v5, verified headless)
+
+- **Director green-lit M1-d Gate A** (`docs/m1d-working-spec.md`). Built the first reviewable increment, **A1 — the sim foundation** (code-only, no editor needed; the Borer DataTable row + paint-to-size UI + sliced camera are A2):
+  - **Shaft/excavation state:** `ShaftDepth` (floors the trunk reaches), `ShaftHeadCm`, `FloorCarvedCells` (per-level carved 10×10 count), `SpoilPileKg`. `ExtendShaft(depth)` emits `ShaftSpoilKgPerFloor` per bored floor; `ExcavateFloor(level, cells)` emits `SpoilKgPerCell`, refusing unreached floors. Config rows `ShaftSpoilKgPerFloor`/`SpoilKgPerCell` (1200/1200, CSV; **DT sync in A2's editor session** — code defaults match).
+  - **Level becomes buildable:** the hard `if (Level != 0)` placement refusal is replaced by trunk connectivity — `CanPlaceBuilding` allows `Level<0` iff `IsLevelConnected` (bore reached it), and the shaft is the grid node + coverage on a reached subsurface floor (link/coverage checks short-circuit). The build command already threaded `Cmd.Level`, so the seam was one function. Surface (`Level==0`) path provably unchanged.
+  - **Save v5:** shaft depth + head + carved map + spoil serialized; v4 refuses loudly.
+  - **Instruments:** `RH.Bore` / `RH.Excavate` cheats, `RH.Build … [Level]`, shaft line in `RH.Status`; RHSim commandlet `-vault` self-test.
+- **Verified headless (`-run=RHSim -vault`), every assertion green:** bore −2 → 2400 kg spoil; excavate −1×4 → 7200 kg, carved 4; unreached −4/−3 refused "bore deeper"; connectivity −1/−2 yes, −3 no; **ChargePad @−1 ALLOWED** (full coverage/footprint/cost chain), @−3 refused; radiation 1.0→0.05→0.0025; **save v5 round-trip** restored depth 2 / carved 4 / spoil 7200 after dirtying. 10-sol surface-arc regression identical to baseline (gen 50, Struct 400/300). Compile clean (66 s).
+- **Next — A2 (needs an editor session):** Borer building DT row + spoil/fuel recipes synced; hydrogen fuel draw; paint-to-size excavation UI; the sliced-ant-farm camera + elevator selector + shaft-section HUD widget; spoil→Forge hauling.
+
 ## 2026-07-07 — Session 20 (StormWearMul live in DT; radiation plumbing; shielding tax deferred to M1-d)
 
 - **Editor task cleared:** `StormWearMul = 2.0` added to the live DT_Config (was code-default-only since Session 19). Radiation config rows landed alongside it: `RadiationSurface = 1.0`, `RadiationPerLevelMul = 0.05`. Asset saved + insurance-committed before the compile gate (`5073816`, per the Content-trash rule).

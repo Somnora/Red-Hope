@@ -42,6 +42,56 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	Dig.Target = FName(*DigTarget);
 	Sim->EnqueueCommand(Dig);
 
+	// M1-d Gate A self-test: the shaft/excavation model, the subsurface build
+	// rule, radiation payoff, and save v5 round-trip - all deterministic, no
+	// time integration needed. `-vault` runs it and exits.
+	if (FParse::Param(*Params, TEXT("vault")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== VAULT SELF-TEST (M1-d Gate A) ==="));
+		const FVector Head(1000.f, 1000.f, 0.f);
+		FString R;
+
+		Sim->ExtendShaft(2, Head);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT bored: depth=%d spoil=%.0f (expect depth 2, spoil 2400)"),
+			Sim->GetShaftDepth(), Sim->GetSpoilPileKg());
+
+		const bool bExc = Sim->ExcavateFloor(-1, 4, R);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT excavate -1 x4 -> %s: carved=%d spoil=%.0f (expect carved 4, spoil 7200)%s"),
+			bExc ? TEXT("OK") : TEXT("FAIL"), Sim->GetFloorCarvedCells(-1), Sim->GetSpoilPileKg(),
+			bExc ? TEXT("") : *FString::Printf(TEXT(" [%s]"), *R));
+
+		FString R4;
+		const bool bExc4 = Sim->ExcavateFloor(-4, 1, R4);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT excavate -4 (unreached) -> %s [%s] (expect refused)"),
+			bExc4 ? TEXT("OK?!") : TEXT("refused"), *R4);
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT connected: -1=%d -2=%d -3=%d (expect 1 1 0)"),
+			(int32)Sim->IsLevelConnected(-1), (int32)Sim->IsLevelConnected(-2), (int32)Sim->IsLevelConnected(-3));
+
+		FString P1, P3;
+		const bool bP1 = Sim->CanPlaceBuilding(FName("ChargePad"), Head, P1, -1);
+		const bool bP3 = Sim->CanPlaceBuilding(FName("ChargePad"), Head, P3, -3);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT place ChargePad @-1 -> %s [%s]"), bP1 ? TEXT("ALLOWED") : TEXT("refused"), *P1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT place ChargePad @-3 -> %s [%s] (expect refused: not reached)"),
+			bP3 ? TEXT("ALLOWED?!") : TEXT("refused"), *P3);
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT radiation: surface=%.3f -1=%.4f -2=%.4f (overburden shielding)"),
+			Sim->GetRadiationAtLevel(0), Sim->GetRadiationAtLevel(-1), Sim->GetRadiationAtLevel(-2));
+
+		FString Err;
+		Sim->SaveColony(TEXT("vaulttest"), Err);
+		const double SpoilBefore = Sim->GetSpoilPileKg();
+		Sim->ExcavateFloor(-1, 99, R); // dirty the state before reload
+		Sim->LoadColony(TEXT("vaulttest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT save/load v5: depth=%d carved(-1)=%d spoil=%.0f (expect depth 2, carved 4, spoil %.0f)"),
+			Sim->GetShaftDepth(), Sim->GetFloorCarvedCells(-1), Sim->GetSpoilPileKg(), SpoilBefore);
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== VAULT SELF-TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	const int32 StepsPerSol = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
 	UE_LOG(LogRedHopeSim, Display, TEXT("RHSim headless: era-integrating %d sols (%d one-minute steps/sol)"), Sols, StepsPerSol);
 

@@ -135,6 +135,24 @@ public:
 	int32 GetMaxDepth() const { return MaxDepth; }
 	double GetFloorHeightCm() const { return FloorHeightCm; }
 
+	// --- Shaft & excavation (M1-d Gate A) ---
+	// The shaft is a vertical trunk bored down from ShaftHeadCm; a subsurface
+	// floor joins the grid (power/O2/coverage carried by the trunk) once the
+	// bore reaches its depth. Excavation on a reached floor carves 10x10 cells,
+	// emitting regolith spoil to the shaft-head pile (hauled to the Forge in A2).
+	int32 GetShaftDepth() const { return ShaftDepth; }
+	bool IsLevelConnected(int32 Level) const { return Level == 0 || (Level < 0 && -Level <= ShaftDepth); }
+	int32 GetFloorCarvedCells(int32 Level) const { const int32* C = FloorCarvedCells.Find(Level); return C ? *C : 0; }
+	double GetSpoilPileKg() const { return SpoilPileKg; }
+	FVector GetShaftHeadCm() const { return ShaftHeadCm; }
+	// Bore the trunk down to ToDepth floors below surface (clamped to MaxDepth);
+	// emits shaft spoil per newly bored floor. The shaft head (surface column)
+	// is fixed on the first bore. Never retracts.
+	void ExtendShaft(int32 ToDepth, const FVector& HeadCm);
+	// Carve Cells (10x10 units) on a reached subsurface floor; emits per-cell
+	// spoil. Fails (with reason) if the floor is not reached.
+	bool ExcavateFloor(int32 Level, int32 Cells, FString& OutReason);
+
 	// --- Reads (out) ---
 	const TArray<FRHBuildingInstance>& GetBuildings() const { return Buildings; }
 	const TArray<FRHDepositState>& GetDeposits() const { return Deposits; }
@@ -359,6 +377,15 @@ private:
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;
 	int32 MaxDepth = 5;
+	// Shaft & excavation state (M1-d Gate A; serialized, save v5).
+	int32 ShaftDepth = 0;                  // floors the trunk reaches below surface (0 = none)
+	FVector ShaftHeadCm = FVector::ZeroVector; // surface column the shaft descends from
+	TMap<int32, int32> FloorCarvedCells;   // Level -> carved 10x10 cell count
+	double SpoilPileKg = 0.0;              // regolith spoil at the shaft head, awaiting haul (A2)
+	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
+	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
+	double ShaftSpoilKgPerFloor = 1200.0;
+	double SpoilKgPerCell = 1200.0;
 	int32 NextBuildingId = 1;
 	int32 NextTaskId = 1;
 	bool bFleetDeployed = false;

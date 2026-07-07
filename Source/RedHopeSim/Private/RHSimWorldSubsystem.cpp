@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 4;
+	constexpr uint32 RHSaveVersion = 5;   // v5: shaft depth + carved floors + spoil pile (M1-d Gate A)
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -89,6 +89,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	StormWearMul = (float)Defs->GetConfigScalar(FName("StormWearMul"), StormWearMul);
 	RadiationSurface = (float)Defs->GetConfigScalar(FName("RadiationSurface"), RadiationSurface);
 	RadiationPerLevelMul = (float)Defs->GetConfigScalar(FName("RadiationPerLevelMul"), RadiationPerLevelMul);
+	ShaftSpoilKgPerFloor = Defs->GetConfigScalar(FName("ShaftSpoilKgPerFloor"), ShaftSpoilKgPerFloor);
+	SpoilKgPerCell = Defs->GetConfigScalar(FName("SpoilKgPerCell"), SpoilKgPerCell);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -1011,6 +1013,46 @@ float URHSimWorldSubsystem::GetRadiationNow(int32 Level) const
 	return Rad;
 }
 
+void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
+{
+	ToDepth = FMath::Clamp(ToDepth, 0, MaxDepth);
+	if (ToDepth <= ShaftDepth)
+	{
+		return; // the trunk never retracts
+	}
+	if (ShaftDepth == 0)
+	{
+		ShaftHeadCm = HeadCm; // the column is fixed on the first bore
+	}
+	const int32 NewFloors = ToDepth - ShaftDepth;
+	const double Spoil = NewFloors * ShaftSpoilKgPerFloor;
+	SpoilPileKg += Spoil;
+	ShaftDepth = ToDepth;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
+		ShaftDepth, NewFloors, Spoil, SpoilPileKg);
+}
+
+bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutReason)
+{
+	if (Cells <= 0)
+	{
+		OutReason = TEXT("Nothing to excavate");
+		return false;
+	}
+	if (Level >= 0 || !IsLevelConnected(Level))
+	{
+		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
+		return false;
+	}
+	int32& Carved = FloorCarvedCells.FindOrAdd(Level);
+	Carved += Cells;
+	const double Spoil = Cells * SpoilKgPerCell;
+	SpoilPileKg += Spoil;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Excavated %d cell(s) on floor %d (%d carved; +%.0f kg spoil; pile %.0f kg)"),
+		Cells, Level, Carved, Spoil, SpoilPileKg);
+	return true;
+}
+
 void URHSimWorldSubsystem::StepPower(float SubDt)
 {
 	// The storm's whole mechanical grip is one multiplier on solar generation
@@ -1120,19 +1162,31 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 		OutReason = FString::Printf(TEXT("Unknown building '%s'"), *DefName.ToString());
 		return false;
 	}
-	// Z-model: only the surface is buildable until the shaft exists (M1-d
-	// replaces this with the trunk-connectivity rule).
-	if (Level != 0)
+	// Z-model (M1-d Gate A): the surface is always buildable; a subsurface floor
+	// opens once the shaft trunk reaches it. Out-of-range or above-surface
+	// refuses; a real floor the bore hasn't reached refuses with the fix ("bore
+	// deeper"), not a dead end.
+	if (Level > 0 || Level < -MaxDepth)
 	{
-		OutReason = (Level > 0 || Level < -MaxDepth)
-			? FString::Printf(TEXT("No such floor (%d)"), Level)
-			: FString::Printf(TEXT("Floor %d is not connected - no shaft"), Level);
+		OutReason = FString::Printf(TEXT("No such floor (%d)"), Level);
+		return false;
+	}
+	if (Level < 0 && !IsLevelConnected(Level))
+	{
+		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper"), Level);
 		return false;
 	}
 	// Pylon-like defs (they project coverage and link by range) are the
 	// territory extenders: their rule is link range to the nearest node,
 	// not the coverage union. Everything else must sit inside coverage.
-	if (Def->CoverageRadius_m > 0.f && Def->LinkRange_m > 0.f)
+	if (Level < 0 && IsLevelConnected(Level))
+	{
+		// Subsurface: the shaft trunk carries the grid down and taps the whole
+		// (small, starter) floor - coverage and the grid node both come from the
+		// shaft, so neither the link-range nor the coverage-union check applies
+		// (underground proposal §5; local distribution nodes are data headroom).
+	}
+	else if (Def->CoverageRadius_m > 0.f && Def->LinkRange_m > 0.f)
 	{
 		double NearestNodeCm = TNumericLimits<double>::Max();
 		for (const FRHBuildingInstance& B : Buildings)
@@ -2233,6 +2287,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ar << S.PointCm << S.RadiusM << S.Sol << S.FoundCount;
 	}
 
+	// Shaft & excavation (save v5).
+	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
+
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
 	{
@@ -2370,6 +2427,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << S.PointCm << S.RadiusM << S.Sol << S.FoundCount;
 		SurveyHistory.Add(S);
 	}
+
+	// Shaft & excavation (save v5). The reader repopulates the map wholesale.
+	FloorCarvedCells.Empty();
+	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

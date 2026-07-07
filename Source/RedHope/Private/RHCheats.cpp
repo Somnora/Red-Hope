@@ -117,12 +117,12 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBenchmark(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 	TEXT("RH.Build"),
-	TEXT("RH.Build <DefName> <Xm> <Ym> - transmit a Build order through the uplink (subject to signal lag + coverage)."),
+	TEXT("RH.Build <DefName> <Xm> <Ym> [Level=0] - transmit a Build order through the uplink (Level<0 needs the shaft bored to that depth)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 3)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Build <DefName> <Xm> <Ym>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Build <DefName> <Xm> <Ym> [Level=0]"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -130,8 +130,48 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Build");
 			Cmd.Target = FName(*Args[0]);
-			Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f);
+			Cmd.Level = Args.Num() > 3 ? FCString::Atoi(*Args[3]) : 0;
+			Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f,
+				Cmd.Level * (float)Sim->GetFloorHeightCm());
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHBore(
+	TEXT("RH.Bore"),
+	TEXT("RH.Bore <ToDepth> [Xm=0] [Ym=0] - bore the shaft trunk down to the given floor depth (emits spoil; opens those floors to building)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Bore <ToDepth> [Xm] [Ym]"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const float X = (Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.f) * 100.f;
+			const float Y = (Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f) * 100.f;
+			Sim->ExtendShaft(FCString::Atoi(*Args[0]), FVector(X, Y, 0.f));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
+	TEXT("RH.Excavate"),
+	TEXT("RH.Excavate <Level> <Cells> - carve N 10x10 cells on a reached subsurface floor (emits spoil)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Excavate <Level> <Cells>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Reason;
+			if (!Sim->ExcavateFloor(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]), Reason))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Excavate: %s"), *Reason);
+			}
 		}
 	}));
 
@@ -181,6 +221,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		}
 		UE_LOG(LogRedHope, Display, TEXT("  import stock: solar %d, battery %d"),
 			Sim->GetImportStock(FName("SolarArray")), Sim->GetImportStock(FName("BatteryBank")));
+		if (Sim->GetShaftDepth() > 0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  shaft: bored to floor -%d | spoil pile %.0f kg"),
+				Sim->GetShaftDepth(), Sim->GetSpoilPileKg());
+		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{
 			UE_LOG(LogRedHope, Display, TEXT("  EVENT: %s until sol %.1f (severity %.2f; dust factor now %.2f)"),

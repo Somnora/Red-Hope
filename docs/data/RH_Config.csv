@@ -33,3 +33,5 @@ MaxDepth,5,floors,"Z-model (M1-b): deepest shaft floor (Level -N); data-expandab
 RadiationSurface,1.0,factor,"M1-c: baseline surface radiation index; flares multiply exposure transiently"
 RadiationPerLevelMul,0.05,factor,"M1-c: per-floor attenuation - each level down multiplies radiation by this (overburden is free shielding)"
 StormWearMul,2.0,factor,"Director ruling 2026-07-07b: robots working through a dust storm wear at this multiple; shelter (warehouse) arrives M2"
+ShaftSpoilKgPerFloor,1200,kg,"M1-d Gate A: regolith spoil emitted per floor the shaft trunk is bored down (the bore column itself)"
+SpoilKgPerCell,1200,kg,"M1-d Gate A: regolith spoil per 10x10 cell carved on a floor (underground proposal §2; ~= the Struct to build the floor out)"
