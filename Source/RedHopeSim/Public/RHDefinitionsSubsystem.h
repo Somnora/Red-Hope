@@ -41,6 +41,9 @@ public:
 	// table = a lonely Mars - the layer stays dormant.
 	const FRHRivalRow* GetRival(FName Name) const;
 	void ForEachRival(TFunctionRef<void(FName, const FRHRivalRow&)> Fn) const;
+	// ALL rival rows including dormant (SliceActive=false) - discovery-on-scout
+	// (M4 Gate B) reveals dormant settlements, so it must see them.
+	void ForEachRivalRow(TFunctionRef<void(FName, const FRHRivalRow&)> Fn) const;
 
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.

@@ -1118,6 +1118,97 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M4 Gate B self-test: THE ESPIONAGE ECONOMY - laundering defuses hidden
+	// tension; sabotage disrupts a rival's trade for a period (and refuses convoys
+	// while down, recovers on the timer); discovery-on-scout unlocks a dormant
+	// settlement. Save v21. `-espionage`.
+	if (FParse::Param(*Params, TEXT("espionage")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ESPIONAGE ECONOMY TEST (M4 Gate B) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Verb = [&](const TCHAR* V, const TCHAR* Target)
+		{
+			FRHCommand Cmd; Cmd.Verb = FName(V); Cmd.Target = FName(Target);
+			Sim->EnqueueCommand(Cmd); RunSols(0.1);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// A DORMANT settlement for the discovery test.
+		FRHRivalRow M;
+		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
+		M.DistanceKm = 200.f; M.ExportLot = TEXT("SpareParts:4"); M.ImportLot = TEXT("Food:60");
+		M.RelationStart = 30.f; M.SliceActive = false; // dormant until scouted
+		DefsSub->Debug_InjectRival(FName("Meridian"), M);
+		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds); // night
+
+		// 1) LAUNDER: build hidden tension via two covert ops (CXCX: op1 clean +8,
+		// op2 caught +25 => 33), then launder to see the full -20 drop unclamped.
+		Verb(TEXT("Covert"), TEXT("Zarya"));
+		Verb(TEXT("Covert"), TEXT("Zarya"));
+		const double Hid0 = Sim->GetHiddenTension(FName("Zarya"));
+		const double HN0 = Sim->GetHumanNatureAxis();
+		Sim->AddStock(FName("Struct"), 200.0); // the peace offering (ImportLot Struct:100)
+		Verb(TEXT("Launder"), TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("ESP launder: hidden %.0f -> %.0f (expect -20 = 33->13) humanNature %.0f -> %.0f (expect +3)"),
+			Hid0, Sim->GetHiddenTension(FName("Zarya")), HN0, Sim->GetHumanNatureAxis());
+
+		// 2) SABOTAGE: disrupt Zarya; while down, a convoy dispatch is refused.
+		Verb(TEXT("Sabotage"), TEXT("Zarya"));
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		FRHCommand Cv; Cv.Verb = FName("Convoy"); Cv.Target = FName("Zarya");
+		Sim->EnqueueCommand(Cv); RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ESP sabotage: remaining=%.1f sols convoy=%s (expect ~6, idle - trade refused while down)"),
+			Sim->GetSabotageRemaining(FName("Zarya")),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+
+		// 3) RECOVERY: after the duration the rival is back; convoy now dispatches.
+		RunSols(6.5);
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		Sim->EnqueueCommand(Cv); RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ESP recovery: remaining=%.1f convoy=%s (expect 0, Zarya - trade resumes)"),
+			Sim->GetSabotageRemaining(FName("Zarya")),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+		RunSols(4.5); // let it come home so the convoy is idle for the next steps
+
+		// 4) DISCOVERY: Meridian ships dormant + unavailable; the survey discovery
+		// roll uncovers it deterministically. Drive the roll directly (surveys
+		// complete in the agent band, which era-mode RunSols doesn't drive).
+		const bool bBeforeAvail = Sim->IsRivalAvailable(FName("Meridian"));
+		for (int32 i = 1; i <= 8 && !Sim->IsRivalDiscovered(FName("Meridian")); ++i)
+		{
+			Sim->Debug_MaybeDiscoverSettlement(i);
+		}
+		UE_LOG(LogRedHopeSim, Display, TEXT("ESP discovery: Meridian before-available=%d now discovered=%d available=%d (expect 0, 1, 1)"),
+			(int32)bBeforeAvail, (int32)Sim->IsRivalDiscovered(FName("Meridian")), (int32)Sim->IsRivalAvailable(FName("Meridian")));
+
+		// 5) Save v21 round-trip: sabotage timers + discovered set survive.
+		Verb(TEXT("Sabotage"), TEXT("Zarya")); // put a timer on the books
+		const double SabB = Sim->GetSabotageRemaining(FName("Zarya"));
+		const bool DiscB = Sim->IsRivalDiscovered(FName("Meridian"));
+		FString Err;
+		Sim->SaveColony(TEXT("esptest"), Err);
+		Sim->LoadColony(TEXT("esptest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ESP save/load v21: sabotage %.1f->%.1f discovered %d->%d (expect identical)"),
+			SabB, Sim->GetSabotageRemaining(FName("Zarya")), (int32)DiscB, (int32)Sim->IsRivalDiscovered(FName("Meridian")));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ESPIONAGE ECONOMY TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

@@ -23,7 +23,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 20;  // v20: covert layer (M4 Gate A); v19 Solidarity Dilemma; v18 Earth's Shadow; v17 rivals/trade
+	constexpr uint32 RHSaveVersion = 21;  // v21: espionage economy (M4 Gate B); v20 covert layer; v19 Solidarity Dilemma; v18 Earth's Shadow
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -170,6 +170,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	CovertHiddenTensionClean = Defs->GetConfigScalar(FName("CovertHiddenTensionClean"), CovertHiddenTensionClean);
 	CovertHiddenTensionCaught = Defs->GetConfigScalar(FName("CovertHiddenTensionCaught"), CovertHiddenTensionCaught);
 	CovertRelationHitCaught = Defs->GetConfigScalar(FName("CovertRelationHitCaught"), CovertRelationHitCaught);
+	LaunderHiddenDrop = Defs->GetConfigScalar(FName("LaunderHiddenDrop"), LaunderHiddenDrop);
+	LaunderRelationBonus = Defs->GetConfigScalar(FName("LaunderRelationBonus"), LaunderRelationBonus);
+	HumanNatureLaunderShift = Defs->GetConfigScalar(FName("HumanNatureLaunderShift"), HumanNatureLaunderShift);
+	HumanNatureSabotageShift = Defs->GetConfigScalar(FName("HumanNatureSabotageShift"), HumanNatureSabotageShift);
+	SabotageDurationSols = Defs->GetConfigScalar(FName("SabotageDurationSols"), SabotageDurationSols);
+	SabotageHiddenTension = Defs->GetConfigScalar(FName("SabotageHiddenTension"), SabotageHiddenTension);
+	DiscoveryChancePerSurvey = Defs->GetConfigScalar(FName("DiscoveryChancePerSurvey"), DiscoveryChancePerSurvey);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -2835,7 +2842,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// (the Borer's H2-batch discipline). The return leg delivers their goods.
 		static const FName NHydrogen(TEXT("Hydrogen")), NSpareParts(TEXT("SpareParts"));
 		const FRHRivalRow* Rival = Defs ? Defs->GetRival(Cmd.Target) : nullptr;
-		if (!Rival || !Rival->SliceActive)
+		if (!Rival || !IsRivalAvailable(Cmd.Target))
 		{
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No trade contact '%s'"), *Cmd.Target.ToString()));
 			return;
@@ -2848,6 +2855,11 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		if (ClosedRoutes.Contains(Cmd.Target))
 		{
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The route to %s is closed - you cut ties when you complied with Earth"), *Rival->DisplayName));
+			return;
+		}
+		if (GetSabotageRemaining(Cmd.Target) > 0.0)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s's production is disrupted (sabotage) - no trade until they recover"), *Rival->DisplayName));
 			return;
 		}
 		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
@@ -2905,6 +2917,26 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// so timing your op for the Martian night is real. Rides the uplink.
 		FString Reason;
 		if (!ResolveCovert(Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else if (Cmd.Verb == FName("Launder"))
+	{
+		// M4 Gate B: make amends to a rival, defusing HiddenTension.
+		FString Reason;
+		if (!ResolveLaunder(Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else if (Cmd.Verb == FName("Sabotage"))
+	{
+		// M4 Gate B: a covert blackout that disrupts a rival's trade.
+		FString Reason;
+		if (!ResolveSabotage(Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -3089,6 +3121,10 @@ double URHSimWorldSubsystem::GetRivalRelation(FName Rival) const
 
 bool URHSimWorldSubsystem::HasActiveRival() const
 {
+	if (DiscoveredRivals.Num() > 0)
+	{
+		return true; // a scouted settlement counts, even if its row ships dormant
+	}
 	bool bAny = false;
 	if (Defs)
 	{
@@ -3110,30 +3146,23 @@ double URHSimWorldSubsystem::GetHiddenTension(FName Rival) const
 	return T ? *T : 0.0;
 }
 
-bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
+bool URHSimWorldSubsystem::IsRivalAvailable(FName Rival) const
 {
 	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
-	if (!Row || !Row->SliceActive)
-	{
-		OutReason = FString::Printf(TEXT("No such settlement '%s' to move against"), *Rival.ToString());
-		return false;
-	}
-	// Intent marks you regardless of outcome (the axis is about HOW you act).
-	HumanNatureAxis = FMath::Clamp(HumanNatureAxis - HumanNatureCovertShift, -100.0, 100.0);
+	return Row && (Row->SliceActive || DiscoveredRivals.Contains(Rival));
+}
 
-	// Deterministic detection roll: a seeded hash of (rival, attempt#) - NEVER
-	// live RNG. The counter (saved) makes repeated ops differ but reproducibly.
-	// The rival seed MUST be a content hash of its name (FCrc::StrCrc32), NOT
-	// GetTypeHash(FName) - that uses the FName comparison INDEX, which is
-	// assigned by registration order at process launch and so varies run-to-run
-	// (adversarial-review 2026-07-07: it would flip caught<->clean on reload /
-	// across machines, breaking determinism). CRC of the string is stable.
+bool URHSimWorldSubsystem::RollCovertDetected(FName Rival)
+{
+	// The shared covert detection roll (requisition + sabotage). Deterministic:
+	// a CONTENT hash of the rival name (FCrc::StrCrc32 - stable across runs,
+	// unlike GetTypeHash(FName) which uses the process-unstable comparison
+	// index; adversarial-review 2026-07-07) combined with the SAVED attempt
+	// counter. A trusting ally watches you less (betrayal is easy, the moral
+	// trap); night halves the eyes on you (Module 2 visibility).
 	const uint32 Seed = HashCombine(FCrc::StrCrc32(*Rival.ToString()), (uint32)(CovertAttempts * 2654435761u));
 	++CovertAttempts;
 	const double U = (Seed % 100000u) / 100000.0; // [0,1)
-
-	// Detection probability: a TRUSTING ally watches you less (betrayal is easy,
-	// the moral trap), and night halves the eyes on you.
 	const double Relation = GetRivalRelation(Rival);
 	double P = CovertDetectionBase * (1.0 - (Relation / 100.0) * CovertDetectionTrustMul);
 	if (IsNight())
@@ -3141,8 +3170,21 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 		P *= CovertDetectionNightMul;
 	}
 	P = FMath::Clamp(P, 0.0, 1.0);
-	const bool bCaught = (U < P);
+	return U < P;
+}
 
+bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
+{
+	if (!IsRivalAvailable(Rival))
+	{
+		OutReason = FString::Printf(TEXT("No such settlement '%s' to move against"), *Rival.ToString());
+		return false;
+	}
+	const FRHRivalRow* Row = Defs->GetRival(Rival);
+	// Intent marks you regardless of outcome (the axis is about HOW you act).
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis - HumanNatureCovertShift, -100.0, 100.0);
+
+	const bool bCaught = RollCovertDetected(Rival);
 	double& Hidden = HiddenTensionRef(Rival);
 	if (bCaught)
 	{
@@ -3194,6 +3236,86 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 	return true;
 }
 
+double URHSimWorldSubsystem::GetSabotageRemaining(FName Rival) const
+{
+	const double* S = SabotageSols.Find(Rival);
+	return S ? *S : 0.0;
+}
+
+bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
+{
+	// Launder: return goods to a rival to DEFUSE the HiddenTension you built - a
+	// peace offering that costs their ImportLot (what they want from you), warms
+	// public standing, and nudges HumanNature toward Evolved (making amends).
+	if (!IsRivalAvailable(Rival))
+	{
+		OutReason = FString::Printf(TEXT("No contact with '%s' to make amends to"), *Rival.ToString());
+		return false;
+	}
+	const FRHRivalRow* Row = Defs->GetRival(Rival);
+	if (GetHiddenTension(Rival) <= 0.0)
+	{
+		OutReason = FString::Printf(TEXT("No hidden grievance with %s to defuse"), *Row->DisplayName);
+		return false;
+	}
+	const TMap<FName, double> Offering = URHDefinitionsSubsystem::ParseResourceList(Row->ImportLot);
+	if (!HasTradeLot(Offering))
+	{
+		OutReason = FString::Printf(TEXT("Short of the peace offering (%s)"), *Row->ImportLot);
+		return false;
+	}
+	SpendTradeLot(Offering);
+	double& Hidden = HiddenTensionRef(Rival);
+	Hidden = FMath::Clamp(Hidden - LaunderHiddenDrop, 0.0, 100.0);
+	double& Rel = RelationRef(Rival);
+	Rel = FMath::Clamp(Rel + LaunderRelationBonus, 0.0, 100.0);
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureLaunderShift, -100.0, 100.0);
+	OnAlert.Broadcast(FString::Printf(
+		TEXT("AMENDS MADE — a gift returned to %s (%s). Hidden tension eases; relations warm."),
+		*Row->DisplayName, *Row->ImportLot));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== LAUNDER: %s (hidden %.0f, relation %.0f, humanNature %.0f) ==="),
+		*Row->DisplayName, Hidden, Rel, HumanNatureAxis);
+	return true;
+}
+
+bool URHSimWorldSubsystem::ResolveSabotage(FName Rival, FString& OutReason)
+{
+	// Sabotage: a covert blackout that disrupts a rival's trade/production for a
+	// period (SabotageDurationSols). Detection-gated like a requisition; a
+	// hostile act, so HumanNature drops harder. NO combat - just a deterministic
+	// downtime the rival recovers from.
+	if (!IsRivalAvailable(Rival))
+	{
+		OutReason = FString::Printf(TEXT("No such settlement '%s' to sabotage"), *Rival.ToString());
+		return false;
+	}
+	const FRHRivalRow* Row = Defs->GetRival(Rival);
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis - HumanNatureSabotageShift, -100.0, 100.0);
+
+	const bool bCaught = RollCovertDetected(Rival);
+	double& Hidden = HiddenTensionRef(Rival);
+	Hidden = FMath::Clamp(Hidden + SabotageHiddenTension, 0.0, 100.0);
+	if (bCaught)
+	{
+		double& Rel = RelationRef(Rival);
+		Rel = FMath::Clamp(Rel - CovertRelationHitCaught, 0.0, 100.0);
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("SABOTAGE EXPOSED — %s traced the blackout to you. Relations crater; the act still bit (their systems are down)."),
+			*Row->DisplayName));
+	}
+	else
+	{
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("SABOTAGE LANDS — %s's production goes dark. They will be offline for a time, and no one saw your hand."),
+			*Row->DisplayName));
+	}
+	// The blackout lands whether or not you were seen (you still hit them).
+	SabotageSols.FindOrAdd(Rival) = SabotageDurationSols;
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== SABOTAGE: %s offline %.0f sols (caught=%d, hidden %.0f, humanNature %.0f) ==="),
+		*Row->DisplayName, SabotageDurationSols, (int32)bCaught, Hidden, HumanNatureAxis);
+	return true;
+}
+
 double URHSimWorldSubsystem::GetRequisitionMultiplier() const
 {
 	// Inert (exactly 1.0) until you have neighbors: a pre-M3 colony's awards -
@@ -3238,6 +3360,22 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 	{
 		SolidarityHope *= FMath::Exp(-DtSols / FMath::Max(SolidarityHopeTauSols, KINDA_SMALL_NUMBER));
 		if (FMath::Abs(SolidarityHope) < 0.01) { SolidarityHope = 0.0; }
+	}
+	// Sabotage blackouts count down (linear, parity-safe); a rival recovers when
+	// the timer hits zero. Iterate a snapshot so we can drop expired entries.
+	if (SabotageSols.Num() > 0)
+	{
+		for (auto It = SabotageSols.CreateIterator(); It; ++It)
+		{
+			It.Value() -= DtSols;
+			if (It.Value() <= 0.0)
+			{
+				const FRHRivalRow* Row = Defs ? Defs->GetRival(It.Key()) : nullptr;
+				OnAlert.Broadcast(FString::Printf(TEXT("RECOVERED — %s's systems are back online."),
+					Row ? *Row->DisplayName : *It.Key().ToString()));
+				It.RemoveCurrent();
+			}
+		}
 	}
 }
 
@@ -3942,7 +4080,49 @@ void URHSimWorldSubsystem::CompleteSurvey(int32 TaskId, double RadiusM)
 	Record.FoundCount = Found;
 	SurveyHistory.Add(Record);
 	OnSurveyCompleted.Broadcast(SurveyHistory.Last());
+	// M4 Gate B: a survey may uncover a dormant settlement (seeded by survey #).
+	MaybeDiscoverSettlement(SurveyHistory.Num());
 	CompleteTask(TaskId);
+}
+
+bool URHSimWorldSubsystem::MaybeDiscoverSettlement(int32 SurveyCount)
+{
+	// A survey may uncover a DORMANT settlement (a rival row that ships
+	// SliceActive=false and isn't yet discovered), unlocking trade + diplomacy.
+	// Deterministic: a seeded roll (survey count) vs the discovery chance; the
+	// FIRST dormant rival by sorted name is revealed.
+	if (!Defs || DiscoveryChancePerSurvey <= 0.0)
+	{
+		return false;
+	}
+	TArray<TPair<FName, const FRHRivalRow*>> Dormant;
+	Defs->ForEachRivalRow([&](FName Name, const FRHRivalRow& R)
+	{
+		if (!R.SliceActive && !DiscoveredRivals.Contains(Name))
+		{
+			Dormant.Emplace(Name, &R);
+		}
+	});
+	if (Dormant.Num() == 0)
+	{
+		return false;
+	}
+	Dormant.Sort([](const TPair<FName, const FRHRivalRow*>& A, const TPair<FName, const FRHRivalRow*>& B)
+	{ return A.Key.LexicalLess(B.Key); });
+	const uint32 Seed = HashCombine(FCrc::StrCrc32(TEXT("survey")), (uint32)(SurveyCount * 2654435761u));
+	const double U = (Seed % 100000u) / 100000.0;
+	if (U >= DiscoveryChancePerSurvey)
+	{
+		return false;
+	}
+	const FName Name = Dormant[0].Key;
+	DiscoveredRivals.Add(Name);
+	RelationRef(Name); // seed its relation from RelationStart
+	OnAlert.Broadcast(FString::Printf(
+		TEXT("SETTLEMENT FOUND — your scouts have made contact with %s (%s). Trade and diplomacy are open."),
+		*Dormant[0].Value->DisplayName, *Dormant[0].Value->Nation));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== SETTLEMENT DISCOVERED: %s ==="), *Dormant[0].Value->DisplayName);
+	return true;
 }
 
 bool URHSimWorldSubsystem::TryClaimRepair(FMassEntityHandle Self, FMassEntityHandle& OutTarget, FVector& OutTargetCm)
@@ -4350,6 +4530,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// The covert layer (save v20).
 	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
+	// The espionage economy (save v21).
+	{
+		TArray<FName> Discovered = DiscoveredRivals.Array();
+		Discovered.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
+		Ar << SabotageSols << Discovered;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4562,6 +4748,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// The covert layer (save v20). Map repopulates wholesale.
 	HiddenTensions.Empty();
 	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
+	// The espionage economy (save v21).
+	{
+		TArray<FName> Discovered;
+		SabotageSols.Empty();
+		Ar << SabotageSols << Discovered;
+		DiscoveredRivals.Empty();
+		DiscoveredRivals.Append(Discovered);
+	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

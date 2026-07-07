@@ -371,6 +371,22 @@ public:
 	// detection). Deterministic from the sol clock.
 	bool IsNight() const;
 
+	// --- The espionage economy (M4 Gate B) ---
+	// Launder: trade goods back to a rival to DEFUSE the HiddenTension you built
+	// (a peace offering - costs their ImportLot, drops hidden tension + warms
+	// public standing + nudges HumanNature toward Evolved). Sabotage: a covert
+	// blackout that disrupts a rival's trade for SabotageDurationSols (detection-
+	// gated like a covert op; a hostile act - HumanNature toward Destructive).
+	// Discovery: a survey may uncover a DORMANT settlement, unlocking it for
+	// trade/diplomacy. All deterministic, no combat.
+	bool ResolveLaunder(FName Rival, FString& OutReason);
+	bool ResolveSabotage(FName Rival, FString& OutReason);
+	// A rival is available to interact with if it ships active OR was discovered.
+	bool IsRivalAvailable(FName Rival) const;
+	// Sols of sabotage disruption remaining on a rival (0 = operating normally).
+	double GetSabotageRemaining(FName Rival) const;
+	bool IsRivalDiscovered(FName Rival) const { return DiscoveredRivals.Contains(Rival); }
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -559,6 +575,9 @@ public:
 	// Harness: force the banked energy (grow-light blackout tests). Clamped to
 	// the current capacity by the next StepPower.
 	void Debug_SetBatteryWh(double Wh) { Power.BatteryWh = FMath::Max(0.0, Wh); }
+	// Harness: run the discovery roll for the Nth survey directly (surveys
+	// complete in the agent band, which the era-mode test loop doesn't drive).
+	bool Debug_MaybeDiscoverSettlement(int32 SurveyCount) { return MaybeDiscoverSettlement(SurveyCount); }
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
@@ -807,8 +826,24 @@ private:
 	double CovertHiddenTensionCaught = 25.0;
 	double CovertRelationHitCaught = 30.0;
 	double& HiddenTensionRef(FName Rival) { return HiddenTensions.FindOrAdd(Rival); }
+	// The espionage economy (M4 Gate B; save v21). Sabotage timers per rival;
+	// the set of dormant rivals a survey has uncovered.
+	TMap<FName, double> SabotageSols;   // rival -> disruption sols remaining
+	TSet<FName> DiscoveredRivals;
+	double LaunderHiddenDrop = 20.0;
+	double LaunderRelationBonus = 4.0;
+	double HumanNatureLaunderShift = 3.0;
+	double HumanNatureSabotageShift = 8.0;
+	double SabotageDurationSols = 6.0;
+	double SabotageHiddenTension = 20.0;
+	double DiscoveryChancePerSurvey = 0.5;
+	// A deterministic detection roll for a covert op against a rival (shared by
+	// requisition + sabotage): seeded by content hash + the saved attempt count.
+	bool RollCovertDetected(FName Rival);
+	// Discovery-on-scout worker (called from CompleteSurvey, seeded by survey #).
+	bool MaybeDiscoverSettlement(int32 SurveyCount);
 	void StepEarth(float SubDt);
-	bool HasActiveRival() const; // any slice-active rival => the layer is live
+	bool HasActiveRival() const; // any available rival => the layer is live
 	// Ensure a rival's relation entry exists (lazy seed from RelationStart).
 	double& RelationRef(FName Rival);
 	// One-way transit time for a rival, in sols.

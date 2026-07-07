@@ -252,6 +252,18 @@ void URHDefinitionsSubsystem::ForEachRival(TFunctionRef<void(FName, const FRHRiv
 	}
 }
 
+void URHDefinitionsSubsystem::ForEachRivalRow(TFunctionRef<void(FName, const FRHRivalRow&)> Fn) const
+{
+	if (!RivalsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : RivalsTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHRivalRow*>(Pair.Value));
+	}
+}
+
 void URHDefinitionsSubsystem::Debug_InjectRival(FName Name, const FRHRivalRow& Row)
 {
 	if (!RivalsTable)

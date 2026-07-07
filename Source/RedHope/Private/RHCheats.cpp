@@ -323,6 +323,32 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCovert(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHLaunder(
+	TEXT("RH.Launder"),
+	TEXT("RH.Launder <RivalName> - make amends to a rival (return goods to defuse hidden tension). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Launder <RivalName>")); return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Launder"); Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSabotage(
+	TEXT("RH.Sabotage"),
+	TEXT("RH.Sabotage <RivalName> - covert blackout: disrupt a rival's production/trade for a period (detection-gated; a hostile act). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Sabotage <RivalName>")); return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Sabotage"); Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 	TEXT("RH.Trade"),
 	TEXT("RH.Trade - log the trade state: rivals, relations, and the convoy's status."),
@@ -339,11 +365,15 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 				Sim->IsConvoyReturning() ? TEXT("returning") : TEXT("outbound"), Sim->GetConvoyProgress() * 100.0));
 		UE_LOG(LogRedHope, Display, TEXT("  human nature %+.0f (Evolved/Diplomatic .. Destructive/Predatory) | %s"),
 			Sim->GetHumanNatureAxis(), Sim->IsNight() ? TEXT("NIGHT (covert ops safer)") : TEXT("day"));
-		Defs->ForEachRival([&](FName Name, const FRHRivalRow& Row)
+		Defs->ForEachRivalRow([&](FName Name, const FRHRivalRow& Row)
 		{
-			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): public relation %.0f | HIDDEN tension %.0f | give %s -> get %s | %.0f km"),
+			if (!Sim->IsRivalAvailable(Name)) { return; } // hide undiscovered dormant settlements
+			const double Sab = Sim->GetSabotageRemaining(Name);
+			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): public relation %.0f | HIDDEN tension %.0f | give %s -> get %s | %.0f km%s%s"),
 				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), Sim->GetHiddenTension(Name),
-				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm);
+				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm,
+				Sim->IsRivalDiscovered(Name) ? TEXT(" [scouted]") : TEXT(""),
+				Sab > 0.0 ? *FString::Printf(TEXT(" [SABOTAGED %.1f sols]"), Sab) : TEXT(""));
 		});
 	}));
 
