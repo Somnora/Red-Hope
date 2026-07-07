@@ -84,4 +84,5 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 
 ## Pending — awaiting director review
 
-- (nothing — M1-b Gate A in progress)
+- **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).
+- **M1-c working spec** (`docs/m1c-working-spec.md`): events table (storms + flares), DustFactor through power, era honesty fixes (overshoot-carry + accumulator dump + paired-run 5% harness), surface radiation/shielding tax, event banner + sky, ComputeModule + uplink queue panel, power strip-chart.
