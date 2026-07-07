@@ -319,6 +319,20 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAddColonists(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDeliver(
+	TEXT("RH.Deliver"),
+	TEXT("RH.Deliver <ItemName> - DEBUG: land a manifest item's cargo effect immediately (e.g. CrewPod; skips the ship transit)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			Sim->Debug_DeliverCargo(FName(*Args[0]));
+			UE_LOG(LogRedHope, Display, TEXT("Delivered '%s'; population %d, free beds %d"),
+				*Args[0], Sim->GetPopulation(), Sim->GetFreeHousing());
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
 	TEXT("RH.Habitat"),
 	TEXT("RH.Habitat - log every subsurface floor's habitability chain: carved, O2 fill/required, circulation, rating."),
