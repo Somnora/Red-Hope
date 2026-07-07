@@ -100,10 +100,12 @@ private:
 	// walls (surface down to the open floor). One actor, thousands-cheap.
 	void EnsureSliceRig();
 	void RebuildSliceRig();
-	// The floor whose pocket is open to the sky: the active subsurface floor,
-	// or -1 when looking from the surface (the topmost dig is the hole you
-	// see into).
-	int32 PitLevel() const { return ViewLevel < 0 ? ViewLevel : -1; }
+	// Two distinct views (director recording verdict): the elevator is a hard
+	// cut between strata. At SURF you see only the intact sunlit surface - no
+	// underground bleed. Descending to -N opens THAT floor as a pit you look
+	// down into (sand walls up to the rim, the dug floor at the bottom). So
+	// "underground" is the whole condition; the open floor is just ViewLevel.
+	bool IsUnderground() const { return ViewLevel < 0; }
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;

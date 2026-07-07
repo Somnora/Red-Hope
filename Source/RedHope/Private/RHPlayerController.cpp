@@ -533,8 +533,13 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 {
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const int32 MaxDepth = Sim ? Sim->GetMaxDepth() : 5;
-	ActiveLevel = FMath::Clamp(Level, -MaxDepth, 0);
+	// You can only ride the elevator as deep as the shaft has actually been
+	// bored (adversarial-review finding): clamping to the total chartered
+	// MaxDepth let you view an un-reached floor, which hid the whole surface,
+	// left the real ground showing, and drew a phantom pit over it. The
+	// reached depth is the floor below which there is only solid rock.
+	const int32 ReachedDepth = Sim ? Sim->GetShaftDepth() : 0;
+	ActiveLevel = FMath::Clamp(Level, -ReachedDepth, 0);
 	// The whole view rides the elevator: camera focus plane, the colony
 	// mirror's slice filter, and the robot layer (surface-only until M1-d
 	// puts robots below ground).

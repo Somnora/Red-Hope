@@ -22,6 +22,12 @@ namespace
 {
 	const FLinearColor DeckBg(0.015f, 0.03f, 0.045f, 0.85f);   // mission-control glass
 	const FLinearColor ReadoutFg(0.75f, 0.87f, 0.92f, 1.f);
+	// Right-column panels are pinned to this width (director fix): the readout
+	// is right-anchored, so variable-width content - the power sparkline that
+	// grows 4->36 columns as history fills, a toggling SHED:N, the vault line -
+	// used to shove the whole block leftward every frame. A fixed width holds
+	// the left edge still and aligns the stacked panels into one clean column.
+	constexpr float ReadoutWidthPx = 560.f;
 
 	FSlateFontInfo DeckFont(int32 Size)
 	{
@@ -183,8 +189,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(8.f)
 		[
 			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
 			[
+				SNew(SBox).WidthOverride(ReadoutWidthPx)
+				[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
 				.BorderBackgroundColor(DeckBg)
@@ -222,9 +230,12 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						.ColorAndOpacity(FLinearColor(0.5f, 0.72f, 0.8f))
 					]
 				]
+				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
 			[
+				SNew(SBox).WidthOverride(ReadoutWidthPx)
+				[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
 				.BorderBackgroundColor(DeckBg)
@@ -235,14 +246,17 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					.Font(DeckFont(9))
 					.ColorAndOpacity(ReadoutFg)
 				]
+				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
 			[
+				SNew(SBox).WidthOverride(ReadoutWidthPx)
+				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
+				[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
 				.BorderBackgroundColor(FLinearColor(0.02f, 0.06f, 0.05f, 0.9f))
 				.Padding(FMargin(10.f, 6.f))
-				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
 				[
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight()
@@ -261,9 +275,13 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 							FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
 					]
 				]
+				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
 			[
+				SNew(SBox).WidthOverride(ReadoutWidthPx)
+				.Visibility(this, &SRHCommandDeck::GetKnownGroundVisibility)
+				[
 				SNew(SBorder)
 				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
 				.BorderBackgroundColor(FLinearColor(0.02f, 0.05f, 0.07f, 0.9f))
@@ -274,6 +292,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					.Text(this, &SRHCommandDeck::GetKnownGroundText)
 					.Font(DeckFont(9))
 					.ColorAndOpacity(FLinearColor(0.55f, 0.85f, 0.9f))
+				]
 				]
 			]
 		]

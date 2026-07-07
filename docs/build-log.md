@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 24 (director recording verdict: pit view v3 "distinct floors" + ground/night + HUD pin; adversarial self-review)
+
+- **Watched the director's 35 s screen recording (frames extracted via ffmpeg).** Confirmed all three reported bugs from the footage: floor −1 carve tiles bleeding through at SURF (frames 12/15), the ground going dark/grey at night (frame 9, SOL 3 03%), and the right-anchored HUD drifting as the sparkline grew.
+- **Pit view v3 — genuinely distinct floors:** `ApplyViewLevel` now hides a floor's visuals unless `BLevel == ViewLevel` (was: "surface always visible + open pit floor"). SURF = intact surface only; −N = that floor only. `IsUnderground()` replaces the old always-`-1` `PitLevel()`.
+- **Ground never greys:** the real MarsGround plane is hidden ONLY while `IsUnderground()` (was: hidden whenever a shaft existed, replaced by gray-box skirt that read dark at night). The skirt/walls + shaft column are underground-only now.
+- **Elevator ride:** `ARHStrategyPawn` smooths the focus-plane Z toward `TargetFocusZCm` (~1.5 s/floor) so descent reads as motion.
+- **HUD pinned:** all four right-column panels (readout/fleet/inspect/known-ground) wrapped in `SNew(SBox).WidthOverride(ReadoutWidthPx=560)`, readout slot right-aligned — variable-width content can no longer shove the left edge.
+- **Adversarial self-review (4-lens workflow) caught 3 regressions in the first cut, fixed before commit:** HIGH — descent clamped to total MaxDepth let you view an un-bored floor (surface hidden, ground showing, phantom pit); fixed by clamping `SetActiveLevel` to `GetShaftDepth()` and keying the ground hide off the view. MEDIUM — deposit/ship spawned while underground popped into the pit view; fixed born-hidden per view. LOW — shaft column born visible at SURF; fixed born-hidden. (Workflow's Verify phase died on a session limit; findings were triaged + verified inline from the completed Review phase.)
+- **No sim code touched** (presentation + one controller clamp) → sim regressions unchanged by construction. Compile clean (33 s incremental). **Editor was open during compile → hot-patch dylib; needs a clean relink after UE closes, then the director's replay is the visual verdict.**
+
 ## 2026-07-07 — Session 23 (habitat minimum size — director ruling 2026-07-07f, verified headless)
 
 - **Phase-1 exit now requires a 4-cell minimum vault** (`MinLivableCells`, DT_Config, data-driven; code default 4 matches CSV — live DT sync next editor session). A floor certifies Livable only at ≥ min cells AND pressurized + circulated. The chain still runs below the minimum (the floor pressurizes and drains the pool as you build toward it); only the rating + exit gate on size.

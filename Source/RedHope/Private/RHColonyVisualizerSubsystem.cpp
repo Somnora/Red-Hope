@@ -481,6 +481,10 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	}
 	ApplyTint(Actor, DepColor);
 	AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
+	// Surface furniture: born hidden if the player is currently underground
+	// (adversarial-review finding - a discovery mid-descent used to pop the
+	// marker into the pit view until the next floor change).
+	Actor->SetActorHiddenInGame(IsUnderground());
 	DepositMarkers.Add(Actor);
 }
 
@@ -762,6 +766,9 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 				FRotator(0, 0, (Leg < 2 ? -1.f : 1.f) * 18.f), FVector(0.35f, 0.35f, 1.9f), DarkSlate);
 		}
 		AddLabel(Ship, TEXT("Supply Ship"), BoneWhite, 620.f);
+		// Surface furniture: hidden if the player is underground when the ship
+		// lands (adversarial-review finding), shown again on the next SURF view.
+		Ship->SetActorHiddenInGame(IsUnderground());
 		ShipVisual = Ship;
 	}
 	if (GEngine)
@@ -832,6 +839,10 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 			if (ShaftVisual) { ShaftVisual->SetActorLabel(TEXT("Sim_Shaft")); }
 #endif
+			// Born hidden at SURF (invariant D): a bore that completes while
+			// the player is at the surface must not flash its column through
+			// the ground before the next view change (mirrors carve tiles).
+			if (ShaftVisual) { ShaftVisual->SetActorHiddenInGame(!IsUnderground()); }
 		}
 		else
 		{
@@ -865,7 +876,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 			Tile->SetActorLabel(FString::Printf(TEXT("Sim_Carve_%d_%d"), L, Have));
 #endif
-			Tile->SetActorHiddenInGame(PitLevel() != L);
+			Tile->SetActorHiddenInGame(ViewLevel != L);
 			CarveTileVisuals.Add(Tile);
 			++Have;
 		}
@@ -933,12 +944,11 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 		return;
 	}
 
-	// v2 (director watch-through): the world is ONE continuous lit scene with
-	// a hole dug in it. Surface actors are always visible - looking into the
-	// pit means seeing the surface around it, and the exposure never changes.
-	// Only what rock genuinely hides hides: a subsurface building shows iff
-	// its floor is the open pit floor.
-	const int32 Pit = PitLevel();
+	// v3 (director recording verdict - "two distinct floors"): a floor's
+	// visuals show iff you are looking at THAT floor. At SURF (ViewLevel 0)
+	// that's the surface colony and nothing underground; at -N it's that
+	// floor's pocket and nothing else. One rule: visible iff BLevel==ViewLevel.
+	const bool bSurface = !IsUnderground();
 	for (auto& Pair : BuildingVisuals)
 	{
 		if (!Pair.Value)
@@ -954,34 +964,41 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 				break;
 			}
 		}
-		Pair.Value->SetActorHiddenInGame(BLevel != 0 && BLevel != Pit);
+		Pair.Value->SetActorHiddenInGame(BLevel != ViewLevel);
 	}
+	// Deposit markers, the ship, and the robot layer are surface furniture -
+	// shown only in the surface view (underground is a separate stratum).
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
 		{
-			Marker->SetActorHiddenInGame(false);
+			Marker->SetActorHiddenInGame(!bSurface);
 		}
 	}
 	if (ShipVisual)
 	{
-		ShipVisual->SetActorHiddenInGame(false);
+		ShipVisual->SetActorHiddenInGame(!bSurface);
 	}
-	// Carve tiles: the open pit floor's pocket shows; deeper strata stay
-	// inside the rock until the elevator opens them.
+	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
+	{
+		Agents->SetSliceHidden(!bSurface);
+	}
+	// Carve tiles: only the viewed floor's pocket shows. At SURF none match
+	// (tiles are all negative-Z) - the surface stays clean.
 	const double FloorH = Sim->GetFloorHeightCm();
 	for (AStaticMeshActor* Tile : CarveTileVisuals)
 	{
 		if (Tile)
 		{
 			const int32 TileLevel = FMath::RoundToInt32(Tile->GetActorLocation().Z / FloorH);
-			Tile->SetActorHiddenInGame(TileLevel != Pit);
+			Tile->SetActorHiddenInGame(TileLevel != ViewLevel);
 		}
 	}
-	// Robots are surface actors and the surface is always in view now.
-	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
+	// The shaft column belongs to the underground read; at SURF the intact
+	// ground covers it, so hide it to avoid poking through the surface.
+	if (ShaftVisual)
 	{
-		Agents->SetSliceHidden(false);
+		ShaftVisual->SetActorHiddenInGame(bSurface);
 	}
 
 	RebuildSliceRig();
@@ -1043,11 +1060,18 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 		return;
 	}
 
-	// The real ground plane yields to the skirt once the shaft exists, so the
-	// pit is visible from every register with unchanged lighting. (Material-
-	// matched search: World Partition renames actors, labels are no handle.)
+	// The real ground is the SURFACE (director fix: it must never grey out at
+	// SURF - the old rig hid it whenever a shaft existed and swapped in a
+	// gray-box skirt that read dark at night). It yields ONLY while you are
+	// underground looking into the pit; at SURF it is always the intact dirt.
+	// (Material-matched search: World Partition renames actors, labels lie.)
+	// Ground search/hide keys off the VIEW, not the shaft depth: the ground is
+	// hidden iff we are underground looking into the pit, and shown otherwise.
+	// (Descent is clamped to reached depth, so underground always implies a
+	// real bored column beneath us - but gating on the view keeps this correct
+	// regardless of how ViewLevel got set.)
 	const int32 Depth = Sim->GetShaftDepth();
-	if (!GroundActor.IsValid() && Depth > 0)
+	if (!GroundActor.IsValid() && IsUnderground())
 	{
 		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
 		{
@@ -1068,18 +1092,17 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 		}
 		if (!GroundActor.IsValid() && !bGroundSearched)
 		{
-			UE_LOG(LogRedHope, Warning, TEXT("Pit view: no MarsGround actor/material found - the skirt will z-fight the ground"));
+			UE_LOG(LogRedHope, Warning, TEXT("Pit view: no MarsGround actor/material found - the underground rim skirt is absent"));
 		}
 		bGroundSearched = true;
 	}
 	if (GroundActor.IsValid())
 	{
-		GroundActor->SetActorHiddenInGame(Depth > 0);
+		GroundActor->SetActorHiddenInGame(IsUnderground());
 	}
 
-	const int32 Pit = PitLevel();
-	const int32 Carved = Sim->GetFloorCarvedCells(Pit);
-	const FIntVector Key(Depth, Pit, Carved);
+	const int32 Carved = IsUnderground() ? Sim->GetFloorCarvedCells(ViewLevel) : 0;
+	const FIntVector Key(Depth, ViewLevel, Carved);
 	if (Key == LastRigKey)
 	{
 		return;
@@ -1093,10 +1116,11 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	}
 	SkirtISM->ClearInstances();
 	WallISM->ClearInstances();
-	if (Depth == 0)
+	if (!IsUnderground())
 	{
-		return; // no shaft, no pit - the real ground is showing
+		return; // SURF (or above): the intact ground is the view - no pit rig
 	}
+	const int32 Pit = ViewLevel; // the floor being looked into
 
 	// The open pocket on the pit floor: the shaft's own cell plus every
 	// carved cell (spiral layout - identical math to the floor tiles).
