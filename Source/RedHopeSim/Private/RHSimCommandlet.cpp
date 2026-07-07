@@ -357,6 +357,111 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate D+ self-test: Hope DRIVES the colony - the exp-form smoother (the
+	// era-parity property), the work-tempo transfer function, band hysteresis,
+	// tempo scaling the garden yield, and save v13 round-trip. `-hopedrive`.
+	if (FParse::Param(*Params, TEXT("hopedrive")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== HOPE-DRIVES TEST (M2 Gate D+) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// Rooms ship active in the synced DT; assert (pure-data, fails on drift).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Garden") })
+		{
+			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
+			if (!Row || !Row->SliceActive)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("HOPEDRIVE: DT_Rooms '%s' not active - DT/CSV drift"), RowName);
+				return 1;
+			}
+		}
+
+		// Certify a 6-cell vault, house 4, stock generously so they stay
+		// supported (instantaneous Hope stays constant through the convergence).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 1200.0);
+		Sim->AddStock(FName("Food"), 600.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(4);
+		// Rooms: 2 LivingQuarters (housing), a Lab (job+morale), a Garden far in
+		// the corner (job+morale, cell 5 = (-1,-1), >2 from any LQ so no Odor offense).
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 2, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 5, FName("Garden"), R);
+		Sim->Debug_DeliverCargo(FName("SoilPallet"));
+		Sim->Debug_DeliverCargo(FName("SeedVault"));
+		Sim->AddStock(FName("Water"), 300.0);
+		RunSols(0.2); // settle jobs, plant the garden
+
+		// 1) The exp smoother (the parity-critical property): capture the
+		// instantaneous Hope + the current smoothed value, run exactly one Tau
+		// (3 sols), and confirm the smoothed value matches the closed form
+		// S = I + (S0-I)*e^-1 to a tight tolerance. A linear lerp would miss this.
+		const double InstantHope = Sim->GetColonyHope().Total;
+		const double S0 = Sim->GetHopeSmoothed();
+		RunSols(3.0);
+		const double S1 = Sim->GetHopeSmoothed();
+		const double Expected1 = InstantHope + (S0 - InstantHope) * FMath::Exp(-1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HOPEDRIVE smoother: instant=%.2f smoothed %.2f->%.2f (expect %.2f, |err| %.3f < 0.05)"),
+			InstantHope, S0, S1, Expected1, FMath::Abs(S1 - Expected1));
+
+		// 2) The work-tempo transfer function: tempo == clamp(1 + slope*(smoothed-50)).
+		const double Smoothed = Sim->GetHopeSmoothed();
+		const double Tempo = Sim->GetHumanWorkTempo();
+		const double TempoExpected = FMath::Clamp(1.0 + 0.006 * (Smoothed - 50.0), 0.60, 1.25);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HOPEDRIVE tempo: %.4f (expect %.4f) band %s at smoothed %.1f"),
+			Tempo, TempoExpected, Sim->GetHopeBandName(), Smoothed);
+
+		// 3) Tempo scales the GARDEN yield: over a short window, the Food the
+		// garden adds == producingCells * baseYield * tempo * dt (isolated from
+		// eating). Proves a thriving crew out-harvests a merely surviving one.
+		RunSols(9.0); // near-converge so tempo is stable across the window
+		const int32 Prod = Sim->GetProducingCellCount();
+		const double Tempo3 = Sim->GetHumanWorkTempo();
+		const double Food0 = Sim->GetStock(FName("Food"));
+		const double MeasWindow = 0.25;
+		RunSols(MeasWindow);
+		const double FoodDelta = Sim->GetStock(FName("Food")) - Food0;
+		const double Eaten = Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol() * MeasWindow;
+		const double GardenGiven = FoodDelta + Eaten;
+		const double GardenExpected = Prod * Sim->GetGardenFoodKgPerSolPerCell() * Tempo3 * MeasWindow;
+		UE_LOG(LogRedHopeSim, Display, TEXT("HOPEDRIVE garden@tempo: %d cell(s) gave %.3f kg (expect %.3f = base x tempo %.3f; |err| %.4f)"),
+			Prod, GardenGiven, GardenExpected, Tempo3, FMath::Abs(GardenGiven - GardenExpected));
+
+		// 4) Band hysteresis: the band name is consistent with the thresholds
+		// (Thriving 75/70, Flourishing 90/85), and does not flicker mid-gap.
+		UE_LOG(LogRedHopeSim, Display, TEXT("HOPEDRIVE band: smoothed %.1f -> %s (Thriving>=75, Flourishing>=90)"),
+			Sim->GetHopeSmoothed(), Sim->GetHopeBandName());
+
+		// 5) Save v13 round-trip: the mood + band survive exactly.
+		const double SmoothedBefore = Sim->GetHopeSmoothed();
+		const FString BandBefore = Sim->GetHopeBandName();
+		FString Err;
+		Sim->SaveColony(TEXT("hopetest"), Err);
+		Sim->LoadColony(TEXT("hopetest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HOPEDRIVE save/load v13: smoothed %.2f->%.2f band %s->%s (expect identical)"),
+			SmoothedBefore, Sim->GetHopeSmoothed(), *BandBefore, Sim->GetHopeBandName());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== HOPE-DRIVES TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
 	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
 	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.

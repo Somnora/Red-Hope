@@ -241,8 +241,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 		if (!Sim) { return; }
 		const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
 		UE_LOG(LogRedHope, Display,
-			TEXT("[RH.Hope] %.1f | base %.0f housing +%.1f rooms +%.1f jobs +%.1f (%d seats) milestones +%.1f comforts +%.1f | adjacency -%.1f (%d pairs) unsupported -%.1f"),
-			H.Total, H.Base, H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Milestones, H.Comforts,
+			TEXT("[RH.Hope] instant %.1f | smoothed %.1f  %s  tempo %.0f%% | base %.0f housing +%.1f rooms +%.1f jobs +%.1f (%d seats) milestones +%.1f comforts +%.1f | adjacency -%.1f (%d pairs) unsupported -%.1f"),
+			H.Total, Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), Sim->GetHumanWorkTempo() * 100.0,
+			H.Base, H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Milestones, H.Comforts,
 			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty);
 	}));
 

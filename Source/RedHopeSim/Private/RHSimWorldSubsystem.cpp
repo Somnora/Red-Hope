@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 12;  // v12: the garden (M2 Gate C); v11 room designations; v10 colonists
+	constexpr uint32 RHSaveVersion = 13;  // v13: Hope-drives (smoothed+band); v12 garden; v11 rooms; v10 colonists
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -114,6 +114,19 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenWaterKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenWaterKgPerSolPerCell"), GardenWaterKgPerSolPerCell);
 	LuxuryKgPerColonistPerSol = Defs->GetConfigScalar(FName("LuxuryKgPerColonistPerSol"), LuxuryKgPerColonistPerSol);
 	HopeLuxuryBonus = Defs->GetConfigScalar(FName("HopeLuxuryBonus"), HopeLuxuryBonus);
+	HopeSmoothTauSols = Defs->GetConfigScalar(FName("HopeSmoothTauSols"), HopeSmoothTauSols);
+	HopeTempoSlope = Defs->GetConfigScalar(FName("HopeTempoSlope"), HopeTempoSlope);
+	HopeTempoMin = Defs->GetConfigScalar(FName("HopeTempoMin"), HopeTempoMin);
+	HopeTempoMax = Defs->GetConfigScalar(FName("HopeTempoMax"), HopeTempoMax);
+	HopeBandUp[0]   = Defs->GetConfigScalar(FName("HopeStrainedEnter"),    HopeBandUp[0]);
+	HopeBandDown[0] = Defs->GetConfigScalar(FName("HopeFailingEnter"),     HopeBandDown[0]);
+	HopeBandUp[1]   = Defs->GetConfigScalar(FName("HopeSteadyEnter"),      HopeBandUp[1]);
+	HopeBandDown[1] = Defs->GetConfigScalar(FName("HopeStrainedExit"),     HopeBandDown[1]);
+	HopeBandUp[2]   = Defs->GetConfigScalar(FName("HopeThrivingEnter"),    HopeBandUp[2]);
+	HopeBandDown[2] = Defs->GetConfigScalar(FName("HopeThrivingExit"),     HopeBandDown[2]);
+	HopeBandUp[3]   = Defs->GetConfigScalar(FName("HopeFlourishingEnter"), HopeBandUp[3]);
+	HopeBandDown[3] = Defs->GetConfigScalar(FName("HopeFlourishingExit"),  HopeBandDown[3]);
+	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -269,6 +282,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepHabitability(SubDt);
 	StepAgriculture(SubDt);
 	StepPopulation(SubDt);
+	StepHope(SubDt); // after population so the mood reflects this step's support state
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -399,6 +413,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepHabitability(DtSimSeconds);
 	StepAgriculture(DtSimSeconds);
 	StepPopulation(DtSimSeconds);
+	StepHope(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -1613,6 +1628,10 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 	int32 Producing = 0;
 	bool bThirsty = false;
+	// Hope drives the harvest: a thriving crew coaxes more food from the same
+	// plot (tempo on the YIELD, not the fixed physical Water draw). Exactly 1.0
+	// at zero population, so the pure-mechanics -garden regression is untouched.
+	const double HumanTempo = GetHumanWorkTempo();
 	for (auto It = PlantedCells.CreateIterator(); It; ++It)
 	{
 		const int32 Level = It->X, Cell = It->Y;
@@ -1635,7 +1654,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
-		AddStock(NFood, GardenFoodKgPerSolPerCell * DtSols);
+		AddStock(NFood, GardenFoodKgPerSolPerCell * HumanTempo * DtSols);
 		++Producing;
 	}
 	ProducingCells = Producing;
@@ -1976,6 +1995,53 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty, 0.0, 100.0);
 	return Out;
+}
+
+void URHSimWorldSubsystem::StepHope(float SubDt)
+{
+	// Low-pass the instantaneous index into the colony's MOOD. The exp form
+	// integrates identically for ANY step size, so an agent sub-step and a 60x
+	// era step converge to the same HopeSmoothed - the parity property a naive
+	// linear lerp would break. dt is in sols to match Tau's units.
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	const double Instant = GetColonyHope().Total;
+	const double Alpha = 1.0 - FMath::Exp(-DtSols / FMath::Max(HopeSmoothTauSols, KINDA_SMALL_NUMBER));
+	HopeSmoothed += (Instant - HopeSmoothed) * Alpha;
+	UpdateHopeBand();
+}
+
+void URHSimWorldSubsystem::UpdateHopeBand()
+{
+	// Rise past the up-thresholds, fall past the (lower) down-thresholds; the
+	// gap between is the hysteresis that stops the band name from twitching.
+	int32 B = (int32)HopeBand;
+	while (B < 4 && HopeSmoothed >= HopeBandUp[B]) { ++B; }
+	while (B > 0 && HopeSmoothed <  HopeBandDown[B - 1]) { --B; }
+	HopeBand = (ERHHopeBand)B;
+}
+
+const TCHAR* URHSimWorldSubsystem::GetHopeBandName() const
+{
+	switch (HopeBand)
+	{
+	case ERHHopeBand::Failing:     return TEXT("FAILING");
+	case ERHHopeBand::Strained:    return TEXT("STRAINED");
+	case ERHHopeBand::Steady:      return TEXT("STEADY");
+	case ERHHopeBand::Thriving:    return TEXT("THRIVING");
+	case ERHHopeBand::Flourishing: return TEXT("FLOURISHING");
+	}
+	return TEXT("STEADY");
+}
+
+double URHSimWorldSubsystem::GetHumanWorkTempo() const
+{
+	// No people, no tempo: exactly 1.0 keeps every pre-crew regression (the
+	// garden/vault/baseline suites run at zero pop) bit-identical.
+	if (Colonists.Num() == 0)
+	{
+		return 1.0;
+	}
+	return FMath::Clamp(1.0 + HopeTempoSlope * (HopeSmoothed - HopeBase), HopeTempoMin, HopeTempoMax);
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
@@ -3414,6 +3480,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Planted.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
 		Ar << Planted << bFirstCropAnnounced;
 	}
+	// Hope-drives (save v13). Smoothed mood + band, so a mid-swing save/load is
+	// exact-equivalent (re-deriving the band would differ inside a hysteresis gap).
+	{
+		uint8 BandByte = (uint8)HopeBand;
+		Ar << HopeSmoothed << BandByte;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3587,6 +3659,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		PlantedCells.Empty();
 		PlantedCells.Append(Planted);
 		bGardenThirstAnnounced = false; // runtime edge re-derives
+	}
+	// Hope-drives (save v13).
+	{
+		uint8 BandByte = 0;
+		Ar << HopeSmoothed << BandByte;
+		HopeBand = (ERHHopeBand)BandByte;
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

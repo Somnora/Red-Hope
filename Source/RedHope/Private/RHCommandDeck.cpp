@@ -820,7 +820,11 @@ FText SRHCommandDeck::GetCrewText() const
 	// The Hope index (M2 Gate B): the number plus the two levers a player can
 	// actually pull right now. Neutral placeholder wording (Gate-D review).
 	const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
-	Text += FString::Printf(TEXT("\nHOPE %.0f"), H.Total);
+	// The mood (smoothed) + its named band + the work-tempo it drives - the
+	// number finally BITES: a thriving crew visibly out-produces a surviving one.
+	const double Tempo = Sim->GetHumanWorkTempo();
+	Text += FString::Printf(TEXT("\nHOPE %.0f  %s   tempo %.0f%%"),
+		Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), Tempo * 100.0);
 	if (H.OffendedPairs > 0)
 	{
 		Text += FString::Printf(TEXT("   layout conflicts: %d (-%.0f)"), H.OffendedPairs, H.AdjacencyPenalty);

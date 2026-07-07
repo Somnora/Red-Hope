@@ -263,6 +263,24 @@ public:
 	// framing; all wording pending the Gate-D review).
 	int32 GetComfortsSuppliedCount() const { return ComfortsSupplied; }
 
+	// --- Hope drives the colony (M2 Gate D+, "what does Hope DO") ---
+	// GetColonyHope() is the INSTANTANEOUS read; HopeSmoothed is its low-pass
+	// integral (Tau ~ 3 sols) and is what actually drives effects, so a rec room
+	// or a lost circulator moves the colony's MOOD over sols, not per-frame. The
+	// smoother uses the exp(-dt/Tau) form so the agent band and the 60x era band
+	// converge to the identical value (the load-bearing parity property).
+	// Serialized (save v13). Named bands carry hysteresis so nothing flickers.
+	enum class ERHHopeBand : uint8 { Failing = 0, Strained, Steady, Thriving, Flourishing };
+	double GetHopeSmoothed() const { return HopeSmoothed; }
+	ERHHopeBand GetHopeBand() const { return HopeBand; }
+	const TCHAR* GetHopeBandName() const;
+	// The human work-tempo multiplier this mood produces (0.60..1.25, 1.00 at
+	// Hope 50). Applies ONLY to colonist labor (garden yield today; lab/bench
+	// output as those gain mechanical outputs). Robots are morale-immune, so
+	// every Phase-1 baseline is untouched. Exactly 1.0 at zero population - no
+	// people, no tempo - which keeps the pre-crew regressions bit-identical.
+	double GetHumanWorkTempo() const;
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -597,6 +615,22 @@ private:
 	double HopeAdjacencyPenalty = 8.0;  // per offended (emitter, refuser) pair
 	double HopeUnsupportedPenalty = 10.0;
 	double HopeVaultMilestone = 5.0;
+	// Hope-drives-the-colony state (save v13). HopeSmoothed low-passes the
+	// instantaneous index; HopeBand is the hysteresis band it currently sits in
+	// (saved so save/load is exact-equivalent even mid-gap). Both run in BOTH
+	// time bands via StepHope, using the step-size-invariant exp smoother.
+	double HopeSmoothed = 50.0;
+	ERHHopeBand HopeBand = ERHHopeBand::Steady;
+	void StepHope(float SubDt);
+	void UpdateHopeBand(); // rise/fall the band from HopeSmoothed with hysteresis
+	double HopeSmoothTauSols = 3.0;
+	double HopeTempoSlope = 0.006;      // tempo = 1 + slope*(smoothed-50)
+	double HopeTempoMin = 0.60;         // a strained colony is slow, never dead
+	double HopeTempoMax = 1.25;
+	// Band boundary thresholds (up>down = the hysteresis gap). Index 0 is the
+	// Failing|Strained edge, 3 is the Thriving|Flourishing edge.
+	double HopeBandUp[4]   = { 28.0, 45.0, 75.0, 90.0 };
+	double HopeBandDown[4] = { 20.0, 35.0, 70.0, 85.0 };
 	// The garden (M2 Gate C; PlantedCells serialized, save v12). Keys are
 	// (Level, CellIndex, 0). ProducingCells is per-step derived, never saved.
 	TSet<FIntVector> PlantedCells;
