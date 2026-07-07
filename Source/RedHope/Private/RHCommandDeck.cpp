@@ -244,10 +244,22 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				.Padding(FMargin(10.f, 6.f))
 				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
 				[
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetInspectText)
-					.Font(DeckFont(10))
-					.ColorAndOpacity(FLinearColor(0.75f, 0.95f, 0.88f))
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetInspectText)
+						.Font(DeckFont(10))
+						.ColorAndOpacity(FLinearColor(0.75f, 0.95f, 0.88f))
+					]
+					// Manual breaker (director ruling, M1-d hand-play): every
+					// inspected structure can be switched off to ride out a
+					// storm on stored charge - and back on.
+					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 5.f, 0.f, 0.f))
+					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetPowerToggleLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
+					]
 				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
@@ -357,6 +369,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetMapLabel)),
 							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleMap))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFleetHoldLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFleetHold))
 					]
 
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
@@ -734,7 +751,14 @@ FText SRHCommandDeck::GetInspectText() const
 	}
 	else
 	{
-		Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
+		if (B->bManualOff)
+		{
+			Text += TEXT("\nSWITCHED OFF (manual) - zero draw, batches frozen");
+		}
+		else
+		{
+			Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
+		}
 		if (B->BatchRemaining_h > 0.0)
 		{
 			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h);
@@ -1037,6 +1061,45 @@ FReply SRHCommandDeck::HandleMap()
 		PC->ToggleSurveyMap();
 	}
 	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandlePowerToggle()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	if (Sim && Id != 0)
+	{
+		Sim->SetManualPower(Id, Sim->IsManualOff(Id)); // off -> on, on -> off
+	}
+	return FReply::Handled();
+}
+
+FText SRHCommandDeck::GetPowerToggleLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	const bool bOff = Sim && Id != 0 && Sim->IsManualOff(Id);
+	return FText::FromString(bOff ? TEXT("Switch ON") : TEXT("Switch OFF"));
+}
+
+FReply SRHCommandDeck::HandleFleetHold()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim)
+	{
+		Sim->SetFleetHold(!Sim->IsFleetHeld());
+	}
+	return FReply::Handled();
+}
+
+FText SRHCommandDeck::GetFleetHoldLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return FText::FromString(Sim && Sim->IsFleetHeld() ? TEXT("Release Fleet") : TEXT("Hold Fleet"));
 }
 
 FReply SRHCommandDeck::HandleSpeed(float Tier)

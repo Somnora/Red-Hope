@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 8;   // v8: vault-exit flag (Gate C); v7 habitability; v6 designations/H2; v5 shaft
+	constexpr uint32 RHSaveVersion = 9;   // v9: manual power + fleet hold (storm discipline); v8 vault exit; v7 habitability
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -836,12 +836,13 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 
 	for (FRHBuildingInstance& B : Buildings)
 	{
-		if (B.bUnderConstruction || (!B.bPowered && !B.bBatchOnH2))
+		if (B.bUnderConstruction || B.bManualOff || (!B.bPowered && !B.bBatchOnH2))
 		{
 			// Shed/unbuilt: batches stall, nothing starts (M0-c shedding rule).
 			// Exception (M1-d): a Hydrogen-fuelled batch bought its whole run
 			// up-front - it grinds on through the brownout. That is the fuel's
-			// entire strategic point.
+			// entire strategic point. Manual OFF trumps even that: the player
+			// pulled the breaker deliberately (storm discipline ruling).
 			continue;
 		}
 
@@ -1212,6 +1213,43 @@ float URHSimWorldSubsystem::GetRadiationNow(int32 Level) const
 	return Rad;
 }
 
+bool URHSimWorldSubsystem::SetManualPower(int32 BuildingId, bool bOn)
+{
+	FRHBuildingInstance* B = FindBuilding(BuildingId);
+	if (!B || B->bUnderConstruction)
+	{
+		return false;
+	}
+	B->bManualOff = !bOn;
+	UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d switched %s"),
+		*B->DefName.ToString(), B->Id, bOn ? TEXT("ON") : TEXT("OFF (manual - zero draw, batches frozen)"));
+	return true;
+}
+
+bool URHSimWorldSubsystem::IsManualOff(int32 BuildingId) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Id == BuildingId)
+		{
+			return B.bManualOff;
+		}
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::SetFleetHold(bool bHold)
+{
+	if (bFleetHold == bHold)
+	{
+		return;
+	}
+	bFleetHold = bHold;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Fleet %s"), bHold
+		? TEXT("HELD - robots finish current tasks, then claim nothing new")
+		: TEXT("released - task claims resume"));
+}
+
 TMap<FName, double> URHSimWorldSubsystem::ComputeConstructionShortage() const
 {
 	TMap<FName, double> NeedKg, DeliveredKg;
@@ -1426,6 +1464,18 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 			B.bPowered = false;
 			continue;
 		}
+		// Manually switched off (storm discipline ruling): no gen, no draw,
+		// reads dark. Storage still counts - the pooled bank must not clamp
+		// away stored energy because a breaker flipped.
+		if (B.bManualOff)
+		{
+			if (const FRHBuildingRow* OffDef = Defs->GetBuilding(B.DefName))
+			{
+				CapWh += OffDef->StorageWh;
+			}
+			B.bPowered = false;
+			continue;
+		}
 		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
 		if (!Def)
 		{
@@ -1587,6 +1637,28 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 				&& FMath::Abs(B.LocationCm.Y - LocationCm.Y) < HalfY + FMath::Max(1, BDef->FootprintY) * 100.0)
 			{
 				OutReason = FString::Printf(TEXT("Footprint overlaps %s #%d"), *B.DefName.ToString(), B.Id);
+				return false;
+			}
+		}
+		// In-flight orders block too (director finding, M1-d hand-play): during
+		// the signal-lag window the same spot happily accepted a second order,
+		// and the collision only surfaced ~45 s later as a confusing rejection.
+		// The ghost now goes red over a spot that is already spoken for.
+		for (const FRHCommand& C : UplinkQueue)
+		{
+			if (C.Verb != FName("Build") || C.Level != Level)
+			{
+				continue;
+			}
+			const FRHBuildingRow* QDef = Defs->GetBuilding(C.Target);
+			if (!QDef)
+			{
+				continue;
+			}
+			if (FMath::Abs(C.Location.X - LocationCm.X) < HalfX + FMath::Max(1, QDef->FootprintX) * 100.0
+				&& FMath::Abs(C.Location.Y - LocationCm.Y) < HalfY + FMath::Max(1, QDef->FootprintY) * 100.0)
+			{
+				OutReason = FString::Printf(TEXT("%s order already in transit for that spot"), *C.Target.ToString());
 				return false;
 			}
 		}
@@ -2005,6 +2077,10 @@ void URHSimWorldSubsystem::ReleaseDigClaim(int32 DepositId)
 
 int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm, int32 RobotLevel)
 {
+	if (bFleetHold)
+	{
+		return 0; // storm discipline: held fleets claim nothing new
+	}
 	int32 BestId = 0;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHDepositState& D : Deposits)
@@ -2028,6 +2104,10 @@ int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm, int32 RobotLe
 
 bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel)
 {
+	if (bFleetHold)
+	{
+		return false;
+	}
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
@@ -2128,6 +2208,10 @@ bool URHSimWorldSubsystem::IsDepositSpent(int32 DepositId) const
 
 bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel)
 {
+	if (bFleetHold)
+	{
+		return false;
+	}
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
@@ -2214,7 +2298,9 @@ bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32
 	OutBuildingId = 0;
 	for (const FRHBuildingInstance& B : Buildings)
 	{
-		if (!B.bUnderConstruction && B.DefName == NAME_ChargePad && B.Level == RobotLevel)
+		// A manually-off pad delivers nothing - robots must not dock at a dead
+		// plug and wait forever (storm discipline ruling).
+		if (!B.bUnderConstruction && !B.bManualOff && B.DefName == NAME_ChargePad && B.Level == RobotLevel)
 		{
 			const double Dist = FVector::DistXY(B.LocationCm, RobotPosCm);
 			if (Dist < BestDist)
@@ -2305,6 +2391,10 @@ float URHSimWorldSubsystem::GetWearWorkMul(float Wear) const
 
 bool URHSimWorldSubsystem::TryClaimSurvey(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask)
 {
+	if (bFleetHold)
+	{
+		return false;
+	}
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
@@ -2368,6 +2458,10 @@ void URHSimWorldSubsystem::CompleteSurvey(int32 TaskId, double RadiusM)
 
 bool URHSimWorldSubsystem::TryClaimRepair(FMassEntityHandle Self, FMassEntityHandle& OutTarget, FVector& OutTargetCm)
 {
+	if (bFleetHold)
+	{
+		return false;
+	}
 	if (GetStock(FName("SpareParts")) < 1.0)
 	{
 		return false; // no parts: nothing to offer the patient
@@ -2665,7 +2759,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2;
+		   << B.bBatchOnH2 << B.bManualOff;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 	}
@@ -2715,7 +2809,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 	// Habitability chain (save v7).
-	Ar << FloorO2Kg << RatedFloors << bVaultRated;
+	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -2799,7 +2893,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		FRHBuildingInstance B;
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2;
+		   << B.bBatchOnH2 << B.bManualOff;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 		Buildings.Add(MoveTemp(B));
@@ -2865,7 +2959,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Habitability chain (save v7).
 	FloorO2Kg.Empty();
 	RatedFloors.Empty();
-	Ar << FloorO2Kg << RatedFloors << bVaultRated;
+	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

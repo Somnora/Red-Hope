@@ -74,6 +74,12 @@ private:
 	FSlateColor GetFloorCellColor(int32 Level) const;
 	FSlateColor GetFloorTextColor(int32 Level) const;
 	FReply HandleMap();
+	// Storm power discipline (director ruling, M1-d hand-play): the manual
+	// breaker on the inspected structure + the colony-wide fleet hold.
+	FReply HandlePowerToggle();
+	FText GetPowerToggleLabel() const;
+	FReply HandleFleetHold();
+	FText GetFleetHoldLabel() const;
 	FReply HandleSpeed(float Tier);
 	FReply HandlePause();
 	FReply HandleSave();

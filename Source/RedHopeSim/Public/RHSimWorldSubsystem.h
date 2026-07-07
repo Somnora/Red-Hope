@@ -55,6 +55,10 @@ struct REDHOPESIM_API FRHBuildingInstance
 	// stock deducted up-front) - it draws idle grid power only and runs
 	// straight through shedding. Cleared at batch completion.
 	UPROPERTY() bool bBatchOnH2 = false;
+	// Director ruling (M1-d hand-play): the player can switch a structure OFF
+	// to stretch the battery through a storm - zero draw, zero gen, batches
+	// frozen (even H2), until switched back on. Serialized (save v9).
+	UPROPERTY() bool bManualOff = false;
 	UPROPERTY() TMap<FName, double> InputKg;
 	UPROPERTY() TMap<FName, double> OutputKg;
 };
@@ -177,6 +181,17 @@ public:
 	// Livable - the colony's first vault. Fires the exit card; never unset
 	// (losing the rating later is a crisis, not an un-achievement).
 	bool HasVaultRating() const { return bVaultRated; }
+
+	// --- Storm power discipline (director ruling, M1-d hand-play) ---
+	// "Shut off some of the robots, tools, areas so you're not wasting battery
+	// when you don't know when you'll get valuable sun again." Manual per-
+	// structure off switch + a colony-wide fleet hold; both survive save/load.
+	bool SetManualPower(int32 BuildingId, bool bOn);
+	bool IsManualOff(int32 BuildingId) const;
+	// Held robots finish their current task, then claim nothing new (they
+	// idle/dock instead of burning charge on work).
+	void SetFleetHold(bool bHold);
+	bool IsFleetHeld() const { return bFleetHold; }
 	// Bore the trunk down to ToDepth floors below surface (clamped to MaxDepth);
 	// emits shaft spoil per newly bored floor. The shaft head (surface column)
 	// is fixed on the first bore. Never retracts.
@@ -447,6 +462,7 @@ private:
 	TMap<int32, double> FloorO2Kg;
 	TSet<int32> RatedFloors;
 	bool bVaultRated = false; // Phase 1 exit fired (save v8); never unset
+	bool bFleetHold = false;  // storm discipline: no new task claims (save v9)
 	// DT_Config rows (CSV-staged defaults): fill mass per carved 10x10 cell,
 	// leak per cell per sol (the standing tax of pressurized volume), and the
 	// trunk's push rate per floor per sol-hour.

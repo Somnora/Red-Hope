@@ -360,6 +360,32 @@ void ARHPlayerController::Tick(float DeltaTime)
 		}
 	}
 
+	// In-flight build orders (director finding, M1-d hand-play): the signal-lag
+	// window left the player blind - "I can't see where I just placed it".
+	// Every queued Build order shows a dim cyan hologram + countdown at its
+	// spot from the moment of the click until the uplink executes.
+	if (const URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>())
+	{
+		for (const FRHCommand& C : Sim->GetUplinkQueue())
+		{
+			if (C.Verb != FName("Build") || C.Level != ActiveLevel)
+			{
+				continue;
+			}
+			const FRHBuildingRow* Def = Defs->GetBuilding(C.Target);
+			const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
+			const float HalfY = Def ? FMath::Max(1, Def->FootprintY) * 100.f : 200.f;
+			FVector Spot = C.Location;
+			Spot.Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
+			DrawDebugBox(World, Spot + FVector(0, 0, 120.f), FVector(HalfX, HalfY, 120.f),
+				FColor(60, 200, 220), false, -1.f, 0, 4.f);
+			const double Eta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+			DrawDebugString(World, Spot + FVector(0, 0, 300.f),
+				FString::Printf(TEXT("%s  Δ %.0fs"), *C.Target.ToString(), Eta),
+				nullptr, FColor(120, 230, 255), 0.f, true, 1.2f);
+		}
+	}
+
 	// Surveyed-land overlay (director request): every past survey as a dim
 	// teal disc - covered ground at a glance; empty circles are knowledge too.
 	if (bShowSurveyMap)
