@@ -1,0 +1,3 @@
+Name,DisplayName,Nation,DistanceKm,ExportLot,ImportLot,RelationStart,SliceActive,Notes
+Zarya,Zarya Station,Zarya Consortium,120,Ice:150,Struct:100,40,TRUE,"M3 Gate A: the first neighbor - an ice-rich crater settlement (brief: their ice vs your ore). One convoy run trades your Struct:100 for their Ice:150. Naming/flavor PLACEHOLDER pending director (Gate D wording review)."
+Meridian,Meridian Base,Meridian Compact,200,SpareParts:4,Food:60,30,FALSE,"Dormant M3 Gate B+: a second neighbor with a parts-for-provisions profile; activates when multiple routes are proven"

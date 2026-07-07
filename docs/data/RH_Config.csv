@@ -84,3 +84,7 @@ HopeGrowthIntervalSols,20,sols,"M2 Gate D+ generational carrot: sustained eligib
 HopeGrowthFoodBufferSols,6,sols,"M2 Gate D+ generational carrot: required Food buffer (in sols of colony draw) before the colony will grow - you do not birth into a famine"
 HopeFirstBornMilestone,6,points,"M2 Gate D+ generational carrot: one-time Hope bonus once the FIRST Martian-born child arrives (never retracts) - the brief milestone + M3 identity-axis seed"
 HopeDiscoveryThreshold,85,points,"M2 Gate D+ discoveries: smoothed Hope at/above this lets staffed Labs accrue research seat-hours toward the next ordered discovery - breakthroughs are earned by sustained flourishing, not a grind"
+ConvoySpeedKmPerSol,60,km,"M3 Gate A: rover convoy speed under clear sky; an active dust storm FREEZES transit (brief: routes disrupted by storms)"
+ConvoyH2PerRun,8,kg,"M3 Gate A: hydrogen burned per convoy round trip, committed at departure (the Borer batch pattern) - trade runs on the fuel economy"
+ConvoyWearParts,1,parts,"M3 Gate A: SpareParts consumed per convoy round trip (vehicle wear, the director's trek cost) - committed at departure"
+RelationPerRun,2,points,"M3 Gate A: relation warmed per completed convoy run (0..100 per rival) - the dependency scalar the Solidarity Dilemma later leverages"
