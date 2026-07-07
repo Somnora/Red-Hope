@@ -1,0 +1,5 @@
+Name,DisplayName,Order,LabSeatHours,HopeBonus,RewardResource,RewardKg,Alert,SliceActive,Notes
+CropStrain,Hardy Crop Strain,1,100,2,Seeds,50,"DISCOVERY — a hardier crop strain, bred for Martian ground. The lab sends seed stock to the garden.",TRUE,"M2 Gate D+ discoveries: first of the ordered sequence; ~2 sols of 2 staffed lab seats"
+RegolithCeramics,Regolith Ceramics,2,150,2,Struct,100,"DISCOVERY — fired regolith ceramics. Stronger structures from the dirt underfoot.",TRUE,"Material payoff; feeds construction"
+SubsurfaceBrine,Subsurface Brine Seep,3,200,3,Water,150,"DISCOVERY — a briny seep in the deep rock. The water table is closer than we thought.",TRUE,"Water payoff; foreshadows the ice-cap arc"
+MicrobialLife,Subsurface Microbial Life,4,300,8,,0,"LIFE ON MARS — dormant microbial life in the deep brine. We are not the first. Everything changes today.",TRUE,"THE landmark (director: 'maybe they find life in microbes'); permanent Hope surge; an M3 identity/politics seed - wording pending Gate-D review"

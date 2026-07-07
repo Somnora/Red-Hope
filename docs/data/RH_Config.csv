@@ -83,3 +83,4 @@ HopeGrowthThreshold,75,points,"M2 Gate D+ generational carrot: smoothed Hope at/
 HopeGrowthIntervalSols,20,sols,"M2 Gate D+ generational carrot: sustained eligible sols per new colonist (a birth); the streak resets if conditions lapse - momentum is earned, not banked"
 HopeGrowthFoodBufferSols,6,sols,"M2 Gate D+ generational carrot: required Food buffer (in sols of colony draw) before the colony will grow - you do not birth into a famine"
 HopeFirstBornMilestone,6,points,"M2 Gate D+ generational carrot: one-time Hope bonus once the FIRST Martian-born child arrives (never retracts) - the brief milestone + M3 identity-axis seed"
+HopeDiscoveryThreshold,85,points,"M2 Gate D+ discoveries: smoothed Hope at/above this lets staffed Labs accrue research seat-hours toward the next ordered discovery - breakthroughs are earned by sustained flourishing, not a grind"
