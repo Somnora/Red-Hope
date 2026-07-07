@@ -112,6 +112,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenSeedsKgPerCell = Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), GardenSeedsKgPerCell);
 	GardenFoodKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenFoodKgPerSolPerCell"), GardenFoodKgPerSolPerCell);
 	GardenWaterKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenWaterKgPerSolPerCell"), GardenWaterKgPerSolPerCell);
+	LuxuryKgPerColonistPerSol = Defs->GetConfigScalar(FName("LuxuryKgPerColonistPerSol"), LuxuryKgPerColonistPerSol);
+	HopeLuxuryBonus = Defs->GetConfigScalar(FName("HopeLuxuryBonus"), HopeLuxuryBonus);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -1657,11 +1659,13 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	RefreshJobs();
 	if (Colonists.Num() == 0)
 	{
+		ComfortsSupplied = 0;
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
 	static const FName NFood(TEXT("Food"));
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 
+	int32 SuppliedThisStep = 0;
 	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
 	{
 		FRHColonist& C = Colonists[i];
@@ -1687,6 +1691,17 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		{
 			AddStock(NFood, -NeedFood);
 			bFed = true;
+		}
+
+		// Comforts (M2 Gate D, abstract): a luxury ration when stocked. Never
+		// part of the support contract - going without lifts nothing, costs
+		// nothing (prevention framing; Gate-D review owns all wording).
+		static const FName NLuxury(TEXT("Luxury"));
+		const double NeedLux = LuxuryKgPerColonistPerSol * DtSols;
+		if (GetStock(NLuxury) >= NeedLux)
+		{
+			AddStock(NLuxury, -NeedLux);
+			++SuppliedThisStep;
 		}
 
 		const bool bNowSupported = bAir && bFed;
@@ -1720,6 +1735,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			Colonists.RemoveAt(i);
 		}
 	}
+	ComfortsSupplied = SuppliedThisStep;
 }
 
 FIntPoint URHSimWorldSubsystem::SpiralCell(int32 Index)
@@ -1943,6 +1959,11 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	}
 	Out.FilledSeats = ColonistJobs.Num();
 	Out.Jobs = Out.FilledSeats * HopePerJob;
+	if (Pop > 0)
+	{
+		// Comforts lift scales with the supplied fraction; never negative.
+		Out.Comforts = HopeLuxuryBonus * FMath::Clamp((double)ComfortsSupplied / (double)Pop, 0.0, 1.0);
+	}
 	Out.AdjacencyPenalty = Out.OffendedPairs * HopeAdjacencyPenalty;
 	for (const FRHColonist& C : Colonists)
 	{
@@ -1952,7 +1973,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		}
 	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty, 0.0, 100.0);
 	return Out;
 }

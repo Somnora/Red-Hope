@@ -825,6 +825,10 @@ FText SRHCommandDeck::GetCrewText() const
 	{
 		Text += FString::Printf(TEXT("   layout conflicts: %d (-%.0f)"), H.OffendedPairs, H.AdjacencyPenalty);
 	}
+	if (H.Comforts > 0.0)
+	{
+		Text += FString::Printf(TEXT("   comforts %d/%d (+%.0f)"), Sim->GetComfortsSuppliedCount(), Pop, H.Comforts);
+	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.
 	if (Sim->GetPlantedCellCount() > 0)

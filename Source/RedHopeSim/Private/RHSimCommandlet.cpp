@@ -304,6 +304,60 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate D self-test (abstract slice): comforts - luxury draw per colonist,
+	// Hope lift scaled by supplied fraction, zero penalty when dry. `-luxury`.
+	if (FParse::Param(*Params, TEXT("luxury")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COMFORTS TEST (M2 Gate D, abstract) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// Certify a 4-cell vault, house 4, keep them fed and breathing.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 800.0);
+		Sim->AddStock(FName("Food"), 200.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(4);
+		RunSols(0.1);
+
+		// 1) Dry: no luxuries, no penalty - Hope is the plain 55 baseline.
+		auto H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("LUXURY dry: hope=%.2f comforts=%.2f supplied=%d (expect 55.00, 0.00, 0)"),
+			H.Total, H.Comforts, Sim->GetComfortsSuppliedCount());
+
+		// 2) The crate lands: full supply lifts Hope by the whole bonus.
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		const double Lux0 = Sim->GetStock(FName("Luxury"));
+		RunSols(1.0);
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("LUXURY supplied: hope=%.2f comforts=%.2f supplied=%d drawn=%.1f (expect 63.00, 8.00, 4, 0.8)"),
+			H.Total, H.Comforts, Sim->GetComfortsSuppliedCount(), Lux0 - Sim->GetStock(FName("Luxury")));
+
+		// 3) Drain it: the lift fades to zero, nothing else changes.
+		Sim->AddStock(FName("Luxury"), -Sim->GetStock(FName("Luxury")));
+		RunSols(0.5);
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("LUXURY drained: hope=%.2f comforts=%.2f pop=%d supported=%d (expect 55.00, 0.00, 4, 4)"),
+			H.Total, H.Comforts, Sim->GetPopulation(),
+			[&]{ int32 N=0; for (const FRHColonist& C : Sim->GetColonists()) { N += C.bSupported ? 1 : 0; } return N; }());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COMFORTS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
 	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
 	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.

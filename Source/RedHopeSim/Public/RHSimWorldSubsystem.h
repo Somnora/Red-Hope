@@ -252,12 +252,16 @@ public:
 	// (work speed, growth) wire up in later gates after the framing review.
 	struct FRHHopeBreakdown
 	{
-		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0;
+		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0; // stored positive
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		double Total = 0;
 	};
 	FRHHopeBreakdown GetColonyHope() const;
+	// Comforts (M2 Gate D, abstract slice): colonists who drew their luxury
+	// ration this step. Pure Hope bonus - absence never penalizes (prevention
+	// framing; all wording pending the Gate-D review).
+	int32 GetComfortsSuppliedCount() const { return ComfortsSupplied; }
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -604,6 +608,11 @@ private:
 	double GardenSeedsKgPerCell = 50.0;
 	double GardenFoodKgPerSolPerCell = 1.0;
 	double GardenWaterKgPerSolPerCell = 4.0;
+	// Comforts (M2 Gate D, abstract). Supplied count is per-step derived,
+	// never saved (the pool stock is the state).
+	int32 ComfortsSupplied = 0;
+	double LuxuryKgPerColonistPerSol = 0.2;
+	double HopeLuxuryBonus = 8.0;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;
