@@ -9,3 +9,4 @@ SolarPack,Solar Array Flat-Pack,400,Power,+1 deployable SolarArray,,TRUE,"Import
 BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,,TRUE,Night resilience
 ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,,TRUE,Latency-to-autonomy on the manifest
 LuxuryGoods,Luxury Goods,300,Future,Dormant until Phase 2 morale,,TRUE,Morale bet for the first crew
+CrewPod,Crew Pod (4 colonists),2400,Crew,"+4 colonists into certified housing; +200 kg Food; returns aboard if no beds",,TRUE,"M2 Gate A: the heaviest single item - crew vs hardware is the Phase-2 manifest decision"

@@ -9,6 +9,7 @@ Ice,Ice,Solid,Stockpile,TRUE,Drilled from subsurface deposits
 Water,Water,Fluid,Tank,TRUE,Network-instant within connected buildings (hybrid logistics rule)
 Oxygen,Oxygen,Gas,Tank,TRUE,Reserve stock; quota line; no consumer until humans (M2)
 Hydrogen,Hydrogen,Gas,Tank,TRUE,"Banked fuel; no slice consumer, labeled future (hoppers/return ships)"
+Food,Food,Provisions,Tank,TRUE,"ACTIVE M2: pooled provisions (network stock like Water); colonists draw ColonistFoodKgPerSol; arrives with CrewPods until the Gate-C garden"
 SpareParts,Spare Parts,Solid,Stockpile,TRUE,Maintenance consumable; import-only
 Soil,Earth Soil,Solid,Stockpile,FALSE,Dormant; greenhouse economy M2; manifest item now
 Seeds,Seeds,Solid,Stockpile,FALSE,Dormant; manifest item now
