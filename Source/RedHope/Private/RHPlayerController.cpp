@@ -260,10 +260,43 @@ void ARHPlayerController::Tick(float DeltaTime)
 				DrawDebugCircle(World, Ground + FVector(0, 0, 30.f), Def->CoverageRadius_m * 100.f,
 					64, Color, false, -1.f, 0, 6.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
 			}
-			HintText = bOk
-				? FString::Printf(TEXT("PLACING %s - click to transmit (Δ %.0f sim-s), right-click to cancel"),
-					*PendingBuildDef.ToString(), Sim->GetOrderLagSeconds())
-				: FString::Printf(TEXT("PLACING %s - %s"), *PendingBuildDef.ToString(), *Reason);
+			// On-placement tooltip (M2 Gate D+ UX part 3): what this thing IS
+			// and everything it will COST, before the click commits anything.
+			FString Tip = FString::Printf(TEXT("PLACING %s"),
+				Def && !Def->DisplayName.IsEmpty() ? *Def->DisplayName : *PendingBuildDef.ToString());
+			if (Def && !Def->Blurb.IsEmpty())
+			{
+				Tip += FString::Printf(TEXT("\n%s"), *Def->Blurb); // director-authored "what is this"
+			}
+			if (Def)
+			{
+				// The REAL bill at this floor (the Level-taxed bill: a surface
+				// site shows its Shielding line; underground shows none).
+				FString Bill;
+				for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, ActiveLevel))
+				{
+					Bill += FString::Printf(TEXT("%s%.0f kg %s"), Bill.IsEmpty() ? TEXT("") : TEXT(" + "),
+						Cost.Value, *Cost.Key.ToString());
+				}
+				Tip += FString::Printf(TEXT("\ncost: %s  ·  %.0f s build"),
+					Bill.IsEmpty() ? TEXT("free (flat-pack)") : *Bill, Def->BuildTime_s);
+				if (Def->PowerDraw_W > 0.f)
+				{
+					Tip += FString::Printf(TEXT("  ·  draws %.0f W"), Def->PowerDraw_W);
+				}
+				else if (Def->PowerGenPeak_W > 0.f)
+				{
+					Tip += FString::Printf(TEXT("  ·  generates up to %.0f W"), Def->PowerGenPeak_W);
+				}
+				if (Def->StorageWh > 0.f)
+				{
+					Tip += FString::Printf(TEXT("  ·  stores %.0f Wh"), Def->StorageWh);
+				}
+			}
+			Tip += bOk
+				? FString::Printf(TEXT("\nclick to transmit (Δ %.0f sim-s), right-click to cancel"), Sim->GetOrderLagSeconds())
+				: FString::Printf(TEXT("\n%s"), *Reason);
+			HintText = Tip;
 			HintColor = FLinearColor(Color);
 		}
 	}
