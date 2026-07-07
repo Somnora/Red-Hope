@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 42 (M4 Gate D — dynamic crises + endings; M4 COMPLETE, the sovereignty game is whole)
+
+- **Gate D built + verified (`7e33113` data, `d701e13` code, save v23):** the finale — kills late-game stagnation, answers the spec's thematic question, reads the two axes toward the endings. All deterministic, on-brief (no combat, no feral robots).
+  - **Dynamic crises** (`StepCrisis`, both bands, has-neighbors gated): a cadence with a seeded roll fires a crisis; the **alignment-gated selector** decides which — a **Destructive** colony draws a **Malfunction** (its predatory conduct returns as a systemic blackout / robot-downtime: work-tempo × `CrisisWorkPenalty` + a Hope hit; units go *inert*, never feral); an **Evolved** colony draws an **Environmental** test (a Water-drain stress test survivable with reserves + a lighter Hope hit). Both recover on a timer — deterministic downtime, never permanent. **This is the spec's "human evolution vs destruction" made mechanical.**
+  - Effects read *live* (tempo/Hope during a crisis) so no per-step mutation diverges; the Water drain is linear/parity-safe.
+  - **The endings framework:** `GetProjectedEnding()` maps (IdentityAxis, HumanNatureAxis) → the brief's four (§66): Corporate Jewel (Earth-aligned), Independent Mars Federation (Martian + Evolved), Martian Cold War (Martian + Destructive), Abandonment/Collapse (had a crew, lost it). A one-time "A PATH IS SET" milestone fires when the colony first reaches a definite outcome. Deck PATH line; `RH.Crisis [trigger]`.
+  - `-crisis` self-test all EXACT (destructive→Malfunction tempo ×0.6 + Hope −12; recovery; evolved→Environmental Water drain; all three political endings map correctly; save v23 round-trip). All 19 suites green; baseline byte-identical; Hope-sensitive suites exact (crisis inert without a rival+crew).
+- **M4 is COMPLETE. The full three-phase arc — Automation (M0/M1) → Habitation (M2) → Sovereignty (M3/M4) — is built end to end.** Two late-game axes drive it: Identity (Earth↔Mars) and HumanNature (Evolved↔Destructive), both with mechanical teeth, both reading toward four endings.
+- **What remains is not more structure — it's finishing:** (1) the **Gate-D mental-health framing review** of ALL placeholder wording across M2/M3/M4 (director-owned, the hard stop before ship); (2) the large **DataTable sync** (save v23; DT_Rivals + DT_Discoveries new assets; ~75 config rows; struct columns — see `docs/dt-sync-checklist.md`); (3) the director's **hand-play** of the whole thing (esp. the visual work — action card, categorized menu, Mars look pass — which headless can't verify); (4) **adversarial-review debt** on Gates C+D. And balance: every number across M3/M4 is legible-math-first, awaiting tuning.
+
 ## 2026-07-07 — Session 41 (M4 Gate C — Earth's pre-emptive pressure: embargo / defection / pacify)
 
 - **Gate C built + verified (`b70757b` data, `8faa19d` code, save v22):** the escalation above the Solidarity Dilemma.
