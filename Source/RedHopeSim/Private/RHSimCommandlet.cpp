@@ -208,19 +208,17 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
-		// The live DT_Rooms predates this gate's activation flips; patch the six
-		// Gate-B rows in memory (the established test-knob pattern - the CSV
-		// carries the truth, the editor session syncs the asset).
+		// DT_Rooms is synced (Gate B): these six functions ship SliceActive=true.
+		// Assert it against the REAL asset so this test is a pure-data verifier -
+		// if the DT ever regresses vs the CSV, it fails loudly instead of a
+		// silent in-memory patch masking the drift.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Workstation"), TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway") })
 		{
-			if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr))
+			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
+			if (!Row || !Row->SliceActive)
 			{
-				Row->SliceActive = true;
-			}
-			else
-			{
-				UE_LOG(LogRedHopeSim, Error, TEXT("ROOMS: no room row '%s' in DT_Rooms"), RowName);
+				UE_LOG(LogRedHopeSim, Error, TEXT("ROOMS: DT_Rooms row '%s' missing or not SliceActive - DT/CSV out of sync"), RowName);
 				return 1;
 			}
 		}
@@ -244,10 +242,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS baseline: hope=%.2f rated=%d pop=%d (expect 55.00, 1, 4)"),
 			H.Total, (int32)Sim->IsFloorRated(-1), Sim->GetPopulation());
 
-		// 2) Refusals: dormant function, uncarved cell.
-		const bool bGarden = Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		// 2) Refusals: a still-dormant function (Smoking - Gate D, SliceActive
+		// FALSE in the synced DT) and an uncarved cell index. Both refused.
+		const bool bDormant = Sim->DesignateRoom(-1, 0, FName("Smoking"), R);
 		const bool bFar = Sim->DesignateRoom(-1, 9, FName("Dining"), R);
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS refusals: garden=%d cell9=%d (expect 0, 0)"), (int32)bGarden, (int32)bFar);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS refusals: dormant=%d cell9=%d (expect 0, 0)"), (int32)bDormant, (int32)bFar);
 
 		// 3) A bad kitchen: Cooking@0 (1,0) beside LQ@1 (1,1), Dining@2 (0,1)
 		// diagonal across the shaft corner. Both offended - dist 1 has no
@@ -373,17 +372,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
-		// In-memory activation until the DT_Rooms sync (established pattern).
+		// DT_Rooms is synced (Gate C): Garden + Workstation ship SliceActive=true.
+		// Assert against the real asset - pure-data verifier, fails on DT/CSV drift.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 		for (const TCHAR* RowName : { TEXT("Garden"), TEXT("Workstation") })
 		{
-			if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr))
+			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
+			if (!Row || !Row->SliceActive)
 			{
-				Row->SliceActive = true;
-			}
-			else
-			{
-				UE_LOG(LogRedHopeSim, Error, TEXT("GARDEN: no room row '%s'"), RowName);
+				UE_LOG(LogRedHopeSim, Error, TEXT("GARDEN: DT_Rooms row '%s' missing or not SliceActive - DT/CSV out of sync"), RowName);
 				return 1;
 			}
 		}
