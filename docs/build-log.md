@@ -1,5 +1,12 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 32 (UX overhaul, part 2: Sims-style categorized build menu)
+
+- **Built (`f-menu`):** the flat BUILD palette became **category tabs** (Power / Production / Life Support / Boring / Logistics…) plus a palette that shows only the selected category's buildings — the director's "organize it by category like the Sims." Switching tabs is a pure visibility flip (every button built once, gated by a category-bound visibility; no rebuild). The open tab glows; CamelCase names auto-space ("LifeSupport" → "Life Support").
+- **Category source:** the new `FRHBuildingRow.Category` column, with a **code-derived fallback** (CanBore→Boring, CirculatesAir→LifeSupport, gen/storage→Power, coverage→Logistics, else Production) so the menu works NOW, before the DT re-sync lands the authored column (authored wins once synced).
+- Pure presentation (RHCommandDeck only) → every headless suite identical by construction; compiles clean; 30 s boot smoke zero ensures. On-screen layout is the director's hand-play verdict.
+- **Director signalled a broader goal:** "12 hours left, use all tokens improving the graphics and design, get as far along with game structure as fast as we can." UX arc part 3 (on-placement tooltips) still pending; the open directional call is whether to schedule a **Mars look/atmosphere pass** (lighting/sky/fog/post-process/color grading + material tuning — the brief's ochre-sky / warm-habitat-light Look), which is distinct from the standing gray-box-GEOMETRY rule (that rule is about meshes/sprites, not environment lighting). Surfaced to the director for a decision.
+
 ## 2026-07-07 — Session 31 (UX overhaul, part 1: the in-world action card — "click the machine, order it")
 
 - **Director's directive:** take on the UX contextual-action overhaul (his #1 concrete pain). Via a previewed structured ask he chose the interaction model: **a card that pops up ABOVE the machine in the world** (not on the deck) — the most immersive of the three options.
