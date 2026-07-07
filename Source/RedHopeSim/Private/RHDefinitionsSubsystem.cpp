@@ -15,15 +15,17 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	DepositsTable = Cast<UDataTable>(DepositsTablePath.TryLoad());
 	QuotasTable = Cast<UDataTable>(QuotasTablePath.TryLoad());
 	ManifestTable = Cast<UDataTable>(ManifestTablePath.TryLoad());
+	EventsTable = Cast<UDataTable>(EventsTablePath.TryLoad()); // absent = clear skies
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
-	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d solarCurve=%s"),
+	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d solarCurve=%s"),
 		BuildingsTable ? BuildingsTable->GetRowMap().Num() : 0,
 		RobotsTable ? RobotsTable->GetRowMap().Num() : 0,
 		RecipesTable ? RecipesTable->GetRowMap().Num() : 0,
 		DepositsTable ? DepositsTable->GetRowMap().Num() : 0,
 		QuotasTable ? QuotasTable->GetRowMap().Num() : 0,
 		ConfigTable ? ConfigTable->GetRowMap().Num() : 0,
+		EventsTable ? EventsTable->GetRowMap().Num() : 0,
 		SolarCurveTable ? TEXT("ok") : TEXT("MISSING"));
 }
 
@@ -93,6 +95,22 @@ void URHDefinitionsSubsystem::ForEachBuilding(TFunctionRef<void(FName, const FRH
 	for (const auto& Pair : BuildingsTable->GetRowMap())
 	{
 		const FRHBuildingRow* Row = reinterpret_cast<const FRHBuildingRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
+void URHDefinitionsSubsystem::ForEachEvent(TFunctionRef<void(FName, const FRHEventRow&)> Fn) const
+{
+	if (!EventsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : EventsTable->GetRowMap())
+	{
+		const FRHEventRow* Row = reinterpret_cast<const FRHEventRow*>(Pair.Value);
 		if (Row->SliceActive)
 		{
 			Fn(Pair.Key, *Row);

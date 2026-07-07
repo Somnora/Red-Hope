@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 16 (M1-b CLOSED by director hand-play; survey map; M1-c Gate A code)
+
+- **M1-b closed on the director's hand-played verdict** ("everything feels pretty good… we are getting somewhere"): survey → Ice_A discovery, inspection card, fleet panel, PAUSED banner all exercised by hand. M1-c approved as specced.
+- **Surveyed-land map (director request, same session):** sim-owned survey history (point/radius/sol/found; **save v4**); deck `Map` toggle → in-world coverage circles (teal = found, gray = empty) + Known Ground panel (every discovered deposit: type/tonnage/coords/dig status); empty surveys announce on the notice line. Verified headless (one hit + one empty survey, both recorded); committed `6e11507`.
+- **M1-c Gate A written + compiled clean (verification in progress):**
+  - `FRHEventRow` + `DT_Events` path (absent table = clear skies, graceful); `RH_Events.csv` authored (Storm_1: sols 12–15 solar×0.3; Flare_1: sol 17 half-sol ×3 wear — flare effects are Gate B).
+  - **DustFactor finally moves:** `StepPower` multiplies solar by the active storm's Severity (via `GetDustFactorNow`); `RH.Status` prints the active event.
+  - **Era auto-drop:** `CanEnterEraMode` refuses during any active event and within one era step of onset ("DustStorm imminent").
+  - **Era-honesty fix 1 (the 8.8% divergence):** `StepProduction` rewritten as a time-budget integrator — batch progress, completion, and next-batch start all inside one step with overshoot carried, so a 2 h batch no longer costs whole-step rounding at era dt. Same function both bands (dimensional honesty preserved); agent-band change is sub-step-scale only.
+  - **Era-honesty fix 2 (the 43 sim-s dump):** the clock's beyond-cap accumulator debt now CARRIES across frames (fast-forward at the per-frame cap) instead of being dropped on era→agent transitions and load hitches; only a runaway backlog past 120 sim-s drops, loudly.
+  - `RH.Ledger` instrument: parseable per-stock lines (solids/fluids/deposits) — the paired-run harness's diff format.
+- **Paired-run divergence harness running headless** (same sol-3 save → agent 8× vs era 60× legs → ledger diff; ≤5% bar): results next entry. Known deviation: 6-sol window pre-quota (era refuses near an unmet deadline — by design); the full 10-sol post-quota harness lands with BP_M1cTest next editor session, along with the DT_Events asset (row struct compiled this build).
+
 ## 2026-07-07 — Session 15 (M1-b Gate C: the player's eyes — compiled, awaiting hand-play)
 
 - **All presentation, zero sim changes** (per spec §5 + the Gate C findings from the director's first hand-played run):

@@ -22,10 +22,6 @@ void URHSimClockSubsystem::Tick(float DeltaTime)
 			++EraStepsThisFrame;
 			SimSecondsTotal += EraStepSimSeconds;
 		}
-		if (Accumulator >= EraStepSimSeconds)
-		{
-			Accumulator = 0.f; // drop silently: era mode has no fidelity promise below 1 sim-min
-		}
 	}
 	else
 	{
@@ -35,13 +31,19 @@ void URHSimClockSubsystem::Tick(float DeltaTime)
 			++StepsThisFrame;
 			SimSecondsTotal += SubStepSeconds;
 		}
-		// Anything past the cap is dropped with a warning: the "sim struggling"
-		// signal, preferred over a death spiral. Surfaces in UI later.
-		if (Accumulator >= SubStepSeconds)
-		{
-			UE_LOG(LogRedHopeSim, Warning, TEXT("SimClock frame budget exceeded; dropping %.1f sim-s"), Accumulator);
-			Accumulator = 0.f;
-		}
+	}
+
+	// Beyond-cap debt CARRIES across frames instead of being dropped (M1-c
+	// era-honesty fix: the era->agent transition used to dump up to a full
+	// era step - 43 sim-s observed - and load hitches shaved sub-steps). The
+	// sim fast-forwards over the next frames at the per-frame cap. Only a
+	// runaway backlog is dropped: that is the true death-spiral guard, and
+	// it stays loud.
+	if (Accumulator > MaxCarrySimSeconds)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("SimClock backlog %.1f sim-s exceeds carry cap; dropping %.1f sim-s"),
+			Accumulator, Accumulator - MaxCarrySimSeconds);
+		Accumulator = MaxCarrySimSeconds;
 	}
 
 	BroadcastSolIfElapsed();

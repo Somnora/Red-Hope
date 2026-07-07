@@ -7,6 +7,7 @@
 #include "RHAgentSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
+#include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/CoreDelegates.h"
@@ -180,6 +181,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		}
 		UE_LOG(LogRedHope, Display, TEXT("  import stock: solar %d, battery %d"),
 			Sim->GetImportStock(FName("SolarArray")), Sim->GetImportStock(FName("BatteryBank")));
+		if (const FRHEventRow* Event = Sim->GetActiveEvent())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  EVENT: %s until sol %.1f (severity %.2f; dust factor now %.2f)"),
+				*Event->Type.ToString(), Event->StartSol + Event->DurationSols, Event->Severity, Sim->GetDustFactorNow());
+		}
 
 		for (const auto& Q : Sim->GetQuotaProgress())
 		{
@@ -230,6 +236,42 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDig(
 			Cmd.Verb = FName("Dig");
 			Cmd.Target = FName(*Args[0]);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHLedger(
+	TEXT("RH.Ledger"),
+	TEXT("RH.Ledger - one parseable line per stock (solids summed over buildings, fluids from the pool, deposits) for paired-run diffs."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>();
+		if (!Sim || !Clock) { return; }
+
+		// Solids: every resource name seen in any hopper/output, summed.
+		TSet<FName> SolidNames;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			for (const auto& In : B.InputKg) { SolidNames.Add(In.Key); }
+			for (const auto& Out : B.OutputKg) { SolidNames.Add(Out.Key); }
+		}
+		TArray<FName> Sorted = SolidNames.Array();
+		Sorted.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Ledger] sol=%d t=%.0f battery=%.1f"),
+			Clock->GetSol(), Clock->GetSimSecondsTotal(), Sim->GetPower().BatteryWh);
+		for (const FName& Name : Sorted)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("LEDGER solid %s %.2f"), *Name.ToString(), Sim->GetTotalSolid(Name));
+		}
+		for (const FName& Fluid : { FName("Water"), FName("Oxygen"), FName("Hydrogen"), FName("SpareParts") })
+		{
+			UE_LOG(LogRedHope, Display, TEXT("LEDGER stock %s %.2f"), *Fluid.ToString(), Sim->GetStock(Fluid));
+		}
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("LEDGER deposit %s %.2f %.2f"), *D.RowName.ToString(), D.RemainingKg, D.PileKg);
 		}
 	}));
 

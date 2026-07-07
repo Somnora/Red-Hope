@@ -32,6 +32,9 @@ public:
 	static constexpr float EraSpeedThreshold = 16.f;
 	static constexpr float EraStepSimSeconds = 60.f;
 	static constexpr int32 MaxEraStepsPerFrame = 4;
+	// Beyond-cap debt carries across frames up to this bound (two era steps);
+	// past it the drop warning fires - the genuine death-spiral guard.
+	static constexpr float MaxCarrySimSeconds = 120.f;
 
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override

@@ -275,6 +275,34 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 			return false;
 		}
 	}
+	// World pressure (M1-c auto-drop list): never era-skip an active event,
+	// and drop back before one starts - onset is an agent-fidelity moment.
+	if (const FRHEventRow* Event = GetActiveEvent())
+	{
+		OutReason = FString::Printf(TEXT("%s in progress"), *Event->Type.ToString());
+		return false;
+	}
+	if (Defs && Clock)
+	{
+		const double SolNow = Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds;
+		bool bImminent = false;
+		FName ImminentType;
+		Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
+		{
+			// Within one era step's horizon of onset (in sols).
+			const double HorizonSols = (double)URHSimClockSubsystem::EraStepSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
+			if (!bImminent && SolNow < (double)Row.StartSol && SolNow + HorizonSols >= (double)Row.StartSol)
+			{
+				bImminent = true;
+				ImminentType = Row.Type;
+			}
+		});
+		if (bImminent)
+		{
+			OutReason = FString::Printf(TEXT("%s imminent"), *ImminentType.ToString());
+			return false;
+		}
+	}
 	if (QuotaPhase == ERHQuotaPhase::Open && Defs && Clock)
 	{
 		if (const FRHQuotaRow* Quota = Defs->GetQuota(NAME_Q1))
@@ -622,92 +650,103 @@ void URHSimWorldSubsystem::StepTaskBoard()
 
 void URHSimWorldSubsystem::StepProduction(float SubDt)
 {
+	// Time-budget integrator (M1-c era-honesty fix): each building spends the
+	// step's hours across batch progress, completion, AND the next batch's
+	// start within one call - overshoot carries instead of rounding every
+	// batch up to a whole step. At agent dt the budget is far smaller than
+	// any batch, so behavior is unchanged; at era dt (1.2 h) this is what
+	// closed the 8.8% divergence (a 2 h batch no longer costs 2 whole steps
+	// plus an idle step to restart).
 	for (FRHBuildingInstance& B : Buildings)
 	{
-		if (B.bUnderConstruction)
+		if (B.bUnderConstruction || !B.bPowered)
 		{
-			continue;
-		}
-		if (B.BatchRemaining_h > 0.0)
-		{
-			if (B.bPowered) // shed buildings stall (priority shedding, M0-c)
-			{
-				B.BatchRemaining_h -= SubDt / 50.0;
-				if (B.BatchRemaining_h <= 0.0)
-				{
-					B.BatchRemaining_h = 0.0;
-					if (const TMap<FName, double>* Outputs = PendingOutputs.Find(B.Id))
-					{
-						for (const auto& Res : *Outputs)
-						{
-							// Hybrid rule: solids drop at the building for
-							// hauling; fluids/gases join the network pool.
-							if (Defs->IsSolidResource(Res.Key))
-							{
-								B.OutputKg.FindOrAdd(Res.Key) += Res.Value;
-								OnStockChanged.Broadcast(Res.Key, GetTotalSolid(Res.Key));
-							}
-							else
-							{
-								AddStock(Res.Key, Res.Value);
-							}
-						}
-						PendingOutputs.Remove(B.Id);
-					}
-					UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d batch complete (%s)"),
-						*B.DefName.ToString(), B.Id, *B.ActiveRecipe.ToString());
-					B.ActiveRecipe = NAME_None;
-				}
-			}
+			// Shed/unbuilt: batches stall, nothing starts (M0-c shedding rule).
 			continue;
 		}
 
-		if (!B.bPowered)
-		{
-			continue; // shed buildings do not start new batches either
-		}
-
-		// Extraction buildings (RequiresDeposit): the recipe has no hopper
-		// inputs; the batch draws its output mass from the attached deposit.
 		const FRHBuildingRow* BDef = Defs->GetBuilding(B.DefName);
 		const bool bExtractor = BDef && BDef->RequiresDeposit;
 
-		// Idle: try to start a batch whose inputs are covered - solids from
-		// the hopper, fluids from the network pool, extraction from ground.
-		if (const FRHRecipeRow* Recipe = Defs->FindRunnableRecipe(B.DefName,
-			[&](const TMap<FName, double>& Inputs)
+		double BudgetH = SubDt / 50.0; // sol-hour = 50 sim-s
+		// Bounded loop: at most a handful of batch boundaries fit in one era
+		// step; the guard is against a zero-time recipe row, not real data.
+		for (int32 Guard = 0; Guard < 8 && BudgetH > 0.0; ++Guard)
+		{
+			if (B.BatchRemaining_h > 0.0)
 			{
-				if (Inputs.Num() == 0)
+				const double SpendH = FMath::Min(BudgetH, B.BatchRemaining_h);
+				B.BatchRemaining_h -= SpendH;
+				BudgetH -= SpendH;
+				if (B.BatchRemaining_h > 0.0)
 				{
-					if (!bExtractor || B.AttachedDepositId == 0)
-					{
-						return false;
-					}
-					const FRHDepositState* D = nullptr;
-					for (const FRHDepositState& Dep : Deposits)
-					{
-						if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
-					}
-					return D && D->RemainingKg > 0.0;
+					break; // budget exhausted mid-batch
 				}
-				for (const auto& In : Inputs)
+				// Batch complete: grant outputs (hybrid rule - solids drop at
+				// the building for hauling; fluids/gases join the pool).
+				if (const TMap<FName, double>* Outputs = PendingOutputs.Find(B.Id))
 				{
-					if (Defs->IsSolidResource(In.Key))
+					for (const auto& Res : *Outputs)
 					{
-						const double* Have = B.InputKg.Find(In.Key);
-						if (!Have || *Have < In.Value)
+						if (Defs->IsSolidResource(Res.Key))
+						{
+							B.OutputKg.FindOrAdd(Res.Key) += Res.Value;
+							OnStockChanged.Broadcast(Res.Key, GetTotalSolid(Res.Key));
+						}
+						else
+						{
+							AddStock(Res.Key, Res.Value);
+						}
+					}
+					PendingOutputs.Remove(B.Id);
+				}
+				UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d batch complete (%s)"),
+					*B.DefName.ToString(), B.Id, *B.ActiveRecipe.ToString());
+				B.ActiveRecipe = NAME_None;
+				continue; // leftover budget flows into the next batch below
+			}
+
+			// Idle: try to start a batch whose inputs are covered - solids
+			// from the hopper, fluids from the network pool, extraction from
+			// the attached deposit.
+			const FRHRecipeRow* Recipe = Defs->FindRunnableRecipe(B.DefName,
+				[&](const TMap<FName, double>& Inputs)
+				{
+					if (Inputs.Num() == 0)
+					{
+						if (!bExtractor || B.AttachedDepositId == 0)
+						{
+							return false;
+						}
+						const FRHDepositState* D = nullptr;
+						for (const FRHDepositState& Dep : Deposits)
+						{
+							if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
+						}
+						return D && D->RemainingKg > 0.0;
+					}
+					for (const auto& In : Inputs)
+					{
+						if (Defs->IsSolidResource(In.Key))
+						{
+							const double* Have = B.InputKg.Find(In.Key);
+							if (!Have || *Have < In.Value)
+							{
+								return false;
+							}
+						}
+						else if (GetStock(In.Key) < In.Value)
 						{
 							return false;
 						}
 					}
-					else if (GetStock(In.Key) < In.Value)
-					{
-						return false;
-					}
-				}
-				return true;
-			}))
-		{
+					return true;
+				});
+			if (!Recipe)
+			{
+				break; // nothing startable: the rest of the budget is idle time
+			}
+
 			const TMap<FName, double> Inputs = URHDefinitionsSubsystem::ParseResourceList(Recipe->Inputs);
 			const TMap<FName, double> Outputs = URHDefinitionsSubsystem::ParseResourceList(Recipe->Outputs);
 
@@ -719,14 +758,12 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				{
 					OutMassKg += O.Value;
 				}
-				if (FRHDepositState* D = FindDeposit(B.AttachedDepositId))
+				FRHDepositState* D = FindDeposit(B.AttachedDepositId);
+				if (!D || D->RemainingKg < OutMassKg)
 				{
-					if (D->RemainingKg < OutMassKg)
-					{
-						continue; // not enough left for a full batch
-					}
-					D->RemainingKg -= OutMassKg;
+					break; // not enough left for a full batch
 				}
+				D->RemainingKg -= OutMassKg;
 			}
 			for (const auto& In : Inputs)
 			{
@@ -826,9 +863,40 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
 }
 
+const FRHEventRow* URHSimWorldSubsystem::GetActiveEvent() const
+{
+	if (!Defs || !Clock)
+	{
+		return nullptr;
+	}
+	// Sol-fraction precision: an event starting at sol 12 begins at 12.0 exactly.
+	const double SolNow = Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds;
+	const FRHEventRow* Active = nullptr;
+	Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
+	{
+		if (!Active && SolNow >= (double)Row.StartSol && SolNow < (double)Row.StartSol + Row.DurationSols)
+		{
+			Active = &Row;
+		}
+	});
+	return Active;
+}
+
+double URHSimWorldSubsystem::GetDustFactorNow() const
+{
+	const FRHEventRow* Event = GetActiveEvent();
+	if (Event && Event->Type == FName("DustStorm"))
+	{
+		return Event->Severity;
+	}
+	return Defs ? Defs->GetConfigScalar(FName("DustFactor"), 1.0) : 1.0;
+}
+
 void URHSimWorldSubsystem::StepPower(float SubDt)
 {
-	const float Solar = Defs->EvalSolarCurve(Clock->GetSolFraction());
+	// The storm's whole mechanical grip is one multiplier on solar generation
+	// (M1-c): the bank-and-shedding stack from M0-c does the rest.
+	const float Solar = Defs->EvalSolarCurve(Clock->GetSolFraction()) * (float)GetDustFactorNow();
 
 	// Pass 1: generation, storage, and each building's wanted draw.
 	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; };

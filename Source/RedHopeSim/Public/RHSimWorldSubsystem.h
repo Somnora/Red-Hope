@@ -200,6 +200,15 @@ public:
 	// Everywhere the colony has surveyed (director request: surveyed-land map).
 	const TArray<FRHSurveyRecord>& GetSurveyHistory() const { return SurveyHistory; }
 
+	// --- World pressure (M1-c) ---
+	// The event active at the current sol, or nullptr for clear skies. Rows
+	// come from DT_Events; overlapping rows resolve first-found (author
+	// schedules should not overlap - flagged at load if they do).
+	const struct FRHEventRow* GetActiveEvent() const;
+	// Solar multiplier right now: the active dust storm's Severity, else the
+	// clear-sky DustFactor config row (1.0).
+	double GetDustFactorNow() const;
+
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
 	double GetAwardMassKg() const { return AwardMassKg; }
