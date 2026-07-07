@@ -6,6 +6,9 @@
 
 class UMaterialParameterCollection;
 class ADirectionalLight;
+class APostProcessVolume;
+class AExponentialHeightFog;
+class ASkyLight;
 
 // Presentation-side driver of the atmosphere dial. Reads sim state
 // (habitability, sol clock) and writes MPC_Atmosphere + rotates the sun.
@@ -34,6 +37,19 @@ private:
 	UPROPERTY() TObjectPtr<ADirectionalLight> SunActor;
 	// Authored sun intensity, captured at discovery; storms scale from this.
 	float SunBaseIntensity = 10.f;
+
+	// The Mars LOOK pass (M2 Gate D+, director-scheduled). Presentation-only,
+	// spawned in code so it works with the editor closed - a cinematic grade
+	// over the gray-box world (respects the gray-box GEOMETRY rule; this is
+	// lighting/atmosphere/colour, not asset modelling). All three are found-or-
+	// spawned once, then driven each Tick from the sol clock + dust + camera
+	// depth. Deleting this subsystem restores the raw look; the sim never knows.
+	UPROPERTY() TObjectPtr<APostProcessVolume> GradeVolume;
+	UPROPERTY() TObjectPtr<AExponentialHeightFog> DustFog;
+	UPROPERTY() TObjectPtr<ASkyLight> FillSky;
+	bool bLookInit = false;
+	void EnsureLookRig();          // find-or-spawn the grade / fog / fill
+	void DriveLook(float DustFactor, float SolFraction, bool bUnderground);
 
 	static constexpr const TCHAR* CollectionPath = TEXT("/Game/RedHope/Sky/MPC_Atmosphere.MPC_Atmosphere");
 };
