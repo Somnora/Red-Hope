@@ -32,6 +32,23 @@ struct REDHOPESIM_API FRHCommand
 	UPROPERTY() double ExecuteAtSimSeconds = 0.0;
 };
 
+// A colonist as the sim knows them (M2 Gate A1). Colonists are population
+// entries first - presentation agents arrive in Gate A2. Serialized (v10).
+USTRUCT()
+struct REDHOPESIM_API FRHColonist
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 Id = 0;
+	UPROPERTY() FString Name;               // deterministic callsign
+	UPROPERTY() int32 HomeLevel = -1;       // the rated floor housing them
+	UPROPERTY() bool bSupported = true;     // life support met this step
+	// Sustained unsupported time; at ColonistEvacSols the Program pulls the
+	// colonist back to orbit (abstract, prevention-framed consequence - the
+	// mental-health directive's discipline; wording is Gate-D review fodder).
+	UPROPERTY() double UnsupportedSimSeconds = 0.0;
+};
+
 // A placed structure as the sim knows it. Solids live here (approved hybrid
 // logistics): InputKg feeds recipes/construction, OutputKg awaits hauling.
 USTRUCT()
@@ -192,6 +209,24 @@ public:
 	// Livable - the colony's first vault. Fires the exit card; never unset
 	// (losing the rating later is a crisis, not an un-achievement).
 	bool HasVaultRating() const { return bVaultRated; }
+
+	// --- Population (M2 Gate A1) ---
+	// Colonists arrive as CrewPod cargo and can disembark only into certified
+	// housing: rated floors x ColonistsPerCell. Each draws O2 from their home
+	// floor's fill and Food from the pool - the habitability chain's first
+	// consumers. Sustained loss of support evacuates them back to orbit.
+	const TArray<FRHColonist>& GetColonists() const { return Colonists; }
+	int32 GetPopulation() const { return Colonists.Num(); }
+	// Total certified beds and the free remainder (capacity minus population).
+	int32 GetHousingCapacity() const;
+	int32 GetFreeHousing() const { return GetHousingCapacity() - Colonists.Num(); }
+	double GetColonistEvacSols() const { return ColonistEvacSols; }
+	// Harness/cheat: house N colonists into certified housing (respects the
+	// capacity gate; returns how many actually found beds).
+	int32 Debug_AddColonists(int32 Count);
+	// Harness: run a cargo item's landing effect directly (the commandlet's
+	// arrival tests skip the quota/manifest ceremony).
+	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
 
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
@@ -378,6 +413,10 @@ private:
 	// floor; a circulator tops it back up from the colony O2 pool. Runs in
 	// BOTH bands (dimensionally honest like StepProduction).
 	void StepHabitability(float SubDt);
+	// Population integrator (M2 Gate A1): colonists breathe their floor's O2
+	// and eat pooled Food; support edges alert; sustained loss evacuates.
+	// Runs in BOTH bands; no-ops at zero population (regression-safe).
+	void StepPopulation(float SubDt);
 	// Construction shortage (M1-d Gate B): resource -> kg the open sites need
 	// beyond everything the colony holds. Drives demand-preferred recipe
 	// selection and the store->producer feed leg. Empty when nothing builds -
@@ -485,6 +524,16 @@ private:
 	// player are "sealed but too small", so the note fires once per episode
 	// instead of every step. Cleared when the floor rates up or loses seal.
 	TSet<int32> FloorsNotedSmall;
+	// Population (M2 Gate A1; serialized, save v10). Config rows drive every
+	// rate - no hardcoded balance.
+	TArray<FRHColonist> Colonists;
+	int32 NextColonistId = 1;
+	double ColonistsPerCell = 1.0;      // certified beds per carved cell on a rated floor
+	double ColonistO2KgPerSol = 0.75;   // breathing draw against the home floor's fill
+	double ColonistFoodKgPerSol = 0.62; // pooled Food draw
+	int32 CrewPodColonists = 4;         // colonists per CrewPod cargo item
+	double CrewPodFoodKg = 200.0;       // provisions landed with each pod
+	double ColonistEvacSols = 2.0;      // sustained unsupported time before evacuation
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;

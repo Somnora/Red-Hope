@@ -1,5 +1,17 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 25 (M1-d CLOSED by director; M2 opens — Gate A1 "The Crew Arrives" built, verify pending relink)
+
+- **M1-d closed:** director cleared progression to M2 ("UE is open, please move forward with the next task M2"). Close hygiene done via MCP (`9427723`): MinLivableCells=4 synced to live DT_Config; BP_VaultDemo removed from L_Slice; level + DT saved. **Phase 1 is complete.**
+- **M2 sequencing decided (director, 2026-07-07h, via structured ask):** Gate A = **colonists as agents** ("the crew arrives" — people inhabit the vault before rooms/morale); mental-health-adjacent mechanics built with **abstract placeholders now, full framing review before ship** (Gate D). `docs/m2-working-spec.md` authored: A1 sim → A2 presentation → B rooms/adjacency/Hope → C garden/food → D framing review + luxuries; surface habs/vehicles sequenced after.
+- **Gate A1 code (compiled clean, 201 s; verify pending clean relink):**
+  - `FRHColonist` (Id, deterministic callsign, HomeLevel, bSupported, evac accumulator). **Save v10.**
+  - **Arrival:** `CrewPod` manifest item (2400 kg, 4 colonists + 200 kg Food) — disembark ONLY into certified housing (rated floors × ColonistsPerCell beds, shallowest-first); no beds → pod returns aboard, loudly. The M1-d vault is the literal prerequisite for population.
+  - **StepPopulation (both bands, no-op at zero pop):** each colonist breathes `ColonistO2KgPerSol` from their home floor's fill (the M1-d atmosphere's first consumer — a crowd can out-breathe a starved circulator) and eats `ColonistFoodKgPerSol` from pooled Food. Support edges alert with the missing leg named; sustained `ColonistEvacSols` unsupported → **evacuated to orbit** (abstract, prevention-framed; wording is Gate-D review fodder). Rating loss now cascades into stakes.
+  - **Data live in DTs + CSVs (`8396629`):** Food resource ACTIVE (Provisions/Tank pool), CrewPod manifest row, 6 colonist config rows — verified via get_rows pre-save.
+  - **Instruments:** `RH.Crew` roster, `RH.AddColonists`, CREW line in the deck readout (population/Food/UNSUPPORTED:N), commandlet **`-crew`** self-test (housing gate → vault certify → landing → 1-sol consumption math → save v10 round-trip → starve → evac).
+- **Verification plan (next editor quit):** clean relink → `-crew` all-assertions + `-habitat`/`-vault`/`-borer`/10-sol regressions (zero-pop no-op keeps baselines identical by construction) → live smoke of the manifest→CrewPod→housing-gate arc.
+
 ## 2026-07-07 — Session 24 (director recording verdict: pit view v3 "distinct floors" + ground/night + HUD pin; adversarial self-review)
 
 - **Watched the director's 35 s screen recording (frames extracted via ffmpeg).** Confirmed all three reported bugs from the footage: floor −1 carve tiles bleeding through at SURF (frames 12/15), the ground going dark/grey at night (frame 9, SOL 3 03%), and the right-anchored HUD drifting as the sparkline grew.

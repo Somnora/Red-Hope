@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 9;   // v9: manual power + fleet hold (storm discipline); v8 vault exit; v7 habitability
+	constexpr uint32 RHSaveVersion = 10;  // v10: colonists (M2 Gate A1); v9 manual power/fleet hold; v8 vault exit
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -95,6 +95,12 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	O2LeakKgPerCellPerSol = Defs->GetConfigScalar(FName("O2LeakKgPerCellPerSol"), O2LeakKgPerCellPerSol);
 	O2FillRateKgPerHour = Defs->GetConfigScalar(FName("O2FillRateKgPerHour"), O2FillRateKgPerHour);
 	MinLivableCells = (int32)Defs->GetConfigScalar(FName("MinLivableCells"), MinLivableCells);
+	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
+	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
+	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
+	CrewPodColonists = (int32)Defs->GetConfigScalar(FName("CrewPodColonists"), CrewPodColonists);
+	CrewPodFoodKg = Defs->GetConfigScalar(FName("CrewPodFoodKg"), CrewPodFoodKg);
+	ColonistEvacSols = Defs->GetConfigScalar(FName("ColonistEvacSols"), ColonistEvacSols);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -248,6 +254,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepTaskBoard();
 	StepProduction(SubDt);
 	StepHabitability(SubDt);
+	StepPopulation(SubDt);
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -376,6 +383,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
 	StepHabitability(DtSimSeconds);
+	StepPopulation(DtSimSeconds);
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -1154,6 +1162,29 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); }
 	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); }
 	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); }
+	else if (ItemName == FName("CrewPod"))
+	{
+		// M2 Gate A1: colonists disembark ONLY into certified housing - the
+		// M1-d vault is the hard prerequisite, made literal. A pod that finds
+		// no beds stays aboard and returns with the ship (no refund; the
+		// Program does not land people into a void).
+		if (GetFreeHousing() >= CrewPodColonists)
+		{
+			const int32 Housed = Debug_AddColonists(CrewPodColonists);
+			AddStock(FName("Food"), CrewPodFoodKg);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("THE CREW HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
+				Housed, CrewPodFoodKg));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: %d colonists housed, +%.0f kg Food ==="), Housed, CrewPodFoodKg);
+		}
+		else
+		{
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
+				GetFreeHousing(), CrewPodColonists));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
+		}
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
 }
 
@@ -1450,6 +1481,142 @@ bool URHSimWorldSubsystem::IsFloorSealedButSmall(int32 Level) const
 	return Cells > 0 && Cells < MinLivableCells && !IsFloorRated(Level)
 		&& IsFloorCirculated(Level)
 		&& GetFloorO2Kg(Level) >= GetFloorO2RequiredKg(Level) - KINDA_SMALL_NUMBER;
+}
+
+int32 URHSimWorldSubsystem::GetHousingCapacity() const
+{
+	int32 Beds = 0;
+	for (const int32 Level : RatedFloors)
+	{
+		Beds += (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell);
+	}
+	return Beds;
+}
+
+namespace
+{
+	// Deterministic callsign pool: colonist N is always the same name in the
+	// same order (fixed-timestep discipline extends to the crew manifest).
+	const TCHAR* GRHCallsigns[] = {
+		TEXT("Adeyemi"), TEXT("Brandt"), TEXT("Chen"), TEXT("Duval"),
+		TEXT("Eriksen"), TEXT("Farid"), TEXT("Goto"), TEXT("Herrera"),
+		TEXT("Ilyina"), TEXT("Joshi"), TEXT("Kowalski"), TEXT("Laurent"),
+		TEXT("Mbeki"), TEXT("Novak"), TEXT("Okafor"), TEXT("Petrov"),
+	};
+}
+
+int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
+{
+	int32 Housed = 0;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		// Shallowest certified floor with a free bed (deterministic fill order).
+		int32 Home = 0;
+		for (int32 Level = -1; Level >= -MaxDepth; --Level)
+		{
+			if (!RatedFloors.Contains(Level))
+			{
+				continue;
+			}
+			int32 Residents = 0;
+			for (const FRHColonist& C : Colonists)
+			{
+				if (C.HomeLevel == Level)
+				{
+					++Residents;
+				}
+			}
+			if (Residents < (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell))
+			{
+				Home = Level;
+				break;
+			}
+		}
+		if (Home == 0)
+		{
+			break; // no certified bed left
+		}
+		FRHColonist C;
+		C.Id = NextColonistId++;
+		const int32 PoolSize = UE_ARRAY_COUNT(GRHCallsigns);
+		C.Name = (C.Id <= PoolSize)
+			? FString(GRHCallsigns[(C.Id - 1) % PoolSize])
+			: FString::Printf(TEXT("%s-%d"), GRHCallsigns[(C.Id - 1) % PoolSize], (C.Id - 1) / PoolSize + 1);
+		C.HomeLevel = Home;
+		Colonists.Add(C);
+		++Housed;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Colonist %s housed on floor %d"), *C.Name, Home);
+	}
+	return Housed;
+}
+
+void URHSimWorldSubsystem::StepPopulation(float SubDt)
+{
+	if (Colonists.Num() == 0)
+	{
+		return; // pre-crew colonies: zero cost, zero divergence
+	}
+	static const FName NFood(TEXT("Food"));
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+
+	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
+	{
+		FRHColonist& C = Colonists[i];
+
+		// Breathe: draw from the home floor's fill. The trunk refills it (the
+		// M1-d loop); a crowd can now out-breathe a starved circulator.
+		bool bAir = false;
+		if (RatedFloors.Contains(C.HomeLevel))
+		{
+			double& FillKg = FloorO2Kg.FindOrAdd(C.HomeLevel);
+			const double NeedO2 = ColonistO2KgPerSol * DtSols;
+			if (FillKg >= NeedO2)
+			{
+				FillKg -= NeedO2;
+				bAir = true;
+			}
+		}
+		// Eat: pooled Food (network stock, arrives with each pod; the garden
+		// is Gate C's answer to this clock running down).
+		bool bFed = false;
+		const double NeedFood = ColonistFoodKgPerSol * DtSols;
+		if (GetStock(NFood) >= NeedFood)
+		{
+			AddStock(NFood, -NeedFood);
+			bFed = true;
+		}
+
+		const bool bNowSupported = bAir && bFed;
+		if (C.bSupported && !bNowSupported)
+		{
+			// Edge alert: name the missing leg so the fix is obvious.
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
+				*C.Name, bAir ? TEXT("food stores empty") : TEXT("home floor lost its air"), ColonistEvacSols));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="),
+				*C.Name, bAir ? TEXT("no food") : TEXT("no air"));
+		}
+		C.bSupported = bNowSupported;
+
+		if (bNowSupported)
+		{
+			C.UnsupportedSimSeconds = 0.0;
+			continue;
+		}
+		C.UnsupportedSimSeconds += SubDt;
+		if (C.UnsupportedSimSeconds >= ColonistEvacSols * URHSimClockSubsystem::SolLengthSimSeconds)
+		{
+			// Abstract, prevention-framed consequence (mental-health directive):
+			// the Program pulls the colonist back to orbit. Wording is a
+			// Gate-D framing-review placeholder.
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("EVACUATED: %s returned to orbit — life support failed for %.1f sols."),
+				*C.Name, ColonistEvacSols));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (unsupported %.1f sols) ==="),
+				*C.Name, ColonistEvacSols);
+			Colonists.RemoveAt(i);
+		}
+	}
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
@@ -2855,6 +3022,19 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 	// Habitability chain (save v7).
 	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
+	// Population (save v10).
+	{
+		int32 PopNum = Colonists.Num();
+		Ar << PopNum << NextColonistId;
+		if (Ar.IsLoading())
+		{
+			Colonists.SetNum(PopNum);
+		}
+		for (FRHColonist& C : Colonists)
+		{
+			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+		}
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3005,6 +3185,19 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	FloorO2Kg.Empty();
 	RatedFloors.Empty();
 	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
+	// Population (save v10).
+	{
+		int32 PopNum = Colonists.Num();
+		Ar << PopNum << NextColonistId;
+		if (Ar.IsLoading())
+		{
+			Colonists.SetNum(PopNum);
+		}
+		for (FRHColonist& C : Colonists)
+		{
+			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+		}
+	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

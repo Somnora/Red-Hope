@@ -102,6 +102,13 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Ship arrival countdown alerts:** at T-2 and T-1 sols to touchdown the colony gets a loud alert to prepare. Implemented this session for the supply ship; crew ships inherit the same seam in M2.
 - **M1-d/M2 habitat mapping approved** as proposed in `docs/habitat-vision.md` §9 (M1-d births room/compartment/door/filtration schemas dormant; M2 activates the human layer).
 
+## Directives — 2026-07-07h (M1-d CLOSED; M2 opened — Gate A sequencing + mental-health handling)
+
+- **M1-d / Phase 1 closed:** director cleared progression to M2. Close hygiene: MinLivableCells live in DT_Config, BP_VaultDemo removed from L_Slice.
+- **M2 Gate A = colonists as agents** (director-selected from structured options): actual crew arrives first — ship-borne, housed only in certified vault floors, drawing O2/Food — before rooms/morale/crops. Rationale: the "people show up and inhabit what you built" payoff makes the vault earned; rooms then get designed against real occupants.
+- **Mental-health handling (director-selected): build mechanics abstract now, review the framing before ship.** Neutral placeholders (numbers, neutral labels like "unsupported"/"evacuated to orbit"); the full player-facing wording/iconography/tone review is Gate D — a hard stop before any of it is final. A1's only failure surface is evacuation: abstract, prevention-framed, never harm imagery.
+- **CrewPod economics:** 2400 kg (heaviest single manifest item) carrying 4 colonists + 200 kg Food (~40 sols for 4). Crew-vs-hardware becomes THE manifest decision; the provisions clock makes the Gate-C garden urgent by design.
+
 ## Directives — 2026-07-07g (director recording verdict: distinct floors, pit depth, ground/night, HUD drift)
 
 Director watched a screen recording of the underground view and reported: (1) "I can see the floors being forged out while looking at the surface, instead of two distinct floors"; (2) the pit "does not feel like a square hole dug in sand — no depth, looks like a shaved layer"; (3) "the dirt ground disappeared overnight and became grey"; (4) "the HUD top-right kept moving left"; (5) buildings/robots are still square boxes.

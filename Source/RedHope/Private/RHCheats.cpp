@@ -286,6 +286,39 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSetShieldTax(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHCrew(
+	TEXT("RH.Crew"),
+	TEXT("RH.Crew - log the colonist roster: name, home floor, support state, evacuation timer."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Crew] population %d | housing %d beds (%d free) | Food %.0f kg"),
+			Sim->GetPopulation(), Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetStock(FName("Food")));
+		for (const FRHColonist& C : Sim->GetColonists())
+		{
+			const double EvacSols = C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
+			UE_LOG(LogRedHope, Display, TEXT("  %-12s floor %d  %s%s"),
+				*C.Name, C.HomeLevel,
+				C.bSupported ? TEXT("supported") : TEXT("UNSUPPORTED"),
+				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (evac in %.1f sols)"), Sim->GetColonistEvacSols() - EvacSols));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAddColonists(
+	TEXT("RH.AddColonists"),
+	TEXT("RH.AddColonists <N> - DEBUG: house N colonists into certified housing (respects the capacity gate)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const int32 Housed = Sim->Debug_AddColonists(FCString::Atoi(*Args[0]));
+			UE_LOG(LogRedHope, Display, TEXT("Housed %d colonist(s); population %d"), Housed, Sim->GetPopulation());
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
 	TEXT("RH.Habitat"),
 	TEXT("RH.Habitat - log every subsurface floor's habitability chain: carved, O2 fill/required, circulation, rating."),

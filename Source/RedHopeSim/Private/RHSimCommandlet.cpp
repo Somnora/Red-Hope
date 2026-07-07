@@ -125,6 +125,74 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate A1 self-test: the crew arrives - housing gate on the certified
+	// vault, O2/Food draws, unsupported edge -> evacuation, save v10. `-crew`.
+	if (FParse::Param(*Params, TEXT("crew")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW ARRIVAL TEST (M2 Gate A1) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+
+		// 1) No certified housing: the pod must stay aboard.
+		Sim->Debug_DeliverCargo(FName("CrewPod"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW no housing: pop=%d (expect 0 - pod returned)"), Sim->GetPopulation());
+
+		// 2) Certify a 4-cell vault (the M1-d chain, on live data rows).
+		const FVector Head(1000.f, 1000.f, 0.f);
+		FString R;
+		Sim->ExtendShaft(1, Head);
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 800.0);
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW vault: rated=%d beds=%d (expect 1, 4)"),
+			(int32)Sim->IsFloorRated(-1), Sim->GetHousingCapacity());
+
+		// 3) The pod lands: 4 colonists + provisions.
+		Sim->Debug_DeliverCargo(FName("CrewPod"));
+		const double Food0 = Sim->GetStock(FName("Food"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW landed: pop=%d food=%.0f (expect 4, 200)"), Sim->GetPopulation(), Food0);
+
+		// 4) One sol of consumption: Food falls by pop x rate; the floor keeps
+		// its rating (breathing competes with leak but the circulator refills).
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW 1 sol: food=%.1f (expect ~%.1f) rated=%d supported=%d/%d"),
+			Sim->GetStock(FName("Food")), Food0 - 4 * 0.62, (int32)Sim->IsFloorRated(-1),
+			[&]{ int32 N=0; for (const FRHColonist& C : Sim->GetColonists()) { N += C.bSupported ? 1 : 0; } return N; }(),
+			Sim->GetPopulation());
+
+		// 5) Save v10 round-trip holds the roster.
+		FString Err;
+		Sim->SaveColony(TEXT("crewtest"), Err);
+		Sim->LoadColony(TEXT("crewtest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW save/load v10: pop=%d first=%s (expect 4, Adeyemi)"),
+			Sim->GetPopulation(),
+			Sim->GetColonists().Num() > 0 ? *Sim->GetColonists()[0].Name : TEXT("-"));
+
+		// 6) Starve the pool: unsupported edge, then evacuation after 2 sols.
+		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 0.5 sol: pop=%d unsupported=%d (expect 4, 4)"),
+			Sim->GetPopulation(),
+			[&]{ int32 N=0; for (const FRHColonist& C : Sim->GetColonists()) { N += C.bSupported ? 0 : 1; } return N; }());
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 2.5 sols: pop=%d (expect 0 - evacuated)"), Sim->GetPopulation());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M1-d Gate B self-test: the habitability chain - carve, circulate,
 	// oxygen fill from the pool, Livable rating edges (gained + lost via
 	// leakage), save v7 round-trip. `-habitat`.

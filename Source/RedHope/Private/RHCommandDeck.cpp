@@ -461,6 +461,22 @@ FText SRHCommandDeck::GetStatusText() const
 	{
 		Text += TEXT("\nTHE VAULT IS LIVABLE - PHASE 1 EXIT READY");
 	}
+	// Population (M2): people change what the numbers mean - the crew line
+	// sits with the colony vitals, not in a side panel.
+	if (Sim->GetPopulation() > 0)
+	{
+		int32 Unsupported = 0;
+		for (const FRHColonist& C : Sim->GetColonists())
+		{
+			if (!C.bSupported)
+			{
+				++Unsupported;
+			}
+		}
+		Text += FString::Printf(TEXT("\nCREW %d   Food %5.0f kg%s"),
+			Sim->GetPopulation(), Sim->GetStock(FName("Food")),
+			Unsupported > 0 ? *FString::Printf(TEXT("   UNSUPPORTED:%d"), Unsupported) : TEXT(""));
+	}
 	return FText::FromString(Text);
 }
 
