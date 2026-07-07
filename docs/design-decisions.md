@@ -210,3 +210,15 @@ Both are agent-found/agent-adjudicated; flagged for the director only as design 
 - Morality tracker -> a new **HumanNatureAxis** (Evolved/Diplomatic +100 .. Destructive/Predatory -100), a SECOND axis beside the Earth/Mars IdentityAxis. Fair trade / pacification / aid push +; theft / sabotage / coercion push -. It GATES which late-game crisis spawns (answering the spec's thematic question). This is the director's exact "human evolution vs destruction" metric, mechanized on-brief.
 
 Everything player-facing stays a Gate-D framing-review placeholder. `docs/m4-working-spec.md` authored. This ruling supersedes the raw spec's combat mechanics; the raw spec is archived here as the source of the GOALS, not the mechanics.
+
+## Review adjudication — 2026-07-07n (M3 Gate B+C and M4 Gate A adversarial review, debt cleared)
+
+Ran a 4-dimension × 2-skeptic adversarial review over `39d4c02..9ea692a` (Earth's Shadow + Solidarity Dilemma) and `aabd7f3..38eff55` (covert layer), clearing the review debt from the session-limit failures. Three distinct findings:
+
+1. **HIGH determinism — the covert detection seed (CONFIRMED, FIXED `commit after 38eff55`).** ResolveCovert seeded on `GetTypeHash(FName Rival)`, which is the FName comparison index (`ToUnstableInt()`) — assigned by pool-registration order at process launch, unstable across runs/machines. The caught↔clean outcome (and stolen goods, relation, hidden tension, saved bytes) could differ run-to-run; a reload/replay could flip it. **Fixed:** seed on `FCrc::StrCrc32(*Rival.ToString())` (content hash, stable). `-covert` now pins the exact outcome sequence (CXCX) as a cross-machine determinism guard.
+
+2. **The SolidarityHope `<0.01 → 0` snap (REFUTED, no fix).** Both skeptics refuted with a clock-granularity proof I verified: `SolLength 1200 / EraStep 60 = 20` and `1200 / SubStep 0.1 = 12000`, both exact integers, so every sol boundary is simultaneously an era-step and sub-step boundary. The exp decay is parity-exact; the snap crosses to zero on the same sol in both bands and self-heals; no save/comparison point samples the sub-sol transient. Not a defect.
+
+3. **HiddenTensions/RivalRelations serialized unsorted (LOW, ACCEPTED, no fix).** Technically against the "sort maps for byte-determinism" invariant, but the dominant codebase precedent is the primary `Stocks` pool, ALSO serialized unsorted via `SerializeResourceMap`. Within-process round-trip is correct; this project's parity harness compares LEDGER VALUES (`RH.Ledger`), never save-file bytes; across-run byte-determinism affects nothing observable. Sorting these two while `Stocks` stays unsorted would be inconsistent for zero gain. Accepted as-is, matching `Stocks`.
+
+Save/load field symmetry across v17–v20 additionally verified by direct inspection (identical field order on both sides). No other findings survived.
