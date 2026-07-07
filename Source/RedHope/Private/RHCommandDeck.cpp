@@ -841,6 +841,11 @@ FText SRHCommandDeck::GetCrewText() const
 		const double Draw = Pop * Sim->GetColonistFoodKgPerSol();
 		Text += FString::Printf(TEXT("\nGARDEN %d/%d cells producing   %+.1f kg/sol net"),
 			Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(), Yield - Draw);
+		if (Sim->GetGardenPowerDrawW() > 0.0)
+		{
+			Text += FString::Printf(TEXT("   grow-lights %.0f W%s"),
+				Sim->GetGardenPowerDrawW(), Sim->AreGrowLightsDark() ? TEXT("  DARK") : TEXT(""));
+		}
 	}
 	for (const FRHColonist& C : Sim->GetColonists())
 	{

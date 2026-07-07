@@ -294,6 +294,10 @@ public:
 	int32 GetProducingCellCount() const { return ProducingCells; }
 	double GetGardenFoodKgPerSolPerCell() const { return GardenFoodKgPerSolPerCell; }
 	double GetGardenWaterKgPerSolPerCell() const { return GardenWaterKgPerSolPerCell; }
+	// Garden power fork reads (deck): the grow-light load this step, and whether
+	// the bank went dark on it (a legibility cue - "your gardens lost power").
+	double GetGardenPowerDrawW() const { return GardenPowerDrawW; }
+	bool AreGrowLightsDark() const { return bGrowLightsDark; }
 
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
@@ -455,6 +459,9 @@ public:
 	// Harness driver (M1-d Gate B): drop solid stock into the first completed
 	// building of a def (seeding a Stockpile with Struct/Ore for tax tests).
 	void Debug_AddSolid(FName DefName, FName Resource, double Kg);
+	// Harness: force the banked energy (grow-light blackout tests). Clamped to
+	// the current capacity by the next StepPower.
+	void Debug_SetBatteryWh(double Wh) { Power.BatteryWh = FMath::Max(0.0, Wh); }
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
@@ -642,6 +649,20 @@ private:
 	double GardenSeedsKgPerCell = 50.0;
 	double GardenFoodKgPerSolPerCell = 1.0;
 	double GardenWaterKgPerSolPerCell = 4.0;
+	// Garden power fork (M2 Gate D+): a planted GARDEN cell runs grow-lights
+	// (steady yield, costs battery energy - dark => dormant when the bank can't
+	// pay); a GREENHOUSE cell trades that for glass-glazed near-free power whose
+	// yield rides the solar curve and needs a shallow floor. Both are "garden
+	// functions" for planting/forfeit; growth branches on which. All per-step
+	// derived - the room designation (saved) carries the type, so no new save state.
+	double GardenGrowLightWPerCell = 60.0;
+	double GreenhouseGlassKgPerCell = 200.0;
+	int32 GreenhouseMinLevel = -1;
+	double GardenPowerDrawW = 0.0;      // grow-light load this step (deck read)
+	bool bGrowLightsDark = false;       // last step the bank couldn't power the lights
+	bool bGardenDarkAnnounced = false;  // runtime edge: one alert per blackout episode
+	// A room function that grows crops (Garden = grow-lit, Greenhouse = glazed).
+	bool IsGardenFunction(FName Fn) const { return Fn == FName("Garden") || Fn == FName("Greenhouse"); }
 	// Comforts (M2 Gate D, abstract). Supplied count is per-step derived,
 	// never saved (the pool stock is the state).
 	int32 ComfortsSupplied = 0;

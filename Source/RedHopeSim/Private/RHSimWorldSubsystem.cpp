@@ -112,6 +112,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenSeedsKgPerCell = Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), GardenSeedsKgPerCell);
 	GardenFoodKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenFoodKgPerSolPerCell"), GardenFoodKgPerSolPerCell);
 	GardenWaterKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenWaterKgPerSolPerCell"), GardenWaterKgPerSolPerCell);
+	GardenGrowLightWPerCell = Defs->GetConfigScalar(FName("GardenGrowLightWPerCell"), GardenGrowLightWPerCell);
+	GreenhouseGlassKgPerCell = Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), GreenhouseGlassKgPerCell);
+	GreenhouseMinLevel = (int32)Defs->GetConfigScalar(FName("GreenhouseMinLevel"), GreenhouseMinLevel);
 	LuxuryKgPerColonistPerSol = Defs->GetConfigScalar(FName("LuxuryKgPerColonistPerSol"), LuxuryKgPerColonistPerSol);
 	HopeLuxuryBonus = Defs->GetConfigScalar(FName("HopeLuxuryBonus"), HopeLuxuryBonus);
 	HopeSmoothTauSols = Defs->GetConfigScalar(FName("HopeSmoothTauSols"), HopeSmoothTauSols);
@@ -1191,6 +1194,7 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 	}
 	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); }
 	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); }
+	else if (ItemName == FName("GlassCrate")) { AddStock(FName("Glass"), 400); }
 	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); }
 	else if (ItemName == FName("CrewPod"))
 	{
@@ -1588,10 +1592,12 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	{
 		return;
 	}
-	static const FName NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NWater(TEXT("Water")), NFood(TEXT("Food"));
+	static const FName NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NWater(TEXT("Water")), NFood(TEXT("Food")), NGlass(TEXT("Glass"));
+	static const FName NGarden(TEXT("Garden")), NGreenhouse(TEXT("Greenhouse"));
 
-	// Plant: any Garden-zoned cell on a rated floor, when the colony holds the
-	// materials. Auto - the gamble pays off the moment the ground is ready.
+	// Plant: any Garden- OR Greenhouse-zoned cell on a rated floor, when the
+	// colony holds the materials. A Greenhouse also needs fabricated/imported
+	// Glass. Auto - the gamble pays off the moment the ground is ready.
 	for (const auto& Pair : FloorRoomCells)
 	{
 		const int32 Level = Pair.Key;
@@ -1602,19 +1608,24 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		for (int32 i = 0; i < Pair.Value.Num(); ++i)
 		{
 			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Pair.Value[i]) : nullptr;
-			if (!Row || Row->Function != FName("Garden") || PlantedCells.Contains(FIntVector(Level, i, 0)))
+			if (!Row || !IsGardenFunction(Row->Function) || PlantedCells.Contains(FIntVector(Level, i, 0)))
 			{
 				continue;
 			}
-			if (GetStock(NSoil) < GardenSoilKgPerCell || GetStock(NSeeds) < GardenSeedsKgPerCell)
+			const bool bGreenhouse = (Row->Function == NGreenhouse);
+			if (GetStock(NSoil) < GardenSoilKgPerCell || GetStock(NSeeds) < GardenSeedsKgPerCell
+				|| (bGreenhouse && GetStock(NGlass) < GreenhouseGlassKgPerCell))
 			{
-				continue; // waits for the next pallet, silently - the deck shows the shortfall
+				continue; // waits for the next pallet/crate, silently - the deck shows the shortfall
 			}
 			AddStock(NSoil, -GardenSoilKgPerCell);
 			AddStock(NSeeds, -GardenSeedsKgPerCell);
+			if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
 			PlantedCells.Add(FIntVector(Level, i, 0));
-			UE_LOG(LogRedHopeSim, Display, TEXT("Garden planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds)"),
-				Level, i, GardenSoilKgPerCell, GardenSeedsKgPerCell);
+			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)"),
+				bGreenhouse ? TEXT("Greenhouse") : TEXT("Garden"), Level, i,
+				GardenSoilKgPerCell, GardenSeedsKgPerCell,
+				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""));
 			if (!bFirstCropAnnounced)
 			{
 				bFirstCropAnnounced = true;
@@ -1623,9 +1634,45 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		}
 	}
 
-	// Grow: planted cells on rated floors turn Water into Food. A cell whose
-	// zoning changed away from Garden forfeits its soil (loudly, once).
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	const double DtHours = SubDt / 50.0; // sol-hours (matches StepPower's Wh accounting)
+
+	// Grow-light power (M2 Gate D+): grow-lit GARDEN cells run on the battery,
+	// all-or-nothing at colony scale (order-independent, legible - "the gardens
+	// went dark"). Debited BEFORE StepPower recomputes the bank, so the drain is
+	// consistent in both time bands. Greenhouses draw ~nothing (they glaze).
+	int32 GrowLitCount = 0;
+	for (const FIntVector& PC : PlantedCells)
+	{
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(PC.X, PC.Y)) : nullptr;
+		if (Row && Row->Function == NGarden && RatedFloors.Contains(PC.X))
+		{
+			++GrowLitCount;
+		}
+	}
+	GardenPowerDrawW = GardenGrowLightWPerCell * GrowLitCount;
+	const double GrowLightWh = GardenPowerDrawW * DtHours;
+	bool bGrowLightsPowered = true;
+	if (GrowLitCount > 0)
+	{
+		if (Power.BatteryWh >= GrowLightWh)
+		{
+			Power.BatteryWh -= GrowLightWh;
+		}
+		else
+		{
+			bGrowLightsPowered = false; // bank can't pay - lights off this step
+		}
+	}
+	bGrowLightsDark = (GrowLitCount > 0 && !bGrowLightsPowered);
+
+	// Greenhouse light: the same solar factor the arrays generate on (curve x
+	// dust) - dark at night, throttled in a storm. Deterministic, band-shared.
+	const double SolarFactor = Defs ? (double)Defs->EvalSolarCurve(Clock->GetSolFraction()) * GetDustFactorNow() : 0.0;
+
+	// Grow: each planted cell on a rated floor turns Water into Food when it has
+	// LIGHT (grow-lit = powered; greenhouse = shallow enough + daylight). A cell
+	// re-zoned away from any garden function forfeits its soil (loudly, once).
 	int32 Producing = 0;
 	bool bThirsty = false;
 	// Hope drives the harvest: a thriving crew coaxes more food from the same
@@ -1636,7 +1683,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	{
 		const int32 Level = It->X, Cell = It->Y;
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(Level, Cell)) : nullptr;
-		if (!Row || Row->Function != FName("Garden"))
+		if (!Row || !IsGardenFunction(Row->Function))
 		{
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
@@ -1647,6 +1694,20 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		{
 			continue; // dormant, not dead: rating loss pauses the crop
 		}
+		// Light gate: no light => dormant this step (no water spent, crop lives).
+		double LightFactor = 1.0;
+		if (Row->Function == NGreenhouse)
+		{
+			if (Level < GreenhouseMinLevel || SolarFactor <= KINDA_SMALL_NUMBER)
+			{
+				continue; // buried too deep for light, or Martian night
+			}
+			LightFactor = SolarFactor;
+		}
+		else if (!bGrowLightsPowered)
+		{
+			continue; // grow-lit but the bank went dark
+		}
 		const double NeedWater = GardenWaterKgPerSolPerCell * DtSols;
 		if (GetStock(NWater) < NeedWater)
 		{
@@ -1654,10 +1715,21 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
-		AddStock(NFood, GardenFoodKgPerSolPerCell * HumanTempo * DtSols);
+		AddStock(NFood, GardenFoodKgPerSolPerCell * HumanTempo * LightFactor * DtSols);
 		++Producing;
 	}
 	ProducingCells = Producing;
+
+	// Grow-light blackout edge: one alert per episode, cleared when power returns.
+	if (bGrowLightsDark && !bGardenDarkAnnounced)
+	{
+		bGardenDarkAnnounced = true;
+		OnAlert.Broadcast(TEXT("GROW-LIGHTS DARK — the bank can't power the garden. Crops hold dormant until the grid recovers."));
+	}
+	else if (!bGrowLightsDark)
+	{
+		bGardenDarkAnnounced = false;
+	}
 
 	// Water-starve edge: one alert per episode, cleared when the taps run again.
 	if (bThirsty && !bGardenThirstAnnounced)

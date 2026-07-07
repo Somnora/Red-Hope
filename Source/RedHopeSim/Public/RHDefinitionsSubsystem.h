@@ -96,6 +96,13 @@ public:
 	// Config scalars from DT_Config (Value column parsed as double).
 	double GetConfigScalar(FName Name, double Default) const;
 
+	// Dev-only in-memory row injection (headless tests exercise rows that a new
+	// gate ADDS before the live DT is MCP-synced - the whole-row extension of
+	// the const_cast SliceActive test-knob pattern). Never called in shipping.
+	void Debug_InjectRoom(FName Name, const FRHRoomRow& Row);
+	void Debug_InjectResource(FName Name, const FRHResourceRow& Row);
+	void Debug_InjectManifest(FName Name, const FRHManifestItemRow& Row);
+
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
 	float EvalSolarCurve(float SolFraction) const;
 

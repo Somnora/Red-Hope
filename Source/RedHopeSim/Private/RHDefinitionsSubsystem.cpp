@@ -214,6 +214,21 @@ TMap<FName, double> URHDefinitionsSubsystem::ParseResourceList(const FString& Li
 	return Out;
 }
 
+void URHDefinitionsSubsystem::Debug_InjectRoom(FName Name, const FRHRoomRow& Row)
+{
+	if (RoomsTable) { RoomsTable->AddRow(Name, Row); }
+}
+
+void URHDefinitionsSubsystem::Debug_InjectResource(FName Name, const FRHResourceRow& Row)
+{
+	if (ResourcesTable) { ResourcesTable->AddRow(Name, Row); }
+}
+
+void URHDefinitionsSubsystem::Debug_InjectManifest(FName Name, const FRHManifestItemRow& Row)
+{
+	if (ManifestTable) { ManifestTable->AddRow(Name, Row); }
+}
+
 double URHDefinitionsSubsystem::GetConfigScalar(FName Name, double Default) const
 {
 	if (const FRHConfigRow* Row = ConfigTable ? ConfigTable->FindRow<FRHConfigRow>(Name, TEXT("GetConfigScalar"), false) : nullptr)

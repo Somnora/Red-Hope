@@ -462,6 +462,113 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate D+ self-test: the GARDEN POWER FORK - grow-lit Garden costs battery
+	// energy (dark->dormant when the bank can't pay) vs Greenhouse (glass, solar-
+	// gated yield, near-free power). `-greenhouse`.
+	if (FParse::Param(*Params, TEXT("greenhouse")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GARDEN POWER FORK TEST (M2 Gate D+) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto SetSolFraction = [&](double Frac)
+		{
+			const double SolLen = URHSimClockSubsystem::SolLengthSimSeconds;
+			const int32 Sol = (int32)(Clock->GetSimSecondsTotal() / SolLen);
+			Clock->Debug_SetSimSeconds((Sol + Frac) * SolLen);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		{
+			const FRHRoomRow* G = DefsSub ? DefsSub->GetRoom(FName("Garden")) : nullptr;
+			if (!G || !G->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Garden not active - DT drift")); return 1; }
+		}
+		// Greenhouse is a NEW row (DT sync pending); inject it in-memory (the
+		// whole-row extension of the SliceActive test-knob).
+		FRHRoomRow GH;
+		GH.DisplayName = TEXT("Greenhouse"); GH.Function = FName("Greenhouse");
+		GH.EmitsTags = TEXT("Odor"); GH.NeedsFiltration = true; GH.NeedsPlumbing = true;
+		GH.MoraleWeight = 0.5f; GH.SliceActive = true;
+		DefsSub->Debug_InjectRoom(FName("Greenhouse"), GH);
+		if (!DefsSub->GetRoom(FName("Greenhouse"))) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Greenhouse inject failed")); return 1; }
+
+		// Certify a 6-cell vault with power; charge the bank.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 900.0);
+		Sim->AddStock(FName("Water"), 400.0);
+		RunSols(2.5);
+		int32 SolarId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.DefName == FName("SolarArray")) { SolarId = B.Id; break; }
+		}
+
+		// 1) Grow-lit Garden: zone + plant; the grow-light load is per-cell.
+		Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		Sim->Debug_DeliverCargo(FName("SoilPallet"));
+		Sim->Debug_DeliverCargo(FName("SeedVault"));
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("FORK garden planted: planted=%d growLightW=%.0f (expect 1, 60)"),
+			Sim->GetPlantedCellCount(), Sim->GetGardenPowerDrawW());
+
+		// 2) Powered growth is STEADY (time-independent): a charged bank yields
+		// exactly cells x base x tempo x window regardless of sol time.
+		Sim->Debug_SetBatteryWh(4000.0);
+		const double LitF0 = Sim->GetStock(FName("Food"));
+		RunSols(0.25);
+		UE_LOG(LogRedHopeSim, Display, TEXT("FORK grow-lit powered: gave %.3f kg over 0.25 sol (expect 0.250) producing=%d"),
+			Sim->GetStock(FName("Food")) - LitF0, Sim->GetProducingCellCount());
+
+		// 3) Blackout: kill the array + empty the bank -> grow-lights dark, the
+		// crop holds dormant (not dead), floor still rated (short window).
+		Sim->SetManualPower(SolarId, false);
+		Sim->Debug_SetBatteryWh(0.0);
+		RunSols(0.15);
+		UE_LOG(LogRedHopeSim, Display, TEXT("FORK blackout: dark=%d producing=%d planted=%d rated=%d (expect 1, 0, 1, 1)"),
+			(int32)Sim->AreGrowLightsDark(), Sim->GetProducingCellCount(),
+			Sim->GetPlantedCellCount(), (int32)Sim->IsFloorRated(-1));
+		Sim->SetManualPower(SolarId, true);
+		Sim->Debug_SetBatteryWh(4000.0);
+
+		// 4) Greenhouse needs GLASS to plant: zone cell 1, run with no glass ->
+		// not planted; deliver a crate -> plants, glass consumed.
+		Sim->DesignateRoom(-1, 1, FName("Greenhouse"), R);
+		RunSols(0.1);
+		const int32 PlantedNoGlass = Sim->GetPlantedCellCount();
+		Sim->Debug_DeliverCargo(FName("GlassCrate")); // +400 Glass
+		RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("FORK greenhouse plant: no-glass planted=%d, after crate planted=%d glass=%.0f (expect 1, 2, 200)"),
+			PlantedNoGlass, Sim->GetPlantedCellCount(), Sim->GetStock(FName("Glass")));
+
+		// 5) Greenhouse is SOLAR-gated, grow-lit is STEADY: at midday both
+		// produce; at deep night only the grow-lit garden does.
+		Sim->Debug_SetBatteryWh(4000.0);
+		SetSolFraction(0.5); // midday
+		RunSols(0.05);
+		const int32 ProdDay = Sim->GetProducingCellCount();
+		Sim->Debug_SetBatteryWh(4000.0);
+		SetSolFraction(0.92); // deep night
+		RunSols(0.05);
+		const int32 ProdNight = Sim->GetProducingCellCount();
+		UE_LOG(LogRedHopeSim, Display, TEXT("FORK solar-gate: midday producing=%d, night producing=%d (expect 2, 1 - greenhouse dark at night, grow-lit steady)"),
+			ProdDay, ProdNight);
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GARDEN POWER FORK TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
 	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
 	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.
