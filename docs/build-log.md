@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 26 (Gate A1 VERIFIED; Gate A2 built + smoked — the crew is visible)
+
+- **Gate A1 verification (editor closed → clean relink, 6 s):** hot-patch dylibs removed, base relinked. **`-crew` all 7 assertions green:** housing gate refuses the pod at 0 beds; 4-cell vault certifies 4 beds; pod lands 4 colonists + 200 kg Food; 1-sol food math exact (197.5); save v10 round-trips (pop 4, first=Adeyemi); starvation marks 4 unsupported at 0.5 sol; all 4 evacuated at exactly 2.0 sols. **Regressions:** `-habitat`, `-vault`, `-borer` all green; 10-sol baseline ledger IDENTICAL to the known profile (gen 50 W / load 20 W / battery 2000/2000 / deposit 40645 kg / same radiation column) — the zero-pop no-op held by construction.
+- **Live smoke (headless -game):** fresh colony + `RH.Deliver CrewPod` → "CREW POD: stays aboard (0 beds free, 4 needed)"; `RH.Load habitattest` (the rated vault) + second pod → 4 housed, +200 kg Food, `RH.Crew` roster all supported, `RH.Habitat` floor −1 LIVABLE. New **`RH.Deliver <Item>`** debug cheat (lands a manifest item's cargo effect instantly — the director's hand-play trigger for the arrival). Verified commit `7d43853`.
+- **Gate A2 built (presentation only, no sim state, no save bump — `7426bd3`):**
+  - **`URHCrewVisualizerSubsystem`** (new): one small suited figure per colonist — bone-white cylinder body + dark helmet with visor glint + flat name plate (same glyph-up convention as building labels). Pure listener; roster-diffed every tick.
+  - **Arrival staged:** a colonist landing mid-session disembarks at the supply-ship pad, marches to the shaft head, and hard-cuts down to their home floor (the pit view's elevator language). A reload's existing crew seeds in place — no phantom marches.
+  - **Life below:** residents wander the carved cells of their home floor (canonical `SpiralCell` layout, now shared from the colony visualizer); occasional **suited surface strolls** near the shaft head and back (the A2 spec's surface beat). Walk pace scales with sim speed (clamped ≤8× so era mode doesn't teleport them); paused colony = still figures.
+  - **Distress read:** an unsupported colonist's suit tints hazard-amber (presentation of the A1 alert, still abstract — Gate-D reviews all framing).
+  - **Deck crew card:** roster panel (name, floor, UNSUPPORTED + evac countdown) with population / free beds / Food kg and **~sols-of-food remaining** (computed from `ColonistFoodKgPerSol` via a new sim getter — no hardcoded balance). Width-pinned like the other four cards. Shows only once anyone has landed.
+- **A2 verified:** compile clean (84 s, editor closed = base dylibs). 60 s live run: 4 figures spawn as residents in the vault on pod delivery, no ensures/errors. `-crew` rerun green post-relink.
+- **Next:** director hand-play of the arrival beat (quota → manifest CrewPod → landing, or `RH.Deliver CrewPod` for the instant version), then Gate B (rooms/adjacency/Hope index) per `docs/m2-working-spec.md`.
+
 ## 2026-07-07 — Session 25 (M1-d CLOSED by director; M2 opens — Gate A1 "The Crew Arrives" built, verify pending relink)
 
 - **M1-d closed:** director cleared progression to M2 ("UE is open, please move forward with the next task M2"). Close hygiene done via MCP (`9427723`): MinLivableCells=4 synced to live DT_Config; BP_VaultDemo removed from L_Slice; level + DT saved. **Phase 1 is complete.**
