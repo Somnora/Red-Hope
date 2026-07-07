@@ -352,6 +352,25 @@ public:
 	// the Hope index. Signed: negative after Comply, positive after Defy.
 	double GetSolidarityHope() const { return SolidarityHope; }
 
+	// --- The covert layer (M4 Gate A) ---
+	// Two-layer diplomacy: Public_Standing is the per-rival relation (M3); this
+	// adds HIDDEN tension - the secret hostility beneath the official smile. And
+	// a second late-game axis, HumanNature (-100 Destructive/Predatory .. +100
+	// Evolved/Diplomatic): HOW you treat others. Fair trade nudges it +; covert
+	// theft/sabotage nudges it -. It gates which late-game crisis fires (Gate D).
+	// A covert requisition steals a fraction of a rival's export goods; a
+	// DETERMINISTIC (seeded, day/night-modulated) detection check decides whether
+	// you get away clean (HiddenTension rises quietly) or are CAUGHT (relation
+	// craters, an incident). No live RNG - the seed is (rival, attempt#).
+	double GetHumanNatureAxis() const { return HumanNatureAxis; }
+	double GetHiddenTension(FName Rival) const;
+	// Resolve a covert requisition against a rival (the uplink verb's worker).
+	// Returns false (with reason) if the rival isn't a valid target.
+	bool ResolveCovert(FName Rival, FString& OutReason);
+	// True while the sun is down (folds Module 2's night visibility into covert
+	// detection). Deterministic from the sol clock.
+	bool IsNight() const;
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -771,6 +790,23 @@ private:
 	double DilemmaDefyRelationBonus = 5.0;
 	double SolidarityHopeShock = 12.0;
 	double SolidarityHopeTauSols = 5.0;
+	// The covert layer (M4 Gate A; save v20). HiddenTensions is per-rival secret
+	// hostility; HumanNatureAxis is the Evolved/Destructive throughline;
+	// CovertAttempts seeds the deterministic detection roll (saved so it never
+	// re-rolls the same outcome on reload).
+	TMap<FName, double> HiddenTensions;
+	double HumanNatureAxis = 0.0;
+	int32 CovertAttempts = 0;
+	double HumanNatureFairTradeShift = 2.0;
+	double HumanNatureCovertShift = 6.0;
+	double CovertLotFraction = 0.5;
+	double CovertDetectionBase = 0.5;
+	double CovertDetectionTrustMul = 0.5;
+	double CovertDetectionNightMul = 0.4;
+	double CovertHiddenTensionClean = 8.0;
+	double CovertHiddenTensionCaught = 25.0;
+	double CovertRelationHitCaught = 30.0;
+	double& HiddenTensionRef(FName Rival) { return HiddenTensions.FindOrAdd(Rival); }
 	void StepEarth(float SubDt);
 	bool HasActiveRival() const; // any slice-active rival => the layer is live
 	// Ensure a rival's relation entry exists (lazy seed from RelationStart).

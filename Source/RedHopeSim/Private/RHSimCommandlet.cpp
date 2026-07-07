@@ -1034,6 +1034,84 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M4 Gate A self-test: THE COVERT LAYER - a covert requisition with a
+	// deterministic (seeded, day/night) detection check, the HumanNature axis
+	// (theft down, fair trade up), HiddenTension, save v20. `-covert`.
+	if (FParse::Param(*Params, TEXT("covert")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT LAYER TEST (M4 Gate A) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Covert = [&](const TCHAR* Rival)
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Covert"); Cmd.Target = FName(Rival);
+			Sim->EnqueueCommand(Cmd);
+			RunSols(0.1);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Set the clock to deep night (sol-fraction 0.9) so covert detection is low.
+		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds);
+
+		// 1) First covert op: EXACTLY ONE of {clean gains goods, caught craters
+		// relation}; the intent always drops HumanNature by the shift (-6);
+		// attempts increments; HiddenTension rises. Deterministic outcome.
+		const double Ice0 = Sim->GetTotalSolid(FName("Ice"));
+		const double Rel0 = Sim->GetRivalRelation(FName("Zarya"));
+		Covert(TEXT("Zarya"));
+		const bool bClean = Sim->GetTotalSolid(FName("Ice")) > Ice0 + 0.01;
+		const bool bCaught = Sim->GetRivalRelation(FName("Zarya")) < Rel0 - 0.01;
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT op1: clean=%d caught=%d (expect exactly one) axis=%.0f hidden=%.0f (expect -6, >0)"),
+			(int32)bClean, (int32)bCaught, Sim->GetHumanNatureAxis(), Sim->GetHiddenTension(FName("Zarya")));
+
+		// 2) Four total attempts: HumanNature -6 each => -24, all deterministic.
+		Covert(TEXT("Zarya")); Covert(TEXT("Zarya")); Covert(TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT x4: axis=%.0f hidden=%.0f (expect -24, rising)"),
+			Sim->GetHumanNatureAxis(), Sim->GetHiddenTension(FName("Zarya")));
+
+		// 3) Fair trade nudges the axis the OTHER way (+2 on a completed convoy).
+		const double AxisBeforeTrade = Sim->GetHumanNatureAxis();
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		FRHCommand Cv; Cv.Verb = FName("Convoy"); Cv.Target = FName("Zarya");
+		Sim->EnqueueCommand(Cv); RunSols(4.5); // dispatch + full round trip
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT fair-trade: axis %.0f -> %.0f (expect +2 - honest dealing lifts it)"),
+			AxisBeforeTrade, Sim->GetHumanNatureAxis());
+
+		// 4) Night lowers detection: report the day-vs-night detection at neutral
+		// relation is deterministic and night is strictly lower (mul 0.4 < 1).
+		// (Structural check: IsNight() flips with the clock.)
+		Clock->Debug_SetSimSeconds(0.5 * URHSimClockSubsystem::SolLengthSimSeconds); // midday
+		const bool bDay = !Sim->IsNight();
+		Clock->Debug_SetSimSeconds(0.05 * URHSimClockSubsystem::SolLengthSimSeconds); // pre-dawn
+		const bool bNight = Sim->IsNight();
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT day/night: midday-is-day=%d predawn-is-night=%d (expect 1, 1)"), (int32)bDay, (int32)bNight);
+
+		// 5) Save v20 round-trip: axis + hidden + attempt seed survive (so future
+		// rolls stay deterministic across a reload).
+		const double AxB = Sim->GetHumanNatureAxis(), HidB = Sim->GetHiddenTension(FName("Zarya"));
+		FString Err;
+		Sim->SaveColony(TEXT("coverttest"), Err);
+		Sim->LoadColony(TEXT("coverttest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT save/load v20: axis %.0f->%.0f hidden %.0f->%.0f (expect identical)"),
+			AxB, Sim->GetHumanNatureAxis(), HidB, Sim->GetHiddenTension(FName("Zarya")));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT LAYER TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

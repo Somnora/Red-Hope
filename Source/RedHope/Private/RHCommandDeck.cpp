@@ -1029,6 +1029,13 @@ FText SRHCommandDeck::GetCrewText() const
 			// Placeholder prompt (Gate-D framing review owns the final wording).
 			Text += TEXT("\n  >> EARTH DEMANDS YOU CUT TRADE  ·  RH.Solidarity comply / defy");
 		}
+		// The HumanNature axis reads once it has moved off center (M4).
+		const double HN = Sim->GetHumanNatureAxis();
+		if (FMath::Abs(HN) > 0.5)
+		{
+			Text += FString::Printf(TEXT("\nCONDUCT %s (%+.0f)"),
+				HN > 5.0 ? TEXT("Evolved") : (HN < -5.0 ? TEXT("Destructive") : TEXT("watched")), HN);
+		}
 	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.

@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 19;  // v19: Solidarity Dilemma (M3 Gate C); v18 Earth's Shadow; v17 rivals/trade; v16 discoveries
+	constexpr uint32 RHSaveVersion = 20;  // v20: covert layer (M4 Gate A); v19 Solidarity Dilemma; v18 Earth's Shadow; v17 rivals/trade
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -159,6 +159,16 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	DilemmaDefyRelationBonus = Defs->GetConfigScalar(FName("DilemmaDefyRelationBonus"), DilemmaDefyRelationBonus);
 	SolidarityHopeShock = Defs->GetConfigScalar(FName("SolidarityHopeShock"), SolidarityHopeShock);
 	SolidarityHopeTauSols = Defs->GetConfigScalar(FName("SolidarityHopeTauSols"), SolidarityHopeTauSols);
+	HumanNatureAxis = Defs->GetConfigScalar(FName("HumanNatureStart"), HumanNatureAxis);
+	HumanNatureFairTradeShift = Defs->GetConfigScalar(FName("HumanNatureFairTradeShift"), HumanNatureFairTradeShift);
+	HumanNatureCovertShift = Defs->GetConfigScalar(FName("HumanNatureCovertShift"), HumanNatureCovertShift);
+	CovertLotFraction = Defs->GetConfigScalar(FName("CovertLotFraction"), CovertLotFraction);
+	CovertDetectionBase = Defs->GetConfigScalar(FName("CovertDetectionBase"), CovertDetectionBase);
+	CovertDetectionTrustMul = Defs->GetConfigScalar(FName("CovertDetectionTrustMul"), CovertDetectionTrustMul);
+	CovertDetectionNightMul = Defs->GetConfigScalar(FName("CovertDetectionNightMul"), CovertDetectionNightMul);
+	CovertHiddenTensionClean = Defs->GetConfigScalar(FName("CovertHiddenTensionClean"), CovertHiddenTensionClean);
+	CovertHiddenTensionCaught = Defs->GetConfigScalar(FName("CovertHiddenTensionCaught"), CovertHiddenTensionCaught);
+	CovertRelationHitCaught = Defs->GetConfigScalar(FName("CovertRelationHitCaught"), CovertRelationHitCaught);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -2887,6 +2897,18 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			return;
 		}
 	}
+	else if (Cmd.Verb == FName("Covert"))
+	{
+		// M4 Gate A: a covert requisition against a rival (Target = rival row).
+		// Resolves at execution - the day/night of THIS moment shapes detection,
+		// so timing your op for the Martian night is real. Rides the uplink.
+		FString Reason;
+		if (!ResolveCovert(Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
 
 	OnCommandExecuted.Broadcast(Cmd);
 }
@@ -3029,6 +3051,9 @@ void URHSimWorldSubsystem::StepTrade(float SubDt)
 	}
 	double& Rel = RelationRef(Done);
 	Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
+	// Fair dealing is who you are: an honest completed trade nudges the
+	// HumanNature axis toward Evolved/Diplomatic (M4 Gate A).
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureFairTradeShift, -100.0, 100.0);
 	OnAlert.Broadcast(FString::Printf(
 		TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
 		*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
@@ -3069,6 +3094,98 @@ bool URHSimWorldSubsystem::HasActiveRival() const
 		Defs->ForEachRival([&bAny](FName, const FRHRivalRow&){ bAny = true; });
 	}
 	return bAny;
+}
+
+bool URHSimWorldSubsystem::IsNight() const
+{
+	// Sunrise at sol-fraction 0.25, sunset at 0.75 (the sun rig's convention).
+	const float Frac = Clock ? Clock->GetSolFraction() : 0.5f;
+	return Frac < 0.25f || Frac > 0.75f;
+}
+
+double URHSimWorldSubsystem::GetHiddenTension(FName Rival) const
+{
+	const double* T = HiddenTensions.Find(Rival);
+	return T ? *T : 0.0;
+}
+
+bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
+{
+	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
+	if (!Row || !Row->SliceActive)
+	{
+		OutReason = FString::Printf(TEXT("No such settlement '%s' to move against"), *Rival.ToString());
+		return false;
+	}
+	// Intent marks you regardless of outcome (the axis is about HOW you act).
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis - HumanNatureCovertShift, -100.0, 100.0);
+
+	// Deterministic detection roll: a seeded hash of (rival, attempt#) - NEVER
+	// live RNG. The counter (saved) makes repeated ops differ but reproducibly.
+	const uint32 Seed = HashCombine(GetTypeHash(Rival), (uint32)(CovertAttempts * 2654435761u));
+	++CovertAttempts;
+	const double U = (Seed % 100000u) / 100000.0; // [0,1)
+
+	// Detection probability: a TRUSTING ally watches you less (betrayal is easy,
+	// the moral trap), and night halves the eyes on you.
+	const double Relation = GetRivalRelation(Rival);
+	double P = CovertDetectionBase * (1.0 - (Relation / 100.0) * CovertDetectionTrustMul);
+	if (IsNight())
+	{
+		P *= CovertDetectionNightMul;
+	}
+	P = FMath::Clamp(P, 0.0, 1.0);
+	const bool bCaught = (U < P);
+
+	double& Hidden = HiddenTensionRef(Rival);
+	if (bCaught)
+	{
+		Hidden = FMath::Clamp(Hidden + CovertHiddenTensionCaught, 0.0, 100.0);
+		double& Rel = RelationRef(Rival);
+		Rel = FMath::Clamp(Rel - CovertRelationHitCaught, 0.0, 100.0);
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("COVERT OP EXPOSED — %s caught your people in the act. Relations with %s crater; they will remember this."),
+			*Row->DisplayName, *Row->Nation));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT CAUGHT: %s (relation %.0f, hidden %.0f, humanNature %.0f) ==="),
+			*Row->DisplayName, Rel, Hidden, HumanNatureAxis);
+	}
+	else
+	{
+		// Clean: take a fraction of their export goods (solids drop at the
+		// Lander for hauling, fluids join the pool - like a delivery, unpaid).
+		Hidden = FMath::Clamp(Hidden + CovertHiddenTensionClean, 0.0, 100.0);
+		FString Stolen;
+		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Row->ExportLot))
+		{
+			const double Amount = Item.Value * CovertLotFraction;
+			if (Defs && Defs->IsSolidResource(Item.Key))
+			{
+				bool bDropped = false;
+				for (FRHBuildingInstance& B : Buildings)
+				{
+					if (B.DefName == FName("Lander") && !B.bUnderConstruction)
+					{
+						B.OutputKg.FindOrAdd(Item.Key) += Amount;
+						bDropped = true;
+						break;
+					}
+				}
+				if (!bDropped) { AddStock(Item.Key, Amount); }
+				OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));
+			}
+			else
+			{
+				AddStock(Item.Key, Amount);
+			}
+			Stolen += FString::Printf(TEXT("%s%.0f %s"), Stolen.IsEmpty() ? TEXT("") : TEXT(", "), Amount, *Item.Key.ToString());
+		}
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("COVERT OP CLEAN — your people slipped away from %s with %s. No one saw a thing (tonight)."),
+			*Row->DisplayName, *Stolen));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT CLEAN: %s took %s (hidden %.0f, humanNature %.0f) ==="),
+			*Row->DisplayName, *Stolen, Hidden, HumanNatureAxis);
+	}
+	return true;
 }
 
 double URHSimWorldSubsystem::GetRequisitionMultiplier() const
@@ -4225,6 +4342,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Closed.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
 		Ar << Closed << SolidarityHope;
 	}
+	// The covert layer (save v20).
+	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4434,6 +4553,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		ClosedRoutes.Empty();
 		ClosedRoutes.Append(Closed);
 	}
+	// The covert layer (save v20). Map repopulates wholesale.
+	HiddenTensions.Empty();
+	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

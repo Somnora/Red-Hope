@@ -304,6 +304,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHConvoy(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHCovert(
+	TEXT("RH.Covert"),
+	TEXT("RH.Covert <RivalName> - run a covert requisition against a rival (steal export goods; a night op is less likely to be caught). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Covert <RivalName>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Covert");
+			Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 	TEXT("RH.Trade"),
 	TEXT("RH.Trade - log the trade state: rivals, relations, and the convoy's status."),
@@ -318,10 +337,13 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 			Out.IsNone() ? TEXT("idle") : *Out.ToString(),
 			Out.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (%s, %.0f%%)"),
 				Sim->IsConvoyReturning() ? TEXT("returning") : TEXT("outbound"), Sim->GetConvoyProgress() * 100.0));
+		UE_LOG(LogRedHope, Display, TEXT("  human nature %+.0f (Evolved/Diplomatic .. Destructive/Predatory) | %s"),
+			Sim->GetHumanNatureAxis(), Sim->IsNight() ? TEXT("NIGHT (covert ops safer)") : TEXT("day"));
 		Defs->ForEachRival([&](FName Name, const FRHRivalRow& Row)
 		{
-			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): relation %.0f | you give %s -> they give %s | %.0f km"),
-				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), *Row.ImportLot, *Row.ExportLot, Row.DistanceKm);
+			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): public relation %.0f | HIDDEN tension %.0f | give %s -> get %s | %.0f km"),
+				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), Sim->GetHiddenTension(Name),
+				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm);
 		});
 	}));
 
