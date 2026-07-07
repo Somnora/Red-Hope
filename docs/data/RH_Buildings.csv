@@ -11,3 +11,4 @@ Electrolyzer,Electrolyzer,3,4,600,15,0,0,0,0,0,120,Struct:120,240,4,FALSE,FALSE,
 Stockpile,Stockpile Pad,3,3,0,0,0,0,0,0,0,20,Struct:20,60,0,FALSE,FALSE,,TRUE,2000 kg solid storage
 ComputeModule,Lander Compute Module,0,0,150,150,0,0,0,0,0,100,Struct:100,200,5,FALSE,FALSE,,TRUE,Lander upgrade slot; lag 45->20 s; 3.6 kWh/sol -- autonomy has a power price
 Habitat,Habitat Module,6,8,400,100,0,0,0,0,0,600,Struct:600,600,3,FALSE,FALSE,,FALSE,Dormant M1; Phase 1 exit structure; consumes HabSegment+Shielding
+Borer,The Borer,3,3,500,15,0,0,0,0,0,180,Struct:180,300,2,FALSE,FALSE,,TRUE,"M1-d: bores the shaft trunk + carves floors via designations; heavy draw, sheds early; burns H2 instead of grid when stocked (H2BurnKgPerHour, CanBore - columns land with the A2 compile)"
