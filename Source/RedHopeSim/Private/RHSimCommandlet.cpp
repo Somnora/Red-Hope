@@ -304,6 +304,90 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
+	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
+	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.
+	if (FParse::Param(*Params, TEXT("garden")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GARDEN TEST (M2 Gate C) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// In-memory activation until the DT_Rooms sync (established pattern).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		for (const TCHAR* RowName : { TEXT("Garden"), TEXT("Workstation") })
+		{
+			if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr))
+			{
+				Row->SliceActive = true;
+			}
+			else
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("GARDEN: no room row '%s'"), RowName);
+				return 1;
+			}
+		}
+
+		// Certify the vault; zone two garden cells BEFORE materials exist.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 900.0);
+		Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		Sim->DesignateRoom(-1, 1, FName("Garden"), R);
+		RunSols(2.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN zoned unfed: rated=%d planted=%d (expect 1, 0 - no soil yet)"),
+			(int32)Sim->IsFloorRated(-1), Sim->GetPlantedCellCount());
+
+		// 1) The gamble pays off: pallet + vault land, both cells auto-plant.
+		Sim->Debug_DeliverCargo(FName("SoilPallet"));
+		Sim->Debug_DeliverCargo(FName("SeedVault"));
+		Sim->AddStock(FName("Water"), 100.0);
+		RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN planted: %d cells, soil=%.0f seeds=%.0f (expect 2, 500, 100)"),
+			Sim->GetPlantedCellCount(), Sim->GetStock(FName("Soil")), Sim->GetStock(FName("Seeds")));
+
+		// 2) Two sols of growth: +1.0 kg/sol/cell, -4.0 kg water/sol/cell.
+		const double Food0 = Sim->GetStock(FName("Food")), Water0 = Sim->GetStock(FName("Water"));
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN 2 sols: producing=%d food +%.1f (expect 4.0) water -%.1f (expect 16.0)"),
+			Sim->GetProducingCellCount(), Sim->GetStock(FName("Food")) - Food0, Water0 - Sim->GetStock(FName("Water")));
+
+		// 3) Dry taps: production pauses, crop stays planted.
+		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
+		const double FoodDry = Sim->GetStock(FName("Food"));
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN dry: producing=%d food delta=%.2f planted=%d (expect 0, 0.00, 2)"),
+			Sim->GetProducingCellCount(), Sim->GetStock(FName("Food")) - FoodDry, Sim->GetPlantedCellCount());
+
+		// 4) Save v12 round-trip holds the planted set.
+		FString Err;
+		Sim->SaveColony(TEXT("gardentest"), Err);
+		Sim->LoadColony(TEXT("gardentest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN save/load v12: planted=%d cell0=%d cell1=%d (expect 2, 1, 1)"),
+			Sim->GetPlantedCellCount(), (int32)Sim->IsGardenPlanted(-1, 0), (int32)Sim->IsGardenPlanted(-1, 1));
+
+		// 5) Re-zoning a planted cell forfeits its soil, loudly.
+		Sim->DesignateRoom(-1, 1, FName("Workstation"), R);
+		RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GARDEN re-zoned: planted=%d cell1=%d (expect 1, 0 - soil forfeit)"),
+			Sim->GetPlantedCellCount(), (int32)Sim->IsGardenPlanted(-1, 1));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GARDEN TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M1-d Gate B self-test: the habitability chain - carve, circulate,
 	// oxygen fill from the pool, Livable rating edges (gained + lost via
 	// leakage), save v7 round-trip. `-habitat`.

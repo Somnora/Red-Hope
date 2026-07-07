@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 11;  // v11: room designations (M2 Gate B); v10 colonists; v9 manual power/fleet hold
+	constexpr uint32 RHSaveVersion = 12;  // v12: the garden (M2 Gate C); v11 room designations; v10 colonists
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -108,6 +108,10 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeAdjacencyPenalty = Defs->GetConfigScalar(FName("HopeAdjacencyPenalty"), HopeAdjacencyPenalty);
 	HopeUnsupportedPenalty = Defs->GetConfigScalar(FName("HopeUnsupportedPenalty"), HopeUnsupportedPenalty);
 	HopeVaultMilestone = Defs->GetConfigScalar(FName("HopeVaultMilestone"), HopeVaultMilestone);
+	GardenSoilKgPerCell = Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), GardenSoilKgPerCell);
+	GardenSeedsKgPerCell = Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), GardenSeedsKgPerCell);
+	GardenFoodKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenFoodKgPerSolPerCell"), GardenFoodKgPerSolPerCell);
+	GardenWaterKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenWaterKgPerSolPerCell"), GardenWaterKgPerSolPerCell);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -261,6 +265,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepTaskBoard();
 	StepProduction(SubDt);
 	StepHabitability(SubDt);
+	StepAgriculture(SubDt);
 	StepPopulation(SubDt);
 	StepQuota();
 	StepPower(SubDt);
@@ -390,6 +395,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
 	StepHabitability(DtSimSeconds);
+	StepAgriculture(DtSimSeconds);
 	StepPopulation(DtSimSeconds);
 	StepQuota();
 	StepPower(DtSimSeconds);
@@ -1557,6 +1563,93 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 	return Housed;
 }
 
+void URHSimWorldSubsystem::StepAgriculture(float SubDt)
+{
+	// Zero-garden colonies: FloorRoomCells is empty pre-M2 (and PlantedCells
+	// with it), so this is a cheap no-op - every existing baseline unchanged.
+	if (FloorRoomCells.Num() == 0 && PlantedCells.Num() == 0)
+	{
+		return;
+	}
+	static const FName NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NWater(TEXT("Water")), NFood(TEXT("Food"));
+
+	// Plant: any Garden-zoned cell on a rated floor, when the colony holds the
+	// materials. Auto - the gamble pays off the moment the ground is ready.
+	for (const auto& Pair : FloorRoomCells)
+	{
+		const int32 Level = Pair.Key;
+		if (!RatedFloors.Contains(Level))
+		{
+			continue;
+		}
+		for (int32 i = 0; i < Pair.Value.Num(); ++i)
+		{
+			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Pair.Value[i]) : nullptr;
+			if (!Row || Row->Function != FName("Garden") || PlantedCells.Contains(FIntVector(Level, i, 0)))
+			{
+				continue;
+			}
+			if (GetStock(NSoil) < GardenSoilKgPerCell || GetStock(NSeeds) < GardenSeedsKgPerCell)
+			{
+				continue; // waits for the next pallet, silently - the deck shows the shortfall
+			}
+			AddStock(NSoil, -GardenSoilKgPerCell);
+			AddStock(NSeeds, -GardenSeedsKgPerCell);
+			PlantedCells.Add(FIntVector(Level, i, 0));
+			UE_LOG(LogRedHopeSim, Display, TEXT("Garden planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds)"),
+				Level, i, GardenSoilKgPerCell, GardenSeedsKgPerCell);
+			if (!bFirstCropAnnounced)
+			{
+				bFirstCropAnnounced = true;
+				OnAlert.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground. The colony starts feeding itself."));
+			}
+		}
+	}
+
+	// Grow: planted cells on rated floors turn Water into Food. A cell whose
+	// zoning changed away from Garden forfeits its soil (loudly, once).
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	int32 Producing = 0;
+	bool bThirsty = false;
+	for (auto It = PlantedCells.CreateIterator(); It; ++It)
+	{
+		const int32 Level = It->X, Cell = It->Y;
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(Level, Cell)) : nullptr;
+		if (!Row || Row->Function != FName("Garden"))
+		{
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
+			It.RemoveCurrent();
+			continue;
+		}
+		if (!RatedFloors.Contains(Level))
+		{
+			continue; // dormant, not dead: rating loss pauses the crop
+		}
+		const double NeedWater = GardenWaterKgPerSolPerCell * DtSols;
+		if (GetStock(NWater) < NeedWater)
+		{
+			bThirsty = true;
+			continue;
+		}
+		AddStock(NWater, -NeedWater);
+		AddStock(NFood, GardenFoodKgPerSolPerCell * DtSols);
+		++Producing;
+	}
+	ProducingCells = Producing;
+
+	// Water-starve edge: one alert per episode, cleared when the taps run again.
+	if (bThirsty && !bGardenThirstAnnounced)
+	{
+		bGardenThirstAnnounced = true;
+		OnAlert.Broadcast(TEXT("THE GARDEN IS DRY — no Water for the crops. Yield paused until the tanks refill."));
+	}
+	else if (!bThirsty)
+	{
+		bGardenThirstAnnounced = false;
+	}
+}
+
 void URHSimWorldSubsystem::StepPopulation(float SubDt)
 {
 	// Jobs re-derive every step (rooms/floors/roster all change them); the
@@ -1718,7 +1811,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 		for (int32 i = 0; i < Cells->Num() && Next < ByIdOrder.Num(); ++i)
 		{
 			const FRHRoomRow* Row = Defs->GetRoom((*Cells)[i]);
-			if (Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation")))
+			if (Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
 			{
 				ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
 			}
@@ -3294,6 +3387,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// Room designations (save v11).
 	Ar << FloorRoomCells;
+	// The garden (save v12).
+	{
+		TArray<FIntVector> Planted = PlantedCells.Array();
+		Planted.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+		Ar << Planted << bFirstCropAnnounced;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3460,6 +3559,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Room designations (save v11). Map repopulates wholesale.
 	FloorRoomCells.Empty();
 	Ar << FloorRoomCells;
+	// The garden (save v12).
+	{
+		TArray<FIntVector> Planted;
+		Ar << Planted << bFirstCropAnnounced;
+		PlantedCells.Empty();
+		PlantedCells.Append(Planted);
+		bGardenThirstAnnounced = false; // runtime edge re-derives
+	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

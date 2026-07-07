@@ -259,6 +259,20 @@ public:
 	};
 	FRHHopeBreakdown GetColonyHope() const;
 
+	// --- The garden (M2 Gate C) ---
+	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
+	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
+	// yields Food per sol while Water holds out. Rating loss makes the crop
+	// dormant, never dead (prevention framing); re-zoning a planted cell
+	// forfeits its soil, loudly. Grow-light power draw is a flagged later gate.
+	bool IsGardenPlanted(int32 Level, int32 CellIndex) const { return PlantedCells.Contains(FIntVector(Level, CellIndex, 0)); }
+	int32 GetPlantedCellCount() const { return PlantedCells.Num(); }
+	// Producing = planted + floor rated + fed by Water this step (the deck's
+	// honest "your farm is actually running" read).
+	int32 GetProducingCellCount() const { return ProducingCells; }
+	double GetGardenFoodKgPerSolPerCell() const { return GardenFoodKgPerSolPerCell; }
+	double GetGardenWaterKgPerSolPerCell() const { return GardenWaterKgPerSolPerCell; }
+
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
 	// when you don't know when you'll get valuable sun again." Manual per-
@@ -579,6 +593,17 @@ private:
 	double HopeAdjacencyPenalty = 8.0;  // per offended (emitter, refuser) pair
 	double HopeUnsupportedPenalty = 10.0;
 	double HopeVaultMilestone = 5.0;
+	// The garden (M2 Gate C; PlantedCells serialized, save v12). Keys are
+	// (Level, CellIndex, 0). ProducingCells is per-step derived, never saved.
+	TSet<FIntVector> PlantedCells;
+	int32 ProducingCells = 0;
+	bool bFirstCropAnnounced = false;   // serialized: the milestone fires once
+	bool bGardenThirstAnnounced = false; // runtime edge: water-starve alert
+	void StepAgriculture(float SubDt);
+	double GardenSoilKgPerCell = 250.0;
+	double GardenSeedsKgPerCell = 50.0;
+	double GardenFoodKgPerSolPerCell = 1.0;
+	double GardenWaterKgPerSolPerCell = 4.0;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;

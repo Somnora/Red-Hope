@@ -246,6 +246,23 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHGarden(
+	TEXT("RH.Garden"),
+	TEXT("RH.Garden - log the garden: planted/producing cells, soil/seed/water stocks, net food per sol."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		const double YieldPerSol = Sim->GetProducingCellCount() * Sim->GetGardenFoodKgPerSolPerCell();
+		const double EatPerSol = Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol();
+		UE_LOG(LogRedHope, Display,
+			TEXT("[RH.Garden] planted %d cell(s), producing %d | yield %.1f kg/sol vs crew draw %.1f kg/sol | Soil %.0f Seeds %.0f Water %.0f Food %.0f"),
+			Sim->GetPlantedCellCount(), Sim->GetProducingCellCount(), YieldPerSol, EatPerSol,
+			Sim->GetStock(FName("Soil")), Sim->GetStock(FName("Seeds")),
+			Sim->GetStock(FName("Water")), Sim->GetStock(FName("Food")));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHActivateRoom(
 	TEXT("RH.ActivateRoom"),
 	TEXT("RH.ActivateRoom <RowName> - DEBUG: flip a room row slice-active in the loaded table (test knob until the DT_Rooms sync lands)."),

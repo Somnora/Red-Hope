@@ -825,6 +825,15 @@ FText SRHCommandDeck::GetCrewText() const
 	{
 		Text += FString::Printf(TEXT("   layout conflicts: %d (-%.0f)"), H.OffendedPairs, H.AdjacencyPenalty);
 	}
+	// The garden (M2 Gate C): net food math at a glance - the line that says
+	// whether the ~40-sol provisions clock is beaten.
+	if (Sim->GetPlantedCellCount() > 0)
+	{
+		const double Yield = Sim->GetProducingCellCount() * Sim->GetGardenFoodKgPerSolPerCell();
+		const double Draw = Pop * Sim->GetColonistFoodKgPerSol();
+		Text += FString::Printf(TEXT("\nGARDEN %d/%d cells producing   %+.1f kg/sol net"),
+			Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(), Yield - Draw);
+	}
 	for (const FRHColonist& C : Sim->GetColonists())
 	{
 		FString Flag;

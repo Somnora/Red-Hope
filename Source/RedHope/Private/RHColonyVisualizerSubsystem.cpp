@@ -902,6 +902,8 @@ FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
 	if (RoomRowName == FName("Lab"))            { return FLinearColor(0.10f, 0.20f, 0.38f); } // ice
 	if (RoomRowName == FName("Workstation"))    { return FLinearColor(0.42f, 0.30f, 0.08f); } // amber
 	if (RoomRowName == FName("Hallway"))        { return FLinearColor(0.30f, 0.30f, 0.32f); } // slate
+	if (RoomRowName == FName("Garden"))         { return FLinearColor(0.14f, 0.26f, 0.09f); } // tilled, waiting
+	if (RoomRowName == FName("Garden#planted")) { return FLinearColor(0.10f, 0.42f, 0.12f); } // growing - the only green on Mars
 	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
 }
 
@@ -921,7 +923,12 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		{
 			continue;
 		}
-		const FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
+		FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
+		// A planted garden reads as its own state - green means growing.
+		if (Room == FName("Garden") && Sim->IsGardenPlanted(Pair.Key.X, Pair.Key.Y))
+		{
+			Room = FName("Garden#planted");
+		}
 		FName* Applied = AppliedRoomTint.Find(Pair.Key);
 		if (Applied && *Applied == Room)
 		{
@@ -948,8 +955,9 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		}
 		if (Label)
 		{
-			const FRHRoomRow* Row = Defs->GetRoom(Room);
-			Label->SetText(Room.IsNone() ? FText::GetEmpty() : FText::FromString(Row ? Row->DisplayName : Room.ToString()));
+			const FName BaseRoom = (Room == FName("Garden#planted")) ? FName("Garden") : Room;
+			const FRHRoomRow* Row = Defs->GetRoom(BaseRoom);
+			Label->SetText(Room.IsNone() ? FText::GetEmpty() : FText::FromString(Row ? Row->DisplayName : BaseRoom.ToString()));
 			const FLinearColor T = RoomTint(Room);
 			Label->SetTextRenderColor((T * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
 			// The tile actor's hidden-in-game state (the elevator's floor cut)
