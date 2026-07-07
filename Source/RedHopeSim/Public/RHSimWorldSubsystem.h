@@ -288,6 +288,21 @@ public:
 	double GetGrowthProgress() const;
 	bool IsGrowthEligible() const;
 
+	// --- Discoveries (M2 Gate D+, the Flourishing layer) ---
+	// Staffed Labs accrue research seat-hours while the colony's smoothed Hope
+	// holds above HopeDiscoveryThreshold; each authored discovery pops in Order
+	// (deterministic sequence, no RNG), granting a permanent Hope milestone and
+	// an optional stock reward. The sequence ends in microbial life - the
+	// landmark. Wording is Gate-D framing-review placeholder.
+	const TArray<FName>& GetDiscoveryLog() const { return DiscoveryLog; }
+	bool HasDiscovered(FName Name) const { return DiscoveryLog.Contains(Name); }
+	// The next undiscovered row (None when the sequence is exhausted or the
+	// table is absent) and the live progress toward it, 0..1.
+	FName GetNextDiscovery() const;
+	double GetDiscoveryProgress() const;
+	// Whether Labs are currently accruing (flourishing + at least one staffed seat).
+	bool IsResearchAccruing() const;
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -665,6 +680,13 @@ private:
 	bool bFirstBornAnnounced = false;     // serialized: the milestone fires once, never retracts
 	int32 BirthsOnMars = 0;               // serialized: native-born count (M3 identity seed)
 	void StepGrowth(float SubDt);
+	// Discoveries (save v16): the ordered log of what the colony has uncovered
+	// (each name's HopeBonus is a permanent milestone) + the seat-hours accrued
+	// toward the next. Linear accumulation on a threshold = era-parity-safe.
+	TArray<FName> DiscoveryLog;
+	double DiscoverySeatHours = 0.0;
+	double HopeDiscoveryThreshold = 85.0;
+	void StepDiscovery(float SubDt);
 	// Band boundary thresholds (up>down = the hysteresis gap). Index 0 is the
 	// Failing|Strained edge, 3 is the Thriving|Flourishing edge.
 	double HopeBandUp[4]   = { 28.0, 45.0, 75.0, 90.0 };

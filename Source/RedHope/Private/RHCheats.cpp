@@ -247,6 +247,29 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty, H.WaterPenalty, Sim->GetWaterPotability() * 100.0);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDiscoveries(
+	TEXT("RH.Discoveries"),
+	TEXT("RH.Discoveries - log the research state: what the colony has uncovered, what's next, and the live progress."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Sim || !Defs) { return; }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Discoveries] found %d | accruing: %s | next: %s (%.0f%%)"),
+			Sim->GetDiscoveryLog().Num(),
+			Sim->IsResearchAccruing() ? TEXT("yes") : TEXT("no (needs flourishing Hope + a staffed Lab)"),
+			Sim->GetNextDiscovery().IsNone() ? TEXT("-") : *Sim->GetNextDiscovery().ToString(),
+			Sim->GetDiscoveryProgress() * 100.0);
+		for (const FName& Found : Sim->GetDiscoveryLog())
+		{
+			const FRHDiscoveryRow* Row = Defs->GetDiscovery(Found);
+			UE_LOG(LogRedHope, Display, TEXT("  %s%s"),
+				Row ? *Row->DisplayName : *Found.ToString(),
+				(Row && Row->HopeBonus > 0.f) ? *FString::Printf(TEXT("  (+%.0f Hope)"), Row->HopeBonus) : TEXT(""));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHGarden(
 	TEXT("RH.Garden"),
 	TEXT("RH.Garden - log the garden: planted/producing cells, soil/seed/water stocks, net food per sol."),

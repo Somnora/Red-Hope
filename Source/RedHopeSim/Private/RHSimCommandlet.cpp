@@ -661,6 +661,100 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate D+ self-test: DISCOVERIES (the Flourishing layer) - staffed Labs
+	// accrue seat-hours while smoothed Hope holds above the threshold; rows pop
+	// in authored Order with permanent Hope milestones + stock rewards; progress
+	// keeps across a pause; save v16. `-discovery`.
+	if (FParse::Param(*Params, TEXT("discovery")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST (M2 Gate D+) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		// Fresh-water topping keeps potability out of the Hope math (the water
+		// loop is separately tested; this isolates the discovery gate).
+		const auto RunSols = [&](double Sols)
+		{
+			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(100.0 * StepSols);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// The DT_Discoveries asset doesn't exist until its first editor import;
+		// inject the four authored rows (mirrors RH_Discoveries.csv exactly).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const auto Inject = [&](const TCHAR* Name, const TCHAR* Display, int32 Order, float SeatH, float Bonus, FName Reward, float Kg)
+		{
+			FRHDiscoveryRow Row;
+			Row.DisplayName = Display; Row.Order = Order; Row.LabSeatHours = SeatH;
+			Row.HopeBonus = Bonus; Row.RewardResource = Reward; Row.RewardKg = Kg;
+			Row.Alert = FString::Printf(TEXT("DISCOVERY — %s"), Display); Row.SliceActive = true;
+			DefsSub->Debug_InjectDiscovery(FName(Name), Row);
+		};
+		Inject(TEXT("CropStrain"), TEXT("Hardy Crop Strain"), 1, 100.f, 2.f, FName("Seeds"), 50.f);
+		Inject(TEXT("RegolithCeramics"), TEXT("Regolith Ceramics"), 2, 150.f, 2.f, FName("Struct"), 100.f);
+		Inject(TEXT("SubsurfaceBrine"), TEXT("Subsurface Brine Seep"), 3, 200.f, 3.f, FName("Water"), 150.f);
+		Inject(TEXT("MicrobialLife"), TEXT("Subsurface Microbial Life"), 4, 300.f, 8.f, NAME_None, 0.f);
+
+		// A flourishing 2-person colony: instant Hope 88.5 (base 50 + housing 15
+		// + Lab 1.5 + Dining 3 + jobs 6 + vault 5 + comforts 8), no emitters so
+		// zero adjacency noise. The smoother crosses 85 at ~7.2 sols.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 2000.0);
+		Sim->AddStock(FName("Food"), 4000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 2, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 3, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 4, FName("Dining"), R);
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+
+		// 1) Below the threshold nothing accrues (the smoothed mood lags).
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("DISC gate: smoothed=%.1f accruing=%d progress=%.2f (expect <85, 0, 0.00)"),
+			Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress());
+
+		// 2) 10 sols in: the mood crossed ~85 near sol 7; 2 Lab seats x 48
+		// seat-h/sol -> CropStrain (100) pops. Seeds +50, milestone 5->7.
+		const double Seeds0 = Sim->GetStock(FName("Seeds"));
+		RunSols(9.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("DISC first: found=%d next=%s seeds +%.0f milestones=%.1f (expect 1, RegolithCeramics, 50, 7.0)"),
+			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
+			Sim->GetStock(FName("Seeds")) - Seeds0, Sim->GetColonyHope().Milestones);
+
+		// 3) 4 more sols: RegolithCeramics (150) pops on the spillover; the
+		// third (200) is still accruing. Struct +100 exactly (nothing else
+		// makes or spends Struct in this colony).
+		const double Struct0 = Sim->GetStock(FName("Struct"));
+		RunSols(4.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("DISC second: found=%d next=%s struct +%.0f milestones=%.1f (expect 2, SubsurfaceBrine, 100, 9.0)"),
+			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
+			Sim->GetStock(FName("Struct")) - Struct0, Sim->GetColonyHope().Milestones);
+
+		// 4) Save v16 round-trip: the log and the partial progress survive.
+		const int32 FoundBefore = Sim->GetDiscoveryLog().Num();
+		const double ProgressBefore = Sim->GetDiscoveryProgress();
+		FString Err;
+		Sim->SaveColony(TEXT("disctest"), Err);
+		Sim->LoadColony(TEXT("disctest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("DISC save/load v16: found %d->%d progress %.3f->%.3f (expect identical)"),
+			FoundBefore, Sim->GetDiscoveryLog().Num(), ProgressBefore, Sim->GetDiscoveryProgress());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

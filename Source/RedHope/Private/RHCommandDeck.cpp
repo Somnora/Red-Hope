@@ -995,6 +995,16 @@ FText SRHCommandDeck::GetCrewText() const
 	{
 		Text += FString::Printf(TEXT("   born on Mars: %d"), Sim->GetBirthsOnMars());
 	}
+	// Discoveries (M2 Gate D+): the research line shows only while the labs are
+	// actually accruing (flourishing + staffed) or once something is uncovered.
+	if (Sim->IsResearchAccruing())
+	{
+		Text += FString::Printf(TEXT("\nRESEARCH - next discovery %.0f%%"), Sim->GetDiscoveryProgress() * 100.0);
+	}
+	if (Sim->GetDiscoveryLog().Num() > 0)
+	{
+		Text += FString::Printf(TEXT("   discoveries: %d"), Sim->GetDiscoveryLog().Num());
+	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.
 	if (Sim->GetPlantedCellCount() > 0)

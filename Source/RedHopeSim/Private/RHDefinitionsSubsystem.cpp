@@ -17,6 +17,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	ManifestTable = Cast<UDataTable>(ManifestTablePath.TryLoad());
 	EventsTable = Cast<UDataTable>(EventsTablePath.TryLoad()); // absent = clear skies
 	RoomsTable = Cast<UDataTable>(RoomsTablePath.TryLoad()); // absent = nothing designatable
+	DiscoveriesTable = Cast<UDataTable>(DiscoveriesTablePath.TryLoad()); // absent = the layer stays dormant
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -227,6 +228,47 @@ void URHDefinitionsSubsystem::Debug_InjectResource(FName Name, const FRHResource
 void URHDefinitionsSubsystem::Debug_InjectManifest(FName Name, const FRHManifestItemRow& Row)
 {
 	if (ManifestTable) { ManifestTable->AddRow(Name, Row); }
+}
+
+void URHDefinitionsSubsystem::Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row)
+{
+	if (!DiscoveriesTable)
+	{
+		// The asset may not exist before its first editor import; a transient
+		// table lets headless tests exercise the layer (dev-only).
+		DiscoveriesTable = NewObject<UDataTable>(this, TEXT("DT_Discoveries_Transient"));
+		DiscoveriesTable->RowStruct = FRHDiscoveryRow::StaticStruct();
+	}
+	DiscoveriesTable->AddRow(Name, Row);
+}
+
+const FRHDiscoveryRow* URHDefinitionsSubsystem::GetDiscovery(FName Name) const
+{
+	return DiscoveriesTable ? DiscoveriesTable->FindRow<FRHDiscoveryRow>(Name, TEXT("GetDiscovery"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::GetDiscoveriesSorted(TArray<TPair<FName, const FRHDiscoveryRow*>>& Out) const
+{
+	Out.Reset();
+	if (!DiscoveriesTable)
+	{
+		return;
+	}
+	for (const auto& Pair : DiscoveriesTable->GetRowMap())
+	{
+		const FRHDiscoveryRow* Row = reinterpret_cast<const FRHDiscoveryRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Out.Emplace(Pair.Key, Row);
+		}
+	}
+	// Sort by the AUTHORED order, never map iteration order - the sequence is
+	// deterministic regardless of import/insertion details.
+	Out.Sort([](const TPair<FName, const FRHDiscoveryRow*>& A, const TPair<FName, const FRHDiscoveryRow*>& B)
+	{
+		return A.Value->Order != B.Value->Order ? A.Value->Order < B.Value->Order
+			: A.Key.LexicalLess(B.Key);
+	});
 }
 
 double URHDefinitionsSubsystem::GetConfigScalar(FName Name, double Default) const

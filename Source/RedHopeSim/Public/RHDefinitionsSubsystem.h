@@ -32,6 +32,11 @@ public:
 	const FRHRoomRow* GetRoom(FName Name) const;
 	// All slice-active room functions (the deck's designation palette).
 	void ForEachRoom(TFunctionRef<void(FName, const FRHRoomRow&)> Fn) const;
+	// Discoveries (M2 Gate D+): row by name, and the slice-active rows sorted
+	// by their authored Order (the deterministic research sequence). Absent
+	// table = no discoveries - the layer simply stays dormant.
+	const FRHDiscoveryRow* GetDiscovery(FName Name) const;
+	void GetDiscoveriesSorted(TArray<TPair<FName, const FRHDiscoveryRow*>>& Out) const;
 
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.
@@ -102,6 +107,10 @@ public:
 	void Debug_InjectRoom(FName Name, const FRHRoomRow& Row);
 	void Debug_InjectResource(FName Name, const FRHResourceRow& Row);
 	void Debug_InjectManifest(FName Name, const FRHManifestItemRow& Row);
+	// Discoveries: the DT asset may not exist at all before its first editor
+	// import, so this one lazily creates a TRANSIENT table for the injection
+	// (dev-only; the real asset supersedes it once imported).
+	void Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row);
 
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
 	float EvalSolarCurve(float SolFraction) const;
@@ -128,6 +137,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath ManifestTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_ManifestItems.DT_ManifestItems"));
 	UPROPERTY(Config) FSoftObjectPath EventsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Events.DT_Events"));
 	UPROPERTY(Config) FSoftObjectPath RoomsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rooms.DT_Rooms"));
+	UPROPERTY(Config) FSoftObjectPath DiscoveriesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Discoveries.DT_Discoveries"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -140,5 +150,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> ManifestTable;
 	UPROPERTY() TObjectPtr<UDataTable> EventsTable;
 	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
+	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

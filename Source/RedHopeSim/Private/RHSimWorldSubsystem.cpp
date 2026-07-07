@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 15;  // v15: generational growth; v14 water; v13 Hope-drives; v12 garden; v11 rooms
+	constexpr uint32 RHSaveVersion = 16;  // v16: discoveries; v15 growth; v14 water; v13 Hope-drives; v12 garden
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -139,6 +139,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeGrowthIntervalSols = Defs->GetConfigScalar(FName("HopeGrowthIntervalSols"), HopeGrowthIntervalSols);
 	HopeGrowthFoodBufferSols = Defs->GetConfigScalar(FName("HopeGrowthFoodBufferSols"), HopeGrowthFoodBufferSols);
 	HopeFirstBornMilestone = Defs->GetConfigScalar(FName("HopeFirstBornMilestone"), HopeFirstBornMilestone);
+	HopeDiscoveryThreshold = Defs->GetConfigScalar(FName("HopeDiscoveryThreshold"), HopeDiscoveryThreshold);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -297,6 +298,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepPopulation(SubDt);
 	StepHope(SubDt); // after population so the mood reflects this step's support state
 	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
+	StepDiscovery(SubDt); // and its labs uncover what Mars is hiding
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -429,6 +431,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepPopulation(DtSimSeconds);
 	StepHope(DtSimSeconds); // same order as the agent band (parity)
 	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
+	StepDiscovery(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -2002,6 +2005,16 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	{
 		Out.Milestones += HopeFirstBornMilestone; // the first Martian, forever a source of hope
 	}
+	// Discoveries are permanent momentum (brief §5) - each uncovered row's
+	// HopeBonus stays in the index forever. The log is tiny (an authored
+	// handful), so the per-call lookups are cheap.
+	for (const FName& Found : DiscoveryLog)
+	{
+		if (const FRHDiscoveryRow* Row = Defs ? Defs->GetDiscovery(Found) : nullptr)
+		{
+			Out.Milestones += Row->HopeBonus;
+		}
+	}
 
 	const int32 Pop = Colonists.Num();
 	int32 LQCells = 0;
@@ -2233,6 +2246,99 @@ void URHSimWorldSubsystem::StepGrowth(float SubDt)
 		OnAlert.Broadcast(FString::Printf(TEXT("A CHILD IS BORN — %s joins the colony (%d born on Mars)."), *Name, BirthsOnMars));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== MARTIAN-BORN: %s (%d total) ==="), *Name, BirthsOnMars);
 	}
+}
+
+FName URHSimWorldSubsystem::GetNextDiscovery() const
+{
+	TArray<TPair<FName, const FRHDiscoveryRow*>> Rows;
+	if (Defs)
+	{
+		Defs->GetDiscoveriesSorted(Rows);
+	}
+	for (const auto& Pair : Rows)
+	{
+		if (!DiscoveryLog.Contains(Pair.Key))
+		{
+			return Pair.Key;
+		}
+	}
+	return NAME_None;
+}
+
+double URHSimWorldSubsystem::GetDiscoveryProgress() const
+{
+	const FName Next = GetNextDiscovery();
+	const FRHDiscoveryRow* Row = (Defs && !Next.IsNone()) ? Defs->GetDiscovery(Next) : nullptr;
+	if (!Row || Row->LabSeatHours <= 0.f)
+	{
+		return 0.0;
+	}
+	return FMath::Clamp(DiscoverySeatHours / (double)Row->LabSeatHours, 0.0, 1.0);
+}
+
+bool URHSimWorldSubsystem::IsResearchAccruing() const
+{
+	if (HopeSmoothed < HopeDiscoveryThreshold || GetNextDiscovery().IsNone())
+	{
+		return false;
+	}
+	for (const auto& Job : ColonistJobs)
+	{
+		if (Job.Value == FName("Lab"))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::StepDiscovery(float SubDt)
+{
+	// Zero-pop / no-Lab / no-table colonies: no staffed seats or no next row,
+	// so this is a no-op - every pre-crew baseline is untouched. Accrual is
+	// LINEAR in dt (seat-count x sol-hours), and the pop is a threshold on a
+	// monotone accumulator - era-parity-safe like growth.
+	if (Colonists.Num() == 0 || HopeSmoothed < HopeDiscoveryThreshold)
+	{
+		return; // progress KEEPS (knowledge doesn't evaporate; accrual just pauses)
+	}
+	int32 LabSeats = 0;
+	for (const auto& Job : ColonistJobs)
+	{
+		if (Job.Value == FName("Lab"))
+		{
+			++LabSeats;
+		}
+	}
+	if (LabSeats == 0)
+	{
+		return;
+	}
+	const FName Next = GetNextDiscovery();
+	const FRHDiscoveryRow* Row = (Defs && !Next.IsNone()) ? Defs->GetDiscovery(Next) : nullptr;
+	if (!Row)
+	{
+		return; // sequence exhausted (or table absent) - the colony knows all it can
+	}
+	DiscoverySeatHours += LabSeats * (SubDt / 50.0); // sol-hours per seat
+	if (DiscoverySeatHours < Row->LabSeatHours)
+	{
+		return;
+	}
+	DiscoverySeatHours -= Row->LabSeatHours; // spillover carries to the next row
+
+	DiscoveryLog.Add(Next);
+	if (!Row->RewardResource.IsNone() && Row->RewardKg > 0.f)
+	{
+		AddStock(Row->RewardResource, Row->RewardKg);
+	}
+	if (!Row->Alert.IsEmpty())
+	{
+		OnAlert.Broadcast(Row->Alert);
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERY: %s (+%.0f Hope milestone%s) ==="),
+		*Row->DisplayName, Row->HopeBonus,
+		Row->RewardKg > 0.f ? *FString::Printf(TEXT(", +%.0f kg %s"), Row->RewardKg, *Row->RewardResource.ToString()) : TEXT(""));
 }
 
 const TCHAR* URHSimWorldSubsystem::GetHopeBandName() const
@@ -3705,6 +3811,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << WaterPotability;
 	// Generational growth (save v15).
 	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
+	// Discoveries (save v16).
+	Ar << DiscoveryLog << DiscoverySeatHours;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3891,6 +3999,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	bWaterQualityAnnounced = false;  // runtime edge re-derives from the loaded value
 	// Generational growth (save v15).
 	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
+	// Discoveries (save v16). Array repopulates wholesale.
+	DiscoveryLog.Reset();
+	Ar << DiscoveryLog << DiscoverySeatHours;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

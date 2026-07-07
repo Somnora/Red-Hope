@@ -241,3 +241,31 @@ struct REDHOPESIM_API FRHDoorRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
+
+// A research discovery (M2 Gate D+, the Flourishing layer): what a thriving
+// colony's staffed Labs UNCOVER. Discoveries pop in authored Order (a
+// deterministic sequence, never a random roll - era-parity by construction),
+// each granting a permanent Hope milestone and an optional stock reward. The
+// sequence ends in the landmark the director asked for: microbial life.
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHDiscoveryRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// Authored sequence position - discoveries fire strictly in this order.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 Order = 0;
+	// Research cost: staffed-Lab seat-hours accrued while the colony's smoothed
+	// Hope holds above HopeDiscoveryThreshold (breakthroughs are earned by
+	// sustained flourishing).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LabSeatHours = 100.f;
+	// Permanent Hope milestone once discovered (momentum, brief §5).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float HopeBonus = 0.f;
+	// Optional one-time stock grant (None/0 = knowledge only).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName RewardResource;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float RewardKg = 0.f;
+	// The banner the colony sees (player-facing - Gate-D framing review).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Alert;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
