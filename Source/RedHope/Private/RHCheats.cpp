@@ -194,6 +194,33 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHAddStock(
+	TEXT("RH.AddStock"),
+	TEXT("RH.AddStock <Resource> <Kg> - DEBUG: add to the colony-wide pool stock (fluids/gases: Oxygen, Water, Hydrogen...)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2) { return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			Sim->AddStock(FName(*Args[0]), FCString::Atod(*Args[1]));
+			UE_LOG(LogRedHope, Display, TEXT("Pool stock %s: %.0f kg"), *Args[0], Sim->GetStock(FName(*Args[0])));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSetCirculates(
+	TEXT("RH.SetCirculates"),
+	TEXT("RH.SetCirculates <DefName> <0|1> - DEBUG: set a building def's CirculatesAir in the loaded table (test knob until the AirFilter DT row lands)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2) { return; }
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (FRHBuildingRow* Row = const_cast<FRHBuildingRow*>(Defs ? Defs->GetBuilding(FName(*Args[0])) : nullptr))
+		{
+			Row->CirculatesAir = FCString::Atoi(*Args[1]) != 0;
+			UE_LOG(LogRedHope, Display, TEXT("'%s' CirculatesAir = %s (in-memory)"), *Args[0], *Args[1]);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHActivateRecipe(
 	TEXT("RH.ActivateRecipe"),
 	TEXT("RH.ActivateRecipe <RowName> - DEBUG: flip a recipe row slice-active in the loaded table (test knob; the DT asset is untouched)."),

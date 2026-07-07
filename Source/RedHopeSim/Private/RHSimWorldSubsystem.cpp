@@ -770,11 +770,13 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			{
 				continue;
 			}
-			// Source: any completed building holding that resource.
+			// Source: any completed building holding that resource, on the
+			// site's floor or any trunk-linked floor (M1-d: the lift carries
+			// materials across levels - how underground sites get built).
 			int32 SourceId = 0;
 			for (const FRHBuildingInstance& S : Buildings)
 			{
-				if (S.bUnderConstruction || S.Id == Site.Id || S.Level != Site.Level)
+				if (S.bUnderConstruction || S.Id == Site.Id || !AreLevelsLinked(S.Level, Site.Level))
 				{
 					continue;
 				}
@@ -1274,6 +1276,18 @@ void URHSimWorldSubsystem::Debug_AddSolid(FName DefName, FName Resource, double 
 		}
 	}
 	UE_LOG(LogRedHopeSim, Warning, TEXT("Debug_AddSolid: no completed '%s'"), *DefName.ToString());
+}
+
+FVector URHSimWorldSubsystem::GetApproachPoint(const FRHSiteRef& Site, int32 RobotLevel) const
+{
+	const int32 SiteLevel = GetSiteLevel(Site);
+	if (SiteLevel != RobotLevel && AreLevelsLinked(SiteLevel, RobotLevel) && ShaftDepth > 0)
+	{
+		FVector Head = ShaftHeadCm;
+		Head.Z = RobotLevel * FloorHeightCm;
+		return Head;
+	}
+	return GetSiteLocation(Site);
 }
 
 bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
@@ -2073,7 +2087,9 @@ bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLo
 		return false;
 	}
 	OutLoadedKg = (float)Taken;
-	OutDropoffCm = GetSiteLocation(T->To);
+	// Cross-level delivery drives to the shaft head; the lift takes the cargo
+	// the last leg (robots are surface-bound until a later gate).
+	OutDropoffCm = GetApproachPoint(T->To, /*RobotLevel*/ 0);
 	return true;
 }
 
@@ -2108,9 +2124,11 @@ bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector&
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
 	{
-		if (T.Type == ERHTaskType::Build && !T.ClaimedBy.IsValid() && GetSiteLevel(T.To) == RobotLevel)
+		// Cross-level claims allowed when the trunk links the floors: the
+		// fabricator works the shaft head, the lift carries the work (M1-d).
+		if (T.Type == ERHTaskType::Build && !T.ClaimedBy.IsValid() && AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
 		{
-			const double Dist = FVector::DistXY(GetSiteLocation(T.To), RobotPosCm);
+			const double Dist = FVector::DistXY(GetApproachPoint(T.To, RobotLevel), RobotPosCm);
 			if (Dist < BestDist)
 			{
 				BestDist = Dist;

@@ -94,7 +94,8 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				Task.TaskType = (uint8)ERHTaskType::Build;
 				Task.TaskId = Board.Id;
 				Task.DigDepositId = Board.To.BuildingId; // reused slot: construction site id
-				Task.TargetCm = Sim->GetSiteLocation(Board.To);
+				// Cross-level sites are worked from the shaft head (M1-d).
+				Task.TargetCm = Sim->GetApproachPoint(Board.To, /*RobotLevel*/ 0);
 				Task.Phase = 0;
 			}
 		}

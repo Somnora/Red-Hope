@@ -146,6 +146,15 @@ public:
 	// emitting regolith spoil to the shaft-head pile (hauled to the Forge in A2).
 	int32 GetShaftDepth() const { return ShaftDepth; }
 	bool IsLevelConnected(int32 Level) const { return Level == 0 || (Level < 0 && -Level <= ShaftDepth); }
+	// Two floors exchange materials iff the trunk reaches both (the lift is
+	// the only cross-level connector - underground proposal §5).
+	bool AreLevelsLinked(int32 A, int32 B) const { return A == B || (IsLevelConnected(A) && IsLevelConnected(B)); }
+	// Where a robot physically drives to serve a site (M1-d): its own floor's
+	// point directly, or the SHAFT HEAD when the site is on another linked
+	// floor - the lift carries the last leg (cargo down the trunk; the
+	// fabricator works the head). Robots themselves stay surface-bound until
+	// a later gate sends them below.
+	FVector GetApproachPoint(const FRHSiteRef& Site, int32 RobotLevel) const;
 	int32 GetFloorCarvedCells(int32 Level) const { const int32* C = FloorCarvedCells.Find(Level); return C ? *C : 0; }
 	double GetSpoilPileKg() const { return SpoilPileKg; }
 	FVector GetShaftHeadCm() const { return ShaftHeadCm; }
@@ -164,6 +173,10 @@ public:
 	double GetFloorO2RequiredKg(int32 Level) const { return GetFloorCarvedCells(Level) * O2FillKgPerCell; }
 	bool IsFloorCirculated(int32 Level) const;
 	bool IsFloorRated(int32 Level) const { return RatedFloors.Contains(Level); }
+	// The Phase 1 exit (M1-d Gate C): true once ANY floor has ever rated
+	// Livable - the colony's first vault. Fires the exit card; never unset
+	// (losing the rating later is a crisis, not an un-achievement).
+	bool HasVaultRating() const { return bVaultRated; }
 	// Bore the trunk down to ToDepth floors below surface (clamped to MaxDepth);
 	// emits shaft spoil per newly bored floor. The shaft head (surface column)
 	// is fixed on the first bore. Never retracts.
