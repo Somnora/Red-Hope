@@ -346,6 +346,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBoreLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBore))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
 						DeckButton(FText::FromString(TEXT("Excavate")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate))
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
@@ -936,6 +941,34 @@ FReply SRHCommandDeck::HandleExcavate()
 		PC->BeginExcavateDesignation();
 	}
 	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleBore()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim)
+	{
+		// One floor past whatever is already reached OR ordered - repeat
+		// clicks stack the designation deeper (clamped by the sim).
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Bore");
+		Cmd.Value = FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()) + 1;
+		Sim->EnqueueCommand(Cmd);
+	}
+	return FReply::Handled();
+}
+
+FText SRHCommandDeck::GetBoreLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Next = Sim ? FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()) + 1 : 1;
+	if (Sim && Next > Sim->GetMaxDepth())
+	{
+		return FText::FromString(TEXT("Bore (max)"));
+	}
+	return FText::FromString(FString::Printf(TEXT("Bore → -%d"), Next));
 }
 
 FReply SRHCommandDeck::HandleFloor(int32 Level)

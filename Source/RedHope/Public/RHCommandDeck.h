@@ -63,6 +63,11 @@ private:
 	FReply HandleSurvey();
 	// Excavation designation (M1-d): paint carve cells on the active floor.
 	FReply HandleExcavate();
+	// Bore designation (M1-d): each click orders the trunk one floor deeper
+	// (uplink verb; rejected loudly without a Borer online). Label reads the
+	// next target so the button says what it will do.
+	FReply HandleBore();
+	FText GetBoreLabel() const;
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
 	FText GetFloorLabel(int32 Level) const;
