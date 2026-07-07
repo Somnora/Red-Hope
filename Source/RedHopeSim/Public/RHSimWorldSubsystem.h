@@ -317,6 +317,24 @@ public:
 	double GetConvoyProgress() const;
 	double GetRivalRelation(FName Rival) const;
 
+	// --- Earth's Shadow (M3 Gate B) ---
+	// Earth tension (0..100) rises while you have neighbors and gates a demand
+	// from your sponsor nation. The identity axis (-100 Earth-aligned .. +100
+	// Martian) is the through-line the Solidarity Dilemma (Gate C) moves and the
+	// endings read. Both persist (save v18). Requisition awards scale with the
+	// axis + tension - loyalty is rewarded, defiance and crisis shrink supply.
+	// The whole layer is INERT until a rival is slice-active (a lonely colony's
+	// awards and baseline are untouched). Gate C wires Comply/Defy to move these.
+	double GetEarthTension() const { return EarthTension; }
+	double GetIdentityAxis() const { return IdentityAxis; }
+	bool IsEarthDemandPending() const { return bEarthDemandPending; }
+	// The multiplier applied to a supply-ship award mass (1.0 when the Earth
+	// layer is inert, so every pre-M3 award is unchanged).
+	double GetRequisitionMultiplier() const;
+	// Gate-C / cheat hooks (Comply/Defy will call these):
+	void Debug_ShiftIdentity(double Delta) { IdentityAxis = FMath::Clamp(IdentityAxis + Delta, -100.0, 100.0); }
+	void Debug_AddTension(double Delta) { EarthTension = FMath::Clamp(EarthTension + Delta, 0.0, 100.0); }
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -715,6 +733,17 @@ private:
 	double ConvoyWearParts = 1.0;
 	double RelationPerRun = 2.0;
 	void StepTrade(float SubDt);
+	// Earth's Shadow (M3 Gate B; save v18). Inert until a rival is slice-active.
+	double EarthTension = 0.0;
+	double IdentityAxis = 0.0;
+	bool bEarthDemandPending = false;
+	double EarthTensionDriftPerSol = 0.6;
+	double EarthTensionDemandThreshold = 60.0;
+	double RequisitionEarthBonus = 0.4;
+	double RequisitionMartianPenalty = 0.6;
+	double RequisitionTensionPenalty = 0.3;
+	void StepEarth(float SubDt);
+	bool HasActiveRival() const; // any slice-active rival => the layer is live
 	// Ensure a rival's relation entry exists (lazy seed from RelationStart).
 	double& RelationRef(FName Rival);
 	// One-way transit time for a rival, in sols.

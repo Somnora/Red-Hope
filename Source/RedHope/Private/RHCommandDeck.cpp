@@ -1012,6 +1012,16 @@ FText SRHCommandDeck::GetCrewText() const
 			Sim->IsConvoyReturning() ? TEXT("returning from") : TEXT("outbound to"),
 			*Sim->GetConvoyRival().ToString(), Sim->GetConvoyProgress() * 100.0);
 	}
+	// Earth's Shadow (M3 Gate B): tension + which way the colony is leaning,
+	// shown once the politics are live (tension has moved off zero).
+	if (Sim->GetEarthTension() > 0.0 || Sim->IsEarthDemandPending())
+	{
+		const double Axis = Sim->GetIdentityAxis();
+		const TCHAR* Lean = Axis > 5.0 ? TEXT("Martian-leaning") : (Axis < -5.0 ? TEXT("Earth-aligned") : TEXT("neutral"));
+		Text += FString::Printf(TEXT("\nEARTH tension %.0f   identity %s (%+.0f)%s"),
+			Sim->GetEarthTension(), Lean, Axis,
+			Sim->IsEarthDemandPending() ? TEXT("   DEMAND PENDING") : TEXT(""));
+	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.
 	if (Sim->GetPlantedCellCount() > 0)

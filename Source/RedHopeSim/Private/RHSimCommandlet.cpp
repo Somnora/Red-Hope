@@ -867,6 +867,74 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M3 Gate B self-test: EARTH'S SHADOW - the layer is inert without neighbors,
+	// tension drifts + generates a demand once a rival exists, and the identity
+	// axis + tension scale the requisition award. Save v18. `-earth`.
+	if (FParse::Param(*Params, TEXT("earth")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH'S SHADOW TEST (M3 Gate B) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// 1) INERT without neighbors: tension doesn't move, multiplier is exactly
+		// 1.0 (this is what keeps every pre-M3 baseline byte-identical).
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH no-neighbors: tension=%.2f mult=%.3f (expect 0.00, 1.000 - inert)"),
+			Sim->GetEarthTension(), Sim->GetRequisitionMultiplier());
+
+		// Now Mars has a neighbor: the layer switches on.
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+
+		// 2) Tension DRIFTS (0.6/sol): after 10 sols ~6.0.
+		RunSols(10.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH drift: tension=%.1f (expect ~6.0 = 0.6 x 10) demand=%d (expect 0)"),
+			Sim->GetEarthTension(), (int32)Sim->IsEarthDemandPending());
+
+		// 3) DEMAND generated once tension crosses 60: jump it up.
+		Sim->Debug_AddTension(55.0); // -> ~61
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH demand: tension=%.0f demand=%d (expect >=60, 1)"),
+			Sim->GetEarthTension(), (int32)Sim->IsEarthDemandPending());
+
+		// 4) The identity axis scales the requisition. At tension ~61, axis 0:
+		// mult = 1 - 0.3*(61/100) = 0.817. Full Earth-aligned (-100): +0.4 bonus
+		// but still -tension: 1 + 0.4 - 0.183 = 1.217 (clamped <= 1.4). Full
+		// Martian (+100): 1 - 0.6 - 0.183 = 0.217.
+		const double MultNeutral = Sim->GetRequisitionMultiplier();
+		Sim->Debug_ShiftIdentity(-100.0); // Earth-aligned
+		const double MultEarth = Sim->GetRequisitionMultiplier();
+		Sim->Debug_ShiftIdentity(200.0);  // -> +100 Martian
+		const double MultMartian = Sim->GetRequisitionMultiplier();
+		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH requisition: neutral=%.3f earth-aligned=%.3f martian=%.3f (expect ~0.82, ~1.22, ~0.22)"),
+			MultNeutral, MultEarth, MultMartian);
+
+		// 5) Save v18 round-trip: tension, axis, demand survive.
+		const double TenB = Sim->GetEarthTension(), AxB = Sim->GetIdentityAxis();
+		const int32 DemB = (int32)Sim->IsEarthDemandPending();
+		FString Err;
+		Sim->SaveColony(TEXT("earthtest"), Err);
+		Sim->LoadColony(TEXT("earthtest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH save/load v18: tension %.0f->%.0f axis %+.0f->%+.0f demand %d->%d (expect identical)"),
+			TenB, Sim->GetEarthTension(), AxB, Sim->GetIdentityAxis(), DemB, (int32)Sim->IsEarthDemandPending());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH'S SHADOW TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 17;  // v17: rivals/trade (M3 Gate A); v16 discoveries; v15 growth; v14 water
+	constexpr uint32 RHSaveVersion = 18;  // v18: Earth's Shadow (M3 Gate B); v17 rivals/trade; v16 discoveries; v15 growth
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -144,6 +144,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	ConvoyH2PerRun = Defs->GetConfigScalar(FName("ConvoyH2PerRun"), ConvoyH2PerRun);
 	ConvoyWearParts = Defs->GetConfigScalar(FName("ConvoyWearParts"), ConvoyWearParts);
 	RelationPerRun = Defs->GetConfigScalar(FName("RelationPerRun"), RelationPerRun);
+	EarthTension = Defs->GetConfigScalar(FName("EarthTensionStart"), EarthTension);
+	IdentityAxis = Defs->GetConfigScalar(FName("IdentityAxisStart"), IdentityAxis);
+	EarthTensionDriftPerSol = Defs->GetConfigScalar(FName("EarthTensionDriftPerSol"), EarthTensionDriftPerSol);
+	EarthTensionDemandThreshold = Defs->GetConfigScalar(FName("EarthTensionDemandThreshold"), EarthTensionDemandThreshold);
+	RequisitionEarthBonus = Defs->GetConfigScalar(FName("RequisitionEarthBonus"), RequisitionEarthBonus);
+	RequisitionMartianPenalty = Defs->GetConfigScalar(FName("RequisitionMartianPenalty"), RequisitionMartianPenalty);
+	RequisitionTensionPenalty = Defs->GetConfigScalar(FName("RequisitionTensionPenalty"), RequisitionTensionPenalty);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -304,6 +311,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
 	StepDiscovery(SubDt); // and its labs uncover what Mars is hiding
 	StepTrade(SubDt); // the convoy rolls toward the neighbors
+	StepEarth(SubDt); // and Earth watches Mars connect to itself
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -438,6 +446,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
 	StepDiscovery(DtSimSeconds); // same order as the agent band (parity)
 	StepTrade(DtSimSeconds); // same order as the agent band (parity)
+	StepEarth(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -1155,10 +1164,16 @@ void URHSimWorldSubsystem::StepQuota()
 		QuotaPhase = ERHQuotaPhase::AwaitingManifest;
 		QuotaMetSol = Clock->GetSol();
 		const bool bOnTime = QuotaMetSol <= Quota->DeadlineSol;
-		AwardMassKg = bOnTime ? Quota->OnTimeAward_kg : Quota->LateAward_kg;
+		// M3 Gate B: the requisition multiplier scales the award by your standing
+		// with Earth (identity axis + tension). Exactly 1.0 until you have
+		// neighbors, so the M0-M2 award is unchanged.
+		const double ReqMult = GetRequisitionMultiplier();
+		AwardMassKg = (bOnTime ? Quota->OnTimeAward_kg : Quota->LateAward_kg) * ReqMult;
 		UE_LOG(LogRedHopeSim, Display,
-			TEXT("=== CEO TRANSMISSION (Sol %d): Quota Q1 met%s. Supply ship authorized: %.0f kg manifest budget. Compose and launch. ==="),
-			QuotaMetSol, bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg);
+			TEXT("=== CEO TRANSMISSION (Sol %d): Quota Q1 met%s. Supply ship authorized: %.0f kg manifest budget%s. Compose and launch. ==="),
+			QuotaMetSol, bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg,
+			ReqMult < 0.999 ? *FString::Printf(TEXT(" (requisition x%.2f - your Martian ties)"), ReqMult)
+				: (ReqMult > 1.001 ? *FString::Printf(TEXT(" (requisition x%.2f - Earth loyalty)"), ReqMult) : TEXT("")));
 		OnQuotaMet.Broadcast(QuotaMetSol, AwardMassKg);
 	}
 	else if (QuotaPhase == ERHQuotaPhase::ShipInbound)
@@ -3015,6 +3030,56 @@ double URHSimWorldSubsystem::GetRivalRelation(FName Rival) const
 	return Row ? Row->RelationStart : 0.0;
 }
 
+bool URHSimWorldSubsystem::HasActiveRival() const
+{
+	bool bAny = false;
+	if (Defs)
+	{
+		Defs->ForEachRival([&bAny](FName, const FRHRivalRow&){ bAny = true; });
+	}
+	return bAny;
+}
+
+double URHSimWorldSubsystem::GetRequisitionMultiplier() const
+{
+	// Inert (exactly 1.0) until you have neighbors: a pre-M3 colony's awards -
+	// and every baseline - are untouched.
+	if (!HasActiveRival())
+	{
+		return 1.0;
+	}
+	const double AxisFrac = IdentityAxis / 100.0;             // + = Martian
+	const double EarthAlign = FMath::Max(0.0, -AxisFrac);     // loyalty
+	const double MartianAlign = FMath::Max(0.0, AxisFrac);    // defiance
+	const double Mult = 1.0
+		+ RequisitionEarthBonus * EarthAlign
+		- RequisitionMartianPenalty * MartianAlign
+		- RequisitionTensionPenalty * (EarthTension / 100.0);
+	return FMath::Clamp(Mult, 0.0, 1.0 + RequisitionEarthBonus);
+}
+
+void URHSimWorldSubsystem::StepEarth(float SubDt)
+{
+	// The Earth-politics layer switches on only once Mars has neighbors - a
+	// lonely colony draws no scrutiny, so pre-M3 baselines stay byte-identical.
+	if (!HasActiveRival())
+	{
+		return;
+	}
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	// Background tension: Earth grows uneasier as Mars connects to itself.
+	EarthTension = FMath::Clamp(EarthTension + EarthTensionDriftPerSol * DtSols, 0.0, 100.0);
+	// A demand is generated once tension crosses the threshold (the hook the
+	// Solidarity Dilemma resolves in Gate C; here it only telegraphs). Wording
+	// is a Gate-D framing-review placeholder.
+	if (!bEarthDemandPending && EarthTension >= EarthTensionDemandThreshold)
+	{
+		bEarthDemandPending = true;
+		OnAlert.Broadcast(TEXT("EARTH TRANSMISSION — your sponsor nation is uneasy about your ties to the other settlements. A demand is coming."));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH DEMAND PENDING (tension %.0f) ==="), EarthTension);
+	}
+}
+
 void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level)
 {
 	FRHBuildingInstance Instance;
@@ -4048,6 +4113,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		uint8 Returning = bConvoyReturning ? 1 : 0;
 		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
 	}
+	// Earth's Shadow (save v18).
+	{
+		uint8 Demand = bEarthDemandPending ? 1 : 0;
+		Ar << EarthTension << IdentityAxis << Demand;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4243,6 +4313,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		RivalRelations.Empty();
 		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
 		bConvoyReturning = (Returning != 0);
+	}
+	// Earth's Shadow (save v18).
+	{
+		uint8 Demand = 0;
+		Ar << EarthTension << IdentityAxis << Demand;
+		bEarthDemandPending = (Demand != 0);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

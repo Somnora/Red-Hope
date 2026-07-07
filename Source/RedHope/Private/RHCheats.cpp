@@ -247,6 +247,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty, H.WaterPenalty, Sim->GetWaterPotability() * 100.0);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHEarth(
+	TEXT("RH.Earth"),
+	TEXT("RH.Earth [tension <delta>] [identity <delta>] - log or nudge the Earth-tension / identity-axis state (identity + = Martian, - = Earth-aligned)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		for (int32 i = 0; i + 1 < Args.Num(); i += 2)
+		{
+			const double Delta = FCString::Atod(*Args[i + 1]);
+			if (Args[i] == TEXT("tension")) { Sim->Debug_AddTension(Delta); }
+			else if (Args[i] == TEXT("identity")) { Sim->Debug_ShiftIdentity(Delta); }
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Earth] tension %.0f | identity %+.0f | demand %s | requisition x%.2f"),
+			Sim->GetEarthTension(), Sim->GetIdentityAxis(),
+			Sim->IsEarthDemandPending() ? TEXT("PENDING") : TEXT("none"), Sim->GetRequisitionMultiplier());
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHConvoy(
 	TEXT("RH.Convoy"),
 	TEXT("RH.Convoy <RivalName> - dispatch the rover trade convoy to a rival (uplink; commits Hydrogen + SpareParts + your export lot at departure)."),
