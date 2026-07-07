@@ -74,6 +74,7 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntity
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnShipArrived, const TArray<FName>& /*Items*/);
 DECLARE_MULTICAST_DELEGATE(FRHOnColonyReloaded);
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnDepositDiscovered, const FRHDepositState&);
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
@@ -162,11 +163,39 @@ public:
 	bool FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm, int32 RobotLevel = 0) const;
 	// Grants up to the pad's transfer rate x dt from grid energy. Zero when
 	// the pad is shed/unbuilt or the grid has nothing to give (night, empty
-	// bank) - the robot waits docked. Multiple robots may share a pad at
-	// slice scale (queueing etiquette: post-M0 StateTree work).
-	double RequestChargeWh(int32 PadBuildingId, double SubDt);
+	// bank) - the robot waits docked. With a valid Robot handle, only the
+	// head of the pad's queue is served (M1-b etiquette: one umbilical per
+	// pad; the rest wait docked at zero draw). An invalid handle bypasses
+	// the queue - the legacy brain's M0-c behavior, frozen.
+	double RequestChargeWh(int32 PadBuildingId, double SubDt, FMassEntityHandle Robot = FMassEntityHandle());
+	void JoinPadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
+	void LeavePadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
 	float GetChargeSeekFraction() const { return ChargeSeekFraction; }
 	float GetChargeResumeFraction() const { return ChargeResumeFraction; }
+
+	// --- Fleet reality (M1-b Gate B) ---
+	// Wear follows exertion: any sub-step spent above idle draw accrues
+	// WearPerSol / sol. Clamped at the halt threshold.
+	void AccrueWear(float& Wear, float WearPerSol, float Dt) const;
+	// Work-rate multiplier for a wear value: 1 below the degrade threshold,
+	// linear to 0 at the halt threshold.
+	float GetWearWorkMul(float Wear) const;
+	float GetWearDegradeThreshold() const { return WearDegradeThreshold; }
+	float GetWearHaltThreshold() const { return WearHaltThreshold; }
+	// Scout: claim the nearest open survey task.
+	bool TryClaimSurvey(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask);
+	// Arrival at the survey point: reveal hidden deposits within RadiusM,
+	// broadcast each discovery, complete the task.
+	void CompleteSurvey(int32 TaskId, double RadiusM);
+	// Maintenance: claim the most-worn robot at or past the degrade
+	// threshold (parts in stock required; self excluded; one claim per target).
+	bool TryClaimRepair(FMassEntityHandle Self, FMassEntityHandle& OutTarget, FVector& OutTargetCm);
+	// Re-track a moving repair target; false once it despawned.
+	bool GetRepairTargetPos(FMassEntityHandle Target, FVector& OutPosCm) const;
+	// On arrival: spend SpareParts (RepairWearPerPart wear each) against the
+	// target's wear until it is clean or stock runs out. Instant at slice scale.
+	void ApplyRepairAt(FMassEntityHandle Target);
+	void ReleaseRepairClaim(FMassEntityHandle Target);
 
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
@@ -207,6 +236,7 @@ public:
 	void Debug_Showcase();
 
 	FRHOnStockChanged OnStockChanged;
+	FRHOnDepositDiscovered OnDepositDiscovered;
 	FRHOnColonyReloaded OnColonyReloaded;
 	FRHOnCommandExecuted OnCommandExecuted;
 	FRHOnBuildingAdded OnBuildingAdded;
@@ -256,6 +286,14 @@ private:
 	double HaulLoadMinKg = 100.0;
 	float ChargeSeekFraction = 0.25f;
 	float ChargeResumeFraction = 0.9f;
+	// Fleet reality (M1-b): DT_Config rows.
+	float WearDegradeThreshold = 50.f;
+	float WearHaltThreshold = 100.f;
+	float RepairWearPerPart = 25.f;
+	// Runtime claim state - never serialized; load resets it and robots
+	// re-claim from fragments/board.
+	TSet<FMassEntityHandle> RepairClaims;
+	TMap<int32, TArray<FMassEntityHandle>> PadQueues;
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;

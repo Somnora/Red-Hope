@@ -104,6 +104,7 @@ FMassEntityHandle URHAgentSubsystem::SpawnRobotWithState(FName RowName, const FR
 	RobotFrag.DrawMoveW = Def.DrawMove_W;
 	RobotFrag.DrawWorkW = Def.DrawWork_W;
 	RobotFrag.DrawIdleW = Def.DrawIdle_W;
+	RobotFrag.WearPerSol = Def.WearPerActiveSol;
 
 	FMassEntityHandle Entity;
 
@@ -211,6 +212,69 @@ void URHAgentSubsystem::CollectRobotStates(TArray<FRHRobotSaveState>& OutStates)
 		State.CargoKg = Task.CargoKg;
 		OutStates.Add(State);
 	}
+}
+
+void URHAgentSubsystem::ForEachRobotState(TFunctionRef<void(FMassEntityHandle, const FVector&, float)> Fn) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (EntityManager.IsEntityValid(Entity))
+		{
+			Fn(Entity,
+				EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform().GetLocation(),
+				EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear);
+		}
+	}
+}
+
+bool URHAgentSubsystem::GetRobotPosition(FMassEntityHandle Entity, FVector& OutPosCm) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem || !MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		return false;
+	}
+	OutPosCm = MassSubsystem->GetEntityManager().GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform().GetLocation();
+	return true;
+}
+
+float URHAgentSubsystem::RemoveRobotWear(FMassEntityHandle Entity, float Amount)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem || !MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		return 0.f;
+	}
+	FRHWearFragment& Wear = MassSubsystem->GetMutableEntityManager().GetFragmentDataChecked<FRHWearFragment>(Entity);
+	const float Removed = FMath::Min(Wear.Wear, Amount);
+	Wear.Wear -= Removed;
+	return Removed;
+}
+
+void URHAgentSubsystem::Debug_SetAllWear(float Wear)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+	int32 Touched = 0;
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (EntityManager.IsEntityValid(Entity))
+		{
+			EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear = FMath::Clamp(Wear, 0.f, 100.f);
+			++Touched;
+		}
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("[RH.Wear] set %d robots to wear %.0f (test knob)"), Touched, Wear);
 }
 
 void URHAgentSubsystem::DespawnAllRobots()

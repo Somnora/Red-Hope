@@ -352,6 +352,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		RejectedHandle = Sim->OnCommandRejected.AddUObject(this, &URHColonyVisualizerSubsystem::HandleCommandRejected);
 		Sim->OnQuotaMet.AddUObject(this, &URHColonyVisualizerSubsystem::HandleQuotaMet);
 		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
+		Sim->OnDepositDiscovered.AddUObject(this, &URHColonyVisualizerSubsystem::HandleDepositDiscovered);
 		Sim->OnColonyReloaded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleColonyReloaded);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -413,36 +414,60 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
 	{
 		return;
 	}
-	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	// Discovery honesty (M1-b): only surveyed ground gets a marker - the
+	// undiscovered rows exist in the sim, not on the player's map.
 	for (const FRHDepositState& D : Sim->GetDeposits())
 	{
-		// Footprint scales gently with mass: 60 t ~ 16 m across.
-		const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
-		AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(D.LocationCm + FVector(0, 0, 20.f), FRotator::ZeroRotator);
-		if (!Actor)
+		if (D.bDiscovered)
 		{
-			continue;
+			SpawnDepositMarker(D);
 		}
-		Actor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
-		Actor->GetStaticMeshComponent()->SetStaticMesh(Cube);
-		Actor->SetActorScale3D(FVector(Side, Side, 0.4f));
-#if WITH_EDITOR
-		Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
-#endif
-		// Ground-truth colors: regolith rust, ore slate, ice pale blue.
-		FLinearColor DepColor(0.55f, 0.30f, 0.12f);
-		if (D.Type == FName("Ore"))
-		{
-			DepColor = FLinearColor(0.30f, 0.32f, 0.40f);
-		}
-		else if (D.Type == FName("Ice"))
-		{
-			DepColor = FLinearColor(0.75f, 0.90f, 1.00f);
-		}
-		ApplyTint(Actor, DepColor);
-		AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
-		DepositMarkers.Add(Actor);
 	}
+}
+
+void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	// Footprint scales gently with mass: 60 t ~ 16 m across.
+	const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(D.LocationCm + FVector(0, 0, 20.f), FRotator::ZeroRotator);
+	if (!Actor)
+	{
+		return;
+	}
+	Actor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+	Actor->GetStaticMeshComponent()->SetStaticMesh(Cube);
+	Actor->SetActorScale3D(FVector(Side, Side, 0.4f));
+#if WITH_EDITOR
+	Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
+#endif
+	// Ground-truth colors: regolith rust, ore slate, ice pale blue.
+	FLinearColor DepColor(0.55f, 0.30f, 0.12f);
+	if (D.Type == FName("Ore"))
+	{
+		DepColor = FLinearColor(0.30f, 0.32f, 0.40f);
+	}
+	else if (D.Type == FName("Ice"))
+	{
+		DepColor = FLinearColor(0.75f, 0.90f, 1.00f);
+	}
+	ApplyTint(Actor, DepColor);
+	AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
+	DepositMarkers.Add(Actor);
+}
+
+void URHColonyVisualizerSubsystem::HandleDepositDiscovered(const FRHDepositState& D)
+{
+	// The go-look payoff: the marker appears the moment the scout reports.
+	SpawnDepositMarker(D);
+	LastNotice = FString::Printf(TEXT("SURVEY: %s discovered - %.0f t %s"),
+		*D.RowName.ToString(), D.RemainingKg / 1000.0, *D.Type.ToString());
+	LastNoticeRealSeconds = FPlatformTime::Seconds();
 }
 
 void URHColonyVisualizerSubsystem::Deinitialize()

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "MassEntityTypes.h"
+#include "Mass/EntityHandle.h"
 #include "RHAgentFragments.generated.h"
 
 // Robot state lives here as pure data - the fragment layout is the contract
@@ -51,6 +52,7 @@ struct REDHOPESIM_API FRHRobotFragment : public FMassFragment
 	float DrawMoveW = 80.f;
 	float DrawWorkW = 80.f;
 	float DrawIdleW = 5.f;
+	float WearPerSol = 5.f; // wear accrued per sol of exertion (M1-b fleet reality)
 };
 
 // Current assignment + execution phase. The task board owns the truth;
@@ -68,4 +70,6 @@ struct REDHOPESIM_API FRHTaskFragment : public FMassFragment
 	FVector TargetCm = FVector::ZeroVector;
 	FName CargoResource;
 	float CargoKg = 0.f;
+	// Repair only: the worn robot this maintenance unit is driving to.
+	FMassEntityHandle RepairTarget;
 };

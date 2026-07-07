@@ -18,9 +18,10 @@ namespace
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
-	// v2 (M1-b): Level on commands, buildings, deposits, robots.
+	// v2 (M1-b Gate A): Level on commands, buildings, deposits, robots.
+	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 2;
+	constexpr uint32 RHSaveVersion = 3;
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -81,6 +82,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
 	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
 	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
+	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
+	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
+	RepairWearPerPart = (float)Defs->GetConfigScalar(FName("RepairWearPerPart"), RepairWearPerPart);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -94,7 +98,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		}
 	}
 
-	// Deposits from data.
+	// Deposits from data. SurfaceVisible=FALSE rows exist in the world but
+	// stay undiscovered until a scout surveys them (M1-b: knowledge costs a
+	// trip; the flag waited in the CSV since M0).
 	Defs->ForEachDeposit([this](FName RowName, const FRHDepositRow& Row)
 	{
 		FRHDepositState D;
@@ -103,6 +109,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		D.Type = Row.Type;
 		D.RemainingKg = Row.Mass_kg;
 		D.LocationCm = FVector(Row.LocX_m * 100.f, Row.LocY_m * 100.f, 0.f);
+		D.bDiscovered = Row.SurfaceVisible;
 		Deposits.Add(D);
 	});
 
@@ -115,6 +122,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	}
 	ImportStock.Add(FName("SolarArray"), (int32)Defs->GetConfigScalar(FName("StarterSolarPacks"), 6));
 	ImportStock.Add(FName("BatteryBank"), (int32)Defs->GetConfigScalar(FName("StarterBatteryPacks"), 2));
+	// Starter maintenance stock (M1-b: the row waited unused since M0). Parts
+	// live in the network pool - the maintenance unit's van is the fiction.
+	AddStock(FName("SpareParts"), Defs->GetConfigScalar(FName("StarterSpareParts"), 6.0));
 
 	// Fleet deploys on the first sim step, after every subsystem's
 	// BeginPlay has run - subscribers never miss the spawn broadcast.
@@ -247,6 +257,22 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	{
 		OutReason = TEXT("supply ship inbound");
 		return false;
+	}
+	// Field operations are agent-fidelity by definition: a scout mid-drive or
+	// a maintenance call cannot integrate analytically. (Repair never posts a
+	// board task - the claim set is its ledger.)
+	if (RepairClaims.Num() > 0)
+	{
+		OutReason = TEXT("maintenance call in progress");
+		return false;
+	}
+	for (const FRHTask& T : Tasks)
+	{
+		if (T.Type == ERHTaskType::Survey)
+		{
+			OutReason = TEXT("survey in progress");
+			return false;
+		}
 	}
 	if (QuotaPhase == ERHQuotaPhase::Open && Defs && Clock)
 	{
@@ -971,7 +997,7 @@ const FRHDepositState* URHSimWorldSubsystem::FindDepositNear(const FVector& Loca
 	double BestDist = MaxDistCm;
 	for (const FRHDepositState& D : Deposits)
 	{
-		if (D.Level != Level)
+		if (D.Level != Level || !D.bDiscovered)
 		{
 			continue;
 		}
@@ -1007,7 +1033,10 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		bool bFound = false;
 		for (FRHDepositState& D : Deposits)
 		{
-			if (D.RowName == Cmd.Target)
+			// Undiscovered deposits reject as unknown - mission control cannot
+			// designate ground truth the colony has not surveyed (and the
+			// message must not leak that something is there).
+			if (D.RowName == Cmd.Target && D.bDiscovered)
 			{
 				D.bDesignated = true;
 				bFound = true;
@@ -1020,6 +1049,16 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown deposit '%s'"), *Cmd.Target.ToString()));
 			return;
 		}
+	}
+	else if (Cmd.Verb == FName("Survey"))
+	{
+		FRHTask T;
+		T.Id = NextTaskId++;
+		T.Type = ERHTaskType::Survey;
+		T.TargetCm = FVector(Cmd.Location.X, Cmd.Location.Y, 0.0);
+		Tasks.Add(T);
+		UE_LOG(LogRedHopeSim, Display, TEXT("Survey posted: (%.0f, %.0f) m - awaiting a scout"),
+			Cmd.Location.X / 100.0, Cmd.Location.Y / 100.0);
 	}
 
 	OnCommandExecuted.Broadcast(Cmd);
@@ -1048,11 +1087,13 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 		Power.BatteryWh += Def->StorageWh * 0.5;
 	}
 	// Extraction buildings bind to the deposit under them (within 12 m).
+	// Undiscovered ground never attaches: you cannot drill what the colony
+	// has not surveyed, even by console coordinates.
 	if (Def && Def->RequiresDeposit)
 	{
 		for (const FRHDepositState& D : Deposits)
 		{
-			if (D.Level == Level && FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
+			if (D.Level == Level && D.bDiscovered && FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
 			{
 				Instance.AttachedDepositId = D.Id;
 				break;
@@ -1482,12 +1523,22 @@ bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32
 	return OutBuildingId != 0;
 }
 
-double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt)
+double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt, FMassEntityHandle Robot)
 {
 	FRHBuildingInstance* Pad = FindBuilding(PadBuildingId);
 	if (!Pad || Pad->bUnderConstruction || !Pad->bPowered)
 	{
 		return 0.0;
+	}
+	// Queue etiquette (M1-b): one umbilical - only the head draws. A robot
+	// that never joined (legacy brain) passes an invalid handle and bypasses.
+	if (Robot.IsValid())
+	{
+		const TArray<FMassEntityHandle>* Queue = PadQueues.Find(PadBuildingId);
+		if (Queue && Queue->Num() > 0 && (*Queue)[0] != Robot)
+		{
+			return 0.0; // docked, waiting for the umbilical
+		}
 	}
 	const FRHBuildingRow* Def = Defs->GetBuilding(Pad->DefName);
 	const double RateW = Def ? Def->PowerDraw_W : 500.0;
@@ -1503,6 +1554,165 @@ double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt)
 		return WantWh; // absorbed by generation surplus (slice approximation)
 	}
 	return 0.0; // night + empty bank: robot waits docked
+}
+
+void URHSimWorldSubsystem::JoinPadQueue(int32 PadBuildingId, FMassEntityHandle Robot)
+{
+	TArray<FMassEntityHandle>& Queue = PadQueues.FindOrAdd(PadBuildingId);
+	Queue.AddUnique(Robot);
+}
+
+void URHSimWorldSubsystem::LeavePadQueue(int32 PadBuildingId, FMassEntityHandle Robot)
+{
+	if (TArray<FMassEntityHandle>* Queue = PadQueues.Find(PadBuildingId))
+	{
+		Queue->Remove(Robot);
+	}
+}
+
+// --- Fleet reality (M1-b Gate B) ---
+
+void URHSimWorldSubsystem::AccrueWear(float& Wear, float WearPerSol, float Dt) const
+{
+	Wear = FMath::Min(WearHaltThreshold, Wear + WearPerSol * (Dt / (float)URHSimClockSubsystem::SolLengthSimSeconds));
+}
+
+float URHSimWorldSubsystem::GetWearWorkMul(float Wear) const
+{
+	if (Wear <= WearDegradeThreshold)
+	{
+		return 1.f;
+	}
+	const float Span = FMath::Max(1.f, WearHaltThreshold - WearDegradeThreshold);
+	return FMath::Max(0.f, 1.f - (Wear - WearDegradeThreshold) / Span);
+}
+
+bool URHSimWorldSubsystem::TryClaimSurvey(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask)
+{
+	FRHTask* Best = nullptr;
+	double BestDist = TNumericLimits<double>::Max();
+	for (FRHTask& T : Tasks)
+	{
+		if (T.Type == ERHTaskType::Survey && !T.ClaimedBy.IsValid())
+		{
+			const double Dist = FVector::DistXY(T.TargetCm, RobotPosCm);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				Best = &T;
+			}
+		}
+	}
+	if (Best)
+	{
+		Best->ClaimedBy = Robot;
+		OutTask = *Best;
+		return true;
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::CompleteSurvey(int32 TaskId, double RadiusM)
+{
+	const FRHTask* T = FindTask(TaskId);
+	if (!T)
+	{
+		return;
+	}
+	const FVector Point = T->TargetCm;
+	int32 Found = 0;
+	for (FRHDepositState& D : Deposits)
+	{
+		if (!D.bDiscovered && FVector::DistXY(D.LocationCm, Point) <= RadiusM * 100.0)
+		{
+			D.bDiscovered = true;
+			++Found;
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== SURVEY: %s discovered - %.0f t %s at (%.0f, %.0f) m ==="),
+				*D.RowName.ToString(), D.RemainingKg / 1000.0, *D.Type.ToString(),
+				D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0);
+			OnDepositDiscovered.Broadcast(D);
+		}
+	}
+	if (Found == 0)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Survey complete at (%.0f, %.0f) m: nothing within %.0f m"),
+			Point.X / 100.0, Point.Y / 100.0, RadiusM);
+	}
+	CompleteTask(TaskId);
+}
+
+bool URHSimWorldSubsystem::TryClaimRepair(FMassEntityHandle Self, FMassEntityHandle& OutTarget, FVector& OutTargetCm)
+{
+	if (GetStock(FName("SpareParts")) < 1.0)
+	{
+		return false; // no parts: nothing to offer the patient
+	}
+	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+	if (!Agents)
+	{
+		return false;
+	}
+	FMassEntityHandle Best;
+	FVector BestPos = FVector::ZeroVector;
+	float BestWear = WearDegradeThreshold; // strictly-worse-than-threshold claims only
+	Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float Wear)
+	{
+		if (Entity != Self && Wear >= BestWear && !RepairClaims.Contains(Entity))
+		{
+			Best = Entity;
+			BestPos = PosCm;
+			BestWear = Wear;
+		}
+	});
+	if (!Best.IsValid())
+	{
+		return false;
+	}
+	RepairClaims.Add(Best);
+	OutTarget = Best;
+	OutTargetCm = BestPos;
+	return true;
+}
+
+bool URHSimWorldSubsystem::GetRepairTargetPos(FMassEntityHandle Target, FVector& OutPosCm) const
+{
+	const URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+	return Agents && Agents->GetRobotPosition(Target, OutPosCm);
+}
+
+void URHSimWorldSubsystem::ApplyRepairAt(FMassEntityHandle Target)
+{
+	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+	if (!Agents)
+	{
+		return;
+	}
+	// Spend parts against the wear, one part = RepairWearPerPart, bounded by
+	// stock. Instant at slice scale - the visit is the cost, like site work.
+	const FName NAME_SpareParts(TEXT("SpareParts"));
+	int32 PartsSpent = 0;
+	float WearRemoved = 0.f;
+	while (GetStock(NAME_SpareParts) >= 1.0)
+	{
+		const float Removed = Agents->RemoveRobotWear(Target, RepairWearPerPart);
+		if (Removed <= 0.f)
+		{
+			break; // clean (or target gone)
+		}
+		AddStock(NAME_SpareParts, -1.0);
+		++PartsSpent;
+		WearRemoved += Removed;
+	}
+	if (PartsSpent > 0)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("REPAIR: %.0f wear removed (%d parts, %.0f left in stock)"),
+			WearRemoved, PartsSpent, GetStock(NAME_SpareParts));
+	}
+}
+
+void URHSimWorldSubsystem::ReleaseRepairClaim(FMassEntityHandle Target)
+{
+	RepairClaims.Remove(Target);
 }
 
 double URHSimWorldSubsystem::GetManifestMassKg() const
@@ -1746,7 +1956,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHDepositState& D : SavedDeposits)
 	{
-		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDesignated;
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDiscovered << D.bDesignated;
 	}
 
 	Num = SavedTasks.Num();
@@ -1757,7 +1967,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ar << T.Id << Type;
 		SerializeSite(Ar, T.From);
 		SerializeSite(Ar, T.To);
-		Ar << T.Resource << T.AmountKg;
+		Ar << T.Resource << T.AmountKg << T.TargetCm;
 	}
 
 	Num = Robots.Num();
@@ -1821,6 +2031,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	PendingOutputs.Reset();
 	ManifestItems.Reset();
 	FleetCounts.Reset();
+	RepairClaims.Reset();  // claim state is runtime-only; robots re-claim
+	PadQueues.Reset();
 	bFleetDeployed = true; // robots respawn explicitly below
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
@@ -1865,7 +2077,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHDepositState D;
-		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDesignated;
+		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDiscovered << D.bDesignated;
 		Deposits.Add(MoveTemp(D));
 	}
 
@@ -1877,7 +2089,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << T.Id << Type;
 		SerializeSite(Ar, T.From);
 		SerializeSite(Ar, T.To);
-		Ar << T.Resource << T.AmountKg;
+		Ar << T.Resource << T.AmountKg << T.TargetCm;
 		T.Type = (ERHTaskType)Type;
 		Tasks.Add(MoveTemp(T));
 	}

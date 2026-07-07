@@ -31,6 +31,7 @@ bool FRHWorkTask::Link(FStateTreeLinker& Linker)
 	Linker.LinkExternalData(BatteryHandle);
 	Linker.LinkExternalData(RobotHandle);
 	Linker.LinkExternalData(TaskHandle);
+	Linker.LinkExternalData(WearHandle);
 	return true;
 }
 
@@ -45,9 +46,14 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 	FRHBatteryFragment& Battery = Context.GetExternalData(BatteryHandle);
 	const FRHRobotFragment& Robot = Context.GetExternalData(RobotHandle);
 	FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	FRHWearFragment& Wear = Context.GetExternalData(WearHandle);
 	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
 	float DrawW = Robot.DrawIdleW;
+	// Fleet reality (M1-b): worn machinery works slower - linear from the
+	// degrade threshold down to nothing at halt (the processor's halt gate
+	// stops ticking before the multiplier ever reaches zero).
+	const float WearMul = Sim->GetWearWorkMul(Wear.Wear);
 
 	// The M0-c switch, verbatim - the tree decides Work vs Charge; this task
 	// is the whole Work activity.
@@ -92,6 +98,62 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				Task.Phase = 0;
 			}
 		}
+		else if (Robot.RobotClass == FName("Scout"))
+		{
+			FRHTask Board;
+			if (Sim->TryClaimSurvey(Entity, Transform.GetLocation(), Board))
+			{
+				Task.TaskType = (uint8)ERHTaskType::Survey;
+				Task.TaskId = Board.Id;
+				Task.TargetCm = Board.TargetCm;
+				Task.Phase = 0;
+			}
+		}
+		else if (Robot.RobotClass == FName("Maintenance"))
+		{
+			FMassEntityHandle Target;
+			FVector TargetCm;
+			if (Sim->TryClaimRepair(Entity, Target, TargetCm))
+			{
+				Task.TaskType = (uint8)ERHTaskType::Repair;
+				Task.RepairTarget = Target;
+				Task.TargetCm = TargetCm;
+				Task.Phase = 0;
+			}
+		}
+		break;
+	}
+
+	case ERHTaskType::Survey:
+	{
+		DrawW = Robot.DrawMoveW;
+		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+		{
+			// WorkRate = survey radius in meters (DT_Robots).
+			Sim->CompleteSurvey(Task.TaskId, Robot.WorkRate);
+			Task = FRHTaskFragment();
+		}
+		break;
+	}
+
+	case ERHTaskType::Repair:
+	{
+		DrawW = Robot.DrawMoveW;
+		// The patient may still be limping somewhere: re-track it each step.
+		FVector TargetCm;
+		if (!Sim->GetRepairTargetPos(Task.RepairTarget, TargetCm))
+		{
+			Sim->ReleaseRepairClaim(Task.RepairTarget);
+			Task = FRHTaskFragment();
+			break;
+		}
+		Task.TargetCm = TargetCm;
+		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+		{
+			Sim->ApplyRepairAt(Task.RepairTarget);
+			Sim->ReleaseRepairClaim(Task.RepairTarget);
+			Task = FRHTaskFragment();
+		}
 		break;
 	}
 
@@ -115,7 +177,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		{
 			DrawW = Robot.DrawWorkW;
 			// WorkRate = kg/sol-hour; sol-hour = 50 sim-s.
-			Sim->DigDeposit(Task.DigDepositId, Robot.WorkRate * (DeltaTime / 50.f));
+			Sim->DigDeposit(Task.DigDepositId, Robot.WorkRate * (DeltaTime / 50.f) * WearMul);
 		}
 		// else: pile full - stand by at idle draw until haulers clear it.
 		break;
@@ -170,7 +232,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		else
 		{
 			DrawW = Robot.DrawWorkW;
-			if (Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate))
+			if (Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul))
 			{
 				Sim->CompleteTask(Task.TaskId);
 				Task = FRHTaskFragment();
@@ -184,6 +246,11 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 	}
 
 	Drain(Battery, DrawW, DeltaTime);
+	// Wear follows exertion: any sub-step above idle draw ages the machine.
+	if (DrawW > Robot.DrawIdleW)
+	{
+		Sim->AccrueWear(Wear.Wear, Robot.WearPerSol, DeltaTime);
+	}
 	return EStateTreeRunStatus::Running;
 }
 
@@ -195,6 +262,7 @@ bool FRHChargeTask::Link(FStateTreeLinker& Linker)
 	Linker.LinkExternalData(BatteryHandle);
 	Linker.LinkExternalData(RobotHandle);
 	Linker.LinkExternalData(TaskHandle);
+	Linker.LinkExternalData(WearHandle);
 	return true;
 }
 
@@ -207,6 +275,7 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 	}
 	FTransform& Transform = Context.GetExternalData(TransformHandle).GetMutableTransform();
 	FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
 	// Put the claim back before leaving (M0-c etiquette block).
 	const ERHTaskType Current = (ERHTaskType)Task.TaskType;
@@ -214,9 +283,13 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 	{
 		Sim->ReleaseDigClaim(Task.DigDepositId);
 	}
-	else if (Current == ERHTaskType::Haul || Current == ERHTaskType::Build)
+	else if (Current == ERHTaskType::Haul || Current == ERHTaskType::Build || Current == ERHTaskType::Survey)
 	{
 		Sim->AbandonTask(Task.TaskId);
+	}
+	else if (Current == ERHTaskType::Repair)
+	{
+		Sim->ReleaseRepairClaim(Task.RepairTarget);
 	}
 
 	int32 PadId = 0;
@@ -230,13 +303,21 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 	Task.DigDepositId = PadId; // slot reused: pad building id
 	Task.TargetCm = PadLoc;
 	Task.Phase = 0;
+	// Queue slot is taken at DOCKING (Tick), not here: a robot that dies on
+	// the drive must never hold the umbilical from the open plain.
 	return EStateTreeRunStatus::Running;
 }
 
 void FRHChargeTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
 {
-	// Topped up (or bounced): clean slate; Work claims fresh.
-	Context.GetExternalData(TaskHandle) = FRHTaskFragment();
+	// Give the umbilical back, then clean slate; Work claims fresh.
+	FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	if (URHSimWorldSubsystem* Sim = GetSim(Context))
+	{
+		const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
+		Sim->LeavePadQueue(Task.DigDepositId, Entity);
+	}
+	Task = FRHTaskFragment();
 }
 
 EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
@@ -250,19 +331,24 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 	FRHBatteryFragment& Battery = Context.GetExternalData(BatteryHandle);
 	const FRHRobotFragment& Robot = Context.GetExternalData(RobotHandle);
 	FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	FRHWearFragment& Wear = Context.GetExternalData(WearHandle);
+	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
 	if (Task.Phase == 0)
 	{
 		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 		{
 			Task.Phase = 1;
+			Sim->JoinPadQueue(Task.DigDepositId, Entity); // docked: take a queue slot
 		}
 		Drain(Battery, Robot.DrawMoveW, DeltaTime);
+		Sim->AccrueWear(Wear.Wear, Robot.WearPerSol, DeltaTime); // the drive costs wear; the dock does not
 	}
 	else
 	{
-		// Docked: pad supplies the robot; zero own draw.
-		const float Granted = (float)Sim->RequestChargeWh(Task.DigDepositId, DeltaTime);
+		// Docked: pad supplies the robot; zero own draw. Only the queue head
+		// draws - the rest wait for the umbilical.
+		const float Granted = (float)Sim->RequestChargeWh(Task.DigDepositId, DeltaTime, Entity);
 		Battery.ChargeWh = FMath::Min(Battery.CapacityWh, Battery.ChargeWh + Granted);
 		if (Battery.ChargeWh >= Battery.CapacityWh * Sim->GetChargeResumeFraction())
 		{

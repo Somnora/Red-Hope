@@ -7,6 +7,7 @@
 class AStaticMeshActor;
 struct FRHBuildingInstance;
 struct FRHCommand;
+struct FRHDepositState;
 
 // Presentation mirror of the colony: spawns a gray-box mesh per sim building
 // event and debug-draws grid coverage discs (Power-as-Territory made
@@ -40,10 +41,13 @@ private:
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
 	void HandleQuotaMet(int32 Sol, double AwardKg);
 	void HandleShipArrived(const TArray<FName>& Items);
+	// Discovery (M1-b): marker + notice the moment a scout's survey reports.
+	void HandleDepositDiscovered(const FRHDepositState& Deposit);
 	// Load path: drop every mirror actor and rebuild from a full state walk.
 	// The visualizer owning zero authoritative state is what makes this safe.
 	void HandleColonyReloaded();
 	void SpawnDepositMarkers();
+	void SpawnDepositMarker(const FRHDepositState& Deposit);
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
 	// Canon visual language (director's reference set, ~/Martians/assets):
 	// bone-white or dark-slate industrial bodies, hazard-yellow details, and

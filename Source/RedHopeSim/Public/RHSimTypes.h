@@ -16,7 +16,9 @@ enum class ERHTaskType : uint8
 	Dig,    // excavator: standing designation on a deposit
 	Haul,   // hauler: move AmountKg of Resource from A to B
 	Build,  // fabricator: work down a construction site's timer
-	Charge  // any robot: dock at a pad and refill (self-issued, never on the board)
+	Charge, // any robot: dock at a pad and refill (self-issued, never on the board)
+	Survey, // scout: travel to a point, reveal hidden deposits in WorkRate radius
+	Repair  // maintenance: travel to a worn robot, spend SpareParts on its wear
 };
 
 // The slice's quota arc: meet Q1 -> CEO transmission -> compose manifest ->
@@ -53,6 +55,9 @@ struct FRHTask
 	FRHSiteRef To;
 	FName Resource;
 	double AmountKg = 0.0;
+	// Survey only: the point the scout drives to (sites are buildings or
+	// deposits; a survey targets bare ground by definition).
+	FVector TargetCm = FVector::ZeroVector;
 	FMassEntityHandle ClaimedBy;
 };
 
@@ -73,6 +78,10 @@ struct REDHOPESIM_API FRHDepositState
 	// reasons in floors; LocationCm.Z is derived presentation. Deposits stay
 	// surface-accessed through Phase 1 (underground spec §7).
 	UPROPERTY() int32 Level = 0;
+	// Discovery (M1-b): mirrors DT_Deposits.SurfaceVisible at init; scouts
+	// flip it via survey. Undiscovered deposits are invisible to every query,
+	// order, and visual - the sim knows the ground truth, the player does not.
+	UPROPERTY() bool bDiscovered = true;
 	UPROPERTY() bool bDesignated = false;
 	UPROPERTY() int32 DigClaims = 0;  // excavators currently working it
 };

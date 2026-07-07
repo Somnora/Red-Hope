@@ -37,6 +37,7 @@ protected:
 	TStateTreeExternalDataHandle<FRHBatteryFragment> BatteryHandle;
 	TStateTreeExternalDataHandle<FRHRobotFragment> RobotHandle;
 	TStateTreeExternalDataHandle<FRHTaskFragment> TaskHandle;
+	TStateTreeExternalDataHandle<FRHWearFragment> WearHandle;
 };
 
 USTRUCT()
@@ -67,6 +68,7 @@ protected:
 	TStateTreeExternalDataHandle<FRHBatteryFragment> BatteryHandle;
 	TStateTreeExternalDataHandle<FRHRobotFragment> RobotHandle;
 	TStateTreeExternalDataHandle<FRHTaskFragment> TaskHandle;
+	TStateTreeExternalDataHandle<FRHWearFragment> WearHandle;
 };
 
 USTRUCT()

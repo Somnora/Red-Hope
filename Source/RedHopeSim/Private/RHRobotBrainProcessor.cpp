@@ -3,6 +3,7 @@
 #include "RHAgentFragments.h"
 #include "RHSimTypes.h"
 #include "RHSimClockSubsystem.h"
+#include "RHSimWorldSubsystem.h"
 #include "Mass/EntityFragments.h"
 #include "MassExecutionContext.h"
 #include "MassStateTreeFragments.h"
@@ -36,8 +37,9 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 {
 	UWorld* World = EntityManager.GetWorld();
 	URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	UMassStateTreeSubsystem* StateTreeSubsystemPtr = World ? World->GetSubsystem<UMassStateTreeSubsystem>() : nullptr;
-	if (!Clock || !StateTreeSubsystemPtr)
+	if (!Clock || !Sim || !StateTreeSubsystemPtr)
 	{
 		return;
 	}
@@ -47,10 +49,11 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 		return; // paused or era band: decisions freeze with the agents
 	}
 	const float SubDt = URHSimClockSubsystem::SubStepSeconds;
+	const float WearHalt = Sim->GetWearHaltThreshold();
 
 	int32 Matched = 0;
 	EntityQuery.ForEachEntityChunk(Context,
-		[Steps, SubDt, &Matched, StateTreeSubsystemPtr](FMassExecutionContext& ChunkContext)
+		[Steps, SubDt, WearHalt, &Matched, StateTreeSubsystemPtr](FMassExecutionContext& ChunkContext)
 	{
 		Matched += ChunkContext.GetNumEntities();
 		UMassStateTreeSubsystem& StateTreeSubsystem = *StateTreeSubsystemPtr;
@@ -62,6 +65,7 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 		}
 		const TArrayView<FMassStateTreeInstanceFragment> Instances = ChunkContext.GetMutableFragmentView<FMassStateTreeInstanceFragment>();
 		const TArrayView<FRHBatteryFragment> Batteries = ChunkContext.GetMutableFragmentView<FRHBatteryFragment>();
+		const TArrayView<FRHWearFragment> Wears = ChunkContext.GetMutableFragmentView<FRHWearFragment>();
 		const TArrayView<FRHTaskFragment> TaskFrags = ChunkContext.GetMutableFragmentView<FRHTaskFragment>();
 
 		for (int32 i = 0; i < ChunkContext.GetNumEntities(); ++i)
@@ -89,11 +93,17 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 
 			for (int32 Step = 0; Step < Steps; ++Step)
 			{
-				// Halt gate (M0-c rule): a drained robot stops where it stands
-				// unless it is already docked at a pad (Charge phase 1) - the
-				// pad can refill a dead battery; the open plain cannot.
+				// Halt gates: a drained robot stops where it stands unless it
+				// is already docked at a pad (Charge phase 1) - the pad can
+				// refill a dead battery; the open plain cannot. A worn-out
+				// robot (M1-b) halts unconditionally - broken machinery
+				// neither works nor drives; only an RC-M visit revives it.
 				const FRHBatteryFragment& Battery = Batteries[i];
 				const FRHTaskFragment& Task = TaskFrags[i];
+				if (Wears[i].Wear >= WearHalt)
+				{
+					break;
+				}
 				const bool bDockedAtPad = (ERHTaskType)Task.TaskType == ERHTaskType::Charge && Task.Phase == 1;
 				if (Battery.ChargeWh <= 0.f && !bDockedAtPad)
 				{

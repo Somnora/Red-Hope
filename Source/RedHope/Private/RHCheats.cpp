@@ -233,6 +233,68 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDig(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHSurvey(
+	TEXT("RH.Survey"),
+	TEXT("RH.Survey <Xm> <Ym> - transmit a survey order; a scout drives out and reveals hidden deposits in its radius."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Survey <Xm> <Ym>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Survey");
+			Cmd.Location = FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHWear(
+	TEXT("RH.Wear"),
+	TEXT("RH.Wear <0-100> - set every robot's wear directly (fleet-crisis test knob, bypasses accrual)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Wear <0-100>"));
+			return;
+		}
+		if (URHAgentSubsystem* Agents = World->GetSubsystem<URHAgentSubsystem>())
+		{
+			Agents->Debug_SetAllWear(FCString::Atof(*Args[0]));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHFleet(
+	TEXT("RH.Fleet"),
+	TEXT("RH.Fleet - log every robot: class, position, battery, wear (degrade/halt flags)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHAgentSubsystem* Agents = World->GetSubsystem<URHAgentSubsystem>();
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Agents || !Sim) { return; }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Fleet] wear thresholds: degrade %.0f, halt %.0f | SpareParts %.0f"),
+			Sim->GetWearDegradeThreshold(), Sim->GetWearHaltThreshold(), Sim->GetStock(FName("SpareParts")));
+		Agents->ForEachRobotState([Sim](FMassEntityHandle Entity, const FVector& PosCm, float Wear)
+		{
+			const TCHAR* Flag = TEXT("");
+			if (Wear >= Sim->GetWearHaltThreshold())
+			{
+				Flag = TEXT("  HALTED");
+			}
+			else if (Wear >= Sim->GetWearDegradeThreshold())
+			{
+				Flag = TEXT("  degraded");
+			}
+			UE_LOG(LogRedHope, Display, TEXT("  robot %d at (%.0f, %.0f) m: wear %.1f (work rate x%.2f)%s"),
+				Entity.Index, PosCm.X / 100.f, PosCm.Y / 100.f, Wear, Sim->GetWearWorkMul(Wear), Flag);
+		});
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHManifest(
 	TEXT("RH.Manifest"),
 	TEXT("RH.Manifest <ItemRowName> - add an item to the open manifest (e.g. RH.Manifest SolarPack)."),

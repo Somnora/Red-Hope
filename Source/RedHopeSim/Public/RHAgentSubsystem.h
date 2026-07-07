@@ -60,6 +60,15 @@ public:
 	// Destroys all robot entities (load path; dummies are untouched).
 	void DespawnAllRobots();
 
+	// Fleet reality (M1-b): the sim's repair loop scans and mutates robot
+	// wear through these - the entity manager stays this subsystem's business.
+	void ForEachRobotState(TFunctionRef<void(FMassEntityHandle, const FVector&, float /*Wear*/)> Fn) const;
+	bool GetRobotPosition(FMassEntityHandle Entity, FVector& OutPosCm) const;
+	// Reduces wear by up to Amount; returns what actually came off.
+	float RemoveRobotWear(FMassEntityHandle Entity, float Amount);
+	// Test knob (RH.Wear): set every robot's wear directly.
+	void Debug_SetAllWear(float Wear);
+
 	int32 GetAgentCount() const { return SpawnedCount; }
 
 private:
