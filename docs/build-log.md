@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 39 (M4 opens on-brief; Gate A — the covert layer & the HumanNature axis)
+
+- **Director brought a large feature spec** ("Complex Diplomacy, Subterfuge & Dynamic Crises" — Modules 1-4: two-layer diplomacy + deceptive economics; covert ops + day/night; Earth-Mars link; late-game crises + a morality tracker; thematic metric "Evolved Diplomacy vs Destructive Human Nature"). **I surfaced the conflict** (parts — Total War, heists, hacking robots feral, colonies attacking you, feral robots killing units — override brief §141's v1 no-combat non-goal AND the mental-health directive AND the determinism rule). **Director ruled "build the on-brief version"** (design-decisions 2026-07-07m): keep the spec's goals, re-skin the violence as espionage/embargo/blackout/defection; no on-map combat, no feral robots. `docs/m4-working-spec.md` authored (two axes: M3 IdentityAxis + new HumanNatureAxis; Gates A covert layer → B espionage economy+discovery → C Earth pre-emptive+pacify → D crises+alignment gating+review).
+- **Gate A built + verified (`aabd7f3` data, `38eff55` code, save v20):**
+  - **Two-layer diplomacy:** Public_Standing (M3 relation) + a hidden `HiddenTension` per rival.
+  - **The HumanNature axis** (−100 Destructive .. +100 Evolved) — HOW you treat others; the director's morality metric mechanized. Honest completed trade nudges it +; a covert op nudges it −.
+  - **Covert requisition** (`Covert <Rival>`): steal a fraction of a rival's export goods on a **deterministic** detection check — a *seeded* hash of (rival, attempt#), never live RNG — modulated by **day/night** (night halves detection) and relation (a trusting ally watches you less — betrayal is easy, the moral trap). Clean → goods + quiet HiddenTension; caught → no goods, Public_Standing craters, an incident. `CovertAttempts` saved so rolls stay reproducible.
+  - Deck CONDUCT line; `RH.Covert`; `RH.Trade` shows hidden tension + conduct + day/night.
+  - `-covert` self-test all EXACT (deterministic clean/caught, axis −6/op → −24 over 4 [3 clean night heists +75 Ice each, then caught on #4, relation 40→10], fair trade +2, day/night flips, save v20 round-trip). All 16 suites green; baseline byte-identical.
+- **Review debt (honest):** the M3 Gate B+C adversarial review got 0 finder coverage (session limit), and M4 Gate A hasn't been independently reviewed yet. Both are owed a review pass (or inline verification) when session limits reset. Self-tests pass and baselines hold, but that is not the same as independent review.
+
 ## 2026-07-07 — Session 38 (M3 Gate C — THE SOLIDARITY DILEMMA; the sovereignty core is complete)
 
 - **Director steered the consequence design** (structured ask): Comply = **sever the dependency** (route permanently closed, you lose what that trade fed); Defy = **Earth cuts you off** (Martian axis → slashed requisitions + escalation). Both the strong versions — this is what makes it a dilemma, not a menu.
