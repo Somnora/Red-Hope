@@ -295,6 +295,18 @@ void ARHPlayerController::Tick(float DeltaTime)
 		}
 	}
 
+	// Surveyed-land overlay (director request): every past survey as a dim
+	// teal disc - covered ground at a glance; empty circles are knowledge too.
+	if (bShowSurveyMap)
+	{
+		for (const FRHSurveyRecord& S : Sim->GetSurveyHistory())
+		{
+			const FColor Ring = S.FoundCount > 0 ? FColor(30, 220, 180) : FColor(70, 110, 120);
+			DrawDebugCircle(World, S.PointCm + FVector(0, 0, 25.f), S.RadiusM * 100.f,
+				64, Ring, false, -1.f, 0, 5.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
+		}
+	}
+
 	// Selection highlight: a steady cyan frame on the inspected building.
 	if (SelectedBuildingId != 0)
 	{

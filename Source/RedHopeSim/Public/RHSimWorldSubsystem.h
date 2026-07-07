@@ -75,6 +75,7 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*Awar
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnShipArrived, const TArray<FName>& /*Items*/);
 DECLARE_MULTICAST_DELEGATE(FRHOnColonyReloaded);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnDepositDiscovered, const FRHDepositState&);
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnSurveyCompleted, const FRHSurveyRecord&);
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
@@ -196,6 +197,8 @@ public:
 	// target's wear until it is clean or stock runs out. Instant at slice scale.
 	void ApplyRepairAt(FMassEntityHandle Target);
 	void ReleaseRepairClaim(FMassEntityHandle Target);
+	// Everywhere the colony has surveyed (director request: surveyed-land map).
+	const TArray<FRHSurveyRecord>& GetSurveyHistory() const { return SurveyHistory; }
 
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
@@ -237,6 +240,7 @@ public:
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
+	FRHOnSurveyCompleted OnSurveyCompleted;
 	FRHOnColonyReloaded OnColonyReloaded;
 	FRHOnCommandExecuted OnCommandExecuted;
 	FRHOnBuildingAdded OnBuildingAdded;
@@ -294,6 +298,7 @@ private:
 	// re-claim from fragments/board.
 	TSet<FMassEntityHandle> RepairClaims;
 	TMap<int32, TArray<FMassEntityHandle>> PadQueues;
+	TArray<FRHSurveyRecord> SurveyHistory; // serialized (save v4)
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;

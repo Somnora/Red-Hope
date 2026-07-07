@@ -188,6 +188,20 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					.ColorAndOpacity(FLinearColor(0.75f, 0.95f, 0.88f))
 				]
 			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.02f, 0.05f, 0.07f, 0.9f))
+				.Padding(FMargin(10.f, 6.f))
+				.Visibility(this, &SRHCommandDeck::GetKnownGroundVisibility)
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetKnownGroundText)
+					.Font(DeckFont(9))
+					.ColorAndOpacity(FLinearColor(0.55f, 0.85f, 0.9f))
+				]
+			]
 		]
 
 		// Mode hint + PAUSED banner, bottom center above the command bar -
@@ -267,6 +281,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						DeckButton(FText::FromString(TEXT("Survey")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSurvey))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetMapLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleMap))
 					]
 
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
@@ -534,6 +553,45 @@ EVisibility SRHCommandDeck::GetInspectVisibility() const
 	return (PC.IsValid() && PC->GetSelectedBuildingId() != 0) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
+FText SRHCommandDeck::GetKnownGroundText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return FText::GetEmpty();
+	}
+	FString Text = FString::Printf(TEXT("KNOWN GROUND   surveys %d"), Sim->GetSurveyHistory().Num());
+	int32 Known = 0;
+	for (const FRHDepositState& D : Sim->GetDeposits())
+	{
+		if (!D.bDiscovered)
+		{
+			continue;
+		}
+		++Known;
+		const TCHAR* Status = D.bDesignated ? TEXT("  DIGGING") : TEXT("");
+		Text += FString::Printf(TEXT("\n%-11s %-8s %6.0f t at (%.0f, %.0f) m%s"),
+			*D.RowName.ToString(), *D.Type.ToString(), D.RemainingKg / 1000.0,
+			D.LocationCm.X / 100.f, D.LocationCm.Y / 100.f, Status);
+	}
+	if (Known == 0)
+	{
+		Text += TEXT("\nno deposits known - survey to find them");
+	}
+	return FText::FromString(Text);
+}
+
+EVisibility SRHCommandDeck::GetKnownGroundVisibility() const
+{
+	return (PC.IsValid() && PC->IsSurveyMapOn()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetMapLabel() const
+{
+	return FText::FromString(PC.IsValid() && PC->IsSurveyMapOn() ? TEXT("Map [on]") : TEXT("Map"));
+}
+
 FText SRHCommandDeck::GetBuildLabel(FName DefName) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -579,6 +637,15 @@ FReply SRHCommandDeck::HandleSurvey()
 	if (PC.IsValid())
 	{
 		PC->BeginSurveyDesignation();
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleMap()
+{
+	if (PC.IsValid())
+	{
+		PC->ToggleSurveyMap();
 	}
 	return FReply::Handled();
 }

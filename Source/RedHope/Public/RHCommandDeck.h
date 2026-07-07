@@ -38,10 +38,16 @@ private:
 	// Inspection card: click a building, read its live state.
 	FText GetInspectText() const;
 	EVisibility GetInspectVisibility() const;
+	// Known Ground panel (director request): surveyed coverage + every
+	// discovered deposit's type/tonnage/dig status, visible while Map is on.
+	FText GetKnownGroundText() const;
+	EVisibility GetKnownGroundVisibility() const;
+	FText GetMapLabel() const;
 	FText GetBuildLabel(FName DefName) const;
 	FReply HandleBuild(FName DefName);
 	FReply HandleDig();
 	FReply HandleSurvey();
+	FReply HandleMap();
 	FReply HandleSpeed(float Tier);
 	FReply HandlePause();
 	FReply HandleSave();

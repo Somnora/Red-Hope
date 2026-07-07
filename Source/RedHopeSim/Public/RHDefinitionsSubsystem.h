@@ -38,6 +38,9 @@ public:
 	void ForEachDeposit(TFunctionRef<void(FName, const FRHDepositRow&)> Fn) const;
 	// All slice-active building defs (the command deck's build palette).
 	void ForEachBuilding(TFunctionRef<void(FName, const FRHBuildingRow&)> Fn) const;
+	// All slice-active world events (M1-c). Absent table = zero events -
+	// clear skies remain the default world.
+	void ForEachEvent(TFunctionRef<void(FName, const FRHEventRow&)> Fn) const;
 	// First slice-active recipe of a building whose inputs the predicate
 	// accepts. Recipe Inputs/Outputs strings parse as "Res:Kg;Res:Kg".
 	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const;
@@ -86,6 +89,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath DepositsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Deposits.DT_Deposits"));
 	UPROPERTY(Config) FSoftObjectPath QuotasTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Quotas.DT_Quotas"));
 	UPROPERTY(Config) FSoftObjectPath ManifestTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_ManifestItems.DT_ManifestItems"));
+	UPROPERTY(Config) FSoftObjectPath EventsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Events.DT_Events"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -96,5 +100,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> DepositsTable;
 	UPROPERTY() TObjectPtr<UDataTable> QuotasTable;
 	UPROPERTY() TObjectPtr<UDataTable> ManifestTable;
+	UPROPERTY() TObjectPtr<UDataTable> EventsTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

@@ -127,6 +127,24 @@ struct REDHOPESIM_API FRHQuotaRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 
+// World-pressure events (M1-c): dust storms + solar flares in one schema.
+// Scripted schedule for M1 (StartSol deterministic); probabilistic scheduling
+// is a post-M1 knob on this same table.
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHEventRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Type; // DustStorm | SolarFlare
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 StartSol = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float DurationSols = 1.f;
+	// DustStorm: solar output multiplier floor (0.3 = solar at 30%).
+	// SolarFlare: exposed-robot wear multiplier (M1-c Gate B).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Severity = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
 USTRUCT(BlueprintType)
 struct REDHOPESIM_API FRHDepositRow : public FTableRowBase
 {

@@ -8,6 +8,7 @@ class AStaticMeshActor;
 struct FRHBuildingInstance;
 struct FRHCommand;
 struct FRHDepositState;
+struct FRHSurveyRecord;
 
 // Presentation mirror of the colony: spawns a gray-box mesh per sim building
 // event and debug-draws grid coverage discs (Power-as-Territory made
@@ -43,6 +44,8 @@ private:
 	void HandleShipArrived(const TArray<FName>& Items);
 	// Discovery (M1-b): marker + notice the moment a scout's survey reports.
 	void HandleDepositDiscovered(const FRHDepositState& Deposit);
+	// Empty surveys report too - paid-for knowledge, even when it's "nothing".
+	void HandleSurveyCompleted(const FRHSurveyRecord& Record);
 	// Load path: drop every mirror actor and rebuild from a full state walk.
 	// The visualizer owning zero authoritative state is what makes this safe.
 	void HandleColonyReloaded();

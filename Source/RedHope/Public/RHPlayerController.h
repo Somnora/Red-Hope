@@ -50,6 +50,9 @@ public:
 	FLinearColor GetHintColor() const { return HintColor; }
 	// Click-to-inspect (M1-b Gate C): the selected building's sim id, 0 = none.
 	int32 GetSelectedBuildingId() const { return SelectedBuildingId; }
+	// Surveyed-land map (director request): toggle the coverage overlay.
+	void ToggleSurveyMap() { bShowSurveyMap = !bShowSurveyMap; }
+	bool IsSurveyMapOn() const { return bShowSurveyMap; }
 
 private:
 	void OnPan(const FInputActionValue& Value);
@@ -84,6 +87,7 @@ private:
 	FName PendingBuildDef;
 	bool bDigMode = false;
 	bool bSurveyMode = false;
+	bool bShowSurveyMap = false;
 	int32 SelectedBuildingId = 0;
 	// Feedback channels (deck-rendered; see GetConfirmText/GetHintText).
 	FString ConfirmText;

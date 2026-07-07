@@ -20,8 +20,9 @@ namespace
 	// the version on any payload change; old versions refuse loudly.
 	// v2 (M1-b Gate A): Level on commands, buildings, deposits, robots.
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
+	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 3;
+	constexpr uint32 RHSaveVersion = 4;
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -1638,6 +1639,15 @@ void URHSimWorldSubsystem::CompleteSurvey(int32 TaskId, double RadiusM)
 		UE_LOG(LogRedHopeSim, Display, TEXT("Survey complete at (%.0f, %.0f) m: nothing within %.0f m"),
 			Point.X / 100.0, Point.Y / 100.0, RadiusM);
 	}
+	// The record is the player's map (director request): covered ground stays
+	// known, including the empty circles - "nothing there" was paid for too.
+	FRHSurveyRecord Record;
+	Record.PointCm = Point;
+	Record.RadiusM = (float)RadiusM;
+	Record.Sol = Clock ? Clock->GetSol() : 0;
+	Record.FoundCount = Found;
+	SurveyHistory.Add(Record);
+	OnSurveyCompleted.Broadcast(SurveyHistory.Last());
 	CompleteTask(TaskId);
 }
 
@@ -1977,6 +1987,13 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ar << R.DefName << R.PosCm << R.Level << R.ChargeWh << R.Wear;
 	}
 
+	Num = SurveyHistory.Num();
+	Ar << Num;
+	for (FRHSurveyRecord& S : SurveyHistory)
+	{
+		Ar << S.PointCm << S.RadiusM << S.Sol << S.FoundCount;
+	}
+
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
 	{
@@ -2033,6 +2050,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	FleetCounts.Reset();
 	RepairClaims.Reset();  // claim state is runtime-only; robots re-claim
 	PadQueues.Reset();
+	SurveyHistory.Reset();
 	bFleetDeployed = true; // robots respawn explicitly below
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
@@ -2104,6 +2122,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		{
 			SpawnRobotTracked(R.DefName, *Row, R.PosCm, R.ChargeWh, R.Wear, Respawned);
 		}
+	}
+
+	Ar << Num;
+	for (int32 i = 0; i < Num; ++i)
+	{
+		FRHSurveyRecord S;
+		Ar << S.PointCm << S.RadiusM << S.Sol << S.FoundCount;
+		SurveyHistory.Add(S);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

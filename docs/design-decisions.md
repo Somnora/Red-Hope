@@ -82,7 +82,12 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 
 - **M1-b working spec adopted** (`docs/m1b-working-spec.md`): Gate A (Z-model + footprint validation) begins; Gates B (fleet reality) and C (player's eyes) follow on its verification.
 
+## Approved — 2026-07-07 (M1-b CLOSED, director hand-played verdict)
+
+- Director hand-played the full M1-b build (survey → Ice_A discovery, inspection card, fleet panel, PAUSED banner, feedback channels): **"everything feels pretty good… we are getting somewhere."** M1-b closed; "progress to the next step" = M1-c approved as specced (`docs/m1c-working-spec.md`).
+- **Director feature request (scheduled immediately):** survey results need persistent visibility — a "surveyed land" view highlighting already-surveyed ground with a breakdown of materials located there. Implementing as a survey-history overlay (sim keeps survey records; deck gains a Map toggle: surveyed circles in-world + a Known Ground panel listing discovered deposits with type/tonnage/dig status), riding the M1-c Gate A compile.
+
 ## Pending — awaiting director review
 
-- **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).
+- (superseded) **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).
 - **M1-c working spec** (`docs/m1c-working-spec.md`): events table (storms + flares), DustFactor through power, era honesty fixes (overshoot-carry + accumulator dump + paired-run 5% harness), surface radiation/shielding tax, event banner + sky, ComputeModule + uplink queue panel, power strip-chart.

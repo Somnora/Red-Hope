@@ -61,6 +61,20 @@ struct FRHTask
 	FMassEntityHandle ClaimedBy;
 };
 
+// One completed survey (M1-b director request): where the colony has looked,
+// what the look cost bought. The deck's Map view renders these as covered
+// ground; empty circles are information too - "nothing there" was paid for.
+USTRUCT()
+struct REDHOPESIM_API FRHSurveyRecord
+{
+	GENERATED_BODY()
+
+	UPROPERTY() FVector PointCm = FVector::ZeroVector;
+	UPROPERTY() float RadiusM = 60.f;
+	UPROPERTY() int32 Sol = 0;
+	UPROPERTY() int32 FoundCount = 0;
+};
+
 // A subsurface resource body, from DT_Deposits. Dug material moves
 // Remaining -> Pile (capped); haulers collect from the pile.
 USTRUCT()

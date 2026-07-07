@@ -353,6 +353,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		Sim->OnQuotaMet.AddUObject(this, &URHColonyVisualizerSubsystem::HandleQuotaMet);
 		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
 		Sim->OnDepositDiscovered.AddUObject(this, &URHColonyVisualizerSubsystem::HandleDepositDiscovered);
+		Sim->OnSurveyCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleSurveyCompleted);
 		Sim->OnColonyReloaded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleColonyReloaded);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -459,6 +460,18 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	ApplyTint(Actor, DepColor);
 	AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
 	DepositMarkers.Add(Actor);
+}
+
+void URHColonyVisualizerSubsystem::HandleSurveyCompleted(const FRHSurveyRecord& Record)
+{
+	// Discoveries already notice per deposit; the empty result needs its own
+	// voice or the player reads a quiet survey as a broken one.
+	if (Record.FoundCount == 0)
+	{
+		LastNotice = FString::Printf(TEXT("SURVEY complete at (%.0f, %.0f) m: no deposits within %.0f m"),
+			Record.PointCm.X / 100.f, Record.PointCm.Y / 100.f, Record.RadiusM);
+		LastNoticeRealSeconds = FPlatformTime::Seconds();
+	}
 }
 
 void URHColonyVisualizerSubsystem::HandleDepositDiscovered(const FRHDepositState& D)
