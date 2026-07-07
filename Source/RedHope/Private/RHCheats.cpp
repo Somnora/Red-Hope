@@ -461,6 +461,24 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHSelect(
+	TEXT("RH.Select"),
+	TEXT("RH.Select <BuildingId> - raise the in-world action card for a building by id (0 = deselect); handy when the gray-box is fiddly to click."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Select <BuildingId>"));
+			return;
+		}
+		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+		{
+			const int32 Id = FCString::Atoi(*Args[0]);
+			PC->Debug_SelectBuilding(Id);
+			UE_LOG(LogRedHope, Display, TEXT("Selected building #%d (action card raised)"), Id);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHFloor(
 	TEXT("RH.Floor"),
 	TEXT("RH.Floor <Level> - ride the elevator: 0 = surface, -N = subsurface floor (camera, slice view, and order Level follow)."),

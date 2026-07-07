@@ -17,6 +17,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
+#include "Widgets/Layout/SConstraintCanvas.h"
 
 namespace
 {
@@ -137,6 +138,85 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SNew(SOverlay)
+
+		// The in-world action card (M2 Gate D+): a full-screen canvas whose one
+		// child floats above the selected machine. Placed FIRST so it renders
+		// beneath the fixed deck panels but above the 3D world. Its offset is
+		// driven per-Tick from the building's screen projection; Alignment
+		// (0.5, 1.0) hangs the card's bottom-centre on that point, so it sits
+		// ABOVE the machine.
+		+ SOverlay::Slot()
+		[
+			SNew(SConstraintCanvas)
+			+ SConstraintCanvas::Slot()
+			.Anchors(FAnchors(0.f, 0.f))
+			.AutoSize(true)
+			.Alignment(FVector2D(0.5f, 1.0f))
+			.Offset(TAttribute<FMargin>::Create(TAttribute<FMargin>::FGetter::CreateSP(this, &SRHCommandDeck::GetActionCardOffset)))
+			[
+				SNew(SBox)
+				.MinDesiredWidth(240.f)
+				.MaxDesiredWidth(340.f)
+				.Visibility(this, &SRHCommandDeck::GetActionCardVisibility)
+				[
+					SNew(SBorder)
+					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(FLinearColor(0.03f, 0.08f, 0.07f, 0.94f))
+					.Padding(FMargin(11.f, 8.f))
+					[
+						SNew(SVerticalBox)
+						// Title + the director-authored "what is this / how to use it".
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(STextBlock)
+							.Text(this, &SRHCommandDeck::GetActionCardTitle)
+							.Font(DeckFont(10))
+							.ColorAndOpacity(FLinearColor(0.85f, 0.98f, 0.9f))
+							.AutoWrapText(true)
+						]
+						// Live state (reuses the existing inspection read-out).
+						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+						[
+							SNew(STextBlock)
+							.Text(this, &SRHCommandDeck::GetInspectText)
+							.Font(DeckFont(9))
+							.ColorAndOpacity(FLinearColor(0.7f, 0.9f, 0.84f))
+							.AutoWrapText(true)
+						]
+						// Afforded verbs, each with its real cost. Bore + Excavate
+						// belong to the Borer; the breaker to anything built.
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+						[
+							SNew(SVerticalBox)
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetBoreActionVisibility)
+								[
+									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBoreLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBore))
+								]
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetExcavateActionVisibility)
+								[
+									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetExcavateActionLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate))
+								]
+							]
+							+ SVerticalBox::Slot().AutoHeight()
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetActionPowerVisibility)
+								[
+									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetPowerToggleLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
+								]
+							]
+						]
+					]
+				]
+			]
+		]
 
 		// Controls hint, top left - discoverability until the diegetic pass.
 		// The uplink queue lives beneath it: orders in flight, cancellable
@@ -287,35 +367,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				]
 				]
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
-			[
-				SNew(SBox).WidthOverride(ReadoutWidthPx)
-				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
-				[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(FLinearColor(0.02f, 0.06f, 0.05f, 0.9f))
-				.Padding(FMargin(10.f, 6.f))
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetInspectText)
-						.Font(DeckFont(10))
-						.ColorAndOpacity(FLinearColor(0.75f, 0.95f, 0.88f))
-					]
-					// Manual breaker (director ruling, M1-d hand-play): every
-					// inspected structure can be switched off to ride out a
-					// storm on stored charge - and back on.
-					+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 5.f, 0.f, 0.f))
-					[
-						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetPowerToggleLabel)),
-							FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
-					]
-				]
-				]
-			]
+			// (The building inspect card moved to the in-world action card that
+			// floats above the machine - M2 Gate D+ UX overhaul. Its live-state
+			// text + breaker button live there now.)
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
 			[
 				SNew(SBox).WidthOverride(ReadoutWidthPx)
@@ -438,15 +492,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						DeckButton(FText::FromString(TEXT("Survey")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSurvey))
 					]
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBoreLabel)),
-							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBore))
-					]
-					+ SHorizontalBox::Slot().AutoWidth()
-					[
-						DeckButton(FText::FromString(TEXT("Excavate")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate))
-					]
+					// Bore + Excavate moved onto the Borer's in-world action card
+					// (M2 Gate D+ UX): you order the machine by clicking it, so the
+					// bottom bar keeps only world-placement orders (Dig/Survey/Map).
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetMapLabel)),
@@ -643,6 +691,48 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 {
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	RefreshUplinkPanel();
+
+	// Position the in-world action card above the selected machine (M2 Gate D+).
+	// Project the building's world point (lifted above its roof) to screen, then
+	// convert screen pixels to this canvas's LOCAL slate units by dividing out
+	// the geometry's DPI scale. Off-screen or behind-camera hides the card.
+	bActionCardOnScreen = false;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Id != 0 && Sim && PC.IsValid())
+	{
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id != Id)
+			{
+				continue;
+			}
+			// Anchor ~3.5 m above the footprint so the card clears the gray-box.
+			const FVector Anchor = B.LocationCm + FVector(0.f, 0.f, 350.f);
+			FVector2D ScreenPx;
+			if (PC->ProjectWorldLocationToScreen(Anchor, ScreenPx, false))
+			{
+				const float Scale = FMath::Max(AllottedGeometry.Scale, KINDA_SMALL_NUMBER);
+				ActionCardPos = FVector2D(ScreenPx.X / Scale, ScreenPx.Y / Scale);
+				bActionCardOnScreen = true;
+			}
+			break;
+		}
+	}
+}
+
+FMargin SRHCommandDeck::GetActionCardOffset() const
+{
+	// SConstraintCanvas AutoSize slot: X,Y is the anchor point; the slot's
+	// Alignment (0.5, 1.0) hangs the card above it. Width/height unused here.
+	return FMargin(ActionCardPos.X, ActionCardPos.Y, 0.f, 0.f);
+}
+
+EVisibility SRHCommandDeck::GetActionCardVisibility() const
+{
+	return (bActionCardOnScreen && GetInspectVisibility() == EVisibility::Visible)
+		? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed;
 }
 
 void SRHCommandDeck::RefreshUplinkPanel()
@@ -1062,6 +1152,93 @@ FText SRHCommandDeck::GetInspectText() const
 EVisibility SRHCommandDeck::GetInspectVisibility() const
 {
 	return (PC.IsValid() && PC->GetSelectedBuildingId() != 0) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+namespace
+{
+	// The selected building's instance + def, or nulls (shared by the action
+	// card getters). Kept local - pure read into the sim.
+	const FRHBuildingInstance* FindSelected(const TWeakObjectPtr<ARHPlayerController>& PC,
+		const FRHBuildingRow*& OutDef)
+	{
+		OutDef = nullptr;
+		const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+		if (!Sim || !Defs || Id == 0)
+		{
+			return nullptr;
+		}
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id == Id)
+			{
+				OutDef = Defs->GetBuilding(B.DefName);
+				return &B;
+			}
+		}
+		return nullptr;
+	}
+}
+
+FText SRHCommandDeck::GetActionCardTitle() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!B)
+	{
+		return FText::GetEmpty();
+	}
+	FString Name = (Def && !Def->DisplayName.IsEmpty()) ? Def->DisplayName : B->DefName.ToString();
+	FString Text = FString::Printf(TEXT("%s  #%d"), *Name, B->Id);
+	// The director-authored "what is this / how to use it" (blank until the DT
+	// re-sync lands the Blurb column; the card still works without it).
+	if (Def && !Def->Blurb.IsEmpty())
+	{
+		Text += TEXT("\n") + Def->Blurb;
+	}
+	return FText::FromString(Text);
+}
+
+EVisibility SRHCommandDeck::GetBoreActionVisibility() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	return (B && Def && Def->CanBore && !B->bUnderConstruction) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+EVisibility SRHCommandDeck::GetExcavateActionVisibility() const
+{
+	return GetBoreActionVisibility(); // the Borer affords both verbs
+}
+
+FText SRHCommandDeck::GetExcavateActionLabel() const
+{
+	// Cost from the real CarveCell recipe when present, else a plain label.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const FRHRecipeRow* Carve = Defs ? Defs->GetRecipe(FName("CarveCell")) : nullptr;
+	if (Carve)
+	{
+		return FText::FromString(FString::Printf(TEXT("Excavate Cells  (%.0f h/cell)"), Carve->BatchTime_h));
+	}
+	return FText::FromString(TEXT("Excavate Cells"));
+}
+
+EVisibility SRHCommandDeck::GetActionPowerVisibility() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!B || !Def || B->bUnderConstruction)
+	{
+		return EVisibility::Collapsed;
+	}
+	// A breaker only matters where power flows or a batch runs (skip inert pads).
+	const bool bPowered = Def->PowerDraw_W > 0.f || Def->PowerIdle_W > 0.f
+		|| Def->PowerGenPeak_W > 0.f || Def->PowerGenBase_W > 0.f
+		|| Def->StorageWh > 0.f || Def->CanBore;
+	return bPowered ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 FText SRHCommandDeck::GetKnownGroundText() const

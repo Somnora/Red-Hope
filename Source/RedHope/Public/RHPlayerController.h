@@ -65,6 +65,9 @@ public:
 	FLinearColor GetHintColor() const { return HintColor; }
 	// Click-to-inspect (M1-b Gate C): the selected building's sim id, 0 = none.
 	int32 GetSelectedBuildingId() const { return SelectedBuildingId; }
+	// Debug/help: select a building by id (RH.Select) - raises its in-world
+	// action card without hunting for the gray-box footprint with the cursor.
+	void Debug_SelectBuilding(int32 Id) { SelectedBuildingId = Id; }
 	// Surveyed-land map (director request): toggle the coverage overlay.
 	void ToggleSurveyMap() { bShowSurveyMap = !bShowSurveyMap; }
 	bool IsSurveyMapOn() const { return bShowSurveyMap; }

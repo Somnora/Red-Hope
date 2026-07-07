@@ -52,6 +52,22 @@ private:
 	// Inspection card: click a building, read its live state.
 	FText GetInspectText() const;
 	EVisibility GetInspectVisibility() const;
+	// The in-world action card (M2 Gate D+ UX overhaul, director's #1 ask):
+	// clicking a machine floats a card ABOVE it in the world with a plain-
+	// language blurb, its live state, and the verbs it affords with real costs.
+	// Positioned each Tick by projecting the building's world point to screen.
+	// GetInspectVisibility gates it (a building is selected); the offset getter
+	// places it. Actions issue normal uplink orders - the card never bypasses
+	// the sim's signal lag.
+	FText GetActionCardTitle() const;      // display name + director's blurb
+	FMargin GetActionCardOffset() const;   // projected screen pos (local units)
+	EVisibility GetActionCardVisibility() const; // selected AND on-screen
+	// Per-verb action buttons + their cost labels. Visible only for a building
+	// that affords the verb (Bore/Excavate = the Borer; Off/On = anything built).
+	EVisibility GetBoreActionVisibility() const;
+	FText GetExcavateActionLabel() const;
+	EVisibility GetExcavateActionVisibility() const;
+	EVisibility GetActionPowerVisibility() const;
 	// Crew roster card (M2 Gate A2): the people, their floor, their life
 	// support - shown once anyone has landed.
 	FText GetCrewText() const;
@@ -96,4 +112,8 @@ private:
 	// Uplink panel state: rebuilt when the queue's id set changes.
 	TSharedPtr<class SVerticalBox> UplinkList;
 	TArray<int32> UplinkIdsShown;
+	// In-world action card position (local slate units) + on-screen flag, both
+	// refreshed in Tick from the selected building's screen projection.
+	FVector2D ActionCardPos = FVector2D::ZeroVector;
+	bool bActionCardOnScreen = false;
 };

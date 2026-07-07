@@ -77,6 +77,12 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// drawing grid power - and runs straight through shedding. 0 = grid only.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float H2BurnKgPerHour = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	// UX (M2 Gate D+): player-facing copy for the in-world action card. Category
+	// groups the build palette Sims-style (Boring/Habitat/Power/Production/
+	// LifeSupport...); Blurb is the "what is this / how to use it" line shown
+	// when you click the machine. Director-authored - never derived in code.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Category;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Blurb;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 
