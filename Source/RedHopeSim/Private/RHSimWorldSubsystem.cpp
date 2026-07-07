@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 18;  // v18: Earth's Shadow (M3 Gate B); v17 rivals/trade; v16 discoveries; v15 growth
+	constexpr uint32 RHSaveVersion = 19;  // v19: Solidarity Dilemma (M3 Gate C); v18 Earth's Shadow; v17 rivals/trade; v16 discoveries
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -151,6 +151,14 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	RequisitionEarthBonus = Defs->GetConfigScalar(FName("RequisitionEarthBonus"), RequisitionEarthBonus);
 	RequisitionMartianPenalty = Defs->GetConfigScalar(FName("RequisitionMartianPenalty"), RequisitionMartianPenalty);
 	RequisitionTensionPenalty = Defs->GetConfigScalar(FName("RequisitionTensionPenalty"), RequisitionTensionPenalty);
+	DilemmaComplyAxisShift = Defs->GetConfigScalar(FName("DilemmaComplyAxisShift"), DilemmaComplyAxisShift);
+	DilemmaDefyAxisShift = Defs->GetConfigScalar(FName("DilemmaDefyAxisShift"), DilemmaDefyAxisShift);
+	DilemmaComplyTensionDrop = Defs->GetConfigScalar(FName("DilemmaComplyTensionDrop"), DilemmaComplyTensionDrop);
+	DilemmaDefyTensionDrop = Defs->GetConfigScalar(FName("DilemmaDefyTensionDrop"), DilemmaDefyTensionDrop);
+	DilemmaRelationHit = Defs->GetConfigScalar(FName("DilemmaRelationHit"), DilemmaRelationHit);
+	DilemmaDefyRelationBonus = Defs->GetConfigScalar(FName("DilemmaDefyRelationBonus"), DilemmaDefyRelationBonus);
+	SolidarityHopeShock = Defs->GetConfigScalar(FName("SolidarityHopeShock"), SolidarityHopeShock);
+	SolidarityHopeTauSols = Defs->GetConfigScalar(FName("SolidarityHopeTauSols"), SolidarityHopeTauSols);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -2170,8 +2178,15 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	{
 		Out.WaterPenalty = HopeWaterPenalty * (WaterPotabilityFloor - WaterPotability) / WaterPotabilityFloor;
 	}
+	// Solidarity (M3 Gate C): the fading morale shock from the last Dilemma
+	// choice (signed - lifts after Defy, weighs after Comply). Only meaningful
+	// once there's a crew to feel it.
+	if (Pop > 0)
+	{
+		Out.Solidarity = SolidarityHope;
+	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Solidarity
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty, 0.0, 100.0);
 	return Out;
 }
@@ -2819,6 +2834,11 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The convoy is already out (to %s)"), *ConvoyRival.ToString()));
 			return;
 		}
+		if (ClosedRoutes.Contains(Cmd.Target))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The route to %s is closed - you cut ties when you complied with Earth"), *Rival->DisplayName));
+			return;
+		}
 		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
 		// overlapping resources - so preflight and commit validate/spend the
 		// identical sum. (Adversarial review, M3 Gate A: three independent checks
@@ -2855,6 +2875,17 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		RelationRef(Cmd.Target); // ensure the relation entry exists
 		UE_LOG(LogRedHopeSim, Display, TEXT("Convoy dispatched to %s (%.0f km; %s -> %s)"),
 			*Rival->DisplayName, Rival->DistanceKm, *Rival->ImportLot, *Rival->ExportLot);
+	}
+	else if (Cmd.Verb == FName("Solidarity"))
+	{
+		// M3 Gate C: answer Earth's demand. Target Comply = cut trade; anything
+		// else (Defy) = keep faith. Rides the uplink like every decision.
+		FString Reason;
+		if (!ResolveDilemma(Cmd.Target == FName("Comply"), Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 	}
 
 	OnCommandExecuted.Broadcast(Cmd);
@@ -3078,6 +3109,76 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 		OnAlert.Broadcast(TEXT("EARTH TRANSMISSION — your sponsor nation is uneasy about your ties to the other settlements. A demand is coming."));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH DEMAND PENDING (tension %.0f) ==="), EarthTension);
 	}
+	// The morale shock from the last Dilemma choice fades toward zero (exp form
+	// = parity-exact across step sizes, like HopeSmoothed).
+	if (SolidarityHope != 0.0)
+	{
+		SolidarityHope *= FMath::Exp(-DtSols / FMath::Max(SolidarityHopeTauSols, KINDA_SMALL_NUMBER));
+		if (FMath::Abs(SolidarityHope) < 0.01) { SolidarityHope = 0.0; }
+	}
+}
+
+bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
+{
+	if (!bEarthDemandPending)
+	{
+		OutReason = TEXT("There is no demand to answer right now.");
+		return false;
+	}
+	bEarthDemandPending = false;
+
+	if (bComply)
+	{
+		// COMPLY: cut trade with the settlements. Every open route CLOSES for
+		// good (you lose whatever that trade fed - the ice that kept your water
+		// loop, say); relations crater; identity swings Earth-ward; the demand
+		// is satisfied so tension falls hard; the colony grieves a shrunken world.
+		int32 Closed = 0;
+		if (Defs)
+		{
+			Defs->ForEachRival([&](FName Name, const FRHRivalRow&)
+			{
+				if (!ClosedRoutes.Contains(Name))
+				{
+					ClosedRoutes.Add(Name);
+					double& Rel = RelationRef(Name);
+					Rel = FMath::Clamp(Rel - DilemmaRelationHit, 0.0, 100.0);
+					++Closed;
+				}
+			});
+		}
+		// A convoy already committed to a now-closed rival still comes home
+		// (the goods were paid for); only NEW dispatches are refused.
+		IdentityAxis = FMath::Clamp(IdentityAxis - DilemmaComplyAxisShift, -100.0, 100.0);
+		EarthTension = FMath::Clamp(EarthTension - DilemmaComplyTensionDrop, 0.0, 100.0);
+		SolidarityHope -= SolidarityHopeShock; // morale grief (fades)
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("YOU COMPLIED — %d trade route(s) severed to satisfy Earth. Requisitions restored; the community feels smaller tonight."), Closed));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY: COMPLIED - %d route(s) closed, axis %.0f, tension %.0f ==="),
+			Closed, IdentityAxis, EarthTension);
+	}
+	else
+	{
+		// DEFY: keep faith with the settlements. Identity swings Martian, every
+		// relation warms, morale lifts - but Earth's requisitions stay slashed by
+		// your Martian axis (Gate B), and tension barely eases, so the next
+		// demand comes sooner. Solidarity has a price you pay in Earth's supply.
+		IdentityAxis = FMath::Clamp(IdentityAxis + DilemmaDefyAxisShift, -100.0, 100.0);
+		EarthTension = FMath::Clamp(EarthTension - DilemmaDefyTensionDrop, 0.0, 100.0);
+		SolidarityHope += SolidarityHopeShock; // pride (fades)
+		if (Defs)
+		{
+			Defs->ForEachRival([&](FName Name, const FRHRivalRow&)
+			{
+				double& Rel = RelationRef(Name);
+				Rel = FMath::Clamp(Rel + DilemmaDefyRelationBonus, 0.0, 100.0);
+			});
+		}
+		OnAlert.Broadcast(TEXT("YOU DEFIED EARTH — the settlements stand together. Morale rises, but your sponsor's supply priority is cut. Survive on what Mars makes."));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY: DEFIED - axis %.0f, tension %.0f, requisition x%.2f ==="),
+			IdentityAxis, EarthTension, GetRequisitionMultiplier());
+	}
+	return true;
 }
 
 void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level)
@@ -4118,6 +4219,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		uint8 Demand = bEarthDemandPending ? 1 : 0;
 		Ar << EarthTension << IdentityAxis << Demand;
 	}
+	// The Solidarity Dilemma (save v19).
+	{
+		TArray<FName> Closed = ClosedRoutes.Array();
+		Closed.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
+		Ar << Closed << SolidarityHope;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4319,6 +4426,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		uint8 Demand = 0;
 		Ar << EarthTension << IdentityAxis << Demand;
 		bEarthDemandPending = (Demand != 0);
+	}
+	// The Solidarity Dilemma (save v19).
+	{
+		TArray<FName> Closed;
+		Ar << Closed << SolidarityHope;
+		ClosedRoutes.Empty();
+		ClosedRoutes.Append(Closed);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

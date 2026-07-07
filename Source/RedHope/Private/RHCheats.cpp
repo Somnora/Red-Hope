@@ -266,6 +266,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHEarth(
 			Sim->IsEarthDemandPending() ? TEXT("PENDING") : TEXT("none"), Sim->GetRequisitionMultiplier());
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHSolidarity(
+	TEXT("RH.Solidarity"),
+	TEXT("RH.Solidarity <comply|defy> - answer Earth's pending demand (comply = cut trade / defy = keep faith with the settlements). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Solidarity <comply|defy>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Solidarity");
+			Cmd.Target = Args[0].Equals(TEXT("comply"), ESearchCase::IgnoreCase) ? FName("Comply") : FName("Defy");
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHConvoy(
 	TEXT("RH.Convoy"),
 	TEXT("RH.Convoy <RivalName> - dispatch the rover trade convoy to a rival (uplink; commits Hydrogen + SpareParts + your export lot at departure)."),

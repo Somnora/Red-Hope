@@ -1014,13 +1014,21 @@ FText SRHCommandDeck::GetCrewText() const
 	}
 	// Earth's Shadow (M3 Gate B): tension + which way the colony is leaning,
 	// shown once the politics are live (tension has moved off zero).
-	if (Sim->GetEarthTension() > 0.0 || Sim->IsEarthDemandPending())
+	if (Sim->GetEarthTension() > 0.0 || Sim->IsEarthDemandPending() || Sim->GetClosedRouteCount() > 0)
 	{
 		const double Axis = Sim->GetIdentityAxis();
 		const TCHAR* Lean = Axis > 5.0 ? TEXT("Martian-leaning") : (Axis < -5.0 ? TEXT("Earth-aligned") : TEXT("neutral"));
-		Text += FString::Printf(TEXT("\nEARTH tension %.0f   identity %s (%+.0f)%s"),
-			Sim->GetEarthTension(), Lean, Axis,
-			Sim->IsEarthDemandPending() ? TEXT("   DEMAND PENDING") : TEXT(""));
+		Text += FString::Printf(TEXT("\nEARTH tension %.0f   identity %s (%+.0f)"),
+			Sim->GetEarthTension(), Lean, Axis);
+		if (Sim->GetClosedRouteCount() > 0)
+		{
+			Text += FString::Printf(TEXT("   %d route(s) closed"), Sim->GetClosedRouteCount());
+		}
+		if (Sim->IsEarthDemandPending())
+		{
+			// Placeholder prompt (Gate-D framing review owns the final wording).
+			Text += TEXT("\n  >> EARTH DEMANDS YOU CUT TRADE  ·  RH.Solidarity comply / defy");
+		}
 	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.

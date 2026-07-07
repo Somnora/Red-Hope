@@ -254,6 +254,7 @@ public:
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
+		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		double Total = 0;
 	};
@@ -334,6 +335,22 @@ public:
 	// Gate-C / cheat hooks (Comply/Defy will call these):
 	void Debug_ShiftIdentity(double Delta) { IdentityAxis = FMath::Clamp(IdentityAxis + Delta, -100.0, 100.0); }
 	void Debug_AddTension(double Delta) { EarthTension = FMath::Clamp(EarthTension + Delta, 0.0, 100.0); }
+
+	// --- The Solidarity Dilemma (M3 Gate C, the signature mechanic) ---
+	// When a demand is pending, the player resolves it: COMPLY (cut trade with
+	// the Martian settlements - the route CLOSES permanently, relations crater,
+	// identity swings Earth-ward, tension is relieved, colonists grieve the
+	// shrunken community) or DEFY (keep trading - identity swings Martian,
+	// relations + colonist morale rise, but Earth's requisitions stay slashed by
+	// your Martian axis and tension barely drops, so the next demand comes
+	// sooner). ALL player-facing wording is Gate-D framing-review placeholder.
+	// Returns false (with reason) if no demand is pending.
+	bool ResolveDilemma(bool bComply, FString& OutReason);
+	bool IsRouteClosed(FName Rival) const { return ClosedRoutes.Contains(Rival); }
+	int32 GetClosedRouteCount() const { return ClosedRoutes.Num(); }
+	// The lasting morale swing from recent choices (fades toward 0); folds into
+	// the Hope index. Signed: negative after Comply, positive after Defy.
+	double GetSolidarityHope() const { return SolidarityHope; }
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -742,6 +759,18 @@ private:
 	double RequisitionEarthBonus = 0.4;
 	double RequisitionMartianPenalty = 0.6;
 	double RequisitionTensionPenalty = 0.3;
+	// The Solidarity Dilemma (M3 Gate C; save v19). Closed routes refuse new
+	// convoys; SolidarityHope is a fading morale shock folded into the index.
+	TSet<FName> ClosedRoutes;
+	double SolidarityHope = 0.0;
+	double DilemmaComplyAxisShift = 20.0;
+	double DilemmaDefyAxisShift = 20.0;
+	double DilemmaComplyTensionDrop = 45.0;
+	double DilemmaDefyTensionDrop = 12.0;
+	double DilemmaRelationHit = 40.0;
+	double DilemmaDefyRelationBonus = 5.0;
+	double SolidarityHopeShock = 12.0;
+	double SolidarityHopeTauSols = 5.0;
 	void StepEarth(float SubDt);
 	bool HasActiveRival() const; // any slice-active rival => the layer is live
 	// Ensure a rival's relation entry exists (lazy seed from RelationStart).

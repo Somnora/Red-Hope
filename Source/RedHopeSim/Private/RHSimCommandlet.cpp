@@ -935,6 +935,105 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M3 Gate C self-test: THE SOLIDARITY DILEMMA - Comply severs the route
+	// (closed, relation craters, axis Earth-ward, tension relieved, morale grief)
+	// vs Defy (axis Martian, relations + morale up, tension barely eases). Both
+	// via the uplink verb; save v19. `-solidarity`.
+	if (FParse::Param(*Params, TEXT("solidarity")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY DILEMMA TEST (M3 Gate C) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Answer = [&](const TCHAR* Choice)
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Solidarity"); Cmd.Target = FName(Choice);
+			Sim->EnqueueCommand(Cmd);
+			RunSols(0.1);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+
+		// Housed colony (2 crew) so SolidarityHope actually reads into the index.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 2000.0);
+		Sim->AddStock(FName("Water"), 2000.0);
+		Sim->AddStock(FName("Food"), 2000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		RunSols(0.2);
+
+		// 0) No demand -> answering is refused.
+		Answer(TEXT("Defy"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID no-demand: axis=%+.0f (expect 0 - refused, nothing to answer)"), Sim->GetIdentityAxis());
+
+		// Raise a demand.
+		Sim->Debug_AddTension(65.0);
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID demand up: pending=%d tension=%.0f (expect 1, >=60)"),
+			(int32)Sim->IsEarthDemandPending(), Sim->GetEarthTension());
+
+		// 1) DEFY: axis -> Martian (+20), relation +5 (40->45), morale shock +12,
+		// tension eases only a little, requisitions stay slashed by the axis.
+		const double Hope0 = Sim->GetColonyHope().Total;
+		Answer(TEXT("Defy"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID defy: axis=%+.0f relation=%.0f pending=%d hope %.1f->%.1f mult=%.2f (expect +20, 45, 0, up, <1)"),
+			Sim->GetIdentityAxis(), Sim->GetRivalRelation(FName("Zarya")), (int32)Sim->IsEarthDemandPending(),
+			Hope0, Sim->GetColonyHope().Total, Sim->GetRequisitionMultiplier());
+
+		// 2) The morale shock FADES: after ~2 tau it's much smaller.
+		const double Solid1 = Sim->GetSolidarityHope();
+		RunSols(10.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID shock fades: %.2f -> %.2f (expect toward 0)"), Solid1, Sim->GetSolidarityHope());
+
+		// Raise a second demand for the Comply branch.
+		Sim->Debug_AddTension(65.0);
+		RunSols(0.2);
+
+		// 3) COMPLY: route to Zarya CLOSES, relation craters, axis swings back
+		// Earth-ward, tension relieved hard, morale grief (negative shock).
+		Answer(TEXT("Comply"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID comply: closed=%d relation=%.0f axis=%+.0f tension=%.0f (expect 1, 5, 0, 55 = 100 clamped - 45 relief, below re-demand)"),
+			Sim->GetClosedRouteCount(), Sim->GetRivalRelation(FName("Zarya")),
+			Sim->GetIdentityAxis(), Sim->GetEarthTension());
+
+		// 4) The closed route REFUSES a convoy (the dependency is severed).
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		FRHCommand Cv; Cv.Verb = FName("Convoy"); Cv.Target = FName("Zarya");
+		Sim->EnqueueCommand(Cv); RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID severed: convoy=%s (expect idle - route closed)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+
+		// 5) Save v19 round-trip: closed routes + axis + morale survive.
+		const int32 ClosedB = Sim->GetClosedRouteCount();
+		const double AxB = Sim->GetIdentityAxis();
+		FString Err;
+		Sim->SaveColony(TEXT("soltest"), Err);
+		Sim->LoadColony(TEXT("soltest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID save/load v19: closed %d->%d axis %+.0f->%+.0f route-closed(Zarya)=%d (expect identical, 1)"),
+			ClosedB, Sim->GetClosedRouteCount(), AxB, Sim->GetIdentityAxis(), (int32)Sim->IsRouteClosed(FName("Zarya")));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY DILEMMA TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.
