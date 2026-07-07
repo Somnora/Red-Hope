@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 37 (M3 Gate A review-fix + Gate B "Earth's Shadow"; checkpoint before Gate C)
+
+- **Gate A adversarial review (Workflow, 4 dims × 2 skeptics):** one CONFIRMED low/latent defect + one correctly-REFUTED finding. Confirmed: convoy dispatch validated Hydrogen/SpareParts/ImportLot as three independent checks against the same stock then committed all three → if an ImportLot ever named Hydrogen or SpareParts the summed draw could drive a pool negative (latent under current data). **Fixed (`f21afe9`):** one aggregate cost lot (fuel+wear+import, summed), one HasTradeLot, one SpendTradeLot; new `-trade` overlap-guard assertion proves a SpareParts-ImportLot rival with insufficient parts is refused (3→3, never negative). Refuted: the storm-freeze frame-granularity finding — a pre-existing property shared by AccrueWear/GetDustFactorNow; the headless harness advances the clock per-step so parity holds; no change.
+- **Gate B "Earth's Shadow" built + verified (`487336e` data, `b900555` code, save v18):**
+  - **Earth tension** (0..100) drifts up once Mars has neighbors; crossing `EarthTensionDemandThreshold` sets a DEMAND PENDING flag + telegraph alert — the hook Gate C resolves.
+  - **The identity axis** (−100 Earth-aligned .. +100 Martian) — the through-line the endings read; established + saved now, moved by Comply/Defy in Gate C. `Debug_ShiftIdentity`/`Debug_AddTension` are the Gate-C wiring hooks.
+  - **Requisitions:** supply-ship award mass now scales by `GetRequisitionMultiplier` — Earth loyalty rewarded, Martian identity shrinks awards toward denied, high tension hoards. The axis has teeth *before* the choice mechanic exists.
+  - **Inert until you have neighbors:** StepEarth no-ops + multiplier exactly 1.0 with no slice-active rival, so every M0–M2 award and the 10-sol baseline are byte-identical (verified). Deck EARTH line; `RH.Earth` cheat.
+  - `-earth` self-test all EXACT (inert/1.000, drift 0.6/sol→6.0, demand at tension 61, requisition 0.82 neutral / 1.22 earth / 0.22 martian, v18 round-trip). All 14 suites green; baseline byte-identical.
+- **CHECKPOINT before Gate C:** the apparatus is complete (dependency + pressure + axis + demand). Gate C is the **Solidarity Dilemma itself** — the Comply/Defy choice, its consequences, and the identity-axis movement. It is the signature mechanic AND its player-facing wording falls squarely under the standing mental-health/framing review, so it is held for a director checkpoint before build (per the working cadence's gate-boundary rule).
+
 ## 2026-07-07 — Session 36 (M3 OPENS — Gate A "The Neighbors": physical rover trade)
 
 - **Director opened M3 (Sovereignty)** via structured ask ("Open M3 now"). `docs/m3-working-spec.md` authored: Gate A neighbors/trade → B Earth's Shadow (tension + requisitions) → C the Solidarity Dilemma + identity axis → D presentation + framing review. Core principle (design-decisions 2026-07-07j): **build the trade dependency FIRST so the Dilemma later cuts something real** — systemic, not scripted (brief open question #8).
