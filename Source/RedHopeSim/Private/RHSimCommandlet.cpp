@@ -1209,6 +1209,89 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M4 Gate C self-test: EARTH'S PRE-EMPTIVE PRESSURE - influence accrues,
+	// a high-tension embargo lands (trade refused), pacify lifts it (spends
+	// influence, eases tension), and an un-pacified embargo hardens to defection.
+	// Save v22. `-preemptive`.
+	if (FParse::Param(*Params, TEXT("preemptive")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH PRE-EMPTIVE TEST (M4 Gate C) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Verb = [&](const TCHAR* V, const TCHAR* Target)
+		{
+			FRHCommand Cmd; Cmd.Verb = FName(V); Cmd.Target = FName(Target);
+			Sim->EnqueueCommand(Cmd); RunSols(0.1);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+
+		// 1) INFLUENCE accrues: a completed honest trade (+3) plus positive-
+		// HumanNature drift. Do a trade to bank some influence + push HumanNature +.
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		FRHCommand Cv; Cv.Verb = FName("Convoy"); Cv.Target = FName("Zarya");
+		Sim->EnqueueCommand(Cv); RunSols(4.5); // round trip -> +InfluencePerTrade, +HumanNature
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE influence: %.1f (expect >=3 - one trade + drift) humanNature %.0f (expect +2)"),
+			Sim->GetInfluence(), Sim->GetHumanNatureAxis());
+
+		// 2) EMBARGO: push Earth tension just past the pre-emptive threshold (75);
+		// the next step Earth turns Zarya against you -> embargoed, trade refused.
+		// (Tension ~78 so a later pacify's -20 relief drops it below 75, avoiding
+		// an instant re-embargo.)
+		Sim->Debug_AddTension(75.0); // ~3 drift + 75 = ~78
+		RunSols(0.2);
+		const FName Embargoing = Sim->GetEmbargoingRival();
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		Sim->EnqueueCommand(Cv); RunSols(0.1); // try to trade with the embargoer
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE embargo: embargoing=%s grace=%.1f convoy=%s (expect Zarya, ~8, idle - trade refused)"),
+			Embargoing.IsNone() ? TEXT("none") : *Embargoing.ToString(),
+			Sim->GetEmbargoGrace(FName("Zarya")),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+
+		// 3) PACIFY: enough influence lifts the embargo (spends PacifyInfluenceCost,
+		// eases tension, +HumanNature).
+		Sim->Debug_AddInfluence(30.0);
+		const double InfBefore = Sim->GetInfluence();
+		const double TenBefore = Sim->GetEarthTension();
+		Verb(TEXT("Pacify"), TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE pacify: embargoed=%d influence %.1f->%.1f (expect -20) tension %.0f->%.0f (expect -20)"),
+			(int32)Sim->IsEmbargoed(FName("Zarya")), InfBefore, Sim->GetInfluence(), TenBefore, Sim->GetEarthTension());
+
+		// 4) DEFECTION: a fresh embargo left un-pacified past the grace hardens
+		// into defection (relation locked low, route closed).
+		Sim->Debug_AddTension(80.0);
+		RunSols(0.2); // re-embargo
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE re-embargo: embargoed=%d (expect 1)"), (int32)Sim->IsEmbargoed(FName("Zarya")));
+		RunSols(9.0); // let the grace (8 sols) expire un-pacified
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE defection: defected=%d embargoed=%d relation=%.0f (expect 1, 0, <=5)"),
+			(int32)Sim->HasDefected(FName("Zarya")), (int32)Sim->IsEmbargoed(FName("Zarya")), Sim->GetRivalRelation(FName("Zarya")));
+
+		// 5) Save v22 round-trip: defection + influence survive.
+		const bool DefB = Sim->HasDefected(FName("Zarya"));
+		const double InfB = Sim->GetInfluence();
+		FString Err;
+		Sim->SaveColony(TEXT("pretest"), Err);
+		Sim->LoadColony(TEXT("pretest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE save/load v22: defected %d->%d influence %.1f->%.1f (expect identical)"),
+			(int32)DefB, (int32)Sim->HasDefected(FName("Zarya")), InfB, Sim->GetInfluence());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== EARTH PRE-EMPTIVE TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

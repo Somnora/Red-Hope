@@ -323,6 +323,19 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCovert(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHPacify(
+	TEXT("RH.Pacify"),
+	TEXT("RH.Pacify <RivalName> - spend Influence to lift an Earth-ordered embargo (the colony sees reason). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Pacify <RivalName>")); return; }
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Pacify"); Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHLaunder(
 	TEXT("RH.Launder"),
 	TEXT("RH.Launder <RivalName> - make amends to a rival (return goods to defuse hidden tension). Rides the uplink."),
@@ -369,11 +382,14 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 		{
 			if (!Sim->IsRivalAvailable(Name)) { return; } // hide undiscovered dormant settlements
 			const double Sab = Sim->GetSabotageRemaining(Name);
-			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): public relation %.0f | HIDDEN tension %.0f | give %s -> get %s | %.0f km%s%s"),
+			FString Flags;
+			if (Sim->IsRivalDiscovered(Name)) { Flags += TEXT(" [scouted]"); }
+			if (Sab > 0.0) { Flags += FString::Printf(TEXT(" [SABOTAGED %.1f]"), Sab); }
+			if (Sim->HasDefected(Name)) { Flags += TEXT(" [DEFECTED]"); }
+			else if (Sim->IsEmbargoed(Name)) { Flags += FString::Printf(TEXT(" [EMBARGO %.1f]"), Sim->GetEmbargoGrace(Name)); }
+			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): public relation %.0f | HIDDEN tension %.0f | give %s -> get %s | %.0f km%s"),
 				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), Sim->GetHiddenTension(Name),
-				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm,
-				Sim->IsRivalDiscovered(Name) ? TEXT(" [scouted]") : TEXT(""),
-				Sab > 0.0 ? *FString::Printf(TEXT(" [SABOTAGED %.1f sols]"), Sab) : TEXT(""));
+				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm, *Flags);
 		});
 	}));
 

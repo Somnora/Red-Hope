@@ -387,6 +387,24 @@ public:
 	double GetSabotageRemaining(FName Rival) const;
 	bool IsRivalDiscovered(FName Rival) const { return DiscoveredRivals.Contains(Rival); }
 
+	// --- Earth's pre-emptive pressure (M4 Gate C) ---
+	// Under high Earth tension, Earth turns a NEIGHBOR against you: that colony
+	// EMBARGOES you (trade refused) and, if you don't act within EmbargoGraceSols,
+	// DEFECTS (relation locks hostile, route closed). Your counter is Pacify -
+	// spending INFLUENCE, a soft currency earned by fair dealing + Evolved
+	// conduct (so the peaceful path earns the tools of peace). Distinct from the
+	// Solidarity Dilemma (Earth demanding YOU cut trade) and pitched higher =
+	// an escalation. All player-facing wording is Gate-D framing-review placeholder.
+	double GetInfluence() const { return Influence; }
+	bool IsEmbargoed(FName Rival) const { return EmbargoGrace.Contains(Rival); }
+	bool HasDefected(FName Rival) const { return DefectedRivals.Contains(Rival); }
+	double GetEmbargoGrace(FName Rival) const;
+	// The rival currently embargoing you (None if none) - the deck's "who to pacify".
+	FName GetEmbargoingRival() const;
+	// Pacify an embargoing rival (the uplink verb's worker): spend Influence, the
+	// colony ignores Earth. Returns false (with reason) on cost/target failure.
+	bool ResolvePacify(FName Rival, FString& OutReason);
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -578,6 +596,8 @@ public:
 	// Harness: run the discovery roll for the Nth survey directly (surveys
 	// complete in the agent band, which the era-mode test loop doesn't drive).
 	bool Debug_MaybeDiscoverSettlement(int32 SurveyCount) { return MaybeDiscoverSettlement(SurveyCount); }
+	// Harness: grant diplomatic influence (pacification-cost tests).
+	void Debug_AddInfluence(double Points) { Influence = FMath::Max(0.0, Influence + Points); }
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
@@ -837,6 +857,22 @@ private:
 	double SabotageDurationSols = 6.0;
 	double SabotageHiddenTension = 20.0;
 	double DiscoveryChancePerSurvey = 0.5;
+	// Earth's pre-emptive pressure (M4 Gate C; save v22). EmbargoGrace: rival ->
+	// sols left to pacify before defection; DefectedRivals: locked-hostile.
+	// Influence: the diplomatic soft currency.
+	TMap<FName, double> EmbargoGrace;
+	TSet<FName> DefectedRivals;
+	double Influence = 0.0;
+	double InfluencePerTrade = 3.0;
+	double InfluencePerLaunder = 2.0;
+	double InfluenceDriftPerSol = 1.0;
+	double EarthPreemptiveThreshold = 75.0;
+	double EmbargoGraceSols = 8.0;
+	double PacifyInfluenceCost = 20.0;
+	double PacifyTensionRelief = 20.0;
+	double HumanNaturePacifyShift = 4.0;
+	double DefectRelationFloor = 5.0;
+	void StepPreemptive(float SubDt); // embargo trigger + grace countdown + influence drift
 	// A deterministic detection roll for a covert op against a rival (shared by
 	// requisition + sabotage): seeded by content hash + the saved attempt count.
 	bool RollCovertDetected(FName Rival);

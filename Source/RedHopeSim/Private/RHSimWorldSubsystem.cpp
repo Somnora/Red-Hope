@@ -23,7 +23,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 21;  // v21: espionage economy (M4 Gate B); v20 covert layer; v19 Solidarity Dilemma; v18 Earth's Shadow
+	constexpr uint32 RHSaveVersion = 22;  // v22: Earth pre-emptive (M4 Gate C); v21 espionage economy; v20 covert layer; v19 Solidarity Dilemma
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -177,6 +177,16 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	SabotageDurationSols = Defs->GetConfigScalar(FName("SabotageDurationSols"), SabotageDurationSols);
 	SabotageHiddenTension = Defs->GetConfigScalar(FName("SabotageHiddenTension"), SabotageHiddenTension);
 	DiscoveryChancePerSurvey = Defs->GetConfigScalar(FName("DiscoveryChancePerSurvey"), DiscoveryChancePerSurvey);
+	Influence = Defs->GetConfigScalar(FName("InfluenceStart"), Influence);
+	InfluencePerTrade = Defs->GetConfigScalar(FName("InfluencePerTrade"), InfluencePerTrade);
+	InfluencePerLaunder = Defs->GetConfigScalar(FName("InfluencePerLaunder"), InfluencePerLaunder);
+	InfluenceDriftPerSol = Defs->GetConfigScalar(FName("InfluenceDriftPerSol"), InfluenceDriftPerSol);
+	EarthPreemptiveThreshold = Defs->GetConfigScalar(FName("EarthPreemptiveThreshold"), EarthPreemptiveThreshold);
+	EmbargoGraceSols = Defs->GetConfigScalar(FName("EmbargoGraceSols"), EmbargoGraceSols);
+	PacifyInfluenceCost = Defs->GetConfigScalar(FName("PacifyInfluenceCost"), PacifyInfluenceCost);
+	PacifyTensionRelief = Defs->GetConfigScalar(FName("PacifyTensionRelief"), PacifyTensionRelief);
+	HumanNaturePacifyShift = Defs->GetConfigScalar(FName("HumanNaturePacifyShift"), HumanNaturePacifyShift);
+	DefectRelationFloor = Defs->GetConfigScalar(FName("DefectRelationFloor"), DefectRelationFloor);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -2862,6 +2872,16 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s's production is disrupted (sabotage) - no trade until they recover"), *Rival->DisplayName));
 			return;
 		}
+		if (DefectedRivals.Contains(Cmd.Target))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s defected to Earth - relations are hostile, no trade"), *Rival->DisplayName));
+			return;
+		}
+		if (EmbargoGrace.Contains(Cmd.Target))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has embargoed you under Earth pressure - pacify them first"), *Rival->DisplayName));
+			return;
+		}
 		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
 		// overlapping resources - so preflight and commit validate/spend the
 		// identical sum. (Adversarial review, M3 Gate A: three independent checks
@@ -2937,6 +2957,16 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// M4 Gate B: a covert blackout that disrupts a rival's trade.
 		FString Reason;
 		if (!ResolveSabotage(Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else if (Cmd.Verb == FName("Pacify"))
+	{
+		// M4 Gate C: spend Influence to lift an Earth-ordered embargo.
+		FString Reason;
+		if (!ResolvePacify(Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -3085,8 +3115,10 @@ void URHSimWorldSubsystem::StepTrade(float SubDt)
 	double& Rel = RelationRef(Done);
 	Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
 	// Fair dealing is who you are: an honest completed trade nudges the
-	// HumanNature axis toward Evolved/Diplomatic (M4 Gate A).
+	// HumanNature axis toward Evolved/Diplomatic (M4 Gate A) and earns diplomatic
+	// influence (M4 Gate C - the peaceful path earns the tools of peace).
 	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureFairTradeShift, -100.0, 100.0);
+	Influence += InfluencePerTrade;
 	OnAlert.Broadcast(FString::Printf(
 		TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
 		*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
@@ -3270,6 +3302,7 @@ bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
 	double& Rel = RelationRef(Rival);
 	Rel = FMath::Clamp(Rel + LaunderRelationBonus, 0.0, 100.0);
 	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureLaunderShift, -100.0, 100.0);
+	Influence += InfluencePerLaunder; // visible goodwill builds diplomatic standing (M4 Gate C)
 	OnAlert.Broadcast(FString::Printf(
 		TEXT("AMENDS MADE — a gift returned to %s (%s). Hidden tension eases; relations warm."),
 		*Row->DisplayName, *Row->ImportLot));
@@ -3377,6 +3410,128 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 			}
 		}
 	}
+	// Earth's pre-emptive pressure (M4 Gate C) shares the same live-once-you-have-
+	// neighbors gate.
+	StepPreemptive(SubDt);
+}
+
+double URHSimWorldSubsystem::GetEmbargoGrace(FName Rival) const
+{
+	const double* G = EmbargoGrace.Find(Rival);
+	return G ? *G : 0.0;
+}
+
+FName URHSimWorldSubsystem::GetEmbargoingRival() const
+{
+	// The soonest-to-defect embargoing rival (deterministic: least grace, then
+	// name), so the deck names one clear target to pacify.
+	FName Best = NAME_None;
+	double BestGrace = TNumericLimits<double>::Max();
+	for (const auto& Pair : EmbargoGrace)
+	{
+		if (Pair.Value < BestGrace || (Pair.Value == BestGrace && (Best.IsNone() || Pair.Key.LexicalLess(Best))))
+		{
+			BestGrace = Pair.Value;
+			Best = Pair.Key;
+		}
+	}
+	return Best;
+}
+
+void URHSimWorldSubsystem::StepPreemptive(float SubDt)
+{
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+
+	// Influence drifts up scaled by POSITIVE HumanNature - the Evolved path earns
+	// the diplomatic capital that buys pacification. Linear = parity-safe.
+	const double Evolved = FMath::Max(0.0, HumanNatureAxis / 100.0);
+	Influence += InfluenceDriftPerSol * Evolved * DtSols;
+
+	// Embargo grace timers count down; expiry hardens into a DEFECTION.
+	if (EmbargoGrace.Num() > 0)
+	{
+		for (auto It = EmbargoGrace.CreateIterator(); It; ++It)
+		{
+			It.Value() -= DtSols;
+			if (It.Value() <= 0.0)
+			{
+				const FName Name = It.Key();
+				It.RemoveCurrent();
+				DefectedRivals.Add(Name);
+				double& Rel = RelationRef(Name);
+				Rel = FMath::Min(Rel, DefectRelationFloor);
+				const FRHRivalRow* Row = Defs ? Defs->GetRival(Name) : nullptr;
+				OnAlert.Broadcast(FString::Printf(
+					TEXT("DEFECTION — %s has sided with Earth. The route is closed and relations are locked hostile."),
+					Row ? *Row->DisplayName : *Name.ToString()));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== DEFECTION: %s (relation %.0f) ==="),
+					Row ? *Row->DisplayName : *Name.ToString(), Rel);
+			}
+		}
+	}
+
+	// Trigger a new embargo when Earth tension is high, nobody is currently
+	// embargoed (one incoming crisis at a time), and there is an eligible target
+	// (available, not closed, not already defected). Deterministic pick: highest
+	// public relation - Earth leans hardest on your closest friend (the betrayal
+	// hurts most, and matches the "trusting ally" moral trap of the covert layer).
+	if (EarthTension >= EarthPreemptiveThreshold && EmbargoGrace.Num() == 0)
+	{
+		FName Target = NAME_None;
+		double BestRel = -1.0;
+		if (Defs)
+		{
+			Defs->ForEachRivalRow([&](FName Name, const FRHRivalRow&)
+			{
+				if (!IsRivalAvailable(Name) || ClosedRoutes.Contains(Name) || DefectedRivals.Contains(Name))
+				{
+					return;
+				}
+				const double Rel = GetRivalRelation(Name);
+				if (Rel > BestRel || (Rel == BestRel && (Target.IsNone() || Name.LexicalLess(Target))))
+				{
+					BestRel = Rel;
+					Target = Name;
+				}
+			});
+		}
+		if (!Target.IsNone())
+		{
+			EmbargoGrace.Add(Target, EmbargoGraceSols);
+			const FRHRivalRow* Row = Defs->GetRival(Target);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("EARTH LEANS ON %s — under pressure from Earth, they have suspended trade with you. Pacify them within %.0f sols or they defect."),
+				Row ? *Row->DisplayName : *Target.ToString(), EmbargoGraceSols));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== EMBARGO: %s (Earth tension %.0f, grace %.0f sols) ==="),
+				Row ? *Row->DisplayName : *Target.ToString(), EarthTension, EmbargoGraceSols);
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
+{
+	if (!EmbargoGrace.Contains(Rival))
+	{
+		OutReason = FString::Printf(TEXT("%s is not under an Earth embargo to lift"), *Rival.ToString());
+		return false;
+	}
+	if (Influence < PacifyInfluenceCost)
+	{
+		OutReason = FString::Printf(TEXT("Not enough Influence to pacify (%.0f needed, %.0f on hand)"),
+			PacifyInfluenceCost, Influence);
+		return false;
+	}
+	Influence -= PacifyInfluenceCost;
+	EmbargoGrace.Remove(Rival);
+	EarthTension = FMath::Clamp(EarthTension - PacifyTensionRelief, 0.0, 100.0);
+	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNaturePacifyShift, -100.0, 100.0);
+	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
+	OnAlert.Broadcast(FString::Printf(
+		TEXT("PACIFIED — %s sees reason and ignores Earth's order. Trade resumes; tension eases."),
+		Row ? *Row->DisplayName : *Rival.ToString()));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== PACIFIED: %s (influence %.0f, tension %.0f) ==="),
+		Row ? *Row->DisplayName : *Rival.ToString(), Influence, EarthTension);
+	return true;
 }
 
 bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
@@ -4536,6 +4691,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Discovered.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
 		Ar << SabotageSols << Discovered;
 	}
+	// Earth's pre-emptive pressure (save v22).
+	{
+		TArray<FName> Defected = DefectedRivals.Array();
+		Defected.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
+		Ar << EmbargoGrace << Defected << Influence;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4755,6 +4916,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << SabotageSols << Discovered;
 		DiscoveredRivals.Empty();
 		DiscoveredRivals.Append(Discovered);
+	}
+	// Earth's pre-emptive pressure (save v22).
+	{
+		TArray<FName> Defected;
+		EmbargoGrace.Empty();
+		Ar << EmbargoGrace << Defected << Influence;
+		DefectedRivals.Empty();
+		DefectedRivals.Append(Defected);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

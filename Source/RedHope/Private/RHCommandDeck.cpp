@@ -1024,10 +1024,17 @@ FText SRHCommandDeck::GetCrewText() const
 		{
 			Text += FString::Printf(TEXT("   %d route(s) closed"), Sim->GetClosedRouteCount());
 		}
+		Text += FString::Printf(TEXT("   influence %.0f"), Sim->GetInfluence());
 		if (Sim->IsEarthDemandPending())
 		{
 			// Placeholder prompt (Gate-D framing review owns the final wording).
 			Text += TEXT("\n  >> EARTH DEMANDS YOU CUT TRADE  ·  RH.Solidarity comply / defy");
+		}
+		const FName Embargo = Sim->GetEmbargoingRival();
+		if (!Embargo.IsNone())
+		{
+			Text += FString::Printf(TEXT("\n  >> %s EMBARGOED YOU (%.1f sols to defection)  ·  RH.Pacify %s"),
+				*Embargo.ToString(), Sim->GetEmbargoGrace(Embargo), *Embargo.ToString());
 		}
 		// The HumanNature axis reads once it has moved off center (M4).
 		const double HN = Sim->GetHumanNatureAxis();
