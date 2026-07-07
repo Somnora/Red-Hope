@@ -1,5 +1,14 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 18 (M1-c Gate A VERIFIED in-engine: the storm/flare arc end-to-end)
+
+- **DT_Events created via MCP** (FRHEventRow schema; canon rows Storm_1 sols 12–15 ×0.3 + Flare_1 sol 17 ×3, plus TEST rows Storm_T sol 2 / Flare_T sol 4 so verification and hand-play reach weather in minutes — TEST rows removed at M1-c close). `events=4` confirmed at boot.
+- **BP_M1cTest headless run (~6.5 min at 8×), all pass:**
+  - `ERA REFUSED: DustStorm imminent - holding 8x` then `ERA REFUSED: SolarFlare imminent` — both auto-drops fired at exactly the onset horizon, restoring the agent speed (never dumping to 1×).
+  - Mid-storm status: `EVENT: DustStorm until sol 3.0 (severity 0.30; dust factor now 0.30)`, midday gen 309 W vs 1199 W clear-sky midday two sols later — the collapse is the data row. Colony rode the bank (6000 → 2838 Wh overnight) and came out clean.
+  - Flare: `EVENT: SolarFlare (severity 3.00; dust factor 1.00)` — flares don't dim, they irradiate; working robots' wear visibly accelerated through the flare window (RC-E ~+3.0 wear in 0.3 sol vs ~+1 baseline), idle robots untouched. The tax reads exactly as designed: exertion under an angry sky costs triple.
+- Harness retired from L_Slice by commit (asset stays in Core). Director hand-play of the M1-c surfaces is the remaining stage gate: storm banner + darkened sun at sol 2, uplink-panel order cancel, sparklines through the storm.
+
 ## 2026-07-07 — Session 17 (M1-c Gate A verified by paired-run iteration; Gate B flare tax + Gate C UI written)
 
 - **The paired-run harness earned its keep — four era-leg iterations, each fix a physical constraint, never a tuning knob** (same sol-3 save; agent 8× vs era 60× to sol 9; `RH.Ledger` diff):
