@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 35 (structure: DISCOVERIES — the Flourishing layer, "LIFE ON MARS")
+
+- **Director:** deadline extended; "keep working on discoveries." Built + verified (`6913c7c` data, `37900d9` code, save v16).
+- **The layer:** a new `FRHDiscoveryRow` + `RH_Discoveries.csv` authored sequence — Hardy Crop Strain → Regolith Ceramics → Subsurface Brine Seep → **Subsurface Microbial Life ("LIFE ON MARS — we are not the first.")** — each with a `LabSeatHours` research cost, a **permanent Hope milestone** (momentum, brief §5), an optional stock reward, and a player-facing banner (Gate-D placeholder). Sorted by authored `Order`, never map iteration: deterministic, zero RNG.
+- **The loop:** `StepDiscovery` (both bands) — staffed **Lab seats** accrue seat-hours while smoothed Hope holds above `HopeDiscoveryThreshold` (85): **breakthroughs are earned by sustained flourishing, not a tech-tree grind.** Crossing a row's cost pops it (reward + banner; spillover carries to the next row). Progress *keeps* across a pause — knowledge doesn't evaporate, accrual just stops. Zero-pop / no-Lab / absent-table = no-op → baselines byte-identical.
+- **Instruments:** deck "RESEARCH — next discovery N%" (only while accruing) + "discoveries: N"; `RH.Discoveries` cheat; `Debug_InjectDiscovery` lazily creates a transient table (the DT asset doesn't exist until its first editor import).
+- `-discovery` self-test all EXACT on the first run (gate holds below threshold; CropStrain +50 Seeds, milestones 5→7; RegolithCeramics +100 Struct exactly on spillover, milestones 9; next=SubsurfaceBrine; v16 round-trip preserves the log + partial progress 0.418). All 12 suites green; 10-sol baseline byte-identical.
+- **The Hope arc is now complete end-to-end:** rooms/comforts/water feed Hope → Hope drives work tempo → sustained thriving grows the colony (first Martian-born child) → sustained flourishing uncovers discoveries → discoveries and births feed Hope back as permanent milestones. Every payoff the design panel proposed for Hope is live.
+- **Pending DT sync (next editor session):** DT_Discoveries import (new asset) + HopeDiscoveryThreshold + everything queued from Sessions 30–34. Save v16 invalidates on-disk saves.
+
 ## 2026-07-07 — Session 34 (structure: the Generational Carrot — the Hope payoff, first Martian-born child)
 
 - **Built (`carrot`, save v15):** what a FLOURISHING colony EARNS — the brief's Hope→birth-rate consumer (§5/§76). `StepGrowth` (both bands) streaks the sols where smoothed Hope ≥ `HopeGrowthThreshold` (75) AND a certified bed is free AND a real Food buffer exists (`HopeGrowthFoodBufferSols` — no birthing into a famine); crossing `HopeGrowthIntervalSols` grows the colony by one via the existing housing path; the streak RESETS if conditions lapse (earned, not banked). Threshold-on-monotone-accumulator = era-parity-safe (zero-pop = no-op, baseline byte-identical).
