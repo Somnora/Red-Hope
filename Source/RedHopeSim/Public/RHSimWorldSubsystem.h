@@ -153,6 +153,17 @@ public:
 	// works through, batch by batch.
 	int32 GetBoreTargetDepth() const { return BoreTargetDepth; }
 	int32 GetCarveQueued(int32 Level) const { const int32* C = CarveQueue.Find(Level); return C ? *C : 0; }
+
+	// --- Habitability chain (M1-d Gate B) ---
+	// A carved floor is bored -> shielded (free from overburden; the M1-c
+	// radiation curve) -> oxygenated (O2 fill mass scaling with carved volume,
+	// pushed down the trunk by a circulator) -> circulated (a completed,
+	// powered CirculatesAir station on the floor) before it rates Livable.
+	// Dig wide without the ISRU to match and it stays a spacesuit-only void.
+	double GetFloorO2Kg(int32 Level) const { const double* V = FloorO2Kg.Find(Level); return V ? *V : 0.0; }
+	double GetFloorO2RequiredKg(int32 Level) const { return GetFloorCarvedCells(Level) * O2FillKgPerCell; }
+	bool IsFloorCirculated(int32 Level) const;
+	bool IsFloorRated(int32 Level) const { return RatedFloors.Contains(Level); }
 	// Bore the trunk down to ToDepth floors below surface (clamped to MaxDepth);
 	// emits shaft spoil per newly bored floor. The shaft head (surface column)
 	// is fixed on the first bore. Never retracts.
@@ -321,6 +332,10 @@ private:
 	void StepProduction(float SubDt);
 	void StepQuota();
 	void StepPower(float SubDt);
+	// Habitability integrator (M1-d Gate B): leak drains every pressurized
+	// floor; a circulator tops it back up from the colony O2 pool. Runs in
+	// BOTH bands (dimensionally honest like StepProduction).
+	void StepHabitability(float SubDt);
 	void ApplyManifestItemEffect(FName ItemName);
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0);
@@ -402,6 +417,18 @@ private:
 	// Y: level). Applied at batch completion; serialized so a mid-batch save
 	// resumes and still advances the shaft.
 	TMap<int32, FIntPoint> PendingBoreWork;
+	// Habitability chain state (M1-d Gate B; serialized, save v7). O2 fill per
+	// floor in kg; RatedFloors = floors currently holding a Livable rating
+	// (hysteresis: rated at 100% fill, lost below 98% - a dry O2 pool drains
+	// the floor through leakage and the loss is announced, not silent).
+	TMap<int32, double> FloorO2Kg;
+	TSet<int32> RatedFloors;
+	// DT_Config rows (CSV-staged defaults): fill mass per carved 10x10 cell,
+	// leak per cell per sol (the standing tax of pressurized volume), and the
+	// trunk's push rate per floor per sol-hour.
+	double O2FillKgPerCell = 100.0;
+	double O2LeakKgPerCellPerSol = 2.0;
+	double O2FillRateKgPerHour = 20.0;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;

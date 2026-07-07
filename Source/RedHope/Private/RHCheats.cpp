@@ -177,6 +177,27 @@ static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
+	TEXT("RH.Habitat"),
+	TEXT("RH.Habitat - log every subsurface floor's habitability chain: carved, O2 fill/required, circulation, rating."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Habitat] shaft -%d | colony O2 %.0f kg"),
+			Sim->GetShaftDepth(), Sim->GetStock(FName("Oxygen")));
+		for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+		{
+			const int32 Cells = Sim->GetFloorCarvedCells(L);
+			if (Cells == 0 && !Sim->IsLevelConnected(L)) { continue; }
+			UE_LOG(LogRedHope, Display, TEXT("  floor %d: %d cell(s) | O2 %.0f / %.0f kg | circulation %s | %s"),
+				L, Cells, Sim->GetFloorO2Kg(L), Sim->GetFloorO2RequiredKg(L),
+				Sim->IsFloorCirculated(L) ? TEXT("ON") : TEXT("off"),
+				Sim->IsFloorRated(L) ? TEXT("LIVABLE") : TEXT("suit-only"));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHFloor(
 	TEXT("RH.Floor"),
 	TEXT("RH.Floor <Level> - ride the elevator: 0 = surface, -N = subsurface floor (camera, slice view, and order Level follow)."),

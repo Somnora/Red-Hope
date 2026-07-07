@@ -125,6 +125,70 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M1-d Gate B self-test: the habitability chain - carve, circulate,
+	// oxygen fill from the pool, Livable rating edges (gained + lost via
+	// leakage), save v7 round-trip. `-habitat`.
+	if (FParse::Param(*Params, TEXT("habitat")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== HABITAT CHAIN TEST (M1-d Gate B) ==="));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// The live DT predates the CirculatesAir column; patch ChargePad's row
+		// in memory (the Borer-test pattern) - the code path is what's proven
+		// headless, the AirFilter DT row proves the data in-editor.
+		FRHBuildingRow* PadRow = const_cast<FRHBuildingRow*>(DefsSub ? DefsSub->GetBuilding(FName("ChargePad")) : nullptr);
+		if (!PadRow)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("HABITAT: no ChargePad row"));
+			return 1;
+		}
+		PadRow->CirculatesAir = true;
+
+		const FVector Head(1000.f, 1000.f, 0.f);
+		FString R;
+		Sim->ExtendShaft(1, Head);
+		Sim->ExcavateFloor(-1, 2, R);          // 2 cells -> 200 kg O2 required
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->AddStock(FName("Oxygen"), 500.0);
+
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT no circulator: O2 fill %.0f (expect 0 - the chain's last link is missing)"),
+			Sim->GetFloorO2Kg(-1));
+
+		Sim->Debug_PlaceInstant(FName("ChargePad"), FVector(1000.f, 1500.f, 0.f), -1); // the patched circulator, ON the floor
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT circulator on: O2 fill %.0f / %.0f, rated=%d (expect 200/200, rated 1)"),
+			Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1), (int32)Sim->IsFloorRated(-1));
+
+		FString Err;
+		Sim->SaveColony(TEXT("habitattest"), Err);
+		Sim->LoadColony(TEXT("habitattest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT save/load v7: fill %.0f rated=%d (expect 200, 1)"),
+			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1));
+		// Reload rebuilt the DT-backed defs? No - rows live in the table asset;
+		// the patched flag persists for this process. Drain the pool: leakage
+		// alone must drop the floor below 98% and announce the loss.
+		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
+		RunSols(3.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT pool dry 3 sols: fill %.0f, rated=%d (expect < 196, rated 0 - loss announced)"),
+			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== HABITAT TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M1-d Gate A self-test: the shaft/excavation model, the subsurface build
 	// rule, radiation payoff, and save v5 round-trip - all deterministic, no
 	// time integration needed. `-vault` runs it and exits.

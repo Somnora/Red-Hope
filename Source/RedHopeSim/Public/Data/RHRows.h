@@ -64,6 +64,9 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// M1-d Gate A2: this definition works bore/carve designations (the Borer).
 	// The designation queue is the gate - its recipes never auto-start.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool CanBore = false;
+	// M1-d Gate B: a completed, powered instance circulates a floor's air -
+	// the "circulate" link of the habitability chain (AirFilter station).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool CirculatesAir = false;
 	// M1-d Gate A2: >0 means a batch burns Hydrogen stock (kg per sol-hour,
 	// whole batch deducted up-front, committed like extraction) instead of
 	// drawing grid power - and runs straight through shedding. 0 = grid only.

@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 20e (M1-d Gate B core: the habitability chain, verified headless; save v7)
+
+- **A carved floor is not a home** — the chain lands: bored (Gate A) → **shielded** (free from overburden, the M1-c radiation curve) → **oxygenated** (O2 fill mass = carved cells × `O2FillKgPerCell`, drawn from the colony pool and pushed down the trunk) → **circulated** (a completed, POWERED `CirculatesAir` station on the floor — the chain's last link; no circulator, no fill) → **rated LIVABLE**. Dig wide without the ISRU to match and it stays a spacesuit-only void — the underground ruling's core loop, now enforced.
+- **Leakage is the standing tax:** every pressurized cell leaks `O2LeakKgPerCellPerSol`; a dry O2 pool drains the floor and the rating is LOST loudly (banner alert both ways; hysteresis rated-at-100%/lost-below-98% keeps healthy equilibrium from flapping). Deliberate tension flagged: the vault and the Q1 quota now compete for the same Oxygen pool.
+- **AirFilter station** (CSV row, `CirculatesAir=TRUE`, 200 W, Struct:80, sheds late at priority 8 — life support): buildable on any reached floor; the habitat vision wants these THROUGHOUT in M2 — same schema. New row-struct column `CirculatesAir` (compile-gated; **DT sync next editor session** with the Borer columns).
+- **StepHabitability** runs in BOTH bands (dimensionally honest like StepProduction — era-safe by construction). **Save v7** (per-floor O2 fill + ratings; v6 refuses). Config rows staged in CSV: `O2FillKgPerCell` 100 / `O2LeakKgPerCellPerSol` 2 / `O2FillRateKgPerHour` 20.
+- **Legibility:** elevator floor cells gain a **●** when rated Livable; `RH.Habitat` logs every floor's chain state (carved / O2 fill vs required / circulation / rating).
+- **Verified headless (`-run=RHSim -habitat`), every number exact:** no circulator → fill 0 after a sol; circulator placed on −1 → 200/200 kg and **RATED LIVABLE announced**; save/load v7 keeps fill + rating; pool drained → leak crossed 98% (196/200) with **loss announced**, 188 kg after 3 sols. `-borer`/`-vault`/10-sol regressions all green. Compile clean first try (56 s). Headless caveat as before: ChargePad row patched in memory for CirculatesAir (code proven; AirFilter DT row proves data in-editor).
+- **Gate B remaining:** the shielding build tax (surface `Shielding:N` cost line + `MakeShielding` activation — next increment), then the Gate C exit card.
+
 ## 2026-07-07 — Session 20d (M1-d Gate A2 presentation: elevator + paint-to-size excavation + sliced-floor view, headless-smoked)
 
 - **The elevator is live** (the M1-b shaft-strip stub grows up): each `SURF · −1 … −5` cell is a button; clicking rides the whole view to that floor — camera focus plane drops (`SetFocusZCm`), the colony mirror slices, orders target that Level. Cell states: bright teal = current floor, slate = trunk reaches it, dark = solid rock; carved-cell counts inline (`-1 ▦5`). `RH.Floor <L>` console equivalent.

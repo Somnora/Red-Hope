@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 6;   // v6: bore/carve designations + H2 batch flag (M1-d Gate A2); v5 added shaft state
+	constexpr uint32 RHSaveVersion = 7;   // v7: habitability (floor O2 fill + ratings, Gate B); v6 designations/H2; v5 shaft
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -91,6 +91,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	RadiationPerLevelMul = (float)Defs->GetConfigScalar(FName("RadiationPerLevelMul"), RadiationPerLevelMul);
 	ShaftSpoilKgPerFloor = Defs->GetConfigScalar(FName("ShaftSpoilKgPerFloor"), ShaftSpoilKgPerFloor);
 	SpoilKgPerCell = Defs->GetConfigScalar(FName("SpoilKgPerCell"), SpoilKgPerCell);
+	O2FillKgPerCell = Defs->GetConfigScalar(FName("O2FillKgPerCell"), O2FillKgPerCell);
+	O2LeakKgPerCellPerSol = Defs->GetConfigScalar(FName("O2LeakKgPerCellPerSol"), O2LeakKgPerCellPerSol);
+	O2FillRateKgPerHour = Defs->GetConfigScalar(FName("O2FillRateKgPerHour"), O2FillRateKgPerHour);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -243,6 +246,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepUplink();
 	StepTaskBoard();
 	StepProduction(SubDt);
+	StepHabitability(SubDt);
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -370,6 +374,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepUplink();
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
+	StepHabitability(DtSimSeconds);
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -1106,6 +1111,77 @@ float URHSimWorldSubsystem::GetRadiationNow(int32 Level) const
 		}
 	}
 	return Rad;
+}
+
+bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level == Level && !B.bUnderConstruction && B.bPowered)
+		{
+			const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+			if (Def && Def->CirculatesAir)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::StepHabitability(float SubDt)
+{
+	static const FName NOxygen(TEXT("Oxygen"));
+	for (int32 Level = -1; Level >= -MaxDepth; --Level)
+	{
+		const int32 Cells = GetFloorCarvedCells(Level);
+		if (Cells == 0 || !IsLevelConnected(Level))
+		{
+			continue;
+		}
+		const double RequiredKg = Cells * O2FillKgPerCell;
+		double& FillKg = FloorO2Kg.FindOrAdd(Level);
+
+		// Pressurized volume leaks - always. The standing tax of living in
+		// what you dug; abandonment drains loudly instead of holding forever.
+		FillKg = FMath::Max(0.0, FillKg - Cells * O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
+
+		// The trunk pushes O2 down; a powered circulator on the floor is what
+		// actually moves air (no circulator, no fill - the chain's last link).
+		if (IsFloorCirculated(Level))
+		{
+			const double WantKg = FMath::Min(O2FillRateKgPerHour * (SubDt / 50.0), RequiredKg - FillKg);
+			if (WantKg > 0.0)
+			{
+				const double TakeKg = FMath::Min(WantKg, GetStock(NOxygen));
+				if (TakeKg > 0.0)
+				{
+					AddStock(NOxygen, -TakeKg);
+					FillKg += TakeKg;
+				}
+			}
+		}
+
+		// Rating edges announce banner-weight: rated at full fill + circulation,
+		// lost below 98% (hysteresis keeps a healthy equilibrium from flapping).
+		const bool bWasRated = RatedFloors.Contains(Level);
+		if (!bWasRated && IsFloorCirculated(Level) && FillKg >= RequiredKg - KINDA_SMALL_NUMBER && RequiredKg > 0.0)
+		{
+			RatedFloors.Add(Level);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("FLOOR %d RATED LIVABLE — %d cell(s) pressurized and circulated, shielded under %d floor(s) of overburden."),
+				Level, Cells, -Level));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d RATED LIVABLE (%d cells, %.0f kg O2) ==="), Level, Cells, FillKg);
+		}
+		else if (bWasRated && (FillKg < RequiredKg * 0.98 || !IsFloorCirculated(Level)))
+		{
+			RatedFloors.Remove(Level);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("FLOOR %d LOST ITS HABITABILITY RATING — %s. Restore oxygen supply."),
+				Level, IsFloorCirculated(Level) ? TEXT("oxygen fill below requirement") : TEXT("air circulation down")));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d LOST HABITABILITY (%.0f / %.0f kg O2) ==="), Level, FillKg, RequiredKg);
+		}
+	}
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
@@ -2446,6 +2522,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	// Shaft & excavation + designations (save v5/v6).
 	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
+	// Habitability chain (save v7).
+	Ar << FloorO2Kg << RatedFloors;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -2592,6 +2670,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	CarveQueue.Empty();
 	PendingBoreWork.Empty();
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
+	// Habitability chain (save v7).
+	FloorO2Kg.Empty();
+	RatedFloors.Empty();
+	Ar << FloorO2Kg << RatedFloors;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

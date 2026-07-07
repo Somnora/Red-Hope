@@ -950,12 +950,14 @@ FText SRHCommandDeck::GetFloorLabel(int32 Level) const
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	const int32 Carved = Sim ? Sim->GetFloorCarvedCells(Level) : 0;
 	const int32 Queued = Sim ? Sim->GetCarveQueued(Level) : 0;
+	// ● = rated Livable (the habitability chain complete on this floor).
+	const TCHAR* Rated = (Sim && Sim->IsFloorRated(Level)) ? TEXT(" ●") : TEXT("");
 	if (Carved > 0 || Queued > 0)
 	{
-		return FText::FromString(FString::Printf(TEXT("%d ▦%d%s"), Level, Carved,
-			Queued > 0 ? TEXT("+") : TEXT("")));
+		return FText::FromString(FString::Printf(TEXT("%d ▦%d%s%s"), Level, Carved,
+			Queued > 0 ? TEXT("+") : TEXT(""), Rated));
 	}
-	return FText::FromString(FString::Printf(TEXT("%d"), Level));
+	return FText::FromString(FString::Printf(TEXT("%d%s"), Level, Rated));
 }
 
 FSlateColor SRHCommandDeck::GetFloorCellColor(int32 Level) const
