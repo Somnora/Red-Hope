@@ -815,8 +815,11 @@ FText SRHCommandDeck::GetCrewText() const
 	const double FoodKg = Sim->GetStock(FName("Food"));
 	const int32 Pop = Sim->GetPopulation();
 	const double SolsOfFood = Pop > 0 ? FoodKg / (Pop * Sim->GetColonistFoodKgPerSol()) : 0.0;
-	FString Text = FString::Printf(TEXT("CREW %d   beds %d free   Food %.0f kg (~%.0f sols)"),
-		Pop, Sim->GetFreeHousing(), FoodKg, SolsOfFood);
+	const double WaterKg = Sim->GetStock(FName("Water"));
+	const double Potability = Sim->GetWaterPotability();
+	FString Text = FString::Printf(TEXT("CREW %d   beds %d free   Food %.0f kg (~%.0f sols)   Water %.0f kg  potability %.0f%%%s"),
+		Pop, Sim->GetFreeHousing(), FoodKg, SolsOfFood, WaterKg, Potability * 100.0,
+		Potability < Sim->GetWaterPotabilityFloor() ? TEXT("  LOW") : TEXT(""));
 	// The Hope index (M2 Gate B): the number plus the two levers a player can
 	// actually pull right now. Neutral placeholder wording (Gate-D review).
 	const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();

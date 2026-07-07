@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 13;  // v13: Hope-drives (smoothed+band); v12 garden; v11 rooms; v10 colonists
+	constexpr uint32 RHSaveVersion = 14;  // v14: water potability; v13 Hope-drives; v12 garden; v11 rooms; v10 colonists
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -115,6 +115,12 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenGrowLightWPerCell = Defs->GetConfigScalar(FName("GardenGrowLightWPerCell"), GardenGrowLightWPerCell);
 	GreenhouseGlassKgPerCell = Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), GreenhouseGlassKgPerCell);
 	GreenhouseMinLevel = (int32)Defs->GetConfigScalar(FName("GreenhouseMinLevel"), GreenhouseMinLevel);
+	ColonistWaterKgPerSol = Defs->GetConfigScalar(FName("ColonistWaterKgPerSol"), ColonistWaterKgPerSol);
+	GreywaterReturnFraction = Defs->GetConfigScalar(FName("GreywaterReturnFraction"), GreywaterReturnFraction);
+	WaterPotabilityDecayPerSol = Defs->GetConfigScalar(FName("WaterPotabilityDecayPerSol"), WaterPotabilityDecayPerSol);
+	WaterPotabilityRestorePerKg = Defs->GetConfigScalar(FName("WaterPotabilityRestorePerKg"), WaterPotabilityRestorePerKg);
+	WaterPotabilityFloor = Defs->GetConfigScalar(FName("WaterPotabilityFloor"), WaterPotabilityFloor);
+	HopeWaterPenalty = Defs->GetConfigScalar(FName("HopeWaterPenalty"), HopeWaterPenalty);
 	LuxuryKgPerColonistPerSol = Defs->GetConfigScalar(FName("LuxuryKgPerColonistPerSol"), LuxuryKgPerColonistPerSol);
 	HopeLuxuryBonus = Defs->GetConfigScalar(FName("HopeLuxuryBonus"), HopeLuxuryBonus);
 	HopeSmoothTauSols = Defs->GetConfigScalar(FName("HopeSmoothTauSols"), HopeSmoothTauSols);
@@ -919,6 +925,13 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 						else
 						{
 							AddStock(Res.Key, Res.Value);
+							// Fresh ice-melt makeup restores water potability (M2
+							// Gate D+ water loop). MeltIce is the only Water output;
+							// StepPopulation consumes this and resets it each step.
+							if (Res.Key == FName("Water"))
+							{
+								FreshWaterThisStepKg += Res.Value;
+							}
 						}
 					}
 					PendingOutputs.Remove(B.Id);
@@ -1751,12 +1764,14 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	if (Colonists.Num() == 0)
 	{
 		ComfortsSupplied = 0;
+		FreshWaterThisStepKg = 0.0; // no consumer to fold it into potability
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
-	static const FName NFood(TEXT("Food"));
+	static const FName NFood(TEXT("Food")), NWater(TEXT("Water"));
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 
 	int32 SuppliedThisStep = 0;
+	double WaterDrawnThisStep = 0.0; // for greywater reclaim + potability
 	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
 	{
 		FRHColonist& C = Colonists[i];
@@ -1784,6 +1799,17 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			bFed = true;
 		}
 
+		// Drink: pooled Water (M2 Gate D+ water loop). Part of the support
+		// contract - no water is as fatal as no air/food (the ice-cap imperative).
+		bool bWatered = false;
+		const double NeedWater = ColonistWaterKgPerSol * DtSols;
+		if (GetStock(NWater) >= NeedWater)
+		{
+			AddStock(NWater, -NeedWater);
+			WaterDrawnThisStep += NeedWater;
+			bWatered = true;
+		}
+
 		// Comforts (M2 Gate D, abstract): a luxury ration when stocked. Never
 		// part of the support contract - going without lifts nothing, costs
 		// nothing (prevention framing; Gate-D review owns all wording).
@@ -1795,15 +1821,16 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			++SuppliedThisStep;
 		}
 
-		const bool bNowSupported = bAir && bFed;
+		const bool bNowSupported = bAir && bFed && bWatered;
 		if (C.bSupported && !bNowSupported)
 		{
 			// Edge alert: name the missing leg so the fix is obvious.
+			const TCHAR* Leg = !bAir ? TEXT("home floor lost its air")
+				: (!bWatered ? TEXT("water tanks empty") : TEXT("food stores empty"));
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
-				*C.Name, bAir ? TEXT("food stores empty") : TEXT("home floor lost its air"), ColonistEvacSols));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="),
-				*C.Name, bAir ? TEXT("no food") : TEXT("no air"));
+				*C.Name, Leg, ColonistEvacSols));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="), *C.Name, Leg);
 		}
 		C.bSupported = bNowSupported;
 
@@ -1827,6 +1854,35 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		}
 	}
 	ComfortsSupplied = SuppliedThisStep;
+
+	// The water loop (M2 Gate D+). Recycling reclaims most of what the crew
+	// drank - stretching the supply - but every cycle degrades POTABILITY. Only
+	// fresh ice-melt makeup (tracked at the MeltIce seam) restores it. Both the
+	// decay and the restore are LINEAR (per-sol / per-kg), so the running value
+	// integrates identically in the agent band and the 60x era band.
+	if (WaterDrawnThisStep > 0.0)
+	{
+		AddStock(NWater, WaterDrawnThisStep * GreywaterReturnFraction);
+	}
+	if (Colonists.Num() > 0)
+	{
+		WaterPotability -= WaterPotabilityDecayPerSol * DtSols;
+	}
+	WaterPotability += FreshWaterThisStepKg * WaterPotabilityRestorePerKg;
+	WaterPotability = FMath::Clamp(WaterPotability, 0.0, 1.0);
+	FreshWaterThisStepKg = 0.0; // consumed; reset before the next StepProduction
+
+	// Grim-water edge: one alert per episode when potability drops through the
+	// floor, cleared when fresh water lifts it back (prevention framing).
+	if (WaterPotability < WaterPotabilityFloor && !bWaterQualityAnnounced)
+	{
+		bWaterQualityAnnounced = true;
+		OnAlert.Broadcast(TEXT("WATER QUALITY LOW — the crew is drinking heavily-recycled water. Drill the ice caps to restore it."));
+	}
+	else if (WaterPotability >= WaterPotabilityFloor)
+	{
+		bWaterQualityAnnounced = false;
+	}
 }
 
 FIntPoint URHSimWorldSubsystem::SpiralCell(int32 Index)
@@ -2063,9 +2119,16 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			Out.UnsupportedPenalty += HopeUnsupportedPenalty;
 		}
 	}
+	// Water quality (M2 Gate D+): grim recycled water saps morale below the
+	// potability floor - the first scarcity-driven Hope input. Scales with how
+	// far below the floor; zero at/above it (fresh ice keeps it painless).
+	if (Pop > 0 && WaterPotability < WaterPotabilityFloor && WaterPotabilityFloor > 0.0)
+	{
+		Out.WaterPenalty = HopeWaterPenalty * (WaterPotabilityFloor - WaterPotability) / WaterPotabilityFloor;
+	}
 	Out.Total = FMath::Clamp(
 		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts
-		- Out.AdjacencyPenalty - Out.UnsupportedPenalty, 0.0, 100.0);
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty, 0.0, 100.0);
 	return Out;
 }
 
@@ -3558,6 +3621,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		uint8 BandByte = (uint8)HopeBand;
 		Ar << HopeSmoothed << BandByte;
 	}
+	// Water potability (save v14).
+	Ar << WaterPotability;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3738,6 +3803,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << HopeSmoothed << BandByte;
 		HopeBand = (ERHHopeBand)BandByte;
 	}
+	// Water potability (save v14).
+	Ar << WaterPotability;
+	FreshWaterThisStepKg = 0.0;      // per-step derived, re-accrues from production
+	bWaterQualityAnnounced = false;  // runtime edge re-derives from the loaded value
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

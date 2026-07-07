@@ -253,7 +253,7 @@ public:
 	struct FRHHopeBreakdown
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
-		double AdjacencyPenalty = 0, UnsupportedPenalty = 0; // stored positive
+		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		double Total = 0;
 	};
@@ -298,6 +298,13 @@ public:
 	// the bank went dark on it (a legibility cue - "your gardens lost power").
 	double GetGardenPowerDrawW() const { return GardenPowerDrawW; }
 	bool AreGrowLightsDark() const { return bGrowLightsDark; }
+	// Water loop reads (deck): pool potability 0..1 and its penalty threshold.
+	double GetWaterPotability() const { return WaterPotability; }
+	double GetWaterPotabilityFloor() const { return WaterPotabilityFloor; }
+	double GetColonistWaterKgPerSol() const { return ColonistWaterKgPerSol; }
+	// Harness: inject fresh ice-melt water (restores potability like the real
+	// IceDrill->WaterPlant chain, without scripting the whole ISRU economy).
+	void Debug_AddFreshWater(double Kg) { AddStock(FName("Water"), Kg); FreshWaterThisStepKg += Kg; }
 
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
@@ -663,6 +670,21 @@ private:
 	bool bGardenDarkAnnounced = false;  // runtime edge: one alert per blackout episode
 	// A room function that grows crops (Garden = grow-lit, Greenhouse = glazed).
 	bool IsGardenFunction(FName Fn) const { return Fn == FName("Garden") || Fn == FName("Greenhouse"); }
+	// The water loop (M2 Gate D+). Colonists draw potable water (part of the
+	// life-support contract, like O2/Food); recycling reclaims most but degrades
+	// POTABILITY - a single 0..1 pool-quality scalar that decays as the crew
+	// recycles and is restored only by FRESH ice-melt makeup (linear in kg, so
+	// the agent band and era band agree). Low potability saps Hope (the first
+	// scarcity-driven Hope input) - the mechanical reason to drill the ice caps.
+	double WaterPotability = 1.0;       // serialized (save v14)
+	double FreshWaterThisStepKg = 0.0;  // ice-melt inflow this step (per-step derived)
+	bool bWaterQualityAnnounced = false; // runtime edge: one grim-water alert per episode
+	double ColonistWaterKgPerSol = 2.0;
+	double GreywaterReturnFraction = 0.85;
+	double WaterPotabilityDecayPerSol = 0.08;
+	double WaterPotabilityRestorePerKg = 0.0008;
+	double WaterPotabilityFloor = 0.6;
+	double HopeWaterPenalty = 12.0;
 	// Comforts (M2 Gate D, abstract). Supplied count is per-step derived,
 	// never saved (the pool stock is the state).
 	int32 ComfortsSupplied = 0;

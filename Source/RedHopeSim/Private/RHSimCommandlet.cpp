@@ -153,6 +153,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
 		Sim->AddStock(FName("Oxygen"), 800.0);
+		Sim->AddStock(FName("Water"), 200.0); // water joins the support contract (Gate D+)
 		RunSols(2.0);
 		UE_LOG(LogRedHopeSim, Display, TEXT("CREW vault: rated=%d beds=%d (expect 1, 4)"),
 			(int32)Sim->IsFloorRated(-1), Sim->GetHousingCapacity());
@@ -233,6 +234,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
 		Sim->AddStock(FName("Oxygen"), 900.0);
 		Sim->AddStock(FName("Food"), 200.0);
+		Sim->AddStock(FName("Water"), 200.0); // water joins the support contract (Gate D+)
 		RunSols(2.5);
 		Sim->Debug_AddColonists(4);
 		RunSols(0.1); // one pass so jobs/support settle
@@ -326,6 +328,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
 		Sim->AddStock(FName("Oxygen"), 800.0);
 		Sim->AddStock(FName("Food"), 200.0);
+		Sim->AddStock(FName("Water"), 200.0); // water joins the support contract (Gate D+)
 		RunSols(2.5);
 		Sim->Debug_AddColonists(4);
 		RunSols(0.1);
@@ -564,6 +567,87 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			ProdDay, ProdNight);
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== GARDEN POWER FORK TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
+	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
+	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.
+	if (FParse::Param(*Params, TEXT("water")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== WATER LOOP TEST (M2 Gate D+) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Supported = [&]{ int32 N=0; for (const FRHColonist& C : Sim->GetColonists()) { N += C.bSupported ? 1 : 0; } return N; };
+
+		// Certify a 4-cell vault, house 4, stock deep O2/Food so only WATER is
+		// ever the marginal need.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 3000.0);
+		Sim->AddStock(FName("Food"), 800.0);
+		Sim->AddStock(FName("Water"), 500.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(4);
+		RunSols(0.1);
+
+		// 1) Draw + greywater reclaim: net loss is draw x (1 - returnFraction).
+		const double W0 = Sim->GetStock(FName("Water"));
+		RunSols(1.0);
+		const double NetDraw = W0 - Sim->GetStock(FName("Water"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER draw: net %.3f kg/sol (expect 1.200 = 4 x 2.0 x 0.15) supported=%d"),
+			NetDraw, Supported());
+
+		// 2) Potability decay (no fresh water): linear at DecayPerSol.
+		const double P0 = Sim->GetWaterPotability();
+		RunSols(2.0);
+		const double P1 = Sim->GetWaterPotability();
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER potability decay: %.3f -> %.3f (expect drop 0.160 = 0.08 x 2)"), P0, P1);
+
+		// 3) Below the floor -> a Hope water penalty appears (first scarcity input).
+		RunSols(4.0);
+		const auto H = Sim->GetColonyHope();
+		const double PLow = Sim->GetWaterPotability();
+		const double PenExpected = PLow < 0.6 ? 12.0 * (0.6 - PLow) / 0.6 : 0.0;
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER penalty: potability %.3f hopeWaterPenalty %.3f (expect %.3f, potability<0.6)"),
+			PLow, H.WaterPenalty, PenExpected);
+
+		// 4) Fresh ice-melt makeup restores potability (linear per kg).
+		const double PBefore = Sim->GetWaterPotability();
+		Sim->Debug_AddFreshWater(250.0); // +0.20 potability, minus one-step decay
+		RunSols(0.05);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER fresh restore: %.3f -> %.3f (expect +~0.196 = 250 x 0.0008 - 1 step decay)"),
+			PBefore, Sim->GetWaterPotability());
+
+		// 5) Save v14 round-trip: potability survives exactly.
+		const double PSave = Sim->GetWaterPotability();
+		FString Err;
+		Sim->SaveColony(TEXT("watertest"), Err);
+		Sim->LoadColony(TEXT("watertest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER save/load v14: potability %.4f -> %.4f (expect identical)"),
+			PSave, Sim->GetWaterPotability());
+
+		// 6) Thirst is fatal: empty the tanks -> unsupported -> evacuated.
+		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 0.5 sol: unsupported=%d (expect 4 - no water)"), 4 - Supported());
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 2.5 sols: pop=%d (expect 0 - evacuated for thirst)"), Sim->GetPopulation());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== WATER LOOP TEST END ==="));
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return 0;
