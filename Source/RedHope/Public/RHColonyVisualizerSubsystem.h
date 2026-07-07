@@ -113,8 +113,16 @@ private:
 	// "underground" is the whole condition; the open floor is just ViewLevel.
 	bool IsUnderground() const { return ViewLevel < 0; }
 
+	// Room zoning made visible (M2 Gate B): tiles retint by designated function
+	// and carry a small flat label. State-diffed per tick like the shaft mirror.
+	void RefreshRoomVisuals();
+	FLinearColor RoomTint(FName RoomRowName) const;
+
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
+	// (level, spiral index, 0) -> the tile actor + what function it last showed.
+	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
+	TMap<FIntVector, FName> AppliedRoomTint;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShaftVisual;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> CarveTileVisuals;

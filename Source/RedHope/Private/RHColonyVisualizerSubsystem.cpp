@@ -408,6 +408,8 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	CarveTileVisuals.Reset();
 	TilesSpawnedPerLevel.Reset();
+	TileByCell.Reset();
+	AppliedRoomTint.Reset();
 	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
 
 	UWorld* World = GetWorld();
@@ -878,13 +880,82 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #endif
 			Tile->SetActorHiddenInGame(ViewLevel != L);
 			CarveTileVisuals.Add(Tile);
+			TileByCell.Add(FIntVector(L, Have, 0), Tile);
 			++Have;
 		}
 	}
 
+	RefreshRoomVisuals();
+
 	// The pit itself (skirt + walls) tracks the carved shape; key-checked, so
 	// this is a no-op except on the frame something actually changed.
 	RebuildSliceRig();
+}
+
+FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
+{
+	// Function accents against the dug-dirt base (0.20/0.15/0.11): each active
+	// room reads as its own material at a glance, gray-box discipline intact.
+	if (RoomRowName == FName("LivingQuarters")) { return FLinearColor(0.46f, 0.40f, 0.30f); } // warm bone
+	if (RoomRowName == FName("Dining"))         { return FLinearColor(0.10f, 0.30f, 0.27f); } // teal
+	if (RoomRowName == FName("Cooking"))        { return FLinearColor(0.42f, 0.17f, 0.06f); } // furnace
+	if (RoomRowName == FName("Lab"))            { return FLinearColor(0.10f, 0.20f, 0.38f); } // ice
+	if (RoomRowName == FName("Workstation"))    { return FLinearColor(0.42f, 0.30f, 0.08f); } // amber
+	if (RoomRowName == FName("Hallway"))        { return FLinearColor(0.30f, 0.30f, 0.32f); } // slate
+	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
+}
+
+void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	for (auto& Pair : TileByCell)
+	{
+		AStaticMeshActor* Tile = Pair.Value.Get();
+		if (!Tile)
+		{
+			continue;
+		}
+		const FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
+		FName* Applied = AppliedRoomTint.Find(Pair.Key);
+		if (Applied && *Applied == Room)
+		{
+			continue; // steady state: zero work
+		}
+		AppliedRoomTint.Add(Pair.Key, Room);
+		ApplyTint(Tile, RoomTint(Room));
+		// One flat label per tile, created on first designation, retextured on
+		// change. Building labels sit at Z=12 (surface); this one rides the
+		// tile's own floor plane.
+		UTextRenderComponent* Label = Tile->FindComponentByClass<UTextRenderComponent>();
+		if (!Label && !Room.IsNone())
+		{
+			Label = NewObject<UTextRenderComponent>(Tile);
+			Label->SetupAttachment(Tile->GetRootComponent());
+			Label->SetAbsolute(true, true, true); // the tile's flat scale would smear glyphs
+			Label->RegisterComponent();
+			Label->SetWorldSize(150.f);
+			Label->SetHorizontalAlignment(EHTA_Center);
+			Label->SetVerticalAlignment(EVRTA_TextCenter);
+			Label->SetWorldLocationAndRotation(
+				Tile->GetActorLocation() + FVector(0, 0, 14.f),
+				FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
+		}
+		if (Label)
+		{
+			const FRHRoomRow* Row = Defs->GetRoom(Room);
+			Label->SetText(Room.IsNone() ? FText::GetEmpty() : FText::FromString(Row ? Row->DisplayName : Room.ToString()));
+			const FLinearColor T = RoomTint(Room);
+			Label->SetTextRenderColor((T * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
+			// The tile actor's hidden-in-game state (the elevator's floor cut)
+			// propagates to the label component automatically.
+		}
+	}
 }
 
 AStaticMeshActor* URHColonyVisualizerSubsystem::SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const
@@ -905,24 +976,9 @@ AStaticMeshActor* URHColonyVisualizerSubsystem::SpawnBox(const FVector& CenterCm
 
 FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
 {
-	// Deterministic square spiral over the 10 m cell grid, skipping (0,0)
-	// (the shaft column's own cell): (1,0), (1,1), (0,1), (-1,1), ...
-	int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
-	for (int32 i = 0; i <= Index; ++i)
-	{
-		X += DX; Y += DY;
-		if (++LegPos == LegLen)
-		{
-			LegPos = 0;
-			const int32 T = DX; DX = -DY; DY = T; // turn left
-			if (++LegsDone == 2)
-			{
-				LegsDone = 0;
-				++LegLen;
-			}
-		}
-	}
-	return FIntPoint(X, Y);
+	// Gate B moved the canonical layout sim-side (adjacency made cell geometry
+	// gameplay); this forwards so existing presentation callers keep working.
+	return URHSimWorldSubsystem::SpiralCell(Index);
 }
 
 void URHColonyVisualizerSubsystem::SetViewLevel(int32 Level)

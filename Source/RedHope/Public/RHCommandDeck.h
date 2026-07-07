@@ -56,6 +56,8 @@ private:
 	// support - shown once anyone has landed.
 	FText GetCrewText() const;
 	EVisibility GetCrewVisibility() const;
+	// Room zoning (M2 Gate B): arm the controller's zone-paint mode.
+	FReply HandleZone(FName Room);
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.
 	FText GetKnownGroundText() const;

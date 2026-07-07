@@ -54,6 +54,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 
 	// Build palette: every slice-active, constructable def, straight from data.
 	TSharedRef<SHorizontalBox> Palette = SNew(SHorizontalBox);
+	// Zone palette (M2 Gate B): every slice-active room function. Zoning is
+	// free (function, not construction), so no cost labels. Empty until the
+	// rooms table activates - the row is simply absent pre-M2.
+	TSharedRef<SHorizontalBox> ZonePalette = SNew(SHorizontalBox);
+	int32 ZoneCount = 0;
 	int32 MaxDepth = 5;
 	if (const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr)
 	{
@@ -72,6 +77,23 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBuild, RowName))
 				];
 			});
+			Defs->ForEachRoom([&](FName RowName, const FRHRoomRow& Row)
+			{
+				++ZoneCount;
+				ZonePalette->AddSlot().AutoWidth()
+				[
+					DeckButton(FText::FromString(Row.DisplayName),
+						FOnClicked::CreateSP(this, &SRHCommandDeck::HandleZone, RowName))
+				];
+			});
+			if (ZoneCount > 0)
+			{
+				ZonePalette->AddSlot().AutoWidth()
+				[
+					DeckButton(FText::FromString(TEXT("Clear")),
+						FOnClicked::CreateSP(this, &SRHCommandDeck::HandleZone, FName(NAME_None)))
+				];
+			}
 		}
 		if (const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
@@ -361,9 +383,33 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// Command bar, bottom.
+		// Command bar, bottom. The zone row (rooms) stacks above the main bar
+		// once room functions exist in data - two rows beat one unscrollable one.
 		+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom)
 		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(6.f, 4.f))
+				.Visibility(ZoneCount > 0 ? EVisibility::Visible : EVisibility::Collapsed)
+				[
+					SNew(SScrollBox).Orientation(Orient_Horizontal)
+					+ SScrollBox::Slot()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("ZONE  "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+						]
+						+ SHorizontalBox::Slot().AutoWidth() [ ZonePalette ]
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
 			.BorderBackgroundColor(DeckBg)
@@ -429,6 +475,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("Save")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSave)) ]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("Load")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLoad)) ]
 				]
+			]
 			]
 		]
 	];
@@ -1076,6 +1123,15 @@ FReply SRHCommandDeck::HandleSurvey()
 	if (PC.IsValid())
 	{
 		PC->BeginSurveyDesignation();
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleZone(FName Room)
+{
+	if (PC.IsValid())
+	{
+		PC->BeginZoneDesignation(Room);
 	}
 	return FReply::Handled();
 }

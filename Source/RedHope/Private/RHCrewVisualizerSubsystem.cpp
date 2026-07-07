@@ -6,6 +6,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "RedHope.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 
@@ -125,6 +126,34 @@ void URHCrewVisualizerSubsystem::SetBodyTint(FCrewVisual& Vis, bool bUnsupported
 				bUnsupported ? DistressAmber * 0.6f : FLinearColor::Black);
 		}
 	}
+}
+
+FVector URHCrewVisualizerSubsystem::JobPointCm(int32 Level, FName JobFunction) const
+{
+	// A point inside a cell zoned with the job's function on this floor;
+	// zero vector when no such room exists (caller falls back to wandering).
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return FVector::ZeroVector;
+	}
+	const int32 Carved = Sim->GetFloorCarvedCells(Level);
+	for (int32 i = 0; i < Carved; ++i)
+	{
+		const FRHRoomRow* Row = Defs->GetRoom(Sim->GetRoomAt(Level, i));
+		if (Row && Row->Function == JobFunction)
+		{
+			const FVector Head = Sim->GetShaftHeadCm();
+			const FIntPoint Cell = URHSimWorldSubsystem::SpiralCell(i);
+			return FVector(
+				Head.X + Cell.X * 1000.0 + FMath::FRandRange(-250.f, 250.f),
+				Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-250.f, 250.f),
+				Level * Sim->GetFloorHeightCm());
+		}
+	}
+	return FVector::ZeroVector;
 }
 
 FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
@@ -255,7 +284,19 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				}
 				else
 				{
-					Vis->TargetCm = WanderPointCm(Vis->HomeLevel);
+					// A colonist with a post (M2 Gate B) mostly hangs around it;
+					// everyone else (and the off-hours) wanders the carved floor.
+					FVector Target = WanderPointCm(Vis->HomeLevel);
+					const FName Job = Sim->GetColonistJob(C.Id);
+					if (!Job.IsNone() && FMath::FRand() < 0.6f)
+					{
+						const FVector Post = JobPointCm(Vis->HomeLevel, Job);
+						if (!Post.IsNearlyZero())
+						{
+							Target = Post;
+						}
+					}
+					Vis->TargetCm = Target;
 					Vis->NextDecideRealSeconds = Now + FMath::FRandRange(4.0, 12.0);
 				}
 				break;

@@ -36,6 +36,10 @@ public:
 	// active subsurface floor, drag sizes the rectangle, release transmits an
 	// Excavate order counted in 10x10 m cells.
 	void BeginExcavateDesignation();
+	// Room zoning (M2 Gate B): pick a function on the deck, click carved cells
+	// on the active floor to designate them (uplink Designate orders). The mode
+	// stays armed for painting several cells; cancel exits.
+	void BeginZoneDesignation(FName Room);
 	void CancelModes();
 	void SetSimSpeed(float Tier);
 	void TogglePause();
@@ -45,6 +49,8 @@ public:
 	bool IsDigMode() const { return bDigMode; }
 	bool IsSurveyMode() const { return bSurveyMode; }
 	bool IsExcavateMode() const { return bExcavateMode; }
+	bool IsZoneMode() const { return bZoneMode; }
+	FName GetZoneRoom() const { return ZoneRoom; }
 	// The elevator (M1-d): which floor the player is looking at and ordering
 	// on. 0 = surface; -N needs no shaft to LOOK, only to order work there.
 	void SetActiveLevel(int32 Level);
@@ -102,6 +108,12 @@ private:
 	bool bExcavateMode = false;
 	bool bExcavateDragging = false;
 	FVector ExcavateAnchorCm = FVector::ZeroVector;
+	// Zone designation state (M2 Gate B).
+	bool bZoneMode = false;
+	FName ZoneRoom;
+	// The carved cell (spiral index) under a world point on the given floor,
+	// or INDEX_NONE. The zoning click's inverse of the sim's SpiralCell.
+	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;
 	int32 ActiveLevel = 0;
 	int32 SelectedBuildingId = 0;
 	// Feedback channels (deck-rendered; see GetConfirmText/GetHintText).

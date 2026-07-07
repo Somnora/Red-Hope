@@ -359,6 +359,44 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 		}
 	}
+	else if (bZoneMode)
+	{
+		// Zoning (M2 Gate B): highlight the hovered carved cell; each click
+		// paints one. Rooms only FUNCTION on rated floors, but zoning ahead of
+		// the certification is planning, not an error.
+		FVector Ground;
+		if (CursorToGround(Ground))
+		{
+			const FString RoomLabel = ZoneRoom.IsNone() ? TEXT("CLEAR") : ZoneRoom.ToString().ToUpper();
+			if (ActiveLevel == 0)
+			{
+				HintText = FString::Printf(TEXT("ZONE %s: pick a subsurface floor on the elevator first"), *RoomLabel);
+				HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+			}
+			else
+			{
+				const int32 Cell = FindCellAt(Ground, ActiveLevel);
+				if (Cell != INDEX_NONE)
+				{
+					const FVector Head = Sim->GetShaftHeadCm();
+					const FIntPoint P = URHSimWorldSubsystem::SpiralCell(Cell);
+					const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, Ground.Z);
+					DrawDebugBox(World, Center + FVector(0, 0, 60.f), FVector(500.f, 500.f, 60.f),
+						FColor::Emerald, false, -1.f, 0, 10.f);
+					const FName Current = Sim->GetRoomAt(ActiveLevel, Cell);
+					HintText = FString::Printf(TEXT("ZONE %s: cell %d%s - click to transmit, right-click to finish"),
+						*RoomLabel, Cell,
+						Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *Current.ToString()));
+					HintColor = FLinearColor(0.3f, 1.f, 0.6f);
+				}
+				else
+				{
+					HintText = FString::Printf(TEXT("ZONE %s: hover a carved cell on this floor"), *RoomLabel);
+					HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+				}
+			}
+		}
+	}
 
 	// In-flight build orders (director finding, M1-d hand-play): the signal-lag
 	// window left the player blind - "I can't see where I just placed it".
@@ -463,6 +501,23 @@ void ARHPlayerController::OnClick()
 			bExcavateDragging = true;
 		}
 	}
+	else if (bZoneMode)
+	{
+		// Paint one cell per click; the mode stays armed (several rooms of the
+		// same function usually go down together). Cancel exits.
+		const int32 Cell = FindCellAt(Ground, ActiveLevel);
+		if (Cell != INDEX_NONE)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Designate");
+			Cmd.Target = ZoneRoom;
+			Cmd.Level = ActiveLevel;
+			Cmd.Value = Cell;
+			Sim->EnqueueCommand(Cmd);
+			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on floor %d cell %d"),
+				ZoneRoom.IsNone() ? TEXT("clear") : *ZoneRoom.ToString(), ActiveLevel, Cell), FLinearColor(0.2f, 0.9f, 1.f));
+		}
+	}
 	else if (bDigMode)
 	{
 		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
@@ -527,6 +582,41 @@ void ARHPlayerController::BeginExcavateDesignation()
 	bSurveyMode = false;
 	bExcavateMode = true;
 	bExcavateDragging = false;
+	bZoneMode = false;
+	ZoneRoom = NAME_None;
+}
+
+void ARHPlayerController::BeginZoneDesignation(FName Room)
+{
+	PendingBuildDef = NAME_None;
+	bDigMode = false;
+	bSurveyMode = false;
+	bExcavateMode = false;
+	bExcavateDragging = false;
+	bZoneMode = true;
+	ZoneRoom = Room;
+}
+
+int32 ARHPlayerController::FindCellAt(const FVector& GroundCm, int32 Level) const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Level >= 0)
+	{
+		return INDEX_NONE;
+	}
+	const FVector Head = Sim->GetShaftHeadCm();
+	const int32 Carved = Sim->GetFloorCarvedCells(Level);
+	for (int32 i = 0; i < Carved; ++i)
+	{
+		const FIntPoint Cell = URHSimWorldSubsystem::SpiralCell(i);
+		if (FMath::Abs(GroundCm.X - (Head.X + Cell.X * 1000.0)) <= 500.0 &&
+			FMath::Abs(GroundCm.Y - (Head.Y + Cell.Y * 1000.0)) <= 500.0)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
 }
 
 void ARHPlayerController::SetActiveLevel(int32 Level)
@@ -557,7 +647,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode)
+	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode)
 	{
 		SelectedBuildingId = 0;
 	}
@@ -566,6 +656,8 @@ void ARHPlayerController::CancelModes()
 	bSurveyMode = false;
 	bExcavateMode = false;
 	bExcavateDragging = false;
+	bZoneMode = false;
+	ZoneRoom = NAME_None;
 	HintText.Reset();
 }
 

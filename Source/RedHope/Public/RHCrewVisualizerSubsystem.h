@@ -59,6 +59,9 @@ private:
 	// A random point inside a random carved cell of the given floor - the
 	// canonical spiral layout the colony visualizer lays tiles with.
 	FVector WanderPointCm(int32 Level) const;
+	// A point inside a cell zoned with the given job function on this floor
+	// (M2 Gate B: colonists report to their posts); zero when none exists.
+	FVector JobPointCm(int32 Level, FName JobFunction) const;
 
 	TMap<int32, FCrewVisual> Tracked; // colonist Id -> figure
 	// First roster sync seeds residents in place; only ids appearing AFTER it
