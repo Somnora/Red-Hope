@@ -277,6 +277,33 @@ void URHAgentSubsystem::Debug_SetAllWear(float Wear)
 	UE_LOG(LogRedHopeSim, Display, TEXT("[RH.Wear] set %d robots to wear %.0f (test knob)"), Touched, Wear);
 }
 
+void URHAgentSubsystem::CollectPanelRows(TArray<FRHRobotPanelRow>& OutRows) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	OutRows.Reserve(OutRows.Num() + RobotHandles.Num());
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (!EntityManager.IsEntityValid(Entity))
+		{
+			continue;
+		}
+		const FRHRobotFragment& Robot = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity);
+		const FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
+		FRHRobotPanelRow Row;
+		Row.DefName = Robot.DefName;
+		Row.RobotClass = Robot.RobotClass;
+		Row.TaskType = EntityManager.GetFragmentDataChecked<FRHTaskFragment>(Entity).TaskType;
+		Row.ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+		Row.Wear = EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear;
+		OutRows.Add(Row);
+	}
+}
+
 void URHAgentSubsystem::DespawnAllRobots()
 {
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();

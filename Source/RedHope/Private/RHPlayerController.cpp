@@ -18,8 +18,7 @@ namespace
 {
 	constexpr float GridSnapCm = 200.f;       // 2 m placement grid (RH_Config CellSizeMeters)
 	constexpr double DigClickRadiusCm = 3000.0; // 30 m: how forgiving a dig click is
-	constexpr int32 ToastKey_Mode = 9101;
-	constexpr int32 ToastKey_Ghost = 9102;
+	constexpr double ConfirmHoldSeconds = 6.0;  // one-shot notices outlive the click that caused them
 }
 
 ARHPlayerController::ARHPlayerController()
@@ -232,6 +231,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 		return;
 	}
 
+	// The hint is recomputed every frame a mode is live; the deck renders it.
+	HintText.Reset();
+
 	// Placement ghost: gray-box honest - debug lines, no meshes. Green means
 	// the order would be accepted RIGHT NOW; the uplink re-checks on arrival.
 	if (!PendingBuildDef.IsNone())
@@ -252,11 +254,11 @@ void ARHPlayerController::Tick(float DeltaTime)
 				DrawDebugCircle(World, Ground + FVector(0, 0, 30.f), Def->CoverageRadius_m * 100.f,
 					64, Color, false, -1.f, 0, 6.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
 			}
-			ShowToast(bOk
-				? FString::Printf(TEXT("Placing %s - click to transmit (Δ %.0f sim-s), right-click to cancel"),
+			HintText = bOk
+				? FString::Printf(TEXT("PLACING %s - click to transmit (Δ %.0f sim-s), right-click to cancel"),
 					*PendingBuildDef.ToString(), Sim->GetOrderLagSeconds())
-				: FString::Printf(TEXT("Placing %s - %s"), *PendingBuildDef.ToString(), *Reason),
-				Color, ToastKey_Ghost);
+				: FString::Printf(TEXT("PLACING %s - %s"), *PendingBuildDef.ToString(), *Reason);
+			HintColor = FLinearColor(Color);
 		}
 	}
 	else if (bDigMode)
@@ -268,13 +270,51 @@ void ARHPlayerController::Tick(float DeltaTime)
 			{
 				DrawDebugCircle(World, Dep->LocationCm + FVector(0, 0, 40.f), 1200.f,
 					48, FColor::Yellow, false, -1.f, 0, 10.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
-				ShowToast(FString::Printf(TEXT("Designate dig: %s (%.0f t left) - click to transmit"),
-					*Dep->RowName.ToString(), Dep->RemainingKg / 1000.0), FColor::Yellow, ToastKey_Ghost);
+				HintText = FString::Printf(TEXT("DIG: %s (%.0f t left) - click to transmit, right-click to cancel"),
+					*Dep->RowName.ToString(), Dep->RemainingKg / 1000.0);
+				HintColor = FLinearColor::Yellow;
 			}
 			else
 			{
-				ShowToast(TEXT("Designate dig: no deposit near cursor"), FColor::Silver, ToastKey_Ghost);
+				HintText = TEXT("DIG: no known deposit near cursor - right-click to cancel");
+				HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
 			}
+		}
+	}
+	else if (bSurveyMode)
+	{
+		FVector Ground;
+		if (CursorToGround(Ground))
+		{
+			// The circle is the scout's honest reveal radius (its WorkRate).
+			DrawDebugCircle(World, Ground + FVector(0, 0, 40.f), SurveyRadiusM() * 100.f,
+				64, FColor::Cyan, false, -1.f, 0, 8.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
+			HintText = FString::Printf(TEXT("SURVEY at (%.0f, %.0f) m - a scout drives out and reveals this circle. Click to transmit"),
+				Ground.X / 100.f, Ground.Y / 100.f);
+			HintColor = FLinearColor(0.3f, 0.9f, 1.f);
+		}
+	}
+
+	// Selection highlight: a steady cyan frame on the inspected building.
+	if (SelectedBuildingId != 0)
+	{
+		bool bStillExists = false;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id == SelectedBuildingId)
+			{
+				const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+				const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
+				const float HalfY = Def ? FMath::Max(1, Def->FootprintY) * 100.f : 200.f;
+				DrawDebugBox(World, B.LocationCm + FVector(0, 0, 170.f), FVector(HalfX + 40.f, HalfY + 40.f, 170.f),
+					FColor::Cyan, false, -1.f, 0, 5.f);
+				bStillExists = true;
+				break;
+			}
+		}
+		if (!bStillExists)
+		{
+			SelectedBuildingId = 0;
 		}
 	}
 }
@@ -303,8 +343,8 @@ void ARHPlayerController::OnClick()
 			Cmd.Target = PendingBuildDef;
 			Cmd.Location = Ground;
 			Sim->EnqueueCommand(Cmd);
-			ShowToast(FString::Printf(TEXT("Order transmitted: %s at (%.0f, %.0f) m"),
-				*PendingBuildDef.ToString(), Ground.X / 100.f, Ground.Y / 100.f), FColor::Cyan);
+			SetConfirm(FString::Printf(TEXT("Order transmitted: %s at (%.0f, %.0f) m"),
+				*PendingBuildDef.ToString(), Ground.X / 100.f, Ground.Y / 100.f), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
 		// Invalid spot: the ghost already says why; the click is a no-op.
@@ -317,9 +357,25 @@ void ARHPlayerController::OnClick()
 			Cmd.Verb = FName("Dig");
 			Cmd.Target = Dep->RowName;
 			Sim->EnqueueCommand(Cmd);
-			ShowToast(FString::Printf(TEXT("Dig designation transmitted: %s"), *Dep->RowName.ToString()), FColor::Cyan);
+			SetConfirm(FString::Printf(TEXT("Dig designation transmitted: %s"), *Dep->RowName.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
+	}
+	else if (bSurveyMode)
+	{
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Survey");
+		Cmd.Location = Ground;
+		Sim->EnqueueCommand(Cmd);
+		SetConfirm(FString::Printf(TEXT("Survey transmitted: (%.0f, %.0f) m - a scout will drive out"),
+			Ground.X / 100.f, Ground.Y / 100.f), FLinearColor(0.2f, 0.9f, 1.f));
+		CancelModes();
+	}
+	else
+	{
+		// No mode: click-to-inspect. A building keeps the card, open ground
+		// dismisses it (Gate C: the first point-at-the-world-and-ask surface).
+		SelectedBuildingId = FindBuildingAt(Ground);
 	}
 }
 
@@ -331,23 +387,35 @@ void ARHPlayerController::OnCancel()
 void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
 	bDigMode = false;
+	bSurveyMode = false;
 	PendingBuildDef = BuildingDef;
 }
 
 void ARHPlayerController::BeginDigDesignation()
 {
 	PendingBuildDef = NAME_None;
+	bSurveyMode = false;
 	bDigMode = true;
+}
+
+void ARHPlayerController::BeginSurveyDesignation()
+{
+	PendingBuildDef = NAME_None;
+	bDigMode = false;
+	bSurveyMode = true;
 }
 
 void ARHPlayerController::CancelModes()
 {
+	// With no mode active, cancel means "dismiss the inspection card".
+	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode)
+	{
+		SelectedBuildingId = 0;
+	}
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
-	if (GEngine)
-	{
-		GEngine->RemoveOnScreenDebugMessage(ToastKey_Ghost);
-	}
+	bSurveyMode = false;
+	HintText.Reset();
 }
 
 void ARHPlayerController::SetSimSpeed(float Tier)
@@ -375,9 +443,9 @@ void ARHPlayerController::QuickSave()
 	if (URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
 	{
 		FString Error;
-		ShowToast(Sim->SaveColony(TEXT("quick"), Error)
-			? FString(TEXT("Colony saved (quick)")) : FString::Printf(TEXT("Save failed: %s"), *Error),
-			FColor::Cyan);
+		const bool bOk = Sim->SaveColony(TEXT("quick"), Error);
+		SetConfirm(bOk ? FString(TEXT("Colony saved (quick)")) : FString::Printf(TEXT("Save failed: %s"), *Error),
+			bOk ? FLinearColor(0.2f, 0.9f, 1.f) : FLinearColor(1.f, 0.4f, 0.2f));
 	}
 }
 
@@ -386,16 +454,80 @@ void ARHPlayerController::QuickLoad()
 	if (URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
 	{
 		FString Error;
-		ShowToast(Sim->LoadColony(TEXT("quick"), Error)
-			? FString(TEXT("Colony loaded (quick)")) : FString::Printf(TEXT("Load failed: %s"), *Error),
-			FColor::Cyan);
+		const bool bOk = Sim->LoadColony(TEXT("quick"), Error);
+		SetConfirm(bOk ? FString(TEXT("Colony loaded (quick)")) : FString::Printf(TEXT("Load failed: %s"), *Error),
+			bOk ? FLinearColor(0.2f, 0.9f, 1.f) : FLinearColor(1.f, 0.4f, 0.2f));
+		SelectedBuildingId = 0; // ids may not survive the reload
 	}
 }
 
-void ARHPlayerController::ShowToast(const FString& Text, const FColor& Color, int32 Key) const
+void ARHPlayerController::SetConfirm(const FString& Text, const FLinearColor& Color)
 {
-	if (GEngine)
+	// The deck's cyan confirm line (real seconds: survives pause and 8x).
+	ConfirmText = Text;
+	ConfirmColor = Color;
+	ConfirmRealSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogRedHope, Display, TEXT("%s"), *Text);
+}
+
+FText ARHPlayerController::GetConfirmText() const
+{
+	if (FPlatformTime::Seconds() - ConfirmRealSeconds > ConfirmHoldSeconds)
 	{
-		GEngine->AddOnScreenDebugMessage(Key, Key == -1 ? 5.f : 0.15f, Color, Text);
+		return FText::GetEmpty();
 	}
+	return FText::FromString(ConfirmText);
+}
+
+FText ARHPlayerController::GetHintText() const
+{
+	return FText::FromString(HintText);
+}
+
+int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return 0;
+	}
+	int32 BestId = 0;
+	double BestDist = TNumericLimits<double>::Max();
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		// Footprint plus half a cell of grace: clicking the plinth counts.
+		const double HalfX = (Def ? FMath::Max(1, Def->FootprintX) : 1) * 100.0 + 100.0;
+		const double HalfY = (Def ? FMath::Max(1, Def->FootprintY) : 1) * 100.0 + 100.0;
+		if (FMath::Abs(B.LocationCm.X - GroundCm.X) <= HalfX && FMath::Abs(B.LocationCm.Y - GroundCm.Y) <= HalfY)
+		{
+			const double Dist = FVector::DistXY(B.LocationCm, GroundCm);
+			if (Dist < BestDist)
+			{
+				BestDist = Dist;
+				BestId = B.Id;
+			}
+		}
+	}
+	return BestId;
+}
+
+float ARHPlayerController::SurveyRadiusM() const
+{
+	const UWorld* World = GetWorld();
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	float Radius = 60.f;
+	if (Defs)
+	{
+		Defs->ForEachRobot([&Radius](FName, const FRHRobotRow& Row)
+		{
+			if (Row.RobotClass == FName("Scout"))
+			{
+				Radius = Row.WorkRate; // WorkRate = survey radius m (DT_Robots)
+			}
+		});
+	}
+	return Radius;
 }

@@ -2,6 +2,7 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -121,30 +122,105 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// Colony readout, top right. The notice line beneath it is the visible
-		// rejection channel - GEngine debug messages hide under the Slate deck.
+		// Right column: colony readout (with the notice + confirm lines - the
+		// visible feedback channels; GEngine debug messages hide under the
+		// deck), then the fleet panel, then the inspection card.
 		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(8.f)
 		[
-			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(DeckBg)
-			.Padding(FMargin(10.f, 6.f))
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
 			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot().AutoHeight()
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(10.f, 6.f))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetStatusText)
+						.Font(DeckFont(10))
+						.ColorAndOpacity(ReadoutFg)
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetNoticeText)
+						.Font(DeckFont(10))
+						.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.08f))
+						.Visibility(this, &SRHCommandDeck::GetNoticeVisibility)
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetConfirmText)
+						.Font(DeckFont(10))
+						.ColorAndOpacity(this, &SRHCommandDeck::GetConfirmColor)
+						.Visibility(this, &SRHCommandDeck::GetConfirmVisibility)
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(10.f, 6.f))
 				[
 					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetStatusText)
-					.Font(DeckFont(10))
+					.Text(this, &SRHCommandDeck::GetFleetText)
+					.Font(DeckFont(9))
 					.ColorAndOpacity(ReadoutFg)
 				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.02f, 0.06f, 0.05f, 0.9f))
+				.Padding(FMargin(10.f, 6.f))
+				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
 				[
 					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetNoticeText)
+					.Text(this, &SRHCommandDeck::GetInspectText)
 					.Font(DeckFont(10))
-					.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.08f))
-					.Visibility(this, &SRHCommandDeck::GetNoticeVisibility)
+					.ColorAndOpacity(FLinearColor(0.75f, 0.95f, 0.88f))
+				]
+			]
+		]
+
+		// Mode hint + PAUSED banner, bottom center above the command bar -
+		// the prompts a player actually looks at while aiming an order.
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(FMargin(0.f, 0.f, 0.f, 52.f))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.25f, 0.05f, 0.02f, 0.9f))
+				.Padding(FMargin(24.f, 8.f))
+				.Visibility(this, &SRHCommandDeck::GetPausedVisibility)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("—  PAUSED  —  Space or a speed key to resume")))
+					.Font(DeckFont(12))
+					.ColorAndOpacity(FLinearColor(1.f, 0.75f, 0.4f))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(14.f, 6.f))
+				.Visibility(this, &SRHCommandDeck::GetHintVisibility)
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetHintText)
+					.Font(DeckFont(10))
+					.ColorAndOpacity(this, &SRHCommandDeck::GetHintColor)
 				]
 			]
 		]
@@ -187,6 +263,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						DeckButton(FText::FromString(TEXT("Dig Site")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDig))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						DeckButton(FText::FromString(TEXT("Survey")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSurvey))
 					]
 
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
@@ -265,6 +345,195 @@ EVisibility SRHCommandDeck::GetNoticeVisibility() const
 	return GetNoticeText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
+FText SRHCommandDeck::GetConfirmText() const
+{
+	return PC.IsValid() ? PC->GetConfirmText() : FText::GetEmpty();
+}
+
+FSlateColor SRHCommandDeck::GetConfirmColor() const
+{
+	return PC.IsValid() ? FSlateColor(PC->GetConfirmColor()) : FSlateColor(FLinearColor::White);
+}
+
+EVisibility SRHCommandDeck::GetConfirmVisibility() const
+{
+	return GetConfirmText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+}
+
+FText SRHCommandDeck::GetHintText() const
+{
+	return PC.IsValid() ? PC->GetHintText() : FText::GetEmpty();
+}
+
+FSlateColor SRHCommandDeck::GetHintColor() const
+{
+	return PC.IsValid() ? FSlateColor(PC->GetHintColor()) : FSlateColor(FLinearColor::White);
+}
+
+EVisibility SRHCommandDeck::GetHintVisibility() const
+{
+	return GetHintText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+}
+
+EVisibility SRHCommandDeck::GetPausedVisibility() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	return (Clock && Clock->GetSpeed() <= 0.f) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetFleetText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHAgentSubsystem* Agents = World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Agents || !Sim)
+	{
+		return FText::FromString(TEXT("FLEET: offline"));
+	}
+	static const TCHAR* StateNames[] = { TEXT("idle"), TEXT("DIG"), TEXT("HAUL"), TEXT("BUILD"), TEXT("CHARGE"), TEXT("SURVEY"), TEXT("REPAIR") };
+
+	TArray<FRHRobotPanelRow> Rows;
+	Agents->CollectPanelRows(Rows);
+	FString Text = FString::Printf(TEXT("FLEET %d   SpareParts %.0f"), Rows.Num(), Sim->GetStock(FName("SpareParts")));
+	for (const FRHRobotPanelRow& Row : Rows)
+	{
+		const TCHAR* State = Row.TaskType < UE_ARRAY_COUNT(StateNames) ? StateNames[Row.TaskType] : TEXT("?");
+		FString Flag;
+		if (Row.Wear >= Sim->GetWearHaltThreshold())
+		{
+			Flag = TEXT("  HALTED");
+		}
+		else if (Row.Wear >= Sim->GetWearDegradeThreshold())
+		{
+			Flag = TEXT("  degraded");
+		}
+		else if (Row.ChargeFrac <= 0.f)
+		{
+			Flag = TEXT("  stranded");
+		}
+		Text += FString::Printf(TEXT("\n%-5s %-6s batt %3.0f%%  wear %3.0f%s"),
+			*Row.DefName.ToString(), State, Row.ChargeFrac * 100.f, Row.Wear, *Flag);
+	}
+	return FText::FromString(Text);
+}
+
+FText SRHCommandDeck::GetInspectText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	if (!Sim || !Defs || Id == 0)
+	{
+		return FText::GetEmpty();
+	}
+	const FRHBuildingInstance* B = nullptr;
+	for (const FRHBuildingInstance& Candidate : Sim->GetBuildings())
+	{
+		if (Candidate.Id == Id)
+		{
+			B = &Candidate;
+			break;
+		}
+	}
+	if (!B)
+	{
+		return FText::GetEmpty();
+	}
+	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
+
+	FString Text = FString::Printf(TEXT("%s #%d   (%.0f, %.0f) m"),
+		*B->DefName.ToString(), B->Id, B->LocationCm.X / 100.f, B->LocationCm.Y / 100.f);
+
+	if (B->bUnderConstruction)
+	{
+		Text += FString::Printf(TEXT("\nUNDER CONSTRUCTION - %.0f s fabrication left"), B->BuildRemaining_s);
+		if (Def)
+		{
+			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
+			{
+				const double* Delivered = B->InputKg.Find(Cost.Key);
+				const double Have = Delivered ? *Delivered : 0.0;
+				Text += FString::Printf(TEXT("\n  material %s: %.0f / %.0f kg%s"),
+					*Cost.Key.ToString(), Have, Cost.Value, Have + 0.5 < Cost.Value ? TEXT("  (hauling)") : TEXT(""));
+			}
+		}
+	}
+	else
+	{
+		Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered until the grid recovers");
+		if (B->BatchRemaining_h > 0.0)
+		{
+			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h);
+		}
+		else if (Def && (Def->PowerDraw_W > 0.f || Def->RequiresDeposit))
+		{
+			Text += TEXT("\nno batch running");
+		}
+	}
+
+	if (Def)
+	{
+		FString Power;
+		if (Def->PowerGenPeak_W > 0.f || Def->PowerGenBase_W > 0.f)
+		{
+			Power += FString::Printf(TEXT("gen %.0f W peak"), Def->PowerGenPeak_W + Def->PowerGenBase_W);
+		}
+		if (Def->PowerDraw_W > 0.f)
+		{
+			Power += FString::Printf(TEXT("%sdraw %.0f W (idle %.0f W)"), Power.IsEmpty() ? TEXT("") : TEXT("   "), Def->PowerDraw_W, Def->PowerIdle_W);
+		}
+		if (Def->StorageWh > 0.f)
+		{
+			Power += FString::Printf(TEXT("%sstore %.0f Wh"), Power.IsEmpty() ? TEXT("") : TEXT("   "), Def->StorageWh);
+		}
+		if (!Power.IsEmpty())
+		{
+			Text += TEXT("\n") + Power;
+		}
+	}
+
+	if (B->AttachedDepositId != 0)
+	{
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.Id == B->AttachedDepositId)
+			{
+				Text += FString::Printf(TEXT("\ndeposit %s: %.0f t left"), *D.RowName.ToString(), D.RemainingKg / 1000.0);
+				break;
+			}
+		}
+	}
+
+	FString Hopper;
+	for (const auto& In : B->InputKg)
+	{
+		if (In.Value >= 0.5 && !B->bUnderConstruction)
+		{
+			Hopper += FString::Printf(TEXT("\n  in  %s: %.0f kg"), *In.Key.ToString(), In.Value);
+		}
+	}
+	for (const auto& Out : B->OutputKg)
+	{
+		if (Out.Value >= 0.5)
+		{
+			Hopper += FString::Printf(TEXT("\n  out %s: %.0f kg (awaiting haul)"), *Out.Key.ToString(), Out.Value);
+		}
+	}
+	if (!Hopper.IsEmpty())
+	{
+		Text += TEXT("\nhopper:") + Hopper;
+	}
+	Text += TEXT("\n(right-click or click ground to dismiss)");
+	return FText::FromString(Text);
+}
+
+EVisibility SRHCommandDeck::GetInspectVisibility() const
+{
+	return (PC.IsValid() && PC->GetSelectedBuildingId() != 0) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
 FText SRHCommandDeck::GetBuildLabel(FName DefName) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -301,6 +570,15 @@ FReply SRHCommandDeck::HandleDig()
 	if (PC.IsValid())
 	{
 		PC->BeginDigDesignation();
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleSurvey()
+{
+	if (PC.IsValid())
+	{
+		PC->BeginSurveyDesignation();
 	}
 	return FReply::Handled();
 }

@@ -26,6 +26,17 @@ struct FRHRobotSaveState
 
 class UStateTree;
 
+// One fleet-panel line (M1-b Gate C): everything the deck shows per robot,
+// snapshotted in one pass so the UI never touches the entity manager.
+struct FRHRobotPanelRow
+{
+	FName DefName;
+	FName RobotClass;
+	uint8 TaskType = 0;    // ERHTaskType
+	float ChargeFrac = 0.f;
+	float Wear = 0.f;
+};
+
 // Owns agent entity lifecycles: the working robot archetype plus the
 // benchmark wander-dummies. Save/load round-trips robots through
 // FRHRobotSaveState; the sim world owns when that happens.
@@ -68,6 +79,8 @@ public:
 	float RemoveRobotWear(FMassEntityHandle Entity, float Amount);
 	// Test knob (RH.Wear): set every robot's wear directly.
 	void Debug_SetAllWear(float Wear);
+	// Fleet panel snapshot (M1-b Gate C), stable spawn order.
+	void CollectPanelRows(TArray<FRHRobotPanelRow>& OutRows) const;
 
 	int32 GetAgentCount() const { return SpawnedCount; }
 

@@ -23,9 +23,25 @@ private:
 	FText GetStatusText() const;
 	FText GetNoticeText() const;
 	EVisibility GetNoticeVisibility() const;
+	// PC feedback channels (M1-b Gate C): one-shot confirms + live mode hint,
+	// replacing the GEngine debug text that hid under the Slate deck.
+	FText GetConfirmText() const;
+	FSlateColor GetConfirmColor() const;
+	EVisibility GetConfirmVisibility() const;
+	FText GetHintText() const;
+	FSlateColor GetHintColor() const;
+	EVisibility GetHintVisibility() const;
+	// PAUSED banner: unmissable, unlike the readout's small speed label.
+	EVisibility GetPausedVisibility() const;
+	// Fleet panel: one line per robot from the agent subsystem snapshot.
+	FText GetFleetText() const;
+	// Inspection card: click a building, read its live state.
+	FText GetInspectText() const;
+	EVisibility GetInspectVisibility() const;
 	FText GetBuildLabel(FName DefName) const;
 	FReply HandleBuild(FName DefName);
 	FReply HandleDig();
+	FReply HandleSurvey();
 	FReply HandleSpeed(float Tier);
 	FReply HandlePause();
 	FReply HandleSave();
