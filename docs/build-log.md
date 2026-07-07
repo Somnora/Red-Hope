@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 31 (UX overhaul, part 1: the in-world action card — "click the machine, order it")
+
+- **Director's directive:** take on the UX contextual-action overhaul (his #1 concrete pain). Via a previewed structured ask he chose the interaction model: **a card that pops up ABOVE the machine in the world** (not on the deck) — the most immersive of the three options.
+- **BUILT + verified (`acdd412` data, `59ef202` code):**
+  - **The in-world action card.** Clicking a building floats a card anchored above it in the 3D world: an `SConstraintCanvas` layer whose one child is positioned every Tick by projecting the building's world point (lifted 3.5 m) to screen via `ProjectWorldLocationToScreen` and dividing out the geometry DPI scale; slot `Alignment(0.5, 1.0)` hangs the card's bottom-centre on that point so it sits above the machine; off-screen / behind-camera collapses it.
+  - **What the card shows:** the building's name, a **director-authored "what is this / how to use it" blurb**, its live state (the old inspect read-out, relocated here), and **action buttons for the verbs it affords with real costs**. For the Borer: **Bore Deeper** + **Excavate Cells** (with the CarveCell recipe's h/cell), which MOVE off the bottom bar onto the machine — decluttering the ORDER row to just world-placement orders (Dig/Survey/Map). The manual breaker moves here too. Every action issues a normal uplink order — the card never bypasses signal lag.
+  - **Data:** new `FRHBuildingRow.Category` + `Blurb` columns (player-facing copy authored in `RH_Buildings.csv`; Category will drive the Sims-style menu next). Honest costs only — real time/power/materials from data; no invented "N crew" number, because the sim assigns robots from a shared pool, not per-task.
+  - The old right-column inspect panel is removed (superseded). New `RH.Select <id>` raises a card without hunting the gray-box footprint with the cursor (hand-play + test aid).
+- **Verification:** compiles clean; a 45 s live boot with a building selected (`RH.Select 1`) exercised the projection + every bound getter with **zero ensures/crashes**; all 9 headless suites exact + 10-sol baseline byte-identical (the struct field is inert to the sim). **Honest caveats:** (1) blurbs render blank until the next editor session's DT re-sync lands the new `Category`/`Blurb` columns — the card structure + actions work now, the copy populates on sync; (2) the card's on-screen POSITIONING is the one thing headless (`-nullrhi`, no Slate render) cannot prove — that's the director's hand-play verdict.
+- **Remaining in the UX arc:** (2) the Sims-style CATEGORIZED build menu (using the new Category column); (3) richer on-placement tooltips. Both are follow-ups. Then M3 sovereignty per the roadmap.
+
 ## 2026-07-07 — Session 30 (director picks increments 2+3: the garden power fork + the water loop — both built + verified)
 
 - **Director's roadmap call:** after the "Hope drives the colony" build, he chose the **garden power fork** and the **water loop** next (over the UX overhaul). Built as two separately-committed, headless-verified increments.
