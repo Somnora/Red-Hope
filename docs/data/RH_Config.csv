@@ -52,3 +52,7 @@ HopePerJob,3,points,"M2 Gate B: Hope per colonist holding a job seat (one seat p
 HopeAdjacencyPenalty,8,points,"M2 Gate B: Hope lost per offended room pair - an emitter within 2 cells of a refuser, unpartitioned (habitat vision §4)"
 HopeUnsupportedPenalty,10,points,"M2 Gate B: Hope lost per currently-unsupported colonist"
 HopeVaultMilestone,5,points,"M2 Gate B: milestone Hope for holding the Phase-1 vault rating (brief §5 momentum component)"
+GardenSoilKgPerCell,250,kg,"M2 Gate C: Earth soil emplaced per Garden cell at planting (one SoilPallet fills 4 cells)"
+GardenSeedsKgPerCell,50,kg,"M2 Gate C: seed mass sown per Garden cell (one SeedVault plants 4 cells)"
+GardenFoodKgPerSolPerCell,1.0,kg,"M2 Gate C: Food yield per planted cell per sol on a rated floor (3 cells ~ break-even for a 4-colonist pod)"
+GardenWaterKgPerSolPerCell,4.0,kg,"M2 Gate C: Water draw per producing cell per sol - the garden is the colony's standing ISRU demand"

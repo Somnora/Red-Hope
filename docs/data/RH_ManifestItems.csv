@@ -1,6 +1,6 @@
 Name,DisplayName,Mass_kg,Category,Effect,UnlockTech,SliceActive,Notes
-SoilPallet,Earth Soil Pallet,1000,Future,Dormant until Phase 2 greenhouse,,TRUE,"Purchasable now, pays off later -- the signature gamble"
-SeedVault,Seed Vault,200,Future,Dormant until Phase 2 greenhouse,,TRUE,Cheap future bet
+SoilPallet,Earth Soil Pallet,1000,Agriculture,+1000 kg Soil (fills 4 garden cells),,TRUE,"M2 Gate C: the signature gamble pays off"
+SeedVault,Seed Vault,200,Agriculture,+200 kg Seeds (plants 4 garden cells),,TRUE,"M2 Gate C: the cheap future bet matures"
 PartsCrate,Spare Parts Crate,500,Operations,+10 SpareParts,,TRUE,Fleet longevity
 Toolkit,Specialty Toolkit,300,Operations,+15% fabricator build speed,,TRUE,Immediate quality-of-life
 AdvExcavator,Advanced Excavator RC-E2,2500,Fleet,+1 RC-E2 unit,,TRUE,Biggest single production jump

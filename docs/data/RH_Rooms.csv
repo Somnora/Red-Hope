@@ -1,6 +1,6 @@
 Name,DisplayName,Function,EmitsTags,RefusesTags,NeedsFiltration,NeedsPlumbing,MoraleWeight,SliceActive,Notes
 LivingQuarters,Living Quarters,Living,,Odor,TRUE,TRUE,1.0,TRUE,"ACTIVE M2 Gate B: crew sleep/rest; refuses Odor adjacency (garden/septic beside it sickens - habitat vision §4)"
-Garden,Gardening Station,Garden,Odor,,TRUE,TRUE,0.5,FALSE,"Dormant M2 Gate C: crops; emits Odor (fertilizer); light interacts with domes/grow-lights (§8)"
+Garden,Gardening Station,Garden,Odor,,TRUE,TRUE,0.5,TRUE,"ACTIVE M2 Gate C: crops on rated floors; emits Odor (fertilizer) - keep it off the quarters; grow-light power is a flagged later gate (§8)"
 Lab,Laboratory,Lab,,,TRUE,FALSE,0.3,TRUE,"ACTIVE M2 Gate B: research space; a job seat per cell"
 Workstation,Workstation,Workstation,,,TRUE,FALSE,0.2,TRUE,"ACTIVE M2 Gate B: crew work posts beside robots; a job seat per cell"
 Dining,Dining Room,Dining,,Odor,TRUE,TRUE,0.6,TRUE,"ACTIVE M2 Gate B: meals together - morale"
