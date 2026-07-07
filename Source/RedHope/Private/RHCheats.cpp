@@ -139,12 +139,51 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHBore(
 	TEXT("RH.Bore"),
-	TEXT("RH.Bore <ToDepth> [Xm=0] [Ym=0] - bore the shaft trunk down to the given floor depth (emits spoil; opens those floors to building)."),
+	TEXT("RH.Bore <ToDepth> - order the shaft trunk bored down to the given floor (uplink; needs a Borer online, works batch by batch)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Bore <ToDepth> [Xm] [Ym]"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Bore <ToDepth>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Bore");
+			Cmd.Value = FCString::Atod(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
+	TEXT("RH.Excavate"),
+	TEXT("RH.Excavate <Level> <Cells> - order N 10x10 cells carved on a reached floor (uplink; the Borer works the queue)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Excavate <Level> <Cells>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Excavate");
+			Cmd.Level = FCString::Atoi(*Args[0]);
+			Cmd.Value = FCString::Atod(*Args[1]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHBoreNow(
+	TEXT("RH.BoreNow"),
+	TEXT("RH.BoreNow <ToDepth> [Xm=0] [Ym=0] - DEBUG: extend the shaft instantly (bypasses Borer/uplink; spoil banks at the head, unhauled)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.BoreNow <ToDepth> [Xm] [Ym]"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -155,14 +194,14 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBore(
 		}
 	}));
 
-static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
-	TEXT("RH.Excavate"),
-	TEXT("RH.Excavate <Level> <Cells> - carve N 10x10 cells on a reached subsurface floor (emits spoil)."),
+static FAutoConsoleCommandWithWorldAndArgs GRHExcavateNow(
+	TEXT("RH.ExcavateNow"),
+	TEXT("RH.ExcavateNow <Level> <Cells> - DEBUG: carve instantly (bypasses Borer/uplink; spoil banks at the head, unhauled)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 2)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Excavate <Level> <Cells>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ExcavateNow <Level> <Cells>"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -221,10 +260,21 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		}
 		UE_LOG(LogRedHope, Display, TEXT("  import stock: solar %d, battery %d"),
 			Sim->GetImportStock(FName("SolarArray")), Sim->GetImportStock(FName("BatteryBank")));
-		if (Sim->GetShaftDepth() > 0)
+		if (Sim->GetShaftDepth() > 0 || Sim->GetBoreTargetDepth() > 0)
 		{
-			UE_LOG(LogRedHope, Display, TEXT("  shaft: bored to floor -%d | spoil pile %.0f kg"),
-				Sim->GetShaftDepth(), Sim->GetSpoilPileKg());
+			FString Carve;
+			for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+			{
+				const int32 Queued = Sim->GetCarveQueued(L);
+				const int32 Carved = Sim->GetFloorCarvedCells(L);
+				if (Queued > 0 || Carved > 0)
+				{
+					Carve += FString::Printf(TEXT("  %d: %d carved%s"), L, Carved,
+						Queued > 0 ? *FString::Printf(TEXT(" (+%d queued)"), Queued) : TEXT(""));
+				}
+			}
+			UE_LOG(LogRedHope, Display, TEXT("  shaft: floor -%d of ordered -%d%s"),
+				Sim->GetShaftDepth(), Sim->GetBoreTargetDepth(), *Carve);
 		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{

@@ -135,6 +135,11 @@ const FRHRecipeRow* URHDefinitionsSubsystem::FindRunnableRecipe(FName BuildingDe
 	return nullptr;
 }
 
+const FRHRecipeRow* URHDefinitionsSubsystem::GetRecipe(FName Name) const
+{
+	return RecipesTable ? RecipesTable->FindRow<FRHRecipeRow>(Name, TEXT("GetRecipe"), false) : nullptr;
+}
+
 TMap<FName, double> URHDefinitionsSubsystem::ParseResourceList(const FString& List)
 {
 	// "Struct:300;Water:200" -> map. Whitespace tolerated.

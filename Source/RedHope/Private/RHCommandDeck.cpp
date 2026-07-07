@@ -725,6 +725,28 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			Text += TEXT("\nno batch running");
 		}
+		// M1-d: the Borer's card reads its standing orders - the shaft's
+		// progress against the ordered depth, per-floor carve state, and the
+		// fuel the current batch runs on.
+		if (Def && Def->CanBore)
+		{
+			if (B->bBatchOnH2)
+			{
+				Text += TEXT("\nrunning on H2 - no grid draw, works through shedding");
+			}
+			Text += FString::Printf(TEXT("\nSHAFT: floor -%d of -%d ordered"),
+				Sim->GetShaftDepth(), FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()));
+			for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+			{
+				const int32 Queued = Sim->GetCarveQueued(L);
+				const int32 Carved = Sim->GetFloorCarvedCells(L);
+				if (Queued > 0 || Carved > 0)
+				{
+					Text += FString::Printf(TEXT("\n  floor %d: %d cell(s) carved%s"), L, Carved,
+						Queued > 0 ? *FString::Printf(TEXT(", %d queued"), Queued) : TEXT(""));
+				}
+			}
+		}
 		// Per-station storm legibility (director finding): a generator's card
 		// says WHY its output collapsed, right where the player is looking.
 		const double Dust = Sim->GetDustFactorNow();

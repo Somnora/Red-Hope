@@ -42,6 +42,89 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	Dig.Target = FName(*DigTarget);
 	Sim->EnqueueCommand(Dig);
 
+	const int32 StepsPerSol = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+
+	// M1-d Gate A2 self-test: the Borer works bore/carve DESIGNATIONS through
+	// the batch integrator - uplink orders, spoil at the building (hauled by
+	// era logistics), hydrogen fuel, mid-flight save v6 round-trip. `-borer`.
+	if (FParse::Param(*Params, TEXT("borer")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== BORER DESIGNATION TEST (M1-d Gate A2) ==="));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// The live DT asset predates the CanBore/H2BurnKgPerHour columns (an
+		// asset can only take them AFTER this binary exists); patch the loaded
+		// row in memory to the values RH_Buildings.csv stages, so this proves
+		// the CODE path. The in-editor smoke after the DT sync proves the DATA.
+		FRHBuildingRow* BorerRow = const_cast<FRHBuildingRow*>(DefsSub ? DefsSub->GetBuilding(FName("Borer")) : nullptr);
+		if (!BorerRow)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("BORER: no Borer row in DT_Buildings"));
+			return 1;
+		}
+		BorerRow->CanBore = true;
+		BorerRow->H2BurnKgPerHour = 1.5f;
+
+		Sim->Debug_PlaceInstant(FName("Borer"), FVector(2000.f, 2000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 2000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 3000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+
+		const auto RunSols = [&](double Sols)
+		{
+			const int32 Steps = (int32)(Sols * StepsPerSol);
+			for (int32 S = 0; S < Steps; ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const FName NRegolith(TEXT("Regolith")), NHydrogen(TEXT("Hydrogen"));
+
+		FRHCommand Bore;
+		Bore.Verb = FName("Bore");
+		Bore.Value = 2;
+		Sim->EnqueueCommand(Bore);
+		RunSols(3.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("BORER bore phase: depth=%d (expect 2) regolith total=%.0f (expect >= 2400, spoil hauled)"),
+			Sim->GetShaftDepth(), Sim->GetTotalSolid(NRegolith));
+
+		FRHCommand Exc;
+		Exc.Verb = FName("Excavate");
+		Exc.Level = -1;
+		Exc.Value = 2;
+		Sim->EnqueueCommand(Exc);
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("BORER carve phase: carved(-1)=%d (expect 2)"), Sim->GetFloorCarvedCells(-1));
+
+		// Mid-flight round-trip: 2 more cells ordered, a batch caught in the
+		// air, save v6, reload, finish - designations and pending work survive.
+		FRHCommand Exc2 = Exc;
+		Sim->EnqueueCommand(Exc2);
+		RunSols(0.15);
+		FString Err;
+		Sim->SaveColony(TEXT("borertest"), Err);
+		Sim->LoadColony(TEXT("borertest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("BORER save/load v6: depth=%d carved(-1)=%d queued(-1)=%d (state mid-designation)"),
+			Sim->GetShaftDepth(), Sim->GetFloorCarvedCells(-1), Sim->GetCarveQueued(-1));
+		RunSols(1.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("BORER resumed: carved(-1)=%d (expect 4)"), Sim->GetFloorCarvedCells(-1));
+
+		// Hydrogen phase: stock fuel, order more cells; batches start "on H2",
+		// deduct whole-batch fuel up-front, and the grid sees idle draw only.
+		Sim->AddStock(NHydrogen, 20.0);
+		FRHCommand Exc3 = Exc;
+		Sim->EnqueueCommand(Exc3);
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("BORER H2 phase: carved(-1)=%d (expect 6) hydrogen=%.1f (expect 11.0: 20 - 2 batches x 4.5)"),
+			Sim->GetFloorCarvedCells(-1), Sim->GetStock(NHydrogen));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== BORER TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M1-d Gate A self-test: the shaft/excavation model, the subsurface build
 	// rule, radiation payoff, and save v5 round-trip - all deterministic, no
 	// time integration needed. `-vault` runs it and exits.
@@ -83,7 +166,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		const double SpoilBefore = Sim->GetSpoilPileKg();
 		Sim->ExcavateFloor(-1, 99, R); // dirty the state before reload
 		Sim->LoadColony(TEXT("vaulttest"), Err);
-		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT save/load v5: depth=%d carved(-1)=%d spoil=%.0f (expect depth 2, carved 4, spoil %.0f)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT save/load v6: depth=%d carved(-1)=%d spoil=%.0f (expect depth 2, carved 4, spoil %.0f)"),
 			Sim->GetShaftDepth(), Sim->GetFloorCarvedCells(-1), Sim->GetSpoilPileKg(), SpoilBefore);
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== VAULT SELF-TEST END ==="));
@@ -92,7 +175,6 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
-	const int32 StepsPerSol = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
 	UE_LOG(LogRedHopeSim, Display, TEXT("RHSim headless: era-integrating %d sols (%d one-minute steps/sol)"), Sols, StepsPerSol);
 
 	// Peak surface exposure over the run: a live solar flare multiplies the

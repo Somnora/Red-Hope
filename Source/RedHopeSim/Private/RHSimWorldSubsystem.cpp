@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 5;   // v5: shaft depth + carved floors + spoil pile (M1-d Gate A)
+	constexpr uint32 RHSaveVersion = 6;   // v6: bore/carve designations + H2 batch flag (M1-d Gate A2); v5 added shaft state
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -739,9 +739,12 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 	// plus an idle step to restart).
 	for (FRHBuildingInstance& B : Buildings)
 	{
-		if (B.bUnderConstruction || !B.bPowered)
+		if (B.bUnderConstruction || (!B.bPowered && !B.bBatchOnH2))
 		{
 			// Shed/unbuilt: batches stall, nothing starts (M0-c shedding rule).
+			// Exception (M1-d): a Hydrogen-fuelled batch bought its whole run
+			// up-front - it grinds on through the brownout. That is the fuel's
+			// entire strategic point.
 			continue;
 		}
 
@@ -782,8 +785,100 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				}
 				UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d batch complete (%s)"),
 					*B.DefName.ToString(), B.Id, *B.ActiveRecipe.ToString());
+				// M1-d: designation work applies its world change at completion -
+				// the spoil already dropped with the outputs above.
+				if (const FIntPoint* Work = PendingBoreWork.Find(B.Id))
+				{
+					if (Work->X == 0) // bore: the trunk descends one floor
+					{
+						if (ShaftDepth == 0)
+						{
+							ShaftHeadCm = B.LocationCm; // the column is fixed by the Borer
+						}
+						++ShaftDepth;
+						UE_LOG(LogRedHopeSim, Display, TEXT("Shaft reached floor -%d%s"), ShaftDepth,
+							ShaftDepth >= BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
+					}
+					else // carve: one cell opens on its floor
+					{
+						int32& Carved = FloorCarvedCells.FindOrAdd(Work->Y);
+						++Carved;
+						UE_LOG(LogRedHopeSim, Display, TEXT("Carved cell on floor %d (%d carved, %d queued)"),
+							Work->Y, Carved, GetCarveQueued(Work->Y));
+					}
+					PendingBoreWork.Remove(B.Id);
+				}
 				B.ActiveRecipe = NAME_None;
+				B.bBatchOnH2 = false;
 				continue; // leftover budget flows into the next batch below
+			}
+
+			if (!B.bPowered)
+			{
+				break; // shed: an H2 batch may finish above, but nothing new starts
+			}
+
+			// M1-d Gate A2: designation-driven work first (the Borer). The
+			// player's queue is the gate - these recipes never pass the
+			// runnable search below. Bore before carve; carve shallowest-first
+			// over sorted keys (TMap iteration order is not deterministic).
+			if (BDef && BDef->CanBore)
+			{
+				FName WorkRecipeName = NAME_None;
+				FIntPoint WorkItem(0, 0);
+				bool bFloorWorkInFlight = false;
+				for (const auto& W : PendingBoreWork)
+				{
+					if (W.Value.X == 0) { bFloorWorkInFlight = true; break; }
+				}
+				if (BoreTargetDepth > ShaftDepth && !bFloorWorkInFlight)
+				{
+					WorkRecipeName = FName("BoreFloor");
+					WorkItem = FIntPoint(0, -(ShaftDepth + 1));
+				}
+				else
+				{
+					TArray<int32> Levels;
+					CarveQueue.GenerateKeyArray(Levels);
+					Levels.Sort([](int32 A, int32 C) { return A > C; }); // -1 before -2
+					for (int32 L : Levels)
+					{
+						if (CarveQueue[L] > 0 && IsLevelConnected(L))
+						{
+							WorkRecipeName = FName("CarveCell");
+							WorkItem = FIntPoint(1, L);
+							break;
+						}
+					}
+				}
+				if (const FRHRecipeRow* Work = WorkRecipeName.IsNone() ? nullptr : Defs->GetRecipe(WorkRecipeName))
+				{
+					// Fuel decision at start, committed like extraction: the
+					// whole batch's Hydrogen deducts up-front if stocked, else
+					// the batch draws grid power.
+					B.bBatchOnH2 = false;
+					if (BDef->H2BurnKgPerHour > 0.f)
+					{
+						const double FuelKg = BDef->H2BurnKgPerHour * Work->BatchTime_h;
+						if (GetStock(FName("Hydrogen")) >= FuelKg)
+						{
+							AddStock(FName("Hydrogen"), -FuelKg);
+							B.bBatchOnH2 = true;
+						}
+					}
+					if (WorkItem.X == 1)
+					{
+						--CarveQueue[WorkItem.Y]; // committed at start
+					}
+					PendingBoreWork.Add(B.Id, WorkItem);
+					B.ActiveRecipe = WorkRecipeName;
+					PendingOutputs.Add(B.Id, URHDefinitionsSubsystem::ParseResourceList(Work->Outputs));
+					B.BatchRemaining_h = Work->BatchTime_h;
+					UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, floor %d)"),
+						*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
+						B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y);
+					continue; // budget flows into the new batch
+				}
 			}
 
 			// Idle: try to start a batch whose inputs are covered - solids
@@ -1079,7 +1174,9 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		CapWh += Def->StorageWh;
 		FLoadEntry E;
 		E.B = &B;
-		E.WantW = (B.BatchRemaining_h > 0.0) ? Def->PowerDraw_W : Def->PowerIdle_W;
+		// M1-d: a Hydrogen-fuelled batch bought its energy up-front - the grid
+		// sees only idle draw while it runs.
+		E.WantW = (B.BatchRemaining_h > 0.0 && !B.bBatchOnH2) ? Def->PowerDraw_W : Def->PowerIdle_W;
 		E.Priority = Def->LoadPriority;
 		Loads.Add(E);
 	}
@@ -1330,6 +1427,54 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		UE_LOG(LogRedHopeSim, Display, TEXT("Survey posted: (%.0f, %.0f) m - awaiting a scout"),
 			Cmd.Location.X / 100.0, Cmd.Location.Y / 100.0);
 	}
+	else if (Cmd.Verb == FName("Bore"))
+	{
+		// M1-d Gate A2: order the shaft trunk down to Value floors. The Borer
+		// works it one BoreFloor batch per floor; designations are standing
+		// orders, so deeper re-orders just raise the target.
+		bool bHaveBorer = false;
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			const FRHBuildingRow* D = Defs->GetBuilding(B.DefName);
+			if (D && D->CanBore && !B.bUnderConstruction)
+			{
+				bHaveBorer = true;
+				break;
+			}
+		}
+		if (!bHaveBorer)
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("No Borer online - build one first"));
+			return;
+		}
+		const int32 Target = FMath::Clamp((int32)Cmd.Value, 0, MaxDepth);
+		if (Target <= ShaftDepth)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Shaft already at floor -%d"), ShaftDepth));
+			return;
+		}
+		BoreTargetDepth = FMath::Max(BoreTargetDepth, Target);
+		UE_LOG(LogRedHopeSim, Display, TEXT("Bore designation: shaft to floor -%d (now -%d)"), BoreTargetDepth, ShaftDepth);
+	}
+	else if (Cmd.Verb == FName("Excavate"))
+	{
+		// M1-d Gate A2: carve Value cells on a reached floor. Queue decrements
+		// at batch START (committed work); the carve applies at completion.
+		const int32 Cells = (int32)Cmd.Value;
+		if (Cells <= 0 || Cmd.Level >= 0 || Cmd.Level < -MaxDepth)
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("Excavation needs a subsurface floor and a cell count"));
+			return;
+		}
+		if (!IsLevelConnected(Cmd.Level))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Cmd.Level));
+			return;
+		}
+		CarveQueue.FindOrAdd(Cmd.Level) += Cells;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d (%d queued there)"),
+			Cells, Cmd.Level, CarveQueue[Cmd.Level]);
+	}
 
 	OnCommandExecuted.Broadcast(Cmd);
 }
@@ -1395,6 +1540,16 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 			*DefName.ToString(), NewId, LocationCm.X / 100.0, LocationCm.Y / 100.0);
 	}
 	OnBuildingAdded.Broadcast(Added);
+}
+
+void URHSimWorldSubsystem::Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level)
+{
+	if (!Defs || !Defs->GetBuilding(DefName))
+	{
+		UE_LOG(LogRedHopeSim, Error, TEXT("Debug_PlaceInstant: unknown building '%s'"), *DefName.ToString());
+		return;
+	}
+	AddBuilding(DefName, LocationCm, /*bInstant*/ true, Level);
 }
 
 void URHSimWorldSubsystem::Debug_Showcase()
@@ -2241,7 +2396,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	for (FRHBuildingInstance& B : SavedBuildings)
 	{
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
-		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
+		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
+		   << B.bBatchOnH2;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 	}
@@ -2287,8 +2443,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ar << S.PointCm << S.RadiusM << S.Sol << S.FoundCount;
 	}
 
-	// Shaft & excavation (save v5).
+	// Shaft & excavation + designations (save v5/v6).
 	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
+	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -2371,7 +2528,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		FRHBuildingInstance B;
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
-		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId;
+		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
+		   << B.bBatchOnH2;
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 		Buildings.Add(MoveTemp(B));
@@ -2428,9 +2586,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		SurveyHistory.Add(S);
 	}
 
-	// Shaft & excavation (save v5). The reader repopulates the map wholesale.
+	// Shaft & excavation + designations (save v5/v6). Maps repopulate wholesale.
 	FloorCarvedCells.Empty();
 	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
+	CarveQueue.Empty();
+	PendingBoreWork.Empty();
+	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

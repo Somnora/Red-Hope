@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 20c (M1-d Gate A2 sim layer: Borer designations + hydrogen fuel + save v6, verified headless)
+
+- **Data first (editor session, insurance-committed `958cd9a`):** Borer building live in DT_Buildings (3×3, 500 W, Struct:180, priority 2 — sheds early); `BoreFloor` (12 sol-h → one floor descent, Regolith:1200 spoil) and `CarveCell` (3 sol-h → one 10×10 cell, Regolith:1200) in DT_Recipes; ShaftSpoilKgPerFloor/SpoilKgPerCell synced to DT_Config. Designation recipes are inert to the auto-start search by construction (empty inputs + non-extractor).
+- **Designations through the real uplink:** `Bore`/`Excavate` are uplink verbs (lag, rejections: "No Borer online", "bore the shaft deeper first"). The Borer works the queues through the EXISTING batch integrator — power, shedding, era parity all inherited. Bore-before-carve, carve shallowest-first over sorted keys (determinism); carve committed at batch start, world change applied at completion via `PendingBoreWork` (BuildingId → work item).
+- **Spoil is real economy:** each batch drops 1200 kg Regolith at the Borer; existing hauling/era-logistics move it to the Forge. Verified: regolith flowed to stores during the bore phase.
+- **Hydrogen fuel (`H2BurnKgPerHour`, row schema):** a batch buys its whole fuel up-front from Hydrogen stock when available and then draws idle grid power only AND **runs straight through shedding** (`bBatchOnH2` exempts the stall; nothing new starts while shed). The Electrolyzer's byproduct becomes strategic.
+- **Save v6:** designations (`BoreTargetDepth`, `CarveQueue`), in-flight work (`PendingBoreWork`), and `bBatchOnH2` serialize; v5 refuses.
+- **Legibility:** Borer inspection card reads standing orders (shaft −N of −M ordered, per-floor carved/queued, "running on H2 — works through shedding"); `RH.Status` shaft line; `RH.Bore`/`RH.Excavate` (uplink) vs `RH.BoreNow`/`RH.ExcavateNow` (debug-instant).
+- **Verified headless (`-run=RHSim -borer`), all assertions green:** bore designation −2 worked as two 12-h batches across 2 sols; carve 2+2 cells; **mid-flight save/load v6 resumed an in-air CarveCell batch and completed it** (carved 3→4 post-reload); H2 phase exact (20 kg → 11.0 after 2 batches × 4.5, batches logged "started on H2"). `-vault` A1 regression all-green; 10-sol baseline figure-identical. Compile clean first try (48 s).
+- **Known gap (deliberate):** live DT_Buildings predates the `CanBore`/`H2BurnKgPerHour` columns — the `-borer` test patches the loaded row in memory to CSV-staged values (proves the CODE). **Next editor session: set Borer CanBore=TRUE, H2BurnKgPerHour=1.5 via MCP + in-editor smoke (proves the DATA).** Then A2 presentation: paint-to-size excavation UI, sliced-floor camera + elevator selector + shaft HUD.
+
 ## 2026-07-07 — Session 20b (M1-d Gate A1: the shaft/excavation model + save v5, verified headless)
 
 - **Director green-lit M1-d Gate A** (`docs/m1d-working-spec.md`). Built the first reviewable increment, **A1 — the sim foundation** (code-only, no editor needed; the Borer DataTable row + paint-to-size UI + sliced camera are A2):

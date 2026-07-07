@@ -44,6 +44,9 @@ public:
 	// First slice-active recipe of a building whose inputs the predicate
 	// accepts. Recipe Inputs/Outputs strings parse as "Res:Kg;Res:Kg".
 	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const;
+	// Recipe row by name (M1-d: designation-driven work - BoreFloor/CarveCell -
+	// starts its recipe explicitly; it never passes the runnable search).
+	const FRHRecipeRow* GetRecipe(FName Name) const;
 
 	static TMap<FName, double> ParseResourceList(const FString& List);
 

@@ -1,14 +1,14 @@
-Name,DisplayName,FootprintX,FootprintY,PowerDraw_W,PowerIdle_W,PowerGenPeak_W,PowerGenBase_W,StorageWh,CoverageRadius_m,LinkRange_m,CostStruct_kg,CostResources,BuildTime_s,LoadPriority,RequiresDeposit,ImportOnly,UnlockTech,SliceActive,Notes
-Lander,The Lander,5,5,0,20,0,50,2000,30,80,0,,0,1,FALSE,FALSE,,TRUE,Pre-placed root node; trickle gen; starter storage; uplink
-SolarArray,Solar Array,2,3,0,0,300,0,0,0,0,0,,60,0,FALSE,TRUE,,TRUE,Flat-pack deploy; yield ~2300 Wh/sol via diurnal curve x DustFactor
-BatteryBank,Battery Bank,2,2,0,5,0,0,4000,0,0,0,,60,1,FALSE,TRUE,,TRUE,1000 W max charge/discharge; ~1 night of baseline per bank
-Pylon,Grid Pylon,1,1,0,10,0,0,0,40,80,40,Struct:40,90,1,FALSE,FALSE,,TRUE,Auto-links nearest node in 80 m; cable mesh auto-laid; coverage disc = territory
-ChargePad,Charging Pad,2,2,500,10,0,0,0,0,0,60,Struct:60,120,9,FALSE,FALSE,,TRUE,500 W transfer to docked robot; robots recharge only here; sheds last
-Forge,The Forge,4,5,800,50,0,0,0,0,0,250,Struct:250,400,2,FALSE,FALSE,,TRUE,Milestone structure; batch smelter; sheds first
-IceDrill,Ice Drill,3,3,250,15,0,0,0,0,0,80,Struct:80,180,6,TRUE,FALSE,,TRUE,Must sit on Ice deposit; 40 kg ice/h
-WaterPlant,Water Plant,3,3,300,15,0,0,0,0,0,100,Struct:100,200,7,FALSE,FALSE,,TRUE,Melts ice; 50 ice -> 45 water per h
-Electrolyzer,Electrolyzer,3,4,600,15,0,0,0,0,0,120,Struct:120,240,4,FALSE,FALSE,,TRUE,10 water -> 8.9 O2 + 1.1 H2 per h; power hog by design
-Stockpile,Stockpile Pad,3,3,0,0,0,0,0,0,0,20,Struct:20,60,0,FALSE,FALSE,,TRUE,2000 kg solid storage
-ComputeModule,Lander Compute Module,0,0,150,150,0,0,0,0,0,100,Struct:100,200,5,FALSE,FALSE,,TRUE,Lander upgrade slot; lag 45->20 s; 3.6 kWh/sol -- autonomy has a power price
-Habitat,Habitat Module,6,8,400,100,0,0,0,0,0,600,Struct:600,600,3,FALSE,FALSE,,FALSE,Dormant M1; Phase 1 exit structure; consumes HabSegment+Shielding
-Borer,The Borer,3,3,500,15,0,0,0,0,0,180,Struct:180,300,2,FALSE,FALSE,,TRUE,"M1-d: bores the shaft trunk + carves floors via designations; heavy draw, sheds early; burns H2 instead of grid when stocked (H2BurnKgPerHour, CanBore - columns land with the A2 compile)"
+Name,DisplayName,FootprintX,FootprintY,PowerDraw_W,PowerIdle_W,PowerGenPeak_W,PowerGenBase_W,StorageWh,CoverageRadius_m,LinkRange_m,CostStruct_kg,CostResources,BuildTime_s,LoadPriority,RequiresDeposit,ImportOnly,UnlockTech,CanBore,H2BurnKgPerHour,SliceActive,Notes
+Lander,The Lander,5,5,0,20,0,50,2000,30,80,0,,0,1,FALSE,FALSE,,FALSE,0,TRUE,Pre-placed root node; trickle gen; starter storage; uplink
+SolarArray,Solar Array,2,3,0,0,300,0,0,0,0,0,,60,0,FALSE,TRUE,,FALSE,0,TRUE,Flat-pack deploy; yield ~2300 Wh/sol via diurnal curve x DustFactor
+BatteryBank,Battery Bank,2,2,0,5,0,0,4000,0,0,0,,60,1,FALSE,TRUE,,FALSE,0,TRUE,1000 W max charge/discharge; ~1 night of baseline per bank
+Pylon,Grid Pylon,1,1,0,10,0,0,0,40,80,40,Struct:40,90,1,FALSE,FALSE,,FALSE,0,TRUE,Auto-links nearest node in 80 m; cable mesh auto-laid; coverage disc = territory
+ChargePad,Charging Pad,2,2,500,10,0,0,0,0,0,60,Struct:60,120,9,FALSE,FALSE,,FALSE,0,TRUE,500 W transfer to docked robot; robots recharge only here; sheds last
+Forge,The Forge,4,5,800,50,0,0,0,0,0,250,Struct:250,400,2,FALSE,FALSE,,FALSE,0,TRUE,Milestone structure; batch smelter; sheds first
+IceDrill,Ice Drill,3,3,250,15,0,0,0,0,0,80,Struct:80,180,6,TRUE,FALSE,,FALSE,0,TRUE,Must sit on Ice deposit; 40 kg ice/h
+WaterPlant,Water Plant,3,3,300,15,0,0,0,0,0,100,Struct:100,200,7,FALSE,FALSE,,FALSE,0,TRUE,Melts ice; 50 ice -> 45 water per h
+Electrolyzer,Electrolyzer,3,4,600,15,0,0,0,0,0,120,Struct:120,240,4,FALSE,FALSE,,FALSE,0,TRUE,10 water -> 8.9 O2 + 1.1 H2 per h; power hog by design
+Stockpile,Stockpile Pad,3,3,0,0,0,0,0,0,0,20,Struct:20,60,0,FALSE,FALSE,,FALSE,0,TRUE,2000 kg solid storage
+ComputeModule,Lander Compute Module,0,0,150,150,0,0,0,0,0,100,Struct:100,200,5,FALSE,FALSE,,FALSE,0,TRUE,Lander upgrade slot; lag 45->20 s; 3.6 kWh/sol -- autonomy has a power price
+Habitat,Habitat Module,6,8,400,100,0,0,0,0,0,600,Struct:600,600,3,FALSE,FALSE,,FALSE,0,FALSE,Dormant M1; Phase 1 exit structure; consumes HabSegment+Shielding
+Borer,The Borer,3,3,500,15,0,0,0,0,0,180,Struct:180,300,2,FALSE,FALSE,,TRUE,1.5,TRUE,"M1-d: works bore/carve designations batch by batch; heavy draw, sheds early; burns H2 (1.5 kg/sol-h, whole batch up-front) instead of grid when stocked - and runs through brownouts"

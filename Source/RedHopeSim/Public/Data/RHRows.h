@@ -61,6 +61,13 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// that tech exists. All checks go through CanFabricateLocally(); never
 	// branch on ImportOnly directly.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockTech;
+	// M1-d Gate A2: this definition works bore/carve designations (the Borer).
+	// The designation queue is the gate - its recipes never auto-start.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool CanBore = false;
+	// M1-d Gate A2: >0 means a batch burns Hydrogen stock (kg per sol-hour,
+	// whole batch deducted up-front, committed like extraction) instead of
+	// drawing grid power - and runs straight through shedding. 0 = grid only.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float H2BurnKgPerHour = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };

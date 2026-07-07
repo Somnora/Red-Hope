@@ -51,6 +51,10 @@ struct REDHOPESIM_API FRHBuildingInstance
 	UPROPERTY() double BatchRemaining_h = 0.0;  // > 0: recipe in progress
 	UPROPERTY() FName ActiveRecipe;
 	UPROPERTY() int32 AttachedDepositId = 0;    // extraction buildings (RequiresDeposit)
+	// M1-d Gate A2: this batch was fuelled by Hydrogen at start (whole-batch
+	// stock deducted up-front) - it draws idle grid power only and runs
+	// straight through shedding. Cleared at batch completion.
+	UPROPERTY() bool bBatchOnH2 = false;
 	UPROPERTY() TMap<FName, double> InputKg;
 	UPROPERTY() TMap<FName, double> OutputKg;
 };
@@ -145,6 +149,10 @@ public:
 	int32 GetFloorCarvedCells(int32 Level) const { const int32* C = FloorCarvedCells.Find(Level); return C ? *C : 0; }
 	double GetSpoilPileKg() const { return SpoilPileKg; }
 	FVector GetShaftHeadCm() const { return ShaftHeadCm; }
+	// Designation reads (M1-d Gate A2): the player's standing orders the Borer
+	// works through, batch by batch.
+	int32 GetBoreTargetDepth() const { return BoreTargetDepth; }
+	int32 GetCarveQueued(int32 Level) const { const int32* C = CarveQueue.Find(Level); return C ? *C : 0; }
 	// Bore the trunk down to ToDepth floors below surface (clamped to MaxDepth);
 	// emits shaft spoil per newly bored floor. The shaft head (surface column)
 	// is fixed on the first bore. Never retracts.
@@ -288,6 +296,10 @@ public:
 	// grid so the full canon silhouette set is on screen at once (RH.Showcase).
 	// Bypasses the economy - completed, no cost, no uplink lag.
 	void Debug_Showcase();
+	// Harness driver (M1-d): place one completed building instantly - no cost,
+	// no lag - so headless tests can stand up a Borer without scripting the
+	// whole construction economy.
+	void Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level = 0);
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
@@ -377,11 +389,19 @@ private:
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;
 	int32 MaxDepth = 5;
-	// Shaft & excavation state (M1-d Gate A; serialized, save v5).
+	// Shaft & excavation state (M1-d Gate A; serialized, save v6).
 	int32 ShaftDepth = 0;                  // floors the trunk reaches below surface (0 = none)
 	FVector ShaftHeadCm = FVector::ZeroVector; // surface column the shaft descends from
 	TMap<int32, int32> FloorCarvedCells;   // Level -> carved 10x10 cell count
-	double SpoilPileKg = 0.0;              // regolith spoil at the shaft head, awaiting haul (A2)
+	double SpoilPileKg = 0.0;              // debug-cheat spoil only; Borer batches drop spoil at the building
+	// Designation queues (A2; serialized): the Borer works these through the
+	// batch integrator. Bore first, then carve shallowest-first (deterministic).
+	int32 BoreTargetDepth = 0;             // ordered trunk depth; work proceeds while ShaftDepth < this
+	TMap<int32, int32> CarveQueue;         // Level -> cells still to carve (decremented at batch START)
+	// Batch-in-flight work records (BuildingId -> X: 0=bore floor/1=carve cell,
+	// Y: level). Applied at batch completion; serialized so a mid-batch save
+	// resumes and still advances the shaft.
+	TMap<int32, FIntPoint> PendingBoreWork;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;
