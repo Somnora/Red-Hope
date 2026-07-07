@@ -2804,26 +2804,36 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The convoy is already out (to %s)"), *ConvoyRival.ToString()));
 			return;
 		}
-		if (GetStock(NHydrogen) < ConvoyH2PerRun)
+		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
+		// overlapping resources - so preflight and commit validate/spend the
+		// identical sum. (Adversarial review, M3 Gate A: three independent checks
+		// against the same stock could each pass while the SUM overdraws, driving
+		// a resource negative if an ImportLot ever names Hydrogen or SpareParts.
+		// Current data doesn't, but the aggregate closes the hole permanently.)
+		TMap<FName, double> Cost;
+		Cost.FindOrAdd(NHydrogen) += ConvoyH2PerRun;
+		Cost.FindOrAdd(NSpareParts) += ConvoyWearParts;
+		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot))
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy needs %.0f kg Hydrogen fuel"), ConvoyH2PerRun));
+			Cost.FindOrAdd(Item.Key) += Item.Value;
+		}
+		if (!HasTradeLot(Cost))
+		{
+			// Name the first shortfall for a legible refusal.
+			FName Short = NAME_None;
+			for (const auto& Item : Cost)
+			{
+				const double Have = (Defs && Defs->IsSolidResource(Item.Key))
+					? GetTotalSolid(Item.Key) + GetStock(Item.Key) : GetStock(Item.Key);
+				if (Have + KINDA_SMALL_NUMBER < Item.Value) { Short = Item.Key; break; }
+			}
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(
+				TEXT("Convoy short of %s (needs fuel %.0f H2 + %.0f parts + %s)"),
+				*Short.ToString(), ConvoyH2PerRun, ConvoyWearParts, *Rival->ImportLot));
 			return;
 		}
-		if (GetTotalSolid(NSpareParts) + GetStock(NSpareParts) < ConvoyWearParts)
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy needs %.0f Spare Part(s) for the trek"), ConvoyWearParts));
-			return;
-		}
-		const TMap<FName, double> YourLot = URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot);
-		if (!HasTradeLot(YourLot))
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy short of the export lot (%s)"), *Rival->ImportLot));
-			return;
-		}
-		// Commit at departure.
-		AddStock(NHydrogen, -ConvoyH2PerRun);
-		SpendTradeLot(TMap<FName, double>{ { NSpareParts, ConvoyWearParts } });
-		SpendTradeLot(YourLot);
+		// Commit at departure - one spend of the validated aggregate.
+		SpendTradeLot(Cost);
 		ConvoyRival = Cmd.Target;
 		bConvoyReturning = false;
 		ConvoyLegSols = 0.0;

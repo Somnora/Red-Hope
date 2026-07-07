@@ -827,16 +827,39 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE storm freeze: progress %.3f -> %.3f (frozen) -> %.3f (moving) (expect ~equal then greater)"),
 			PStorm, PStill, PMoving);
 
-		// 6) Save v17 round-trip mid-transit: convoy + relations survive.
+		// 5b) Aggregate-cost conservation (adversarial-review fix): a rival whose
+		// ImportLot NAMES SpareParts must be gated on fuel+wear+lot SUMMED, not
+		// three independent checks - so it refuses cleanly instead of driving the
+		// pool negative. Let the storm convoy finish (sol 17 is a flare, which
+		// does NOT freeze it), then inject Greed (ImportLot SpareParts:4).
+		RunSols(4.5); // storm-test convoy gets home -> idle
+		FRHRivalRow Greed = Z; Greed.DisplayName = TEXT("Greedy Post");
+		Greed.ImportLot = TEXT("SpareParts:4"); Greed.ExportLot = TEXT("Ice:10");
+		DefsSub->Debug_InjectRival(FName("Greed"), Greed);
+		// Drain SpareParts to exactly 3 (< wear 1 + lot 4 = 5), keep H2 high.
+		Sim->AddStock(FName("SpareParts"), 3.0 - (Sim->GetTotalSolid(FName("SpareParts")) + Sim->GetStock(FName("SpareParts"))));
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		const double Parts0 = Sim->GetTotalSolid(FName("SpareParts")) + Sim->GetStock(FName("SpareParts"));
+		Dispatch(TEXT("Greed"));
+		const double Parts1 = Sim->GetTotalSolid(FName("SpareParts")) + Sim->GetStock(FName("SpareParts"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE overlap-guard: convoy=%s parts %.0f->%.0f (expect idle, 3->3 - refused, never negative)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString(), Parts0, Parts1);
+
+		// 6) Save v17 round-trip MID-TRANSIT: re-dispatch a legitimate Zarya run,
+		// advance partway, then save/load and confirm the convoy + relations
+		// survive exactly.
+		Dispatch(TEXT("Zarya"));
+		RunSols(1.0); // outbound, mid-leg
 		const FName OutTo = Sim->GetConvoyRival();
+		const double ProgBefore = Sim->GetConvoyProgress();
 		const double RelBefore = Sim->GetRivalRelation(FName("Zarya"));
 		FString Err;
 		Sim->SaveColony(TEXT("tradetest"), Err);
 		Sim->LoadColony(TEXT("tradetest"), Err);
-		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE save/load v17: convoy %s->%s relation %.0f->%.0f (expect identical)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE save/load v17: convoy %s->%s progress %.3f->%.3f relation %.0f->%.0f (expect identical)"),
 			OutTo.IsNone() ? TEXT("idle") : *OutTo.ToString(),
 			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString(),
-			RelBefore, Sim->GetRivalRelation(FName("Zarya")));
+			ProgBefore, Sim->GetConvoyProgress(), RelBefore, Sim->GetRivalRelation(FName("Zarya")));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== RIVALS & TRADE TEST END ==="));
 		GEngine->DestroyWorldContext(World);
