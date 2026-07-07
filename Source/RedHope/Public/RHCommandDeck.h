@@ -81,6 +81,14 @@ private:
 	FText GetMapLabel() const;
 	FText GetBuildLabel(FName DefName) const;
 	FReply HandleBuild(FName DefName);
+	// Sims-style categorized build menu (M2 Gate D+ UX, part 2): a row of
+	// category tabs; picking one shows only that category's buildings. Category
+	// comes from the DataTable (FRHBuildingRow.Category), with a code-derived
+	// fallback so the menu works before the DT re-sync lands the column.
+	FReply HandleSelectCategory(FName Category);
+	FText GetCategoryLabel(FName Category) const;
+	FSlateColor GetCategoryTabColor(FName Category) const;
+	EVisibility GetBuildCatVisibility(FName Category) const;
 	FReply HandleDig();
 	FReply HandleSurvey();
 	// Excavation designation (M1-d): paint carve cells on the active floor.
@@ -116,4 +124,7 @@ private:
 	// refreshed in Tick from the selected building's screen projection.
 	FVector2D ActionCardPos = FVector2D::ZeroVector;
 	bool bActionCardOnScreen = false;
+	// Categorized build menu: the tab currently showing, defaulted to the first
+	// category present in the data at Construct.
+	FName SelectedBuildCategory;
 };

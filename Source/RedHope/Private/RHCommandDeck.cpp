@@ -47,14 +47,36 @@ namespace
 			]
 		];
 	}
+
+	// The build category for a def: the DataTable's authored Category when set,
+	// else derived from capabilities so the Sims-style menu works BEFORE the DT
+	// re-sync lands the Category column (the authored value wins once synced).
+	FName CategoryOfBuilding(const FRHBuildingRow& D)
+	{
+		if (!D.Category.IsNone())
+		{
+			return D.Category;
+		}
+		if (D.CanBore)                                                         return FName("Boring");
+		if (D.CirculatesAir)                                                   return FName("LifeSupport");
+		if (D.PowerGenPeak_W > 0.f || D.PowerGenBase_W > 0.f || D.StorageWh > 0.f) return FName("Power");
+		if (D.CoverageRadius_m > 0.f || D.LinkRange_m > 0.f)                   return FName("Logistics");
+		if (D.PowerDraw_W > 0.f)                                               return FName("Production");
+		return FName("Logistics");
+	}
 }
 
 void SRHCommandDeck::Construct(const FArguments& InArgs)
 {
 	PC = InArgs._OwnerPC;
 
-	// Build palette: every slice-active, constructable def, straight from data.
+	// Build menu, Sims-style (M2 Gate D+ UX part 2): a row of CATEGORY tabs +
+	// a palette that shows only the selected category's buildings. Both are
+	// built once here; each building button carries a visibility bound to its
+	// category, so switching tabs is a pure visibility flip (no rebuild).
+	TSharedRef<SHorizontalBox> CategoryTabs = SNew(SHorizontalBox);
 	TSharedRef<SHorizontalBox> Palette = SNew(SHorizontalBox);
+	TArray<FName> BuildCategories; // distinct, first-seen order
 	// Zone palette (M2 Gate B): every slice-active room function. Zoning is
 	// free (function, not construction), so no cost labels. Empty until the
 	// rooms table activates - the row is simply absent pre-M2.
@@ -71,13 +93,43 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				{
 					return; // pre-placed structures (the Lander) are not orderable
 				}
+				const FName Cat = CategoryOfBuilding(Row);
+				BuildCategories.AddUnique(Cat);
+				// The button shows only while its category tab is selected.
 				Palette->AddSlot().AutoWidth()
 				[
-					DeckButton(
-						TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildLabel, RowName)),
-						FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBuild, RowName))
+					SNew(SBox)
+					.Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildCatVisibility, Cat)))
+					[
+						DeckButton(
+							TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildLabel, RowName)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBuild, RowName))
+					]
 				];
 			});
+			// Default to the first category so the menu opens on something.
+			if (BuildCategories.Num() > 0 && SelectedBuildCategory.IsNone())
+			{
+				SelectedBuildCategory = BuildCategories[0];
+			}
+			for (const FName Cat : BuildCategories)
+			{
+				CategoryTabs->AddSlot().AutoWidth()
+				[
+					SNew(SBox).Padding(FMargin(1.f, 0.f))
+					[
+						SNew(SButton)
+						.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetCategoryTabColor, Cat)))
+						.ContentPadding(FMargin(8.f, 5.f))
+						.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSelectCategory, Cat))
+						[
+							SNew(STextBlock)
+							.Text(GetCategoryLabel(Cat))
+							.Font(DeckFont(9))
+						]
+					]
+				];
+			}
 			Defs->ForEachRoom([&](FName RowName, const FRHRoomRow& Row)
 			{
 				++ZoneCount;
@@ -477,6 +529,13 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 					[
 						SNew(STextBlock).Text(FText::FromString(TEXT("BUILD "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+					]
+					// Category tabs (Sims-style folders), then the selected
+					// category's buildings - a thin separator between them.
+					+ SHorizontalBox::Slot().AutoWidth() [ CategoryTabs ]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(6.f, 0.f, 8.f, 0.f))
+					[
+						SNew(STextBlock).Text(FText::FromString(TEXT("|"))).Font(DeckFont(9)).ColorAndOpacity(FLinearColor(0.4f, 0.5f, 0.55f))
 					]
 					+ SHorizontalBox::Slot().AutoWidth() [ Palette ]
 
@@ -1309,6 +1368,42 @@ FReply SRHCommandDeck::HandleBuild(FName DefName)
 		PC->BeginPlacement(DefName);
 	}
 	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleSelectCategory(FName Category)
+{
+	SelectedBuildCategory = Category;
+	return FReply::Handled();
+}
+
+EVisibility SRHCommandDeck::GetBuildCatVisibility(FName Category) const
+{
+	return (Category == SelectedBuildCategory) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FSlateColor SRHCommandDeck::GetCategoryTabColor(FName Category) const
+{
+	// The open folder glows; the rest sit dim - the one-glance "where am I".
+	return (Category == SelectedBuildCategory)
+		? FSlateColor(FLinearColor(0.15f, 0.45f, 0.55f))
+		: FSlateColor(FLinearColor(0.06f, 0.11f, 0.14f));
+}
+
+FText SRHCommandDeck::GetCategoryLabel(FName Category) const
+{
+	// Space out CamelCase folder names for display ("LifeSupport" -> "Life
+	// Support") without needing a separate label column.
+	const FString Raw = Category.ToString();
+	FString Out;
+	for (int32 i = 0; i < Raw.Len(); ++i)
+	{
+		if (i > 0 && FChar::IsUpper(Raw[i]) && !FChar::IsUpper(Raw[i - 1]))
+		{
+			Out.AppendChar(' ');
+		}
+		Out.AppendChar(Raw[i]);
+	}
+	return FText::FromString(Out);
 }
 
 FReply SRHCommandDeck::HandleDig()
