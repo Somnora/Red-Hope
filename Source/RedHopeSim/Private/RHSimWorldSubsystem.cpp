@@ -8,6 +8,7 @@
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/NameAsStringProxyArchive.h"
+#include "Misc/Crc.h"
 
 namespace
 {
@@ -3122,7 +3123,12 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 
 	// Deterministic detection roll: a seeded hash of (rival, attempt#) - NEVER
 	// live RNG. The counter (saved) makes repeated ops differ but reproducibly.
-	const uint32 Seed = HashCombine(GetTypeHash(Rival), (uint32)(CovertAttempts * 2654435761u));
+	// The rival seed MUST be a content hash of its name (FCrc::StrCrc32), NOT
+	// GetTypeHash(FName) - that uses the FName comparison INDEX, which is
+	// assigned by registration order at process launch and so varies run-to-run
+	// (adversarial-review 2026-07-07: it would flip caught<->clean on reload /
+	// across machines, breaking determinism). CRC of the string is stable.
+	const uint32 Seed = HashCombine(FCrc::StrCrc32(*Rival.ToString()), (uint32)(CovertAttempts * 2654435761u));
 	++CovertAttempts;
 	const double U = (Seed % 100000u) / 100000.0; // [0,1)
 

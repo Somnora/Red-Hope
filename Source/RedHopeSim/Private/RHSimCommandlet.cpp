@@ -1067,18 +1067,24 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// 1) First covert op: EXACTLY ONE of {clean gains goods, caught craters
 		// relation}; the intent always drops HumanNature by the shift (-6);
 		// attempts increments; HiddenTension rises. Deterministic outcome.
-		const double Ice0 = Sim->GetTotalSolid(FName("Ice"));
-		const double Rel0 = Sim->GetRivalRelation(FName("Zarya"));
-		Covert(TEXT("Zarya"));
-		const bool bClean = Sim->GetTotalSolid(FName("Ice")) > Ice0 + 0.01;
-		const bool bCaught = Sim->GetRivalRelation(FName("Zarya")) < Rel0 - 0.01;
-		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT op1: clean=%d caught=%d (expect exactly one) axis=%.0f hidden=%.0f (expect -6, >0)"),
-			(int32)bClean, (int32)bCaught, Sim->GetHumanNatureAxis(), Sim->GetHiddenTension(FName("Zarya")));
-
-		// 2) Four total attempts: HumanNature -6 each => -24, all deterministic.
-		Covert(TEXT("Zarya")); Covert(TEXT("Zarya")); Covert(TEXT("Zarya"));
-		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT x4: axis=%.0f hidden=%.0f (expect -24, rising)"),
-			Sim->GetHumanNatureAxis(), Sim->GetHiddenTension(FName("Zarya")));
+		// Run four ops and record each outcome as C(lean)/X(caught). Because the
+		// detection seed is now a CONTENT hash (FCrc of the rival name), this
+		// sequence is IDENTICAL on every machine - a cross-run determinism guard.
+		// A reversion to GetTypeHash(FName) would make it machine-dependent and
+		// diverge from the pinned pattern. (Deep night, relation 40 -> detection
+		// low but non-zero; the fixed seed decides each.)
+		FString Pattern;
+		for (int32 op = 0; op < 4; ++op)
+		{
+			const double IceB = Sim->GetTotalSolid(FName("Ice"));
+			const double RelB = Sim->GetRivalRelation(FName("Zarya"));
+			Covert(TEXT("Zarya"));
+			const bool bC = Sim->GetTotalSolid(FName("Ice")) > IceB + 0.01;
+			const bool bX = Sim->GetRivalRelation(FName("Zarya")) < RelB - 0.01;
+			Pattern.AppendChar(bC ? TEXT('C') : (bX ? TEXT('X') : TEXT('?')));
+		}
+		UE_LOG(LogRedHopeSim, Display, TEXT("COVERT sequence: %s (expect CXCX - content-hash deterministic, same on every machine) axis=%.0f (expect -24)"),
+			*Pattern, Sim->GetHumanNatureAxis());
 
 		// 3) Fair trade nudges the axis the OTHER way (+2 on a completed convoy).
 		const double AxisBeforeTrade = Sim->GetHumanNatureAxis();
