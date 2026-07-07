@@ -173,3 +173,65 @@ struct REDHOPESIM_API FRHDepositRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
+
+// --- M1-d Gate C: the human-layer schemas, born DORMANT (habitat-vision §9,
+// approved 2026-07-07b). M2 activates content, not schema - the M0 dormant-row
+// discipline. No sim code consumes these until humans arrive.
+
+// A room FUNCTION within a hab/floor (rooms-as-data, like buildings): what a
+// designated space is for, what it needs, and how it behaves in the adjacency
+// calculus (garden beside living quarters sickens; hallway + filtration cures).
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHRoomRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// Function class: Living | Garden | Lab | Workstation | Dining | Cooking |
+	// Smoking | Hallway | Septic | WaterWorks (semicolon-free single tag).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Function;
+	// Adjacency tags this room EMITS ("Odor;Contagion") and REFUSES nearby
+	// ("Odor"): the §4 architecture-as-gameplay calculus, data-first.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString EmitsTags;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString RefusesTags;
+	// A Hallway-function room between emitter and refuser cancels the emission;
+	// filtration coverage (NeedsFiltration consumers) cancels air tags.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool NeedsFiltration = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool NeedsPlumbing = false;
+	// Morale contribution when staffed/used (Hope-index input, brief §5).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float MoraleWeight = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+// A pressure compartment class: compartments are the atmosphere unit, doors
+// are edges (§3 - the storm-breach retreat graph exists before breaches do).
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHCompartmentRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// O2 buffer a sealed compartment of this class holds per cell when cut
+	// off - what "retreat somewhere with oxygen" is worth in sols.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float O2BufferKgPerCell = 0.f;
+	// Leak multiplier vs the open-floor rate (sealed compartments leak less).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LeakMul = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
+// A pressurized-door class: the EDGES of the compartment graph. Behavior on
+// breach is the whole point (auto-seal keeps the far side breathable).
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHDoorRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool AutoSealOnBreach = true;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float SealSeconds = 5.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CostStruct_kg = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};

@@ -415,6 +415,11 @@ FText SRHCommandDeck::GetStatusText() const
 	default:
 		break;
 	}
+	// The Phase 1 exit (M1-d): permanent once earned - the readout's proudest line.
+	if (Sim->HasVaultRating())
+	{
+		Text += TEXT("\nTHE VAULT IS LIVABLE - PHASE 1 EXIT READY");
+	}
 	return FText::FromString(Text);
 }
 

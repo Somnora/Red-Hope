@@ -1,0 +1,3 @@
+Name,DisplayName,AutoSealOnBreach,SealSeconds,CostStruct_kg,SliceActive,Notes
+PressureDoor,Pressure Door,TRUE,5,20,FALSE,"Dormant M2: the compartment-graph edge; auto-seals on breach so the far side keeps its air (§3)"
+BulkheadHatch,Bulkhead Hatch,TRUE,2,45,FALSE,"Dormant M2: heavy fast-seal door for critical partitions (vault entry, shaft collar)"

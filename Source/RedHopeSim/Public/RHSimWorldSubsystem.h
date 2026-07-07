@@ -446,6 +446,7 @@ private:
 	// the floor through leakage and the loss is announced, not silent).
 	TMap<int32, double> FloorO2Kg;
 	TSet<int32> RatedFloors;
+	bool bVaultRated = false; // Phase 1 exit fired (save v8); never unset
 	// DT_Config rows (CSV-staged defaults): fill mass per carved 10x10 cell,
 	// leak per cell per sol (the standing tax of pressurized volume), and the
 	// trunk's push rate per floor per sol-hour.

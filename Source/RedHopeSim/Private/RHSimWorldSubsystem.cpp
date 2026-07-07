@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 7;   // v7: habitability (floor O2 fill + ratings, Gate B); v6 designations/H2; v5 shaft
+	constexpr uint32 RHSaveVersion = 8;   // v8: vault-exit flag (Gate C); v7 habitability; v6 designations/H2; v5 shaft
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -1349,6 +1349,14 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 				TEXT("FLOOR %d RATED LIVABLE — %d cell(s) pressurized and circulated, shielded under %d floor(s) of overburden."),
 				Level, Cells, -Level));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d RATED LIVABLE (%d cells, %.0f kg O2) ==="), Level, Cells, FillKg);
+			// The Phase 1 exit (M1-d Gate C): the colony's FIRST livable space.
+			// Fires once per colony; the deck readout carries it permanently.
+			if (!bVaultRated)
+			{
+				bVaultRated = true;
+				OnAlert.Broadcast(TEXT("PHASE 1 EXIT: THE VAULT — the colony's first livable space is ready for a crew. The Program can send humans."));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== PHASE 1 EXIT: THE VAULT — floor %d rated for the first crew ==="), Level);
+			}
 		}
 		else if (bWasRated && (FillKg < RequiredKg * 0.98 || !IsFloorCirculated(Level)))
 		{
@@ -2707,7 +2715,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 	// Habitability chain (save v7).
-	Ar << FloorO2Kg << RatedFloors;
+	Ar << FloorO2Kg << RatedFloors << bVaultRated;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -2857,7 +2865,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Habitability chain (save v7).
 	FloorO2Kg.Empty();
 	RatedFloors.Empty();
-	Ar << FloorO2Kg << RatedFloors;
+	Ar << FloorO2Kg << RatedFloors << bVaultRated;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

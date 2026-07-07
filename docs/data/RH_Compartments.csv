@@ -1,0 +1,4 @@
+Name,DisplayName,O2BufferKgPerCell,LeakMul,SliceActive,Notes
+OpenFloor,Open Floor,0,1.0,FALSE,"Dormant M1-d: an unsealed carved floor - the Gate B leak rate, no buffer when cut off"
+SealedBay,Sealed Bay,25,0.5,FALSE,"Dormant M2: a door-bounded compartment; holds ~a sol of air per cell when cut off - the storm-breach retreat (§3)"
+Airlock,Airlock,5,0.25,FALSE,"Dormant M2: surface<->pressurized transition cell; suits go on here (§6)"
