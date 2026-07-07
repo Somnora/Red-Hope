@@ -1,5 +1,12 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 23 (habitat minimum size — director ruling 2026-07-07f, verified headless)
+
+- **Phase-1 exit now requires a 4-cell minimum vault** (`MinLivableCells`, DT_Config, data-driven; code default 4 matches CSV — live DT sync next editor session). A floor certifies Livable only at ≥ min cells AND pressurized + circulated. The chain still runs below the minimum (the floor pressurizes and drains the pool as you build toward it); only the rating + exit gate on size.
+- **Legibility for the withheld exit:** one-shot "FLOOR N SEALED — X of 4 cells, carve K more" banner when a floor is atmospherically complete but undersized and no carve is queued (quiet during an active dig-out, speaks when you've stopped — the genuinely confusing moment). New `IsFloorSealedButSmall`; circulator inspection card shows `HABITAT: floor N, X/4 cells | O2 …` + status line; `RH.Habitat` shows `cells/min` + sealed/livable/suit-only.
+- **Verified headless (`-habitat`, rewritten to prove the gate):** 2/4 cells fill 200/200 → `rated=0, sealed-but-small=1`, SEALED note fires once; carve to 4/4 → RATED LIVABLE + PHASE 1 EXIT; save/load v9 holds fill 400 / rated / vault; pool-dry → LOST at 392, 368 after 4 sols (the flap-fix's preserved genuine-failure path). `-vault` 7/7, `-borer` 4/4, 10-sol baseline identical. Two clean compiles.
+- Resolves the open design question flagged at the Gate C commit.
+
 ## 2026-07-07 — Session 22 (director's screenshot verdict → pit view v2 + the full queued compile)
 
 - **Director hand-played + screenshotted the slice view; five findings, all addressed this session:**

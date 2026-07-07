@@ -94,6 +94,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	O2FillKgPerCell = Defs->GetConfigScalar(FName("O2FillKgPerCell"), O2FillKgPerCell);
 	O2LeakKgPerCellPerSol = Defs->GetConfigScalar(FName("O2LeakKgPerCellPerSol"), O2LeakKgPerCellPerSol);
 	O2FillRateKgPerHour = Defs->GetConfigScalar(FName("O2FillRateKgPerHour"), O2FillRateKgPerHour);
+	MinLivableCells = (int32)Defs->GetConfigScalar(FName("MinLivableCells"), MinLivableCells);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -1382,11 +1383,18 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 		// Rating edges announce banner-weight: rated at full fill + circulation,
 		// lost below 98% (hysteresis keeps a healthy equilibrium from flapping).
 		const bool bWasRated = RatedFloors.Contains(Level);
-		if (!bWasRated && IsFloorCirculated(Level) && FillKg >= RequiredKg - KINDA_SMALL_NUMBER && RequiredKg > 0.0)
+		const bool bCirculated = IsFloorCirculated(Level);
+		const bool bFull = RequiredKg > 0.0 && FillKg >= RequiredKg - KINDA_SMALL_NUMBER;
+		// Director ruling (2026-07-07f): a single sealed room is not a vault -
+		// a habitat must reach the cell minimum before it can certify Livable.
+		const bool bBigEnough = Cells >= MinLivableCells;
+
+		if (!bWasRated && bCirculated && bFull && bBigEnough)
 		{
 			RatedFloors.Add(Level);
+			FloorsNotedSmall.Remove(Level);
 			OnAlert.Broadcast(FString::Printf(
-				TEXT("FLOOR %d RATED LIVABLE — %d cell(s) pressurized and circulated, shielded under %d floor(s) of overburden."),
+				TEXT("FLOOR %d RATED LIVABLE — %d cells pressurized and circulated, shielded under %d floor(s) of overburden."),
 				Level, Cells, -Level));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d RATED LIVABLE (%d cells, %.0f kg O2) ==="), Level, Cells, FillKg);
 			// The Phase 1 exit (M1-d Gate C): the colony's FIRST livable space.
@@ -1404,15 +1412,44 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 		// new cells while a healthy circulator is filling is EXPANSION, not a
 		// crisis - the demo run flapped RATED/LOST four times during a normal
 		// dig-out and spammed banner alerts (director watch-through finding).
-		else if (bWasRated && (!IsFloorCirculated(Level) || (FillKg < RequiredKg * 0.98 && TakenKg < LeakedKg)))
+		else if (bWasRated && (!bCirculated || (FillKg < RequiredKg * 0.98 && TakenKg < LeakedKg)))
 		{
 			RatedFloors.Remove(Level);
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("FLOOR %d LOST ITS HABITABILITY RATING — %s. Restore oxygen supply."),
-				Level, IsFloorCirculated(Level) ? TEXT("oxygen fill below requirement") : TEXT("air circulation down")));
+				Level, bCirculated ? TEXT("oxygen fill below requirement") : TEXT("air circulation down")));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d LOST HABITABILITY (%.0f / %.0f kg O2) ==="), Level, FillKg, RequiredKg);
 		}
+
+		// Sealed but too small: the atmosphere chain is complete for the floor's
+		// current size, yet it is under the cell minimum. This is the exact
+		// moment the player expects the exit banner - so tell them WHY it is
+		// withheld, once per episode (edge-triggered; re-fires if they fill a
+		// larger-but-still-small floor). Held quiet while a carve is still
+		// queued for the floor: mid-dig-out is not the confusing case, a
+		// finished-but-undersized floor is. Prevents "nothing happened".
+		const bool bSealedSmall = !bWasRated && bCirculated && bFull && !bBigEnough && GetCarveQueued(Level) == 0;
+		if (bSealedSmall && !FloorsNotedSmall.Contains(Level))
+		{
+			FloorsNotedSmall.Add(Level);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("FLOOR %d SEALED — %d of %d cells. Carve %d more to certify it a livable habitat."),
+				Level, Cells, MinLivableCells, MinLivableCells - Cells));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FLOOR %d SEALED but under habitat minimum (%d/%d cells) ==="), Level, Cells, MinLivableCells);
+		}
+		else if (!bSealedSmall && !bWasRated && FloorsNotedSmall.Contains(Level))
+		{
+			FloorsNotedSmall.Remove(Level); // fill/size changed - re-arm the note
+		}
 	}
+}
+
+bool URHSimWorldSubsystem::IsFloorSealedButSmall(int32 Level) const
+{
+	const int32 Cells = GetFloorCarvedCells(Level);
+	return Cells > 0 && Cells < MinLivableCells && !IsFloorRated(Level)
+		&& IsFloorCirculated(Level)
+		&& GetFloorO2Kg(Level) >= GetFloorO2RequiredKg(Level) - KINDA_SMALL_NUMBER;
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)

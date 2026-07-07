@@ -177,6 +177,17 @@ public:
 	double GetFloorO2RequiredKg(int32 Level) const { return GetFloorCarvedCells(Level) * O2FillKgPerCell; }
 	bool IsFloorCirculated(int32 Level) const;
 	bool IsFloorRated(int32 Level) const { return RatedFloors.Contains(Level); }
+	// Director ruling (2026-07-07f): a habitat must be at least this many
+	// carved cells to certify Livable - a single 10x10 room is a sealed pocket,
+	// not a vault. The atmosphere chain still runs below the minimum (the floor
+	// pressurizes as you build toward it); only the RATING and the Phase-1 exit
+	// gate on size. DT_Config row MinLivableCells.
+	int32 GetMinLivableCells() const { return MinLivableCells; }
+	// A floor that is circulated + fully pressurized for its current size but
+	// still under the cell minimum: sealed, air-holding, not yet a habitat.
+	// The reason the exit banner is withheld - surfaced so it never reads as a
+	// silent failure.
+	bool IsFloorSealedButSmall(int32 Level) const;
 	// The Phase 1 exit (M1-d Gate C): true once ANY floor has ever rated
 	// Livable - the colony's first vault. Fires the exit card; never unset
 	// (losing the rating later is a crisis, not an un-achievement).
@@ -469,6 +480,11 @@ private:
 	double O2FillKgPerCell = 100.0;
 	double O2LeakKgPerCellPerSol = 2.0;
 	double O2FillRateKgPerHour = 20.0;
+	int32 MinLivableCells = 4; // director ruling: min carved cells to certify a habitat
+	// Transient UX debounce (not serialized): floors we've already told the
+	// player are "sealed but too small", so the note fires once per episode
+	// instead of every step. Cleared when the floor rates up or loses seal.
+	TSet<int32> FloorsNotedSmall;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;

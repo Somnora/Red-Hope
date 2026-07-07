@@ -38,3 +38,4 @@ SpoilKgPerCell,1200,kg,"M1-d Gate A: regolith spoil per 10x10 cell carved on a f
 O2FillKgPerCell,100,kg,"M1-d Gate B: oxygen mass to pressurize one carved 10x10 cell (~2 sols of one Electrolyzer); scales the habitability cost with ambition"
 O2LeakKgPerCellPerSol,2,kg,"M1-d Gate B: standing leakage per pressurized cell per sol - the tax of living in what you dug; a dry O2 pool drains the floor loudly"
 O2FillRateKgPerHour,20,kg,"M1-d Gate B: trunk push rate per floor per sol-hour while a powered circulator runs"
+MinLivableCells,4,cells,"Director ruling 2026-07-07f: minimum carved cells for a floor to certify Livable and fire the Phase-1 exit; a single sealed room is a pocket, not a vault"

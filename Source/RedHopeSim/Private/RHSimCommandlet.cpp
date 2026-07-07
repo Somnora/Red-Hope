@@ -143,13 +143,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		}
 		PadRow->CirculatesAir = true;
 
+		const int32 MinCells = Sim->GetMinLivableCells(); // director ruling: 4
+
 		const FVector Head(1000.f, 1000.f, 0.f);
 		FString R;
 		Sim->ExtendShaft(1, Head);
-		Sim->ExcavateFloor(-1, 2, R);          // 2 cells -> 200 kg O2 required
+		Sim->ExcavateFloor(-1, 2, R);          // 2 cells -> under the habitat minimum
 		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
-		Sim->AddStock(FName("Oxygen"), 500.0);
+		Sim->AddStock(FName("Oxygen"), 800.0);
 
 		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
 		const auto RunSols = [&](double Sols)
@@ -167,21 +169,29 @@ int32 URHSimCommandlet::Main(const FString& Params)
 
 		Sim->Debug_PlaceInstant(FName("ChargePad"), FVector(1000.f, 1500.f, 0.f), -1); // the patched circulator, ON the floor
 		RunSols(1.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT circulator on: O2 fill %.0f / %.0f, rated=%d (expect 200/200, rated 1)"),
-			Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1), (int32)Sim->IsFloorRated(-1));
+		// 2 cells fill fully but MUST NOT rate - under the director's minimum.
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT 2/%d cells filled: O2 %.0f/%.0f, rated=%d, sealed-but-small=%d (expect 200/200, rated 0, sealed 1)"),
+			MinCells, Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1),
+			(int32)Sim->IsFloorRated(-1), (int32)Sim->IsFloorSealedButSmall(-1));
+
+		// Carve up to the minimum: NOW it certifies and fires the exit.
+		Sim->ExcavateFloor(-1, MinCells - 2, R);
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT %d/%d cells filled: O2 %.0f/%.0f, rated=%d, vault=%d (expect full, rated 1, vault 1)"),
+			MinCells, MinCells, Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1),
+			(int32)Sim->IsFloorRated(-1), (int32)Sim->HasVaultRating());
 
 		FString Err;
 		Sim->SaveColony(TEXT("habitattest"), Err);
 		Sim->LoadColony(TEXT("habitattest"), Err);
-		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT save/load v7: fill %.0f rated=%d (expect 200, 1)"),
-			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1));
-		// Reload rebuilt the DT-backed defs? No - rows live in the table asset;
-		// the patched flag persists for this process. Drain the pool: leakage
-		// alone must drop the floor below 98% and announce the loss.
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT save/load v9: fill %.0f rated=%d vault=%d (expect full, 1, 1)"),
+			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1), (int32)Sim->HasVaultRating());
+		// Drain the pool: leakage alone must drop the floor below 98% and
+		// announce the loss (the genuine-failure path the flap-fix preserved).
 		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
-		RunSols(3.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT pool dry 3 sols: fill %.0f, rated=%d (expect < 196, rated 0 - loss announced)"),
-			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1));
+		RunSols(4.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("HABITAT pool dry 4 sols: fill %.0f, rated=%d (expect < %.0f, rated 0 - loss announced)"),
+			Sim->GetFloorO2Kg(-1), (int32)Sim->IsFloorRated(-1), Sim->GetFloorO2RequiredKg(-1) * 0.98);
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== HABITAT TEST END ==="));
 		GEngine->DestroyWorldContext(World);

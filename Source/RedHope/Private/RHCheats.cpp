@@ -294,16 +294,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
 		if (!World) { return; }
 		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
 		if (!Sim) { return; }
-		UE_LOG(LogRedHope, Display, TEXT("[RH.Habitat] shaft -%d | colony O2 %.0f kg"),
-			Sim->GetShaftDepth(), Sim->GetStock(FName("Oxygen")));
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Habitat] shaft -%d | colony O2 %.0f kg | habitat minimum %d cells"),
+			Sim->GetShaftDepth(), Sim->GetStock(FName("Oxygen")), Sim->GetMinLivableCells());
 		for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
 		{
 			const int32 Cells = Sim->GetFloorCarvedCells(L);
 			if (Cells == 0 && !Sim->IsLevelConnected(L)) { continue; }
-			UE_LOG(LogRedHope, Display, TEXT("  floor %d: %d cell(s) | O2 %.0f / %.0f kg | circulation %s | %s"),
-				L, Cells, Sim->GetFloorO2Kg(L), Sim->GetFloorO2RequiredKg(L),
-				Sim->IsFloorCirculated(L) ? TEXT("ON") : TEXT("off"),
-				Sim->IsFloorRated(L) ? TEXT("LIVABLE") : TEXT("suit-only"));
+			const TCHAR* Status = Sim->IsFloorRated(L) ? TEXT("LIVABLE")
+				: (Sim->IsFloorSealedButSmall(L) ? TEXT("sealed - too small") : TEXT("suit-only"));
+			UE_LOG(LogRedHope, Display, TEXT("  floor %d: %d/%d cell(s) | O2 %.0f / %.0f kg | circulation %s | %s"),
+				L, Cells, Sim->GetMinLivableCells(), Sim->GetFloorO2Kg(L), Sim->GetFloorO2RequiredKg(L),
+				Sim->IsFloorCirculated(L) ? TEXT("ON") : TEXT("off"), Status);
 		}
 	}));
 

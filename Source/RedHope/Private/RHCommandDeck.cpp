@@ -807,6 +807,32 @@ FText SRHCommandDeck::GetInspectText() const
 			Text += FString::Printf(TEXT("\nSOLAR FLARE: radiation x%.1f (exposed at surface; shielded underground)"),
 				RadNow / FMath::Max(RadBase, KINDA_SMALL_NUMBER));
 		}
+		// A circulator's card reads its floor's habitat progress (M1-d): the
+		// chain it drives, and - the director's 4-cell ruling made visible -
+		// exactly how many more cells the floor needs to certify Livable.
+		if (Def && Def->CirculatesAir && B->Level < 0)
+		{
+			const int32 Cells = Sim->GetFloorCarvedCells(B->Level);
+			const int32 MinCells = Sim->GetMinLivableCells();
+			Text += FString::Printf(TEXT("\nHABITAT: floor %d, %d/%d cells | O2 %.0f / %.0f kg"),
+				B->Level, Cells, MinCells, Sim->GetFloorO2Kg(B->Level), Sim->GetFloorO2RequiredKg(B->Level));
+			if (Sim->IsFloorRated(B->Level))
+			{
+				Text += TEXT("\n  RATED LIVABLE");
+			}
+			else if (Sim->IsFloorSealedButSmall(B->Level))
+			{
+				Text += FString::Printf(TEXT("\n  SEALED - carve %d more cell(s) to certify a habitat"), MinCells - Cells);
+			}
+			else if (Cells < MinCells)
+			{
+				Text += FString::Printf(TEXT("\n  below habitat minimum (%d more cell(s), then pressurize)"), MinCells - Cells);
+			}
+			else
+			{
+				Text += TEXT("\n  pressurizing...");
+			}
+		}
 	}
 
 	if (Def)
