@@ -146,3 +146,19 @@ Director watched a screen recording of the underground view and reported: (1) "I
 
 - (superseded) **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).
 - **M1-c working spec** (`docs/m1c-working-spec.md`): events table (storms + flares), DustFactor through power, era honesty fixes (overshoot-carry + accumulator dump + paired-run 5% harness), surface radiation/shielding tax, event banner + sky, ComputeModule + uplink queue panel, power strip-chart.
+
+## Directive — 2026-07-07i (director: fast-track M2 gates without per-gate hand-play)
+
+- Director: *"can we move ahead to gate B without having to do the test? I only have 1 day with Fable 5 (you) and want to get as much done as possible today."* — the Gate-A hand-play stops being a blocker; per-gate director sign-off is DEFERRED to a consolidated review session, not skipped. Headless self-tests + live smokes are the verification bar for the fast-tracked gates; every gate remains individually committed and reviewable.
+- Built under this directive (all 2026-07-07): Gate B (rooms/adjacency/jobs/Hope, save v11), Gate C (the garden, save v12), Gate D abstract slice (comforts/luxury loop). The consolidated hand-play now covers: pit view v3, the crew arrival, zoning + the hallway cure, the garden arc, the comforts lift.
+
+## Agent-proposed balance awaiting director review (2026-07-07, M2 Gates B–D)
+
+- Hope weights (DT_Config): base 50, housing max 15, 5/morale-point per room type per rated floor, 3/job seat, vault milestone 5, adjacency −8/pair, unsupported −10 each, comforts +8 at full supply. Chosen for legible arithmetic in tests, not tuned play.
+- Garden rates: 250 kg soil + 50 kg seeds per cell (one pallet + one vault = 4 cells), 1.0 kg Food/sol/cell yield, 4.0 kg Water/sol/cell draw (3 cells ≈ break-even for a 4-colonist pod, ~40-sol provisions clock beaten by one pallet+vault landed in time).
+- Comforts: 0.2 kg/colonist/sol (one 300 kg crate ≈ 94 sols for a pod of 4).
+- Open design questions logged in build-log Session 27: grow-light power, recycled-water psychology (needs a recycling loop first), Hope's mechanical effects, smoking/tobacco (waits on the framing review itself).
+
+## Standing gate unchanged — the Gate-D framing review
+
+- Every player-facing string/icon born in Gates A–D (evacuation, unsupported, comforts, garden loss) is a PLACEHOLDER under the mental-health directive. The director reviews all of it before any of it ships. Nothing in the fast-track waived this.
