@@ -23,7 +23,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 22;  // v22: Earth pre-emptive (M4 Gate C); v21 espionage economy; v20 covert layer; v19 Solidarity Dilemma
+	constexpr uint32 RHSaveVersion = 23;  // v23: crises+endings (M4 Gate D); v22 Earth pre-emptive; v21 espionage economy; v20 covert layer
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -187,6 +187,16 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	PacifyTensionRelief = Defs->GetConfigScalar(FName("PacifyTensionRelief"), PacifyTensionRelief);
 	HumanNaturePacifyShift = Defs->GetConfigScalar(FName("HumanNaturePacifyShift"), HumanNaturePacifyShift);
 	DefectRelationFloor = Defs->GetConfigScalar(FName("DefectRelationFloor"), DefectRelationFloor);
+	CrisisIntervalSols = Defs->GetConfigScalar(FName("CrisisIntervalSols"), CrisisIntervalSols);
+	CrisisChance = Defs->GetConfigScalar(FName("CrisisChance"), CrisisChance);
+	CrisisDurationSols = Defs->GetConfigScalar(FName("CrisisDurationSols"), CrisisDurationSols);
+	CrisisAlignmentThreshold = Defs->GetConfigScalar(FName("CrisisAlignmentThreshold"), CrisisAlignmentThreshold);
+	CrisisWorkPenalty = Defs->GetConfigScalar(FName("CrisisWorkPenalty"), CrisisWorkPenalty);
+	CrisisMalfunctionHope = Defs->GetConfigScalar(FName("CrisisMalfunctionHope"), CrisisMalfunctionHope);
+	CrisisEnvironmentHope = Defs->GetConfigScalar(FName("CrisisEnvironmentHope"), CrisisEnvironmentHope);
+	CrisisWaterDrainPerSol = Defs->GetConfigScalar(FName("CrisisWaterDrainPerSol"), CrisisWaterDrainPerSol);
+	EndingIdentityThreshold = Defs->GetConfigScalar(FName("EndingIdentityThreshold"), EndingIdentityThreshold);
+	EndingHumanNatureThreshold = Defs->GetConfigScalar(FName("EndingHumanNatureThreshold"), EndingHumanNatureThreshold);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -1657,6 +1667,7 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 			: FString::Printf(TEXT("%s-%d"), GRHCallsigns[(C.Id - 1) % PoolSize], (C.Id - 1) / PoolSize + 1);
 		C.HomeLevel = Home;
 		Colonists.Add(C);
+		bEverHadCrew = true; // M4 Gate D: the collapse ending checks "had a crew, lost it"
 		++Housed;
 		UE_LOG(LogRedHopeSim, Display, TEXT("Colonist %s housed on floor %d"), *C.Name, Home);
 	}
@@ -2212,10 +2223,14 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	if (Pop > 0)
 	{
 		Out.Solidarity = SolidarityHope;
+		// M4 Gate D: an active crisis weighs on morale while it runs (Malfunction
+		// harder than Environmental). Cleared when the crisis ends.
+		if (ActiveCrisis == ERHCrisis::Malfunction)      { Out.CrisisPenalty = CrisisMalfunctionHope; }
+		else if (ActiveCrisis == ERHCrisis::Environmental) { Out.CrisisPenalty = CrisisEnvironmentHope; }
 	}
 	Out.Total = FMath::Clamp(
 		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Solidarity
-		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty, 0.0, 100.0);
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.CrisisPenalty, 0.0, 100.0);
 	return Out;
 }
 
@@ -2426,7 +2441,14 @@ double URHSimWorldSubsystem::GetHumanWorkTempo() const
 	{
 		return 1.0;
 	}
-	return FMath::Clamp(1.0 + HopeTempoSlope * (HopeSmoothed - HopeBase), HopeTempoMin, HopeTempoMax);
+	double Tempo = FMath::Clamp(1.0 + HopeTempoSlope * (HopeSmoothed - HopeBase), HopeTempoMin, HopeTempoMax);
+	// M4 Gate D: a Malfunction crisis slows human labor while it runs (automation
+	// stutters, units go inert) - recoverable, clears when the crisis ends.
+	if (ActiveCrisis == ERHCrisis::Malfunction)
+	{
+		Tempo *= CrisisWorkPenalty;
+	}
+	return Tempo;
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
@@ -3413,6 +3435,25 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 	// Earth's pre-emptive pressure (M4 Gate C) shares the same live-once-you-have-
 	// neighbors gate.
 	StepPreemptive(SubDt);
+	// Dynamic crises (M4 Gate D) - same gate; the finale's escalating pressure.
+	StepCrisis(SubDt);
+
+	// The ending milestone (M4 Gate D): fire once when the colony first arrives
+	// at a definite political outcome (a strong, settled allegiance). Never
+	// retracts - it's the story's declared direction, celebrated on arrival.
+	if (!bEndingDeclared)
+	{
+		const ERHEnding E = GetProjectedEnding();
+		if (E != ERHEnding::Undetermined && E != ERHEnding::Collapse)
+		{
+			bEndingDeclared = true;
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("A PATH IS SET — the colony's course reads clearly now: %s. History will remember which Mars you chose to build."),
+				GetEndingName(E)));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING PATH: %s (identity %.0f, humanNature %.0f) ==="),
+				GetEndingName(E), IdentityAxis, HumanNatureAxis);
+		}
+	}
 }
 
 double URHSimWorldSubsystem::GetEmbargoGrace(FName Rival) const
@@ -3532,6 +3573,126 @@ bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== PACIFIED: %s (influence %.0f, tension %.0f) ==="),
 		Row ? *Row->DisplayName : *Rival.ToString(), Influence, EarthTension);
 	return true;
+}
+
+const TCHAR* URHSimWorldSubsystem::GetActiveCrisisName() const
+{
+	switch (ActiveCrisis)
+	{
+	case ERHCrisis::Malfunction:  return TEXT("SYSTEMS MALFUNCTION");
+	case ERHCrisis::Environmental: return TEXT("ENVIRONMENTAL STRAIN");
+	default: return TEXT("none");
+	}
+}
+
+void URHSimWorldSubsystem::TriggerCrisis()
+{
+	// The alignment-gated selector (the spec's thematic payoff): a DESTRUCTIVE
+	// colony (HumanNature below the split) draws a self-inflicted Malfunction -
+	// its own predatory conduct comes home as sabotage-blowback / a systems
+	// blackout; an EVOLVED colony draws an external Environmental test it can
+	// weather with reserves + cooperation. Deterministic - the axis decides.
+	ActiveCrisis = (HumanNatureAxis < CrisisAlignmentThreshold)
+		? ERHCrisis::Malfunction : ERHCrisis::Environmental;
+	CrisisRemainingSols = CrisisDurationSols;
+	++CrisisCount;
+	if (ActiveCrisis == ERHCrisis::Malfunction)
+	{
+		OnAlert.Broadcast(TEXT("SYSTEMS MALFUNCTION — automation across the colony stutters and stalls. Units are going inert; crews are stretched. It will pass, but it bites."));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISIS: MALFUNCTION (%.0f sols, humanNature %.0f) ==="), CrisisDurationSols, HumanNatureAxis);
+	}
+	else
+	{
+		OnAlert.Broadcast(TEXT("ENVIRONMENTAL STRAIN — a systems-stress test on the colony's reserves. Water demand spikes; hold together and it passes."));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISIS: ENVIRONMENTAL (%.0f sols, humanNature %.0f) ==="), CrisisDurationSols, HumanNatureAxis);
+	}
+}
+
+void URHSimWorldSubsystem::StepCrisis(float SubDt)
+{
+	// Live only once the late game is on (has neighbors) - pre-M3 baselines have
+	// no rival, so ActiveCrisis stays None and nothing here runs: byte-identical.
+	if (!HasActiveRival())
+	{
+		return;
+	}
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+
+	if (ActiveCrisis != ERHCrisis::None)
+	{
+		// Apply the ongoing effect, then count down. Environmental drains Water
+		// (a strain on reserves); Malfunction's work/Hope hit is read live in
+		// GetHumanWorkTempo / GetColonyHope while active (no per-step mutation).
+		if (ActiveCrisis == ERHCrisis::Environmental)
+		{
+			static const FName NWater(TEXT("Water"));
+			const double Draw = CrisisWaterDrainPerSol * DtSols;
+			AddStock(NWater, -FMath::Min(Draw, GetStock(NWater)));
+		}
+		CrisisRemainingSols -= DtSols;
+		if (CrisisRemainingSols <= 0.0)
+		{
+			const ERHCrisis Was = ActiveCrisis;
+			ActiveCrisis = ERHCrisis::None;
+			CrisisRemainingSols = 0.0;
+			OnAlert.Broadcast(Was == ERHCrisis::Malfunction
+				? TEXT("RECOVERED — the malfunction is contained; automation is coming back online.")
+				: TEXT("WEATHERED — the environmental strain has passed; the colony held."));
+		}
+		return; // one crisis at a time; the interval clock waits
+	}
+
+	// No crisis active: accumulate toward the next check. Every interval, a
+	// deterministic seeded roll (crisis count) decides whether one fires.
+	CrisisCheckSols += DtSols;
+	if (CrisisCheckSols >= CrisisIntervalSols)
+	{
+		CrisisCheckSols -= CrisisIntervalSols;
+		const uint32 Seed = HashCombine(FCrc::StrCrc32(TEXT("crisis")), (uint32)(CrisisCount * 2654435761u));
+		const double U = (Seed % 100000u) / 100000.0;
+		if (U < CrisisChance)
+		{
+			TriggerCrisis();
+		}
+		else
+		{
+			++CrisisCount; // a quiet interval still advances the seed sequence
+		}
+	}
+}
+
+URHSimWorldSubsystem::ERHEnding URHSimWorldSubsystem::GetProjectedEnding() const
+{
+	// Collapse: a colony that once had a crew and lost all of it (the failure
+	// state, brief §66). Checked first - it overrides the political read.
+	if (bEverHadCrew && Colonists.Num() == 0)
+	{
+		return ERHEnding::Collapse;
+	}
+	// The two axes decide the political outcome once an allegiance is definite.
+	if (IdentityAxis <= -EndingIdentityThreshold)
+	{
+		return ERHEnding::CorporateJewel;         // loyal to Earth
+	}
+	if (IdentityAxis >= EndingIdentityThreshold)
+	{
+		return (HumanNatureAxis >= EndingHumanNatureThreshold)
+			? ERHEnding::IndependentFederation    // Martian + Evolved: a free, cooperative Mars
+			: ERHEnding::MartianColdWar;          // Martian + Destructive/contested: a fractured, hostile Mars
+	}
+	return ERHEnding::Undetermined;               // still contested
+}
+
+const TCHAR* URHSimWorldSubsystem::GetEndingName(ERHEnding Ending) const
+{
+	switch (Ending)
+	{
+	case ERHEnding::CorporateJewel:        return TEXT("Corporate Jewel of Earth");
+	case ERHEnding::IndependentFederation: return TEXT("Independent Mars Federation");
+	case ERHEnding::MartianColdWar:        return TEXT("Martian Cold War");
+	case ERHEnding::Collapse:              return TEXT("Abandonment / Collapse");
+	default: return TEXT("Undetermined");
+	}
 }
 
 bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
@@ -4697,6 +4858,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Defected.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
 		Ar << EmbargoGrace << Defected << Influence;
 	}
+	// Dynamic crises + endings (save v23).
+	{
+		uint8 Crisis = (uint8)ActiveCrisis, Ever = bEverHadCrew ? 1 : 0, Declared = bEndingDeclared ? 1 : 0;
+		Ar << Crisis << CrisisRemainingSols << CrisisCheckSols << CrisisCount << Ever << Declared;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4924,6 +5090,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << EmbargoGrace << Defected << Influence;
 		DefectedRivals.Empty();
 		DefectedRivals.Append(Defected);
+	}
+	// Dynamic crises + endings (save v23).
+	{
+		uint8 Crisis = 0, Ever = 0, Declared = 0;
+		Ar << Crisis << CrisisRemainingSols << CrisisCheckSols << CrisisCount << Ever << Declared;
+		ActiveCrisis = (ERHCrisis)Crisis;
+		bEverHadCrew = (Ever != 0);
+		bEndingDeclared = (Declared != 0);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

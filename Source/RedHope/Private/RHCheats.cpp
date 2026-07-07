@@ -323,6 +323,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCovert(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHCrisis(
+	TEXT("RH.Crisis"),
+	TEXT("RH.Crisis [trigger] - log the crisis + endings state, or force the alignment-gated selector to fire a crisis now."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		if (Args.Num() > 0 && Args[0] == TEXT("trigger"))
+		{
+			Sim->Debug_TriggerCrisis();
+		}
+		const auto E = Sim->GetProjectedEnding();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Crisis] active: %s%s | identity %+.0f martian/earth | humanNature %+.0f evolved/destructive | projected ending: %s"),
+			Sim->GetActiveCrisisName(),
+			Sim->GetActiveCrisis() != URHSimWorldSubsystem::ERHCrisis::None ? *FString::Printf(TEXT(" (%.1f sols left)"), Sim->GetCrisisRemaining()) : TEXT(""),
+			Sim->GetIdentityAxis(), Sim->GetHumanNatureAxis(), Sim->GetEndingName(E));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHPacify(
 	TEXT("RH.Pacify"),
 	TEXT("RH.Pacify <RivalName> - spend Influence to lift an Earth-ordered embargo (the colony sees reason). Rides the uplink."),

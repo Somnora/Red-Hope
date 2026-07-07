@@ -1043,6 +1043,16 @@ FText SRHCommandDeck::GetCrewText() const
 			Text += FString::Printf(TEXT("\nCONDUCT %s (%+.0f)"),
 				HN > 5.0 ? TEXT("Evolved") : (HN < -5.0 ? TEXT("Destructive") : TEXT("watched")), HN);
 		}
+		// Active crisis + the projected ending (M4 Gate D).
+		if (Sim->GetActiveCrisis() != URHSimWorldSubsystem::ERHCrisis::None)
+		{
+			Text += FString::Printf(TEXT("\n  !! %s (%.1f sols)"), Sim->GetActiveCrisisName(), Sim->GetCrisisRemaining());
+		}
+		const auto Ending = Sim->GetProjectedEnding();
+		if (Ending != URHSimWorldSubsystem::ERHEnding::Undetermined)
+		{
+			Text += FString::Printf(TEXT("\nPATH: %s"), Sim->GetEndingName(Ending));
+		}
 	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.

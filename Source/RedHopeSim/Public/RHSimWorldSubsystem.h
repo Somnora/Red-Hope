@@ -254,6 +254,7 @@ public:
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
+		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		double Total = 0;
@@ -272,6 +273,13 @@ public:
 	// converge to the identical value (the load-bearing parity property).
 	// Serialized (save v13). Named bands carry hysteresis so nothing flickers.
 	enum class ERHHopeBand : uint8 { Failing = 0, Strained, Steady, Thriving, Flourishing };
+	// M4 Gate D dynamic crises: a Malfunction (systemic blackout / robot-downtime
+	// - the Destructive colony's self-inflicted crisis) or an Environmental test
+	// (the Evolved colony's external strain). Which one fires is gated by the
+	// HumanNature axis - the spec's "human evolution vs destruction" made mechanical.
+	enum class ERHCrisis : uint8 { None = 0, Malfunction, Environmental };
+	// M4 Gate D endings: where the two axes (Identity + HumanNature) point.
+	enum class ERHEnding : uint8 { Undetermined = 0, CorporateJewel, IndependentFederation, MartianColdWar, Collapse };
 	double GetHopeSmoothed() const { return HopeSmoothed; }
 	ERHHopeBand GetHopeBand() const { return HopeBand; }
 	const TCHAR* GetHopeBandName() const;
@@ -335,6 +343,7 @@ public:
 	// Gate-C / cheat hooks (Comply/Defy will call these):
 	void Debug_ShiftIdentity(double Delta) { IdentityAxis = FMath::Clamp(IdentityAxis + Delta, -100.0, 100.0); }
 	void Debug_AddTension(double Delta) { EarthTension = FMath::Clamp(EarthTension + Delta, 0.0, 100.0); }
+	void Debug_ShiftHumanNature(double Delta) { HumanNatureAxis = FMath::Clamp(HumanNatureAxis + Delta, -100.0, 100.0); }
 
 	// --- The Solidarity Dilemma (M3 Gate C, the signature mechanic) ---
 	// When a demand is pending, the player resolves it: COMPLY (cut trade with
@@ -404,6 +413,26 @@ public:
 	// Pacify an embargoing rival (the uplink verb's worker): spend Influence, the
 	// colony ignores Earth. Returns false (with reason) on cost/target failure.
 	bool ResolvePacify(FName Rival, FString& OutReason);
+
+	// --- Dynamic crises + the endings framework (M4 Gate D, the finale) ---
+	// Once the late game is live, crises fire on a cadence; WHICH one is gated by
+	// your HumanNature axis (a Destructive colony draws self-inflicted Malfunction
+	// blackouts; an Evolved colony draws survivable Environmental tests) - the
+	// spec's thematic payoff. A Malfunction slows human work (CrisisWorkPenalty)
+	// + weighs on Hope; an Environmental strains Water + a lighter Hope hit. Both
+	// are deterministic, recoverable downtimes - never feral, per the on-brief
+	// ruling. The endings read maps (IdentityAxis, HumanNatureAxis) to one of the
+	// brief's four outcomes. All player-facing wording is Gate-D review placeholder.
+	ERHCrisis GetActiveCrisis() const { return ActiveCrisis; }
+	const TCHAR* GetActiveCrisisName() const;
+	double GetCrisisRemaining() const { return CrisisRemainingSols; }
+	// Which ending the colony is trending toward (a pure read of the two axes +
+	// a collapse check); Undetermined while the colony is still contested.
+	ERHEnding GetProjectedEnding() const;
+	const TCHAR* GetEndingName(ERHEnding Ending) const;
+	// Harness/cheat: force the crisis selector to fire now (natural cadence is in
+	// StepCrisis). Returns the crisis that fired.
+	ERHCrisis Debug_TriggerCrisis() { TriggerCrisis(); return ActiveCrisis; }
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -873,6 +902,27 @@ private:
 	double HumanNaturePacifyShift = 4.0;
 	double DefectRelationFloor = 5.0;
 	void StepPreemptive(float SubDt); // embargo trigger + grace countdown + influence drift
+	// Dynamic crises + endings (M4 Gate D; save v23). ActiveCrisis + its timer;
+	// CrisisCheckSols accumulates toward the next selector roll; CrisisCount seeds
+	// the deterministic roll (saved); bEverHadCrew + bEndingDeclared are milestones.
+	ERHCrisis ActiveCrisis = ERHCrisis::None;
+	double CrisisRemainingSols = 0.0;
+	double CrisisCheckSols = 0.0;
+	int32 CrisisCount = 0;
+	bool bEverHadCrew = false;
+	bool bEndingDeclared = false;
+	double CrisisIntervalSols = 15.0;
+	double CrisisChance = 0.6;
+	double CrisisDurationSols = 5.0;
+	double CrisisAlignmentThreshold = 0.0;
+	double CrisisWorkPenalty = 0.6;
+	double CrisisMalfunctionHope = 12.0;
+	double CrisisEnvironmentHope = 6.0;
+	double CrisisWaterDrainPerSol = 8.0;
+	double EndingIdentityThreshold = 60.0;
+	double EndingHumanNatureThreshold = 30.0;
+	void StepCrisis(float SubDt);
+	void TriggerCrisis(); // run the alignment-gated selector, start a crisis
 	// A deterministic detection roll for a covert op against a rival (shared by
 	// requisition + sabotage): seeded by content hash + the saved attempt count.
 	bool RollCovertDetected(FName Rival);

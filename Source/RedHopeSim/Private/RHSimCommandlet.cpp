@@ -1292,6 +1292,98 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M4 Gate D self-test: DYNAMIC CRISES + ENDINGS - the alignment selector
+	// (Destructive -> Malfunction, Evolved -> Environmental), the crisis effects
+	// (work-tempo + Hope + Water), recovery, and the endings read across the two
+	// axes. Save v23. `-crisis`.
+	if (FParse::Param(*Params, TEXT("crisis")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISES & ENDINGS TEST (M4 Gate D) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		const FRHRoomRow* LQ = DefsSub->GetRoom(FName("LivingQuarters"));
+		if (!LQ || !LQ->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("CRISIS: LivingQuarters not active")); return 1; }
+
+		// A housed, stocked colony (2 crew) so crisis morale + tempo effects read.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 4000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		RunSols(0.2);
+
+		// 1) SELECTOR - DESTRUCTIVE colony draws a MALFUNCTION. Drive HumanNature
+		// negative, force a crisis, confirm the type + its work-tempo penalty.
+		Sim->Debug_ShiftIdentity(0); // no-op clarity
+		for (int32 i = 0; i < 10; ++i) { Sim->Debug_ShiftHumanNature(-10); } // -> -100 (clamped)
+		const double TempoBefore = Sim->GetHumanWorkTempo();
+		const double HopeBefore = Sim->GetColonyHope().Total;
+		Sim->Debug_TriggerCrisis();
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS destructive: type=%s tempo %.3f->%.3f (expect x0.6) hope %.1f->%.1f (expect -12)"),
+			Sim->GetActiveCrisisName(), TempoBefore, Sim->GetHumanWorkTempo(), HopeBefore, Sim->GetColonyHope().Total);
+
+		// 2) RECOVERY: after CrisisDurationSols the malfunction clears; the 0.6x
+		// penalty is gone (tempo >= pre-crisis; Hope also rebounded during downtime).
+		RunSols(5.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS recovery: active=%s tempo=%.3f (expect none, >= %.3f - penalty lifted)"),
+			Sim->GetActiveCrisisName(), Sim->GetHumanWorkTempo(), TempoBefore);
+
+		// 3) SELECTOR - EVOLVED colony draws an ENVIRONMENTAL test that drains
+		// Water. Drive HumanNature positive, force a crisis, confirm Water drain.
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); } // -> +100
+		Sim->Debug_TriggerCrisis();
+		const double Water0 = Sim->GetStock(FName("Water"));
+		RunSols(2.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS evolved: type=%s water drained %.0f (expect ~17 = 16 crisis [8/sol x2] + ~1.2 colonist drink)"),
+			Sim->GetActiveCrisisName(), Water0 - Sim->GetStock(FName("Water")));
+		RunSols(4.0); // clear it
+
+		// 4) ENDINGS across the two axes (pure read).
+		Sim->Debug_ShiftIdentity(-200); // Earth-aligned
+		const auto EJewel = Sim->GetProjectedEnding();
+		Sim->Debug_ShiftIdentity(+200); // -> Martian (+100), HumanNature already +100 (Evolved)
+		const auto EFed = Sim->GetProjectedEnding();
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(-10); } // -> -100 Destructive, still Martian
+		const auto EWar = Sim->GetProjectedEnding();
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS endings: earth=%s martian-evolved=%s martian-destructive=%s (expect Corporate Jewel, Independent Mars Federation, Martian Cold War)"),
+			Sim->GetEndingName(EJewel), Sim->GetEndingName(EFed), Sim->GetEndingName(EWar));
+
+		// 5) Save v23 round-trip: crisis + ending milestone survive.
+		Sim->Debug_TriggerCrisis();
+		const int32 CrisisB = (int32)Sim->GetActiveCrisis();
+		FString Err;
+		Sim->SaveColony(TEXT("crisistest"), Err);
+		Sim->LoadColony(TEXT("crisistest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS save/load v23: active %d->%d ending=%s (expect identical)"),
+			CrisisB, (int32)Sim->GetActiveCrisis(), Sim->GetEndingName(Sim->GetProjectedEnding()));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISES & ENDINGS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.
