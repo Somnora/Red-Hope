@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 36 (M3 OPENS — Gate A "The Neighbors": physical rover trade)
+
+- **Director opened M3 (Sovereignty)** via structured ask ("Open M3 now"). `docs/m3-working-spec.md` authored: Gate A neighbors/trade → B Earth's Shadow (tension + requisitions) → C the Solidarity Dilemma + identity axis → D presentation + framing review. Core principle (design-decisions 2026-07-07j): **build the trade dependency FIRST so the Dilemma later cuts something real** — systemic, not scripted (brief open question #8).
+- **Gate A built + verified (`6dcbcea` data, `7de3599` code, save v17):**
+  - `FRHRivalRow` + `RH_Rivals.csv`: **Zarya Station** active (ice-rich crater — brief's "their ice vs your ore"), Meridian dormant. `ExportLot` = what they send / `ImportLot` = your side. Naming/flavor Gate-D placeholder.
+  - **The convoy** (one rover, sim state machine, both bands): dispatch = uplink verb `Convoy <Rival>` (signal-lagged). **All costs committed at departure** (the Borer batch pattern): Hydrogen + SpareParts (the trek's vehicle wear) + your export lot. Transit = `Distance / ConvoySpeedKmPerSol` sols each way, advancing **only under clear sky** — an active DustStorm **freezes** the convoy (brief: routes disrupted by storms). Return credits their lot (solids → Lander depot for hauling; fluids → pool) and warms the per-rival **relation** — the dependency the Dilemma will leverage.
+  - **The elegant coupling:** Zarya trades your Struct:100 → their Ice:150 → the ice feeds the WaterPlant → fresh water restores potability. **Trade becomes an alternative to drilling your own ice**, wiring straight into the M2 water loop.
+  - `HasTradeLot`/`SpendTradeLot` (solids drained across building stores in ascending-Id order = deterministic). Deck CONVOY line; `RH.Convoy`/`RH.Trade`; `Debug_InjectRival` (lazy transient table); DT_Rivals path (absent = a lonely Mars).
+  - `-trade` self-test all EXACT first run (no-fuel refused; dispatch commits Struct −100 / H2 −8 / parts −1; double-dispatch refused; round trip delivers Ice:150 + relation 40→42; **storm freeze** holds progress at 0.000 through Storm_1 then advances after; v17 round-trip preserves the in-transit convoy). All 13 suites green; 10-sol baseline byte-identical.
+  - An adversarial review workflow over the Gate A diff is running as final sign-off.
+
 ## 2026-07-07 — Session 35 (structure: DISCOVERIES — the Flourishing layer, "LIFE ON MARS")
 
 - **Director:** deadline extended; "keep working on discoveries." Built + verified (`6913c7c` data, `37900d9` code, save v16).
