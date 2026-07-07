@@ -10,3 +10,4 @@ BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,,TRUE,Night re
 ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,,TRUE,Latency-to-autonomy on the manifest
 LuxuryGoods,Luxury Goods,300,Comforts,+300 kg Luxury (comforts draw per colonist per sol),,TRUE,"M2 Gate D: the morale bet lands - ~90 sols of comforts for a pod of 4"
 CrewPod,Crew Pod (4 colonists),2400,Crew,"+4 colonists into certified housing; +200 kg Food; returns aboard if no beds",,TRUE,"M2 Gate A: the heaviest single item - crew vs hardware is the Phase-2 manifest decision"
+GlassCrate,Glass Panes Crate,600,Agriculture,+400 kg Glass (2 greenhouse cells),,TRUE,"M2 Gate D+ garden fork: greenhouse glazing - the low-power garden bet (local fabrication is a flagged follow-up)"

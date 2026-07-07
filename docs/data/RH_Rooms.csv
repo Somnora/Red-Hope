@@ -9,3 +9,4 @@ Smoking,Smoking Area,Smoking,Odor,,TRUE,FALSE,0.8,FALSE,"Dormant M2 Gate D: luxu
 Hallway,Hallway,Hallway,,,FALSE,FALSE,0.0,TRUE,"ACTIVE M2 Gate B: the partition room - directly between an Odor emitter and a refuser it CANCELS the adjacency penalty (with the floor's filtration running, §4)"
 Septic,Septic / Fertilizer Works,Septic,Odor;Contagion,,TRUE,TRUE,0.0,FALSE,"Dormant M2 Gate C: feces->fertilizer; strongest emitter - keep it partitioned"
 WaterWorks,Water Filtration Works,WaterWorks,,,FALSE,TRUE,0.0,FALSE,"Dormant M2 Gate C: urine->urea+water; drinking recycled water has a morale/sickness cost (§4)"
+Greenhouse,Greenhouse,Greenhouse,Odor,,TRUE,TRUE,0.5,TRUE,"ACTIVE M2 Gate D+ garden fork: glass-glazed crops - near-free power but yield rides the solar curve (dark at night, starves in dust storms) and needs a SHALLOW floor for light; the low-energy alternative to grow-lit Garden"

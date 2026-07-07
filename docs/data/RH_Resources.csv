@@ -16,3 +16,4 @@ Seeds,Seeds,Solid,Stockpile,TRUE,"ACTIVE M2 Gate C: planted into Garden cells (G
 Luxury,Luxury Goods,Solid,Stockpile,TRUE,"ACTIVE M2 Gate D (abstract): colonists draw LuxuryKgPerColonistPerSol; supplied crew lifts Hope (pure bonus, never a penalty)"
 Research,Research Points,Abstract,Ledger,FALSE,Dormant; acquisition model due M1
 Hope,Hope,Abstract,Ledger,FALSE,"Derived non-spendable index (approved); no slice inputs yet"
+Glass,Glass,Solid,Stockpile,TRUE,"M2 Gate D+ (garden fork): fabricated/imported panes for greenhouses; a Greenhouse cell consumes GreenhouseGlassKgPerCell at planting"
