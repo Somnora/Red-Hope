@@ -79,6 +79,11 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnShipArrived, const TArray<FName>& /*Ite
 DECLARE_MULTICAST_DELEGATE(FRHOnColonyReloaded);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnDepositDiscovered, const FRHDepositState&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnSurveyCompleted, const FRHSurveyRecord&);
+// Loud, transient, must-not-miss moments: event onsets (with the 1x snap),
+// era refusals, ship arrival countdowns. Banner-weight in the deck -
+// distinct from the notice line (director finding: the refusal read as
+// "nothing happened").
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnAlert, const FString&);
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
@@ -260,6 +265,7 @@ public:
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
 	FRHOnSurveyCompleted OnSurveyCompleted;
+	FRHOnAlert OnAlert;
 	FRHOnColonyReloaded OnColonyReloaded;
 	FRHOnCommandExecuted OnCommandExecuted;
 	FRHOnBuildingAdded OnBuildingAdded;
@@ -287,6 +293,9 @@ private:
 	// integrator's aggregate-rate source) stays true.
 	FMassEntityHandle SpawnRobotTracked(FName RowName, const FRHRobotRow& Row, const FVector& PosCm, float ChargeWh, float Wear, TArray<FMassEntityHandle>& OutSpawned);
 	void HandleSolElapsed(int32 NewSol);
+	// Event onset/end edge detection (director ruling: onset snaps any speed
+	// to 1x so the player can batten down; both edges alert loudly).
+	void StepEventEdges();
 	// Era-band stand-in for dig + haul: deposits feed demanding hoppers at the
 	// parked excavator fleet's aggregate rate; finished outputs transfer to
 	// demanders/stores instantly (haulers are not modeled above the agent band).
@@ -313,6 +322,15 @@ private:
 	float WearDegradeThreshold = 50.f;
 	float WearHaltThreshold = 100.f;
 	float RepairWearPerPart = 25.f;
+	// Director ruling 2026-07-07b: robots working through a dust storm wear
+	// at this multiple (the storm grinds machinery; shelter arrives with the
+	// M2 warehouse). DT_Config row StormWearMul.
+	float StormWearMul = 2.f;
+	// Transient event-edge + ship-countdown state (never serialized; a load
+	// re-derives both from the clock + quota phase on the next step).
+	bool bEventWasActive = false;
+	FName LastEventType;
+	int32 ShipAlertStage = 0; // 0 none, 1 = T-2 fired, 2 = T-1 fired
 	// Runtime claim state - never serialized; load resets it and robots
 	// re-claim from fragments/board.
 	TSet<FMassEntityHandle> RepairClaims;

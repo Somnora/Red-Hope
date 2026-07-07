@@ -39,6 +39,9 @@ private:
 	FText GetEventText() const;
 	FSlateColor GetEventColor() const;
 	EVisibility GetEventVisibility() const;
+	// Transient must-not-miss banner (onset 1x snap, era refusal, ship ETA).
+	FText GetAlertText() const;
+	EVisibility GetAlertVisibility() const;
 	// Uplink queue panel (M1-c): orders in flight with countdowns; the list
 	// rebuilds only when the queue changes (ids are the change signal).
 	void RefreshUplinkPanel();

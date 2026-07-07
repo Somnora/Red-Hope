@@ -93,6 +93,15 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Hand-play findings (M1-c surfaces):** (1) pressing 60× during the storm/flare read as "nothing happened" — the era refusal fires only into the small notice line; refusal feedback must be unmissable (queued: refusal banner treatment). Also raised as a design question: should era be allowed during steady-state storms (onset always experienced) while flares stay refused? (2) The storm's effect on individual stations wasn't legible — the banner may be missed and the inspection card says nothing about the storm (queued: card + shed-reason notes).
 - **Territory question answered:** coverage grows by Pylon chains (80 m link range, each completed node projects new coverage) — already in game.
 
+## Directives — 2026-07-07b (director rulings on storm handling, flares, arrivals; M1-d/M2 mapping approved)
+
+- **Storm time rule (approved + amended):** era time-skip stays refused at onset and during flares, allowed mid-siege — AND storm/flare onset now **snaps any speed to 1× on the spot** so the player can batten down. Player may re-speed afterwards. Implemented this session.
+- **Working through a storm costs:** robots sent outside during a dust storm take **accelerated wear** (`StormWearMul` config row, 2× default). Implemented this session.
+- **Warehouse/garage building** (scheduled M2 with vehicles; schema headroom M1-d): stored vehicles/robots take no storm wear — shelter as a buildable choice.
+- **Solar flares are ELECTRONIC, not mechanical (design fork, scheduled):** flares should cause electronic/software **faults** repaired by a HUMAN — "I don't think robots should be able to repair other robots." Faults land with the M2 human layer (schema headroom in M1-d). **Interim:** the verified flare wear-×3 stays as placeholder. **Flagged tension for director:** the approved-and-verified RC-M loop has a robot repairing robots' mechanical wear — does the no-robot-repairs principle retire RC-M repair (e.g., move wear repair to a dock/bay facility or human crew), or does it apply only to electronic faults? Awaiting ruling before M1-d schema work.
+- **Ship arrival countdown alerts:** at T-2 and T-1 sols to touchdown the colony gets a loud alert to prepare. Implemented this session for the supply ship; crew ships inherit the same seam in M2.
+- **M1-d/M2 habitat mapping approved** as proposed in `docs/habitat-vision.md` §9 (M1-d births room/compartment/door/filtration schemas dormant; M2 activates the human layer).
+
 ## Pending — awaiting director review
 
 - (superseded) **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).

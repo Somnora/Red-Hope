@@ -140,18 +140,38 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		]
 
 		// World-pressure banner, top center (M1-c): the sky has agency now.
+		// The alert banner beneath it is the transient must-not-miss channel
+		// (onset 1x snap, era refusal, ship countdown - director finding).
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 		[
-			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(FLinearColor(0.12f, 0.06f, 0.01f, 0.92f))
-			.Padding(FMargin(22.f, 7.f))
-			.Visibility(this, &SRHCommandDeck::GetEventVisibility)
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 			[
-				SNew(STextBlock)
-				.Text(this, &SRHCommandDeck::GetEventText)
-				.Font(DeckFont(12))
-				.ColorAndOpacity(this, &SRHCommandDeck::GetEventColor)
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.12f, 0.06f, 0.01f, 0.92f))
+				.Padding(FMargin(22.f, 7.f))
+				.Visibility(this, &SRHCommandDeck::GetEventVisibility)
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetEventText)
+					.Font(DeckFont(12))
+					.ColorAndOpacity(this, &SRHCommandDeck::GetEventColor)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.2f, 0.12f, 0.02f, 0.95f))
+				.Padding(FMargin(18.f, 8.f))
+				.Visibility(this, &SRHCommandDeck::GetAlertVisibility)
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetAlertText)
+					.Font(DeckFont(11))
+					.ColorAndOpacity(FLinearColor(1.f, 0.9f, 0.55f))
+				]
 			]
 		]
 
@@ -475,6 +495,18 @@ EVisibility SRHCommandDeck::GetEventVisibility() const
 	return GetEventText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
+FText SRHCommandDeck::GetAlertText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	return Viz ? Viz->GetAlertText() : FText::GetEmpty();
+}
+
+EVisibility SRHCommandDeck::GetAlertVisibility() const
+{
+	return GetAlertText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+}
+
 void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
@@ -684,7 +716,7 @@ FText SRHCommandDeck::GetInspectText() const
 	}
 	else
 	{
-		Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered until the grid recovers");
+		Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
 		if (B->BatchRemaining_h > 0.0)
 		{
 			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h);
@@ -692,6 +724,13 @@ FText SRHCommandDeck::GetInspectText() const
 		else if (Def && (Def->PowerDraw_W > 0.f || Def->RequiresDeposit))
 		{
 			Text += TEXT("\nno batch running");
+		}
+		// Per-station storm legibility (director finding): a generator's card
+		// says WHY its output collapsed, right where the player is looking.
+		const double Dust = Sim->GetDustFactorNow();
+		if (Def && Def->PowerGenPeak_W > 0.f && Dust < 1.0)
+		{
+			Text += FString::Printf(TEXT("\nDUST STORM: solar output at %.0f%% of clear sky"), Dust * 100.0);
 		}
 	}
 

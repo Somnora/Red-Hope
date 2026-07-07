@@ -32,3 +32,4 @@ FloorHeightMeters,4,m,"Z-model (M1-b): vertical spacing between shaft floors; pr
 MaxDepth,5,floors,"Z-model (M1-b): deepest shaft floor (Level -N); data-expandable per underground spec"
 RadiationSurface,1.0,factor,"M1-c: baseline surface radiation index; flares multiply exposure transiently"
 RadiationPerLevelMul,0.05,factor,"M1-c: per-floor attenuation - each level down multiplies radiation by this (overburden is free shielding)"
+StormWearMul,2.0,factor,"Director ruling 2026-07-07b: robots working through a dust storm wear at this multiple; shelter (warehouse) arrives M2"

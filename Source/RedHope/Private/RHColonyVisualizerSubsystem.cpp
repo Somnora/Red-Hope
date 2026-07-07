@@ -354,6 +354,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
 		Sim->OnDepositDiscovered.AddUObject(this, &URHColonyVisualizerSubsystem::HandleDepositDiscovered);
 		Sim->OnSurveyCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleSurveyCompleted);
+		Sim->OnAlert.AddUObject(this, &URHColonyVisualizerSubsystem::HandleAlert);
 		Sim->OnColonyReloaded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleColonyReloaded);
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -667,6 +668,23 @@ FText URHColonyVisualizerSubsystem::GetNoticeText() const
 		return FText::GetEmpty();
 	}
 	return FText::FromString(LastNotice);
+}
+
+void URHColonyVisualizerSubsystem::HandleAlert(const FString& Alert)
+{
+	LastAlert = Alert;
+	LastAlertRealSeconds = FPlatformTime::Seconds();
+}
+
+FText URHColonyVisualizerSubsystem::GetAlertText() const
+{
+	// Longer hold than the notice line: these are the batten-down moments.
+	constexpr double AlertHoldSeconds = 15.0;
+	if (FPlatformTime::Seconds() - LastAlertRealSeconds > AlertHoldSeconds)
+	{
+		return FText::GetEmpty();
+	}
+	return FText::FromString(LastAlert);
 }
 
 void URHColonyVisualizerSubsystem::HandleQuotaMet(int32 Sol, double AwardKg)

@@ -35,6 +35,9 @@ public:
 	// listens on the sim's rejection seam; the deck polls this rather than
 	// wiring its own delegate (debug messages hide under the Slate overlay).
 	FText GetNoticeText() const;
+	// Banner-weight alert (era refusal, event onset, ship countdown) - the
+	// must-not-miss channel the director asked for. Empty once stale.
+	FText GetAlertText() const;
 
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
@@ -46,6 +49,7 @@ private:
 	void HandleDepositDiscovered(const FRHDepositState& Deposit);
 	// Empty surveys report too - paid-for knowledge, even when it's "nothing".
 	void HandleSurveyCompleted(const FRHSurveyRecord& Record);
+	void HandleAlert(const FString& Alert);
 	// Load path: drop every mirror actor and rebuild from a full state walk.
 	// The visualizer owning zero authoritative state is what makes this safe.
 	void HandleColonyReloaded();
@@ -76,4 +80,6 @@ private:
 	FDelegateHandle RejectedHandle;
 	FString LastNotice;
 	double LastNoticeRealSeconds = -1.0e9;
+	FString LastAlert;
+	double LastAlertRealSeconds = -1.0e9;
 };

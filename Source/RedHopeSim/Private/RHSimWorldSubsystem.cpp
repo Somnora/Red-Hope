@@ -86,6 +86,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
 	RepairWearPerPart = (float)Defs->GetConfigScalar(FName("RepairWearPerPart"), RepairWearPerPart);
+	StormWearMul = (float)Defs->GetConfigScalar(FName("StormWearMul"), StormWearMul);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -212,15 +213,12 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 		if (!CanEnterEraMode(Why))
 		{
 			// Refusing era mode is not a punishment: hold the player's last
-			// agent-band speed (not 1x) and surface the reason as a toast -
-			// the silent drop read as a speed-control bug in the field.
+			// agent-band speed (not 1x) and say so LOUDLY - the notice-line
+			// version read as "nothing happened" in the director's hands.
 			const float Restore = FMath::Max(1.f, Clock->GetLastAgentSpeed());
 			Clock->SetSpeed(Restore);
 			UE_LOG(LogRedHopeSim, Display, TEXT("ERA REFUSED: %s - holding %.0fx"), *Why, Restore);
-			FRHCommand SpeedCmd;
-			SpeedCmd.Verb = FName("SetSpeed");
-			SpeedCmd.Target = FName("EraMode");
-			OnCommandRejected.Broadcast(SpeedCmd, FString::Printf(TEXT("era mode unavailable: %s"), *Why));
+			OnAlert.Broadcast(FString::Printf(TEXT("60x unavailable: %s — holding %.0fx"), *Why, Restore));
 			return;
 		}
 	}
@@ -237,11 +235,45 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 
 	// Fixed order: orders land, work is posted, factories run, the quota
 	// arc advances, power settles.
+	StepEventEdges();
 	StepUplink();
 	StepTaskBoard();
 	StepProduction(SubDt);
 	StepQuota();
 	StepPower(SubDt);
+}
+
+void URHSimWorldSubsystem::StepEventEdges()
+{
+	const FRHEventRow* Event = GetActiveEvent();
+	const bool bActive = Event != nullptr;
+	if (bActive && !bEventWasActive)
+	{
+		// Onset (director ruling): snap ANY speed to 1x on the spot - the
+		// player gets real time to batten down. They may re-speed at will.
+		LastEventType = Event->Type;
+		if (Clock && Clock->GetSpeed() > 1.f)
+		{
+			Clock->SetSpeed(1.f);
+		}
+		const bool bStorm = Event->Type == FName("DustStorm");
+		const FString Alert = bStorm
+			? FString::Printf(TEXT("DUST STORM ONSET — solar dropping to %.0f%%. Speed set to 1x: batten down. Robots working outside wear %.1fx faster."),
+				Event->Severity * 100.f, StormWearMul)
+			: FString::Printf(TEXT("SOLAR FLARE — exposed units wearing %.1fx faster until sol %.1f. Speed set to 1x."),
+				Event->Severity, Event->StartSol + Event->DurationSols);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== %s ==="), *Alert);
+		OnAlert.Broadcast(Alert);
+	}
+	else if (!bActive && bEventWasActive)
+	{
+		const FString Alert = LastEventType == FName("DustStorm")
+			? FString(TEXT("The dust storm has passed. Solar output restored."))
+			: FString(TEXT("The solar flare has subsided."));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== %s ==="), *Alert);
+		OnAlert.Broadcast(Alert);
+	}
+	bEventWasActive = bActive;
 }
 
 bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
@@ -275,12 +307,17 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 			return false;
 		}
 	}
-	// World pressure (M1-c auto-drop list): never era-skip an active event,
-	// and drop back before one starts - onset is an agent-fidelity moment.
+	// World pressure (director ruling 2026-07-07b): "sleep through the siege,
+	// never through the onset, never through a flare." A steady-state dust
+	// storm may be era-skipped (the onset was experienced at 1x); flares
+	// never - their whole life is the emergency.
 	if (const FRHEventRow* Event = GetActiveEvent())
 	{
-		OutReason = FString::Printf(TEXT("%s in progress"), *Event->Type.ToString());
-		return false;
+		if (Event->Type == FName("SolarFlare"))
+		{
+			OutReason = TEXT("SolarFlare in progress");
+			return false;
+		}
 	}
 	if (Defs && Clock)
 	{
@@ -325,6 +362,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	// Same spine as StepSim at a coarser dt: the sub-step functions are
 	// already dimensionally honest, so era mode is the same integrator run
 	// at 1 sim-minute. Only dig/haul need the abstract stand-in (agents park).
+	StepEventEdges(); // storm END mid-era alerts; onsets can't occur here (imminent check drops first)
 	StepUplink();
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
@@ -851,6 +889,19 @@ void URHSimWorldSubsystem::StepQuota()
 	}
 	else if (QuotaPhase == ERHQuotaPhase::ShipInbound)
 	{
+		// Arrival countdown (director ruling): loud alerts at T-2 and T-1
+		// sols so the colony can prepare. Crew ships inherit this seam in M2.
+		const double SolsOut = (ShipArrivalSimSeconds - Clock->GetSimSecondsTotal()) / URHSimClockSubsystem::SolLengthSimSeconds;
+		if (ShipAlertStage < 1 && SolsOut <= 2.0 && SolsOut > 1.0)
+		{
+			ShipAlertStage = 1;
+			OnAlert.Broadcast(TEXT("SUPPLY SHIP: touchdown in 2 sols — prepare the colony."));
+		}
+		else if (ShipAlertStage < 2 && SolsOut <= 1.0 && SolsOut > 0.0)
+		{
+			ShipAlertStage = 2;
+			OnAlert.Broadcast(TEXT("SUPPLY SHIP: touchdown in 1 sol."));
+		}
 		if (Clock->GetSimSecondsTotal() >= ShipArrivalSimSeconds)
 		{
 			QuotaPhase = ERHQuotaPhase::Completed;
@@ -1721,16 +1772,16 @@ void URHSimWorldSubsystem::LeavePadQueue(int32 PadBuildingId, FMassEntityHandle 
 
 void URHSimWorldSubsystem::AccrueWear(float& Wear, float WearPerSol, float Dt) const
 {
-	// Flare tax (M1-c): an active solar flare multiplies exertion wear on
-	// exposed units - and until the M1-d vault exists, EVERY unit is exposed;
+	// Weather tax (M1-c + director ruling 2026-07-07b): an active flare
+	// multiplies exertion wear on exposed units (placeholder until M2's
+	// electronic-fault system - flares become software faults repaired by
+	// humans); a dust storm grinds working machinery at StormWearMul. Until
+	// the M1-d vault / M2 warehouse exist, EVERY working unit is exposed;
 	// docked at a pad is not shelter. The player is supposed to feel this gap.
 	float Mul = 1.f;
 	if (const FRHEventRow* Event = GetActiveEvent())
 	{
-		if (Event->Type == FName("SolarFlare"))
-		{
-			Mul = Event->Severity;
-		}
+		Mul = (Event->Type == FName("SolarFlare")) ? Event->Severity : StormWearMul;
 	}
 	Wear = FMath::Min(WearHaltThreshold, Wear + WearPerSol * Mul * (Dt / (float)URHSimClockSubsystem::SolLengthSimSeconds));
 }
@@ -1935,6 +1986,7 @@ bool URHSimWorldSubsystem::LaunchShip(FString& OutError)
 	}
 	const double TransitSols = Defs->GetConfigScalar(FName("ShipTransitSols"), 3.0);
 	ShipArrivalSimSeconds = Clock->GetSimSecondsTotal() + TransitSols * URHSimClockSubsystem::SolLengthSimSeconds;
+	ShipAlertStage = 0; // fresh countdown per launch
 	QuotaPhase = ERHQuotaPhase::ShipInbound;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Ship launched: %d items, %.0f/%.0f kg, arrival in %.0f sols"),
 		ManifestItems.Num(), GetManifestMassKg(), AwardMassKg, TransitSols);
@@ -2294,6 +2346,21 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Clock->Debug_SetSimSeconds(SimSeconds);
 	Clock->SetSpeed(1.f);
 	LastAutosaveSol = Clock->GetSol();
+
+	// Transient edge state re-derives from the loaded clock: a mid-storm load
+	// must not re-announce "onset", and the ship countdown picks up mid-run.
+	const FRHEventRow* ActiveNow = GetActiveEvent();
+	bEventWasActive = ActiveNow != nullptr;
+	LastEventType = ActiveNow ? ActiveNow->Type : NAME_None;
+	if (QuotaPhase == ERHQuotaPhase::ShipInbound)
+	{
+		const double SolsOut = (ShipArrivalSimSeconds - SimSeconds) / URHSimClockSubsystem::SolLengthSimSeconds;
+		ShipAlertStage = SolsOut <= 1.0 ? 2 : (SolsOut <= 2.0 ? 1 : 0);
+	}
+	else
+	{
+		ShipAlertStage = 0;
+	}
 
 	OnColonyReloaded.Broadcast();
 	if (Respawned.Num() > 0)

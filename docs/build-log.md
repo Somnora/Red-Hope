@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 19 (director weather/arrival rulings implemented + verified headless)
+
+- **Rulings from the M1-c hand-play debrief (design-decisions 2026-07-07b), all implemented this session:**
+  - **Onset snaps to 1×:** any speed drops to 1× the step a storm/flare begins (StepEventEdges, both bands) with a banner-weight alert ("batten down", wear warning included). Player re-speeds at will.
+  - **Era rule amended:** "sleep through the siege, never the onset, never a flare" — CanEnterEraMode now allows era during a steady-state DustStorm, still refuses active flares and any imminent onset.
+  - **Storm wear:** robots working through a dust storm wear at `StormWearMul` (2×, new config row; code default matches CSV until the DT row is added next editor session).
+  - **Ship countdown:** T-2 / T-1 sol alerts on the supply ship (stage resets per launch; re-derives on load). Crew ships inherit the seam in M2.
+  - **Alert channel:** new sim `OnAlert` delegate → visualizer 15-s hold → deck banner (top center, under the event banner). Era refusal moved from the missable notice line to this channel — the director's "nothing happened" finding.
+  - **Per-station storm legibility:** a generator's inspection card now reads "DUST STORM: solar output at 30% of clear sky"; SHED line explains the deficit.
+- **Scheduled, not implemented:** warehouse/garage shelter (M2, schema headroom M1-d); flares-as-electronic-faults repaired by humans (M2) — flare wear ×3 stands as placeholder; **open ruling flagged:** does no-robot-repairs retire the RC-M mechanical loop or apply only to electronic faults?
+- **Habitat vision §9 milestone mapping APPROVED by the director** (M1-d births room/compartment/door/filtration schemas dormant; M2 activates the human layer); rulings appended to the vision doc as §10.
+- **Verified headless, two runs:** (1) 8× colony hit the sol-2 test storm → `DUST STORM ONSET … Speed set to 1x` same step. (2) Loaded mid-storm, `RH.SetSpeed 60` → **engaged** (zero DustStorm refusals — the amended rule live), storm-end alert fired from inside era, then `ERA REFUSED: SolarFlare imminent` auto-drop, then the flare onset alert. Compile clean first try (64 s).
+
 ## 2026-07-07 — Session 18b (director hand-play of M1-c + the habitat vision)
 
 - **Director hand-played the storm/flare build.** Two findings, both queued for the next compile gate:

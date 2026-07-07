@@ -1,6 +1,6 @@
 # Habitat Vision — Director Directives (2026-07-07)
 
-Status: **director-directed canon** (verbal direction after the M1-c hand-play), captured verbatim-faithful with an agent-proposed milestone mapping at the end (§9, awaiting director OK). This document extends — never replaces — the underground rulings in `docs/m1-underground-proposal.md`.
+Status: **director-directed canon** (verbal direction after the M1-c hand-play). **§9 milestone mapping APPROVED by the director 2026-07-07b**; weather/arrival rulings from the same exchange appended as §10. This document extends — never replaces — the underground rulings in `docs/m1-underground-proposal.md`.
 
 Canon anchors: brief §2 Phase 2 (humans arrive, morale), §5 (Hope index, luxuries, water/waste), the 2026-07-05 underground rulings (per-floor habitability chain, water/waste recycling loop, sliced camera). The director's words are the source of truth here; agent structuring is labeled.
 
@@ -72,3 +72,13 @@ The director's closing concern — "with how the game is structured now, I don't
 - **Not scheduled yet:** anything Phase 3.
 
 Rationale for the split: M1-d stays the tight "first vault" exit the rulings define, but every schema the hab vision needs (rooms, compartments, doors, filtration coverage) is born there so the M2 human layer lands on prepared ground instead of a rewrite.
+
+---
+
+## 10. Weather & arrival rulings (director, 2026-07-07b — implemented same session unless noted)
+
+- **Onset snaps time to 1×** (any speed): the player gets real time to batten down; re-speeding afterwards is allowed. Era stays refused at onset and during flares; a steady-state storm may be era-skipped.
+- **Robots sent out during a dust storm take accelerated wear** (`StormWearMul`, 2× default) — working through the siege is allowed and costly.
+- **Warehouse/garage** (M2, schema headroom M1-d): stored vehicles/robots take no storm wear.
+- **Flares become electronic** (M2): software/electronic faults repaired by a HUMAN — robots do not repair robots (director). Interim: flare wear ×3 placeholder. Open ruling: does the no-robot-repairs principle retire the RC-M mechanical-repair loop, or apply only to electronic faults?
+- **Ship arrival alerts at T-2 and T-1 sols** — supply ship now; crew ships inherit the seam in M2.
