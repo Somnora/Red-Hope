@@ -5,6 +5,7 @@
 #include "RedHope.h"
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
+#include "RHPlayerController.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
@@ -173,6 +174,23 @@ static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 			Cmd.Level = FCString::Atoi(*Args[0]);
 			Cmd.Value = FCString::Atod(*Args[1]);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHFloor(
+	TEXT("RH.Floor"),
+	TEXT("RH.Floor <Level> - ride the elevator: 0 = surface, -N = subsurface floor (camera, slice view, and order Level follow)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Floor <Level>"));
+			return;
+		}
+		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+		{
+			PC->SetActiveLevel(FCString::Atoi(*Args[0]));
+			UE_LOG(LogRedHope, Display, TEXT("Elevator: floor %d"), PC->GetActiveLevel());
 		}
 	}));
 

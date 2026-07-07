@@ -45,6 +45,15 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 	}
 }
 
+void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
+{
+	bSliceHidden = bHidden;
+	if (MeshComponent)
+	{
+		MeshComponent->SetVisibility(!bHidden);
+	}
+}
+
 void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 {
 	if (MeshComponent)
@@ -82,6 +91,7 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 		Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor(0.60f, 0.50f, 0.28f));
 		MeshComponent->SetMaterial(0, Mid);
 	}
+	MeshComponent->SetVisibility(!bSliceHidden); // honor an already-descended elevator
 }
 
 void URHAgentVisualizerSubsystem::Tick(float DeltaTime)

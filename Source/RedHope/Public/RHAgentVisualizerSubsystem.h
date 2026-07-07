@@ -34,10 +34,14 @@ public:
 	// Load path: forget every tracked entity and instance; the reload's
 	// OnRobotsSpawned broadcasts repopulate from scratch.
 	void ResetTracking();
+	// Sliced-floor view (M1-d): robots are surface actors until later gates
+	// send them below; the whole ISM layer hides when the elevator descends.
+	void SetSliceHidden(bool bHidden);
 
 private:
 	void EnsureMeshComponent();
 
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> MeshComponent;
 	TArray<FMassEntityHandle> Tracked;
+	bool bSliceHidden = false;
 };

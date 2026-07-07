@@ -39,6 +39,14 @@ public:
 	// must-not-miss channel the director asked for. Empty once stale.
 	FText GetAlertText() const;
 
+	// Sliced-floor view (M1-d Gate A2): the elevator's floor becomes the only
+	// visible stratum - surface as ever at 0; a subsurface floor hides the
+	// ground plane + surface actors and shows that floor's carved cells, its
+	// buildings, and the shaft column (the ant farm cleaved open).
+	// Presentation-only; the sim never knows what the camera looks at.
+	void SetViewLevel(int32 Level);
+	int32 GetViewLevel() const { return ViewLevel; }
+
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
@@ -72,9 +80,27 @@ private:
 	void AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
 	void BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const;
 
+	// Shaft & excavation mirror (M1-d Gate A2): a column actor for the trunk,
+	// one floor tile per carved cell. The sim keeps carved cells as per-floor
+	// COUNTS (A1 model); tiles lay out in a deterministic square spiral around
+	// the shaft head - honest about how much is carved, canonical about where.
+	// Flagged in the build log: spatial (painted-position) carving is a sim
+	// upgrade for a later gate if the director wants placement-in-pocket rules.
+	void UpdateShaftVisuals();
+	void ApplyViewLevel();
+	AStaticMeshActor* SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const;
+	static FIntPoint SpiralCell(int32 Index);
+
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
+	UPROPERTY() TObjectPtr<AStaticMeshActor> ShaftVisual;
+	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> CarveTileVisuals;
+	TMap<int32, int32> TilesSpawnedPerLevel;
+	TWeakObjectPtr<AActor> GroundActor;
+	bool bGroundSearched = false;
+	int32 ViewLevel = 0;
+	int32 LastShaftDepthSeen = 0;
 	FDelegateHandle AddedHandle;
 	FDelegateHandle CompletedHandle;
 	FDelegateHandle RejectedHandle;

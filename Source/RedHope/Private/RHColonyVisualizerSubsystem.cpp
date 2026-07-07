@@ -2,6 +2,8 @@
 #include "RedHope.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
+#include "RHAgentVisualizerSubsystem.h"
+#include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
@@ -389,6 +391,22 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		ShipVisual->Destroy();
 		ShipVisual = nullptr;
 	}
+	// Shaft mirror rebuilds from the loaded counts on the next Tick.
+	if (ShaftVisual)
+	{
+		ShaftVisual->Destroy();
+		ShaftVisual = nullptr;
+	}
+	LastShaftDepthSeen = 0;
+	for (AStaticMeshActor* Tile : CarveTileVisuals)
+	{
+		if (Tile)
+		{
+			Tile->Destroy();
+		}
+	}
+	CarveTileVisuals.Reset();
+	TilesSpawnedPerLevel.Reset();
 
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -405,6 +423,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	{
 		HandleShipArrived(Sim->GetManifestItems());
 	}
+	ApplyViewLevel(); // the reloaded colony honors the elevator's floor
 	UE_LOG(LogRedHope, Display, TEXT("Colony visuals rebuilt from loaded state (%d buildings)"), Sim->GetBuildings().Num());
 }
 
@@ -631,6 +650,9 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		AddAccent(Actor, Sphere, Instance.LocationCm + FVector(0, 0, 225.f), FRotator::ZeroRotator,
 			FVector(0.28f), RHCanon::HazYellow, FLinearColor(3.2f, 2.2f, 0.35f));
 	}
+	// Born on whatever floor the sim says; visible only if the elevator is
+	// looking at that stratum (M1-d slice view).
+	Actor->SetActorHiddenInGame(Instance.Level != ViewLevel);
 	BuildingVisuals.Add(Instance.Id, Actor);
 }
 
@@ -760,9 +782,14 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	{
 		return;
 	}
-	// Territory made visible: one disc per coverage node, every frame.
+	// Territory made visible: one disc per coverage node, every frame - on
+	// the floor the elevator shows.
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
+		if (B.Level != ViewLevel)
+		{
+			continue;
+		}
 		if (const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName))
 		{
 			if (Def->CoverageRadius_m > 0.f)
@@ -772,5 +799,216 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 					FVector(1, 0, 0), FVector(0, 1, 0), false);
 			}
 		}
+	}
+
+	// Shaft & carved-floor mirror (M1-d): state-diffed each frame - the counts
+	// are tiny and the sim has no per-cell visual events to listen to.
+	UpdateShaftVisuals();
+}
+
+void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	const double FloorH = Sim->GetFloorHeightCm();
+	const int32 Depth = Sim->GetShaftDepth();
+
+	// The trunk: one dark column from the surface down to the bored depth,
+	// amber-lit (canon: hazard hues mark machine interfaces).
+	if (Depth > 0 && Depth != LastShaftDepthSeen)
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const FVector Center(Head.X, Head.Y, -Depth * FloorH * 0.5);
+		const FVector Scale(4.f, 4.f, Depth * FloorH / 100.0);
+		if (!ShaftVisual)
+		{
+			ShaftVisual = SpawnBox(Center, Scale, RHCanon::DarkSlate, FLinearColor(0.35f, 0.25f, 0.02f));
+#if WITH_EDITOR
+			if (ShaftVisual) { ShaftVisual->SetActorLabel(TEXT("Sim_Shaft")); }
+#endif
+		}
+		else
+		{
+			ShaftVisual->SetActorLocation(Center);
+			ShaftVisual->SetActorScale3D(Scale);
+		}
+		LastShaftDepthSeen = Depth;
+	}
+
+	// Carved cells: one 10x10 m floor tile per completed cell, spiraling out
+	// from the shaft head. The sim tracks per-floor COUNTS (A1 model); the
+	// spiral is the canonical layout - honest about how much, canonical about
+	// where. Spatial painted-position carving is a flagged later-gate upgrade.
+	for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+	{
+		const int32 Want = Sim->GetFloorCarvedCells(L);
+		int32& Have = TilesSpawnedPerLevel.FindOrAdd(L);
+		while (Have < Want)
+		{
+			const FIntPoint Cell = SpiralCell(Have);
+			const FVector Head = Sim->GetShaftHeadCm();
+			const FVector Center(Head.X + Cell.X * 1000.0, Head.Y + Cell.Y * 1000.0, L * FloorH - 20.0);
+			// A carved pocket's floor: warm regolith gray, faintly self-lit so
+			// the open cell reads against the void standing in for rock.
+			AStaticMeshActor* Tile = SpawnBox(Center, FVector(9.6f, 9.6f, 0.3f),
+				FLinearColor(0.16f, 0.12f, 0.10f), FLinearColor(0.012f, 0.010f, 0.008f));
+			if (!Tile)
+			{
+				break;
+			}
+#if WITH_EDITOR
+			Tile->SetActorLabel(FString::Printf(TEXT("Sim_Carve_%d_%d"), L, Have));
+#endif
+			Tile->SetActorHiddenInGame(ViewLevel != L);
+			CarveTileVisuals.Add(Tile);
+			++Have;
+		}
+	}
+}
+
+AStaticMeshActor* URHColonyVisualizerSubsystem::SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const
+{
+	UWorld* World = GetWorld();
+	AStaticMeshActor* Actor = World ? World->SpawnActor<AStaticMeshActor>(CenterCm, FRotator::ZeroRotator) : nullptr;
+	if (!Actor)
+	{
+		return nullptr;
+	}
+	UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
+	Mesh->SetMobility(EComponentMobility::Movable);
+	Mesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+	Actor->SetActorScale3D(ScaleM);
+	ApplyTint(Actor, Body, Emissive);
+	return Actor;
+}
+
+FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
+{
+	// Deterministic square spiral over the 10 m cell grid, skipping (0,0)
+	// (the shaft column's own cell): (1,0), (1,1), (0,1), (-1,1), ...
+	int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
+	for (int32 i = 0; i <= Index; ++i)
+	{
+		X += DX; Y += DY;
+		if (++LegPos == LegLen)
+		{
+			LegPos = 0;
+			const int32 T = DX; DX = -DY; DY = T; // turn left
+			if (++LegsDone == 2)
+			{
+				LegsDone = 0;
+				++LegLen;
+			}
+		}
+	}
+	return FIntPoint(X, Y);
+}
+
+void URHColonyVisualizerSubsystem::SetViewLevel(int32 Level)
+{
+	if (ViewLevel == Level)
+	{
+		return;
+	}
+	ViewLevel = Level;
+	ApplyViewLevel();
+}
+
+void URHColonyVisualizerSubsystem::ApplyViewLevel()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!World || !Sim)
+	{
+		return;
+	}
+	const bool bSurface = ViewLevel == 0;
+
+	// The Mars ground plane is the knife: hidden, the colony reads cut open.
+	// World Partition renames runtime actors, so the LABEL (GB_MarsGround) is
+	// no handle - the MATERIAL (MI_MarsGround) is the stable identity. Missing
+	// (e.g. still streaming) degrades to "no cut-away" and re-searches on the
+	// next elevator ride; the warning fires once.
+	if (!GroundActor.IsValid())
+	{
+		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+		{
+			bool bMatch = It->GetFName().ToString().Contains(TEXT("MarsGround"));
+			if (!bMatch)
+			{
+				if (const UStaticMeshComponent* Mesh = It->GetStaticMeshComponent())
+				{
+					const UMaterialInterface* Mat = Mesh->GetNumMaterials() > 0 ? Mesh->GetMaterial(0) : nullptr;
+					bMatch = Mat && Mat->GetName().Contains(TEXT("MarsGround"));
+				}
+			}
+			if (bMatch)
+			{
+				GroundActor = *It;
+				break;
+			}
+		}
+		if (!GroundActor.IsValid() && !bGroundSearched)
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("Slice view: no MarsGround actor/material found - the surface will not cut away"));
+		}
+		bGroundSearched = true;
+	}
+	if (GroundActor.IsValid())
+	{
+		GroundActor->SetActorHiddenInGame(!bSurface);
+	}
+
+	// One stratum at a time: buildings show on their own floor only.
+	for (auto& Pair : BuildingVisuals)
+	{
+		if (!Pair.Value)
+		{
+			continue;
+		}
+		int32 BLevel = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id == Pair.Key)
+			{
+				BLevel = B.Level;
+				break;
+			}
+		}
+		Pair.Value->SetActorHiddenInGame(BLevel != ViewLevel);
+	}
+	// Deposit markers and the ship are surface furniture (underground deposits
+	// get their own read when they ship).
+	for (AStaticMeshActor* Marker : DepositMarkers)
+	{
+		if (Marker)
+		{
+			Marker->SetActorHiddenInGame(!bSurface);
+		}
+	}
+	if (ShipVisual)
+	{
+		ShipVisual->SetActorHiddenInGame(!bSurface);
+	}
+	// Carve tiles: only the active floor's pocket shows (floors above would
+	// roof it in; deeper floors would bleed through un-rendered rock).
+	const double FloorH = Sim->GetFloorHeightCm();
+	for (AStaticMeshActor* Tile : CarveTileVisuals)
+	{
+		if (Tile)
+		{
+			const int32 TileLevel = FMath::RoundToInt32(Tile->GetActorLocation().Z / FloorH);
+			Tile->SetActorHiddenInGame(TileLevel != ViewLevel);
+		}
+	}
+	// Robots live on the surface until M1-d's later gates send them below;
+	// their ISM layer hides with the rest of the surface.
+	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
+	{
+		Agents->SetSliceHidden(!bSurface);
 	}
 }

@@ -32,6 +32,10 @@ public:
 	void BeginPlacement(FName BuildingDef);
 	void BeginDigDesignation();
 	void BeginSurveyDesignation();
+	// Paint-to-size excavation (M1-d Gate A2): click anchors a corner on the
+	// active subsurface floor, drag sizes the rectangle, release transmits an
+	// Excavate order counted in 10x10 m cells.
+	void BeginExcavateDesignation();
 	void CancelModes();
 	void SetSimSpeed(float Tier);
 	void TogglePause();
@@ -40,6 +44,11 @@ public:
 	FName GetPendingBuildDef() const { return PendingBuildDef; }
 	bool IsDigMode() const { return bDigMode; }
 	bool IsSurveyMode() const { return bSurveyMode; }
+	bool IsExcavateMode() const { return bExcavateMode; }
+	// The elevator (M1-d): which floor the player is looking at and ordering
+	// on. 0 = surface; -N needs no shaft to LOOK, only to order work there.
+	void SetActiveLevel(int32 Level);
+	int32 GetActiveLevel() const { return ActiveLevel; }
 	// The deck's visible feedback channels (M1-b Gate C: GEngine debug text
 	// provably hides under the Slate deck, so the deck renders these instead).
 	// Confirm = one-shot notice with expiry (order sent, save/load result);
@@ -88,6 +97,12 @@ private:
 	bool bDigMode = false;
 	bool bSurveyMode = false;
 	bool bShowSurveyMap = false;
+	// Excavation designation state (M1-d): anchor set on click, rect follows
+	// the cursor, release transmits. Cells are 10x10 m.
+	bool bExcavateMode = false;
+	bool bExcavateDragging = false;
+	FVector ExcavateAnchorCm = FVector::ZeroVector;
+	int32 ActiveLevel = 0;
 	int32 SelectedBuildingId = 0;
 	// Feedback channels (deck-rendered; see GetConfirmText/GetHintText).
 	FString ConfirmText;

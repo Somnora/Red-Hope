@@ -61,6 +61,13 @@ private:
 	FReply HandleBuild(FName DefName);
 	FReply HandleDig();
 	FReply HandleSurvey();
+	// Excavation designation (M1-d): paint carve cells on the active floor.
+	FReply HandleExcavate();
+	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
+	FReply HandleFloor(int32 Level);
+	FText GetFloorLabel(int32 Level) const;
+	FSlateColor GetFloorCellColor(int32 Level) const;
+	FSlateColor GetFloorTextColor(int32 Level) const;
 	FReply HandleMap();
 	FReply HandleSpeed(float Tier);
 	FReply HandlePause();

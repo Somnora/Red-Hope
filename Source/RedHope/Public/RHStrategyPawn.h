@@ -33,6 +33,10 @@ public:
 		return MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, SmoothedZoomT);
 	}
 
+	// Sliced-floor view (M1-d): the elevator drops the camera's focus plane to
+	// the active floor; orbit/zoom/pan behave identically at any depth.
+	void SetFocusZCm(float Zcm) { FocusPointCm.Z = Zcm; }
+
 	// 0 = ground register (25 m), 1 = orbital register (3000 m).
 	// Default 0.45 ~= 215 m: the whole starting colony in frame with readable
 	// 3D depth on the gray-boxes - the classic strategy opening shot.

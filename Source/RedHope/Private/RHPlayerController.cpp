@@ -2,6 +2,7 @@
 #include "RedHope.h"
 #include "RHStrategyPawn.h"
 #include "RHCommandDeck.h"
+#include "RHColonyVisualizerSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -179,7 +180,12 @@ bool ARHPlayerController::CursorToGround(FVector& OutCm) const
 	{
 		return false;
 	}
-	const double T = -Origin.Z / Dir.Z;
+	// The cursor ray meets the ACTIVE floor's plane (M1-d): the elevator moves
+	// the whole interaction surface down with the view. Z on orders is derived
+	// by the sim; this Z only places previews at honest depth.
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const double PlaneZ = Sim ? ActiveLevel * Sim->GetFloorHeightCm() : 0.0;
+	const double T = (PlaneZ - Origin.Z) / Dir.Z;
 	if (T <= 0.0)
 	{
 		return false;
@@ -187,7 +193,7 @@ bool ARHPlayerController::CursorToGround(FVector& OutCm) const
 	OutCm = Origin + Dir * T;
 	OutCm.X = FMath::GridSnap(OutCm.X, GridSnapCm);
 	OutCm.Y = FMath::GridSnap(OutCm.Y, GridSnapCm);
-	OutCm.Z = 0.0;
+	OutCm.Z = PlaneZ;
 	return true;
 }
 
@@ -243,7 +249,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 		{
 			const FRHBuildingRow* Def = Defs->GetBuilding(PendingBuildDef);
 			FString Reason;
-			const bool bOk = Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason);
+			const bool bOk = Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason, ActiveLevel);
 			const FColor Color = bOk ? FColor::Green : FColor::Red;
 
 			const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
@@ -266,7 +272,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 		FVector Ground;
 		if (CursorToGround(Ground))
 		{
-			if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm))
+			if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
 			{
 				DrawDebugCircle(World, Dep->LocationCm + FVector(0, 0, 40.f), 1200.f,
 					48, FColor::Yellow, false, -1.f, 0, 10.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
@@ -292,6 +298,65 @@ void ARHPlayerController::Tick(float DeltaTime)
 			HintText = FString::Printf(TEXT("SURVEY at (%.0f, %.0f) m - a scout drives out and reveals this circle. Click to transmit"),
 				Ground.X / 100.f, Ground.Y / 100.f);
 			HintColor = FLinearColor(0.3f, 0.9f, 1.f);
+		}
+	}
+	else if (bExcavateMode)
+	{
+		// Paint-to-size (M1-d): the rect on the active floor, sized in 10x10 m
+		// carve cells. Preflight is honest preview only - the uplink re-checks.
+		FVector Ground;
+		if (CursorToGround(Ground))
+		{
+			const bool bFloorOk = ActiveLevel < 0 && Sim->IsLevelConnected(ActiveLevel);
+			if (ActiveLevel == 0)
+			{
+				HintText = TEXT("EXCAVATE: pick a subsurface floor on the elevator first (surface is open sky)");
+				HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+			}
+			else if (bExcavateDragging)
+			{
+				constexpr float CellCm = 1000.f; // 10 m carve cell
+				const float MinX = FMath::Min(ExcavateAnchorCm.X, Ground.X), MaxX = FMath::Max(ExcavateAnchorCm.X, Ground.X);
+				const float MinY = FMath::Min(ExcavateAnchorCm.Y, Ground.Y), MaxY = FMath::Max(ExcavateAnchorCm.Y, Ground.Y);
+				const int32 CellsX = FMath::Max(1, FMath::RoundToInt32((MaxX - MinX) / CellCm));
+				const int32 CellsY = FMath::Max(1, FMath::RoundToInt32((MaxY - MinY) / CellCm));
+				const int32 Cells = CellsX * CellsY;
+				const FVector Center((MinX + MaxX) * 0.5f, (MinY + MaxY) * 0.5f, Ground.Z);
+				const FColor Color = bFloorOk ? FColor::Orange : FColor::Red;
+				DrawDebugBox(World, Center + FVector(0, 0, 60.f),
+					FVector(CellsX * CellCm * 0.5f, CellsY * CellCm * 0.5f, 60.f), Color, false, -1.f, 0, 10.f);
+				HintText = bFloorOk
+					? FString::Printf(TEXT("EXCAVATE floor %d: %d cell(s) ~ %.1f t spoil - release to transmit"),
+						ActiveLevel, Cells, Cells * 1.2f)
+					: FString::Printf(TEXT("EXCAVATE floor %d: not reached - bore the shaft deeper first"), ActiveLevel);
+				HintColor = FLinearColor(Color);
+
+				if (!IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bExcavateDragging = false;
+					if (bFloorOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("Excavate");
+						Cmd.Level = ActiveLevel;
+						Cmd.Value = Cells;
+						Cmd.Location = Center;
+						Sim->EnqueueCommand(Cmd);
+						SetConfirm(FString::Printf(TEXT("Excavation transmitted: %d cell(s) on floor %d"), Cells, ActiveLevel),
+							FLinearColor(0.2f, 0.9f, 1.f));
+						CancelModes();
+					}
+				}
+			}
+			else
+			{
+				DrawDebugBox(World, Ground + FVector(0, 0, 60.f), FVector(500.f, 500.f, 60.f),
+					bFloorOk ? FColor::Orange : FColor::Red, false, -1.f, 0, 8.f);
+				HintText = bFloorOk
+					? FString::Printf(TEXT("EXCAVATE floor %d: click and drag to paint the dig, release to transmit"), ActiveLevel)
+					: FString::Printf(TEXT("EXCAVATE floor %d: not reached - bore the shaft deeper first"), ActiveLevel);
+				HintColor = bFloorOk ? FLinearColor(1.f, 0.6f, 0.1f) : FLinearColor(1.f, 0.3f, 0.2f);
+			}
 		}
 	}
 
@@ -348,22 +413,33 @@ void ARHPlayerController::OnClick()
 	if (!PendingBuildDef.IsNone())
 	{
 		FString Reason;
-		if (Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason))
+		if (Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason, ActiveLevel))
 		{
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Build");
 			Cmd.Target = PendingBuildDef;
 			Cmd.Location = Ground;
+			Cmd.Level = ActiveLevel;
 			Sim->EnqueueCommand(Cmd);
-			SetConfirm(FString::Printf(TEXT("Order transmitted: %s at (%.0f, %.0f) m"),
-				*PendingBuildDef.ToString(), Ground.X / 100.f, Ground.Y / 100.f), FLinearColor(0.2f, 0.9f, 1.f));
+			SetConfirm(FString::Printf(TEXT("Order transmitted: %s at (%.0f, %.0f) m%s"),
+				*PendingBuildDef.ToString(), Ground.X / 100.f, Ground.Y / 100.f,
+				ActiveLevel < 0 ? *FString::Printf(TEXT(" floor %d"), ActiveLevel) : TEXT("")), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
 		// Invalid spot: the ghost already says why; the click is a no-op.
 	}
+	else if (bExcavateMode)
+	{
+		// Anchor the paint rect; Tick sizes it and transmits on release.
+		if (ActiveLevel < 0)
+		{
+			ExcavateAnchorCm = Ground;
+			bExcavateDragging = true;
+		}
+	}
 	else if (bDigMode)
 	{
-		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm))
+		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
 		{
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Dig");
@@ -414,19 +490,51 @@ void ARHPlayerController::BeginSurveyDesignation()
 {
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
+	bExcavateMode = false;
 	bSurveyMode = true;
+}
+
+void ARHPlayerController::BeginExcavateDesignation()
+{
+	PendingBuildDef = NAME_None;
+	bDigMode = false;
+	bSurveyMode = false;
+	bExcavateMode = true;
+	bExcavateDragging = false;
+}
+
+void ARHPlayerController::SetActiveLevel(int32 Level)
+{
+	UWorld* World = GetWorld();
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 MaxDepth = Sim ? Sim->GetMaxDepth() : 5;
+	ActiveLevel = FMath::Clamp(Level, -MaxDepth, 0);
+	// The whole view rides the elevator: camera focus plane, the colony
+	// mirror's slice filter, and the robot layer (surface-only until M1-d
+	// puts robots below ground).
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->SetFocusZCm(Sim ? ActiveLevel * (float)Sim->GetFloorHeightCm() : ActiveLevel * 400.f);
+	}
+	if (URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+	{
+		Colony->SetViewLevel(ActiveLevel);
+	}
+	SelectedBuildingId = 0; // the card belongs to the floor you left
 }
 
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode)
+	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode)
 	{
 		SelectedBuildingId = 0;
 	}
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
 	bSurveyMode = false;
+	bExcavateMode = false;
+	bExcavateDragging = false;
 	HintText.Reset();
 }
 
@@ -509,6 +617,10 @@ int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const
 	double BestDist = TNumericLimits<double>::Max();
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
+		if (B.Level != ActiveLevel)
+		{
+			continue; // inspect what the elevator shows (M1-d slice honesty)
+		}
 		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
 		// Footprint plus half a cell of grace: clicking the plinth counts.
 		const double HalfX = (Def ? FMath::Max(1, Def->FootprintX) : 1) * 100.0 + 100.0;
