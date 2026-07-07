@@ -1359,20 +1359,22 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 
 		// Pressurized volume leaks - always. The standing tax of living in
 		// what you dug; abandonment drains loudly instead of holding forever.
-		FillKg = FMath::Max(0.0, FillKg - Cells * O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
+		const double LeakedKg = FMath::Min(FillKg, Cells * O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
+		FillKg -= LeakedKg;
 
 		// The trunk pushes O2 down; a powered circulator on the floor is what
 		// actually moves air (no circulator, no fill - the chain's last link).
+		double TakenKg = 0.0;
 		if (IsFloorCirculated(Level))
 		{
 			const double WantKg = FMath::Min(O2FillRateKgPerHour * (SubDt / 50.0), RequiredKg - FillKg);
 			if (WantKg > 0.0)
 			{
-				const double TakeKg = FMath::Min(WantKg, GetStock(NOxygen));
-				if (TakeKg > 0.0)
+				TakenKg = FMath::Min(WantKg, GetStock(NOxygen));
+				if (TakenKg > 0.0)
 				{
-					AddStock(NOxygen, -TakeKg);
-					FillKg += TakeKg;
+					AddStock(NOxygen, -TakenKg);
+					FillKg += TakenKg;
 				}
 			}
 		}
@@ -1396,7 +1398,13 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 				UE_LOG(LogRedHopeSim, Display, TEXT("=== PHASE 1 EXIT: THE VAULT — floor %d rated for the first crew ==="), Level);
 			}
 		}
-		else if (bWasRated && (FillKg < RequiredKg * 0.98 || !IsFloorCirculated(Level)))
+		// The rating drops only when the atmosphere is genuinely FAILING:
+		// circulation down, or under-required while net-declining (leak
+		// outpacing intake - a dry pool). Growing the requirement by carving
+		// new cells while a healthy circulator is filling is EXPANSION, not a
+		// crisis - the demo run flapped RATED/LOST four times during a normal
+		// dig-out and spammed banner alerts (director watch-through finding).
+		else if (bWasRated && (!IsFloorCirculated(Level) || (FillKg < RequiredKg * 0.98 && TakenKg < LeakedKg)))
 		{
 			RatedFloors.Remove(Level);
 			OnAlert.Broadcast(FString::Printf(
