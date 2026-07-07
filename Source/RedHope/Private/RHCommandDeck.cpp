@@ -251,6 +251,23 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
 			[
 				SNew(SBox).WidthOverride(ReadoutWidthPx)
+				.Visibility(this, &SRHCommandDeck::GetCrewVisibility)
+				[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FLinearColor(0.05f, 0.04f, 0.02f, 0.9f))
+				.Padding(FMargin(10.f, 6.f))
+				[
+					SNew(STextBlock)
+					.Text(this, &SRHCommandDeck::GetCrewText)
+					.Font(DeckFont(9))
+					.ColorAndOpacity(FLinearColor(0.9f, 0.82f, 0.62f))
+				]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
+			[
+				SNew(SBox).WidthOverride(ReadoutWidthPx)
 				.Visibility(this, &SRHCommandDeck::GetInspectVisibility)
 				[
 				SNew(SBorder)
@@ -738,6 +755,40 @@ FText SRHCommandDeck::GetFleetText() const
 			*Row.DefName.ToString(), State, Row.ChargeFrac * 100.f, Row.Wear, *Flag);
 	}
 	return FText::FromString(Text);
+}
+
+FText SRHCommandDeck::GetCrewText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return FText::GetEmpty();
+	}
+	const double FoodKg = Sim->GetStock(FName("Food"));
+	const int32 Pop = Sim->GetPopulation();
+	const double SolsOfFood = Pop > 0 ? FoodKg / (Pop * Sim->GetColonistFoodKgPerSol()) : 0.0;
+	FString Text = FString::Printf(TEXT("CREW %d   beds %d free   Food %.0f kg (~%.0f sols)"),
+		Pop, Sim->GetFreeHousing(), FoodKg, SolsOfFood);
+	for (const FRHColonist& C : Sim->GetColonists())
+	{
+		FString Flag;
+		if (!C.bSupported)
+		{
+			const double EvacIn = Sim->GetColonistEvacSols()
+				- C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
+			Flag = FString::Printf(TEXT("  UNSUPPORTED - evac %.1f sols"), FMath::Max(EvacIn, 0.0));
+		}
+		Text += FString::Printf(TEXT("\n%-12s floor %d%s"), *C.Name, C.HomeLevel, *Flag);
+	}
+	return FText::FromString(Text);
+}
+
+EVisibility SRHCommandDeck::GetCrewVisibility() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return (Sim && Sim->GetPopulation() > 0) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 FText SRHCommandDeck::GetInspectText() const

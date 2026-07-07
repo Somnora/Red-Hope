@@ -1,0 +1,67 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Subsystems/WorldSubsystem.h"
+#include "RHCrewVisualizerSubsystem.generated.h"
+
+class UStaticMeshComponent;
+
+// Presentation mirror of the crew (M2 Gate A2): one small suited figure per
+// colonist. Pure listener - the sim keeps colonists abstract (roster + home
+// floor); everything spatial here (arrival march, home-floor wander, surface
+// strolls) is presentation flavor and never feeds back. Deleting this class
+// leaves the sim intact.
+//
+// Where a colonist IS, visually:
+//   Arriving  - walked in from the supply-ship pad to the shaft head (staged
+//               only for colonists who land mid-session; a reload's existing
+//               crew spawns straight into residence).
+//   Resident  - wandering the carved cells of their home floor.
+//   Strolling - a brief suited walk on the surface near the shaft head, then
+//               back down ("the crew takes air", the A2 spec's surface beat).
+// Visibility obeys the pit view's hard cut: a figure shows iff the floor it
+// currently stands on IS the viewed floor.
+UCLASS()
+class REDHOPE_API URHCrewVisualizerSubsystem : public UTickableWorldSubsystem
+{
+	GENERATED_BODY()
+
+public:
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override
+	{
+		RETURN_QUICK_DECLARE_CYCLE_STAT(URHCrewVisualizerSubsystem, STATGROUP_Tickables);
+	}
+	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override
+	{
+		return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
+	}
+
+private:
+	enum class EPhase : uint8 { Arriving, Descending, Resident, StrollOut, StrollBack };
+
+	struct FCrewVisual
+	{
+		TWeakObjectPtr<AActor> Actor;
+		TWeakObjectPtr<UStaticMeshComponent> Body; // tint flips with support state
+		EPhase Phase = EPhase::Resident;
+		int32 CurLevel = 0;        // floor the figure currently stands on
+		int32 HomeLevel = -1;
+		FVector TargetCm = FVector::ZeroVector;
+		double NextDecideRealSeconds = 0.0;
+		bool bTintedUnsupported = false;
+	};
+
+	void HandleColonyReloaded();
+	AActor* SpawnFigure(const FString& Name, const FVector& AtCm, UStaticMeshComponent*& OutBody);
+	void SetBodyTint(FCrewVisual& Vis, bool bUnsupported);
+	// A random point inside a random carved cell of the given floor - the
+	// canonical spiral layout the colony visualizer lays tiles with.
+	FVector WanderPointCm(int32 Level) const;
+
+	TMap<int32, FCrewVisual> Tracked; // colonist Id -> figure
+	// First roster sync seeds residents in place; only ids appearing AFTER it
+	// get the staged pad-to-shaft arrival march.
+	bool bSyncedOnce = false;
+};

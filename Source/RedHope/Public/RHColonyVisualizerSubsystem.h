@@ -94,7 +94,13 @@ private:
 	void UpdateShaftVisuals();
 	void ApplyViewLevel();
 	AStaticMeshActor* SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const;
+
+public:
+	// Canonical carved-cell layout (shared with the crew visualizer): cell
+	// index -> grid offset from the shaft head. Presentation-only convention.
 	static FIntPoint SpiralCell(int32 Index);
+
+private:
 	// The pit rig (v2): two instanced-mesh layers rebuilt whenever the pit's
 	// shape changes - the sand skirt (surface around the hole) and the rock
 	// walls (surface down to the open floor). One actor, thousands-cheap.

@@ -221,6 +221,7 @@ public:
 	int32 GetHousingCapacity() const;
 	int32 GetFreeHousing() const { return GetHousingCapacity() - Colonists.Num(); }
 	double GetColonistEvacSols() const { return ColonistEvacSols; }
+	double GetColonistFoodKgPerSol() const { return ColonistFoodKgPerSol; }
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);

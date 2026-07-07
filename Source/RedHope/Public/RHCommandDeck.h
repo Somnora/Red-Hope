@@ -52,6 +52,10 @@ private:
 	// Inspection card: click a building, read its live state.
 	FText GetInspectText() const;
 	EVisibility GetInspectVisibility() const;
+	// Crew roster card (M2 Gate A2): the people, their floor, their life
+	// support - shown once anyone has landed.
+	FText GetCrewText() const;
+	EVisibility GetCrewVisibility() const;
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.
 	FText GetKnownGroundText() const;
