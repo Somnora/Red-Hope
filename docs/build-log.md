@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 34 (structure: the Generational Carrot — the Hope payoff, first Martian-born child)
+
+- **Built (`carrot`, save v15):** what a FLOURISHING colony EARNS — the brief's Hope→birth-rate consumer (§5/§76). `StepGrowth` (both bands) streaks the sols where smoothed Hope ≥ `HopeGrowthThreshold` (75) AND a certified bed is free AND a real Food buffer exists (`HopeGrowthFoodBufferSols` — no birthing into a famine); crossing `HopeGrowthIntervalSols` grows the colony by one via the existing housing path; the streak RESETS if conditions lapse (earned, not banked). Threshold-on-monotone-accumulator = era-parity-safe (zero-pop = no-op, baseline byte-identical).
+- **The first Martian-born child:** the first birth fires the brief's landmark beat — a one-time `+HopeFirstBornMilestone` (never retracts) and `BirthsOnMars` (the M3 identity-axis seed: native-born citizens weight the colony toward Mars). Celebration wording, Gate-D placeholder. Deck shows a live "FLOURISHING — next arrival N%" bar while eligible + a "born on Mars: N" badge.
+- **A real systems interaction the test surfaced (not a bug):** the water loop's potability decay saps Hope below the growth threshold unless fresh ice-melt flows. So in play, **drilling the ice caps is what keeps a colony flourishing enough to grow** — the systems couple correctly. The `-growth` test tops up fresh water to isolate the growth gate.
+- `-growth` self-test all EXACT (eligible at THRIVING smoothed 77.3, first Martian born pop 2→3, milestones 5→11, streak resets on lapse, v15 round-trip). All 11 suites + 10-sol baseline byte-identical. 4 config rows.
+
+## 2026-07-07 — Session 33 (graphics: the Mars look pass — director-scheduled)
+
+- **Director scheduled a LOOK pass** (lighting/atmosphere/colour — distinct from the standing gray-box GEOMETRY rule, which governs meshes; choosing this explicitly schedules the visual pass the rule waits on). All C++, editor-closed, presentation-only in `RHAtmosphereSubsystem` (extends the existing sun/MPC driver).
+- **Built (`marslook`):** a found-or-spawned unbound **post-process grade** (tag RH.Grade) — white-balance toward ochre/butterscotch, gentle saturation + contrast, warm ochre color gain on the SURFACE / cooler slate underground ("color = life earned"), subtle bloom + vignette, storm-reactive film grain, and **EXPOSURE LOCKED** (min==max) which directly fixes the director's recording complaint that exposure changed descending into the pit. A found-or-spawned **ExponentialHeightFog** dust haze (butterscotch, thickens with the storm). **Cool ambient fill** on an existing SkyLight. The sun disc warmed toward butterscotch. Surface-vs-underground read from the colony visualizer's ViewLevel (pure read). Live taste knobs as CVars (`RH.Grade.Warmth/Saturation/FogDensity/Exposure`).
+- Sim untouched → all headless suites identical by construction; compiles clean; 40 s real-render boot (no `-nullrhi`) = zero ensures/crashes (grade + fog spawn and drive safely). **The VISUAL result is the director's hand-play verdict** — headless proves it runs, not how it looks. Goes deeper with editor+MCP (sky mesh / richer materials / per-biome ground).
+
 ## 2026-07-07 — Session 32 (UX overhaul, part 2: Sims-style categorized build menu)
 
 - **Built (`f-menu`):** the flat BUILD palette became **category tabs** (Power / Production / Life Support / Boring / Logistics…) plus a palette that shows only the selected category's buildings — the director's "organize it by category like the Sims." Switching tabs is a pure visibility flip (every button built once, gated by a category-bound visibility; no rebuild). The open tab glows; CamelCase names auto-space ("LifeSupport" → "Life Support").
