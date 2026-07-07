@@ -2,8 +2,10 @@
 #include "RedHope.h"
 #include "RHGameState.h"
 #include "RHSimClockSubsystem.h"
+#include "RHSimWorldSubsystem.h"
 #include "EngineUtils.h"
 #include "Engine/DirectionalLight.h"
+#include "Components/LightComponent.h"
 #include "Kismet/KismetMaterialLibrary.h"
 #include "Materials/MaterialParameterCollection.h"
 
@@ -47,8 +49,16 @@ void URHAtmosphereSubsystem::Tick(float DeltaTime)
 		SolFraction = Clock->GetSolFraction();
 	}
 
+	// Storm presentation (M1-c): Dust 0 = clear, 1 = full storm. The MPC
+	// scalar is wired by the content pass; the sun dimming below works today.
+	float DustFactor = 1.f;
+	if (const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+	{
+		DustFactor = (float)Sim->GetDustFactorNow();
+	}
 	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("Habitability"), Habitability);
 	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("TimeOfSol"), SolFraction);
+	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("Dust"), 1.f - DustFactor);
 
 	if (!SunActor)
 	{
@@ -60,11 +70,21 @@ void URHAtmosphereSubsystem::Tick(float DeltaTime)
 				break;
 			}
 		}
+		if (SunActor && SunActor->GetLightComponent())
+		{
+			SunBaseIntensity = SunActor->GetLightComponent()->Intensity;
+		}
 	}
 	if (SunActor)
 	{
 		// Sunrise 06:00 (frac 0.25) = horizon; noon (0.5) = max elevation.
 		const float SunAngleDeg = (SolFraction - 0.25f) * 360.f;
 		SunActor->SetActorRotation(FRotator(-SunAngleDeg, -45.f, 0.f));
+		if (ULightComponent* Light = SunActor->GetLightComponent())
+		{
+			// A storm mutes the disc itself - light drops with generation, so
+			// the world darkens the way the readout does.
+			Light->SetIntensity(SunBaseIntensity * (0.25f + 0.75f * DustFactor));
+		}
 	}
 }

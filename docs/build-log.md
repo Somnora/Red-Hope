@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 17 (M1-c Gate A verified by paired-run iteration; Gate B flare tax + Gate C UI written)
+
+- **The paired-run harness earned its keep — four era-leg iterations, each fix a physical constraint, never a tuning knob** (same sol-3 save; agent 8× vs era 60× to sol 9; `RH.Ledger` diff):
+  1. Baseline: era **under**-extracted 8.4% and held 58% less raw regolith — the Session 9 "digs only to feed demanding consumers" limitation, measured. Fix: leftover era dig budget flows to stores (the agent band's pile→hauler→stockpile loop, integrated).
+  2. Then era **over**-dug (deposit −10.7%): it ran 24/7 while agent robots halt after dark on an empty bank. Fix: the **night gate** — no sun + no stored energy = no work.
+  3. Then still ~5% hot: daytime charge trips (25%→90% docked hours) weren't modeled. Fix: **derived duty factor** — work-hours vs charge-hours per cycle, every term a data row (RC-E ≈ 0.81). Not a magic constant.
+  4. **Final: extraction 0.4%, stores 4.0%, battery ~0 — bar met.** `Struct +7.4%` is the one line over: root-caused to **brownout-throttle oscillation** — the power-starved test colony's Forge duty-cycles at sub-step granularity under shed oscillation (Session 9's observation), which a 1-min integrator cannot see; era's cleaner cycling over-produces. On a healthy grid this term collapses. Logged as a measured, understood deviation; harness (staged saves + RH.Ledger) stays the regression net. Known deviations by design: SpareParts (era models no RC-M repairs), robot wear static in era band.
+- **Era-honesty fixes shipped en route** (commit `e84d3b3` + this batch): StepProduction time-budget integrator (overshoot carries across batch boundaries — kills whole-step rounding at era dt); clock accumulator debt carries across frames (the 43 sim-s era→agent dump, gone; only >120 sim-s backlog drops, loudly); `RH.Ledger` instrument.
+- **Events live:** `FRHEventRow`/DT_Events path + RH_Events.csv (Storm_1 sols 12–15 solar×0.3; Flare_1 sol 17 wear×3); StepPower applies the storm dust factor; era refuses during events and within one era step of onset; RH.Status prints the active event.
+- **Gate B written:** flare wear tax in AccrueWear (active flare multiplies exertion wear; docked-at-pad is NOT shelter until the M1-d vault — deliberate). Radiation config rows staged in CSV. Shielding build tax deferred to next session (changes CSVs + harness together).
+- **Gate C written + compiled:** event banner (amber storm / red flare, top center); **cancellable uplink queue panel** (orders in flight with live Δ countdowns, × aborts before execution — M0 spec §8 delivered; the signal can beat the click, which is the game); **power strip-chart** (last 3 sols gen/load/bank as block-glyph sparklines in the readout); ComputeModule completion hook (lag 45→20 s, min() so ComputeCore tier 2 never regresses); storm sky presentation (Dust MPC scalar + sun intensity scaling with generation).
+- Awaiting next editor session: DT_Events asset creation (struct now compiled), BP_M1cTest storm harness, director hand-play of the M1-c surfaces.
+
 ## 2026-07-07 — Session 16 (M1-b CLOSED by director hand-play; survey map; M1-c Gate A code)
 
 - **M1-b closed on the director's hand-played verdict** ("everything feels pretty good… we are getting somewhere"): survey → Ice_A discovery, inspection card, fleet panel, PAUSED banner all exercised by hand. M1-c approved as specced.

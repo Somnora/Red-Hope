@@ -334,7 +334,14 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 
 void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 {
-	// Aggregate dig rate of the parked excavator fleet (kg per sol-hour).
+	// Aggregate dig rate of the parked excavator fleet (kg per sol-hour),
+	// derated by the charge duty cycle the agent band lives under: a robot
+	// works Battery x (resume - seek) / DrawWork hours, then spends
+	// Battery x (resume - seek) / PadRate hours docked. Every term is a data
+	// row - a derived physical constant, not a tuning knob (paired-run
+	// finding #3: ungated era dig ran ~8% hot from skipped charge trips).
+	const FRHBuildingRow* PadDef = Defs->GetBuilding(FName("ChargePad"));
+	const double PadRateW = PadDef ? PadDef->PowerDraw_W : 500.0;
 	double DigRateKgPerH = 0.0;
 	for (const auto& Fleet : FleetCounts)
 	{
@@ -342,11 +349,23 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 		{
 			if (Row->RobotClass == FName("Excavator"))
 			{
-				DigRateKgPerH += (double)Fleet.Value * Row->WorkRate;
+				const double WorkH = Row->Battery_Wh * (ChargeResumeFraction - ChargeSeekFraction) / FMath::Max(1.f, Row->DrawWork_W);
+				const double ChargeH = Row->Battery_Wh * (ChargeResumeFraction - ChargeSeekFraction) / PadRateW;
+				const double Duty = WorkH / FMath::Max(0.1, WorkH + ChargeH);
+				DigRateKgPerH += (double)Fleet.Value * Row->WorkRate * Duty;
 			}
 		}
 	}
 	double DigBudgetKg = DigRateKgPerH * (DtSimSeconds / 50.0); // sol-hour = 50 sim-s
+
+	// Night gate (paired-run finding #2): the agent band's excavators halt
+	// after dark whenever the bank is empty (pads shed, robots dock till
+	// dawn) - ungated era digging ran ~70% hot. Same physical constraint,
+	// integrated: no sun and no stored energy means no work.
+	if (Defs->EvalSolarCurve(Clock->GetSolFraction()) <= 0.f && Power.BatteryWh <= 0.0)
+	{
+		DigBudgetKg = 0.0;
+	}
 
 	// Ground -> demanding hopper at fleet rate (piles are an agent-band
 	// fidelity detail; era mode digs straight into the chain).
@@ -385,6 +404,25 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			B.InputKg.FindOrAdd(D.Type) += TakeKg;
 			DigBudgetKg -= TakeKg;
 			break;
+		}
+		// Leftover budget digs to a store, exactly like the agent band's
+		// pile->hauler->Stockpile flow (paired-run finding: era extracted 27%
+		// less and held 58% less raw regolith because the surplus dig was
+		// simply never modeled - the Session 9 "digs only to feed demanding
+		// consumers" limitation, now closed).
+		if (DigBudgetKg > 0.0)
+		{
+			for (FRHBuildingInstance& S : Buildings)
+			{
+				if (!S.bUnderConstruction && S.Level == D.Level && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
+				{
+					const double TakeKg = FMath::Min(DigBudgetKg, D.RemainingKg);
+					D.RemainingKg -= TakeKg;
+					S.InputKg.FindOrAdd(D.Type) += TakeKg;
+					DigBudgetKg -= TakeKg;
+					break;
+				}
+			}
 		}
 	}
 
@@ -954,15 +992,43 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	const double DeltaWh = (GenW - LoadW) * (SubDt / 50.0);
 	Power.BatteryWh = FMath::Clamp(Power.BatteryWh + DeltaWh, 0.0, CapWh);
 	Power.bDeficit = Power.ShedCount > 0;
+
+	// Strip-chart ring: one sample per sol-hour, last 3 sols (72 entries).
+	const int64 Hour = (int64)(Clock->GetSimSecondsTotal() / 50.0);
+	if (Hour != LastPowerSampleHour)
+	{
+		LastPowerSampleHour = Hour;
+		PowerHistory.Add(FVector3f((float)GenW, (float)LoadW, (float)Power.BatteryWh));
+		if (PowerHistory.Num() > 72)
+		{
+			PowerHistory.RemoveAt(0, PowerHistory.Num() - 72);
+		}
+	}
 }
 
 void URHSimWorldSubsystem::EnqueueCommand(FRHCommand Command)
 {
+	Command.CommandId = NextCommandId++;
 	Command.IssuedAtSimSeconds = Clock ? Clock->GetSimSecondsTotal() : 0.0;
 	Command.ExecuteAtSimSeconds = Command.IssuedAtSimSeconds + OrderLagSeconds;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Uplink: '%s %s' transmitted, executes in %.0f sim-s"),
 		*Command.Verb.ToString(), *Command.Target.ToString(), OrderLagSeconds);
 	UplinkQueue.Add(MoveTemp(Command));
+}
+
+bool URHSimWorldSubsystem::CancelUplinkCommand(int32 CommandId)
+{
+	for (int32 i = 0; i < UplinkQueue.Num(); ++i)
+	{
+		if (UplinkQueue[i].CommandId == CommandId)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Uplink: '%s %s' CANCELLED before execution"),
+				*UplinkQueue[i].Verb.ToString(), *UplinkQueue[i].Target.ToString());
+			UplinkQueue.RemoveAt(i);
+			return true;
+		}
+	}
+	return false; // already executed - the signal beat the cancel (that is the game)
 }
 
 bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level) const
@@ -1564,6 +1630,18 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 		{
 			Power.BatteryWh += Def->StorageWh * 0.5; // constructed storage arrives half-charged
 		}
+		// ComputeModule (M1-c latency arc): local autonomy takes the uplink
+		// from tier 0 to tier 1. min() so a manifest ComputeCore's tier 2 is
+		// never regressed. OrderLagSeconds serializes - survives loads.
+		if (B->DefName == FName("ComputeModule"))
+		{
+			const double Tier1 = Defs->GetConfigScalar(FName("OrderLagTier1_s"), 20.0);
+			if (Tier1 < OrderLagSeconds)
+			{
+				OrderLagSeconds = Tier1;
+				UE_LOG(LogRedHopeSim, Display, TEXT("Compute module online: order lag now %.0f sim-s"), OrderLagSeconds);
+			}
+		}
 		UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d construction complete"), *B->DefName.ToString(), B->Id);
 		OnBuildingCompleted.Broadcast(*B);
 		return true;
@@ -1643,7 +1721,18 @@ void URHSimWorldSubsystem::LeavePadQueue(int32 PadBuildingId, FMassEntityHandle 
 
 void URHSimWorldSubsystem::AccrueWear(float& Wear, float WearPerSol, float Dt) const
 {
-	Wear = FMath::Min(WearHaltThreshold, Wear + WearPerSol * (Dt / (float)URHSimClockSubsystem::SolLengthSimSeconds));
+	// Flare tax (M1-c): an active solar flare multiplies exertion wear on
+	// exposed units - and until the M1-d vault exists, EVERY unit is exposed;
+	// docked at a pad is not shelter. The player is supposed to feel this gap.
+	float Mul = 1.f;
+	if (const FRHEventRow* Event = GetActiveEvent())
+	{
+		if (Event->Type == FName("SolarFlare"))
+		{
+			Mul = Event->Severity;
+		}
+	}
+	Wear = FMath::Min(WearHaltThreshold, Wear + WearPerSol * Mul * (Dt / (float)URHSimClockSubsystem::SolLengthSimSeconds));
 }
 
 float URHSimWorldSubsystem::GetWearWorkMul(float Wear) const

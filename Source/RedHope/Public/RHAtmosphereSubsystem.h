@@ -5,6 +5,7 @@
 #include "RHAtmosphereSubsystem.generated.h"
 
 class UMaterialParameterCollection;
+class ADirectionalLight;
 
 // Presentation-side driver of the atmosphere dial. Reads sim state
 // (habitability, sol clock) and writes MPC_Atmosphere + rotates the sun.
@@ -30,7 +31,9 @@ public:
 private:
 	UPROPERTY() TObjectPtr<UMaterialParameterCollection> Collection;
 	// Sun = first directional light tagged RH.Sun in the level.
-	UPROPERTY() TObjectPtr<AActor> SunActor;
+	UPROPERTY() TObjectPtr<ADirectionalLight> SunActor;
+	// Authored sun intensity, captured at discovery; storms scale from this.
+	float SunBaseIntensity = 10.f;
 
 	static constexpr const TCHAR* CollectionPath = TEXT("/Game/RedHope/Sky/MPC_Atmosphere.MPC_Atmosphere");
 };

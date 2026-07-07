@@ -7,6 +7,7 @@
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimTypes.h"
+#include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
@@ -108,17 +109,49 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		SNew(SOverlay)
 
 		// Controls hint, top left - discoverability until the diegetic pass.
+		// The uplink queue lives beneath it: orders in flight, cancellable
+		// until the signal lands (M0 spec §8, delivered M1-c).
 		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top).Padding(8.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(10.f, 6.f))
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("WASD pan   wheel zoom   RMB-drag orbit   MMB-drag pan\nSpace pause   1/2/3/4 speed   Esc/right-click cancel order")))
+					.Font(DeckFont(9))
+					.ColorAndOpacity(ReadoutFg)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Left)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(DeckBg)
+				.Padding(FMargin(8.f, 5.f))
+				[
+					SAssignNew(UplinkList, SVerticalBox)
+				]
+			]
+		]
+
+		// World-pressure banner, top center (M1-c): the sky has agency now.
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 		[
 			SNew(SBorder)
 			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(DeckBg)
-			.Padding(FMargin(10.f, 6.f))
+			.BorderBackgroundColor(FLinearColor(0.12f, 0.06f, 0.01f, 0.92f))
+			.Padding(FMargin(22.f, 7.f))
+			.Visibility(this, &SRHCommandDeck::GetEventVisibility)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("WASD pan   wheel zoom   RMB-drag orbit   MMB-drag pan\nSpace pause   1/2/3/4 speed   Esc/right-click cancel order")))
-				.Font(DeckFont(9))
-				.ColorAndOpacity(ReadoutFg)
+				.Text(this, &SRHCommandDeck::GetEventText)
+				.Font(DeckFont(12))
+				.ColorAndOpacity(this, &SRHCommandDeck::GetEventColor)
 			]
 		]
 
@@ -158,6 +191,13 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						.Font(DeckFont(10))
 						.ColorAndOpacity(this, &SRHCommandDeck::GetConfirmColor)
 						.Visibility(this, &SRHCommandDeck::GetConfirmVisibility)
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetPowerChartText)
+						.Font(DeckFont(9))
+						.ColorAndOpacity(FLinearColor(0.5f, 0.72f, 0.8f))
 					]
 				]
 			]
@@ -399,6 +439,169 @@ EVisibility SRHCommandDeck::GetPausedVisibility() const
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
 	return (Clock && Clock->GetSpeed() <= 0.f) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetEventText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FRHEventRow* Event = Sim ? Sim->GetActiveEvent() : nullptr;
+	if (!Event)
+	{
+		return FText::GetEmpty();
+	}
+	if (Event->Type == FName("DustStorm"))
+	{
+		return FText::FromString(FString::Printf(TEXT("DUST STORM  —  solar at %.0f%%, until sol %.1f"),
+			Event->Severity * 100.f, Event->StartSol + Event->DurationSols));
+	}
+	return FText::FromString(FString::Printf(TEXT("SOLAR FLARE  —  exposed units taking wear, until sol %.1f"),
+		Event->StartSol + Event->DurationSols));
+}
+
+FSlateColor SRHCommandDeck::GetEventColor() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FRHEventRow* Event = Sim ? Sim->GetActiveEvent() : nullptr;
+	// Amber storm, red flare.
+	return (Event && Event->Type == FName("SolarFlare"))
+		? FSlateColor(FLinearColor(1.f, 0.32f, 0.22f))
+		: FSlateColor(FLinearColor(1.f, 0.72f, 0.25f));
+}
+
+EVisibility SRHCommandDeck::GetEventVisibility() const
+{
+	return GetEventText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+}
+
+void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
+{
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+	RefreshUplinkPanel();
+}
+
+void SRHCommandDeck::RefreshUplinkPanel()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !UplinkList.IsValid())
+	{
+		return;
+	}
+	// Rebuild only when membership changes; countdown text stays live via
+	// per-row attributes.
+	TArray<int32> Ids;
+	for (const FRHCommand& C : Sim->GetUplinkQueue())
+	{
+		Ids.Add(C.CommandId);
+	}
+	if (Ids == UplinkIdsShown)
+	{
+		return;
+	}
+	UplinkIdsShown = Ids;
+	UplinkList->ClearChildren();
+	if (Ids.Num() == 0)
+	{
+		return;
+	}
+	UplinkList->AddSlot().AutoHeight()
+	[
+		SNew(STextBlock).Text(FText::FromString(TEXT("UPLINK"))).Font(DeckFont(8))
+		.ColorAndOpacity(FLinearColor(0.75f, 0.87f, 0.92f))
+	];
+	TWeakObjectPtr<ARHPlayerController> WeakPC = PC;
+	for (const FRHCommand& C : Sim->GetUplinkQueue())
+	{
+		const int32 Id = C.CommandId;
+		const FString Label = C.Target.IsNone()
+			? C.Verb.ToString()
+			: FString::Printf(TEXT("%s %s"), *C.Verb.ToString(), *C.Target.ToString());
+		UplinkList->AddSlot().AutoHeight().Padding(FMargin(0.f, 2.f))
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Font(DeckFont(9))
+				.ColorAndOpacity(FLinearColor(0.2f, 0.9f, 1.f))
+				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateLambda([WeakPC, Id, Label]()
+				{
+					const UWorld* W = WeakPC.IsValid() ? WeakPC->GetWorld() : nullptr;
+					const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+					const URHSimClockSubsystem* Clk = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+					if (S && Clk)
+					{
+						for (const FRHCommand& Cmd : S->GetUplinkQueue())
+						{
+							if (Cmd.CommandId == Id)
+							{
+								const double Remain = FMath::Max(0.0, Cmd.ExecuteAtSimSeconds - Clk->GetSimSecondsTotal());
+								return FText::FromString(FString::Printf(TEXT("%s  Δ %.0fs"), *Label, Remain));
+							}
+						}
+					}
+					return FText::FromString(Label);
+				})))
+			]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(FMargin(6.f, 0.f, 0.f, 0.f))
+			[
+				SNew(SButton)
+				.ContentPadding(FMargin(5.f, 1.f))
+				.OnClicked(this, &SRHCommandDeck::HandleCancelOrder, Id)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("x"))).Font(DeckFont(9))
+				]
+			]
+		];
+	}
+}
+
+FText SRHCommandDeck::GetPowerChartText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Sim->GetPowerHistory().Num() < 4)
+	{
+		return FText::GetEmpty();
+	}
+	const TArray<FVector3f>& H = Sim->GetPowerHistory();
+	// Downsample to <=36 columns; normalize gen+load to their shared peak,
+	// bank to capacity. Block glyphs U+2581..U+2588.
+	const int32 Stride = FMath::Max(1, H.Num() / 36);
+	float PeakW = 1.f;
+	for (const FVector3f& S : H)
+	{
+		PeakW = FMath::Max3(PeakW, S.X, S.Y);
+	}
+	const float CapWh = FMath::Max(1.f, (float)Sim->GetPower().BatteryCapWh);
+	auto Spark = [&](auto Value, float Scale)
+	{
+		FString Row;
+		for (int32 i = 0; i < H.Num(); i += Stride)
+		{
+			const int32 Lvl = FMath::Clamp((int32)(Value(H[i]) / Scale * 7.99f), 0, 7);
+			Row.AppendChar((TCHAR)(0x2581 + Lvl));
+		}
+		return Row;
+	};
+	const FString Text = FString::Printf(TEXT("gen  %s\nload %s\nbank %s"),
+		*Spark([](const FVector3f& S) { return S.X; }, PeakW),
+		*Spark([](const FVector3f& S) { return S.Y; }, PeakW),
+		*Spark([](const FVector3f& S) { return S.Z; }, CapWh));
+	return FText::FromString(Text);
+}
+
+FReply SRHCommandDeck::HandleCancelOrder(int32 CommandId)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && !Sim->CancelUplinkCommand(CommandId))
+	{
+		// The signal beat the click - that races is the point of the mechanic.
+	}
+	return FReply::Handled();
 }
 
 FText SRHCommandDeck::GetFleetText() const

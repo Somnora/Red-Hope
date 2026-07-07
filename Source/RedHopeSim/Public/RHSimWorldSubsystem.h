@@ -20,6 +20,9 @@ struct REDHOPESIM_API FRHCommand
 
 	UPROPERTY() FName Verb;                     // Build, Dig, ...
 	UPROPERTY() FName Target;                   // definition/deposit row name
+	// Transient queue handle (uplink panel cancel); reassigned on load,
+	// never serialized.
+	UPROPERTY() int32 CommandId = 0;
 	UPROPERTY() FVector Location = FVector::ZeroVector;
 	// Z-model (M1-b): the floor an order targets. 0 = surface; subsurface
 	// floors become orderable when the shaft exists (M1-d).
@@ -104,6 +107,10 @@ public:
 	double GetOrderLagSeconds() const { return OrderLagSeconds; }
 	void SetOrderLagSeconds(double Lag) { OrderLagSeconds = Lag; }
 	const TArray<FRHCommand>& GetUplinkQueue() const { return UplinkQueue; }
+	// Abort a queued order before its lag elapses (M0 spec §8: cancellable
+	// until execution). Stopping your own transmission is instantaneous
+	// mission-control action - no lag on the cancel itself.
+	bool CancelUplinkCommand(int32 CommandId);
 
 	// --- Territory ---
 	// Every spatial query is per-level 2D (Z-model, M1-b): the shaft is the
@@ -208,6 +215,9 @@ public:
 	// Solar multiplier right now: the active dust storm's Severity, else the
 	// clear-sky DustFactor config row (1.0).
 	double GetDustFactorNow() const;
+	// Last 3 sols of (GenW, LoadW, BatteryWh), one sample per sol-hour, oldest
+	// first. Transient - rebuilds after load (the chart is a gauge, not truth).
+	const TArray<FVector3f>& GetPowerHistory() const { return PowerHistory; }
 
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
@@ -308,6 +318,9 @@ private:
 	TSet<FMassEntityHandle> RepairClaims;
 	TMap<int32, TArray<FMassEntityHandle>> PadQueues;
 	TArray<FRHSurveyRecord> SurveyHistory; // serialized (save v4)
+	int32 NextCommandId = 1;               // transient uplink handles
+	TArray<FVector3f> PowerHistory;        // transient strip-chart ring
+	int64 LastPowerSampleHour = -1;
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;

@@ -30,3 +30,5 @@ AutosaveEverySols,1,sols,"Autosave to slot 'auto' every N sol boundaries; 0 disa
 StartSolHour,6,sol-hour,"Mission clock at landing; 6 = dawn - the colony wakes with the sun (first-play readability)"
 FloorHeightMeters,4,m,"Z-model (M1-b): vertical spacing between shaft floors; presentation Z = Level x this"
 MaxDepth,5,floors,"Z-model (M1-b): deepest shaft floor (Level -N); data-expandable per underground spec"
+RadiationSurface,1.0,factor,"M1-c: baseline surface radiation index; flares multiply exposure transiently"
+RadiationPerLevelMul,0.05,factor,"M1-c: per-floor attenuation - each level down multiplies radiation by this (overburden is free shielding)"

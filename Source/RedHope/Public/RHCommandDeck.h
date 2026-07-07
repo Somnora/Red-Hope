@@ -18,6 +18,8 @@ public:
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
+	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).
+	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
 	FText GetStatusText() const;
@@ -33,6 +35,15 @@ private:
 	EVisibility GetHintVisibility() const;
 	// PAUSED banner: unmissable, unlike the readout's small speed label.
 	EVisibility GetPausedVisibility() const;
+	// World-pressure banner (M1-c): active storm/flare, top center.
+	FText GetEventText() const;
+	FSlateColor GetEventColor() const;
+	EVisibility GetEventVisibility() const;
+	// Uplink queue panel (M1-c): orders in flight with countdowns; the list
+	// rebuilds only when the queue changes (ids are the change signal).
+	void RefreshUplinkPanel();
+	// Power strip-chart: last 3 sols of gen/load/bank as block-char sparklines.
+	FText GetPowerChartText() const;
 	// Fleet panel: one line per robot from the agent subsystem snapshot.
 	FText GetFleetText() const;
 	// Inspection card: click a building, read its live state.
@@ -52,6 +63,10 @@ private:
 	FReply HandlePause();
 	FReply HandleSave();
 	FReply HandleLoad();
+	FReply HandleCancelOrder(int32 CommandId);
 
 	TWeakObjectPtr<ARHPlayerController> PC;
+	// Uplink panel state: rebuilt when the queue's id set changes.
+	TSharedPtr<class SVerticalBox> UplinkList;
+	TArray<int32> UplinkIdsShown;
 };
