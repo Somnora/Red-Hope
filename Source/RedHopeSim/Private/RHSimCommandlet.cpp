@@ -225,6 +225,21 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("VAULT radiation: surface=%.3f -1=%.4f -2=%.4f (overburden shielding)"),
 			Sim->GetRadiationAtLevel(0), Sim->GetRadiationAtLevel(-1), Sim->GetRadiationAtLevel(-2));
 
+		// Gate B: the surface shielding tax. Same def, same colony: taxed on
+		// the surface (refused - no Shielding, no producer), exempt below
+		// (overburden shields for free).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (FRHBuildingRow* Pad = const_cast<FRHBuildingRow*>(DefsSub ? DefsSub->GetBuilding(FName("ChargePad")) : nullptr))
+		{
+			Pad->SurfaceShielding_kg = 50.f;
+			FString TS, TU;
+			const bool bSurf = Sim->CanPlaceBuilding(FName("ChargePad"), Head, TS, 0);
+			const bool bSub = Sim->CanPlaceBuilding(FName("ChargePad"), Head, TU, -1);
+			UE_LOG(LogRedHopeSim, Display, TEXT("VAULT shielding tax: surface -> %s [%s] (expect refused: Insufficient Shielding); floor -1 -> %s (expect ALLOWED - overburden exempt)"),
+				bSurf ? TEXT("ALLOWED?!") : TEXT("refused"), *TS, bSub ? TEXT("ALLOWED") : *FString::Printf(TEXT("refused?! [%s]"), *TU));
+			Pad->SurfaceShielding_kg = 0.f;
+		}
+
 		FString Err;
 		Sim->SaveColony(TEXT("vaulttest"), Err);
 		const double SpoilBefore = Sim->GetSpoilPileKg();

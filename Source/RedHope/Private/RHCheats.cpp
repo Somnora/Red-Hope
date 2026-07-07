@@ -6,6 +6,7 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHPlayerController.h"
+#include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
@@ -174,6 +175,56 @@ static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 			Cmd.Level = FCString::Atoi(*Args[0]);
 			Cmd.Value = FCString::Atod(*Args[1]);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
+	TEXT("RH.AddSolid"),
+	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.AddSolid <DefName> <Resource> <Kg>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			Sim->Debug_AddSolid(FName(*Args[0]), FName(*Args[1]), FCString::Atod(*Args[2]));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateRecipe(
+	TEXT("RH.ActivateRecipe"),
+	TEXT("RH.ActivateRecipe <RowName> - DEBUG: flip a recipe row slice-active in the loaded table (test knob; the DT asset is untouched)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// Dev-only knob: mutating the in-memory row is the point (the asset on
+		// disk is untouched); const_cast is confined to cheats.
+		if (FRHRecipeRow* Row = const_cast<FRHRecipeRow*>(Defs ? Defs->GetRecipe(FName(*Args[0])) : nullptr))
+		{
+			Row->SliceActive = true;
+			UE_LOG(LogRedHope, Display, TEXT("Recipe '%s' activated (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateRecipe: no recipe row '%s'"), *Args[0]);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSetShieldTax(
+	TEXT("RH.SetShieldTax"),
+	TEXT("RH.SetShieldTax <DefName> <Kg> - DEBUG: set a building def's SurfaceShielding_kg in the loaded table (test knob)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2) { return; }
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (FRHBuildingRow* Row = const_cast<FRHBuildingRow*>(Defs ? Defs->GetBuilding(FName(*Args[0])) : nullptr))
+		{
+			Row->SurfaceShielding_kg = FCString::Atof(*Args[1]);
+			UE_LOG(LogRedHope, Display, TEXT("'%s' SurfaceShielding_kg = %s (in-memory)"), *Args[0], *Args[1]);
 		}
 	}));
 

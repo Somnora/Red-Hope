@@ -311,6 +311,9 @@ public:
 	// no lag - so headless tests can stand up a Borer without scripting the
 	// whole construction economy.
 	void Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level = 0);
+	// Harness driver (M1-d Gate B): drop solid stock into the first completed
+	// building of a def (seeding a Stockpile with Struct/Ore for tax tests).
+	void Debug_AddSolid(FName DefName, FName Resource, double Kg);
 
 	FRHOnStockChanged OnStockChanged;
 	FRHOnDepositDiscovered OnDepositDiscovered;
@@ -336,6 +339,13 @@ private:
 	// floor; a circulator tops it back up from the colony O2 pool. Runs in
 	// BOTH bands (dimensionally honest like StepProduction).
 	void StepHabitability(float SubDt);
+	// Construction shortage (M1-d Gate B): resource -> kg the open sites need
+	// beyond everything the colony holds. Drives demand-preferred recipe
+	// selection and the store->producer feed leg. Empty when nothing builds -
+	// the guard that keeps steady-state logistics (and era parity) untouched.
+	TMap<FName, double> ComputeConstructionShortage() const;
+	// Can some completed building run a slice-active recipe outputting this?
+	bool HasProducerFor(FName Resource) const;
 	void ApplyManifestItemEffect(FName ItemName);
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0);

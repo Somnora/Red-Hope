@@ -135,6 +135,40 @@ const FRHRecipeRow* URHDefinitionsSubsystem::FindRunnableRecipe(FName BuildingDe
 	return nullptr;
 }
 
+const FRHRecipeRow* URHDefinitionsSubsystem::FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk, TFunctionRef<bool(const FRHRecipeRow&)> RowFilter) const
+{
+	if (!RecipesTable)
+	{
+		return nullptr;
+	}
+	for (const auto& Pair : RecipesTable->GetRowMap())
+	{
+		const FRHRecipeRow* Row = reinterpret_cast<const FRHRecipeRow*>(Pair.Value);
+		if (Row->SliceActive && Row->Building == BuildingDef && RowFilter(*Row) && InputsOk(ParseResourceList(Row->Inputs)))
+		{
+			return Row;
+		}
+	}
+	return nullptr;
+}
+
+const FRHRecipeRow* URHDefinitionsSubsystem::FindRecipeByOutput(FName BuildingDef, FName Resource) const
+{
+	if (!RecipesTable)
+	{
+		return nullptr;
+	}
+	for (const auto& Pair : RecipesTable->GetRowMap())
+	{
+		const FRHRecipeRow* Row = reinterpret_cast<const FRHRecipeRow*>(Pair.Value);
+		if (Row->SliceActive && Row->Building == BuildingDef && ParseResourceList(Row->Outputs).Contains(Resource))
+		{
+			return Row;
+		}
+	}
+	return nullptr;
+}
+
 const FRHRecipeRow* URHDefinitionsSubsystem::GetRecipe(FName Name) const
 {
 	return RecipesTable ? RecipesTable->FindRow<FRHRecipeRow>(Name, TEXT("GetRecipe"), false) : nullptr;

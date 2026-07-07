@@ -44,6 +44,14 @@ public:
 	// First slice-active recipe of a building whose inputs the predicate
 	// accepts. Recipe Inputs/Outputs strings parse as "Res:Kg;Res:Kg".
 	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk) const;
+	// As above with an extra row predicate (M1-d Gate B: demand preference -
+	// "first runnable recipe whose OUTPUT construction is short of" outranks
+	// plain row order, so a Forge with a Shielding-hungry site makes Shielding
+	// instead of smelting more Struct).
+	const FRHRecipeRow* FindRunnableRecipe(FName BuildingDef, TFunctionRef<bool(const TMap<FName, double>&)> InputsOk, TFunctionRef<bool(const FRHRecipeRow&)> RowFilter) const;
+	// First slice-active recipe of a building whose outputs include Resource
+	// (the "can the colony produce this at all" preflight question).
+	const FRHRecipeRow* FindRecipeByOutput(FName BuildingDef, FName Resource) const;
 	// Recipe row by name (M1-d: designation-driven work - BoreFloor/CarveCell -
 	// starts its recipe explicitly; it never passes the runnable search).
 	const FRHRecipeRow* GetRecipe(FName Name) const;
@@ -62,6 +70,20 @@ public:
 		if (Def.CostStruct_kg > 0.f)
 		{
 			Cost.Add(FName(TEXT("Struct")), Def.CostStruct_kg);
+		}
+		return Cost;
+	}
+
+	// Bill of materials at a floor (M1-d Gate B): the base bill plus the
+	// surface radiation tax - Level >= 0 adds Shielding:SurfaceShielding_kg;
+	// underground the overburden shields for free. ALL construction math goes
+	// through this; plain GetBuildCost is the Level-blind base bill.
+	static TMap<FName, double> GetBuildCostFor(const FRHBuildingRow& Def, int32 Level)
+	{
+		TMap<FName, double> Cost = GetBuildCost(Def);
+		if (Level >= 0 && Def.SurfaceShielding_kg > 0.f)
+		{
+			Cost.FindOrAdd(FName(TEXT("Shielding"))) += Def.SurfaceShielding_kg;
 		}
 		return Cost;
 	}

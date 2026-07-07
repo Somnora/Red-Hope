@@ -67,6 +67,11 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// M1-d Gate B: a completed, powered instance circulates a floor's air -
 	// the "circulate" link of the habitability chain (AirFilter station).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool CirculatesAir = false;
+	// M1-d Gate B: the surface radiation tax - built at Level >= 0 this def's
+	// bill gains Shielding:N kg; underground the overburden shields for free
+	// (the M1-c radiation curve made physical). 0 = untaxed (rugged hardware;
+	// the bootstrap chain stays orderable at landing).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float SurfaceShielding_kg = 0.f;
 	// M1-d Gate A2: >0 means a batch burns Hydrogen stock (kg per sol-hour,
 	// whole batch deducted up-front, committed like extraction) instead of
 	// drawing grid power - and runs straight through shedding. 0 = grid only.

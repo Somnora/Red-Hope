@@ -676,6 +676,79 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		}
 	}
 
+	// Haul: store stock -> producer hopper, ONLY for inputs of a recipe whose
+	// output construction is short of (M1-d Gate B: the Struct+Ore feed that
+	// lets the Forge make the Shielding a taxed site is waiting on). Scoped to
+	// construction shortage so steady-state logistics never grow this leg.
+	{
+		const TMap<FName, double> ShortageKg = ComputeConstructionShortage();
+		const auto OutputsShort = [&ShortageKg](const FRHRecipeRow& Row)
+		{
+			for (const auto& Out : URHDefinitionsSubsystem::ParseResourceList(Row.Outputs))
+			{
+				if (ShortageKg.Contains(Out.Key))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		for (const FRHBuildingInstance& Store : Buildings)
+		{
+			if (ShortageKg.Num() == 0)
+			{
+				break;
+			}
+			if (Store.bUnderConstruction || (Store.DefName != NAME_Stockpile && Store.DefName != NAME_Lander))
+			{
+				continue;
+			}
+			for (const auto& Held : Store.InputKg)
+			{
+				if (Held.Value < HaulLoadMinKg)
+				{
+					continue;
+				}
+				for (const FRHBuildingInstance& C : Buildings)
+				{
+					if (C.bUnderConstruction || C.Id == Store.Id || C.Level != Store.Level)
+					{
+						continue;
+					}
+					const FRHRecipeRow* Wants = Defs->FindRunnableRecipe(C.DefName,
+						[&](const TMap<FName, double>& Inputs)
+						{
+							const double* Need = Inputs.Find(Held.Key);
+							if (!Need)
+							{
+								return false;
+							}
+							const double* Have = C.InputKg.Find(Held.Key);
+							return (!Have || *Have < *Need * 2.0);
+						}, OutputsShort);
+					if (!Wants)
+					{
+						continue;
+					}
+					FRHSiteRef From; From.BuildingId = Store.Id;
+					FRHSiteRef To; To.BuildingId = C.Id;
+					if (!HasOpenTask(ERHTaskType::Haul, From, To, Held.Key))
+					{
+						FRHTask T;
+						T.Id = NextTaskId++;
+						T.Type = ERHTaskType::Haul;
+						T.From = From;
+						T.To = To;
+						T.Resource = Held.Key;
+						T.AmountKg = FMath::Min(Held.Value, 200.0);
+						Tasks.Add(T);
+					}
+					break;
+				}
+			}
+		}
+	}
+
 	// Haul: construction sites want their bill of materials delivered before
 	// the fabricator can work (site-delivery rule; multi-resource since M1-a).
 	for (const FRHBuildingInstance& Site : Buildings)
@@ -689,7 +762,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		{
 			continue;
 		}
-		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Site.Level))
 		{
 			const double* Delivered = Site.InputKg.Find(Cost.Key);
 			const double NeedKg = Cost.Value - (Delivered ? *Delivered : 0.0);
@@ -742,6 +815,23 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 	// any batch, so behavior is unchanged; at era dt (1.2 h) this is what
 	// closed the 8.8% divergence (a 2 h batch no longer costs 2 whole steps
 	// plus an idle step to restart).
+	// Construction shortage (M1-d Gate B): what the open sites need beyond
+	// colony holdings. Recipes whose outputs are short get first claim on an
+	// idle building - the site's demand is what tells the Forge to make
+	// Shielding instead of more Struct. Empty map = pure row-order (M0 rule).
+	const TMap<FName, double> ShortageKg = ComputeConstructionShortage();
+	const auto OutputsShort = [&ShortageKg](const FRHRecipeRow& Row)
+	{
+		for (const auto& Out : URHDefinitionsSubsystem::ParseResourceList(Row.Outputs))
+		{
+			if (ShortageKg.Contains(Out.Key))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
 	for (FRHBuildingInstance& B : Buildings)
 	{
 		if (B.bUnderConstruction || (!B.bPowered && !B.bBatchOnH2))
@@ -888,40 +978,47 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 
 			// Idle: try to start a batch whose inputs are covered - solids
 			// from the hopper, fluids from the network pool, extraction from
-			// the attached deposit.
-			const FRHRecipeRow* Recipe = Defs->FindRunnableRecipe(B.DefName,
-				[&](const TMap<FName, double>& Inputs)
+			// the attached deposit. Construction-short outputs outrank row
+			// order (Gate B); no shortage = the M0 rule exactly.
+			const auto InputsOk = [&](const TMap<FName, double>& Inputs)
+			{
+				if (Inputs.Num() == 0)
 				{
-					if (Inputs.Num() == 0)
+					if (!bExtractor || B.AttachedDepositId == 0)
 					{
-						if (!bExtractor || B.AttachedDepositId == 0)
-						{
-							return false;
-						}
-						const FRHDepositState* D = nullptr;
-						for (const FRHDepositState& Dep : Deposits)
-						{
-							if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
-						}
-						return D && D->RemainingKg > 0.0;
+						return false;
 					}
-					for (const auto& In : Inputs)
+					const FRHDepositState* D = nullptr;
+					for (const FRHDepositState& Dep : Deposits)
 					{
-						if (Defs->IsSolidResource(In.Key))
-						{
-							const double* Have = B.InputKg.Find(In.Key);
-							if (!Have || *Have < In.Value)
-							{
-								return false;
-							}
-						}
-						else if (GetStock(In.Key) < In.Value)
+						if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
+					}
+					return D && D->RemainingKg > 0.0;
+				}
+				for (const auto& In : Inputs)
+				{
+					if (Defs->IsSolidResource(In.Key))
+					{
+						const double* Have = B.InputKg.Find(In.Key);
+						if (!Have || *Have < In.Value)
 						{
 							return false;
 						}
 					}
-					return true;
-				});
+					else if (GetStock(In.Key) < In.Value)
+					{
+						return false;
+					}
+				}
+				return true;
+			};
+			const FRHRecipeRow* Recipe = ShortageKg.Num() > 0
+				? Defs->FindRunnableRecipe(B.DefName, InputsOk, OutputsShort)
+				: nullptr;
+			if (!Recipe)
+			{
+				Recipe = Defs->FindRunnableRecipe(B.DefName, InputsOk);
+			}
 			if (!Recipe)
 			{
 				break; // nothing startable: the rest of the budget is idle time
@@ -1111,6 +1208,72 @@ float URHSimWorldSubsystem::GetRadiationNow(int32 Level) const
 		}
 	}
 	return Rad;
+}
+
+TMap<FName, double> URHSimWorldSubsystem::ComputeConstructionShortage() const
+{
+	TMap<FName, double> NeedKg, DeliveredKg;
+	for (const FRHBuildingInstance& Site : Buildings)
+	{
+		if (!Site.bUnderConstruction)
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs->GetBuilding(Site.DefName);
+		if (!Def)
+		{
+			continue;
+		}
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Site.Level))
+		{
+			const double* D = Site.InputKg.Find(Cost.Key);
+			const double Delivered = D ? *D : 0.0;
+			if (Cost.Value > Delivered)
+			{
+				NeedKg.FindOrAdd(Cost.Key) += Cost.Value - Delivered;
+			}
+			DeliveredKg.FindOrAdd(Cost.Key) += Delivered;
+		}
+	}
+	TMap<FName, double> Short;
+	for (const auto& P : NeedKg)
+	{
+		// On hand everywhere EXCEPT what already sits delivered at the sites
+		// (GetTotalSolid counts site hoppers; the need already excludes them).
+		const double* Delivered = DeliveredKg.Find(P.Key);
+		const double OnHand = GetTotalSolid(P.Key) + GetStock(P.Key) - (Delivered ? *Delivered : 0.0);
+		if (P.Value > OnHand)
+		{
+			Short.Add(P.Key, P.Value - OnHand);
+		}
+	}
+	return Short;
+}
+
+bool URHSimWorldSubsystem::HasProducerFor(FName Resource) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (!B.bUnderConstruction && Defs && Defs->FindRecipeByOutput(B.DefName, Resource))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::Debug_AddSolid(FName DefName, FName Resource, double Kg)
+{
+	for (FRHBuildingInstance& B : Buildings)
+	{
+		if (B.DefName == DefName && !B.bUnderConstruction)
+		{
+			B.InputKg.FindOrAdd(Resource) += Kg;
+			OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));
+			return;
+		}
+	}
+	UE_LOG(LogRedHopeSim, Warning, TEXT("Debug_AddSolid: no completed '%s'"), *DefName.ToString());
 }
 
 bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
@@ -1419,13 +1582,16 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 	else
 	{
 		// Materials are delivered to the site by haulers (task board);
-		// this only rejects orders the colony cannot possibly fill.
-		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
+		// this only rejects orders the colony cannot POSSIBLY fill - short
+		// stock with a completed producer online is an order that waits for
+		// production (M1-d Gate B: how the first Shielding gets made - the
+		// site's demand is what tells the Forge to make it).
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Level))
 		{
 			const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
-			if (Available < Cost.Value)
+			if (Available < Cost.Value && !HasProducerFor(Cost.Key))
 			{
-				OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"),
+				OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand, no producer online)"),
 					*Cost.Key.ToString(), Cost.Value, Available);
 				return false;
 			}
@@ -1969,9 +2135,9 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 		return true;
 	}
 	// Fabrication waits for the full bill of materials on site (haulers are
-	// bringing it; multi-resource since M1-a).
+	// bringing it; multi-resource since M1-a; Level-taxed since M1-d Gate B).
 	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
-	const TMap<FName, double> Cost = Def ? URHDefinitionsSubsystem::GetBuildCost(*Def) : TMap<FName, double>();
+	const TMap<FName, double> Cost = Def ? URHDefinitionsSubsystem::GetBuildCostFor(*Def, B->Level) : TMap<FName, double>();
 	for (const auto& Line : Cost)
 	{
 		const double* Delivered = B->InputKg.Find(Line.Key);

@@ -711,7 +711,9 @@ FText SRHCommandDeck::GetInspectText() const
 		Text += FString::Printf(TEXT("\nUNDER CONSTRUCTION - %.0f s fabrication left"), B->BuildRemaining_s);
 		if (Def)
 		{
-			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCost(*Def))
+			// Level-taxed bill (Gate B): a surface site's card shows its
+			// Shielding line; the same def underground shows none.
+			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, B->Level))
 			{
 				const double* Delivered = B->InputKg.Find(Cost.Key);
 				const double Have = Delivered ? *Delivered : 0.0;
