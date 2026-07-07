@@ -56,3 +56,5 @@ GardenSoilKgPerCell,250,kg,"M2 Gate C: Earth soil emplaced per Garden cell at pl
 GardenSeedsKgPerCell,50,kg,"M2 Gate C: seed mass sown per Garden cell (one SeedVault plants 4 cells)"
 GardenFoodKgPerSolPerCell,1.0,kg,"M2 Gate C: Food yield per planted cell per sol on a rated floor (3 cells ~ break-even for a 4-colonist pod)"
 GardenWaterKgPerSolPerCell,4.0,kg,"M2 Gate C: Water draw per producing cell per sol - the garden is the colony's standing ISRU demand"
+LuxuryKgPerColonistPerSol,0.2,kg,"M2 Gate D (abstract): comforts consumed per colonist per sol when stocked - one LuxuryGoods crate ~ 375 colonist-sols"
+HopeLuxuryBonus,8,points,"M2 Gate D (abstract): Hope lift at full comforts supply, scaled by the supplied fraction; pure bonus - absence never penalizes (prevention framing)"

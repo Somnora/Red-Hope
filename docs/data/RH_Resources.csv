@@ -13,6 +13,6 @@ Food,Food,Provisions,Tank,TRUE,"ACTIVE M2: pooled provisions (network stock like
 SpareParts,Spare Parts,Solid,Stockpile,TRUE,Maintenance consumable; import-only
 Soil,Earth Soil,Solid,Stockpile,TRUE,"ACTIVE M2 Gate C: emplaced into Garden cells (GardenSoilKgPerCell); lands via SoilPallet"
 Seeds,Seeds,Solid,Stockpile,TRUE,"ACTIVE M2 Gate C: planted into Garden cells (GardenSeedsKgPerCell); lands via SeedVault"
-Luxury,Luxury Goods,Solid,Stockpile,FALSE,Dormant; morale economy M2
+Luxury,Luxury Goods,Solid,Stockpile,TRUE,"ACTIVE M2 Gate D (abstract): colonists draw LuxuryKgPerColonistPerSol; supplied crew lifts Hope (pure bonus, never a penalty)"
 Research,Research Points,Abstract,Ledger,FALSE,Dormant; acquisition model due M1
 Hope,Hope,Abstract,Ledger,FALSE,"Derived non-spendable index (approved); no slice inputs yet"

@@ -8,5 +8,5 @@ ExtraHauler,Hauler RC-H,1800,Fleet,+1 RC-H unit,,TRUE,Logistics throughput
 SolarPack,Solar Array Flat-Pack,400,Power,+1 deployable SolarArray,,TRUE,"Import-only rule: power growth is manifest-gated"
 BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,,TRUE,Night resilience
 ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,,TRUE,Latency-to-autonomy on the manifest
-LuxuryGoods,Luxury Goods,300,Future,Dormant until Phase 2 morale,,TRUE,Morale bet for the first crew
+LuxuryGoods,Luxury Goods,300,Comforts,+300 kg Luxury (comforts draw per colonist per sol),,TRUE,"M2 Gate D: the morale bet lands - ~90 sols of comforts for a pod of 4"
 CrewPod,Crew Pod (4 colonists),2400,Crew,"+4 colonists into certified housing; +200 kg Food; returns aboard if no beds",,TRUE,"M2 Gate A: the heaviest single item - crew vs hardware is the Phase-2 manifest decision"
