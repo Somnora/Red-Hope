@@ -1,5 +1,17 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 22 (director's screenshot verdict → pit view v2 + the full queued compile)
+
+- **Director hand-played + screenshotted the slice view; five findings, all addressed this session:**
+  1. **Floor tiles had gaps** → tiles are now exactly cell-sized (10 m, was 9.6) and top-flush with the floor plane — the dug base reads as one piece. Walls between rooms come later (his note), this is the base layer.
+  2. **"No feeling of depth — it looks like we shaved a layer"** → **pit view v2**: the world is now one continuous lit scene with a hole dug in it. An instanced sand skirt (~300 m each way) replaces the ground plane once the shaft exists, dark-strata **walls line every open-to-rock edge from the surface down to the open floor**, and the carved tiles sit at the bottom — a perfect square hole in sand, seen from above, exactly the brief. Surface actors (buildings/robots/markers/ship) stay visible around the hole; the elevator changes which floor's pocket is open. Two ISM components, thousands-cheap, rebuilt only when the pit shape changes.
+  3. **Lighting/exposure changed underground** → fixed by construction: the sun and scene never change (the old view hid the entire ground, so auto-exposure swung against the void). Windows/skylights as future light sources stay canon (§8).
+  4. **"Didn't see the elevator move"** → the camera focus plane now RIDES between floors (~1.5 s smoothed descent) instead of cutting.
+  5. **"Everything is square boxes"** → acknowledged; the bespoke building/robot art milestone stays deferred by the director's own earlier ruling ("when it makes more sense") — logged as reaffirmed for post-gameplay.
+- **The whole queued batch compiled clean** (105 s): pit v2 + elevator ride + `Bore → -N` deck button + in-flight order holograms/double-place blocking + manual breakers (Switch OFF/ON) + Hold Fleet + the rating-flap fix (expansion ≠ crisis) + save v9.
+- **All regressions green post-batch:** -borer 5/5 (H2 11.0 exact), -vault 7/7, -habitat exact incl. pool-dry loss (the genuine-failure path the flap-fix had to preserve), 10-sol baseline identical.
+- Live -game smoke: bore-to-−2 arc with pit rebuild log lines, breakers + fleet hold exercised, zero ensures.
+
 ## 2026-07-07 — Session 21 (M1-d DT sync: the vault arc runs on PURE DATA; dormant human-layer DTs born)
 
 - **DT sync (editor session, `822d923`):** Borer `CanBore=TRUE` + `H2BurnKgPerHour=1.5`; **AirFilter row live** (CirculatesAir=TRUE, 200 W, Struct:80, tax 30 kg, sheds late); ComputeModule tax 20 kg; **MakeShielding SliceActive=TRUE**; O2 config rows (fill 100 / leak 2 / rate 20). **DT_Rooms / DT_Compartments / DT_Doors imported from the staged CSVs** (10 rooms, 3 compartments, 2 doors — every row SliceActive FALSE, dormant per §9). All values verified byte-exact via get_rows before save.

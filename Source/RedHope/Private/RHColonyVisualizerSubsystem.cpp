@@ -7,6 +7,7 @@
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
@@ -407,6 +408,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	CarveTileVisuals.Reset();
 	TilesSpawnedPerLevel.Reset();
+	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
 
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -843,6 +845,8 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 	// from the shaft head. The sim tracks per-floor COUNTS (A1 model); the
 	// spiral is the canonical layout - honest about how much, canonical about
 	// where. Spatial painted-position carving is a flagged later-gate upgrade.
+	// Tiles are exactly cell-sized and top-flush with the floor plane - the
+	// dug-out base must read as ONE piece (director watch-through finding).
 	for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
 	{
 		const int32 Want = Sim->GetFloorCarvedCells(L);
@@ -851,11 +855,9 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 		{
 			const FIntPoint Cell = SpiralCell(Have);
 			const FVector Head = Sim->GetShaftHeadCm();
-			const FVector Center(Head.X + Cell.X * 1000.0, Head.Y + Cell.Y * 1000.0, L * FloorH - 20.0);
-			// A carved pocket's floor: warm regolith gray, faintly self-lit so
-			// the open cell reads against the void standing in for rock.
-			AStaticMeshActor* Tile = SpawnBox(Center, FVector(9.6f, 9.6f, 0.3f),
-				FLinearColor(0.16f, 0.12f, 0.10f), FLinearColor(0.012f, 0.010f, 0.008f));
+			const FVector Center(Head.X + Cell.X * 1000.0, Head.Y + Cell.Y * 1000.0, L * FloorH - 15.0);
+			AStaticMeshActor* Tile = SpawnBox(Center, FVector(10.f, 10.f, 0.3f),
+				FLinearColor(0.20f, 0.15f, 0.11f), FLinearColor::Black);
 			if (!Tile)
 			{
 				break;
@@ -863,11 +865,15 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 			Tile->SetActorLabel(FString::Printf(TEXT("Sim_Carve_%d_%d"), L, Have));
 #endif
-			Tile->SetActorHiddenInGame(ViewLevel != L);
+			Tile->SetActorHiddenInGame(PitLevel() != L);
 			CarveTileVisuals.Add(Tile);
 			++Have;
 		}
 	}
+
+	// The pit itself (skirt + walls) tracks the carved shape; key-checked, so
+	// this is a no-op except on the frame something actually changed.
+	RebuildSliceRig();
 }
 
 AStaticMeshActor* URHColonyVisualizerSubsystem::SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const
@@ -926,14 +932,122 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	{
 		return;
 	}
-	const bool bSurface = ViewLevel == 0;
 
-	// The Mars ground plane is the knife: hidden, the colony reads cut open.
-	// World Partition renames runtime actors, so the LABEL (GB_MarsGround) is
-	// no handle - the MATERIAL (MI_MarsGround) is the stable identity. Missing
-	// (e.g. still streaming) degrades to "no cut-away" and re-searches on the
-	// next elevator ride; the warning fires once.
-	if (!GroundActor.IsValid())
+	// v2 (director watch-through): the world is ONE continuous lit scene with
+	// a hole dug in it. Surface actors are always visible - looking into the
+	// pit means seeing the surface around it, and the exposure never changes.
+	// Only what rock genuinely hides hides: a subsurface building shows iff
+	// its floor is the open pit floor.
+	const int32 Pit = PitLevel();
+	for (auto& Pair : BuildingVisuals)
+	{
+		if (!Pair.Value)
+		{
+			continue;
+		}
+		int32 BLevel = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id == Pair.Key)
+			{
+				BLevel = B.Level;
+				break;
+			}
+		}
+		Pair.Value->SetActorHiddenInGame(BLevel != 0 && BLevel != Pit);
+	}
+	for (AStaticMeshActor* Marker : DepositMarkers)
+	{
+		if (Marker)
+		{
+			Marker->SetActorHiddenInGame(false);
+		}
+	}
+	if (ShipVisual)
+	{
+		ShipVisual->SetActorHiddenInGame(false);
+	}
+	// Carve tiles: the open pit floor's pocket shows; deeper strata stay
+	// inside the rock until the elevator opens them.
+	const double FloorH = Sim->GetFloorHeightCm();
+	for (AStaticMeshActor* Tile : CarveTileVisuals)
+	{
+		if (Tile)
+		{
+			const int32 TileLevel = FMath::RoundToInt32(Tile->GetActorLocation().Z / FloorH);
+			Tile->SetActorHiddenInGame(TileLevel != Pit);
+		}
+	}
+	// Robots are surface actors and the surface is always in view now.
+	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
+	{
+		Agents->SetSliceHidden(false);
+	}
+
+	RebuildSliceRig();
+}
+
+void URHColonyVisualizerSubsystem::EnsureSliceRig()
+{
+	if (SliceRigActor)
+	{
+		return;
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	SliceRigActor = World->SpawnActor<AActor>();
+	if (!SliceRigActor)
+	{
+		return;
+	}
+	USceneComponent* Root = NewObject<USceneComponent>(SliceRigActor, TEXT("Root"));
+	Root->RegisterComponent();
+	SliceRigActor->SetRootComponent(Root);
+#if WITH_EDITOR
+	SliceRigActor->SetActorLabel(TEXT("RH_SliceRig"));
+#endif
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+	const auto MakeISM = [&](const TCHAR* Name, const FLinearColor& Tint) -> UInstancedStaticMeshComponent*
+	{
+		UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(SliceRigActor, Name);
+		ISM->SetupAttachment(Root);
+		ISM->RegisterComponent();
+		SliceRigActor->AddInstanceComponent(ISM);
+		ISM->SetStaticMesh(Cube);
+		ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		ISM->SetCastShadow(true);
+		if (Base)
+		{
+			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, ISM);
+			Mid->SetVectorParameterValue(FName("Tint"), Tint);
+			ISM->SetMaterial(0, Mid);
+		}
+		return ISM;
+	};
+	// Skirt matches the sunlit regolith so the hole reads as dug INTO the
+	// same ground; walls are darker strata - the cut faces of the excavation.
+	SkirtISM = MakeISM(TEXT("PitSkirt"), FLinearColor(0.48f, 0.31f, 0.19f));
+	WallISM = MakeISM(TEXT("PitWalls"), FLinearColor(0.30f, 0.19f, 0.12f));
+}
+
+void URHColonyVisualizerSubsystem::RebuildSliceRig()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!World || !Sim)
+	{
+		return;
+	}
+
+	// The real ground plane yields to the skirt once the shaft exists, so the
+	// pit is visible from every register with unchanged lighting. (Material-
+	// matched search: World Partition renames actors, labels are no handle.)
+	const int32 Depth = Sim->GetShaftDepth();
+	if (!GroundActor.IsValid() && Depth > 0)
 	{
 		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
 		{
@@ -954,61 +1068,88 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 		}
 		if (!GroundActor.IsValid() && !bGroundSearched)
 		{
-			UE_LOG(LogRedHope, Warning, TEXT("Slice view: no MarsGround actor/material found - the surface will not cut away"));
+			UE_LOG(LogRedHope, Warning, TEXT("Pit view: no MarsGround actor/material found - the skirt will z-fight the ground"));
 		}
 		bGroundSearched = true;
 	}
 	if (GroundActor.IsValid())
 	{
-		GroundActor->SetActorHiddenInGame(!bSurface);
+		GroundActor->SetActorHiddenInGame(Depth > 0);
 	}
 
-	// One stratum at a time: buildings show on their own floor only.
-	for (auto& Pair : BuildingVisuals)
+	const int32 Pit = PitLevel();
+	const int32 Carved = Sim->GetFloorCarvedCells(Pit);
+	const FIntVector Key(Depth, Pit, Carved);
+	if (Key == LastRigKey)
 	{
-		if (!Pair.Value)
-		{
-			continue;
-		}
-		int32 BLevel = 0;
-		for (const FRHBuildingInstance& B : Sim->GetBuildings())
-		{
-			if (B.Id == Pair.Key)
-			{
-				BLevel = B.Level;
-				break;
-			}
-		}
-		Pair.Value->SetActorHiddenInGame(BLevel != ViewLevel);
+		return;
 	}
-	// Deposit markers and the ship are surface furniture (underground deposits
-	// get their own read when they ship).
-	for (AStaticMeshActor* Marker : DepositMarkers)
+	LastRigKey = Key;
+
+	EnsureSliceRig();
+	if (!SkirtISM || !WallISM)
 	{
-		if (Marker)
-		{
-			Marker->SetActorHiddenInGame(!bSurface);
-		}
+		return;
 	}
-	if (ShipVisual)
+	SkirtISM->ClearInstances();
+	WallISM->ClearInstances();
+	if (Depth == 0)
 	{
-		ShipVisual->SetActorHiddenInGame(!bSurface);
+		return; // no shaft, no pit - the real ground is showing
 	}
-	// Carve tiles: only the active floor's pocket shows (floors above would
-	// roof it in; deeper floors would bleed through un-rendered rock).
+
+	// The open pocket on the pit floor: the shaft's own cell plus every
+	// carved cell (spiral layout - identical math to the floor tiles).
+	TSet<FIntPoint> Open;
+	Open.Add(FIntPoint(0, 0));
+	for (int32 i = 0; i < Carved; ++i)
+	{
+		Open.Add(SpiralCell(i));
+	}
+
+	const FVector Head = Sim->GetShaftHeadCm();
 	const double FloorH = Sim->GetFloorHeightCm();
-	for (AStaticMeshActor* Tile : CarveTileVisuals)
+	const double PitDepthCm = -Pit * FloorH; // surface (0) down to the open floor
+
+	// Sand skirt: the surface, minus the hole. 30 cells (~300 m) each way
+	// covers the playfield at every practical zoom; beyond it the void only
+	// shows at orbital register (gray-box note, not a bug).
+	constexpr int32 SkirtCells = 30;
+	for (int32 GX = -SkirtCells; GX <= SkirtCells; ++GX)
 	{
-		if (Tile)
+		for (int32 GY = -SkirtCells; GY <= SkirtCells; ++GY)
 		{
-			const int32 TileLevel = FMath::RoundToInt32(Tile->GetActorLocation().Z / FloorH);
-			Tile->SetActorHiddenInGame(TileLevel != ViewLevel);
+			if (Open.Contains(FIntPoint(GX, GY)))
+			{
+				continue;
+			}
+			const FTransform T(FRotator::ZeroRotator,
+				FVector(Head.X + GX * 1000.0, Head.Y + GY * 1000.0, -20.0),
+				FVector(10.f, 10.f, 0.4f));
+			SkirtISM->AddInstance(T, /*bWorldSpace*/ true);
 		}
 	}
-	// Robots live on the surface until M1-d's later gates send them below;
-	// their ISM layer hides with the rest of the surface.
-	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
+
+	// Pit walls: every open-to-rock edge gets a cut face from the surface
+	// down to the open floor - the vertical faces are what make it a HOLE
+	// dug in the ground instead of a shaved-off plane.
+	const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	for (const FIntPoint& Cell : Open)
 	{
-		Agents->SetSliceHidden(!bSurface);
+		for (const FIntPoint& D : Dirs)
+		{
+			if (Open.Contains(Cell + D))
+			{
+				continue;
+			}
+			const FVector CellCenter(Head.X + Cell.X * 1000.0, Head.Y + Cell.Y * 1000.0, 0.0);
+			const FVector WallCenter = CellCenter + FVector(D.X * 530.0, D.Y * 530.0, -PitDepthCm * 0.5);
+			const FVector Scale = D.X != 0
+				? FVector(0.6f, 10.f, (float)(PitDepthCm / 100.0))
+				: FVector(10.f, 0.6f, (float)(PitDepthCm / 100.0));
+			WallISM->AddInstance(FTransform(FRotator::ZeroRotator, WallCenter, Scale), /*bWorldSpace*/ true);
+		}
 	}
+	UE_LOG(LogRedHope, Display, TEXT("Pit rebuilt: floor %d, %d open cell(s), %d wall face(s)"),
+		Pit, Open.Num(), WallISM->GetInstanceCount());
 }

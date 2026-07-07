@@ -5,6 +5,7 @@
 #include "RHColonyVisualizerSubsystem.generated.h"
 
 class AStaticMeshActor;
+class UInstancedStaticMeshComponent;
 struct FRHBuildingInstance;
 struct FRHCommand;
 struct FRHDepositState;
@@ -39,10 +40,14 @@ public:
 	// must-not-miss channel the director asked for. Empty once stale.
 	FText GetAlertText() const;
 
-	// Sliced-floor view (M1-d Gate A2): the elevator's floor becomes the only
-	// visible stratum - surface as ever at 0; a subsurface floor hides the
-	// ground plane + surface actors and shows that floor's carved cells, its
-	// buildings, and the shaft column (the ant farm cleaved open).
+	// The pit view (M1-d, v2 after the director's watch-through): once the
+	// shaft exists the world reads as a PERFECT SQUARE HOLE DUG IN SAND - the
+	// surrounding surface stays (an instanced sand skirt replaces the ground
+	// plane), rock walls line the pit from the surface down to the open
+	// floor, and the carved floor tiles sit flush at the bottom. Visible from
+	// the surface AND underground; the elevator changes which floor is open
+	// and rides the camera down. Sunlight and exposure never change - it is
+	// one continuous lit scene, exactly like looking into a real excavation.
 	// Presentation-only; the sim never knows what the camera looks at.
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
@@ -90,12 +95,25 @@ private:
 	void ApplyViewLevel();
 	AStaticMeshActor* SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const;
 	static FIntPoint SpiralCell(int32 Index);
+	// The pit rig (v2): two instanced-mesh layers rebuilt whenever the pit's
+	// shape changes - the sand skirt (surface around the hole) and the rock
+	// walls (surface down to the open floor). One actor, thousands-cheap.
+	void EnsureSliceRig();
+	void RebuildSliceRig();
+	// The floor whose pocket is open to the sky: the active subsurface floor,
+	// or -1 when looking from the surface (the topmost dig is the hole you
+	// see into).
+	int32 PitLevel() const { return ViewLevel < 0 ? ViewLevel : -1; }
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShaftVisual;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> CarveTileVisuals;
+	UPROPERTY() TObjectPtr<AActor> SliceRigActor;
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SkirtISM;
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> WallISM;
+	FIntVector LastRigKey = FIntVector(-999, -999, -999); // (depth, pit level, carved count)
 	TMap<int32, int32> TilesSpawnedPerLevel;
 	TWeakObjectPtr<AActor> GroundActor;
 	bool bGroundSearched = false;

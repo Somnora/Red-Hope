@@ -17,6 +17,9 @@ void ARHStrategyPawn::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	SmoothedZoomT = FMath::FInterpTo(SmoothedZoomT, ZoomT, DeltaTime, ZoomInterpSpeed);
+	// The elevator ride (M1-d): the focus plane descends/ascends smoothly
+	// (~1.5 s per floor) instead of cutting - the motion IS the feedback.
+	FocusPointCm.Z = FMath::FInterpTo(FocusPointCm.Z, TargetFocusZCm, DeltaTime, 3.f);
 
 	// Exponential distance mapping keeps ground-level zoom fine-grained while
 	// orbital sweeps stay fast; linear pitch/FOV are placeholders for CT_CameraRig.

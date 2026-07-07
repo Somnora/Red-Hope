@@ -34,8 +34,10 @@ public:
 	}
 
 	// Sliced-floor view (M1-d): the elevator drops the camera's focus plane to
-	// the active floor; orbit/zoom/pan behave identically at any depth.
-	void SetFocusZCm(float Zcm) { FocusPointCm.Z = Zcm; }
+	// the active floor; orbit/zoom/pan behave identically at any depth. The
+	// descent is smoothed in Tick so the ride reads as motion, not a cut
+	// (director watch-through finding: "I didn't see the elevator move").
+	void SetFocusZCm(float Zcm) { TargetFocusZCm = Zcm; }
 
 	// 0 = ground register (25 m), 1 = orbital register (3000 m).
 	// Default 0.45 ~= 215 m: the whole starting colony in frame with readable
@@ -55,6 +57,7 @@ private:
 	UPROPERTY(VisibleAnywhere) TObjectPtr<UCameraComponent> Camera;
 
 	FVector FocusPointCm = FVector::ZeroVector;
+	float TargetFocusZCm = 0.f; // elevator destination; Tick rides toward it
 	float OrbitYawDeg = 0.f;
 	float SmoothedZoomT = 0.45f;
 };
