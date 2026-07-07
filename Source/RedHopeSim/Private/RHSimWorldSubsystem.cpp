@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 16;  // v16: discoveries; v15 growth; v14 water; v13 Hope-drives; v12 garden
+	constexpr uint32 RHSaveVersion = 17;  // v17: rivals/trade (M3 Gate A); v16 discoveries; v15 growth; v14 water
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -140,6 +140,10 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeGrowthFoodBufferSols = Defs->GetConfigScalar(FName("HopeGrowthFoodBufferSols"), HopeGrowthFoodBufferSols);
 	HopeFirstBornMilestone = Defs->GetConfigScalar(FName("HopeFirstBornMilestone"), HopeFirstBornMilestone);
 	HopeDiscoveryThreshold = Defs->GetConfigScalar(FName("HopeDiscoveryThreshold"), HopeDiscoveryThreshold);
+	ConvoySpeedKmPerSol = Defs->GetConfigScalar(FName("ConvoySpeedKmPerSol"), ConvoySpeedKmPerSol);
+	ConvoyH2PerRun = Defs->GetConfigScalar(FName("ConvoyH2PerRun"), ConvoyH2PerRun);
+	ConvoyWearParts = Defs->GetConfigScalar(FName("ConvoyWearParts"), ConvoyWearParts);
+	RelationPerRun = Defs->GetConfigScalar(FName("RelationPerRun"), RelationPerRun);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -299,6 +303,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepHope(SubDt); // after population so the mood reflects this step's support state
 	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
 	StepDiscovery(SubDt); // and its labs uncover what Mars is hiding
+	StepTrade(SubDt); // the convoy rolls toward the neighbors
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -432,6 +437,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepHope(DtSimSeconds); // same order as the agent band (parity)
 	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
 	StepDiscovery(DtSimSeconds); // same order as the agent band (parity)
+	StepTrade(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -2781,8 +2787,222 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			return;
 		}
 	}
+	else if (Cmd.Verb == FName("Convoy"))
+	{
+		// M3 Gate A: dispatch the rover convoy to a rival (Target = rival row).
+		// Everything is committed AT DEPARTURE - fuel, wear, and your export lot
+		// (the Borer's H2-batch discipline). The return leg delivers their goods.
+		static const FName NHydrogen(TEXT("Hydrogen")), NSpareParts(TEXT("SpareParts"));
+		const FRHRivalRow* Rival = Defs ? Defs->GetRival(Cmd.Target) : nullptr;
+		if (!Rival || !Rival->SliceActive)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No trade contact '%s'"), *Cmd.Target.ToString()));
+			return;
+		}
+		if (!ConvoyRival.IsNone())
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The convoy is already out (to %s)"), *ConvoyRival.ToString()));
+			return;
+		}
+		if (GetStock(NHydrogen) < ConvoyH2PerRun)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy needs %.0f kg Hydrogen fuel"), ConvoyH2PerRun));
+			return;
+		}
+		if (GetTotalSolid(NSpareParts) + GetStock(NSpareParts) < ConvoyWearParts)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy needs %.0f Spare Part(s) for the trek"), ConvoyWearParts));
+			return;
+		}
+		const TMap<FName, double> YourLot = URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot);
+		if (!HasTradeLot(YourLot))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Convoy short of the export lot (%s)"), *Rival->ImportLot));
+			return;
+		}
+		// Commit at departure.
+		AddStock(NHydrogen, -ConvoyH2PerRun);
+		SpendTradeLot(TMap<FName, double>{ { NSpareParts, ConvoyWearParts } });
+		SpendTradeLot(YourLot);
+		ConvoyRival = Cmd.Target;
+		bConvoyReturning = false;
+		ConvoyLegSols = 0.0;
+		RelationRef(Cmd.Target); // ensure the relation entry exists
+		UE_LOG(LogRedHopeSim, Display, TEXT("Convoy dispatched to %s (%.0f km; %s -> %s)"),
+			*Rival->DisplayName, Rival->DistanceKm, *Rival->ImportLot, *Rival->ExportLot);
+	}
 
 	OnCommandExecuted.Broadcast(Cmd);
+}
+
+bool URHSimWorldSubsystem::HasTradeLot(const TMap<FName, double>& Lot) const
+{
+	for (const auto& Item : Lot)
+	{
+		const double Have = Defs && Defs->IsSolidResource(Item.Key)
+			? GetTotalSolid(Item.Key) + GetStock(Item.Key)
+			: GetStock(Item.Key);
+		if (Have + KINDA_SMALL_NUMBER < Item.Value)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::SpendTradeLot(const TMap<FName, double>& Lot)
+{
+	for (const auto& Item : Lot)
+	{
+		double Remaining = Item.Value;
+		if (Defs && Defs->IsSolidResource(Item.Key))
+		{
+			// Drain building stores in ascending Id order (deterministic),
+			// OutputKg then InputKg; pooled remainder (import-only parts) last.
+			TArray<FRHBuildingInstance*> Sorted;
+			for (FRHBuildingInstance& B : Buildings) { Sorted.Add(&B); }
+			Sorted.Sort([](const FRHBuildingInstance& A, const FRHBuildingInstance& B){ return A.Id < B.Id; });
+			for (FRHBuildingInstance* B : Sorted)
+			{
+				if (Remaining <= KINDA_SMALL_NUMBER) { break; }
+				for (TMap<FName, double>* Store : { &B->OutputKg, &B->InputKg })
+				{
+					if (double* Have = Store->Find(Item.Key))
+					{
+						const double Take = FMath::Min(*Have, Remaining);
+						*Have -= Take;
+						Remaining -= Take;
+						if (Remaining <= KINDA_SMALL_NUMBER) { break; }
+					}
+				}
+			}
+			if (Remaining > KINDA_SMALL_NUMBER)
+			{
+				AddStock(Item.Key, -Remaining); // pooled fallback (e.g. SpareParts)
+				Remaining = 0.0;
+			}
+			OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));
+		}
+		else
+		{
+			AddStock(Item.Key, -Remaining); // fluids/gases from the pool
+		}
+	}
+}
+
+double& URHSimWorldSubsystem::RelationRef(FName Rival)
+{
+	if (double* R = RivalRelations.Find(Rival))
+	{
+		return *R;
+	}
+	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
+	return RivalRelations.Add(Rival, Row ? Row->RelationStart : 30.0);
+}
+
+double URHSimWorldSubsystem::ConvoyLegSolsFor(FName Rival) const
+{
+	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
+	const double Speed = FMath::Max(ConvoySpeedKmPerSol, KINDA_SMALL_NUMBER);
+	return Row ? Row->DistanceKm / Speed : 0.0;
+}
+
+void URHSimWorldSubsystem::StepTrade(float SubDt)
+{
+	// Idle colonies (and every pre-M3 baseline) have no convoy out - a true
+	// no-op, so the 10-sol baseline is byte-identical.
+	if (ConvoyRival.IsNone())
+	{
+		return;
+	}
+	const FRHRivalRow* Rival = Defs ? Defs->GetRival(ConvoyRival) : nullptr;
+	if (!Rival)
+	{
+		ConvoyRival = NAME_None; // the row vanished (data edit) - abort cleanly
+		return;
+	}
+	// A dust storm freezes the convoy where it sits (brief: routes disrupted by
+	// storms). The rover waits out the weather - progress simply doesn't advance.
+	const FRHEventRow* Event = GetActiveEvent();
+	if (Event && Event->Type == FName("DustStorm"))
+	{
+		return;
+	}
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	const double LegTime = ConvoyLegSolsFor(ConvoyRival);
+	ConvoyLegSols += DtSols;
+	if (ConvoyLegSols < LegTime)
+	{
+		return; // still en route on this leg
+	}
+	if (!bConvoyReturning)
+	{
+		// Reached the rival; turn around (carry the spillover into the return).
+		bConvoyReturning = true;
+		ConvoyLegSols -= LegTime;
+		return;
+	}
+	// Home again: deliver their export lot, warm the relation, go idle.
+	ConvoyLegSols = 0.0;
+	bConvoyReturning = false;
+	const FName Done = ConvoyRival;
+	ConvoyRival = NAME_None;
+	const TMap<FName, double> TheirLot = URHDefinitionsSubsystem::ParseResourceList(Rival->ExportLot);
+	for (const auto& Item : TheirLot)
+	{
+		if (Defs && Defs->IsSolidResource(Item.Key))
+		{
+			// Drop at the trade depot (the Lander) for normal hauling.
+			bool bDropped = false;
+			for (FRHBuildingInstance& B : Buildings)
+			{
+				if (B.DefName == FName("Lander") && !B.bUnderConstruction)
+				{
+					B.OutputKg.FindOrAdd(Item.Key) += Item.Value;
+					bDropped = true;
+					break;
+				}
+			}
+			if (!bDropped) { AddStock(Item.Key, Item.Value); }
+			OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));
+		}
+		else
+		{
+			AddStock(Item.Key, Item.Value); // fluids join the pool
+		}
+	}
+	double& Rel = RelationRef(Done);
+	Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
+	OnAlert.Broadcast(FString::Printf(
+		TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
+		*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== CONVOY RETURN: %s delivered %s, relation %.0f ==="),
+		*Rival->DisplayName, *Rival->ExportLot, Rel);
+}
+
+double URHSimWorldSubsystem::GetConvoyProgress() const
+{
+	if (ConvoyRival.IsNone())
+	{
+		return 0.0;
+	}
+	const double LegTime = ConvoyLegSolsFor(ConvoyRival);
+	if (LegTime <= 0.0)
+	{
+		return 0.0;
+	}
+	const double Legs = (bConvoyReturning ? 1.0 : 0.0) + FMath::Clamp(ConvoyLegSols / LegTime, 0.0, 1.0);
+	return FMath::Clamp(Legs / 2.0, 0.0, 1.0);
+}
+
+double URHSimWorldSubsystem::GetRivalRelation(FName Rival) const
+{
+	if (const double* R = RivalRelations.Find(Rival))
+	{
+		return *R;
+	}
+	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
+	return Row ? Row->RelationStart : 0.0;
 }
 
 void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level)
@@ -3813,6 +4033,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
 	// Discoveries (save v16).
 	Ar << DiscoveryLog << DiscoverySeatHours;
+	// Rivals & trade (save v17).
+	{
+		uint8 Returning = bConvoyReturning ? 1 : 0;
+		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -4002,6 +4227,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Discoveries (save v16). Array repopulates wholesale.
 	DiscoveryLog.Reset();
 	Ar << DiscoveryLog << DiscoverySeatHours;
+	// Rivals & trade (save v17).
+	{
+		uint8 Returning = 0;
+		RivalRelations.Empty();
+		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
+		bConvoyReturning = (Returning != 0);
+	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

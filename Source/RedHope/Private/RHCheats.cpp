@@ -247,6 +247,46 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty, H.WaterPenalty, Sim->GetWaterPotability() * 100.0);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHConvoy(
+	TEXT("RH.Convoy"),
+	TEXT("RH.Convoy <RivalName> - dispatch the rover trade convoy to a rival (uplink; commits Hydrogen + SpareParts + your export lot at departure)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Convoy <RivalName>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Convoy");
+			Cmd.Target = FName(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
+	TEXT("RH.Trade"),
+	TEXT("RH.Trade - log the trade state: rivals, relations, and the convoy's status."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Sim || !Defs) { return; }
+		const FName Out = Sim->GetConvoyRival();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Trade] convoy: %s%s"),
+			Out.IsNone() ? TEXT("idle") : *Out.ToString(),
+			Out.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (%s, %.0f%%)"),
+				Sim->IsConvoyReturning() ? TEXT("returning") : TEXT("outbound"), Sim->GetConvoyProgress() * 100.0));
+		Defs->ForEachRival([&](FName Name, const FRHRivalRow& Row)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  %s (%s): relation %.0f | you give %s -> they give %s | %.0f km"),
+				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), *Row.ImportLot, *Row.ExportLot, Row.DistanceKm);
+		});
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHDiscoveries(
 	TEXT("RH.Discoveries"),
 	TEXT("RH.Discoveries - log the research state: what the colony has uncovered, what's next, and the live progress."),

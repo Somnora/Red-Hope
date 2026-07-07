@@ -37,6 +37,10 @@ public:
 	// table = no discoveries - the layer simply stays dormant.
 	const FRHDiscoveryRow* GetDiscovery(FName Name) const;
 	void GetDiscoveriesSorted(TArray<TPair<FName, const FRHDiscoveryRow*>>& Out) const;
+	// Rivals (M3 Gate A): row by name + all slice-active neighbors. Absent
+	// table = a lonely Mars - the layer stays dormant.
+	const FRHRivalRow* GetRival(FName Name) const;
+	void ForEachRival(TFunctionRef<void(FName, const FRHRivalRow&)> Fn) const;
 
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.
@@ -111,6 +115,7 @@ public:
 	// import, so this one lazily creates a TRANSIENT table for the injection
 	// (dev-only; the real asset supersedes it once imported).
 	void Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row);
+	void Debug_InjectRival(FName Name, const FRHRivalRow& Row);
 
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
 	float EvalSolarCurve(float SolFraction) const;
@@ -138,6 +143,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath EventsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Events.DT_Events"));
 	UPROPERTY(Config) FSoftObjectPath RoomsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rooms.DT_Rooms"));
 	UPROPERTY(Config) FSoftObjectPath DiscoveriesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Discoveries.DT_Discoveries"));
+	UPROPERTY(Config) FSoftObjectPath RivalsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rivals.DT_Rivals"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -151,5 +157,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> EventsTable;
 	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
 	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
+	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

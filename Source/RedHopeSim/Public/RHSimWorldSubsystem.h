@@ -303,6 +303,20 @@ public:
 	// Whether Labs are currently accruing (flourishing + at least one staffed seat).
 	bool IsResearchAccruing() const;
 
+	// --- Rivals & trade (M3 Gate A, "The Neighbors") ---
+	// One rover convoy runs barter with a rival settlement: dispatch is an
+	// uplink verb (Convoy <Rival>); Hydrogen + SpareParts + your export lot are
+	// ALL committed at departure (the Borer batch pattern); transit takes real
+	// sols and FREEZES under an active dust storm; the return credits their
+	// export lot (solids drop at the Lander for hauling, fluids join the pool)
+	// and warms the per-rival relation - the dependency the Solidarity Dilemma
+	// (Gate C) will later demand the player cut.
+	FName GetConvoyRival() const { return ConvoyRival; }
+	bool IsConvoyReturning() const { return bConvoyReturning; }
+	// Round-trip progress 0..1 (0 when idle).
+	double GetConvoyProgress() const;
+	double GetRivalRelation(FName Rival) const;
+
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
 	// the soil and seeds (the SoilPallet/SeedVault gamble paying off), then
@@ -687,6 +701,29 @@ private:
 	double DiscoverySeatHours = 0.0;
 	double HopeDiscoveryThreshold = 85.0;
 	void StepDiscovery(float SubDt);
+	// Rivals & trade (M3 Gate A; save v17). One active convoy at a time (fleet
+	// expansion is data once proven). ConvoyRival None = idle. Transit is a sol
+	// accumulator advanced only under clear sky (storm freezes it); at the
+	// one-way distance it flips to the return leg; at the round trip it delivers.
+	// Relations persist per rival (RivalRelations), seeded from RelationStart.
+	FName ConvoyRival;
+	bool bConvoyReturning = false;
+	double ConvoyLegSols = 0.0;         // sols travelled on the CURRENT leg
+	TMap<FName, double> RivalRelations; // rival row name -> 0..100
+	double ConvoySpeedKmPerSol = 60.0;
+	double ConvoyH2PerRun = 8.0;
+	double ConvoyWearParts = 1.0;
+	double RelationPerRun = 2.0;
+	void StepTrade(float SubDt);
+	// Ensure a rival's relation entry exists (lazy seed from RelationStart).
+	double& RelationRef(FName Rival);
+	// One-way transit time for a rival, in sols.
+	double ConvoyLegSolsFor(FName Rival) const;
+	// Trade-lot accounting: does the colony hold this "Res:Kg;..." lot (solids
+	// across building stores + pool; fluids from the pool)? And spend it,
+	// draining solids from building stores in ascending-Id order (deterministic).
+	bool HasTradeLot(const TMap<FName, double>& Lot) const;
+	void SpendTradeLot(const TMap<FName, double>& Lot);
 	// Band boundary thresholds (up>down = the hysteresis gap). Index 0 is the
 	// Failing|Strained edge, 3 is the Thriving|Flourishing edge.
 	double HopeBandUp[4]   = { 28.0, 45.0, 75.0, 90.0 };

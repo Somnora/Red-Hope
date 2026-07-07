@@ -755,6 +755,95 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M3 Gate A self-test: RIVALS & TRADE - convoy dispatch (committed costs),
+	// preflight refusals, the round-trip barter (relation warms), the DUST-STORM
+	// FREEZE, and save v17. `-trade`.
+	if (FParse::Param(*Params, TEXT("trade")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== RIVALS & TRADE TEST (M3 Gate A) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		const auto Dispatch = [&](const TCHAR* Rival)
+		{
+			FRHCommand Cmd; Cmd.Verb = FName("Convoy"); Cmd.Target = FName(Rival);
+			Sim->EnqueueCommand(Cmd);
+			RunSols(0.1); // clear the signal lag + execute
+		};
+		// Inject Zarya (DT_Rivals doesn't exist until its first editor import).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+
+		// The fresh colony has 400 Struct (Lander) + 6 SpareParts, but no fuel.
+		// 1) No hydrogen -> dispatch refused, convoy stays idle.
+		Dispatch(TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE no-fuel: convoy=%s (expect idle - no Hydrogen)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+
+		// 2) Fuel up + dispatch: costs committed at departure (Struct -100, H2 -8,
+		// SpareParts -1), convoy outbound to Zarya.
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		const double Struct0 = Sim->GetTotalSolid(FName("Struct"));
+		Dispatch(TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE dispatched: convoy=%s struct %.0f->%.0f H2=%.0f parts=%.0f (expect Zarya, -100, 32, 5)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString(),
+			Struct0, Sim->GetTotalSolid(FName("Struct")), Sim->GetStock(FName("Hydrogen")),
+			Sim->GetTotalSolid(FName("SpareParts")) + Sim->GetStock(FName("SpareParts")));
+
+		// 3) A second dispatch while the convoy is out -> refused.
+		Dispatch(TEXT("Zarya"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE double-dispatch: still one convoy to %s (expect Zarya - refused)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+
+		// 4) The round trip (2 sols out + 2 back at 60 km/sol over 120 km):
+		// their Ice lands, relation 40 -> 42, convoy idle. Clear sky (sol < 5).
+		const double Ice0 = Sim->GetTotalSolid(FName("Ice"));
+		RunSols(4.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE round trip: convoy=%s ice +%.0f relation=%.0f (expect idle, 150, 42)"),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString(),
+			Sim->GetTotalSolid(FName("Ice")) - Ice0, Sim->GetRivalRelation(FName("Zarya")));
+
+		// 5) The dust-storm FREEZE: jump the clock into Storm_1 (canon sols
+		// 12-15), dispatch, and confirm progress does NOT advance while the storm
+		// blows - then resumes once it clears.
+		Clock->Debug_SetSimSeconds(12.5 * URHSimClockSubsystem::SolLengthSimSeconds);
+		Dispatch(TEXT("Zarya"));
+		const double PStorm = Sim->GetConvoyProgress();
+		RunSols(1.0); // to ~sol 13.6, still inside the storm
+		const double PStill = Sim->GetConvoyProgress();
+		Clock->Debug_SetSimSeconds(16.0 * URHSimClockSubsystem::SolLengthSimSeconds); // past the storm
+		RunSols(0.2);
+		const double PMoving = Sim->GetConvoyProgress();
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE storm freeze: progress %.3f -> %.3f (frozen) -> %.3f (moving) (expect ~equal then greater)"),
+			PStorm, PStill, PMoving);
+
+		// 6) Save v17 round-trip mid-transit: convoy + relations survive.
+		const FName OutTo = Sim->GetConvoyRival();
+		const double RelBefore = Sim->GetRivalRelation(FName("Zarya"));
+		FString Err;
+		Sim->SaveColony(TEXT("tradetest"), Err);
+		Sim->LoadColony(TEXT("tradetest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TRADE save/load v17: convoy %s->%s relation %.0f->%.0f (expect identical)"),
+			OutTo.IsNone() ? TEXT("idle") : *OutTo.ToString(),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString(),
+			RelBefore, Sim->GetRivalRelation(FName("Zarya")));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== RIVALS & TRADE TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

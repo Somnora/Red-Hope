@@ -18,6 +18,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	EventsTable = Cast<UDataTable>(EventsTablePath.TryLoad()); // absent = clear skies
 	RoomsTable = Cast<UDataTable>(RoomsTablePath.TryLoad()); // absent = nothing designatable
 	DiscoveriesTable = Cast<UDataTable>(DiscoveriesTablePath.TryLoad()); // absent = the layer stays dormant
+	RivalsTable = Cast<UDataTable>(RivalsTablePath.TryLoad()); // absent = a lonely Mars
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -228,6 +229,37 @@ void URHDefinitionsSubsystem::Debug_InjectResource(FName Name, const FRHResource
 void URHDefinitionsSubsystem::Debug_InjectManifest(FName Name, const FRHManifestItemRow& Row)
 {
 	if (ManifestTable) { ManifestTable->AddRow(Name, Row); }
+}
+
+const FRHRivalRow* URHDefinitionsSubsystem::GetRival(FName Name) const
+{
+	return RivalsTable ? RivalsTable->FindRow<FRHRivalRow>(Name, TEXT("GetRival"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::ForEachRival(TFunctionRef<void(FName, const FRHRivalRow&)> Fn) const
+{
+	if (!RivalsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : RivalsTable->GetRowMap())
+	{
+		const FRHRivalRow* Row = reinterpret_cast<const FRHRivalRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
+void URHDefinitionsSubsystem::Debug_InjectRival(FName Name, const FRHRivalRow& Row)
+{
+	if (!RivalsTable)
+	{
+		RivalsTable = NewObject<UDataTable>(this, TEXT("DT_Rivals_Transient"));
+		RivalsTable->RowStruct = FRHRivalRow::StaticStruct();
+	}
+	RivalsTable->AddRow(Name, Row);
 }
 
 void URHDefinitionsSubsystem::Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row)

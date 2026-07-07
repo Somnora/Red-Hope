@@ -1005,6 +1005,13 @@ FText SRHCommandDeck::GetCrewText() const
 	{
 		Text += FString::Printf(TEXT("   discoveries: %d"), Sim->GetDiscoveryLog().Num());
 	}
+	// Trade (M3 Gate A): the convoy's status while it's out.
+	if (!Sim->GetConvoyRival().IsNone())
+	{
+		Text += FString::Printf(TEXT("\nCONVOY %s %s   %.0f%%"),
+			Sim->IsConvoyReturning() ? TEXT("returning from") : TEXT("outbound to"),
+			*Sim->GetConvoyRival().ToString(), Sim->GetConvoyProgress() * 100.0);
+	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.
 	if (Sim->GetPlantedCellCount() > 0)

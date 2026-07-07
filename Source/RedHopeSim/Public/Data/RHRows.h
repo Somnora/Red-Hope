@@ -269,3 +269,25 @@ struct REDHOPESIM_API FRHDiscoveryRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
+
+// A rival national colony (M3 Gate A): the neighbor the player trades with -
+// and whom the Solidarity Dilemma will later demand they cut off. One row per
+// settlement; ExportLot is what THEY send per convoy run, ImportLot is your
+// side of the barter. Naming/flavor is Gate-D wording-review placeholder.
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHRivalRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Nation;
+	// Overland distance; transit = Distance / ConvoySpeedKmPerSol each way.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float DistanceKm = 100.f;
+	// "Res:Kg;Res:Kg" - their goods per completed run / your goods per dispatch.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString ExportLot;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString ImportLot;
+	// Opening relation 0..100; completed runs warm it (RelationPerRun).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float RelationStart = 30.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
