@@ -178,6 +178,92 @@ static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDesignate(
+	TEXT("RH.Designate"),
+	TEXT("RH.Designate <Room|None> <Level> <CellIndex> [Count=1] - zone carved cells with a room function (uplink; None clears)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Designate <Room|None> <Level> <CellIndex> [Count=1]"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const int32 Count = Args.Num() > 3 ? FMath::Max(1, FCString::Atoi(*Args[3])) : 1;
+			for (int32 i = 0; i < Count; ++i)
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Designate");
+				Cmd.Target = (Args[0] == TEXT("None")) ? NAME_None : FName(*Args[0]);
+				Cmd.Level = FCString::Atoi(*Args[1]);
+				Cmd.Value = FCString::Atoi(*Args[2]) + i;
+				Sim->EnqueueCommand(Cmd);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHRooms(
+	TEXT("RH.Rooms"),
+	TEXT("RH.Rooms - log every floor's room designations by cell index."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+		{
+			const int32 Carved = Sim->GetFloorCarvedCells(L);
+			if (Carved == 0)
+			{
+				continue;
+			}
+			FString Line = FString::Printf(TEXT("[RH.Rooms] floor %d (%d cells%s):"), L, Carved,
+				Sim->IsFloorRated(L) ? TEXT(", LIVABLE") : TEXT(""));
+			for (int32 i = 0; i < Carved; ++i)
+			{
+				const FName Room = Sim->GetRoomAt(L, i);
+				const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i);
+				Line += FString::Printf(TEXT("\n  cell %d (%+d,%+d): %s"), i, P.X, P.Y,
+					Room.IsNone() ? TEXT("-") : *Room.ToString());
+			}
+			UE_LOG(LogRedHope, Display, TEXT("%s"), *Line);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHHope(
+	TEXT("RH.Hope"),
+	TEXT("RH.Hope - log the colony Hope index with its full component breakdown."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+		UE_LOG(LogRedHope, Display,
+			TEXT("[RH.Hope] %.1f | base %.0f housing +%.1f rooms +%.1f jobs +%.1f (%d seats) milestones +%.1f | adjacency -%.1f (%d pairs) unsupported -%.1f"),
+			H.Total, H.Base, H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Milestones,
+			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateRoom(
+	TEXT("RH.ActivateRoom"),
+	TEXT("RH.ActivateRoom <RowName> - DEBUG: flip a room row slice-active in the loaded table (test knob until the DT_Rooms sync lands)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(Defs ? Defs->GetRoom(FName(*Args[0])) : nullptr))
+		{
+			Row->SliceActive = true;
+			UE_LOG(LogRedHope, Display, TEXT("Room row '%s' slice-active (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateRoom: no room row '%s'"), *Args[0]);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 	TEXT("RH.AddSolid"),
 	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),
@@ -299,8 +385,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCrew(
 		for (const FRHColonist& C : Sim->GetColonists())
 		{
 			const double EvacSols = C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
-			UE_LOG(LogRedHope, Display, TEXT("  %-12s floor %d  %s%s"),
+			const FName Job = Sim->GetColonistJob(C.Id);
+			UE_LOG(LogRedHope, Display, TEXT("  %-12s floor %d  %-12s %s%s"),
 				*C.Name, C.HomeLevel,
+				Job.IsNone() ? TEXT("(no post)") : *Job.ToString(),
 				C.bSupported ? TEXT("supported") : TEXT("UNSUPPORTED"),
 				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (evac in %.1f sols)"), Sim->GetColonistEvacSols() - EvacSols));
 		}

@@ -229,6 +229,36 @@ public:
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
 
+	// --- Rooms & the Hope index (M2 Gate B) ---
+	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
+	// later gate). Cells are addressed by carve index; the canonical square
+	// spiral (below) maps index -> grid offset from the shaft head, so geometry
+	// and presentation agree. Rooms FUNCTION only on rated floors; designation
+	// is allowed anytime (planning ahead is free).
+	// The deterministic carve layout, now sim-owned: adjacency is gameplay
+	// (habitat vision §4), so the sim is the authority on where cell i IS.
+	static FIntPoint SpiralCell(int32 Index);
+	// Designate (or clear, RoomName=None) a room function on a carved cell.
+	bool DesignateRoom(int32 Level, int32 CellIndex, FName RoomName, FString& OutReason);
+	FName GetRoomAt(int32 Level, int32 CellIndex) const;
+	const TMap<int32, TArray<FName>>& GetFloorRoomCells() const { return FloorRoomCells; }
+	// The colonist's job: a seat in a Lab/Workstation cell on a rated floor,
+	// assigned deterministically (shallowest floor, lowest cell, colonists by
+	// Id). Presentation flavor + Hope input; production effects come later.
+	FName GetColonistJob(int32 ColonistId) const { const FName* J = ColonistJobs.Find(ColonistId); return J ? *J : NAME_None; }
+	// The Hope index (brief §5), Gate-B slice: a pure derived read - base +
+	// housing quality + functioning rooms + jobs + milestones - adjacency
+	// offenses - unsupported colonists, clamped 0..100. No sim state; effects
+	// (work speed, growth) wire up in later gates after the framing review.
+	struct FRHHopeBreakdown
+	{
+		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0;
+		double AdjacencyPenalty = 0, UnsupportedPenalty = 0; // stored positive
+		int32 OffendedPairs = 0, FilledSeats = 0;
+		double Total = 0;
+	};
+	FRHHopeBreakdown GetColonyHope() const;
+
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
 	// when you don't know when you'll get valuable sun again." Manual per-
@@ -535,6 +565,20 @@ private:
 	int32 CrewPodColonists = 4;         // colonists per CrewPod cargo item
 	double CrewPodFoodKg = 200.0;       // provisions landed with each pod
 	double ColonistEvacSols = 2.0;      // sustained unsupported time before evacuation
+	// Rooms & Hope (M2 Gate B). FloorRoomCells: per floor, the room function of
+	// each carved cell by spiral index (NAME_None = undesignated). Serialized
+	// (save v11). ColonistJobs is derived (rebuilt each population step + on
+	// load) - never saved, so it can't diverge.
+	TMap<int32, TArray<FName>> FloorRoomCells;
+	TMap<int32, FName> ColonistJobs;
+	void RefreshJobs();
+	double HopeBase = 50.0;
+	double HopeHousingMax = 15.0;       // full when LivingQuarters cells >= population
+	double HopePerMoralePoint = 5.0;    // per room type per rated floor (Living excluded)
+	double HopePerJob = 3.0;
+	double HopeAdjacencyPenalty = 8.0;  // per offended (emitter, refuser) pair
+	double HopeUnsupportedPenalty = 10.0;
+	double HopeVaultMilestone = 5.0;
 	// DT_Config: ShaftSpoilKgPerFloor (bore-column regolith per floor descended),
 	// SpoilKgPerCell (~1200 kg per 10x10 cell carved, underground proposal §2).
 	double ShaftSpoilKgPerFloor = 1200.0;

@@ -770,6 +770,14 @@ FText SRHCommandDeck::GetCrewText() const
 	const double SolsOfFood = Pop > 0 ? FoodKg / (Pop * Sim->GetColonistFoodKgPerSol()) : 0.0;
 	FString Text = FString::Printf(TEXT("CREW %d   beds %d free   Food %.0f kg (~%.0f sols)"),
 		Pop, Sim->GetFreeHousing(), FoodKg, SolsOfFood);
+	// The Hope index (M2 Gate B): the number plus the two levers a player can
+	// actually pull right now. Neutral placeholder wording (Gate-D review).
+	const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+	Text += FString::Printf(TEXT("\nHOPE %.0f"), H.Total);
+	if (H.OffendedPairs > 0)
+	{
+		Text += FString::Printf(TEXT("   layout conflicts: %d (-%.0f)"), H.OffendedPairs, H.AdjacencyPenalty);
+	}
 	for (const FRHColonist& C : Sim->GetColonists())
 	{
 		FString Flag;
@@ -779,7 +787,9 @@ FText SRHCommandDeck::GetCrewText() const
 				- C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
 			Flag = FString::Printf(TEXT("  UNSUPPORTED - evac %.1f sols"), FMath::Max(EvacIn, 0.0));
 		}
-		Text += FString::Printf(TEXT("\n%-12s floor %d%s"), *C.Name, C.HomeLevel, *Flag);
+		const FName Job = Sim->GetColonistJob(C.Id);
+		Text += FString::Printf(TEXT("\n%-12s floor %d  %s%s"), *C.Name, C.HomeLevel,
+			Job.IsNone() ? TEXT("") : *Job.ToString().ToLower(), *Flag);
 	}
 	return FText::FromString(Text);
 }

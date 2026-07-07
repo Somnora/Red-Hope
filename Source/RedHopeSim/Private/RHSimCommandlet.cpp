@@ -193,6 +193,117 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate B self-test: room designations on carved cells, the adjacency
+	// calculus (emit/refuse, hallway+filtration cure), jobs, and the Hope
+	// index arithmetic - exact doubles. Save v11 round-trip. `-rooms`.
+	if (FParse::Param(*Params, TEXT("rooms")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS & HOPE TEST (M2 Gate B) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// The live DT_Rooms predates this gate's activation flips; patch the six
+		// Gate-B rows in memory (the established test-knob pattern - the CSV
+		// carries the truth, the editor session syncs the asset).
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Workstation"), TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway") })
+		{
+			if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr))
+			{
+				Row->SliceActive = true;
+			}
+			else
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("ROOMS: no room row '%s' in DT_Rooms"), RowName);
+				return 1;
+			}
+		}
+
+		// Certify a 6-cell vault and house 4 colonists (stocked so support
+		// noise never touches the Hope assertions).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 900.0);
+		Sim->AddStock(FName("Food"), 200.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(4);
+		RunSols(0.1); // one pass so jobs/support settle
+
+		// 1) Baseline: no designations. 50 base + 5 vault milestone.
+		auto H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS baseline: hope=%.2f rated=%d pop=%d (expect 55.00, 1, 4)"),
+			H.Total, (int32)Sim->IsFloorRated(-1), Sim->GetPopulation());
+
+		// 2) Refusals: dormant function, uncarved cell.
+		const bool bGarden = Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		const bool bFar = Sim->DesignateRoom(-1, 9, FName("Dining"), R);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS refusals: garden=%d cell9=%d (expect 0, 0)"), (int32)bGarden, (int32)bFar);
+
+		// 3) A bad kitchen: Cooking@0 (1,0) beside LQ@1 (1,1), Dining@2 (0,1)
+		// diagonal across the shaft corner. Both offended - dist 1 has no
+		// between, dist 2's common neighbor is the LQ, not a hallway.
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 2, FName("Dining"), R);
+		Sim->DesignateRoom(-1, 0, FName("Cooking"), R);
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS bad kitchen: hope=%.2f pairs=%d housing=%.2f rooms=%.2f (expect 47.25, 2, 3.75, 4.50)"),
+			H.Total, H.OffendedPairs, H.Housing, H.Rooms);
+
+		// 4) The cure: move Cooking to (-1,0) with the Hallway at (-1,1)
+		// between it and Dining, circulator running - partition + filtration
+		// cancels the pair (habitat vision §4). Lab@5 seats one colonist.
+		Sim->DesignateRoom(-1, 0, NAME_None, R);
+		Sim->DesignateRoom(-1, 4, FName("Cooking"), R);
+		Sim->DesignateRoom(-1, 3, FName("Hallway"), R);
+		Sim->DesignateRoom(-1, 5, FName("Lab"), R);
+		RunSols(0.1); // jobs refresh in the population step
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS cured layout: hope=%.2f pairs=%d jobs=%.2f seats=%d (expect 67.75, 0, 3.00, 1)"),
+			H.Total, H.OffendedPairs, H.Jobs, H.FilledSeats);
+
+		// 5) Greed test: swap the hallway for more quarters - the partition
+		// dies and both offenses return. More beds, less Hope: a real tradeoff.
+		Sim->DesignateRoom(-1, 3, FName("LivingQuarters"), R);
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS greed swap: hope=%.2f pairs=%d housing=%.2f (expect 55.50, 2, 7.50)"),
+			H.Total, H.OffendedPairs, H.Housing);
+
+		// 6) The Designate verb rides the uplink like any order.
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Designate");
+		Cmd.Target = FName("Workstation");
+		Cmd.Level = -1;
+		Cmd.Value = 0;
+		Sim->EnqueueCommand(Cmd);
+		RunSols(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS uplink designate: cell0=%s (expect Workstation)"),
+			*Sim->GetRoomAt(-1, 0).ToString());
+
+		// 7) Save v11 round-trip: designations + jobs + the exact Hope total.
+		const double HopeBefore = Sim->GetColonyHope().Total;
+		FString Err;
+		Sim->SaveColony(TEXT("roomstest"), Err);
+		Sim->LoadColony(TEXT("roomstest"), Err);
+		H = Sim->GetColonyHope();
+		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS save/load v11: cell4=%s cell3=%s hope=%.2f (expect Cooking, LivingQuarters, %.2f) seats=%d (expect 2)"),
+			*Sim->GetRoomAt(-1, 4).ToString(), *Sim->GetRoomAt(-1, 3).ToString(), H.Total, HopeBefore, H.FilledSeats);
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M1-d Gate B self-test: the habitability chain - carve, circulate,
 	// oxygen fill from the pool, Livable rating edges (gained + lost via
 	// leakage), save v7 round-trip. `-habitat`.

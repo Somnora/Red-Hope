@@ -16,9 +16,10 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	QuotasTable = Cast<UDataTable>(QuotasTablePath.TryLoad());
 	ManifestTable = Cast<UDataTable>(ManifestTablePath.TryLoad());
 	EventsTable = Cast<UDataTable>(EventsTablePath.TryLoad()); // absent = clear skies
+	RoomsTable = Cast<UDataTable>(RoomsTablePath.TryLoad()); // absent = nothing designatable
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
-	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d solarCurve=%s"),
+	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
 		BuildingsTable ? BuildingsTable->GetRowMap().Num() : 0,
 		RobotsTable ? RobotsTable->GetRowMap().Num() : 0,
 		RecipesTable ? RecipesTable->GetRowMap().Num() : 0,
@@ -26,6 +27,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		QuotasTable ? QuotasTable->GetRowMap().Num() : 0,
 		ConfigTable ? ConfigTable->GetRowMap().Num() : 0,
 		EventsTable ? EventsTable->GetRowMap().Num() : 0,
+		RoomsTable ? RoomsTable->GetRowMap().Num() : 0,
 		SolarCurveTable ? TEXT("ok") : TEXT("MISSING"));
 }
 
@@ -47,6 +49,27 @@ const FRHQuotaRow* URHDefinitionsSubsystem::GetQuota(FName Name) const
 const FRHManifestItemRow* URHDefinitionsSubsystem::GetManifestItem(FName Name) const
 {
 	return ManifestTable ? ManifestTable->FindRow<FRHManifestItemRow>(Name, TEXT("GetManifestItem"), false) : nullptr;
+}
+
+const FRHRoomRow* URHDefinitionsSubsystem::GetRoom(FName Name) const
+{
+	return RoomsTable ? RoomsTable->FindRow<FRHRoomRow>(Name, TEXT("GetRoom"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::ForEachRoom(TFunctionRef<void(FName, const FRHRoomRow&)> Fn) const
+{
+	if (!RoomsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : RoomsTable->GetRowMap())
+	{
+		const FRHRoomRow* Row = reinterpret_cast<const FRHRoomRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
 }
 
 bool URHDefinitionsSubsystem::IsSolidResource(FName Name) const

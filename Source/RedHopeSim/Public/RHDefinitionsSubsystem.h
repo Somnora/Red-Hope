@@ -27,6 +27,11 @@ public:
 	const FRHRobotRow* GetRobot(FName Name) const;
 	const FRHQuotaRow* GetQuota(FName Name) const;
 	const FRHManifestItemRow* GetManifestItem(FName Name) const;
+	// Room function row (M2 Gate B). Returns dormant rows too - callers gate
+	// on SliceActive (designation refuses dormant functions).
+	const FRHRoomRow* GetRoom(FName Name) const;
+	// All slice-active room functions (the deck's designation palette).
+	void ForEachRoom(TFunctionRef<void(FName, const FRHRoomRow&)> Fn) const;
 
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.
@@ -115,6 +120,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath QuotasTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Quotas.DT_Quotas"));
 	UPROPERTY(Config) FSoftObjectPath ManifestTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_ManifestItems.DT_ManifestItems"));
 	UPROPERTY(Config) FSoftObjectPath EventsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Events.DT_Events"));
+	UPROPERTY(Config) FSoftObjectPath RoomsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rooms.DT_Rooms"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -126,5 +132,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> QuotasTable;
 	UPROPERTY() TObjectPtr<UDataTable> ManifestTable;
 	UPROPERTY() TObjectPtr<UDataTable> EventsTable;
+	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 10;  // v10: colonists (M2 Gate A1); v9 manual power/fleet hold; v8 vault exit
+	constexpr uint32 RHSaveVersion = 11;  // v11: room designations (M2 Gate B); v10 colonists; v9 manual power/fleet hold
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -101,6 +101,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	CrewPodColonists = (int32)Defs->GetConfigScalar(FName("CrewPodColonists"), CrewPodColonists);
 	CrewPodFoodKg = Defs->GetConfigScalar(FName("CrewPodFoodKg"), CrewPodFoodKg);
 	ColonistEvacSols = Defs->GetConfigScalar(FName("ColonistEvacSols"), ColonistEvacSols);
+	HopeBase = Defs->GetConfigScalar(FName("HopeBase"), HopeBase);
+	HopeHousingMax = Defs->GetConfigScalar(FName("HopeHousingMax"), HopeHousingMax);
+	HopePerMoralePoint = Defs->GetConfigScalar(FName("HopePerMoralePoint"), HopePerMoralePoint);
+	HopePerJob = Defs->GetConfigScalar(FName("HopePerJob"), HopePerJob);
+	HopeAdjacencyPenalty = Defs->GetConfigScalar(FName("HopeAdjacencyPenalty"), HopeAdjacencyPenalty);
+	HopeUnsupportedPenalty = Defs->GetConfigScalar(FName("HopeUnsupportedPenalty"), HopeUnsupportedPenalty);
+	HopeVaultMilestone = Defs->GetConfigScalar(FName("HopeVaultMilestone"), HopeVaultMilestone);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -1552,6 +1559,9 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 
 void URHSimWorldSubsystem::StepPopulation(float SubDt)
 {
+	// Jobs re-derive every step (rooms/floors/roster all change them); the
+	// reset keeps the map honest at zero pop too.
+	RefreshJobs();
 	if (Colonists.Num() == 0)
 	{
 		return; // pre-crew colonies: zero cost, zero divergence
@@ -1617,6 +1627,241 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			Colonists.RemoveAt(i);
 		}
 	}
+}
+
+FIntPoint URHSimWorldSubsystem::SpiralCell(int32 Index)
+{
+	// Deterministic square spiral over the 10 m cell grid, skipping (0,0)
+	// (the shaft column's own cell): (1,0), (1,1), (0,1), (-1,1), ...
+	// Moved sim-side at Gate B: room adjacency made cell GEOMETRY gameplay,
+	// so the sim owns the layout; presentation reads this same function.
+	int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
+	for (int32 i = 0; i <= Index; ++i)
+	{
+		X += DX; Y += DY;
+		if (++LegPos == LegLen)
+		{
+			LegPos = 0;
+			const int32 T = DX; DX = -DY; DY = T; // turn left
+			if (++LegsDone == 2)
+			{
+				LegsDone = 0;
+				++LegLen;
+			}
+		}
+	}
+	return FIntPoint(X, Y);
+}
+
+bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName RoomName, FString& OutReason)
+{
+	const int32 Carved = GetFloorCarvedCells(Level);
+	if (Level >= 0 || CellIndex < 0 || CellIndex >= Carved)
+	{
+		OutReason = FString::Printf(TEXT("Cell %d on floor %d is not carved yet"), CellIndex, Level);
+		return false;
+	}
+	if (!RoomName.IsNone())
+	{
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(RoomName) : nullptr;
+		if (!Row || !Row->SliceActive)
+		{
+			OutReason = FString::Printf(TEXT("'%s' is not a designatable room function"), *RoomName.ToString());
+			return false;
+		}
+	}
+	TArray<FName>& Cells = FloorRoomCells.FindOrAdd(Level);
+	if (Cells.Num() < Carved)
+	{
+		Cells.SetNum(Carved); // new carves default undesignated
+	}
+	Cells[CellIndex] = RoomName;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Room designation: floor %d cell %d -> %s"),
+		Level, CellIndex, RoomName.IsNone() ? TEXT("(cleared)") : *RoomName.ToString());
+	return true;
+}
+
+FName URHSimWorldSubsystem::GetRoomAt(int32 Level, int32 CellIndex) const
+{
+	const TArray<FName>* Cells = FloorRoomCells.Find(Level);
+	return (Cells && Cells->IsValidIndex(CellIndex)) ? (*Cells)[CellIndex] : NAME_None;
+}
+
+void URHSimWorldSubsystem::RefreshJobs()
+{
+	// Deterministic seat assignment: floors shallow->deep, cells in carve
+	// order, colonists by Id. One seat per Lab/Workstation cell on a RATED
+	// floor. (Job functions widen at Gate C - the garden wants gardeners.)
+	ColonistJobs.Reset();
+	if (Colonists.Num() == 0 || !Defs)
+	{
+		return;
+	}
+	TArray<int32> ByIdOrder;
+	for (const FRHColonist& C : Colonists)
+	{
+		ByIdOrder.Add(C.Id);
+	}
+	ByIdOrder.Sort();
+	int32 Next = 0;
+	for (int32 Level = -1; Level >= -MaxDepth && Next < ByIdOrder.Num(); --Level)
+	{
+		if (!RatedFloors.Contains(Level))
+		{
+			continue;
+		}
+		const TArray<FName>* Cells = FloorRoomCells.Find(Level);
+		if (!Cells)
+		{
+			continue;
+		}
+		for (int32 i = 0; i < Cells->Num() && Next < ByIdOrder.Num(); ++i)
+		{
+			const FRHRoomRow* Row = Defs->GetRoom((*Cells)[i]);
+			if (Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation")))
+			{
+				ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
+			}
+		}
+	}
+}
+
+URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() const
+{
+	// Pure derived read (approved M0 decision: Hope is an index, never a
+	// stockpile). Components per the Gate-B slice; all weights DT_Config.
+	FRHHopeBreakdown Out;
+	Out.Base = HopeBase;
+	if (bVaultRated)
+	{
+		Out.Milestones = HopeVaultMilestone;
+	}
+
+	const int32 Pop = Colonists.Num();
+	int32 LQCells = 0;
+	TSet<FName> TypesCounted; // per room type per rated floor
+	for (const auto& Pair : FloorRoomCells)
+	{
+		const int32 Level = Pair.Key;
+		if (!RatedFloors.Contains(Level))
+		{
+			continue; // rooms function only on certified floors
+		}
+		const TArray<FName>& Cells = Pair.Value;
+		for (int32 i = 0; i < Cells.Num(); ++i)
+		{
+			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Cells[i]) : nullptr;
+			if (!Row || !Row->SliceActive)
+			{
+				continue;
+			}
+			if (Row->Function == FName("Living"))
+			{
+				++LQCells; // housing quality, counted below - never double-dipped
+			}
+			else if (Row->MoraleWeight > 0.f)
+			{
+				const FName FloorType(*FString::Printf(TEXT("%d:%s"), Level, *Row->Function.ToString()));
+				if (!TypesCounted.Contains(FloorType))
+				{
+					TypesCounted.Add(FloorType);
+					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
+				}
+			}
+		}
+
+		// Adjacency offenses (habitat vision §4): an emitter reaches refusers
+		// within Manhattan distance 2. At distance 1 nothing fits between -
+		// the penalty is architectural and permanent. At distance 2 a Hallway
+		// cell directly between them, with the floor's circulation running,
+		// cancels it (partition + filtration - the canonical cure).
+		for (int32 E = 0; E < Cells.Num(); ++E)
+		{
+			const FRHRoomRow* ERow = Defs ? Defs->GetRoom(Cells[E]) : nullptr;
+			if (!ERow || !ERow->SliceActive || ERow->EmitsTags.IsEmpty())
+			{
+				continue;
+			}
+			TArray<FString> Emits;
+			ERow->EmitsTags.ParseIntoArray(Emits, TEXT(";"));
+			const FIntPoint EPos = SpiralCell(E);
+			for (int32 R = 0; R < Cells.Num(); ++R)
+			{
+				if (R == E)
+				{
+					continue;
+				}
+				const FRHRoomRow* RRow = Defs ? Defs->GetRoom(Cells[R]) : nullptr;
+				if (!RRow || !RRow->SliceActive || RRow->RefusesTags.IsEmpty())
+				{
+					continue;
+				}
+				TArray<FString> Refuses;
+				RRow->RefusesTags.ParseIntoArray(Refuses, TEXT(";"));
+				bool bOffends = false;
+				for (const FString& Tag : Emits)
+				{
+					if (Refuses.Contains(Tag))
+					{
+						bOffends = true;
+						break;
+					}
+				}
+				if (!bOffends)
+				{
+					continue;
+				}
+				const FIntPoint RPos = SpiralCell(R);
+				const int32 Dist = FMath::Abs(EPos.X - RPos.X) + FMath::Abs(EPos.Y - RPos.Y);
+				if (Dist > 2)
+				{
+					continue; // out of reach
+				}
+				if (Dist == 2 && IsFloorCirculated(Level))
+				{
+					// A Hallway on any cell 4-adjacent to BOTH ends partitions
+					// the pair (straight runs have one such cell, diagonals two).
+					bool bPartitioned = false;
+					for (int32 H = 0; H < Cells.Num() && !bPartitioned; ++H)
+					{
+						const FRHRoomRow* HRow = Defs ? Defs->GetRoom(Cells[H]) : nullptr;
+						if (!HRow || !HRow->SliceActive || HRow->Function != FName("Hallway"))
+						{
+							continue;
+						}
+						const FIntPoint HPos = SpiralCell(H);
+						const int32 DE = FMath::Abs(HPos.X - EPos.X) + FMath::Abs(HPos.Y - EPos.Y);
+						const int32 DR = FMath::Abs(HPos.X - RPos.X) + FMath::Abs(HPos.Y - RPos.Y);
+						bPartitioned = (DE == 1 && DR == 1);
+					}
+					if (bPartitioned)
+					{
+						continue;
+					}
+				}
+				++Out.OffendedPairs;
+			}
+		}
+	}
+
+	if (Pop > 0)
+	{
+		Out.Housing = HopeHousingMax * FMath::Min(1.0, (double)LQCells / (double)Pop);
+	}
+	Out.FilledSeats = ColonistJobs.Num();
+	Out.Jobs = Out.FilledSeats * HopePerJob;
+	Out.AdjacencyPenalty = Out.OffendedPairs * HopeAdjacencyPenalty;
+	for (const FRHColonist& C : Colonists)
+	{
+		if (!C.bSupported)
+		{
+			Out.UnsupportedPenalty += HopeUnsupportedPenalty;
+		}
+	}
+	Out.Total = FMath::Clamp(
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty, 0.0, 100.0);
+	return Out;
 }
 
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
@@ -2022,6 +2267,18 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		CarveQueue.FindOrAdd(Cmd.Level) += Cells;
 		UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d (%d queued there)"),
 			Cells, Cmd.Level, CarveQueue[Cmd.Level]);
+	}
+	else if (Cmd.Verb == FName("Designate"))
+	{
+		// M2 Gate B: zone a carved cell with a room function (Target = room row,
+		// None = clear; Value = spiral cell index). Zoning is free - it rides
+		// the uplink like every other order because it IS an order.
+		FString Reason;
+		if (!DesignateRoom(Cmd.Level, (int32)Cmd.Value, Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 	}
 
 	OnCommandExecuted.Broadcast(Cmd);
@@ -3035,6 +3292,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
 		}
 	}
+	// Room designations (save v11).
+	Ar << FloorRoomCells;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3198,12 +3457,16 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
 		}
 	}
+	// Room designations (save v11). Map repopulates wholesale.
+	FloorRoomCells.Empty();
+	Ar << FloorRoomCells;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.
 	Clock->Debug_SetSimSeconds(SimSeconds);
 	Clock->SetSpeed(1.f);
 	LastAutosaveSol = Clock->GetSol();
+	RefreshJobs(); // derived, never saved - rebuilt from the loaded roster + rooms
 
 	// Transient edge state re-derives from the loaded clock: a mid-storm load
 	// must not re-announce "onset", and the ship countdown picks up mid-run.
