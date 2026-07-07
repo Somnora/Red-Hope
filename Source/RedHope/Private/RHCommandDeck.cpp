@@ -732,6 +732,17 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			Text += FString::Printf(TEXT("\nDUST STORM: solar output at %.0f%% of clear sky"), Dust * 100.0);
 		}
+		// Per-station flare legibility (M1-c): during a solar flare a surface
+		// station reads an elevated radiation index. The storm dims your panels;
+		// the flare irradiates your machinery - each hazard now says so on the
+		// card. The parenthetical previews the M1-d payoff: dig in and it drops.
+		const float RadBase = Sim->GetRadiationAtLevel(B->Level);
+		const float RadNow = Sim->GetRadiationNow(B->Level);
+		if (RadNow > RadBase + KINDA_SMALL_NUMBER)
+		{
+			Text += FString::Printf(TEXT("\nSOLAR FLARE: radiation x%.1f (exposed at surface; shielded underground)"),
+				RadNow / FMath::Max(RadBase, KINDA_SMALL_NUMBER));
+		}
 	}
 
 	if (Def)

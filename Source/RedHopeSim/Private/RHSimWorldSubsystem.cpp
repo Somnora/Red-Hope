@@ -87,6 +87,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
 	RepairWearPerPart = (float)Defs->GetConfigScalar(FName("RepairWearPerPart"), RepairWearPerPart);
 	StormWearMul = (float)Defs->GetConfigScalar(FName("StormWearMul"), StormWearMul);
+	RadiationSurface = (float)Defs->GetConfigScalar(FName("RadiationSurface"), RadiationSurface);
+	RadiationPerLevelMul = (float)Defs->GetConfigScalar(FName("RadiationPerLevelMul"), RadiationPerLevelMul);
 	if (Clock)
 	{
 		Clock->OnSolElapsed.AddUObject(this, &URHSimWorldSubsystem::HandleSolElapsed);
@@ -979,6 +981,34 @@ double URHSimWorldSubsystem::GetDustFactorNow() const
 		return Event->Severity;
 	}
 	return Defs ? Defs->GetConfigScalar(FName("DustFactor"), 1.0) : 1.0;
+}
+
+float URHSimWorldSubsystem::GetRadiationAtLevel(int32 Level) const
+{
+	// Level 0 = surface (index 1.0). Subsurface floors are negative; each floor
+	// of overburden multiplies exposure by RadiationPerLevelMul (~0.05 = a
+	// couple metres of regolith is excellent shielding). Above-surface stays
+	// at the surface index.
+	const int32 Depth = FMath::Max(0, -Level);
+	return RadiationSurface * FMath::Pow(RadiationPerLevelMul, (float)Depth);
+}
+
+float URHSimWorldSubsystem::GetRadiationNow(int32 Level) const
+{
+	float Rad = GetRadiationAtLevel(Level);
+	// A solar flare floods the surface; overburden still shields, so only the
+	// sky-exposed floors (Level >= 0) take the multiplier.
+	if (Level >= 0)
+	{
+		if (const FRHEventRow* Event = GetActiveEvent())
+		{
+			if (Event->Type == FName("SolarFlare"))
+			{
+				Rad *= Event->Severity;
+			}
+		}
+	}
+	return Rad;
 }
 
 void URHSimWorldSubsystem::StepPower(float SubDt)

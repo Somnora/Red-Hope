@@ -1,5 +1,14 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 20 (StormWearMul live in DT; radiation plumbing; shielding tax deferred to M1-d)
+
+- **Editor task cleared:** `StormWearMul = 2.0` added to the live DT_Config (was code-default-only since Session 19). Radiation config rows landed alongside it: `RadiationSurface = 1.0`, `RadiationPerLevelMul = 0.05`. Asset saved + insurance-committed before the compile gate (`5073816`, per the Content-trash rule).
+- **Radiation plumbing (M1-c):** `GetRadiationAtLevel(Level)` — surface index 1.0, each floor of overburden ×0.05 (≈20× shielding/floor); `GetRadiationNow(Level)` — a live solar flare multiplies the *surface* index by its severity while subsurface stays shielded. Config-driven (GetConfigScalar, defaults match CSV).
+- **The flare now has a per-station tell.** Its only prior surface was the alert banner + a silent wear ×3. An exposed station's inspection card now reads `SOLAR FLARE: radiation ×3 (exposed at surface; shielded underground)` — the symmetric partner to the storm's `solar output at 30%` line, and it plants the M1-d underground payoff. `RH.Radiation` cheat dumps the per-floor curve; the RHSim commandlet now prints the shielding curve + peak surface exposure over a run.
+- **Shielding build tax DEFERRED to M1-d (design ruling this session):** every building is Level 0 today (no subsurface until the M1-d shaft), so a surface tax would raise all costs uniformly, break the M0-c regression arc, and create zero tradeoff — there's no underground alternative to shield toward. It becomes a real decision only in M1-d paired with the vault. Moving it there tightens M1-c's remaining scope to: radiation plumbing (done) + the director's weather-surface hand-play.
+- **Verified headless (RHSim commandlet):** peak surface radiation over a 6-sol run = **3.000** (the sol-4 test flare, severity 3.0, plumbs through `GetRadiationNow`); clear-sky surface = 1.000; overburden curve 1.0 → 0.05 → 0.0025 down the shaft. Two compiles clean (54 s full, 10 s incremental).
+- **Still open for the director:** RC-M vs no-robot-repairs ruling (gates M1-d schema); the weather/alert-surface hand-play (editor build is current); TEST event-row removal at M1-c close.
+
 ## 2026-07-07 — Session 19 (director weather/arrival rulings implemented + verified headless)
 
 - **Rulings from the M1-c hand-play debrief (design-decisions 2026-07-07b), all implemented this session:**

@@ -45,10 +45,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	const int32 StepsPerSol = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
 	UE_LOG(LogRedHopeSim, Display, TEXT("RHSim headless: era-integrating %d sols (%d one-minute steps/sol)"), Sols, StepsPerSol);
 
+	// Peak surface exposure over the run: a live solar flare multiplies the
+	// surface index by its severity, so this catches the spike even when no
+	// whole-sol stop lands inside the (sub-sol) flare window.
+	float PeakSurfaceRad = 0.f;
 	for (int32 Step = 0; Step < Sols * StepsPerSol; ++Step)
 	{
 		Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
 		Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		PeakSurfaceRad = FMath::Max(PeakSurfaceRad, Sim->GetRadiationNow(0));
 	}
 
 	// The ledger, printed. CI greps these lines.
@@ -69,6 +74,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("buildings: %d | sol: %d | quota phase: %d"),
 		Sim->GetBuildings().Num(), Clock->GetSol(), (int32)Sim->GetQuotaPhase());
+	// Radiation profile (M1-c): surface exposure now (spikes under a live flare)
+	// and the overburden-shielded curve down the shaft - the M1-d vault's whole
+	// argument, printed so the balance runner can see it.
+	UE_LOG(LogRedHopeSim, Display, TEXT("radiation surface now: %.3f (steady-state %.3f) | peak surface over run: %.3f"),
+		Sim->GetRadiationNow(0), Sim->GetRadiationAtLevel(0), PeakSurfaceRad);
+	for (int32 Lvl = 0; Lvl >= -Sim->GetMaxDepth(); --Lvl)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("radiation level %d: %.4f"), Lvl, Sim->GetRadiationAtLevel(Lvl));
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== RHSim LEDGER END ==="));
 
 	GEngine->DestroyWorldContext(World);

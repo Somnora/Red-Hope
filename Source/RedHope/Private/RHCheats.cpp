@@ -337,6 +337,28 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFleet(
 		});
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHRadiation(
+	TEXT("RH.Radiation"),
+	TEXT("RH.Radiation - log the radiation index per floor (surface to MaxDepth) plus any live solar-flare surface spike."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		const float SurfaceNow = Sim->GetRadiationNow(0);
+		const float SurfaceBase = Sim->GetRadiationAtLevel(0);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Radiation] surface index %.3f%s"),
+			SurfaceNow,
+			SurfaceNow > SurfaceBase + KINDA_SMALL_NUMBER
+				? *FString::Printf(TEXT("  (SOLAR FLARE x%.1f)"), SurfaceNow / FMath::Max(SurfaceBase, KINDA_SMALL_NUMBER))
+				: TEXT(""));
+		for (int32 Level = 0; Level >= -Sim->GetMaxDepth(); --Level)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  level %d: radiation %.4f (steady-state, overburden-shielded)"),
+				Level, Sim->GetRadiationAtLevel(Level));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHManifest(
 	TEXT("RH.Manifest"),
 	TEXT("RH.Manifest <ItemRowName> - add an item to the open manifest (e.g. RH.Manifest SolarPack)."),

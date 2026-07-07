@@ -102,6 +102,11 @@ Full rationale for each in `docs/step1-digest-and-recommendations.md`.
 - **Ship arrival countdown alerts:** at T-2 and T-1 sols to touchdown the colony gets a loud alert to prepare. Implemented this session for the supply ship; crew ships inherit the same seam in M2.
 - **M1-d/M2 habitat mapping approved** as proposed in `docs/habitat-vision.md` §9 (M1-d births room/compartment/door/filtration schemas dormant; M2 activates the human layer).
 
+## Decision — 2026-07-07c (radiation plumbing lands in M1-c; shielding build tax moves to M1-d)
+
+- **Radiation is now a plumbed, data-driven quantity** (config: `RadiationSurface` 1.0, `RadiationPerLevelMul` 0.05): surface exposure index attenuated per floor of overburden (≈20×/floor), with a live solar flare multiplying the *surface* index by its severity. Consumed in M1-c only as **per-station flare legibility** on the inspection card (`SOLAR FLARE: radiation ×N`), giving the flare the same station-level "why" the storm already has and previewing the underground payoff. M2's human-health layer and M1-d's vault read the same accessors.
+- **Shielding build tax deferred from M1-c to M1-d** (agent design ruling, within approved M1-c scope): with every structure at Level 0 (no subsurface until the M1-d shaft), a surface-shielding cost tax would raise *all* build costs uniformly, break the M0-c scripted regression arc, and create no decision — there is no shielded underground alternative to weigh against. The tax only becomes meaningful in M1-d, paired with the vault, where surface-vs-underground is a real tradeoff. **This supersedes the M1-c spec's "surface radiation/shielding tax" line item** — radiation plumbing ships in M1-c; the *cost tax* ships in M1-d. Flag to director if you'd rather force it earlier.
+
 ## Pending — awaiting director review
 
 - (superseded) **M1-b stage close:** Gates A (Z-model + footprint), B (fleet reality), C (player's eyes) all committed + verified headless/smoke; the stage-end hand-played director run is the remaining sign-off (survey by hand → Ice_A appears; inspection card; fleet panel; PAUSED banner).

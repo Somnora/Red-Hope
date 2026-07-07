@@ -220,6 +220,15 @@ public:
 	// Solar multiplier right now: the active dust storm's Severity, else the
 	// clear-sky DustFactor config row (1.0).
 	double GetDustFactorNow() const;
+	// Radiation exposure index at a floor. Overburden shields: each level down
+	// multiplies the surface index by RadiationPerLevelMul (M1-c plumbing;
+	// the M1-d vault trades boring cost for near-zero radiation, and M2's human
+	// layer reads this for health). Steady-state - no active-flare spike.
+	float GetRadiationAtLevel(int32 Level) const;
+	// As above, but a live solar flare multiplies the *surface* index by its
+	// Severity (subsurface stays shielded). This is the number the player sees
+	// spike on an exposed station's card mid-flare.
+	float GetRadiationNow(int32 Level) const;
 	// Last 3 sols of (GenW, LoadW, BatteryWh), one sample per sol-hour, oldest
 	// first. Transient - rebuilds after load (the chart is a gauge, not truth).
 	const TArray<FVector3f>& GetPowerHistory() const { return PowerHistory; }
@@ -326,6 +335,13 @@ private:
 	// at this multiple (the storm grinds machinery; shelter arrives with the
 	// M2 warehouse). DT_Config row StormWearMul.
 	float StormWearMul = 2.f;
+	// Radiation model (M1-c): surface baseline index and per-level attenuation
+	// (each floor down multiplies by this). DT_Config rows RadiationSurface,
+	// RadiationPerLevelMul. Overburden is free shielding - the M1-d vault's
+	// whole point. No M1-c consumer taxes it yet (shielding build tax lands in
+	// M1-d with the underground contrast); M1-c only surfaces the flare spike.
+	float RadiationSurface = 1.f;
+	float RadiationPerLevelMul = 0.05f;
 	// Transient event-edge + ship-countdown state (never serialized; a load
 	// re-derives both from the clock + quota phase on the next step).
 	bool bEventWasActive = false;
