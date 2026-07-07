@@ -1,5 +1,16 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 41 (M4 Gate C — Earth's pre-emptive pressure: embargo / defection / pacify)
+
+- **Gate C built + verified (`b70757b` data, `8faa19d` code, save v22):** the escalation above the Solidarity Dilemma.
+  - **Influence** — a diplomatic soft currency earned by fair dealing (per honest trade, per launder) and a passive drift **scaled by positive HumanNature** (the Evolved path earns the tools of peace). Spent to pacify.
+  - **Embargo** — once Earth tension crosses `EarthPreemptiveThreshold` (75, above the Solidarity demand's 60 = an escalation), `StepPreemptive` turns a neighbor against you — **Earth leans hardest on your closest friend** (highest relation; the betrayal hurts most). That rival embargoes you (convoy refused) with an `EmbargoGraceSols` countdown; one incoming crisis at a time.
+  - **Pacify** (`Pacify <Rival>`) — spend Influence → the colony ignores Earth; embargo lifted, tension eased, HumanNature toward Evolved.
+  - **Defection** — an un-pacified embargo hardens past the grace into a permanent defection (relation locked low, route closed). The cost of neglect.
+  - `StepPreemptive` runs both bands via `StepEarth` (inherits the has-neighbors inert gate); all linear/threshold → parity-safe. `RH.Pacify`; deck EARTH line shows influence + the embargo prompt.
+  - `-preemptive` self-test all EXACT (influence + HumanNature from a trade; embargo at 78; pacify −20/−20 lifts it; re-embargo → defection at grace expiry, relation locked 5; save v22 round-trip). All 18 suites green; baseline byte-identical.
+- **M4 is one gate from complete.** Gate D is the finale: the dynamic crises (deepen the solar flare into a systemic blackout + deterministic robot-*malfunction downtime* — never feral), the **alignment-gated crisis selector** (HumanNatureAxis × IdentityAxis picks WHICH crisis fires — the spec's thematic payoff), the **endings framework** reading both axes, and — critically — the **standing Gate-D mental-health framing review** of ALL the placeholder wording across M2/M3/M4. That review is the director's to run.
+
 ## 2026-07-07 — Session 40 (review debt cleared; M4 Gate B — the espionage economy)
 
 - **Cleared the review debt (director's instruction).** Re-ran the adversarial review over M3 Gate B+C (`39d4c02..9ea692a`) and M4 Gate A (`aabd7f3..38eff55`) — this time with real coverage. **One HIGH confirmed + fixed:** the covert detection roll seeded on `GetTypeHash(FName)`, whose value is the process-unstable FName comparison index — the caught↔clean *outcome* (not just bytes) could differ run-to-run / on reload. **Fixed** to `FCrc::StrCrc32` (content-stable); `-covert` now pins the exact sequence (CXCX) as a cross-machine determinism guard. Two other findings adjudicated no-fix and documented (design-decisions 2026-07-07n): the SolidarityHope snap-to-zero (refuted — sol boundaries always coincide in both bands, verified via the exact clock constants) and unsorted map serialization (accepted — consistent with the dominant `Stocks`-pool precedent; parity harness compares ledger values, not save bytes). Save-symmetry v17–v20 verified by direct inspection.
