@@ -280,6 +280,13 @@ public:
 	// every Phase-1 baseline is untouched. Exactly 1.0 at zero population - no
 	// people, no tempo - which keeps the pre-crew regressions bit-identical.
 	double GetHumanWorkTempo() const;
+	// The Generational Carrot reads (deck + M3 identity axis).
+	int32 GetBirthsOnMars() const { return BirthsOnMars; }
+	bool HasFirstBorn() const { return bFirstBornAnnounced; }
+	// Progress toward the next birth, 0..1 (0 when the colony isn't currently
+	// eligible to grow - the deck shows a live "next arrival" bar only then).
+	double GetGrowthProgress() const;
+	bool IsGrowthEligible() const;
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -641,6 +648,23 @@ private:
 	double HopeTempoSlope = 0.006;      // tempo = 1 + slope*(smoothed-50)
 	double HopeTempoMin = 0.60;         // a strained colony is slow, never dead
 	double HopeTempoMax = 1.25;
+	// The Generational Carrot (M2 Gate D+): what a FLOURISHING colony EARNS. A
+	// deterministic sol-accumulator, zero RNG - streak the sols where smoothed
+	// Hope >= threshold AND there is housing headroom AND a real food buffer;
+	// when the streak crosses the interval, the colony GROWS by one (a birth,
+	// via the existing housing path). The FIRST such birth is the brief's
+	// "first Martian-born child" - a one-time Hope surge and the seed of the M3
+	// identity axis (native-born citizens weight the colony toward Mars).
+	// Threshold-on-monotone-accumulator = the most era-parity-safe construct
+	// (no sub-step ordering sensitivity), evaluated at the sol boundary.
+	double HopeGrowthThreshold = 75.0;    // smoothed Hope needed to grow
+	double HopeGrowthIntervalSols = 20.0; // sustained sols per new colonist
+	double HopeGrowthFoodBufferSols = 6.0;// required Food buffer (sols of colony draw)
+	double HopeFirstBornMilestone = 6.0;  // one-time Hope bonus once a child is born
+	double HopeGrowthStreakSols = 0.0;    // serialized (save v15): the running streak
+	bool bFirstBornAnnounced = false;     // serialized: the milestone fires once, never retracts
+	int32 BirthsOnMars = 0;               // serialized: native-born count (M3 identity seed)
+	void StepGrowth(float SubDt);
 	// Band boundary thresholds (up>down = the hysteresis gap). Index 0 is the
 	// Failing|Strained edge, 3 is the Thriving|Flourishing edge.
 	double HopeBandUp[4]   = { 28.0, 45.0, 75.0, 90.0 };

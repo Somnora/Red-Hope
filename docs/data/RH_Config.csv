@@ -79,3 +79,7 @@ WaterPotabilityDecayPerSol,0.08,per-sol,"M2 Gate D+ water loop: potability lost 
 WaterPotabilityRestorePerKg,0.0008,per-kg,"M2 Gate D+ water loop: potability restored per kg of FRESH ice-melt water entering the pool (linear = era-parity-safe); makes ice-cap drilling the standing imperative"
 WaterPotabilityFloor,0.6,fraction,"M2 Gate D+ water loop: below this potability the crew takes a Hope penalty (grim recycled water saps morale) - the first scarcity-driven Hope input"
 HopeWaterPenalty,12,points,"M2 Gate D+ water loop: max Hope lost at zero potability, scaled by how far below the floor (prevention-framed morale pressure, not a death spiral)"
+HopeGrowthThreshold,75,points,"M2 Gate D+ generational carrot: smoothed Hope at/above this (the THRIVING band) lets the colony grow - births are earned by sustained flourishing"
+HopeGrowthIntervalSols,20,sols,"M2 Gate D+ generational carrot: sustained eligible sols per new colonist (a birth); the streak resets if conditions lapse - momentum is earned, not banked"
+HopeGrowthFoodBufferSols,6,sols,"M2 Gate D+ generational carrot: required Food buffer (in sols of colony draw) before the colony will grow - you do not birth into a famine"
+HopeFirstBornMilestone,6,points,"M2 Gate D+ generational carrot: one-time Hope bonus once the FIRST Martian-born child arrives (never retracts) - the brief milestone + M3 identity-axis seed"

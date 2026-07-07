@@ -572,6 +572,95 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// M2 Gate D+ self-test: the GENERATIONAL CARROT - a flourishing colony grows,
+	// the food-buffer + housing gates, the first-Martian-born milestone + its
+	// Hope surge, streak reset on lapse, save v15. `-growth`.
+	if (FParse::Param(*Params, TEXT("growth")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST (M2 Gate D+) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		// Top up fresh ice-melt each step so water POTABILITY stays high - this
+		// test isolates the GROWTH gate from the (separately tested) water loop,
+		// whose potability decay would otherwise drag Hope below the threshold.
+		// ~100 kg/sol holds potability against the 0.08/sol decay.
+		const auto RunSols = [&](double Sols)
+		{
+			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(100.0 * StepSols);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab") })
+		{
+			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
+			if (!Row || !Row->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("GROWTH: DT_Rooms '%s' not active"), RowName); return 1; }
+		}
+
+		// Certify an 8-cell vault, house 2 (so there is HOUSING HEADROOM to grow
+		// into), and zone rooms so Hope climbs into THRIVING. Deep O2/Water so
+		// only the growth gates are ever the variable.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 8, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 2000.0);
+		Sim->AddStock(FName("Food"), 4000.0); // deep buffer -> food gate always met
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		// Rooms: 2 quarters (housing), a Lab (jobs+morale) -> Hope well into THRIVING.
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 2, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 3, FName("Lab"), R);
+		RunSols(14.0); // let the smoothed mood settle above the growth threshold
+		               // (instant ~77.5; the exp smoother needs > 2 Tau to cross 75)
+
+		// 1) Eligible + growing: smoothed Hope >= 75, free beds, food buffer.
+		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH eligible: smoothed=%.1f band=%s eligible=%d pop=%d beds-free=%d"),
+			Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), (int32)Sim->IsGrowthEligible(),
+			Sim->GetPopulation(), Sim->GetFreeHousing());
+
+		// 2) Run one full growth interval (20 sols) -> exactly one birth, and it
+		// is the FIRST MARTIAN (milestone + a Hope surge folded into the index).
+		const int32 Pop0 = Sim->GetPopulation();
+		const double MilestonesBefore = Sim->GetColonyHope().Milestones;
+		RunSols(20.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH first birth: pop %d->%d births=%d firstBorn=%d (expect 2->3, 1, 1)"),
+			Pop0, Sim->GetPopulation(), Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn());
+		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH milestone: Hope milestones %.1f -> %.1f (expect 5.0 -> 11.0 = vault + first-born)"),
+			MilestonesBefore, Sim->GetColonyHope().Milestones);
+
+		// 3) Streak RESETS when the colony stops flourishing: crash Hope by
+		// gutting housing quality (evict the quarters) -> not eligible -> streak 0.
+		Sim->DesignateRoom(-1, 0, NAME_None, R);
+		Sim->DesignateRoom(-1, 1, NAME_None, R);
+		Sim->DesignateRoom(-1, 2, NAME_None, R);
+		Sim->DesignateRoom(-1, 3, NAME_None, R);
+		RunSols(8.0); // mood falls out of THRIVING
+		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH lapse: smoothed=%.1f eligible=%d progress=%.2f (expect not-eligible, 0.00)"),
+			Sim->GetHopeSmoothed(), (int32)Sim->IsGrowthEligible(), Sim->GetGrowthProgress());
+
+		// 4) Save v15 round-trip: births + first-born flag survive.
+		const int32 BirthsBefore = Sim->GetBirthsOnMars();
+		FString Err;
+		Sim->SaveColony(TEXT("growthtest"), Err);
+		Sim->LoadColony(TEXT("growthtest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH save/load v15: births %d->%d firstBorn=%d (expect identical, 1)"),
+			BirthsBefore, Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// M2 Gate D+ self-test: the WATER LOOP - colonist draw + greywater reclaim,
 	// potability decay vs fresh ice-melt restore (linear/parity-safe), the Hope
 	// penalty below the floor, thirst as a support-contract fail, save v14. `-water`.

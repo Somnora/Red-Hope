@@ -985,6 +985,16 @@ FText SRHCommandDeck::GetCrewText() const
 	{
 		Text += FString::Printf(TEXT("   comforts %d/%d (+%.0f)"), Sim->GetComfortsSuppliedCount(), Pop, H.Comforts);
 	}
+	// The generational carrot (M2 Gate D+): a flourishing colony grows. Show a
+	// live "next arrival" bar only while eligible; the first-born is a badge.
+	if (Sim->IsGrowthEligible())
+	{
+		Text += FString::Printf(TEXT("\nFLOURISHING - next arrival %.0f%%"), Sim->GetGrowthProgress() * 100.0);
+	}
+	if (Sim->GetBirthsOnMars() > 0)
+	{
+		Text += FString::Printf(TEXT("   born on Mars: %d"), Sim->GetBirthsOnMars());
+	}
 	// The garden (M2 Gate C): net food math at a glance - the line that says
 	// whether the ~40-sol provisions clock is beaten.
 	if (Sim->GetPlantedCellCount() > 0)

@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 14;  // v14: water potability; v13 Hope-drives; v12 garden; v11 rooms; v10 colonists
+	constexpr uint32 RHSaveVersion = 15;  // v15: generational growth; v14 water; v13 Hope-drives; v12 garden; v11 rooms
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -135,6 +135,10 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeBandDown[2] = Defs->GetConfigScalar(FName("HopeThrivingExit"),     HopeBandDown[2]);
 	HopeBandUp[3]   = Defs->GetConfigScalar(FName("HopeFlourishingEnter"), HopeBandUp[3]);
 	HopeBandDown[3] = Defs->GetConfigScalar(FName("HopeFlourishingExit"),  HopeBandDown[3]);
+	HopeGrowthThreshold = Defs->GetConfigScalar(FName("HopeGrowthThreshold"), HopeGrowthThreshold);
+	HopeGrowthIntervalSols = Defs->GetConfigScalar(FName("HopeGrowthIntervalSols"), HopeGrowthIntervalSols);
+	HopeGrowthFoodBufferSols = Defs->GetConfigScalar(FName("HopeGrowthFoodBufferSols"), HopeGrowthFoodBufferSols);
+	HopeFirstBornMilestone = Defs->GetConfigScalar(FName("HopeFirstBornMilestone"), HopeFirstBornMilestone);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -292,6 +296,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepAgriculture(SubDt);
 	StepPopulation(SubDt);
 	StepHope(SubDt); // after population so the mood reflects this step's support state
+	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
 	StepQuota();
 	StepPower(SubDt);
 }
@@ -423,6 +428,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepAgriculture(DtSimSeconds);
 	StepPopulation(DtSimSeconds);
 	StepHope(DtSimSeconds); // same order as the agent band (parity)
+	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
 }
@@ -1992,6 +1998,10 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	{
 		Out.Milestones = HopeVaultMilestone;
 	}
+	if (bFirstBornAnnounced)
+	{
+		Out.Milestones += HopeFirstBornMilestone; // the first Martian, forever a source of hope
+	}
 
 	const int32 Pop = Colonists.Num();
 	int32 LQCells = 0;
@@ -2153,6 +2163,76 @@ void URHSimWorldSubsystem::UpdateHopeBand()
 	while (B < 4 && HopeSmoothed >= HopeBandUp[B]) { ++B; }
 	while (B > 0 && HopeSmoothed <  HopeBandDown[B - 1]) { --B; }
 	HopeBand = (ERHHopeBand)B;
+}
+
+bool URHSimWorldSubsystem::IsGrowthEligible() const
+{
+	// A thriving colony grows only when it can actually WELCOME a new person:
+	// smoothed Hope over the threshold, a free certified bed, and a genuine food
+	// buffer (you don't birth into a famine). All three, or the streak stalls.
+	if (Colonists.Num() == 0 || HopeSmoothed < HopeGrowthThreshold || GetFreeHousing() < 1)
+	{
+		return false;
+	}
+	const double FoodBuffer = GetStock(FName("Food"));
+	const double DailyDraw = Colonists.Num() * ColonistFoodKgPerSol;
+	return DailyDraw <= 0.0 || FoodBuffer >= DailyDraw * HopeGrowthFoodBufferSols;
+}
+
+double URHSimWorldSubsystem::GetGrowthProgress() const
+{
+	if (HopeGrowthIntervalSols <= 0.0 || !IsGrowthEligible())
+	{
+		return 0.0;
+	}
+	return FMath::Clamp(HopeGrowthStreakSols / HopeGrowthIntervalSols, 0.0, 1.0);
+}
+
+void URHSimWorldSubsystem::StepGrowth(float SubDt)
+{
+	// Zero-pop colonies never grow: the streak stays 0 and this is a no-op, so
+	// the pre-crew baseline is untouched. Threshold on a MONOTONE accumulator =
+	// era-parity-safe (the crossing sol is identical in both bands).
+	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	if (!IsGrowthEligible())
+	{
+		HopeGrowthStreakSols = 0.0; // conditions lapsed: momentum resets (earned, not banked)
+		return;
+	}
+	HopeGrowthStreakSols += DtSols;
+	if (HopeGrowthStreakSols < HopeGrowthIntervalSols)
+	{
+		return;
+	}
+	HopeGrowthStreakSols -= HopeGrowthIntervalSols;
+
+	// A birth: one colonist via the existing certified-housing path (respects
+	// the bed gate; if the last bed vanished this step, Debug_AddColonists no-
+	// ops and the streak simply re-accrues next eligible window).
+	const int32 Before = Colonists.Num();
+	Debug_AddColonists(1);
+	if (Colonists.Num() <= Before)
+	{
+		return;
+	}
+	++BirthsOnMars;
+	const FString Name = Colonists.Last().Name;
+	if (!bFirstBornAnnounced)
+	{
+		// The brief's landmark beat: the first human born on Mars. A one-time
+		// Hope surge (folded into GetColonyHope) and the seed of the M3 identity
+		// axis. Wording is a Gate-D framing-review placeholder (celebration, not
+		// clinical). Never retracts.
+		bFirstBornAnnounced = true;
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("THE FIRST MARTIAN IS BORN — %s, the first human native to Mars. The colony is no longer a mission. It is a home."), *Name));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FIRST MARTIAN-BORN: %s ==="), *Name);
+	}
+	else
+	{
+		OnAlert.Broadcast(FString::Printf(TEXT("A CHILD IS BORN — %s joins the colony (%d born on Mars)."), *Name, BirthsOnMars));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== MARTIAN-BORN: %s (%d total) ==="), *Name, BirthsOnMars);
+	}
 }
 
 const TCHAR* URHSimWorldSubsystem::GetHopeBandName() const
@@ -3623,6 +3703,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// Water potability (save v14).
 	Ar << WaterPotability;
+	// Generational growth (save v15).
+	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -3807,6 +3889,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Ar << WaterPotability;
 	FreshWaterThisStepKg = 0.0;      // per-step derived, re-accrues from production
 	bWaterQualityAnnounced = false;  // runtime edge re-derives from the loaded value
+	// Generational growth (save v15).
+	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.
