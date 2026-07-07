@@ -194,3 +194,19 @@ The Session-30 review workflow hit the session limit before any finder completed
 2. **Re-zone Garden->Greenhouse skips the Glass cost.** A cell planted as a grow-lit Garden (soil+seeds paid) that is then re-zoned Greenhouse keeps growing under the greenhouse (solar) rule without paying GreenhouseGlassKgPerCell, because the planting loop only fires on UNplanted cells. No material is duplicated (Glass is not created, merely not required for the conversion), and it is a lateral trade (steady grow-lit yield for solar-dependent yield), not a win. DECISION: accept as known minor; the Glass requirement is initial-glazing, and forfeit-on-any-garden-rezone would punish a legitimate conversion.
 
 Both are agent-found/agent-adjudicated; flagged for the director only as design notes, not blockers.
+
+## Directive + ruling — 2026-07-07m (M4 "Complex Diplomacy, Subterfuge & Dynamic Crises" — on-brief adaptation)
+
+**Director brought a feature spec** (Modules 1-4: two-layer diplomacy + deceptive economics; covert ops + day/night; Earth-Mars geopolitical link; late-game environmental crises + a morality tracker) to kill mid/late-game stagnation, with the thematic metric **"Evolved Diplomacy vs. Destructive Human Nature."**
+
+**Conflict surfaced by the agent, decision by the director (structured ask):** parts of the raw spec (Total War / military conquest; covert supply RAIDS/heists; hacking that turns robot units FERAL/hostile to kill; colonies militarily ATTACKING the player; feral robots attacking organic units during a flare) override TWO standing constraints: (1) brief §141's explicit v1 non-goal — "combat/warfare simulation (war is a threatened outcome, mostly off-screen pressure — revisit post-v1)"; and (2) the mental-health directive (prevention-focused, abstracted consequences, never graphic). They also fight the determinism rule (RNG + dynamic AI-controller flipping vs the fixed-timestep deterministic robot brain).
+
+**DIRECTOR RULED: "Build the on-brief version"** — deliver the spec's GOALS in the prevention-framed, deterministic register; re-skin the violence:
+- Two-layer diplomacy KEPT: `Public_Standing` (existing per-rival relation) + a hidden `HiddenTension` covert layer. Deceptive economics KEPT as an ESPIONAGE ECONOMY: covert requisition steals a resource/intel lot with a DETERMINISTIC (seeded, day/night-modulated) detection check; caught -> Public_Standing craters; clean -> HiddenTension rises. Laundering = trading stolen goods back. NO military raids.
+- "Total War" -> a COLD-WAR / severance state (routes closed, relations locked hostile) - economic/diplomatic, not on-map military conquest. No conquest victory in v1.
+- "Hack turns robots feral" -> covert SABOTAGE/BLACKOUT: a temporary deterministic production/power downtime on a rival, never "robots turn hostile and kill."
+- Earth pre-emptive strikes -> under high Earth tension an allied/neutral colony EMBARGOES or DEFECTS (economic/diplomatic pressure); diplomatic counters (spend influence/resources) PACIFY it. No military attack.
+- Solar-flare crisis -> deepen the EXISTING flare into a systemic BLACKOUT + a deterministic robot "malfunction" DOWNTIME (units go inert/need reset), never feral combat. RNG only ever SEEDED + deterministic.
+- Morality tracker -> a new **HumanNatureAxis** (Evolved/Diplomatic +100 .. Destructive/Predatory -100), a SECOND axis beside the Earth/Mars IdentityAxis. Fair trade / pacification / aid push +; theft / sabotage / coercion push -. It GATES which late-game crisis spawns (answering the spec's thematic question). This is the director's exact "human evolution vs destruction" metric, mechanized on-brief.
+
+Everything player-facing stays a Gate-D framing-review placeholder. `docs/m4-working-spec.md` authored. This ruling supersedes the raw spec's combat mechanics; the raw spec is archived here as the source of the GOALS, not the mechanics.
