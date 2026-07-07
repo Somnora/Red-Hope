@@ -1,5 +1,13 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 18b (director hand-play of M1-c + the habitat vision)
+
+- **Director hand-played the storm/flare build.** Two findings, both queued for the next compile gate:
+  1. **Era refusal is invisible in anger:** pressing 60× during the storm/flare read as "nothing happened" — the refusal notice goes to the small orange line and was missed. Fix queued: unmissable refusal treatment (banner-weight, PAUSED-style). Design question surfaced to the director alongside: allow era during *steady-state* storms (onset always experienced at agent speed) while flares stay refused — proposed rule "you can sleep through the siege, never through the onset, never through a flare."
+  2. **Storm impact on stations is not legible at the station:** the top banner alone carries the story (missable); the inspection card says nothing. Fix queued: card shows storm-derated generation and shed-reason; solar arrays' card line reads "gen X W (storm: 30%)".
+- **The habitat vision landed as canon direction** — captured in full in `docs/habitat-vision.md` (modular lego habs + paint-to-size shells/hallways, room types incl. luxury crops/tobacco, filtration/plumbing/septic adjacency-as-gameplay with morale/sickness stakes, pressurized-door compartments for storm-breach retreat, interior visibility, surface↔underground connection, domes/windows trading shielding for light+morale, suits, vehicles). Milestone mapping proposed in §9: M1-d births the schemas (rooms, compartments, doors, filtration coverage — dormant), M2 activates the human layer. Awaiting director OK on the mapping.
+- Territory question answered in-session: coverage grows by Pylon chains (80 m link, already in game since M0-a).
+
 ## 2026-07-07 — Session 18 (M1-c Gate A VERIFIED in-engine: the storm/flare arc end-to-end)
 
 - **DT_Events created via MCP** (FRHEventRow schema; canon rows Storm_1 sols 12–15 ×0.3 + Flare_1 sol 17 ×3, plus TEST rows Storm_T sol 2 / Flare_T sol 4 so verification and hand-play reach weather in minutes — TEST rows removed at M1-c close). `events=4` confirmed at boot.
