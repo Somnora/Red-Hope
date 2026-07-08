@@ -7,6 +7,7 @@
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -102,6 +103,23 @@ void URHColonyVisualizerSubsystem::ApplyTint(UStaticMeshComponent* Mesh, const F
 	Mid->SetVectorParameterValue(FName("Tint"), Color);
 	Mid->SetVectorParameterValue(FName("Emissive"), Emissive);
 	Mesh->SetMaterial(0, Mid);
+}
+
+bool URHColonyVisualizerSubsystem::ApplySurface(UStaticMeshComponent* Mesh, const TCHAR* TexPath, float TileCm, const FLinearColor& Tint, float Rough) const
+{
+	UMaterialInterface* Surf = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_MarsSurface.M_MarsSurface"));
+	UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, TexPath);
+	if (!Surf || !Tex || !Mesh)
+	{
+		return false;
+	}
+	UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Surf, Mesh);
+	Mid->SetTextureParameterValue(FName("SurfTex"), Tex);
+	Mid->SetScalarParameterValue(FName("TileCm"), TileCm);
+	Mid->SetVectorParameterValue(FName("Tint"), Tint);
+	Mid->SetScalarParameterValue(FName("Rough"), Rough);
+	Mesh->SetMaterial(0, Mid);
+	return true;
 }
 
 void URHColonyVisualizerSubsystem::AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color, const FLinearColor& Emissive) const
@@ -1136,7 +1154,19 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			continue; // steady state: zero work
 		}
 		AppliedRoomTint.Add(Pair.Key, Room);
-		ApplyTint(Tile, RoomTint(Room));
+		// Undesignated cells stay carved rock (cavern basalt); a designated
+		// room lays deck plating (steel grid, 10 m panel = exactly one cell),
+		// tinted with a brightened room hue so the at-a-glance color language
+		// survives the texture. Flat tints if the assets are missing.
+		const bool bTextured = Room.IsNone()
+			? ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Cavern_Basalt_Texture.Cavern_Basalt_Texture"),
+				1000.f, FLinearColor(0.75f, 0.70f, 0.68f))
+			: ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Steel_Grid_Texture.Steel_Grid_Texture"),
+				1000.f, RoomTint(Room) * 2.8f, 0.45f);
+		if (!bTextured)
+		{
+			ApplyTint(Tile, RoomTint(Room));
+		}
 		// One flat label per tile, created on first designation, retextured on
 		// change. Building labels sit at Z=12 (surface); this one rides the
 		// tile's own floor plane.
@@ -1473,9 +1503,13 @@ void URHColonyVisualizerSubsystem::EnsureSliceRig()
 		return ISM;
 	};
 	// Skirt matches the sunlit regolith so the hole reads as dug INTO the
-	// same ground; walls are darker strata - the cut faces of the excavation.
+	// same ground; walls are the cut faces of the excavation - the director's
+	// cavern basalt (dark rock veined with luminous mineral: the subterranean
+	// identity). Flat tints only if the texture assets are missing.
 	SkirtISM = MakeISM(TEXT("PitSkirt"), FLinearColor(0.48f, 0.31f, 0.19f));
 	WallISM = MakeISM(TEXT("PitWalls"), FLinearColor(0.30f, 0.19f, 0.12f));
+	ApplySurface(SkirtISM, TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"), 900.f, FLinearColor(0.85f, 0.80f, 0.75f));
+	ApplySurface(WallISM, TEXT("/Game/RedHope/Art/Cavern_Basalt_Texture.Cavern_Basalt_Texture"), 700.f, FLinearColor::White);
 }
 
 void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
@@ -1506,6 +1540,41 @@ void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
 	// mesh now (graphics pass 3: the primitive cones and cube rocks never
 	// survived the director's eye). Same seeds, same composition, real shapes.
 	RHMarsTerrain::BuildScenery(*EnvironmentRigActor);
+
+	// The authored MarsGround pad gets the real regolith texture too - it is
+	// what the camera looks at most. Find it NOW (the pit view's lazy finder
+	// matches on the material NAME, which this swap changes) and cache it, so
+	// the underground hide keeps working off the cached pointer.
+	if (!GroundActor.IsValid())
+	{
+		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
+		{
+			bool bMatch = It->GetFName().ToString().Contains(TEXT("MarsGround"));
+			if (!bMatch)
+			{
+				if (const UStaticMeshComponent* Mesh = It->GetStaticMeshComponent())
+				{
+					const UMaterialInterface* Mat = Mesh->GetNumMaterials() > 0 ? Mesh->GetMaterial(0) : nullptr;
+					bMatch = Mat && Mat->GetName().Contains(TEXT("MarsGround"));
+				}
+			}
+			if (bMatch)
+			{
+				GroundActor = *It;
+				break;
+			}
+		}
+	}
+	if (AStaticMeshActor* Pad = Cast<AStaticMeshActor>(GroundActor.Get()))
+	{
+		const bool bOk = ApplySurface(Pad->GetStaticMeshComponent(),
+			TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"), 900.f, FLinearColor::White);
+		UE_LOG(LogRedHope, Display, TEXT("Ground pad retexture: %s"), bOk ? TEXT("regolith applied") : TEXT("assets missing - flat look kept"));
+	}
+	else
+	{
+		UE_LOG(LogRedHope, Warning, TEXT("Ground pad retexture: MarsGround actor not found at rig time - pad keeps its authored material"));
+	}
 
 	// Wind-laid dust drifts stay soft primitive spheres (dunes ARE smooth
 	// forms), riding the new height field so far drifts follow rolling ground.

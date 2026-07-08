@@ -78,6 +78,10 @@ private:
 	FLinearColor BodyFor(FName DefName) const;
 	void ApplyTint(AStaticMeshActor* Actor, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
 	void ApplyTint(UStaticMeshComponent* Mesh, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
+	// Real tiling texture via the triplanar M_MarsSurface (RHArt commandlet
+	// asset). Returns false when the material/texture assets are absent so the
+	// caller can fall back to the flat ApplyTint look.
+	bool ApplySurface(UStaticMeshComponent* Mesh, const TCHAR* TexPath, float TileCm, const FLinearColor& Tint, float Rough = 0.95f) const;
 	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const;
 	// Silhouette pass (director: "no boring rectangles"): each family gets a
 	// distinct primitive-composed form per the reference sheet. World-space

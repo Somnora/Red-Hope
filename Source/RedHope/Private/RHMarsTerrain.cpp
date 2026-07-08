@@ -1,6 +1,7 @@
 #include "RHMarsTerrain.h"
 #include "RedHope.h"
 #include "ProceduralMeshComponent.h"
+#include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RandomStream.h"
 
@@ -346,7 +347,12 @@ void BuildScenery(AActor& Rig)
 	{
 		return;
 	}
+	// The real regolith texture (director's own tiling asset) on the triplanar
+	// surface material; graybox flat-tint fallback if either asset is missing.
+	UMaterialInterface* SurfMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_MarsSurface.M_MarsSurface"));
+	UTexture2D* Regolith = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"));
 	UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+	const bool bTextured = SurfMat && Regolith;
 
 	FAcc GroundBase, GroundPatch, Boulders, Pebbles, NearPeaks, MidPeaks, FarPeaks, Mesas;
 
@@ -447,14 +453,27 @@ void BuildScenery(AActor& Rig)
 		PMC->SetCastShadow(bShadow);
 		return PMC;
 	};
-	const auto AddSection = [&](UProceduralMeshComponent* PMC, int32 Idx, const FAcc& Acc, const FLinearColor& Tint)
+	// Textured mode: the texture carries the color (white tint = as authored);
+	// per-section tints become the depth banding (near dark, far haze-lifted)
+	// and larger TileCm keeps distant features from strobing. Fallback tints
+	// are the flat pass-3 values.
+	const auto AddSection = [&](UProceduralMeshComponent* PMC, int32 Idx, const FAcc& Acc,
+		const FLinearColor& TexTint, float TileCm, const FLinearColor& FlatTint)
 	{
 		PMC->CreateMeshSection(Idx, Acc.V, Acc.I, Acc.N,
 			TArray<FVector2D>(), TArray<FColor>(), TArray<FProcMeshTangent>(), /*bCreateCollision*/ false);
-		if (BaseMat)
+		if (bTextured)
+		{
+			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(SurfMat, PMC);
+			Mid->SetTextureParameterValue(FName("SurfTex"), Regolith);
+			Mid->SetScalarParameterValue(FName("TileCm"), TileCm);
+			Mid->SetVectorParameterValue(FName("Tint"), TexTint);
+			PMC->SetMaterial(Idx, Mid);
+		}
+		else if (BaseMat)
 		{
 			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(BaseMat, PMC);
-			Mid->SetVectorParameterValue(FName("Tint"), Tint);
+			Mid->SetVectorParameterValue(FName("Tint"), FlatTint);
 			// Bare regolith: kill the hull material's panel seams and metal
 			// response (the old cone mountains rendered as riveted metal -
 			// no-ops if the params are ever renamed away).
@@ -464,16 +483,16 @@ void BuildScenery(AActor& Rig)
 		}
 	};
 	UProceduralMeshComponent* Ground = NewPMC(TEXT("SceneryGround"), false);
-	AddSection(Ground, 0, GroundBase, FLinearColor(0.42f, 0.265f, 0.16f));
-	AddSection(Ground, 1, GroundPatch, FLinearColor(0.30f, 0.20f, 0.13f));
+	AddSection(Ground, 0, GroundBase, FLinearColor(1.0f, 1.0f, 1.0f), 900.f, FLinearColor(0.42f, 0.265f, 0.16f));
+	AddSection(Ground, 1, GroundPatch, FLinearColor(0.55f, 0.52f, 0.55f), 900.f, FLinearColor(0.30f, 0.20f, 0.13f));
 	UProceduralMeshComponent* Near = NewPMC(TEXT("SceneryNear"), true);
-	AddSection(Near, 0, Boulders, FLinearColor(0.30f, 0.19f, 0.12f));
-	AddSection(Near, 1, NearPeaks, FLinearColor(0.33f, 0.195f, 0.115f));
+	AddSection(Near, 0, Boulders, FLinearColor(0.60f, 0.55f, 0.52f), 500.f, FLinearColor(0.30f, 0.19f, 0.12f));
+	AddSection(Near, 1, NearPeaks, FLinearColor(0.80f, 0.72f, 0.68f), 2600.f, FLinearColor(0.33f, 0.195f, 0.115f));
 	UProceduralMeshComponent* Far = NewPMC(TEXT("SceneryFar"), false);
-	AddSection(Far, 0, Pebbles, FLinearColor(0.40f, 0.26f, 0.16f));
-	AddSection(Far, 1, MidPeaks, FLinearColor(0.40f, 0.25f, 0.15f));
-	AddSection(Far, 2, FarPeaks, FLinearColor(0.47f, 0.315f, 0.20f));
-	AddSection(Far, 3, Mesas, FLinearColor(0.37f, 0.225f, 0.13f));
+	AddSection(Far, 0, Pebbles, FLinearColor(0.95f, 0.90f, 0.85f), 500.f, FLinearColor(0.40f, 0.26f, 0.16f));
+	AddSection(Far, 1, MidPeaks, FLinearColor(1.00f, 0.95f, 0.90f), 3600.f, FLinearColor(0.40f, 0.25f, 0.15f));
+	AddSection(Far, 2, FarPeaks, FLinearColor(1.25f, 1.15f, 1.05f), 5000.f, FLinearColor(0.47f, 0.315f, 0.20f));
+	AddSection(Far, 3, Mesas, FLinearColor(0.90f, 0.80f, 0.70f), 3000.f, FLinearColor(0.37f, 0.225f, 0.13f));
 
 	const int32 TotalTris = (GroundBase.I.Num() + GroundPatch.I.Num() + Boulders.I.Num() + Pebbles.I.Num()
 		+ NearPeaks.I.Num() + MidPeaks.I.Num() + FarPeaks.I.Num() + Mesas.I.Num()) / 3;
