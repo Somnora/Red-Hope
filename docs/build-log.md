@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-07 — Session 43 (C+D review verdict + fix; Sovereignty made visible for the director's demo)
+
+- **The M4 C+D adversarial review returned real coverage:** one CONFIRMED (low, state-consistency) + one correctly REFUTED. Confirmed: an **in-flight convoy** was never re-validated against embargo/defection — a rover returning to a rival that turned hostile mid-route still warmed its relation above the defection's locked floor and minted Influence from a hostile party (easy repro: Zarya's 4-sol round trip < the 8-sol embargo grace). **Fixed:** goods always land (paid at dispatch — conservation), but the *diplomatic* upside (relation/HumanNature/Influence) accrues only if the relationship is intact at return; soured returns say so honestly. `-preemptive` upgraded to pin it (relation 42→42, influence drift-only). Refuted: the pacify-cooldown finding (tension's only upward source is 0.6/sol drift; max overshoot over a grace ≈ 4.8 vs the 20-point relief — same-sol re-embargo unreachable). All 19 suites green.
+- **Sovereignty made visible (director's pre-demo pick):** the M3/M4 layer was deck-text-only; now —
+  - **Rival settlement markers**: a distant compound per available rival, deterministic bearing (content-hash), tinted by state (living / amber embargoed / red defected / dark sabotaged), named, surface-view only; undiscovered dormant settlements stay off the map.
+  - **The trade rover**: physically drives Lander → settlement → Lander on the sim's own convoy progress — the trade (and the storm-freeze) you can *watch*.
+  - **Crisis screen cues**: a Malfunction drains color + grains the frame ("systems failing," zero graphic imagery); Environmental strain thickens the haze. Auto-reverting.
+  - **`RH.InjectRivals`**: the demo bridge — loads Zarya (active) + Meridian (dormant) in-memory so the whole Sovereignty demo runs *before* the DT sync.
+  - Presentation-only; two real-render smokes (absent-table + injected-rivals/dispatched-convoy) zero ensures. Pixels = the director's verdict.
+
 ## 2026-07-07 — Session 42 (M4 Gate D — dynamic crises + endings; M4 COMPLETE, the sovereignty game is whole)
 
 - **Gate D built + verified (`7e33113` data, `d701e13` code, save v23):** the finale — kills late-game stagnation, answers the spec's thematic question, reads the two axes toward the endings. All deterministic, on-brief (no combat, no feral robots).
