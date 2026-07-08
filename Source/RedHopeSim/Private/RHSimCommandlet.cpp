@@ -1268,12 +1268,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("PRE pacify: embargoed=%d influence %.1f->%.1f (expect -20) tension %.0f->%.0f (expect -20)"),
 			(int32)Sim->IsEmbargoed(FName("Zarya")), InfBefore, Sim->GetInfluence(), TenBefore, Sim->GetEarthTension());
 
-		// 4) DEFECTION: a fresh embargo left un-pacified past the grace hardens
-		// into defection (relation locked low, route closed).
+		// 4) SOURED CONVOY + DEFECTION: dispatch a convoy, then let Earth
+		// re-embargo Zarya while the rover is OUT - the cargo still lands, but
+		// the soured relationship earns no relation warming and no Influence
+		// (adversarial-review fix: an in-flight convoy must not warm a hostile
+		// rival or mint Influence). The un-pacified embargo then hardens into
+		// defection.
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		Sim->EnqueueCommand(Cv); RunSols(0.1); // rover rolls out to Zarya
 		Sim->Debug_AddTension(80.0);
-		RunSols(0.2); // re-embargo
-		UE_LOG(LogRedHopeSim, Display, TEXT("PRE re-embargo: embargoed=%d (expect 1)"), (int32)Sim->IsEmbargoed(FName("Zarya")));
-		RunSols(9.0); // let the grace (8 sols) expire un-pacified
+		RunSols(0.1); // re-embargo fires while the rover is on the road
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE re-embargo: embargoed=%d convoy=%s (expect 1, Zarya - out when it fired)"),
+			(int32)Sim->IsEmbargoed(FName("Zarya")),
+			Sim->GetConvoyRival().IsNone() ? TEXT("idle") : *Sim->GetConvoyRival().ToString());
+		const double RelSour = Sim->GetRivalRelation(FName("Zarya"));
+		const double InfSour = Sim->GetInfluence();
+		RunSols(4.4); // the rover comes home to a soured relationship
+		UE_LOG(LogRedHopeSim, Display, TEXT("PRE soured convoy: relation %.0f->%.0f (expect unchanged) influence +%.2f (expect <1 - drift only, NO +3 trade grant)"),
+			RelSour, Sim->GetRivalRelation(FName("Zarya")), Sim->GetInfluence() - InfSour);
+		RunSols(4.5); // let the grace (8 sols) expire un-pacified
 		UE_LOG(LogRedHopeSim, Display, TEXT("PRE defection: defected=%d embargoed=%d relation=%.0f (expect 1, 0, <=5)"),
 			(int32)Sim->HasDefected(FName("Zarya")), (int32)Sim->IsEmbargoed(FName("Zarya")), Sim->GetRivalRelation(FName("Zarya")));
 

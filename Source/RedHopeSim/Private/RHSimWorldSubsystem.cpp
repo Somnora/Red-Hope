@@ -3134,18 +3134,37 @@ void URHSimWorldSubsystem::StepTrade(float SubDt)
 			AddStock(Item.Key, Item.Value); // fluids join the pool
 		}
 	}
-	double& Rel = RelationRef(Done);
-	Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
-	// Fair dealing is who you are: an honest completed trade nudges the
-	// HumanNature axis toward Evolved/Diplomatic (M4 Gate A) and earns diplomatic
-	// influence (M4 Gate C - the peaceful path earns the tools of peace).
-	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureFairTradeShift, -100.0, 100.0);
-	Influence += InfluencePerTrade;
-	OnAlert.Broadcast(FString::Printf(
-		TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
-		*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
-	UE_LOG(LogRedHopeSim, Display, TEXT("=== CONVOY RETURN: %s delivered %s, relation %.0f ==="),
-		*Rival->DisplayName, *Rival->ExportLot, Rel);
+	// The goods always land (paid for at dispatch - conservation), but the
+	// DIPLOMATIC upside accrues only if the relationship survived the trip. A
+	// rival that defected, embargoed you, or whose route you closed mid-route
+	// gets no relation warming (defection's lock holds), no HumanNature nudge,
+	// and no Influence - trade with a hostile party is cargo, not goodwill.
+	// (Adversarial review, M4 C+D: an in-flight convoy could otherwise warm a
+	// defected rival above its locked floor and mint Influence from hostility.)
+	const bool bRelationshipIntact = !DefectedRivals.Contains(Done)
+		&& !EmbargoGrace.Contains(Done) && !ClosedRoutes.Contains(Done);
+	if (bRelationshipIntact)
+	{
+		double& Rel = RelationRef(Done);
+		Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
+		// Fair dealing is who you are: an honest completed trade nudges the
+		// HumanNature axis toward Evolved/Diplomatic (M4 Gate A) and earns
+		// influence (M4 Gate C - the peaceful path earns the tools of peace).
+		HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureFairTradeShift, -100.0, 100.0);
+		Influence += InfluencePerTrade;
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
+			*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
+	}
+	else
+	{
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("CONVOY HOME — cargo from %s arrived, but the relationship soured while the rover was out. Goods only; no goodwill."),
+			*Rival->DisplayName));
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== CONVOY RETURN: %s delivered %s, relation %.0f%s ==="),
+		*Rival->DisplayName, *Rival->ExportLot, GetRivalRelation(Done),
+		bRelationshipIntact ? TEXT("") : TEXT(" (soured - goods only)"));
 }
 
 double URHSimWorldSubsystem::GetConvoyProgress() const
