@@ -10,6 +10,8 @@
 #include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "Styling/CoreStyle.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
@@ -69,6 +71,28 @@ namespace
 void SRHCommandDeck::Construct(const FArguments& InArgs)
 {
 	PC = InArgs._OwnerPC;
+
+	// Onboarding & rewards (alive pass): remembered tips-off flag, milestone
+	// cards, first-stock celebrations (with a boot grace so a loaded colony's
+	// existing stores don't all cheer at once).
+	GConfig->GetBool(TEXT("RedHope"), TEXT("TipsOff"), bTipsOff, GGameIni);
+	StockGraceUntil = FSlateApplication::Get().GetCurrentTime() + 3.0;
+	if (const UWorld* WorldForBind = PC.IsValid() ? PC->GetWorld() : nullptr)
+	{
+		if (URHSimWorldSubsystem* SimForBind = WorldForBind->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			SimForBind->OnMilestone.AddSP(this, &SRHCommandDeck::HandleMilestone);
+			SimForBind->OnStockChanged.AddSP(this, &SRHCommandDeck::HandleStockChanged);
+			SimForBind->OnColonyReloaded.AddLambda([WeakSelf = TWeakPtr<SRHCommandDeck>(SharedThis(this))]()
+			{
+				if (TSharedPtr<SRHCommandDeck> Self = WeakSelf.Pin())
+				{
+					// A loaded colony's stores must not all cheer: re-arm the grace.
+					Self->StockGraceUntil = FSlateApplication::Get().GetCurrentTime() + 3.0;
+				}
+			});
+		}
+	}
 
 	// Build menu, Sims-style (M2 Gate D+ UX part 2): a row of CATEGORY tabs +
 	// a palette that shows only the selected category's buildings. Both are
@@ -190,6 +214,78 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SNew(SOverlay)
+
+		// Info card (alive pass): center screen, one at a time - tutorial tips
+		// (teal, with SKIP ALL TIPS) and milestone celebrations (golden).
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SBox)
+			.MinDesiredWidth(400.f)
+			.MaxDesiredWidth(460.f)
+			.Visibility(this, &SRHCommandDeck::GetInfoCardVisibility)
+			[
+				SNew(SBorder)
+				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(this, &SRHCommandDeck::GetInfoCardColor)
+				.Padding(FMargin(18.f, 14.f))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8.f)
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetInfoCardTitle)
+						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 15))
+						.ColorAndOpacity(FLinearColor(0.95f, 0.85f, 0.55f))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12.f)
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetInfoCardBody)
+						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 11))
+						.ColorAndOpacity(FLinearColor(0.92f, 0.92f, 0.88f))
+						.AutoWrapText(true)
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 10.f, 0)
+						[
+							SNew(SButton)
+							.Text(FText::FromString(TEXT("GOT IT")))
+							.OnClicked(this, &SRHCommandDeck::HandleCardGotIt)
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SButton)
+							.Text(FText::FromString(TEXT("SKIP ALL TIPS")))
+							.Visibility(this, &SRHCommandDeck::GetSkipTipsVisibility)
+							.OnClicked(this, &SRHCommandDeck::HandleCardSkipAll)
+						]
+					]
+				]
+			]
+		]
+
+		// Reward toast (alive pass): a quiet one-line cheer under the banners.
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Top)
+		.Padding(0.f, 96.f, 0.f, 0.f)
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(FLinearColor(0.10f, 0.09f, 0.02f, 0.85f))
+			.Padding(FMargin(12.f, 5.f))
+			.Visibility(this, &SRHCommandDeck::GetToastVisibility)
+			[
+				SNew(STextBlock)
+				.Text(this, &SRHCommandDeck::GetToastText)
+				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
+				.ColorAndOpacity(FLinearColor(0.98f, 0.85f, 0.45f))
+			]
+		]
 
 		// The in-world action card (M2 Gate D+): a full-screen canvas whose one
 		// child floats above the selected machine. Placed FIRST so it renders
@@ -748,6 +844,35 @@ EVisibility SRHCommandDeck::GetAlertVisibility() const
 
 void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
+	// Tutorial beats (alive pass): plain-language basics on a fresh session,
+	// each a GOT IT card; SKIP ALL TIPS ends them forever. The crew card waits
+	// for the first landing so it arrives when it matters.
+	if (!bTipsOff && TutorialStage == 0)
+	{
+		TutorialStage = 1;
+		PushCard(TEXT("WELCOME, DIRECTOR"),
+			TEXT("This is your slice of Mars. The robots work for you; the colony's HOPE depends on you. These tips can be skipped any time - the colony will still tell you what it needs."), false);
+		PushCard(TEXT("THE CAMERA"),
+			TEXT("WASD pans. Mouse wheel zooms. Q / E orbits. R / F tilts up to the mountains. 1 / 2 / 3 / 4 sets sim speed, SPACE pauses."), false);
+		PushCard(TEXT("FIRST POWER"),
+			TEXT("Open the BUILD menu and place a Solar Array and a Battery Bank near the Lander. Power is territory - machines only run inside the grid's reach."), false);
+		PushCard(TEXT("DIG IN"),
+			TEXT("The surface is deadly. Build the Borer, then use DIG to sink the shaft and EXCAVATE to carve floors. An Air Filter certifies a floor for humans."), false);
+	}
+	if (!bTipsOff && TutorialStage == 1)
+	{
+		if (const UWorld* WorldForTut = PC.IsValid() ? PC->GetWorld() : nullptr)
+		{
+			const URHSimWorldSubsystem* SimForTut = WorldForTut->GetSubsystem<URHSimWorldSubsystem>();
+			if (SimForTut && SimForTut->GetPopulation() > 0)
+			{
+				TutorialStage = 2;
+				PushCard(TEXT("YOUR PEOPLE"),
+					TEXT("Colonists need Oxygen, Water and Food, every sol. Zone LivingQuarters for beds, a Lab or Garden for jobs - and watch HOPE, top right. Hope drives how hard the colony works."), false);
+			}
+		}
+	}
+
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	RefreshUplinkPanel();
 
@@ -1680,4 +1805,121 @@ FReply SRHCommandDeck::HandleLoad()
 		PC->QuickLoad();
 	}
 	return FReply::Handled();
+}
+
+// --- Onboarding & rewards (alive pass) ---
+
+void SRHCommandDeck::PushCard(const FString& Title, const FString& Body, bool bGolden)
+{
+	FInfoCard Card;
+	Card.Title = Title;
+	Card.Body = Body;
+	Card.bGolden = bGolden;
+	CardQueue.Add(Card);
+}
+
+FText SRHCommandDeck::GetInfoCardTitle() const
+{
+	return CardQueue.Num() > 0 ? FText::FromString(CardQueue[0].Title) : FText::GetEmpty();
+}
+
+FText SRHCommandDeck::GetInfoCardBody() const
+{
+	return CardQueue.Num() > 0 ? FText::FromString(CardQueue[0].Body) : FText::GetEmpty();
+}
+
+EVisibility SRHCommandDeck::GetInfoCardVisibility() const
+{
+	return CardQueue.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FSlateColor SRHCommandDeck::GetInfoCardColor() const
+{
+	// Golden celebration vs teal instruction.
+	return CardQueue.Num() > 0 && CardQueue[0].bGolden
+		? FSlateColor(FLinearColor(0.16f, 0.12f, 0.02f, 0.96f))
+		: FSlateColor(FLinearColor(0.02f, 0.07f, 0.08f, 0.96f));
+}
+
+EVisibility SRHCommandDeck::GetSkipTipsVisibility() const
+{
+	// The skip button only matters on instruction cards; celebrations keep it
+	// out of the way.
+	return CardQueue.Num() > 0 && !CardQueue[0].bGolden ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FReply SRHCommandDeck::HandleCardGotIt()
+{
+	if (CardQueue.Num() > 0)
+	{
+		CardQueue.RemoveAt(0);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleCardSkipAll()
+{
+	// Silence the tutorial forever (celebration cards still show): remembered
+	// across sessions in the game ini.
+	bTipsOff = true;
+	for (int32 i = CardQueue.Num() - 1; i >= 0; --i)
+	{
+		if (!CardQueue[i].bGolden)
+		{
+			CardQueue.RemoveAt(i);
+		}
+	}
+	GConfig->SetBool(TEXT("RedHope"), TEXT("TipsOff"), true, GGameIni);
+	GConfig->Flush(false, GGameIni);
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::HandleMilestone(const FString& Line)
+{
+	// Milestones are the game's applause: a golden card, always shown (even
+	// with tips off - these are rewards, not instructions).
+	PushCard(TEXT("MILESTONE"), Line, /*bGolden*/ true);
+}
+
+void SRHCommandDeck::HandleStockChanged(FName Resource, double Total)
+{
+	// First-acquisition rewards. A boot/reload grace swallows pre-existing
+	// stock so only genuinely NEW materials celebrate.
+	const double Now = FSlateApplication::Get().GetCurrentTime();
+	if (Total <= 0.0 || SeenStock.Contains(Resource))
+	{
+		return;
+	}
+	SeenStock.Add(Resource);
+	if (Now < StockGraceUntil)
+	{
+		return;
+	}
+	// The rare set gets the full golden card; everything else a cheer line.
+	static const TMap<FName, FString> RareLines = {
+		{ FName("Ice"),     TEXT("FIRST ICE BANKED — melt it and the colony makes its own water.") },
+		{ FName("Glass"),   TEXT("FIRST GLASS — greenhouses under real sunlight are within reach.") },
+		{ FName("Seeds"),   TEXT("SEEDS IN STORAGE — life, waiting for soil.") },
+		{ FName("Soil"),    TEXT("EARTH SOIL DELIVERED — the garden can begin.") },
+		{ FName("Luxury"),  TEXT("COMFORTS UNPACKED — small joys for the crew's long nights.") },
+		{ FName("SpareParts"), TEXT("SPARE PARTS ON THE SHELF — the fleet can be kept alive.") },
+	};
+	if (const FString* Line = RareLines.Find(Resource))
+	{
+		PushCard(TEXT("RARE MATERIALS"), *Line, /*bGolden*/ true);
+		return;
+	}
+	ToastLine = FString::Printf(TEXT("+ first %s banked"), *Resource.ToString());
+	ToastUntil = Now + 6.0;
+}
+
+FText SRHCommandDeck::GetToastText() const
+{
+	return FSlateApplication::Get().GetCurrentTime() < ToastUntil
+		? FText::FromString(ToastLine) : FText::GetEmpty();
+}
+
+EVisibility SRHCommandDeck::GetToastVisibility() const
+{
+	return GetToastText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }

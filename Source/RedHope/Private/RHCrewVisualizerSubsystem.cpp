@@ -54,6 +54,89 @@ void URHCrewVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
 	{
 		Sim->OnColonyReloaded.AddUObject(this, &URHCrewVisualizerSubsystem::HandleColonyReloaded);
+		Sim->OnCrewMoment.AddUObject(this, &URHCrewVisualizerSubsystem::HandleCrewMoment);
+	}
+}
+
+void URHCrewVisualizerSubsystem::ShowEmote(FCrewVisual& Vis, const FString& Line, const FColor& Color, double Seconds)
+{
+	AActor* Actor = Vis.Actor.Get();
+	if (!Actor)
+	{
+		return;
+	}
+	UTextRenderComponent* Emote = Vis.Emote.Get();
+	if (!Emote)
+	{
+		// Lazily add the overhead plate: flat, glyph-up, floating above the
+		// helmet - the same top-down reading convention as every other label.
+		Emote = NewObject<UTextRenderComponent>(Actor);
+		Emote->SetupAttachment(Actor->GetRootComponent());
+		Emote->RegisterComponent();
+		Emote->SetWorldSize(95.f);
+		Emote->SetHorizontalAlignment(EHTA_Center);
+		Emote->SetVerticalAlignment(EVRTA_TextCenter);
+		Emote->SetRelativeLocationAndRotation(FVector(85.f, 0, 10.f),
+			FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
+		Vis.Emote = Emote;
+	}
+	Emote->SetText(FText::FromString(Line));
+	Emote->SetTextRenderColor(Color);
+	Vis.EmoteUntilRealSeconds = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0) + Seconds;
+}
+
+void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 IdB, const FString& Text)
+{
+	// The sim's beat -> stage direction. All copy here is short overhead-plate
+	// shorthand (Gate-D framing-review placeholder, like the sim's lines).
+	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	const auto Moment = (URHSimWorldSubsystem::ERHCrewMoment)Type;
+
+	if (Moment == URHSimWorldSubsystem::ERHCrewMoment::Celebrate)
+	{
+		// The whole crew, hopping: harvest days are for everyone.
+		for (auto& Pair : Tracked)
+		{
+			Pair.Value.CheerUntilRealSeconds = Now + 7.0;
+			ShowEmote(Pair.Value, TEXT("* cheering *"), FColor(255, 214, 80), 7.0);
+		}
+		return;
+	}
+
+	FCrewVisual* A = Tracked.Find(IdA);
+	FCrewVisual* B = Tracked.Find(IdB);
+	if (!A || !A->Actor.IsValid())
+	{
+		return;
+	}
+	// B walks to A's side; both hold there through the beat. If the pair spans
+	// floors the plates still show - the gathering is best-effort staging.
+	if (B && B->Actor.IsValid() && IdB != IdA && B->CurLevel == A->CurLevel)
+	{
+		// Walk B to A's side (XY only - the floor logic owns Z), then both hold
+		// through the beat instead of immediately re-deciding away.
+		const FVector APos = A->Actor.Get()->GetActorLocation();
+		B->TargetCm = FVector(APos.X + 150.f, APos.Y + 90.f, B->Actor.Get()->GetActorLocation().Z);
+		B->NextDecideRealSeconds = Now + 9.0;
+		A->NextDecideRealSeconds = Now + 9.0;
+	}
+	switch (Moment)
+	{
+	case URHSimWorldSubsystem::ERHCrewMoment::Pastime:
+		ShowEmote(*A, TEXT("~ off duty ~"), FColor(150, 220, 210), 9.0);
+		if (B) { ShowEmote(*B, TEXT("~ off duty ~"), FColor(150, 220, 210), 9.0); }
+		break;
+	case URHSimWorldSubsystem::ERHCrewMoment::JoinWork:
+		ShowEmote(*A, TEXT("+ lending a hand"), FColor(140, 210, 255), 9.0);
+		if (B) { ShowEmote(*B, TEXT("* working *"), FColor(140, 210, 255), 9.0); }
+		break;
+	case URHSimWorldSubsystem::ERHCrewMoment::Dispute:
+		// Abstracted friction: an amber plate and a face-off. Words, never blows.
+		ShowEmote(*A, TEXT("! heated words !"), FColor(235, 130, 40), 9.0);
+		if (B) { ShowEmote(*B, TEXT("! heated words !"), FColor(235, 130, 40), 9.0); }
+		break;
+	default:
+		break;
 	}
 }
 
@@ -313,6 +396,33 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				break;
 			default:
 				break;
+			}
+		}
+
+		// Alive pass: body language. A cheering figure hops; a posted worker
+		// bobs gently at their station (per-id phase so the crew never moves in
+		// lockstep); an expired emote plate clears.
+		if (UStaticMeshComponent* Body = Vis->Body.Get())
+		{
+			const float Phase = (float)(C.Id % 7) * 0.9f;
+			float BodyZ = 62.f;
+			if (Now < Vis->CheerUntilRealSeconds)
+			{
+				BodyZ += 30.f * FMath::Abs(FMath::Sin((float)Now * 6.f + Phase)); // the harvest-day hop
+			}
+			else if (!Sim->GetColonistJob(C.Id).IsNone() && Pace > 0.f
+				&& FVector::Dist2D(Actor->GetActorLocation(), Vis->TargetCm) < 60.f)
+			{
+				BodyZ += 4.f * FMath::Sin((float)Now * 2.2f + Phase); // at-the-bench work rhythm
+			}
+			Body->SetRelativeLocation(FVector(0, 0, BodyZ));
+		}
+		if (Vis->EmoteUntilRealSeconds > 0.0 && Now >= Vis->EmoteUntilRealSeconds)
+		{
+			Vis->EmoteUntilRealSeconds = 0.0;
+			if (UTextRenderComponent* Emote = Vis->Emote.Get())
+			{
+				Emote->SetText(FText::GetEmpty());
 			}
 		}
 

@@ -116,7 +116,35 @@ private:
 	FReply HandleLoad();
 	FReply HandleCancelOrder(int32 CommandId);
 
+	// --- Onboarding & rewards (alive pass, director's pickup-and-play brief) ---
+	// Info cards: a queue of center-screen cards - a short skippable tutorial
+	// on a fresh colony, golden celebration cards on milestones. GOT IT pops
+	// the next; SKIP ALL TIPS silences the tutorial forever (saved to game ini).
+	void PushCard(const FString& Title, const FString& Body, bool bGolden);
+	FText GetInfoCardTitle() const;
+	FText GetInfoCardBody() const;
+	EVisibility GetInfoCardVisibility() const;
+	FSlateColor GetInfoCardColor() const;
+	EVisibility GetSkipTipsVisibility() const;
+	FReply HandleCardGotIt();
+	FReply HandleCardSkipAll();
+	// Reward toasts: first-acquisition of each resource gets a one-line cheer
+	// (top center); rare materials get a full golden card instead.
+	void HandleStockChanged(FName Resource, double Total);
+	void HandleMilestone(const FString& Line);
+	FText GetToastText() const;
+	EVisibility GetToastVisibility() const;
+
 	TWeakObjectPtr<ARHPlayerController> PC;
+	// Info-card + toast state.
+	struct FInfoCard { FString Title; FString Body; bool bGolden = false; };
+	TArray<FInfoCard> CardQueue;
+	bool bTipsOff = false;
+	int32 TutorialStage = 0;      // 0 = not pushed; 1 = basics queued; 2 = crew card done
+	TSet<FName> SeenStock;        // resources already toasted (or pre-existing)
+	double StockGraceUntil = 0.0; // boot/reload grace: existing stocks don't toast
+	FString ToastLine;
+	double ToastUntil = 0.0;
 	// Uplink panel state: rebuilt when the queue's id set changes.
 	TSharedPtr<class SVerticalBox> UplinkList;
 	TArray<int32> UplinkIdsShown;

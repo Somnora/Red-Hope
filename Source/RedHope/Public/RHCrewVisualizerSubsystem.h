@@ -5,6 +5,7 @@
 #include "RHCrewVisualizerSubsystem.generated.h"
 
 class UStaticMeshComponent;
+class UTextRenderComponent;
 
 // Presentation mirror of the crew (M2 Gate A2): one small suited figure per
 // colonist. Pure listener - the sim keeps colonists abstract (roster + home
@@ -51,9 +52,20 @@ private:
 		FVector TargetCm = FVector::ZeroVector;
 		double NextDecideRealSeconds = 0.0;
 		bool bTintedUnsupported = false;
+		// Alive pass: the emote plate above the head (spawned lazily) and the
+		// windows it is showing for; cheering figures hop until CheerUntil.
+		TWeakObjectPtr<UTextRenderComponent> Emote;
+		double EmoteUntilRealSeconds = 0.0;
+		double CheerUntilRealSeconds = 0.0;
 	};
 
 	void HandleColonyReloaded();
+	// Alive pass: the sim's crew-life beats made visible - pairs gather for
+	// pastimes, a helper walks to the worker they're joining, disputes read as
+	// a close face-off under an amber plate (abstracted - words, never blows),
+	// and a Celebrate sets the WHOLE crew hopping. Pure presentation.
+	void HandleCrewMoment(uint8 Type, int32 IdA, int32 IdB, const FString& Text);
+	void ShowEmote(FCrewVisual& Vis, const FString& Line, const FColor& Color, double Seconds);
 	AActor* SpawnFigure(const FString& Name, const FVector& AtCm, UStaticMeshComponent*& OutBody);
 	void SetBodyTint(FCrewVisual& Vis, bool bUnsupported);
 	// A random point inside a random carved cell of the given floor - the
