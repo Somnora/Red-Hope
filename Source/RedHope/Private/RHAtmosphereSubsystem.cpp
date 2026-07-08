@@ -9,8 +9,10 @@
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/SkyLight.h"
+#include "Components/DirectionalLightComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/LightComponent.h"
+#include "Components/SkyAtmosphereComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Kismet/KismetMaterialLibrary.h"
 #include "Materials/MaterialParameterCollection.h"
@@ -170,6 +172,43 @@ void URHAtmosphereSubsystem::EnsureLookRig()
 	if (TActorIterator<ASkyLight> It(World); It)
 	{
 		FillSky = *It;
+	}
+
+	// The Martian sky dome: prefer an existing SkyAtmosphere; else spawn one.
+	// Tinted so the horizon reads dusty butterscotch (the reference panorama's
+	// airborne-dust look, NOT Earth blue) fading darker overhead; the sun disc
+	// tracks the sol clock via the RH.Sun directional light.
+	if (TActorIterator<ASkyAtmosphere> It(World); It)
+	{
+		SkyDome = *It;
+	}
+	if (!SkyDome)
+	{
+		SkyDome = World->SpawnActor<ASkyAtmosphere>();
+#if WITH_EDITOR
+		if (SkyDome) { SkyDome->SetActorLabel(TEXT("RH_MarsSky")); }
+#endif
+	}
+	if (SkyDome)
+	{
+		if (USkyAtmosphereComponent* Sky = SkyDome->GetComponent())
+		{
+			// Warm-dominant scattering = ochre sky; low Rayleigh + high Mie =
+			// the dusty, low-contrast Martian haze rather than a crisp blue dome.
+			Sky->SetRayleighScattering(FLinearColor(0.65f, 0.32f, 0.12f));
+			Sky->SetRayleighScatteringScale(0.06f);
+			Sky->SetMieScatteringScale(0.02f);
+			Sky->SetMieAbsorptionScale(0.006f);
+			Sky->SetMieAnisotropy(0.65f);
+			Sky->SetGroundAlbedo(FColor(120, 74, 46)); // rust bounce
+		}
+	}
+	if (SunActor)
+	{
+		if (UDirectionalLightComponent* Sun = Cast<UDirectionalLightComponent>(SunActor->GetLightComponent()))
+		{
+			Sun->SetAtmosphereSunLight(true); // the disc + sky tint ride the sol clock
+		}
 	}
 }
 

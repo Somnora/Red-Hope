@@ -103,6 +103,11 @@ void ARHPlayerController::SetupInputComponent()
 	Mapping->MapKey(IA_Orbit, EKeys::E);
 	Mapping->MapKey(IA_Orbit, EKeys::Q).Modifiers.Add(Negate());
 
+	// Tilt (R = raise the gaze toward the horizon/mountains, F = back down).
+	IA_Tilt = MakeAction(TEXT("IA_Tilt"), EInputActionValueType::Axis1D);
+	Mapping->MapKey(IA_Tilt, EKeys::R);
+	Mapping->MapKey(IA_Tilt, EKeys::F).Modifiers.Add(Negate());
+
 	IA_Click = MakeAction(TEXT("IA_Click"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_Click, EKeys::LeftMouseButton);
 
@@ -131,6 +136,7 @@ void ARHPlayerController::SetupInputComponent()
 	Input->BindAction(IA_Pan, ETriggerEvent::Triggered, this, &ARHPlayerController::OnPan);
 	Input->BindAction(IA_Zoom, ETriggerEvent::Triggered, this, &ARHPlayerController::OnZoom);
 	Input->BindAction(IA_Orbit, ETriggerEvent::Triggered, this, &ARHPlayerController::OnOrbit);
+	Input->BindAction(IA_Tilt, ETriggerEvent::Triggered, this, &ARHPlayerController::OnTilt);
 	Input->BindAction(IA_Click, ETriggerEvent::Started, this, &ARHPlayerController::OnClick);
 	Input->BindAction(IA_Cancel, ETriggerEvent::Started, this, &ARHPlayerController::OnCancel);
 	Input->BindAction(IA_Pause, ETriggerEvent::Started, this, &ARHPlayerController::TogglePause);
@@ -170,6 +176,15 @@ void ARHPlayerController::OnOrbit(const FInputActionValue& Value)
 	if (ARHStrategyPawn* Cam = StrategyPawn())
 	{
 		Cam->AddOrbit(Value.Get<float>() * 90.f * GetWorld()->GetDeltaSeconds());
+	}
+}
+
+void ARHPlayerController::OnTilt(const FInputActionValue& Value)
+{
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		// R raises the gaze (negative pitch offset = look up toward the ring).
+		Cam->AddTilt(-Value.Get<float>() * 45.f * GetWorld()->GetDeltaSeconds());
 	}
 }
 

@@ -76,6 +76,7 @@ private:
 	void OnPan(const FInputActionValue& Value);
 	void OnZoom(const FInputActionValue& Value);
 	void OnOrbit(const FInputActionValue& Value);
+	void OnTilt(const FInputActionValue& Value);
 	void OnClick();
 	void OnCancel();
 	// Cursor ray intersected with the ground plane (Z=0), snapped to the 2 m grid.
@@ -93,6 +94,7 @@ private:
 	UPROPERTY() TObjectPtr<UInputAction> IA_Pan;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Zoom;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Orbit;
+	UPROPERTY() TObjectPtr<UInputAction> IA_Tilt;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Click;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Cancel;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Pause;

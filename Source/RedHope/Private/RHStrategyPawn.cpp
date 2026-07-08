@@ -17,14 +17,19 @@ void ARHStrategyPawn::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	SmoothedZoomT = FMath::FInterpTo(SmoothedZoomT, ZoomT, DeltaTime, ZoomInterpSpeed);
+	SmoothedPitchOffsetDeg = FMath::FInterpTo(SmoothedPitchOffsetDeg, PitchOffsetDeg, DeltaTime, ZoomInterpSpeed);
 	// The elevator ride (M1-d): the focus plane descends/ascends smoothly
 	// (~1.5 s per floor) instead of cutting - the motion IS the feedback.
 	FocusPointCm.Z = FMath::FInterpTo(FocusPointCm.Z, TargetFocusZCm, DeltaTime, 3.f);
 
 	// Exponential distance mapping keeps ground-level zoom fine-grained while
 	// orbital sweeps stay fast; linear pitch/FOV are placeholders for CT_CameraRig.
+	// The manual tilt offset rides on top of the zoom-coupled pitch; the final
+	// clamp keeps the gaze between "just above the horizon" (the mountain ring +
+	// sky) and straight down.
 	const float Distance = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, SmoothedZoomT);
-	const float Pitch = FMath::Lerp(MinPitchDeg, MaxPitchDeg, SmoothedZoomT);
+	const float Pitch = FMath::Clamp(
+		FMath::Lerp(MinPitchDeg, MaxPitchDeg, SmoothedZoomT) + SmoothedPitchOffsetDeg, -6.f, 86.f);
 	const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, SmoothedZoomT);
 
 	const FRotator LookRot(-Pitch, OrbitYawDeg, 0.f);
@@ -43,6 +48,13 @@ void ARHStrategyPawn::AddZoom(float Delta)
 void ARHStrategyPawn::AddOrbit(float DeltaYawDeg)
 {
 	OrbitYawDeg = FMath::UnwindDegrees(OrbitYawDeg + DeltaYawDeg);
+}
+
+void ARHStrategyPawn::AddTilt(float DeltaPitchDeg)
+{
+	// Offset range: enough to drag the ground-register 30-degree pitch below the
+	// horizon line (-6 after the Tick clamp) or push it fully top-down.
+	PitchOffsetDeg = FMath::Clamp(PitchOffsetDeg + DeltaPitchDeg, -42.f, 30.f);
 }
 
 void ARHStrategyPawn::AddPan(FVector2D PlanarDeltaCm)

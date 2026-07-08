@@ -8,10 +8,18 @@
 
 class UInstancedStaticMeshComponent;
 
-// Scaffold presentation for sim agents: one ISM, one instance per entity,
-// transforms copied from Mass fragments each frame. Deliberately dumb - it
-// proves the seam (sim knows nothing about it) and is what the stress test
-// measures as "presentation cost". MassRepresentation replaces it in M0+.
+// Scaffold presentation for sim agents: instanced meshes, transforms copied
+// from Mass fragments each frame. Deliberately dumb - it proves the seam (sim
+// knows nothing about it) and is what the stress test measures as
+// "presentation cost". MassRepresentation replaces it in M0+.
+//
+// Reference (Robots/Humanoid, "reminiscent of a Tesla Bot"): each unit is a
+// BIPEDAL HUMANOID composed from nine instanced layers - white armored torso /
+// head / legs over matte-black joints and arms, a dark visor with a cyan
+// status bar. Legs and arms swing in a procedural walk cycle driven by each
+// entity's own ground speed (phase accumulates with distance covered), and the
+// figure faces its direction of travel. Still zero per-actor cost: N robots =
+// 9 ISMs total, one instance each.
 UCLASS()
 class REDHOPE_API URHAgentVisualizerSubsystem : public UTickableWorldSubsystem
 {
@@ -41,14 +49,17 @@ public:
 private:
 	void EnsureMeshComponent();
 
-	// Reference (Robots/ConstructionDrone): three instanced layers make each
-	// unit read as the canon drone at strategic zoom - bone-white chassis, a
-	// dark tinted cab glass, and a dark wheel skirt - instead of one anonymous
-	// cube. All three ride the same entity transform with a fixed local offset
-	// composed per part in Tick (still zero per-actor cost).
-	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> MeshComponent;      // chassis
-	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CabComponent;      // glass
-	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> WheelComponent;    // skirt
+	// One ISM per body part; every tracked entity owns instance i in each.
+	enum class EPart : uint8
+	{
+		Torso = 0, Pelvis, Head, Visor, Pack, LegL, LegR, ArmL, ArmR, COUNT
+	};
+	UPROPERTY() TArray<TObjectPtr<UInstancedStaticMeshComponent>> Parts;
 	TArray<FMassEntityHandle> Tracked;
+	// Per-entity gait state, parallel to Tracked: last ground position (for
+	// speed), smoothed facing yaw, and the accumulated stride phase.
+	TArray<FVector> LastPosCm;
+	TArray<float> FacingYawDeg;
+	TArray<float> StridePhase;
 	bool bSliceHidden = false;
 };

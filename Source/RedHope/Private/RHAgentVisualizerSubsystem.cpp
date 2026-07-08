@@ -8,6 +8,31 @@
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
+namespace
+{
+	// The humanoid's proportions (reference: Robots/Humanoid - white armor over
+	// matte-black joints, ~1.8 m tall). All offsets are in ENTITY space, X
+	// forward, relative to the entity transform's origin; the prior 1.5 m-tall
+	// stand-in cube put the ground at origin-75, so the feet keep that datum.
+	constexpr float GroundZ = -75.f;
+	constexpr float HipZ = GroundZ + 78.f;
+	constexpr float ShoulderZ = GroundZ + 138.f;
+	constexpr float LegLen = 76.f;   // hip to sole
+	constexpr float ArmLen = 58.f;
+	constexpr float HipHalfY = 11.f;
+	constexpr float ShoulderHalfY = 26.f;
+
+	// A swinging limb: leaf scale/offset hangs the box below the pivot, the
+	// swing rotates about the pivot, then the whole thing rides the entity.
+	FTransform Limb(const FVector& PivotEntitySpace, float SwingDeg, float LenCm, const FVector& Girth, const FTransform& Entity)
+	{
+		const FTransform Mesh(FQuat::Identity, FVector(0, 0, -LenCm * 0.5f), FVector(Girth.X, Girth.Y, LenCm / 100.f));
+		const FTransform Swing(FRotator(SwingDeg, 0.f, 0.f).Quaternion());
+		const FTransform Pivot(FQuat::Identity, PivotEntitySpace);
+		return Mesh * Swing * Pivot * Entity;
+	}
+}
+
 void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
@@ -22,7 +47,10 @@ void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 void URHAgentVisualizerSubsystem::ResetTracking()
 {
 	Tracked.Reset();
-	for (UInstancedStaticMeshComponent* Part : { MeshComponent.Get(), CabComponent.Get(), WheelComponent.Get() })
+	LastPosCm.Reset();
+	FacingYawDeg.Reset();
+	StridePhase.Reset();
+	for (UInstancedStaticMeshComponent* Part : Parts)
 	{
 		if (Part)
 		{
@@ -36,23 +64,27 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 	Tracked.Append(Entities);
 	EnsureMeshComponent();
 
-	if (MeshComponent)
+	const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.f));
+	for (int32 i = 0; i < Entities.Num(); ++i)
 	{
-		const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.f));
-		for (int32 i = 0; i < Entities.Num(); ++i)
+		for (UInstancedStaticMeshComponent* Part : Parts)
 		{
-			MeshComponent->AddInstance(Proto, /*bWorldSpace*/ true);
-			if (CabComponent) { CabComponent->AddInstance(Proto, /*bWorldSpace*/ true); }
-			if (WheelComponent) { WheelComponent->AddInstance(Proto, /*bWorldSpace*/ true); }
+			if (Part)
+			{
+				Part->AddInstance(Proto, /*bWorldSpace*/ true);
+			}
 		}
-		UE_LOG(LogRedHope, Display, TEXT("Visualizer tracking %d agents"), Tracked.Num());
+		LastPosCm.Add(FVector::ZeroVector);
+		FacingYawDeg.Add(0.f);
+		StridePhase.Add((float)((Tracked.Num() + i) % 7) * 0.9f); // desynced strides
 	}
+	UE_LOG(LogRedHope, Display, TEXT("Visualizer tracking %d agents"), Tracked.Num());
 }
 
 void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 {
 	bSliceHidden = bHidden;
-	for (UInstancedStaticMeshComponent* Part : { MeshComponent.Get(), CabComponent.Get(), WheelComponent.Get() })
+	for (UInstancedStaticMeshComponent* Part : Parts)
 	{
 		if (Part)
 		{
@@ -63,7 +95,7 @@ void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 
 void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 {
-	if (MeshComponent)
+	if (Parts.Num() > 0)
 	{
 		return;
 	}
@@ -77,9 +109,6 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	Holder->SetActorLabel(TEXT("RH_AgentVisualizer"));
 #endif
 
-	// Reference (Robots/ConstructionDrone): three layers per unit. The maker
-	// binds mesh + tint; Tick composes each layer's fixed local offset onto the
-	// shared entity transform.
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
 	const auto MakeLayer = [&](const TCHAR* Name, const FLinearColor& Tint, const FLinearColor& Emissive) -> UInstancedStaticMeshComponent*
@@ -100,18 +129,28 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 		Part->SetVisibility(!bSliceHidden); // honor an already-descended elevator
 		return Part;
 	};
-	// Chassis: bone-white with the warm self-glow (a powered unit - the night
-	// shift stays visible; 0.1 proved invisible in footage, lamps sit at ~3.2).
-	MeshComponent = MakeLayer(TEXT("AgentInstances"), FLinearColor(0.62f, 0.60f, 0.54f), FLinearColor(0.60f, 0.50f, 0.28f));
-	// Cab glass: near-black with the faint cool status glow of the reference visor.
-	CabComponent = MakeLayer(TEXT("AgentCabs"), FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.14f, 0.18f));
-	// Wheel skirt: dark running gear under the flanks.
-	WheelComponent = MakeLayer(TEXT("AgentWheels"), FLinearColor(0.05f, 0.05f, 0.06f), FLinearColor::Black);
+
+	// Reference palette: gloss-white armor plates, matte-black underlayer/
+	// joints, the dark visor's cyan status bar. The white keeps the prior
+	// stand-in's warm self-glow so the night shift stays visible.
+	const FLinearColor ArmorWhite(0.60f, 0.58f, 0.54f);
+	const FLinearColor ArmorGlow(0.45f, 0.38f, 0.22f);
+	const FLinearColor JointBlack(0.05f, 0.05f, 0.06f);
+	Parts.SetNum((int32)EPart::COUNT);
+	Parts[(int32)EPart::Torso] = MakeLayer(TEXT("Torso"), ArmorWhite, ArmorGlow);
+	Parts[(int32)EPart::Pelvis] = MakeLayer(TEXT("Pelvis"), JointBlack, FLinearColor::Black);
+	Parts[(int32)EPart::Head] = MakeLayer(TEXT("Head"), ArmorWhite, ArmorGlow * 0.5f);
+	Parts[(int32)EPart::Visor] = MakeLayer(TEXT("Visor"), FLinearColor(0.02f, 0.03f, 0.04f), FLinearColor(0.1f, 1.8f, 2.2f));
+	Parts[(int32)EPart::Pack] = MakeLayer(TEXT("Pack"), JointBlack, FLinearColor::Black);
+	Parts[(int32)EPart::LegL] = MakeLayer(TEXT("LegL"), ArmorWhite, FLinearColor::Black);
+	Parts[(int32)EPart::LegR] = MakeLayer(TEXT("LegR"), ArmorWhite, FLinearColor::Black);
+	Parts[(int32)EPart::ArmL] = MakeLayer(TEXT("ArmL"), JointBlack, FLinearColor::Black);
+	Parts[(int32)EPart::ArmR] = MakeLayer(TEXT("ArmR"), JointBlack, FLinearColor::Black);
 }
 
 void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 {
-	if (!MeshComponent || Tracked.Num() == 0)
+	if (Parts.Num() == 0 || Tracked.Num() == 0 || DeltaTime <= 0.f)
 	{
 		return;
 	}
@@ -122,28 +161,61 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
 
-	// Fixed part offsets in ENTITY space (X forward): chassis mass, the raked
-	// cab glass up front, and the wheel skirt under the flanks - the reference
-	// drone's read at strategic zoom. ChildWorld = Local * EntityTransform.
-	static const FTransform ChassisLocal(FQuat::Identity, FVector(0, 0, 0), FVector(1.2f, 0.95f, 0.85f));
-	static const FTransform CabLocal(FRotator(-14.f, 0, 0).Quaternion(), FVector(30.f, 0, 62.f), FVector(0.55f, 0.78f, 0.45f));
-	static const FTransform WheelLocal(FQuat::Identity, FVector(0, 0, -52.f), FVector(1.1f, 1.05f, 0.3f));
-
-	TArray<FTransform> Bodies, Cabs, Wheels;
-	Bodies.Reserve(Tracked.Num());
-	Cabs.Reserve(Tracked.Num());
-	Wheels.Reserve(Tracked.Num());
-	for (const FMassEntityHandle& Entity : Tracked)
+	TArray<TArray<FTransform>> Out;
+	Out.SetNum((int32)EPart::COUNT);
+	for (TArray<FTransform>& Arr : Out)
 	{
-		if (EntityManager.IsEntityValid(Entity))
+		Arr.Reserve(Tracked.Num());
+	}
+
+	for (int32 i = 0; i < Tracked.Num(); ++i)
+	{
+		if (!EntityManager.IsEntityValid(Tracked[i]))
 		{
-			const FTransform& T = EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform();
-			Bodies.Add(ChassisLocal * T);
-			Cabs.Add(CabLocal * T);
-			Wheels.Add(WheelLocal * T);
+			continue;
+		}
+		const FVector Pos = EntityManager.GetFragmentDataChecked<FTransformFragment>(Tracked[i]).GetTransform().GetLocation();
+
+		// Gait from the entity's own motion: stride phase accumulates with
+		// ground covered (so faster sim speeds walk faster, and a stopped
+		// robot's legs settle); facing eases toward the travel direction.
+		const FVector Delta = (Pos - LastPosCm[i]) * FVector(1, 1, 0);
+		const float Speed = LastPosCm[i].IsNearlyZero() ? 0.f : (float)Delta.Size() / DeltaTime; // cm/s
+		LastPosCm[i] = Pos;
+		const float Stride = FMath::Clamp(Speed / 220.f, 0.f, 1.f); // full swing at a brisk walk
+		if (Speed > 15.f)
+		{
+			const float TargetYaw = FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X));
+			FacingYawDeg[i] = FMath::FixedTurn(FacingYawDeg[i], TargetYaw, 540.f * DeltaTime);
+		}
+		StridePhase[i] += (Speed / 46.f) * DeltaTime; // ~one full cycle per stride length
+		const float Swing = 26.f * Stride * FMath::Sin(StridePhase[i] * 2.f * PI);
+		const float Bob = 2.5f * Stride * FMath::Abs(FMath::Sin(StridePhase[i] * 2.f * PI));
+
+		const FTransform Entity(FRotator(0.f, FacingYawDeg[i], 0.f).Quaternion(), Pos + FVector(0, 0, Bob));
+
+		// Rigid parts: offsets in entity space.
+		const auto Fixed = [&](const FVector& At, const FVector& Scale)
+		{
+			return FTransform(FQuat::Identity, At, Scale) * Entity;
+		};
+		Out[(int32)EPart::Torso].Add(Fixed(FVector(0, 0, GroundZ + 116.f), FVector(0.30f, 0.42f, 0.52f)));
+		Out[(int32)EPart::Pelvis].Add(Fixed(FVector(0, 0, HipZ + 6.f), FVector(0.24f, 0.32f, 0.20f)));
+		Out[(int32)EPart::Head].Add(Fixed(FVector(0, 0, GroundZ + 160.f), FVector(0.22f, 0.24f, 0.24f)));
+		Out[(int32)EPart::Visor].Add(Fixed(FVector(12.f, 0, GroundZ + 161.f), FVector(0.05f, 0.18f, 0.10f)));
+		Out[(int32)EPart::Pack].Add(Fixed(FVector(-19.f, 0, GroundZ + 120.f), FVector(0.12f, 0.30f, 0.34f)));
+		// Swinging limbs: legs opposite phase, arms counter-swinging their leg.
+		Out[(int32)EPart::LegL].Add(Limb(FVector(0, -HipHalfY, HipZ), Swing, LegLen, FVector(0.15f, 0.13f, 0), Entity));
+		Out[(int32)EPart::LegR].Add(Limb(FVector(0, HipHalfY, HipZ), -Swing, LegLen, FVector(0.15f, 0.13f, 0), Entity));
+		Out[(int32)EPart::ArmL].Add(Limb(FVector(0, -ShoulderHalfY, ShoulderZ), -Swing * 0.7f, ArmLen, FVector(0.10f, 0.10f, 0), Entity));
+		Out[(int32)EPart::ArmR].Add(Limb(FVector(0, ShoulderHalfY, ShoulderZ), Swing * 0.7f, ArmLen, FVector(0.10f, 0.10f, 0), Entity));
+	}
+
+	for (int32 P = 0; P < (int32)EPart::COUNT; ++P)
+	{
+		if (Parts[P])
+		{
+			Parts[P]->BatchUpdateInstancesTransforms(0, Out[P], /*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
 		}
 	}
-	MeshComponent->BatchUpdateInstancesTransforms(0, Bodies, /*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
-	if (CabComponent) { CabComponent->BatchUpdateInstancesTransforms(0, Cabs, true, true, true); }
-	if (WheelComponent) { WheelComponent->BatchUpdateInstancesTransforms(0, Wheels, true, true, true); }
 }

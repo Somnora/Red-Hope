@@ -156,6 +156,51 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 			FVector(ScaleM.X + 0.14f, ScaleM.Y + 0.14f, 0.5f), Hue, Hue * 0.9f);
 	}
 
+	// LIVED-IN + DUSTY (director's look note): every standing structure wears
+	// the planet. Deterministic per family (a content hash picks which sides),
+	// so the same building always weathers the same way.
+	// - dust drifts banked against two hull faces (wind-laid, like the plain's)
+	// - a grime band where hull meets regolith
+	// - a thin dust film on the roof
+	// - one replaced hull panel in off-tone (maintenance you can SEE)
+	if (DefName != FName("Lander") && DefName != FName("Pylon") && DefName != FName("ChargePad"))
+	{
+		const uint32 Wear = FCrc::StrCrc32(*DefName.ToString());
+		const FLinearColor DriftDust(0.52f, 0.35f, 0.22f);
+		const FLinearColor Grime(0.15f, 0.115f, 0.085f);
+		const float Hx = ScaleM.X * 50.f;
+		const float Hy = ScaleM.Y * 50.f;
+		for (int32 D = 0; D < 2; ++D)
+		{
+			const int32 Side = (int32)((Wear >> (D * 3)) % 4u);
+			const float Sx = (Side == 0) ? 1.f : (Side == 1 ? -1.f : 0.f);
+			const float Sy = (Side == 2) ? 1.f : (Side == 3 ? -1.f : 0.f);
+			const FVector At = BaseCm + FVector(Sx * (Hx + 25.f), Sy * (Hy + 25.f), 6.f)
+				+ FVector(Sy * (float)((Wear >> (D * 5)) % 120u) - Sy * 60.f, Sx * (float)((Wear >> (D * 7)) % 120u) - Sx * 60.f, 0.f);
+			AddAccent(Actor, Sphere, At, FRotator(0, Sx != 0.f ? 90.f : 0.f, 0),
+				FVector(FMath::Max(ScaleM.Y, ScaleM.X) * 0.55f + 0.8f, 1.1f, 0.42f), DriftDust);
+		}
+		// Grime band: four thin skirts at the hull base.
+		AddAccent(Actor, Cube, BaseCm + FVector(Hx + 3.f, 0, 22.f), FRotator::ZeroRotator, FVector(0.05f, ScaleM.Y * 0.98f, 0.44f), Grime);
+		AddAccent(Actor, Cube, BaseCm + FVector(-Hx - 3.f, 0, 22.f), FRotator::ZeroRotator, FVector(0.05f, ScaleM.Y * 0.98f, 0.44f), Grime);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, Hy + 3.f, 22.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.98f, 0.05f, 0.44f), Grime);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, -Hy - 3.f, 22.f), FRotator::ZeroRotator, FVector(ScaleM.X * 0.98f, 0.05f, 0.44f), Grime);
+		// Roof dust film (skip open-frame silhouettes where a slab makes no sense).
+		if (DefName != FName("Stockpile") && DefName != FName("SolarArray"))
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector(Hx * 0.18f, -Hy * 0.15f, TopZ + 3.f), FRotator(0, (float)(Wear % 27u), 0),
+				FVector(ScaleM.X * 0.72f, ScaleM.Y * 0.6f, 0.05f), FLinearColor(0.44f, 0.29f, 0.185f));
+		}
+		// The replaced panel: proud of the hull by 3 cm, in a mismatched tone.
+		{
+			const bool bEastFace = (Wear & 8u) != 0;
+			const FLinearColor Patch = (Wear & 16u) ? FLinearColor(0.40f, 0.385f, 0.35f) : FLinearColor(0.20f, 0.21f, 0.24f);
+			const float Along = ((float)((Wear >> 9) % 100u) / 100.f - 0.5f) * ScaleM.Y * 60.f;
+			AddAccent(Actor, Cube, BaseCm + FVector((bEastFace ? 1.f : -1.f) * (Hx + 3.f), Along, TopZ * 0.55f),
+				FRotator::ZeroRotator, FVector(0.04f, 0.85f, 0.7f), Patch);
+		}
+	}
+
 	if (DefName == FName("Lander"))
 	{
 		// REFERENCE (Ships/CargoLander): a blocky, functional cargo freighter -
@@ -286,6 +331,20 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		}
 		AddAccent(Actor, Cyl, BaseCm + FVector(ScaleM.X * 50.f + 80.f, -40.f, 45.f), FRotator(52.f, 0, 0), FVector(0.35f, 0.35f, 2.2f), DarkSlate);
 		AddAccent(Actor, Cube, BaseCm + FVector(ScaleM.X * 50.f + 150.f, -40.f, 20.f), FRotator(0, 25.f, 0), FVector(0.9f, 0.9f, 0.35f), FLinearColor(0.75f, 0.90f, 1.00f));
+		// Reference (Facilities/IceProcessor): the extraction works ships with a
+		// pair of frost-white INSULATED TANKS on cradles, piped back into the
+		// block, and a frost collar where the drill string enters the ground -
+		// the cold made visible.
+		const FLinearColor FrostWhite(0.62f, 0.66f, 0.70f);
+		for (int32 T = 0; T < 2; ++T)
+		{
+			const FVector TankCm = BaseCm + FVector(-60.f + T * 150.f, -ScaleM.Y * 50.f - 120.f, 0);
+			AddAccent(Actor, Cyl, TankCm + FVector(0, 0, 120.f), FRotator::ZeroRotator, FVector(1.15f, 1.15f, 2.4f), FrostWhite);
+			AddAccent(Actor, Sphere, TankCm + FVector(0, 0, 240.f), FRotator::ZeroRotator, FVector(1.1f, 1.1f, 0.75f), FrostWhite);
+			AddAccent(Actor, Cube, TankCm + FVector(0, 0, 16.f), FRotator::ZeroRotator, FVector(1.0f, 1.0f, 0.32f), DarkSlate);
+			AddAccent(Actor, Cyl, TankCm + FVector(0, 60.f, 150.f), FRotator(90.f, 0, 0), FVector(0.16f, 0.16f, 1.2f), DarkSlate);
+		}
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, 10.f), FRotator::ZeroRotator, FVector(1.9f, 1.9f, 0.14f), FrostWhite); // frost collar
 	}
 	else if (DefName == FName("WaterPlant"))
 	{
@@ -305,6 +364,20 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		{
 			AddAccent(Actor, Sphere, BaseCm + FVector((V - 1) * 190.f, ScaleM.Y * 50.f + 110.f, 305.f), FRotator::ZeroRotator, FVector(0.4f), HazYellow);
 		}
+		// Reference (Facilities/IceProcessor): the open MELT BASIN - a dark
+		// trough with raw ice glowing pale blue inside, chunks waiting to feed
+		// the works - plus the red hand-valve wheel and a breathing vent stack.
+		{
+			const FVector Basin = BaseCm + FVector(-ScaleM.X * 50.f - 160.f, -60.f, 0);
+			AddAccent(Actor, Cube, Basin + FVector(0, 0, 30.f), FRotator(0, 8.f, 0), FVector(2.6f, 1.7f, 0.6f), DarkSlate);
+			AddAccent(Actor, Cube, Basin + FVector(0, 0, 52.f), FRotator(0, 8.f, 0), FVector(2.3f, 1.4f, 0.18f),
+				FLinearColor(0.55f, 0.75f, 0.9f), FLinearColor(0.25f, 0.8f, 1.4f)); // the melt, lit from within
+			AddAccent(Actor, Cube, Basin + FVector(-40.f, 20.f, 78.f), FRotator(0, 33.f, 0), FVector(0.45f, 0.45f, 0.4f), FLinearColor(0.75f, 0.90f, 1.00f));
+			AddAccent(Actor, Cube, Basin + FVector(55.f, -25.f, 74.f), FRotator(0, -21.f, 0), FVector(0.38f, 0.38f, 0.32f), FLinearColor(0.75f, 0.90f, 1.00f));
+			AddAccent(Actor, Cyl, Basin + FVector(120.f, 60.f, 55.f), FRotator(0, 0, 90.f), FVector(0.4f, 0.4f, 0.08f), FLinearColor(0.7f, 0.12f, 0.08f)); // the red valve wheel
+		}
+		AddAccent(Actor, Cyl, BaseCm + FVector(ScaleM.X * 35.f, -ScaleM.Y * 30.f, TopZ + 90.f), FRotator::ZeroRotator, FVector(0.3f, 0.3f, 1.8f), BoneWhite);
+		AddAccent(Actor, Sphere, BaseCm + FVector(ScaleM.X * 35.f, -ScaleM.Y * 30.f, TopZ + 205.f), FRotator::ZeroRotator, FVector(0.55f, 0.55f, 0.4f), FLinearColor(0.68f, 0.66f, 0.64f)); // the steam breath
 	}
 	else if (DefName == FName("Electrolyzer"))
 	{
@@ -903,6 +976,14 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	{
 		return;
 	}
+	// The scenery ring + ground scatter (one-time build; state-diffed hide when
+	// the elevator descends, matching the surface ground plane's behavior).
+	EnsureEnvironmentRig();
+	if (EnvironmentRigActor && bEnvironmentHidden != IsUnderground())
+	{
+		bEnvironmentHidden = IsUnderground();
+		EnvironmentRigActor->SetActorHiddenInGame(bEnvironmentHidden);
+	}
 	// Territory made visible: one disc per coverage node, every frame - on
 	// the floor the elevator shows.
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -1382,6 +1463,187 @@ void URHColonyVisualizerSubsystem::EnsureSliceRig()
 	// same ground; walls are darker strata - the cut faces of the excavation.
 	SkirtISM = MakeISM(TEXT("PitSkirt"), FLinearColor(0.48f, 0.31f, 0.19f));
 	WallISM = MakeISM(TEXT("PitWalls"), FLinearColor(0.30f, 0.19f, 0.12f));
+}
+
+void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
+{
+	if (EnvironmentRigActor)
+	{
+		return;
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	EnvironmentRigActor = World->SpawnActor<AActor>();
+	if (!EnvironmentRigActor)
+	{
+		return;
+	}
+	USceneComponent* Root = NewObject<USceneComponent>(EnvironmentRigActor, TEXT("Root"));
+	Root->RegisterComponent();
+	EnvironmentRigActor->SetRootComponent(Root);
+#if WITH_EDITOR
+	EnvironmentRigActor->SetActorLabel(TEXT("RH_Scenery"));
+#endif
+
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UStaticMesh* Cone = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cone.Cone"));
+	UStaticMesh* Cyl = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+	const auto MakeISM = [&](const TCHAR* Name, UStaticMesh* Mesh, const FLinearColor& Tint, bool bShadow) -> UInstancedStaticMeshComponent*
+	{
+		UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(EnvironmentRigActor, Name);
+		ISM->SetupAttachment(Root);
+		ISM->RegisterComponent();
+		EnvironmentRigActor->AddInstanceComponent(ISM);
+		ISM->SetStaticMesh(Mesh);
+		ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		ISM->SetCastShadow(bShadow);
+		if (Base)
+		{
+			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, ISM);
+			Mid->SetVectorParameterValue(FName("Tint"), Tint);
+			ISM->SetMaterial(0, Mid);
+		}
+		return ISM;
+	};
+	const auto Deg = [](float D){ return FRotator(0.f, D, 0.f); };
+
+	// One seeded stream = the same Mars every run (and after every reload).
+	FRandomStream Rand(20260708);
+
+	// --- The far ground apron: the horizon never shows void. A huge flattened
+	// disc a hair below the playfield plane, in a slightly darker regolith so
+	// the distance reads as terrain even past the authored ground's edge.
+	UInstancedStaticMeshComponent* Apron = MakeISM(TEXT("FarApron"), Cyl, FLinearColor(0.42f, 0.265f, 0.16f), false);
+	{
+		FTransform T(FQuat::Identity, FVector(0, 0, -25.f), FVector(8000.f, 8000.f, 0.2f)); // r = 4 km
+		Apron->AddInstance(T, true);
+	}
+
+	// --- The mountain ring (reference: Mountain_Range.png - layered ranges
+	// hazing into the butterscotch sky). Three depth bands, each its own tint:
+	// nearer = darker rust, farther = paler (atmospheric perspective baked into
+	// the tint; the height fog adds the rest live).
+	UInstancedStaticMeshComponent* NearRock = MakeISM(TEXT("NearRange"), Cone, FLinearColor(0.33f, 0.195f, 0.115f), true);
+	UInstancedStaticMeshComponent* MidRock = MakeISM(TEXT("MidRange"), Cone, FLinearColor(0.40f, 0.25f, 0.15f), false);
+	UInstancedStaticMeshComponent* FarRock = MakeISM(TEXT("FarRange"), Cone, FLinearColor(0.47f, 0.315f, 0.20f), false);
+	UInstancedStaticMeshComponent* Mesa = MakeISM(TEXT("Mesas"), Cyl, FLinearColor(0.37f, 0.225f, 0.13f), false);
+	const auto Massif = [&](UInstancedStaticMeshComponent* ISM, const FVector& CenterCm, float PeakM, float SpreadM, int32 Peaks)
+	{
+		for (int32 P = 0; P < Peaks; ++P)
+		{
+			const float H = PeakM * Rand.FRandRange(0.55f, 1.0f);
+			const FVector Off = P == 0 ? FVector::ZeroVector
+				: FVector(Rand.FRandRange(-SpreadM, SpreadM) * 100.f, Rand.FRandRange(-SpreadM, SpreadM) * 100.f, 0);
+			// The default cone is 50 cm tall with its BASE at z=0 - scale Z by
+			// height and pinch X/Y for a craggy, not perfectly conic, profile.
+			FTransform T(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(),
+				CenterCm + Off,
+				FVector(H * Rand.FRandRange(1.6f, 2.6f), H * Rand.FRandRange(1.2f, 2.2f), H * 2.f));
+			ISM->AddInstance(T, true);
+		}
+	};
+	// Far band: a long broken ring, 2.2-3.2 km out.
+	for (int32 M = 0; M < 16; ++M)
+	{
+		const float Ang = M * 22.5f + Rand.FRandRange(-8.f, 8.f);
+		const float R = Rand.FRandRange(220000.f, 320000.f);
+		Massif(FarRock, Deg(Ang).Vector() * R, Rand.FRandRange(260.f, 520.f), 420.f, 3);
+	}
+	// Mid band: sparser, 1.3-2.0 km.
+	for (int32 M = 0; M < 9; ++M)
+	{
+		const float Ang = M * 40.f + Rand.FRandRange(-13.f, 13.f);
+		const float R = Rand.FRandRange(130000.f, 200000.f);
+		Massif(MidRock, Deg(Ang).Vector() * R, Rand.FRandRange(160.f, 320.f), 260.f, 3);
+	}
+	// Mesas/buttes in the mid ground (the reference's flat-topped forms).
+	for (int32 M = 0; M < 6; ++M)
+	{
+		const float Ang = M * 60.f + Rand.FRandRange(-20.f, 20.f);
+		const float R = Rand.FRandRange(90000.f, 170000.f);
+		FTransform T(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(), Deg(Ang).Vector() * R,
+			FVector(Rand.FRandRange(220.f, 480.f), Rand.FRandRange(160.f, 340.f), Rand.FRandRange(0.9f, 1.7f)));
+		Mesa->AddInstance(T, true);
+	}
+	// --- THE HERO MASSIF (director: "building a Habitat at the base of a
+	// mountain would be awesome"): a close, three-peak range NE of the colony,
+	// its foothills ending on a flat buildable apron ~380 m out. Near enough to
+	// pan to in seconds, far enough to never shade the starting base.
+	{
+		const FVector Heart = Deg(38.f).Vector() * 52000.f; // 520 m NE
+		Massif(NearRock, Heart, 300.f, 160.f, 4);
+		Massif(NearRock, Heart + Deg(122.f).Vector() * 22000.f, 180.f, 90.f, 2);
+		// Foothill shoulders: low wedge boxes easing the cones into the plain.
+		for (int32 F = 0; F < 5; ++F)
+		{
+			const FVector Foot = Heart + Deg(180.f + 38.f + Rand.FRandRange(-55.f, 55.f)).Vector() * Rand.FRandRange(9000.f, 15000.f);
+			FTransform T(FRotator(Rand.FRandRange(-4.f, 4.f), Rand.FRandRange(0.f, 360.f), Rand.FRandRange(-3.f, 3.f)).Quaternion(),
+				Foot + FVector(0, 0, -60.f),
+				FVector(Rand.FRandRange(40.f, 90.f), Rand.FRandRange(25.f, 60.f), Rand.FRandRange(4.f, 9.f)));
+			NearRock->AddInstance(T, true);
+		}
+	}
+
+	// --- Ground detail scatter: rocks (dark, the pit-wall geology), pebbles,
+	// wind-laid dust drifts (one prevailing wind), and shallow craters. All
+	// outside the starting build apron so the base stays clean.
+	UInstancedStaticMeshComponent* Rocks = MakeISM(TEXT("Rocks"), Cube, FLinearColor(0.30f, 0.19f, 0.12f), true);
+	UInstancedStaticMeshComponent* Pebbles = MakeISM(TEXT("Pebbles"), Cube, FLinearColor(0.40f, 0.26f, 0.16f), false);
+	UInstancedStaticMeshComponent* Drifts = MakeISM(TEXT("DustDrifts"), Sphere, FLinearColor(0.55f, 0.37f, 0.23f), false);
+	UInstancedStaticMeshComponent* CraterFloors = MakeISM(TEXT("CraterFloors"), Cyl, FLinearColor(0.36f, 0.22f, 0.13f), false);
+	const auto ScatterRing = [&](UInstancedStaticMeshComponent* ISM, int32 Count, float MinRm, float MaxRm,
+		float SMin, float SMax, float ZScaleMul, float ZAtCm)
+	{
+		for (int32 i = 0; i < Count; ++i)
+		{
+			const float R = Rand.FRandRange(MinRm, MaxRm) * 100.f;
+			const FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R + FVector(0, 0, ZAtCm);
+			const float S = Rand.FRandRange(SMin, SMax);
+			FTransform T(FRotator(0.f, Rand.FRandRange(0.f, 360.f), 0.f).Quaternion(), Pos,
+				FVector(S * Rand.FRandRange(0.7f, 1.4f), S * Rand.FRandRange(0.7f, 1.4f), S * ZScaleMul));
+			ISM->AddInstance(T, true);
+		}
+	};
+	ScatterRing(Rocks, 260, 38.f, 460.f, 0.5f, 2.4f, 0.7f, 15.f);
+	ScatterRing(Pebbles, 520, 12.f, 240.f, 0.12f, 0.45f, 0.6f, 4.f);
+	ScatterRing(CraterFloors, 16, 60.f, 420.f, 6.f, 16.f, 0.f, 2.f); // ZScaleMul 0 -> use fixed thin Z below
+	// Craters need a fixed razor-thin Z (the ring set Z scale to 0 - repair it)
+	// plus a rubble rim.
+	for (int32 C = 0; C < CraterFloors->GetInstanceCount(); ++C)
+	{
+		FTransform T;
+		CraterFloors->GetInstanceTransform(C, T, true);
+		FVector S = T.GetScale3D();
+		S.Z = 0.04f;
+		T.SetScale3D(S);
+		CraterFloors->UpdateInstanceTransform(C, T, true, C == CraterFloors->GetInstanceCount() - 1, true);
+		const int32 RimRocks = Rand.RandRange(6, 10);
+		for (int32 Rk = 0; Rk < RimRocks; ++Rk)
+		{
+			const float A = Rk * (360.f / RimRocks) + Rand.FRandRange(-14.f, 14.f);
+			const FVector Rim = T.GetLocation() + Deg(A).Vector() * (S.X * 50.f + Rand.FRandRange(30.f, 90.f));
+			const float RS = Rand.FRandRange(0.25f, 0.8f);
+			FTransform RT(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(), FVector(Rim.X, Rim.Y, 12.f),
+				FVector(RS, RS * Rand.FRandRange(0.7f, 1.3f), RS * 0.7f));
+			Rocks->AddInstance(RT, true);
+		}
+	}
+	// Wind-laid drifts: all within +/-14 degrees of one prevailing wind so the
+	// plain reads as WEATHER, not noise (squashed spheres = soft dunes).
+	for (int32 D = 0; D < 90; ++D)
+	{
+		const float R = Rand.FRandRange(20.f, 380.f) * 100.f;
+		const FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R + FVector(0, 0, 6.f);
+		const float L = Rand.FRandRange(5.f, 18.f);
+		FTransform T(Deg(115.f + Rand.FRandRange(-14.f, 14.f)).Quaternion(), Pos,
+			FVector(L, L * Rand.FRandRange(0.18f, 0.3f), 0.5f));
+		Drifts->AddInstance(T, true);
+	}
 }
 
 void URHColonyVisualizerSubsystem::RebuildSliceRig()

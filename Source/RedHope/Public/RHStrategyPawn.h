@@ -25,6 +25,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddZoom(float Delta);
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddOrbit(float DeltaYawDeg);
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddPan(FVector2D PlanarDeltaCm);
+	// Manual tilt on top of the zoom-coupled pitch (director: "tilt up and see
+	// mountains"). Negative offset raises the gaze; the final pitch clamps just
+	// above the horizon so the scenery ring and sky read, never under the world.
+	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddTilt(float DeltaPitchDeg);
 
 	// Current camera distance (cm) - pan speed scales with it so a screen-width
 	// drag covers similar ground at every register.
@@ -60,4 +64,7 @@ private:
 	float TargetFocusZCm = 0.f; // elevator destination; Tick rides toward it
 	float OrbitYawDeg = 0.f;
 	float SmoothedZoomT = 0.45f;
+	// Manual tilt (R/F): 0 = classic zoom-coupled pitch; negative looks up.
+	float PitchOffsetDeg = 0.f;
+	float SmoothedPitchOffsetDeg = 0.f;
 };

@@ -9,6 +9,7 @@ class ADirectionalLight;
 class APostProcessVolume;
 class AExponentialHeightFog;
 class ASkyLight;
+class ASkyAtmosphere;
 
 // Presentation-side driver of the atmosphere dial. Reads sim state
 // (habitability, sol clock) and writes MPC_Atmosphere + rotates the sun.
@@ -47,6 +48,10 @@ private:
 	UPROPERTY() TObjectPtr<APostProcessVolume> GradeVolume;
 	UPROPERTY() TObjectPtr<AExponentialHeightFog> DustFog;
 	UPROPERTY() TObjectPtr<ASkyLight> FillSky;
+	// The Martian sky dome (Session 44+ scenery pass): a physically-driven sky
+	// so tilting the camera up shows a butterscotch horizon fading over the
+	// mountain ring, with the animated sun disc + a naturally dark night.
+	UPROPERTY() TObjectPtr<ASkyAtmosphere> SkyDome;
 	bool bLookInit = false;
 	void EnsureLookRig();          // find-or-spawn the grade / fog / fill
 	void DriveLook(float DustFactor, float SolFraction, bool bUnderground);

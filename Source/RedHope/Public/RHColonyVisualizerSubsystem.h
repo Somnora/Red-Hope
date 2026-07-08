@@ -106,6 +106,13 @@ private:
 	// walls (surface down to the open floor). One actor, thousands-cheap.
 	void EnsureSliceRig();
 	void RebuildSliceRig();
+	// The scenery rig (Session 44+, director request): a mountain ring + mesas
+	// hazing into the fog (the reference panorama), a hero massif near enough
+	// to build a Habitat at its base, a far ground apron so the horizon never
+	// shows void, and deterministic rock/pebble/drift/crater scatter that gives
+	// the regolith readable detail. Built once (seeded FRandomStream - identical
+	// every run), pure presentation, hidden while underground like the surface.
+	void EnsureEnvironmentRig();
 	// Two distinct views (director recording verdict): the elevator is a hard
 	// cut between strata. At SURF you see only the intact sunlit surface - no
 	// underground bleed. Descending to -N opens THAT floor as a pit you look
@@ -142,6 +149,8 @@ private:
 	UPROPERTY() TObjectPtr<AActor> SliceRigActor;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> SkirtISM;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> WallISM;
+	UPROPERTY() TObjectPtr<AActor> EnvironmentRigActor;
+	bool bEnvironmentHidden = false;
 	FIntVector LastRigKey = FIntVector(-999, -999, -999); // (depth, pit level, carved count)
 	TMap<int32, int32> TilesSpawnedPerLevel;
 	TWeakObjectPtr<AActor> GroundActor;
