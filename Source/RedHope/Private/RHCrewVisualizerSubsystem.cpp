@@ -82,7 +82,7 @@ void URHCrewVisualizerSubsystem::ShowEmote(FCrewVisual& Vis, const FString& Line
 	}
 	Emote->SetText(FText::FromString(Line));
 	Emote->SetTextRenderColor(Color);
-	Vis.EmoteUntilRealSeconds = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0) + Seconds;
+	Vis.EmoteRemainingS = Seconds;
 }
 
 void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 IdB, const FString& Text)
@@ -97,7 +97,7 @@ void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 I
 		// The whole crew, hopping: harvest days are for everyone.
 		for (auto& Pair : Tracked)
 		{
-			Pair.Value.CheerUntilRealSeconds = Now + 7.0;
+			Pair.Value.CheerRemainingS = 7.0;
 			ShowEmote(Pair.Value, TEXT("* cheering *"), FColor(255, 214, 80), 7.0);
 		}
 		return;
@@ -281,6 +281,10 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	// Figures amble at sim pace (paused colony = still colony); era speed is
 	// clamped so fast-forward doesn't turn walks into teleports.
 	const float Pace = FMath::Min(Clock->GetSpeed(), 8.f);
+	if (Pace > 0.f)
+	{
+		AnimClockS += DeltaTime; // body-language time: frozen while paused
+	}
 
 	// Roster diff: arrivals spawn, departures (evacuation) leave the world.
 	TSet<int32> Alive;
@@ -404,30 +408,39 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 
-		// Alive pass: body language. A cheering figure hops; a posted worker
-		// bobs gently at their station (per-id phase so the crew never moves in
-		// lockstep); an expired emote plate clears.
+		// Alive pass: body language, on the SIM's clock (adversarial review:
+		// the first cut ran on real time, so a paused colony kept hopping and
+		// its celebration windows drained through the pause). The windows count
+		// down and the pose clock advances only while the sim runs - pause
+		// freezes every figure mid-pose and the party resumes with the world.
+		if (Pace > 0.f)
+		{
+			Vis->EmoteRemainingS = FMath::Max(0.0, Vis->EmoteRemainingS - DeltaTime);
+			Vis->CheerRemainingS = FMath::Max(0.0, Vis->CheerRemainingS - DeltaTime);
+		}
 		if (UStaticMeshComponent* Body = Vis->Body.Get())
 		{
 			const float Phase = (float)(C.Id % 7) * 0.9f;
 			float BodyZ = 62.f;
-			if (Now < Vis->CheerUntilRealSeconds)
+			if (Vis->CheerRemainingS > 0.0)
 			{
-				BodyZ += 30.f * FMath::Abs(FMath::Sin((float)Now * 6.f + Phase)); // the harvest-day hop
+				BodyZ += 30.f * FMath::Abs(FMath::Sin((float)AnimClockS * 6.f + Phase)); // the harvest-day hop
 			}
 			else if (!Sim->GetColonistJob(C.Id).IsNone() && Pace > 0.f
 				&& FVector::Dist2D(Actor->GetActorLocation(), Vis->TargetCm) < 60.f)
 			{
-				BodyZ += 4.f * FMath::Sin((float)Now * 2.2f + Phase); // at-the-bench work rhythm
+				BodyZ += 4.f * FMath::Sin((float)AnimClockS * 2.2f + Phase); // at-the-bench work rhythm
 			}
 			Body->SetRelativeLocation(FVector(0, 0, BodyZ));
 		}
-		if (Vis->EmoteUntilRealSeconds > 0.0 && Now >= Vis->EmoteUntilRealSeconds)
+		if (Vis->EmoteRemainingS <= 0.0)
 		{
-			Vis->EmoteUntilRealSeconds = 0.0;
 			if (UTextRenderComponent* Emote = Vis->Emote.Get())
 			{
-				Emote->SetText(FText::GetEmpty());
+				if (!Emote->Text.IsEmpty())
+				{
+					Emote->SetText(FText::GetEmpty());
+				}
 			}
 		}
 

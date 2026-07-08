@@ -52,11 +52,13 @@ private:
 		FVector TargetCm = FVector::ZeroVector;
 		double NextDecideRealSeconds = 0.0;
 		bool bTintedUnsupported = false;
-		// Alive pass: the emote plate above the head (spawned lazily) and the
-		// windows it is showing for; cheering figures hop until CheerUntil.
+		// Alive pass: the emote plate above the head (spawned lazily) and its
+		// remaining display window; cheering figures hop while CheerRemainingS
+		// runs. Both windows count down ONLY while the sim runs (paused colony
+		// = still colony - the celebration waits for the player).
 		TWeakObjectPtr<UTextRenderComponent> Emote;
-		double EmoteUntilRealSeconds = 0.0;
-		double CheerUntilRealSeconds = 0.0;
+		double EmoteRemainingS = 0.0;
+		double CheerRemainingS = 0.0;
 	};
 
 	void HandleColonyReloaded();
@@ -79,4 +81,7 @@ private:
 	// First roster sync seeds residents in place; only ids appearing AFTER it
 	// get the staged pad-to-shaft arrival march.
 	bool bSyncedOnce = false;
+	// The body-language clock: accrues only while the sim runs, so hops and
+	// work-bobs freeze mid-pose on pause instead of dancing through it.
+	double AnimClockS = 0.0;
 };
