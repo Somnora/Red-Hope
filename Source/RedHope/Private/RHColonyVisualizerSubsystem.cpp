@@ -118,6 +118,25 @@ bool URHColonyVisualizerSubsystem::ApplySurface(UStaticMeshComponent* Mesh, cons
 	Mid->SetScalarParameterValue(FName("TileCm"), TileCm);
 	Mid->SetVectorParameterValue(FName("Tint"), Tint);
 	Mid->SetScalarParameterValue(FName("Rough"), Rough);
+	// Matching normal map by convention: Foo.Foo -> Foo_Normal.Foo_Normal.
+	// Absent one, zero the bump rather than let the material's default normal
+	// (regolith) bump a non-regolith surface.
+	FString PkgName, AssetName;
+	UTexture2D* Norm = nullptr;
+	if (FString(TexPath).Split(TEXT("."), &PkgName, &AssetName))
+	{
+		Norm = LoadObject<UTexture2D>(nullptr, *FString::Printf(TEXT("%s_Normal.%s_Normal"), *PkgName, *AssetName));
+	}
+	// Only trust a map RHArt has configured: a freshly imported-but-unfixed
+	// normal (sRGB on, TC_Default) decodes wrong and shades WORSE than flat.
+	if (Norm && Norm->CompressionSettings == TC_Normalmap)
+	{
+		Mid->SetTextureParameterValue(FName("NormTex"), Norm);
+	}
+	else
+	{
+		Mid->SetScalarParameterValue(FName("NormalStrength"), 0.f);
+	}
 	Mesh->SetMaterial(0, Mid);
 	return true;
 }
@@ -547,8 +566,11 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 	// an oblique capture - the -Forward variant rendered it upside down). Built
 	// from axes so it stays a pure rotation, never a reflection - the old Euler
 	// combo faced the text into the ground and read backwards + upside down.
+	const FVector AL = Actor->GetActorLocation();
+	// Ride the scenery relief (12 cm above THE GROUND, not above z=0): far
+	// deposit/rival labels would otherwise bury under rolling terrain.
 	Label->SetWorldLocationAndRotation(
-		Actor->GetActorLocation() * FVector(1, 1, 0) + FVector(-SouthOffsetCm, 0, 12.f),
+		FVector(AL.X - SouthOffsetCm, AL.Y, RHMarsTerrain::GroundZCm(AL.X - SouthOffsetCm, AL.Y) + 12.f),
 		FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 }
 
@@ -831,8 +853,49 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	}
 	UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
 	Mesh->SetMobility(EComponentMobility::Movable);
-	Mesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
-	Actor->SetActorScale3D(Scale);
+	// A real imported model (director's image-to-3D pipeline -> GLB ->
+	// ImportAssets) replaces the whole composed-primitive treatment when one
+	// exists for this building type: uniform-scaled to the footprint, grounded
+	// on its own bounds, wearing its baked vertex colors. Add a row here per
+	// new GLB dropped in ~/Desktop/Martians/assets/models and imported.
+	UStaticMesh* RealModel = nullptr;
+	if (!Instance.bUnderConstruction)
+	{
+		static const TMap<FName, FString> RealModelPaths = {
+			{ FName("Forge"), FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
+		};
+		if (const FString* Path = RealModelPaths.Find(Instance.DefName))
+		{
+			RealModel = LoadObject<UStaticMesh>(nullptr, **Path);
+		}
+	}
+	if (RealModel)
+	{
+		Mesh->SetStaticMesh(RealModel);
+		const FBoxSphereBounds MB = RealModel->GetBounds();
+		// Min-side fit: the model must stay INSIDE the sim's reserved footprint
+		// on both axes (max-side fit spilled a square mesh 1 m into the cells
+		// flanking a rectangular footprint - review finding).
+		const float TargetCm = FMath::Min(Scale.X, Scale.Y) * 100.f;
+		const float S = TargetCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+		Actor->SetActorScale3D(FVector(S));
+		// Recenter horizontally, sit the bounds bottom on the ground.
+		Actor->SetActorLocation(Seated - FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S);
+		if (UMaterialInterface* VCMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_VertexColor.M_VertexColor")))
+		{
+			for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+			{
+				Mesh->SetMaterial(Slot, UMaterialInstanceDynamic::Create(VCMat, Mesh));
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f)"),
+			*Instance.DefName.ToString(), *RealModel->GetName(), S);
+	}
+	else
+	{
+		Mesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+		Actor->SetActorScale3D(Scale);
+	}
 #if WITH_EDITOR
 	Actor->SetActorLabel(FString::Printf(TEXT("Sim_%s_%d"), *Instance.DefName.ToString(), Instance.Id));
 #endif
@@ -840,14 +903,19 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// label in the function hue so "which block is the Forge" never needs asking.
 	const FLinearColor Tint = TintFor(Instance.DefName);
 	const FLinearColor Body = BodyFor(Instance.DefName);
-	ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body, FLinearColor::Black);
+	if (!RealModel)
+	{
+		// The imported model keeps its vertex-color material; tinting would
+		// clobber it back to gray-box.
+		ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body, FLinearColor::Black);
+	}
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
-	if (!Instance.bUnderConstruction)
+	if (!Instance.bUnderConstruction && !RealModel)
 	{
 		BuildSilhouette(Actor, Instance.DefName, Seated, Scale);
 	}
-	else
-	{
+	else if (Instance.bUnderConstruction) // NOT plain else: a completed real
+	{                                     // model must not wear site dressing
 		// Construction site: hazard corner posts + a lit work lamp on a mast.
 		// A dim foundation slab alone reads as a finished flat deck from the
 		// strategic camera - and disappears entirely at night while the robots
