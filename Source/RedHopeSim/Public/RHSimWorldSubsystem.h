@@ -47,6 +47,10 @@ struct REDHOPESIM_API FRHColonist
 	// colonist back to orbit (abstract, prevention-framed consequence - the
 	// mental-health directive's discipline; wording is Gate-D review fodder).
 	UPROPERTY() double UnsupportedSimSeconds = 0.0;
+	// Alive pass: sols worked per job function. Skill grows with practice -
+	// output multiplier ramps 1x -> 2x at SkillMasterySols (linear = identical
+	// across both time bands). Serialized sorted (save v24).
+	TMap<FName, double> SkillSols;
 };
 
 // A placed structure as the sim knows it. Solids live here (approved hybrid
@@ -101,6 +105,13 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnCommandRejected, const FRHCommand&, co
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntityHandle>&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnShipArrived, const TArray<FName>& /*Items*/);
+// Alive pass: a beat of crew life. Type is one of the ERHCrewMoment values;
+// A/B are colonist ids (B may be 0 for solo/whole-crew moments). Text is a
+// presentation-ready line (Gate-D framing-review placeholder, like all copy).
+DECLARE_MULTICAST_DELEGATE_FourParams(FRHOnCrewMoment, uint8 /*Type*/, int32 /*A*/, int32 /*B*/, const FString& /*Text*/);
+// Alive pass: a celebratory milestone (first harvest, discovery, the vault...)
+// - the golden-banner channel, distinct from OnAlert's warnings.
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnMilestone, const FString&);
 DECLARE_MULTICAST_DELEGATE(FRHOnColonyReloaded);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnDepositDiscovered, const FRHDepositState&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnSurveyCompleted, const FRHSurveyRecord&);
@@ -640,6 +651,24 @@ public:
 	FRHOnRobotsSpawned OnRobotsSpawned;
 	FRHOnQuotaMet OnQuotaMet;
 	FRHOnShipArrived OnShipArrived;
+	FRHOnCrewMoment OnCrewMoment;
+	FRHOnMilestone OnMilestone;
+
+	// --- The alive pass: skills, traits, and crew-life moments ---
+	// Crew moments: a deterministic sol-cadence generator of visible life -
+	// pastimes in pairs, a lounger joining a worker, and (only when needs are
+	// unmet or Hope runs low) abstracted DISPUTES - raised voices, never
+	// violence, and no Hope penalty: the friction is a symptom the player can
+	// see, not a second punishment (mental-health directive).
+	enum class ERHCrewMoment : uint8 { Pastime = 0, JoinWork, Dispute, Celebrate };
+	// A colonist's disposition, derived (not stored) from their id: biases the
+	// pastime they reach for. The pool is presentation-facing flavor.
+	static const TCHAR* TraitFor(int32 ColonistId);
+	// Crew skill: 1x fresh -> 2x at mastery, per job function - the average
+	// across everyone currently holding that job (1.0 with nobody employed).
+	double GetCrewSkillMul(FName Function) const;
+	double GetSkillMasterySols() const { return SkillMasterySols; }
+	bool HasHadFirstHarvest() const { return bFirstHarvestAnnounced; }
 
 private:
 	void StepSim(float SubDt);
@@ -923,6 +952,19 @@ private:
 	double EndingHumanNatureThreshold = 30.0;
 	void StepCrisis(float SubDt);
 	void TriggerCrisis(); // run the alignment-gated selector, start a crisis
+	// The alive pass (save v24). MomentSols accumulates toward the next crew
+	// moment; MomentCounter seeds the deterministic picks. First-harvest
+	// tracking: cumulative garden-grown food + the once-only milestone flag.
+	void StepMoments(float SubDt);
+	double MomentSols = 0.0;
+	int32 MomentCounter = 0;
+	bool bFirstHarvestAnnounced = false;
+	double GardenFoodCumKg = 0.0;
+	double SkillMasterySols = 30.0;
+	double CrewMomentIntervalSols = 0.5;
+	double DisputeHopeBelow = 45.0;
+	double FirstHarvestKg = 1.0;
+	double HopeFirstHarvestMilestone = 4.0;
 	// A deterministic detection roll for a covert op against a rival (shared by
 	// requisition + sabotage): seeded by content hash + the saved attempt count.
 	bool RollCovertDetected(FName Rival);

@@ -23,7 +23,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 23;  // v23: crises+endings (M4 Gate D); v22 Earth pre-emptive; v21 espionage economy; v20 covert layer
+	constexpr uint32 RHSaveVersion = 24;  // v24: alive pass (skills, moments, first harvest); v23 crises+endings; v22 Earth pre-emptive; v21 espionage
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -197,6 +197,11 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	CrisisWaterDrainPerSol = Defs->GetConfigScalar(FName("CrisisWaterDrainPerSol"), CrisisWaterDrainPerSol);
 	EndingIdentityThreshold = Defs->GetConfigScalar(FName("EndingIdentityThreshold"), EndingIdentityThreshold);
 	EndingHumanNatureThreshold = Defs->GetConfigScalar(FName("EndingHumanNatureThreshold"), EndingHumanNatureThreshold);
+	SkillMasterySols = Defs->GetConfigScalar(FName("SkillMasterySols"), SkillMasterySols);
+	CrewMomentIntervalSols = Defs->GetConfigScalar(FName("CrewMomentIntervalSols"), CrewMomentIntervalSols);
+	DisputeHopeBelow = Defs->GetConfigScalar(FName("DisputeHopeBelow"), DisputeHopeBelow);
+	FirstHarvestKg = Defs->GetConfigScalar(FName("FirstHarvestKg"), FirstHarvestKg);
+	HopeFirstHarvestMilestone = Defs->GetConfigScalar(FName("HopeFirstHarvestMilestone"), HopeFirstHarvestMilestone);
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -1557,6 +1562,7 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 			{
 				bVaultRated = true;
 				OnAlert.Broadcast(TEXT("PHASE 1 EXIT: THE VAULT — the colony's first livable space is ready for a crew. The Program can send humans."));
+				OnMilestone.Broadcast(TEXT("PHASE 1 EXIT: THE VAULT — the colony's first livable space is ready for a crew."));
 				UE_LOG(LogRedHopeSim, Display, TEXT("=== PHASE 1 EXIT: THE VAULT — floor %d rated for the first crew ==="), Level);
 			}
 		}
@@ -1618,14 +1624,49 @@ int32 URHSimWorldSubsystem::GetHousingCapacity() const
 
 namespace
 {
-	// Deterministic callsign pool: colonist N is always the same name in the
-	// same order (fixed-timestep discipline extends to the crew manifest).
+	// Deterministic name pools: colonist N is always the same person (fixed-
+	// timestep discipline extends to the crew manifest). Alive pass: 40 first
+	// names x 40 surnames from many cultures, walked with coprime strides so
+	// the first 1600 colonists all get distinct full names - a crew that looks
+	// like Earth sent it.
+	const TCHAR* GRHFirstNames[] = {
+		TEXT("Amara"), TEXT("Bao"), TEXT("Carmen"), TEXT("Dmitri"),
+		TEXT("Efe"), TEXT("Freya"), TEXT("Gabriel"), TEXT("Hana"),
+		TEXT("Idris"), TEXT("Jaya"), TEXT("Kenji"), TEXT("Leila"),
+		TEXT("Mateo"), TEXT("Nadia"), TEXT("Omar"), TEXT("Priya"),
+		TEXT("Quentin"), TEXT("Rosa"), TEXT("Santiago"), TEXT("Tomoko"),
+		TEXT("Umut"), TEXT("Valentina"), TEXT("Wei"), TEXT("Ximena"),
+		TEXT("Yusuf"), TEXT("Zola"), TEXT("Anouk"), TEXT("Bjorn"),
+		TEXT("Chidi"), TEXT("Daria"), TEXT("Esteban"), TEXT("Fatima"),
+		TEXT("Gunnar"), TEXT("Halima"), TEXT("Ines"), TEXT("Jonas"),
+		TEXT("Kirra"), TEXT("Lars"), TEXT("Mei"), TEXT("Noor"),
+	};
 	const TCHAR* GRHCallsigns[] = {
 		TEXT("Adeyemi"), TEXT("Brandt"), TEXT("Chen"), TEXT("Duval"),
 		TEXT("Eriksen"), TEXT("Farid"), TEXT("Goto"), TEXT("Herrera"),
 		TEXT("Ilyina"), TEXT("Joshi"), TEXT("Kowalski"), TEXT("Laurent"),
 		TEXT("Mbeki"), TEXT("Novak"), TEXT("Okafor"), TEXT("Petrov"),
+		TEXT("Quispe"), TEXT("Rahman"), TEXT("Silva"), TEXT("Tanaka"),
+		TEXT("Umarov"), TEXT("Vasquez"), TEXT("Whitehorse"), TEXT("Xu"),
+		TEXT("Yilmaz"), TEXT("Zhang"), TEXT("Andersson"), TEXT("Bakker"),
+		TEXT("Castellanos"), TEXT("Dlamini"), TEXT("Eze"), TEXT("Fontaine"),
+		TEXT("Gustafsson"), TEXT("Haddad"), TEXT("Ivanova"), TEXT("Jansen"),
+		TEXT("Kimura"), TEXT("Lindqvist"), TEXT("Morales"), TEXT("Nakamura"),
 	};
+	// Dispositions (alive pass): derived from the id, never stored - they bias
+	// which pastime a colonist reaches for and give the crew visible variety.
+	const TCHAR* GRHTraits[] = {
+		TEXT("Stargazer"), TEXT("Musician"), TEXT("Cardsharp"), TEXT("Tinkerer"),
+		TEXT("Chef"), TEXT("Athlete"), TEXT("Bookworm"), TEXT("Sketcher"),
+		TEXT("Gardener"), TEXT("Storyteller"), TEXT("Chessmaster"), TEXT("Dreamer"),
+	};
+}
+
+const TCHAR* URHSimWorldSubsystem::TraitFor(int32 ColonistId)
+{
+	// Content-hash pick (stable across runs, like every seeded roll here).
+	const uint32 H = HashCombine(FCrc::StrCrc32(TEXT("trait")), (uint32)ColonistId * 2654435761u);
+	return GRHTraits[H % UE_ARRAY_COUNT(GRHTraits)];
 }
 
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
@@ -1661,10 +1702,17 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 		}
 		FRHColonist C;
 		C.Id = NextColonistId++;
-		const int32 PoolSize = UE_ARRAY_COUNT(GRHCallsigns);
-		C.Name = (C.Id <= PoolSize)
-			? FString(GRHCallsigns[(C.Id - 1) % PoolSize])
-			: FString::Printf(TEXT("%s-%d"), GRHCallsigns[(C.Id - 1) % PoolSize], (C.Id - 1) / PoolSize + 1);
+		// Full name via the Latin-square diagonal walk over the two 40-pools:
+		// first = K mod 40, surname = (K + K/40) mod 40 - the first 1600 ids all
+		// land on DISTINCT first+surname pairs, with varied surnames from id 1.
+		const int32 FirstCount = UE_ARRAY_COUNT(GRHFirstNames);
+		const int32 LastCount = UE_ARRAY_COUNT(GRHCallsigns);
+		const int32 K = C.Id - 1;
+		C.Name = FString::Printf(TEXT("%s %s"), GRHFirstNames[K % FirstCount], GRHCallsigns[(K + K / FirstCount) % LastCount]);
+		if (K >= FirstCount * LastCount)
+		{
+			C.Name += FString::Printf(TEXT(" %d"), K / (FirstCount * LastCount) + 1);
+		}
 		C.HomeLevel = Home;
 		Colonists.Add(C);
 		bEverHadCrew = true; // M4 Gate D: the collapse ending checks "had a crew, lost it"
@@ -1720,6 +1768,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			{
 				bFirstCropAnnounced = true;
 				OnAlert.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground. The colony starts feeding itself."));
+				OnMilestone.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground."));
 			}
 		}
 	}
@@ -1805,7 +1854,24 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
-		AddStock(NFood, GardenFoodKgPerSolPerCell * HumanTempo * LightFactor * DtSols);
+		// Yield rides work tempo, light, and now the gardeners' MASTERY (alive
+		// pass): a seasoned garden crew doubles the take.
+		const double YieldKg = GardenFoodKgPerSolPerCell * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
+		AddStock(NFood, YieldKg);
+		GardenFoodCumKg += YieldKg;
+		if (!bFirstHarvestAnnounced && GardenFoodCumKg >= FirstHarvestKg)
+		{
+			// THE FIRST MARTIAN HARVEST: a once-only milestone. Permanent Hope
+			// (folded in GetColonyHope), a whole-crew celebration moment, and
+			// the golden-banner channel. Wording = Gate-D review placeholder.
+			bFirstHarvestAnnounced = true;
+			const FString Line = TEXT("THE FIRST MARTIAN HARVEST — food grown in OUR ground is on the table. The crew is celebrating in the mess.");
+			OnMilestone.Broadcast(Line);
+			OnAlert.Broadcast(Line);
+			OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Celebrate, 0, 0, Line);
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FIRST HARVEST (%.2f kg cumulative, +%.0f Hope milestone) ==="),
+				GardenFoodCumKg, HopeFirstHarvestMilestone);
+		}
 		++Producing;
 	}
 	ProducingCells = Producing;
@@ -1898,6 +1964,14 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			++SuppliedThisStep;
 		}
 
+		// Practice makes mastery (alive pass): sols at a post accrue that job's
+		// skill. Linear in dt = identical across both time bands.
+		const FName Job = GetColonistJob(C.Id);
+		if (!Job.IsNone())
+		{
+			C.SkillSols.FindOrAdd(Job) += DtSols;
+		}
+
 		const bool bNowSupported = bAir && bFed && bWatered;
 		if (C.bSupported && !bNowSupported)
 		{
@@ -1960,6 +2034,113 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	{
 		bWaterQualityAnnounced = false;
 	}
+
+	// Crew life (alive pass): the moments generator rides the population step -
+	// both bands, and the zero-pop early-out above already protects baselines.
+	StepMoments(SubDt);
+}
+
+double URHSimWorldSubsystem::GetCrewSkillMul(FName Function) const
+{
+	// The average mastery of everyone currently holding that job: a fresh hand
+	// works at 1x, a master at 2x. Nobody employed -> exactly 1.0 (baselines).
+	double Sum = 0.0;
+	int32 Count = 0;
+	for (const FRHColonist& C : Colonists)
+	{
+		if (GetColonistJob(C.Id) == Function)
+		{
+			const double* Sols = C.SkillSols.Find(Function);
+			Sum += 1.0 + FMath::Min(1.0, (Sols ? *Sols : 0.0) / FMath::Max(SkillMasterySols, KINDA_SMALL_NUMBER));
+			++Count;
+		}
+	}
+	return Count > 0 ? Sum / Count : 1.0;
+}
+
+void URHSimWorldSubsystem::StepMoments(float SubDt)
+{
+	// A deterministic heartbeat of visible crew life. Every interval, a seeded
+	// pick (content hash + the saved counter) chooses a moment:
+	//  - needs unmet or Hope low -> a DISPUTE (abstracted: raised voices, a
+	//    heated disagreement - never violence, and NO Hope penalty; the
+	//    friction is a visible symptom, not a second punishment)
+	//  - otherwise a JOIN-IN (a free colonist drifts over to help a worker)
+	//    or a PASTIME (two crew unwind together, flavored by disposition)
+	// All copy is Gate-D framing-review placeholder.
+	MomentSols += SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	if (MomentSols < CrewMomentIntervalSols)
+	{
+		return;
+	}
+	MomentSols -= CrewMomentIntervalSols;
+	const uint32 Seed = HashCombine(FCrc::StrCrc32(TEXT("moment")), (uint32)(MomentCounter * 2654435761u));
+	++MomentCounter;
+	const int32 Pop = Colonists.Num();
+	const int32 IdxA = (int32)(Seed % (uint32)Pop);
+	int32 IdxB = (int32)((Seed >> 8) % (uint32)Pop);
+	if (IdxB == IdxA && Pop > 1)
+	{
+		IdxB = (IdxA + 1) % Pop; // never pair a colonist with themselves
+	}
+	const FRHColonist& A = Colonists[IdxA];
+	const FRHColonist& B = Colonists[IdxB];
+
+	bool bAnyUnsupported = false;
+	for (const FRHColonist& C : Colonists)
+	{
+		bAnyUnsupported |= !C.bSupported;
+	}
+
+	if ((bAnyUnsupported || HopeSmoothed < DisputeHopeBelow) && A.Id != B.Id)
+	{
+		const FString Text = FString::Printf(
+			TEXT("Raised voices on floor %d — %s and %s are arguing over the shortages. Morale is wearing thin."),
+			A.HomeLevel, *A.Name, *B.Name);
+		OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Dispute, A.Id, B.Id, Text);
+		UE_LOG(LogRedHopeSim, Display, TEXT("MOMENT dispute: %s vs %s"), *A.Name, *B.Name);
+		return;
+	}
+
+	// A join-in wants one FREE colonist and one WORKER; scan deterministically
+	// from the seeded start for the first of each.
+	int32 WorkerId = 0, FreeId = 0;
+	FName WorkerJob;
+	FString WorkerName, FreeName;
+	for (int32 i = 0; i < Pop; ++i)
+	{
+		const FRHColonist& C = Colonists[(int32)((Seed % (uint32)Pop) + i) % Pop];
+		const FName Job = GetColonistJob(C.Id);
+		if (!Job.IsNone() && WorkerId == 0) { WorkerId = C.Id; WorkerJob = Job; WorkerName = C.Name; }
+		if (Job.IsNone() && FreeId == 0) { FreeId = C.Id; FreeName = C.Name; }
+	}
+	if (WorkerId != 0 && FreeId != 0 && (Seed & 4u))
+	{
+		const FString Text = FString::Printf(
+			TEXT("%s wandered over to the %s post and rolled up their sleeves next to %s. Many hands."),
+			*FreeName, *WorkerJob.ToString(), *WorkerName);
+		OnCrewMoment.Broadcast((uint8)ERHCrewMoment::JoinWork, FreeId, WorkerId, Text);
+		UE_LOG(LogRedHopeSim, Display, TEXT("MOMENT join: %s -> %s (%s)"), *FreeName, *WorkerName, *WorkerJob.ToString());
+		return;
+	}
+
+	// A pastime, flavored by the first colonist's disposition.
+	const FString Trait = TraitFor(A.Id);
+	FString Text;
+	if (Trait == TEXT("Stargazer"))       { Text = FString::Printf(TEXT("%s took %s up top to watch Phobos rise. The dust makes the sunsets blue."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Musician"))   { Text = FString::Printf(TEXT("%s is playing something soft in the mess; %s is humming along."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Cardsharp"))  { Text = FString::Printf(TEXT("%s dealt %s in for cards. The stakes: tomorrow's dish duty."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Tinkerer"))   { Text = FString::Printf(TEXT("%s is rebuilding a spare servo for fun while %s hands over tools."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Chef"))       { Text = FString::Printf(TEXT("%s is improvising with the rations again. %s volunteered to taste."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Athlete"))    { Text = FString::Printf(TEXT("%s challenged %s to low-gravity handball down the corridor."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Bookworm"))   { Text = FString::Printf(TEXT("%s is reading aloud from the archive; %s stayed to listen."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Sketcher"))   { Text = FString::Printf(TEXT("%s is sketching %s against the pit lights. Hold still."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Gardener"))   { Text = FString::Printf(TEXT("%s is showing %s the seedlings. Green, on Mars."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Storyteller")){ Text = FString::Printf(TEXT("%s has the mess laughing at the landing story again. %s swears it grows each telling."), *A.Name, *B.Name); }
+	else if (Trait == TEXT("Chessmaster")){ Text = FString::Printf(TEXT("%s and %s are three sols into one chess game. Neither will resign."), *A.Name, *B.Name); }
+	else                                  { Text = FString::Printf(TEXT("%s and %s are up top, quietly watching Earth rise. It's small from here."), *A.Name, *B.Name); }
+	OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Pastime, A.Id, B.Id, Text);
+	UE_LOG(LogRedHopeSim, Display, TEXT("MOMENT pastime (%s): %s + %s"), *Trait, *A.Name, *B.Name);
 }
 
 FIntPoint URHSimWorldSubsystem::SpiralCell(int32 Index)
@@ -2072,6 +2253,10 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	if (bFirstBornAnnounced)
 	{
 		Out.Milestones += HopeFirstBornMilestone; // the first Martian, forever a source of hope
+	}
+	if (bFirstHarvestAnnounced)
+	{
+		Out.Milestones += HopeFirstHarvestMilestone; // food from OUR soil, forever
 	}
 	// Discoveries are permanent momentum (brief §5) - each uncovered row's
 	// HopeBonus stays in the index forever. The log is tiny (an authored
@@ -2399,7 +2584,9 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	{
 		return; // sequence exhausted (or table absent) - the colony knows all it can
 	}
-	DiscoverySeatHours += LabSeats * (SubDt / 50.0); // sol-hours per seat
+	// Research rides the scientists' MASTERY (alive pass): a seasoned lab crew
+	// doubles the pace. Linear scaling = both-band parity preserved.
+	DiscoverySeatHours += LabSeats * GetCrewSkillMul(FName("Lab")) * (SubDt / 50.0); // sol-hours per seat
 	if (DiscoverySeatHours < Row->LabSeatHours)
 	{
 		return;
@@ -2414,6 +2601,11 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	if (!Row->Alert.IsEmpty())
 	{
 		OnAlert.Broadcast(Row->Alert);
+		// A BREAKTHROUGH is a celebration: golden banner + the lab crew cheers
+		// (alive pass - the presentation gathers the crew to celebrate).
+		OnMilestone.Broadcast(Row->Alert);
+		OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Celebrate, 0, 0,
+			FString::Printf(TEXT("BREAKTHROUGH — %s! The lab is cheering."), *Row->DisplayName));
 	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERY: %s (+%.0f Hope milestone%s) ==="),
 		*Row->DisplayName, Row->HopeBonus,
@@ -4825,6 +5017,32 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		for (FRHColonist& C : Colonists)
 		{
 			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+		// Skills (save v24): sorted for deterministic bytes; load repopulates.
+		if (Ar.IsLoading())
+		{
+			int32 SkillCount = 0;
+			Ar << SkillCount;
+			C.SkillSols.Empty();
+			for (int32 Sk = 0; Sk < SkillCount; ++Sk)
+			{
+				FName Fn; double Sols = 0.0;
+				Ar << Fn << Sols;
+				C.SkillSols.Add(Fn, Sols);
+			}
+		}
+		else
+		{
+			TArray<FName> Fns;
+			C.SkillSols.GetKeys(Fns);
+			Fns.Sort([](const FName& X, const FName& Y){ return X.LexicalLess(Y); });
+			int32 SkillCount = Fns.Num();
+			Ar << SkillCount;
+			for (const FName& Fn : Fns)
+			{
+				FName FnCopy = Fn; double Sols = C.SkillSols[Fn];
+				Ar << FnCopy << Sols;
+			}
+		}
 		}
 	}
 	// Room designations (save v11).
@@ -4881,6 +5099,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		uint8 Crisis = (uint8)ActiveCrisis, Ever = bEverHadCrew ? 1 : 0, Declared = bEndingDeclared ? 1 : 0;
 		Ar << Crisis << CrisisRemainingSols << CrisisCheckSols << CrisisCount << Ever << Declared;
+	}
+	// The alive pass (save v24).
+	{
+		uint8 Harvest = bFirstHarvestAnnounced ? 1 : 0;
+		Ar << MomentSols << MomentCounter << Harvest << GardenFoodCumKg;
 	}
 
 	const FString Path = SaveSlotToPath(Slot);
@@ -5043,6 +5266,32 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		for (FRHColonist& C : Colonists)
 		{
 			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+		// Skills (save v24): sorted for deterministic bytes; load repopulates.
+		if (Ar.IsLoading())
+		{
+			int32 SkillCount = 0;
+			Ar << SkillCount;
+			C.SkillSols.Empty();
+			for (int32 Sk = 0; Sk < SkillCount; ++Sk)
+			{
+				FName Fn; double Sols = 0.0;
+				Ar << Fn << Sols;
+				C.SkillSols.Add(Fn, Sols);
+			}
+		}
+		else
+		{
+			TArray<FName> Fns;
+			C.SkillSols.GetKeys(Fns);
+			Fns.Sort([](const FName& X, const FName& Y){ return X.LexicalLess(Y); });
+			int32 SkillCount = Fns.Num();
+			Ar << SkillCount;
+			for (const FName& Fn : Fns)
+			{
+				FName FnCopy = Fn; double Sols = C.SkillSols[Fn];
+				Ar << FnCopy << Sols;
+			}
+		}
 		}
 	}
 	// Room designations (save v11). Map repopulates wholesale.
@@ -5117,6 +5366,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		ActiveCrisis = (ERHCrisis)Crisis;
 		bEverHadCrew = (Ever != 0);
 		bEndingDeclared = (Declared != 0);
+	}
+	// The alive pass (save v24).
+	{
+		uint8 Harvest = 0;
+		Ar << MomentSols << MomentCounter << Harvest << GardenFoodCumKg;
+		bFirstHarvestAnnounced = (Harvest != 0);
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

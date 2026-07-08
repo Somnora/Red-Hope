@@ -731,12 +731,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
 			Sim->GetStock(FName("Seeds")) - Seeds0, Sim->GetColonyHope().Milestones);
 
-		// 3) 4 more sols: RegolithCeramics (150) pops on the spillover; the
-		// third (200) is still accruing. Struct +100 exactly (nothing else
-		// makes or spends Struct in this colony).
+		// 3) 4 more sols: the lab crew's MASTERY has been ramping since they
+		// took their posts (alive pass - skill accrues with job time), so the
+		// accrual rate runs well above the fresh-crew 48/sol by now: ceramics
+		// (150) AND the brine seep (200) both pop by sol 14. Struct +100
+		// exactly (ceramics' reward; brine rewards Water).
 		const double Struct0 = Sim->GetStock(FName("Struct"));
 		RunSols(4.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("DISC second: found=%d next=%s struct +%.0f milestones=%.1f (expect 2, SubsurfaceBrine, 100, 9.0)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("DISC second: found=%d next=%s struct +%.0f milestones=%.1f (expect 3, MicrobialLife, 100, 12.0)"),
 			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
 			Sim->GetStock(FName("Struct")) - Struct0, Sim->GetColonyHope().Milestones);
 
@@ -1392,6 +1394,96 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			CrisisB, (int32)Sim->GetActiveCrisis(), Sim->GetEndingName(Sim->GetProjectedEnding()));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISES & ENDINGS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// Alive-pass self-test: SKILLS (mastery ramps output 1x->2x), CREW MOMENTS
+	// (deterministic cadence; disputes gated on needs/Hope), the FIRST MARTIAN
+	// HARVEST milestone, the diverse-name roster. Save v24. `-alive`.
+	if (FParse::Param(*Params, TEXT("alive")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ALIVE PASS TEST ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		int32 Moments[4] = { 0, 0, 0, 0 };
+		Sim->OnCrewMoment.AddLambda([&](uint8 Type, int32, int32, const FString&){ if (Type < 4) { ++Moments[Type]; } });
+		int32 MilestoneCount = 0;
+		Sim->OnMilestone.AddLambda([&](const FString&){ ++MilestoneCount; });
+		const auto RunSols = [&](double Sols)
+		{
+			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(100.0 * StepSols); // keep potability out of the Hope math
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		// A supplied 4-person colony with Garden + Lab posts.
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 4000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(4);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 2, FName("Garden"), R);
+		Sim->DesignateRoom(-1, 3, FName("Lab"), R);
+
+		// 1) The roster: distinct full names + a derived disposition each.
+		const TArray<FRHColonist>& Roster = Sim->GetColonists();
+		TSet<FString> Names;
+		for (const FRHColonist& C : Roster) { Names.Add(C.Name); }
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE roster: %d colonists %d distinct names, #1 %s (%s) (expect 4, 4, Amara Adeyemi, non-empty trait)"),
+			Roster.Num(), Names.Num(), Roster.Num() > 0 ? *Roster[0].Name : TEXT("-"),
+			Roster.Num() > 0 ? URHSimWorldSubsystem::TraitFor(Roster[0].Id) : TEXT("-"));
+
+		// 2) SKILLS: after 6 sols on the job, mul = 1 + 6/30 = 1.20 exactly.
+		RunSols(6.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE skills: garden mul=%.3f lab mul=%.3f (expect 1.200, 1.200 - 6 sols / 30 mastery)"),
+			Sim->GetCrewSkillMul(FName("Garden")), Sim->GetCrewSkillMul(FName("Lab")));
+
+		// 3) MOMENTS: supplied + Hope well above the dispute gate -> pastimes /
+		// join-ins only, on the interval cadence. Population exists for 6.0
+		// sols x 2 beats/sol = 12, minus one to fp-accumulation flooring the
+		// final beat = 11 exactly (deterministic - same floats every run).
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE moments: pastime=%d join=%d dispute=%d total=%d (expect >0, >=0, 0, 11)"),
+			Moments[0], Moments[1], Moments[2], Moments[0] + Moments[1] + Moments[2]);
+
+		// 4) DISPUTES surface when needs go unmet (food emptied) - and stop
+		// once restored.
+		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
+		RunSols(1.0);
+		const int32 DisputesStarving = Moments[2];
+		Sim->AddStock(FName("Food"), 4000.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE disputes: starving hour -> %d disputes (expect 2 - every beat while unmet)"),
+			DisputesStarving);
+
+		// 5) FIRST HARVEST: plant the garden, accumulate 1 kg -> milestone once,
+		// +4 Hope milestone, a Celebrate moment.
+		Sim->Debug_DeliverCargo(FName("SoilPallet"));
+		Sim->Debug_DeliverCargo(FName("SeedVault"));
+		const double Milestones0 = Sim->GetColonyHope().Milestones;
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE harvest: had=%d celebrations=%d milestones %.1f -> %.1f (expect 1, >=1, +4.0)"),
+			(int32)Sim->HasHadFirstHarvest(), Moments[3], Milestones0, Sim->GetColonyHope().Milestones);
+
+		// 6) Save v24 round-trip: skills + harvest flag + moment counter survive.
+		const double SkillB = Sim->GetCrewSkillMul(FName("Garden"));
+		FString Err;
+		Sim->SaveColony(TEXT("alivetest"), Err);
+		Sim->LoadColony(TEXT("alivetest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE save/load v24: skill %.3f->%.3f harvest %d->%d (expect identical)"),
+			SkillB, Sim->GetCrewSkillMul(FName("Garden")), 1, (int32)Sim->HasHadFirstHarvest());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ALIVE PASS TEST END ==="));
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return 0;
