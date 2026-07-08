@@ -1,5 +1,15 @@
 # Build Log — The Red Hope
 
+## 2026-07-08 — Session 45 (graphics pass 2: humanoids that walk, dusty lived-in industry, mountains + sky + tilt)
+
+- **Director's five-part look request, built against the reference set (`a44791b`, presentation-only):**
+  - **Humanoid robots** (Robots/Humanoid): nine instanced layers per unit — white armor over matte-black joints, dark visor with cyan bar — and a **procedural walk cycle** driven by each entity's own ground speed (stride phase accumulates with distance; legs opposite-swing, arms counter-swing, subtle bob; figures face their travel direction). Zero per-actor cost preserved.
+  - **Lived-in + dusty**: every building wears wind-banked dust drifts (content-hash-picked faces), a grime band at the regolith line, roof dust film, and one mismatched replaced hull panel. IceDrill gains the reference's frost-white insulated tanks + frost collar; WaterPlant gains the open melt basin (glowing pale-blue melt + ice chunks), red valve wheel, vent stack.
+  - **Scenery** (Mountain_Range.png): seeded-deterministic mountain ring in three depth bands + mesas; a **hero massif 520 m NE with a flat buildable apron at its foothills** (the build-a-Habitat-at-a-mountain spot); 4 km far ground apron; 260 rocks / 520 pebbles / 90 wind-aligned dust drifts / 16 rimmed craters. Hidden underground with the rest of the surface.
+  - **Mars sky**: found-or-spawned SkyAtmosphere (warm scattering, heavy Mie dust, rust albedo), sun disc riding the sol clock — tilting up now shows sky, dusk, night.
+  - **Camera tilt**: R/F ride a smoothed manual pitch offset over the zoom-coupled pitch, clamped just above the horizon.
+- Verified: RedHope-module-only diff, 10-sol baseline byte-identical, real-render smoke (dusty industry + walking humanoids + convoy + reload + descent) zero ensures. Pixels = director's verdict.
+
 ## 2026-07-08 — Session 44 (reference-match model pass: buildings, robots, convoy)
 
 - **Read the director's reference sheet directly** (`~/Desktop/Martians/assets/sprites` + `ASSETS.md` art guide — "Subterranean Utilitarian", SimCity 2013 × Civ VI) and matched the gray-box silhouettes to each PNG:
