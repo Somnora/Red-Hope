@@ -1,5 +1,20 @@
 # Build Log — The Red Hope
 
+## 2026-07-08 — Session 44 (reference-match model pass: buildings, robots, convoy)
+
+- **Read the director's reference sheet directly** (`~/Desktop/Martians/assets/sprites` + `ASSETS.md` art guide — "Subterranean Utilitarian", SimCity 2013 × Civ VI) and matched the gray-box silhouettes to each PNG:
+  - **Lander** → a blocky horizontal **cargo freighter** (faceted cockpit nose, open cargo bay with glowing amber crates, spine turret, twin tail fins) — replaced the off-canon vertical descent-rocket.
+  - **SolarArray** → white **hub pod + four radiating PV-blue panel clusters** on pedestals (was a single tilted slab).
+  - **Borer** → the **auger** (drill cone in the regolith, inclined spoil conveyor, crawler tracks, operator cab).
+  - **AirFilter** → a **life-support scrubber drum** (intake louvers, fan cowl, teal status light).
+  - **Habitat** → a **walled modular compound** (perimeter walls, corner posts, lit window band, central dome) — was one giant blob-dome.
+  - **BatteryBank** → the **white shell** (corner pillars framing the teal cells + orange hazard chevrons).
+  - **Robots** → a **3-layer instanced drone** (bone chassis + dark cab glass + wheel skirt), composed onto each Mass transform at zero per-actor cost — was one anonymous cube.
+  - **Convoy rover** → a detailed drone (hull/cab/six wheels/hazard stripes/beacon/cargo pack), uniform-root + relative children so it drives without smearing, facing down its road.
+  - Palette entries for AirFilter (teal) + Borer (amber); `RH.Spawn` + `RH.Snapshot` look-dev cheats.
+- **Adversarial review (4×2 skeptics, full 8/8 coverage): 1 CONFIRMED + FIXED.** The SolarArray had a legacy `bPanel` branch short-circuiting `BuildSilhouette`, so the new radiating geometry was dead code while the `BodyFor` PVBlue→dark change hit the live slab (a color regression). Fixed by routing SolarArray through the new geometry (removed the legacy tilt/lift/slab). 1 finding correctly refuted (AirFilter/Borer gray band = taste) but adopted as the palette polish above.
+- **Presentation-only, verified:** sim baseline byte-identical + newest suites green (no `RedHopeSim` file touched); boot smoke clean across all models + robots + convoy + crisis + save/load reload + floor descent, zero ensures/fatals. **Pixels remain the director's hand-play verdict** — headless proves structure + no crash, not the final look.
+
 ## 2026-07-07 — Session 43 (C+D review verdict + fix; Sovereignty made visible for the director's demo)
 
 - **The M4 C+D adversarial review returned real coverage:** one CONFIRMED (low, state-consistency) + one correctly REFUTED. Confirmed: an **in-flight convoy** was never re-validated against embargo/defection — a rover returning to a rival that turned hostile mid-route still warmed its relation above the defection's locked floor and minted Influence from a hostile party (easy repro: Zarya's 4-sol round trip < the 8-sol embargo grace). **Fixed:** goods always land (paid at dispatch — conservation), but the *diplomatic* upside (relation/HumanNature/Influence) accrues only if the relationship is intact at return; soured returns say so honestly. `-preemptive` upgraded to pin it (relation 42→42, influence drift-only). Refuted: the pacify-cooldown finding (tension's only upward source is 0.6/sol drift; max overshoot over a grace ≈ 4.8 vs the 20-point relief — same-sol re-embargo unreachable). All 19 suites green.
