@@ -222,3 +222,13 @@ Ran a 4-dimension × 2-skeptic adversarial review over `39d4c02..9ea692a` (Earth
 3. **HiddenTensions/RivalRelations serialized unsorted (LOW, ACCEPTED, no fix).** Technically against the "sort maps for byte-determinism" invariant, but the dominant codebase precedent is the primary `Stocks` pool, ALSO serialized unsorted via `SerializeResourceMap`. Within-process round-trip is correct; this project's parity harness compares LEDGER VALUES (`RH.Ledger`), never save-file bytes; across-run byte-determinism affects nothing observable. Sorting these two while `Stocks` stays unsorted would be inconsistent for zero gain. Accepted as-is, matching `Stocks`.
 
 Save/load field symmetry across v17–v20 additionally verified by direct inspection (identical field order on both sides). No other findings survived.
+
+## Review adjudication — 2026-07-08 (the alive pass; workflow starved, inline verification)
+
+The alive-pass adversarial review workflow was session-limit-starved on three consecutive runs (1 of 6 agents completing each time), so its two surviving findings were verified INLINE and the three never-run dimensions were self-reviewed against the exact questions authored for them:
+
+1. **JoinWork gather inversion (CONFIRMED inline, FIXED `6a7c129`).** The sim broadcasts JoinWork as A=the free helper, B=the worker; the visualizer's generic gather walked B→A, so the worker abandoned their post to visit the lounger — backwards from the design. Fixed: walker/anchor now depend on the beat.
+2. **Pause-consistency (CONFIRMED inline, FIXED).** Cheer-hop + emote windows ran on real time; a paused colony hopped and celebrations drained through pauses. Fixed: windows count down and the pose clock advances only at Pace > 0.
+3. **Un-run dimensions, self-reviewed:** (a) *skills parity* — accrual is linear-in-dt with RefreshJobs re-deriving assignments identically at every step in both bands; zero-pop early-out precedes everything; division guarded by KINDA_SMALL_NUMBER. (b) *moments parity* — MomentSols/MomentCounter are saved state, but the beat threshold (0.5 sol) crosses at the same era-step window in both bands (fp drift ~1e-13 cannot shift a crossing across a sol boundary — the same argument that cleared the SolidarityHope snap, 2026-07-07n); the max step (0.05 sol) is 10× under the interval, so double-fires are impossible. (c) *deck onboarding* — AddSP binds are weak-pointer lifetime-safe; HandleStockChanged early-outs on SeenStock; the card overlay slot precedes the deck panels, whose edge-anchored slots don't overlap screen center.
+
+Residual debt: a full workflow-verified pass over the alive diff remains desirable when session limits allow; the inline analysis above is the honest interim record.
