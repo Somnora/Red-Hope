@@ -109,16 +109,21 @@ void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 I
 	{
 		return;
 	}
-	// B walks to A's side; both hold there through the beat. If the pair spans
-	// floors the plates still show - the gathering is best-effort staging.
+	// One of the pair walks to the other's side; both hold there through the
+	// beat. WHO walks depends on the beat: a JOIN-IN sends the HELPER (A, the
+	// sim's FreeId) to the worker's post - the worker never abandons their
+	// bench (adversarial review: the generic direction had this inverted). For
+	// pastimes/disputes B drifts to A. If the pair spans floors the plates
+	// still show - the gathering is best-effort staging.
 	if (B && B->Actor.IsValid() && IdB != IdA && B->CurLevel == A->CurLevel)
 	{
-		// Walk B to A's side (XY only - the floor logic owns Z), then both hold
-		// through the beat instead of immediately re-deciding away.
-		const FVector APos = A->Actor.Get()->GetActorLocation();
-		B->TargetCm = FVector(APos.X + 150.f, APos.Y + 90.f, B->Actor.Get()->GetActorLocation().Z);
-		B->NextDecideRealSeconds = Now + 9.0;
-		A->NextDecideRealSeconds = Now + 9.0;
+		FCrewVisual* Walker = (Moment == URHSimWorldSubsystem::ERHCrewMoment::JoinWork) ? A : B;
+		FCrewVisual* Anchor = (Moment == URHSimWorldSubsystem::ERHCrewMoment::JoinWork) ? B : A;
+		// XY only - the floor logic owns Z.
+		const FVector AnchorPos = Anchor->Actor.Get()->GetActorLocation();
+		Walker->TargetCm = FVector(AnchorPos.X + 150.f, AnchorPos.Y + 90.f, Walker->Actor.Get()->GetActorLocation().Z);
+		Walker->NextDecideRealSeconds = Now + 9.0;
+		Anchor->NextDecideRealSeconds = Now + 9.0;
 	}
 	switch (Moment)
 	{
