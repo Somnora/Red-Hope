@@ -22,9 +22,12 @@ void URHAgentVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 void URHAgentVisualizerSubsystem::ResetTracking()
 {
 	Tracked.Reset();
-	if (MeshComponent)
+	for (UInstancedStaticMeshComponent* Part : { MeshComponent.Get(), CabComponent.Get(), WheelComponent.Get() })
 	{
-		MeshComponent->ClearInstances();
+		if (Part)
+		{
+			Part->ClearInstances();
+		}
 	}
 }
 
@@ -35,11 +38,12 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 
 	if (MeshComponent)
 	{
-		// Robot-ish gray box: 1 m cube stretched to 1x1x1.5 m.
-		const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.5f));
+		const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.f));
 		for (int32 i = 0; i < Entities.Num(); ++i)
 		{
 			MeshComponent->AddInstance(Proto, /*bWorldSpace*/ true);
+			if (CabComponent) { CabComponent->AddInstance(Proto, /*bWorldSpace*/ true); }
+			if (WheelComponent) { WheelComponent->AddInstance(Proto, /*bWorldSpace*/ true); }
 		}
 		UE_LOG(LogRedHope, Display, TEXT("Visualizer tracking %d agents"), Tracked.Num());
 	}
@@ -48,9 +52,12 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 {
 	bSliceHidden = bHidden;
-	if (MeshComponent)
+	for (UInstancedStaticMeshComponent* Part : { MeshComponent.Get(), CabComponent.Get(), WheelComponent.Get() })
 	{
-		MeshComponent->SetVisibility(!bHidden);
+		if (Part)
+		{
+			Part->SetVisibility(!bHidden);
+		}
 	}
 }
 
@@ -70,28 +77,36 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	Holder->SetActorLabel(TEXT("RH_AgentVisualizer"));
 #endif
 
-	MeshComponent = NewObject<UInstancedStaticMeshComponent>(Holder, TEXT("AgentInstances"));
-	MeshComponent->RegisterComponent();
-	Holder->AddInstanceComponent(MeshComponent);
-
+	// Reference (Robots/ConstructionDrone): three layers per unit. The maker
+	// binds mesh + tint; Tick composes each layer's fixed local offset onto the
+	// shared entity transform.
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	MeshComponent->SetStaticMesh(Cube);
-	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	MeshComponent->SetCastShadow(true);
-	// Canon: bone-white body (humanoid android chassis lands with the deferred
-	// art pass; this instanced block is the stand-in). Reads bright against
-	// the rust regolith.
-	if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
+	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+	const auto MakeLayer = [&](const TCHAR* Name, const FLinearColor& Tint, const FLinearColor& Emissive) -> UInstancedStaticMeshComponent*
 	{
-		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, MeshComponent);
-		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.62f, 0.60f, 0.54f));
-		// Warm self-glow: a powered unit - the night shift stays visible
-		// instead of vanishing until sunrise. 0.1 proved invisible in footage;
-		// site lamps sit at ~3.2, so this reads as a dim unit, not a light.
-		Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor(0.60f, 0.50f, 0.28f));
-		MeshComponent->SetMaterial(0, Mid);
-	}
-	MeshComponent->SetVisibility(!bSliceHidden); // honor an already-descended elevator
+		UInstancedStaticMeshComponent* Part = NewObject<UInstancedStaticMeshComponent>(Holder, Name);
+		Part->RegisterComponent();
+		Holder->AddInstanceComponent(Part);
+		Part->SetStaticMesh(Cube);
+		Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Part->SetCastShadow(true);
+		if (Base)
+		{
+			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Part);
+			Mid->SetVectorParameterValue(FName("Tint"), Tint);
+			Mid->SetVectorParameterValue(FName("Emissive"), Emissive);
+			Part->SetMaterial(0, Mid);
+		}
+		Part->SetVisibility(!bSliceHidden); // honor an already-descended elevator
+		return Part;
+	};
+	// Chassis: bone-white with the warm self-glow (a powered unit - the night
+	// shift stays visible; 0.1 proved invisible in footage, lamps sit at ~3.2).
+	MeshComponent = MakeLayer(TEXT("AgentInstances"), FLinearColor(0.62f, 0.60f, 0.54f), FLinearColor(0.60f, 0.50f, 0.28f));
+	// Cab glass: near-black with the faint cool status glow of the reference visor.
+	CabComponent = MakeLayer(TEXT("AgentCabs"), FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.14f, 0.18f));
+	// Wheel skirt: dark running gear under the flanks.
+	WheelComponent = MakeLayer(TEXT("AgentWheels"), FLinearColor(0.05f, 0.05f, 0.06f), FLinearColor::Black);
 }
 
 void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
@@ -107,14 +122,28 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
 
-	TArray<FTransform> Transforms;
-	Transforms.Reserve(Tracked.Num());
+	// Fixed part offsets in ENTITY space (X forward): chassis mass, the raked
+	// cab glass up front, and the wheel skirt under the flanks - the reference
+	// drone's read at strategic zoom. ChildWorld = Local * EntityTransform.
+	static const FTransform ChassisLocal(FQuat::Identity, FVector(0, 0, 0), FVector(1.2f, 0.95f, 0.85f));
+	static const FTransform CabLocal(FRotator(-14.f, 0, 0).Quaternion(), FVector(30.f, 0, 62.f), FVector(0.55f, 0.78f, 0.45f));
+	static const FTransform WheelLocal(FQuat::Identity, FVector(0, 0, -52.f), FVector(1.1f, 1.05f, 0.3f));
+
+	TArray<FTransform> Bodies, Cabs, Wheels;
+	Bodies.Reserve(Tracked.Num());
+	Cabs.Reserve(Tracked.Num());
+	Wheels.Reserve(Tracked.Num());
 	for (const FMassEntityHandle& Entity : Tracked)
 	{
 		if (EntityManager.IsEntityValid(Entity))
 		{
-			Transforms.Add(EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform());
+			const FTransform& T = EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform();
+			Bodies.Add(ChassisLocal * T);
+			Cabs.Add(CabLocal * T);
+			Wheels.Add(WheelLocal * T);
 		}
 	}
-	MeshComponent->BatchUpdateInstancesTransforms(0, Transforms, /*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
+	MeshComponent->BatchUpdateInstancesTransforms(0, Bodies, /*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
+	if (CabComponent) { CabComponent->BatchUpdateInstancesTransforms(0, Cabs, true, true, true); }
+	if (WheelComponent) { WheelComponent->BatchUpdateInstancesTransforms(0, Wheels, true, true, true); }
 }

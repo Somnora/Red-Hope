@@ -41,7 +41,14 @@ public:
 private:
 	void EnsureMeshComponent();
 
-	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> MeshComponent;
+	// Reference (Robots/ConstructionDrone): three instanced layers make each
+	// unit read as the canon drone at strategic zoom - bone-white chassis, a
+	// dark tinted cab glass, and a dark wheel skirt - instead of one anonymous
+	// cube. All three ride the same entity transform with a fixed local offset
+	// composed per part in Tick (still zero per-actor cost).
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> MeshComponent;      // chassis
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CabComponent;      // glass
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> WheelComponent;    // skirt
 	TArray<FMassEntityHandle> Tracked;
 	bool bSliceHidden = false;
 };
