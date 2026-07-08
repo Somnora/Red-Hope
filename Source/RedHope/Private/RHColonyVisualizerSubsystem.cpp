@@ -3,6 +3,7 @@
 #include "RHSimWorldSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHAgentVisualizerSubsystem.h"
+#include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/StaticMesh.h"
@@ -662,7 +663,9 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	// Footprint scales gently with mass: 60 t ~ 16 m across.
 	const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
-	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(D.LocationCm + FVector(0, 0, 20.f), FRotator::ZeroRotator);
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(
+		D.LocationCm + FVector(0, 0, 20.f + RHMarsTerrain::GroundZCm(D.LocationCm.X, D.LocationCm.Y)),
+		FRotator::ZeroRotator);
 	if (!Actor)
 	{
 		return;
@@ -797,7 +800,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// reference, so it takes the normal flat-deck path.)
 	const bool bLander = Instance.DefName == FName("Lander") && !Instance.bUnderConstruction;
 	const float LiftZ = bLander ? GLanderLiftCm + Scale.Z * 50.f : Scale.Z * 50.f;
-	const FVector Location = Instance.LocationCm + FVector(0, 0, LiftZ);
+	// Seated on the scenery relief: zero across the colony flat, real ground
+	// out at the hero massif's bench (underground floors are all within the
+	// flat, so their z never moves).
+	const FVector Seated = Instance.LocationCm
+		+ FVector(0, 0, RHMarsTerrain::GroundZCm(Instance.LocationCm.X, Instance.LocationCm.Y));
+	const FVector Location = Seated + FVector(0, 0, LiftZ);
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, FRotator::ZeroRotator);
 	if (!Actor)
 	{
@@ -818,7 +826,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
 	if (!Instance.bUnderConstruction)
 	{
-		BuildSilhouette(Actor, Instance.DefName, Instance.LocationCm, Scale);
+		BuildSilhouette(Actor, Instance.DefName, Seated, Scale);
 	}
 	else
 	{
@@ -833,12 +841,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		for (int32 C = 0; C < 4; ++C)
 		{
 			const FVector Corner((C & 1) ? Hx : -Hx, (C & 2) ? Hy : -Hy, 0.f);
-			AddAccent(Actor, Cube, Instance.LocationCm + Corner + FVector(0, 0, 85.f), FRotator::ZeroRotator,
+			AddAccent(Actor, Cube, Seated + Corner + FVector(0, 0, 85.f), FRotator::ZeroRotator,
 				FVector(0.14f, 0.14f, 1.7f), RHCanon::HazYellow, FLinearColor(0.4f, 0.28f, 0.02f));
 		}
-		AddAccent(Actor, Cube, Instance.LocationCm + FVector(0, 0, 105.f), FRotator::ZeroRotator,
+		AddAccent(Actor, Cube, Seated + FVector(0, 0, 105.f), FRotator::ZeroRotator,
 			FVector(0.09f, 0.09f, 2.1f), RHCanon::DarkSlate);
-		AddAccent(Actor, Sphere, Instance.LocationCm + FVector(0, 0, 225.f), FRotator::ZeroRotator,
+		AddAccent(Actor, Sphere, Seated + FVector(0, 0, 225.f), FRotator::ZeroRotator,
 			FVector(0.28f), RHCanon::HazYellow, FLinearColor(3.2f, 2.2f, 0.35f));
 	}
 	// Born on whatever floor the sim says; visible only if the elevator is
@@ -1168,7 +1176,8 @@ FVector URHColonyVisualizerSubsystem::RivalMarkerPos(FName Rival, float Distance
 	const uint32 Hash = FCrc::StrCrc32(*Rival.ToString());
 	const double AngleRad = FMath::DegreesToRadians((double)(Hash % 360u));
 	const double RadiusCm = 20000.0 + FMath::Clamp(DistanceKm, 0.f, 400.f) * 30.0; // 200 m + 0.3 m/km
-	return FVector(FMath::Cos(AngleRad) * RadiusCm, FMath::Sin(AngleRad) * RadiusCm, 0.0);
+	const double X = FMath::Cos(AngleRad) * RadiusCm, Y = FMath::Sin(AngleRad) * RadiusCm;
+	return FVector(X, Y, RHMarsTerrain::GroundZCm(X, Y)); // seated on the scenery relief
 }
 
 void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
@@ -1304,7 +1313,11 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 				: FMath::Clamp(P * 2.0, 0.0, 1.0);          // home -> marker
 			const FVector From = Sim->IsConvoyReturning() ? Dest : Home;
 			const FVector To = Sim->IsConvoyReturning() ? Home : Dest;
-			ConvoyVisual->SetActorLocation(FMath::Lerp(From, To, Alpha) + FVector(0, 0, 60.f));
+			// Wheels on the ground the whole road: the straight-line lerp gets
+			// its Z from the terrain under each step, not the endpoints.
+			FVector Loc = FMath::Lerp(From, To, Alpha);
+			Loc.Z = RHMarsTerrain::GroundZCm(Loc.X, Loc.Y) + 60.f;
+			ConvoyVisual->SetActorLocation(Loc);
 			// The cab leads: face the rover down its road (X+ = nose).
 			const FVector Travel = (To - From).GetSafeNormal2D();
 			if (!Travel.IsNearlyZero())
@@ -1488,157 +1501,40 @@ void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
 	EnvironmentRigActor->SetActorLabel(TEXT("RH_Scenery"));
 #endif
 
-	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	UStaticMesh* Cone = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cone.Cone"));
-	UStaticMesh* Cyl = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	// The heavy scenery - ground relief with carved craters, boulder fields,
+	// the three mountain bands, mesas, and the hero massif - is real procedural
+	// mesh now (graphics pass 3: the primitive cones and cube rocks never
+	// survived the director's eye). Same seeds, same composition, real shapes.
+	RHMarsTerrain::BuildScenery(*EnvironmentRigActor);
+
+	// Wind-laid dust drifts stay soft primitive spheres (dunes ARE smooth
+	// forms), riding the new height field so far drifts follow rolling ground.
+	// All within +/-14 degrees of one prevailing wind so the plain reads as
+	// WEATHER, not noise.
 	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
-	const auto MakeISM = [&](const TCHAR* Name, UStaticMesh* Mesh, const FLinearColor& Tint, bool bShadow) -> UInstancedStaticMeshComponent*
+	UInstancedStaticMeshComponent* Drifts = NewObject<UInstancedStaticMeshComponent>(EnvironmentRigActor, TEXT("DustDrifts"));
+	Drifts->SetupAttachment(Root);
+	Drifts->RegisterComponent();
+	EnvironmentRigActor->AddInstanceComponent(Drifts);
+	Drifts->SetStaticMesh(Sphere);
+	Drifts->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Drifts->SetCastShadow(false);
+	if (Base)
 	{
-		UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(EnvironmentRigActor, Name);
-		ISM->SetupAttachment(Root);
-		ISM->RegisterComponent();
-		EnvironmentRigActor->AddInstanceComponent(ISM);
-		ISM->SetStaticMesh(Mesh);
-		ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		ISM->SetCastShadow(bShadow);
-		if (Base)
-		{
-			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, ISM);
-			Mid->SetVectorParameterValue(FName("Tint"), Tint);
-			ISM->SetMaterial(0, Mid);
-		}
-		return ISM;
-	};
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Drifts);
+		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.55f, 0.37f, 0.23f));
+		Mid->SetScalarParameterValue(FName("SeamStrength"), 0.f); // dust, not hull plating
+		Mid->SetScalarParameterValue(FName("Metallic"), 0.f);
+		Drifts->SetMaterial(0, Mid);
+	}
 	const auto Deg = [](float D){ return FRotator(0.f, D, 0.f); };
-
-	// One seeded stream = the same Mars every run (and after every reload).
 	FRandomStream Rand(20260708);
-
-	// --- The far ground apron: the horizon never shows void. A huge flattened
-	// disc a hair below the playfield plane, in a slightly darker regolith so
-	// the distance reads as terrain even past the authored ground's edge.
-	UInstancedStaticMeshComponent* Apron = MakeISM(TEXT("FarApron"), Cyl, FLinearColor(0.42f, 0.265f, 0.16f), false);
-	{
-		FTransform T(FQuat::Identity, FVector(0, 0, -25.f), FVector(8000.f, 8000.f, 0.2f)); // r = 4 km
-		Apron->AddInstance(T, true);
-	}
-
-	// --- The mountain ring (reference: Mountain_Range.png - layered ranges
-	// hazing into the butterscotch sky). Three depth bands, each its own tint:
-	// nearer = darker rust, farther = paler (atmospheric perspective baked into
-	// the tint; the height fog adds the rest live).
-	UInstancedStaticMeshComponent* NearRock = MakeISM(TEXT("NearRange"), Cone, FLinearColor(0.33f, 0.195f, 0.115f), true);
-	UInstancedStaticMeshComponent* MidRock = MakeISM(TEXT("MidRange"), Cone, FLinearColor(0.40f, 0.25f, 0.15f), false);
-	UInstancedStaticMeshComponent* FarRock = MakeISM(TEXT("FarRange"), Cone, FLinearColor(0.47f, 0.315f, 0.20f), false);
-	UInstancedStaticMeshComponent* Mesa = MakeISM(TEXT("Mesas"), Cyl, FLinearColor(0.37f, 0.225f, 0.13f), false);
-	const auto Massif = [&](UInstancedStaticMeshComponent* ISM, const FVector& CenterCm, float PeakM, float SpreadM, int32 Peaks)
-	{
-		for (int32 P = 0; P < Peaks; ++P)
-		{
-			const float H = PeakM * Rand.FRandRange(0.55f, 1.0f);
-			const FVector Off = P == 0 ? FVector::ZeroVector
-				: FVector(Rand.FRandRange(-SpreadM, SpreadM) * 100.f, Rand.FRandRange(-SpreadM, SpreadM) * 100.f, 0);
-			// The default cone is 50 cm tall with its BASE at z=0 - scale Z by
-			// height and pinch X/Y for a craggy, not perfectly conic, profile.
-			FTransform T(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(),
-				CenterCm + Off,
-				FVector(H * Rand.FRandRange(1.6f, 2.6f), H * Rand.FRandRange(1.2f, 2.2f), H * 2.f));
-			ISM->AddInstance(T, true);
-		}
-	};
-	// Far band: a long broken ring, 2.2-3.2 km out.
-	for (int32 M = 0; M < 16; ++M)
-	{
-		const float Ang = M * 22.5f + Rand.FRandRange(-8.f, 8.f);
-		const float R = Rand.FRandRange(220000.f, 320000.f);
-		Massif(FarRock, Deg(Ang).Vector() * R, Rand.FRandRange(260.f, 520.f), 420.f, 3);
-	}
-	// Mid band: sparser, 1.3-2.0 km.
-	for (int32 M = 0; M < 9; ++M)
-	{
-		const float Ang = M * 40.f + Rand.FRandRange(-13.f, 13.f);
-		const float R = Rand.FRandRange(130000.f, 200000.f);
-		Massif(MidRock, Deg(Ang).Vector() * R, Rand.FRandRange(160.f, 320.f), 260.f, 3);
-	}
-	// Mesas/buttes in the mid ground (the reference's flat-topped forms).
-	for (int32 M = 0; M < 6; ++M)
-	{
-		const float Ang = M * 60.f + Rand.FRandRange(-20.f, 20.f);
-		const float R = Rand.FRandRange(90000.f, 170000.f);
-		FTransform T(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(), Deg(Ang).Vector() * R,
-			FVector(Rand.FRandRange(220.f, 480.f), Rand.FRandRange(160.f, 340.f), Rand.FRandRange(0.9f, 1.7f)));
-		Mesa->AddInstance(T, true);
-	}
-	// --- THE HERO MASSIF (director: "building a Habitat at the base of a
-	// mountain would be awesome"): a close, three-peak range NE of the colony,
-	// its foothills ending on a flat buildable apron ~380 m out. Near enough to
-	// pan to in seconds, far enough to never shade the starting base.
-	{
-		const FVector Heart = Deg(38.f).Vector() * 52000.f; // 520 m NE
-		Massif(NearRock, Heart, 300.f, 160.f, 4);
-		Massif(NearRock, Heart + Deg(122.f).Vector() * 22000.f, 180.f, 90.f, 2);
-		// Foothill shoulders: low wedge boxes easing the cones into the plain.
-		for (int32 F = 0; F < 5; ++F)
-		{
-			const FVector Foot = Heart + Deg(180.f + 38.f + Rand.FRandRange(-55.f, 55.f)).Vector() * Rand.FRandRange(9000.f, 15000.f);
-			FTransform T(FRotator(Rand.FRandRange(-4.f, 4.f), Rand.FRandRange(0.f, 360.f), Rand.FRandRange(-3.f, 3.f)).Quaternion(),
-				Foot + FVector(0, 0, -60.f),
-				FVector(Rand.FRandRange(40.f, 90.f), Rand.FRandRange(25.f, 60.f), Rand.FRandRange(4.f, 9.f)));
-			NearRock->AddInstance(T, true);
-		}
-	}
-
-	// --- Ground detail scatter: rocks (dark, the pit-wall geology), pebbles,
-	// wind-laid dust drifts (one prevailing wind), and shallow craters. All
-	// outside the starting build apron so the base stays clean.
-	UInstancedStaticMeshComponent* Rocks = MakeISM(TEXT("Rocks"), Cube, FLinearColor(0.30f, 0.19f, 0.12f), true);
-	UInstancedStaticMeshComponent* Pebbles = MakeISM(TEXT("Pebbles"), Cube, FLinearColor(0.40f, 0.26f, 0.16f), false);
-	UInstancedStaticMeshComponent* Drifts = MakeISM(TEXT("DustDrifts"), Sphere, FLinearColor(0.55f, 0.37f, 0.23f), false);
-	UInstancedStaticMeshComponent* CraterFloors = MakeISM(TEXT("CraterFloors"), Cyl, FLinearColor(0.36f, 0.22f, 0.13f), false);
-	const auto ScatterRing = [&](UInstancedStaticMeshComponent* ISM, int32 Count, float MinRm, float MaxRm,
-		float SMin, float SMax, float ZScaleMul, float ZAtCm)
-	{
-		for (int32 i = 0; i < Count; ++i)
-		{
-			const float R = Rand.FRandRange(MinRm, MaxRm) * 100.f;
-			const FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R + FVector(0, 0, ZAtCm);
-			const float S = Rand.FRandRange(SMin, SMax);
-			FTransform T(FRotator(0.f, Rand.FRandRange(0.f, 360.f), 0.f).Quaternion(), Pos,
-				FVector(S * Rand.FRandRange(0.7f, 1.4f), S * Rand.FRandRange(0.7f, 1.4f), S * ZScaleMul));
-			ISM->AddInstance(T, true);
-		}
-	};
-	ScatterRing(Rocks, 260, 38.f, 460.f, 0.5f, 2.4f, 0.7f, 15.f);
-	ScatterRing(Pebbles, 520, 12.f, 240.f, 0.12f, 0.45f, 0.6f, 4.f);
-	ScatterRing(CraterFloors, 16, 60.f, 420.f, 6.f, 16.f, 0.f, 2.f); // ZScaleMul 0 -> use fixed thin Z below
-	// Craters need a fixed razor-thin Z (the ring set Z scale to 0 - repair it)
-	// plus a rubble rim.
-	for (int32 C = 0; C < CraterFloors->GetInstanceCount(); ++C)
-	{
-		FTransform T;
-		CraterFloors->GetInstanceTransform(C, T, true);
-		FVector S = T.GetScale3D();
-		S.Z = 0.04f;
-		T.SetScale3D(S);
-		CraterFloors->UpdateInstanceTransform(C, T, true, C == CraterFloors->GetInstanceCount() - 1, true);
-		const int32 RimRocks = Rand.RandRange(6, 10);
-		for (int32 Rk = 0; Rk < RimRocks; ++Rk)
-		{
-			const float A = Rk * (360.f / RimRocks) + Rand.FRandRange(-14.f, 14.f);
-			const FVector Rim = T.GetLocation() + Deg(A).Vector() * (S.X * 50.f + Rand.FRandRange(30.f, 90.f));
-			const float RS = Rand.FRandRange(0.25f, 0.8f);
-			FTransform RT(Deg(Rand.FRandRange(0.f, 360.f)).Quaternion(), FVector(Rim.X, Rim.Y, 12.f),
-				FVector(RS, RS * Rand.FRandRange(0.7f, 1.3f), RS * 0.7f));
-			Rocks->AddInstance(RT, true);
-		}
-	}
-	// Wind-laid drifts: all within +/-14 degrees of one prevailing wind so the
-	// plain reads as WEATHER, not noise (squashed spheres = soft dunes).
 	for (int32 D = 0; D < 90; ++D)
 	{
 		const float R = Rand.FRandRange(20.f, 380.f) * 100.f;
-		const FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R + FVector(0, 0, 6.f);
+		FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R;
+		Pos.Z = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y) + 6.f;
 		const float L = Rand.FRandRange(5.f, 18.f);
 		FTransform T(Deg(115.f + Rand.FRandRange(-14.f, 14.f)).Quaternion(), Pos,
 			FVector(L, L * Rand.FRandRange(0.18f, 0.3f), 0.5f));

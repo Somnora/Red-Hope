@@ -1,5 +1,6 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RedHope.h"
+#include "RHMarsTerrain.h"
 #include "RHSimWorldSubsystem.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
@@ -192,7 +193,11 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		const float Swing = 26.f * Stride * FMath::Sin(StridePhase[i] * 2.f * PI);
 		const float Bob = 2.5f * Stride * FMath::Abs(FMath::Sin(StridePhase[i] * 2.f * PI));
 
-		const FTransform Entity(FRotator(0.f, FacingYawDeg[i], 0.f).Quaternion(), Pos + FVector(0, 0, Bob));
+		// The sim walks robots on the z=0 plane; the scenery relief is purely
+		// presentation, so the figure rides the terrain height at its feet
+		// (zero across the colony flat, real ground out at the far deposits).
+		const float TerrainZ = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y);
+		const FTransform Entity(FRotator(0.f, FacingYawDeg[i], 0.f).Quaternion(), Pos + FVector(0, 0, Bob + TerrainZ));
 
 		// Rigid parts: offsets in entity space.
 		const auto Fixed = [&](const FVector& At, const FVector& Scale)

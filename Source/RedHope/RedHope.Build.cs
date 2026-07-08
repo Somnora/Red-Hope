@@ -21,6 +21,7 @@ public class RedHope : ModuleRules
 			"MassCore",
 			"StateTreeModule",
 			"MassAIBehavior",
+			"ProceduralMeshComponent",
 			"RedHopeSim"
 		});
 
