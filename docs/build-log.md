@@ -1,5 +1,18 @@
 # Build Log — The Red Hope
 
+## 2026-07-08 — Session 46 (the ALIVE pass: skills, crew life, celebrations, onboarding — save v24)
+
+- **The director's "make it feel alive / pickup-and-play" brief, built in three gates:**
+- **L1 — sim (`de0cf0f`, save v24):**
+  - **Skills & mastery**: colonists accrue skill-sols in their job (linear = band-parity); `GetCrewSkillMul` ramps output 1×→2× at 30 sols mastery, applied to garden yield + discovery pace. Zero employed → exactly 1.0.
+  - **Crew-life moments** (deterministic beat, ~2/sol): pastimes flavored by 12 derived dispositions, join-ins (a free colonist helps a worker), and — only when needs are unmet or Hope < 45 — **abstracted disputes** (raised voices, *no Hope penalty*: a visible symptom, not a second punishment). New `OnCrewMoment` delegate.
+  - **The First Martian Harvest**: cumulative garden food ≥ 1 kg fires once — permanent +4 Hope milestone, whole-crew celebration, golden banner. Breakthroughs/vault/first-crop also route through the new `OnMilestone` channel.
+  - **The roster**: 40×40 diverse first/surnames (Latin-square walk = 1600 distinct full names), `TraitFor(id)` dispositions.
+  - `-alive` suite all EXACT; `-discovery` pins updated to the intended skill-ramp math; all 20 suites green; baseline byte-identical.
+- **L2 — the visible community (`179a9fc`):** moment staging (the second colonist *walks over*; overhead emote plates — off-duty teal / lending-a-hand blue / heated-words amber); **Celebrate sets the whole crew hopping for 7 s** ("the community cheers together"); posted workers bob at their bench; job-pairs cluster naturally.
+- **L3 — onboarding + rewards (`179a9fc`):** center-screen info-card queue — 4-card plain-language tutorial + a first-landing crew card, **GOT IT / SKIP ALL TIPS** (persisted); milestones = golden cards always; first-acquisition **reward toasts** for every resource with the rare set (Ice/Glass/Seeds/Soil/Luxury/SpareParts) getting full golden story cards; boot/reload grace.
+- All wording remains Gate-D framing-review placeholder. Adversarial review workflow launched (results next entry). Staged visuals = director hand-play verdict.
+
 ## 2026-07-08 — Session 45 (graphics pass 2: humanoids that walk, dusty lived-in industry, mountains + sky + tilt)
 
 - **Director's five-part look request, built against the reference set (`a44791b`, presentation-only):**
