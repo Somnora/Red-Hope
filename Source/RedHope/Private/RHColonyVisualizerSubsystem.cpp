@@ -11,6 +11,7 @@
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
+#include "Misc/Crc.h"
 #include "DrawDebugHelpers.h"
 
 namespace RHCanon
@@ -410,6 +411,20 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	TilesSpawnedPerLevel.Reset();
 	TileByCell.Reset();
 	AppliedRoomTint.Reset();
+	for (auto& Pair : RivalMarkers)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->Destroy();
+		}
+	}
+	RivalMarkers.Reset();
+	RivalMarkerState.Reset();
+	if (ConvoyVisual)
+	{
+		ConvoyVisual->Destroy();
+		ConvoyVisual = nullptr;
+	}
 	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
 
 	UWorld* World = GetWorld();
@@ -815,6 +830,8 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// Shaft & carved-floor mirror (M1-d): state-diffed each frame - the counts
 	// are tiny and the sim has no per-cell visual events to listen to.
 	UpdateShaftVisuals();
+	// Sovereignty mirror (M3/M4): rival markers + the trade rover, same pattern.
+	RefreshSovereigntyVisuals();
 }
 
 void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
@@ -962,6 +979,120 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Label->SetTextRenderColor((T * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
 			// The tile actor's hidden-in-game state (the elevator's floor cut)
 			// propagates to the label component automatically.
+		}
+	}
+}
+
+FVector URHColonyVisualizerSubsystem::RivalMarkerPos(FName Rival, float DistanceKm) const
+{
+	// A deterministic bearing from a CONTENT hash of the name (stable across
+	// runs, like the sim's covert seed) at presentation distance: real km would
+	// be off-map, so the marker says "they're over there" - farther settlements
+	// sit farther out, all inside the sand skirt.
+	const uint32 Hash = FCrc::StrCrc32(*Rival.ToString());
+	const double AngleRad = FMath::DegreesToRadians((double)(Hash % 360u));
+	const double RadiusCm = 20000.0 + FMath::Clamp(DistanceKm, 0.f, 400.f) * 30.0; // 200 m + 0.3 m/km
+	return FVector(FMath::Cos(AngleRad) * RadiusCm, FMath::Sin(AngleRad) * RadiusCm, 0.0);
+}
+
+void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
+{
+	UWorld* World = GetWorld();
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	using namespace RHCanon;
+	const bool bSurface = ViewLevel == 0; // sovereignty is surface furniture
+
+	// Settlement markers: one per AVAILABLE rival, tinted by diplomatic state.
+	// 0 normal / 1 embargoed / 2 defected / 3 sabotaged; state-diffed so the
+	// steady state does zero material work.
+	Defs->ForEachRivalRow([&](FName Name, const FRHRivalRow& Row)
+	{
+		if (!Sim->IsRivalAvailable(Name))
+		{
+			return; // undiscovered dormant settlements stay off the map
+		}
+		TObjectPtr<AStaticMeshActor>* Found = RivalMarkers.Find(Name);
+		AStaticMeshActor* Marker = Found ? Found->Get() : nullptr;
+		if (!Marker)
+		{
+			// A distant low-slung compound: main hall + a dome, plus a name.
+			const FVector Pos = RivalMarkerPos(Name, Row.DistanceKm);
+			Marker = SpawnBox(Pos + FVector(0, 0, 125.f), FVector(7.f, 5.f, 2.5f), BoneWhite, FLinearColor::Black);
+			if (!Marker)
+			{
+				return;
+			}
+#if WITH_EDITOR
+			Marker->SetActorLabel(FString::Printf(TEXT("Sim_Rival_%s"), *Name.ToString()));
+#endif
+			AddAccent(Marker, TEXT("/Engine/BasicShapes/Sphere.Sphere"), Pos + FVector(-250.f, 200.f, 220.f),
+				FRotator::ZeroRotator, FVector(2.6f, 2.6f, 1.8f), DarkSlate, TealGlow * 0.2f);
+			AddLabel(Marker, Row.DisplayName, BoneWhite, 480.f);
+			RivalMarkers.Add(Name, Marker);
+			RivalMarkerState.Add(Name, 255); // force the first tint pass
+		}
+		// Diplomatic state -> tint (defected outranks embargo outranks sabotage).
+		uint8 State = 0;
+		if (Sim->HasDefected(Name))                      { State = 2; }
+		else if (Sim->IsEmbargoed(Name))                 { State = 1; }
+		else if (Sim->GetSabotageRemaining(Name) > 0.0)  { State = 3; }
+		uint8& Applied = RivalMarkerState.FindOrAdd(Name);
+		if (Applied != State)
+		{
+			Applied = State;
+			switch (State)
+			{
+			case 1:  ApplyTint(Marker, HazYellow, AmberGlow * 0.25f); break;          // embargoed: amber warning
+			case 2:  ApplyTint(Marker, FLinearColor(0.42f, 0.07f, 0.05f), FLinearColor(1.2f, 0.1f, 0.05f)); break; // defected: hostile red
+			case 3:  ApplyTint(Marker, DarkSlate, FLinearColor::Black); break;        // sabotaged: gone dark
+			default: ApplyTint(Marker, BoneWhite, TealGlow * 0.08f); break;           // normal: a living neighbor
+			}
+		}
+		Marker->SetActorHiddenInGame(!bSurface);
+	});
+
+	// The trade rover: drives home -> settlement -> home on the sim's own
+	// progress. Hidden when the convoy is idle (or underground view).
+	const FName Out = Sim->GetConvoyRival();
+	if (Out.IsNone())
+	{
+		if (ConvoyVisual)
+		{
+			ConvoyVisual->SetActorHiddenInGame(true);
+		}
+	}
+	else if (const FRHRivalRow* Row = Defs->GetRival(Out))
+	{
+		if (!ConvoyVisual)
+		{
+			ConvoyVisual = SpawnBox(FVector(0, 0, 60.f), FVector(1.8f, 1.2f, 0.9f), DarkSlate, AmberGlow * 0.35f);
+#if WITH_EDITOR
+			if (ConvoyVisual) { ConvoyVisual->SetActorLabel(TEXT("Sim_Convoy")); }
+#endif
+			if (ConvoyVisual) { AddLabel(ConvoyVisual, TEXT("Convoy"), RHCanon::HazYellow, 220.f); }
+		}
+		if (ConvoyVisual)
+		{
+			// Home = the Lander pad; destination = the rival's marker.
+			FVector Home(0, 0, 0);
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName("Lander")) { Home = B.LocationCm; break; }
+			}
+			const FVector Dest = RivalMarkerPos(Out, Row->DistanceKm);
+			const double P = Sim->GetConvoyProgress(); // 0..1 round trip
+			const double Alpha = Sim->IsConvoyReturning()
+				? FMath::Clamp((P - 0.5) * 2.0, 0.0, 1.0)   // marker -> home
+				: FMath::Clamp(P * 2.0, 0.0, 1.0);          // home -> marker
+			const FVector From = Sim->IsConvoyReturning() ? Dest : Home;
+			const FVector To = Sim->IsConvoyReturning() ? Home : Dest;
+			ConvoyVisual->SetActorLocation(FMath::Lerp(From, To, Alpha) + FVector(0, 0, 60.f));
+			ConvoyVisual->SetActorHiddenInGame(!bSurface);
 		}
 	}
 }

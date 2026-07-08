@@ -117,12 +117,25 @@ private:
 	// and carry a small flat label. State-diffed per tick like the shaft mirror.
 	void RefreshRoomVisuals();
 	FLinearColor RoomTint(FName RoomRowName) const;
+	// Sovereignty made visible (M3/M4): a distant settlement marker per
+	// AVAILABLE rival (tinted by its diplomatic state - normal / embargoed /
+	// defected / sabotaged) and a rover that physically drives the trade route,
+	// following the sim's convoy progress. Pure presentation, state-diffed per
+	// tick; markers sit at a deterministic bearing (a content hash of the rival
+	// name) at presentation distance - "they're over there", not literal km.
+	void RefreshSovereigntyVisuals();
+	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
 	TMap<FIntVector, FName> AppliedRoomTint;
+	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
+	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
+	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;
+	TMap<FName, uint8> RivalMarkerState;
+	UPROPERTY() TObjectPtr<AStaticMeshActor> ConvoyVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShaftVisual;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> CarveTileVisuals;

@@ -323,6 +323,27 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCovert(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHInjectRivals(
+	TEXT("RH.InjectRivals"),
+	TEXT("RH.InjectRivals - DEBUG: load the canonical rival settlements (Zarya active, Meridian dormant) in-memory, mirroring RH_Rivals.csv - the demo bridge until DT_Rivals is imported."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Defs) { return; }
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		Defs->Debug_InjectRival(FName("Zarya"), Z);
+		FRHRivalRow M;
+		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
+		M.DistanceKm = 200.f; M.ExportLot = TEXT("SpareParts:4"); M.ImportLot = TEXT("Food:60");
+		M.RelationStart = 30.f; M.SliceActive = false; // dormant until scouted
+		Defs->Debug_InjectRival(FName("Meridian"), M);
+		UE_LOG(LogRedHope, Display, TEXT("Rivals injected (in-memory): Zarya Station active, Meridian Base dormant. The neighbors exist; RH.Trade to see them."));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHCrisis(
 	TEXT("RH.Crisis"),
 	TEXT("RH.Crisis [trigger] - log the crisis + endings state, or force the alignment-gated selector to fire a crisis now."),

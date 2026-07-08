@@ -179,6 +179,17 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 	// Daylight strength for ambient (night = no sky contribution).
 	const float Day = FMath::Clamp(FMath::Sin(SolFraction * PI), 0.f, 1.f);
 
+	// The crisis screen cue (M4 Gate D): an active crisis reads on the LENS, not
+	// just the deck - a Malfunction desaturates and grains the frame (systems
+	// failing); Environmental strain thickens the haze. Absolute values are set
+	// every frame, so recovery reverts the look automatically.
+	bool bMalfunction = false, bEnvironmental = false;
+	if (const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
+	{
+		bMalfunction = Sim->GetActiveCrisis() == URHSimWorldSubsystem::ERHCrisis::Malfunction;
+		bEnvironmental = Sim->GetActiveCrisis() == URHSimWorldSubsystem::ERHCrisis::Environmental;
+	}
+
 	if (GradeVolume)
 	{
 		FPostProcessSettings& PP = GradeVolume->Settings;
@@ -193,7 +204,10 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 		PP.bOverride_WhiteTemp = true;
 		PP.WhiteTemp = bUnderground ? GRHGradeWarmth - 900.f : GRHGradeWarmth;
 		PP.bOverride_ColorSaturation = true;
-		PP.ColorSaturation = FVector4(GRHGradeSaturation, GRHGradeSaturation, GRHGradeSaturation, 1.f);
+		// A Malfunction crisis drains the color from the frame - the world reads
+		// as "systems failing" without a single graphic image.
+		const float Sat = bMalfunction ? GRHGradeSaturation * 0.72f : GRHGradeSaturation;
+		PP.ColorSaturation = FVector4(Sat, Sat, Sat, 1.f);
 		PP.bOverride_ColorContrast = true;
 		PP.ColorContrast = FVector4(1.05f, 1.05f, 1.05f, 1.f);
 		// A warm ochre gain on the surface; a cooler slate gain underground -
@@ -210,7 +224,7 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 		// A dust storm crushes the sky into a hazy sepia - lift the shadows and
 		// desaturate slightly so the world reads as "socked in", not just dark.
 		PP.bOverride_FilmGrainIntensity = true;
-		PP.FilmGrainIntensity = 0.08f + 0.25f * Dust;
+		PP.FilmGrainIntensity = 0.08f + 0.25f * Dust + (bMalfunction ? 0.3f : 0.f);
 	}
 
 	if (DustFog)
@@ -219,7 +233,8 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 		{
 			// Haze thickens with the storm; butterscotch inscatter by day, dimmer
 			// at night. Base density is the ever-present thin Mars dust.
-			Fog->SetFogDensity(GRHFogDensity + 0.16f * Dust);
+			// Environmental strain thickens the haze - the crisis you can SEE roll in.
+			Fog->SetFogDensity(GRHFogDensity + 0.16f * Dust + (bEnvironmental ? 0.08f : 0.f));
 			Fog->SetFogHeightFalloff(0.2f);
 			const FLinearColor Haze = FLinearColor(0.62f, 0.42f, 0.26f) * (0.25f + 0.75f * Day);
 			Fog->SetFogInscatteringColor(Haze);
