@@ -140,3 +140,8 @@ CrisisEnvironmentHope,6,points,"M4 Gate D: Hope penalty while an Environmental c
 CrisisWaterDrainPerSol,8,kg,"M4 Gate D: extra Water drained per sol during an Environmental crisis (a systems-stress test survivable with reserves)"
 EndingIdentityThreshold,60,points,"M4 Gate D: |IdentityAxis| at which the colony has a DEFINITE Earth/Mars allegiance for the endings read"
 EndingHumanNatureThreshold,30,points,"M4 Gate D: HumanNature magnitude separating an Evolved federation ending from a Destructive cold-war ending"
+SkillMasterySols,30,sols,"Alive pass: sols worked at one job to reach mastery - output multiplier ramps linearly 1x -> 2x (a master gardener/scientist doubles their yield)"
+CrewMomentIntervalSols,0.5,sols,"Alive pass: cadence of crew-life moments (pastimes, join-ins, disputes) - one seeded moment roughly twice a sol"
+DisputeHopeBelow,45,points,"Alive pass: HopeSmoothed below which crew friction (abstracted disputes - raised voices, never violence) can surface; needs-unmet also triggers. Wording placeholder per Gate-D review"
+FirstHarvestKg,1.0,kg,"Alive pass: cumulative garden-grown Food that marks THE FIRST MARTIAN HARVEST milestone (crew celebration + permanent Hope)"
+HopeFirstHarvestMilestone,4,points,"Alive pass: permanent Hope milestone for the first Martian-grown harvest - food from OUR soil"
