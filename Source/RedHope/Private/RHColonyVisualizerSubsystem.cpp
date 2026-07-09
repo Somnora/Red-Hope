@@ -1355,11 +1355,15 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			}
 			Prop->SetStaticMesh(PropMesh);
 			Prop->SetVisibility(true);
-			// Uniform min-side fit into ~7.5 m of the 10 m cell, feet on the
-			// tile's floor plane (tile is a 0.3 m box centred at L*FloorH-15, so
-			// its top is L*FloorH = TileLoc.Z + 15), deterministic per-cell yaw.
+			// Fit the prop's larger horizontal dimension to a human-scale
+			// footprint (~2.5 m), NOT the whole 10 m cell - furniture must read
+			// small beside a ~1.8 m colonist (director: earlier 7.5 m fill made
+			// it ~3x too big). Feet on the tile's floor plane (tile is a 0.3 m
+			// box centred at L*FloorH-15, so its top is L*FloorH = TileLoc.Z+15),
+			// deterministic per-cell yaw. Tunable per-prop later if needed.
+			const float TargetFootprintCm = 250.f;
 			const FBoxSphereBounds MB = PropMesh->GetBounds();
-			const float S = 750.f / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+			const float S = TargetFootprintCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
 			const FVector TileLoc = Tile->GetActorLocation();
 			const float Yaw = 90.f * ((Pair.Key.Y * 3 + Pair.Key.X) & 3);
 			Prop->SetWorldScale3D(FVector(S));
