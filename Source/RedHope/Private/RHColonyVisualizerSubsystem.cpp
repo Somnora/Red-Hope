@@ -639,6 +639,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	TilesSpawnedPerLevel.Reset();
 	TileByCell.Reset();
 	AppliedRoomTint.Reset();
+	RoomPropByCell.Reset(); // prop components died with their tiles just above
 	for (auto& Pair : RivalMarkers)
 	{
 		if (Pair.Value)
@@ -869,19 +870,24 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	{
 		static const TMap<FName, FString> RealModelPaths = {
 			{ FName("Forge"),       FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
-			{ FName("Lander"),      FString(TEXT("/Game/RedHope/Art/Models/lander/lander.lander")) },
-			{ FName("SolarArray"),  FString(TEXT("/Game/RedHope/Art/Models/solar/solar.solar")) },
 			{ FName("BatteryBank"), FString(TEXT("/Game/RedHope/Art/Models/battery/battery.battery")) },
 			// The IceProcessor art is a tanks-and-pipes processing plant, so it
 			// renders the WaterPlant; IceDrill stays a primitive until drill art exists.
 			{ FName("WaterPlant"),  FString(TEXT("/Game/RedHope/Art/Models/ice/ice.ice")) },
-			// NOT mapped yet, pending re-generated art (see docs/build-log.md):
-			//   extractor - the source sprite is an excavation-PIT diorama (dirt
-			//     walls wrap the machine), and it depicts an OreExtractor, not the
-			//     WaterPlant it was briefly mapped to.
-			//   block - the source sprite is a ROOFLESS habitat-interior cutaway
-			//     (beds, workstations), not the Stockpile crates it was mapped to.
-			// Both need standalone-object art before they can render as buildings.
+			// Plinth-free regenerations. The originals baked their ground IN (an
+			// excavation pit, a hangar bay, a floating regolith island), which
+			// meshed into a base that never seated on terrain - so the objects
+			// were re-generated standalone (InstantStyle) and re-meshed; solar's
+			// residual shadow slab was additionally cut in mesh-cleanup. The
+			// superseded lander/ and solar/ meshes are left on disk but no longer
+			// referenced. See docs/build-log.md.
+			{ FName("Lander"),      FString(TEXT("/Game/RedHope/Art/Models/lander2/lander2.lander2")) },
+			{ FName("SolarArray"),  FString(TEXT("/Game/RedHope/Art/Models/solar2/solar2.solar2")) },
+			{ FName("Habitat"),     FString(TEXT("/Game/RedHope/Art/Models/habitat/habitat.habitat")) },
+			{ FName("Stockpile"),   FString(TEXT("/Game/RedHope/Art/Models/stockpile/stockpile.stockpile")) },
+			// The OreExtractor art (tracked excavator + digging arm) renders the
+			// Borer - the sim's shaft/floor digging machine.
+			{ FName("Borer"),       FString(TEXT("/Game/RedHope/Art/Models/extractor2/extractor2.extractor2")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
@@ -1223,6 +1229,31 @@ FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
 	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
 }
 
+FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
+{
+	// One hero furnishing per active room type (director's own sprite roster,
+	// re-meshed). The player draws the room's SHAPE with DesignateRoom; these
+	// props auto-furnish each cell it covers - prefab meeting hand-drawn. Garden
+	// arrives here already split into its planted state (planter_dry -> _wet).
+	// Empty string = no prop (undesignated rock, or a room with no furniture yet).
+	static const TMap<FName, FString> Props = {
+		{ FName("LivingQuarters"), TEXT("/Game/RedHope/Art/Props/bunk/bunk.bunk") },
+		{ FName("Lab"),            TEXT("/Game/RedHope/Art/Props/labbench/labbench.labbench") },
+		{ FName("Workstation"),    TEXT("/Game/RedHope/Art/Props/console/console.console") },
+		{ FName("Dining"),         TEXT("/Game/RedHope/Art/Props/diningtable/diningtable.diningtable") },
+		{ FName("Cooking"),        TEXT("/Game/RedHope/Art/Props/galley/galley.galley") },
+		{ FName("Hallway"),        TEXT("/Game/RedHope/Art/Props/conduit/conduit.conduit") },
+		{ FName("Garden"),         TEXT("/Game/RedHope/Art/Props/planter_dry/planter_dry.planter_dry") },
+		{ FName("Garden#planted"), TEXT("/Game/RedHope/Art/Props/planter_wet/planter_wet.planter_wet") },
+		{ FName("Greenhouse"),     TEXT("/Game/RedHope/Art/Props/planter_wet/planter_wet.planter_wet") },
+		// Dormant rooms (M2 Gate C+): the fluid works read as a tank + pump.
+		{ FName("WaterWorks"),     TEXT("/Game/RedHope/Art/Props/tank/tank.tank") },
+		{ FName("Septic"),         TEXT("/Game/RedHope/Art/Props/tank/tank.tank") },
+	};
+	const FString* P = Props.Find(Room);
+	return P ? *P : FString();
+}
+
 void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 {
 	UWorld* World = GetWorld();
@@ -1290,6 +1321,56 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Label->SetTextRenderColor((T * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
 			// The tile actor's hidden-in-game state (the elevator's floor cut)
 			// propagates to the label component automatically.
+		}
+		// A furnishing prop per designated cell, attached to the tile actor so
+		// the slice-view floor-cut, actor lifecycle, and this per-change diff all
+		// come free (identical to the label above). One extra StaticMeshComponent
+		// per designated cell; undesignated cells and rooms with no prop carry
+		// none. Density is one-per-cell by design - a broad room reads furnished,
+		// with a per-cell yaw so it isn't tiled wallpaper.
+		UStaticMeshComponent* Prop = RoomPropByCell.FindRef(Pair.Key).Get();
+		const FString PropPath = RoomPropPath(Room);
+		// A missing asset must not leave the PREVIOUS room's furniture standing on
+		// a retinted tile - fall through to the hide path and say so once.
+		UStaticMesh* PropMesh = PropPath.IsEmpty() ? nullptr : LoadObject<UStaticMesh>(nullptr, *PropPath);
+		if (!PropPath.IsEmpty() && !PropMesh)
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("Room prop asset missing: %s (cell stays unfurnished)"), *PropPath);
+		}
+		if (!PropMesh)
+		{
+			if (Prop) { Prop->SetVisibility(false); } // room cleared / no furniture
+		}
+		else
+		{
+			if (!Prop)
+			{
+				Prop = NewObject<UStaticMeshComponent>(Tile, TEXT("RoomProp"));
+				Prop->SetupAttachment(Tile->GetRootComponent());
+				Prop->SetMobility(EComponentMobility::Movable);
+				Prop->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Prop->SetAbsolute(true, true, true); // the tile's flat 0.3 m Z scale would squash it
+				Prop->RegisterComponent();
+				RoomPropByCell.Add(Pair.Key, Prop);
+			}
+			Prop->SetStaticMesh(PropMesh);
+			Prop->SetVisibility(true);
+			// Uniform min-side fit into ~7.5 m of the 10 m cell, feet on the
+			// tile's floor plane (tile is a 0.3 m box centred at L*FloorH-15, so
+			// its top is L*FloorH = TileLoc.Z + 15), deterministic per-cell yaw.
+			const FBoxSphereBounds MB = PropMesh->GetBounds();
+			const float S = 750.f / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+			const FVector TileLoc = Tile->GetActorLocation();
+			const float Yaw = 90.f * ((Pair.Key.Y * 3 + Pair.Key.X) & 3);
+			Prop->SetWorldScale3D(FVector(S));
+			Prop->SetWorldLocationAndRotation(
+				FVector(TileLoc.X - MB.Origin.X * S,
+						TileLoc.Y - MB.Origin.Y * S,
+						(TileLoc.Z + 15.f) - (MB.Origin.Z - MB.BoxExtent.Z) * S),
+				FRotator(0.f, Yaw, 0.f));
+			// Receipt (bounded: fires only on a room CHANGE, not per tick).
+			UE_LOG(LogRedHope, Display, TEXT("Room prop: L%d cell %d '%s' furnished with '%s' (scale %.2f, yaw %.0f)"),
+				Pair.Key.X, Pair.Key.Y, *Room.ToString(), *PropMesh->GetName(), S, Yaw);
 		}
 	}
 }

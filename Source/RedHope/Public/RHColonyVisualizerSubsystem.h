@@ -6,6 +6,7 @@
 
 class AStaticMeshActor;
 class UInstancedStaticMeshComponent;
+class UStaticMeshComponent;
 struct FRHBuildingInstance;
 struct FRHCommand;
 struct FRHDepositState;
@@ -128,6 +129,8 @@ private:
 	// and carry a small flat label. State-diffed per tick like the shaft mirror.
 	void RefreshRoomVisuals();
 	FLinearColor RoomTint(FName RoomRowName) const;
+	// Content path of the furnishing prop for a room function (empty = none).
+	FString RoomPropPath(FName Room) const;
 	// Sovereignty made visible (M3/M4): a distant settlement marker per
 	// AVAILABLE rival (tinted by its diplomatic state - normal / embargoed /
 	// defected / sabotaged) and a rover that physically drives the trade route,
@@ -142,6 +145,9 @@ private:
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
 	TMap<FIntVector, FName> AppliedRoomTint;
+	// Per-cell furnishing prop component (owned by its tile actor, so it is
+	// GC-safe via CarveTileVisuals and inherits the tile's slice-view hiding).
+	TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>> RoomPropByCell;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;
