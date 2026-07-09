@@ -853,20 +853,43 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	}
 	UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
 	Mesh->SetMobility(EComponentMobility::Movable);
-	// A real imported model (director's image-to-3D pipeline -> GLB ->
-	// ImportAssets) replaces the whole composed-primitive treatment when one
-	// exists for this building type: uniform-scaled to the footprint, grounded
-	// on its own bounds, wearing its baked vertex colors. Add a row here per
-	// new GLB dropped in ~/Desktop/Martians/assets/models and imported.
+	// A real imported model (director's image-to-3D pipeline -> mesh -> import)
+	// replaces the whole composed-primitive treatment when one exists for this
+	// building type: uniform-scaled to the footprint, grounded on its own
+	// bounds. Add a row here per new model imported under
+	// /Game/RedHope/Art/Models. Two material lineages coexist:
+	//   - The Forge is an early vertex-color mesh (COLOR_0, no textures) and
+	//     needs M_VertexColor applied below or it renders gray.
+	//   - Everything from the textured pipeline (Hunyuan paint stage -> baseColor
+	//     texture -> MI_<name> assigned on the StaticMesh asset) already carries
+	//     its own material; leave the slots alone so the texture shows.
 	UStaticMesh* RealModel = nullptr;
+	bool bVertexColored = false;
 	if (!Instance.bUnderConstruction)
 	{
 		static const TMap<FName, FString> RealModelPaths = {
-			{ FName("Forge"), FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
+			{ FName("Forge"),       FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
+			{ FName("Lander"),      FString(TEXT("/Game/RedHope/Art/Models/lander/lander.lander")) },
+			{ FName("SolarArray"),  FString(TEXT("/Game/RedHope/Art/Models/solar/solar.solar")) },
+			{ FName("BatteryBank"), FString(TEXT("/Game/RedHope/Art/Models/battery/battery.battery")) },
+			// The IceProcessor art is a tanks-and-pipes processing plant, so it
+			// renders the WaterPlant; IceDrill stays a primitive until drill art exists.
+			{ FName("WaterPlant"),  FString(TEXT("/Game/RedHope/Art/Models/ice/ice.ice")) },
+			// NOT mapped yet, pending re-generated art (see docs/build-log.md):
+			//   extractor - the source sprite is an excavation-PIT diorama (dirt
+			//     walls wrap the machine), and it depicts an OreExtractor, not the
+			//     WaterPlant it was briefly mapped to.
+			//   block - the source sprite is a ROOFLESS habitat-interior cutaway
+			//     (beds, workstations), not the Stockpile crates it was mapped to.
+			// Both need standalone-object art before they can render as buildings.
 		};
+		// Meshes whose color lives in vertex colors, not a texture — these (and
+		// only these) get the M_VertexColor override after the mesh is set.
+		static const TSet<FName> VertexColoredModels = { FName("Forge") };
 		if (const FString* Path = RealModelPaths.Find(Instance.DefName))
 		{
 			RealModel = LoadObject<UStaticMesh>(nullptr, **Path);
+			bVertexColored = VertexColoredModels.Contains(Instance.DefName);
 		}
 	}
 	if (RealModel)
@@ -881,15 +904,21 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		Actor->SetActorScale3D(FVector(S));
 		// Recenter horizontally, sit the bounds bottom on the ground.
 		Actor->SetActorLocation(Seated - FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S);
-		if (UMaterialInterface* VCMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_VertexColor.M_VertexColor")))
+		// Only the vertex-color lineage (the Forge) needs its material forced;
+		// textured models keep the MI_<name> already on their slots.
+		if (bVertexColored)
 		{
-			for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+			if (UMaterialInterface* VCMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_VertexColor.M_VertexColor")))
 			{
-				Mesh->SetMaterial(Slot, UMaterialInstanceDynamic::Create(VCMat, Mesh));
+				for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+				{
+					Mesh->SetMaterial(Slot, UMaterialInstanceDynamic::Create(VCMat, Mesh));
+				}
 			}
 		}
-		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f)"),
-			*Instance.DefName.ToString(), *RealModel->GetName(), S);
+		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f, %s)"),
+			*Instance.DefName.ToString(), *RealModel->GetName(), S,
+			bVertexColored ? TEXT("vertex-color") : TEXT("textured"));
 	}
 	else
 	{
