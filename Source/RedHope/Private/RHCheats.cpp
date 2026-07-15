@@ -787,6 +787,52 @@ static FAutoConsoleCommandWithWorldAndArgs GRHShowcase(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDemo(
+	TEXT("RH.Demo"),
+	TEXT("RH.Demo - the everything button: bore a floor, carve it, place power + life-support, "
+	     "zone one of every room, house a crew, and ride down. Then speed up (RH.SetSpeed 3) to watch it live."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		FString R;
+		// Dig and carve floor -1 (instant, bypasses the Borer for the demo).
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 8, R);
+		// Power at the surface, life-support on the floor, and stocked so the
+		// crew can breathe/eat/drink the moment the floor rates.
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 1200.0);
+		Sim->AddStock(FName("Food"), 400.0);
+		Sim->AddStock(FName("Water"), 400.0);
+		// One of every active room, spread across the 8 carved cells.
+		const TCHAR* Rooms[8] = {
+			TEXT("LivingQuarters"), TEXT("LivingQuarters"), TEXT("Workstation"), TEXT("Lab"),
+			TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway"), TEXT("Garden")
+		};
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Sim->DesignateRoom(-1, i, FName(Rooms[i]), R);
+		}
+		// Certify the floor NOW (fills O2 + rates it) so the crew move in this
+		// frame - otherwise Debug_AddColonists finds no rated bed and adds none.
+		Sim->Debug_ForceRateFloor(-1);
+		// The crew (now the floor is rated, they house immediately).
+		Sim->Debug_AddColonists(4);
+		// Ride the elevator down to look at it.
+		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+		{
+			PC->SetActiveLevel(-1);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Demo] floor -1: 8 cells carved + zoned, power + AirFilter placed, 4 crew inbound. "
+			"Run RH.SetSpeed 3 to let it certify and the crew move in."));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 	TEXT("RH.Status"),
 	TEXT("RH.Status - log colony power, economy, tasks, quota, and uplink."),

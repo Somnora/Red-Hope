@@ -236,6 +236,10 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// Cheat (RH.Demo): certify a floor instantly - fill its O2 to required and
+	// mark it Livable - so a demo crew can move in this frame instead of after
+	// sols of fill. Only certifies if it's circulated and big enough (real gate).
+	void Debug_ForceRateFloor(int32 Level);
 	// Harness: run a cargo item's landing effect directly (the commandlet's
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }

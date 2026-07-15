@@ -1669,6 +1669,22 @@ const TCHAR* URHSimWorldSubsystem::TraitFor(int32 ColonistId)
 	return GRHTraits[H % UE_ARRAY_COUNT(GRHTraits)];
 }
 
+void URHSimWorldSubsystem::Debug_ForceRateFloor(int32 Level)
+{
+	const int32 Cells = GetFloorCarvedCells(Level);
+	if (Cells < MinLivableCells || !IsFloorCirculated(Level))
+	{
+		UE_LOG(LogRedHopeSim, Warning,
+			TEXT("Debug_ForceRateFloor: floor %d not eligible (cells %d/%d, circulated %d)"),
+			Level, Cells, MinLivableCells, (int32)IsFloorCirculated(Level));
+		return;
+	}
+	FloorO2Kg.FindOrAdd(Level) = Cells * O2FillKgPerCell; // fill to required
+	RatedFloors.Add(Level);
+	FloorsNotedSmall.Remove(Level);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Debug_ForceRateFloor: floor %d certified (%d cells)"), Level, Cells);
+}
+
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
 	int32 Housed = 0;

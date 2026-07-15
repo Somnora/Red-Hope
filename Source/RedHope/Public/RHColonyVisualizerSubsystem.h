@@ -6,6 +6,7 @@
 
 class AStaticMeshActor;
 class UInstancedStaticMeshComponent;
+class UPointLightComponent;
 class UStaticMeshComponent;
 struct FRHBuildingInstance;
 struct FRHCommand;
@@ -148,6 +149,28 @@ private:
 	// Per-cell furnishing prop component (owned by its tile actor, so it is
 	// GC-safe via CarveTileVisuals and inherits the tile's slice-view hiding).
 	TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>> RoomPropByCell;
+	// Automatic hab lighting (director 2026-07-09): one soft ceiling light per
+	// designated cell, owned by its tile actor like the prop; intensity is a
+	// READOUT of the sim - full while the floor's circulator runs on a healthy
+	// grid, dimmed in a brownout, dark when circulation is down. Plus one cool
+	// dim fill that rides the viewed floor (owned by the shaft column) so an
+	// unpowered hab reads dim-and-cold instead of void-black at night.
+	TMap<FIntVector, TWeakObjectPtr<UPointLightComponent>> LightByCell;
+	TWeakObjectPtr<UPointLightComponent> FloorFill;
+	// Insulated-wall dressing (director 2026-07-09: "walls look like bare
+	// martian rock... every few blocks an air vent"): vent units mounted on the
+	// pit's wall faces, rebuilt with the rig. Owned by SliceRigActor.
+	TArray<TWeakObjectPtr<UStaticMeshComponent>> WallVents;
+	// Lived-in accumulation: crates/drums/lockers appear over time on populated
+	// floors (count grows with residents + sols; components ride tile actors so
+	// lifecycle and floor-cut hiding come free). Per-floor spawned count.
+	TMap<int32, int32> ClutterSpawnedPerLevel;
+	// The elevator at the shaft head: real cage mesh + two sliding door panels,
+	// doors easing open whenever a colonist is near the shaft on the open floor.
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorCage;
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorL;
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorR;
+	float ElevatorDoorAlpha = 0.f;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;

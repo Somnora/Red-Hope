@@ -4,10 +4,20 @@
 #include "RHSimWorldSubsystem.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
+#include "Animation/AnimSequence.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInstanceDynamic.h"
+
+namespace
+{
+	const TCHAR* RobotWalkerMesh = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robot.RH_Walker_robot");
+	const TCHAR* RobotWalkClip   = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robotWalk.RH_Walker_robotWalk");
+	const TCHAR* RobotIdleClip   = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robotIdle.RH_Walker_robotIdle");
+}
 
 namespace
 {
@@ -51,6 +61,15 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 	LastPosCm.Reset();
 	FacingYawDeg.Reset();
 	StridePhase.Reset();
+	for (USkeletalMeshComponent* S : SkelBodies)
+	{
+		if (S)
+		{
+			S->DestroyComponent();
+		}
+	}
+	SkelBodies.Reset();
+	bWalkPlaying.Reset();
 	for (UInstancedStaticMeshComponent* Part : Parts)
 	{
 		if (Part)
@@ -66,13 +85,36 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 	EnsureMeshComponent();
 
 	const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.f));
+	AActor* Holder = Parts.Num() > 0 && Parts[0] ? Parts[0]->GetOwner() : nullptr;
+	USkeletalMesh* Walker = bUseSkeletal ? LoadObject<USkeletalMesh>(nullptr, RobotWalkerMesh) : nullptr;
 	for (int32 i = 0; i < Entities.Num(); ++i)
 	{
-		for (UInstancedStaticMeshComponent* Part : Parts)
+		if (Walker && Holder)
 		{
-			if (Part)
+			// One skeletal walker per robot; the ISM layers stay empty.
+			USkeletalMeshComponent* Skel = NewObject<USkeletalMeshComponent>(Holder);
+			Skel->RegisterComponent();
+			Holder->AddInstanceComponent(Skel);
+			Skel->SetSkeletalMesh(Walker);
+			Skel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			const FBoxSphereBounds WB = Walker->GetBounds();
+			Skel->SetWorldScale3D(FVector(180.f / FMath::Max(2.f * WB.BoxExtent.Z, 1.f)));
+			Skel->SetVisibility(!bSliceHidden);
+			if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, RobotIdleClip))
 			{
-				Part->AddInstance(Proto, /*bWorldSpace*/ true);
+				Skel->PlayAnimation(Idle, true);
+			}
+			SkelBodies.Add(Skel);
+			bWalkPlaying.Add(false);
+		}
+		else
+		{
+			for (UInstancedStaticMeshComponent* Part : Parts)
+			{
+				if (Part)
+				{
+					Part->AddInstance(Proto, /*bWorldSpace*/ true);
+				}
 			}
 		}
 		LastPosCm.Add(FVector::ZeroVector);
@@ -92,6 +134,13 @@ void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 			Part->SetVisibility(!bHidden);
 		}
 	}
+	for (USkeletalMeshComponent* S : SkelBodies)
+	{
+		if (S)
+		{
+			S->SetVisibility(!bHidden);
+		}
+	}
 }
 
 void URHAgentVisualizerSubsystem::EnsureMeshComponent()
@@ -109,6 +158,10 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 #if WITH_EDITOR
 	Holder->SetActorLabel(TEXT("RH_AgentVisualizer"));
 #endif
+
+	// Rigged walker available? Then the cube layers stay empty (fallback only).
+	bUseSkeletal = LoadObject<USkeletalMesh>(nullptr, RobotWalkerMesh) != nullptr;
+	UE_LOG(LogRedHope, Display, TEXT("Robot figures: %s"), bUseSkeletal ? TEXT("ANIMATED walker") : TEXT("primitive 9-layer"));
 
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
 	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
@@ -197,6 +250,29 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		// presentation, so the figure rides the terrain height at its feet
 		// (zero across the colony flat, real ground out at the far deposits).
 		const float TerrainZ = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y);
+
+		// Skeletal path: one component per robot - place it feet-down at the
+		// entity, face travel, swap Walk/Idle on the speed threshold. The clip
+		// carries the gait, so the procedural Bob is skipped.
+		if (bUseSkeletal && SkelBodies.IsValidIndex(i))
+		{
+			if (USkeletalMeshComponent* Skel = SkelBodies[i])
+			{
+				Skel->SetWorldLocationAndRotation(
+					Pos + FVector(0, 0, GroundZ + TerrainZ),
+					FRotator(0.f, FacingYawDeg[i], 0.f));
+				const bool bWantWalk = Speed > 15.f;
+				if (bWantWalk != bWalkPlaying[i])
+				{
+					if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, bWantWalk ? RobotWalkClip : RobotIdleClip))
+					{
+						Skel->PlayAnimation(Clip, true);
+						bWalkPlaying[i] = bWantWalk;
+					}
+				}
+			}
+			continue;
+		}
 		const FTransform Entity(FRotator(0.f, FacingYawDeg[i], 0.f).Quaternion(), Pos + FVector(0, 0, Bob + TerrainZ));
 
 		// Rigid parts: offsets in entity space.
