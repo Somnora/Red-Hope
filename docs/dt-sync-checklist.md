@@ -1,5 +1,11 @@
 # DataTable Sync Checklist — accumulated debt (Sessions 30–36)
 
+> **STALE (2026-07-15): this file stops at save v17.** The debt has since grown
+> through **save v25**. For the current, authoritative list of what the next
+> editor session must sync, see **`docs/PROJECT_STATUS.md` §4 item 1**. The
+> sections below remain a useful how-to for the mechanics of syncing, but the
+> row inventory is out of date — trust PROJECT_STATUS for what's owed.
+
 The CSVs in `docs/data/` are the source of truth and are all committed. The live DataTable assets + the two C++ row structs need syncing next editor session (editor open, MCP connected). Until then: code defaults match every scalar, and headless tests inject the new rows in memory, so everything runs — but the live in-editor game reads stale/absent rows for the new content.
 
 ## 1. Recompile first (two structs gained columns / two are new)
