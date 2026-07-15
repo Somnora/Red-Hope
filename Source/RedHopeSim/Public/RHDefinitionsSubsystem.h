@@ -26,6 +26,15 @@ public:
 	const FRHBuildingRow* GetBuilding(FName Name) const;
 	const FRHRobotRow* GetRobot(FName Name) const;
 	const FRHQuotaRow* GetQuota(FName Name) const;
+	// All slice-active quotas (the goal ladder, save v25). Ordering is the
+	// caller's job (the sim advances by ascending DeadlineSol, then name).
+	void ForEachQuota(TFunctionRef<void(FName, const FRHQuotaRow&)> Fn) const;
+	// Flip a room row live (UnlockRoom discoveries; also the RH.ActivateRoom
+	// test knob). In-memory only - the DT asset on disk is untouched; unlocks
+	// re-apply from the discovery log on load. Returns false if no such row.
+	bool ActivateRoomRow(FName Name);
+	// Same knob for quota rows (test/bridge until the DT_Quotas sync lands).
+	bool Debug_ActivateQuota(FName Name);
 	const FRHManifestItemRow* GetManifestItem(FName Name) const;
 	// Room function row (M2 Gate B). Returns dormant rows too - callers gate
 	// on SliceActive (designation refuses dormant functions).

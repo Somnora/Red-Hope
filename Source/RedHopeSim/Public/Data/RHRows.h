@@ -141,6 +141,10 @@ struct REDHOPESIM_API FRHQuotaRow : public FTableRowBase
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Requirements;
+	// Sols allowed FROM THE SOL THIS QUOTA OPENS (the quota ladder, save v25:
+	// quotas after the first open when their predecessor's ship lands, so an
+	// absolute sol would be instantly late). The first quota opens at sol 0,
+	// where relative == absolute - every M0 pin unchanged.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 DeadlineSol = 10;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float OnTimeAward_kg = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LateAward_kg = 0.f;
@@ -206,6 +210,18 @@ struct REDHOPESIM_API FRHRoomRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool NeedsPlumbing = false;
 	// Morale contribution when staffed/used (Hope-index input, brief §5).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float MoraleWeight = 0.f;
+	// --- Station tiers (tiered-production spec 2026-07-10, Gate A). A tier
+	// ladder within a Function family: same job, better furniture. Defaults
+	// make every pre-tier row an implicit T1 (all prior pins unchanged).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 Tier = 1;
+	// The row this station re-designates into (the upgrade verb is a later
+	// interaction gate; the column is the data spine it will read).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UpgradesTo;
+	// Job seats one designated cell of this room provides (T1 benches seat 1).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 SeatCount = 1;
+	// Output multiplier per filled seat: Lab-line seats multiply discovery
+	// seat-hour accrual; Workstation-line seats feed the fabrication bonus.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float YieldMul = 1.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
@@ -266,6 +282,14 @@ struct REDHOPESIM_API FRHDiscoveryRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float RewardKg = 0.f;
 	// The banner the colony sees (player-facing - Gate-D framing review).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Alert;
+	// --- Research pays (tiered-production spec 2026-07-10): completing this
+	// discovery banks manifest budget toward the NEXT CEO quota award (the
+	// existing funding currency - research literally funds the program).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float FundingKg = 0.f;
+	// A discovery can unlock a dormant room row (flips SliceActive live;
+	// re-applied from the discovery log on load). The tier ladder is gated by
+	// playing the research loop, not a tech-tree UI.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockRoom;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };

@@ -524,6 +524,23 @@ static FAutoConsoleCommandWithWorldAndArgs GRHActivateRoom(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateQuota(
+	TEXT("RH.ActivateQuota"),
+	TEXT("RH.ActivateQuota <RowName> - DEBUG: flip a quota row slice-active in the loaded table (test knob until the DT_Quotas sync lands)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (Defs && Defs->Debug_ActivateQuota(FName(*Args[0])))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("Quota row '%s' slice-active (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateQuota: no quota row '%s'"), *Args[0]);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 	TEXT("RH.AddSolid"),
 	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),

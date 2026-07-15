@@ -1399,6 +1399,273 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// v25 self-test: THE GOAL LADDER - quotas advance when the ship lands
+	// (deadlines relative to opening), research funding pays out on the next
+	// award, the weather-cycle fold, save v25 round-trip mid-ladder. `-ladder`.
+	if (FParse::Param(*Params, TEXT("ladder")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GOAL LADDER TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// Q2 rides the ladder once its row is active (the DT flip is the
+		// committed CSV's job; this knob bridges until the editor sync).
+		DefsSub->Debug_ActivateQuota(FName("Q2"));
+
+		// 1) Fresh colony opens on Q1 (smallest deadline among active rows).
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER open: active=%s phase=%d openedSol=%d (expect Q1, 0=Open, 0)"),
+			*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaOpenedSol());
+
+		// 2) Meet Q1 (Struct:300;Water:200;Oxygen:50) -> AwaitingManifest,
+		// on-time award 10000 (no rivals: requisition x1, no funding pending).
+		Sim->AddStock(FName("Struct"), 300.0);
+		Sim->AddStock(FName("Water"), 200.0);
+		Sim->AddStock(FName("Oxygen"), 50.0);
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER Q1 met: phase=%d award=%.0f (expect 1=AwaitingManifest, 10000)"),
+			(int32)Sim->GetQuotaPhase(), Sim->GetAwardMassKg());
+
+		// 3) Launch (empty manifest is a legal choice) -> ship lands ~3 sols
+		// -> Q1 Completed -> THE LADDER ADVANCES: Q2 opens at the landing sol.
+		FString Err;
+		Sim->LaunchShip(Err);
+		RunSols(3.3);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER advance: active=%s phase=%d openedSol=%d (expect Q2, 0=Open, 3)"),
+			*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaOpenedSol());
+
+		// 4) Research pays: bank 500 kg, meet Q2 (Struct:600;Oxygen:150;
+		// Hydrogen:40) inside its RELATIVE deadline -> award 12000 + 500.
+		Sim->Debug_AddResearchFunding(500.0);
+		Sim->AddStock(FName("Struct"), 600.0);
+		Sim->AddStock(FName("Oxygen"), 150.0);
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER Q2 met: award=%.0f pending=%.0f (expect 12500, 0)"),
+			Sim->GetAwardMassKg(), Sim->GetPendingResearchFundingKg());
+
+		// 5) Save v25 round-trip mid-ladder: active quota + phase + award survive.
+		const FName ActiveB = Sim->GetActiveQuotaName();
+		const double AwardB = Sim->GetAwardMassKg();
+		Sim->SaveColony(TEXT("laddertest"), Err);
+		Sim->LoadColony(TEXT("laddertest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER save/load v25: active %s->%s award %.0f->%.0f phase=%d (expect identical, 1)"),
+			*ActiveB.ToString(), *Sim->GetActiveQuotaName().ToString(), AwardB, Sim->GetAwardMassKg(), (int32)Sim->GetQuotaPhase());
+
+		// 6) The weather-cycle fold (pure function probes; knob off = passthrough).
+		const double FoldOff = Sim->FoldEventSol(33.0);
+		Sim->Debug_SetWeatherCycleSols(20.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER weather fold: off=%.1f in-window=%.1f folded=%.1f onset=%.1f (expect 33.0, 10.0, 13.0, 12.0)"),
+			FoldOff, Sim->FoldEventSol(10.0), Sim->FoldEventSol(33.0), Sim->FoldEventSol(52.0));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GOAL LADDER TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// v25 self-test: ENDING RESOLUTION - the declared path's epilogue after a
+	// sustained hold (wavering resets the clock), and the one-time Collapse
+	// declaration when a colony that had people empties. `-ending`.
+	if (FParse::Param(*Params, TEXT("ending")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FRHRivalRow Z;
+		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
+		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
+		Z.RelationStart = 40.f; Z.SliceActive = true;
+		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+
+		// A housed colony (the endings need bEverHadCrew + a live Earth layer).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 4000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+
+		// 1) Martian + Evolved -> Independent Mars Federation declares.
+		Sim->Debug_SetEpilogueSustainSols(2.0);
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftIdentity(+10); }
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING declared: %d name=%s (expect 1, Independent Mars Federation)"),
+			(int32)Sim->IsEndingDeclared(), Sim->GetEndingName(Sim->GetDeclaredEnding()));
+
+		// 2) WAVER: 1 sol in, swing HumanNature Destructive - the projection
+		// leaves the declared path, the epilogue clock resets to zero.
+		RunSols(1.0);
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(-10); }
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING waver: sustain=%.2f epilogue=%d (expect 0.00, 0)"),
+			Sim->GetPathSustainSols(), (int32)Sim->IsEpilogueDeclared());
+
+		// 3) Re-earn the path: hold Federation 2 sols -> EPILOGUE fires once.
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+		RunSols(2.3);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING epilogue: %d sustain=%.2f (expect 1, >=2.0)"),
+			(int32)Sim->IsEpilogueDeclared(), Sim->GetPathSustainSols());
+
+		// 4) Save v25 round-trip: declared + epilogue survive.
+		FString Err;
+		Sim->SaveColony(TEXT("endingtest"), Err);
+		Sim->LoadColony(TEXT("endingtest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING save/load v25: declared=%s epilogue=%d (expect Independent Mars Federation, 1)"),
+			Sim->GetEndingName(Sim->GetDeclaredEnding()), (int32)Sim->IsEpilogueDeclared());
+
+		// 5) COLLAPSE: strip the stores; the crew go unsupported, evacuate at
+		// the countdown, and the emptied colony declares Collapse ONCE -
+		// abstract, with the recovery path named (Gate-D placeholder wording).
+		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
+		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
+		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
+		RunSols(3.5); // evac countdown (2 sols unsupported) + margin
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING collapse: pop=%d declared=%d projected=%s (expect 0, 1, Collapse)"),
+			Sim->GetPopulation(), (int32)Sim->IsCollapseDeclared(),
+			Sim->GetEndingName(Sim->GetProjectedEnding()));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
+	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
+	// FUNDING, the Infirmary evac grace, and unlock persistence across a
+	// save/load. `-tiers`.
+	if (FParse::Param(*Params, TEXT("tiers")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				// 6 drinkers decay potability fast - feed enough fresh melt to
+				// hold it above the floor, or the water Hope penalty pins the
+				// smoothed mood just under the 85 discovery gate.
+				Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// The tier ladder's new stations (in-memory rows until the DT sync).
+		FRHRoomRow W2; W2.DisplayName = TEXT("Large Workbench"); W2.Function = FName("Workstation");
+		W2.Tier = 2; W2.SeatCount = 2; W2.YieldMul = 1.35f; W2.MoraleWeight = 1.0f; W2.SliceActive = true;
+		DefsSub->Debug_InjectRoom(FName("WorkbenchLarge"), W2);
+		FRHRoomRow L2; L2.DisplayName = TEXT("Large Chem Table"); L2.Function = FName("Lab");
+		L2.Tier = 2; L2.SeatCount = 1; L2.YieldMul = 1.35f; L2.MoraleWeight = 1.0f; L2.SliceActive = true;
+		DefsSub->Debug_InjectRoom(FName("ChemTableLarge"), L2);
+		FRHRoomRow W3; W3.DisplayName = TEXT("Workshop"); W3.Function = FName("Workstation");
+		W3.Tier = 3; W3.SeatCount = 3; W3.YieldMul = 1.8f; W3.MoraleWeight = 1.5f; W3.SliceActive = false; // DORMANT until unlocked
+		DefsSub->Debug_InjectRoom(FName("Workshop"), W3);
+		FRHRoomRow INF; INF.DisplayName = TEXT("Infirmary"); INF.Function = FName("Infirmary");
+		INF.MoraleWeight = 0.5f; INF.SliceActive = true;
+		DefsSub->Debug_InjectRoom(FName("Infirmary"), INF);
+		// The unlocking discovery, first in the sequence (Order 0 outranks the
+		// authored rows), cheap enough to pop fast once the mood crosses 85.
+		FRHDiscoveryRow DUnlock; DUnlock.DisplayName = TEXT("Regolith Ceramics II");
+		DUnlock.Order = 0; DUnlock.LabSeatHours = 50.f; DUnlock.HopeBonus = 2.f;
+		DUnlock.FundingKg = 500.f; DUnlock.UnlockRoom = FName("Workshop");
+		DUnlock.Alert = TEXT("BREAKTHROUGH — ceramics strong enough for machine housings.");
+		DUnlock.SliceActive = true;
+		DefsSub->Debug_InjectDiscovery(FName("TestCeramics"), DUnlock);
+
+		// A flourishing colony (the -discovery recipe, plus the tier benches).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 10, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		RunSols(2.5);
+		const int32 Housed = Sim->Debug_AddColonists(6);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("Workstation"), R);     // T1: 1 seat, x1.0
+		Sim->DesignateRoom(-1, 2, FName("WorkbenchLarge"), R);  // T2: 2 seats, x1.35
+		Sim->DesignateRoom(-1, 3, FName("Lab"), R);             // T1: 1 seat, x1.0
+		Sim->DesignateRoom(-1, 4, FName("ChemTableLarge"), R);  // T2: 1 seat, x1.35
+		Sim->DesignateRoom(-1, 5, FName("Dining"), R);
+		// Six colonists drain a comforts crate quickly - stock several so the
+		// comforts fraction holds at 1.0 through the whole march.
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		RunSols(0.2);
+
+		// 1) Seat math: 5 job seats (1+2+1+1), yield sums weigh the tiers.
+		const double EvacBase = Sim->GetEffectiveEvacSols();
+		Sim->Debug_SetWorkstationFabBonus(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS seats: housed=%d filled=%d labSum=%.2f wsSum=%.2f fabMul=%.3f (expect 6, 5, 2.35, 3.70, 1.370)"),
+			Housed, Sim->GetColonyHope().FilledSeats, Sim->GetLabYieldSeatSum(),
+			Sim->GetWorkstationYieldSeatSum(), Sim->GetWorkstationFabMul());
+
+		// 2) The dormant Workshop refuses designation (locked by research).
+		FString RefuseMsg;
+		const bool bRefused = !Sim->DesignateRoom(-1, 6, FName("Workshop"), RefuseMsg);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS locked: workshopRefused=%d (expect 1: '%s')"),
+			(int32)bRefused, *RefuseMsg);
+
+		// 3) March to the breakthrough: the smoothed mood clears 85 once the
+		// water and comforts hold; 2.35 yield-seats x 48 seat-h/sol clears 50
+		// seat-hours fast. Funding banks; the Workshop unlocks and ACCEPTS.
+		RunSols(12.0);
+		FString AcceptMsg;
+		const bool bAccepted = Sim->DesignateRoom(-1, 6, FName("Workshop"), AcceptMsg);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS unlock: found=%d pending=%.0f workshopAccepted=%d smoothed=%.1f accruing=%d progress=%.2f next=%s (expect >=1, 500, 1)"),
+			Sim->GetDiscoveryLog().Num(), Sim->GetPendingResearchFundingKg(), (int32)bAccepted,
+			Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress(),
+			*Sim->GetNextDiscovery().ToString());
+
+		// 4) Infirmary: designating one stretches the evac countdown by the
+		// configured grace (prevention framing - more time to fix the fault).
+		Sim->DesignateRoom(-1, 7, FName("Infirmary"), R);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS infirmary: evac %.1f -> %.1f sols (expect 2.0 -> 3.0)"),
+			EvacBase, Sim->GetEffectiveEvacSols());
+
+		// 5) Save v25 round-trip: the unlock re-applies from the discovery log
+		// (row flips are in-memory), seat sums re-derive, the grace holds.
+		FString Err;
+		Sim->SaveColony(TEXT("tierstest"), Err);
+		Sim->LoadColony(TEXT("tierstest"), Err);
+		const FRHRoomRow* WShop = DefsSub->GetRoom(FName("Workshop"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS save/load v25: workshopActive=%d labSum=%.2f evac=%.1f (expect 1, 2.35, 3.0)"),
+			(int32)(WShop && WShop->SliceActive), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// Alive-pass self-test: SKILLS (mastery ramps output 1x->2x), CREW MOMENTS
 	// (deterministic cadence; disputes gated on needs/Hope), the FIRST MARTIAN
 	// HARVEST milestone, the diverse-name roster. Save v24. `-alive`.

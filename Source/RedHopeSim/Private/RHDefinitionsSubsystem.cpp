@@ -53,6 +53,42 @@ const FRHManifestItemRow* URHDefinitionsSubsystem::GetManifestItem(FName Name) c
 	return ManifestTable ? ManifestTable->FindRow<FRHManifestItemRow>(Name, TEXT("GetManifestItem"), false) : nullptr;
 }
 
+void URHDefinitionsSubsystem::ForEachQuota(TFunctionRef<void(FName, const FRHQuotaRow&)> Fn) const
+{
+	if (!QuotasTable)
+	{
+		return;
+	}
+	for (const auto& Pair : QuotasTable->GetRowMap())
+	{
+		const FRHQuotaRow* Row = reinterpret_cast<const FRHQuotaRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
+bool URHDefinitionsSubsystem::ActivateRoomRow(FName Name)
+{
+	if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(GetRoom(Name)))
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
+}
+
+bool URHDefinitionsSubsystem::Debug_ActivateQuota(FName Name)
+{
+	if (FRHQuotaRow* Row = QuotasTable ? QuotasTable->FindRow<FRHQuotaRow>(Name, TEXT("Debug_ActivateQuota"), false) : nullptr)
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
+}
+
 const FRHRoomRow* URHDefinitionsSubsystem::GetRoom(FName Name) const
 {
 	return RoomsTable ? RoomsTable->FindRow<FRHRoomRow>(Name, TEXT("GetRoom"), false) : nullptr;

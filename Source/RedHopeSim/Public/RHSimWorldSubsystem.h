@@ -445,9 +445,42 @@ public:
 	// a collapse check); Undetermined while the colony is still contested.
 	ERHEnding GetProjectedEnding() const;
 	const TCHAR* GetEndingName(ERHEnding Ending) const;
+	// --- Ending resolution (save v25): the game structure closes its loop.
+	// Once a path is DECLARED (bEndingDeclared), holding the same projected
+	// ending for EpilogueSustainSols fires the one-time EPILOGUE card - the
+	// story of this Mars is written; the sandbox keeps running. Collapse
+	// (had crew, lost it all) declares its own one-time card in
+	// StepPopulation - abstract and prevention-framed with the recovery path
+	// named (Gate-D wording review owns the final copy).
+	ERHEnding GetDeclaredEnding() const { return (ERHEnding)DeclaredEnding; }
+	bool IsEndingDeclared() const { return bEndingDeclared; }
+	bool IsEpilogueDeclared() const { return bEpilogueDeclared; }
+	bool IsCollapseDeclared() const { return bCollapseDeclared; }
+	double GetPathSustainSols() const { return PathSustainSols; }
 	// Harness/cheat: force the crisis selector to fire now (natural cadence is in
 	// StepCrisis). Returns the crisis that fired.
 	ERHCrisis Debug_TriggerCrisis() { TriggerCrisis(); return ActiveCrisis; }
+	// Harness knobs (v25 suites): shrink the epilogue hold, bank funding
+	// directly, spin the weather cycle, arm the workstation fab bonus.
+	void Debug_SetEpilogueSustainSols(double Sols) { EpilogueSustainSols = Sols; }
+	void Debug_AddResearchFunding(double Kg) { PendingResearchFundingKg += Kg; }
+	void Debug_SetWeatherCycleSols(double Sols) { WeatherCycleSols = Sols; }
+	void Debug_SetWorkstationFabBonus(double PerSeat) { WorkstationFabBonusPerSeat = PerSeat; }
+
+	// --- Station tiers (tiered-production spec, Gate A) ---
+	// Sum of YieldMul over FILLED seats per family (derived with ColonistJobs,
+	// never saved). Plain T1 content: equals the filled-seat count exactly.
+	double GetLabYieldSeatSum() const { return LabYieldSeatSum; }
+	double GetWorkstationYieldSeatSum() const { return WorkstationYieldSeatSum; }
+	// Construction-speed multiplier from staffed workstation-line seats
+	// (1.0 + PerSeatBonus x yield-seat-sum). Rides the same integrator slot as
+	// FabricatorSpeedMul; zero pop or zero bonus = exactly 1.0 (baselines safe).
+	double GetWorkstationFabMul() const { return 1.0 + WorkstationFabBonusPerSeat * WorkstationYieldSeatSum; }
+	// Infirmary (passive, prevention-framed): any slice-active Infirmary-
+	// function cell on a RATED floor stretches the evacuation countdown -
+	// more time to fix the missing leg, never a penalty.
+	bool HasInfirmaryOnline() const;
+	double GetEffectiveEvacSols() const { return ColonistEvacSols + (HasInfirmaryOnline() ? InfirmaryEvacBonusSols : 0.0); }
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -574,6 +607,10 @@ public:
 	// come from DT_Events; overlapping rows resolve first-found (author
 	// schedules should not overlap - flagged at load if they do).
 	const struct FRHEventRow* GetActiveEvent() const;
+	// Long-game weather (v25): fold a sol back into the authored event window
+	// when the WeatherCycleSols knob is on (0 = off, sol passes through).
+	double FoldEventSol(double SolNow) const;
+	double EventCycleSpan() const;
 	// Solar multiplier right now: the active dust storm's Severity, else the
 	// clear-sky DustFactor config row (1.0).
 	double GetDustFactorNow() const;
@@ -593,6 +630,15 @@ public:
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
 	double GetAwardMassKg() const { return AwardMassKg; }
+	// The goal ladder (save v25): which CEO quota is live now, and the sol it
+	// opened (deadlines are relative to opening). When a quota's ship lands,
+	// the next slice-active row - ascending (DeadlineSol, name) - opens, so
+	// the program's demands keep coming for as long as the data ladder runs.
+	FName GetActiveQuotaName() const { return ActiveQuota; }
+	int32 GetQuotaOpenedSol() const { return QuotaOpenedSol; }
+	// Manifest budget banked by completed discoveries (FundingKg), paid out on
+	// top of the next quota award - research funds the program.
+	double GetPendingResearchFundingKg() const { return PendingResearchFundingKg; }
 	double GetManifestMassKg() const;
 	const TArray<FName>& GetManifestItems() const { return ManifestItems; }
 	double GetShipEtaSimSeconds() const { return ShipArrivalSimSeconds; }
@@ -1053,6 +1099,29 @@ private:
 	TArray<FName> ManifestItems;
 	double ShipArrivalSimSeconds = 0.0;
 	int32 QuotaMetSol = 0;
+	// The goal ladder (save v25). ActiveQuota derives to the first
+	// slice-active row when none is set (fresh colony or legacy path).
+	FName ActiveQuota;
+	int32 QuotaOpenedSol = 0;
+	double PendingResearchFundingKg = 0.0;
+	FName FirstQuotaName() const;
+	void AdvanceQuotaLadder();
+	// Ending resolution (save v25).
+	uint8 DeclaredEnding = 0;      // ERHEnding recorded at PATH IS SET
+	double PathSustainSols = 0.0;  // sols the projected ending has held since
+	bool bEpilogueDeclared = false;
+	bool bCollapseDeclared = false;
+	double EpilogueSustainSols = 15.0;        // config EpilogueSustainSols
+	// Long-game weather (config WeatherCycleSols, 0 = off): past the authored
+	// schedule, events repeat on this period - deterministic, data-driven.
+	double WeatherCycleSols = 0.0;
+	// Station tiers (Gate A). Derived with ColonistJobs (never saved): the sum
+	// of YieldMul over FILLED seats per family. All-default content makes
+	// these equal the plain seat counts.
+	double LabYieldSeatSum = 0.0;
+	double WorkstationYieldSeatSum = 0.0;
+	double WorkstationFabBonusPerSeat = 0.0;  // config, 0 until the director arms it
+	double InfirmaryEvacBonusSols = 1.0;      // config InfirmaryEvacBonusSols
 
 	UPROPERTY() TObjectPtr<URHDefinitionsSubsystem> Defs;
 	UPROPERTY() TObjectPtr<URHSimClockSubsystem> Clock;

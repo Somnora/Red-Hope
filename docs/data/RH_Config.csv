@@ -145,3 +145,7 @@ CrewMomentIntervalSols,0.5,sols,"Alive pass: cadence of crew-life moments (pasti
 DisputeHopeBelow,45,points,"Alive pass: HopeSmoothed below which crew friction (abstracted disputes - raised voices, never violence) can surface; needs-unmet also triggers. Wording placeholder per Gate-D review"
 FirstHarvestKg,1.0,kg,"Alive pass: cumulative garden-grown Food that marks THE FIRST MARTIAN HARVEST milestone (crew celebration + permanent Hope)"
 HopeFirstHarvestMilestone,4,points,"Alive pass: permanent Hope milestone for the first Martian-grown harvest - food from OUR soil"
+EpilogueSustainSols,15,sols,"v25 ending resolution: sols the declared path must HOLD (projected ending == declared) before the one-time EPILOGUE card; wavering resets the clock. Balance placeholder"
+WeatherCycleSols,0,sols,"v25 long-game weather: 0 = off (authored schedule only). >0 repeats the authored event pattern on this period once the schedule ends (never shorter than the authored span). Director flips when the long game wants recurring skies"
+InfirmaryEvacBonusSols,1.0,sols,"v25 tiers Gate A: extra evacuation-countdown grace while an Infirmary cell is online on a rated floor (prevention framing - more time to fix the fault)"
+WorkstationFabBonusPerSeat,0,fraction,"v25 tiers Gate A: construction-speed bonus per filled workstation-line yield-seat (1.0 + bonus x yield-seat-sum multiplies build speed). 0 = OFF until the director arms it - all pre-tier pins hold at 0"
