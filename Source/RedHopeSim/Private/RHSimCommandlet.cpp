@@ -1682,6 +1682,201 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// Greenhouse-agriculture self-test (2026-07-10 spec, Gates A/B/D): crops
+	// with real grow time replace the flat garden when their rows go live -
+	// growth stages, per-crop water/yield, soil depletion + fertilizer refill,
+	// per-floor climate (regulator-gated), duct CO2/O2 exchange, save v26.
+	// `-agri`.
+	if (FParse::Param(*Params, TEXT("agri")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== AGRICULTURE TEST (greenhouse spec Gates A/B/D) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(100.0 * StepSols);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// 1) Pure-data: the seven authored crops ride the synced DT_Crops,
+		// ALL DORMANT (activation is the director's per-gate flip). Assert the
+		// arithmetic-bearing columns of the three this test marches on.
+		{
+			int32 Rows = 0, Active = 0;
+			DefsSub->ForEachCropRow([&](FName, const FRHCropRow& Row){ ++Rows; Active += Row.SliceActive ? 1 : 0; });
+			if (Rows != 7 || Active != 0)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: expected 7 dormant crop rows, found %d rows / %d active - DT/CSV drift"), Rows, Active);
+				return 1;
+			}
+			const auto CheckCrop = [&](const TCHAR* Name, float Grow, float Yield, float Water, FName Band) -> bool
+			{
+				const FRHCropRow* Row = DefsSub->GetCrop(FName(Name));
+				if (!Row || Row->GrowSols != Grow || Row->YieldKgPerSol != Yield
+					|| Row->WaterKgPerSol != Water || Row->ClimateBand != Band)
+				{
+					UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: crop %s missing/drifted - DT/CSV drift"), Name);
+					return false;
+				}
+				return true;
+			};
+			if (!CheckCrop(TEXT("Carrot"), 2.f, 3.f, 3.f, FName("Temperate"))) { return 1; }
+			if (!CheckCrop(TEXT("Corn"), 4.f, 2.f, 4.f, FName("Temperate"))) { return 1; }
+			if (!CheckCrop(TEXT("Beans"), 3.f, 2.f, 3.f, FName("Humid"))) { return 1; }
+		}
+
+		// 2) Flip the whole catalogue live (the director's gate flip).
+		{
+			TArray<FName> Names;
+			DefsSub->ForEachCropRow([&Names](FName Name, const FRHCropRow&){ Names.Add(Name); });
+			for (const FName& Name : Names) { DefsSub->ActivateCropRow(Name); }
+			if (!Sim->AreCropsLive()) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: crops did not activate")); return 1; }
+		}
+
+		// 3) A certified 6-cell vault with power and stores for exactly two
+		// beds (soil 500 = 2 x 250; no replant stock after a bed reverts).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 2000.0);
+		Sim->AddStock(FName("Soil"), 500.0);
+		Sim->AddStock(FName("Seeds"), 100.0);
+		RunSols(2.5); // floor certifies
+
+		// 4) Two garden cells plant the rotation deterministically: the
+		// Temperate-matched actives sorted by name are Carrot, Corn, Potato -
+		// cell 0 takes Carrot (GrowSols 2), cell 1 takes Corn (GrowSols 4).
+		Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		Sim->DesignateRoom(-1, 1, FName("Garden"), R);
+		RunSols(0.1); // the plant step
+		const FName Crop0 = Sim->GetCellCrop(-1, 0), Crop1 = Sim->GetCellCrop(-1, 1);
+		if (Crop0 != FName("Carrot") || Crop1 != FName("Corn"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: rotation planted %s/%s (expected Carrot/Corn)"), *Crop0.ToString(), *Crop1.ToString());
+			return 1;
+		}
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI planted: cell0=%s cell1=%s stages=%d/%d (expect Carrot, Corn, 0, 0)"),
+			*Crop0.ToString(), *Crop1.ToString(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 5) Growth is real time: one sol in, nothing has yielded. (Instant
+		// stage reads run one 0.05-sol era step behind the yield ledger -
+		// the bed plants at the END of the first step - so Carrot reads
+		// sprout here and flips young next step; the cums are exact.)
+		RunSols(0.9);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI immature: cum=%.2f kg stages=%d/%d (expect 0.00, 0, 0 - Carrot one step shy of young)"),
+			Sim->GetGardenFoodCumKg(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 6) Carrot matures at age 2.0 and yields 3 kg/sol for the last half
+		// of this march; Corn is still growing. Zero pop = tempo and skill
+		// exactly 1.0, so the arithmetic is exact.
+		RunSols(1.5); // age 2.5
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI first yield: cum=%.2f kg (expect 1.50 = 0.5 sol x 3)"), Sim->GetGardenFoodCumKg());
+
+		// 7) By age 4.0 the Carrot has yielded 2.0 total mature sols; Corn
+		// arrives at maturity exactly now (nothing banked yet).
+		RunSols(1.5); // age 4.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI second: cum=%.2f kg stages=%d/%d (expect 6.00, 2, 1 - Corn one step shy of mature read)"),
+			Sim->GetGardenFoodCumKg(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 8) Both mature: 3 + 2 = 5 kg/sol.
+		RunSols(1.0); // age 5.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI both mature: cum=%.2f kg (expect 11.00)"), Sim->GetGardenFoodCumKg());
+
+		// 9) Climate (Gate B): a Humid setting is INERT until a regulator is
+		// online; with one placed, both Temperate crops fall to x0.6.
+		FString ClimErr;
+		if (!Sim->SetFloorClimate(-1, FName("Humid"), ClimErr)) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: %s"), *ClimErr); return 1; }
+		if (Sim->GetFloorClimateEffective(-1) != FName("Temperate"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: climate took effect without a regulator"));
+			return 1;
+		}
+		Sim->Debug_PlaceInstant(FName("HumidityRegulator"), FVector(1500.f, 1000.f, 0.f), -1);
+		if (Sim->GetFloorClimateEffective(-1) != FName("Humid"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: regulator online but climate still inert"));
+			return 1;
+		}
+		RunSols(1.0); // age 6.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI climate: cum=%.2f kg (expect 14.00 = +5 x 0.6)"), Sim->GetGardenFoodCumKg());
+
+		// 10) The crew feeds the loop (Gates B/D): compost and CO2 accrue per
+		// colonist-sol. (Yield goes tempo/skill-coloured from here - the exact
+		// asserts stay on the crew-independent pools.)
+		Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 3, FName("Dining"), R);
+		const int32 Housed = Sim->Debug_AddColonists(2);
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI crew pools: housed=%d compost=%.2f kg co2=%.2f kg (expect 2, 2.00, 2.00)"),
+			Housed, Sim->GetStock(FName("Compost")), Sim->GetColonyCO2Kg());
+
+		// 11) Ducts (Gate D): the garden floor breathes with the colony. Two
+		// producing cells draw 0.5 kg CO2/sol each; the crew adds 2/sol; the
+		// pool holds, so the bonus and the O2 emission run the whole sol.
+		FString DuctErr;
+		if (!Sim->DesignateDuct(-1, DuctErr)) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: %s"), *DuctErr); return 1; }
+		const double O2Before = Sim->GetStock(FName("Oxygen"));
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI duct: co2=%.2f kg o2Delta=%+.2f kg cum=%.2f (expect 3.00 = 2+2-1; o2 includes crew draw + 0.40 emitted)"),
+			Sim->GetColonyCO2Kg(), Sim->GetStock(FName("Oxygen")) - O2Before, Sim->GetGardenFoodCumKg());
+
+		// 12) Dig-spoil chemicals (Gate B): fresh excavation with the crop
+		// layer live banks a fertilizer-chain fraction.
+		Sim->ExtendShaft(2, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-2, 4, R);
+		const double Chems = Sim->GetStock(FName("SpoilChemicals"));
+		if (Chems <= 0.0) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: dig produced no SpoilChemicals")); return 1; }
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI spoil chems: %.2f kg banked (expect > 0: excavation x fraction)"), Chems);
+
+		// 13) Soil spends and fertilizer refills (Gate B): at 250 kg/sol both
+		// beds hit zero this sol; 125 kg Fertilizer restores exactly ONE in
+		// place, the other reverts (and cannot replant - soil stock is spent).
+		Sim->AddStock(FName("Soil"), -Sim->GetStock(FName("Soil")));
+		Sim->AddStock(FName("Fertilizer"), 125.0);
+		Sim->Debug_SetCropSoilDepleteKgPerSol(250.0);
+		RunSols(1.0);
+		Sim->Debug_SetCropSoilDepleteKgPerSol(25.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI soil economy: planted=%d fert=%.2f kg (expect 1, 0.00 - one bed refilled, one reverted)"),
+			Sim->GetPlantedCellCount(), Sim->GetStock(FName("Fertilizer")));
+		if (Sim->GetPlantedCellCount() != 1)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: expected exactly one surviving bed"));
+			return 1;
+		}
+
+		// 14) Save v26 round-trip: crop cells, climate, duct, CO2 pool.
+		FString Err;
+		const FName CropBefore = Sim->GetCellCrop(-1, 0).IsNone() ? Sim->GetCellCrop(-1, 1) : Sim->GetCellCrop(-1, 0);
+		const double CO2Before = Sim->GetColonyCO2Kg();
+		Sim->SaveColony(TEXT("agritest"), Err);
+		Sim->LoadColony(TEXT("agritest"), Err);
+		const FName CropAfter = Sim->GetCellCrop(-1, 0).IsNone() ? Sim->GetCellCrop(-1, 1) : Sim->GetCellCrop(-1, 0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI save/load v26: crop %s->%s co2 %.2f->%.2f climate=%s ducted=%d (expect identical, Humid, 1)"),
+			*CropBefore.ToString(), *CropAfter.ToString(), CO2Before, Sim->GetColonyCO2Kg(),
+			*Sim->GetFloorClimateSetting(-1).ToString(), (int32)Sim->IsFloorDucted(-1));
+		if (CropBefore != CropAfter || !Sim->IsFloorDucted(-1))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: save/load round-trip drifted"));
+			return 1;
+		}
+		RunSols(0.5); // the loaded colony marches on without incident
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== AGRICULTURE TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
 	// Alive-pass self-test: SKILLS (mastery ramps output 1x->2x), CREW MOMENTS
 	// (deterministic cadence; disputes gated on needs/Hope), the FIRST MARTIAN
 	// HARVEST milestone, the diverse-name roster. Save v24. `-alive`.

@@ -174,11 +174,19 @@ These are **finishing, not structure** — the whole arc is built.
 4. **Balance.** Every M2–M4 and v25 number is legible-math-first (chosen so the
    tests read cleanly), explicitly awaiting tuning — not tuned play.
 
-5. **The two 2026-07-10 specs beyond Gate A**: greenhouse agriculture (crops/
-   growth-stages/fertilizer/climate/ducts) and the rest of tiered production
-   (prefab LabFull/Infirmary buildings, click-to-assign, lazy seat-fill) are
-   authored and partly art-batched; only tiered-production **Gate A** is built
-   (this session). The rest are the obvious next increments.
+5. **The two 2026-07-10 specs beyond Gate A** — updated 2026-07-16:
+   **greenhouse agriculture Gates A/B/D are BUILT** (save v26): DT_Crops with
+   7 dormant crops + growth stages + stage-art visualizer wiring (19 agri
+   models imported under /Game/RedHope/Art/Agri), soil depletion + the
+   compost/spoil-chems -> FertilizerMix loop, per-floor climate with the
+   HumidityRegulator gate, duct CO2/O2 exchange; `-agri` self-test exact,
+   baseline pins untouched (crops dormant = legacy garden bit-for-bit).
+   Still owed from the specs: agri **Gate C** (above-ground drag-footprint
+   greenhouse + parametric dome - a new placement interaction, deliberately
+   deferred to a presentation session) and the rest of tiered production
+   (prefab LabFull/Infirmary buildings, click-to-assign, lazy seat-fill).
+   Crop activation (`RH.ActivateCrop all` or flipping the CSV) is a
+   director gate flip.
 
 ---
 

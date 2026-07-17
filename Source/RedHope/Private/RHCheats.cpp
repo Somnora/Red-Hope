@@ -541,6 +541,72 @@ static FAutoConsoleCommandWithWorldAndArgs GRHActivateQuota(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateCrop(
+	TEXT("RH.ActivateCrop"),
+	TEXT("RH.ActivateCrop <RowName|all> - flip a dormant crop row live (the per-gate director flip; in-memory)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Defs) { return; }
+		if (Args[0].Equals(TEXT("all"), ESearchCase::IgnoreCase))
+		{
+			int32 Flipped = 0;
+			TArray<FName> Names;
+			Defs->ForEachCropRow([&Names](FName Name, const FRHCropRow&) { Names.Add(Name); });
+			for (const FName& Name : Names) { Flipped += Defs->ActivateCropRow(Name) ? 1 : 0; }
+			UE_LOG(LogRedHope, Display, TEXT("Crops live: %d rows slice-active (in-memory)"), Flipped);
+		}
+		else if (Defs->ActivateCropRow(FName(*Args[0])))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("Crop row '%s' slice-active (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateCrop: no crop row '%s'"), *Args[0]);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHClimate(
+	TEXT("RH.Climate"),
+	TEXT("RH.Climate <Level> <Temperate|Humid|Arid> - set a floor's greenhouse climate (needs a HumidityRegulator online for non-Temperate to take effect)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Climate <Level> <Temperate|Humid|Arid>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Err;
+			if (!Sim->SetFloorClimate(FCString::Atoi(*Args[0]), FName(*Args[1]), Err))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RH.Climate: %s"), *Err);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDuct(
+	TEXT("RH.Duct"),
+	TEXT("RH.Duct <Level> - duct a garden floor into the colony air loop (crops draw crew CO2, emit O2)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Duct <Level>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Err;
+			if (!Sim->DesignateDuct(FCString::Atoi(*Args[0]), Err))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RH.Duct: %s"), *Err);
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 	TEXT("RH.AddSolid"),
 	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),

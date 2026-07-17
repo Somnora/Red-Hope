@@ -17,3 +17,6 @@ Luxury,Luxury Goods,Solid,Stockpile,TRUE,"ACTIVE M2 Gate D (abstract): colonists
 Research,Research Points,Abstract,Ledger,FALSE,Dormant; acquisition model due M1
 Hope,Hope,Abstract,Ledger,FALSE,"Derived non-spendable index (approved); no slice inputs yet"
 Glass,Glass,Solid,Stockpile,TRUE,"M2 Gate D+ (garden fork): fabricated/imported panes for greenhouses; a Greenhouse cell consumes GreenhouseGlassKgPerCell at planting"
+Compost,Compost,Abstract,Pool,FALSE,"DORMANT agri Gate B: abstract colonist-recycling accumulator (prevention-framed wording - Gate-D review); accrues per colonist-sol while crops are live; fertilizer feedstock"
+SpoilChemicals,Spoil Chemicals,Abstract,Pool,FALSE,"DORMANT agri Gate B: chemical fraction extracted from fresh dig spoil while crops are live; fertilizer feedstock (spec §3 'chemicals from digs')"
+Fertilizer,Fertilizer,Solid,Stockpile,FALSE,"DORMANT agri Gate B: FertilizerMix output; auto-worked into spent garden beds (FertilizerSoilPerKg soil restored per kg)"

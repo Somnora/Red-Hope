@@ -900,6 +900,8 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			// Gemini design pass (2026-07-09): the life-support unit the
 			// director asked to re-imagine - compact HVAC body, big intake fan.
 			{ FName("AirFilter"),   FString(TEXT("/Game/RedHope/Art/Machines/RH_AirFilter2/StaticMeshes/RH_AirFilter2.RH_AirFilter2")) },
+			// Agri Gate B: the climate machinery (generated with the agri batch).
+			{ FName("HumidityRegulator"), FString(TEXT("/Game/RedHope/Art/Agri/humidity/humidity/StaticMeshes/humidity.humidity")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
@@ -1416,6 +1418,8 @@ FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
 	if (RoomRowName == FName("Hallway"))        { return FLinearColor(0.30f, 0.30f, 0.32f); } // slate
 	if (RoomRowName == FName("Garden"))         { return FLinearColor(0.14f, 0.26f, 0.09f); } // tilled, waiting
 	if (RoomRowName == FName("Garden#planted")) { return FLinearColor(0.10f, 0.42f, 0.12f); } // growing - the only green on Mars
+	// Crop-stage keys (Garden#<family>#<stage> / Greenhouse#...): same green.
+	if (RoomRowName.ToString().Contains(TEXT("#"))) { return FLinearColor(0.10f, 0.42f, 0.12f); }
 	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
 }
 
@@ -1443,6 +1447,22 @@ FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
 		{ FName("WaterWorks"),     TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
 		{ FName("Septic"),         TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
 	};
+	// Crop-stage cells (agri Gate A): the room key arrives as
+	// <Garden|Greenhouse>#<family>#<stage 0-2>; the stage art is one mesh per
+	// silhouette family per stage (crop_<family>_<1-3>, Interchange layout).
+	{
+		FString RoomStr = Room.ToString();
+		FString Base, Rest;
+		if (RoomStr.Split(TEXT("#"), &Base, &Rest) && Rest.Contains(TEXT("#")))
+		{
+			FString Family, StageStr;
+			Rest.Split(TEXT("#"), &Family, &StageStr);
+			const int32 Stage = FMath::Clamp(FCString::Atoi(*StageStr), 0, 2);
+			// Interchange lays these out as <name>/<name>/StaticMeshes/<name>.
+			const FString N = FString::Printf(TEXT("crop_%s_%d"), *Family, Stage + 1);
+			return FString::Printf(TEXT("/Game/RedHope/Art/Agri/%s/%s/StaticMeshes/%s.%s"), *N, *N, *N, *N);
+		}
+	}
 	const FString* P = Props.Find(Room);
 	return P ? *P : FString();
 }
@@ -1470,10 +1490,26 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			continue;
 		}
 		FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
-		// A planted garden reads as its own state - green means growing.
-		if (Room == FName("Garden") && Sim->IsGardenPlanted(Pair.Key.X, Pair.Key.Y))
+		// A planted garden reads as its own state - green means growing. With
+		// the crop layer live (agri Gate A) the cell reads as its CROP at its
+		// GROWTH STAGE: the family+stage fold into the diffed room key, so a
+		// stage change refreshes the prop exactly like a redesignation. Cells
+		// without a crop entry (crops dormant / legacy saves) keep the exact
+		// pre-agri planter visuals.
+		if ((Room == FName("Garden") || Room == FName("Greenhouse")) && Sim->IsGardenPlanted(Pair.Key.X, Pair.Key.Y))
 		{
-			Room = FName("Garden#planted");
+			const FName Crop = Sim->GetCellCrop(Pair.Key.X, Pair.Key.Y);
+			const int32 Stage = Sim->GetCellCropStage(Pair.Key.X, Pair.Key.Y);
+			const FRHCropRow* CropRow = Crop.IsNone() ? nullptr : Defs->GetCrop(Crop);
+			if (CropRow && Stage >= 0)
+			{
+				const FString Family = CropRow->VisualFamily.IsNone() ? TEXT("root") : CropRow->VisualFamily.ToString();
+				Room = FName(*FString::Printf(TEXT("%s#%s#%d"), *Room.ToString(), *Family, Stage));
+			}
+			else if (Room == FName("Garden"))
+			{
+				Room = FName("Garden#planted");
+			}
 		}
 		FName* Applied = AppliedRoomTint.Find(Pair.Key);
 		if (Applied && *Applied == Room)
@@ -1515,7 +1551,10 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		}
 		if (Label)
 		{
-			const FName BaseRoom = (Room == FName("Garden#planted")) ? FName("Garden") : Room;
+			FString BaseStr = Room.ToString();
+			int32 HashIdx;
+			if (BaseStr.FindChar(TEXT('#'), HashIdx)) { BaseStr.LeftInline(HashIdx); }
+			const FName BaseRoom(*BaseStr);
 			const FRHRoomRow* Row = Defs->GetRoom(BaseRoom);
 			Label->SetText(Room.IsNone() ? FText::GetEmpty() : FText::FromString(Row ? Row->DisplayName : BaseRoom.ToString()));
 			const FLinearColor T = RoomTint(Room);

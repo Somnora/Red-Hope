@@ -1,0 +1,8 @@
+Name,DisplayName,GrowSols,YieldKgPerSol,WaterKgPerSol,ClimateBand,FoodKind,VisualFamily,SliceActive,Notes
+Potato,Potato,3,2.0,3,Temperate,staple,root,FALSE,"DORMANT agri Gate A: the reliable staple; root-row silhouette family (crop_root stage art). All crop numbers legible-math placeholders pending director balance review"
+Carrot,Carrot,2,3.0,3,Temperate,staple,root,FALSE,"DORMANT agri Gate A: fastest cycle, the -agri suite's exact-arithmetic crop; root-row family"
+Corn,Corn,4,2.0,4,Temperate,staple,tall,FALSE,"DORMANT agri Gate A: slow but steady; tall-stalk silhouette family (crop_tall stage art)"
+Grain,Grain,5,1.5,2,Arid,staple,tall,FALSE,"DORMANT agri Gate A: the dry-climate specialist - an Arid greenhouse's reason to exist; tall-stalk family"
+Beans,Beans,3,2.0,3,Humid,protein,vine,FALSE,"DORMANT agri Gate A: the protein line; bush/vine silhouette family (crop_vine stage art)"
+Strawberry,Strawberry,4,1.0,4,Humid,fruit,vine,FALSE,"DORMANT agri Gate A: low yield, morale-flavored fruit (comforts hook later); vine family"
+Cotton,Cotton,6,1.0,2,Arid,fiber,vine,FALSE,"DORMANT agri Gate A: fiber feeds a later textiles loop (spec 2026-07-10 §2); not food - FoodKind gates what the larder counts"

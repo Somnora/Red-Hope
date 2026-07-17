@@ -53,6 +53,17 @@ struct REDHOPESIM_API FRHColonist
 	TMap<FName, double> SkillSols;
 };
 
+// A planted cell's crop state (greenhouse-agriculture Gate A, save v26).
+// Parallel to PlantedCells: a planted cell WITHOUT an entry here is a legacy
+// flat-yield cell (pre-crop saves, or crops dormant at plant time). Growth
+// stage is derived from PlantedSol - never stored (era-parity by construction).
+struct FRHPlantedCropState
+{
+	FName Crop;
+	double PlantedSol = 0.0;
+	double SoilKg = 0.0; // remaining bed soil; fertilizer refills, zero reverts the cell
+};
+
 // A placed structure as the sim knows it. Solids live here (approved hybrid
 // logistics): InputKg feeds recipes/construction, OutputKg awaits hauling.
 USTRUCT()
@@ -498,6 +509,37 @@ public:
 	// Garden power fork reads (deck): the grow-light load this step, and whether
 	// the bank went dark on it (a legibility cue - "your gardens lost power").
 	double GetGardenPowerDrawW() const { return GardenPowerDrawW; }
+
+	// --- Crops (greenhouse-agriculture spec 2026-07-10, Gates A/B/D) ---
+	// With ANY DT_Crops row slice-active, newly planted cells carry a named
+	// crop: real grow time (no yield until mature), per-crop water draw,
+	// climate preference, bed-soil depletion + fertilizer refill, and (ducted)
+	// CO2/O2 exchange with the crew. With every crop dormant, the garden
+	// reproduces the legacy flat-yield math exactly - baseline untouched.
+	bool AreCropsLive() const;
+	// Cumulative garden yield (pure production, unaffected by consumption -
+	// what the self-tests measure against).
+	double GetGardenFoodCumKg() const { return GardenFoodCumKg; }
+	// Test knob: soil-depletion rate (the -agri suite spends a bed in one sol
+	// instead of ten; same linear shape, just faster).
+	void Debug_SetCropSoilDepleteKgPerSol(double V) { CropSoilDepleteKgPerSol = V; }
+	FName GetCellCrop(int32 Level, int32 CellIndex) const;
+	// Presentation read: 0 sprout / 1 young / 2 mature; -1 legacy or unplanted.
+	int32 GetCellCropStage(int32 Level, int32 CellIndex) const;
+	double GetCellSoilKg(int32 Level, int32 CellIndex) const;
+	// Per-floor climate (Gate B): Temperate default. Humid/Arid only take
+	// EFFECT with a powered HumidityRegulator on the floor (else Temperate).
+	bool SetFloorClimate(int32 Level, FName Band, FString& OutError);
+	FName GetFloorClimateSetting(int32 Level) const;
+	FName GetFloorClimateEffective(int32 Level) const;
+	bool HasRegulatorOnline(int32 Level) const;
+	// Ducts (Gate D): a ducted garden floor breathes with the colony - crops
+	// draw the crew's exhaled CO2 (yield bonus while the pool holds) and emit
+	// O2 back into the colony supply, offsetting leakage.
+	bool DesignateDuct(int32 Level, FString& OutError);
+	bool RemoveDuct(int32 Level) { return DuctedFloors.Remove(Level) > 0; }
+	bool IsFloorDucted(int32 Level) const { return DuctedFloors.Contains(Level); }
+	double GetColonyCO2Kg() const { return ColonyCO2Kg; }
 	bool AreGrowLightsDark() const { return bGrowLightsDark; }
 	// Water loop reads (deck): pool potability 0..1 and its penalty threshold.
 	double GetWaterPotability() const { return WaterPotability; }
@@ -1038,6 +1080,26 @@ private:
 	// The garden (M2 Gate C; PlantedCells serialized, save v12). Keys are
 	// (Level, CellIndex, 0). ProducingCells is per-step derived, never saved.
 	TSet<FIntVector> PlantedCells;
+	// Crops (save v26): per-cell crop state, per-floor climate settings,
+	// ducted floors, the colony CO2 pool, and the deterministic rotation
+	// counter. A planted cell absent from PlantedCrops is a legacy cell.
+	TMap<FIntVector, FRHPlantedCropState> PlantedCrops;
+	TMap<int32, FName> FloorClimate; // absent = Temperate
+	TSet<int32> DuctedFloors;
+	double ColonyCO2Kg = 0.0;
+	int32 PlantRotation = 0;
+	bool bSoilSpentAnnounced = false; // runtime edge, never saved
+	// Crop economy scalars (Gate B/D; all linear or threshold-on-monotone -
+	// era-parity-safe by shape; numbers legible-math placeholders).
+	double CropSoilDepleteKgPerSol = 25.0;
+	double FertilizerSoilPerKg = 2.0;
+	double CompostKgPerColonistSol = 1.0;
+	double SpoilChemFraction = 0.02;
+	double ClimateMismatchYieldMul = 0.6;
+	double DuctYieldBonusMul = 1.1;
+	double GardenCO2DrawKgPerSolPerCell = 0.5;
+	double GardenO2EmitKgPerSolPerCell = 0.2;
+	double CO2KgPerColonistSol = 1.0;
 	int32 ProducingCells = 0;
 	bool bFirstCropAnnounced = false;   // serialized: the milestone fires once
 	bool bGardenThirstAnnounced = false; // runtime edge: water-starve alert

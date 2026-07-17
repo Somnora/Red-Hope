@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 25;  // v25: goal ladder + ending resolution + research funding; v24 alive pass; v23 crises+endings; v22 Earth pre-emptive
+	constexpr uint32 RHSaveVersion = 26;  // v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -115,6 +115,15 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenGrowLightWPerCell = Defs->GetConfigScalar(FName("GardenGrowLightWPerCell"), GardenGrowLightWPerCell);
 	GreenhouseGlassKgPerCell = Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), GreenhouseGlassKgPerCell);
 	GreenhouseMinLevel = (int32)Defs->GetConfigScalar(FName("GreenhouseMinLevel"), GreenhouseMinLevel);
+	CropSoilDepleteKgPerSol = Defs->GetConfigScalar(FName("CropSoilDepleteKgPerSol"), CropSoilDepleteKgPerSol);
+	FertilizerSoilPerKg = Defs->GetConfigScalar(FName("FertilizerSoilPerKg"), FertilizerSoilPerKg);
+	CompostKgPerColonistSol = Defs->GetConfigScalar(FName("CompostKgPerColonistSol"), CompostKgPerColonistSol);
+	SpoilChemFraction = Defs->GetConfigScalar(FName("SpoilChemFraction"), SpoilChemFraction);
+	ClimateMismatchYieldMul = Defs->GetConfigScalar(FName("ClimateMismatchYieldMul"), ClimateMismatchYieldMul);
+	DuctYieldBonusMul = Defs->GetConfigScalar(FName("DuctYieldBonusMul"), DuctYieldBonusMul);
+	GardenCO2DrawKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenCO2DrawKgPerSolPerCell"), GardenCO2DrawKgPerSolPerCell);
+	GardenO2EmitKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenO2EmitKgPerSolPerCell"), GardenO2EmitKgPerSolPerCell);
+	CO2KgPerColonistSol = Defs->GetConfigScalar(FName("CO2KgPerColonistSol"), CO2KgPerColonistSol);
 	ColonistWaterKgPerSol = Defs->GetConfigScalar(FName("ColonistWaterKgPerSol"), ColonistWaterKgPerSol);
 	GreywaterReturnFraction = Defs->GetConfigScalar(FName("GreywaterReturnFraction"), GreywaterReturnFraction);
 	WaterPotabilityDecayPerSol = Defs->GetConfigScalar(FName("WaterPotabilityDecayPerSol"), WaterPotabilityDecayPerSol);
@@ -1891,6 +1900,110 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 	return Housed;
 }
 
+bool URHSimWorldSubsystem::AreCropsLive() const
+{
+	bool bLive = false;
+	if (Defs)
+	{
+		Defs->ForEachCropRow([&bLive](FName, const FRHCropRow& Row) { bLive |= Row.SliceActive; });
+	}
+	return bLive;
+}
+
+FName URHSimWorldSubsystem::GetCellCrop(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	return S ? S->Crop : NAME_None;
+}
+
+int32 URHSimWorldSubsystem::GetCellCropStage(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	const FRHCropRow* Row = (S && Defs) ? Defs->GetCrop(S->Crop) : nullptr;
+	if (!Row || !Clock || Row->GrowSols <= 0.f)
+	{
+		return -1;
+	}
+	// Stage is DERIVED from planting sol (never stored): sprout below half
+	// grown, young to maturity, mature after. Presentation reads this; the
+	// sim itself only cares about the mature threshold.
+	const double Age = Clock->GetSimSecondsTotal() / (double)URHSimClockSubsystem::SolLengthSimSeconds - S->PlantedSol;
+	if (Age >= (double)Row->GrowSols) { return 2; }
+	return (Age >= 0.5 * (double)Row->GrowSols) ? 1 : 0;
+}
+
+double URHSimWorldSubsystem::GetCellSoilKg(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	return S ? S->SoilKg : 0.0;
+}
+
+bool URHSimWorldSubsystem::SetFloorClimate(int32 Level, FName Band, FString& OutError)
+{
+	static const FName NTemperate(TEXT("Temperate")), NHumid(TEXT("Humid")), NArid(TEXT("Arid"));
+	if (Band != NTemperate && Band != NHumid && Band != NArid)
+	{
+		OutError = TEXT("Climate must be Temperate, Humid, or Arid");
+		return false;
+	}
+	if (!FloorRoomCells.Contains(Level))
+	{
+		OutError = FString::Printf(TEXT("Floor %d has no designated rooms"), Level);
+		return false;
+	}
+	if (Band == NTemperate) { FloorClimate.Remove(Level); }
+	else { FloorClimate.Add(Level, Band); }
+	UE_LOG(LogRedHopeSim, Display, TEXT("Climate: floor %d set to %s%s"), Level, *Band.ToString(),
+		(Band != NTemperate && !HasRegulatorOnline(Level)) ? TEXT(" (INERT until a HumidityRegulator is online on the floor)") : TEXT(""));
+	return true;
+}
+
+FName URHSimWorldSubsystem::GetFloorClimateSetting(int32 Level) const
+{
+	static const FName NTemperate(TEXT("Temperate"));
+	const FName* Found = FloorClimate.Find(Level);
+	return Found ? *Found : NTemperate;
+}
+
+FName URHSimWorldSubsystem::GetFloorClimateEffective(int32 Level) const
+{
+	static const FName NTemperate(TEXT("Temperate"));
+	const FName Setting = GetFloorClimateSetting(Level);
+	// A non-default climate needs machinery to hold it: no powered regulator
+	// on the floor means the room drifts back to Temperate (never a penalty,
+	// the setting just waits for its hardware).
+	return (Setting != NTemperate && !HasRegulatorOnline(Level)) ? NTemperate : Setting;
+}
+
+bool URHSimWorldSubsystem::HasRegulatorOnline(int32 Level) const
+{
+	static const FName NRegulator(TEXT("HumidityRegulator"));
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.DefName == NRegulator && B.Level == Level && !B.bUnderConstruction && B.bPowered)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::DesignateDuct(int32 Level, FString& OutError)
+{
+	if (!FloorRoomCells.Contains(Level))
+	{
+		OutError = FString::Printf(TEXT("Floor %d has no designated rooms to duct"), Level);
+		return false;
+	}
+	bool bAlready = false;
+	DuctedFloors.Add(Level, &bAlready);
+	if (!bAlready)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Duct: floor %d now breathes with the colony (CO2 in, O2 out)"), Level);
+	}
+	return true;
+}
+
 void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 {
 	// Zero-garden colonies: FloorRoomCells is empty pre-M2 (and PlantedCells
@@ -1901,6 +2014,14 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	}
 	static const FName NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NWater(TEXT("Water")), NFood(TEXT("Food")), NGlass(TEXT("Glass"));
 	static const FName NGarden(TEXT("Garden")), NGreenhouse(TEXT("Greenhouse"));
+	static const FName NCompost(TEXT("Compost")), NFertilizer(TEXT("Fertilizer")), NOxygen(TEXT("Oxygen"));
+
+	// Crop context (greenhouse-agriculture Gates A/B/D), resolved once per
+	// step: zero active crop rows = the legacy flat-yield garden, bit-for-bit.
+	TArray<TPair<FName, const FRHCropRow*>> ActiveCrops;
+	if (Defs) { Defs->GetActiveCropsSorted(ActiveCrops); }
+	const bool bCropsLive = ActiveCrops.Num() > 0;
+	const double NowSols = Clock ? Clock->GetSimSecondsTotal() / (double)URHSimClockSubsystem::SolLengthSimSeconds : 0.0;
 
 	// Plant: any Garden- OR Greenhouse-zoned cell on a rated floor, when the
 	// colony holds the materials. A Greenhouse also needs fabricated/imported
@@ -1929,10 +2050,35 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			AddStock(NSeeds, -GardenSeedsKgPerCell);
 			if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
 			PlantedCells.Add(FIntVector(Level, i, 0));
-			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)"),
+			bSoilSpentAnnounced = false; // a fresh bed clears the spent-soil edge
+			FName PlantedCrop = NAME_None;
+			if (bCropsLive)
+			{
+				// Deterministic crop pick (Gate A): cycle the name-sorted
+				// active list, preferring crops matched to the floor's
+				// effective climate - per-crop greenhouses emerge naturally.
+				TArray<int32> Matching;
+				const FName Climate = GetFloorClimateEffective(Level);
+				for (int32 c = 0; c < ActiveCrops.Num(); ++c)
+				{
+					if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
+				}
+				const int32 Pick = Matching.Num() > 0
+					? Matching[PlantRotation % Matching.Num()]
+					: (PlantRotation % ActiveCrops.Num());
+				++PlantRotation;
+				FRHPlantedCropState S;
+				S.Crop = ActiveCrops[Pick].Key;
+				S.PlantedSol = NowSols;
+				S.SoilKg = GardenSoilKgPerCell;
+				PlantedCrops.Add(FIntVector(Level, i, 0), S);
+				PlantedCrop = S.Crop;
+			}
+			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)%s"),
 				bGreenhouse ? TEXT("Greenhouse") : TEXT("Garden"), Level, i,
 				GardenSoilKgPerCell, GardenSeedsKgPerCell,
-				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""));
+				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""),
+				PlantedCrop.IsNone() ? TEXT("") : *FString::Printf(TEXT(" crop=%s"), *PlantedCrop.ToString()));
 			if (!bFirstCropAnnounced)
 			{
 				bFirstCropAnnounced = true;
@@ -1944,6 +2090,17 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 	const double DtHours = SubDt / 50.0; // sol-hours (matches StepPower's Wh accounting)
+
+	// The crew feeds the farm loop (Gates B/D): compost accrues per colonist-
+	// sol (abstract, prevention-framed - the recycling the colony runs anyway)
+	// and exhaled CO2 pools for ducted gardens to breathe. Linear per-sol
+	// scalars, band-identical; gated on the crop layer so every pre-crop
+	// baseline is untouched.
+	if (bCropsLive && GetPopulation() > 0)
+	{
+		AddStock(NCompost, CompostKgPerColonistSol * (double)GetPopulation() * DtSols);
+		ColonyCO2Kg += CO2KgPerColonistSol * (double)GetPopulation() * DtSols;
+	}
 
 	// Grow-light power (M2 Gate D+): grow-lit GARDEN cells run on the battery,
 	// all-or-nothing at colony scale (order-independent, legible - "the gardens
@@ -1995,6 +2152,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		{
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
+			PlantedCrops.Remove(*It); // the crop goes with the bed
 			It.RemoveCurrent();
 			continue;
 		}
@@ -2016,17 +2174,77 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		{
 			continue; // grow-lit but the bank went dark
 		}
-		const double NeedWater = GardenWaterKgPerSolPerCell * DtSols;
+		// Crop fork (Gate A): a cell with a crop entry uses that crop's real
+		// water draw, grow time, and yield; a legacy cell (crops dormant at
+		// plant time, or a pre-v26 save) keeps the flat math exactly.
+		FRHPlantedCropState* CropState = PlantedCrops.Find(*It);
+		const FRHCropRow* Crop = (CropState && Defs) ? Defs->GetCrop(CropState->Crop) : nullptr;
+		const double NeedWater = (Crop ? (double)Crop->WaterKgPerSol : GardenWaterKgPerSolPerCell) * DtSols;
 		if (GetStock(NWater) < NeedWater)
 		{
 			bThirsty = true;
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
+		if (Crop && (NowSols - CropState->PlantedSol) < (double)Crop->GrowSols)
+		{
+			// Immature: the crop drinks but yields nothing yet. Maturity is a
+			// threshold on the planting sol - monotone, era-parity-safe.
+			continue;
+		}
+		double CellMul = 1.0;
+		if (Crop)
+		{
+			// Climate preference (Gate B): matched band = full yield.
+			CellMul *= (Crop->ClimateBand == GetFloorClimateEffective(Level)) ? 1.0 : ClimateMismatchYieldMul;
+			// Duct exchange (Gate D): a ducted garden floor photosynthesizes
+			// the crew's CO2 - yield bonus and O2 back out, but only while
+			// the pool actually holds the draw (no CO2, no boost, no O2).
+			if (DuctedFloors.Contains(Level))
+			{
+				const double WantCO2 = GardenCO2DrawKgPerSolPerCell * DtSols;
+				if (ColonyCO2Kg >= WantCO2)
+				{
+					ColonyCO2Kg -= WantCO2;
+					CellMul *= DuctYieldBonusMul;
+					AddStock(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
+				}
+			}
+		}
 		// Yield rides work tempo, light, and now the gardeners' MASTERY (alive
 		// pass): a seasoned garden crew doubles the take.
-		const double YieldKg = GardenFoodKgPerSolPerCell * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
+		const double YieldKg = (Crop ? (double)Crop->YieldKgPerSol : GardenFoodKgPerSolPerCell)
+			* CellMul * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
 		AddStock(NFood, YieldKg);
+		// Soil depletion (Gate B): mature production spends the bed. Fertilizer
+		// refills it in place; an empty colony larder lets the cell revert to
+		// unplanted (the plant loop re-emplaces it when stocks allow).
+		if (Crop)
+		{
+			CropState->SoilKg -= CropSoilDepleteKgPerSol * DtSols;
+			if (CropState->SoilKg <= 0.0)
+			{
+				const double FertNeed = GardenSoilKgPerCell / FMath::Max(FertilizerSoilPerKg, (double)KINDA_SMALL_NUMBER);
+				if (GetStock(NFertilizer) >= FertNeed)
+				{
+					AddStock(NFertilizer, -FertNeed);
+					CropState->SoilKg = GardenSoilKgPerCell;
+					UE_LOG(LogRedHopeSim, Display, TEXT("Fertilizer worked into floor %d cell %d (%.0f kg -> bed restored)"), Level, Cell, FertNeed);
+				}
+				else
+				{
+					if (!bSoilSpentAnnounced)
+					{
+						bSoilSpentAnnounced = true;
+						OnAlert.Broadcast(TEXT("A GARDEN BED IS SPENT — the soil gave all it had. Fertilizer or a fresh soil pallet brings it back."));
+					}
+					UE_LOG(LogRedHopeSim, Display, TEXT("Soil spent: floor %d cell %d reverts to unplanted (crop %s)"), Level, Cell, *CropState->Crop.ToString());
+					PlantedCrops.Remove(*It);
+					It.RemoveCurrent();
+					continue;
+				}
+			}
+		}
 		GardenFoodCumKg += YieldKg;
 		if (!bFirstHarvestAnnounced && GardenFoodCumKg >= FirstHarvestKg)
 		{
@@ -2872,6 +3090,13 @@ void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
 	const int32 NewFloors = ToDepth - ShaftDepth;
 	const double Spoil = NewFloors * ShaftSpoilKgPerFloor;
 	SpoilPileKg += Spoil;
+	// Gate B: a chemical fraction of fresh dig spoil feeds the fertilizer
+	// chain (the "chemicals from digs" source, agri spec §3). Crop-layer
+	// gated so pre-crop stock ledgers stay byte-identical.
+	if (Spoil > 0.0 && AreCropsLive())
+	{
+		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+	}
 	ShaftDepth = ToDepth;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
 		ShaftDepth, NewFloors, Spoil, SpoilPileKg);
@@ -2893,6 +3118,11 @@ bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutR
 	Carved += Cells;
 	const double Spoil = Cells * SpoilKgPerCell;
 	SpoilPileKg += Spoil;
+	// Gate B: dig-spoil chemicals for the fertilizer chain (crop-layer gated).
+	if (Spoil > 0.0 && AreCropsLive())
+	{
+		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Excavated %d cell(s) on floor %d (%d carved; +%.0f kg spoil; pile %.0f kg)"),
 		Cells, Level, Carved, Spoil, SpoilPileKg);
 	return true;
@@ -5383,6 +5613,34 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ar << ActiveQuota << QuotaOpenedSol << PendingResearchFundingKg
 		   << DeclaredEnding << PathSustainSols << Epilogue << Collapse;
 	}
+	// Crops + climate + ducts (save v26). Maps/sets serialize SORTED so the
+	// bytes are deterministic regardless of insertion history.
+	{
+		TArray<FIntVector> CropKeys;
+		PlantedCrops.GetKeys(CropKeys);
+		CropKeys.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+		int32 CropCount = CropKeys.Num();
+		Ar << CropCount;
+		for (const FIntVector& K : CropKeys)
+		{
+			FRHPlantedCropState& S = PlantedCrops[K];
+			FIntVector Key = K;
+			Ar << Key << S.Crop << S.PlantedSol << S.SoilKg;
+		}
+		TArray<int32> ClimateKeys;
+		FloorClimate.GetKeys(ClimateKeys);
+		ClimateKeys.Sort();
+		int32 ClimateCount = ClimateKeys.Num();
+		Ar << ClimateCount;
+		for (const int32 K : ClimateKeys)
+		{
+			int32 Key = K; FName Band = FloorClimate[K];
+			Ar << Key << Band;
+		}
+		TArray<int32> Ducts = DuctedFloors.Array();
+		Ducts.Sort();
+		Ar << Ducts << ColonyCO2Kg << PlantRotation;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -5672,6 +5930,32 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				Defs->ActivateRoomRow(Row->UnlockRoom);
 			}
 		}
+	}
+	// Crops + climate + ducts (save v26).
+	{
+		PlantedCrops.Empty();
+		int32 CropCount = 0;
+		Ar << CropCount;
+		for (int32 i = 0; i < CropCount; ++i)
+		{
+			FIntVector Key; FRHPlantedCropState S;
+			Ar << Key << S.Crop << S.PlantedSol << S.SoilKg;
+			PlantedCrops.Add(Key, S);
+		}
+		FloorClimate.Empty();
+		int32 ClimateCount = 0;
+		Ar << ClimateCount;
+		for (int32 i = 0; i < ClimateCount; ++i)
+		{
+			int32 Key = 0; FName Band;
+			Ar << Key << Band;
+			FloorClimate.Add(Key, Band);
+		}
+		TArray<int32> Ducts;
+		Ar << Ducts << ColonyCO2Kg << PlantRotation;
+		DuctedFloors.Empty();
+		DuctedFloors.Append(Ducts);
+		bSoilSpentAnnounced = false; // runtime edge re-derives
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

@@ -46,6 +46,16 @@ public:
 	// table = no discoveries - the layer simply stays dormant.
 	const FRHDiscoveryRow* GetDiscovery(FName Name) const;
 	void GetDiscoveriesSorted(TArray<TPair<FName, const FRHDiscoveryRow*>>& Out) const;
+	// Crops (greenhouse-agriculture Gate A): row by name (dormant rows too),
+	// all slice-active crops sorted by name (deterministic rotation order),
+	// and ALL rows for the pure-data verifier. Absent table / all-dormant =
+	// the garden keeps its legacy flat-yield behavior exactly.
+	const FRHCropRow* GetCrop(FName Name) const;
+	void GetActiveCropsSorted(TArray<TPair<FName, const FRHCropRow*>>& Out) const;
+	void ForEachCropRow(TFunctionRef<void(FName, const FRHCropRow&)> Fn) const;
+	// Flips a dormant crop live in-memory (per-gate director flip / test knob;
+	// the DT asset is untouched, same contract as ActivateRoomRow).
+	bool ActivateCropRow(FName Name);
 	// Rivals (M3 Gate A): row by name + all slice-active neighbors. Absent
 	// table = a lonely Mars - the layer stays dormant.
 	const FRHRivalRow* GetRival(FName Name) const;
@@ -156,6 +166,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath RoomsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rooms.DT_Rooms"));
 	UPROPERTY(Config) FSoftObjectPath DiscoveriesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Discoveries.DT_Discoveries"));
 	UPROPERTY(Config) FSoftObjectPath RivalsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rivals.DT_Rivals"));
+	UPROPERTY(Config) FSoftObjectPath CropsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Crops.DT_Crops"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -170,5 +181,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
 	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
 	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
+	UPROPERTY() TObjectPtr<UDataTable> CropsTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

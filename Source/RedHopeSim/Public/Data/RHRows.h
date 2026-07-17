@@ -258,6 +258,34 @@ struct REDHOPESIM_API FRHDoorRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 
+// A crop variety (greenhouse-agriculture spec 2026-07-10, Gate A). Crops ride
+// the existing garden cells: when any crop row is SliceActive the garden's
+// flat legacy yield hands over to per-cell crops with real grow time, water
+// draw, climate preference, and soil depletion. All rows authored DORMANT;
+// activation is a per-gate director flip (the M2 dormant-row convention).
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHCropRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// Sols from planting to maturity; growth stage (sprout/young/mature) is
+	// presentation-derived from age/GrowSols - never stored, era-parity-safe.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float GrowSols = 3.f;
+	// Food per sol per MATURE cell (immature cells yield nothing).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float YieldKgPerSol = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float WaterKgPerSol = 2.f;
+	// Preferred climate band (Temperate/Humid/Arid). Yield x1.0 matched,
+	// x ClimateMismatchYieldMul otherwise - per-crop greenhouses emerge.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName ClimateBand;
+	// staple/protein/fruit/fiber (fiber feeds a later textiles loop).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName FoodKind;
+	// Stage-art silhouette family the visualizer draws: root/tall/vine.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName VisualFamily;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};
+
 // A research discovery (M2 Gate D+, the Flourishing layer): what a thriving
 // colony's staffed Labs UNCOVER. Discoveries pop in authored Order (a
 // deterministic sequence, never a random roll - era-parity by construction),
