@@ -146,16 +146,19 @@ verified against the 24-green battery.**
 
 These are **finishing, not structure** — the whole arc is built.
 
-1. **The large DataTable sync** (`docs/dt-sync-checklist.md` — note: that
-   checklist is stale at v17; the real debt now runs through **v25**). The CSVs
-   in `docs/data/` are the committed source of truth and code defaults match
-   every scalar, so headless runs are correct — but the **live in-editor**
-   DataTables need syncing next editor session: new struct columns
-   (`FRHRoomRow` Tier/UpgradesTo/SeatCount/YieldMul; `FRHDiscoveryRow`
-   FundingKg/UnlockRoom; `FRHQuotaRow` unchanged schema but Q2 now active),
-   new `DT_Rivals`/`DT_Discoveries` assets, `DT_Buildings` Category/Blurb, and
-   ~30 accumulated `DT_Config` rows. Until then, `RH.ActivateRoom`/
-   `RH.ActivateQuota` bridge live runs.
+1. ~~**The large DataTable sync**~~ **DONE 2026-07-16, headless.** All 14
+   DataTables re-imported from the `docs/data/` CSVs via the `ImportAssets`
+   commandlet with `CSVImportFactory` + `ImportRowStruct` JSON settings — no
+   editor session needed (the Session-48 editor-free discovery extends to
+   DataTables). This landed the new struct columns (`FRHRoomRow`
+   Tier/UpgradesTo/SeatCount/YieldMul; `FRHDiscoveryRow` FundingKg/UnlockRoom),
+   the new `DT_Rivals` + `DT_Discoveries` assets, `DT_Buildings`
+   Category/Blurb, Q2 active, and all accumulated `DT_Config` rows (150 live).
+   Verified: full 24-run battery green against the live tables, baseline pins
+   byte-identical. The `RH.ActivateRoom`/`RH.ActivateQuota` bridge is no
+   longer needed for live runs. Remaining follow-up (needs a director
+   compile): drop the in-memory `Debug_Inject*` rows from the self-tests so
+   they become true pure-data verifiers that fail on DT/CSV drift.
 
 2. **Director hand-play**, especially the visuals headless can't judge: the
    action card, categorized build menu, Mars look-pass grade, the rigged
