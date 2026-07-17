@@ -491,14 +491,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const FRHRoomRow* G = DefsSub ? DefsSub->GetRoom(FName("Garden")) : nullptr;
 			if (!G || !G->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Garden not active - DT drift")); return 1; }
 		}
-		// Greenhouse is a NEW row (DT sync pending); inject it in-memory (the
-		// whole-row extension of the SliceActive test-knob).
-		FRHRoomRow GH;
-		GH.DisplayName = TEXT("Greenhouse"); GH.Function = FName("Greenhouse");
-		GH.EmitsTags = TEXT("Odor"); GH.NeedsFiltration = true; GH.NeedsPlumbing = true;
-		GH.MoraleWeight = 0.5f; GH.SliceActive = true;
-		DefsSub->Debug_InjectRoom(FName("Greenhouse"), GH);
-		if (!DefsSub->GetRoom(FName("Greenhouse"))) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Greenhouse inject failed")); return 1; }
+		// Pure-data: the Greenhouse row rides the synced DT (2026-07-16).
+		{
+			const FRHRoomRow* GH = DefsSub->GetRoom(FName("Greenhouse"));
+			if (!GH || !GH->SliceActive || GH->EmitsTags != TEXT("Odor") || GH->MoraleWeight != 0.5f)
+			{ UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Greenhouse row missing/drifted - DT/CSV drift")); return 1; }
+		}
 
 		// Certify a 6-cell vault with power; charge the bank.
 		FString R;
@@ -681,21 +679,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
-		// The DT_Discoveries asset doesn't exist until its first editor import;
-		// inject the four authored rows (mirrors RH_Discoveries.csv exactly).
+		// Pure-data: the four authored rows ride the synced DT_Discoveries
+		// (2026-07-16) - assert the arithmetic-bearing columns instead of
+		// injecting, so this suite fails loudly on DT/CSV drift.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		const auto Inject = [&](const TCHAR* Name, const TCHAR* Display, int32 Order, float SeatH, float Bonus, FName Reward, float Kg)
+		const auto CheckDisc = [&](const TCHAR* Name, int32 Order, float SeatH, float Bonus, FName Reward, float Kg) -> bool
 		{
-			FRHDiscoveryRow Row;
-			Row.DisplayName = Display; Row.Order = Order; Row.LabSeatHours = SeatH;
-			Row.HopeBonus = Bonus; Row.RewardResource = Reward; Row.RewardKg = Kg;
-			Row.Alert = FString::Printf(TEXT("DISCOVERY — %s"), Display); Row.SliceActive = true;
-			DefsSub->Debug_InjectDiscovery(FName(Name), Row);
+			const FRHDiscoveryRow* Row = DefsSub->GetDiscovery(FName(Name));
+			if (!Row || !Row->SliceActive || Row->Order != Order || Row->LabSeatHours != SeatH
+				|| Row->HopeBonus != Bonus || Row->RewardResource != Reward || Row->RewardKg != Kg)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("DISCOVERY: row %s missing/drifted - DT/CSV drift"), Name);
+				return false;
+			}
+			return true;
 		};
-		Inject(TEXT("CropStrain"), TEXT("Hardy Crop Strain"), 1, 100.f, 2.f, FName("Seeds"), 50.f);
-		Inject(TEXT("RegolithCeramics"), TEXT("Regolith Ceramics"), 2, 150.f, 2.f, FName("Struct"), 100.f);
-		Inject(TEXT("SubsurfaceBrine"), TEXT("Subsurface Brine Seep"), 3, 200.f, 3.f, FName("Water"), 150.f);
-		Inject(TEXT("MicrobialLife"), TEXT("Subsurface Microbial Life"), 4, 300.f, 8.f, NAME_None, 0.f);
+		if (!CheckDisc(TEXT("CropStrain"), 1, 100.f, 2.f, FName("Seeds"), 50.f)) { return 1; }
+		if (!CheckDisc(TEXT("RegolithCeramics"), 2, 150.f, 2.f, FName("Struct"), 100.f)) { return 1; }
+		if (!CheckDisc(TEXT("SubsurfaceBrine"), 3, 200.f, 3.f, FName("Water"), 150.f)) { return 1; }
+		if (!CheckDisc(TEXT("MicrobialLife"), 4, 300.f, 8.f, NAME_None, 0.f)) { return 1; }
 
 		// A flourishing 2-person colony: instant Hope 88.5 (base 50 + housing 15
 		// + Lab 1.5 + Dining 3 + jobs 6 + vault 5 + comforts 8), no emitters so
@@ -778,13 +780,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd);
 			RunSols(0.1); // clear the signal lag + execute
 		};
-		// Inject Zarya (DT_Rivals doesn't exist until its first editor import).
+		// Zarya rides the synced DT_Rivals; Greed below stays a synthetic inject.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// The fresh colony has 400 Struct (Lander) + 6 SpareParts, but no fuel.
 		// 1) No hydrogen -> dispatch refused, convoy stays idle.
@@ -835,7 +838,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// pool negative. Let the storm convoy finish (sol 17 is a flare, which
 		// does NOT freeze it), then inject Greed (ImportLot SpareParts:4).
 		RunSols(4.5); // storm-test convoy gets home -> idle
-		FRHRivalRow Greed = Z; Greed.DisplayName = TEXT("Greedy Post");
+		FRHRivalRow Greed = *ZRow; Greed.DisplayName = TEXT("Greedy Post");
 		Greed.ImportLot = TEXT("SpareParts:4"); Greed.ExportLot = TEXT("Ice:10");
 		DefsSub->Debug_InjectRival(FName("Greed"), Greed);
 		// Drain SpareParts to exactly 3 (< wear 1 + lot 4 = 5), keep H2 high.
@@ -893,11 +896,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->GetEarthTension(), Sim->GetRequisitionMultiplier());
 
 		// Now Mars has a neighbor: the layer switches on.
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// 2) Tension DRIFTS (0.6/sol): after 10 sols ~6.0.
 		RunSols(10.0);
@@ -960,11 +964,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// Housed colony (2 crew) so SolidarityHope actually reads into the index.
 		FString R;
@@ -1058,11 +1063,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 		// Set the clock to deep night (sol-fraction 0.9) so covert detection is low.
 		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds);
 
@@ -1142,17 +1148,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd); RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
-		// A DORMANT settlement for the discovery test.
-		FRHRivalRow M;
-		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
-		M.DistanceKm = 200.f; M.ExportLot = TEXT("SpareParts:4"); M.ImportLot = TEXT("Food:60");
-		M.RelationStart = 30.f; M.SliceActive = false; // dormant until scouted
-		DefsSub->Debug_InjectRival(FName("Meridian"), M);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
+		// The DORMANT settlement for the discovery test rides the synced DT too.
+		{
+			const FRHRivalRow* MRow = DefsSub->GetRival(FName("Meridian"));
+			if (!MRow || MRow->SliceActive || MRow->DistanceKm != 200.f)
+			{ UE_LOG(LogRedHopeSim, Error, TEXT("Meridian row missing/drifted (must exist DORMANT) - DT/CSV drift")); return 1; }
+		}
 		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds); // night
 
 		// 1) LAUNDER: build hidden tension via two covert ops (CXCX: op1 clean +8,
@@ -1233,11 +1240,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd); RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// 1) INFLUENCE accrues: a completed honest trade (+3) plus positive-
 		// HumanNature drift. Do a trade to bank some influence + push HumanNature +.
@@ -1324,11 +1332,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 		const FRHRoomRow* LQ = DefsSub->GetRoom(FName("LivingQuarters"));
 		if (!LQ || !LQ->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("CRISIS: LivingQuarters not active")); return 1; }
 
@@ -1486,11 +1495,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// A housed colony (the endings need bEverHadCrew + a live Earth layer).
 		FString R;
@@ -1574,21 +1584,27 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		// The tier ladder's new stations (in-memory rows until the DT sync).
-		FRHRoomRow W2; W2.DisplayName = TEXT("Large Workbench"); W2.Function = FName("Workstation");
-		W2.Tier = 2; W2.SeatCount = 2; W2.YieldMul = 1.35f; W2.MoraleWeight = 1.0f; W2.SliceActive = true;
-		DefsSub->Debug_InjectRoom(FName("WorkbenchLarge"), W2);
-		FRHRoomRow L2; L2.DisplayName = TEXT("Large Chem Table"); L2.Function = FName("Lab");
-		L2.Tier = 2; L2.SeatCount = 1; L2.YieldMul = 1.35f; L2.MoraleWeight = 1.0f; L2.SliceActive = true;
-		DefsSub->Debug_InjectRoom(FName("ChemTableLarge"), L2);
-		FRHRoomRow W3; W3.DisplayName = TEXT("Workshop"); W3.Function = FName("Workstation");
-		W3.Tier = 3; W3.SeatCount = 3; W3.YieldMul = 1.8f; W3.MoraleWeight = 1.5f; W3.SliceActive = false; // DORMANT until unlocked
-		DefsSub->Debug_InjectRoom(FName("Workshop"), W3);
-		FRHRoomRow INF; INF.DisplayName = TEXT("Infirmary"); INF.Function = FName("Infirmary");
-		INF.MoraleWeight = 0.5f; INF.SliceActive = true;
-		DefsSub->Debug_InjectRoom(FName("Infirmary"), INF);
-		// The unlocking discovery, first in the sequence (Order 0 outranks the
-		// authored rows), cheap enough to pop fast once the mood crosses 85.
+		// Pure-data: the tier ladder's stations ride the synced DT_Rooms
+		// (2026-07-16) - assert the arithmetic-bearing columns instead of
+		// injecting, so this suite fails loudly on DT/CSV drift.
+		const auto CheckRoom = [&](const TCHAR* Name, FName Function, int32 Tier, int32 Seats, float Yield, bool bActive) -> bool
+		{
+			const FRHRoomRow* Row = DefsSub->GetRoom(FName(Name));
+			if (!Row || Row->SliceActive != bActive || Row->Function != Function
+				|| Row->Tier != Tier || Row->SeatCount != Seats || Row->YieldMul != Yield)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("TIERS: room %s missing/drifted - DT/CSV drift"), Name);
+				return false;
+			}
+			return true;
+		};
+		if (!CheckRoom(TEXT("WorkbenchLarge"), FName("Workstation"), 2, 2, 1.35f, true)) { return 1; }
+		if (!CheckRoom(TEXT("ChemTableLarge"), FName("Lab"), 2, 1, 1.35f, true)) { return 1; }
+		if (!CheckRoom(TEXT("Workshop"), FName("Workstation"), 3, 3, 1.8f, false)) { return 1; } // DORMANT until unlocked
+		if (!CheckRoom(TEXT("Infirmary"), FName("Infirmary"), 1, 1, 1.0f, true)) { return 1; }
+		// The unlocking discovery stays a SYNTHETIC inject (test-only row, not
+		// in the CSV): first in the sequence (Order 0 outranks the authored
+		// rows), cheap enough to pop fast once the mood crosses 85.
 		FRHDiscoveryRow DUnlock; DUnlock.DisplayName = TEXT("Regolith Ceramics II");
 		DUnlock.Order = 0; DUnlock.LabSeatHours = 50.f; DUnlock.HopeBonus = 2.f;
 		DUnlock.FundingKg = 500.f; DUnlock.UnlockRoom = FName("Workshop");
