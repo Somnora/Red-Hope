@@ -28,6 +28,24 @@ namespace
 	const FVector CrewPadCm(4000.f, -4000.f, 0.f);
 
 	constexpr float WalkCmPerSec = 170.f;   // suited amble, scaled by sim speed
+
+	// The sprite-generated walker meshes were meshed FACING THE CAMERA, so
+	// their intrinsic forward is not +X - without a correction they walk
+	// sideways (director hand-play 2026-07-17). Applied as the skeletal
+	// component's RELATIVE yaw so every actor-facing computation stays pure.
+	// Live-tunable: `rh.WalkerYawOffsetDeg 90` / `-90` / `180` in the console.
+	static TAutoConsoleVariable<float> CVarWalkerYawOffsetDeg(
+		TEXT("rh.WalkerYawOffsetDeg"), -90.f,
+		TEXT("Yaw correction applied to skeletal walker meshes so figures face their travel direction."));
+
+	// Where crew board and alight: at the elevator's DOOR FACE (+X side,
+	// matching the visualizer's door panels), never the cage centre - walking
+	// to the centre clipped figures through the cage walls (director
+	// hand-play 2026-07-17: "characters phase through the side").
+	FVector ElevatorDoorCm(const FVector& HeadCm, double Z)
+	{
+		return FVector(HeadCm.X + 170.0, HeadCm.Y, Z);
+	}
 	constexpr float StrollChance = 0.12f;   // odds a settled colonist takes air
 
 	UStaticMeshComponent* AddPart(AActor* Owner, const TCHAR* MeshPath,
@@ -468,7 +486,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				NewVis.Activity = TEXT("arriving");
 				const FVector Spawn = CrewPadCm + FVector(-600.f, FMath::FRandRange(-500.f, 500.f), 0);
 				NewVis.Actor = SpawnFigure(C.Name, C.Id, Spawn, Body, Skel, NewVis.BaseZCm);
-				NewVis.TargetCm = FVector(Sim->GetShaftHeadCm().X, Sim->GetShaftHeadCm().Y, 0);
+				NewVis.TargetCm = ElevatorDoorCm(Sim->GetShaftHeadCm(), 0);
 			}
 			else
 			{
@@ -505,7 +523,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			{
 				const FVector Head = Sim->GetShaftHeadCm();
 				Vis->CurLevel = C.HomeLevel;
-				Actor->SetActorLocation(FVector(Head.X, Head.Y, C.HomeLevel * Sim->GetFloorHeightCm()));
+				Actor->SetActorLocation(ElevatorDoorCm(Head, C.HomeLevel * Sim->GetFloorHeightCm()));
 				Vis->TargetCm = WanderPointCm(C.HomeLevel);
 			}
 		}
@@ -539,6 +557,9 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		// pouring at a lab); Idle otherwise - and freeze mid-pose on pause.
 		if (USkeletalMeshComponent* Skel = Vis->SkelBody.Get())
 		{
+			// Mesh-forward correction rides the component's relative yaw
+			// (actor rotation stays the pure travel direction).
+			Skel->SetRelativeRotation(FRotator(0.f, CVarWalkerYawOffsetDeg.GetValueOnGameThread(), 0.f));
 			FName WantClip = TEXT("Idle");
 			if (bWalking)
 			{
@@ -570,7 +591,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				// the pit view's language - the figure re-appears below).
 				Vis->Phase = EPhase::Resident;
 				Vis->CurLevel = Vis->HomeLevel;
-				Actor->SetActorLocation(FVector(Head.X, Head.Y, Vis->HomeLevel * Sim->GetFloorHeightCm()));
+				Actor->SetActorLocation(ElevatorDoorCm(Head, Vis->HomeLevel * Sim->GetFloorHeightCm()));
 				Vis->TargetCm = WanderPointCm(Vis->HomeLevel);
 				Vis->Activity = TEXT("settling in");
 				Vis->bFaceOnArrive = false;
@@ -581,7 +602,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					// Take air: surface at the shaft head, wander out a bit.
 					Vis->Phase = EPhase::StrollOut;
 					Vis->CurLevel = 0;
-					Actor->SetActorLocation(FVector(Head.X, Head.Y, 0));
+					Actor->SetActorLocation(ElevatorDoorCm(Head, 0));
 					const float Ang = FMath::FRandRange(0.f, 2.f * PI);
 					Vis->TargetCm = FVector(Head.X, Head.Y, 0)
 						+ FVector(FMath::Cos(Ang), FMath::Sin(Ang), 0) * FMath::FRandRange(1500.f, 3200.f);
@@ -642,14 +663,14 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				break;
 			case EPhase::StrollOut:
 				Vis->Phase = EPhase::StrollBack;
-				Vis->TargetCm = FVector(Head.X, Head.Y, 0);
+				Vis->TargetCm = ElevatorDoorCm(Head, 0);
 				Vis->Activity = TEXT("taking air");
 				Vis->NextDecideRealSeconds = Now + FMath::FRandRange(2.0, 6.0);
 				break;
 			case EPhase::StrollBack:
 				Vis->Phase = EPhase::Resident;
 				Vis->CurLevel = Vis->HomeLevel;
-				Actor->SetActorLocation(FVector(Head.X, Head.Y, Vis->HomeLevel * Sim->GetFloorHeightCm()));
+				Actor->SetActorLocation(ElevatorDoorCm(Head, Vis->HomeLevel * Sim->GetFloorHeightCm()));
 				Vis->TargetCm = WanderPointCm(Vis->HomeLevel);
 				Vis->Activity = TEXT("heading home");
 				Vis->bFaceOnArrive = false;

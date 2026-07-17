@@ -2036,8 +2036,37 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		for (int32 i = 0; i < Pair.Value.Num(); ++i)
 		{
 			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Pair.Value[i]) : nullptr;
-			if (!Row || !IsGardenFunction(Row->Function) || PlantedCells.Contains(FIntVector(Level, i, 0)))
+			if (!Row || !IsGardenFunction(Row->Function))
 			{
+				continue;
+			}
+			if (PlantedCells.Contains(FIntVector(Level, i, 0)))
+			{
+				// ADOPTION (director hand-play 2026-07-17): a bed planted
+				// before the crop layer went live carries no crop - when the
+				// catalogue activates mid-game it adopts one in place (soil
+				// already emplaced, no extra cost) and starts growing. With
+				// crops dormant this branch never fires - legacy exact.
+				if (bCropsLive && !PlantedCrops.Contains(FIntVector(Level, i, 0)))
+				{
+					TArray<int32> Matching;
+					const FName Climate = GetFloorClimateEffective(Level);
+					for (int32 c = 0; c < ActiveCrops.Num(); ++c)
+					{
+						if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
+					}
+					const int32 Pick = Matching.Num() > 0
+						? Matching[PlantRotation % Matching.Num()]
+						: (PlantRotation % ActiveCrops.Num());
+					++PlantRotation;
+					FRHPlantedCropState S;
+					S.Crop = ActiveCrops[Pick].Key;
+					S.PlantedSol = NowSols;
+					S.SoilKg = GardenSoilKgPerCell;
+					PlantedCrops.Add(FIntVector(Level, i, 0), S);
+					UE_LOG(LogRedHopeSim, Display, TEXT("Crop adopted: floor %d cell %d takes %s (bed planted pre-activation)"),
+						Level, i, *S.Crop.ToString());
+				}
 				continue;
 			}
 			const bool bGreenhouse = (Row->Function == NGreenhouse);

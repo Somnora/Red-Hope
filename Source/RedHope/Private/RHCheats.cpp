@@ -893,6 +893,12 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDemo(
 		Sim->AddStock(FName("Oxygen"), 1200.0);
 		Sim->AddStock(FName("Food"), 400.0);
 		Sim->AddStock(FName("Water"), 400.0);
+		// Garden materials so zoned beds actually PLANT (director hand-play
+		// 2026-07-17: the demo colony had no Soil/Seeds, so RH.ActivateCrop
+		// had nothing to grow). Glass covers a greenhouse fork too.
+		Sim->AddStock(FName("Soil"), 2000.0);
+		Sim->AddStock(FName("Seeds"), 400.0);
+		Sim->AddStock(FName("Glass"), 200.0);
 		// One of every active room, spread across the 8 carved cells.
 		const TCHAR* Rooms[8] = {
 			TEXT("LivingQuarters"), TEXT("LivingQuarters"), TEXT("Workstation"), TEXT("Lab"),

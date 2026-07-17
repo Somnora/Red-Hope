@@ -1202,6 +1202,10 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		const FVector Head = Sim->GetShaftHeadCm();
 		const double FloorH = Sim->GetFloorHeightCm();
 		const double FloorZ = ViewLevel * FloorH;
+		// The doors mount ON the cage's +X face (director hand-play
+		// 2026-07-17: the fixed 92 cm offset left them floating free of the
+		// frame). Derived from the cage's real bounds, whatever mesh it wears.
+		float DoorFaceX = Head.X + 92.f;
 		if (const UStaticMesh* Cage = CageComp->GetStaticMesh())
 		{
 			const FBoxSphereBounds CB = Cage->GetBounds();
@@ -1210,6 +1214,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 				Head.X - CB.Origin.X * S,
 				Head.Y - CB.Origin.Y * S,
 				FloorZ - (CB.Origin.Z - CB.BoxExtent.Z) * S));
+			DoorFaceX = Head.X + CB.BoxExtent.X * S + 3.f; // flush, a hair proud of the frame
 		}
 		float Target = 0.f;
 		if (IsUnderground())
@@ -1223,11 +1228,11 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		const float SlideCm = 26.f + ElevatorDoorAlpha * 68.f; // shut seam -> parted panels
 		if (UStaticMeshComponent* DoorL = ElevatorDoorL.Get())
 		{
-			DoorL->SetWorldLocation(FVector(Head.X + 92.f, Head.Y - SlideCm, FloorZ + 76.f));
+			DoorL->SetWorldLocation(FVector(DoorFaceX, Head.Y - SlideCm, FloorZ + 76.f));
 		}
 		if (UStaticMeshComponent* DoorR = ElevatorDoorR.Get())
 		{
-			DoorR->SetWorldLocation(FVector(Head.X + 92.f, Head.Y + SlideCm, FloorZ + 76.f));
+			DoorR->SetWorldLocation(FVector(DoorFaceX, Head.Y + SlideCm, FloorZ + 76.f));
 		}
 	}
 	// Sovereignty mirror (M3/M4): rival markers + the trade rover, same pattern.
@@ -2121,39 +2126,11 @@ void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
 		UE_LOG(LogRedHope, Warning, TEXT("Ground pad retexture: MarsGround actor not found at rig time - pad keeps its authored material"));
 	}
 
-	// Wind-laid dust drifts stay soft primitive spheres (dunes ARE smooth
-	// forms), riding the new height field so far drifts follow rolling ground.
-	// All within +/-14 degrees of one prevailing wind so the plain reads as
-	// WEATHER, not noise.
-	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
-	UInstancedStaticMeshComponent* Drifts = NewObject<UInstancedStaticMeshComponent>(EnvironmentRigActor, TEXT("DustDrifts"));
-	Drifts->SetupAttachment(Root);
-	Drifts->RegisterComponent();
-	EnvironmentRigActor->AddInstanceComponent(Drifts);
-	Drifts->SetStaticMesh(Sphere);
-	Drifts->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Drifts->SetCastShadow(false);
-	if (Base)
-	{
-		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Drifts);
-		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.55f, 0.37f, 0.23f));
-		Mid->SetScalarParameterValue(FName("SeamStrength"), 0.f); // dust, not hull plating
-		Mid->SetScalarParameterValue(FName("Metallic"), 0.f);
-		Drifts->SetMaterial(0, Mid);
-	}
-	const auto Deg = [](float D){ return FRotator(0.f, D, 0.f); };
-	FRandomStream Rand(20260708);
-	for (int32 D = 0; D < 90; ++D)
-	{
-		const float R = Rand.FRandRange(20.f, 380.f) * 100.f;
-		FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R;
-		Pos.Z = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y) + 6.f;
-		const float L = Rand.FRandRange(5.f, 18.f);
-		FTransform T(Deg(115.f + Rand.FRandRange(-14.f, 14.f)).Quaternion(), Pos,
-			FVector(L, L * Rand.FRandRange(0.18f, 0.3f), 0.5f));
-		Drifts->AddInstance(T, true);
-	}
+	// The wind-laid dust drifts (90 stretched-sphere instances) are GONE -
+	// the director flagged the smooth beige ellipsoids as alien objects on
+	// the terrain, twice (2026-07-17 hand-play: "strange rocks or weird oval
+	// things"). The procedural boulder fields in BuildScenery carry the
+	// ground interest on their own.
 }
 
 void URHColonyVisualizerSubsystem::RebuildSliceRig()

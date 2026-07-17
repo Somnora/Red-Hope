@@ -258,9 +258,12 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			if (USkeletalMeshComponent* Skel = SkelBodies[i])
 			{
+				// Sprite-generated meshes face the camera, not +X - fold the
+				// shared correction (rh.WalkerYawOffsetDeg) into the yaw.
+				static const auto* YawOff = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("rh.WalkerYawOffsetDeg"));
 				Skel->SetWorldLocationAndRotation(
 					Pos + FVector(0, 0, GroundZ + TerrainZ),
-					FRotator(0.f, FacingYawDeg[i], 0.f));
+					FRotator(0.f, FacingYawDeg[i] + (YawOff ? YawOff->GetValueOnGameThread() : 0.f), 0.f));
 				const bool bWantWalk = Speed > 15.f;
 				if (bWantWalk != bWalkPlaying[i])
 				{
