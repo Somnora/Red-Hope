@@ -16,3 +16,14 @@ CMakeLists.txt
 # Plugins build artifacts
 Plugins/**/Binaries/
 Plugins/**/Intermediate/
+
+# Art-generation working library (9.5 GB of raw 4K art, GLBs, and gen scripts).
+# Lives beside the project for convenience; it is NOT repo content and must
+# never enter git history. Do not `git clean` it away — as of 2026-08-14 the
+# copy here is the only local one (the old ~/Desktop/Martians is gone).
+Martians/
+
+# Local session cruft
+iTerm2
+Content/.claude/
+*-this-session-is-being-continued-from-a-previous-c.txt
