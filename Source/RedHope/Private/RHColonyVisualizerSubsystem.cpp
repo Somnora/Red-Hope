@@ -625,6 +625,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	BuildingVisuals.Reset();
 	AppliedPowerState.Reset();
+	// Ids are reused across a colony reload, so a remembered depth could be
+	// attributed to a different building def entirely.
+	AuthoredPulseDepth.Reset();
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
@@ -2035,6 +2038,49 @@ FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
 	// Gate B moved the canonical layout sim-side (adjacency made cell geometry
 	// gameplay); this forwards so existing presentation callers keep working.
 	return URHSimWorldSubsystem::SpiralCell(Index);
+}
+
+void URHColonyVisualizerSubsystem::Debug_SetPulseScale(float Scale)
+{
+	int32 Touched = 0;
+	for (const TPair<int32, TObjectPtr<AStaticMeshActor>>& Pair : BuildingVisuals)
+	{
+		AStaticMeshActor* Actor = Pair.Value;
+		if (!Actor)
+		{
+			continue;
+		}
+		UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
+		if (!Mesh)
+		{
+			continue;
+		}
+		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+		if (!Mid)
+		{
+			Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
+		}
+		if (!Mid)
+		{
+			continue;
+		}
+		// First touch reads the authored value straight through to the parent
+		// instance; every later call scales that remembered number. Buildings
+		// whose material is not M_RH_Master simply read 0 and stay still.
+		float Authored = 0.f;
+		if (const float* Remembered = AuthoredPulseDepth.Find(Pair.Key))
+		{
+			Authored = *Remembered;
+		}
+		else
+		{
+			Authored = Mid->K2_GetScalarParameterValue(FName("PulseDepth"));
+			AuthoredPulseDepth.Add(Pair.Key, Authored);
+		}
+		Mid->SetScalarParameterValue(FName("PulseDepth"), Authored * Scale);
+		++Touched;
+	}
+	UE_LOG(LogRedHope, Display, TEXT("[RH.Pulse] scale %.2f applied to %d building visual(s)"), Scale, Touched);
 }
 
 void URHColonyVisualizerSubsystem::SetViewLevel(int32 Level)

@@ -94,6 +94,25 @@ bool URHCrewVisualizerSubsystem::IsAnyCrewWithinCm(const FVector& WorldPos, floa
 	return false;
 }
 
+bool URHCrewVisualizerSubsystem::Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const
+{
+	// Sorted by colonist Id: TMap iteration order is not a stable contract, and
+	// a capture sheet that framed a different person each run would be useless.
+	TArray<int32> Ids;
+	Tracked.GetKeys(Ids);
+	Ids.Sort();
+	if (!Ids.IsValidIndex(Index))
+	{
+		return false;
+	}
+	if (const AActor* Actor = Tracked[Ids[Index]].Actor.Get())
+	{
+		OutLocationCm = Actor->GetActorLocation();
+		return true;
+	}
+	return false;
+}
+
 void URHCrewVisualizerSubsystem::ShowEmote(FCrewVisual& Vis, const FString& Line, const FColor& Color, double Seconds)
 {
 	AActor* Actor = Vis.Actor.Get();

@@ -57,6 +57,19 @@ void ARHStrategyPawn::AddTilt(float DeltaPitchDeg)
 	PitchOffsetDeg = FMath::Clamp(PitchOffsetDeg + DeltaPitchDeg, -42.f, 30.f);
 }
 
+void ARHStrategyPawn::SetCameraPose(FVector2D FocusXYCm, float InZoomT, float InPitchOffsetDeg, float InYawDeg)
+{
+	FocusPointCm.X = FocusXYCm.X;
+	FocusPointCm.Y = FocusXYCm.Y;
+	ZoomT = FMath::Clamp(InZoomT, 0.f, 1.f);
+	PitchOffsetDeg = FMath::Clamp(InPitchOffsetDeg, -42.f, 30.f);
+	OrbitYawDeg = FMath::UnwindDegrees(InYawDeg);
+	// Tick reads the smoothed mirrors, so collapsing them here is what makes
+	// the pose land immediately instead of a half-second later.
+	SmoothedZoomT = ZoomT;
+	SmoothedPitchOffsetDeg = PitchOffsetDeg;
+}
+
 void ARHStrategyPawn::AddPan(FVector2D PlanarDeltaCm)
 {
 	const FRotator YawOnly(0.f, OrbitYawDeg, 0.f);

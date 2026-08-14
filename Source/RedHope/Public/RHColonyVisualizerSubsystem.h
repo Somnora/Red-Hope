@@ -54,6 +54,12 @@ public:
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
 
+	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
+	// against each building's AUTHORED PulseDepth, so the art-bible mix between
+	// machines is preserved and repeated calls set an absolute multiplier
+	// instead of compounding. 0 = fully still, 1 = as authored.
+	void Debug_SetPulseScale(float Scale);
+
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
@@ -146,6 +152,10 @@ private:
 	// only touches a MID when the sim actually changed the answer.
 	// 0 = dark (shed or switched off), 1 = running, 2 = under construction.
 	TMap<int32, uint8> AppliedPowerState;
+	// Each building's PulseDepth as the art pass authored it, captured the first
+	// time RH.Pulse touches it - the MID's own value stops being the authored
+	// one after the first scale, so scaling off it would compound.
+	TMap<int32, float> AuthoredPulseDepth;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;

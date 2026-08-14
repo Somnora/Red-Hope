@@ -6,12 +6,16 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHPlayerController.h"
+#include "RHStrategyPawn.h"
+#include "RHColonyVisualizerSubsystem.h"
+#include "RHCrewVisualizerSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/CoreDelegates.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
@@ -44,6 +48,112 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSnapshot(
 		{
 			FScreenshotRequest::RequestScreenshot(TEXT("RHSnap"), /*bShowUI*/ false, /*bAddFilenameSuffix*/ true);
 			UE_LOG(LogRedHope, Display, TEXT("Snapshot requested"));
+		}, Delay, false);
+	}));
+
+// ---------------------------------------------------------------------------
+// Scripted visual capture (QA contact sheets). The strategy camera is otherwise
+// mouse-only, so a headless driver could never frame anything: every shot came
+// out at the default 215 m opening register, which is far too distant to judge
+// a mesh or a paint job. These four make a boot reproducible end to end.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	ARHStrategyPawn* FindStrategyPawn(UWorld* World)
+	{
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		return PC ? Cast<ARHStrategyPawn>(PC->GetPawn()) : nullptr;
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCam(
+	TEXT("RH.Cam"),
+	TEXT("RH.Cam <Xm> <Ym> <ZoomT 0-1> [PitchOffsetDeg] [YawDeg] - place the strategy camera exactly. ZoomT 0 = 25 m, 0.45 = 215 m (default opening), 1 = 3000 m. Snaps with no easing so a timed screenshot is repeatable."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Cam <Xm> <Ym> <ZoomT 0-1> [PitchOffsetDeg] [YawDeg]"));
+			return;
+		}
+		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
+		if (!Pawn)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.Cam: no strategy pawn possessed"));
+			return;
+		}
+		const float Xm = FCString::Atof(*Args[0]);
+		const float Ym = FCString::Atof(*Args[1]);
+		const float ZoomT = FCString::Atof(*Args[2]);
+		const float Pitch = Args.Num() > 3 ? FCString::Atof(*Args[3]) : 0.f;
+		const float Yaw = Args.Num() > 4 ? FCString::Atof(*Args[4]) : 0.f;
+		Pawn->SetCameraPose(FVector2D(Xm * 100.f, Ym * 100.f), ZoomT, Pitch, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Cam] focus (%.0f, %.0f) m | zoomT %.2f = %.0f m out | pitch offset %.0f | yaw %.0f"),
+			Xm, Ym, ZoomT, Pawn->GetViewDistanceCm() / 100.f, Pitch, Yaw);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCamCrew(
+	TEXT("RH.CamCrew"),
+	TEXT("RH.CamCrew [Index=0] [ZoomT=0.05] [YawDeg=0] - frame the Nth crew figure where it currently stands. Walkers move, so a fixed RH.Cam pose can miss them entirely."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
+		const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>();
+		if (!Pawn || !Crew)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.CamCrew: no strategy pawn or crew visualizer"));
+			return;
+		}
+		const int32 Index = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 0;
+		const float ZoomT = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.05f;
+		const float Yaw = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f;
+		FVector At = FVector::ZeroVector;
+		if (!Crew->Debug_GetCrewLocation(Index, At))
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.CamCrew: no crew figure at index %d"), Index);
+			return;
+		}
+		Pawn->SetCameraPose(FVector2D(At.X, At.Y), ZoomT, 0.f, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.CamCrew] crew %d at (%.0f, %.0f) m | zoomT %.2f = %.0f m out"),
+			Index, At.X / 100.f, At.Y / 100.f, ZoomT, Pawn->GetViewDistanceCm() / 100.f);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHPulse(
+	TEXT("RH.Pulse"),
+	TEXT("RH.Pulse <Scale> - scale every machine's ambient emissive throb against its authored depth (0 = fully still, 1 = as authored, 2 = double). Absolute, so repeated calls do not compound."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Pulse <Scale>"));
+			return;
+		}
+		if (URHColonyVisualizerSubsystem* Viz = World->GetSubsystem<URHColonyVisualizerSubsystem>())
+		{
+			Viz->Debug_SetPulseScale(FCString::Atof(*Args[0]));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHQuit(
+	TEXT("RH.Quit"),
+	TEXT("RH.Quit [DelaySeconds=0] - request a clean shutdown after a delay, so a capture driver can end a run without SIGKILL truncating the log or a screenshot mid-write."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 0.f;
+		if (Delay <= 0.f)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Quit] exiting"));
+			FPlatformMisc::RequestExit(false, TEXT("RH.Quit"));
+			return;
+		}
+		FTimerHandle Handle;
+		World->GetTimerManager().SetTimer(Handle, []()
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Quit] exiting"));
+			FPlatformMisc::RequestExit(false, TEXT("RH.Quit"));
 		}, Delay, false);
 	}));
 

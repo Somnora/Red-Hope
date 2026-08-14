@@ -21,6 +21,8 @@ Every script here does. Override the destination with `RH_REPORT=<path>`.
 | `rh_reimport_inplace.py` | re-imports meshes **or textures** over their existing asset path |
 | `rh_author_master.py` | authors `M_RH_Master`'s whole graph |
 | `rh_tune_motion.py` | sets the per-machine ambient-pulse parameters |
+| `rh_terrain_macro.py` | adds/retunes the terrain's macro albedo variation |
+| `rh_capture.sh` | boots the game for real and harvests screenshots |
 
 **Materials are compile-free.** `UMaterialEditingLibrary` is a
 `UBlueprintFunctionLibrary`, so its whole graph API is exposed to Python:
@@ -35,6 +37,24 @@ by parameter **name** and survive, which was verified after the rebuild.
 **Pin-name gotcha:** an expression with a single input reports that pin as
 `"None"` (see `get_material_expression_input_names`); pass `""` to connect it.
 Multi-input nodes use real names (`A`/`B`, `A`/`B`/`Alpha`).
+
+**The graph can be READ, not just written** (5.8, found 2026-08-14). This is what
+makes *surgical* edits possible — you no longer have to rebuild a material from
+scratch just to change one thing:
+
+| call | gives you |
+|---|---|
+| `get_material_expressions(mat)` | every node in the graph |
+| `get_material_property_input_node(mat, MaterialProperty.MP_BASE_COLOR)` | what currently drives an output |
+| `get_material_property_input_node_output_name(...)` | which of its outputs |
+| `get_inputs_for_material_expression(mat, expr)` | a node's upstream inputs |
+| `get_material_expression_input_names/output_names(expr)` | its pin names |
+| `duplicate_material_expression`, `delete_material_expression`, `disconnect_material_property` | edit in place |
+
+Note `mat.get_editor_property("expressions")` does **not** work in 5.8 (the
+property moved); go through `MaterialEditingLibrary` instead. `rh_terrain_macro.py`
+is the worked example: it reads whatever drives BaseColor, wraps it in one
+multiply, and leaves the other 58 nodes of the triplanar untouched.
 
 ## In-place reimport — the only way to re-cut a FLAT-layout asset
 
@@ -63,6 +83,38 @@ RH_MANIFEST=pairs.json RH_REPORT=/tmp/r.txt UnrealEditor-Cmd <proj> \
 
 Preconditions: the GLB must contain exactly **one** mesh node (`rh_finish.py`
 joins), and internal mesh/image names must stay stable.
+
+---
+
+## Seeing the game: scripted capture (`rh_capture.sh`)
+
+Every art verification before 2026-08-14 was a *receipt* — triangle counts,
+warning counts, battery pins. None of it was a pixel. `rh_capture.sh` closes
+that: it boots the real game with a real Metal RHI, drives it with console
+commands, and harvests the PNGs, so the art can be reviewed as images.
+
+```bash
+bash scripts/unreal/rh_capture.sh surface \
+  "r.setres 1600x900w, RH.Demo, RH.ActivateCrop all, RH.Floor 0, RH.Snapshot 35, RH.Snapshot 70" \
+  2 400
+```
+
+Three things cost a run each to learn, so they are worth stating plainly:
+
+1. **`-ExecCmds` must carry NO literal quotes, and must come last.** The form the
+   docs imply, `-ExecCmds="a, b arg"`, makes the engine run *nothing at all* —
+   silently, with no warning. Pass it as one shell-quoted argument instead
+   (`"-ExecCmds=$CMDS"`). Because `ParseExecCmdsFromCommandLine` parses with
+   `bShouldStopOnSeparator = false`, the value runs to end of line, which is
+   both why the unquoted form tolerates spaces *and* why nothing may follow it.
+2. **`-resx`/`-resy` do not set the screenshot size** — the saved
+   `GameUserSettings` resolution wins. Put `r.setres <W>x<H>w` first in the
+   command list.
+3. **Delay the snapshot past the load.** `RH.Snapshot <seconds>` schedules on a
+   world timer; the first ~30 s of a cold-DDC boot is texture building, and a
+   shot taken then catches an unfinished scene. 35 s and up is safe.
+
+`RH.Demo` rides the elevator down, so add `RH.Floor 0` for surface shots.
 
 ---
 

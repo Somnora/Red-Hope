@@ -30,6 +30,14 @@ public:
 	// above the horizon so the scenery ring and sky read, never under the world.
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera") void AddTilt(float DeltaPitchDeg);
 
+	// Scripted-capture placement (QA contact sheets): set the whole pose at once
+	// AND collapse the interpolators, so the next frame is already the final
+	// framing. A camera still easing when a timed screenshot fires would make
+	// the shot depend on when it was taken; these sheets must be repeatable.
+	// The focus Z is deliberately untouched - the elevator owns it.
+	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera")
+	void SetCameraPose(FVector2D FocusXYCm, float InZoomT, float InPitchOffsetDeg, float InYawDeg);
+
 	// Current camera distance (cm) - pan speed scales with it so a screen-width
 	// drag covers similar ground at every register.
 	float GetViewDistanceCm() const

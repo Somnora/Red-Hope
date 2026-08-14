@@ -87,6 +87,13 @@ public:
 	// colony visualizer's elevator doors open for approaching colonists.
 	bool IsAnyCrewWithinCm(const FVector& WorldPos, float RadiusCm) const;
 
+	// Scripted-capture helper: world location of the Nth tracked crew figure,
+	// in colonist-Id order so the same index means the same person between
+	// runs. Lets a QA driver frame walkers that are moving instead of guessing
+	// a fixed point and hoping someone walks through it. False when the index
+	// is past the roster or that figure no longer exists.
+	bool Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const;
+
 private:
 	void HandleColonyReloaded();
 	// Alive pass: the sim's crew-life beats made visible - pairs gather for
