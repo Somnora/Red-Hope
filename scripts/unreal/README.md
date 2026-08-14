@@ -12,6 +12,58 @@ UnrealEditor-Cmd <proj> -run=pythonscript -script=<abs path>.py \
 commandlet run. Have the script **write a report file** and read that instead.
 Every script here does. Override the destination with `RH_REPORT=<path>`.
 
+## What this lane can do (all without a compile)
+
+| script | does |
+|---|---|
+| `rh_audit_nanite.py` | reports Nanite state + LOD0 counts for every art mesh |
+| `rh_fix_nanite.py` | disables Nanite on every art mesh that has it |
+| `rh_reimport_inplace.py` | re-imports meshes **or textures** over their existing asset path |
+| `rh_author_master.py` | authors `M_RH_Master`'s whole graph |
+| `rh_tune_motion.py` | sets the per-machine ambient-pulse parameters |
+
+**Materials are compile-free.** `UMaterialEditingLibrary` is a
+`UBlueprintFunctionLibrary`, so its whole graph API is exposed to Python:
+`create_material_expression`, `connect_material_expressions`,
+`connect_material_property`, `recompile_material` (which *returns the compile
+errors*, so a script can verify itself), plus the full instance-parameter setter
+suite. `rh_author_master.py` is therefore the canonical place to edit the master
+material now; `RHArtWireCommandlet::AuthorMaster` remains as the C++ bootstrap.
+Rebuilding the graph is safe for existing instances — `MI_<name>` overrides bind
+by parameter **name** and survive, which was verified after the rebuild.
+
+**Pin-name gotcha:** an expression with a single input reports that pin as
+`"None"` (see `get_material_expression_input_names`); pass `""` to connect it.
+Multi-input nodes use real names (`A`/`B`, `A`/`B`/`Alpha`).
+
+## In-place reimport — the only way to re-cut a FLAT-layout asset
+
+Three layouts exist in this project: **FLAT** (`Art/<Grp>/<n>/<n>`, 23 assets,
+FBX era), **single+SM** (`Art/<Grp>/<n>/StaticMeshes/<n>`, 75), and **DOUBLE**
+(`Art/<Grp>/<n>/<n>/StaticMeshes/<n>`, 34).
+
+The `ImportAssets` commandlet's `-dest` is fed through Interchange's SubPath
+machinery — `bSceneNameSubFolder` and `bAssetTypeSubFolders`, both **true in the
+glTF pipeline and false in the FBX/OBJ one**, which is exactly why the two
+lineages have different shapes. So a `-dest` re-import of a FLAT asset creates a
+*new* asset at a double-folder path and silently orphans the one the game
+references.
+
+Setting `ImportAssetParameters.reimport_asset` bypasses SubPath entirely and
+writes to the existing package verbatim — flat, single and double alike, and it
+works on the legacy FBX assets too (a GLB with exactly one mesh node takes the
+single-factory-node short-circuit). That is what `rh_reimport_inplace.py` does:
+
+```bash
+RH_MANIFEST=pairs.json RH_REPORT=/tmp/r.txt UnrealEditor-Cmd <proj> \
+  -run=pythonscript -script=$PWD/scripts/unreal/rh_reimport_inplace.py \
+  -unattended -nosound -stdout
+# pairs.json: [{"asset": "/Game/...", "source": "/abs/mesh.glb"}, ...]
+```
+
+Preconditions: the GLB must contain exactly **one** mesh node (`rh_finish.py`
+joins), and internal mesh/image names must stay stable.
+
 ---
 
 ## The Nanite trap (found 2026-08-14 — re-run the fixer after every import)

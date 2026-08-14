@@ -286,11 +286,32 @@ All presentation-layer, all driven by **existing** sim events — no sim edits:
 - G0.4 **DONE** — the mixed set is wired (§6), and `rh.ModelSetV2` now means
   "mixed set" vs "all originals".
 
-**P1 — Buildings to bar** (~10–13 h + overnight bakes)
-- G1.1 C-lane batch over the mixed set incl. the two C1 repairs; re-import.
-- G1.2 PoweredState + ambient motion materials + first Niagara (forge, borer
-  dust); `RHAssetPoints` map. *One compile.*
-- G1.3 Three-zoom screenshot batch → director gate.
+**P1 — Buildings to bar** — *EXECUTED 2026-08-14, no compile required.*
+- G1.1 **DONE** — the whole remaining library welded (36 meshes: 7 building
+  models, 19 agri, 10 props) and re-imported **in place**. Receipts: battery
+  53,920 → 24,853 verts, lander2 → 17,231, stockpile → 13,771, all with triangle
+  counts preserved exactly. 10 of the 11 rendered models are now welded;
+  `RH_AirFilter2` is the one hold-out because no local source file exists for it.
+  Honest note: the FBX-era originals already carried smooth normals despite being
+  unwelded, so for those the win is ~55 % fewer vertices rather than a visible
+  change — unlike the Models2 batch, where welding was dramatic.
+- G1.2 **DONE, and cheaper than planned.** `UMaterialEditingLibrary` turns out to
+  be fully exposed to Python, so ambient motion shipped with **no compile**: the
+  master gained `PulseDepth`/`PulseSpeed` and an emissive pulse that multiplies
+  *through* `PoweredState`, which means an unpowered machine goes dark **and
+  still** for free — no tick, no components, works on instanced meshes. Tuned per
+  machine (forge a slow furnace throb, ComputeModule a fast data blink,
+  structures deliberately still). Niagara is available but was **not** needed for
+  this beat; deferred rather than spent.
+- G1.3 texture pass **DONE**: AO + curvature baked per asset (Cycles CPU, ~5 s
+  each) and composited into a new BaseColor — contact shadowing, curvature-driven
+  edge wear, cavity grime. Reported honestly: this is a *modest* gain, clearly
+  visible on complex assets (OreExtractor treads, IceProcessor pipework) and
+  marginal on convex ones. **Normal-map baking was cut from the plan**: with no
+  high-poly source anywhere in the pipeline there is nothing for it to capture.
+- Still owed from P1: the two C1 silhouette repairs (ModularBlock's open face,
+  HeavyFreighter's proportions — both unwired, so they block nothing) and the
+  three-zoom screenshot batch, which wants a live boot.
 
 **P2 — Characters** (~16–25 h; the long pole; prep starts during P1)
 - G2.1 Base body + `RH_Crew` skeleton + rig-loop retrieval/rewrite + clips
