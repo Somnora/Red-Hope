@@ -214,7 +214,19 @@ These are **finishing, not structure** — the whole arc is built.
    different generator, a retopo/sculpt pass, or a deliberate stylization —
    not a repeat. Also note: the rig loop lives only on Somnora-East, and there
    is no working local Blender (the Homebrew cask is registered but the app is
-   gone), so any rig work needs the GPU box up.
+   gone), so any rig work needs the GPU box up. *(Update, same day: Blender
+   5.2 LTS reinstalled and proven — local renders/bakes work again; only the
+   rig-loop script retrieval still needs the box.)*
+
+8. **The premium asset plan — authored 2026-08-14, awaiting director OK.**
+   `docs/premium-asset-plan.md`: the full strategy for characters, places,
+   objects, activities and vehicles — AI generation demoted to blockout +
+   texture source, a scripted local-Blender finishing lane (real UVs, bakes,
+   camera-projection texturing from the identity-anchored 4K sheets), one
+   master-material family keyed to the in-code RHCanon palette, a shared crew
+   skeleton with modular gear and socketed hand props, data-driven interaction
+   anchors, and six phased gates (P0–P5) with quality bars, costs, risks and
+   the director's four open decision points.
 
 ---
 
