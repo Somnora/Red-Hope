@@ -162,6 +162,123 @@ def smooth_by_angle(ob, angle_deg=40.0):
     return sharp
 
 
+def strip_loose(ob, min_faces=4):
+    """Delete floating specks the generator left behind.
+
+    Image-to-3D output often carries a few disconnected scraps - single stray
+    triangles, sub-millimetre shards - that show up as "holes" in a naive
+    boundary check and as glinting dirt in-game. Components smaller than
+    min_faces go; anything larger is real geometry and is left alone.
+    """
+    me = ob.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bm.faces.ensure_lookup_table()
+
+    unvisited = set(f.index for f in bm.faces)
+    doomed = []
+    while unvisited:
+        seed = unvisited.pop()
+        comp = [seed]
+        stack = [bm.faces[seed]]
+        while stack:
+            f = stack.pop()
+            for e in f.edges:
+                for nf in e.link_faces:
+                    if nf.index in unvisited:
+                        unvisited.discard(nf.index)
+                        comp.append(nf.index)
+                        stack.append(nf)
+        if len(comp) < min_faces:
+            doomed.extend(comp)
+
+    if not doomed:
+        bm.free()
+        log(f"loose: none (no component under {min_faces} faces)")
+        return 0
+    bmesh.ops.delete(bm, geom=[bm.faces[i] for i in doomed], context="FACES")
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+    log(f"loose: removed {len(doomed)} face(s) in tiny disconnected components")
+    return len(doomed)
+
+
+def fill_holes(ob, max_sides=8):
+    """Close small boundary loops left by the generator.
+
+    Only small holes: a large boundary loop is usually a deliberately open face
+    (ModularBlock's bay, for instance), and filling it would destroy the design
+    rather than repair it. Reports what it found either way.
+    """
+    me = ob.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    boundary = [e for e in bm.edges if len(e.link_faces) == 1]
+    if not boundary:
+        bm.free()
+        log("holes: none (closed manifold)")
+        return 0
+
+    # Group the boundary into loops so each hole can be judged on its own size.
+    remaining = {e.index: e for e in boundary}
+    loops = []
+    while remaining:
+        _, seed = remaining.popitem()
+        loop = [seed]
+        stack = [seed]
+        while stack:
+            cur = stack.pop()
+            for v in cur.verts:
+                for e2 in v.link_edges:
+                    if e2.index in remaining:
+                        del remaining[e2.index]
+                        loop.append(e2)
+                        stack.append(e2)
+        loops.append(loop)
+
+    before = len(bm.faces)
+    small = [lp for lp in loops if len(lp) <= max_sides]
+    skipped = len(loops) - len(small)
+    for lp in small:
+        # holes_fill ignores its `sides` bound and contextual_create silently
+        # declines on these loops, so walk the cycle and build the face directly.
+        made = False
+        try:
+            n0 = len(bm.faces)
+            bmesh.ops.contextual_create(bm, geom=lp)
+            made = len(bm.faces) > n0
+        except Exception:
+            made = False
+        if made:
+            continue
+        try:
+            edges = {e.index: e for e in lp}
+            start = lp[0]
+            ordered = [start.verts[0], start.verts[1]]
+            del edges[start.index]
+            while edges:
+                tail = ordered[-1]
+                nxt = next((e for e in edges.values() if tail in e.verts), None)
+                if nxt is None:
+                    break
+                del edges[nxt.index]
+                ordered.append(nxt.verts[1] if nxt.verts[0] == tail else nxt.verts[0])
+            if ordered[0] == ordered[-1]:
+                ordered.pop()
+            if len(ordered) >= 3:
+                bm.faces.new(ordered)
+        except Exception as e:
+            log(f"  ! fill failed on a {len(lp)}-edge loop: {e}")
+    filled = len(bm.faces) - before
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+    log(f"holes: {len(loops)} hole(s), filled {len(small)} with {filled} face(s); "
+        f"left {skipped} large open loop(s) alone")
+    return filled
+
+
 def decimate_to(ob, max_tris):
     tris = tri_count(ob)
     if tris <= max_tris:

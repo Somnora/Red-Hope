@@ -20,7 +20,7 @@ TIER_TRIS = {"H": 35000, "S": 20000, "B": 8000}
 
 def parse(argv):
     opts = {"tier": "S", "weld": 0.0001, "angle": 40.0, "uv": False,
-            "decimate": True, "in": None, "out": None, "report": None}
+            "decimate": True, "fill": False, "in": None, "out": None, "report": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -38,6 +38,8 @@ def parse(argv):
             opts["angle"] = float(argv[i + 1]); i += 2
         elif a == "--uv":
             opts["uv"] = True; i += 1
+        elif a == "--fill-holes":
+            opts["fill"] = True; i += 1
         elif a == "--no-decimate":
             opts["decimate"] = False; i += 1
         else:
@@ -57,6 +59,9 @@ def main():
     before = R.metrics(ob)
 
     R.weld(ob, o["weld"])
+    if o["fill"]:
+        R.strip_loose(ob)
+        R.fill_holes(ob)
     R.smooth_by_angle(ob, o["angle"])
     if o["decimate"]:
         R.decimate_to(ob, TIER_TRIS.get(o["tier"], 20000))
