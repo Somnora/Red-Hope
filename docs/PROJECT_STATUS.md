@@ -188,6 +188,34 @@ These are **finishing, not structure** — the whole arc is built.
    Crop activation (`RH.ActivateCrop all` or flipping the CSV) is a
    director gate flip.
 
+6. **Building models, updated 2026-08-14.** The painted batch generated on the
+   A100 on 2026-07-17 (Hunyuan3D shape + PAINT from the Nano Banana Pro 4K
+   sheets) is imported — 13 objects under `/Game/RedHope/Art/Models2/<N>/<N>/`,
+   13/13 clean Interchange receipts. Eight are wired in `HandleBuildingAdded`:
+   painted replacements for Forge, BatteryBank, WaterPlant, Lander, SolarArray,
+   Habitat and Borer, plus first-ever model coverage for ComputeModule. The
+   swap rides `rh.ModelSetV2` (default 1; set 0 + re-run `RH.Demo` for the
+   originals) so the director can A/B in one boot. **Owed: that verdict.**
+   Held back: ModularBlock (open face) and HeavyFreighter (skinny) failed batch
+   QA; AirlockModule, GreenhouseDome and ScoutSpeeder have no building DefName
+   yet (the dome is Gate C's). Note the new models wear the auto-generated
+   Interchange material, not the hand-built `MI_<name>`/`M_ModelTex` instances
+   the older models use — if they read flat beside their neighbours, the fix is
+   a material-instance pass, not regeneration.
+
+7. **Character redo — premise corrected 2026-08-14, gate NOT started.** The
+   spec's diagnosis ("the paint stage never ran, so the crew are gray statues")
+   is **false**: all 20 `RH_Walker_*` assets carry a baseColor +
+   metallic/roughness pair with a material binding both, imported in 29bb31b.
+   The "weirdly unfinished" read is therefore about mesh/art quality inherent
+   to sprite-driven Hunyuan3D humanoids, and re-running the same pipeline would
+   return the same class of result. Get a director verdict on the 2026-07-17
+   crew contact sheet first; if it still misses, the real options are a
+   different generator, a retopo/sculpt pass, or a deliberate stylization —
+   not a repeat. Also note: the rig loop lives only on Somnora-East, and there
+   is no working local Blender (the Homebrew cask is registered but the app is
+   gone), so any rig work needs the GPU box up.
+
 ---
 
 ## 5. Risks & gaps (honest read)
