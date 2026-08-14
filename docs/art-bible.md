@@ -113,8 +113,16 @@ G=Roughness B=AO). Three textures per asset, no more.
 **Characters additionally:** ≤ 25 k body+gear, ≤ 4 bone influences per vertex,
 sockets `Prop_R` `Prop_L` `Back` `Helm`, and the 10-clip contract.
 
-**Platform target: 8 GB unified memory, Metal.** No Nanite (budgets don't need
-it), no Lumen dependency for readability, no MetaHumans, no marketplace packs.
+**Platform target: 8 GB unified memory, Metal.** No Nanite, no Lumen dependency
+for readability, no MetaHumans, no marketplace packs.
+
+> **"No Nanite" is enforced, not aspirational.** The project sets
+> `r.Nanite.ProjectEnabled=False`, but UE 5.8's Interchange GLB import enables
+> Nanite **per asset** by default — and a Nanite-enabled mesh in a Nanite-off
+> project renders its reduced *fallback proxy*, not its real geometry. On
+> 2026-08-14 that was true of **109 of 132** art meshes, with HabitatDome drawing
+> 3,962 of its 18,000 triangles. Run `scripts/unreal/rh_fix_nanite.py` after
+> **every** import; see `scripts/unreal/README.md`.
 
 ---
 
