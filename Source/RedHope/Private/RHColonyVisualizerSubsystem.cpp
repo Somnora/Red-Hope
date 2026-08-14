@@ -1060,6 +1060,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// A fresh visual has no material state pushed into it yet; forget any answer
 	// remembered for this Id so the next power pass re-applies from scratch.
 	AppliedPowerState.Remove(Instance.Id);
+	// Same reason, and it matters more than it looks: an under-construction
+	// building wears M_Graybox, which has no PulseDepth at all, so a pulse read
+	// taken then caches 0. Completion rebuilds the visual under this same Id
+	// with the real material, and without this the building's throb would stay
+	// pinned off for the rest of the session.
+	AuthoredPulseDepth.Remove(Instance.Id);
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
