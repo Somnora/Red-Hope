@@ -17,6 +17,7 @@ Graph:
   Metallic  = Metallic
   Roughness = Rough
   Emissive  = EmissiveColor * EmissiveAmount * PoweredState * Pulse * EmissiveMask(uv)
+              * GlowScale (MPC_Atmosphere, driven by rh.Glow)
               + BaseColor * EmissiveFloor
 
 EmissiveMask defaults to T_RH_MaskWhite (8x8 white, linear grayscale), which
@@ -39,6 +40,7 @@ import unreal
 MASTER_PKG = "/Game/RedHope/Art/M_RH_Master"
 DEFAULT_BASE_TEX = "/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"
 DEFAULT_MASK_TEX = "/Game/RedHope/Art/Masks/T_RH_MaskWhite.T_RH_MaskWhite"
+GLOW_COLLECTION = "/Game/RedHope/Sky/MPC_Atmosphere.MPC_Atmosphere"
 OUT = os.environ.get("RH_REPORT", "/tmp/rh_master.txt")
 
 MEL = unreal.MaterialEditingLibrary
@@ -155,11 +157,25 @@ def main():
     glow_d = node(mat, unreal.MaterialExpressionMultiply, -60, 500)
     link(glow_c, "", glow_d, "A")
     link(mask, "", glow_d, "B")
+    # Global dial (rh.Glow -> MPC_Atmosphere.GlowScale, default 1). Lets the
+    # player switch the machine-glow assist off once they have built their own
+    # lighting. Real lights - hab ceiling lamps, Floodmasts - are untouched by
+    # this, and so is the EmissiveFloor ambient lift below.
+    glow_scale = node(mat, unreal.MaterialExpressionCollectionParameter, -260, 380,
+                      parameter_name="GlowScale")
+    coll = unreal.load_asset(GLOW_COLLECTION)
+    if coll:
+        glow_scale.set_editor_property("collection", coll)
+    else:
+        rec("  ! %s missing - run rh_add_mpc_glow.py first" % GLOW_COLLECTION)
+    glow_e = node(mat, unreal.MaterialExpressionMultiply, 60, 440)
+    link(glow_d, "", glow_e, "A")
+    link(glow_scale, "", glow_e, "B")
     floor_mul = node(mat, unreal.MaterialExpressionMultiply, -360, 720)
     link(albedo, "", floor_mul, "A")
     link(floor, "", floor_mul, "B")
-    emissive = node(mat, unreal.MaterialExpressionAdd, 60, 640)
-    link(glow_d, "", emissive, "A")
+    emissive = node(mat, unreal.MaterialExpressionAdd, 200, 640)
+    link(glow_e, "", emissive, "A")
     link(floor_mul, "", emissive, "B")
 
     MEL.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)

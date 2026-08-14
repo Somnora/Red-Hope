@@ -60,6 +60,14 @@ public:
 	// instead of compounding. 0 = fully still, 1 = as authored.
 	void Debug_SetPulseScale(float Scale);
 
+	// Sims-style interior viewing (rh.Cutaway). The pit is open-topped by
+	// construction, so there is no roof to lift: what occludes an interior is
+	// the near WALL faces. Mode 1 drops the one or two facing the camera and
+	// swaps as you orbit; mode 2 drops them all for a floorplan read.
+	// State-diffed on a (mode, hidden-sides) key, with hysteresis, so orbiting
+	// past a boundary cannot strobe the walls.
+	void ApplyCutaway();
+
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
@@ -175,6 +183,18 @@ private:
 	// martian rock... every few blocks an air vent"): vent units mounted on the
 	// pit's wall faces, rebuilt with the rig. Owned by SliceRigActor.
 	TArray<TWeakObjectPtr<UStaticMeshComponent>> WallVents;
+	// Cutaway bookkeeping. WallISM is a FILTERED VIEW of WallFaceXf: the rig
+	// authors every face here, and ApplyCutaway re-adds only the visible ones.
+	// WallVentDir parallels WallVents so a vent hides with the wall it is
+	// mounted on. Key = (mode << 4) | hidden-side bitmask; 0xFF forces re-apply.
+	TArray<FTransform> WallFaceXf;
+	TArray<FIntPoint> WallFaceDir;
+	TArray<FIntPoint> WallVentDir;
+	FVector PitCenterCm = FVector::ZeroVector;
+	uint8 AppliedCutawayKey = 0xFF;
+	// Buildings that carry a real light (Floodmast). Intensity rides bPowered,
+	// so a brownout darkens the city the player lit.
+	TMap<int32, TWeakObjectPtr<UPointLightComponent>> BuildingLights;
 	// Lived-in accumulation: crates/drums/lockers appear over time on populated
 	// floors (count grows with residents + sols; components ride tile actors so
 	// lifecycle and floor-cut hiding come free). Per-floor spawned count.

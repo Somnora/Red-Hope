@@ -89,3 +89,48 @@ scalar; UI is deferred with the rest of the UI pass pending Gate-D.
 
 Open pricing decisions for the director: Floodmast cost/draw, default `rh.Glow`
 value, and whether mode 2's hysteresis angle feels right (tuned live via CVar).
+
+
+---
+
+# Execution log (2026-08-14)
+
+## Done, compile-free
+
+- `MPC_Atmosphere` gained the `GlowScale` scalar (default 1.0) via
+  `scripts/unreal/rh_add_mpc_glow.py`. Params are now
+  Habitability, TimeOfSol, DustAmount, GlowScale.
+- `M_RH_Master` multiplies its MASKED emissive by that collection parameter
+  (`rh_author_master.py`, 49 expressions, 0 compile errors). The
+  `EmissiveFloor` ambient lift is deliberately NOT scaled - at `rh.Glow 0` the
+  hulls still read, they just stop advertising.
+- `Floodmast` row added to `docs/data/RH_Buildings.csv` and DT_Buildings synced
+  headless (16 rows) with the new `scripts/unreal/rh_sync_datatables.py`.
+  Row: 1x1 footprint, 150 W draw, 5 W idle, 40 Struct, 60 s build,
+  LoadPriority 12 (**shed first** - when the grid browns out the decorative
+  lights go before life support, which is both correct and dramatic).
+
+## Written, awaiting the single director compile
+
+- `rh.Cutaway 0|1|2` - all walls / drop the faces toward the camera (swapping
+  as you orbit, with hysteresis so a boundary crossing cannot strobe) /
+  floorplan. WallISM became a filtered view of an authored face list; wall
+  vents hide with the wall they are mounted on.
+- Floodmast carries a REAL `UPointLightComponent` (45000 lm, 26 m radius, warm
+  1.0/0.86/0.66, shadowless by choice) plus a mast silhouette whose emissive
+  heads match the light, so the source you see is the source that lights the
+  ground. Visibility rides `bPowered`.
+- `rh.Glow <0..1>` pushes GlowScale every atmosphere tick.
+- **Bug found and fixed in passing:** the atmosphere pushed a scalar named
+  `Dust`, but the collection declares `DustAmount`. That write had been going
+  nowhere. Renamed.
+
+## Deliberately NOT built
+
+- Surface-hab interiors. Those meshes are hulls with no interior geometry, so a
+  "look inside" mode has nothing to show. The warm frosted portholes from the
+  mask pass are the honest version of that read. Modelled interiors are a
+  separate art decision, not a view mode.
+- A roof-lift mode. The pit is an open excavation; there is no roof to lift.
+  What actually occludes an interior there is the near wall, which is what
+  mode 1 drops.

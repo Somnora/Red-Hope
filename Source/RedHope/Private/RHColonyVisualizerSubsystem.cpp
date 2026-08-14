@@ -8,6 +8,8 @@
 #include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Components/StaticMeshComponent.h"
@@ -51,6 +53,30 @@ static TAutoConsoleVariable<int32> CVarModelSetV2(
 	TEXT("Building models: 1 = the mixed set (painted mesh where it reads better), 0 = all originals."),
 	ECVF_Default);
 
+// Sims-style interior viewing. The pit has no roof to lift - it is an open
+// excavation - so the thing that hides an interior is the near wall faces.
+static TAutoConsoleVariable<int32> CVarCutaway(
+	TEXT("rh.Cutaway"),
+	0,
+	TEXT("Interior view: 0 = all walls, 1 = drop the wall faces toward the camera (swaps as you orbit), 2 = floorplan, no walls."),
+	ECVF_Default);
+
+// The four wall-face outward directions, in the order their bits are packed
+// into the cutaway hidden-mask.
+static const FIntPoint GRHWallDirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+
+static int32 RHWallDirSlot(const FIntPoint& D)
+{
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (GRHWallDirs[i] == D)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
+}
+
 FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 {
 	// Function accent hue: drives labels and each machine's glow identity.
@@ -59,6 +85,7 @@ FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 		{ FName("SolarArray"),    FLinearColor(0.25f, 0.45f, 0.95f) },  // PV blue
 		{ FName("BatteryBank"),   FLinearColor(0.10f, 0.85f, 0.65f) },  // cell teal
 		{ FName("Pylon"),         FLinearColor(0.95f, 0.60f, 0.05f) },  // grid amber
+		{ FName("Floodmast"),     FLinearColor(1.00f, 0.86f, 0.66f) },  // warm work light
 		{ FName("ChargePad"),     FLinearColor(0.95f, 0.75f, 0.15f) },  // pad amber
 		{ FName("Forge"),         FLinearColor(0.95f, 0.35f, 0.08f) },  // furnace orange
 		{ FName("IceDrill"),      FLinearColor(0.50f, 0.85f, 0.95f) },  // ice cyan
@@ -87,7 +114,7 @@ FLinearColor URHColonyVisualizerSubsystem::BodyFor(FName DefName) const
 	{
 		return RHCanon::DarkSlate;
 	}
-	if (DefName == FName("Pylon"))
+	if (DefName == FName("Pylon") || DefName == FName("Floodmast"))
 	{
 		return FLinearColor(0.22f, 0.23f, 0.26f);
 	}
@@ -203,6 +230,7 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 	// color elsewhere.
 	if (DefName != FName("Lander") && DefName != FName("ChargePad")
 		&& DefName != FName("Stockpile") && DefName != FName("Pylon")
+		&& DefName != FName("Floodmast") // a mast has no hull to band
 		&& DefName != FName("SolarArray")) // the radiating panels carry the PV blue
 	{
 		const FLinearColor Hue = TintFor(DefName);
@@ -339,6 +367,27 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		// coverage discs.
 		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 40.f), FRotator::ZeroRotator, FVector(0.8f), TintFor(DefName), AmberGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ - 70.f), FRotator::ZeroRotator, FVector(2.4f, 0.25f, 0.25f), DarkSlate);
+	}
+	else if (DefName == FName("Floodmast"))
+	{
+		// A light tower and nothing else: slim mast, a cross-arm, and two
+		// hooded heads whose emissive matches the real point light attached in
+		// HandleBuildingAdded - so the source you SEE is the source that lights
+		// the ground. Warm, because everything else out here is cold.
+		const float MastZ = TopZ + 520.f;
+		const FLinearColor Warm(1.0f, 0.86f, 0.66f);
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, MastZ * 0.5f), FRotator::ZeroRotator,
+			FVector(0.22f, 0.22f, MastZ / 100.f), DarkSlate);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, MastZ), FRotator::ZeroRotator,
+			FVector(0.22f, 1.5f, 0.16f), DarkSlate);
+		for (int32 S = -1; S <= 1; S += 2)
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector(0, S * 62.f, MastZ - 22.f), FRotator::ZeroRotator,
+				FVector(0.34f, 0.42f, 0.22f), Warm, Warm * 3.2f);
+		}
+		// One hazard band at boot height so nobody walks into the mast.
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, 120.f), FRotator::ZeroRotator,
+			FVector(0.3f, 0.3f, 0.3f), HazYellow);
 	}
 	else if (DefName == FName("ChargePad"))
 	{
@@ -628,6 +677,8 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	// Ids are reused across a colony reload, so a remembered depth could be
 	// attributed to a different building def entirely.
 	AuthoredPulseDepth.Reset();
+	// The lamps died with their actors above; drop the stale weak handles.
+	BuildingLights.Reset();
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
@@ -1056,6 +1107,31 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// Born on whatever floor the sim says; visible only if the elevator is
 	// looking at that stratum (M1-d slice view).
 	Actor->SetActorHiddenInGame(Instance.Level != ViewLevel);
+	// The Floodmast exists only to light the place. It carries a real point
+	// light rather than an emissive fake, so it actually throws light onto the
+	// regolith and the hulls around it - which is the entire point of building
+	// one. Intensity rides bPowered through the power pass below.
+	if (!Instance.bUnderConstruction && Instance.DefName == FName("Floodmast"))
+	{
+		UPointLightComponent* Lamp = NewObject<UPointLightComponent>(Actor);
+		Lamp->SetupAttachment(Actor->GetRootComponent());
+		Lamp->SetMobility(EComponentMobility::Movable);
+		Lamp->SetAbsolute(true, true, true);
+		// Candelas, like the vault fill and the hab ceiling lights. The default
+		// is Unitless, which routes through a legacy x16 path and would make a
+		// value tuned in any real unit come out wrong by orders of magnitude.
+		Lamp->SetIntensityUnits(ELightUnits::Candelas);
+		Lamp->SetIntensity(90.f); // ~4x the 22 cd vault fill: a work light, not daylight
+		Lamp->SetLightColor(FColor(255, 219, 168)); // warm work light
+		Lamp->SetAttenuationRadius(2600.f);
+		// Shadowless on purpose: a colony of these would otherwise cost a
+		// shadow pass each, and the read we want is pooled light on the ground.
+		Lamp->SetCastShadows(false);
+		Lamp->RegisterComponent();
+		Lamp->SetWorldLocation(Seated + FVector(0, 0, 620.f));
+		BuildingLights.Add(Instance.Id, Lamp);
+	}
+
 	BuildingVisuals.Add(Instance.Id, Actor);
 	// A fresh visual has no material state pushed into it yet; forget any answer
 	// remembered for this Id so the next power pass re-applies from scratch.
@@ -1266,11 +1342,22 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			Mid->SetScalarParameterValue(FName("PoweredState"), Want == 1 ? 1.f : 0.f);
 		}
+		// A Floodmast on a shed breaker goes dark with everything else.
+		if (const TWeakObjectPtr<UPointLightComponent>* Found = BuildingLights.Find(B.Id))
+		{
+			if (UPointLightComponent* Lamp = Found->Get())
+			{
+				Lamp->SetVisibility(Want == 1);
+			}
+		}
 	}
 
 	// Shaft & carved-floor mirror (M1-d): state-diffed each frame - the counts
 	// are tiny and the sim has no per-cell visual events to listen to.
 	UpdateShaftVisuals();
+
+	// Interior viewing: cheap unless the camera actually crossed a boundary.
+	ApplyCutaway();
 
 	// Hover-gated labels (director 2026-07-10: station and room names show
 	// only under the cursor - a working town, not a diagram). One deproject,
@@ -2046,6 +2133,78 @@ FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
 	return URHSimWorldSubsystem::SpiralCell(Index);
 }
 
+void URHColonyVisualizerSubsystem::ApplyCutaway()
+{
+	if (!WallISM)
+	{
+		return;
+	}
+	const int32 Mode = FMath::Clamp(CVarCutaway.GetValueOnGameThread(), 0, 2);
+
+	uint8 Hidden = 0;
+	if (Mode == 2)
+	{
+		Hidden = 0x0F; // floorplan: every face down
+	}
+	else if (Mode == 1)
+	{
+		const UWorld* World = GetWorld();
+		const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+		if (Cam)
+		{
+			const FVector CamLoc = Cam->GetCameraLocation();
+			FVector2D ToCam(CamLoc.X - PitCenterCm.X, CamLoc.Y - PitCenterCm.Y);
+			if (ToCam.Normalize())
+			{
+				const uint8 WasHidden = (AppliedCutawayKey == 0xFF) ? 0 : (AppliedCutawayKey & 0x0F);
+				for (int32 i = 0; i < 4; ++i)
+				{
+					// A face whose OUTWARD normal points at the camera is a near
+					// wall standing between the viewer and the room. Two
+					// thresholds, not one: a side already down stays down until
+					// it clearly swings away, so an orbit through the boundary
+					// cannot strobe walls in and out.
+					const float Dot = ToCam.X * GRHWallDirs[i].X + ToCam.Y * GRHWallDirs[i].Y;
+					const bool bWas = (WasHidden & (1 << i)) != 0;
+					if (bWas ? (Dot > 0.25f) : (Dot > 0.40f))
+					{
+						Hidden |= (uint8)(1 << i);
+					}
+				}
+			}
+		}
+	}
+
+	const uint8 Key = (uint8)((Mode << 4) | Hidden);
+	if (Key == AppliedCutawayKey)
+	{
+		return;
+	}
+	AppliedCutawayKey = Key;
+
+	WallISM->ClearInstances();
+	for (int32 i = 0; i < WallFaceXf.Num(); ++i)
+	{
+		const int32 Slot = RHWallDirSlot(WallFaceDir[i]);
+		if (Slot != INDEX_NONE && (Hidden & (1 << Slot)) != 0)
+		{
+			continue;
+		}
+		WallISM->AddInstance(WallFaceXf[i], /*bWorldSpace*/ true);
+	}
+	for (int32 i = 0; i < WallVents.Num(); ++i)
+	{
+		UStaticMeshComponent* Vent = WallVents[i].Get();
+		if (!Vent)
+		{
+			continue;
+		}
+		const int32 Slot = WallVentDir.IsValidIndex(i) ? RHWallDirSlot(WallVentDir[i]) : INDEX_NONE;
+		Vent->SetHiddenInGame(Slot != INDEX_NONE && (Hidden & (1 << Slot)) != 0);
+	}
+}
+
 void URHColonyVisualizerSubsystem::Debug_SetPulseScale(float Scale)
 {
 	int32 Touched = 0;
@@ -2373,6 +2532,14 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 		}
 	}
 	WallVents.Reset();
+	// The cutaway's authored face list dies with them, and it MUST be cleared
+	// on this side of the early return below: at the surface WallISM is emptied
+	// and this function bails, so a stale face list would let ApplyCutaway
+	// re-add pit walls into a view that has no pit.
+	WallFaceXf.Reset();
+	WallFaceDir.Reset();
+	WallVentDir.Reset();
+	AppliedCutawayKey = 0xFF;
 	if (!IsUnderground())
 	{
 		return; // SURF (or above): the intact ground is the view - no pit rig
@@ -2417,11 +2584,16 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	UStaticMesh* VentMesh = LoadObject<UStaticMesh>(nullptr,
 		TEXT("/Game/RedHope/Art/Dress/RH_vent/StaticMeshes/RH_vent.RH_vent"));
 
-	const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	// The cutaway needs to know where every face is and which way it looks, so
+	// the authored list is filled here and WallISM becomes a filtered view of
+	// it. (The lists were cleared above, on the surface side of the early
+	// return, so both paths leave them consistent with WallISM.)
+	PitCenterCm = Head;
+
 	int32 FaceIdx = 0;
 	for (const FIntPoint& Cell : Open)
 	{
-		for (const FIntPoint& D : Dirs)
+		for (const FIntPoint& D : GRHWallDirs)
 		{
 			if (Open.Contains(Cell + D))
 			{
@@ -2432,7 +2604,10 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 			const FVector Scale = D.X != 0
 				? FVector(0.6f, 10.f, (float)(PitDepthCm / 100.0))
 				: FVector(10.f, 0.6f, (float)(PitDepthCm / 100.0));
-			WallISM->AddInstance(FTransform(FRotator::ZeroRotator, WallCenter, Scale), /*bWorldSpace*/ true);
+			const FTransform WallXf(FRotator::ZeroRotator, WallCenter, Scale);
+			WallFaceXf.Add(WallXf);
+			WallFaceDir.Add(D);
+			WallISM->AddInstance(WallXf, /*bWorldSpace*/ true);
 			// Every third wall face carries a life-support vent at head height
 			// on the open floor - the insulated lining reads SERVICED, not dead
 			// space (director 2026-07-09). Faces inward at the room.
@@ -2453,6 +2628,8 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 				Vent->SetWorldScale3D(FVector(VS));
 				Vent->SetWorldLocationAndRotation(VentPos, Inward.Rotation());
 				WallVents.Add(Vent);
+				WallVentDir.Add(D); // parallel to WallVents: the vent hides with its wall
+
 			}
 		}
 	}
