@@ -27,3 +27,7 @@ Martians/
 iTerm2
 Content/.claude/
 *-this-session-is-being-continued-from-a-previous-c.txt
+
+# Python bytecode from the Blender finishing scripts
+__pycache__/
+*.pyc

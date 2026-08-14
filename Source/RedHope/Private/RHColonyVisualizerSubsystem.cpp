@@ -39,15 +39,16 @@ namespace RHCanon
 // The Lander body rides this high on its legs so the descent engine + gear read.
 static constexpr float GLanderLiftCm = 210.f;
 
-// Model-set A/B. The 2026-07-17 painted batch (ModelPathsV2, in
-// HandleBuildingAdded) renders by default; `rh.ModelSetV2 0` restores the
-// original models so both sets can be judged in ONE boot instead of across a
-// recompile. A building picks its mesh when it spawns, so re-run RH.Demo (or
-// reload a save) after toggling for the change to take.
+// Model-set A/B. `rh.ModelSetV2 1` (default) renders the MIXED SET - the
+// painted 2026-07-17 mesh for the buildings where it reads better, the original
+// everywhere else (see ModelPathsV2 in HandleBuildingAdded for the per-building
+// reasoning). `rh.ModelSetV2 0` restores the all-original set, so both can be
+// judged in ONE boot instead of across a recompile. A building picks its mesh
+// when it spawns, so re-run RH.Demo (or reload a save) after toggling.
 static TAutoConsoleVariable<int32> CVarModelSetV2(
 	TEXT("rh.ModelSetV2"),
 	1,
-	TEXT("Building models: 1 = 2026-07-17 painted batch where one exists, 0 = the originals."),
+	TEXT("Building models: 1 = the mixed set (painted mesh where it reads better), 0 = all originals."),
 	ECVF_Default);
 
 FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
@@ -623,6 +624,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		}
 	}
 	BuildingVisuals.Reset();
+	AppliedPowerState.Reset();
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
@@ -915,23 +917,34 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			// Agri Gate B: the climate machinery (generated with the agri batch).
 			{ FName("HumidityRegulator"), FString(TEXT("/Game/RedHope/Art/Agri/humidity/humidity/StaticMeshes/humidity.humidity")) },
 		};
-		// The 2026-07-17 batch: the same building roster regenerated from the
-		// identity-anchored 4K sheets and run through shape + PAINT, so each
-		// mesh arrives with its own baseColor + metallic/roughness maps. These
-		// supersede the originals row-for-row while `rh.ModelSetV2` is 1.
-		// ComputeModule is NEW coverage - it had no model and drew primitives.
-		// Held back deliberately: ModularBlock (open face) and HeavyFreighter
-		// (reads skinny) failed batch QA; AirlockModule, GreenhouseDome,
-		// ScoutSpeeder are imported but have no building DefName to attach to
-		// yet (the dome is agri Gate C's).
+		// The MIXED SET (premium-asset-plan section 6, resolved from the
+		// 2026-08-14 side-by-side renders): keep the mesh that READS, and let
+		// the material family carry the coherence instead of the mesh.
+		//
+		// IN - the painted 2026-07-17 mesh wins outright:
+		//   Forge         the original is the vertex-colour mesh and reads as a
+		//                 dark broken slab; the replacement is a real machine
+		//   Habitat       geodesic dome with legible portholes
+		//   ComputeModule NEW coverage - it drew composed primitives before
+		//   SolarArray    a toss-up in the renders; kept here so it can be
+		//                 judged in-boot against the original
+		//
+		// OUT - the ORIGINAL mesh reads better and stays; each loses function
+		// legibility in the new batch, which matters more than fidelity here:
+		//   BatteryBank   original's display panels say "power" at a glance;
+		//                 the replacement is an anonymous crate
+		//   Borer         original keeps its unmistakable digging arm
+		//   WaterPlant    original's tanks-and-pipes says "processing plant"
+		//   Lander        original's splayed descent stage is instantly a lander
+		//
+		// Held back entirely: ModularBlock (open face) and HeavyFreighter
+		// (proportions) failed batch QA and want silhouette surgery first;
+		// AirlockModule, GreenhouseDome and ScoutSpeeder are imported but have
+		// no building DefName to attach to yet (the dome is agri Gate C's).
 		static const TMap<FName, FString> ModelPathsV2 = {
 			{ FName("Forge"),         FString(TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/StaticMeshes/HeavyForge.HeavyForge")) },
-			{ FName("BatteryBank"),   FString(TEXT("/Game/RedHope/Art/Models2/BatteryStation/BatteryStation/StaticMeshes/BatteryStation.BatteryStation")) },
-			{ FName("WaterPlant"),    FString(TEXT("/Game/RedHope/Art/Models2/IceProcessor/IceProcessor/StaticMeshes/IceProcessor.IceProcessor")) },
-			{ FName("Lander"),        FString(TEXT("/Game/RedHope/Art/Models2/CargoLander/CargoLander/StaticMeshes/CargoLander.CargoLander")) },
 			{ FName("SolarArray"),    FString(TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel")) },
 			{ FName("Habitat"),       FString(TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome")) },
-			{ FName("Borer"),         FString(TEXT("/Game/RedHope/Art/Models2/OreExtractor/OreExtractor/StaticMeshes/OreExtractor.OreExtractor")) },
 			{ FName("ComputeModule"), FString(TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
@@ -1041,6 +1054,9 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// looking at that stratum (M1-d slice view).
 	Actor->SetActorHiddenInGame(Instance.Level != ViewLevel);
 	BuildingVisuals.Add(Instance.Id, Actor);
+	// A fresh visual has no material state pushed into it yet; forget any answer
+	// remembered for this Id so the next power pass re-applies from scratch.
+	AppliedPowerState.Remove(Instance.Id);
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
@@ -1196,6 +1212,50 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 					64, FColor(255, 140, 40), false, -1.f, 0, 12.f,
 					FVector(1, 0, 0), FVector(0, 1, 0), false);
 			}
+		}
+	}
+
+	// Is it working? A machine that has been shed by the power priority, or
+	// switched off by the player, goes dark; a running one keeps its glow. The
+	// sim already decides this per building (FRHBuildingInstance::bPowered), so
+	// the visual is a pure readout - state-diffed, because writing a material
+	// parameter every frame for every building would be waste. Only meshes
+	// wearing the M_RH_Master family carry PoweredState; on anything else the
+	// parameter simply does not exist and the write is a no-op.
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const uint8 Want = B.bUnderConstruction ? 2 : (B.bPowered ? 1 : 0);
+		if (const uint8* Applied = AppliedPowerState.Find(B.Id))
+		{
+			if (*Applied == Want)
+			{
+				continue;
+			}
+		}
+		TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(B.Id);
+		if (!Found || !*Found)
+		{
+			continue;
+		}
+		UStaticMeshComponent* Mesh = (*Found)->GetStaticMeshComponent();
+		if (!Mesh)
+		{
+			continue;
+		}
+		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+		if (!Mid)
+		{
+			Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
+		}
+		// Record the attempt whether or not it produced a MID. A mesh whose
+		// slot 0 is empty makes CreateAndSetMaterialInstanceDynamic return null
+		// AND log a warning, so leaving the entry unrecorded would retry - and
+		// log - every frame forever. HandleBuildingAdded clears the entry when
+		// the visual is rebuilt, so a genuine retry still happens then.
+		AppliedPowerState.Add(B.Id, Want);
+		if (Mid)
+		{
+			Mid->SetScalarParameterValue(FName("PoweredState"), Want == 1 ? 1.f : 0.f);
 		}
 	}
 

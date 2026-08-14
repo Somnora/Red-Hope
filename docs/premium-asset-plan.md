@@ -253,14 +253,38 @@ All presentation-layer, all driven by **existing** sim events — no sim edits:
 
 ## 9. Phases & gates (each = commit + push + receipts + director stop)
 
-**P0 — Foundations** (~8–10 h, one compile)
-- G0.1 Art bible one-pager (palette hexes from `RHCanon`, readability
-  doctrine, tier table, naming). *1–2 h.*
-- G0.2 `M_RH_Master` family + `RHArtWire` commandlet; re-parent existing
-  lineages. *3–4 h + compile.*
-- G0.3 Local finishing kit: port cleanup, add UV/bake/composite/QA scripts +
-  manifest import loop; prove end-to-end on 2 assets. *3–4 h.*
-- G0.4 A/B mixed-set verdict wired (per §6). *0.5 h + the same compile.*
+**P0 — Foundations** — *EXECUTED 2026-08-14, awaiting one director compile.*
+- G0.1 **DONE** — `docs/art-bible.md`: `RHCanon` converted to authoritative sRGB
+  hex, the 14 function accents, wear discipline, tier budgets, naming contracts,
+  an 8-point per-asset acceptance checklist, standing prohibitions.
+- G0.2 **WRITTEN** (needs the compile) — `M_RH_Master` + the wiring pass, as a
+  new `RHArtWireCommandlet` (`-run=RHArtWire [-master] [-wire] [-dryrun]`).
+  Recon changed the design twice, both for the better: (a) an editor-only,
+  asset-authoring, package-saving commandlet **already exists** in this repo
+  (`URHArtCommandlet`, `-run=RHArt`) so the new one copies a proven pattern
+  rather than inventing one; (b) it needs **zero Build.cs changes** —
+  `UMaterialInstanceConstant`, `SavePackage` and `FAssetRegistryModule` are all
+  already reachable from `RedHope`, and pulling in `UnrealEd`/`MaterialEditor`
+  would have dragged Slate into the closure for no gain. The master is
+  deliberately texture-light (BaseTex + scalars) because a texture parameter
+  whose default is the wrong sampler type fails to compile, and today's assets
+  have no normal/MRA maps to point at — those arrive with the C4 bakes in P1.
+  Wired set = **the 11 meshes the game actually renders**, spanning both
+  lineages, so the kept originals are re-parented onto the same master.
+- G0.3 **DONE** — `scripts/blender/` (`rh_lib.py`, `rh_finish.py`, `README.md`),
+  proven on **13 assets**, not the 2 planned. Two findings changed the doctrine:
+  **(1)** the whole painted batch shipped **unwelded** — 2.99 verts/tri, every
+  triangle carrying its own vertices, which forces faceted shading regardless of
+  normals. Welding merges ~83 % of vertices on every asset while preserving
+  triangles and UVs exactly (0.544 → 0.544 utilisation, measured), and the
+  visual difference is obvious: `Martians/gen/weld_smooth_proof_20260814.png`.
+  **(2)** re-unwrapping is a REGRESSION on assets that already have good UVs
+  (smart_project dropped HabitatDome from 54.4 % to 13.8 % utilisation and broke
+  texture correspondence), so `--uv` is opt-in and only correct when every map is
+  being re-baked. Cycles headless baking was proven working before anything was
+  built on it.
+- G0.4 **DONE** — the mixed set is wired (§6), and `rh.ModelSetV2` now means
+  "mixed set" vs "all originals".
 
 **P1 — Buildings to bar** (~10–13 h + overnight bakes)
 - G1.1 C-lane batch over the mixed set incl. the two C1 repairs; re-import.

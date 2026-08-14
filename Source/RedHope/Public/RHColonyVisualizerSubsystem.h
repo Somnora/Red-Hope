@@ -142,6 +142,10 @@ private:
 	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
+	// Last PoweredState pushed into a building's material, so the per-frame pass
+	// only touches a MID when the sim actually changed the answer.
+	// 0 = dark (shed or switched off), 1 = running, 2 = under construction.
+	TMap<int32, uint8> AppliedPowerState;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
