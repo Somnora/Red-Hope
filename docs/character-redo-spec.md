@@ -1,5 +1,20 @@
 # Character Redo — working spec (2026-07-17)
 
+> **CORRECTION 2026-08-14 — the diagnosis below was wrong.** Checked on disk:
+> all 20 `RH_Walker_*` assets DO carry a baseColor + metallic/roughness texture
+> pair (imported in 29bb31b), and their Interchange material binds both
+> (`BaseColorTexture`, `MetallicRoughnessTexture`); the SkeletalMesh references
+> that material. The paint stage DID run on the characters. So "unfinished" is
+> an art-QUALITY judgement — Hunyuan3D humanoids built from a single sprite come
+> out lumpy in silhouette, soft in the face, mitten-handed — not a missing-paint
+> bug, and re-running the same pipeline on new sprites returns the same class of
+> result. Better input art (the Nano Banana Pro 4K identity-anchored sheets)
+> raises the floor, not the ceiling. **Get the director's verdict on the
+> 2026-07-17 contact sheet before spending another GPU session**, and if the
+> answer is "still not good enough", the real options are a different mesh
+> generator, a retopo/sculpt pass, or stylizing away from realism — not a
+> repeat of this pipeline.
+
 Director brief (hand-play session, 2026-07-17): the crew walker models "look
 weirdly unfinished" — they read as gray statues. Verdict from the screenshots:
 the meshes are UNTEXTURED (the paint stage never ran on the character batch

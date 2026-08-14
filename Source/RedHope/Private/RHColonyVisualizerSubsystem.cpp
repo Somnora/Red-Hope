@@ -18,6 +18,7 @@
 #include "Math/RotationMatrix.h"
 #include "Misc/Crc.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 
 namespace RHCanon
 {
@@ -37,6 +38,17 @@ namespace RHCanon
 
 // The Lander body rides this high on its legs so the descent engine + gear read.
 static constexpr float GLanderLiftCm = 210.f;
+
+// Model-set A/B. The 2026-07-17 painted batch (ModelPathsV2, in
+// HandleBuildingAdded) renders by default; `rh.ModelSetV2 0` restores the
+// original models so both sets can be judged in ONE boot instead of across a
+// recompile. A building picks its mesh when it spawns, so re-run RH.Demo (or
+// reload a save) after toggling for the change to take.
+static TAutoConsoleVariable<int32> CVarModelSetV2(
+	TEXT("rh.ModelSetV2"),
+	1,
+	TEXT("Building models: 1 = 2026-07-17 painted batch where one exists, 0 = the originals."),
+	ECVF_Default);
 
 FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 {
@@ -903,14 +915,55 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			// Agri Gate B: the climate machinery (generated with the agri batch).
 			{ FName("HumidityRegulator"), FString(TEXT("/Game/RedHope/Art/Agri/humidity/humidity/StaticMeshes/humidity.humidity")) },
 		};
+		// The 2026-07-17 batch: the same building roster regenerated from the
+		// identity-anchored 4K sheets and run through shape + PAINT, so each
+		// mesh arrives with its own baseColor + metallic/roughness maps. These
+		// supersede the originals row-for-row while `rh.ModelSetV2` is 1.
+		// ComputeModule is NEW coverage - it had no model and drew primitives.
+		// Held back deliberately: ModularBlock (open face) and HeavyFreighter
+		// (reads skinny) failed batch QA; AirlockModule, GreenhouseDome,
+		// ScoutSpeeder are imported but have no building DefName to attach to
+		// yet (the dome is agri Gate C's).
+		static const TMap<FName, FString> ModelPathsV2 = {
+			{ FName("Forge"),         FString(TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/StaticMeshes/HeavyForge.HeavyForge")) },
+			{ FName("BatteryBank"),   FString(TEXT("/Game/RedHope/Art/Models2/BatteryStation/BatteryStation/StaticMeshes/BatteryStation.BatteryStation")) },
+			{ FName("WaterPlant"),    FString(TEXT("/Game/RedHope/Art/Models2/IceProcessor/IceProcessor/StaticMeshes/IceProcessor.IceProcessor")) },
+			{ FName("Lander"),        FString(TEXT("/Game/RedHope/Art/Models2/CargoLander/CargoLander/StaticMeshes/CargoLander.CargoLander")) },
+			{ FName("SolarArray"),    FString(TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel")) },
+			{ FName("Habitat"),       FString(TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome")) },
+			{ FName("Borer"),         FString(TEXT("/Game/RedHope/Art/Models2/OreExtractor/OreExtractor/StaticMeshes/OreExtractor.OreExtractor")) },
+			{ FName("ComputeModule"), FString(TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule")) },
+		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
 		static const TSet<FName> VertexColoredModels = { FName("Forge") };
-		if (const FString* Path = RealModelPaths.Find(Instance.DefName))
+		bool bUsingV2 = CVarModelSetV2.GetValueOnGameThread() != 0;
+		if (const FString* V2Path = bUsingV2 ? ModelPathsV2.Find(Instance.DefName) : nullptr)
 		{
-			RealModel = LoadObject<UStaticMesh>(nullptr, **Path);
-			bVertexColored = VertexColoredModels.Contains(Instance.DefName);
+			RealModel = LoadObject<UStaticMesh>(nullptr, **V2Path);
+			if (!RealModel)
+			{
+				// The V2 asset is missing (partial import): fall through to the
+				// original rather than regress the building to primitives.
+				UE_LOG(LogRedHope, Warning, TEXT("ModelSetV2: %s missing for %s - using the original model"),
+					**V2Path, *Instance.DefName.ToString());
+				bUsingV2 = false;
+			}
 		}
+		else
+		{
+			bUsingV2 = false;
+		}
+		if (!RealModel)
+		{
+			if (const FString* Original = RealModelPaths.Find(Instance.DefName))
+			{
+				RealModel = LoadObject<UStaticMesh>(nullptr, **Original);
+			}
+		}
+		// Only the ORIGINAL Forge carries its color in vertex data; its V2
+		// replacement is textured and must keep the material it shipped with.
+		bVertexColored = !bUsingV2 && VertexColoredModels.Contains(Instance.DefName);
 	}
 	if (RealModel)
 	{
