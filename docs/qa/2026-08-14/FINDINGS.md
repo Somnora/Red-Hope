@@ -122,3 +122,76 @@ The scope approved after W2 is done, entirely compile-free.
 - The regolith tiling (root cause list, item 3) — needs a lookup-level fix.
 - New scope requested 2026-08-14: Sims-style interior cutaways, player-placed
   lights, and a glow-toggle setting — see `docs/night-and-interiors-plan.md`.
+
+---
+
+# CORRECTION to commit 92be72c, and a hard blocker (2026-08-14, later)
+
+## The correction: the props did NOT join the family
+
+Commit 92be72c is titled "plus the props join the family" and claims all ten
+Props2 instances were reparented onto `M_RH_Master` with masks assigned. **That
+claim is false.** A six-agent audit caught it and I verified it independently:
+
+- `MI_bunk` and its nine siblings exist ONLY at `Content/RedHope/Art/Props/<n>/`
+  - the flat V1 lineage. `git show --stat 92be72c` lists exactly those paths and
+  **zero** Props2 files.
+- The game loads `Props2/<n>/StaticMeshes/<n>` (RoomPropPath), whose slot-0
+  material is `Props2/<n>/Materials/Material`, still parented to
+  `/InterchangeAssets/gltf/Substrate/M_GLTF`. No `MI_*` exists under Props2.
+- Only one of the ten reparented instances is on a mesh anything loads
+  (`Props/locker`, used as floor clutter).
+
+Root cause: `rh_assign_masks.py` searched the asset registry for anything merely
+NAMED `MI_<n>` and took the first hit. Two lineages share those names. The
+lesson is in `rh_wire_props.py` now: address assets by FULL PATH, and read the
+mesh slot back after assigning rather than trusting the write.
+
+My "verified in a boot: screen strips now read" line was also wrong - I
+over-read a blue tint in the capture that was the room-designation quad, not a
+prop screen. The albedo half of that A/B was real; the emissive half was not.
+
+## The fix, written and ready, blocked
+
+`scripts/unreal/rh_wire_props.py` creates `MI_<n>` under Props2 parented to the
+master, carries BaseTex AND the glTF metallic-roughness map across, assigns the
+already-committed masks, and asserts mesh slot 0 afterwards.
+`rh_author_master.py` gained the `MRTex`/`UseMRTex` path so joining the family
+no longer costs per-pixel surface response (default 0 = every existing instance
+is bit-identical).
+
+Neither has been RUN, because:
+
+## BLOCKER: the editor cannot start
+
+`Binaries/Mac/libUnrealEditor-RedHope.dylib` is missing - the module manifest
+still lists it, and it is nowhere on the volume. Every editor launch now dies
+with "The game module 'RedHope' could not be found", which takes down the entire
+headless Python lane and the capture harness with it. I could not determine what
+removed it and will not guess.
+
+The already-pending director compile restores it AND builds rh.Cutaway /
+Floodmast / rh.Glow. Until then no asset work of any kind can run.
+
+## Verified audit findings worth acting on after the compile
+
+Beyond the prop wiring, 56 findings survived adversarial verification. The two
+that change previously-held beliefs:
+
+1. **"Unweldable because the source GLBs are gone" is FALSE.** UE 5.8 exports
+   geometry back out headlessly (AssetExportTask + StaticMeshExporterFBX), and
+   the FBX route returns already-welded data. The library-wide 3.00 verts/tri is
+   **hard split normals, not duplicated positions** - so the repair is a normals
+   operation (clear custom split normals, THEN smooth by angle), not a merge.
+   This unlocks AirFilter, the Elevators, Dress clutter and the Tiers set.
+2. **Three live room types furnish nothing.** WorkbenchLarge, ChemTableLarge and
+   Infirmary are SliceActive in DT_Rooms and are designatable from the command
+   deck, but have no RoomPropPath entry - so designating one silently STRIPS the
+   cell's furniture and leaves bare deck, with no warning logged. Confirmed by
+   pixel-diffing before/after captures.
+
+Also verified: the hab floor texture is cracked white plaster at 0.471 linear
+albedo (not clipped - an albedo/motif problem, so compile-free fixable), the
+wall panel reads as bathroom tile at ~0.9 m quilt, and NO `_Normal` sibling
+exists for any Surfaces/ texture, so every floor and wall in the colony is
+shaded perfectly flat.

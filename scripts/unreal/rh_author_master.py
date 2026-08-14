@@ -115,6 +115,28 @@ def main():
     else:
         rec("  ! default mask %s missing - run rh_import_masks.py first" % DEFAULT_MASK_TEX)
 
+    # Optional per-pixel metal/roughness, glTF packing (G = roughness,
+    # B = metallic). The Interchange-imported props carry one of these and would
+    # otherwise lose all surface variation when they join this family. UseMRTex
+    # defaults to 0, so every instance authored before this stays on the flat
+    # scalar path and is bit-identical.
+    mr_tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -900, 1400,
+                  parameter_name="MRTex",
+                  sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    mr_default = unreal.load_asset(DEFAULT_MASK_TEX)
+    if mr_default:
+        mr_tex.set_editor_property("texture", mr_default)
+    use_mr = node(mat, unreal.MaterialExpressionScalarParameter, -900, 1300,
+                  parameter_name="UseMRTex", default_value=0.0)
+    rough_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -560, 340)
+    link(rough, "", rough_mix, "A")
+    link(mr_tex, "G", rough_mix, "B")
+    link(use_mr, "", rough_mix, "Alpha")
+    metal_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -560, 240)
+    link(metallic, "", metal_mix, "A")
+    link(mr_tex, "B", metal_mix, "B")
+    link(use_mr, "", metal_mix, "Alpha")
+
     # BaseColor
     albedo = node(mat, unreal.MaterialExpressionLinearInterpolate, -520, -200)
     link(base, "", albedo, "A")
@@ -179,8 +201,8 @@ def main():
     link(floor_mul, "", emissive, "B")
 
     MEL.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
-    MEL.connect_material_property(metallic, "", unreal.MaterialProperty.MP_METALLIC)
-    MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    MEL.connect_material_property(metal_mix, "", unreal.MaterialProperty.MP_METALLIC)
+    MEL.connect_material_property(rough_mix, "", unreal.MaterialProperty.MP_ROUGHNESS)
     MEL.connect_material_property(emissive, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     try:
