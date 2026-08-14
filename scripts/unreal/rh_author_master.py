@@ -16,8 +16,16 @@ Graph:
   BaseColor = lerp(BaseTex, AccentColor, AccentAmount)
   Metallic  = Metallic
   Roughness = Rough
-  Emissive  = EmissiveColor * EmissiveAmount * PoweredState * Pulse
+  Emissive  = EmissiveColor * EmissiveAmount * PoweredState * Pulse * EmissiveMask(uv)
               + BaseColor * EmissiveFloor
+
+EmissiveMask defaults to T_RH_MaskWhite (8x8 white, linear grayscale), which
+makes it a no-op until a model's MI assigns a real mask - the 2026-08-14 W2
+finding was that the UNMASKED glow term buried every machine's paint under a
+flat HDR wash (HeavyForge at 0.22 emitted ~1.3 orange over the whole hull).
+The mask confines the glow to windows, furnace mouths and indicator strips;
+pulse and PoweredState ride through it, so the throb becomes blinking lights
+instead of a breathing hull and power-off still reads.
 
 Pulse = 1 - PulseDepth * (0.5 - 0.5*sin(Time * PulseSpeed))
 so PulseDepth 0 (the default) is a perfect no-op, and because the pulse rides
@@ -30,6 +38,7 @@ import unreal
 
 MASTER_PKG = "/Game/RedHope/Art/M_RH_Master"
 DEFAULT_BASE_TEX = "/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"
+DEFAULT_MASK_TEX = "/Game/RedHope/Art/Masks/T_RH_MaskWhite.T_RH_MaskWhite"
 OUT = os.environ.get("RH_REPORT", "/tmp/rh_master.txt")
 
 MEL = unreal.MaterialEditingLibrary
@@ -95,6 +104,14 @@ def main():
                  parameter_name="PulseDepth", default_value=0.0)
     speed = node(mat, unreal.MaterialExpressionScalarParameter, -900, 960,
                  parameter_name="PulseSpeed", default_value=2.0)
+    mask = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -900, 1160,
+                parameter_name="EmissiveMask",
+                sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE)
+    mask_tex = unreal.load_asset(DEFAULT_MASK_TEX)
+    if mask_tex:
+        mask.set_editor_property("texture", mask_tex)
+    else:
+        rec("  ! default mask %s missing - run rh_import_masks.py first" % DEFAULT_MASK_TEX)
 
     # BaseColor
     albedo = node(mat, unreal.MaterialExpressionLinearInterpolate, -520, -200)
@@ -134,11 +151,15 @@ def main():
     glow_c = node(mat, unreal.MaterialExpressionMultiply, -200, 560)
     link(glow_b, "", glow_c, "A")
     link(pulse, "", glow_c, "B")
+    # The W2 fix: glow only where the mask says. White default = old behavior.
+    glow_d = node(mat, unreal.MaterialExpressionMultiply, -60, 500)
+    link(glow_c, "", glow_d, "A")
+    link(mask, "", glow_d, "B")
     floor_mul = node(mat, unreal.MaterialExpressionMultiply, -360, 720)
     link(albedo, "", floor_mul, "A")
     link(floor, "", floor_mul, "B")
-    emissive = node(mat, unreal.MaterialExpressionAdd, -60, 640)
-    link(glow_c, "", emissive, "A")
+    emissive = node(mat, unreal.MaterialExpressionAdd, 60, 640)
+    link(glow_d, "", emissive, "A")
     link(floor_mul, "", emissive, "B")
 
     MEL.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)

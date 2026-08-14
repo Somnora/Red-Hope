@@ -23,6 +23,9 @@ Every script here does. Override the destination with `RH_REPORT=<path>`.
 | `rh_tune_motion.py` | sets the per-machine ambient-pulse parameters |
 | `rh_terrain_macro.py` | adds/retunes the terrain's macro albedo variation |
 | `rh_capture.sh` | boots the game for real and harvests screenshots |
+| `rh_tune_emissive.py` | blunt knob: sets EmissiveAmount on every MI |
+| `rh_import_masks.py` | imports grayscale mask PNGs as linear TC_Grayscale |
+| `rh_assign_masks.py` | per-model emissive mask + post-mask strength table |
 
 **Materials are compile-free.** `UMaterialEditingLibrary` is a
 `UBlueprintFunctionLibrary`, so its whole graph API is exposed to Python:

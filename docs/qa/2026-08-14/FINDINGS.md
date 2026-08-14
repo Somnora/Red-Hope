@@ -71,3 +71,54 @@ snapshot time**, or it is measuring the time of day.
 - The Borer reads as a lumpy yellow blob at strategy distance.
 - The default camera opens at 216 m, which is too far to see any of this. It is
   why none of these problems surfaced before.
+
+---
+
+# W3: the emissive mask — root cause 4 FIXED (2026-08-14, same day)
+
+The scope approved after W2 is done, entirely compile-free.
+
+## What changed
+
+- `M_RH_Master` gained `EmissiveMask` (linear grayscale, defaults to the new
+  8x8 white `T_RH_MaskWhite`, so unmasked = old behaviour; proven a rendering
+  no-op at mean pixel diff 0.586 before any mask was assigned).
+- 11 masks were cut from the models' own paint and live in
+  `/Game/RedHope/Art/Masks/`. Sources of truth were the IMPORTED texture pixels
+  (post AO/wear composite), exported and thresholded per model:
+  Forge = ember hue (hazard chevrons excluded by hue window), battery = its
+  teal/blue display panels (dozens of them), ComputeModule = dark screens,
+  WaterPlant = small accents at full value plus the painted ice mass at 0.28
+  (a low inner frost-glow), Borer/AirFilter/Humidity = size-windowed status
+  dots and small screens, Habitat = its round portholes, blurred 5 px for the
+  director's "warm and frosted" windows. SolarArray, Lander, Stockpile are
+  deliberately dark (black mask AND amount 0) — the Lander's orange trim reads
+  as paint, not lights, so no invented beacon.
+- Post-mask strengths: Forge 2.2, ComputeModule 1.8, battery 1.6,
+  Borer/AirFilter 1.5, Humidity 1.3, Habitat 1.0, WaterPlant 0.9.
+
+## Verified with pixels
+
+- Day (sheet 4): the forge keeps ALL its paint — rust panels, chevrons,
+  weathered chimneys — with ember glints on top. Day-subtle, as directed.
+- Night (sheet 5, sol fraction ~0.87 via RH.SetSpeed 8): the colony reads as a
+  working settlement — battery = wall of teal readouts, forge = one warm lit
+  window on a dark hull, Borer = amber cab lights, ice plant = cool blue.
+- Pulse rides the masks: lit-pixel delta across a 3-frame night triplet is
+  2.5–9.2 vs a ~0.5 TAA noise floor. Powered/dark still works — same term.
+
+## Tuning knobs now live
+
+- `scripts/unreal/rh_assign_masks.py` — per-model mask + strength table;
+  edit and re-run.
+- `scripts/unreal/gen` recipes in the session scratchpad were used to cut the
+  masks; the mask PNGs themselves are re-cuttable from the exported albedos.
+- ComputeModule's screens are thin (0.04 % coverage) and read faintly; loosen
+  its recipe or raise its amount if it should read stronger.
+
+## Still open (director)
+
+- Wear strength / pulse strength / yaw verdicts from the QA card.
+- The regolith tiling (root cause list, item 3) — needs a lookup-level fix.
+- New scope requested 2026-08-14: Sims-style interior cutaways, player-placed
+  lights, and a glow-toggle setting — see `docs/night-and-interiors-plan.md`.
