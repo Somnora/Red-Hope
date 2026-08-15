@@ -59,15 +59,40 @@ there; the cheaper/faster H100s are in other regions and would strand the data.
 
 Runner: `Somnora-East/red_hope/scripts/rh_trellis2.py <ref.png> <out.glb> [tris]`
 
-## STILL BLOCKED - two director credentials
+## The Vertex model rename (2026-08-15, cost a batch)
 
-1. **HF token with DINOv3 access.** TRELLIS.2's image encoder is
-   `facebook/dinov3-vitl16-pretrain-lvd1689m`, a GATED repo. The NFS cache has
-   dinov2-giant (old Hunyuan lineage) but not dinov3. Needs: accept the licence
-   on that model page, create a token, `huggingface-cli login` (or HF_TOKEN).
-2. **gcloud ADC for Vertex.** Nano Banana reference generation fails with
-   "Reauthentication is needed"; run `gcloud auth application-default login`.
+Reference generation 404'd on **every** call with `Publisher model ... not
+found`. It read like an auth failure and was not: ADC was valid. The preview
+alias `gemini-3-pro-image-preview` was RETIRED when the model went GA. The
+live id is **`gemini-3-pro-image`**.
 
-Nine crop references are rostered and ready at `docs/crop_roster.json`
-(root/tall/vine x seedling/growing/mature, flat studio background, no ground
-plane per the object-generator rules).
+Do not guess the replacement - the SDK enumerates it authoritatively, while a
+raw REST probe 404s even for valid ids:
+
+    genai.Client(vertexai=True, project=..., location="global").models.list()
+
+Patched in `nb_gen_object.py` / `nb_gen_char.py`, repo + skill copies both.
+`nb_batch_obj.py` now honours `RH_ROSTER` / `RH_OUT` so one driver serves any
+roster instead of hardcoding the object batch.
+
+## STILL BLOCKED - one director credential
+
+**HF token with DINOv3 access.** TRELLIS.2's image encoder is
+`facebook/dinov3-vitl16-pretrain-lvd1689m`, re-verified 2026-08-15 as
+`gated: manual`. The NFS cache has dinov2-giant (old Hunyuan lineage) but not
+dinov3. Needs: accept the licence on that model page, create a token,
+`huggingface-cli login` (or HF_TOKEN). `microsoft/TRELLIS.2-4B` itself is
+ungated.
+
+**Do not launch the A100 before the token exists.** It bills $1.99/hr and
+would idle at a gated download. `LAMBDA_API_KEY` is live in the Manifold
+terminal env and `gpu_1x_a100_sxm4` has capacity in us-east-1, so launch is
+one call away the moment the token lands.
+
+(RESOLVED 2026-08-15: gcloud ADC for Vertex.)
+
+Nine crop references are rostered at `docs/crop_roster.json` (root/tall/vine x
+seedling/growing/mature). Each desc now carries an explicit no-legs/no-stand/
+no-cart clause on top of the generator's generic NEG block, because a grow tray
+is a thing that plausibly stands on legs and a baked-in stand is exactly the
+defect that put holes under the desks.
