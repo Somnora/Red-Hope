@@ -79,9 +79,15 @@ for name, (amount, colour) in sorted(PROPS.items()) if master else []:
         log.append("  ! %s has no albedo - it would render as the parent default" % name)
 
     # glTF packs roughness in G and metallic in B of one texture; the master
-    # reads those channels only when UseMRTex is 1.
-    mr_name = "prop_%s_textured_metallic-prop_%s_textured_roughness" % (name, name)
-    mr = unreal.load_asset("%s/Textures/%s.%s" % (base_dir, mr_name, mr_name))
+    # reads those channels only when UseMRTex is 1. The asset NAME is the glTF
+    # image name and is sometimes truncated on import, so scan the folder for
+    # anything carrying "metallic" instead of trusting an exact spelling.
+    mr = None
+    registry = unreal.AssetRegistryHelpers.get_asset_registry()
+    for a in registry.get_assets_by_path("%s/Textures" % base_dir, recursive=False):
+        if "metallic" in str(a.asset_name).lower():
+            mr = unreal.load_asset("%s.%s" % (str(a.package_name), str(a.asset_name)))
+            break
     if mr:
         MEL.set_material_instance_texture_parameter_value(mi, "MRTex", mr)
         MEL.set_material_instance_scalar_parameter_value(mi, "UseMRTex", 1.0)
@@ -101,13 +107,11 @@ for name, (amount, colour) in sorted(PROPS.items()) if master else []:
     unreal.EditorAssetLibrary.save_loaded_asset(mi)
 
     # Point the mesh at it, then read the slot back: the whole reason this file
-    # exists is that an assignment was believed rather than verified.
-    mats = mesh.get_editor_property("static_materials")
-    if not mats:
-        log.append("  ! %s mesh has no material slots" % name)
-        continue
-    mats[0].material_interface = mi
-    mesh.set_editor_property("static_materials", mats)
+    # exists is that an assignment was believed rather than verified. First
+    # attempt used get/set of static_materials, and the read-back proved the
+    # write never stuck (the getter returns copies). set_material is the real
+    # engine-side setter.
+    mesh.set_material(0, mi)
     unreal.EditorAssetLibrary.save_loaded_asset(mesh)
 
     check = mesh.get_editor_property("static_materials")[0].material_interface

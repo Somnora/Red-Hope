@@ -195,3 +195,52 @@ albedo (not clipped - an albedo/motif problem, so compile-free fixable), the
 wall panel reads as bathroom tile at ~0.9 m quilt, and NO `_Normal` sibling
 exists for any Surfaces/ texture, so every floor and wall in the colony is
 shaded perfectly flat.
+
+---
+
+# W5: everything verified on the new binary (2026-08-14, evening)
+
+The compile landed (after one -Wshadow error, mine, fixed) and restored
+libUnrealEditor-RedHope.dylib - which also solved the missing-dylib mystery:
+an earlier 12:59 build attempt had compiled the atmosphere file, hit the same
+shadow error on the visualizer, and its half-finished link left no module
+binary. Nothing mysterious deleted it.
+
+## The props are ACTUALLY wired now, and the proof is causal
+
+`rh_wire_props.py` created MI_<n> under Props2, carried BaseTex AND the glTF
+metallic-roughness map (master gained MRTex/UseMRTex), assigned the masks, and
+read the mesh slot back. The read-back caught a second silent failure on the
+first run: get/set of static_materials returns COPIES, so the slot write never
+stuck; set_material() is the real setter. All ten now read slot0 = MI_<n>.
+
+Proof the glow is real this time, not an eyeball: two identical boots differing
+ONLY in `rh.Glow 1` vs `rh.Glow 0`, same camera, same snapshot second. The diff
+is 0.480% of the frame in 38 distinct clusters, and the changed pixels sit ON
+the furniture (labbench edge strips, galley, bunks, tank, console desk) plus
+two walker-position differences. That one test verifies the prop wiring, the
+masks, the MPC GlowScale plumbing, and the new rh.Glow CVar end to end.
+
+## Floodmast: verified in the game, at night
+
+RH.Spawn Floodmast landed the DT row through the real sim ("Built Floodmast #5
+at (18, 4) m"), the mast silhouette renders with its two lit heads, and the
+point light throws a warm ~20 m pool on the regolith with the Lander catching
+the edge. sheet: Saved/RHCapture/shots/w5_floodmast_00.png.
+
+## Cutaway: verified at two yaws + floorplan
+
+docs/qa/2026-08-14/6-cutaway-modes.png. Camera south: near walls drop. Camera
+north: the OPPOSITE walls drop. Mode 2: no walls. The swap follows the camera
+with no visible artefacts at either yaw.
+
+## Still open for the next pass (from the 56-finding audit)
+
+1. Hab floor/wall re-skin + _Normal maps for Surfaces/ - the biggest remaining
+   interior lever, compile-free.
+2. RoomPropPath entries for WorkbenchLarge / ChemTableLarge / Infirmary (C++,
+   small; next compile).
+3. The label-Z fix (14 -> 25 cm, C++, one constant; next compile).
+4. Split-normals weld pass over AirFilter / Elevators / Dress / Tiers via the
+   FBX export lane.
+5. The regolith tiling (lookup-level fix, art decision).

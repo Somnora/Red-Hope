@@ -1343,9 +1343,11 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 			Mid->SetScalarParameterValue(FName("PoweredState"), Want == 1 ? 1.f : 0.f);
 		}
 		// A Floodmast on a shed breaker goes dark with everything else.
-		if (const TWeakObjectPtr<UPointLightComponent>* Found = BuildingLights.Find(B.Id))
+		// (Named FoundLamp, not Found: this scope already has a `Found` for the
+		// building visual, and the build is -Werror,-Wshadow.)
+		if (const TWeakObjectPtr<UPointLightComponent>* FoundLamp = BuildingLights.Find(B.Id))
 		{
-			if (UPointLightComponent* Lamp = Found->Get())
+			if (UPointLightComponent* Lamp = FoundLamp->Get())
 			{
 				Lamp->SetVisibility(Want == 1);
 			}
@@ -2157,7 +2159,7 @@ void URHColonyVisualizerSubsystem::ApplyCutaway()
 			FVector2D ToCam(CamLoc.X - PitCenterCm.X, CamLoc.Y - PitCenterCm.Y);
 			if (ToCam.Normalize())
 			{
-				const uint8 WasHidden = (AppliedCutawayKey == 0xFF) ? 0 : (AppliedCutawayKey & 0x0F);
+				const uint8 WasHidden = (AppliedCutawayKey == 0xFF) ? 0u : (uint8)(AppliedCutawayKey & 0x0F);
 				for (int32 i = 0; i < 4; ++i)
 				{
 					// A face whose OUTWARD normal points at the camera is a near
@@ -2165,7 +2167,9 @@ void URHColonyVisualizerSubsystem::ApplyCutaway()
 					// thresholds, not one: a side already down stays down until
 					// it clearly swings away, so an orbit through the boundary
 					// cannot strobe walls in and out.
-					const float Dot = ToCam.X * GRHWallDirs[i].X + ToCam.Y * GRHWallDirs[i].Y;
+					// FVector2D is double-precision in UE5; the cast is explicit so no
+					// narrowing warning can fire under -Werror.
+					const float Dot = (float)(ToCam.X * GRHWallDirs[i].X + ToCam.Y * GRHWallDirs[i].Y);
 					const bool bWas = (WasHidden & (1 << i)) != 0;
 					if (bWas ? (Dot > 0.25f) : (Dot > 0.40f))
 					{
