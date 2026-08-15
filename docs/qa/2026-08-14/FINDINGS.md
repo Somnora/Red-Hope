@@ -292,3 +292,20 @@ Also riding that compile: the tier rooms (WorkbenchLarge / ChemTableLarge /
 Infirmary / LabFull / Workshop) get RoomPropPath entries plus a Function-field
 fall-through so a future data-added room can never silently strip a cell
 again, and the room-tile label lifts from +14 to +25 so it clears the deck.
+
+## W7: all four C++ fixes verified in pixels (2026-08-15, 01:20 UTC)
+
+One frame (w7_elevator3_01) shows all four: the elevator stands on dark
+tread-plate deck instead of bare dirt; the "Hallway" floor label reads (the
++25 lift); WorkbenchLarge and Infirmary furnished themselves on designation
+("Room prop: ... furnished with 'workbench_lg' / 'infirmary'"); and no door
+panel hangs outside the cage.
+
+Operational gotcha worth its own line: WHEN THE EDITOR IS OPEN, Build.sh links
+a hot-reload PATCH dylib (libUnrealEditor-RedHope-0001.dylib) that only the
+live editor loads - headless boots keep loading the BASE dylib, so new code
+silently does not run and the old code's silent paths (like the prop-strip
+branch) make it look like the fix failed. The first verification boot did
+exactly that. Fix: close the editor before compiling, or copy the -0001 over
+the base name. The capture harness now has one more reason to judge on log
+receipts, never on "it built".
