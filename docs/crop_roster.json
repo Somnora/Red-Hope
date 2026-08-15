@@ -1,56 +1,72 @@
 [
  {
+  "id": "planter_chassis",
+  "name": "Planter Chassis",
+  "class": "agri",
+  "hero_only": true,
+  "desc": "an EMPTY modular Mars-colony hydroponic planter tray with nothing growing in it: a shallow rectangular white-and-steel nutrient tray with rounded reinforced corners, red safety accent blocks at the corners, panel lines and bolts, honest dust and wear, thin drip lines along one edge, a small teal status readout on one end, bare dark growing medium visible inside, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+ },
+ {
   "id": "crop_root_1",
   "name": "Root Crop Seedling",
   "class": "agri",
-  "desc": "a low hydroponic grow tray planted with young ROOT-VEGETABLE seedlings: a shallow rectangular white-and-steel nutrient tray, small dark growing medium, a sparse even row of tiny bright-green seedling shoots only a few centimetres tall, thin drip lines along one edge, a small teal status readout on the tray end, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a low hydroponic grow tray planted with young ROOT-VEGETABLE seedlings: a shallow rectangular white-and-steel nutrient tray, small dark growing medium, a sparse even row of tiny bright-green seedling shoots only a few centimetres tall, thin drip lines along one edge, a small teal status readout on the tray end, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "planter_chassis"
  },
  {
   "id": "crop_root_2",
   "name": "Root Crop Growing",
   "class": "agri",
-  "desc": "a low hydroponic grow tray of HALF-GROWN root vegetables: shallow white-and-steel nutrient tray, dense healthy mid-green leafy tops forming a continuous canopy across the tray, the crowns of pale orange roots just breaking the growing medium, drip lines, a small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a low hydroponic grow tray of HALF-GROWN root vegetables: shallow white-and-steel nutrient tray, dense healthy mid-green leafy tops forming a continuous canopy across the tray, the crowns of pale orange roots just breaking the growing medium, drip lines, a small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_root_1"
  },
  {
   "id": "crop_root_3",
   "name": "Root Crop Mature",
   "class": "agri",
-  "desc": "a low hydroponic grow tray of MATURE root vegetables ready to harvest: shallow white-and-steel nutrient tray packed with lush deep-green leafy tops, fat orange carrot-like roots clearly swelling out of the medium, drip lines, a small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray of MATURE root vegetables at peak harvest: the tray COMPLETELY FULL of big fat swollen bright-ORANGE carrot-like roots, each root clearly bulging up out of the dark growing medium so the orange shoulders are plainly visible in tight packed rows, topped by a dense lush deep-green leafy canopy that is FULLER and TALLER than at any earlier stage, drip lines, a small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_root_1"
  },
  {
   "id": "crop_tall_1",
   "name": "Tall Crop Seedling",
   "class": "agri",
-  "desc": "a hydroponic grow tray with young TALL-STALK grain seedlings: shallow white-and-steel nutrient tray, thin bright-green grass-like shoots a few centimetres tall in even rows, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray with young TALL-STALK grain seedlings: shallow white-and-steel nutrient tray, thin bright-green grass-like shoots a few centimetres tall in even rows, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "planter_chassis"
  },
  {
   "id": "crop_tall_2",
   "name": "Tall Crop Growing",
   "class": "agri",
-  "desc": "a hydroponic grow tray of HALF-GROWN tall grain stalks: white-and-steel tray, upright mid-green stalks about knee height with narrow leaves, a light support mesh, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray of HALF-GROWN tall grain stalks: white-and-steel tray, upright mid-green stalks about knee height with narrow leaves, a light support mesh, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_tall_1"
  },
  {
   "id": "crop_tall_3",
   "name": "Tall Crop Mature",
   "class": "agri",
-  "desc": "a hydroponic grow tray of MATURE tall grain: white-and-steel tray, dense upright golden-green stalks with heavy seed heads at the top, support mesh, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray of MATURE tall grain: white-and-steel tray, dense upright golden-green stalks with heavy seed heads at the top, support mesh, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_tall_1"
  },
  {
   "id": "crop_vine_1",
   "name": "Vine Crop Seedling",
   "class": "agri",
-  "desc": "a hydroponic grow tray with young VINE seedlings and a bare trellis: white-and-steel nutrient tray, a slim vertical wire trellis frame, a few small bright-green vine shoots just starting to climb, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray with young VINE seedlings and a bare trellis: white-and-steel nutrient tray, a slim vertical wire trellis frame, a few small bright-green vine shoots just starting to climb, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "planter_chassis"
  },
  {
   "id": "crop_vine_2",
   "name": "Vine Crop Growing",
   "class": "agri",
-  "desc": "a hydroponic grow tray of HALF-GROWN vines on a trellis: white-and-steel tray, a slim wire trellis half covered in mid-green leafy vines with small yellow flowers, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray of HALF-GROWN vines on a trellis: white-and-steel tray, a slim wire trellis half covered in mid-green leafy vines with small yellow flowers, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_vine_1"
  },
  {
   "id": "crop_vine_3",
   "name": "Vine Crop Mature",
   "class": "agri",
-  "desc": "a hydroponic grow tray of MATURE fruiting vines: white-and-steel tray, a wire trellis densely covered in deep-green leaves with ripe red tomato-like fruit hanging, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it"
+  "desc": "a hydroponic grow tray of MATURE fruiting vines: white-and-steel tray, a wire trellis densely covered in deep-green leaves with ripe red tomato-like fruit hanging, drip lines, small teal status readout, the tray body sitting flush on its own underside with no legs, no stand, no cart, no wheels, no supporting frame and nothing at all underneath it",
+  "anchor": "crop_vine_1"
  }
 ]
