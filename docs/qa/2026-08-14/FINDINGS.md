@@ -244,3 +244,51 @@ with no visible artefacts at either yaw.
 4. Split-normals weld pass over AirFilter / Elevators / Dress / Tiers via the
    FBX export lane.
 5. The regolith tiling (lookup-level fix, art decision).
+
+---
+
+# W6: the director's four interior complaints, root-caused and fixed (2026-08-14, night)
+
+Complaints from the live review of the cutaway sheets, in his words: materials
+look jank; the floor is missing around the elevator; you cannot see the floor
+underneath a lot of the desks; the elevator doors open strangely outside of
+its body.
+
+## 1. "Materials look jank" -> the surfaces were re-skinned (DONE, verified)
+
+New procedural T_HabFloor_Sealed (2 m panel grid, mean linear albedo 0.294 vs
+the old plaster's 0.471), T_HabFloor_Deck (1 m plates + tread studs), and
+T_HabWall_Panel (vertical insulated panels + bolts), each with a height-derived
+_Normal sibling imported as TC_Normalmap - so ApplySurface's Foo_Normal
+convention lights them automatically, and every floor and wall in the colony is
+shaded for the first time. Verified in pixels at the same framing he critiqued.
+
+## 2. "Cannot see the floor under the desks" -> baked plates, CUT (DONE, verified)
+
+The grey slabs were IN THE PROP MESHES - the generator bakes a ground slab
+under furniture, and the Aug-14 weld pass reimported from the with-plate
+sources, resurrecting plates the July "plate-free re-export" had removed.
+scripts/blender/rh_cut_plate.py detects the plate STRUCTURALLY (a connected
+component that is razor-flat, footprint-wide and bottom-flush - a blind z-cut
+would have taken chair legs with it) and deletes it. 7 of 10 props carried
+plates and were cut; conduit / planter_wet / tank genuinely had none (largest
+bottom-flush slab: 4.8 % of footprint) and were passed through untouched.
+Reimported in place, slots re-asserted, verified: furniture stands on the deck.
+
+## 3. "Floor missing around the elevator" -> C++, awaiting compile
+
+The shaft-head cell deliberately stayed bare dirt ("leave it bare rock") while
+every neighbour got bright deck - on his screen that read as a hole. It now
+wears dark deck plating like the rest of the floor.
+
+## 4. "Doors open outside the body" -> C++, awaiting compile
+
+Door travel was a fixed 26->94 cm throw regardless of cage size, so parted
+panels overshot the cage and hung in the air. Travel is now derived from the
+cage's own bounds (outer edge stops at the cage side, panels pocket into the
+frame), the same way DoorFaceX already was.
+
+Also riding that compile: the tier rooms (WorkbenchLarge / ChemTableLarge /
+Infirmary / LabFull / Workshop) get RoomPropPath entries plus a Function-field
+fall-through so a future data-added room can never silently strip a cell
+again, and the room-tile label lifts from +14 to +25 so it clears the deck.

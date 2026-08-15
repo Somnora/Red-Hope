@@ -1436,7 +1436,19 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 		ElevatorDoorAlpha = FMath::FInterpTo(ElevatorDoorAlpha, Target, DeltaTime, 3.5f);
-		const float SlideCm = 26.f + ElevatorDoorAlpha * 68.f; // shut seam -> parted panels
+		// Panels pocket INTO the frame: fully open, a door's outer edge stops
+		// at the cage's own side, never past it. The old fixed 94 cm throw
+		// overshot the cage body and the parted panels hung in the air beside
+		// it (director 2026-08-14: "the doors open strangely outside of its
+		// body"). 27.5 = half the 55 cm panel; travel is derived from the cage
+		// bounds like DoorFaceX above, so any future cage mesh keeps this true.
+		float SlideMaxCm = 94.f;
+		if (const UStaticMesh* CageMesh = CageComp->GetStaticMesh())
+		{
+			const float S = CageComp->GetComponentScale().Z;
+			SlideMaxCm = FMath::Max(30.f, CageMesh->GetBounds().BoxExtent.Y * S - 27.5f - 2.f);
+		}
+		const float SlideCm = FMath::Lerp(26.f, SlideMaxCm, ElevatorDoorAlpha);
 		if (UStaticMeshComponent* DoorL = ElevatorDoorL.Get())
 		{
 			DoorL->SetWorldLocation(FVector(DoorFaceX, Head.Y - SlideCm, FloorZ + 76.f));
@@ -1585,6 +1597,13 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 			if (AStaticMeshActor* HeadTile = SpawnBox(Center, FVector(10.f, 10.f, 0.3f),
 				FLinearColor(0.20f, 0.15f, 0.11f), FLinearColor::Black))
 			{
+				// The elevator's own cell wears deck plating like every other
+				// carved cell, only darker - it WAS left bare dirt, and on the
+				// director's screen (2026-08-14) that read as a hole in the
+				// floor around the elevator, not as rock.
+				ApplySurface(HeadTile->GetStaticMeshComponent(),
+					TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Deck.T_HabFloor_Deck"),
+					1000.f, FLinearColor(0.30f, 0.30f, 0.32f), 0.6f);
 #if WITH_EDITOR
 				HeadTile->SetActorLabel(FString::Printf(TEXT("Sim_ShaftFloor_%d"), L));
 #endif
@@ -1662,6 +1681,17 @@ FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
 		// Dormant rooms (M2 Gate C+): the fluid works read as a tank + pump.
 		{ FName("WaterWorks"),     TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
 		{ FName("Septic"),         TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
+		// Tier rooms (tiers Gate A). These are SliceActive and designatable,
+		// and had NO entry here - so zoning one silently STRIPPED the cell's
+		// furniture and left bare deck, with no warning fired (the missing-asset
+		// log only triggers on a non-empty path). Audit finding, 2026-08-14,
+		// confirmed by pixel diff. Tiers meshes are still on the importer
+		// material - imperfect furniture, but honest beats empty.
+		{ FName("WorkbenchLarge"), TEXT("/Game/RedHope/Art/Tiers/workbench_lg/StaticMeshes/workbench_lg.workbench_lg") },
+		{ FName("ChemTableLarge"), TEXT("/Game/RedHope/Art/Tiers/chemtable_lg/StaticMeshes/chemtable_lg.chemtable_lg") },
+		{ FName("Infirmary"),      TEXT("/Game/RedHope/Art/Tiers/infirmary/StaticMeshes/infirmary.infirmary") },
+		{ FName("LabFull"),        TEXT("/Game/RedHope/Art/Tiers/lab_full/StaticMeshes/lab_full.lab_full") },
+		{ FName("Workshop"),       TEXT("/Game/RedHope/Art/Tiers/workshop/StaticMeshes/workshop.workshop") },
 	};
 	// Crop-stage cells (agri Gate A): the room key arrives as
 	// <Garden|Greenhouse>#<family>#<stage 0-2>; the stage art is one mesh per
@@ -1679,8 +1709,30 @@ FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
 			return FString::Printf(TEXT("/Game/RedHope/Art/Agri/%s/%s/StaticMeshes/%s.%s"), *N, *N, *N, *N);
 		}
 	}
-	const FString* P = Props.Find(Room);
-	return P ? *P : FString();
+	if (const FString* P = Props.Find(Room))
+	{
+		return *P;
+	}
+	// Unknown row: fall through on its FUNCTION before giving up, so a future
+	// data-added room furnishes itself with its family's furniture instead of
+	// silently stripping the cell (how the tier rooms went bare for a month).
+	if (!Room.IsNone())
+	{
+		if (const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr)
+		{
+			if (const FRHRoomRow* Row = Defs->GetRoom(Room))
+			{
+				if (Row->Function != Room)
+				{
+					if (const FString* F = Props.Find(Row->Function))
+					{
+						return *F;
+					}
+				}
+			}
+		}
+	}
+	return FString();
 }
 
 void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
@@ -1761,8 +1813,11 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Label->SetWorldSize(150.f);
 			Label->SetHorizontalAlignment(EHTA_Center);
 			Label->SetVerticalAlignment(EVRTA_TextCenter);
+			// 25, not 14: the tile is a 0.3 m box whose top face is at +15, so
+			// a glyph plane at +14 sat one centimetre INSIDE the deck and was
+			// depth-occluded from every camera above it (audit 2026-08-14).
 			Label->SetWorldLocationAndRotation(
-				Tile->GetActorLocation() + FVector(0, 0, 14.f),
+				Tile->GetActorLocation() + FVector(0, 0, 25.f),
 				FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 		}
 		if (Label)
