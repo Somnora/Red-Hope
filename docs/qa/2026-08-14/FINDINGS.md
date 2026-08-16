@@ -437,3 +437,67 @@ summary statistics over them.
 - The Tiers furniture is no longer the shard-confetti it was before b5a2cb1; it
   reads as furniture in game. It remains the set the director rejected, so it is
   a regeneration candidate, not a repair one.
+
+---
+
+# W12: the Tiers furniture through TRELLIS.2 - 3 of 5 (2026-08-16)
+
+The director rejected the repaired Tiers furniture ("the large work bench
+actually looks worse, we might need to start over from scratch"). Starting over
+was the right call and this is it: new art-bible-canon references, then
+TRELLIS.2-4B.
+
+References follow the canon rather than my taste: BoneWhite body, DarkSlate tube
+frame, HazYellow as *trim only* (the bible's rule is 5-15 % of visible surface -
+"a building painted head to toe in its accent reads as a toy"), TealGlow
+readouts, interior wear 0.15. Anchored to the workbench hero so all five read as
+one furniture family. `hero_only` on every entry: TRELLIS.2 is single-image
+conditioned, so 5 images, not 25.
+
+The infirmary was written under the Gate-D directive - equipment at rest, no
+patient, no injury, no red cross emblem, nothing clinical-graphic.
+
+## Result: 3 usable, 2 rejected
+
+| asset | tris | v/t | verdict |
+|---|---|---|---|
+| workbench_lg | 7676 | 1.08 | shipped |
+| workshop | 7652 | 1.20 | shipped |
+| infirmary | 7805 | 0.99 | shipped |
+| chemtable_lg | 6235 | 1.21 | REJECTED - collapsed |
+| lab_full | 7568 | 1.14 | REJECTED - fragmented |
+
+For contrast, the meshes these replace were 7,000 tris at **3.00 v/t** in ~1,300
+disconnected components with ~8,800 open boundary edges.
+
+The two failures share a cause and it is not randomness: `chemtable_lg` has a
+GLASS fume hood and `lab_full` a tall cabinet standing apart in an L.
+Transparency and disconnected volumes are the two shapes single-image-to-3D
+solves worst - it reconstructs one connected surface, and glass gives it no
+surface to find. Re-rolling would re-roll the same problem. The fix is a
+reference without glass and with the cabinet joined to the bench mass.
+
+## Two instrument errors, both mine, both caught
+
+1. My first preview render used a 2000 W area light on white furniture and blew
+   the textures out; I nearly reported "washed out, texture lost". Checking the
+   ALBEDO ATLASES showed the yellow trim, dark slate and rust bands all present
+   (dark coverage 19-61 %). Re-rendered at 420 W - the material was always there.
+2. Locating props by picking the highest-variance image block found the planter
+   and the Borer instead of the furniture, twice. Computing the cell position
+   from the sim's own `SpiralCell` is the reliable way, as it was for the crops.
+
+Both are the W11 lesson again: judge from the right instrument, and prefer the
+one the engine itself defines.
+
+## Verified
+
+`cell 2 'WorkbenchLarge' furnished with 'workbench_lg'` and `cell 4 'Infirmary'`
+in a live boot; the workbench renders with clear open space beneath the worktop
+and the lower shelf legible through it - the director's original complaint
+("you cannot see the floor underneath a lot of the desks") answered in pixels.
+`docs/qa/2026-08-16/workbench-in-game.png`.
+
+Workshop could not be shown in-boot: its row is DORMANT, gated behind the
+RegolithCeramics discovery, so `RH.Designate Workshop` furnishes nothing. The
+asset is verified from its shipped GLB and its UE read-back only.
