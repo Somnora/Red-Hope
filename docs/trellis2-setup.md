@@ -75,7 +75,20 @@ Patched in `nb_gen_object.py` / `nb_gen_char.py`, repo + skill copies both.
 `nb_batch_obj.py` now honours `RH_ROSTER` / `RH_OUT` so one driver serves any
 roster instead of hardcoding the object batch.
 
-## STILL BLOCKED - one director credential
+## UNBLOCKED 2026-08-16 - and the lane finally RAN
+
+The director's DINOv3 access request was approved. Verified before spending
+anything: `config.json` returns **200** with the token, and a range request on
+`model.safetensors` returns **206**, so the weights genuinely download rather
+than just the metadata. Read the codes apart - 401 no credentials, 403
+credentials without a grant, 200 granted.
+
+That let the pipeline execute for the FIRST TIME. Everything below the old
+blocker note was written from a lane that had never run; three further gates
+were hiding behind the first one, and none of them were knowable until DINOv3
+opened. See "First real run" at the end of this file.
+
+## HISTORICAL - the credential block, now resolved
 
 **HF token with DINOv3 access.** TRELLIS.2's image encoder is
 `facebook/dinov3-vitl16-pretrain-lvd1689m`. Needs: accept the licence on that
@@ -151,3 +164,75 @@ seedling/growing/mature). Each desc now carries an explicit no-legs/no-stand/
 no-cart clause on top of the generator's generic NEG block, because a grow tray
 is a thing that plausibly stands on legs and a baked-in stand is exactly the
 defect that put holes under the desks.
+
+---
+
+# First real run of the lane (2026-08-16)
+
+`bootstrap_trellis2.sh` on the persistent filesystem rebuilds this on a fresh box
+in one pass. It exists because the environment lives in system python3.10
+user-site on EPHEMERAL root and dies with the instance, while the 16 GB
+TRELLIS.2-4B snapshot, the repo clones and the source patches all persist.
+
+## Three gates were hiding behind DINOv3
+
+1. **`briaai/RMBG-2.0` is ALSO gated.** `from_pretrained` constructs
+   `BiRefNet(model_name="briaai/RMBG-2.0")` unconditionally, so the pipeline
+   could not even load. But `preprocess_image()` only calls the remover when the
+   input has no usable alpha - "if has alpha channel, use it directly" - and every
+   reference we feed is rembg-stripped RGBA. The model is built and never used.
+   `rh_trellis2.py` now stubs the constructor AND asserts the alpha, aborting
+   loudly if an opaque image ever arrives, because the failure mode of a silent
+   stub is meshing the background as geometry.
+
+2. **`'DINOv3ViTModel' object has no attribute 'layer'`.** Upstream walks
+   `self.model.layer`; under transformers 5.15 the model's children are
+   `embeddings / rope_embeddings / model / norm`, and the 24 blocks live at
+   `model.model.layer` inside a `DINOv3ViTEncoder`. Patched in both repo clones
+   with a fallback that reports the actual children instead of a bare
+   AttributeError. NOTE: both clones (`TRELLIS2` and `TRELLIS.2`) are the same
+   git rev 75fbf01 - the duplicate is harmless, but patch both, because the
+   runner's own `sys.path.insert(0, ...)` outranks PYTHONPATH and picks one.
+
+3. **`o_voxel`'s imports reveal themselves one layer at a time**: plyfile, then
+   utils3d, then flex_gemm, then cumesh. Each fix exposed exactly one more. The
+   bootstrap now installs all four up front.
+
+## The nvdiffrast note in this file was wrong
+
+It said a working copy was saved at `wheels/` and to copy it in. That could never
+have worked: the compiled extension is `_nvdiffrast_c`, a **sibling** top-level
+module in site-packages, not a child of the `nvdiffrast/` package directory, so
+copying the package dir carried only `.py` files and `ops.py` dies at
+`import _nvdiffrast_c` on line 12. It must be BUILT (`setup.sh --nvdiffrast`).
+Building it LAST also dissolves the original trap - the danger was a *later*
+nameless package uninstalling it, and nothing installs after it now. The `.so`
+is now saved beside the package for reference.
+
+## Results, against Hunyuan3D on the same reference
+
+`crop_vine_3` - a wire trellis under dense foliage - is the case Hunyuan3D
+collapsed into intersecting planes on TWO independent takes.
+
+| | Hunyuan3D 2.1 | TRELLIS.2-4B |
+|---|---|---|
+| result | collapsed planes, twice | trellis rods + hanging fruit, first try |
+| triangles | 10093 then 8981 (over budget) | **7817, in-pipeline** |
+| verts/tri | 3.00 (hard split normals) | **1.43 (welded)** |
+| texture | separate paint stage | **PBR direct** |
+| wall clock | shape 33 s + paint 65 s + two loads | 147 s total |
+
+Pipeline load is ~135 s (16 GB off NFS); generation is 12 shape steps + 12
+texture steps and quick.
+
+## One difference that will sink a prop if missed
+
+TRELLIS.2 emits meshes **centred on the origin** (`Zmin -0.385`), while
+`mesh_cleanup.py` grounded the Hunyuan ones (`Zmin +0.000`). Imported raw, the
+prop sinks halfway into the deck. Ground it first - `scripts/blender` style
+Zmin->0 and XY-centre - before the in-place reimport.
+
+## And the reimport still does not carry textures
+
+Same trap as the crops: reimporting the mesh reports OK and leaves the old
+albedo in place. Always follow with `rh_import_crop_textures.py`.
