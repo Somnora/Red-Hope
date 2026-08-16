@@ -17,7 +17,7 @@ one. Nothing here should be treated as a clearance.
 | Hunyuan3D 2.1 | `tencent-hunyuan-community` | Yes, **inside the Territory** | Territory **excludes the EU, UK and South Korea**; >1 M MAU requires a separate licence; distribution must carry a notice; **Tencent claims no rights in Outputs** | Most shipped meshes: props, building models, crew walkers, the 8 Hunyuan crops |
 | TRELLIS.2-4B | **MIT** | Yes, unrestricted | none | `crop_vine_3`, `workbench_lg`, `workshop`, `infirmary` |
 | DINOv3 (`dinov3-vitl16`) | DINOv3 License (Meta) | Yes, worldwide, no MAU threshold | **Must prominently display "Built with DINOv3"** | The same four (it is TRELLIS.2's image encoder) |
-| **nvdiffrast** | **NVIDIA Source Code License (1-Way Commercial)** | **No — non-commercial only** | *"The Work and any derivative works thereof only may be used or intended for use non-commercially."* | The same four — see below |
+| ~~nvdiffrast~~ **removed** | NVIDIA Source Code License (1-Way Commercial) | No — non-commercial only | **No longer used.** Replaced by `scripts/gpu/rh_uv_rasterizer.py`; the four assets were re-baked with it absent | none |
 | SDXL 1.0 + IP-Adapter | CreativeML Open RAIL++-M | Yes, with behavioural use restrictions | model card states "research purposes only" as intended use | style-lock / older sprite lanes |
 | Real-ESRGAN | BSD-3-Clause | Yes | attribution | Hunyuan paint stage |
 | rembg (code) | MIT | Yes | the underlying u2net / isnet-general-use **model** licences are unconfirmed | background stripping |
@@ -78,6 +78,30 @@ Note the asymmetry that makes this worth solving rather than avoiding:
 TRELLIS.2-4B itself is **MIT**, the most permissive thing in the pipeline. The
 restriction is in a rendering utility, not in the model — so it is plausibly
 engineerable around rather than a dead end.
+
+#### RESOLVED 2026-08-16: nvdiffrast removed, assets re-baked
+
+`scripts/gpu/rh_uv_rasterizer.py` replaces the two calls with ~120 lines of our
+own PyTorch. Proven, not asserted:
+
+- nvdiffrast was **deleted from the box** (`site-packages/nvdiffrast`, the
+  `_nvdiffrast_c*.so`, and the dist-info). `import nvdiffrast` then raised
+  ModuleNotFoundError, and so did `o_voxel` - the baseline.
+- With only the stand-in registered, `o_voxel` imported and **all four assets
+  exported**: crop_vine_3, workbench_lg, workshop, infirmary. GLB sizes within
+  1% of the originals.
+- Rendered side by side, the results are indistinguishable from the nvdiffrast
+  bakes, with the trim, readouts and panels in the same places -
+  `docs/qa/2026-08-16/permissive-rasterizer-ab.jpg`. No vertical flip, which
+  confirms `flip_y=False` by the test that actually matters.
+- The four shipped assets have been **re-imported from the nvdiffrast-free
+  bakes**, so the repo no longer contains art produced through it.
+
+One honest negative: a pixel diff of the atlases could NOT validate this,
+because the pipeline is not reproducible run to run - the same seed produced
+7817 vs 7571 triangles for crop_vine_3, so the UV layouts differ and a
+pixel-wise comparison is meaningless. The render comparison is the evidence;
+the atlas diff is not.
 
 ### 2. Hunyuan3D's Territory excludes the EU, UK and South Korea
 
