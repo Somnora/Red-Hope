@@ -107,17 +107,21 @@ else:
         if extra:
             line += "  {%s}" % ", ".join(extra)
         log.append(line)
+        # get_inputs_for_material_expression returns the upstream EXPRESSIONS
+        # themselves, in input order - NOT input names. The first version of
+        # this script assumed names and called MEL.get_input_node (which does
+        # not exist in 5.8); the AttributeError was swallowed by a bare except,
+        # so the graph silently dumped with no connections at all. Never let an
+        # inspection tool fail quietly - a blank section reads as "nothing
+        # connected" rather than "the reader is broken".
         try:
-            for inp in MEL.get_inputs_for_material_expression(mat, e):
-                try:
-                    tgt = MEL.get_input_node(mat, e, inp)
-                except Exception:
-                    tgt = None
+            ups = list(MEL.get_inputs_for_material_expression(mat, e))
+            for slot, tgt in enumerate(ups):
                 if tgt is not None:
-                    log.append("        .%s <- [%s] %s" % (
-                        inp, index.get(tgt, "?"), label(tgt)))
+                    log.append("        in[%d] <- [%s] %s" % (
+                        slot, index.get(tgt, "?"), label(tgt)))
         except Exception as exc:
-            log.append("        <inputs unavailable: %s>" % str(exc)[:60])
+            log.append("        <inputs UNAVAILABLE: %r>" % (exc,))
 
 with open(OUT, "w") as f:
     f.write("\n".join(log) + "\n")

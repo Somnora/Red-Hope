@@ -309,3 +309,87 @@ branch) make it look like the fix failed. The first verification boot did
 exactly that. Fix: close the editor before compiling, or copy the -0001 over
 the base name. The capture harness now has one more reason to judge on log
 receipts, never on "it built".
+
+---
+
+# W10: the regolith tiling, fixed at the lookup (2026-08-15)
+
+The last unfixed root cause from this audit, and the one the 2026-08-14 pass
+measured and then reverted. Sheet: `docs/qa/2026-08-15/regolith-tiling-ab.png`.
+
+## Why the framing mattered more than the fix
+
+The first capture aimed at open terrain (`RH.Cam 600 600 0.45`) and measured a
+repeat peak of only 0.044-0.098 - which reads as "there is no tiling problem".
+That is a measurement artefact with two causes: hills put the ground at varying
+depth so no single lag matches across the patch, and slope makes the triplanar
+weights vary, which decorrelates the taps by itself.
+
+The colony view - `RH.Cam 0 0 0.45`, the DEFAULT OPENING CAMERA - is flat graded
+ground, and there the lattice is unmistakable both to the eye and to the metric
+at 0.418-0.631. **The bug lives exactly where the player is looking when the
+game starts.** Measure the shot the director complained about, not a shot that
+happens to be convenient.
+
+## The fix
+
+`scripts/unreal/rh_terrain_stochastic.py`. Per triplanar plane, `SurfTex` is
+sampled a second time on a decorrelated UV and blended:
+
+    uv_macro = uv_detail / MacroRatio * (1, -1.13) + (0.37, 0.61)
+    mixed    = lerp(detail, macro, MacroBlend)
+    final    = Mean + (blended - Mean) * MacroContrast
+
+Non-integer period ratio (5.3) so the two periods do not come back into phase at
+screen scale, an axis flip to kill streak alignment, and an offset so the taps do
+not coincide at the world origin. `Mean` is `SurfTex` sampled at an explicit high
+mip - the top mip of a mipped texture IS its average colour, so the GPU supplies
+the mean for a 1x1 lookup instead of a hand-entered constant that would rot the
+next time the texture is re-authored. The script checks the texture actually has
+a mip chain and disables the restore rather than silently subtracting a
+full-detail sample.
+
+Albedo goes 3 taps -> 6, plus the 1x1 mean: 6 -> 10 samples. The NORMAL path is
+deliberately untouched - at the distance where tiling is objectionable the normal
+map has mipped to near-flat and contributes almost nothing to the repeat, while
+albedo's large blobs survive mipping.
+
+## Verified, in this order
+
+1. **No-op proof.** Authored at `MacroBlend=0` (lerp collapses to the detail tap,
+   contrast to 1.0) and captured. Diff vs shipped on bare ground: mean 0.88/255,
+   against a same-run frame-to-frame noise floor of 1.06/255 - the rebuilt graph
+   differs from the original by LESS than two frames of one run differ from each
+   other. Graph surgery proven harmless before judging the art.
+2. **Repeat peak, same camera and same pinned snapshot second:**
+
+   | crop | before | after |
+   |---|---|---|
+   | 800x260+60+60 | 0.631 | 0.313 |
+   | 470x400+30+430 | 0.456 | 0.233 |
+   | 600x300+950+120 | 0.592 | 0.257 |
+   | 500x350+1050+520 | 0.418 | 0.224 |
+
+   Halved on every patch, and `top0.1%` halved too - the whole population of high
+   lags fell, not one lucky peak.
+3. **No wash-out.** Mean luminance moved <0.6/255; detrended local contrast rose
+   6.96 -> 8.08, because the second tap adds independent detail. The variance
+   restore did its job.
+4. **No regression on hilly terrain**: 0.044 -> 0.049, both inside the
+   no-lattice regime.
+
+## Tuning
+
+`MacroRatio` / `MacroBlend` / `MacroContrast` are live scalar parameters in
+group "Terrain Macro". Re-running the script only retunes them - the marker on
+the created nodes means the graph never accumulates duplicates. `MacroBlend 0`
+restores the shipped look exactly.
+
+## Tooling fixed in passing
+
+`rh_dump_material.py` had been reporting NO connections at all for every
+material. `MEL.get_inputs_for_material_expression` returns the upstream
+EXPRESSIONS, not input names; the script treated them as names and called
+`MEL.get_input_node`, which does not exist in 5.8, and a bare `except` swallowed
+the AttributeError. A blank section read as "nothing is connected" rather than
+"the reader is broken" - which is how a graph gets authored against a guess.
