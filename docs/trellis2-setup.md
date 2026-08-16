@@ -88,7 +88,26 @@ no dinov3 of any kind. The NFS has dinov2-giant (old Hunyuan lineage), which is
 NOT a substitute - TRELLIS.2-4B's weights were trained against DINOv3 features,
 so swapping the encoder would burn GPU time to produce garbage. Nor should an
 unofficial re-upload be used to route around a licence the rights-holder gated.
-This is a 30-second click by the director and there is no engineering way past it.
+
+**Status 2026-08-16, with the director's token (user `CitiznLame`):** the token
+is valid (`whoami-v2` resolves), but the same file returns **HTTP 403**. Read the
+two codes apart, because they mean different things and only one is actionable:
+
+    401  no credentials          -> supply a token
+    403  credentials, no grant   -> the ACCESS REQUEST has not been approved
+
+The repo is `gated: manual`, i.e. a human reviews each request. Earlier notes in
+this file called that "a 30-second click"; that was wrong. Submitting the form is
+seconds, approval is an unbounded wait on Meta and is not something the project
+controls. **Do not plan a session around it landing.** The crop work therefore
+runs on Hunyuan3D 2.1 (installed, weights on the NFS, DINOv2-based and ungated),
+with TRELLIS.2 held as a later quality pass.
+
+Worth keeping in view: the mesher was never the root cause of the bad crops. The
+reference images were - they were generated from art that textured as aerial
+satellite views of a city. Good references through the OLD lane is expected to
+fix them; TRELLIS.2 is an upgrade (direct PBR, no separate paint stage), not a
+prerequisite.
 
 ## State on Somnora-East as of 2026-08-16 (verified, not assumed)
 
