@@ -78,16 +78,52 @@ roster instead of hardcoding the object batch.
 ## STILL BLOCKED - one director credential
 
 **HF token with DINOv3 access.** TRELLIS.2's image encoder is
-`facebook/dinov3-vitl16-pretrain-lvd1689m`, re-verified 2026-08-15 as
-`gated: manual`. The NFS cache has dinov2-giant (old Hunyuan lineage) but not
-dinov3. Needs: accept the licence on that model page, create a token,
-`huggingface-cli login` (or HF_TOKEN). `microsoft/TRELLIS.2-4B` itself is
-ungated.
+`facebook/dinov3-vitl16-pretrain-lvd1689m`. Needs: accept the licence on that
+model page, create a token, `huggingface-cli login` (or HF_TOKEN).
+`microsoft/TRELLIS.2-4B` itself is ungated.
 
-**Do not launch the A100 before the token exists.** It bills $1.99/hr and
-would idle at a gated download. `LAMBDA_API_KEY` is live in the Manifold
-terminal env and `gpu_1x_a100_sxm4` has capacity in us-east-1, so launch is
-one call away the moment the token lands.
+Re-verified on-box 2026-08-16: an anonymous fetch of the DINOv3 `config.json`
+returns **HTTP 401**, and a `find` across the whole 248 GB filesystem turns up
+no dinov3 of any kind. The NFS has dinov2-giant (old Hunyuan lineage), which is
+NOT a substitute - TRELLIS.2-4B's weights were trained against DINOv3 features,
+so swapping the encoder would burn GPU time to produce garbage. Nor should an
+unofficial re-upload be used to route around a licence the rights-holder gated.
+This is a 30-second click by the director and there is no engineering way past it.
+
+## State on Somnora-East as of 2026-08-16 (verified, not assumed)
+
+- `microsoft/TRELLIS.2-4B`: **fully downloaded, 16 GB, 0 `.incomplete` parts**,
+  at `hf-cache/hub/models--microsoft--TRELLIS.2-4B`. This is what grew the
+  filesystem to 248 GB. The download is DONE; do not re-do it.
+- Runner `red_hope/scripts/rh_trellis2.py` present; both `repos/TRELLIS2` and
+  `repos/TRELLIS.2` clones exist, so the runner's `sys.path` entry is valid.
+- Working `nvdiffrast` + `pip freeze` at `red_hope/wheels/`.
+- **The nine stripped crop references are parked at
+  `red_hope/io/crop_refs/`** (1536 px RGBA, background removed) - so the next
+  launch starts at meshing, not at uploading. Strip AppleDouble `._*` files
+  after any macOS-made tarball; a glob would otherwise feed them to the model.
+
+## Launch through Manifold, not raw curl
+
+The 2026-08-15 note said "no MCP is involved". That is now wrong: the Manifold
+MCP server IS connected, and it authenticates to Lambda on its own - the
+`LAMBDA_API_KEY` in `Desktop/Manifold/.env` is not needed by an agent driving
+through the MCP. Going through Manifold buys budget guards, an audit trail the
+director reads, a 30-minute idle timeout, data rescue on terminate, and
+`list_persistent_files` over SSH. The raw-curl path has none of that, and the
+expensive failure here has always been a box left running, not anything
+technical.
+
+    list_launch_options -> gpu_1x_a100_sxm4 / us-east-1 / Somnora-East ($1.99/hr)
+    launch_gpu with max_lifetime_seconds -> wait_for_launch -> run_command
+
+Measured 2026-08-16: **the A100 booted in 4 minutes**, not the 15-40 the
+playbook warns about for SXM. There is therefore no reason to hold a box open
+"just in case" - relaunching is cheap.
+
+(Also note `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` exist in that .env but are
+EMPTY, which is why `list_persistent_files` cannot browse the filesystem with
+nothing running. Filling them would make future state checks free.)
 
 (RESOLVED 2026-08-15: gcloud ADC for Vertex.)
 
