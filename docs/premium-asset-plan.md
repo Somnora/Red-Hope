@@ -363,9 +363,14 @@ NB missing-8 ~$13 if approved; occasional $2–4 A100 session.
 - **Projection seams** (multi-view blending) → per-view incidence-weighted
   masks; fallback = Hunyuan paint transfer (what we ship today, so the floor
   is never lower than now).
-- **License diligence before any commercial ship**: verify Hunyuan3D 2.1
+- **License diligence before any commercial ship**: ~~verify Hunyuan3D 2.1
   weight license terms for commercial use, SDXL/IP-Adapter terms, and
-  Vertex/NB output terms. CC0 base meshes are safe. (Flagged, not assessed.)
+  Vertex/NB output terms.~~ **ASSESSED 2026-08-16 -> `docs/asset-licence-audit.md`.**
+  Two items need a decision, not just a note: nvdiffrast is NON-COMMERCIAL and is
+  a hard dependency of the TRELLIS.2 export path, and Hunyuan3D's Territory
+  excludes the EU, UK and South Korea. Attribution owed for DINOv3, Tencent and
+  Real-ESRGAN -> `docs/third-party-notices.md`, which does not yet ship.
+  CC0 base meshes are safe.
 - **Scope creep** → the tier table is the budget; anything wanting Tier H
   treatment outside the Tier H list is a director decision, not a drift.
 - **Manifold availability** is session-dependent → only Stages B and the
