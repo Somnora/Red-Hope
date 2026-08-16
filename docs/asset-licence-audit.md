@@ -36,11 +36,42 @@ accident on 2026-08-16: when nvdiffrast failed to import on a clean box,
 2048 PBR maps — failed to import with it. So every TRELLIS.2 asset shipped today
 was produced through it.
 
+#### Tested 2026-08-16: where exactly nvdiffrast is used
+
+Read from source rather than guessed (`o-voxel/o_voxel/postprocess.py`, upstream
+`main`). The result is narrower than feared:
+
+- The import is **top-level** (`import nvdiffrast.torch as dr`), which is why
+  `o_voxel` dies without it. No parameter of `to_glb` disables it - not
+  `remesh`, not `texture_size`.
+- But it is called in **exactly one place**, the texture bake, via **two** calls:
+  `dr.rasterize(ctx, uvs_rast, faces, resolution=[texture_size]*2)` and
+  `dr.interpolate(out_vertices, rast, out_faces)`.
+- `o_voxel/rasterize.py` does **not** use it - that is a separate custom CUDA
+  voxel renderer (`_C.rasterize_voxels_cuda`).
+- Everything else in the export - mesh extraction, decimation, remeshing, UV
+  unwrap - is **cumesh**, not nvdiffrast.
+- **The model itself does not need it.** Proven from our own bootstrap log: on
+  the first clean-box run `trellis2` imported OK while `nvdiffrast.torch` and
+  `o_voxel` both failed. Only the export/bake path is affected.
+
+What those two calls actually do is UV-space triangle rasterization plus
+barycentric interpolation: `rasterize` returns per-texel barycentrics and a
+triangle id, and `interpolate` turns those into a 3D position per texel, which is
+then re-projected onto the original mesh via BVH and trilinearly sampled from the
+attribute volume. **No gradients flow** (this is a bake, not training) and
+`dr.antialias` is never called - so none of nvdiffrast's differentiable or
+anti-aliasing machinery is being used. It is being used as a plain rasterizer.
+
 Options, cheapest first:
-- **Check whether o_voxel can export without the rasterizer** (e.g. `remesh=0`,
-  or a texture path that does not call it). If a code path avoids it, re-export.
-- **Substitute a permissively-licensed rasterizer** for the bake.
+- **Write a permissive UV-space rasterizer** to replace those two calls: for each
+  texel centre, the covering triangle and its barycentrics, then a weighted sum
+  of vertex positions. Our own code, so no licence issue. Bounded, but it is a
+  real piece of work - roughly 100 lines plus validation against a known-good
+  bake, call it a couple of hours, not the 20 minutes first guessed.
 - **Ask NVIDIA for commercial terms.**
+- **Keep TRELLIS.2 for GEOMETRY and bake textures elsewhere** (Blender is already
+  in the lane and is a GPL *tool*, which does not encumber its output).
 - **Treat the four TRELLIS.2 assets as non-shippable** and keep the Hunyuan ones.
 
 Note the asymmetry that makes this worth solving rather than avoiding:
