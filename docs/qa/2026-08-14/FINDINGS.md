@@ -393,3 +393,47 @@ EXPRESSIONS, not input names; the script treated them as names and called
 `MEL.get_input_node`, which does not exist in 5.8, and a bare `except` swallowed
 the AttributeError. A blank section read as "nothing is connected" rather than
 "the reader is broken" - which is how a graph gets authored against a guess.
+
+---
+
+# W11: a texture audit, and a suspicion that did not survive contact (2026-08-16)
+
+All 29 model albedos in the game (Tiers / Props2 / Models2) exported and laid out
+in `docs/qa/2026-08-16/texture-audit-29-models.jpg`, after the crop textures
+turned out to have been an aerial view of a city for months.
+
+## The suspicion
+
+`prop_planter_wet` measured 21.4% foliage - 3.5x the CORRECT new crop tray
+(6.07%) - and its atlas showed tree canopies, long cream slabs and grey
+road-like strips, the same visual grammar as the confirmed-bad crop texture.
+Both planters are live in the default game, because crop activation is a
+director gate flip and `RH.Demo` without `RH.ActivateCrop` furnishes the Garden
+with `planter_dry` -> `planter_wet`. So this looked like a second instance of the
+same defect, sitting in front of the player.
+
+## It was wrong
+
+Rendered in the game at the same camera and pinned second as the fixed crop,
+`planter_wet` reads as exactly what it is: a grey planter unit with pots and
+leafy plants. The 21.4% foliage is real foliage. The atlas only resembled an
+overhead garden scene because that is what an organic prop's UV atlas looks like.
+
+**A texture atlas is not evidence of how an asset reads.** The old crop texture
+was proven bad by RENDERING it, not by looking at its atlas - and note the
+numbers would have misled either way: that known-bad aerial city measured only
+1.55% foliage, LOWER than every healthy plant asset. The metric separated
+nothing; the frame did.
+
+Kept as a standing rule: rank art defects from frames, not from atlases or
+summary statistics over them.
+
+## Also checked, and fine
+
+- No CSV/DataTable drift (no CSV newer than its DataTable).
+- `ai.mass.DynamicSTProcessorsEnabled=0` intact; `rh.ModelSetV2` default 1.
+- The two upstream-less `claude/*` branches hold ZERO unique commits - they are
+  stale labels on a July commit already in `main`, not unpushed work.
+- The Tiers furniture is no longer the shard-confetti it was before b5a2cb1; it
+  reads as furniture in game. It remains the set the director rejected, so it is
+  a regeneration candidate, not a repair one.
