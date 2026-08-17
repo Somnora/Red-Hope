@@ -1946,10 +1946,18 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 	// and its seat ring. Components ride tile actors: lifecycle + hiding free.
 	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
 	const int32 Sol = Clock ? Clock->GetSol() : 0;
+	// The locker pointed at the FLAT Props/ lineage, which still carries the
+	// baked ground plate the whole Props2 lineage exists to remove - the
+	// director's "white platform below it that should be transparent". Props2's
+	// locker was cut to 17189 tris in July, carries MI_locker and its 2048
+	// textures, and was sitting unreferenced. One in three clutter items is a
+	// locker and there are up to 12 per inhabited floor, so this was the most
+	// frequently drawn plate in the game. Crate and drum were already on Dress,
+	// which was re-baked plinth-free 2026-08-17.
 	static const TCHAR* ClutterPaths[3] = {
 		TEXT("/Game/RedHope/Art/Dress/RH_crate/StaticMeshes/RH_crate.RH_crate"),
 		TEXT("/Game/RedHope/Art/Dress/RH_drum/StaticMeshes/RH_drum.RH_drum"),
-		TEXT("/Game/RedHope/Art/Props/locker/locker.locker"),
+		TEXT("/Game/RedHope/Art/Props2/locker/StaticMeshes/locker.locker"),
 	};
 	for (const auto& TilesPair : TilesSpawnedPerLevel)
 	{
