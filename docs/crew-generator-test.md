@@ -84,10 +84,48 @@ vertices and shares none. TRELLIS.2 comes out at 0.86–0.93, properly welded, w
    computed*; the exporter may duplicate freely afterwards, because the copies
    then carry identical weights and cannot travel apart.
 
-   Fixed for 12 of 20 crew, in place. The remaining 8 have no local source mesh
-   (the plan's "missing-8 faces"); they can be recovered by exporting the
-   existing skeletal mesh out of UE and re-rigging that, or they get fixed
-   whenever those faces are regenerated.
+   **All 20 crew are now fixed.** The 12 with local sources were re-rigged from
+   those. The remaining 8 — the plan's "missing-8 faces", with no source mesh
+   anywhere — were recovered by exporting their skeletal meshes back out of UE
+   (`GLTFExporter`), stripping the old skin
+   (`scripts/blender/rh_strip_rig.py`: delete armatures, drop armature
+   modifiers, clear vertex groups, apply transforms — otherwise the fresh bind
+   layers onto stale weights whose group names collide with the new rig's), then
+   welding and re-rigging that.
+
+   Three things that pass came out of doing the 8:
+
+   - **Two of them (`fab_stone`, `vet_kowalski`) still fail the heat solver even
+     welded**, because ~25% of their geometry sits in detached shells: 64 and 74
+     connected components with the largest holding only ~76%, against a healthy
+     mesh's 94%. Blender's heat weighting is all-or-nothing per object, so it
+     fails for the whole mesh and every vertex lands in the backstop.
+   - **So the backstop was rewritten to blend.** It used to assign 1.0 to the
+     single nearest bone, which IS rigid binding and is what tears a mesh open.
+     It now distributes over the 3 nearest bone segments by inverse distance: a
+     detached pouch still rides its nearest bone almost rigidly because that
+     bone dominates, while a vertex near a joint gets a real mix and deforms
+     smoothly. The worst case degrades from "geometry tears off the body" to
+     "slightly soft weighting" — verified in motion,
+     `qa/2026-08-17/qa-soft-backstop-motion.jpg`.
+   - **Reimporting an untextured GLB resets the material slot** to
+     `WorldGridMaterial`. The 8 UE exports carry no embedded images, so all 8
+     lost their binding on reimport and were restored by re-running
+     `rh_wire_walkers.py` → `rh_wire_crew_mr.py` → `rh_wire_crew_normals.py`.
+     Caught because the verification pass checks the material parent rather than
+     assuming the reimport preserved it.
+
+   **`v/t` in UE is not a fix indicator.** UE and glTF both re-split vertices, so
+   a correctly welded-at-bind-time crew mesh still reads 2.99 verts/tri in UE
+   (measured on the fixed `cmdr_vale`). The real indicator is the backstop count
+   at rig time: 53,885 of 53,885 before, 0 after.
+
+   **Known consequence, stated rather than buried:** the 12 rebuilt from local
+   sources are now 18,000 tris where they were 9,000, because those sources are
+   denser than what was originally imported. The 8 rebuilt from UE exports stay
+   at 9,000. The crew therefore has two density tiers (12 × 18k + 8 × 9k ≈ 288k
+   tris for the full roster), which is negligible at this scale but is a change
+   I made without intending to.
 
 ## Outputs
 

@@ -102,7 +102,13 @@ bpy.context.view_layer.objects.active = body
 body.select_set(True)
 bpy.ops.object.mode_set(mode="EDIT")
 bpy.ops.mesh.select_all(action="SELECT")
-bpy.ops.mesh.remove_doubles(threshold=0.00005)
+# Threshold is env-tunable because two of the crew (fab_stone, vet_kowalski)
+# still failed the heat solver at the default: their duplicate vertices are
+# NEAR-coincident rather than exactly coincident, so the shells stayed
+# disconnected and the backstop again claimed 100%. A larger merge joins them.
+# Keep it small - this is for joining vertices that should already be one, not
+# for simplifying geometry.
+bpy.ops.mesh.remove_doubles(threshold=float(__import__("os").environ.get("RH_WELD_DIST", "0.00005")))
 bpy.ops.object.mode_set(mode="OBJECT")
 body.select_set(False)
 print("[rig] welded before bind: %d -> %d verts" % (_before_weld, len(body.data.vertices)), flush=True)
@@ -137,14 +143,33 @@ def seg_dist(p, a, bpt):
     t = max(0.0, min(1.0, ab.dot(p - a) / max(ab.length_squared, 1e-8)))
     return (a + ab * t - p).length
 
+# SOFT backstop (2026-08-17). This used to assign 1.0 to the single nearest
+# bone, which is rigid binding: two vertices either side of a joint snap to
+# DIFFERENT bones and the surface tears open as the joint bends. Welding fixes
+# most meshes by letting the heat solver succeed, but it cannot fix them all -
+# fab_stone and vet_kowalski carry ~25% of their geometry in detached shells
+# (74 and 64 connected components, largest holding only ~76%, against a healthy
+# mesh's 94%), and Blender's heat weighting is all-or-nothing per object, so it
+# fails for the whole mesh and every vertex lands here.
+#
+# So the fallback now blends over the K nearest bone segments by inverse
+# distance instead of picking one. A detached pouch still rides its nearest
+# bone almost rigidly, because that bone dominates the blend; a vertex near a
+# joint gets a real mix of both bones and deforms smoothly. The failure mode
+# degrades from "geometry tears off the body" to "slightly soft weighting".
+K_NEAREST = 3
 fixed = 0
 mw = body.matrix_world
 for v in body.data.vertices:
     if sum(g.weight for g in v.groups) > 1e-4:
         continue
     p = mw @ v.co
-    best = min(bone_segs, key=lambda s: seg_dist(p, s[1], s[2]))
-    best[0].add([v.index], 1.0, "REPLACE")
+    ranked = sorted(((seg_dist(p, s[1], s[2]), s[0]) for s in bone_segs), key=lambda t: t[0])[:K_NEAREST]
+    # inverse-distance weights, epsilon so a vertex sitting on a bone is finite
+    inv = [(1.0 / max(d, 1e-4), grp) for d, grp in ranked]
+    total = sum(w for w, _ in inv) or 1.0
+    for w, grp in inv:
+        grp.add([v.index], w / total, "REPLACE")
     fixed += 1
 weightless = sum(1 for v in body.data.vertices if sum(g.weight for g in v.groups) <= 1e-4)
 print(f"[rig] backstop assigned {fixed} verts; weightless now {weightless}", flush=True)
