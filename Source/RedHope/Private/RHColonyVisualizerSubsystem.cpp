@@ -778,7 +778,7 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	// Footprint scales gently with mass: 60 t ~ 16 m across.
 	const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(
-		D.LocationCm + FVector(0, 0, 20.f + RHMarsTerrain::GroundZCm(D.LocationCm.X, D.LocationCm.Y)),
+		D.LocationCm + FVector(0, 0, 6.f + RHMarsTerrain::GroundZCm(D.LocationCm.X, D.LocationCm.Y)),
 		FRotator::ZeroRotator);
 	if (!Actor)
 	{
@@ -786,7 +786,8 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	}
 	Actor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
 	Actor->GetStaticMeshComponent()->SetStaticMesh(Cube);
-	Actor->SetActorScale3D(FVector(Side, Side, 0.4f));
+	// A thin pad, not a platform: 12 cm proud of the terrain reads as ground.
+	Actor->SetActorScale3D(FVector(Side, Side, 0.12f));
 #if WITH_EDITOR
 	Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
 #endif
@@ -800,7 +801,17 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	{
 		DepColor = FLinearColor(0.75f, 0.90f, 1.00f);
 	}
-	ApplyTint(Actor, DepColor);
+	// The director's "giant checkerboard": ApplyTint dresses the pad in
+	// M_Graybox, whose blockout grid stretched across a 16-30 m cube face is
+	// exactly a checkerboard. Deposits are GROUND, so wear the terrain's own
+	// regolith texture, world-tiled, tinted per type - the label and tinted
+	// hue still say what it is, the surface now says where it is.
+	if (!ApplySurface(Actor->GetStaticMeshComponent(),
+		TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"),
+		340.f, DepColor * FLinearColor(1.6f, 1.5f, 1.6f), 0.95f))
+	{
+		ApplyTint(Actor, DepColor); // graybox fallback beats invisible
+	}
 	AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
 	// Surface furniture: born hidden if the player is currently underground
 	// (adversarial-review finding - a discovery mid-descent used to pop the

@@ -36,8 +36,11 @@ fi
 
 case "$PRESET" in
 surface)
-  # Everything placed, then back up top: the building set in daylight.
-  CMDS="r.setres ${RESX}x${RESY}w, RH.Demo, RH.ActivateCrop all, RH.Showcase, RH.Floor 0, RH.SetSpeed 3, RH.Cam 20 0 0.22 0 0$EXTRA"
+  # Everything placed, then back up top: the building set in daylight, and a
+  # dig designation at the regolith deposit so the robot fleet visibly WORKS -
+  # without an order the starting fleet idles in its spawn line, which reads as
+  # broken (director, 2026-08-17: "I haven't seen them move around at all").
+  CMDS="r.setres ${RESX}x${RESY}w, RH.Demo, RH.ActivateCrop all, RH.Showcase, RH.Floor 0, RH.Dig Regolith_A, RH.SetSpeed 3, RH.Cam 20 0 0.22 0 0$EXTRA"
   ;;
 interior|*)
   # The everything button rides you down to floor -1: rooms, furniture, crew.

@@ -94,6 +94,14 @@ def cut(name, img):
         out[size_filter((h >= 150) & (h <= 260) & (s > 0.18) & (v > 100))] = 1.0
     elif name == "airfilter2":
         out[size_filter(teal_key(h, s, v))] = 1.0
+    elif name in ("bunk", "console", "diningtable", "galley", "labbench",
+                  "locker", "planter_dry", "planter_wet", "tank"):
+        # Room props: teal readouts/lamps only. Every Props2 prop ships lit
+        # (EmissiveAmount 0.6-1.4, enumerated 2026-08-17 - the 'props are
+        # authored at 0.0' claim was from the pre-mask W2 era and wrong), so
+        # their masks must be re-cut whenever the props are re-baked. Slightly
+        # looser S floor than the buildings: the bake desaturates the accents.
+        out[size_filter(teal_key(h, s, v, s_min=0.22, v_min=100), lo=10, hi=1500)] = 1.0
     elif name == "HabitatDome":
         # Disc detection was tried and found 151 candidates on the refreshed
         # atlas - a triangulated-panel dome is full of near-circular fragments,

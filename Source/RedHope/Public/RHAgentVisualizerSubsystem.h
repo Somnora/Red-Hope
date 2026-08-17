@@ -63,6 +63,12 @@ private:
 	// art-free fallback.
 	UPROPERTY() TArray<TObjectPtr<USkeletalMeshComponent>> SkelBodies;
 	TArray<bool> bWalkPlaying;
+	// Per-walker Z lift that puts the MESH'S OWN feet on the ground, derived
+	// from its bounds at spawn. The old constant GroundZ (-75) assumed the
+	// primitive stand-in's mid-body origin; the rigged GLBs are grounded at
+	// their feet, so that constant buried every robot 75 cm - the director's
+	// "stuck halfway underground".
+	TArray<float> FeetLiftCm;
 	bool bUseSkeletal = false;
 	TArray<FMassEntityHandle> Tracked;
 	// Per-entity gait state, parallel to Tracked: last ground position (for

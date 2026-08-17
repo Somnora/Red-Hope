@@ -70,6 +70,7 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 	}
 	SkelBodies.Reset();
 	bWalkPlaying.Reset();
+	FeetLiftCm.Reset();
 	for (UInstancedStaticMeshComponent* Part : Parts)
 	{
 		if (Part)
@@ -98,7 +99,12 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 			Skel->SetSkeletalMesh(Walker);
 			Skel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			const FBoxSphereBounds WB = Walker->GetBounds();
-			Skel->SetWorldScale3D(FVector(180.f / FMath::Max(2.f * WB.BoxExtent.Z, 1.f)));
+			const float WalkerScale = 180.f / FMath::Max(2.f * WB.BoxExtent.Z, 1.f);
+			Skel->SetWorldScale3D(FVector(WalkerScale));
+			// Feet-on-ground from the bounds, not from a pivot assumption: a
+			// grounded mesh (origin at soles) yields 0, a mid-body origin
+			// yields +extent. Works for either without knowing which shipped.
+			FeetLiftCm.Add((WB.BoxExtent.Z - WB.Origin.Z) * WalkerScale);
 			Skel->SetVisibility(!bSliceHidden);
 			if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, RobotIdleClip))
 			{
@@ -262,7 +268,7 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 				// shared correction (rh.WalkerYawOffsetDeg) into the yaw.
 				static const auto* YawOff = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("rh.WalkerYawOffsetDeg"));
 				Skel->SetWorldLocationAndRotation(
-					Pos + FVector(0, 0, GroundZ + TerrainZ),
+					FVector(Pos.X, Pos.Y, Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f)),
 					FRotator(0.f, FacingYawDeg[i] + (YawOff ? YawOff->GetValueOnGameThread() : 0.f), 0.f));
 				const bool bWantWalk = Speed > 15.f;
 				if (bWantWalk != bWalkPlaying[i])
