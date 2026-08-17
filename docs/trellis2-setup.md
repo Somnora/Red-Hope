@@ -47,6 +47,44 @@ there; the cheaper/faster H100s are in other regions and would strand the data.
    import.** A copy of the working module + a 174-line `pip freeze` are saved
    at `Somnora-East/red_hope/wheels/`.
 
+## Three more fresh-box traps, all found 2026-08-17, all on paid time
+
+The four above are install traps. These are *environment* traps: the bootstrap
+completes, reports `TRELLIS2_ENV_READY`, and the first real run still dies.
+
+5. **`hf-cache/hub` came back ROOT-OWNED.** The first bake attempt failed
+   instantly with `PermissionError: ... models--microsoft--TRELLIS.2-4B` while
+   trying to *create* the model dir. Fix: `sudo chown -R ubuntu:ubuntu
+   <NS>/hf-cache`. Nothing in the lane does this, so it will recur.
+6. **The 16 GB TRELLIS.2-4B snapshot was NOT on the NFS**, although this file
+   and the bootstrap header both said it was. `hf-cache` measured **34 KB**.
+   It re-downloaded (fast - 22 files in 37 s). Treat the cache as a bonus, not
+   a given, and budget the download into any run's time.
+7. **Blender cannot start on a fresh box**: `bin/blender: error while loading
+   shared libraries: libSM.so.6`. The preview renderer therefore fails silently
+   as far as the batch loop is concerned. Fix:
+   `sudo apt-get install -y libsm6 libxext6 libxrender1 libxi6 libxxf86vm1
+   libxfixes3 libxkbcommon0`. Worth knowing that even once it starts, Cycles
+   spends minutes compiling kernels on a box with no kernel cache - which is
+   paid time for a check the in-engine boot does better.
+
+## `RH_NO_NVDIFFRAST=1` - the shipping path
+
+nvdiffrast is NVIDIA Source Code License (non-commercial). Since 2026-08-17
+`bootstrap_trellis2.sh` takes `RH_NO_NVDIFFRAST=1`, which **skips step 5
+entirely** and instead asserts that `import nvdiffrast` raises
+ModuleNotFoundError before registering `scripts/rh_uv_rasterizer.py` in its
+place. The verify step then imports `o_voxel` through the stand-in.
+
+Use it for anything whose output ships. It is a stronger claim than the
+2026-08-16 proof run, which had to install nvdiffrast and delete it again:
+this way the box never has it.
+
+    RH_NO_NVDIFFRAST=1 HF_TOKEN=... bash bootstrap_trellis2.sh
+
+Backed up in-repo at `scripts/gpu/trellis2/` (bootstrap, runner, and the two
+batch wrappers), because the NFS copy was the only copy.
+
 ## Two API-level gotchas in the runner
 
 - `Trellis2ImageTo3DPipeline.from_pretrained()` needs the **local snapshot

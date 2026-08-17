@@ -15,8 +15,8 @@ one. Nothing here should be treated as a clearance.
 |---|---|---|---|---|
 | Gemini 3 Pro Image ("Nano Banana Pro") on Vertex | Google Cloud terms | Yes | Google **asserts no ownership** in Generated Output; output is Customer Data. IP indemnity offered, conditioned on following safety practice | **All** reference art |
 | Hunyuan3D 2.1 | `tencent-hunyuan-community` | Yes, **inside the Territory** | Territory **excludes the EU, UK and South Korea**; >1 M MAU requires a separate licence; distribution must carry a notice; **Tencent claims no rights in Outputs** | Most shipped meshes: props, building models, crew walkers, the 8 Hunyuan crops |
-| TRELLIS.2-4B | **MIT** | Yes, unrestricted | none | `crop_vine_3`, `workbench_lg`, `workshop`, `infirmary` |
-| DINOv3 (`dinov3-vitl16`) | DINOv3 License (Meta) | Yes, worldwide, no MAU threshold | **Must prominently display "Built with DINOv3"** | The same four (it is TRELLIS.2's image encoder) |
+| TRELLIS.2-4B | **MIT** | Yes, unrestricted | none | `crop_vine_3`, `workbench_lg`, `workshop`, `infirmary`, `chemtable_lg`, `lab_full` |
+| DINOv3 (`dinov3-vitl16`) | DINOv3 License (Meta) | Yes, worldwide, no MAU threshold | **Must prominently display "Built with DINOv3"** | The same six (it is TRELLIS.2's image encoder) |
 | ~~nvdiffrast~~ **removed** | NVIDIA Source Code License (1-Way Commercial) | No — non-commercial only | **No longer used.** Replaced by `scripts/gpu/rh_uv_rasterizer.py`; the four assets were re-baked with it absent | none |
 | SDXL 1.0 + IP-Adapter | CreativeML Open RAIL++-M | Yes, with behavioural use restrictions | model card states "research purposes only" as intended use | style-lock / older sprite lanes |
 | Real-ESRGAN | BSD-3-Clause | Yes | attribution | Hunyuan paint stage |
@@ -96,6 +96,13 @@ own PyTorch. Proven, not asserted:
   confirms `flip_y=False` by the test that actually matters.
 - The four shipped assets have been **re-imported from the nvdiffrast-free
   bakes**, so the repo no longer contains art produced through it.
+
+**Strengthened 2026-08-17.** The proof above had to install nvdiffrast and then
+delete it. `bootstrap_trellis2.sh` now takes `RH_NO_NVDIFFRAST=1`, which skips
+the install entirely and asserts `import nvdiffrast` raises ModuleNotFoundError
+before registering the stand-in. `chemtable_lg` and `lab_full` were baked that
+way on a box that never had nvdiffrast on it at any point. Every TRELLIS.2 asset
+in the repo is now nvdiffrast-free, and the lane's default path is too.
 
 One honest negative: a pixel diff of the atlases could NOT validate this,
 because the pipeline is not reproducible run to run - the same seed produced
