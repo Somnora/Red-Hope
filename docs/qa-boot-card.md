@@ -4,10 +4,11 @@ Regenerated 2026-08-16 against `bccf0f0` (the card before that was 40 commits
 stale). Nine commits have landed since, so the deltas are recorded in §0 rather
 than letting the card drift again.
 
-**A COMPILE IS NOW PENDING.** `cb558e0` is the first C++ change since Aug 14, so
-`libUnrealEditor-RedHope.dylib` (Aug 14 18:16) is now OLDER than `Source/`.
-Everything else this session is content-side and live without a rebuild; that one
-string literal is not. Battery 25/25 green, pins identical
+**No compile pending.** `cb558e0`'s one-line locker swap was compiled
+2026-08-17 (`Build.sh red_hopeEditor Mac Development` → `Result: Succeeded`,
+editor closed so the BASE dylib was linked, not a hot-reload patch) and proven
+live: the smoke boot loads `Props2/locker` with its 2048 textures and the old
+`Props/locker` appears nowhere in the log. Battery 25/25 green, pins identical
 (`gen 50 W load 20 W`, `Regolith_A: 40645 kg`).
 
 ## 0. What changed since the card was regenerated
