@@ -152,6 +152,28 @@ your call, not a chore — see §6.
 
 Mode 1 is what you already had; 0 and 2 are new and have never been reviewed.
 
+## 5b. Night window lights — NEW 2026-08-17 → `qa/2026-08-17/qa-night-window-lights.jpg`
+
+Every powered building now carries a small lamp (21 cd, 12 m, shadowless) tinted
+to its own authored accent pulled 60% toward warm white, at doorway height. The
+colony reads as inhabited at night instead of as dark shapes.
+
+Why this and not more emissive masks: at the distances this camera occupies,
+three controlled A/Bs measured the entire normal-map change at 0.08-0.29% of
+pixels, while a bright POINT reads at any distance because it is contrast rather
+than detail. Authored light also has no UV dependency, so unlike a cut mask it
+survives every re-bake - and three separate attempts to key lit panels out of the
+refreshed albedos failed because the paint does not contain them.
+
+Tuned once already: at 150 cm the lamp cleared the roof line of the short
+buildings and washed their roofs flat, since an opaque hull does not transmit
+light. 55 cm reads as spill at ground level. The white roof patches on IceDrill
+and ComputeModule are their OWN authored emissive from the earlier glow pass -
+present in both frames, not from this lamp.
+
+Verdict wanted: right / brighter / dimmer, and whether the accent tint should be
+stronger than 40%.
+
 ## 5. Night, floodmast, glow dial → `qa-glow-ab.jpg`
 
 `rh.Glow 1` over `rh.Glow 0` at night. At 1 the ComputeModule panels, the

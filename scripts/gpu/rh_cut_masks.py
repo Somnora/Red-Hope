@@ -68,6 +68,68 @@ def size_filter(mask, lo=15, hi=900):
     return keep[lab]
 
 
+def readout_key(h, s, v, top_n=10, min_px=14, max_px=2400, fill_min=0.55):
+    """REJECTED 2026-08-17 - kept as a record so it is not re-attempted.
+
+    Judged on a contact sheet and it does NOT find readouts. Coverage and blob
+    count look perfect (0.12-0.38%, 10 panels an asset) and the selected blobs
+    are bright highlight SLIVERS on panel edges, not screens or lamps: ten
+    glowing scratches scattered over a hull, which is worse than dark. The
+    identifiable candidates visible in the albedos - galley's teal strip, the
+    console's dark screens, the dial cluster - are not what it picks.
+
+    THE REAL CONCLUSION, after three failed approaches (hue key -> ~0% because
+    the bake desaturates; raw top-hat -> 2-8% of paint noise; this, compact
+    top-hat -> plausible numbers, wrong pixels): the refreshed albedos DO NOT
+    CONTAIN keyable emissive features. The information is not there to find, so
+    no cleverer filter will recover it. Automatic mask cutting from TRELLIS.2
+    paint is a dead end, and the durable answers are (a) references with
+    unambiguous bright cyan screens so the next bake produces keyable features,
+    or (b) authored light placement in the visualizer, which has no UV
+    dependency at all and therefore survives every future re-bake.
+
+    Original intent below.
+
+    The few deliberate lit panels, not every bright speck.
+
+    Added 2026-08-17 after the hue-based recipes came back at ~0% on the
+    refreshed albedos: the TRELLIS.2 bake desaturates accents below any hue
+    key, so keying COLOUR finds nothing. Keying LOCAL BRIGHTNESS finds far too
+    much - a white top-hat on these atlases returns 400-1100 blobs and 2-8%
+    coverage, which is paint noise, and glowing 8% of a hull is the 2026-08-14
+    flat-HDR-wash failure with extra steps.
+
+    So: top-hat to find locally-bright regions, then keep only blobs that look
+    like PANELS - compact enough to fill their bounding box (fill_min), within a
+    plausible size band - and of those, only the TOP_N by contrast. A machine has
+    a handful of lit readouts, not a thousand. Few and bright is also exactly
+    what survives the strategy camera's 29 m minimum distance, where a glowing
+    point still reads and surface detail does not.
+    """
+    bg = ndimage.uniform_filter(v, size=41)
+    top = v - bg
+    cand = (top > 26) & (v > 95)
+    lab, n = ndimage.label(cand)
+    if n == 0:
+        return np.zeros(v.shape, dtype=bool), 0
+    objs = ndimage.find_objects(lab)
+    scored = []
+    for i, sl in enumerate(objs, start=1):
+        comp = lab[sl] == i
+        area = int(comp.sum())
+        if not (min_px <= area <= max_px):
+            continue
+        bbox = comp.shape[0] * comp.shape[1]
+        if bbox == 0 or area / float(bbox) < fill_min:
+            continue
+        scored.append((float(top[sl][comp].mean()) * area, i))
+    scored.sort(reverse=True)
+    out = np.zeros(v.shape, dtype=bool)
+    for _, i in scored[:top_n]:
+        out |= lab == i
+    return out, min(len(scored), top_n)
+
+
 def cut(name, img):
     h, s, v = hsv(img)
     out = np.zeros(h.shape, dtype=np.float32)

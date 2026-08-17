@@ -1122,6 +1122,57 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// light rather than an emissive fake, so it actually throws light onto the
 	// regolith and the hulls around it - which is the entire point of building
 	// one. Intensity rides bPowered through the power pass below.
+	// EVERY powered building gets a small lamp tinted to its own authored accent,
+	// not just the Floodmast. Reason, from the 2026-08-17 fidelity pass: at the
+	// distances this camera actually occupies (29 m closest, 216 m at the default
+	// opening) surface detail is measurably invisible - three controlled A/Bs put
+	// the whole normal-map change at 0.08-0.29% of pixels - while a BRIGHT POINT
+	// still reads at any distance, because it is contrast rather than detail. A
+	// night colony of small coloured pools is therefore the cheapest real gain in
+	// how the place looks, and it costs nothing per asset.
+	//
+	// It also sidesteps the wall the emissive masks kept hitting: authored light
+	// placement has NO UV dependency, so unlike a cut mask it survives every
+	// future re-bake. Three separate attempts to key lit panels out of the
+	// refreshed albedos failed because the paint simply does not contain them
+	// (see rh_cut_masks.py's rejected readout_key for the evidence).
+	//
+	// Deliberately modest: 26 cd against the Floodmast's 90, a 12 m radius
+	// against its 26, shadowless like every other lamp here. This is a lit
+	// window, not a floodlight - the mast stays the thing that lights the yard.
+	// Under-construction shells stay dark, which keeps "finished" legible at
+	// night, and the whole set rides bPowered through the existing power pass
+	// below, so a brownout still darkens the colony.
+	const bool bWantsLamp = !Instance.bUnderConstruction
+		&& Instance.DefName != FName("Pylon");       // a bare mast has no interior to light
+	if (bWantsLamp && Instance.DefName != FName("Floodmast"))
+	{
+		UPointLightComponent* Win = NewObject<UPointLightComponent>(Actor);
+		Win->SetupAttachment(Actor->GetRootComponent());
+		Win->SetMobility(EComponentMobility::Movable);
+		Win->SetAbsolute(true, true, true);
+		Win->SetIntensityUnits(ELightUnits::Candelas);
+		Win->SetIntensity(21.f);
+		// The building's own accent hue, pulled 60% toward warm white so a colony
+		// at night reads as inhabited rather than as a row of coloured bulbs -
+		// the accent identifies the machine, the warmth says someone lives here.
+		const FLinearColor Accent = TintFor(Instance.DefName);
+		const FLinearColor Warm(1.00f, 0.88f, 0.72f);
+		const FLinearColor Mix = Accent * 0.4f + Warm * 0.6f;
+		Win->SetLightColor(Mix.ToFColor(false));
+		Win->SetAttenuationRadius(1200.f);
+		Win->SetCastShadows(false);
+		Win->RegisterComponent();
+		// DOORWAY height, deliberately - tuned from a night frame. At 150 cm the
+		// lamp cleared the roof line of the SHORT buildings (IceDrill,
+		// WaterPlant) and blew their roofs into flat white patches, because an
+		// opaque hull does not transmit light: what you saw was the lamp
+		// spilling over the top, not a lit interior. At 55 cm it sits below
+		// every roof and reads as light spilling out at ground level, which is
+		// also the read that carries at 216 m - a pool on the regolith.
+		Win->SetWorldLocation(Seated + FVector(0, 0, 55.f));
+		BuildingLights.Add(Instance.Id, Win);
+	}
 	if (!Instance.bUnderConstruction && Instance.DefName == FName("Floodmast"))
 	{
 		UPointLightComponent* Lamp = NewObject<UPointLightComponent>(Actor);
