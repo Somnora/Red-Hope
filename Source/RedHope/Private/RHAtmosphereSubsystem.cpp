@@ -36,6 +36,12 @@ static FAutoConsoleVariableRef CVarRHGradeSaturation(TEXT("RH.Grade.Saturation")
 static float GRHFogDensity = 0.018f;
 static FAutoConsoleVariableRef CVarRHFogDensity(TEXT("RH.Grade.FogDensity"), GRHFogDensity,
 	TEXT("Clear-sky dust-haze density; storms thicken it. Default 0.018."));
+// The night-glow dial the director asked for: build your own lighting, then
+// turn the assist off and take the credit. Rides MPC_Atmosphere.GlowScale,
+// which M_RH_Master multiplies into its MASKED emissive only.
+static float GRHGlowScale = 1.0f;
+static FAutoConsoleVariableRef CVarRHGlowScale(TEXT("rh.Glow"), GRHGlowScale,
+	TEXT("Machine-glow assist: 1 = as authored, 0 = off (player-built lights only). Default 1."));
 static float GRHExposure = 1.0f;
 static FAutoConsoleVariableRef CVarRHExposure(TEXT("RH.Grade.Exposure"), GRHExposure,
 	TEXT("Locked exposure brightness (min==max, no auto-swing). Default 1.0."));
@@ -83,7 +89,14 @@ void URHAtmosphereSubsystem::Tick(float DeltaTime)
 	}
 	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("Habitability"), Habitability);
 	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("TimeOfSol"), SolFraction);
-	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("Dust"), 1.f - DustFactor);
+	// The collection declares DustAmount, not Dust: this push had been writing
+	// to a parameter that does not exist, so it went nowhere.
+	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("DustAmount"), 1.f - DustFactor);
+	// The machine-glow assist. 1 = as authored; 0 hands the night entirely to
+	// lights the player built (hab ceiling lamps and Floodmasts are real point
+	// lights and are NOT scaled by this).
+	UKismetMaterialLibrary::SetScalarParameterValue(World, Collection, TEXT("GlowScale"),
+		FMath::Max(0.f, GRHGlowScale));
 
 	if (!SunActor)
 	{

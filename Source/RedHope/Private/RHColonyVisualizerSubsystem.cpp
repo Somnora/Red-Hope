@@ -1,20 +1,26 @@
 #include "RHColonyVisualizerSubsystem.h"
 #include "RedHope.h"
+#include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHAgentVisualizerSubsystem.h"
+#include "RHCrewVisualizerSubsystem.h"
 #include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/PointLightComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
 #include "Misc/Crc.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 
 namespace RHCanon
 {
@@ -35,6 +41,42 @@ namespace RHCanon
 // The Lander body rides this high on its legs so the descent engine + gear read.
 static constexpr float GLanderLiftCm = 210.f;
 
+// Model-set A/B. `rh.ModelSetV2 1` (default) renders the MIXED SET - the
+// painted 2026-07-17 mesh for the buildings where it reads better, the original
+// everywhere else (see ModelPathsV2 in HandleBuildingAdded for the per-building
+// reasoning). `rh.ModelSetV2 0` restores the all-original set, so both can be
+// judged in ONE boot instead of across a recompile. A building picks its mesh
+// when it spawns, so re-run RH.Demo (or reload a save) after toggling.
+static TAutoConsoleVariable<int32> CVarModelSetV2(
+	TEXT("rh.ModelSetV2"),
+	1,
+	TEXT("Building models: 1 = the mixed set (painted mesh where it reads better), 0 = all originals."),
+	ECVF_Default);
+
+// Sims-style interior viewing. The pit has no roof to lift - it is an open
+// excavation - so the thing that hides an interior is the near wall faces.
+static TAutoConsoleVariable<int32> CVarCutaway(
+	TEXT("rh.Cutaway"),
+	0,
+	TEXT("Interior view: 0 = all walls, 1 = drop the wall faces toward the camera (swaps as you orbit), 2 = floorplan, no walls."),
+	ECVF_Default);
+
+// The four wall-face outward directions, in the order their bits are packed
+// into the cutaway hidden-mask.
+static const FIntPoint GRHWallDirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+
+static int32 RHWallDirSlot(const FIntPoint& D)
+{
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (GRHWallDirs[i] == D)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
+}
+
 FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 {
 	// Function accent hue: drives labels and each machine's glow identity.
@@ -43,6 +85,7 @@ FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 		{ FName("SolarArray"),    FLinearColor(0.25f, 0.45f, 0.95f) },  // PV blue
 		{ FName("BatteryBank"),   FLinearColor(0.10f, 0.85f, 0.65f) },  // cell teal
 		{ FName("Pylon"),         FLinearColor(0.95f, 0.60f, 0.05f) },  // grid amber
+		{ FName("Floodmast"),     FLinearColor(1.00f, 0.86f, 0.66f) },  // warm work light
 		{ FName("ChargePad"),     FLinearColor(0.95f, 0.75f, 0.15f) },  // pad amber
 		{ FName("Forge"),         FLinearColor(0.95f, 0.35f, 0.08f) },  // furnace orange
 		{ FName("IceDrill"),      FLinearColor(0.50f, 0.85f, 0.95f) },  // ice cyan
@@ -71,7 +114,7 @@ FLinearColor URHColonyVisualizerSubsystem::BodyFor(FName DefName) const
 	{
 		return RHCanon::DarkSlate;
 	}
-	if (DefName == FName("Pylon"))
+	if (DefName == FName("Pylon") || DefName == FName("Floodmast"))
 	{
 		return FLinearColor(0.22f, 0.23f, 0.26f);
 	}
@@ -187,6 +230,7 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 	// color elsewhere.
 	if (DefName != FName("Lander") && DefName != FName("ChargePad")
 		&& DefName != FName("Stockpile") && DefName != FName("Pylon")
+		&& DefName != FName("Floodmast") // a mast has no hull to band
 		&& DefName != FName("SolarArray")) // the radiating panels carry the PV blue
 	{
 		const FLinearColor Hue = TintFor(DefName);
@@ -323,6 +367,27 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 		// coverage discs.
 		AddAccent(Actor, Sphere, BaseCm + FVector(0, 0, TopZ + 40.f), FRotator::ZeroRotator, FVector(0.8f), TintFor(DefName), AmberGlow);
 		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ - 70.f), FRotator::ZeroRotator, FVector(2.4f, 0.25f, 0.25f), DarkSlate);
+	}
+	else if (DefName == FName("Floodmast"))
+	{
+		// A light tower and nothing else: slim mast, a cross-arm, and two
+		// hooded heads whose emissive matches the real point light attached in
+		// HandleBuildingAdded - so the source you SEE is the source that lights
+		// the ground. Warm, because everything else out here is cold.
+		const float MastZ = TopZ + 520.f;
+		const FLinearColor Warm(1.0f, 0.86f, 0.66f);
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, MastZ * 0.5f), FRotator::ZeroRotator,
+			FVector(0.22f, 0.22f, MastZ / 100.f), DarkSlate);
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, MastZ), FRotator::ZeroRotator,
+			FVector(0.22f, 1.5f, 0.16f), DarkSlate);
+		for (int32 S = -1; S <= 1; S += 2)
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector(0, S * 62.f, MastZ - 22.f), FRotator::ZeroRotator,
+				FVector(0.34f, 0.42f, 0.22f), Warm, Warm * 3.2f);
+		}
+		// One hazard band at boot height so nobody walks into the mast.
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, 120.f), FRotator::ZeroRotator,
+			FVector(0.3f, 0.3f, 0.3f), HazYellow);
 	}
 	else if (DefName == FName("ChargePad"))
 	{
@@ -608,6 +673,12 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		}
 	}
 	BuildingVisuals.Reset();
+	AppliedPowerState.Reset();
+	// Ids are reused across a colony reload, so a remembered depth could be
+	// attributed to a different building def entirely.
+	AuthoredPulseDepth.Reset();
+	// The lamps died with their actors above; drop the stale weak handles.
+	BuildingLights.Reset();
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
@@ -639,6 +710,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	TilesSpawnedPerLevel.Reset();
 	TileByCell.Reset();
 	AppliedRoomTint.Reset();
+	RoomPropByCell.Reset();       // prop components died with their tiles just above
+	LightByCell.Reset();          // cell lights died with their tiles too
+	ClutterSpawnedPerLevel.Reset(); // clutter died with its tiles: re-accumulates
 	for (auto& Pair : RivalMarkers)
 	{
 		if (Pair.Value)
@@ -840,11 +914,15 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// reference, so it takes the normal flat-deck path.)
 	const bool bLander = Instance.DefName == FName("Lander") && !Instance.bUnderConstruction;
 	const float LiftZ = bLander ? GLanderLiftCm + Scale.Z * 50.f : Scale.Z * 50.f;
-	// Seated on the scenery relief: zero across the colony flat, real ground
-	// out at the hero massif's bench (underground floors are all within the
-	// flat, so their z never moves).
-	const FVector Seated = Instance.LocationCm
-		+ FVector(0, 0, RHMarsTerrain::GroundZCm(Instance.LocationCm.X, Instance.LocationCm.Y));
+	// Seated on the correct plane: an UNDERGROUND building sits on its floor
+	// (Level * FloorHeight), NOT on the surface terrain - the sim's LocationCm.Z
+	// is unreliable (Debug_PlaceInstant passes 0), so the floor Z is derived
+	// from the building's Level. Surface buildings ride the scenery relief.
+	const URHSimWorldSubsystem* SeatSim = World->GetSubsystem<URHSimWorldSubsystem>();
+	const double FloorZ = (Instance.Level < 0 && SeatSim)
+		? Instance.Level * SeatSim->GetFloorHeightCm()
+		: RHMarsTerrain::GroundZCm(Instance.LocationCm.X, Instance.LocationCm.Y);
+	const FVector Seated(Instance.LocationCm.X, Instance.LocationCm.Y, FloorZ);
 	const FVector Location = Seated + FVector(0, 0, LiftZ);
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(Location, FRotator::ZeroRotator);
 	if (!Actor)
@@ -853,21 +931,106 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	}
 	UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
 	Mesh->SetMobility(EComponentMobility::Movable);
-	// A real imported model (director's image-to-3D pipeline -> GLB ->
-	// ImportAssets) replaces the whole composed-primitive treatment when one
-	// exists for this building type: uniform-scaled to the footprint, grounded
-	// on its own bounds, wearing its baked vertex colors. Add a row here per
-	// new GLB dropped in ~/Desktop/Martians/assets/models and imported.
+	// A real imported model (director's image-to-3D pipeline -> mesh -> import)
+	// replaces the whole composed-primitive treatment when one exists for this
+	// building type: uniform-scaled to the footprint, grounded on its own
+	// bounds. Add a row here per new model imported under
+	// /Game/RedHope/Art/Models. Two material lineages coexist:
+	//   - The Forge is an early vertex-color mesh (COLOR_0, no textures) and
+	//     needs M_VertexColor applied below or it renders gray.
+	//   - Everything from the textured pipeline (Hunyuan paint stage -> baseColor
+	//     texture -> MI_<name> assigned on the StaticMesh asset) already carries
+	//     its own material; leave the slots alone so the texture shows.
 	UStaticMesh* RealModel = nullptr;
+	bool bVertexColored = false;
 	if (!Instance.bUnderConstruction)
 	{
 		static const TMap<FName, FString> RealModelPaths = {
-			{ FName("Forge"), FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
+			{ FName("Forge"),       FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
+			{ FName("BatteryBank"), FString(TEXT("/Game/RedHope/Art/Models/battery/battery.battery")) },
+			// The IceProcessor art is a tanks-and-pipes processing plant, so it
+			// renders the WaterPlant; IceDrill stays a primitive until drill art exists.
+			{ FName("WaterPlant"),  FString(TEXT("/Game/RedHope/Art/Models/ice/ice.ice")) },
+			// Plinth-free regenerations. The originals baked their ground IN (an
+			// excavation pit, a hangar bay, a floating regolith island), which
+			// meshed into a base that never seated on terrain - so the objects
+			// were re-generated standalone (InstantStyle) and re-meshed; solar's
+			// residual shadow slab was additionally cut in mesh-cleanup. The
+			// superseded lander/ and solar/ meshes are left on disk but no longer
+			// referenced. See docs/build-log.md.
+			{ FName("Lander"),      FString(TEXT("/Game/RedHope/Art/Models/lander2/lander2.lander2")) },
+			{ FName("SolarArray"),  FString(TEXT("/Game/RedHope/Art/Models/solar2/solar2.solar2")) },
+			{ FName("Habitat"),     FString(TEXT("/Game/RedHope/Art/Models/habitat/habitat.habitat")) },
+			{ FName("Stockpile"),   FString(TEXT("/Game/RedHope/Art/Models/stockpile/stockpile.stockpile")) },
+			// The OreExtractor art (tracked excavator + digging arm) renders the
+			// Borer - the sim's shaft/floor digging machine.
+			{ FName("Borer"),       FString(TEXT("/Game/RedHope/Art/Models/extractor2/extractor2.extractor2")) },
+			// Gemini design pass (2026-07-09): the life-support unit the
+			// director asked to re-imagine - compact HVAC body, big intake fan.
+			{ FName("AirFilter"),   FString(TEXT("/Game/RedHope/Art/Machines/RH_AirFilter2/StaticMeshes/RH_AirFilter2.RH_AirFilter2")) },
+			// Agri Gate B: the climate machinery (generated with the agri batch).
+			{ FName("HumidityRegulator"), FString(TEXT("/Game/RedHope/Art/Agri/humidity/humidity/StaticMeshes/humidity.humidity")) },
 		};
-		if (const FString* Path = RealModelPaths.Find(Instance.DefName))
+		// The MIXED SET (premium-asset-plan section 6, resolved from the
+		// 2026-08-14 side-by-side renders): keep the mesh that READS, and let
+		// the material family carry the coherence instead of the mesh.
+		//
+		// IN - the painted 2026-07-17 mesh wins outright:
+		//   Forge         the original is the vertex-colour mesh and reads as a
+		//                 dark broken slab; the replacement is a real machine
+		//   Habitat       geodesic dome with legible portholes
+		//   ComputeModule NEW coverage - it drew composed primitives before
+		//   SolarArray    a toss-up in the renders; kept here so it can be
+		//                 judged in-boot against the original
+		//
+		// OUT - the ORIGINAL mesh reads better and stays; each loses function
+		// legibility in the new batch, which matters more than fidelity here:
+		//   BatteryBank   original's display panels say "power" at a glance;
+		//                 the replacement is an anonymous crate
+		//   Borer         original keeps its unmistakable digging arm
+		//   WaterPlant    original's tanks-and-pipes says "processing plant"
+		//   Lander        original's splayed descent stage is instantly a lander
+		//
+		// Held back entirely: ModularBlock (open face) and HeavyFreighter
+		// (proportions) failed batch QA and want silhouette surgery first;
+		// AirlockModule, GreenhouseDome and ScoutSpeeder are imported but have
+		// no building DefName to attach to yet (the dome is agri Gate C's).
+		static const TMap<FName, FString> ModelPathsV2 = {
+			{ FName("Forge"),         FString(TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/StaticMeshes/HeavyForge.HeavyForge")) },
+			{ FName("SolarArray"),    FString(TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel")) },
+			{ FName("Habitat"),       FString(TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome")) },
+			{ FName("ComputeModule"), FString(TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule")) },
+		};
+		// Meshes whose color lives in vertex colors, not a texture — these (and
+		// only these) get the M_VertexColor override after the mesh is set.
+		static const TSet<FName> VertexColoredModels = { FName("Forge") };
+		bool bUsingV2 = CVarModelSetV2.GetValueOnGameThread() != 0;
+		if (const FString* V2Path = bUsingV2 ? ModelPathsV2.Find(Instance.DefName) : nullptr)
 		{
-			RealModel = LoadObject<UStaticMesh>(nullptr, **Path);
+			RealModel = LoadObject<UStaticMesh>(nullptr, **V2Path);
+			if (!RealModel)
+			{
+				// The V2 asset is missing (partial import): fall through to the
+				// original rather than regress the building to primitives.
+				UE_LOG(LogRedHope, Warning, TEXT("ModelSetV2: %s missing for %s - using the original model"),
+					**V2Path, *Instance.DefName.ToString());
+				bUsingV2 = false;
+			}
 		}
+		else
+		{
+			bUsingV2 = false;
+		}
+		if (!RealModel)
+		{
+			if (const FString* Original = RealModelPaths.Find(Instance.DefName))
+			{
+				RealModel = LoadObject<UStaticMesh>(nullptr, **Original);
+			}
+		}
+		// Only the ORIGINAL Forge carries its color in vertex data; its V2
+		// replacement is textured and must keep the material it shipped with.
+		bVertexColored = !bUsingV2 && VertexColoredModels.Contains(Instance.DefName);
 	}
 	if (RealModel)
 	{
@@ -881,15 +1044,21 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		Actor->SetActorScale3D(FVector(S));
 		// Recenter horizontally, sit the bounds bottom on the ground.
 		Actor->SetActorLocation(Seated - FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S);
-		if (UMaterialInterface* VCMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_VertexColor.M_VertexColor")))
+		// Only the vertex-color lineage (the Forge) needs its material forced;
+		// textured models keep the MI_<name> already on their slots.
+		if (bVertexColored)
 		{
-			for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+			if (UMaterialInterface* VCMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_VertexColor.M_VertexColor")))
 			{
-				Mesh->SetMaterial(Slot, UMaterialInstanceDynamic::Create(VCMat, Mesh));
+				for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+				{
+					Mesh->SetMaterial(Slot, UMaterialInstanceDynamic::Create(VCMat, Mesh));
+				}
 			}
 		}
-		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f)"),
-			*Instance.DefName.ToString(), *RealModel->GetName(), S);
+		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f, %s)"),
+			*Instance.DefName.ToString(), *RealModel->GetName(), S,
+			bVertexColored ? TEXT("vertex-color") : TEXT("textured"));
 	}
 	else
 	{
@@ -938,7 +1107,41 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// Born on whatever floor the sim says; visible only if the elevator is
 	// looking at that stratum (M1-d slice view).
 	Actor->SetActorHiddenInGame(Instance.Level != ViewLevel);
+	// The Floodmast exists only to light the place. It carries a real point
+	// light rather than an emissive fake, so it actually throws light onto the
+	// regolith and the hulls around it - which is the entire point of building
+	// one. Intensity rides bPowered through the power pass below.
+	if (!Instance.bUnderConstruction && Instance.DefName == FName("Floodmast"))
+	{
+		UPointLightComponent* Lamp = NewObject<UPointLightComponent>(Actor);
+		Lamp->SetupAttachment(Actor->GetRootComponent());
+		Lamp->SetMobility(EComponentMobility::Movable);
+		Lamp->SetAbsolute(true, true, true);
+		// Candelas, like the vault fill and the hab ceiling lights. The default
+		// is Unitless, which routes through a legacy x16 path and would make a
+		// value tuned in any real unit come out wrong by orders of magnitude.
+		Lamp->SetIntensityUnits(ELightUnits::Candelas);
+		Lamp->SetIntensity(90.f); // ~4x the 22 cd vault fill: a work light, not daylight
+		Lamp->SetLightColor(FColor(255, 219, 168)); // warm work light
+		Lamp->SetAttenuationRadius(2600.f);
+		// Shadowless on purpose: a colony of these would otherwise cost a
+		// shadow pass each, and the read we want is pooled light on the ground.
+		Lamp->SetCastShadows(false);
+		Lamp->RegisterComponent();
+		Lamp->SetWorldLocation(Seated + FVector(0, 0, 620.f));
+		BuildingLights.Add(Instance.Id, Lamp);
+	}
+
 	BuildingVisuals.Add(Instance.Id, Actor);
+	// A fresh visual has no material state pushed into it yet; forget any answer
+	// remembered for this Id so the next power pass re-applies from scratch.
+	AppliedPowerState.Remove(Instance.Id);
+	// Same reason, and it matters more than it looks: an under-construction
+	// building wears M_Graybox, which has no PulseDepth at all, so a pulse read
+	// taken then caches 0. Completion rebuilds the visual under this same Id
+	// with the real material, and without this the building's throb would stay
+	// pinned off for the rest of the session.
+	AuthoredPulseDepth.Remove(Instance.Id);
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
@@ -1097,9 +1300,164 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		}
 	}
 
+	// Is it working? A machine that has been shed by the power priority, or
+	// switched off by the player, goes dark; a running one keeps its glow. The
+	// sim already decides this per building (FRHBuildingInstance::bPowered), so
+	// the visual is a pure readout - state-diffed, because writing a material
+	// parameter every frame for every building would be waste. Only meshes
+	// wearing the M_RH_Master family carry PoweredState; on anything else the
+	// parameter simply does not exist and the write is a no-op.
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const uint8 Want = B.bUnderConstruction ? 2 : (B.bPowered ? 1 : 0);
+		if (const uint8* Applied = AppliedPowerState.Find(B.Id))
+		{
+			if (*Applied == Want)
+			{
+				continue;
+			}
+		}
+		TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(B.Id);
+		if (!Found || !*Found)
+		{
+			continue;
+		}
+		UStaticMeshComponent* Mesh = (*Found)->GetStaticMeshComponent();
+		if (!Mesh)
+		{
+			continue;
+		}
+		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+		if (!Mid)
+		{
+			Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
+		}
+		// Record the attempt whether or not it produced a MID. A mesh whose
+		// slot 0 is empty makes CreateAndSetMaterialInstanceDynamic return null
+		// AND log a warning, so leaving the entry unrecorded would retry - and
+		// log - every frame forever. HandleBuildingAdded clears the entry when
+		// the visual is rebuilt, so a genuine retry still happens then.
+		AppliedPowerState.Add(B.Id, Want);
+		if (Mid)
+		{
+			Mid->SetScalarParameterValue(FName("PoweredState"), Want == 1 ? 1.f : 0.f);
+		}
+		// A Floodmast on a shed breaker goes dark with everything else.
+		// (Named FoundLamp, not Found: this scope already has a `Found` for the
+		// building visual, and the build is -Werror,-Wshadow.)
+		if (const TWeakObjectPtr<UPointLightComponent>* FoundLamp = BuildingLights.Find(B.Id))
+		{
+			if (UPointLightComponent* Lamp = FoundLamp->Get())
+			{
+				Lamp->SetVisibility(Want == 1);
+			}
+		}
+	}
+
 	// Shaft & carved-floor mirror (M1-d): state-diffed each frame - the counts
 	// are tiny and the sim has no per-cell visual events to listen to.
 	UpdateShaftVisuals();
+
+	// Interior viewing: cheap unless the camera actually crossed a boundary.
+	ApplyCutaway();
+
+	// Hover-gated labels (director 2026-07-10: station and room names show
+	// only under the cursor - a working town, not a diagram). One deproject,
+	// then proximity-toggle every tile label and building label.
+	{
+		FVector CursorCm(1.0e12, 1.0e12, 0);
+		if (APlayerController* PC = World->GetFirstPlayerController())
+		{
+			FVector O, D;
+			if (PC->DeprojectMousePositionToWorld(O, D) && FMath::Abs(D.Z) > 1.0e-4)
+			{
+				const double PlaneZ = ViewLevel * Sim->GetFloorHeightCm();
+				const double T = (PlaneZ - O.Z) / D.Z;
+				if (T > 0)
+				{
+					CursorCm = O + D * T;
+				}
+			}
+		}
+		for (const auto& TP : TileByCell)
+		{
+			if (AStaticMeshActor* Tile = TP.Value.Get())
+			{
+				if (UTextRenderComponent* L = Tile->FindComponentByClass<UTextRenderComponent>())
+				{
+					L->SetVisibility(FVector::Dist2D(Tile->GetActorLocation(), CursorCm) < 600.f);
+				}
+			}
+		}
+		for (const auto& BP : BuildingVisuals)
+		{
+			if (AStaticMeshActor* B = BP.Value)
+			{
+				const bool bNear = FVector::Dist2D(B->GetActorLocation(), CursorCm) < 800.f;
+				TArray<UTextRenderComponent*> Texts;
+				B->GetComponents(Texts);
+				for (UTextRenderComponent* L : Texts)
+				{
+					L->SetVisibility(bNear);
+				}
+			}
+		}
+	}
+
+	// The elevator rides the open floor, and its doors ease open whenever a
+	// colonist stands near the shaft head (director 2026-07-09) - the cage is
+	// where crew "board" for the between-floors hard cut, so the doors parting
+	// for an approaching figure is what sells the ride.
+	if (UStaticMeshComponent* CageComp = ElevatorCage.Get())
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const double FloorH = Sim->GetFloorHeightCm();
+		const double FloorZ = ViewLevel * FloorH;
+		// The doors mount ON the cage's +X face (director hand-play
+		// 2026-07-17: the fixed 92 cm offset left them floating free of the
+		// frame). Derived from the cage's real bounds, whatever mesh it wears.
+		float DoorFaceX = Head.X + 92.f;
+		if (const UStaticMesh* Cage = CageComp->GetStaticMesh())
+		{
+			const FBoxSphereBounds CB = Cage->GetBounds();
+			const float S = CageComp->GetComponentScale().Z;
+			CageComp->SetWorldLocation(FVector(
+				Head.X - CB.Origin.X * S,
+				Head.Y - CB.Origin.Y * S,
+				FloorZ - (CB.Origin.Z - CB.BoxExtent.Z) * S));
+			DoorFaceX = Head.X + CB.BoxExtent.X * S + 3.f; // flush, a hair proud of the frame
+		}
+		float Target = 0.f;
+		if (IsUnderground())
+		{
+			if (const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>())
+			{
+				Target = Crew->IsAnyCrewWithinCm(FVector(Head.X, Head.Y, FloorZ), 420.f) ? 1.f : 0.f;
+			}
+		}
+		ElevatorDoorAlpha = FMath::FInterpTo(ElevatorDoorAlpha, Target, DeltaTime, 3.5f);
+		// Panels pocket INTO the frame: fully open, a door's outer edge stops
+		// at the cage's own side, never past it. The old fixed 94 cm throw
+		// overshot the cage body and the parted panels hung in the air beside
+		// it (director 2026-08-14: "the doors open strangely outside of its
+		// body"). 27.5 = half the 55 cm panel; travel is derived from the cage
+		// bounds like DoorFaceX above, so any future cage mesh keeps this true.
+		float SlideMaxCm = 94.f;
+		if (const UStaticMesh* CageMesh = CageComp->GetStaticMesh())
+		{
+			const float S = CageComp->GetComponentScale().Z;
+			SlideMaxCm = FMath::Max(30.f, CageMesh->GetBounds().BoxExtent.Y * S - 27.5f - 2.f);
+		}
+		const float SlideCm = FMath::Lerp(26.f, SlideMaxCm, ElevatorDoorAlpha);
+		if (UStaticMeshComponent* DoorL = ElevatorDoorL.Get())
+		{
+			DoorL->SetWorldLocation(FVector(DoorFaceX, Head.Y - SlideCm, FloorZ + 76.f));
+		}
+		if (UStaticMeshComponent* DoorR = ElevatorDoorR.Get())
+		{
+			DoorR->SetWorldLocation(FVector(DoorFaceX, Head.Y + SlideCm, FloorZ + 76.f));
+		}
+	}
 	// Sovereignty mirror (M3/M4): rival markers + the trade rover, same pattern.
 	RefreshSovereigntyVisuals();
 }
@@ -1115,16 +1473,23 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 	const double FloorH = Sim->GetFloorHeightCm();
 	const int32 Depth = Sim->GetShaftDepth();
 
-	// The trunk: one dark column from the surface down to the bored depth,
-	// amber-lit (canon: hazard hues mark machine interfaces).
+	// The shaft anchor: an INVISIBLE actor at the trunk (director 2026-07-09b:
+	// even slimmed, a floor-to-surface column read as a black void and blocked
+	// the floor beneath it). The elevator's visible presence is now entirely
+	// the cage + sliding doors + fill light, all parented to this anchor.
 	if (Depth > 0 && Depth != LastShaftDepthSeen)
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
 		const FVector Center(Head.X, Head.Y, -Depth * FloorH * 0.5);
-		const FVector Scale(4.f, 4.f, Depth * FloorH / 100.0);
+		const FVector Scale(2.2f, 2.2f, Depth * FloorH / 100.0);
 		if (!ShaftVisual)
 		{
-			ShaftVisual = SpawnBox(Center, Scale, RHCanon::DarkSlate, FLinearColor(0.35f, 0.25f, 0.02f));
+			ShaftVisual = SpawnBox(Center, Scale, RHCanon::DarkSlate, FLinearColor::Black);
+			if (ShaftVisual && ShaftVisual->GetStaticMeshComponent())
+			{
+				// Hide only the box mesh; attached children keep their own visibility.
+				ShaftVisual->GetStaticMeshComponent()->SetVisibility(false);
+			}
 #if WITH_EDITOR
 			if (ShaftVisual) { ShaftVisual->SetActorLabel(TEXT("Sim_Shaft")); }
 #endif
@@ -1132,6 +1497,77 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 			// the player is at the surface must not flash its column through
 			// the ground before the next view change (mirrors carve tiles).
 			if (ShaftVisual) { ShaftVisual->SetActorHiddenInGame(!IsUnderground()); }
+			// The underground fill: one big dim cool light riding the viewed
+			// floor (repositioned by ApplyViewLevel), so an unpowered vault
+			// reads dim-and-cold instead of void-black at night. Owned by the
+			// shaft column - dies and rebuilds with it on reload, and inherits
+			// its hidden-at-surface state.
+			if (ShaftVisual)
+			{
+				UPointLightComponent* Fill = NewObject<UPointLightComponent>(ShaftVisual, TEXT("FloorFill"));
+				Fill->SetupAttachment(ShaftVisual->GetRootComponent());
+				Fill->SetMobility(EComponentMobility::Movable);
+				Fill->SetAbsolute(true, true, true);
+				Fill->SetIntensityUnits(ELightUnits::Candelas);
+				Fill->SetIntensity(22.f);
+				Fill->SetLightColor(FColor(170, 190, 215)); // cold vault ambience
+				Fill->SetAttenuationRadius(4000.f);
+				Fill->SetCastShadows(false);
+				Fill->RegisterComponent();
+				Fill->SetWorldLocation(FVector(Head.X, Head.Y, ViewLevel * FloorH + 350.0));
+				FloorFill = Fill;
+			}
+			// The elevator CAGE at the shaft head (director 2026-07-09): the
+			// real generated model, riding the open floor, with two sliding
+			// door panels that ease open when a colonist approaches (animated
+			// in Tick). Attached to the shaft actor: hidden at SURF, dies and
+			// rebuilds with it on reload. Gemini design first, prior cage as
+			// fallback; absent both, the slim column carries alone.
+			if (ShaftVisual)
+			{
+				UStaticMesh* Cage = LoadObject<UStaticMesh>(nullptr,
+					TEXT("/Game/RedHope/Art/Machines/RH_Elevator2/StaticMeshes/RH_Elevator2.RH_Elevator2"));
+				if (!Cage)
+				{
+					Cage = LoadObject<UStaticMesh>(nullptr,
+						TEXT("/Game/RedHope/Art/Shaft/RH_Elevator/StaticMeshes/RH_Elevator.RH_Elevator"));
+				}
+				if (Cage)
+				{
+					UStaticMeshComponent* CageComp = NewObject<UStaticMeshComponent>(ShaftVisual, TEXT("ElevatorCage"));
+					CageComp->SetupAttachment(ShaftVisual->GetRootComponent());
+					CageComp->SetMobility(EComponentMobility::Movable);
+					CageComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					CageComp->SetAbsolute(true, true, true);
+					CageComp->RegisterComponent();
+					CageComp->SetStaticMesh(Cage);
+					const FBoxSphereBounds CB = Cage->GetBounds();
+					CageComp->SetWorldScale3D(FVector((float)(FloorH * 0.78 / FMath::Max(2.f * CB.BoxExtent.Z, 1.f))));
+					ElevatorCage = CageComp;
+					UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+					UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+					for (int32 Side = 0; Side < 2; ++Side)
+					{
+						UStaticMeshComponent* Door = NewObject<UStaticMeshComponent>(ShaftVisual,
+							Side == 0 ? TEXT("ElevatorDoorL") : TEXT("ElevatorDoorR"));
+						Door->SetupAttachment(ShaftVisual->GetRootComponent());
+						Door->SetMobility(EComponentMobility::Movable);
+						Door->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+						Door->SetAbsolute(true, true, true);
+						Door->RegisterComponent();
+						Door->SetStaticMesh(Cube);
+						Door->SetWorldScale3D(FVector(0.06f, 0.55f, 1.5f));
+						if (Base)
+						{
+							UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Door);
+							Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.88f, 0.87f, 0.85f));
+							Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor::Black);
+							Door->SetMaterial(0, Mid);
+						}
+						(Side == 0 ? ElevatorDoorL : ElevatorDoorR) = Door;
+					}
+				}
+			}
 		}
 		else
 		{
@@ -1150,6 +1586,32 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 	for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
 	{
 		const int32 Want = Sim->GetFloorCarvedCells(L);
+		// A floor tile at the shaft-head cell (0,0) too - the spiral skips it (the
+		// shaft column's cell), which left an un-tiled HOLE the elevator floated
+		// over (director 2026-07-10). The elevator platform now sits on it. Keyed
+		// at sentinel index -1 (SpiralCell never yields it), spawned once.
+		if (Want > 0 && !TileByCell.Contains(FIntVector(L, -1, 0)))
+		{
+			const FVector Head = Sim->GetShaftHeadCm();
+			const FVector Center(Head.X, Head.Y, L * FloorH - 15.0);
+			if (AStaticMeshActor* HeadTile = SpawnBox(Center, FVector(10.f, 10.f, 0.3f),
+				FLinearColor(0.20f, 0.15f, 0.11f), FLinearColor::Black))
+			{
+				// The elevator's own cell wears deck plating like every other
+				// carved cell, only darker - it WAS left bare dirt, and on the
+				// director's screen (2026-08-14) that read as a hole in the
+				// floor around the elevator, not as rock.
+				ApplySurface(HeadTile->GetStaticMeshComponent(),
+					TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Deck.T_HabFloor_Deck"),
+					1000.f, FLinearColor(0.30f, 0.30f, 0.32f), 0.6f);
+#if WITH_EDITOR
+				HeadTile->SetActorLabel(FString::Printf(TEXT("Sim_ShaftFloor_%d"), L));
+#endif
+				HeadTile->SetActorHiddenInGame(ViewLevel != L);
+				CarveTileVisuals.Add(HeadTile);
+				TileByCell.Add(FIntVector(L, -1, 0), HeadTile);
+			}
+		}
 		int32& Have = TilesSpawnedPerLevel.FindOrAdd(L);
 		while (Have < Want)
 		{
@@ -1191,7 +1653,86 @@ FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
 	if (RoomRowName == FName("Hallway"))        { return FLinearColor(0.30f, 0.30f, 0.32f); } // slate
 	if (RoomRowName == FName("Garden"))         { return FLinearColor(0.14f, 0.26f, 0.09f); } // tilled, waiting
 	if (RoomRowName == FName("Garden#planted")) { return FLinearColor(0.10f, 0.42f, 0.12f); } // growing - the only green on Mars
+	// Crop-stage keys (Garden#<family>#<stage> / Greenhouse#...): same green.
+	if (RoomRowName.ToString().Contains(TEXT("#"))) { return FLinearColor(0.10f, 0.42f, 0.12f); }
 	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
+}
+
+FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
+{
+	// One hero furnishing per active room type (director's own sprite roster,
+	// re-meshed). The player draws the room's SHAPE with DesignateRoom; these
+	// props auto-furnish each cell it covers - prefab meeting hand-drawn. Garden
+	// arrives here already split into its planted state (planter_dry -> _wet).
+	// Empty string = no prop (undesignated rock, or a room with no furniture yet).
+	// Props2 = the plate-free re-exports (director 2026-07-09: the baked floor
+	// pad under each prop hid the deck) - same art, floor plate removed, own
+	// embedded textures. Interchange layout: <name>/StaticMeshes/<name>.
+	static const TMap<FName, FString> Props = {
+		{ FName("LivingQuarters"), TEXT("/Game/RedHope/Art/Props2/bunk/StaticMeshes/bunk.bunk") },
+		{ FName("Lab"),            TEXT("/Game/RedHope/Art/Props2/labbench/StaticMeshes/labbench.labbench") },
+		{ FName("Workstation"),    TEXT("/Game/RedHope/Art/Props2/console/StaticMeshes/console.console") },
+		{ FName("Dining"),         TEXT("/Game/RedHope/Art/Props2/diningtable/StaticMeshes/diningtable.diningtable") },
+		{ FName("Cooking"),        TEXT("/Game/RedHope/Art/Props2/galley/StaticMeshes/galley.galley") },
+		{ FName("Hallway"),        TEXT("/Game/RedHope/Art/Props2/conduit/StaticMeshes/conduit.conduit") },
+		{ FName("Garden"),         TEXT("/Game/RedHope/Art/Props2/planter_dry/StaticMeshes/planter_dry.planter_dry") },
+		{ FName("Garden#planted"), TEXT("/Game/RedHope/Art/Props2/planter_wet/StaticMeshes/planter_wet.planter_wet") },
+		{ FName("Greenhouse"),     TEXT("/Game/RedHope/Art/Props2/planter_wet/StaticMeshes/planter_wet.planter_wet") },
+		// Dormant rooms (M2 Gate C+): the fluid works read as a tank + pump.
+		{ FName("WaterWorks"),     TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
+		{ FName("Septic"),         TEXT("/Game/RedHope/Art/Props2/tank/StaticMeshes/tank.tank") },
+		// Tier rooms (tiers Gate A). These are SliceActive and designatable,
+		// and had NO entry here - so zoning one silently STRIPPED the cell's
+		// furniture and left bare deck, with no warning fired (the missing-asset
+		// log only triggers on a non-empty path). Audit finding, 2026-08-14,
+		// confirmed by pixel diff. Tiers meshes are still on the importer
+		// material - imperfect furniture, but honest beats empty.
+		{ FName("WorkbenchLarge"), TEXT("/Game/RedHope/Art/Tiers/workbench_lg/StaticMeshes/workbench_lg.workbench_lg") },
+		{ FName("ChemTableLarge"), TEXT("/Game/RedHope/Art/Tiers/chemtable_lg/StaticMeshes/chemtable_lg.chemtable_lg") },
+		{ FName("Infirmary"),      TEXT("/Game/RedHope/Art/Tiers/infirmary/StaticMeshes/infirmary.infirmary") },
+		{ FName("LabFull"),        TEXT("/Game/RedHope/Art/Tiers/lab_full/StaticMeshes/lab_full.lab_full") },
+		{ FName("Workshop"),       TEXT("/Game/RedHope/Art/Tiers/workshop/StaticMeshes/workshop.workshop") },
+	};
+	// Crop-stage cells (agri Gate A): the room key arrives as
+	// <Garden|Greenhouse>#<family>#<stage 0-2>; the stage art is one mesh per
+	// silhouette family per stage (crop_<family>_<1-3>, Interchange layout).
+	{
+		FString RoomStr = Room.ToString();
+		FString Base, Rest;
+		if (RoomStr.Split(TEXT("#"), &Base, &Rest) && Rest.Contains(TEXT("#")))
+		{
+			FString Family, StageStr;
+			Rest.Split(TEXT("#"), &Family, &StageStr);
+			const int32 Stage = FMath::Clamp(FCString::Atoi(*StageStr), 0, 2);
+			// Interchange lays these out as <name>/<name>/StaticMeshes/<name>.
+			const FString N = FString::Printf(TEXT("crop_%s_%d"), *Family, Stage + 1);
+			return FString::Printf(TEXT("/Game/RedHope/Art/Agri/%s/%s/StaticMeshes/%s.%s"), *N, *N, *N, *N);
+		}
+	}
+	if (const FString* P = Props.Find(Room))
+	{
+		return *P;
+	}
+	// Unknown row: fall through on its FUNCTION before giving up, so a future
+	// data-added room furnishes itself with its family's furniture instead of
+	// silently stripping the cell (how the tier rooms went bare for a month).
+	if (!Room.IsNone())
+	{
+		if (const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr)
+		{
+			if (const FRHRoomRow* Row = Defs->GetRoom(Room))
+			{
+				if (Row->Function != Room)
+				{
+					if (const FString* F = Props.Find(Row->Function))
+					{
+						return *F;
+					}
+				}
+			}
+		}
+	}
+	return FString();
 }
 
 void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
@@ -1210,11 +1751,33 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		{
 			continue;
 		}
-		FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
-		// A planted garden reads as its own state - green means growing.
-		if (Room == FName("Garden") && Sim->IsGardenPlanted(Pair.Key.X, Pair.Key.Y))
+		// The shaft-head floor tile (sentinel cell index -1) is never a room -
+		// it just fills the hole under the elevator; leave it bare rock.
+		if (Pair.Key.Y < 0)
 		{
-			Room = FName("Garden#planted");
+			continue;
+		}
+		FName Room = Sim->GetRoomAt(Pair.Key.X, Pair.Key.Y);
+		// A planted garden reads as its own state - green means growing. With
+		// the crop layer live (agri Gate A) the cell reads as its CROP at its
+		// GROWTH STAGE: the family+stage fold into the diffed room key, so a
+		// stage change refreshes the prop exactly like a redesignation. Cells
+		// without a crop entry (crops dormant / legacy saves) keep the exact
+		// pre-agri planter visuals.
+		if ((Room == FName("Garden") || Room == FName("Greenhouse")) && Sim->IsGardenPlanted(Pair.Key.X, Pair.Key.Y))
+		{
+			const FName Crop = Sim->GetCellCrop(Pair.Key.X, Pair.Key.Y);
+			const int32 Stage = Sim->GetCellCropStage(Pair.Key.X, Pair.Key.Y);
+			const FRHCropRow* CropRow = Crop.IsNone() ? nullptr : Defs->GetCrop(Crop);
+			if (CropRow && Stage >= 0)
+			{
+				const FString Family = CropRow->VisualFamily.IsNone() ? TEXT("root") : CropRow->VisualFamily.ToString();
+				Room = FName(*FString::Printf(TEXT("%s#%s#%d"), *Room.ToString(), *Family, Stage));
+			}
+			else if (Room == FName("Garden"))
+			{
+				Room = FName("Garden#planted");
+			}
 		}
 		FName* Applied = AppliedRoomTint.Find(Pair.Key);
 		if (Applied && *Applied == Room)
@@ -1222,15 +1785,17 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			continue; // steady state: zero work
 		}
 		AppliedRoomTint.Add(Pair.Key, Room);
-		// Undesignated cells stay carved rock (cavern basalt); a designated
-		// room lays deck plating (steel grid, 10 m panel = exactly one cell),
-		// tinted with a brightened room hue so the at-a-glance color language
-		// survives the texture. Flat tints if the assets are missing.
+		// Undesignated cells read as bare industrial deck plating - carved and
+		// built, awaiting assignment (the regolith-dirt look read as "unfinished
+		// floor" on the director's screen, 2026-07-09). A designated room lays
+		// clean sealed panels (10 m panel = exactly one cell) with only a GENTLE
+		// room-hue tint over a light base, so the at-a-glance colour language
+		// survives without the floor glowing. Flat tints if assets missing.
 		const bool bTextured = Room.IsNone()
-			? ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Cavern_Basalt_Texture.Cavern_Basalt_Texture"),
-				1000.f, FLinearColor(0.75f, 0.70f, 0.68f))
-			: ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Steel_Grid_Texture.Steel_Grid_Texture"),
-				1000.f, RoomTint(Room) * 2.8f, 0.45f);
+			? ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Deck.T_HabFloor_Deck"),
+				1000.f, FLinearColor(0.42f, 0.42f, 0.44f), 0.6f)
+			: ApplySurface(Tile->GetStaticMeshComponent(), TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Sealed.T_HabFloor_Sealed"),
+				1000.f, RoomTint(Room) * 0.35f + FLinearColor(0.62f, 0.62f, 0.62f), 0.45f);
 		if (!bTextured)
 		{
 			ApplyTint(Tile, RoomTint(Room));
@@ -1248,19 +1813,194 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Label->SetWorldSize(150.f);
 			Label->SetHorizontalAlignment(EHTA_Center);
 			Label->SetVerticalAlignment(EVRTA_TextCenter);
+			// 25, not 14: the tile is a 0.3 m box whose top face is at +15, so
+			// a glyph plane at +14 sat one centimetre INSIDE the deck and was
+			// depth-occluded from every camera above it (audit 2026-08-14).
 			Label->SetWorldLocationAndRotation(
-				Tile->GetActorLocation() + FVector(0, 0, 14.f),
+				Tile->GetActorLocation() + FVector(0, 0, 25.f),
 				FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 		}
 		if (Label)
 		{
-			const FName BaseRoom = (Room == FName("Garden#planted")) ? FName("Garden") : Room;
+			FString BaseStr = Room.ToString();
+			int32 HashIdx;
+			if (BaseStr.FindChar(TEXT('#'), HashIdx)) { BaseStr.LeftInline(HashIdx); }
+			const FName BaseRoom(*BaseStr);
 			const FRHRoomRow* Row = Defs->GetRoom(BaseRoom);
 			Label->SetText(Room.IsNone() ? FText::GetEmpty() : FText::FromString(Row ? Row->DisplayName : BaseRoom.ToString()));
 			const FLinearColor T = RoomTint(Room);
 			Label->SetTextRenderColor((T * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
 			// The tile actor's hidden-in-game state (the elevator's floor cut)
 			// propagates to the label component automatically.
+		}
+		// A furnishing prop per designated cell, attached to the tile actor so
+		// the slice-view floor-cut, actor lifecycle, and this per-change diff all
+		// come free (identical to the label above). One extra StaticMeshComponent
+		// per designated cell; undesignated cells and rooms with no prop carry
+		// none. Density is one-per-cell by design - a broad room reads furnished,
+		// with a per-cell yaw so it isn't tiled wallpaper.
+		UStaticMeshComponent* Prop = RoomPropByCell.FindRef(Pair.Key).Get();
+		const FString PropPath = RoomPropPath(Room);
+		// A missing asset must not leave the PREVIOUS room's furniture standing on
+		// a retinted tile - fall through to the hide path and say so once.
+		UStaticMesh* PropMesh = PropPath.IsEmpty() ? nullptr : LoadObject<UStaticMesh>(nullptr, *PropPath);
+		if (!PropPath.IsEmpty() && !PropMesh)
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("Room prop asset missing: %s (cell stays unfurnished)"), *PropPath);
+		}
+		if (!PropMesh)
+		{
+			if (Prop) { Prop->SetVisibility(false); } // room cleared / no furniture
+		}
+		else
+		{
+			if (!Prop)
+			{
+				Prop = NewObject<UStaticMeshComponent>(Tile, TEXT("RoomProp"));
+				Prop->SetupAttachment(Tile->GetRootComponent());
+				Prop->SetMobility(EComponentMobility::Movable);
+				Prop->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Prop->SetAbsolute(true, true, true); // the tile's flat 0.3 m Z scale would squash it
+				Prop->RegisterComponent();
+				RoomPropByCell.Add(Pair.Key, Prop);
+			}
+			Prop->SetStaticMesh(PropMesh);
+			Prop->SetVisibility(true);
+			// Fit the prop's larger horizontal dimension to a human-scale
+			// footprint (~2.5 m), NOT the whole 10 m cell - furniture must read
+			// small beside a ~1.8 m colonist (director: earlier 7.5 m fill made
+			// it ~3x too big). Feet on the tile's floor plane (tile is a 0.3 m
+			// box centred at L*FloorH-15, so its top is L*FloorH = TileLoc.Z+15),
+			// deterministic per-cell yaw. Tunable per-prop later if needed.
+			const float TargetFootprintCm = 250.f;
+			const FBoxSphereBounds MB = PropMesh->GetBounds();
+			const float S = TargetFootprintCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+			const FVector TileLoc = Tile->GetActorLocation();
+			const float Yaw = 90.f * ((Pair.Key.Y * 3 + Pair.Key.X) & 3);
+			Prop->SetWorldScale3D(FVector(S));
+			Prop->SetWorldLocationAndRotation(
+				FVector(TileLoc.X - MB.Origin.X * S,
+						TileLoc.Y - MB.Origin.Y * S,
+						(TileLoc.Z + 15.f) - (MB.Origin.Z - MB.BoxExtent.Z) * S),
+				FRotator(0.f, Yaw, 0.f));
+			// Receipt (bounded: fires only on a room CHANGE, not per tick).
+			UE_LOG(LogRedHope, Display, TEXT("Room prop: L%d cell %d '%s' furnished with '%s' (scale %.2f, yaw %.0f)"),
+				Pair.Key.X, Pair.Key.Y, *Room.ToString(), *PropMesh->GetName(), S, Yaw);
+		}
+		// Automatic hab lighting (director 2026-07-09): a designated cell gets
+		// a soft ceiling light - infrastructure, never a placeable, exactly like
+		// air. Created dark; the tick pass below drives its intensity from the
+		// sim every frame. Owned by the tile: floor-cut hiding + lifecycle free.
+		UPointLightComponent* Light = LightByCell.FindRef(Pair.Key).Get();
+		if (Room.IsNone())
+		{
+			if (Light) { Light->SetVisibility(false); } // room cleared: fixture decommissioned
+		}
+		else if (!Light)
+		{
+			Light = NewObject<UPointLightComponent>(Tile, TEXT("CellLight"));
+			Light->SetupAttachment(Tile->GetRootComponent());
+			Light->SetMobility(EComponentMobility::Movable);
+			Light->SetAbsolute(true, true, true);
+			Light->SetIntensityUnits(ELightUnits::Candelas);
+			Light->SetIntensity(0.f);
+			Light->SetLightColor(FColor(255, 236, 210)); // warm interior white
+			Light->SetAttenuationRadius(850.f);
+			Light->SetCastShadows(false);
+			Light->RegisterComponent();
+			Light->SetWorldLocation(Tile->GetActorLocation() + FVector(0, 0, 330.f));
+			LightByCell.Add(Pair.Key, Light);
+		}
+		else
+		{
+			Light->SetVisibility(true);
+		}
+	}
+
+	// The lights track the sim EVERY tick (the loop above early-outs per cell
+	// on steady state): full while that floor's circulator runs on a healthy
+	// grid, dimmed hard in a brownout/shedding, dark when circulation is down.
+	// Light is a readout of colony health, not decoration.
+	const FRHPowerState& Power = Sim->GetPower();
+	const float GridMul = (Power.bDeficit || Power.ShedCount > 0) ? 0.30f : 1.0f;
+	constexpr float BaseCandela = 120.f;
+	for (auto& LPair : LightByCell)
+	{
+		UPointLightComponent* Light = LPair.Value.Get();
+		if (!Light)
+		{
+			continue;
+		}
+		const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul : 0.f;
+		if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.5f))
+		{
+			Light->SetIntensity(Want);
+		}
+	}
+
+	// Lived-in accumulation (director 2026-07-09: "once an area gets populated,
+	// over time decor and space stuff just appears"). Crates, drums, and lockers
+	// collect on inhabited floors - count grows with residents and sols, capped,
+	// never removed (a home only gets more lived-in). Deterministic placement
+	// (seeded per floor+item) in a cell's outer band, clear of the centre prop
+	// and its seat ring. Components ride tile actors: lifecycle + hiding free.
+	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	const int32 Sol = Clock ? Clock->GetSol() : 0;
+	static const TCHAR* ClutterPaths[3] = {
+		TEXT("/Game/RedHope/Art/Dress/RH_crate/StaticMeshes/RH_crate.RH_crate"),
+		TEXT("/Game/RedHope/Art/Dress/RH_drum/StaticMeshes/RH_drum.RH_drum"),
+		TEXT("/Game/RedHope/Art/Props/locker/locker.locker"),
+	};
+	for (const auto& TilesPair : TilesSpawnedPerLevel)
+	{
+		const int32 L = TilesPair.Key;
+		const int32 Carved = TilesPair.Value;
+		if (Carved <= 0)
+		{
+			continue;
+		}
+		int32 Residents = 0;
+		for (const FRHColonist& C : Sim->GetColonists())
+		{
+			if (C.HomeLevel == L)
+			{
+				++Residents;
+			}
+		}
+		if (Residents <= 0)
+		{
+			continue; // uninhabited floors stay bare
+		}
+		const int32 Want = FMath::Min(12, Residents * 2 + Sol / 10);
+		int32& Have = ClutterSpawnedPerLevel.FindOrAdd(L);
+		while (Have < Want)
+		{
+			FRandomStream Rand(L * 7919 + Have * 131 + 20260709);
+			AStaticMeshActor* Tile = TileByCell.FindRef(FIntVector(L, Rand.RandRange(0, Carved - 1), 0)).Get();
+			UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, ClutterPaths[Have % 3]);
+			if (!Tile || !Mesh)
+			{
+				break; // tile not spawned yet / assets absent: retry next tick
+			}
+			UStaticMeshComponent* Item = NewObject<UStaticMeshComponent>(Tile);
+			Item->SetupAttachment(Tile->GetRootComponent());
+			Item->SetMobility(EComponentMobility::Movable);
+			Item->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Item->SetAbsolute(true, true, true);
+			Item->RegisterComponent();
+			Item->SetStaticMesh(Mesh);
+			const FBoxSphereBounds MB = Mesh->GetBounds();
+			const float S = Rand.FRandRange(95.f, 130.f) / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+			const float Ang = Rand.FRand() * 2.f * PI;
+			const float R = Rand.FRandRange(360.f, 450.f); // outer band: clear of prop + seats
+			const FVector TileLoc = Tile->GetActorLocation();
+			Item->SetWorldScale3D(FVector(S));
+			Item->SetWorldLocationAndRotation(
+				FVector(TileLoc.X + FMath::Cos(Ang) * R - MB.Origin.X * S,
+						TileLoc.Y + FMath::Sin(Ang) * R - MB.Origin.Y * S,
+						(TileLoc.Z + 15.f) - (MB.Origin.Z - MB.BoxExtent.Z) * S),
+				FRotator(0.f, Rand.FRandRange(0.f, 360.f), 0.f));
+			++Have;
 		}
 	}
 }
@@ -1450,6 +2190,123 @@ FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
 	return URHSimWorldSubsystem::SpiralCell(Index);
 }
 
+void URHColonyVisualizerSubsystem::ApplyCutaway()
+{
+	if (!WallISM)
+	{
+		return;
+	}
+	const int32 Mode = FMath::Clamp(CVarCutaway.GetValueOnGameThread(), 0, 2);
+
+	uint8 Hidden = 0;
+	if (Mode == 2)
+	{
+		Hidden = 0x0F; // floorplan: every face down
+	}
+	else if (Mode == 1)
+	{
+		const UWorld* World = GetWorld();
+		const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+		if (Cam)
+		{
+			const FVector CamLoc = Cam->GetCameraLocation();
+			FVector2D ToCam(CamLoc.X - PitCenterCm.X, CamLoc.Y - PitCenterCm.Y);
+			if (ToCam.Normalize())
+			{
+				const uint8 WasHidden = (AppliedCutawayKey == 0xFF) ? 0u : (uint8)(AppliedCutawayKey & 0x0F);
+				for (int32 i = 0; i < 4; ++i)
+				{
+					// A face whose OUTWARD normal points at the camera is a near
+					// wall standing between the viewer and the room. Two
+					// thresholds, not one: a side already down stays down until
+					// it clearly swings away, so an orbit through the boundary
+					// cannot strobe walls in and out.
+					// FVector2D is double-precision in UE5; the cast is explicit so no
+					// narrowing warning can fire under -Werror.
+					const float Dot = (float)(ToCam.X * GRHWallDirs[i].X + ToCam.Y * GRHWallDirs[i].Y);
+					const bool bWas = (WasHidden & (1 << i)) != 0;
+					if (bWas ? (Dot > 0.25f) : (Dot > 0.40f))
+					{
+						Hidden |= (uint8)(1 << i);
+					}
+				}
+			}
+		}
+	}
+
+	const uint8 Key = (uint8)((Mode << 4) | Hidden);
+	if (Key == AppliedCutawayKey)
+	{
+		return;
+	}
+	AppliedCutawayKey = Key;
+
+	WallISM->ClearInstances();
+	for (int32 i = 0; i < WallFaceXf.Num(); ++i)
+	{
+		const int32 Slot = RHWallDirSlot(WallFaceDir[i]);
+		if (Slot != INDEX_NONE && (Hidden & (1 << Slot)) != 0)
+		{
+			continue;
+		}
+		WallISM->AddInstance(WallFaceXf[i], /*bWorldSpace*/ true);
+	}
+	for (int32 i = 0; i < WallVents.Num(); ++i)
+	{
+		UStaticMeshComponent* Vent = WallVents[i].Get();
+		if (!Vent)
+		{
+			continue;
+		}
+		const int32 Slot = WallVentDir.IsValidIndex(i) ? RHWallDirSlot(WallVentDir[i]) : INDEX_NONE;
+		Vent->SetHiddenInGame(Slot != INDEX_NONE && (Hidden & (1 << Slot)) != 0);
+	}
+}
+
+void URHColonyVisualizerSubsystem::Debug_SetPulseScale(float Scale)
+{
+	int32 Touched = 0;
+	for (const TPair<int32, TObjectPtr<AStaticMeshActor>>& Pair : BuildingVisuals)
+	{
+		AStaticMeshActor* Actor = Pair.Value;
+		if (!Actor)
+		{
+			continue;
+		}
+		UStaticMeshComponent* Mesh = Actor->GetStaticMeshComponent();
+		if (!Mesh)
+		{
+			continue;
+		}
+		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+		if (!Mid)
+		{
+			Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
+		}
+		if (!Mid)
+		{
+			continue;
+		}
+		// First touch reads the authored value straight through to the parent
+		// instance; every later call scales that remembered number. Buildings
+		// whose material is not M_RH_Master simply read 0 and stay still.
+		float Authored = 0.f;
+		if (const float* Remembered = AuthoredPulseDepth.Find(Pair.Key))
+		{
+			Authored = *Remembered;
+		}
+		else
+		{
+			Authored = Mid->K2_GetScalarParameterValue(FName("PulseDepth"));
+			AuthoredPulseDepth.Add(Pair.Key, Authored);
+		}
+		Mid->SetScalarParameterValue(FName("PulseDepth"), Authored * Scale);
+		++Touched;
+	}
+	UE_LOG(LogRedHope, Display, TEXT("[RH.Pulse] scale %.2f applied to %d building visual(s)"), Scale, Touched);
+}
+
 void URHColonyVisualizerSubsystem::SetViewLevel(int32 Level)
 {
 	if (ViewLevel == Level)
@@ -1490,6 +2347,14 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 			}
 		}
 		Pair.Value->SetActorHiddenInGame(BLevel != ViewLevel);
+	}
+	// The underground fill light rides the elevator: it hovers over whichever
+	// floor is open. (Its owner, the shaft column, is hidden at SURF, which
+	// hides the light with it.)
+	if (UPointLightComponent* Fill = FloorFill.Get())
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		Fill->SetWorldLocation(FVector(Head.X, Head.Y, ViewLevel * Sim->GetFloorHeightCm() + 350.0));
 	}
 	// Deposit markers, the ship, and the robot layer are surface furniture -
 	// shown only in the surface view (underground is a separate stratum).
@@ -1570,14 +2435,14 @@ void URHColonyVisualizerSubsystem::EnsureSliceRig()
 		}
 		return ISM;
 	};
-	// Skirt matches the sunlit regolith so the hole reads as dug INTO the
-	// same ground; walls are the cut faces of the excavation - the director's
-	// cavern basalt (dark rock veined with luminous mineral: the subterranean
-	// identity). Flat tints only if the texture assets are missing.
+	// Skirt matches the sunlit regolith so the hole reads as dug INTO the same
+	// ground; walls read as INSULATED habitat lining - brushed panels sealing
+	// the excavation to protect the inhabitants (director 2026-07-09: bare rock
+	// walls looked wrong for a lived-in vault). Flat tints if assets missing.
 	SkirtISM = MakeISM(TEXT("PitSkirt"), FLinearColor(0.48f, 0.31f, 0.19f));
-	WallISM = MakeISM(TEXT("PitWalls"), FLinearColor(0.30f, 0.19f, 0.12f));
+	WallISM = MakeISM(TEXT("PitWalls"), FLinearColor(0.55f, 0.54f, 0.52f));
 	ApplySurface(SkirtISM, TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"), 900.f, FLinearColor(0.85f, 0.80f, 0.75f));
-	ApplySurface(WallISM, TEXT("/Game/RedHope/Art/Cavern_Basalt_Texture.Cavern_Basalt_Texture"), 700.f, FLinearColor::White);
+	ApplySurface(WallISM, TEXT("/Game/RedHope/Art/Surfaces/T_HabWall_Panel.T_HabWall_Panel"), 450.f, FLinearColor(0.72f, 0.71f, 0.69f), 0.55f);
 }
 
 void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
@@ -1644,39 +2509,11 @@ void URHColonyVisualizerSubsystem::EnsureEnvironmentRig()
 		UE_LOG(LogRedHope, Warning, TEXT("Ground pad retexture: MarsGround actor not found at rig time - pad keeps its authored material"));
 	}
 
-	// Wind-laid dust drifts stay soft primitive spheres (dunes ARE smooth
-	// forms), riding the new height field so far drifts follow rolling ground.
-	// All within +/-14 degrees of one prevailing wind so the plain reads as
-	// WEATHER, not noise.
-	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
-	UInstancedStaticMeshComponent* Drifts = NewObject<UInstancedStaticMeshComponent>(EnvironmentRigActor, TEXT("DustDrifts"));
-	Drifts->SetupAttachment(Root);
-	Drifts->RegisterComponent();
-	EnvironmentRigActor->AddInstanceComponent(Drifts);
-	Drifts->SetStaticMesh(Sphere);
-	Drifts->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Drifts->SetCastShadow(false);
-	if (Base)
-	{
-		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Drifts);
-		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.55f, 0.37f, 0.23f));
-		Mid->SetScalarParameterValue(FName("SeamStrength"), 0.f); // dust, not hull plating
-		Mid->SetScalarParameterValue(FName("Metallic"), 0.f);
-		Drifts->SetMaterial(0, Mid);
-	}
-	const auto Deg = [](float D){ return FRotator(0.f, D, 0.f); };
-	FRandomStream Rand(20260708);
-	for (int32 D = 0; D < 90; ++D)
-	{
-		const float R = Rand.FRandRange(20.f, 380.f) * 100.f;
-		FVector Pos = Deg(Rand.FRandRange(0.f, 360.f)).Vector() * R;
-		Pos.Z = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y) + 6.f;
-		const float L = Rand.FRandRange(5.f, 18.f);
-		FTransform T(Deg(115.f + Rand.FRandRange(-14.f, 14.f)).Quaternion(), Pos,
-			FVector(L, L * Rand.FRandRange(0.18f, 0.3f), 0.5f));
-		Drifts->AddInstance(T, true);
-	}
+	// The wind-laid dust drifts (90 stretched-sphere instances) are GONE -
+	// the director flagged the smooth beige ellipsoids as alien objects on
+	// the terrain, twice (2026-07-17 hand-play: "strange rocks or weird oval
+	// things"). The procedural boulder fields in BuildScenery carry the
+	// ground interest on their own.
 }
 
 void URHColonyVisualizerSubsystem::RebuildSliceRig()
@@ -1744,6 +2581,24 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	}
 	SkirtISM->ClearInstances();
 	WallISM->ClearInstances();
+	// Vents die with the wall layout they sat on - including on the way UP to
+	// the surface, where the pit rig clears but this function returns early.
+	for (const TWeakObjectPtr<UStaticMeshComponent>& V : WallVents)
+	{
+		if (UStaticMeshComponent* Vent = V.Get())
+		{
+			Vent->DestroyComponent();
+		}
+	}
+	WallVents.Reset();
+	// The cutaway's authored face list dies with them, and it MUST be cleared
+	// on this side of the early return below: at the surface WallISM is emptied
+	// and this function bails, so a stale face list would let ApplyCutaway
+	// re-add pit walls into a view that has no pit.
+	WallFaceXf.Reset();
+	WallFaceDir.Reset();
+	WallVentDir.Reset();
+	AppliedCutawayKey = 0xFF;
 	if (!IsUnderground())
 	{
 		return; // SURF (or above): the intact ground is the view - no pit rig
@@ -1785,10 +2640,19 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	// Pit walls: every open-to-rock edge gets a cut face from the surface
 	// down to the open floor - the vertical faces are what make it a HOLE
 	// dug in the ground instead of a shaved-off plane.
-	const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	UStaticMesh* VentMesh = LoadObject<UStaticMesh>(nullptr,
+		TEXT("/Game/RedHope/Art/Dress/RH_vent/StaticMeshes/RH_vent.RH_vent"));
+
+	// The cutaway needs to know where every face is and which way it looks, so
+	// the authored list is filled here and WallISM becomes a filtered view of
+	// it. (The lists were cleared above, on the surface side of the early
+	// return, so both paths leave them consistent with WallISM.)
+	PitCenterCm = Head;
+
+	int32 FaceIdx = 0;
 	for (const FIntPoint& Cell : Open)
 	{
-		for (const FIntPoint& D : Dirs)
+		for (const FIntPoint& D : GRHWallDirs)
 		{
 			if (Open.Contains(Cell + D))
 			{
@@ -1799,9 +2663,35 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 			const FVector Scale = D.X != 0
 				? FVector(0.6f, 10.f, (float)(PitDepthCm / 100.0))
 				: FVector(10.f, 0.6f, (float)(PitDepthCm / 100.0));
-			WallISM->AddInstance(FTransform(FRotator::ZeroRotator, WallCenter, Scale), /*bWorldSpace*/ true);
+			const FTransform WallXf(FRotator::ZeroRotator, WallCenter, Scale);
+			WallFaceXf.Add(WallXf);
+			WallFaceDir.Add(D);
+			WallISM->AddInstance(WallXf, /*bWorldSpace*/ true);
+			// Every third wall face carries a life-support vent at head height
+			// on the open floor - the insulated lining reads SERVICED, not dead
+			// space (director 2026-07-09). Faces inward at the room.
+			if (VentMesh && SliceRigActor && (FaceIdx++ % 3) == 0)
+			{
+				UStaticMeshComponent* Vent = NewObject<UStaticMeshComponent>(SliceRigActor);
+				Vent->SetupAttachment(SliceRigActor->GetRootComponent());
+				Vent->SetMobility(EComponentMobility::Movable);
+				Vent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Vent->RegisterComponent();
+				Vent->SetStaticMesh(VentMesh);
+				const FBoxSphereBounds VB = VentMesh->GetBounds();
+				const float VS = 110.f / FMath::Max(2.f * VB.BoxExtent.GetMax(), 1.f); // ~1.1 m unit
+				const FVector Inward(-D.X, -D.Y, 0.f);
+				const FVector VentPos = CellCenter
+					+ FVector(D.X * 480.0, D.Y * 480.0, Pit * FloorH + 210.0)
+					- FVector(VB.Origin * VS);
+				Vent->SetWorldScale3D(FVector(VS));
+				Vent->SetWorldLocationAndRotation(VentPos, Inward.Rotation());
+				WallVents.Add(Vent);
+				WallVentDir.Add(D); // parallel to WallVents: the vent hides with its wall
+
+			}
 		}
 	}
-	UE_LOG(LogRedHope, Display, TEXT("Pit rebuilt: floor %d, %d open cell(s), %d wall face(s)"),
-		Pit, Open.Num(), WallISM->GetInstanceCount());
+	UE_LOG(LogRedHope, Display, TEXT("Pit rebuilt: floor %d, %d open cell(s), %d wall face(s), %d vent(s)"),
+		Pit, Open.Num(), WallISM->GetInstanceCount(), WallVents.Num());
 }

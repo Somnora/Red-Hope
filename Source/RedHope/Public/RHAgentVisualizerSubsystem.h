@@ -7,6 +7,7 @@
 #include "RHAgentVisualizerSubsystem.generated.h"
 
 class UInstancedStaticMeshComponent;
+class USkeletalMeshComponent;
 
 // Scaffold presentation for sim agents: instanced meshes, transforms copied
 // from Mass fragments each frame. Deliberately dumb - it proves the seam (sim
@@ -55,6 +56,14 @@ private:
 		Torso = 0, Pelvis, Head, Visor, Pack, LegL, LegR, ArmL, ArmR, COUNT
 	};
 	UPROPERTY() TArray<TObjectPtr<UInstancedStaticMeshComponent>> Parts;
+	// Rigged robot walkers (animation phase): when RH_Walker_robot exists each
+	// tracked entity gets ONE skeletal component instead of ISM instances -
+	// real Walk/Idle clips driven by ground speed. Fleet is small (<20), so
+	// per-robot skeletal cost is fine; the 9-ISM cube figure stays as the
+	// art-free fallback.
+	UPROPERTY() TArray<TObjectPtr<USkeletalMeshComponent>> SkelBodies;
+	TArray<bool> bWalkPlaying;
+	bool bUseSkeletal = false;
 	TArray<FMassEntityHandle> Tracked;
 	// Per-entity gait state, parallel to Tracked: last ground position (for
 	// speed), smoothed facing yaw, and the accumulated stride phase.

@@ -15,7 +15,6 @@ namespace
 	const FName NAME_Struct(TEXT("Struct"));
 	const FName NAME_Lander(TEXT("Lander"));
 	const FName NAME_Stockpile(TEXT("Stockpile"));
-	const FName NAME_Q1(TEXT("Q1"));
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
@@ -23,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 24;  // v24: alive pass (skills, moments, first harvest); v23 crises+endings; v22 Earth pre-emptive; v21 espionage
+	constexpr uint32 RHSaveVersion = 26;  // v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -116,6 +115,15 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenGrowLightWPerCell = Defs->GetConfigScalar(FName("GardenGrowLightWPerCell"), GardenGrowLightWPerCell);
 	GreenhouseGlassKgPerCell = Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), GreenhouseGlassKgPerCell);
 	GreenhouseMinLevel = (int32)Defs->GetConfigScalar(FName("GreenhouseMinLevel"), GreenhouseMinLevel);
+	CropSoilDepleteKgPerSol = Defs->GetConfigScalar(FName("CropSoilDepleteKgPerSol"), CropSoilDepleteKgPerSol);
+	FertilizerSoilPerKg = Defs->GetConfigScalar(FName("FertilizerSoilPerKg"), FertilizerSoilPerKg);
+	CompostKgPerColonistSol = Defs->GetConfigScalar(FName("CompostKgPerColonistSol"), CompostKgPerColonistSol);
+	SpoilChemFraction = Defs->GetConfigScalar(FName("SpoilChemFraction"), SpoilChemFraction);
+	ClimateMismatchYieldMul = Defs->GetConfigScalar(FName("ClimateMismatchYieldMul"), ClimateMismatchYieldMul);
+	DuctYieldBonusMul = Defs->GetConfigScalar(FName("DuctYieldBonusMul"), DuctYieldBonusMul);
+	GardenCO2DrawKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenCO2DrawKgPerSolPerCell"), GardenCO2DrawKgPerSolPerCell);
+	GardenO2EmitKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenO2EmitKgPerSolPerCell"), GardenO2EmitKgPerSolPerCell);
+	CO2KgPerColonistSol = Defs->GetConfigScalar(FName("CO2KgPerColonistSol"), CO2KgPerColonistSol);
 	ColonistWaterKgPerSol = Defs->GetConfigScalar(FName("ColonistWaterKgPerSol"), ColonistWaterKgPerSol);
 	GreywaterReturnFraction = Defs->GetConfigScalar(FName("GreywaterReturnFraction"), GreywaterReturnFraction);
 	WaterPotabilityDecayPerSol = Defs->GetConfigScalar(FName("WaterPotabilityDecayPerSol"), WaterPotabilityDecayPerSol);
@@ -141,6 +149,17 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeGrowthFoodBufferSols = Defs->GetConfigScalar(FName("HopeGrowthFoodBufferSols"), HopeGrowthFoodBufferSols);
 	HopeFirstBornMilestone = Defs->GetConfigScalar(FName("HopeFirstBornMilestone"), HopeFirstBornMilestone);
 	HopeDiscoveryThreshold = Defs->GetConfigScalar(FName("HopeDiscoveryThreshold"), HopeDiscoveryThreshold);
+	EpilogueSustainSols = Defs->GetConfigScalar(FName("EpilogueSustainSols"), EpilogueSustainSols);
+	WeatherCycleSols = Defs->GetConfigScalar(FName("WeatherCycleSols"), WeatherCycleSols);
+	InfirmaryEvacBonusSols = Defs->GetConfigScalar(FName("InfirmaryEvacBonusSols"), InfirmaryEvacBonusSols);
+	WorkstationFabBonusPerSeat = Defs->GetConfigScalar(FName("WorkstationFabBonusPerSeat"), WorkstationFabBonusPerSeat);
+	// The goal ladder: a fresh colony opens on the first slice-active quota
+	// (Q1 today - identical to the old hard-wired behavior).
+	if (ActiveQuota.IsNone())
+	{
+		ActiveQuota = FirstQuotaName();
+		QuotaOpenedSol = 0;
+	}
 	ConvoySpeedKmPerSol = Defs->GetConfigScalar(FName("ConvoySpeedKmPerSol"), ConvoySpeedKmPerSol);
 	ConvoyH2PerRun = Defs->GetConfigScalar(FName("ConvoyH2PerRun"), ConvoyH2PerRun);
 	ConvoyWearParts = Defs->GetConfigScalar(FName("ConvoyWearParts"), ConvoyWearParts);
@@ -448,11 +467,23 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 		const double SolNow = Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds;
 		bool bImminent = false;
 		FName ImminentType;
+		// Long-game weather (v25): when the cycle knob is on and we're past the
+		// authored schedule, onset distances are measured on the FOLDED sol -
+		// the era must still drop for every repeated storm's onset (ruling
+		// 2026-07-07b holds forever, not just for the authored fortnight).
+		// Wrap-aware: an onset just past the cycle boundary is still ahead.
+		const double FoldedNow = FoldEventSol(SolNow);
+		const double CycleSpan = EventCycleSpan();
 		Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
 		{
 			// Within one era step's horizon of onset (in sols).
 			const double HorizonSols = (double)URHSimClockSubsystem::EraStepSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
-			if (!bImminent && SolNow < (double)Row.StartSol && SolNow + HorizonSols >= (double)Row.StartSol)
+			double DistSols = (double)Row.StartSol - FoldedNow;
+			if (CycleSpan > 0.0 && DistSols < 0.0)
+			{
+				DistSols += CycleSpan;
+			}
+			if (!bImminent && DistSols > 0.0 && DistSols <= HorizonSols)
 			{
 				bImminent = true;
 				ImminentType = Row.Type;
@@ -466,9 +497,11 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	}
 	if (QuotaPhase == ERHQuotaPhase::Open && Defs && Clock)
 	{
-		if (const FRHQuotaRow* Quota = Defs->GetQuota(NAME_Q1))
+		if (const FRHQuotaRow* Quota = Defs->GetQuota(ActiveQuota))
 		{
-			const double DeadlineSimSeconds = (double)(Quota->DeadlineSol + 1) * URHSimClockSubsystem::SolLengthSimSeconds;
+			// Ladder deadlines are relative to the quota's opening sol; the
+			// first quota opens at sol 0, so this reads as it always did.
+			const double DeadlineSimSeconds = (double)(QuotaOpenedSol + Quota->DeadlineSol + 1) * URHSimClockSubsystem::SolLengthSimSeconds;
 			if (DeadlineSimSeconds - Clock->GetSimSecondsTotal() < URHSimClockSubsystem::SolLengthSimSeconds)
 			{
 				OutReason = TEXT("quota deadline within one sol");
@@ -1197,7 +1230,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 
 void URHSimWorldSubsystem::StepQuota()
 {
-	const FRHQuotaRow* Quota = Defs->GetQuota(NAME_Q1);
+	const FRHQuotaRow* Quota = Defs->GetQuota(ActiveQuota);
 	if (!Quota)
 	{
 		return;
@@ -1214,17 +1247,28 @@ void URHSimWorldSubsystem::StepQuota()
 		}
 		QuotaPhase = ERHQuotaPhase::AwaitingManifest;
 		QuotaMetSol = Clock->GetSol();
-		const bool bOnTime = QuotaMetSol <= Quota->DeadlineSol;
+		// Deadlines are relative to the sol the quota OPENED (the ladder:
+		// later quotas open when their predecessor's ship lands). The first
+		// quota opens at sol 0, so every M0 pin reads identically.
+		const bool bOnTime = (QuotaMetSol - QuotaOpenedSol) <= Quota->DeadlineSol;
 		// M3 Gate B: the requisition multiplier scales the award by your standing
 		// with Earth (identity axis + tension). Exactly 1.0 until you have
 		// neighbors, so the M0-M2 award is unchanged.
 		const double ReqMult = GetRequisitionMultiplier();
 		AwardMassKg = (bOnTime ? Quota->OnTimeAward_kg : Quota->LateAward_kg) * ReqMult;
+		// Research pays (v25): banked discovery funding rides the next award.
+		const double Funding = PendingResearchFundingKg;
+		if (Funding > 0.0)
+		{
+			AwardMassKg += Funding;
+			PendingResearchFundingKg = 0.0;
+		}
 		UE_LOG(LogRedHopeSim, Display,
-			TEXT("=== CEO TRANSMISSION (Sol %d): Quota Q1 met%s. Supply ship authorized: %.0f kg manifest budget%s. Compose and launch. ==="),
-			QuotaMetSol, bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg,
+			TEXT("=== CEO TRANSMISSION (Sol %d): Quota %s met%s. Supply ship authorized: %.0f kg manifest budget%s%s. Compose and launch. ==="),
+			QuotaMetSol, *ActiveQuota.ToString(), bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg,
 			ReqMult < 0.999 ? *FString::Printf(TEXT(" (requisition x%.2f - your Martian ties)"), ReqMult)
-				: (ReqMult > 1.001 ? *FString::Printf(TEXT(" (requisition x%.2f - Earth loyalty)"), ReqMult) : TEXT("")));
+				: (ReqMult > 1.001 ? *FString::Printf(TEXT(" (requisition x%.2f - Earth loyalty)"), ReqMult) : TEXT("")),
+			Funding > 0.0 ? *FString::Printf(TEXT(" (+%.0f kg research funding)"), Funding) : TEXT(""));
 		OnQuotaMet.Broadcast(QuotaMetSol, AwardMassKg);
 	}
 	else if (QuotaPhase == ERHQuotaPhase::ShipInbound)
@@ -1254,10 +1298,81 @@ void URHSimWorldSubsystem::StepQuota()
 			// Slice end card.
 			UE_LOG(LogRedHopeSim, Display,
 				TEXT("=== THE PROGRAM CONTINUES: sols elapsed %d | quota met sol %d (deadline %d) | fleet + colony operational ==="),
-				Clock->GetSol(), QuotaMetSol, Quota->DeadlineSol);
+				Clock->GetSol(), QuotaMetSol, QuotaOpenedSol + Quota->DeadlineSol);
 			OnShipArrived.Broadcast(ManifestItems);
+			// The goal ladder (v25): the next slice-active quota opens as this
+			// one's ship lands - the program's demands keep coming.
+			AdvanceQuotaLadder();
 		}
 	}
+}
+
+FName URHSimWorldSubsystem::FirstQuotaName() const
+{
+	// Smallest (DeadlineSol, name) among slice-active rows: Q1 on today's data.
+	FName Best = NAME_None;
+	int32 BestDeadline = MAX_int32;
+	if (Defs)
+	{
+		Defs->ForEachQuota([&](FName Name, const FRHQuotaRow& Row)
+		{
+			if (Row.DeadlineSol < BestDeadline ||
+				(Row.DeadlineSol == BestDeadline && (Best.IsNone() || Name.LexicalLess(Best))))
+			{
+				BestDeadline = Row.DeadlineSol;
+				Best = Name;
+			}
+		});
+	}
+	return Best;
+}
+
+void URHSimWorldSubsystem::AdvanceQuotaLadder()
+{
+	// Next slice-active quota strictly after the current one in ascending
+	// (DeadlineSol, name) order - a deterministic authored ladder, no RNG.
+	const FRHQuotaRow* Cur = Defs ? Defs->GetQuota(ActiveQuota) : nullptr;
+	if (!Cur)
+	{
+		return;
+	}
+	const int32 CurDeadline = Cur->DeadlineSol;
+	const FName CurName = ActiveQuota;
+	FName Best = NAME_None;
+	int32 BestDeadline = MAX_int32;
+	Defs->ForEachQuota([&](FName Name, const FRHQuotaRow& Row)
+	{
+		const bool bAfterCur = Row.DeadlineSol > CurDeadline ||
+			(Row.DeadlineSol == CurDeadline && CurName.LexicalLess(Name));
+		const bool bBeatsBest = Row.DeadlineSol < BestDeadline ||
+			(Row.DeadlineSol == BestDeadline && (Best.IsNone() || Name.LexicalLess(Best)));
+		if (bAfterCur && bBeatsBest)
+		{
+			BestDeadline = Row.DeadlineSol;
+			Best = Name;
+		}
+	});
+	if (Best.IsNone())
+	{
+		// Ladder exhausted: the Completed phase stands as the program's rest
+		// state (exactly the pre-v25 behavior after Q1).
+		return;
+	}
+	ActiveQuota = Best;
+	QuotaOpenedSol = Clock ? Clock->GetSol() : 0;
+	QuotaPhase = ERHQuotaPhase::Open;
+	QuotaMetSol = 0;
+	AwardMassKg = 0.0;
+	ShipAlertStage = 0;
+	ManifestItems.Reset();
+	const FRHQuotaRow* Next = Defs->GetQuota(Best);
+	const FString Msg = FString::Printf(
+		TEXT("CEO TRANSMISSION — new quota %s: deliver %s by sol %d. The program's eyes stay on Mars."),
+		*Best.ToString(), Next ? *Next->Requirements : TEXT("?"),
+		QuotaOpenedSol + (Next ? Next->DeadlineSol : 0));
+	OnAlert.Broadcast(Msg);
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== QUOTA LADDER: %s opens (sol %d, deadline sol %d) ==="),
+		*Best.ToString(), QuotaOpenedSol, QuotaOpenedSol + (Next ? Next->DeadlineSol : 0));
 }
 
 void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
@@ -1316,6 +1431,51 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
 }
 
+double URHSimWorldSubsystem::EventCycleSpan() const
+{
+	// The repeat period once the cycle knob is on: never shorter than the
+	// authored schedule itself (overlapping replays would double-book the sky).
+	if (WeatherCycleSols <= 0.0 || !Defs)
+	{
+		return 0.0;
+	}
+	double FirstStart = TNumericLimits<double>::Max(), LastEnd = 0.0;
+	Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
+	{
+		FirstStart = FMath::Min(FirstStart, (double)Row.StartSol);
+		LastEnd = FMath::Max(LastEnd, (double)Row.StartSol + Row.DurationSols);
+	});
+	if (LastEnd <= 0.0)
+	{
+		return 0.0; // no authored events - nothing to repeat
+	}
+	return FMath::Max(WeatherCycleSols, LastEnd - FirstStart);
+}
+
+double URHSimWorldSubsystem::FoldEventSol(double SolNow) const
+{
+	// Long-game weather (v25, config WeatherCycleSols, default 0 = off): past
+	// the authored schedule the pattern repeats on a fixed period. Purely a
+	// lookup transform - deterministic, identical in both bands, and inert
+	// while the knob is 0 (every existing pin reads the unfolded sol).
+	const double Span = EventCycleSpan();
+	if (Span <= 0.0)
+	{
+		return SolNow;
+	}
+	double FirstStart = TNumericLimits<double>::Max(), LastEnd = 0.0;
+	Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
+	{
+		FirstStart = FMath::Min(FirstStart, (double)Row.StartSol);
+		LastEnd = FMath::Max(LastEnd, (double)Row.StartSol + Row.DurationSols);
+	});
+	if (SolNow < LastEnd)
+	{
+		return SolNow; // the authored window plays exactly as authored
+	}
+	return FirstStart + FMath::Fmod(SolNow - FirstStart, Span);
+}
+
 const FRHEventRow* URHSimWorldSubsystem::GetActiveEvent() const
 {
 	if (!Defs || !Clock)
@@ -1323,7 +1483,9 @@ const FRHEventRow* URHSimWorldSubsystem::GetActiveEvent() const
 		return nullptr;
 	}
 	// Sol-fraction precision: an event starting at sol 12 begins at 12.0 exactly.
-	const double SolNow = Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds;
+	// The folded sol makes the authored pattern repeat when the cycle knob is
+	// on (v25); with the knob off it IS the plain sol.
+	const double SolNow = FoldEventSol(Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds);
 	const FRHEventRow* Active = nullptr;
 	Defs->ForEachEvent([&](FName, const FRHEventRow& Row)
 	{
@@ -1669,6 +1831,22 @@ const TCHAR* URHSimWorldSubsystem::TraitFor(int32 ColonistId)
 	return GRHTraits[H % UE_ARRAY_COUNT(GRHTraits)];
 }
 
+void URHSimWorldSubsystem::Debug_ForceRateFloor(int32 Level)
+{
+	const int32 Cells = GetFloorCarvedCells(Level);
+	if (Cells < MinLivableCells || !IsFloorCirculated(Level))
+	{
+		UE_LOG(LogRedHopeSim, Warning,
+			TEXT("Debug_ForceRateFloor: floor %d not eligible (cells %d/%d, circulated %d)"),
+			Level, Cells, MinLivableCells, (int32)IsFloorCirculated(Level));
+		return;
+	}
+	FloorO2Kg.FindOrAdd(Level) = Cells * O2FillKgPerCell; // fill to required
+	RatedFloors.Add(Level);
+	FloorsNotedSmall.Remove(Level);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Debug_ForceRateFloor: floor %d certified (%d cells)"), Level, Cells);
+}
+
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
 	int32 Housed = 0;
@@ -1722,6 +1900,110 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 	return Housed;
 }
 
+bool URHSimWorldSubsystem::AreCropsLive() const
+{
+	bool bLive = false;
+	if (Defs)
+	{
+		Defs->ForEachCropRow([&bLive](FName, const FRHCropRow& Row) { bLive |= Row.SliceActive; });
+	}
+	return bLive;
+}
+
+FName URHSimWorldSubsystem::GetCellCrop(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	return S ? S->Crop : NAME_None;
+}
+
+int32 URHSimWorldSubsystem::GetCellCropStage(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	const FRHCropRow* Row = (S && Defs) ? Defs->GetCrop(S->Crop) : nullptr;
+	if (!Row || !Clock || Row->GrowSols <= 0.f)
+	{
+		return -1;
+	}
+	// Stage is DERIVED from planting sol (never stored): sprout below half
+	// grown, young to maturity, mature after. Presentation reads this; the
+	// sim itself only cares about the mature threshold.
+	const double Age = Clock->GetSimSecondsTotal() / (double)URHSimClockSubsystem::SolLengthSimSeconds - S->PlantedSol;
+	if (Age >= (double)Row->GrowSols) { return 2; }
+	return (Age >= 0.5 * (double)Row->GrowSols) ? 1 : 0;
+}
+
+double URHSimWorldSubsystem::GetCellSoilKg(int32 Level, int32 CellIndex) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	return S ? S->SoilKg : 0.0;
+}
+
+bool URHSimWorldSubsystem::SetFloorClimate(int32 Level, FName Band, FString& OutError)
+{
+	static const FName NTemperate(TEXT("Temperate")), NHumid(TEXT("Humid")), NArid(TEXT("Arid"));
+	if (Band != NTemperate && Band != NHumid && Band != NArid)
+	{
+		OutError = TEXT("Climate must be Temperate, Humid, or Arid");
+		return false;
+	}
+	if (!FloorRoomCells.Contains(Level))
+	{
+		OutError = FString::Printf(TEXT("Floor %d has no designated rooms"), Level);
+		return false;
+	}
+	if (Band == NTemperate) { FloorClimate.Remove(Level); }
+	else { FloorClimate.Add(Level, Band); }
+	UE_LOG(LogRedHopeSim, Display, TEXT("Climate: floor %d set to %s%s"), Level, *Band.ToString(),
+		(Band != NTemperate && !HasRegulatorOnline(Level)) ? TEXT(" (INERT until a HumidityRegulator is online on the floor)") : TEXT(""));
+	return true;
+}
+
+FName URHSimWorldSubsystem::GetFloorClimateSetting(int32 Level) const
+{
+	static const FName NTemperate(TEXT("Temperate"));
+	const FName* Found = FloorClimate.Find(Level);
+	return Found ? *Found : NTemperate;
+}
+
+FName URHSimWorldSubsystem::GetFloorClimateEffective(int32 Level) const
+{
+	static const FName NTemperate(TEXT("Temperate"));
+	const FName Setting = GetFloorClimateSetting(Level);
+	// A non-default climate needs machinery to hold it: no powered regulator
+	// on the floor means the room drifts back to Temperate (never a penalty,
+	// the setting just waits for its hardware).
+	return (Setting != NTemperate && !HasRegulatorOnline(Level)) ? NTemperate : Setting;
+}
+
+bool URHSimWorldSubsystem::HasRegulatorOnline(int32 Level) const
+{
+	static const FName NRegulator(TEXT("HumidityRegulator"));
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.DefName == NRegulator && B.Level == Level && !B.bUnderConstruction && B.bPowered)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::DesignateDuct(int32 Level, FString& OutError)
+{
+	if (!FloorRoomCells.Contains(Level))
+	{
+		OutError = FString::Printf(TEXT("Floor %d has no designated rooms to duct"), Level);
+		return false;
+	}
+	bool bAlready = false;
+	DuctedFloors.Add(Level, &bAlready);
+	if (!bAlready)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Duct: floor %d now breathes with the colony (CO2 in, O2 out)"), Level);
+	}
+	return true;
+}
+
 void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 {
 	// Zero-garden colonies: FloorRoomCells is empty pre-M2 (and PlantedCells
@@ -1732,6 +2014,14 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	}
 	static const FName NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NWater(TEXT("Water")), NFood(TEXT("Food")), NGlass(TEXT("Glass"));
 	static const FName NGarden(TEXT("Garden")), NGreenhouse(TEXT("Greenhouse"));
+	static const FName NCompost(TEXT("Compost")), NFertilizer(TEXT("Fertilizer")), NOxygen(TEXT("Oxygen"));
+
+	// Crop context (greenhouse-agriculture Gates A/B/D), resolved once per
+	// step: zero active crop rows = the legacy flat-yield garden, bit-for-bit.
+	TArray<TPair<FName, const FRHCropRow*>> ActiveCrops;
+	if (Defs) { Defs->GetActiveCropsSorted(ActiveCrops); }
+	const bool bCropsLive = ActiveCrops.Num() > 0;
+	const double NowSols = Clock ? Clock->GetSimSecondsTotal() / (double)URHSimClockSubsystem::SolLengthSimSeconds : 0.0;
 
 	// Plant: any Garden- OR Greenhouse-zoned cell on a rated floor, when the
 	// colony holds the materials. A Greenhouse also needs fabricated/imported
@@ -1746,8 +2036,37 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		for (int32 i = 0; i < Pair.Value.Num(); ++i)
 		{
 			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Pair.Value[i]) : nullptr;
-			if (!Row || !IsGardenFunction(Row->Function) || PlantedCells.Contains(FIntVector(Level, i, 0)))
+			if (!Row || !IsGardenFunction(Row->Function))
 			{
+				continue;
+			}
+			if (PlantedCells.Contains(FIntVector(Level, i, 0)))
+			{
+				// ADOPTION (director hand-play 2026-07-17): a bed planted
+				// before the crop layer went live carries no crop - when the
+				// catalogue activates mid-game it adopts one in place (soil
+				// already emplaced, no extra cost) and starts growing. With
+				// crops dormant this branch never fires - legacy exact.
+				if (bCropsLive && !PlantedCrops.Contains(FIntVector(Level, i, 0)))
+				{
+					TArray<int32> Matching;
+					const FName Climate = GetFloorClimateEffective(Level);
+					for (int32 c = 0; c < ActiveCrops.Num(); ++c)
+					{
+						if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
+					}
+					const int32 Pick = Matching.Num() > 0
+						? Matching[PlantRotation % Matching.Num()]
+						: (PlantRotation % ActiveCrops.Num());
+					++PlantRotation;
+					FRHPlantedCropState S;
+					S.Crop = ActiveCrops[Pick].Key;
+					S.PlantedSol = NowSols;
+					S.SoilKg = GardenSoilKgPerCell;
+					PlantedCrops.Add(FIntVector(Level, i, 0), S);
+					UE_LOG(LogRedHopeSim, Display, TEXT("Crop adopted: floor %d cell %d takes %s (bed planted pre-activation)"),
+						Level, i, *S.Crop.ToString());
+				}
 				continue;
 			}
 			const bool bGreenhouse = (Row->Function == NGreenhouse);
@@ -1760,10 +2079,35 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			AddStock(NSeeds, -GardenSeedsKgPerCell);
 			if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
 			PlantedCells.Add(FIntVector(Level, i, 0));
-			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)"),
+			bSoilSpentAnnounced = false; // a fresh bed clears the spent-soil edge
+			FName PlantedCrop = NAME_None;
+			if (bCropsLive)
+			{
+				// Deterministic crop pick (Gate A): cycle the name-sorted
+				// active list, preferring crops matched to the floor's
+				// effective climate - per-crop greenhouses emerge naturally.
+				TArray<int32> Matching;
+				const FName Climate = GetFloorClimateEffective(Level);
+				for (int32 c = 0; c < ActiveCrops.Num(); ++c)
+				{
+					if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
+				}
+				const int32 Pick = Matching.Num() > 0
+					? Matching[PlantRotation % Matching.Num()]
+					: (PlantRotation % ActiveCrops.Num());
+				++PlantRotation;
+				FRHPlantedCropState S;
+				S.Crop = ActiveCrops[Pick].Key;
+				S.PlantedSol = NowSols;
+				S.SoilKg = GardenSoilKgPerCell;
+				PlantedCrops.Add(FIntVector(Level, i, 0), S);
+				PlantedCrop = S.Crop;
+			}
+			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)%s"),
 				bGreenhouse ? TEXT("Greenhouse") : TEXT("Garden"), Level, i,
 				GardenSoilKgPerCell, GardenSeedsKgPerCell,
-				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""));
+				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""),
+				PlantedCrop.IsNone() ? TEXT("") : *FString::Printf(TEXT(" crop=%s"), *PlantedCrop.ToString()));
 			if (!bFirstCropAnnounced)
 			{
 				bFirstCropAnnounced = true;
@@ -1775,6 +2119,17 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 	const double DtHours = SubDt / 50.0; // sol-hours (matches StepPower's Wh accounting)
+
+	// The crew feeds the farm loop (Gates B/D): compost accrues per colonist-
+	// sol (abstract, prevention-framed - the recycling the colony runs anyway)
+	// and exhaled CO2 pools for ducted gardens to breathe. Linear per-sol
+	// scalars, band-identical; gated on the crop layer so every pre-crop
+	// baseline is untouched.
+	if (bCropsLive && GetPopulation() > 0)
+	{
+		AddStock(NCompost, CompostKgPerColonistSol * (double)GetPopulation() * DtSols);
+		ColonyCO2Kg += CO2KgPerColonistSol * (double)GetPopulation() * DtSols;
+	}
 
 	// Grow-light power (M2 Gate D+): grow-lit GARDEN cells run on the battery,
 	// all-or-nothing at colony scale (order-independent, legible - "the gardens
@@ -1826,6 +2181,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		{
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
+			PlantedCrops.Remove(*It); // the crop goes with the bed
 			It.RemoveCurrent();
 			continue;
 		}
@@ -1847,17 +2203,77 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		{
 			continue; // grow-lit but the bank went dark
 		}
-		const double NeedWater = GardenWaterKgPerSolPerCell * DtSols;
+		// Crop fork (Gate A): a cell with a crop entry uses that crop's real
+		// water draw, grow time, and yield; a legacy cell (crops dormant at
+		// plant time, or a pre-v26 save) keeps the flat math exactly.
+		FRHPlantedCropState* CropState = PlantedCrops.Find(*It);
+		const FRHCropRow* Crop = (CropState && Defs) ? Defs->GetCrop(CropState->Crop) : nullptr;
+		const double NeedWater = (Crop ? (double)Crop->WaterKgPerSol : GardenWaterKgPerSolPerCell) * DtSols;
 		if (GetStock(NWater) < NeedWater)
 		{
 			bThirsty = true;
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
+		if (Crop && (NowSols - CropState->PlantedSol) < (double)Crop->GrowSols)
+		{
+			// Immature: the crop drinks but yields nothing yet. Maturity is a
+			// threshold on the planting sol - monotone, era-parity-safe.
+			continue;
+		}
+		double CellMul = 1.0;
+		if (Crop)
+		{
+			// Climate preference (Gate B): matched band = full yield.
+			CellMul *= (Crop->ClimateBand == GetFloorClimateEffective(Level)) ? 1.0 : ClimateMismatchYieldMul;
+			// Duct exchange (Gate D): a ducted garden floor photosynthesizes
+			// the crew's CO2 - yield bonus and O2 back out, but only while
+			// the pool actually holds the draw (no CO2, no boost, no O2).
+			if (DuctedFloors.Contains(Level))
+			{
+				const double WantCO2 = GardenCO2DrawKgPerSolPerCell * DtSols;
+				if (ColonyCO2Kg >= WantCO2)
+				{
+					ColonyCO2Kg -= WantCO2;
+					CellMul *= DuctYieldBonusMul;
+					AddStock(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
+				}
+			}
+		}
 		// Yield rides work tempo, light, and now the gardeners' MASTERY (alive
 		// pass): a seasoned garden crew doubles the take.
-		const double YieldKg = GardenFoodKgPerSolPerCell * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
+		const double YieldKg = (Crop ? (double)Crop->YieldKgPerSol : GardenFoodKgPerSolPerCell)
+			* CellMul * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
 		AddStock(NFood, YieldKg);
+		// Soil depletion (Gate B): mature production spends the bed. Fertilizer
+		// refills it in place; an empty colony larder lets the cell revert to
+		// unplanted (the plant loop re-emplaces it when stocks allow).
+		if (Crop)
+		{
+			CropState->SoilKg -= CropSoilDepleteKgPerSol * DtSols;
+			if (CropState->SoilKg <= 0.0)
+			{
+				const double FertNeed = GardenSoilKgPerCell / FMath::Max(FertilizerSoilPerKg, (double)KINDA_SMALL_NUMBER);
+				if (GetStock(NFertilizer) >= FertNeed)
+				{
+					AddStock(NFertilizer, -FertNeed);
+					CropState->SoilKg = GardenSoilKgPerCell;
+					UE_LOG(LogRedHopeSim, Display, TEXT("Fertilizer worked into floor %d cell %d (%.0f kg -> bed restored)"), Level, Cell, FertNeed);
+				}
+				else
+				{
+					if (!bSoilSpentAnnounced)
+					{
+						bSoilSpentAnnounced = true;
+						OnAlert.Broadcast(TEXT("A GARDEN BED IS SPENT — the soil gave all it had. Fertilizer or a fresh soil pallet brings it back."));
+					}
+					UE_LOG(LogRedHopeSim, Display, TEXT("Soil spent: floor %d cell %d reverts to unplanted (crop %s)"), Level, Cell, *CropState->Crop.ToString());
+					PlantedCrops.Remove(*It);
+					It.RemoveCurrent();
+					continue;
+				}
+			}
+		}
 		GardenFoodCumKg += YieldKg;
 		if (!bFirstHarvestAnnounced && GardenFoodCumKg >= FirstHarvestKg)
 		{
@@ -1908,6 +2324,19 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	{
 		ComfortsSupplied = 0;
 		FreshWaterThisStepKg = 0.0; // no consumer to fold it into potability
+		// Ending resolution (v25): a colony that HAD people and lost them all
+		// declares Collapse - once, loudly, and with the recovery path named
+		// (prevention framing; the projected-ending read stays live either
+		// way). All wording is a Gate-D framing-review placeholder.
+		if (bEverHadCrew && !bCollapseDeclared)
+		{
+			bCollapseDeclared = true;
+			OnAlert.Broadcast(TEXT(
+				"THE COLONY STANDS EMPTY — everyone has returned to orbit. The machines keep the lights on. "
+				"Restore housing and life support, and people will come back to Mars."));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING PATH: %s (the colony emptied; recoverable) ==="),
+				GetEndingName(ERHEnding::Collapse));
+		}
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
 	static const FName NFood(TEXT("Food")), NWater(TEXT("Water"));
@@ -1980,7 +2409,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 				: (!bWatered ? TEXT("water tanks empty") : TEXT("food stores empty"));
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
-				*C.Name, Leg, ColonistEvacSols));
+				*C.Name, Leg, GetEffectiveEvacSols()));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="), *C.Name, Leg);
 		}
 		C.bSupported = bNowSupported;
@@ -1991,16 +2420,19 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			continue;
 		}
 		C.UnsupportedSimSeconds += SubDt;
-		if (C.UnsupportedSimSeconds >= ColonistEvacSols * URHSimClockSubsystem::SolLengthSimSeconds)
+		// Infirmary (station tiers, Gate A): an online infirmary stretches the
+		// countdown - more time to fix the missing leg (prevention framing).
+		const double EvacSols = GetEffectiveEvacSols();
+		if (C.UnsupportedSimSeconds >= EvacSols * URHSimClockSubsystem::SolLengthSimSeconds)
 		{
 			// Abstract, prevention-framed consequence (mental-health directive):
 			// the Program pulls the colonist back to orbit. Wording is a
 			// Gate-D framing-review placeholder.
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("EVACUATED: %s returned to orbit — life support failed for %.1f sols."),
-				*C.Name, ColonistEvacSols));
+				*C.Name, EvacSols));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (unsupported %.1f sols) ==="),
-				*C.Name, ColonistEvacSols);
+				*C.Name, EvacSols);
 			Colonists.RemoveAt(i);
 		}
 	}
@@ -2204,9 +2636,14 @@ FName URHSimWorldSubsystem::GetRoomAt(int32 Level, int32 CellIndex) const
 void URHSimWorldSubsystem::RefreshJobs()
 {
 	// Deterministic seat assignment: floors shallow->deep, cells in carve
-	// order, colonists by Id. One seat per Lab/Workstation cell on a RATED
-	// floor. (Job functions widen at Gate C - the garden wants gardeners.)
+	// order, colonists by Id. SeatCount seats per Lab/Workstation cell on a
+	// RATED floor (T1 benches seat 1 - the pre-tier behavior exactly).
+	// LabYieldSeatSum / WorkstationYieldSeatSum accumulate each FILLED seat's
+	// YieldMul (station tiers, Gate A): all-default content keeps them equal
+	// to the plain filled-seat counts.
 	ColonistJobs.Reset();
+	LabYieldSeatSum = 0.0;
+	WorkstationYieldSeatSum = 0.0;
 	if (Colonists.Num() == 0 || !Defs)
 	{
 		return;
@@ -2234,7 +2671,19 @@ void URHSimWorldSubsystem::RefreshJobs()
 			const FRHRoomRow* Row = Defs->GetRoom((*Cells)[i]);
 			if (Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
 			{
-				ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
+				const int32 Seats = FMath::Max(1, Row->SeatCount);
+				for (int32 Seat = 0; Seat < Seats && Next < ByIdOrder.Num(); ++Seat)
+				{
+					ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
+					if (Row->Function == FName("Lab"))
+					{
+						LabYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
+					}
+					else if (Row->Function == FName("Workstation"))
+					{
+						WorkstationYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
+					}
+				}
 			}
 		}
 	}
@@ -2566,15 +3015,10 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	{
 		return; // progress KEEPS (knowledge doesn't evaporate; accrual just pauses)
 	}
-	int32 LabSeats = 0;
-	for (const auto& Job : ColonistJobs)
-	{
-		if (Job.Value == FName("Lab"))
-		{
-			++LabSeats;
-		}
-	}
-	if (LabSeats == 0)
+	// Station tiers (Gate A): each filled Lab-line seat contributes its room's
+	// YieldMul (derived alongside ColonistJobs in RefreshJobs). Plain T1 labs
+	// make this the old integer seat count exactly - every pin unchanged.
+	if (LabYieldSeatSum <= 0.0)
 	{
 		return;
 	}
@@ -2586,7 +3030,7 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	}
 	// Research rides the scientists' MASTERY (alive pass): a seasoned lab crew
 	// doubles the pace. Linear scaling = both-band parity preserved.
-	DiscoverySeatHours += LabSeats * GetCrewSkillMul(FName("Lab")) * (SubDt / 50.0); // sol-hours per seat
+	DiscoverySeatHours += LabYieldSeatSum * GetCrewSkillMul(FName("Lab")) * (SubDt / 50.0); // sol-hours per seat
 	if (DiscoverySeatHours < Row->LabSeatHours)
 	{
 		return;
@@ -2597,6 +3041,24 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	if (!Row->RewardResource.IsNone() && Row->RewardKg > 0.f)
 	{
 		AddStock(Row->RewardResource, Row->RewardKg);
+	}
+	// Research pays (v25): funding banks toward the NEXT quota award.
+	if (Row->FundingKg > 0.f)
+	{
+		PendingResearchFundingKg += Row->FundingKg;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Research funding banked: +%.0f kg manifest budget (total pending %.0f)"),
+			Row->FundingKg, PendingResearchFundingKg);
+	}
+	// A discovery can unlock a dormant station (the tier ladder's gate). The
+	// flip is in-memory; loads re-apply it from the discovery log.
+	if (!Row->UnlockRoom.IsNone() && Defs->ActivateRoomRow(Row->UnlockRoom))
+	{
+		const FRHRoomRow* Unlocked = Defs->GetRoom(Row->UnlockRoom);
+		OnAlert.Broadcast(FString::Printf(
+			TEXT("NEW STATION UNLOCKED — %s can now be designated. Knowledge becomes furniture."),
+			Unlocked ? *Unlocked->DisplayName : *Row->UnlockRoom.ToString()));
+		UE_LOG(LogRedHopeSim, Display, TEXT("Discovery '%s' unlocked room '%s'"),
+			*Next.ToString(), *Row->UnlockRoom.ToString());
 	}
 	if (!Row->Alert.IsEmpty())
 	{
@@ -2657,6 +3119,13 @@ void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
 	const int32 NewFloors = ToDepth - ShaftDepth;
 	const double Spoil = NewFloors * ShaftSpoilKgPerFloor;
 	SpoilPileKg += Spoil;
+	// Gate B: a chemical fraction of fresh dig spoil feeds the fertilizer
+	// chain (the "chemicals from digs" source, agri spec §3). Crop-layer
+	// gated so pre-crop stock ledgers stay byte-identical.
+	if (Spoil > 0.0 && AreCropsLive())
+	{
+		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+	}
 	ShaftDepth = ToDepth;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
 		ShaftDepth, NewFloors, Spoil, SpoilPileKg);
@@ -2678,6 +3147,11 @@ bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutR
 	Carved += Cells;
 	const double Spoil = Cells * SpoilKgPerCell;
 	SpoilPileKg += Spoil;
+	// Gate B: dig-spoil chemicals for the fertilizer chain (crop-layer gated).
+	if (Spoil > 0.0 && AreCropsLive())
+	{
+		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Excavated %d cell(s) on floor %d (%d carved; +%.0f kg spoil; pile %.0f kg)"),
 		Cells, Level, Carved, Spoil, SpoilPileKg);
 	return true;
@@ -3658,11 +4132,40 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 		if (E != ERHEnding::Undetermined && E != ERHEnding::Collapse)
 		{
 			bEndingDeclared = true;
+			DeclaredEnding = (uint8)E; // the epilogue clock (v25) measures against this
+			PathSustainSols = 0.0;
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("A PATH IS SET — the colony's course reads clearly now: %s. History will remember which Mars you chose to build."),
 				GetEndingName(E)));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING PATH: %s (identity %.0f, humanNature %.0f) ==="),
 				GetEndingName(E), IdentityAxis, HumanNatureAxis);
+		}
+	}
+	// Ending resolution (v25): hold the declared path for EpilogueSustainSols
+	// and the story is WRITTEN - a one-time epilogue card; the sandbox keeps
+	// running. Wavering resets the clock (the path must be re-earned), the
+	// declaration itself never retracts. Threshold-on-monotone-accumulator =
+	// era-parity-safe, like growth. Wording is a Gate-D review placeholder.
+	if (bEndingDeclared && !bEpilogueDeclared)
+	{
+		if ((uint8)GetProjectedEnding() == DeclaredEnding)
+		{
+			PathSustainSols += DtSols;
+			if (PathSustainSols >= EpilogueSustainSols)
+			{
+				bEpilogueDeclared = true;
+				const FString Card = FString::Printf(
+					TEXT("EPILOGUE — the story of this Mars is written: %s. The colony carries it forward."),
+					GetEndingName((ERHEnding)DeclaredEnding));
+				OnAlert.Broadcast(Card);
+				OnMilestone.Broadcast(Card);
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== EPILOGUE: %s (held %.1f sols) ==="),
+					GetEndingName((ERHEnding)DeclaredEnding), PathSustainSols);
+			}
+		}
+		else
+		{
+			PathSustainSols = 0.0;
 		}
 	}
 }
@@ -3870,6 +4373,31 @@ void URHSimWorldSubsystem::StepCrisis(float SubDt)
 			++CrisisCount; // a quiet interval still advances the seed sequence
 		}
 	}
+}
+
+bool URHSimWorldSubsystem::HasInfirmaryOnline() const
+{
+	// Passive presence check: any slice-active Infirmary-function cell on a
+	// RATED floor. Cheap at colony scale (a handful of floors x cells).
+	if (!Defs)
+	{
+		return false;
+	}
+	for (const int32 Level : RatedFloors)
+	{
+		if (const TArray<FName>* Cells = FloorRoomCells.Find(Level))
+		{
+			for (const FName& CellRoom : *Cells)
+			{
+				const FRHRoomRow* Row = Defs->GetRoom(CellRoom);
+				if (Row && Row->SliceActive && Row->Function == FName("Infirmary"))
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
 }
 
 URHSimWorldSubsystem::ERHEnding URHSimWorldSubsystem::GetProjectedEnding() const
@@ -4129,7 +4657,7 @@ double URHSimWorldSubsystem::GetTotalSolid(FName Resource) const
 TMap<FName, TPair<double, double>> URHSimWorldSubsystem::GetQuotaProgress() const
 {
 	TMap<FName, TPair<double, double>> Progress;
-	if (const FRHQuotaRow* Quota = Defs ? Defs->GetQuota(NAME_Q1) : nullptr)
+	if (const FRHQuotaRow* Quota = Defs ? Defs->GetQuota(ActiveQuota) : nullptr)
 	{
 		for (const auto& Req : URHDefinitionsSubsystem::ParseResourceList(Quota->Requirements))
 		{
@@ -4410,7 +4938,10 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 			return false; // standing by for materials; no work progress
 		}
 	}
-	B->BuildRemaining_s -= Seconds * FabricatorSpeedMul;
+	// Station tiers (Gate A): staffed workstation-line seats speed construction
+	// alongside the Toolkit multiplier. Zero pop or an unarmed bonus knob
+	// makes the factor exactly 1.0 - every pre-tier pin unchanged.
+	B->BuildRemaining_s -= Seconds * FabricatorSpeedMul * GetWorkstationFabMul();
 	if (B->BuildRemaining_s <= 0.0)
 	{
 		B->bUnderConstruction = false;
@@ -5105,6 +5636,40 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		uint8 Harvest = bFirstHarvestAnnounced ? 1 : 0;
 		Ar << MomentSols << MomentCounter << Harvest << GardenFoodCumKg;
 	}
+	// The goal ladder + ending resolution + research funding (save v25).
+	{
+		uint8 Epilogue = bEpilogueDeclared ? 1 : 0, Collapse = bCollapseDeclared ? 1 : 0;
+		Ar << ActiveQuota << QuotaOpenedSol << PendingResearchFundingKg
+		   << DeclaredEnding << PathSustainSols << Epilogue << Collapse;
+	}
+	// Crops + climate + ducts (save v26). Maps/sets serialize SORTED so the
+	// bytes are deterministic regardless of insertion history.
+	{
+		TArray<FIntVector> CropKeys;
+		PlantedCrops.GetKeys(CropKeys);
+		CropKeys.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+		int32 CropCount = CropKeys.Num();
+		Ar << CropCount;
+		for (const FIntVector& K : CropKeys)
+		{
+			FRHPlantedCropState& S = PlantedCrops[K];
+			FIntVector Key = K;
+			Ar << Key << S.Crop << S.PlantedSol << S.SoilKg;
+		}
+		TArray<int32> ClimateKeys;
+		FloorClimate.GetKeys(ClimateKeys);
+		ClimateKeys.Sort();
+		int32 ClimateCount = ClimateKeys.Num();
+		Ar << ClimateCount;
+		for (const int32 K : ClimateKeys)
+		{
+			int32 Key = K; FName Band = FloorClimate[K];
+			Ar << Key << Band;
+		}
+		TArray<int32> Ducts = DuctedFloors.Array();
+		Ducts.Sort();
+		Ar << Ducts << ColonyCO2Kg << PlantRotation;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -5372,6 +5937,54 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		uint8 Harvest = 0;
 		Ar << MomentSols << MomentCounter << Harvest << GardenFoodCumKg;
 		bFirstHarvestAnnounced = (Harvest != 0);
+	}
+	// The goal ladder + ending resolution + research funding (save v25).
+	{
+		uint8 Epilogue = 0, Collapse = 0;
+		Ar << ActiveQuota << QuotaOpenedSol << PendingResearchFundingKg
+		   << DeclaredEnding << PathSustainSols << Epilogue << Collapse;
+		bEpilogueDeclared = (Epilogue != 0);
+		bCollapseDeclared = (Collapse != 0);
+		if (ActiveQuota.IsNone())
+		{
+			ActiveQuota = FirstQuotaName(); // legacy safety: never load ladderless
+		}
+		// Room unlocks are DT-row flips (in-memory), so they re-apply from the
+		// loaded discovery log - deterministic, no extra save state.
+		for (const FName& Found : DiscoveryLog)
+		{
+			const FRHDiscoveryRow* Row = Defs->GetDiscovery(Found);
+			if (Row && !Row->UnlockRoom.IsNone())
+			{
+				Defs->ActivateRoomRow(Row->UnlockRoom);
+			}
+		}
+	}
+	// Crops + climate + ducts (save v26).
+	{
+		PlantedCrops.Empty();
+		int32 CropCount = 0;
+		Ar << CropCount;
+		for (int32 i = 0; i < CropCount; ++i)
+		{
+			FIntVector Key; FRHPlantedCropState S;
+			Ar << Key << S.Crop << S.PlantedSol << S.SoilKg;
+			PlantedCrops.Add(Key, S);
+		}
+		FloorClimate.Empty();
+		int32 ClimateCount = 0;
+		Ar << ClimateCount;
+		for (int32 i = 0; i < ClimateCount; ++i)
+		{
+			int32 Key = 0; FName Band;
+			Ar << Key << Band;
+			FloorClimate.Add(Key, Band);
+		}
+		TArray<int32> Ducts;
+		Ar << Ducts << ColonyCO2Kg << PlantRotation;
+		DuctedFloors.Empty();
+		DuctedFloors.Append(Ducts);
+		bSoilSpentAnnounced = false; // runtime edge re-derives
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

@@ -19,6 +19,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	RoomsTable = Cast<UDataTable>(RoomsTablePath.TryLoad()); // absent = nothing designatable
 	DiscoveriesTable = Cast<UDataTable>(DiscoveriesTablePath.TryLoad()); // absent = the layer stays dormant
 	RivalsTable = Cast<UDataTable>(RivalsTablePath.TryLoad()); // absent = a lonely Mars
+	CropsTable = Cast<UDataTable>(CropsTablePath.TryLoad()); // absent/dormant = the legacy flat-yield garden
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -51,6 +52,90 @@ const FRHQuotaRow* URHDefinitionsSubsystem::GetQuota(FName Name) const
 const FRHManifestItemRow* URHDefinitionsSubsystem::GetManifestItem(FName Name) const
 {
 	return ManifestTable ? ManifestTable->FindRow<FRHManifestItemRow>(Name, TEXT("GetManifestItem"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::ForEachQuota(TFunctionRef<void(FName, const FRHQuotaRow&)> Fn) const
+{
+	if (!QuotasTable)
+	{
+		return;
+	}
+	for (const auto& Pair : QuotasTable->GetRowMap())
+	{
+		const FRHQuotaRow* Row = reinterpret_cast<const FRHQuotaRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
+bool URHDefinitionsSubsystem::ActivateRoomRow(FName Name)
+{
+	if (FRHRoomRow* Row = const_cast<FRHRoomRow*>(GetRoom(Name)))
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
+}
+
+const FRHCropRow* URHDefinitionsSubsystem::GetCrop(FName Name) const
+{
+	return CropsTable ? CropsTable->FindRow<FRHCropRow>(Name, TEXT("GetCrop"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::GetActiveCropsSorted(TArray<TPair<FName, const FRHCropRow*>>& Out) const
+{
+	Out.Reset();
+	if (!CropsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : CropsTable->GetRowMap())
+	{
+		const FRHCropRow* Row = reinterpret_cast<const FRHCropRow*>(Pair.Value);
+		if (Row && Row->SliceActive)
+		{
+			Out.Emplace(Pair.Key, Row);
+		}
+	}
+	Out.Sort([](const TPair<FName, const FRHCropRow*>& A, const TPair<FName, const FRHCropRow*>& B)
+	{
+		return A.Key.LexicalLess(B.Key);
+	});
+}
+
+void URHDefinitionsSubsystem::ForEachCropRow(TFunctionRef<void(FName, const FRHCropRow&)> Fn) const
+{
+	if (!CropsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : CropsTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHCropRow*>(Pair.Value));
+	}
+}
+
+bool URHDefinitionsSubsystem::ActivateCropRow(FName Name)
+{
+	if (FRHCropRow* Row = CropsTable ? CropsTable->FindRow<FRHCropRow>(Name, TEXT("ActivateCropRow"), false) : nullptr)
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
+}
+
+bool URHDefinitionsSubsystem::Debug_ActivateQuota(FName Name)
+{
+	if (FRHQuotaRow* Row = QuotasTable ? QuotasTable->FindRow<FRHQuotaRow>(Name, TEXT("Debug_ActivateQuota"), false) : nullptr)
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
 }
 
 const FRHRoomRow* URHDefinitionsSubsystem::GetRoom(FName Name) const

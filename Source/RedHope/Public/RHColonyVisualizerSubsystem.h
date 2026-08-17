@@ -6,6 +6,8 @@
 
 class AStaticMeshActor;
 class UInstancedStaticMeshComponent;
+class UPointLightComponent;
+class UStaticMeshComponent;
 struct FRHBuildingInstance;
 struct FRHCommand;
 struct FRHDepositState;
@@ -51,6 +53,20 @@ public:
 	// Presentation-only; the sim never knows what the camera looks at.
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
+
+	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
+	// against each building's AUTHORED PulseDepth, so the art-bible mix between
+	// machines is preserved and repeated calls set an absolute multiplier
+	// instead of compounding. 0 = fully still, 1 = as authored.
+	void Debug_SetPulseScale(float Scale);
+
+	// Sims-style interior viewing (rh.Cutaway). The pit is open-topped by
+	// construction, so there is no roof to lift: what occludes an interior is
+	// the near WALL faces. Mode 1 drops the one or two facing the camera and
+	// swaps as you orbit; mode 2 drops them all for a floorplan read.
+	// State-diffed on a (mode, hidden-sides) key, with hysteresis, so orbiting
+	// past a boundary cannot strobe the walls.
+	void ApplyCutaway();
 
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
@@ -128,6 +144,8 @@ private:
 	// and carry a small flat label. State-diffed per tick like the shaft mirror.
 	void RefreshRoomVisuals();
 	FLinearColor RoomTint(FName RoomRowName) const;
+	// Content path of the furnishing prop for a room function (empty = none).
+	FString RoomPropPath(FName Room) const;
 	// Sovereignty made visible (M3/M4): a distant settlement marker per
 	// AVAILABLE rival (tinted by its diplomatic state - normal / embargoed /
 	// defected / sabotaged) and a rover that physically drives the trade route,
@@ -138,10 +156,55 @@ private:
 	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
+	// Last PoweredState pushed into a building's material, so the per-frame pass
+	// only touches a MID when the sim actually changed the answer.
+	// 0 = dark (shed or switched off), 1 = running, 2 = under construction.
+	TMap<int32, uint8> AppliedPowerState;
+	// Each building's PulseDepth as the art pass authored it, captured the first
+	// time RH.Pulse touches it - the MID's own value stops being the authored
+	// one after the first scale, so scaling off it would compound.
+	TMap<int32, float> AuthoredPulseDepth;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
 	TMap<FIntVector, FName> AppliedRoomTint;
+	// Per-cell furnishing prop component (owned by its tile actor, so it is
+	// GC-safe via CarveTileVisuals and inherits the tile's slice-view hiding).
+	TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>> RoomPropByCell;
+	// Automatic hab lighting (director 2026-07-09): one soft ceiling light per
+	// designated cell, owned by its tile actor like the prop; intensity is a
+	// READOUT of the sim - full while the floor's circulator runs on a healthy
+	// grid, dimmed in a brownout, dark when circulation is down. Plus one cool
+	// dim fill that rides the viewed floor (owned by the shaft column) so an
+	// unpowered hab reads dim-and-cold instead of void-black at night.
+	TMap<FIntVector, TWeakObjectPtr<UPointLightComponent>> LightByCell;
+	TWeakObjectPtr<UPointLightComponent> FloorFill;
+	// Insulated-wall dressing (director 2026-07-09: "walls look like bare
+	// martian rock... every few blocks an air vent"): vent units mounted on the
+	// pit's wall faces, rebuilt with the rig. Owned by SliceRigActor.
+	TArray<TWeakObjectPtr<UStaticMeshComponent>> WallVents;
+	// Cutaway bookkeeping. WallISM is a FILTERED VIEW of WallFaceXf: the rig
+	// authors every face here, and ApplyCutaway re-adds only the visible ones.
+	// WallVentDir parallels WallVents so a vent hides with the wall it is
+	// mounted on. Key = (mode << 4) | hidden-side bitmask; 0xFF forces re-apply.
+	TArray<FTransform> WallFaceXf;
+	TArray<FIntPoint> WallFaceDir;
+	TArray<FIntPoint> WallVentDir;
+	FVector PitCenterCm = FVector::ZeroVector;
+	uint8 AppliedCutawayKey = 0xFF;
+	// Buildings that carry a real light (Floodmast). Intensity rides bPowered,
+	// so a brownout darkens the city the player lit.
+	TMap<int32, TWeakObjectPtr<UPointLightComponent>> BuildingLights;
+	// Lived-in accumulation: crates/drums/lockers appear over time on populated
+	// floors (count grows with residents + sols; components ride tile actors so
+	// lifecycle and floor-cut hiding come free). Per-floor spawned count.
+	TMap<int32, int32> ClutterSpawnedPerLevel;
+	// The elevator at the shaft head: real cage mesh + two sliding door panels,
+	// doors easing open whenever a colonist is near the shaft on the open floor.
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorCage;
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorL;
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorR;
+	float ElevatorDoorAlpha = 0.f;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;

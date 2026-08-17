@@ -8,3 +8,4 @@ MeltIce,WaterPlant,Ice:50,Water:45,1,300,TRUE,90% yield; continuous while fed
 Electrolysis,Electrolyzer,Water:10,Oxygen:8.9;Hydrogen:1.1,1,600,TRUE,"True 8:1 mass stoichiometry; hard-sci anchor"
 BoreFloor,Borer,,Regolith:1200,12,500,TRUE,"M1-d: one shaft-floor descent; spoil drops at the Borer for hauling; designation-gated - never auto-starts"
 CarveCell,Borer,,Regolith:1200,3,500,TRUE,"M1-d: one 10x10 cell carved on a reached floor; designation-gated - never auto-starts"
+FertilizerMix,Forge,Compost:20;SpoilChemicals:10,Fertilizer:25,2,400,FALSE,"DORMANT agri Gate B: closes the farm loop - more people = more farming capacity (spec §3). Placeholder ratios; a dedicated fertilizer unit building is a later presentation gate (art exists)"

@@ -1,5 +1,15 @@
 # DataTable Sync Checklist — accumulated debt (Sessions 30–36)
 
+> **RESOLVED (2026-07-16): the full sync through save v25 is DONE**, headless,
+> via the `ImportAssets` commandlet (`CSVImportFactory` + `ImportRowStruct`
+> JSON settings — no editor needed). All 14 DTs re-imported from
+> `docs/data/*.csv`, incl. new `DT_Discoveries`/`DT_Rivals`; 24-run battery
+> green against the live tables, baseline pins byte-identical. See
+> `docs/PROJECT_STATUS.md` §4.1. The only follow-up is dropping the
+> `Debug_Inject*` rows from the self-tests (needs a director compile) so they
+> become pure-data drift verifiers. This file is kept as history; the how-to
+> below (MCP `set_rows` route) is superseded by the headless import route.
+
 The CSVs in `docs/data/` are the source of truth and are all committed. The live DataTable assets + the two C++ row structs need syncing next editor session (editor open, MCP connected). Until then: code defaults match every scalar, and headless tests inject the new rows in memory, so everything runs — but the live in-editor game reads stale/absent rows for the new content.
 
 ## 1. Recompile first (two structs gained columns / two are new)

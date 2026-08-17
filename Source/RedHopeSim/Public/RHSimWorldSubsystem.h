@@ -53,6 +53,17 @@ struct REDHOPESIM_API FRHColonist
 	TMap<FName, double> SkillSols;
 };
 
+// A planted cell's crop state (greenhouse-agriculture Gate A, save v26).
+// Parallel to PlantedCells: a planted cell WITHOUT an entry here is a legacy
+// flat-yield cell (pre-crop saves, or crops dormant at plant time). Growth
+// stage is derived from PlantedSol - never stored (era-parity by construction).
+struct FRHPlantedCropState
+{
+	FName Crop;
+	double PlantedSol = 0.0;
+	double SoilKg = 0.0; // remaining bed soil; fertilizer refills, zero reverts the cell
+};
+
 // A placed structure as the sim knows it. Solids live here (approved hybrid
 // logistics): InputKg feeds recipes/construction, OutputKg awaits hauling.
 USTRUCT()
@@ -236,6 +247,10 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// Cheat (RH.Demo): certify a floor instantly - fill its O2 to required and
+	// mark it Livable - so a demo crew can move in this frame instead of after
+	// sols of fill. Only certifies if it's circulated and big enough (real gate).
+	void Debug_ForceRateFloor(int32 Level);
 	// Harness: run a cargo item's landing effect directly (the commandlet's
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
@@ -441,9 +456,42 @@ public:
 	// a collapse check); Undetermined while the colony is still contested.
 	ERHEnding GetProjectedEnding() const;
 	const TCHAR* GetEndingName(ERHEnding Ending) const;
+	// --- Ending resolution (save v25): the game structure closes its loop.
+	// Once a path is DECLARED (bEndingDeclared), holding the same projected
+	// ending for EpilogueSustainSols fires the one-time EPILOGUE card - the
+	// story of this Mars is written; the sandbox keeps running. Collapse
+	// (had crew, lost it all) declares its own one-time card in
+	// StepPopulation - abstract and prevention-framed with the recovery path
+	// named (Gate-D wording review owns the final copy).
+	ERHEnding GetDeclaredEnding() const { return (ERHEnding)DeclaredEnding; }
+	bool IsEndingDeclared() const { return bEndingDeclared; }
+	bool IsEpilogueDeclared() const { return bEpilogueDeclared; }
+	bool IsCollapseDeclared() const { return bCollapseDeclared; }
+	double GetPathSustainSols() const { return PathSustainSols; }
 	// Harness/cheat: force the crisis selector to fire now (natural cadence is in
 	// StepCrisis). Returns the crisis that fired.
 	ERHCrisis Debug_TriggerCrisis() { TriggerCrisis(); return ActiveCrisis; }
+	// Harness knobs (v25 suites): shrink the epilogue hold, bank funding
+	// directly, spin the weather cycle, arm the workstation fab bonus.
+	void Debug_SetEpilogueSustainSols(double Sols) { EpilogueSustainSols = Sols; }
+	void Debug_AddResearchFunding(double Kg) { PendingResearchFundingKg += Kg; }
+	void Debug_SetWeatherCycleSols(double Sols) { WeatherCycleSols = Sols; }
+	void Debug_SetWorkstationFabBonus(double PerSeat) { WorkstationFabBonusPerSeat = PerSeat; }
+
+	// --- Station tiers (tiered-production spec, Gate A) ---
+	// Sum of YieldMul over FILLED seats per family (derived with ColonistJobs,
+	// never saved). Plain T1 content: equals the filled-seat count exactly.
+	double GetLabYieldSeatSum() const { return LabYieldSeatSum; }
+	double GetWorkstationYieldSeatSum() const { return WorkstationYieldSeatSum; }
+	// Construction-speed multiplier from staffed workstation-line seats
+	// (1.0 + PerSeatBonus x yield-seat-sum). Rides the same integrator slot as
+	// FabricatorSpeedMul; zero pop or zero bonus = exactly 1.0 (baselines safe).
+	double GetWorkstationFabMul() const { return 1.0 + WorkstationFabBonusPerSeat * WorkstationYieldSeatSum; }
+	// Infirmary (passive, prevention-framed): any slice-active Infirmary-
+	// function cell on a RATED floor stretches the evacuation countdown -
+	// more time to fix the missing leg, never a penalty.
+	bool HasInfirmaryOnline() const;
+	double GetEffectiveEvacSols() const { return ColonistEvacSols + (HasInfirmaryOnline() ? InfirmaryEvacBonusSols : 0.0); }
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
@@ -461,6 +509,37 @@ public:
 	// Garden power fork reads (deck): the grow-light load this step, and whether
 	// the bank went dark on it (a legibility cue - "your gardens lost power").
 	double GetGardenPowerDrawW() const { return GardenPowerDrawW; }
+
+	// --- Crops (greenhouse-agriculture spec 2026-07-10, Gates A/B/D) ---
+	// With ANY DT_Crops row slice-active, newly planted cells carry a named
+	// crop: real grow time (no yield until mature), per-crop water draw,
+	// climate preference, bed-soil depletion + fertilizer refill, and (ducted)
+	// CO2/O2 exchange with the crew. With every crop dormant, the garden
+	// reproduces the legacy flat-yield math exactly - baseline untouched.
+	bool AreCropsLive() const;
+	// Cumulative garden yield (pure production, unaffected by consumption -
+	// what the self-tests measure against).
+	double GetGardenFoodCumKg() const { return GardenFoodCumKg; }
+	// Test knob: soil-depletion rate (the -agri suite spends a bed in one sol
+	// instead of ten; same linear shape, just faster).
+	void Debug_SetCropSoilDepleteKgPerSol(double V) { CropSoilDepleteKgPerSol = V; }
+	FName GetCellCrop(int32 Level, int32 CellIndex) const;
+	// Presentation read: 0 sprout / 1 young / 2 mature; -1 legacy or unplanted.
+	int32 GetCellCropStage(int32 Level, int32 CellIndex) const;
+	double GetCellSoilKg(int32 Level, int32 CellIndex) const;
+	// Per-floor climate (Gate B): Temperate default. Humid/Arid only take
+	// EFFECT with a powered HumidityRegulator on the floor (else Temperate).
+	bool SetFloorClimate(int32 Level, FName Band, FString& OutError);
+	FName GetFloorClimateSetting(int32 Level) const;
+	FName GetFloorClimateEffective(int32 Level) const;
+	bool HasRegulatorOnline(int32 Level) const;
+	// Ducts (Gate D): a ducted garden floor breathes with the colony - crops
+	// draw the crew's exhaled CO2 (yield bonus while the pool holds) and emit
+	// O2 back into the colony supply, offsetting leakage.
+	bool DesignateDuct(int32 Level, FString& OutError);
+	bool RemoveDuct(int32 Level) { return DuctedFloors.Remove(Level) > 0; }
+	bool IsFloorDucted(int32 Level) const { return DuctedFloors.Contains(Level); }
+	double GetColonyCO2Kg() const { return ColonyCO2Kg; }
 	bool AreGrowLightsDark() const { return bGrowLightsDark; }
 	// Water loop reads (deck): pool potability 0..1 and its penalty threshold.
 	double GetWaterPotability() const { return WaterPotability; }
@@ -570,6 +649,10 @@ public:
 	// come from DT_Events; overlapping rows resolve first-found (author
 	// schedules should not overlap - flagged at load if they do).
 	const struct FRHEventRow* GetActiveEvent() const;
+	// Long-game weather (v25): fold a sol back into the authored event window
+	// when the WeatherCycleSols knob is on (0 = off, sol passes through).
+	double FoldEventSol(double SolNow) const;
+	double EventCycleSpan() const;
 	// Solar multiplier right now: the active dust storm's Severity, else the
 	// clear-sky DustFactor config row (1.0).
 	double GetDustFactorNow() const;
@@ -589,6 +672,15 @@ public:
 	// --- Quota / manifest / ship (the slice finale) ---
 	ERHQuotaPhase GetQuotaPhase() const { return QuotaPhase; }
 	double GetAwardMassKg() const { return AwardMassKg; }
+	// The goal ladder (save v25): which CEO quota is live now, and the sol it
+	// opened (deadlines are relative to opening). When a quota's ship lands,
+	// the next slice-active row - ascending (DeadlineSol, name) - opens, so
+	// the program's demands keep coming for as long as the data ladder runs.
+	FName GetActiveQuotaName() const { return ActiveQuota; }
+	int32 GetQuotaOpenedSol() const { return QuotaOpenedSol; }
+	// Manifest budget banked by completed discoveries (FundingKg), paid out on
+	// top of the next quota award - research funds the program.
+	double GetPendingResearchFundingKg() const { return PendingResearchFundingKg; }
 	double GetManifestMassKg() const;
 	const TArray<FName>& GetManifestItems() const { return ManifestItems; }
 	double GetShipEtaSimSeconds() const { return ShipArrivalSimSeconds; }
@@ -988,6 +1080,26 @@ private:
 	// The garden (M2 Gate C; PlantedCells serialized, save v12). Keys are
 	// (Level, CellIndex, 0). ProducingCells is per-step derived, never saved.
 	TSet<FIntVector> PlantedCells;
+	// Crops (save v26): per-cell crop state, per-floor climate settings,
+	// ducted floors, the colony CO2 pool, and the deterministic rotation
+	// counter. A planted cell absent from PlantedCrops is a legacy cell.
+	TMap<FIntVector, FRHPlantedCropState> PlantedCrops;
+	TMap<int32, FName> FloorClimate; // absent = Temperate
+	TSet<int32> DuctedFloors;
+	double ColonyCO2Kg = 0.0;
+	int32 PlantRotation = 0;
+	bool bSoilSpentAnnounced = false; // runtime edge, never saved
+	// Crop economy scalars (Gate B/D; all linear or threshold-on-monotone -
+	// era-parity-safe by shape; numbers legible-math placeholders).
+	double CropSoilDepleteKgPerSol = 25.0;
+	double FertilizerSoilPerKg = 2.0;
+	double CompostKgPerColonistSol = 1.0;
+	double SpoilChemFraction = 0.02;
+	double ClimateMismatchYieldMul = 0.6;
+	double DuctYieldBonusMul = 1.1;
+	double GardenCO2DrawKgPerSolPerCell = 0.5;
+	double GardenO2EmitKgPerSolPerCell = 0.2;
+	double CO2KgPerColonistSol = 1.0;
 	int32 ProducingCells = 0;
 	bool bFirstCropAnnounced = false;   // serialized: the milestone fires once
 	bool bGardenThirstAnnounced = false; // runtime edge: water-starve alert
@@ -1049,6 +1161,29 @@ private:
 	TArray<FName> ManifestItems;
 	double ShipArrivalSimSeconds = 0.0;
 	int32 QuotaMetSol = 0;
+	// The goal ladder (save v25). ActiveQuota derives to the first
+	// slice-active row when none is set (fresh colony or legacy path).
+	FName ActiveQuota;
+	int32 QuotaOpenedSol = 0;
+	double PendingResearchFundingKg = 0.0;
+	FName FirstQuotaName() const;
+	void AdvanceQuotaLadder();
+	// Ending resolution (save v25).
+	uint8 DeclaredEnding = 0;      // ERHEnding recorded at PATH IS SET
+	double PathSustainSols = 0.0;  // sols the projected ending has held since
+	bool bEpilogueDeclared = false;
+	bool bCollapseDeclared = false;
+	double EpilogueSustainSols = 15.0;        // config EpilogueSustainSols
+	// Long-game weather (config WeatherCycleSols, 0 = off): past the authored
+	// schedule, events repeat on this period - deterministic, data-driven.
+	double WeatherCycleSols = 0.0;
+	// Station tiers (Gate A). Derived with ColonistJobs (never saved): the sum
+	// of YieldMul over FILLED seats per family. All-default content makes
+	// these equal the plain seat counts.
+	double LabYieldSeatSum = 0.0;
+	double WorkstationYieldSeatSum = 0.0;
+	double WorkstationFabBonusPerSeat = 0.0;  // config, 0 until the director arms it
+	double InfirmaryEvacBonusSols = 1.0;      // config InfirmaryEvacBonusSols
 
 	UPROPERTY() TObjectPtr<URHDefinitionsSubsystem> Defs;
 	UPROPERTY() TObjectPtr<URHSimClockSubsystem> Clock;

@@ -6,12 +6,16 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHPlayerController.h"
+#include "RHStrategyPawn.h"
+#include "RHColonyVisualizerSubsystem.h"
+#include "RHCrewVisualizerSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/CoreDelegates.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
@@ -44,6 +48,112 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSnapshot(
 		{
 			FScreenshotRequest::RequestScreenshot(TEXT("RHSnap"), /*bShowUI*/ false, /*bAddFilenameSuffix*/ true);
 			UE_LOG(LogRedHope, Display, TEXT("Snapshot requested"));
+		}, Delay, false);
+	}));
+
+// ---------------------------------------------------------------------------
+// Scripted visual capture (QA contact sheets). The strategy camera is otherwise
+// mouse-only, so a headless driver could never frame anything: every shot came
+// out at the default 215 m opening register, which is far too distant to judge
+// a mesh or a paint job. These four make a boot reproducible end to end.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	ARHStrategyPawn* FindStrategyPawn(UWorld* World)
+	{
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		return PC ? Cast<ARHStrategyPawn>(PC->GetPawn()) : nullptr;
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCam(
+	TEXT("RH.Cam"),
+	TEXT("RH.Cam <Xm> <Ym> <ZoomT 0-1> [PitchOffsetDeg] [YawDeg] - place the strategy camera exactly. ZoomT 0 = 25 m, 0.45 = 215 m (default opening), 1 = 3000 m. Snaps with no easing so a timed screenshot is repeatable."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Cam <Xm> <Ym> <ZoomT 0-1> [PitchOffsetDeg] [YawDeg]"));
+			return;
+		}
+		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
+		if (!Pawn)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.Cam: no strategy pawn possessed"));
+			return;
+		}
+		const float Xm = FCString::Atof(*Args[0]);
+		const float Ym = FCString::Atof(*Args[1]);
+		const float ZoomT = FCString::Atof(*Args[2]);
+		const float Pitch = Args.Num() > 3 ? FCString::Atof(*Args[3]) : 0.f;
+		const float Yaw = Args.Num() > 4 ? FCString::Atof(*Args[4]) : 0.f;
+		Pawn->SetCameraPose(FVector2D(Xm * 100.f, Ym * 100.f), ZoomT, Pitch, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Cam] focus (%.0f, %.0f) m | zoomT %.2f = %.0f m out | pitch offset %.0f | yaw %.0f"),
+			Xm, Ym, ZoomT, Pawn->GetViewDistanceCm() / 100.f, Pitch, Yaw);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCamCrew(
+	TEXT("RH.CamCrew"),
+	TEXT("RH.CamCrew [Index=0] [ZoomT=0.05] [YawDeg=0] - frame the Nth crew figure where it currently stands. Walkers move, so a fixed RH.Cam pose can miss them entirely."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
+		const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>();
+		if (!Pawn || !Crew)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.CamCrew: no strategy pawn or crew visualizer"));
+			return;
+		}
+		const int32 Index = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 0;
+		const float ZoomT = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.05f;
+		const float Yaw = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f;
+		FVector At = FVector::ZeroVector;
+		if (!Crew->Debug_GetCrewLocation(Index, At))
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.CamCrew: no crew figure at index %d"), Index);
+			return;
+		}
+		Pawn->SetCameraPose(FVector2D(At.X, At.Y), ZoomT, 0.f, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.CamCrew] crew %d at (%.0f, %.0f) m | zoomT %.2f = %.0f m out"),
+			Index, At.X / 100.f, At.Y / 100.f, ZoomT, Pawn->GetViewDistanceCm() / 100.f);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHPulse(
+	TEXT("RH.Pulse"),
+	TEXT("RH.Pulse <Scale> - scale every machine's ambient emissive throb against its authored depth (0 = fully still, 1 = as authored, 2 = double). Absolute, so repeated calls do not compound."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Pulse <Scale>"));
+			return;
+		}
+		if (URHColonyVisualizerSubsystem* Viz = World->GetSubsystem<URHColonyVisualizerSubsystem>())
+		{
+			Viz->Debug_SetPulseScale(FCString::Atof(*Args[0]));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHQuit(
+	TEXT("RH.Quit"),
+	TEXT("RH.Quit [DelaySeconds=0] - request a clean shutdown after a delay, so a capture driver can end a run without SIGKILL truncating the log or a screenshot mid-write."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 0.f;
+		if (Delay <= 0.f)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Quit] exiting"));
+			FPlatformMisc::RequestExit(false, TEXT("RH.Quit"));
+			return;
+		}
+		FTimerHandle Handle;
+		World->GetTimerManager().SetTimer(Handle, []()
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Quit] exiting"));
+			FPlatformMisc::RequestExit(false, TEXT("RH.Quit"));
 		}, Delay, false);
 	}));
 
@@ -524,6 +634,89 @@ static FAutoConsoleCommandWithWorldAndArgs GRHActivateRoom(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateQuota(
+	TEXT("RH.ActivateQuota"),
+	TEXT("RH.ActivateQuota <RowName> - DEBUG: flip a quota row slice-active in the loaded table (test knob until the DT_Quotas sync lands)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (Defs && Defs->Debug_ActivateQuota(FName(*Args[0])))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("Quota row '%s' slice-active (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateQuota: no quota row '%s'"), *Args[0]);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHActivateCrop(
+	TEXT("RH.ActivateCrop"),
+	TEXT("RH.ActivateCrop <RowName|all> - flip a dormant crop row live (the per-gate director flip; in-memory)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1) { return; }
+		URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Defs) { return; }
+		if (Args[0].Equals(TEXT("all"), ESearchCase::IgnoreCase))
+		{
+			int32 Flipped = 0;
+			TArray<FName> Names;
+			Defs->ForEachCropRow([&Names](FName Name, const FRHCropRow&) { Names.Add(Name); });
+			for (const FName& Name : Names) { Flipped += Defs->ActivateCropRow(Name) ? 1 : 0; }
+			UE_LOG(LogRedHope, Display, TEXT("Crops live: %d rows slice-active (in-memory)"), Flipped);
+		}
+		else if (Defs->ActivateCropRow(FName(*Args[0])))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("Crop row '%s' slice-active (in-memory)"), *Args[0]);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.ActivateCrop: no crop row '%s'"), *Args[0]);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHClimate(
+	TEXT("RH.Climate"),
+	TEXT("RH.Climate <Level> <Temperate|Humid|Arid> - set a floor's greenhouse climate (needs a HumidityRegulator online for non-Temperate to take effect)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Climate <Level> <Temperate|Humid|Arid>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Err;
+			if (!Sim->SetFloorClimate(FCString::Atoi(*Args[0]), FName(*Args[1]), Err))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RH.Climate: %s"), *Err);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDuct(
+	TEXT("RH.Duct"),
+	TEXT("RH.Duct <Level> - duct a garden floor into the colony air loop (crops draw crew CO2, emit O2)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Duct <Level>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FString Err;
+			if (!Sim->DesignateDuct(FCString::Atoi(*Args[0]), Err))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RH.Duct: %s"), *Err);
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 	TEXT("RH.AddSolid"),
 	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),
@@ -785,6 +978,58 @@ static FAutoConsoleCommandWithWorldAndArgs GRHShowcase(
 		{
 			Sim->Debug_Showcase();
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDemo(
+	TEXT("RH.Demo"),
+	TEXT("RH.Demo - the everything button: bore a floor, carve it, place power + life-support, "
+	     "zone one of every room, house a crew, and ride down. Then speed up (RH.SetSpeed 3) to watch it live."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		FString R;
+		// Dig and carve floor -1 (instant, bypasses the Borer for the demo).
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 8, R);
+		// Power at the surface, life-support on the floor, and stocked so the
+		// crew can breathe/eat/drink the moment the floor rates.
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 1200.0);
+		Sim->AddStock(FName("Food"), 400.0);
+		Sim->AddStock(FName("Water"), 400.0);
+		// Garden materials so zoned beds actually PLANT (director hand-play
+		// 2026-07-17: the demo colony had no Soil/Seeds, so RH.ActivateCrop
+		// had nothing to grow). Glass covers a greenhouse fork too.
+		Sim->AddStock(FName("Soil"), 2000.0);
+		Sim->AddStock(FName("Seeds"), 400.0);
+		Sim->AddStock(FName("Glass"), 200.0);
+		// One of every active room, spread across the 8 carved cells.
+		const TCHAR* Rooms[8] = {
+			TEXT("LivingQuarters"), TEXT("LivingQuarters"), TEXT("Workstation"), TEXT("Lab"),
+			TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway"), TEXT("Garden")
+		};
+		for (int32 i = 0; i < 8; ++i)
+		{
+			Sim->DesignateRoom(-1, i, FName(Rooms[i]), R);
+		}
+		// Certify the floor NOW (fills O2 + rates it) so the crew move in this
+		// frame - otherwise Debug_AddColonists finds no rated bed and adds none.
+		Sim->Debug_ForceRateFloor(-1);
+		// The crew (now the floor is rated, they house immediately).
+		Sim->Debug_AddColonists(4);
+		// Ride the elevator down to look at it.
+		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+		{
+			PC->SetActiveLevel(-1);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Demo] floor -1: 8 cells carved + zoned, power + AirFilter placed, 4 crew inbound. "
+			"Run RH.SetSpeed 3 to let it certify and the crew move in."));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHStatus(

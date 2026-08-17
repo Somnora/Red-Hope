@@ -491,14 +491,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const FRHRoomRow* G = DefsSub ? DefsSub->GetRoom(FName("Garden")) : nullptr;
 			if (!G || !G->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Garden not active - DT drift")); return 1; }
 		}
-		// Greenhouse is a NEW row (DT sync pending); inject it in-memory (the
-		// whole-row extension of the SliceActive test-knob).
-		FRHRoomRow GH;
-		GH.DisplayName = TEXT("Greenhouse"); GH.Function = FName("Greenhouse");
-		GH.EmitsTags = TEXT("Odor"); GH.NeedsFiltration = true; GH.NeedsPlumbing = true;
-		GH.MoraleWeight = 0.5f; GH.SliceActive = true;
-		DefsSub->Debug_InjectRoom(FName("Greenhouse"), GH);
-		if (!DefsSub->GetRoom(FName("Greenhouse"))) { UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Greenhouse inject failed")); return 1; }
+		// Pure-data: the Greenhouse row rides the synced DT (2026-07-16).
+		{
+			const FRHRoomRow* GH = DefsSub->GetRoom(FName("Greenhouse"));
+			if (!GH || !GH->SliceActive || GH->EmitsTags != TEXT("Odor") || GH->MoraleWeight != 0.5f)
+			{ UE_LOG(LogRedHopeSim, Error, TEXT("FORK: Greenhouse row missing/drifted - DT/CSV drift")); return 1; }
+		}
 
 		// Certify a 6-cell vault with power; charge the bank.
 		FString R;
@@ -681,21 +679,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
-		// The DT_Discoveries asset doesn't exist until its first editor import;
-		// inject the four authored rows (mirrors RH_Discoveries.csv exactly).
+		// Pure-data: the four authored rows ride the synced DT_Discoveries
+		// (2026-07-16) - assert the arithmetic-bearing columns instead of
+		// injecting, so this suite fails loudly on DT/CSV drift.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		const auto Inject = [&](const TCHAR* Name, const TCHAR* Display, int32 Order, float SeatH, float Bonus, FName Reward, float Kg)
+		const auto CheckDisc = [&](const TCHAR* Name, int32 Order, float SeatH, float Bonus, FName Reward, float Kg) -> bool
 		{
-			FRHDiscoveryRow Row;
-			Row.DisplayName = Display; Row.Order = Order; Row.LabSeatHours = SeatH;
-			Row.HopeBonus = Bonus; Row.RewardResource = Reward; Row.RewardKg = Kg;
-			Row.Alert = FString::Printf(TEXT("DISCOVERY — %s"), Display); Row.SliceActive = true;
-			DefsSub->Debug_InjectDiscovery(FName(Name), Row);
+			const FRHDiscoveryRow* Row = DefsSub->GetDiscovery(FName(Name));
+			if (!Row || !Row->SliceActive || Row->Order != Order || Row->LabSeatHours != SeatH
+				|| Row->HopeBonus != Bonus || Row->RewardResource != Reward || Row->RewardKg != Kg)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("DISCOVERY: row %s missing/drifted - DT/CSV drift"), Name);
+				return false;
+			}
+			return true;
 		};
-		Inject(TEXT("CropStrain"), TEXT("Hardy Crop Strain"), 1, 100.f, 2.f, FName("Seeds"), 50.f);
-		Inject(TEXT("RegolithCeramics"), TEXT("Regolith Ceramics"), 2, 150.f, 2.f, FName("Struct"), 100.f);
-		Inject(TEXT("SubsurfaceBrine"), TEXT("Subsurface Brine Seep"), 3, 200.f, 3.f, FName("Water"), 150.f);
-		Inject(TEXT("MicrobialLife"), TEXT("Subsurface Microbial Life"), 4, 300.f, 8.f, NAME_None, 0.f);
+		if (!CheckDisc(TEXT("CropStrain"), 1, 100.f, 2.f, FName("Seeds"), 50.f)) { return 1; }
+		if (!CheckDisc(TEXT("RegolithCeramics"), 2, 150.f, 2.f, FName("Struct"), 100.f)) { return 1; }
+		if (!CheckDisc(TEXT("SubsurfaceBrine"), 3, 200.f, 3.f, FName("Water"), 150.f)) { return 1; }
+		if (!CheckDisc(TEXT("MicrobialLife"), 4, 300.f, 8.f, NAME_None, 0.f)) { return 1; }
 
 		// A flourishing 2-person colony: instant Hope 88.5 (base 50 + housing 15
 		// + Lab 1.5 + Dining 3 + jobs 6 + vault 5 + comforts 8), no emitters so
@@ -778,13 +780,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd);
 			RunSols(0.1); // clear the signal lag + execute
 		};
-		// Inject Zarya (DT_Rivals doesn't exist until its first editor import).
+		// Zarya rides the synced DT_Rivals; Greed below stays a synthetic inject.
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// The fresh colony has 400 Struct (Lander) + 6 SpareParts, but no fuel.
 		// 1) No hydrogen -> dispatch refused, convoy stays idle.
@@ -835,7 +838,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// pool negative. Let the storm convoy finish (sol 17 is a flare, which
 		// does NOT freeze it), then inject Greed (ImportLot SpareParts:4).
 		RunSols(4.5); // storm-test convoy gets home -> idle
-		FRHRivalRow Greed = Z; Greed.DisplayName = TEXT("Greedy Post");
+		FRHRivalRow Greed = *ZRow; Greed.DisplayName = TEXT("Greedy Post");
 		Greed.ImportLot = TEXT("SpareParts:4"); Greed.ExportLot = TEXT("Ice:10");
 		DefsSub->Debug_InjectRival(FName("Greed"), Greed);
 		// Drain SpareParts to exactly 3 (< wear 1 + lot 4 = 5), keep H2 high.
@@ -893,11 +896,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->GetEarthTension(), Sim->GetRequisitionMultiplier());
 
 		// Now Mars has a neighbor: the layer switches on.
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// 2) Tension DRIFTS (0.6/sol): after 10 sols ~6.0.
 		RunSols(10.0);
@@ -960,11 +964,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// Housed colony (2 crew) so SolidarityHope actually reads into the index.
 		FString R;
@@ -1058,11 +1063,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 		// Set the clock to deep night (sol-fraction 0.9) so covert detection is low.
 		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds);
 
@@ -1142,17 +1148,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd); RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
-		// A DORMANT settlement for the discovery test.
-		FRHRivalRow M;
-		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
-		M.DistanceKm = 200.f; M.ExportLot = TEXT("SpareParts:4"); M.ImportLot = TEXT("Food:60");
-		M.RelationStart = 30.f; M.SliceActive = false; // dormant until scouted
-		DefsSub->Debug_InjectRival(FName("Meridian"), M);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
+		// The DORMANT settlement for the discovery test rides the synced DT too.
+		{
+			const FRHRivalRow* MRow = DefsSub->GetRival(FName("Meridian"));
+			if (!MRow || MRow->SliceActive || MRow->DistanceKm != 200.f)
+			{ UE_LOG(LogRedHopeSim, Error, TEXT("Meridian row missing/drifted (must exist DORMANT) - DT/CSV drift")); return 1; }
+		}
 		Clock->Debug_SetSimSeconds(0.9 * URHSimClockSubsystem::SolLengthSimSeconds); // night
 
 		// 1) LAUNDER: build hidden tension via two covert ops (CXCX: op1 clean +8,
@@ -1233,11 +1240,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->EnqueueCommand(Cmd); RunSols(0.1);
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 
 		// 1) INFLUENCE accrues: a completed honest trade (+3) plus positive-
 		// HumanNature drift. Do a trade to bank some influence + push HumanNature +.
@@ -1324,11 +1332,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 		};
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		FRHRivalRow Z;
-		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
-		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
-		Z.RelationStart = 40.f; Z.SliceActive = true;
-		DefsSub->Debug_InjectRival(FName("Zarya"), Z);
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
 		const FRHRoomRow* LQ = DefsSub->GetRoom(FName("LivingQuarters"));
 		if (!LQ || !LQ->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("CRISIS: LivingQuarters not active")); return 1; }
 
@@ -1394,6 +1403,475 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			CrisisB, (int32)Sim->GetActiveCrisis(), Sim->GetEndingName(Sim->GetProjectedEnding()));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISES & ENDINGS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// v25 self-test: THE GOAL LADDER - quotas advance when the ship lands
+	// (deadlines relative to opening), research funding pays out on the next
+	// award, the weather-cycle fold, save v25 round-trip mid-ladder. `-ladder`.
+	if (FParse::Param(*Params, TEXT("ladder")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GOAL LADDER TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// Q2 rides the ladder once its row is active (the DT flip is the
+		// committed CSV's job; this knob bridges until the editor sync).
+		DefsSub->Debug_ActivateQuota(FName("Q2"));
+
+		// 1) Fresh colony opens on Q1 (smallest deadline among active rows).
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER open: active=%s phase=%d openedSol=%d (expect Q1, 0=Open, 0)"),
+			*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaOpenedSol());
+
+		// 2) Meet Q1 (Struct:300;Water:200;Oxygen:50) -> AwaitingManifest,
+		// on-time award 10000 (no rivals: requisition x1, no funding pending).
+		Sim->AddStock(FName("Struct"), 300.0);
+		Sim->AddStock(FName("Water"), 200.0);
+		Sim->AddStock(FName("Oxygen"), 50.0);
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER Q1 met: phase=%d award=%.0f (expect 1=AwaitingManifest, 10000)"),
+			(int32)Sim->GetQuotaPhase(), Sim->GetAwardMassKg());
+
+		// 3) Launch (empty manifest is a legal choice) -> ship lands ~3 sols
+		// -> Q1 Completed -> THE LADDER ADVANCES: Q2 opens at the landing sol.
+		FString Err;
+		Sim->LaunchShip(Err);
+		RunSols(3.3);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER advance: active=%s phase=%d openedSol=%d (expect Q2, 0=Open, 3)"),
+			*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaOpenedSol());
+
+		// 4) Research pays: bank 500 kg, meet Q2 (Struct:600;Oxygen:150;
+		// Hydrogen:40) inside its RELATIVE deadline -> award 12000 + 500.
+		Sim->Debug_AddResearchFunding(500.0);
+		Sim->AddStock(FName("Struct"), 600.0);
+		Sim->AddStock(FName("Oxygen"), 150.0);
+		Sim->AddStock(FName("Hydrogen"), 40.0);
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER Q2 met: award=%.0f pending=%.0f (expect 12500, 0)"),
+			Sim->GetAwardMassKg(), Sim->GetPendingResearchFundingKg());
+
+		// 5) Save v25 round-trip mid-ladder: active quota + phase + award survive.
+		const FName ActiveB = Sim->GetActiveQuotaName();
+		const double AwardB = Sim->GetAwardMassKg();
+		Sim->SaveColony(TEXT("laddertest"), Err);
+		Sim->LoadColony(TEXT("laddertest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER save/load v25: active %s->%s award %.0f->%.0f phase=%d (expect identical, 1)"),
+			*ActiveB.ToString(), *Sim->GetActiveQuotaName().ToString(), AwardB, Sim->GetAwardMassKg(), (int32)Sim->GetQuotaPhase());
+
+		// 6) The weather-cycle fold (pure function probes; knob off = passthrough).
+		const double FoldOff = Sim->FoldEventSol(33.0);
+		Sim->Debug_SetWeatherCycleSols(20.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("LADDER weather fold: off=%.1f in-window=%.1f folded=%.1f onset=%.1f (expect 33.0, 10.0, 13.0, 12.0)"),
+			FoldOff, Sim->FoldEventSol(10.0), Sim->FoldEventSol(33.0), Sim->FoldEventSol(52.0));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GOAL LADDER TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// v25 self-test: ENDING RESOLUTION - the declared path's epilogue after a
+	// sustained hold (wavering resets the clock), and the one-time Collapse
+	// declaration when a colony that had people empties. `-ending`.
+	if (FParse::Param(*Params, TEXT("ending")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// Pure-data: Zarya rides the synced DT_Rivals (2026-07-16) - assert the
+		// arithmetic-bearing columns so any DT/CSV drift fails loudly.
+		const FRHRivalRow* ZRow = DefsSub->GetRival(FName("Zarya"));
+		if (!ZRow || !ZRow->SliceActive || ZRow->DistanceKm != 120.f || ZRow->ExportLot != TEXT("Ice:150")
+			|| ZRow->ImportLot != TEXT("Struct:100") || ZRow->RelationStart != 40.f)
+		{ UE_LOG(LogRedHopeSim, Error, TEXT("Zarya row missing/drifted - DT/CSV drift")); return 1; }
+
+		// A housed colony (the endings need bEverHadCrew + a live Earth layer).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 4000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 4000.0);
+		RunSols(2.5);
+		Sim->Debug_AddColonists(2);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+
+		// 1) Martian + Evolved -> Independent Mars Federation declares.
+		Sim->Debug_SetEpilogueSustainSols(2.0);
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftIdentity(+10); }
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+		RunSols(0.2);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING declared: %d name=%s (expect 1, Independent Mars Federation)"),
+			(int32)Sim->IsEndingDeclared(), Sim->GetEndingName(Sim->GetDeclaredEnding()));
+
+		// 2) WAVER: 1 sol in, swing HumanNature Destructive - the projection
+		// leaves the declared path, the epilogue clock resets to zero.
+		RunSols(1.0);
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(-10); }
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING waver: sustain=%.2f epilogue=%d (expect 0.00, 0)"),
+			Sim->GetPathSustainSols(), (int32)Sim->IsEpilogueDeclared());
+
+		// 3) Re-earn the path: hold Federation 2 sols -> EPILOGUE fires once.
+		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+		RunSols(2.3);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING epilogue: %d sustain=%.2f (expect 1, >=2.0)"),
+			(int32)Sim->IsEpilogueDeclared(), Sim->GetPathSustainSols());
+
+		// 4) Save v25 round-trip: declared + epilogue survive.
+		FString Err;
+		Sim->SaveColony(TEXT("endingtest"), Err);
+		Sim->LoadColony(TEXT("endingtest"), Err);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING save/load v25: declared=%s epilogue=%d (expect Independent Mars Federation, 1)"),
+			Sim->GetEndingName(Sim->GetDeclaredEnding()), (int32)Sim->IsEpilogueDeclared());
+
+		// 5) COLLAPSE: strip the stores; the crew go unsupported, evacuate at
+		// the countdown, and the emptied colony declares Collapse ONCE -
+		// abstract, with the recovery path named (Gate-D placeholder wording).
+		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
+		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
+		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
+		RunSols(3.5); // evac countdown (2 sols unsupported) + margin
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING collapse: pop=%d declared=%d projected=%s (expect 0, 1, Collapse)"),
+			Sim->GetPopulation(), (int32)Sim->IsCollapseDeclared(),
+			Sim->GetEndingName(Sim->GetProjectedEnding()));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
+	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
+	// FUNDING, the Infirmary evac grace, and unlock persistence across a
+	// save/load. `-tiers`.
+	if (FParse::Param(*Params, TEXT("tiers")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST (v25) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				// 6 drinkers decay potability fast - feed enough fresh melt to
+				// hold it above the floor, or the water Hope penalty pins the
+				// smoothed mood just under the 85 discovery gate.
+				Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		// Pure-data: the tier ladder's stations ride the synced DT_Rooms
+		// (2026-07-16) - assert the arithmetic-bearing columns instead of
+		// injecting, so this suite fails loudly on DT/CSV drift.
+		const auto CheckRoom = [&](const TCHAR* Name, FName Function, int32 Tier, int32 Seats, float Yield, bool bActive) -> bool
+		{
+			const FRHRoomRow* Row = DefsSub->GetRoom(FName(Name));
+			if (!Row || Row->SliceActive != bActive || Row->Function != Function
+				|| Row->Tier != Tier || Row->SeatCount != Seats || Row->YieldMul != Yield)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("TIERS: room %s missing/drifted - DT/CSV drift"), Name);
+				return false;
+			}
+			return true;
+		};
+		if (!CheckRoom(TEXT("WorkbenchLarge"), FName("Workstation"), 2, 2, 1.35f, true)) { return 1; }
+		if (!CheckRoom(TEXT("ChemTableLarge"), FName("Lab"), 2, 1, 1.35f, true)) { return 1; }
+		if (!CheckRoom(TEXT("Workshop"), FName("Workstation"), 3, 3, 1.8f, false)) { return 1; } // DORMANT until unlocked
+		if (!CheckRoom(TEXT("Infirmary"), FName("Infirmary"), 1, 1, 1.0f, true)) { return 1; }
+		// The unlocking discovery stays a SYNTHETIC inject (test-only row, not
+		// in the CSV): first in the sequence (Order 0 outranks the authored
+		// rows), cheap enough to pop fast once the mood crosses 85.
+		FRHDiscoveryRow DUnlock; DUnlock.DisplayName = TEXT("Regolith Ceramics II");
+		DUnlock.Order = 0; DUnlock.LabSeatHours = 50.f; DUnlock.HopeBonus = 2.f;
+		DUnlock.FundingKg = 500.f; DUnlock.UnlockRoom = FName("Workshop");
+		DUnlock.Alert = TEXT("BREAKTHROUGH — ceramics strong enough for machine housings.");
+		DUnlock.SliceActive = true;
+		DefsSub->Debug_InjectDiscovery(FName("TestCeramics"), DUnlock);
+
+		// A flourishing colony (the -discovery recipe, plus the tier benches).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 10, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		RunSols(2.5);
+		const int32 Housed = Sim->Debug_AddColonists(6);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("Workstation"), R);     // T1: 1 seat, x1.0
+		Sim->DesignateRoom(-1, 2, FName("WorkbenchLarge"), R);  // T2: 2 seats, x1.35
+		Sim->DesignateRoom(-1, 3, FName("Lab"), R);             // T1: 1 seat, x1.0
+		Sim->DesignateRoom(-1, 4, FName("ChemTableLarge"), R);  // T2: 1 seat, x1.35
+		Sim->DesignateRoom(-1, 5, FName("Dining"), R);
+		// Six colonists drain a comforts crate quickly - stock several so the
+		// comforts fraction holds at 1.0 through the whole march.
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		RunSols(0.2);
+
+		// 1) Seat math: 5 job seats (1+2+1+1), yield sums weigh the tiers.
+		const double EvacBase = Sim->GetEffectiveEvacSols();
+		Sim->Debug_SetWorkstationFabBonus(0.1);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS seats: housed=%d filled=%d labSum=%.2f wsSum=%.2f fabMul=%.3f (expect 6, 5, 2.35, 3.70, 1.370)"),
+			Housed, Sim->GetColonyHope().FilledSeats, Sim->GetLabYieldSeatSum(),
+			Sim->GetWorkstationYieldSeatSum(), Sim->GetWorkstationFabMul());
+
+		// 2) The dormant Workshop refuses designation (locked by research).
+		FString RefuseMsg;
+		const bool bRefused = !Sim->DesignateRoom(-1, 6, FName("Workshop"), RefuseMsg);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS locked: workshopRefused=%d (expect 1: '%s')"),
+			(int32)bRefused, *RefuseMsg);
+
+		// 3) March to the breakthrough: the smoothed mood clears 85 once the
+		// water and comforts hold; 2.35 yield-seats x 48 seat-h/sol clears 50
+		// seat-hours fast. Funding banks; the Workshop unlocks and ACCEPTS.
+		RunSols(12.0);
+		FString AcceptMsg;
+		const bool bAccepted = Sim->DesignateRoom(-1, 6, FName("Workshop"), AcceptMsg);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS unlock: found=%d pending=%.0f workshopAccepted=%d smoothed=%.1f accruing=%d progress=%.2f next=%s (expect >=1, 500, 1)"),
+			Sim->GetDiscoveryLog().Num(), Sim->GetPendingResearchFundingKg(), (int32)bAccepted,
+			Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress(),
+			*Sim->GetNextDiscovery().ToString());
+
+		// 4) Infirmary: designating one stretches the evac countdown by the
+		// configured grace (prevention framing - more time to fix the fault).
+		Sim->DesignateRoom(-1, 7, FName("Infirmary"), R);
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS infirmary: evac %.1f -> %.1f sols (expect 2.0 -> 3.0)"),
+			EvacBase, Sim->GetEffectiveEvacSols());
+
+		// 5) Save v25 round-trip: the unlock re-applies from the discovery log
+		// (row flips are in-memory), seat sums re-derive, the grace holds.
+		FString Err;
+		Sim->SaveColony(TEXT("tierstest"), Err);
+		Sim->LoadColony(TEXT("tierstest"), Err);
+		const FRHRoomRow* WShop = DefsSub->GetRoom(FName("Workshop"));
+		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS save/load v25: workshopActive=%d labSum=%.2f evac=%.1f (expect 1, 2.35, 3.0)"),
+			(int32)(WShop && WShop->SliceActive), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols());
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST END ==="));
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return 0;
+	}
+
+	// Greenhouse-agriculture self-test (2026-07-10 spec, Gates A/B/D): crops
+	// with real grow time replace the flat garden when their rows go live -
+	// growth stages, per-crop water/yield, soil depletion + fertilizer refill,
+	// per-floor climate (regulator-gated), duct CO2/O2 exchange, save v26.
+	// `-agri`.
+	if (FParse::Param(*Params, TEXT("agri")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== AGRICULTURE TEST (greenhouse spec Gates A/B/D) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(100.0 * StepSols);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// 1) Pure-data: the seven authored crops ride the synced DT_Crops,
+		// ALL DORMANT (activation is the director's per-gate flip). Assert the
+		// arithmetic-bearing columns of the three this test marches on.
+		{
+			int32 Rows = 0, Active = 0;
+			DefsSub->ForEachCropRow([&](FName, const FRHCropRow& Row){ ++Rows; Active += Row.SliceActive ? 1 : 0; });
+			if (Rows != 7 || Active != 0)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: expected 7 dormant crop rows, found %d rows / %d active - DT/CSV drift"), Rows, Active);
+				return 1;
+			}
+			const auto CheckCrop = [&](const TCHAR* Name, float Grow, float Yield, float Water, FName Band) -> bool
+			{
+				const FRHCropRow* Row = DefsSub->GetCrop(FName(Name));
+				if (!Row || Row->GrowSols != Grow || Row->YieldKgPerSol != Yield
+					|| Row->WaterKgPerSol != Water || Row->ClimateBand != Band)
+				{
+					UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: crop %s missing/drifted - DT/CSV drift"), Name);
+					return false;
+				}
+				return true;
+			};
+			if (!CheckCrop(TEXT("Carrot"), 2.f, 3.f, 3.f, FName("Temperate"))) { return 1; }
+			if (!CheckCrop(TEXT("Corn"), 4.f, 2.f, 4.f, FName("Temperate"))) { return 1; }
+			if (!CheckCrop(TEXT("Beans"), 3.f, 2.f, 3.f, FName("Humid"))) { return 1; }
+		}
+
+		// 2) Flip the whole catalogue live (the director's gate flip).
+		{
+			TArray<FName> Names;
+			DefsSub->ForEachCropRow([&Names](FName Name, const FRHCropRow&){ Names.Add(Name); });
+			for (const FName& Name : Names) { DefsSub->ActivateCropRow(Name); }
+			if (!Sim->AreCropsLive()) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: crops did not activate")); return 1; }
+		}
+
+		// 3) A certified 6-cell vault with power and stores for exactly two
+		// beds (soil 500 = 2 x 250; no replant stock after a bed reverts).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 2000.0);
+		Sim->AddStock(FName("Soil"), 500.0);
+		Sim->AddStock(FName("Seeds"), 100.0);
+		RunSols(2.5); // floor certifies
+
+		// 4) Two garden cells plant the rotation deterministically: the
+		// Temperate-matched actives sorted by name are Carrot, Corn, Potato -
+		// cell 0 takes Carrot (GrowSols 2), cell 1 takes Corn (GrowSols 4).
+		Sim->DesignateRoom(-1, 0, FName("Garden"), R);
+		Sim->DesignateRoom(-1, 1, FName("Garden"), R);
+		RunSols(0.1); // the plant step
+		const FName Crop0 = Sim->GetCellCrop(-1, 0), Crop1 = Sim->GetCellCrop(-1, 1);
+		if (Crop0 != FName("Carrot") || Crop1 != FName("Corn"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: rotation planted %s/%s (expected Carrot/Corn)"), *Crop0.ToString(), *Crop1.ToString());
+			return 1;
+		}
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI planted: cell0=%s cell1=%s stages=%d/%d (expect Carrot, Corn, 0, 0)"),
+			*Crop0.ToString(), *Crop1.ToString(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 5) Growth is real time: one sol in, nothing has yielded. (Instant
+		// stage reads run one 0.05-sol era step behind the yield ledger -
+		// the bed plants at the END of the first step - so Carrot reads
+		// sprout here and flips young next step; the cums are exact.)
+		RunSols(0.9);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI immature: cum=%.2f kg stages=%d/%d (expect 0.00, 0, 0 - Carrot one step shy of young)"),
+			Sim->GetGardenFoodCumKg(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 6) Carrot matures at age 2.0 and yields 3 kg/sol for the last half
+		// of this march; Corn is still growing. Zero pop = tempo and skill
+		// exactly 1.0, so the arithmetic is exact.
+		RunSols(1.5); // age 2.5
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI first yield: cum=%.2f kg (expect 1.50 = 0.5 sol x 3)"), Sim->GetGardenFoodCumKg());
+
+		// 7) By age 4.0 the Carrot has yielded 2.0 total mature sols; Corn
+		// arrives at maturity exactly now (nothing banked yet).
+		RunSols(1.5); // age 4.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI second: cum=%.2f kg stages=%d/%d (expect 6.00, 2, 1 - Corn one step shy of mature read)"),
+			Sim->GetGardenFoodCumKg(), Sim->GetCellCropStage(-1, 0), Sim->GetCellCropStage(-1, 1));
+
+		// 8) Both mature: 3 + 2 = 5 kg/sol.
+		RunSols(1.0); // age 5.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI both mature: cum=%.2f kg (expect 11.00)"), Sim->GetGardenFoodCumKg());
+
+		// 9) Climate (Gate B): a Humid setting is INERT until a regulator is
+		// online; with one placed, both Temperate crops fall to x0.6.
+		FString ClimErr;
+		if (!Sim->SetFloorClimate(-1, FName("Humid"), ClimErr)) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: %s"), *ClimErr); return 1; }
+		if (Sim->GetFloorClimateEffective(-1) != FName("Temperate"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: climate took effect without a regulator"));
+			return 1;
+		}
+		Sim->Debug_PlaceInstant(FName("HumidityRegulator"), FVector(1500.f, 1000.f, 0.f), -1);
+		if (Sim->GetFloorClimateEffective(-1) != FName("Humid"))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: regulator online but climate still inert"));
+			return 1;
+		}
+		RunSols(1.0); // age 6.0
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI climate: cum=%.2f kg (expect 14.00 = +5 x 0.6)"), Sim->GetGardenFoodCumKg());
+
+		// 10) The crew feeds the loop (Gates B/D): compost and CO2 accrue per
+		// colonist-sol. (Yield goes tempo/skill-coloured from here - the exact
+		// asserts stay on the crew-independent pools.)
+		Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 3, FName("Dining"), R);
+		const int32 Housed = Sim->Debug_AddColonists(2);
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI crew pools: housed=%d compost=%.2f kg co2=%.2f kg (expect 2, 2.00, 2.00)"),
+			Housed, Sim->GetStock(FName("Compost")), Sim->GetColonyCO2Kg());
+
+		// 11) Ducts (Gate D): the garden floor breathes with the colony. Two
+		// producing cells draw 0.5 kg CO2/sol each; the crew adds 2/sol; the
+		// pool holds, so the bonus and the O2 emission run the whole sol.
+		FString DuctErr;
+		if (!Sim->DesignateDuct(-1, DuctErr)) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: %s"), *DuctErr); return 1; }
+		const double O2Before = Sim->GetStock(FName("Oxygen"));
+		RunSols(1.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI duct: co2=%.2f kg o2Delta=%+.2f kg cum=%.2f (expect 3.00 = 2+2-1; o2 includes crew draw + 0.40 emitted)"),
+			Sim->GetColonyCO2Kg(), Sim->GetStock(FName("Oxygen")) - O2Before, Sim->GetGardenFoodCumKg());
+
+		// 12) Dig-spoil chemicals (Gate B): fresh excavation with the crop
+		// layer live banks a fertilizer-chain fraction.
+		Sim->ExtendShaft(2, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-2, 4, R);
+		const double Chems = Sim->GetStock(FName("SpoilChemicals"));
+		if (Chems <= 0.0) { UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: dig produced no SpoilChemicals")); return 1; }
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI spoil chems: %.2f kg banked (expect > 0: excavation x fraction)"), Chems);
+
+		// 13) Soil spends and fertilizer refills (Gate B): at 250 kg/sol both
+		// beds hit zero this sol; 125 kg Fertilizer restores exactly ONE in
+		// place, the other reverts (and cannot replant - soil stock is spent).
+		Sim->AddStock(FName("Soil"), -Sim->GetStock(FName("Soil")));
+		Sim->AddStock(FName("Fertilizer"), 125.0);
+		Sim->Debug_SetCropSoilDepleteKgPerSol(250.0);
+		RunSols(1.0);
+		Sim->Debug_SetCropSoilDepleteKgPerSol(25.0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI soil economy: planted=%d fert=%.2f kg (expect 1, 0.00 - one bed refilled, one reverted)"),
+			Sim->GetPlantedCellCount(), Sim->GetStock(FName("Fertilizer")));
+		if (Sim->GetPlantedCellCount() != 1)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: expected exactly one surviving bed"));
+			return 1;
+		}
+
+		// 14) Save v26 round-trip: crop cells, climate, duct, CO2 pool.
+		FString Err;
+		const FName CropBefore = Sim->GetCellCrop(-1, 0).IsNone() ? Sim->GetCellCrop(-1, 1) : Sim->GetCellCrop(-1, 0);
+		const double CO2Before = Sim->GetColonyCO2Kg();
+		Sim->SaveColony(TEXT("agritest"), Err);
+		Sim->LoadColony(TEXT("agritest"), Err);
+		const FName CropAfter = Sim->GetCellCrop(-1, 0).IsNone() ? Sim->GetCellCrop(-1, 1) : Sim->GetCellCrop(-1, 0);
+		UE_LOG(LogRedHopeSim, Display, TEXT("AGRI save/load v26: crop %s->%s co2 %.2f->%.2f climate=%s ducted=%d (expect identical, Humid, 1)"),
+			*CropBefore.ToString(), *CropAfter.ToString(), CO2Before, Sim->GetColonyCO2Kg(),
+			*Sim->GetFloorClimateSetting(-1).ToString(), (int32)Sim->IsFloorDucted(-1));
+		if (CropBefore != CropAfter || !Sim->IsFloorDucted(-1))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("AGRI: save/load round-trip drifted"));
+			return 1;
+		}
+		RunSols(0.5); // the loaded colony marches on without incident
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== AGRICULTURE TEST END ==="));
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return 0;
