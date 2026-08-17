@@ -53,11 +53,28 @@ had simply never been put on a mesh slot. Second contributor: every
 metallic-roughness map was `TC_DEFAULT`, putting DXT block artifacts straight
 into roughness, which reads as mottled specular. Both fixed.
 
-**Still open, and it is a separate cause:** some residual white speckle remains
-on a few suits, and that lives in the ALBEDO textures — Hunyuan paint-stage
-artifacts, not a shading bug. It would need a re-paint, which is a GPU job.
-So the shape question you were being asked to judge is now actually answerable;
-the paint has one more pass owed on some crew.
+**RETRACTED 2026-08-17: the "residual albedo splotch" was not demonstrated.**
+I claimed the leftover speckle was Hunyuan paint artifacts needing a GPU
+re-paint. I could not substantiate it and the metric I built to prove it was
+wrong: it scored "desaturated near-white area", which ranked med_haddad worst
+at 20.8% — because he is the medic and that is his WHITE COAT. It measured how
+much white clothing a character wears, not defects. The atlases are coherent,
+and the import settings are correct (1024 native, `max_texture_size=0`,
+`lod_bias=0`, TC_DEFAULT, TEXTUREGROUP_WORLD — nothing is being downscaled).
+
+**Judge from `qa-crew-zoom-ladder.jpg`, not from magnified crops.** Every crew
+frame before it was a 3–5× blow-up of a figure ~60 px tall, which is the wrong
+instrument. The ladder shows the crew at the four distances the strategy camera
+actually reaches:
+
+| zoomT | distance | crew read as |
+|---|---|---|
+| 0.45 | 216 m | the default opening camera — a few pixels |
+| 0.16 | 54 m | small figures, silhouette only |
+| 0.07 | 35 m | legible people |
+| 0.03 | **29 m — the closest the camera goes** | clearly legible, no visible speckle |
+
+There is no zoom in this game at which the speckle I was chasing is visible.
 
 What I see, for you to agree or overrule: suits now read opaque with legible
 colour and trim — a white/orange EVA suit and a blue-trimmed lab coat are
