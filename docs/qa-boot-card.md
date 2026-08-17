@@ -34,16 +34,34 @@ RH.Cam 37 0 0.30 0 0      the showcase grid   (needs RH.Floor 0 first)
 
 ---
 
-## 1. Crew — THE headline check → `qa-crew.jpg`
+## 1. Crew — THE headline check → `qa-crew-subsurface-fix.jpg`
 
-The walkers are textured and have been since the skeletal-usage-flag fix. The
-question was never paint; it is **shape**. The frame shows four crew at close
-range in the vault.
+**Re-shot 2026-08-17 after a real defect was found. Judge the AFTER frame; the
+earlier `qa-crew.jpg` shows the broken state.**
 
-What I see, for you to agree or overrule: suits read as distinct, silhouettes
-are legible as people, and the figure at the console reads hunched and hard to
-parse. One walker is heavily motion-blurred mid-stride — that is UE's motion
-blur on a moving skeletal mesh, not a mesh defect, but say if it reads as one.
+Director: *"a lot of the character models still look splotchy, sometimes you can
+see through parts of their body."* Correct on both counts, and I had wrongly
+written off the transparency in the first card as motion blur. It was not.
+
+All 21 walkers (20 crew + the robot) had slot 0 on Interchange's auto-generated
+`Materials/Material`, based on `/InterchangeAssets/gltf/Substrate/M_GLTF`, whose
+shading model is **MSM_SUBSURFACE_PROFILE** — a skin/SSS shader. Subsurface
+scattering bleeds light *through* thin geometry and mottles the surface: one
+flag, both symptoms. `M_RH_Character` (opaque, default-lit, skeletal usage on)
+and all 21 `MI_RH_Walker_*` instances already existed, correctly authored, and
+had simply never been put on a mesh slot. Second contributor: every
+metallic-roughness map was `TC_DEFAULT`, putting DXT block artifacts straight
+into roughness, which reads as mottled specular. Both fixed.
+
+**Still open, and it is a separate cause:** some residual white speckle remains
+on a few suits, and that lives in the ALBEDO textures — Hunyuan paint-stage
+artifacts, not a shading bug. It would need a re-paint, which is a GPU job.
+So the shape question you were being asked to judge is now actually answerable;
+the paint has one more pass owed on some crew.
+
+What I see, for you to agree or overrule: suits now read opaque with legible
+colour and trim — a white/orange EVA suit and a blue-trimmed lab coat are
+clearly distinct. Silhouettes are legible as people.
 
 **This gates P2 Characters (16–25 h, the long pole in the plan).** Pass and it
 shrinks or disappears; fail and it is a *mesh* verdict — different generator or
