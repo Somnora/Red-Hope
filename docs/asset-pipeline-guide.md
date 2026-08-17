@@ -340,3 +340,18 @@ masters, lerping to a flat (0,0,1) normal and the scalar roughness, so any
 instance authored before this is bit-identical until its MI opts in. Verified:
 the 13 prop EmissiveAmount/Mask overrides were byte-identical before and after
 the master graph rebuild.
+
+## Persistent filesystems are a cache, not an archive (2026-08-17)
+
+Every script the GPU lane runs now lives in git. `scripts/gpu/lane/` is 71 files
+of tooling that existed ONLY on the Lambda filesystem until it was rescued — see
+its README for why, and for what each piece does.
+
+The rule this closes: **anything that runs on a rented box and is not
+reproducible from this repo is one `terminate` away from gone.** It had already
+cost two incidents in one week — the mask cutter died with a scratchpad and had
+to be reconstructed from a commit message, and the rig loop
+(`rig_colonist.py`, the prerequisite for re-rigging any new crew mesh onto the
+existing 21 clips) was reachable only by booting an instance. Cherry-picking the
+important files is the judgement that failed both times, so the whole directory
+came across at 380 KB.

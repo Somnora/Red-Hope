@@ -27,9 +27,15 @@ re-rig — queued as the next gate after the hand-play fix pass verifies.
   clips under `/Game/RedHope/Art/CrewAnim/`; `WalkerMeshPath()` wires them by
   crew Id. The redo swaps ASSETS in place — no code change if names hold.
 - The rig loop from the animation phase (products in NFS `io/rigged/`, 21
-  GLBs) — locate its script under `red_hope/scripts/` on Somnora-East when
-  the box is up; it consumed cleaned character GLBs and emitted rigged+clipped
-  walkers.
+  GLBs) is **`scripts/gpu/lane/rig_colonist.py`, IN THIS REPO** since
+  2026-08-17. It previously existed only on the NFS and this spec told you to
+  "locate it on Somnora-East" — a filesystem that no longer exists under that
+  name. Usage: `blender --background --python scripts/gpu/lane/rig_colonist.py
+  -- <in.glb> <out.glb>`. It fits a 13-bone armature from bounds proportions,
+  bakes Walk (24f) + Idle (48f), and exports a skinned GLB that Interchange
+  imports as a SkeletalMesh with AnimSequences. Facing is detected as the
+  mesh's smaller horizontal extent, and `rh.WalkerYawOffsetDeg` corrects the
+  rest live, so a facing mistake is a console dial and not a re-export.
 - The full generation stack on the A100: style-lock (SDXL + IP-Adapter),
   sprite-to-3d (Hunyuan3D shape), the PAINT stage (queue worker ran it for
   props: `queue/<batch>/out/*_textured.glb`), mesh-cleanup. All proven.
