@@ -77,6 +77,36 @@ for sgn, s in ((1, "L"), (-1, "R")):
     add_bone(f"forearm.{s}",  bpos(0.62, sgn * shw * 1.35), bpos(0.46, sgn * shw * 1.5), f"upperarm.{s}")
 bpy.ops.object.mode_set(mode="OBJECT")
 
+# --- WELD BEFORE BIND (2026-08-17: this is the fix, not an option) ---
+# glTF cannot store per-loop UVs or split normals, so it duplicates a vertex at
+# every UV seam and shading split. The Hunyuan crew arrive as 53,885 vertices
+# over 18,000 triangles - 2.99 per triangle, essentially every vertex split.
+#
+# Binding in that state DESTROYS THE SKIN, measured not guessed: with the mesh
+# unwelded the heat solver fails on all of it and the backstop below hard-assigns
+# 53,885 of 53,885 vertices to a single nearest bone each - zero blending
+# anywhere, every joint a rigid boundary. Welding first drops it to 9,002 real
+# vertices, the heat solver succeeds completely, and the backstop assigns ZERO.
+# In motion the difference is a slab of hip geometry tearing off the body and
+# hanging in the air (docs/qa/2026-08-17/qa-weld-motion-ab.jpg) - the director's
+# "sometimes you can see through parts of their body", reproduced deterministically.
+#
+# The weld must happen HERE, after import and before the bind. Doing it in an
+# intermediate GLB does not work: the exporter re-splits the vertices on the way
+# out, so the file arrives unwelded again. What matters is that each real vertex
+# is ONE vertex while weights are computed; the exporter may then duplicate it
+# freely, because the copies carry identical weights and cannot travel apart.
+# Blender keeps UVs and custom normals per loop, so this costs no fidelity.
+_before_weld = len(body.data.vertices)
+bpy.context.view_layer.objects.active = body
+body.select_set(True)
+bpy.ops.object.mode_set(mode="EDIT")
+bpy.ops.mesh.select_all(action="SELECT")
+bpy.ops.mesh.remove_doubles(threshold=0.00005)
+bpy.ops.object.mode_set(mode="OBJECT")
+body.select_set(False)
+print("[rig] welded before bind: %d -> %d verts" % (_before_weld, len(body.data.vertices)), flush=True)
+
 # --- bind: automatic weights, then GUARANTEE full coverage ---
 # Hunyuan meshes carry disconnected shells (armor plates) that defeat the heat
 # solver ("Bone Heat Weighting failed"), leaving verts weightless - the glTF

@@ -57,14 +57,37 @@ vertices and shares none. TRELLIS.2 comes out at 0.86–0.93, properly welded, w
    report), and `M_RH_Character` had no normal input and no MR input at all, so
    every walker's roughness map sat inert. **The verdict predates both fixes and
    should be re-taken before any rebuild is authorised.**
-3. **The unwelded mesh is a live suspect for the animation-time symptom.** 53,860
-   split vertices going through `rig_colonist.py`'s automatic weights is exactly
-   the setup where adjacent triangles receive different weights and seams pull
-   apart as the mesh deforms — which would read as gaps opening in a body while
-   it walks, and would not show in a static render. NOT yet demonstrated; the
-   test is to weld one mesh, re-rig it, and compare the two in motion. If it
-   holds, the fix is a weld + re-rig of the existing meshes — hours, not the
-   16–25 h rebuild, and it keeps the gear detail.
+3. **The unwelded mesh was the animation-time defect. CONFIRMED 2026-08-17.**
+   The suspect held, and the mechanism is worse than "some vertices diverge".
+
+   With the mesh unwelded, `rig_colonist.py`'s heat solver fails on ALL of it and
+   the nearest-bone backstop hard-assigns **53,885 of 53,885 vertices** — 100% —
+   each pinned to one bone with zero blending anywhere. Every joint is a rigid
+   boundary. Welding first (after import, BEFORE the bind) drops the mesh to
+   9,002 real vertices, the heat solver succeeds completely, and the backstop
+   assigns **0**.
+
+   In motion the difference is not subtle: at Walk frame 1 a slab of hip
+   geometry tears off the body and hangs in the air
+   (`qa/2026-08-17/qa-weld-hip-tear.jpg`; four-frame comparison in
+   `qa-weld-motion-ab.jpg`). That is the director's "sometimes you can see
+   through parts of their body", reproduced deterministically and then removed.
+   Silhouette differs by 1.6% of body pixels at the worst frame and 0.3% at the
+   best — a defect that only appears at certain phases of the cycle, which is
+   exactly why it read as intermittent.
+
+   **The weld must happen inside the rigging script.** Doing it in an
+   intermediate GLB does nothing: glTF cannot store per-loop UVs, so the
+   exporter re-splits every vertex on the way out and the file arrives unwelded
+   again (measured: a welded 9,002-vertex GLB came back as 53,751 at bind time).
+   What matters is that each real vertex is ONE vertex *while weights are
+   computed*; the exporter may duplicate freely afterwards, because the copies
+   then carry identical weights and cannot travel apart.
+
+   Fixed for 12 of 20 crew, in place. The remaining 8 have no local source mesh
+   (the plan's "missing-8 faces"); they can be recovered by exporting the
+   existing skeletal mesh out of UE and re-rigging that, or they get fixed
+   whenever those faces are regenerated.
 
 ## Outputs
 
