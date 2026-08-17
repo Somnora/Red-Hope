@@ -1,15 +1,42 @@
-# QA Boot Card — regenerated 2026-08-16 against `bccf0f0`
+# QA Boot Card — updated 2026-08-17 against `cb558e0`
 
-The previous card was written for `08080ce` and is **40 commits stale**. Since
-it was written the regolith tiling was fixed at the lookup, all 9 crops were
-remade, the TRELLIS.2 lane was stood up, 29 models were texture-audited, the
-art pipeline was licence-audited, nvdiffrast was removed, and the Tiers
-furniture set completed. This card describes what is actually in the build now.
+Regenerated 2026-08-16 against `bccf0f0` (the card before that was 40 commits
+stale). Nine commits have landed since, so the deltas are recorded in §0 rather
+than letting the card drift again.
 
-**No compile needed.** `libUnrealEditor-RedHope.dylib` (Aug 14 18:16) is newer
-than the last `Source/` commit (Aug 14 18:03); everything since has been
-content-side. Battery 25/25 green at this commit, pins identical
+**A COMPILE IS NOW PENDING.** `cb558e0` is the first C++ change since Aug 14, so
+`libUnrealEditor-RedHope.dylib` (Aug 14 18:16) is now OLDER than `Source/`.
+Everything else this session is content-side and live without a rebuild; that one
+string literal is not. Battery 25/25 green, pins identical
 (`gen 50 W load 20 W`, `Regolith_A: 40645 kg`).
+
+## 0. What changed since the card was regenerated
+
+Read this first — several items below were rewritten by it.
+
+- **The crew were on a skin shader.** All 21 walkers rendered through
+  `M_GLTF`, whose shading model is `MSM_SUBSURFACE_PROFILE`. Subsurface
+  scattering bleeds light *through* thin geometry and mottles the surface: one
+  flag, both of the director's symptoms ("splotchy", "see through parts of their
+  body"). Now on `M_RH_Character`. §1 rewritten; judge the zoom ladder.
+- **That was a class, not an incident.** A sweep of all 939 art assets found 97
+  data maps on colour compression and 78 meshes on the skin shader. Every live
+  one is fixed; the elevators were the biggest visible win. One deliberate
+  exception remains (`forge`, vertex-coloured).
+- **The white platforms are real and mostly gone.** `rh_cut_plate.py` had
+  diagnosed them in July and been applied to furniture only. Cut and reimported
+  on `conduit`, `battery`, `ice`, `crop_vine_3`, `lander2`, `extractor2`,
+  `stockpile`, `crop_root_2`, `crop_vine_2`. The most frequently drawn plate was
+  a *caller* bug, not an asset bug — see the compile note above.
+- **215 orphan assets deleted.** Art tree 939 → 736. Garden, Struct and Furnish
+  are gone entirely.
+- **12 room props re-baked** through TRELLIS.2 (`conduit` rejected on
+  silhouette) → `qa-props-refresh-sheet.jpg`, `qa-props-refresh-ingame.jpg`.
+- **The game is no longer called "Top Down BP Game Template"**, and the licence
+  notices now ship beside the executable.
+- **In flight at the time of writing:** 10 live buildings and the 8 remaining
+  Hunyuan crops, both re-baking through TRELLIS.2. Sheets will follow; nothing
+  is imported until it passes a low-angle frame.
 
 **Every item below has a frame already shot**, in `docs/qa/2026-08-16/`. Boot
 it yourself if you want to poke the knobs, but you can answer all six verdicts
