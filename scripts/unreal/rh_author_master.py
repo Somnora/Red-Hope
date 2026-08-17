@@ -14,8 +14,9 @@ NAME, so they survive a graph rebuild as long as the names below do not change.
 
 Graph:
   BaseColor = lerp(BaseTex, AccentColor, AccentAmount)
-  Metallic  = Metallic
-  Roughness = Rough
+  Metallic  = lerp(Metallic, MRTex.b, UseMRTex)
+  Roughness = lerp(Rough,    MRTex.g, UseMRTex)
+  Normal    = lerp(float3(0,0,1), NormTex, UseNormTex)
   Emissive  = EmissiveColor * EmissiveAmount * PoweredState * Pulse * EmissiveMask(uv)
               * GlowScale (MPC_Atmosphere, driven by rh.Glow)
               + BaseColor * EmissiveFloor
@@ -137,6 +138,31 @@ def main():
     link(mr_tex, "B", metal_mix, "B")
     link(use_mr, "", metal_mix, "Alpha")
 
+    # Normal. Until 2026-08-17 this master had NO normal input at all
+    # (dumped: "Normal <- <none>"), so every prop and building shaded off
+    # nothing but its decimated vertex normals - which on a large flat panel
+    # reads as soft irregular light/dark patching. That is the director's
+    # "splotchy", and no amount of re-baking the ALBEDO could ever fix it.
+    # Same opt-in shape as the MR path: UseNormTex defaults to 0, which lerps
+    # to a flat (0,0,1) tangent normal, so every instance authored before this
+    # is bit-identical until its MI opts in.
+    norm_tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -900, 1650,
+                    parameter_name="NormTex",
+                    sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+    norm_default = unreal.load_asset("/Engine/EngineMaterials/DefaultNormal")
+    if norm_default:
+        norm_tex.set_editor_property("texture", norm_default)
+    else:
+        rec("  ! /Engine/EngineMaterials/DefaultNormal missing - NormTex has no default")
+    use_norm = node(mat, unreal.MaterialExpressionScalarParameter, -900, 1560,
+                    parameter_name="UseNormTex", default_value=0.0)
+    flat_norm = node(mat, unreal.MaterialExpressionConstant3Vector, -900, 1760,
+                     constant=unreal.LinearColor(0.0, 0.0, 1.0, 1.0))
+    norm_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -560, 1650)
+    link(flat_norm, "", norm_mix, "A")
+    link(norm_tex, "", norm_mix, "B")
+    link(use_norm, "", norm_mix, "Alpha")
+
     # BaseColor
     albedo = node(mat, unreal.MaterialExpressionLinearInterpolate, -520, -200)
     link(base, "", albedo, "A")
@@ -203,6 +229,7 @@ def main():
     MEL.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
     MEL.connect_material_property(metal_mix, "", unreal.MaterialProperty.MP_METALLIC)
     MEL.connect_material_property(rough_mix, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    MEL.connect_material_property(norm_mix, "", unreal.MaterialProperty.MP_NORMAL)
     MEL.connect_material_property(emissive, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     try:

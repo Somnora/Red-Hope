@@ -30,6 +30,14 @@ DEFAULT_TEX = "/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"
 log = []
 
 
+def link(a, out_name, b, in_name):
+    ok = MEL.connect_material_expressions(a, out_name, b, in_name)
+    if not ok:
+        log.append("  ! connect %s.%s -> %s.%s FAILED"
+                   % (type(a).__name__, out_name, type(b).__name__, in_name))
+    return ok
+
+
 def node(mat, cls, x, y, **props):
     e = MEL.create_material_expression(mat, cls, x, y)
     for k, v in props.items():
@@ -66,6 +74,47 @@ def author():
     floor = node(mat, unreal.MaterialExpressionScalarParameter, -800, 450,
                  parameter_name="EmissiveFloor", default_value=0.08)
 
+    # Per-pixel metal/roughness and normal. Dumped 2026-08-17: this master had
+    # only ONE texture parameter (BaseTex) and "Normal <- <none>", which means
+    # every walker's imported *_metallic-*_roughness map was INERT - present on
+    # disk, bound by nothing - and the crew shaded off a flat scalar roughness
+    # with no surface normal. That is the shading half of the director's
+    # "human models seem incomplete or blotchy"; the subsurface-shader fix
+    # earlier this session was the other half. glTF packing: G=rough, B=metal.
+    # Both paths are opt-in (UseMRTex / UseNormTex default 0) so the 21
+    # existing MI_RH_Walker_* instances are bit-identical until wired.
+    mr_tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -800, 620,
+                  parameter_name="MRTex",
+                  sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    mr_default = unreal.load_asset("/Game/RedHope/Art/Masks/T_RH_MaskWhite")
+    if mr_default:
+        mr_tex.set_editor_property("texture", mr_default)
+    use_mr = node(mat, unreal.MaterialExpressionScalarParameter, -800, 530,
+                  parameter_name="UseMRTex", default_value=0.0)
+    rough_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -450, 250)
+    link(rough, "", rough_mix, "A")
+    link(mr_tex, "G", rough_mix, "B")
+    link(use_mr, "", rough_mix, "Alpha")
+    metal_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -450, 350)
+    link(metal, "", metal_mix, "A")
+    link(mr_tex, "B", metal_mix, "B")
+    link(use_mr, "", metal_mix, "Alpha")
+
+    norm_tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -800, 800,
+                    parameter_name="NormTex",
+                    sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL)
+    norm_default = unreal.load_asset("/Engine/EngineMaterials/DefaultNormal")
+    if norm_default:
+        norm_tex.set_editor_property("texture", norm_default)
+    use_norm = node(mat, unreal.MaterialExpressionScalarParameter, -800, 710,
+                    parameter_name="UseNormTex", default_value=0.0)
+    flat_norm = node(mat, unreal.MaterialExpressionConstant3Vector, -800, 900,
+                     constant=unreal.LinearColor(0.0, 0.0, 1.0, 1.0))
+    norm_mix = node(mat, unreal.MaterialExpressionLinearInterpolate, -450, 800)
+    link(flat_norm, "", norm_mix, "A")
+    link(norm_tex, "", norm_mix, "B")
+    link(use_norm, "", norm_mix, "Alpha")
+
     tinted = node(mat, unreal.MaterialExpressionMultiply, -450, -150)
     MEL.connect_material_expressions(base, "", tinted, "A")
     MEL.connect_material_expressions(tint, "", tinted, "B")
@@ -74,8 +123,9 @@ def author():
     MEL.connect_material_expressions(floor, "", em, "B")
 
     MEL.connect_material_property(tinted, "", unreal.MaterialProperty.MP_BASE_COLOR)
-    MEL.connect_material_property(rough, "", unreal.MaterialProperty.MP_ROUGHNESS)
-    MEL.connect_material_property(metal, "", unreal.MaterialProperty.MP_METALLIC)
+    MEL.connect_material_property(rough_mix, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    MEL.connect_material_property(metal_mix, "", unreal.MaterialProperty.MP_METALLIC)
+    MEL.connect_material_property(norm_mix, "", unreal.MaterialProperty.MP_NORMAL)
     MEL.connect_material_property(em, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     # the whole point:

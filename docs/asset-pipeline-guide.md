@@ -283,3 +283,39 @@ scp -i $RH3D_SSH_KEY $RH3D_USER@$RH3D_HOST:$RH3D_NS/io/outbox/thing_game.glb ~/D
 
 **Never** put the SSH key or the server API token into a committed file — they
 live in `~/.ssh/` and on NFS respectively, and the skills read them at runtime.
+
+## Normal maps: the gap, the stopgap, and the real fix (2026-08-17)
+
+**The gap.** Neither master material had a normal input until 2026-08-17. Both
+`M_RH_Master` and `M_RH_Character` dumped as `Normal <- <none>`, and only 6
+normal maps existed in the whole art tree - all hand-authored surfaces. Of the
+~700 GENERATED models: zero. TRELLIS.2 and Hunyuan both emit baseColor +
+metallic + roughness and no normal, so every prop, building and crew member
+shaded off nothing but its decimated vertex normals. On a large flat panel that
+reads as soft irregular light/dark patching, which is the "splotchy" the
+director reported three times across three sessions. Re-baking the ALBEDO could
+never fix it, because the albedo was never the defect. `M_RH_Character` was
+worse still: it had only ONE texture parameter, so every walker's imported
+`*_metallic-*_roughness` map sat inert on disk, bound by nothing.
+
+**The stopgap, now shipped.** `scripts/gpu/rh_derive_normals.py` derives a
+tangent normal from the albedo's luminance (local blur - wide blur high-pass ->
+Sobel), and `rh_wire_normals.py` / `rh_wire_crew_normals.py` import it as
+TC_NORMALMAP + sRGB off and bind it. Generated paint puts real surface
+information in its luminance - panel gaps, rivets, weld beads, grille slots are
+all painted darker than the plate around them - so this recovers genuine relief
+(22 models at 24-41%, 20 crew at 25-30%). It is an approximation and it says so:
+it cannot invent detail the paint does not describe, and a dark PAINTED marking
+reads as a dent, which is why crew strength is 0.75 rather than 1.0 (a suit is
+cloth, and machinery-strength relief on fabric reads as crumpled foil).
+
+**The real fix, for future batches.** Keep TRELLIS.2's PRE-DECIMATION mesh and
+bake a real normal from it in Blender before the high-poly is discarded. Today
+the bake decimates and throws the high-poly away, which is why the 700 assets
+already on disk have nothing to bake from. Any new batch should retain it.
+
+**Both paths are opt-in.** `UseNormTex` and `UseMRTex` default to 0 in both
+masters, lerping to a flat (0,0,1) normal and the scalar roughness, so any
+instance authored before this is bit-identical until its MI opts in. Verified:
+the 13 prop EmissiveAmount/Mask overrides were byte-identical before and after
+the master graph rebuild.
