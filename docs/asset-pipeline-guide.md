@@ -314,6 +314,27 @@ bake a real normal from it in Blender before the high-poly is discarded. Today
 the bake decimates and throws the high-poly away, which is why the 700 assets
 already on disk have nothing to bake from. Any new batch should retain it.
 
+**Strength was tuned on an isolated render, not guessed.** The first pass shipped
+at detail-blur 1.1 / strength 1.0 and was wrong in a way no in-game frame could
+show: a controlled Blender A/B of one locker (same mesh, same light rig, one
+variable) differed on 29% of pixels and revealed the map was OVER-COOKED - real
+louvre slots and door seams came through beautifully, and every flat plate also
+picked up a hammered orange-peel pebbling because per-texel paint noise became
+relief, with painted markings embossing as dents. Blur 2.4 removes the pebbling
+while keeping the construction detail; material strength 0.5 (models) / 0.35
+(crew) keeps the remaining marking-emboss subtle. `rh_toggle_surface_detail.py`
+flips the whole set for that A/B and carries the tuned values as its ON state.
+
+**Two things the in-game A/B established, both worth knowing before spending
+more on surface fidelity.** First, floor-label rendering and day/night state
+dominate a naive frame diff - the pixel-diff hot spots in three separate
+comparisons were LABELS, not shading, which is why the honest instrument is a
+single mesh under a fixed light rig. Second, at the distances the strategy camera
+actually reaches, the entire normal-map change moves 0.08-0.29% of pixels: it is
+essentially invisible in gameplay and only matters at the close range the
+director inspects at by WASD-ing in. That is a reason to stop investing in
+close-range surface fidelity, not a reason to invest more.
+
 **Both paths are opt-in.** `UseNormTex` and `UseMRTex` default to 0 in both
 masters, lerping to a flat (0,0,1) normal and the scalar roughness, so any
 instance authored before this is bit-identical until its MI opts in. Verified:

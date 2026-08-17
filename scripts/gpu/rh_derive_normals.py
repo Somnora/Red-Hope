@@ -56,11 +56,17 @@ from PIL import Image
 from scipy import ndimage
 
 
-def derive(img, strength=1.0):
+def derive(img, strength=1.0, detail_blur=2.4):
     a = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
     lum = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
 
-    detail = ndimage.gaussian_filter(lum, 1.1)
+    # detail_blur is the load-bearing knob, tuned 2026-08-17 against an
+    # isolated render: at 1.1 the map was correct but OVER-COOKED - real panel
+    # gaps and louvre slots came through beautifully AND every flat plate picked
+    # up a hammered orange-peel pebbling, because per-texel paint noise became
+    # relief. 2.4 keeps the features the eye reads as construction and drops the
+    # noise floor that reads as damage.
+    detail = ndimage.gaussian_filter(lum, detail_blur)
     broad = ndimage.gaussian_filter(lum, 24.0)
     height = np.clip(0.5 + (detail - broad) * 2.2, 0.0, 1.0)
 
@@ -82,6 +88,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--sheet", default=None)
     ap.add_argument("--strength", type=float, default=1.0)
+    ap.add_argument("--detail-blur", type=float, default=2.4,
+                    help="small-scale blur before the high-pass; higher = less "
+                         "paint-noise pebbling, fewer fine features")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -89,7 +98,7 @@ def main():
     for spec in a.spec:
         name, path = spec.split(":", 1)
         img = Image.open(path)
-        nrm = derive(img, a.strength)
+        nrm = derive(img, a.strength, a.detail_blur)
         dst = os.path.join(a.out, "T_%s_Normal.png" % name)
         nrm.save(dst)
         # Deviation from flat: how much relief was actually found. Near zero
