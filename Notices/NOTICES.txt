@@ -1,0 +1,141 @@
+THE RED HOPE — THIRD-PARTY NOTICES
+==================================
+
+This file lists attributions required by the licences of the tools and models
+used to produce this game's art. It ships beside the executable because these
+notices are required on DISTRIBUTION, and a file in a source repository
+satisfies nobody's licence.
+
+Source of record: docs/third-party-notices.md and docs/asset-licence-audit.md.
+
+
+BUILT WITH DINOV3
+-----------------
+Required by the DINOv3 License (Meta), which asks that "Built with DINOv3" be
+displayed prominently on a related website, user interface, blogpost, about
+page or product documentation.
+
+    Built with DINOv3
+
+
+TENCENT HUNYUAN 3D 2.1
+----------------------
+Required with any distribution of works produced with it:
+
+    Tencent Hunyuan 3D 2.1 is licensed under the Tencent Hunyuan 3D 2.1
+    Community License Agreement, Copyright (C) 2025 Tencent.
+
+
+MICROSOFT TRELLIS.2-4B
+----------------------
+MIT licensed. Retaining the copyright and permission notice:
+
+    Copyright (c) Microsoft Corporation.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+
+REAL-ESRGAN
+-----------
+BSD 3-Clause. Retaining the copyright notice, list of conditions and
+disclaimer:
+
+    Copyright (c) 2021, Xintao Wang
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice,
+       this list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+    3. Neither the name of the copyright holder nor the names of its
+       contributors may be used to endorse or promote products derived from
+       this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+
+REMBG
+-----
+MIT licensed, Copyright (c) 2020 Daniel Gatis. Used for background removal on
+reference art.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the above copyright notice and
+    this permission notice being included in all copies or substantial
+    portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+    WARRANTY OF ANY KIND.
+
+    NOTE: rembg's CODE is MIT. The background-removal MODEL WEIGHTS
+    (u2net / isnet-general-use) are licensed separately and their terms are
+    still to be confirmed. See docs/asset-licence-audit.md.
+
+
+STABLE DIFFUSION XL 1.0 + IP-ADAPTER
+------------------------------------
+CreativeML Open RAIL++-M. The licence carries behavioural use restrictions
+which must be passed downstream to any recipient of the model or its
+derivatives. Used in the style-lock and earlier sprite lanes.
+
+
+UNREAL ENGINE
+-------------
+This product is built with Unreal(R) Engine. Unreal(R) is a trademark or
+registered trademark of Epic Games, Inc. in the United States of America and
+elsewhere. Unreal(R) Engine, Copyright 1998-2026, Epic Games, Inc.
+All rights reserved.
+
+
+BLENDER
+-------
+Blender is GPL-licensed and was used as a TOOL in the art pipeline. The GPL
+binds Blender itself, not artwork produced with it. No notice is required for
+the artwork and none is claimed here; this entry is informational.
+
+
+NOT RESOLVED BY ATTRIBUTION
+---------------------------
+Two matters in docs/asset-licence-audit.md are not addressed by this file and
+are recorded here so they are not mistaken for closed:
+
+  * Hunyuan3D 2.1's licence grants rights "for the Territory only", and the
+    Territory EXCLUDES the European Union, the United Kingdom and South Korea.
+    Most shipped meshes were produced with it. Tencent separately disclaims any
+    rights in Outputs. Whether a game containing those meshes may be sold into
+    those markets is a question for a lawyer and is NOT settled by the output
+    disclaimer.
+
+  * The u2net / isnet-general-use model weight licences are unconfirmed.

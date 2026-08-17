@@ -124,6 +124,20 @@ than the usual licence footnote because it names three major games markets.
 
 Generation itself happens in `us-east-1`, which is inside the Territory.
 
+## Cheap compliance — DONE 2026-08-17, except one line of it
+
+`Notices/NOTICES.txt` now ships beside the executable
+(`+DirectoriesToAlwaysStageAsNonUFS=(Path="Notices")` in `DefaultGame.ini`),
+carrying the DINOv3, Tencent, TRELLIS.2/MIT, Real-ESRGAN, rembg, SDXL and
+Unreal notices. `scripts/unreal/rh_check_shipping_meta.py` guards it and exits
+non-zero on regression.
+
+The one part still open is DINOv3's **"prominently"**: a text file beside the
+binary is the minimum defensible reading of "product documentation", and an
+in-UI About panel would be the strong one. That needs a director compile.
+
+The list below is kept for the record.
+
 ## Cheap compliance, owed regardless
 
 - **"Built with DINOv3"** displayed prominently — website, UI, about page or

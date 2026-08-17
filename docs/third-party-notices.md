@@ -4,10 +4,26 @@ Attributions required by the licences of the tools and models used to produce
 Red Hope's art. See `asset-licence-audit.md` for the full assessment, including
 two items that are **not** resolved by attribution.
 
-**This file is not yet shipped.** These notices are required on *distribution*,
-so before any public build they need to reach the packaged game — a credits
-screen, an in-game about page, or a `NOTICES.txt` beside the executable.
-A docs file satisfies nobody's licence.
+**SHIPPED since 2026-08-17.** `Notices/NOTICES.txt` is staged into packaged
+builds as loose files beside the executable, via
+`+DirectoriesToAlwaysStageAsNonUFS=(Path="Notices")` in `Config/DefaultGame.ini`.
+That satisfies DINOv3's "product documentation" wording and Tencent's
+requirement that the notice accompany any distribution.
+
+`scripts/unreal/rh_check_shipping_meta.py` verifies the staging entry, the
+project metadata and the required verbatim strings, and exits non-zero if any
+of it regresses. Run it before a release.
+
+**This markdown file is now the source of record, not the deliverable.** Edit
+`Notices/NOTICES.txt` alongside it or the two drift; the checker only guards
+the strings it knows about.
+
+Still owed: a *prominent* in-UI credit. DINOv3's wording asks for a website,
+user interface or about page, and a text file beside the binary is the minimum
+defensible reading. The project has a Slate UI (`SRHCommandDeck`, C++ only —
+there is no UMG anywhere), so an About panel is achievable but needs a director
+compile. Not written speculatively, because an uncompilable change costs the
+director's time rather than mine.
 
 ---
 
