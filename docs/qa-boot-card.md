@@ -112,6 +112,24 @@ clearly distinct. Silhouettes are legible as people.
 shrinks or disappears; fail and it is a *mesh* verdict — different generator or
 retopo — because paint is no longer the problem.
 
+> **UPDATE 2026-08-17 — the "different generator" branch is now closed by
+> evidence.** The three shipped sprites were re-baked through TRELLIS.2 and
+> rendered against the Hunyuan meshes in one fixed light rig
+> (`docs/crew-generator-test.md`, sheet
+> `qa/2026-08-17/qa-crew-generator-test.jpg`). The Hunyuan meshes are NOT lumpy —
+> clean silhouettes, correct proportions, separated fingers — and on gear detail
+> they are arguably better; TRELLIS.2 smooths away eng_ruiz's harness and
+> geo_okafor's vest pockets. TRELLIS.2 wins only on topology: 0.86–0.93 verts per
+> triangle against Hunyuan's **2.99, i.e. completely unwelded**.
+>
+> So a re-bake would spend the plan's biggest budget line, lose detail, and not
+> address the complaint. **Re-take this verdict before authorising any rebuild**:
+> it was given before the subsurface-shader fix AND before `M_RH_Character` got a
+> normal input and its MR input, so it was taken on crew that could not display
+> surface detail at all. The live suspect for "see through parts of their body"
+> during MOTION is now the 53,860 split vertices meeting automatic weights — a
+> weld + re-rig, which is hours rather than 16–25 h.
+
 ## 2. Buildings — the mixed set → `qa-modelset-ab.jpg`
 
 `rh.ModelSetV2 1` (default) over `rh.ModelSetV2 0`, same camera, same sun.
