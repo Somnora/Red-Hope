@@ -6,15 +6,26 @@
 #   rh_lambda.sh launch              A100 in us-east-1 with Somnora-East attached
 #   rh_lambda.sh ip                  bare IP of the running instance
 #   rh_lambda.sh sync                write the IP into ~/.config/rh3d/host.env
-#   rh_lambda.sh terminate           kill every running instance
+#   rh_lambda.sh terminate <id>      kill ONE instance, by id
 #
 # Region is NOT free choice: the 227 GB Somnora-East filesystem holds the
 # weights, the HF cache and the pipeline, and a filesystem can only attach to
 # an instance in its own region. Cheaper H100s live elsewhere and would strand
 # the data, so us-east-1 / gpu_1x_a100_sxm4 it is.
 #
-# The instance bills by the hour from launch, so `status` prints the spend and
-# `terminate` is deliberately one word.
+# THIS ACCOUNT IS SHARED. Red Hope is not the only project on it - Tally runs
+# vLLM servers on the same Lambda account and the same Somnora-East filesystem.
+# `terminate` used to collect EVERY instance id the account returned and kill
+# them all, off one word with no argument. Nothing in the output distinguished
+# a Red Hope box from someone else's, so that was a project-wide outage waiting
+# on a typo. It now requires an explicit id and refuses a bare invocation.
+#
+# The wider lesson, learned the hard way on 2026-08-17: a box that looks idle
+# is not evidence it is free. A vLLM server loading a 27B model shows no users,
+# no obvious processes and no NFS writes for 10-12 minutes while it reads
+# weights from the shared cache - it looks exactly like an abandoned box right
+# up until it starts serving. `nvidia-smi` is the honest check: a warming
+# server already holds tens of GB of VRAM. If you did not launch it, leave it.
 set -euo pipefail
 
 API="https://cloud.lambdalabs.com/api/v1"
@@ -71,15 +82,28 @@ print("RH3D_HOST=%s" % ip)
 PY
   ;;
 terminate)
-  IDS="$(api "$API/instances" | python3 -c '
-import sys, json
-print(json.dumps([i["id"] for i in json.load(sys.stdin).get("data", [])]))
-')"
-  [ "$IDS" != "[]" ] || { echo "nothing running"; exit 0; }
+  # One id, always. See the shared-account note at the top of this file.
+  ID="${2:-}"
+  if [ -z "$ID" ]; then
+    echo "refusing to terminate without an instance id." >&2
+    echo "  this Lambda account is SHARED - other projects' boxes are in here too." >&2
+    echo "  usage: rh_lambda.sh terminate <instance-id>   (see 'rh_lambda.sh status')" >&2
+    exit 2
+  fi
+  api "$API/instances" | ID="$ID" python3 -c '
+import os, sys, json
+want = os.environ["ID"]
+run = {i["id"]: i for i in json.load(sys.stdin).get("data", [])}
+if want not in run:
+    sys.exit("no running instance with id %s" % want)
+i = run[want]
+sys.stderr.write("terminating %s  %s  %s\n" % (
+    want, i.get("instance_type", {}).get("name"), i.get("region", {}).get("name")))
+' || exit 1
   api -X POST "$API/instance-operations/terminate" \
     -H "Content-Type: application/json" \
-    -d "{\"instance_ids\":$IDS}" | python3 -m json.tool
+    -d "{\"instance_ids\":[\"$ID\"]}" | python3 -m json.tool
   ;;
 *)
-  echo "usage: rh_lambda.sh {status|launch|ip|sync|terminate}" >&2; exit 1 ;;
+  echo "usage: rh_lambda.sh {status|launch|ip|sync|terminate <id>}" >&2; exit 1 ;;
 esac
