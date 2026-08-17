@@ -6,7 +6,7 @@
 # nvdiffrast is NOT installed on this box (bootstrap ran with RH_NO_NVDIFFRAST=1),
 # so the permissive rasterizer is not an option here - it is the only renderer.
 set -u
-NS=/lambda/nfs/Somnora-East/red_hope
+NS=/lambda/nfs/red-hope-east/red_hope
 REPO=$NS/repos/TRELLIS.2
 IN=$NS/io/tiers_refs2
 OUT=$NS/io/tiers_out2

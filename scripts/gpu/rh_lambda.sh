@@ -3,18 +3,19 @@
 # (the Manifold app terminal exports it; there is no MCP involved).
 #
 #   rh_lambda.sh status              what is running, and what it is costing
-#   rh_lambda.sh launch              A100 in us-east-1 with Somnora-East attached
+#   rh_lambda.sh launch              A100 in us-east-1 with red-hope-east attached
 #   rh_lambda.sh ip                  bare IP of the running instance
 #   rh_lambda.sh sync                write the IP into ~/.config/rh3d/host.env
 #   rh_lambda.sh terminate <id>      kill ONE instance, by id
 #
-# Region is NOT free choice: the 227 GB Somnora-East filesystem holds the
-# weights, the HF cache and the pipeline, and a filesystem can only attach to
-# an instance in its own region. Cheaper H100s live elsewhere and would strand
-# the data, so us-east-1 / gpu_1x_a100_sxm4 it is.
+# Region is NOT free choice: the red-hope-east filesystem (weights, HF cache,
+# the whole pipeline - MIGRATED off the shared Somnora-East 2026-08-17, ~35 GB,
+# checksum-verified) can only attach to an instance in its own region, so
+# us-east-1 / gpu_1x_a100_sxm4 it is. Cheaper H100s elsewhere would strand it.
 #
 # THIS ACCOUNT IS SHARED. Red Hope is not the only project on it - Tally runs
-# vLLM servers on the same Lambda account and the same Somnora-East filesystem.
+# vLLM servers on the same Lambda account (their data stays on Somnora-East;
+# ours no longer does, which is half the point of the split).
 # `terminate` used to collect EVERY instance id the account returned and kill
 # them all, off one word with no argument. Nothing in the output distinguished
 # a Red Hope box from someone else's, so that was a project-wide outage waiting
@@ -32,7 +33,7 @@ API="https://cloud.lambdalabs.com/api/v1"
 TYPE="gpu_1x_a100_sxm4"
 REGION="us-east-1"
 SSHKEY="lambda-burst-ed25519"
-FS="Somnora-East"
+FS="red-hope-east"
 HOSTENV="$HOME/.config/rh3d/host.env"
 
 [ -n "${LAMBDA_API_KEY:-}" ] || { echo "LAMBDA_API_KEY not set - open the Manifold terminal" >&2; exit 1; }

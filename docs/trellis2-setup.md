@@ -1,5 +1,16 @@
 # TRELLIS.2-4B on Lambda: a working setup, and the four traps (2026-08-15)
 
+> **FILESYSTEM MOVED 2026-08-17.** Everything below that says `Somnora-East`
+> now lives at **`red-hope-east`** (us-east-1, mount
+> `/lambda/nfs/red-hope-east`). Red Hope migrated off the shared filesystem:
+> 35.5 GB / 11,690 files rsynced box-to-box, full `-c` checksum verify came
+> back zero mismatches, and the acceptance test was this very bootstrap run to
+> `TRELLIS2_ENV_READY` entirely from the migrated tree. `pip-cache` and `io/`
+> intermediates were deliberately NOT migrated (rebuildable; finals live in
+> `Martians/gen`). Launch with `filesystem=red-hope-east`; Somnora-East keeps a
+> `red_hope-MOVED.txt` breadcrumb and belongs to the other projects now. Path
+> references in the historical notes below are left as written.
+
 The crop assets were regenerated-from-scratch candidates because their textures
 turned out to be **aerial satellite views of a city** (verified by exporting
 `crop_root_1_textured` from the shipped game: roads, rooftops, parking lots,

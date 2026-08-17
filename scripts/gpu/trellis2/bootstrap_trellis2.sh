@@ -29,11 +29,11 @@
 #     a fallback to model.layer. Upstream assumes the flat layout and dies with
 #     "'DINOv3ViTModel' object has no attribute 'layer'".
 set -u
-NS=/lambda/nfs/Somnora-East/red_hope
+NS=/lambda/nfs/red-hope-east/red_hope
 REPO=$NS/repos/TRELLIS.2
 SITE=$HOME/.local/lib/python3.10/site-packages
 export PIP_USER=1
-export HF_HOME=/lambda/nfs/Somnora-East/hf-cache
+export HF_HOME=/lambda/nfs/red-hope-east/hf-cache
 export HUGGINGFACE_HUB_CACHE=$HF_HOME/hub
 export PATH=$HOME/.local/bin:$PATH
 mkdir -p "$SITE"

@@ -25,11 +25,11 @@ import time
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ.setdefault("HF_HOME", "/lambda/nfs/Somnora-East/hf-cache")
-sys.path.insert(0, "/lambda/nfs/Somnora-East/red_hope/repos/TRELLIS2")
+os.environ.setdefault("HF_HOME", "/lambda/nfs/red-hope-east/hf-cache")
+sys.path.insert(0, "/lambda/nfs/red-hope-east/red_hope/repos/TRELLIS2")
 
 if os.environ.get("RH_PERMISSIVE_RASTER") == "1":
-    sys.path.insert(0, "/lambda/nfs/Somnora-East/red_hope/scripts")
+    sys.path.insert(0, "/lambda/nfs/red-hope-east/red_hope/scripts")
     import rh_uv_rasterizer as _rh_raster
     _rh_raster.install(flip_y=os.environ.get("RH_RASTER_FLIP_Y") == "1")
     print("PERMISSIVE_RASTER installed (flip_y=%s)"
