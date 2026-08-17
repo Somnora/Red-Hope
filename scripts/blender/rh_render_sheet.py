@@ -78,9 +78,22 @@ sun = bpy.data.objects.new("sun", sun_data)
 bpy.context.scene.collection.objects.link(sun)
 sun.rotation_euler = (math.radians(52), math.radians(14), math.radians(40))
 
+# FILL LIGHT + a lifted world, added 2026-08-17 after this script produced a
+# misleading sheet. With one sun and a 0.05 world, every face angled away from it
+# went near-black, and on TALL subjects that is most of the silhouette: the
+# building sheet showed heavy dark blotching on 6 of 9 assets whose albedo
+# atlases measured 0.0% black. A QA instrument that makes good assets look broken
+# is worse than no instrument, because it invites exactly the wrong fix.
+fill_data = bpy.data.lights.new("fill", type="SUN")
+fill_data.energy = 1.4
+fill = bpy.data.objects.new("fill", fill_data)
+bpy.context.scene.collection.objects.link(fill)
+fill.rotation_euler = (math.radians(66), math.radians(-10), math.radians(-135))
+
 bpy.context.scene.world = bpy.data.worlds.new("w")
 bpy.context.scene.world.use_nodes = True
-bpy.context.scene.world.node_tree.nodes["Background"].inputs[0].default_value = (0.05, 0.05, 0.06, 1)
+# 0.22 rather than 0.05: enough ambient that an unlit face still shows its albedo.
+bpy.context.scene.world.node_tree.nodes["Background"].inputs[0].default_value = (0.22, 0.22, 0.24, 1)
 bpy.context.scene.world.node_tree.nodes["Background"].inputs[1].default_value = 1.0
 
 scene = bpy.context.scene
