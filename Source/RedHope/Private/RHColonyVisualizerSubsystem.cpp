@@ -1011,6 +1011,11 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			{ FName("SolarArray"),    FString(TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel")) },
 			{ FName("Habitat"),       FString(TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome")) },
 			{ FName("ComputeModule"), FString(TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule")) },
+			// First asset through the hero-reference -> TRELLIS.2 (kept
+			// hi-poly) -> Blender-baked real normal lane (2026-08-18). The
+			// building drew composed primitives before - NEW coverage, so no
+			// RealModelPaths fallback exists and none is wanted.
+			{ FName("Electrolyzer"),  FString(TEXT("/Game/RedHope/Art/Models2/Electrolyzer/Electrolyzer/StaticMeshes/Electrolyzer.Electrolyzer")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
@@ -1067,9 +1072,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 				}
 			}
 		}
-		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f, %s)"),
+		UE_LOG(LogRedHope, Display, TEXT("%s renders as imported model '%s' (uniform scale %.2f, %s, mat0 %s)"),
 			*Instance.DefName.ToString(), *RealModel->GetName(), S,
-			bVertexColored ? TEXT("vertex-color") : TEXT("textured"));
+			bVertexColored ? TEXT("vertex-color") : TEXT("textured"),
+			Mesh->GetMaterial(0) ? *Mesh->GetMaterial(0)->GetPathName() : TEXT("<none>"));
 	}
 	else
 	{

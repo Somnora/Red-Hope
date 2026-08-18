@@ -106,5 +106,16 @@ echo "execcmds fired: $(grep -c 'RH.Demo\]' "$LOG")"
 echo "snapshot log:   $(grep -c 'Snapshot requested' "$LOG")"
 echo "sim errors:     $(grep -c 'LogRedHopeSim: Error' "$LOG")"
 echo "usage warnings: $(grep -ci 'is not compatible with\|missing usage flag\|bUsedWithSkeletalMesh' "$LOG")"
+# A material that fails the Metal translator renders DEFAULT MATERIAL in -game
+# with only a boot-log warning to show for it. That is how the whole
+# M_RH_Master family shipped gray for a day (08-17/08-18, judged as "dark
+# paint" in a dozen captures) - so every capture now counts it, loudly.
+MATFAIL=$(grep -c 'Failed to compile Material' "$LOG")
+if [ "$MATFAIL" -gt 0 ]; then
+  echo "MATERIAL FAILURES: $MATFAIL  ** objects on these materials render DEFAULT-GRAY - frame is not judgeable **"
+  grep 'Failed to compile Material' "$LOG" | sed 's/^.*AssetLog\] /  /' | sort -u | head -5
+else
+  echo "material fails:  0"
+fi
 echo "max frame:      $(grep -oE '^\[[0-9.-]+[^]]*\]\[ *[0-9]+\]' "$LOG" | grep -oE '\[ *[0-9]+\]$' | tr -d '[] ' | sort -n | tail -1)"
 echo "log:            $LOG"

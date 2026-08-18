@@ -21,8 +21,9 @@ Graph:
               * GlowScale (MPC_Atmosphere, driven by rh.Glow)
               + BaseColor * EmissiveFloor
 
-EmissiveMask defaults to T_RH_MaskWhite (8x8 white, linear grayscale), which
-makes it a no-op until a model's MI assigns a real mask - the 2026-08-14 W2
+EmissiveMask defaults to T_RH_MaskWhiteG (8x8 white, TC_GRAYSCALE - NOT the
+TC_MASKS T_RH_MaskWhite, see the node comment for the Metal-compile incident),
+which makes it a no-op until a model's MI assigns a real mask - the 2026-08-14 W2
 finding was that the UNMASKED glow term buried every machine's paint under a
 flat HDR wash (HeavyForge at 0.22 emitted ~1.3 orange over the whole hull).
 The mask confines the glow to windows, furnace mouths and indicator strips;
@@ -110,11 +111,21 @@ def main():
     mask = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -900, 1160,
                 parameter_name="EmissiveMask",
                 sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE)
-    mask_tex = unreal.load_asset(DEFAULT_MASK_TEX)
+    # MUST be the TC_GRAYSCALE white, never T_RH_MaskWhite: the 08-16 sweep
+    # (996e2c5) made that one TC_MASKS for the MRTex samplers, and a grayscale
+    # SAMPLER on a Masks TEXTURE is a fatal translator error on SF_METAL_SM6 -
+    # the whole master then silently renders DEFAULT MATERIAL in -game while
+    # every editor-side dump still looks healthy. That mismatch shipped on
+    # 08-17 and blacked out the entire building family for a day (the
+    # director's "no color design" photos). Real masks are TC_GRAYSCALE via
+    # rh_import_masks.py, so grayscale sampler + grayscale default is the only
+    # consistent pairing.
+    mask_tex = unreal.load_asset("/Game/RedHope/Art/Masks/T_RH_MaskWhiteG")
     if mask_tex:
         mask.set_editor_property("texture", mask_tex)
     else:
-        rec("  ! default mask %s missing - run rh_import_masks.py first" % DEFAULT_MASK_TEX)
+        rec("  ! T_RH_MaskWhiteG (grayscale white) missing - the master will "
+            "FAIL METAL COMPILE if this node keeps a TC_MASKS default")
 
     # Optional per-pixel metal/roughness, glTF packing (G = roughness,
     # B = metallic). The Interchange-imported props carry one of these and would

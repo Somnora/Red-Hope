@@ -394,3 +394,30 @@ paired with a texture from a DIFFERENT run produces exactly the camo-blotch
 class. Any rollback must move mesh + BC + normal + emissive mask as one
 lineage-consistent set (the 08-18 rollback of battery/ice/extractor2/lander2/
 stockpile took everything from c87a51c~1 plus the matching 08-14 masks).
+
+### The second instrument: material liveness (2026-08-18)
+
+The daylight instrument alone was not enough. From the 08-17 master re-author
+until 08-18, EVERY M_RH_Master building rendered the ENGINE DEFAULT MATERIAL
+in -game - a sampler/texture type mismatch (LINEAR_GRAYSCALE EmissiveMask node
+against the TC_MASKS white the 08-16 sweep produced) failed the whole material
+on SF_METAL_SM6. In-editor dumps looked healthy; only the -game boot log
+carried the one warning. The rollback and the accent pass were both judged on
+frames where the family rendered gray, and "default-material gray" was
+misread as "dark paint" in a dozen captures, including the director's 4:10AM
+photos.
+
+Two instruments now catch this class:
+  1. rh_capture.sh counts 'Failed to compile Material' in every report and
+     stamps the frame NOT JUDGEABLE when nonzero.
+  2. When a material-family look changes inexplicably, capture once with
+     `viewmode unlit` in the ExecCmds: default material renders FLAT UNIFORM
+     GRAY unlit, while any live BaseColor chain shows its texture/tint. One
+     frame separates "the paint is dark" from "there is no paint".
+
+And the standing rule the incident teaches: a shared DEFAULT texture is part
+of a sampler node's TYPE CONTRACT. Never re-compress a texture that material
+sampler nodes reference as a default (T_RH_MaskWhite, T_RH_MaskWhiteG,
+DefaultNormal) without re-checking every node that names it - the sweep that
+re-compressed the white was correct about data maps in MIs and still took the
+master down, because the node's sampler_type is authored, not derived.
