@@ -120,12 +120,35 @@ vertices and shares none. TRELLIS.2 comes out at 0.86–0.93, properly welded, w
    (measured on the fixed `cmdr_vale`). The real indicator is the backstop count
    at rig time: 53,885 of 53,885 before, 0 after.
 
-   **Known consequence, stated rather than buried:** the 12 rebuilt from local
-   sources are now 18,000 tris where they were 9,000, because those sources are
-   denser than what was originally imported. The 8 rebuilt from UE exports stay
-   at 9,000. The crew therefore has two density tiers (12 × 18k + 8 × 9k ≈ 288k
-   tris for the full roster), which is negligible at this scale but is a change
-   I made without intending to.
+   **The density mismatch was left in place, deliberately, after testing the
+   fix.** The 12 rebuilt from local sources are 18,000 tris where UE had them at
+   9,000; the 8 rebuilt from UE exports are 9,000. I proposed normalising the 12
+   down to match and the director approved it — then doing the work showed the
+   normalisation makes the crew WORSE, so it was abandoned rather than shipped:
+
+   - At 18,000 tris all 12 rig perfectly: backstop 0 on every one.
+   - Decimated to 9,000, two of them (`med_haddad`, `quart_bello`) collapse to
+     100% backstop — the heat solver fails again.
+   - The reason, measured: `med_haddad` welds to **ONE connected component at
+     18,000 tris**. Decimated to 9,000 it becomes **95 components, largest
+     holding 38%**. Edge collapse severs thin connections and shatters the mesh,
+     which is exactly the condition the heat solver cannot survive.
+
+   Uniformity buys nothing here — 12 × 18k + 8 × 9k ≈ 288k triangles for the
+   whole roster is trivial at this scale, and no perf argument favours 9k — while
+   the cost is real rig quality on two characters. Different characters carrying
+   different densities is ordinary and invisible at a camera that gets no closer
+   than 29 m.
+
+   **This also completes the root-cause story of the director's bug.** The
+   original pipeline decimated before rigging. Decimation fragments the mesh; a
+   fragmented mesh defeats Blender's heat weighting; the failure falls through to
+   a backstop that hard-pinned every vertex to one nearest bone; rigid binding
+   tears geometry apart at the joints during animation; and that is the "you can
+   see through parts of their body" report. The correct order — **decimate never,
+   or decimate then check connectivity; weld; then bind** — is now enforced by
+   `rig_colonist.py` welding before the bind and by `rh_decimate.py` carrying the
+   warning that it must run before rigging and can fragment what it touches.
 
 ## Outputs
 
