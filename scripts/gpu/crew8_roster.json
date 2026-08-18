@@ -1,0 +1,45 @@
+{
+ "_comment": "The 8 crew whose original designs were lost (confetti-8). New identities, authored 2026-08-18 under the director's 'all yours' mandate. Outfit base colors deliberately match the stopgap suits already in-game (sage/slate/cream/rust/steel/khaki/amber/olive) so the regeneration reads as the same person coming into focus, not a cast change. bot_lindqvist keeps the white hair the director photographed.",
+ "chars": [
+  {
+   "id": "bot_lindqvist",
+   "identity": "A Scandinavian woman in her late 40s, pale complexion, silver-white hair in a short practical crop, calm weathered face with faint laugh lines",
+   "habitat": "a sage-green utilitarian botanist's jumpsuit with rolled sleeves, soil-worn knees, an empty chest-rig of small tool loops, muted green accent piping"
+  },
+  {
+   "id": "comms_diallo",
+   "identity": "A tall Senegalese man in his early 30s, deep brown skin, close-cropped black hair, slim build, focused thoughtful expression",
+   "habitat": "a slate-blue communications coverall with a soft padded fabric collar, thin cable piping along one shoulder seam, slate accent stripes at the cuffs"
+  },
+  {
+   "id": "cook_moreau",
+   "identity": "A stocky French woman in her 50s, olive skin, dark hair in a tight bun streaked with grey, warm no-nonsense face",
+   "habitat": "a warm cream galley smock with a wraparound half-apron front over grey work trousers, sleeves pushed to the elbow, cream accent trim"
+  },
+  {
+   "id": "driver_costa",
+   "identity": "A wiry Brazilian man in his 40s, tan skin, short black curls, light stubble, easy confident bearing",
+   "habitat": "a muted rust-orange driver's jacket with padded elbows and a high collar over a grey coverall, rust accent panels on the shoulders"
+  },
+  {
+   "id": "fab_stone",
+   "identity": "A broad-shouldered Black woman in her mid 30s, dark skin, shaved head, steady level gaze",
+   "habitat": "a steel-grey fabricator's coverall with heat-scuffed forearm panels, a heavy waist cinch, reinforced knees, heavy boots, gunmetal accent details"
+  },
+  {
+   "id": "rookie_shaw",
+   "identity": "A lanky young white man barely in his 20s, freckles, messy auburn hair, eager open face",
+   "habitat": "a khaki general-duty coverall that still looks a size too new and clean, neatly rolled cuffs at the wrist, khaki accent tabs, and sturdy brown lace-up work boots on the feet"
+  },
+  {
+   "id": "safety_abara",
+   "identity": "A composed Nigerian woman in her 40s, dark skin, short natural hair, upright alert posture",
+   "habitat": "a muted amber high-visibility safety layer with reflective-weave strips over a charcoal coverall, amber accent banding at the shoulders"
+  },
+  {
+   "id": "vet_kowalski",
+   "identity": "A grizzled Polish man in his 60s, weathered pale skin, cropped grey hair, grey stubble, solid heavyset build",
+   "habitat": "a faded olive-drab field jacket, visibly repaired at one elbow with a neat blank patch, over a worn coverall, olive accent webbing"
+  }
+ ]
+}

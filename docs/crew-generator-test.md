@@ -257,3 +257,39 @@ that the robot comes off the same `rig_colonist.py` with the same leg swing, the
 same 199 cm height and a same-length clip, so it inherits the crew's measured
 104 cm per cycle, then rides the runtime downscale to 180 cm (×0.905) → ~94 cm.
 The cvar exists so a look that disagrees is a dial, not a rebuild.
+
+---
+
+## The 8 regenerated end-to-end (2026-08-18)
+
+Under the director's "all yours to move forward": new identities authored
+(`scripts/gpu/crew8_roster.json` — suit colours deliberately match the in-game
+stopgaps so the swap reads as the same person coming into focus; Lindqvist keeps
+the white hair the director photographed), hero-front sprites via Nano Banana
+(`rh_nb_crew8.py`, ~$1.80 with two re-rolls: one non-flat background, one
+barefoot), QA-passed on corners/pose/hands, meshed through TRELLIS.2 at 12k tris
+— **the first production batch on the real-normals path** (all 8 shipped with
+high-poly-baked normals at strength 1.0, not albedo-derived) — then welded,
+rigged, reimported in place WITH their textures (the trap from last time,
+not repeated), and wired. 20/20 walkers verify green; battery 25/25, pins
+identical.
+
+Bind quality: six of eight near-perfect heat solves (backstop 0–36 verts);
+`cook_moreau` and `vet_kowalski` fell to the soft 3-bone backstop — both wear
+loose overgarments (apron, open field jacket) that mesh as detached shells,
+which is precisely the case the soft backstop was built and motion-verified for.
+
+Honest quality note (`qa/2026-08-17/qa-crew8-meshed.jpg`): faces and identity
+carry well, but layered garments show muddy dark patches where the SINGLE-VIEW
+bake guesses occluded regions — kowalski's open jacket is the worst. The
+upgrade path if the director wants it: multi-view TRELLIS conditioning (bake
+from front+side+back sprites, ~$0.60/character more) or a re-roll of the worst
+seeds. At the strategy camera's distances the 8 read as intended.
+
+Operational notes: gcloud's TWO credentials bit again (`auth login` was fresh,
+`application-default` dead — the generator now falls back to the CLI token
+automatically); local background tasks were being killed externally all
+session, so the batch ran as short foreground chunks (`--limit`); and the
+director's root volume hit 100% full mid-pipeline — 1.4 GB of session scratch
+freed, the pipeline moved to the external volume, but the machine itself
+remains ~99% full without me.
