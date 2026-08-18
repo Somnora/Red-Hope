@@ -1475,10 +1475,6 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		const FVector Head = Sim->GetShaftHeadCm();
 		const double FloorH = Sim->GetFloorHeightCm();
 		const double FloorZ = ViewLevel * FloorH;
-		// The doors mount ON the cage's +X face (director hand-play
-		// 2026-07-17: the fixed 92 cm offset left them floating free of the
-		// frame). Derived from the cage's real bounds, whatever mesh it wears.
-		float DoorFaceX = Head.X + 92.f;
 		if (const UStaticMesh* Cage = CageComp->GetStaticMesh())
 		{
 			const FBoxSphereBounds CB = Cage->GetBounds();
@@ -1487,7 +1483,6 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 				Head.X - CB.Origin.X * S,
 				Head.Y - CB.Origin.Y * S,
 				FloorZ - (CB.Origin.Z - CB.BoxExtent.Z) * S));
-			DoorFaceX = Head.X + CB.BoxExtent.X * S + 3.f; // flush, a hair proud of the frame
 		}
 		float Target = 0.f;
 		if (IsUnderground())
@@ -1497,27 +1492,14 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 				Target = Crew->IsAnyCrewWithinCm(FVector(Head.X, Head.Y, FloorZ), 420.f) ? 1.f : 0.f;
 			}
 		}
-		ElevatorDoorAlpha = FMath::FInterpTo(ElevatorDoorAlpha, Target, DeltaTime, 3.5f);
-		// Panels pocket INTO the frame: fully open, a door's outer edge stops
-		// at the cage's own side, never past it. The old fixed 94 cm throw
-		// overshot the cage body and the parted panels hung in the air beside
-		// it (director 2026-08-14: "the doors open strangely outside of its
-		// body"). 27.5 = half the 55 cm panel; travel is derived from the cage
-		// bounds like DoorFaceX above, so any future cage mesh keeps this true.
-		float SlideMaxCm = 94.f;
-		if (const UStaticMesh* CageMesh = CageComp->GetStaticMesh())
+		ElevatorWakeAlpha = FMath::FInterpTo(ElevatorWakeAlpha, Target, DeltaTime, 3.5f);
+		if (UPointLightComponent* Lamp = ElevatorLamp.Get())
 		{
-			const float S = CageComp->GetComponentScale().Z;
-			SlideMaxCm = FMath::Max(30.f, CageMesh->GetBounds().BoxExtent.Y * S - 27.5f - 2.f);
-		}
-		const float SlideCm = FMath::Lerp(26.f, SlideMaxCm, ElevatorDoorAlpha);
-		if (UStaticMeshComponent* DoorL = ElevatorDoorL.Get())
-		{
-			DoorL->SetWorldLocation(FVector(DoorFaceX, Head.Y - SlideCm, FloorZ + 76.f));
-		}
-		if (UStaticMeshComponent* DoorR = ElevatorDoorR.Get())
-		{
-			DoorR->SetWorldLocation(FVector(DoorFaceX, Head.Y + SlideCm, FloorZ + 76.f));
+			// The cage wakes for an approaching colonist: 0 cd asleep, 18 cd
+			// greeting - under the 22 cd vault fill, so it reads as a cabin
+			// light, not a floodlight. Rides the viewed floor with the cage.
+			Lamp->SetWorldLocation(FVector(Head.X, Head.Y, FloorZ + 150.f));
+			Lamp->SetIntensity(18.f * ElevatorWakeAlpha);
 		}
 	}
 	// Sovereignty mirror (M3/M4): rival markers + the trade rover, same pattern.
@@ -1606,28 +1588,21 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 					const FBoxSphereBounds CB = Cage->GetBounds();
 					CageComp->SetWorldScale3D(FVector((float)(FloorH * 0.78 / FMath::Max(2.f * CB.BoxExtent.Z, 1.f))));
 					ElevatorCage = CageComp;
-					UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-					UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
-					for (int32 Side = 0; Side < 2; ++Side)
-					{
-						UStaticMeshComponent* Door = NewObject<UStaticMeshComponent>(ShaftVisual,
-							Side == 0 ? TEXT("ElevatorDoorL") : TEXT("ElevatorDoorR"));
-						Door->SetupAttachment(ShaftVisual->GetRootComponent());
-						Door->SetMobility(EComponentMobility::Movable);
-						Door->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-						Door->SetAbsolute(true, true, true);
-						Door->RegisterComponent();
-						Door->SetStaticMesh(Cube);
-						Door->SetWorldScale3D(FVector(0.06f, 0.55f, 1.5f));
-						if (Base)
-						{
-							UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Door);
-							Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.88f, 0.87f, 0.85f));
-							Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor::Black);
-							Door->SetMaterial(0, Mid);
-						}
-						(Side == 0 ? ElevatorDoorL : ElevatorDoorR) = Door;
-					}
+					// No door panels (see the header note by ElevatorLamp).
+					// The approach cue is this lamp inside the lattice: warm,
+					// small, shadowless like every other interior light, and
+					// driven from 0 in Tick so a sleeping cage stays dark.
+					UPointLightComponent* Lamp = NewObject<UPointLightComponent>(ShaftVisual, TEXT("ElevatorLamp"));
+					Lamp->SetupAttachment(ShaftVisual->GetRootComponent());
+					Lamp->SetMobility(EComponentMobility::Movable);
+					Lamp->SetAbsolute(true, true, true);
+					Lamp->SetIntensityUnits(ELightUnits::Candelas);
+					Lamp->SetIntensity(0.f);
+					Lamp->SetLightColor(FColor(255, 214, 160));
+					Lamp->SetAttenuationRadius(520.f);
+					Lamp->SetCastShadows(false);
+					Lamp->RegisterComponent();
+					ElevatorLamp = Lamp;
 				}
 			}
 		}

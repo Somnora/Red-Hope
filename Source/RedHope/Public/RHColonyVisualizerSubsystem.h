@@ -202,9 +202,16 @@ private:
 	// The elevator at the shaft head: real cage mesh + two sliding door panels,
 	// doors easing open whenever a colonist is near the shaft on the open floor.
 	TWeakObjectPtr<UStaticMeshComponent> ElevatorCage;
-	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorL;
-	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorR;
-	float ElevatorDoorAlpha = 0.f;
+	// The sliding door panels are GONE (director 2026-08-17: "the doors are
+	// floating as they open and close... nothing encasing the doors").
+	// Two free panels can never read as attached to an open lattice cage - the
+	// mesh has no casing to pocket into, and two rounds of offset math
+	// (2026-07-17, 2026-08-14) already failed to fake it. The approach cue the
+	// doors carried (2026-07-09: the elevator reacting to a nearing colonist
+	// "is what sells the ride") now lives in this lamp: the cage interior
+	// warms up as crew approach. A light inside a lattice cannot detach.
+	TWeakObjectPtr<UPointLightComponent> ElevatorLamp;
+	float ElevatorWakeAlpha = 0.f;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;
