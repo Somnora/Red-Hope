@@ -327,5 +327,14 @@ tier rooms are SliceActive=FALSE so RH.Demo never designates them, and five
 capture attempts never caught a robot in haul phase 2 (the demo's dig loop
 without stockpile demand may never spawn hauls). Both are code-verified against
 the professor's line-cited lifecycle and the researcher's independent map, and
-frame-verification belongs to the director's next real playthrough: designate a
-tier room; order a dig plus a build and watch the haulers.
+frame-verification belongs to the director's next real playthrough. A sixth
+capture attempt with the spawn condition read from source (hauls require a dug
+pile PLUS a completed Stockpile or Lander on the deposit's level —
+RHSimWorldSubsystem.cpp:745-767, and the Lander always qualifies) still caught
+only clean-backed robots at the 70-second mark, so either the demo windows keep
+missing phase 2 or the lump has an undiscovered visibility bug — stated as
+exactly that uncertainty. The director's recipe, made precise by the source
+read: `RH.Dig Regolith_A`, then watch robots walking BACK toward the Lander
+from about a minute in — a loaded hauler should wear a rust lump on its back,
+scaled by load. If none ever appears across a real session, the lump has a bug
+and one report line will find it.
