@@ -155,3 +155,70 @@ vertices and shares none. TRELLIS.2 comes out at 0.86–0.93, properly welded, w
 Kept at `Martians/gen/crewtest/*.glb` (local) and `io/crewtest/out/` on
 `red-hope-east`. They are usable if the stylization pilot later runs, so the
 $1 is not spent twice.
+
+---
+
+## The splotch, finally: the crew's atlases in UE are confetti (2026-08-17)
+
+The director looked at the re-rigged crew and reported them **worse**: "super
+splotchy… just like a mesh of colors slapped on a model." He was right, and two
+of the three causes were mine.
+
+**What the splotch actually is.** The crew albedo atlases living in UE are
+shattered confetti — hundreds of tiny disconnected paint fragments in hard
+black/white (`qa/2026-08-17/qa-crew-confetti-atlas.jpg`, top row). The local
+source GLBs for the same characters carry *coherent* paint: recognisable faces,
+jackets, denim, gear (bottom row). Two completely different texture sets, and UE
+had the ruined one.
+
+This is the decimation story again, one layer further out. The original pipeline
+decimated before rigging; decimation shatters the mesh into 95+ components; a
+shattered mesh unwraps to confetti UV islands; paint baked onto confetti islands
+IS the splotch. Every "splotchy" report going back weeks traces to that one
+ordering mistake.
+
+**What I made worse.** My re-rig replaced the 12 crew meshes with source-derived
+geometry carrying the SOURCE's UVs, while leaving them bound to the OLD confetti
+atlas keyed to the OLD UVs. Mesh and texture no longer agreed at all. The trap is
+documented in `rh_import_textures.py`'s own docstring — *"reimport_inplace does
+NOT bring the source file's textures with it… New geometry, old paint, and a
+green log at every step"* — written after the crops hit it on 2026-08-16. I had
+the tool, the warning, and the precedent, and still shipped the same bug.
+
+**Fixed** by importing each source GLB's albedo and MR over the existing texture
+assets (sRGB on / TC_DEFAULT for albedo, sRGB off / TC_MASKS for MR). Verified
+by reading the textures back out of UE and diffing against the sources: mean
+absolute difference **0.0** against source, ~74–104 against the old confetti.
+
+**Not fixed for the 8** with no local source. They were reimported from their own
+UE exports, so they are at least self-consistent — mesh and confetti atlas agree
+— but they are still wearing confetti. Those need regenerating from sprites, and
+that is now the strongest argument for the P2 character work: not because the
+generator is bad, but because 8 characters' paint is unrecoverable.
+
+## Foot sliding, measured and fixed
+
+Also reported: "their steps don't match their strides." The Walk clip is 24
+frames at 24 fps — exactly 1.0 s — and the foot bone swings 52.2 cm peak-to-peak
+relative to the body, so the clip depicts ~104 cm of ground per cycle. The
+visualizer translated the figure at 170 cm/s with `GlobalAnimRateScale` pinned to
+1.0, so the feet slid forward by ~63%.
+
+The rate is now the ratio of actual speed to depicted stride, with the stride
+exposed as `rh.CrewStrideCm` (default 104.4) because it is a look value that must
+follow any re-bake of the clip. Work and idle clips keep rate 1.0 — they are not
+locomotion — and everything still freezes at `Pace == 0`.
+
+**The robot walkers have the same bug** (`RHAgentVisualizerSubsystem.cpp` calls
+`PlayAnimation` with no rate scaling) and are NOT fixed here; their clip's stride
+has not been measured.
+
+## Still open: crew walk through furniture
+
+The third report — "no collision, they walk right through objects like desks and
+tables" — is real and is not a bug in the sense the other two were. The crew
+visualizer walks each figure in a straight line toward a wander point with no
+knowledge of what is in the way; props are placed by a different subsystem and
+nothing consults them. Fixing it properly means either prop-aware wander points
+or real avoidance, which is a design decision about how much agency the crew
+should appear to have, not a repair.

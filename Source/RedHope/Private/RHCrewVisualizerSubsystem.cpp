@@ -28,6 +28,15 @@ namespace
 	const FVector CrewPadCm(4000.f, -4000.f, 0.f);
 
 	constexpr float WalkCmPerSec = 170.f;   // suited amble, scaled by sim speed
+	// How far the Walk CLIP depicts the body travelling in one full cycle.
+	// Measured, not guessed: rig_colonist.py bakes Walk as 24 frames at 24 fps
+	// (exactly 1.0 s) and the foot bone swings 52.2 cm peak-to-peak relative to
+	// the body, which is one step; a gait cycle is two steps, so the clip shows
+	// ~104 cm of ground per second. The visualizer was translating the figure at
+	// 170 cm/s with the clip pinned to rate 1.0, so the feet slid forward by
+	// ~63% - the director's "their steps don't match their strides". Rate is now
+	// speed-matched against this number. Exposed as a cvar because it is a LOOK
+	// value: re-bake the clip with a different leg swing and this must follow.
 
 	// The sprite-generated walker meshes were meshed FACING THE CAMERA, so
 	// their intrinsic forward is not +X - without a correction they walk
@@ -37,6 +46,12 @@ namespace
 	static TAutoConsoleVariable<float> CVarWalkerYawOffsetDeg(
 		TEXT("rh.WalkerYawOffsetDeg"), -90.f,
 		TEXT("Yaw correction applied to skeletal walker meshes so figures face their travel direction."));
+
+static TAutoConsoleVariable<float> CVarCrewStrideCm(
+	TEXT("rh.CrewStrideCm"),
+	104.4f,
+	TEXT("Ground distance (cm) the crew Walk clip depicts per full cycle. Drives animation rate so feet do not slide. Measured from the baked clip: 52.2 cm step x 2."),
+	ECVF_Default);
 
 	// Where crew board and alight: at the elevator's DOOR FACE (+X side,
 	// matching the visualizer's door panels), never the cage centre - walking
@@ -597,7 +612,18 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					Vis->CurrentClip = WantClip;
 				}
 			}
-			Skel->GlobalAnimRateScale = Pace > 0.f ? 1.f : 0.f;
+			// Speed-match the LOCOMOTION clip so the feet stay planted: the
+			// figure covers WalkCmPerSec * Pace cm/s, the clip depicts
+			// rh.CrewStrideCm per cycle, so the rate is their ratio. Work and
+			// idle clips are not locomotion and keep rate 1 (still frozen on
+			// pause, which is what Pace == 0 means).
+			float RateScale = 1.f;
+			if (bWalking)
+			{
+				const float StrideCm = FMath::Max(CVarCrewStrideCm.GetValueOnGameThread(), 1.f);
+				RateScale = FMath::Clamp((WalkCmPerSec * Pace) / StrideCm, 0.05f, 6.f);
+			}
+			Skel->GlobalAnimRateScale = Pace > 0.f ? RateScale : 0.f;
 		}
 		if (!bWalking && Pace > 0.f && Now >= Vis->NextDecideRealSeconds)
 		{
