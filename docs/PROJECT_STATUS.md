@@ -1,13 +1,18 @@
 # The Red Hope — Project Status
 
-**Dated 2026-07-15.** Consolidation pass. This is the working source-of-truth
-snapshot: what the game IS, what is built, what this session changed, and what is
-owed. Ordered by the three-phase arc from the design brief
+**Dated 2026-08-18.** This is the working source-of-truth snapshot: what the
+game IS, what is built, what changed, and what is owed. Ordered by the
+three-phase arc from the design brief
 (`docs/the-red-hope-design-brief.md`).
 
+The SIMULATION is unchanged since the 2026-07-15 consolidation - sections 1 and 2
+below still describe it accurately. Everything since has been the ART AND
+PRESENTATION arc, summarised in section 3b.
+
 Verification bar for every claim below: the full headless self-test battery
-(**23 suites + the 10-sol baseline, all green today**) plus the byte-identical
-regression pins (`power: gen 50 W load 20 W`, `deposit Regolith_A: 40645 kg`).
+(**25 suites + the 10-sol baseline, all green**) plus the byte-identical
+regression pins (`power: gen 50 W load 20 W`, `deposit Regolith_A: 40645 kg`),
+which have not moved once across the whole graphics arc.
 Reproduce:
 ```bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
@@ -98,7 +103,7 @@ endings.
 
 ---
 
-## 3. What this session (2026-07-15) changed
+## 3. What the 2026-07-15 consolidation changed (history, kept)
 
 **Everything below is committed on branch `graphics-pass-6-textured-models` and
 verified against the 24-green battery.**
@@ -142,7 +147,58 @@ verified against the 24-green battery.**
 
 ---
 
-## 4. What is owed (unchanged by this session unless noted)
+## 3b. The art & presentation arc (2026-08-14 → 08-18)
+
+No simulation code changed. The battery stayed 25/25 with identical pins
+throughout, which is the evidence that none of this touched the sim.
+
+**One root cause explained years of "splotchy".** The character pipeline
+DECIMATED BEFORE RIGGING. Decimation shatters a mesh into disconnected shells
+(measured: one crew mesh goes from 1 connected component to 95, largest holding
+38%); a shattered mesh unwraps to confetti UV islands, so the baked paint IS
+confetti; and Blender's heat weighting fails on it, falling through to a backstop
+that hard-pinned **53,885 of 53,885 vertices** to one nearest bone each. Rigid
+binding then tears geometry off the body at the joints in motion - the "you can
+see through parts of their body" report. Fixed by welding before the bind (0
+backstop hits after), by blending the backstop over 3 nearest bones instead of
+snapping to 1, and by importing the coherent source paint over the confetti.
+Full account: `docs/crew-generator-test.md`.
+
+**Two shading inputs did not exist.** Neither master material had a normal input
+(`M_RH_Master`, `M_RH_Character` both dumped `Normal <- <none>`), and the
+character master had no metallic/roughness input either - so every walker's
+imported roughness map sat inert. Both added, opt-in, with 42 derived normal maps
+wired. Honest measurement: at the distances the strategy camera actually reaches
+(29 m closest), the whole normal-map change moves 0.08-0.29% of pixels. It is
+foundation, not a visible win.
+
+**What DOES read at 29-216 m**, established by measurement rather than taste:
+silhouette, large-scale value contrast, emissive points, and lighting. Hence the
+per-building night lamps (every powered building, accent-tinted, riding the
+existing power pass) rather than more surface detail.
+
+**Asset work:** 12 room props and 10 buildings re-baked through TRELLIS.2; 215
+orphan assets deleted (art tree 939 → 736); 13 baked-in floor plates removed;
+the crew's subsurface-shader bug fixed; licence notices now ship beside the
+executable; the project stopped calling itself "Top Down BP Game Template".
+
+**Infrastructure:** Red Hope moved off the shared `Somnora-East` filesystem onto
+its own `red-hope-east` (checksum-verified, acceptance-tested by bootstrapping
+the lane from it). The GPU lane's tooling - 71 files including `rig_colonist.py`,
+the rigger everything depends on - was rescued off the filesystem into git, where
+it had never been.
+
+**Two mistakes worth carrying forward.** (1) A re-rig replaced 12 crew meshes
+without their textures, leaving new UVs bound to old paint - the exact trap
+`rh_import_textures.py`'s docstring already warned about. (2) The migration
+excluded a 14 GB `io/` directory as "rebuildable intermediates" and then deleted
+the source; it held the only surviving sources for 8 characters, who are now
+stuck on confetti paint until regenerated. The rule earned: **commit the
+excluded-file list before deleting a migration source.**
+
+---
+
+## 4. What is owed
 
 These are **finishing, not structure** — the whole arc is built.
 
@@ -160,10 +216,18 @@ These are **finishing, not structure** — the whole arc is built.
    compile): drop the in-memory `Debug_Inject*` rows from the self-tests so
    they become true pure-data verifiers that fail on DT/CSV drift.
 
-2. **Director hand-play**, especially the visuals headless can't judge: the
-   action card, categorized build menu, Mars look-pass grade, the rigged
-   walkers + elevator, pit view, the crew-arrival/zoning/garden/Hope loop, and
-   now the v25 ladder/ending/tiers surfaces.
+2. **Director hand-play** - the visuals headless cannot judge. Boot it without
+   the editor: `bash scripts/unreal/rh_sandbox.sh` (add `surface` for the
+   building set, `LOW=1` for a busy machine). Outstanding verdicts live in
+   `docs/qa-boot-card.md`; the one that gates most work is verdict 1 on the
+   crew, which must be RE-TAKEN because it was given before the subsurface fix,
+   the normal/MR inputs, the rigid-bind tear fix and the paint fix all landed.
+
+2b. **Three open decisions that are the director's, not repairs:**
+   - crew walk through furniture (prop-aware wander targets vs real avoidance);
+   - regenerate the 8 faces whose sources were lost (~$13 + a bake), the only
+     route to fixing their paint;
+   - night-lamp brightness and the 40% accent tint.
 
 3. **The Gate-D mental-health framing review** — the standing hard stop.
    **Every** player-facing morale/sickness/evacuation/collapse string and icon
@@ -238,10 +302,17 @@ These are **finishing, not structure** — the whole arc is built.
   mutates state per-step differently in the agent vs era band — the discipline
   (threshold-on-monotone-accumulator, linear scalars, derived-never-saved) is
   what protects it. Keep new features to that shape.
-- **The DT-sync debt is the biggest latent trap**: headless is green because it
-  reads the CSVs, but a live editor session reads the stale DTs until synced. Do
-  the sync before any live demo of M2+ content. The pure-data verifiers will
-  fail loudly on drift once the injects are dropped.
+- **The DT-sync debt**: headless reads the CSVs, a live editor reads the DTs, so
+  run `scripts/unreal/rh_sync_datatables.py` after any CSV edit and before any
+  live demo. Parity is green as of 2026-08-18.
+- **Generated art has no stable UVs.** TRELLIS.2's unwrap is not deterministic -
+  the same seed has produced 7,817 and 7,571 triangles - so ANYTHING derived from
+  a UV layout (emissive masks, derived normals) must be regenerated on every
+  re-bake, and a re-bake that ships without its textures leaves new UVs on old
+  paint. Both failure modes have already bitten once each.
+- **Eight crew are wearing ruined paint and their sources no longer exist.**
+  They render and animate correctly; they simply cannot be improved without
+  regeneration.
 - **Visuals are unverified by construction** — headless renders previews but
   "does it read in-game" is a hand-play verdict the director owns. The models
   are a decisive upgrade over primitives, but the polish pass's re-import + look
@@ -260,9 +331,19 @@ These are **finishing, not structure** — the whole arc is built.
 
 - Source of truth order: (1) the director, (2) the design brief, (3) nothing.
 - Approvals: `docs/design-decisions.md`. History: `docs/build-log.md`. Balance:
-  `docs/data/*.csv` → DataTables.
-- Build gate: director quits UE, terminal `Build.sh red_hopeEditor`, reopen,
-  `/mcp`. Headless verify loop needs no editor (`-run=RHSim` / `-run=RHArt` /
-  `-run=ImportAssets`).
-- Pipeline: five skills (`lambda-bootstrap`, `style-lock`, `gen-3d`,
-  `mesh-cleanup`, `generation-server`) + the two new guides drive the A100.
+  `docs/data/*.csv` → DataTables (sync with `rh_sync_datatables.py`).
+- Build gate: the editor must be CLOSED for `Build.sh red_hopeEditor` - with a
+  live editor the linker produces a hot-reload patch dylib that only that editor
+  loads, so headless boots keep running the old code and a fix silently does not
+  apply. Headless verify needs no editor (`-run=RHSim` / `-run=RHArt`).
+- Look at the game without the editor: `bash scripts/unreal/rh_sandbox.sh`.
+- GPU lane: `filesystem=red-hope-east` (NOT Somnora-East, which belongs to the
+  other projects). Bootstrap to `TRELLIS2_ENV_READY`, then bake. Everything the
+  lane runs is in `scripts/gpu/` - `lane/` is the rescued history including
+  `rig_colonist.py`, the rigger every character depends on.
+- Art rules the hard way, all in `docs/asset-pipeline-guide.md`: decimate NEVER
+  before rigging; weld before bind; re-import textures whenever you re-import a
+  mesh; regenerate every UV-derived artifact after a re-bake; and judge a
+  generated asset on a contact sheet before it enters the project.
+- Anything that runs on a rented box and is not reproducible from this repo is
+  one `terminate` away from gone.
