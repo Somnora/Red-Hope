@@ -1020,6 +1020,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			{ FName("Electrolyzer"),  FString(TEXT("/Game/RedHope/Art/Models2/Electrolyzer/Electrolyzer/StaticMeshes/Electrolyzer.Electrolyzer")) },
 			{ FName("IceDrill"),      FString(TEXT("/Game/RedHope/Art/Models2/IceDrill/IceDrill/StaticMeshes/IceDrill.IceDrill")) },
 			{ FName("Pylon"),         FString(TEXT("/Game/RedHope/Art/Models2/Pylon/Pylon/StaticMeshes/Pylon.Pylon")) },
+			// Re-bakes of the two worst paint offenders from the director's
+			// 2026-08-18 photo notes. The old extractor2/RH_AirFilter2 assets
+			// stay on disk under RealModelPaths as the rh.ModelSetV2=0
+			// fallback. Borer keeps its digging-arm identity by design brief.
+			{ FName("Borer"),         FString(TEXT("/Game/RedHope/Art/Models2/Borer/Borer/StaticMeshes/Borer.Borer")) },
+			{ FName("AirFilter"),     FString(TEXT("/Game/RedHope/Art/Models2/AirFilter/AirFilter/StaticMeshes/AirFilter.AirFilter")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
