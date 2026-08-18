@@ -309,10 +309,18 @@ it cannot invent detail the paint does not describe, and a dark PAINTED marking
 reads as a dent, which is why crew strength is 0.75 rather than 1.0 (a suit is
 cloth, and machinery-strength relief on fabric reads as crumpled foil).
 
-**The real fix, for future batches.** Keep TRELLIS.2's PRE-DECIMATION mesh and
-bake a real normal from it in Blender before the high-poly is discarded. Today
-the bake decimates and throws the high-poly away, which is why the 700 assets
-already on disk have nothing to bake from. Any new batch should retain it.
+**The real fix is BUILT (2026-08-18) and proven on one asset.** Run the lane
+with `RH_KEEP_HIPOLY=1` and `rh_trellis2.py` exports the pre-decimation surface
+beside the output (`<name>_hi.glb`); `scripts/blender/rh_bake_normal.py` then
+bakes it onto the shipped mesh's own UVs (proof: cmdr_vale, 2,527,300 tris onto
+11,417, real trouser seams and pocket construction visible that the derived
+normal cannot know about). Green channel is flipped to UE's DirectX convention
+in the file itself. Two lessons from the proof are baked into the defaults: 5 cm
+cage extrusion (2 cm left ray-miss patches on the thigh) and flat-normal image
+init (missed texels degrade to "no relief", never to black). The box needs X11
+shims for headless Blender - the apt line is in the script header. USE THIS on
+every batch from now on; the derived-normal path stays only for assets whose
+high-poly predates retention.
 
 **Strength was tuned on an isolated render, not guessed.** The first pass shipped
 at detail-blur 1.1 / strength 1.0 and was wrong in a way no in-game frame could

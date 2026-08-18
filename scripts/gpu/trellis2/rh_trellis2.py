@@ -90,6 +90,22 @@ print("RUN_DONE %.1fs" % (time.time() - t1), flush=True)
 
 mesh.simplify(16777216)  # nvdiffrast limit
 
+# RH_KEEP_HIPOLY=1: export the pre-decimation surface beside the output, so a
+# REAL normal map can be baked from it (scripts/blender/rh_bake_normal.py).
+# to_glb below decimates to `target` and then DISCARDS this surface - which is
+# why none of the ~700 assets baked before 2026-08-18 has anything to bake a
+# normal from, and why their normals had to be derived from albedo luminance
+# (an approximation that once turned paint noise into orange-peel pebbling).
+# Geometry only, no textures: the bake needs the SHAPE. Opt-in so default runs
+# are byte-identical in behaviour and cost.
+if os.environ.get("RH_KEEP_HIPOLY") == "1":
+    import trimesh as _tm
+    _v = mesh.vertices.cpu().numpy() if hasattr(mesh.vertices, "cpu") else mesh.vertices
+    _f = mesh.faces.cpu().numpy() if hasattr(mesh.faces, "cpu") else mesh.faces
+    _hi = out[:-4] + "_hi.glb" if out.endswith(".glb") else out + "_hi.glb"
+    _tm.Trimesh(vertices=_v, faces=_f, process=False).export(_hi)
+    print("HIPOLY %s (%d tris)" % (_hi, len(_f)), flush=True)
+
 glb = o_voxel.postprocess.to_glb(
     vertices=mesh.vertices,
     faces=mesh.faces,
