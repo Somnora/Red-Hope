@@ -45,6 +45,22 @@ static FAutoConsoleVariableRef CVarRHGlowScale(TEXT("rh.Glow"), GRHGlowScale,
 static float GRHExposure = 1.0f;
 static FAutoConsoleVariableRef CVarRHExposure(TEXT("RH.Grade.Exposure"), GRHExposure,
 	TEXT("Locked exposure brightness (min==max, no auto-swing). Default 1.0."));
+// The finishing trio the grade lacked (2026-08-18). The session's measured
+// doctrine: at 29-216 m the image is carried by silhouette, value contrast,
+// emissive points and lighting - these three act on exactly those. Bloom makes
+// the night lamps and readouts GLOW instead of merely existing; AO seats
+// furniture and hulls against their floors; the film curve gives the flat
+// linear-ish frame real blacks and a gentle shoulder. All live-tunable, all
+// zeroable for an honest A/B.
+static float GRHGradeBloom = 0.55f;
+static FAutoConsoleVariableRef CVarRHGradeBloom(TEXT("RH.Grade.Bloom"), GRHGradeBloom,
+	TEXT("Bloom intensity for emissives and lamps. 0 disables the override. Default 0.55."));
+static float GRHGradeAO = 0.7f;
+static FAutoConsoleVariableRef CVarRHGradeAO(TEXT("RH.Grade.AO"), GRHGradeAO,
+	TEXT("Ambient-occlusion intensity (0..1); radius rides it. 0 disables the override. Default 0.7."));
+static float GRHGradeFilm = 1.0f;
+static FAutoConsoleVariableRef CVarRHGradeFilm(TEXT("RH.Grade.Film"), GRHGradeFilm,
+	TEXT("Filmic contrast blend: 0 = engine default curve, 1 = the Mars curve (slope 0.94 toe 0.60 shoulder 0.30). Default 1."));
 
 void URHAtmosphereSubsystem::Initialize(FSubsystemCollectionBase& Collection_)
 {
@@ -255,7 +271,36 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 		// the pit reads as sheltered interior without CHANGING exposure.
 		PP.bOverride_WhiteTemp = true;
 		PP.WhiteTemp = bUnderground ? GRHGradeWarmth - 900.f : GRHGradeWarmth;
-		PP.bOverride_ColorSaturation = true;
+		// Finishing trio (see the cvar block for why these three).
+		if (GRHGradeBloom > 0.f)
+		{
+			PP.bOverride_BloomIntensity = true;
+			PP.BloomIntensity = GRHGradeBloom;
+			PP.bOverride_BloomThreshold = true;
+			// Above 1.0 only genuinely bright pixels bloom - lamps, glow,
+			// readouts - and the sunlit regolith stays crisp.
+			PP.BloomThreshold = 1.1f;
+		}
+		if (GRHGradeAO > 0.f)
+		{
+			PP.bOverride_AmbientOcclusionIntensity = true;
+			PP.AmbientOcclusionIntensity = FMath::Clamp(GRHGradeAO, 0.f, 1.f);
+			PP.bOverride_AmbientOcclusionRadius = true;
+			PP.AmbientOcclusionRadius = 120.f;
+			PP.bOverride_AmbientOcclusionPower = true;
+			PP.AmbientOcclusionPower = 1.6f;
+		}
+		if (GRHGradeFilm > 0.f)
+		{
+			const float T = FMath::Clamp(GRHGradeFilm, 0.f, 1.f);
+			PP.bOverride_FilmSlope = true;
+			PP.FilmSlope = FMath::Lerp(0.88f, 0.94f, T);   // steeper mids = presence
+			PP.bOverride_FilmToe = true;
+			PP.FilmToe = FMath::Lerp(0.55f, 0.60f, T);     // deeper blacks
+			PP.bOverride_FilmShoulder = true;
+			PP.FilmShoulder = FMath::Lerp(0.26f, 0.30f, T); // gentler highlight rolloff
+		}
+				PP.bOverride_ColorSaturation = true;
 		// A Malfunction crisis drains the color from the frame - the world reads
 		// as "systems failing" without a single graphic image.
 		const float Sat = bMalfunction ? GRHGradeSaturation * 0.72f : GRHGradeSaturation;
@@ -268,9 +313,9 @@ void URHAtmosphereSubsystem::DriveLook(float DustFactor, float SolFraction, bool
 		PP.ColorGain = bUnderground
 			? FVector4(0.92f, 0.95f, 1.02f, 1.f)
 			: FVector4(1.06f, 0.99f, 0.86f, 1.f);
-		// Bloom + vignette for a lensed, cinematic frame (subtle).
-		PP.bOverride_BloomIntensity = true;
-		PP.BloomIntensity = 0.35f;
+		// Vignette for a lensed frame (bloom is owned by RH.Grade.Bloom above -
+		// this block used to hardcode 0.35 AFTER the cvar block wrote 0.55,
+		// silently winning; one owner now).
 		PP.bOverride_VignetteIntensity = true;
 		PP.VignetteIntensity = 0.42f;
 		// A dust storm crushes the sky into a hazy sepia - lift the shadows and
