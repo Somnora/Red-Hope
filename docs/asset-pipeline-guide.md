@@ -347,6 +347,14 @@ Every script the GPU lane runs now lives in git. `scripts/gpu/lane/` is 71 files
 of tooling that existed ONLY on the Lambda filesystem until it was rescued — see
 its README for why, and for what each piece does.
 
+**And when a migration EXCLUDES anything, write the excluded file list into the
+repo before deleting the source.** The 2026-08-17 move dropped the top-level
+`io/` as "rebuildable intermediates, finals live in Martians/gen" — true for 12
+crew, false for 8, whose meshes and sprites are now unrecoverable and who are
+stuck on ruined paint as a result. A manifest of what is being dropped costs
+nothing and turns "probably rebuildable" from a judgement made in the abstract
+into a claim someone can check. See `docs/crew-generator-test.md`.
+
 The rule this closes: **anything that runs on a rented box and is not
 reproducible from this repo is one `terminate` away from gone.** It had already
 cost two incidents in one week — the mask cutter died with a scratchpad and had

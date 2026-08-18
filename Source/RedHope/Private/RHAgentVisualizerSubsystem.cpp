@@ -19,6 +19,12 @@ namespace
 	const TCHAR* RobotIdleClip   = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robotIdle.RH_Walker_robotIdle");
 }
 
+static TAutoConsoleVariable<float> CVarRobotStrideCm(
+	TEXT("rh.RobotStrideCm"),
+	94.4f,
+	TEXT("Ground distance (cm) the robot Walk clip depicts per cycle, at the runtime scale. Drives animation rate so feet do not slide."),
+	ECVF_Default);
+
 namespace
 {
 	// The humanoid's proportions (reference: Robots/Humanoid - white armor over
@@ -279,6 +285,24 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 						bWalkPlaying[i] = bWantWalk;
 					}
 				}
+				// Speed-match the walk so the feet stay planted. Same defect the
+				// crew had: the clip was pinned to rate 1.0 while the entity
+				// translated at whatever speed the sim gave it, so the feet slid.
+				//
+				// The stride default is DERIVED, not directly measured, and that
+				// is worth knowing: UE's GLTF exporter emits the skeletal mesh
+				// without its AnimSequences, so the robot clip could not be
+				// sampled in Blender the way the crew's was. What IS known is
+				// that the robot is rigged by the same rig_colonist.py with the
+				// same leg-swing degrees, comes out the same 199 cm tall, and
+				// carries a clip of the same length - so its stride matches the
+				// crew's measured 104 cm per cycle, then rides the runtime
+				// downscale to 180 cm (x0.905) => ~94 cm. rh.RobotStrideCm exists
+				// so a look that disagrees can be dialled without a rebuild.
+				const float RobotStride = FMath::Max(CVarRobotStrideCm.GetValueOnGameThread(), 1.f);
+				Skel->GlobalAnimRateScale = bWantWalk
+					? FMath::Clamp(Speed / RobotStride, 0.05f, 6.f)
+					: 1.f;
 			}
 			continue;
 		}

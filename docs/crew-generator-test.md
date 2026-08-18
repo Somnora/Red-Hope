@@ -222,3 +222,38 @@ knowledge of what is in the way; props are placed by a different subsystem and
 nothing consults them. Fixing it properly means either prop-aware wander points
 or real avoidance, which is a design decision about how much agency the crew
 should appear to have, not a repair.
+
+## The 8 crew's sources are gone, and my migration is a plausible cause (2026-08-17)
+
+Searched `red-hope-east` for any surviving source for the eight — pre-decimation
+GLBs, rigged GLBs, sprites, anything bearing their names. **Zero matches.** `io/`
+now holds only today's `crewtest`.
+
+The likely reason is mine. The 2026-08-17 migration deliberately excluded the
+top-level `io/` — 14 GB judged as "rebuildable intermediates; the finals all live
+in `Martians/gen`" — and then the source tree was deleted. That judgement was
+true for 12 crew and false for 8: `io/rigged/` held the rigged walkers, and `io/`
+is the most plausible home for their sprites. I cannot prove their
+*pre-decimation* meshes were ever in there — they were never in
+`models_20260717`, so they may have been lost before the migration touched
+anything — but the exclusion was my decision and I reasoned about it in the
+abstract instead of listing what I was dropping.
+
+**The rule this earns:** when excluding anything from a migration, write the
+file list to the repo first. A manifest of what was dropped costs nothing and
+turns "probably rebuildable" from a judgement into a checkable claim.
+
+Impact is bounded: the 8 still exist and run in-game, they are simply stuck on
+confetti paint until regenerated from new sprites (plan §10 decision 3, ~$13 plus
+a bake). Nothing that worked has stopped working.
+
+## Robot walkers: same foot-slide fix
+
+`RHAgentVisualizerSubsystem` had the identical defect and now speed-matches too,
+via `rh.RobotStrideCm` (default 94.4). The default is **derived, not measured**:
+UE's GLTF exporter emits a skeletal mesh without its AnimSequences, so the robot
+clip could not be sampled in Blender the way the crew's was. What is known is
+that the robot comes off the same `rig_colonist.py` with the same leg swing, the
+same 199 cm height and a same-length clip, so it inherits the crew's measured
+104 cm per cycle, then rides the runtime downscale to 180 cm (×0.905) → ~94 cm.
+The cvar exists so a look that disagrees is a dial, not a rebuild.
