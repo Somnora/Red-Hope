@@ -270,7 +270,12 @@ namespace
 		{
 			// Darker basalt patches past the flat, at ~240 m blob scale: the
 			// albedo variation real regolith has (and one flat tint lacks).
-			const bool bPatch = Centroid.Size2D() > 33000.0
+			// Gate lowered 330 m -> 160 m (2026-08-18 terrain pass, professor
+			// review): the near vista read flat partly because these patches
+			// were excluded from everything the default camera actually frames.
+			// 160 m keeps the colony flat (z=0 inside 150 m) clean while the
+			// mid-ground picks up the albedo variation real regolith has.
+			const bool bPatch = Centroid.Size2D() > 16000.0
 				&& Noise2((float)(Centroid.X / 24000.0), (float)(Centroid.Y / 24000.0), 501u) > 0.62f;
 			return bPatch ? Patch : Base;
 		};
@@ -425,7 +430,58 @@ void BuildScenery(AActor& Rig)
 				Radii, Rand.FRandRange(0.f, 360.f), (uint32)Rand.RandRange(1, 1 << 24), bSubdivide);
 		}
 	};
-	Scatter(Boulders, 260, 38.f, 460.f, 0.5f, 2.4f, true);
+	// Haul-corridor exclusion (2026-08-18, professor review condition): robots
+	// drive shaft-head -> deposit in straight lines, and scatter rocks have no
+	// collision, so a rock on the corridor is a visible drive-through - the
+	// exact class the director flagged for crew and furniture. Corridors are
+	// derived from docs/data/RH_Deposits.csv (positions are battery-pinned
+	// constants of the shipped colony; update BOTH if the CSV ever moves).
+	static const FVector2D DepositCm[] = {
+		FVector2D(2000.f, -3000.f),     // Regolith_A
+		FVector2D(-30000.f, 4000.f),    // Regolith_B
+		FVector2D(-16000.f, -15000.f),  // Ore_A
+		FVector2D(-8000.f, -44000.f),   // Ore_B
+		FVector2D(13000.f, 13000.f),    // Ice_A
+	};
+	const auto OnHaulCorridor = [&](const FVector2D& P, float ClearCm) -> bool
+	{
+		for (const FVector2D& D : DepositCm)
+		{
+			const float L2 = D.SizeSquared();
+			if (L2 < 1.f) { continue; }
+			const float T = FMath::Clamp(FVector2D::DotProduct(P, D) / L2, 0.f, 1.f);
+			if (FVector2D::Distance(P, D * T) < ClearCm) { return true; }
+		}
+		return false;
+	};
+	const auto ScatterEx = [&](FAcc& Acc, int32 Count, float MinRm, float MaxRm, float SMin, float SMax, bool bSubdivide, float CorridorCm)
+	{
+		for (int32 i = 0; i < Count; ++i)
+		{
+			// Draw position AND size unconditionally so the stream stays
+			// aligned with the shipped sequence; a corridor hit skips the rock
+			// but never re-rolls (deterministic, and thins rather than dams).
+			const float R = Rand.FRandRange(MinRm, MaxRm) * 100.f;
+			const FVector2D Pos = FVector2D(Deg(Rand.FRandRange(0.f, 360.f)).Vector()) * R;
+			const float S = Rand.FRandRange(SMin, SMax);
+			const FVector Radii(S * 55.f * Rand.FRandRange(0.7f, 1.4f), S * 55.f * Rand.FRandRange(0.7f, 1.4f), S * 42.f);
+			const float Yaw = Rand.FRandRange(0.f, 360.f);
+			const uint32 Seed = (uint32)Rand.RandRange(1, 1 << 24);
+			if (OnHaulCorridor(Pos, CorridorCm))
+			{
+				continue;
+			}
+			AppendBoulder(Acc, FVector(Pos.X, Pos.Y, GroundZCm(Pos.X, Pos.Y) - Radii.Z * 0.35f),
+				Radii, Yaw, Seed, bSubdivide);
+		}
+	};
+	// Retuned (professor-gated): boulder inner radius 38 -> 66 m so the
+	// showcase grid (~62 m reach) never wears a rock; corridors kept clear.
+	ScatterEx(Boulders, 300, 66.f, 460.f, 0.5f, 2.4f, true, 500.f);
+	// NEW large-silhouette line - the size class the vista lacked. 1.2-2.7 m
+	// standing rocks, sparse, mid-to-far only: silhouette interest at the
+	// distances the strategy camera actually frames, without crowding the flat.
+	ScatterEx(Boulders, 44, 90.f, 430.f, 3.2f, 6.5f, true, 800.f);
 	Scatter(Pebbles, 520, 12.f, 240.f, 0.12f, 0.45f, false);
 	for (const FCrater& C : Craters())
 	{
