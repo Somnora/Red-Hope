@@ -97,6 +97,23 @@ for sgn, s in ((1, "L"), (-1, "R")):
     add_bone(f"foot.{s}",  bpos(0.05,  sgn * hipw), bpos(0.01, sgn * hipw * 1.15), f"shin.{s}")
     add_bone(f"upperarm.{s}", bpos(0.78, sgn * shw), bpos(0.62, sgn * shw * 1.35), "chest")
     add_bone(f"forearm.{s}",  bpos(0.62, sgn * shw * 1.35), bpos(0.46, sgn * shw * 1.5), f"upperarm.{s}")
+
+# --- ALIGN EVERY BONE'S ROLL to the anatomical swing plane (2026-08-18) ---
+# The clips key fore-aft swings on local X, which is only the side axis for
+# bones Blender happens to give that roll - true for the straight-down legs,
+# FALSE for the diagonal arm bones, whose default rolls tilt each bone's local
+# X differently. Keying axis 0 on those rotated the shoulder and the elbow in
+# two different world planes - the director's "the elbow and the hands are
+# articulating in different directions than the elbow and the shoulder".
+# Setting local Z = side x bonedir makes local X the side-axis projection for
+# EVERY bone (X = Y x Z = d x (side x d) = side - d(d.side)), so all arm
+# segments swing in the same fore-aft plane. For vertical legs this reproduces
+# Blender's default roll exactly, so existing leg motion is bit-identical.
+for eb in arm_data.edit_bones:
+    d = (eb.tail - eb.head).normalized()
+    z_target = side.cross(d)
+    if z_target.length > 1e-4:
+        eb.align_roll(z_target.normalized())
 bpy.ops.object.mode_set(mode="OBJECT")
 
 # --- WELD BEFORE BIND (2026-08-17: this is the fix, not an option) ---
@@ -180,6 +197,15 @@ def seg_dist(p, a, bpt):
 # joint gets a real mix of both bones and deforms smoothly. The failure mode
 # degrades from "geometry tears off the body" to "slightly soft weighting".
 K_NEAREST = 3
+# Relative cutoff (2026-08-18): a candidate bone only joins the blend when its
+# segment distance is within CUTOFF x the nearest bone's. Without it, a BELLY
+# vertex - nearest to the spine but with the upper-arm segment passing not
+# much further away - handed the arm ~25% of the torso surface, and the belly
+# stretched with every arm swing (the director's "alien"). A true joint vertex
+# sits near-equidistant between its two bones and keeps the blend; a torso
+# vertex is 2-3x closer to the spine than to any arm and now binds clean.
+# Inverse-SQUARE weighting further concentrates the blend on the winner.
+REL_CUTOFF = 1.6
 fixed = 0
 mw = body.matrix_world
 for v in body.data.vertices:
@@ -187,8 +213,8 @@ for v in body.data.vertices:
         continue
     p = mw @ v.co
     ranked = sorted(((seg_dist(p, s[1], s[2]), s[0]) for s in bone_segs), key=lambda t: t[0])[:K_NEAREST]
-    # inverse-distance weights, epsilon so a vertex sitting on a bone is finite
-    inv = [(1.0 / max(d, 1e-4), grp) for d, grp in ranked]
+    ranked = [(d, grp) for d, grp in ranked if d <= ranked[0][0] * REL_CUTOFF]
+    inv = [(1.0 / max(d * d, 1e-6), grp) for d, grp in ranked]
     total = sum(w for w, _ in inv) or 1.0
     for w, grp in inv:
         grp.add([v.index], w / total, "REPLACE")

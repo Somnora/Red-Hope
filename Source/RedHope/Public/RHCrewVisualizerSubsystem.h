@@ -115,10 +115,15 @@ private:
 	// Furniture positions per level, rebuilt each Tick from the colony
 	// visualizer's furnished props. Presentation-side only: the SIM has no
 	// furniture concept and stays untouched - this is about where figures
-	// APPEAR to walk. Wander targets are resampled away from these, and the
-	// walk steers around them; work-post approaches are deliberately exempt
-	// so a colonist can still reach the bench they are meant to stand at.
-	TMap<int32, TArray<FVector>> FurnitureByLevel;
+	// APPEAR to walk. XYZ is the prop centre; W is its 2D bounds radius, so a
+	// long dining table repels along its whole length, not just at its
+	// centre point (director 2026-08-18: figures still cut through desks).
+	// Wander targets are resampled away from these, and EVERY walk steers
+	// around them - the old whole-trip exemption for work-post approaches let
+	// a commute cross the entire floor through furniture; now only obstacles
+	// close to the DESTINATION are ignored, which still lets a colonist
+	// reach the bench they are meant to stand at without orbiting it.
+	TMap<int32, TArray<FVector4>> FurnitureByLevel;
 	bool NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const;
 	// A work post BESIDE the job room's furnishing prop on this floor - a
 	// deterministic seat around the cell centre keyed by SeatSeed (colonist Id)

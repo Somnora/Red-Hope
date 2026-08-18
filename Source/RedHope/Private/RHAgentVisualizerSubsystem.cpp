@@ -26,6 +26,12 @@ static TAutoConsoleVariable<float> CVarRobotStrideCm(
 	TEXT("Ground distance (cm) the robot Walk clip depicts per cycle, at the runtime scale. Drives animation rate so feet do not slide."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarRobotPlantCm(
+	TEXT("rh.RobotPlantCm"),
+	16.f,
+	TEXT("Cm to press the robot walker down from its bounds-derived ground fit. The lift is computed from the REFERENCE pose's bounds bottom, but the animated Idle/Walk soles sit higher than the ref pose's lowest point, which read as floating (director 2026-08-18: shadows don't touch the feet). Calibrated against a close idle-line capture."),
+	ECVF_Default);
+
 namespace
 {
 	// The humanoid's proportions (reference: Robots/Humanoid - white armor over
@@ -310,8 +316,9 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 				// Sprite-generated meshes face the camera, not +X - fold the
 				// shared correction (rh.WalkerYawOffsetDeg) into the yaw.
 				static const auto* YawOff = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("rh.WalkerYawOffsetDeg"));
+				const float Plant = CVarRobotPlantCm.GetValueOnGameThread();
 				Skel->SetWorldLocationAndRotation(
-					FVector(Pos.X, Pos.Y, Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f)),
+					FVector(Pos.X, Pos.Y, Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f) - Plant),
 					FRotator(0.f, FacingYawDeg[i] + (YawOff ? YawOff->GetValueOnGameThread() : 0.f), 0.f));
 				// Cargo read from the PUBLIC sim fragments (professor: no
 				// accessor - the data is already exported). GetFragmentDataPtr,
@@ -335,7 +342,7 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 							const FVector Back = FRotator(0.f, FacingYawDeg[i], 0.f).Vector() * -30.f;
 							Lump->SetWorldLocationAndRotation(
 								FVector(Pos.X + Back.X, Pos.Y + Back.Y,
-									Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f) + 118.f),
+									Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f) - Plant + 118.f),
 								FRotator(0.f, FacingYawDeg[i] + 12.f, 0.f));
 							const float LS = 0.24f + 0.20f * Frac;
 							Lump->SetWorldScale3D(FVector(LS, LS * 1.25f, LS * 0.7f));

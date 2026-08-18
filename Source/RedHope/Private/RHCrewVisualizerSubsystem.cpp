@@ -441,11 +441,12 @@ FVector URHCrewVisualizerSubsystem::RoomSeatCm(int32 Level, FName RoomRowName, i
 
 bool URHCrewVisualizerSubsystem::NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const
 {
-	if (const TArray<FVector>* Obs = FurnitureByLevel.Find(Level))
+	if (const TArray<FVector4>* Obs = FurnitureByLevel.Find(Level))
 	{
-		for (const FVector& O : *Obs)
+		for (const FVector4& O : *Obs)
 		{
-			if (FVector::Dist2D(PointCm, O) < RadiusCm)
+			// RadiusCm is personal space; O.W is the prop's own footprint.
+			if (FVector::Dist2D(PointCm, FVector(O)) < RadiusCm + O.W)
 			{
 				return true;
 			}
@@ -470,8 +471,9 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 		return FVector(Head.X, Head.Y, FloorZ); // nowhere carved: hold the shaft
 	}
 	// Resample away from furniture (bounded: last try stands even if crowded -
-	// a colonist choosing a spot NEAR a desk beats an infinite loop). 140 cm
-	// keeps the whole figure clear of a 250 cm-footprint prop's centre.
+	// a colonist choosing a spot NEAR a desk beats an infinite loop). 80 cm of
+	// personal space on top of each prop's OWN footprint radius, which
+	// NearFurnitureCm now adds per prop.
 	FVector Candidate = FVector::ZeroVector;
 	for (int32 Try = 0; Try < 8; ++Try)
 	{
@@ -480,7 +482,7 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 			Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			FloorZ);
-		if (!NearFurnitureCm(Level, Candidate, 140.f))
+		if (!NearFurnitureCm(Level, Candidate, 80.f))
 		{
 			break;
 		}
@@ -508,7 +510,13 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			if (P->IsVisible())
 			{
-				FurnitureByLevel.FindOrAdd(PropPair.Key.X).Add(P->GetComponentLocation());
+				// 2D footprint radius from the component's world bounds,
+				// clamped: tiny props still get personal space, and one huge
+				// prop must not wall off a whole room.
+				const FBoxSphereBounds B = P->Bounds;
+				const float R = FMath::Clamp(FMath::Max(B.BoxExtent.X, B.BoxExtent.Y), 30.f, 240.f);
+				const FVector L = P->GetComponentLocation();
+				FurnitureByLevel.FindOrAdd(PropPair.Key.X).Add(FVector4(L.X, L.Y, L.Z, R));
 			}
 		}
 	}
@@ -615,44 +623,53 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		if (bWalking)
 		{
 			FVector Dir = (Flat - Pos).GetSafeNormal2D();
-			// Steer around furniture while WANDERING (director 2026-08-17:
-			// "they walk right through objects like desks and tables"). A
-			// work-post approach (bFaceOnArrive) is exempt on purpose: its
-			// destination IS beside a prop, and steering there would orbit the
-			// bench forever. Lookahead + inverse-proximity push, renormalized -
-			// bends the path, never stalls it.
-			if (!Vis->bFaceOnArrive && Pace > 0.f)
+			// Steer around furniture on EVERY walk (director 2026-08-18:
+			// figures still cut through desks - the old whole-trip exemption
+			// for work-post approaches was most of what he watched). Two
+			// fields, summed over ALL props in range, sized by each prop's
+			// real footprint (O.W):
+			//   - a push off the CURRENT position, so a figure already
+			//     brushing a desk exits instead of clipping onward through it
+			//   - a push off the LOOKAHEAD point, which bends the path early
+			// Props within arm's reach of the DESTINATION never repel: that
+			// is the bench the colonist is walking to, and repelling from it
+			// would orbit forever (the reason the old exemption existed).
+			if (Pace > 0.f)
 			{
 				const int32 WalkLevel = FMath::RoundToInt(Pos.Z / FMath::Max(1.0, Sim->GetFloorHeightCm()));
 				const float Look = FMath::Min(190.f, FVector::Dist2D(Pos, Flat));
 				const FVector Ahead = Pos + Dir * Look;
-				float BestD = 95.f;
-				FVector Hit = FVector::ZeroVector;
-				bool bHit = false;
-				if (const TArray<FVector>* Obs = FurnitureByLevel.Find(WalkLevel))
+				FVector Push = FVector::ZeroVector;
+				if (const TArray<FVector4>* Obs = FurnitureByLevel.Find(WalkLevel))
 				{
-					for (const FVector& O : *Obs)
+					for (const FVector4& O4 : *Obs)
 					{
-						const float D = FVector::Dist2D(Ahead, O);
-						if (D < BestD)
+						const FVector O(O4);
+						if (FVector::Dist2D(Flat, O) < O4.W + 80.f)
 						{
-							BestD = D;
-							Hit = O;
-							bHit = true;
+							continue; // the destination's own furniture
 						}
+						auto Repel = [&O](const FVector& From, float Reach) -> FVector
+						{
+							const float D = FVector::Dist2D(From, O);
+							if (D >= Reach)
+							{
+								return FVector::ZeroVector;
+							}
+							FVector Away = (From - O).GetSafeNormal2D();
+							return Away * (1.f - D / Reach);
+						};
+						Push += Repel(Pos, O4.W + 85.f) * 2.2f;   // hard exit
+						Push += Repel(Ahead, O4.W + 55.f) * 1.4f; // early bend
 					}
 				}
-				if (bHit)
+				if (!Push.IsNearlyZero())
 				{
-					FVector Away = Ahead - Hit;
-					Away.Z = 0.0;
-					Away = Away.GetSafeNormal();
-					if (Away.IsNearlyZero())
-					{
-						Away = FVector(-Dir.Y, Dir.X, 0.f); // dead-on: pick a side
-					}
-					const float W = 1.f - BestD / 95.f;
-					Dir = (Dir + Away * (1.6f * W)).GetSafeNormal2D();
+					Push.Z = 0.0;
+					const FVector Bent = (Dir + Push.GetClampedToMaxSize(2.6)).GetSafeNormal2D();
+					// A push that exactly cancels travel (pinched between two
+					// props) slides sideways instead of freezing in place.
+					Dir = Bent.IsNearlyZero() ? FVector(-Dir.Y, Dir.X, 0.f) : Bent;
 				}
 			}
 			Actor->SetActorLocation(Pos + Dir * Step);
