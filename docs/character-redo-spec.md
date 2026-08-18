@@ -61,7 +61,13 @@ re-rig — queued as the next gate after the hand-play fix pass verifies.
 4. **Re-rig** the picked, textured, cleaned meshes with the animation-phase
    rig loop (same skeleton + clip names so the existing Walk/Idle/job clips
    and `WalkerAnimPath()` keep working, or re-emit clips per walker as the
-   loop did originally).
+   loop did originally). **MANDATORY: `RH_TARGET_HEIGHT_M=1.99`** on every crew
+   rig. UE's reimport-in-place keeps the existing Skeleton asset, whose bone
+   spacing was fitted on ~1.99 m meshes; a mesh rigged at TRELLIS's native
+   ~1.0 m gets STRETCHED to the old bone positions by animation retargeting —
+   the 2026-08-18 "slenderman" incident, measured as 100 cm imported bounds vs
+   the roster's 199 cm, fixed to a 0.5 cm roster-wide spread by rigging at
+   the matching height.
 5. **Import** headless over the existing `RH_Walker_<face>` names
    (`-replaceexisting`), live boot, director look.
 

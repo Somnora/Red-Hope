@@ -2,6 +2,7 @@
 # Bake the regenerated 8 crew through TRELLIS.2 - the FIRST batch on the
 # real-normals path (RH_KEEP_HIPOLY + rh_bake_normal.py per asset).
 # Inputs: alpha-cut hero fronts at $NS/io/crew8/in/<id>.png
+# NOTE: local re-rigging of these outputs MUST use RH_TARGET_HEIGHT_M=1.99 (see character-redo-spec).
 # Outputs: $NS/io/crew8/out/<id>.glb, <id>_hi.glb, <id>_real_normal.png
 set -u
 NS=/lambda/nfs/red-hope-east/red_hope

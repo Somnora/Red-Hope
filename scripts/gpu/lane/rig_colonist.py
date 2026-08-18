@@ -34,6 +34,28 @@ if len(meshes) > 1:
 body = bpy.context.view_layer.objects.active
 bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
 
+# --- RH_TARGET_HEIGHT_M: normalize the mesh height BEFORE the armature is
+# fitted (2026-08-18, the slenderman bug). TRELLIS.2 meshes arrive ~1.0 units
+# tall while the shipped crew skeletons were fitted on ~1.99-unit meshes.
+# UE's reimport-in-place KEEPS the existing Skeleton asset, and animation
+# retargeting then stretches a short mesh to the old bone spacing: the
+# director's "extremely and terrifyingly large... slenderman" botanist,
+# measured as 100 cm imported bounds vs the roster's 199 cm. Scaling here -
+# before bone fitting - makes the new armature's spacing match the shipped
+# skeleton, which is what the 12 re-rigged-from-199cm-sources proved works.
+_th = float(__import__("os").environ.get("RH_TARGET_HEIGHT_M", "0") or 0)
+if _th > 0:
+    _bb = [body.matrix_world @ Vector(c) for c in body.bound_box]
+    _H = max(v.z for v in _bb) - min(v.z for v in _bb)
+    if _H > 1e-4 and abs(_H - _th) > 1e-3:
+        _f = _th / _H
+        body.scale = (_f, _f, _f)
+        bpy.ops.object.select_all(action="DESELECT")
+        body.select_set(True)
+        bpy.context.view_layer.objects.active = body
+        bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+        print("[rig] height normalized: %.3f -> %.2f m (x%.3f)" % (_H, _th, _f), flush=True)
+
 # --- proportions from bounds ---
 bb = [body.matrix_world @ Vector(c) for c in body.bound_box]
 zmin = min(v.z for v in bb); zmax = max(v.z for v in bb)
