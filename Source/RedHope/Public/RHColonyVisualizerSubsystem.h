@@ -171,6 +171,10 @@ private:
 	// Per-cell furnishing prop component (owned by its tile actor, so it is
 	// GC-safe via CarveTileVisuals and inherits the tile's slice-view hiding).
 	TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>> RoomPropByCell;
+	// Per-cell hab-light brightness multiplier by room type (professor-gated
+	// 2026-08-18): folded into the tick loop's Want so brownout/circulation
+	// behaviour stays untouched. Keyed like LightByCell.
+	TMap<FIntVector, float> LightMulByCell;
 
 public:
 	// Read-only view of the furnished props, for the crew visualizer's

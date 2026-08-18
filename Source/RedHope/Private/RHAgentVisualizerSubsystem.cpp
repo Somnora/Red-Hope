@@ -4,6 +4,7 @@
 #include "RHSimWorldSubsystem.h"
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
+#include "RHAgentFragments.h"
 #include "Animation/AnimSequence.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -74,6 +75,14 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 			S->DestroyComponent();
 		}
 	}
+	for (TWeakObjectPtr<UStaticMeshComponent>& L : CargoLumps)
+	{
+		if (UStaticMeshComponent* C = L.Get())
+		{
+			C->DestroyComponent();
+		}
+	}
+	CargoLumps.Reset();
 	SkelBodies.Reset();
 	bWalkPlaying.Reset();
 	FeetLiftCm.Reset();
@@ -111,6 +120,23 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 			// grounded mesh (origin at soles) yields 0, a mid-body origin
 			// yields +extent. Works for either without knowing which shipped.
 			FeetLiftCm.Add((WB.BoxExtent.Z - WB.Origin.Z) * WalkerScale);
+			// The cargo lump: what a hauling robot is CARRYING, finally
+			// visible. Hidden until the task fragment says CargoKg > 0.
+			UStaticMeshComponent* Lump = NewObject<UStaticMeshComponent>(Holder);
+			Lump->RegisterComponent();
+			Holder->AddInstanceComponent(Lump);
+			Lump->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+			Lump->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Lump->SetAbsolute(true, true, true);
+			if (UMaterialInterface* LumpBase = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
+			{
+				UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(LumpBase, Lump);
+				Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.44f, 0.21f, 0.10f)); // hauled regolith
+				Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor::Black);
+				Lump->SetMaterial(0, Mid);
+			}
+			Lump->SetVisibility(false);
+			CargoLumps.Add(Lump);
 			Skel->SetVisibility(!bSliceHidden);
 			if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, RobotIdleClip))
 			{
@@ -151,6 +177,17 @@ void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 		if (S)
 		{
 			S->SetVisibility(!bHidden);
+		}
+	}
+	// Cargo lumps follow the slice hide; the Tick below re-shows only loaded ones.
+	if (bHidden)
+	{
+		for (TWeakObjectPtr<UStaticMeshComponent>& L : CargoLumps)
+		{
+			if (UStaticMeshComponent* C = L.Get())
+			{
+				C->SetVisibility(false);
+			}
 		}
 	}
 }
@@ -276,6 +313,35 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 				Skel->SetWorldLocationAndRotation(
 					FVector(Pos.X, Pos.Y, Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f)),
 					FRotator(0.f, FacingYawDeg[i] + (YawOff ? YawOff->GetValueOnGameThread() : 0.f), 0.f));
+				// Cargo read from the PUBLIC sim fragments (professor: no
+				// accessor - the data is already exported). GetFragmentDataPtr,
+				// never Checked: the RH.Crew cheat's dummy agents share this
+				// tracking list and their archetype has no task fragment.
+				if (CargoLumps.IsValidIndex(i))
+				{
+					if (UStaticMeshComponent* Lump = CargoLumps[i].Get())
+					{
+						const FRHTaskFragment* Task = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
+						const FRHRobotFragment* Robot = EntityManager.GetFragmentDataPtr<FRHRobotFragment>(Tracked[i]);
+						const float Cargo = Task ? Task->CargoKg : 0.f;
+						const bool bShow = !bSliceHidden && Cargo > 0.f;
+						if (Lump->IsVisible() != bShow)
+						{
+							Lump->SetVisibility(bShow);
+						}
+						if (bShow)
+						{
+							const float Frac = FMath::Clamp(Cargo / FMath::Max(Robot ? Robot->CargoCapKg : 100.f, 1.f), 0.f, 1.f);
+							const FVector Back = FRotator(0.f, FacingYawDeg[i], 0.f).Vector() * -30.f;
+							Lump->SetWorldLocationAndRotation(
+								FVector(Pos.X + Back.X, Pos.Y + Back.Y,
+									Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f) + 118.f),
+								FRotator(0.f, FacingYawDeg[i] + 12.f, 0.f));
+							const float LS = 0.24f + 0.20f * Frac;
+							Lump->SetWorldScale3D(FVector(LS, LS * 1.25f, LS * 0.7f));
+						}
+					}
+				}
 				const bool bWantWalk = Speed > 15.f;
 				if (bWantWalk != bWalkPlaying[i])
 				{

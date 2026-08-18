@@ -1692,6 +1692,34 @@ FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
 	if (RoomRowName == FName("Garden#planted")) { return FLinearColor(0.10f, 0.42f, 0.12f); } // growing - the only green on Mars
 	// Crop-stage keys (Garden#<family>#<stage> / Greenhouse#...): same green.
 	if (RoomRowName.ToString().Contains(TEXT("#"))) { return FLinearColor(0.10f, 0.42f, 0.12f); }
+	// Tier and utility rooms (2026-08-18 gap-fill, professor review): these
+	// eight designatable types previously fell through to the dirt default, so
+	// every tier room wore the identical washed grey - the same missed-fallback
+	// family as the 2026-08-14 furniture audit, which RoomPropPath got fixed
+	// for and this chain never did.
+	if (RoomRowName == FName("Infirmary"))      { return FLinearColor(0.30f, 0.44f, 0.36f); } // clinical mint
+	if (RoomRowName == FName("Workshop"))       { return FLinearColor(0.36f, 0.24f, 0.12f); } // iron + oil
+	if (RoomRowName == FName("LabFull"))        { return FLinearColor(0.08f, 0.16f, 0.34f); } // deep ice
+	if (RoomRowName == FName("WorkbenchLarge")) { return FLinearColor(0.38f, 0.26f, 0.10f); } // heavy amber
+	if (RoomRowName == FName("ChemTableLarge")) { return FLinearColor(0.26f, 0.16f, 0.36f); } // reagent violet
+	if (RoomRowName == FName("WaterWorks"))     { return FLinearColor(0.10f, 0.28f, 0.40f); } // water blue
+	if (RoomRowName == FName("Septic"))         { return FLinearColor(0.24f, 0.26f, 0.12f); } // murk olive
+	if (RoomRowName == FName("Greenhouse"))     { return FLinearColor(0.14f, 0.26f, 0.09f); } // tilled, waiting
+	// Unknown row: resolve its FUNCTION (mirrors RoomPropPath's fallback) so a
+	// future room inherits its family hue instead of reading as dirt.
+	if (!RoomRowName.IsNone())
+	{
+		if (const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr)
+		{
+			if (const FRHRoomRow* Row = Defs->GetRoom(RoomRowName))
+			{
+				if (Row->Function != RoomRowName)
+				{
+					return RoomTint(Row->Function);
+				}
+			}
+		}
+	}
 	return FLinearColor(0.20f, 0.15f, 0.11f); // undesignated: the dirt
 }
 
@@ -1941,7 +1969,6 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Light->SetAbsolute(true, true, true);
 			Light->SetIntensityUnits(ELightUnits::Candelas);
 			Light->SetIntensity(0.f);
-			Light->SetLightColor(FColor(255, 236, 210)); // warm interior white
 			Light->SetAttenuationRadius(850.f);
 			Light->SetCastShadows(false);
 			Light->RegisterComponent();
@@ -1951,6 +1978,47 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		else
 		{
 			Light->SetVisibility(true);
+		}
+		// Room identity in the LIGHT (2026-08-18, professor-gated): colour
+		// temperature and a brightness multiplier per room type. Set on BOTH
+		// the create and reuse branches - the component survives
+		// redesignation (FindRef above), so a colour set only at creation
+		// goes stale when a Lab becomes LivingQuarters. Brightness is a
+		// per-cell MULTIPLIER folded into the tick loop below, never a
+		// SetIntensity here, so brownout/shed/circulation behaviour - "light
+		// is a readout of colony health" - is preserved exactly.
+		if (Light)
+		{
+			FColor Temp(255, 236, 210); // the shipped warm interior white
+			float Mul = 1.0f;
+			const FName Fn = Room;
+			const FString RoomStr = Room.ToString();
+			if (Fn == FName("Cooking") || Fn == FName("Dining"))
+			{
+				Temp = FColor(255, 186, 120); Mul = 1.05f;          // galley warmth
+			}
+			else if (Fn == FName("Lab") || Fn == FName("LabFull") || Fn == FName("Workstation") || Fn == FName("ChemTableLarge"))
+			{
+				Temp = FColor(222, 234, 255); Mul = 1.0f;           // cool task light
+			}
+			else if (Fn == FName("Infirmary"))
+			{
+				Temp = FColor(255, 250, 240); Mul = 1.35f;          // bright neutral
+			}
+			else if (Fn == FName("LivingQuarters"))
+			{
+				Temp = FColor(255, 196, 136); Mul = 0.65f;          // dim amber rest
+			}
+			else if (Fn == FName("Garden") || Fn == FName("Greenhouse") || RoomStr.Contains(TEXT("#")))
+			{
+				Temp = FColor(255, 226, 238); Mul = 1.15f;          // grow-light blush
+			}
+			else if (Fn == FName("Hallway"))
+			{
+				Mul = 0.8f;
+			}
+			Light->SetLightColor(Temp);
+			LightMulByCell.Add(Pair.Key, Mul);
 		}
 	}
 
@@ -1968,7 +2036,8 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		{
 			continue;
 		}
-		const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul : 0.f;
+		const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
+		const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul * RoomMul : 0.f;
 		if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.5f))
 		{
 			Light->SetIntensity(Want);

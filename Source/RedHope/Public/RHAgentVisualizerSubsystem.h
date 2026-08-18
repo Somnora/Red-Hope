@@ -69,6 +69,11 @@ private:
 	// their feet, so that constant buried every robot 75 cm - the director's
 	// "stuck halfway underground".
 	TArray<float> FeetLiftCm;
+	// One small regolith-lump component per skeletal robot (professor-gated
+	// 2026-08-18): visible while the robot's FRHTaskFragment carries CargoKg,
+	// scaled by load fraction. Read from the PUBLIC Mass fragments - no sim
+	// accessor, no sim recompile.
+	TArray<TWeakObjectPtr<UStaticMeshComponent>> CargoLumps;
 	bool bUseSkeletal = false;
 	TArray<FMassEntityHandle> Tracked;
 	// Per-entity gait state, parallel to Tracked: last ground position (for

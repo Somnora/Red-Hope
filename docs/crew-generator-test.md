@@ -293,3 +293,39 @@ session, so the batch ran as short foreground chunks (`--limit`); and the
 director's root volume hit 100% full mid-pipeline — 1.4 GB of session scratch
 freed, the pipeline moved to the external volume, but the machine itself
 remains ~99% full without me.
+
+---
+
+## The Living Colony pass (2026-08-18, professor-gated)
+
+Professor verdict (Fable 5) before any code: two of the plan's four parts were
+DUPLICATES of shipped systems - room floor tinting exists (`RoomTint`, gentle by
+director decision 2026-07-09), and crew already sleep in their bunks at night
+(`RHCrewVisualizerSubsystem.cpp:750-762`). Both cut. What shipped:
+
+1. **RoomTint gap-fill**: eight designatable room types (Infirmary, Workshop,
+   LabFull, WorkbenchLarge, ChemTableLarge, WaterWorks, Septic, Greenhouse) fell
+   through to the dirt default - the same missed-fallback family as the
+   2026-08-14 furniture audit. Fixed with direct tints plus the Function
+   fallback RoomPropPath already had.
+2. **Hab-light identity**: colour temperature and brightness per room type
+   (galley warm, lab cool, infirmary bright x1.35, quarters dim x0.65,
+   greenhouse grow-blush), set on BOTH the create and reuse branches (the
+   component survives redesignation - colour set only at creation goes stale),
+   with brightness as a per-cell multiplier folded into the existing tick loop
+   so brownout/shed/circulation behaviour is untouched.
+3. **Visible robot cargo**: a regolith lump on each robot's back, driven by the
+   PUBLIC sim fragments (`FRHTaskFragment.CargoKg` / `FRHRobotFragment.CargoCapKg`)
+   via `GetFragmentDataPtr` - no sim accessor, no sim recompile (professor: the
+   data is already exported; `Checked` would assert on cheat-spawned dummies).
+   Registered in ResetTracking and SetSliceHidden.
+
+**Evidence honesty**: the light-warmth change is visible but subtle at the demo
+camera (13.7% of pixels moved, much of it crew motion); the tint gap-fill and
+the cargo lump could NOT be photographed in a default demo boot BY CONSTRUCTION -
+tier rooms are SliceActive=FALSE so RH.Demo never designates them, and five
+capture attempts never caught a robot in haul phase 2 (the demo's dig loop
+without stockpile demand may never spawn hauls). Both are code-verified against
+the professor's line-cited lifecycle and the researcher's independent map, and
+frame-verification belongs to the director's next real playthrough: designate a
+tier room; order a dig plus a build and watch the haulers.
