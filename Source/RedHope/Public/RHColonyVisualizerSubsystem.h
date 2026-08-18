@@ -171,6 +171,14 @@ private:
 	// Per-cell furnishing prop component (owned by its tile actor, so it is
 	// GC-safe via CarveTileVisuals and inherits the tile's slice-view hiding).
 	TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>> RoomPropByCell;
+
+public:
+	// Read-only view of the furnished props, for the crew visualizer's
+	// furniture avoidance (director 2026-08-17: "there's no collision so they
+	// walk right through objects like desks and tables"). Key.X is the level.
+	const TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>>& GetRoomProps() const { return RoomPropByCell; }
+
+private:
 	// Automatic hab lighting (director 2026-07-09): one soft ceiling light per
 	// designated cell, owned by its tile actor like the prop; intensity is a
 	// READOUT of the sim - full while the floor's circulator runs on a healthy

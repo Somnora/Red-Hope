@@ -112,6 +112,14 @@ private:
 	// A random point inside a random carved cell of the given floor - the
 	// canonical spiral layout the colony visualizer lays tiles with.
 	FVector WanderPointCm(int32 Level) const;
+	// Furniture positions per level, rebuilt each Tick from the colony
+	// visualizer's furnished props. Presentation-side only: the SIM has no
+	// furniture concept and stays untouched - this is about where figures
+	// APPEAR to walk. Wander targets are resampled away from these, and the
+	// walk steers around them; work-post approaches are deliberately exempt
+	// so a colonist can still reach the bench they are meant to stand at.
+	TMap<int32, TArray<FVector>> FurnitureByLevel;
+	bool NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const;
 	// A work post BESIDE the job room's furnishing prop on this floor - a
 	// deterministic seat around the cell centre keyed by SeatSeed (colonist Id)
 	// so workers stand at the bench, not inside it; zero when none exists.

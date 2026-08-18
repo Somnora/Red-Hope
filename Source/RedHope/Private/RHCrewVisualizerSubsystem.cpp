@@ -439,6 +439,21 @@ FVector URHCrewVisualizerSubsystem::RoomSeatCm(int32 Level, FName RoomRowName, i
 	return FVector::ZeroVector;
 }
 
+bool URHCrewVisualizerSubsystem::NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const
+{
+	if (const TArray<FVector>* Obs = FurnitureByLevel.Find(Level))
+	{
+		for (const FVector& O : *Obs)
+		{
+			if (FVector::Dist2D(PointCm, O) < RadiusCm)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 {
 	UWorld* World = GetWorld();
@@ -454,11 +469,23 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 	{
 		return FVector(Head.X, Head.Y, FloorZ); // nowhere carved: hold the shaft
 	}
-	const FIntPoint Cell = URHColonyVisualizerSubsystem::SpiralCell(FMath::RandRange(0, Carved - 1));
-	return FVector(
-		Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
-		Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),
-		FloorZ);
+	// Resample away from furniture (bounded: last try stands even if crowded -
+	// a colonist choosing a spot NEAR a desk beats an infinite loop). 140 cm
+	// keeps the whole figure clear of a 250 cm-footprint prop's centre.
+	FVector Candidate = FVector::ZeroVector;
+	for (int32 Try = 0; Try < 8; ++Try)
+	{
+		const FIntPoint Cell = URHColonyVisualizerSubsystem::SpiralCell(FMath::RandRange(0, Carved - 1));
+		Candidate = FVector(
+			Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
+			Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),
+			FloorZ);
+		if (!NearFurnitureCm(Level, Candidate, 140.f))
+		{
+			break;
+		}
+	}
+	return Candidate;
 }
 
 void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
@@ -470,6 +497,20 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	if (!Sim || !Clock || !Colony)
 	{
 		return;
+	}
+
+	// Furniture obstacle cache for this frame: tens of props, trivial to
+	// rebuild, and rebuilding dodges every refurnish/lifecycle edge case.
+	FurnitureByLevel.Reset();
+	for (const auto& PropPair : Colony->GetRoomProps())
+	{
+		if (const UStaticMeshComponent* P = PropPair.Value.Get())
+		{
+			if (P->IsVisible())
+			{
+				FurnitureByLevel.FindOrAdd(PropPair.Key.X).Add(P->GetComponentLocation());
+			}
+		}
 	}
 	const TArray<FRHColonist>& Roster = Sim->GetColonists();
 	const double Now = World->GetTimeSeconds();
@@ -573,7 +614,47 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		const bool bWalking = FVector::Dist2D(Pos, Flat) > Step;
 		if (bWalking)
 		{
-			const FVector Dir = (Flat - Pos).GetSafeNormal2D();
+			FVector Dir = (Flat - Pos).GetSafeNormal2D();
+			// Steer around furniture while WANDERING (director 2026-08-17:
+			// "they walk right through objects like desks and tables"). A
+			// work-post approach (bFaceOnArrive) is exempt on purpose: its
+			// destination IS beside a prop, and steering there would orbit the
+			// bench forever. Lookahead + inverse-proximity push, renormalized -
+			// bends the path, never stalls it.
+			if (!Vis->bFaceOnArrive && Pace > 0.f)
+			{
+				const int32 WalkLevel = FMath::RoundToInt(Pos.Z / FMath::Max(1.0, Sim->GetFloorHeightCm()));
+				const float Look = FMath::Min(190.f, FVector::Dist2D(Pos, Flat));
+				const FVector Ahead = Pos + Dir * Look;
+				float BestD = 95.f;
+				FVector Hit = FVector::ZeroVector;
+				bool bHit = false;
+				if (const TArray<FVector>* Obs = FurnitureByLevel.Find(WalkLevel))
+				{
+					for (const FVector& O : *Obs)
+					{
+						const float D = FVector::Dist2D(Ahead, O);
+						if (D < BestD)
+						{
+							BestD = D;
+							Hit = O;
+							bHit = true;
+						}
+					}
+				}
+				if (bHit)
+				{
+					FVector Away = Ahead - Hit;
+					Away.Z = 0.0;
+					Away = Away.GetSafeNormal();
+					if (Away.IsNearlyZero())
+					{
+						Away = FVector(-Dir.Y, Dir.X, 0.f); // dead-on: pick a side
+					}
+					const float W = 1.f - BestD / 95.f;
+					Dir = (Dir + Away * (1.6f * W)).GetSafeNormal2D();
+				}
+			}
 			Actor->SetActorLocation(Pos + Dir * Step);
 			if (Pace > 0.f && !Dir.IsNearlyZero())
 			{
