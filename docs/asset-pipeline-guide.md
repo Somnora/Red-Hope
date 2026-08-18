@@ -371,3 +371,26 @@ to be reconstructed from a commit message, and the rig loop
 existing 21 clips) was reachable only by booting an instance. Cherry-picking the
 important files is the judgement that failed both times, so the whole directory
 came across at 380 KB.
+
+## The acceptance instrument for surface art (2026-08-18, professor condition)
+
+Every art-touching gate MUST include a DAYLIGHT per-building acceptance capture
+and a per-asset judgement - not night frames, not atlas statistics, not sim-error
+counts. The 2026-08-17 building re-bake shipped camo-mottled paint precisely
+because it was accepted on "0 sim errors, atlases 0.0% black" and night grade
+frames; the director found it in his own boot a day later. The instrument:
+
+    bash scripts/unreal/rh_capture.sh accept_day \
+      "r.setres 2560x1440w, r.MotionBlurQuality 0, RH.Demo, RH.Showcase, \
+       RH.Floor 0, RH.SetSpeed 8, RH.Cam 22 0 0.24 0 0, RH.Snapshot 35" 1 400 2560 1440
+
+RH.Showcase is the SAME rendering path as the real game (AddBuilding ->
+HandleBuildingAdded) - the 08-18 failure was acceptance criteria and lighting,
+never the boot path. Judge every building BY NAME in the daylight frame before
+an art gate closes.
+
+Also recorded: the TRELLIS.2 bake is non-reproducible run to run, so a mesh
+paired with a texture from a DIFFERENT run produces exactly the camo-blotch
+class. Any rollback must move mesh + BC + normal + emissive mask as one
+lineage-consistent set (the 08-18 rollback of battery/ice/extractor2/lander2/
+stockpile took everything from c87a51c~1 plus the matching 08-14 masks).

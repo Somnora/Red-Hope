@@ -26,6 +26,8 @@ Every script here does. Override the destination with `RH_REPORT=<path>`.
 | `rh_tune_emissive.py` | blunt knob: sets EmissiveAmount on every MI |
 | `rh_import_masks.py` | imports grayscale mask PNGs as linear TC_Grayscale |
 | `rh_assign_masks.py` | per-model emissive mask + post-mask strength table |
+| `rh_inventory_buildings.py` | audits every mesh the real game's building tables reach: slot material, MI parent, BaseTex, Nanite/LOD/UV0, plus what sits unwired under `Models/` |
+| `rh_wire_originals.py` | puts the two stranded original building meshes (`solar2`, `habitat`) on `M_RH_Master` |
 
 **Materials are compile-free.** `UMaterialEditingLibrary` is a
 `UBlueprintFunctionLibrary`, so its whole graph API is exposed to Python:
