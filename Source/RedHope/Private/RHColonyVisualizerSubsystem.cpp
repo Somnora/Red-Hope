@@ -1011,11 +1011,15 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			{ FName("SolarArray"),    FString(TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel")) },
 			{ FName("Habitat"),       FString(TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome")) },
 			{ FName("ComputeModule"), FString(TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule")) },
-			// First asset through the hero-reference -> TRELLIS.2 (kept
-			// hi-poly) -> Blender-baked real normal lane (2026-08-18). The
-			// building drew composed primitives before - NEW coverage, so no
-			// RealModelPaths fallback exists and none is wanted.
+			// The hero-reference -> TRELLIS.2 (kept hi-poly) -> Blender-baked
+			// real normal lane (2026-08-18). All three drew composed
+			// primitives before - NEW coverage, so no RealModelPaths fallback
+			// exists and none is wanted. These retire the last of the
+			// director's "old geometrical drawings" list; IceDrill is finally
+			// distinct art (mast + auger), NOT the WaterPlant's twin.
 			{ FName("Electrolyzer"),  FString(TEXT("/Game/RedHope/Art/Models2/Electrolyzer/Electrolyzer/StaticMeshes/Electrolyzer.Electrolyzer")) },
+			{ FName("IceDrill"),      FString(TEXT("/Game/RedHope/Art/Models2/IceDrill/IceDrill/StaticMeshes/IceDrill.IceDrill")) },
+			{ FName("Pylon"),         FString(TEXT("/Game/RedHope/Art/Models2/Pylon/Pylon/StaticMeshes/Pylon.Pylon")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
