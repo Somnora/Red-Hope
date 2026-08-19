@@ -1026,6 +1026,18 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			// fallback. Borer keeps its digging-arm identity by design brief.
 			{ FName("Borer"),         FString(TEXT("/Game/RedHope/Art/Models2/Borer/Borer/StaticMeshes/Borer.Borer")) },
 			{ FName("AirFilter"),     FString(TEXT("/Game/RedHope/Art/Models2/AirFilter/AirFilter/StaticMeshes/AirFilter.AirFilter")) },
+			// Batch 4 (2026-08-18): the four buildings still wearing the
+			// oldest Hunyuan albedos - the remainder of the "TV static"
+			// family. The hero references preserved the mixed-set identity
+			// verdicts that kept these on their originals: BatteryBank keeps
+			// say-power charge bars, WaterPlant keeps tanks-and-pipes, Lander
+			// keeps the splayed descent stage; Stockpile is one strapped
+			// block per the solid-silhouette rule. Originals remain in
+			// RealModelPaths as the rh.ModelSetV2=0 set.
+			{ FName("WaterPlant"),    FString(TEXT("/Game/RedHope/Art/Models2/WaterPlant/WaterPlant/StaticMeshes/WaterPlant.WaterPlant")) },
+			{ FName("BatteryBank"),   FString(TEXT("/Game/RedHope/Art/Models2/BatteryBank/BatteryBank/StaticMeshes/BatteryBank.BatteryBank")) },
+			{ FName("Lander"),        FString(TEXT("/Game/RedHope/Art/Models2/Lander/Lander/StaticMeshes/Lander.Lander")) },
+			{ FName("Stockpile"),     FString(TEXT("/Game/RedHope/Art/Models2/Stockpile/Stockpile/StaticMeshes/Stockpile.Stockpile")) },
 		};
 		// Meshes whose color lives in vertex colors, not a texture — these (and
 		// only these) get the M_VertexColor override after the mesh is set.
