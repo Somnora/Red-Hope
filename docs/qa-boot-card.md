@@ -1,8 +1,44 @@
-# QA Boot Card — updated 2026-08-17 against `cb558e0`
+# QA Boot Card — updated 2026-08-18 against `f12736d`
 
 Regenerated 2026-08-16 against `bccf0f0` (the card before that was 40 commits
 stale). Nine commits have landed since, so the deltas are recorded in §0 rather
 than letting the card drift again.
+
+## -1. The 2026-08-18 deltas — read before trusting any building frame below
+
+Four commits landed after this card's frames were shot (`6816d4b`, `d203405`,
+`1f68ffe`, `f12736d`). Two of them change how the older sheets must be read:
+
+- **`M_RH_Master` was DEAD on Metal from mid-08-17 until `6816d4b`.** A texture
+  sweep + material re-author combined into a shader that failed the Metal
+  translator, so every master-family *building* rendered the engine's default
+  gray in-game while editor previews looked healthy. Any 08-17 building frame
+  is suspect; judge buildings from a fresh boot or from
+  `qa/2026-08-18/`. Crew frames are unaffected (`M_RH_Character` is a
+  different master). The capture harness now hard-counts material compile
+  failures so this class of frame can never be silently judged again.
+- **Five buildings are now hero-lane art** (4K hero reference → TRELLIS.2
+  kept-hi-poly → real baked 2048 normals): **Electrolyzer, IceDrill, Pylon
+  (now a solid monopole — the lattice version is one `git checkout` away),
+  Borer (tracked excavator again), AirFilter (fan-front, solid grille)**.
+  All five want your verdict; Borer + AirFilter emissive masks deliberately
+  ship at 0 until you accept the paint (masks are UV-keyed, re-cut after).
+- **Your six photo notes are fixed and live**: crew steer around furniture on
+  every walk (not just wander); the belly-stretch and wrong-plane elbows were
+  re-rigged out of all 20 walkers (bone-roll alignment + 3-bone blended
+  backstop, verified in motion renders); stationary robots plant their soles
+  (`rh.RobotPlantCm`, default 16); derived-normal strengths halved fleet-wide
+  (the "TV static" amplifier — real bakes stay at 1.0).
+- **You can now edit paint yourself**: the Red Hope Paint Shop artifact walks
+  the three lanes (reference redesign / repaint the albedo PNG / MI dials
+  in-editor); `scripts/blender/rh_paint_kit.py` exports an asset's albedo +
+  UV guide + turnaround, `scripts/unreal/rh_paint_return.py` puts your edited
+  PNG back on the right texture.
+
+New verdicts this adds to the list at the bottom: **the five hero buildings
+(esp. Borer/AirFilter paint acceptance — it unlocks their glow), Pylon
+monopole vs lattice, and whether the 0.42 accent strength reads now that the
+master actually renders.**
 
 **No compile pending.** `cb558e0`'s one-line locker swap was compiled
 2026-08-17 (`Build.sh red_hopeEditor Mac Development` → `Result: Succeeded`,

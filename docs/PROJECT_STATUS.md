@@ -182,6 +182,24 @@ orphan assets deleted (art tree 939 → 736); 13 baked-in floor plates removed;
 the crew's subsurface-shader bug fixed; licence notices now ship beside the
 executable; the project stopped calling itself "Top Down BP Game Template".
 
+**The 2026-08-16→18 tail of the arc** (commits `6816d4b`→`f12736d`): the
+surface catastrophe was root-caused to `M_RH_Master` failing the Metal shader
+translator — every master-family building had rendered engine-default gray
+in-game since mid-08-17 while editor dumps looked healthy (the fix: a
+TC_GRAYSCALE white default for the EmissiveMask sampler; the doctrine: a frame
+with material compile failures is NOT JUDGEABLE, now hard-counted by
+`rh_capture.sh` and testable via `viewmode unlit`). Five buildings then went
+through the new hero lane (Nano-Banana 4K hero reference → TRELLIS.2 with
+kept hi-poly → Blender-baked real 2048 normals, ~$0.35–0.45 each):
+Electrolyzer, IceDrill, Pylon (solid monopole re-roll), Borer, AirFilter.
+The director's six photo notes were each root-caused and fixed (furniture
+avoidance on all walks; bone-roll re-rig of all 20 walkers killing the
+belly-stretch and wrong-plane elbows; `rh.RobotPlantCm` grounding the robots;
+derived-normal strengths halved — the "TV static" amplifier). A complete
+beginner paint pipeline now exists for the director (`rh_paint_kit.py` /
+`rh_paint_return.py` + the Paint Shop artifact). Still on old paint:
+BatteryBank, WaterPlant, Lander, Stockpile — queued for the same lane.
+
 **Infrastructure:** Red Hope moved off the shared `Somnora-East` filesystem onto
 its own `red-hope-east` (checksum-verified, acceptance-tested by bootstrapping
 the lane from it). The GPU lane's tooling - 71 files including `rig_colonist.py`,
@@ -223,11 +241,12 @@ These are **finishing, not structure** — the whole arc is built.
    crew, which must be RE-TAKEN because it was given before the subsurface fix,
    the normal/MR inputs, the rigid-bind tear fix and the paint fix all landed.
 
-2b. **Three open decisions that are the director's, not repairs:**
-   - crew walk through furniture (prop-aware wander targets vs real avoidance);
-   - regenerate the 8 faces whose sources were lost (~$13 + a bake), the only
-     route to fixing their paint;
-   - night-lamp brightness and the 40% accent tint.
+2b. **Open decisions that are the director's, not repairs** (updated
+   2026-08-18): night-lamp brightness and the 40% accent tint; the five
+   hero-lane buildings (esp. Borer/AirFilter paint acceptance, which unlocks
+   their emissive re-cut); Pylon monopole vs lattice. Two former entries are
+   RESOLVED: crew now really avoid furniture on every walk (`1f68ffe`), and
+   the 8 lost-source crew were regenerated and re-rigged (`97101bc`, crew8).
 
 3. **The Gate-D mental-health framing review** — the standing hard stop.
    **Every** player-facing morale/sickness/evacuation/collapse string and icon
@@ -266,6 +285,11 @@ These are **finishing, not structure** — the whole arc is built.
    Interchange material, not the hand-built `MI_<name>`/`M_ModelTex` instances
    the older models use — if they read flat beside their neighbours, the fix is
    a material-instance pass, not regeneration.
+   *(Updated 2026-08-18: `ModelPathsV2` now carries 9 rows — the four
+   surviving 07-17 meshes plus the five hero-lane assets, all on `M_RH_Master`
+   instances with canon accents. The only buildings left on the oldest paint
+   are BatteryBank, WaterPlant, Lander and Stockpile, queued for the hero
+   lane with their identity verdicts preserved.)*
 
 7. **Character redo — premise corrected 2026-08-14, gate NOT started.** The
    spec's diagnosis ("the paint stage never ran, so the crew are gray statues")
@@ -310,9 +334,10 @@ These are **finishing, not structure** — the whole arc is built.
   a UV layout (emissive masks, derived normals) must be regenerated on every
   re-bake, and a re-bake that ships without its textures leaves new UVs on old
   paint. Both failure modes have already bitten once each.
-- **Eight crew are wearing ruined paint and their sources no longer exist.**
-  They render and animate correctly; they simply cannot be improved without
-  regeneration.
+- ~~**Eight crew are wearing ruined paint.**~~ RESOLVED `97101bc`: the eight
+  were regenerated from fresh 4K sheets (crew8), rigged and imported; all 20
+  walkers were then re-rigged again in `1f68ffe` (bone-roll planes + blended
+  backstop).
 - **Visuals are unverified by construction** — headless renders previews but
   "does it read in-game" is a hand-play verdict the director owns. The models
   are a decisive upgrade over primitives, but the polish pass's re-import + look
