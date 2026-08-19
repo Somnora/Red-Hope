@@ -16,8 +16,14 @@
 namespace
 {
 	const TCHAR* RobotWalkerMesh = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robot.RH_Walker_robot");
-	const TCHAR* RobotWalkClip   = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robotWalk.RH_Walker_robotWalk");
-	const TCHAR* RobotIdleClip   = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robotIdle.RH_Walker_robotIdle");
+	// Every clip lives beside the mesh as RH_Walker_robot<Suffix>. The full
+	// task set (Dig/Haul/Charge/Operate/Repair + Walk/Idle) shipped with the
+	// animation phase; only Walk/Idle were ever wired until 2026-08-18.
+	FString RobotClipPath(FName Suffix)
+	{
+		const FString S = Suffix.ToString();
+		return FString::Printf(TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robot%s.RH_Walker_robot%s"), *S, *S);
+	}
 }
 
 static TAutoConsoleVariable<float> CVarRobotStrideCm(
@@ -90,7 +96,7 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 	}
 	CargoLumps.Reset();
 	SkelBodies.Reset();
-	bWalkPlaying.Reset();
+	PlayingClip.Reset();
 	FeetLiftCm.Reset();
 	for (UInstancedStaticMeshComponent* Part : Parts)
 	{
@@ -144,12 +150,12 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 			Lump->SetVisibility(false);
 			CargoLumps.Add(Lump);
 			Skel->SetVisibility(!bSliceHidden);
-			if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, RobotIdleClip))
+			if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, *RobotClipPath(FName("Idle"))))
 			{
 				Skel->PlayAnimation(Idle, true);
 			}
 			SkelBodies.Add(Skel);
-			bWalkPlaying.Add(false);
+			PlayingClip.Add(FName("Idle"));
 		}
 		else
 		{
@@ -349,13 +355,46 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 						}
 					}
 				}
-				const bool bWantWalk = Speed > 15.f;
-				if (bWantWalk != bWalkPlaying[i])
+				// Clip choice: travel wins; a stationary robot whose task
+				// fragment says Working/Loading (1) or Unloading (3) plays its
+				// task's work pose; everything else idles. Same public-fragment
+				// read as the cargo lump - the task set of clips shipped with
+				// the animation phase and sat unwired until 2026-08-18.
+				FName WantClip = FName("Idle");
+				if (Speed > 15.f)
 				{
-					if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, bWantWalk ? RobotWalkClip : RobotIdleClip))
+					WantClip = FName("Walk");
+				}
+				else if (const FRHTaskFragment* T = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]))
+				{
+					if (T->Phase == 1 || T->Phase == 3)
+					{
+						switch ((ERHTaskType)T->TaskType)
+						{
+						case ERHTaskType::Dig:    WantClip = FName("Dig");     break;
+						case ERHTaskType::Haul:   WantClip = FName("Haul");    break;
+						case ERHTaskType::Build:  WantClip = FName("Operate"); break;
+						case ERHTaskType::Charge: WantClip = FName("Charge");  break;
+						case ERHTaskType::Survey: WantClip = FName("Operate"); break;
+						case ERHTaskType::Repair: WantClip = FName("Repair");  break;
+						default:                                               break;
+						}
+					}
+				}
+				if (WantClip != PlayingClip[i])
+				{
+					if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, *RobotClipPath(WantClip)))
 					{
 						Skel->PlayAnimation(Clip, true);
-						bWalkPlaying[i] = bWantWalk;
+						PlayingClip[i] = WantClip;
+						// One receipt per clip type per session: headless
+						// captures can prove the task poses actually fire.
+						static TSet<FName> Reported;
+						if (!Reported.Contains(WantClip))
+						{
+							Reported.Add(WantClip);
+							UE_LOG(LogRedHope, Display, TEXT("Robot clip live: %s"), *WantClip.ToString());
+						}
 					}
 				}
 				// Speed-match the walk so the feet stay planted. Same defect the
@@ -373,7 +412,7 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 				// downscale to 180 cm (x0.905) => ~94 cm. rh.RobotStrideCm exists
 				// so a look that disagrees can be dialled without a rebuild.
 				const float RobotStride = FMath::Max(CVarRobotStrideCm.GetValueOnGameThread(), 1.f);
-				Skel->GlobalAnimRateScale = bWantWalk
+				Skel->GlobalAnimRateScale = (PlayingClip[i] == FName("Walk"))
 					? FMath::Clamp(Speed / RobotStride, 0.05f, 6.f)
 					: 1.f;
 			}

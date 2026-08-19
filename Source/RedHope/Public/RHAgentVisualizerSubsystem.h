@@ -58,11 +58,13 @@ private:
 	UPROPERTY() TArray<TObjectPtr<UInstancedStaticMeshComponent>> Parts;
 	// Rigged robot walkers (animation phase): when RH_Walker_robot exists each
 	// tracked entity gets ONE skeletal component instead of ISM instances -
-	// real Walk/Idle clips driven by ground speed. Fleet is small (<20), so
-	// per-robot skeletal cost is fine; the 9-ISM cube figure stays as the
-	// art-free fallback.
+	// real clips driven by ground speed + task phase (Walk/Idle plus the
+	// per-task work poses: Dig/Haul/Operate/Charge/Repair). Fleet is small
+	// (<20), so per-robot skeletal cost is fine; the 9-ISM cube figure stays
+	// as the art-free fallback.
 	UPROPERTY() TArray<TObjectPtr<USkeletalMeshComponent>> SkelBodies;
-	TArray<bool> bWalkPlaying;
+	// Suffix of the clip each robot is currently playing ("Idle", "Walk", ...).
+	TArray<FName> PlayingClip;
 	// Per-walker Z lift that puts the MESH'S OWN feet on the ground, derived
 	// from its bounds at spawn. The old constant GroundZ (-75) assumed the
 	// primitive stand-in's mid-body origin; the rigged GLBs are grounded at
