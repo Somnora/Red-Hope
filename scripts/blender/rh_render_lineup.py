@@ -51,7 +51,13 @@ def reset():
 
 def stage(scene, src):
     bpy.ops.import_scene.gltf(filepath=src)
-    meshes = [o for o in scene.objects if o.type == "MESH"]
+    # Blender's glTF importer adds an "Icosphere" (r = 1 m, at the origin) as the
+    # custom display shape for every imported bone. It never renders, but
+    # counting it in the bounds inflated skinned assets to ~3 m and framed them
+    # smaller than their neighbours - so exclude any mesh that is a bone shape.
+    shapes = {pb.custom_shape for o in scene.objects if o.type == "ARMATURE"
+              for pb in o.pose.bones if pb.custom_shape}
+    meshes = [o for o in scene.objects if o.type == "MESH" and o not in shapes]
     if not meshes:
         return None
     deps = bpy.context.evaluated_depsgraph_get()

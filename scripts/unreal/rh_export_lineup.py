@@ -104,6 +104,17 @@ with open(REPORT, "w") as f:
 # have (it exports geometry with EMPTY materials, and -AllowCommandletRendering
 # exits silently on Metal). So the real run is the full editor:
 #   UnrealEditor <proj> -ExecutePythonScript=<this> -unattended -nosound
-# and RH_QUIT=1 closes it once the report is written.
+# and RH_QUIT=1 closes it once the report is written. The quit is deferred to a
+# post-tick callback: -ExecutePythonScript runs during startup, and a quit
+# requested then is dropped - the 2026-10-13 runs wrote their reports and then
+# sat idle for 90 minutes.
 if os.environ.get("RH_QUIT") == "1":
-    unreal.SystemLibrary.quit_editor()
+    _ticks = [0]
+
+    def _quit_when_ticking(_dt):
+        _ticks[0] += 1
+        if _ticks[0] == 30:
+            unreal.unregister_slate_post_tick_callback(_quit_handle)
+            unreal.SystemLibrary.quit_editor()
+
+    _quit_handle = unreal.register_slate_post_tick_callback(_quit_when_ticking)
