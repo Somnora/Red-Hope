@@ -325,7 +325,16 @@ namespace
 		const FLinearColor TealGlow(0.1f, 4.5f, 3.2f);
 		const FLinearColor IceGlow(0.8f, 2.8f, 5.0f);
 		const FLinearColor AmberGlow(4.5f, 2.2f, 0.2f);
+		const FLinearColor MagentaGlow(4.4f, 1.1f, 2.5f);
 
+		// Rows marked KIT are rebuilt from code (scripts/blender/rh_hs.py,
+		// 2026-10-13). Their accent is painted into BaseColor as TRIM, and
+		// M_RH_Master has no accent mask, so AccentAmount MUST stay 0 - any other
+		// value tints the whole hull. Their glow sits behind a real
+		// EmissiveMask, so GlowAmount is the masked value (0.8), not the
+		// pre-mask whole-hull trickle the older rows use. BaseTex is the kit's
+		// <Name>_BaseColor; re-running this pass must not hand the old
+		// image-to-3D albedo back to the new mesh.
 		const FWireRow Rows[] =
 		{
 			// --- the painted meshes that won their slot (Models2 lineage) ---
@@ -341,10 +350,10 @@ namespace
 			{ TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome"),
 			  TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/Textures/HabitatDome_textured.HabitatDome_textured"),
 			  FLinearColor(0.95f, 0.95f, 0.95f), 0.06f, 0.10f, 0.72f, AmberGlow, 0.16f },
-			// ComputeModule
+			// ComputeModule - KIT (scripts/blender/rh_build_commandmodule.py)
 			{ TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule"),
-			  TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/Textures/CommandModule_textured.CommandModule_textured"),
-			  FLinearColor(0.90f, 0.25f, 0.55f), 0.10f, 0.25f, 0.60f, TealGlow, 0.22f },
+			  TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/Textures/CommandModule_BaseColor.CommandModule_BaseColor"),
+			  FLinearColor(0.90f, 0.25f, 0.55f), 0.0f, 0.25f, 0.60f, MagentaGlow, 0.8f },
 
 			// --- the kept originals, brought into the same family ---
 			// Their MI_<name> assets already exist (parented to M_ModelTex); the
@@ -373,11 +382,12 @@ namespace
 			{ TEXT("/Game/RedHope/Art/Machines/RH_AirFilter2/StaticMeshes/RH_AirFilter2.RH_AirFilter2"),
 			  TEXT("/Game/RedHope/Art/Machines/RH_AirFilter2/Textures/airfilter2_textured.airfilter2_textured"),
 			  FLinearColor(0.30f, 0.85f, 0.80f), 0.10f, 0.25f, 0.62f, TealGlow, 0.20f },
-			// HumidityRegulator - no TintFor entry yet, so it takes the
-			// life-support teal of its sibling machine rather than gray.
+			// HumidityRegulator - KIT (scripts/blender/rh_build_humidity.py). No
+			// TintFor entry yet, so it takes the life-support teal of its
+			// sibling machine rather than gray.
 			{ TEXT("/Game/RedHope/Art/Agri/humidity/humidity/StaticMeshes/humidity.humidity"),
-			  TEXT("/Game/RedHope/Art/Agri/humidity/humidity/Textures/humidity_textured.humidity_textured"),
-			  FLinearColor(0.30f, 0.85f, 0.80f), 0.10f, 0.25f, 0.65f, TealGlow, 0.16f },
+			  TEXT("/Game/RedHope/Art/Agri/humidity/humidity/Textures/humidity_BaseColor.humidity_BaseColor"),
+			  FLinearColor(0.30f, 0.85f, 0.80f), 0.0f, 0.25f, 0.65f, TealGlow, 0.8f },
 		};
 
 		int32 Ok = 0;

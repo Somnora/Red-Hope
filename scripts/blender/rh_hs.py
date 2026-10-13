@@ -254,6 +254,24 @@ class Kit:
             % (name, tris, len(me.vertices), dims, len(me.materials)))
         return ob
 
+    # ------------------------------------------------------------- facing
+    @staticmethod
+    def face_camera(ob):
+        """Turn a model built with its front at -Y so the front faces -X.
+
+        Measured 2026-10-13 (rh_capture.sh, RH.Cam yaw 0): the strategy camera's
+        default view meets the model's Blender -X face (the BatteryBank's two bar
+        faces carry different charge levels; the in-game frame matched the face
+        that had been built at +Y, which a +90 deg turn had moved to -X). So the
+        identity face belongs at -X; build it at -Y as usual and call this.
+        """
+        bpy.ops.object.select_all(action="DESELECT")
+        ob.select_set(True)
+        bpy.context.view_layer.objects.active = ob
+        ob.rotation_euler.z = math.radians(-90.0)
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+        return ob
+
     # ----------------------------------------------------------------- bake
     def bake_and_export(self, ob, name, outdir, size=2048, wear=0.35, dust=0.30,
                         ao_samples=64, ao_distance=0.35):

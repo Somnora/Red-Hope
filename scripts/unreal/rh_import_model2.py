@@ -35,7 +35,11 @@ GLB = os.environ.get("RH_GLB", "")
 NRM = os.environ.get("RH_NRM", "")
 ACCENT = tuple(float(x) for x in os.environ.get("RH_ACCENT", "0.5,0.5,0.5").split(","))
 ACCENT_AMT = float(os.environ.get("RH_ACCENT_AMT", "0.42"))
-DEST = "/Game/RedHope/Art/Models2/%s" % NAME
+# RH_DEST overrides the destination for an asset that predates Models2 (e.g. the
+# humidity regulator at /Game/RedHope/Art/Agri/humidity): Interchange lays the
+# import out as <DEST>/<glb name>/StaticMeshes/<mesh name>, so pointing DEST at
+# the old parent folder replaces the old asset in place.
+DEST = os.environ.get("RH_DEST") or "/Game/RedHope/Art/Models2/%s" % NAME
 
 log = []
 
