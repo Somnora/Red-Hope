@@ -28,6 +28,7 @@ Every script here does. Override the destination with `RH_REPORT=<path>`.
 | `rh_assign_masks.py` | per-model emissive mask + post-mask strength table |
 | `rh_inventory_buildings.py` | audits every mesh the real game's building tables reach: slot material, MI parent, BaseTex, Nanite/LOD/UV0, plus what sits unwired under `Models/` |
 | `rh_wire_originals.py` | puts the two stranded original building meshes (`solar2`, `habitat`) on `M_RH_Master` |
+| `rh_export_lineup.py` | exports every art mesh as GLB with its shipping material baked, for a QA lineup (render with `scripts/blender/rh_render_lineup.py`). **Runs in the full editor, not the commandlet** (`UnrealEditor <proj> -ExecutePythonScript=<abs>.py`, `RH_QUIT=1`): material baking needs a live RHI |
 
 **Materials are compile-free.** `UMaterialEditingLibrary` is a
 `UBlueprintFunctionLibrary`, so its whole graph API is exposed to Python:
