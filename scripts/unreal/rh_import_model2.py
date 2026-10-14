@@ -40,6 +40,10 @@ ACCENT_AMT = float(os.environ.get("RH_ACCENT_AMT", "0.42"))
 # import out as <DEST>/<glb name>/StaticMeshes/<mesh name>, so pointing DEST at
 # the old parent folder replaces the old asset in place.
 DEST = os.environ.get("RH_DEST") or "/Game/RedHope/Art/Models2/%s" % NAME
+# Texture-name tag, NAME by default. Asset names are case-insensitive, so a kit
+# rebuild named "Stockpile" would overwrite the V0 lineage's T_stockpile_Normal
+# (2026-10-14; the 08-18 batch-4 lesson again) - pass RH_TEX_TAG=StockpileKit.
+TAG = os.environ.get("RH_TEX_TAG") or NAME
 
 log = []
 
@@ -109,12 +113,12 @@ def main():
     ntask = unreal.AssetImportTask()
     ntask.filename = NRM
     ntask.destination_path = "/Game/RedHope/Art/Normals"
-    ntask.destination_name = "T_%s_Normal" % NAME
+    ntask.destination_name = "T_%s_Normal" % TAG
     ntask.automated = True
     ntask.replace_existing = True
     ntask.save = True
     AT.import_asset_tasks([ntask])
-    nrm_tex = unreal.load_asset("/Game/RedHope/Art/Normals/T_%s_Normal.T_%s_Normal" % (NAME, NAME))
+    nrm_tex = unreal.load_asset("/Game/RedHope/Art/Normals/T_%s_Normal.T_%s_Normal" % (TAG, TAG))
     if not nrm_tex:
         rec("** normal import failed - abort **")
         return

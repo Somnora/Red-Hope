@@ -34,6 +34,7 @@ SRC = os.environ["RH_DIR"]
 REPORT = os.environ.get("RH_REPORT", "/tmp/rh_import_hs.txt")
 GLOW = tuple(float(x) for x in os.environ.get("RH_GLOW", "0.05,2.2,1.56").split(","))
 GLOW_AMT = float(os.environ.get("RH_GLOW_AMT", "1.6"))
+TAG = os.environ.get("RH_TEX_TAG") or NAME     # normal/mask name tag, see rh_import_model2
 MEL = unreal.MaterialEditingLibrary
 EAL = unreal.EditorAssetLibrary
 log = []
@@ -63,7 +64,7 @@ def main():
     manifest = REPORT + ".masks.json"
     json.dump([{"png": os.path.join(SRC, NAME + "_EmissiveMask.png"),
                 "dest": "/Game/RedHope/Art/Masks",
-                "name": "T_%s_EmissiveMask" % NAME}], open(manifest, "w"))
+                "name": "T_%s_EmissiveMask" % TAG}], open(manifest, "w"))
     step("rh_import_masks.py", {"RH_MANIFEST": manifest}, REPORT + ".masks")
 
     mesh = unreal.load_asset(mesh_path)
@@ -88,7 +89,7 @@ def main():
         MEL.set_material_instance_texture_parameter_value(mi, param, tex)
         log.append("%s rewired %s -> %s" % (param, cur.get_name() if cur else None, leaf))
 
-    mask = unreal.load_asset("/Game/RedHope/Art/Masks/T_%s_EmissiveMask.T_%s_EmissiveMask" % (NAME, NAME))
+    mask = unreal.load_asset("/Game/RedHope/Art/Masks/T_%s_EmissiveMask.T_%s_EmissiveMask" % (TAG, TAG))
     if not mask:
         log.append("** emissive mask missing **")
         return

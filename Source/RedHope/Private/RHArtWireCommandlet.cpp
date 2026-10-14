@@ -338,10 +338,10 @@ namespace
 		const FWireRow Rows[] =
 		{
 			// --- the painted meshes that won their slot (Models2 lineage) ---
-			// Forge
+			// Forge - KIT (scripts/blender/rh_build_heavyforge.py, 2026-10-14)
 			{ TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/StaticMeshes/HeavyForge.HeavyForge"),
-			  TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/Textures/HeavyForge_textured.HeavyForge_textured"),
-			  FLinearColor(0.95f, 0.35f, 0.08f), 0.10f, 0.35f, 0.62f, FurnaceGlow, 0.22f },
+			  TEXT("/Game/RedHope/Art/Models2/HeavyForge/HeavyForge/Textures/HeavyForge_BaseColor.HeavyForge_BaseColor"),
+			  FLinearColor(0.95f, 0.35f, 0.08f), 0.0f, 0.35f, 0.62f, FurnaceGlow, 0.8f },
 			// SolarArray
 			{ TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel"),
 			  TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/Textures/SolarPanel_textured.SolarPanel_textured"),
