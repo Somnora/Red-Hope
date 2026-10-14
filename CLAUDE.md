@@ -1,4 +1,4 @@
-@/Users/jamesmcshane/Vaults/Main/Projects/red_hope/claude-context.md
+@/Users/jamesmcshane/Desktop/obsidian-vault/the-eye/Projects/red_hope/claude-context.md
 
 ## Repo location
 Actual UE project root is `/Volumes/Unreal/red_hope/red_hope` (one level below the same-named volume folder). External volume `/Volumes/Unreal`. This IS a git repo on `main`.
