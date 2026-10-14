@@ -42,7 +42,9 @@ import math
 import os
 import sys
 
+import bmesh
 import bpy
+import mathutils
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -66,13 +68,13 @@ NAME = "RH_Walker_" + FACE
 CREW = {
     "cmdr_vale": dict(
         sex=0.0, age=0.62, height_m=1.62, muscle=0.55, weight=0.42, proportions=0.65,
-        race=dict(asian=0.92, caucasian=0.08, african=0.0), skin="middleage_asian_female", proxy="female1605",
+        race=dict(asian=0.92, caucasian=0.08, african=0.0), skin="middleage_asian_female", proxy="female_generic",
         outfit=[("male_casualsuit01", "z", {"upper": "#3A3F48", "lower": "#26282D"}),
                 ("shoes03", "all", {"all": "#232427"})],
         hair=("short04", "#171514"), brow=("eyebrow006", "#1A1716"), eyes="brown"),
     "vet_kowalski": dict(
         sex=1.0, age=0.86, height_m=1.88, muscle=0.6, weight=0.74, proportions=0.5,
-        race=dict(asian=0.0, caucasian=1.0, african=0.0), skin="old_caucasian_male", proxy="male1591",
+        race=dict(asian=0.0, caucasian=1.0, african=0.0), skin="old_caucasian_male", proxy="male_generic",
         outfit=[("male_casualsuit05", "hue", {"upper": "#6C6948", "lower": "#7E7C77", "shirt": "#7C3A30"}),
                 ("shoes03", "all", {"all": "#3A2E26"})],
         hair=("short02", "#8F8B85"), brow=("eyebrow002", "#88837C"), eyes="blue"),
@@ -101,7 +103,7 @@ def person(sex, age, h, skin, race, outfit, hair, brow, muscle=0.55, weight=0.5,
     a, s_, c = race
     return dict(sex=sex, age=age, height_m=h, muscle=muscle, weight=weight, proportions=proportions,
                 race=dict(african=a, asian=s_, caucasian=c), skin=skin,
-                proxy="female1605" if sex < 0.5 else "male1591",
+                proxy="female_generic" if sex < 0.5 else "male_generic",
                 outfit=outfit, hair=hair, brow=brow, eyes="brown")
 
 
@@ -117,7 +119,7 @@ CREW.update({
                          jacket("#8A4B33", "#5E5A52", "#3A3C40"), ("short01", "#141110"), ("eyebrow001", "#141110"),
                          muscle=0.75, weight=0.68),
     "med_haddad": person(1, 0.57, 1.78, "young_caucasian_male", (0.08, 0.07, 0.85), shirt("#E4DED2", "#7898AE"),
-                         ("short03", "#1E1814"), ("eyebrow003", "#1E1814"), muscle=0.5, weight=0.45),
+                         ("short01", "#1E1814"), ("eyebrow003", "#1E1814"), muscle=0.5, weight=0.45),
     "tech_park": person(0, 0.55, 1.66, "young_asian_female", (0.0, 0.95, 0.05), jacket("#4C566C", "#6E6C68", "#2E2F33"),
                         ("short04", "#131110"), ("eyebrow006", "#131110"), weight=0.4),
     "pilot_reyes": person(0, 0.58, 1.68, "young_caucasian_female2", (0.15, 0.15, 0.7), jacket("#3E5A7F", "#2B2A29", "#3A3A3C"),
@@ -125,7 +127,7 @@ CREW.update({
     "quart_bello": person(1, 0.60, 1.80, "young_african_male", (0.92, 0.0, 0.08), jacket("#68683E", "#8C7F66", "#55603F"),
                           ("afro01", "#15110F"), ("eyebrow001", "#15110F"), muscle=0.6, weight=0.88),
     "res_novak": person(0, 0.78, 1.66, "old_caucasian_female", (0.0, 0.0, 1.0), jacket("#DAD7CF", "#6F6E6B", "#5D6873"),
-                        ("bob01", "#CBC8C2"), ("eyebrow004", "#9A968F"), weight=0.5),
+                        ("ponytail01", "#CBC8C2"), ("eyebrow004", "#9A968F"), weight=0.5),
     "hydro_mensah": person(0, 0.52, 1.64, "young_african_female", (0.95, 0.0, 0.05), shirt("#5C6B44", "#4E6A86"),
                            ("ponytail01", "#15100E"), ("eyebrow007", "#15100E"), weight=0.45),
     "reactor_ito": person(1, 0.65, 1.72, "middleage_asian_male", (0.0, 0.95, 0.05), jumpsuit("#3A3C3F"),
@@ -141,7 +143,7 @@ CREW.update({
     "comms_diallo": person(1, 0.58, 1.79, "young_african_male", (1.0, 0.0, 0.0), jumpsuit("#4F5B6E"),
                            ("short01", "#100C0A"), ("eyebrow001", "#100C0A"), weight=0.5),
     "rookie_shaw": person(1, 0.47, 1.77, "young_caucasian_male", (0.0, 0.0, 1.0), jumpsuit("#A1956F"),
-                          ("short03", "#A34F22"), ("eyebrow003", "#8A4A2A"), muscle=0.45, weight=0.38),
+                          ("short02", "#A34F22"), ("eyebrow003", "#8A4A2A"), muscle=0.45, weight=0.38),
     "safety_abara": person(0, 0.62, 1.69, "middleage_african_female", (1.0, 0.0, 0.0), jacket("#E2862C", "#555556", "#444446"),
                            ("short01", "#100C0A"), ("eyebrow006", "#100C0A"), muscle=0.6, weight=0.55),
     "driver_costa": person(1, 0.60, 1.75, "middleage_caucasian_male", (0.2, 0.1, 0.7), jacket("#9A4A2C", "#5F6266", "#6A6E73"),
@@ -149,7 +151,30 @@ CREW.update({
     "cook_moreau": person(0, 0.75, 1.60, "middleage_caucasian_female", (0.0, 0.2, 0.8), shirt("#D6CCB8", "#6A6863"),
                           ("ponytail01", "#5E5852"), ("eyebrow005", "#4A453F"), weight=0.62),
 })
+# Eye colour per person (everyone not listed keeps "brown"). Brown is by far
+# the commonest; the lighter colours go where the ancestry mix makes them likely.
+for _face, _eyes in {"med_haddad": "hazel", "pilot_reyes": "hazel", "cook_moreau": "hazel",
+                     "res_novak": "grey", "bot_lindqvist": "blue", "rookie_shaw": "green"}.items():
+    CREW[_face]["eyes"] = _eyes
+# spec colour -> (MPFB iris texture, (hue, saturation, value) for an HSV node or None).
+# MPFB's "brown" iris is an auburn red that read as red eyes in close-up
+# (2026-10-14); shifting it ~+18 deg of hue and darkening it gives a dark brown.
+EYES = {"brown": ("brown", (0.55, 0.72, 0.62)), "hazel": ("brownlight", None),
+        "blue": ("blue", None), "grey": ("grey", None), "green": ("green", None)}
 ROUGH = {"skin": 0.55, "cloth": 0.82, "shoe": 0.45, "hair": 0.6, "eye": 0.15}
+# How much the baked AO darkens each role. Eyes get none: AO from the sockets
+# turned the whites grey and the irises near-black in close-up.
+AO_STRENGTH = {"skin": 0.42, "eye": 0.0, "hair": 0.50, "cloth": 0.50, "shoe": 0.50}
+HEAD_UV_SCALE = 2.0        # linear texel boost for the head (face, ears, hair, brows, eyes)
+# Skin is MPFB's *_generic proxy (MakeHuman's full ~27k-tri body) cut down in
+# place: the 1.6k-vert proxies gave every face the same smooth egg (2026-10-14
+# close-ups), and MPFB has nothing in between. The head keeps HEAD_SKIN_RATIO
+# of its faces (the face normal map restores what that loses); visible body
+# skin (neck below the jaw, hands, any ankle) keeps BODY_SKIN_RATIO.
+# (short03, bob01 and bob02 hang over one eye on these heads, so nobody wears
+# them: the face is the point of this pass.)
+HEAD_SKIN_RATIO = 0.35     # of the head's triangles: ~8.5k -> ~3k
+BODY_SKIN_RATIO = 0.22
 CLOTH_MAX_TRIS = 8000      # per garment; keeps every crew member inside the 25k budget
 
 # Measured 2026-10-13 (evaluated mesh, proportions 0.6): MPFB height macro -> metres.
@@ -201,13 +226,20 @@ def build(spec):
         parts["shoe" if garment.startswith("shoes") else "cloth"].append(o)
     eyes = HumanService.add_mhclo_asset(P("eyes", "low-poly", "low-poly.mhclo"), bm, asset_type="Eyes",
                                         subdiv_levels=0, material_type="MAKESKIN")
+    set_eye_colour(eyes, spec.get("eyes", "brown"))
     parts["eye"].append(eyes)
     for kind, (asset, colour) in (("Eyebrows", spec["brow"]), ("Hair", spec["hair"])):
         sub = "eyebrows" if kind == "Eyebrows" else "hair"
         o = HumanService.add_mhclo_asset(P(sub, asset, asset + ".mhclo"), bm, asset_type=kind,
                                          subdiv_levels=0, material_type="MAKESKIN")
-        tint_strands(o, colour)
+        tint_strands(o, colour, solid="brow" if kind == "Eyebrows" else "hair")
         parts["hair"].append(o)
+    # lashes: without them the eyes were two dark dots in close-up
+    lash = HumanService.add_mhclo_asset(P("eyelashes", "eyelashes02", "eyelashes02.mhclo"), bm,
+                                        asset_type="Eyelashes", subdiv_levels=0, material_type="MAKESKIN")
+    tint_strands(lash, "#%02X%02X%02X" % tuple(int(int(spec["brow"][1].lstrip("#")[i:i + 2], 16) * 0.5)
+                                               for i in (0, 2, 4)), solid="hair")
+    parts["hair"].append(lash)
     bm.hide_render = True
     bm.hide_set(True)
     return bm, rig, parts
@@ -288,12 +320,15 @@ def recolour_garment(o, garment, split, tints, rig):
     legs = (rig.matrix_world @ rig.data.bones["thigh_l"].head_local).z - 0.10
     h, w = px.shape[:2]
     counts = {r: 0 for r in regions}
+    island_up = _island_above(o, uv, waist) if split == "z" else None
     for p in me.polygons:
         if split == "all":
             r = "all"
         elif split == "z":
-            zc = sum((o.matrix_world @ me.vertices[v].co).z for v in p.vertices) / len(p.vertices)
-            r = "upper" if zc > waist else "lower"
+            # whole UV islands, not faces: the shirt and the jeans are separate
+            # islands, so the colour change follows the real hem seam instead
+            # of a jagged cut across triangles at waist height (2026-10-14)
+            r = "upper" if island_up[p.index] else "lower"
         elif "lower" in tints and sum((o.matrix_world @ me.vertices[v].co).z for v in p.vertices) / len(p.vertices) < legs:
             r = "lower"
         else:
@@ -314,6 +349,43 @@ def recolour_garment(o, garment, split, tints, rig):
     log("recoloured %s (%s split): %s" % (garment, split, counts))
 
 
+def _island_above(o, uv, z_cut):
+    """Per face: does its source-UV island sit (area-weighted) above z_cut?
+    Faces sharing an edge are one island when the edge's UVs match on both."""
+    me = o.data
+    par = list(range(len(me.polygons)))
+
+    def find(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    seen = {}
+    for p in me.polygons:
+        li = list(p.loop_indices)
+        for k in range(len(li)):
+            l0, l1 = li[k], li[(k + 1) % len(li)]
+            v0, v1 = me.loops[l0].vertex_index, me.loops[l1].vertex_index
+            key = (min(v0, v1), max(v0, v1))
+            uvs = {v0: tuple(round(c, 5) for c in uv[l0].uv), v1: tuple(round(c, 5) for c in uv[l1].uv)}
+            if key in seen:
+                q, quvs = seen[key]
+                if quvs == uvs:
+                    a, b = find(p.index), find(q)
+                    if a != b:
+                        par[a] = b
+            else:
+                seen[key] = (p.index, uvs)
+    acc = {}
+    for p in me.polygons:
+        r = find(p.index)
+        zc = (o.matrix_world @ p.center).z
+        za, aa = acc.get(r, (0.0, 0.0))
+        acc[r] = (za + zc * p.area, aa + p.area)
+    up = {r: (za / aa if aa > 0 else 0.0) > z_cut for r, (za, aa) in acc.items()}
+    return [up[find(p.index)] for p in me.polygons]
+
+
 def _hue(c):
     r, g, b = float(c[0]), float(c[1]), float(c[2])
     mx, mn = max(r, g, b), min(r, g, b)
@@ -328,11 +400,77 @@ def _hue(c):
     return 60.0 * h
 
 
-def tint_strands(o, colour):
+def set_eye_colour(o, name):
+    """Swap the eyes' iris texture for the person's colour (MPFB loads "brown"
+    for everyone) and, for brown, pull MPFB's auburn iris to a dark brown."""
+    tex, hsv = EYES[name]
+    m = o.data.materials[0]
+    nt = m.node_tree
+    tx = next(n for n in _tex_nodes(m) if "eye" in n.image.name.lower())
+    tx.image = bpy.data.images.load(P("eyes", "materials", tex + "_eye.png"), check_existing=True)
+    if hsv:
+        hs = nt.nodes.new("ShaderNodeHueSaturation")
+        hs.inputs["Hue"].default_value, hs.inputs["Saturation"].default_value, hs.inputs["Value"].default_value = hsv
+        for l in list(tx.outputs["Color"].links):
+            to = l.to_socket
+            nt.links.remove(l)
+            nt.links.new(hs.outputs["Color"], to)
+        nt.links.new(hs.inputs["Color"], tx.outputs["Color"])
+    log("eyes %s (%s%s)" % (name, tex, ", hsv %s" % (hsv,) if hsv else ""))
+
+
+def _box_blur(a, r):
+    """Separable box blur of a 2-D array, radius r texels (edge-padded)."""
+    k = 2 * r + 1
+    for ax in (0, 1):
+        p = np.pad(a, [(r, r) if i == ax else (0, 0) for i in range(2)], mode="edge")
+        c = np.cumsum(p, axis=ax, dtype=np.float64)
+        c = np.concatenate([np.zeros_like(np.take(c, [0], axis=ax)), c], axis=ax)
+        a = (np.take(c, range(k, c.shape[ax]), axis=ax) - np.take(c, range(0, c.shape[ax] - k), axis=ax)) / k
+    return a
+
+
+def _solid_strands(img, radius_div=110, lo=0.05, hi=0.18):
+    """A brow texture whose strands survive the masked material's 0.5 cut.
+    MPFB's brows are a thin arc of soft strands (eyebrow006: 4 % of texels
+    above alpha 0.05, 0.7 % above 0.5), so after the atlas bake and the clip
+    only a few dots were left (2026-10-14 close-ups). Blur the alpha, then
+    re-threshold it into one solid brow shape; the strand alpha survives as
+    a little light/dark variation in the colour."""
+    w, h = img.size
+    px = np.empty(w * h * 4, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(h, w, 4)
+    a = px[..., 3].astype(np.float64)
+    soft = _box_blur(a, max(1, w // radius_div))
+    solid = np.clip((soft - lo) / (hi - lo), 0.0, 1.0)
+    solid = solid * solid * (3 - 2 * solid)
+    out = np.empty_like(px)
+    if radius_div == 110:                       # brows: flat grey, strands as variation
+        out[..., 0] = out[..., 1] = out[..., 2] = 0.45 + 0.35 * a
+    else:                                       # hair: keep the strand colour detail
+        out[..., :3] = px[..., :3]
+    out[..., 3] = solid
+    new = bpy.data.images.new(img.name + ".solid", w, h, alpha=True)
+    new.pixels.foreach_set(out.astype(np.float32).ravel())
+    new.pack()
+    log("strands: %s alpha>0.5 %.2f%% -> %.2f%% of texels" % (img.name, 100 * (a > 0.5).mean(), 100 * (solid > 0.5).mean()))
+    return new
+
+
+def tint_strands(o, colour, solid=False):
     """Hair/brows: the strand texture's luminance x the person's hair colour;
-    the strand alpha is kept for the masked material."""
+    the strand alpha is kept for the masked material. solid="brow" first
+    thickens the strands into one shape, solid="hair" only cleans the alpha
+    (see _solid_strands)."""
     src = o.data.materials[0]
     diff = _tex_nodes(src)[0].image
+    if solid == "brow":
+        diff = _solid_strands(diff)
+    elif solid == "hair":
+        # gentler: fill small gaps and drop isolated strand tips, which the
+        # 0.5 cut left as speckle on the crown (2026-10-14 close-ups)
+        diff = _solid_strands(diff, radius_div=512, lo=0.30, hi=0.55)
     m = bpy.data.materials.new(o.name + ".tint")
     m.use_nodes = True
     nt = m.node_tree
@@ -359,6 +497,52 @@ def tint_strands(o, colour):
 
 
 # ------------------------------------------------------- join + atlas bake
+def _edit_select_faces(o, flags):
+    """Enter edit mode with EXACTLY the flagged faces (and their verts/edges)
+    selected, in face select mode. Setting polygon.select from object mode is
+    not enough: vertex selection stays stale, and edit-mode operators read it -
+    the first face pass decimated and unwrapped the WHOLE body (2026-10-14)."""
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    bm = bmesh.from_edit_mesh(o.data)
+    bm.faces.ensure_lookup_table()
+    for el in (*bm.verts, *bm.edges, *bm.faces):
+        el.select = False
+    for f, on in zip(bm.faces, flags):
+        if on:
+            f.select_set(True)
+    bm.select_mode = {"FACE"}
+    bmesh.update_edit_mesh(o.data)
+    return sum(1 for f in bm.faces if f.select)
+
+
+def reduce_skin(o, rig):
+    """Decimate the generic proxy's visible skin by region (head lightly, the
+    rest hard). Edit-mode decimate collapses only edges inside the selection,
+    so the neck seam between the two regions is left untouched. It counts its
+    ratio in faces AFTER triangulating, so triangulate first or quads make
+    every ratio about half as generous as it reads."""
+    me = o.data
+    neck = (rig.matrix_world @ rig.data.bones["neck_01"].head_local).z
+    before = sum(len(p.vertices) - 2 for p in me.polygons)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.quads_convert_to_tris()
+    bpy.ops.object.mode_set(mode="OBJECT")
+    head = [(o.matrix_world @ p.center).z > neck for p in me.polygons]
+    counts = {}
+    for region, ratio in ((True, HEAD_SKIN_RATIO), (False, BODY_SKIN_RATIO)):
+        bpy.ops.object.mode_set(mode="OBJECT")
+        _edit_select_faces(o, [((o.matrix_world @ p.center).z > neck) == region for p in me.polygons])
+        bpy.ops.mesh.decimate(ratio=ratio)
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for p in me.polygons:
+        k = "head" if (o.matrix_world @ p.center).z > neck else "body"
+        counts[k] = counts.get(k, 0) + len(p.vertices) - 2
+    log("skin %d -> %d tris (head %d, body %d; %d head faces before)"
+        % (before, sum(counts.values()), counts.get("head", 0), counts.get("body", 0), sum(head)))
+
+
 def bake_ready_mesh(rig, parts):
     """Freeze every visible part (mask/delete-group modifiers and shape keys
     applied at the rest pose), keep it skinned, join into one mesh."""
@@ -394,6 +578,8 @@ def bake_ready_mesh(rig, parts):
             o = bpy.context.view_layer.objects.active
             for m in list(o.modifiers):
                 o.modifiers.remove(m)
+            if role == "skin":
+                reduce_skin(o, rig)
             am = o.modifiers.new("Armature", "ARMATURE")
             am.object = rig
             if o.data.uv_layers:
@@ -413,7 +599,7 @@ def bake_ready_mesh(rig, parts):
     return body
 
 
-def atlas_uv(body):
+def atlas_uv(body, rig):
     me = body.data
     src = me.uv_layers["UVMap"]
     # A FRESH non-overlapping unwrap, not MakeHuman's per-asset UVs packed
@@ -423,16 +609,76 @@ def atlas_uv(body):
     at = me.uv_layers.new(name="Atlas")
     me.uv_layers.active = at
     src.active_render = True
+    # The head (face, ears, neck, hair, brows, eyes) is unwrapped on its own and
+    # packed HEAD_UV_SCALE x larger: at an even texel density the face got a
+    # sliver of the 2048 atlas and read as blotchy and featureless up close.
+    neck = (rig.matrix_world @ rig.data.bones["neck_01"].head_local).z
+    roles = [(sl.material.get("rh_role") if sl.material else None) or "cloth" for sl in body.material_slots]
+    head = [roles[p.material_index] in ("skin", "eye", "hair") and (body.matrix_world @ p.center).z > neck
+            for p in me.polygons]
+    # where the face normal map applies: head SKIN only (not hair, brows, eyes)
+    attr = me.attributes.new("rh_facenrm", "FLOAT", "FACE")
+    attr.data.foreach_set("value", [1.0 if hd and roles[p.material_index] == "skin" else 0.0
+                                    for hd, p in zip(head, me.polygons)])
     bpy.ops.object.select_all(action="DESELECT")
     body.select_set(True)
     bpy.context.view_layer.objects.active = body
+    bpy.context.scene.tool_settings.use_uv_select_sync = True
+    for part in (True, False):
+        n = _edit_select_faces(body, [hd == part for hd in head])
+        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.003, area_weight=0.0,
+                                 correct_aspect=True, scale_to_bounds=False)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        log("atlas: unwrapped %d %s faces" % (n, "head" if part else "body"))
+    # two projections are scaled independently: even out texel density by 3D
+    # area first, then enlarge the head islands
+    me.polygons.foreach_set("select", [True] * len(me.polygons))
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
-    bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.003, area_weight=0.0,
-                             correct_aspect=True, scale_to_bounds=False)
+    bpy.ops.uv.select_all(action="SELECT")
+    bpy.ops.uv.average_islands_scale()
+    bpy.ops.object.mode_set(mode="OBJECT")
+    uv = me.uv_layers["Atlas"].data
+    loops = [li for hd, p in zip(head, me.polygons) if hd for li in p.loop_indices]
+    if loops:
+        cx = sum(uv[li].uv.x for li in loops) / len(loops)
+        cy = sum(uv[li].uv.y for li in loops) / len(loops)
+        for li in loops:
+            u = uv[li].uv
+            uv[li].uv = (cx + (u.x - cx) * HEAD_UV_SCALE, cy + (u.y - cy) * HEAD_UV_SCALE)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
     bpy.ops.uv.select_all(action="SELECT")
     bpy.ops.uv.pack_islands(rotate=True, margin=0.004)
     bpy.ops.object.mode_set(mode="OBJECT")
+    log("atlas: head packed %.1fx; UV overlap %.3f%% of covered texels" % (HEAD_UV_SCALE, uv_overlap(me, "Atlas")))
+
+
+def uv_overlap(me, layer, res=1024):
+    """Share of atlas texels covered by more than one triangle (should be ~0:
+    overlapping islands bake one surface's colour onto another)."""
+    uv = me.uv_layers[layer].data
+    cover = np.zeros((res, res), dtype=np.uint16)
+    for p in me.polygons:
+        pts = [uv[li].uv for li in p.loop_indices]
+        for i in range(1, len(pts) - 1):
+            tri = np.array([pts[0], pts[i], pts[i + 1]]) * res
+            x0, y0 = np.floor(tri.min(0)).astype(int)
+            x1, y1 = np.ceil(tri.max(0)).astype(int)
+            x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, res), min(y1, res)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            ys, xs = np.mgrid[y0:y1, x0:x1] + 0.5
+            (ax, ay), (bx, by), (cx, cy) = tri
+            d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+            if abs(d) < 1e-12:
+                continue
+            l1 = ((by - cy) * (xs - cx) + (cx - bx) * (ys - cy)) / d
+            l2 = ((cy - ay) * (xs - cx) + (ax - cx) * (ys - cy)) / d
+            inside = (l1 >= 0) & (l2 >= 0) & (l1 + l2 <= 1)
+            cover[y0:y1, x0:x1] += inside
+    covered = (cover > 0).sum()
+    return 100.0 * (cover > 1).sum() / max(1, covered)
 
 
 def _swap_emission(body, value_of):
@@ -453,9 +699,10 @@ def _swap_emission(body, value_of):
     return saved
 
 
-def _bake_into(body, img, bake_type, samples=1, pass_filter=None):
+def _bake_into(body, img, bake_type, samples=1, pass_filter=None, sources=()):
     sc = bpy.context.scene
     sc.cycles.samples = samples
+    sc.render.bake.use_selected_to_active = bool(sources)
     for s in body.material_slots:
         nt = s.material.node_tree
         tex = nt.nodes.new("ShaderNodeTexImage")
@@ -465,6 +712,8 @@ def _bake_into(body, img, bake_type, samples=1, pass_filter=None):
         tex.select = True
         nt.nodes.active = tex
     bpy.ops.object.select_all(action="DESELECT")
+    for o in sources:
+        o.select_set(True)
     body.select_set(True)
     bpy.context.view_layer.objects.active = body
     if pass_filter:
@@ -476,7 +725,7 @@ def _bake_into(body, img, bake_type, samples=1, pass_filter=None):
     return a.reshape(img.size[1], img.size[0], 4)
 
 
-def bake_atlas(body, rig):
+def bake_atlas(body, rig, hi=None):
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
     sc.cycles.device = "CPU"
@@ -520,25 +769,60 @@ def bake_atlas(body, rig):
     for i, m in enumerate(saved):
         body.material_slots[i].material = m
 
-    saved = _swap_emission(body, lambda m, t: 1.0 if m.get("rh_role") == "skin" else 0.0)
-    skin = _bake_into(body, new("skin"), "EMIT")
+    saved = _swap_emission(body, lambda m, t: float(AO_STRENGTH.get(m.get("rh_role", "cloth"), 0.5)))
+    aostr = _bake_into(body, new("aostr"), "EMIT")
     for i, m in enumerate(saved):
         body.material_slots[i].material = m
 
     ao = _bake_into(body, new("ao"), "AO", samples=48)
-    log("baked colour, alpha, roughness, skin mask, AO at %d" % SIZE)
+    log("baked colour, alpha, roughness, AO strength, AO at %d" % SIZE)
+
+    nrm_p = None
+    if hi is not None:
+        # The decimated face lost fine shape; MakeHuman's full-resolution
+        # body has the nose, lips, eyelids and ears. Bake its surface into a
+        # tangent-space normal map, kept on head skin only (rays from garments
+        # and hair cards would hit the body underneath and mean nothing).
+        def face_src(m, t):
+            at = t.node_tree.nodes.new("ShaderNodeAttribute")
+            at.attribute_type = "GEOMETRY"
+            at.attribute_name = "rh_facenrm"
+            return at.outputs["Fac"]
+        saved = _swap_emission(body, face_src)
+        mask = _bake_into(body, new("facemask"), "EMIT")
+        for i, m in enumerate(saved):
+            body.material_slots[i].material = m
+        me = body.data
+        render_uv = next(u for u in me.uv_layers if u.active_render)
+        me.uv_layers["Atlas"].active_render = True     # tangents from the atlas UVs the GLB ships
+        sc.render.bake.normal_space = "TANGENT"
+        sc.render.bake.use_cage = False
+        sc.render.bake.cage_extrusion = 0.01
+        sc.render.bake.max_ray_distance = 0.02
+        hi.hide_render = False
+        hi.hide_set(False)
+        nrm = _bake_into(body, new("nrm"), "NORMAL", sources=(hi,))
+        hi.hide_render = True
+        sc.render.bake.use_selected_to_active = False
+        render_uv.active_render = True
+        fm = (mask[..., 0:1] > 0.5).astype(np.float32)
+        flat = np.array([0.5, 0.5, 1.0], dtype=np.float32)
+        N = fm * nrm[..., :3] + (1.0 - fm) * flat
+        dev = np.abs(nrm[..., :3] - flat).sum(axis=2)[fm[..., 0] > 0.5]
+        log("face normal map: %.1f%% of the atlas is face, mean deviation from flat %.3f"
+            % (100 * fm.mean(), float(dev.mean()) if dev.size else 0.0))
+        nrm_p = _save(N, os.path.join(OUT, NAME + "_Normal.png"))
 
     A = col[..., :3]
     occ = ao[..., 0:1]
-    sk = skin[..., 0:1]
-    strength = 0.30 * sk + 0.50 * (1 - sk)           # one AO treatment, gentler on skin
+    strength = aostr[..., 0:1]                          # per-role AO (none on the eyes)
     A = A * (1.0 - strength * (1.0 - occ))
     srgb = np.where(A <= 0.0031308, A * 12.92, 1.055 * np.power(np.clip(A, 0, 1), 1 / 2.4) - 0.055)
     rgba = np.concatenate([np.clip(srgb, 0, 1), np.clip(alp[..., 0:1], 0, 1)], axis=2)
     mr = np.concatenate([occ, np.clip(rough[..., 0:1], 0.05, 1.0), np.zeros_like(occ)], axis=2)
     base_p = _save(rgba, os.path.join(OUT, NAME + "_BaseColor.png"))
     mr_p = _save(mr, os.path.join(OUT, NAME + "_MetallicRoughness.png"))
-    return base_p, mr_p
+    return base_p, mr_p, nrm_p
 
 
 def _save(arr, path):
@@ -555,7 +839,7 @@ def _save(arr, path):
     return path
 
 
-def final_material(body, base_p, mr_p):
+def final_material(body, base_p, mr_p, nrm_p=None):
     m = bpy.data.materials.new(NAME)
     m.use_nodes = True
     nt = m.node_tree
@@ -589,9 +873,34 @@ def final_material(body, base_p, mr_p):
     # the atlas becomes the only UV set (TEXCOORD_0 in the GLB)
     me.uv_layers.remove(me.uv_layers["UVMap"])
     me.uv_layers["Atlas"].name = "UVMap"
+    if "rh_facenrm" in me.attributes:
+        me.attributes.remove(me.attributes["rh_facenrm"])
+    if nrm_p:
+        tn = nt.nodes.new("ShaderNodeTexImage")
+        tn.image = bpy.data.images.load(nrm_p); tn.image.name = NAME + "_Normal"
+        tn.image.colorspace_settings.name = "Non-Color"
+        nm = nt.nodes.new("ShaderNodeNormalMap")
+        nm.uv_map = "UVMap"
+        nt.links.new(nm.inputs["Color"], tn.outputs["Color"])
+        nt.links.new(b.inputs["Normal"], nm.outputs["Normal"])
 
 
-def fit_height(rig, body, target):
+def hires_copy(bm):
+    """MakeHuman's full-resolution body (targets applied, helpers masked) as a
+    plain mesh - the source the face normal map is baked from. Not rendered
+    except during that bake (it would occlude everything in the AO pass)."""
+    bm.hide_set(False)
+    dg = bpy.context.evaluated_depsgraph_get()
+    me = bpy.data.meshes.new_from_object(bm.evaluated_get(dg))
+    hi = bpy.data.objects.new(NAME + "_hi", me)
+    bpy.context.scene.collection.objects.link(hi)
+    hi.matrix_world = bm.matrix_world.copy()
+    hi.hide_render = True
+    log("hi-res source: %d verts (modifiers %s)" % (len(me.vertices), [m.type for m in bm.modifiers]))
+    return hi
+
+
+def fit_height(rig, body, target, also=()):
     dg = bpy.context.evaluated_depsgraph_get()
     zs = [(body.matrix_world @ v.co).z for v in body.evaluated_get(dg).to_mesh().vertices]
     h = max(zs) - min(zs)
@@ -602,6 +911,10 @@ def fit_height(rig, body, target):
     bpy.context.view_layer.objects.active = rig
     rig.scale = (s, s, s)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    pivot = rig.matrix_world.translation.copy()
+    for o in also:                    # same scale about the rig origin
+        o.matrix_world = (mathutils.Matrix.Translation(pivot) @ mathutils.Matrix.Scale(s, 4)
+                          @ mathutils.Matrix.Translation(-pivot) @ o.matrix_world)
     log("height %.3f m -> %.3f m (scale %.4f)" % (h, target, s))
     return h * s
 
@@ -612,11 +925,12 @@ def main():
     bm, rig, parts = build(spec)
     rig.name = NAME + "_Rig"
     body = bake_ready_mesh(rig, parts)
+    hi = hires_copy(bm)
     bpy.data.objects.remove(bm)
-    height = fit_height(rig, body, spec["height_m"])
-    atlas_uv(body)
-    base_p, mr_p = bake_atlas(body, rig)
-    final_material(body, base_p, mr_p)
+    height = fit_height(rig, body, spec["height_m"], also=(hi,))
+    atlas_uv(body, rig)
+    base_p, mr_p, nrm_p = bake_atlas(body, rig, hi)
+    final_material(body, base_p, mr_p, nrm_p)
     tris = sum(len(p.vertices) - 2 for p in body.data.polygons)
     clips = []
     if not NO_CLIPS:

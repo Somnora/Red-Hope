@@ -18,9 +18,11 @@ Per face, in one commandlet run:
      WalkerMeshPath()/WalkerAnimPath() load. Clips must come out named
      RH_Walker_<face><Clip>; any other naming is renamed to that and reported.
   4. MI_RH_Walker_<face> on M_RH_CharacterMasked: BaseTex = the RGBA atlas,
-     MRTex = the MR atlas (TC_MASKS, sRGB off), UseMRTex 1; every material slot
-     of the skeletal mesh points at it (the array is rebuilt - UE Python hands
-     back copies).
+     MRTex = the MR atlas (TC_MASKS, sRGB off), UseMRTex 1, and - when the
+     walker carries one (2026-10-14 face pass) - NormTex = the face normal map
+     (TC_NORMALMAP, sRGB off, green flipped: Blender bakes OpenGL-style +Y, UE
+     wants DirectX), UseNormTex 1; every material slot of the skeletal mesh
+     points at it (the array is rebuilt - UE Python hands back copies).
 Verify afterwards from a fresh -game boot (rh_capture.sh), not this process.
 """
 import os
@@ -122,6 +124,16 @@ def import_face(face, master):
         mr.set_editor_property("srgb", False)
         mr.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_MASKS)
         EAL.save_loaded_asset(mr)
+    nrm = next((t for t in texs if t.get_name().endswith("_Normal")), None)
+    if nrm:
+        was = (nrm.get_editor_property("compression_settings"), nrm.get_editor_property("srgb"),
+               nrm.get_editor_property("flip_green_channel"))
+        nrm.set_editor_property("srgb", False)
+        nrm.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_NORMALMAP)
+        nrm.set_editor_property("flip_green_channel", True)
+        EAL.save_loaded_asset(nrm)
+        log.append("%s: normal %s (imported as %s, srgb %s, flip %s -> TC_NORMALMAP, srgb off, flip on)"
+                   % (face, nrm.get_name(), was[0], was[1], was[2]))
     mi_name = "MI_" + name
     mi = AT.create_asset(mi_name, dest, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
     mi.set_editor_property("parent", master)
@@ -130,7 +142,15 @@ def import_face(face, master):
     if mr:
         MEL.set_material_instance_texture_parameter_value(mi, "MRTex", mr)
         MEL.set_material_instance_scalar_parameter_value(mi, "UseMRTex", 1.0)
+    if nrm:
+        MEL.set_material_instance_texture_parameter_value(mi, "NormTex", nrm)
+        MEL.set_material_instance_scalar_parameter_value(mi, "UseNormTex", 1.0)
     EAL.save_loaded_asset(mi)
+    # read back, don't trust the setters: they return False even when the value
+    # lands (2026-10-14 - a fresh-process readback showed all 20 set)
+    got_n = MEL.get_material_instance_texture_parameter_value(mi, "NormTex")
+    log.append("%s: readback NormTex=%s UseNormTex=%s" % (
+        face, got_n.get_name() if got_n else None, MEL.get_material_instance_scalar_parameter_value(mi, "UseNormTex")))
     rebuilt = []
     for sm in mesh.get_editor_property("materials"):
         sm.set_editor_property("material_interface", mi)
