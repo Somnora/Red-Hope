@@ -119,6 +119,16 @@ elsewhere. Unreal(R) Engine, Copyright 1998-2026, Epic Games, Inc.
 All rights reserved.
 
 
+MAKEHUMAN ASSETS (VIA MPFB 2)
+-----------------------------
+Character base meshes, proxies, skins, clothing, hair and eyebrows from
+MakeHuman (makehumancommunity.org), as bundled with MPFB 2. These assets were
+explicitly released as CC0 in September 2020 by Data Collection AB, Joel
+Palmius and Jonas Hauquier. CC0 requires no attribution; this entry is a
+courtesy credit. MPFB itself (GPL-3.0-or-later) was used as a TOOL and none of
+its code is distributed.
+
+
 BLENDER
 -------
 Blender is GPL-licensed and was used as a TOOL in the art pipeline. The GPL

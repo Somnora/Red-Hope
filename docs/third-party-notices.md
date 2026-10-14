@@ -65,6 +65,22 @@ still to be confirmed — see the audit.
 CreativeML Open RAIL++-M. The licence carries behavioural use restrictions that
 must be passed downstream to any recipient of the model or its derivatives.
 
+## MakeHuman assets via MPFB 2
+
+The crew walkers (`scripts/blender/rh_crew_build.py`, 2026-10) are built from
+MakeHuman's base mesh, proxies, skins, clothes, hair and eyebrows as bundled
+with MPFB 2 (v2.0.17). Each of those asset files carries the header "This asset
+was explicitly released as CC0 in september 2020" (copyright holders at the time
+of release: Data Collection AB, Joel Palmius, Jonas Hauquier). CC0 needs no
+attribution; this entry is informational, as a courtesy credit:
+
+> Character base meshes and clothing from MakeHuman (makehumancommunity.org), CC0.
+
+MPFB itself is GPL-3.0-or-later and was used as a TOOL, like Blender below; none
+of its code ships. The `male_casualsuit01` diffuse texture carries a
+"www.makehuman.org" mark in its top-left corner; no face of the garment samples
+that corner, so the mark never reaches a baked crew atlas.
+
 ## Blender
 
 Blender is GPL. It is used as a tool; the GPL binds Blender itself, not artwork

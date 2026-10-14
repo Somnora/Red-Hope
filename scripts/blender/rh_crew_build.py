@@ -77,7 +77,80 @@ CREW = {
                 ("shoes03", "all", {"all": "#3A2E26"})],
         hair=("short02", "#8F8B85"), brow=("eyebrow002", "#88837C"), eyes="blue"),
 }
+
+
+# ------------------------------------------------- the rest of the roster
+# Outfit kit (the shared wardrobe): three cuts, recoloured per person.
+def jumpsuit(c, boots="#2A2622"):
+    """Long-sleeved shirt + trousers in one colour reads as a coverall."""
+    return [("male_casualsuit01", "z", {"upper": c, "lower": c}), ("shoes03", "all", {"all": boots})]
+
+
+def shirt(top, bottom, boots="#2A2622"):
+    return [("male_casualsuit01", "z", {"upper": top, "lower": bottom}), ("shoes03", "all", {"all": boots})]
+
+
+def jacket(jk, trousers, inner, boots="#2A2622"):
+    return [("male_casualsuit05", "hue", {"upper": jk, "lower": trousers, "shirt": inner}),
+            ("shoes03", "all", {"all": boots})]
+
+
+def person(sex, age, h, skin, race, outfit, hair, brow, muscle=0.55, weight=0.5, proportions=0.6):
+    """sex 0 = female / 1 = male; age is MPFB's macro (0.5 = 25 y, 1.0 = 90 y);
+    h in metres; race = (african, asian, caucasian)."""
+    a, s_, c = race
+    return dict(sex=sex, age=age, height_m=h, muscle=muscle, weight=weight, proportions=proportions,
+                race=dict(african=a, asian=s_, caucasian=c), skin=skin,
+                proxy="female1605" if sex < 0.5 else "male1591",
+                outfit=outfit, hair=hair, brow=brow, eyes="brown")
+
+
+# Identity from the shipped references (Martians/gen/chars-redo/<id>/cutout/
+# <id>_habitat_front.png for the July twelve, Martians/gen/crew8/cutout/<id>.png
+# for the August eight): build, age, ancestry, hair and outfit colours. Faces
+# are MPFB's - identity at gameplay zoom is silhouette, height, skin, hair and
+# clothing, which is what carries over.
+CREW.update({
+    "eng_ruiz": person(1, 0.70, 1.76, "middleage_caucasian_male", (0.1, 0.15, 0.75), jumpsuit("#4B4541"),
+                       ("short01", "#7C7873"), ("eyebrow002", "#5A5550"), muscle=0.6, weight=0.6),
+    "geo_okafor": person(1, 0.68, 1.86, "middleage_african_male", (0.95, 0.0, 0.05),
+                         jacket("#8A4B33", "#5E5A52", "#3A3C40"), ("short01", "#141110"), ("eyebrow001", "#141110"),
+                         muscle=0.75, weight=0.68),
+    "med_haddad": person(1, 0.57, 1.78, "young_caucasian_male", (0.08, 0.07, 0.85), shirt("#E4DED2", "#7898AE"),
+                         ("short03", "#1E1814"), ("eyebrow003", "#1E1814"), muscle=0.5, weight=0.45),
+    "tech_park": person(0, 0.55, 1.66, "young_asian_female", (0.0, 0.95, 0.05), jacket("#4C566C", "#6E6C68", "#2E2F33"),
+                        ("short04", "#131110"), ("eyebrow006", "#131110"), weight=0.4),
+    "pilot_reyes": person(0, 0.58, 1.68, "young_caucasian_female2", (0.15, 0.15, 0.7), jacket("#3E5A7F", "#2B2A29", "#3A3A3C"),
+                          ("short04", "#1B1512"), ("eyebrow005", "#1B1512"), weight=0.45),
+    "quart_bello": person(1, 0.60, 1.80, "young_african_male", (0.92, 0.0, 0.08), jacket("#68683E", "#8C7F66", "#55603F"),
+                          ("afro01", "#15110F"), ("eyebrow001", "#15110F"), muscle=0.6, weight=0.88),
+    "res_novak": person(0, 0.78, 1.66, "old_caucasian_female", (0.0, 0.0, 1.0), jacket("#DAD7CF", "#6F6E6B", "#5D6873"),
+                        ("bob01", "#CBC8C2"), ("eyebrow004", "#9A968F"), weight=0.5),
+    "hydro_mensah": person(0, 0.52, 1.64, "young_african_female", (0.95, 0.0, 0.05), shirt("#5C6B44", "#4E6A86"),
+                           ("ponytail01", "#15100E"), ("eyebrow007", "#15100E"), weight=0.45),
+    "reactor_ito": person(1, 0.65, 1.72, "middleage_asian_male", (0.0, 0.95, 0.05), jumpsuit("#3A3C3F"),
+                          ("short01", "#2A2826"), ("eyebrow002", "#1E1C1A"), muscle=0.6, weight=0.5),
+    "survey_khan": person(1, 0.62, 1.80, "middleage_asian_male", (0.1, 0.35, 0.55), jacket("#8A8270", "#5D5A52", "#3D3D3B"),
+                          ("short02", "#1A1512"), ("eyebrow002", "#1A1512"), muscle=0.6, weight=0.55),
+    "xeno_adeyemi": person(0, 0.60, 1.70, "middleage_african_female", (0.95, 0.0, 0.05), jacket("#6E3044", "#6D8191", "#E0D8C8"),
+                           ("afro01", "#1A1310"), ("eyebrow006", "#1A1310"), weight=0.48),
+    "bot_lindqvist": person(0, 0.82, 1.64, "old_caucasian_female", (0.0, 0.0, 1.0), jumpsuit("#6F7D61"),
+                            ("short04", "#D9D7D1"), ("eyebrow004", "#B0ADA6"), weight=0.5),
+    "fab_stone": person(0, 0.60, 1.74, "middleage_african_female", (0.95, 0.0, 0.05), jumpsuit("#4A4A4C"),
+                        ("short01", "#110D0B"), ("eyebrow006", "#110D0B"), muscle=0.7, weight=0.55),
+    "comms_diallo": person(1, 0.58, 1.79, "young_african_male", (1.0, 0.0, 0.0), jumpsuit("#4F5B6E"),
+                           ("short01", "#100C0A"), ("eyebrow001", "#100C0A"), weight=0.5),
+    "rookie_shaw": person(1, 0.47, 1.77, "young_caucasian_male", (0.0, 0.0, 1.0), jumpsuit("#A1956F"),
+                          ("short03", "#A34F22"), ("eyebrow003", "#8A4A2A"), muscle=0.45, weight=0.38),
+    "safety_abara": person(0, 0.62, 1.69, "middleage_african_female", (1.0, 0.0, 0.0), jacket("#E2862C", "#555556", "#444446"),
+                           ("short01", "#100C0A"), ("eyebrow006", "#100C0A"), muscle=0.6, weight=0.55),
+    "driver_costa": person(1, 0.60, 1.75, "middleage_caucasian_male", (0.2, 0.1, 0.7), jacket("#9A4A2C", "#5F6266", "#6A6E73"),
+                           ("short02", "#120E0C"), ("eyebrow002", "#120E0C"), muscle=0.6, weight=0.55),
+    "cook_moreau": person(0, 0.75, 1.60, "middleage_caucasian_female", (0.0, 0.2, 0.8), shirt("#D6CCB8", "#6A6863"),
+                          ("ponytail01", "#5E5852"), ("eyebrow005", "#4A453F"), weight=0.62),
+})
 ROUGH = {"skin": 0.55, "cloth": 0.82, "shoe": 0.45, "hair": 0.6, "eye": 0.15}
+CLOTH_MAX_TRIS = 8000      # per garment; keeps every crew member inside the 25k budget
 
 # Measured 2026-10-13 (evaluated mesh, proportions 0.6): MPFB height macro -> metres.
 H_TABLE = {0.0: [(0.2, 1.382), (0.5, 1.593), (0.8, 2.008), (1.0, 2.294)],
@@ -189,10 +262,15 @@ def recolour_garment(o, garment, split, tints, rig):
         if ao is not None:
             ta = nt.nodes.new("ShaderNodeTexImage"); ta.image = ao
             ta.image.colorspace_settings.name = "Non-Color"
+            # floor the AO at 0.65: the garment maps carry near-black crease
+            # specks (casualsuit01: min 0.08, 1st percentile 0.49) that read as
+            # blotches once tinted; above the floor the folds keep their shading
+            fl = nt.nodes.new("ShaderNodeMath"); fl.operation = "MAXIMUM"; fl.inputs[1].default_value = 0.65
+            nt.links.new(fl.inputs[0], ta.outputs["Color"])
             m2 = nt.nodes.new("ShaderNodeMix"); m2.data_type = "RGBA"; m2.blend_type = "MULTIPLY"
             m2.inputs["Factor"].default_value = 0.85
             nt.links.new(m2.inputs["A"], out)
-            nt.links.new(m2.inputs["B"], ta.outputs["Color"])
+            nt.links.new(m2.inputs["B"], fl.outputs["Value"])
             out = m2.outputs["Result"]
         nt.links.new(b.inputs["Base Color"], out)
         nt.links.new(b.inputs["Alpha"], tx.outputs["Alpha"])
@@ -294,6 +372,20 @@ def bake_ready_mesh(rig, parts):
             for m in arm:
                 m.show_viewport = False
                 m.show_render = False
+            tris = sum(len(p.vertices) - 2 for p in o.data.polygons)
+            if role in ("cloth", "shoe") and tris > CLOTH_MAX_TRIS:
+                # male_casualsuit01 alone is ~16.6k tris, which put everyone
+                # wearing it over the art bible's 25k character budget.
+                # Collapse keeps weights, UVs and the recolour regions.
+                dec = o.modifiers.new("Budget", "DECIMATE")
+                dec.ratio = CLOTH_MAX_TRIS / float(tris)
+                # the coarser faces cut the corners of the leg's curve and the
+                # boot rim poked through the trouser shin as a black blob;
+                # 7 mm out along the normals puts the cloth back over it
+                puff = o.modifiers.new("Puff", "DISPLACE")
+                puff.mid_level = 0.0
+                puff.strength = 0.007
+                log("decimated %s %d -> ~%d tris (+7 mm puff)" % (o.name, tris, CLOTH_MAX_TRIS))
             bpy.ops.object.select_all(action="DESELECT")
             o.hide_set(False)
             o.select_set(True)
