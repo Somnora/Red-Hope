@@ -69,14 +69,20 @@ def main():
     task.replace_existing = True
     task.save = True
     AT.import_asset_tasks([task])
-    assets = EAL.list_assets(DEST, recursive=True)
-    rec("imported %d assets under %s" % (len(assets), DEST))
+    # Interchange lays the import out as <DEST>/<glb name>/... Look ONLY there
+    # and take the mesh BY NAME: with a shared RH_DEST (Machines, Props2, Tiers)
+    # "the first static mesh under DEST" was a neighbour - on 2026-10-14 the
+    # elevator's material was wired onto RH_AirFilter2.
+    own = "%s/%s" % (DEST, os.path.splitext(os.path.basename(GLB))[0])
+    root = own if EAL.does_directory_exist(own) else DEST
+    assets = EAL.list_assets(root, recursive=True)
+    rec("imported %d assets under %s" % (len(assets), root))
 
     mesh = mesh_path = None
     texs = []
     for a in assets:
         obj = unreal.load_asset(a)
-        if isinstance(obj, unreal.StaticMesh) and mesh is None:
+        if isinstance(obj, unreal.StaticMesh) and (mesh is None or obj.get_name() == NAME):
             mesh, mesh_path = obj, a
         elif isinstance(obj, unreal.Texture2D):
             texs.append((leaf(a), obj))
