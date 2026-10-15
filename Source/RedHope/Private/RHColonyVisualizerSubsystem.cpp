@@ -5,6 +5,7 @@
 #include "RHDefinitionsSubsystem.h"
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHCrewVisualizerSubsystem.h"
+#include "RHElevatorLayout.h"
 #include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
@@ -1077,7 +1078,23 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		// Min-side fit: the model must stay INSIDE the sim's reserved footprint
 		// on both axes (max-side fit spilled a square mesh 1 m into the cells
 		// flanking a rectangular footprint - review finding).
-		const float TargetCm = FMath::Min(Scale.X, Scale.Y) * 100.f;
+		// ScaleFor's per-type squeezes shape the PRIMITIVE stand-ins
+		// (Electrolyzer's slim hall, WaterPlant's tank farm). Applied to the
+		// code-built models (2026-10-14) they left both sitting small inside
+		// their reserved cells, so those two fit the raw footprint. The Lander
+		// keeps its squeeze: its legs are part of the model and the director
+		// signed off its size.
+		FVector Fit = Scale;
+		if (Instance.DefName == FName("Electrolyzer") || Instance.DefName == FName("WaterPlant"))
+		{
+			const URHDefinitionsSubsystem* FitDefs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (const FRHBuildingRow* FitDef = FitDefs ? FitDefs->GetBuilding(Instance.DefName) : nullptr)
+			{
+				Fit.X = FMath::Max(1, FitDef->FootprintX) * 2.f;
+				Fit.Y = FMath::Max(1, FitDef->FootprintY) * 2.f;
+			}
+		}
+		const float TargetCm = FMath::Min(Fit.X, Fit.Y) * 100.f;
 		const float S = TargetCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
 		Actor->SetActorScale3D(FVector(S));
 		// Recenter horizontally, sit the bounds bottom on the ground.
@@ -1503,7 +1520,13 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		const FVector Head = Sim->GetShaftHeadCm();
 		const double FloorH = Sim->GetFloorHeightCm();
 		const double FloorZ = ViewLevel * FloorH;
-		if (const UStaticMesh* Cage = CageComp->GetStaticMesh())
+		if (bElevatorIsCab)
+		{
+			// The cab's pivot IS its floor centre (RHElevatorLayout.h), so it
+			// sits by pivot - bounds would shift with the door casing.
+			CageComp->SetWorldLocation(FVector(Head.X, Head.Y, FloorZ));
+		}
+		else if (const UStaticMesh* Cage = CageComp->GetStaticMesh())
 		{
 			const FBoxSphereBounds CB = Cage->GetBounds();
 			const float S = CageComp->GetComponentScale().Z;
@@ -1521,6 +1544,20 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 		ElevatorWakeAlpha = FMath::FInterpTo(ElevatorWakeAlpha, Target, DeltaTime, 3.5f);
+		// The doors ride the same wake: each leaf slides one leaf-width into
+		// its pocket as crew approach and back as they leave. Leaf B is leaf A
+		// turned 180 degrees (the leaf mesh is symmetric).
+		const float Slide = RHElevator::LeafClosedY + RHElevator::LeafTravel * FMath::Clamp(ElevatorWakeAlpha, 0.f, 1.f);
+		if (UStaticMeshComponent* LeafA = ElevatorDoorA.Get())
+		{
+			LeafA->SetWorldLocationAndRotation(
+				FVector(Head.X + RHElevator::DoorPlaneX, Head.Y + Slide, FloorZ + RHElevator::LeafZ), FRotator::ZeroRotator);
+		}
+		if (UStaticMeshComponent* LeafB = ElevatorDoorB.Get())
+		{
+			LeafB->SetWorldLocationAndRotation(
+				FVector(Head.X + RHElevator::DoorPlaneX, Head.Y - Slide, FloorZ + RHElevator::LeafZ), FRotator(0.f, 180.f, 0.f));
+		}
 		if (UPointLightComponent* Lamp = ElevatorLamp.Get())
 		{
 			// The cage wakes for an approaching colonist: 0 cd asleep, 18 cd
@@ -1597,8 +1634,15 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 			// fallback; absent both, the slim column carries alone.
 			if (ShaftVisual)
 			{
+				// The code-built cab (2026-10-14) first: true scale, real doors.
 				UStaticMesh* Cage = LoadObject<UStaticMesh>(nullptr,
-					TEXT("/Game/RedHope/Art/Machines/RH_Elevator2/StaticMeshes/RH_Elevator2.RH_Elevator2"));
+					TEXT("/Game/RedHope/Art/Machines/RH_ElevatorCab/StaticMeshes/RH_ElevatorCab.RH_ElevatorCab"));
+				bElevatorIsCab = Cage != nullptr;
+				if (!Cage)
+				{
+					Cage = LoadObject<UStaticMesh>(nullptr,
+						TEXT("/Game/RedHope/Art/Machines/RH_Elevator2/StaticMeshes/RH_Elevator2.RH_Elevator2"));
+				}
 				if (!Cage)
 				{
 					Cage = LoadObject<UStaticMesh>(nullptr,
@@ -1614,12 +1658,35 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 					CageComp->RegisterComponent();
 					CageComp->SetStaticMesh(Cage);
 					const FBoxSphereBounds CB = Cage->GetBounds();
-					CageComp->SetWorldScale3D(FVector((float)(FloorH * 0.78 / FMath::Max(2.f * CB.BoxExtent.Z, 1.f))));
+					// The cab is built in real metres to the RHElevatorLayout.h
+					// contract; only the legacy lattice is fitted to the floor.
+					CageComp->SetWorldScale3D(bElevatorIsCab ? FVector(1.f)
+						: FVector((float)(FloorH * 0.78 / FMath::Max(2.f * CB.BoxExtent.Z, 1.f))));
 					ElevatorCage = CageComp;
-					// No door panels (see the header note by ElevatorLamp).
-					// The approach cue is this lamp inside the lattice: warm,
-					// small, shadowless like every other interior light, and
-					// driven from 0 in Tick so a sleeping cage stays dark.
+					// Sliding leaves, only on the cab: its front wall has the
+					// pockets they slide into (the lattice never did - see the
+					// header note by ElevatorLamp). Placed every tick.
+					UStaticMesh* Leaf = bElevatorIsCab ? LoadObject<UStaticMesh>(nullptr,
+						TEXT("/Game/RedHope/Art/Machines/RH_ElevatorDoor/StaticMeshes/RH_ElevatorDoor.RH_ElevatorDoor")) : nullptr;
+					if (Leaf)
+					{
+						for (int32 Side = 0; Side < 2; ++Side)
+						{
+							UStaticMeshComponent* LeafComp = NewObject<UStaticMeshComponent>(ShaftVisual,
+								Side == 0 ? TEXT("ElevatorDoorA") : TEXT("ElevatorDoorB"));
+							LeafComp->SetupAttachment(ShaftVisual->GetRootComponent());
+							LeafComp->SetMobility(EComponentMobility::Movable);
+							LeafComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+							LeafComp->SetAbsolute(true, true, true);
+							LeafComp->RegisterComponent();
+							LeafComp->SetStaticMesh(Leaf);
+							LeafComp->SetWorldScale3D(FVector(1.f));
+							(Side == 0 ? ElevatorDoorA : ElevatorDoorB) = LeafComp;
+						}
+					}
+					// The approach cue: warm, small, shadowless like every other
+					// interior light, driven from 0 in Tick so a sleeping cab
+					// stays dark - and on the cab it rides with the doors.
 					UPointLightComponent* Lamp = NewObject<UPointLightComponent>(ShaftVisual, TEXT("ElevatorLamp"));
 					Lamp->SetupAttachment(ShaftVisual->GetRootComponent());
 					Lamp->SetMobility(EComponentMobility::Movable);

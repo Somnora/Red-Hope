@@ -224,6 +224,14 @@ private:
 	// warms up as crew approach. A light inside a lattice cannot detach.
 	TWeakObjectPtr<UPointLightComponent> ElevatorLamp;
 	float ElevatorWakeAlpha = 0.f;
+	// 2026-10-14: the doors are BACK, on a cab that can hold them. RH_ElevatorCab
+	// (scripts/blender/rh_build_elevator.py) is a solid car whose front wall
+	// has pocket cavities; the two RH_ElevatorDoor leaves slide into those
+	// pockets, so they can never float. Geometry contract: RHElevatorLayout.h.
+	// Null when only the legacy lattice cage is present (then no doors).
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorA;
+	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorB;
+	bool bElevatorIsCab = false;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;

@@ -346,10 +346,10 @@ namespace
 			{ TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/StaticMeshes/SolarPanel.SolarPanel"),
 			  TEXT("/Game/RedHope/Art/Models2/SolarPanel/SolarPanel/Textures/SolarPanel_textured.SolarPanel_textured"),
 			  FLinearColor(0.25f, 0.45f, 0.95f), 0.10f, 0.20f, 0.45f, IceGlow, 0.10f },
-			// Habitat
+			// Habitat - KIT (scripts/blender/rh_build_habitatdome.py, 2026-10-14)
 			{ TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/StaticMeshes/HabitatDome.HabitatDome"),
-			  TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/Textures/HabitatDome_textured.HabitatDome_textured"),
-			  FLinearColor(0.95f, 0.95f, 0.95f), 0.06f, 0.10f, 0.72f, AmberGlow, 0.16f },
+			  TEXT("/Game/RedHope/Art/Models2/HabitatDome/HabitatDome/Textures/HabitatDome_BaseColor.HabitatDome_BaseColor"),
+			  FLinearColor(0.95f, 0.95f, 0.95f), 0.0f, 0.10f, 0.72f, AmberGlow, 0.8f },
 			// ComputeModule - KIT (scripts/blender/rh_build_commandmodule.py)
 			{ TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/StaticMeshes/CommandModule.CommandModule"),
 			  TEXT("/Game/RedHope/Art/Models2/CommandModule/CommandModule/Textures/CommandModule_BaseColor.CommandModule_BaseColor"),

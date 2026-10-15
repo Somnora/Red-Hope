@@ -10,6 +10,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "RedHope.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHElevatorLayout.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -47,19 +48,30 @@ namespace
 		TEXT("rh.WalkerYawOffsetDeg"), -90.f,
 		TEXT("Yaw correction applied to skeletal walker meshes so figures face their travel direction."));
 
+static TAutoConsoleVariable<int32> CVarCrewTrueHeight(
+	TEXT("rh.CrewTrueHeight"),
+	1,
+	TEXT("1 = walkers stand at their built height (the MPFB crew run 1.60-1.88 m, 2026-10-14); 0 = the old uniform 1.8 m normalisation. Applies to figures spawned after the change."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarCrewStrideCm(
 	TEXT("rh.CrewStrideCm"),
 	104.4f,
 	TEXT("Ground distance (cm) the crew Walk clip depicts per full cycle. Drives animation rate so feet do not slide. Measured from the baked clip: 52.2 cm step x 2."),
 	ECVF_Default);
 
-	// Where crew board and alight: at the elevator's DOOR FACE (+X side,
-	// matching the visualizer's door panels), never the cage centre - walking
-	// to the centre clipped figures through the cage walls (director
-	// hand-play 2026-07-17: "characters phase through the side").
+	// Where crew board and alight: just outside the cab's DOORWAY (-X face,
+	// the side the default camera sees - RHElevatorLayout.h). Underground they
+	// then walk in through the open doors (ElevatorCabCm) and ride; they reach
+	// the door point AROUND the cab, never through it (director hand-play
+	// 2026-07-17: "characters phase through the side").
 	FVector ElevatorDoorCm(const FVector& HeadCm, double Z)
 	{
-		return FVector(HeadCm.X + 170.0, HeadCm.Y, Z);
+		return FVector(HeadCm.X + RHElevator::DoorStandX, HeadCm.Y, Z);
+	}
+	FVector ElevatorCabCm(const FVector& HeadCm, double Z)
+	{
+		return FVector(HeadCm.X + RHElevator::InsideX, HeadCm.Y, Z);
 	}
 	constexpr float StrollChance = 0.12f;   // odds a settled colonist takes air
 
@@ -302,7 +314,11 @@ AActor* URHCrewVisualizerSubsystem::SpawnFigure(const FString& Name, int32 Id, c
 		Skel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		const FBoxSphereBounds WB = Walker->GetBounds();
 		const float HeightCm = FMath::Max(2.f * WB.BoxExtent.Z, 1.f);
-		Skel->SetRelativeScale3D(FVector(180.f / HeightCm)); // ~1.8 m suited figure
+		// The MPFB crew are built at true height (different sizes, one world -
+		// director 2026-10-13); anything outside a human range is a legacy
+		// asset and still gets the old 1.8 m fit.
+		const bool bTrue = CVarCrewTrueHeight.GetValueOnGameThread() != 0 && HeightCm > 140.f && HeightCm < 220.f;
+		Skel->SetRelativeScale3D(FVector(bTrue ? 1.f : 180.f / HeightCm));
 		Skel->SetRelativeLocation(FVector::ZeroVector);
 		if (UAnimSequence* Idle = LoadObject<UAnimSequence>(nullptr, *WalkerAnimPath(Id, TEXT("Idle"))))
 		{
@@ -482,7 +498,9 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 			Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			FloorZ);
-		if (!NearFurnitureCm(Level, Candidate, 80.f))
+		const bool bInCab = Level != 0
+			&& RHElevator::Inside(RHElevator::CabRect(Head, RHElevator::WalkMargin + 60.f), Candidate);
+		if (!NearFurnitureCm(Level, Candidate, 80.f) && !bInCab)
 		{
 			break;
 		}
@@ -522,6 +540,47 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	const TArray<FRHColonist>& Roster = Sim->GetColonists();
 	const double Now = World->GetTimeSeconds();
+
+	// The elevator walk (2026-10-14: the cab has real doors now). Underground,
+	// every walk goes AROUND the cab; a rider walks to the door point, in
+	// through the open doors, rides (the hard cut), and steps out the same way
+	// below. The surface shaft head has no cab, so it keeps the plain vanish.
+	auto WalkTo = [&](FCrewVisual& V, const FVector& From, const FVector& To, int32 Level)
+	{
+		V.Waypoints.Reset();
+		if (Level != 0)
+		{
+			V.Waypoints = RHElevator::RouteAroundCab(Sim->GetShaftHeadCm(), From, To);
+		}
+		V.Waypoints.Add(To);
+		V.TargetCm = V.Waypoints[0];
+		V.Waypoints.RemoveAt(0);
+	};
+	auto Board = [&](FCrewVisual& V, const FVector& From, int32 FromLevel, int32 ToLevel, const FVector& AfterTarget)
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const double Z = FromLevel * Sim->GetFloorHeightCm();
+		V.Phase = EPhase::Boarding;
+		V.RideToLevel = ToLevel;
+		V.AfterRideTargetCm = AfterTarget;
+		V.bFaceOnArrive = false;
+		WalkTo(V, From, ElevatorDoorCm(Head, Z), FromLevel);
+		V.Waypoints.Add(ElevatorCabCm(Head, Z)); // then straight in through the doorway
+		V.NextDecideRealSeconds = Now;
+	};
+	auto StepOutBelow = [&](FCrewVisual& V, AActor* A, int32 Level)
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const double Z = Level * Sim->GetFloorHeightCm();
+		V.CurLevel = Level;
+		V.Phase = EPhase::Alighting;
+		V.Waypoints.Reset();
+		A->SetActorLocation(ElevatorCabCm(Head, Z));
+		A->SetActorRotation(FRotator(0.f, 180.f, 0.f)); // facing out of the doorway
+		V.TargetCm = ElevatorDoorCm(Head, Z);
+		V.bFaceOnArrive = false;
+		V.NextDecideRealSeconds = Now;
+	};
 	// Figures amble at sim pace (paused colony = still colony); era speed is
 	// clamped so fast-forward doesn't turn walks into teleports.
 	const float Pace = FMath::Min(Clock->GetSpeed(), 8.f);
@@ -605,9 +664,16 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			if (Vis->Phase == EPhase::Resident)
 			{
 				const FVector Head = Sim->GetShaftHeadCm();
-				Vis->CurLevel = C.HomeLevel;
-				Actor->SetActorLocation(ElevatorDoorCm(Head, C.HomeLevel * Sim->GetFloorHeightCm()));
-				Vis->TargetCm = WanderPointCm(C.HomeLevel);
+				if (C.HomeLevel != 0)
+				{
+					StepOutBelow(*Vis, Actor, C.HomeLevel);
+				}
+				else
+				{
+					Vis->CurLevel = C.HomeLevel;
+					Actor->SetActorLocation(ElevatorDoorCm(Head, 0));
+					Vis->TargetCm = WanderPointCm(C.HomeLevel);
+				}
 			}
 		}
 
@@ -718,12 +784,25 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			float RateScale = 1.f;
 			if (bWalking)
 			{
-				const float StrideCm = FMath::Max(CVarCrewStrideCm.GetValueOnGameThread(), 1.f);
+				// The clip's stride was tuned at 1.8 m; at true height it scales
+				// with the figure, or short crew would moonwalk.
+				float HeightK = 1.f;
+				if (const USkeletalMesh* SM = Skel->GetSkeletalMeshAsset())
+				{
+					HeightK = FMath::Clamp(Skel->GetComponentScale().Z * 2.f * (float)SM->GetBounds().BoxExtent.Z / 180.f, 0.7f, 1.3f);
+				}
+				const float StrideCm = FMath::Max(CVarCrewStrideCm.GetValueOnGameThread() * HeightK, 1.f);
 				RateScale = FMath::Clamp((WalkCmPerSec * Pace) / StrideCm, 0.05f, 6.f);
 			}
 			Skel->GlobalAnimRateScale = Pace > 0.f ? RateScale : 0.f;
 		}
-		if (!bWalking && Pace > 0.f && Now >= Vis->NextDecideRealSeconds)
+		if (!bWalking && Pace > 0.f && Vis->Waypoints.Num() > 0)
+		{
+			// A corner of the walk around the cab (or the doorway): keep going.
+			Vis->TargetCm = Vis->Waypoints[0];
+			Vis->Waypoints.RemoveAt(0);
+		}
+		else if (!bWalking && Pace > 0.f && Now >= Vis->NextDecideRealSeconds)
 		{
 			Actor->SetActorLocation(Flat);
 			const FVector Head = Sim->GetShaftHeadCm();
@@ -731,26 +810,39 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			{
 			case EPhase::Arriving:
 				// At the shaft head: ride down (the elevator is a hard cut in
-				// the pit view's language - the figure re-appears below).
-				Vis->Phase = EPhase::Resident;
-				Vis->CurLevel = Vis->HomeLevel;
-				Actor->SetActorLocation(ElevatorDoorCm(Head, Vis->HomeLevel * Sim->GetFloorHeightCm()));
-				Vis->TargetCm = WanderPointCm(Vis->HomeLevel);
+				// the pit view's language - the figure re-appears below, inside
+				// the cab, and steps out through its doors).
 				Vis->Activity = TEXT("settling in");
-				Vis->bFaceOnArrive = false;
+				if (Vis->HomeLevel != 0)
+				{
+					StepOutBelow(*Vis, Actor, Vis->HomeLevel);
+				}
+				else
+				{
+					Vis->Phase = EPhase::Resident;
+					Vis->CurLevel = 0;
+					Vis->TargetCm = WanderPointCm(0);
+					Vis->bFaceOnArrive = false;
+				}
 				break;
 			case EPhase::Resident:
 				if (FMath::FRand() < StrollChance && Sim->GetShaftDepth() > 0)
 				{
-					// Take air: surface at the shaft head, wander out a bit.
-					Vis->Phase = EPhase::StrollOut;
-					Vis->CurLevel = 0;
-					Actor->SetActorLocation(ElevatorDoorCm(Head, 0));
+					// Take air: ride up to the shaft head, wander out a bit.
 					const float Ang = FMath::FRandRange(0.f, 2.f * PI);
-					Vis->TargetCm = FVector(Head.X, Head.Y, 0)
+					const FVector Stroll = FVector(Head.X, Head.Y, 0)
 						+ FVector(FMath::Cos(Ang), FMath::Sin(Ang), 0) * FMath::FRandRange(1500.f, 3200.f);
 					Vis->Activity = TEXT("taking air");
-					Vis->bFaceOnArrive = false;
+					if (Vis->CurLevel != 0)
+					{
+						Board(*Vis, Flat, Vis->CurLevel, 0, Stroll);
+					}
+					else
+					{
+						Vis->Phase = EPhase::StrollOut;
+						Vis->TargetCm = Stroll;
+						Vis->bFaceOnArrive = false;
+					}
 				}
 				else
 				{
@@ -800,7 +892,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 							Vis->bFaceOnArrive = true;
 						}
 					}
-					Vis->TargetCm = Target;
+					WalkTo(*Vis, Flat, Target, Vis->CurLevel);
 					Vis->NextDecideRealSeconds = Now + FMath::FRandRange(4.0, 12.0);
 				}
 				break;
@@ -811,12 +903,40 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				Vis->NextDecideRealSeconds = Now + FMath::FRandRange(2.0, 6.0);
 				break;
 			case EPhase::StrollBack:
-				Vis->Phase = EPhase::Resident;
-				Vis->CurLevel = Vis->HomeLevel;
-				Actor->SetActorLocation(ElevatorDoorCm(Head, Vis->HomeLevel * Sim->GetFloorHeightCm()));
-				Vis->TargetCm = WanderPointCm(Vis->HomeLevel);
 				Vis->Activity = TEXT("heading home");
-				Vis->bFaceOnArrive = false;
+				if (Vis->HomeLevel != 0)
+				{
+					StepOutBelow(*Vis, Actor, Vis->HomeLevel);
+				}
+				else
+				{
+					Vis->Phase = EPhase::Resident;
+					Vis->CurLevel = 0;
+					Vis->TargetCm = WanderPointCm(0);
+					Vis->bFaceOnArrive = false;
+				}
+				break;
+			case EPhase::Boarding:
+				// Inside the cab: ride (the hard cut). Up top there is no cab -
+				// the rider appears at the shaft head and walks on.
+				if (Vis->RideToLevel == 0)
+				{
+					Vis->Phase = EPhase::StrollOut;
+					Vis->CurLevel = 0;
+					Actor->SetActorLocation(ElevatorDoorCm(Head, 0));
+					Vis->TargetCm = Vis->AfterRideTargetCm;
+				}
+				else
+				{
+					StepOutBelow(*Vis, Actor, Vis->RideToLevel);
+				}
+				break;
+			case EPhase::Alighting:
+				// Out through the doors: back to life on this floor, walking
+				// around the cab to wherever it goes first.
+				Vis->Phase = EPhase::Resident;
+				WalkTo(*Vis, Flat, WanderPointCm(Vis->CurLevel), Vis->CurLevel);
+				Vis->NextDecideRealSeconds = Now + FMath::FRandRange(2.0, 6.0);
 				break;
 			default:
 				break;

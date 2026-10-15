@@ -41,7 +41,10 @@ public:
 	}
 
 private:
-	enum class EPhase : uint8 { Arriving, Descending, Resident, StrollOut, StrollBack };
+	// Boarding: walking to the elevator door, then into the cab (2026-10-14);
+	// on reaching the cab the figure rides (hard cut) to RideToLevel.
+	// Alighting: walking out of the cab to the door point after a ride.
+	enum class EPhase : uint8 { Arriving, Descending, Resident, StrollOut, StrollBack, Boarding, Alighting };
 
 	struct FCrewVisual
 	{
@@ -57,6 +60,13 @@ private:
 		// only when the cursor is near the figure.
 		TWeakObjectPtr<UTextRenderComponent> NameLabel;
 		EPhase Phase = EPhase::Resident;
+		// Corner waypoints still to walk before TargetCm (walking around the
+		// elevator cab, never through it), consumed front to back.
+		TArray<FVector> Waypoints;
+		// A Boarding figure's ride: the floor it rides to, and what it does on
+		// stepping out there (surface: the stroll; underground: Alighting).
+		int32 RideToLevel = 0;
+		FVector AfterRideTargetCm = FVector::ZeroVector;
 		int32 CurLevel = 0;        // floor the figure currently stands on
 		int32 HomeLevel = -1;
 		FVector TargetCm = FVector::ZeroVector;
