@@ -2,11 +2,13 @@
 # The first-hour playtest: a scripted player walks the guide's path in the
 # real game (live robots, agent band at 16x) and logs a timeline.
 #
-#   bash scripts/sim/rh_playtest.sh [sols=30] [label=playtest] [rush|guide]
+#   bash scripts/sim/rh_playtest.sh [sols=30] [label=playtest] [rush|guide] [lean|full]
 #
 # rush  = every opening order at once (all kits, pad, dig, Forge, survey)
 # guide = the first-hour guide's order: power + the Charging Pad first, the
 #         dig and the Forge only once the pad stands
+# lean  = the crew ship carries the Crew Pod alone (full = plus soil, seeds,
+#         comforts - the data ladder has two quotas, so it is the last ship)
 #
 # Windowless (-nullrhi) on a fixed time step (-benchmark -fps=10): every frame
 # advances 0.1 s of game time however fast the machine runs it, so 30 sols
@@ -23,6 +25,7 @@ set -u
 SOLS="${1:-30}"
 LABEL="${2:-playtest}"
 MODE="${3:-rush}"
+CARGO="${4:-full}"
 TIMEOUT="${RH_PLAYTEST_TIMEOUT:-1800}"
 UE="/Volumes/Unreal/UE_5.8/Engine/Binaries/Mac/UnrealEditor"
 PROJ_DIR="/Volumes/Unreal/red_hope/red_hope"
@@ -32,7 +35,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout \
-  "-ExecCmds=RH.Playtest $SOLS $MODE" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

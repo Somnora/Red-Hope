@@ -2293,13 +2293,21 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	}
 	ProducingCells = Producing;
 
-	// Grow-light blackout edge: one alert per episode, cleared when power returns.
-	if (bGrowLightsDark && !bGardenDarkAnnounced)
+	// Grow-light blackout edge: one alert per episode. An episode ends only
+	// after the lights have stayed on for a whole sol - a bank scraping empty
+	// at night flips them every step, and re-arming on each flip flooded the
+	// alert channel (12,524 alerts in 40 sols, RH.Playtest 2026-10-15).
+	const double NowSimSeconds = Clock ? Clock->GetSimSecondsTotal() : 0.0;
+	if (bGrowLightsDark)
 	{
-		bGardenDarkAnnounced = true;
-		OnAlert.Broadcast(TEXT("GROW-LIGHTS DARK — the bank can't power the garden. Crops hold dormant until the grid recovers."));
+		GardenLastDarkSimSeconds = NowSimSeconds;
+		if (!bGardenDarkAnnounced)
+		{
+			bGardenDarkAnnounced = true;
+			OnAlert.Broadcast(TEXT("GROW-LIGHTS DARK — the bank can't power the garden. Crops hold dormant until the grid recovers."));
+		}
 	}
-	else if (!bGrowLightsDark)
+	else if (NowSimSeconds - GardenLastDarkSimSeconds >= URHSimClockSubsystem::SolLengthSimSeconds)
 	{
 		bGardenDarkAnnounced = false;
 	}

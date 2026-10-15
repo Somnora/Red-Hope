@@ -304,16 +304,40 @@ namespace
 				NAME_None, NAME_None },
 
 			// --- The crew ---
+			// Soil and seeds ride with the people (crew-phase playtest, 2026-10-15):
+			// the data ladder has two quotas, so this ship can be the last - a
+			// Crew Pod alone lands 200 kg of food and no way to grow more, and
+			// the colony empties ~65 sols later (RH.Playtest ... lean).
 			{ TEXT("THE CREW"), TEXT("Bring the first crew"),
 				[](const FGuideCtx& C)
 				{
-					return FString::Printf(TEXT("Your vault has %d bed%s. Add a Crew Pod to the next supply ship's cargo - meet the next quota to earn the ship."),
+					return FString::Printf(TEXT("Your vault has %d bed%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: it may be the last ship, and a garden is how they will eat. Meet the next quota to earn it."),
 						C.Sim->GetHousingCapacity(), C.Sim->GetHousingCapacity() == 1 ? TEXT("") : TEXT("s"));
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetPopulation() > 0; },
 				NoBar(), NAME_None, FName("Launch") },
+			// Live warnings first (crew-phase playtest): Hope stayed FLOURISHING
+			// while the food ran down and the water went stale, so the guide says
+			// what Hope does not.
 			{ TEXT("THE CREW"), TEXT("Keep them well"),
-				Fixed(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets how hard they work. That's the first hour - hide this guide any time.")),
+				[](const FGuideCtx& C)
+				{
+					const int32 Pop = C.Sim->GetPopulation();
+					const double Draw = Pop * C.Sim->GetColonistFoodKgPerSol();
+					const double Runway = Draw > 0.0 ? C.Sim->GetStock(FName("Food")) / Draw : 1.0e9;
+					const double Grown = C.Sim->GetProducingCellCount() * C.Sim->GetGardenFoodKgPerSolPerCell();
+					if (Pop > 0 && Grown < Draw && Runway < 40.0)
+					{
+						return C.Sim->GetPlantedCellCount() > 0
+							? FString::Printf(TEXT("Food runs out in about %.0f sols - the garden grows %.1f kg a sol against %.1f eaten. Zone more Gardening Station cells, and keep the grow-lights powered."), Runway, Grown, Draw)
+							: FString::Printf(TEXT("Food runs out in about %.0f sols and nothing is growing. Zone a Gardening Station - it plants itself from Earth Soil and Seeds in store, which only come by supply ship."), Runway);
+					}
+					if (Pop > 0 && C.Sim->GetWaterPotability() < C.Sim->GetWaterPotabilityFloor() + 0.15)
+					{
+						return FString(TEXT("The water is going stale - the crew drinks it over and over. Fresh ice-melt restores it: if the Ice Drill's deposit is spent, survey for more ice and drill it."));
+					}
+					return FString(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets how hard they work. That's the first hour - hide this guide any time."));
+				},
 				[](const FGuideCtx&) { return false; },
 				NoBar(), NAME_None, NAME_None },
 		};

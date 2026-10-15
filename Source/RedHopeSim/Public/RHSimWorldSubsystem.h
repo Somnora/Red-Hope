@@ -1128,6 +1128,12 @@ private:
 	double GardenPowerDrawW = 0.0;      // grow-light load this step (deck read)
 	bool bGrowLightsDark = false;       // last step the bank couldn't power the lights
 	bool bGardenDarkAnnounced = false;  // runtime edge: one alert per blackout episode
+	// The last sim-second the grow-lights were dark. A bank hovering near empty
+	// at night flips the lights every step, and each flip used to be a new
+	// "episode": the first-hour playtest logged 12,524 GROW-LIGHTS DARK alerts
+	// in 40 sols. The alert now re-arms only after a full sol fully lit.
+	// Runtime only (the alert channel; garden yield is untouched).
+	double GardenLastDarkSimSeconds = -1.0e12;
 	// A room function that grows crops (Garden = grow-lit, Greenhouse = glazed).
 	bool IsGardenFunction(FName Fn) const { return Fn == FName("Garden") || Fn == FName("Greenhouse"); }
 	// The water loop (M2 Gate D+). Colonists draw potable water (part of the

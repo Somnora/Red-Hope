@@ -18,8 +18,13 @@
 // windowless on a fixed time step, so 30 sols take minutes, not hours.
 //
 // It is a measuring instrument, not a pass/fail test: the colony's pacing is
-// a design question. It ends after the first crew lands (plus a sol of
-// watching them) or at the sol limit, prints the report, and quits.
+// a design question. Past the first crew it plays the guide's last step,
+// "Keep them well" (the crew-phase extension): the crew ship also carries
+// soil, seeds and comforts (the data ladder has two rungs, so it is the last
+// ship), the vault is carved to nine cells and zoned as they come, and a CREW
+// line per sol logs Hope and its parts, food runway, the garden, water and
+// support. It ends at the sol limit (or if the colony empties), prints the
+// report, and quits.
 
 #include "CoreMinimal.h"
 #include "RedHope.h"
@@ -44,6 +49,10 @@ namespace
 		// first power and the Charging Pad, and only once the pad stands, the
 		// dig, the Forge and the rest.
 		bool bGuideOrder = false;
+		// "lean": the crew ship carries the Crew Pod alone - what the guide's
+		// "Bring the first crew" step used to say. Without it, the ship also
+		// brings soil, seeds and comforts.
+		bool bLeanCargo = false;
 		TSet<FName> Issued;                 // plan steps already ordered
 		TArray<TPair<FString, double>> Milestones; // what, sol - first time only
 		TSet<FString> MilestoneSet;
@@ -58,6 +67,12 @@ namespace
 		double RunDeficitSec = 0.0, RunShedSec = 0.0;
 		int32 RunStrandedMax = 0;
 		double CrewLandedSol = -1.0;
+		// The crew phase: population tracking (recalls / births) and the
+		// worst moments seen.
+		int32 LastPop = 0;
+		int32 Recalled = 0, Born = 0;
+		double MinHope = 100.0, MaxHope = 0.0, MinFoodSols = 1.0e9;
+		int32 MaxUnsupported = 0;
 		FTimerHandle Timer;
 		FDelegateHandle hRejected, hCompleted, hQuota, hShip, hDeposit, hAlert;
 	};
@@ -175,6 +190,12 @@ namespace
 				100.0 * P.RunShedSec / (RunSols * URHSimClockSubsystem::SolLengthSimSeconds),
 				P.RunStrandedMax, P.Rejections);
 		}
+		if (P.CrewLandedSol >= 0.0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
+				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.MaxUnsupported, P.MinHope, P.MaxHope,
+				P.MinFoodSols < 1.0e8 ? P.MinFoodSols : 0.0);
+		}
 		if (Sim)
 		{
 			Sim->OnCommandRejected.Remove(P.hRejected);
@@ -261,6 +282,19 @@ namespace
 				Sim->GetStock(FName("Hydrogen")), Sim->GetStock(FName("Food")),
 				*Sim->GetActiveQuotaName().ToString(), *Quota,
 				P.SampleSec > 0.0 ? P.IdleRobotSec / P.SampleSec : 0.0, P.StrandedMax, Sim->GetPopulation());
+			if (Sim->GetPopulation() > 0)
+			{
+				const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+				int32 Unsupported = 0;
+				for (const FRHColonist& Col : Sim->GetColonists()) { Unsupported += Col.bSupported ? 0 : 1; }
+				const double Draw = Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol();
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] CREW %d | pop %d unsupported %d | hope %.0f %s (now %.0f: housing %.0f rooms %.0f jobs %.0f comforts %.0f milestones %.0f, -adjacency %.0f -unsupported %.0f -water %.0f) | food %.0f kg = %.0f sols, garden %d/%d producing | water %.0f kg %.0f%% drinkable | tempo %.0f%%"),
+					C->GetSol(), Sim->GetPopulation(), Unsupported, Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), H.Total,
+					H.Housing, H.Rooms, H.Jobs, H.Comforts, H.Milestones, H.AdjacencyPenalty, H.UnsupportedPenalty, H.WaterPenalty,
+					Sim->GetStock(FName("Food")), Draw > 0.0 ? Sim->GetStock(FName("Food")) / Draw : 0.0,
+					Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(),
+					Sim->GetStock(FName("Water")), Sim->GetWaterPotability() * 100.0, Sim->GetHumanWorkTempo() * 100.0);
+			}
 			P.SolLogged = C->GetSol();
 			P.DeficitSec = P.ShedSec = P.IdleRobotSec = P.SampleSec = 0.0;
 			P.MinBankFrac = 1.0;
@@ -386,7 +420,17 @@ namespace
 			if (Sim->GetHousingCapacity() > 0 || Sim->IsFloorRated(-1))
 			{
 				Once(TEXT("cargo2"));
-				LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack") });
+				// The data ladder has two rungs, so this may be the last ship:
+				// a sensible director sends food-growing with the people.
+				if (P.bLeanCargo)
+				{
+					LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack") });
+				}
+				else
+				{
+					LoadCargo(Sim, C, { FName("CrewPod"), FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"),
+						FName("SolarPack"), FName("SolarPack") });
+				}
 			}
 		}
 		if (Sim->GetPopulation() > 0)
@@ -398,10 +442,65 @@ namespace
 			}
 		}
 
-		// --- The end ---
-		if (P.CrewLandedSol >= 0.0 && SolNow(C) > P.CrewLandedSol + 1.0)
+		// --- The crew phase (the guide's last step, "Keep them well") ---
+		// Zone the vault floor as cells come carved, from one layout chosen
+		// so no garden sits within two cells of quarters without a hallway
+		// between (spiral cells: Hall (1,0), quarters around the north and
+		// west, Lab and Workstation south-west, the gardens south-east).
+		// Four quarters give full housing Hope at four crew. Carve to nine.
+		static const TCHAR* GLayout[] = { TEXT("Hallway"), TEXT("LivingQuarters"), TEXT("LivingQuarters"), TEXT("LivingQuarters"),
+			TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Workstation"), TEXT("Garden"), TEXT("Garden") };
+		if (P.CrewLandedSol >= 0.0)
 		{
-			Finish(World, TEXT("crew landed + 1 sol"));
+			if (Once(TEXT("carve9")))
+			{
+				const int32 More = (int32)UE_ARRAY_COUNT(GLayout) - Sim->GetFloorCarvedCells(-1);
+				if (More > 0)
+				{
+					FRHCommand Exc; Exc.Verb = FName("Excavate"); Exc.Level = -1; Exc.Value = More;
+					Exc.Location = Sim->GetShaftHeadCm();
+					Order(Sim, C, Exc, FString::Printf(TEXT("Excavate %d more cells on -1 (to %d)"), More, (int32)UE_ARRAY_COUNT(GLayout)));
+				}
+			}
+			for (int32 i = 0; i < (int32)UE_ARRAY_COUNT(GLayout) && i < Sim->GetFloorCarvedCells(-1); ++i)
+			{
+				if (Once(*FString::Printf(TEXT("zone%d"), i)))
+				{
+					FRHCommand Z; Z.Verb = FName("Designate"); Z.Level = -1; Z.Value = i; Z.Target = FName(GLayout[i]);
+					Order(Sim, C, Z, FString::Printf(TEXT("Zone -1 cell %d as %s"), i, GLayout[i]));
+				}
+			}
+			if (Sim->GetPlantedCellCount() > 0) { Mark(P, C, TEXT("first garden planted")); }
+			if (Sim->GetProducingCellCount() > 0) { Mark(P, C, TEXT("first harvest")); }
+
+			// Recalls and births, by population edges.
+			const int32 Pop = Sim->GetPopulation();
+			if (P.LastPop > 0 && Pop < P.LastPop)
+			{
+				P.Recalled += P.LastPop - Pop;
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f RECALL  %d colonist(s) left for orbit (pop %d)"), SolNow(C), P.LastPop - Pop, Pop);
+			}
+			else if (P.LastPop > 0 && Pop > P.LastPop)
+			{
+				P.Born += Pop - P.LastPop;
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  +%d (pop %d)"), SolNow(C), Pop - P.LastPop, Pop);
+			}
+			P.LastPop = Pop;
+			int32 Unsupported = 0;
+			for (const FRHColonist& Col : Sim->GetColonists()) { Unsupported += Col.bSupported ? 0 : 1; }
+			P.MaxUnsupported = FMath::Max(P.MaxUnsupported, Unsupported);
+			if (Pop > 0)
+			{
+				P.MinHope = FMath::Min(P.MinHope, Sim->GetHopeSmoothed());
+				P.MaxHope = FMath::Max(P.MaxHope, Sim->GetHopeSmoothed());
+				P.MinFoodSols = FMath::Min(P.MinFoodSols, Sim->GetStock(FName("Food")) / FMath::Max(0.01, Pop * Sim->GetColonistFoodKgPerSol()));
+			}
+		}
+
+		// --- The end ---
+		if (P.CrewLandedSol >= 0.0 && Sim->GetPopulation() == 0)
+		{
+			Finish(World, TEXT("the colony emptied"));
 		}
 		else if (C->GetSol() >= P.TargetSols)
 		{
@@ -412,7 +511,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30] [rush|guide] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, logs a [Playtest] timeline, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30] [rush|guide] [lean] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -431,6 +530,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.World = World;
 		P.TargetSols = Args.Num() > 0 ? FMath::Max(1, FCString::Atoi(*Args[0])) : 30;
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
+		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
@@ -465,7 +565,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ALERT   %s"), SolOf(), *Line);
 		});
 
-		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %d sols at %.0fx, %s order"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
-			P.bGuideOrder ? TEXT("guide") : TEXT("rush"));
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %d sols at %.0fx, %s order, %s crew cargo"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
+			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

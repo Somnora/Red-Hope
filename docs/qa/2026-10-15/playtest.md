@@ -1,4 +1,4 @@
-# First-hour playtest — 2026-10-15
+# Playtest: the first hour and the crew phase — 2026-10-15
 
 `RH.Playtest` (Source/RedHope/Private/RHPlaytest.cpp) drives the real game —
 live robots in the agent band at 16x, real construction, real surveys — down
@@ -6,8 +6,14 @@ the first-hour guide's path using only player orders, and logs a timeline.
 Run it with:
 
 ```
-bash scripts/sim/rh_playtest.sh 30 <label> rush|guide
+bash scripts/sim/rh_playtest.sh <sols> <label> rush|guide [full|lean]
 ```
+
+Past the first crew it keeps playing the guide's last step (the crew-phase
+extension, Finding 4): soil, seeds and comforts ride with the Crew Pod
+(`full`; `lean` sends the pod alone), the vault is carved to nine cells and
+zoned, and a `CREW` line per sol logs Hope and its parts, food runway, the
+garden, water and support.
 
 About two minutes per 30 sols (windowless, fixed 0.1 s step). Output:
 `Saved/RHPlaytest/<label>.txt`. Both runs below are deterministic (the 2-sol
@@ -104,6 +110,57 @@ loads first, but the player sees a permanently starved grid.
 - Water piles up: 3,055 kg by sol 10 against a 200 kg quota line.
 - Food is 0 until the Crew Pod's 200 kg lands; the garden is not on the
   guide's path yet, and four colonists draw ~2.5 kg a sol.
+
+## Finding 4 — the crew phase (sols 10–110)
+
+**With soil, seeds and comforts on the crew ship** (`crew2`, to sol 50): the
+four colonists never lack support; the garden is planted by sol 11.1;
+Hope (smoothed) climbs from 53 to **100 FLOURISHING by sol 16 and stays
+there**; a child is born at sol 32.8; the discovery chain runs all the way to
+LIFE ON MARS by sol 35.7. Food never drops below 60 sols of draw.
+
+**With the Crew Pod alone** — what the guide's "Bring the first crew" step
+used to say (`lean1`, to sol 110):
+
+| sol | |
+|---|---|
+| 10.55 | four colonists land with 200 kg of food; no soil, no seeds |
+| 20–70 | Hope THRIVING → FLOURISHING the whole time; births at sols 33.9 and 53.9 |
+| 45 → 60 | Ice_A runs dry; drinkable water 100% → 0%; Hope barely moves |
+| 75.44 | food hits zero — the **first warning of any kind**: six "unsupported" alerts at once |
+| 77.44 | all six recalled to orbit, both Mars-born children included; THE COLONY STANDS EMPTY |
+
+The data ladder has two quotas (Q1, Q2), so the crew's ship is the last ship
+the program sends. A lean cargo makes the colony unwinnable at sol 7.5 (the
+launch), and nothing says so until sol 75.
+
+**Shipped (presentation):** the guide's "Bring the first crew" now names the
+Soil Pallet and Seed Vault and says why; "Keep them well" warns with live
+numbers while food runs out with too little growing ("Food runs out in about
+N sols - the garden grows X kg a sol against Y eaten...") and when the water
+goes stale.
+
+**Shipped (sim, alert channel only):** the GROW-LIGHTS DARK alert fired
+**12,524 times in 40 sols** — a bank scraping empty at night flips the lights
+every step, and each flip re-armed the alert. It now re-arms only after a
+whole sol fully lit: 1 alert in the same run, with every crew number (pop,
+births, food, power) identical, so garden yield is untouched.
+
+**For the director:**
+
+- **The supply line ends at sol ~10.** With two quotas, a colony that missed
+  soil and seeds on its second ship cannot recover. Extend the ladder (Q3+),
+  make soil obtainable on Mars (the dormant agri chain: compost, fertilizer),
+  or keep a slow recurring resupply?
+- **Hope gives no warning.** It sat at FLOURISHING (91) while food ran down
+  and the water hit 0% drinkable; the potability penalty caps at 12 points.
+  Should a short food runway or stale water weigh on Hope - and should the sim
+  raise a "food running low" alert (today the first alert is at zero)?
+- **Hope pins at 100 from sol 16** with a sensible layout and comforts - the
+  crew phase has no tension, and the discovery chain reaches LIFE ON MARS
+  ~25 sols after landing.
+- **Gate-D wording:** "EVACUATED: Freya Farid returned to orbit" is said of a
+  child born on Mars.
 
 ## Balance questions for the director
 
