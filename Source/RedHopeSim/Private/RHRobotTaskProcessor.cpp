@@ -69,8 +69,9 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 			{
 				// Charging etiquette: below the seek threshold, break off
 				// (unless mid-delivery - finish the drop first) and head for
-				// the nearest pad. With no pad built, keep working: a dead
-				// robot is the player's lesson, not a stuck sim.
+				// the nearest pad - or, with none working, the Lander's slow
+				// emergency dock. Only with neither (the Lander switched off)
+				// does a robot keep working until it halts.
 				const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
 				const ERHTaskType Current = (ERHTaskType)Task.TaskType;
 				const bool bMidDelivery = (Current == ERHTaskType::Haul && Task.Phase == 2);

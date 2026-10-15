@@ -19,6 +19,7 @@ PilesCapacity_kg,500,kg,Dig-site pile cap
 HopperCapacity_kg,200,kg,Building input hopper cap
 ChargeSeekFraction,0.25,fraction,Robots break off work to seek a charge pad below this battery fraction
 ChargeResumeFraction,0.90,fraction,Robots resume work above this battery fraction
+LanderDockRate_W,100,W,"2026-10-15 playtest fix: with no working Charging Pad, robots recharge at the Lander at this rate each, all docked at once. The pad stays the real charger (500 W, one at a time); the Lander is the way back - before it, a fleet that ran flat before its first pad was a permanent softlock"
 WearDegradeThreshold,50,wear,Work rate degrades linearly past this
 WearHaltThreshold,100,wear,Robot halts (destruction is M1+)
 RepairWearPerPart,25,wear,Maintenance bot repair per spare part

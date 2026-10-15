@@ -37,14 +37,30 @@ fixes it.
 charger" now completes only when the pad is *finished*, and tells the player
 to wait for it before ordering anything big.
 
-**The rule itself is the director's call** (it changes the sim and its
-baselines). Options:
+**Fixed (director's call: option 1, the Lander emergency dock).** With no
+working Charging Pad, robots dock on the Lander's south side and charge at
+`LanderDockRate_W` (RH_Config, 100 W) each, all at once; the pad stays the
+real charger (500 W, one at a time). A Lander the player has switched off is
+no dock. The alternatives weighed were a starting pad and a queue-jumping
+pad order.
 
-1. **The Lander doubles as a slow emergency dock** — robots that find no pad
-   limp home and trickle-charge there. Keeps the pad as the real charger,
-   always leaves a way back. *Recommended.*
-2. The colony starts with a Charging Pad already standing.
-3. A queued Charging Pad jumps the build queue.
+Same rush order, after the fix (`rush2`):
+
+| sol | milestone |
+|---|---|
+| 0.63 | Forge built |
+| 2.78 | Charging Pad built (the fleet crawled on the Lander dock until then) |
+| 4.60 | quota 1 met |
+| 8.38 | floor -1 livable |
+| 11.38 | first crew landed |
+
+No robot ever ran flat (stranded-max 0 every sol). Rushing now costs about
+a sol against the guide order instead of the game. The guide-order run is
+milestone-for-milestone identical before and after the fix (a pad always
+stands, so the dock never comes into play).
+
+Era mode (> 16x) already integrated charging as if a pad existed; the dock
+does not change it, so the battery baselines are untouched.
 
 ## Finding 2 — the guide's path works, and the first quota is generous
 

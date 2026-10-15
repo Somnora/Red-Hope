@@ -603,15 +603,22 @@ public:
 	bool ApplyBuildWork(int32 BuildingId, double Seconds); // true when completed
 	void CompleteTask(int32 TaskId);
 	void AbandonTask(int32 TaskId);
-	// Charging: pads only (design rule). Returns false if no completed,
-	// powered pad exists.
+	// Charging: the nearest completed, switched-on Charging Pad on the
+	// robot's floor. With none, the Lander is the emergency dock (2026-10-15
+	// playtest fix: robots recharge only by docking, builders take the nearest
+	// site, so a fabricator that built the Forge before the first pad ran flat
+	// and nothing could ever build one - a permanent softlock). The Lander
+	// charges slowly (LanderDockRate_W) and serves every docked robot at once;
+	// the pad stays the real charger. False only when neither exists (or the
+	// player has switched the Lander off).
 	bool FindNearestChargePad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm, int32 RobotLevel = 0) const;
 	// Grants up to the pad's transfer rate x dt from grid energy. Zero when
 	// the pad is shed/unbuilt or the grid has nothing to give (night, empty
 	// bank) - the robot waits docked. With a valid Robot handle, only the
 	// head of the pad's queue is served (M1-b etiquette: one umbilical per
 	// pad; the rest wait docked at zero draw). An invalid handle bypasses
-	// the queue - the legacy brain's M0-c behavior, frozen.
+	// the queue - the legacy brain's M0-c behavior, frozen. The Lander dock
+	// has no queue and grants LanderDockRate_W.
 	double RequestChargeWh(int32 PadBuildingId, double SubDt, FMassEntityHandle Robot = FMassEntityHandle());
 	void JoinPadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
 	void LeavePadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
@@ -820,6 +827,7 @@ private:
 	double HaulLoadMinKg = 100.0;
 	float ChargeSeekFraction = 0.25f;
 	float ChargeResumeFraction = 0.9f;
+	double LanderDockRateW = 100.0; // RH_Config LanderDockRate_W
 	// Fleet reality (M1-b): DT_Config rows.
 	float WearDegradeThreshold = 50.f;
 	float WearHaltThreshold = 100.f;

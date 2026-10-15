@@ -80,6 +80,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HaulLoadMinKg = FMath::Max(25.0, PileCapKg / 5.0);
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
+	LanderDockRateW = Defs->GetConfigScalar(FName("LanderDockRate_W"), LanderDockRateW);
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
 	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
 	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
@@ -4996,7 +4997,25 @@ bool URHSimWorldSubsystem::FindNearestChargePad(const FVector& RobotPosCm, int32
 			}
 		}
 	}
-	return OutBuildingId != 0;
+	if (OutBuildingId != 0)
+	{
+		return true;
+	}
+	// No working pad: the Lander is the emergency dock (see the header). A
+	// Lander the player has switched off is no dock - the storm-discipline
+	// rule that a dead plug must never draw robots still holds.
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.DefName == NAME_Lander && !B.bUnderConstruction && !B.bManualOff && B.Level == RobotLevel)
+		{
+			OutBuildingId = B.Id;
+			// Dock on the south side, clear of the hull (the 5x5-cell footprint
+			// is 10 m across; the starting fleet deploys on this side too).
+			OutLocationCm = B.LocationCm + FVector(-750.f, 0.f, 0.f);
+			return true;
+		}
+	}
+	return false;
 }
 
 double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt, FMassEntityHandle Robot)
@@ -5006,9 +5025,11 @@ double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt, 
 	{
 		return 0.0;
 	}
+	// The Lander emergency dock: slow, and every docked robot at once.
+	const bool bLanderDock = Pad->DefName == NAME_Lander;
 	// Queue etiquette (M1-b): one umbilical - only the head draws. A robot
 	// that never joined (legacy brain) passes an invalid handle and bypasses.
-	if (Robot.IsValid())
+	if (Robot.IsValid() && !bLanderDock)
 	{
 		const TArray<FMassEntityHandle>* Queue = PadQueues.Find(PadBuildingId);
 		if (Queue && Queue->Num() > 0 && (*Queue)[0] != Robot)
@@ -5017,7 +5038,7 @@ double URHSimWorldSubsystem::RequestChargeWh(int32 PadBuildingId, double SubDt, 
 		}
 	}
 	const FRHBuildingRow* Def = Defs->GetBuilding(Pad->DefName);
-	const double RateW = Def ? Def->PowerDraw_W : 500.0;
+	const double RateW = bLanderDock ? LanderDockRateW : (Def ? Def->PowerDraw_W : 500.0);
 	const double WantWh = RateW * (SubDt / 50.0);
 	// Grid energy: from the bank if it holds charge, else from live surplus.
 	if (Power.BatteryWh >= WantWh)

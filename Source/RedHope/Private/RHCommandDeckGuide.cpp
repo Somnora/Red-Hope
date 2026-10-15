@@ -161,15 +161,15 @@ namespace
 				NoBar(), FName("BatteryBank"), NAME_None },
 			// Done only once the pad STANDS (playtest finding, 2026-10-15): builders
 			// take the nearest site, so a Forge ordered while the pad is still a
-			// site can be built first - and the fabricator runs flat before it
-			// reaches the pad. With no pad, nothing recharges, ever: the colony
-			// deadlocks by sol 3 (RH.Playtest rush).
+			// site can be built first. That used to deadlock the colony (robots
+			// had nowhere else to charge); the Lander's slow emergency dock now
+			// keeps it alive, but the fleet crawls until the pad stands.
 			{ TEXT("AUTOMATION"), TEXT("Give the robots a charger"),
 				[](const FGuideCtx& C)
 				{
 					return CountOf(C, FName("ChargePad")) >= 1
-						? FString(TEXT("Wait for the Charging Pad to finish before ordering anything big. Robots only recharge at a finished pad - if they run flat first, nothing can build one."))
-						: FString(TEXT("Robots only recharge at a Charging Pad - without one the fleet runs flat. BUILD > Logistics > Charging Pad, inside the ring."));
+						? FString(TEXT("Let the Charging Pad finish before ordering anything big - until it stands, robots limp home to the Lander, which charges them slowly."))
+						: FString(TEXT("Robots charge fast at a Charging Pad; without one they limp home to the Lander, which charges them slowly. BUILD > Logistics > Charging Pad, inside the ring."));
 				},
 				[](const FGuideCtx& C) { return CountBuilt(C, FName("ChargePad")) >= 1; },
 				NoBar(), FName("ChargePad"), NAME_None },
