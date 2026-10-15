@@ -1738,6 +1738,125 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// Dome self-test (Agri Gate C, 2026-10-15): the drag-sized surface
+	// greenhouse - placement and size gates, the bed-scaled bill, beds that
+	// plant and grow like greenhouse cells by daylight with no grow-light
+	// draw, and save/load of the size and the beds. Fails loudly. `-dome`.
+	if (FParse::Param(*Params, TEXT("dome")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DOME TEST (Agri Gate C, 2026-10-15) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DOME ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DOME FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Step = [&]()
+		{
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// 1) Pure data.
+		const FRHBuildingRow* DomeDef = DefsSub->GetBuilding(FName("GreenhouseDome"));
+		Expect(DomeDef && DomeDef->SliceActive && DomeDef->DragSized && DomeDef->ProvidesRoom == FName("Greenhouse"),
+			TEXT("GreenhouseDome row: active, drag-sized, provides Greenhouse (DT/CSV)"));
+		if (!DomeDef)
+		{
+			return 1;
+		}
+
+		// 2) Placement and size gates. The Lander's coverage holds the spot.
+		const FVector Spot(2500.f, 0.f, 0.f);
+		FString Why;
+		Expect(!Sim->CanPlaceBuildingSized(FName("GreenhouseDome"), Spot, Why, -1, 1, 1), FString::Printf(TEXT("refused underground (%s)"), *Why));
+		const int32 Max = Sim->GetDomeMaxBedsPerSide();
+		Expect(!Sim->CanPlaceBuildingSized(FName("GreenhouseDome"), Spot, Why, 0, Max + 1, 1), FString::Printf(TEXT("refused past %d beds a side (%s)"), Max, *Why));
+		Why.Reset();
+		Expect(Sim->CanPlaceBuildingSized(FName("GreenhouseDome"), Spot, Why, 0, 2, 2), FString::Printf(TEXT("2x2 accepted on the surface (%s)"), *Why));
+		Expect(URHSimWorldSubsystem::DecodeBuildSize(URHSimWorldSubsystem::EncodeBuildSize(3, 2)) == FIntPoint(3, 2)
+			&& URHSimWorldSubsystem::DecodeBuildSize(0.0) == FIntPoint(1, 1), TEXT("size round-trips through the order's Value"));
+
+		// 3) A 2x2 order: the bill and the build time are four beds'.
+		FRHCommand Order; Order.Verb = FName("Build"); Order.Target = FName("GreenhouseDome"); Order.Location = Spot; Order.Level = 0;
+		Order.Value = URHSimWorldSubsystem::EncodeBuildSize(2, 2);
+		Sim->EnqueueCommand(Order);
+		// A Solar Array 8 m inside the order's west edge, still in the
+		// Lander's coverage: only the in-flight 2x2 footprint stops it.
+		Expect(!Sim->CanPlaceBuilding(FName("SolarArray"), Spot + FVector(-800.f, 600.f, 0.f), Why, 0) && Why.Contains(TEXT("transit")),
+			FString::Printf(TEXT("the in-flight 2x2 order blocks its whole footprint (%s)"), *Why));
+		for (int32 i = 0; i < 3; ++i) { Step(); }
+		int32 DomeId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("GreenhouseDome")) { DomeId = B.Id; } }
+		const FRHBuildingInstance* Dome = nullptr;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == DomeId) { Dome = &B; } }
+		Expect(Dome && Dome->SizeX == 2 && Dome->SizeY == 2 && Dome->bUnderConstruction, TEXT("the order lands as a 2x2 site under construction"));
+		if (!Dome)
+		{
+			return 1;
+		}
+		const TMap<FName, double> Bill = Sim->GetSiteBill(*Dome);
+		const double* StructKg = Bill.Find(FName("Struct"));
+		Expect(StructKg && FMath::IsNearlyEqual(*StructKg, DomeDef->CostStruct_kg * 4.0),
+			FString::Printf(TEXT("site bill Struct %.0f kg (expect 4 x %.0f)"), StructKg ? *StructKg : -1.0, DomeDef->CostStruct_kg));
+		Expect(Dome->BuildRemaining_s > DomeDef->BuildTime_s * 3.0, FString::Printf(TEXT("build time %.0f s (four beds)"), Dome->BuildRemaining_s));
+		Expect(Sim->GetDomeRoom(*Dome) == nullptr, TEXT("an unbuilt dome gardens nothing"));
+
+		// 4) A built 2x2 dome on a colony with NO rooms plants its four beds,
+		// glazing each (soil, seeds, glass from stock).
+		Sim->Debug_PlaceInstant(FName("GreenhouseDome"), FVector(-3000.f, 0.f, 0.f), 0, 2, 2);
+		int32 BuiltId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("GreenhouseDome") && !B.bUnderConstruction) { BuiltId = B.Id; } }
+		Sim->AddStock(FName("Soil"), 2000.0);
+		Sim->AddStock(FName("Seeds"), 200.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		const double Glass0 = Sim->GetStock(FName("Glass"));
+		Sim->AddStock(FName("Glass"), 4.0 * 200.0 - Glass0);
+		Step();
+		int32 Planted = 0;
+		for (int32 Bed = 0; Bed < 4; ++Bed) { Planted += Sim->IsDomeBedPlanted(BuiltId, Bed) ? 1 : 0; }
+		Expect(Planted == 4, FString::Printf(TEXT("four beds planted on a room-less colony (planted %d)"), Planted));
+		Expect(Sim->GetStock(FName("Glass")) < 1.0, FString::Printf(TEXT("each bed glazed: glass %.0f kg left (expect 0)"), Sim->GetStock(FName("Glass"))));
+
+		// 5) Daylight, not power: across a sol the beds drink only while the
+		// sun is up, and draw no grow-light power at any hour.
+		int32 DarkDrinks = 0, LitDrinks = 0, LightSteps = 0;
+		double MaxGrowLightW = 0.0;
+		for (int32 S = 0; S < 20; ++S)
+		{
+			// The step's light is read AFTER the clock advances, as EraStep sees it.
+			const double W0 = Sim->GetStock(FName("Water"));
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			const double Solar = DefsSub->EvalSolarCurve(Clock->GetSolFraction());
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			const bool bDrank = Sim->GetStock(FName("Water")) < W0 - 1e-6;
+			if (Solar <= KINDA_SMALL_NUMBER) { DarkDrinks += bDrank ? 1 : 0; }
+			else { ++LightSteps; LitDrinks += bDrank ? 1 : 0; }
+			MaxGrowLightW = FMath::Max(MaxGrowLightW, Sim->GetGardenPowerDrawW());
+		}
+		Expect(MaxGrowLightW <= 0.0, FString::Printf(TEXT("no grow-light draw at any hour (max %.0f W)"), MaxGrowLightW));
+		Expect(DarkDrinks == 0 && LitDrinks > 0, FString::Printf(TEXT("beds grow by daylight only: lit drinks %d/%d, dark drinks %d"), LitDrinks, LightSteps, DarkDrinks));
+
+		// 6) Save/load keeps the size and the beds.
+		FString Err;
+		Sim->SaveColony(TEXT("dometest"), Err);
+		Sim->LoadColony(TEXT("dometest"), Err);
+		const FRHBuildingInstance* Loaded = nullptr;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == BuiltId) { Loaded = &B; } }
+		int32 PlantedAfter = 0;
+		for (int32 Bed = 0; Bed < 4; ++Bed) { PlantedAfter += Sim->IsDomeBedPlanted(BuiltId, Bed) ? 1 : 0; }
+		Expect(Loaded && Loaded->SizeX == 2 && Loaded->SizeY == 2 && PlantedAfter == 4,
+			FString::Printf(TEXT("save/load: size %dx%d, %d beds planted"), Loaded ? Loaded->SizeX : 0, Loaded ? Loaded->SizeY : 0, PlantedAfter));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DOME TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

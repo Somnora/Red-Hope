@@ -89,6 +89,11 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// cell of that room (its seats, YieldMul, the infirmary grace). DT_Rooms
 	// stays the single source of the station's numbers. Empty elsewhere.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName ProvidesRoom;
+	// Agri Gate C (2026-10-15): the player sizes this structure with a drag.
+	// FootprintX/Y is ONE bed (a 10 m greenhouse bed = one underground
+	// greenhouse cell's numbers); the instance holds SizeX x SizeY beds, and
+	// the bill and build time scale with the bed count. Surface only.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool DragSized = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

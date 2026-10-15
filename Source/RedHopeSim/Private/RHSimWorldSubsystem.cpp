@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 27;  // v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 28;  // v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -116,6 +116,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	GardenWaterKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenWaterKgPerSolPerCell"), GardenWaterKgPerSolPerCell);
 	GardenGrowLightWPerCell = Defs->GetConfigScalar(FName("GardenGrowLightWPerCell"), GardenGrowLightWPerCell);
 	GreenhouseGlassKgPerCell = Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), GreenhouseGlassKgPerCell);
+	DomeMaxBedsPerSide = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("DomeMaxBedsPerSide"), (double)DomeMaxBedsPerSide));
 	GreenhouseMinLevel = (int32)Defs->GetConfigScalar(FName("GreenhouseMinLevel"), GreenhouseMinLevel);
 	CropSoilDepleteKgPerSol = Defs->GetConfigScalar(FName("CropSoilDepleteKgPerSol"), CropSoilDepleteKgPerSol);
 	FertilizerSoilPerKg = Defs->GetConfigScalar(FName("FertilizerSoilPerKg"), FertilizerSoilPerKg);
@@ -920,7 +921,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		{
 			continue;
 		}
-		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Site.Level))
+		for (const auto& Cost : GetSiteBill(Site))
 		{
 			const double* Delivered = Site.InputKg.Find(Cost.Key);
 			const double NeedKg = Cost.Value - (Delivered ? *Delivered : 0.0);
@@ -1588,7 +1589,7 @@ TMap<FName, double> URHSimWorldSubsystem::ComputeConstructionShortage() const
 		{
 			continue;
 		}
-		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Site.Level))
+		for (const auto& Cost : GetSiteBill(Site))
 		{
 			const double* D = Site.InputKg.Find(Cost.Key);
 			const double Delivered = D ? *D : 0.0;
@@ -1920,7 +1921,23 @@ FName URHSimWorldSubsystem::GetCellCrop(int32 Level, int32 CellIndex) const
 
 int32 URHSimWorldSubsystem::GetCellCropStage(int32 Level, int32 CellIndex) const
 {
-	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(Level, CellIndex, 0));
+	return GetCropStageForKey(FIntVector(Level, CellIndex, 0));
+}
+
+FName URHSimWorldSubsystem::GetDomeBedCrop(int32 DomeId, int32 Bed) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(FIntVector(0, Bed, DomeId));
+	return S ? S->Crop : NAME_None;
+}
+
+int32 URHSimWorldSubsystem::GetDomeBedCropStage(int32 DomeId, int32 Bed) const
+{
+	return GetCropStageForKey(FIntVector(0, Bed, DomeId));
+}
+
+int32 URHSimWorldSubsystem::GetCropStageForKey(const FIntVector& Key) const
+{
+	const FRHPlantedCropState* S = PlantedCrops.Find(Key);
 	const FRHCropRow* Row = (S && Defs) ? Defs->GetCrop(S->Crop) : nullptr;
 	if (!Row || !Clock || Row->GrowSols <= 0.f)
 	{
@@ -2010,7 +2027,13 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 {
 	// Zero-garden colonies: FloorRoomCells is empty pre-M2 (and PlantedCells
 	// with it), so this is a cheap no-op - every existing baseline unchanged.
-	if (FloorRoomCells.Num() == 0 && PlantedCells.Num() == 0)
+	// Agri Gate C: a built greenhouse dome gardens on a colony with no rooms.
+	bool bAnyDome = false;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (GetDomeRoom(B)) { bAnyDome = true; break; }
+	}
+	if (FloorRoomCells.Num() == 0 && PlantedCells.Num() == 0 && !bAnyDome)
 	{
 		return;
 	}
@@ -2025,9 +2048,89 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	const bool bCropsLive = ActiveCrops.Num() > 0;
 	const double NowSols = Clock ? Clock->GetSimSecondsTotal() / (double)URHSimClockSubsystem::SolLengthSimSeconds : 0.0;
 
-	// Plant: any Garden- OR Greenhouse-zoned cell on a rated floor, when the
-	// colony holds the materials. A Greenhouse also needs fabricated/imported
-	// Glass. Auto - the gamble pays off the moment the ground is ready.
+	// Plant: any Garden- OR Greenhouse-zoned cell on a rated floor - and every
+	// bed of a built greenhouse dome (Agri Gate C) - when the colony holds the
+	// materials. A Greenhouse (cell or dome bed) also needs fabricated/imported
+	// Glass. Auto - the gamble pays off the moment the ground is ready. Key is
+	// the planted-map key: (Level, Cell, 0) for a cell, (0, Bed, DomeId) for
+	// a dome bed; ClimateLevel is the floor whose climate the bed breathes.
+	const auto PickCrop = [&](int32 ClimateLevel) -> FName
+	{
+		// Deterministic crop pick (Gate A): cycle the name-sorted active
+		// list, preferring crops matched to the floor's effective climate -
+		// per-crop greenhouses emerge naturally.
+		TArray<int32> Matching;
+		const FName Climate = GetFloorClimateEffective(ClimateLevel);
+		for (int32 c = 0; c < ActiveCrops.Num(); ++c)
+		{
+			if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
+		}
+		const int32 Pick = Matching.Num() > 0
+			? Matching[PlantRotation % Matching.Num()]
+			: (PlantRotation % ActiveCrops.Num());
+		++PlantRotation;
+		return ActiveCrops[Pick].Key;
+	};
+	// The log's name for a bed - built only when a line is actually written.
+	const auto BedName = [](const FIntVector& Key)
+	{
+		return Key.Z != 0 ? FString::Printf(TEXT("dome #%d bed %d"), Key.Z, Key.Y)
+			: FString::Printf(TEXT("floor %d cell %d"), Key.X, Key.Y);
+	};
+	const auto TryPlant = [&](const FIntVector& Key, const FRHRoomRow* Row, int32 ClimateLevel)
+	{
+		if (PlantedCells.Contains(Key))
+		{
+			// ADOPTION (director hand-play 2026-07-17): a bed planted before
+			// the crop layer went live carries no crop - when the catalogue
+			// activates mid-game it adopts one in place (soil already
+			// emplaced, no extra cost) and starts growing. With crops dormant
+			// this branch never fires - legacy exact.
+			if (bCropsLive && !PlantedCrops.Contains(Key))
+			{
+				FRHPlantedCropState S;
+				S.Crop = PickCrop(ClimateLevel);
+				S.PlantedSol = NowSols;
+				S.SoilKg = GardenSoilKgPerCell;
+				PlantedCrops.Add(Key, S);
+				UE_LOG(LogRedHopeSim, Display, TEXT("Crop adopted: %s takes %s (bed planted pre-activation)"),
+					*BedName(Key), *S.Crop.ToString());
+			}
+			return;
+		}
+		const bool bGreenhouse = (Row->Function == NGreenhouse);
+		if (GetStock(NSoil) < GardenSoilKgPerCell || GetStock(NSeeds) < GardenSeedsKgPerCell
+			|| (bGreenhouse && GetStock(NGlass) < GreenhouseGlassKgPerCell))
+		{
+			return; // waits for the next pallet/crate, silently - the deck shows the shortfall
+		}
+		AddStock(NSoil, -GardenSoilKgPerCell);
+		AddStock(NSeeds, -GardenSeedsKgPerCell);
+		if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
+		PlantedCells.Add(Key);
+		bSoilSpentAnnounced = false; // a fresh bed clears the spent-soil edge
+		FName PlantedCrop = NAME_None;
+		if (bCropsLive)
+		{
+			FRHPlantedCropState S;
+			S.Crop = PickCrop(ClimateLevel);
+			S.PlantedSol = NowSols;
+			S.SoilKg = GardenSoilKgPerCell;
+			PlantedCrops.Add(Key, S);
+			PlantedCrop = S.Crop;
+		}
+		UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: %s (%.0f kg soil, %.0f kg seeds%s)%s"),
+			bGreenhouse ? TEXT("Greenhouse") : TEXT("Garden"), *BedName(Key),
+			GardenSoilKgPerCell, GardenSeedsKgPerCell,
+			bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""),
+			PlantedCrop.IsNone() ? TEXT("") : *FString::Printf(TEXT(" crop=%s"), *PlantedCrop.ToString()));
+		if (!bFirstCropAnnounced)
+		{
+			bFirstCropAnnounced = true;
+			OnAlert.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground. The colony starts feeding itself."));
+			OnMilestone.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground."));
+		}
+	};
 	for (const auto& Pair : FloorRoomCells)
 	{
 		const int32 Level = Pair.Key;
@@ -2042,79 +2145,24 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			{
 				continue;
 			}
-			if (PlantedCells.Contains(FIntVector(Level, i, 0)))
+			TryPlant(FIntVector(Level, i, 0), Row, Level);
+		}
+	}
+	// Dome beds after every zoned cell, domes in Id order, beds in order.
+	if (bAnyDome)
+	{
+		for (int32 b = 0; b < Buildings.Num(); ++b)
+		{
+			const FRHRoomRow* Row = GetDomeRoom(Buildings[b]);
+			if (!Row)
 			{
-				// ADOPTION (director hand-play 2026-07-17): a bed planted
-				// before the crop layer went live carries no crop - when the
-				// catalogue activates mid-game it adopts one in place (soil
-				// already emplaced, no extra cost) and starts growing. With
-				// crops dormant this branch never fires - legacy exact.
-				if (bCropsLive && !PlantedCrops.Contains(FIntVector(Level, i, 0)))
-				{
-					TArray<int32> Matching;
-					const FName Climate = GetFloorClimateEffective(Level);
-					for (int32 c = 0; c < ActiveCrops.Num(); ++c)
-					{
-						if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
-					}
-					const int32 Pick = Matching.Num() > 0
-						? Matching[PlantRotation % Matching.Num()]
-						: (PlantRotation % ActiveCrops.Num());
-					++PlantRotation;
-					FRHPlantedCropState S;
-					S.Crop = ActiveCrops[Pick].Key;
-					S.PlantedSol = NowSols;
-					S.SoilKg = GardenSoilKgPerCell;
-					PlantedCrops.Add(FIntVector(Level, i, 0), S);
-					UE_LOG(LogRedHopeSim, Display, TEXT("Crop adopted: floor %d cell %d takes %s (bed planted pre-activation)"),
-						Level, i, *S.Crop.ToString());
-				}
 				continue;
 			}
-			const bool bGreenhouse = (Row->Function == NGreenhouse);
-			if (GetStock(NSoil) < GardenSoilKgPerCell || GetStock(NSeeds) < GardenSeedsKgPerCell
-				|| (bGreenhouse && GetStock(NGlass) < GreenhouseGlassKgPerCell))
+			const int32 DomeId = Buildings[b].Id;
+			const int32 Beds = GetBedCount(Buildings[b]);
+			for (int32 Bed = 0; Bed < Beds; ++Bed)
 			{
-				continue; // waits for the next pallet/crate, silently - the deck shows the shortfall
-			}
-			AddStock(NSoil, -GardenSoilKgPerCell);
-			AddStock(NSeeds, -GardenSeedsKgPerCell);
-			if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
-			PlantedCells.Add(FIntVector(Level, i, 0));
-			bSoilSpentAnnounced = false; // a fresh bed clears the spent-soil edge
-			FName PlantedCrop = NAME_None;
-			if (bCropsLive)
-			{
-				// Deterministic crop pick (Gate A): cycle the name-sorted
-				// active list, preferring crops matched to the floor's
-				// effective climate - per-crop greenhouses emerge naturally.
-				TArray<int32> Matching;
-				const FName Climate = GetFloorClimateEffective(Level);
-				for (int32 c = 0; c < ActiveCrops.Num(); ++c)
-				{
-					if (ActiveCrops[c].Value->ClimateBand == Climate) { Matching.Add(c); }
-				}
-				const int32 Pick = Matching.Num() > 0
-					? Matching[PlantRotation % Matching.Num()]
-					: (PlantRotation % ActiveCrops.Num());
-				++PlantRotation;
-				FRHPlantedCropState S;
-				S.Crop = ActiveCrops[Pick].Key;
-				S.PlantedSol = NowSols;
-				S.SoilKg = GardenSoilKgPerCell;
-				PlantedCrops.Add(FIntVector(Level, i, 0), S);
-				PlantedCrop = S.Crop;
-			}
-			UE_LOG(LogRedHopeSim, Display, TEXT("%s planted: floor %d cell %d (%.0f kg soil, %.0f kg seeds%s)%s"),
-				bGreenhouse ? TEXT("Greenhouse") : TEXT("Garden"), Level, i,
-				GardenSoilKgPerCell, GardenSeedsKgPerCell,
-				bGreenhouse ? *FString::Printf(TEXT(", %.0f kg glass"), GreenhouseGlassKgPerCell) : TEXT(""),
-				PlantedCrop.IsNone() ? TEXT("") : *FString::Printf(TEXT(" crop=%s"), *PlantedCrop.ToString()));
-			if (!bFirstCropAnnounced)
-			{
-				bFirstCropAnnounced = true;
-				OnAlert.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground. The colony starts feeding itself."));
-				OnMilestone.Broadcast(TEXT("THE FIRST CROP IS PLANTED — Earth soil in Martian ground."));
+				TryPlant(FIntVector(0, Bed, DomeId), Row, 0);
 			}
 		}
 	}
@@ -2140,6 +2188,10 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	int32 GrowLitCount = 0;
 	for (const FIntVector& PC : PlantedCells)
 	{
+		if (PC.Z != 0)
+		{
+			continue; // a dome bed glazes - no grow lights
+		}
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(PC.X, PC.Y)) : nullptr;
 		if (Row && Row->Function == NGarden && RatedFloors.Contains(PC.X))
 		{
@@ -2178,18 +2230,35 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	for (auto It = PlantedCells.CreateIterator(); It; ++It)
 	{
 		const int32 Level = It->X, Cell = It->Y;
-		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(Level, Cell)) : nullptr;
-		if (!Row || !IsGardenFunction(Row->Function))
+		const bool bDomeBed = It->Z != 0;
+		const FRHRoomRow* Row = nullptr;
+		if (bDomeBed)
 		{
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
-			PlantedCrops.Remove(*It); // the crop goes with the bed
-			It.RemoveCurrent();
-			continue;
+			// A dome bed (Agri Gate C): its dome's room, while the dome stands
+			// and the bed is inside its size. Domes are never demolished, so a
+			// missing row is a dormant room - the bed waits, nothing is lost.
+			const FRHBuildingInstance* Dome = FindBuilding(It->Z);
+			Row = (Dome && Cell < GetBedCount(*Dome)) ? GetDomeRoom(*Dome) : nullptr;
+			if (!Row)
+			{
+				continue;
+			}
 		}
-		if (!RatedFloors.Contains(Level))
+		else
 		{
-			continue; // dormant, not dead: rating loss pauses the crop
+			Row = Defs ? Defs->GetRoom(GetRoomAt(Level, Cell)) : nullptr;
+			if (!Row || !IsGardenFunction(Row->Function))
+			{
+				OnAlert.Broadcast(FString::Printf(
+					TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
+				PlantedCrops.Remove(*It); // the crop goes with the bed
+				It.RemoveCurrent();
+				continue;
+			}
+			if (!RatedFloors.Contains(Level))
+			{
+				continue; // dormant, not dead: rating loss pauses the crop
+			}
 		}
 		// Light gate: no light => dormant this step (no water spent, crop lives).
 		double LightFactor = 1.0;
@@ -3456,6 +3525,42 @@ bool URHSimWorldSubsystem::CancelUplinkCommand(int32 CommandId)
 
 bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level) const
 {
+	return CanPlaceBuildingSized(DefName, LocationCm, OutReason, Level, 1, 1);
+}
+
+FVector2D URHSimWorldSubsystem::GetFootprintHalfCm(const FRHBuildingRow* Def, int32 SizeX, int32 SizeY)
+{
+	return FVector2D((Def ? FMath::Max(1, Def->FootprintX) : 1) * FMath::Max(1, SizeX) * 100.0,
+		(Def ? FMath::Max(1, Def->FootprintY) : 1) * FMath::Max(1, SizeY) * 100.0);
+}
+
+TMap<FName, double> URHSimWorldSubsystem::GetSiteBill(const FRHBuildingInstance& B) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	TMap<FName, double> Bill = Def ? URHDefinitionsSubsystem::GetBuildCostFor(*Def, B.Level) : TMap<FName, double>();
+	const int32 Beds = GetBedCount(B);
+	if (Beds > 1)
+	{
+		for (TPair<FName, double>& Line : Bill)
+		{
+			Line.Value *= Beds;
+		}
+	}
+	return Bill;
+}
+
+const FRHRoomRow* URHSimWorldSubsystem::GetDomeRoom(const FRHBuildingInstance& B) const
+{
+	if (B.Level != 0 || B.bUnderConstruction)
+	{
+		return nullptr;
+	}
+	const FRHRoomRow* Row = GetProvidedRoom(B, /*bRequireOnline*/ false);
+	return (Row && IsGardenFunction(Row->Function)) ? Row : nullptr;
+}
+
+bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY) const
+{
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
 	if (!Def)
 	{
@@ -3478,7 +3583,25 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 	}
 	// Prefab stations (tiered production T1): underground, on a carved cell,
 	// and only once research has opened their room.
-	if (!Def->ProvidesRoom.IsNone())
+	// Drag-sized structures (Agri Gate C): surface only, inside the size cap.
+	if (Def->DragSized)
+	{
+		if (Level != 0)
+		{
+			OutReason = TEXT("Greenhouse domes stand on the surface - underground, zone Greenhouse cells instead");
+			return false;
+		}
+		if (SizeX < 1 || SizeY < 1 || SizeX > DomeMaxBedsPerSide || SizeY > DomeMaxBedsPerSide)
+		{
+			OutReason = FString::Printf(TEXT("A dome is 1 to %d beds a side"), DomeMaxBedsPerSide);
+			return false;
+		}
+	}
+	else
+	{
+		SizeX = SizeY = 1;
+	}
+	if (!Def->ProvidesRoom.IsNone() && !Def->DragSized)
 	{
 		if (Level >= 0)
 		{
@@ -3560,8 +3683,9 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 	// buildings could interpenetrate). Half-extents in cm match the ghost box
 	// (FootprintX cells x 2 m); strict < keeps edge-adjacent placement legal.
 	{
-		const double HalfX = FMath::Max(1, Def->FootprintX) * 100.0;
-		const double HalfY = FMath::Max(1, Def->FootprintY) * 100.0;
+		const FVector2D Half = GetFootprintHalfCm(Def, SizeX, SizeY);
+		const double HalfX = Half.X;
+		const double HalfY = Half.Y;
 		for (const FRHBuildingInstance& B : Buildings)
 		{
 			if (B.Level != Level)
@@ -3573,8 +3697,9 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 			{
 				continue;
 			}
-			if (FMath::Abs(B.LocationCm.X - LocationCm.X) < HalfX + FMath::Max(1, BDef->FootprintX) * 100.0
-				&& FMath::Abs(B.LocationCm.Y - LocationCm.Y) < HalfY + FMath::Max(1, BDef->FootprintY) * 100.0)
+			const FVector2D BHalf = GetFootprintHalfCm(BDef, B.SizeX, B.SizeY);
+			if (FMath::Abs(B.LocationCm.X - LocationCm.X) < HalfX + BHalf.X
+				&& FMath::Abs(B.LocationCm.Y - LocationCm.Y) < HalfY + BHalf.Y)
 			{
 				OutReason = FString::Printf(TEXT("Footprint overlaps %s #%d"), *B.DefName.ToString(), B.Id);
 				return false;
@@ -3595,8 +3720,10 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 			{
 				continue;
 			}
-			if (FMath::Abs(C.Location.X - LocationCm.X) < HalfX + FMath::Max(1, QDef->FootprintX) * 100.0
-				&& FMath::Abs(C.Location.Y - LocationCm.Y) < HalfY + FMath::Max(1, QDef->FootprintY) * 100.0)
+			const FIntPoint QSize = QDef->DragSized ? DecodeBuildSize(C.Value) : FIntPoint(1, 1);
+			const FVector2D QHalf = GetFootprintHalfCm(QDef, QSize.X, QSize.Y);
+			if (FMath::Abs(C.Location.X - LocationCm.X) < HalfX + QHalf.X
+				&& FMath::Abs(C.Location.Y - LocationCm.Y) < HalfY + QHalf.Y)
 			{
 				OutReason = FString::Printf(TEXT("%s order already in transit for that spot"), *C.Target.ToString());
 				return false;
@@ -3622,11 +3749,12 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 		// site's demand is what tells the Forge to make it).
 		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Level))
 		{
+			const double Need = Cost.Value * SizeX * SizeY;
 			const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
-			if (Available < Cost.Value && !HasProducerFor(Cost.Key))
+			if (Available < Need && !HasProducerFor(Cost.Key))
 			{
 				OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand, no producer online)"),
-					*Cost.Key.ToString(), Cost.Value, Available);
+					*Cost.Key.ToString(), Need, Available);
 				return false;
 			}
 		}
@@ -3659,7 +3787,9 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	if (Cmd.Verb == FName("Build"))
 	{
 		FString Reason;
-		if (!CanPlaceBuilding(Cmd.Target, Cmd.Location, Reason, Cmd.Level))
+		const FRHBuildingRow* SizedDef = Defs ? Defs->GetBuilding(Cmd.Target) : nullptr;
+		const FIntPoint Size = (SizedDef && SizedDef->DragSized) ? DecodeBuildSize(Cmd.Value) : FIntPoint(1, 1);
+		if (!CanPlaceBuildingSized(Cmd.Target, Cmd.Location, Reason, Cmd.Level, Size.X, Size.Y))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -3669,7 +3799,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		{
 			--ImportStock.FindOrAdd(Cmd.Target); // consumption happens at execution, not preview
 		}
-		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0, Cmd.Level);
+		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0, Cmd.Level, Size.X, Size.Y);
 	}
 	else if (Cmd.Verb == FName("Dig"))
 	{
@@ -4768,7 +4898,7 @@ bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
 	return true;
 }
 
-void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level)
+void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level, int32 SizeX, int32 SizeY)
 {
 	FRHBuildingInstance Instance;
 	Instance.Id = NextBuildingId++;
@@ -4778,10 +4908,15 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	Instance.LocationCm.Z = Level * FloorHeightCm; // Z is derived, never authored
 
 	const FRHBuildingRow* Def = Defs->GetBuilding(DefName);
+	if (Def && Def->DragSized)
+	{
+		Instance.SizeX = FMath::Clamp(SizeX, 1, DomeMaxBedsPerSide);
+		Instance.SizeY = FMath::Clamp(SizeY, 1, DomeMaxBedsPerSide);
+	}
 	if (!bInstant && Def && Def->BuildTime_s > 0.0)
 	{
 		Instance.bUnderConstruction = true;
-		Instance.BuildRemaining_s = Def->BuildTime_s;
+		Instance.BuildRemaining_s = Def->BuildTime_s * GetBedCount(Instance); // a bigger dome takes longer
 	}
 	if (Def && !Instance.bUnderConstruction)
 	{
@@ -4831,14 +4966,14 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	OnBuildingAdded.Broadcast(Added);
 }
 
-void URHSimWorldSubsystem::Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level)
+void URHSimWorldSubsystem::Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level, int32 SizeX, int32 SizeY)
 {
 	if (!Defs || !Defs->GetBuilding(DefName))
 	{
 		UE_LOG(LogRedHopeSim, Error, TEXT("Debug_PlaceInstant: unknown building '%s'"), *DefName.ToString());
 		return;
 	}
-	AddBuilding(DefName, LocationCm, /*bInstant*/ true, Level);
+	AddBuilding(DefName, LocationCm, /*bInstant*/ true, Level, SizeX, SizeY);
 }
 
 void URHSimWorldSubsystem::Debug_Showcase()
@@ -5200,7 +5335,7 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	// Fabrication waits for the full bill of materials on site (haulers are
 	// bringing it; multi-resource since M1-a; Level-taxed since M1-d Gate B).
 	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
-	const TMap<FName, double> Cost = Def ? URHDefinitionsSubsystem::GetBuildCostFor(*Def, B->Level) : TMap<FName, double>();
+	const TMap<FName, double> Cost = Def ? GetSiteBill(*B) : TMap<FName, double>();
 	for (const auto& Line : Cost)
 	{
 		const double* Delivered = B->InputKg.Find(Line.Key);
@@ -5777,7 +5912,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2 << B.bManualOff;
+		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY; // size: v28
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 	}
@@ -5872,7 +6007,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	// The garden (save v12).
 	{
 		TArray<FIntVector> Planted = PlantedCells.Array();
-		Planted.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+		Planted.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z); });
 		Ar << Planted << bFirstCropAnnounced;
 	}
 	// Hope-drives (save v13). Smoothed mood + band, so a mid-swing save/load is
@@ -5938,7 +6073,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		TArray<FIntVector> CropKeys;
 		PlantedCrops.GetKeys(CropKeys);
-		CropKeys.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+		CropKeys.Sort([](const FIntVector& A, const FIntVector& B){ return A.X != B.X ? A.X < B.X : (A.Y != B.Y ? A.Y < B.Y : A.Z < B.Z); });
 		int32 CropCount = CropKeys.Num();
 		Ar << CropCount;
 		for (const FIntVector& K : CropKeys)
@@ -6049,7 +6184,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		FRHBuildingInstance B;
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2 << B.bManualOff;
+		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY; // size: v28
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 		Buildings.Add(MoveTemp(B));

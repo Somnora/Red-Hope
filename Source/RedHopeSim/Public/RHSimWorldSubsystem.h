@@ -10,6 +10,7 @@ class URHSimClockSubsystem;
 class URHAgentSubsystem;
 struct FRHRobotRow;
 struct FRHRoomRow;
+struct FRHBuildingRow;
 
 // A strategic order. Presentation can only reach the sim through these:
 // commands enter the uplink queue, wait out the signal lag, then apply at a
@@ -92,6 +93,10 @@ struct REDHOPESIM_API FRHBuildingInstance
 	// to stretch the battery through a storm - zero draw, zero gen, batches
 	// frozen (even H2), until switched back on. Serialized (save v9).
 	UPROPERTY() bool bManualOff = false;
+	// Agri Gate C (save v28): beds per side of a drag-sized structure (the
+	// greenhouse dome). 1 x 1 for every fixed-size building.
+	UPROPERTY() int32 SizeX = 1;
+	UPROPERTY() int32 SizeY = 1;
 	UPROPERTY() TMap<FName, double> InputKg;
 	UPROPERTY() TMap<FName, double> OutputKg;
 };
@@ -178,6 +183,25 @@ public:
 	// at the seam, and the world may have changed during the signal delay
 	// (that is the game).
 	bool CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level = 0) const;
+	// The same, for a drag-sized structure of SizeX x SizeY beds (Agri Gate C).
+	bool CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY) const;
+	// Drag-sized structures (the greenhouse dome). A Build order carries its
+	// size in Value as SizeX * 1000 + SizeY (0 = 1 x 1).
+	static double EncodeBuildSize(int32 SizeX, int32 SizeY) { return (double)(SizeX * 1000 + SizeY); }
+	static FIntPoint DecodeBuildSize(double Value) { const int32 V = (int32)Value; return V <= 0 ? FIntPoint(1, 1) : FIntPoint(FMath::Max(1, V / 1000), FMath::Max(1, V % 1000)); }
+	// Footprint half-extents in cm for a def at a size (2 m footprint cells).
+	static FVector2D GetFootprintHalfCm(const FRHBuildingRow* Def, int32 SizeX = 1, int32 SizeY = 1);
+	int32 GetDomeMaxBedsPerSide() const { return DomeMaxBedsPerSide; }
+	static int32 GetBedCount(const FRHBuildingInstance& B) { return FMath::Max(1, B.SizeX) * FMath::Max(1, B.SizeY); }
+	// The site's whole bill: the def's (Level-taxed) bill x its bed count.
+	TMap<FName, double> GetSiteBill(const FRHBuildingInstance& B) const;
+	// The greenhouse dome's garden row if B is a BUILT surface dome whose room
+	// is live, else null. Its beds plant and grow like greenhouse cells.
+	const FRHRoomRow* GetDomeRoom(const FRHBuildingInstance& B) const;
+	// Bed state for presentation (Key (0, Bed, DomeId) in the planted maps).
+	bool IsDomeBedPlanted(int32 DomeId, int32 Bed) const { return PlantedCells.Contains(FIntVector(0, Bed, DomeId)); }
+	FName GetDomeBedCrop(int32 DomeId, int32 Bed) const;
+	int32 GetDomeBedCropStage(int32 DomeId, int32 Bed) const;
 	// Nearest slice deposit within MaxDistCm of a point, or nullptr (click-to-dig).
 	const FRHDepositState* FindDepositNear(const FVector& LocationCm, double MaxDistCm, int32 Level = 0) const;
 	int32 GetMaxDepth() const { return MaxDepth; }
@@ -761,7 +785,7 @@ public:
 	// Harness driver (M1-d): place one completed building instantly - no cost,
 	// no lag - so headless tests can stand up a Borer without scripting the
 	// whole construction economy.
-	void Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level = 0);
+	void Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
 	// Harness driver (M1-d Gate B): drop solid stock into the first completed
 	// building of a def (seeding a Stockpile with Struct/Ore for tax tests).
 	void Debug_AddSolid(FName DefName, FName Resource, double Kg);
@@ -829,7 +853,8 @@ private:
 	bool HasProducerFor(FName Resource) const;
 	void ApplyManifestItemEffect(FName ItemName);
 	void ExecuteCommand(const FRHCommand& Cmd);
-	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0);
+	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
+	int32 GetCropStageForKey(const FIntVector& Key) const;
 	// The floor a task site sits on (building/deposit lookup; 0 if gone).
 	int32 GetSiteLevel(const FRHSiteRef& Site) const;
 	void SpawnStartingFleet();
@@ -1171,6 +1196,7 @@ private:
 	// derived - the room designation (saved) carries the type, so no new save state.
 	double GardenGrowLightWPerCell = 60.0;
 	double GreenhouseGlassKgPerCell = 200.0;
+	int32 DomeMaxBedsPerSide = 3;          // config DomeMaxBedsPerSide (Agri Gate C)
 	int32 GreenhouseMinLevel = -1;
 	double GardenPowerDrawW = 0.0;      // grow-light load this step (deck read)
 	bool bGrowLightsDark = false;       // last step the bank couldn't power the lights
