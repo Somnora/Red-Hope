@@ -53,6 +53,9 @@ public:
 	// Presentation-only; the sim never knows what the camera looks at.
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
+	// 0 closed .. 1 open: the cab's sliding doors (0 when only the legacy
+	// lattice cage exists). The audio subsystem plays the slide and chime off it.
+	float GetElevatorDoorAlpha() const { return bElevatorIsCab ? ElevatorWakeAlpha : 0.f; }
 
 	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
 	// against each building's AUTHORED PulseDepth, so the art-bible mix between
@@ -232,6 +235,7 @@ private:
 	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorA;
 	TWeakObjectPtr<UStaticMeshComponent> ElevatorDoorB;
 	bool bElevatorIsCab = false;
+	double ElevatorHoldUntil = 0.0;
 	// Sovereignty visuals (M3/M4): marker per rival + its last-applied state
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;

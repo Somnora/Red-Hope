@@ -129,6 +129,13 @@ courtesy credit. MPFB itself (GPL-3.0-or-later) was used as a TOOL and none of
 its code is distributed.
 
 
+KENNEY SOUND PACKS
+------------------
+Sound effects by Kenney (www.kenney.nl): Sci-Fi Sounds, Interface Sounds and
+Impact Sounds, released under CC0. CC0 requires no attribution; this entry is
+a courtesy credit.
+
+
 BLENDER
 -------
 Blender is GPL-licensed and was used as a TOOL in the art pipeline. The GPL

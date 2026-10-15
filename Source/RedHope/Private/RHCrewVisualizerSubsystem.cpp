@@ -121,6 +121,25 @@ bool URHCrewVisualizerSubsystem::IsAnyCrewWithinCm(const FVector& WorldPos, floa
 	return false;
 }
 
+bool URHCrewVisualizerSubsystem::IsAnyRiderWithinCm(const FVector& WorldPos, float RadiusCm) const
+{
+	for (const auto& Pair : Tracked)
+	{
+		const FCrewVisual& V = Pair.Value;
+		if (V.Phase != EPhase::Boarding && V.Phase != EPhase::Alighting)
+		{
+			continue;
+		}
+		const AActor* Actor = V.Actor.Get();
+		if (Actor && FVector::Dist2D(Actor->GetActorLocation(), WorldPos) <= RadiusCm
+			&& FMath::Abs(Actor->GetActorLocation().Z - WorldPos.Z) < 250.f)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 bool URHCrewVisualizerSubsystem::Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const
 {
 	// Sorted by colonist Id: TMap iteration order is not a stable contract, and

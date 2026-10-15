@@ -2,6 +2,8 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHAudioSubsystem.h"
+#include "Sound/SoundBase.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -37,11 +39,29 @@ namespace
 		return FCoreStyle::GetDefaultFontStyle("Mono", Size);
 	}
 
+	// Every deck button clicks (2026-10-14: the game had no sound). Slate plays
+	// it without a world; FSlateSound holds the rooted asset.
+	const FSlateSound& DeckClick()
+	{
+		static FSlateSound Sound;
+		static bool bInit = false;
+		if (!bInit)
+		{
+			if (USoundBase* S = URHAudioSubsystem::UIClickSound())
+			{
+				Sound.SetResourceObject(S);
+				bInit = true;
+			}
+		}
+		return Sound;
+	}
+
 	TSharedRef<SWidget> DeckButton(const TAttribute<FText>& Label, const FOnClicked& OnClicked)
 	{
 		return SNew(SBox).Padding(FMargin(2.f, 0.f))
 		[
 			SNew(SButton)
+			.ClickedSoundOverride(DeckClick())
 			.OnClicked(OnClicked)
 			.ContentPadding(FMargin(8.f, 5.f))
 			[
@@ -1811,6 +1831,7 @@ FReply SRHCommandDeck::HandleLoad()
 
 void SRHCommandDeck::PushCard(const FString& Title, const FString& Body, bool bGolden)
 {
+	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, bGolden ? FName("Milestone") : FName("CardOpen"));
 	FInfoCard Card;
 	Card.Title = Title;
 	Card.Body = Body;
@@ -1850,6 +1871,7 @@ EVisibility SRHCommandDeck::GetSkipTipsVisibility() const
 
 FReply SRHCommandDeck::HandleCardGotIt()
 {
+	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("CardClose"));
 	if (CardQueue.Num() > 0)
 	{
 		CardQueue.RemoveAt(0);
@@ -1859,6 +1881,7 @@ FReply SRHCommandDeck::HandleCardGotIt()
 
 FReply SRHCommandDeck::HandleCardSkipAll()
 {
+	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("CardClose"));
 	// Silence the tutorial forever (celebration cards still show): remembered
 	// across sessions in the game ini.
 	bTipsOff = true;
@@ -1911,6 +1934,7 @@ void SRHCommandDeck::HandleStockChanged(FName Resource, double Total)
 	}
 	ToastLine = FString::Printf(TEXT("+ first %s banked"), *Resource.ToString());
 	ToastUntil = Now + 6.0;
+	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Notify"));
 }
 
 FText SRHCommandDeck::GetToastText() const

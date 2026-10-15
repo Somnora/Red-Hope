@@ -1540,7 +1540,18 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			if (const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>())
 			{
-				Target = Crew->IsAnyCrewWithinCm(FVector(Head.X, Head.Y, FloorZ), 420.f) ? 1.f : 0.f;
+				// The cab wakes for riders only (the doors would otherwise
+				// part for every colonist walking round it).
+				const bool bNear = bElevatorIsCab ? Crew->IsAnyRiderWithinCm(FVector(Head.X, Head.Y, FloorZ), 420.f)
+					: Crew->IsAnyCrewWithinCm(FVector(Head.X, Head.Y, FloorZ), 420.f);
+				// Real doors dwell: held open 2 s after the last rider, so
+				// riders stepping in and out of range don't make them flutter.
+				const double NowS = World->GetTimeSeconds();
+				if (bNear)
+				{
+					ElevatorHoldUntil = NowS + 2.0;
+				}
+				Target = NowS < ElevatorHoldUntil ? 1.f : 0.f;
 			}
 		}
 		ElevatorWakeAlpha = FMath::FInterpTo(ElevatorWakeAlpha, Target, DeltaTime, 3.5f);

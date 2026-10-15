@@ -3,6 +3,7 @@
 #include "RHStrategyPawn.h"
 #include "RHCommandDeck.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHAudioSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -538,7 +539,11 @@ void ARHPlayerController::OnClick()
 				ActiveLevel < 0 ? *FString::Printf(TEXT(" floor %d"), ActiveLevel) : TEXT("")), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
-		// Invalid spot: the ghost already says why; the click is a no-op.
+		else
+		{
+			// Invalid spot: the ghost already says why; the click only buzzes.
+			URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+		}
 	}
 	else if (bExcavateMode)
 	{
@@ -758,6 +763,8 @@ void ARHPlayerController::SetConfirm(const FString& Text, const FLinearColor& Co
 	ConfirmText = Text;
 	ConfirmColor = Color;
 	ConfirmRealSeconds = FPlatformTime::Seconds();
+	// Cyan lines are transmitted orders, warm lines are refusals.
+	URHAudioSubsystem::Cue(GetWorld(), Color.R > Color.B ? FName("Error") : FName("Confirm"));
 	UE_LOG(LogRedHope, Display, TEXT("%s"), *Text);
 }
 

@@ -96,6 +96,10 @@ public:
 	// True if any crew figure stands within RadiusCm (2D) of WorldPos - the
 	// colony visualizer's elevator doors open for approaching colonists.
 	bool IsAnyCrewWithinCm(const FVector& WorldPos, float RadiusCm) const;
+	// Same test, counting only RIDERS (Boarding / Alighting): the elevator's
+	// doors part for people getting in or out, not for everyone walking past
+	// the cab (2026-10-14 - with sound on they chimed every few seconds).
+	bool IsAnyRiderWithinCm(const FVector& WorldPos, float RadiusCm) const;
 
 	// Scripted-capture helper: world location of the Nth tracked crew figure,
 	// in colonist-Id order so the same index means the same person between

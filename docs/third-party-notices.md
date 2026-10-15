@@ -81,6 +81,19 @@ of its code ships. The `male_casualsuit01` diffuse texture carries a
 "www.makehuman.org" mark in its top-left corner; no face of the garment samples
 that corner, so the mark never reaches a baked crew atlas.
 
+## Kenney sound packs
+
+Part of the game's sound (UI clicks and confirmations, the elevator doors, the
+command module's chatter, the lander's idle engine, the borer's mining hits,
+the crew lander's touchdown) comes from Kenney's Sci-Fi Sounds, Interface
+Sounds and Impact Sounds packs (kenney.nl, downloaded 2026-10-14), released
+under CC0. No attribution is required; this is a courtesy credit:
+
+> Sound effects by Kenney (www.kenney.nl), CC0.
+
+The rest of the soundscape (ambience beds, machine loops, chime and stingers)
+is synthesised in `scripts/audio/rh_sfx_build.py`.
+
 ## Blender
 
 Blender is GPL. It is used as a tool; the GPL binds Blender itself, not artwork
