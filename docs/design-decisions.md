@@ -232,3 +232,16 @@ The alive-pass adversarial review workflow was session-limit-starved on three co
 3. **Un-run dimensions, self-reviewed:** (a) *skills parity* — accrual is linear-in-dt with RefreshJobs re-deriving assignments identically at every step in both bands; zero-pop early-out precedes everything; division guarded by KINDA_SMALL_NUMBER. (b) *moments parity* — MomentSols/MomentCounter are saved state, but the beat threshold (0.5 sol) crosses at the same era-step window in both bands (fp drift ~1e-13 cannot shift a crossing across a sol boundary — the same argument that cleared the SolidarityHope snap, 2026-07-07n); the max step (0.05 sol) is 10× under the interval, so double-fires are impossible. (c) *deck onboarding* — AddSP binds are weak-pointer lifetime-safe; HandleStockChanged early-outs on SeenStock; the card overlay slot precedes the deck panels, whose edge-anchored slots don't overlap screen center.
 
 Residual debt: a full workflow-verified pass over the alive diff remains desirable when session limits allow; the inline analysis above is the honest interim record.
+
+## Directive + ruling — 2026-10-15 (director: Sims-style build mode, decisions 1a-6a)
+
+The director asked for a way to build above- and below-ground habitats "similar to how in The Sims you can build a house", using prefab habitats and habitats of our own design, "both using materials which we collect". A planning pass produced six gates (BM-1 to BM-6: surface habitats sim; their shells, derived walls and cutaway; demolish with salvage; a furniture catalogue with sim meaning; Furnish mode; windows and doors). He answered all six open questions with the recommendation:
+
+1. **Order: surface habitats first, then furniture.** BM-1 (sim) → BM-2 (presentation) → BM-3 (demolish) → BM-4/5 (furniture) → BM-6 (windows/doors).
+2. **Prefab habs are Forge-made** from collected Struct + Shielding (habitat segments, the dormant MakeHabSegment recipe switched on), not shipped kits.
+3. **Walls are derived** from the bays and rooms the player lays out; the player places windows and doors on them. No freehand wall drawing.
+4. **A surface habitat network is livable at the vault's 4-cell minimum**, counted across connected modules and corridors.
+5. **Furniture installs instantly from stock** after the uplink lag; selling refunds 75%.
+6. **Airlocks are cosmetic** (plus a smaller air leak) until storms can damage habs; a hab needs no airlock or shaft link to be lived in.
+
+Standing rules carried into every gate: new systems are inert for colonies that don't use them (the battery baseline and pins must not move); every new sim gate ships a fails-loudly self-test suite; every player-facing morale/evacuation string stays a Gate-D placeholder.
