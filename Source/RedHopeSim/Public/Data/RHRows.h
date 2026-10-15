@@ -83,6 +83,12 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// when you click the machine. Director-authored - never derived in code.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Category;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Blurb;
+	// Prefab stations (tiered production, 2026-10-15): a building that IS a
+	// room station - LabModule provides LabFull, InfirmaryModule an Infirmary.
+	// A completed, switched-on, powered prefab on a rated floor counts as one
+	// cell of that room (its seats, YieldMul, the infirmary grace). DT_Rooms
+	// stays the single source of the station's numbers. Empty elsewhere.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName ProvidesRoom;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

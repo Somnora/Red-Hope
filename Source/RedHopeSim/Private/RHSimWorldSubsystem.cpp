@@ -2625,6 +2625,11 @@ bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName Roo
 			return false;
 		}
 	}
+	if (!RoomName.IsNone() && FindModuleOnCell(Level, CellIndex))
+	{
+		OutReason = TEXT("A station module sits on this cell - remove it to zone the cell");
+		return false;
+	}
 	TArray<FName>& Cells = FloorRoomCells.FindOrAdd(Level);
 	if (Cells.Num() < Carved)
 	{
@@ -2664,38 +2669,106 @@ void URHSimWorldSubsystem::RefreshJobs()
 	}
 	ByIdOrder.Sort();
 	int32 Next = 0;
+	// One station's seats, in order (cells and prefab modules alike).
+	const auto FillStation = [&](const FRHRoomRow* Row)
+	{
+		if (!Row || !Row->SliceActive || !(Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
+		{
+			return;
+		}
+		const int32 Seats = FMath::Max(1, Row->SeatCount);
+		for (int32 Seat = 0; Seat < Seats && Next < ByIdOrder.Num(); ++Seat)
+		{
+			ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
+			if (Row->Function == FName("Lab"))
+			{
+				LabYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
+			}
+			else if (Row->Function == FName("Workstation"))
+			{
+				WorkstationYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
+			}
+		}
+	};
 	for (int32 Level = -1; Level >= -MaxDepth && Next < ByIdOrder.Num(); --Level)
 	{
 		if (!RatedFloors.Contains(Level))
 		{
 			continue;
 		}
-		const TArray<FName>* Cells = FloorRoomCells.Find(Level);
-		if (!Cells)
+		if (const TArray<FName>* Cells = FloorRoomCells.Find(Level))
 		{
-			continue;
-		}
-		for (int32 i = 0; i < Cells->Num() && Next < ByIdOrder.Num(); ++i)
-		{
-			const FRHRoomRow* Row = Defs->GetRoom((*Cells)[i]);
-			if (Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
+			for (int32 i = 0; i < Cells->Num() && Next < ByIdOrder.Num(); ++i)
 			{
-				const int32 Seats = FMath::Max(1, Row->SeatCount);
-				for (int32 Seat = 0; Seat < Seats && Next < ByIdOrder.Num(); ++Seat)
-				{
-					ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
-					if (Row->Function == FName("Lab"))
-					{
-						LabYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
-					}
-					else if (Row->Function == FName("Workstation"))
-					{
-						WorkstationYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
-					}
-				}
+				FillStation(Defs->GetRoom((*Cells)[i]));
+			}
+		}
+		// Prefab stations on this floor, after its cells, in Id (creation)
+		// order. None placed = the pre-T1 assignment exactly.
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			if (Next >= ByIdOrder.Num())
+			{
+				break;
+			}
+			if (B.Level == Level)
+			{
+				FillStation(GetProvidedRoom(B, /*bRequireOnline*/ true));
 			}
 		}
 	}
+}
+
+const FRHRoomRow* URHSimWorldSubsystem::GetProvidedRoom(const FRHBuildingInstance& B, bool bRequireOnline) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	if (!Def || Def->ProvidesRoom.IsNone())
+	{
+		return nullptr;
+	}
+	const FRHRoomRow* Row = Defs->GetRoom(Def->ProvidesRoom);
+	if (!Row || !Row->SliceActive)
+	{
+		return nullptr;
+	}
+	if (bRequireOnline && (B.bUnderConstruction || B.bManualOff || !B.bPowered || !RatedFloors.Contains(B.Level)))
+	{
+		return nullptr;
+	}
+	return Row;
+}
+
+const FRHBuildingInstance* URHSimWorldSubsystem::FindModuleOnCell(int32 Level, int32 Cell) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level == Level && Level < 0 && GetProvidedRoom(B, /*bRequireOnline*/ false) && FindCarvedCellAt(Level, B.LocationCm) == Cell)
+		{
+			return &B;
+		}
+	}
+	return nullptr;
+}
+
+int32 URHSimWorldSubsystem::FindCarvedCellAt(int32 Level, const FVector& LocationCm) const
+{
+	const int32 Carved = GetFloorCarvedCells(Level);
+	if (Level >= 0 || Carved <= 0)
+	{
+		return INDEX_NONE;
+	}
+	// Cell centres sit at the shaft head + SpiralCell x 10 m (the visualizer's
+	// carve tiles use the same mapping).
+	const FIntPoint P(FMath::RoundToInt((LocationCm.X - ShaftHeadCm.X) / 1000.0),
+		FMath::RoundToInt((LocationCm.Y - ShaftHeadCm.Y) / 1000.0));
+	for (int32 i = 0; i < Carved; ++i)
+	{
+		if (SpiralCell(i) == P)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
 }
 
 URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() const
@@ -3302,6 +3375,54 @@ bool URHSimWorldSubsystem::CanPlaceBuilding(FName DefName, const FVector& Locati
 	{
 		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper"), Level);
 		return false;
+	}
+	// Prefab stations (tiered production T1): underground, on a carved cell,
+	// and only once research has opened their room.
+	if (!Def->ProvidesRoom.IsNone())
+	{
+		if (Level >= 0)
+		{
+			OutReason = TEXT("Station modules go on a dug floor - ride down with the SHAFT strip first");
+			return false;
+		}
+		const FRHRoomRow* Room = Defs->GetRoom(Def->ProvidesRoom);
+		if (!Room || !Room->SliceActive)
+		{
+			FString By;
+			TArray<TPair<FName, const FRHDiscoveryRow*>> Discoveries;
+			Defs->GetDiscoveriesSorted(Discoveries);
+			for (const TPair<FName, const FRHDiscoveryRow*>& D : Discoveries)
+			{
+				if (D.Value && D.Value->UnlockRoom == Def->ProvidesRoom)
+				{
+					By = D.Value->DisplayName;
+					break;
+				}
+			}
+			OutReason = By.IsEmpty() ? FString(TEXT("Locked - research has not opened this station yet"))
+				: FString::Printf(TEXT("Locked - research %s first"), *By);
+			return false;
+		}
+		const int32 Cell = FindCarvedCellAt(Level, LocationCm);
+		if (Cell == INDEX_NONE)
+		{
+			OutReason = TEXT("Place it on a carved cell of this floor");
+			return false;
+		}
+		// One station per cell: a module never stacks on a zoned room or on
+		// another module (DesignateRoom refuses the converse).
+		const FName Zoned = GetRoomAt(Level, Cell);
+		if (!Zoned.IsNone())
+		{
+			const FRHRoomRow* ZRow = Defs->GetRoom(Zoned);
+			OutReason = FString::Printf(TEXT("This cell is zoned as %s - clear the zone first"), ZRow ? *ZRow->DisplayName : *Zoned.ToString());
+			return false;
+		}
+		if (FindModuleOnCell(Level, Cell))
+		{
+			OutReason = TEXT("A station module already sits on this cell");
+			return false;
+		}
 	}
 	// Pylon-like defs (they project coverage and link by range) are the
 	// territory extenders: their rule is link range to the nearest node,
@@ -4404,6 +4525,15 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 					return true;
 				}
 			}
+		}
+	}
+	// A prefab Infirmary module counts too (tiered production T1).
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		const FRHRoomRow* Row = GetProvidedRoom(B, /*bRequireOnline*/ true);
+		if (Row && Row->Function == FName("Infirmary"))
+		{
+			return true;
 		}
 	}
 	return false;

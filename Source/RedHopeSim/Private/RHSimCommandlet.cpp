@@ -1563,6 +1563,127 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// Staffing self-test (tiered production T1-T3, 2026-10-15): prefab station
+	// modules - a building that counts as a room station (seats, yield, the
+	// infirmary grace) - gated underground, on carved cells and by research.
+	// Every check FAILS the suite (LogRedHopeSim Error + exit 1) on mismatch,
+	// unlike the older print-only suites. `-staff`.
+	if (FParse::Param(*Params, TEXT("staff")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STAFFING TEST (prefab stations, 2026-10-15) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+				// Staffing is the subject, not the grid: a full bank every
+				// step keeps night shedding out of the seat checks (StepPower
+				// clamps it to capacity).
+				Sim->Debug_SetBatteryWh(1.0e9);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk)
+			{
+				UE_LOG(LogRedHopeSim, Display, TEXT("STAFF ok: %s"), *What);
+			}
+			else
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("STAFF FAIL: %s"), *What);
+				++Fails;
+			}
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// 1) Pure data: the prefab rows ride the synced DT_Buildings.
+		const FRHBuildingRow* LabMod = DefsSub->GetBuilding(FName("LabModule"));
+		const FRHBuildingRow* InfMod = DefsSub->GetBuilding(FName("InfirmaryModule"));
+		Expect(LabMod && LabMod->SliceActive && LabMod->ProvidesRoom == FName("LabFull"), TEXT("LabModule row provides LabFull (DT/CSV)"));
+		Expect(InfMod && InfMod->SliceActive && InfMod->ProvidesRoom == FName("Infirmary"), TEXT("InfirmaryModule row provides Infirmary (DT/CSV)"));
+		if (!LabMod || !InfMod)
+		{
+			return 1;
+		}
+
+		// A rated ten-cell floor with four colonists (the -tiers recipe).
+		FString R;
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 10, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 2000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		RunSols(2.5);
+		Expect(Sim->IsFloorRated(-1), TEXT("floor -1 rated"));
+		Sim->Debug_AddColonists(4);
+		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
+		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
+		const FVector Head = Sim->GetShaftHeadCm();
+		const auto CellCentre = [&](int32 i) { const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i); return FVector(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, 0.0); };
+
+		// 2) Placement gates.
+		FString Why;
+		Expect(!Sim->CanPlaceBuilding(FName("LabModule"), CellCentre(3), Why, 0), FString::Printf(TEXT("refused on the surface (%s)"), *Why));
+		const FRHRoomRow* LabFull = DefsSub->GetRoom(FName("LabFull"));
+		const bool bLabFullDormant = LabFull && !LabFull->SliceActive;
+		Expect(bLabFullDormant, TEXT("LabFull starts dormant (research-locked)"));
+		Expect(!Sim->CanPlaceBuilding(FName("LabModule"), CellCentre(3), Why, -1) && Why.StartsWith(TEXT("Locked")), FString::Printf(TEXT("refused while LabFull is dormant (%s)"), *Why));
+		DefsSub->ActivateRoomRow(FName("LabFull"));
+		Why.Reset();
+		Expect(Sim->CanPlaceBuilding(FName("LabModule"), CellCentre(3), Why, -1), FString::Printf(TEXT("accepted on a carved cell once LabFull is live (%s)"), *Why));
+		Expect(!Sim->CanPlaceBuilding(FName("LabModule"), Head + FVector(30000.0, 0.0, 0.0), Why, -1), FString::Printf(TEXT("refused off the carved cells (%s)"), *Why));
+		Expect(!Sim->CanPlaceBuilding(FName("LabModule"), CellCentre(0), Why, -1), FString::Printf(TEXT("refused on a zoned cell (%s)"), *Why));
+
+		// 3) Seats: four colonists, no room stations - the module seats two at
+		// LabFull's x2.0.
+		Sim->Debug_PlaceInstant(FName("LabModule"), CellCentre(3), -1);
+		RunSols(0.2);
+		Expect(Sim->GetColonyHope().FilledSeats == 2 && FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 4.0),
+			FString::Printf(TEXT("LabModule seats 2 at x2.0: filled=%d labSum=%.2f (expect 2, 4.00)"), Sim->GetColonyHope().FilledSeats, Sim->GetLabYieldSeatSum()));
+		int32 LabId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("LabModule")) { LabId = B.Id; } }
+		Expect(!Sim->DesignateRoom(-1, 3, FName("Lab"), Why), FString::Printf(TEXT("zoning the module's cell is refused (%s)"), *Why));
+		Expect(!Sim->CanPlaceBuilding(FName("LabModule"), CellCentre(3), Why, -1), FString::Printf(TEXT("a second module on the same cell is refused (%s)"), *Why));
+
+		// 4) Switched off: no seats; back on: seats return. Two steps each (a
+		// sol is 20 era steps): StepPower runs after StepPopulation, so a
+		// module switched on reads unpowered for one step.
+		Sim->SetManualPower(LabId, false);
+		RunSols(0.1);
+		Expect(FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 0.0), FString::Printf(TEXT("switched off: labSum=%.2f (expect 0)"), Sim->GetLabYieldSeatSum()));
+		Sim->SetManualPower(LabId, true);
+		RunSols(0.1);
+		Expect(FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 4.0), FString::Printf(TEXT("back on: labSum=%.2f (expect 4.00)"), Sim->GetLabYieldSeatSum()));
+
+		// 5) The Infirmary module stretches the recall window like the room.
+		const double EvacBase = Sim->GetEffectiveEvacSols();
+		Sim->Debug_PlaceInstant(FName("InfirmaryModule"), CellCentre(4), -1);
+		RunSols(0.1);
+		const double EvacMod = Sim->GetEffectiveEvacSols();
+		Expect(EvacMod > EvacBase + 0.5, FString::Printf(TEXT("InfirmaryModule: evac %.1f -> %.1f sols (expect +1.0)"), EvacBase, EvacMod));
+
+		// 6) Save/load: the modules and their effects survive.
+		FString Err;
+		Sim->SaveColony(TEXT("stafftest"), Err);
+		Sim->LoadColony(TEXT("stafftest"), Err);
+		RunSols(0.05);
+		Expect(FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 4.0) && FMath::IsNearlyEqual(Sim->GetEffectiveEvacSols(), EvacMod),
+			FString::Printf(TEXT("save/load: labSum=%.2f evac=%.1f"), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols()));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STAFFING TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

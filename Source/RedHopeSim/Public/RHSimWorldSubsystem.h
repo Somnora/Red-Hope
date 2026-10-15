@@ -9,6 +9,7 @@ class URHDefinitionsSubsystem;
 class URHSimClockSubsystem;
 class URHAgentSubsystem;
 struct FRHRobotRow;
+struct FRHRoomRow;
 
 // A strategic order. Presentation can only reach the sim through these:
 // commands enter the uplink queue, wait out the signal lag, then apply at a
@@ -492,6 +493,17 @@ public:
 	// more time to fix the missing leg, never a penalty.
 	bool HasInfirmaryOnline() const;
 	double GetEffectiveEvacSols() const { return ColonistEvacSols + (HasInfirmaryOnline() ? InfirmaryEvacBonusSols : 0.0); }
+	// Prefab stations (tiered production T1, 2026-10-15): the room a building
+	// provides - null if none or the room row is dormant. bRequireOnline adds:
+	// built, switched on, powered, on a rated floor.
+	const FRHRoomRow* GetProvidedRoom(const FRHBuildingInstance& B, bool bRequireOnline) const;
+	// The carved cell (spiral index) under a point on a subsurface floor, or
+	// INDEX_NONE - the inverse of SpiralCell around the shaft head.
+	int32 FindCarvedCellAt(int32 Level, const FVector& LocationCm) const;
+	// The station module (any build state) standing on a carved cell, or null.
+	// One station per cell: modules refuse zoned cells and zoning refuses
+	// module cells.
+	const FRHBuildingInstance* FindModuleOnCell(int32 Level, int32 Cell) const;
 
 	// --- The garden (M2 Gate C) ---
 	// A Garden-zoned cell on a RATED floor auto-plants when the colony holds
