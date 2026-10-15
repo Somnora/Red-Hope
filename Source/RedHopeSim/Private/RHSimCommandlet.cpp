@@ -1678,6 +1678,60 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 4.0) && FMath::IsNearlyEqual(Sim->GetEffectiveEvacSols(), EvacMod),
 			FString::Printf(TEXT("save/load: labSum=%.2f evac=%.1f"), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols()));
 
+		// 7) T2 Assign: zone a Workstation (cell 5) and a WorkbenchLarge (cell
+		// 6, 2 seats x1.35). Default order fills the cells first (ws=1+2.7),
+		// leaving the module 1 of its 2 seats. Assign the module: it fills
+		// first (lab=4.0), the cells take the rest in carve order (ws=1+1.35).
+		Sim->DesignateRoom(-1, 5, FName("Workstation"), R);
+		Sim->DesignateRoom(-1, 6, FName("WorkbenchLarge"), R);
+		RunSols(0.1);
+		Expect(FMath::IsNearlyEqual(Sim->GetWorkstationYieldSeatSum(), 3.70, 1e-4) && FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 2.0, 1e-4),
+			FString::Printf(TEXT("default order: ws=%.2f lab=%.2f (expect 3.70, 2.00)"), Sim->GetWorkstationYieldSeatSum(), Sim->GetLabYieldSeatSum()));
+		FRHCommand Assign; Assign.Verb = FName("Assign"); Assign.Target = FName("Building"); Assign.Value = LabId;
+		Sim->EnqueueCommand(Assign);
+		RunSols(0.15); // past the uplink lag (45 sim-s) and a power step
+		Expect(FMath::IsNearlyEqual(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && FMath::IsNearlyEqual(Sim->GetWorkstationYieldSeatSum(), 2.35, 1e-4),
+			FString::Printf(TEXT("module assigned first: lab=%.2f ws=%.2f (expect 4.00, 2.35)"), Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum()));
+		FRHCommand AssignCell; AssignCell.Verb = FName("Assign"); AssignCell.Level = -1; AssignCell.Value = 6;
+		Sim->EnqueueCommand(AssignCell);
+		RunSols(0.15);
+		Expect(Sim->GetSeatPriority().Num() == 2 && Sim->GetSeatPriority()[0] == FIntVector(-1, 6, 0),
+			FString::Printf(TEXT("newest assignment first: %d entries, head (%d,%d,%d)"), Sim->GetSeatPriority().Num(),
+				Sim->GetSeatPriority().Num() ? Sim->GetSeatPriority()[0].X : 0, Sim->GetSeatPriority().Num() ? Sim->GetSeatPriority()[0].Y : 0,
+				Sim->GetSeatPriority().Num() ? Sim->GetSeatPriority()[0].Z : 0));
+		FRHCommand Bad; Bad.Verb = FName("Assign"); Bad.Level = -1; Bad.Value = 0; // Living Quarters
+		Sim->EnqueueCommand(Bad);
+		RunSols(0.15);
+		Expect(Sim->GetSeatPriority().Num() == 2, TEXT("Assign on Living Quarters is refused"));
+		Sim->DesignateRoom(-1, 6, FName("Dining"), R);
+		Expect(Sim->GetSeatPriority().Num() == 1, TEXT("re-zoning an assigned cell to Dining drops it from the order"));
+		FString Err2;
+		Sim->SaveColony(TEXT("stafftest2"), Err2);
+		const TArray<FIntVector> PriorBefore = Sim->GetSeatPriority();
+		Sim->LoadColony(TEXT("stafftest2"), Err2);
+		Expect(Sim->GetSeatPriority() == PriorBefore, TEXT("save/load v27 keeps the seat order"));
+
+		// 8) T3 lazy fill. Now: the module (assigned) seats colonists 1-2,
+		// cell 5 seats 3, colonist 4 idles. Arm 1.0 sol, add two colonists,
+		// then zone two more Workstations: the new seats wait, then are taken
+		// one per sol.
+		Sim->Debug_SetLazySeatFillSols(1.0);
+		RunSols(0.1);
+		const int32 Staffed0 = Sim->GetColonyHope().FilledSeats;
+		Sim->Debug_AddColonists(2);
+		Sim->DesignateRoom(-1, 7, FName("Workstation"), R);
+		Sim->DesignateRoom(-1, 8, FName("Workstation"), R);
+		RunSols(0.1);
+		const int32 Staffed1 = Sim->GetColonyHope().FilledSeats;
+		Expect(Staffed0 == 3 && Staffed1 == Staffed0, FString::Printf(TEXT("lazy: the new seats wait (filled %d -> %d, expect 3 -> 3)"), Staffed0, Staffed1));
+		RunSols(1.0);
+		const int32 Staffed2 = Sim->GetColonyHope().FilledSeats;
+		Expect(Staffed2 == Staffed0 + 1, FString::Printf(TEXT("lazy: one takes charge after a sol (filled %d, expect %d)"), Staffed2, Staffed0 + 1));
+		RunSols(1.0);
+		Expect(Sim->GetColonyHope().FilledSeats == Staffed0 + 2, FString::Printf(TEXT("lazy: the second a sol later (filled %d, expect %d)"), Sim->GetColonyHope().FilledSeats, Staffed0 + 2));
+		// Instant mode (the shipped default) seats everyone at once again.
+		Sim->Debug_SetLazySeatFillSols(0.0);
+
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== STAFFING TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);

@@ -826,6 +826,32 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAfter(
 		}), FMath::Max(0.01f, Delay), false);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHAssign(
+	TEXT("RH.Assign"),
+	TEXT("RH.Assign <Level> <Cell> | RH.Assign Building <Id> - put a work station at the front of the seat order (uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Assign <Level> <Cell> | RH.Assign Building <Id>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Assign");
+		if (Args[0].Equals(TEXT("Building"), ESearchCase::IgnoreCase))
+		{
+			Cmd.Target = FName("Building");
+			Cmd.Value = FCString::Atoi(*Args[1]);
+		}
+		else
+		{
+			Cmd.Level = FCString::Atoi(*Args[0]);
+			Cmd.Value = FCString::Atoi(*Args[1]);
+		}
+		Sim->EnqueueCommand(Cmd);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHMenu(
 	TEXT("RH.Menu"),
 	TEXT("RH.Menu <title|pause|settings|credits|none> - DEBUG: open a menu screen (captures/QA)."),

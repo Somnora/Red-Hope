@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 26;  // v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 27;  // v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -81,6 +81,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
 	LanderDockRateW = Defs->GetConfigScalar(FName("LanderDockRate_W"), LanderDockRateW);
+	LazySeatFillSols = Defs->GetConfigScalar(FName("LazySeatFillSols"), LazySeatFillSols);
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
 	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
 	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
@@ -2329,6 +2330,37 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	// Jobs re-derive every step (rooms/floors/roster all change them); the
 	// reset keeps the map honest at zero pop too.
 	RefreshJobs();
+	// Lazy seat fill (T3): while someone is idle and an unassigned seat is
+	// open, the accumulator runs; each LazySeatFillSols one more seat is
+	// staffed (threshold-on-accumulator with reset - the StepGrowth shape, so
+	// both time bands cross on the same step window).
+	if (LazySeatFillSols > 0.0 && LastIdleColonists > 0 && LastOpenSeats > 0)
+	{
+		SeatFillSols += SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		if (SeatFillSols >= LazySeatFillSols)
+		{
+			SeatFillSols -= LazySeatFillSols;
+			++StaffedSeats;
+			const int32 Before = ColonistStations.Num();
+			RefreshJobs();
+			if (ColonistStations.Num() > Before)
+			{
+				// Placeholder copy (Gate-D review). The newest seat-holder is
+				// the highest-Id colonist with a station.
+				int32 NewId = 0;
+				for (const TPair<int32, FIntVector>& CS : ColonistStations) { NewId = FMath::Max(NewId, CS.Key); }
+				FString Name;
+				for (const FRHColonist& C : Colonists) { if (C.Id == NewId) { Name = C.Name; } }
+				const FString Text = FString::Printf(TEXT("%s took charge of an empty %s seat."), *Name, *GetColonistJob(NewId).ToString().ToLower());
+				OnCrewMoment.Broadcast((uint8)ERHCrewMoment::JoinWork, NewId, 0, Text);
+				UE_LOG(LogRedHopeSim, Display, TEXT("STAFF lazy fill: %s (staffed %d)"), *Text, StaffedSeats);
+			}
+		}
+	}
+	else
+	{
+		SeatFillSols = 0.0;
+	}
 	if (Colonists.Num() == 0)
 	{
 		ComfortsSupplied = 0;
@@ -2636,6 +2668,13 @@ bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName Roo
 		Cells.SetNum(Carved); // new carves default undesignated
 	}
 	Cells[CellIndex] = RoomName;
+	{
+		const FRHRoomRow* NewRow = (Defs && !RoomName.IsNone()) ? Defs->GetRoom(RoomName) : nullptr;
+		if (!NewRow || !(NewRow->Function == FName("Lab") || NewRow->Function == FName("Workstation") || NewRow->Function == FName("Garden")))
+		{
+			SeatPriority.Remove(FIntVector(Level, CellIndex, 0));
+		}
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Room designation: floor %d cell %d -> %s"),
 		Level, CellIndex, RoomName.IsNone() ? TEXT("(cleared)") : *RoomName.ToString());
 	return true;
@@ -2649,15 +2688,21 @@ FName URHSimWorldSubsystem::GetRoomAt(int32 Level, int32 CellIndex) const
 
 void URHSimWorldSubsystem::RefreshJobs()
 {
-	// Deterministic seat assignment: floors shallow->deep, cells in carve
-	// order, colonists by Id. SeatCount seats per Lab/Workstation cell on a
-	// RATED floor (T1 benches seat 1 - the pre-tier behavior exactly).
-	// LabYieldSeatSum / WorkstationYieldSeatSum accumulate each FILLED seat's
-	// YieldMul (station tiers, Gate A): all-default content keeps them equal
-	// to the plain filled-seat counts.
+	// Deterministic seat assignment. Every open station in the default order -
+	// floors shallow->deep, each floor's cells in carve order, then its prefab
+	// modules in Id order - with the player's ASSIGNED stations moved to the
+	// front in priority order (T2). Colonists fill seats by Id. SeatCount seats
+	// per station; LabYieldSeatSum / WorkstationYieldSeatSum accumulate each
+	// filled seat's YieldMul (station tiers). With no assignments, no modules
+	// and instant fill, this is the pre-T1 walk exactly.
 	ColonistJobs.Reset();
+	ColonistStations.Reset();
+	StationFilled.Reset();
+	StationCapacity.Reset();
 	LabYieldSeatSum = 0.0;
 	WorkstationYieldSeatSum = 0.0;
+	LastIdleColonists = 0;
+	LastOpenSeats = 0;
 	if (Colonists.Num() == 0 || !Defs)
 	{
 		return;
@@ -2668,29 +2713,14 @@ void URHSimWorldSubsystem::RefreshJobs()
 		ByIdOrder.Add(C.Id);
 	}
 	ByIdOrder.Sort();
-	int32 Next = 0;
-	// One station's seats, in order (cells and prefab modules alike).
-	const auto FillStation = [&](const FRHRoomRow* Row)
+
+	struct FStation { FIntVector Key; const FRHRoomRow* Row; };
+	TArray<FStation> Stations;
+	const auto IsSeatRow = [](const FRHRoomRow* Row)
 	{
-		if (!Row || !Row->SliceActive || !(Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
-		{
-			return;
-		}
-		const int32 Seats = FMath::Max(1, Row->SeatCount);
-		for (int32 Seat = 0; Seat < Seats && Next < ByIdOrder.Num(); ++Seat)
-		{
-			ColonistJobs.Add(ByIdOrder[Next++], Row->Function);
-			if (Row->Function == FName("Lab"))
-			{
-				LabYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
-			}
-			else if (Row->Function == FName("Workstation"))
-			{
-				WorkstationYieldSeatSum += FMath::Max(0.f, Row->YieldMul);
-			}
-		}
+		return Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden"));
 	};
-	for (int32 Level = -1; Level >= -MaxDepth && Next < ByIdOrder.Num(); --Level)
+	for (int32 Level = -1; Level >= -MaxDepth; --Level)
 	{
 		if (!RatedFloors.Contains(Level))
 		{
@@ -2698,25 +2728,95 @@ void URHSimWorldSubsystem::RefreshJobs()
 		}
 		if (const TArray<FName>* Cells = FloorRoomCells.Find(Level))
 		{
-			for (int32 i = 0; i < Cells->Num() && Next < ByIdOrder.Num(); ++i)
+			for (int32 i = 0; i < Cells->Num(); ++i)
 			{
-				FillStation(Defs->GetRoom((*Cells)[i]));
+				const FRHRoomRow* Row = Defs->GetRoom((*Cells)[i]);
+				if (IsSeatRow(Row))
+				{
+					Stations.Add({ FIntVector(Level, i, 0), Row });
+				}
 			}
 		}
-		// Prefab stations on this floor, after its cells, in Id (creation)
-		// order. None placed = the pre-T1 assignment exactly.
 		for (const FRHBuildingInstance& B : Buildings)
 		{
-			if (Next >= ByIdOrder.Num())
-			{
-				break;
-			}
 			if (B.Level == Level)
 			{
-				FillStation(GetProvidedRoom(B, /*bRequireOnline*/ true));
+				const FRHRoomRow* Row = GetProvidedRoom(B, /*bRequireOnline*/ true);
+				if (IsSeatRow(Row))
+				{
+					Stations.Add({ FIntVector(Level, INDEX_NONE, B.Id), Row });
+				}
 			}
 		}
 	}
+
+	// Assigned stations first (newest assignment first), then the rest.
+	TArray<int32> Order;
+	for (const FIntVector& K : SeatPriority)
+	{
+		for (int32 i = 0; i < Stations.Num(); ++i)
+		{
+			if (Stations[i].Key == K && !Order.Contains(i))
+			{
+				Order.Add(i);
+			}
+		}
+	}
+	for (int32 i = 0; i < Stations.Num(); ++i)
+	{
+		if (!SeatPriority.Contains(Stations[i].Key))
+		{
+			Order.Add(i);
+		}
+	}
+
+	// Lazy fill (T3): unassigned seats fill only up to StaffedSeats.
+	const bool bLazy = LazySeatFillSols > 0.0;
+	int32 Next = 0, NonPriorityFilled = 0, NonPrioritySeats = 0;
+	for (const int32 Idx : Order)
+	{
+		const FStation& S = Stations[Idx];
+		const bool bAssigned = SeatPriority.Contains(S.Key);
+		const int32 Seats = FMath::Max(1, S.Row->SeatCount);
+		StationCapacity.Add(S.Key, Seats);
+		if (!bAssigned)
+		{
+			NonPrioritySeats += Seats;
+		}
+		for (int32 Seat = 0; Seat < Seats && Next < ByIdOrder.Num(); ++Seat)
+		{
+			if (!bAssigned && bLazy && NonPriorityFilled >= StaffedSeats)
+			{
+				break;
+			}
+			const int32 Id = ByIdOrder[Next++];
+			ColonistJobs.Add(Id, S.Row->Function);
+			ColonistStations.Add(Id, S.Key);
+			++StationFilled.FindOrAdd(S.Key);
+			NonPriorityFilled += bAssigned ? 0 : 1;
+			if (S.Row->Function == FName("Lab"))
+			{
+				LabYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
+			}
+			else if (S.Row->Function == FName("Workstation"))
+			{
+				WorkstationYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
+			}
+		}
+	}
+	// Instant mode keeps StaffedSeats at the filled count, so arming lazy
+	// mode mid-game evicts nobody; lazy mode cannot bank unused staffing.
+	StaffedSeats = bLazy ? FMath::Min(StaffedSeats, NonPriorityFilled) : NonPriorityFilled;
+	LastIdleColonists = ByIdOrder.Num() - Next;
+	LastOpenSeats = NonPrioritySeats - NonPriorityFilled;
+}
+
+void URHSimWorldSubsystem::GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const
+{
+	const int32* F = StationFilled.Find(Key);
+	const int32* C = StationCapacity.Find(Key);
+	OutFilled = F ? *F : 0;
+	OutCapacity = C ? *C : 0;
 }
 
 const FRHRoomRow* URHSimWorldSubsystem::GetProvidedRoom(const FRHBuildingInstance& B, bool bRequireOnline) const
@@ -3650,6 +3750,38 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		CarveQueue.FindOrAdd(Cmd.Level) += Cells;
 		UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d (%d queued there)"),
 			Cells, Cmd.Level, CarveQueue[Cmd.Level]);
+	}
+	else if (Cmd.Verb == FName("Assign"))
+	{
+		// Tiered production T2: put a station at the FRONT of the seat order.
+		// Target None = a room cell (Level, Value = cell index); Target
+		// "Building" = a prefab module (Value = building id).
+		FIntVector Key;
+		const FRHRoomRow* Row = nullptr;
+		if (Cmd.Target == FName("Building"))
+		{
+			const FRHBuildingInstance* B = FindBuilding((int32)Cmd.Value);
+			Row = B ? GetProvidedRoom(*B, /*bRequireOnline*/ false) : nullptr;
+			Key = FIntVector(B ? B->Level : 0, INDEX_NONE, B ? B->Id : 0);
+		}
+		else
+		{
+			Row = Defs ? Defs->GetRoom(GetRoomAt(Cmd.Level, (int32)Cmd.Value)) : nullptr;
+			Key = FIntVector(Cmd.Level, (int32)Cmd.Value, 0);
+		}
+		if (!Row || !Row->SliceActive || !(Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("Not a work station - assign staff to a Lab, Workstation or Gardening Station"));
+			return;
+		}
+		SeatPriority.Remove(Key);
+		SeatPriority.Insert(Key, 0);
+		if (SeatPriority.Num() > MaxSeatPriority)
+		{
+			SeatPriority.SetNum(MaxSeatPriority);
+		}
+		RefreshJobs();
+		UE_LOG(LogRedHopeSim, Display, TEXT("Assign: station (%d, %d, %d) now first of %d"), Key.X, Key.Y, Key.Z, SeatPriority.Num());
 	}
 	else if (Cmd.Verb == FName("Designate"))
 	{
@@ -5829,6 +5961,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		Ducts.Sort();
 		Ar << Ducts << ColonyCO2Kg << PlantRotation;
 	}
+	// Staffing (save v27): the player's seat order (order-preserving) and the
+	// lazy-fill state.
+	{
+		Ar << SeatPriority << StaffedSeats << SeatFillSols;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -6144,6 +6281,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		DuctedFloors.Empty();
 		DuctedFloors.Append(Ducts);
 		bSoilSpentAnnounced = false; // runtime edge re-derives
+	}
+	// Staffing (save v27).
+	{
+		Ar << SeatPriority << StaffedSeats << SeatFillSols;
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

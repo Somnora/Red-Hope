@@ -500,6 +500,30 @@ public:
 	// The carved cell (spiral index) under a point on a subsurface floor, or
 	// INDEX_NONE - the inverse of SpiralCell around the shaft head.
 	int32 FindCarvedCellAt(int32 Level, const FVector& LocationCm) const;
+
+	// --- Staffing (tiered production T2/T3, save v27) ---
+	// A station is a seat-bearing room cell, key (Level, Cell, 0), or a prefab
+	// module, key (Level, INDEX_NONE, BuildingId). The seat-priority list holds
+	// the stations the player ASSIGNED staff to (uplink verb "Assign"), newest
+	// first; they fill before the default walk (floors shallow->deep, cells in
+	// carve order, then modules by Id). An empty list is the default exactly.
+	const TArray<FIntVector>& GetSeatPriority() const { return SeatPriority; }
+	int32 GetSeatPriorityRank(const FIntVector& Key) const { return SeatPriority.IndexOfByKey(Key); }
+	// The station a colonist works at (derived each refresh; false = idle).
+	bool GetColonistStation(int32 ColonistId, FIntVector& OutKey) const
+	{
+		const FIntVector* K = ColonistStations.Find(ColonistId);
+		if (K) { OutKey = *K; }
+		return K != nullptr;
+	}
+	// Seats filled and seat capacity at a station (0/0 if it is not one).
+	void GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const;
+	static constexpr int32 MaxSeatPriority = 32;
+	// Lazy seat fill (T3): with LazySeatFillSols > 0, unassigned seats are
+	// not filled at once - an idle colonist takes charge of an open seat each
+	// LazySeatFillSols. 0 (the shipped default) = instant fill, as before.
+	int32 GetStaffedSeats() const { return StaffedSeats; }
+	void Debug_SetLazySeatFillSols(double Sols) { LazySeatFillSols = FMath::Max(0.0, Sols); }
 	// The station module (any build state) standing on a carved cell, or null.
 	// One station per cell: modules refuse zoned cells and zoning refuses
 	// module cells.
@@ -920,6 +944,17 @@ private:
 	// load) - never saved, so it can't diverge.
 	TMap<int32, TArray<FName>> FloorRoomCells;
 	TMap<int32, FName> ColonistJobs;
+	// Staffing (T2/T3). SeatPriority, StaffedSeats and SeatFillSols are saved
+	// (v27); the station maps re-derive with the jobs.
+	TArray<FIntVector> SeatPriority;
+	int32 StaffedSeats = 0;
+	double SeatFillSols = 0.0;
+	double LazySeatFillSols = 0.0;        // config LazySeatFillSols (0 = instant)
+	TMap<int32, FIntVector> ColonistStations;
+	TMap<FIntVector, int32> StationFilled;
+	TMap<FIntVector, int32> StationCapacity;
+	int32 LastIdleColonists = 0;          // derived by RefreshJobs, read by T3
+	int32 LastOpenSeats = 0;
 	void RefreshJobs();
 	double HopeBase = 50.0;
 	double HopeHousingMax = 15.0;       // full when LivingQuarters cells >= population
