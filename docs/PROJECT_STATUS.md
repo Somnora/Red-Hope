@@ -1,13 +1,13 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-15 (through commit `4706e5f`).** The previous snapshot was
+**Snapshot: 2026-10-15, late (through commit `fdffc75`).** The previous snapshot was
 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v26**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v28**.
 
-## Since August (22 commits, `147de7a` → `4706e5f`; detail in §3c)
+## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 
 - **Hero lane finished the static family** (`147de7a`); **robots play their
   task poses** - the work clips had shipped unwired (`9efba3d`).
@@ -35,25 +35,40 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   GROW-LIGHTS DARK alert flood (12,524 in 40 sols) is fixed (now 1).
 - **Toolchain** (outside the repo): Metal Toolchain reinstalled after the
   Xcode 27 update (`db6a99a`); UE 5.8's SDK gate opened for Xcode 27 (`9532013`).
+- **Front end + the director's session pack** (`daaf86b`): title, pause,
+  settings and credits menus; balance-sweep hooks (`-RHConfig`, `-RHQuotas`);
+  the Gate-D wording inventory (`docs/qa/2026-10-15/gate-d-wording.md`).
+- **A packaged, double-clickable Mac build** (`e10fedc`):
+  `bash scripts/unreal/rh_package.sh` → `/Volumes/Unreal/red_hope/Packaged/Mac/red_hope.app`.
+- **Tiered production, finished**: prefab Lab and Infirmary modules (`f77b962`,
+  T1); ASSIGN STAFF + seat priority, lazy seat fill behind a switch (`63f452f`,
+  T2+T3, save v27); clickable stations with seat cards (`fdffc75`, T4).
+- **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
+  v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 24
-suites (25 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 26
+suites (27 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
-the art, audio, interface and playtest work. Last reported fully green on
-`4706e5f` ("0 suites not green", pins unchanged); also on `9532013`, `48934b9`,
-`9a9261e`, `0ca24d3`, `6410bf8`.
+the art, audio, interface, playtest, tiered-production and dome work. Last
+reported fully green on `585ee8e` ("0 suite(s) not green", pins unchanged);
+also on `f77b962`, `63f452f`, `4706e5f` and earlier. The two newest suites
+(`-staff`, `-dome`) fail loudly on any mismatch, unlike the older print-only
+ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 25 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 27 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri   (+ no-switch = the baseline)
+#         crisis alive ladder ending tiers agri staff dome   (+ no-switch = the baseline)
 ```
 
 **The simulation has changed since the 07-15 consolidation, in pin-neutral
 ways:** greenhouse agriculture (save v26, 07-16, crops dormant), pure-data
 self-tests (`163165a`), a read-only manifest iterator (`48934b9`), the Lander
-dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only).
+dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only),
+prefab station modules (`f77b962`), seat priority and lazy fill (`63f452f`,
+lazy fill off by default), the greenhouse dome (`585ee8e`). Each is inert for
+a colony that doesn't use it.
 
 ---
 
@@ -123,6 +138,16 @@ endings.
   harvest** celebration, a 1600-name diverse roster. **Onboarding** is now the
   first-hour guide (`60c14a2`; presentation, capture-verified) plus tip cards
   and milestone/first-stock toasts.
+- **Tiered production** (`f77b962`, `63f452f`, `fdffc75`): prefab **Lab Module**
+  (counts as a Full Laboratory cell: 2 seats at x2.0) and **Infirmary Module**,
+  placed on a dug cell once research opens their room; one station per cell.
+  **ASSIGN STAFF** (uplink verb `Assign`) puts a station first in the staff
+  order; click a station to see its seats. **Lazy seat fill**
+  (`LazySeatFillSols`, shipped 0 = instant) makes unassigned seats wait.
+- **The Greenhouse Dome** (agri Gate C, `585ee8e`, `ea2a791`): drag to size on
+  the surface in 10 m beds (up to 3 x 3); each bed = one underground greenhouse
+  cell (planted from Glass + Soil + Seeds, grows by daylight, no grow-light
+  power); a glass dome from four beds up, a flat glass house below.
 
 ### Phase 3 — Sovereignty (M3 + M4)
 - **Neighbors & trade** (M3-A): rover convoys to rival colonies, all costs
@@ -271,6 +296,26 @@ only (era mode parks the robots), windowless on a fixed 0.1 s step: ~2 min per
   lit (`GardenLastDarkSimSeconds`, runtime only; every crew number identical);
   the guide names the Soil Pallet and Seed Vault and warns with live numbers.
 
+**Late 10-15: the P1/P2 round** (`daaf86b` → `fdffc75`).
+- **Menus and the Mac app.** Title (New Colony / Continue / Settings /
+  Credits / Quit), Esc pause, settings (five audio buses, window, resolution,
+  quality, guide on/off). The first package failed on two unity-build name
+  collisions the editor build never sees (`Txt`, `Expr`); then the archived
+  app died at launch on a missing `libtbb.12.dylib` because UE 5.8's archive
+  step copies the bare executable bundle. `rh_package.sh` now copies the
+  complete staged app (1.5 GB) and the app boots to the title and runs a
+  colony. Ad-hoc signed, this Mac only.
+- **Balance sweeps** for the director's questions: Q3 + a lean cargo rescues
+  the colony (4 births, pop 8); 9 solar + 3 battery barely changes the
+  brownouts; halved Hope weights plateau at 83-89 THRIVING.
+- **Tiered production T1-T4** and **agri Gate C**: see §2 Phase 2.
+  Verification: `-staff` (25 checks) and `-dome` (15 checks) suites, the
+  full battery green on each sim gate, live captures of the dome
+  (`docs/media/dome-*.jpg`) and the station cards (`docs/media/station-card-*.jpg`,
+  `build-drawer-habitat.jpg`).
+- **Not yet hand-tested** (captures cannot drive the mouse): the dome's
+  click-and-drag sizing, and a real click on a station cell.
+
 ---
 
 ## 4. What is owed
@@ -322,26 +367,31 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
    wording, the Earth/politics/colonist-support panel text (`48934b9`), the
    guide's crew-phase warnings, and one concrete case the playtest surfaced:
    "EVACUATED: <name> returned to orbit" is said of a child born on Mars.
-   `docs/qa/2026-10-15/gate-d-wording.md` is being prepared; it is not in the
-   repo as of `4706e5f`.
+   The full inventory is `docs/qa/2026-10-15/gate-d-wording.md` (85 strings,
+   32 decisions, `daaf86b`); this round adds the lazy-fill crew moment and the
+   Infirmary card line.
 
 4. **Balance.** Every M2–M4 and v25 number is legible-math-first, awaiting
-   tuning; new since August: `LanderDockRate_W` = 100 W.
+   tuning; new since August: `LanderDockRate_W` = 100 W; the Lab/Infirmary
+   module and dome bills; `LazySeatFillSols` (0); `DomeMaxBedsPerSide` (3).
+   Director decisions open in the session pack: Q8 lazy fill on/off, Q9 do
+   modules count toward Hope's Rooms term (they don't today), Q10 the new
+   placeholder numbers.
 
-5. **The two 2026-07-10 specs beyond what is built.** Agri **Gate C**
-   (above-ground drag-footprint greenhouse + parametric dome - a new placement
-   interaction; the GreenhouseDome model has no building DefName yet) and the
-   rest of tiered production (prefab LabFull/Infirmary buildings,
-   click-to-assign, lazy seat-fill). Crop activation (`RH.ActivateCrop all` or
-   the CSV flag) is a director gate flip - and one of the playtest's candidate
-   answers to the supply-line problem.
+5. **Build mode (next, the director's ask of 10-15).** Sims-style habitats
+   above and below ground from collected materials: surface hab modules that
+   snap together and connect to the underground, walls derived from rooms
+   with placeable windows and doors, a furniture catalogue (beds, seats,
+   desks) with real sim meaning, demolition. A gate plan (BM-1 to BM-6) and
+   six decisions are with the director. Both 07-10 specs are now built (agri
+   Gate C, tiered production). Crop activation (`RH.ActivateCrop all` or the
+   CSV flag) is still a director gate flip - and one of the playtest's
+   candidate answers to the supply-line problem.
 
-6. **The game around the game.** No commit records a packaged build: the
-   packaging settings and notice staging are configured (`8e9c0ca`) and the
-   shipping-meta check passes, but there is no record of a cooked standalone
-   boot, and there is no packaging script. There is no title screen,
-   pause menu or settings menu (Space toggles sim pause, Escape cancels; the
-   audio volumes are console variables only).
+6. **The game around the game.** Menus and a packaged Mac build exist
+   (`daaf86b`, `e10fedc`). Still owed: distribution signing/notarization (a
+   director call), and the packaged app has not been double-clicked in
+   Finder by a human yet.
 
 7. **Open art decisions carried from August** (status not settled by any later
    commit - unverified): night-lamp brightness and the 40% accent tint; Pylon
@@ -374,7 +424,7 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
   every sol and empties its bank nightly from sol 3 (§4.2, balance).
 - **DT sync debt**: headless reads the CSVs, a live editor reads the DTs, and
   the self-tests fail on drift. Run `rh_sync_datatables.py` after any CSV edit.
-  Last sync: `6410bf8` (DT_Config 159 → 160 rows).
+  Last sync: `585ee8e` (DT_Config 162 rows, DT_Buildings 19).
 - **Toolchain edits live outside the repo.** The UE 5.8 install's
   `Engine/Config/Apple/Apple_SDK.json` has MaxVersion 27.9.0 for Xcode 27 (the
   original is `Apple_SDK.json.bak-20261014-before-xcode27`), and the Metal
@@ -398,9 +448,18 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
 - **No hard fail-state decision** (brief open question #5): Collapse is a
   recoverable, prevention-framed empty-colony state, not a "you lost" screen.
   The lean playtest shows it does fire in live play.
-- **Scope**: a complete structure with a playable first hour, a new interface
-  and sound - but one region, legible-math balance, placeholder wording, no
-  menus and no packaged build. Not a finished, tuned, shipped game.
+- **Nothing can be demolished.** No removal path exists for any building;
+  build mode's BM-3 owns it (it also has to fix cargo lost when a haul target
+  vanishes).
+- **People and robots move like board pieces up close.** Robots travel in
+  straight lines through buildings and each other, turn instantly and stand
+  idle with no task; crew walk well (speed-matched, steer around furniture,
+  ride the elevator) but never sit or lie down, socialize only through
+  floating text plates, and walk through each other. This is the
+  "alive pass 2" track, after build mode.
+- **Scope**: a complete structure with a playable first hour, a new interface,
+  sound, menus and a Mac build - but one region, legible-math balance,
+  placeholder wording. Not a finished, tuned, shipped game.
 
 ---
 
@@ -428,7 +487,15 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
   at boot). Audio: `RH_SOUND=1` + `rh.AudioMaster 0` + `rh.AudioLog 1`.
   Judge on harvested PNGs and the material-failure count.
 - **Thumbnails:** `RH.Showcase`, `RH.Thumbs <AbsOutDir>` →
-  `scripts/ui/rh_thumbs_compose.py` → `scripts/unreal/rh_import_ui.py`.
+  `scripts/ui/rh_thumbs_compose.py` → `scripts/unreal/rh_import_ui.py`
+  (copy only the new `<Def>_color/_mask.png` pairs to a fresh folder to avoid
+  reimporting every card).
+- **Packaging:** `bash scripts/unreal/rh_package.sh` (editor closed, nothing
+  else heavy; ~6 min). Judge on `BUILD SUCCESSFUL` and the 1.5 GB app with a
+  `Contents/UE` folder. Unity collisions only show up here: name
+  anonymous-namespace helpers uniquely per file.
+- **Dome glass:** `scripts/unreal/rh_make_glass.py` (rerunnable) authors
+  `M_DomeGlass`; it must stay used-with-instanced-static-meshes.
 - **DataTables:** `RH_TABLES=Config,Buildings UnrealEditor-Cmd red_hope.uproject
   -run=pythonscript -script=$PWD/scripts/unreal/rh_sync_datatables.py
   -unattended -nosound -stdout` (omit `RH_TABLES` for all), then the battery.
