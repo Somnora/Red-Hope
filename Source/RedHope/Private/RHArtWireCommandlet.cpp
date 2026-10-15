@@ -43,7 +43,8 @@ namespace
 	// open as one overlapping pile, which makes the master unusable for the
 	// hand-tuning P1 expects to do on it.
 	template <typename T>
-	T* Expr(UMaterial* Mat, int32 X = 0, int32 Y = 0)
+	// Named apart from RHArtCommandlet's Expr (unity builds; see SaveWiredAsset).
+	T* WireExpr(UMaterial* Mat, int32 X = 0, int32 Y = 0)
 	{
 		T* E = NewObject<T>(Mat);
 		Mat->GetExpressionCollection().AddExpression(E);
@@ -78,60 +79,60 @@ namespace
 		Package->FullyLoad();
 		UMaterial* Mat = NewObject<UMaterial>(Package, TEXT("M_RH_Master"), RF_Public | RF_Standalone);
 
-		auto* BaseTex = Expr<UMaterialExpressionTextureSampleParameter2D>(Mat, -900, -300);
+		auto* BaseTex = WireExpr<UMaterialExpressionTextureSampleParameter2D>(Mat, -900, -300);
 		BaseTex->ParameterName = FName("BaseTex");
 		BaseTex->Texture = LoadObject<UTexture2D>(nullptr, GDefaultBaseTex);
 		BaseTex->SamplerType = SAMPLERTYPE_Color;
 
-		auto* AccentColor = Expr<UMaterialExpressionVectorParameter>(Mat, -900, 0);
+		auto* AccentColor = WireExpr<UMaterialExpressionVectorParameter>(Mat, -900, 0);
 		AccentColor->ParameterName = FName("AccentColor");
 		AccentColor->DefaultValue = FLinearColor(0.5f, 0.5f, 0.5f);
 
-		auto* AccentAmount = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 130);
+		auto* AccentAmount = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 130);
 		AccentAmount->ParameterName = FName("AccentAmount");
 		AccentAmount->DefaultValue = 0.f;
 
-		auto* Metallic = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 230);
+		auto* Metallic = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 230);
 		Metallic->ParameterName = FName("Metallic");
 		Metallic->DefaultValue = 0.f;
 
-		auto* Rough = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 330);
+		auto* Rough = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 330);
 		Rough->ParameterName = FName("Rough");
 		Rough->DefaultValue = 0.75f;
 
-		auto* EmissiveColor = Expr<UMaterialExpressionVectorParameter>(Mat, -900, 430);
+		auto* EmissiveColor = WireExpr<UMaterialExpressionVectorParameter>(Mat, -900, 430);
 		EmissiveColor->ParameterName = FName("EmissiveColor");
 		EmissiveColor->DefaultValue = FLinearColor::Black;
 
-		auto* EmissiveAmount = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 560);
+		auto* EmissiveAmount = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 560);
 		EmissiveAmount->ParameterName = FName("EmissiveAmount");
 		EmissiveAmount->DefaultValue = 0.f;
 
-		auto* Powered = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 660);
+		auto* Powered = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 660);
 		Powered->ParameterName = FName("PoweredState");
 		Powered->DefaultValue = 1.f;
 
-		auto* Floor = Expr<UMaterialExpressionScalarParameter>(Mat, -900, 760);
+		auto* Floor = WireExpr<UMaterialExpressionScalarParameter>(Mat, -900, 760);
 		Floor->ParameterName = FName("EmissiveFloor");
 		Floor->DefaultValue = 0.08f;
 
 		// BaseColor = lerp(albedo, accent, accentAmount)
-		auto* Albedo = Expr<UMaterialExpressionLinearInterpolate>(Mat, -500, -200);
+		auto* Albedo = WireExpr<UMaterialExpressionLinearInterpolate>(Mat, -500, -200);
 		Albedo->A.Connect(0, BaseTex);
 		Albedo->B.Connect(0, AccentColor);
 		Albedo->Alpha.Connect(0, AccentAmount);
 
 		// Emissive = accentGlow * amount * powered + base * floor
-		auto* GlowA = Expr<UMaterialExpressionMultiply>(Mat, -500, 430);
+		auto* GlowA = WireExpr<UMaterialExpressionMultiply>(Mat, -500, 430);
 		GlowA->A.Connect(0, EmissiveColor);
 		GlowA->B.Connect(0, EmissiveAmount);
-		auto* GlowB = Expr<UMaterialExpressionMultiply>(Mat, -340, 500);
+		auto* GlowB = WireExpr<UMaterialExpressionMultiply>(Mat, -340, 500);
 		GlowB->A.Connect(0, GlowA);
 		GlowB->B.Connect(0, Powered);
-		auto* FloorMul = Expr<UMaterialExpressionMultiply>(Mat, -340, 700);
+		auto* FloorMul = WireExpr<UMaterialExpressionMultiply>(Mat, -340, 700);
 		FloorMul->A.Connect(0, Albedo);
 		FloorMul->B.Connect(0, Floor);
-		auto* Emissive = Expr<UMaterialExpressionAdd>(Mat, -180, 600);
+		auto* Emissive = WireExpr<UMaterialExpressionAdd>(Mat, -180, 600);
 		Emissive->A.Connect(0, GlowB);
 		Emissive->B.Connect(0, FloorMul);
 

@@ -29,6 +29,19 @@ mkdir -p "$OUT"
   > "$OUT/rh_package.log" 2>&1
 STATUS=$?
 
+# UE 5.8 (modern Xcode mode) assembles the complete app - executable, the TBB
+# dylibs under Contents/UE/red_hope/Binaries, the paks - at
+# Saved/StagedBuilds/Mac/red_hope.app, but -archive copies Binaries/Mac/
+# red_hope.app, which holds the bare executable only: it dies at launch on
+# "Library not loaded: @rpath/libtbb.12.dylib" (first packaged build,
+# 2026-10-15). Replace the archived copy with the staged one.
+STAGED="/Volumes/Unreal/red_hope/red_hope/Saved/StagedBuilds/Mac/red_hope.app"
+if [ "$STATUS" -eq 0 ] && [ -d "$STAGED/Contents/UE" ]; then
+  rm -rf "$OUT/Mac/red_hope.app"
+  ditto "$STAGED" "$OUT/Mac/red_hope.app"
+fi
+
 echo "exit: $STATUS"
 grep -E "BUILD SUCCESSFUL|BUILD FAILED|AutomationTool exiting with ExitCode" "$OUT/rh_package.log" | tail -3
 ls -d "$OUT"/Mac/*.app 2>/dev/null
+du -sh "$OUT"/Mac/*.app 2>/dev/null
