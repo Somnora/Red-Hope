@@ -13,6 +13,7 @@
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformMisc.h"
@@ -799,6 +800,30 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeckBuild(
 		{
 			PC->Debug_OpenBuildDrawer(FName(*Args[0]));
 		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAfter(
+	TEXT("RH.After"),
+	TEXT("RH.After <Seconds> <Command...> - DEBUG: run a console command later. Capture scripts' -ExecCmds all fire at boot; this stages a later beat (e.g. RH.After 25 RH.Launch)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.After <Seconds> <Command...>"));
+			return;
+		}
+		const float Delay = FCString::Atof(*Args[0]);
+		const FString Cmd = FString::Join(TArrayView<const FString>(Args).RightChop(1), TEXT(" "));
+		TWeakObjectPtr<UWorld> WeakWorld = World;
+		FTimerHandle Handle;
+		World->GetTimerManager().SetTimer(Handle, FTimerDelegate::CreateLambda([WeakWorld, Cmd]()
+		{
+			if (UWorld* W = WeakWorld.Get())
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.After] %s"), *Cmd);
+				GEngine->Exec(W, *Cmd);
+			}
+		}), FMath::Max(0.01f, Delay), false);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSetCirculates(

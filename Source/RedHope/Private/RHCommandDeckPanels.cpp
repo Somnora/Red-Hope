@@ -384,6 +384,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildHelpPanel()
 			]
 		];
 	}
+	// Tips and the first-hour guide, back on demand once skipped.
+	Rows->AddSlot().AutoHeight().HAlign(HAlign_Left).Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]() { return bTipsOff ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			D::Button(Txt(TEXT("SHOW THE GUIDE AND TIPS")), FOnClicked::CreateLambda([this]() { SetTipsOff(false); return FReply::Handled(); }))
+		]
+	];
 	return SNew(SBox)
 		.WidthOverride(380.f)
 		.Visibility_Lambda([this]() { return bShowHelp ? EVisibility::Visible : EVisibility::Collapsed; })
@@ -554,7 +563,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 	}
 	Picker->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
 	[
-		D::Button(Txt(TEXT("LAUNCH SUPPLY SHIP")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLaunch), true, true)
+		GuideHalo(FName("Launch"), D::Button(Txt(TEXT("LAUNCH SUPPLY SHIP")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLaunch), true, true))
 	];
 	Body->AddSlot().AutoHeight()
 	[
@@ -1377,8 +1386,9 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCard(FName DefName)
 		? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Pic))
 		: D::IconImage(CategoryIcon(Row->Category), FSlateColor(D::TextDim), 48.f);
 
-	return SNew(SBox).WidthOverride(124.f).Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+	return SNew(SBox).WidthOverride(128.f).Padding(FMargin(0.f, 0.f, 6.f, 0.f))
 	[
+		GuideHalo(DefName,
 		SNew(SButton)
 		.ButtonStyle(&D::ButtonStyle())
 		.ContentPadding(FMargin(6.f, 6.f, 6.f, 7.f))
@@ -1432,7 +1442,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCard(FName DefName)
 					SNew(STextBlock).Text(Txt(PowerShort)).Font(D::Body(8)).ColorAndOpacity(PowerColor)
 				]
 			]
-		]
+		])
 	];
 }
 

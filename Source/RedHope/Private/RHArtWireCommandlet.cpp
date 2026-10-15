@@ -28,7 +28,9 @@ namespace
 	// has to be present and type-correct or the master will not compile.
 	const TCHAR* GDefaultBaseTex = TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture");
 
-	bool SaveAsset(UObject* Asset)
+	// Named apart from RHArtCommandlet's SaveAsset: a unity build can put the
+	// two files in one translation unit.
+	bool SaveWiredAsset(UObject* Asset)
 	{
 		const FString FileName = FPackageName::LongPackageNameToFilename(
 			Asset->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
@@ -144,7 +146,7 @@ namespace
 		Mat->PreEditChange(nullptr);
 		Mat->PostEditChange();
 		FAssetRegistryModule::AssetCreated(Mat);
-		const bool bSaved = SaveAsset(Mat);
+		const bool bSaved = SaveWiredAsset(Mat);
 		UE_LOG(LogRedHope, Display, TEXT("RHArtWire: authored M_RH_Master (%d expressions) %s"),
 			Mat->GetExpressionCollection().Expressions.Num(), bSaved ? TEXT("OK") : TEXT("FAILED"));
 		return bSaved;
@@ -277,10 +279,10 @@ namespace
 			// Targeted equivalent of the rebuild for a material swap.
 			Mesh->UpdateUVChannelData(false);
 			Mesh->MarkPackageDirty();
-			bMeshSaved = SaveAsset(Mesh);
+			bMeshSaved = SaveWiredAsset(Mesh);
 		}
 
-		const bool bMISaved = SaveAsset(MI);
+		const bool bMISaved = SaveWiredAsset(MI);
 
 		// Geometry receipt. The weld pass claims ~83% of vertices were merged;
 		// this is the number UE actually built, which is the only one that

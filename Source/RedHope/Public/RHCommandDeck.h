@@ -170,6 +170,22 @@ private:
 	const class URHSimClockSubsystem* GetClock() const;
 	const class URHDefinitionsSubsystem* GetDefs() const;
 
+	// --- The first-hour guide (RHCommandDeckGuide.cpp) ---
+	// A live "next step" panel atop the right column: the first unfinished
+	// step of a fixed chain, read from sim state each Tick (a loaded colony
+	// lands on the right step); steps never un-complete. The controls it
+	// names pulse amber. Hidden with the tips; back from the "?" card.
+	TSharedRef<SWidget> BuildGuidePanel();
+	void RefreshGuide();
+	FName GetGuideBuildDef() const;
+	FName GetGuideOrder() const;
+	bool IsGuideTarget(FName Key) const;
+	FLinearColor GuidePulse() const;
+	TSharedRef<SWidget> GuideHalo(FName Key, const TSharedRef<SWidget>& Content);
+	void SetTipsOff(bool bOff);
+	int32 GuideStep = -1;      // -1 until first evaluated
+	int32 GuideHighWater = 0;
+
 	bool bShowHelp = false;
 	bool bBuildDrawerOpen = false;
 	FName HoveredBuildDef;

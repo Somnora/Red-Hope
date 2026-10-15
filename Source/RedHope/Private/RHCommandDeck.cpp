@@ -93,6 +93,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				{
 					// A loaded colony's stores must not all cheer: re-arm the grace.
 					Self->StockGraceUntil = FSlateApplication::Get().GetCurrentTime() + 3.0;
+					// The guide re-reads the loaded colony from step 1 (silently).
+					Self->GuideHighWater = 0;
+					Self->GuideStep = -1;
 				}
 			});
 		}
@@ -294,16 +297,16 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 							[
 								SNew(SBox).Visibility(this, &SRHCommandDeck::GetBoreActionVisibility)
 								[
-									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBoreLabel)),
-										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBore))
+									GuideHalo(FName("Bore"), DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBoreLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBore)))
 								]
 							]
 							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
 							[
 								SNew(SBox).Visibility(this, &SRHCommandDeck::GetExcavateActionVisibility)
 								[
-									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetExcavateActionLabel)),
-										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate))
+									GuideHalo(FName("Excavate"), DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetExcavateActionLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate)))
 								]
 							]
 							+ SVerticalBox::Slot().AutoHeight()
@@ -428,6 +431,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				+ SScrollBox::Slot()
 				[
 					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+					[
+						BuildGuidePanel()
+					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
 					[
 						BuildCommsPanel()
@@ -648,11 +655,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
-						DeckButton(FText::FromString(TEXT("Dig Site")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDig))
+						GuideHalo(FName("Dig"), DeckButton(FText::FromString(TEXT("Dig Site")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDig)))
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
-						DeckButton(FText::FromString(TEXT("Survey")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSurvey))
+						GuideHalo(FName("Survey"), DeckButton(FText::FromString(TEXT("Survey")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSurvey)))
 					]
 					// Bore + Excavate moved onto the Borer's in-world action card
 					// (M2 Gate D+ UX): you order the machine by clicking it, so the
@@ -795,13 +802,9 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	{
 		TutorialStage = 1;
 		PushCard(TEXT("WELCOME, DIRECTOR"),
-			TEXT("This is your slice of Mars. The robots work for you; the colony's HOPE depends on you. These tips can be skipped any time - the colony will still tell you what it needs."), false);
+			TEXT("This is your slice of Mars. The robots work for you; the colony's HOPE depends on you. The NEXT STEP panel, top right, walks you through the first hour - and these tips can be skipped any time."), false);
 		PushCard(TEXT("THE CAMERA"),
-			TEXT("WASD pans. Mouse wheel zooms. Q / E orbits. R / F tilts up to the mountains. 1 / 2 / 3 / 4 sets sim speed, SPACE pauses."), false);
-		PushCard(TEXT("FIRST POWER"),
-			TEXT("Open the BUILD menu and place a Solar Array and a Battery Bank near the Lander. Power is territory - machines only run inside the grid's reach."), false);
-		PushCard(TEXT("DIG IN"),
-			TEXT("The surface is deadly. Build the Borer, then use DIG to sink the shaft and EXCAVATE to carve floors. An Air Filter certifies a floor for humans."), false);
+			TEXT("WASD pans. Mouse wheel zooms. Q / E orbits. R / F tilts up to the mountains. 1 / 2 / 3 / 4 sets sim speed, SPACE pauses. The ? button, top left, lists every control."), false);
 	}
 	if (!bTipsOff && TutorialStage == 1)
 	{
@@ -812,7 +815,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 			{
 				TutorialStage = 2;
 				PushCard(TEXT("YOUR PEOPLE"),
-					TEXT("Colonists need Oxygen, Water and Food, every sol. Zone LivingQuarters for beds, a Lab or Garden for jobs - and watch HOPE, top right. Hope drives how hard the colony works."), false);
+					TEXT("Colonists need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - quarters, a garden, work. Watch HOPE, top left: it drives how hard the colony works, and the Crew panel shows what is moving it."), false);
 			}
 		}
 	}
@@ -821,6 +824,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshUplinkPanel();
 	RefreshFleetPanel();
 	RefreshRosterPanel();
+	RefreshGuide();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
 	// Project the building's world point (lifted above its roof) to screen, then
@@ -1341,6 +1345,18 @@ EVisibility SRHCommandDeck::GetBuildCatVisibility(FName Category) const
 
 FSlateColor SRHCommandDeck::GetCategoryTabColor(FName Category) const
 {
+	// The guide's building: its tab breathes amber until its drawer is open.
+	const FName Target = GetGuideBuildDef();
+	if (!Target.IsNone() && !(bBuildDrawerOpen && Category == SelectedBuildCategory))
+	{
+		for (const TPair<FName, FName>& E : BuildEntries)
+		{
+			if (E.Key == Target && E.Value == Category)
+			{
+				return FSlateColor(FMath::Lerp(FLinearColor(0.06f, 0.11f, 0.14f), FLinearColor(0.55f, 0.33f, 0.06f), GuidePulse().A));
+			}
+		}
+	}
 	// The open folder glows; the rest sit dim - the one-glance "where am I".
 	return (bBuildDrawerOpen && Category == SelectedBuildCategory)
 		? FSlateColor(FLinearColor(0.15f, 0.45f, 0.55f))
@@ -1466,6 +1482,13 @@ FSlateColor SRHCommandDeck::GetFloorCellColor(int32 Level) const
 	if (bActive)
 	{
 		return FLinearColor(0.05f, 0.32f, 0.27f, 0.95f);
+	}
+	// The guide wants the player on floor -1 (air filter, excavation).
+	const bool bWanted = IsGuideTarget(FName("Down"))
+		|| (IsGuideTarget(FName("Excavate")) && PC.IsValid() && PC->IsExcavateMode() && PC->GetActiveLevel() == 0);
+	if (Level == -1 && bReached && bWanted)
+	{
+		return FMath::Lerp(FLinearColor(0.05f, 0.10f, 0.13f, 0.9f), FLinearColor(0.55f, 0.33f, 0.06f, 1.f), GuidePulse().A);
 	}
 	if (bReached)
 	{
@@ -1618,18 +1641,8 @@ FReply SRHCommandDeck::HandleCardGotIt()
 FReply SRHCommandDeck::HandleCardSkipAll()
 {
 	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("CardClose"));
-	// Silence the tutorial forever (celebration cards still show): remembered
-	// across sessions in the game ini.
-	bTipsOff = true;
-	for (int32 i = CardQueue.Num() - 1; i >= 0; --i)
-	{
-		if (!CardQueue[i].bGolden)
-		{
-			CardQueue.RemoveAt(i);
-		}
-	}
-	GConfig->SetBool(TEXT("RedHope"), TEXT("TipsOff"), true, GGameIni);
-	GConfig->Flush(false, GGameIni);
+	// Silences the tutorial cards and the first-hour guide, across sessions.
+	SetTipsOff(true);
 	return FReply::Handled();
 }
 
