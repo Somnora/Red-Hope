@@ -68,6 +68,8 @@ public:
 	void PostConfirm(const FString& Text, const FLinearColor& Color) { SetConfirm(Text, Color); }
 	// Capture/QA (RH.DeckExpand): unfold every deck panel.
 	void Debug_ExpandDeck(bool bRoster);
+	// Capture/QA (RH.DeckBuild): open the deck's build drawer on a category.
+	void Debug_OpenBuildDrawer(FName Category);
 	// Click-to-inspect (M1-b Gate C): the selected building's sim id, 0 = none.
 	int32 GetSelectedBuildingId() const { return SelectedBuildingId; }
 	// Debug/help: select a building by id (RH.Select) - raises its in-world

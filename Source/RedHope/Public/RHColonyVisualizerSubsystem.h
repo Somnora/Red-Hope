@@ -41,6 +41,13 @@ public:
 	// Banner-weight alert (era refusal, event onset, ship countdown) - the
 	// must-not-miss channel the director asked for. Empty once stale.
 	FText GetAlertText() const;
+	// A building's main visual actor (the build menu's thumbnail capture,
+	// RH.Thumbs); null if it has none yet.
+	AStaticMeshActor* GetBuildingVisual(int32 BuildingId) const
+	{
+		const TObjectPtr<AStaticMeshActor>* A = BuildingVisuals.Find(BuildingId);
+		return A ? A->Get() : nullptr;
+	}
 
 	// The pit view (M1-d, v2 after the director's watch-through): once the
 	// shaft exists the world reads as a PERFECT SQUARE HOLE DUG IN SAND - the

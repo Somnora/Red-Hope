@@ -765,6 +765,14 @@ void ARHPlayerController::Debug_ExpandDeck(bool bRoster)
 	}
 }
 
+void ARHPlayerController::Debug_OpenBuildDrawer(FName Category)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_OpenBuild(Category);
+	}
+}
+
 void ARHPlayerController::SetConfirm(const FString& Text, const FLinearColor& Color)
 {
 	// The deck's cyan confirm line (real seconds: survives pause and 8x).

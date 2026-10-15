@@ -212,4 +212,67 @@ d.rectangle((64, 48, 108, 208), fill=C)
 d.rectangle((148, 48, 192, 208), fill=C)
 save(im, "pause")
 
+# --- Build-menu category icons (interface pass step 2) ---
+
+# factory - a sawtooth roof with a stack (Production)
+im, d = canvas()
+poly(d, [(28, 220), (28, 120), (84, 84), (84, 120), (140, 84), (140, 120), (196, 84), (196, 40), (228, 40), (228, 220)])
+d.rectangle((60, 160, 92, 220), fill=C)
+d.rectangle((124, 160, 156, 192), fill=C)
+save(im, "factory")
+
+# pylon - a lattice tower with two arms (Logistics)
+im, d = canvas()
+poly(d, [(128, 24), (72, 232)], closed=False)
+poly(d, [(128, 24), (184, 232)], closed=False)
+d.line((60, 76, 196, 76), fill=C, width=W)
+d.line((84, 136, 172, 136), fill=C, width=W - 4)
+poly(d, [(100, 136), (156, 196), (88, 196), (168, 136)], width=W - 8, closed=False)
+save(im, "pylon")
+
+# drill - a bit pointing down (Boring)
+im, d = canvas()
+d.rectangle((92, 24, 164, 72), outline=C, width=W - 4)
+poly(d, [(100, 72), (156, 72), (156, 160), (128, 232), (100, 160)])
+for y in (104, 140):
+    d.line((100, y + 16, 156, y - 8), fill=C, width=W - 8)
+save(im, "drill")
+
+# fan - three blades in a ring (Life Support)
+im, d = canvas()
+d.ellipse((24, 24, 232, 232), outline=C, width=W - 4)
+for k in range(3):
+    a = k * 2 * math.pi / 3
+    pts = []
+    for t in range(0, 61, 6):
+        u = a + math.radians(t)
+        r = 20 + 66 * math.sin(math.radians(t * 3))
+        pts.append((128 + r * math.cos(u), 128 + r * math.sin(u)))
+    d.polygon(pts, fill=C)
+d.ellipse((112, 112, 144, 144), fill=C)
+save(im, "fan")
+
+# dome - a habitat dome on a deck (Habitat)
+im, d = canvas()
+d.arc((40, 64, 216, 240), 180, 360, fill=C, width=W)
+d.line((24, 156, 232, 156), fill=C, width=W)
+d.line((40, 200, 216, 200), fill=C, width=W - 4)
+d.rectangle((112, 112, 144, 156), fill=C)
+save(im, "dome")
+
+# dish - an antenna dish (Command)
+im, d = canvas()
+d.chord((40, 40, 200, 200), 135, 315, outline=C, width=W - 2)
+d.line((120, 120, 176, 64), fill=C, width=W - 6)
+d.ellipse((168, 52, 196, 80), fill=C)
+d.line((96, 168, 72, 232), fill=C, width=W - 2)
+d.line((40, 232, 120, 232), fill=C, width=W)
+save(im, "dish")
+
+# close - an X
+im, d = canvas()
+d.line((64, 64, 192, 192), fill=C, width=W + 6)
+d.line((192, 64, 64, 192), fill=C, width=W + 6)
+save(im, "close")
+
 print("icons:", len([f for f in os.listdir(OUT) if f.endswith(".png")]), "->", OUT)

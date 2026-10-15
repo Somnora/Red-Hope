@@ -789,6 +789,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeckExpand(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckBuild(
+	TEXT("RH.DeckBuild"),
+	TEXT("RH.DeckBuild <Category> - DEBUG: open the command deck's build drawer on a category (Power, Logistics, Production...)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (PC && Args.Num() > 0)
+		{
+			PC->Debug_OpenBuildDrawer(FName(*Args[0]));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSetCirculates(
 	TEXT("RH.SetCirculates"),
 	TEXT("RH.SetCirculates <DefName> <0|1> - DEBUG: set a building def's CirculatesAir in the loaded table (test knob until the AirFilter DT row lands)."),

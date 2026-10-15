@@ -1,10 +1,13 @@
-"""Import the deck's icon set (scripts/ui/rh_icons_build.py) as UI textures.
+"""Import the deck's UI images as UI textures: the icon set
+(scripts/ui/rh_icons_build.py) and the build menu's thumbnails
+(scripts/ui/rh_thumbs_compose.py).
 
-  RH_ICONS=<abs dir of T_Icon_*.png> RH_REPORT=<txt> \
-    UnrealEditor-Cmd <proj> -run=pythonscript \
+  RH_ICONS=<abs dir of PNGs> [RH_DEST=/Game/RedHope/UI/Thumbs RH_PREFIX=T_Thumb_] \
+    RH_REPORT=<txt> UnrealEditor-Cmd <proj> -run=pythonscript \
     -script=$PWD/scripts/unreal/rh_import_ui.py -unattended -nosound -stdout
 
-Each PNG lands as /Game/RedHope/UI/Icons/T_Icon_<name>, set up for Slate:
+Each <RH_PREFIX><name>.png lands as <RH_DEST>/<RH_PREFIX><name> (defaults:
+/Game/RedHope/UI/Icons, T_Icon_), set up for Slate:
 UserInterface2D compression (uncompressed RGBA, crisp edges), the UI texture
 group, no mips, sRGB. RHDeckStyle loads them by these paths.
 """
@@ -16,10 +19,11 @@ EAL = unreal.EditorAssetLibrary
 AT = unreal.AssetToolsHelpers.get_asset_tools()
 SRC = os.environ["RH_ICONS"]
 REPORT = os.environ.get("RH_REPORT", "/tmp/rh_import_ui.txt")
-DEST = "/Game/RedHope/UI/Icons"
+DEST = os.environ.get("RH_DEST", "/Game/RedHope/UI/Icons")
+PREFIX = os.environ.get("RH_PREFIX", "T_Icon_")
 log = []
 
-pngs = sorted(f for f in os.listdir(SRC) if f.startswith("T_Icon_") and f.endswith(".png"))
+pngs = sorted(f for f in os.listdir(SRC) if f.startswith(PREFIX) and f.endswith(".png"))
 tasks = []
 for f in pngs:
     t = unreal.AssetImportTask()
@@ -44,6 +48,6 @@ for f in pngs:
     EAL.save_loaded_asset(tex)
     ok += 1
     log.append("ok %s/%s %dx%d" % (DEST, name, tex.blueprint_get_size_x(), tex.blueprint_get_size_y()))
-log.append("DONE %d/%d icons" % (ok, len(pngs)))
+log.append("DONE %d/%d images" % (ok, len(pngs)))
 with open(REPORT, "w") as fh:
     fh.write("\n".join(log) + "\n")

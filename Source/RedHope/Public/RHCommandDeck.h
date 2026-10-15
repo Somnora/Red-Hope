@@ -21,6 +21,8 @@ public:
 	// Capture/QA: unfold every collapsible panel (RH.DeckExpand); the roster
 	// only with "roster", it is tall enough to push the rest off screen.
 	void Debug_ExpandAll(bool bRoster) { bFleetExpanded = bCrewExpanded = bPoliticsExpanded = bPowerExpanded = true; bRosterExpanded = bRoster; }
+	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
+	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
 	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
@@ -77,7 +79,6 @@ private:
 	FText GetKnownGroundText() const;
 	EVisibility GetKnownGroundVisibility() const;
 	FText GetMapLabel() const;
-	FText GetBuildLabel(FName DefName) const;
 	FReply HandleBuild(FName DefName);
 	// Sims-style categorized build menu (M2 Gate D+ UX, part 2): a row of
 	// category tabs; picking one shows only that category's buildings. Category
@@ -148,6 +149,18 @@ private:
 	TSharedRef<SWidget> BuildCommsPanel();
 	TSharedRef<SWidget> ExpandToggle(bool* bFlag);
 	void RefreshFleetPanel();
+	// The build menu (interface pass step 2): category tabs on the command bar
+	// open a drawer of building cards - in-game thumbnail, name, cost (red
+	// when the colony can't cover it), power - beside a detail panel with the
+	// hovered card's whole story. Picking a card starts placement and folds
+	// the drawer away.
+	TSharedRef<SWidget> BuildBuildDrawer();
+	TSharedRef<SWidget> BuildCard(FName DefName);
+	// The build bill as words + whether the colony is short of it.
+	FString BuildCostLine(FName DefName, bool& bOutShort) const;
+	// Which building the drawer's detail panel describes.
+	FName GetDetailBuildDef() const;
+	static FName CategoryIcon(FName Category);
 	void RefreshRosterPanel();
 	FReply HandleManifestAdd(FName Item);
 	FReply HandleLaunch();
@@ -158,6 +171,12 @@ private:
 	const class URHDefinitionsSubsystem* GetDefs() const;
 
 	bool bShowHelp = false;
+	bool bBuildDrawerOpen = false;
+	FName HoveredBuildDef;
+	// Orderable buildings (def, category) in data order, and the distinct
+	// categories in first-seen order - filled once at Construct.
+	TArray<TPair<FName, FName>> BuildEntries;
+	TArray<FName> BuildCategoryOrder;
 	bool bFleetExpanded = false;
 	bool bCrewExpanded = true;
 	bool bRosterExpanded = false;

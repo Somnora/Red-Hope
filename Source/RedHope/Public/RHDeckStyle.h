@@ -40,6 +40,9 @@ namespace RHDeck
 
 	// The icon set (T_Icon_<Name>); null if the asset is missing.
 	const FSlateBrush* Icon(FName Name);
+	// A building's build-menu thumbnail (T_Thumb_<DefName>, rendered in game
+	// by RH.Thumbs); null if it has none yet.
+	const FSlateBrush* Thumb(FName DefName);
 	// Rounded glass, the panel and tile background.
 	const FSlateBrush* GlassBrush();
 	const FSlateBrush* TileBrush();

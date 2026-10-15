@@ -98,13 +98,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		}
 	}
 
-	// Build menu, Sims-style (M2 Gate D+ UX part 2): a row of CATEGORY tabs +
-	// a palette that shows only the selected category's buildings. Both are
-	// built once here; each building button carries a visibility bound to its
-	// category, so switching tabs is a pure visibility flip (no rebuild).
+	// Build menu (M2 Gate D+ UX part 2; cards since the 2026-10-15 interface
+	// pass): CATEGORY tabs on the command bar open a drawer of building cards
+	// (BuildBuildDrawer). Entries and categories are gathered once here.
 	TSharedRef<SHorizontalBox> CategoryTabs = SNew(SHorizontalBox);
-	TSharedRef<SHorizontalBox> Palette = SNew(SHorizontalBox);
-	TArray<FName> BuildCategories; // distinct, first-seen order
 	// Zone palette (M2 Gate B): every slice-active room function. Zoning is
 	// free (function, not construction), so no cost labels. Empty until the
 	// rooms table activates - the row is simply absent pre-M2.
@@ -122,25 +119,15 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					return; // pre-placed structures (the Lander) are not orderable
 				}
 				const FName Cat = CategoryOfBuilding(Row);
-				BuildCategories.AddUnique(Cat);
-				// The button shows only while its category tab is selected.
-				Palette->AddSlot().AutoWidth()
-				[
-					SNew(SBox)
-					.Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildCatVisibility, Cat)))
-					[
-						DeckButton(
-							TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildLabel, RowName)),
-							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBuild, RowName))
-					]
-				];
+				BuildCategoryOrder.AddUnique(Cat);
+				BuildEntries.Emplace(RowName, Cat);
 			});
 			// Default to the first category so the menu opens on something.
-			if (BuildCategories.Num() > 0 && SelectedBuildCategory.IsNone())
+			if (BuildCategoryOrder.Num() > 0 && SelectedBuildCategory.IsNone())
 			{
-				SelectedBuildCategory = BuildCategories[0];
+				SelectedBuildCategory = BuildCategoryOrder[0];
 			}
-			for (const FName Cat : BuildCategories)
+			for (const FName Cat : BuildCategoryOrder)
 			{
 				CategoryTabs->AddSlot().AutoWidth()
 				[
@@ -149,13 +136,21 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						SNew(SButton)
 						.ButtonStyle(&RHDeck::TintButtonStyle())
 						.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetCategoryTabColor, Cat)))
-						.ContentPadding(FMargin(9.f, 5.f))
+						.ContentPadding(FMargin(8.f, 5.f, 9.f, 5.f))
 						.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSelectCategory, Cat))
 						[
-							SNew(STextBlock)
-							.Text(GetCategoryLabel(Cat))
-							.Font(RHDeck::Label(10))
-							.ColorAndOpacity(RHDeck::Text)
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 5.f, 0.f))
+							[
+								RHDeck::IconImage(CategoryIcon(Cat), FSlateColor(RHDeck::Text), 12.f)
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(GetCategoryLabel(Cat))
+								.Font(RHDeck::Label(10))
+								.ColorAndOpacity(RHDeck::Text)
+							]
 						]
 					]
 				];
@@ -217,6 +212,31 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	{
 		AddFloorCell(-Floor);
 	}
+
+	// Speed tiers light up while live, so the bar says how fast time runs.
+	auto SpeedButton = [this](const TCHAR* Label, float Tier) -> TSharedRef<SWidget>
+	{
+		return SNew(SBox).Padding(FMargin(2.f, 0.f))
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity_Lambda([this, Tier]()
+			{
+				const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+				const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+				const bool bLive = Clock && (Tier <= 0.f ? Clock->GetSpeed() <= 0.f : FMath::IsNearlyEqual(Clock->GetSpeed(), Tier));
+				return FSlateColor(bLive ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f));
+			})
+			.ContentPadding(FMargin(9.f, 5.f))
+			.OnClicked(Tier <= 0.f ? FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePause) : FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, Tier))
+			[
+				SNew(STextBlock).Text(FText::FromString(Label)).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+			]
+		];
+	};
+	// The zone row sits above the command bar while underground; the drawer
+	// and the info card stack above whatever is there.
+	auto ZoneRowShown = [this, ZoneCount]() { return ZoneCount > 0 && PC.IsValid() && PC->GetActiveLevel() < 0; };
 
 	ChildSlot
 	[
@@ -456,7 +476,12 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		// gold; moved off screen-centre so it never covers the colony), then the
 		// PAUSED banner and the live mode hint - the prompts a player actually
 		// looks at while aiming an order.
-		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(FMargin(0.f, 0.f, 0.f, 96.f))
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom)
+		.Padding(TAttribute<FMargin>::CreateLambda([this, ZoneRowShown]()
+		{
+			// Clear the command bar, the zone row and an open build drawer.
+			return FMargin(0.f, 0.f, 0.f, 62.f + (ZoneRowShown() ? 44.f : 0.f) + (bBuildDrawerOpen ? 236.f : 0.f));
+		}))
 		[
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 0.f, 0.f, 8.f))
@@ -564,6 +589,16 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
+		// The build drawer (interface pass step 2), above the command bar.
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Bottom)
+		.Padding(TAttribute<FMargin>::CreateLambda([ZoneRowShown]()
+		{
+			return FMargin(10.f, 0.f, 10.f, 60.f + (ZoneRowShown() ? 44.f : 0.f));
+		}))
+		[
+			BuildBuildDrawer()
+		]
+
 		// Command bar, bottom. The zone row (rooms) stacks above the main bar
 		// while the view is underground - rooms only exist down there, so on
 		// the surface the row is noise.
@@ -575,10 +610,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				SNew(SBorder)
 				.BorderImage(RHDeck::GlassBrush())
 				.Padding(FMargin(8.f, 5.f))
-				.Visibility_Lambda([this, ZoneCount]()
-				{
-					return (ZoneCount > 0 && PC.IsValid() && PC->GetActiveLevel() < 0) ? EVisibility::Visible : EVisibility::Collapsed;
-				})
+				.Visibility_Lambda([ZoneRowShown]() { return ZoneRowShown() ? EVisibility::Visible : EVisibility::Collapsed; })
 				[
 					SNew(SScrollBox).Orientation(Orient_Horizontal)
 					+ SScrollBox::Slot()
@@ -607,14 +639,8 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						SNew(STextBlock).Text(FText::FromString(TEXT("BUILD"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
-					// Category tabs (Sims-style folders), then the selected
-					// category's buildings - a thin separator between them.
+					// Category tabs (Sims-style folders): each opens the card drawer.
 					+ SHorizontalBox::Slot().AutoWidth() [ CategoryTabs ]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill).Padding(FMargin(8.f, 3.f))
-					[
-						SNew(SBox).WidthOverride(1.f) [ SNew(SBorder).BorderImage(RHDeck::RoundedWhite()).BorderBackgroundColor(RHDeck::PanelLine) ]
-					]
-					+ SHorizontalBox::Slot().AutoWidth() [ Palette ]
 
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(16.f, 0.f, 8.f, 0.f))
 					[
@@ -646,11 +672,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						SNew(STextBlock).Text(FText::FromString(TEXT("SPEED"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
-					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("II")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePause)) ]
-					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("1x")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 1.f)) ]
-					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("3x")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 3.f)) ]
-					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("8x")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 8.f)) ]
-					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("60x")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 60.f)) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SpeedButton(TEXT("II"), 0.f) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SpeedButton(TEXT("1x"), 1.f) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SpeedButton(TEXT("3x"), 3.f) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SpeedButton(TEXT("8x"), 8.f) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SpeedButton(TEXT("60x"), 60.f) ]
 
 					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(16.f, 0.f, 8.f, 0.f))
 					[
@@ -1289,39 +1315,21 @@ FText SRHCommandDeck::GetMapLabel() const
 	return FText::FromString(PC.IsValid() && PC->IsSurveyMapOn() ? TEXT("Map [on]") : TEXT("Map"));
 }
 
-FText SRHCommandDeck::GetBuildLabel(FName DefName) const
-{
-	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
-	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
-	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
-	if (!Def)
-	{
-		return FText::FromName(DefName);
-	}
-	if (Def->ImportOnly)
-	{
-		return FText::FromString(FString::Printf(TEXT("%s [%d]"),
-			*DefName.ToString(), Sim ? Sim->GetImportStock(DefName) : 0));
-	}
-	if (Def->CostStruct_kg > 0.f)
-	{
-		return FText::FromString(FString::Printf(TEXT("%s %.0fkg"), *DefName.ToString(), Def->CostStruct_kg));
-	}
-	return FText::FromName(DefName);
-}
-
 FReply SRHCommandDeck::HandleBuild(FName DefName)
 {
 	if (PC.IsValid())
 	{
 		PC->BeginPlacement(DefName);
 	}
+	// Fold the drawer so the ground is clear to place on.
+	bBuildDrawerOpen = false;
 	return FReply::Handled();
 }
 
 FReply SRHCommandDeck::HandleSelectCategory(FName Category)
 {
+	// A tab opens its drawer; the open tab again folds it.
+	bBuildDrawerOpen = !(bBuildDrawerOpen && Category == SelectedBuildCategory);
 	SelectedBuildCategory = Category;
 	return FReply::Handled();
 }
@@ -1334,7 +1342,7 @@ EVisibility SRHCommandDeck::GetBuildCatVisibility(FName Category) const
 FSlateColor SRHCommandDeck::GetCategoryTabColor(FName Category) const
 {
 	// The open folder glows; the rest sit dim - the one-glance "where am I".
-	return (Category == SelectedBuildCategory)
+	return (bBuildDrawerOpen && Category == SelectedBuildCategory)
 		? FSlateColor(FLinearColor(0.15f, 0.45f, 0.55f))
 		: FSlateColor(FLinearColor(0.06f, 0.11f, 0.14f));
 }

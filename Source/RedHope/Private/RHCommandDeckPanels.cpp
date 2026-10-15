@@ -28,6 +28,8 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Layout/SWrapBox.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/SNullWidget.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -1243,4 +1245,340 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 			]
 		],
 		Summary);
+}
+
+// --- The build menu (interface pass step 2) ---
+
+FName SRHCommandDeck::CategoryIcon(FName Category)
+{
+	static const TMap<FName, FName> Icons = {
+		{ FName("Power"), FName("power") },
+		{ FName("Logistics"), FName("pylon") },
+		{ FName("Production"), FName("factory") },
+		{ FName("Command"), FName("dish") },
+		{ FName("Boring"), FName("drill") },
+		{ FName("LifeSupport"), FName("fan") },
+		{ FName("Habitat"), FName("dome") },
+	};
+	const FName* I = Icons.Find(Category);
+	return I ? *I : FName("structure");
+}
+
+namespace
+{
+	// What a building does to the grid: a short card line, a sentence for the
+	// detail panel, and its colour (green makes, teal stores, amber uses).
+	void DescribePower(const FRHBuildingRow& Row, FString& OutShort, FString& OutLong, FLinearColor& OutColor)
+	{
+		OutColor = D::TextDim;
+		if (Row.PowerGenPeak_W > 0.f)
+		{
+			OutShort = FString::Printf(TEXT("+%.0f W"), Row.PowerGenPeak_W);
+			OutLong = FString::Printf(TEXT("Makes up to %.0f W in sunlight."), Row.PowerGenPeak_W);
+			OutColor = D::Green;
+		}
+		else if (Row.PowerGenBase_W > 0.f)
+		{
+			OutShort = FString::Printf(TEXT("+%.0f W"), Row.PowerGenBase_W);
+			OutLong = FString::Printf(TEXT("Makes %.0f W, day and night."), Row.PowerGenBase_W);
+			OutColor = D::Green;
+		}
+		else if (Row.StorageWh > 0.f)
+		{
+			OutShort = FString::Printf(TEXT("stores %.0f Wh"), Row.StorageWh);
+			OutLong = FString::Printf(TEXT("Stores %.0f Wh for the night."), Row.StorageWh);
+			OutColor = D::Teal;
+		}
+		else if (Row.PowerDraw_W > 0.f)
+		{
+			OutShort = FString::Printf(TEXT("uses %.0f W"), Row.PowerDraw_W);
+			OutLong = FString::Printf(TEXT("Uses %.0f W while working."), Row.PowerDraw_W);
+			OutColor = D::Amber;
+		}
+		else
+		{
+			OutShort = TEXT("no power");
+			OutLong = TEXT("Needs no power.");
+		}
+	}
+}
+
+FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
+{
+	// The bill at the floor being viewed (underground adds shielding) and
+	// whether the colony holds it; import-only kits count stock instead.
+	bOutShort = false;
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHDefinitionsSubsystem* Df = GetDefs();
+	const FRHBuildingRow* R = Df ? Df->GetBuilding(DefName) : nullptr;
+	if (!S || !R)
+	{
+		return FString();
+	}
+	if (R->ImportOnly)
+	{
+		const int32 N = S->GetImportStock(DefName);
+		bOutShort = N <= 0;
+		return N > 0 ? FString::Printf(TEXT("%d kit%s in stock"), N, N == 1 ? TEXT("") : TEXT("s")) : FString(TEXT("no kits left"));
+	}
+	const TMap<FName, double> Cost = URHDefinitionsSubsystem::GetBuildCostFor(*R, PC.IsValid() ? PC->GetActiveLevel() : 0);
+	if (Cost.Num() == 0)
+	{
+		return TEXT("free");
+	}
+	TArray<FString> Parts;
+	for (const auto& C : Cost)
+	{
+		bOutShort |= Amount(S, C.Key) + KINDA_SMALL_NUMBER < C.Value;
+		Parts.Add(FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
+	}
+	return FString::Join(Parts, TEXT(" + "));
+}
+
+FName SRHCommandDeck::GetDetailBuildDef() const
+{
+	// The hovered card while it belongs to the open category, else that
+	// category's first card - the panel is never empty.
+	FName First = NAME_None;
+	for (const TPair<FName, FName>& E : BuildEntries)
+	{
+		if (E.Value != SelectedBuildCategory)
+		{
+			continue;
+		}
+		if (E.Key == HoveredBuildDef)
+		{
+			return E.Key;
+		}
+		if (First.IsNone())
+		{
+			First = E.Key;
+		}
+	}
+	return First;
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildCard(FName DefName)
+{
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	const FRHBuildingRow* Row = Defs ? Defs->GetBuilding(DefName) : nullptr;
+	if (!Row)
+	{
+		return SNullWidget::NullWidget;
+	}
+	const FString Name = Row->DisplayName.IsEmpty() ? DefName.ToString() : Row->DisplayName;
+	const bool bImport = Row->ImportOnly;
+	FString PowerShort, PowerLong;
+	FLinearColor PowerColor;
+	DescribePower(*Row, PowerShort, PowerLong, PowerColor);
+
+	const FSlateBrush* Pic = D::Thumb(DefName);
+	TSharedRef<SWidget> Picture = Pic
+		? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Pic))
+		: D::IconImage(CategoryIcon(Row->Category), FSlateColor(D::TextDim), 48.f);
+
+	return SNew(SBox).WidthOverride(124.f).Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+	[
+		SNew(SButton)
+		.ButtonStyle(&D::ButtonStyle())
+		.ContentPadding(FMargin(6.f, 6.f, 6.f, 7.f))
+		.OnHovered_Lambda([this, DefName]() { HoveredBuildDef = DefName; })
+		.IsEnabled_Lambda([this, DefName, bImport]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			return !bImport || (S && S->GetImportStock(DefName) > 0);
+		})
+		.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleBuild, DefName))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(SBox).WidthOverride(96.f).HeightOverride(96.f).HAlign(HAlign_Center).VAlign(VAlign_Center)
+				[
+					Picture
+				]
+			]
+			// Two lines reserved so every card in the row lines up.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
+			[
+				SNew(SBox).MinDesiredHeight(30.f).VAlign(VAlign_Top)
+				[
+					SNew(STextBlock).Text(Txt(Name)).Font(D::Label(10)).ColorAndOpacity(D::Text).AutoWrapText(true)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 4.f, 0.f)
+				[
+					D::IconImage(bImport ? FName("ship") : FName("structure"), FSlateColor(D::TextDim), 10.f)
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(8)).AutoWrapText(true)
+					.Text_Lambda([this, DefName]() { bool bShort; return Txt(BuildCostLine(DefName, bShort)); })
+					.ColorAndOpacity_Lambda([this, DefName]() { bool bShort; BuildCostLine(DefName, bShort); return FSlateColor(bShort ? D::Red : D::Text); })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 4.f, 0.f)
+				[
+					D::IconImage(FName("power"), FSlateColor(PowerColor), 10.f)
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Text(Txt(PowerShort)).Font(D::Body(8)).ColorAndOpacity(PowerColor)
+				]
+			]
+		]
+	];
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
+{
+	// One row of cards per category, all built once; the tab flips which row
+	// shows (a visibility flip, no rebuild - same contract as the old palette).
+	TSharedRef<SVerticalBox> Rows = SNew(SVerticalBox);
+	for (const FName Cat : BuildCategoryOrder)
+	{
+		TSharedRef<SHorizontalBox> Cards = SNew(SHorizontalBox);
+		for (const TPair<FName, FName>& E : BuildEntries)
+		{
+			if (E.Value == Cat)
+			{
+				Cards->AddSlot().AutoWidth()[BuildCard(E.Key)];
+			}
+		}
+		Rows->AddSlot().AutoHeight()
+		[
+			SNew(SBox).Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildCatVisibility, Cat)))
+			[
+				Cards
+			]
+		];
+	}
+
+	// The detail panel: the hovered card's whole story (no hover delay, and
+	// never empty - it falls back to the category's first card).
+	auto DetailRow = [this]() -> const FRHBuildingRow*
+	{
+		const URHDefinitionsSubsystem* Df = GetDefs();
+		return Df ? Df->GetBuilding(GetDetailBuildDef()) : nullptr;
+	};
+	TSharedRef<SWidget> Detail = SNew(SBox).WidthOverride(290.f).Padding(FMargin(10.f, 0.f, 0.f, 0.f))
+	[
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock).Font(D::Label(13)).ColorAndOpacity(D::Amber)
+			.Text_Lambda([this, DetailRow]()
+			{
+				const FRHBuildingRow* R = DetailRow();
+				return R ? Txt(R->DisplayName.IsEmpty() ? GetDetailBuildDef().ToString() : R->DisplayName) : FText::GetEmpty();
+			})
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+		[
+			Prose(MakeAttributeLambda([DetailRow]() { const FRHBuildingRow* R = DetailRow(); return R ? Txt(R->Blurb) : FText::GetEmpty(); }), D::Text, 9)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
+		[
+			Prose(MakeAttributeLambda([DetailRow]()
+			{
+				const FRHBuildingRow* R = DetailRow();
+				if (!R) { return FText::GetEmpty(); }
+				FString Short, Long;
+				FLinearColor Color;
+				DescribePower(*R, Short, Long, Color);
+				TArray<FString> Facts;
+				Facts.Add(Long);
+				if (R->CoverageRadius_m > 0.f) { Facts.Add(FString::Printf(TEXT("Powers machines within %.0f m."), R->CoverageRadius_m)); }
+				if (R->LinkRange_m > 0.f) { Facts.Add(FString::Printf(TEXT("Links to the grid within %.0f m."), R->LinkRange_m)); }
+				Facts.Add(R->BuildTime_s >= 120.f
+					? FString::Printf(TEXT("Takes %.0f min to build at 1x."), R->BuildTime_s / 60.f)
+					: FString::Printf(TEXT("Takes %.0f s to build at 1x."), R->BuildTime_s));
+				if (R->ImportOnly) { Facts.Add(TEXT("Shipped from Earth as a kit - order more on the supply ship.")); }
+				return Txt(FString::Join(Facts, TEXT("\n")));
+			}), D::TextDim, 9)
+		]
+		// Live: can today's grid carry it (consumers only)?
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
+		[
+			SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true)
+			.Visibility_Lambda([DetailRow]() { const FRHBuildingRow* R = DetailRow(); return (R && R->PowerDraw_W > 0.f) ? EVisibility::Visible : EVisibility::Collapsed; })
+			.Text_Lambda([this]()
+			{
+				const URHSimWorldSubsystem* S = GetSim();
+				const double Spare = S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0;
+				return Txt(FString::Printf(TEXT("Your grid has %.0f W to spare right now."), FMath::Max(0.0, Spare)));
+			})
+			.ColorAndOpacity_Lambda([this, DetailRow]()
+			{
+				const URHSimWorldSubsystem* S = GetSim();
+				const FRHBuildingRow* R = DetailRow();
+				const double Spare = S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0;
+				return FSlateColor((R && Spare < R->PowerDraw_W) ? D::Red : D::Green);
+			})
+		]
+		// Live: the bill, and whether the colony can pay it.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+		[
+			SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true)
+			.Text_Lambda([this, DetailRow]()
+			{
+				const FRHBuildingRow* R = DetailRow();
+				bool bShort;
+				const FString L = BuildCostLine(GetDetailBuildDef(), bShort);
+				if (!R) { return FText::GetEmpty(); }
+				return Txt(R->ImportOnly ? L : FString::Printf(TEXT("Costs %s%s"), *L, bShort ? TEXT(" - the colony doesn't have it yet") : TEXT("")));
+			})
+			.ColorAndOpacity_Lambda([this]() { bool bShort; BuildCostLine(GetDetailBuildDef(), bShort); return FSlateColor(bShort ? D::Red : D::Text); })
+		]
+	];
+
+	TSharedRef<SWidget> Close = SNew(SButton)
+		.ButtonStyle(&D::FlatButtonStyle())
+		.ContentPadding(FMargin(4.f))
+		.ToolTipText(Txt(TEXT("Close")))
+		.OnClicked_Lambda([this]() { bBuildDrawerOpen = false; return FReply::Handled(); })
+		[
+			D::IconImage(FName("close"), FSlateColor(D::TextDim), 12.f)
+		];
+	TSharedRef<SWidget> Title = SNew(STextBlock).Font(D::Label(11)).ColorAndOpacity(D::Amber)
+		.Text_Lambda([this]() { return FText::FromString(GetCategoryLabel(SelectedBuildCategory).ToString().ToUpper()); });
+	return SNew(SBox)
+		.Visibility_Lambda([this]() { return bBuildDrawerOpen ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			SNew(SBorder).BorderImage(D::GlassBrush()).Padding(FMargin(10.f, 8.f, 10.f, 10.f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 8.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 7.f, 0.f)
+					[
+						SNew(SBox).WidthOverride(15.f).HeightOverride(15.f)
+						[
+							SNew(SImage)
+							.Image_Lambda([this]() { return D::Icon(CategoryIcon(SelectedBuildCategory)); })
+							.ColorAndOpacity(D::Amber)
+						]
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)[Title]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)[Close]
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SScrollBox).Orientation(Orient_Horizontal)
+						+ SScrollBox::Slot()[Rows]
+					]
+					+ SHorizontalBox::Slot().AutoWidth()[Detail]
+				]
+			]
+		];
 }

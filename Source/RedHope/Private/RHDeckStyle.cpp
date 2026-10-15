@@ -22,14 +22,17 @@ namespace RHDeck
 	FSlateFontInfo Body(int32 Size) { return FCoreStyle::GetDefaultFontStyle("Regular", Size); }
 	FSlateFontInfo Value(int32 Size) { return FCoreStyle::GetDefaultFontStyle("Bold", Size); }
 
-	const FSlateBrush* Icon(FName Name)
+	// UI textures under /Game/RedHope/UI/<Folder>/<Prefix><Name>, one brush each,
+	// cached for the session (misses too, so a missing asset is looked up once).
+	static const FSlateBrush* UIBrush(const TCHAR* Folder, const TCHAR* Prefix, FName Name, float Size)
 	{
-		static TMap<FName, TSharedPtr<FSlateBrush>> Brushes;
-		if (const TSharedPtr<FSlateBrush>* Found = Brushes.Find(Name))
+		static TMap<FString, TSharedPtr<FSlateBrush>> Brushes;
+		const FString Key = FString(Prefix) + Name.ToString();
+		if (const TSharedPtr<FSlateBrush>* Found = Brushes.Find(Key))
 		{
 			return Found->Get();
 		}
-		const FString Path = FString::Printf(TEXT("/Game/RedHope/UI/Icons/T_Icon_%s.T_Icon_%s"), *Name.ToString(), *Name.ToString());
+		const FString Path = FString::Printf(TEXT("/Game/RedHope/UI/%s/%s.%s"), Folder, *Key, *Key);
 		UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, *Path, nullptr, LOAD_NoWarn | LOAD_Quiet);
 		TSharedPtr<FSlateBrush> Brush;
 		if (Tex)
@@ -37,11 +40,21 @@ namespace RHDeck
 			Tex->AddToRoot(); // Slate holds the brush for the session
 			Brush = MakeShared<FSlateBrush>();
 			Brush->SetResourceObject(Tex);
-			Brush->ImageSize = FVector2D(64.f, 64.f);
+			Brush->ImageSize = FVector2D(Size, Size);
 			Brush->DrawAs = ESlateBrushDrawType::Image;
 		}
-		Brushes.Add(Name, Brush);
+		Brushes.Add(Key, Brush);
 		return Brush.Get();
+	}
+
+	const FSlateBrush* Icon(FName Name)
+	{
+		return UIBrush(TEXT("Icons"), TEXT("T_Icon_"), Name, 64.f);
+	}
+
+	const FSlateBrush* Thumb(FName DefName)
+	{
+		return UIBrush(TEXT("Thumbs"), TEXT("T_Thumb_"), DefName, 256.f);
 	}
 
 	const FSlateBrush* GlassBrush()
