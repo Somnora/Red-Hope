@@ -4997,6 +4997,10 @@ void URHSimWorldSubsystem::Debug_Showcase()
 	const int32 Cols = 4;
 	const float SpacingCm = 1400.f;    // 14 m centres: big silhouettes clear each other
 	const float OriginXCm = 1600.f;    // start north of the Lander
+	// Drag-sized structures (the dome) show at 2 x 2 beds on their own row
+	// past the grid, so the bigger shell overlaps nothing.
+	TArray<FName> Sized;
+	Names.RemoveAll([&](const FName& N) { const FRHBuildingRow* D = Defs->GetBuilding(N); if (D && D->DragSized) { Sized.Add(N); return true; } return false; });
 	for (int32 i = 0; i < Names.Num(); ++i)
 	{
 		const int32 Row = i / Cols;
@@ -5007,6 +5011,13 @@ void URHSimWorldSubsystem::Debug_Showcase()
 			0.f);
 		AddBuilding(Names[i], Loc, /*bInstant*/ true);
 	}
+	const int32 Rows = (Names.Num() + Cols - 1) / Cols;
+	for (int32 i = 0; i < Sized.Num(); ++i)
+	{
+		AddBuilding(Sized[i], FVector(OriginXCm + (Rows + 0.5f) * SpacingCm + 600.f, (i - (Sized.Num() - 1) * 0.5f) * 2600.f, 0.f),
+			/*bInstant*/ true, 0, 2, 2);
+	}
+	Names.Append(Sized);
 	UE_LOG(LogRedHopeSim, Display, TEXT("[Showcase] placed %d building types"), Names.Num());
 }
 

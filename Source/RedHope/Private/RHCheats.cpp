@@ -991,7 +991,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHabitat(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSelect(
 	TEXT("RH.Select"),
-	TEXT("RH.Select <BuildingId> - raise the in-world action card for a building by id (0 = deselect); handy when the gray-box is fiddly to click."),
+	TEXT("RH.Select <BuildingId> | RH.Select Cell <Level> <Index> - raise the in-world action card for a building by id (0 = deselect), or for a zoned work-station cell; handy when the gray-box is fiddly to click."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1)
@@ -1001,6 +1001,12 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSelect(
 		}
 		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
 		{
+			if (Args[0].Equals(TEXT("Cell"), ESearchCase::IgnoreCase) && Args.Num() >= 3)
+			{
+				PC->Debug_SelectCell(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2]));
+				UE_LOG(LogRedHope, Display, TEXT("Selected cell %s on floor %s (action card raised)"), *Args[2], *Args[1]);
+				return;
+			}
 			const int32 Id = FCString::Atoi(*Args[0]);
 			PC->Debug_SelectBuilding(Id);
 			UE_LOG(LogRedHope, Display, TEXT("Selected building #%d (action card raised)"), Id);

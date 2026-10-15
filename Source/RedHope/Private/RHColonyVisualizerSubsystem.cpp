@@ -97,6 +97,9 @@ FLinearColor URHColonyVisualizerSubsystem::TintFor(FName DefName) const
 		{ FName("Habitat"),       FLinearColor(0.95f, 0.95f, 0.95f) },
 		{ FName("AirFilter"),     FLinearColor(0.30f, 0.85f, 0.80f) },  // life-support teal
 		{ FName("Borer"),         FLinearColor(0.90f, 0.55f, 0.10f) },  // mining amber
+		{ FName("LabModule"),     FLinearColor(0.35f, 0.70f, 1.00f) },  // research blue
+		{ FName("InfirmaryModule"), FLinearColor(0.55f, 0.95f, 0.75f) }, // calm mint
+		{ FName("GreenhouseDome"), FLinearColor(0.45f, 0.85f, 0.35f) }, // leaf green
 	};
 	if (const FLinearColor* Found = Palette.Find(DefName))
 	{
@@ -588,6 +591,34 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 			const float Along = ((float)((Wear >> 9) % 100u) / 100.f - 0.5f) * ScaleM.Y * 60.f;
 			AddAccent(Actor, Cube, BaseCm + FVector((bEastFace ? 1.f : -1.f) * (Hx + 3.f), Along, TopZ * 0.55f),
 				FRotator::ZeroRotator, FVector(0.04f, 0.85f, 0.7f), Patch);
+		}
+	}
+
+	if (DefName == FName("LabModule") || DefName == FName("InfirmaryModule"))
+	{
+		// Prefab station shell (tiered production T4): a factory-made module
+		// on skids - a low barrel-vault roof, a lit window band in the
+		// function hue on both long faces, a hatch. The station is the sim's.
+		const FLinearColor Hue = TintFor(DefName);
+		const float Hx = ScaleM.X * 50.f, Hy = ScaleM.Y * 50.f;
+		AddAccent(Actor, Cyl, BaseCm + FVector(0, 0, TopZ - 6.f), FRotator(90.f, 0.f, 0.f),
+			FVector(1.1f, ScaleM.Y * 0.96f, ScaleM.X * 0.96f), FLinearColor(0.80f, 0.79f, 0.76f));
+		AddAccent(Actor, Cube, BaseCm + FVector(0, 0, TopZ * 0.62f), FRotator::ZeroRotator,
+			FVector(ScaleM.X * 0.78f, ScaleM.Y + 0.05f, 0.32f), Hue, Hue * 1.4f);
+		AddAccent(Actor, Cube, BaseCm + FVector(Hx * 0.55f, -Hy - 4.f, TopZ * 0.34f), FRotator::ZeroRotator,
+			FVector(0.9f, 0.08f, 1.9f), FLinearColor(0.14f, 0.15f, 0.17f));
+		for (const float Sy : { -0.62f, 0.62f })
+		{
+			AddAccent(Actor, Cube, BaseCm + FVector(0, Sy * Hy, 8.f), FRotator::ZeroRotator,
+				FVector(ScaleM.X * 1.06f, 0.22f, 0.16f), FLinearColor(0.10f, 0.10f, 0.11f));
+		}
+		if (DefName == FName("LabModule"))
+		{
+			// A sensor mast: the lab's instruments reach outside.
+			AddAccent(Actor, Cube, BaseCm + FVector(-Hx * 0.6f, Hy * 0.5f, TopZ + 90.f), FRotator::ZeroRotator,
+				FVector(0.06f, 0.06f, 1.8f), FLinearColor(0.2f, 0.2f, 0.22f));
+			AddAccent(Actor, Sphere, BaseCm + FVector(-Hx * 0.6f, Hy * 0.5f, TopZ + 185.f), FRotator::ZeroRotator,
+				FVector(0.22f), Hue, Hue * 2.f);
 		}
 	}
 

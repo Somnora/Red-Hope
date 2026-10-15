@@ -571,6 +571,23 @@ void ARHPlayerController::Tick(float DeltaTime)
 		}
 	}
 
+	// The inspected station cell: an emerald frame; a floor change drops it.
+	if (HasSelectedCell())
+	{
+		if (SelectedCellLevel != ActiveLevel)
+		{
+			SelectedCellLevel = 0;
+			SelectedCellIndex = INDEX_NONE;
+		}
+		else
+		{
+			const FVector Head = Sim->GetShaftHeadCm();
+			const FIntPoint P = URHSimWorldSubsystem::SpiralCell(SelectedCellIndex);
+			const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, ActiveLevel * Sim->GetFloorHeightCm());
+			DrawDebugBox(World, Center + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
+		}
+	}
+
 	// Selection highlight: a steady cyan frame on the inspected building.
 	if (SelectedBuildingId != 0)
 	{
@@ -692,7 +709,21 @@ void ARHPlayerController::OnClick()
 	{
 		// No mode: click-to-inspect. A building keeps the card, open ground
 		// dismisses it (Gate C: the first point-at-the-world-and-ask surface).
+		// Underground, a zoned work station cell is inspectable too (T4).
 		SelectedBuildingId = FindBuildingAt(Ground);
+		SelectedCellLevel = 0;
+		SelectedCellIndex = INDEX_NONE;
+		if (SelectedBuildingId == 0 && ActiveLevel < 0)
+		{
+			const URHDefinitionsSubsystem* CellDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+			const int32 Cell = FindCellAt(Ground, ActiveLevel);
+			const FRHRoomRow* Row = (Cell != INDEX_NONE && CellDefs) ? CellDefs->GetRoom(Sim->GetRoomAt(ActiveLevel, Cell)) : nullptr;
+			if (Row && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
+			{
+				SelectedCellLevel = ActiveLevel;
+				SelectedCellIndex = Cell;
+			}
+		}
 	}
 }
 
@@ -715,7 +746,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0;
+	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0 || HasSelectedCell();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -914,6 +945,8 @@ void ARHPlayerController::CancelModes()
 	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode)
 	{
 		SelectedBuildingId = 0;
+		SelectedCellLevel = 0;
+		SelectedCellIndex = INDEX_NONE;
 	}
 	PendingBuildDef = NAME_None;
 	bBuildDragging = false;

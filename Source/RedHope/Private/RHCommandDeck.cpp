@@ -309,6 +309,14 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate)))
 								]
 							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetAssignActionVisibility)
+								[
+									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetAssignActionLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleAssign))
+								]
+							]
 							+ SVerticalBox::Slot().AutoHeight()
 							[
 								SNew(SBox).Visibility(this, &SRHCommandDeck::GetActionPowerVisibility)
@@ -834,6 +842,19 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedCell())
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const FIntPoint P = URHSimWorldSubsystem::SpiralCell(PC->GetSelectedCellIndex());
+		const FVector Anchor(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, PC->GetSelectedCellLevel() * Sim->GetFloorHeightCm() + 300.0);
+		FVector2D ScreenPx;
+		if (PC->ProjectWorldLocationToScreen(Anchor, ScreenPx, false))
+		{
+			const float Scale = FMath::Max(AllottedGeometry.Scale, KINDA_SMALL_NUMBER);
+			ActionCardPos = FVector2D(ScreenPx.X / Scale, ScreenPx.Y / Scale);
+			bActionCardOnScreen = true;
+		}
+	}
 	if (Id != 0 && Sim && PC.IsValid())
 	{
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -1005,6 +1026,23 @@ FText SRHCommandDeck::GetInspectText() const
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	FIntVector StationKey;
+	const bool bStation = GetSelectedStationKey(StationKey);
+	if (Sim && Defs && Id == 0 && bStation)
+	{
+		// A zoned work station cell (T4): its seats and its place in the order.
+		int32 Filled = 0, Capacity = 0;
+		Sim->GetStationSeats(StationKey, Filled, Capacity);
+		FString Text = Capacity > 0
+			? FString::Printf(TEXT("SEATS: %d of %d staffed"), Filled, Capacity)
+			: FString(TEXT("NOT STAFFED - the floor is not rated livable yet"));
+		const int32 Rank = Sim->GetSeatPriorityRank(StationKey);
+		Text += Rank >= 0
+			? FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), Rank + 1)
+			: FString(TEXT("\nstaffed in dig order (shallow floors first)"));
+		Text += TEXT("\n(right-click or click ground to dismiss)");
+		return FText::FromString(Text);
+	}
 	if (!Sim || !Defs || Id == 0)
 	{
 		return FText::GetEmpty();
@@ -1036,7 +1074,7 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			// Level-taxed bill (Gate B): a surface site's card shows its
 			// Shielding line; the same def underground shows none.
-			for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, B->Level))
+			for (const auto& Cost : Sim->GetSiteBill(*B))
 			{
 				const double* Delivered = B->InputKg.Find(Cost.Key);
 				const double Have = Delivered ? *Delivered : 0.0;
@@ -1054,6 +1092,47 @@ FText SRHCommandDeck::GetInspectText() const
 		else
 		{
 			Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
+		}
+		// Prefab stations (T4): seats, or why the module is idle.
+		if (const FRHRoomRow* Provided = Sim->GetProvidedRoom(*B, /*bRequireOnline*/ false))
+		{
+			const bool bOnline = Sim->GetProvidedRoom(*B, /*bRequireOnline*/ true) != nullptr;
+			if (Def && Def->DragSized)
+			{
+				const int32 Beds = URHSimWorldSubsystem::GetBedCount(*B);
+				int32 Planted = 0;
+				for (int32 Bed = 0; Bed < Beds; ++Bed) { Planted += Sim->IsDomeBedPlanted(B->Id, Bed) ? 1 : 0; }
+				Text += FString::Printf(TEXT("\nBEDS: %d of %d planted (%d x %d)"), Planted, Beds, B->SizeX, B->SizeY);
+				if (Planted < Beds)
+				{
+					Text += FString::Printf(TEXT("\n  each new bed takes %.0f kg glass, %.0f kg soil, %.0f kg seeds"),
+						Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), 200.0),
+						Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), 250.0),
+						Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), 50.0));
+				}
+				Text += TEXT("\ngrows by daylight - no grow-light power");
+			}
+			else if (Provided->Function == FName("Infirmary"))
+			{
+				Text += bOnline
+					? FString(TEXT("\nINFIRMARY ONLINE - the recall window is one sol longer"))
+					: FString(TEXT("\nINFIRMARY IDLE - needs power and a livable floor"));
+			}
+			else if (!bOnline)
+			{
+				Text += FString::Printf(TEXT("\n%s IDLE - needs power and a livable floor"), *Provided->DisplayName.ToUpper());
+			}
+			else
+			{
+				int32 Filled = 0, Capacity = 0;
+				Sim->GetStationSeats(FIntVector(B->Level, INDEX_NONE, B->Id), Filled, Capacity);
+				Text += FString::Printf(TEXT("\nSEATS: %d of %d staffed (x%.2f each)"), Filled, Capacity, Provided->YieldMul);
+				const int32 Rank = Sim->GetSeatPriorityRank(FIntVector(B->Level, INDEX_NONE, B->Id));
+				if (Rank >= 0)
+				{
+					Text += FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), Rank + 1);
+				}
+			}
 		}
 		if (B->BatchRemaining_h > 0.0)
 		{
@@ -1190,7 +1269,81 @@ FText SRHCommandDeck::GetInspectText() const
 
 EVisibility SRHCommandDeck::GetInspectVisibility() const
 {
-	return (PC.IsValid() && PC->GetSelectedBuildingId() != 0) ? EVisibility::Visible : EVisibility::Collapsed;
+	return (PC.IsValid() && (PC->GetSelectedBuildingId() != 0 || PC->HasSelectedCell())) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+bool SRHCommandDeck::GetSelectedStationKey(FIntVector& OutKey) const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !PC.IsValid())
+	{
+		return false;
+	}
+	if (PC->GetSelectedBuildingId() == 0)
+	{
+		if (!PC->HasSelectedCell())
+		{
+			return false;
+		}
+		OutKey = FIntVector(PC->GetSelectedCellLevel(), PC->GetSelectedCellIndex(), 0);
+		return true;
+	}
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		if (B.Id == PC->GetSelectedBuildingId())
+		{
+			const FRHRoomRow* Row = B.bUnderConstruction ? nullptr : Sim->GetProvidedRoom(B, /*bRequireOnline*/ false);
+			if (Row && URHSimWorldSubsystem::IsSeatFunction(Row->Function))
+			{
+				OutKey = FIntVector(B.Level, INDEX_NONE, B.Id);
+				return true;
+			}
+			return false;
+		}
+	}
+	return false;
+}
+
+EVisibility SRHCommandDeck::GetAssignActionVisibility() const
+{
+	FIntVector Key;
+	return GetSelectedStationKey(Key) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetAssignActionLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FIntVector Key;
+	const bool bFirst = Sim && GetSelectedStationKey(Key) && Sim->GetSeatPriorityRank(Key) == 0;
+	return FText::FromString(bFirst ? TEXT("Staffed first") : TEXT("Assign staff here first"));
+}
+
+FReply SRHCommandDeck::HandleAssign()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FIntVector Key;
+	if (Sim && GetSelectedStationKey(Key))
+	{
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Assign");
+		if (Key.Y == INDEX_NONE)
+		{
+			Cmd.Target = FName("Building");
+			Cmd.Value = Key.Z;
+		}
+		else
+		{
+			Cmd.Level = Key.X;
+			Cmd.Value = Key.Y;
+		}
+		Sim->EnqueueCommand(Cmd);
+		URHAudioSubsystem::Cue(PC->GetWorld(), FName("Confirm"));
+		PC->PostConfirm(TEXT("Staff order transmitted: this station fills first"), FLinearColor(0.2f, 0.9f, 1.f));
+	}
+	return FReply::Handled();
 }
 
 namespace
@@ -1225,6 +1378,16 @@ FText SRHCommandDeck::GetActionCardTitle() const
 {
 	const FRHBuildingRow* Def = nullptr;
 	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!B && PC.IsValid() && PC->HasSelectedCell())
+	{
+		const UWorld* World = PC->GetWorld();
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const FName Room = Sim ? Sim->GetRoomAt(PC->GetSelectedCellLevel(), PC->GetSelectedCellIndex()) : NAME_None;
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(Room) : nullptr;
+		return FText::FromString(FString::Printf(TEXT("%s - floor %d\nA work station. Colonists take its seats in dig order; assigning staff puts it first."),
+			Row ? *Row->DisplayName : *Room.ToString(), PC->GetSelectedCellLevel()));
+	}
 	if (!B)
 	{
 		return FText::GetEmpty();

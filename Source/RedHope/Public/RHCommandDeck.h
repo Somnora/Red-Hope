@@ -73,6 +73,14 @@ private:
 	FText GetExcavateActionLabel() const;
 	EVisibility GetExcavateActionVisibility() const;
 	EVisibility GetActionPowerVisibility() const;
+	// ASSIGN STAFF (tiered production T4): on a selected work station - a zoned
+	// seat cell or a built Lab module - puts it first in the colony's staff
+	// order (uplink verb "Assign").
+	EVisibility GetAssignActionVisibility() const;
+	FText GetAssignActionLabel() const;
+	FReply HandleAssign();
+	// The selected station's key for the sim's seat maps, or false.
+	bool GetSelectedStationKey(FIntVector& OutKey) const;
 	// The crew panel shows once anyone has landed (M2 Gate A2).
 	EVisibility GetCrewVisibility() const;
 	// Room zoning (M2 Gate B): arm the controller's zone-paint mode.

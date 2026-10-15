@@ -86,6 +86,13 @@ public:
 	void Debug_OpenBuildDrawer(FName Category);
 	// Click-to-inspect (M1-b Gate C): the selected building's sim id, 0 = none.
 	int32 GetSelectedBuildingId() const { return SelectedBuildingId; }
+	// Station cell inspection (tiered production T4): a click on a zoned seat
+	// cell (Lab / Workstation / Garden) with no mode armed selects the cell;
+	// the action card reads its seats and offers ASSIGN STAFF.
+	bool HasSelectedCell() const { return SelectedCellLevel < 0 && SelectedCellIndex != INDEX_NONE; }
+	int32 GetSelectedCellLevel() const { return SelectedCellLevel; }
+	int32 GetSelectedCellIndex() const { return SelectedCellIndex; }
+	void Debug_SelectCell(int32 Level, int32 Cell) { SelectedBuildingId = 0; SelectedCellLevel = Level; SelectedCellIndex = Cell; }
 	// Debug/help: select a building by id (RH.Select) - raises its in-world
 	// action card without hunting for the gray-box footprint with the cursor.
 	void Debug_SelectBuilding(int32 Id) { SelectedBuildingId = Id; }
@@ -157,6 +164,8 @@ private:
 	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;
 	int32 ActiveLevel = 0;
 	int32 SelectedBuildingId = 0;
+	int32 SelectedCellLevel = 0;
+	int32 SelectedCellIndex = INDEX_NONE;
 	// Feedback channels (deck-rendered; see GetConfirmText/GetHintText).
 	FString ConfirmText;
 	FLinearColor ConfirmColor = FLinearColor::White;

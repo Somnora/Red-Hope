@@ -543,6 +543,8 @@ public:
 	// Seats filled and seat capacity at a station (0/0 if it is not one).
 	void GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const;
 	static constexpr int32 MaxSeatPriority = 32;
+	// A work station's function: its seats take colonists.
+	static bool IsSeatFunction(FName Fn) { return Fn == FName("Lab") || Fn == FName("Workstation") || Fn == FName("Garden"); }
 	// Lazy seat fill (T3): with LazySeatFillSols > 0, unassigned seats are
 	// not filled at once - an idle colonist takes charge of an open seat each
 	// LazySeatFillSols. 0 (the shipped default) = instant fill, as before.
