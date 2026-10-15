@@ -114,6 +114,14 @@ private:
 	// accents (buildings never move), added only once construction ends.
 	void AddAccent(AStaticMeshActor* Actor, const TCHAR* ShapePath, const FVector& WorldCm, const FRotator& Rot, const FVector& Scale, const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black) const;
 	void BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const;
+	// Agri Gate C: the greenhouse dome, built in code on its deck - strut frame
+	// always, glazing and soil beds once complete. Crop props per bed are
+	// refreshed by RefreshDomeCrops (state-diffed on the beds' growth stages).
+	void BuildGreenhouseDome(AStaticMeshActor* Actor, const FRHBuildingInstance& B, const FVector& Seated) const;
+	void RefreshDomeCrops();
+	// Per dome: the bed-stage key last drawn, and the crop props it drew.
+	TMap<int32, FString> AppliedDomeCrops;
+	TMap<int32, TArray<TWeakObjectPtr<UStaticMeshComponent>>> DomeCropProps;
 
 	// Shaft & excavation mirror (M1-d Gate A2): a column actor for the trunk,
 	// one floor tile per carved cell. The sim keeps carved cells as per-floor

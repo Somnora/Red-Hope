@@ -205,6 +205,313 @@ void URHColonyVisualizerSubsystem::AddAccent(AStaticMeshActor* Actor, const TCHA
 	ApplyTint(Mesh, Color, Emissive);
 }
 
+void URHColonyVisualizerSubsystem::BuildGreenhouseDome(AStaticMeshActor* Actor, const FRHBuildingInstance& B, const FVector& Seated) const
+{
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	if (!Actor || !Cube || !Def)
+	{
+		return;
+	}
+	const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+	const int32 NX = FMath::Max(1, B.SizeX), NY = FMath::Max(1, B.SizeY);
+	const bool bBuilt = !B.bUnderConstruction;
+	const FVector Base = Seated + FVector(0, 0, 30.f); // the deck's top face
+
+	// One ISM per material family, world-space instances (the actor's root is
+	// the non-uniformly scaled deck - children must not inherit it).
+	const auto MakeISM = [&](const TCHAR* Name) -> UInstancedStaticMeshComponent*
+	{
+		UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(Actor, Name);
+		ISM->SetupAttachment(Actor->GetRootComponent());
+		ISM->SetAbsolute(true, true, true);
+		ISM->SetStaticMesh(Cube);
+		ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		ISM->RegisterComponent();
+		Actor->AddInstanceComponent(ISM);
+		return ISM;
+	};
+	const auto Beam = [](UInstancedStaticMeshComponent* ISM, const FVector& A, const FVector& Bp, float ThickCm)
+	{
+		const FVector D = Bp - A;
+		const float Len = D.Size();
+		if (Len < 1.f)
+		{
+			return;
+		}
+		ISM->AddInstance(FTransform(FRotationMatrix::MakeFromX(D / Len).Rotator(), (A + Bp) * 0.5f,
+			FVector(Len / 100.f, ThickCm / 100.f, ThickCm / 100.f)), /*bWorldSpace*/ true);
+	};
+	// A pane on the quad P00-P10-P11-P01 (U runs P00->P10), inset so the
+	// struts read between panes.
+	const auto Pane = [](UInstancedStaticMeshComponent* ISM, const FVector& P00, const FVector& P10, const FVector& P11, const FVector& P01)
+	{
+		const FVector C = (P00 + P10 + P11 + P01) * 0.25f;
+		const FVector U = ((P10 + P11) - (P00 + P01)).GetSafeNormal();
+		const FVector V = ((P01 + P11) - (P00 + P10)).GetSafeNormal();
+		const float W = 0.5f * ((P10 - P00).Size() + (P11 - P01).Size());
+		const float H = 0.5f * ((P01 - P00).Size() + (P11 - P10).Size());
+		if (W < 1.f || H < 1.f || U.IsNearlyZero() || V.IsNearlyZero())
+		{
+			return;
+		}
+		ISM->AddInstance(FTransform(FRotationMatrix::MakeFromXY(U, V).Rotator(), C,
+			FVector(W * 0.94f / 100.f, H * 0.94f / 100.f, 0.03f)), /*bWorldSpace*/ true);
+	};
+
+	UInstancedStaticMeshComponent* Struts = MakeISM(TEXT("DomeStruts"));
+	ApplyTint(Struts, FLinearColor(0.11f, 0.12f, 0.14f), FLinearColor::Black);
+	UInstancedStaticMeshComponent* Panes = bBuilt ? MakeISM(TEXT("DomePanes")) : nullptr;
+	if (Panes)
+	{
+		Panes->SetCastShadow(false); // glass: the sun reaches the beds
+		if (UMaterialInterface* Glass = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_DomeGlass.M_DomeGlass")))
+		{
+			UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Glass, Panes);
+			Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.58f, 0.74f, 0.80f));
+			Mid->SetScalarParameterValue(FName("Opacity"), 0.2f);
+			Panes->SetMaterial(0, Mid);
+		}
+		else
+		{
+			// No glass material: a pale emissive-free tint still reads as panes.
+			ApplyTint(Panes, FLinearColor(0.55f, 0.70f, 0.78f), FLinearColor::Black);
+			UE_LOG(LogRedHope, Warning, TEXT("M_DomeGlass missing - dome panes draw opaque (run scripts/unreal/rh_make_glass.py)"));
+		}
+	}
+
+	if (NX * NY < 4)
+	{
+		// A small greenhouse: a flat-roofed glass house, ~2.5 m mullions.
+		const float Hw = 340.f;
+		const int32 SegX = FMath::Max(2, FMath::RoundToInt32(2.f * Half.X / 250.f));
+		const int32 SegY = FMath::Max(2, FMath::RoundToInt32(2.f * Half.Y / 250.f));
+		const auto Corner = [&](float FX, float FY, float Z) { return Base + FVector(FX * Half.X, FY * Half.Y, Z); };
+		for (int32 i = 0; i <= SegX; ++i)
+		{
+			const float FX = -1.f + 2.f * i / SegX;
+			for (const float FY : { -1.f, 1.f })
+			{
+				Beam(Struts, Corner(FX, FY, 0.f), Corner(FX, FY, Hw), 10.f);
+			}
+			Beam(Struts, Corner(FX, -1.f, Hw), Corner(FX, 1.f, Hw), 8.f); // roof rafters
+		}
+		for (int32 j = 0; j <= SegY; ++j)
+		{
+			const float FY = -1.f + 2.f * j / SegY;
+			for (const float FX : { -1.f, 1.f })
+			{
+				Beam(Struts, Corner(FX, FY, 0.f), Corner(FX, FY, Hw), 10.f);
+			}
+		}
+		for (const float Z : { 0.f, Hw })
+		{
+			Beam(Struts, Corner(-1, -1, Z), Corner(1, -1, Z), 12.f);
+			Beam(Struts, Corner(-1, 1, Z), Corner(1, 1, Z), 12.f);
+			Beam(Struts, Corner(-1, -1, Z), Corner(-1, 1, Z), 12.f);
+			Beam(Struts, Corner(1, -1, Z), Corner(1, 1, Z), 12.f);
+		}
+		if (Panes)
+		{
+			for (int32 i = 0; i < SegX; ++i)
+			{
+				const float A = -1.f + 2.f * i / SegX, Bx = -1.f + 2.f * (i + 1) / SegX;
+				for (const float FY : { -1.f, 1.f })
+				{
+					Pane(Panes, Corner(A, FY, 0.f), Corner(Bx, FY, 0.f), Corner(Bx, FY, Hw), Corner(A, FY, Hw));
+				}
+				for (int32 j = 0; j < SegY; ++j)
+				{
+					const float C0 = -1.f + 2.f * j / SegY, C1 = -1.f + 2.f * (j + 1) / SegY;
+					Pane(Panes, Corner(A, C0, Hw), Corner(Bx, C0, Hw), Corner(Bx, C1, Hw), Corner(A, C1, Hw));
+				}
+			}
+			for (int32 j = 0; j < SegY; ++j)
+			{
+				const float C0 = -1.f + 2.f * j / SegY, C1 = -1.f + 2.f * (j + 1) / SegY;
+				for (const float FX : { -1.f, 1.f })
+				{
+					Pane(Panes, Corner(FX, C0, 0.f), Corner(FX, C1, 0.f), Corner(FX, C1, Hw), Corner(FX, C0, Hw));
+				}
+			}
+		}
+	}
+	else
+	{
+		// A dome: a squircle-section cap (|x|^4 + |y|^4 ~ 1, so it covers the
+		// rectangular bed grid) on a 60 cm knee wall; height scales with the
+		// footprint's short side. Rings of latitude x meridians, one pane per
+		// quad, struts on every edge.
+		const float Knee = 60.f;
+		const float H = 0.42f * 2.f * FMath::Min(Half.X, Half.Y) + 250.f;
+		const int32 NTheta = FMath::Clamp(FMath::RoundToInt32(2.f * PI * FMath::Max(Half.X, Half.Y) / 320.f), 20, 48) & ~1;
+		const int32 NPhi = 7;
+		const auto Sq = [](float T) { return FMath::Sign(T) * FMath::Pow(FMath::Abs(T), 0.35f); };
+		// The rectangle's corner beds (inset 80 cm) sit just inside the
+		// rounded square at 1.04x: |cos 45|^0.35 x 1.04 = 0.92 of the half.
+		const auto P = [&](int32 i, int32 k)
+		{
+			if (k >= NPhi)
+			{
+				return Base + FVector(0, 0, Knee + H);
+			}
+			const float Theta = 2.f * PI * i / NTheta;
+			const float Phi = 0.5f * PI * k / NPhi;
+			const float R = FMath::Cos(Phi) * 1.04f;
+			return Base + FVector(Half.X * Sq(FMath::Cos(Theta)) * R, Half.Y * Sq(FMath::Sin(Theta)) * R, Knee + H * FMath::Sin(Phi));
+		};
+		for (int32 i = 0; i < NTheta; ++i)
+		{
+			const int32 I1 = (i + 1) % NTheta;
+			// Knee wall: a post per meridian and a sill ring.
+			Beam(Struts, P(i, 0) - FVector(0, 0, Knee), P(i, 0), 14.f);
+			Beam(Struts, P(i, 0) - FVector(0, 0, Knee), P(I1, 0) - FVector(0, 0, Knee), 16.f);
+			for (int32 k = 0; k < NPhi; ++k)
+			{
+				Beam(Struts, P(i, k), P(i, k + 1), 9.f);  // meridian
+				Beam(Struts, P(i, k), P(I1, k), 7.f);     // ring
+				if (Panes)
+				{
+					Pane(Panes, P(i, k), P(I1, k), P(I1, k + 1), P(i, k + 1));
+				}
+			}
+			if (Panes)
+			{
+				// Knee-wall glazing.
+				Pane(Panes, P(i, 0) - FVector(0, 0, Knee), P(I1, 0) - FVector(0, 0, Knee), P(I1, 0), P(i, 0));
+			}
+		}
+	}
+
+	// The airlock: a small opaque vestibule on the -Y face.
+	AddAccent(Actor, TEXT("/Engine/BasicShapes/Cube.Cube"), Base + FVector(0, -Half.Y - 140.f, 140.f), FRotator::ZeroRotator,
+		FVector(2.6f, 2.8f, 2.8f), FLinearColor(0.78f, 0.77f, 0.74f));
+	AddAccent(Actor, TEXT("/Engine/BasicShapes/Cube.Cube"), Base + FVector(0, -Half.Y - 282.f, 120.f), FRotator::ZeroRotator,
+		FVector(1.2f, 0.06f, 2.1f), FLinearColor(0.12f, 0.13f, 0.15f));
+
+	if (bBuilt)
+	{
+		// Soil beds: one per 10 m bed, a dark tilled box with a walkway margin.
+		UInstancedStaticMeshComponent* Beds = MakeISM(TEXT("DomeBeds"));
+		ApplyTint(Beds, FLinearColor(0.20f, 0.13f, 0.085f), FLinearColor::Black);
+		const float BedX = 2.f * Half.X / NX, BedY = 2.f * Half.Y / NY;
+		for (int32 by = 0; by < NY; ++by)
+		{
+			for (int32 bx = 0; bx < NX; ++bx)
+			{
+				const FVector C = Base + FVector(-Half.X + (bx + 0.5f) * BedX, -Half.Y + (by + 0.5f) * BedY, 22.f);
+				Beds->AddInstance(FTransform(FRotator::ZeroRotator, C, FVector((BedX - 160.f) / 100.f, (BedY - 160.f) / 100.f, 0.44f)), true);
+			}
+		}
+	}
+}
+
+void URHColonyVisualizerSubsystem::RefreshDomeCrops()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		if (!Def || !Def->DragSized || B.bUnderConstruction)
+		{
+			continue;
+		}
+		TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(B.Id);
+		AStaticMeshActor* Actor = Found ? Found->Get() : nullptr;
+		if (!Actor)
+		{
+			continue;
+		}
+		// Key: per bed, '-' unplanted, '*' planted without a crop entry, else
+		// <family initial><stage>. Equal key = zero work.
+		const int32 Beds = URHSimWorldSubsystem::GetBedCount(B);
+		FString Key;
+		TArray<FString> MeshPaths;
+		MeshPaths.SetNum(Beds);
+		for (int32 Bed = 0; Bed < Beds; ++Bed)
+		{
+			if (!Sim->IsDomeBedPlanted(B.Id, Bed))
+			{
+				Key += TEXT("-");
+				continue;
+			}
+			const FName Crop = Sim->GetDomeBedCrop(B.Id, Bed);
+			const int32 Stage = Sim->GetDomeBedCropStage(B.Id, Bed);
+			const FRHCropRow* CropRow = Crop.IsNone() ? nullptr : Defs->GetCrop(Crop);
+			const FString Family = (CropRow && !CropRow->VisualFamily.IsNone()) ? CropRow->VisualFamily.ToString() : TEXT("root");
+			const int32 S = (CropRow && Stage >= 0) ? Stage : 1;
+			Key += FString::Printf(TEXT("%c%d"), Family.IsEmpty() ? TEXT('r') : Family[0], S);
+			const FString N = FString::Printf(TEXT("crop_%s_%d"), *Family, S + 1);
+			MeshPaths[Bed] = FString::Printf(TEXT("/Game/RedHope/Art/Agri/%s/%s/StaticMeshes/%s.%s"), *N, *N, *N, *N);
+		}
+		if (const FString* Applied = AppliedDomeCrops.Find(B.Id))
+		{
+			if (*Applied == Key)
+			{
+				continue;
+			}
+		}
+		AppliedDomeCrops.Add(B.Id, Key);
+		TArray<TWeakObjectPtr<UStaticMeshComponent>>& Props = DomeCropProps.FindOrAdd(B.Id);
+		for (const TWeakObjectPtr<UStaticMeshComponent>& P : Props)
+		{
+			if (UStaticMeshComponent* C = P.Get())
+			{
+				C->DestroyComponent();
+			}
+		}
+		Props.Reset();
+		// Three by three plants per 10 m bed, each fit to ~2.4 m, feet on the
+		// soil; a deterministic yaw per plant so rows aren't wallpaper.
+		const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+		const int32 NX = FMath::Max(1, B.SizeX), NY = FMath::Max(1, B.SizeY);
+		const float BedX = 2.f * Half.X / NX, BedY = 2.f * Half.Y / NY;
+		const FVector Seated = Actor->GetActorLocation() - FVector(0, 0, 15.f);
+		for (int32 Bed = 0; Bed < Beds; ++Bed)
+		{
+			if (MeshPaths[Bed].IsEmpty())
+			{
+				continue;
+			}
+			UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPaths[Bed]);
+			if (!Mesh)
+			{
+				continue;
+			}
+			const FBoxSphereBounds MB = Mesh->GetBounds();
+			const float S = 240.f / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+			const int32 bx = Bed % NX, by = Bed / NX;
+			const FVector BedC = Seated + FVector(-Half.X + (bx + 0.5f) * BedX, -Half.Y + (by + 0.5f) * BedY, 30.f + 44.f);
+			for (int32 p = 0; p < 9; ++p)
+			{
+				const FVector At = BedC + FVector(((p % 3) - 1) * (BedX - 160.f) / 3.f, ((p / 3) - 1) * (BedY - 160.f) / 3.f, 0.f);
+				UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(Actor);
+				C->SetupAttachment(Actor->GetRootComponent());
+				C->SetAbsolute(true, true, true);
+				C->SetMobility(EComponentMobility::Movable);
+				C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				C->SetStaticMesh(Mesh);
+				C->RegisterComponent();
+				// Centre the plant's BOUNDS on its point after the yaw: the crop
+				// meshes' pivots sit off-centre, and rotating about the pivot
+				// swung edge plants out through the glass (first capture).
+				const FRotator Yaw(0.f, 90.f * ((Bed * 7 + p * 3) & 3), 0.f);
+				C->SetWorldScale3D(FVector(S));
+				C->SetWorldLocationAndRotation(At - Yaw.RotateVector(FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S), Yaw);
+				Props.Add(C);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("Dome #%d crops: %s"), B.Id, *Key);
+	}
+}
+
 void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FName DefName, const FVector& BaseCm, const FVector& ScaleM) const
 {
 	static const TCHAR* Cyl = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
@@ -869,7 +1176,15 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 		Scale.X = FMath::Max(1, Def->FootprintX) * 2.f;
 		Scale.Y = FMath::Max(1, Def->FootprintY) * 2.f;
 		const FName N = Instance.DefName;
-		if (N == FName("SolarArray") || N == FName("ChargePad") || N == FName("Stockpile"))
+		if (Def->DragSized)
+		{
+			// The greenhouse dome's deck under all its beds; the shell is
+			// built separately (BuildGreenhouseDome).
+			Scale.X *= FMath::Max(1, Instance.SizeX);
+			Scale.Y *= FMath::Max(1, Instance.SizeY);
+			Scale.Z = 0.3f;
+		}
+		else if (N == FName("SolarArray") || N == FName("ChargePad") || N == FName("Stockpile"))
 		{
 			Scale.Z = 0.25f; // flat decks
 		}
@@ -1136,7 +1451,16 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body, FLinearColor::Black);
 	}
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
-	if (!Instance.bUnderConstruction && !RealModel)
+	const URHDefinitionsSubsystem* DomeDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	const FRHBuildingRow* DomeDef = DomeDefs ? DomeDefs->GetBuilding(Instance.DefName) : nullptr;
+	if (DomeDef && DomeDef->DragSized)
+	{
+		ApplyTint(Actor, Instance.bUnderConstruction ? FLinearColor(0.08f, 0.08f, 0.09f) : FLinearColor(0.30f, 0.29f, 0.28f), FLinearColor::Black);
+		BuildGreenhouseDome(Actor, Instance, Seated);
+		AppliedDomeCrops.Remove(Instance.Id); // a rebuilt shell redraws its crops
+		DomeCropProps.Remove(Instance.Id);
+	}
+	else if (!Instance.bUnderConstruction && !RealModel)
 	{
 		BuildSilhouette(Actor, Instance.DefName, Seated, Scale);
 	}
@@ -1407,6 +1731,8 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 	}
+
+	RefreshDomeCrops();
 
 	// Is it working? A machine that has been shed by the power priority, or
 	// switched off by the player, goes dark; a running one keeps its glow. The

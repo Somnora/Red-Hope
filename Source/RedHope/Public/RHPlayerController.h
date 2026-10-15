@@ -9,6 +9,7 @@ class UInputMappingContext;
 class ARHStrategyPawn;
 class SRHCommandDeck;
 struct FInputActionValue;
+struct FRHBuildingRow;
 
 // Mission control's hands (M1-a Gate C). Enhanced Input actions and the
 // mapping context are constructed at runtime in C++ - no input assets, the
@@ -141,6 +142,13 @@ private:
 	bool bExcavateMode = false;
 	bool bExcavateDragging = false;
 	FVector ExcavateAnchorCm = FVector::ZeroVector;
+	// Drag-sized placement (Agri Gate C): a DragSized def (the greenhouse dome)
+	// anchors its first bed on click and grows in whole beds toward the cursor
+	// while the button is held; release transmits.
+	bool bBuildDragging = false;
+	FVector BuildAnchorCm = FVector::ZeroVector;
+	// The drag's footprint centre and beds per side for the cursor at GroundCm.
+	void ComputeDragFootprint(const FVector& GroundCm, const FRHBuildingRow* Def, int32 MaxBeds, FVector& OutCenter, FIntPoint& OutSize) const;
 	// Zone designation state (M2 Gate B).
 	bool bZoneMode = false;
 	FName ZoneRoom;

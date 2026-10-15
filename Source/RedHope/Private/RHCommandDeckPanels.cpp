@@ -1341,7 +1341,8 @@ FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
 		bOutShort |= Amount(S, C.Key) + KINDA_SMALL_NUMBER < C.Value;
 		Parts.Add(FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
 	}
-	return FString::Join(Parts, TEXT(" + "));
+	// Drag-sized (the greenhouse dome): the line is one bed's bill.
+	return FString::Join(Parts, TEXT(" + ")) + (R->DragSized ? TEXT(" per bed") : TEXT(""));
 }
 
 FName SRHCommandDeck::GetDetailBuildDef() const
@@ -1510,6 +1511,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 					? FString::Printf(TEXT("Takes %.0f min to build at 1x."), R->BuildTime_s / 60.f)
 					: FString::Printf(TEXT("Takes %.0f s to build at 1x."), R->BuildTime_s));
 				if (R->ImportOnly) { Facts.Add(TEXT("Shipped from Earth as a kit - order more on the supply ship.")); }
+				if (R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m beds. Build time and cost are per bed.")); }
 				return Txt(FString::Join(Facts, TEXT("\n")));
 			}), D::TextDim, 9)
 		]

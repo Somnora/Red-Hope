@@ -23,7 +23,7 @@
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSpawn(
 	TEXT("RH.Spawn"),
-	TEXT("RH.Spawn <DefName> [Xm] [Ym] [Level=0] - DEBUG: place a finished building instantly (bypasses cost/fabrication). For look-dev and demo dressing."),
+	TEXT("RH.Spawn <DefName> [Xm] [Ym] [Level=0] [SizeX SizeY] - DEBUG: place a finished building instantly (bypasses cost/fabrication). Size = beds per side for a drag-sized def (the greenhouse dome). For look-dev and demo dressing."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Spawn <DefName> [Xm] [Ym] [Level]")); return; }
@@ -32,7 +32,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSpawn(
 			const double Xm = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 20.0;
 			const double Ym = Args.Num() > 2 ? FCString::Atod(*Args[2]) : 0.0;
 			const int32 Level = Args.Num() > 3 ? FCString::Atoi(*Args[3]) : 0;
-			Sim->Debug_PlaceInstant(FName(*Args[0]), FVector(Xm * 100.0, Ym * 100.0, 0), Level);
+			const int32 SX = Args.Num() > 5 ? FCString::Atoi(*Args[4]) : 1;
+			const int32 SY = Args.Num() > 5 ? FCString::Atoi(*Args[5]) : 1;
+			Sim->Debug_PlaceInstant(FName(*Args[0]), FVector(Xm * 100.0, Ym * 100.0, 0), Level, SX, SY);
 			UE_LOG(LogRedHope, Display, TEXT("Spawned %s at (%.0f, %.0f) m L%d"), *Args[0], Xm, Ym, Level);
 		}
 	}));
@@ -264,7 +266,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBenchmark(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 	TEXT("RH.Build"),
-	TEXT("RH.Build <DefName> <Xm> <Ym> [Level=0] - transmit a Build order through the uplink (Level<0 needs the shaft bored to that depth)."),
+	TEXT("RH.Build <DefName> <Xm> <Ym> [Level=0] [SizeX SizeY] - transmit a Build order through the uplink (Level<0 needs the shaft bored to that depth; size = beds per side for the greenhouse dome)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 3)
@@ -280,6 +282,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 			Cmd.Level = Args.Num() > 3 ? FCString::Atoi(*Args[3]) : 0;
 			Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f,
 				Cmd.Level * (float)Sim->GetFloorHeightCm());
+			if (Args.Num() > 5)
+			{
+				Cmd.Value = URHSimWorldSubsystem::EncodeBuildSize(FCString::Atoi(*Args[4]), FCString::Atoi(*Args[5]));
+			}
 			Sim->EnqueueCommand(Cmd);
 		}
 	}));

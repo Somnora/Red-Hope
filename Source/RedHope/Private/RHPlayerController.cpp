@@ -274,13 +274,39 @@ void ARHPlayerController::Tick(float DeltaTime)
 		if (CursorToGround(Ground))
 		{
 			const FRHBuildingRow* Def = Defs->GetBuilding(PendingBuildDef);
+			// Drag-sized (Agri Gate C): before the click the ghost is one bed
+			// under the cursor; while the button is held it is the dragged
+			// size, anchored on the first bed.
+			const bool bSized = Def && Def->DragSized;
+			FVector At = Ground;
+			FIntPoint Size(1, 1);
+			if (bSized && bBuildDragging)
+			{
+				ComputeDragFootprint(Ground, Def, Sim->GetDomeMaxBedsPerSide(), At, Size);
+			}
 			FString Reason;
-			const bool bOk = Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason, ActiveLevel);
+			const bool bOk = Sim->CanPlaceBuildingSized(PendingBuildDef, At, Reason, ActiveLevel, Size.X, Size.Y);
 			const FColor Color = bOk ? FColor::Green : FColor::Red;
 
-			const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
-			const float HalfY = Def ? FMath::Max(1, Def->FootprintY) * 100.f : 200.f;
-			DrawDebugBox(World, Ground + FVector(0, 0, 150.f), FVector(HalfX, HalfY, 150.f), Color, false, -1.f, 0, 8.f);
+			const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(Def, Size.X, Size.Y);
+			const float HalfX = (float)Half.X;
+			const float HalfY = (float)Half.Y;
+			DrawDebugBox(World, At + FVector(0, 0, 150.f), FVector(HalfX, HalfY, 150.f), Color, false, -1.f, 0, 8.f);
+			if (bSized)
+			{
+				// The bed seams: one line per internal bed edge, at bed height.
+				const float BedX = 2.f * HalfX / Size.X, BedY = 2.f * HalfY / Size.Y;
+				for (int32 i = 1; i < Size.X; ++i)
+				{
+					const float X = At.X - HalfX + i * BedX;
+					DrawDebugLine(World, FVector(X, At.Y - HalfY, At.Z + 40.f), FVector(X, At.Y + HalfY, At.Z + 40.f), Color, false, -1.f, 0, 5.f);
+				}
+				for (int32 j = 1; j < Size.Y; ++j)
+				{
+					const float Y = At.Y - HalfY + j * BedY;
+					DrawDebugLine(World, FVector(At.X - HalfX, Y, At.Z + 40.f), FVector(At.X + HalfX, Y, At.Z + 40.f), Color, false, -1.f, 0, 5.f);
+				}
+			}
 			if (Def && Def->CoverageRadius_m > 0.f)
 			{
 				DrawDebugCircle(World, Ground + FVector(0, 0, 30.f), Def->CoverageRadius_m * 100.f,
@@ -290,6 +316,12 @@ void ARHPlayerController::Tick(float DeltaTime)
 			// and everything it will COST, before the click commits anything.
 			FString Tip = FString::Printf(TEXT("PLACING %s"),
 				Def && !Def->DisplayName.IsEmpty() ? *Def->DisplayName : *PendingBuildDef.ToString());
+			const int32 Beds = Size.X * Size.Y;
+			if (bSized)
+			{
+				Tip += FString::Printf(TEXT(" - %d x %d bed%s (%.0f x %.0f m)"), Size.X, Size.Y, Beds == 1 ? TEXT("") : TEXT("s"),
+					2.f * HalfX / 100.f, 2.f * HalfY / 100.f);
+			}
 			if (Def && !Def->Blurb.IsEmpty())
 			{
 				Tip += FString::Printf(TEXT("\n%s"), *Def->Blurb); // director-authored "what is this"
@@ -302,10 +334,18 @@ void ARHPlayerController::Tick(float DeltaTime)
 				for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, ActiveLevel))
 				{
 					Bill += FString::Printf(TEXT("%s%.0f kg %s"), Bill.IsEmpty() ? TEXT("") : TEXT(" + "),
-						Cost.Value, *Cost.Key.ToString());
+						Cost.Value * Beds, *Cost.Key.ToString());
 				}
 				Tip += FString::Printf(TEXT("\ncost: %s  ·  %.0f s build"),
-					Bill.IsEmpty() ? TEXT("free (flat-pack)") : *Bill, Def->BuildTime_s);
+					Bill.IsEmpty() ? TEXT("free (flat-pack)") : *Bill, Def->BuildTime_s * Beds);
+				if (bSized)
+				{
+					// Each bed is glazed and planted on its own, from stock.
+					Tip += FString::Printf(TEXT("\neach bed, when planted: %.0f kg glass + %.0f kg soil + %.0f kg seeds"),
+						Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), 200.0),
+						Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), 250.0),
+						Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), 50.0));
+				}
 				if (Def->PowerDraw_W > 0.f)
 				{
 					Tip += FString::Printf(TEXT("  ·  draws %.0f W"), Def->PowerDraw_W);
@@ -319,11 +359,45 @@ void ARHPlayerController::Tick(float DeltaTime)
 					Tip += FString::Printf(TEXT("  ·  stores %.0f Wh"), Def->StorageWh);
 				}
 			}
-			Tip += bOk
-				? FString::Printf(TEXT("\nclick to transmit (Δ %.0f sim-s), right-click to cancel"), Sim->GetOrderLagSeconds())
-				: FString::Printf(TEXT("\n%s"), *Reason);
+			if (bSized && !bBuildDragging)
+			{
+				Tip += bOk
+					? FString::Printf(TEXT("\nclick and drag to size it in 10 m beds (up to %d a side), release to transmit"), Sim->GetDomeMaxBedsPerSide())
+					: FString::Printf(TEXT("\n%s"), *Reason);
+			}
+			else
+			{
+				Tip += bOk
+					? FString::Printf(TEXT("\n%s to transmit (Δ %.0f sim-s), right-click to cancel"), bSized ? TEXT("release") : TEXT("click"), Sim->GetOrderLagSeconds())
+					: FString::Printf(TEXT("\n%s"), *Reason);
+			}
 			HintText = Tip;
 			HintColor = FLinearColor(Color);
+			// Release ends a size drag: transmit when the ghost is green,
+			// else buzz and drop back to aiming (the mode stays armed).
+			if (bSized && bBuildDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bBuildDragging = false;
+				if (bOk)
+				{
+					FRHCommand Cmd;
+					Cmd.Verb = FName("Build");
+					Cmd.Target = PendingBuildDef;
+					Cmd.Location = At;
+					Cmd.Level = ActiveLevel;
+					Cmd.Value = URHSimWorldSubsystem::EncodeBuildSize(Size.X, Size.Y);
+					Sim->EnqueueCommand(Cmd);
+					URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+					SetConfirm(FString::Printf(TEXT("Order transmitted: %s, %d x %d beds at (%.0f, %.0f) m"),
+						Def && !Def->DisplayName.IsEmpty() ? *Def->DisplayName : *PendingBuildDef.ToString(),
+						Size.X, Size.Y, At.X / 100.f, At.Y / 100.f), FLinearColor(0.2f, 0.9f, 1.f));
+					CancelModes();
+				}
+				else
+				{
+					URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				}
+			}
 		}
 	}
 	else if (bDigMode)
@@ -470,8 +544,10 @@ void ARHPlayerController::Tick(float DeltaTime)
 				continue;
 			}
 			const FRHBuildingRow* Def = Defs->GetBuilding(C.Target);
-			const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
-			const float HalfY = Def ? FMath::Max(1, Def->FootprintY) * 100.f : 200.f;
+			const FIntPoint QSize = (Def && Def->DragSized) ? URHSimWorldSubsystem::DecodeBuildSize(C.Value) : FIntPoint(1, 1);
+			const FVector2D QHalf = URHSimWorldSubsystem::GetFootprintHalfCm(Def, QSize.X, QSize.Y);
+			const float HalfX = (float)QHalf.X;
+			const float HalfY = (float)QHalf.Y;
 			FVector Spot = C.Location;
 			Spot.Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
 			DrawDebugBox(World, Spot + FVector(0, 0, 120.f), FVector(HalfX, HalfY, 120.f),
@@ -504,8 +580,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 			if (B.Id == SelectedBuildingId)
 			{
 				const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
-				const float HalfX = Def ? FMath::Max(1, Def->FootprintX) * 100.f : 200.f;
-				const float HalfY = Def ? FMath::Max(1, Def->FootprintY) * 100.f : 200.f;
+				const FVector2D BHalf = URHSimWorldSubsystem::GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+				const float HalfX = (float)BHalf.X;
+				const float HalfY = (float)BHalf.Y;
 				DrawDebugBox(World, B.LocationCm + FVector(0, 0, 170.f), FVector(HalfX + 40.f, HalfY + 40.f, 170.f),
 					FColor::Cyan, false, -1.f, 0, 5.f);
 				bStillExists = true;
@@ -533,7 +610,15 @@ void ARHPlayerController::OnClick()
 		return;
 	}
 
-	if (!PendingBuildDef.IsNone())
+	const URHDefinitionsSubsystem* ClickDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	const FRHBuildingRow* ClickDef = (ClickDefs && !PendingBuildDef.IsNone()) ? ClickDefs->GetBuilding(PendingBuildDef) : nullptr;
+	if (ClickDef && ClickDef->DragSized)
+	{
+		// Anchor the first bed; Tick sizes the drag and transmits on release.
+		BuildAnchorCm = Ground;
+		bBuildDragging = true;
+	}
+	else if (!PendingBuildDef.IsNone())
 	{
 		FString Reason;
 		if (Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason, ActiveLevel))
@@ -831,6 +916,7 @@ void ARHPlayerController::CancelModes()
 		SelectedBuildingId = 0;
 	}
 	PendingBuildDef = NAME_None;
+	bBuildDragging = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;
@@ -838,6 +924,20 @@ void ARHPlayerController::CancelModes()
 	bZoneMode = false;
 	ZoneRoom = NAME_None;
 	HintText.Reset();
+}
+
+void ARHPlayerController::ComputeDragFootprint(const FVector& GroundCm, const FRHBuildingRow* Def, int32 MaxBeds, FVector& OutCenter, FIntPoint& OutSize) const
+{
+	// The anchor is the CENTRE of the first bed (where the one-bed ghost sat
+	// at the click), so nothing jumps when the drag starts; the dome grows
+	// toward the cursor in whole beds.
+	const FVector2D Bed = URHSimWorldSubsystem::GetFootprintHalfCm(Def, 1, 1) * 2.0;
+	const double DX = GroundCm.X - BuildAnchorCm.X, DY = GroundCm.Y - BuildAnchorCm.Y;
+	OutSize.X = FMath::Clamp(1 + FMath::RoundToInt32(FMath::Abs(DX) / Bed.X), 1, FMath::Max(1, MaxBeds));
+	OutSize.Y = FMath::Clamp(1 + FMath::RoundToInt32(FMath::Abs(DY) / Bed.Y), 1, FMath::Max(1, MaxBeds));
+	OutCenter = BuildAnchorCm;
+	OutCenter.X += (DX < 0.0 ? -1.0 : 1.0) * (OutSize.X - 1) * Bed.X * 0.5;
+	OutCenter.Y += (DY < 0.0 ? -1.0 : 1.0) * (OutSize.Y - 1) * Bed.Y * 0.5;
 }
 
 void ARHPlayerController::SetSimSpeed(float Tier)
@@ -951,8 +1051,9 @@ int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const
 		}
 		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
 		// Footprint plus half a cell of grace: clicking the plinth counts.
-		const double HalfX = (Def ? FMath::Max(1, Def->FootprintX) : 1) * 100.0 + 100.0;
-		const double HalfY = (Def ? FMath::Max(1, Def->FootprintY) : 1) * 100.0 + 100.0;
+		const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+		const double HalfX = Half.X + 100.0;
+		const double HalfY = Half.Y + 100.0;
 		if (FMath::Abs(B.LocationCm.X - GroundCm.X) <= HalfX && FMath::Abs(B.LocationCm.Y - GroundCm.Y) <= HalfY)
 		{
 			const double Dist = FVector::DistXY(B.LocationCm, GroundCm);
