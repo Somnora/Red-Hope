@@ -54,6 +54,22 @@ const FRHManifestItemRow* URHDefinitionsSubsystem::GetManifestItem(FName Name) c
 	return ManifestTable ? ManifestTable->FindRow<FRHManifestItemRow>(Name, TEXT("GetManifestItem"), false) : nullptr;
 }
 
+void URHDefinitionsSubsystem::ForEachManifestItem(TFunctionRef<void(FName, const FRHManifestItemRow&)> Fn) const
+{
+	if (!ManifestTable)
+	{
+		return;
+	}
+	for (const auto& Pair : ManifestTable->GetRowMap())
+	{
+		const FRHManifestItemRow* Row = reinterpret_cast<const FRHManifestItemRow*>(Pair.Value);
+		if (Row->SliceActive)
+		{
+			Fn(Pair.Key, *Row);
+		}
+	}
+}
+
 void URHDefinitionsSubsystem::ForEachQuota(TFunctionRef<void(FName, const FRHQuotaRow&)> Fn) const
 {
 	if (!QuotasTable)

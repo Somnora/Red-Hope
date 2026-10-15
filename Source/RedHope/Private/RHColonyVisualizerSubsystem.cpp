@@ -813,7 +813,8 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	{
 		ApplyTint(Actor, DepColor); // graybox fallback beats invisible
 	}
-	AddLabel(Actor, D.RowName.ToString(), DepColor, Side * 50.f + 260.f);
+	// Players read the material, not the data row (interface pass: no raw IDs).
+	AddLabel(Actor, D.Type.ToString() + TEXT(" deposit"), DepColor, Side * 50.f + 260.f);
 	// Surface furniture: born hidden if the player is currently underground
 	// (adversarial-review finding - a discovery mid-descent used to pop the
 	// marker into the pit view until the next floor change).
@@ -837,8 +838,8 @@ void URHColonyVisualizerSubsystem::HandleDepositDiscovered(const FRHDepositState
 {
 	// The go-look payoff: the marker appears the moment the scout reports.
 	SpawnDepositMarker(D);
-	LastNotice = FString::Printf(TEXT("SURVEY: %s discovered - %.0f t %s"),
-		*D.RowName.ToString(), D.RemainingKg / 1000.0, *D.Type.ToString());
+	LastNotice = FString::Printf(TEXT("Survey found a %s deposit - %.0f t"),
+		*D.Type.ToString().ToLower(), D.RemainingKg / 1000.0);
 	LastNoticeRealSeconds = FPlatformTime::Seconds();
 }
 

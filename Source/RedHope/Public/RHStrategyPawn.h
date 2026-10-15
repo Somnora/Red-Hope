@@ -18,6 +18,7 @@ class REDHOPE_API ARHStrategyPawn : public APawn
 public:
 	ARHStrategyPawn();
 
+	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 
 	// Input surface (wired to Enhanced Input in the M0 UI pass; callable from
@@ -75,4 +76,10 @@ private:
 	// Manual tilt (R/F): 0 = classic zoom-coupled pitch; negative looks up.
 	float PitchOffsetDeg = 0.f;
 	float SmoothedPitchOffsetDeg = 0.f;
+	// The opening shot (interface pass, 2026-10-15): the session starts low
+	// and close on the Lander and slowly pulls back and swings round to the
+	// classic strategy framing. Presentation only - sim time is untouched.
+	// Any camera input, or a scripted pose, ends it at once.
+	float IntroSecondsLeft = 0.f;
+	float IntroYawOffsetDeg = 0.f;
 };

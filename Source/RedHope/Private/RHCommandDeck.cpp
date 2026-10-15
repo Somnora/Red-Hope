@@ -1,4 +1,5 @@
 #include "RHCommandDeck.h"
+#include "RHDeckStyle.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHColonyVisualizerSubsystem.h"
@@ -22,50 +23,33 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Layout/SConstraintCanvas.h"
+#include "Widgets/Images/SImage.h"
 
 namespace
 {
-	const FLinearColor DeckBg(0.015f, 0.03f, 0.045f, 0.85f);   // mission-control glass
 	const FLinearColor ReadoutFg(0.75f, 0.87f, 0.92f, 1.f);
-	// Right-column panels are pinned to this width (director fix): the readout
-	// is right-anchored, so variable-width content - the power sparkline that
-	// grows 4->36 columns as history fills, a toggling SHED:N, the vault line -
-	// used to shove the whole block leftward every frame. A fixed width holds
-	// the left edge still and aligns the stacked panels into one clean column.
-	constexpr float ReadoutWidthPx = 560.f;
+	// The right column is pinned to this width (director fix): a right-anchored
+	// column whose width followed its content shoved every panel leftward each
+	// time a line grew. Fixed width holds the left edge still.
+	constexpr float RightColumnPx = 340.f;
 
 	FSlateFontInfo DeckFont(int32 Size)
 	{
 		return FCoreStyle::GetDefaultFontStyle("Mono", Size);
 	}
 
-	// Every deck button clicks (2026-10-14: the game had no sound). Slate plays
-	// it without a world; FSlateSound holds the rooted asset.
-	const FSlateSound& DeckClick()
-	{
-		static FSlateSound Sound;
-		static bool bInit = false;
-		if (!bInit)
-		{
-			if (USoundBase* S = URHAudioSubsystem::UIClickSound())
-			{
-				Sound.SetResourceObject(S);
-				bInit = true;
-			}
-		}
-		return Sound;
-	}
-
+	// Every deck button clicks (2026-10-14: the game had no sound); the deck
+	// style carries the click as its pressed sound.
 	TSharedRef<SWidget> DeckButton(const TAttribute<FText>& Label, const FOnClicked& OnClicked)
 	{
 		return SNew(SBox).Padding(FMargin(2.f, 0.f))
 		[
 			SNew(SButton)
-			.ClickedSoundOverride(DeckClick())
+			.ButtonStyle(&RHDeck::ButtonStyle())
 			.OnClicked(OnClicked)
-			.ContentPadding(FMargin(8.f, 5.f))
+			.ContentPadding(FMargin(9.f, 5.f))
 			[
-				SNew(STextBlock).Text(Label).Font(DeckFont(9))
+				SNew(STextBlock).Text(Label).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
 			]
 		];
 	}
@@ -163,13 +147,15 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					SNew(SBox).Padding(FMargin(1.f, 0.f))
 					[
 						SNew(SButton)
+						.ButtonStyle(&RHDeck::TintButtonStyle())
 						.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetCategoryTabColor, Cat)))
-						.ContentPadding(FMargin(8.f, 5.f))
+						.ContentPadding(FMargin(9.f, 5.f))
 						.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSelectCategory, Cat))
 						[
 							SNew(STextBlock)
 							.Text(GetCategoryLabel(Cat))
-							.Font(DeckFont(9))
+							.Font(RHDeck::Label(10))
+							.ColorAndOpacity(RHDeck::Text)
 						]
 					]
 				];
@@ -206,20 +192,21 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	TSharedRef<SVerticalBox> ShaftStrip = SNew(SVerticalBox);
 	ShaftStrip->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 0.f, 0.f, 3.f))
 	[
-		SNew(STextBlock).Text(FText::FromString(TEXT("SHAFT"))).Font(DeckFont(8)).ColorAndOpacity(ReadoutFg)
+		SNew(STextBlock).Text(FText::FromString(TEXT("SHAFT"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
 	];
 	auto AddFloorCell = [&ShaftStrip, this](int32 Level)
 	{
 		ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
 		[
 			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
 			.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorCellColor, Level)))
 			.ContentPadding(FMargin(9.f, 4.f))
 			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFloor, Level))
 			[
 				SNew(STextBlock)
 				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorLabel, Level)))
-				.Font(DeckFont(9))
+				.Font(RHDeck::Label(10))
 				.Justification(ETextJustify::Center)
 				.ColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorTextColor, Level)))
 			]
@@ -234,78 +221,6 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SNew(SOverlay)
-
-		// Info card (alive pass): center screen, one at a time - tutorial tips
-		// (teal, with SKIP ALL TIPS) and milestone celebrations (golden).
-		+ SOverlay::Slot()
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
-		[
-			SNew(SBox)
-			.MinDesiredWidth(400.f)
-			.MaxDesiredWidth(460.f)
-			.Visibility(this, &SRHCommandDeck::GetInfoCardVisibility)
-			[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(this, &SRHCommandDeck::GetInfoCardColor)
-				.Padding(FMargin(18.f, 14.f))
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8.f)
-					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetInfoCardTitle)
-						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 15))
-						.ColorAndOpacity(FLinearColor(0.95f, 0.85f, 0.55f))
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12.f)
-					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetInfoCardBody)
-						.Font(FCoreStyle::GetDefaultFontStyle("Regular", 11))
-						.ColorAndOpacity(FLinearColor(0.92f, 0.92f, 0.88f))
-						.AutoWrapText(true)
-					]
-					+ SVerticalBox::Slot().AutoHeight()
-					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 10.f, 0)
-						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("GOT IT")))
-							.OnClicked(this, &SRHCommandDeck::HandleCardGotIt)
-						]
-						+ SHorizontalBox::Slot().AutoWidth()
-						[
-							SNew(SButton)
-							.Text(FText::FromString(TEXT("SKIP ALL TIPS")))
-							.Visibility(this, &SRHCommandDeck::GetSkipTipsVisibility)
-							.OnClicked(this, &SRHCommandDeck::HandleCardSkipAll)
-						]
-					]
-				]
-			]
-		]
-
-		// Reward toast (alive pass): a quiet one-line cheer under the banners.
-		+ SOverlay::Slot()
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Top)
-		.Padding(0.f, 96.f, 0.f, 0.f)
-		[
-			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(FLinearColor(0.10f, 0.09f, 0.02f, 0.85f))
-			.Padding(FMargin(12.f, 5.f))
-			.Visibility(this, &SRHCommandDeck::GetToastVisibility)
-			[
-				SNew(STextBlock)
-				.Text(this, &SRHCommandDeck::GetToastText)
-				.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
-				.ColorAndOpacity(FLinearColor(0.98f, 0.85f, 0.45f))
-			]
-		]
 
 		// The in-world action card (M2 Gate D+): a full-screen canvas whose one
 		// child floats above the selected machine. Placed FIRST so it renders
@@ -323,14 +238,13 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			.Offset(TAttribute<FMargin>::Create(TAttribute<FMargin>::FGetter::CreateSP(this, &SRHCommandDeck::GetActionCardOffset)))
 			[
 				SNew(SBox)
-				.MinDesiredWidth(240.f)
+				.MinDesiredWidth(250.f)
 				.MaxDesiredWidth(340.f)
 				.Visibility(this, &SRHCommandDeck::GetActionCardVisibility)
 				[
 					SNew(SBorder)
-					.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-					.BorderBackgroundColor(FLinearColor(0.03f, 0.08f, 0.07f, 0.94f))
-					.Padding(FMargin(11.f, 8.f))
+					.BorderImage(RHDeck::GlassBrush())
+					.Padding(FMargin(12.f, 9.f))
 					[
 						SNew(SVerticalBox)
 						// Title + the director-authored "what is this / how to use it".
@@ -338,22 +252,22 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						[
 							SNew(STextBlock)
 							.Text(this, &SRHCommandDeck::GetActionCardTitle)
-							.Font(DeckFont(10))
-							.ColorAndOpacity(FLinearColor(0.85f, 0.98f, 0.9f))
+							.Font(RHDeck::Body(10))
+							.ColorAndOpacity(RHDeck::Text)
 							.AutoWrapText(true)
 						]
 						// Live state (reuses the existing inspection read-out).
-						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+						+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 5.f, 0.f, 0.f))
 						[
 							SNew(STextBlock)
 							.Text(this, &SRHCommandDeck::GetInspectText)
-							.Font(DeckFont(9))
-							.ColorAndOpacity(FLinearColor(0.7f, 0.9f, 0.84f))
+							.Font(RHDeck::Body(9))
+							.ColorAndOpacity(RHDeck::TextDim)
 							.AutoWrapText(true)
 						]
 						// Afforded verbs, each with its real cost. Bore + Excavate
 						// belong to the Borer; the breaker to anything built.
-						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+						+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 7.f, 0.f, 0.f))
 						[
 							SNew(SVerticalBox)
 							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
@@ -386,245 +300,293 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// Controls hint, top left - discoverability until the diegetic pass.
-		// The uplink queue lives beneath it: orders in flight, cancellable
-		// until the signal lands (M0 spec §8, delivered M1-c).
-		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top).Padding(8.f)
+		// Top left (interface pass): the vitals strip, the controls card
+		// behind "?", and the uplink queue - orders in flight, cancellable
+		// until the signal lands (M0 spec section 8, delivered M1-c).
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top).Padding(10.f)
 		[
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight()
 			[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
-				.Padding(FMargin(10.f, 6.f))
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("WASD pan   wheel zoom   RMB-drag orbit   MMB-drag pan\nSpace pause   1/2/3/4 speed   Esc/right-click cancel order")))
-					.Font(DeckFont(9))
-					.ColorAndOpacity(ReadoutFg)
-				]
+				BuildVitalsStrip()
 			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Left)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+			[
+				BuildHelpPanel()
+			]
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
-				.Padding(FMargin(8.f, 5.f))
+				.BorderImage(RHDeck::GlassBrush())
+				.Padding(FMargin(10.f, 7.f))
+				.Visibility_Lambda([this]() { return UplinkIdsShown.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed; })
 				[
 					SAssignNew(UplinkList, SVerticalBox)
 				]
 			]
 		]
 
-		// World-pressure banner, top center (M1-c): the sky has agency now.
-		// The alert banner beneath it is the transient must-not-miss channel
-		// (onset 1x snap, era refusal, ship countdown - director finding).
-		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+		// World-pressure banner (M1-c): the sky has agency now. The alert
+		// banner beneath it is the transient must-not-miss channel (onset 1x
+		// snap, era refusal, ship countdown - director finding). Centred under
+		// the vitals strip so the two never collide.
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(FMargin(0.f, 100.f, 0.f, 0.f))
 		[
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderImage(RHDeck::RoundedWhite())
 				.BorderBackgroundColor(FLinearColor(0.12f, 0.06f, 0.01f, 0.92f))
-				.Padding(FMargin(22.f, 7.f))
+				.Padding(FMargin(18.f, 7.f))
 				.Visibility(this, &SRHCommandDeck::GetEventVisibility)
 				[
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetEventText)
-					.Font(DeckFont(12))
-					.ColorAndOpacity(this, &SRHCommandDeck::GetEventColor)
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+					[
+						RHDeck::IconImage(FName("warning"), TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetEventColor)), 16.f)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetEventText)
+						.Font(RHDeck::Label(13))
+						.ColorAndOpacity(this, &SRHCommandDeck::GetEventColor)
+					]
 				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderImage(RHDeck::RoundedWhite())
 				.BorderBackgroundColor(FLinearColor(0.2f, 0.12f, 0.02f, 0.95f))
-				.Padding(FMargin(18.f, 8.f))
+				.Padding(FMargin(16.f, 7.f))
 				.Visibility(this, &SRHCommandDeck::GetAlertVisibility)
 				[
 					SNew(STextBlock)
 					.Text(this, &SRHCommandDeck::GetAlertText)
-					.Font(DeckFont(11))
+					.Font(RHDeck::Label(12))
 					.ColorAndOpacity(FLinearColor(1.f, 0.9f, 0.55f))
 				]
 			]
+			// Reward toast (alive pass): a quiet one-line cheer under the banners.
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 6.f, 0.f, 0.f))
+			[
+				SNew(SBorder)
+				.BorderImage(RHDeck::RoundedWhite())
+				.BorderBackgroundColor(FLinearColor(0.10f, 0.09f, 0.02f, 0.88f))
+				.Padding(FMargin(14.f, 6.f))
+				.Visibility(this, &SRHCommandDeck::GetToastVisibility)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 7.f, 0.f))
+					[
+						RHDeck::IconImage(FName("hope"), FSlateColor(RHDeck::Gold), 14.f)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(this, &SRHCommandDeck::GetToastText)
+						.Font(RHDeck::Label(12))
+						.ColorAndOpacity(RHDeck::Gold)
+					]
+				]
+			]
 		]
 
-		// Right column: colony readout (with the notice + confirm lines - the
-		// visible feedback channels; GEngine debug messages hide under the
-		// deck), then the fleet panel, then the inspection card.
-		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(8.f)
+		// Right column (interface pass): titled panels - comms, the objective,
+		// Earth & neighbors, crew, fleet, power history, known ground. Fixed
+		// width (the old director fix still applies: a right-anchored column
+		// must not breathe with its content); scrolls if a tall manifest or a
+		// long roster outgrows the screen.
+		+ SOverlay::Slot().HAlign(HAlign_Right).VAlign(VAlign_Top).Padding(FMargin(10.f, 10.f, 10.f, 96.f))
 		[
-			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+			SNew(SBox).WidthOverride(RightColumnPx)
 			[
-				SNew(SBox).WidthOverride(ReadoutWidthPx)
-				[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
-				.Padding(FMargin(10.f, 6.f))
+				SNew(SScrollBox)
+				.ScrollBarThickness(FVector2D(4.f, 4.f))
+				+ SScrollBox::Slot()
 				[
 					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+					[
+						BuildCommsPanel()
+					]
 					+ SVerticalBox::Slot().AutoHeight()
 					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetStatusText)
-						.Font(DeckFont(10))
-						.ColorAndOpacity(ReadoutFg)
+						BuildObjectivePanel()
 					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					// Politics above crew: a pending Earth decision outranks the roster.
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetNoticeText)
-						.Font(DeckFont(10))
-						.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.08f))
-						.Visibility(this, &SRHCommandDeck::GetNoticeVisibility)
+						BuildPoliticsPanel()
 					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetConfirmText)
-						.Font(DeckFont(10))
-						.ColorAndOpacity(this, &SRHCommandDeck::GetConfirmColor)
-						.Visibility(this, &SRHCommandDeck::GetConfirmVisibility)
+						BuildCrewPanel()
 					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 0.f))
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetPowerChartText)
-						.Font(DeckFont(9))
-						.ColorAndOpacity(FLinearColor(0.5f, 0.72f, 0.8f))
+						BuildFleetPanel()
 					]
-				]
-				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
-			[
-				SNew(SBox).WidthOverride(ReadoutWidthPx)
-				[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
-				.Padding(FMargin(10.f, 6.f))
-				[
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetFleetText)
-					.Font(DeckFont(9))
-					.ColorAndOpacity(ReadoutFg)
-				]
-				]
-			]
-			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
-			[
-				SNew(SBox).WidthOverride(ReadoutWidthPx)
-				.Visibility(this, &SRHCommandDeck::GetCrewVisibility)
-				[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(FLinearColor(0.05f, 0.04f, 0.02f, 0.9f))
-				.Padding(FMargin(10.f, 6.f))
-				[
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetCrewText)
-					.Font(DeckFont(9))
-					.ColorAndOpacity(FLinearColor(0.9f, 0.82f, 0.62f))
-				]
-				]
-			]
-			// (The building inspect card moved to the in-world action card that
-			// floats above the machine - M2 Gate D+ UX overhaul. Its live-state
-			// text + breaker button live there now.)
-			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 6.f, 0.f, 0.f)).HAlign(HAlign_Right)
-			[
-				SNew(SBox).WidthOverride(ReadoutWidthPx)
-				.Visibility(this, &SRHCommandDeck::GetKnownGroundVisibility)
-				[
-				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(FLinearColor(0.02f, 0.05f, 0.07f, 0.9f))
-				.Padding(FMargin(10.f, 6.f))
-				.Visibility(this, &SRHCommandDeck::GetKnownGroundVisibility)
-				[
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetKnownGroundText)
-					.Font(DeckFont(9))
-					.ColorAndOpacity(FLinearColor(0.55f, 0.85f, 0.9f))
-				]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+					[
+						BuildPowerPanel()
+					]
+					// Known Ground (director request): surveyed coverage + every
+					// discovered deposit, while Map is on. A table, so monospace.
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+					[
+						SNew(SBox)
+						.Visibility(this, &SRHCommandDeck::GetKnownGroundVisibility)
+						[
+							RHDeck::Panel(FName("research"), FText::FromString(TEXT("KNOWN GROUND")), RHDeck::Teal,
+								SNew(STextBlock)
+								.Text(this, &SRHCommandDeck::GetKnownGroundText)
+								.Font(DeckFont(9))
+								.ColorAndOpacity(RHDeck::Text))
+						]
+					]
 				]
 			]
 		]
 
-		// Mode hint + PAUSED banner, bottom center above the command bar -
-		// the prompts a player actually looks at while aiming an order.
-		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(FMargin(0.f, 0.f, 0.f, 52.f))
+		// Bottom centre, above the command bar: the info card (alive pass -
+		// tutorial tips in teal with SKIP ALL TIPS, milestone celebrations in
+		// gold; moved off screen-centre so it never covers the colony), then the
+		// PAUSED banner and the live mode hint - the prompts a player actually
+		// looks at while aiming an order.
+		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(FMargin(0.f, 0.f, 0.f, 96.f))
 		[
 			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+			[
+				SNew(SBox)
+				.WidthOverride(470.f)
+				.Visibility(this, &SRHCommandDeck::GetInfoCardVisibility)
+				[
+					SNew(SBorder)
+					.BorderImage(RHDeck::GlassBrush())
+					.Padding(FMargin(18.f, 14.f))
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 8.f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+							[
+								SNew(SBox).WidthOverride(18.f).HeightOverride(18.f)
+								[
+									SNew(SImage)
+									.Image_Lambda([this]() { return RHDeck::Icon(CardQueue.Num() > 0 && CardQueue[0].bGolden ? FName("hope") : FName("help")); })
+									.ColorAndOpacity_Lambda([this]() { return FSlateColor(CardQueue.Num() > 0 && CardQueue[0].bGolden ? RHDeck::Gold : RHDeck::Teal); })
+								]
+							]
+							+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(this, &SRHCommandDeck::GetInfoCardTitle)
+								.Font(RHDeck::Label(15))
+								.ColorAndOpacity_Lambda([this]() { return FSlateColor(CardQueue.Num() > 0 && CardQueue[0].bGolden ? RHDeck::Gold : RHDeck::Teal); })
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 0, 0, 12.f)
+						[
+							SNew(STextBlock)
+							.Text(this, &SRHCommandDeck::GetInfoCardBody)
+							.Font(RHDeck::Body(11))
+							.ColorAndOpacity(RHDeck::Text)
+							.AutoWrapText(true)
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 8.f, 0)
+							[
+								RHDeck::Button(FText::FromString(TEXT("GOT IT")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleCardGotIt), true, true)
+							]
+							+ SHorizontalBox::Slot().AutoWidth()
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetSkipTipsVisibility)
+								[
+									RHDeck::Button(FText::FromString(TEXT("SKIP ALL TIPS")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleCardSkipAll))
+								]
+							]
+						]
+					]
+				]
+			]
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderImage(RHDeck::RoundedWhite())
 				.BorderBackgroundColor(FLinearColor(0.25f, 0.05f, 0.02f, 0.9f))
-				.Padding(FMargin(24.f, 8.f))
+				.Padding(FMargin(22.f, 8.f))
 				.Visibility(this, &SRHCommandDeck::GetPausedVisibility)
 				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("—  PAUSED  —  Space or a speed key to resume")))
-					.Font(DeckFont(12))
-					.ColorAndOpacity(FLinearColor(1.f, 0.75f, 0.4f))
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 9.f, 0.f))
+					[
+						RHDeck::IconImage(FName("pause"), FSlateColor(FLinearColor(1.f, 0.75f, 0.4f)), 14.f)
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(TEXT("PAUSED  -  Space or a speed key to resume")))
+						.Font(RHDeck::Label(13))
+						.ColorAndOpacity(FLinearColor(1.f, 0.75f, 0.4f))
+					]
 				]
 			]
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
+				.BorderImage(RHDeck::GlassBrush())
 				.Padding(FMargin(14.f, 6.f))
 				.Visibility(this, &SRHCommandDeck::GetHintVisibility)
 				[
 					SNew(STextBlock)
 					.Text(this, &SRHCommandDeck::GetHintText)
-					.Font(DeckFont(10))
+					.Font(RHDeck::Body(11))
 					.ColorAndOpacity(this, &SRHCommandDeck::GetHintColor)
 				]
 			]
 		]
 
 		// Shaft strip, left edge - the vertical map beside the sliced territory.
-		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(8.f)
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(10.f)
 		[
 			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(DeckBg)
-			.Padding(FMargin(5.f, 5.f))
+			.BorderImage(RHDeck::GlassBrush())
+			.Padding(FMargin(6.f, 6.f))
 			[
 				ShaftStrip
 			]
 		]
 
 		// Command bar, bottom. The zone row (rooms) stacks above the main bar
-		// once room functions exist in data - two rows beat one unscrollable one.
-		+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom)
+		// while the view is underground - rooms only exist down there, so on
+		// the surface the row is noise.
+		+ SOverlay::Slot().HAlign(HAlign_Fill).VAlign(VAlign_Bottom).Padding(FMargin(10.f, 0.f, 10.f, 10.f))
 		[
 			SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
 			[
 				SNew(SBorder)
-				.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-				.BorderBackgroundColor(DeckBg)
-				.Padding(FMargin(6.f, 4.f))
-				.Visibility(ZoneCount > 0 ? EVisibility::Visible : EVisibility::Collapsed)
+				.BorderImage(RHDeck::GlassBrush())
+				.Padding(FMargin(8.f, 5.f))
+				.Visibility_Lambda([this, ZoneCount]()
+				{
+					return (ZoneCount > 0 && PC.IsValid() && PC->GetActiveLevel() < 0) ? EVisibility::Visible : EVisibility::Collapsed;
+				})
 				[
 					SNew(SScrollBox).Orientation(Orient_Horizontal)
 					+ SScrollBox::Slot()
 					[
 						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(2.f, 0.f, 8.f, 0.f))
 						[
-							SNew(STextBlock).Text(FText::FromString(TEXT("ZONE  "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+							SNew(STextBlock).Text(FText::FromString(TEXT("ZONE"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 						]
 						+ SHorizontalBox::Slot().AutoWidth() [ ZonePalette ]
 					]
@@ -633,31 +595,30 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight()
 			[
 			SNew(SBorder)
-			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(DeckBg)
-			.Padding(FMargin(6.f, 5.f))
+			.BorderImage(RHDeck::GlassBrush())
+			.Padding(FMargin(8.f, 6.f))
 			[
 				SNew(SScrollBox).Orientation(Orient_Horizontal)
 				+ SScrollBox::Slot()
 				[
 					SNew(SHorizontalBox)
 
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(2.f, 0.f, 8.f, 0.f))
 					[
-						SNew(STextBlock).Text(FText::FromString(TEXT("BUILD "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+						SNew(STextBlock).Text(FText::FromString(TEXT("BUILD"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
 					// Category tabs (Sims-style folders), then the selected
 					// category's buildings - a thin separator between them.
 					+ SHorizontalBox::Slot().AutoWidth() [ CategoryTabs ]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(6.f, 0.f, 8.f, 0.f))
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Fill).Padding(FMargin(8.f, 3.f))
 					[
-						SNew(STextBlock).Text(FText::FromString(TEXT("|"))).Font(DeckFont(9)).ColorAndOpacity(FLinearColor(0.4f, 0.5f, 0.55f))
+						SNew(SBox).WidthOverride(1.f) [ SNew(SBorder).BorderImage(RHDeck::RoundedWhite()).BorderBackgroundColor(RHDeck::PanelLine) ]
 					]
 					+ SHorizontalBox::Slot().AutoWidth() [ Palette ]
 
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(16.f, 0.f, 8.f, 0.f))
 					[
-						SNew(STextBlock).Text(FText::FromString(TEXT("ORDER "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+						SNew(STextBlock).Text(FText::FromString(TEXT("ORDER"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
@@ -681,9 +642,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFleetHold))
 					]
 
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(16.f, 0.f, 8.f, 0.f))
 					[
-						SNew(STextBlock).Text(FText::FromString(TEXT("SPEED "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+						SNew(STextBlock).Text(FText::FromString(TEXT("SPEED"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("II")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePause)) ]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("1x")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 1.f)) ]
@@ -691,9 +652,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("8x")),  FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 8.f)) ]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("60x")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, 60.f)) ]
 
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(14.f, 0.f, 0.f, 0.f))
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(16.f, 0.f, 8.f, 0.f))
 					[
-						SNew(STextBlock).Text(FText::FromString(TEXT("SIM "))).Font(DeckFont(9)).ColorAndOpacity(ReadoutFg)
+						SNew(STextBlock).Text(FText::FromString(TEXT("COLONY"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
 					]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("Save")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSave)) ]
 					+ SHorizontalBox::Slot().AutoWidth() [ DeckButton(FText::FromString(TEXT("Load")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLoad)) ]
@@ -702,69 +663,6 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 	];
-}
-
-FText SRHCommandDeck::GetStatusText() const
-{
-	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
-	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
-	if (!Sim || !Clock)
-	{
-		return FText::FromString(TEXT("colony link offline"));
-	}
-
-	const FRHPowerState& Power = Sim->GetPower();
-	const FString SpeedLabel = Clock->GetSpeed() <= 0.f
-		? FString(TEXT("PAUSED")) : FString::Printf(TEXT("%.0fx"), Clock->GetSpeed());
-	FString Text = FString::Printf(TEXT("SOL %d  %02.0f%%   %s\ngen %4.0f W   load %4.0f W   bank %5.0f/%.0f Wh%s"),
-		Clock->GetSol(), Clock->GetSolFraction() * 100.f, *SpeedLabel,
-		Power.GenW, Power.LoadW, Power.BatteryWh, Power.BatteryCapWh,
-		Power.ShedCount > 0 ? *FString::Printf(TEXT("  SHED:%d"), Power.ShedCount) : TEXT(""));
-
-	for (const auto& Line : Sim->GetQuotaProgress())
-	{
-		Text += FString::Printf(TEXT("\n%-7s %5.0f / %.0f kg"),
-			*Line.Key.ToString(), Line.Value.Key, Line.Value.Value);
-	}
-
-	switch (Sim->GetQuotaPhase())
-	{
-	case ERHQuotaPhase::AwaitingManifest:
-		Text += FString::Printf(TEXT("\nQUOTA MET - manifest %.0f/%.0f kg (RH.Manifest)"),
-			Sim->GetManifestMassKg(), Sim->GetAwardMassKg());
-		break;
-	case ERHQuotaPhase::ShipInbound:
-		Text += TEXT("\nSUPPLY SHIP INBOUND");
-		break;
-	case ERHQuotaPhase::Completed:
-		Text += TEXT("\nTHE PROGRAM CONTINUES");
-		break;
-	default:
-		break;
-	}
-	// The Phase 1 exit (M1-d): permanent once earned - the readout's proudest line.
-	if (Sim->HasVaultRating())
-	{
-		Text += TEXT("\nTHE VAULT IS LIVABLE - PHASE 1 EXIT READY");
-	}
-	// Population (M2): people change what the numbers mean - the crew line
-	// sits with the colony vitals, not in a side panel.
-	if (Sim->GetPopulation() > 0)
-	{
-		int32 Unsupported = 0;
-		for (const FRHColonist& C : Sim->GetColonists())
-		{
-			if (!C.bSupported)
-			{
-				++Unsupported;
-			}
-		}
-		Text += FString::Printf(TEXT("\nCREW %d   Food %5.0f kg%s"),
-			Sim->GetPopulation(), Sim->GetStock(FName("Food")),
-			Unsupported > 0 ? *FString::Printf(TEXT("   UNSUPPORTED:%d"), Unsupported) : TEXT(""));
-	}
-	return FText::FromString(Text);
 }
 
 FText SRHCommandDeck::GetNoticeText() const
@@ -895,6 +793,8 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	RefreshUplinkPanel();
+	RefreshFleetPanel();
+	RefreshRosterPanel();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
 	// Project the building's world point (lifted above its roof) to screen, then
@@ -966,8 +866,8 @@ void SRHCommandDeck::RefreshUplinkPanel()
 	}
 	UplinkList->AddSlot().AutoHeight()
 	[
-		SNew(STextBlock).Text(FText::FromString(TEXT("UPLINK"))).Font(DeckFont(8))
-		.ColorAndOpacity(FLinearColor(0.75f, 0.87f, 0.92f))
+		SNew(STextBlock).Text(FText::FromString(TEXT("UPLINK  -  ORDERS IN FLIGHT"))).Font(RHDeck::Label(9))
+		.ColorAndOpacity(RHDeck::TextDim)
 	];
 	TWeakObjectPtr<ARHPlayerController> WeakPC = PC;
 	for (const FRHCommand& C : Sim->GetUplinkQueue())
@@ -1062,173 +962,6 @@ FReply SRHCommandDeck::HandleCancelOrder(int32 CommandId)
 	return FReply::Handled();
 }
 
-FText SRHCommandDeck::GetFleetText() const
-{
-	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
-	const URHAgentSubsystem* Agents = World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr;
-	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	if (!Agents || !Sim)
-	{
-		return FText::FromString(TEXT("FLEET: offline"));
-	}
-	static const TCHAR* StateNames[] = { TEXT("idle"), TEXT("DIG"), TEXT("HAUL"), TEXT("BUILD"), TEXT("CHARGE"), TEXT("SURVEY"), TEXT("REPAIR") };
-
-	TArray<FRHRobotPanelRow> Rows;
-	Agents->CollectPanelRows(Rows);
-	FString Text = FString::Printf(TEXT("FLEET %d   SpareParts %.0f"), Rows.Num(), Sim->GetStock(FName("SpareParts")));
-	for (const FRHRobotPanelRow& Row : Rows)
-	{
-		const TCHAR* State = Row.TaskType < UE_ARRAY_COUNT(StateNames) ? StateNames[Row.TaskType] : TEXT("?");
-		FString Flag;
-		if (Row.Wear >= Sim->GetWearHaltThreshold())
-		{
-			Flag = TEXT("  HALTED");
-		}
-		else if (Row.Wear >= Sim->GetWearDegradeThreshold())
-		{
-			Flag = TEXT("  degraded");
-		}
-		else if (Row.ChargeFrac <= 0.f)
-		{
-			Flag = TEXT("  stranded");
-		}
-		Text += FString::Printf(TEXT("\n%-5s %-6s batt %3.0f%%  wear %3.0f%s"),
-			*Row.DefName.ToString(), State, Row.ChargeFrac * 100.f, Row.Wear, *Flag);
-	}
-	return FText::FromString(Text);
-}
-
-FText SRHCommandDeck::GetCrewText() const
-{
-	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
-	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	if (!Sim)
-	{
-		return FText::GetEmpty();
-	}
-	const double FoodKg = Sim->GetStock(FName("Food"));
-	const int32 Pop = Sim->GetPopulation();
-	const double SolsOfFood = Pop > 0 ? FoodKg / (Pop * Sim->GetColonistFoodKgPerSol()) : 0.0;
-	const double WaterKg = Sim->GetStock(FName("Water"));
-	const double Potability = Sim->GetWaterPotability();
-	FString Text = FString::Printf(TEXT("CREW %d   beds %d free   Food %.0f kg (~%.0f sols)   Water %.0f kg  potability %.0f%%%s"),
-		Pop, Sim->GetFreeHousing(), FoodKg, SolsOfFood, WaterKg, Potability * 100.0,
-		Potability < Sim->GetWaterPotabilityFloor() ? TEXT("  LOW") : TEXT(""));
-	// The Hope index (M2 Gate B): the number plus the two levers a player can
-	// actually pull right now. Neutral placeholder wording (Gate-D review).
-	const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
-	// The mood (smoothed) + its named band + the work-tempo it drives - the
-	// number finally BITES: a thriving crew visibly out-produces a surviving one.
-	const double Tempo = Sim->GetHumanWorkTempo();
-	Text += FString::Printf(TEXT("\nHOPE %.0f  %s   tempo %.0f%%"),
-		Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), Tempo * 100.0);
-	if (H.OffendedPairs > 0)
-	{
-		Text += FString::Printf(TEXT("   layout conflicts: %d (-%.0f)"), H.OffendedPairs, H.AdjacencyPenalty);
-	}
-	if (H.Comforts > 0.0)
-	{
-		Text += FString::Printf(TEXT("   comforts %d/%d (+%.0f)"), Sim->GetComfortsSuppliedCount(), Pop, H.Comforts);
-	}
-	// The generational carrot (M2 Gate D+): a flourishing colony grows. Show a
-	// live "next arrival" bar only while eligible; the first-born is a badge.
-	if (Sim->IsGrowthEligible())
-	{
-		Text += FString::Printf(TEXT("\nFLOURISHING - next arrival %.0f%%"), Sim->GetGrowthProgress() * 100.0);
-	}
-	if (Sim->GetBirthsOnMars() > 0)
-	{
-		Text += FString::Printf(TEXT("   born on Mars: %d"), Sim->GetBirthsOnMars());
-	}
-	// Discoveries (M2 Gate D+): the research line shows only while the labs are
-	// actually accruing (flourishing + staffed) or once something is uncovered.
-	if (Sim->IsResearchAccruing())
-	{
-		Text += FString::Printf(TEXT("\nRESEARCH - next discovery %.0f%%"), Sim->GetDiscoveryProgress() * 100.0);
-	}
-	if (Sim->GetDiscoveryLog().Num() > 0)
-	{
-		Text += FString::Printf(TEXT("   discoveries: %d"), Sim->GetDiscoveryLog().Num());
-	}
-	// Trade (M3 Gate A): the convoy's status while it's out.
-	if (!Sim->GetConvoyRival().IsNone())
-	{
-		Text += FString::Printf(TEXT("\nCONVOY %s %s   %.0f%%"),
-			Sim->IsConvoyReturning() ? TEXT("returning from") : TEXT("outbound to"),
-			*Sim->GetConvoyRival().ToString(), Sim->GetConvoyProgress() * 100.0);
-	}
-	// Earth's Shadow (M3 Gate B): tension + which way the colony is leaning,
-	// shown once the politics are live (tension has moved off zero).
-	if (Sim->GetEarthTension() > 0.0 || Sim->IsEarthDemandPending() || Sim->GetClosedRouteCount() > 0)
-	{
-		const double Axis = Sim->GetIdentityAxis();
-		const TCHAR* Lean = Axis > 5.0 ? TEXT("Martian-leaning") : (Axis < -5.0 ? TEXT("Earth-aligned") : TEXT("neutral"));
-		Text += FString::Printf(TEXT("\nEARTH tension %.0f   identity %s (%+.0f)"),
-			Sim->GetEarthTension(), Lean, Axis);
-		if (Sim->GetClosedRouteCount() > 0)
-		{
-			Text += FString::Printf(TEXT("   %d route(s) closed"), Sim->GetClosedRouteCount());
-		}
-		Text += FString::Printf(TEXT("   influence %.0f"), Sim->GetInfluence());
-		if (Sim->IsEarthDemandPending())
-		{
-			// Placeholder prompt (Gate-D framing review owns the final wording).
-			Text += TEXT("\n  >> EARTH DEMANDS YOU CUT TRADE  ·  RH.Solidarity comply / defy");
-		}
-		const FName Embargo = Sim->GetEmbargoingRival();
-		if (!Embargo.IsNone())
-		{
-			Text += FString::Printf(TEXT("\n  >> %s EMBARGOED YOU (%.1f sols to defection)  ·  RH.Pacify %s"),
-				*Embargo.ToString(), Sim->GetEmbargoGrace(Embargo), *Embargo.ToString());
-		}
-		// The HumanNature axis reads once it has moved off center (M4).
-		const double HN = Sim->GetHumanNatureAxis();
-		if (FMath::Abs(HN) > 0.5)
-		{
-			Text += FString::Printf(TEXT("\nCONDUCT %s (%+.0f)"),
-				HN > 5.0 ? TEXT("Evolved") : (HN < -5.0 ? TEXT("Destructive") : TEXT("watched")), HN);
-		}
-		// Active crisis + the projected ending (M4 Gate D).
-		if (Sim->GetActiveCrisis() != URHSimWorldSubsystem::ERHCrisis::None)
-		{
-			Text += FString::Printf(TEXT("\n  !! %s (%.1f sols)"), Sim->GetActiveCrisisName(), Sim->GetCrisisRemaining());
-		}
-		const auto Ending = Sim->GetProjectedEnding();
-		if (Ending != URHSimWorldSubsystem::ERHEnding::Undetermined)
-		{
-			Text += FString::Printf(TEXT("\nPATH: %s"), Sim->GetEndingName(Ending));
-		}
-	}
-	// The garden (M2 Gate C): net food math at a glance - the line that says
-	// whether the ~40-sol provisions clock is beaten.
-	if (Sim->GetPlantedCellCount() > 0)
-	{
-		const double Yield = Sim->GetProducingCellCount() * Sim->GetGardenFoodKgPerSolPerCell();
-		const double Draw = Pop * Sim->GetColonistFoodKgPerSol();
-		Text += FString::Printf(TEXT("\nGARDEN %d/%d cells producing   %+.1f kg/sol net"),
-			Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(), Yield - Draw);
-		if (Sim->GetGardenPowerDrawW() > 0.0)
-		{
-			Text += FString::Printf(TEXT("   grow-lights %.0f W%s"),
-				Sim->GetGardenPowerDrawW(), Sim->AreGrowLightsDark() ? TEXT("  DARK") : TEXT(""));
-		}
-	}
-	for (const FRHColonist& C : Sim->GetColonists())
-	{
-		FString Flag;
-		if (!C.bSupported)
-		{
-			const double EvacIn = Sim->GetColonistEvacSols()
-				- C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
-			Flag = FString::Printf(TEXT("  UNSUPPORTED - evac %.1f sols"), FMath::Max(EvacIn, 0.0));
-		}
-		const FName Job = Sim->GetColonistJob(C.Id);
-		Text += FString::Printf(TEXT("\n%-12s floor %d  %s%s"), *C.Name, C.HomeLevel,
-			Job.IsNone() ? TEXT("") : *Job.ToString().ToLower(), *Flag);
-	}
-	return FText::FromString(Text);
-}
-
 EVisibility SRHCommandDeck::GetCrewVisibility() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -1261,8 +994,10 @@ FText SRHCommandDeck::GetInspectText() const
 	}
 	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
 
-	FString Text = FString::Printf(TEXT("%s #%d   (%.0f, %.0f) m"),
-		*B->DefName.ToString(), B->Id, B->LocationCm.X / 100.f, B->LocationCm.Y / 100.f);
+	// The card's title already names the machine; the old "<Def> #<id> (x, y) m"
+	// header was the last raw-ID line on screen (interface pass). Lines below
+	// each lead with "\n", so the first is trimmed off at the end.
+	FString Text;
 
 	if (B->bUnderConstruction)
 	{
@@ -1419,6 +1154,7 @@ FText SRHCommandDeck::GetInspectText() const
 		Text += TEXT("\nhopper:") + Hopper;
 	}
 	Text += TEXT("\n(right-click or click ground to dismiss)");
+	Text.TrimStartInline();
 	return FText::FromString(Text);
 }
 
@@ -1464,7 +1200,7 @@ FText SRHCommandDeck::GetActionCardTitle() const
 		return FText::GetEmpty();
 	}
 	FString Name = (Def && !Def->DisplayName.IsEmpty()) ? Def->DisplayName : B->DefName.ToString();
-	FString Text = FString::Printf(TEXT("%s  #%d"), *Name, B->Id);
+	FString Text = Name;
 	// The director-authored "what is this / how to use it" (blank until the DT
 	// re-sync lands the Blurb column; the card still works without it).
 	if (Def && !Def->Blurb.IsEmpty())
@@ -1522,7 +1258,7 @@ FText SRHCommandDeck::GetKnownGroundText() const
 	{
 		return FText::GetEmpty();
 	}
-	FString Text = FString::Printf(TEXT("KNOWN GROUND   surveys %d"), Sim->GetSurveyHistory().Num());
+	FString Text = FString::Printf(TEXT("surveys run: %d"), Sim->GetSurveyHistory().Num());
 	int32 Known = 0;
 	for (const FRHDepositState& D : Sim->GetDeposits())
 	{
@@ -1852,14 +1588,6 @@ FText SRHCommandDeck::GetInfoCardBody() const
 EVisibility SRHCommandDeck::GetInfoCardVisibility() const
 {
 	return CardQueue.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
-}
-
-FSlateColor SRHCommandDeck::GetInfoCardColor() const
-{
-	// Golden celebration vs teal instruction.
-	return CardQueue.Num() > 0 && CardQueue[0].bGolden
-		? FSlateColor(FLinearColor(0.16f, 0.12f, 0.02f, 0.96f))
-		: FSlateColor(FLinearColor(0.02f, 0.07f, 0.08f, 0.96f));
 }
 
 EVisibility SRHCommandDeck::GetSkipTipsVisibility() const

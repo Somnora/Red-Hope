@@ -757,6 +757,14 @@ void ARHPlayerController::QuickLoad()
 	}
 }
 
+void ARHPlayerController::Debug_ExpandDeck(bool bRoster)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_ExpandAll(bRoster);
+	}
+}
+
 void ARHPlayerController::SetConfirm(const FString& Text, const FLinearColor& Color)
 {
 	// The deck's cyan confirm line (real seconds: survives pause and 8x).

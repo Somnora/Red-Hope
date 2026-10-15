@@ -36,6 +36,8 @@ public:
 	// Same knob for quota rows (test/bridge until the DT_Quotas sync lands).
 	bool Debug_ActivateQuota(FName Name);
 	const FRHManifestItemRow* GetManifestItem(FName Name) const;
+	// All slice-active manifest items (the deck's supply-ship picker).
+	void ForEachManifestItem(TFunctionRef<void(FName, const FRHManifestItemRow&)> Fn) const;
 	// Room function row (M2 Gate B). Returns dormant rows too - callers gate
 	// on SliceActive (designation refuses dormant functions).
 	const FRHRoomRow* GetRoom(FName Name) const;

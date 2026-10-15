@@ -38,15 +38,16 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSpawn(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSnapshot(
 	TEXT("RH.Snapshot"),
-	TEXT("RH.Snapshot [DelaySeconds=5] - DEBUG: request a screenshot after a delay (written to Saved/Screenshots). Lets a headless driver verify the look."),
+	TEXT("RH.Snapshot [DelaySeconds=5] [ui] - DEBUG: request a screenshot after a delay (written to Saved/Screenshots). Lets a headless driver verify the look; 'ui' keeps the HUD/deck in the frame."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
 		const float Delay = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 5.f;
+		const bool bUI = Args.Num() > 1 && Args[1].Equals(TEXT("ui"), ESearchCase::IgnoreCase);
 		FTimerHandle Handle;
-		World->GetTimerManager().SetTimer(Handle, []()
+		World->GetTimerManager().SetTimer(Handle, [bUI]()
 		{
-			FScreenshotRequest::RequestScreenshot(TEXT("RHSnap"), /*bShowUI*/ false, /*bAddFilenameSuffix*/ true);
+			FScreenshotRequest::RequestScreenshot(TEXT("RHSnap"), /*bShowUI*/ bUI, /*bAddFilenameSuffix*/ true);
 			UE_LOG(LogRedHope, Display, TEXT("Snapshot requested"));
 		}, Delay, false);
 	}));
@@ -774,6 +775,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAddStock(
 		{
 			Sim->AddStock(FName(*Args[0]), FCString::Atod(*Args[1]));
 			UE_LOG(LogRedHope, Display, TEXT("Pool stock %s: %.0f kg"), *Args[0], Sim->GetStock(FName(*Args[0])));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckExpand(
+	TEXT("RH.DeckExpand"),
+	TEXT("RH.DeckExpand [roster] - DEBUG: unfold every collapsible command-deck panel (captures/QA); 'roster' unfolds the crew list too."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr)
+		{
+			PC->Debug_ExpandDeck(Args.Num() > 0 && Args[0].Equals(TEXT("roster"), ESearchCase::IgnoreCase));
 		}
 	}));
 

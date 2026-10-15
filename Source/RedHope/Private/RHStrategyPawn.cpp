@@ -12,12 +12,31 @@ ARHStrategyPawn::ARHStrategyPawn()
 	Camera->SetupAttachment(Root);
 }
 
+void ARHStrategyPawn::BeginPlay()
+{
+	Super::BeginPlay();
+	// Opening shot: ~40 m off the Lander (the origin), looking flatter so the
+	// horizon reads, swung 35 degrees round; Tick eases all three home.
+	IntroSecondsLeft = 8.f;
+	SmoothedZoomT = 0.1f;
+	SmoothedPitchOffsetDeg = -12.f;
+	IntroYawOffsetDeg = -35.f;
+}
+
 void ARHStrategyPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	SmoothedZoomT = FMath::FInterpTo(SmoothedZoomT, ZoomT, DeltaTime, ZoomInterpSpeed);
-	SmoothedPitchOffsetDeg = FMath::FInterpTo(SmoothedPitchOffsetDeg, PitchOffsetDeg, DeltaTime, ZoomInterpSpeed);
+	// The opening pull-back runs slow (speed 0.6, ~settled in 7 s); then the
+	// usual snappy zoom response resumes. Its clock is clamped to 30 fps steps:
+	// the first frames after boot can take seconds each (shader and streaming
+	// hitches), and an unclamped ease would land in one jump, unseen.
+	const float Dt = IntroSecondsLeft > 0.f ? FMath::Min(DeltaTime, 1.f / 30.f) : DeltaTime;
+	const float Speed = IntroSecondsLeft > 0.f ? 0.6f : ZoomInterpSpeed;
+	IntroSecondsLeft = FMath::Max(0.f, IntroSecondsLeft - Dt);
+	IntroYawOffsetDeg = IntroSecondsLeft > 0.f ? FMath::FInterpTo(IntroYawOffsetDeg, 0.f, Dt, 0.6f) : 0.f;
+	SmoothedZoomT = FMath::FInterpTo(SmoothedZoomT, ZoomT, Dt, Speed);
+	SmoothedPitchOffsetDeg = FMath::FInterpTo(SmoothedPitchOffsetDeg, PitchOffsetDeg, Dt, Speed);
 	// The elevator ride (M1-d): the focus plane descends/ascends smoothly
 	// (~1.5 s per floor) instead of cutting - the motion IS the feedback.
 	FocusPointCm.Z = FMath::FInterpTo(FocusPointCm.Z, TargetFocusZCm, DeltaTime, 3.f);
@@ -32,7 +51,7 @@ void ARHStrategyPawn::Tick(float DeltaTime)
 		FMath::Lerp(MinPitchDeg, MaxPitchDeg, SmoothedZoomT) + SmoothedPitchOffsetDeg, -6.f, 86.f);
 	const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, SmoothedZoomT);
 
-	const FRotator LookRot(-Pitch, OrbitYawDeg, 0.f);
+	const FRotator LookRot(-Pitch, OrbitYawDeg + IntroYawOffsetDeg, 0.f);
 	const FVector CamPos = FocusPointCm - LookRot.Vector() * Distance;
 
 	SetActorLocation(CamPos);
@@ -42,16 +61,19 @@ void ARHStrategyPawn::Tick(float DeltaTime)
 
 void ARHStrategyPawn::AddZoom(float Delta)
 {
+	IntroSecondsLeft = 0.f;
 	ZoomT = FMath::Clamp(ZoomT + Delta, 0.f, 1.f);
 }
 
 void ARHStrategyPawn::AddOrbit(float DeltaYawDeg)
 {
+	IntroSecondsLeft = 0.f;
 	OrbitYawDeg = FMath::UnwindDegrees(OrbitYawDeg + DeltaYawDeg);
 }
 
 void ARHStrategyPawn::AddTilt(float DeltaPitchDeg)
 {
+	IntroSecondsLeft = 0.f;
 	// Offset range: enough to drag the ground-register 30-degree pitch below the
 	// horizon line (-6 after the Tick clamp) or push it fully top-down.
 	PitchOffsetDeg = FMath::Clamp(PitchOffsetDeg + DeltaPitchDeg, -42.f, 30.f);
@@ -68,10 +90,13 @@ void ARHStrategyPawn::SetCameraPose(FVector2D FocusXYCm, float InZoomT, float In
 	// the pose land immediately instead of a half-second later.
 	SmoothedZoomT = ZoomT;
 	SmoothedPitchOffsetDeg = PitchOffsetDeg;
+	IntroSecondsLeft = 0.f;
+	IntroYawOffsetDeg = 0.f;
 }
 
 void ARHStrategyPawn::AddPan(FVector2D PlanarDeltaCm)
 {
+	IntroSecondsLeft = 0.f;
 	const FRotator YawOnly(0.f, OrbitYawDeg, 0.f);
 	FocusPointCm += YawOnly.RotateVector(FVector(PlanarDeltaCm.X, PlanarDeltaCm.Y, 0.f));
 }

@@ -18,11 +18,13 @@ public:
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
+	// Capture/QA: unfold every collapsible panel (RH.DeckExpand); the roster
+	// only with "roster", it is tall enough to push the rest off screen.
+	void Debug_ExpandAll(bool bRoster) { bFleetExpanded = bCrewExpanded = bPoliticsExpanded = bPowerExpanded = true; bRosterExpanded = bRoster; }
 	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:
-	FText GetStatusText() const;
 	FText GetNoticeText() const;
 	EVisibility GetNoticeVisibility() const;
 	// PC feedback channels (M1-b Gate C): one-shot confirms + live mode hint,
@@ -47,8 +49,6 @@ private:
 	void RefreshUplinkPanel();
 	// Power strip-chart: last 3 sols of gen/load/bank as block-char sparklines.
 	FText GetPowerChartText() const;
-	// Fleet panel: one line per robot from the agent subsystem snapshot.
-	FText GetFleetText() const;
 	// Inspection card: click a building, read its live state.
 	FText GetInspectText() const;
 	EVisibility GetInspectVisibility() const;
@@ -68,9 +68,7 @@ private:
 	FText GetExcavateActionLabel() const;
 	EVisibility GetExcavateActionVisibility() const;
 	EVisibility GetActionPowerVisibility() const;
-	// Crew roster card (M2 Gate A2): the people, their floor, their life
-	// support - shown once anyone has landed.
-	FText GetCrewText() const;
+	// The crew panel shows once anyone has landed (M2 Gate A2).
 	EVisibility GetCrewVisibility() const;
 	// Room zoning (M2 Gate B): arm the controller's zone-paint mode.
 	FReply HandleZone(FName Room);
@@ -124,7 +122,6 @@ private:
 	FText GetInfoCardTitle() const;
 	FText GetInfoCardBody() const;
 	EVisibility GetInfoCardVisibility() const;
-	FSlateColor GetInfoCardColor() const;
 	EVisibility GetSkipTipsVisibility() const;
 	FReply HandleCardGotIt();
 	FReply HandleCardSkipAll();
@@ -134,6 +131,46 @@ private:
 	void HandleMilestone(const FString& Line);
 	FText GetToastText() const;
 	EVisibility GetToastVisibility() const;
+
+	// --- Interface pass (2026-10-15): titled panels replace the text dumps ---
+	// RHCommandDeckPanels.cpp. The vitals strip (top left) puts the colony's
+	// numbers on icon tiles; the right column is Objective (quota bars, the
+	// supply-ship manifest picker and LAUNCH), Crew, Fleet, Earth & Neighbors
+	// (the M3/M4 verbs, until now console-only) and Power history. Collapsible
+	// panels keep a one-line summary in their header.
+	TSharedRef<SWidget> BuildVitalsStrip();
+	TSharedRef<SWidget> BuildObjectivePanel();
+	TSharedRef<SWidget> BuildCrewPanel();
+	TSharedRef<SWidget> BuildFleetPanel();
+	TSharedRef<SWidget> BuildPoliticsPanel();
+	TSharedRef<SWidget> BuildPowerPanel();
+	TSharedRef<SWidget> BuildHelpPanel();
+	TSharedRef<SWidget> BuildCommsPanel();
+	TSharedRef<SWidget> ExpandToggle(bool* bFlag);
+	void RefreshFleetPanel();
+	void RefreshRosterPanel();
+	FReply HandleManifestAdd(FName Item);
+	FReply HandleLaunch();
+	FReply HandleSolidarity(bool bComply);
+	FReply HandleRivalVerb(FName Verb, FName Rival);
+	const class URHSimWorldSubsystem* GetSim() const;
+	const class URHSimClockSubsystem* GetClock() const;
+	const class URHDefinitionsSubsystem* GetDefs() const;
+
+	bool bShowHelp = false;
+	bool bFleetExpanded = false;
+	bool bCrewExpanded = true;
+	bool bRosterExpanded = false;
+	bool bPoliticsExpanded = false;
+	bool bPowerExpanded = false;
+	// Fleet rows, refreshed each Tick from the agent snapshot; the list widget
+	// rebuilds only when membership changes (rows read by index).
+	struct FFleetRowView { FString Name; uint8 Task = 0; float Charge = 0.f; float Wear = 0.f; };
+	TArray<FFleetRowView> FleetRows;
+	TArray<FName> FleetDefsShown;
+	TSharedPtr<class SVerticalBox> FleetList;
+	TSharedPtr<class SVerticalBox> RosterList;
+	int32 RosterCountShown = -1;
 
 	TWeakObjectPtr<ARHPlayerController> PC;
 	// Info-card + toast state.
