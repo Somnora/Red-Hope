@@ -94,6 +94,15 @@ under CC0. No attribution is required; this is a courtesy credit:
 The rest of the soundscape (ambience beds, machine loops, chime and stingers)
 is synthesised in `scripts/audio/rh_sfx_build.py`.
 
+## Music generated with Google Lyria
+
+The six soundtrack pieces (`/Game/RedHope/Audio/Music`, two per phase) were
+generated on 2026-10-15 with Google's Lyria 3 Pro model on Vertex AI
+(project somnora-dev-01), from the prompts in
+`scripts/audio/rh_music_prompts.json`. This is a provenance note, not a
+licence requirement. Lyria output carries Google's inaudible SynthID
+watermark.
+
 ## Blender
 
 Blender is GPL. It is used as a tool; the GPL binds Blender itself, not artwork

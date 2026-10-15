@@ -1,0 +1,13 @@
+{
+ "model": "lyria-3-pro-preview",
+ "generated": "2026-10-15",
+ "level": "ffmpeg loudnorm I=-20 TP=-2 LRA=11, fade in 1.5 s, fade out 3 s, 44.1 kHz stereo PCM16",
+ "tracks": {
+  "mus_p1_a": "Instrumental ambient score for a Mars colony strategy game, phase one: robots alone on an empty red planet. Sparse, slow analog synth pads, a distant pulsing arpeggio like a signal from a probe, deep sub-bass swells, glassy high tones. Vast, lonely, a sense of awe and quiet competence. Around 70 BPM, no drums, no vocals, no lyrics. Calm, suitable to play under gameplay.",
+  "mus_p1_b": "Instrumental ambient score for a Mars colony strategy game, phase one: dawn over a robot dig site on an empty Mars. Slow evolving synthesizer drones, soft granular textures, a sparse plucked motif, wind-like noise swells, a faint mechanical pulse far in the background. Awe and isolation, patient and curious. No drums, no vocals, no lyrics.",
+  "mus_p2_a": "Instrumental score for a Mars colony strategy game, phase two: the first humans arrive and make a home underground. Warm, hopeful ambient: soft felt piano, gentle string pads, a warm synth bed, slow tempo around 72 BPM. Intimate and communal, quiet optimism, a sense of belonging. No drums, no vocals, no lyrics.",
+  "mus_p2_b": "Instrumental score for a Mars colony strategy game, phase two: evening in the underground habitat, the crew sharing a meal under greenhouse lights. Gentle acoustic guitar harmonics, soft piano, a warm cello line, light ambient pads, tender and hopeful, slow. No vocals, no lyrics, no drum kit.",
+  "mus_p3_a": "Instrumental cinematic score for a Mars colony strategy game, phase three: a young Martian society faces Earth's politics and chooses its own path. Dignified, weighty and hopeful: low strings and soft brass swells over an ambient synth bed, a slow build, determined resolve, hard-science optimism. No vocals, no lyrics.",
+  "mus_p3_b": "Instrumental orchestral ambient for a Mars colony strategy game, late game: wide open horizons over a growing settlement on Mars. Slow broad strings, warm horn swells, soft synth pads, gentle mallet percussion, expansive and hopeful, calm and dignified. Instrumental only."
+ }
+}

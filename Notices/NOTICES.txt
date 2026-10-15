@@ -136,6 +136,11 @@ Impact Sounds, released under CC0. CC0 requires no attribution; this entry is
 a courtesy credit.
 
 
+MUSIC
+-----
+The soundtrack was generated with Google Lyria (Vertex AI).
+
+
 BLENDER
 -------
 Blender is GPL-licensed and was used as a TOOL in the art pipeline. The GPL
