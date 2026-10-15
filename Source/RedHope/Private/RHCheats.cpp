@@ -826,6 +826,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAfter(
 		}), FMath::Max(0.01f, Delay), false);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHMenu(
+	TEXT("RH.Menu"),
+	TEXT("RH.Menu <title|pause|settings|credits|none> - DEBUG: open a menu screen (captures/QA)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (PC && Args.Num() > 0)
+		{
+			PC->Debug_OpenMenu(Args[0]);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSetCirculates(
 	TEXT("RH.SetCirculates"),
 	TEXT("RH.SetCirculates <DefName> <0|1> - DEBUG: set a building def's CirculatesAir in the loaded table (test knob until the AirFilter DT row lands)."),
@@ -892,7 +904,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCrew(
 				*C.Name, C.HomeLevel,
 				Job.IsNone() ? TEXT("(no post)") : *Job.ToString(),
 				C.bSupported ? TEXT("supported") : TEXT("UNSUPPORTED"),
-				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (evac in %.1f sols)"), Sim->GetColonistEvacSols() - EvacSols));
+				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (evac in %.1f sols)"), Sim->GetEffectiveEvacSols() - EvacSols));
 		}
 	}));
 

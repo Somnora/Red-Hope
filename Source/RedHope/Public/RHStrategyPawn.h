@@ -19,6 +19,9 @@ public:
 	ARHStrategyPawn();
 
 	virtual void BeginPlay() override;
+	// The opening pull-back on the Lander (also replayed when the title's NEW
+	// COLONY closes the menu).
+	void PlayIntro();
 	virtual void Tick(float DeltaTime) override;
 
 	// Input surface (wired to Enhanced Input in the M0 UI pass; callable from

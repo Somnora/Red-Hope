@@ -1,25 +1,59 @@
 # The Red Hope — Project Status
 
-**Dated 2026-08-18.** This is the working source-of-truth snapshot: what the
+**Snapshot: 2026-10-15 (through commit `4706e5f`).** The previous snapshot was
+2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
-three-phase arc from the design brief
-(`docs/the-red-hope-design-brief.md`).
+three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
+Everything is on `main` (local `main` matches the `origin/main` tracking ref,
+`https://github.com/Somnora/Red-Hope.git`). Save format **v26**.
 
-The SIMULATION is unchanged since the 2026-07-15 consolidation - sections 1 and 2
-below still describe it accurately. Everything since has been the ART AND
-PRESENTATION arc, summarised in section 3b.
+## Since August (22 commits, `147de7a` → `4706e5f`; detail in §3c)
 
-Verification bar for every claim below: the full headless self-test battery
-(**25 suites + the 10-sol baseline, all green**) plus the byte-identical
-regression pins (`power: gen 50 W load 20 W`, `deposit Regolith_A: 40645 kg`),
-which have not moved once across the whole graphics arc.
-Reproduce:
+- **Hero lane finished the static family** (`147de7a`); **robots play their
+  task poses** - the work clips had shipped unwired (`9efba3d`).
+- **Model triage → buildings built in code**: the director judged a lineup of
+  every shipping mesh (`db6a99a`) on 10-13; everything marked "weird"/"fix" was
+  rebuilt as a hard-surface Blender build from its approved reference
+  (`221afe7`, `03d86be`, `07841c8`, `33caddf`, `1d2342c`, `951f3f8`): 12
+  buildings, the elevator cab + door, 6 props, 2 crop stages.
+- **The whole crew on one MPFB body** (`8b52734`, `2c784da`): one mesh, one
+  53-bone skeleton, one clip set, 1.60–1.88 m; **face pass** (`2325955`).
+- **Elevator doors + boarding live, crew at true height, real models fill
+  their footprints** (`9532013`).
+- **Sound** (`20807bf`) and a **six-track Lyria score**, two per phase (`bb240a8`).
+- **Interface pass**: step 1 panel deck, console-only verbs as buttons, an
+  opening shot (`48934b9`); step 2 card build menu with in-game thumbnails
+  (`9a9261e`).
+- **The first-hour guide**: a live 19-step NEXT STEP panel (`60c14a2`).
+- **`RH.Playtest`**, a scripted player, found a **permanent softlock**: robots
+  recharge only at a finished Charging Pad (`0ca24d3`). Fixed by the director's
+  call - **the Lander is an emergency charging dock**, `LanderDockRate_W`
+  100 W (`6410bf8`).
+- **Crew-phase playtest** (`4706e5f`): two quotas make the crew ship the
+  program's last; a lean cargo empties the colony at sol 77 with no warning
+  before sol 75; with soil + seeds Hope pins at 100 from sol 16. The
+  GROW-LIGHTS DARK alert flood (12,524 in 40 sols) is fixed (now 1).
+- **Toolchain** (outside the repo): Metal Toolchain reinstalled after the
+  Xcode 27 update (`db6a99a`); UE 5.8's SDK gate opened for Xcode 27 (`9532013`).
+
+**Verification bar.** The full headless battery is **the 10-sol baseline + 24
+suites (25 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
+the art, audio, interface and playtest work. Last reported fully green on
+`4706e5f` ("0 suites not green", pins unchanged); also on `9532013`, `48934b9`,
+`9a9261e`, `0ca24d3`, `6410bf8`.
 ```bash
+bash scripts/sim/rh_battery.sh            # all 25 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers   (+ no-switch = the baseline)
+#         crisis alive ladder ending tiers agri   (+ no-switch = the baseline)
 ```
+
+**The simulation has changed since the 07-15 consolidation, in pin-neutral
+ways:** greenhouse agriculture (save v26, 07-16, crops dormant), pure-data
+self-tests (`163165a`), a read-only manifest iterator (`48934b9`), the Lander
+dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only).
 
 ---
 
@@ -51,7 +85,11 @@ endings.
   aggregate integrator with proven agent-vs-era parity.
 - **Fleet reality**: wear/degrade/halt + repair, survey (hidden deposits),
   one-umbilical pad queue, storms & solar flares (dust derates solar, flares tax
-  exposed robots), radiation curve (shielded underground).
+  exposed robots), radiation curve (shielded underground). **Charging**: the
+  Charging Pad is the real charger (500 W, one robot at a time); with no working
+  pad on the robot's floor, robots dock on the Lander's south side at
+  `LanderDockRate_W` (100 W each, all at once). A Lander switched off is no
+  dock (`6410bf8`).
 - **The vault**: bore a shaft, carve floors, shield → oxygenate → circulate →
   **rate a floor LIVABLE**. Underground construction, the trunk hauls across
   levels, sliced-camera pit view.
@@ -75,300 +113,340 @@ endings.
   **potability** (a scalar) → drilling/importing ice is what keeps a colony
   flourishing enough to grow. **Discoveries**: staffed Labs uncover an authored
   sequence ending in **LIFE ON MARS** (permanent Hope milestones).
+- **Greenhouse agriculture** (save v26, spec Gates A/B/D): `DT_Crops` with 7
+  crops and growth stages, soil depletion + the compost/spoil-chems →
+  FertilizerMix loop, per-floor climate with the HumidityRegulator gate, duct
+  CO2/O2 exchange. **All crops ship dormant** (dormant = the legacy garden
+  bit-for-bit); activation is a director gate flip.
 - **The alive pass**: per-colonist **skills** (mastery ramps output 1×→2×),
   crew-life **moments** (abstracted, never violent), the **first Martian
-  harvest** celebration, a 1600-name diverse roster, and pickup-and-play
-  onboarding (tutorial cards, milestone/first-stock toasts).
+  harvest** celebration, a 1600-name diverse roster. **Onboarding** is now the
+  first-hour guide (`60c14a2`; presentation, capture-verified) plus tip cards
+  and milestone/first-stock toasts.
 
 ### Phase 3 — Sovereignty (M3 + M4)
 - **Neighbors & trade** (M3-A): rover convoys to rival colonies, all costs
   committed at departure, transit freezes in dust storms; Zarya's ice restores
-  your water potability — **trade is an alternative to drilling your own ice**
-  (wired into the M2 water loop, not a bolt-on).
+  your water potability — **trade is an alternative to drilling your own ice**.
 - **Earth's Shadow** (M3-B): tension drifts → demands; a **requisition
   multiplier** scales your CEO award by standing (Identity axis + tension).
 - **The Solidarity Dilemma** (M3-C): Comply (sever routes, national pride,
   morale grief) vs Defy (Martian pride, warm rivals, requisitions stay slashed,
-  escalation) — the brief's signature choice, cutting something real because the
-  trade dependency was built first.
+  escalation) — the brief's signature choice.
 - **Espionage economy** (M4-A/B): covert requisition (seeded-hash detection
-  check, content-stable), launder, sabotage-blackout — re-skinned from the
-  director's combat spec to on-brief embargo/blackout, **no combat**.
-- **Earth's pre-emptive pressure** (M4-C): Influence currency, embargo (turns
-  your closest friend against you), Pacify, permanent defection.
-- **The finale** (M4-D): alignment-gated **dynamic crises** (Destructive→
-  Malfunction work-slow, Evolved→Environmental water-drain; units inert, never
-  feral), and the **endings framework** reading both axes → Corporate Jewel /
-  Independent Mars Federation / Martian Cold War / Abandonment-Collapse.
+  check), launder, sabotage-blackout — on-brief embargo/blackout, **no combat**.
+- **Earth's pre-emptive pressure** (M4-C): Influence currency, embargo, Pacify,
+  permanent defection.
+- **The finale** (M4-D): alignment-gated **dynamic crises** (units inert, never
+  feral) and the **endings framework** → Corporate Jewel / Independent Mars
+  Federation / Martian Cold War / Abandonment-Collapse.
+- Since `48934b9` every M3/M4 verb has a deck button that enqueues the same
+  uplink command the `RH.*` cheats send.
 
 ---
 
-## 3. What the 2026-07-15 consolidation changed (history, kept)
+## 3. History: the 2026-07-15 consolidation (kept, compressed)
 
-**Everything below is committed on branch `graphics-pass-6-textured-models` and
-verified against the 24-green battery.**
+All of it is on `main`.
+1. Committed the uncommitted animation-phase work (`29bb31b`, 646 files) and
+   the two 2026-07-10 specs + project CLAUDE.md (`4df818d`).
+2. **v25** (`6fd3faa`): the goal ladder (meeting a quota opens the next), ending
+   resolution (EPILOGUE / COLLAPSE), research funding + UnlockRoom, station
+   tiers (tiered-production Gate A, incl. the Infirmary), repeatable weather.
+   Suites `-ladder -ending -tiers`.
+3. Guides: `docs/asset-pipeline-guide.md`, `docs/model-material-polishing-guide.md`.
+4. A headless-Blender polish pass on ~36 GLBs (QA found them fully split/
+   faceted). Mostly moot now: see §3c.
 
-1. **Committed the uncommitted animation-phase work** (`29bb31b`, 646 files):
-   rigged skeletal walkers for crew + robots (Walk/Idle + per-job clips), the
-   20-face roster, the elevator-as-a-place (cage + sliding doors + fill light),
-   hover-gated labels, `RH.Demo` everything-button. Was ~935 lines + 12 art dirs
-   sitting uncommitted (asset-loss risk); compiled clean, battery green, then
-   committed. Plus the two 2026-07-10 specs + project CLAUDE.md (`4df818d`).
-
-2. **Built the v25 increment** (`6fd3faa`) — closing the game-structure loop
-   that was the one real gap. Sim-only, save v25, baseline byte-identical:
-   - **The goal ladder**: quota deadlines relative to opening; meeting one opens
-     the next (Q2 now active). The program's demands keep coming.
-   - **Ending resolution**: hold a declared path → one-time EPILOGUE; a colony
-     that had crew and emptied → one-time COLLAPSE (prevention-framed).
-   - **Research pays + unlocks**: discovery FundingKg banks toward the next
-     award; discovery UnlockRoom flips a dormant station live (the tier ladder
-     gated by playing research, not a tech tree).
-   - **Station tiers** (tiered-production spec Gate A): Tier/SeatCount/YieldMul
-     on rooms; T2/T3 Workstation & Lab lines; workstation seats speed
-     construction; an **Infirmary** passively stretches the evac countdown.
-   - **Long-game weather**: the authored storm/flare schedule can repeat on a
-     cycle (off by default), era-drop rules fold with it.
-   - Three new suites (`-ladder -ending -tiers`), all exact.
-
-3. **Wrote three human-runnable guides** (this commit):
-   - `docs/asset-pipeline-guide.md` — build assets yourself on the Lambda/
-     Manifold A100 (launch → bootstrap → style-lock → gen-3d → mesh-cleanup →
-     server → UE import → shut down).
-   - `docs/model-material-polishing-guide.md` — mesh polish (weld/smooth/ground)
-     + Unreal `M_ModelTex` material tuning (incl. why the emissive floor exists,
-     the ISM-usage trap).
-   - This status doc.
-
-4. **Ran a model polish pass** on the ~36 game GLBs (headless Blender on the
-   A100): QA audit + weld + auto-smooth + before/after preview renders. The QA
-   confirmed the meshes are fully-split/faceted (≈18k islands, 94.6% flat) —
-   `_polished.glb` variants + preview pairs are on NFS for a re-import decision.
+Follow-ups that landed 07-16: the full DataTable sync, headless (`e556267`);
+the self-tests became pure-data verifiers (`163165a`: CSV-mirroring injects
+replaced by drift assertions; two synthetic fixtures, Greed and TestCeramics,
+stay injected by design); greenhouse agriculture (save v26).
 
 ---
 
-## 3b. The art & presentation arc (2026-08-14 → 08-18)
+## 3b. History: the art & presentation arc (2026-08-14 → 08-18, compressed)
 
-No simulation code changed. The battery stayed 25/25 with identical pins
-throughout, which is the evidence that none of this touched the sim.
+No simulation code changed; the battery stayed green with identical pins.
+- **"Splotchy / see-through crew"**: the pipeline decimated BEFORE rigging
+  (shattered shells, confetti UVs, every vertex hard-pinned to one bone) and the
+  crew sat on a subsurface skin shader. Fixed then (`docs/crew-generator-test.md`);
+  superseded now by the MPFB crew (§3c).
+- **Master materials** gained normal and MR inputs - <0.3% of pixels at the
+  29–216 m camera range. What reads there is silhouette, value contrast,
+  emissive and lighting, hence per-building night lamps.
+- **`M_RH_Master` failed the Metal shader translator** until `6816d4b`:
+  buildings rendered gray in-game while editor dumps looked healthy. Doctrine: a
+  frame with material compile failures is NOT JUDGEABLE (`rh_capture.sh` counts
+  them).
+- **The hero lane** (Nano-Banana 4K → TRELLIS.2 → baked normals) re-did nine
+  buildings through `147de7a`; only the Pylon is still a hero-lane mesh in game.
+  GPU work moved to its own filesystem `red-hope-east`; the lane's tooling was
+  rescued into git (`scripts/gpu/lane/`).
+- **Lessons kept:** commit the excluded-file list before deleting a migration
+  source (the 14 GB `io/` loss); scripts the docs point at belong in git
+  (`147de7a` recreated `rh_paint_kit.py`/`rh_paint_return.py` from a lost
+  scratchpad).
 
-**One root cause explained years of "splotchy".** The character pipeline
-DECIMATED BEFORE RIGGING. Decimation shatters a mesh into disconnected shells
-(measured: one crew mesh goes from 1 connected component to 95, largest holding
-38%); a shattered mesh unwraps to confetti UV islands, so the baked paint IS
-confetti; and Blender's heat weighting fails on it, falling through to a backstop
-that hard-pinned **53,885 of 53,885 vertices** to one nearest bone each. Rigid
-binding then tears geometry off the body at the joints in motion - the "you can
-see through parts of their body" report. Fixed by welding before the bind (0
-backstop hits after), by blending the backstop over 3 nearest bones instead of
-snapping to 1, and by importing the coherent source paint over the confetti.
-Full account: `docs/crew-generator-test.md`.
+---
 
-**Two shading inputs did not exist.** Neither master material had a normal input
-(`M_RH_Master`, `M_RH_Character` both dumped `Normal <- <none>`), and the
-character master had no metallic/roughness input either - so every walker's
-imported roughness map sat inert. Both added, opt-in, with 42 derived normal maps
-wired. Honest measurement: at the distances the strategy camera actually reaches
-(29 m closest), the whole normal-map change moves 0.08-0.29% of pixels. It is
-foundation, not a visible win.
+## 3c. The October arc (2026-10-13 → 10-15)
 
-**What DOES read at 29-216 m**, established by measurement rather than taste:
-silhouette, large-scale value contrast, emissive points, and lighting. Hence the
-per-building night lamps (every powered building, accent-tinted, riding the
-existing power pass) rather than more surface detail.
+**Buildings and props, built in code.** The 10-13 triage split the models
+cleanly: the ones the director liked (Lander, Habitat, Pylon, SolarArray) were
+clean silhouettes; the "weird" ones were image-to-3D output - melted detail,
+shredded fins, holes, a function tint over the whole hull. The hard-surface kit
+`scripts/blender/rh_hs.py` (Blender 5.2, headless, local) builds bevelled
+primitives in art-bible role materials and bakes BaseColor (edge chipping,
+cavity rust, AO grime, Mars dust), an MR map and an emissive mask: one mesh, one
+material, mostly 8–17k tris. Each `rh_build_<name>.py` keeps its approved
+reference, was self-checked (no floating islands, z-fights or degenerate faces)
+and reviewed, then `scripts/unreal/rh_import_hs.py` replaced it IN PLACE (same
+`/Game` path, no C++ change). Accent is trim only; glow sits behind a real mask.
+- Rebuilt: BatteryBank, ComputeModule (`CommandModule`), AirFilter,
+  HumidityRegulator, Electrolyzer, Forge (`HeavyForge`), IceDrill, Stockpile,
+  WaterPlant, Borer, Lander, Habitat; elevator cab + door; props infirmary (no
+  IV pole, Gate-D), lab_full, workbench_lg, workshop, planter_wet, tank;
+  crop_tall stages 2–3. Each verified in a fresh `-game` boot (renders as the
+  imported model on `MI_<name>`, 0 material failures, 0 sim errors).
+- Of the 13 `ModelPathsV2` buildings, 11 are now code-built; **SolarArray**
+  (07-17 Hunyuan paint) and **Pylon** (08-18 hero lane) are not - both liked.
 
-**Asset work:** 12 room props and 10 buildings re-baked through TRELLIS.2; 215
-orphan assets deleted (art tree 939 → 736); 13 baked-in floor plates removed;
-the crew's subsurface-shader bug fixed; licence notices now ship beside the
-executable; the project stopped calling itself "Top Down BP Game Template".
+**The crew on one body.** All 20 walkers are MPFB2 (MakeHuman, CC0) builds on
+one topology, one 53-bone `game_engine` skeleton (UE mannequin names), one clip
+set (Walk, Idle, WorkBench, WorkLab, Dig, Haul, Charge, Plant, Repair, Operate)
+with planted-feet crouches, recoloured into the art-bible palette, one 2048
+atlas, 16.4–22.7k tris (budget 25k). Scripts: `rh_crew_build.py`,
+`rh_crew_clips.py`, `rh_crew_roster.py`; import `scripts/unreal/rh_import_crew.py`
+onto `M_RH_CharacterMasked`. The face pass (`2325955`) fixed red eyes and dotted
+brows, added a face normal map and lashes, retired hair over the eyes. Roster
+and face sheets: `docs/media/crew-roster-20.png`, `crew-faces-20.png`. A boot
+reaches population 20 with 0 material/sim/usage errors.
 
-**The 2026-08-16→18 tail of the arc** (commits `6816d4b`→`f12736d`): the
-surface catastrophe was root-caused to `M_RH_Master` failing the Metal shader
-translator — every master-family building had rendered engine-default gray
-in-game since mid-08-17 while editor dumps looked healthy (the fix: a
-TC_GRAYSCALE white default for the EmissiveMask sampler; the doctrine: a frame
-with material compile failures is NOT JUDGEABLE, now hard-counted by
-`rh_capture.sh` and testable via `viewmode unlit`). Five buildings then went
-through the new hero lane (Nano-Banana 4K hero reference → TRELLIS.2 with
-kept hi-poly → Blender-baked real 2048 normals, ~$0.35–0.45 each):
-Electrolyzer, IceDrill, Pylon (solid monopole re-roll), Borer, AirFilter.
-The director's six photo notes were each root-caused and fixed (furniture
-avoidance on all walks; bone-roll re-rig of all 20 walkers killing the
-belly-stretch and wrong-plane elbows; `rh.RobotPlantCm` grounding the robots;
-derived-normal strengths halved — the "TV static" amplifier). A complete
-beginner paint pipeline now exists for the director (`rh_paint_kit.py` /
-`rh_paint_return.py` + the Paint Shop artifact). Still on old paint:
-BatteryBank, WaterPlant, Lander, Stockpile — queued for the same lane.
+**Elevator, height, footprint (`9532013`).** `RHElevatorLayout.h` is the
+geometry contract shared with `rh_build_elevator.py`: a 1.22 × 2.22 m clear
+doorway on the camera side (tallest crew 1.88 m + a foot each way), pocket
+doors that slide on ElevatorWakeAlpha, Boarding/Alighting phases, walks routed
+around the cab. Doors part for riders only, with a 2 s dwell (`20807bf`).
+Walkers measuring 140–220 cm render at true scale (`rh.CrewTrueHeight`,
+default 1); the walk rate scales with height. ScaleFor's gray-box squeezes no
+longer shrink the code-built Electrolyzer (2.07, was ~1.52) and WaterPlant.
 
-**Infrastructure:** Red Hope moved off the shared `Somnora-East` filesystem onto
-its own `red-hope-east` (checksum-verified, acceptance-tested by bootstrapping
-the lane from it). The GPU lane's tooling - 71 files including `rig_colonist.py`,
-the rigger everything depends on - was rescued off the filesystem into git, where
-it had never been.
+**Audio (`20807bf`, `bb240a8`).** 26 WAVs (seeded synthesised beds and
+machine loops from `scripts/audio/rh_sfx_build.py`; Kenney CC0 UI/door/thruster
+sounds) and six Lyria tracks (`lyria-3-pro-preview` on Vertex, two per phase,
+levelled under the beds). `URHAudioSubsystem` is presentation only (reads the
+sim, never writes): wind vs habitat bed, storm layer, machine loops full within
+15 m and gone by ~75 m (the 215 m overview stays quiet), elevator doors, chime,
+event and UI cues, phase music with 25–70 s silences. Dials
+`rh.AudioMaster/Music/Ambience/SFX/UI`. Verified with the speakers muted only.
 
-**Two mistakes worth carrying forward.** (1) A re-rig replaced 12 crew meshes
-without their textures, leaving new UVs bound to old paint - the exact trap
-`rh_import_textures.py`'s docstring already warned about. (2) The migration
-excluded a 14 GB `io/` directory as "rebuildable intermediates" and then deleted
-the source; it held the only surviving sources for 8 characters, who are now
-stuck on confetti paint until regenerated. The rule earned: **commit the
-excluded-file list before deleting a migration source.**
+**Interface (`48934b9`, `9a9261e`).** `RHDeckStyle` (palette, type ramp, glass
+panels, 29 code-drawn icons). A vitals strip top-left; a right column of panels
+(Objective with the manifest picker + LAUNCH, Earth & Neighbors with every
+M3/M4 verb, Crew, Fleet with friendly names instead of IDs, Power history,
+Known Ground, Comms); a drawer of build cards (thumbnail from `RH.Thumbs`, bill
+at the viewed floor, power line) with a detail panel; an opening shot that eases
+from ~40 m off the Lander to the 215 m register.
+
+**The first-hour guide (`60c14a2`).** `RHCommandDeckGuide.cpp`: 19 steps in
+three stages, each a predicate on sim state with a high-water mark (a loaded
+save or `RH.Demo` lands on the right step); it lights the button the step names
+and diagnoses the livable-floor blocker. Hidden with SKIP ALL TIPS.
+
+**Playtesting (`0ca24d3`, `6410bf8`, `4706e5f`; `docs/qa/2026-10-15/playtest.md`).**
+`RH.Playtest` plays the real game in the agent band at 16× with player orders
+only (era mode parks the robots), windowless on a fixed 0.1 s step: ~2 min per
+30 sols, deterministic run to run.
+- **Rush order:** before the dock, structural froze at sol 3 and all 7 robots
+  were dead by sol 13. After `6410bf8`: quota 1 at 4.60, first crew at 11.38,
+  no robot ever flat.
+- **Guide order:** quota 1 at sol 4.2 (deadline 10), floor -1 livable 7.18,
+  first crew 10.55 (~3.5 h at 1×); unchanged by the dock. Browned out
+  throughout (machines shed 20–78% of each sol); ~4 of 7 robots idle.
+- **Crew phase:** full cargo → Hope 100 from sol 16, a birth at 32.8, LIFE ON
+  MARS by 35.7. Lean cargo → Hope FLOURISHING while food and water run out,
+  first warning at 75.44, all six (two Mars-born) recalled at 77.44.
+- Fixed in `4706e5f`: the grow-light alert re-arms only after a whole sol fully
+  lit (`GardenLastDarkSimSeconds`, runtime only; every crew number identical);
+  the guide names the Soil Pallet and Seed Vault and warns with live numbers.
 
 ---
 
 ## 4. What is owed
 
-These are **finishing, not structure** — the whole arc is built.
+**Closed since the last snapshot** (so nobody re-does them): dropping the
+`Debug_Inject*` rows from the self-tests - already landed in `163165a`
+(2026-07-16), before the 08-18 doc listed it; the four buildings on the oldest
+paint (`147de7a`, then code-built) and the Borer/AirFilter emissive masks
+(code-built with real masks); the character redo (answered with a different
+generator: the MPFB crew, `8b52734`/`2c784da`/`2325955`); the 1.8 m walker
+normalisation and ScaleFor shrinking real models (`9532013`); elevator doors
+(`33caddf` + `9532013`); the uncompiled `RHArtWireCommandlet` rows (`9532013`);
+the first-hour softlock (`6410bf8`); the alert flood (`4706e5f`). **No compile
+is pending**: the tree was clean at `4706e5f`, and every C++ commit from
+`9532013` on reports a clean build.
 
-1. ~~**The large DataTable sync**~~ **DONE 2026-07-16, headless.** All 14
-   DataTables re-imported from the `docs/data/` CSVs via the `ImportAssets`
-   commandlet with `CSVImportFactory` + `ImportRowStruct` JSON settings — no
-   editor session needed (the Session-48 editor-free discovery extends to
-   DataTables). This landed the new struct columns (`FRHRoomRow`
-   Tier/UpgradesTo/SeatCount/YieldMul; `FRHDiscoveryRow` FundingKg/UnlockRoom),
-   the new `DT_Rivals` + `DT_Discoveries` assets, `DT_Buildings`
-   Category/Blurb, Q2 active, and all accumulated `DT_Config` rows (150 live).
-   Verified: full 24-run battery green against the live tables, baseline pins
-   byte-identical. The `RH.ActivateRoom`/`RH.ActivateQuota` bridge is no
-   longer needed for live runs. Remaining follow-up (needs a director
-   compile): drop the in-memory `Debug_Inject*` rows from the self-tests so
-   they become true pure-data verifiers that fail on DT/CSV drift.
+**Still owed:**
 
-2. **Director hand-play** - the visuals headless cannot judge. Boot it without
-   the editor: `bash scripts/unreal/rh_sandbox.sh` (add `surface` for the
-   building set, `LOW=1` for a busy machine). Outstanding verdicts live in
-   `docs/qa-boot-card.md`; the one that gates most work is verdict 1 on the
-   crew, which must be RE-TAKEN because it was given before the subsurface fix,
-   the normal/MR inputs, the rigid-bind tear fix and the paint fix all landed.
+1. **Director hand-play - the consolidated in-game verdicts.** Boot without the
+   editor: `bash scripts/unreal/rh_sandbox.sh`. The 10-13 triage judged
+   Blender renders of the exported shipping meshes (`db6a99a`); no commit
+   records a director verdict from the running game since. Owed: the
+   code-built buildings and props in context; the MPFB crew at true height (no
+   in-game crew close-up has been captured - `RH.CamCrew` runs before figures
+   spawn, `8b52734`); elevator boarding; the interface panels, build cards and opening shot; the guide's
+   wording; and the **listening test** for the sound and score (verified only
+   with the speakers muted; a 40 s preview mix was sent separately).
+   `docs/qa-boot-card.md` is still dated 2026-08-18 and predates all of this.
 
-2b. **Open decisions that are the director's, not repairs** (updated
-   2026-08-18): night-lamp brightness and the 40% accent tint; the five
-   hero-lane buildings (esp. Borer/AirFilter paint acceptance, which unlocks
-   their emissive re-cut); Pylon monopole vs lattice. Two former entries are
-   RESOLVED: crew now really avoid furniture on every walk (`1f68ffe`), and
-   the 8 lost-source crew were regenerated and re-rigged (`97101bc`, crew8).
+2. **Director decisions from the playtest** (`docs/qa/2026-10-15/playtest.md`):
+   - **The supply line ends at sol ~10.** Two quotas make the crew ship the
+     last; a colony that missed soil and seeds cannot recover. Extend the ladder
+     (Q3+), make soil obtainable on Mars (the dormant agri chain), or a slow
+     recurring resupply?
+   - **Hope gives no warning.** It sat at FLOURISHING (91) while food ran out
+     and water went to 0% drinkable (the potability penalty caps at 12). Should
+     a short food runway or stale water weigh on Hope, and should the sim raise
+     a "food running low" alert (today the first alert is at zero)?
+   - **Hope pins at 100 from sol 16** with a sensible layout and comforts: the
+     crew phase has no tension, and LIFE ON MARS arrives ~25 sols after landing.
+   - **Balance:** is quota 1 (met at sol 4.2 of 10) meant to have that slack?
+     Should the starting grid carry the Forge + water chain without nightly
+     blackouts? Is ~3.5 h at 1× to the first crew the intended first session?
 
-3. **The Gate-D mental-health framing review** — the standing hard stop.
+3. **The Gate-D mental-health framing review** - the standing hard stop.
    **Every** player-facing morale/sickness/evacuation/collapse string and icon
    is a PLACEHOLDER pending the director's review under the prevention-focused,
-   never-graphic directive. This includes the new v25 EPILOGUE and COLLAPSE
-   wording.
+   never-graphic directive. It now also covers the v25 EPILOGUE/COLLAPSE
+   wording, the Earth/politics/colonist-support panel text (`48934b9`), the
+   guide's crew-phase warnings, and one concrete case the playtest surfaced:
+   "EVACUATED: <name> returned to orbit" is said of a child born on Mars.
+   `docs/qa/2026-10-15/gate-d-wording.md` is being prepared; it is not in the
+   repo as of `4706e5f`.
 
-4. **Balance.** Every M2–M4 and v25 number is legible-math-first (chosen so the
-   tests read cleanly), explicitly awaiting tuning — not tuned play.
+4. **Balance.** Every M2–M4 and v25 number is legible-math-first, awaiting
+   tuning; new since August: `LanderDockRate_W` = 100 W.
 
-5. **The two 2026-07-10 specs beyond Gate A** — updated 2026-07-16:
-   **greenhouse agriculture Gates A/B/D are BUILT** (save v26): DT_Crops with
-   7 dormant crops + growth stages + stage-art visualizer wiring (19 agri
-   models imported under /Game/RedHope/Art/Agri), soil depletion + the
-   compost/spoil-chems -> FertilizerMix loop, per-floor climate with the
-   HumidityRegulator gate, duct CO2/O2 exchange; `-agri` self-test exact,
-   baseline pins untouched (crops dormant = legacy garden bit-for-bit).
-   Still owed from the specs: agri **Gate C** (above-ground drag-footprint
-   greenhouse + parametric dome - a new placement interaction, deliberately
-   deferred to a presentation session) and the rest of tiered production
-   (prefab LabFull/Infirmary buildings, click-to-assign, lazy seat-fill).
-   Crop activation (`RH.ActivateCrop all` or flipping the CSV) is a
-   director gate flip.
+5. **The two 2026-07-10 specs beyond what is built.** Agri **Gate C**
+   (above-ground drag-footprint greenhouse + parametric dome - a new placement
+   interaction; the GreenhouseDome model has no building DefName yet) and the
+   rest of tiered production (prefab LabFull/Infirmary buildings,
+   click-to-assign, lazy seat-fill). Crop activation (`RH.ActivateCrop all` or
+   the CSV flag) is a director gate flip - and one of the playtest's candidate
+   answers to the supply-line problem.
 
-6. **Building models, updated 2026-08-14.** The painted batch generated on the
-   A100 on 2026-07-17 (Hunyuan3D shape + PAINT from the Nano Banana Pro 4K
-   sheets) is imported — 13 objects under `/Game/RedHope/Art/Models2/<N>/<N>/`,
-   13/13 clean Interchange receipts. Eight are wired in `HandleBuildingAdded`:
-   painted replacements for Forge, BatteryBank, WaterPlant, Lander, SolarArray,
-   Habitat and Borer, plus first-ever model coverage for ComputeModule. The
-   swap rides `rh.ModelSetV2` (default 1; set 0 + re-run `RH.Demo` for the
-   originals) so the director can A/B in one boot. **Owed: that verdict.**
-   Held back: ModularBlock (open face) and HeavyFreighter (skinny) failed batch
-   QA; AirlockModule, GreenhouseDome and ScoutSpeeder have no building DefName
-   yet (the dome is Gate C's). Note the new models wear the auto-generated
-   Interchange material, not the hand-built `MI_<name>`/`M_ModelTex` instances
-   the older models use — if they read flat beside their neighbours, the fix is
-   a material-instance pass, not regeneration.
-   *(Updated 2026-08-18: `ModelPathsV2` now carries 9 rows — the four
-   surviving 07-17 meshes plus the five hero-lane assets, all on `M_RH_Master`
-   instances with canon accents. The only buildings left on the oldest paint
-   are BatteryBank, WaterPlant, Lander and Stockpile, queued for the hero
-   lane with their identity verdicts preserved.)*
+6. **The game around the game.** No commit records a packaged build: the
+   packaging settings and notice staging are configured (`8e9c0ca`) and the
+   shipping-meta check passes, but there is no record of a cooked standalone
+   boot, and there is no packaging script. There is no title screen,
+   pause menu or settings menu (Space toggles sim pause, Escape cancels; the
+   audio volumes are console variables only).
 
-7. **Character redo — premise corrected 2026-08-14, gate NOT started.** The
-   spec's diagnosis ("the paint stage never ran, so the crew are gray statues")
-   is **false**: all 20 `RH_Walker_*` assets carry a baseColor +
-   metallic/roughness pair with a material binding both, imported in 29bb31b.
-   The "weirdly unfinished" read is therefore about mesh/art quality inherent
-   to sprite-driven Hunyuan3D humanoids, and re-running the same pipeline would
-   return the same class of result. Get a director verdict on the 2026-07-17
-   crew contact sheet first; if it still misses, the real options are a
-   different generator, a retopo/sculpt pass, or a deliberate stylization —
-   not a repeat. Also note: the rig loop lives only on Somnora-East, and there
-   is no working local Blender (the Homebrew cask is registered but the app is
-   gone), so any rig work needs the GPU box up. *(Update, same day: Blender
-   5.2 LTS reinstalled and proven — local renders/bakes work again; only the
-   rig-loop script retrieval still needs the box.)*
+7. **Open art decisions carried from August** (status not settled by any later
+   commit - unverified): night-lamp brightness and the 40% accent tint; Pylon
+   monopole vs lattice (the 10-13 triage listed Pylon as liked, and the lineup
+   exported the shipping mesh, the monopole - probably settled, confirm).
 
-8. **The premium asset plan — authored 2026-08-14, awaiting director OK.**
-   `docs/premium-asset-plan.md`: the full strategy for characters, places,
-   objects, activities and vehicles — AI generation demoted to blockout +
-   texture source, a scripted local-Blender finishing lane (real UVs, bakes,
-   camera-projection texturing from the identity-anchored 4K sheets), one
-   master-material family keyed to the in-code RHCanon palette, a shared crew
-   skeleton with modular gear and socketed hand props, data-driven interaction
-   anchors, and six phased gates (P0–P5) with quality bars, costs, risks and
-   the director's four open decision points.
+8. **The premium asset plan** (`docs/premium-asset-plan.md`, 08-14): no commit
+   records the director's OK. The October kit lane and MPFB crew overlap much
+   of it (scripted local-Blender finishing, one shared crew skeleton); the plan
+   should be reconciled with what shipped rather than started from P0.
 
 ---
 
 ## 5. Risks & gaps (honest read)
 
-- **Determinism is the load-bearing invariant** and it is holding: every
-  increment this session kept the 10-sol baseline byte-identical and both
-  Hope-band suites parity-exact. The risk is always a future feature that
-  mutates state per-step differently in the agent vs era band — the discipline
+- **Determinism is the load-bearing invariant** and it is holding: the pins
+  have not moved through `4706e5f`, and both October sim changes were shaped to
+  keep them (the dock lives in the agent band only; the alert re-arm is
+  runtime state on the alert channel, not saved). The discipline
   (threshold-on-monotone-accumulator, linear scalars, derived-never-saved) is
-  what protects it. Keep new features to that shape.
-- **The DT-sync debt**: headless reads the CSVs, a live editor reads the DTs, so
-  run `scripts/unreal/rh_sync_datatables.py` after any CSV edit and before any
-  live demo. Parity is green as of 2026-08-18.
-- **Generated art has no stable UVs.** TRELLIS.2's unwrap is not deterministic -
-  the same seed has produced 7,817 and 7,571 triangles - so ANYTHING derived from
-  a UV layout (emissive masks, derived normals) must be regenerated on every
-  re-bake, and a re-bake that ships without its textures leaves new UVs on old
-  paint. Both failure modes have already bitten once each.
-- ~~**Eight crew are wearing ruined paint.**~~ RESOLVED `97101bc`: the eight
-  were regenerated from fresh 4K sheets (crew8), rigged and imported; all 20
-  walkers were then re-rigged again in `1f68ffe` (bone-roll planes + blended
-  backstop).
-- **Visuals are unverified by construction** — headless renders previews but
-  "does it read in-game" is a hand-play verdict the director owns. The models
-  are a decisive upgrade over primitives, but the polish pass's re-import + look
-  check is still owed.
-- **No hard fail-state decision** (brief open question #5): the game currently
-  has Collapse as a recoverable, prevention-framed empty-colony state, not a
-  hard "you lost" screen. That is a deliberate placeholder consistent with the
-  mental-health directive; the director owns the final call.
-- **Scope**: the full arc is built but shallow in places by design (one region,
-  legible-math balance, placeholder wording). It is a complete *structure* ready
-  for depth passes, not a finished, tuned, shipped game.
+  what protects it. One asymmetry to know: era mode (> 16×) integrates charging
+  as if a pad existed, while the agent band now charges a pad-less fleet at the
+  Lander's 100 W - the two bands already differed for a pad-less colony; the
+  dock narrowed the gap rather than created it.
+- **The crew phase is the design hole now.** The structure is complete, but
+  the playtest shows the second half of a normal game either flatlines at Hope
+  100 or fails silently 70 sols after the decision that doomed it. The guide's
+  text is a mitigation, not a fix; the fixes are the director's (§4.2).
+- **The opening grid is starved**: a guide-order colony sheds machines most of
+  every sol and empties its bank nightly from sol 3 (§4.2, balance).
+- **DT sync debt**: headless reads the CSVs, a live editor reads the DTs, and
+  the self-tests fail on drift. Run `rh_sync_datatables.py` after any CSV edit.
+  Last sync: `6410bf8` (DT_Config 159 → 160 rows).
+- **Toolchain edits live outside the repo.** The UE 5.8 install's
+  `Engine/Config/Apple/Apple_SDK.json` has MaxVersion 27.9.0 for Xcode 27 (the
+  original is `Apple_SDK.json.bak-20261014-before-xcode27`), and the Metal
+  Toolchain was installed with `xcodebuild -downloadComponent MetalToolchain`.
+  An engine reinstall or Xcode change undoes either (the Metal error shows only
+  in `~/Library/Logs/Unreal Engine/red_hopeEditor/`).
+- **Import traps that have each bitten**: case-insensitive asset names (a
+  re-bake's `T_Stockpile_*` overwrote `T_stockpile_*` twice, `147de7a`/`07841c8`;
+  use `RH_TEX_TAG`); shared-folder discovery (`33caddf`, now scoped per asset);
+  a crew reimport keeps the old skeleton unless its folder is deleted first.
+- **Generated art has no stable UVs** - still true for what remains generated
+  (SolarArray, Pylon, props and crops not rebuilt); code-built assets are
+  reproducible from their scripts.
+- **Visuals and sound are verified by construction, not by eye or ear**:
+  captures prove 0 material failures and what is on screen; "does it read" and
+  "does it sound right" are the director's (§4.1).
+- **The written history has drifted.** `docs/build-log.md` and
+  `docs/design-decisions.md` were last touched 2026-07-09; `docs/qa-boot-card.md`
+  2026-08-18. Since then the commit messages are the record, and the 10-13
+  triage verdicts exist only in commit messages (no triage note in `docs/`).
+- **No hard fail-state decision** (brief open question #5): Collapse is a
+  recoverable, prevention-framed empty-colony state, not a "you lost" screen.
+  The lean playtest shows it does fire in live play.
+- **Scope**: a complete structure with a playable first hour, a new interface
+  and sound - but one region, legible-math balance, placeholder wording, no
+  menus and no packaged build. Not a finished, tuned, shipped game.
 
 ---
 
 ## 6. Fast orientation for the next session
 
 - Source of truth order: (1) the director, (2) the design brief, (3) nothing.
-- Approvals: `docs/design-decisions.md`. History: `docs/build-log.md`. Balance:
-  `docs/data/*.csv` → DataTables (sync with `rh_sync_datatables.py`).
-- Build gate: the editor must be CLOSED for `Build.sh red_hopeEditor` - with a
-  live editor the linker produces a hot-reload patch dylib that only that editor
-  loads, so headless boots keep running the old code and a fix silently does not
-  apply. Headless verify needs no editor (`-run=RHSim` / `-run=RHArt`).
+  History since July: `git log`. Playtest findings and open decisions:
+  `docs/qa/2026-10-15/playtest.md`. Balance: `docs/data/*.csv` → DataTables.
+- **Build gate:** the editor must be CLOSED for `Build.sh red_hopeEditor` - with
+  a live editor the linker produces a hot-reload patch dylib only that editor
+  loads, so headless boots keep running the old code. Xcode 27 builds need the
+  `Apple_SDK.json` edit in §5.
+- **Battery:** `bash scripts/sim/rh_battery.sh [sols]` (bash only). Judge on
+  `BATTERY COMPLETE: N suite(s) not green`, never on exit codes (a benign
+  port-8000 bind makes every run exit nonzero). Logs: `Saved/RHBattery/`.
+- **Playtest:** `bash scripts/sim/rh_playtest.sh <sols> <label> rush|guide [full|lean]`
+  → `Saved/RHPlaytest/<label>.txt` (timeline, per-sol vitals, CREW lines,
+  REPORT). In a running game: `RH.Playtest [Sols] [rush|guide] [lean]`.
+- **Captures:** `bash scripts/unreal/rh_capture.sh <label> "<execcmds>" [expect_n] [timeout_s] [resx] [resy]`
+  - the commands must include `RH.Snapshot`; `-ExecCmds` must stay last and
+  unquoted (see the script). Put `r.setres <W>x<H>w` first for frame size.
+  `RH.Snapshot <delay> ui` keeps the deck in frame; `RH.DeckExpand [roster]`
+  unfolds every panel; `RH.DeckBuild <Category>` opens the build drawer;
+  `RH.After <seconds> <command...>` stages a later beat (all `-ExecCmds` fire
+  at boot). Audio: `RH_SOUND=1` + `rh.AudioMaster 0` + `rh.AudioLog 1`.
+  Judge on harvested PNGs and the material-failure count.
+- **Thumbnails:** `RH.Showcase`, `RH.Thumbs <AbsOutDir>` →
+  `scripts/ui/rh_thumbs_compose.py` → `scripts/unreal/rh_import_ui.py`.
+- **DataTables:** `RH_TABLES=Config,Buildings UnrealEditor-Cmd red_hope.uproject
+  -run=pythonscript -script=$PWD/scripts/unreal/rh_sync_datatables.py
+  -unattended -nosound -stdout` (omit `RH_TABLES` for all), then the battery.
 - Look at the game without the editor: `bash scripts/unreal/rh_sandbox.sh`.
-- GPU lane: `filesystem=red-hope-east` (NOT Somnora-East, which belongs to the
-  other projects). Bootstrap to `TRELLIS2_ENV_READY`, then bake. Everything the
-  lane runs is in `scripts/gpu/` - `lane/` is the rescued history including
-  `rig_colonist.py`, the rigger every character depends on.
-- Art rules the hard way, all in `docs/asset-pipeline-guide.md`: decimate NEVER
-  before rigging; weld before bind; re-import textures whenever you re-import a
-  mesh; regenerate every UV-derived artifact after a re-bake; and judge a
+  `RH.Demo` builds a colony; its fleet idles until `RH.Dig Regolith_A`.
+- **Art lanes.** Local Blender works (5.2.2 at `/Applications/Blender.app`):
+  the hard-surface kit (`scripts/blender/rh_hs.py` + `rh_build_<name>.py` →
+  `scripts/unreal/rh_import_hs.py`) and the crew (`rh_crew_build.py`,
+  `rh_crew_clips.py` → `rh_import_crew.py`) need no GPU. The hero lane
+  (Nano-Banana → TRELLIS.2) still runs on the A100: `filesystem=red-hope-east`
+  (NOT Somnora-East); its tooling is in `scripts/gpu/`.
+- **Art rules the hard way:** decimate NEVER before rigging; weld before bind;
+  re-import textures whenever you re-import a mesh; regenerate every UV-derived
+  artifact after a re-bake; kit assets take `AccentAmount 0`; build the front at
+  -Y and call `face_camera()` (the default camera meets a model's Blender -X
+  face); check for case-insensitive name collisions before importing; judge a
   generated asset on a contact sheet before it enters the project.
-- Anything that runs on a rented box and is not reproducible from this repo is
-  one `terminate` away from gone.
+- **Audio:** `scripts/audio/rh_sfx_build.py` (seeded), `rh_music_gen.py` +
+  `rh_music_prompts.json` (Vertex, gcloud ADC) → `rh_import_audio.py`.
+- Anything on a rented box and not reproducible from this repo is one
+  `terminate` away from gone; anything in a session scratchpad, one reboot.

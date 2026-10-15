@@ -15,6 +15,10 @@
 # (~37 minutes of 16x play) take about two minutes, boot included. RH.Playtest quits the game
 # itself when the first crew has lived a sol, or at the sol limit.
 #
+# Balance sweeps: RH_PLAYTEST_EXTRA is passed to the game before -ExecCmds, e.g.
+#   RH_PLAYTEST_EXTRA="-RHConfig=StarterSolarPacks=9,StarterBatteryPacks=3 -RHQuotas=Q3"
+# (config-row overrides and dormant quota activation; both log loudly).
+#
 # Output: Saved/RHPlaytest/<label>.log (full) and <label>.txt (the [Playtest]
 # lines - the timeline, per-sol vitals and the REPORT block).
 #
@@ -34,7 +38,7 @@ mkdir -p "$OUT"
 LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
-  -benchmark -fps=10 -unattended -nosound -stdout \
+  -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
   "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO" > "$LOG" 2>&1 &
 PID=$!
 

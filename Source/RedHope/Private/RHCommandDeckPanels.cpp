@@ -803,7 +803,7 @@ void SRHCommandDeck::RefreshRosterPanel()
 					if (!C.bSupported)
 					{
 						// Placeholder wording (Gate-D framing review).
-						const double EvacIn = S->GetColonistEvacSols() - C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
+						const double EvacIn = S->GetEffectiveEvacSols() - C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
 						return Txt(FString::Printf(TEXT("needs support - recalled in %.1f sols"), FMath::Max(EvacIn, 0.0)));
 					}
 					const FName Job = S->GetColonistJob(C.Id);

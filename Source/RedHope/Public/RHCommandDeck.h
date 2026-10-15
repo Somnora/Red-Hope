@@ -21,6 +21,9 @@ public:
 	// Capture/QA: unfold every collapsible panel (RH.DeckExpand); the roster
 	// only with "roster", it is tall enough to push the rest off screen.
 	void Debug_ExpandAll(bool bRoster) { bFleetExpanded = bCrewExpanded = bPoliticsExpanded = bPowerExpanded = true; bRosterExpanded = bRoster; }
+	// The settings menu's "Guide and tips" switch.
+	bool AreTipsOn() const { return !bTipsOff; }
+	void SetTipsOn(bool bOn) { SetTipsOff(!bOn); }
 	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
 	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
 	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).

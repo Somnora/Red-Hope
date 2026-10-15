@@ -1,3 +1,4 @@
 Name,Requirements,DeadlineSol,OnTimeAward_kg,LateAward_kg,SliceActive,Notes
 Q1,Struct:300;Water:200;Oxygen:50,10,10000,6000,TRUE,"First CEO quota; soft deadline -- late reduces award tier, never fails. Deadlines are RELATIVE to the quota's opening sol (v25 ladder); Q1 opens at sol 0 so nothing changed here"
 Q2,Struct:600;Oxygen:150;Hydrogen:40,22,12000,8000,TRUE,"ACTIVE v25: second rung of the goal ladder - opens when Q1's ship lands; 22 sols from opening; H2 line makes fuel banking pay off"
+Q3,Struct:900;Water:300;Oxygen:200;Hydrogen:60,24,14000,9000,FALSE,"PROPOSAL (2026-10-15 playtest, DORMANT): a third rung so the supply line does not end at sol ~10 - with two quotas the crew ship is the last, and a crew sent without soil and seeds cannot recover. Live only via -RHQuotas=Q3 for balance sweeps until the director decides"

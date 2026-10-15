@@ -162,6 +162,25 @@ births, food, power) identical, so garden yield is untouched.
 - **Gate-D wording:** "EVACUATED: Freya Farid returned to orbit" is said of a
   child born on Mars.
 
+## Balance sweeps (data for the open questions)
+
+Run with the new sweep hooks, which only act when the flag is present:
+`RH_PLAYTEST_EXTRA="-RHConfig=Name=Value,... -RHQuotas=Q3" bash scripts/sim/rh_playtest.sh ...`.
+Baseline for comparison: `crew2` (guide order, full cargo, shipped values).
+
+| sweep | change | result |
+|---|---|---|
+| A `sweepA_q3_lean` | dormant **Q3** live (Struct 900, Water 300, O2 200, H2 60) + the pod-only crew ship | **The lean colony is rescued.** Q3 was met **the moment it opened** (the colony already held 1,150 Struct / 3,055 water / 648 O2 / 97 H2), so ship 3 brought soil and seeds at sol 13.6; 0 recalled, 4 births, pop 8 by sol 94. A second cliff shows up instead: Ice_A spent by ~sol 41, drinkable water 0% from sol ~60, and the water **stock** falls 15 t → 251 kg by sol 110 - the pool runs dry a few sols later. |
+| B `sweepB_grid` | 9 solar kits, 3 battery kits at start (from 6 / 2) | **Barely helps.** Power short 34% of the run (35% baseline), machines shed 26% (27%); the bank still reaches 0% every night. Quota 1 at sol 3.8 (4.2). The blackouts come from night-time load - Forge 800 W, Electrolyzer 600 W, Borer 500 W - not from too few kits. |
+| C `sweepC_hope` | Hope weights halved: HopeHousingMax 15→7.5, HopePerJob 3→1.5, HopePerMoralePoint 5→2.5 | **Hope gains a ceiling with tension.** It plateaus at 83-89 THRIVING (instantaneous 83-88) instead of pinning at 100 FLOURISHING: births still come (one at sol 34.8, threshold 75), but labs need 85 to accrue research, so discoveries slow down. |
+
+What the sweeps suggest (director's call):
+
+- **The supply line:** a third quota works as a rescue, but the proposed Q3 must be sized against what a colony has banked by sol ~10 (here ~1,150 Struct, ~3,000 kg water) or it is free.
+- **Blackouts:** more starting kits don't fix them. Night-load options: let the player stage machines off at night (exists: the breaker on each card), add a night-time load priority, or give the Forge/Electrolyzer a "day shift" mode.
+- **Hope:** halving the weights gives a THRIVING plateau with a FLOURISHING stretch goal - the tension the crew phase lacks. Pair it with water and food-runway pressure on Hope.
+- **Water is the next cliff** after food: the colony has one reachable ice deposit.
+
 ## Balance questions for the director
 
 - Is quota 1 (met at sol 4.2 of 10) meant to have this much slack?

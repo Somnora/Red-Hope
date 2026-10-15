@@ -66,6 +66,19 @@ public:
 	// Deck-originated orders (manifest, launch, politics buttons) report
 	// through the same confirm line as the controller's own.
 	void PostConfirm(const FString& Text, const FLinearColor& Color) { SetConfirm(Text, Color); }
+	// --- Menus (RHMenus: title, pause, settings, credits) ---
+	// The sim holds still and the deck steps aside while a menu is up.
+	void OpenPauseMenu();
+	void CloseMenus();
+	void StartNewColony();   // title: close it, run the sim, replay the opening shot
+	void ContinueColony();   // title: load the quicksave, then as above
+	void QuitGame();
+	bool IsMenuOpen() const;
+	bool AreTipsOn() const;
+	void SetTipsOn(bool bOn);
+	// Capture/QA (RH.Menu): open a menu screen by name (title, pause,
+	// settings, credits, none).
+	void Debug_OpenMenu(const FString& Name);
 	// Capture/QA (RH.DeckExpand): unfold every deck panel.
 	void Debug_ExpandDeck(bool bRoster);
 	// Capture/QA (RH.DeckBuild): open the deck's build drawer on a category.
@@ -111,6 +124,14 @@ private:
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed60;
 
 	TSharedPtr<SRHCommandDeck> Deck;
+	TSharedPtr<class SRHMenus> Menus;
+	float SpeedBeforeMenu = 1.f;
+	// The title shows at boot except for automated runs (captures and
+	// playtests pass -unattended; -RHNoTitle skips it by hand).
+	bool ShouldShowTitle() const;
+	// Any order being aimed or a building card open - what Esc cancels first.
+	bool HasActiveMode() const;
+	void OpenMenuScreen(uint8 Screen);
 	FName PendingBuildDef;
 	bool bDigMode = false;
 	bool bSurveyMode = false;

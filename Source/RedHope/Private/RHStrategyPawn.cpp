@@ -15,6 +15,11 @@ ARHStrategyPawn::ARHStrategyPawn()
 void ARHStrategyPawn::BeginPlay()
 {
 	Super::BeginPlay();
+	PlayIntro();
+}
+
+void ARHStrategyPawn::PlayIntro()
+{
 	// Opening shot: ~40 m off the Lander (the origin), looking flatter so the
 	// horizon reads, swung 35 degrees round; Tick eases all three home.
 	IntroSecondsLeft = 8.f;

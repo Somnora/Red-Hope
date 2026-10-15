@@ -156,6 +156,8 @@ public:
 	}
 
 private:
+	// -RHConfig=Name=Value,... command-line overrides (balance sweeps only).
+	TMap<FName, double> ConfigOverrides;
 	UPROPERTY(Config) FSoftObjectPath ResourcesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Resources.DT_Resources"));
 	UPROPERTY(Config) FSoftObjectPath BuildingsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Buildings.DT_Buildings"));
 	UPROPERTY(Config) FSoftObjectPath RobotsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Robots.DT_Robots"));

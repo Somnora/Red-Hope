@@ -2,6 +2,8 @@
 #include "RedHopeSim.h"
 #include "Engine/DataTable.h"
 #include "Engine/CurveTable.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -32,6 +34,39 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		EventsTable ? EventsTable->GetRowMap().Num() : 0,
 		RoomsTable ? RoomsTable->GetRowMap().Num() : 0,
 		SolarCurveTable ? TEXT("ok") : TEXT("MISSING"));
+
+	// Balance sweeps (2026-10-15): a playtest can run "the world where X is
+	// different" without editing the CSVs or the DataTables. Both flags act
+	// only when present on the command line, and say so loudly:
+	//   -RHConfig=StarterSolarPacks=9,HopePerJob=1.5   config-row overrides
+	//   -RHQuotas=Q3                                   flip dormant quota rows live
+	FString ConfigArg;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RHConfig="), ConfigArg, /*bShouldStopOnSeparator*/ false))
+	{
+		ConfigArg = ConfigArg.Left(ConfigArg.Find(TEXT(" ")) == INDEX_NONE ? ConfigArg.Len() : ConfigArg.Find(TEXT(" ")));
+		TArray<FString> Pairs;
+		ConfigArg.ParseIntoArray(Pairs, TEXT(","));
+		for (const FString& Pair : Pairs)
+		{
+			FString Key, Value;
+			if (Pair.Split(TEXT("="), &Key, &Value))
+			{
+				ConfigOverrides.Add(FName(*Key), FCString::Atod(*Value));
+				UE_LOG(LogRedHopeSim, Warning, TEXT("[RHConfig] command-line override %s = %s (balance sweep - not the shipped value)"), *Key, *Value);
+			}
+		}
+	}
+	FString QuotasArg;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RHQuotas="), QuotasArg))
+	{
+		TArray<FString> Names;
+		QuotasArg.ParseIntoArray(Names, TEXT(","));
+		for (const FString& QName : Names)
+		{
+			const bool bOk = Debug_ActivateQuota(FName(*QName));
+			UE_LOG(LogRedHopeSim, Warning, TEXT("[RHQuotas] command-line activation of %s: %s (balance sweep)"), *QName, bOk ? TEXT("live") : TEXT("NO SUCH ROW"));
+		}
+	}
 }
 
 const FRHBuildingRow* URHDefinitionsSubsystem::GetBuilding(FName Name) const
@@ -418,6 +453,10 @@ void URHDefinitionsSubsystem::GetDiscoveriesSorted(TArray<TPair<FName, const FRH
 
 double URHDefinitionsSubsystem::GetConfigScalar(FName Name, double Default) const
 {
+	if (const double* Override = ConfigOverrides.Find(Name))
+	{
+		return *Override; // -RHConfig balance sweep (see Initialize)
+	}
 	if (const FRHConfigRow* Row = ConfigTable ? ConfigTable->FindRow<FRHConfigRow>(Name, TEXT("GetConfigScalar"), false) : nullptr)
 	{
 		return FCString::Atod(*Row->Value);

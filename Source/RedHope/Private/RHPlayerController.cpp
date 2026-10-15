@@ -2,6 +2,8 @@
 #include "RedHope.h"
 #include "RHStrategyPawn.h"
 #include "RHCommandDeck.h"
+#include "RHMenus.h"
+#include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -46,6 +48,14 @@ void ARHPlayerController::BeginPlay()
 	{
 		SAssignNew(Deck, SRHCommandDeck).OwnerPC(this);
 		GEngine->GameViewport->AddViewportWidgetContent(Deck.ToSharedRef(), 10);
+		// The menus sit above the deck.
+		SRHMenus::ApplySavedAudio();
+		SAssignNew(Menus, SRHMenus).OwnerPC(this);
+		GEngine->GameViewport->AddViewportWidgetContent(Menus.ToSharedRef(), 20);
+		if (ShouldShowTitle())
+		{
+			OpenMenuScreen((uint8)SRHMenus::EScreen::Title);
+		}
 	}
 
 	FInputModeGameAndUI Mode;
@@ -603,7 +613,123 @@ void ARHPlayerController::OnClick()
 
 void ARHPlayerController::OnCancel()
 {
-	CancelModes();
+	// Esc: a menu goes back; an order being aimed is cancelled; otherwise the
+	// pause menu opens.
+	if (Menus.IsValid() && Menus->IsOpen())
+	{
+		Menus->HandleBack();
+		return;
+	}
+	if (HasActiveMode())
+	{
+		CancelModes();
+		return;
+	}
+	OpenPauseMenu();
+}
+
+bool ARHPlayerController::HasActiveMode() const
+{
+	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0;
+}
+
+bool ARHPlayerController::ShouldShowTitle() const
+{
+	// -RHTitle forces it (captures of the title itself).
+	return FParse::Param(FCommandLine::Get(), TEXT("RHTitle"))
+		|| (!FParse::Param(FCommandLine::Get(), TEXT("unattended")) && !FParse::Param(FCommandLine::Get(), TEXT("RHNoTitle")));
+}
+
+void ARHPlayerController::Debug_OpenMenu(const FString& Name)
+{
+	if (Name.Equals(TEXT("none"), ESearchCase::IgnoreCase))
+	{
+		CloseMenus();
+		return;
+	}
+	const SRHMenus::EScreen S = Name.Equals(TEXT("title"), ESearchCase::IgnoreCase) ? SRHMenus::EScreen::Title
+		: Name.Equals(TEXT("settings"), ESearchCase::IgnoreCase) ? SRHMenus::EScreen::Settings
+		: Name.Equals(TEXT("credits"), ESearchCase::IgnoreCase) ? SRHMenus::EScreen::Credits
+		: SRHMenus::EScreen::Pause;
+	OpenMenuScreen((uint8)S);
+}
+
+bool ARHPlayerController::IsMenuOpen() const
+{
+	return Menus.IsValid() && Menus->IsOpen();
+}
+
+void ARHPlayerController::OpenMenuScreen(uint8 Screen)
+{
+	URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	if (!IsMenuOpen() && Clock)
+	{
+		SpeedBeforeMenu = Clock->GetSpeed();
+		Clock->SetSpeed(0.f);
+	}
+	if (Menus.IsValid())
+	{
+		Menus->Show((SRHMenus::EScreen)Screen);
+	}
+	if (Deck.IsValid())
+	{
+		Deck->SetVisibility(EVisibility::Collapsed);
+	}
+}
+
+void ARHPlayerController::OpenPauseMenu()
+{
+	OpenMenuScreen((uint8)SRHMenus::EScreen::Pause);
+}
+
+void ARHPlayerController::CloseMenus()
+{
+	if (Menus.IsValid())
+	{
+		Menus->Show(SRHMenus::EScreen::None);
+	}
+	if (Deck.IsValid())
+	{
+		Deck->SetVisibility(EVisibility::Visible); // the deck's default
+	}
+	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
+	{
+		Clock->SetSpeed(SpeedBeforeMenu);
+	}
+}
+
+void ARHPlayerController::StartNewColony()
+{
+	SpeedBeforeMenu = 1.f;
+	CloseMenus();
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->PlayIntro();
+	}
+}
+
+void ARHPlayerController::ContinueColony()
+{
+	QuickLoad();
+	StartNewColony();
+}
+
+void ARHPlayerController::QuitGame()
+{
+	FPlatformMisc::RequestExit(false, TEXT("RedHope menu"));
+}
+
+bool ARHPlayerController::AreTipsOn() const
+{
+	return Deck.IsValid() && Deck->AreTipsOn();
+}
+
+void ARHPlayerController::SetTipsOn(bool bOn)
+{
+	if (Deck.IsValid())
+	{
+		Deck->SetTipsOn(bOn);
+	}
 }
 
 void ARHPlayerController::BeginPlacement(FName BuildingDef)
@@ -716,6 +842,10 @@ void ARHPlayerController::CancelModes()
 
 void ARHPlayerController::SetSimSpeed(float Tier)
 {
+	if (IsMenuOpen())
+	{
+		return; // the speed keys wait for the menu to close
+	}
 	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
 	{
 		if (Tier > 0.f)
@@ -728,6 +858,10 @@ void ARHPlayerController::SetSimSpeed(float Tier)
 
 void ARHPlayerController::TogglePause()
 {
+	if (IsMenuOpen())
+	{
+		return;
+	}
 	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
 	{
 		Clock->SetSpeed(Clock->GetSpeed() > 0.f ? 0.f : LastNonZeroSpeed);

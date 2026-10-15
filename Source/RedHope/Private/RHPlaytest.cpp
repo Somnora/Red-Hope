@@ -433,6 +433,16 @@ namespace
 				}
 			}
 		}
+		// A third ship, when the ladder has one (-RHQuotas=Q3 sweeps): the
+		// rescue a player would send once the guide warns that food is short -
+		// soil and seeds, comforts, more power.
+		if (Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && P.Issued.Contains(FName("cargo2"))
+			&& !P.Issued.Contains(FName("cargo3")) && Sim->GetActiveQuotaName() != FName("Q1") && Sim->GetActiveQuotaName() != FName("Q2"))
+		{
+			Once(TEXT("cargo3"));
+			Mark(P, C, FString::Printf(TEXT("quota %s met"), *Sim->GetActiveQuotaName().ToString()));
+			LoadCargo(Sim, C, { FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack") });
+		}
 		if (Sim->GetPopulation() > 0)
 		{
 			Mark(P, C, TEXT("first crew landed"));
