@@ -61,6 +61,17 @@ namespace
 		return N;
 	}
 
+	// Finished buildings of a type - where the step only counts once it stands.
+	int32 CountBuilt(const FGuideCtx& C, FName Def)
+	{
+		int32 N = 0;
+		for (const FRHBuildingInstance& B : C.Sim->GetBuildings())
+		{
+			N += (B.DefName == Def && !B.bUnderConstruction) ? 1 : 0;
+		}
+		return N;
+	}
+
 	bool AnyIce(const FGuideCtx& C, bool bMustBeInGrid)
 	{
 		for (const FRHDepositState& Dp : C.Sim->GetDeposits())
@@ -148,9 +159,19 @@ namespace
 				Fixed(TEXT("Solar dies at sunset. BUILD > Power > Battery Bank carries the colony through the dark.")),
 				[](const FGuideCtx& C) { return CountOf(C, FName("BatteryBank")) >= 1; },
 				NoBar(), FName("BatteryBank"), NAME_None },
+			// Done only once the pad STANDS (playtest finding, 2026-10-15): builders
+			// take the nearest site, so a Forge ordered while the pad is still a
+			// site can be built first - and the fabricator runs flat before it
+			// reaches the pad. With no pad, nothing recharges, ever: the colony
+			// deadlocks by sol 3 (RH.Playtest rush).
 			{ TEXT("AUTOMATION"), TEXT("Give the robots a charger"),
-				Fixed(TEXT("Robots only recharge at a Charging Pad - without one the fleet runs flat. BUILD > Logistics > Charging Pad, inside the ring.")),
-				[](const FGuideCtx& C) { return CountOf(C, FName("ChargePad")) >= 1; },
+				[](const FGuideCtx& C)
+				{
+					return CountOf(C, FName("ChargePad")) >= 1
+						? FString(TEXT("Wait for the Charging Pad to finish before ordering anything big. Robots only recharge at a finished pad - if they run flat first, nothing can build one."))
+						: FString(TEXT("Robots only recharge at a Charging Pad - without one the fleet runs flat. BUILD > Logistics > Charging Pad, inside the ring."));
+				},
+				[](const FGuideCtx& C) { return CountBuilt(C, FName("ChargePad")) >= 1; },
 				NoBar(), FName("ChargePad"), NAME_None },
 			{ TEXT("AUTOMATION"), TEXT("Put the fleet to work"),
 				Fixed(TEXT("The robots wait for orders. ORDER > Dig Site, then click the regolith deposit beside the Lander: excavators dig it and haulers bring it home.")),
