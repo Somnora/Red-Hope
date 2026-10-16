@@ -223,7 +223,23 @@ void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 I
 		FCrewVisual* Anchor = (Moment == URHSimWorldSubsystem::ERHCrewMoment::JoinWork) ? B : A;
 		// XY only - the floor logic owns Z.
 		const FVector AnchorPos = Anchor->Actor.Get()->GetActorLocation();
-		Walker->TargetCm = FVector(AnchorPos.X + 150.f, AnchorPos.Y + 90.f, Walker->Actor.Get()->GetActorLocation().Z);
+		const FVector Meet(AnchorPos.X + 150.f, AnchorPos.Y + 90.f, Walker->Actor.Get()->GetActorLocation().Z);
+		if (Walker->AirlockAct == 0)
+		{
+			// Through doorways and airlocks on the surface, like every walk.
+			Walker->Waypoints.Reset();
+			Walker->WaypointActs.Reset();
+			if (Walker->CurLevel == 0)
+			{
+				SurfaceRoute(Walker->Actor.Get()->GetActorLocation(), Meet, Walker->Waypoints, Walker->WaypointActs);
+			}
+			Walker->Waypoints.Add(Meet);
+			Walker->WaypointActs.Add(0);
+			Walker->TargetCm = Walker->Waypoints[0];
+			Walker->TargetAct = Walker->WaypointActs[0];
+			Walker->Waypoints.RemoveAt(0);
+			Walker->WaypointActs.RemoveAt(0);
+		}
 		Walker->NextDecideRealSeconds = Now + 9.0;
 		Anchor->NextDecideRealSeconds = Now + 9.0;
 	}
@@ -559,6 +575,65 @@ FVector URHCrewVisualizerSubsystem::StationSpotCm(int32 ColonistId, int32 SeatSe
 	return FVector::ZeroVector;
 }
 
+void URHCrewVisualizerSubsystem::SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const
+{
+	// Inside one habitat network: bay to bay through the doorways. Between
+	// outside and a habitat: through that network's airlock (the act on the
+	// chamber point runs the decompression cycle). Between two networks: out
+	// of one airlock and in at the other. Outside to outside: straight.
+	OutPts.Reset();
+	OutActs.Reset();
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	int32 FH = 0, FB = INDEX_NONE, TH = 0, TB = INDEX_NONE;
+	const bool bFromIn = RHHabLayout::MemberBayAt(Sim, From, FH, FB);
+	const bool bToIn = RHHabLayout::MemberBayAt(Sim, To, TH, TB);
+	const int32 RF = bFromIn ? Sim->GetHabNetworkRoot(FH) : 0;
+	const int32 RT = bToIn ? Sim->GetHabNetworkRoot(TH) : 0;
+	const auto Add = [&](const FVector& P, uint8 Act) { OutPts.Add(P); OutActs.Add(Act); };
+	TArray<FVector> Doors;
+	if (RF != 0 && RF == RT)
+	{
+		if (RHHabLayout::BayPath(Sim, FH, FB, TH, TB, Doors))
+		{
+			for (const FVector& D : Doors) { Add(D, 0); }
+		}
+		return;
+	}
+	if (RF != 0)
+	{
+		if (const FRHAirlock* A = RHHabLayout::FindAirlock(Airlocks, RF))
+		{
+			if (RHHabLayout::BayPath(Sim, FH, FB, A->HabId, A->Bay, Doors))
+			{
+				for (const FVector& D : Doors) { Add(D, 0); }
+			}
+			Add(A->Inner, 0);
+			Add(A->WallMid, 0);
+			Add(A->Chamber, 2);   // the suit goes ON inside the mist
+			Add(A->Outer, 0);
+		}
+	}
+	if (RT != 0)
+	{
+		if (const FRHAirlock* A = RHHabLayout::FindAirlock(Airlocks, RT))
+		{
+			Add(A->Outer, 0);
+			Add(A->Chamber, 1);   // the suit comes OFF inside the mist
+			Add(A->WallMid, 0);
+			Add(A->Inner, 0);
+			if (RHHabLayout::BayPath(Sim, A->HabId, A->Bay, TH, TB, Doors))
+			{
+				for (const FVector& D : Doors) { Add(D, 0); }
+			}
+		}
+	}
+}
+
 bool URHCrewVisualizerSubsystem::NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const
 {
 	if (const TArray<FVector4>* Obs = FurnitureByLevel.Find(Level))
@@ -649,16 +724,27 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	// every walk goes AROUND the cab; a rider walks to the door point, in
 	// through the open doors, rides (the hard cut), and steps out the same way
 	// below. The surface shaft head has no cab, so it keeps the plain vanish.
+	// The airlocks this frame (doorway/airlock routing on the surface).
+	RHHabLayout::GatherAirlocks(Sim, World->GetSubsystem<URHDefinitionsSubsystem>(), Airlocks);
 	auto WalkTo = [&](FCrewVisual& V, const FVector& From, const FVector& To, int32 Level)
 	{
 		V.Waypoints.Reset();
+		V.WaypointActs.Reset();
 		if (Level != 0)
 		{
 			V.Waypoints = RHElevator::RouteAroundCab(Sim->GetShaftHeadCm(), From, To);
+			V.WaypointActs.SetNumZeroed(V.Waypoints.Num());
+		}
+		else
+		{
+			SurfaceRoute(From, To, V.Waypoints, V.WaypointActs);
 		}
 		V.Waypoints.Add(To);
+		V.WaypointActs.Add(0);
 		V.TargetCm = V.Waypoints[0];
+		V.TargetAct = V.WaypointActs[0];
 		V.Waypoints.RemoveAt(0);
+		V.WaypointActs.RemoveAt(0);
 	};
 	// BM-2: home = a wander point on the home floor, or in the home habitat.
 	auto HomeWander = [&](const FRHColonist& Col)
@@ -676,6 +762,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		V.bFaceOnArrive = false;
 		WalkTo(V, From, ElevatorDoorCm(Head, Z), FromLevel);
 		V.Waypoints.Add(ElevatorCabCm(Head, Z)); // then straight in through the doorway
+		V.WaypointActs.Add(0);
 		V.NextDecideRealSeconds = Now;
 	};
 	auto StepOutBelow = [&](FCrewVisual& V, AActor* A, int32 Level)
@@ -685,6 +772,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		V.CurLevel = Level;
 		V.Phase = EPhase::Alighting;
 		V.Waypoints.Reset();
+		V.WaypointActs.Reset();
+		V.TargetAct = 0;
 		A->SetActorLocation(ElevatorCabCm(Head, Z));
 		A->SetActorRotation(FRotator(0.f, 180.f, 0.f)); // facing out of the doorway
 		V.TargetCm = ElevatorDoorCm(Head, Z);
@@ -870,7 +959,11 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			// off. The swap keeps the rig and clip set, so the beat carries on.
 			int32 SuitHab = 0, SuitBay = INDEX_NONE;
 			const bool bWantSuit = Vis->CurLevel == 0 && !Sim->FindBayAt(Actor->GetActorLocation(), SuitHab, SuitBay);
-			if (bWantSuit != Vis->bSuited)
+			// An airlock chamber (or a cycle in progress) is the mist's call,
+			// not the location's: the suit changes only while it is hidden.
+			const bool bAirlockOwns = Vis->AirlockAct != 0 || Vis->TargetAct != 0
+				|| (Vis->CurLevel == 0 && RHHabLayout::InChamber(Airlocks, Actor->GetActorLocation()));
+			if (!bAirlockOwns && bWantSuit != Vis->bSuited)
 			{
 				const TCHAR* Face = bWantSuit ? SuitFaceName(C.Id) : CrewFaceName(C.Id);
 				if (USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, *FacePath(Face, TEXT(""))))
@@ -925,11 +1018,92 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 			Skel->GlobalAnimRateScale = Pace > 0.f ? RateScale : 0.f;
 		}
-		if (!bWalking && Pace > 0.f && Vis->Waypoints.Num() > 0)
+		if (!bWalking && Vis->TargetAct != 0 && Vis->AirlockAct == 0)
 		{
-			// A corner of the walk around the cab (or the doorway): keep going.
+			// Reached an airlock chamber: start the decompression cycle.
+			Vis->AirlockAct = Vis->TargetAct;
+			Vis->TargetAct = 0;
+			Vis->AirlockT = 0.f;
+			UStaticMeshComponent* Mist = NewObject<UStaticMeshComponent>(Actor);
+			Mist->SetupAttachment(Actor->GetRootComponent());
+			Mist->SetAbsolute(true, true, true);
+			Mist->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere")));
+			Mist->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Mist->SetCastShadow(false);
+			Mist->RegisterComponent();
+			if (UMaterialInterface* Glass = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_DomeGlass.M_DomeGlass")))
+			{
+				UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Glass, Mist);
+				Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.92f, 0.95f, 0.98f));
+				Mid->SetScalarParameterValue(FName("Opacity"), 0.f);
+				Mid->SetScalarParameterValue(FName("Glow"), 0.35f);
+				Mist->SetMaterial(0, Mid);
+			}
+			Mist->SetWorldLocation(Flat + FVector(0, 0, 125.f));
+			Mist->SetWorldScale3D(FVector(0.01f));
+			Vis->Mist = Mist;
+		}
+		if (Vis->AirlockAct != 0)
+		{
+			// The cycle (2 s at 1x, sim-paced; frozen on pause): the mist swells
+			// and thickens, the suit changes while it hides the figure, the
+			// mist clears, and the walk goes on through the next door.
+			Vis->AirlockT += DeltaTime * Pace;
+			const float T = Vis->AirlockT;
+			const float Swell = FMath::Clamp(T / 0.45f, 0.f, 1.f);
+			const float Fade = 1.f - FMath::Clamp((T - 1.35f) / 0.6f, 0.f, 1.f);
+			if (UStaticMeshComponent* Mist = Vis->Mist.Get())
+			{
+				// Fills the 3 x 3 m chamber floor to head height: the figure
+				// vanishes into the spray, not behind a ball.
+				Mist->SetWorldScale3D(FVector(2.9f, 2.9f, 2.6f) * FMath::Max(0.01f, Swell));
+				if (UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mist->GetMaterial(0)))
+				{
+					Mid->SetScalarParameterValue(FName("Opacity"), 0.82f * Swell * Fade);
+				}
+			}
+			USkeletalMeshComponent* SkelHide = Vis->SkelBody.Get();
+			if (SkelHide)
+			{
+				SkelHide->SetVisibility(T < 0.55f || T > 1.25f);
+			}
+			if (T >= 0.9f && Vis->bSuited != (Vis->AirlockAct == 2))
+			{
+				const TCHAR* Face = Vis->AirlockAct == 2 ? SuitFaceName(C.Id) : CrewFaceName(C.Id);
+				if (USkeletalMesh* Mesh = SkelHide ? LoadObject<USkeletalMesh>(nullptr, *FacePath(Face, TEXT(""))) : nullptr)
+				{
+					SkelHide->SetSkeletalMesh(Mesh);
+					const float HeightCm = FMath::Max(2.f * Mesh->GetBounds().BoxExtent.Z, 1.f);
+					const bool bTrue = CVarCrewTrueHeight.GetValueOnGameThread() != 0 && HeightCm > 140.f && HeightCm < 220.f;
+					SkelHide->SetRelativeScale3D(FVector(bTrue ? 1.f : 180.f / HeightCm));
+					Vis->CurrentClip = NAME_None;
+				}
+				Vis->bSuited = Vis->AirlockAct == 2;
+			}
+			if (T >= 2.0f)
+			{
+				if (UStaticMeshComponent* Mist = Vis->Mist.Get())
+				{
+					Mist->DestroyComponent();
+				}
+				if (SkelHide)
+				{
+					SkelHide->SetVisibility(true);
+				}
+				Vis->AirlockAct = 0;
+			}
+		}
+		else if (!bWalking && Pace > 0.f && Vis->Waypoints.Num() > 0)
+		{
+			// A corner of the walk around the cab, a doorway, or an airlock
+			// door: keep going.
 			Vis->TargetCm = Vis->Waypoints[0];
 			Vis->Waypoints.RemoveAt(0);
+			Vis->TargetAct = Vis->WaypointActs.Num() ? Vis->WaypointActs[0] : 0;
+			if (Vis->WaypointActs.Num())
+			{
+				Vis->WaypointActs.RemoveAt(0);
+			}
 		}
 		else if (!bWalking && Pace > 0.f && Now >= Vis->NextDecideRealSeconds)
 		{
@@ -950,7 +1124,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				{
 					Vis->Phase = EPhase::Resident;
 					Vis->CurLevel = 0;
-					Vis->TargetCm = HomeWander(C);
+					WalkTo(*Vis, Flat, HomeWander(C), 0); // in through their habitat's airlock
 					Vis->bFaceOnArrive = false;
 				}
 				break;
@@ -969,7 +1143,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					else
 					{
 						Vis->Phase = EPhase::StrollOut;
-						Vis->TargetCm = Stroll;
+						WalkTo(*Vis, Flat, Stroll, 0); // a surface resident leaves by the airlock
 						Vis->bFaceOnArrive = false;
 					}
 				}
@@ -1031,7 +1205,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			case EPhase::StrollOut:
 				Vis->Phase = EPhase::StrollBack;
 				// A surface resident walks straight home, not to the shaft.
-				Vis->TargetCm = C.HomeHab != 0 ? HomeWander(C) : ElevatorDoorCm(Head, 0);
+				WalkTo(*Vis, Flat, C.HomeHab != 0 ? HomeWander(C) : ElevatorDoorCm(Head, 0), 0);
 				Vis->Activity = TEXT("taking air");
 				Vis->NextDecideRealSeconds = Now + FMath::FRandRange(2.0, 6.0);
 				break;
@@ -1045,7 +1219,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				{
 					Vis->Phase = EPhase::Resident;
 					Vis->CurLevel = 0;
-					Vis->TargetCm = HomeWander(C);
+					WalkTo(*Vis, Flat, HomeWander(C), 0);
 					Vis->bFaceOnArrive = false;
 				}
 				break;

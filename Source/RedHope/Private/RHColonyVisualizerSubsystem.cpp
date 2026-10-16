@@ -1,4 +1,5 @@
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHHabLayout.h"
 #include "RedHope.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -429,6 +430,9 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 	const int32 Cutaway = FMath::Clamp(CVarCutaway.GetValueOnGameThread(), 0, 2);
 	const bool bRoof = CVarHabRoof.GetValueOnGameThread() != 0 && Cutaway == 0;
 	static const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	// One decompression chamber per network (director 2026-10-16; see RHHabLayout.h).
+	TArray<FRHAirlock> Airlocks;
+	RHHabLayout::GatherAirlocks(Sim, Defs, Airlocks);
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
 		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
@@ -444,6 +448,11 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 		const FIntPoint G = Sim->GetBayGrid(B);
 		const int32 Root = Sim->GetHabNetworkRoot(B.Id);
 		const bool bRated = Sim->IsHabRated(B.Id);
+		const FRHAirlock* Lock = RHHabLayout::FindAirlock(Airlocks, Root);
+		if (Lock && Lock->HabId != B.Id)
+		{
+			Lock = nullptr; // the network's airlock is cut into another shell
+		}
 		// Edge kinds: 0 exterior wall, 1 open (same shell, same room),
 		// 2 partition + door (same shell, different rooms), 3 joint + door
 		// (another shell of this network).
@@ -469,6 +478,10 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 					{
 						Kind = 3;
 					}
+				}
+				if (Lock && Lock->Bay == Bay && Lock->Dir == Dirs[d])
+				{
+					Kind = 4; // the airlock's inner door, in the exterior wall
 				}
 				I.Edge[d] = Kind;
 			}
@@ -530,7 +543,7 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 					continue;
 				}
 				// Shared interior edges are drawn once, from the +X/+Y side.
-				if (Kind >= 2 && (d == 1 || d == 3))
+				if ((Kind == 2 || Kind == 3) && (d == 1 || d == 3))
 				{
 					continue;
 				}
@@ -539,6 +552,13 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 				if (Kind == 0)
 				{
 					Piece(Mid, Along, -500.f, 500.f, 0.f, ExtH);
+				}
+				else if (Kind == 4)
+				{
+					// The exterior wall around the airlock's inner door.
+					Piece(Mid, Along, -500.f, -Door * 0.5f, 0.f, ExtH);
+					Piece(Mid, Along, Door * 0.5f, 500.f, 0.f, ExtH);
+					Piece(Mid, Along, -Door * 0.5f, Door * 0.5f, FMath::Min(DoorH, ExtH), ExtH);
 				}
 				else
 				{
@@ -628,7 +648,60 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 			Lamp->SetWorldLocation(FVector(I.C.X, I.C.Y, Base + 260.f));
 			Vis.Parts.Add(Lamp);
 		}
-		UE_LOG(LogRedHope, Display, TEXT("Habitat #%d drawn: %d bays, network #%d%s"), B.Id, Bays.Num(), Root, bRated ? TEXT(" (rated)") : TEXT(""));
+		if (Lock)
+		{
+			// The decompression chamber: a 3 x 3 m vestibule outside the door -
+			// side walls, an outer wall with its own door, a hazard band and a
+			// cool lamp; open-topped like the habitat so the cycle reads from
+			// the strategy camera.
+			const FVector N(Lock->Dir.X, Lock->Dir.Y, 0.f);
+			const FVector Side = Lock->Dir.X != 0 ? FVector(0, 1, 0) : FVector(1, 0, 0);
+			const float HalfW = RHHabLayout::ChamberWidthCm * 0.5f, Depth = RHHabLayout::ChamberDepthCm;
+			const FVector WallMid(Lock->WallMid.X, Lock->WallMid.Y, 0.f);
+			for (const float S : { -1.f, 1.f })
+			{
+				Piece(WallMid + Side * (S * (HalfW - Th * 0.5f)), N, 0.f, Depth, 0.f, WallH);
+			}
+			const FVector OuterMid = WallMid + N * (Depth - Th * 0.5f);
+			Piece(OuterMid, Side, -HalfW, -Door * 0.5f, 0.f, WallH);
+			Piece(OuterMid, Side, Door * 0.5f, HalfW, 0.f, WallH);
+			Piece(OuterMid, Side, -Door * 0.5f, Door * 0.5f, FMath::Min(DoorH, WallH), WallH);
+			UStaticMeshComponent* Floor = NewObject<UStaticMeshComponent>(Actor);
+			Floor->SetupAttachment(Actor->GetRootComponent());
+			Floor->SetAbsolute(true, true, true);
+			Floor->SetStaticMesh(Cube);
+			Floor->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Floor->RegisterComponent();
+			Floor->SetWorldLocation(FVector(Lock->Chamber.X, Lock->Chamber.Y, Base - 1.f));
+			Floor->SetWorldScale3D(FVector(Lock->Dir.X != 0 ? Depth / 100.f : RHHabLayout::ChamberWidthCm / 100.f,
+				Lock->Dir.X != 0 ? RHHabLayout::ChamberWidthCm / 100.f : Depth / 100.f, 0.06f));
+			ApplyTint(Floor, FLinearColor(0.20f, 0.21f, 0.23f), FLinearColor::Black);
+			Vis.Parts.Add(Floor);
+			UStaticMeshComponent* Band = NewObject<UStaticMeshComponent>(Actor);
+			Band->SetupAttachment(Actor->GetRootComponent());
+			Band->SetAbsolute(true, true, true);
+			Band->SetStaticMesh(Cube);
+			Band->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Band->RegisterComponent();
+			Band->SetWorldLocation(FVector(OuterMid.X, OuterMid.Y, Base + WallH + 6.f));
+			Band->SetWorldScale3D(Lock->Dir.X != 0 ? FVector(0.3f, RHHabLayout::ChamberWidthCm / 100.f, 0.12f) : FVector(RHHabLayout::ChamberWidthCm / 100.f, 0.3f, 0.12f));
+			ApplyTint(Band, RHCanon::HazYellow, RHCanon::HazYellow * 0.4f);
+			Vis.Parts.Add(Band);
+			UPointLightComponent* Cool = NewObject<UPointLightComponent>(Actor);
+			Cool->SetupAttachment(Actor->GetRootComponent());
+			Cool->SetAbsolute(true, true, true);
+			Cool->SetMobility(EComponentMobility::Movable);
+			Cool->SetIntensityUnits(ELightUnits::Candelas);
+			Cool->SetIntensity(14.f);
+			Cool->SetLightColor(FColor(196, 226, 255));
+			Cool->SetAttenuationRadius(450.f);
+			Cool->SetCastShadows(false);
+			Cool->RegisterComponent();
+			Cool->SetWorldLocation(FVector(Lock->Chamber.X, Lock->Chamber.Y, Base + 240.f));
+			Vis.Parts.Add(Cool);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("Habitat #%d drawn: %d bays, network #%d%s%s"), B.Id, Bays.Num(), Root, bRated ? TEXT(" (rated)") : TEXT(""),
+			Lock ? TEXT(", airlock here") : TEXT(""));
 	}
 }
 

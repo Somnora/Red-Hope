@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "RHHabLayout.h"
 #include "RHCrewVisualizerSubsystem.generated.h"
 
 class USkeletalMeshComponent;
@@ -64,6 +65,13 @@ private:
 		// Corner waypoints still to walk before TargetCm (walking around the
 		// elevator cab, never through it), consumed front to back.
 		TArray<FVector> Waypoints;
+		// Parallel to Waypoints: what happens on reaching that point - 0 walk
+		// on, 1 airlock IN (the mist takes the suit off), 2 airlock OUT (on).
+		TArray<uint8> WaypointActs;
+		uint8 TargetAct = 0;          // the act of the point being walked to now
+		uint8 AirlockAct = 0;         // a decompression cycle in progress (1 in / 2 out)
+		float AirlockT = 0.f;         // its clock (sim-paced seconds)
+		TWeakObjectPtr<UStaticMeshComponent> Mist;
 		// A Boarding figure's ride: the floor it rides to, and what it does on
 		// stepping out there (surface: the stroll; underground: Alighting).
 		int32 RideToLevel = 0;
@@ -154,6 +162,11 @@ private:
 	FVector HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
 	// BM-2: the seat at a colonist's actual station (bay or in-bay module).
 	FVector StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	// Director 2026-10-16: on the surface, people walk through doorways and
+	// airlocks. Routes a surface walk From -> To into waypoints + acts.
+	void SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const;
+	// The airlocks this frame (derived from the habitat layout, see RHHabLayout.h).
+	TArray<FRHAirlock> Airlocks;
 
 	TMap<int32, FCrewVisual> Tracked; // colonist Id -> figure
 	// First roster sync seeds residents in place; only ids appearing AFTER it
