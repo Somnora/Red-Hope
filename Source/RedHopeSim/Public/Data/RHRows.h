@@ -371,3 +371,35 @@ struct REDHOPESIM_API FRHRivalRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
+
+// A furnishing (build mode BM-4, 2026-10-16): placed by hand on a 4x4 grid of
+// 2.5 m sub-cells inside a zoned room cell or habitat bay, paid in stock when
+// the order lands, sold back at FurnitureRefundFraction. Functional pieces
+// REPLACE their room's legacy number, by kind: a Living cell with beds houses
+// exactly its beds; a work station with job seats seats exactly them. Rooms
+// without such pieces keep working exactly as before. Absent table = no
+// furnishing layer at all. Copy is placeholder pending director review.
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHFurnitureRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// Catalogue folder: Sleep | Work | Table | Seating | Comfort | Plant | Storage.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Category;
+	// What it means to the sim: Bed | JobSeat | DiningSeat | Comfort | None.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Provides;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 Capacity = 0;
+	// Room FUNCTIONS it may stand in ("Living;Dining"), so higher-tier rows
+	// of a function family inherit.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString RoomFunctions;
+	// Footprint in 2.5 m sub-cells at rotation 0 (odd rotations swap them).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 SlotsX = 1;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 SlotsY = 1;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString CostResources;
+	// Bonus-only Hope while it stands in a working room (capped colony-wide).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float HopeComfort = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Blurb;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};

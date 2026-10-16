@@ -26,11 +26,36 @@ WANT = [t.strip() for t in os.environ.get("RH_TABLES", "").split(",") if t.strip
 log = []
 registry = unreal.AssetRegistryHelpers.get_asset_registry()
 
+# RH_CREATE="Furniture:RHFurnitureRow,..." creates a brand-new DT_<Name> with
+# that (compiled) row struct before the fill below - the step a new table
+# needs once, after the editor compile that adds its struct (BM-4, 2026-10-16).
+created = []
+for spec in [s.strip() for s in os.environ.get("RH_CREATE", "").split(",") if s.strip()]:
+    bare, struct_name = spec.split(":")
+    asset_path = "%s/DT_%s" % (DT_DIR, bare)
+    if unreal.EditorAssetLibrary.does_asset_exist(asset_path):
+        log.append("HAVE %-22s already exists" % ("DT_" + bare))
+        continue
+    st = unreal.load_object(None, "/Script/RedHopeSim.%s" % struct_name)
+    if not st:
+        log.append("FAIL %-22s row struct %s not compiled" % ("DT_" + bare, struct_name))
+        continue
+    factory = unreal.DataTableFactory()
+    factory.set_editor_property("struct", st)
+    dt = unreal.AssetToolsHelpers.get_asset_tools().create_asset("DT_" + bare, DT_DIR, unreal.DataTable, factory)
+    if not dt:
+        log.append("FAIL %-22s create_asset returned nothing" % ("DT_" + bare))
+        continue
+    unreal.EditorAssetLibrary.save_loaded_asset(dt)
+    created.append("DT_" + bare)
+    log.append("NEW  %-22s created with %s" % ("DT_" + bare, struct_name))
+
 names = []
 for asset in registry.get_assets_by_path(DT_DIR, recursive=True):
     name = str(asset.asset_name)
     if name.startswith("DT_"):
         names.append(name)
+names.extend(c for c in created if c not in names)  # the registry may lag a fresh asset
 names.sort()
 
 for dt_name in names:

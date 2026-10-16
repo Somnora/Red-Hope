@@ -2638,6 +2638,378 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// BM-4 self-test (2026-10-16): FURNITURE - the catalogue rows, placement
+	// refusals, beds that replace a Living cell's legacy bed, desks and benches
+	// that replace a station's seats, the capped Furnishings Hope line, the bed
+	// guard, re-zoning, refunds, surface bays, demolish with furniture inside,
+	// derived bed / seat assignments and save v30. Fails loudly. `-furnish`.
+	if (FParse::Param(*Params, TEXT("furnish")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FURNITURE TEST (BM-4, 2026-10-16) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("FURNISH ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("FURNISH FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Step = [&]()
+		{
+			Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const auto RunSols = [&](double Sols) { for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S) { Step(); } };
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		TArray<FString> Alerts, Rejects;
+		TArray<FIntVector> Changed;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const FDelegateHandle ChangedH = Sim->OnFurnitureChanged.AddLambda([&Changed](const FIntVector& K) { Changed.Add(K); });
+		const auto LastReject = [&Rejects]() { return Rejects.Num() ? Rejects.Last() : FString(); };
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return LastIdOf(Def);
+		};
+		const int32 LanderId = LastIdOf(TEXT("Lander"));
+		const auto LanderKg = [&](const TCHAR* Res, bool bOut)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == LanderId) { return (bOut ? B.OutputKg : B.InputKg).FindRef(FName(Res)); } }
+			return 0.0;
+		};
+		const FName NStruct(TEXT("Struct"));
+		// Orders: one order, one step (lag 45 s < the 60 s era step).
+		const auto FurnishCmd = [&](const TCHAR* Row, const FIntVector& Key, int32 Slot, int32 Rot)
+		{
+			FRHCommand C; C.Verb = FName("Furnish"); C.Target = FName(Row); C.Level = Key.Z == 0 ? Key.X : 0;
+			C.Location = Sim->GetCellCentreCm(Key);
+			C.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Z == 0 ? Key.Y : 0, Slot, Rot);
+			return C;
+		};
+		const auto Furnish = [&](const TCHAR* Row, const FIntVector& Key, int32 Slot, int32 Rot = 0)
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(FurnishCmd(Row, Key, Slot, Rot));
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const auto SellPiece = [&](int32 Id)
+		{
+			const int32 R0 = Rejects.Num();
+			FRHCommand C; C.Verb = FName("Sell"); C.Target = FName("Furniture"); C.Value = (double)Id;
+			Sim->EnqueueCommand(C);
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const auto SellCell = [&](const FIntVector& Key)
+		{
+			const int32 R0 = Rejects.Num();
+			FRHCommand C; C.Verb = FName("Sell"); C.Target = FName("Cell"); C.Level = Key.Z == 0 ? Key.X : 0;
+			C.Location = Sim->GetCellCentreCm(Key);
+			C.Value = (double)(Key.Z == 0 ? Key.Y : 0);
+			Sim->EnqueueCommand(C);
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const auto LastPieceId = [&]() { return Sim->GetFurniture().Num() ? Sim->GetFurniture().Last().Id : 0; };
+		const auto Seats = [&](const FIntVector& Key) { int32 F = 0, Cap = 0; Sim->GetStationSeats(Key, F, Cap); return FIntPoint(F, Cap); };
+		const auto CanPlace = [&](const TCHAR* Row, const FIntVector& Key, int32 Slot, int32 Rot, FString& Why)
+		{
+			Why.Reset();
+			return Sim->CanPlaceFurniture(FName(Row), Key, Slot, Rot, Why);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString Why, R;
+
+		// F0. Pure data (fail fast: no table, no layer).
+		if (!DefsSub->HasFurnitureCatalogue())
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("FURNISH FAIL: DT_Furniture missing (create + sync it)"));
+			return 1;
+		}
+		{
+			int32 Rows = 0, Active = 0;
+			bool bValid = true;
+			DefsSub->ForEachFurnitureRow([&](FName Name, const FRHFurnitureRow& Row)
+			{
+				++Rows;
+				Active += Row.SliceActive ? 1 : 0;
+				const bool bFunctional = Row.Provides == FName("Bed") || Row.Provides == FName("JobSeat") || Row.Provides == FName("DiningSeat");
+				bool bRow = (Row.Capacity >= 1) == bFunctional && Row.SlotsX >= 1 && Row.SlotsX <= 4 && Row.SlotsY >= 1 && Row.SlotsY <= 4 && Row.HopeComfort >= 0.f;
+				const TMap<FName, double> Bill = URHDefinitionsSubsystem::GetFurnitureCost(Row);
+				bRow &= Bill.Num() == 1 && Bill.Contains(FName("Struct"));
+				if (Row.Provides == FName("Bed"))
+				{
+					bRow &= Row.RoomFunctions == TEXT("Living");
+				}
+				if (Row.Provides == FName("JobSeat"))
+				{
+					TArray<FString> Fns;
+					Row.RoomFunctions.ParseIntoArray(Fns, TEXT(";"), true);
+					for (const FString& Fn : Fns) { bRow &= Fn == TEXT("Lab") || Fn == TEXT("Workstation"); }
+				}
+				if (!bRow) { UE_LOG(LogRedHopeSim, Error, TEXT("FURNISH: row %s breaks a data rule"), *Name.ToString()); }
+				bValid &= bRow;
+			});
+			const FRHFurnitureRow* Cot = DefsSub->GetFurniture(FName("Cot"));
+			const FRHFurnitureRow* Desk = DefsSub->GetFurniture(FName("Desk"));
+			Expect(Rows == 13 && Active == 13 && bValid && Cot && Cot->Capacity == 1 && Cot->SlotsX == 2 && Desk && Desk->Provides == FName("JobSeat"),
+				FString::Printf(TEXT("F0 DT_Furniture: %d rows, %d active, every row within the data rules (DT/CSV)"), Rows, Active));
+			Expect(Near(Sim->GetFurnitureRefundFraction(), 0.75, 1e-9) && Near(Sim->GetHopeFurnishingsMax(), 6.0, 1e-9),
+				TEXT("F0 config: refund 0.75 (ruling 5a), Furnishings cap 6"));
+			FRHFurnitureRow Statue; Statue.DisplayName = TEXT("Statue"); Statue.Provides = FName("Comfort"); Statue.RoomFunctions = TEXT("Living");
+			Statue.CostResources = TEXT("Struct:20"); Statue.SliceActive = false;
+			DefsSub->Debug_InjectFurniture(FName("Statue"), Statue);
+		}
+
+		// Setup: a 7-cell rated floor, 7 colonists.
+		Place(TEXT("SolarArray"), 3500.f, -1000.f);
+		Place(TEXT("SolarArray"), 3500.f, -2000.f);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		Sim->ExtendShaft(1, FVector(3000.f, 3000.f, 0.f));
+		Sim->ExcavateFloor(-1, 7, R);
+		const int32 AF = Place(TEXT("AirFilter"), 3000, 3500, 1, 1, -1);
+		Sim->Debug_ForceRateFloor(-1);
+		Step();
+		const FIntVector C0(-1, 0, 0), C1(-1, 1, 0), C2(-1, 2, 0), C3(-1, 3, 0), C4(-1, 4, 0), C5(-1, 5, 0), C6(-1, 6, 0);
+		Expect(Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R) && Sim->DesignateRoom(-1, 1, FName("Workstation"), R)
+			&& Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R) && Sim->DesignateRoom(-1, 3, FName("WorkbenchLarge"), R)
+			&& Sim->DesignateRoom(-1, 4, FName("Dining"), R) && Sim->DesignateRoom(-1, 5, FName("Lab"), R) && AF != 0,
+			FString::Printf(TEXT("setup: 7 cells zoned c0 Living, c1 Workstation, c2 Living, c3 Large Workbench, c4 Dining, c5 Lab, c6 none (%s)"), *R));
+		Expect(Sim->Debug_AddColonists(7) == 7 && Sim->GetPopulation() == 7, TEXT("setup: 7 colonists on floor -1"));
+		Step();
+
+		// F1. Legacy numbers with no furniture at all.
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+			Expect(Sim->GetHousingCapacity() == 7 && Seats(C1) == FIntPoint(1, 1) && Seats(C3) == FIntPoint(2, 2) && Seats(C5) == FIntPoint(1, 1)
+				&& H.FilledSeats == 4 && Near(Sim->GetWorkstationYieldSeatSum(), 3.7, 1e-6) && Near(Sim->GetLabYieldSeatSum(), 1.0, 1e-6)
+				&& Near(H.Housing, 15.0 * 2.0 / 7.0, 1e-6) && H.Furnishings == 0.0 && Sim->GetFurniture().Num() == 0,
+				FString::Printf(TEXT("F1 legacy: capacity %d, seats c1/c3/c5 1/2/1, filled %d, workstation sum %.2f, housing %.4f, furnishings 0"),
+					Sim->GetHousingCapacity(), H.FilledSeats, Sim->GetWorkstationYieldSeatSum(), H.Housing));
+		}
+
+		// F2. Refusals.
+		Expect(!CanPlace(TEXT("Throne"), C0, 0, 0, Why) && Why.Contains(TEXT("catalogue")), FString::Printf(TEXT("F2 an unknown row (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Statue"), C0, 0, 0, Why) && Why.Contains(TEXT("not available")), FString::Printf(TEXT("F2 a dormant row (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Cot"), FIntVector(-1, 7, 0), 0, 0, Why) && Why.Contains(TEXT("carved")), FString::Printf(TEXT("F2 an uncarved cell (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Cot"), FIntVector(0, 0, 9999), 0, 0, Why) && Why.Contains(TEXT("bay")), FString::Printf(TEXT("F2 no such habitat bay (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Cot"), C1, 0, 0, Why) && Why.Contains(TEXT("Living")), FString::Printf(TEXT("F2 a cot in a Workstation (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Desk"), C0, 0, 0, Why) && Why.Contains(TEXT("Workstation")), FString::Printf(TEXT("F2 a desk in Living Quarters (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Plant"), C6, 0, 0, Why) && Why.Contains(TEXT("Zone")), FString::Printf(TEXT("F2 an unzoned cell (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Cot"), C0, 3, 0, Why) && Why.Contains(TEXT("fit")), FString::Printf(TEXT("F2 a 2x2 off the edge (%s)"), *Why));
+		Expect(!CanPlace(TEXT("Workbench"), C3, 15, 1, Why) && Why.Contains(TEXT("fit")) && !CanPlace(TEXT("Plant"), C0, 0, 4, Why),
+			TEXT("F2 a corner slot that can't hold a 2x2, and rotation 4, refused"));
+		Expect(!CanPlace(TEXT("Cot"), C2, 0, 0, Why) && Why.Contains(TEXT("AirFilter")), FString::Printf(TEXT("F2 the filter's sub-cells in c2 (%s)"), *Why));
+		Expect(CanPlace(TEXT("Cot"), C2, 8, 0, Why), FString::Printf(TEXT("F2 the far half of c2 is free (%s)"), *Why));
+		{
+			const double Struct0 = Sim->GetTotalSolid(NStruct);
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 30.0 - Struct0, false);
+			Expect(!CanPlace(TEXT("Cot"), C0, 0, 0, Why) && Why.Contains(TEXT("Struct")), FString::Printf(TEXT("F2 30 kg Struct can't buy a 40 kg cot (%s)"), *Why));
+			Expect(!Furnish(TEXT("Cot"), C0, 0) && Sim->GetFurniture().Num() == 0 && Near(Sim->GetTotalSolid(NStruct), 30.0, 1e-6),
+				FString::Printf(TEXT("F2 the order is rejected when it lands, nothing spent (%s)"), *LastReject()));
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 2000.0 - 30.0, false);
+		}
+		const double StructStart = Sim->GetTotalSolid(NStruct);
+		double Spent = 0.0, Refunded = 0.0;
+
+		// F3. Buying beds.
+		Changed.Reset();
+		Expect(Furnish(TEXT("Cot"), C0, 0) && LastPieceId() == 1 && Near(Sim->GetTotalSolid(NStruct), StructStart - 40.0, 1e-6)
+			&& Changed.Num() == 1 && Changed[0] == C0 && Sim->GetHousingCapacity() == 7,
+			FString::Printf(TEXT("F3 cot #1 in c0: -40 Struct, one change event, capacity still %d (1 bed = the legacy bed)"), Sim->GetHousingCapacity()));
+		Spent += 40.0;
+		Sim->EnqueueCommand(FurnishCmd(TEXT("Cot"), C0, 2, 0));
+		Expect(!CanPlace(TEXT("Cot"), C0, 2, 0, Why) && Why.Contains(TEXT("transit")), FString::Printf(TEXT("F3 a spot with an order in flight (%s)"), *Why));
+		Step();
+		Spent += 40.0;
+		Expect(Sim->GetHousingCapacity() == 8 && Near(Sim->GetColonyHope().Housing, 15.0 * 3.0 / 7.0, 1e-6),
+			FString::Printf(TEXT("F3 two cots: capacity 8, housing %.4f"), Sim->GetColonyHope().Housing));
+		Expect(Furnish(TEXT("Cot"), C0, 8) && Furnish(TEXT("Cot"), C0, 10, 1), TEXT("F3 cots 3 and 4 (one turned)"));
+		Spent += 80.0;
+		Expect(Sim->GetHousingCapacity() == 10 && Near(Sim->GetColonyHope().Housing, 15.0 * 5.0 / 7.0, 1e-6) && Sim->GetCellBeds(C0) == 4,
+			FString::Printf(TEXT("F3 four cots: capacity %d, housing %.4f, c0 beds %d"), Sim->GetHousingCapacity(), Sim->GetColonyHope().Housing, Sim->GetCellBeds(C0)));
+		Expect(!CanPlace(TEXT("Cot"), C0, 5, 0, Why) && Why.Contains(TEXT("Overlaps")), FString::Printf(TEXT("F3 a fifth cot overlaps (%s)"), *Why));
+		Expect(Sim->Debug_AddColonists(4) == 3 && Sim->GetPopulation() == 10 && Near(Sim->GetColonyHope().Housing, 7.5, 1e-6),
+			FString::Printf(TEXT("F3 three more colonists fill the beds (pop %d, housing %.2f)"), Sim->GetPopulation(), Sim->GetColonyHope().Housing));
+
+		// F4. The bed guard.
+		{
+			TMap<FName, double> Refund;
+			Expect(!Sim->CanSellFurniture(3, Why, &Refund) && Why.Contains(TEXT("sleep")), FString::Printf(TEXT("F4 selling a needed bed is refused (%s)"), *Why));
+			Expect(!SellPiece(3) && !SellCell(C0) && Sim->GetFurniture().Num() == 4, FString::Printf(TEXT("F4 the order and a bulk sell are refused too (%s)"), *LastReject()));
+		}
+
+		// F5. Seats.
+		Expect(Furnish(TEXT("Desk"), C1, 0) && Seats(C1) == FIntPoint(1, 1), TEXT("F5 one desk in c1: still 1 seat"));
+		Expect(Furnish(TEXT("Desk"), C1, 2) && Seats(C1) == FIntPoint(2, 2) && Sim->GetColonyHope().FilledSeats == 5 && Near(Sim->GetWorkstationYieldSeatSum(), 4.7, 1e-6),
+			FString::Printf(TEXT("F5 two desks in c1: 2 seats, filled %d, workstation sum %.2f"), Sim->GetColonyHope().FilledSeats, Sim->GetWorkstationYieldSeatSum()));
+		Expect(Furnish(TEXT("Desk"), C3, 0) && Seats(C3) == FIntPoint(1, 1) && Sim->GetColonyHope().FilledSeats == 4 && Near(Sim->GetWorkstationYieldSeatSum(), 3.35, 1e-6),
+			FString::Printf(TEXT("F5 one desk in the Large Workbench room REPLACES its 2 seats with 1 (filled %d, sum %.2f)"), Sim->GetColonyHope().FilledSeats, Sim->GetWorkstationYieldSeatSum()));
+		Expect(Furnish(TEXT("Workbench"), C3, 8, 1) && Seats(C3) == FIntPoint(3, 3) && Sim->GetColonyHope().FilledSeats == 6 && Near(Sim->GetWorkstationYieldSeatSum(), 6.05, 1e-6),
+			FString::Printf(TEXT("F5 + a workbench: c3 seats 3 (filled %d, sum %.2f)"), Sim->GetColonyHope().FilledSeats, Sim->GetWorkstationYieldSeatSum()));
+		Expect(Furnish(TEXT("LabBench"), C5, 0) && Seats(C5) == FIntPoint(2, 2) && Near(Sim->GetLabYieldSeatSum(), 2.0, 1e-6)
+			&& Sim->GetColonyHope().FilledSeats == 7 && Near(Sim->GetColonyHope().Jobs, 21.0, 1e-6),
+			FString::Printf(TEXT("F5 a lab bench: c5 seats 2, filled %d, jobs %.1f"), Sim->GetColonyHope().FilledSeats, Sim->GetColonyHope().Jobs));
+		Spent += 40.0 * 3 + 80.0 + 80.0;
+		{
+			const bool bSeats = Sim->GetColonistSeatPiece(1) == 5 && Sim->GetColonistSeatPiece(2) == 6 && Sim->GetColonistSeatPiece(3) == 7
+				&& Sim->GetColonistSeatPiece(4) == 8 && Sim->GetColonistSeatPiece(5) == 8 && Sim->GetColonistSeatPiece(6) == 9
+				&& Sim->GetColonistSeatPiece(7) == 9 && Sim->GetColonistSeatPiece(8) == 0;
+			const bool bBeds = Sim->GetColonistBedPiece(1) == 1 && Sim->GetColonistBedPiece(2) == 2 && Sim->GetColonistBedPiece(3) == 3
+				&& Sim->GetColonistBedPiece(4) == 4 && Sim->GetColonistBedPiece(5) == 0 && Sim->GetColonistBedPiece(10) == 0;
+			Expect(bSeats && bBeds, TEXT("F5 derived assignments: seats 1,2 desks; 3 desk; 4,5 workbench; 6,7 lab bench; beds 1-4 cots, 5-10 legacy"));
+		}
+
+		// F6. Comfort.
+		Expect(Furnish(TEXT("DiningTable"), C4, 0) && Near(Sim->GetColonyHope().Furnishings, 1.0, 1e-9),
+			FString::Printf(TEXT("F6 a dining table: Furnishings %.1f"), Sim->GetColonyHope().Furnishings));
+		for (const int32 S : { 2, 3, 6, 7, 8 }) { Furnish(TEXT("Plant"), C4, S); }
+		Expect(Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9), FString::Printf(TEXT("F6 + five plants: Furnishings %.1f"), Sim->GetColonyHope().Furnishings));
+		Expect(Furnish(TEXT("Plant"), C4, 9) && Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9), TEXT("F6 a sixth plant: capped at 6"));
+		Spent += 40.0 + 6 * 20.0;
+
+		// F7. Re-zoning.
+		Expect(!Sim->DesignateRoom(-1, 0, FName("Lab"), Why) && Why.Contains(TEXT("Cot")), FString::Printf(TEXT("F7 c0 to Lab refused (%s)"), *Why));
+		Expect(!Sim->DesignateRoom(-1, 4, FName("LivingQuarters"), Why) && Why.Contains(TEXT("Dining Table")), FString::Printf(TEXT("F7 c4 to Living refused (%s)"), *Why));
+		Expect(Furnish(TEXT("Plant"), C2, 15) && Sim->DesignateRoom(-1, 2, FName("Dining"), Why) && Near(Sim->GetColonyHope().Housing, 6.0, 1e-6)
+			&& Sim->GetHousingCapacity() == 10, FString::Printf(TEXT("F7 a plant goes Living -> Dining with its room; housing %.2f, capacity %d"), Sim->GetColonyHope().Housing, Sim->GetHousingCapacity()));
+		Spent += 20.0;
+		Expect(!Sim->DesignateRoom(-1, 2, NAME_None, Why) && Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R) && Near(Sim->GetColonyHope().Housing, 7.5, 1e-6),
+			FString::Printf(TEXT("F7 clearing c2 refused (%s); back to Living"), *Why));
+
+		// F8. Selling.
+		{
+			const double Out0 = LanderKg(TEXT("Struct"), true);
+			Expect(SellPiece(5) && Near(LanderKg(TEXT("Struct"), true) - Out0, 30.0, 1e-6) && Seats(C1).Y == 1,
+				FString::Printf(TEXT("F8 a desk sold: +%.0f Struct on the Lander's output shelf, c1 back to 1 seat"), LanderKg(TEXT("Struct"), true) - Out0));
+			Refunded += 30.0;
+			const double Out1 = LanderKg(TEXT("Struct"), true);
+			TMap<FName, double> Refund;
+			Expect(Sim->CanSellCell(C4, Why, &Refund) && Near(Refund.FindRef(NStruct), 120.0, 1e-6) && SellCell(C4)
+				&& Near(LanderKg(TEXT("Struct"), true) - Out1, 120.0, 1e-6) && Sim->GetCellFurniture(C4) == 0 && Sim->DesignateRoom(-1, 4, NAME_None, R),
+				TEXT("F8 everything in c4 sold in one order (+120 = 0.75 x 160); the cell can be cleared again"));
+			Refunded += 120.0;
+			Expect(Near(Sim->GetTotalSolid(NStruct), StructStart - Spent + Refunded, 1e-3),
+				FString::Printf(TEXT("F8 the Struct ledger closes: %.1f = %.1f - %.0f + %.0f"), Sim->GetTotalSolid(NStruct), StructStart, Spent, Refunded));
+		}
+
+		// F9. Surface bays.
+		Sim->AddStock(FName("Shielding"), 1000.0);
+		const int32 A = Place(TEXT("HabModule"), -1000, 1000);
+		const int32 B = Place(TEXT("HabModule"), -2000, 1000);
+		const int32 Cc = Place(TEXT("HabModule"), -1500, 2000, 2, 1);
+		Place(TEXT("AirFilter"), -1000, 1000);
+		Expect(Sim->DesignateBay(A, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(B, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(Cc, 0, FName("LivingQuarters"), R),
+			TEXT("F9 habs A, B, C with a filter in A; A:0, B:0, C:0 Living"));
+		{
+			const double F0 = Sim->GetColonyHope().Furnishings;
+			Expect(Furnish(TEXT("Plant"), FIntVector(0, 0, B), 0) && Near(Sim->GetColonyHope().Furnishings, F0, 1e-9),
+				TEXT("F9 a plant in an unrated habitat does nothing yet"));
+			Spent += 20.0;
+			RunSols(1.0);
+			Sim->Debug_SetVaultRated(true);
+			Expect(Sim->IsHabRated(A) && Near(Sim->GetColonyHope().Furnishings, F0 + 1.0, 1e-9),
+				FString::Printf(TEXT("F9 rated: the plant counts (%.1f -> %.1f)"), F0, Sim->GetColonyHope().Furnishings));
+		}
+		Expect(!CanPlace(TEXT("Cot"), FIntVector(0, 0, A), 0, 0, Why) && Why.Contains(TEXT("AirFilter")), FString::Printf(TEXT("F9 A's filter fills its centre (%s)"), *Why));
+		{
+			FString W2;
+			Expect(!Sim->CanPlaceBuildingSized(FName("Floodmast"), FVector(-2300.f, 700.f, 0.f), W2, 0, 1, 1) && W2.Contains(TEXT("furnishing")),
+				FString::Printf(TEXT("F9 a Floodmast over B's plant is refused (%s)"), *W2));
+		}
+		Expect(Furnish(TEXT("Cot"), FIntVector(0, 0, Cc), 0) && Furnish(TEXT("Cot"), FIntVector(0, 0, Cc), 2) && Sim->GetHabBeds(Cc) == 2,
+			FString::Printf(TEXT("F9 two cots in C:0 - C has %d beds"), Sim->GetHabBeds(Cc)));
+		Spent += 80.0;
+		{
+			const int32 Pop0 = Sim->GetPopulation();
+			Expect(Sim->Debug_AddColonists(4) == 4 && Sim->GetHabResidents(A) == 1 && Sim->GetHabResidents(B) == 1 && Sim->GetHabResidents(Cc) == 2,
+				FString::Printf(TEXT("F9 four more crew: A 1, B 1, C 2 (pop %d -> %d)"), Pop0, Sim->GetPopulation()));
+			const int32 CotC = LastPieceId();
+			Expect(!Sim->CanSellFurniture(CotC, Why) && Why.Contains(TEXT("sleep")), FString::Printf(TEXT("F9 C's cots are spoken for (%s)"), *Why));
+		}
+		const int32 Hh = Place(TEXT("HabModule"), -2000, -500, 1, 2);
+		Expect(Sim->DesignateBay(Hh, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(Hh, 1, FName("LivingQuarters"), R)
+			&& Furnish(TEXT("Cot"), FIntVector(0, 0, Hh), 0) && Furnish(TEXT("Cot"), FIntVector(0, 0, Hh), 2) && Sim->GetHabBeds(Hh) == 3,
+			FString::Printf(TEXT("F9 H (1x2) with two cots in H:0 and a plain Living H:1: %d beds"), Sim->GetHabBeds(Hh)));
+		Spent += 80.0;
+		Why.Reset();
+		Expect(Sim->Debug_AddColonists(2) == 2 && Sim->GetHabResidents(Hh) == 2 && Sim->DesignateBay(Hh, 1, NAME_None, Why),
+			TEXT("F9 two residents in H: un-zoning H:1 is allowed - the cots still sleep both"));
+		Expect(Sim->DesignateBay(Hh, 1, FName("LivingQuarters"), R) && Sim->Debug_AddColonists(1) == 1 && !Sim->DesignateBay(Hh, 1, NAME_None, Why),
+			FString::Printf(TEXT("F9 a third resident: now it is refused (%s)"), *Why));
+		Expect(!Sim->DesignateBay(Cc, 0, FName("Lab"), Why) && Why.Contains(TEXT("Cot")), FString::Printf(TEXT("F9 C:0 to Lab refused (%s)"), *Why));
+
+		// F10. Demolishing a furnished habitat sells its furniture with it.
+		{
+			const int32 Dm = Place(TEXT("HabModule"), -1000, -4000);
+			Expect(Sim->DesignateBay(Dm, 0, FName("LivingQuarters"), R) && Furnish(TEXT("Cot"), FIntVector(0, 0, Dm), 0) && Furnish(TEXT("Plant"), FIntVector(0, 0, Dm), 15),
+				TEXT("F10 a lone hab with a cot and a plant"));
+			Spent += 60.0;
+			TMap<FName, double> Salvage;
+			Expect(Sim->CanDemolishBuilding(Dm, Why, &Salvage) && Near(Salvage.FindRef(NStruct), 145.0, 1e-6) && Near(Salvage.FindRef(FName("Shielding")), 25.0, 1e-6),
+				FString::Printf(TEXT("F10 the preview: Struct %.0f (0.5 x 200 + 0.75 x 60), Shielding %.0f"), Salvage.FindRef(NStruct), Salvage.FindRef(FName("Shielding"))));
+			const double S0 = LanderKg(TEXT("Struct"), true), Sh0 = LanderKg(TEXT("Shielding"), true);
+			Changed.Reset();
+			FRHCommand D; D.Verb = FName("Demolish"); D.Target = FName("Building"); D.Value = (double)Dm;
+			Sim->EnqueueCommand(D);
+			Step();
+			bool bGone = true;
+			for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { bGone &= F.Key.Z != Dm; }
+			Expect(bGone && Near(LanderKg(TEXT("Struct"), true) - S0, 145.0, 1e-6) && Near(LanderKg(TEXT("Shielding"), true) - Sh0, 25.0, 1e-6)
+				&& Changed.Contains(FIntVector(0, 0, Dm)) && Alerts.ContainsByPredicate([](const FString& S) { return S.Contains(TEXT("DEMOLISHED")) && S.Contains(TEXT("2 furnishing(s) sold back")); }),
+				TEXT("F10 demolished: +145 Struct, +25 Shielding, its 2 pieces gone and named in the alert"));
+		}
+
+		// F11. Save / load (v30).
+		{
+			struct FSnap
+			{
+				TArray<FString> Pieces; int32 Cap = 0; TArray<int32> HabBeds; TArray<FIntPoint> StationSeats; double Housing = 0, Jobs = 0, Furn = 0; TArray<FIntPoint> Assign;
+			};
+			const auto Take = [&]()
+			{
+				FSnap S;
+				for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { S.Pieces.Add(FString::Printf(TEXT("%d:%s:%d,%d,%d:%d:%d"), F.Id, *F.Row.ToString(), F.Key.X, F.Key.Y, F.Key.Z, F.Slot, F.Rot)); }
+				S.Cap = Sim->GetHousingCapacity();
+				for (const int32 H : { A, B, Cc, Hh }) { S.HabBeds.Add(Sim->GetHabBeds(H)); }
+				for (const FIntVector& K : { C1, C3, C5 }) { S.StationSeats.Add(Seats(K)); }
+				const URHSimWorldSubsystem::FRHHopeBreakdown Hb = Sim->GetColonyHope();
+				S.Housing = Hb.Housing; S.Jobs = Hb.Jobs; S.Furn = Hb.Furnishings;
+				for (const FRHColonist& Col : Sim->GetColonists()) { S.Assign.Add(FIntPoint(Sim->GetColonistBedPiece(Col.Id), Sim->GetColonistSeatPiece(Col.Id))); }
+				return S;
+			};
+			const FSnap Before = Take();
+			int32 MaxId = 0;
+			for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { MaxId = FMath::Max(MaxId, F.Id); }
+			MaxId = FMath::Max(MaxId, LastPieceId());
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("furnishtest"), Err), FString::Printf(TEXT("F11 saved (%s)"), *Err));
+			Furnish(TEXT("Plant"), C2, 14);
+			SellPiece(6);
+			Expect(Sim->LoadColony(TEXT("furnishtest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("F11 loaded (%s)"), *Err));
+			const FSnap After = Take();
+			Expect(Before.Pieces == After.Pieces && Before.Cap == After.Cap && Before.HabBeds == After.HabBeds && Before.StationSeats == After.StationSeats
+				&& Before.Housing == After.Housing && Before.Jobs == After.Jobs && Before.Furn == After.Furn && Before.Assign == After.Assign,
+				FString::Printf(TEXT("F11 the reload matches exactly: %d pieces, capacity %d, beds, seats, Hope lines, every assignment"), After.Pieces.Num(), After.Cap));
+			Expect(Furnish(TEXT("Plant"), C2, 14) && LastPieceId() > MaxId,
+				FString::Printf(TEXT("F11 the next piece gets #%d, above every Id issued before the save (highest standing #%d) - Ids are never reused"), LastPieceId(), MaxId));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnCommandRejected.Remove(RejectH);
+		Sim->OnFurnitureChanged.Remove(ChangedH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FURNITURE TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

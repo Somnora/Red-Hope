@@ -15,6 +15,9 @@ namespace
 	const FName NAME_Struct(TEXT("Struct"));
 	const FName NAME_Lander(TEXT("Lander"));
 	const FName NAME_Stockpile(TEXT("Stockpile"));
+	const FName NAME_FurnBed(TEXT("Bed"));
+	const FName NAME_FurnJobSeat(TEXT("JobSeat"));
+	const FName NAME_FurnDiningSeat(TEXT("DiningSeat"));
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
@@ -22,7 +25,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 29;  // v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 30;  // v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -99,6 +102,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	MinLivableCells = (int32)Defs->GetConfigScalar(FName("MinLivableCells"), MinLivableCells);
 	ShaftLinkRangeCm = Defs->GetConfigScalar(FName("ShaftLinkRange_m"), ShaftLinkRangeCm / 100.0) * 100.0;
 	SalvageFraction = FMath::Clamp(Defs->GetConfigScalar(FName("SalvageFraction"), SalvageFraction), 0.0, 1.0);
+	FurnitureRefundFraction = FMath::Clamp(Defs->GetConfigScalar(FName("FurnitureRefundFraction"), FurnitureRefundFraction), 0.0, 1.0);
+	HopeFurnishingsMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeFurnishingsMax"), HopeFurnishingsMax));
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -2349,7 +2354,7 @@ int32 URHSimWorldSubsystem::GetHabLivingBays(int32 HabId) const
 
 int32 URHSimWorldSubsystem::GetHabBeds(int32 HabId) const
 {
-	return (int32)(GetHabLivingBays(HabId) * ColonistsPerCell);
+	return CountHabBeds(HabId); // BM-4: furnished Living bays count their beds
 }
 
 int32 URHSimWorldSubsystem::GetHabResidents(int32 HabId) const
@@ -2375,7 +2380,7 @@ int32 URHSimWorldSubsystem::GetHousingCapacity() const
 	int32 Beds = 0;
 	for (const int32 Level : RatedFloors)
 	{
-		Beds += (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell);
+		Beds += CountFloorBeds(Level, nullptr); // BM-4: the legacy rule unless beds are placed
 	}
 	// BM-1: Living bays of rated surface habitat networks - open to crew only
 	// once the Phase-1 vault is certified (director, 2026-10-16: crew still
@@ -2480,7 +2485,7 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 					++Residents;
 				}
 			}
-			if (Residents < (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell))
+			if (Residents < CountFloorBeds(Level, nullptr))
 			{
 				Home = Level;
 				bFound = true;
@@ -3398,6 +3403,10 @@ bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName Roo
 		OutReason = TEXT("A station module sits on this cell - remove it to zone the cell");
 		return false;
 	}
+	if (!FurnitureAllowsRezone(FIntVector(Level, CellIndex, 0), RoomName, OutReason))
+	{
+		return false; // BM-4: furniture that can't stand in the new room
+	}
 	TArray<FName>& Cells = FloorRoomCells.FindOrAdd(Level);
 	if (Cells.Num() < Carved)
 	{
@@ -3511,11 +3520,16 @@ bool URHSimWorldSubsystem::DesignateBay(int32 HabId, int32 Bay, FName RoomName, 
 		OutReason = TEXT("A station module sits in this bay - remove it to zone the bay");
 		return false;
 	}
-	// Bed guard: never take the last bed from someone sleeping here.
+	if (!FurnitureAllowsRezone(FIntVector(0, Bay, HabId), RoomName, OutReason))
+	{
+		return false; // BM-4: furniture that can't stand in the new room
+	}
+	// Bed guard: never take the last bed from someone sleeping here (BM-4:
+	// the habitat's beds without this bay, furnished bays counting theirs).
 	const FRHRoomRow* OldRow = Defs->GetRoom(GetBayRoom(HabId, Bay));
 	const bool bWasLiving = OldRow && OldRow->SliceActive && OldRow->Function == FName("Living");
 	const bool bIsLiving = Row && Row->Function == FName("Living");
-	if (bWasLiving && !bIsLiving && GetHabResidents(HabId) > (int32)((GetHabLivingBays(HabId) - 1) * ColonistsPerCell))
+	if (bWasLiving && !bIsLiving && GetHabResidents(HabId) > CountHabBeds(HabId, Bay))
 	{
 		OutReason = FString::Printf(TEXT("%d residents sleep in this habitat - rezone after they move"), GetHabResidents(HabId));
 		return false;
@@ -3548,6 +3562,8 @@ void URHSimWorldSubsystem::RefreshJobs()
 	ColonistStations.Reset();
 	StationFilled.Reset();
 	StationCapacity.Reset();
+	ColonistBedPiece.Reset();
+	ColonistSeatPiece.Reset();
 	LabYieldSeatSum = 0.0;
 	WorkstationYieldSeatSum = 0.0;
 	LastIdleColonists = 0;
@@ -3657,7 +3673,24 @@ void URHSimWorldSubsystem::RefreshJobs()
 	{
 		const FStation& S = Stations[Idx];
 		const bool bAssigned = SeatPriority.Contains(S.Key);
-		const int32 Seats = FMath::Max(1, S.Row->SeatCount);
+		// BM-4: job-seat furniture replaces the room's SeatCount (yield still
+		// comes from the room row); each seat is a piece, in Id order.
+		const FRHCellFurnish* CF = FurnishedCells.Find(S.Key);
+		const bool bFurnishedSeats = CF && CF->SeatPieces > 0;
+		const int32 Seats = bFurnishedSeats ? CF->JobSeats : FMath::Max(1, S.Row->SeatCount);
+		TArray<int32> SeatIds;
+		if (bFurnishedSeats)
+		{
+			for (const int32 PieceId : CF->Ids)
+			{
+				const FRHFurnitureInstance* FP = FindFurniture(PieceId);
+				const FRHFurnitureRow* FR = FP ? Defs->GetFurniture(FP->Row) : nullptr;
+				for (int32 k = 0; FR && FR->Provides == NAME_FurnJobSeat && k < FR->Capacity; ++k)
+				{
+					SeatIds.Add(PieceId);
+				}
+			}
+		}
 		StationCapacity.Add(S.Key, Seats);
 		if (!bAssigned)
 		{
@@ -3672,6 +3705,10 @@ void URHSimWorldSubsystem::RefreshJobs()
 			const int32 Id = ByIdOrder[Next++];
 			ColonistJobs.Add(Id, S.Row->Function);
 			ColonistStations.Add(Id, S.Key);
+			if (SeatIds.IsValidIndex(Seat))
+			{
+				ColonistSeatPiece.Add(Id, SeatIds[Seat]);
+			}
 			++StationFilled.FindOrAdd(S.Key);
 			NonPriorityFilled += bAssigned ? 0 : 1;
 			if (S.Row->Function == FName("Lab"))
@@ -3689,6 +3726,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 	StaffedSeats = bLazy ? FMath::Min(StaffedSeats, NonPriorityFilled) : NonPriorityFilled;
 	LastIdleColonists = ByIdOrder.Num() - Next;
 	LastOpenSeats = NonPrioritySeats - NonPriorityFilled;
+	BuildBedAssignments(ByIdOrder);
 }
 
 void URHSimWorldSubsystem::GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const
@@ -3791,6 +3829,12 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 
 	const int32 Pop = Colonists.Num();
 	int32 LQCells = 0;
+	// BM-4: a Living cell with beds counts its beds, else 1 (the legacy rule).
+	const auto LivingWeight = [this](const FIntVector& K)
+	{
+		const FRHCellFurnish* CF = FurnishedCells.Find(K);
+		return (CF && CF->BedPieces > 0) ? CF->Beds : 1;
+	};
 	TSet<FName> TypesCounted; // per room type per rated floor
 	for (const auto& Pair : FloorRoomCells)
 	{
@@ -3809,7 +3853,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			}
 			if (Row->Function == FName("Living"))
 			{
-				++LQCells; // housing quality, counted below - never double-dipped
+				LQCells += LivingWeight(FIntVector(Level, i, 0)); // housing quality, counted below - never double-dipped
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
@@ -3907,6 +3951,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		}
 		TArray<const FRHRoomRow*> Rows;
 		TArray<FIntPoint> Pos;
+		TArray<FIntVector> BayKeys;
 		for (const int32 HabId : Net.Members)
 		{
 			const FRHHabMemberCache& M = HabMembers.FindChecked(HabId);
@@ -3915,17 +3960,19 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetBayRoom(HabId, Bay)) : nullptr;
 				Rows.Add((Row && Row->SliceActive) ? Row : nullptr);
 				Pos.Add(CellPos(FIntVector(0, Bay, HabId)));
+				BayKeys.Add(FIntVector(0, Bay, HabId));
 			}
 		}
-		for (const FRHRoomRow* Row : Rows)
+		for (int32 RI = 0; RI < Rows.Num(); ++RI)
 		{
+			const FRHRoomRow* Row = Rows[RI];
 			if (!Row)
 			{
 				continue;
 			}
 			if (Row->Function == FName("Living"))
 			{
-				++LQCells;
+				LQCells += LivingWeight(BayKeys[RI]);
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
@@ -3998,6 +4045,10 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		// Comforts lift scales with the supplied fraction; never negative.
 		Out.Comforts = HopeLuxuryBonus * FMath::Clamp((double)ComfortsSupplied / (double)Pop, 0.0, 1.0);
 	}
+	if (Pop > 0 && Furniture.Num() > 0)
+	{
+		Out.Furnishings = GetFurnishingsHope(); // BM-4: bonus-only, capped
+	}
 	Out.AdjacencyPenalty = Out.OffendedPairs * HopeAdjacencyPenalty;
 	for (const FRHColonist& C : Colonists)
 	{
@@ -4025,7 +4076,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		else if (ActiveCrisis == ERHCrisis::Environmental) { Out.CrisisPenalty = CrisisEnvironmentHope; }
 	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Solidarity
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Solidarity
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.CrisisPenalty, 0.0, 100.0);
 	return Out;
 }
@@ -4756,6 +4807,21 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				return false;
 			}
 		}
+		// BM-4: furnishings stand where a machine would go.
+		for (const FRHFurnitureInstance& F : Furniture)
+		{
+			FVector FC;
+			FVector2D FH;
+			if ((F.Key.Z == 0 ? F.Key.X : 0) != Level || !GetFurnitureFootprintCm(F.Row, F.Key, F.Slot, F.Rot, FC, FH))
+			{
+				continue;
+			}
+			if (FMath::Abs(FC.X - OverlapLoc.X) < HalfX + FH.X && FMath::Abs(FC.Y - OverlapLoc.Y) < HalfY + FH.Y)
+			{
+				OutReason = FString::Printf(TEXT("Footprint overlaps a furnishing (%s #%d)"), *F.Row.ToString(), F.Id);
+				return false;
+			}
+		}
 	}
 	if (Def->ImportOnly)
 	{
@@ -4965,6 +5031,68 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			return;
 		}
 		RemoveBuilding((int32)Cmd.Value);
+	}
+	else if (Cmd.Verb == FName("Furnish"))
+	{
+		// BM-4: install a furnishing from stock - instant once the order lands.
+		FString Reason;
+		FIntVector Key;
+		int32 Cell = 0, Slot = 0, Rot = 0;
+		DecodeFurnish(Cmd.Value, Cell, Slot, Rot);
+		if (!ResolveFurnishOrderKey(Cmd, Key))
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("No room there to furnish"));
+			return;
+		}
+		if (!CanPlaceFurniture(Cmd.Target, Key, Slot, Rot, Reason, /*bCheckQueued*/ false))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+		SpendTradeLot(URHDefinitionsSubsystem::GetFurnitureCost(*Defs->GetFurniture(Cmd.Target)));
+		AddFurniture(Cmd.Target, Key, Slot, Rot);
+		RefreshJobs();
+	}
+	else if (Cmd.Verb == FName("Sell"))
+	{
+		// BM-4: sell one furnishing (Target "Furniture", Value = Id) or a whole
+		// cell's (Target "Cell": Level + Value = cell, or Location = a bay).
+		FString Reason;
+		TSet<int32> Ids;
+		if (Cmd.Target == FName("Furniture"))
+		{
+			if (!CanSellFurniture((int32)Cmd.Value, Reason))
+			{
+				OnCommandRejected.Broadcast(Cmd, Reason);
+				return;
+			}
+			Ids.Add((int32)Cmd.Value);
+		}
+		else if (Cmd.Target == FName("Cell"))
+		{
+			int32 H = 0, Bay = INDEX_NONE;
+			if (Cmd.Level == 0 && !FindBayAt(Cmd.Location, H, Bay))
+			{
+				OnCommandRejected.Broadcast(Cmd, TEXT("No habitat bay there"));
+				return;
+			}
+			const FIntVector Key = Cmd.Level == 0 ? FIntVector(0, Bay, H) : FIntVector(Cmd.Level, (int32)Cmd.Value, 0);
+			if (!CanSellCell(Key, Reason))
+			{
+				OnCommandRejected.Broadcast(Cmd, Reason);
+				return;
+			}
+			TArray<int32> CellIds;
+			GetCellFurniture(Key, &CellIds);
+			Ids.Append(CellIds);
+		}
+		else
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("Sell needs a furnishing"));
+			return;
+		}
+		RemoveFurniture(Ids, nullptr);
+		RefreshJobs();
 	}
 	else if (Cmd.Verb == FName("Designate"))
 	{
@@ -6096,6 +6224,22 @@ void URHSimWorldSubsystem::ComputeSalvage(const FRHBuildingInstance& B, TMap<FNa
 			OutOut.FindOrAdd(L.Key) += L.Value * SalvageFraction;
 		}
 	}
+	// BM-4: a habitat's furnishings are sold back with it.
+	if (Def && Def->Pressurized && Furniture.Num() > 0)
+	{
+		TSet<int32> Inside;
+		for (const FRHFurnitureInstance& F : Furniture)
+		{
+			if (F.Key.Z == B.Id)
+			{
+				Inside.Add(F.Id);
+			}
+		}
+		for (const auto& L : FurnitureRefundFor(Inside))
+		{
+			OutOut.FindOrAdd(L.Key) += L.Value;
+		}
+	}
 }
 
 bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMap<FName, double>* OutSalvage) const
@@ -6389,6 +6533,20 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	RatedHabs.Remove(Id);
 	HabBayRooms.Remove(Id);
 	HabNetsNotedSmall.Remove(Id);
+	// BM-4: its furnishings (their refund is already in the salvage).
+	TArray<FIntVector> FurnKeys;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		if (F.Key.Z == Id)
+		{
+			FurnKeys.AddUnique(F.Key);
+		}
+	}
+	const int32 FurnSold = Furniture.RemoveAll([Id](const FRHFurnitureInstance& F) { return F.Key.Z == Id; });
+	if (FurnSold > 0)
+	{
+		RebuildFurnitureCache();
+	}
 	if (Def && !Gone.bUnderConstruction && Def->StorageWh > 0.f)
 	{
 		Power.BatteryCapWh = FMath::Max(0.0, Power.BatteryCapWh - Def->StorageWh);
@@ -6472,6 +6630,10 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	{
 		Notes += FString::Printf(TEXT(" Order lag back to %.0f s."), OrderLagSeconds);
 	}
+	if (FurnSold > 0)
+	{
+		Notes += FString::Printf(TEXT(" %d furnishing(s) sold back with it."), FurnSold);
+	}
 	const FString Name = Def && !Def->DisplayName.IsEmpty() ? Def->DisplayName : Gone.DefName.ToString();
 	UE_LOG(LogRedHopeSim, Display, TEXT("Demolished %s #%d (%s); salvage: %s"), *Gone.DefName.ToString(), Gone.Id,
 		Gone.bUnderConstruction ? TEXT("site cancelled") : TEXT("standing"), Line.IsEmpty() ? TEXT("nothing") : *Line);
@@ -6484,6 +6646,10 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	{
 		OnAlert.Broadcast(FString::Printf(TEXT("DEMOLISHED — %s #%d. Salvage at the Lander: %s.%s"), *Name, Gone.Id,
 			Line.IsEmpty() ? TEXT("nothing") : *Line, *Notes));
+	}
+	for (const FIntVector& K : FurnKeys)
+	{
+		OnFurnitureChanged.Broadcast(K);
 	}
 	OnBuildingRemoved.Broadcast(Gone);
 }
@@ -6507,6 +6673,720 @@ void URHSimWorldSubsystem::Debug_AddSolidAt(int32 BuildingId, FName Resource, do
 	{
 		(bOutput ? B->OutputKg : B->InputKg).FindOrAdd(Resource) += Kg;
 		OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));
+	}
+}
+
+// --- Furniture (BM-4, 2026-10-16) ---
+
+void URHSimWorldSubsystem::CreditLander(const TMap<FName, double>& Lines, bool bOutputShelf)
+{
+	FRHBuildingInstance* Lander = Buildings.FindByPredicate([](const FRHBuildingInstance& B) { return B.DefName == NAME_Lander; });
+	for (const auto& L : Lines)
+	{
+		if (L.Value <= 0.0)
+		{
+			continue;
+		}
+		if (Lander && Defs && Defs->IsSolidResource(L.Key))
+		{
+			(bOutputShelf ? Lander->OutputKg : Lander->InputKg).FindOrAdd(L.Key) += L.Value;
+			OnStockChanged.Broadcast(L.Key, GetTotalSolid(L.Key));
+		}
+		else
+		{
+			AddStock(L.Key, L.Value);
+		}
+	}
+}
+
+FIntPoint URHSimWorldSubsystem::GetFurnitureSize(const FRHFurnitureRow& Row, int32 Rot)
+{
+	const int32 X = FMath::Clamp(Row.SlotsX, 1, FurnishGrid);
+	const int32 Y = FMath::Clamp(Row.SlotsY, 1, FurnishGrid);
+	return (Rot & 1) ? FIntPoint(Y, X) : FIntPoint(X, Y);
+}
+
+uint32 URHSimWorldSubsystem::FurnitureMask(int32 Slot, const FIntPoint& Size)
+{
+	const int32 SX = Slot % FurnishGrid;
+	const int32 SY = Slot / FurnishGrid;
+	if (Slot < 0 || Slot >= FurnishGrid * FurnishGrid || SX + Size.X > FurnishGrid || SY + Size.Y > FurnishGrid)
+	{
+		return 0u; // doesn't fit
+	}
+	uint32 M = 0u;
+	for (int32 y = SY; y < SY + Size.Y; ++y)
+	{
+		for (int32 x = SX; x < SX + Size.X; ++x)
+		{
+			M |= 1u << (y * FurnishGrid + x);
+		}
+	}
+	return M;
+}
+
+const FRHFurnitureInstance* URHSimWorldSubsystem::FindFurniture(int32 Id) const
+{
+	return Furniture.FindByPredicate([Id](const FRHFurnitureInstance& F) { return F.Id == Id; });
+}
+
+int32 URHSimWorldSubsystem::GetCellFurniture(const FIntVector& Key, TArray<int32>* OutIds) const
+{
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	if (OutIds)
+	{
+		OutIds->Reset();
+		if (CF)
+		{
+			*OutIds = CF->Ids;
+		}
+	}
+	return CF ? CF->Ids.Num() : 0;
+}
+
+FName URHSimWorldSubsystem::GetCellRoom(const FIntVector& Key) const
+{
+	return Key.Z == 0 ? GetRoomAt(Key.X, Key.Y) : GetBayRoom(Key.Z, Key.Y);
+}
+
+bool URHSimWorldSubsystem::ResolveFurnitureKey(int32 Level, const FVector& LocationCm, FIntVector& OutKey) const
+{
+	if (Level == 0)
+	{
+		int32 H = 0, Bay = INDEX_NONE;
+		if (!FindBayAt(LocationCm, H, Bay))
+		{
+			return false;
+		}
+		OutKey = FIntVector(0, Bay, H);
+		return true;
+	}
+	const int32 Cell = FindCarvedCellAt(Level, LocationCm);
+	if (Cell == INDEX_NONE)
+	{
+		return false;
+	}
+	OutKey = FIntVector(Level, Cell, 0);
+	return true;
+}
+
+bool URHSimWorldSubsystem::ResolveFurnishOrderKey(const FRHCommand& Cmd, FIntVector& OutKey) const
+{
+	if (Cmd.Level == 0)
+	{
+		int32 H = 0, Bay = INDEX_NONE;
+		if (!FindBayAt(Cmd.Location, H, Bay))
+		{
+			return false;
+		}
+		OutKey = FIntVector(0, Bay, H);
+		return true;
+	}
+	int32 Cell = 0, Slot = 0, Rot = 0;
+	DecodeFurnish(Cmd.Value, Cell, Slot, Rot);
+	OutKey = FIntVector(Cmd.Level, Cell, 0);
+	return true;
+}
+
+FVector URHSimWorldSubsystem::GetCellCentreCm(const FIntVector& Key) const
+{
+	if (Key.Z != 0)
+	{
+		const FRHBuildingInstance* B = FindBuildingById(Key.Z);
+		return B ? GetBayCentreCm(*B, Key.Y) : FVector::ZeroVector;
+	}
+	const FIntPoint P = SpiralCell(Key.Y);
+	return FVector(ShaftHeadCm.X + P.X * 1000.0, ShaftHeadCm.Y + P.Y * 1000.0, Key.X * FloorHeightCm);
+}
+
+bool URHSimWorldSubsystem::GetFurnitureFootprintCm(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FVector& OutCentre, FVector2D& OutHalf) const
+{
+	const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(RowName) : nullptr;
+	if (!Row)
+	{
+		return false;
+	}
+	const FIntPoint S = GetFurnitureSize(*Row, Rot);
+	const int32 SX = Slot % FurnishGrid;
+	const int32 SY = Slot / FurnishGrid;
+	OutHalf = FVector2D(125.0 * S.X, 125.0 * S.Y);
+	OutCentre = GetCellCentreCm(Key) + FVector(-500.0 + 250.0 * SX + OutHalf.X, -500.0 + 250.0 * SY + OutHalf.Y, 0.0);
+	return true;
+}
+
+int32 URHSimWorldSubsystem::AnchorSlotFor(const FVector2D& LocalFromCellMinCm, int32 W, int32 H)
+{
+	const int32 CW = FMath::Clamp(W, 1, FurnishGrid);
+	const int32 CH = FMath::Clamp(H, 1, FurnishGrid);
+	const int32 SX = FMath::Clamp(FMath::RoundToInt32(LocalFromCellMinCm.X / 250.0 - CW * 0.5), 0, FurnishGrid - CW);
+	const int32 SY = FMath::Clamp(FMath::RoundToInt32(LocalFromCellMinCm.Y / 250.0 - CH * 0.5), 0, FurnishGrid - CH);
+	return SY * FurnishGrid + SX;
+}
+
+void URHSimWorldSubsystem::RebuildFurnitureCache()
+{
+	FurnishedCells.Reset();
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		FRHCellFurnish& CF = FurnishedCells.FindOrAdd(F.Key);
+		CF.Ids.Add(F.Id);
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+		if (!Row)
+		{
+			continue;
+		}
+		CF.Occupied |= FurnitureMask(F.Slot, GetFurnitureSize(*Row, F.Rot));
+		if (Row->Provides == NAME_FurnBed)
+		{
+			CF.Beds += Row->Capacity;
+			++CF.BedPieces;
+		}
+		else if (Row->Provides == NAME_FurnJobSeat)
+		{
+			CF.JobSeats += Row->Capacity;
+			++CF.SeatPieces;
+		}
+		else if (Row->Provides == NAME_FurnDiningSeat)
+		{
+			CF.DiningSeats += Row->Capacity;
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::IsFurnishKeyValid(const FIntVector& Key, FString* OutReason) const
+{
+	if (Key.Z == 0)
+	{
+		if (Key.X >= 0 || Key.Y < 0 || Key.Y >= GetFloorCarvedCells(Key.X))
+		{
+			if (OutReason)
+			{
+				*OutReason = FString::Printf(TEXT("Floor %d cell %d is not carved yet"), Key.X, Key.Y);
+			}
+			return false;
+		}
+		return true;
+	}
+	const FRHBuildingInstance* B = FindBuildingById(Key.Z);
+	const FRHBuildingRow* Def = (B && Defs) ? Defs->GetBuilding(B->DefName) : nullptr;
+	const FIntPoint G = B ? GetBayGrid(*B) : FIntPoint(0, 0);
+	if (Key.X != 0 || !B || B->Level != 0 || !Def || !Def->Pressurized || Key.Y < 0 || Key.Y >= G.X * G.Y)
+	{
+		if (OutReason)
+		{
+			*OutReason = TEXT("No habitat bay there");
+		}
+		return false;
+	}
+	if (B->bUnderConstruction)
+	{
+		if (OutReason)
+		{
+			*OutReason = TEXT("The habitat is still being built");
+		}
+		return false;
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::IsLivingKey(const FIntVector& Key) const
+{
+	const FRHRoomRow* Room = Defs ? Defs->GetRoom(GetCellRoom(Key)) : nullptr;
+	return Room && Room->SliceActive && Room->Function == FName("Living");
+}
+
+bool URHSimWorldSubsystem::IsFurnitureCellWorking(const FIntVector& Key) const
+{
+	const FRHRoomRow* Room = Defs ? Defs->GetRoom(GetCellRoom(Key)) : nullptr;
+	if (!Room || !Room->SliceActive)
+	{
+		return false;
+	}
+	return Key.Z == 0 ? RatedFloors.Contains(Key.X) : IsHabRated(Key.Z);
+}
+
+uint32 URHSimWorldSubsystem::BuildingMaskInCell(const FIntVector& Key, uint32 Probe, const FRHBuildingInstance** OutFirst) const
+{
+	if (OutFirst)
+	{
+		*OutFirst = nullptr;
+	}
+	if (!Defs)
+	{
+		return 0u;
+	}
+	const int32 Level = Key.Z == 0 ? Key.X : 0;
+	const FVector C = GetCellCentreCm(Key);
+	uint32 M = 0u;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		const FRHBuildingRow* BDef = B.Level == Level ? Defs->GetBuilding(B.DefName) : nullptr;
+		if (!BDef || BDef->Pressurized)
+		{
+			continue; // shells are the rooms themselves, not obstacles in them
+		}
+		const FVector2D Half = GetFootprintHalfCm(BDef, B.SizeX, B.SizeY);
+		if (Half.X <= 0.0 || Half.Y <= 0.0)
+		{
+			continue;
+		}
+		uint32 BM = 0u;
+		for (int32 i = 0; i < FurnishGrid * FurnishGrid; ++i)
+		{
+			const double X0 = C.X - 500.0 + 250.0 * (i % FurnishGrid);
+			const double Y0 = C.Y - 500.0 + 250.0 * (i / FurnishGrid);
+			if (B.LocationCm.X - Half.X < X0 + 249.0 && B.LocationCm.X + Half.X > X0 + 1.0
+				&& B.LocationCm.Y - Half.Y < Y0 + 249.0 && B.LocationCm.Y + Half.Y > Y0 + 1.0)
+			{
+				BM |= 1u << i;
+			}
+		}
+		if (OutFirst && !*OutFirst && (BM & Probe))
+		{
+			*OutFirst = &B;
+		}
+		M |= BM;
+	}
+	return M;
+}
+
+bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued) const
+{
+	if (!Defs || !Defs->HasFurnitureCatalogue())
+	{
+		OutReason = TEXT("No furniture catalogue");
+		return false;
+	}
+	const FRHFurnitureRow* Row = Defs->GetFurniture(RowName);
+	if (!Row)
+	{
+		OutReason = FString::Printf(TEXT("'%s' is not in the furniture catalogue"), *RowName.ToString());
+		return false;
+	}
+	if (!Row->SliceActive)
+	{
+		OutReason = FString::Printf(TEXT("%s is not available yet"), *Row->DisplayName);
+		return false;
+	}
+	if (!IsFurnishKeyValid(Key, &OutReason))
+	{
+		return false;
+	}
+	const FRHRoomRow* Room = Defs->GetRoom(GetCellRoom(Key));
+	if (!Room || !Room->SliceActive)
+	{
+		OutReason = TEXT("Zone this space first - furniture goes in rooms");
+		return false;
+	}
+	if (!URHDefinitionsSubsystem::FurnitureAllowsFunction(*Row, Room->Function))
+	{
+		OutReason = FString::Printf(TEXT("A %s goes in a %s room, not %s"), *Row->DisplayName,
+			*Row->RoomFunctions.Replace(TEXT(";"), TEXT(" or ")), *Room->DisplayName);
+		return false;
+	}
+	const uint32 Mask = (Rot >= 0 && Rot <= 3) ? FurnitureMask(Slot, GetFurnitureSize(*Row, Rot)) : 0u;
+	if (Mask == 0u)
+	{
+		OutReason = TEXT("It doesn't fit there - keep it inside the room");
+		return false;
+	}
+	if (const FRHCellFurnish* CF = FurnishedCells.Find(Key))
+	{
+		for (const int32 Id : CF->Ids)
+		{
+			const FRHFurnitureInstance* F = FindFurniture(Id);
+			const FRHFurnitureRow* FR = F ? Defs->GetFurniture(F->Row) : nullptr;
+			if (FR && (FurnitureMask(F->Slot, GetFurnitureSize(*FR, F->Rot)) & Mask))
+			{
+				OutReason = FString::Printf(TEXT("Overlaps the %s #%d"), *FR->DisplayName, F->Id);
+				return false;
+			}
+		}
+	}
+	if (bCheckQueued)
+	{
+		for (const FRHCommand& Q : UplinkQueue)
+		{
+			const FRHFurnitureRow* QRow = Q.Verb == FName("Furnish") ? Defs->GetFurniture(Q.Target) : nullptr;
+			FIntVector QKey;
+			if (!QRow || !ResolveFurnishOrderKey(Q, QKey) || QKey != Key)
+			{
+				continue;
+			}
+			int32 QCell = 0, QSlot = 0, QRot = 0;
+			DecodeFurnish(Q.Value, QCell, QSlot, QRot);
+			if (FurnitureMask(QSlot, GetFurnitureSize(*QRow, QRot)) & Mask)
+			{
+				OutReason = FString::Printf(TEXT("A %s is already in transit for that spot"), *QRow->DisplayName);
+				return false;
+			}
+		}
+	}
+	const FRHBuildingInstance* Blocker = nullptr;
+	if (BuildingMaskInCell(Key, Mask, &Blocker) & Mask)
+	{
+		OutReason = Blocker ? FString::Printf(TEXT("The %s #%d stands there"), *Blocker->DefName.ToString(), Blocker->Id)
+			: FString(TEXT("A machine stands there"));
+		return false;
+	}
+	for (const auto& Line : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
+	{
+		const double Have = Defs->IsSolidResource(Line.Key) ? GetTotalSolid(Line.Key) + GetStock(Line.Key) : GetStock(Line.Key);
+		if (Have + KINDA_SMALL_NUMBER < Line.Value)
+		{
+			OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"), *Line.Key.ToString(), Line.Value, Have);
+			return false;
+		}
+	}
+	return true;
+}
+
+int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int32>* Exclude) const
+{
+	const int32 Carved = GetFloorCarvedCells(Level);
+	if (Furniture.Num() == 0)
+	{
+		return (int32)(Carved * ColonistsPerCell); // the legacy rule, exactly
+	}
+	// Every carved cell holds the legacy beds, except a Living cell with bed
+	// pieces, which holds exactly its beds.
+	TMap<int32, int32> CellBeds;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		if (F.Key.Z != 0 || F.Key.X != Level || (Exclude && Exclude->Contains(F.Id)))
+		{
+			continue;
+		}
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+		if (Row && Row->Provides == NAME_FurnBed && IsLivingKey(F.Key))
+		{
+			CellBeds.FindOrAdd(F.Key.Y) += Row->Capacity;
+		}
+	}
+	if (CellBeds.Num() == 0)
+	{
+		return (int32)(Carved * ColonistsPerCell);
+	}
+	int32 Sum = 0;
+	for (const auto& P : CellBeds)
+	{
+		Sum += P.Value; // an integer sum: order-free
+	}
+	return (int32)((Carved - CellBeds.Num()) * ColonistsPerCell) + Sum;
+}
+
+int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TSet<int32>* Exclude) const
+{
+	const FRHHabMemberCache* M = HabMembers.Find(HabId);
+	const FRHBuildingInstance* B = M ? nullptr : FindBuildingById(HabId);
+	const FIntPoint G = M ? FIntPoint(M->NX, M->NY) : (B ? GetBayGrid(*B) : FIntPoint(0, 0));
+	int32 Plain = 0, Sum = 0;
+	for (int32 Bay = 0; Bay < G.X * G.Y; ++Bay)
+	{
+		const FIntVector Key(0, Bay, HabId);
+		if (Bay == ExcludeBay || !IsLivingKey(Key))
+		{
+			continue;
+		}
+		int32 Beds = 0;
+		bool bAny = false;
+		if (const FRHCellFurnish* CF = FurnishedCells.Find(Key))
+		{
+			for (const int32 Id : CF->Ids)
+			{
+				const FRHFurnitureInstance* F = (Exclude && Exclude->Contains(Id)) ? nullptr : FindFurniture(Id);
+				const FRHFurnitureRow* Row = (F && Defs) ? Defs->GetFurniture(F->Row) : nullptr;
+				if (Row && Row->Provides == NAME_FurnBed)
+				{
+					Beds += Row->Capacity;
+					bAny = true;
+				}
+			}
+		}
+		if (bAny)
+		{
+			Sum += Beds;
+		}
+		else
+		{
+			++Plain;
+		}
+	}
+	return (int32)(Plain * ColonistsPerCell) + Sum;
+}
+
+int32 URHSimWorldSubsystem::GetCellBeds(const FIntVector& Key) const
+{
+	if (Key.Z != 0 && !IsLivingKey(Key))
+	{
+		return 0; // a bay houses only as Living Quarters
+	}
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	if (CF && CF->BedPieces > 0 && IsLivingKey(Key))
+	{
+		return CF->Beds;
+	}
+	return (int32)ColonistsPerCell; // every carved cell holds the legacy beds
+}
+
+int32 URHSimWorldSubsystem::GetCellSeats(const FIntVector& Key) const
+{
+	const FRHRoomRow* Room = Defs ? Defs->GetRoom(GetCellRoom(Key)) : nullptr;
+	if (!Room || !Room->SliceActive || !IsSeatFunction(Room->Function))
+	{
+		return 0;
+	}
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	return (CF && CF->SeatPieces > 0) ? CF->JobSeats : FMath::Max(1, Room->SeatCount);
+}
+
+double URHSimWorldSubsystem::GetFurnishingsHope(double* OutRaw) const
+{
+	double Sum = 0.0;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+		if (!Row || Row->HopeComfort <= 0.f || !IsFurnitureCellWorking(F.Key))
+		{
+			continue;
+		}
+		const FRHRoomRow* Room = Defs->GetRoom(GetCellRoom(F.Key));
+		if (Room && URHDefinitionsSubsystem::FurnitureAllowsFunction(*Row, Room->Function))
+		{
+			Sum += Row->HopeComfort;
+		}
+	}
+	if (OutRaw)
+	{
+		*OutRaw = Sum;
+	}
+	return FMath::Min(Sum, HopeFurnishingsMax);
+}
+
+bool URHSimWorldSubsystem::PreviewFurnishEffect(FName RowName, const FIntVector& Key, FRHFurnishPreview& Out) const
+{
+	const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(RowName) : nullptr;
+	if (!Row)
+	{
+		return false;
+	}
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	Out.BedsBefore = GetCellBeds(Key);
+	Out.SeatsBefore = GetCellSeats(Key);
+	Out.BedsAfter = Out.BedsBefore;
+	Out.SeatsAfter = Out.SeatsBefore;
+	if (Row->Provides == NAME_FurnBed && IsLivingKey(Key))
+	{
+		Out.BedsAfter = ((CF && CF->BedPieces > 0) ? CF->Beds : 0) + Row->Capacity;
+	}
+	else if (Row->Provides == NAME_FurnJobSeat && Out.SeatsBefore > 0)
+	{
+		Out.SeatsAfter = ((CF && CF->SeatPieces > 0) ? CF->JobSeats : 0) + Row->Capacity;
+	}
+	double Raw = 0.0;
+	Out.ComfortBefore = GetFurnishingsHope(&Raw);
+	Out.ComfortAfter = FMath::Min(HopeFurnishingsMax, Raw + (IsFurnitureCellWorking(Key) ? (double)Row->HopeComfort : 0.0));
+	return true;
+}
+
+TMap<FName, double> URHSimWorldSubsystem::FurnitureRefundFor(const TSet<int32>& Ids) const
+{
+	TMap<FName, double> Refund;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		const FRHFurnitureRow* Row = Ids.Contains(F.Id) && Defs ? Defs->GetFurniture(F.Row) : nullptr;
+		if (!Row)
+		{
+			continue;
+		}
+		for (const auto& L : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
+		{
+			Refund.FindOrAdd(L.Key) += L.Value * FurnitureRefundFraction;
+		}
+	}
+	return Refund;
+}
+
+bool URHSimWorldSubsystem::BedGuardAllowsRemoval(const FIntVector& Key, const TSet<int32>& Ids, FString& OutReason) const
+{
+	int32 Residents = 0, Before = 0, After = 0;
+	if (Key.Z == 0)
+	{
+		for (const FRHColonist& Col : Colonists)
+		{
+			Residents += (Col.HomeHab == 0 && Col.HomeLevel == Key.X) ? 1 : 0;
+		}
+		Before = CountFloorBeds(Key.X, nullptr);
+		After = CountFloorBeds(Key.X, &Ids);
+	}
+	else
+	{
+		Residents = GetHabResidents(Key.Z);
+		Before = CountHabBeds(Key.Z);
+		After = CountHabBeds(Key.Z, INDEX_NONE, &Ids);
+	}
+	if (After < Before && After < Residents)
+	{
+		OutReason = FString::Printf(TEXT("%d resident(s) sleep here - selling this would leave someone without a bed"), Residents);
+		return false;
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanSellFurniture(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund) const
+{
+	const FRHFurnitureInstance* F = FindFurniture(Id);
+	if (!F)
+	{
+		OutReason = FString::Printf(TEXT("No furnishing #%d - it is already gone"), Id);
+		return false;
+	}
+	TSet<int32> Ids;
+	Ids.Add(Id);
+	if (!BedGuardAllowsRemoval(F->Key, Ids, OutReason))
+	{
+		return false;
+	}
+	if (OutRefund)
+	{
+		*OutRefund = FurnitureRefundFor(Ids);
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanSellCell(const FIntVector& Key, FString& OutReason, TMap<FName, double>* OutRefund) const
+{
+	TArray<int32> CellIds;
+	if (GetCellFurniture(Key, &CellIds) == 0)
+	{
+		OutReason = TEXT("Nothing to sell here");
+		return false;
+	}
+	TSet<int32> Ids;
+	Ids.Append(CellIds);
+	if (!BedGuardAllowsRemoval(Key, Ids, OutReason))
+	{
+		return false;
+	}
+	if (OutRefund)
+	{
+		*OutRefund = FurnitureRefundFor(Ids);
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::AddFurniture(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot)
+{
+	FRHFurnitureInstance F;
+	F.Id = NextFurnitureId++;
+	F.Row = RowName;
+	F.Key = Key;
+	F.Slot = Slot;
+	F.Rot = Rot & 3;
+	Furniture.Add(F);
+	RebuildFurnitureCache();
+	UE_LOG(LogRedHopeSim, Display, TEXT("Furnished %s #%d in (%d, %d, %d) at slot %d, rot %d"),
+		*RowName.ToString(), F.Id, Key.X, Key.Y, Key.Z, Slot, F.Rot);
+	OnFurnitureChanged.Broadcast(Key);
+}
+
+void URHSimWorldSubsystem::RemoveFurniture(const TSet<int32>& Ids, TMap<FName, double>* OutRefund)
+{
+	if (Ids.Num() == 0)
+	{
+		return;
+	}
+	const TMap<FName, double> Refund = FurnitureRefundFor(Ids);
+	TArray<FIntVector> Keys;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		if (Ids.Contains(F.Id))
+		{
+			Keys.AddUnique(F.Key);
+		}
+	}
+	const int32 Sold = Furniture.RemoveAll([&Ids](const FRHFurnitureInstance& F) { return Ids.Contains(F.Id); });
+	RebuildFurnitureCache();
+	CreditLander(Refund, /*bOutputShelf*/ true);
+	if (OutRefund)
+	{
+		*OutRefund = Refund;
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Sold %d furnishing(s); %.0f kg Struct back to the Lander"), Sold, Refund.FindRef(NAME_Struct));
+	for (const FIntVector& K : Keys)
+	{
+		OnFurnitureChanged.Broadcast(K);
+	}
+}
+
+bool URHSimWorldSubsystem::FurnitureAllowsRezone(const FIntVector& Key, FName NewRoom, FString& OutReason) const
+{
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	if (!CF || CF->Ids.Num() == 0)
+	{
+		return true;
+	}
+	const FRHRoomRow* Room = (Defs && !NewRoom.IsNone()) ? Defs->GetRoom(NewRoom) : nullptr;
+	for (const int32 Id : CF->Ids)
+	{
+		const FRHFurnitureInstance* F = FindFurniture(Id);
+		if (!F)
+		{
+			continue;
+		}
+		const FRHFurnitureRow* FR = Defs ? Defs->GetFurniture(F->Row) : nullptr;
+		if (!Room || !FR || !URHDefinitionsSubsystem::FurnitureAllowsFunction(*FR, Room->Function))
+		{
+			OutReason = FString::Printf(TEXT("The %s #%d can't stand in %s - sell it first"),
+				FR ? *FR->DisplayName : *F->Row.ToString(), Id, Room ? *Room->DisplayName : TEXT("an unzoned space"));
+			return false;
+		}
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::BuildBedAssignments(const TArray<int32>& ByIdOrder)
+{
+	if (Furniture.Num() == 0)
+	{
+		return;
+	}
+	// Bed slots per home - a floor (Level, 0) or a habitat (0, HabId) - in
+	// cell / bay order, then piece Id; each piece offers Capacity slots.
+	TMap<FIntPoint, TArray<TPair<int64, int32>>> Slots;
+	for (const FRHFurnitureInstance& F : Furniture)
+	{
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+		if (!Row || Row->Provides != NAME_FurnBed || !IsLivingKey(F.Key))
+		{
+			continue;
+		}
+		const FIntPoint Home = F.Key.Z == 0 ? FIntPoint(F.Key.X, 0) : FIntPoint(0, F.Key.Z);
+		for (int32 k = 0; k < Row->Capacity; ++k)
+		{
+			Slots.FindOrAdd(Home).Emplace((int64)F.Key.Y * 1000000 + F.Id, F.Id);
+		}
+	}
+	for (auto& P : Slots)
+	{
+		P.Value.StableSort([](const TPair<int64, int32>& A, const TPair<int64, int32>& B) { return A.Key < B.Key; });
+	}
+	TMap<FIntPoint, int32> NextSlot;
+	for (const int32 Id : ByIdOrder)
+	{
+		const FRHColonist* Col = Colonists.FindByPredicate([Id](const FRHColonist& X) { return X.Id == Id; });
+		if (!Col)
+		{
+			continue;
+		}
+		const FIntPoint Home = Col->HomeHab != 0 ? FIntPoint(0, Col->HomeHab) : FIntPoint(Col->HomeLevel, 0);
+		const TArray<TPair<int64, int32>>* S = Slots.Find(Home);
+		int32& N = NextSlot.FindOrAdd(Home);
+		if (S && S->IsValidIndex(N))
+		{
+			ColonistBedPiece.Add(Id, (*S)[N].Value);
+			++N;
+		}
 	}
 }
 
@@ -7688,6 +8568,22 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			Ar << Key << Rooms;
 		}
 	}
+	// Furniture (save v30): pieces in Id order. The cell cache and the bed /
+	// seat assignments are DERIVED.
+	{
+		Ar << NextFurnitureId;
+		int32 FurnCount = Furniture.Num();
+		Ar << FurnCount;
+		for (const FRHFurnitureInstance& F : Furniture)
+		{
+			int32 FId = F.Id;
+			FName FRow = F.Row;
+			FIntVector FKey = F.Key;
+			int32 FSlot = F.Slot;
+			int32 FRot = F.Rot;
+			Ar << FId << FRow << FKey << FSlot << FRot;
+		}
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -8045,6 +8941,25 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v29: colonist %d HomeHab #%d is not a surface habitat"), Col.Id, Col.HomeHab);
 			}
 		}
+	}
+	// Furniture (save v30).
+	{
+		Furniture.Reset();
+		Ar << NextFurnitureId;
+		int32 FurnCount = 0;
+		Ar << FurnCount;
+		for (int32 i = 0; i < FurnCount; ++i)
+		{
+			FRHFurnitureInstance F;
+			Ar << F.Id << F.Row << F.Key << F.Slot << F.Rot;
+			if (!(Defs && Defs->GetFurniture(F.Row)) || !IsFurnishKeyValid(F.Key))
+			{
+				// Kept (it may come back with its row) but it furnishes nothing.
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v30: furnishing #%d (%s) has no row or no cell"), F.Id, *F.Row.ToString());
+			}
+			Furniture.Add(F);
+		}
+		RebuildFurnitureCache();
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

@@ -10,6 +10,7 @@ class URHSimClockSubsystem;
 class URHAgentSubsystem;
 struct FRHRobotRow;
 struct FRHRoomRow;
+struct FRHFurnitureRow;
 struct FRHBuildingRow;
 
 // A strategic order. Presentation can only reach the sim through these:
@@ -105,6 +106,22 @@ struct REDHOPESIM_API FRHBuildingInstance
 	UPROPERTY() TMap<FName, double> OutputKg;
 };
 
+// A placed furnishing (BM-4, 2026-10-16). Key = the cell it stands in, in
+// the station-key convention: (Level, CellIndex, 0) underground, (0, Bay,
+// HabId) in a surface habitat bay. Slot = sy * 4 + sx of its min-corner 2.5 m
+// sub-cell; Rot 0..3 quarter turns. Serialized (save v30).
+USTRUCT()
+struct REDHOPESIM_API FRHFurnitureInstance
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 Id = 0;
+	UPROPERTY() FName Row;
+	UPROPERTY() FIntVector Key = FIntVector::ZeroValue;
+	UPROPERTY() int32 Slot = 0;
+	UPROPERTY() int32 Rot = 0;
+};
+
 USTRUCT()
 struct REDHOPESIM_API FRHPowerState
 {
@@ -124,6 +141,8 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingAdded, const FRHBuildingInstanc
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingCompleted, const FRHBuildingInstance&);
 // BM-3: a structure demolished or a site cancelled - the instance as it stood.
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingRemoved, const FRHBuildingInstance&);
+// BM-4: a cell's furnishings changed (placed, sold, or its habitat demolished).
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnFurnitureChanged, const FIntVector& /*CellKey*/);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnCommandRejected, const FRHCommand&, const FString&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntityHandle>&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
@@ -227,6 +246,53 @@ public:
 	bool CanDemolishBuilding(int32 Id, FString& OutReason, TMap<FName, double>* OutSalvage = nullptr) const;
 	bool HasBuilding(int32 Id) const { return FindBuildingById(Id) != nullptr; }
 	double GetSalvageFraction() const { return SalvageFraction; }
+	// --- Furniture (BM-4, 2026-10-16) ---
+	// A 10 m cell or bay is a 4x4 grid of 2.5 m sub-cells. A Furnish order is
+	// Target = row, Level, Location (a bay is found by location, like
+	// Designate) and Value = EncodeFurnish(Cell, Slot, Rot). A Sell order is
+	// Target "Furniture" + Value = piece Id, or Target "Cell" + Level and
+	// Value = cell index (underground) or Location (bay): everything in it.
+	static constexpr int32 FurnishGrid = 4;
+	static double EncodeFurnish(int32 Cell, int32 Slot, int32 Rot) { return (double)(FMath::Max(0, Cell) * 64 + FMath::Clamp(Slot, 0, 15) * 4 + (Rot & 3)); }
+	static void DecodeFurnish(double Value, int32& OutCell, int32& OutSlot, int32& OutRot)
+	{
+		const int32 V = FMath::Max(0, (int32)Value);
+		OutCell = V / 64;
+		OutSlot = (V / 4) % 16;
+		OutRot = V % 4;
+	}
+	// Footprint in sub-cells at a rotation (odd turns swap the sides).
+	static FIntPoint GetFurnitureSize(const FRHFurnitureRow& Row, int32 Rot);
+	const TArray<FRHFurnitureInstance>& GetFurniture() const { return Furniture; }
+	const FRHFurnitureInstance* FindFurniture(int32 Id) const;
+	int32 GetCellFurniture(const FIntVector& Key, TArray<int32>* OutIds = nullptr) const;
+	// The furnishable cell (or bay) under a point on a floor.
+	bool ResolveFurnitureKey(int32 Level, const FVector& LocationCm, FIntVector& OutKey) const;
+	FVector GetCellCentreCm(const FIntVector& Key) const;
+	FName GetCellRoom(const FIntVector& Key) const;
+	bool GetFurnitureFootprintCm(FName Row, const FIntVector& Key, int32 Slot, int32 Rot, FVector& OutCentre, FVector2D& OutHalf) const;
+	// The slot that centres a W x H footprint on a point measured from the
+	// cell's min corner (cm), clamped into the grid.
+	static int32 AnchorSlotFor(const FVector2D& LocalFromCellMinCm, int32 W, int32 H);
+	// Preflight for a Furnish order. The ghost polls it; ExecuteCommand runs it
+	// again without the in-transit check (the order itself is no longer queued).
+	bool CanPlaceFurniture(FName Row, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued = true) const;
+	bool CanSellFurniture(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
+	bool CanSellCell(const FIntVector& Key, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
+	// A cell's effective beds and work seats (furnished, or the legacy number).
+	int32 GetCellBeds(const FIntVector& Key) const;
+	int32 GetCellSeats(const FIntVector& Key) const;
+	// What placing a row would do to the cell's beds and seats and to the
+	// colony's Furnishings line - the sim's own replacement rule, for the hint.
+	struct FRHFurnishPreview { int32 BedsBefore = 0; int32 BedsAfter = 0; int32 SeatsBefore = 0; int32 SeatsAfter = 0; double ComfortBefore = 0.0; double ComfortAfter = 0.0; };
+	bool PreviewFurnishEffect(FName Row, const FIntVector& Key, FRHFurnishPreview& Out) const;
+	// Derived each RefreshJobs, never saved: the bed / work-seat piece each
+	// colonist uses (0 = a legacy bed or seat) - what animation will target.
+	int32 GetColonistBedPiece(int32 ColonistId) const { return ColonistBedPiece.FindRef(ColonistId); }
+	int32 GetColonistSeatPiece(int32 ColonistId) const { return ColonistSeatPiece.FindRef(ColonistId); }
+	double GetFurnitureRefundFraction() const { return FurnitureRefundFraction; }
+	double GetHopeFurnishingsMax() const { return HopeFurnishingsMax; }
+	int32 GetFloorBeds(int32 Level) const { return CountFloorBeds(Level, nullptr); }
 	// The greenhouse dome's garden row if B is a BUILT surface dome whose room
 	// is live, else null. Its beds plant and grow like greenhouse cells.
 	const FRHRoomRow* GetDomeRoom(const FRHBuildingInstance& B) const;
@@ -368,6 +434,7 @@ public:
 	struct FRHHopeBreakdown
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
+		double Furnishings = 0; // BM-4: bonus-only, capped (HopeFurnishingsMax)
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
@@ -873,6 +940,7 @@ public:
 	FRHOnBuildingAdded OnBuildingAdded;
 	FRHOnBuildingCompleted OnBuildingCompleted;
 	FRHOnBuildingRemoved OnBuildingRemoved;
+	FRHOnFurnitureChanged OnFurnitureChanged;
 	FRHOnCommandRejected OnCommandRejected;
 	FRHOnRobotsSpawned OnRobotsSpawned;
 	FRHOnQuotaMet OnQuotaMet;
@@ -1049,6 +1117,38 @@ private:
 	double SalvageFraction = 0.5;         // config SalvageFraction
 	void ComputeSalvage(const FRHBuildingInstance& B, TMap<FName, double>& OutIn, TMap<FName, double>& OutOut, int32& OutPacks) const;
 	void RemoveBuilding(int32 Id);
+	// Credits stock to the Lander: solids onto a shelf, the rest to the pool.
+	void CreditLander(const TMap<FName, double>& Lines, bool bOutputShelf);
+	// --- Furniture (BM-4) ---
+	TArray<FRHFurnitureInstance> Furniture;   // SAVED (v30), Id-ascending
+	int32 NextFurnitureId = 1;               // SAVED; Ids are never reused
+	double FurnitureRefundFraction = 0.75;   // config FurnitureRefundFraction
+	double HopeFurnishingsMax = 6.0;         // config HopeFurnishingsMax
+	// DERIVED per cell, lookup only: raw capacities by kind, the sub-cell
+	// occupancy mask and the piece Ids (ascending). Rebuilt eagerly by
+	// RebuildFurnitureCache at every change, like the hab topology.
+	struct FRHCellFurnish { int32 Beds = 0; int32 BedPieces = 0; int32 JobSeats = 0; int32 SeatPieces = 0; int32 DiningSeats = 0; uint32 Occupied = 0; TArray<int32> Ids; };
+	TMap<FIntVector, FRHCellFurnish> FurnishedCells;
+	TMap<int32, int32> ColonistBedPiece;     // derived (RefreshJobs)
+	TMap<int32, int32> ColonistSeatPiece;    // derived (RefreshJobs)
+	void RebuildFurnitureCache();
+	bool IsFurnishKeyValid(const FIntVector& Key, FString* OutReason = nullptr) const;
+	bool IsLivingKey(const FIntVector& Key) const;
+	bool IsFurnitureCellWorking(const FIntVector& Key) const;
+	static uint32 FurnitureMask(int32 Slot, const FIntPoint& Size);
+	// Sub-cells of a cell covered by machine footprints; OutFirst = the first
+	// building (by Id) covering any sub-cell of Probe.
+	uint32 BuildingMaskInCell(const FIntVector& Key, uint32 Probe = 0, const FRHBuildingInstance** OutFirst = nullptr) const;
+	int32 CountFloorBeds(int32 Level, const TSet<int32>* Exclude) const;
+	int32 CountHabBeds(int32 HabId, int32 ExcludeBay = INDEX_NONE, const TSet<int32>* Exclude = nullptr) const;
+	bool BedGuardAllowsRemoval(const FIntVector& Key, const TSet<int32>& Ids, FString& OutReason) const;
+	bool ResolveFurnishOrderKey(const FRHCommand& Cmd, FIntVector& OutKey) const;
+	void AddFurniture(FName Row, const FIntVector& Key, int32 Slot, int32 Rot);
+	void RemoveFurniture(const TSet<int32>& Ids, TMap<FName, double>* OutRefund);
+	TMap<FName, double> FurnitureRefundFor(const TSet<int32>& Ids) const;
+	double GetFurnishingsHope(double* OutRaw = nullptr) const;
+	bool FurnitureAllowsRezone(const FIntVector& Key, FName NewRoom, FString& OutReason) const;
+	void BuildBedAssignments(const TArray<int32>& ByIdOrder);
 	bool AnyHabNetRated() const;
 	int32 GetHabLivingBays(int32 HabId) const;
 	bool IsLocationInRatedHab(const FVector& LocationCm) const;

@@ -22,6 +22,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	DiscoveriesTable = Cast<UDataTable>(DiscoveriesTablePath.TryLoad()); // absent = the layer stays dormant
 	RivalsTable = Cast<UDataTable>(RivalsTablePath.TryLoad()); // absent = a lonely Mars
 	CropsTable = Cast<UDataTable>(CropsTablePath.TryLoad()); // absent/dormant = the legacy flat-yield garden
+	FurnitureTable = Cast<UDataTable>(FurnitureTablePath.TryLoad()); // absent = no furnishing layer
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -167,6 +168,64 @@ void URHDefinitionsSubsystem::ForEachCropRow(TFunctionRef<void(FName, const FRHC
 	{
 		Fn(Pair.Key, *reinterpret_cast<const FRHCropRow*>(Pair.Value));
 	}
+}
+
+const FRHFurnitureRow* URHDefinitionsSubsystem::GetFurniture(FName Name) const
+{
+	return FurnitureTable ? FurnitureTable->FindRow<FRHFurnitureRow>(Name, TEXT("GetFurniture"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::GetActiveFurnitureSorted(TArray<TPair<FName, const FRHFurnitureRow*>>& Out) const
+{
+	Out.Reset();
+	if (!FurnitureTable)
+	{
+		return;
+	}
+	for (const auto& Pair : FurnitureTable->GetRowMap())
+	{
+		const FRHFurnitureRow* Row = reinterpret_cast<const FRHFurnitureRow*>(Pair.Value);
+		if (Row && Row->SliceActive)
+		{
+			Out.Emplace(Pair.Key, Row);
+		}
+	}
+	Out.Sort([](const TPair<FName, const FRHFurnitureRow*>& A, const TPair<FName, const FRHFurnitureRow*>& B)
+	{
+		return A.Key.LexicalLess(B.Key);
+	});
+}
+
+void URHDefinitionsSubsystem::ForEachFurnitureRow(TFunctionRef<void(FName, const FRHFurnitureRow&)> Fn) const
+{
+	if (!FurnitureTable)
+	{
+		return;
+	}
+	for (const auto& Pair : FurnitureTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHFurnitureRow*>(Pair.Value));
+	}
+}
+
+bool URHDefinitionsSubsystem::ActivateFurnitureRow(FName Name)
+{
+	if (FRHFurnitureRow* Row = FurnitureTable ? FurnitureTable->FindRow<FRHFurnitureRow>(Name, TEXT("ActivateFurnitureRow"), false) : nullptr)
+	{
+		Row->SliceActive = true;
+		return true;
+	}
+	return false;
+}
+
+void URHDefinitionsSubsystem::Debug_InjectFurniture(FName Name, const FRHFurnitureRow& Row)
+{
+	if (!FurnitureTable)
+	{
+		FurnitureTable = NewObject<UDataTable>(this, TEXT("DT_Furniture_Transient"));
+		FurnitureTable->RowStruct = FRHFurnitureRow::StaticStruct();
+	}
+	FurnitureTable->AddRow(Name, Row);
 }
 
 bool URHDefinitionsSubsystem::ActivateCropRow(FName Name)

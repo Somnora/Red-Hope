@@ -58,6 +58,29 @@ public:
 	// Flips a dormant crop live in-memory (per-gate director flip / test knob;
 	// the DT asset is untouched, same contract as ActivateRoomRow).
 	bool ActivateCropRow(FName Name);
+	// Furniture (BM-4): row by name (dormant rows too), the slice-active rows
+	// sorted by name (the catalogue's order), all rows (pure-data verifier).
+	// Absent table = no furnishing layer.
+	bool HasFurnitureCatalogue() const { return FurnitureTable != nullptr; }
+	const FRHFurnitureRow* GetFurniture(FName Name) const;
+	void GetActiveFurnitureSorted(TArray<TPair<FName, const FRHFurnitureRow*>>& Out) const;
+	void ForEachFurnitureRow(TFunctionRef<void(FName, const FRHFurnitureRow&)> Fn) const;
+	bool ActivateFurnitureRow(FName Name);
+	static TMap<FName, double> GetFurnitureCost(const FRHFurnitureRow& Row) { return ParseResourceList(Row.CostResources); }
+	// True if the row may stand in a room of this Function.
+	static bool FurnitureAllowsFunction(const FRHFurnitureRow& Row, FName Function)
+	{
+		TArray<FString> Parts;
+		Row.RoomFunctions.ParseIntoArray(Parts, TEXT(";"), true);
+		for (const FString& P : Parts)
+		{
+			if (FName(*P.TrimStartAndEnd()) == Function)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 	// Rivals (M3 Gate A): row by name + all slice-active neighbors. Absent
 	// table = a lonely Mars - the layer stays dormant.
 	const FRHRivalRow* GetRival(FName Name) const;
@@ -140,6 +163,7 @@ public:
 	// (dev-only; the real asset supersedes it once imported).
 	void Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row);
 	void Debug_InjectRival(FName Name, const FRHRivalRow& Row);
+	void Debug_InjectFurniture(FName Name, const FRHFurnitureRow& Row);
 
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
 	float EvalSolarCurve(float SolFraction) const;
@@ -171,6 +195,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath DiscoveriesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Discoveries.DT_Discoveries"));
 	UPROPERTY(Config) FSoftObjectPath RivalsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rivals.DT_Rivals"));
 	UPROPERTY(Config) FSoftObjectPath CropsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Crops.DT_Crops"));
+	UPROPERTY(Config) FSoftObjectPath FurnitureTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Furniture.DT_Furniture"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -186,5 +211,6 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
 	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
 	UPROPERTY() TObjectPtr<UDataTable> CropsTable;
+	UPROPERTY() TObjectPtr<UDataTable> FurnitureTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };
