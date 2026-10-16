@@ -151,6 +151,20 @@ CREW.update({
     "cook_moreau": person(0, 0.75, 1.60, "middleage_caucasian_female", (0.0, 0.2, 0.8), shirt("#D6CCB8", "#6A6863"),
                           ("ponytail01", "#5E5852"), ("eyebrow005", "#4A453F"), weight=0.62),
 })
+# EVA suits (director 2026-10-16: "male and female characters with their space
+# suits on for when they are doing surface work"). The game swaps a colonist's
+# walker for the suit of their sex whenever they are outdoors. Same body, rig
+# and clips as the crew; a white coverall bulked out, plus hard EVA parts
+# (helmet + visor, neck ring, life-support pack, chest unit, gloves, boots)
+# bound rigidly to their bones - see add_eva_parts. No hair under a helmet.
+EVA_COVERALL = "#DCD8CF"
+CREW.update({
+    "suit_m": dict(person(1, 0.60, 1.78, "middleage_caucasian_male", (0.2, 0.2, 0.6), jumpsuit(EVA_COVERALL, boots="#B9B5AD"),
+                          None, ("eyebrow002", "#2A2522"), muscle=0.6, weight=0.55), eva=True),
+    "suit_f": dict(person(0, 0.58, 1.68, "young_caucasian_female2", (0.2, 0.2, 0.6), jumpsuit(EVA_COVERALL, boots="#B9B5AD"),
+                          None, ("eyebrow005", "#2A2522"), weight=0.48), eva=True),
+})
+
 # Eye colour per person (everyone not listed keeps "brown"). Brown is by far
 # the commonest; the lighter colours go where the ancestry mix makes them likely.
 for _face, _eyes in {"med_haddad": "hazel", "pilot_reyes": "hazel", "cook_moreau": "hazel",
@@ -228,7 +242,10 @@ def build(spec):
                                         subdiv_levels=0, material_type="MAKESKIN")
     set_eye_colour(eyes, spec.get("eyes", "brown"))
     parts["eye"].append(eyes)
-    for kind, (asset, colour) in (("Eyebrows", spec["brow"]), ("Hair", spec["hair"])):
+    for kind, pair in (("Eyebrows", spec["brow"]), ("Hair", spec["hair"])):
+        if pair is None:
+            continue  # a suited walker: no hair under the helmet
+        asset, colour = pair
         sub = "eyebrows" if kind == "Eyebrows" else "hair"
         o = HumanService.add_mhclo_asset(P(sub, asset, asset + ".mhclo"), bm, asset_type=kind,
                                          subdiv_levels=0, material_type="MAKESKIN")
@@ -240,9 +257,135 @@ def build(spec):
     tint_strands(lash, "#%02X%02X%02X" % tuple(int(int(spec["brow"][1].lstrip("#")[i:i + 2], 16) * 0.5)
                                                for i in (0, 2, 4)), solid="hair")
     parts["hair"].append(lash)
+    if spec.get("eva"):
+        add_eva_parts(rig, parts)
     bm.hide_render = True
     bm.hide_set(True)
     return bm, rig, parts
+
+
+def _eva_material(name, hexcol, role):
+    """A flat-colour part material the atlas bake can read: the colour comes
+    through an RGB node (the bake's base_src keeps only the red channel of an
+    unlinked Base Color default)."""
+    m = bpy.data.materials.new(name)
+    m.use_nodes = True
+    m["rh_role"] = role
+    nt = m.node_tree
+    rgb = nt.nodes.new("ShaderNodeRGB")
+    rgb.outputs[0].default_value = tuple(hex_lin(hexcol)[:3]) + (1.0,)
+    nt.links.new(_principled(m).inputs["Base Color"], rgb.outputs[0])
+    return m
+
+
+def add_eva_parts(rig, parts):
+    """Hard EVA parts, each bound rigidly (weight 1.0) to one bone, sized from
+    the body's own height so male and female suits fit. The model faces -Y."""
+    skin = parts["skin"][0]
+    zs = [(skin.matrix_world @ v.co).z for v in skin.data.vertices]
+    H = max(zs) - min(zs)
+    ground = min(zs)
+
+    def bone(name, at=0.0):
+        b = rig.data.bones[name]
+        return rig.matrix_world @ (b.head_local.lerp(b.tail_local, at))
+
+    mats = {
+        "white": _eva_material("eva_white", "#E6E3DC", "shoe"),
+        "grey": _eva_material("eva_grey", "#8E9196", "shoe"),
+        "dark": _eva_material("eva_dark", "#2C2F34", "shoe"),
+        "visor": _eva_material("eva_visor", "#141A22", "eye"),
+        "accent": _eva_material("eva_accent", "#D9762B", "shoe"),
+    }
+
+    def part(name, kind, loc, scale, bone_name, mat, segs=24):
+        if kind == "sphere":
+            bpy.ops.mesh.primitive_uv_sphere_add(segments=segs, ring_count=segs // 2, radius=1.0, location=loc)
+        elif kind == "cyl":
+            bpy.ops.mesh.primitive_cylinder_add(vertices=segs, radius=1.0, depth=1.0, location=loc)
+        else:
+            bpy.ops.mesh.primitive_cube_add(size=2.0, location=loc)
+            bev = None
+        o = bpy.context.object
+        o.name = "eva_" + name
+        o.scale = scale
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        if kind == "cube":
+            # Rounded hard-surface edges (bevel applied by the bake's convert).
+            bev = o.modifiers.new("Bevel", "BEVEL")
+            bev.width = min(scale) * 0.25
+            bev.segments = 3
+        o.data.materials.append(mats[mat])
+        vg = o.vertex_groups.new(name=bone_name)
+        vg.add(list(range(len(o.data.vertices))), 1.0, "REPLACE")
+        am = o.modifiers.new("Armature", "ARMATURE")
+        am.object = rig
+        o.parent = rig
+        o.matrix_parent_inverse = rig.matrix_world.inverted()
+        for poly in o.data.polygons:
+            poly.use_smooth = True
+        bpy.ops.object.select_all(action="DESELECT")
+        o.select_set(True)
+        bpy.context.view_layer.objects.active = o
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.uv.smart_project()
+        bpy.ops.object.mode_set(mode="OBJECT")
+        parts["shoe"].append(o)
+        return o
+
+    head = bone("head")
+    centre = head + mathutils.Vector((0.0, -0.004 * H, 0.054 * H))
+    part("helmet", "sphere", centre, (0.098 * H, 0.104 * H, 0.106 * H), "head", "white", 32)
+    part("visor", "sphere", centre + mathutils.Vector((0.0, -0.040 * H, 0.0)),
+         (0.082 * H, 0.072 * H, 0.074 * H), "head", "visor", 32)
+    part("neckring", "cyl", bone("neck_01") + mathutils.Vector((0.0, 0.0, -0.004 * H)),
+         (0.074 * H, 0.074 * H, 0.026 * H), "neck_01", "grey")
+    chest = bone("spine_03", 0.4)
+    part("pack", "cube", chest + mathutils.Vector((0.0, 0.092 * H, 0.0)), (0.105 * H, 0.050 * H, 0.135 * H), "spine_03", "white")
+    part("pack_panel", "cube", chest + mathutils.Vector((0.0, 0.143 * H, 0.03 * H)), (0.06 * H, 0.004 * H, 0.04 * H), "spine_03", "accent")
+    part("chest_unit", "cube", chest + mathutils.Vector((0.0, -0.082 * H, -0.035 * H)), (0.058 * H, 0.020 * H, 0.032 * H), "spine_03", "grey")
+    for side in ("l", "r"):
+        # The cuff at the wrist; the glove itself is the hand's own skin,
+        # recoloured below (real fingers, no mitten).
+        part("cuff_" + side, "sphere", bone("hand_" + side, 0.0), (0.030 * H, 0.030 * H, 0.024 * H), "hand_" + side, "dark", 16)
+        foot = bone("foot_" + side, 0.45)
+        part("boot_" + side, "cube", mathutils.Vector((foot.x, foot.y - 0.01 * H, ground + 0.034 * H)),
+             (0.036 * H, 0.072 * H, 0.034 * H), "foot_" + side, "grey")
+    # Gloves and the helmet's interior: hand skin (weighted mostly to the hand
+    # and finger bones) takes the dark glove material; head and neck skin take
+    # the visor tone, so nothing pink shows under the helmet rim.
+    sk = parts["skin"][0]
+    names = {g.index: g.name for g in sk.vertex_groups}
+    hand_prefixes = ("hand_", "thumb_", "index_", "middle_", "ring_", "pinky_")
+
+    def dominant(v):
+        best, bw = "", 0.0
+        for g in v.groups:
+            if g.weight > bw:
+                best, bw = names.get(g.group, ""), g.weight
+        return best
+    dom = [dominant(v) for v in sk.data.vertices]
+    sk.data.materials.append(mats["dark"])
+    i_glove = len(sk.data.materials) - 1
+    sk.data.materials.append(mats["visor"])
+    i_inner = len(sk.data.materials) - 1
+    n_glove = n_inner = 0
+    for poly in sk.data.polygons:
+        ds = [dom[i] for i in poly.vertices]
+        if all(d.startswith(hand_prefixes) for d in ds):
+            poly.material_index = i_glove
+            n_glove += 1
+        elif all(d in ("head", "neck_01", "neck_02") for d in ds):
+            poly.material_index = i_inner
+            n_inner += 1
+    log("EVA: %d hand faces gloved, %d head/neck faces under the helmet" % (n_glove, n_inner))
+    # Bulk the coverall: a suit stands off the body.
+    for o in parts["cloth"]:
+        puff = o.modifiers.new("EvaBulk", "DISPLACE")
+        puff.mid_level = 0.0
+        puff.strength = 0.012 * H
+    log("EVA parts added (body height %.3f units)" % H)
 
 
 def _tex_nodes(mat):

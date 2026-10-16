@@ -55,6 +55,7 @@ private:
 		// rest - and Body stays null. Static mesh / primitive remain fallbacks.
 		TWeakObjectPtr<USkeletalMeshComponent> SkelBody;
 		FName CurrentClip;           // Walk / Idle / WorkBench / WorkLab
+		bool bSuited = false;        // wearing the EVA suit walker (outdoors on the surface)
 		// The name plate (spawned with the figure) - hover-gated: hundreds of
 		// always-on names read as noise (director 2026-07-10), so plates show
 		// only when the cursor is near the figure.

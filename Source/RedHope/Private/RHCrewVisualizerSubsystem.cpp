@@ -289,6 +289,22 @@ namespace
 		const TCHAR* N = CrewFaceName(Id);
 		return FString::Printf(TEXT("/Game/RedHope/Art/CrewAnim/RH_Walker_%s/SkeletalMeshes/RH_Walker_%s%s.RH_Walker_%s%s"), N, N, Clip, N, Clip);
 	}
+
+	// EVA suits (director 2026-10-16): outdoors on the surface a colonist
+	// wears the suit walker of their sex - same rig and clip set, its own
+	// assets (scripts/blender/rh_crew_build.py --face suit_m|suit_f).
+	const TCHAR* SuitFaceName(int32 Id)
+	{
+		static const TSet<FString> Female = {
+			TEXT("cmdr_vale"), TEXT("bot_lindqvist"), TEXT("tech_park"), TEXT("pilot_reyes"), TEXT("res_novak"),
+			TEXT("fab_stone"), TEXT("hydro_mensah"), TEXT("safety_abara"), TEXT("cook_moreau"), TEXT("xeno_adeyemi"),
+		};
+		return Female.Contains(CrewFaceName(Id)) ? TEXT("suit_f") : TEXT("suit_m");
+	}
+	FString FacePath(const TCHAR* N, const TCHAR* Clip)
+	{
+		return FString::Printf(TEXT("/Game/RedHope/Art/CrewAnim/RH_Walker_%s/SkeletalMeshes/RH_Walker_%s%s.RH_Walker_%s%s"), N, N, Clip, N, Clip);
+	}
 }
 
 FString URHCrewVisualizerSubsystem::ColonistMeshPath(int32 Id) const
@@ -849,6 +865,24 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		// pouring at a lab); Idle otherwise - and freeze mid-pose on pause.
 		if (USkeletalMeshComponent* Skel = Vis->SkelBody.Get())
 		{
+			// EVA: on the surface and not inside a habitat bay = outdoors, so
+			// the suit goes on; indoors (a bay, or any floor below) it comes
+			// off. The swap keeps the rig and clip set, so the beat carries on.
+			int32 SuitHab = 0, SuitBay = INDEX_NONE;
+			const bool bWantSuit = Vis->CurLevel == 0 && !Sim->FindBayAt(Actor->GetActorLocation(), SuitHab, SuitBay);
+			if (bWantSuit != Vis->bSuited)
+			{
+				const TCHAR* Face = bWantSuit ? SuitFaceName(C.Id) : CrewFaceName(C.Id);
+				if (USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, *FacePath(Face, TEXT(""))))
+				{
+					Skel->SetSkeletalMesh(Mesh);
+					const float HeightCm = FMath::Max(2.f * Mesh->GetBounds().BoxExtent.Z, 1.f);
+					const bool bTrue = CVarCrewTrueHeight.GetValueOnGameThread() != 0 && HeightCm > 140.f && HeightCm < 220.f;
+					Skel->SetRelativeScale3D(FVector(bTrue ? 1.f : 180.f / HeightCm));
+					Vis->bSuited = bWantSuit;
+					Vis->CurrentClip = NAME_None; // reload the beat's clip from the new set
+				}
+			}
 			// Mesh-forward correction rides the component's relative yaw
 			// (actor rotation stays the pure travel direction).
 			Skel->SetRelativeRotation(FRotator(0.f, CVarWalkerYawOffsetDeg.GetValueOnGameThread(), 0.f));
@@ -864,7 +898,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 			if (WantClip != Vis->CurrentClip)
 			{
-				if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, *WalkerAnimPath(C.Id, *WantClip.ToString())))
+				const FString ClipPath = Vis->bSuited ? FacePath(SuitFaceName(C.Id), *WantClip.ToString()) : WalkerAnimPath(C.Id, *WantClip.ToString());
+				if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, *ClipPath))
 				{
 					Skel->PlayAnimation(Clip, true);
 					Vis->CurrentClip = WantClip;
