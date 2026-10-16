@@ -564,6 +564,25 @@ void ARHPlayerController::Tick(float DeltaTime)
 	{
 		for (const FRHCommand& C : Sim->GetUplinkQueue())
 		{
+			if (C.Verb == FName("Demolish"))
+			{
+				// BM-3: the doomed structure wears an amber frame + countdown
+				// until the order lands (cancel it in the uplink to keep it).
+				const int32 BId = (int32)C.Value;
+				const FRHBuildingInstance* Doomed = Sim->GetBuildings().FindByPredicate([BId](const FRHBuildingInstance& X) { return X.Id == BId; });
+				if (Doomed && Doomed->Level == ActiveLevel)
+				{
+					const FVector2D DHalf = URHSimWorldSubsystem::GetFootprintHalfCm(Defs->GetBuilding(Doomed->DefName), Doomed->SizeX, Doomed->SizeY);
+					FVector Spot = Doomed->LocationCm;
+					Spot.Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
+					DrawDebugBox(World, Spot + FVector(0, 0, 150.f), FVector((float)DHalf.X + 40.f, (float)DHalf.Y + 40.f, 150.f),
+						FColor(255, 150, 40), false, -1.f, 0, 5.f);
+					const double DEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+					DrawDebugString(World, Spot + FVector(0, 0, 360.f), FString::Printf(TEXT("Demolish  Δ %.0fs"), DEta),
+						nullptr, FColor(255, 180, 90), 0.f, true, 1.2f);
+				}
+				continue;
+			}
 			if (C.Verb != FName("Build") || C.Level != ActiveLevel)
 			{
 				continue;

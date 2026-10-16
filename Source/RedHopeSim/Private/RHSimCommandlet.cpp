@@ -2263,6 +2263,381 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// BM-3 self-test (2026-10-16): DEMOLISH - the uplink verb and its
+	// refusals, salvage to the Lander, cancelled sites, cargo in flight, pads,
+	// domes, imports and storage, the lag tier, habitat splits and the
+	// Buildings-index caches, stale orders, save/load. Fails loudly.
+	// `-demolish`.
+	if (FParse::Param(*Params, TEXT("demolish")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DEMOLISH TEST (BM-3, 2026-10-16) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DEMOLISH ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DEMOLISH FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Step = [&]()
+		{
+			Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const auto RunSols = [&](double Sols) { for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S) { Step(); } };
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		TArray<FString> Alerts, Rejects;
+		TArray<FRHBuildingInstance> Removed;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const FDelegateHandle RemovedH = Sim->OnBuildingRemoved.AddLambda([&Removed](const FRHBuildingInstance& B) { Removed.Add(B); });
+		const auto LastAlert = [&Alerts]() { return Alerts.Num() ? Alerts.Last() : FString(); };
+		const auto LastReject = [&Rejects]() { return Rejects.Num() ? Rejects.Last() : FString(); };
+		const auto CountAlerts = [&Alerts](const TCHAR* Sub) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Sub) ? 1 : 0; } return N; };
+		const auto Find = [&](int32 Id) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == Id) { return &B; } }
+			return nullptr;
+		};
+		// Buildings stay Id-ascending: the last match is the newest.
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return LastIdOf(Def);
+		};
+		const auto Order = [&](const TCHAR* Def, double X, double Y)
+		{
+			const int32 Before = LastIdOf(Def);
+			FRHCommand C; C.Verb = FName("Build"); C.Target = FName(Def); C.Location = FVector(X, Y, 0.0); C.Level = 0;
+			Sim->EnqueueCommand(C);
+			Step();
+			const int32 Id = LastIdOf(Def);
+			return Id != Before ? Id : 0;
+		};
+		const auto DemoCmd = [](int32 Id) { FRHCommand C; C.Verb = FName("Demolish"); C.Target = FName("Building"); C.Value = (double)Id; return C; };
+		// One order, one step (every lag here is under the 60 s era step).
+		// True when it was not rejected.
+		const auto Demo = [&](int32 Id)
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(DemoCmd(Id));
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const int32 LanderId = LastIdOf(TEXT("Lander"));
+		const auto LanderKg = [&](const TCHAR* Res, bool bOut)
+		{
+			const FRHBuildingInstance* L = Find(LanderId);
+			return L ? (bOut ? L->OutputKg : L->InputKg).FindRef(FName(Res)) : 0.0;
+		};
+		const auto LanderAll = [&](const TCHAR* Res) { return LanderKg(Res, false) + LanderKg(Res, true); };
+		const FName NStruct(TEXT("Struct")), NOx(TEXT("Oxygen"));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString Why, R;
+		int32 MaxIdSeen = 0;
+		const auto NoteIds = [&]() { for (const FRHBuildingInstance& B : Sim->GetBuildings()) { MaxIdSeen = FMath::Max(MaxIdSeen, B.Id); } };
+
+		// D1. Data, and the world.
+		Expect(LanderId != 0 && Near(Sim->GetSalvageFraction(), 0.5, 1e-9),
+			FString::Printf(TEXT("D1 Lander #%d; SalvageFraction %.2f (DT/CSV)"), LanderId, Sim->GetSalvageFraction()));
+		const FVector LanderLoc = Find(LanderId) ? Find(LanderId)->LocationCm : FVector::ZeroVector;
+		const int32 Solar0 = Place(TEXT("SolarArray"), 3500.f, 1000.f); // an early, low-Id building (D12e)
+		Place(TEXT("SolarArray"), 3500.f, 2000.f);
+		Sim->AddStock(NOx, 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		Step();
+
+		// D2. Refusals: one rejection each, nothing removed.
+		{
+			const int32 Pylon = Place(TEXT("Pylon"), -2500.f, -2500.f);
+			const int32 N0 = Sim->GetBuildings().Num();
+			Expect(!Demo(LanderId) && LastReject().Contains(TEXT("anchor")), FString::Printf(TEXT("D2 the Lander is refused (%s)"), *LastReject()));
+			Expect(!Demo(Pylon) && LastReject().Contains(TEXT("territory")), FString::Printf(TEXT("D2 a standing pylon is refused (%s)"), *LastReject()));
+			Expect(!Demo(9999) && LastReject().Contains(TEXT("already gone")), FString::Printf(TEXT("D2 an unknown Id is refused (%s)"), *LastReject()));
+			FRHCommand Bad = DemoCmd(Pylon); Bad.Target = FName("Pylon");
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(Bad);
+			Step();
+			Expect(Rejects.Num() == R0 + 1 && LastReject().Contains(TEXT("structure")), FString::Printf(TEXT("D2 a non-Building target is refused (%s)"), *LastReject()));
+			Expect(Removed.Num() == 0 && Sim->GetBuildings().Num() == N0, TEXT("D2 four refusals: no removal event, no building lost"));
+		}
+
+		// D3. Cancel in the uplink is undo.
+		const int32 Pile = Order(TEXT("Stockpile"), 1500.f, -1500.f);
+		Expect(Pile != 0 && Find(Pile) && Find(Pile)->bUnderConstruction, TEXT("D3 a Stockpile order lands as a site"));
+		{
+			Sim->EnqueueCommand(DemoCmd(Pile));
+			const bool bCancelled = Sim->GetUplinkQueue().Num() > 0 && Sim->CancelUplinkCommand(Sim->GetUplinkQueue().Last().CommandId);
+			Step();
+			Expect(bCancelled && Find(Pile) && Removed.Num() == 0, TEXT("D3 a cancelled Demolish never lands: the site stands"));
+		}
+
+		// D4. A cancelled site returns what was delivered; its build task goes.
+		{
+			const double Struct0 = Sim->GetTotalSolid(NStruct), Lander0 = LanderAll(TEXT("Struct"));
+			Sim->Debug_StepTaskBoard();
+			FRHTask Haul, Build;
+			const FMassEntityHandle Hauler(900001, 1), Fab(900002, 1);
+			const bool bClaim = Sim->TryClaimHaul(Hauler, LanderLoc, Haul) && Haul.To.BuildingId == Pile && Haul.Resource == NStruct;
+			float Loaded = 0.f; FVector Drop;
+			const bool bLoad = bClaim && Sim->HaulLoad(Haul.Id, 20.f, Loaded, Drop) && Near(Loaded, 20.0, 1e-3);
+			Sim->HaulUnload(Haul.Id, Loaded);
+			const bool bBuild = Sim->TryClaimBuild(Fab, Find(Pile)->LocationCm, Build) && Build.To.BuildingId == Pile;
+			Expect(bClaim && bLoad && bBuild && Near(Find(Pile)->InputKg.FindRef(NStruct), 20.0, 1e-3) && Near(LanderAll(TEXT("Struct")), Lander0 - 20.0, 1e-3),
+				TEXT("D4 20 kg Struct hauled Lander -> site; a fabricator claims the build"));
+			Expect(Demo(Pile) && !Find(Pile), FString::Printf(TEXT("D4 the site is demolished (%s)"), *LastAlert()));
+			FRHTask Gone;
+			Expect(Near(LanderAll(TEXT("Struct")), Lander0, 1e-3) && Near(Sim->GetTotalSolid(NStruct), Struct0, 1e-3),
+				FString::Printf(TEXT("D4 the 20 kg is back at the Lander (%.1f, expect %.1f); colony Struct unchanged"), LanderAll(TEXT("Struct")), Lander0));
+			Expect(!Sim->Debug_GetTask(Build.Id, Gone) && Sim->ApplyBuildWork(Pile, 10.0), TEXT("D4 the claimed build task is gone; the fabricator's work reports done"));
+			Expect(Removed.Num() == 1 && Removed.Last().Id == Pile && Removed.Last().bUnderConstruction && LastAlert().Contains(TEXT("SITE CANCELLED")),
+				FString::Printf(TEXT("D4 exactly one removal event, flagged as a site (%s)"), *LastAlert()));
+		}
+
+		// D5. Cargo in flight to a demolished site comes home to the Lander.
+		{
+			const int32 Pad = Order(TEXT("ChargePad"), -1500.f, -1500.f);
+			const double Struct0 = Sim->GetTotalSolid(NStruct), Lander0 = LanderAll(TEXT("Struct"));
+			Sim->Debug_StepTaskBoard();
+			FRHTask Haul;
+			const FMassEntityHandle Hauler(900003, 1);
+			float Loaded = 0.f; FVector Drop;
+			const bool bOk = Pad && Sim->TryClaimHaul(Hauler, LanderLoc, Haul) && Haul.To.BuildingId == Pad && Sim->HaulLoad(Haul.Id, 60.f, Loaded, Drop) && Near(Loaded, 60.0, 1e-3);
+			Expect(bOk && Near(Sim->GetTotalSolid(NStruct), Struct0 - 60.0, 1e-3), TEXT("D5 a hauler carries 60 kg Struct toward the pad site"));
+			Expect(Demo(Pad) && !Find(Pad), TEXT("D5 the pad site is demolished"));
+			FRHTask Now;
+			Expect(Sim->Debug_GetTask(Haul.Id, Now) && Now.To.BuildingId == LanderId && Now.ClaimedBy == Hauler,
+				TEXT("D5 the claimed haul survives, rerouted to the Lander"));
+			Sim->HaulUnload(Haul.Id, Loaded);
+			Expect(Near(LanderAll(TEXT("Struct")), Lander0, 1e-3) && Near(Sim->GetTotalSolid(NStruct), Struct0, 1e-3) && !Sim->Debug_GetTask(Haul.Id, Now),
+				FString::Printf(TEXT("D5 unloaded at the Lander: Lander %.1f (expect %.1f), colony Struct unchanged"), LanderAll(TEXT("Struct")), Lander0));
+		}
+
+		// D6. A standing structure: held stock in full + half the bill.
+		{
+			const int32 Forge = Place(TEXT("Forge"), 2000.f, 1000.f);
+			Sim->SetManualPower(Forge, false);
+			const double Struct0 = Sim->GetTotalSolid(NStruct), Lander0 = LanderAll(TEXT("Struct")), Rego0 = LanderKg(TEXT("Regolith"), false);
+			const double LIn0 = LanderKg(TEXT("Struct"), false), LOut0 = LanderKg(TEXT("Struct"), true);
+			Sim->Debug_AddSolidAt(Forge, FName("Regolith"), 300.0, false);
+			Sim->Debug_AddSolidAt(Forge, NStruct, 150.0, true);
+			TMap<FName, double> Salvage;
+			Why.Reset();
+			Expect(Sim->CanDemolishBuilding(Forge, Why, &Salvage) && Near(Salvage.FindRef(NStruct), 275.0, 1e-3) && Near(Salvage.FindRef(FName("Regolith")), 300.0, 1e-3),
+				FString::Printf(TEXT("D6 the card's preview: Struct %.0f (150 held + 125 hull), Regolith %.0f"), Salvage.FindRef(NStruct), Salvage.FindRef(FName("Regolith"))));
+			Sim->Debug_StepTaskBoard();
+			FRHTask Haul;
+			const FMassEntityHandle Hauler(900004, 1);
+			const bool bClaim = Sim->TryClaimHaul(Hauler, Find(Forge)->LocationCm, Haul) && Haul.From.BuildingId == Forge;
+			Expect(Demo(Forge) && !Find(Forge), FString::Printf(TEXT("D6 the Forge is demolished (%s)"), *LastAlert()));
+			Expect(Near(Sim->GetTotalSolid(NStruct), Struct0 + 150.0 + 125.0, 1e-3) && Near(LanderAll(TEXT("Struct")), Lander0 + 275.0, 1e-3)
+				&& Near(LanderKg(TEXT("Struct"), true), LOut0 + 275.0, 1e-3) && Near(LanderKg(TEXT("Struct"), false), LIn0, 1e-3),
+				FString::Printf(TEXT("D6 Lander Struct +%.1f on its output shelf; colony Struct +125 net of the held 150"), LanderAll(TEXT("Struct")) - Lander0));
+			Expect(LanderKg(TEXT("Regolith"), false) >= Rego0 + 300.0 - 1e-3, TEXT("D6 the hopper's 300 kg Regolith is back on the Lander's input shelf"));
+			float Loaded = 0.f; FVector Drop; FRHTask Now;
+			Expect(bClaim && !Sim->HaulLoad(Haul.Id, 200.f, Loaded, Drop) && !Sim->Debug_GetTask(Haul.Id, Now),
+				TEXT("D6 a claimed haul FROM the Forge finds nothing at load time and clears itself"));
+		}
+
+		// D7. The last Compute Module: the uplink falls back to tier 0.
+		{
+			const double Lag0 = Sim->GetOrderLagSeconds();
+			Sim->Debug_AddSolidAt(LanderId, FName("Shielding"), 20.0, false);
+			const int32 Cm = Order(TEXT("ComputeModule"), -500.f, -2500.f);
+			Sim->Debug_AddSolidAt(Cm, NStruct, 100.0, false);
+			Sim->Debug_AddSolidAt(Cm, FName("Shielding"), 20.0, false);
+			Expect(Cm && Sim->ApplyBuildWork(Cm, 1.0e6) && Sim->GetOrderLagSeconds() < Lag0,
+				FString::Printf(TEXT("D7 the module completes: lag %.0f -> %.0f s"), Lag0, Sim->GetOrderLagSeconds()));
+			const double S0 = LanderKg(TEXT("Struct"), true), Sh0 = LanderKg(TEXT("Shielding"), true);
+			Expect(Demo(Cm) && Near(Sim->GetOrderLagSeconds(), Lag0, 1e-6) && LastAlert().Contains(TEXT("Order lag")),
+				FString::Printf(TEXT("D7 demolished: lag back to %.0f s (%s)"), Sim->GetOrderLagSeconds(), *LastAlert()));
+			Expect(Near(LanderKg(TEXT("Struct"), true) - S0, 50.0, 1e-3) && Near(LanderKg(TEXT("Shielding"), true) - Sh0, 10.0, 1e-3),
+				TEXT("D7 salvage: half of Struct 100 + the surface Shielding 20"));
+		}
+
+		// D8. Imports and storage: a cancelled kit goes back in its crate; a
+		// standing bank salvages nothing and takes its capacity with it.
+		{
+			const int32 Kits0 = Sim->GetImportStock(FName("SolarArray"));
+			const int32 Site = Order(TEXT("SolarArray"), 2500.f, -500.f);
+			Expect(Site && Sim->GetImportStock(FName("SolarArray")) == Kits0 - 1, TEXT("D8 a Solar Array order spends a kit"));
+			Expect(Demo(Site) && Sim->GetImportStock(FName("SolarArray")) == Kits0 && LastAlert().Contains(TEXT("kit")),
+				FString::Printf(TEXT("D8 cancelled: the kit is back (%d) (%s)"), Sim->GetImportStock(FName("SolarArray")), *LastAlert()));
+			const int32 Bank = Place(TEXT("BatteryBank"), -500.f, 3500.f);
+			Step();
+			const double Cap0 = Sim->GetPower().BatteryCapWh;
+			const int32 Banks0 = Sim->GetImportStock(FName("BatteryBank"));
+			TMap<FName, double> Salvage;
+			Why.Reset();
+			Expect(Sim->CanDemolishBuilding(Bank, Why, &Salvage) && Salvage.Num() == 0, TEXT("D8 a standing bank previews no salvage"));
+			Expect(Demo(Bank) && Near(Sim->GetPower().BatteryCapWh, Cap0 - 4000.0, 1e-6) && Sim->GetImportStock(FName("BatteryBank")) == Banks0
+				&& Sim->GetPower().BatteryWh <= Sim->GetPower().BatteryCapWh + 1e-6,
+				FString::Printf(TEXT("D8 the bank's 4000 Wh leaves the grid (%.0f -> %.0f); no kit back"), Cap0, Sim->GetPower().BatteryCapWh));
+		}
+
+		// D9. A pad demolished under a docked robot.
+		{
+			const int32 Pad = Place(TEXT("ChargePad"), 500.f, -2500.f);
+			Step();
+			const FMassEntityHandle Bot(900005, 1);
+			Sim->JoinPadQueue(Pad, Bot);
+			Expect(Sim->RequestChargeWh(Pad, 1.0, Bot) > 0.0, TEXT("D9 the docked robot draws from the pad"));
+			Expect(Demo(Pad) && !Sim->HasBuilding(Pad) && Sim->RequestChargeWh(Pad, 1.0, Bot) == 0.0, TEXT("D9 demolished: the pad gives nothing"));
+			int32 Dock = 0; FVector DockLoc;
+			Expect(Sim->FindNearestChargePad(LanderLoc, Dock, DockLoc) && Dock == LanderId, TEXT("D9 the next dock is the Lander"));
+		}
+
+		// D10. A planted dome: the beds go with it, the soil is forfeit.
+		{
+			const int32 Dome = Place(TEXT("GreenhouseDome"), 3500.f, -2500.f, 2, 1);
+			Sim->AddStock(FName("Soil"), 2000.0);
+			Sim->AddStock(FName("Seeds"), 200.0);
+			Sim->AddStock(FName("Glass"), 400.0);
+			Step();
+			const int32 Planted0 = Sim->GetPlantedCellCount();
+			Expect(Sim->IsDomeBedPlanted(Dome, 0) && Sim->IsDomeBedPlanted(Dome, 1), FString::Printf(TEXT("D10 both beds planted (%d planted)"), Planted0));
+			Expect(Demo(Dome) && !Sim->IsDomeBedPlanted(Dome, 0) && !Sim->IsDomeBedPlanted(Dome, 1) && Sim->GetPlantedCellCount() == Planted0 - 2
+				&& LastAlert().Contains(TEXT("forfeit")), FString::Printf(TEXT("D10 the beds are cleared (%s)"), *LastAlert()));
+		}
+
+		// D12. Habitats. The S5/S6 layout: A + B + C (2x1), a filter in A.
+		Sim->AddStock(FName("Shielding"), 1000.0);
+		const int32 A = Place(TEXT("HabModule"), -1000, 1000);
+		const int32 B = Place(TEXT("HabModule"), -2000, 1000);
+		const int32 Cc = Place(TEXT("HabModule"), -1500, 2000, 2, 1);
+		const int32 AFA = Place(TEXT("AirFilter"), -1000, 1000);
+		RunSols(1.0);
+		Sim->Debug_SetVaultRated(true);
+		Expect(Sim->DesignateBay(A, 0, FName("LivingQuarters"), Why) && Sim->IsHabRated(A) && Sim->Debug_AddColonists(1) == 1
+			&& Sim->GetColonists().Last().HomeHab == A, FString::Printf(TEXT("D12 a rated 4-bay network; one resident in A (%s)"), *Why));
+		const int32 Resident = Sim->GetColonists().Last().Id;
+		Expect(!Demo(A) && LastReject().Contains(TEXT("live in")), FString::Printf(TEXT("D12a A is home: refused (%s)"), *LastReject()));
+		const int32 Mast = Place(TEXT("Floodmast"), -2000, 1000);
+		Expect(!Demo(B) && LastReject().Contains(TEXT("stand inside")) && LastReject().Contains(TEXT("Floodmast")),
+			FString::Printf(TEXT("D12b a machine inside B: refused (%s)"), *LastReject()));
+		Expect(Demo(Mast) && !Find(Mast), TEXT("D12b the Floodmast itself comes down"));
+		Expect(!Demo(B) && LastReject().Contains(TEXT("bay minimum")), FString::Printf(TEXT("D12c without B the resident's network is 3 bays: refused (%s)"), *LastReject()));
+		Expect(!Demo(AFA) && LastReject().Contains(TEXT("only air circulator")), FString::Printf(TEXT("D12d the network's only filter: refused (%s)"), *LastReject()));
+
+		// D12e. The index caches: a module in C:0, then a LOWER-Id building goes.
+		DefsSub->ActivateRoomRow(FName("LabFull"));
+		const int32 Lab = Place(TEXT("LabModule"), -2000, 2000);
+		RunSols(0.05);
+		const FIntVector LabKey(0, INDEX_NONE, Lab);
+		FIntVector Station;
+		int32 Filled = 0, Cap = 0;
+		Sim->GetStationSeats(LabKey, Filled, Cap);
+		Expect(Sim->GetColonistStation(Resident, Station) && Station == LabKey && Cap == 2 && Filled == 1,
+			FString::Printf(TEXT("D12e the resident works the Lab Module (%d/%d seats)"), Filled, Cap));
+		Expect(Solar0 < Lab && Demo(Solar0) && !Find(Solar0), TEXT("D12e a lower-Id Solar Array is demolished (Buildings indices shift)"));
+		RunSols(0.2);
+		Filled = 0; Cap = 0;
+		Sim->GetStationSeats(LabKey, Filled, Cap);
+		Expect(Sim->GetColonistStation(Resident, Station) && Station == LabKey && Cap == 2 && Filled == 1 && Sim->IsHabNetworkCirculated(A),
+			FString::Printf(TEXT("D12e after the shift: same station, %d/%d seats, still circulated"), Filled, Cap));
+
+		// D12f. An allowed removal from a lived-in network.
+		const int32 D = Place(TEXT("HabModule"), -3000, 1000);
+		Expect(Sim->GetHabNetworkBays(A) == 5 && Sim->DesignateBay(D, 0, FName("Lab"), Why), FString::Printf(TEXT("D12f D joins (5 bays) and is zoned Lab (%s)"), *Why));
+		{
+			FRHCommand As; As.Verb = FName("Assign"); As.Level = 0; As.Location = FVector(-3000.f, 1000.f, 0.f);
+			Sim->EnqueueCommand(As);
+		}
+		RunSols(1.0);
+		const FIntVector DKey(0, 0, D);
+		Expect(Sim->GetSeatPriorityRank(DKey) == 0 && Near(Sim->GetHabO2Kg(D), 100.0, 0.5),
+			FString::Printf(TEXT("D12f D:0 staffed first, D filled (%.1f kg)"), Sim->GetHabO2Kg(D)));
+		{
+			const double Ox0 = Sim->GetStock(NOx);
+			Expect(Demo(D) && !Find(D), FString::Printf(TEXT("D12f D is demolished (%s)"), *LastAlert()));
+			Expect(Sim->GetStock(NOx) >= Ox0 + 70.0 && LastAlert().Contains(TEXT("air pumped back")),
+				FString::Printf(TEXT("D12f its air returns to the tanks (+%.1f kg)"), Sim->GetStock(NOx) - Ox0));
+		}
+		Expect(Sim->GetSeatPriorityRank(DKey) == INDEX_NONE && Sim->GetBayRoom(D, 0).IsNone() && Sim->GetHabO2Kg(D) == 0.0 && Sim->GetHabNetworkBays(A) == 4,
+			TEXT("D12f D's priority, zoning and fill are gone; the network is 4 bays"));
+		RunSols(0.5);
+		Expect(Sim->IsHabRated(A) && Sim->GetColonists().Num() == 1 && Sim->GetColonists()[0].bSupported, TEXT("D12f the network keeps its rating; the resident is supported"));
+
+		// D12g. A split: two 2-bay halves, each with a filter, joined by a
+		// 1-bay corridor. The corridor goes; both halves drop below the minimum.
+		const int32 E = Place(TEXT("HabModule"), -1500, -5000, 2, 1);
+		const int32 K = Place(TEXT("HabCorridor"), 0, -5000);
+		const int32 F = Place(TEXT("HabModule"), 1500, -5000, 2, 1);
+		Place(TEXT("AirFilter"), -2000, -5000);
+		Place(TEXT("AirFilter"), 2000, -5000);
+		RunSols(1.5);
+		Expect(Sim->GetHabNetworkBays(E) == 5 && Sim->IsHabRated(E) && Sim->IsHabRated(F), FString::Printf(TEXT("D12g E+K+F rate as one 5-bay network (%d)"), Sim->GetHabNetworkBays(E)));
+		{
+			const int32 Lost0 = CountAlerts(TEXT("below the habitat minimum"));
+			Expect(Demo(K) && Sim->GetHabNetworkBays(E) == 2 && Sim->GetHabNetworkBays(F) == 2 && Sim->GetHabNetworkRoot(F) == F,
+				TEXT("D12g the corridor goes: two 2-bay networks"));
+			Expect(!Sim->IsHabRated(E) && !Sim->IsHabRated(F) && CountAlerts(TEXT("below the habitat minimum")) == Lost0 + 2,
+				TEXT("D12g both halves lose the rating in the same step, one alert each"));
+		}
+
+		// D13. Underground: the last filter of a lived-in floor stays.
+		Sim->ExtendShaft(1, FVector(3000.f, 3000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, R);
+		const int32 AF1 = Place(TEXT("AirFilter"), 3000, 3500, 1, 1, -1);
+		Sim->Debug_ForceRateFloor(-1); // needs the floor circulated first
+		Step();
+		Expect(Sim->Debug_AddColonists(1) == 1 && Sim->GetColonists().Last().HomeLevel == -1 && Sim->GetColonists().Last().HomeHab == 0,
+			TEXT("D13 a colonist lands on floor -1"));
+		Expect(!Demo(AF1) && LastReject().Contains(TEXT("only air circulator")), FString::Printf(TEXT("D13 the floor's only filter: refused (%s)"), *LastReject()));
+		Place(TEXT("AirFilter"), 2500, 3500, 1, 1, -1);
+		Expect(Demo(AF1) && !Find(AF1), TEXT("D13 with a second filter the first comes down"));
+
+		// D11. The Borer stays once the shaft exists.
+		const int32 Borer = Place(TEXT("Borer"), 3500, -4000);
+		Expect(!Demo(Borer) && LastReject().Contains(TEXT("shaft")), FString::Printf(TEXT("D11 the Borer is refused (%s)"), *LastReject()));
+
+		// The newest building ever made goes too, so D14's Id check bites.
+		const int32 Tail = Place(TEXT("Stockpile"), -4000, -2000);
+		Expect(Demo(Tail) && !Find(Tail), TEXT("D14 the newest building is demolished before the save"));
+
+		// D15. A stale order: Demolish then Assign the same module, one step.
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(DemoCmd(Lab));
+			FRHCommand As; As.Verb = FName("Assign"); As.Target = FName("Building"); As.Value = (double)Lab;
+			Sim->EnqueueCommand(As);
+			Step();
+			bool bNoKey = true;
+			for (const FIntVector& Key : Sim->GetSeatPriority()) { bNoKey &= Key.Z != Lab; }
+			Expect(!Find(Lab) && Rejects.Num() == R0 + 1 && LastReject().Contains(TEXT("Not a work station")) && bNoKey,
+				FString::Printf(TEXT("D15 the module goes; the Assign behind it is rejected (%s)"), *LastReject()));
+		}
+
+		// D14. Save/load: the same buildings, Ids never reused.
+		{
+			NoteIds();
+			for (const FRHBuildingInstance& X : Removed) { MaxIdSeen = FMath::Max(MaxIdSeen, X.Id); }
+			TArray<int32> Ids0;
+			for (const FRHBuildingInstance& X : Sim->GetBuildings()) { Ids0.Add(X.Id); }
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("demolishtest"), Err) && Sim->LoadColony(TEXT("demolishtest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("D14 save/load (%s)"), *Err));
+			TArray<int32> Ids1;
+			for (const FRHBuildingInstance& X : Sim->GetBuildings()) { Ids1.Add(X.Id); }
+			bool bAbsent = true;
+			for (const FRHBuildingInstance& X : Removed) { bAbsent &= !Ids1.Contains(X.Id); }
+			Expect(Ids0 == Ids1 && bAbsent, FString::Printf(TEXT("D14 the same %d buildings; the %d demolished stay gone"), Ids1.Num(), Removed.Num()));
+			const int32 Next = Place(TEXT("Stockpile"), -4000, -2000);
+			Expect(MaxIdSeen == Tail && Next == Tail + 1, FString::Printf(TEXT("D14 the next Id is %d after demolished #%d - never reused"), Next, Tail));
+		}
+		Expect(Removed.Num() == 15, FString::Printf(TEXT("D one removal event per demolish: %d (expect 15)"), Removed.Num()));
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnCommandRejected.Remove(RejectH);
+		Sim->OnBuildingRemoved.Remove(RemovedH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DEMOLISH TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

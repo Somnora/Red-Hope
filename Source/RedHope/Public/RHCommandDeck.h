@@ -81,6 +81,18 @@ private:
 	FReply HandleAssign();
 	// The selected station's key for the sim's seat maps, or false.
 	bool GetSelectedStationKey(FIntVector& OutKey) const;
+	// DEMOLISH (BM-3): any selected structure but the Lander. The sim's own
+	// preflight (CanDemolishBuilding) names the salvage or the refusal; the
+	// first click arms, a second within DemolishArmSeconds transmits a normal
+	// uplink order (cancellable until it lands).
+	EVisibility GetDemolishActionVisibility() const;
+	FText GetDemolishActionLabel() const;
+	FText GetDemolishNote() const;
+	FReply HandleDemolish();
+	bool IsDemolishInFlight(int32 BuildingId) const;
+	int32 DemolishArmedId = 0;
+	double DemolishArmedAt = 0.0;
+	static constexpr double DemolishArmSeconds = 4.0;
 	// The crew panel shows once anyone has landed (M2 Gate A2).
 	EVisibility GetCrewVisibility() const;
 	// Room zoning (M2 Gate B): arm the controller's zone-paint mode.

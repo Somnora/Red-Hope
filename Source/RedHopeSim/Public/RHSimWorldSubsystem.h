@@ -122,6 +122,8 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnStockChanged, FName, double);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnCommandExecuted, const FRHCommand&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingAdded, const FRHBuildingInstance&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingCompleted, const FRHBuildingInstance&);
+// BM-3: a structure demolished or a site cancelled - the instance as it stood.
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingRemoved, const FRHBuildingInstance&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnCommandRejected, const FRHCommand&, const FString&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntityHandle>&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
@@ -212,6 +214,19 @@ public:
 	static int32 GetBedCount(const FRHBuildingInstance& B) { return FMath::Max(1, B.SizeX) * FMath::Max(1, B.SizeY); }
 	// The site's whole bill: the def's (Level-taxed) bill x its bed count.
 	TMap<FName, double> GetSiteBill(const FRHBuildingInstance& B) const;
+	// --- Demolish (BM-3, 2026-10-16) ---
+	// A Demolish order (Target "Building", Value = Id) takes a structure down
+	// or cancels a site. True if it would be accepted right now; OutSalvage
+	// (optional) = what comes back to the Lander. The card polls this and
+	// ExecuteCommand runs the same check when the order lands. Salvage: a
+	// site returns everything delivered (and an imported kit's crate); a
+	// standing structure returns its held stock plus SalvageFraction of its
+	// bill. Refused: the Lander, standing territory, a Borer once boring has
+	// begun, a home, a hab with machines inside, and anything whose loss
+	// would leave residents without a rated habitat or air.
+	bool CanDemolishBuilding(int32 Id, FString& OutReason, TMap<FName, double>* OutSalvage = nullptr) const;
+	bool HasBuilding(int32 Id) const { return FindBuildingById(Id) != nullptr; }
+	double GetSalvageFraction() const { return SalvageFraction; }
 	// The greenhouse dome's garden row if B is a BUILT surface dome whose room
 	// is live, else null. Its beds plant and grow like greenhouse cells.
 	const FRHRoomRow* GetDomeRoom(const FRHBuildingInstance& B) const;
@@ -313,6 +328,10 @@ public:
 	// Harness: set the Phase-1 vault flag without the milestone (BM-1 tests:
 	// surface beds open to crew only once the vault is certified).
 	void Debug_SetVaultRated(bool bRated) { bVaultRated = bRated; }
+	// BM-3 harness: post tasks, read one, and stock a given building's store.
+	void Debug_StepTaskBoard() { StepTaskBoard(); }
+	bool Debug_GetTask(int32 TaskId, FRHTask& Out) const;
+	void Debug_AddSolidAt(int32 BuildingId, FName Resource, double Kg, bool bOutput);
 	// Harness: run a cargo item's landing effect directly (the commandlet's
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
@@ -853,6 +872,7 @@ public:
 	FRHOnCommandExecuted OnCommandExecuted;
 	FRHOnBuildingAdded OnBuildingAdded;
 	FRHOnBuildingCompleted OnBuildingCompleted;
+	FRHOnBuildingRemoved OnBuildingRemoved;
 	FRHOnCommandRejected OnCommandRejected;
 	FRHOnRobotsSpawned OnRobotsSpawned;
 	FRHOnQuotaMet OnQuotaMet;
@@ -1010,7 +1030,8 @@ private:
 	// EAGERLY by RebuildHabTopology() at every Buildings mutation site.
 	struct FRHHabMemberCache { int32 Id = 0; int32 NX = 0; int32 NY = 0; FIntPoint GridMin = FIntPoint::ZeroValue; int32 NetIndex = INDEX_NONE; FName FixedRoom; };
 	// Per network: Members ascending; Circulators / Modules are Buildings
-	// INDICES (stable: Buildings only ever appends) of the built Interior air
+	// INDICES (Buildings stays Id-ascending; a demolish RemoveAt is followed
+	// at once by RebuildHabTopology) of the built Interior air
 	// circulators and the Interior station modules (any build state) standing
 	// in a member bay, ascending - the per-step reads never scan Buildings.
 	struct FRHHabNetCache { int32 Root = 0; TArray<int32> Members; int32 Bays = 0; TArray<int32> Circulators; TArray<int32> Modules; };
@@ -1023,6 +1044,11 @@ private:
 	const FRHHabNetCache* FindHabNet(int32 HabId) const;
 	bool IsNetRated(const FRHHabNetCache& N) const;
 	bool IsNetCirculated(const FRHHabNetCache& N) const;
+	bool IsNetShaftLinked(const FRHHabNetCache& N) const;
+	// BM-3 internals.
+	double SalvageFraction = 0.5;         // config SalvageFraction
+	void ComputeSalvage(const FRHBuildingInstance& B, TMap<FName, double>& OutIn, TMap<FName, double>& OutOut, int32& OutPacks) const;
+	void RemoveBuilding(int32 Id);
 	bool AnyHabNetRated() const;
 	int32 GetHabLivingBays(int32 HabId) const;
 	bool IsLocationInRatedHab(const FVector& LocationCm) const;

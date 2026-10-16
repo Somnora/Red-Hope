@@ -1,11 +1,45 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-15, late (through commit `fdffc75`).** The previous snapshot was
-2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
+**Snapshot: 2026-10-16 (through build mode BM-3).** The 10-15 snapshot ran
+through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v28**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v29**.
+
+## 2026-10-16: build mode, suits and airlocks
+
+- **The director's build-mode ruling** (`130e065`; decisions 1a-6a in
+  `docs/design-decisions.md`): BM-1 surface habitats (sim) → BM-2 their
+  presentation → BM-3 demolish → BM-4/5 furniture → BM-6 windows and doors.
+- **BM-1, surface habitats** (`e6ee887`, save **v29**): pressurized
+  HabModule and HabCorridor shells on a 10 m bay grid join into networks by
+  shared edges. A network is livable at 4 bays, full of O2 and circulated (an
+  Air Filter in a bay, or the optional shaft link to a rated floor -1). Bays
+  are zoned like cells; Lab and Infirmary modules stand in bays. **Crew still
+  need the vault** (director 10-16): surface beds open only once the
+  underground vault is certified. Suite `-surfacehab` (78 checks).
+- **BM-2, presentation** (`05fe968`): shells dragged out on the grid, derived
+  walls with doors, cutaway, zone and station cards for bays; residents live,
+  sleep, eat and work in their habitat.
+- **EVA suits** (`3a0cf82`): male and female suited walkers on the crew rig;
+  anyone outdoors on the surface wears one.
+- **Airlocks and doorways** (`3047a26`): walks route bay to bay through the
+  doorways; each habitat network has one decompression chamber where a mist
+  hides the suit coming off (going in) or on (going out). The elevator is the
+  other chamber: suited at the top, unsuited below.
+- **BM-3, demolish** (this snapshot): an uplink verb, `Demolish`, takes a
+  structure down or cancels a site; the action card's button takes two clicks
+  and names the salvage or the refusal; the structure wears an amber frame
+  while the order is in flight. A site returns everything delivered (and an
+  imported kit); a standing structure returns its held stock plus
+  `SalvageFraction` (0.5) of its bill, all to the Lander. Refused: the Lander,
+  standing pylons, the Borer once the shaft exists, a home, a habitat with
+  machines inside, a removal that would strand residents (bay minimum or
+  air), and the last filter people breathe through. Cargo in flight is
+  rerouted, never lost. No save change. Suite `-demolish` (62 checks).
+  **Open for the director:** built imports salvage nothing (no kit back),
+  pylons can't come down, a habitat must be emptied of machines first.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 
@@ -46,20 +80,21 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 26
-suites (27 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 28
+suites (29 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
-the art, audio, interface, playtest, tiered-production and dome work. Last
-reported fully green on `585ee8e` ("0 suite(s) not green", pins unchanged);
-also on `f77b962`, `63f452f`, `4706e5f` and earlier. The two newest suites
-(`-staff`, `-dome`) fail loudly on any mismatch, unlike the older print-only
-ones.
+the art, audio, interface, playtest, tiered-production, dome and build-mode
+work. Last reported fully green on the BM-3 commit (29 runs) ("0 suite(s) not green", pins
+unchanged); also on `e6ee887`, `585ee8e`, `f77b962`, `63f452f`, `4706e5f` and
+earlier. The four newest suites (`-staff`, `-dome`, `-surfacehab`,
+`-demolish`) fail loudly on any mismatch, unlike the older print-only ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 27 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 29 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome   (+ no-switch = the baseline)
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish
+#         (+ no-switch = the baseline)
 ```
 
 **The simulation has changed since the 07-15 consolidation, in pin-neutral
@@ -67,8 +102,8 @@ ways:** greenhouse agriculture (save v26, 07-16, crops dormant), pure-data
 self-tests (`163165a`), a read-only manifest iterator (`48934b9`), the Lander
 dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only),
 prefab station modules (`f77b962`), seat priority and lazy fill (`63f452f`,
-lazy fill off by default), the greenhouse dome (`585ee8e`). Each is inert for
-a colony that doesn't use it.
+lazy fill off by default), the greenhouse dome (`585ee8e`), surface habitats
+(`e6ee887`), demolish (BM-3). Each is inert for a colony that doesn't use it.
 
 ---
 
@@ -448,9 +483,9 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
 - **No hard fail-state decision** (brief open question #5): Collapse is a
   recoverable, prevention-framed empty-colony state, not a "you lost" screen.
   The lean playtest shows it does fire in live play.
-- **Nothing can be demolished.** No removal path exists for any building;
-  build mode's BM-3 owns it (it also has to fix cargo lost when a haul target
-  vanishes).
+- **Demolish is instant once the order lands** (BM-3): no robot works it
+  and nothing animates the teardown; the structure simply goes. Making it
+  take work would need new saved state.
 - **People and robots move like board pieces up close.** Robots travel in
   straight lines through buildings and each other, turn instantly and stand
   idle with no task; crew walk well (speed-matched, steer around furniture,

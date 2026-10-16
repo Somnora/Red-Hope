@@ -81,6 +81,9 @@ public:
 private:
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
+	// BM-3: a structure demolished (or a site cancelled) - its actor goes, and
+	// with it the shell parts, crop props and lamps it owns.
+	void HandleBuildingRemoved(const FRHBuildingInstance& Instance);
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
 	void HandleQuotaMet(int32 Sol, double AwardKg);
 	void HandleShipArrived(const TArray<FName>& Items);
@@ -283,6 +286,7 @@ private:
 	FDelegateHandle AddedHandle;
 	FDelegateHandle CompletedHandle;
 	FDelegateHandle RejectedHandle;
+	FDelegateHandle RemovedHandle;
 	FString LastNotice;
 	double LastNoticeRealSeconds = -1.0e9;
 	FString LastAlert;

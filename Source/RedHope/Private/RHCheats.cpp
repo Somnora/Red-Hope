@@ -912,6 +912,24 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAssign(
 		Sim->EnqueueCommand(Cmd);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDemolish(
+	TEXT("RH.Demolish"),
+	TEXT("RH.Demolish <Id> - BM-3: order a structure demolished or a site cancelled (uplink; salvage to the Lander)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Demolish <Id>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Demolish");
+		Cmd.Target = FName("Building");
+		Cmd.Value = FCString::Atoi(*Args[0]);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHMenu(
 	TEXT("RH.Menu"),
 	TEXT("RH.Menu <title|pause|settings|credits|none> - DEBUG: open a menu screen (captures/QA)."),

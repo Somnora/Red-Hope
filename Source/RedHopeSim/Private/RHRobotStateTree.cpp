@@ -335,6 +335,12 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 	FRHWearFragment& Wear = Context.GetExternalData(WearHandle);
 	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
+	// BM-3: the pad was demolished under it - back to Work, which re-seeks a
+	// dock (the next pad, or the Lander) while the battery is still low.
+	if (!Sim->HasBuilding(Task.DigDepositId))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
 	if (Task.Phase == 0)
 	{
 		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))

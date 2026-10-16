@@ -350,6 +350,28 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 										FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
 								]
 							]
+							// BM-3: demolish / cancel a site, with what comes back.
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetDemolishActionVisibility)
+								[
+									SNew(SVerticalBox)
+									+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+									[
+										DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetDemolishActionLabel)),
+											FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDemolish))
+									]
+									+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(FMargin(0.f, 2.f, 2.f, 0.f))
+									[
+										SNew(STextBlock)
+										.Text(this, &SRHCommandDeck::GetDemolishNote)
+										.Font(RHDeck::Body(8))
+										.ColorAndOpacity(RHDeck::TextDim)
+										.Justification(ETextJustify::Right)
+										.WrapTextAt(300.f)
+									]
+								]
+							]
 						]
 					]
 				]
@@ -963,9 +985,16 @@ void SRHCommandDeck::RefreshUplinkPanel()
 	for (const FRHCommand& C : Sim->GetUplinkQueue())
 	{
 		const int32 Id = C.CommandId;
-		const FString Label = C.Target.IsNone()
+		FString Label = C.Target.IsNone()
 			? C.Verb.ToString()
 			: FString::Printf(TEXT("%s %s"), *C.Verb.ToString(), *C.Target.ToString());
+		if (C.Verb == FName("Demolish"))
+		{
+			// BM-3: "Demolish Forge #7", not the raw target slot.
+			const int32 BId = (int32)C.Value;
+			const FRHBuildingInstance* Doomed = Sim->GetBuildings().FindByPredicate([BId](const FRHBuildingInstance& X) { return X.Id == BId; });
+			Label = Doomed ? FString::Printf(TEXT("Demolish %s #%d"), *Doomed->DefName.ToString(), BId) : FString::Printf(TEXT("Demolish #%d"), BId);
+		}
 		UplinkList->AddSlot().AutoHeight().Padding(FMargin(0.f, 2.f))
 		[
 			SNew(SHorizontalBox)
@@ -1787,6 +1816,132 @@ FReply SRHCommandDeck::HandlePowerToggle()
 	{
 		Sim->SetManualPower(Id, Sim->IsManualOff(Id)); // off -> on, on -> off
 	}
+	return FReply::Handled();
+}
+
+bool SRHCommandDeck::IsDemolishInFlight(int32 BuildingId) const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return Sim && Sim->GetUplinkQueue().ContainsByPredicate([BuildingId](const FRHCommand& C)
+		{
+			return C.Verb == FName("Demolish") && (int32)C.Value == BuildingId;
+		});
+}
+
+EVisibility SRHCommandDeck::GetDemolishActionVisibility() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	return (B && B->DefName != FName("Lander")) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetDemolishActionLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!Sim || !B)
+	{
+		return FText::GetEmpty();
+	}
+	if (IsDemolishInFlight(B->Id))
+	{
+		return FText::FromString(TEXT("Demolish order in flight"));
+	}
+	FString Why;
+	if (!Sim->CanDemolishBuilding(B->Id, Why))
+	{
+		return FText::FromString(TEXT("Can't demolish"));
+	}
+	const bool bArmed = DemolishArmedId == B->Id && FPlatformTime::Seconds() - DemolishArmedAt <= DemolishArmSeconds;
+	if (bArmed)
+	{
+		return FText::FromString(B->bUnderConstruction ? TEXT("Click again to cancel the site") : TEXT("Click again to demolish"));
+	}
+	return FText::FromString(B->bUnderConstruction ? TEXT("Cancel site") : TEXT("Demolish"));
+}
+
+FText SRHCommandDeck::GetDemolishNote() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!Sim || !Defs || !B)
+	{
+		return FText::GetEmpty();
+	}
+	if (IsDemolishInFlight(B->Id))
+	{
+		return FText::FromString(TEXT("Cancel it in the uplink to keep this structure."));
+	}
+	FString Why;
+	TMap<FName, double> Salvage;
+	if (!Sim->CanDemolishBuilding(B->Id, Why, &Salvage))
+	{
+		return FText::FromString(Why);
+	}
+	// Ordered for a stable read: kg lines by name, the returned kit last.
+	Salvage.KeySort(FNameLexicalLess());
+	FString Line, Kit;
+	for (const auto& L : Salvage)
+	{
+		if (const FRHBuildingRow* KitDef = Defs->GetBuilding(L.Key))
+		{
+			Kit = FString::Printf(TEXT("the %s kit"), *KitDef->DisplayName);
+			continue;
+		}
+		Line += FString::Printf(TEXT("%s%.0f kg %s"), Line.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+	}
+	if (!Kit.IsEmpty())
+	{
+		Line += (Line.IsEmpty() ? TEXT("") : TEXT(", ")) + Kit;
+	}
+	return FText::FromString(FString::Printf(TEXT("Back to the Lander: %s"), Line.IsEmpty() ? TEXT("nothing") : *Line));
+}
+
+FReply SRHCommandDeck::HandleDemolish()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!Sim || !B || IsDemolishInFlight(B->Id))
+	{
+		return FReply::Handled();
+	}
+	const int32 Id = B->Id;
+	const FString Name = Def && !Def->DisplayName.IsEmpty() ? Def->DisplayName : B->DefName.ToString();
+	FString Why;
+	if (!Sim->CanDemolishBuilding(Id, Why))
+	{
+		URHAudioSubsystem::Cue(PC->GetWorld(), FName("Error"));
+		PC->PostConfirm(Why, FLinearColor(1.f, 0.62f, 0.2f));
+		return FReply::Handled();
+	}
+	const double Now = FPlatformTime::Seconds();
+	if (DemolishArmedId != Id || Now - DemolishArmedAt > DemolishArmSeconds)
+	{
+		// A destructive verb takes two clicks.
+		DemolishArmedId = Id;
+		DemolishArmedAt = Now;
+		PC->PostConfirm(FString::Printf(TEXT("Click again to %s %s"), B->bUnderConstruction ? TEXT("cancel the") : TEXT("demolish the"), *Name),
+			FLinearColor(1.f, 0.62f, 0.2f));
+		return FReply::Handled();
+	}
+	DemolishArmedId = 0;
+	FRHCommand Cmd;
+	Cmd.Verb = FName("Demolish");
+	Cmd.Target = FName("Building");
+	Cmd.Value = Id;
+	Cmd.Level = B->Level;
+	Cmd.Location = B->LocationCm;
+	Sim->EnqueueCommand(Cmd);
+	URHAudioSubsystem::Cue(PC->GetWorld(), FName("Confirm"));
+	PC->PostConfirm(FString::Printf(TEXT("Demolish order transmitted: %s - cancel it in the uplink before it lands"), *Name), FLinearColor(0.2f, 0.9f, 1.f));
 	return FReply::Handled();
 }
 

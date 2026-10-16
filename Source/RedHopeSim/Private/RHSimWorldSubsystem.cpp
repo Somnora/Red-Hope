@@ -98,6 +98,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	O2FillRateKgPerHour = Defs->GetConfigScalar(FName("O2FillRateKgPerHour"), O2FillRateKgPerHour);
 	MinLivableCells = (int32)Defs->GetConfigScalar(FName("MinLivableCells"), MinLivableCells);
 	ShaftLinkRangeCm = Defs->GetConfigScalar(FName("ShaftLinkRange_m"), ShaftLinkRangeCm / 100.0) * 100.0;
+	SalvageFraction = FMath::Clamp(Defs->GetConfigScalar(FName("SalvageFraction"), SalvageFraction), 0.0, 1.0);
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -1855,15 +1856,17 @@ void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
 				bVaultRated ? TEXT("") : TEXT(" Crew can move in once the underground vault is certified.")));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d RATED LIVABLE (%d bays, %d beds, %.0f kg O2) ==="), N.Root, N.Bays, Beds, SumFill);
 		}
-		else if (bWas && (!bCirc || (SumFill < SumReq * 0.98 && Taken < SumLeak)))
+		else if (bWas && (!bCirc || !bBig || (SumFill < SumReq * 0.98 && Taken < SumLeak)))
 		{
 			for (const int32 Id : N.Members)
 			{
 				RatedHabs.Remove(Id);
 			}
+			// !bBig: a demolish split the network into a piece under the minimum.
 			OnAlert.Broadcast(FString::Printf(
-				TEXT("SURFACE HABITAT LOST ITS HABITABILITY RATING — %s. Restore oxygen supply."),
-				bCirc ? TEXT("oxygen fill below requirement") : TEXT("air circulation down")));
+				TEXT("SURFACE HABITAT LOST ITS HABITABILITY RATING — %s. %s"),
+				!bBig ? TEXT("below the habitat minimum") : bCirc ? TEXT("oxygen fill below requirement") : TEXT("air circulation down"),
+				!bBig ? TEXT("Rejoin or extend it to restore the rating.") : TEXT("Restore oxygen supply.")));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d LOST HABITABILITY (%.0f / %.0f kg O2) ==="), N.Root, SumFill, SumReq);
 		}
 		else if (bWas)
@@ -2210,8 +2213,14 @@ bool URHSimWorldSubsystem::IsNetCirculated(const FRHHabNetCache& N) const
 			return true;
 		}
 	}
-	// ...or a shaft link: a member bay beside the shaft head while floor -1 is
-	// rated (optional; ruling 6a - a hab needs no link to be lived in).
+	// ...or a shaft link.
+	return IsNetShaftLinked(N);
+}
+
+bool URHSimWorldSubsystem::IsNetShaftLinked(const FRHHabNetCache& N) const
+{
+	// A member bay beside the shaft head while floor -1 is rated (optional;
+	// ruling 6a - a hab needs no link to be lived in).
 	if (RatedFloors.Contains(-1))
 	{
 		for (const int32 Id : N.Members)
@@ -2860,8 +2869,9 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		if (bDomeBed)
 		{
 			// A dome bed (Agri Gate C): its dome's room, while the dome stands
-			// and the bed is inside its size. Domes are never demolished, so a
-			// missing row is a dormant room - the bed waits, nothing is lost.
+			// and the bed is inside its size. A demolished dome's beds are
+			// cleared by RemoveBuilding, so a missing row is a dormant room -
+			// the bed waits, nothing is lost.
 			const FRHBuildingInstance* Dome = FindBuilding(It->Z);
 			Row = (Dome && Cell < GetBedCount(*Dome)) ? GetDomeRoom(*Dome) : nullptr;
 			if (!Row)
@@ -4940,6 +4950,22 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		RefreshJobs();
 		UE_LOG(LogRedHopeSim, Display, TEXT("Assign: station (%d, %d, %d) now first of %d"), Key.X, Key.Y, Key.Z, SeatPriority.Num());
 	}
+	else if (Cmd.Verb == FName("Demolish"))
+	{
+		// BM-3: take a structure down or cancel a site (Value = building id).
+		FString Reason;
+		if (Cmd.Target != FName("Building"))
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("Demolish needs a structure"));
+			return;
+		}
+		if (!CanDemolishBuilding((int32)Cmd.Value, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+		RemoveBuilding((int32)Cmd.Value);
+	}
 	else if (Cmd.Verb == FName("Designate"))
 	{
 		// M2 Gate B: zone a carved cell with a room function (Target = room row,
@@ -6030,6 +6056,460 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	OnBuildingAdded.Broadcast(Added);
 }
 
+// --- Demolish (BM-3, 2026-10-16) ---
+
+void URHSimWorldSubsystem::ComputeSalvage(const FRHBuildingInstance& B, TMap<FName, double>& OutIn, TMap<FName, double>& OutOut, int32& OutPacks) const
+{
+	// Every kg keeps its shelf: held inputs stay inputs (the Forge can still
+	// draw them from the Lander), outputs and the reclaimed hull are outputs.
+	OutIn.Reset();
+	OutOut.Reset();
+	OutPacks = 0;
+	for (const auto& L : B.InputKg)
+	{
+		if (L.Value > KINDA_SMALL_NUMBER)
+		{
+			OutIn.FindOrAdd(L.Key) += L.Value;
+		}
+	}
+	for (const auto& L : B.OutputKg)
+	{
+		if (L.Value > KINDA_SMALL_NUMBER)
+		{
+			OutOut.FindOrAdd(L.Key) += L.Value;
+		}
+	}
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	if (B.bUnderConstruction)
+	{
+		// A cancelled site: what was delivered is already in InputKg; an
+		// imported kit goes back in its crate.
+		OutPacks = (Def && Def->ImportOnly) ? 1 : 0;
+		return;
+	}
+	// A standing structure: part of its hull comes back. Imported hardware
+	// has no bill, so it salvages nothing (no free half-charged bank).
+	if (SalvageFraction > 0.0)
+	{
+		for (const auto& L : GetSiteBill(B))
+		{
+			OutOut.FindOrAdd(L.Key) += L.Value * SalvageFraction;
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMap<FName, double>* OutSalvage) const
+{
+	const FRHBuildingInstance* B = Defs ? FindBuildingById(Id) : nullptr;
+	if (!B)
+	{
+		OutReason = FString::Printf(TEXT("No structure #%d - it is already gone"), Id);
+		return false;
+	}
+	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
+	if (B->DefName == NAME_Lander)
+	{
+		OutReason = TEXT("The Lander is the colony's anchor - it cannot be demolished");
+		return false;
+	}
+	if (Def && !B->bUnderConstruction && Def->CoverageRadius_m > 0.f)
+	{
+		OutReason = TEXT("Grid pylons hold your territory - a standing pylon cannot be demolished yet");
+		return false;
+	}
+	if (Def && Def->CanBore && ((!B->bUnderConstruction && ShaftDepth > 0) || PendingBoreWork.Contains(Id)))
+	{
+		OutReason = TEXT("The Borer anchors the shaft - it stays once boring has begun");
+		return false;
+	}
+	int32 Residents = 0;
+	for (const FRHColonist& C : Colonists)
+	{
+		Residents += C.HomeHab == Id ? 1 : 0;
+	}
+	if (Residents > 0)
+	{
+		OutReason = FString::Printf(TEXT("%d colonist(s) live in this habitat - it cannot be demolished while it is home"), Residents);
+		return false;
+	}
+	const bool bShell = Def && Def->Pressurized && B->Level == 0;
+	if (bShell)
+	{
+		// Machines standing in its bays (any build state) - clear it first.
+		int32 Inside = 0;
+		const FRHBuildingInstance* First = nullptr;
+		for (const FRHBuildingInstance& X : Buildings)
+		{
+			const FRHBuildingRow* XDef = X.Level == 0 && X.Id != Id ? Defs->GetBuilding(X.DefName) : nullptr;
+			int32 H = 0, Bay = INDEX_NONE;
+			if (XDef && !XDef->Pressurized && FindBayAt(X.LocationCm, H, Bay) && H == Id)
+			{
+				First = First ? First : &X;
+				++Inside;
+			}
+		}
+		if (Inside > 0)
+		{
+			OutReason = FString::Printf(TEXT("Clear the habitat first - %d machine(s) stand inside (%s #%d)"), Inside, *First->DefName.ToString(), First->Id);
+			return false;
+		}
+	}
+	// The colonists each network piece would still house.
+	const auto NetResidents = [this](const FRHHabNetCache& N)
+	{
+		int32 Count = 0;
+		for (const FRHColonist& C : Colonists)
+		{
+			Count += (C.HomeHab != 0 && N.Members.Contains(C.HomeHab)) ? 1 : 0;
+		}
+		return Count;
+	};
+	const FRHHabNetCache* Net = (bShell && !B->bUnderConstruction) ? FindHabNet(Id) : nullptr;
+	if (Net)
+	{
+		// A split: every piece that still houses someone must keep the bay
+		// minimum and its own air (a circulator in its bays, or the shaft link).
+		TArray<int32> Rest = Net->Members;
+		Rest.Remove(Id);
+		TMap<int32, int32> PieceOf;
+		int32 Pieces = 0;
+		for (const int32 Seed : Rest)
+		{
+			if (PieceOf.Contains(Seed))
+			{
+				continue;
+			}
+			TArray<int32> Stack = { Seed };
+			PieceOf.Add(Seed, Pieces);
+			while (Stack.Num())
+			{
+				const int32 Cur = Stack.Pop();
+				const FRHHabMemberCache& M = HabMembers.FindChecked(Cur);
+				for (int32 BY = 0; BY < M.NY; ++BY)
+				{
+					for (int32 BX = 0; BX < M.NX; ++BX)
+					{
+						for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+						{
+							const int32* Other = HabBayOwner.Find(M.GridMin + FIntPoint(BX, BY) + D);
+							if (Other && *Other != Id && *Other != Cur && !PieceOf.Contains(*Other))
+							{
+								PieceOf.Add(*Other, Pieces);
+								Stack.Add(*Other);
+							}
+						}
+					}
+				}
+			}
+			++Pieces;
+		}
+		TArray<int32> Bays, Homes;
+		TArray<bool> Air;
+		Bays.SetNumZeroed(Pieces);
+		Homes.SetNumZeroed(Pieces);
+		Air.Init(false, Pieces);
+		for (const int32 M : Rest)
+		{
+			const FRHHabMemberCache& MC = HabMembers.FindChecked(M);
+			const int32 P = PieceOf.FindChecked(M);
+			Bays[P] += MC.NX * MC.NY;
+			const FRHBuildingInstance* MB = FindBuildingById(M);
+			for (int32 Bay = 0; MB && RatedFloors.Contains(-1) && Bay < MC.NX * MC.NY; ++Bay)
+			{
+				const FVector C = GetBayCentreCm(*MB, Bay);
+				if (FMath::Max(FMath::Abs(C.X - ShaftHeadCm.X), FMath::Abs(C.Y - ShaftHeadCm.Y)) <= ShaftLinkRangeCm + 0.5)
+				{
+					Air[P] = true;
+				}
+			}
+		}
+		for (const int32 Index : Net->Circulators)
+		{
+			int32 H = 0, Bay = INDEX_NONE;
+			if (Buildings.IsValidIndex(Index) && FindMemberBayAt(Buildings[Index].LocationCm, H, Bay) && PieceOf.Contains(H))
+			{
+				Air[PieceOf[H]] = true;
+			}
+		}
+		for (const FRHColonist& C : Colonists)
+		{
+			if (const int32* P = C.HomeHab != 0 ? PieceOf.Find(C.HomeHab) : nullptr)
+			{
+				++Homes[*P];
+			}
+		}
+		for (int32 P = 0; P < Pieces; ++P)
+		{
+			if (Homes[P] > 0 && Bays[P] < MinLivableCells)
+			{
+				OutReason = FString::Printf(TEXT("Demolishing this would leave %d resident(s) in a habitat under the %d-bay minimum"), Homes[P], MinLivableCells);
+				return false;
+			}
+			if (Homes[P] > 0 && !Air[P])
+			{
+				OutReason = FString::Printf(TEXT("Demolishing this would leave %d resident(s) in a habitat with no air circulator"), Homes[P]);
+				return false;
+			}
+		}
+	}
+	if (Def && Def->CirculatesAir && !B->bUnderConstruction)
+	{
+		// The last air for the people who breathe it.
+		int32 Breathing = 0;
+		if (B->Level < 0)
+		{
+			bool bOther = false;
+			for (const FRHBuildingInstance& X : Buildings)
+			{
+				const FRHBuildingRow* XDef = (X.Id != Id && X.Level == B->Level && !X.bUnderConstruction) ? Defs->GetBuilding(X.DefName) : nullptr;
+				if (XDef && XDef->CirculatesAir)
+				{
+					bOther = true;
+				}
+			}
+			if (!bOther)
+			{
+				for (const FRHColonist& C : Colonists)
+				{
+					Breathing += (C.HomeHab == 0 && C.HomeLevel == B->Level) ? 1 : 0;
+				}
+				if (B->Level == -1)
+				{
+					// ...and the habitats whose only air comes down the shaft link.
+					for (const FRHHabNetCache& N : HabNets)
+					{
+						Breathing += (N.Circulators.Num() == 0 && IsNetShaftLinked(N)) ? NetResidents(N) : 0;
+					}
+				}
+			}
+		}
+		else
+		{
+			int32 H = 0, Bay = INDEX_NONE;
+			const FRHHabNetCache* In = FindMemberBayAt(B->LocationCm, H, Bay) ? FindHabNet(H) : nullptr;
+			if (In && In->Circulators.Num() <= 1 && !IsNetShaftLinked(*In))
+			{
+				Breathing = NetResidents(*In);
+			}
+		}
+		if (Breathing > 0)
+		{
+			OutReason = FString::Printf(TEXT("This is the only air circulator for %d resident(s) - build another first"), Breathing);
+			return false;
+		}
+	}
+	if (OutSalvage)
+	{
+		TMap<FName, double> In, Out;
+		int32 Packs = 0;
+		ComputeSalvage(*B, In, Out, Packs);
+		OutSalvage->Reset();
+		for (const auto& L : In)
+		{
+			OutSalvage->FindOrAdd(L.Key) += L.Value;
+		}
+		for (const auto& L : Out)
+		{
+			OutSalvage->FindOrAdd(L.Key) += L.Value;
+		}
+		if (Packs > 0)
+		{
+			OutSalvage->FindOrAdd(B->DefName) += Packs; // the kit itself, back in stock
+		}
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
+{
+	const int32 Index = Buildings.IndexOfByPredicate([Id](const FRHBuildingInstance& X) { return X.Id == Id; });
+	if (Index == INDEX_NONE || !Defs)
+	{
+		return;
+	}
+	// A copy: nothing may hold a pointer into Buildings across the RemoveAt.
+	const FRHBuildingInstance Gone = Buildings[Index];
+	const FRHBuildingRow* Def = Defs->GetBuilding(Gone.DefName);
+	TMap<FName, double> SalvIn, SalvOut;
+	int32 Packs = 0;
+	ComputeSalvage(Gone, SalvIn, SalvOut, Packs);
+	int32 LanderId = 0;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.DefName == NAME_Lander)
+		{
+			LanderId = B.Id;
+			break;
+		}
+	}
+
+	// The task board. Unclaimed work for it is void; a fabricator on the site
+	// finds it gone (ApplyBuildWork reports done) and moves on; cargo already
+	// bound for it comes home to the Lander instead. A haul FROM it finds an
+	// empty source at load time and clears itself.
+	Tasks.RemoveAll([Id](const FRHTask& T)
+	{
+		if (T.From.BuildingId != Id && T.To.BuildingId != Id)
+		{
+			return false;
+		}
+		return !T.ClaimedBy.IsValid() || T.Type == ERHTaskType::Build;
+	});
+	for (FRHTask& T : Tasks)
+	{
+		if (T.Type == ERHTaskType::Haul && T.To.BuildingId == Id && LanderId != 0)
+		{
+			T.To.BuildingId = LanderId;
+		}
+	}
+
+	// Everything keyed by its Id.
+	const bool bBatch = PendingOutputs.Contains(Id) || Gone.BatchRemaining_h > 0.0;
+	PendingOutputs.Remove(Id);
+	PadQueues.Remove(Id);
+	ensure(!PendingBoreWork.Contains(Id));
+	SeatPriority.RemoveAll([Id](const FIntVector& K) { return K.Z == Id; });
+	int32 BedsLost = 0;
+	for (auto It = PlantedCells.CreateIterator(); It; ++It)
+	{
+		if (It->X == 0 && It->Z == Id)
+		{
+			PlantedCrops.Remove(*It);
+			It.RemoveCurrent();
+			++BedsLost;
+		}
+	}
+	static const FName NOxygen(TEXT("Oxygen"));
+	const double AirBack = HabO2Kg.FindRef(Id);
+	HabO2Kg.Remove(Id);
+	if (AirBack > 0.0)
+	{
+		AddStock(NOxygen, AirBack); // the hab's air is pumped back to the tanks
+	}
+	RatedHabs.Remove(Id);
+	HabBayRooms.Remove(Id);
+	HabNetsNotedSmall.Remove(Id);
+	if (Def && !Gone.bUnderConstruction && Def->StorageWh > 0.f)
+	{
+		Power.BatteryCapWh = FMath::Max(0.0, Power.BatteryCapWh - Def->StorageWh);
+		Power.BatteryWh = FMath::Min(Power.BatteryWh, Power.BatteryCapWh);
+	}
+
+	Buildings.RemoveAt(Index); // order-preserving: Buildings stays Id-ascending
+	RebuildHabTopology();      // the network caches hold Buildings INDICES
+
+	// The last Compute Module gone: the uplink falls back to tier 0 (never
+	// past a manifest ComputeCore's tier 2).
+	bool bLag = false;
+	if (!Gone.bUnderConstruction && Gone.DefName == FName("ComputeModule")
+		&& !Buildings.ContainsByPredicate([](const FRHBuildingInstance& B) { return B.DefName == FName("ComputeModule") && !B.bUnderConstruction; }))
+	{
+		const double Tier0 = Defs->GetConfigScalar(FName("OrderLagTier0_s"), 45.0);
+		const double Tier1 = Defs->GetConfigScalar(FName("OrderLagTier1_s"), 20.0);
+		if (FMath::IsNearlyEqual(OrderLagSeconds, Tier1) && Tier0 > OrderLagSeconds)
+		{
+			OrderLagSeconds = Tier0;
+			bLag = true;
+		}
+	}
+
+	// Salvage to the Lander (looked up after the array changed).
+	FRHBuildingInstance* Lander = FindBuilding(LanderId);
+	TArray<FName> Touched;
+	FString Line;
+	const auto Credit = [&](const TMap<FName, double>& Lines, bool bOutput)
+	{
+		for (const auto& L : Lines)
+		{
+			if (Lander && Defs->IsSolidResource(L.Key))
+			{
+				(bOutput ? Lander->OutputKg : Lander->InputKg).FindOrAdd(L.Key) += L.Value;
+			}
+			else
+			{
+				AddStock(L.Key, L.Value);
+			}
+			Touched.AddUnique(L.Key);
+		}
+	};
+	Credit(SalvIn, false);
+	Credit(SalvOut, true);
+	if (Packs > 0)
+	{
+		ImportStock.FindOrAdd(Gone.DefName) += Packs;
+	}
+	TMap<FName, double> Total;
+	for (const FName& R : Touched)
+	{
+		Total.Add(R, SalvIn.FindRef(R) + SalvOut.FindRef(R));
+	}
+	Total.KeySort(FNameLexicalLess());
+	for (const auto& L : Total)
+	{
+		Line += FString::Printf(TEXT("%s%.0f kg %s"), Line.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+		OnStockChanged.Broadcast(L.Key, Defs->IsSolidResource(L.Key) ? GetTotalSolid(L.Key) : GetStock(L.Key));
+	}
+	if (Packs > 0)
+	{
+		Line += FString::Printf(TEXT("%sthe %s kit"), Line.IsEmpty() ? TEXT("") : TEXT(", "), *Gone.DefName.ToString());
+	}
+	RefreshJobs();
+
+	FString Notes;
+	if (bBatch)
+	{
+		Notes += TEXT(" The batch in progress was scrapped.");
+	}
+	if (BedsLost > 0)
+	{
+		Notes += FString::Printf(TEXT(" %d planted bed(s) - the soil is forfeit."), BedsLost);
+	}
+	if (AirBack > 0.0)
+	{
+		Notes += FString::Printf(TEXT(" %.0f kg of air pumped back to the tanks."), AirBack);
+	}
+	if (bLag)
+	{
+		Notes += FString::Printf(TEXT(" Order lag back to %.0f s."), OrderLagSeconds);
+	}
+	const FString Name = Def && !Def->DisplayName.IsEmpty() ? Def->DisplayName : Gone.DefName.ToString();
+	UE_LOG(LogRedHopeSim, Display, TEXT("Demolished %s #%d (%s); salvage: %s"), *Gone.DefName.ToString(), Gone.Id,
+		Gone.bUnderConstruction ? TEXT("site cancelled") : TEXT("standing"), Line.IsEmpty() ? TEXT("nothing") : *Line);
+	if (Gone.bUnderConstruction)
+	{
+		OnAlert.Broadcast(FString::Printf(TEXT("SITE CANCELLED — %s #%d. Returned to the Lander: %s.%s"), *Name, Gone.Id,
+			Line.IsEmpty() ? TEXT("nothing") : *Line, *Notes));
+	}
+	else
+	{
+		OnAlert.Broadcast(FString::Printf(TEXT("DEMOLISHED — %s #%d. Salvage at the Lander: %s.%s"), *Name, Gone.Id,
+			Line.IsEmpty() ? TEXT("nothing") : *Line, *Notes));
+	}
+	OnBuildingRemoved.Broadcast(Gone);
+}
+
+bool URHSimWorldSubsystem::Debug_GetTask(int32 TaskId, FRHTask& Out) const
+{
+	for (const FRHTask& T : Tasks)
+	{
+		if (T.Id == TaskId)
+		{
+			Out = T;
+			return true;
+		}
+	}
+	return false;
+}
+
+void URHSimWorldSubsystem::Debug_AddSolidAt(int32 BuildingId, FName Resource, double Kg, bool bOutput)
+{
+	if (FRHBuildingInstance* B = FindBuilding(BuildingId))
+	{
+		(bOutput ? B->OutputKg : B->InputKg).FindOrAdd(Resource) += Kg;
+		OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));
+	}
+}
+
 void URHSimWorldSubsystem::Debug_PlaceInstant(FName DefName, const FVector& LocationCm, int32 Level, int32 SizeX, int32 SizeY)
 {
 	if (!Defs || !Defs->GetBuilding(DefName))
@@ -6944,13 +7424,15 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			}
 			else if (T.From.BuildingId > 0)
 			{
-				for (FRHBuildingInstance& B : SavedBuildings)
+				FRHBuildingInstance* Back = SavedBuildings.FindByPredicate([&T](const FRHBuildingInstance& B) { return B.Id == T.From.BuildingId; });
+				if (!Back)
 				{
-					if (B.Id == T.From.BuildingId)
-					{
-						B.OutputKg.FindOrAdd(R.CargoResource) += R.CargoKg;
-						break;
-					}
+					// BM-3: the source was demolished - the cargo goes to the Lander.
+					Back = SavedBuildings.FindByPredicate([](const FRHBuildingInstance& B) { return B.DefName == NAME_Lander; });
+				}
+				if (Back)
+				{
+					Back->OutputKg.FindOrAdd(R.CargoResource) += R.CargoKg;
 				}
 			}
 			break;

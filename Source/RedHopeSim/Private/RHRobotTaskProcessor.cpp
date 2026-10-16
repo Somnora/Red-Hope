@@ -109,6 +109,11 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 				{
 				case ERHTaskType::Charge:
 				{
+					if (!Sim->HasBuilding(Task.DigDepositId))
+					{
+						Task = FRHTaskFragment(); // BM-3: pad demolished - re-seek next tick
+						break;
+					}
 					if (Task.Phase == 0)
 					{
 						DrawW = Robot.DrawMoveW;

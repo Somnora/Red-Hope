@@ -1281,6 +1281,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		AddedHandle = Sim->OnBuildingAdded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingAdded);
 		CompletedHandle = Sim->OnBuildingCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingCompleted);
 		RejectedHandle = Sim->OnCommandRejected.AddUObject(this, &URHColonyVisualizerSubsystem::HandleCommandRejected);
+		RemovedHandle = Sim->OnBuildingRemoved.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingRemoved);
 		Sim->OnQuotaMet.AddUObject(this, &URHColonyVisualizerSubsystem::HandleQuotaMet);
 		Sim->OnShipArrived.AddUObject(this, &URHColonyVisualizerSubsystem::HandleShipArrived);
 		Sim->OnDepositDiscovered.AddUObject(this, &URHColonyVisualizerSubsystem::HandleDepositDiscovered);
@@ -1485,9 +1486,35 @@ void URHColonyVisualizerSubsystem::Deinitialize()
 			Sim->OnBuildingAdded.Remove(AddedHandle);
 			Sim->OnBuildingCompleted.Remove(CompletedHandle);
 			Sim->OnCommandRejected.Remove(RejectedHandle);
+			Sim->OnBuildingRemoved.Remove(RemovedHandle);
 		}
 	}
 	Super::Deinitialize();
+}
+
+void URHColonyVisualizerSubsystem::HandleBuildingRemoved(const FRHBuildingInstance& Instance)
+{
+	// The actor owns everything drawn for it (shell walls, floor tiles, room
+	// props and lamps, dome glass and crops, its light); neighbouring shells
+	// redraw on their own next Tick because their wall keys change.
+	if (AStaticMeshActor* Actor = BuildingVisuals.FindRef(Instance.Id).Get())
+	{
+		Actor->Destroy();
+	}
+	BuildingVisuals.Remove(Instance.Id);
+	AppliedPowerState.Remove(Instance.Id);
+	AuthoredPulseDepth.Remove(Instance.Id);
+	BuildingLights.Remove(Instance.Id);
+	HabShellVis.Remove(Instance.Id);
+	AppliedDomeCrops.Remove(Instance.Id);
+	DomeCropProps.Remove(Instance.Id);
+	for (auto It = RoomPropByCell.CreateIterator(); It; ++It)
+	{
+		if (It->Key.X == 0 && It->Key.Z == Instance.Id)
+		{
+			It.RemoveCurrent(); // the crew's furniture list reads these (bay props)
+		}
+	}
 }
 
 FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instance) const

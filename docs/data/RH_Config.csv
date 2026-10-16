@@ -162,3 +162,4 @@ GardenCO2DrawKgPerSolPerCell,0.5,kg/sol,"agri Gate D: CO2 a ducted producing cel
 GardenO2EmitKgPerSolPerCell,0.2,kg/sol,"agri Gate D: O2 a ducted producing cell returns to colony stock when its CO2 draw is met"
 CO2KgPerColonistSol,1,kg/sol,"agri Gate D: exhaled CO2 pooled per colonist-sol while crops are live (feeds ducted gardens)"
 ShaftLinkRange_m,10,m,"BM-1 (2026-10-16): a surface habitat network is also circulated through the shaft when one of its bay centres lies within this distance (each axis) of the shaft head and floor -1 is RATED. Optional - a hab needs no shaft link (ruling 6a). Placeholder, director review"
+SalvageFraction,0.5,fraction,"BM-3 (2026-10-16): share of a standing structure's bill (Level-taxed, per bay) reclaimed to the Lander when it is demolished; held stock always comes back in full and a cancelled site returns everything delivered. Built imported hardware salvages nothing. Placeholder, director review"
