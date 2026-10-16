@@ -100,9 +100,12 @@ private:
 	// Furnish mode (BM-5): the zone row's FURNISH tab holds the catalogue.
 	FReply HandleFurnish(FName Row);
 	FReply HandleSellFurniture();
-	bool bFurnishTab = false;
+	// BM-6: the WALLS tab - windows, doors, airlocks.
+	FReply HandleFit(FName Row);
+	int32 RowTab = 0; // the zone row's tab: 0 ZONE, 1 FURNISH, 2 WALLS
 public:
-	void Debug_SetFurnishTab(bool bOn) { bFurnishTab = bOn; }
+	void Debug_SetFurnishTab(bool bOn) { RowTab = bOn ? 1 : 0; }
+	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 2); }
 private:
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.

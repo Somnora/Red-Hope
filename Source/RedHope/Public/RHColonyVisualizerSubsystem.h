@@ -224,6 +224,11 @@ private:
 	// rotation); a furnished cell's automatic room-prop hides.
 	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; FString Sig; };
 	TMap<int32, FRHFurnVis> FurnitureVis;
+	// BM-6: door leaves in doored doorways (drawn by RefreshHabShells, owned
+	// by the shell), keyed by the wall edge; they part for passing crew.
+	struct FRHDoorLeaves { TWeakObjectPtr<UStaticMeshComponent> L; TWeakObjectPtr<UStaticMeshComponent> R; FVector Mid = FVector::ZeroVector; FVector Along = FVector::ZeroVector; float Open = 0.f; };
+	TMap<FIntVector, FRHDoorLeaves> DoorLeaves;
+	void AnimateDoors(float DeltaTime);
 	TMap<FIntVector, TArray<TWeakObjectPtr<UStaticMeshComponent>>> FurnitureCompsByCell;
 	TSet<FIntVector> PropsHiddenForFurniture;
 	void RefreshFurniture(const URHSimWorldSubsystem* Sim);

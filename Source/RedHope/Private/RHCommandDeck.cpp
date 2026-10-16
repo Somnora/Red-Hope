@@ -110,6 +110,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	// rooms table activates - the row is simply absent pre-M2.
 	TSharedRef<SHorizontalBox> ZonePalette = SNew(SHorizontalBox);
 	TSharedRef<SHorizontalBox> FurnishPalette = SNew(SHorizontalBox);
+	TSharedRef<SHorizontalBox> WallsPalette = SNew(SHorizontalBox);
 	int32 ZoneCount = 0;
 	int32 MaxDepth = 5;
 	if (const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr)
@@ -212,6 +213,34 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				if (Pieces.Num() > 0)
 				{
 					FurnishPalette->AddSlot().AutoWidth()
+					[
+						DeckButton(FText::FromString(TEXT("Sell")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSellFurniture))
+					];
+				}
+			}
+			// BM-6: windows, doors and airlocks, with their price.
+			{
+				TArray<TPair<FName, const FRHDoorRow*>> Fittings;
+				Defs->GetActiveDoorsSorted(Fittings);
+				for (const auto& Fitting : Fittings)
+				{
+					FString Price;
+					for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Fitting.Value))
+					{
+						Price += FString::Printf(TEXT(" %.0f%s"), L.Value, L.Key == FName("Struct") ? TEXT("") : *FString::Printf(TEXT(" %s"), *L.Key.ToString()));
+					}
+					WallsPalette->AddSlot().AutoWidth()
+					[
+						SNew(SBox).ToolTipText(FText::FromString(Fitting.Value->Blurb))
+						[
+							DeckButton(FText::FromString(Fitting.Value->DisplayName + Price),
+								FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFit, Fitting.Key))
+						]
+					];
+				}
+				if (Fittings.Num() > 0)
+				{
+					WallsPalette->AddSlot().AutoWidth()
 					[
 						DeckButton(FText::FromString(TEXT("Sell")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSellFurniture))
 					];
@@ -725,9 +754,9 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						[
 							SNew(SButton)
 							.ButtonStyle(&RHDeck::TintButtonStyle())
-							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(!bFurnishTab ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(RowTab == 0 ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
 							.ContentPadding(FMargin(8.f, 4.f))
-							.OnClicked_Lambda([this]() { bFurnishTab = false; return FReply::Handled(); })
+							.OnClicked_Lambda([this]() { RowTab = 0; return FReply::Handled(); })
 							[
 								SNew(STextBlock).Text(FText::FromString(TEXT("ZONE"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
 							]
@@ -736,20 +765,35 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						[
 							SNew(SButton)
 							.ButtonStyle(&RHDeck::TintButtonStyle())
-							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(bFurnishTab ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(RowTab == 1 ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
 							.ContentPadding(FMargin(8.f, 4.f))
-							.OnClicked_Lambda([this]() { bFurnishTab = true; return FReply::Handled(); })
+							.OnClicked_Lambda([this]() { RowTab = 1; return FReply::Handled(); })
 							[
 								SNew(STextBlock).Text(FText::FromString(TEXT("FURNISH"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
 							]
 						]
-						+ SHorizontalBox::Slot().AutoWidth()
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
 						[
-							SNew(SBox).Visibility_Lambda([this]() { return bFurnishTab ? EVisibility::Collapsed : EVisibility::Visible; }) [ ZonePalette ]
+							SNew(SButton)
+							.ButtonStyle(&RHDeck::TintButtonStyle())
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(RowTab == 2 ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ContentPadding(FMargin(8.f, 4.f))
+							.OnClicked_Lambda([this]() { RowTab = 2; return FReply::Handled(); })
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("WALLS"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+							]
 						]
 						+ SHorizontalBox::Slot().AutoWidth()
 						[
-							SNew(SBox).Visibility_Lambda([this]() { return bFurnishTab ? EVisibility::Visible : EVisibility::Collapsed; }) [ FurnishPalette ]
+							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 0 ? EVisibility::Visible : EVisibility::Collapsed; }) [ ZonePalette ]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 1 ? EVisibility::Visible : EVisibility::Collapsed; }) [ FurnishPalette ]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 2 ? EVisibility::Visible : EVisibility::Collapsed; }) [ WallsPalette ]
 						]
 					]
 				]
@@ -1056,7 +1100,13 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		FString Label = C.Target.IsNone()
 			? C.Verb.ToString()
 			: FString::Printf(TEXT("%s %s"), *C.Verb.ToString(), *C.Target.ToString());
-		if (C.Verb == FName("Sell"))
+		if (C.Verb == FName("Sell") && C.Target == FName("WallFeature"))
+		{
+			// BM-6: "Sell Window #3".
+			const FRHWallFeature* SW = Sim->FindWallFeature((int32)C.Value);
+			Label = SW ? FString::Printf(TEXT("Sell %s #%d"), *SW->Row.ToString(), SW->Id) : FString(TEXT("Sell a fitting"));
+		}
+		else if (C.Verb == FName("Sell"))
 		{
 			// BM-5: "Sell Cot #3" / "Sell a room's furniture".
 			const FRHFurnitureInstance* SF = C.Target == FName("Furniture") ? Sim->FindFurniture((int32)C.Value) : nullptr;
@@ -1765,6 +1815,15 @@ FReply SRHCommandDeck::HandleFurnish(FName Row)
 	if (PC.IsValid())
 	{
 		PC->BeginFurnish(Row);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleFit(FName Row)
+{
+	if (PC.IsValid())
+	{
+		PC->BeginFit(Row);
 	}
 	return FReply::Handled();
 }

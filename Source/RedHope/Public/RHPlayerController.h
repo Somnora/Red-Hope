@@ -47,6 +47,12 @@ public:
 	// click a piece to sell it back (FurnitureRefundFraction).
 	void BeginFurnish(FName Row);
 	void BeginSellFurniture();
+	// Fit mode (BM-6): pick a window, door or airlock on the deck's WALLS tab,
+	// hover a surface habitat bay - the nearest wall of that bay lights - and
+	// click to transmit a Fit order. Sell mode sells fittings too.
+	void BeginFit(FName Row);
+	bool IsFitMode() const { return bFitMode; }
+	void Debug_ShowWallsTab();
 	bool IsFurnishMode() const { return bFurnishMode; }
 	FName GetFurnishRow() const { return FurnishRow; }
 	bool IsSellMode() const { return bSellMode; }
@@ -128,6 +134,8 @@ private:
 	// armed piece there; false off any room.
 	bool ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
 	const struct FRHFurnitureInstance* FindFurnitureAt(const FVector& GroundCm) const;
+	// The wall of the surface bay under a point nearest to it (and its side).
+	bool ComputeFitEdge(const FVector& GroundCm, FIntVector& OutEdge, int32& OutDir) const;
 	// Cursor ray intersected with the ground plane (Z=0), snapped to the 2 m grid.
 	bool CursorToGround(FVector& OutCm) const;
 	ARHStrategyPawn* StrategyPawn() const;
@@ -186,6 +194,8 @@ private:
 	FName FurnishRow;
 	int32 FurnishRot = 0;
 	bool bSellMode = false;
+	bool bFitMode = false;
+	FName FitRow;
 	// The carved cell (spiral index) under a world point on the given floor,
 	// or INDEX_NONE. The zoning click's inverse of the sim's SpiralCell.
 	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;

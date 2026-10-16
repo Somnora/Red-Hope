@@ -978,6 +978,60 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeckFurnish(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHFit(
+	TEXT("RH.Fit"),
+	TEXT("RH.Fit <Row> <Xm> <Ym> <Side 0..3 = +X,-X,+Y,-Y> - BM-6: order a window, door or airlock into the wall of the habitat bay at that point (uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Fit <Row> <Xm> <Ym> <Side 0..3>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Fit");
+		Cmd.Target = FName(*Args[0]);
+		Cmd.Level = 0;
+		Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f);
+		Cmd.Value = FCString::Atoi(*Args[3]);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSellFitting(
+	TEXT("RH.SellFitting"),
+	TEXT("RH.SellFitting <Id> - BM-6: sell a window, door or airlock back (uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.SellFitting <Id>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Sell");
+		Cmd.Target = FName("WallFeature");
+		Cmd.Value = FCString::Atoi(*Args[0]);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckWalls(
+	TEXT("RH.DeckWalls"),
+	TEXT("RH.DeckWalls [Row] - DEBUG: show the deck's WALLS tab (captures); with a row, arm Fit mode on it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (PC)
+		{
+			PC->Debug_ShowWallsTab();
+			if (Args.Num() > 0)
+			{
+				PC->BeginFit(FName(*Args[0]));
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHDemolish(
 	TEXT("RH.Demolish"),
 	TEXT("RH.Demolish <Id> - BM-3: order a structure demolished or a site cancelled (uplink; salvage to the Lander)."),

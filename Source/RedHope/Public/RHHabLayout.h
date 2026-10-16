@@ -75,6 +75,39 @@ namespace RHHabLayout
 		const FVector Centre = Sim->GetShaftDepth() > 0 ? Sim->GetShaftHeadCm() : FVector::ZeroVector;
 		TMap<int32, int32> ByRoot; // root -> index in Out (lookup only)
 		TMap<int32, double> Best;
+		// BM-6: the player's airlocks first. A network with any placed airlock
+		// enters there; the derived entrance below covers the rest.
+		TSet<int32> Placed;
+		for (const FRHWallFeature& W : Sim->GetWallFeatures())
+		{
+			const FRHDoorRow* Row = Defs->GetDoor(W.Row);
+			int32 Inside = 0, H = 0, Bay = INDEX_NONE;
+			FIntPoint InPt, OutStep;
+			if (!Row || Row->Kind != FName("Airlock")
+				|| Sim->ClassifyWallEdge(W.Edge, &Inside, &InPt, &OutStep) != URHSimWorldSubsystem::ERHWallEdge::Exterior)
+			{
+				continue;
+			}
+			const int32 Root = Sim->GetHabNetworkRoot(Inside);
+			const FVector C(InPt.X * 1000.0, InPt.Y * 1000.0, 0.0);
+			if (Root == 0 || !Sim->FindBayAt(C, H, Bay))
+			{
+				continue;
+			}
+			FRHAirlock A;
+			A.Root = Root;
+			A.HabId = H;
+			A.Bay = Bay;
+			A.Dir = OutStep;
+			A.BayCentre = C;
+			const FVector N(OutStep.X, OutStep.Y, 0.f);
+			A.WallMid = C + N * 500.f;
+			A.Chamber = C + N * (500.f + ChamberDepthCm * 0.5f);
+			A.Outer = C + N * (500.f + ChamberDepthCm + 120.f);
+			A.Inner = C + N * 330.f;
+			Out.Add(A);
+			Placed.Add(Root);
+		}
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
 			if (!IsShell(Defs, B) || B.bUnderConstruction)
@@ -82,7 +115,7 @@ namespace RHHabLayout
 				continue;
 			}
 			const int32 Root = Sim->GetHabNetworkRoot(B.Id);
-			if (Root == 0)
+			if (Root == 0 || Placed.Contains(Root))
 			{
 				continue;
 			}
@@ -129,7 +162,7 @@ namespace RHHabLayout
 				}
 			}
 		}
-		Out.Sort([](const FRHAirlock& L, const FRHAirlock& R) { return L.Root < R.Root; });
+		Out.StableSort([](const FRHAirlock& L, const FRHAirlock& R) { return L.Root < R.Root; });
 	}
 
 	inline const FRHAirlock* FindAirlock(const TArray<FRHAirlock>& Airlocks, int32 Root)

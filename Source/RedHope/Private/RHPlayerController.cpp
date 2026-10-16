@@ -620,12 +620,96 @@ void ARHPlayerController::Tick(float DeltaTime)
 			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
 		}
 	}
+	else if (bFitMode)
+	{
+		// BM-6: the hovered bay's nearest wall, green when the sim would take
+		// the fitting, with what it would do.
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(FitRow) : nullptr;
+		FVector Ground;
+		FIntVector Edge;
+		int32 Dir = 0;
+		if (Row && ActiveLevel == 0 && CursorToGround(Ground) && ComputeFitEdge(Ground, Edge, Dir))
+		{
+			FString Why;
+			const bool bOk = Sim->CanPlaceWallFeature(FitRow, Edge, Why);
+			const FVector WM = Sim->GetWallEdgeMidCm(Edge);
+			const FVector Along = Edge.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+			const FColor Col = bOk ? FColor::Emerald : FColor::Red;
+			DrawDebugLine(World, WM - Along * 480.f + FVector(0, 0, 160.f), WM + Along * 480.f + FVector(0, 0, 160.f), Col, false, -1.f, 0, 14.f);
+			FVector ChC;
+			FVector2D ChH;
+			if (Row->Kind == FName("Airlock") && Sim->GetAirlockChamberRect(Edge, ChC, ChH))
+			{
+				DrawDebugBox(World, ChC + FVector(0, 0, 120.f), FVector(ChH.X, ChH.Y, 120.f), Col, false, -1.f, 0, 5.f);
+			}
+			FString Cost;
+			for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Row))
+			{
+				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+			}
+			if (bOk)
+			{
+				FString Effect;
+				if (Row->Kind == FName("Window"))
+				{
+					Effect = FString::Printf(TEXT(" - a view (Hope +%.1f) for %.1f kg of air a sol"), Row->HopeViews, Row->LeakKgPerSol);
+				}
+				else if (Row->Kind == FName("Door"))
+				{
+					int32 Inside = 0, Doorways = 0, Doored = 0;
+					Sim->ClassifyWallEdge(Edge, &Inside);
+					Sim->GetHabNetworkDoorways(Inside, Doorways, Doored);
+					Effect = Doored + 1 >= Doorways
+						? FString::Printf(TEXT(" - the last doorway: seals the habitat (air leak x%.1f)"), Sim->GetSealedLeakMul())
+						: FString::Printf(TEXT(" - doors in %d of %d doorways; door them all to seal the habitat"), Doored + 1, Doorways);
+				}
+				else
+				{
+					Effect = TEXT(" - this habitat's entrance: the crew suit up and down here");
+				}
+				HintText = FString::Printf(TEXT("FIT %s (%s)%s - click to fit, right-click to finish"), *Row->DisplayName, *Cost, *Effect);
+				HintColor = FLinearColor(0.3f, 1.f, 0.6f);
+			}
+			else
+			{
+				HintText = FString::Printf(TEXT("FIT %s: %s"), *Row->DisplayName, *Why);
+				HintColor = FLinearColor(1.f, 0.4f, 0.3f);
+			}
+		}
+		else if (Row)
+		{
+			HintText = FString::Printf(TEXT("FIT %s: hover a surface habitat bay - its nearest wall lights up"), *Row->DisplayName);
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+	}
 	else if (bSellMode)
 	{
 		FVector Ground;
-		const FRHFurnitureInstance* Hit = CursorToGround(Ground) ? FindFurnitureAt(Ground) : nullptr;
+		const bool bGround = CursorToGround(Ground);
+		const FRHFurnitureInstance* Hit = bGround ? FindFurnitureAt(Ground) : nullptr;
 		const FRHFurnitureRow* HitRow = (Hit && Defs) ? Defs->GetFurniture(Hit->Row) : nullptr;
-		if (Hit)
+		FIntVector WEdge;
+		int32 WDir = 0;
+		const FRHWallFeature* WHit = (!Hit && bGround && ComputeFitEdge(Ground, WEdge, WDir)) ? Sim->FindWallFeatureOnEdge(WEdge) : nullptr;
+		if (WHit)
+		{
+			// BM-6: a fitting on the hovered bay's nearest wall.
+			const FRHDoorRow* WRow = Defs ? Defs->GetDoor(WHit->Row) : nullptr;
+			TMap<FName, double> Refund;
+			FString Why;
+			Sim->CanSellWallFeature(WHit->Id, Why, &Refund);
+			const FVector WM = Sim->GetWallEdgeMidCm(WHit->Edge);
+			const FVector Along = WHit->Edge.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+			DrawDebugLine(World, WM - Along * 480.f + FVector(0, 0, 160.f), WM + Along * 480.f + FVector(0, 0, 160.f), FColor(255, 150, 40), false, -1.f, 0, 14.f);
+			FString Back;
+			for (const auto& L : Refund)
+			{
+				Back += FString::Printf(TEXT("%s%.1f %s"), Back.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+			}
+			HintText = FString::Printf(TEXT("SELL %s #%d: %s back - click to transmit, right-click to finish"), WRow ? *WRow->DisplayName : *WHit->Row.ToString(), WHit->Id, *Back);
+			HintColor = FLinearColor(1.f, 0.62f, 0.2f);
+		}
+		else if (Hit)
 		{
 			FString Why;
 			TMap<FName, double> Refund;
@@ -655,6 +739,33 @@ void ARHPlayerController::Tick(float DeltaTime)
 	{
 		for (const FRHCommand& C : Sim->GetUplinkQueue())
 		{
+			if ((C.Verb == FName("Fit") || (C.Verb == FName("Sell") && C.Target == FName("WallFeature"))) && ActiveLevel == 0)
+			{
+				// BM-6: a fitting in transit (cyan) or being sold (amber).
+				FIntVector FEdge;
+				bool bHaveEdge = false;
+				if (C.Verb == FName("Fit"))
+				{
+					bHaveEdge = Sim->ResolveWallEdge(C.Location, (int32)C.Value, FEdge);
+				}
+				else if (const FRHWallFeature* SW = Sim->FindWallFeature((int32)C.Value))
+				{
+					FEdge = SW->Edge;
+					bHaveEdge = true;
+				}
+				if (bHaveEdge)
+				{
+					const bool bSell = C.Verb == FName("Sell");
+					const FVector WM = Sim->GetWallEdgeMidCm(FEdge);
+					const FVector Along = FEdge.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+					DrawDebugLine(World, WM - Along * 470.f + FVector(0, 0, 150.f), WM + Along * 470.f + FVector(0, 0, 150.f),
+						bSell ? FColor(255, 150, 40) : FColor(60, 200, 220), false, -1.f, 0, 8.f);
+					const double FEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+					DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("%s  \u0394 %.0fs"), bSell ? TEXT("Sell fitting") : *C.Target.ToString(), FEta),
+						nullptr, bSell ? FColor(255, 180, 90) : FColor(120, 230, 255), 0.f, true, 1.1f);
+				}
+				continue;
+			}
 			if (C.Verb == FName("Furnish") || C.Verb == FName("Sell"))
 			{
 				// BM-5: a furnishing in transit (cyan) or about to be sold (amber).
@@ -923,6 +1034,51 @@ void ARHPlayerController::OnClick()
 			}
 		}
 	}
+	else if (bFitMode)
+	{
+		// BM-6: transmit the fitting on the lit wall; the mode stays armed.
+		FIntVector Edge;
+		int32 Dir = 0;
+		FString Why;
+		if (ActiveLevel == 0 && ComputeFitEdge(Ground, Edge, Dir))
+		{
+			if (Sim->CanPlaceWallFeature(FitRow, Edge, Why))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Fit");
+				Cmd.Target = FitRow;
+				Cmd.Level = 0;
+				Cmd.Location = Ground; // a point in the bay
+				Cmd.Value = Dir;
+				Sim->EnqueueCommand(Cmd);
+				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+				const FRHDoorRow* Row = ClickDefs ? ClickDefs->GetDoor(FitRow) : nullptr;
+				SetConfirm(FString::Printf(TEXT("Fit order transmitted: %s"), Row ? *Row->DisplayName : *FitRow.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
+			}
+			else
+			{
+				URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				SetConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+			}
+		}
+	}
+	else if (bSellMode && !FindFurnitureAt(Ground) && ActiveLevel == 0)
+	{
+		// BM-6: no furnishing under the cursor - a fitting on the nearest wall.
+		FIntVector Edge;
+		int32 Dir = 0;
+		const FRHWallFeature* WHit = ComputeFitEdge(Ground, Edge, Dir) ? Sim->FindWallFeatureOnEdge(Edge) : nullptr;
+		if (WHit)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Sell");
+			Cmd.Target = FName("WallFeature");
+			Cmd.Value = WHit->Id;
+			Sim->EnqueueCommand(Cmd);
+			URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+			SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *WHit->Row.ToString(), WHit->Id), FLinearColor(1.f, 0.62f, 0.2f));
+		}
+	}
 	else if (bSellMode)
 	{
 		if (const FRHFurnitureInstance* Hit = FindFurnitureAt(Ground))
@@ -1027,7 +1183,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -1135,6 +1291,7 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 	bSurveyMode = false;
 	bFurnishMode = false;
 	bSellMode = false;
+	bFitMode = false;
 	PendingBuildDef = BuildingDef;
 }
 
@@ -1170,6 +1327,36 @@ void ARHPlayerController::BeginSellFurniture()
 	CancelModes();
 	SelectedBuildingId = 0;
 	bSellMode = true;
+}
+
+void ARHPlayerController::BeginFit(FName Row)
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bFitMode = true;
+	FitRow = Row;
+}
+
+void ARHPlayerController::Debug_ShowWallsTab()
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetRowTab(2);
+	}
+}
+
+bool ARHPlayerController::ComputeFitEdge(const FVector& GroundCm, FIntVector& OutEdge, int32& OutDir) const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || ActiveLevel != 0)
+	{
+		return false;
+	}
+	// The bay's lattice point, and which of its four walls the cursor is nearest.
+	const FVector Local(GroundCm.X - FMath::FloorToInt32(GroundCm.X / 1000.0 + 0.5) * 1000.0, GroundCm.Y - FMath::FloorToInt32(GroundCm.Y / 1000.0 + 0.5) * 1000.0, 0.0);
+	OutDir = FMath::Abs(Local.X) >= FMath::Abs(Local.Y) ? (Local.X >= 0.0 ? 0 : 1) : (Local.Y >= 0.0 ? 2 : 3);
+	return Sim->ResolveWallEdge(GroundCm, OutDir, OutEdge);
 }
 
 void ARHPlayerController::Debug_ShowFurnishTab()
@@ -1243,6 +1430,7 @@ void ARHPlayerController::BeginZoneDesignation(FName Room)
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
+	bFitMode = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;
@@ -1301,7 +1489,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode)
+	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -1320,6 +1508,8 @@ void ARHPlayerController::CancelModes()
 	bFurnishMode = false;
 	FurnishRow = NAME_None;
 	bSellMode = false;
+	bFitMode = false;
+	FitRow = NAME_None;
 	HintText.Reset();
 }
 

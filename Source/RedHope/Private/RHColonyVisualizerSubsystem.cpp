@@ -448,10 +448,15 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 		const FIntPoint G = Sim->GetBayGrid(B);
 		const int32 Root = Sim->GetHabNetworkRoot(B.Id);
 		const bool bRated = Sim->IsHabRated(B.Id);
-		const FRHAirlock* Lock = RHHabLayout::FindAirlock(Airlocks, Root);
-		if (Lock && Lock->HabId != B.Id)
+		// The network's airlocks cut into THIS shell (the player's, BM-6, or
+		// the derived entrance).
+		TArray<const FRHAirlock*> Locks;
+		for (const FRHAirlock& L : Airlocks)
 		{
-			Lock = nullptr; // the network's airlock is cut into another shell
+			if (L.HabId == B.Id)
+			{
+				Locks.Add(&L);
+			}
 		}
 		// Edge kinds: 0 exterior wall, 1 open (same shell, same room),
 		// 2 partition + door (same shell, different rooms), 3 joint + door
@@ -479,9 +484,25 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 						Kind = 3;
 					}
 				}
-				if (Lock && Lock->Bay == Bay && Lock->Dir == Dirs[d])
+				// BM-6: 5 = a window in an outside wall; 6 / 7 = a doorway
+				// (partition / joint) with its door fitted.
+				const FIntVector WEdge = URHSimWorldSubsystem::WallEdgeKey(FIntPoint(FMath::RoundToInt32(I.C.X / 1000.0), FMath::RoundToInt32(I.C.Y / 1000.0)), d);
+				const FRHWallFeature* WF = Sim->FindWallFeatureOnEdge(WEdge);
+				const FRHDoorRow* WRow = WF ? Defs->GetDoor(WF->Row) : nullptr;
+				if (Kind == 0 && WRow && WRow->Kind == FName("Window"))
 				{
-					Kind = 4; // the airlock's inner door, in the exterior wall
+					Kind = 5;
+				}
+				else if ((Kind == 2 || Kind == 3) && WRow && WRow->Kind == FName("Door"))
+				{
+					Kind += 4;
+				}
+				for (const FRHAirlock* L : Locks)
+				{
+					if (L->Bay == Bay && L->Dir == Dirs[d])
+					{
+						Kind = 4; // an airlock's inner door, in the exterior wall
+					}
 				}
 				I.Edge[d] = Kind;
 			}
@@ -543,7 +564,7 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 					continue;
 				}
 				// Shared interior edges are drawn once, from the +X/+Y side.
-				if ((Kind == 2 || Kind == 3) && (d == 1 || d == 3))
+				if ((Kind == 2 || Kind == 3 || Kind == 6 || Kind == 7) && (d == 1 || d == 3))
 				{
 					continue;
 				}
@@ -560,12 +581,77 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 					Piece(Mid, Along, Door * 0.5f, 500.f, 0.f, ExtH);
 					Piece(Mid, Along, -Door * 0.5f, Door * 0.5f, FMath::Min(DoorH, ExtH), ExtH);
 				}
+				else if (Kind == 5)
+				{
+					// BM-6: a window - wall either side, a sill below, a header
+					// above, and a glazed band between.
+					const float WinW = 300.f, Sill = FMath::Min(90.f, ExtH), Head = FMath::Min(230.f, ExtH);
+					Piece(Mid, Along, -500.f, -WinW * 0.5f, 0.f, ExtH);
+					Piece(Mid, Along, WinW * 0.5f, 500.f, 0.f, ExtH);
+					Piece(Mid, Along, -WinW * 0.5f, WinW * 0.5f, 0.f, Sill);
+					Piece(Mid, Along, -WinW * 0.5f, WinW * 0.5f, Head, ExtH);
+					if (Head - Sill > 1.f)
+					{
+						UStaticMeshComponent* Pane = NewObject<UStaticMeshComponent>(Actor);
+						Pane->SetupAttachment(Actor->GetRootComponent());
+						Pane->SetAbsolute(true, true, true);
+						Pane->SetStaticMesh(Cube);
+						Pane->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+						Pane->RegisterComponent();
+						const bool bAlongX = FMath::Abs(Along.X) > 0.5f;
+						Pane->SetWorldLocation(FVector(Mid.X, Mid.Y, Base + (Sill + Head) * 0.5f));
+						Pane->SetWorldScale3D(FVector(bAlongX ? WinW / 100.f : 0.06f, bAlongX ? 0.06f : WinW / 100.f, (Head - Sill) / 100.f));
+						if (UMaterialInterface* GlassMat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_DomeGlass.M_DomeGlass")))
+						{
+							UMaterialInstanceDynamic* GlassMid = UMaterialInstanceDynamic::Create(GlassMat, Pane);
+							GlassMid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.55f, 0.72f, 0.82f));
+							GlassMid->SetScalarParameterValue(FName("Opacity"), 0.28f);
+							Pane->SetMaterial(0, GlassMid);
+						}
+						else
+						{
+							ApplyTint(Pane, FLinearColor(0.45f, 0.62f, 0.72f), FLinearColor::Black);
+						}
+						Vis.Parts.Add(Pane);
+						// A thin frame: two mullions.
+						for (const float S : { -WinW * 0.5f, WinW * 0.5f })
+						{
+							Piece(Mid, Along, S - 6.f, S + 6.f, Sill, Head);
+						}
+					}
+				}
 				else
 				{
 					// A doorway in the middle; a lintel above it.
 					Piece(Mid, Along, -500.f, -Door * 0.5f, 0.f, WallH);
 					Piece(Mid, Along, Door * 0.5f, 500.f, 0.f, WallH);
 					Piece(Mid, Along, -Door * 0.5f, Door * 0.5f, FMath::Min(DoorH, WallH), WallH);
+					if (Kind == 6 || Kind == 7)
+					{
+						// BM-6: a pressure door - two leaves that part for the
+						// crew (AnimateDoors); slate with a hazard edge.
+						FRHDoorLeaves& Leaves = DoorLeaves.FindOrAdd(URHSimWorldSubsystem::WallEdgeKey(FIntPoint(FMath::RoundToInt32(I.C.X / 1000.0), FMath::RoundToInt32(I.C.Y / 1000.0)), d));
+						Leaves.Mid = FVector(I.C.X + Dirs[d].X * 500.f, I.C.Y + Dirs[d].Y * 500.f, Base + FMath::Min(DoorH, WallH) * 0.5f);
+						Leaves.Along = Along;
+						const bool bAlongX = FMath::Abs(Along.X) > 0.5f;
+						const float LeafH = FMath::Min(DoorH, WallH) - 4.f;
+						for (int32 Side = 0; Side < 2; ++Side)
+						{
+							UStaticMeshComponent* Leaf = NewObject<UStaticMeshComponent>(Actor);
+							Leaf->SetupAttachment(Actor->GetRootComponent());
+							Leaf->SetAbsolute(true, true, true);
+							Leaf->SetMobility(EComponentMobility::Movable);
+							Leaf->SetStaticMesh(Cube);
+							Leaf->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+							Leaf->RegisterComponent();
+							Leaf->SetWorldScale3D(FVector(bAlongX ? (Door * 0.5f + 2.f) / 100.f : 0.08f, bAlongX ? 0.08f : (Door * 0.5f + 2.f) / 100.f, LeafH / 100.f));
+							Leaf->SetWorldLocation(Leaves.Mid + Along * ((Side == 0 ? -1.f : 1.f) * Door * 0.25f));
+							ApplyTint(Leaf, FLinearColor(0.36f, 0.38f, 0.42f), RHCanon::HazYellow * 0.05f);
+							Vis.Parts.Add(Leaf);
+							(Side == 0 ? Leaves.L : Leaves.R) = Leaf;
+						}
+						Leaves.Open = 0.f;
+					}
 				}
 			}
 			// The bay's floor: sealed panels in the room hue (as underground).
@@ -648,7 +734,7 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 			Lamp->SetWorldLocation(FVector(I.C.X, I.C.Y, Base + 260.f));
 			Vis.Parts.Add(Lamp);
 		}
-		if (Lock)
+		for (const FRHAirlock* Lock : Locks)
 		{
 			// The decompression chamber: a 3 x 3 m vestibule outside the door -
 			// side walls, an outer wall with its own door, a hazard band and a
@@ -701,7 +787,7 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 			Vis.Parts.Add(Cool);
 		}
 		UE_LOG(LogRedHope, Display, TEXT("Habitat #%d drawn: %d bays, network #%d%s%s"), B.Id, Bays.Num(), Root, bRated ? TEXT(" (rated)") : TEXT(""),
-			Lock ? TEXT(", airlock here") : TEXT(""));
+			Locks.Num() > 0 ? TEXT(", airlock here") : TEXT(""));
 	}
 }
 
@@ -1347,6 +1433,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	AppliedRoomTint.Reset();
 	RoomPropByCell.Reset();       // prop components died with their tiles just above
 	FurnitureVis.Reset();         // furniture died with its tiles / habitat actors
+	DoorLeaves.Reset();           // door leaves died with their shells
 	FurnitureCompsByCell.Reset();
 	PropsHiddenForFurniture.Reset();
 	LightByCell.Reset();          // cell lights died with their tiles too
@@ -1493,6 +1580,33 @@ void URHColonyVisualizerSubsystem::Deinitialize()
 		}
 	}
 	Super::Deinitialize();
+}
+
+void URHColonyVisualizerSubsystem::AnimateDoors(float DeltaTime)
+{
+	const URHCrewVisualizerSubsystem* Crew = GetWorld() ? GetWorld()->GetSubsystem<URHCrewVisualizerSubsystem>() : nullptr;
+	for (auto It = DoorLeaves.CreateIterator(); It; ++It)
+	{
+		FRHDoorLeaves& D = It->Value;
+		UStaticMeshComponent* L = D.L.Get();
+		UStaticMeshComponent* R = D.R.Get();
+		if (!L || !R)
+		{
+			It.RemoveCurrent(); // the shell redrew or the door was sold
+			continue;
+		}
+		// The leaves part while anyone is within a couple of metres.
+		const float Target = (Crew && Crew->IsAnyCrewWithinCm(D.Mid, 230.f)) ? 1.f : 0.f;
+		const float Was = D.Open;
+		D.Open = FMath::FInterpConstantTo(D.Open, Target, DeltaTime, 2.2f);
+		if (D.Open == Was)
+		{
+			continue;
+		}
+		const float Slide = 45.f + 80.f * D.Open; // a leaf's centre from the doorway's middle
+		L->SetWorldLocation(D.Mid - D.Along * Slide);
+		R->SetWorldLocation(D.Mid + D.Along * Slide);
+	}
 }
 
 FString URHColonyVisualizerSubsystem::FurniturePropPath(FName Row, float& OutFitCm)
@@ -2224,6 +2338,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	RefreshDomeCrops();
 	RefreshHabShells();
 	RefreshFurniture(Sim);
+	AnimateDoors(DeltaTime);
 
 	// Is it working? A machine that has been shed by the power priority, or
 	// switched off by the player, goes dark; a running one keeps its glow. The

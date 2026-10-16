@@ -1,11 +1,11 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-16 (through build mode BM-5, Furnish mode).** The 10-15 snapshot ran
+**Snapshot: 2026-10-16 (through build mode BM-6, windows and doors).** The 10-15 snapshot ran
 through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v30**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v31**.
 
 ## 2026-10-16: build mode, suits and airlocks
 
@@ -62,6 +62,20 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   face); crew walk around them. `RH.Furnish`, `RH.Sell`, `RH.DeckFurnish`.
   Sheet: `docs/media/furnish-mode.jpg`. **Not hand-tested** (captures can't
   move the mouse): the hover ghost, T, and click-to-place.
+- **BM-6, windows and doors** (`14f4e99` sim, save **v31**; presentation in
+  this snapshot): the M2 door table grown into the wall catalogue. A Pressure
+  Door goes in a doorway (between rooms or modules); a door in EVERY doorway
+  seals the habitat network - it leaks at the Sealed Bay rate (half). A
+  Window (Struct 10 + Glass 40) goes in an outside wall: Views Hope +0.5
+  (capped at 3) for 0.5 kg/sol of air. An Airlock sets the habitat's
+  entrance (cosmetic, ruling 6a; unplaced networks keep the derived one).
+  Fit / Sell uplink orders; no module may wall over a window; demolish sells
+  fittings back; Glass refunds go to the pool. Suite `-walls` (37 checks,
+  leaks measured). In game: the zone row's WALLS tab, Fit mode (the hovered
+  bay's nearest wall lights, the hint names the effect), glazed windows,
+  door leaves that part for crew, placed airlocks. Sheet:
+  `docs/media/windows-doors.jpg`. **Not hand-tested:** Fit hover/click; the
+  door-opening animation was not caught in a capture.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 
@@ -102,21 +116,21 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 29
-suites (30 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 30
+suites (31 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
 the art, audio, interface, playtest, tiered-production, dome and build-mode
-work. Last reported fully green on `d180f12` (30 runs) ("0 suite(s) not green", pins
+work. Last reported fully green on `14f4e99` (31 runs) ("0 suite(s) not green", pins
 unchanged); also on `d180f12` (BM-4), `3332e21` (BM-3), `e6ee887`, `585ee8e`,
-`f77b962`, `63f452f`, `4706e5f` and earlier. The five newest suites (`-staff`,
-`-dome`, `-surfacehab`, `-demolish`, `-furnish`) fail loudly on any mismatch,
+`f77b962`, `63f452f`, `4706e5f` and earlier. The six newest suites (`-staff`,
+`-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`) fail loudly on any mismatch,
 unlike the older print-only ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 30 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 31 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls
 #         (+ no-switch = the baseline)
 ```
 
@@ -126,7 +140,7 @@ self-tests (`163165a`), a read-only manifest iterator (`48934b9`), the Lander
 dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only),
 prefab station modules (`f77b962`), seat priority and lazy fill (`63f452f`,
 lazy fill off by default), the greenhouse dome (`585ee8e`), surface habitats
-(`e6ee887`), demolish (BM-3), furniture (BM-4). Each is inert for a colony that doesn't use it.
+(`e6ee887`), demolish (BM-3), furniture (BM-4), wall fittings (BM-6). Each is inert for a colony that doesn't use it.
 
 ---
 
