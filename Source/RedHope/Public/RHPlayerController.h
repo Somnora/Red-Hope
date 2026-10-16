@@ -90,6 +90,11 @@ public:
 	// cell (Lab / Workstation / Garden) with no mode armed selects the cell;
 	// the action card reads its seats and offers ASSIGN STAFF.
 	bool HasSelectedCell() const { return SelectedCellLevel < 0 && SelectedCellIndex != INDEX_NONE; }
+	// BM-2: a work-station bay of a surface habitat, inspected like a cell.
+	bool HasSelectedBay() const { return SelectedBayHab != 0 && SelectedBay != INDEX_NONE; }
+	int32 GetSelectedBayHab() const { return SelectedBayHab; }
+	int32 GetSelectedBay() const { return SelectedBay; }
+	void Debug_SelectBay(int32 Hab, int32 Bay) { SelectedBuildingId = 0; SelectedCellLevel = 0; SelectedCellIndex = INDEX_NONE; SelectedBayHab = Hab; SelectedBay = Bay; }
 	int32 GetSelectedCellLevel() const { return SelectedCellLevel; }
 	int32 GetSelectedCellIndex() const { return SelectedCellIndex; }
 	void Debug_SelectCell(int32 Level, int32 Cell) { SelectedBuildingId = 0; SelectedCellLevel = Level; SelectedCellIndex = Cell; }
@@ -166,6 +171,8 @@ private:
 	int32 SelectedBuildingId = 0;
 	int32 SelectedCellLevel = 0;
 	int32 SelectedCellIndex = INDEX_NONE;
+	int32 SelectedBayHab = 0;
+	int32 SelectedBay = INDEX_NONE;
 	// Feedback channels (deck-rendered; see GetConfirmText/GetHintText).
 	FString ConfirmText;
 	FLinearColor ConfirmColor = FLinearColor::White;

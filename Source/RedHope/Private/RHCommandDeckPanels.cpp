@@ -807,7 +807,8 @@ void SRHCommandDeck::RefreshRosterPanel()
 						return Txt(FString::Printf(TEXT("needs support - recalled in %.1f sols"), FMath::Max(EvacIn, 0.0)));
 					}
 					const FName Job = S->GetColonistJob(C.Id);
-					return Txt(FString::Printf(TEXT("floor %d%s%s"), FMath::Abs(C.HomeLevel),
+					const FString Home = C.HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C.HomeLevel));
+					return Txt(FString::Printf(TEXT("%s%s%s"), *Home,
 						Job.IsNone() ? TEXT("") : TEXT("  -  "), Job.IsNone() ? TEXT("") : *Job.ToString().ToLower()));
 				})
 				.ColorAndOpacity_Lambda([this, Index]()
@@ -1342,7 +1343,7 @@ FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
 		Parts.Add(FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
 	}
 	// Drag-sized (the greenhouse dome): the line is one bed's bill.
-	return FString::Join(Parts, TEXT(" + ")) + (R->DragSized ? TEXT(" per bed") : TEXT(""));
+	return FString::Join(Parts, TEXT(" + ")) + (R->Pressurized ? TEXT(" per bay") : (R->DragSized ? TEXT(" per bed") : TEXT("")));
 }
 
 FName SRHCommandDeck::GetDetailBuildDef() const
@@ -1511,7 +1512,8 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 					? FString::Printf(TEXT("Takes %.0f min to build at 1x."), R->BuildTime_s / 60.f)
 					: FString::Printf(TEXT("Takes %.0f s to build at 1x."), R->BuildTime_s));
 				if (R->ImportOnly) { Facts.Add(TEXT("Shipped from Earth as a kit - order more on the supply ship.")); }
-				if (R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m beds. Build time and cost are per bed.")); }
+				if (R->Pressurized) { Facts.Add(TEXT("Drag to size it in 10 m bays on the grid; modules set edge to edge join one habitat. Build time and cost are per bay.")); }
+				else if (R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m beds. Build time and cost are per bed.")); }
 				return Txt(FString::Join(Facts, TEXT("\n")));
 			}), D::TextDim, 9)
 		]

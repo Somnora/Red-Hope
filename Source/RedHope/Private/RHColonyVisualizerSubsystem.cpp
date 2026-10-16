@@ -54,6 +54,12 @@ static TAutoConsoleVariable<int32> CVarModelSetV2(
 	TEXT("Building models: 1 = the mixed set (painted mesh where it reads better), 0 = all originals."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarHabRoof(
+	TEXT("rh.HabRoof"),
+	0,
+	TEXT("Surface habitats: 0 = open-top cutaway (see inside from the strategy camera), 1 = roofed."),
+	ECVF_Default);
+
 // Sims-style interior viewing. The pit has no roof to lift - it is an open
 // excavation - so the thing that hides an interior is the near wall faces.
 static TAutoConsoleVariable<int32> CVarCutaway(
@@ -410,6 +416,222 @@ void URHColonyVisualizerSubsystem::BuildGreenhouseDome(AStaticMeshActor* Actor, 
 	}
 }
 
+void URHColonyVisualizerSubsystem::RefreshHabShells()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (!Sim || !Defs || !Cube)
+	{
+		return;
+	}
+	const int32 Cutaway = FMath::Clamp(CVarCutaway.GetValueOnGameThread(), 0, 2);
+	const bool bRoof = CVarHabRoof.GetValueOnGameThread() != 0 && Cutaway == 0;
+	static const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		if (!Def || !Def->Pressurized || B.Level != 0 || B.bUnderConstruction)
+		{
+			continue;
+		}
+		AStaticMeshActor* Actor = BuildingVisuals.FindRef(B.Id).Get();
+		if (!Actor)
+		{
+			continue;
+		}
+		const FIntPoint G = Sim->GetBayGrid(B);
+		const int32 Root = Sim->GetHabNetworkRoot(B.Id);
+		const bool bRated = Sim->IsHabRated(B.Id);
+		// Edge kinds: 0 exterior wall, 1 open (same shell, same room),
+		// 2 partition + door (same shell, different rooms), 3 joint + door
+		// (another shell of this network).
+		struct FBay { FVector C; FName Room; uint8 Edge[4]; };
+		TArray<FBay> Bays;
+		FString Key = FString::Printf(TEXT("%d|%d|%d|%d|"), Root, bRated ? 1 : 0, bRoof ? 1 : 0, Cutaway);
+		for (int32 Bay = 0; Bay < G.X * G.Y; ++Bay)
+		{
+			FBay I;
+			I.C = Sim->GetBayCentreCm(B, Bay);
+			I.Room = Sim->GetBayRoom(B.Id, Bay);
+			for (int32 d = 0; d < 4; ++d)
+			{
+				int32 H2 = 0, B2 = INDEX_NONE;
+				uint8 Kind = 0;
+				if (Sim->FindBayAt(I.C + FVector(Dirs[d].X * 1000.0, Dirs[d].Y * 1000.0, 0.0), H2, B2))
+				{
+					if (H2 == B.Id)
+					{
+						Kind = Sim->GetBayRoom(H2, B2) == I.Room ? 1 : 2;
+					}
+					else if (Root != 0 && Sim->GetHabNetworkRoot(H2) == Root)
+					{
+						Kind = 3;
+					}
+				}
+				I.Edge[d] = Kind;
+			}
+			Key += FString::Printf(TEXT("%s:%d%d%d%d;"), *I.Room.ToString(), I.Edge[0], I.Edge[1], I.Edge[2], I.Edge[3]);
+			Bays.Add(I);
+		}
+		FRHHabShellVis& Vis = HabShellVis.FindOrAdd(B.Id);
+		if (Vis.Key == Key)
+		{
+			continue;
+		}
+		Vis.Key = Key;
+		for (const TWeakObjectPtr<UActorComponent>& P : Vis.Parts)
+		{
+			if (UActorComponent* Comp = P.Get())
+			{
+				Comp->DestroyComponent();
+			}
+		}
+		Vis.Parts.Reset();
+
+		const float Base = (float)(Actor->GetActorLocation().Z + 3.f); // the thin deck's top
+		const float WallH = Cutaway == 2 ? 30.f : 300.f;
+		const float ExtH = Cutaway == 1 ? 110.f : WallH;
+		const float Th = 22.f, Door = 180.f, DoorH = 220.f;
+		UInstancedStaticMeshComponent* Walls = NewObject<UInstancedStaticMeshComponent>(Actor);
+		Walls->SetupAttachment(Actor->GetRootComponent());
+		Walls->SetAbsolute(true, true, true);
+		Walls->SetStaticMesh(Cube);
+		Walls->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Walls->RegisterComponent();
+		if (!ApplySurface(Walls, TEXT("/Game/RedHope/Art/Surfaces/T_HabWall_Panel.T_HabWall_Panel"), 450.f, FLinearColor(0.80f, 0.79f, 0.76f), 0.55f))
+		{
+			ApplyTint(Walls, FLinearColor(0.80f, 0.79f, 0.76f), FLinearColor::Black);
+		}
+		Vis.Parts.Add(Walls);
+		// One wall piece along an edge: Along = unit along the edge, Mid = the
+		// edge midpoint, From/To = offsets along it (cm), Z0/Z1 = heights.
+		const auto Piece = [&](const FVector& Mid, const FVector& Along, float From, float To, float Z0, float Z1)
+		{
+			const float Len = To - From;
+			if (Len <= 1.f || Z1 - Z0 <= 1.f)
+			{
+				return;
+			}
+			const FVector C = Mid + Along * ((From + To) * 0.5f) + FVector(0, 0, Base + (Z0 + Z1) * 0.5f);
+			const bool bAlongX = FMath::Abs(Along.X) > 0.5f;
+			Walls->AddInstance(FTransform(FRotator::ZeroRotator, C,
+				FVector(bAlongX ? Len / 100.f : Th / 100.f, bAlongX ? Th / 100.f : Len / 100.f, (Z1 - Z0) / 100.f)), true);
+		};
+		for (int32 Bay = 0; Bay < Bays.Num(); ++Bay)
+		{
+			const FBay& I = Bays[Bay];
+			for (int32 d = 0; d < 4; ++d)
+			{
+				const uint8 Kind = I.Edge[d];
+				if (Kind == 1)
+				{
+					continue;
+				}
+				// Shared interior edges are drawn once, from the +X/+Y side.
+				if (Kind >= 2 && (d == 1 || d == 3))
+				{
+					continue;
+				}
+				const FVector Mid(I.C.X + Dirs[d].X * (500.f - Th * 0.5f), I.C.Y + Dirs[d].Y * (500.f - Th * 0.5f), 0.f);
+				const FVector Along = Dirs[d].X != 0 ? FVector(0, 1, 0) : FVector(1, 0, 0);
+				if (Kind == 0)
+				{
+					Piece(Mid, Along, -500.f, 500.f, 0.f, ExtH);
+				}
+				else
+				{
+					// A doorway in the middle; a lintel above it.
+					Piece(Mid, Along, -500.f, -Door * 0.5f, 0.f, WallH);
+					Piece(Mid, Along, Door * 0.5f, 500.f, 0.f, WallH);
+					Piece(Mid, Along, -Door * 0.5f, Door * 0.5f, FMath::Min(DoorH, WallH), WallH);
+				}
+			}
+			// The bay's floor: sealed panels in the room hue (as underground).
+			UStaticMeshComponent* Tile = NewObject<UStaticMeshComponent>(Actor);
+			Tile->SetupAttachment(Actor->GetRootComponent());
+			Tile->SetAbsolute(true, true, true);
+			Tile->SetStaticMesh(Cube);
+			Tile->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Tile->RegisterComponent();
+			Tile->SetWorldLocation(FVector(I.C.X, I.C.Y, Base + 1.f));
+			Tile->SetWorldScale3D(FVector(9.9f, 9.9f, 0.02f));
+			const bool bTex = I.Room.IsNone()
+				? ApplySurface(Tile, TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Deck.T_HabFloor_Deck"), 1000.f, FLinearColor(0.42f, 0.42f, 0.44f), 0.6f)
+				: ApplySurface(Tile, TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Sealed.T_HabFloor_Sealed"), 1000.f, RoomTint(I.Room) * 0.35f + FLinearColor(0.62f, 0.62f, 0.62f), 0.45f);
+			if (!bTex)
+			{
+				ApplyTint(Tile, RoomTint(I.Room), FLinearColor::Black);
+			}
+			Vis.Parts.Add(Tile);
+			if (bRoof)
+			{
+				UStaticMeshComponent* Roof = NewObject<UStaticMeshComponent>(Actor);
+				Roof->SetupAttachment(Actor->GetRootComponent());
+				Roof->SetAbsolute(true, true, true);
+				Roof->SetStaticMesh(Cube);
+				Roof->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Roof->RegisterComponent();
+				Roof->SetWorldLocation(FVector(I.C.X, I.C.Y, Base + WallH + 10.f));
+				Roof->SetWorldScale3D(FVector(10.f, 10.f, 0.2f));
+				ApplyTint(Roof, FLinearColor(0.70f, 0.69f, 0.66f), FLinearColor::Black);
+				Vis.Parts.Add(Roof);
+			}
+			if (I.Room.IsNone())
+			{
+				continue;
+			}
+			// Room label, furnishing prop (crew avoid it: it rides the shared
+			// prop map keyed (0, Bay, HabId)) and a soft lamp.
+			const FRHRoomRow* Row = Defs->GetRoom(I.Room);
+			UTextRenderComponent* Label = NewObject<UTextRenderComponent>(Actor);
+			Label->SetupAttachment(Actor->GetRootComponent());
+			Label->SetAbsolute(true, true, true);
+			Label->RegisterComponent();
+			Label->SetWorldSize(150.f);
+			Label->SetHorizontalAlignment(EHTA_Center);
+			Label->SetVerticalAlignment(EVRTA_TextCenter);
+			Label->SetWorldLocationAndRotation(FVector(I.C.X, I.C.Y - 330.f, Base + 12.f),
+				FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
+			Label->SetText(FText::FromString(Row ? Row->DisplayName : I.Room.ToString()));
+			Label->SetTextRenderColor((RoomTint(I.Room) * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
+			Vis.Parts.Add(Label);
+			const FString PropPath = RoomPropPath(I.Room);
+			if (UStaticMesh* PropMesh = PropPath.IsEmpty() ? nullptr : LoadObject<UStaticMesh>(nullptr, *PropPath))
+			{
+				UStaticMeshComponent* Prop = NewObject<UStaticMeshComponent>(Actor);
+				Prop->SetupAttachment(Actor->GetRootComponent());
+				Prop->SetAbsolute(true, true, true);
+				Prop->SetMobility(EComponentMobility::Movable);
+				Prop->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Prop->SetStaticMesh(PropMesh);
+				Prop->RegisterComponent();
+				const FBoxSphereBounds MB = PropMesh->GetBounds();
+				const float S = 250.f / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f);
+				const FRotator Yaw(0.f, 90.f * ((Bay * 3 + B.Id) & 3), 0.f);
+				Prop->SetWorldScale3D(FVector(S));
+				Prop->SetWorldLocationAndRotation(FVector(I.C.X, I.C.Y, Base) - Yaw.RotateVector(FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S), Yaw);
+				RoomPropByCell.Add(FIntVector(0, Bay, B.Id), Prop);
+				Vis.Parts.Add(Prop);
+			}
+			UPointLightComponent* Lamp = NewObject<UPointLightComponent>(Actor);
+			Lamp->SetupAttachment(Actor->GetRootComponent());
+			Lamp->SetAbsolute(true, true, true);
+			Lamp->SetMobility(EComponentMobility::Movable);
+			Lamp->SetIntensityUnits(ELightUnits::Candelas);
+			Lamp->SetIntensity(bRated ? 18.f : 3.f); // a rated (lived-in) habitat glows
+			Lamp->SetLightColor(FColor(255, 228, 196));
+			Lamp->SetAttenuationRadius(800.f);
+			Lamp->SetCastShadows(false);
+			Lamp->RegisterComponent();
+			Lamp->SetWorldLocation(FVector(I.C.X, I.C.Y, Base + 260.f));
+			Vis.Parts.Add(Lamp);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("Habitat #%d drawn: %d bays, network #%d%s"), B.Id, Bays.Num(), Root, bRated ? TEXT(" (rated)") : TEXT(""));
+	}
+}
+
 void URHColonyVisualizerSubsystem::RefreshDomeCrops()
 {
 	UWorld* World = GetWorld();
@@ -422,7 +644,7 @@ void URHColonyVisualizerSubsystem::RefreshDomeCrops()
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
 		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
-		if (!Def || !Def->DragSized || B.bUnderConstruction)
+		if (!Def || !Def->DragSized || Def->Pressurized || B.bUnderConstruction)
 		{
 			continue;
 		}
@@ -1209,11 +1431,12 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 		const FName N = Instance.DefName;
 		if (Def->DragSized)
 		{
-			// The greenhouse dome's deck under all its beds; the shell is
-			// built separately (BuildGreenhouseDome).
+			// The greenhouse dome's deck under all its beds (built separately
+			// by BuildGreenhouseDome); a habitat's deck is a thin floor so the
+			// crew's feet sit on it (BM-2: RefreshHabShells draws the rest).
 			Scale.X *= FMath::Max(1, Instance.SizeX);
 			Scale.Y *= FMath::Max(1, Instance.SizeY);
-			Scale.Z = 0.3f;
+			Scale.Z = Def->Pressurized ? 0.06f : 0.3f;
 		}
 		else if (N == FName("SolarArray") || N == FName("ChargePad") || N == FName("Stockpile"))
 		{
@@ -1484,7 +1707,14 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
 	const URHDefinitionsSubsystem* DomeDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
 	const FRHBuildingRow* DomeDef = DomeDefs ? DomeDefs->GetBuilding(Instance.DefName) : nullptr;
-	if (DomeDef && DomeDef->DragSized)
+	if (DomeDef && DomeDef->Pressurized)
+	{
+		// BM-2: the shell's interior is drawn (and redrawn as rooms and
+		// neighbours change) by RefreshHabShells; a fresh actor redraws.
+		ApplyTint(Actor, Instance.bUnderConstruction ? FLinearColor(0.08f, 0.08f, 0.09f) : FLinearColor(0.34f, 0.33f, 0.31f), FLinearColor::Black);
+		HabShellVis.Remove(Instance.Id);
+	}
+	else if (DomeDef && DomeDef->DragSized)
 	{
 		ApplyTint(Actor, Instance.bUnderConstruction ? FLinearColor(0.08f, 0.08f, 0.09f) : FLinearColor(0.30f, 0.29f, 0.28f), FLinearColor::Black);
 		BuildGreenhouseDome(Actor, Instance, Seated);
@@ -1764,6 +1994,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	}
 
 	RefreshDomeCrops();
+	RefreshHabShells();
 
 	// Is it working? A machine that has been shed by the power priority, or
 	// switched off by the player, goes dark; a running one keeps its glow. The

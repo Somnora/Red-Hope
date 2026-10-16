@@ -354,6 +354,60 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDesignate(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHZoneBay(
+	TEXT("RH.ZoneBay"),
+	TEXT("RH.ZoneBay <Room|None> <Xm> <Ym> - zone the surface habitat bay under a point (uplink; None clears)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ZoneBay <Room|None> <Xm> <Ym>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Designate");
+		Cmd.Target = (Args[0] == TEXT("None")) ? NAME_None : FName(*Args[0]);
+		Cmd.Level = 0;
+		Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHHabDemo(
+	TEXT("RH.HabDemo"),
+	TEXT("RH.HabDemo - DEBUG (BM-2 look-dev): lay a surface habitat network NE of the Lander - a 2x2 module, a corridor and a 1x2 module, an Air Filter inside - and zone its bays. Run time to fill it with O2; RH.Demo first gives the crew-ready vault."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		Sim->Debug_PlaceInstant(FName("HabModule"), FVector(3500.f, 3500.f, 0.f), 0, 2, 2);
+		Sim->Debug_PlaceInstant(FName("HabCorridor"), FVector(5000.f, 3000.f, 0.f), 0, 1, 1);
+		Sim->Debug_PlaceInstant(FName("HabModule"), FVector(6000.f, 3500.f, 0.f), 0, 1, 2);
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(3000.f, 3000.f, 0.f));
+		Sim->AddStock(FName("Oxygen"), 3000.0);
+		// Look-dev: RH.Demo certifies its floor without the vault milestone,
+		// and surface beds open only after the vault (director 2026-10-16).
+		Sim->Debug_SetVaultRated(true);
+		const TPair<FVector, const TCHAR*> Zones[] = {
+			{ FVector(3000.f, 4000.f, 0.f), TEXT("LivingQuarters") }, { FVector(4000.f, 4000.f, 0.f), TEXT("LivingQuarters") },
+			{ FVector(4000.f, 3000.f, 0.f), TEXT("Dining") }, { FVector(3000.f, 3000.f, 0.f), TEXT("Lab") },
+			{ FVector(6000.f, 3000.f, 0.f), TEXT("Workstation") }, { FVector(6000.f, 4000.f, 0.f), TEXT("LivingQuarters") },
+		};
+		for (const TPair<FVector, const TCHAR*>& Z : Zones)
+		{
+			int32 Hab = 0, Bay = INDEX_NONE;
+			FString Why;
+			if (Sim->FindBayAt(Z.Key, Hab, Bay))
+			{
+				Sim->DesignateBay(Hab, Bay, FName(Z.Value), Why);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.HabDemo] surface habitat laid out (7 bays); fill it with time (RH.SetSpeed 60), then RH.AddColonists to move people in"));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHRooms(
 	TEXT("RH.Rooms"),
 	TEXT("RH.Rooms - log every floor's room designations by cell index."),
@@ -1001,6 +1055,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSelect(
 		}
 		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
 		{
+			int32 Hab = 0, Bay = INDEX_NONE;
+			if (Args[0].Equals(TEXT("Bay"), ESearchCase::IgnoreCase) && Args.Num() >= 3)
+			{
+				const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+				if (Sim && Sim->FindBayAt(FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f), Hab, Bay))
+				{
+					PC->Debug_SelectBay(Hab, Bay);
+					UE_LOG(LogRedHope, Display, TEXT("Selected habitat #%d bay %d (action card raised)"), Hab, Bay);
+				}
+				return;
+			}
 			if (Args[0].Equals(TEXT("Cell"), ESearchCase::IgnoreCase) && Args.Num() >= 3)
 			{
 				PC->Debug_SelectCell(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2]));

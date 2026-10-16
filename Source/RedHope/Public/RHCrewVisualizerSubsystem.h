@@ -147,6 +147,12 @@ private:
 	// Same seat ring, but keyed by ROOM ROW NAME instead of job function - for
 	// off-shift beats at rooms that aren't jobs (a meal at the Dining table).
 	FVector RoomSeatCm(int32 Level, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	// BM-2: a surface resident's spots in their habitat NETWORK. RoomRowName
+	// None = a wander point in any bay; else a seat at the first bay of that
+	// room (members by Id, bays in order). Zero vector when none exists.
+	FVector HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	// BM-2: the seat at a colonist's actual station (bay or in-bay module).
+	FVector StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
 
 	TMap<int32, FCrewVisual> Tracked; // colonist Id -> figure
 	// First roster sync seeds residents in place; only ids appearing AFTER it

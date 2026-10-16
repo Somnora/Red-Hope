@@ -278,11 +278,17 @@ void ARHPlayerController::Tick(float DeltaTime)
 			// under the cursor; while the button is held it is the dragged
 			// size, anchored on the first bed.
 			const bool bSized = Def && Def->DragSized;
+			const bool bPress = Def && Def->Pressurized;
 			FVector At = Ground;
 			FIntPoint Size(1, 1);
 			if (bSized && bBuildDragging)
 			{
-				ComputeDragFootprint(Ground, Def, Sim->GetDomeMaxBedsPerSide(), At, Size);
+				ComputeDragFootprint(Ground, Def, Sim->GetMaxBedsPerSide(Def), At, Size);
+			}
+			if (bPress)
+			{
+				// BM-2: habitats ride the 10 m bay grid - the ghost snaps.
+				At = URHSimWorldSubsystem::SnapToBayGrid(Def, At, Size.X, Size.Y);
 			}
 			FString Reason;
 			const bool bOk = Sim->CanPlaceBuildingSized(PendingBuildDef, At, Reason, ActiveLevel, Size.X, Size.Y);
@@ -319,8 +325,8 @@ void ARHPlayerController::Tick(float DeltaTime)
 			const int32 Beds = Size.X * Size.Y;
 			if (bSized)
 			{
-				Tip += FString::Printf(TEXT(" - %d x %d bed%s (%.0f x %.0f m)"), Size.X, Size.Y, Beds == 1 ? TEXT("") : TEXT("s"),
-					2.f * HalfX / 100.f, 2.f * HalfY / 100.f);
+				Tip += FString::Printf(TEXT(" - %d x %d %s%s (%.0f x %.0f m)"), Size.X, Size.Y, bPress ? TEXT("bay") : TEXT("bed"),
+					Beds == 1 ? TEXT("") : TEXT("s"), 2.f * HalfX / 100.f, 2.f * HalfY / 100.f);
 			}
 			if (Def && !Def->Blurb.IsEmpty())
 			{
@@ -338,7 +344,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				}
 				Tip += FString::Printf(TEXT("\ncost: %s  ·  %.0f s build"),
 					Bill.IsEmpty() ? TEXT("free (flat-pack)") : *Bill, Def->BuildTime_s * Beds);
-				if (bSized)
+				if (bSized && !bPress)
 				{
 					// Each bed is glazed and planted on its own, from stock.
 					Tip += FString::Printf(TEXT("\neach bed, when planted: %.0f kg glass + %.0f kg soil + %.0f kg seeds"),
@@ -362,7 +368,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 			if (bSized && !bBuildDragging)
 			{
 				Tip += bOk
-					? FString::Printf(TEXT("\nclick and drag to size it in 10 m beds (up to %d a side), release to transmit"), Sim->GetDomeMaxBedsPerSide())
+					? (bPress
+						? FString::Printf(TEXT("\nclick and drag to size it in 10 m bays (up to %d a side; it snaps to the grid - set modules edge to edge to join them), release to transmit"), Sim->GetMaxBedsPerSide(Def))
+						: FString::Printf(TEXT("\nclick and drag to size it in 10 m beds (up to %d a side), release to transmit"), Sim->GetMaxBedsPerSide(Def)))
 					: FString::Printf(TEXT("\n%s"), *Reason);
 			}
 			else
@@ -501,9 +509,26 @@ void ARHPlayerController::Tick(float DeltaTime)
 		if (CursorToGround(Ground))
 		{
 			const FString RoomLabel = ZoneRoom.IsNone() ? TEXT("CLEAR") : ZoneRoom.ToString().ToUpper();
-			if (ActiveLevel == 0)
+			int32 BayHab = 0, Bay = INDEX_NONE;
+			if (ActiveLevel == 0 && Sim->FindBayAt(Ground, BayHab, Bay))
 			{
-				HintText = FString::Printf(TEXT("ZONE %s: pick a subsurface floor on the elevator first"), *RoomLabel);
+				// BM-2: zone a surface habitat bay.
+				for (const FRHBuildingInstance& HB : Sim->GetBuildings())
+				{
+					if (HB.Id == BayHab)
+					{
+						const FVector C = Sim->GetBayCentreCm(HB, Bay);
+						DrawDebugBox(World, C + FVector(0, 0, 60.f), FVector(500.f, 500.f, 60.f), FColor::Emerald, false, -1.f, 0, 10.f);
+					}
+				}
+				const FName Current = Sim->GetBayRoom(BayHab, Bay);
+				HintText = FString::Printf(TEXT("ZONE %s: habitat bay%s - click to transmit, right-click to finish"), *RoomLabel,
+					Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *Current.ToString()));
+				HintColor = FLinearColor(0.3f, 1.f, 0.6f);
+			}
+			else if (ActiveLevel == 0)
+			{
+				HintText = FString::Printf(TEXT("ZONE %s: hover a habitat bay, or pick a subsurface floor on the elevator"), *RoomLabel);
 				HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
 			}
 			else
@@ -571,6 +596,25 @@ void ARHPlayerController::Tick(float DeltaTime)
 		}
 	}
 
+	// The inspected station bay (BM-2): an emerald frame; leaving the surface drops it.
+	if (HasSelectedBay())
+	{
+		bool bFound = false;
+		for (const FRHBuildingInstance& HB : Sim->GetBuildings())
+		{
+			if (HB.Id == SelectedBayHab && ActiveLevel == 0)
+			{
+				const FVector C = Sim->GetBayCentreCm(HB, SelectedBay);
+				DrawDebugBox(World, C + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
+				bFound = true;
+			}
+		}
+		if (!bFound)
+		{
+			SelectedBayHab = 0;
+			SelectedBay = INDEX_NONE;
+		}
+	}
 	// The inspected station cell: an emerald frame; a floor change drops it.
 	if (HasSelectedCell())
 	{
@@ -631,8 +675,9 @@ void ARHPlayerController::OnClick()
 	const FRHBuildingRow* ClickDef = (ClickDefs && !PendingBuildDef.IsNone()) ? ClickDefs->GetBuilding(PendingBuildDef) : nullptr;
 	if (ClickDef && ClickDef->DragSized)
 	{
-		// Anchor the first bed; Tick sizes the drag and transmits on release.
-		BuildAnchorCm = Ground;
+		// Anchor the first bed (a habitat's on the bay grid); Tick sizes the
+		// drag and transmits on release.
+		BuildAnchorCm = ClickDef->Pressurized ? URHSimWorldSubsystem::SnapToBayGrid(ClickDef, Ground, 1, 1) : Ground;
 		bBuildDragging = true;
 	}
 	else if (!PendingBuildDef.IsNone())
@@ -670,8 +715,21 @@ void ARHPlayerController::OnClick()
 	{
 		// Paint one cell per click; the mode stays armed (several rooms of the
 		// same function usually go down together). Cancel exits.
+		int32 BayHab = 0, Bay = INDEX_NONE;
 		const int32 Cell = FindCellAt(Ground, ActiveLevel);
-		if (Cell != INDEX_NONE)
+		if (ActiveLevel == 0 && Sim->FindBayAt(Ground, BayHab, Bay))
+		{
+			// BM-2: a habitat bay - the sim finds it by the order's location.
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Designate");
+			Cmd.Target = ZoneRoom;
+			Cmd.Level = 0;
+			Cmd.Location = Ground;
+			Sim->EnqueueCommand(Cmd);
+			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on habitat bay %d"),
+				ZoneRoom.IsNone() ? TEXT("clear") : *ZoneRoom.ToString(), Bay), FLinearColor(0.2f, 0.9f, 1.f));
+		}
+		else if (Cell != INDEX_NONE)
 		{
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Designate");
@@ -713,6 +771,24 @@ void ARHPlayerController::OnClick()
 		SelectedBuildingId = FindBuildingAt(Ground);
 		SelectedCellLevel = 0;
 		SelectedCellIndex = INDEX_NONE;
+		SelectedBayHab = 0;
+		SelectedBay = INDEX_NONE;
+		{
+			// BM-2: clicking a work-station bay of a habitat inspects the bay
+			// (its seats + ASSIGN STAFF); any other spot keeps the building.
+			const URHDefinitionsSubsystem* BayDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+			int32 BayHab = 0, Bay = INDEX_NONE;
+			if (ActiveLevel == 0 && BayDefs && SelectedBuildingId != 0 && Sim->FindBayAt(Ground, BayHab, Bay) && BayHab == SelectedBuildingId)
+			{
+				const FRHRoomRow* Row = BayDefs->GetRoom(Sim->GetBayRoom(BayHab, Bay));
+				if (Row && Row->SliceActive && URHSimWorldSubsystem::IsSeatFunction(Row->Function))
+				{
+					SelectedBuildingId = 0;
+					SelectedBayHab = BayHab;
+					SelectedBay = Bay;
+				}
+			}
+		}
 		if (SelectedBuildingId == 0 && ActiveLevel < 0)
 		{
 			const URHDefinitionsSubsystem* CellDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
@@ -746,7 +822,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0 || HasSelectedCell();
+	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -947,6 +1023,8 @@ void ARHPlayerController::CancelModes()
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
 		SelectedCellIndex = INDEX_NONE;
+		SelectedBayHab = 0;
+		SelectedBay = INDEX_NONE;
 	}
 	PendingBuildDef = NAME_None;
 	bBuildDragging = false;
@@ -968,6 +1046,12 @@ void ARHPlayerController::ComputeDragFootprint(const FVector& GroundCm, const FR
 	const double DX = GroundCm.X - BuildAnchorCm.X, DY = GroundCm.Y - BuildAnchorCm.Y;
 	OutSize.X = FMath::Clamp(1 + FMath::RoundToInt32(FMath::Abs(DX) / Bed.X), 1, FMath::Max(1, MaxBeds));
 	OutSize.Y = FMath::Clamp(1 + FMath::RoundToInt32(FMath::Abs(DY) / Bed.Y), 1, FMath::Max(1, MaxBeds));
+	if (Def && Def->DragShortSideMax > 0)
+	{
+		// A corridor: the shorter drag side is capped (1 bay wide).
+		int32& Short = FMath::Abs(DX) <= FMath::Abs(DY) ? OutSize.X : OutSize.Y;
+		Short = FMath::Min(Short, Def->DragShortSideMax);
+	}
 	OutCenter = BuildAnchorCm;
 	OutCenter.X += (DX < 0.0 ? -1.0 : 1.0) * (OutSize.X - 1) * Bed.X * 0.5;
 	OutCenter.Y += (DY < 0.0 ? -1.0 : 1.0) * (OutSize.Y - 1) * Bed.Y * 0.5;
@@ -1076,6 +1160,7 @@ int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const
 	}
 	int32 BestId = 0;
 	double BestDist = TNumericLimits<double>::Max();
+	double BestArea = TNumericLimits<double>::Max();
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
 		if (B.Level != ActiveLevel)
@@ -1089,9 +1174,13 @@ int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const
 		const double HalfY = Half.Y + 100.0;
 		if (FMath::Abs(B.LocationCm.X - GroundCm.X) <= HalfX && FMath::Abs(B.LocationCm.Y - GroundCm.Y) <= HalfY)
 		{
+			// BM-2: the smallest footprint wins (an AirFilter inside a habitat
+			// bay beats the shell around it), then the nearest.
 			const double Dist = FVector::DistXY(B.LocationCm, GroundCm);
-			if (Dist < BestDist)
+			const double Area = Half.X * Half.Y;
+			if (Area < BestArea - 1.0 || (FMath::Abs(Area - BestArea) <= 1.0 && Dist < BestDist))
 			{
+				BestArea = Area;
 				BestDist = Dist;
 				BestId = B.Id;
 			}

@@ -474,6 +474,75 @@ FVector URHCrewVisualizerSubsystem::RoomSeatCm(int32 Level, FName RoomRowName, i
 	return FVector::ZeroVector;
 }
 
+FVector URHCrewVisualizerSubsystem::HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg) const
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const int32 Root = Sim ? Sim->GetHabNetworkRoot(HomeHab) : 0;
+	if (!Sim || !Defs || Root == 0)
+	{
+		return FVector::ZeroVector;
+	}
+	TArray<FVector> Centres;
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		const FRHBuildingRow* Def = B.Level == 0 ? Defs->GetBuilding(B.DefName) : nullptr;
+		if (!Def || !Def->Pressurized || B.bUnderConstruction || Sim->GetHabNetworkRoot(B.Id) != Root)
+		{
+			continue;
+		}
+		const FIntPoint G = Sim->GetBayGrid(B);
+		for (int32 Bay = 0; Bay < G.X * G.Y; ++Bay)
+		{
+			if (RoomRowName.IsNone() || Sim->GetBayRoom(B.Id, Bay) == RoomRowName)
+			{
+				Centres.Add(Sim->GetBayCentreCm(B, Bay));
+			}
+		}
+	}
+	if (Centres.Num() == 0)
+	{
+		return FVector::ZeroVector;
+	}
+	if (!RoomRowName.IsNone())
+	{
+		return SeatOnRing(Centres[0], FIntPoint(0, 0), Centres[0].Z, SeatSeed, OutFaceYawDeg);
+	}
+	FVector Candidate = Centres[0];
+	for (int32 Try = 0; Try < 8; ++Try)
+	{
+		const FVector C = Centres[FMath::RandRange(0, Centres.Num() - 1)];
+		Candidate = FVector(C.X + FMath::FRandRange(-330.f, 330.f), C.Y + FMath::FRandRange(-330.f, 330.f), C.Z);
+		if (!NearFurnitureCm(0, Candidate, 80.f))
+		{
+			break;
+		}
+	}
+	return Candidate;
+}
+
+FVector URHCrewVisualizerSubsystem::StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg) const
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FIntVector Key;
+	if (!Sim || !Sim->GetColonistStation(ColonistId, Key))
+	{
+		return FVector::ZeroVector;
+	}
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		if (B.Id != Key.Z)
+		{
+			continue;
+		}
+		const FVector C = Key.Y == INDEX_NONE ? B.LocationCm : Sim->GetBayCentreCm(B, Key.Y);
+		return SeatOnRing(C, FIntPoint(0, 0), C.Z, SeatSeed, OutFaceYawDeg);
+	}
+	return FVector::ZeroVector;
+}
+
 bool URHCrewVisualizerSubsystem::NearFurnitureCm(int32 Level, const FVector& PointCm, float RadiusCm) const
 {
 	if (const TArray<FVector4>* Obs = FurnitureByLevel.Find(Level))
@@ -575,6 +644,12 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		V.TargetCm = V.Waypoints[0];
 		V.Waypoints.RemoveAt(0);
 	};
+	// BM-2: home = a wander point on the home floor, or in the home habitat.
+	auto HomeWander = [&](const FRHColonist& Col)
+	{
+		const FVector P = Col.HomeHab != 0 ? HabSpotCm(Col.HomeHab, NAME_None, Col.Id) : FVector::ZeroVector;
+		return P.IsNearlyZero() ? WanderPointCm(Col.HomeLevel) : P;
+	};
 	auto Board = [&](FCrewVisual& V, const FVector& From, int32 FromLevel, int32 ToLevel, const FVector& AfterTarget)
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
@@ -654,7 +729,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				// First sync (fresh boot or reload): already living here.
 				NewVis.Phase = EPhase::Resident;
 				NewVis.CurLevel = C.HomeLevel;
-				NewVis.TargetCm = WanderPointCm(C.HomeLevel);
+				NewVis.TargetCm = HomeWander(C);
 				NewVis.Actor = SpawnFigure(C.Name, C.Id, NewVis.TargetCm, Body, Skel, NewVis.BaseZCm);
 			}
 			NewVis.Body = Body;
@@ -840,7 +915,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				{
 					Vis->Phase = EPhase::Resident;
 					Vis->CurLevel = 0;
-					Vis->TargetCm = WanderPointCm(0);
+					Vis->TargetCm = HomeWander(C);
 					Vis->bFaceOnArrive = false;
 				}
 				break;
@@ -871,7 +946,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					// themselves - the player builds the town, not the routine);
 					// off the shift there's a chance of a meal at the Dining
 					// table; everyone else wanders. Every beat names itself.
-					FVector Target = WanderPointCm(Vis->HomeLevel);
+					FVector Target = HomeWander(C);
 					Vis->Activity = TEXT("off duty");
 					Vis->bFaceOnArrive = false;
 					float FaceYaw = 0.f;
@@ -880,7 +955,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					const FName Job = Sim->GetColonistJob(C.Id);
 					if (bNight)
 					{
-						const FVector Bunk = RoomSeatCm(Vis->HomeLevel, FName("LivingQuarters"), C.Id, &FaceYaw);
+						const FVector Bunk = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("LivingQuarters"), C.Id, &FaceYaw)
+							: RoomSeatCm(Vis->HomeLevel, FName("LivingQuarters"), C.Id, &FaceYaw);
 						if (!Bunk.IsNearlyZero())
 						{
 							Target = Bunk;
@@ -891,7 +967,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					}
 					else if (!Job.IsNone() && FMath::FRand() < 0.85f)
 					{
-						const FVector Post = JobPointCm(Vis->HomeLevel, Job, C.Id, &FaceYaw);
+						const FVector Post = C.HomeHab != 0 ? StationSpotCm(C.Id, C.Id, &FaceYaw)
+							: JobPointCm(Vis->HomeLevel, Job, C.Id, &FaceYaw);
 						if (!Post.IsNearlyZero())
 						{
 							Target = Post;
@@ -902,7 +979,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					}
 					else if (FMath::FRand() < 0.25f)
 					{
-						const FVector Seat = RoomSeatCm(Vis->HomeLevel, FName("Dining"), C.Id, &FaceYaw);
+						const FVector Seat = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("Dining"), C.Id, &FaceYaw)
+							: RoomSeatCm(Vis->HomeLevel, FName("Dining"), C.Id, &FaceYaw);
 						if (!Seat.IsNearlyZero())
 						{
 							Target = Seat;
@@ -917,7 +995,8 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				break;
 			case EPhase::StrollOut:
 				Vis->Phase = EPhase::StrollBack;
-				Vis->TargetCm = ElevatorDoorCm(Head, 0);
+				// A surface resident walks straight home, not to the shaft.
+				Vis->TargetCm = C.HomeHab != 0 ? HomeWander(C) : ElevatorDoorCm(Head, 0);
 				Vis->Activity = TEXT("taking air");
 				Vis->NextDecideRealSeconds = Now + FMath::FRandRange(2.0, 6.0);
 				break;
@@ -931,7 +1010,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				{
 					Vis->Phase = EPhase::Resident;
 					Vis->CurLevel = 0;
-					Vis->TargetCm = WanderPointCm(0);
+					Vis->TargetCm = HomeWander(C);
 					Vis->bFaceOnArrive = false;
 				}
 				break;

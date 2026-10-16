@@ -119,6 +119,16 @@ private:
 	// refreshed by RefreshDomeCrops (state-diffed on the beds' growth stages).
 	void BuildGreenhouseDome(AStaticMeshActor* Actor, const FRHBuildingInstance& B, const FVector& Seated) const;
 	void RefreshDomeCrops();
+	// BM-2: a pressurized habitat shell's interior - one floor tile, label,
+	// prop and lamp per bay, and walls DERIVED from the bays (exterior on an
+	// open edge; a partition with a doorway between different rooms; a joint
+	// with a doorway where modules of one network meet; nothing between bays
+	// of the same room). No roof by default (rh.HabRoof 1 adds one);
+	// rh.Cutaway 1 drops exterior walls to waist height, 2 = floorplan.
+	// State-diffed per shell on a key of rooms + neighbours + rating.
+	void RefreshHabShells();
+	struct FRHHabShellVis { FString Key; TArray<TWeakObjectPtr<UActorComponent>> Parts; };
+	TMap<int32, FRHHabShellVis> HabShellVis;
 	// Per dome: the bed-stage key last drawn, and the crop props it drew.
 	TMap<int32, FString> AppliedDomeCrops;
 	TMap<int32, TArray<TWeakObjectPtr<UStaticMeshComponent>>> DomeCropProps;

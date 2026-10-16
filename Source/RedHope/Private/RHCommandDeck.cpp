@@ -239,7 +239,32 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	};
 	// The zone row sits above the command bar while underground; the drawer
 	// and the info card stack above whatever is there.
-	auto ZoneRowShown = [this, ZoneCount]() { return ZoneCount > 0 && PC.IsValid() && PC->GetActiveLevel() < 0; };
+	// BM-2: also at the surface once a habitat shell stands (bays zone too).
+	auto ZoneRowShown = [this, ZoneCount]()
+	{
+		if (ZoneCount <= 0 || !PC.IsValid())
+		{
+			return false;
+		}
+		if (PC->GetActiveLevel() < 0)
+		{
+			return true;
+		}
+		const URHSimWorldSubsystem* S = GetSim();
+		const URHDefinitionsSubsystem* Df = GetDefs();
+		if (S && Df && PC->GetActiveLevel() == 0)
+		{
+			for (const FRHBuildingInstance& B : S->GetBuildings())
+			{
+				const FRHBuildingRow* R = Df->GetBuilding(B.DefName);
+				if (R && R->Pressurized)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	};
 
 	ChildSlot
 	[
@@ -842,6 +867,20 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedBay())
+	{
+		for (const FRHBuildingInstance& HB : Sim->GetBuildings())
+		{
+			FVector2D ScreenPx;
+			if (HB.Id == PC->GetSelectedBayHab()
+				&& PC->ProjectWorldLocationToScreen(Sim->GetBayCentreCm(HB, PC->GetSelectedBay()) + FVector(0, 0, 300.f), ScreenPx, false))
+			{
+				const float Scale = FMath::Max(AllottedGeometry.Scale, KINDA_SMALL_NUMBER);
+				ActionCardPos = FVector2D(ScreenPx.X / Scale, ScreenPx.Y / Scale);
+				bActionCardOnScreen = true;
+			}
+		}
+	}
 	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedCell())
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
@@ -1039,7 +1078,7 @@ FText SRHCommandDeck::GetInspectText() const
 		const int32 Rank = Sim->GetSeatPriorityRank(StationKey);
 		Text += Rank >= 0
 			? FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), Rank + 1)
-			: FString(TEXT("\nstaffed in dig order (shallow floors first)"));
+			: (StationKey.X == 0 ? FString(TEXT("\nstaffed after every underground seat")) : FString(TEXT("\nstaffed in dig order (shallow floors first)")));
 		Text += TEXT("\n(right-click or click ground to dismiss)");
 		return FText::FromString(Text);
 	}
@@ -1092,6 +1131,36 @@ FText SRHCommandDeck::GetInspectText() const
 		else
 		{
 			Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
+		}
+		// BM-2: a habitat shell reads its network - size, rating and why not,
+		// air, beds and residents (placeholder copy, director review).
+		if (Def && Def->Pressurized)
+		{
+			const int32 NetBays = Sim->GetHabNetworkBays(B->Id);
+			const double O2 = Sim->GetHabNetworkO2Kg(B->Id), O2Req = Sim->GetHabNetworkO2RequiredKg(B->Id);
+			Text += FString::Printf(TEXT("\nHABITAT: %d bay(s) here, %d in its network"), URHSimWorldSubsystem::GetBedCount(*B), NetBays);
+			if (Sim->IsHabRated(B->Id))
+			{
+				Text += TEXT("\nRATED LIVABLE");
+			}
+			else if (!Sim->IsHabNetworkCirculated(B->Id))
+			{
+				Text += TEXT("\nNOT LIVABLE - no air circulation: set an Air Filtration Station inside a bay");
+			}
+			else if (NetBays < Sim->GetMinLivableCells())
+			{
+				Text += FString::Printf(TEXT("\nNOT LIVABLE - %d of %d bays: join more modules or corridors"), NetBays, Sim->GetMinLivableCells());
+			}
+			else
+			{
+				Text += TEXT("\nNOT LIVABLE YET - filling with oxygen");
+			}
+			Text += FString::Printf(TEXT("\nair %.0f / %.0f kg  ·  %d bed(s), %d resident(s)"), O2, O2Req,
+				Sim->GetHabBeds(B->Id), Sim->GetHabResidents(B->Id));
+			if (!Sim->HasVaultRating())
+			{
+				Text += TEXT("\ncrew move in once the underground vault is certified");
+			}
 		}
 		// Prefab stations (T4): seats, or why the module is idle.
 		if (const FRHRoomRow* Provided = Sim->GetProvidedRoom(*B, /*bRequireOnline*/ false))
@@ -1269,7 +1338,7 @@ FText SRHCommandDeck::GetInspectText() const
 
 EVisibility SRHCommandDeck::GetInspectVisibility() const
 {
-	return (PC.IsValid() && (PC->GetSelectedBuildingId() != 0 || PC->HasSelectedCell())) ? EVisibility::Visible : EVisibility::Collapsed;
+	return (PC.IsValid() && (PC->GetSelectedBuildingId() != 0 || PC->HasSelectedCell() || PC->HasSelectedBay())) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 bool SRHCommandDeck::GetSelectedStationKey(FIntVector& OutKey) const
@@ -1282,6 +1351,11 @@ bool SRHCommandDeck::GetSelectedStationKey(FIntVector& OutKey) const
 	}
 	if (PC->GetSelectedBuildingId() == 0)
 	{
+		if (PC->HasSelectedBay())
+		{
+			OutKey = FIntVector(0, PC->GetSelectedBay(), PC->GetSelectedBayHab());
+			return true;
+		}
 		if (!PC->HasSelectedCell())
 		{
 			return false;
@@ -1334,6 +1408,18 @@ FReply SRHCommandDeck::HandleAssign()
 			Cmd.Target = FName("Building");
 			Cmd.Value = Key.Z;
 		}
+		else if (Key.X == 0)
+		{
+			// BM-2: a habitat bay - the sim finds it by location.
+			Cmd.Level = 0;
+			for (const FRHBuildingInstance& HB : Sim->GetBuildings())
+			{
+				if (HB.Id == Key.Z)
+				{
+					Cmd.Location = Sim->GetBayCentreCm(HB, Key.Y);
+				}
+			}
+		}
 		else
 		{
 			Cmd.Level = Key.X;
@@ -1378,6 +1464,16 @@ FText SRHCommandDeck::GetActionCardTitle() const
 {
 	const FRHBuildingRow* Def = nullptr;
 	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	if (!B && PC.IsValid() && PC->HasSelectedBay())
+	{
+		const UWorld* World = PC->GetWorld();
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const FName Room = Sim ? Sim->GetBayRoom(PC->GetSelectedBayHab(), PC->GetSelectedBay()) : NAME_None;
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(Room) : nullptr;
+		return FText::FromString(FString::Printf(TEXT("%s - surface habitat\nA work station. Colonists take its seats after the underground's; assigning staff puts it first."),
+			Row ? *Row->DisplayName : *Room.ToString()));
+	}
 	if (!B && PC.IsValid() && PC->HasSelectedCell())
 	{
 		const UWorld* World = PC->GetWorld();
