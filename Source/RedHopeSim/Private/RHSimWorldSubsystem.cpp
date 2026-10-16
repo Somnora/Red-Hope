@@ -22,7 +22,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 28;  // v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 29;  // v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -97,6 +97,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	O2LeakKgPerCellPerSol = Defs->GetConfigScalar(FName("O2LeakKgPerCellPerSol"), O2LeakKgPerCellPerSol);
 	O2FillRateKgPerHour = Defs->GetConfigScalar(FName("O2FillRateKgPerHour"), O2FillRateKgPerHour);
 	MinLivableCells = (int32)Defs->GetConfigScalar(FName("MinLivableCells"), MinLivableCells);
+	ShaftLinkRangeCm = Defs->GetConfigScalar(FName("ShaftLinkRange_m"), ShaftLinkRangeCm / 100.0) * 100.0;
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -1425,9 +1426,13 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		}
 		else
 		{
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
-				GetFreeHousing(), CrewPodColonists));
+			// BM-1: with a rated surface habitat the fix is beds, not a vault
+			// (Gate-D placeholder copy).
+			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
+				? FString::Printf(TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Zone Living Quarters bays in your rated habitat before the next ship."),
+					GetFreeHousing(), CrewPodColonists)
+				: FString::Printf(TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
+					GetFreeHousing(), CrewPodColonists));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
 		}
 	}
@@ -1767,6 +1772,585 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 			FloorsNotedSmall.Remove(Level); // fill/size changed - re-arm the note
 		}
 	}
+	StepHabNetworks(SubDt); // BM-1: after every floor, so floors keep first claim on the O2 pool
+}
+
+void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
+{
+	// Surface habitat networks (BM-1): the floor chain's twin, per network of
+	// pressurized shells that share a bay edge. Each member holds its own O2;
+	// one push budget per network fills members in ascending Id; the rating
+	// edges mirror the floor's (full + circulated + big enough; lost when
+	// circulation fails or the fill is net-declining under 98%). No hab = no
+	// work at all (inert for every colony without one).
+	if (HabNets.Num() == 0)
+	{
+		return;
+	}
+	static const FName NOxygen(TEXT("Oxygen"));
+	const double LeakPerBay = O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+	for (const FRHHabNetCache& N : HabNets)
+	{
+		double SumReq = 0.0, SumLeak = 0.0, Taken = 0.0;
+		for (const int32 Id : N.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+			const int32 Bays = M.NX * M.NY;
+			double& Fill = HabO2Kg.FindOrAdd(Id);
+			const double Leaked = FMath::Min(Fill, Bays * LeakPerBay);
+			Fill -= Leaked;
+			SumLeak += Leaked;
+			SumReq += Bays * O2FillKgPerCell;
+		}
+		const bool bCirc = IsNetCirculated(N);
+		if (bCirc)
+		{
+			double Budget = O2FillRateKgPerHour * (SubDt / 50.0);
+			for (const int32 Id : N.Members)
+			{
+				const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+				double& Fill = HabO2Kg.FindOrAdd(Id);
+				const double Want = FMath::Min(Budget, M.NX * M.NY * O2FillKgPerCell - Fill);
+				if (Want > 0.0)
+				{
+					const double Take = FMath::Min(Want, GetStock(NOxygen));
+					if (Take > 0.0)
+					{
+						AddStock(NOxygen, -Take);
+						Fill += Take;
+						Budget -= Take;
+						Taken += Take;
+					}
+				}
+			}
+		}
+		double SumFill = 0.0;
+		bool bFull = SumReq > 0.0;
+		for (const int32 Id : N.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+			const double Fill = HabO2Kg.FindRef(Id);
+			SumFill += Fill;
+			if (Fill < M.NX * M.NY * O2FillKgPerCell - KINDA_SMALL_NUMBER)
+			{
+				bFull = false;
+			}
+		}
+		const bool bWas = IsNetRated(N);
+		const bool bBig = N.Bays >= MinLivableCells;
+		if (!bWas && bCirc && bFull && bBig)
+		{
+			int32 Beds = 0;
+			for (const int32 Id : N.Members)
+			{
+				RatedHabs.Add(Id);
+				Beds += GetHabBeds(Id);
+			}
+			HabNetsNotedSmall.Remove(N.Root);
+			// Gate-D placeholder copy. Never the Phase 1 vault milestone: that
+			// stays the underground's first livable floor.
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("SURFACE HABITAT RATED LIVABLE — %d bays pressurized and circulated under a shielded hull; %d beds.%s%s"),
+				N.Bays, Beds, Beds == 0 ? TEXT(" Zone a bay Living Quarters to add beds.") : TEXT(""),
+				bVaultRated ? TEXT("") : TEXT(" Crew can move in once the underground vault is certified.")));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d RATED LIVABLE (%d bays, %d beds, %.0f kg O2) ==="), N.Root, N.Bays, Beds, SumFill);
+		}
+		else if (bWas && (!bCirc || (SumFill < SumReq * 0.98 && Taken < SumLeak)))
+		{
+			for (const int32 Id : N.Members)
+			{
+				RatedHabs.Remove(Id);
+			}
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("SURFACE HABITAT LOST ITS HABITABILITY RATING — %s. Restore oxygen supply."),
+				bCirc ? TEXT("oxygen fill below requirement") : TEXT("air circulation down")));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d LOST HABITABILITY (%.0f / %.0f kg O2) ==="), N.Root, SumFill, SumReq);
+		}
+		else if (bWas)
+		{
+			// A merge or an added module is expansion, not a crisis (the floor
+			// rule for new carves): every member carries the rating.
+			for (const int32 Id : N.Members)
+			{
+				RatedHabs.Add(Id);
+			}
+		}
+		const bool bSealedSmall = !bWas && bCirc && bFull && !bBig;
+		if (bSealedSmall && !HabNetsNotedSmall.Contains(N.Root))
+		{
+			HabNetsNotedSmall.Add(N.Root);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("SURFACE HABITAT SEALED — %d of %d bays. Add %d more to certify it a livable habitat."),
+				N.Bays, MinLivableCells, MinLivableCells - N.Bays));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d SEALED but under habitat minimum (%d/%d bays) ==="), N.Root, N.Bays, MinLivableCells);
+		}
+		else if (!bSealedSmall && !bWas)
+		{
+			HabNetsNotedSmall.Remove(N.Root);
+		}
+	}
+}
+
+const FRHBuildingInstance* URHSimWorldSubsystem::FindBuildingById(int32 Id) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Id == Id)
+		{
+			return &B;
+		}
+	}
+	return nullptr;
+}
+
+int32 URHSimWorldSubsystem::GetMaxBedsPerSide(const FRHBuildingRow* Def) const
+{
+	return (Def && Def->MaxBedsPerSide > 0) ? Def->MaxBedsPerSide : DomeMaxBedsPerSide;
+}
+
+FIntPoint URHSimWorldSubsystem::GetBayGridFor(const FRHBuildingRow* Def, int32 SizeX, int32 SizeY)
+{
+	if (!Def || !Def->Pressurized)
+	{
+		return FIntPoint(0, 0);
+	}
+	const int32 FX = FMath::Max(1, Def->FootprintX), FY = FMath::Max(1, Def->FootprintY);
+	if (FX % 5 != 0 || FY % 5 != 0)
+	{
+		return FIntPoint(0, 0); // not a whole number of 10 m bays (data error)
+	}
+	return FIntPoint((FX / 5) * FMath::Max(1, SizeX), (FY / 5) * FMath::Max(1, SizeY));
+}
+
+FIntPoint URHSimWorldSubsystem::GetBayGrid(const FRHBuildingInstance& B) const
+{
+	return Defs ? GetBayGridFor(Defs->GetBuilding(B.DefName), B.SizeX, B.SizeY) : FIntPoint(0, 0);
+}
+
+bool URHSimWorldSubsystem::IsOnBayGrid(const FRHBuildingRow* Def, const FVector& LocationCm, int32 SizeX, int32 SizeY)
+{
+	// Bay centres sit on multiples of 10 m: a shell of N bays along an axis is
+	// centred (N-1) x 5 m off that lattice.
+	const FIntPoint G = GetBayGridFor(Def, SizeX, SizeY);
+	if (G.X <= 0)
+	{
+		return false;
+	}
+	const auto On = [](double R) { return FMath::Abs(R - 1000.0 * FMath::RoundToDouble(R / 1000.0)) <= 1.0; };
+	return On(LocationCm.X - (G.X - 1) * 500.0) && On(LocationCm.Y - (G.Y - 1) * 500.0);
+}
+
+FVector URHSimWorldSubsystem::SnapToBayGrid(const FRHBuildingRow* Def, const FVector& LocationCm, int32 SizeX, int32 SizeY)
+{
+	const FIntPoint G = GetBayGridFor(Def, SizeX, SizeY);
+	if (G.X <= 0)
+	{
+		return LocationCm;
+	}
+	const double OX = (G.X - 1) * 500.0, OY = (G.Y - 1) * 500.0;
+	return FVector(1000.0 * FMath::RoundToDouble((LocationCm.X - OX) / 1000.0) + OX,
+		1000.0 * FMath::RoundToDouble((LocationCm.Y - OY) / 1000.0) + OY, LocationCm.Z);
+}
+
+FVector URHSimWorldSubsystem::GetBayCentreCm(const FRHBuildingInstance& B, int32 Bay) const
+{
+	const FIntPoint G = GetBayGrid(B);
+	if (G.X <= 0)
+	{
+		return B.LocationCm;
+	}
+	const FVector2D Half = GetFootprintHalfCm(Defs->GetBuilding(B.DefName), B.SizeX, B.SizeY);
+	const int32 BX = Bay % G.X, BY = Bay / G.X;
+	return FVector(B.LocationCm.X - Half.X + (BX + 0.5) * 1000.0, B.LocationCm.Y - Half.Y + (BY + 0.5) * 1000.0, B.LocationCm.Z);
+}
+
+bool URHSimWorldSubsystem::FindBayAt(const FVector& LocationCm, int32& OutHabId, int32& OutBay) const
+{
+	if (!Defs)
+	{
+		return false;
+	}
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level != 0)
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		const FIntPoint G = GetBayGridFor(Def, B.SizeX, B.SizeY);
+		if (G.X <= 0)
+		{
+			continue;
+		}
+		const FVector2D Half = GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+		const int32 BX = FMath::FloorToInt32((LocationCm.X - (B.LocationCm.X - Half.X)) / 1000.0);
+		const int32 BY = FMath::FloorToInt32((LocationCm.Y - (B.LocationCm.Y - Half.Y)) / 1000.0);
+		if (BX >= 0 && BX < G.X && BY >= 0 && BY < G.Y)
+		{
+			OutHabId = B.Id;
+			OutBay = BY * G.X + BX;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsWhollyInBay(const FRHBuildingInstance& Hab, const FVector& LocationCm, const FVector2D& HalfCm, int32& OutBay) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(Hab.DefName) : nullptr;
+	const FIntPoint G = GetBayGridFor(Def, Hab.SizeX, Hab.SizeY);
+	if (G.X <= 0)
+	{
+		return false;
+	}
+	const FVector2D Half = GetFootprintHalfCm(Def, Hab.SizeX, Hab.SizeY);
+	const int32 BX = FMath::FloorToInt32((LocationCm.X - (Hab.LocationCm.X - Half.X)) / 1000.0);
+	const int32 BY = FMath::FloorToInt32((LocationCm.Y - (Hab.LocationCm.Y - Half.Y)) / 1000.0);
+	if (BX < 0 || BX >= G.X || BY < 0 || BY >= G.Y)
+	{
+		return false;
+	}
+	OutBay = BY * G.X + BX;
+	const FVector C = GetBayCentreCm(Hab, OutBay);
+	return FMath::Abs(LocationCm.X - C.X) + HalfCm.X <= 500.5 && FMath::Abs(LocationCm.Y - C.Y) + HalfCm.Y <= 500.5;
+}
+
+FIntPoint URHSimWorldSubsystem::CellPos(const FIntVector& Key) const
+{
+	// Comparable only within ONE floor or ONE network: underground cells use
+	// the spiral around the shaft head; bays use the world bay lattice.
+	if (Key.X < 0)
+	{
+		return SpiralCell(Key.Y);
+	}
+	const FRHHabMemberCache* M = HabMembers.Find(Key.Z);
+	return (M && M->NX > 0) ? M->GridMin + FIntPoint(Key.Y % M->NX, Key.Y / M->NX) : FIntPoint(MIN_int32, MIN_int32);
+}
+
+void URHSimWorldSubsystem::RebuildHabTopology()
+{
+	// Pure function of Buildings, rebuilt at every mutation site (AddBuilding,
+	// construction completion, LoadColony). Networks in ascending root (min
+	// member Id), members ascending; the lookup maps are never iterated.
+	HabNets.Reset();
+	HabMembers.Reset();
+	HabBayOwner.Reset();
+	if (!Defs)
+	{
+		return;
+	}
+	TArray<int32> Ids;
+	TMap<FIntPoint, int32>& BayOwner = HabBayOwner;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level != 0 || B.bUnderConstruction)
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		const FIntPoint G = GetBayGridFor(Def, B.SizeX, B.SizeY);
+		if (G.X <= 0)
+		{
+			continue;
+		}
+		const FVector2D Half = GetFootprintHalfCm(Def, B.SizeX, B.SizeY);
+		FRHHabMemberCache M;
+		M.Id = B.Id;
+		M.NX = G.X;
+		M.NY = G.Y;
+		M.GridMin = FIntPoint(FMath::RoundToInt32((B.LocationCm.X - Half.X + 500.0) / 1000.0),
+			FMath::RoundToInt32((B.LocationCm.Y - Half.Y + 500.0) / 1000.0));
+		M.FixedRoom = Def->ProvidesRoom;
+		for (int32 BY = 0; BY < G.Y; ++BY)
+		{
+			for (int32 BX = 0; BX < G.X; ++BX)
+			{
+				const FIntPoint P = M.GridMin + FIntPoint(BX, BY);
+				if (BayOwner.Contains(P))
+				{
+					UE_LOG(LogRedHopeSim, Warning, TEXT("Habitat #%d overlaps another shell's bay (%d, %d) - only cheat placement can do this"), B.Id, P.X, P.Y);
+				}
+				else
+				{
+					BayOwner.Add(P, B.Id);
+				}
+			}
+		}
+		HabMembers.Add(B.Id, M);
+		Ids.Add(B.Id);
+	}
+	if (Ids.Num() == 0)
+	{
+		return;
+	}
+	Ids.Sort();
+	TMap<int32, int32> Parent;
+	for (const int32 Id : Ids)
+	{
+		Parent.Add(Id, Id);
+	}
+	const auto FindRoot = [&Parent](int32 X)
+	{
+		while (Parent[X] != X)
+		{
+			Parent[X] = Parent[Parent[X]];
+			X = Parent[X];
+		}
+		return X;
+	};
+	for (const int32 Id : Ids)
+	{
+		const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+		for (int32 BY = 0; BY < M.NY; ++BY)
+		{
+			for (int32 BX = 0; BX < M.NX; ++BX)
+			{
+				const FIntPoint P = M.GridMin + FIntPoint(BX, BY);
+				for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(0, 1) })
+				{
+					if (const int32* Other = BayOwner.Find(P + D))
+					{
+						const int32 A = FindRoot(Id), B = FindRoot(*Other);
+						if (A != B)
+						{
+							Parent[FMath::Max(A, B)] = FMath::Min(A, B); // root = min Id
+						}
+					}
+				}
+			}
+		}
+	}
+	TMap<int32, int32> NetOfRoot;
+	for (const int32 Id : Ids) // ascending: a set's root (its min Id) is met first
+	{
+		const int32 Root = FindRoot(Id);
+		int32 Index = INDEX_NONE;
+		if (const int32* Found = NetOfRoot.Find(Root))
+		{
+			Index = *Found;
+		}
+		else
+		{
+			FRHHabNetCache Net;
+			Net.Root = Root;
+			Index = HabNets.Add(Net);
+			NetOfRoot.Add(Root, Index);
+		}
+		FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+		M.NetIndex = Index;
+		HabNets[Index].Members.Add(Id);
+		HabNets[Index].Bays += M.NX * M.NY;
+	}
+	// Bucket the Interior machines by the network whose bay they stand in
+	// (Buildings is Id-ascending, so each bucket is too).
+	for (int32 i = 0; i < Buildings.Num(); ++i)
+	{
+		const FRHBuildingInstance& B = Buildings[i];
+		const FRHBuildingRow* Def = B.Level == 0 ? Defs->GetBuilding(B.DefName) : nullptr;
+		int32 Hab = 0, Bay = INDEX_NONE;
+		if (!Def || !Def->Interior || Def->Pressurized || !FindMemberBayAt(B.LocationCm, Hab, Bay))
+		{
+			continue;
+		}
+		FRHHabNetCache& Net = HabNets[HabMembers.FindChecked(Hab).NetIndex];
+		if (Def->CirculatesAir && !B.bUnderConstruction)
+		{
+			Net.Circulators.Add(i);
+		}
+		if (!Def->ProvidesRoom.IsNone())
+		{
+			Net.Modules.Add(i);
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::FindMemberBayAt(const FVector& LocationCm, int32& OutHabId, int32& OutBay) const
+{
+	// Bay centres sit on multiples of 10 m; a bay spans [10k - 5, 10k + 5) m on
+	// each axis - the same half-open floor FindBayAt applies.
+	const FIntPoint P(FMath::FloorToInt32(LocationCm.X / 1000.0 + 0.5), FMath::FloorToInt32(LocationCm.Y / 1000.0 + 0.5));
+	const int32* Hab = HabBayOwner.Find(P);
+	const FRHHabMemberCache* M = Hab ? HabMembers.Find(*Hab) : nullptr;
+	if (!M)
+	{
+		return false;
+	}
+	const FIntPoint L = P - M->GridMin;
+	OutHabId = *Hab;
+	OutBay = L.Y * M->NX + L.X;
+	return true;
+}
+
+const URHSimWorldSubsystem::FRHHabNetCache* URHSimWorldSubsystem::FindHabNet(int32 HabId) const
+{
+	const FRHHabMemberCache* M = HabMembers.Find(HabId);
+	return (M && HabNets.IsValidIndex(M->NetIndex)) ? &HabNets[M->NetIndex] : nullptr;
+}
+
+bool URHSimWorldSubsystem::IsNetRated(const FRHHabNetCache& N) const
+{
+	for (const int32 Id : N.Members)
+	{
+		if (RatedHabs.Contains(Id))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsNetCirculated(const FRHHabNetCache& N) const
+{
+	// A powered air circulator standing in any member bay (cached at topology
+	// time; power is read live)...
+	for (const int32 Index : N.Circulators)
+	{
+		if (Buildings.IsValidIndex(Index) && Buildings[Index].bPowered)
+		{
+			return true;
+		}
+	}
+	// ...or a shaft link: a member bay beside the shaft head while floor -1 is
+	// rated (optional; ruling 6a - a hab needs no link to be lived in).
+	if (RatedFloors.Contains(-1))
+	{
+		for (const int32 Id : N.Members)
+		{
+			const FRHBuildingInstance* B = FindBuildingById(Id);
+			const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+			for (int32 Bay = 0; B && Bay < M.NX * M.NY; ++Bay)
+			{
+				const FVector C = GetBayCentreCm(*B, Bay);
+				if (FMath::Max(FMath::Abs(C.X - ShaftHeadCm.X), FMath::Abs(C.Y - ShaftHeadCm.Y)) <= ShaftLinkRangeCm + 0.5)
+				{
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::AnyHabNetRated() const
+{
+	for (const FRHHabNetCache& N : HabNets)
+	{
+		if (IsNetRated(N))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsHabRated(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N && IsNetRated(*N);
+}
+
+int32 URHSimWorldSubsystem::GetHabNetworkRoot(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N ? N->Root : 0;
+}
+
+int32 URHSimWorldSubsystem::GetHabNetworkBays(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N ? N->Bays : 0;
+}
+
+double URHSimWorldSubsystem::GetHabO2Kg(int32 HabId) const
+{
+	const double* V = HabO2Kg.Find(HabId);
+	return V ? *V : 0.0;
+}
+
+double URHSimWorldSubsystem::GetHabO2RequiredKg(int32 HabId) const
+{
+	const FRHHabMemberCache* M = HabMembers.Find(HabId);
+	return M ? M->NX * M->NY * O2FillKgPerCell : 0.0;
+}
+
+double URHSimWorldSubsystem::GetHabNetworkO2Kg(int32 HabId) const
+{
+	double Sum = 0.0;
+	if (const FRHHabNetCache* N = FindHabNet(HabId))
+	{
+		for (const int32 Id : N->Members)
+		{
+			Sum += GetHabO2Kg(Id);
+		}
+	}
+	return Sum;
+}
+
+double URHSimWorldSubsystem::GetHabNetworkO2RequiredKg(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N ? N->Bays * O2FillKgPerCell : 0.0;
+}
+
+bool URHSimWorldSubsystem::IsHabNetworkCirculated(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N && IsNetCirculated(*N);
+}
+
+bool URHSimWorldSubsystem::IsHabNetworkSealedButSmall(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	if (!N || IsNetRated(*N) || N->Bays >= MinLivableCells || !IsNetCirculated(*N))
+	{
+		return false;
+	}
+	for (const int32 Id : N->Members)
+	{
+		if (GetHabO2Kg(Id) < GetHabO2RequiredKg(Id) - KINDA_SMALL_NUMBER)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::IsLocationInRatedHab(const FVector& LocationCm) const
+{
+	int32 Hab = 0, Bay = INDEX_NONE;
+	return FindMemberBayAt(LocationCm, Hab, Bay) && IsHabRated(Hab);
+}
+
+int32 URHSimWorldSubsystem::GetHabLivingBays(int32 HabId) const
+{
+	const FRHHabMemberCache* M = HabMembers.Find(HabId);
+	const FRHBuildingInstance* B = M ? nullptr : FindBuildingById(HabId);
+	const FIntPoint G = M ? FIntPoint(M->NX, M->NY) : (B ? GetBayGrid(*B) : FIntPoint(0, 0));
+	int32 Living = 0;
+	for (int32 Bay = 0; Bay < G.X * G.Y; ++Bay)
+	{
+		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetBayRoom(HabId, Bay)) : nullptr;
+		if (Row && Row->SliceActive && Row->Function == FName("Living"))
+		{
+			++Living;
+		}
+	}
+	return Living;
+}
+
+int32 URHSimWorldSubsystem::GetHabBeds(int32 HabId) const
+{
+	return (int32)(GetHabLivingBays(HabId) * ColonistsPerCell);
+}
+
+int32 URHSimWorldSubsystem::GetHabResidents(int32 HabId) const
+{
+	int32 N = 0;
+	for (const FRHColonist& C : Colonists)
+	{
+		N += (C.HomeHab == HabId) ? 1 : 0;
+	}
+	return N;
 }
 
 bool URHSimWorldSubsystem::IsFloorSealedButSmall(int32 Level) const
@@ -1783,6 +2367,19 @@ int32 URHSimWorldSubsystem::GetHousingCapacity() const
 	for (const int32 Level : RatedFloors)
 	{
 		Beds += (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell);
+	}
+	// BM-1: Living bays of rated surface habitat networks - open to crew only
+	// once the Phase-1 vault is certified (director, 2026-10-16: crew still
+	// need the vault; the surface habitat is expansion, not a shortcut).
+	for (const FRHHabNetCache& N : HabNets)
+	{
+		if (bVaultRated && IsNetRated(N))
+		{
+			for (const int32 Id : N.Members)
+			{
+				Beds += GetHabBeds(Id);
+			}
+		}
 	}
 	return Beds;
 }
@@ -1855,8 +2452,11 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 	int32 Housed = 0;
 	for (int32 i = 0; i < Count; ++i)
 	{
-		// Shallowest certified floor with a free bed (deterministic fill order).
-		int32 Home = 0;
+		// Shallowest certified floor with a free bed (deterministic fill
+		// order); then (BM-1) the rated surface networks in root order, their
+		// members by Id.
+		int32 Home = 0, HomeHab = 0;
+		bool bFound = false;
 		for (int32 Level = -1; Level >= -MaxDepth; --Level)
 		{
 			if (!RatedFloors.Contains(Level))
@@ -1874,10 +2474,27 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 			if (Residents < (int32)(GetFloorCarvedCells(Level) * ColonistsPerCell))
 			{
 				Home = Level;
+				bFound = true;
 				break;
 			}
 		}
-		if (Home == 0)
+		for (int32 n = 0; bVaultRated && !bFound && n < HabNets.Num(); ++n)
+		{
+			if (!IsNetRated(HabNets[n]))
+			{
+				continue;
+			}
+			for (const int32 Id : HabNets[n].Members)
+			{
+				if (GetHabResidents(Id) < GetHabBeds(Id))
+				{
+					HomeHab = Id;
+					bFound = true;
+					break;
+				}
+			}
+		}
+		if (!bFound)
 		{
 			break; // no certified bed left
 		}
@@ -1894,11 +2511,19 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 		{
 			C.Name += FString::Printf(TEXT(" %d"), K / (FirstCount * LastCount) + 1);
 		}
-		C.HomeLevel = Home;
+		C.HomeLevel = HomeHab ? 0 : Home;
+		C.HomeHab = HomeHab;
 		Colonists.Add(C);
 		bEverHadCrew = true; // M4 Gate D: the collapse ending checks "had a crew, lost it"
 		++Housed;
-		UE_LOG(LogRedHopeSim, Display, TEXT("Colonist %s housed on floor %d"), *C.Name, Home);
+		if (HomeHab)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Colonist %s housed in surface habitat #%d"), *C.Name, HomeHab);
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Colonist %s housed on floor %d"), *C.Name, Home);
+		}
 	}
 	return Housed;
 }
@@ -2461,7 +3086,36 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		// Breathe: draw from the home floor's fill. The trunk refills it (the
 		// M1-d loop); a crowd can now out-breathe a starved circulator.
 		bool bAir = false;
-		if (RatedFloors.Contains(C.HomeLevel))
+		if (C.HomeHab != 0)
+		{
+			// BM-1: a surface resident breathes from the whole network - their
+			// own hab first, then the other members in ascending Id.
+			const FRHHabNetCache* Net = FindHabNet(C.HomeHab);
+			const double NeedO2 = ColonistO2KgPerSol * DtSols;
+			if (Net && IsNetRated(*Net) && GetHabNetworkO2Kg(C.HomeHab) >= NeedO2)
+			{
+				double Left = NeedO2;
+				const auto Take = [this, &Left](int32 Id)
+				{
+					if (double* V = HabO2Kg.Find(Id))
+					{
+						const double T = FMath::Min(*V, Left);
+						*V -= T;
+						Left -= T;
+					}
+				};
+				Take(C.HomeHab);
+				for (const int32 Id : Net->Members)
+				{
+					if (Id != C.HomeHab && Left > 0.0)
+					{
+						Take(Id);
+					}
+				}
+				bAir = true;
+			}
+		}
+		else if (RatedFloors.Contains(C.HomeLevel))
 		{
 			double& FillKg = FloorO2Kg.FindOrAdd(C.HomeLevel);
 			const double NeedO2 = ColonistO2KgPerSol * DtSols;
@@ -2515,7 +3169,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		if (C.bSupported && !bNowSupported)
 		{
 			// Edge alert: name the missing leg so the fix is obvious.
-			const TCHAR* Leg = !bAir ? TEXT("home floor lost its air")
+			const TCHAR* Leg = !bAir ? (C.HomeHab ? TEXT("home habitat lost its air") : TEXT("home floor lost its air"))
 				: (!bWatered ? TEXT("water tanks empty") : TEXT("food stores empty"));
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
@@ -2636,9 +3290,12 @@ void URHSimWorldSubsystem::StepMoments(float SubDt)
 
 	if ((bAnyUnsupported || HopeSmoothed < DisputeHopeBelow) && A.Id != B.Id)
 	{
-		const FString Text = FString::Printf(
-			TEXT("Raised voices on floor %d — %s and %s are arguing over the shortages. Morale is wearing thin."),
-			A.HomeLevel, *A.Name, *B.Name);
+		// Placeholder copy (Gate-D review).
+		const FString Text = A.HomeHab != 0
+			? FString::Printf(TEXT("Raised voices in the surface habitat — %s and %s are arguing over the shortages. Morale is wearing thin."),
+				*A.Name, *B.Name)
+			: FString::Printf(TEXT("Raised voices on floor %d — %s and %s are arguing over the shortages. Morale is wearing thin."),
+				A.HomeLevel, *A.Name, *B.Name);
 		OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Dispute, A.Id, B.Id, Text);
 		UE_LOG(LogRedHopeSim, Display, TEXT("MOMENT dispute: %s vs %s"), *A.Name, *B.Name);
 		return;
@@ -2755,6 +3412,119 @@ FName URHSimWorldSubsystem::GetRoomAt(int32 Level, int32 CellIndex) const
 	return (Cells && Cells->IsValidIndex(CellIndex)) ? (*Cells)[CellIndex] : NAME_None;
 }
 
+FName URHSimWorldSubsystem::GetBayRoom(int32 HabId, int32 Bay) const
+{
+	// Built members read the topology cache (O(1)); a construction site falls
+	// back to the scan.
+	if (const FRHHabMemberCache* M = HabMembers.Find(HabId))
+	{
+		if (Bay < 0 || Bay >= M->NX * M->NY)
+		{
+			return NAME_None;
+		}
+		if (const TArray<FName>* Rooms = HabBayRooms.Find(HabId))
+		{
+			if (Rooms->IsValidIndex(Bay) && !(*Rooms)[Bay].IsNone())
+			{
+				return (*Rooms)[Bay];
+			}
+		}
+		return M->FixedRoom;
+	}
+	const FRHBuildingInstance* B = FindBuildingById(HabId);
+	const FRHBuildingRow* Def = (B && Defs) ? Defs->GetBuilding(B->DefName) : nullptr;
+	const FIntPoint G = B ? GetBayGrid(*B) : FIntPoint(0, 0);
+	if (!Def || G.X <= 0 || Bay < 0 || Bay >= G.X * G.Y)
+	{
+		return NAME_None;
+	}
+	if (const TArray<FName>* Rooms = HabBayRooms.Find(HabId))
+	{
+		if (Rooms->IsValidIndex(Bay) && !(*Rooms)[Bay].IsNone())
+		{
+			return (*Rooms)[Bay];
+		}
+	}
+	return Def->ProvidesRoom; // a corridor's fixed Hallway; None for a free shell
+}
+
+const FRHBuildingInstance* URHSimWorldSubsystem::FindModuleInBay(int32 HabId, int32 Bay) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level != 0)
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+		int32 H = 0, Slot = INDEX_NONE;
+		if (Def && Def->Interior && !Def->Pressurized && !Def->ProvidesRoom.IsNone()
+			&& FindBayAt(B.LocationCm, H, Slot) && H == HabId && Slot == Bay)
+		{
+			return &B;
+		}
+	}
+	return nullptr;
+}
+
+bool URHSimWorldSubsystem::DesignateBay(int32 HabId, int32 Bay, FName RoomName, FString& OutReason)
+{
+	// BM-1: zone a surface habitat bay. DesignateRoom stays the underground's.
+	// Copy is a Gate-D-adjacent placeholder.
+	const FRHBuildingInstance* B = FindBuildingById(HabId);
+	const FRHBuildingRow* Def = (B && Defs) ? Defs->GetBuilding(B->DefName) : nullptr;
+	const FIntPoint G = B ? GetBayGrid(*B) : FIntPoint(0, 0);
+	if (!B || B->Level != 0 || !Def || G.X <= 0 || Bay < 0 || Bay >= G.X * G.Y)
+	{
+		OutReason = TEXT("No habitat bay there");
+		return false;
+	}
+	if (!Def->ProvidesRoom.IsNone())
+	{
+		OutReason = FString::Printf(TEXT("This bay is part of a %s - its room is fixed"), *Def->DisplayName);
+		return false;
+	}
+	const FRHRoomRow* Row = RoomName.IsNone() ? nullptr : Defs->GetRoom(RoomName);
+	if (!RoomName.IsNone() && (!Row || !Row->SliceActive))
+	{
+		OutReason = FString::Printf(TEXT("'%s' is not a designatable room function"), *RoomName.ToString());
+		return false;
+	}
+	if (Row && IsGardenFunction(Row->Function))
+	{
+		// Load-bearing: agriculture treats Z != 0 planted keys as dome beds.
+		OutReason = TEXT("Gardens grow underground or under a greenhouse dome, not in a habitat bay");
+		return false;
+	}
+	if (!RoomName.IsNone() && FindModuleInBay(HabId, Bay))
+	{
+		OutReason = TEXT("A station module sits in this bay - remove it to zone the bay");
+		return false;
+	}
+	// Bed guard: never take the last bed from someone sleeping here.
+	const FRHRoomRow* OldRow = Defs->GetRoom(GetBayRoom(HabId, Bay));
+	const bool bWasLiving = OldRow && OldRow->SliceActive && OldRow->Function == FName("Living");
+	const bool bIsLiving = Row && Row->Function == FName("Living");
+	if (bWasLiving && !bIsLiving && GetHabResidents(HabId) > (int32)((GetHabLivingBays(HabId) - 1) * ColonistsPerCell))
+	{
+		OutReason = FString::Printf(TEXT("%d residents sleep in this habitat - rezone after they move"), GetHabResidents(HabId));
+		return false;
+	}
+	TArray<FName>& Rooms = HabBayRooms.FindOrAdd(HabId);
+	if (Rooms.Num() < G.X * G.Y)
+	{
+		Rooms.SetNum(G.X * G.Y);
+	}
+	Rooms[Bay] = RoomName;
+	if (!Row || !IsSeatFunction(Row->Function))
+	{
+		SeatPriority.Remove(FIntVector(0, Bay, HabId));
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Bay designation: habitat #%d bay %d -> %s"),
+		HabId, Bay, RoomName.IsNone() ? TEXT("(cleared)") : *RoomName.ToString());
+	return true;
+}
+
 void URHSimWorldSubsystem::RefreshJobs()
 {
 	// Deterministic seat assignment. Every open station in the default order -
@@ -2815,6 +3585,37 @@ void URHSimWorldSubsystem::RefreshJobs()
 				{
 					Stations.Add({ FIntVector(Level, INDEX_NONE, B.Id), Row });
 				}
+			}
+		}
+	}
+	// BM-1: rated surface networks after every floor - networks by root,
+	// members by Id, bays in order, then the network's in-bay modules by Id.
+	// No habs = no stations here (the pre-BM-1 walk exactly).
+	for (const FRHHabNetCache& Net : HabNets)
+	{
+		if (!IsNetRated(Net))
+		{
+			continue;
+		}
+		for (const int32 HabId : Net.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(HabId);
+			for (int32 Bay = 0; Bay < M.NX * M.NY; ++Bay)
+			{
+				const FRHRoomRow* Row = Defs->GetRoom(GetBayRoom(HabId, Bay));
+				if (IsSeatRow(Row))
+				{
+					Stations.Add({ FIntVector(0, Bay, HabId), Row });
+				}
+			}
+		}
+		for (const int32 Index : Net.Modules)
+		{
+			const FRHBuildingInstance& B = Buildings[Index];
+			const FRHRoomRow* Row = GetProvidedRoom(B, /*bRequireOnline*/ true);
+			if (IsSeatRow(Row))
+			{
+				Stations.Add({ FIntVector(0, INDEX_NONE, B.Id), Row });
 			}
 		}
 	}
@@ -2891,18 +3692,27 @@ void URHSimWorldSubsystem::GetStationSeats(const FIntVector& Key, int32& OutFill
 const FRHRoomRow* URHSimWorldSubsystem::GetProvidedRoom(const FRHBuildingInstance& B, bool bRequireOnline) const
 {
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
-	if (!Def || Def->ProvidesRoom.IsNone())
+	if (!Def || Def->Pressurized || Def->ProvidesRoom.IsNone())
 	{
-		return nullptr;
+		return nullptr; // BM-1: a shell's ProvidesRoom is its bays' fixed room, not a station
 	}
 	const FRHRoomRow* Row = Defs->GetRoom(Def->ProvidesRoom);
 	if (!Row || !Row->SliceActive)
 	{
 		return nullptr;
 	}
-	if (bRequireOnline && (B.bUnderConstruction || B.bManualOff || !B.bPowered || !RatedFloors.Contains(B.Level)))
+	if (bRequireOnline)
 	{
-		return nullptr;
+		if (B.bUnderConstruction || B.bManualOff || !B.bPowered)
+		{
+			return nullptr;
+		}
+		// Rated here: its floor underground, or (BM-1) the habitat bay it stands in.
+		const bool bRatedHere = B.Level < 0 ? RatedFloors.Contains(B.Level) : IsLocationInRatedHab(B.LocationCm);
+		if (!bRatedHere)
+		{
+			return nullptr;
+		}
 	}
 	return Row;
 }
@@ -3064,6 +3874,97 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 						const FIntPoint HPos = SpiralCell(H);
 						const int32 DE = FMath::Abs(HPos.X - EPos.X) + FMath::Abs(HPos.Y - EPos.Y);
 						const int32 DR = FMath::Abs(HPos.X - RPos.X) + FMath::Abs(HPos.Y - RPos.Y);
+						bPartitioned = (DE == 1 && DR == 1);
+					}
+					if (bPartitioned)
+					{
+						continue;
+					}
+				}
+				++Out.OffendedPairs;
+			}
+		}
+	}
+
+	// BM-1: rated surface networks - the floor rules, per network. Bay
+	// positions come from the world bay lattice; pairs never cross networks.
+	// Station modules do not count toward Rooms (director Q9 open).
+	for (const FRHHabNetCache& Net : HabNets)
+	{
+		if (!IsNetRated(Net))
+		{
+			continue;
+		}
+		TArray<const FRHRoomRow*> Rows;
+		TArray<FIntPoint> Pos;
+		for (const int32 HabId : Net.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(HabId);
+			for (int32 Bay = 0; Bay < M.NX * M.NY; ++Bay)
+			{
+				const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetBayRoom(HabId, Bay)) : nullptr;
+				Rows.Add((Row && Row->SliceActive) ? Row : nullptr);
+				Pos.Add(CellPos(FIntVector(0, Bay, HabId)));
+			}
+		}
+		for (const FRHRoomRow* Row : Rows)
+		{
+			if (!Row)
+			{
+				continue;
+			}
+			if (Row->Function == FName("Living"))
+			{
+				++LQCells;
+			}
+			else if (Row->MoraleWeight > 0.f)
+			{
+				const FName NetType(*FString::Printf(TEXT("N%d:%s"), Net.Root, *Row->Function.ToString()));
+				if (!TypesCounted.Contains(NetType))
+				{
+					TypesCounted.Add(NetType);
+					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
+				}
+			}
+		}
+		const bool bCirc = IsNetCirculated(Net);
+		for (int32 E = 0; E < Rows.Num(); ++E)
+		{
+			if (!Rows[E] || Rows[E]->EmitsTags.IsEmpty())
+			{
+				continue;
+			}
+			TArray<FString> Emits;
+			Rows[E]->EmitsTags.ParseIntoArray(Emits, TEXT(";"));
+			for (int32 R = 0; R < Rows.Num(); ++R)
+			{
+				if (R == E || !Rows[R] || Rows[R]->RefusesTags.IsEmpty())
+				{
+					continue;
+				}
+				TArray<FString> Refuses;
+				Rows[R]->RefusesTags.ParseIntoArray(Refuses, TEXT(";"));
+				bool bOffends = false;
+				for (const FString& Tag : Emits)
+				{
+					bOffends |= Refuses.Contains(Tag);
+				}
+				const int32 Dist = FMath::Abs(Pos[E].X - Pos[R].X) + FMath::Abs(Pos[E].Y - Pos[R].Y);
+				if (!bOffends || Dist > 2)
+				{
+					continue;
+				}
+				if (Dist == 2 && bCirc)
+				{
+					bool bPartitioned = false;
+					for (int32 Hx = 0; Hx < Rows.Num() && !bPartitioned; ++Hx)
+					{
+						if (!Rows[Hx] || Rows[Hx]->Function != FName("Hallway"))
+						{
+							continue;
+						}
+						const int32 DE = FMath::Abs(Pos[Hx].X - Pos[E].X) + FMath::Abs(Pos[Hx].Y - Pos[E].Y);
+						const int32 DR = FMath::Abs(Pos[Hx].X - Pos[R].X) + FMath::Abs(Pos[Hx].Y - Pos[R].Y);
 						bPartitioned = (DE == 1 && DR == 1);
 					}
 					if (bPartitioned)
@@ -3581,19 +4482,39 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper"), Level);
 		return false;
 	}
-	// Prefab stations (tiered production T1): underground, on a carved cell,
-	// and only once research has opened their room.
-	// Drag-sized structures (Agri Gate C): surface only, inside the size cap.
+	// BM-1: pressurized habitat shells stand on the surface, in whole bays.
+	if (Def->Pressurized)
+	{
+		if (Level != 0)
+		{
+			OutReason = TEXT("Habitats stand on the surface - underground, carve and zone cells instead");
+			return false;
+		}
+		if (GetBayGridFor(Def, 1, 1).X == 0)
+		{
+			OutReason = TEXT("Habitat footprint is not a whole number of 10 m bays (data)");
+			return false;
+		}
+	}
+	// Drag-sized structures (Agri Gate C; BM-1 habitats): surface only, inside
+	// the per-row size cap; a corridor's short side is capped.
 	if (Def->DragSized)
 	{
+		const int32 Cap = GetMaxBedsPerSide(Def);
 		if (Level != 0)
 		{
 			OutReason = TEXT("Greenhouse domes stand on the surface - underground, zone Greenhouse cells instead");
 			return false;
 		}
-		if (SizeX < 1 || SizeY < 1 || SizeX > DomeMaxBedsPerSide || SizeY > DomeMaxBedsPerSide)
+		if (SizeX < 1 || SizeY < 1 || SizeX > Cap || SizeY > Cap)
 		{
-			OutReason = FString::Printf(TEXT("A dome is 1 to %d beds a side"), DomeMaxBedsPerSide);
+			OutReason = Def->Pressurized ? FString::Printf(TEXT("A habitat is 1 to %d bays a side"), Cap)
+				: FString::Printf(TEXT("A dome is 1 to %d beds a side"), Cap);
+			return false;
+		}
+		if (Def->DragShortSideMax > 0 && FMath::Min(SizeX, SizeY) > Def->DragShortSideMax)
+		{
+			OutReason = FString::Printf(TEXT("A %s is %d bay(s) wide"), *Def->DisplayName, Def->DragShortSideMax);
 			return false;
 		}
 	}
@@ -3601,12 +4522,37 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 	{
 		SizeX = SizeY = 1;
 	}
-	if (!Def->ProvidesRoom.IsNone() && !Def->DragSized)
+	if (Def->Pressurized && !IsOnBayGrid(Def, LocationCm, SizeX, SizeY))
 	{
+		OutReason = TEXT("Habitats sit on the 10 m bay grid");
+		return false;
+	}
+	// Prefab stations (tiered production T1): on a carved cell or (BM-1) in a
+	// habitat bay, and only once research has opened their room.
+	if (!Def->ProvidesRoom.IsNone() && !Def->DragSized && !Def->Pressurized)
+	{
+		int32 BayHab = 0, Bay = INDEX_NONE;
 		if (Level >= 0)
 		{
-			OutReason = TEXT("Station modules go on a dug floor - ride down with the SHAFT strip first");
-			return false;
+			bool bInBay = false;
+			if (Def->Interior && Level == 0)
+			{
+				for (const FRHBuildingInstance& H : Buildings)
+				{
+					const FRHBuildingRow* HDef = H.Level == 0 ? Defs->GetBuilding(H.DefName) : nullptr;
+					if (HDef && HDef->Pressurized && IsWhollyInBay(H, LocationCm, GetFootprintHalfCm(Def, 1, 1), Bay))
+					{
+						BayHab = H.Id;
+						bInBay = true;
+						break;
+					}
+				}
+			}
+			if (!bInBay)
+			{
+				OutReason = TEXT("Station modules go on a dug floor or inside a habitat bay - ride down with the SHAFT strip first");
+				return false;
+			}
 		}
 		const FRHRoomRow* Room = Defs->GetRoom(Def->ProvidesRoom);
 		if (!Room || !Room->SliceActive)
@@ -3626,25 +4572,51 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				: FString::Printf(TEXT("Locked - research %s first"), *By);
 			return false;
 		}
-		const int32 Cell = FindCarvedCellAt(Level, LocationCm);
-		if (Cell == INDEX_NONE)
+		if (Level < 0)
 		{
-			OutReason = TEXT("Place it on a carved cell of this floor");
-			return false;
+			const int32 Cell = FindCarvedCellAt(Level, LocationCm);
+			if (Cell == INDEX_NONE)
+			{
+				OutReason = TEXT("Place it on a carved cell of this floor");
+				return false;
+			}
+			// One station per cell: a module never stacks on a zoned room or on
+			// another module (DesignateRoom refuses the converse).
+			const FName Zoned = GetRoomAt(Level, Cell);
+			if (!Zoned.IsNone())
+			{
+				const FRHRoomRow* ZRow = Defs->GetRoom(Zoned);
+				OutReason = FString::Printf(TEXT("This cell is zoned as %s - clear the zone first"), ZRow ? *ZRow->DisplayName : *Zoned.ToString());
+				return false;
+			}
+			if (FindModuleOnCell(Level, Cell))
+			{
+				OutReason = TEXT("A station module already sits on this cell");
+				return false;
+			}
 		}
-		// One station per cell: a module never stacks on a zoned room or on
-		// another module (DesignateRoom refuses the converse).
-		const FName Zoned = GetRoomAt(Level, Cell);
-		if (!Zoned.IsNone())
+		else
 		{
-			const FRHRoomRow* ZRow = Defs->GetRoom(Zoned);
-			OutReason = FString::Printf(TEXT("This cell is zoned as %s - clear the zone first"), ZRow ? *ZRow->DisplayName : *Zoned.ToString());
-			return false;
-		}
-		if (FindModuleOnCell(Level, Cell))
-		{
-			OutReason = TEXT("A station module already sits on this cell");
-			return false;
+			// One station per bay, never in a fixed-room shell (a corridor).
+			const FRHBuildingInstance* HabB = FindBuildingById(BayHab);
+			const FRHBuildingRow* HDef = HabB ? Defs->GetBuilding(HabB->DefName) : nullptr;
+			if (HDef && !HDef->ProvidesRoom.IsNone())
+			{
+				OutReason = FString::Printf(TEXT("This bay is part of a %s - its room is fixed"), *HDef->DisplayName);
+				return false;
+			}
+			const FName Zoned = GetBayRoom(BayHab, Bay);
+			if (!Zoned.IsNone())
+			{
+				const FRHRoomRow* ZRow = Defs->GetRoom(Zoned);
+				OutReason = FString::Printf(TEXT("This bay is zoned as %s - clear the zone first"), ZRow ? *ZRow->DisplayName : *Zoned.ToString());
+				return false;
+			}
+			if (FindModuleInBay(BayHab, Bay))
+			{
+				OutReason = TEXT("A station module already sits in this bay");
+				return false;
+			}
 		}
 	}
 	// Pylon-like defs (they project coverage and link by range) are the
@@ -3674,15 +4646,52 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 			return false;
 		}
 	}
+	else if (Def->Pressurized)
+	{
+		// BM-1: every bay centre must be inside coverage, not just the middle.
+		const FIntPoint G = GetBayGridFor(Def, SizeX, SizeY);
+		const FVector2D Half = GetFootprintHalfCm(Def, SizeX, SizeY);
+		for (int32 Bay = 0; Bay < G.X * G.Y; ++Bay)
+		{
+			const FVector BayC(LocationCm.X - Half.X + (Bay % G.X + 0.5) * 1000.0, LocationCm.Y - Half.Y + (Bay / G.X + 0.5) * 1000.0, LocationCm.Z);
+			if (!IsInCoverage(BayC, Level))
+			{
+				OutReason = TEXT("Outside grid coverage - extend pylons first");
+				return false;
+			}
+		}
+	}
 	else if (!IsInCoverage(LocationCm, Level))
 	{
-		OutReason = TEXT("Outside grid coverage - extend pylons first");
-		return false;
+		// BM-1: an Interior def wholly inside a habitat bay is fed by the hab.
+		bool bInBay = false;
+		if (Def->Interior && Level == 0)
+		{
+			const FVector2D Half = GetFootprintHalfCm(Def, 1, 1);
+			for (const FRHBuildingInstance& H : Buildings)
+			{
+				const FRHBuildingRow* HDef = H.Level == 0 ? Defs->GetBuilding(H.DefName) : nullptr;
+				int32 Bay = INDEX_NONE;
+				if (HDef && HDef->Pressurized && IsWhollyInBay(H, LocationCm, Half, Bay))
+				{
+					bInBay = true;
+					break;
+				}
+			}
+		}
+		if (!bInBay)
+		{
+			OutReason = TEXT("Outside grid coverage - extend pylons first");
+			return false;
+		}
 	}
 	// Footprint overlap: one cell, one structure (the demo-era gap - two
 	// buildings could interpenetrate). Half-extents in cm match the ghost box
 	// (FootprintX cells x 2 m); strict < keeps edge-adjacent placement legal.
+	// BM-1: a shell is compared at its snapped location (the grid check
+	// tolerates 1 cm; AddBuilding snaps), so a hair off-grid never overlaps.
 	{
+		const FVector OverlapLoc = Def->Pressurized ? SnapToBayGrid(Def, LocationCm, SizeX, SizeY) : LocationCm;
 		const FVector2D Half = GetFootprintHalfCm(Def, SizeX, SizeY);
 		const double HalfX = Half.X;
 		const double HalfY = Half.Y;
@@ -3698,9 +4707,16 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				continue;
 			}
 			const FVector2D BHalf = GetFootprintHalfCm(BDef, B.SizeX, B.SizeY);
-			if (FMath::Abs(B.LocationCm.X - LocationCm.X) < HalfX + BHalf.X
-				&& FMath::Abs(B.LocationCm.Y - LocationCm.Y) < HalfY + BHalf.Y)
+			if (FMath::Abs(B.LocationCm.X - OverlapLoc.X) < HalfX + BHalf.X
+				&& FMath::Abs(B.LocationCm.Y - OverlapLoc.Y) < HalfY + BHalf.Y)
 			{
+				// BM-1: furniture-scale Interior machines stand INSIDE a shell's
+				// bay (one-way: a shell dropped over machines is still refused).
+				int32 Bay = INDEX_NONE;
+				if (Def->Interior && Level == 0 && BDef->Pressurized && IsWhollyInBay(B, LocationCm, FVector2D(HalfX, HalfY), Bay))
+				{
+					continue;
+				}
 				OutReason = FString::Printf(TEXT("Footprint overlaps %s #%d"), *B.DefName.ToString(), B.Id);
 				return false;
 			}
@@ -3722,8 +4738,9 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 			}
 			const FIntPoint QSize = QDef->DragSized ? DecodeBuildSize(C.Value) : FIntPoint(1, 1);
 			const FVector2D QHalf = GetFootprintHalfCm(QDef, QSize.X, QSize.Y);
-			if (FMath::Abs(C.Location.X - LocationCm.X) < HalfX + QHalf.X
-				&& FMath::Abs(C.Location.Y - LocationCm.Y) < HalfY + QHalf.Y)
+			const FVector QLoc = QDef->Pressurized ? SnapToBayGrid(QDef, C.Location, QSize.X, QSize.Y) : C.Location;
+			if (FMath::Abs(QLoc.X - OverlapLoc.X) < HalfX + QHalf.X
+				&& FMath::Abs(QLoc.Y - OverlapLoc.Y) < HalfY + QHalf.Y)
 			{
 				OutReason = FString::Printf(TEXT("%s order already in transit for that spot"), *C.Target.ToString());
 				return false;
@@ -3896,10 +4913,20 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		}
 		else
 		{
-			Row = Defs ? Defs->GetRoom(GetRoomAt(Cmd.Level, (int32)Cmd.Value)) : nullptr;
-			Key = FIntVector(Cmd.Level, (int32)Cmd.Value, 0);
+			int32 H = 0, Bay = INDEX_NONE;
+			if (Cmd.Level == 0 && FindBayAt(Cmd.Location, H, Bay))
+			{
+				// BM-1: a habitat bay, found by the order's location.
+				Row = Defs ? Defs->GetRoom(GetBayRoom(H, Bay)) : nullptr;
+				Key = FIntVector(0, Bay, H);
+			}
+			else
+			{
+				Row = Defs ? Defs->GetRoom(GetRoomAt(Cmd.Level, (int32)Cmd.Value)) : nullptr;
+				Key = FIntVector(Cmd.Level, (int32)Cmd.Value, 0);
+			}
 		}
-		if (!Row || !Row->SliceActive || !(Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden")))
+		if (!Row || !Row->SliceActive || !IsSeatFunction(Row->Function))
 		{
 			OnCommandRejected.Broadcast(Cmd, TEXT("Not a work station - assign staff to a Lab, Workstation or Gardening Station"));
 			return;
@@ -3918,8 +4945,12 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// M2 Gate B: zone a carved cell with a room function (Target = room row,
 		// None = clear; Value = spiral cell index). Zoning is free - it rides
 		// the uplink like every other order because it IS an order.
+		// BM-1: at the surface the order's location picks a habitat bay;
+		// anything else (no bay hit) is the legacy cell path verbatim.
 		FString Reason;
-		if (!DesignateRoom(Cmd.Level, (int32)Cmd.Value, Cmd.Target, Reason))
+		int32 H = 0, Bay = INDEX_NONE;
+		const bool bBay = Cmd.Level == 0 && FindBayAt(Cmd.Location, H, Bay);
+		if (bBay ? !DesignateBay(H, Bay, Cmd.Target, Reason) : !DesignateRoom(Cmd.Level, (int32)Cmd.Value, Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -4789,6 +5820,26 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 			}
 		}
 	}
+	// BM-1: an Infirmary bay in a rated surface network.
+	for (const FRHHabNetCache& Net : HabNets)
+	{
+		if (!IsNetRated(Net))
+		{
+			continue;
+		}
+		for (const int32 HabId : Net.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(HabId);
+			for (int32 Bay = 0; Bay < M.NX * M.NY; ++Bay)
+			{
+				const FRHRoomRow* Row = Defs->GetRoom(GetBayRoom(HabId, Bay));
+				if (Row && Row->SliceActive && Row->Function == FName("Infirmary"))
+				{
+					return true;
+				}
+			}
+		}
+	}
 	// A prefab Infirmary module counts too (tiered production T1).
 	for (const FRHBuildingInstance& B : Buildings)
 	{
@@ -4910,8 +5961,20 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	const FRHBuildingRow* Def = Defs->GetBuilding(DefName);
 	if (Def && Def->DragSized)
 	{
-		Instance.SizeX = FMath::Clamp(SizeX, 1, DomeMaxBedsPerSide);
-		Instance.SizeY = FMath::Clamp(SizeY, 1, DomeMaxBedsPerSide);
+		const int32 Cap = GetMaxBedsPerSide(Def);
+		Instance.SizeX = FMath::Clamp(SizeX, 1, Cap);
+		Instance.SizeY = FMath::Clamp(SizeY, 1, Cap);
+		if (Def->DragShortSideMax > 0)
+		{
+			int32& Short = Instance.SizeX <= Instance.SizeY ? Instance.SizeX : Instance.SizeY;
+			Short = FMath::Min(Short, Def->DragShortSideMax);
+		}
+	}
+	if (Def && Def->Pressurized)
+	{
+		// BM-1: every shell sits on the bay grid, even from cheat/debug paths
+		// that skip CanPlace (identity for a CanPlace-checked order).
+		Instance.LocationCm = SnapToBayGrid(Def, Instance.LocationCm, Instance.SizeX, Instance.SizeY);
 	}
 	if (!bInstant && Def && Def->BuildTime_s > 0.0)
 	{
@@ -4946,6 +6009,7 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 
 	const int32 NewId = Instance.Id;
 	Buildings.Add(MoveTemp(Instance));
+	RebuildHabTopology(); // BM-1: before any listener reads the new building
 	const FRHBuildingInstance& Added = Buildings.Last();
 
 	if (Added.bUnderConstruction)
@@ -4956,12 +6020,12 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 		T.To.BuildingId = NewId;
 		Tasks.Add(T);
 		UE_LOG(LogRedHopeSim, Display, TEXT("Construction site: %s #%d at (%.0f, %.0f) m (%.0f s of fabrication)"),
-			*DefName.ToString(), NewId, LocationCm.X / 100.0, LocationCm.Y / 100.0, Added.BuildRemaining_s);
+			*DefName.ToString(), NewId, Added.LocationCm.X / 100.0, Added.LocationCm.Y / 100.0, Added.BuildRemaining_s);
 	}
 	else
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("Built %s #%d at (%.0f, %.0f) m"),
-			*DefName.ToString(), NewId, LocationCm.X / 100.0, LocationCm.Y / 100.0);
+			*DefName.ToString(), NewId, Added.LocationCm.X / 100.0, Added.LocationCm.Y / 100.0);
 	}
 	OnBuildingAdded.Broadcast(Added);
 }
@@ -5363,6 +6427,7 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 	{
 		B->bUnderConstruction = false;
 		B->BuildRemaining_s = 0.0;
+		RebuildHabTopology(); // BM-1: a finished shell joins its network now
 		// The delivered materials become the structure.
 		for (const auto& Line : Cost)
 		{
@@ -5984,7 +7049,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		}
 		for (FRHColonist& C : Colonists)
 		{
-			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds; // HomeHab: v29
 		// Skills (save v24): sorted for deterministic bytes; load repopulates.
 		if (Ar.IsLoading())
 		{
@@ -6112,6 +7177,35 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		Ar << SeatPriority << StaffedSeats << SeatFillSols;
 	}
+	// Surface habitats (save v29). Sorted for deterministic bytes; topology,
+	// networks, circulation, beds, stations and Hope terms are DERIVED.
+	{
+		TArray<int32> O2Keys;
+		HabO2Kg.GetKeys(O2Keys);
+		O2Keys.Sort();
+		int32 O2Count = O2Keys.Num();
+		Ar << O2Count;
+		for (const int32 K : O2Keys)
+		{
+			int32 Key = K;
+			double V = HabO2Kg[K];
+			Ar << Key << V;
+		}
+		TArray<int32> Rated = RatedHabs.Array();
+		Rated.Sort();
+		Ar << Rated;
+		TArray<int32> RoomKeys;
+		HabBayRooms.GetKeys(RoomKeys);
+		RoomKeys.Sort();
+		int32 RoomCount = RoomKeys.Num();
+		Ar << RoomCount;
+		for (const int32 K : RoomKeys)
+		{
+			int32 Key = K;
+			TArray<FName> Rooms = HabBayRooms[K];
+			Ar << Key << Rooms;
+		}
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -6200,6 +7294,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		SerializeResourceMap(Ar, B.OutputKg);
 		Buildings.Add(MoveTemp(B));
 	}
+	RebuildHabTopology(); // BM-1: derived, never saved
 
 	Ar << Num;
 	for (int32 i = 0; i < Num; ++i)
@@ -6272,7 +7367,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		}
 		for (FRHColonist& C : Colonists)
 		{
-			Ar << C.Id << C.Name << C.HomeLevel << C.bSupported << C.UnsupportedSimSeconds;
+			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds; // HomeHab: v29
 		// Skills (save v24): sorted for deterministic bytes; load repopulates.
 		if (Ar.IsLoading())
 		{
@@ -6431,6 +7526,43 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Staffing (save v27).
 	{
 		Ar << SeatPriority << StaffedSeats << SeatFillSols;
+	}
+	// Surface habitats (save v29). Topology was rebuilt after the building loop.
+	{
+		HabO2Kg.Empty();
+		RatedHabs.Empty();
+		HabBayRooms.Empty();
+		HabNetsNotedSmall.Reset();
+		int32 O2Count = 0;
+		Ar << O2Count;
+		for (int32 i = 0; i < O2Count; ++i)
+		{
+			int32 Key = 0;
+			double V = 0.0;
+			Ar << Key << V;
+			HabO2Kg.Add(Key, V);
+		}
+		TArray<int32> Rated;
+		Ar << Rated;
+		RatedHabs.Append(Rated);
+		int32 RoomCount = 0;
+		Ar << RoomCount;
+		for (int32 i = 0; i < RoomCount; ++i)
+		{
+			int32 Key = 0;
+			TArray<FName> Rooms;
+			Ar << Key << Rooms;
+			HabBayRooms.Add(Key, MoveTemp(Rooms));
+		}
+		for (const FRHColonist& Col : Colonists)
+		{
+			const FRHBuildingInstance* HB = Col.HomeHab ? FindBuildingById(Col.HomeHab) : nullptr;
+			const FRHBuildingRow* HD = (HB && Defs) ? Defs->GetBuilding(HB->DefName) : nullptr;
+			if (Col.HomeHab != 0 && !(HB && HB->Level == 0 && HD && HD->Pressurized))
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v29: colonist %d HomeHab #%d is not a surface habitat"), Col.Id, Col.HomeHab);
+			}
+		}
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

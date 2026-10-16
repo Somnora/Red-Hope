@@ -1857,6 +1857,412 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// Surface habitats self-test (BM-1, 2026-10-16): pressurized shells on the
+	// 10 m bay grid join into networks; a network rates Livable full +
+	// circulated + >= MinLivableCells bays; residents, breathing, zoning,
+	// stations in bays, Hope across modules, the optional shaft link, save
+	// v29 and loss/recovery. Fails loudly. `-surfacehab`.
+	if (FParse::Param(*Params, TEXT("surfacehab")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SURFACE HABITAT TEST (BM-1, 2026-10-16) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
+			{
+				Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+				Sim->Debug_SetBatteryWh(1.0e9);
+				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+			}
+		};
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("SURFACEHAB ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("SURFACEHAB FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		int32 Milestones = 0;
+		TArray<FString> Alerts;
+		const FDelegateHandle MilestoneH = Sim->OnMilestone.AddLambda([&Milestones](const FString&) { ++Milestones; });
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Sub) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Sub) ? 1 : 0; } return N; };
+		const auto LastAlert = [&Alerts]() { return Alerts.Num() ? Alerts.Last() : FString(); };
+		const auto IdOf = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName(Def) && B.Level == Level && FMath::Abs(B.LocationCm.X - X) < 1.0 && FMath::Abs(B.LocationCm.Y - Y) < 1.0)
+				{
+					return B.Id;
+				}
+			}
+			return 0;
+		};
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return IdOf(Def, X, Y, Level);
+		};
+		const auto Can = [&](const TCHAR* Def, double X, double Y, FString& Why, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Why.Reset();
+			return Sim->CanPlaceBuildingSized(FName(Def), FVector(X, Y, 0.0), Why, Level, SX, SY);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NOx(TEXT("Oxygen"));
+		FString Why, R;
+
+		// S0. A fresh world houses nobody.
+		Expect(Sim->GetHousingCapacity() == 0 && Sim->Debug_AddColonists(1) == 0 && Sim->GetPopulation() == 0, TEXT("S0 fresh world: no beds, no colonists"));
+
+		// S1. Pure data (DT/CSV), fail-fast.
+		const FRHBuildingRow* HabDef = DefsSub->GetBuilding(FName("HabModule"));
+		const FRHBuildingRow* CorDef = DefsSub->GetBuilding(FName("HabCorridor"));
+		if (!HabDef || !CorDef)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("SURFACEHAB FAIL: HabModule/HabCorridor rows missing (sync DT_Buildings)"));
+			return 1;
+		}
+		{
+			const TMap<FName, double> Bill = URHDefinitionsSubsystem::GetBuildCostFor(*HabDef, 0);
+			Expect(HabDef->SliceActive && HabDef->DragSized && HabDef->Pressurized && !HabDef->Interior && HabDef->FootprintX == 5 && HabDef->FootprintY == 5
+				&& HabDef->MaxBedsPerSide == 4 && HabDef->DragShortSideMax == 0 && Near(Bill.FindRef(FName("Struct")), 200.0, 1e-6) && Near(Bill.FindRef(FName("Shielding")), 50.0, 1e-6),
+				TEXT("S1 HabModule row: drag-sized pressurized 5x5 bay, cap 4, bill Struct 200 + Shielding 50"));
+			const TMap<FName, double> CBill = URHDefinitionsSubsystem::GetBuildCostFor(*CorDef, 0);
+			Expect(CorDef->Pressurized && CorDef->DragSized && CorDef->ProvidesRoom == FName("Hallway") && CorDef->DragShortSideMax == 1 && CorDef->MaxBedsPerSide == 6
+				&& CBill.FindRef(FName("Struct")) < Bill.FindRef(FName("Struct")), TEXT("S1 HabCorridor row: pressurized Hallway, 1 bay wide, cap 6, cheaper"));
+			const FRHBuildingRow* Old = DefsSub->GetBuilding(FName("Habitat"));
+			Expect(Old && !Old->SliceActive && !Old->Pressurized, TEXT("S1 the old Habitat row stays dormant (prefab chain is BM-1b)"));
+			bool bInteriorOk = true;
+			for (const TCHAR* N : { TEXT("AirFilter"), TEXT("LabModule"), TEXT("InfirmaryModule"), TEXT("HumidityRegulator"), TEXT("Floodmast") })
+			{
+				const FRHBuildingRow* D = DefsSub->GetBuilding(FName(N));
+				bInteriorOk &= D && D->Interior;
+			}
+			for (const TCHAR* N : { TEXT("HabModule"), TEXT("GreenhouseDome"), TEXT("ChargePad"), TEXT("SolarArray") })
+			{
+				const FRHBuildingRow* D = DefsSub->GetBuilding(FName(N));
+				bInteriorOk &= D && !D->Interior;
+			}
+			Expect(bInteriorOk, TEXT("S1 Interior flags: life support + modules + Floodmast yes; shells, dome, pads, solar no"));
+			const FRHBuildingRow* DomeDef = DefsSub->GetBuilding(FName("GreenhouseDome"));
+			Expect(DomeDef && !DomeDef->Pressurized && DomeDef->MaxBedsPerSide == 0 && Sim->GetMinLivableCells() == 4 && Sim->GetDomeMaxBedsPerSide() == 3
+				&& Sim->GetMaxBedsPerSide(HabDef) == 4 && Sim->GetMaxBedsPerSide(DomeDef) == 3, TEXT("S1 caps: hab 4, dome 3 (row 0 = config), 4-bay minimum"));
+		}
+
+		// S2. Setup: power and stock (no Shielding yet).
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 2000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->AddStock(FName("Struct"), 5000.0);
+		Sim->AddStock(NOx, 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+
+		// S3. Placement gates.
+		Expect(!Can(TEXT("HabModule"), -1000, 1000, Why) && Why.Contains(TEXT("Shielding")), FString::Printf(TEXT("S3a no Shielding, no producer: refused (%s)"), *Why));
+		Sim->AddStock(FName("Shielding"), 1000.0);
+		Expect(Can(TEXT("HabModule"), -1000, 1000, Why), FString::Printf(TEXT("S3b with Shielding: accepted (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -1250, 1000, Why) && Why.Contains(TEXT("grid")), FString::Printf(TEXT("S3c off-grid x refused (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -1000, 1250, Why) && Why.Contains(TEXT("grid")), FString::Printf(TEXT("S3c off-grid y refused (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -1000, 1000, Why, 2, 1) && Why.Contains(TEXT("grid")), FString::Printf(TEXT("S3c a 2x1 centred on a bay centre is off-grid (%s)"), *Why));
+		Expect(Can(TEXT("HabModule"), -1500, 1000, Why, 2, 1), FString::Printf(TEXT("S3c a 2x1 centred on a bay edge is on-grid (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -4000, 0, Why) && Why.Contains(TEXT("coverage")), FString::Printf(TEXT("S3d outside coverage refused (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -2500, 1000, Why, 2, 1) && Why.Contains(TEXT("coverage")), FString::Printf(TEXT("S3d every bay must be covered, not just the centre (%s)"), *Why));
+		Expect(!Can(TEXT("HabModule"), -500, 2000, Why, 5, 1) && Why.Contains(TEXT("bays a side")), FString::Printf(TEXT("S3e past 4 bays a side refused (%s)"), *Why));
+		Expect(!Can(TEXT("HabCorridor"), -1500, 1500, Why, 2, 2) && Why.Contains(TEXT("wide")), FString::Printf(TEXT("S3e a 2-wide corridor refused (%s)"), *Why));
+		Expect(Can(TEXT("HabCorridor"), 0, 2000, Why, 3, 1), FString::Printf(TEXT("S3e a 3x1 corridor accepted (%s)"), *Why));
+		Expect(Can(TEXT("AirFilter"), -1000, 1000, Why), FString::Printf(TEXT("S3f a surface AirFilter with no hab is legacy-legal (%s)"), *Why));
+
+		// S4. A 2x1 order: the site's bill and build time are two bays'.
+		{
+			FRHCommand Order; Order.Verb = FName("Build"); Order.Target = FName("HabModule"); Order.Location = FVector(-500.f, -1000.f, 0.f); Order.Level = 0;
+			Order.Value = URHSimWorldSubsystem::EncodeBuildSize(2, 1);
+			Sim->EnqueueCommand(Order);
+			RunSols(0.05);
+			const FRHBuildingInstance* Site = nullptr;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("HabModule") && B.bUnderConstruction) { Site = &B; } }
+			Expect(Site && Site->SizeX == 2 && Site->SizeY == 1, TEXT("S4 the order lands as a 2x1 site"));
+			if (Site)
+			{
+				const TMap<FName, double> Bill = Sim->GetSiteBill(*Site);
+				Expect(Near(Bill.FindRef(FName("Struct")), 400.0, 1e-6) && Near(Bill.FindRef(FName("Shielding")), 100.0, 1e-6) && Near(Site->BuildRemaining_s, 600.0, 1e-6)
+					&& Sim->GetHabNetworkRoot(Site->Id) == 0, FString::Printf(TEXT("S4 site bill Struct %.0f + Shielding %.0f, %.0f s, not a network member"),
+						Bill.FindRef(FName("Struct")), Bill.FindRef(FName("Shielding")), Site->BuildRemaining_s));
+			}
+		}
+
+		// S5. A one-bay pocket seals but cannot rate.
+		const int32 A = Place(TEXT("HabModule"), -1000, 1000);
+		Expect(Can(TEXT("AirFilter"), -1000, 1000, Why), FString::Printf(TEXT("S5 an AirFilter wholly inside the bay is accepted (%s)"), *Why));
+		Expect(!Can(TEXT("AirFilter"), -1500, 1000, Why), FString::Printf(TEXT("S5 an AirFilter straddling the wall is refused (%s)"), *Why));
+		Expect(!Can(TEXT("AirFilter"), -1000, 1400, Why), FString::Printf(TEXT("S5 an AirFilter poking out of the bay is refused (%s)"), *Why));
+		Expect(!Can(TEXT("ChargePad"), -1000, 1000, Why) && !Can(TEXT("HabModule"), -1000, 1000, Why), TEXT("S5 a pad or another shell inside the bay is refused"));
+		Place(TEXT("AirFilter"), -1000, -2000);
+		RunSols(0.5);
+		Expect(Near(Sim->GetHabO2Kg(A), 0.0, 1e-9) && !Sim->IsHabNetworkCirculated(A) && !Sim->IsHabRated(A),
+			FString::Printf(TEXT("S5 an outside filter does not circulate the hab (O2 %.2f)"), Sim->GetHabO2Kg(A)));
+		const int32 AFA = Place(TEXT("AirFilter"), -1000, 1000);
+		RunSols(1.0);
+		Expect(Near(Sim->GetHabO2Kg(A), 100.0, 1e-6) && Sim->IsHabNetworkCirculated(A) && !Sim->IsHabRated(A) && Sim->IsHabNetworkSealedButSmall(A),
+			FString::Printf(TEXT("S5 filter inside: full %.2f kg, circulated, sealed but small"), Sim->GetHabO2Kg(A)));
+		Expect(CountAlerts(TEXT("SURFACE HABITAT SEALED")) == 1 && Sim->GetHousingCapacity() == 0 && !Sim->HasVaultRating() && Milestones == 0,
+			FString::Printf(TEXT("S5 one SEALED note (%d), no beds, no vault milestone"), CountAlerts(TEXT("SURFACE HABITAT SEALED"))));
+
+		// S6. A network forms and rates.
+		const int32 B = Place(TEXT("HabModule"), -2000, 1000);
+		const int32 Cc = Place(TEXT("HabModule"), -1500, 2000, 2, 1);
+		const int32 Dome = Place(TEXT("GreenhouseDome"), -3000, 1000);
+		Expect(A && B && Cc && Sim->GetHabNetworkRoot(B) == A && Sim->GetHabNetworkRoot(Cc) == A && Sim->GetHabNetworkBays(A) == 4 && Sim->GetHabNetworkRoot(Dome) == 0,
+			FString::Printf(TEXT("S6 A+B+C share edges: one network of %d bays rooted at A; the dome is not a member"), Sim->GetHabNetworkBays(A)));
+		RunSols(1.0);
+		Expect(Near(Sim->GetHabO2Kg(B), 100.0, 1e-6) && Near(Sim->GetHabO2Kg(Cc), 200.0, 1e-6) && Sim->IsHabRated(A) && Sim->IsHabRated(B) && Sim->IsHabRated(Cc),
+			FString::Printf(TEXT("S6 B %.1f + C %.1f kg: the network rates"), Sim->GetHabO2Kg(B), Sim->GetHabO2Kg(Cc)));
+		Expect(CountAlerts(TEXT("RATED LIVABLE")) == 1 && LastAlert().Contains(TEXT("0 beds")) && !Sim->HasVaultRating() && Sim->GetColonyHope().Milestones == 0.0
+			&& Milestones == 0 && Sim->GetHousingCapacity() == 0, TEXT("S6 one RATED alert naming 0 beds; never the vault milestone"));
+		Sim->Debug_DeliverCargo(FName("CrewPod"));
+		Expect(Sim->GetPopulation() == 0 && LastAlert().Contains(TEXT("CREW POD RETURNED")) && LastAlert().Contains(TEXT("vault")),
+			FString::Printf(TEXT("S6 no vault yet: the pod is turned away and points at the vault (%s)"), *LastAlert()));
+
+		// S7. Zoning bays.
+		{
+			FRHCommand Z; Z.Verb = FName("Designate"); Z.Target = FName("LivingQuarters"); Z.Level = 0; Z.Location = FVector(-1000.f, 1000.f, 0.f);
+			Sim->EnqueueCommand(Z);
+			RunSols(0.05);
+		}
+		Expect(Sim->GetBayRoom(A, 0) == FName("LivingQuarters"), TEXT("S7a the Designate order zones bay A:0 by location"));
+		Why.Reset();
+		Expect(Sim->DesignateBay(Cc, 1, FName("LivingQuarters"), Why), FString::Printf(TEXT("S7b C:1 zoned Living (%s)"), *Why));
+		Expect(!Sim->DesignateBay(B, 0, FName("Garden"), Why) && !Sim->DesignateBay(Cc, 0, FName("Greenhouse"), Why) && !Sim->DesignateBay(B, 0, FName("Smoking"), Why)
+			&& !Sim->DesignateBay(B, 1, FName("Lab"), Why) && Sim->GetPlantedCellCount() == 0, TEXT("S7c gardens, a dormant row and an out-of-range bay are refused"));
+		Expect(Sim->GetHabBeds(A) + Sim->GetHabBeds(Cc) == 2 && Sim->GetHousingCapacity() == 0,
+			FString::Printf(TEXT("S7d two Living bays = 2 beds, not yet open to crew without the vault (capacity %d)"), Sim->GetHousingCapacity()));
+		const int32 Hh = Place(TEXT("HabModule"), -2000, -500, 1, 2);
+		Expect(Hh && Sim->GetBayGrid(*Sim->GetBuildings().FindByPredicate([Hh](const FRHBuildingInstance& X) { return X.Id == Hh; })) == FIntPoint(1, 2)
+			&& Sim->GetHabNetworkBays(A) == 6 && Sim->IsHabRated(Hh), TEXT("S7e H joins the rated network (6 bays) and carries its rating"));
+		Expect(Sim->DesignateBay(Hh, 0, FName("LivingQuarters"), Why) && Sim->DesignateBay(Hh, 1, FName("LivingQuarters"), Why) && Sim->GetHabBeds(Hh) == 2,
+			FString::Printf(TEXT("S7e H's two Living bays: %d beds"), Sim->GetHabBeds(Hh)));
+		{
+			int32 SiteId = 0;
+			for (const FRHBuildingInstance& X : Sim->GetBuildings()) { if (X.DefName == FName("HabModule") && X.bUnderConstruction) { SiteId = X.Id; } }
+			Expect(Sim->GetHabNetworkRoot(SiteId) == 0 && Sim->GetHabNetworkBays(A) == 6, TEXT("S7f the edge-adjacent construction site stays out of the network"));
+		}
+
+		// S8. Crew still need the vault (director 2026-10-16): with 4 surface
+		// beds and no vault the pod is turned away; once the vault is
+		// certified it lands in the surface beds. Breathing spans the network.
+		Sim->Debug_DeliverCargo(FName("CrewPod"));
+		Expect(Sim->GetPopulation() == 0 && Sim->GetHousingCapacity() == 0 && LastAlert().Contains(TEXT("vault")),
+			TEXT("S8 surface beds alone do not admit crew"));
+		Sim->Debug_SetVaultRated(true);
+		Expect(Sim->GetHousingCapacity() == 4, FString::Printf(TEXT("S8 vault certified: the 4 surface beds open (capacity %d)"), Sim->GetHousingCapacity()));
+		Sim->Debug_DeliverCargo(FName("CrewPod"));
+		{
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			const bool bHomes = Cs.Num() == 4 && Cs[0].HomeHab == A && Cs[1].HomeHab == Cc && Cs[2].HomeHab == Hh && Cs[3].HomeHab == Hh
+				&& Cs[0].HomeLevel == 0 && Cs[1].HomeLevel == 0 && Cs[2].HomeLevel == 0 && Cs[3].HomeLevel == 0;
+			Expect(bHomes && LastAlert().Contains(TEXT("THE CREW HAS LANDED")), TEXT("S8 four colonists land in surface beds [A, C, H, H], HomeLevel 0"));
+		}
+		Expect(Sim->Debug_AddColonists(1) == 0, TEXT("S8 no fifth bed"));
+		Sim->AddStock(NOx, 0.400001 - Sim->GetStock(NOx));
+		RunSols(0.05);
+		{
+			bool bAll = true;
+			for (const FRHColonist& Col : Sim->GetColonists()) { bAll &= Col.bSupported; }
+			Expect(Sim->GetHabO2Kg(Hh) < 1e-9 && bAll && Sim->IsHabRated(A) && Sim->IsHabRated(Hh) && Sim->GetHabO2Kg(A) < 99.9,
+				FString::Printf(TEXT("S8 empty H's residents breathe the network (H %.4f, A %.4f), all supported"), Sim->GetHabO2Kg(Hh), Sim->GetHabO2Kg(A)));
+		}
+		Sim->AddStock(NOx, 6000.0);
+		RunSols(0.5);
+		{
+			bool bAll = true;
+			for (const FRHColonist& Col : Sim->GetColonists()) { bAll &= Col.bSupported; }
+			// The push fills H to 200 kg, then its two residents breathe in the
+			// same step (StepPopulation runs after StepHabitability): within 0.1.
+			Expect(Near(Sim->GetHabO2Kg(Hh), 200.0, 0.1) && bAll && Near(Sim->GetColonyHope().Housing, 15.0, 1e-6),
+				FString::Printf(TEXT("S8 refilled: H %.3f kg, all supported, Housing %.2f"), Sim->GetHabO2Kg(Hh), Sim->GetColonyHope().Housing));
+		}
+		Expect(!Sim->DesignateBay(A, 0, NAME_None, Why), FString::Printf(TEXT("S8 the bed guard keeps A's sleeper's bed (%s)"), *Why));
+
+		// S9. Stations in bays.
+		Expect(Can(TEXT("InfirmaryModule"), -2000, 1000, Why), FString::Printf(TEXT("S9a an Infirmary in free bay B (%s)"), *Why));
+		Expect(!Can(TEXT("InfirmaryModule"), -1000, 1000, Why) && Why.Contains(TEXT("zoned")), FString::Printf(TEXT("S9a not in zoned bay A (%s)"), *Why));
+		Expect(!Can(TEXT("InfirmaryModule"), -2000, -1000, Why), FString::Printf(TEXT("S9a not in zoned H:0 (%s)"), *Why));
+		Expect(!Can(TEXT("InfirmaryModule"), 0, -2000, Why), FString::Printf(TEXT("S9a not on open ground (%s)"), *Why));
+		Place(TEXT("InfirmaryModule"), -2000, 1000);
+		RunSols(0.05);
+		Expect(Near(Sim->GetEffectiveEvacSols(), 3.0, 1e-9) && !Can(TEXT("LabModule"), -2000, 1000, Why) && !Sim->DesignateBay(B, 0, FName("Lab"), Why),
+			FString::Printf(TEXT("S9b the infirmary in B stretches recall to %.1f sols; one station per bay"), Sim->GetEffectiveEvacSols()));
+		DefsSub->ActivateRoomRow(FName("LabFull"));
+		Expect(Can(TEXT("LabModule"), -2000, 2000, Why), FString::Printf(TEXT("S9c a Lab Module in C:0 (%s)"), *Why));
+		Place(TEXT("LabModule"), -2000, 2000);
+		RunSols(0.05);
+		Expect(Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Sim->GetColonyHope().FilledSeats == 2,
+			FString::Printf(TEXT("S9c the module seats 2 at x2.0 (labSum %.2f, filled %d)"), Sim->GetLabYieldSeatSum(), Sim->GetColonyHope().FilledSeats));
+
+		// S10. Shaft link, the corridor, floors-first housing, adjacency, seat order.
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, R);
+		Expect(!Can(TEXT("HabModule"), 1000, -3000, Why, 1, 1, -1) && Why.Contains(TEXT("surface")), FString::Printf(TEXT("S10 no habitat shells underground (%s)"), *Why));
+		const int32 PQ = Place(TEXT("HabModule"), 1500, 1000, 2, 1);
+		const int32 Corr = Place(TEXT("HabCorridor"), 1000, 2000);
+		RunSols(0.5);
+		Expect(Near(Sim->GetHabO2Kg(PQ), 0.0, 1e-9) && !Sim->IsHabNetworkCirculated(PQ), TEXT("S10 no filter, no rated floor -1: no air"));
+		Expect(!Sim->DesignateBay(Corr, 0, FName("Lab"), Why) && Why.Contains(TEXT("fixed")), FString::Printf(TEXT("S10 a corridor bay's room is fixed (%s)"), *Why));
+		const int32 FAF = Place(TEXT("AirFilter"), 1000, 1500, 1, 1, -1);
+		RunSols(2.0);
+		Expect(Sim->IsFloorRated(-1) && Sim->HasVaultRating() && Milestones == 0 && Near(Sim->GetColonyHope().Milestones, 5.0, 1e-9),
+			FString::Printf(TEXT("S10 floor -1 rates (vault flag already set by the harness: no second milestone, %d; Hope milestones 5)"), Milestones));
+		Expect(Near(Sim->GetHabO2Kg(PQ), 200.0, 1e-6) && Near(Sim->GetHabO2Kg(Corr), 100.0, 1e-6) && !Sim->IsHabRated(PQ) && Sim->IsHabNetworkSealedButSmall(PQ)
+			&& CountAlerts(TEXT("SURFACE HABITAT SEALED")) == 2, FString::Printf(TEXT("S10 the shaft link fills PQ %.1f + corridor %.1f; 3 bays: sealed, not rated"),
+				Sim->GetHabO2Kg(PQ), Sim->GetHabO2Kg(Corr)));
+		const int32 Rr = Place(TEXT("HabModule"), 2000, 2000);
+		RunSols(0.5);
+		Expect(Sim->IsHabRated(PQ) && Sim->GetHabNetworkBays(PQ) == 4, TEXT("S10 R makes 4 bays (the corridor counts): rated"));
+		Sim->SetManualPower(FAF, false);
+		RunSols(0.1);
+		Expect(!Sim->IsFloorRated(-1) && !Sim->IsHabRated(PQ) && Sim->IsHabRated(A), TEXT("S10 floor filter off: floor -1 and the linked network lose their rating; A keeps its own"));
+		Sim->SetManualPower(FAF, true);
+		RunSols(0.5);
+		Expect(Sim->IsFloorRated(-1) && Sim->IsHabRated(PQ), TEXT("S10 back on: both rate again"));
+		Sim->DesignateBay(PQ, 0, FName("LivingQuarters"), Why);
+		Expect(Sim->GetHousingCapacity() == 9, FString::Printf(TEXT("S10 capacity floor 4 + network 4 + PQ 1 = %d (expect 9)"), Sim->GetHousingCapacity()));
+		Expect(Sim->Debug_AddColonists(6) == 5, TEXT("S10 five more housed"));
+		{
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			bool bOk = Cs.Num() == 9;
+			for (int32 i = 4; bOk && i < 8; ++i) { bOk &= Cs[i].HomeLevel == -1 && Cs[i].HomeHab == 0; }
+			bOk = bOk && Cs[8].HomeHab == PQ && Cs[8].HomeLevel == 0;
+			Expect(bOk, TEXT("S10 floors fill first (Ids 5-8 on floor -1), then the network (Id 9 in PQ)"));
+		}
+		const int32 Ss = Place(TEXT("HabModule"), 2000, 0);
+		RunSols(0.5);
+		Sim->DesignateBay(Ss, 0, FName("Workstation"), Why);
+		Sim->DesignateBay(Rr, 0, FName("Cooking"), Why);
+		Sim->DesignateBay(PQ, 1, FName("Dining"), Why);
+		Sim->DesignateRoom(-1, 0, FName("Workstation"), R);
+		RunSols(0.05);
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			FIntVector St;
+			const bool bSt = Sim->GetColonistStation(1, St);
+			Expect(Hp.OffendedPairs == 1 && Near(Hp.AdjacencyPenalty, 8.0, 1e-9) && Near(Hp.Rooms, 6.5, 1e-6),
+				FString::Printf(TEXT("S10 Hope: Q-R offends, the corridor partitions P-R (pairs %d, adj %.1f, rooms %.2f)"), Hp.OffendedPairs, Hp.AdjacencyPenalty, Hp.Rooms));
+			Expect(Hp.FilledSeats == 4 && Near(Hp.Jobs, 12.0, 1e-9) && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Near(Sim->GetWorkstationYieldSeatSum(), 2.0, 1e-4)
+				&& bSt && St == FIntVector(-1, 0, 0) && Near(Hp.Housing, 15.0 * 5.0 / 9.0, 1e-6),
+				FString::Printf(TEXT("S10 seats: floor first (filled %d, jobs %.0f, lab %.2f, ws %.2f, housing %.3f)"), Hp.FilledSeats, Hp.Jobs,
+					Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum(), Hp.Housing));
+		}
+		Sim->DesignateBay(PQ, 1, NAME_None, Why);
+		Expect(Sim->GetColonyHope().OffendedPairs == 0 && Near(Sim->GetColonyHope().Rooms, 3.5, 1e-6), TEXT("S10 clearing the Dining bay clears the pair"));
+		Sim->DesignateBay(PQ, 1, FName("Dining"), Why);
+		Expect(Sim->GetColonyHope().OffendedPairs == 1 && Near(Sim->GetColonyHope().Rooms, 6.5, 1e-6), TEXT("S10 re-zoned: the pair is back"));
+		{
+			FRHCommand As; As.Verb = FName("Assign"); As.Level = 0; As.Location = FVector(2000.f, 0.f, 0.f);
+			Sim->EnqueueCommand(As);
+			RunSols(0.05);
+			FIntVector St;
+			Expect(Sim->GetSeatPriority().Num() && Sim->GetSeatPriority()[0] == FIntVector(0, 0, Ss) && Sim->GetColonistStation(1, St) && St == FIntVector(0, 0, Ss),
+				TEXT("S10 Assign by location puts bay S:0 first"));
+		}
+
+		// S11. Save/load inside the 98-100% band.
+		TArray<FIntPoint> Homes;
+		for (const FRHColonist& Col : Sim->GetColonists()) { Homes.Add(FIntPoint(Col.HomeLevel, Col.HomeHab)); }
+		Sim->AddStock(NOx, -Sim->GetStock(NOx));
+		RunSols(0.25);
+		const auto InBand = [&](double Fill, double Req) { return Req > 0.0 && Fill >= 0.98 * Req && Fill < Req; };
+		Expect(InBand(Sim->GetHabNetworkO2Kg(A), Sim->GetHabNetworkO2RequiredKg(A)) && InBand(Sim->GetHabNetworkO2Kg(PQ), Sim->GetHabNetworkO2RequiredKg(PQ))
+			&& InBand(Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1)) && Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1),
+			FString::Printf(TEXT("S11 dry pool: all three inside the hysteresis band, still rated (net1 %.2f/%.0f, net2 %.2f/%.0f, floor %.2f/%.0f)"),
+				Sim->GetHabNetworkO2Kg(A), Sim->GetHabNetworkO2RequiredKg(A), Sim->GetHabNetworkO2Kg(PQ), Sim->GetHabNetworkO2RequiredKg(PQ),
+				Sim->GetFloorO2Kg(-1), Sim->GetFloorO2RequiredKg(-1)));
+		TMap<int32, double> O2Snap;
+		for (const int32 Id : { A, B, Cc, Hh, PQ, Corr, Rr, Ss }) { O2Snap.Add(Id, Sim->GetHabO2Kg(Id)); }
+		const int32 CapSnap = Sim->GetHousingCapacity();
+		const double LabSnap = Sim->GetLabYieldSeatSum(), EvacSnap = Sim->GetEffectiveEvacSols();
+		const TArray<FIntVector> PrioSnap = Sim->GetSeatPriority();
+		FString Err;
+		Expect(Sim->SaveColony(TEXT("surfacehabtest"), Err), FString::Printf(TEXT("S11 saved (%s)"), *Err));
+		Place(TEXT("HabModule"), 0, 2000);  // dirty: merges the networks
+		Sim->DesignateBay(PQ, 1, NAME_None, Why);
+		Err.Reset();
+		Expect(Sim->LoadColony(TEXT("surfacehabtest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("S11 loaded (%s)"), *Err));
+		{
+			int32 Hx = 0, Bx = 0;
+			bool bSame = !Sim->FindBayAt(FVector(0.f, 2000.f, 0.f), Hx, Bx) && Sim->GetBayRoom(PQ, 1) == FName("Dining")
+				&& Sim->GetHousingCapacity() == CapSnap && Near(Sim->GetLabYieldSeatSum(), LabSnap, 1e-9) && Near(Sim->GetEffectiveEvacSols(), EvacSnap, 1e-9)
+				&& Sim->GetSeatPriority() == PrioSnap && Sim->GetHabNetworkBays(A) == 6 && Sim->GetHabNetworkBays(PQ) == 5;
+			for (const TPair<int32, double>& P : O2Snap) { bSame &= Near(Sim->GetHabO2Kg(P.Key), P.Value, 1e-9); }
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			bSame &= Cs.Num() == Homes.Num();
+			for (int32 i = 0; bSame && i < Cs.Num(); ++i) { bSame &= FIntPoint(Cs[i].HomeLevel, Cs[i].HomeHab) == Homes[i]; }
+			FIntVector St;
+			bSame &= Sim->GetColonistStation(1, St) && St == FIntVector(0, 0, Ss);
+			Expect(bSame, TEXT("S11 the load restores O2, homes, rooms, networks (6 + 5 bays), seats and priority with no step"));
+		}
+		RunSols(0.05);
+		Expect(Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1), TEXT("S11 a step after the load: the ratings held (a lost rating could not be regained on a dry pool)"));
+
+		// S12. Loss and recovery.
+		RunSols(1.0);
+		{
+			bool bNone = true;
+			for (const FRHColonist& Col : Sim->GetColonists()) { bNone &= !Col.bSupported; }
+			Expect(!Sim->IsHabRated(A) && !Sim->IsHabRated(PQ) && !Sim->IsFloorRated(-1) && bNone && Sim->GetHousingCapacity() == 0 && Sim->GetColonyHope().FilledSeats == 0
+				&& Near(Sim->GetLabYieldSeatSum(), 0.0, 1e-9) && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9) && Sim->GetPopulation() == 9,
+				TEXT("S12 a dry pool: every rating lost, everyone unsupported, no seats, no infirmary, nobody recalled yet"));
+		}
+		Sim->AddStock(NOx, 6000.0);
+		RunSols(1.0);
+		{
+			bool bAll = true;
+			for (const FRHColonist& Col : Sim->GetColonists()) { bAll &= Col.bSupported; }
+			Expect(Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1) && bAll && Sim->GetHousingCapacity() == 9 && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4)
+				&& Near(Sim->GetEffectiveEvacSols(), 3.0, 1e-9), TEXT("S12 oxygen back: all rated, all supported, seats and infirmary back"));
+		}
+
+		// S12b. A surface-only failure recalls the surface crew alone.
+		Sim->SetManualPower(AFA, false);
+		RunSols(0.1);
+		{
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			bool bSurfaceDown = Cs.Num() == 9;
+			for (int32 i = 0; bSurfaceDown && i < 4; ++i) { bSurfaceDown &= !Cs[i].bSupported; }
+			Expect(!Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1) && bSurfaceDown && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9),
+				TEXT("S12b network 1's filter off: only it fails (no shaft link); its four lose support; the infirmary in B goes offline"));
+		}
+		RunSols(2.5);
+		{
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			bool bOk = Cs.Num() == 5;
+			for (int32 i = 0; bOk && i < 4; ++i) { bOk &= Cs[i].HomeLevel == -1 && Cs[i].HomeHab == 0; }
+			bOk = bOk && Cs[4].HomeHab == PQ && Sim->GetHabResidents(A) == 0 && Sim->GetHabResidents(Hh) == 0 && Sim->GetHousingCapacity() == 5;
+			Expect(bOk, FString::Printf(TEXT("S12b the four surface residents are recalled; floor and PQ stay (pop %d, capacity %d)"), Sim->GetPopulation(), Sim->GetHousingCapacity()));
+			TArray<FIntPoint> Before;
+			for (const FRHColonist& Col : Cs) { Before.Add(FIntPoint(Col.HomeLevel, Col.HomeHab)); }
+			Err.Reset();
+			Sim->SaveColony(TEXT("surfacehabtest2"), Err);
+			Sim->Debug_AddColonists(1);
+			Sim->LoadColony(TEXT("surfacehabtest2"), Err);
+			bool bSame = Sim->GetPopulation() == 5;
+			for (int32 i = 0; bSame && i < Sim->GetColonists().Num(); ++i)
+			{
+				bSame &= FIntPoint(Sim->GetColonists()[i].HomeLevel, Sim->GetColonists()[i].HomeHab) == Before[i];
+			}
+			Expect(bSame, TEXT("S12b save/load keeps every survivor's home"));
+		}
+
+		Sim->OnMilestone.Remove(MilestoneH);
+		Sim->OnAlert.Remove(AlertH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SURFACE HABITAT TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

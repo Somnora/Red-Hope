@@ -89,11 +89,28 @@ struct REDHOPESIM_API FRHBuildingRow : public FTableRowBase
 	// cell of that room (its seats, YieldMul, the infirmary grace). DT_Rooms
 	// stays the single source of the station's numbers. Empty elsewhere.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName ProvidesRoom;
-	// Agri Gate C (2026-10-15): the player sizes this structure with a drag.
+	// Agri Gate C (2026-10-15): the player sizes this structure with a drag
+	// (beds for the greenhouse dome; bays for a BM-1 habitat shell).
 	// FootprintX/Y is ONE bed (a 10 m greenhouse bed = one underground
 	// greenhouse cell's numbers); the instance holds SizeX x SizeY beds, and
 	// the bill and build time scale with the bed count. Surface only.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool DragSized = false;
+	// BM-1 (2026-10-16): a pressurized surface habitat shell (HabModule,
+	// HabCorridor). Surface only; bays are 10 m (footprint 5x5 per bay; bays =
+	// (FootprintX/5*SizeX) x (FootprintY/5*SizeY)) and centre on the world 10 m
+	// grid. Shells sharing a bay edge form one network (derived, never saved).
+	// ProvidesRoom on a shell is the FIXED room of every bay (not a station -
+	// GetProvidedRoom returns null).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool Pressurized = false;
+	// BM-1: may stand wholly inside one bay of a pressurized shell (the
+	// footprint-overlap rule exempts that pair). Station modules with this flag
+	// are allowed in a bay, one station per bay.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool Interior = false;
+	// BM-1: drag cap per side (beds for a dome, bays for a hab); 0 = config
+	// DomeMaxBedsPerSide.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 MaxBedsPerSide = 0;
+	// BM-1: > 0 caps the SHORTER drag side (a corridor is 1 bay wide); 0 = none.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 DragShortSideMax = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

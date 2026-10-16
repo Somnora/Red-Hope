@@ -43,7 +43,11 @@ struct REDHOPESIM_API FRHColonist
 
 	UPROPERTY() int32 Id = 0;
 	UPROPERTY() FString Name;               // deterministic callsign
-	UPROPERTY() int32 HomeLevel = -1;       // the rated floor housing them
+	UPROPERTY() int32 HomeLevel = -1;       // the rated floor (<0), or 0 for a surface-habitat resident
+	// BM-1: the pressurized hab (building Id) whose Living bay houses this
+	// colonist; 0 = floor-housed. Surface residents carry HomeLevel 0.
+	// Serialized inline in the colonist record (save v29).
+	UPROPERTY() int32 HomeHab = 0;
 	UPROPERTY() bool bSupported = true;     // life support met this step
 	// Sustained unsupported time; at ColonistEvacSols the Program pulls the
 	// colonist back to orbit (abstract, prevention-framed consequence - the
@@ -192,6 +196,19 @@ public:
 	// Footprint half-extents in cm for a def at a size (2 m footprint cells).
 	static FVector2D GetFootprintHalfCm(const FRHBuildingRow* Def, int32 SizeX = 1, int32 SizeY = 1);
 	int32 GetDomeMaxBedsPerSide() const { return DomeMaxBedsPerSide; }
+	// BM-1: a drag-sized def's cap per side (row MaxBedsPerSide, else the dome cap).
+	int32 GetMaxBedsPerSide(const FRHBuildingRow* Def) const;
+	// --- Surface habitats (BM-1, 2026-10-16) ---
+	// A Pressurized shell is a grid of 10 m bays (footprint 5x5 per bay), its
+	// bay centres on the world 10 m grid. Bay index = by * NX + bx (the dome-bed
+	// convention). (0,0) when B is not a pressurized shell.
+	FIntPoint GetBayGrid(const FRHBuildingInstance& B) const;
+	static FIntPoint GetBayGridFor(const FRHBuildingRow* Def, int32 SizeX, int32 SizeY);
+	static bool IsOnBayGrid(const FRHBuildingRow* Def, const FVector& LocationCm, int32 SizeX, int32 SizeY);
+	static FVector SnapToBayGrid(const FRHBuildingRow* Def, const FVector& LocationCm, int32 SizeX, int32 SizeY);
+	FVector GetBayCentreCm(const FRHBuildingInstance& B, int32 Bay) const;
+	// The pressurized shell and bay under a surface point (any build state).
+	bool FindBayAt(const FVector& LocationCm, int32& OutHabId, int32& OutBay) const;
 	static int32 GetBedCount(const FRHBuildingInstance& B) { return FMath::Max(1, B.SizeX) * FMath::Max(1, B.SizeY); }
 	// The site's whole bill: the def's (Level-taxed) bill x its bed count.
 	TMap<FName, double> GetSiteBill(const FRHBuildingInstance& B) const;
@@ -256,6 +273,20 @@ public:
 	// Livable - the colony's first vault. Fires the exit card; never unset
 	// (losing the rating later is a crisis, not an un-achievement).
 	bool HasVaultRating() const { return bVaultRated; }
+	// BM-1: surface habitat networks. Shells sharing a bay edge form one
+	// network (derived, never saved); a network rates Livable when every member
+	// is full of O2, it is circulated (a powered Interior air circulator in any
+	// bay, or a shaft link to a RATED floor -1), and it spans >= MinLivableCells
+	// bays. A member of a rated network is "rated".
+	bool IsHabRated(int32 HabId) const;
+	int32 GetHabNetworkRoot(int32 HabId) const;      // min member Id; 0 = not a member
+	int32 GetHabNetworkBays(int32 HabId) const;
+	double GetHabO2Kg(int32 HabId) const;
+	double GetHabO2RequiredKg(int32 HabId) const;    // bays x O2FillKgPerCell
+	double GetHabNetworkO2Kg(int32 HabId) const;
+	double GetHabNetworkO2RequiredKg(int32 HabId) const;
+	bool IsHabNetworkCirculated(int32 HabId) const;
+	bool IsHabNetworkSealedButSmall(int32 HabId) const;
 
 	// --- Population (M2 Gate A1) ---
 	// Colonists arrive as CrewPod cargo and can disembark only into certified
@@ -272,10 +303,16 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// BM-1: beds in a hab's Living bays (x ColonistsPerCell) and who sleeps there.
+	int32 GetHabBeds(int32 HabId) const;
+	int32 GetHabResidents(int32 HabId) const;
 	// Cheat (RH.Demo): certify a floor instantly - fill its O2 to required and
 	// mark it Livable - so a demo crew can move in this frame instead of after
 	// sols of fill. Only certifies if it's circulated and big enough (real gate).
 	void Debug_ForceRateFloor(int32 Level);
+	// Harness: set the Phase-1 vault flag without the milestone (BM-1 tests:
+	// surface beds open to crew only once the vault is certified).
+	void Debug_SetVaultRated(bool bRated) { bVaultRated = bRated; }
 	// Harness: run a cargo item's landing effect directly (the commandlet's
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
@@ -293,6 +330,14 @@ public:
 	bool DesignateRoom(int32 Level, int32 CellIndex, FName RoomName, FString& OutReason);
 	FName GetRoomAt(int32 Level, int32 CellIndex) const;
 	const TMap<int32, TArray<FName>>& GetFloorRoomCells() const { return FloorRoomCells; }
+	// BM-1: zone a habitat bay (None clears). Refuses fixed-room shells
+	// (corridors), gardens (domes and underground grow food), a bay holding a
+	// station module, and taking the last bed from a sleeping resident.
+	bool DesignateBay(int32 HabId, int32 Bay, FName RoomName, FString& OutReason);
+	// The zoned room, else the shell's fixed ProvidesRoom, else None.
+	FName GetBayRoom(int32 HabId, int32 Bay) const;
+	const TMap<int32, TArray<FName>>& GetHabBayRooms() const { return HabBayRooms; }
+	const FRHBuildingInstance* FindModuleInBay(int32 HabId, int32 Bay) const;
 	// The colonist's job: a seat in a Lab/Workstation cell on a rated floor,
 	// assigned deterministically (shallowest floor, lowest cell, colonists by
 	// Id). Presentation flavor + Hope input; production effects come later.
@@ -955,6 +1000,36 @@ private:
 	// player are "sealed but too small", so the note fires once per episode
 	// instead of every step. Cleared when the floor rates up or loses seal.
 	TSet<int32> FloorsNotedSmall;
+	// BM-1 surface habitats. SAVED (v29): per-hab O2 fill (kg) and the hab Ids
+	// holding the rating (hysteresis needs history, like RatedFloors).
+	TMap<int32, double> HabO2Kg;
+	TSet<int32> RatedHabs;
+	TSet<int32> HabNetsNotedSmall;        // transient debounce by network root; reset on load
+	double ShaftLinkRangeCm = 1000.0;     // config ShaftLinkRange_m
+	// DERIVED topology (never saved): a pure function of Buildings, rebuilt
+	// EAGERLY by RebuildHabTopology() at every Buildings mutation site.
+	struct FRHHabMemberCache { int32 Id = 0; int32 NX = 0; int32 NY = 0; FIntPoint GridMin = FIntPoint::ZeroValue; int32 NetIndex = INDEX_NONE; FName FixedRoom; };
+	// Per network: Members ascending; Circulators / Modules are Buildings
+	// INDICES (stable: Buildings only ever appends) of the built Interior air
+	// circulators and the Interior station modules (any build state) standing
+	// in a member bay, ascending - the per-step reads never scan Buildings.
+	struct FRHHabNetCache { int32 Root = 0; TArray<int32> Members; int32 Bays = 0; TArray<int32> Circulators; TArray<int32> Modules; };
+	TMap<FIntPoint, int32> HabBayOwner;         // member bay lattice point -> hab Id (lookup only)
+	// The member shell and bay under a surface point (built members only; O(1)).
+	bool FindMemberBayAt(const FVector& LocationCm, int32& OutHabId, int32& OutBay) const;
+	TArray<FRHHabNetCache> HabNets;             // ascending Root; ITERATE THIS
+	TMap<int32, FRHHabMemberCache> HabMembers;  // lookup only, NEVER iterated
+	void RebuildHabTopology();
+	const FRHHabNetCache* FindHabNet(int32 HabId) const;
+	bool IsNetRated(const FRHHabNetCache& N) const;
+	bool IsNetCirculated(const FRHHabNetCache& N) const;
+	bool AnyHabNetRated() const;
+	int32 GetHabLivingBays(int32 HabId) const;
+	bool IsLocationInRatedHab(const FVector& LocationCm) const;
+	bool IsWhollyInBay(const FRHBuildingInstance& Hab, const FVector& LocationCm, const FVector2D& HalfCm, int32& OutBay) const;
+	FIntPoint CellPos(const FIntVector& Key) const;
+	void StepHabNetworks(float SubDt);
+	const FRHBuildingInstance* FindBuildingById(int32 Id) const;
 	// Population (M2 Gate A1; serialized, save v10). Config rows drive every
 	// rate - no hardcoded balance.
 	TArray<FRHColonist> Colonists;
@@ -970,6 +1045,10 @@ private:
 	// (save v11). ColonistJobs is derived (rebuilt each population step + on
 	// load) - never saved, so it can't diverge.
 	TMap<int32, TArray<FName>> FloorRoomCells;
+	// BM-1: per hab, the zoned room of each bay (index by*NX+bx); saved (v29).
+	// Never stored in FloorRoomCells: key 0 would open SetFloorClimate /
+	// DesignateDuct for the dome-bed level and defeat StepAgriculture's early-out.
+	TMap<int32, TArray<FName>> HabBayRooms;
 	TMap<int32, FName> ColonistJobs;
 	// Staffing (T2/T3). SeatPriority, StaffedSeats and SeatFillSols are saved
 	// (v27); the station maps re-derive with the jobs.

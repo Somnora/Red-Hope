@@ -1,5 +1,5 @@
 #!/bin/bash
-# Full headless self-test battery: the baseline plus all 26 suites.
+# Full headless self-test battery: the baseline plus all 27 suites.
 #
 #   bash scripts/sim/rh_battery.sh [sols]
 #
@@ -32,7 +32,7 @@ rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 SUITES="crew habitat vault borer rooms garden luxury hopedrive greenhouse water
          growth discovery trade earth solidarity covert espionage preemptive
-         crisis alive ladder ending tiers agri staff dome"
+         crisis alive ladder ending tiers agri staff dome surfacehab"
 
 FAILED=0
 
@@ -50,7 +50,7 @@ run_one() {
 
 echo "=== baseline (no suite switch), $SOLS sols ==="
 run_one baseline "-sols=$SOLS"
-echo "=== 26 suites ==="
+echo "=== 27 suites ==="
 for s in $SUITES; do
   run_one "$s" "-sols=$SOLS" "-$s"
 done
