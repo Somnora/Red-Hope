@@ -62,6 +62,25 @@ public:
 	// sorted by name (the catalogue's order), all rows (pure-data verifier).
 	// Absent table = no furnishing layer.
 	bool HasFurnitureCatalogue() const { return FurnitureTable != nullptr; }
+	// Wall fittings (BM-6, DT_Doors) and compartment classes (DT_Compartments).
+	bool HasWallCatalogue() const { return DoorsTable != nullptr; }
+	const FRHDoorRow* GetDoor(FName Name) const;
+	void GetActiveDoorsSorted(TArray<TPair<FName, const FRHDoorRow*>>& Out) const;
+	void ForEachDoorRow(TFunctionRef<void(FName, const FRHDoorRow&)> Fn) const;
+	const FRHCompartmentRow* GetCompartment(FName Name) const;
+	static TMap<FName, double> GetDoorCost(const FRHDoorRow& Row)
+	{
+		if (!Row.CostResources.IsEmpty())
+		{
+			return ParseResourceList(Row.CostResources);
+		}
+		TMap<FName, double> Cost;
+		if (Row.CostStruct_kg > 0.f)
+		{
+			Cost.Add(FName(TEXT("Struct")), Row.CostStruct_kg);
+		}
+		return Cost;
+	}
 	const FRHFurnitureRow* GetFurniture(FName Name) const;
 	void GetActiveFurnitureSorted(TArray<TPair<FName, const FRHFurnitureRow*>>& Out) const;
 	void ForEachFurnitureRow(TFunctionRef<void(FName, const FRHFurnitureRow&)> Fn) const;
@@ -196,6 +215,8 @@ private:
 	UPROPERTY(Config) FSoftObjectPath RivalsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rivals.DT_Rivals"));
 	UPROPERTY(Config) FSoftObjectPath CropsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Crops.DT_Crops"));
 	UPROPERTY(Config) FSoftObjectPath FurnitureTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Furniture.DT_Furniture"));
+	UPROPERTY(Config) FSoftObjectPath DoorsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Doors.DT_Doors"));
+	UPROPERTY(Config) FSoftObjectPath CompartmentsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Compartments.DT_Compartments"));
 	UPROPERTY(Config) FSoftObjectPath SolarCurvePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/CT_SolarDiurnal.CT_SolarDiurnal"));
 
 	UPROPERTY() TObjectPtr<UDataTable> ResourcesTable;
@@ -212,5 +233,7 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
 	UPROPERTY() TObjectPtr<UDataTable> CropsTable;
 	UPROPERTY() TObjectPtr<UDataTable> FurnitureTable;
+	UPROPERTY() TObjectPtr<UDataTable> DoorsTable;
+	UPROPERTY() TObjectPtr<UDataTable> CompartmentsTable;
 	UPROPERTY() TObjectPtr<UCurveTable> SolarCurveTable;
 };

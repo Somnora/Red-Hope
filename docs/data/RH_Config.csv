@@ -165,3 +165,4 @@ ShaftLinkRange_m,10,m,"BM-1 (2026-10-16): a surface habitat network is also circ
 SalvageFraction,0.5,fraction,"BM-3 (2026-10-16): share of a standing structure's bill (Level-taxed, per bay) reclaimed to the Lander when it is demolished; held stock always comes back in full and a cancelled site returns everything delivered. Built imported hardware salvages nothing. Placeholder, director review"
 FurnitureRefundFraction,0.75,fraction,"BM-4 (director ruling 5a, 2026-10-15): share of a furnishing's bill refunded to the Lander when it is sold (or its habitat demolished)"
 HopeFurnishingsMax,6,Hope,"BM-4 (2026-10-16): cap on the bonus-only Furnishings line - the summed HopeComfort of furnishings standing in working rooms. Placeholder, director review"
+HopeViewsMax,3,Hope,"BM-6 (2026-10-16): cap on the bonus-only Views line - the summed HopeViews of windows in rated surface habitats. Placeholder, director review"

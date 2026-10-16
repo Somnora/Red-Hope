@@ -18,6 +18,10 @@ namespace
 	const FName NAME_FurnBed(TEXT("Bed"));
 	const FName NAME_FurnJobSeat(TEXT("JobSeat"));
 	const FName NAME_FurnDiningSeat(TEXT("DiningSeat"));
+	const FName NAME_WallDoor(TEXT("Door"));
+	const FName NAME_WallWindow(TEXT("Window"));
+	const FName NAME_WallAirlock(TEXT("Airlock"));
+	const FName NAME_Glass(TEXT("Glass"));
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
@@ -25,7 +29,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 30;  // v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 31;  // v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -104,6 +108,11 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	SalvageFraction = FMath::Clamp(Defs->GetConfigScalar(FName("SalvageFraction"), SalvageFraction), 0.0, 1.0);
 	FurnitureRefundFraction = FMath::Clamp(Defs->GetConfigScalar(FName("FurnitureRefundFraction"), FurnitureRefundFraction), 0.0, 1.0);
 	HopeFurnishingsMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeFurnishingsMax"), HopeFurnishingsMax));
+	HopeViewsMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeViewsMax"), HopeViewsMax));
+	if (const FRHCompartmentRow* Sealed = Defs->GetCompartment(FName("SealedBay")))
+	{
+		SealedLeakMul = Sealed->SliceActive ? FMath::Clamp((double)Sealed->LeakMul, 0.0, 1.0) : 1.0;
+	}
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -1795,15 +1804,24 @@ void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
 	}
 	static const FName NOxygen(TEXT("Oxygen"));
 	const double LeakPerBay = O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+	const bool bFitted = WallFeatures.Num() > 0;
 	for (const FRHHabNetCache& N : HabNets)
 	{
 		double SumReq = 0.0, SumLeak = 0.0, Taken = 0.0;
+		// BM-6: a door in every doorway seals the network into compartments
+		// (SealedBay rate); windows leak on top. No fittings = the legacy rate.
+		const double LeakMul = (bFitted && IsNetSealed(N)) ? SealedLeakMul : 1.0;
 		for (const int32 Id : N.Members)
 		{
 			const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
 			const int32 Bays = M.NX * M.NY;
 			double& Fill = HabO2Kg.FindOrAdd(Id);
-			const double Leaked = FMath::Min(Fill, Bays * LeakPerBay);
+			double LeakHere = Bays * LeakPerBay;
+			if (bFitted)
+			{
+				LeakHere = LeakHere * LeakMul + GetMemberWindowLeakPerSol(Id) * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			}
+			const double Leaked = FMath::Min(Fill, LeakHere);
 			Fill -= Leaked;
 			SumLeak += Leaked;
 			SumReq += Bays * O2FillKgPerCell;
@@ -4049,6 +4067,10 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	{
 		Out.Furnishings = GetFurnishingsHope(); // BM-4: bonus-only, capped
 	}
+	if (Pop > 0 && WallFeatures.Num() > 0)
+	{
+		Out.Views = GetViewsHope(); // BM-6: windows, bonus-only, capped
+	}
 	Out.AdjacencyPenalty = Out.OffendedPairs * HopeAdjacencyPenalty;
 	for (const FRHColonist& C : Colonists)
 	{
@@ -4076,7 +4098,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		else if (ActiveCrisis == ERHCrisis::Environmental) { Out.CrisisPenalty = CrisisEnvironmentHope; }
 	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Solidarity
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.CrisisPenalty, 0.0, 100.0);
 	return Out;
 }
@@ -4822,6 +4844,31 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				return false;
 			}
 		}
+		// BM-6: a new shell may not wall over a window or an airlock, and
+		// nothing may stand in an airlock's chamber.
+		for (const FRHWallFeature& W : WallFeatures)
+		{
+			const FRHDoorRow* WRow = Level == 0 ? Defs->GetDoor(W.Row) : nullptr;
+			FIntPoint InsidePt, OutStep;
+			if (!WRow || ClassifyWallEdge(W.Edge, nullptr, &InsidePt, &OutStep) != ERHWallEdge::Exterior)
+			{
+				continue;
+			}
+			const FVector OutsideBay((InsidePt.X + OutStep.X) * 1000.0, (InsidePt.Y + OutStep.Y) * 1000.0, 0.0);
+			if (Def->Pressurized && FMath::Abs(OutsideBay.X - OverlapLoc.X) < HalfX && FMath::Abs(OutsideBay.Y - OverlapLoc.Y) < HalfY)
+			{
+				OutReason = FString::Printf(TEXT("The %s #%d faces that way - sell it first"), *WRow->DisplayName, W.Id);
+				return false;
+			}
+			FVector ChC;
+			FVector2D ChH;
+			if (WRow->Kind == NAME_WallAirlock && GetAirlockChamberRect(W.Edge, ChC, ChH)
+				&& FMath::Abs(ChC.X - OverlapLoc.X) < HalfX + ChH.X && FMath::Abs(ChC.Y - OverlapLoc.Y) < HalfY + ChH.Y)
+			{
+				OutReason = FString::Printf(TEXT("That is the chamber outside the Airlock #%d"), W.Id);
+				return false;
+			}
+		}
 	}
 	if (Def->ImportOnly)
 	{
@@ -5052,6 +5099,38 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		SpendTradeLot(URHDefinitionsSubsystem::GetFurnitureCost(*Defs->GetFurniture(Cmd.Target)));
 		AddFurniture(Cmd.Target, Key, Slot, Rot);
 		RefreshJobs();
+	}
+	else if (Cmd.Verb == FName("Fit"))
+	{
+		// BM-6: a window, door or airlock into a habitat wall (instant once
+		// the order lands). Location = a point in the bay, Value = the side.
+		FString Reason;
+		FIntVector Edge;
+		if (!ResolveWallEdge(Cmd.Location, (int32)Cmd.Value, Edge))
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("No habitat wall there"));
+			return;
+		}
+		if (!CanPlaceWallFeature(Cmd.Target, Edge, Reason, /*bCheckQueued*/ false))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+		SpendTradeLot(URHDefinitionsSubsystem::GetDoorCost(*Defs->GetDoor(Cmd.Target)));
+		AddWallFeature(Cmd.Target, Edge);
+	}
+	else if (Cmd.Verb == FName("Sell") && Cmd.Target == FName("WallFeature"))
+	{
+		// BM-6: sell a wall fitting back.
+		FString Reason;
+		if (!CanSellWallFeature((int32)Cmd.Value, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+		TSet<int32> Ids;
+		Ids.Add((int32)Cmd.Value);
+		RemoveWallFeatures(Ids, nullptr);
 	}
 	else if (Cmd.Verb == FName("Sell"))
 	{
@@ -6224,6 +6303,16 @@ void URHSimWorldSubsystem::ComputeSalvage(const FRHBuildingInstance& B, TMap<FNa
 			OutOut.FindOrAdd(L.Key) += L.Value * SalvageFraction;
 		}
 	}
+	// BM-6: and the fittings on its walls.
+	if (Def && Def->Pressurized && WallFeatures.Num() > 0)
+	{
+		TSet<int32> OnWalls;
+		GetFeaturesTouchingHab(B.Id, OnWalls);
+		for (const auto& L : WallFeatureRefundFor(OnWalls))
+		{
+			OutOut.FindOrAdd(L.Key) += L.Value;
+		}
+	}
 	// BM-4: a habitat's furnishings are sold back with it.
 	if (Def && Def->Pressurized && Furniture.Num() > 0)
 	{
@@ -6533,6 +6622,22 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	RatedHabs.Remove(Id);
 	HabBayRooms.Remove(Id);
 	HabNetsNotedSmall.Remove(Id);
+	// BM-6: the fittings on its walls (their refund is in the salvage too).
+	TSet<int32> WallsGone;
+	GetFeaturesTouchingHab(Id, WallsGone);
+	TArray<FIntVector> WallEdgesGone;
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		if (WallsGone.Contains(W.Id))
+		{
+			WallEdgesGone.Add(W.Edge);
+		}
+	}
+	const int32 WallsSold = WallFeatures.RemoveAll([&WallsGone](const FRHWallFeature& W) { return WallsGone.Contains(W.Id); });
+	if (WallsSold > 0)
+	{
+		RebuildWallFeatureIndex();
+	}
 	// BM-4: its furnishings (their refund is already in the salvage).
 	TArray<FIntVector> FurnKeys;
 	for (const FRHFurnitureInstance& F : Furniture)
@@ -6579,7 +6684,9 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	{
 		for (const auto& L : Lines)
 		{
-			if (Lander && Defs->IsSolidResource(L.Key))
+			// Glass is a solid every consumer takes from the pool (greenhouse
+			// glazing): it goes back there, never onto the Lander's shelf.
+			if (Lander && Defs->IsSolidResource(L.Key) && L.Key != NAME_Glass)
 			{
 				(bOutput ? Lander->OutputKg : Lander->InputKg).FindOrAdd(L.Key) += L.Value;
 			}
@@ -6634,6 +6741,10 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	{
 		Notes += FString::Printf(TEXT(" %d furnishing(s) sold back with it."), FurnSold);
 	}
+	if (WallsSold > 0)
+	{
+		Notes += FString::Printf(TEXT(" %d window(s) / door(s) sold back with it."), WallsSold);
+	}
 	const FString Name = Def && !Def->DisplayName.IsEmpty() ? Def->DisplayName : Gone.DefName.ToString();
 	UE_LOG(LogRedHopeSim, Display, TEXT("Demolished %s #%d (%s); salvage: %s"), *Gone.DefName.ToString(), Gone.Id,
 		Gone.bUnderConstruction ? TEXT("site cancelled") : TEXT("standing"), Line.IsEmpty() ? TEXT("nothing") : *Line);
@@ -6650,6 +6761,10 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	for (const FIntVector& K : FurnKeys)
 	{
 		OnFurnitureChanged.Broadcast(K);
+	}
+	for (const FIntVector& E : WallEdgesGone)
+	{
+		OnWallFeatureChanged.Broadcast(E);
 	}
 	OnBuildingRemoved.Broadcast(Gone);
 }
@@ -6676,6 +6791,418 @@ void URHSimWorldSubsystem::Debug_AddSolidAt(int32 BuildingId, FName Resource, do
 	}
 }
 
+// --- Wall fittings (BM-6, 2026-10-16) ---
+
+FIntVector URHSimWorldSubsystem::WallEdgeKey(const FIntPoint& P, int32 Dir)
+{
+	switch (Dir & 3)
+	{
+	case 0: return FIntVector(P.X, P.Y, 0);
+	case 1: return FIntVector(P.X - 1, P.Y, 0);
+	case 2: return FIntVector(P.X, P.Y, 1);
+	default: return FIntVector(P.X, P.Y - 1, 1);
+	}
+}
+
+bool URHSimWorldSubsystem::ResolveWallEdge(const FVector& LocationCm, int32 Dir, FIntVector& OutEdge) const
+{
+	const FIntPoint P(FMath::FloorToInt32(LocationCm.X / 1000.0 + 0.5), FMath::FloorToInt32(LocationCm.Y / 1000.0 + 0.5));
+	if (!HabBayOwner.Contains(P) || Dir < 0 || Dir > 3)
+	{
+		return false;
+	}
+	OutEdge = WallEdgeKey(P, Dir);
+	return true;
+}
+
+int32 URHSimWorldSubsystem::WallBayIndex(int32 HabId, const FIntPoint& Point) const
+{
+	const FRHHabMemberCache* M = HabMembers.Find(HabId);
+	if (!M)
+	{
+		return INDEX_NONE;
+	}
+	const FIntPoint L = Point - M->GridMin;
+	return L.Y * M->NX + L.X;
+}
+
+URHSimWorldSubsystem::ERHWallEdge URHSimWorldSubsystem::ClassifyWallEdge(const FIntVector& Edge, int32* OutInsideHab, FIntPoint* OutInsidePoint, FIntPoint* OutOutward) const
+{
+	const FIntPoint A(Edge.X, Edge.Y);
+	const FIntPoint B = A + (Edge.Z == 0 ? FIntPoint(1, 0) : FIntPoint(0, 1));
+	const int32* HA = HabBayOwner.Find(A);
+	const int32* HB = HabBayOwner.Find(B);
+	if (!HA && !HB)
+	{
+		return ERHWallEdge::None;
+	}
+	const bool bAInside = HA != nullptr;
+	if (OutInsideHab)
+	{
+		*OutInsideHab = bAInside ? *HA : *HB;
+	}
+	if (OutInsidePoint)
+	{
+		*OutInsidePoint = bAInside ? A : B;
+	}
+	if (OutOutward)
+	{
+		*OutOutward = bAInside ? (B - A) : (A - B);
+	}
+	if (!HA || !HB)
+	{
+		return ERHWallEdge::Exterior;
+	}
+	if (*HA != *HB)
+	{
+		return ERHWallEdge::Doorway; // a joint between two modules
+	}
+	return GetBayRoom(*HA, WallBayIndex(*HA, A)) == GetBayRoom(*HB, WallBayIndex(*HB, B)) ? ERHWallEdge::Open : ERHWallEdge::Doorway;
+}
+
+FVector URHSimWorldSubsystem::GetWallEdgeMidCm(const FIntVector& Edge) const
+{
+	return Edge.Z == 0 ? FVector(Edge.X * 1000.0 + 500.0, Edge.Y * 1000.0, 0.0) : FVector(Edge.X * 1000.0, Edge.Y * 1000.0 + 500.0, 0.0);
+}
+
+bool URHSimWorldSubsystem::GetAirlockChamberRect(const FIntVector& Edge, FVector& OutCentre, FVector2D& OutHalf) const
+{
+	FIntPoint Out;
+	if (ClassifyWallEdge(Edge, nullptr, nullptr, &Out) != ERHWallEdge::Exterior)
+	{
+		return false;
+	}
+	// The presentation's chamber is 3 x 3 m outside the doorway (RHHabLayout).
+	OutCentre = GetWallEdgeMidCm(Edge) + FVector(Out.X * 160.0, Out.Y * 160.0, 0.0);
+	OutHalf = Out.X != 0 ? FVector2D(160.0, 150.0) : FVector2D(150.0, 160.0);
+	return true;
+}
+
+const FRHWallFeature* URHSimWorldSubsystem::FindWallFeature(int32 Id) const
+{
+	return WallFeatures.FindByPredicate([Id](const FRHWallFeature& W) { return W.Id == Id; });
+}
+
+const FRHWallFeature* URHSimWorldSubsystem::FindWallFeatureOnEdge(const FIntVector& Edge) const
+{
+	const int32* Id = FeatureByEdge.Find(Edge);
+	return Id ? FindWallFeature(*Id) : nullptr;
+}
+
+void URHSimWorldSubsystem::RebuildWallFeatureIndex()
+{
+	FeatureByEdge.Reset();
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		FeatureByEdge.Add(W.Edge, W.Id);
+	}
+}
+
+bool URHSimWorldSubsystem::CanPlaceWallFeature(FName RowName, const FIntVector& Edge, FString& OutReason, bool bCheckQueued) const
+{
+	if (!Defs || !Defs->HasWallCatalogue())
+	{
+		OutReason = TEXT("No windows or doors catalogue");
+		return false;
+	}
+	const FRHDoorRow* Row = Defs->GetDoor(RowName);
+	if (!Row)
+	{
+		OutReason = FString::Printf(TEXT("'%s' is not a window, door or airlock"), *RowName.ToString());
+		return false;
+	}
+	if (!Row->SliceActive)
+	{
+		OutReason = FString::Printf(TEXT("%s is not available yet"), *Row->DisplayName);
+		return false;
+	}
+	const ERHWallEdge Kind = ClassifyWallEdge(Edge);
+	if (Kind == ERHWallEdge::None)
+	{
+		OutReason = TEXT("No habitat wall there");
+		return false;
+	}
+	if (Row->Kind == NAME_WallDoor)
+	{
+		if (Kind == ERHWallEdge::Exterior)
+		{
+			OutReason = TEXT("Doors go in doorways between rooms - an outside wall takes a Window or an Airlock");
+			return false;
+		}
+		if (Kind == ERHWallEdge::Open)
+		{
+			OutReason = TEXT("That opening joins one room - doors go in doorways between rooms or modules");
+			return false;
+		}
+	}
+	else if (Kind != ERHWallEdge::Exterior)
+	{
+		OutReason = FString::Printf(TEXT("A %s goes in an outside wall"), *Row->DisplayName);
+		return false;
+	}
+	if (const FRHWallFeature* Have = FindWallFeatureOnEdge(Edge))
+	{
+		const FRHDoorRow* HaveRow = Defs->GetDoor(Have->Row);
+		OutReason = FString::Printf(TEXT("The %s #%d is already there"), HaveRow ? *HaveRow->DisplayName : *Have->Row.ToString(), Have->Id);
+		return false;
+	}
+	if (bCheckQueued)
+	{
+		for (const FRHCommand& Q : UplinkQueue)
+		{
+			FIntVector QEdge;
+			if (Q.Verb == FName("Fit") && ResolveWallEdge(Q.Location, (int32)Q.Value, QEdge) && QEdge == Edge)
+			{
+				OutReason = TEXT("A fitting is already in transit for that wall");
+				return false;
+			}
+		}
+	}
+	if (Row->Kind == NAME_WallAirlock)
+	{
+		FVector ChC;
+		FVector2D ChH;
+		GetAirlockChamberRect(Edge, ChC, ChH);
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			const FRHBuildingRow* BDef = B.Level == 0 ? Defs->GetBuilding(B.DefName) : nullptr;
+			const FVector2D BH = BDef ? GetFootprintHalfCm(BDef, B.SizeX, B.SizeY) : FVector2D::ZeroVector;
+			if (BDef && FMath::Abs(B.LocationCm.X - ChC.X) < BH.X + ChH.X && FMath::Abs(B.LocationCm.Y - ChC.Y) < BH.Y + ChH.Y)
+			{
+				OutReason = FString::Printf(TEXT("The %s #%d stands where the airlock's chamber goes"), *B.DefName.ToString(), B.Id);
+				return false;
+			}
+		}
+	}
+	for (const auto& Line : URHDefinitionsSubsystem::GetDoorCost(*Row))
+	{
+		const double Have = Defs->IsSolidResource(Line.Key) ? GetTotalSolid(Line.Key) + GetStock(Line.Key) : GetStock(Line.Key);
+		if (Have + KINDA_SMALL_NUMBER < Line.Value)
+		{
+			OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand)"), *Line.Key.ToString(), Line.Value, Have);
+			return false;
+		}
+	}
+	return true;
+}
+
+TMap<FName, double> URHSimWorldSubsystem::WallFeatureRefundFor(const TSet<int32>& Ids) const
+{
+	TMap<FName, double> Refund;
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		const FRHDoorRow* Row = (Ids.Contains(W.Id) && Defs) ? Defs->GetDoor(W.Row) : nullptr;
+		if (!Row)
+		{
+			continue;
+		}
+		for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Row))
+		{
+			Refund.FindOrAdd(L.Key) += L.Value * FurnitureRefundFraction;
+		}
+	}
+	return Refund;
+}
+
+bool URHSimWorldSubsystem::CanSellWallFeature(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund) const
+{
+	if (!FindWallFeature(Id))
+	{
+		OutReason = FString::Printf(TEXT("No fitting #%d - it is already gone"), Id);
+		return false;
+	}
+	if (OutRefund)
+	{
+		TSet<int32> Ids;
+		Ids.Add(Id);
+		*OutRefund = WallFeatureRefundFor(Ids);
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::AddWallFeature(FName RowName, const FIntVector& Edge)
+{
+	FRHWallFeature W;
+	W.Id = NextWallFeatureId++;
+	W.Row = RowName;
+	W.Edge = Edge;
+	WallFeatures.Add(W);
+	RebuildWallFeatureIndex();
+	UE_LOG(LogRedHopeSim, Display, TEXT("Fitted %s #%d in the wall (%d, %d, %d)"), *RowName.ToString(), W.Id, Edge.X, Edge.Y, Edge.Z);
+	OnWallFeatureChanged.Broadcast(Edge);
+}
+
+void URHSimWorldSubsystem::RemoveWallFeatures(const TSet<int32>& Ids, TMap<FName, double>* OutRefund)
+{
+	if (Ids.Num() == 0)
+	{
+		return;
+	}
+	const TMap<FName, double> Refund = WallFeatureRefundFor(Ids);
+	TArray<FIntVector> Edges;
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		if (Ids.Contains(W.Id))
+		{
+			Edges.Add(W.Edge);
+		}
+	}
+	const int32 Sold = WallFeatures.RemoveAll([&Ids](const FRHWallFeature& W) { return Ids.Contains(W.Id); });
+	RebuildWallFeatureIndex();
+	CreditLander(Refund, /*bOutputShelf*/ true);
+	if (OutRefund)
+	{
+		*OutRefund = Refund;
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Sold %d wall fitting(s)"), Sold);
+	for (const FIntVector& E : Edges)
+	{
+		OnWallFeatureChanged.Broadcast(E);
+	}
+}
+
+void URHSimWorldSubsystem::GetFeaturesTouchingHab(int32 HabId, TSet<int32>& OutIds) const
+{
+	OutIds.Reset();
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		const FIntPoint A(W.Edge.X, W.Edge.Y);
+		const FIntPoint B = A + (W.Edge.Z == 0 ? FIntPoint(1, 0) : FIntPoint(0, 1));
+		const int32* HA = HabBayOwner.Find(A);
+		const int32* HB = HabBayOwner.Find(B);
+		if ((HA && *HA == HabId) || (HB && *HB == HabId))
+		{
+			OutIds.Add(W.Id);
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::IsNetSealed(const FRHHabNetCache& N) const
+{
+	if (FeatureByEdge.Num() == 0)
+	{
+		return false;
+	}
+	int32 Doorways = 0;
+	for (const int32 Id : N.Members)
+	{
+		const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+		for (int32 BY = 0; BY < M.NY; ++BY)
+		{
+			for (int32 BX = 0; BX < M.NX; ++BX)
+			{
+				const FIntPoint P = M.GridMin + FIntPoint(BX, BY);
+				for (int32 Axis = 0; Axis < 2; ++Axis)
+				{
+					const FIntVector Edge(P.X, P.Y, Axis);
+					if (ClassifyWallEdge(Edge) != ERHWallEdge::Doorway)
+					{
+						continue;
+					}
+					++Doorways;
+					const FRHWallFeature* W = FindWallFeatureOnEdge(Edge);
+					const FRHDoorRow* Row = (W && Defs) ? Defs->GetDoor(W->Row) : nullptr;
+					if (!Row || Row->Kind != NAME_WallDoor)
+					{
+						return false;
+					}
+				}
+			}
+		}
+	}
+	return Doorways > 0;
+}
+
+void URHSimWorldSubsystem::GetHabNetworkDoorways(int32 HabId, int32& OutDoorways, int32& OutDoored) const
+{
+	OutDoorways = 0;
+	OutDoored = 0;
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	if (!N)
+	{
+		return;
+	}
+	for (const int32 Id : N->Members)
+	{
+		const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+		for (int32 BY = 0; BY < M.NY; ++BY)
+		{
+			for (int32 BX = 0; BX < M.NX; ++BX)
+			{
+				const FIntPoint P = M.GridMin + FIntPoint(BX, BY);
+				for (int32 Axis = 0; Axis < 2; ++Axis)
+				{
+					const FIntVector Edge(P.X, P.Y, Axis);
+					if (ClassifyWallEdge(Edge) == ERHWallEdge::Doorway)
+					{
+						++OutDoorways;
+						const FRHWallFeature* W = FindWallFeatureOnEdge(Edge);
+						const FRHDoorRow* Row = (W && Defs) ? Defs->GetDoor(W->Row) : nullptr;
+						OutDoored += (Row && Row->Kind == NAME_WallDoor) ? 1 : 0;
+					}
+				}
+			}
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::IsHabNetworkSealed(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N && IsNetSealed(*N);
+}
+
+double URHSimWorldSubsystem::GetMemberWindowLeakPerSol(int32 HabId) const
+{
+	double Sum = 0.0;
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(W.Row) : nullptr;
+		int32 Inside = 0;
+		if (Row && Row->LeakKgPerSol > 0.f && ClassifyWallEdge(W.Edge, &Inside) == ERHWallEdge::Exterior && Inside == HabId)
+		{
+			Sum += Row->LeakKgPerSol;
+		}
+	}
+	return Sum;
+}
+
+double URHSimWorldSubsystem::GetHabNetworkLeakKgPerSol(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	if (!N)
+	{
+		return 0.0;
+	}
+	const double Mul = IsNetSealed(*N) ? SealedLeakMul : 1.0;
+	double Sum = 0.0;
+	for (const int32 Id : N->Members)
+	{
+		const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
+		Sum += M.NX * M.NY * O2LeakKgPerCellPerSol * Mul + GetMemberWindowLeakPerSol(Id);
+	}
+	return Sum;
+}
+
+double URHSimWorldSubsystem::GetViewsHope(double* OutRaw) const
+{
+	double Sum = 0.0;
+	for (const FRHWallFeature& W : WallFeatures)
+	{
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(W.Row) : nullptr;
+		int32 Inside = 0;
+		if (Row && Row->HopeViews > 0.f && ClassifyWallEdge(W.Edge, &Inside) == ERHWallEdge::Exterior && IsHabRated(Inside))
+		{
+			Sum += Row->HopeViews;
+		}
+	}
+	if (OutRaw)
+	{
+		*OutRaw = Sum;
+	}
+	return FMath::Min(Sum, HopeViewsMax);
+}
+
 // --- Furniture (BM-4, 2026-10-16) ---
 
 void URHSimWorldSubsystem::CreditLander(const TMap<FName, double>& Lines, bool bOutputShelf)
@@ -6687,7 +7214,7 @@ void URHSimWorldSubsystem::CreditLander(const TMap<FName, double>& Lines, bool b
 		{
 			continue;
 		}
-		if (Lander && Defs && Defs->IsSolidResource(L.Key))
+		if (Lander && Defs && Defs->IsSolidResource(L.Key) && L.Key != NAME_Glass)
 		{
 			(bOutputShelf ? Lander->OutputKg : Lander->InputKg).FindOrAdd(L.Key) += L.Value;
 			OnStockChanged.Broadcast(L.Key, GetTotalSolid(L.Key));
@@ -8584,6 +9111,19 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			Ar << FId << FRow << FKey << FSlot << FRot;
 		}
 	}
+	// Wall fittings (save v31): Id order. The edge index is DERIVED.
+	{
+		Ar << NextWallFeatureId;
+		int32 WallCount = WallFeatures.Num();
+		Ar << WallCount;
+		for (const FRHWallFeature& W : WallFeatures)
+		{
+			int32 WId = W.Id;
+			FName WRow = W.Row;
+			FIntVector WEdge = W.Edge;
+			Ar << WId << WRow << WEdge;
+		}
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -8960,6 +9500,24 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Furniture.Add(F);
 		}
 		RebuildFurnitureCache();
+	}
+	// Wall fittings (save v31).
+	{
+		WallFeatures.Reset();
+		Ar << NextWallFeatureId;
+		int32 WallCount = 0;
+		Ar << WallCount;
+		for (int32 i = 0; i < WallCount; ++i)
+		{
+			FRHWallFeature W;
+			Ar << W.Id << W.Row << W.Edge;
+			if (!(Defs && Defs->GetDoor(W.Row)) || ClassifyWallEdge(W.Edge) == ERHWallEdge::None)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v31: wall fitting #%d (%s) has no row or no habitat wall"), W.Id, *W.Row.ToString());
+			}
+			WallFeatures.Add(W);
+		}
+		RebuildWallFeatureIndex();
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

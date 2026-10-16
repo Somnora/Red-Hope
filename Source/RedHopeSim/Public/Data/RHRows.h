@@ -271,17 +271,29 @@ struct REDHOPESIM_API FRHCompartmentRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 
-// A pressurized-door class: the EDGES of the compartment graph. Behavior on
-// breach is the whole point (auto-seal keeps the far side breathable).
+// A wall fitting (build mode BM-6, 2026-10-16; the M2 pressurized-door rows
+// grown into windows and airlocks): placed by the player on the derived walls
+// of a surface habitat. Kind Door goes in a doorway (between rooms or
+// modules); Window and Airlock go in an outside wall. Copy and numbers are
+// placeholders for the director.
 USTRUCT(BlueprintType)
 struct REDHOPESIM_API FRHDoorRow : public FTableRowBase
 {
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString DisplayName;
+	// Door | Window | Airlock.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Kind;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool AutoSealOnBreach = true;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float SealSeconds = 5.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float CostStruct_kg = 0.f;
+	// "Struct:10;Glass:40"; empty falls back to CostStruct_kg.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString CostResources;
+	// Bonus-only Hope while it stands in a rated habitat (the Views line).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float HopeViews = 0.f;
+	// Extra air its habitat leaks per sol.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LeakKgPerSol = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Blurb;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };

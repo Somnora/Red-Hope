@@ -3010,6 +3010,268 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// BM-6 self-test (2026-10-16): WINDOWS AND DOORS - wall fittings on the
+	// derived habitat walls: the data, edge classes, refusals, windows (Views
+	// Hope, capped, and their air leak - measured), doors (a door in every
+	// doorway seals the network: half the leak - measured), airlocks and their
+	// chamber, the guards against walling over a window, selling (Glass back
+	// to the pool), demolish with fittings, save v31. Fails loudly. `-walls`.
+	if (FParse::Param(*Params, TEXT("walls")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== WINDOWS AND DOORS TEST (BM-6, 2026-10-16) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("WALLS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("WALLS FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Step = [&]()
+		{
+			Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const auto RunSols = [&](double Sols) { for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S) { Step(); } };
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		TArray<FString> Alerts, Rejects;
+		TArray<FIntVector> Changed;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const FDelegateHandle ChangedH = Sim->OnWallFeatureChanged.AddLambda([&Changed](const FIntVector& E) { Changed.Add(E); });
+		const auto LastReject = [&Rejects]() { return Rejects.Num() ? Rejects.Last() : FString(); };
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), 0, SX, SY);
+			return LastIdOf(Def);
+		};
+		const int32 LanderId = LastIdOf(TEXT("Lander"));
+		const auto LanderKg = [&](const TCHAR* Res, bool bOut)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == LanderId) { return (bOut ? B.OutputKg : B.InputKg).FindRef(FName(Res)); } }
+			return 0.0;
+		};
+		// Fit orders: a point in the bay + the side (0 +X, 1 -X, 2 +Y, 3 -Y).
+		const auto Fit = [&](const TCHAR* Row, double X, double Y, int32 Dir)
+		{
+			const int32 R0 = Rejects.Num();
+			FRHCommand C; C.Verb = FName("Fit"); C.Target = FName(Row); C.Level = 0; C.Location = FVector(X, Y, 0.0); C.Value = (double)Dir;
+			Sim->EnqueueCommand(C);
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const auto SellW = [&](int32 Id)
+		{
+			const int32 R0 = Rejects.Num();
+			FRHCommand C; C.Verb = FName("Sell"); C.Target = FName("WallFeature"); C.Value = (double)Id;
+			Sim->EnqueueCommand(C);
+			Step();
+			return Rejects.Num() == R0;
+		};
+		const auto CanFit = [&](const TCHAR* Row, double X, double Y, int32 Dir, FString& Why)
+		{
+			Why.Reset();
+			FIntVector E;
+			if (!Sim->ResolveWallEdge(FVector(X, Y, 0.0), Dir, E))
+			{
+				Why = TEXT("No habitat wall there");
+				return false;
+			}
+			return Sim->CanPlaceWallFeature(FName(Row), E, Why);
+		};
+		const auto Edge = [&](double X, double Y, int32 Dir) { FIntVector E; Sim->ResolveWallEdge(FVector(X, Y, 0.0), Dir, E); return E; };
+		const auto LastFeatureId = [&]() { return Sim->GetWallFeatures().Num() ? Sim->GetWallFeatures().Last().Id : 0; };
+		const auto NetO2 = [&](int32 A0, int32 B0, int32 C0) { return Sim->GetHabO2Kg(A0) + Sim->GetHabO2Kg(B0) + Sim->GetHabO2Kg(C0); };
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		using EEdge = URHSimWorldSubsystem::ERHWallEdge;
+		FString Why, R;
+		const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+
+		// W0. Data.
+		if (!DefsSub->HasWallCatalogue())
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("WALLS FAIL: DT_Doors missing"));
+			return 1;
+		}
+		{
+			const FRHDoorRow* Door = DefsSub->GetDoor(FName("PressureDoor"));
+			const FRHDoorRow* Hatch = DefsSub->GetDoor(FName("BulkheadHatch"));
+			const FRHDoorRow* Win = DefsSub->GetDoor(FName("Window"));
+			const FRHDoorRow* Lock = DefsSub->GetDoor(FName("Airlock"));
+			const TMap<FName, double> WinBill = Win ? URHDefinitionsSubsystem::GetDoorCost(*Win) : TMap<FName, double>();
+			Expect(Door && Door->SliceActive && Door->Kind == FName("Door") && Hatch && !Hatch->SliceActive
+				&& Win && Win->SliceActive && Win->Kind == FName("Window") && Near(WinBill.FindRef(FName("Struct")), 10.0, 1e-9) && Near(WinBill.FindRef(FName("Glass")), 40.0, 1e-9)
+				&& Near(Win->HopeViews, 0.5, 1e-6) && Near(Win->LeakKgPerSol, 0.5, 1e-6) && Lock && Lock->SliceActive && Lock->Kind == FName("Airlock") && Lock->LeakKgPerSol == 0.f,
+				TEXT("W0 DT_Doors: Pressure Door (live), Bulkhead Hatch (dormant), Window (Struct 10 + Glass 40, Views 0.5, leak 0.5), Airlock (live, no leak) (DT/CSV)"));
+			Expect(Near(Sim->GetHopeViewsMax(), 3.0, 1e-9) && Near(Sim->GetSealedLeakMul(), 0.5, 1e-9),
+				TEXT("W0 config: Views cap 3; the Sealed Bay compartment row is live at LeakMul 0.5"));
+		}
+
+		// Setup: the -surfacehab layout - A + B + C (2x1), a filter in A.
+		Place(TEXT("SolarArray"), 3500.f, -1000.f);
+		Place(TEXT("SolarArray"), 3500.f, -2000.f);
+		Sim->AddStock(FName("Oxygen"), 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(FName("Food"), 6000.0);
+		Sim->AddStock(FName("Shielding"), 1000.0);
+		Sim->Debug_AddSolidAt(LanderId, FName("Struct"), 2000.0, false);
+		const int32 A = Place(TEXT("HabModule"), -1000, 1000);
+		const int32 B = Place(TEXT("HabModule"), -2000, 1000);
+		const int32 Cc = Place(TEXT("HabModule"), -1500, 2000, 2, 1);
+		const int32 Filter = Place(TEXT("AirFilter"), -1000, 1000);
+		Expect(Sim->DesignateBay(A, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(B, 0, FName("LivingQuarters"), R)
+			&& Sim->DesignateBay(Cc, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(Cc, 1, FName("Dining"), R),
+			TEXT("setup: A, B, C:0 Living, C:1 Dining"));
+		RunSols(1.0);
+		Expect(Sim->IsHabRated(A), TEXT("setup: the 4-bay network rates"));
+
+		// W1. No fittings: the legacy habitat.
+		{
+			int32 Doorways = 0, Doored = 0;
+			Sim->GetHabNetworkDoorways(A, Doorways, Doored);
+			Expect(Near(Sim->GetHabNetworkLeakKgPerSol(A), 8.0, 1e-9) && !Sim->IsHabNetworkSealed(A) && Doorways == 4 && Doored == 0
+				&& Sim->GetWallFeatures().Num() == 0 && Sim->GetViewsHope() == 0.0,
+				FString::Printf(TEXT("W1 no fittings: leak %.2f kg/sol (4 bays x 2), %d doorways, none doored, no views"), Sim->GetHabNetworkLeakKgPerSol(A), Doorways));
+		}
+
+		// W2. Edge classes and refusals.
+		Expect(Sim->ClassifyWallEdge(Edge(-1000, 1000, 0)) == EEdge::Exterior && Sim->ClassifyWallEdge(Edge(-2000, 1000, 0)) == EEdge::Doorway
+			&& Sim->ClassifyWallEdge(Edge(-2000, 2000, 0)) == EEdge::Doorway && Edge(-1000, 1000, 1) == Edge(-2000, 1000, 0)
+			&& Sim->ClassifyWallEdge(FIntVector(20, 20, 0)) == EEdge::None,
+			TEXT("W2 edges: A's east wall is outside; A-B and C:0-C:1 (Living | Dining) are doorways; one key from either side"));
+		Expect(!CanFit(TEXT("Throne"), -1000, 1000, 0, Why) && Why.Contains(TEXT("not a window")), FString::Printf(TEXT("W2 an unknown row (%s)"), *Why));
+		Expect(!CanFit(TEXT("BulkheadHatch"), -2000, 1000, 0, Why) && Why.Contains(TEXT("not available")), FString::Printf(TEXT("W2 the dormant hatch (%s)"), *Why));
+		Expect(!CanFit(TEXT("Window"), -2000, 1000, 0, Why) && Why.Contains(TEXT("outside wall")), FString::Printf(TEXT("W2 a window in a doorway (%s)"), *Why));
+		Expect(!CanFit(TEXT("PressureDoor"), -1000, 1000, 0, Why) && Why.Contains(TEXT("doorways")), FString::Printf(TEXT("W2 a door in an outside wall (%s)"), *Why));
+		Expect(!CanFit(TEXT("Window"), 9000, 9000, 0, Why) && Why.Contains(TEXT("No habitat wall")), FString::Printf(TEXT("W2 open ground (%s)"), *Why));
+		Expect(!CanFit(TEXT("Window"), -1000, 1000, 0, Why) && Why.Contains(TEXT("Glass")), FString::Printf(TEXT("W2 no Glass in stock (%s)"), *Why));
+		Expect(Sim->DesignateBay(Cc, 1, FName("LivingQuarters"), R) && !CanFit(TEXT("PressureDoor"), -2000, 2000, 0, Why) && Why.Contains(TEXT("one room"))
+			&& Sim->DesignateBay(Cc, 1, FName("Dining"), R), FString::Printf(TEXT("W2 with C all Living its middle is one room - no door (%s)"), *Why));
+		Sim->AddStock(FName("Glass"), 1000.0);
+
+		// W3. Windows: Views and their leak.
+		{
+			const double Struct0 = Sim->GetTotalSolid(FName("Struct")), Glass0 = Sim->GetStock(FName("Glass"));
+			Changed.Reset();
+			Expect(Fit(TEXT("Window"), -1000, 1000, 0) && Near(Sim->GetTotalSolid(FName("Struct")), Struct0 - 10.0, 1e-6) && Near(Sim->GetStock(FName("Glass")), Glass0 - 40.0, 1e-6)
+				&& Changed.Num() == 1 && Near(Sim->GetViewsHope(), 0.5, 1e-9) && Near(Sim->GetHabNetworkLeakKgPerSol(A), 8.5, 1e-9),
+				FString::Printf(TEXT("W3 a window in A's east wall: -10 Struct, -40 Glass, views %.1f, leak %.2f kg/sol"), Sim->GetViewsHope(), Sim->GetHabNetworkLeakKgPerSol(A)));
+			bool bAll = true;
+			for (const FIntVector& S : { FIntVector(-1000, 1000, 3), FIntVector(-2000, 1000, 1), FIntVector(-2000, 1000, 3), FIntVector(-2000, 2000, 1),
+				FIntVector(-2000, 2000, 2), FIntVector(-1000, 2000, 2), FIntVector(-1000, 2000, 0) })
+			{
+				bAll &= Fit(TEXT("Window"), S.X, S.Y, S.Z);
+			}
+			double Raw = 0.0;
+			const double Capped = Sim->GetViewsHope(&Raw);
+			Expect(bAll && Sim->GetWallFeatures().Num() == 8 && Near(Raw, 4.0, 1e-9) && Near(Capped, 3.0, 1e-9) && Near(Sim->GetHabNetworkLeakKgPerSol(A), 12.0, 1e-9),
+				FString::Printf(TEXT("W3 a window in all 8 outside walls: views %.1f capped at %.1f, leak %.2f"), Raw, Capped, Sim->GetHabNetworkLeakKgPerSol(A)));
+			Expect(!CanFit(TEXT("Window"), -1000, 1000, 0, Why) && Why.Contains(TEXT("already there")), FString::Printf(TEXT("W3 one fitting a wall (%s)"), *Why));
+			// The leak, measured: the filter off (it powers down at the end of
+			// the next step), no one breathing.
+			Sim->SetManualPower(Filter, false);
+			Step();
+			const double O20 = NetO2(A, B, Cc);
+			Step();
+			Expect(Near(O20 - NetO2(A, B, Cc), 12.0 * StepSols, 1e-6), FString::Printf(TEXT("W3 measured: the network lost %.4f kg in a step (expect %.4f)"), O20 - NetO2(A, B, Cc), 12.0 * StepSols));
+			Sim->SetManualPower(Filter, true);
+		}
+
+		// W4. Doors: a door in every doorway seals the network.
+		{
+			Expect(Fit(TEXT("PressureDoor"), -2000, 1000, 0) && Fit(TEXT("PressureDoor"), -1000, 1000, 2) && Fit(TEXT("PressureDoor"), -2000, 1000, 2)
+				&& !Sim->IsHabNetworkSealed(A) && Near(Sim->GetHabNetworkLeakKgPerSol(A), 12.0, 1e-9), TEXT("W4 three doors of four: not sealed, leak unchanged"));
+			Expect(Fit(TEXT("PressureDoor"), -2000, 2000, 0) && Sim->IsHabNetworkSealed(A) && Near(Sim->GetHabNetworkLeakKgPerSol(A), 8.0 * 0.5 + 4.0, 1e-9),
+				FString::Printf(TEXT("W4 the fourth door seals it: leak %.2f (8 x 0.5 + the windows' 4)"), Sim->GetHabNetworkLeakKgPerSol(A)));
+			Sim->SetManualPower(Filter, false);
+			Step();
+			const double O20 = NetO2(A, B, Cc);
+			Step();
+			Expect(Near(O20 - NetO2(A, B, Cc), 8.0 * StepSols, 1e-6), FString::Printf(TEXT("W4 measured: %.4f kg in a step sealed (expect %.4f)"), O20 - NetO2(A, B, Cc), 8.0 * StepSols));
+			Sim->SetManualPower(Filter, true);
+			int32 Doorways = 0, Doored = 0;
+			Expect(Sim->DesignateBay(Cc, 1, FName("LivingQuarters"), R) && Sim->IsHabNetworkSealed(A) && (Sim->GetHabNetworkDoorways(A, Doorways, Doored), Doorways == 3 && Doored == 3)
+				&& Sim->DesignateBay(Cc, 1, FName("Dining"), R), TEXT("W4 re-zoning C into one room leaves 3 doorways, all doored - still sealed"));
+		}
+		RunSols(1.0);
+		Sim->Debug_SetVaultRated(true);
+		Expect(Sim->IsHabRated(A) && Sim->Debug_AddColonists(3) == 3 && Near(Sim->GetColonyHope().Views, 3.0, 1e-9),
+			FString::Printf(TEXT("W4 rated again; three residents: Views %.1f in the Hope breakdown"), Sim->GetColonyHope().Views));
+
+		// W5/W6. Sell a window; the airlock and its chamber; no walling over a window.
+		{
+			const int32 WestWin = Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 1)) ? Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 1))->Id : 0;
+			const double Out0 = LanderKg(TEXT("Struct"), true), Glass0 = Sim->GetStock(FName("Glass"));
+			Expect(WestWin && SellW(WestWin) && Near(LanderKg(TEXT("Struct"), true) - Out0, 7.5, 1e-6) && Near(Sim->GetStock(FName("Glass")) - Glass0, 30.0, 1e-6)
+				&& LanderKg(TEXT("Glass"), true) == 0.0 && !Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 1)),
+				TEXT("W6 a window sold: 7.5 Struct to the Lander, 30 Glass back to the pool (where glazing reads it)"));
+			const int32 Mast = Place(TEXT("Floodmast"), -2700, 1000);
+			Expect(!CanFit(TEXT("Airlock"), -2000, 1000, 1, Why) && Why.Contains(TEXT("Floodmast")), FString::Printf(TEXT("W5 a machine in the chamber's way (%s)"), *Why));
+			FRHCommand D; D.Verb = FName("Demolish"); D.Target = FName("Building"); D.Value = (double)Mast;
+			Sim->EnqueueCommand(D);
+			Step();
+			Expect(Fit(TEXT("Airlock"), -2000, 1000, 1), TEXT("W5 an airlock in B's west wall"));
+			FString W2;
+			Expect(!Sim->CanPlaceBuildingSized(FName("Floodmast"), FVector(-2700.f, 1000.f, 0.f), W2, 0, 1, 1) && W2.Contains(TEXT("chamber")),
+				FString::Printf(TEXT("W5 nothing may stand in the chamber (%s)"), *W2));
+			Expect(!Sim->CanPlaceBuildingSized(FName("HabModule"), FVector(0.f, 1000.f, 0.f), W2, 0, 1, 1) && W2.Contains(TEXT("faces that way")),
+				FString::Printf(TEXT("W5 a new module may not wall over A's east window (%s)"), *W2));
+		}
+
+		// W7. Demolish a habitat with fittings: they come back in the salvage.
+		int32 LastIssued = 0;
+		{
+			const int32 Dm = Place(TEXT("HabModule"), -1000, -4000);
+			Expect(Fit(TEXT("Window"), -1000, -4000, 3) && Fit(TEXT("Airlock"), -1000, -4000, 2), TEXT("W7 a lone hab with a window and an airlock"));
+			LastIssued = LastFeatureId();
+			TMap<FName, double> Salvage;
+			Expect(Sim->CanDemolishBuilding(Dm, Why, &Salvage) && Near(Salvage.FindRef(FName("Struct")), 152.5, 1e-6) && Near(Salvage.FindRef(FName("Glass")), 30.0, 1e-6)
+				&& Near(Salvage.FindRef(FName("Shielding")), 25.0, 1e-6),
+				FString::Printf(TEXT("W7 the preview: Struct %.1f (100 hull + 0.75 x 70), Glass %.0f, Shielding %.0f"), Salvage.FindRef(FName("Struct")), Salvage.FindRef(FName("Glass")), Salvage.FindRef(FName("Shielding"))));
+			const double S0 = LanderKg(TEXT("Struct"), true), G0 = Sim->GetStock(FName("Glass"));
+			const int32 N0 = Sim->GetWallFeatures().Num();
+			FRHCommand D; D.Verb = FName("Demolish"); D.Target = FName("Building"); D.Value = (double)Dm;
+			Sim->EnqueueCommand(D);
+			Step();
+			Expect(Sim->GetWallFeatures().Num() == N0 - 2 && Near(LanderKg(TEXT("Struct"), true) - S0, 152.5, 1e-6) && Near(Sim->GetStock(FName("Glass")) - G0, 30.0, 1e-6)
+				&& LanderKg(TEXT("Glass"), true) == 0.0 && Alerts.ContainsByPredicate([](const FString& S) { return S.Contains(TEXT("2 window(s) / door(s) sold back")); }),
+				TEXT("W7 demolished: its 2 fittings gone, 152.5 Struct to the Lander, 30 Glass to the pool, named in the alert"));
+		}
+
+		// W8. Save / load (v31).
+		{
+			TArray<FString> Before;
+			for (const FRHWallFeature& W : Sim->GetWallFeatures()) { Before.Add(FString::Printf(TEXT("%d:%s:%d,%d,%d"), W.Id, *W.Row.ToString(), W.Edge.X, W.Edge.Y, W.Edge.Z)); }
+			const double Leak0 = Sim->GetHabNetworkLeakKgPerSol(A), Views0 = Sim->GetColonyHope().Views;
+			const bool bSealed0 = Sim->IsHabNetworkSealed(A);
+			int32 MaxId = 0;
+			for (const FRHWallFeature& W : Sim->GetWallFeatures()) { MaxId = FMath::Max(MaxId, W.Id); }
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("wallstest"), Err), FString::Printf(TEXT("W8 saved (%s)"), *Err));
+			SellW(Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 0))->Id);
+			Expect(Sim->LoadColony(TEXT("wallstest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("W8 loaded (%s)"), *Err));
+			TArray<FString> After;
+			for (const FRHWallFeature& W : Sim->GetWallFeatures()) { After.Add(FString::Printf(TEXT("%d:%s:%d,%d,%d"), W.Id, *W.Row.ToString(), W.Edge.X, W.Edge.Y, W.Edge.Z)); }
+			Expect(Before == After && Sim->GetHabNetworkLeakKgPerSol(A) == Leak0 && Sim->GetColonyHope().Views == Views0 && Sim->IsHabNetworkSealed(A) == bSealed0 && bSealed0,
+				FString::Printf(TEXT("W8 the reload matches: %d fittings, sealed, leak %.2f, views %.1f"), After.Num(), Leak0, Views0));
+			Expect(Fit(TEXT("Window"), -2000, 1000, 1) == false && Fit(TEXT("Window"), -1000, 1000, 3) == false,
+				TEXT("W8 the loaded walls are still occupied (the airlock, the window)"));
+			const int32 DoorAB = Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 0)) ? Sim->FindWallFeatureOnEdge(Edge(-2000, 1000, 0))->Id : 0;
+			Expect(DoorAB && SellW(DoorAB) && Fit(TEXT("PressureDoor"), -2000, 1000, 0) && LastFeatureId() == LastIssued + 1 && LastIssued > MaxId,
+				FString::Printf(TEXT("W8 a door re-fitted gets #%d - after the demolished hab's #%d, Ids are never reused"), LastFeatureId(), LastIssued));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnCommandRejected.Remove(RejectH);
+		Sim->OnWallFeatureChanged.Remove(ChangedH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== WINDOWS AND DOORS TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

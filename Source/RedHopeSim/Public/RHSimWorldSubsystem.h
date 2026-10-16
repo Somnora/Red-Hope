@@ -122,6 +122,20 @@ struct REDHOPESIM_API FRHFurnitureInstance
 	UPROPERTY() int32 Rot = 0;
 };
 
+// A wall fitting (BM-6, 2026-10-16) on a surface habitat's bay edge. Edge =
+// (X, Y, Axis) on the 10 m bay lattice: the edge between bay point (X, Y)
+// and (X+1, Y) (Axis 0) or (X, Y+1) (Axis 1) - one key whichever side it is
+// seen from. Serialized (save v31).
+USTRUCT()
+struct REDHOPESIM_API FRHWallFeature
+{
+	GENERATED_BODY()
+
+	UPROPERTY() int32 Id = 0;
+	UPROPERTY() FName Row;
+	UPROPERTY() FIntVector Edge = FIntVector::ZeroValue;
+};
+
 USTRUCT()
 struct REDHOPESIM_API FRHPowerState
 {
@@ -143,6 +157,8 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingCompleted, const FRHBuildingIns
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnBuildingRemoved, const FRHBuildingInstance&);
 // BM-4: a cell's furnishings changed (placed, sold, or its habitat demolished).
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnFurnitureChanged, const FIntVector& /*CellKey*/);
+// BM-6: a wall fitting was placed or sold (Edge = the lattice edge key).
+DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnWallFeatureChanged, const FIntVector& /*Edge*/);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnCommandRejected, const FRHCommand&, const FString&);
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnRobotsSpawned, const TArray<FMassEntityHandle>&);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnQuotaMet, int32 /*Sol*/, double /*AwardKg*/);
@@ -293,6 +309,39 @@ public:
 	double GetFurnitureRefundFraction() const { return FurnitureRefundFraction; }
 	double GetHopeFurnishingsMax() const { return HopeFurnishingsMax; }
 	int32 GetFloorBeds(int32 Level) const { return CountFloorBeds(Level, nullptr); }
+	// --- Wall fittings (BM-6, 2026-10-16) ---
+	// Windows, doors and airlocks on the derived walls of BUILT surface
+	// habitats. A Fit order is Target = row, Level 0, Location = a point in a
+	// habitat bay and Value = the side (0 +X, 1 -X, 2 +Y, 3 -Y); Sell with
+	// Target "WallFeature" + Value = Id refunds FurnitureRefundFraction.
+	// Effects: a window adds Hope (Views, capped) and air leak; a habitat
+	// network with a door in EVERY doorway is sealed into compartments and
+	// leaks at the SealedBay rate; an airlock is the network's entrance
+	// (cosmetic in the sim, ruling 6a). No fittings = the legacy habitat.
+	enum class ERHWallEdge : uint8 { None = 0, Exterior, Open, Doorway };
+	static FIntVector WallEdgeKey(const FIntPoint& BayPoint, int32 Dir);
+	bool ResolveWallEdge(const FVector& LocationCm, int32 Dir, FIntVector& OutEdge) const;
+	// What the edge is now; OutInsideHab / OutOutward describe an exterior
+	// edge (the member it belongs to, the step from inside to outside).
+	ERHWallEdge ClassifyWallEdge(const FIntVector& Edge, int32* OutInsideHab = nullptr, FIntPoint* OutInsidePoint = nullptr, FIntPoint* OutOutward = nullptr) const;
+	FVector GetWallEdgeMidCm(const FIntVector& Edge) const;
+	// The 3 x 3 m chamber outside an airlock edge (centre, half extents).
+	bool GetAirlockChamberRect(const FIntVector& Edge, FVector& OutCentre, FVector2D& OutHalf) const;
+	const TArray<FRHWallFeature>& GetWallFeatures() const { return WallFeatures; }
+	const FRHWallFeature* FindWallFeature(int32 Id) const;
+	const FRHWallFeature* FindWallFeatureOnEdge(const FIntVector& Edge) const;
+	bool CanPlaceWallFeature(FName Row, const FIntVector& Edge, FString& OutReason, bool bCheckQueued = true) const;
+	bool CanSellWallFeature(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
+	// A habitat network's doorways and how many carry a door; sealed = all,
+	// and at least one.
+	void GetHabNetworkDoorways(int32 HabId, int32& OutDoorways, int32& OutDoored) const;
+	bool IsHabNetworkSealed(int32 HabId) const;
+	// The network's air leak per sol as the step integrates it (bays x the
+	// leak rate x the sealed multiplier, plus its windows).
+	double GetHabNetworkLeakKgPerSol(int32 HabId) const;
+	double GetViewsHope(double* OutRaw = nullptr) const;
+	double GetHopeViewsMax() const { return HopeViewsMax; }
+	double GetSealedLeakMul() const { return SealedLeakMul; }
 	// The greenhouse dome's garden row if B is a BUILT surface dome whose room
 	// is live, else null. Its beds plant and grow like greenhouse cells.
 	const FRHRoomRow* GetDomeRoom(const FRHBuildingInstance& B) const;
@@ -435,6 +484,7 @@ public:
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double Furnishings = 0; // BM-4: bonus-only, capped (HopeFurnishingsMax)
+		double Views = 0;       // BM-6: windows in rated habitats, bonus-only, capped (HopeViewsMax)
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
@@ -941,6 +991,7 @@ public:
 	FRHOnBuildingCompleted OnBuildingCompleted;
 	FRHOnBuildingRemoved OnBuildingRemoved;
 	FRHOnFurnitureChanged OnFurnitureChanged;
+	FRHOnWallFeatureChanged OnWallFeatureChanged;
 	FRHOnCommandRejected OnCommandRejected;
 	FRHOnRobotsSpawned OnRobotsSpawned;
 	FRHOnQuotaMet OnQuotaMet;
@@ -1149,6 +1200,21 @@ private:
 	double GetFurnishingsHope(double* OutRaw = nullptr) const;
 	bool FurnitureAllowsRezone(const FIntVector& Key, FName NewRoom, FString& OutReason) const;
 	void BuildBedAssignments(const TArray<int32>& ByIdOrder);
+	// --- Wall fittings (BM-6) ---
+	TArray<FRHWallFeature> WallFeatures;    // SAVED (v31), Id-ascending
+	int32 NextWallFeatureId = 1;            // SAVED; never reused
+	double HopeViewsMax = 3.0;              // config HopeViewsMax
+	double SealedLeakMul = 1.0;             // DT_Compartments SealedBay LeakMul (active row), else 1
+	TMap<FIntVector, int32> FeatureByEdge;  // derived lookup (edge -> Id)
+	void RebuildWallFeatureIndex();
+	int32 WallBayIndex(int32 HabId, const FIntPoint& Point) const;
+	bool IsNetSealed(const FRHHabNetCache& N) const;
+	double GetMemberWindowLeakPerSol(int32 HabId) const;
+	void AddWallFeature(FName Row, const FIntVector& Edge);
+	void RemoveWallFeatures(const TSet<int32>& Ids, TMap<FName, double>* OutRefund);
+	TMap<FName, double> WallFeatureRefundFor(const TSet<int32>& Ids) const;
+	// The fittings on any edge of a habitat's bays (both sides).
+	void GetFeaturesTouchingHab(int32 HabId, TSet<int32>& OutIds) const;
 	bool AnyHabNetRated() const;
 	int32 GetHabLivingBays(int32 HabId) const;
 	bool IsLocationInRatedHab(const FVector& LocationCm) const;

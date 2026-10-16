@@ -1,3 +1,5 @@
-Name,DisplayName,AutoSealOnBreach,SealSeconds,CostStruct_kg,SliceActive,Notes
-PressureDoor,Pressure Door,TRUE,5,20,FALSE,"Dormant M2: the compartment-graph edge; auto-seals on breach so the far side keeps its air (§3)"
-BulkheadHatch,Bulkhead Hatch,TRUE,2,45,FALSE,"Dormant M2: heavy fast-seal door for critical partitions (vault entry, shaft collar)"
+Name,DisplayName,Kind,AutoSealOnBreach,SealSeconds,CostStruct_kg,CostResources,HopeViews,LeakKgPerSol,Blurb,SliceActive,Notes
+PressureDoor,Pressure Door,Door,TRUE,5,20,Struct:20,0,0,"A door for a doorway between rooms or modules. Put one in every doorway of a habitat and it seals into compartments: half the air leak.",TRUE,"BM-6 (2026-10-16): the compartment-graph edge; breach auto-seal is not modelled yet (no breaches). Placeholder, director review"
+BulkheadHatch,Bulkhead Hatch,Door,TRUE,2,45,Struct:45,0,0,"A heavy fast-sealing door for critical partitions.",FALSE,"Dormant: no distinct meaning until breaches exist (it would seal faster than the Pressure Door)"
+Window,Window,Window,FALSE,0,10,Struct:10;Glass:40,0.5,0.5,"A window in an outside wall: a view of Mars for the crew (Hope) at the price of a little air leak.",TRUE,"BM-6: Views Hope per window in a rated habitat, capped by HopeViewsMax; +0.5 kg/sol leak each. No radiation model yet. Placeholder, director review"
+Airlock,Airlock,Airlock,FALSE,0,60,Struct:60,0,0,"The habitat's entrance, where the crew suit up and down. A habitat without one gets an entrance placed for it.",TRUE,"BM-6 / ruling 6a: cosmetic in the sim until storms can damage habitats; it sets where crew enter"

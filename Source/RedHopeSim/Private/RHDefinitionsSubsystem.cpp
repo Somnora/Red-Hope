@@ -23,6 +23,8 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	RivalsTable = Cast<UDataTable>(RivalsTablePath.TryLoad()); // absent = a lonely Mars
 	CropsTable = Cast<UDataTable>(CropsTablePath.TryLoad()); // absent/dormant = the legacy flat-yield garden
 	FurnitureTable = Cast<UDataTable>(FurnitureTablePath.TryLoad()); // absent = no furnishing layer
+	DoorsTable = Cast<UDataTable>(DoorsTablePath.TryLoad()); // absent = no wall fittings
+	CompartmentsTable = Cast<UDataTable>(CompartmentsTablePath.TryLoad()); // absent = no sealed-habitat rate
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -206,6 +208,49 @@ void URHDefinitionsSubsystem::ForEachFurnitureRow(TFunctionRef<void(FName, const
 	{
 		Fn(Pair.Key, *reinterpret_cast<const FRHFurnitureRow*>(Pair.Value));
 	}
+}
+
+const FRHDoorRow* URHDefinitionsSubsystem::GetDoor(FName Name) const
+{
+	return DoorsTable ? DoorsTable->FindRow<FRHDoorRow>(Name, TEXT("GetDoor"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::GetActiveDoorsSorted(TArray<TPair<FName, const FRHDoorRow*>>& Out) const
+{
+	Out.Reset();
+	if (!DoorsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : DoorsTable->GetRowMap())
+	{
+		const FRHDoorRow* Row = reinterpret_cast<const FRHDoorRow*>(Pair.Value);
+		if (Row && Row->SliceActive)
+		{
+			Out.Emplace(Pair.Key, Row);
+		}
+	}
+	Out.Sort([](const TPair<FName, const FRHDoorRow*>& A, const TPair<FName, const FRHDoorRow*>& B)
+	{
+		return A.Key.LexicalLess(B.Key);
+	});
+}
+
+void URHDefinitionsSubsystem::ForEachDoorRow(TFunctionRef<void(FName, const FRHDoorRow&)> Fn) const
+{
+	if (!DoorsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : DoorsTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHDoorRow*>(Pair.Value));
+	}
+}
+
+const FRHCompartmentRow* URHDefinitionsSubsystem::GetCompartment(FName Name) const
+{
+	return CompartmentsTable ? CompartmentsTable->FindRow<FRHCompartmentRow>(Name, TEXT("GetCompartment"), false) : nullptr;
 }
 
 bool URHDefinitionsSubsystem::ActivateFurnitureRow(FName Name)
