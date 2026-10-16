@@ -717,6 +717,21 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 	}
+	// BM-5: placed furniture too (a rug is walked over, not around).
+	for (const auto& CellPair : Colony->GetFurnitureComps())
+	{
+		for (const TWeakObjectPtr<UStaticMeshComponent>& W : CellPair.Value)
+		{
+			const UStaticMeshComponent* P = W.Get();
+			if (P && P->IsVisible() && P->Bounds.BoxExtent.Z > 8.f)
+			{
+				const FBoxSphereBounds B = P->Bounds;
+				const float R = FMath::Clamp(FMath::Max(B.BoxExtent.X, B.BoxExtent.Y), 30.f, 240.f);
+				const FVector L = P->GetComponentLocation();
+				FurnitureByLevel.FindOrAdd(CellPair.Key.X).Add(FVector4(L.X, L.Y, L.Z, R));
+			}
+		}
+	}
 	const TArray<FRHColonist>& Roster = Sim->GetColonists();
 	const double Now = World->GetTimeSeconds();
 

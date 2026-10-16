@@ -41,6 +41,17 @@ public:
 	// on the active floor to designate them (uplink Designate orders). The mode
 	// stays armed for painting several cells; cancel exits.
 	void BeginZoneDesignation(FName Room);
+	// Furnish mode (BM-5): pick a catalogue piece on the deck, hover a zoned
+	// cell or habitat bay - the ghost snaps to the 2.5 m sub-grid - T turns
+	// it, click transmits a Furnish order; the mode stays armed. Sell mode:
+	// click a piece to sell it back (FurnitureRefundFraction).
+	void BeginFurnish(FName Row);
+	void BeginSellFurniture();
+	bool IsFurnishMode() const { return bFurnishMode; }
+	FName GetFurnishRow() const { return FurnishRow; }
+	bool IsSellMode() const { return bSellMode; }
+	// Capture/QA (RH.DeckFurnish): show the deck's FURNISH tab.
+	void Debug_ShowFurnishTab();
 	void CancelModes();
 	void SetSimSpeed(float Tier);
 	void TogglePause();
@@ -112,6 +123,11 @@ private:
 	void OnTilt(const FInputActionValue& Value);
 	void OnClick();
 	void OnCancel();
+	void OnRotate();
+	// The furnishable cell under a ground point and the slot that centres the
+	// armed piece there; false off any room.
+	bool ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
+	const struct FRHFurnitureInstance* FindFurnitureAt(const FVector& GroundCm) const;
 	// Cursor ray intersected with the ground plane (Z=0), snapped to the 2 m grid.
 	bool CursorToGround(FVector& OutCm) const;
 	ARHStrategyPawn* StrategyPawn() const;
@@ -130,6 +146,7 @@ private:
 	UPROPERTY() TObjectPtr<UInputAction> IA_Tilt;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Click;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Cancel;
+	UPROPERTY() TObjectPtr<UInputAction> IA_Rotate;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Pause;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed1;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed3;
@@ -164,6 +181,11 @@ private:
 	// Zone designation state (M2 Gate B).
 	bool bZoneMode = false;
 	FName ZoneRoom;
+	// Furnish / Sell state (BM-5).
+	bool bFurnishMode = false;
+	FName FurnishRow;
+	int32 FurnishRot = 0;
+	bool bSellMode = false;
 	// The carved cell (spiral index) under a world point on the given floor,
 	// or INDEX_NONE. The zoning click's inverse of the sim's SpiralCell.
 	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;

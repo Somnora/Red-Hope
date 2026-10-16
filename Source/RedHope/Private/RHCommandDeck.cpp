@@ -109,6 +109,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	// free (function, not construction), so no cost labels. Empty until the
 	// rooms table activates - the row is simply absent pre-M2.
 	TSharedRef<SHorizontalBox> ZonePalette = SNew(SHorizontalBox);
+	TSharedRef<SHorizontalBox> FurnishPalette = SNew(SHorizontalBox);
 	int32 ZoneCount = 0;
 	int32 MaxDepth = 5;
 	if (const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr)
@@ -174,6 +175,47 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					DeckButton(FText::FromString(TEXT("Clear")),
 						FOnClicked::CreateSP(this, &SRHCommandDeck::HandleZone, FName(NAME_None)))
 				];
+			}
+			// BM-5: the furniture catalogue, by folder then name; the button
+			// carries its Struct price, the tooltip what it does.
+			{
+				TArray<TPair<FName, const FRHFurnitureRow*>> Pieces;
+				Defs->GetActiveFurnitureSorted(Pieces);
+				const auto Folder = [](FName Cat)
+				{
+					static const FName Order[] = { FName("Sleep"), FName("Seating"), FName("Table"), FName("Work"), FName("Comfort"), FName("Plant"), FName("Storage") };
+					for (int32 i = 0; i < (int32)UE_ARRAY_COUNT(Order); ++i)
+					{
+						if (Order[i] == Cat)
+						{
+							return i;
+						}
+					}
+					return (int32)UE_ARRAY_COUNT(Order);
+				};
+				Pieces.StableSort([&Folder](const TPair<FName, const FRHFurnitureRow*>& A, const TPair<FName, const FRHFurnitureRow*>& B)
+				{
+					return Folder(A.Value->Category) < Folder(B.Value->Category);
+				});
+				for (const auto& Piece : Pieces)
+				{
+					const double StructKg = URHDefinitionsSubsystem::GetFurnitureCost(*Piece.Value).FindRef(FName("Struct"));
+					FurnishPalette->AddSlot().AutoWidth()
+					[
+						SNew(SBox).ToolTipText(FText::FromString(Piece.Value->Blurb))
+						[
+							DeckButton(FText::FromString(FString::Printf(TEXT("%s %.0f"), *Piece.Value->DisplayName, StructKg)),
+								FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFurnish, Piece.Key))
+						]
+					];
+				}
+				if (Pieces.Num() > 0)
+				{
+					FurnishPalette->AddSlot().AutoWidth()
+					[
+						DeckButton(FText::FromString(TEXT("Sell")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSellFurniture))
+					];
+				}
 			}
 		}
 		if (const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -678,11 +720,37 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SScrollBox::Slot()
 					[
 						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(2.f, 0.f, 8.f, 0.f))
+						// BM-5: ZONE | FURNISH tabs share the row.
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 3.f, 0.f))
 						[
-							SNew(STextBlock).Text(FText::FromString(TEXT("ZONE"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::TextDim)
+							SNew(SButton)
+							.ButtonStyle(&RHDeck::TintButtonStyle())
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(!bFurnishTab ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ContentPadding(FMargin(8.f, 4.f))
+							.OnClicked_Lambda([this]() { bFurnishTab = false; return FReply::Handled(); })
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("ZONE"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+							]
 						]
-						+ SHorizontalBox::Slot().AutoWidth() [ ZonePalette ]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+						[
+							SNew(SButton)
+							.ButtonStyle(&RHDeck::TintButtonStyle())
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(bFurnishTab ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ContentPadding(FMargin(8.f, 4.f))
+							.OnClicked_Lambda([this]() { bFurnishTab = true; return FReply::Handled(); })
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("FURNISH"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+							]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).Visibility_Lambda([this]() { return bFurnishTab ? EVisibility::Collapsed : EVisibility::Visible; }) [ ZonePalette ]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).Visibility_Lambda([this]() { return bFurnishTab ? EVisibility::Visible : EVisibility::Collapsed; }) [ FurnishPalette ]
+						]
 					]
 				]
 			]
@@ -988,6 +1056,12 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		FString Label = C.Target.IsNone()
 			? C.Verb.ToString()
 			: FString::Printf(TEXT("%s %s"), *C.Verb.ToString(), *C.Target.ToString());
+		if (C.Verb == FName("Sell"))
+		{
+			// BM-5: "Sell Cot #3" / "Sell a room's furniture".
+			const FRHFurnitureInstance* SF = C.Target == FName("Furniture") ? Sim->FindFurniture((int32)C.Value) : nullptr;
+			Label = SF ? FString::Printf(TEXT("Sell %s #%d"), *SF->Row.ToString(), SF->Id) : FString(TEXT("Sell a room's furniture"));
+		}
 		if (C.Verb == FName("Demolish"))
 		{
 			// BM-3: "Demolish Forge #7", not the raw target slot.
@@ -1682,6 +1756,24 @@ FReply SRHCommandDeck::HandleSurvey()
 	if (PC.IsValid())
 	{
 		PC->BeginSurveyDesignation();
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleFurnish(FName Row)
+{
+	if (PC.IsValid())
+	{
+		PC->BeginFurnish(Row);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleSellFurniture()
+{
+	if (PC.IsValid())
+	{
+		PC->BeginSellFurniture();
 	}
 	return FReply::Handled();
 }

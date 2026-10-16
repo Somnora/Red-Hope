@@ -1346,6 +1346,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	TileByCell.Reset();
 	AppliedRoomTint.Reset();
 	RoomPropByCell.Reset();       // prop components died with their tiles just above
+	FurnitureVis.Reset();         // furniture died with its tiles / habitat actors
+	FurnitureCompsByCell.Reset();
+	PropsHiddenForFurniture.Reset();
 	LightByCell.Reset();          // cell lights died with their tiles too
 	ClutterSpawnedPerLevel.Reset(); // clutter died with its tiles: re-accumulates
 	for (auto& Pair : RivalMarkers)
@@ -1490,6 +1493,131 @@ void URHColonyVisualizerSubsystem::Deinitialize()
 		}
 	}
 	Super::Deinitialize();
+}
+
+FString URHColonyVisualizerSubsystem::FurniturePropPath(FName Row, float& OutFitCm)
+{
+	struct FEntry { const TCHAR* Path; float FitCm; };
+	static const TMap<FName, FEntry> Paths = {
+		{ FName("Cot"),         { TEXT("/Game/RedHope/Art/Furniture/furn_cot/StaticMeshes/furn_cot.furn_cot"), 0.f } },
+		{ FName("BunkBed"),     { TEXT("/Game/RedHope/Art/Furniture/furn_bunkbed/StaticMeshes/furn_bunkbed.furn_bunkbed"), 0.f } },
+		{ FName("Desk"),        { TEXT("/Game/RedHope/Art/Furniture/furn_desk/StaticMeshes/furn_desk.furn_desk"), 0.f } },
+		{ FName("Chair"),       { TEXT("/Game/RedHope/Art/Furniture/furn_chair/StaticMeshes/furn_chair.furn_chair"), 0.f } },
+		{ FName("Bench"),       { TEXT("/Game/RedHope/Art/Furniture/furn_bench/StaticMeshes/furn_bench.furn_bench"), 0.f } },
+		{ FName("Sofa"),        { TEXT("/Game/RedHope/Art/Furniture/furn_sofa/StaticMeshes/furn_sofa.furn_sofa"), 0.f } },
+		{ FName("Lamp"),        { TEXT("/Game/RedHope/Art/Furniture/furn_lamp/StaticMeshes/furn_lamp.furn_lamp"), 0.f } },
+		{ FName("Rug"),         { TEXT("/Game/RedHope/Art/Furniture/furn_rug/StaticMeshes/furn_rug.furn_rug"), 0.f } },
+		{ FName("Plant"),       { TEXT("/Game/RedHope/Art/Furniture/furn_plant/StaticMeshes/furn_plant.furn_plant"), 0.f } },
+		// Room props reused as catalogue pieces, fitted like the room props.
+		{ FName("LabBench"),    { TEXT("/Game/RedHope/Art/Props2/labbench/StaticMeshes/labbench.labbench"), 240.f } },
+		{ FName("Workbench"),   { TEXT("/Game/RedHope/Art/Tiers/workbench_lg/StaticMeshes/workbench_lg.workbench_lg"), 240.f } },
+		{ FName("DiningTable"), { TEXT("/Game/RedHope/Art/Props2/diningtable/StaticMeshes/diningtable.diningtable"), 220.f } },
+		{ FName("Locker"),      { TEXT("/Game/RedHope/Art/Props2/locker/StaticMeshes/locker.locker"), 90.f } },
+	};
+	const FEntry* E = Paths.Find(Row);
+	OutFitCm = E ? E->FitCm : 0.f;
+	return E ? FString(E->Path) : FString();
+}
+
+void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* Sim)
+{
+	if (!Sim)
+	{
+		return;
+	}
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	TSet<int32> Live;
+	FurnitureCompsByCell.Reset();
+	for (const FRHFurnitureInstance& F : Sim->GetFurniture())
+	{
+		Live.Add(F.Id);
+		const FString Sig = FString::Printf(TEXT("%s|%d,%d,%d|%d|%d"), *F.Row.ToString(), F.Key.X, F.Key.Y, F.Key.Z, F.Slot, F.Rot);
+		FRHFurnVis& Vis = FurnitureVis.FindOrAdd(F.Id);
+		UStaticMeshComponent* Comp = Vis.Comp.Get();
+		if (!Comp || Vis.Sig != Sig)
+		{
+			if (Comp)
+			{
+				Comp->DestroyComponent();
+				Comp = nullptr;
+			}
+			Vis.Comp = nullptr;
+			Vis.Sig.Reset();
+			AActor* Owner = F.Key.Z == 0 ? (AActor*)TileByCell.FindRef(FIntVector(F.Key.X, F.Key.Y, 0)).Get() : (AActor*)BuildingVisuals.FindRef(F.Key.Z).Get();
+			float FitCm = 0.f;
+			const FString Path = FurniturePropPath(F.Row, FitCm);
+			UStaticMesh* Mesh = (Owner && !Path.IsEmpty()) ? LoadObject<UStaticMesh>(nullptr, *Path) : nullptr;
+			FVector Centre;
+			FVector2D Half;
+			if (!Mesh || !Sim->GetFurnitureFootprintCm(F.Row, F.Key, F.Slot, F.Rot, Centre, Half))
+			{
+				continue; // its tile / habitat actor isn't up yet: next tick
+			}
+			Comp = NewObject<UStaticMeshComponent>(Owner);
+			Comp->SetupAttachment(Owner->GetRootComponent());
+			Comp->SetMobility(EComponentMobility::Movable);
+			Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Comp->SetAbsolute(true, true, true); // a tile's flat scale would squash it
+			Comp->RegisterComponent();
+			Comp->SetStaticMesh(Mesh);
+			const FBoxSphereBounds MB = Mesh->GetBounds();
+			const float S = FitCm > 0.f ? FitCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f) : 1.f;
+			const FRotator Yaw(0.f, 90.f * F.Rot, 0.f);
+			const FVector Off = Yaw.RotateVector(FVector(MB.Origin.X, MB.Origin.Y, 0.f) * S);
+			// Feet on the floor: an underground tile's top is Level x FloorHeight;
+			// a habitat bay's floor tile tops out at its actor + 5 cm
+			// (RefreshHabShells: Base = actor + 3, a 2 cm tile centred at Base + 1).
+			const float FloorZ = F.Key.Z == 0 ? (float)(F.Key.X * Sim->GetFloorHeightCm()) : (float)(Owner->GetActorLocation().Z + 5.f);
+			const float Lift = MB.BoxExtent.Z < 3.f ? 0.6f : 0.f; // a rug sits just proud of the deck
+			// Seats pull up to what they face (a chair to its table): slide the
+			// piece forward to the edge of its footprint. Presentation only.
+			FVector Pull = FVector::ZeroVector;
+			const FRHFurnitureRow* FRow = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+			if (FRow && FRow->Category == FName("Seating"))
+			{
+				const FVector Facing = Yaw.RotateVector(FVector(0.f, -1.f, 0.f));
+				const double Reach = ((F.Rot & 1) ? Half.X : Half.Y) - MB.BoxExtent.Y * S - 10.0;
+				Pull = Facing * (float)FMath::Max(0.0, Reach);
+			}
+			Comp->SetWorldScale3D(FVector(S));
+			Comp->SetWorldLocationAndRotation(FVector(Centre.X - Off.X + Pull.X, Centre.Y - Off.Y + Pull.Y, FloorZ + Lift - (MB.Origin.Z - MB.BoxExtent.Z) * S), Yaw);
+			Vis.Comp = Comp;
+			Vis.Sig = Sig;
+		}
+		FurnitureCompsByCell.FindOrAdd(F.Key).Add(Comp);
+	}
+	for (auto It = FurnitureVis.CreateIterator(); It; ++It)
+	{
+		if (!Live.Contains(It->Key))
+		{
+			if (UStaticMeshComponent* Gone = It->Value.Comp.Get())
+			{
+				Gone->DestroyComponent(); // sold
+			}
+			It.RemoveCurrent();
+		}
+	}
+	// A furnished cell drops its automatic room-prop; selling it all back
+	// brings the prop back.
+	for (const auto& Pair : RoomPropByCell)
+	{
+		UStaticMeshComponent* Prop = Pair.Value.Get();
+		if (!Prop)
+		{
+			continue;
+		}
+		const bool bFurnished = Sim->GetCellFurniture(Pair.Key) > 0;
+		if (bFurnished && Prop->IsVisible())
+		{
+			Prop->SetVisibility(false);
+			PropsHiddenForFurniture.Add(Pair.Key);
+		}
+		else if (!bFurnished && PropsHiddenForFurniture.Contains(Pair.Key))
+		{
+			Prop->SetVisibility(true);
+			PropsHiddenForFurniture.Remove(Pair.Key);
+		}
+	}
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingRemoved(const FRHBuildingInstance& Instance)
@@ -2095,6 +2223,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 
 	RefreshDomeCrops();
 	RefreshHabShells();
+	RefreshFurniture(Sim);
 
 	// Is it working? A machine that has been shed by the power priority, or
 	// switched off by the player, goes dark; a running one keeps its glow. The

@@ -97,6 +97,13 @@ private:
 	EVisibility GetCrewVisibility() const;
 	// Room zoning (M2 Gate B): arm the controller's zone-paint mode.
 	FReply HandleZone(FName Room);
+	// Furnish mode (BM-5): the zone row's FURNISH tab holds the catalogue.
+	FReply HandleFurnish(FName Row);
+	FReply HandleSellFurniture();
+	bool bFurnishTab = false;
+public:
+	void Debug_SetFurnishTab(bool bOn) { bFurnishTab = bOn; }
+private:
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.
 	FText GetKnownGroundText() const;

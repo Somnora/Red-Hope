@@ -8,6 +8,7 @@ class AStaticMeshActor;
 class UInstancedStaticMeshComponent;
 class UPointLightComponent;
 class UStaticMeshComponent;
+class URHSimWorldSubsystem;
 struct FRHBuildingInstance;
 struct FRHCommand;
 struct FRHDepositState;
@@ -212,6 +213,25 @@ public:
 	// furniture avoidance (director 2026-08-17: "there's no collision so they
 	// walk right through objects like desks and tables"). Key.X is the level.
 	const TMap<FIntVector, TWeakObjectPtr<UStaticMeshComponent>>& GetRoomProps() const { return RoomPropByCell; }
+	// BM-5: placed furniture components by cell (keys like the room props:
+	// Key.X is the level, 0 for a habitat bay), for crew avoidance.
+	const TMap<FIntVector, TArray<TWeakObjectPtr<UStaticMeshComponent>>>& GetFurnitureComps() const { return FurnitureCompsByCell; }
+
+private:
+	// BM-5: one component per placed piece, owned by its tile (underground)
+	// or habitat actor (a bay) - floor-cut hiding and lifecycle come free -
+	// reconciled against the sim every tick by signature (row, cell, slot,
+	// rotation); a furnished cell's automatic room-prop hides.
+	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; FString Sig; };
+	TMap<int32, FRHFurnVis> FurnitureVis;
+	TMap<FIntVector, TArray<TWeakObjectPtr<UStaticMeshComponent>>> FurnitureCompsByCell;
+	TSet<FIntVector> PropsHiddenForFurniture;
+	void RefreshFurniture(const URHSimWorldSubsystem* Sim);
+	// Mesh per catalogue row; OutFitCm > 0 fits a room-scale prop's larger
+	// horizontal extent to that size, 0 = the code-built pieces' true scale.
+	static FString FurniturePropPath(FName Row, float& OutFitCm);
+
+public:
 
 private:
 	// Automatic hab lighting (director 2026-07-09): one soft ceiling light per

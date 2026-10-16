@@ -127,6 +127,10 @@ void ARHPlayerController::SetupInputComponent()
 	IA_Cancel = MakeAction(TEXT("IA_Cancel"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_Cancel, EKeys::Escape);
 
+	// T turns the armed furnishing a quarter (R is the camera tilt).
+	IA_Rotate = MakeAction(TEXT("IA_Rotate"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_Rotate, EKeys::T);
+
 	IA_Pause = MakeAction(TEXT("IA_Pause"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_Pause, EKeys::SpaceBar);
 	IA_Speed1 = MakeAction(TEXT("IA_Speed1"), EInputActionValueType::Boolean);
@@ -150,6 +154,7 @@ void ARHPlayerController::SetupInputComponent()
 	Input->BindAction(IA_Tilt, ETriggerEvent::Triggered, this, &ARHPlayerController::OnTilt);
 	Input->BindAction(IA_Click, ETriggerEvent::Started, this, &ARHPlayerController::OnClick);
 	Input->BindAction(IA_Cancel, ETriggerEvent::Started, this, &ARHPlayerController::OnCancel);
+	Input->BindAction(IA_Rotate, ETriggerEvent::Started, this, &ARHPlayerController::OnRotate);
 	Input->BindAction(IA_Pause, ETriggerEvent::Started, this, &ARHPlayerController::TogglePause);
 	Input->BindAction(IA_Speed1, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 1.f);
 	Input->BindAction(IA_Speed3, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 3.f);
@@ -555,6 +560,92 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 		}
 	}
+	else if (bFurnishMode)
+	{
+		// BM-5: the piece's footprint on the room's 2.5 m sub-grid, green when
+		// the sim would accept it, with a facing arrow and what it would do.
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(FurnishRow) : nullptr;
+		FVector Ground;
+		FIntVector Key;
+		int32 Slot = 0;
+		if (Row && CursorToGround(Ground) && ComputeFurnishSpot(Ground, Key, Slot))
+		{
+			FString Why;
+			const bool bOk = Sim->CanPlaceFurniture(FurnishRow, Key, Slot, FurnishRot, Why);
+			FVector FC;
+			FVector2D FH;
+			Sim->GetFurnitureFootprintCm(FurnishRow, Key, Slot, FurnishRot, FC, FH);
+			const FVector CC = Sim->GetCellCentreCm(Key);
+			const float Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
+			const FColor Col = bOk ? FColor::Emerald : FColor::Red;
+			DrawDebugBox(World, FVector(CC.X, CC.Y, Z + 30.f), FVector(500.f, 500.f, 30.f), FColor(70, 110, 110), false, -1.f, 0, 3.f);
+			DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), Col, false, -1.f, 0, 8.f);
+			const FVector Facing = FRotator(0.f, 90.f * FurnishRot, 0.f).RotateVector(FVector(0.f, -1.f, 0.f));
+			const FVector Mid(FC.X, FC.Y, Z + 125.f);
+			DrawDebugDirectionalArrow(World, Mid, Mid + Facing * (FMath::Min(FH.X, FH.Y) - 15.f), 60.f, Col, false, -1.f, 0, 6.f);
+			FString Cost;
+			for (const auto& L : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
+			{
+				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+			}
+			if (bOk)
+			{
+				URHSimWorldSubsystem::FRHFurnishPreview Pv;
+				Sim->PreviewFurnishEffect(FurnishRow, Key, Pv);
+				FString Effect;
+				if (Pv.BedsAfter != Pv.BedsBefore)
+				{
+					Effect = FString::Printf(TEXT(" - beds here %d -> %d"), Pv.BedsBefore, Pv.BedsAfter);
+				}
+				else if (Pv.SeatsAfter != Pv.SeatsBefore)
+				{
+					Effect = FString::Printf(TEXT(" - work seats here %d -> %d"), Pv.SeatsBefore, Pv.SeatsAfter);
+				}
+				else if (Pv.ComfortAfter > Pv.ComfortBefore + 1e-6)
+				{
+					Effect = FString::Printf(TEXT(" - Hope +%.0f"), Pv.ComfortAfter - Pv.ComfortBefore);
+				}
+				HintText = FString::Printf(TEXT("FURNISH %s (%s)%s - click to place, T to turn, right-click to finish"), *Row->DisplayName, *Cost, *Effect);
+				HintColor = FLinearColor(0.3f, 1.f, 0.6f);
+			}
+			else
+			{
+				HintText = FString::Printf(TEXT("FURNISH %s: %s"), *Row->DisplayName, *Why);
+				HintColor = FLinearColor(1.f, 0.4f, 0.3f);
+			}
+		}
+		else if (Row)
+		{
+			HintText = FString::Printf(TEXT("FURNISH %s: hover a zoned room - a carved cell, or a habitat bay at the surface"), *Row->DisplayName);
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+	}
+	else if (bSellMode)
+	{
+		FVector Ground;
+		const FRHFurnitureInstance* Hit = CursorToGround(Ground) ? FindFurnitureAt(Ground) : nullptr;
+		const FRHFurnitureRow* HitRow = (Hit && Defs) ? Defs->GetFurniture(Hit->Row) : nullptr;
+		if (Hit)
+		{
+			FString Why;
+			TMap<FName, double> Refund;
+			const bool bOk = Sim->CanSellFurniture(Hit->Id, Why, &Refund);
+			FVector FC;
+			FVector2D FH;
+			Sim->GetFurnitureFootprintCm(Hit->Row, Hit->Key, Hit->Slot, Hit->Rot, FC, FH);
+			const float Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
+			DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), bOk ? FColor(255, 150, 40) : FColor::Red, false, -1.f, 0, 8.f);
+			const FString Name = HitRow ? HitRow->DisplayName : Hit->Row.ToString();
+			HintText = bOk ? FString::Printf(TEXT("SELL %s #%d: %.0f Struct back to the Lander - click to transmit, right-click to finish"), *Name, Hit->Id, Refund.FindRef(FName("Struct")))
+				: FString::Printf(TEXT("SELL %s #%d: %s"), *Name, Hit->Id, *Why);
+			HintColor = bOk ? FLinearColor(1.f, 0.62f, 0.2f) : FLinearColor(1.f, 0.4f, 0.3f);
+		}
+		else
+		{
+			HintText = TEXT("SELL: hover a furnishing on this floor");
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+	}
 
 	// In-flight build orders (director finding, M1-d hand-play): the signal-lag
 	// window left the player blind - "I can't see where I just placed it".
@@ -564,6 +655,50 @@ void ARHPlayerController::Tick(float DeltaTime)
 	{
 		for (const FRHCommand& C : Sim->GetUplinkQueue())
 		{
+			if (C.Verb == FName("Furnish") || C.Verb == FName("Sell"))
+			{
+				// BM-5: a furnishing in transit (cyan) or about to be sold (amber).
+				FName GRow;
+				FIntVector GKey;
+				int32 GSlot = 0, GRot = 0;
+				bool bHave = false;
+				if (C.Verb == FName("Furnish") && C.Level == ActiveLevel)
+				{
+					int32 GCell = 0;
+					URHSimWorldSubsystem::DecodeFurnish(C.Value, GCell, GSlot, GRot);
+					GRow = C.Target;
+					if (C.Level == 0)
+					{
+						bHave = Sim->ResolveFurnitureKey(0, C.Location, GKey);
+					}
+					else
+					{
+						GKey = FIntVector(C.Level, GCell, 0);
+						bHave = true;
+					}
+				}
+				else if (C.Verb == FName("Sell") && C.Target == FName("Furniture"))
+				{
+					if (const FRHFurnitureInstance* SF = Sim->FindFurniture((int32)C.Value))
+					{
+						GRow = SF->Row; GKey = SF->Key; GSlot = SF->Slot; GRot = SF->Rot;
+						bHave = (SF->Key.Z == 0 ? SF->Key.X : 0) == ActiveLevel;
+					}
+				}
+				FVector GC;
+				FVector2D GH;
+				if (bHave && Sim->GetFurnitureFootprintCm(GRow, GKey, GSlot, GRot, GC, GH))
+				{
+					const float GZ = ActiveLevel * (float)Sim->GetFloorHeightCm();
+					const bool bSell = C.Verb == FName("Sell");
+					DrawDebugBox(World, FVector(GC.X, GC.Y, GZ + 60.f), FVector(GH.X - 10.f, GH.Y - 10.f, 60.f),
+						bSell ? FColor(255, 150, 40) : FColor(60, 200, 220), false, -1.f, 0, 4.f);
+					const double GEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+					DrawDebugString(World, FVector(GC.X, GC.Y, GZ + 220.f), FString::Printf(TEXT("%s %s  \u0394 %.0fs"),
+						bSell ? TEXT("Sell") : TEXT("Furnish"), *GRow.ToString(), GEta), nullptr, bSell ? FColor(255, 180, 90) : FColor(120, 230, 255), 0.f, true, 1.1f);
+				}
+				continue;
+			}
 			if (C.Verb == FName("Demolish"))
 			{
 				// BM-3: the doomed structure wears an amber frame + countdown
@@ -760,6 +895,57 @@ void ARHPlayerController::OnClick()
 				ZoneRoom.IsNone() ? TEXT("clear") : *ZoneRoom.ToString(), ActiveLevel, Cell), FLinearColor(0.2f, 0.9f, 1.f));
 		}
 	}
+	else if (bFurnishMode)
+	{
+		// BM-5: transmit the piece where the ghost stands; the mode stays armed.
+		FIntVector Key;
+		int32 Slot = 0;
+		FString Why;
+		if (ComputeFurnishSpot(Ground, Key, Slot))
+		{
+			if (Sim->CanPlaceFurniture(FurnishRow, Key, Slot, FurnishRot, Why))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Furnish");
+				Cmd.Target = FurnishRow;
+				Cmd.Level = ActiveLevel;
+				Cmd.Location = Ground; // a bay is found by location, like Designate
+				Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Z == 0 ? Key.Y : 0, Slot, FurnishRot);
+				Sim->EnqueueCommand(Cmd);
+				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+				const FRHFurnitureRow* Row = ClickDefs ? ClickDefs->GetFurniture(FurnishRow) : nullptr;
+				SetConfirm(FString::Printf(TEXT("Furnish order transmitted: %s"), Row ? *Row->DisplayName : *FurnishRow.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
+			}
+			else
+			{
+				URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				SetConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+			}
+		}
+	}
+	else if (bSellMode)
+	{
+		if (const FRHFurnitureInstance* Hit = FindFurnitureAt(Ground))
+		{
+			FString Why;
+			if (Sim->CanSellFurniture(Hit->Id, Why))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Sell");
+				Cmd.Target = FName("Furniture");
+				Cmd.Value = Hit->Id;
+				Cmd.Level = ActiveLevel;
+				Sim->EnqueueCommand(Cmd);
+				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+				SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *Hit->Row.ToString(), Hit->Id), FLinearColor(1.f, 0.62f, 0.2f));
+			}
+			else
+			{
+				URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				SetConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+			}
+		}
+	}
 	else if (bDigMode)
 	{
 		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
@@ -841,7 +1027,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -947,6 +1133,8 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
 	bDigMode = false;
 	bSurveyMode = false;
+	bFurnishMode = false;
+	bSellMode = false;
 	PendingBuildDef = BuildingDef;
 }
 
@@ -954,6 +1142,8 @@ void ARHPlayerController::BeginDigDesignation()
 {
 	PendingBuildDef = NAME_None;
 	bSurveyMode = false;
+	bFurnishMode = false;
+	bSellMode = false;
 	bDigMode = true;
 }
 
@@ -962,12 +1152,84 @@ void ARHPlayerController::BeginSurveyDesignation()
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
 	bExcavateMode = false;
+	bFurnishMode = false;
+	bSellMode = false;
 	bSurveyMode = true;
+}
+
+void ARHPlayerController::BeginFurnish(FName Row)
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bFurnishMode = true;
+	FurnishRow = Row;
+}
+
+void ARHPlayerController::BeginSellFurniture()
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bSellMode = true;
+}
+
+void ARHPlayerController::Debug_ShowFurnishTab()
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetFurnishTab(true);
+	}
+}
+
+void ARHPlayerController::OnRotate()
+{
+	if (bFurnishMode)
+	{
+		FurnishRot = (FurnishRot + 1) & 3;
+	}
+}
+
+bool ARHPlayerController::ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(FurnishRow) : nullptr;
+	if (!Sim || !Row || !Sim->ResolveFurnitureKey(ActiveLevel, GroundCm, OutKey))
+	{
+		return false;
+	}
+	const FIntPoint Size = URHSimWorldSubsystem::GetFurnitureSize(*Row, FurnishRot);
+	const FVector CC = Sim->GetCellCentreCm(OutKey);
+	OutSlot = URHSimWorldSubsystem::AnchorSlotFor(FVector2D(GroundCm.X - (CC.X - 500.0), GroundCm.Y - (CC.Y - 500.0)), Size.X, Size.Y);
+	return true;
+}
+
+const FRHFurnitureInstance* ARHPlayerController::FindFurnitureAt(const FVector& GroundCm) const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return nullptr;
+	}
+	for (const FRHFurnitureInstance& F : Sim->GetFurniture())
+	{
+		FVector C;
+		FVector2D H;
+		if ((F.Key.Z == 0 ? F.Key.X : 0) == ActiveLevel && Sim->GetFurnitureFootprintCm(F.Row, F.Key, F.Slot, F.Rot, C, H)
+			&& FMath::Abs(GroundCm.X - C.X) <= H.X && FMath::Abs(GroundCm.Y - C.Y) <= H.Y)
+		{
+			return &F;
+		}
+	}
+	return nullptr;
 }
 
 void ARHPlayerController::BeginExcavateDesignation()
 {
 	PendingBuildDef = NAME_None;
+	bFurnishMode = false;
+	bSellMode = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = true;
@@ -979,6 +1241,8 @@ void ARHPlayerController::BeginExcavateDesignation()
 void ARHPlayerController::BeginZoneDesignation(FName Room)
 {
 	PendingBuildDef = NAME_None;
+	bFurnishMode = false;
+	bSellMode = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;
@@ -1037,7 +1301,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode)
+	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -1053,6 +1317,9 @@ void ARHPlayerController::CancelModes()
 	bExcavateDragging = false;
 	bZoneMode = false;
 	ZoneRoom = NAME_None;
+	bFurnishMode = false;
+	FurnishRow = NAME_None;
+	bSellMode = false;
 	HintText.Reset();
 }
 

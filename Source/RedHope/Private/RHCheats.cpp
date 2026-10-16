@@ -912,6 +912,72 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAssign(
 		Sim->EnqueueCommand(Cmd);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHFurnish(
+	TEXT("RH.Furnish"),
+	TEXT("RH.Furnish <Row> <Level> <Cell|Xm Ym> <Slot> [Rot] - BM-4: order a furnishing (uplink). Underground: the cell index; surface: a point in the habitat bay."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Furnish <Row> <Level> <Cell|Xm Ym> <Slot> [Rot]"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Furnish");
+		Cmd.Target = FName(*Args[0]);
+		Cmd.Level = FCString::Atoi(*Args[1]);
+		if (Cmd.Level == 0)
+		{
+			if (Args.Num() < 5)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("Usage (surface): RH.Furnish <Row> 0 <Xm> <Ym> <Slot> [Rot]"));
+				return;
+			}
+			Cmd.Location = FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f);
+			Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(0, FCString::Atoi(*Args[4]), Args.Num() > 5 ? FCString::Atoi(*Args[5]) : 0);
+		}
+		else
+		{
+			Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3]), Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 0);
+		}
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSell(
+	TEXT("RH.Sell"),
+	TEXT("RH.Sell <FurnitureId> - BM-4: sell a furnishing back (uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Sell <FurnitureId>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Sell");
+		Cmd.Target = FName("Furniture");
+		Cmd.Value = FCString::Atoi(*Args[0]);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckFurnish(
+	TEXT("RH.DeckFurnish"),
+	TEXT("RH.DeckFurnish [Row] - DEBUG: show the deck's FURNISH tab (captures); with a row, arm Furnish mode on it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (PC)
+		{
+			PC->Debug_ShowFurnishTab();
+			if (Args.Num() > 0)
+			{
+				PC->BeginFurnish(FName(*Args[0]));
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHDemolish(
 	TEXT("RH.Demolish"),
 	TEXT("RH.Demolish <Id> - BM-3: order a structure demolished or a site cancelled (uplink; salvage to the Lander)."),

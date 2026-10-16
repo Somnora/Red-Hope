@@ -1,11 +1,11 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-16 (through build mode BM-3).** The 10-15 snapshot ran
+**Snapshot: 2026-10-16 (through build mode BM-5, Furnish mode).** The 10-15 snapshot ran
 through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v29**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v30**.
 
 ## 2026-10-16: build mode, suits and airlocks
 
@@ -40,6 +40,28 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   rerouted, never lost. No save change. Suite `-demolish` (62 checks).
   **Open for the director:** built imports salvage nothing (no kit back),
   pylons can't come down, a habitat must be emptied of machines first.
+- **Furniture art** (`47d6667`): nine pieces built in code in the tier-room
+  bench family (`scripts/blender/rh_build_furnishings.py`) - chair, desk with
+  its chair, bench, sofa, floor lamp, rug, cot, bunk bed, potted plant - at
+  TRUE scale (`/Game/RedHope/Art/Furniture`). Sheet: `docs/media/furniture-pieces.jpg`.
+- **BM-4, the furniture catalogue (sim)** (`d180f12`, save **v30**): 13 pieces
+  in `RH_Furniture.csv` / `DT_Furniture`, Struct-only, placed on a 4x4 grid of
+  2.5 m sub-cells in a zoned cell or habitat bay by a `Furnish` order (instant
+  when it lands, decision 5a) and sold back at 75% (`Sell`). Effects by kind:
+  a Living cell with beds houses exactly its beds; a station with desks or
+  benches seats exactly them; comfort pieces feed a capped (6) bonus-only Hope
+  line, Furnishings. Rooms without such pieces are exactly as before. Bed
+  guard on selling and re-zoning; a demolished habitat sells its furniture
+  back. Derived bed/seat assignments per colonist (for alive pass 2). Suite
+  `-furnish` (63 checks).
+- **BM-5, Furnish mode** (this snapshot): the zone row's FURNISH tab (the
+  catalogue with prices, and Sell); a ghost on the sub-grid with a facing
+  arrow, T to turn it, and a hint naming the effect ("beds here 1 -> 2") or
+  the refusal; in-flight furnish/sell ghosts; placed pieces in the world (a
+  furnished cell hides its automatic room prop; seats pull up to what they
+  face); crew walk around them. `RH.Furnish`, `RH.Sell`, `RH.DeckFurnish`.
+  Sheet: `docs/media/furnish-mode.jpg`. **Not hand-tested** (captures can't
+  move the mouse): the hover ghost, T, and click-to-place.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 
@@ -80,20 +102,21 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 28
-suites (29 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 29
+suites (30 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
 the art, audio, interface, playtest, tiered-production, dome and build-mode
-work. Last reported fully green on the BM-3 commit (29 runs) ("0 suite(s) not green", pins
-unchanged); also on `e6ee887`, `585ee8e`, `f77b962`, `63f452f`, `4706e5f` and
-earlier. The four newest suites (`-staff`, `-dome`, `-surfacehab`,
-`-demolish`) fail loudly on any mismatch, unlike the older print-only ones.
+work. Last reported fully green on `d180f12` (30 runs) ("0 suite(s) not green", pins
+unchanged); also on `d180f12` (BM-4), `3332e21` (BM-3), `e6ee887`, `585ee8e`,
+`f77b962`, `63f452f`, `4706e5f` and earlier. The five newest suites (`-staff`,
+`-dome`, `-surfacehab`, `-demolish`, `-furnish`) fail loudly on any mismatch,
+unlike the older print-only ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 29 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 30 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome surfacehab demolish
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish
 #         (+ no-switch = the baseline)
 ```
 
@@ -103,7 +126,7 @@ self-tests (`163165a`), a read-only manifest iterator (`48934b9`), the Lander
 dock (`6410bf8`), the grow-light alert re-arm (`4706e5f`, runtime only),
 prefab station modules (`f77b962`), seat priority and lazy fill (`63f452f`,
 lazy fill off by default), the greenhouse dome (`585ee8e`), surface habitats
-(`e6ee887`), demolish (BM-3). Each is inert for a colony that doesn't use it.
+(`e6ee887`), demolish (BM-3), furniture (BM-4). Each is inert for a colony that doesn't use it.
 
 ---
 
@@ -534,6 +557,8 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
 - **DataTables:** `RH_TABLES=Config,Buildings UnrealEditor-Cmd red_hope.uproject
   -run=pythonscript -script=$PWD/scripts/unreal/rh_sync_datatables.py
   -unattended -nosound -stdout` (omit `RH_TABLES` for all), then the battery.
+  A brand-new table: add `RH_CREATE=<Name>:<RowStruct>` once its struct is
+  compiled (how `DT_Furniture` was made).
 - Look at the game without the editor: `bash scripts/unreal/rh_sandbox.sh`.
   `RH.Demo` builds a colony; its fleet idles until `RH.Dig Regolith_A`.
 - **Art lanes.** Local Blender works (5.2.2 at `/Applications/Blender.app`):
