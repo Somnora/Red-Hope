@@ -125,6 +125,13 @@ private:
 		FFurnitureSeat Seat;
 		FFurnitureSeat PendingSeat;
 		float SettleAlpha = 0.f;
+		// Alive pass 2 (b): a crew moment in progress - the pair face each
+		// other (talking over a pastime; a still face-off in a dispute), or
+		// the helper lends a hand at the worker's bench. Sim-paced; 0 = none.
+		double TalkRemainingS = 0.0;
+		int32 TalkPartner = 0;
+		bool bHelping = false;
+		bool bTalkGesture = false;
 	};
 
 public:
@@ -212,4 +219,6 @@ private:
 	// The body-language clock: accrues only while the sim runs, so hops and
 	// work-bobs freeze mid-pose on pause instead of dancing through it.
 	double AnimClockS = 0.0;
+	// rh.CrewOverlapLog's next report (world seconds).
+	double NextOverlapLogS = 0.0;
 };

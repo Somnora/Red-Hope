@@ -862,6 +862,20 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeckBuild(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHCrewMoment(
+	TEXT("RH.CrewMoment"),
+	TEXT("RH.CrewMoment <0 pastime|1 join|2 dispute|3 celebrate> <IdA> <IdB> - DEBUG (captures): replay a crew-moment beat to the presentation listeners. The sim's state is untouched."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CrewMoment <Type> <IdA> <IdB>"));
+			return;
+		}
+		Sim->OnCrewMoment.Broadcast((uint8)FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2]), TEXT("(debug) a crew moment"));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHAfter(
 	TEXT("RH.After"),
 	TEXT("RH.After <Seconds> <Command...> - DEBUG: run a console command later. Capture scripts' -ExecCmds all fire at boot; this stages a later beat (e.g. RH.After 25 RH.Launch)."),

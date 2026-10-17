@@ -54,6 +54,18 @@ static TAutoConsoleVariable<int32> CVarCrewForceBeat(
 	TEXT("DEBUG (captures): force every resident's next beat - 0 natural, 1 sleep, 2 work, 3 eat, 4 relax. Presentation only; the sim never sees it."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<int32> CVarCrewSeparation(
+	TEXT("rh.CrewSeparation"),
+	1,
+	TEXT("1 = crew figures step around one another and ease apart when standing in each other (alive pass 2); 0 = the old pass-through walking (A/B comparison)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarCrewOverlapLog(
+	TEXT("rh.CrewOverlapLog"),
+	0,
+	TEXT("DEBUG: every 2 s, log how many pairs of standing or walking crew figures on one floor are closer than 40 cm (bodies inside each other)."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarCrewTrueHeight(
 	TEXT("rh.CrewTrueHeight"),
 	1,
@@ -248,6 +260,26 @@ void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 I
 		}
 		Walker->NextDecideRealSeconds = Now + 9.0;
 		Anchor->NextDecideRealSeconds = Now + 9.0;
+		// The walker leaves any seat it was in (it stands first); then the
+		// pair turn to each other for the beat. A pastime is a conversation
+		// (the Talk gesture). A dispute is a still face-off - the amber plate
+		// carries the words; no raised hands (Gate-D framing: words, never
+		// blows). A join-in has the helper work alongside, facing the worker,
+		// who carries on at the bench.
+		Walker->PendingSeat = FFurnitureSeat();
+		const bool bJoin = Moment == URHSimWorldSubsystem::ERHCrewMoment::JoinWork;
+		const bool bGesture = Moment == URHSimWorldSubsystem::ERHCrewMoment::Pastime;
+		A->TalkRemainingS = 9.0;
+		A->TalkPartner = IdB;
+		A->bHelping = bJoin;
+		A->bTalkGesture = bGesture;
+		if (!bJoin)
+		{
+			B->TalkRemainingS = 9.0;
+			B->TalkPartner = IdA;
+			B->bHelping = false;
+			B->bTalkGesture = bGesture;
+		}
 	}
 	switch (Moment)
 	{
@@ -1027,6 +1059,47 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	}
 
 	// Roster diff: arrivals spawn, departures (evacuation) leave the world.
+	// Alive pass 2 (b): where everyone stands this frame, by floor - the
+	// figures step around each other (a seated or lying figure counts where
+	// its body is, not where it stood up from).
+	TMap<int32, TArray<TPair<int32, FVector>>> CrowdByLevel;
+	for (const auto& T : Tracked)
+	{
+		const AActor* Fig = T.Value.Actor.Get();
+		const USkeletalMeshComponent* FigBody = T.Value.SkelBody.Get();
+		if (Fig && T.Value.AirlockAct == 0)
+		{
+			CrowdByLevel.FindOrAdd(T.Value.CurLevel).Emplace(T.Key,
+				(FigBody && T.Value.SettleAlpha > 0.5f) ? FigBody->GetComponentLocation() : Fig->GetActorLocation());
+		}
+	}
+	if (CVarCrewOverlapLog.GetValueOnGameThread() != 0 && Now >= NextOverlapLogS)
+	{
+		NextOverlapLogS = Now + 2.0;
+		int32 Pairs = 0, Figures = 0;
+		for (const auto& L : CrowdByLevel)
+		{
+			for (int32 i = 0; i < L.Value.Num(); ++i)
+			{
+				const FCrewVisual* Vi = Tracked.Find(L.Value[i].Key);
+				if (!Vi || Vi->SettleAlpha > 0.f)
+				{
+					continue; // seated / lying bodies sit where the furniture puts them
+				}
+				++Figures;
+				for (int32 j = i + 1; j < L.Value.Num(); ++j)
+				{
+					const FCrewVisual* Vj = Tracked.Find(L.Value[j].Key);
+					if (Vj && Vj->SettleAlpha <= 0.f && FVector::Dist2D(L.Value[i].Value, L.Value[j].Value) < 40.f)
+					{
+						++Pairs;
+					}
+				}
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[CrewOverlap] %d pair(s) closer than 40 cm among %d standing/walking figures (separation %s)"),
+			Pairs, Figures, CVarCrewSeparation.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
+	}
 	TSet<int32> Alive;
 	for (const FRHColonist& C : Roster)
 	{
@@ -1171,6 +1244,37 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 						Push += Repel(Ahead, O4.W + 55.f) * 1.4f; // early bend
 					}
 				}
+				// People too (alive pass 2): a personal space of ~0.7 m, and a
+				// keep-right nudge for anyone ahead, so two walkers meeting
+				// head-on pass each other instead of locking. Nobody steers
+				// away from the person they are walking up to, or near the end
+				// of the walk (whoever is waiting there is the destination).
+				if (CVarCrewSeparation.GetValueOnGameThread() != 0 && FVector::Dist2D(Pos, Flat) > 120.f)
+				{
+					if (const TArray<TPair<int32, FVector>>* Crowd = CrowdByLevel.Find(Vis->CurLevel))
+					{
+						const FVector Right(-Dir.Y, Dir.X, 0.f);
+						for (const TPair<int32, FVector>& O : *Crowd)
+						{
+							if (O.Key == C.Id || O.Key == Vis->TalkPartner || FVector::Dist2D(Flat, O.Value) < 90.f)
+							{
+								continue;
+							}
+							const FVector To = FVector(O.Value.X - Pos.X, O.Value.Y - Pos.Y, 0.f);
+							const float D = To.Size2D();
+							if (D < 1.f || D > 160.f)
+							{
+								continue;
+							}
+							const float Near = 1.f - D / 160.f;
+							Push -= To / D * Near * 1.6f;
+							if (FVector::DotProduct(To / D, Dir) > 0.3f)
+							{
+								Push += Right * Near * 0.9f;
+							}
+						}
+					}
+				}
 				if (!Push.IsNearlyZero())
 				{
 					Push.Z = 0.0;
@@ -1191,6 +1295,48 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			Actor->SetActorRotation(FMath::RInterpTo(Actor->GetActorRotation(),
 				FRotator(0.f, Vis->PostFaceYawDeg, 0.f), DeltaTime, 6.f));
+		}
+		if (!bWalking && Pace > 0.f && Vis->SettleAlpha <= 0.f && Vis->AirlockAct == 0)
+		{
+			// A crew moment: turn to the other one.
+			const FCrewVisual* Partner = Vis->TalkRemainingS > 0.0 ? Tracked.Find(Vis->TalkPartner) : nullptr;
+			const AActor* PartnerActor = Partner ? Partner->Actor.Get() : nullptr;
+			if (PartnerActor && FVector::Dist2D(PartnerActor->GetActorLocation(), Pos) < 400.f)
+			{
+				const FVector ToPartner = (PartnerActor->GetActorLocation() - Pos).GetSafeNormal2D();
+				if (!ToPartner.IsNearlyZero())
+				{
+					Actor->SetActorRotation(FMath::RInterpTo(Actor->GetActorRotation(),
+						FRotator(0.f, ToPartner.Rotation().Yaw, 0.f), DeltaTime, 6.f));
+				}
+			}
+			// Standing figures that ended up in one another (two beats chose
+			// neighbouring spots) ease apart; the spot moves with them, so the
+			// next beat doesn't snap them back. Not at a furnishing place -
+			// those are exact.
+			if (Vis->Seat.Pose == 0 && CVarCrewSeparation.GetValueOnGameThread() != 0)
+			{
+				if (const TArray<TPair<int32, FVector>>* Crowd = CrowdByLevel.Find(Vis->CurLevel))
+				{
+					FVector Ease = FVector::ZeroVector;
+					for (const TPair<int32, FVector>& O : *Crowd)
+					{
+						const FVector Away(Pos.X - O.Value.X, Pos.Y - O.Value.Y, 0.f);
+						const float D = Away.Size2D();
+						if (O.Key != C.Id && D < 60.f)
+						{
+							// Exactly on top of each other: split by Id.
+							Ease += D > 1.f ? Away / D * (1.f - D / 60.f) : FVector(C.Id < O.Key ? -1.f : 1.f, 0.f, 0.f);
+						}
+					}
+					if (!Ease.IsNearlyZero())
+					{
+						const FVector Delta = Ease.GetClampedToMaxSize(1.f) * 40.f * Pace * DeltaTime;
+						Actor->AddActorWorldOffset(Delta);
+						Vis->TargetCm += Delta;
+					}
+				}
+			}
 		}
 		// Rigged walker: pick the clip that matches the beat - Walk on the
 		// move; at a work post, the JOB's action (hammering at a bench,
@@ -1248,6 +1394,12 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			else if (bStepping)
 			{
 				WantClip = TEXT("Walk");
+			}
+			else if (Vis->TalkRemainingS > 0.0)
+			{
+				// A crew moment: the pastime's conversation, the helper working
+				// the bench alongside, or a dispute's still face-off (Idle).
+				WantClip = Vis->bHelping ? FName("WorkLab") : (Vis->bTalkGesture ? FName("Talk") : FName("Idle"));
 			}
 			else if (Vis->Activity == TEXT("working"))
 			{
@@ -1596,6 +1748,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		if (Pace > 0.f)
 		{
 			Vis->EmoteRemainingS = FMath::Max(0.0, Vis->EmoteRemainingS - DeltaTime);
+			Vis->TalkRemainingS = FMath::Max(0.0, Vis->TalkRemainingS - DeltaTime);
 			Vis->CheerRemainingS = FMath::Max(0.0, Vis->CheerRemainingS - DeltaTime);
 		}
 		if (UStaticMeshComponent* Body = Vis->Body.Get())
