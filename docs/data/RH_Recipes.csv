@@ -3,7 +3,7 @@ SmeltRegolith,Forge,Regolith:100,Struct:25,2,800,TRUE,"Base chain; 12.5 kg Struc
 DrillIce,IceDrill,,Ice:40,1,250,TRUE,"Extraction recipe: no hopper inputs; draws 40 kg/h from the attached deposit"
 SmeltOre,Forge,Ore:100,Struct:60,2,800,TRUE,"Richer yield rewards prospecting + longer haul"
 MakeShielding,Forge,Struct:40;Ore:60,Shielding:50,3,800,TRUE,"ACTIVE M1-d Gate B: the surface shielding tax's supply; demand-preferred when a site is short of Shielding - Ore finally matters"
-MakeHabSegment,Forge,Struct:120;Shielding:30,HabSegment:1,4,800,FALSE,Dormant; habitat chain M1
+MakeHabSegment,Forge,Struct:120;Shielding:30,HabSegment:1,4,800,TRUE,BM-1b (2026-10-16): live - the prefab Habitat's segments; was dormant; habitat chain M1
 MeltIce,WaterPlant,Ice:50,Water:45,1,300,TRUE,90% yield; continuous while fed
 Electrolysis,Electrolyzer,Water:10,Oxygen:8.9;Hydrogen:1.1,1,600,TRUE,"True 8:1 mass stoichiometry; hard-sci anchor"
 BoreFloor,Borer,,Regolith:1200,12,500,TRUE,"M1-d: one shaft-floor descent; spoil drops at the Borer for hauling; designation-gated - never auto-starts"

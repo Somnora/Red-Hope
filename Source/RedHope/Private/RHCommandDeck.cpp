@@ -1291,7 +1291,8 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			const int32 NetBays = Sim->GetHabNetworkBays(B->Id);
 			const double O2 = Sim->GetHabNetworkO2Kg(B->Id), O2Req = Sim->GetHabNetworkO2RequiredKg(B->Id);
-			Text += FString::Printf(TEXT("\nHABITAT: %d bay(s) here, %d in its network"), URHSimWorldSubsystem::GetBedCount(*B), NetBays);
+			const FIntPoint ShellBays = Sim->GetBayGrid(*B); // BM-1b: a fixed prefab's bays come from its footprint
+			Text += FString::Printf(TEXT("\nHABITAT: %d bay(s) here, %d in its network"), ShellBays.X * ShellBays.Y, NetBays);
 			if (Sim->IsHabRated(B->Id))
 			{
 				Text += TEXT("\nRATED LIVABLE");

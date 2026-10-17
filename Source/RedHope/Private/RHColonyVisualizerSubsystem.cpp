@@ -1771,8 +1771,9 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 		Scale.X = FMath::Max(1, Def->FootprintX) * 2.f;
 		Scale.Y = FMath::Max(1, Def->FootprintY) * 2.f;
 		const FName N = Instance.DefName;
-		if (Def->DragSized)
+		if (Def->DragSized || Def->Pressurized)
 		{
+			// (BM-1b: a fixed prefab shell too - a thin deck, never a block.)
 			// The greenhouse dome's deck under all its beds (built separately
 			// by BuildGreenhouseDome); a habitat's deck is a thin floor so the
 			// crew's feet sit on it (BM-2: RefreshHabShells draws the rest).
@@ -1867,7 +1868,11 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	//     its own material; leave the slots alone so the texture shows.
 	UStaticMesh* RealModel = nullptr;
 	bool bVertexColored = false;
-	if (!Instance.bUnderConstruction)
+	// BM-1b: a pressurized shell (the prefab Habitat too) is drawn as its
+	// walls and rooms by RefreshHabShells - no model over the top of them.
+	const URHDefinitionsSubsystem* ShellDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	const FRHBuildingRow* ShellDef = ShellDefs ? ShellDefs->GetBuilding(Instance.DefName) : nullptr;
+	if (!Instance.bUnderConstruction && !(ShellDef && ShellDef->Pressurized))
 	{
 		static const TMap<FName, FString> RealModelPaths = {
 			{ FName("Forge"),       FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },

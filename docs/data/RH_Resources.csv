@@ -4,7 +4,7 @@ Regolith,Regolith,Solid,Stockpile,TRUE,Bulk feedstock; dug from surface patches
 Ore,Ore,Solid,Stockpile,TRUE,"Fe-rich in slice; Fe/Al/Si/rare split is post-M0"
 Struct,Structural Materials,Solid,Stockpile,TRUE,Forge output; all local construction consumes this
 Shielding,Radiation Shielding,Solid,Stockpile,FALSE,Dormant; habitat chain activates M1
-HabSegment,Habitat Segment,Solid,Stockpile,FALSE,Dormant; Phase 1 exit chain M1
+HabSegment,Habitat Segment,Solid,Stockpile,TRUE,BM-1b (2026-10-16): live - the prefab Habitat's segments; was dormant; Phase 1 exit chain M1
 Ice,Ice,Solid,Stockpile,TRUE,Drilled from subsurface deposits
 Water,Water,Fluid,Tank,TRUE,Network-instant within connected buildings (hybrid logistics rule)
 Oxygen,Oxygen,Gas,Tank,TRUE,Reserve stock; quota line; no consumer until humans (M2)

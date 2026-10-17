@@ -1934,7 +1934,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(CorDef->Pressurized && CorDef->DragSized && CorDef->ProvidesRoom == FName("Hallway") && CorDef->DragShortSideMax == 1 && CorDef->MaxBedsPerSide == 6
 				&& CBill.FindRef(FName("Struct")) < Bill.FindRef(FName("Struct")), TEXT("S1 HabCorridor row: pressurized Hallway, 1 bay wide, cap 6, cheaper"));
 			const FRHBuildingRow* Old = DefsSub->GetBuilding(FName("Habitat"));
-			Expect(Old && !Old->SliceActive && !Old->Pressurized, TEXT("S1 the old Habitat row stays dormant (prefab chain is BM-1b)"));
+			Expect(Old && Old->SliceActive && Old->Pressurized && !Old->DragSized, TEXT("S1 the Habitat row is the BM-1b prefab: a fixed pressurized shell"));
 			bool bInteriorOk = true;
 			for (const TCHAR* N : { TEXT("AirFilter"), TEXT("LabModule"), TEXT("InfirmaryModule"), TEXT("HumidityRegulator"), TEXT("Floodmast") })
 			{
@@ -3267,6 +3267,131 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->OnCommandRejected.Remove(RejectH);
 		Sim->OnWallFeatureChanged.Remove(ChangedH);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== WINDOWS AND DOORS TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
+	// BM-1b self-test (2026-10-16): THE PREFAB HABITAT - the Forge-made chain
+	// end to end: a Habitat site wants 2 segments; the Forge (with Struct and
+	// Ore, no Shielding anywhere) makes Shielding because the segments need it
+	// (the shortage looks through a short output's recipe), then presses the
+	// segments; haulers deliver; the prefab stands as a fixed two-bay Living
+	// Quarters that joins a network and rates. Haulers are stood in by the
+	// robot API (perfect haulers each step). Fails loudly. `-prefab`.
+	if (FParse::Param(*Params, TEXT("prefab")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== PREFAB HABITAT TEST (BM-1b, 2026-10-16) ==="));
+		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("PREFAB ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("PREFAB FAIL: %s"), *What); ++Fails; }
+		};
+		int32 HaulsDone = 0;
+		const auto Haulers = [&]()
+		{
+			Sim->Debug_StepTaskBoard();
+			FRHTask T;
+			for (int32 k = 0; k < 64 && Sim->TryClaimHaul(FMassEntityHandle(920001 + k, 1), FVector::ZeroVector, T); ++k)
+			{
+				float Loaded = 0.f;
+				FVector Drop;
+				if (Sim->HaulLoad(T.Id, 200.f, Loaded, Drop))
+				{
+					Sim->HaulUnload(T.Id, Loaded);
+					++HaulsDone;
+				}
+			}
+		};
+		const auto Step = [&]()
+		{
+			Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const auto RunSols = [&](double Sols) { for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S) { Step(); } };
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const auto Find = [&](int32 Id) -> const FRHBuildingInstance* { for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == Id) { return &B; } } return nullptr; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), 0, SX, SY);
+			return LastIdOf(Def);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const int32 LanderId = LastIdOf(TEXT("Lander"));
+		const FName NSeg(TEXT("HabSegment")), NShield(TEXT("Shielding")), NStruct(TEXT("Struct"));
+		FString Why, R;
+
+		// P0. Data.
+		{
+			const FRHBuildingRow* Hab = DefsSub->GetBuilding(FName("Habitat"));
+			const FRHRecipeRow* Rec = DefsSub->GetRecipe(FName("MakeHabSegment"));
+			const TMap<FName, double> Bill = Hab ? URHDefinitionsSubsystem::GetBuildCostFor(*Hab, 0) : TMap<FName, double>();
+			const TMap<FName, double> In = Rec ? URHDefinitionsSubsystem::ParseResourceList(Rec->Inputs) : TMap<FName, double>();
+			Expect(Hab && Hab->SliceActive && Hab->Pressurized && !Hab->DragSized && Hab->FootprintX == 5 && Hab->FootprintY == 10
+				&& Hab->ProvidesRoom == FName("LivingQuarters") && Bill.Num() == 1 && Bill.FindRef(NSeg) == 2.0
+				&& Rec && Rec->SliceActive && Rec->Building == FName("Forge") && In.FindRef(NStruct) == 120.0 && In.FindRef(NShield) == 30.0
+				&& DefsSub->IsSolidResource(NSeg),
+				TEXT("P0 Habitat: a fixed 1x2-bay pressurized Living Quarters, bill 2 HabSegment (no surface tax); MakeHabSegment live at the Forge (Struct 120 + Shielding 30) (DT/CSV)"));
+		}
+
+		// P1. Placement: a producer must exist; the bay grid.
+		Place(TEXT("SolarArray"), 3500.f, -1000.f);
+		Place(TEXT("SolarArray"), 3500.f, -2000.f);
+		const FVector Spot(-1000.f, 1500.f, 0.f);
+		Expect(!Sim->CanPlaceBuilding(FName("Habitat"), Spot, Why, 0) && Why.Contains(TEXT("HabSegment")), FString::Printf(TEXT("P1 no Forge, no segments: refused (%s)"), *Why));
+		const int32 Forge = Place(TEXT("Forge"), 2000.f, 1500.f);
+		Why.Reset();
+		Expect(Sim->CanPlaceBuilding(FName("Habitat"), Spot, Why, 0), FString::Printf(TEXT("P1 with a Forge to press segments: accepted (%s)"), *Why));
+		Expect(!Sim->CanPlaceBuilding(FName("Habitat"), FVector(-1000.f, 1000.f, 0.f), Why, 0) && Why.Contains(TEXT("grid")), FString::Printf(TEXT("P1 off the bay grid: refused (%s)"), *Why));
+
+		// P2. The chain.
+		Sim->Debug_AddSolidAt(LanderId, NStruct, 600.0, false);
+		Sim->Debug_AddSolidAt(LanderId, FName("Ore"), 300.0, false);
+		FRHCommand Order; Order.Verb = FName("Build"); Order.Target = FName("Habitat"); Order.Location = Spot; Order.Level = 0;
+		Sim->EnqueueCommand(Order);
+		Step();
+		const int32 Hab = LastIdOf(TEXT("Habitat"));
+		Expect(Hab && Find(Hab) && Find(Hab)->bUnderConstruction && Sim->GetTotalSolid(NShield) + Sim->GetStock(NShield) == 0.0,
+			TEXT("P2 a Habitat site wants 2 segments; the colony holds no Shielding at all"));
+		double PeakShield = 0.0;
+		int32 Steps = 0;
+		for (; Steps < 3 * StepsPerSolH; ++Steps)
+		{
+			Haulers();
+			Step();
+			PeakShield = FMath::Max(PeakShield, Sim->GetTotalSolid(NShield));
+			const FRHBuildingInstance* Site = Find(Hab);
+			if (Site && Site->InputKg.FindRef(NSeg) >= 2.0 - 1e-6)
+			{
+				break;
+			}
+		}
+		const FRHBuildingInstance* Site = Find(Hab);
+		Expect(PeakShield >= 60.0 - 1e-6, FString::Printf(TEXT("P2 the Forge made Shielding no site asked for - the segments did (peak %.0f kg)"), PeakShield));
+		Expect(Site && Site->InputKg.FindRef(NSeg) >= 2.0 - 1e-6, FString::Printf(TEXT("P2 two segments pressed and delivered in %d steps (%.1f sols, %d hauls)"),
+			Steps, Steps / (double)StepsPerSolH, HaulsDone));
+		Expect(Sim->ApplyBuildWork(Hab, 1.0e6) && Find(Hab) && !Find(Hab)->bUnderConstruction && Sim->GetBayGrid(*Find(Hab)) == FIntPoint(1, 2),
+			TEXT("P2 assembled: a 1x2-bay shell"));
+
+		// P3. A shell like any other: fixed Living bays, a network, a rating.
+		Expect(Sim->GetBayRoom(Hab, 0) == FName("LivingQuarters") && Sim->GetBayRoom(Hab, 1) == FName("LivingQuarters") && !Sim->DesignateBay(Hab, 0, FName("Dining"), Why),
+			FString::Printf(TEXT("P3 both bays are Living Quarters, fixed (%s)"), *Why));
+		Sim->AddStock(FName("Shielding"), 500.0);
+		Sim->AddStock(FName("Oxygen"), 3000.0);
+		const int32 Mod = Place(TEXT("HabModule"), -2000, 1500, 1, 2);
+		Place(TEXT("AirFilter"), -2000, 1000);
+		RunSols(1.0);
+		Sim->Debug_SetVaultRated(true);
+		Expect(Sim->GetHabNetworkRoot(Mod) == Sim->GetHabNetworkRoot(Hab) && Sim->GetHabNetworkBays(Hab) == 4 && Sim->IsHabRated(Hab) && Sim->GetHabBeds(Hab) == 2
+			&& Sim->Debug_AddColonists(2) == 2 && Sim->GetHabResidents(Hab) == 2,
+			FString::Printf(TEXT("P3 joined to a 1x2 module: a rated 4-bay network; the prefab sleeps %d and two crew move in"), Sim->GetHabBeds(Hab)));
+		Expect(Find(Forge) != nullptr, TEXT("P3 the Forge stands"));
+
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== PREFAB HABITAT TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return Fails > 0 ? 1 : 0;

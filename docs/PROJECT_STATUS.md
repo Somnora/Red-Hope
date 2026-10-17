@@ -1,6 +1,6 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-16 (through build mode BM-6, windows and doors).** The 10-15 snapshot ran
+**Snapshot: 2026-10-16 (build mode complete: BM-1..BM-6 and the BM-1b prefab).** The 10-15 snapshot ran
 through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
@@ -76,6 +76,17 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   door leaves that part for crew, placed airlocks. Sheet:
   `docs/media/windows-doors.jpg`. **Not hand-tested:** Fit hover/click; the
   door-opening animation was not caught in a capture.
+- **BM-1b, the prefab Habitat** (this snapshot; ruling 2a): the dormant
+  Habitat row, HabSegment resource and MakeHabSegment recipe go live. The
+  prefab is a fixed 1x2-bay pressurized shell whose bays are Living Quarters
+  (2 beds), billed 2 HabSegment, which the Forge presses from Struct 120 +
+  Shielding 30. The construction shortage now looks through a short output's
+  recipe to inputs the colony holds none of, so the Forge makes the Shielding
+  the segments need. It joins networks and rates like any shell. Suite
+  `-prefab` (11 checks: the chain end to end with stand-in haulers - 100 kg
+  Shielding made, 2 segments delivered in 0.8 sols). In game it draws as its
+  rooms (no dome model over it). No build-menu thumbnail yet (the Habitat
+  Bay and Corridor have none either). Sheet: `docs/media/prefab-habitat.jpg`.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 
@@ -116,21 +127,21 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 30
-suites (31 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 31
+suites (32 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
 the art, audio, interface, playtest, tiered-production, dome and build-mode
-work. Last reported fully green on `14f4e99` (31 runs) ("0 suite(s) not green", pins
+work. Last reported fully green on the BM-1b commit (32 runs) ("0 suite(s) not green", pins
 unchanged); also on `d180f12` (BM-4), `3332e21` (BM-3), `e6ee887`, `585ee8e`,
-`f77b962`, `63f452f`, `4706e5f` and earlier. The six newest suites (`-staff`,
-`-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`) fail loudly on any mismatch,
+`f77b962`, `63f452f`, `4706e5f` and earlier. The seven newest suites (`-staff`,
+`-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`, `-prefab`) fail loudly on any mismatch,
 unlike the older print-only ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 31 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 32 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab
 #         (+ no-switch = the baseline)
 ```
 

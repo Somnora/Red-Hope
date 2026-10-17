@@ -1632,6 +1632,44 @@ TMap<FName, double> URHSimWorldSubsystem::ComputeConstructionShortage() const
 			Short.Add(P.Key, P.Value - OnHand);
 		}
 	}
+	// BM-1b: a short output's recipe inputs that the colony holds NONE of are
+	// short too - a prefab's segments need Shielding before the Forge can
+	// press them, and nothing else would ask for Shielding. Zero-held inputs
+	// only (two levels deep), so a chain the colony already stocks keeps the
+	// Forge's legacy choices.
+	TArray<FName> Frontier;
+	Short.GetKeys(Frontier);
+	for (int32 Depth = 0; Depth < 2 && Frontier.Num() > 0; ++Depth)
+	{
+		TArray<FName> Next;
+		for (const FName Res : Frontier)
+		{
+			const FRHRecipeRow* Rec = nullptr;
+			for (const FRHBuildingInstance& B : Buildings)
+			{
+				Rec = (!B.bUnderConstruction && Defs) ? Defs->FindRecipeByOutput(B.DefName, Res) : nullptr;
+				if (Rec)
+				{
+					break;
+				}
+			}
+			const double PerBatch = Rec ? URHDefinitionsSubsystem::ParseResourceList(Rec->Outputs).FindRef(Res) : 0.0;
+			if (PerBatch <= 0.0)
+			{
+				continue;
+			}
+			const double Batches = FMath::CeilToDouble(Short[Res] / PerBatch);
+			for (const auto& In : URHDefinitionsSubsystem::ParseResourceList(Rec->Inputs))
+			{
+				if (!Short.Contains(In.Key) && GetTotalSolid(In.Key) + GetStock(In.Key) <= KINDA_SMALL_NUMBER)
+				{
+					Short.Add(In.Key, Batches * In.Value);
+					Next.Add(In.Key);
+				}
+			}
+		}
+		Frontier = MoveTemp(Next);
+	}
 	return Short;
 }
 

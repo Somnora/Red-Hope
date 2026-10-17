@@ -948,6 +948,10 @@ void ARHPlayerController::OnClick()
 	else if (!PendingBuildDef.IsNone())
 	{
 		FString Reason;
+		if (ClickDef && ClickDef->Pressurized)
+		{
+			Ground = URHSimWorldSubsystem::SnapToBayGrid(ClickDef, Ground, 1, 1); // BM-1b: a fixed shell rides the bay grid, as its ghost does
+		}
 		if (Sim->CanPlaceBuilding(PendingBuildDef, Ground, Reason, ActiveLevel))
 		{
 			FRHCommand Cmd;
