@@ -1,6 +1,6 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-16 (build mode complete: BM-1..BM-6 and the BM-1b prefab).** The 10-15 snapshot ran
+**Snapshot: 2026-10-16 (build mode complete: BM-1..BM-6 and the BM-1b prefab; alive pass 2).** The 10-15 snapshot ran
 through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
@@ -87,6 +87,42 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   Shielding made, 2 segments delivered in 0.8 sols). In game it draws as its
   rooms (no dome model over it). No build-menu thumbnail yet (the Habitat
   Bay and Corridor have none either). Sheet: `docs/media/prefab-habitat.jpg`.
+
+## 2026-10-16: alive pass 2 (presentation only; RedHopeSim untouched)
+
+- **2a, people use the furniture** (`d544d31`). Five new crew clips on the
+  shared MPFB rig: Sit, SitWork, SitEat, Lie and Talk. All 20 crew and both
+  suits were rebuilt and re-imported with 15 clips each. At night colonists lie
+  in the bed the sim assigned them (a bunk's second sleeper takes the top
+  berth). At work they sit at their desk's chair and type, or stand at one of
+  a bench's two places. At meals they take a free dining seat; off duty, a sofa
+  cushion or a lounge chair or bench. They settle in over ~0.45 s and stand up
+  before walking off. A facing bug was fixed on the way: the code-built
+  furniture came in from glTF back to front, so every chair had faced away from
+  its table. `rh.CrewForceBeat` forces beats for captures. Sheet:
+  `docs/media/alive-furniture.jpg`. **Not yet seen:** a surface-habitat
+  resident using furniture.
+- **2b, conversations and personal space** (`9bf87a8`). Crew moments get body
+  language: a pastime is a face-to-face Talk; a join-in has the helper work
+  alongside. A dispute is a still face-off under the amber plate, and the Talk
+  gesture is deliberately not used there (Gate-D: words, never blows). That is
+  a placeholder for the framing review. Figures steer around one another and
+  ease apart when standing inside each other. With 20 crew, overlapping pairs
+  fell from 7.9 to 0.18 per sample (A/B via `rh.CrewSeparation`). Sheet:
+  `docs/media/alive-crowd-talk.jpg`.
+- **2c, robots route, ease and park** (this snapshot). Presentation only: the sim
+  still walks robots in straight lines and stays the authority on where they
+  are and when they arrive. The drawn figure walks each trip along a detour
+  around surface building footprints (a visibility graph over the expanded
+  footprints), at the sim's progress fraction, so it arrives on time. Starts
+  and stops are eased and turns are smoothed. A robot idle for 6 sim-seconds
+  walks to a parking rank beside the Lander. **The trade-off:** a parked robot
+  is drawn up to ~38 m from its sim position until its next task, when it walks
+  back. Robots drawn inside a footprint that isn't their own fell from 54 to 2
+  robot-samples over the same deterministic run (A/B via `rh.RobotRouting`).
+  Sheet: `docs/media/alive-robots.jpg`. **Director call owed:** keep parking
+  as presentation, or make idle robots park in the sim? The sim option is a
+  behaviour change that moves every battery baseline.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 

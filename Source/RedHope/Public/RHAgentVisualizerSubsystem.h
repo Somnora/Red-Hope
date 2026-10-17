@@ -8,6 +8,7 @@
 
 class UInstancedStaticMeshComponent;
 class USkeletalMeshComponent;
+struct FRHTaskFragment;
 
 // Scaffold presentation for sim agents: instanced meshes, transforms copied
 // from Mass fragments each frame. Deliberately dumb - it proves the seam (sim
@@ -84,4 +85,47 @@ private:
 	TArray<float> FacingYawDeg;
 	TArray<float> StridePhase;
 	bool bSliceHidden = false;
+
+	// Alive pass 2 (c), presentation only: where a robot is DRAWN. The sim
+	// walks robots in straight lines (and stays the authority on where they
+	// are and when they arrive); the drawn figure walks the same trip along a
+	// detour around building footprints, at the same progress fraction, so
+	// it never cuts through a building and still arrives on time. Starts and
+	// stops are eased, turns are smoothed, and a robot left idle walks to a
+	// parking slot beside the Lander until its next task.
+	struct FRobotTrip
+	{
+		bool bInit = false;
+		FVector DrawCm = FVector::ZeroVector;       // where the figure is drawn
+		bool bTrip = false;
+		FVector TripTargetCm = FVector::ZeroVector; // the sim's target for this trip
+		float SimStartDistCm = 0.f;                 // sim distance to it at the start
+		TArray<FVector> Path;                       // drawn route, DrawCm at start -> target
+		float PathLenCm = 0.f;
+		FVector LastSyncedCm = FVector::ZeroVector; // where the synced trip left it
+		double IdleS = 0.0;                         // sim-paced time idle (parking)
+		// Free walks (not tied to sim progress): to a parking slot, or back to
+		// the sim's position when a task begins where the robot already is.
+		bool bFree = false;
+		FVector FreeGoalCm = FVector::ZeroVector;
+		TArray<FVector> FreePath;
+		float FreeLenCm = 0.f;
+		float FreeDoneCm = 0.f;
+	};
+	TArray<FRobotTrip> Trips;
+	TArray<FVector> SimLastPosCm; // the sim's position last frame (its own speed)
+	double NextRouteLogS = 0.0;   // rh.RobotRouteLog's next report
+	// Surface building footprints (expanded by a robot's clearance), rebuilt
+	// each tick; robots route around them.
+	TArray<FBox2D> Obstacles;
+	void RebuildObstacles();
+	// Shortest route From -> To around Obstacles (a visibility graph over the
+	// expanded footprints' corners); footprints containing either end are
+	// the trip's own building and are walked into. Straight when clear.
+	void PlanRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPath) const;
+	bool SegmentBlocked(const FVector2D& A, const FVector2D& B, const TArray<int32>& Candidates) const;
+	// The Nth parking slot beside the Lander (clear of footprints).
+	FVector ParkSlotCm(int32 Index) const;
+	// The figure's drawn position this frame (advances its trip state).
+	FVector AdvanceDrawn(int32 i, const FVector& SimPosCm, float SimSpeedCmS, const FRHTaskFragment* Task, float DeltaTime);
 };
