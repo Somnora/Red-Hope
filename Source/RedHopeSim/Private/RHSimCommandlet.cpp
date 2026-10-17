@@ -3413,6 +3413,246 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// D2a self-test (2026-10-17): ICE RUNNING LOW - a one-shot alert when a
+	// discovered ice deposit falls below RH_Config IceLowAlertFraction of its
+	// surveyed mass, and the pure read the guide interrupt shares
+	// (GetIceExpansionStage). Pure-data pins, the type/discovery gates, the
+	// crossing detected on its own step at dt 60 s and dt 1 s, no re-fire,
+	// the load-time latch rebuild AND reset (the latch is cleared before a
+	// load so a stale in-memory copy cannot pass for the rebuild), and the
+	// dead end (both deposits low: nothing left to resolve), the "melt it where
+	// you drill it" stage, and the drill's ice hauled to the NEAREST Water Plant.
+	// Fails loudly.
+	// `-icelow`.
+	if (FParse::Param(*Params, TEXT("icelow")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ICE LOW TEST (D2a, 2026-10-17) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("ICELOW ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("ICELOW FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		const auto Step = [&](double Dt)
+		{
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Clock->Debug_AdvanceSimSeconds(Dt);
+			Sim->EraStep((float)Dt);
+		};
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Needle) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Needle) ? 1 : 0; } return N; };
+		const auto LastAlert = [&Alerts]() { return Alerts.Num() ? Alerts.Last() : FString(); };
+		const auto Dep = [&](const ANSICHAR* Row) -> const FRHDepositState*
+		{
+			for (const FRHDepositState& D : Sim->GetDeposits()) { if (D.RowName == FName(Row)) { return &D; } }
+			return nullptr;
+		};
+		const auto SetLeft = [&](const ANSICHAR* Row, double Kg) { if (const FRHDepositState* D = Dep(Row)) { Sim->Debug_SetDepositRemainingKg(D->Id, Kg); } };
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const double Frac = 0.25;
+		FString Err;
+
+		// I1. Pure data: the config row rides the synced DT_Config. The -1
+		// sentinel fails loudly on a DT that was never synced.
+		Expect(Near(DefsSub->GetConfigScalar(FName("IceLowAlertFraction"), -1.0), Frac, 1e-9) && Near(Sim->GetIceLowAlertFraction(), Frac, 1e-9),
+			FString::Printf(TEXT("I1 RH_Config IceLowAlertFraction = %.2f, and the sim reads it (DT/CSV)"), Sim->GetIceLowAlertFraction()));
+
+		// I2. Pure data: the two ice bodies. Ice_B's position is pinned because
+		// the guide copy tells the player where to look.
+		{
+			bool bA = false, bB = false;
+			DefsSub->ForEachDeposit([&](FName Row, const FRHDepositRow& R)
+			{
+				bA |= Row == FName("Ice_A") && R.Type == FName("Ice") && R.Mass_kg == 30000.f && !R.SurfaceVisible;
+				bB |= Row == FName("Ice_B") && R.Type == FName("Ice") && R.Mass_kg == 60000.f && !R.SurfaceVisible && R.LocX_m == 60.f && R.LocY_m == 700.f;
+			});
+			Expect(bA && bB, TEXT("I2 Ice_A (30 t) and Ice_B (60 t at 60 m E, 700 m N) are hidden Ice rows (DT/CSV)"));
+			if (!bA || !bB)
+			{
+				Sim->OnAlert.Remove(AlertH);
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== ICE LOW TEST END: %d failure(s) ==="), Fails);
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				return 1;
+			}
+		}
+
+		// I3. InitialKg is the row mass at begin-play; nothing is low yet.
+		{
+			bool bAll = true, bLow = false;
+			DefsSub->ForEachDeposit([&](FName Row, const FRHDepositRow& R)
+			{
+				const FRHDepositState* D = Dep(TCHAR_TO_ANSI(*Row.ToString()));
+				bAll &= D && Near(D->InitialKg, R.Mass_kg, 1e-6);
+			});
+			for (const FRHDepositState& D : Sim->GetDeposits()) { bLow |= Sim->IsIceDepositLow(D); }
+			Expect(bAll && !bLow && Sim->GetIceExpansionStage() == -1 && Sim->HasUndiscoveredIce(),
+				TEXT("I3 every deposit's InitialKg = its row mass; nothing low; ice still to find"));
+		}
+
+		// I4. Inert while undiscovered: an unsurveyed deposit is invisible to
+		// the alert, however little is left.
+		SetLeft("Ice_B", 100.0);
+		for (int32 i = 0; i < 24; ++i) { Step(60.0); }
+		Expect(CountAlerts(TEXT("RUNNING LOW")) == 0 && !Sim->IsIceDepositLow(*Dep("Ice_B")) && Sim->GetIceExpansionStage() == -1,
+			TEXT("I4 an undiscovered ice deposit at 100 kg raises nothing"));
+		SetLeft("Ice_B", 60000.0);
+
+		// I5. Type gate: a regolith body below the line is not ice.
+		SetLeft("Regolith_A", 1000.0);
+		for (int32 i = 0; i < 24; ++i) { Step(60.0); }
+		Expect(CountAlerts(TEXT("RUNNING LOW")) == 0 && !Sim->IsIceDepositLow(*Dep("Regolith_A")),
+			TEXT("I5 a regolith deposit nearly spent raises nothing"));
+		SetLeft("Regolith_A", 60000.0);
+
+		// I6. The crossing at dt 60 s: Ice_A surveyed, drilled, set 200 kg
+		// above the line; the alert comes on the very step it crosses.
+		const int32 IceAId = Sim->Debug_RevealDeposit(FName("Ice_A"));
+		const FVector IceALoc = Dep("Ice_A")->LocationCm;
+		Sim->Debug_PlaceInstant(FName("IceDrill"), IceALoc);
+		int32 DrillA = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("IceDrill")) { DrillA = B.Id; } }
+		bool bAttached = false;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { bAttached |= B.Id == DrillA && B.AttachedDepositId == IceAId; }
+		const double LineA = Frac * Dep("Ice_A")->InitialKg;
+		Expect(IceAId != 0 && DrillA != 0 && bAttached && !Sim->IsIceDepositLow(*Dep("Ice_A")) && Sim->GetIceExpansionStage() == -1,
+			TEXT("I6 Ice_A surveyed and drilled; full, so not low"));
+		SetLeft("Ice_A", LineA + 200.0);
+		int32 CrossStep = -1, CountBefore = 0, CountAtCross = 0;
+		bool bQuiet = true;
+		for (int32 i = 0; i < 600 && CrossStep < 0; ++i)
+		{
+			const bool bWasLow = Sim->IsIceDepositLow(*Dep("Ice_A"));
+			CountBefore = CountAlerts(TEXT("RUNNING LOW"));
+			Step(60.0);
+			if (!bWasLow && !Sim->IsIceDepositLow(*Dep("Ice_A"))) { bQuiet &= CountAlerts(TEXT("RUNNING LOW")) == 0; }
+			if (Sim->IsIceDepositLow(*Dep("Ice_A")))
+			{
+				CrossStep = i;
+				CountAtCross = CountAlerts(TEXT("RUNNING LOW")) - CountBefore;
+			}
+		}
+		Expect(CrossStep >= 0 && bQuiet && CountAtCross == 1 && CountAlerts(TEXT("ICE_A RUNNING LOW")) == 1,
+			FString::Printf(TEXT("I6 quiet above the line, exactly one alert on the step Ice_A crossed it (step %d, dt 60 s)"), CrossStep));
+
+		// I7. Text: names the deposit, the tonnage and the fix. Ice_B is still
+		// unsurveyed, so the fix is to find it.
+		Expect(LastAlert().Contains(TEXT("ICE_A RUNNING LOW")) && LastAlert().Contains(TEXT("Survey for more ice")) && Sim->HasUndiscoveredIce(),
+			FString::Printf(TEXT("I7 alert names the deposit and the fix: \"%s\""), *LastAlert()));
+		Expect(Sim->GetIceExpansionStage() == 0, TEXT("I7 interrupt stage 0 (find more ice) while Ice_B is unsurveyed"));
+
+		// I8. No re-fire while it keeps falling.
+		for (int32 i = 0; i < 2 * 1440; ++i) { Step(60.0); }
+		Expect(CountAlerts(TEXT("RUNNING LOW")) == 1 && Sim->IsIceDepositLow(*Dep("Ice_A")),
+			TEXT("I8 two more sols of drawing: still one alert, still low"));
+
+		// I9. The expansion stages, then the setup for the save: Ice_B found
+		// (healthy, out of the grid) -> carry the grid -> a pylon covers it.
+		Sim->Debug_RevealDeposit(FName("Ice_B"));
+		const FVector IceBLoc = Dep("Ice_B")->LocationCm;
+		const int32 StageFound = Sim->GetIceExpansionStage();
+		Sim->Debug_PlaceInstant(FName("Pylon"), FVector(IceBLoc.X, IceBLoc.Y - 1000.0, 0.0));
+		const int32 StageGrid = Sim->GetIceExpansionStage();
+		Expect(StageFound == 1 && StageGrid == 2 && !Sim->HasUndiscoveredIce(),
+			FString::Printf(TEXT("I9 Ice_B found -> stage %d (carry the grid); a pylon covers it -> stage %d (drill it)"), StageFound, StageGrid));
+		SetLeft("Ice_B", Frac * 60000.0 + 70.0);
+		Expect(!Sim->IsIceDepositLow(*Dep("Ice_B")) && CountAlerts(TEXT("RUNNING LOW")) == 1,
+			TEXT("I9 Ice_B just above the line (a drill batch is 40 kg): not low, no second alert"));
+
+		// I10. Save, then the load-time latch REBUILD: raise Ice_A (dirty
+		// state), EMPTY the latch, load. Ice_A must come back low and must not
+		// be announced again - only the rebuild can have remembered it.
+		Expect(Sim->SaveColony(TEXT("icelowtest"), Err), TEXT("I10 saved 'icelowtest'"));
+		SetLeft("Ice_A", 30000.0);
+		Sim->Debug_ClearIceLowLatch();
+		const bool bLoaded = Sim->LoadColony(TEXT("icelowtest"), Err);
+		Expect(bLoaded && Dep("Ice_A") && Dep("Ice_B") && Dep("Ice_A")->RemainingKg < Frac * 30000.0 && Near(Dep("Ice_A")->InitialKg, 30000.0, 1e-6)
+			&& Near(Dep("Ice_B")->InitialKg, 60000.0, 1e-6) && Sim->IsIceDepositLow(*Dep("Ice_A")) && !Sim->IsIceDepositLow(*Dep("Ice_B")),
+			TEXT("I10 load: Ice_A back below the line, InitialKg re-derived from data, Ice_B above"));
+		for (int32 i = 0; i < 5; ++i) { Step(60.0); }
+		Expect(CountAlerts(TEXT("RUNNING LOW")) == 1,
+			TEXT("I10 latch emptied before the load: Ice_A is not announced again (the rebuild marked it)"));
+
+		// I11. The reset half: announce Ice_B (latch now holds both), then
+		// load the earlier save - Ice_B is back above the line and the latch
+		// must be forgotten, so the real crossing at dt 1 s alerts again.
+		SetLeft("Ice_B", 14000.0);
+		Step(60.0);
+		Expect(CountAlerts(TEXT("ICE_B RUNNING LOW")) == 1 && CountAlerts(TEXT("RUNNING LOW")) == 2,
+			TEXT("I11 Ice_B pushed under the line: its alert fires (2 in all)"));
+		Expect(Sim->LoadColony(TEXT("icelowtest"), Err) && Near(Dep("Ice_B")->RemainingKg, Frac * 60000.0 + 70.0, 1e-6) && !Sim->IsIceDepositLow(*Dep("Ice_B")),
+			TEXT("I11 loaded the earlier save: Ice_B back above the line"));
+		Sim->Debug_PlaceInstant(FName("IceDrill"), IceBLoc);
+		// Stage 3: a drill alone is not enough - its ice is a long haul from
+		// any Water Plant. A far plant does not count; a finished one beside
+		// the drill ends the prompt.
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const int32 DrillB = LastIdOf(TEXT("IceDrill"));
+		const int32 StageDrilled = Sim->GetIceExpansionStage();
+		Sim->Debug_PlaceInstant(FName("WaterPlant"), FVector(2500.0, -1500.0, 0.0));
+		const int32 PlantFar = LastIdOf(TEXT("WaterPlant"));
+		const int32 StageFarPlant = Sim->GetIceExpansionStage();
+		Sim->Debug_PlaceInstant(FName("WaterPlant"), FVector(IceBLoc.X - 1200.0, IceBLoc.Y - 1000.0, 0.0));
+		const int32 PlantNear = LastIdOf(TEXT("WaterPlant"));
+		const int32 StageNearPlant = Sim->GetIceExpansionStage();
+		Expect(StageDrilled == 3 && StageFarPlant == 3 && StageNearPlant == -1 && PlantFar != PlantNear,
+			FString::Printf(TEXT("I11 drilled, no plant near it -> stage %d (melt it where you drill it); a far plant still %d; a plant beside the drill -> %d"),
+				StageDrilled, StageFarPlant, StageNearPlant));
+
+		// The haul from a far drill goes to the NEAREST plant, though the far
+		// one stands earlier in building order.
+		Sim->Debug_AddSolidAt(DrillB, FName("Ice"), 500.0, true);
+		Sim->Debug_StepTaskBoard();
+		const int32 HaulDest = Sim->Debug_GetOpenHaulDestFrom(DrillB, FName("Ice"));
+		Expect(DrillB != 0 && HaulDest == PlantNear,
+			FString::Printf(TEXT("I11 the Ice_B drill's ice is posted to the nearest Water Plant #%d, not the first one #%d (posted to #%d)"), PlantNear, PlantFar, HaulDest));
+		// With every plant's hopper full, ice waits at its drill - it is not
+		// carried to a store (where nothing would ever bring it back). A
+		// construction material (Struct) still overflows to the nearest store.
+		{
+			Sim->Debug_PlaceInstant(FName("IceDrill"), FVector(IceBLoc.X + 300.0, IceBLoc.Y, 0.0));
+			const int32 DrillB2 = LastIdOf(TEXT("IceDrill"));
+			Sim->Debug_AddSolidAt(PlantFar, FName("Ice"), 200.0, false);
+			Sim->Debug_AddSolidAt(PlantNear, FName("Ice"), 200.0, false);
+			Sim->Debug_AddSolidAt(DrillB2, FName("Ice"), 500.0, true);
+			Sim->Debug_AddSolidAt(DrillB2, FName("Struct"), 500.0, true);
+			Sim->Debug_StepTaskBoard();
+			const int32 IceDest = Sim->Debug_GetOpenHaulDestFrom(DrillB2, FName("Ice"));
+			const int32 StructDest = Sim->Debug_GetOpenHaulDestFrom(DrillB2, FName("Struct"));
+			Expect(DrillB2 != DrillB && IceDest == 0 && StructDest != 0,
+				FString::Printf(TEXT("I11 plants full: the ice waits at its drill (posted to #%d), Struct still overflows to a store (#%d)"), IceDest, StructDest));
+		}
+		int32 CrossB = -1, AtCrossB = 0, BeforeB = 0;
+		for (int32 i = 0; i < 4000 && CrossB < 0; ++i)
+		{
+			BeforeB = CountAlerts(TEXT("RUNNING LOW"));
+			Step(1.0);
+			if (Sim->IsIceDepositLow(*Dep("Ice_B")))
+			{
+				CrossB = i;
+				AtCrossB = CountAlerts(TEXT("RUNNING LOW")) - BeforeB;
+			}
+		}
+		Expect(CrossB >= 0 && AtCrossB == 1 && CountAlerts(TEXT("ICE_B RUNNING LOW")) == 2 && CountAlerts(TEXT("ICE_A RUNNING LOW")) == 1 && CountAlerts(TEXT("RUNNING LOW")) == 3,
+			FString::Printf(TEXT("I11 the latch was reset by the load: Ice_B alerts again on the step it crosses (step %d, dt 1 s); Ice_A stays at one"), CrossB));
+
+		// I12. The dead end: both ice bodies low, nothing unsurveyed. No
+		// interrupt may show (it could never be resolved), and the alert names
+		// a lever that exists instead of a survey.
+		Expect(!Sim->HasUndiscoveredIce() && Sim->IsIceDepositLow(*Dep("Ice_A")) && Sim->IsIceDepositLow(*Dep("Ice_B")) && Sim->GetIceExpansionStage() == -1,
+			TEXT("I12 both ice bodies low, none unsurveyed: HasUndiscoveredIce false, expansion stage -1"));
+		Expect(LastAlert().Contains(TEXT("ICE_B RUNNING LOW")) && LastAlert().Contains(TEXT("Ration water")) && !LastAlert().Contains(TEXT("Survey")),
+			FString::Printf(TEXT("I12 the last-ice alert gives no survey advice: \"%s\""), *LastAlert()));
+
+		Sim->OnAlert.Remove(AlertH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ICE LOW TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// v25 self-test: STATION TIERS - SeatCount/YieldMul seat math, the
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a

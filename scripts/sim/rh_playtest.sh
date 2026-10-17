@@ -10,6 +10,11 @@
 # lean  = the crew ship carries the Crew Pod alone (full = plus soil, seeds,
 #         comforts - the data ladder has two quotas, so it is the last ship)
 #
+# When Ice_A runs low the bot also plays the water expansion: survey far north,
+# chain pylons out to Ice_B, drill it and build a Water Plant beside the drill
+# (marks: "ice running low", "Ice_B found", "grid reaches Ice_B", "second Ice
+# Drill running", "Water Plant beside Ice_B").
+#
 # Windowless (-nullrhi) on a fixed time step (-benchmark -fps=10): every frame
 # advances 0.1 s of game time however fast the machine runs it, so 30 sols
 # (~37 minutes of 16x play) take about two minutes, boot included. RH.Playtest quits the game

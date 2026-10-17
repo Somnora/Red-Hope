@@ -84,6 +84,44 @@ namespace
 		return false;
 	}
 
+	// D2a: the low ice deposit worth naming - the one an Ice Drill is working
+	// if there is one, else the first low one (both can be low late in a run).
+	const FRHDepositState* LowIce(const FGuideCtx& C)
+	{
+		const FRHDepositState* First = nullptr;
+		for (const FRHDepositState& Dp : C.Sim->GetDeposits())
+		{
+			if (!C.Sim->IsIceDepositLow(Dp))
+			{
+				continue;
+			}
+			First = First ? First : &Dp;
+			for (const FRHBuildingInstance& B : C.Sim->GetBuildings())
+			{
+				if (B.DefName == FName("IceDrill") && B.AttachedDepositId == Dp.Id)
+				{
+					return &Dp;
+				}
+			}
+		}
+		return First;
+	}
+
+	// D2a: the surveyed ice with the most left that is not itself running low.
+	const FRHDepositState* HealthyIce(const FGuideCtx& C)
+	{
+		const FRHDepositState* Best = nullptr;
+		for (const FRHDepositState& Dp : C.Sim->GetDeposits())
+		{
+			if (Dp.bDiscovered && Dp.Type == FName("Ice") && Dp.RemainingKg > 0.0 && !C.Sim->IsIceDepositLow(Dp)
+				&& (!Best || Dp.RemainingKg > Best->RemainingKg))
+			{
+				Best = &Dp;
+			}
+		}
+		return Best;
+	}
+
 	// The first quota has been met at least once: the ladder's opening rung is
 	// past Open, or a later rung opened (its opening sol is after sol 0).
 	bool FirstQuotaMet(const FGuideCtx& C)
@@ -343,6 +381,76 @@ namespace
 		};
 		return S;
 	}
+
+	// Interrupts (D2a): steps outside the chain for something that goes wrong
+	// mid-game, which no linear step can carry (it would be passed long before
+	// the ice runs low, or it would block "Keep them well"). Ranked, first one
+	// that applies wins and outranks the chain. Done here means "does not
+	// apply" - and every interrupt is Done when nothing the player could do
+	// would resolve it, so it can never get stuck on (the chain comes back).
+	// Ice: GetIceExpansionStage() is the same pure read the -icelow suite pins.
+	const TArray<FGuideStep>& Interrupts()
+	{
+		static const TArray<FGuideStep> S = {
+			{ TEXT("WATER"), TEXT("Find more ice"),
+				[](const FGuideCtx& C)
+				{
+					const FRHDepositState* Low = LowIce(C);
+					const FString Name = Low ? Low->RowName.ToString() : FString(TEXT("The ice"));
+					const double Left = Low ? Low->RemainingKg / 1000.0 : 0.0;
+					for (const FRHDepositState& Dp : C.Sim->GetDeposits())
+					{
+						if (Dp.RowName == FName("Ice_B") && !Dp.bDiscovered)
+						{
+							return FString::Printf(TEXT("%s has about %.0f t of ice left. More lies far to the north: ORDER > Survey, then click open ground about 700 m north of the Lander, a little to the east - the scout reports anything within 60 m."), *Name, Left);
+						}
+					}
+					return FString::Printf(TEXT("%s has about %.0f t of ice left, and no untouched ice is known. ORDER > Survey new ground - every circle a scout covers stays on your map."), *Name, Left);
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 0; },
+				NoBar(), NAME_None, FName("Survey") },
+			{ TEXT("WATER"), TEXT("Carry the grid to the new ice"),
+				[](const FGuideCtx& C)
+				{
+					const FRHDepositState* Low = LowIce(C);
+					const FRHDepositState* Fresh = HealthyIce(C);
+					return FString::Printf(TEXT("%s: %.0f t of ice, outside the grid. BUILD > Logistics > Grid Pylon - each links to the grid within 80 m and powers 40 m around itself. Chain them out to it (%s has about %.0f t left)."),
+						Fresh ? *Fresh->RowName.ToString() : TEXT("The new ice"), Fresh ? Fresh->RemainingKg / 1000.0 : 0.0,
+						Low ? *Low->RowName.ToString() : TEXT("the first deposit"), Low ? Low->RemainingKg / 1000.0 : 0.0);
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 1; },
+				NoBar(), FName("Pylon"), NAME_None },
+			{ TEXT("WATER"), TEXT("Drill the new ice"),
+				[](const FGuideCtx& C)
+				{
+					const FRHDepositState* Fresh = HealthyIce(C);
+					return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Its ice is hauled to the Water Plant like the first drill's."),
+						Fresh ? *Fresh->RowName.ToString() : TEXT("the new ice"));
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 2; },
+				NoBar(), FName("IceDrill"), NAME_None },
+			{ TEXT("WATER"), TEXT("Melt it where you drill it"),
+				[](const FGuideCtx& C)
+				{
+					const FRHDepositState* Fresh = HealthyIce(C);
+					return FString::Printf(TEXT("%s's ice is a long haul from the Water Plant. BUILD > Production > Water Plant beside the new drill, inside the grid - water is shared colony-wide, so it melts where it is drilled."),
+						Fresh ? *Fresh->RowName.ToString() : TEXT("The new ice"));
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 3; },
+				NoBar(), FName("WaterPlant"), NAME_None },
+		};
+		return S;
+	}
+
+	// What the panel and the deck lights show: a live interrupt, else the chain.
+	const FGuideStep* ShownStep(int32 Interrupt, int32 Step)
+	{
+		if (Interrupts().IsValidIndex(Interrupt))
+		{
+			return &Interrupts()[Interrupt];
+		}
+		return Steps().IsValidIndex(Step) ? &Steps()[Step] : nullptr;
+	}
 }
 
 void SRHCommandDeck::RefreshGuide()
@@ -379,16 +487,49 @@ void SRHCommandDeck::RefreshGuide()
 	}
 	GuideStep = Now;
 	GuideHighWater = Now;
+
+	// Interrupts ride on top of the chain. One that resolves (or stops being
+	// resolvable) gets the same quiet tick as a finished step; a fresh boot or
+	// loaded save (GuideStep was -1) skips it silently.
+	int32 Int = INDEX_NONE;
+	for (int32 i = 0; i < Interrupts().Num(); ++i)
+	{
+		if (!Interrupts()[i].Done(C))
+		{
+			Int = i;
+			break;
+		}
+	}
+	if (Int != GuideInterrupt)
+	{
+		if (GuideStep >= 0 && GuideInterrupt != INDEX_NONE && (Int == INDEX_NONE || Int > GuideInterrupt) && !bTipsOff)
+		{
+			ToastLine = FString::Printf(TEXT("Done: %s"), Interrupts()[GuideInterrupt].Title);
+			ToastUntil = FSlateApplication::Get().GetCurrentTime() + 4.0;
+			URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Confirm"));
+		}
+		if (Int != INDEX_NONE)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[Guide] now: %s"), Interrupts()[Int].Title);
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[Guide] now: back to the chain"));
+		}
+	}
+	GuideInterrupt = Int;
 }
 
 FName SRHCommandDeck::GetGuideBuildDef() const
 {
-	return (!bTipsOff && Steps().IsValidIndex(GuideStep)) ? Steps()[GuideStep].BuildDef : NAME_None;
+	const FGuideStep* S = bTipsOff ? nullptr : ShownStep(GuideInterrupt, GuideStep);
+	return S ? S->BuildDef : NAME_None;
 }
 
 FName SRHCommandDeck::GetGuideOrder() const
 {
-	return (!bTipsOff && Steps().IsValidIndex(GuideStep)) ? Steps()[GuideStep].Order : NAME_None;
+	const FGuideStep* S = bTipsOff ? nullptr : ShownStep(GuideInterrupt, GuideStep);
+	return S ? S->Order : NAME_None;
 }
 
 bool SRHCommandDeck::IsGuideTarget(FName Key) const
@@ -449,7 +590,7 @@ void SRHCommandDeck::SetTipsOff(bool bOff)
 
 TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 {
-	auto Step = [this]() -> const FGuideStep* { return Steps().IsValidIndex(GuideStep) ? &Steps()[GuideStep] : nullptr; };
+	auto Step = [this]() -> const FGuideStep* { return ShownStep(GuideInterrupt, GuideStep); };
 	auto Ctx = [this]() { return FGuideCtx{ GetSim(), GetDefs() }; };
 
 	TSharedRef<SWidget> Header = SNew(SHorizontalBox)
@@ -465,7 +606,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
 			SNew(STextBlock).Font(D::Label(10)).ColorAndOpacity(D::TextDim)
-			.Text_Lambda([this]() { return FText::FromString(FString::Printf(TEXT("%d / %d"), GuideStep + 1, Steps().Num())); })
+			.Text_Lambda([this]() { return FText::FromString(GuideInterrupt != INDEX_NONE ? FString() : FString::Printf(TEXT("%d / %d"), GuideStep + 1, Steps().Num())); })
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.f, 0.f, 0.f, 0.f)
 		[

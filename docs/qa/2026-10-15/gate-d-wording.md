@@ -134,6 +134,25 @@ Only columns the game displays are included. Notes columns are designer-only. Ed
 | D84 | ZONE row button + floor cell label · `RH_Rooms.csv:17` DisplayName | `Infirmary` | Fine: it implies care, not illness. Its effect (+1 sol before recall) is shown nowhere, and D3 currently undercounts it. | keep |
 | D85 | **Not shown** (SliceActive FALSE) · `RH_Rooms.csv:8` DisplayName | `Smoking Area` | A Gate-D luxury item (tobacco as a morale source in a game under a mental-health directive). It needs your call before it ever activates. | Keep dormant. If it is activated, rename it `Lounge` and drop tobacco as the comfort. |
 
+## 8. Ice running low (D2a, added 2026-10-17)
+
+Added with gate D2a (`docs/qa/2026-10-17/crew-phase-brief.md`). Every row is a **PLACEHOLDER** written to the prevention-first rules below (name the fix, then the consequence; no threat words) and awaits your wording review. The interrupt card appears while it can be acted on and goes away when nothing the player could do would resolve it. STEP = the `Interrupts()` array in GUIDE.
+
+| ID | Where | Current | Concern | Proposed |
+|---|---|---|---|---|
+| D86 | Alert banner, once per ice deposit, while ice remains to be surveyed · SIM `StepDepositAlerts` | `%s RUNNING LOW — about %.0f t of ice left. Survey for more ice and carry the grid to it.` Example: "ICE_A RUNNING LOW — about 7 t of ice left. Survey for more ice and carry the grid to it." | PLACEHOLDER. Names the fix; `ICE_A` is a data row name in capitals, like the other deposit banners. | keep pending review |
+| D87 | Alert banner, once, when the low deposit is the last ice anywhere (nothing unsurveyed, no healthy ice) · SIM `StepDepositAlerts` | `%s RUNNING LOW — about %.0f t of ice left. The last known ice. Ration water: recycling stretches it, and the Water Plant restores it while ice remains.` | PLACEHOLDER. Gives a lever that exists (recycling, the Water Plant) rather than a survey that cannot succeed. "The last known ice" is a statement of fact, not a threat. | keep pending review |
+| D88 | Alert banner, once, when untouched ice is already known · SIM `StepDepositAlerts` | `%s RUNNING LOW — about %.0f t of ice left. Drill the untouched ice before this runs out.` | PLACEHOLDER. Not reachable with the shipped data order (Ice_B is found only after Ice_A is low), kept for a player who surveys first. | keep pending review |
+| D89 | Guide panel header while an ice step is up · GUIDE | `NEXT STEP  -  WATER`, with the `n / N` counter blank | PLACEHOLDER. A new stage label. | keep pending review |
+| D90 | Guide step, ice low and Ice_B not yet surveyed · GUIDE STEP 1 | Title `Find more ice`. Body `%s has about %.0f t of ice left. More lies far to the north: ORDER > Survey, then click open ground about 700 m north of the Lander, a little to the east - the scout reports anything within 60 m.` | PLACEHOLDER. Names where to look before it is surveyed (the same precedent as "north-east" in the first-hour step). Design call: say less ("survey farther out, to the north")? | keep pending review |
+| D91 | Guide step, ice low and no named untouched ice · GUIDE STEP 1 | `%s has about %.0f t of ice left, and no untouched ice is known. ORDER > Survey new ground - every circle a scout covers stays on your map.` | PLACEHOLDER. | keep pending review |
+| D92 | Guide step, healthy ice found but outside the grid · GUIDE STEP 2 | Title `Carry the grid to the new ice`. Body `%s: %.0f t of ice, outside the grid. BUILD > Logistics > Grid Pylon - each links to the grid within 80 m and powers 40 m around itself. Chain them out to it (%s has about %.0f t left).` | PLACEHOLDER. | keep pending review |
+| D93 | Guide step, grid reaches healthy ice with no drill on it · GUIDE STEP 3 | Title `Drill the new ice`. Body `BUILD > Production > Ice Drill, placed on %s. Its ice is hauled to the Water Plant like the first drill's.` | PLACEHOLDER. | keep pending review |
+| D94 | Toast when an ice step resolves · GUIDE | `Done: <step title>` (the existing format) | PLACEHOLDER. Also shown when the step clears because nothing can be done any more; the title then reads slightly rosy. | keep pending review |
+| D95 | Selected Ice Drill card, attached-deposit line · DECK | `deposit %s: %.0f t left - RUNNING LOW` (the suffix only when low) | PLACEHOLDER. | keep pending review |
+| D96 | Known Ground list, status column · DECK | `  LOW` after the tonnage when the ice deposit is low | PLACEHOLDER. | keep pending review |
+| D97 | Guide step, a healthy ice deposit is drilled but no finished Water Plant stands near it · GUIDE STEP 4 | Title `Melt it where you drill it`. Body `%s's ice is a long haul from the Water Plant. BUILD > Production > Water Plant beside the new drill, inside the grid - water is shared colony-wide, so it melts where it is drilled.` | PLACEHOLDER. Same `WATER` stage label as D89. | keep pending review |
+
 ## Patterns to adopt game-wide
 
 1. **One recall vocabulary.** People are *recalled* and *safe in orbit*. They are never evacuated, returned, lost or failed. Every line must read right for a Mars-born child, who has never been to orbit and whose home is Mars.

@@ -1512,6 +1512,31 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSurvey(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDepositLeft(
+	TEXT("RH.DepositLeft"),
+	TEXT("RH.DepositLeft <Row> <kg> - DEBUG: set a deposit's remaining mass (ice-low alert and guide smoke; e.g. Ice_A 7600)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DepositLeft <Row> <kg>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			for (const FRHDepositState& D : Sim->GetDeposits())
+			{
+				if (D.RowName == FName(*Args[0]))
+				{
+					Sim->Debug_SetDepositRemainingKg(D.Id, FCString::Atod(*Args[1]));
+					UE_LOG(LogRedHope, Display, TEXT("[RH.DepositLeft] %s now %.0f kg of %.0f"), *D.RowName.ToString(), D.RemainingKg, D.InitialKg);
+					return;
+				}
+			}
+			UE_LOG(LogRedHope, Error, TEXT("RH.DepositLeft: no deposit named '%s'"), *Args[0]);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHWear(
 	TEXT("RH.Wear"),
 	TEXT("RH.Wear <0-100> - set every robot's wear directly (fleet-crisis test knob, bypasses accrual)."),

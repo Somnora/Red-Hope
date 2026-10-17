@@ -96,6 +96,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					// The guide re-reads the loaded colony from step 1 (silently).
 					Self->GuideHighWater = 0;
 					Self->GuideStep = -1;
+					Self->GuideInterrupt = INDEX_NONE;
 				}
 			});
 		}
@@ -1460,7 +1461,8 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			if (D.Id == B->AttachedDepositId)
 			{
-				Text += FString::Printf(TEXT("\ndeposit %s: %.0f t left"), *D.RowName.ToString(), D.RemainingKg / 1000.0);
+				Text += FString::Printf(TEXT("\ndeposit %s: %.0f t left%s"), *D.RowName.ToString(), D.RemainingKg / 1000.0,
+					Sim->IsIceDepositLow(D) ? TEXT(" - RUNNING LOW") : TEXT(""));
 				break;
 			}
 		}
@@ -1710,10 +1712,14 @@ FText SRHCommandDeck::GetKnownGroundText() const
 			continue;
 		}
 		++Known;
-		const TCHAR* Status = D.bDesignated ? TEXT("  DIGGING") : TEXT("");
+		FString Status = D.bDesignated ? TEXT("  DIGGING") : TEXT("");
+		if (Sim->IsIceDepositLow(D))
+		{
+			Status += TEXT("  LOW");
+		}
 		Text += FString::Printf(TEXT("\n%-11s %-8s %6.0f t at (%.0f, %.0f) m%s"),
 			*D.RowName.ToString(), *D.Type.ToString(), D.RemainingKg / 1000.0,
-			D.LocationCm.X / 100.f, D.LocationCm.Y / 100.f, Status);
+			D.LocationCm.X / 100.f, D.LocationCm.Y / 100.f, *Status);
 	}
 	if (Known == 0)
 	{

@@ -149,6 +149,26 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	WaterPotabilityRestorePerKg = Defs->GetConfigScalar(FName("WaterPotabilityRestorePerKg"), WaterPotabilityRestorePerKg);
 	WaterPotabilityFloor = Defs->GetConfigScalar(FName("WaterPotabilityFloor"), WaterPotabilityFloor);
 	HopeWaterPenalty = Defs->GetConfigScalar(FName("HopeWaterPenalty"), HopeWaterPenalty);
+	IceLowAlertFraction = Defs->GetConfigScalar(FName("IceLowAlertFraction"), IceLowAlertFraction);
+	IceWaterPlantNear_m = Defs->GetConfigScalar(FName("IceWaterPlantNear_m"), IceWaterPlantNear_m);
+	ConstructionMaterials.Reset();
+	ConstructionMaterials.Add(FName("Struct"));
+	Defs->ForEachBuilding([this](FName, const FRHBuildingRow& Row)
+	{
+		for (const auto& Line : URHDefinitionsSubsystem::ParseResourceList(Row.CostResources)) { ConstructionMaterials.Add(Line.Key); }
+	});
+	Defs->ForEachFurnitureRow([this](FName, const FRHFurnitureRow& Row)
+	{
+		for (const auto& Line : URHDefinitionsSubsystem::ParseResourceList(Row.CostResources)) { ConstructionMaterials.Add(Line.Key); }
+	});
+	{
+		TArray<TPair<FName, const FRHDoorRow*>> DoorRows;
+		Defs->GetActiveDoorsSorted(DoorRows);
+		for (const auto& Door : DoorRows)
+		{
+			for (const auto& Line : URHDefinitionsSubsystem::ParseResourceList(Door.Value->CostResources)) { ConstructionMaterials.Add(Line.Key); }
+		}
+	}
 	LuxuryKgPerColonistPerSol = Defs->GetConfigScalar(FName("LuxuryKgPerColonistPerSol"), LuxuryKgPerColonistPerSol);
 	HopeLuxuryBonus = Defs->GetConfigScalar(FName("HopeLuxuryBonus"), HopeLuxuryBonus);
 	HopeSmoothTauSols = Defs->GetConfigScalar(FName("HopeSmoothTauSols"), HopeSmoothTauSols);
@@ -264,6 +284,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		D.RowName = RowName;
 		D.Type = Row.Type;
 		D.RemainingKg = Row.Mass_kg;
+		D.InitialKg = Row.Mass_kg;
 		D.LocationCm = FVector(Row.LocX_m * 100.f, Row.LocY_m * 100.f, 0.f);
 		D.bDiscovered = Row.SurfaceVisible;
 		Deposits.Add(D);
@@ -393,6 +414,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepUplink();
 	StepTaskBoard();
 	StepProduction(SubDt);
+	StepDepositAlerts(); // D2a: same position in both bands (parity)
 	StepHabitability(SubDt);
 	StepAgriculture(SubDt);
 	StepPopulation(SubDt);
@@ -542,6 +564,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepUplink();
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
+	StepDepositAlerts(); // D2a: same position in both bands (parity)
 	StepHabitability(DtSimSeconds);
 	StepAgriculture(DtSimSeconds);
 	StepPopulation(DtSimSeconds);
@@ -790,7 +813,9 @@ void URHSimWorldSubsystem::StepTaskBoard()
 	// Haul: production outputs -> demanding consumer (recipe wants it and the
 	// hopper holds under two batches), else -> Stockpile/Lander store. This
 	// routes drill ice to the Water Plant and Forge Struct to stores with
-	// one rule.
+	// one rule. D2a: the NEAREST consumer (then the nearest store) wins, ties
+	// to the lower building Id - a second Water Plant beside a far drill must
+	// beat the first one, or every load crosses the map.
 	for (const FRHBuildingInstance& B : Buildings)
 	{
 		for (const auto& Out : B.OutputKg)
@@ -800,6 +825,17 @@ void URHSimWorldSubsystem::StepTaskBoard()
 				continue;
 			}
 			int32 DestId = 0;
+			double BestDistCm = 0.0;
+			bool bAnyConsumer = false; // some machine here takes it, hopper full or not
+			const auto Consider = [&](const FRHBuildingInstance& Cand)
+			{
+				const double DistCm = FVector::DistXY(B.LocationCm, Cand.LocationCm);
+				if (DestId == 0 || DistCm < BestDistCm || (DistCm == BestDistCm && Cand.Id < DestId))
+				{
+					DestId = Cand.Id;
+					BestDistCm = DistCm;
+				}
+			};
 			for (const FRHBuildingInstance& C : Buildings)
 			{
 				if (C.bUnderConstruction || C.Id == B.Id || C.Level != B.Level)
@@ -813,22 +849,25 @@ void URHSimWorldSubsystem::StepTaskBoard()
 						{
 							return false;
 						}
+						bAnyConsumer = true;
 						const double* Have = C.InputKg.Find(Out.Key);
 						return (!Have || *Have < *Need * 2.0);
 					}))
 				{
-					DestId = C.Id;
-					break;
+					Consider(C);
 				}
 			}
-			if (DestId == 0)
+			// Overflow to a store only for what construction draws from stores,
+			// or what nothing here consumes (D2a: drill ice hauled to the Lander
+			// sat there for good - 7 t in the playtest - and the long trips
+			// starved the Water Plant; it now waits at the drill for the plant).
+			if (DestId == 0 && (!bAnyConsumer || ConstructionMaterials.Contains(Out.Key)))
 			{
 				for (const FRHBuildingInstance& S : Buildings)
 				{
 					if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id && S.Level == B.Level)
 					{
-						DestId = S.Id;
-						break;
+						Consider(S);
 					}
 				}
 			}
@@ -1245,6 +1284,112 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				*B.DefName.ToString(), B.Id, *Recipe->Inputs, *Recipe->Outputs);
 		}
 	}
+}
+
+// D2a. Era-parity-safe: a level-triggered threshold on a MONOTONE quantity
+// (RemainingKg only falls), latched once per deposit, so it never re-arms or
+// flaps. Both bands detect the crossing on the step it happens. It feeds
+// nothing back into sim state, and writes no log line, so silent runs stay
+// byte-identical.
+void URHSimWorldSubsystem::StepDepositAlerts()
+{
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (!IsIceDepositLow(D) || IceLowAnnounced.Contains(D.Id))
+		{
+			continue;
+		}
+		IceLowAnnounced.Add(D.Id);
+		// The remedy named depends on what can still be done (Gate-D
+		// PLACEHOLDER wording): never tell the player to find ice that is not
+		// there. Untouched known ice outranks surveying.
+		const TCHAR* Advice = TEXT("Survey for more ice and carry the grid to it.");
+		if (HasHealthyDiscoveredIce())
+		{
+			Advice = TEXT("Drill the untouched ice before this runs out.");
+		}
+		else if (!HasUndiscoveredIce())
+		{
+			Advice = TEXT("The last known ice. Ration water: recycling stretches it, and the Water Plant restores it while ice remains.");
+		}
+		OnAlert.Broadcast(FString::Printf(TEXT("%s RUNNING LOW — about %.0f t of ice left. %s"),
+			*D.RowName.ToString().ToUpper(), D.RemainingKg / 1000.0, Advice));
+	}
+}
+
+bool URHSimWorldSubsystem::IsIceDepositLow(const FRHDepositState& D) const
+{
+	return D.Type == FName("Ice") && D.bDiscovered && D.InitialKg > 0.0 && IceLowAlertFraction > 0.0
+		&& D.RemainingKg < IceLowAlertFraction * D.InitialKg;
+}
+
+bool URHSimWorldSubsystem::HasUndiscoveredIce() const
+{
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Type == FName("Ice") && !D.bDiscovered)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::HasHealthyDiscoveredIce() const
+{
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Type == FName("Ice") && D.bDiscovered && D.RemainingKg > 0.0 && !IsIceDepositLow(D))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// What the player can still do about a low ice deposit, as one pure read the
+// guide and the suite share: -1 nothing to resolve (no low deposit, or no way
+// out - the last ice), 0 find more, 1 carry the grid to healthy ice, 2 drill it,
+// 3 melt it where it is drilled (a drilled healthy deposit with no finished
+// Water Plant within IceWaterPlantNear_m: its ice is a long haul from any plant).
+int32 URHSimWorldSubsystem::GetIceExpansionStage() const
+{
+	bool bAnyLow = false;
+	for (const FRHDepositState& D : Deposits)
+	{
+		bAnyLow |= IsIceDepositLow(D);
+	}
+	if (!bAnyLow)
+	{
+		return -1;
+	}
+	if (!HasHealthyDiscoveredIce())
+	{
+		return HasUndiscoveredIce() ? 0 : -1;
+	}
+	bool bReached = false, bDrilled = false, bMelted = false;
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Type != FName("Ice") || !D.bDiscovered || D.RemainingKg <= 0.0 || IsIceDepositLow(D))
+		{
+			continue;
+		}
+		bool bHasDrill = false, bHasPlant = false;
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			bHasDrill |= B.DefName == FName("IceDrill") && B.AttachedDepositId == D.Id;
+			bHasPlant |= B.DefName == FName("WaterPlant") && !B.bUnderConstruction && B.Level == D.Level
+				&& FVector::DistXY(B.LocationCm, D.LocationCm) <= IceWaterPlantNear_m * 100.0;
+		}
+		bDrilled |= bHasDrill;
+		bMelted |= bHasDrill && bHasPlant;
+		bReached |= bHasDrill || IsInCoverage(D.LocationCm, 0);
+	}
+	if (bDrilled)
+	{
+		return bMelted ? -1 : 3;
+	}
+	return bReached ? 2 : 1;
 }
 
 void URHSimWorldSubsystem::StepQuota()
@@ -9296,6 +9441,22 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << D.Id << D.RowName << D.Type << D.RemainingKg << D.PileKg << D.LocationCm << D.Level << D.bDiscovered << D.bDesignated;
 		Deposits.Add(MoveTemp(D));
 	}
+	// D2a: the surveyed mass is data, not save state - re-derive it by row.
+	{
+		TMap<FName, double> RowMass;
+		Defs->ForEachDeposit([&RowMass](FName RowName, const FRHDepositRow& Row) { RowMass.Add(RowName, Row.Mass_kg); });
+		for (FRHDepositState& D : Deposits)
+		{
+			if (const double* Mass = RowMass.Find(D.RowName))
+			{
+				D.InitialKg = *Mass;
+			}
+			else
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("Load: deposit row '%s' is gone from data - its low-ice alert is off"), *D.RowName.ToString());
+			}
+		}
+	}
 
 	Ar << Num;
 	for (int32 i = 0; i < Num; ++i)
@@ -9605,6 +9766,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	else
 	{
 		ShipAlertStage = 0;
+	}
+	// D2a: already low at load = already announced.
+	IceLowAnnounced.Reset();
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (IsIceDepositLow(D))
+		{
+			IceLowAnnounced.Add(D.Id);
+		}
 	}
 
 	OnColonyReloaded.Broadcast();

@@ -276,3 +276,29 @@ The surface-habitat capture (`e2706e5`) found a gap. BM-4's rule kept a Living b
 3. **Bed guard:** furnishing a surface Living bay is refused while it would leave the habitat's residents without beds ("put a bed in this bay first"). The Furnish-mode hint shows the drop (e.g. beds 1 -> 0) before placing.
 
 Inert for colonies with no furniture in surface Living bays. Verified by the `-furnish` suite (F9, F9b) and a full-battery line diff.
+
+## Ruling — 2026-10-17 (director: the crew-phase package, D1a-D5a)
+
+The director answered the crew-phase brief (`docs/qa/2026-10-17/crew-phase-brief.md`) with the recommended set, "D1a D2a D3a D4a D5a":
+
+1. **D1a:** Q3 goes live, sized to take work, and the ladder repeats with bills +25% a round.
+2. **D2a:** a worked ice deposit announces RUNNING LOW, and the guide leads to the second deposit.
+3. **D3a:** the three biggest Hope weights are halved.
+4. **D4a:** a food-runway Hope line and a FOOD RUNNING LOW alert.
+5. **D5a:** a per-machine day shift, on by default for the Forge and Electrolyzer.
+
+They are built as separate commits in that order: D2a, D4a, D1a, D3a, D5a.
+
+### D2a as built (2026-10-17)
+
+- **The alert.** A discovered ice deposit whose remaining mass falls under `IceLowAlertFraction` (0.25) of its surveyed mass announces RUNNING LOW once.
+  - It is a threshold on a monotone quantity, so it is era-parity safe.
+  - Its latch is runtime only and re-derived on load, so there is no save bump.
+  - The advice names what can still be done: survey for more, drill the untouched ice already found, or, when no ice is left to find, ration water.
+- **The guide.** A new interrupt layer sits outside the high-water chain, driven by one sim read, `GetIceExpansionStage()`. Its steps are: find more ice, carry the grid to it, drill it, and melt it where you drill it (a Water Plant within `IceWaterPlantNear_m`, 100 m). An interrupt shows only while the player can still resolve it, so it never gets stuck on.
+- **Logistics fix found on the way.** The playtest showed that expanding to Ice_B did nothing, for two reasons:
+  - Output hauls went to the *first* eligible consumer in building order and overflowed to the *first* store. Every load of the far drill's ice crossed 700 m to the old Water Plant, and the surplus went to the Lander, where 7 t of ice sat for good.
+  - Hauls now go to the **nearest** consumer, then the nearest store.
+  - A resource overflows to a store only when it is a construction material (Struct and every bill line) or nothing on the level consumes it. Ice waits at its drill for the plant.
+  - Inert for every existing battery run: 0 differing lines.
+- **Still open (found in the D2a playtest, not D2a's to fix).** Even with the logistics fixed, the full-cargo run still goes undrinkable from sol ~60. The fleet wears out: SpareParts is 0 by sol 30, the excavators HALT at wear 100 by sol 44, and two worn haulers run flat mid-route on the 700 m trip, because a 25% charge reserve does not cover the trip at a degraded pace. With the ladder ending at sol ~10 no parts crate can come. D1a's repeating ladder is the lever. The playtest bot should then order Spare Parts, and the re-run will show whether that is enough or whether far work also needs a forward Charging Pad.

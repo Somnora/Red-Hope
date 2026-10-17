@@ -23,8 +23,10 @@
 // soil, seeds and comforts (the data ladder has two rungs, so it is the last
 // ship), the vault is carved to nine cells and zoned as they come, and a CREW
 // line per sol logs Hope and its parts, food runway, the garden, water and
-// support. It ends at the sol limit (or if the colony empties), prints the
-// report, and quits.
+// support. When Ice_A runs low (D2a) it plays the water expansion the guide
+// calls for: survey far north, chain pylons out to Ice_B, drill it and put a
+// Water Plant beside the drill. It ends at the sol limit (or if the colony
+// empties), prints the report, and quits.
 
 #include "CoreMinimal.h"
 #include "RedHope.h"
@@ -223,6 +225,10 @@ namespace
 	// Extra kits from the first ship go under the first pylon's 40 m reach.
 	const FVector2D GSolarMore[] = { {30, 38}, {30, 46}, {30, 54}, {30, 62}, {38, 30}, {46, 30}, {54, 30}, {62, 30} };
 	const FVector2D GBatteryMore[] = { {62, 62}, {68, 62} };
+	// D2a: the pylon chain a player lays to Ice_B at (60, 700) m. Links are
+	// ~70 m (a pylon joins the grid within 80 m) and the last is 32 m from the
+	// ice (coverage reaches 40 m).
+	const FVector2D GIceBChain[] = { {6, 70}, {12, 140}, {18, 210}, {24, 280}, {30, 350}, {36, 420}, {42, 490}, {48, 560}, {54, 630}, {60, 668} };
 
 	void Tick()
 	{
@@ -358,6 +364,50 @@ namespace
 		if (FindBuilt(Sim, FName("IceDrill"), Ice ? &Ice->LocationCm : nullptr)) { Mark(P, C, TEXT("Ice Drill running")); }
 		if (FindBuilt(Sim, FName("WaterPlant"))) { Mark(P, C, TEXT("Water Plant running")); }
 		if (FindBuilt(Sim, FName("Electrolyzer"))) { Mark(P, C, TEXT("Electrolyzer running")); }
+
+		// D2a, the water expansion: Ice_A running low is the cue (the alert
+		// and the guide say so); a sensible player surveys where the guide
+		// points - far north - chains pylons out to the new ice and drills it.
+		if (Ice && Sim->IsIceDepositLow(*Ice))
+		{
+			Mark(P, C, TEXT("ice running low"));
+			if (Once(TEXT("surveyB")))
+			{
+				FRHCommand SurveyB; SurveyB.Verb = FName("Survey"); SurveyB.Location = FVector(3000.f, 70000.f, 0.f);
+				Order(Sim, C, SurveyB, TEXT("Survey at (30, 700) m"));
+			}
+		}
+		const FRHDepositState* IceB = nullptr;
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.bDiscovered && D.RowName == FName("Ice_B")) { IceB = &D; }
+		}
+		if (IceB)
+		{
+			Mark(P, C, TEXT("Ice_B found"));
+			// One pylon at a time, each as the one before it stands.
+			for (int32 i = 0; i < (int32)UE_ARRAY_COUNT(GIceBChain); ++i)
+			{
+				const FVector Prev = i > 0 ? FVector(GIceBChain[i - 1].X * 100.f, GIceBChain[i - 1].Y * 100.f, 0.f) : FVector::ZeroVector;
+				if (i > 0 && !FindBuilt(Sim, FName("Pylon"), &Prev)) { break; }
+				if (Once(*FString::Printf(TEXT("chainB%d"), i))) { OrderBuild(Sim, C, FName("Pylon"), GIceBChain[i].X, GIceBChain[i].Y); }
+			}
+			const FVector LastB(GIceBChain[UE_ARRAY_COUNT(GIceBChain) - 1].X * 100.f, GIceBChain[UE_ARRAY_COUNT(GIceBChain) - 1].Y * 100.f, 0.f);
+			if (FindBuilt(Sim, FName("Pylon"), &LastB) && Once(TEXT("drillB")))
+			{
+				Mark(P, C, TEXT("grid reaches Ice_B"));
+				OrderBuild(Sim, C, FName("IceDrill"), IceB->LocationCm.X / 100.f, IceB->LocationCm.Y / 100.f);
+			}
+			if (FindBuilt(Sim, FName("IceDrill"), &IceB->LocationCm))
+			{
+				Mark(P, C, TEXT("second Ice Drill running"));
+				// Melt it where it is drilled: a plant beside the drill, inside
+				// the last pylon's cover (hauls go to the nearest plant).
+				if (Once(TEXT("meltB"))) { OrderBuild(Sim, C, FName("WaterPlant"), 48, 690); }
+			}
+			const FVector MeltB(4800.f, 69000.f, 0.f);
+			if (FindBuilt(Sim, FName("WaterPlant"), &MeltB)) { Mark(P, C, TEXT("Water Plant beside Ice_B")); }
+		}
 
 		// The first ship: power before people.
 		if (Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && !P.Issued.Contains(FName("cargo1")))

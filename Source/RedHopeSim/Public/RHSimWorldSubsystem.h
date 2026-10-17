@@ -791,6 +791,17 @@ public:
 	// Harness: inject fresh ice-melt water (restores potability like the real
 	// IceDrill->WaterPlant chain, without scripting the whole ISRU economy).
 	void Debug_AddFreshWater(double Kg) { AddStock(FName("Water"), Kg); FreshWaterThisStepKg += Kg; }
+	// Ice running low (D2a): the one low-deposit predicate (alert, guide,
+	// inspect card, playtest). Fraction is RH_Config IceLowAlertFraction.
+	bool IsIceDepositLow(const FRHDepositState& D) const;
+	double GetIceLowAlertFraction() const { return IceLowAlertFraction; }
+	// Any ice body no scout has surveyed yet (ground truth - the deck copy
+	// leaks no more than the guide already does).
+	bool HasUndiscoveredIce() const;
+	// What the player can still do about a low ice deposit: -1 nothing to
+	// resolve, 0 find more ice, 1 carry the grid to healthy ice, 2 drill it,
+	// 3 melt it where it is drilled (no finished Water Plant near the drill).
+	int32 GetIceExpansionStage() const;
 
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
@@ -975,6 +986,34 @@ public:
 	// Harness: force the banked energy (grow-light blackout tests). Clamped to
 	// the current capacity by the next StepPower.
 	void Debug_SetBatteryWh(double Wh) { Power.BatteryWh = FMath::Max(0.0, Wh); }
+	// Harness (D2a): surveys complete in the agent band, which the era-mode
+	// loop doesn't drive - reveal a deposit directly (returns its id, or 0).
+	int32 Debug_RevealDeposit(FName RowName)
+	{
+		for (FRHDepositState& D : Deposits)
+		{
+			if (D.RowName == RowName) { D.bDiscovered = true; return D.Id; }
+		}
+		return 0;
+	}
+	// Harness / RH.DepositLeft: the one path that can RAISE a deposit's mass.
+	void Debug_SetDepositRemainingKg(int32 Id, double Kg)
+	{
+		if (FRHDepositState* D = FindDeposit(Id)) { D->RemainingKg = FMath::Max(0.0, Kg); }
+	}
+	// Harness (D2a): empty the low-ice latch so a test can prove LoadColony
+	// rebuilds it (and resets a stale one).
+	void Debug_ClearIceLowLatch() { IceLowAnnounced.Reset(); }
+	// Harness (D2a): where the open haul task from a building (for a resource)
+	// is bound - its To building id, or 0 if none is posted.
+	int32 Debug_GetOpenHaulDestFrom(int32 FromBuildingId, FName Resource) const
+	{
+		for (const FRHTask& T : Tasks)
+		{
+			if (T.Type == ERHTaskType::Haul && T.From.BuildingId == FromBuildingId && T.Resource == Resource) { return T.To.BuildingId; }
+		}
+		return 0;
+	}
 	// Harness: run the discovery roll for the Nth survey directly (surveys
 	// complete in the agent band, which the era-mode test loop doesn't drive).
 	bool Debug_MaybeDiscoverSettlement(int32 SurveyCount) { return MaybeDiscoverSettlement(SurveyCount); }
@@ -1020,6 +1059,8 @@ private:
 	void StepUplink();
 	void StepTaskBoard();
 	void StepProduction(float SubDt);
+	void StepDepositAlerts(); // D2a: one-shot "ice running low" per deposit
+	bool HasHealthyDiscoveredIce() const; // known, mass left, above the low line
 	void StepQuota();
 	void StepPower(float SubDt);
 	// Habitability integrator (M1-d Gate B): leak drains every pressurized
@@ -1497,6 +1538,16 @@ private:
 	double WaterPotabilityRestorePerKg = 0.0008;
 	double WaterPotabilityFloor = 0.6;
 	double HopeWaterPenalty = 12.0;
+	double IceLowAlertFraction = 0.25;  // D2a, RH_Config (0 disables)
+	double IceWaterPlantNear_m = 100.0; // D2a, RH_Config: a Water Plant this close counts as "beside" the drill
+	// D2a: resources construction draws from stores (Struct plus every
+	// building / furnishing / fitting bill line). Only these overflow to a
+	// store when their consumer's hopper is full; anything else (drill ice)
+	// waits at its producer for the consumer. Built from data at begin-play.
+	TSet<FName> ConstructionMaterials;
+	// D2a runtime latch: deposit ids already announced. Never saved;
+	// re-derived on load from the loaded masses.
+	TSet<int32> IceLowAnnounced;
 	// Comforts (M2 Gate D, abstract). Supplied count is per-step derived,
 	// never saved (the pool stock is the state).
 	int32 ComfortsSupplied = 0;

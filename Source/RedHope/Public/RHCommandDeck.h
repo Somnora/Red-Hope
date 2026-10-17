@@ -208,6 +208,9 @@ private:
 	// step of a fixed chain, read from sim state each Tick (a loaded colony
 	// lands on the right step); steps never un-complete. The controls it
 	// names pulse amber. Hidden with the tips; back from the "?" card.
+	// Interrupts (D2a ice; D4a/D5a reuse the layer) sit outside the chain:
+	// while one applies it outranks the current step, and it clears itself
+	// the moment nothing can resolve it (the chain comes straight back).
 	TSharedRef<SWidget> BuildGuidePanel();
 	void RefreshGuide();
 	FName GetGuideBuildDef() const;
@@ -218,6 +221,7 @@ private:
 	void SetTipsOff(bool bOff);
 	int32 GuideStep = -1;      // -1 until first evaluated
 	int32 GuideHighWater = 0;
+	int32 GuideInterrupt = INDEX_NONE; // a live interrupt step, outside the high-water chain
 
 	bool bShowHelp = false;
 	bool bBuildDrawerOpen = false;

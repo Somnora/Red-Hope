@@ -86,6 +86,9 @@ struct REDHOPESIM_API FRHDepositState
 	UPROPERTY() FName RowName;
 	UPROPERTY() FName Type;           // Regolith / Ore / Ice
 	UPROPERTY() double RemainingKg = 0.0;
+	// D2a: surveyed mass from DT_Deposits.Mass_kg. Derived from data, never
+	// saved: set at begin-play and re-derived from the row on load.
+	UPROPERTY() double InitialKg = 0.0;
 	UPROPERTY() double PileKg = 0.0;
 	UPROPERTY() FVector LocationCm = FVector::ZeroVector;
 	// Z-model (M1-b): 0 = surface, -1..-MaxDepth = shaft floors. The sim
