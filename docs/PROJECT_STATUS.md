@@ -85,8 +85,13 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   the segments need. It joins networks and rates like any shell. Suite
   `-prefab` (11 checks: the chain end to end with stand-in haulers - 100 kg
   Shielding made, 2 segments delivered in 0.8 sols). In game it draws as its
-  rooms (no dome model over it). No build-menu thumbnail yet (the Habitat
-  Bay and Corridor have none either). Sheet: `docs/media/prefab-habitat.jpg`.
+  rooms (no dome model over it). Sheet: `docs/media/prefab-habitat.jpg`.
+- **Build-menu thumbnails for the Habitat Bay, Corridor and prefab Habitat**
+  (after alive pass 2). They are rendered by RH.Thumbs like the rest, and
+  pressurized shells are shot from 50 degrees down so the rooms inside read.
+  The prefab's card no longer claims a per-bay, drag-sized bill: it reads "2
+  habitat segments" (counted, not weighed) and "a ready-made 1 x 2-bay
+  habitat, placed whole". Sheet: `docs/media/hab-thumbnails.jpg`.
 
 ## 2026-10-16: alive pass 2 (presentation only; RedHopeSim untouched)
 

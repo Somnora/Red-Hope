@@ -51,6 +51,13 @@ namespace
 	{
 		return Def == FName("SolarArray") ? -60.f : ThumbView.Yaw;
 	}
+	// Pressurized shells are open-top cutaways: what they ARE is the floor
+	// plan inside the walls, which the shallow default angle hides behind the
+	// near wall - look down steeper so the rooms read.
+	float ThumbPitchFor(const FRHBuildingRow* Def)
+	{
+		return (Def && Def->Pressurized) ? -50.f : ThumbView.Pitch;
+	}
 
 	void CaptureAll(UWorld* World, const FString& OutDir)
 	{
@@ -124,7 +131,7 @@ namespace
 
 			// Frame the bounding sphere with a little air; the compose script
 			// crops tight afterwards, so this only has to be conservative.
-			const FRotator View(ThumbView.Pitch, ThumbYawFor(B.DefName), 0.f);
+			const FRotator View(ThumbPitchFor(Def), ThumbYawFor(B.DefName), 0.f);
 			const float Radius = FMath::Max(Box.GetExtent().Size(), 50.f);
 			const float Distance = Radius / FMath::Sin(FMath::DegreesToRadians(ThumbFovDeg * 0.5f)) * 1.05f;
 			CamActor->SetActorLocationAndRotation(Box.GetCenter() - View.Vector() * Distance, View);

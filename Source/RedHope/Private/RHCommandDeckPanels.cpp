@@ -1340,10 +1340,15 @@ FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
 	for (const auto& C : Cost)
 	{
 		bOutShort |= Amount(S, C.Key) + KINDA_SMALL_NUMBER < C.Value;
-		Parts.Add(FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
+		// Habitat segments are whole parts (the sim books one per kg), so
+		// count them rather than weigh them.
+		Parts.Add(C.Key == FName("HabSegment")
+			? FString::Printf(TEXT("%.0f habitat segment%s"), C.Value, FMath::IsNearlyEqual(C.Value, 1.0) ? TEXT("") : TEXT("s"))
+			: FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
 	}
-	// Drag-sized (the greenhouse dome): the line is one bed's bill.
-	return FString::Join(Parts, TEXT(" + ")) + (R->Pressurized ? TEXT(" per bay") : (R->DragSized ? TEXT(" per bed") : TEXT("")));
+	// Drag-sized: the line is one bay's (a habitat module) or one bed's (the
+	// greenhouse dome) bill. The prefab Habitat is a fixed shell: its whole bill.
+	return FString::Join(Parts, TEXT(" + ")) + (R->DragSized ? (R->Pressurized ? TEXT(" per bay") : TEXT(" per bed")) : TEXT(""));
 }
 
 FName SRHCommandDeck::GetDetailBuildDef() const
@@ -1512,7 +1517,13 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 					? FString::Printf(TEXT("Takes %.0f min to build at 1x."), R->BuildTime_s / 60.f)
 					: FString::Printf(TEXT("Takes %.0f s to build at 1x."), R->BuildTime_s));
 				if (R->ImportOnly) { Facts.Add(TEXT("Shipped from Earth as a kit - order more on the supply ship.")); }
-				if (R->Pressurized) { Facts.Add(TEXT("Drag to size it in 10 m bays on the grid; modules set edge to edge join one habitat. Build time and cost are per bay.")); }
+				if (R->Pressurized && R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m bays on the grid; modules set edge to edge join one habitat. Build time and cost are per bay.")); }
+				else if (R->Pressurized)
+				{
+					// The prefab: a fixed shell, placed whole (2 m footprint cells, 10 m bays).
+					Facts.Add(FString::Printf(TEXT("A ready-made %d x %d-bay habitat, placed whole on the bay grid; set edge to edge with modules it joins one habitat."),
+						FMath::Max(1, R->FootprintX / 5), FMath::Max(1, R->FootprintY / 5)));
+				}
 				else if (R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m beds. Build time and cost are per bed.")); }
 				return Txt(FString::Join(Facts, TEXT("\n")));
 			}), D::TextDim, 9)
