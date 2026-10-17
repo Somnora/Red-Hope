@@ -259,3 +259,10 @@ Alive pass 2c (`17454fb`) draws an idle robot walking to a parking rank beside t
 
 1. **Robot parking is presentation only.** The sim stays the authority on where robots are and when they arrive. Idle robots are not moved in the sim, and the baselines and pins stay as they are.
 2. `rh.RobotRouting 0` remains the debug switch that draws robots exactly at their sim position.
+
+## Ruling — 2026-10-16 (director: disputes stay a still face-off)
+
+Alive pass 2b (`9bf87a8`) staged a crew dispute as the pair turning to face each other and standing still under the amber plate. The Talk gesture was deliberately withheld, because a raised hand at someone's face can read as a threat. The director ruled:
+
+1. **A dispute is shown as a still face-off.** No gesture or clip beyond Idle, consistent with the mental-health directive (abstracted consequences; words, never blows).
+2. This settles the body language only. The plate's wording ("! heated words !") is a player-facing string and stays under the standing Gate-D framing review like every other morale string.

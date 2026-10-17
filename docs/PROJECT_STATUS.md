@@ -112,8 +112,9 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **2b, conversations and personal space** (`9bf87a8`). Crew moments get body
   language: a pastime is a face-to-face Talk; a join-in has the helper work
   alongside. A dispute is a still face-off under the amber plate, and the Talk
-  gesture is deliberately not used there (Gate-D: words, never blows). That is
-  a placeholder for the framing review. Figures steer around one another and
+  gesture is deliberately not used there (Gate-D: words, never blows). The
+  director ruled 2026-10-16 to keep the still face-off. The plate's wording
+  stays a Gate-D placeholder string. Figures steer around one another and
   ease apart when standing inside each other. With 20 crew, overlapping pairs
   fell from 7.9 to 0.18 per sample (A/B via `rh.CrewSeparation`). Sheet:
   `docs/media/alive-crowd-talk.jpg`.
