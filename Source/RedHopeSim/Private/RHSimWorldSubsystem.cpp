@@ -29,7 +29,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 31;  // v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 32;  // v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -195,6 +195,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	WeatherCycleSols = Defs->GetConfigScalar(FName("WeatherCycleSols"), WeatherCycleSols);
 	InfirmaryEvacBonusSols = Defs->GetConfigScalar(FName("InfirmaryEvacBonusSols"), InfirmaryEvacBonusSols);
 	WorkstationFabBonusPerSeat = Defs->GetConfigScalar(FName("WorkstationFabBonusPerSeat"), WorkstationFabBonusPerSeat);
+	QuotaRepeatBillMul = Defs->GetConfigScalar(FName("QuotaRepeatBillMul"), QuotaRepeatBillMul);
 	// The goal ladder: a fresh colony opens on the first slice-active quota
 	// (Q1 today - identical to the old hard-wired behavior).
 	if (ActiveQuota.IsNone())
@@ -546,7 +547,11 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 			// Ladder deadlines are relative to the quota's opening sol; the
 			// first quota opens at sol 0, so this reads as it always did.
 			const double DeadlineSimSeconds = (double)(QuotaOpenedSol + Quota->DeadlineSol + 1) * URHSimClockSubsystem::SolLengthSimSeconds;
-			if (DeadlineSimSeconds - Clock->GetSimSecondsTotal() < URHSimClockSubsystem::SolLengthSimSeconds)
+			// Refuse only during the last on-time sol: once the deadline sol has
+			// passed, era mode cannot change the on-time result, and a late colony
+			// must not be locked out of 60x for as long as the ladder repeats.
+			const double Left = DeadlineSimSeconds - Clock->GetSimSecondsTotal();
+			if (Left > 0.0 && Left < URHSimClockSubsystem::SolLengthSimSeconds)
 			{
 				OutReason = TEXT("quota deadline within one sol");
 				return false;
@@ -1431,8 +1436,10 @@ void URHSimWorldSubsystem::StepQuota()
 			PendingResearchFundingKg = 0.0;
 		}
 		UE_LOG(LogRedHopeSim, Display,
-			TEXT("=== CEO TRANSMISSION (Sol %d): Quota %s met%s. Supply ship authorized: %.0f kg manifest budget%s%s. Compose and launch. ==="),
-			QuotaMetSol, *ActiveQuota.ToString(), bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg,
+			TEXT("=== CEO TRANSMISSION (Sol %d): Quota %s%s met%s. Supply ship authorized: %.0f kg manifest budget%s%s. Compose and launch. ==="),
+			QuotaMetSol, *ActiveQuota.ToString(),
+			QuotaRepeatRound > 0 ? *FString::Printf(TEXT(" (round %d)"), QuotaRepeatRound) : TEXT(""),
+			bOnTime ? TEXT(" ON TIME") : TEXT(" (late)"), AwardMassKg,
 			ReqMult < 0.999 ? *FString::Printf(TEXT(" (requisition x%.2f - your Martian ties)"), ReqMult)
 				: (ReqMult > 1.001 ? *FString::Printf(TEXT(" (requisition x%.2f - Earth loyalty)"), ReqMult) : TEXT("")),
 			Funding > 0.0 ? *FString::Printf(TEXT(" (+%.0f kg research funding)"), Funding) : TEXT(""));
@@ -1471,6 +1478,13 @@ void URHSimWorldSubsystem::StepQuota()
 			// one's ship lands - the program's demands keep coming.
 			AdvanceQuotaLadder();
 		}
+	}
+	else if (QuotaPhase == ERHQuotaPhase::Completed && QuotaRepeatBillMul > 0.0)
+	{
+		// A colony resting at Completed (a knob-0 run switched on mid-game)
+		// picks the ladder back up on its next step. Otherwise this phase is
+		// only ever transient inside the landing call above.
+		AdvanceQuotaLadder();
 	}
 }
 
@@ -1521,9 +1535,19 @@ void URHSimWorldSubsystem::AdvanceQuotaLadder()
 	});
 	if (Best.IsNone())
 	{
-		// Ladder exhausted: the Completed phase stands as the program's rest
-		// state (exactly the pre-v25 behavior after Q1).
-		return;
+		// Ladder exhausted. Knob off: the Completed phase stands as the program's
+		// rest state (the pre-D1a behavior). Knob on: the LAST rung reopens with
+		// its bills scaled up one more round (deadline and award unscaled).
+		if (QuotaRepeatBillMul <= 0.0)
+		{
+			return;
+		}
+		Best = CurName;
+		++QuotaRepeatRound;
+	}
+	else
+	{
+		QuotaRepeatRound = 0; // an authored row was found: a later rung restarts the count
 	}
 	ActiveQuota = Best;
 	QuotaOpenedSol = Clock ? Clock->GetSol() : 0;
@@ -1533,13 +1557,38 @@ void URHSimWorldSubsystem::AdvanceQuotaLadder()
 	ShipAlertStage = 0;
 	ManifestItems.Reset();
 	const FRHQuotaRow* Next = Defs->GetQuota(Best);
-	const FString Msg = FString::Printf(
-		TEXT("CEO TRANSMISSION — new quota %s: deliver %s by sol %d. The program's eyes stay on Mars."),
-		*Best.ToString(), Next ? *Next->Requirements : TEXT("?"),
-		QuotaOpenedSol + (Next ? Next->DeadlineSol : 0));
+	const int32 DueSol = QuotaOpenedSol + (Next ? Next->DeadlineSol : 0);
+	const FString Msg = QuotaRepeatRound > 0
+		? FString::Printf(TEXT("CEO TRANSMISSION — quota %s renewed (round %d): deliver %s by sol %d. The program's eyes stay on Mars."),
+			*Best.ToString(), QuotaRepeatRound, *DescribeQuotaBills(), DueSol)
+		: FString::Printf(TEXT("CEO TRANSMISSION — new quota %s: deliver %s by sol %d. The program's eyes stay on Mars."),
+			*Best.ToString(), *DescribeQuotaBills(), DueSol);
 	OnAlert.Broadcast(Msg);
-	UE_LOG(LogRedHopeSim, Display, TEXT("=== QUOTA LADDER: %s opens (sol %d, deadline sol %d) ==="),
-		*Best.ToString(), QuotaOpenedSol, QuotaOpenedSol + (Next ? Next->DeadlineSol : 0));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== QUOTA LADDER: %s opens (sol %d, deadline sol %d)%s ==="),
+		*Best.ToString(), QuotaOpenedSol, DueSol,
+		QuotaRepeatRound > 0 ? *FString::Printf(TEXT(" - round %d, bills x%.4g"), QuotaRepeatRound, GetQuotaBillScale()) : TEXT(""));
+}
+
+double URHSimWorldSubsystem::GetQuotaBillScale() const
+{
+	if (QuotaRepeatRound <= 0 || QuotaRepeatBillMul <= 0.0)
+	{
+		return 1.0;
+	}
+	return FMath::Pow(QuotaRepeatBillMul, (double)QuotaRepeatRound);
+}
+
+FString URHSimWorldSubsystem::DescribeQuotaBills() const
+{
+	// Player-facing bills in ParseResourceList order; Struct reads "structural",
+	// as the guide already says it.
+	TArray<FString> Parts;
+	for (const auto& Req : GetQuotaProgress())
+	{
+		Parts.Add(FString::Printf(TEXT("%s %.0f kg"),
+			Req.Key == FName("Struct") ? TEXT("structural") : *Req.Key.ToString(), Req.Value.Value));
+	}
+	return FString::Join(Parts, TEXT(", "));
 }
 
 void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
@@ -8292,7 +8341,10 @@ TMap<FName, TPair<double, double>> URHSimWorldSubsystem::GetQuotaProgress() cons
 			{
 				Have += *Fluid;
 			}
-			Progress.Add(Req.Key, TPair<double, double>(Have, Req.Value));
+			// Round 0 keeps the raw bill (bit-identical to pre-D1a); renewals scale
+			// it and round to whole kg so the shown bill is the threshold.
+			const double Need = QuotaRepeatRound > 0 ? FMath::RoundToDouble(Req.Value * GetQuotaBillScale()) : Req.Value;
+			Progress.Add(Req.Key, TPair<double, double>(Have, Need));
 		}
 	}
 	return Progress;
@@ -9382,6 +9434,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			Ar << WId << WRow << WEdge;
 		}
 	}
+	// Quota repeat round (save v32, D1a).
+	Ar << QuotaRepeatRound;
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -9792,6 +9846,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			WallFeatures.Add(W);
 		}
 		RebuildWallFeatureIndex();
+	}
+	// Quota repeat round (save v32, D1a).
+	Ar << QuotaRepeatRound;
+	if (QuotaRepeatRound < 0)
+	{
+		UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v32: quota repeat round %d is negative; clamped to 0"), QuotaRepeatRound);
+		QuotaRepeatRound = 0;
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

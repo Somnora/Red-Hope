@@ -840,7 +840,7 @@ public:
 	// Network-instant pool (fluids/gases/abstract per hybrid logistics).
 	double GetStock(FName Resource) const;
 	void AddStock(FName Resource, double Delta);
-	// Quota progress vs DT_Quotas Q1: resource -> (have, need).
+	// Quota progress vs the active quota (bills scaled by the repeat round, D1a): resource -> (have, need).
 	TMap<FName, TPair<double, double>> GetQuotaProgress() const;
 
 	// --- Robot work API (game-thread, called by Mass processors) ---
@@ -944,9 +944,15 @@ public:
 	// The goal ladder (save v25): which CEO quota is live now, and the sol it
 	// opened (deadlines are relative to opening). When a quota's ship lands,
 	// the next slice-active row - ascending (DeadlineSol, name) - opens, so
-	// the program's demands keep coming for as long as the data ladder runs.
+	// the program's demands keep coming; once the rows run out the last rung
+	// repeats with its bills scaled up each round (D1a, save v32).
 	FName GetActiveQuotaName() const { return ActiveQuota; }
 	int32 GetQuotaOpenedSol() const { return QuotaOpenedSol; }
+	// The renewal count: 0 while authored rows remain, +1 each time the last
+	// rung reopens. GetQuotaBillScale() is exactly 1.0 at round 0 or with the
+	// knob off, else QuotaRepeatBillMul^round (every bill, not award/deadline).
+	int32 GetQuotaRepeatRound() const { return QuotaRepeatRound; }
+	double GetQuotaBillScale() const;
 	// Manifest budget banked by completed discoveries (FundingKg), paid out on
 	// top of the next quota award - research funds the program.
 	double GetPendingResearchFundingKg() const { return PendingResearchFundingKg; }
@@ -994,6 +1000,9 @@ public:
 	// Harness: force the banked energy (grow-light blackout tests). Clamped to
 	// the current capacity by the next StepPower.
 	void Debug_SetBatteryWh(double Wh) { Power.BatteryWh = FMath::Max(0.0, Wh); }
+	// Harness (D1a): flip the ladder-repeat knob mid-run (0 = off, the legacy
+	// Completed rest state after the last ship).
+	void Debug_SetQuotaRepeatBillMul(double Mul) { QuotaRepeatBillMul = Mul; }
 	// Harness (D2a): surveys complete in the agent band, which the era-mode
 	// loop doesn't drive - reveal a deposit directly (returns its id, or 0).
 	int32 Debug_RevealDeposit(FName RowName)
@@ -1589,6 +1598,12 @@ private:
 	// slice-active row when none is set (fresh colony or legacy path).
 	FName ActiveQuota;
 	int32 QuotaOpenedSol = 0;
+	// The goal ladder's renewal count (save v32): 0 while authored rows remain;
+	// +1 each time the last rung reopens. Bills scale by QuotaRepeatBillMul^round;
+	// deadline and award do not.
+	int32 QuotaRepeatRound = 0;
+	double QuotaRepeatBillMul = 1.25;   // config QuotaRepeatBillMul; <= 0 = no repeat
+	FString DescribeQuotaBills() const;
 	double PendingResearchFundingKg = 0.0;
 	FName FirstQuotaName() const;
 	void AdvanceQuotaLadder();

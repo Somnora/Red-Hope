@@ -1376,7 +1376,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 				Sim->GetShipEtaSimSeconds(), Clock->GetSimSecondsTotal());
 			break;
 		case ERHQuotaPhase::Completed:
-			UE_LOG(LogRedHope, Display, TEXT("  SLICE COMPLETE - the Program continues."));
+			UE_LOG(LogRedHope, Display, TEXT("  LADDER ENDED (QuotaRepeatBillMul 0) - the Program continues."));
 			break;
 		default:
 			break;
@@ -1405,6 +1405,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 				*Event->Type.ToString(), Event->StartSol + Event->DurationSols, Event->Severity, Sim->GetDustFactorNow());
 		}
 
+		if (Sim->GetQuotaRepeatRound() > 0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  ladder: %s renewed, round %d (bills x%.2f)"),
+				*Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaBillScale());
+		}
 		for (const auto& Q : Sim->GetQuotaProgress())
 		{
 			UE_LOG(LogRedHope, Display, TEXT("  quota %s: %.0f / %.0f kg"),

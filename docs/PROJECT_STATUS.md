@@ -5,7 +5,7 @@ through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the workin
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v31**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v32**.
 
 ## 2026-10-16: build mode, suits and airlocks
 
@@ -181,21 +181,21 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 33
-suites (34 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 34
+suites (35 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
 the art, audio, interface, playtest, tiered-production, dome and build-mode
 work. Last reported fully green on the BM-1b commit (32 runs) ("0 suite(s) not green", pins
 unchanged); also on `d180f12` (BM-4), `3332e21` (BM-3), `e6ee887`, `585ee8e`,
-`f77b962`, `63f452f`, `4706e5f` and earlier. The nine newest suites (`-staff`,
-`-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`, `-prefab`, `-icelow`, `-food`) fail loudly on any mismatch,
+`f77b962`, `63f452f`, `4706e5f` and earlier. The ten newest suites (`-staff`,
+`-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`, `-prefab`, `-icelow`, `-food`, `-resupply`) fail loudly on any mismatch,
 unlike the older print-only ones.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 34 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 35 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food resupply
 #         (+ no-switch = the baseline)
 ```
 

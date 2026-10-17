@@ -5,6 +5,9 @@
 #include "RHDefinitionsSubsystem.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -4377,6 +4380,293 @@ int32 URHSimCommandlet::Main(const FString& Params)
 
 		Sim->OnAlert.Remove(AlertH);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== FOOD RUNWAY TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
+	// D1a self-test (2026-10-17): Q3 is live at the resized bills and the
+	// ladder REPEATS its last rung when that ship lands, every bill x1.25 per
+	// round (award and deadline unscaled), saved as the v32 round counter. The
+	// era-mode refusal no longer locks a late colony out. Fails loudly: every
+	// check logs at Error. `-resupply`.
+	if (FParse::Param(*Params, TEXT("resupply")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== RESUPPLY TEST (D1a, 2026-10-17) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("RESUPPLY ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("RESUPPLY FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		const auto Step = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const int32 StepsPerSolR = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto RunSolsR = [&](double NSol) { for (int32 i = 0; i < (int32)(NSol * StepsPerSolR); ++i) { Step(); } };
+		// Run to an absolute sol (fractions allowed), bounded.
+		const auto RunToSol = [&](double TargetSol)
+		{
+			for (int32 i = 0; i < 100 * StepsPerSolR && Clock->GetSimSecondsTotal() < TargetSol * URHSimClockSubsystem::SolLengthSimSeconds; ++i) { Step(); }
+		};
+
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto LastAlertWith = [&Alerts](const TCHAR* Needle)
+		{
+			for (int32 i = Alerts.Num() - 1; i >= 0; --i) { if (Alerts[i].Contains(Needle)) { return Alerts[i]; } }
+			return FString();
+		};
+		// Landing sol captured AT the landing (not read after a run), and the
+		// award + requisition multiplier captured AT the met broadcast.
+		int32 Landings = 0, LandSol = -1;
+		double MetAward = 0.0, MetMult = 1.0;
+		const FDelegateHandle ShipH = Sim->OnShipArrived.AddLambda([&](const TArray<FName>&) { ++Landings; LandSol = Clock->GetSol(); });
+		const FDelegateHandle MetH = Sim->OnQuotaMet.AddLambda([&](int32, double AwardKg) { MetAward = AwardKg; MetMult = Sim->GetRequisitionMultiplier(); });
+
+		const auto Have = [&](const TCHAR* Res)
+		{
+			const auto Prog = Sim->GetQuotaProgress();
+			const TPair<double, double>* P = Prog.Find(FName(Res));
+			return P ? P->Key : -1.0;
+		};
+		const auto Need = [&](const TCHAR* Res)
+		{
+			const auto Prog = Sim->GetQuotaProgress();
+			const TPair<double, double>* P = Prog.Find(FName(Res));
+			return P ? P->Value : -1.0;
+		};
+		// The active quota asks exactly Struct S, Oxygen O, Hydrogen H - and nothing else.
+		const auto BillsAre = [&](double S, double O, double H)
+		{
+			return Sim->GetQuotaProgress().Num() == 3 && Near(Need(TEXT("Struct")), S, 1e-9)
+				&& Near(Need(TEXT("Oxygen")), O, 1e-9) && Near(Need(TEXT("Hydrogen")), H, 1e-9);
+		};
+		const auto BillsText = [&]()
+		{
+			FString T;
+			for (const auto& L : Sim->GetQuotaProgress()) { T += FString::Printf(TEXT("%s %.0f "), *L.Key.ToString(), L.Value.Value); }
+			return T.TrimEnd();
+		};
+		// Holdings are thresholds, never deducted: bring every line to its bill + Margin.
+		const auto TopUp = [&](double Margin)
+		{
+			for (const auto& L : Sim->GetQuotaProgress())
+			{
+				const double Gap = L.Value.Value + Margin - L.Value.Key;
+				if (Gap > 0.0) { Sim->AddStock(L.Key, Gap); }
+			}
+		};
+		const auto SetHold = [&](const TCHAR* Res, double Target) { Sim->AddStock(FName(Res), Target - Have(Res)); };
+		const auto LaunchAndLand = [&]() -> bool
+		{
+			FString LErr;
+			const int32 Before = Landings;
+			const bool bLaunched = Sim->LaunchShip(LErr);
+			for (int32 i = 0; i < 20 * StepsPerSolR && Landings == Before; ++i) { Step(); }
+			return bLaunched && Landings == Before + 1;
+		};
+		const auto QuotaAlertsSince = [&Alerts](int32 From)
+		{
+			int32 N = 0;
+			for (int32 i = From; i < Alerts.Num(); ++i)
+			{
+				N += (Alerts[i].Contains(TEXT("quota"), ESearchCase::IgnoreCase) || Alerts[i].Contains(TEXT("round"), ESearchCase::IgnoreCase)
+					|| Alerts[i].Contains(TEXT("renewed"), ESearchCase::IgnoreCase)) ? 1 : 0;
+			}
+			return N;
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString Err;
+
+		// R0. Pure data, against the LIVE synced DT rows (no Debug_ActivateQuota):
+		// a stale DT_Quotas / DT_Config fails loudly here, then stops the suite.
+		{
+			const FRHQuotaRow* Q2 = DefsSub->GetQuota(FName("Q2"));
+			const FRHQuotaRow* Q3 = DefsSub->GetQuota(FName("Q3"));
+			const bool bQ3 = Q3 != nullptr;
+			Expect(bQ3, TEXT("R0 DT_Quotas has a Q3 row"));
+			Expect(bQ3 && Q3->SliceActive, TEXT("R0 Q3 is SliceActive in the live DT (DT/CSV)"));
+			Expect(bQ3 && Q3->Requirements == TEXT("Struct:2500;Oxygen:1200;Hydrogen:250"),
+				FString::Printf(TEXT("R0 Q3 Requirements \"%s\" (expect Struct:2500;Oxygen:1200;Hydrogen:250, no water line)"), bQ3 ? *Q3->Requirements : TEXT("<none>")));
+			Expect(bQ3 && Q3->DeadlineSol == 24 && Near(Q3->OnTimeAward_kg, 14000.0, 1e-9) && Near(Q3->LateAward_kg, 9000.0, 1e-9),
+				FString::Printf(TEXT("R0 Q3 deadline %d / on-time %.0f / late %.0f (expect 24 / 14000 / 9000)"),
+					bQ3 ? Q3->DeadlineSol : -1, bQ3 ? Q3->OnTimeAward_kg : -1.0, bQ3 ? Q3->LateAward_kg : -1.0));
+			Expect(Q2 && Q2->SliceActive && bQ3 && Q2->DeadlineSol < Q3->DeadlineSol,
+				FString::Printf(TEXT("R0 Q2 is active and its deadline %d sits below Q3's (the (DeadlineSol, name) order Q1 < Q2 < Q3 holds)"), Q2 ? Q2->DeadlineSol : -1));
+			const double Mul = DefsSub->GetConfigScalar(FName("QuotaRepeatBillMul"), -1.0);
+			Expect(Near(Mul, 1.25, 1e-9), FString::Printf(TEXT("R0 RH_Config QuotaRepeatBillMul %.4f (expect 1.25; -1 = DT_Config never synced)"), Mul));
+			if (!bQ3 || !Q3->SliceActive || Q3->Requirements != TEXT("Struct:2500;Oxygen:1200;Hydrogen:250") || !Near(Mul, 1.25, 1e-9) || Fails > 0)
+			{
+				Sim->OnAlert.Remove(AlertH);
+				Sim->OnShipArrived.Remove(ShipH);
+				Sim->OnQuotaMet.Remove(MetH);
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== RESUPPLY TEST END: %d failure(s) ==="), Fails);
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				return 1;
+			}
+		}
+
+		// R1. A fresh colony: Q1, round 0, bills unscaled, Open.
+		Expect(Sim->GetActiveQuotaName() == FName("Q1") && Sim->GetQuotaRepeatRound() == 0 && Sim->GetQuotaBillScale() == 1.0
+			&& Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaOpenedSol() == 0,
+			FString::Printf(TEXT("R1 fresh colony: active %s, round %d, scale %.4f, phase %d, opened sol %d (expect Q1, 0, 1.0, Open, 0)"),
+				*Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaBillScale(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaOpenedSol()));
+
+		// R2. Q1 met on time -> its ship lands -> Q2 opens at the landing sol.
+		TopUp(1.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(MetAward, 10000.0 * MetMult, 0.5),
+			FString::Printf(TEXT("R2 Q1 met: phase %d, award %.1f (expect AwaitingManifest, 10000 x %.4f requisition)"), (int32)Sim->GetQuotaPhase(), MetAward, MetMult));
+		Expect(LaunchAndLand(), TEXT("R2 Q1 ship launched and landed"));
+		Expect(Sim->GetActiveQuotaName() == FName("Q2") && Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaRepeatRound() == 0 && Sim->GetQuotaOpenedSol() == LandSol,
+			FString::Printf(TEXT("R2 after landing: active %s, phase %d, round %d, opened sol %d vs landing sol %d (expect Q2, Open, 0, equal)"),
+				*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaOpenedSol(), LandSol));
+
+		// R3. Q2 met -> its ship lands -> Q3 opens (the live ladder reaches it).
+		TopUp(1.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(MetAward, 12000.0 * MetMult, 0.5),
+			FString::Printf(TEXT("R3 Q2 met: phase %d, award %.1f (expect AwaitingManifest, 12000 x %.4f)"), (int32)Sim->GetQuotaPhase(), MetAward, MetMult));
+		Expect(LaunchAndLand(), TEXT("R3 Q2 ship launched and landed"));
+		Expect(Sim->GetActiveQuotaName() == FName("Q3") && Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaRepeatRound() == 0 && Sim->GetQuotaOpenedSol() == LandSol,
+			FString::Printf(TEXT("R3 after landing: active %s, phase %d, round %d, opened sol %d vs landing sol %d (expect Q3, Open, 0, equal)"),
+				*Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaOpenedSol(), LandSol));
+		Expect(BillsAre(2500.0, 1200.0, 250.0) && Sim->GetQuotaProgress().Find(FName("Water")) == nullptr,
+			FString::Printf(TEXT("R3 Q3 bills: %s (expect Struct 2500 Oxygen 1200 Hydrogen 250, three lines, no Water)"), *BillsText()));
+		Expect(LastAlertWith(TEXT("new quota Q3")).Contains(TEXT("structural 2500 kg")) && LastAlertWith(TEXT("new quota Q3")).Contains(TEXT("Hydrogen 250 kg")),
+			FString::Printf(TEXT("R3 opening alert: \"%s\""), *LastAlertWith(TEXT("new quota Q3"))));
+
+		// R4. Q3 met at the authored bills -> unscaled on-time award -> its ship
+		// lands -> Q3 REOPENS as round 1 with the bills x1.25.
+		TopUp(1.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(MetAward, 14000.0 * MetMult, 0.5),
+			FString::Printf(TEXT("R4 Q3 met at the new bills: phase %d, award %.1f (expect AwaitingManifest, 14000 x %.4f)"), (int32)Sim->GetQuotaPhase(), MetAward, MetMult));
+		Expect(LaunchAndLand(), TEXT("R4 Q3 ship launched and landed"));
+		Expect(Sim->GetActiveQuotaName() == FName("Q3") && Sim->GetQuotaRepeatRound() == 1 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open
+			&& Sim->GetAwardMassKg() == 0.0 && Sim->GetManifestItems().Num() == 0 && Sim->GetQuotaOpenedSol() == LandSol,
+			FString::Printf(TEXT("R4 ladder exhausted -> repeat: active %s, round %d, phase %d, award %.0f, manifest %d, opened %d vs landing %d (expect Q3, 1, Open, 0, 0, equal)"),
+				*Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound(), (int32)Sim->GetQuotaPhase(), Sim->GetAwardMassKg(), Sim->GetManifestItems().Num(), Sim->GetQuotaOpenedSol(), LandSol));
+		Expect(BillsAre(3125.0, 1500.0, 313.0) && Near(Sim->GetQuotaBillScale(), 1.25, 1e-12),
+			FString::Printf(TEXT("R4 round-1 bills: %s, scale %.6f (expect 3125 / 1500 / 313, 1.25)"), *BillsText(), Sim->GetQuotaBillScale()));
+		Expect(LastAlertWith(TEXT("renewed (round 1)")).Contains(TEXT("structural 3125 kg")) && LastAlertWith(TEXT("renewed (round 1)")).Contains(TEXT("quota Q3")),
+			FString::Printf(TEXT("R4 renewal alert: \"%s\""), *LastAlertWith(TEXT("renewed (round 1)"))));
+
+		// R5. The scaling is enforced. Holding EXACTLY the round-0 bills (which
+		// would already meet an unscaled Q3) leaves round 1 Open; one kg short
+		// of the round-1 bills is still Open; the last kg meets it.
+		SetHold(TEXT("Struct"), 2500.0); SetHold(TEXT("Oxygen"), 1200.0); SetHold(TEXT("Hydrogen"), 250.0);
+		Expect(Near(Have(TEXT("Struct")), 2500.0, 1e-6) && Near(Have(TEXT("Oxygen")), 1200.0, 1e-6) && Near(Have(TEXT("Hydrogen")), 250.0, 1e-6),
+			FString::Printf(TEXT("R5 setup holds exactly the round-0 bills: %.3f / %.3f / %.3f"), Have(TEXT("Struct")), Have(TEXT("Oxygen")), Have(TEXT("Hydrogen"))));
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open,
+			FString::Printf(TEXT("R5 holding exactly the round-0 bills: round 1 stays Open (phase %d)"), (int32)Sim->GetQuotaPhase()));
+		SetHold(TEXT("Struct"), 3124.0); SetHold(TEXT("Oxygen"), 1500.0); SetHold(TEXT("Hydrogen"), 313.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Near(Have(TEXT("Struct")), 3124.0, 1e-6),
+			FString::Printf(TEXT("R5 Struct 1 kg short of 3125 (O2 and H2 met): Open (phase %d, struct %.3f)"), (int32)Sim->GetQuotaPhase(), Have(TEXT("Struct"))));
+		SetHold(TEXT("Struct"), 3125.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest,
+			FString::Printf(TEXT("R5 Struct 3125: met (phase %d)"), (int32)Sim->GetQuotaPhase()));
+
+		// R6. Round 2 and the era-mode refusal. Holdings stay at the round-1
+		// bills, so round 2 (3906 / 1875 / 391) cannot be met while we wait.
+		Expect(LaunchAndLand(), TEXT("R6 round-1 ship launched and landed"));
+		const int32 Opened2 = Sim->GetQuotaOpenedSol();
+		Expect(Sim->GetQuotaRepeatRound() == 2 && BillsAre(3906.0, 1875.0, 391.0) && Opened2 == LandSol,
+			FString::Printf(TEXT("R6 round 2: round %d, bills %s, opened %d vs landing %d (expect 2, 3906 / 1875 / 391, equal)"),
+				Sim->GetQuotaRepeatRound(), *BillsText(), Opened2, LandSol));
+		RunToSol((double)Opened2 + 24.5);
+		{
+			FString Why;
+			const bool bCan = Sim->CanEnterEraMode(Why);
+			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open && !bCan && Why == TEXT("quota deadline within one sol"),
+				FString::Printf(TEXT("R6 mid deadline sol (sol %d, due %d): Can=%d, reason \"%s\" (expect refused, exactly the quota reason)"),
+					Clock->GetSol(), Opened2 + 24, bCan ? 1 : 0, *Why));
+		}
+		RunToSol((double)Opened2 + 25.5);
+		{
+			FString Why;
+			const bool bCan = Sim->CanEnterEraMode(Why);
+			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open && bCan && Why.IsEmpty(),
+				FString::Printf(TEXT("R6 after the deadline sol (sol %d), still Open and unmet: Can=%d, reason \"%s\" (expect allowed, no refusal at all)"),
+					Clock->GetSol(), bCan ? 1 : 0, *Why));
+		}
+
+		// R7. Met late: the late award, unscaled.
+		TopUp(1.0);
+		RunSolsR(0.2);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Clock->GetSol() - Opened2 > 24 && Near(MetAward, 9000.0 * MetMult, 0.5),
+			FString::Printf(TEXT("R7 round 2 met %d sols after opening: award %.1f (expect late tier 9000 x %.4f, unscaled)"), Clock->GetSol() - Opened2, MetAward, MetMult));
+
+		// R8. Save v32 mid-round (round 2, AwaitingManifest).
+		const int32 SnapRound = Sim->GetQuotaRepeatRound(), SnapOpened = Sim->GetQuotaOpenedSol();
+		const FName SnapActive = Sim->GetActiveQuotaName();
+		const double SnapAward = Sim->GetAwardMassKg();
+		Expect(Sim->SaveColony(TEXT("resupplytest"), Err),
+			FString::Printf(TEXT("R8 saved v32 at round %d, %s, opened %d, award %.1f (%s)"), SnapRound, *SnapActive.ToString(), SnapOpened, SnapAward, *Err));
+
+		// R9. Knob 0 is the legacy rest state: the ship lands, Completed stands,
+		// the round stays, and no quota/renewal alert is raised.
+		Sim->Debug_SetQuotaRepeatBillMul(0.0);
+		const int32 AlertMark9 = Alerts.Num();
+		Expect(LaunchAndLand(), TEXT("R9 round-2 ship launched and landed with the knob at 0"));
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Completed && Sim->GetActiveQuotaName() == FName("Q3") && Sim->GetQuotaRepeatRound() == 2
+			&& Sim->GetQuotaBillScale() == 1.0 && QuotaAlertsSince(AlertMark9) == 0,
+			FString::Printf(TEXT("R9 knob 0: phase %d, active %s, round %d, scale %.4f, %d quota/round alerts since launch (expect Completed, Q3, 2, 1.0, 0)"),
+				(int32)Sim->GetQuotaPhase(), *Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaBillScale(), QuotaAlertsSince(AlertMark9)));
+		RunSolsR(0.5);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Completed && Sim->GetQuotaRepeatRound() == 2 && QuotaAlertsSince(AlertMark9) == 0,
+			FString::Printf(TEXT("R9 half a sol later: still Completed (phase %d), round %d, %d quota/round alerts"), (int32)Sim->GetQuotaPhase(), Sim->GetQuotaRepeatRound(), QuotaAlertsSince(AlertMark9)));
+
+		// R10. The Completed re-check: switching the knob on reopens the ladder
+		// on the very next step as round 3.
+		Sim->Debug_SetQuotaRepeatBillMul(1.25);
+		Step();
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaRepeatRound() == 3 && Sim->GetQuotaOpenedSol() == Clock->GetSol() && BillsAre(4883.0, 2344.0, 488.0),
+			FString::Printf(TEXT("R10 knob back on: phase %d, round %d, opened %d vs sol %d, bills %s (expect Open, 3, equal, 4883 / 2344 / 488)"),
+				(int32)Sim->GetQuotaPhase(), Sim->GetQuotaRepeatRound(), Sim->GetQuotaOpenedSol(), Clock->GetSol(), *BillsText()));
+		Expect(LastAlertWith(TEXT("renewed (round 3)")).Contains(TEXT("structural 4883 kg")),
+			FString::Printf(TEXT("R10 renewal alert: \"%s\""), *LastAlertWith(TEXT("renewed (round 3)"))));
+
+		// R11. Load restores the mutated state: round 3 -> the saved round 2.
+		const bool bLoaded = Sim->LoadColony(TEXT("resupplytest"), Err);
+		Expect(bLoaded && Sim->GetQuotaRepeatRound() == SnapRound && Sim->GetActiveQuotaName() == SnapActive && Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest
+			&& Near(Sim->GetAwardMassKg(), SnapAward, 1e-6) && Sim->GetQuotaOpenedSol() == SnapOpened && BillsAre(3906.0, 1875.0, 391.0),
+			FString::Printf(TEXT("R11 load v32 (%d): round %d, active %s, phase %d, award %.1f, opened %d, bills %s (expect 2, Q3, AwaitingManifest, %.1f, %d, 3906 / 1875 / 391) %s"),
+				bLoaded ? 1 : 0, Sim->GetQuotaRepeatRound(), *Sim->GetActiveQuotaName().ToString(), (int32)Sim->GetQuotaPhase(), Sim->GetAwardMassKg(), Sim->GetQuotaOpenedSol(), *BillsText(), SnapAward, SnapOpened, *Err));
+
+		// R12. The strict rule stands: the same file stamped as v31 is refused
+		// loudly and the live colony is untouched.
+		{
+			const FString SlotPath = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_resupplytest.sav");
+			const FString OldPath = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_resupplytest31.sav");
+			TArray<uint8> Bytes;
+			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *SlotPath) && Bytes.Num() > 8;
+			bool bRefused = false;
+			if (bRead)
+			{
+				Bytes[4] = 31; Bytes[5] = 0; Bytes[6] = 0; Bytes[7] = 0; // header: magic u32, then version u32
+				FFileHelper::SaveArrayToFile(Bytes, *OldPath);
+				FString OldErr;
+				bRefused = !Sim->LoadColony(TEXT("resupplytest31"), OldErr) && OldErr.Contains(TEXT("Save format mismatch"));
+				IFileManager::Get().Delete(*OldPath);
+			}
+			Expect(bRead && bRefused && Sim->GetQuotaRepeatRound() == SnapRound && Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest,
+				FString::Printf(TEXT("R12 a v31-stamped save is refused (read %d, refused %d); live round still %d, phase %d"),
+					bRead ? 1 : 0, bRefused ? 1 : 0, Sim->GetQuotaRepeatRound(), (int32)Sim->GetQuotaPhase()));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnShipArrived.Remove(ShipH);
+		Sim->OnQuotaMet.Remove(MetH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== RESUPPLY TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return Fails > 0 ? 1 : 0;

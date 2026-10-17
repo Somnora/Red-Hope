@@ -21,8 +21,8 @@ enum class ERHTaskType : uint8
 	Repair  // maintenance: travel to a worn robot, spend SpareParts on its wear
 };
 
-// The slice's quota arc: meet Q1 -> CEO transmission -> compose manifest ->
-// ship transit -> arrival (slice win).
+// The quota arc: meet the active quota -> CEO transmission -> compose manifest ->
+// ship transit -> arrival -> next rung (the last rung repeats, D1a).
 UENUM()
 enum class ERHQuotaPhase : uint8
 {

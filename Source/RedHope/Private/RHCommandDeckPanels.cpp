@@ -456,6 +456,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			switch (S->GetQuotaPhase())
 			{
 			case ERHQuotaPhase::Open:
+				if (S->GetQuotaRepeatRound() > 0)
+				{
+					return Txt(TEXT("Earth renews the quota with every bill raised. Stockpile it to earn the next supply ship."));
+				}
 				return Txt(TEXT("Stockpile Earth's quota to earn a supply ship."));
 			case ERHQuotaPhase::AwaitingManifest:
 				return Txt(TEXT("Quota met. Choose the ship's cargo, then launch it."));
@@ -590,7 +594,12 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			const FRHQuotaRow* Q = (S && Df) ? Df->GetQuota(S->GetActiveQuotaName()) : nullptr;
 			if (!Q || !C || S->GetQuotaPhase() != ERHQuotaPhase::Open) { return FText::GetEmpty(); }
 			const int32 DueSol = S->GetQuotaOpenedSol() + Q->DeadlineSol;
-			return Txt(C->GetSol() > DueSol ? FString(TEXT("LATE")) : FString::Printf(TEXT("DUE SOL %d"), DueSol));
+			const FString DueText = C->GetSol() > DueSol ? FString(TEXT("LATE")) : FString::Printf(TEXT("DUE SOL %d"), DueSol);
+			// Renewed rungs name their round; the percentage is CUMULATIVE on the authored bills.
+			return Txt(S->GetQuotaRepeatRound() > 0
+				? FString::Printf(TEXT("%s - round %d, bills up %.0f%% - %s"), *S->GetActiveQuotaName().ToString(),
+					S->GetQuotaRepeatRound(), (S->GetQuotaBillScale() - 1.0) * 100.0, *DueText)
+				: DueText);
 		})
 		.ColorAndOpacity_Lambda([this]()
 		{

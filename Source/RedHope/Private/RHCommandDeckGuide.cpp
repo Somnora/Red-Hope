@@ -343,13 +343,13 @@ namespace
 
 			// --- The crew ---
 			// Soil and seeds ride with the people (crew-phase playtest, 2026-10-15):
-			// the data ladder has two quotas, so this ship can be the last - a
-			// Crew Pod alone lands 200 kg of food and no way to grow more, and
-			// the colony empties ~65 sols later (RH.Playtest ... lean).
+			// there is always a next ship (the ladder repeats, D1a), but it is a
+			// whole quota away - a Crew Pod alone lands 200 kg of food and no way
+			// to grow more, and the colony empties ~65 sols later (RH.Playtest ... lean).
 			{ TEXT("THE CREW"), TEXT("Bring the first crew"),
 				[](const FGuideCtx& C)
 				{
-					return FString::Printf(TEXT("Your vault has %d bed%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: it may be the last ship, and a garden is how they will eat. Meet the next quota to earn it."),
+					return FString::Printf(TEXT("Your vault has %d bed%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: a garden is how they will eat, and each later ship is a whole quota away. Meet the next quota to earn it."),
 						C.Sim->GetHousingCapacity(), C.Sim->GetHousingCapacity() == 1 ? TEXT("") : TEXT("s"));
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetPopulation() > 0; },

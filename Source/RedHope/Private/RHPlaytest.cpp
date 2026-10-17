@@ -20,8 +20,8 @@
 // It is a measuring instrument, not a pass/fail test: the colony's pacing is
 // a design question. Past the first crew it plays the guide's last step,
 // "Keep them well" (the crew-phase extension): the crew ship also carries
-// soil, seeds and comforts (the data ladder has two rungs, so it is the last
-// ship), the vault is carved to nine cells and zoned as they come, and a CREW
+// soil, seeds and comforts (each later ship is a whole quota away: the last
+// rung repeats, D1a), the vault is carved to nine cells and zoned as they come, and a CREW
 // line per sol logs Hope and its parts, food runway, the garden, water and
 // support. When Ice_A runs low (D2a) it plays the water expansion the guide
 // calls for: survey far north, chain pylons out to Ice_B, drill it and put a
@@ -75,6 +75,12 @@ namespace
 		int32 Recalled = 0, Born = 0;
 		double MinHope = 100.0, MaxHope = 0.0, MinFoodSols = 1.0e9;
 		int32 MaxUnsupported = 0;
+		// D1a: the current ship round's cadence, logged as a ROUND line when its
+		// ship lands (opened -> met -> launched -> landed, plus the cargo).
+		FString RoundName;
+		int32 RoundOpenedSol = 0, RoundMetSol = -1;
+		double RoundLaunchSol = -1.0;
+		FString RoundCargo;
 		FTimerHandle Timer;
 		FDelegateHandle hRejected, hCompleted, hQuota, hShip, hDeposit, hAlert;
 	};
@@ -145,7 +151,9 @@ namespace
 
 	// The first cargo a sensible director would pick: power before people
 	// (there is nowhere for a crew to live yet), kept under the late award.
-	void LoadCargo(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const TArray<FName>& Items)
+	// FillItem (optional): once Items are in, keep adding it until the budget
+	// refuses - the bot's way of spending a big award on one thing.
+	void LoadCargo(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const TArray<FName>& Items, FName FillItem = NAME_None)
 	{
 		for (const FName& Item : Items)
 		{
@@ -159,10 +167,26 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f CARGO   %s refused: %s"), SolNow(C), *Item.ToString(), *Err);
 			}
 		}
+		if (!FillItem.IsNone())
+		{
+			int32 Filled = 0;
+			FString FillErr;
+			while (Filled < 100 && Sim->AddManifestItem(FillItem, FillErr)) { ++Filled; }
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f CARGO   +%d more %s to fill the budget"), SolNow(C), Filled, *FillItem.ToString());
+		}
 		FString Err;
 		if (Sim->LaunchShip(Err))
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  manifest %.0f / %.0f kg"), SolNow(C), Sim->GetManifestMassKg(), Sim->GetAwardMassKg());
+			if (GPlaytest.IsValid())
+			{
+				TMap<FName, int32> Counts;
+				for (const FName& I : Sim->GetManifestItems()) { ++Counts.FindOrAdd(I); }
+				FString Cargo;
+				for (const TPair<FName, int32>& K : Counts) { Cargo += FString::Printf(TEXT("%s%s x%d"), Cargo.IsEmpty() ? TEXT("") : TEXT(", "), *K.Key.ToString(), K.Value); }
+				GPlaytest->RoundLaunchSol = SolNow(C);
+				GPlaytest->RoundCargo = Cargo;
+			}
 		}
 		else
 		{
@@ -286,7 +310,7 @@ namespace
 				100.0 * P.MinBankFrac,
 				Sim->GetTotalSolid(FName("Struct")) + Sim->GetStock(FName("Struct")), Sim->GetStock(FName("Water")), Sim->GetStock(FName("Oxygen")),
 				Sim->GetStock(FName("Hydrogen")), Sim->GetStock(FName("Food")),
-				*Sim->GetActiveQuotaName().ToString(), *Quota,
+				*Sim->GetActiveQuotaName().ToString(), *FString::Printf(TEXT("%s%s"), Sim->GetQuotaRepeatRound() > 0 ? *FString::Printf(TEXT(" r%d"), Sim->GetQuotaRepeatRound()) : TEXT(""), *Quota),
 				P.SampleSec > 0.0 ? P.IdleRobotSec / P.SampleSec : 0.0, P.StrandedMax, Sim->GetPopulation());
 			if (Sim->GetPopulation() > 0)
 			{
@@ -470,8 +494,8 @@ namespace
 			if (Sim->GetHousingCapacity() > 0 || Sim->IsFloorRated(-1))
 			{
 				Once(TEXT("cargo2"));
-				// The data ladder has two rungs, so this may be the last ship:
-				// a sensible director sends food-growing with the people.
+				// The next ship is a whole quota away: a sensible director sends
+				// food-growing with the people.
 				if (P.bLeanCargo)
 				{
 					LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack") });
@@ -483,15 +507,20 @@ namespace
 				}
 			}
 		}
-		// A third ship, when the ladder has one (-RHQuotas=Q3 sweeps): the
-		// rescue a player would send once the guide warns that food is short -
-		// soil and seeds, comforts, more power.
+		// Every ship from the third on - the last rung repeats (D1a), so there is
+		// one per round, each under its own token: the rescue a player would send
+		// once the guide warns that food is short (soil and seeds, comforts, more
+		// power), plus Spare Parts for the fleet - the D2a playtest found it halts
+		// at wear 100 by sol ~44 because SpareParts hits 0 by sol 30 and no ship
+		// brought more. Two crates ride in the list; any budget left fills with more.
+		const FString Cargo3Tok = FString::Printf(TEXT("cargo3-%s-r%d"), *Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound());
 		if (Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && P.Issued.Contains(FName("cargo2"))
-			&& !P.Issued.Contains(FName("cargo3")) && Sim->GetActiveQuotaName() != FName("Q1") && Sim->GetActiveQuotaName() != FName("Q2"))
+			&& !P.Issued.Contains(FName(*Cargo3Tok)) && Sim->GetActiveQuotaName() != FName("Q1") && Sim->GetActiveQuotaName() != FName("Q2"))
 		{
-			Once(TEXT("cargo3"));
-			Mark(P, C, FString::Printf(TEXT("quota %s met"), *Sim->GetActiveQuotaName().ToString()));
-			LoadCargo(Sim, C, { FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack") });
+			Once(*Cargo3Tok);
+			Mark(P, C, FString::Printf(TEXT("quota %s met (round %d)"), *Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound()));
+			LoadCargo(Sim, C, { FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack"),
+				FName("PartsCrate"), FName("PartsCrate") }, FName("PartsCrate"));
 		}
 		if (Sim->GetPopulation() > 0)
 		{
@@ -606,15 +635,30 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f BUILT   %s at (%.0f, %.0f) m%s"), SolOf(), *B.DefName.ToString(),
 				B.LocationCm.X / 100.f, B.LocationCm.Y / 100.f, B.Level < 0 ? *FString::Printf(TEXT(" floor %d"), B.Level) : TEXT(""));
 		});
-		P.hQuota = Sim->OnQuotaMet.AddLambda([SolOf](int32 Sol, double AwardKg)
+		TWeakObjectPtr<URHSimWorldSubsystem> WeakSim = Sim;
+		P.hQuota = Sim->OnQuotaMet.AddLambda([SolOf, WeakSim](int32 Sol, double AwardKg)
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f QUOTA   met on sol %d, award %.0f kg"), SolOf(), Sol, AwardKg);
+			const URHSimWorldSubsystem* S = WeakSim.Get();
+			if (GPlaytest.IsValid() && S)
+			{
+				GPlaytest->RoundName = FString::Printf(TEXT("%s r%d"), *S->GetActiveQuotaName().ToString(), S->GetQuotaRepeatRound());
+				GPlaytest->RoundOpenedSol = S->GetQuotaOpenedSol();
+				GPlaytest->RoundMetSol = Sol;
+				GPlaytest->RoundLaunchSol = -1.0;
+				GPlaytest->RoundCargo.Reset();
+			}
 		});
 		P.hShip = Sim->OnShipArrived.AddLambda([SolOf](const TArray<FName>& Items)
 		{
 			FString List;
 			for (const FName& I : Items) { List += I.ToString() + TEXT(" "); }
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f SHIP    landed: %s"), SolOf(), *List);
+			if (GPlaytest.IsValid())
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ROUND   %s: opened sol %d, met sol %d, launched sol %.2f, landed sol %.2f | cargo: %s"),
+					SolOf(), *GPlaytest->RoundName, GPlaytest->RoundOpenedSol, GPlaytest->RoundMetSol, GPlaytest->RoundLaunchSol, SolOf(), *GPlaytest->RoundCargo);
+			}
 		});
 		P.hDeposit = Sim->OnDepositDiscovered.AddLambda([SolOf](const FRHDepositState& D)
 		{

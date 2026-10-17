@@ -8,7 +8,10 @@
 # guide = the first-hour guide's order: power + the Charging Pad first, the
 #         dig and the Forge only once the pad stands
 # lean  = the crew ship carries the Crew Pod alone (full = plus soil, seeds,
-#         comforts - the data ladder has two quotas, so it is the last ship)
+#         comforts; from the third ship on every ship also carries Spare Parts -
+#         the last quota rung repeats with bills x QuotaRepeatBillMul, D1a, so
+#         the bot fills and launches one ship per round and logs a ROUND line
+#         per landing: opened / met / launched / landed sol and the cargo)
 #
 # When Ice_A runs low the bot also plays the water expansion: survey far north,
 # chain pylons out to Ice_B, drill it and build a Water Plant beside the drill
@@ -18,11 +21,12 @@
 # Windowless (-nullrhi) on a fixed time step (-benchmark -fps=10): every frame
 # advances 0.1 s of game time however fast the machine runs it, so 30 sols
 # (~37 minutes of 16x play) take about two minutes, boot included. RH.Playtest quits the game
-# itself when the first crew has lived a sol, or at the sol limit.
+# itself at the sol limit, or when the colony empties.
 #
 # Balance sweeps: RH_PLAYTEST_EXTRA is passed to the game before -ExecCmds, e.g.
-#   RH_PLAYTEST_EXTRA="-RHConfig=StarterSolarPacks=9,StarterBatteryPacks=3 -RHQuotas=Q3"
-# (config-row overrides and dormant quota activation; both log loudly).
+#   RH_PLAYTEST_EXTRA="-RHConfig=StarterSolarPacks=9,StarterBatteryPacks=3,QuotaRepeatBillMul=1.5"
+# (config-row overrides, and -RHQuotas=<row> for any dormant quota row; both
+# log loudly).
 #
 # Output: Saved/RHPlaytest/<label>.log (full) and <label>.txt (the [Playtest]
 # lines - the timeline, per-sol vitals and the REPORT block).

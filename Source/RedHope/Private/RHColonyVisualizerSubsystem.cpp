@@ -1465,7 +1465,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		HandleBuildingAdded(B);
 	}
 	SpawnDepositMarkers();
-	if (Sim->GetQuotaPhase() == ERHQuotaPhase::Completed)
+	// Completed is only a passing state now (the ladder repeats, D1a); a ship has
+	// landed once any quota past the first has opened, so the pad keeps its lander.
+	if (Sim->GetQuotaPhase() == ERHQuotaPhase::Completed || Sim->GetQuotaOpenedSol() > 0)
 	{
 		HandleShipArrived(Sim->GetManifestItems());
 	}
