@@ -485,7 +485,9 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
    surface`, `SOUND=1` for the listening test), what to try by hand, what
    good looks like, the frames already shot, and the verdicts wanted.
 
-2. **Director decisions from the playtest** (`docs/qa/2026-10-15/playtest.md`):
+2. **Director decisions from the playtest** (`docs/qa/2026-10-15/playtest.md`;
+   **one-reply brief with recommendations: `docs/qa/2026-10-17/crew-phase-brief.md`**,
+   D1-D6):
    - **The supply line ends at sol ~10.** Two quotas make the crew ship the
      last; a colony that missed soil and seeds cannot recover. Extend the ladder
      (Q3+), make soil obtainable on Mars (the dormant agri chain), or a slow
