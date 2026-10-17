@@ -127,9 +127,9 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   is drawn up to ~38 m from its sim position until its next task, when it walks
   back. Robots drawn inside a footprint that isn't their own fell from 54 to 2
   robot-samples over the same deterministic run (A/B via `rh.RobotRouting`).
-  Sheet: `docs/media/alive-robots.jpg`. **Director call owed:** keep parking
-  as presentation, or make idle robots park in the sim? The sim option is a
-  behaviour change that moves every battery baseline.
+  Sheet: `docs/media/alive-robots.jpg`. **Director ruling 2026-10-16:** parking
+  stays presentation only. The sim keeps idle robots where they stop, and the
+  battery baselines are untouched.
 
 ## Since August (29 commits, `147de7a` → `fdffc75`; detail in §3c)
 

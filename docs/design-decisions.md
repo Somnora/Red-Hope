@@ -252,3 +252,10 @@ After the habitat thumbnails landed, the director ruled on the prefab Habitat's 
 
 1. **The prefab is called "Habitat"** (it was "Habitat Module", which read as the drag-sized Habitat Bay's sibling).
 2. **Its copy is final:** the "(PLACEHOLDER copy, director review)" tag is dropped from the blurb. The balance numbers (2 segments, 240 s) remain placeholders, as the row's Notes say.
+
+## Ruling — 2026-10-16 (director: robot parking stays presentation)
+
+Alive pass 2c (`17454fb`) draws an idle robot walking to a parking rank beside the Lander, while the sim keeps it where its last task left it, up to ~38 m apart until its next task. The alternative was to park idle robots in the sim, a behaviour change that would move every battery baseline. The director ruled:
+
+1. **Robot parking is presentation only.** The sim stays the authority on where robots are and when they arrive. Idle robots are not moved in the sim, and the baselines and pins stay as they are.
+2. `rh.RobotRouting 0` remains the debug switch that draws robots exactly at their sim position.
