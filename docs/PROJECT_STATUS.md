@@ -91,7 +91,9 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   pressurized shells are shot from 50 degrees down so the rooms inside read.
   The prefab's card no longer claims a per-bay, drag-sized bill: it reads "2
   habitat segments" (counted, not weighed) and "a ready-made 1 x 2-bay
-  habitat, placed whole". Sheet: `docs/media/hab-thumbnails.jpg`.
+  habitat, placed whole". Sheet: `docs/media/hab-thumbnails.jpg`. The
+  director then renamed the prefab "Habitat" (was "Habitat Module") and
+  approved its blurb, dropping the placeholder tag.
 
 ## 2026-10-16: alive pass 2 (presentation only; RedHopeSim untouched)
 

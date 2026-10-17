@@ -245,3 +245,10 @@ The director asked for a way to build above- and below-ground habitats "similar 
 6. **Airlocks are cosmetic** (plus a smaller air leak) until storms can damage habs; a hab needs no airlock or shaft link to be lived in.
 
 Standing rules carried into every gate: new systems are inert for colonies that don't use them (the battery baseline and pins must not move); every new sim gate ships a fails-loudly self-test suite; every player-facing morale/evacuation string stays a Gate-D placeholder.
+
+## Ruling — 2026-10-16 (director: the prefab's name and copy)
+
+After the habitat thumbnails landed, the director ruled on the prefab Habitat's card:
+
+1. **The prefab is called "Habitat"** (it was "Habitat Module", which read as the drag-sized Habitat Bay's sibling).
+2. **Its copy is final:** the "(PLACEHOLDER copy, director review)" tag is dropped from the blurb. The balance numbers (2 segments, 240 s) remain placeholders, as the row's Notes say.
