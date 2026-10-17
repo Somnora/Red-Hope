@@ -7,6 +7,7 @@
 
 class USkeletalMeshComponent;
 class UStaticMeshComponent;
+struct FRHColonist;
 class UTextRenderComponent;
 
 // Presentation mirror of the crew (M2 Gate A2): one small suited figure per
@@ -46,6 +47,24 @@ private:
 	// on reaching the cab the figure rides (hard cut) to RideToLevel.
 	// Alighting: walking out of the cab to the door point after a ride.
 	enum class EPhase : uint8 { Arriving, Descending, Resident, StrollOut, StrollBack, Boarding, Alighting };
+
+	// Alive pass 2 (2026-10-16): a place on a furnishing - a bed berth, a
+	// desk's chair, a dining seat, a sofa cushion. The figure walks to
+	// Approach, then settles (sits or lies) into Pose over a short blend,
+	// and stands back up before walking anywhere else. Pose 0 = standing at
+	// a bench (the work clips), 1 = seated, 2 = lying (the walker is tipped
+	// onto its back; Yaw then points from the head to the feet).
+	struct FFurnitureSeat
+	{
+		uint8 Pose = 0;
+		int32 Piece = 0;
+		int32 Berth = 0;
+		FVector ApproachCm = FVector::ZeroVector;
+		FVector PoseCm = FVector::ZeroVector;
+		float YawDeg = 0.f;
+		FName Clip;
+		bool SameAs(const FFurnitureSeat& O) const { return Pose == O.Pose && Piece == O.Piece && Berth == O.Berth; }
+	};
 
 	struct FCrewVisual
 	{
@@ -99,6 +118,13 @@ private:
 		TWeakObjectPtr<UTextRenderComponent> Emote;
 		double EmoteRemainingS = 0.0;
 		double CheerRemainingS = 0.0;
+		// Alive pass 2: the furnishing place the figure is in (or walking to),
+		// the one the latest beat chose (taken over once the figure is back on
+		// its feet), and how far into the seat it has settled (0 standing,
+		// 1 seated / lying; sim-paced).
+		FFurnitureSeat Seat;
+		FFurnitureSeat PendingSeat;
+		float SettleAlpha = 0.f;
 	};
 
 public:
@@ -165,6 +191,17 @@ private:
 	// Director 2026-10-16: on the surface, people walk through doorways and
 	// airlocks. Routes a surface walk From -> To into waypoints + acts.
 	void SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const;
+	// Alive pass 2: where a colonist sits or lies on a furnishing piece -
+	// Berth picks the bunk, bench seat or sofa cushion. Activity steers the
+	// clip ("working" at a desk types, "eating" eats, "sleeping" lies).
+	// False when the piece is not drawn yet or has no place for people.
+	bool FurnitureSeatFor(int32 PieceId, int32 Berth, const FString& Activity, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const;
+	// The berth of a sim-assigned bed or work-seat piece a colonist uses:
+	// their rank (by Id) among the colonists the sim gave that same piece.
+	int32 AssignedBerth(int32 ColonistId, int32 PieceId, bool bBed) const;
+	// A free presentation seat in the colonist's home (dining at meals, sofa
+	// and living-room seats off duty) - one nobody else is in or heading to.
+	bool FindHomeSeat(const FRHColonist& C, bool bMeal, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const;
 	// The airlocks this frame (derived from the habitat layout, see RHHabLayout.h).
 	TArray<FRHAirlock> Airlocks;
 

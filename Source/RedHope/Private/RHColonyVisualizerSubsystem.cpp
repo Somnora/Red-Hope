@@ -1633,6 +1633,19 @@ FString URHColonyVisualizerSubsystem::FurniturePropPath(FName Row, float& OutFit
 	return E ? FString(E->Path) : FString();
 }
 
+bool URHColonyVisualizerSubsystem::GetFurnitureFrame(int32 Id, FVector& OutCentreCm, float& OutYawDeg, FVector2D& OutHalfCm) const
+{
+	const FRHFurnVis* Vis = FurnitureVis.Find(Id);
+	if (!Vis || !Vis->Comp.IsValid())
+	{
+		return false;
+	}
+	OutCentreCm = Vis->FrameCm;
+	OutYawDeg = Vis->YawDeg;
+	OutHalfCm = Vis->HalfCm;
+	return true;
+}
+
 void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* Sim)
 {
 	if (!Sim)
@@ -1677,7 +1690,14 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 			const FBoxSphereBounds MB = Mesh->GetBounds();
 			const float S = FitCm > 0.f ? FitCm / FMath::Max(2.f * FMath::Max(MB.BoxExtent.X, MB.BoxExtent.Y), 1.f) : 1.f;
 			const FRotator Yaw(0.f, 90.f * F.Rot, 0.f);
-			const FVector Off = Yaw.RotateVector(FVector(MB.Origin.X, MB.Origin.Y, 0.f) * S);
+			// The code-built pieces are authored front at -Y in Blender, and the
+			// glTF import flips Y (measured 2026-10-16: the chair's back came in
+			// at -Y), so they are drawn a half turn round - otherwise every
+			// chair sat with its back to its table. The reused room props keep
+			// their old fit.
+			const bool bBuiltPiece = Path.StartsWith(TEXT("/Game/RedHope/Art/Furniture/"));
+			const FRotator MeshYaw(0.f, 90.f * F.Rot + (bBuiltPiece ? 180.f : 0.f), 0.f);
+			const FVector Off = MeshYaw.RotateVector(FVector(MB.Origin.X, MB.Origin.Y, 0.f) * S);
 			// Feet on the floor: an underground tile's top is Level x FloorHeight;
 			// a habitat bay's floor tile tops out at its actor + 5 cm
 			// (RefreshHabShells: Base = actor + 3, a 2 cm tile centred at Base + 1).
@@ -1694,9 +1714,12 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 				Pull = Facing * (float)FMath::Max(0.0, Reach);
 			}
 			Comp->SetWorldScale3D(FVector(S));
-			Comp->SetWorldLocationAndRotation(FVector(Centre.X - Off.X + Pull.X, Centre.Y - Off.Y + Pull.Y, FloorZ + Lift - (MB.Origin.Z - MB.BoxExtent.Z) * S), Yaw);
+			Comp->SetWorldLocationAndRotation(FVector(Centre.X - Off.X + Pull.X, Centre.Y - Off.Y + Pull.Y, FloorZ + Lift - (MB.Origin.Z - MB.BoxExtent.Z) * S), MeshYaw);
 			Vis.Comp = Comp;
 			Vis.Sig = Sig;
+			Vis.FrameCm = FVector(Centre.X + Pull.X, Centre.Y + Pull.Y, FloorZ);
+			Vis.YawDeg = 90.f * F.Rot;
+			Vis.HalfCm = FVector2D(MB.BoxExtent.X * S, MB.BoxExtent.Y * S);
 		}
 		FurnitureCompsByCell.FindOrAdd(F.Key).Add(Comp);
 	}

@@ -9,8 +9,16 @@ Clip contract (art bible section 5; names and lengths match what
 scripts/gpu/lane/rig_colonist.py shipped, 24 fps):
   Walk 1-25 (loop)   Idle 1-49   WorkBench 1-25   WorkLab 1-49
   Dig 1-33  Haul 1-33  Charge 1-49  Plant 1-33  Repair 1-33  Operate 1-33
-The game plays Idle / Walk / WorkBench / WorkLab for crew
-(RHCrewVisualizerSubsystem.cpp ~695); the rest complete the contract.
+Alive pass 2 (2026-10-16) adds the furniture and social clips:
+  Sit 1-49  SitWork 1-33  SitEat 1-49  Lie 1-73  Talk 1-49
+The game plays Idle / Walk / WorkBench / WorkLab / Sit* / Lie / Talk for crew
+(RHCrewVisualizerSubsystem.cpp); the rest complete the contract.
+
+SEATED CLIPS keep the pelvis over the Root (the game places the Root at the
+seat): hip 90, knee 90 puts the shins vertical and the feet flat on the floor
+when the pelvis drops by the thigh length. Lie is a STANDING-frame pose (legs
+straight, arms at the sides, slow breath); the game tips the whole walker onto
+its back on the mattress, so gravity is the visualizer's business.
 
 HOW ROTATIONS ARE SPECIFIED. Every key is a rotation about a WORLD axis at the
 rest pose, converted into the bone's own rest frame, so it does not depend on
@@ -97,6 +105,7 @@ class Rig:
             pb.rotation_mode = "QUATERNION"
         b = rig.data.bones
         self.L = ((b["thigh_l"].length + b["calf_l"].length) / 2.0)
+        self.thigh = b["thigh_l"].length
         self.base = self._arm_base()
 
     # rest-frame conversion: world-axis rotation -> bone-local quaternion
@@ -358,6 +367,118 @@ def operate(R):
     return act
 
 
+def _seat_legs(R, splay=0.0):
+    """Hip 90 / knee 90 with the shins vertical: the thigh drop puts the feet
+    on the floor (pelvis drop = thigh length)."""
+    rots = {}
+    for s in R.SIDES:
+        sg = 1.0 if s == "l" else -1.0
+        rots["thigh_" + s] = turn(sg * splay) @ fwd(90.0)
+        rots["calf_" + s] = knee(88.0)
+        rots["foot_" + s] = toes(-2.0)
+    return rots, R.thigh
+
+
+def sit(R):
+    """Seated at rest: hands on the thighs, settled back, slow breath."""
+    act = _action(R.rig, "Sit", 1, 49)
+    for f, t in ((1, 0.0), (13, 0.5), (25, 1.0), (37, 0.5), (49, 0.0)):
+        b = math.sin(math.radians(t * 180.0))
+        legs, drop = _seat_legs(R, 6.0)
+        rots = dict(legs)
+        rots.update({"spine_01": lean(-4.0), "spine_03": lean(-1.0 * b), "neck_01": lean(4.0 + 1.0 * b),
+                     "head": turn(4.0 * math.sin(math.radians(t * 360.0))),
+                     "upperarm_l": fwd(6.0 + 1.0 * b) @ q(AZ, -6.0), "lowerarm_l": inward("l", 14) @ elbow(42.0),
+                     "upperarm_r": fwd(6.0 + 1.0 * b) @ q(AZ, 6.0), "lowerarm_r": inward("r", 14) @ elbow(42.0),
+                     "hand_l": q(AX, 25.0), "hand_r": q(AX, 25.0),
+                     "_grip_l": 25.0, "_grip_r": 25.0})
+        R.pose(f, rots, pelvis_drop=drop + 0.003 * b)
+    return act
+
+
+def sitwork(R):
+    """Seated at a desk: forearms on the keyboard, alternating key taps, a
+    glance up at the screen."""
+    act = _action(R.rig, "SitWork", 1, 33)
+    for f, (tl, tr, g) in ((1, (0, 0, 0)), (9, (1, 0, 0)), (17, (0, 1, 1)), (25, (1, 0, 0)), (33, (0, 0, 0))):
+        legs, drop = _seat_legs(R, 4.0)
+        rots = dict(legs)
+        rots.update({"spine_01": lean(6.0), "spine_02": lean(4.0), "neck_01": lean(2.0), "head": lean(4.0 - 6.0 * g),
+                     "upperarm_l": fwd(30.0), "lowerarm_l": inward("l", 18) @ elbow(72.0 + 6.0 * tl),
+                     "upperarm_r": fwd(30.0), "lowerarm_r": inward("r", 18) @ elbow(72.0 + 6.0 * tr),
+                     "hand_l": q(AX, 6.0 * tl), "hand_r": q(AX, 6.0 * tr),
+                     "_grip_l": 30.0, "_grip_r": 30.0})
+        R.pose(f, rots, pelvis_drop=drop)
+    return act
+
+
+def siteat(R):
+    """Seated at a meal: the left hand holds the bowl low in front (reads at a
+    table and on a lone chair alike), the right hand lifts a fork to the
+    mouth and back down."""
+    act = _action(R.rig, "SitEat", 1, 49)
+    for f, u in ((1, 0.0), (9, 0.0), (17, 1.0), (25, 1.0), (33, 0.0), (49, 0.0)):
+        legs, drop = _seat_legs(R, 5.0)
+        rots = dict(legs)
+        rots.update({"spine_01": lean(5.0), "spine_02": lean(3.0), "head": lean(6.0 - 8.0 * u),
+                     "upperarm_l": fwd(14.0), "lowerarm_l": inward("l", 26) @ elbow(66.0),
+                     "upperarm_r": fwd(18.0 + 10.0 * u) @ q(AZ, 8.0 * u),
+                     "lowerarm_r": inward("r", 16 + 16 * u) @ elbow(62.0 + 70.0 * u),
+                     "_grip_l": 25.0, "_grip_r": 55.0})
+        R.pose(f, rots, pelvis_drop=drop)
+    return act
+
+
+def lie(R):
+    """Asleep on the back: legs out, arms relaxed at the sides, feet fallen
+    open, a slow deep breath (3 s). Keyed in the standing frame - the game
+    lays the walker down."""
+    act = _action(R.rig, "Lie", 1, 73)
+    for f, t in ((1, 0.0), (19, 0.5), (37, 1.0), (55, 0.5), (73, 0.0)):
+        b = math.sin(math.radians(t * 180.0))
+        R.pose(f, {
+            "spine_03": lean(-2.0 * b), "neck_01": lean(8.0), "head": lean(4.0) @ turn(10.0),
+            "clavicle_l": q(AY, -2.0 * b), "clavicle_r": q(AY, 2.0 * b),
+            "upperarm_l": fwd(4.0), "lowerarm_l": elbow(10.0),
+            "upperarm_r": fwd(4.0), "lowerarm_r": elbow(10.0),
+            "thigh_l": turn(4.0) @ fwd(3.0), "thigh_r": turn(-4.0) @ fwd(3.0),
+            "calf_l": knee(5.0), "calf_r": knee(5.0),
+            "foot_l": turn(10.0) @ toes(-38.0), "foot_r": turn(-10.0) @ toes(-38.0),
+            "_grip_l": 35.0, "_grip_r": 35.0,
+        })
+    return act
+
+
+def talk(R):
+    """Standing conversation: the right hand opens out on a point, the head
+    nods, weight shifts - a 2 s loop."""
+    act = _action(R.rig, "Talk", 1, 49)
+    for f, (g, n, w) in ((1, (0.0, 0.0, 0.0)), (9, (1.0, 0.5, 0.3)), (17, (0.6, 1.0, 0.6)),
+                         (25, (0.2, 0.0, 1.0)), (33, (0.8, 0.7, 0.6)), (41, (0.3, 0.2, 0.2)), (49, (0.0, 0.0, 0.0))):
+        R.pose(f, {
+            "spine_03": lean(1.0) @ turn(4.0 * g), "neck_01": lean(2.0 + 3.0 * n), "head": lean(3.0 * n) @ turn(-3.0 * g),
+            "pelvis": tilt(1.5 * (2.0 * w - 1.0)),
+            "upperarm_r": fwd(18.0 + 22.0 * g) @ q(AZ, 14.0 * g),
+            "lowerarm_r": inward("r", 10 + 12 * g) @ elbow(40.0 + 45.0 * g),
+            "hand_r": q(AY, -20.0 * g),
+            "upperarm_l": fwd(8.0 + 6.0 * g), "lowerarm_l": elbow(20.0 + 15.0 * g),
+            "_grip_l": 22.0, "_grip_r": 10.0 + 10.0 * (1.0 - g),
+        }, pelvis_shift=(0.012 * (2.0 * w - 1.0), 0.0))
+    return act
+
+
+def measure_seat(R, act, height_m, log=print):
+    """Seated hip height and the back's depth behind the Root, as fractions of
+    the figure's height - the numbers the visualizer seats and beds people by."""
+    R.rig.animation_data.action = act
+    sc = bpy.context.scene
+    sc.frame_set(1)
+    mw = R.rig.matrix_world
+    hip = (mw @ R.rig.pose.bones["pelvis"].head).z
+    foot = min((mw @ R.rig.pose.bones["ball_" + s].head).z for s in R.SIDES)
+    log("seated pelvis %.3f m (%.3f of height), ball z %.3f" % (hip, hip / height_m, foot))
+
+
 def stride_cm(R, act, height_m):
     """Body travel per Walk cycle implied by the planted foot, scaled to the
     1.8 m height the game normalises every walker to."""
@@ -383,6 +504,8 @@ def author_all(rig, height_m, log=print):
             break
         bpy.data.actions.remove(w)
         swing *= STRIDE_CM_AT_1_8 / max(s, 1.0)
-    acts = [w, idle(R), workbench(R), worklab(R), dig(R), haul(R), charge(R), plant(R), repair(R), operate(R)]
+    acts = [w, idle(R), workbench(R), worklab(R), dig(R), haul(R), charge(R), plant(R), repair(R), operate(R),
+            sit(R), sitwork(R), siteat(R), lie(R), talk(R)]
+    measure_seat(R, acts[10], height_m, log)
     rig.animation_data.action = acts[1]
     return acts

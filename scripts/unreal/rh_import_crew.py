@@ -35,7 +35,8 @@ AT = unreal.AssetToolsHelpers.get_asset_tools()
 FACES = [f for f in os.environ["RH_FACES"].split(",") if f]
 SRC = os.environ["RH_SRC"]
 REPORT = os.environ.get("RH_REPORT", "/tmp/rh_import_crew.txt")
-CLIPS = ["Walk", "Idle", "WorkBench", "WorkLab", "Dig", "Haul", "Charge", "Plant", "Repair", "Operate"]
+CLIPS = ["Walk", "Idle", "WorkBench", "WorkLab", "Dig", "Haul", "Charge", "Plant", "Repair", "Operate",
+         "Sit", "SitWork", "SitEat", "Lie", "Talk"]  # alive pass 2 (2026-10-16)
 MASTER = "/Game/RedHope/Art/M_RH_Character"
 MASKED = "/Game/RedHope/Art/M_RH_CharacterMasked"
 log = []

@@ -61,6 +61,11 @@ public:
 	// Presentation-only; the sim never knows what the camera looks at.
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
+	// Alive pass 2: where a placed furnishing actually stands - its logical
+	// centre (with a seat's pull-up applied) on the floor, its yaw (90 x Rot:
+	// the catalogue's front faces -Y at yaw 0) and the drawn mesh's half
+	// extents along its own X / Y. False until the piece is drawn.
+	bool GetFurnitureFrame(int32 Id, FVector& OutCentreCm, float& OutYawDeg, FVector2D& OutHalfCm) const;
 	// 0 closed .. 1 open: the cab's sliding doors (0 when only the legacy
 	// lattice cage exists). The audio subsystem plays the slide and chime off it.
 	float GetElevatorDoorAlpha() const { return bElevatorIsCab ? ElevatorWakeAlpha : 0.f; }
@@ -222,7 +227,7 @@ private:
 	// or habitat actor (a bay) - floor-cut hiding and lifecycle come free -
 	// reconciled against the sim every tick by signature (row, cell, slot,
 	// rotation); a furnished cell's automatic room-prop hides.
-	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; FString Sig; };
+	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; FString Sig; FVector FrameCm = FVector::ZeroVector; float YawDeg = 0.f; FVector2D HalfCm = FVector2D::ZeroVector; };
 	TMap<int32, FRHFurnVis> FurnitureVis;
 	// BM-6: door leaves in doored doorways (drawn by RefreshHabShells, owned
 	// by the shell), keyed by the wall edge; they part for passing crew.

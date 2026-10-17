@@ -48,6 +48,12 @@ namespace
 		TEXT("rh.WalkerYawOffsetDeg"), -90.f,
 		TEXT("Yaw correction applied to skeletal walker meshes so figures face their travel direction."));
 
+static TAutoConsoleVariable<int32> CVarCrewForceBeat(
+	TEXT("rh.CrewForceBeat"),
+	0,
+	TEXT("DEBUG (captures): force every resident's next beat - 0 natural, 1 sleep, 2 work, 3 eat, 4 relax. Presentation only; the sim never sees it."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarCrewTrueHeight(
 	TEXT("rh.CrewTrueHeight"),
 	1,
@@ -575,6 +581,196 @@ FVector URHCrewVisualizerSubsystem::StationSpotCm(int32 ColonistId, int32 SeatSe
 	return FVector::ZeroVector;
 }
 
+namespace
+{
+	// Seated hip height as a fraction of the walker's height, measured on the
+	// built crew (rh_crew_clips.measure_seat: 0.291 at 1.62 m, 0.302 at 1.88 m),
+	// and the depth of the back behind the Root once a walker lies down.
+	constexpr float SeatedHipK = 0.296f;
+	constexpr float LyingBackCm = 11.f;
+	// Settling into / out of a seat takes ~0.45 s at 1x.
+	constexpr float SettlePerSec = 2.2f;
+
+	FVector FurnLocal(const FVector& Centre, float YawDeg, float X, float Y, float Z)
+	{
+		return Centre + FRotator(0.f, YawDeg, 0.f).RotateVector(FVector(X, Y, 0.f)) + FVector(0.f, 0.f, Z);
+	}
+}
+
+bool URHCrewVisualizerSubsystem::FurnitureSeatFor(int32 PieceId, int32 Berth, const FString& Activity, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	const FRHFurnitureInstance* F = Sim ? Sim->FindFurniture(PieceId) : nullptr;
+	FVector C;
+	float Yaw = 0.f;
+	FVector2D Half;
+	if (!F || !Colony || !Colony->GetFurnitureFrame(PieceId, C, Yaw, Half))
+	{
+		return false;
+	}
+	// Places in the piece's own frame (cm): the catalogue's front faces -Y,
+	// the code-built pieces are measured from scripts/blender/
+	// rh_build_furnishings.py (drawn a half turn round, so their Blender X
+	// reads mirrored), the reused room props from their fitted bounds.
+	Out = FFurnitureSeat();
+	Out.Piece = PieceId;
+	Out.Berth = Berth;
+	const float H = FMath::Clamp(HeightCm, 140.f, 220.f);
+	const float Front = Yaw - 90.f;  // facing out of the piece's front
+	const float Back = Yaw + 90.f;   // facing into it from the front
+	auto Sit = [&](float X, float Y, float SeatTopCm, float FaceYaw, float ApproachY, FName Clip)
+	{
+		Out.Pose = 1;
+		Out.Clip = Clip;
+		Out.YawDeg = FaceYaw;
+		Out.PoseCm = FurnLocal(C, Yaw, X, Y, FMath::Max(0.f, SeatTopCm + 6.f - SeatedHipK * H));
+		Out.ApproachCm = FurnLocal(C, Yaw, X, ApproachY, 0.f);
+		OutFaceYawDeg = FaceYaw;
+	};
+	const FName Seated = Activity == TEXT("eating") ? FName("SitEat") : FName("Sit");
+	const FName Row = F->Row;
+	if (Row == FName("Chair"))
+	{
+		Sit(0.f, 5.f, 50.f, Front, -75.f, Seated);
+	}
+	else if (Row == FName("Bench"))
+	{
+		Sit(Berth == 0 ? -37.f : 37.f, 0.f, 46.f, Front, -70.f, Seated);
+	}
+	else if (Row == FName("Sofa"))
+	{
+		Sit(54.f * (float)(1 - FMath::Clamp(Berth, 0, 2)), 2.f, 41.f, Front, -85.f, Seated);
+	}
+	else if (Row == FName("Desk"))
+	{
+		// Its own chair, tucked in at the front: the sitter faces the desk.
+		Sit(20.f, -35.f, 50.f, Back, -95.f, Activity == TEXT("working") ? FName("SitWork") : Seated);
+	}
+	else if (Row == FName("DiningTable"))
+	{
+		// The table prop carries a bench down each long side: two places a
+		// side, everyone facing across the table.
+		const bool bFar = (Berth & 2) != 0;
+		const float SideY = Half.Y - 20.f;
+		Sit((Berth & 1) ? 50.f : -50.f, bFar ? SideY : -SideY, 48.f, bFar ? Front : Back, bFar ? Half.Y + 55.f : -(Half.Y + 55.f), Seated);
+	}
+	else if (Row == FName("Cot") || Row == FName("BunkBed"))
+	{
+		// On the back, head on the pillow (-X), feet toward +X; a bunk's second
+		// berth is the top one.
+		const float Mattress = Row == FName("BunkBed") ? (Berth == 1 ? 153.f : 53.f) : 55.f;
+		Out.Pose = 2;
+		Out.Clip = FName("Lie");
+		Out.YawDeg = Yaw;
+		Out.PoseCm = FurnLocal(C, Yaw, FMath::Min(92.f, H - 92.f), 0.f, Mattress + LyingBackCm * H / 180.f);
+		Out.ApproachCm = FurnLocal(C, Yaw, 0.f, -(Half.Y + 45.f), 0.f);
+		OutFaceYawDeg = Back;
+	}
+	else if (Row == FName("Workbench") || Row == FName("LabBench"))
+	{
+		// Standing work: a place at the front of the bench, two a bench.
+		Out.Pose = 0;
+		Out.YawDeg = Back;
+		Out.ApproachCm = FurnLocal(C, Yaw, Berth == 0 ? -55.f : 55.f, -(Half.Y + 38.f), 0.f);
+		Out.PoseCm = Out.ApproachCm;
+		OutFaceYawDeg = Back;
+	}
+	else
+	{
+		return false;
+	}
+	return true;
+}
+
+int32 URHCrewVisualizerSubsystem::AssignedBerth(int32 ColonistId, int32 PieceId, bool bBed) const
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	int32 Rank = 0;
+	if (Sim)
+	{
+		for (const FRHColonist& O : Sim->GetColonists())
+		{
+			if (O.Id < ColonistId && (bBed ? Sim->GetColonistBedPiece(O.Id) : Sim->GetColonistSeatPiece(O.Id)) == PieceId)
+			{
+				++Rank;
+			}
+		}
+	}
+	return Rank;
+}
+
+bool URHCrewVisualizerSubsystem::FindHomeSeat(const FRHColonist& C, bool bMeal, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return false;
+	}
+	const int32 HomeRoot = C.HomeHab != 0 ? Sim->GetHabNetworkRoot(C.HomeHab) : 0;
+	// Meals: the dining seats in a Dining room. Off duty: a sofa, or a chair
+	// or bench anywhere that isn't the dining room.
+	TArray<TPair<int32, int32>> Places; // piece, berth - piece Id order
+	for (const FRHFurnitureInstance& F : Sim->GetFurniture())
+	{
+		const bool bHome = C.HomeHab != 0 ? (F.Key.X == 0 && F.Key.Z != 0 && Sim->GetHabNetworkRoot(F.Key.Z) == HomeRoot)
+			: (F.Key.Z == 0 && F.Key.X == C.HomeLevel);
+		const FRHFurnitureRow* Row = bHome ? Defs->GetFurniture(F.Row) : nullptr;
+		if (!Row)
+		{
+			continue;
+		}
+		const bool bDiningRoom = Sim->GetCellRoom(F.Key) == FName("Dining");
+		int32 Berths = 0;
+		if (bMeal)
+		{
+			Berths = (Row->Provides == FName("DiningSeat") && bDiningRoom) ? Row->Capacity : 0;
+		}
+		else if (F.Row == FName("Sofa"))
+		{
+			Berths = 3;
+		}
+		else if (Row->Provides == FName("DiningSeat") && !bDiningRoom && F.Row != FName("DiningTable"))
+		{
+			Berths = Row->Capacity;
+		}
+		for (int32 k = 0; k < Berths; ++k)
+		{
+			Places.Emplace(F.Id, k);
+		}
+	}
+	if (Places.Num() == 0)
+	{
+		return false;
+	}
+	// Start at a place keyed by the colonist (a habit, not a scramble) and
+	// take the first one nobody else is in or heading to.
+	const int32 Start = (C.Id * 7) % Places.Num();
+	for (int32 i = 0; i < Places.Num(); ++i)
+	{
+		const TPair<int32, int32>& P = Places[(Start + i) % Places.Num()];
+		bool bTaken = false;
+		for (const auto& T : Tracked)
+		{
+			if (T.Key != C.Id && ((T.Value.Seat.Piece == P.Key && T.Value.Seat.Berth == P.Value)
+				|| (T.Value.PendingSeat.Piece == P.Key && T.Value.PendingSeat.Berth == P.Value)))
+			{
+				bTaken = true;
+				break;
+			}
+		}
+		if (!bTaken && FurnitureSeatFor(P.Key, P.Value, bMeal ? TEXT("eating") : TEXT("relaxing"), HeightCm, Out, OutFaceYawDeg))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void URHCrewVisualizerSubsystem::SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const
 {
 	// Inside one habitat network: bay to bay through the doorways. Between
@@ -741,6 +937,12 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	// below. The surface shaft head has no cab, so it keeps the plain vanish.
 	// The airlocks this frame (doorway/airlock routing on the surface).
 	RHHabLayout::GatherAirlocks(Sim, World->GetSubsystem<URHDefinitionsSubsystem>(), Airlocks);
+	auto WalkerHeightCm = [](const FCrewVisual& V) -> float
+	{
+		const USkeletalMeshComponent* K = V.SkelBody.Get();
+		const USkeletalMesh* M = K ? K->GetSkeletalMeshAsset() : nullptr;
+		return M ? 2.f * (float)M->GetBounds().BoxExtent.Z * (float)K->GetRelativeScale3D().Z : 180.f;
+	};
 	auto WalkTo = [&](FCrewVisual& V, const FVector& From, const FVector& To, int32 Level)
 	{
 		V.Waypoints.Reset();
@@ -786,6 +988,9 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		const double Z = Level * Sim->GetFloorHeightCm();
 		V.CurLevel = Level;
 		V.Phase = EPhase::Alighting;
+		V.Seat = FFurnitureSeat();
+		V.PendingSeat = FFurnitureSeat();
+		V.SettleAlpha = 0.f;
 		V.Waypoints.Reset();
 		V.WaypointActs.Reset();
 		V.TargetAct = 0;
@@ -900,7 +1105,30 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		const FVector Flat(Vis->TargetCm.X, Vis->TargetCm.Y, Pos.Z);
 		const float Step = WalkCmPerSec * Pace * DeltaTime;
 		const bool bWalking = FVector::Dist2D(Pos, Flat) > Step;
-		if (bWalking)
+		// Alive pass 2: seated or lying, a figure gets back on its feet before
+		// it walks anywhere; standing at its place, it settles in.
+		const bool bSeatHold = bWalking && Vis->SettleAlpha > 0.f;
+		const bool bStepping = bWalking && !bSeatHold;
+		if (bSeatHold)
+		{
+			if (Pace > 0.f)
+			{
+				Vis->SettleAlpha = FMath::Max(0.f, Vis->SettleAlpha - DeltaTime * Pace * SettlePerSec);
+				if (Vis->SettleAlpha <= 0.f)
+				{
+					Vis->Seat = Vis->PendingSeat;
+				}
+			}
+		}
+		else if (!bWalking && Vis->Seat.Pose != 0 && Vis->Waypoints.Num() == 0 && Vis->Phase == EPhase::Resident
+			&& FVector::Dist2D(Pos, Vis->Seat.ApproachCm) < 30.f)
+		{
+			if (Pace > 0.f)
+			{
+				Vis->SettleAlpha = FMath::Min(1.f, Vis->SettleAlpha + DeltaTime * Pace * SettlePerSec);
+			}
+		}
+		if (bStepping)
 		{
 			FVector Dir = (Flat - Pos).GetSafeNormal2D();
 			// Steer around furniture on EVERY walk (director 2026-08-18:
@@ -993,9 +1221,31 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 			// Mesh-forward correction rides the component's relative yaw
 			// (actor rotation stays the pure travel direction).
-			Skel->SetRelativeRotation(FRotator(0.f, CVarWalkerYawOffsetDeg.GetValueOnGameThread(), 0.f));
+			const float YawOff = CVarWalkerYawOffsetDeg.GetValueOnGameThread();
+			const float Settle = Vis->Seat.Pose != 0 ? FMath::SmoothStep(0.f, 1.f, Vis->SettleAlpha) : 0.f;
+			if (Settle > 0.f)
+			{
+				// Seated / lying: the walker leaves its feet-on-the-floor frame
+				// for the place on the furnishing - a blend from standing at the
+				// approach point into the pose. Lying tips it onto its back
+				// (pitch the walker's up axis along -Yaw, its face to the sky).
+				const FQuat Stand = Actor->GetActorQuat() * FQuat(FRotator(0.f, YawOff, 0.f));
+				const FQuat Place = Vis->Seat.Pose == 2
+					? FQuat(FRotator(0.f, Vis->Seat.YawDeg, 0.f)) * FQuat(FRotator(90.f, 0.f, 0.f)) * FQuat(FRotator(0.f, YawOff, 0.f))
+					: FQuat(FRotator(0.f, Vis->Seat.YawDeg + YawOff, 0.f));
+				Skel->SetWorldLocationAndRotation(FMath::Lerp(Actor->GetActorLocation(), Vis->Seat.PoseCm, Settle),
+					FQuat::Slerp(Stand, Place, Settle));
+			}
+			else
+			{
+				Skel->SetRelativeLocationAndRotation(FVector::ZeroVector, FRotator(0.f, YawOff, 0.f));
+			}
 			FName WantClip = TEXT("Idle");
-			if (bWalking)
+			if (Settle > 0.35f)
+			{
+				WantClip = Vis->Seat.Clip; // already sitting / lying down
+			}
+			else if (bStepping)
 			{
 				WantClip = TEXT("Walk");
 			}
@@ -1019,7 +1269,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			// idle clips are not locomotion and keep rate 1 (still frozen on
 			// pause, which is what Pace == 0 means).
 			float RateScale = 1.f;
-			if (bWalking)
+			if (bStepping && WantClip == FName("Walk"))
 			{
 				// The clip's stride was tuned at 1.8 m; at true height it scales
 				// with the figure, or short crew would moonwalk.
@@ -1144,6 +1394,11 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				}
 				break;
 			case EPhase::Resident:
+				Vis->PendingSeat = FFurnitureSeat(); // a beat away from furniture leaves the seat empty
+				if (Vis->SettleAlpha <= 0.f)
+				{
+					Vis->Seat = FFurnitureSeat();
+				}
 				if (FMath::FRand() < StrollChance && Sim->GetShaftDepth() > 0)
 				{
 					// Take air: ride up to the shaft head, wander out a bit.
@@ -1175,45 +1430,113 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 					Vis->bFaceOnArrive = false;
 					float FaceYaw = 0.f;
 					const float SolFrac = Clock->GetSolFraction();
-					const bool bNight = SolFrac < 0.25f || SolFrac > 0.75f; // sun below the horizon (atmosphere mapping)
+					const int32 Force = CVarCrewForceBeat.GetValueOnGameThread();
+					const bool bNight = Force == 1 || (Force == 0 && (SolFrac < 0.25f || SolFrac > 0.75f)); // sun below the horizon (atmosphere mapping)
 					const FName Job = Sim->GetColonistJob(C.Id);
+					// Alive pass 2: a beat at a furnishing sends the figure to
+					// its real place on it - the bed the sim gave them, their
+					// desk's chair, a free seat at the dining table - instead
+					// of the ring around the room's centre.
+					FFurnitureSeat NewSeat;
+					const float HeightCm = WalkerHeightCm(*Vis);
+					auto TakeSeat = [&](const FFurnitureSeat& S, float SeatFace, const TCHAR* Act)
+					{
+						NewSeat = S;
+						Target = S.ApproachCm;
+						Vis->Activity = Act;
+						Vis->PostFaceYawDeg = SeatFace;
+						Vis->bFaceOnArrive = true;
+					};
 					if (bNight)
 					{
-						const FVector Bunk = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("LivingQuarters"), C.Id, &FaceYaw)
-							: RoomSeatCm(Vis->HomeLevel, FName("LivingQuarters"), C.Id, &FaceYaw);
-						if (!Bunk.IsNearlyZero())
+						const int32 Bed = Sim->GetColonistBedPiece(C.Id);
+						FFurnitureSeat S;
+						if (Bed != 0 && FurnitureSeatFor(Bed, AssignedBerth(C.Id, Bed, true), TEXT("sleeping"), HeightCm, S, FaceYaw))
 						{
-							Target = Bunk;
-							Vis->Activity = TEXT("sleeping");
-							Vis->PostFaceYawDeg = FaceYaw;
-							Vis->bFaceOnArrive = true;
+							TakeSeat(S, FaceYaw, TEXT("sleeping"));
+						}
+						else
+						{
+							const FVector Bunk = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("LivingQuarters"), C.Id, &FaceYaw)
+								: RoomSeatCm(Vis->HomeLevel, FName("LivingQuarters"), C.Id, &FaceYaw);
+							if (!Bunk.IsNearlyZero())
+							{
+								Target = Bunk;
+								Vis->Activity = TEXT("sleeping");
+								Vis->PostFaceYawDeg = FaceYaw;
+								Vis->bFaceOnArrive = true;
+							}
 						}
 					}
-					else if (!Job.IsNone() && FMath::FRand() < 0.85f)
+					else if (!Job.IsNone() && (Force == 2 || (Force == 0 && FMath::FRand() < 0.85f)))
 					{
-						const FVector Post = C.HomeHab != 0 ? StationSpotCm(C.Id, C.Id, &FaceYaw)
-							: JobPointCm(Vis->HomeLevel, Job, C.Id, &FaceYaw);
-						if (!Post.IsNearlyZero())
+						const int32 Piece = Sim->GetColonistSeatPiece(C.Id);
+						FFurnitureSeat S;
+						if (Piece != 0 && FurnitureSeatFor(Piece, AssignedBerth(C.Id, Piece, false), TEXT("working"), HeightCm, S, FaceYaw))
 						{
-							Target = Post;
-							Vis->Activity = TEXT("working");
-							Vis->PostFaceYawDeg = FaceYaw;
-							Vis->bFaceOnArrive = true;
+							TakeSeat(S, FaceYaw, TEXT("working"));
+						}
+						else
+						{
+							const FVector Post = C.HomeHab != 0 ? StationSpotCm(C.Id, C.Id, &FaceYaw)
+								: JobPointCm(Vis->HomeLevel, Job, C.Id, &FaceYaw);
+							if (!Post.IsNearlyZero())
+							{
+								Target = Post;
+								Vis->Activity = TEXT("working");
+								Vis->PostFaceYawDeg = FaceYaw;
+								Vis->bFaceOnArrive = true;
+							}
 						}
 					}
-					else if (FMath::FRand() < 0.25f)
+					else if (Force == 3 || (Force == 0 && FMath::FRand() < 0.25f))
 					{
-						const FVector Seat = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("Dining"), C.Id, &FaceYaw)
-							: RoomSeatCm(Vis->HomeLevel, FName("Dining"), C.Id, &FaceYaw);
-						if (!Seat.IsNearlyZero())
+						FFurnitureSeat S;
+						if (FindHomeSeat(C, /*bMeal*/ true, HeightCm, S, FaceYaw))
 						{
-							Target = Seat;
-							Vis->Activity = TEXT("eating");
-							Vis->PostFaceYawDeg = FaceYaw;
-							Vis->bFaceOnArrive = true;
+							TakeSeat(S, FaceYaw, TEXT("eating"));
+						}
+						else
+						{
+							const FVector Seat = C.HomeHab != 0 ? HabSpotCm(C.HomeHab, FName("Dining"), C.Id, &FaceYaw)
+								: RoomSeatCm(Vis->HomeLevel, FName("Dining"), C.Id, &FaceYaw);
+							if (!Seat.IsNearlyZero())
+							{
+								Target = Seat;
+								Vis->Activity = TEXT("eating");
+								Vis->PostFaceYawDeg = FaceYaw;
+								Vis->bFaceOnArrive = true;
+							}
 						}
 					}
-					WalkTo(*Vis, Flat, Target, Vis->CurLevel);
+					else if (Force == 4 || (Force == 0 && FMath::FRand() < 0.4f))
+					{
+						FFurnitureSeat S;
+						if (FindHomeSeat(C, /*bMeal*/ false, HeightCm, S, FaceYaw))
+						{
+							TakeSeat(S, FaceYaw, TEXT("relaxing"));
+						}
+					}
+					if (Force != 0)
+					{
+						const USkeletalMeshComponent* K = Vis->SkelBody.Get();
+						UE_LOG(LogRedHope, Display, TEXT("[CrewBeat] #%d %s: %s -> piece %d berth %d pose %d clip %s (bed piece %d, seat piece %d, job %s) at %s level %d, body %s, settled %.2f, approach %s pose %s"),
+							C.Id, *C.Name, *Vis->Activity, NewSeat.Piece, NewSeat.Berth, NewSeat.Pose, *NewSeat.Clip.ToString(),
+							Sim->GetColonistBedPiece(C.Id), Sim->GetColonistSeatPiece(C.Id), *Job.ToString(),
+							*Actor->GetActorLocation().ToCompactString(), Vis->CurLevel, K ? *K->GetComponentLocation().ToCompactString() : TEXT("-"),
+							Vis->SettleAlpha, *NewSeat.ApproachCm.ToCompactString(), *NewSeat.PoseCm.ToCompactString());
+					}
+					// Settled in this same place already: stay put (a sleeper
+					// re-deciding "sleeping" doesn't get up and lie down again).
+					Vis->PendingSeat = NewSeat;
+					if (Vis->SettleAlpha <= 0.f || NewSeat.Pose == 0 || !NewSeat.SameAs(Vis->Seat))
+					{
+						if (Vis->SettleAlpha <= 0.f)
+						{
+							Vis->Seat = NewSeat; // already on their feet: no stand-up to wait for
+						}
+						WalkTo(*Vis, Flat, Target, Vis->CurLevel);
+					}
 					Vis->NextDecideRealSeconds = Now + FMath::FRandRange(4.0, 12.0);
 				}
 				break;
