@@ -480,7 +480,10 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
    spawn, `8b52734`); elevator boarding; the interface panels, build cards and opening shot; the guide's
    wording; and the **listening test** for the sound and score (verified only
    with the speakers muted; a 40 s preview mix was sent separately).
-   `docs/qa-boot-card.md` is still dated 2026-08-18 and predates all of this.
+   `docs/qa-boot-card.md` was rewritten for this on 2026-10-17 (against
+   `480bda5`): one sandbox preset per area (`rh_sandbox.sh build | crew |
+   surface`, `SOUND=1` for the listening test), what to try by hand, what
+   good looks like, the frames already shot, and the verdicts wanted.
 
 2. **Director decisions from the playtest** (`docs/qa/2026-10-15/playtest.md`):
    - **The supply line ends at sol ~10.** Two quotas make the crew ship the
@@ -515,14 +518,10 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
    modules count toward Hope's Rooms term (they don't today), Q10 the new
    placeholder numbers.
 
-5. **Build mode (next, the director's ask of 10-15).** Sims-style habitats
-   above and below ground from collected materials: surface hab modules that
-   snap together and connect to the underground, walls derived from rooms
-   with placeable windows and doors, a furniture catalogue (beds, seats,
-   desks) with real sim meaning, demolition. A gate plan (BM-1 to BM-6) and
-   six decisions are with the director. Both 07-10 specs are now built (agri
-   Gate C, tiered production). Crop activation (`RH.ActivateCrop all` or the
-   CSV flag) is still a director gate flip - and one of the playtest's
+5. **Build mode: built (BM-1 to BM-6 and the BM-1b prefab, 10-16), owed a
+   hand-play** (§4.1, the boot card's §1). Both 07-10 specs are also built
+   (agri Gate C, tiered production). Crop activation (`RH.ActivateCrop all` or
+   the CSV flag) is still a director gate flip - and one of the playtest's
    candidate answers to the supply-line problem.
 
 6. **The game around the game.** Menus and a packaged Mac build exist
@@ -579,8 +578,9 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
   captures prove 0 material failures and what is on screen; "does it read" and
   "does it sound right" are the director's (§4.1).
 - **The written history has drifted.** `docs/build-log.md` and
-  `docs/design-decisions.md` were last touched 2026-07-09; `docs/qa-boot-card.md`
-  2026-08-18. Since then the commit messages are the record, and the 10-13
+  `docs/design-decisions.md` lagged from 07-09 to October (the decision log is
+  current again from the 10-15 build-mode ruling on, and the boot card was
+  rewritten 10-17). Between those dates the commit messages are the record, and the 10-13
   triage verdicts exist only in commit messages (no triage note in `docs/`).
 - **No hard fail-state decision** (brief open question #5): Collapse is a
   recoverable, prevention-framed empty-colony state, not a "you lost" screen.
