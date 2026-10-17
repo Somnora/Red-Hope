@@ -107,8 +107,16 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   before walking off. A facing bug was fixed on the way: the code-built
   furniture came in from glTF back to front, so every chair had faced away from
   its table. `rh.CrewForceBeat` forces beats for captures. Sheet:
-  `docs/media/alive-furniture.jpg`. **Not yet seen:** a surface-habitat
-  resident using furniture.
+  `docs/media/alive-furniture.jpg`. Surface-habitat residents were
+  captured on 2026-10-16 (RH.HabDemo, furnished bays, 10 colonists added):
+  they sleep in the hab's cots and bunk (both berths), eat at its dining
+  table and chairs, and sit on the lounge bench and sofa
+  (`docs/media/alive-surface-hab.jpg`). **Gap found:** a Living bay furnished
+  without beds (a lounge) still counts its 2 legacy beds in the sim, but its
+  automatic bed props are hidden once any furniture is placed. A colonist
+  housed on such a bed has no bed piece and stands at the old fallback spot at
+  night. This needs a director call: show the legacy beds, or stop a
+  bedless Living bay from housing anyone.
 - **2b, conversations and personal space** (`9bf87a8`). Crew moments get body
   language: a pastime is a face-to-face Talk; a join-in has the helper work
   alongside. A dispute is a still face-off under the amber plate, and the Talk
