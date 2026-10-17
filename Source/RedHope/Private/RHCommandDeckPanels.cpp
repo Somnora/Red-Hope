@@ -299,15 +299,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildVitalsStrip()
 				MakeAttributeLambda([this]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
-					const double Draw = S ? S->GetPopulation() * S->GetColonistFoodKgPerSol() : 0.0;
-					const double Sols = Draw > 0.0 ? S->GetStock(FName("Food")) / Draw : 99.0;
-					return FSlateColor(Sols < 5.0 ? D::Red : (Sols < 10.0 ? D::Amber : D::Text));
+					const double Sols = S ? S->GetFoodRunwaySols() : 99.0;
+					// Amber starts exactly where the Hope line does (D4a).
+					return FSlateColor(Sols < 5.0 ? D::Red : (S && Sols < S->GetFoodRunwayFloorSols() ? D::Amber : D::Text));
 				}),
 				MakeAttributeLambda([this]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
 					const double Draw = S ? S->GetPopulation() * S->GetColonistFoodKgPerSol() : 0.0;
-					return Txt(Draw > 0.0 ? FString::Printf(TEXT("~%.0f sols left"), S->GetStock(FName("Food")) / Draw) : FString());
+					return Txt(Draw > 0.0 ? FString::Printf(TEXT("~%.0f sols left"), S->GetFoodRunwaySols()) : FString());
 				}),
 				MakeAttributeLambda(HasCrew))
 		]
@@ -677,6 +677,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			if (S->GetWaterPotability() < S->GetWaterPotabilityFloor())
 			{
 				Parts.Add(FString::Printf(TEXT("Water is only %.0f%% drinkable."), S->GetWaterPotability() * 100.0));
+			}
+			if (H.FoodPenalty > 0.0)
+			{
+				// D4a, Gate-D framing PLACEHOLDER. Same floor as the FOOD RUNNING LOW alert.
+				const int32 FoodSols = FMath::Max(1, FMath::FloorToInt(S->GetFoodRunwaySols()));
+				const double FoodNet = S->GetProducingCellCount() * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
+				Parts.Add(S->GetPlantedCellCount() > 0 && FoodNet >= 0.0
+					? FString::Printf(TEXT("Food: about %d sol%s in store - the garden is refilling it."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s"))
+					: FString::Printf(TEXT("Food: about %d sol%s in store - running short weighs on the crew. Grow more: zone Gardening Station cells."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s")));
 			}
 			if (S->GetPlantedCellCount() > 0)
 			{

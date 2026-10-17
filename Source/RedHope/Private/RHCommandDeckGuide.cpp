@@ -362,7 +362,7 @@ namespace
 				{
 					const int32 Pop = C.Sim->GetPopulation();
 					const double Draw = Pop * C.Sim->GetColonistFoodKgPerSol();
-					const double Runway = Draw > 0.0 ? C.Sim->GetStock(FName("Food")) / Draw : 1.0e9;
+					const double Runway = C.Sim->GetFoodRunwaySols();
 					const double Grown = C.Sim->GetProducingCellCount() * C.Sim->GetGardenFoodKgPerSolPerCell();
 					if (Pop > 0 && Grown < Draw && Runway < 40.0)
 					{
@@ -389,9 +389,34 @@ namespace
 	// apply" - and every interrupt is Done when nothing the player could do
 	// would resolve it, so it can never get stuck on (the chain comes back).
 	// Ice: GetIceExpansionStage() is the same pure read the -icelow suite pins.
+	// Food (D4a) ranks first: a larder under the Hope line's floor is the
+	// nearest clock, and an ice interrupt would otherwise hide the chain's
+	// "Keep them well" food warning. The Done predicates compare a stage or a
+	// runway, never an array index, so ranking is free to change.
 	const TArray<FGuideStep>& Interrupts()
 	{
 		static const TArray<FGuideStep> S = {
+			// Gate-D framing placeholder (D4a): prevention-framed, names the fix.
+			// Nothing lights: the Gardening Station is a zone, not a build card.
+			{ TEXT("FOOD"), TEXT("Grow more food"),
+				[](const FGuideCtx& C)
+				{
+					const double Runway = C.Sim->GetFoodRunwaySols();
+					const int32 N = FMath::Max(1, FMath::FloorToInt(Runway)); // same rounding as the alert
+					const double Draw = C.Sim->GetPopulation() * C.Sim->GetColonistFoodKgPerSol();
+					const double Grown = C.Sim->GetProducingCellCount() * C.Sim->GetGardenFoodKgPerSolPerCell();
+					if (C.Sim->GetPlantedCellCount() > 0 && Grown >= Draw)
+					{
+						return FString::Printf(TEXT("Food in store is down to about %d sol%s at today's draw, but the garden grows %.1f kg a sol against %.1f eaten - it is refilling. Keep the grow-lights powered."),
+							N, N == 1 ? TEXT("") : TEXT("s"), Grown, Draw);
+					}
+					return C.Sim->GetPlantedCellCount() > 0
+						? FString::Printf(TEXT("Food runs out in about %d sol%s at today's draw. Grow more: zone more Gardening Station cells, and keep the grow-lights powered."), N, N == 1 ? TEXT("") : TEXT("s"))
+						: FString::Printf(TEXT("Food runs out in about %d sol%s at today's draw and nothing is growing. Grow more: zone a Gardening Station - it plants itself from Earth Soil and Seeds in store, which only come by supply ship."), N, N == 1 ? TEXT("") : TEXT("s"));
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetPopulation() == 0 || C.Sim->GetFoodRunwaySols() >= C.Sim->GetFoodRunwayFloorSols(); },
+				[](const FGuideCtx& C) { return (float)FMath::Clamp(C.Sim->GetFoodRunwaySols() / FMath::Max(1.0, C.Sim->GetFoodRunwayFloorSols()), 0.0, 1.0); },
+				NAME_None, NAME_None },
 			{ TEXT("WATER"), TEXT("Find more ice"),
 				[](const FGuideCtx& C)
 				{

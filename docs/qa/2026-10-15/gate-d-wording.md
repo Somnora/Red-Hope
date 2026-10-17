@@ -153,6 +153,21 @@ Added with gate D2a (`docs/qa/2026-10-17/crew-phase-brief.md`). Every row is a *
 | D96 | Known Ground list, status column · DECK | `  LOW` after the tonnage when the ice deposit is low | PLACEHOLDER. | keep pending review |
 | D97 | Guide step, a healthy ice deposit is drilled but no finished Water Plant stands near it · GUIDE STEP 4 | Title `Melt it where you drill it`. Body `%s's ice is a long haul from the Water Plant. BUILD > Production > Water Plant beside the new drill, inside the grid - water is shared colony-wide, so it melts where it is drilled.` | PLACEHOLDER. Same `WATER` stage label as D89. | keep pending review |
 
+## 9. Food running low (D4a, added 2026-10-17)
+
+All rows are PLACEHOLDER pending this review. Each is prevention-framed and names the fix: no hunger or starvation imagery, only the store and what to do about it.
+
+| ID | Where | Current | Concern | Proposed |
+|---|---|---|---|---|
+| D98 | Alert banner, once per larder episode, when the food runway at today's draw falls under 10 sols (re-arms past 15) · SIM `StepPopulation` | `FOOD RUNNING LOW — about %d sol(s) left at today's draw. Grow more: zone Gardening Station cells and keep their lights powered (Earth Soil and Seeds come by supply ship).` The sols are floored, at least 1; "sol"/"sols" is chosen in code. Silent on a step where someone already failed the food draw (LIFE SUPPORT, D1, owns the banner). | PLACEHOLDER. Names the fix first. Until the supply-ship gate lands, a colony past the two-rung ladder has no next ship, so "by supply ship" is only half true. | keep pending review |
+| D99 | Crew panel, "What is moving Hope" prose, while the food line costs Hope and the garden is not out-growing the crew · PANELS | `Food: about %d sol(s) in store - running short weighs on the crew. Grow more: zone Gardening Station cells.` Same floored sols as D98. | PLACEHOLDER. "weighs on the crew" is the prevention-framed way to say Hope is lower. | keep pending review |
+| D100 | Same prose, while the food line costs Hope but the garden grows at least what is eaten · PANELS | `Food: about %d sol(s) in store - the garden is refilling it.` | PLACEHOLDER. Tells the player the problem is already being solved; the line stays until the store is back over 10 sols. | keep pending review |
+| D101 | Guide panel header while the food step is up · GUIDE | `NEXT STEP  -  FOOD`, with the `n / N` counter blank | PLACEHOLDER. A new stage label, ranked above the WATER ones. | keep pending review |
+| D102 | Guide step, runway under 10 sols and nothing planted · GUIDE | Title `Grow more food`. Body `Food runs out in about %d sol(s) at today's draw and nothing is growing. Grow more: zone a Gardening Station - it plants itself from Earth Soil and Seeds in store, which only come by supply ship.` | PLACEHOLDER. "Food runs out" is a plain supply fact, as in the existing "Keep them well" text. | keep pending review |
+| D103 | Guide step, runway under 10 sols with a garden that is not keeping up · GUIDE | `Food runs out in about %d sol(s) at today's draw. Grow more: zone more Gardening Station cells, and keep the grow-lights powered.` | PLACEHOLDER. | keep pending review |
+| D104 | Guide step, runway under 10 sols with a garden that out-grows the crew · GUIDE | `Food in store is down to about %d sol(s) at today's draw, but the garden grows %.1f kg a sol against %.1f eaten - it is refilling. Keep the grow-lights powered.` | PLACEHOLDER. | keep pending review |
+| D105 | Toast when the food step resolves · GUIDE | `Done: Grow more food` (the existing format) | PLACEHOLDER. Also shown when the step clears because the crew is gone. | keep pending review |
+
 ## Patterns to adopt game-wide
 
 1. **One recall vocabulary.** People are *recalled* and *safe in orbit*. They are never evacuated, returned, lost or failed. Every line must read right for a Mars-born child, who has never been to orbit and whose home is Mars.

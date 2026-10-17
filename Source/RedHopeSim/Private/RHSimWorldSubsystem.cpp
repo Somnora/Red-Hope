@@ -149,6 +149,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	WaterPotabilityRestorePerKg = Defs->GetConfigScalar(FName("WaterPotabilityRestorePerKg"), WaterPotabilityRestorePerKg);
 	WaterPotabilityFloor = Defs->GetConfigScalar(FName("WaterPotabilityFloor"), WaterPotabilityFloor);
 	HopeWaterPenalty = Defs->GetConfigScalar(FName("HopeWaterPenalty"), HopeWaterPenalty);
+	HopeFoodPenalty = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeFoodPenalty"), HopeFoodPenalty));
+	FoodRunwayFloorSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("FoodRunwayFloorSols"), FoodRunwayFloorSols));
+	FoodRunwayRearmSols = FMath::Max(FoodRunwayFloorSols, Defs->GetConfigScalar(FName("FoodRunwayRearmSols"), FoodRunwayRearmSols)); // hysteresis is never negative
 	IceLowAlertFraction = Defs->GetConfigScalar(FName("IceLowAlertFraction"), IceLowAlertFraction);
 	IceWaterPlantNear_m = Defs->GetConfigScalar(FName("IceWaterPlantNear_m"), IceWaterPlantNear_m);
 	ConstructionMaterials.Reset();
@@ -3274,6 +3277,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	if (Colonists.Num() == 0)
 	{
 		ComfortsSupplied = 0;
+		bFoodLowAnnounced = false; // no crew, no larder episode (D4a; runtime only)
 		FreshWaterThisStepKg = 0.0; // no consumer to fold it into potability
 		// Ending resolution (v25): a colony that HAD people and lost them all
 		// declares Collapse - once, loudly, and with the recovery path named
@@ -3295,6 +3299,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 
 	int32 SuppliedThisStep = 0;
 	double WaterDrawnThisStep = 0.0; // for greywater reclaim + potability
+	bool bAnyHungry = false; // D4a: someone failed the food draw this step
 	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
 	{
 		FRHColonist& C = Colonists[i];
@@ -3350,6 +3355,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			AddStock(NFood, -NeedFood);
 			bFed = true;
 		}
+		bAnyHungry |= !bFed;
 
 		// Drink: pooled Water (M2 Gate D+ water loop). Part of the support
 		// contract - no water is as fatal as no air/food (the ice-cap imperative).
@@ -3445,6 +3451,29 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	else if (WaterPotability >= WaterPotabilityFloor)
 	{
 		bWaterQualityAnnounced = false;
+	}
+
+	// Food runway edge (D4a): one alert per episode as the larder drops under the
+	// floor at today's draw; it re-arms only past FoodRunwayRearmSols (hysteresis,
+	// so a break-even garden never repeats it). Runtime-only and changes no sim
+	// state, so it is band-safe by construction. If someone already went hungry
+	// this step, LIFE SUPPORT ('food stores empty') owns the banner, so the
+	// episode latches silently. Gate-D framing: placeholder wording.
+	const double FoodRunway = GetFoodRunwaySols();
+	if (FoodRunway < FoodRunwayFloorSols && !bFoodLowAnnounced)
+	{
+		bFoodLowAnnounced = true;
+		if (!bAnyHungry)
+		{
+			const int32 N = FMath::Max(1, FMath::FloorToInt(FoodRunway)); // never overstate
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("FOOD RUNNING LOW — about %d sol%s left at today's draw. Grow more: zone Gardening Station cells and keep their lights powered (Earth Soil and Seeds come by supply ship)."),
+				N, N == 1 ? TEXT("") : TEXT("s")));
+		}
+	}
+	else if (FoodRunway >= FoodRunwayRearmSols)
+	{
+		bFoodLowAnnounced = false;
 	}
 
 	// Crew life (alive pass): the moments generator rides the population step -
@@ -3999,6 +4028,12 @@ int32 URHSimWorldSubsystem::FindCarvedCellAt(int32 Level, const FVector& Locatio
 	return INDEX_NONE;
 }
 
+double URHSimWorldSubsystem::GetFoodRunwaySols() const
+{
+	const double Draw = Colonists.Num() * ColonistFoodKgPerSol;
+	return Draw > 0.0 ? GetStock(FName("Food")) / Draw : 1.0e9;
+}
+
 URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() const
 {
 	// Pure derived read (approved M0 decision: Hope is an index, never a
@@ -4269,6 +4304,19 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	{
 		Out.WaterPenalty = HopeWaterPenalty * (WaterPotabilityFloor - WaterPotability) / WaterPotabilityFloor;
 	}
+	// Food runway (D4a): a larder under FoodRunwayFloorSols at today's draw weighs
+	// on the crew - linear from 0 at the floor to HopeFoodPenalty at an empty store
+	// (the water line's shape; a soft cap, never accelerating). Gross stock / draw,
+	// so the value is a pure function of a linearly integrated stock: same parity
+	// class as WaterPenalty.
+	if (Pop > 0 && FoodRunwayFloorSols > 0.0)
+	{
+		const double Runway = GetFoodRunwaySols();
+		if (Runway < FoodRunwayFloorSols)
+		{
+			Out.FoodPenalty = HopeFoodPenalty * (FoodRunwayFloorSols - FMath::Max(0.0, Runway)) / FoodRunwayFloorSols;
+		}
+	}
 	// Solidarity (M3 Gate C): the fading morale shock from the last Dilemma
 	// choice (signed - lifts after Defy, weighs after Comply). Only meaningful
 	// once there's a crew to feel it.
@@ -4282,7 +4330,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	}
 	Out.Total = FMath::Clamp(
 		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity
-		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.CrisisPenalty, 0.0, 100.0);
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty, 0.0, 100.0);
 	return Out;
 }
 
@@ -9776,6 +9824,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			IceLowAnnounced.Add(D.Id);
 		}
 	}
+	// D4a: a save loaded inside a food episode must not re-announce it (already below = latched).
+	bFoodLowAnnounced = Colonists.Num() > 0 && GetFoodRunwaySols() < FoodRunwayFloorSols;
 
 	OnColonyReloaded.Broadcast();
 	if (Respawned.Num() > 0)

@@ -478,14 +478,15 @@ public:
 	FName GetColonistJob(int32 ColonistId) const { const FName* J = ColonistJobs.Find(ColonistId); return J ? *J : NAME_None; }
 	// The Hope index (brief §5), Gate-B slice: a pure derived read - base +
 	// housing quality + functioning rooms + jobs + milestones - adjacency
-	// offenses - unsupported colonists, clamped 0..100. No sim state; effects
-	// (work speed, growth) wire up in later gates after the framing review.
+	// offenses - unsupported colonists - water/food scarcity, clamped 0..100.
+	// No sim state; effects (work speed, growth) wire up in later gates after the framing review.
 	struct FRHHopeBreakdown
 	{
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double Furnishings = 0; // BM-4: bonus-only, capped (HopeFurnishingsMax)
 		double Views = 0;       // BM-6: windows in rated habitats, bonus-only, capped (HopeViewsMax)
 		double AdjacencyPenalty = 0, UnsupportedPenalty = 0, WaterPenalty = 0; // stored positive
+		double FoodPenalty = 0; // D4a: stored positive - a food runway under FoodRunwayFloorSols at today's draw (soft cap HopeFoodPenalty)
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
 		int32 OffendedPairs = 0, FilledSeats = 0;
@@ -788,6 +789,13 @@ public:
 	double GetWaterPotability() const { return WaterPotability; }
 	double GetWaterPotabilityFloor() const { return WaterPotabilityFloor; }
 	double GetColonistWaterKgPerSol() const { return ColonistWaterKgPerSol; }
+	// D4a food runway: pooled Food stock / (Pop x ColonistFoodKgPerSol), the
+	// gross "at today's draw" figure the FOOD tile, guide and playtest use.
+	// 1.0e9 at zero population (the sentinel they already use).
+	double GetFoodRunwaySols() const;
+	double GetFoodRunwayFloorSols() const { return FoodRunwayFloorSols; }
+	double GetFoodRunwayRearmSols() const { return FoodRunwayRearmSols; }
+	double GetHopeFoodPenaltyMax() const { return HopeFoodPenalty; }
 	// Harness: inject fresh ice-melt water (restores potability like the real
 	// IceDrill->WaterPlant chain, without scripting the whole ISRU economy).
 	void Debug_AddFreshWater(double Kg) { AddStock(FName("Water"), Kg); FreshWaterThisStepKg += Kg; }
@@ -1538,6 +1546,11 @@ private:
 	double WaterPotabilityRestorePerKg = 0.0008;
 	double WaterPotabilityFloor = 0.6;
 	double HopeWaterPenalty = 12.0;
+	// Food runway (D4a). Derived from the pooled Food stock - nothing here is saved.
+	double HopeFoodPenalty = 10.0;
+	double FoodRunwayFloorSols = 10.0;
+	double FoodRunwayRearmSols = 15.0;
+	bool bFoodLowAnnounced = false; // runtime edge, re-derived on load (never saved)
 	double IceLowAlertFraction = 0.25;  // D2a, RH_Config (0 disables)
 	double IceWaterPlantNear_m = 100.0; // D2a, RH_Config: a Water Plant this close counts as "beside" the drill
 	// D2a: resources construction draws from stores (Struct plus every

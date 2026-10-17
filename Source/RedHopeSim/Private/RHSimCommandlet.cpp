@@ -4138,6 +4138,250 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// D4a self-test (2026-10-17): the FOOD RUNWAY - a Hope line that grows as the
+	// larder (stock / today's draw) falls under RH_Config FoodRunwayFloorSols,
+	// and a one-shot FOOD RUNNING LOW alert on the downward crossing that
+	// re-arms only past FoodRunwayRearmSols. Pure-data pins, the zero-pop
+	// silence, the line's linear shape and cap, the crossing on its own step,
+	// no re-fire, hysteresis, re-arm, the silent latch when the larder is already
+	// empty (LIFE SUPPORT owns the banner), the load-time latch RE-DERIVE (the
+	// runtime latch is made to DISAGREE with the saved state before each load, so
+	// only the re-derive can pass), and 60 s vs 6 s band parity of the line, the
+	// smoothed mood and the alert's step. Fails loudly. `-food`.
+	if (FParse::Param(*Params, TEXT("food")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FOOD RUNWAY TEST (D4a, 2026-10-17) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("FOOD ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("FOOD FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		const auto Step = [&](double Dt)
+		{
+			Sim->Debug_AddFreshWater(50.0); // potability stays out of the Hope math
+			Sim->Debug_SetBatteryWh(1.0e9); // the circulator stays up
+			Clock->Debug_AdvanceSimSeconds(Dt);
+			Sim->EraStep((float)Dt);
+		};
+		const auto RunSteps = [&](int32 N, double Dt = 60.0) { for (int32 i = 0; i < N; ++i) { Step(Dt); } };
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Needle) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Needle) ? 1 : 0; } return N; };
+		const auto LastAlertWith = [&Alerts](const TCHAR* Needle)
+		{
+			for (int32 i = Alerts.Num() - 1; i >= 0; --i) { if (Alerts[i].Contains(Needle)) { return Alerts[i]; } }
+			return FString();
+		};
+		// Food stock that gives exactly S sols of runway at today's population.
+		// Colonists FIRST, then this - the target scales with the live Pop.
+		const auto SetRunway = [&](double S)
+		{
+			Sim->AddStock(FName("Food"), S * Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol() - Sim->GetStock(FName("Food")));
+		};
+		const auto Pen = [&]() { return Sim->GetColonyHope().FoodPenalty; };
+		const TCHAR* FoodKey = TEXT("FOOD RUNNING LOW");
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString Err;
+
+		// F0. Pure data: the three rows ride the synced DT_Config (the -1
+		// sentinel fails loudly on a DT that was never synced), and the sim
+		// reads them.
+		{
+			const bool bData = Near(DefsSub->GetConfigScalar(FName("HopeFoodPenalty"), -1.0), 10.0, 1e-9)
+				&& Near(DefsSub->GetConfigScalar(FName("FoodRunwayFloorSols"), -1.0), 10.0, 1e-9)
+				&& Near(DefsSub->GetConfigScalar(FName("FoodRunwayRearmSols"), -1.0), 15.0, 1e-9);
+			Expect(bData && Near(Sim->GetHopeFoodPenaltyMax(), 10.0, 1e-9) && Near(Sim->GetFoodRunwayFloorSols(), 10.0, 1e-9) && Near(Sim->GetFoodRunwayRearmSols(), 15.0, 1e-9),
+				FString::Printf(TEXT("F0 RH_Config HopeFoodPenalty 10 / FoodRunwayFloorSols 10 / FoodRunwayRearmSols 15, and the sim reads %.0f / %.0f / %.0f (DT/CSV)"),
+					Sim->GetHopeFoodPenaltyMax(), Sim->GetFoodRunwayFloorSols(), Sim->GetFoodRunwayRearmSols()));
+			if (!bData)
+			{
+				Sim->OnAlert.Remove(AlertH);
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== FOOD RUNWAY TEST END: %d failure(s) ==="), Fails);
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				return 1;
+			}
+		}
+
+		// Certified 4-cell vault (the -water setup); nobody home yet.
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 4, Err);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Sim->AddStock(FName("Oxygen"), 3000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		RunSteps(50);
+
+		// F1. Zero population: an empty larder is silent and weighs on no one.
+		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
+		RunSteps(10);
+		Expect(Sim->GetPopulation() == 0 && Sim->GetFoodRunwaySols() >= 1.0e8 && Pen() == 0.0 && CountAlerts(FoodKey) == 0,
+			FString::Printf(TEXT("F1 no crew, empty larder: runway sentinel %.0e, FoodPenalty %.1f, %d food alerts"), Sim->GetFoodRunwaySols(), Pen(), CountAlerts(FoodKey)));
+
+		// F2. Plenty: crew first, THEN the larder (the target scales with Pop).
+		const int32 Added = Sim->Debug_AddColonists(4);
+		SetRunway(40.0);
+		RunSteps(2);
+		Expect(Added == 4 && Pen() == 0.0 && Near(Sim->GetFoodRunwaySols(), 39.9, 1e-6) && CountAlerts(FoodKey) == 0 && CountAlerts(TEXT("LIFE SUPPORT")) == 0,
+			FString::Printf(TEXT("F2 4 crew, 40 sols of food: runway %.4f (expect 39.9), FoodPenalty %.1f, no alerts"), Sim->GetFoodRunwaySols(), Pen()));
+
+		// F3. The crossing is detected on its own step: 10.05 sols is quiet,
+		// 9.95 alerts once, naming the (floored) sols and the fix.
+		SetRunway(10.5);
+		RunSteps(9);
+		Expect(Near(Sim->GetFoodRunwaySols(), 10.05, 1e-6) && CountAlerts(FoodKey) == 0 && Pen() == 0.0,
+			FString::Printf(TEXT("F3 runway %.4f (expect 10.05): no alert, no penalty yet"), Sim->GetFoodRunwaySols()));
+		RunSteps(2);
+		{
+			const double R = Sim->GetFoodRunwaySols();
+			Expect(Near(R, 9.95, 1e-6) && CountAlerts(FoodKey) == 1 && LastAlertWith(FoodKey).Contains(TEXT("about 9 sols left")) && LastAlertWith(FoodKey).Contains(TEXT("Gardening Station"))
+				&& Near(Pen(), 10.0 * (10.0 - R) / 10.0, 1e-9),
+				FString::Printf(TEXT("F3 runway %.4f: exactly 1 alert (\"%s\"), FoodPenalty %.4f"), R, *LastAlertWith(FoodKey), Pen()));
+		}
+
+		// F4. The line is linear from 0 at the floor to the cap at empty, and
+		// Total falls by exactly the line. Pure reads, no stepping.
+		{
+			SetRunway(5.0);   const double P5 = Pen();   const double T5 = Sim->GetColonyHope().Total;
+			SetRunway(2.5);   const double P25 = Pen();
+			SetRunway(0.0);   const double P0 = Pen();
+			SetRunway(40.0);  const double P40 = Pen();  const double T40 = Sim->GetColonyHope().Total;
+			Expect(Near(P5, 5.0, 1e-9) && Near(P25, 7.5, 1e-9) && P0 == 10.0 && P40 == 0.0 && Near(T40 - T5, 5.0, 1e-9),
+				FString::Printf(TEXT("F4 FoodPenalty: runway 5 -> %.3f, 2.5 -> %.3f, 0 -> %.3f (the cap), 40 -> %.3f; Total(40) - Total(5) = %.3f (expect 5)"),
+					P5, P25, P0, P40, T40 - T5));
+		}
+
+		// F5. One-shot: a whole sol deeper into the episode stays at one alert.
+		SetRunway(8.0);
+		RunSteps(20);
+		Expect(CountAlerts(FoodKey) == 1, FString::Printf(TEXT("F5 a sol deeper under the floor: still %d food alert"), CountAlerts(FoodKey)));
+
+		// F6. Hysteresis: 13.95 sols is back over the floor but not over the
+		// re-arm line, so dipping again does not repeat the alert.
+		SetRunway(14.0);
+		RunSteps(1);
+		SetRunway(9.0);
+		RunSteps(1);
+		Expect(CountAlerts(FoodKey) == 1, FString::Printf(TEXT("F6 recovered only to 14 (re-arm 15), dipped to 9: still %d food alert"), CountAlerts(FoodKey)));
+
+		// F7. Re-arm: past 15 the next real drop alerts again.
+		SetRunway(16.0);
+		RunSteps(1);
+		SetRunway(9.0);
+		RunSteps(1);
+		Expect(CountAlerts(FoodKey) == 2 && LastAlertWith(FoodKey).Contains(TEXT("about 8 sols left")),
+			FString::Printf(TEXT("F7 recovered past 15, dropped to 9: %d food alerts, newest \"%s\""), CountAlerts(FoodKey), *LastAlertWith(FoodKey)));
+
+		// F8. An abrupt empty: everyone fails the draw that very step, so LIFE
+		// SUPPORT owns the banner and the episode latches silently. Refilling
+		// restores support; nobody is evacuated.
+		{
+			SetRunway(30.0);
+			RunSteps(1);
+			const int32 Food0 = CountAlerts(FoodKey), Life0 = CountAlerts(TEXT("LIFE SUPPORT"));
+			SetRunway(0.0);
+			RunSteps(1);
+			Expect(CountAlerts(FoodKey) == Food0 && CountAlerts(TEXT("LIFE SUPPORT")) == Life0 + 4 && Pen() == 10.0,
+				FString::Printf(TEXT("F8 larder emptied in one go: food alerts %d -> %d (silent), LIFE SUPPORT +%d (expect 4), FoodPenalty %.1f"),
+					Food0, CountAlerts(FoodKey), CountAlerts(TEXT("LIFE SUPPORT")) - Life0, Pen()));
+			SetRunway(40.0);
+			RunSteps(1);
+			int32 Supported = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { Supported += C.bSupported ? 1 : 0; }
+			Expect(Pen() == 0.0 && Supported == 4 && Sim->GetPopulation() == 4 && CountAlerts(TEXT("EVACUATED")) == 0,
+				FString::Printf(TEXT("F8 refilled: FoodPenalty %.1f, %d of 4 supported, pop %d, no evacuation"), Pen(), Supported, Sim->GetPopulation()));
+		}
+
+		// F9. The load-time latch RE-DERIVE. Each half makes the runtime latch
+		// DISAGREE with the saved state before the load, so only a re-derive
+		// can pass (a load that left the latch alone would fail both).
+		{
+			// (a) saved while latched; unlatched in memory before the load.
+			SetRunway(8.0);
+			RunSteps(1);
+			const int32 A0 = CountAlerts(FoodKey);
+			const double PenSaved = Pen();
+			Expect(Sim->SaveColony(TEXT("foodtest"), Err), TEXT("F9 saved 'foodtest' inside the episode (latched)"));
+			SetRunway(16.0);
+			RunSteps(1); // re-arms the live latch
+			const bool bLoaded = Sim->LoadColony(TEXT("foodtest"), Err);
+			Expect(bLoaded && Pen() == PenSaved && Pen() > 0.0,
+				FString::Printf(TEXT("F9a load: FoodPenalty %.9f bit-identical to the save (%.9f)"), Pen(), PenSaved));
+			RunSteps(1);
+			Expect(CountAlerts(FoodKey) == A0, FString::Printf(TEXT("F9a latch re-armed in memory, save was inside the episode: the load re-latches, %d new food alerts (expect 0)"), CountAlerts(FoodKey) - A0));
+
+			// (b) saved unlatched at 12 sols; latched in memory before the load.
+			SetRunway(16.0);
+			RunSteps(1);
+			SetRunway(12.0);
+			RunSteps(1);
+			Expect(Sim->SaveColony(TEXT("foodtest"), Err) && Pen() == 0.0, TEXT("F9 saved 'foodtest' above the floor, after a recovery (unlatched)"));
+			SetRunway(8.0);
+			RunSteps(1); // fires and latches the live latch
+			const bool bLoaded2 = Sim->LoadColony(TEXT("foodtest"), Err);
+			const int32 B0 = CountAlerts(FoodKey);
+			Expect(bLoaded2 && Pen() == 0.0 && Sim->GetFoodRunwaySols() > Sim->GetFoodRunwayFloorSols(), TEXT("F9b load: back above the floor"));
+			SetRunway(9.0);
+			RunSteps(1);
+			Expect(CountAlerts(FoodKey) == B0 + 1, FString::Printf(TEXT("F9b latch set in memory, save was above the floor: the load un-latches, so the next drop alerts (%d new, expect 1)"), CountAlerts(FoodKey) - B0));
+		}
+
+		// F10. Band parity: the same 1200 sim-seconds of falling larder at 60 s
+		// and at 6 s per step from the SAME saved state (saved HopeSmoothed
+		// included). The runway and the line are pure functions of a linearly
+		// integrated stock, so they agree to rounding. The smoothed mood is exact
+		// for constant input and O(dt) for a ramp: the line ramps at 1 point per
+		// sol, so the legs agree within 0.05 point (documented tolerance). The
+		// alert lands on the first step under the floor in each leg, and the two
+		// land within one 60 s step of each other.
+		{
+			SetRunway(16.0);
+			RunSteps(1); // arm
+			Expect(Sim->SaveColony(TEXT("foodparity"), Err), TEXT("F10 saved the armed start state"));
+			struct FLeg { double Runway = 0, Penalty = 0, Smoothed = 0, AlertAtSec = -1; int32 Alerts = 0; bool bFirstUnder = false; };
+			const auto RunLeg = [&](int32 N, double Dt) -> FLeg
+			{
+				FLeg L;
+				SetRunway(10.52); // under the floor after 11 x 60 s / 105 x 6 s
+				const int32 C0 = CountAlerts(FoodKey);
+				for (int32 i = 1; i <= N; ++i)
+				{
+					const int32 Before = CountAlerts(FoodKey);
+					Step(Dt);
+					if (CountAlerts(FoodKey) > Before)
+					{
+						L.AlertAtSec = i * Dt;
+						L.bFirstUnder = Sim->GetFoodRunwaySols() < 10.0 && (Sim->GetFoodRunwaySols() + Dt / 1200.0) >= 10.0 - 1e-9;
+					}
+				}
+				L.Alerts = CountAlerts(FoodKey) - C0;
+				L.Runway = Sim->GetFoodRunwaySols();
+				L.Penalty = Pen();
+				L.Smoothed = Sim->GetHopeSmoothed();
+				return L;
+			};
+			const FLeg A = RunLeg(20, 60.0);
+			const bool bBack = Sim->LoadColony(TEXT("foodparity"), Err);
+			const FLeg B = RunLeg(200, 6.0);
+			Expect(bBack, TEXT("F10 reloaded the same start state for the 6 s leg"));
+			Expect(A.Alerts == 1 && B.Alerts == 1 && A.bFirstUnder && B.bFirstUnder && Near(A.AlertAtSec, B.AlertAtSec, 60.0),
+				FString::Printf(TEXT("F10 one alert per leg, on the first step under the floor: 60 s leg at %.0f s, 6 s leg at %.0f s (within one 60 s step)"), A.AlertAtSec, B.AlertAtSec));
+			Expect(Near(A.Runway, B.Runway, 1e-9) && Near(A.Penalty, B.Penalty, 1e-9) && Near(A.Runway, 9.52, 1e-6),
+				FString::Printf(TEXT("F10 runway %.9f vs %.9f (expect 9.52), FoodPenalty %.9f vs %.9f"), A.Runway, B.Runway, A.Penalty, B.Penalty));
+			Expect(Near(A.Smoothed, B.Smoothed, 0.05),
+				FString::Printf(TEXT("F10 HopeSmoothed %.5f (60 s) vs %.5f (6 s): differ by %.5f (tolerance 0.05)"), A.Smoothed, B.Smoothed, FMath::Abs(A.Smoothed - B.Smoothed)));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FOOD RUNWAY TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
 	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
 	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.
