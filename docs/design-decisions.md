@@ -266,3 +266,13 @@ Alive pass 2b (`9bf87a8`) staged a crew dispute as the pair turning to face each
 
 1. **A dispute is shown as a still face-off.** No gesture or clip beyond Idle, consistent with the mental-health directive (abstracted consequences; words, never blows).
 2. This settles the body language only. The plate's wording ("! heated words !") is a player-facing string and stays under the standing Gate-D framing review like every other morale string.
+
+## Ruling — 2026-10-16 (director: a furnished Living bay without beds houses nobody, option 2)
+
+The surface-habitat capture (`e2706e5`) found a gap. BM-4's rule kept a Living bay's legacy beds until a bed piece arrived, so a lounge (sofa, bench, rug, plant) still slept two. The presentation hides a furnished bay's automatic props, so that resident had no bed to lie in. Of the two fixes offered (keep drawing legacy beds there, or change the rule), the director chose the rule:
+
+1. **A surface Living bay with any furnishing houses exactly its bed pieces' beds**, which may be zero. Only a bare bay keeps the legacy beds.
+2. **Underground cells are unchanged.** Every carved cell of a floor holds the legacy beds whatever its room, so a lounge cell below stays consistent with its floor.
+3. **Bed guard:** furnishing a surface Living bay is refused while it would leave the habitat's residents without beds ("put a bed in this bay first"). The Furnish-mode hint shows the drop (e.g. beds 1 -> 0) before placing.
+
+Inert for colonies with no furniture in surface Living bays. Verified by the `-furnish` suite (F9, F9b) and a full-battery line diff.

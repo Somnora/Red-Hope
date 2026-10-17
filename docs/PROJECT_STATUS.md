@@ -115,8 +115,10 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   without beds (a lounge) still counts its 2 legacy beds in the sim, but its
   automatic bed props are hidden once any furniture is placed. A colonist
   housed on such a bed has no bed piece and stands at the old fallback spot at
-  night. This needs a director call: show the legacy beds, or stop a
-  bedless Living bay from housing anyone.
+  night. Ruled the same day (option 2): a surface Living bay with any
+  furnishing now houses exactly its bed pieces (a lounge sleeps nobody), and
+  furnishing one is refused while it would leave residents without beds.
+  Underground cells keep the legacy beds.
 - **2b, conversations and personal space** (`9bf87a8`). Crew moments get body
   language: a pastime is a face-to-face Talk; a join-in has the helper work
   alongside. A dispute is a still face-off under the amber plate, and the Talk

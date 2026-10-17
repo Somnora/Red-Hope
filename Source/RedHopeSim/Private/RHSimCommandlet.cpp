@@ -2916,6 +2916,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->Debug_SetVaultRated(true);
 			Expect(Sim->IsHabRated(A) && Near(Sim->GetColonyHope().Furnishings, F0 + 1.0, 1e-9),
 				FString::Printf(TEXT("F9 rated: the plant counts (%.1f -> %.1f)"), F0, Sim->GetColonyHope().Furnishings));
+			Expect(Sim->GetHabBeds(B) == 0,
+				FString::Printf(TEXT("F9 B:0 holds only a plant: a Living bay furnished without beds sleeps nobody (ruling 2026-10-16) - B has %d beds"), Sim->GetHabBeds(B)));
 		}
 		Expect(!CanPlace(TEXT("Cot"), FIntVector(0, 0, A), 0, 0, Why) && Why.Contains(TEXT("AirFilter")), FString::Printf(TEXT("F9 A's filter fills its centre (%s)"), *Why));
 		{
@@ -2928,10 +2930,24 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Spent += 80.0;
 		{
 			const int32 Pop0 = Sim->GetPopulation();
-			Expect(Sim->Debug_AddColonists(4) == 4 && Sim->GetHabResidents(A) == 1 && Sim->GetHabResidents(B) == 1 && Sim->GetHabResidents(Cc) == 2,
-				FString::Printf(TEXT("F9 four more crew: A 1, B 1, C 2 (pop %d -> %d)"), Pop0, Sim->GetPopulation()));
+			Expect(Sim->Debug_AddColonists(4) == 3 && Sim->GetHabResidents(A) == 1 && Sim->GetHabResidents(B) == 0 && Sim->GetHabResidents(Cc) == 2,
+				FString::Printf(TEXT("F9 four more crew asked for, three beds: A 1, B 0 (its plant), C 2 (pop %d -> %d)"), Pop0, Sim->GetPopulation()));
 			const int32 CotC = LastPieceId();
 			Expect(!Sim->CanSellFurniture(CotC, Why) && Why.Contains(TEXT("sleep")), FString::Printf(TEXT("F9 C's cots are spoken for (%s)"), *Why));
+		}
+		// F9b. The furnishing bed guard (ruling 2026-10-16): the first non-bed
+		// piece in a bare Living bay ends its legacy bed, so it is refused
+		// while someone sleeps there; a bed brings a furnished bay back.
+		{
+			URHSimWorldSubsystem::FRHFurnishPreview P;
+			Expect(Sim->PreviewFurnishEffect(FName("Plant"), FIntVector(0, 0, A), P) && P.BedsBefore == 1 && P.BedsAfter == 0,
+				FString::Printf(TEXT("F9b the hint: a plant in A's bare Living bay takes its beds %d -> %d"), P.BedsBefore, P.BedsAfter));
+			Why.Reset();
+			Expect(!CanPlace(TEXT("Plant"), FIntVector(0, 0, A), 15, 0, Why) && Why.Contains(TEXT("sleep")),
+				FString::Printf(TEXT("F9b ...so it is refused while A's resident sleeps there (%s)"), *Why));
+			Expect(Furnish(TEXT("Cot"), FIntVector(0, 0, B), 2) && Sim->GetHabBeds(B) == 1 && Sim->Debug_AddColonists(1) == 1 && Sim->GetHabResidents(B) == 1,
+				FString::Printf(TEXT("F9b a cot beside B's plant: B sleeps %d again and a newcomer moves in"), Sim->GetHabBeds(B)));
+			Spent += 40.0;
 		}
 		const int32 Hh = Place(TEXT("HabModule"), -2000, -500, 1, 2);
 		Expect(Sim->DesignateBay(Hh, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(Hh, 1, FName("LivingQuarters"), R)

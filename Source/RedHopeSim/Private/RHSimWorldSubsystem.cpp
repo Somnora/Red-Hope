@@ -7594,6 +7594,22 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 			: FString(TEXT("A machine stands there"));
 		return false;
 	}
+	// Bed guard (ruling 2026-10-16): furnishing a surface Living bay may not
+	// take beds from the habitat's sleepers - its first non-bed piece ends the
+	// legacy beds, and a smaller bed replaces them.
+	if (Key.Z != 0 && IsLivingKey(Key))
+	{
+		FRHFurnishPreview P;
+		if (PreviewFurnishEffect(RowName, Key, P) && P.BedsAfter < P.BedsBefore)
+		{
+			const int32 Residents = GetHabResidents(Key.Z);
+			if (CountHabBeds(Key.Z) - P.BedsBefore + P.BedsAfter < Residents)
+			{
+				OutReason = FString::Printf(TEXT("%d resident(s) sleep in this habitat - put a bed in this bay first"), Residents);
+				return false;
+			}
+		}
+	}
 	for (const auto& Line : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
 	{
 		const double Have = Defs->IsSolidResource(Line.Key) ? GetTotalSolid(Line.Key) + GetStock(Line.Key) : GetStock(Line.Key);
@@ -7653,6 +7669,9 @@ int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TS
 		{
 			continue;
 		}
+		// Director ruling 2026-10-16 (option 2): a Living bay with ANY
+		// furnishing houses exactly its bed pieces - a lounge furnished
+		// without beds sleeps nobody. Only a bare bay keeps the legacy beds.
 		int32 Beds = 0;
 		bool bAny = false;
 		if (const FRHCellFurnish* CF = FurnishedCells.Find(Key))
@@ -7661,10 +7680,10 @@ int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TS
 			{
 				const FRHFurnitureInstance* F = (Exclude && Exclude->Contains(Id)) ? nullptr : FindFurniture(Id);
 				const FRHFurnitureRow* Row = (F && Defs) ? Defs->GetFurniture(F->Row) : nullptr;
+				bAny |= F != nullptr;
 				if (Row && Row->Provides == NAME_FurnBed)
 				{
 					Beds += Row->Capacity;
-					bAny = true;
 				}
 			}
 		}
@@ -7690,6 +7709,10 @@ int32 URHSimWorldSubsystem::GetCellBeds(const FIntVector& Key) const
 	if (CF && CF->BedPieces > 0 && IsLivingKey(Key))
 	{
 		return CF->Beds;
+	}
+	if (Key.Z != 0 && CF && CF->Ids.Num() > 0)
+	{
+		return 0; // a surface Living bay furnished without beds (ruling 2026-10-16)
 	}
 	return (int32)ColonistsPerCell; // every carved cell holds the legacy beds
 }
@@ -7743,6 +7766,10 @@ bool URHSimWorldSubsystem::PreviewFurnishEffect(FName RowName, const FIntVector&
 	if (Row->Provides == NAME_FurnBed && IsLivingKey(Key))
 	{
 		Out.BedsAfter = ((CF && CF->BedPieces > 0) ? CF->Beds : 0) + Row->Capacity;
+	}
+	else if (Key.Z != 0 && IsLivingKey(Key) && (!CF || CF->Ids.Num() == 0))
+	{
+		Out.BedsAfter = 0; // the first furnishing of a bare Living bay, not a bed: it stops sleeping anyone
 	}
 	else if (Row->Provides == NAME_FurnJobSeat && Out.SeatsBefore > 0)
 	{
