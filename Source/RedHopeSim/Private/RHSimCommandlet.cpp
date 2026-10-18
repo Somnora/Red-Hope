@@ -5671,6 +5671,392 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
+	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
+	// bunks and benches, air and power held up each step, gardens on every
+	// floor), then grows the population 250 -> 1,000 -> 3,000 -> 5,000 and, at
+	// each size, times the agent-band sub-step (0.1 s), the era step (60 s),
+	// GetColonyHope (the deck reads it every frame) and the Debug_AddColonists
+	// call that got there, against budgets. Correctness at scale is asserted
+	// too: the population is exactly N, every Id resolves, everyone is housed,
+	// supported and in a bed with room, and the seats fill. Then half the crew
+	// is starved out and evacuated (the roster shifts under every lookup) and a
+	// save/load round trip must restore every assignment. A DIGEST line per
+	// size hashes every derived value bit-for-bit, so a refactor that must not
+	// change behaviour is proven by diffing two runs of this suite. Timings are
+	// wall clock on a shared machine: budgets are generous multiples. `-scale`.
+	if (FParse::Param(*Params, TEXT("scale")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST (C1, 2026-10-18) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("SCALE ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("SCALE FAIL: %s"), *What); ++Fails; }
+		};
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double AgentDt = (double)URHSimClockSubsystem::SubStepSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr int32 Floors = 5;
+		constexpr int32 CellsPerFloor = 210;
+		constexpr int32 GardenCells = 10;      // the tail of each floor's spiral
+		constexpr int32 AgentReps = 200;
+		constexpr int32 EraReps = 20;
+		constexpr int32 HopeReps = 50;
+		constexpr double CapSeconds = 5.0;     // one step this slow stops the growth
+		const int32 Targets[] = { 250, 1000, 3000, 5000 };
+
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const auto TopUp = [&](double Dt)
+		{
+			Sim->Debug_AddFreshWater(500.0 * Dt / SolLen);
+			Sim->Debug_SetBatteryWh(1.0e9);
+		};
+		const auto EraStepOnce = [&]()
+		{
+			TopUp(EraDt);
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto AgentStepOnce = [&]()
+		{
+			TopUp(AgentDt);
+			Clock->Debug_AdvanceSimSeconds(AgentDt);
+			Sim->Debug_StepSim(URHSimClockSubsystem::SubStepSeconds);
+		};
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString R;
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("Lander")) { LanderId = B.Id; } }
+
+		// Setup: power, a deep shaft, big floors, an air filter on each.
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -1000.0, 0.0));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -2000.0, 0.0));
+		const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen")), NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NStruct(TEXT("Struct"));
+		Sim->AddStock(NOxygen, 1.0e8);
+		Sim->AddStock(NWater, 1.0e8);
+		Sim->AddStock(NFood, 1.0e8);
+		Sim->AddStock(NSoil, 250.0 * 400.0);
+		Sim->AddStock(NSeeds, 50.0 * 400.0);
+		Sim->Debug_AddSolidAt(LanderId, NStruct, 2.0e7, false);
+		const FVector Head(3000.0, 3000.0, 0.0);
+		Sim->ExtendShaft(Floors, Head);
+		bool bCarved = true;
+		for (int32 L = 1; L <= Floors; ++L) { bCarved &= Sim->ExcavateFloor(-L, CellsPerFloor, R); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_PlaceInstant(FName("AirFilter"), Head, -L); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+		EraStepOnce();
+		Expect(bCarved && Sim->GetShaftDepth() == Floors && Sim->IsFloorRated(-1) && Sim->IsFloorRated(-Floors),
+			FString::Printf(TEXT("setup: shaft to -%d, %d cells a floor, every floor rated"), Floors, CellsPerFloor));
+
+		// Zoning. Gardens (odor emitters) sit at the tail of each floor's spiral;
+		// on floors -1..-4 every cell within reach of one is a non-refuser, so the
+		// colony's Hope is not buried under offended pairs. Floor -5 is left to
+		// offend: no buffer, two Cooking emitters among the Living cells, and a
+		// Hallway every thirty cells - the adjacency code runs both ways, with
+		// some pairs partitioned and some not.
+		int32 ZonedLiving = 0, ZonedSeat = 0, ZonedGarden = 0, ZonedOther = 0;
+		TArray<FIntPoint> LabCells, WorkCells, DiningCells, LivingCells; // (level, cell)
+		for (int32 L = 1; L <= Floors; ++L)
+		{
+			TArray<FIntPoint> Pos;
+			for (int32 I = 0; I < CellsPerFloor; ++I) { Pos.Add(URHSimWorldSubsystem::SpiralCell(I)); }
+			for (int32 I = 0; I < CellsPerFloor; ++I)
+			{
+				bool bNearGarden = false;
+				for (int32 G = CellsPerFloor - GardenCells; G < CellsPerFloor && L < Floors; ++G)
+				{
+					bNearGarden |= (FMath::Abs(Pos[I].X - Pos[G].X) + FMath::Abs(Pos[I].Y - Pos[G].Y)) <= 2;
+				}
+				FName Room;
+				if (I >= CellsPerFloor - GardenCells) { Room = FName("Garden"); }
+				else if (bNearGarden) { Room = I % 3 == 0 ? FName("Lab") : (I % 3 == 1 ? FName("Workstation") : FName("Hallway")); }
+				else if (L == Floors && I % 97 == 5) { Room = FName("Cooking"); }
+				else
+				{
+					switch (I % 10)
+					{
+					case 7: Room = FName("Workstation"); break;
+					case 8: Room = FName("Dining"); break;
+					case 9: Room = (I / 10) % 3 == 2 ? FName("Hallway") : ((I / 10) % 3 == 0 ? FName("Lab") : FName("Infirmary")); break;
+					default: Room = FName("LivingQuarters"); break;
+					}
+				}
+				if (!Sim->DesignateRoom(-L, I, Room, R)) { UE_LOG(LogRedHopeSim, Error, TEXT("SCALE: zoning floor %d cell %d failed: %s"), -L, I, *R); ++Fails; }
+				if (Room == FName("LivingQuarters")) { ++ZonedLiving; LivingCells.Add(FIntPoint(-L, I)); }
+				else if (Room == FName("Garden")) { ++ZonedGarden; ++ZonedSeat; }
+				else if (Room == FName("Workstation")) { ++ZonedSeat; WorkCells.Add(FIntPoint(-L, I)); }
+				else if (Room == FName("Lab")) { ++ZonedSeat; LabCells.Add(FIntPoint(-L, I)); }
+				else { ++ZonedOther; if (Room == FName("Dining")) { DiningCells.Add(FIntPoint(-L, I)); } }
+			}
+		}
+		Expect(ZonedLiving > 600 && ZonedGarden == Floors * GardenCells,
+			FString::Printf(TEXT("zoning: %d Living, %d work/lab/garden cells, %d Garden, %d other"), ZonedLiving, ZonedSeat, ZonedGarden, ZonedOther));
+
+		// Furnishing, through the same Furnish orders the -furnish suite sends:
+		// four bunk beds in every Living cell, four benches in every work and lab
+		// cell (each replaces the legacy single seat), a table in each Dining.
+		// Batched so one era step lands a few hundred orders.
+		int32 Queued = 0;
+		const auto FurnishOrder = [&](const TCHAR* Piece, int32 Level, int32 Cell, int32 Slot)
+		{
+			const FIntVector Key(Level, Cell, 0);
+			FRHCommand Order; Order.Verb = FName("Furnish"); Order.Target = FName(Piece); Order.Level = Level;
+			Order.Location = Sim->GetCellCentreCm(Key);
+			Order.Value = URHSimWorldSubsystem::EncodeFurnish(Cell, Slot, 0);
+			Sim->EnqueueCommand(Order);
+			if (++Queued >= 400) { EraStepOnce(); Queued = 0; }
+		};
+		for (const FIntPoint& Cell : LivingCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("BunkBed"), Cell.X, Cell.Y, Slot); } }
+		for (const FIntPoint& Cell : WorkCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("Workbench"), Cell.X, Cell.Y, Slot); } }
+		for (const FIntPoint& Cell : LabCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("LabBench"), Cell.X, Cell.Y, Slot); } }
+		for (const FIntPoint& Cell : DiningCells) { FurnishOrder(TEXT("DiningTable"), Cell.X, Cell.Y, 0); }
+		EraStepOnce();
+		int32 StationOrders = 0;
+		for (const FIntPoint* Station : { &LabCells[1], &WorkCells[1], &LabCells[LabCells.Num() / 2], &WorkCells[WorkCells.Num() / 2], &LabCells.Last(), &WorkCells.Last() })
+		{
+			FRHCommand Assign; Assign.Verb = FName("Assign"); Assign.Level = Station->X; Assign.Value = (double)Station->Y;
+			Sim->EnqueueCommand(Assign);
+			++StationOrders;
+		}
+		EraStepOnce();
+		const int32 Capacity = Sim->GetHousingCapacity();
+		Expect(Rejects.Num() == 0 && Sim->GetFurniture().Num() > 2500 && Capacity >= 5000 && Sim->GetSeatPriority().Num() == StationOrders,
+			FString::Printf(TEXT("furnishing: %d pieces placed, %d refused, %d certified beds (need 5,000), %d stations assigned first"),
+				Sim->GetFurniture().Num(), Rejects.Num(), Capacity, Sim->GetSeatPriority().Num()));
+		int32 SeatsTotal = 0;
+		for (int32 L = 1; L <= Floors; ++L) { for (int32 I = 0; I < CellsPerFloor; ++I) { SeatsTotal += Sim->GetCellSeats(FIntVector(-L, I, 0)); } }
+		UE_LOG(LogRedHopeSim, Display, TEXT("SCALE layout: %d cells, %d pieces, %d beds, %d work seats"), Floors * CellsPerFloor, Sim->GetFurniture().Num(), Capacity, SeatsTotal);
+
+		// Digests: every derived value that must survive a refactor, hashed at full
+		// precision (raw double bits) and in the colonist array's own order.
+		// Assignments is the part a save/load must restore exactly (the per-step
+		// readouts - comforts, producing beds - are not saved, so they stay out).
+		const auto MixBytes = [](uint32& H, const void* P, int32 Bytes) { H = FCrc::MemCrc32(P, Bytes, H); };
+		const auto MixD = [&MixBytes](uint32& H, double V) { MixBytes(H, &V, (int32)sizeof(V)); };
+		const auto MixI = [&MixBytes](uint32& H, int32 V) { MixBytes(H, &V, (int32)sizeof(V)); };
+		const auto Assignments = [&]() -> uint32
+		{
+			uint32 H = 0;
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			for (const double V : { Hp.Housing, Hp.Rooms, Hp.Jobs, Hp.Furnishings, Hp.Views, Hp.AdjacencyPenalty }) { MixD(H, V); }
+			MixI(H, Hp.OffendedPairs); MixI(H, Hp.FilledSeats);
+			MixI(H, Sim->GetStaffedSeats()); MixD(H, Sim->GetLabYieldSeatSum()); MixD(H, Sim->GetWorkstationYieldSeatSum());
+			MixI(H, Sim->GetHousingCapacity()); MixI(H, Sim->GetFreeHousing()); MixI(H, Sim->GetPopulation());
+			for (int32 L = 1; L <= Floors; ++L)
+			{
+				MixI(H, Sim->GetFloorBeds(-L));
+				for (int32 I = 0; I < CellsPerFloor; ++I)
+				{
+					const FIntVector K(-L, I, 0);
+					int32 Filled = 0, Cap = 0;
+					Sim->GetStationSeats(K, Filled, Cap);
+					MixI(H, Filled); MixI(H, Cap); MixI(H, Sim->GetCellBeds(K)); MixI(H, Sim->GetCellSeats(K));
+				}
+			}
+			for (const FIntVector& K : Sim->GetSeatPriority()) { MixI(H, K.X); MixI(H, K.Y); MixI(H, K.Z); }
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				MixI(H, C.Id); MixI(H, C.HomeLevel); MixI(H, C.HomeHab);
+				MixI(H, (int32)FCrc::StrCrc32(*Sim->GetColonistJob(C.Id).ToString())); MixI(H, Sim->GetColonistBedPiece(C.Id)); MixI(H, Sim->GetColonistSeatPiece(C.Id));
+				FIntVector St = FIntVector::ZeroValue;
+				const bool bSt = Sim->GetColonistStation(C.Id, St);
+				MixI(H, bSt ? 1 : 0); MixI(H, St.X); MixI(H, St.Y); MixI(H, St.Z);
+			}
+			return H;
+		};
+		const auto Digest = [&]() -> uint32
+		{
+			uint32 H = Assignments();
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			for (const double V : { Hp.Base, Hp.Milestones, Hp.Comforts, Hp.UnsupportedPenalty, Hp.WaterPenalty, Hp.FoodPenalty, Hp.CrisisPenalty, Hp.Solidarity, Hp.Total }) { MixD(H, V); }
+			MixD(H, Sim->GetHopeSmoothed()); MixI(H, (int32)Sim->GetHopeBand());
+			MixD(H, Sim->GetCrewSkillMul(FName("Lab"))); MixD(H, Sim->GetCrewSkillMul(FName("Garden"))); MixD(H, Sim->GetCrewSkillMul(FName("Workstation")));
+			for (const FName& Res : { NFood, NWater, NOxygen, NSoil, NSeeds }) { MixD(H, Sim->GetStock(Res)); }
+			MixD(H, Sim->GetWaterPotability()); MixD(H, Sim->GetGardenFoodCumKg()); MixD(H, Sim->GetPower().BatteryWh);
+			MixI(H, Sim->GetPlantedCellCount()); MixI(H, Sim->GetProducingCellCount()); MixI(H, Sim->GetComfortsSuppliedCount()); MixI(H, Sim->GetBirthsOnMars());
+			MixI(H, Sim->GetDiscoveryLog().Num()); MixD(H, Sim->GetDiscoveryProgress());
+			for (int32 L = 1; L <= Floors; ++L) { MixD(H, Sim->GetFloorO2Kg(-L)); MixI(H, Sim->IsFloorRated(-L) ? 1 : 0); }
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				MixI(H, C.bSupported ? 1 : 0); MixD(H, C.UnsupportedSimSeconds);
+				TArray<TPair<FString, double>> Skills;
+				for (const TPair<FName, double>& S : C.SkillSols) { Skills.Emplace(S.Key.ToString(), S.Value); }
+				Skills.Sort([](const TPair<FString, double>& A, const TPair<FString, double>& B) { return A.Key < B.Key; });
+				for (const TPair<FString, double>& S : Skills) { MixI(H, (int32)FCrc::StrCrc32(*S.Key)); MixD(H, S.Value); }
+			}
+			return H;
+		};
+
+		// Correctness at scale.
+		const auto VerifyAt = [&](const FString& Tag)
+		{
+			const TArray<FRHColonist>& Cs = Sim->GetColonists();
+			const int32 N = Cs.Num();
+			TSet<int32> Ids;
+			TMap<int32, int32> PerFloor, PerPiece;
+			bool bSupported = true, bHomed = true, bStations = true, bIndex = true;
+			int32 Employed = 0, Idle = 0, MaxId = 0;
+			for (const FRHColonist& C : Cs)
+			{
+				Ids.Add(C.Id);
+				MaxId = FMath::Max(MaxId, C.Id);
+				bIndex &= Sim->FindColonist(C.Id) == &C;
+				bSupported &= C.bSupported;
+				bHomed &= C.HomeHab == 0 && C.HomeLevel < 0 && C.HomeLevel >= -Floors && Sim->IsFloorRated(C.HomeLevel);
+				++PerFloor.FindOrAdd(C.HomeLevel);
+				const int32 Piece = Sim->GetColonistBedPiece(C.Id);
+				if (Piece != 0) { ++PerPiece.FindOrAdd(Piece); }
+				FIntVector St;
+				const bool bHasStation = Sim->GetColonistStation(C.Id, St);
+				const bool bHasJob = !Sim->GetColonistJob(C.Id).IsNone();
+				bStations &= bHasStation == bHasJob;
+				Employed += bHasJob ? 1 : 0;
+				Idle += bHasJob ? 0 : 1;
+			}
+			bool bBedsFit = true, bPiecesOk = true;
+			for (const TPair<int32, int32>& P : PerFloor) { bBedsFit &= P.Value <= Sim->GetFloorBeds(P.Key); }
+			for (const TPair<int32, int32>& P : PerPiece)
+			{
+				const FRHFurnitureInstance* F = Sim->FindFurniture(P.Key);
+				const FRHFurnitureRow* Piece = F ? DefsSub->GetFurniture(F->Row) : nullptr;
+				bPiecesOk &= Piece && Piece->Provides == FName("Bed") && P.Value <= Piece->Capacity;
+			}
+			Expect(Sim->GetPopulation() == N && Ids.Num() == N && N > 0, FString::Printf(TEXT("%s: population %d, every Id distinct"), *Tag, N));
+			Expect(bIndex && Sim->FindColonist(0) == nullptr && Sim->FindColonist(MaxId + 1) == nullptr, FString::Printf(TEXT("%s: every Id resolves to its own colonist, a stranger to none"), *Tag));
+			Expect(bHomed && bBedsFit && Sim->GetFreeHousing() == Sim->GetHousingCapacity() - N, FString::Printf(TEXT("%s: everyone housed on a rated floor, no floor over its beds, %d beds free"), *Tag, Sim->GetFreeHousing()));
+			Expect(bSupported, FString::Printf(TEXT("%s: everyone supported (air, food, water)"), *Tag));
+			Expect(bPiecesOk, FString::Printf(TEXT("%s: every bed piece holds no more than its capacity (%d colonists share %d pieces)"), *Tag, N, PerPiece.Num()));
+			Expect(bStations && Employed == FMath::Min(N, SeatsTotal) && Sim->GetColonyHope().FilledSeats == Employed,
+				FString::Printf(TEXT("%s: %d at work posts (min of N and %d seats), %d idle, every worker has a station"), *Tag, Employed, SeatsTotal, Idle));
+		};
+
+		// The growth ladder.
+		struct FScaleLine { int32 N = 0; double AgentMs = 0.0, EraMs = 0.0, HopeMs = 0.0, AddMs = 0.0; uint32 Digest = 0; };
+		TArray<FScaleLine> Table;
+		bool bCapped = false;
+		for (const int32 Target : Targets)
+		{
+			if (bCapped) { break; }
+			FScaleLine Line;
+			const int32 Want = Target - Sim->GetPopulation();
+			const double A0 = FPlatformTime::Seconds();
+			const int32 Housed = Sim->Debug_AddColonists(Want);
+			Line.AddMs = (FPlatformTime::Seconds() - A0) * 1000.0;
+			Line.N = Sim->GetPopulation();
+			Expect(Housed == Want, FString::Printf(TEXT("N=%d: Debug_AddColonists(%d) housed %d"), Target, Want, Housed));
+			if (Table.Num() == 1)
+			{
+				// Five sols with a thousand at work: the smoothed Hope climbs past the
+				// discovery line (85), so the research and growth paths run in every
+				// measured step from here on. (No birth: that needs 20 sols.)
+				for (int32 K = 0; K < 5 * (int32)(SolLen / EraDt); ++K) { EraStepOnce(); }
+			}
+			// Settle: the first step after a change rebuilds whatever is derived.
+			EraStepOnce();
+			for (int32 K = 0; K < 3; ++K) { AgentStepOnce(); }
+
+			double AgentTotal = 0.0, EraTotal = 0.0, HopeTotal = 0.0;
+			int32 AgentDone = 0, EraDone = 0;
+			for (; AgentDone < AgentReps && !bCapped;)
+			{
+				TopUp(AgentDt);
+				Clock->Debug_AdvanceSimSeconds(AgentDt);
+				const double S0 = FPlatformTime::Seconds();
+				Sim->Debug_StepSim(URHSimClockSubsystem::SubStepSeconds);
+				const double Took = FPlatformTime::Seconds() - S0;
+				AgentTotal += Took; ++AgentDone;
+				bCapped |= Took > CapSeconds;
+			}
+			for (; EraDone < EraReps && !bCapped;)
+			{
+				TopUp(EraDt);
+				Clock->Debug_AdvanceSimSeconds(EraDt);
+				const double S0 = FPlatformTime::Seconds();
+				Sim->EraStep((float)EraDt);
+				const double Took = FPlatformTime::Seconds() - S0;
+				EraTotal += Took; ++EraDone;
+				bCapped |= Took > CapSeconds;
+			}
+			double HopeSink = 0.0;
+			const double H0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < HopeReps; ++K) { HopeSink += Sim->GetColonyHope().Total; }
+			HopeTotal = FPlatformTime::Seconds() - H0;
+			Line.AgentMs = AgentDone > 0 ? AgentTotal * 1000.0 / AgentDone : 0.0;
+			Line.EraMs = EraDone > 0 ? EraTotal * 1000.0 / EraDone : 0.0;
+			Line.HopeMs = HopeTotal * 1000.0 / HopeReps;
+			Line.Digest = Digest();
+			Table.Add(Line);
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE N=%5d | agent %9.3f ms/step (%d steps) | era %9.3f ms/step (%d steps) | hope %9.3f ms/read | add %10.1f ms (%d colonists)%s"),
+				Line.N, Line.AgentMs, AgentDone, Line.EraMs, EraDone, Line.HopeMs, Line.AddMs, Housed, bCapped ? TEXT(" | CAPPED: a step took over 5 s, growth stops here") : TEXT(""));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest N=%d: %08x (hope sink %.6f, smoothed %.3f, %d discoveries)"),
+				Line.N, Line.Digest, HopeSink, Sim->GetHopeSmoothed(), Sim->GetDiscoveryLog().Num());
+			VerifyAt(FString::Printf(TEXT("N=%d"), Line.N));
+		}
+		Expect(!bCapped && Table.Num() == UE_ARRAY_COUNT(Targets), TEXT("every size ran: no step took over 5 s"));
+		Expect(Sim->GetBirthsOnMars() == 0 && Sim->GetPopulation() == (Table.Num() ? Table.Last().N : -1), TEXT("no births muddied the headcount (growth needs 20 sols; the run is about a dozen)"));
+
+		// Evacuation at scale. Only the newest half of the crew is fed (the draw
+		// walks the roster from its last slot down), so the older half goes
+		// unsupported and, after the countdown, is pulled back to orbit - every
+		// removal shifts the slots of everyone after it.
+		if (!bCapped)
+		{
+			const int32 Before = Sim->GetPopulation();
+			const double RationKg = Sim->GetColonistFoodKgPerSol() * EraDt / SolLen;
+			int32 StarvedSteps = 0;
+			for (; StarvedSteps < 90 && Sim->GetPopulation() == Before; ++StarvedSteps)
+			{
+				Sim->AddStock(NFood, (Before / 2 + 0.5) * RationKg - Sim->GetStock(NFood));
+				EraStepOnce();
+			}
+			const int32 Left = Sim->GetPopulation();
+			Expect(Left < Before && Left >= Before / 2 && Left <= Before / 2 + 600,
+				FString::Printf(TEXT("evacuation: %d of %d pulled back after %d starved steps (the unfed half; gardens fed a few more)"), Before - Left, Before, StarvedSteps));
+			Sim->AddStock(NFood, 1.0e8 - Sim->GetStock(NFood));
+			for (int32 K = 0; K < 3; ++K) { EraStepOnce(); }
+			const FRHColonist* Oldest = Sim->GetColonists().Num() ? &Sim->GetColonists()[0] : nullptr;
+			Expect(Sim->FindColonist(1) == nullptr && Oldest && Oldest->Id > Before / 4 && Sim->FindColonist(Oldest->Id) == Oldest,
+				FString::Printf(TEXT("evacuation: the oldest hands are gone, the roster now starts at #%d and every lookup follows the shift"), Oldest ? Oldest->Id : 0));
+			VerifyAt(TEXT("after evacuation"));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest evacuated: %08x (%d left)"), Digest(), Left);
+
+			// Save / load: every derived assignment must come back exactly.
+			const uint32 AssignedBefore = Assignments();
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("scaletest"), Err), FString::Printf(TEXT("save/load: saved %d colonists (%s)"), Left, *Err));
+			FRHCommand Reorder; Reorder.Verb = FName("Assign"); Reorder.Level = WorkCells[2].X; Reorder.Value = (double)WorkCells[2].Y;
+			Sim->EnqueueCommand(Reorder);
+			EraStepOnce();
+			Expect(Assignments() != AssignedBefore, TEXT("save/load: a new Assign order moved the seat plan after the save"));
+			Expect(Sim->LoadColony(TEXT("scaletest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("save/load: loaded (%s)"), *Err));
+			Expect(Assignments() == AssignedBefore, TEXT("save/load: the reload restores every seat, bed, station, capacity and Hope line exactly"));
+			VerifyAt(TEXT("after reload"));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest reloaded: %08x"), Assignments());
+		}
+
+		// Budgets (wall clock, shared machine): about seven times the numbers a
+		// quiet run records, and well under what the old per-step rebuilds cost.
+		if (Table.Num() == UE_ARRAY_COUNT(Targets))
+		{
+			const FScaleLine& At3000 = Table[2];
+			const FScaleLine& At5000 = Table[3];
+			Expect(At3000.AgentMs <= 2.0, FString::Printf(TEXT("budget: agent step at N=3000 %.3f ms (<= 2.0)"), At3000.AgentMs));
+			Expect(At3000.EraMs <= 2.0, FString::Printf(TEXT("budget: era step at N=3000 %.3f ms (<= 2.0)"), At3000.EraMs));
+			Expect(At5000.AgentMs <= 3.0, FString::Printf(TEXT("budget: agent step at N=5000 %.3f ms (<= 3.0)"), At5000.AgentMs));
+			Expect(At5000.EraMs <= 3.0, FString::Printf(TEXT("budget: era step at N=5000 %.3f ms (<= 3.0)"), At5000.EraMs));
+			Expect(At5000.HopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope at N=5000 %.3f ms (<= 0.5)"), At5000.HopeMs));
+			Expect(At5000.AddMs <= 50.0, FString::Printf(TEXT("budget: moving 2,000 colonists in took %.1f ms (<= 50)"), At5000.AddMs));
+		}
+
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	UE_LOG(LogRedHopeSim, Display, TEXT("RHSim headless: era-integrating %d sols (%d one-minute steps/sol)"), Sols, StepsPerSol);
 
 	// Peak surface exposure over the run: a live solar flare multiplies the

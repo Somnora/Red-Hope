@@ -9,6 +9,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/NameAsStringProxyArchive.h"
 #include "Misc/Crc.h"
+#include "Misc/CommandLine.h"
 
 namespace
 {
@@ -72,6 +73,7 @@ void URHSimWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 	Defs = Collection.InitializeDependency<URHDefinitionsSubsystem>();
 	Clock = Collection.InitializeDependency<URHSimClockSubsystem>();
+	bVerifyCaches = FParse::Param(FCommandLine::Get(), TEXT("RHVerifyCaches"));
 }
 
 void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -2462,6 +2464,7 @@ void URHSimWorldSubsystem::RebuildHabTopology()
 	// Pure function of Buildings, rebuilt at every mutation site (AddBuilding,
 	// construction completion, LoadColony). Networks in ascending root (min
 	// member Id), members ascending; the lookup maps are never iterated.
+	++ZoningVersion; // C1: bay ownership moved
 	HabNets.Reset();
 	HabMembers.Reset();
 	HabBayOwner.Reset();
@@ -2779,6 +2782,29 @@ int32 URHSimWorldSubsystem::GetHabBeds(int32 HabId) const
 	return CountHabBeds(HabId); // BM-4: furnished Living bays count their beds
 }
 
+void URHSimWorldSubsystem::RebuildColonistIndex() const
+{
+	ColonistIndexById.Reset();
+	ColonistIndexById.Reserve(Colonists.Num());
+	for (int32 i = 0; i < Colonists.Num(); ++i)
+	{
+		ColonistIndexById.Add(Colonists[i].Id, i);
+	}
+	bColonistIndexDirty = false;
+}
+
+const FRHColonist* URHSimWorldSubsystem::FindColonist(int32 Id) const
+{
+	// The Num check is a belt: an evacuation or a load marks the map dirty, but
+	// a roster edit that forgot to would still trip it on a size change.
+	if (bColonistIndexDirty || ColonistIndexById.Num() != Colonists.Num())
+	{
+		RebuildColonistIndex();
+	}
+	const int32* Index = ColonistIndexById.Find(Id);
+	return Index ? &Colonists[*Index] : nullptr;
+}
+
 int32 URHSimWorldSubsystem::GetHabResidents(int32 HabId) const
 {
 	int32 N = 0;
@@ -2886,6 +2912,25 @@ void URHSimWorldSubsystem::Debug_ForceRateFloor(int32 Level)
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
 	int32 Housed = 0;
+	// C1: occupancy and capacity are counted ONCE per call, then kept current as
+	// each colonist moves in (the roster, the beds, the rated floors and the
+	// networks cannot change inside this loop). Counting them afresh for every
+	// arrival made a crew of K cost K x N.
+	TMap<int32, int32> FloorResidents, HabResidents;
+	TMap<int32, int32> FloorBeds, HabBeds;
+	TArray<int8> NetRatedNow; // per HabNets index: -1 not asked yet, else 0/1
+	if (Count > 0)
+	{
+		for (const FRHColonist& C : Colonists)
+		{
+			++FloorResidents.FindOrAdd(C.HomeLevel);
+			if (C.HomeHab != 0)
+			{
+				++HabResidents.FindOrAdd(C.HomeHab);
+			}
+		}
+		NetRatedNow.Init(-1, HabNets.Num());
+	}
 	for (int32 i = 0; i < Count; ++i)
 	{
 		// Shallowest certified floor with a free bed (deterministic fill
@@ -2899,15 +2944,12 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 			{
 				continue;
 			}
-			int32 Residents = 0;
-			for (const FRHColonist& C : Colonists)
+			int32* Beds = FloorBeds.Find(Level);
+			if (!Beds)
 			{
-				if (C.HomeLevel == Level)
-				{
-					++Residents;
-				}
+				Beds = &FloorBeds.Add(Level, CountFloorBeds(Level, nullptr));
 			}
-			if (Residents < CountFloorBeds(Level, nullptr))
+			if (FloorResidents.FindRef(Level) < *Beds)
 			{
 				Home = Level;
 				bFound = true;
@@ -2916,13 +2958,22 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 		}
 		for (int32 n = 0; bVaultRated && !bFound && n < HabNets.Num(); ++n)
 		{
-			if (!IsNetRated(HabNets[n]))
+			if (NetRatedNow[n] < 0)
+			{
+				NetRatedNow[n] = IsNetRated(HabNets[n]) ? 1 : 0;
+			}
+			if (NetRatedNow[n] == 0)
 			{
 				continue;
 			}
 			for (const int32 Id : HabNets[n].Members)
 			{
-				if (GetHabResidents(Id) < GetHabBeds(Id))
+				int32* Beds = HabBeds.Find(Id);
+				if (!Beds)
+				{
+					Beds = &HabBeds.Add(Id, GetHabBeds(Id));
+				}
+				if (HabResidents.FindRef(Id) < *Beds)
 				{
 					HomeHab = Id;
 					bFound = true;
@@ -2950,6 +3001,19 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 		C.HomeLevel = HomeHab ? 0 : Home;
 		C.HomeHab = HomeHab;
 		Colonists.Add(C);
+		++ColonistSetVersion;
+		if (!bColonistIndexDirty)
+		{
+			ColonistIndexById.Add(C.Id, Colonists.Num() - 1);
+		}
+		if (HomeHab)
+		{
+			++HabResidents.FindOrAdd(HomeHab);
+		}
+		else
+		{
+			++FloorResidents.FindOrAdd(Home);
+		}
 		bEverHadCrew = true; // M4 Gate D: the collapse ending checks "had a crew, lost it"
 		++Housed;
 		if (HomeHab)
@@ -3288,6 +3352,11 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	// plot (tempo on the YIELD, not the fixed physical Water draw). Exactly 1.0
 	// at zero population, so the pure-mechanics -garden regression is untouched.
 	const double HumanTempo = GetHumanWorkTempo();
+	// C1: the gardeners' mastery is the same for every bed in a step (skills only
+	// accrue in StepPopulation), so it is read once, on first use - it was one
+	// walk of the whole roster per planted bed.
+	bool bGardenSkillKnown = false;
+	double GardenSkillMul = 1.0;
 	for (auto It = PlantedCells.CreateIterator(); It; ++It)
 	{
 		const int32 Level = It->X, Cell = It->Y;
@@ -3375,8 +3444,13 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		}
 		// Yield rides work tempo, light, and now the gardeners' MASTERY (alive
 		// pass): a seasoned garden crew doubles the take.
+		if (!bGardenSkillKnown)
+		{
+			GardenSkillMul = GetCrewSkillMul(NGarden);
+			bGardenSkillKnown = true;
+		}
 		const double YieldKg = (Crop ? (double)Crop->YieldKgPerSol : GardenFoodKgPerSolPerCell)
-			* CellMul * HumanTempo * LightFactor * GetCrewSkillMul(FName("Garden")) * DtSols;
+			* CellMul * HumanTempo * LightFactor * GardenSkillMul * DtSols;
 		AddStock(NFood, YieldKg);
 		// Soil depletion (Gate B): mature production spends the bed. Fertilizer
 		// refills it in place; an empty colony larder lets the cell revert to
@@ -3481,7 +3555,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 				int32 NewId = 0;
 				for (const TPair<int32, FIntVector>& CS : ColonistStations) { NewId = FMath::Max(NewId, CS.Key); }
 				FString Name;
-				for (const FRHColonist& C : Colonists) { if (C.Id == NewId) { Name = C.Name; } }
+				if (const FRHColonist* NewHand = FindColonist(NewId)) { Name = NewHand->Name; }
 				const FString Text = FString::Printf(TEXT("%s took charge of an empty %s seat."), *Name, *GetColonistJob(NewId).ToString().ToLower());
 				OnCrewMoment.Broadcast((uint8)ERHCrewMoment::JoinWork, NewId, 0, Text);
 				UE_LOG(LogRedHopeSim, Display, TEXT("STAFF lazy fill: %s (staffed %d)"), *Text, StaffedSeats);
@@ -3518,6 +3592,20 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	int32 SuppliedThisStep = 0;
 	double WaterDrawnThisStep = 0.0; // for greywater reclaim + potability
 	bool bAnyHungry = false; // D4a: someone failed the food draw this step
+	// C1: the evacuation countdown is the same for everyone this step (nothing in
+	// the loop moves a floor's rating, a room or a building), so the infirmary
+	// scan runs once, on first need - not once per unsupported colonist.
+	bool bEvacSolsKnown = false;
+	double EvacSolsNow = 0.0;
+	const auto EvacSolsThisStep = [&]()
+	{
+		if (!bEvacSolsKnown)
+		{
+			EvacSolsNow = GetEffectiveEvacSols();
+			bEvacSolsKnown = true;
+		}
+		return EvacSolsNow;
+	};
 	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
 	{
 		FRHColonist& C = Colonists[i];
@@ -3613,7 +3701,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 				: (!bWatered ? TEXT("water tanks empty") : TEXT("food stores empty"));
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
-				*C.Name, Leg, GetEffectiveEvacSols()));
+				*C.Name, Leg, EvacSolsThisStep()));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="), *C.Name, Leg);
 		}
 		C.bSupported = bNowSupported;
@@ -3626,7 +3714,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		C.UnsupportedSimSeconds += SubDt;
 		// Infirmary (station tiers, Gate A): an online infirmary stretches the
 		// countdown - more time to fix the missing leg (prevention framing).
-		const double EvacSols = GetEffectiveEvacSols();
+		const double EvacSols = EvacSolsThisStep();
 		if (C.UnsupportedSimSeconds >= EvacSols * URHSimClockSubsystem::SolLengthSimSeconds)
 		{
 			// Abstract, prevention-framed consequence (mental-health directive):
@@ -3638,6 +3726,8 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (unsupported %.1f sols) ==="),
 				*C.Name, EvacSols);
 			Colonists.RemoveAt(i);
+			bColonistIndexDirty = true; // everyone after i moved down one slot
+			++ColonistSetVersion;
 		}
 	}
 	ComfortsSupplied = SuppliedThisStep;
@@ -3861,6 +3951,7 @@ bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName Roo
 		Cells.SetNum(Carved); // new carves default undesignated
 	}
 	Cells[CellIndex] = RoomName;
+	++ZoningVersion; // C1: a re-zoned cell can change who has a bed
 	{
 		const FRHRoomRow* NewRow = (Defs && !RoomName.IsNone()) ? Defs->GetRoom(RoomName) : nullptr;
 		if (!NewRow || !(NewRow->Function == FName("Lab") || NewRow->Function == FName("Workstation") || NewRow->Function == FName("Garden")))
@@ -3988,6 +4079,7 @@ bool URHSimWorldSubsystem::DesignateBay(int32 HabId, int32 Bay, FName RoomName, 
 		Rooms.SetNum(G.X * G.Y);
 	}
 	Rooms[Bay] = RoomName;
+	++ZoningVersion; // C1: a re-zoned bay can change who has a bed
 	if (!Row || !IsSeatFunction(Row->Function))
 	{
 		SeatPriority.Remove(FIntVector(0, Bay, HabId));
@@ -4006,11 +4098,11 @@ void URHSimWorldSubsystem::RefreshJobs()
 	// per station; LabYieldSeatSum / WorkstationYieldSeatSum accumulate each
 	// filled seat's YieldMul (station tiers). With no assignments, no modules
 	// and instant fill, this is the pre-T1 walk exactly.
+	static const FName NLab(TEXT("Lab")), NWorkstation(TEXT("Workstation")), NGarden(TEXT("Garden"));
 	ColonistJobs.Reset();
 	ColonistStations.Reset();
 	StationFilled.Reset();
 	StationCapacity.Reset();
-	ColonistBedPiece.Reset();
 	ColonistSeatPiece.Reset();
 	LabYieldSeatSum = 0.0;
 	WorkstationYieldSeatSum = 0.0;
@@ -4018,20 +4110,28 @@ void URHSimWorldSubsystem::RefreshJobs()
 	LastOpenSeats = 0;
 	if (Colonists.Num() == 0 || !Defs)
 	{
+		ColonistBedPiece.Reset();
+		bBedKeyValid = false;
 		return;
 	}
 	TArray<int32> ByIdOrder;
+	ByIdOrder.Reserve(Colonists.Num());
+	bool bByIdSorted = true;
 	for (const FRHColonist& C : Colonists)
 	{
+		bByIdSorted &= ByIdOrder.Num() == 0 || ByIdOrder.Last() <= C.Id;
 		ByIdOrder.Add(C.Id);
 	}
-	ByIdOrder.Sort();
+	if (!bByIdSorted)
+	{
+		ByIdOrder.Sort(); // the roster is Id-ascending by construction; sorting a sorted list is a no-op
+	}
 
 	struct FStation { FIntVector Key; const FRHRoomRow* Row; };
 	TArray<FStation> Stations;
 	const auto IsSeatRow = [](const FRHRoomRow* Row)
 	{
-		return Row && Row->SliceActive && (Row->Function == FName("Lab") || Row->Function == FName("Workstation") || Row->Function == FName("Garden"));
+		return Row && Row->SliceActive && (Row->Function == NLab || Row->Function == NWorkstation || Row->Function == NGarden);
 	};
 	for (int32 Level = -1; Level >= -MaxDepth; --Level)
 	{
@@ -4159,11 +4259,11 @@ void URHSimWorldSubsystem::RefreshJobs()
 			}
 			++StationFilled.FindOrAdd(S.Key);
 			NonPriorityFilled += bAssigned ? 0 : 1;
-			if (S.Row->Function == FName("Lab"))
+			if (S.Row->Function == NLab)
 			{
 				LabYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
 			}
-			else if (S.Row->Function == FName("Workstation"))
+			else if (S.Row->Function == NWorkstation)
 			{
 				WorkstationYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
 			}
@@ -4174,7 +4274,41 @@ void URHSimWorldSubsystem::RefreshJobs()
 	StaffedSeats = bLazy ? FMath::Min(StaffedSeats, NonPriorityFilled) : NonPriorityFilled;
 	LastIdleColonists = ByIdOrder.Num() - Next;
 	LastOpenSeats = NonPrioritySeats - NonPriorityFilled;
-	BuildBedAssignments(ByIdOrder);
+	// C1: who sleeps in which bed is a pure function of the roster, the furniture
+	// and the zoning, so it is re-derived only when one of the three has moved
+	// (it was an every-step O(N^2) before). No furniture = no pieces, as before.
+	if (Furniture.Num() == 0)
+	{
+		ColonistBedPiece.Reset();
+		bBedKeyValid = false;
+	}
+	else if (!bBedKeyValid || BedKeyColonists != ColonistSetVersion || BedKeyFurniture != FurnitureVersion || BedKeyZoning != ZoningVersion)
+	{
+		ColonistBedPiece.Reset();
+		BuildBedAssignments(ByIdOrder);
+		bBedKeyValid = true;
+		BedKeyColonists = ColonistSetVersion;
+		BedKeyFurniture = FurnitureVersion;
+		BedKeyZoning = ZoningVersion;
+	}
+	else if (bVerifyCaches)
+	{
+		// The cache is about to be reused: derive the assignment again and compare.
+		const TMap<int32, int32> Reused = ColonistBedPiece;
+		ColonistBedPiece.Reset();
+		BuildBedAssignments(ByIdOrder);
+		bool bSame = Reused.Num() == ColonistBedPiece.Num();
+		for (const TPair<int32, int32>& Piece : Reused)
+		{
+			const int32* Fresh = ColonistBedPiece.Find(Piece.Key);
+			bSame &= Fresh && *Fresh == Piece.Value;
+		}
+		if (!bSame)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the bed assignment cache is stale (%d reused, %d re-derived; colonists v%u, furniture v%u, zoning v%u)"),
+				Reused.Num(), ColonistBedPiece.Num(), ColonistSetVersion, FurnitureVersion, ZoningVersion);
+		}
+	}
 }
 
 void URHSimWorldSubsystem::GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const
@@ -4289,7 +4423,22 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		const FRHCellFurnish* CF = FurnishedCells.Find(K);
 		return (CF && CF->BedPieces > 0) ? CF->Beds : 1;
 	};
-	TSet<FName> TypesCounted; // per room type per rated floor
+	static const FName NLiving(TEXT("Living")), NHallway(TEXT("Hallway"));
+	// C1: a room row's refused tags, split once per call. They were re-split for
+	// every candidate (emitter, refuser) pair - a string parse in a C^2 loop.
+	// The reference RefusesOf returns is valid until the next call.
+	TMap<const FRHRoomRow*, TArray<FString>> RefuseCache;
+	const auto RefusesOf = [&RefuseCache](const FRHRoomRow* Row) -> const TArray<FString>&
+	{
+		TArray<FString>* Found = RefuseCache.Find(Row);
+		if (!Found)
+		{
+			TArray<FString> Tags;
+			Row->RefusesTags.ParseIntoArray(Tags, TEXT(";"));
+			Found = &RefuseCache.Add(Row, MoveTemp(Tags));
+		}
+		return *Found;
+	};
 	for (const auto& Pair : FloorRoomCells)
 	{
 		const int32 Level = Pair.Key;
@@ -4298,6 +4447,11 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			continue; // rooms function only on certified floors
 		}
 		const TArray<FName>& Cells = Pair.Value;
+		// Each cell's live room row (null = none, or dormant), looked up once.
+		TArray<const FRHRoomRow*> Rows;
+		Rows.SetNumZeroed(Cells.Num());
+		TArray<FName> FunctionsCounted; // per room type per rated floor
+		bool bAnyEmitter = false;
 		for (int32 i = 0; i < Cells.Num(); ++i)
 		{
 			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Cells[i]) : nullptr;
@@ -4305,16 +4459,17 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			{
 				continue;
 			}
-			if (Row->Function == FName("Living"))
+			Rows[i] = Row;
+			bAnyEmitter |= !Row->EmitsTags.IsEmpty();
+			if (Row->Function == NLiving)
 			{
 				LQCells += LivingWeight(FIntVector(Level, i, 0)); // housing quality, counted below - never double-dipped
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
-				const FName FloorType(*FString::Printf(TEXT("%d:%s"), Level, *Row->Function.ToString()));
-				if (!TypesCounted.Contains(FloorType))
+				if (!FunctionsCounted.Contains(Row->Function))
 				{
-					TypesCounted.Add(FloorType);
+					FunctionsCounted.Add(Row->Function);
 					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
 				}
 			}
@@ -4325,29 +4480,73 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		// the penalty is architectural and permanent. At distance 2 a Hallway
 		// cell directly between them, with the floor's circulation running,
 		// cancels it (partition + filtration - the canonical cure).
+		// C1: found by looking at each emitter's twelve neighbours on a dense
+		// grid of the floor's spiral (it was every emitter x every cell, then a
+		// third scan for the hallway - O(C^2) to O(C^3) with string splits). Each
+		// (emitter, refuser) pair is still counted once; only the search changed.
+		if (!bAnyEmitter)
+		{
+			continue;
+		}
+		TArray<FIntPoint> Pos;
+		Pos.SetNumUninitialized(Cells.Num());
+		{
+			int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0; // SpiralCell's walk, once
+			for (int32 i = 0; i < Cells.Num(); ++i)
+			{
+				X += DX; Y += DY;
+				Pos[i] = FIntPoint(X, Y);
+				if (++LegPos == LegLen)
+				{
+					LegPos = 0;
+					const int32 T = DX; DX = -DY; DY = T;
+					if (++LegsDone == 2)
+					{
+						LegsDone = 0;
+						++LegLen;
+					}
+				}
+			}
+		}
+		FIntPoint Lo = Pos[0], Hi = Pos[0];
+		for (const FIntPoint& P : Pos)
+		{
+			Lo = FIntPoint(FMath::Min(Lo.X, P.X), FMath::Min(Lo.Y, P.Y));
+			Hi = FIntPoint(FMath::Max(Hi.X, P.X), FMath::Max(Hi.Y, P.Y));
+		}
+		const int32 GridW = Hi.X - Lo.X + 1;
+		TArray<int32> Grid;
+		Grid.Init(INDEX_NONE, GridW * (Hi.Y - Lo.Y + 1));
+		for (int32 i = 0; i < Cells.Num(); ++i)
+		{
+			Grid[(Pos[i].Y - Lo.Y) * GridW + (Pos[i].X - Lo.X)] = i;
+		}
+		const auto CellAt = [&](const FIntPoint& P) -> int32
+		{
+			return (P.X < Lo.X || P.X > Hi.X || P.Y < Lo.Y || P.Y > Hi.Y) ? (int32)INDEX_NONE : Grid[(P.Y - Lo.Y) * GridW + (P.X - Lo.X)];
+		};
+		static const FIntPoint Reach[12] = {
+			FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1),
+			FIntPoint(2, 0), FIntPoint(-2, 0), FIntPoint(0, 2), FIntPoint(0, -2),
+			FIntPoint(1, 1), FIntPoint(1, -1), FIntPoint(-1, 1), FIntPoint(-1, -1) };
+		bool bCircKnown = false, bCirculated = false;
 		for (int32 E = 0; E < Cells.Num(); ++E)
 		{
-			const FRHRoomRow* ERow = Defs ? Defs->GetRoom(Cells[E]) : nullptr;
-			if (!ERow || !ERow->SliceActive || ERow->EmitsTags.IsEmpty())
+			const FRHRoomRow* ERow = Rows[E];
+			if (!ERow || ERow->EmitsTags.IsEmpty())
 			{
 				continue;
 			}
 			TArray<FString> Emits;
 			ERow->EmitsTags.ParseIntoArray(Emits, TEXT(";"));
-			const FIntPoint EPos = SpiralCell(E);
-			for (int32 R = 0; R < Cells.Num(); ++R)
+			for (const FIntPoint& Off : Reach)
 			{
-				if (R == E)
+				const int32 R = CellAt(Pos[E] + Off);
+				if (R == INDEX_NONE || !Rows[R] || Rows[R]->RefusesTags.IsEmpty())
 				{
 					continue;
 				}
-				const FRHRoomRow* RRow = Defs ? Defs->GetRoom(Cells[R]) : nullptr;
-				if (!RRow || !RRow->SliceActive || RRow->RefusesTags.IsEmpty())
-				{
-					continue;
-				}
-				TArray<FString> Refuses;
-				RRow->RefusesTags.ParseIntoArray(Refuses, TEXT(";"));
+				const TArray<FString>& Refuses = RefusesOf(Rows[R]);
 				bool bOffends = false;
 				for (const FString& Tag : Emits)
 				{
@@ -4361,32 +4560,31 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				{
 					continue;
 				}
-				const FIntPoint RPos = SpiralCell(R);
-				const int32 Dist = FMath::Abs(EPos.X - RPos.X) + FMath::Abs(EPos.Y - RPos.Y);
-				if (Dist > 2)
+				if (FMath::Abs(Off.X) + FMath::Abs(Off.Y) == 2)
 				{
-					continue; // out of reach
-				}
-				if (Dist == 2 && IsFloorCirculated(Level))
-				{
-					// A Hallway on any cell 4-adjacent to BOTH ends partitions
-					// the pair (straight runs have one such cell, diagonals two).
-					bool bPartitioned = false;
-					for (int32 H = 0; H < Cells.Num() && !bPartitioned; ++H)
+					if (!bCircKnown)
 					{
-						const FRHRoomRow* HRow = Defs ? Defs->GetRoom(Cells[H]) : nullptr;
-						if (!HRow || !HRow->SliceActive || HRow->Function != FName("Hallway"))
+						bCirculated = IsFloorCirculated(Level);
+						bCircKnown = true;
+					}
+					if (bCirculated)
+					{
+						// A Hallway on any cell 4-adjacent to BOTH ends partitions
+						// the pair (straight runs have one such cell, diagonals two).
+						bool bPartitioned = false;
+						for (int32 U = 0; U < 4 && !bPartitioned; ++U)
+						{
+							const int32 H = CellAt(Pos[E] + Reach[U]);
+							if (H != INDEX_NONE && Rows[H] && Rows[H]->Function == NHallway)
+							{
+								const FIntPoint Gap = Pos[H] - Pos[R];
+								bPartitioned = FMath::Abs(Gap.X) + FMath::Abs(Gap.Y) == 1;
+							}
+						}
+						if (bPartitioned)
 						{
 							continue;
 						}
-						const FIntPoint HPos = SpiralCell(H);
-						const int32 DE = FMath::Abs(HPos.X - EPos.X) + FMath::Abs(HPos.Y - EPos.Y);
-						const int32 DR = FMath::Abs(HPos.X - RPos.X) + FMath::Abs(HPos.Y - RPos.Y);
-						bPartitioned = (DE == 1 && DR == 1);
-					}
-					if (bPartitioned)
-					{
-						continue;
 					}
 				}
 				++Out.OffendedPairs;
@@ -4417,6 +4615,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				BayKeys.Add(FIntVector(0, Bay, HabId));
 			}
 		}
+		TArray<FName> FunctionsCounted; // per room type per network
 		for (int32 RI = 0; RI < Rows.Num(); ++RI)
 		{
 			const FRHRoomRow* Row = Rows[RI];
@@ -4424,16 +4623,15 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			{
 				continue;
 			}
-			if (Row->Function == FName("Living"))
+			if (Row->Function == NLiving)
 			{
 				LQCells += LivingWeight(BayKeys[RI]);
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
-				const FName NetType(*FString::Printf(TEXT("N%d:%s"), Net.Root, *Row->Function.ToString()));
-				if (!TypesCounted.Contains(NetType))
+				if (!FunctionsCounted.Contains(Row->Function))
 				{
-					TypesCounted.Add(NetType);
+					FunctionsCounted.Add(Row->Function);
 					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
 				}
 			}
@@ -4453,15 +4651,18 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				{
 					continue;
 				}
-				TArray<FString> Refuses;
-				Rows[R]->RefusesTags.ParseIntoArray(Refuses, TEXT(";"));
+				const int32 Dist = FMath::Abs(Pos[E].X - Pos[R].X) + FMath::Abs(Pos[E].Y - Pos[R].Y);
+				if (Dist > 2)
+				{
+					continue;
+				}
+				const TArray<FString>& Refuses = RefusesOf(Rows[R]);
 				bool bOffends = false;
 				for (const FString& Tag : Emits)
 				{
 					bOffends |= Refuses.Contains(Tag);
 				}
-				const int32 Dist = FMath::Abs(Pos[E].X - Pos[R].X) + FMath::Abs(Pos[E].Y - Pos[R].Y);
-				if (!bOffends || Dist > 2)
+				if (!bOffends)
 				{
 					continue;
 				}
@@ -4470,7 +4671,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 					bool bPartitioned = false;
 					for (int32 Hx = 0; Hx < Rows.Num() && !bPartitioned; ++Hx)
 					{
-						if (!Rows[Hx] || Rows[Hx]->Function != FName("Hallway"))
+						if (!Rows[Hx] || Rows[Hx]->Function != NHallway)
 						{
 							continue;
 						}
@@ -6499,6 +6700,7 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 {
 	// Passive presence check: any slice-active Infirmary-function cell on a
 	// RATED floor. Cheap at colony scale (a handful of floors x cells).
+	static const FName NInfirmary(TEXT("Infirmary"));
 	if (!Defs)
 	{
 		return false;
@@ -6510,7 +6712,7 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 			for (const FName& CellRoom : *Cells)
 			{
 				const FRHRoomRow* Row = Defs->GetRoom(CellRoom);
-				if (Row && Row->SliceActive && Row->Function == FName("Infirmary"))
+				if (Row && Row->SliceActive && Row->Function == NInfirmary)
 				{
 					return true;
 				}
@@ -6530,7 +6732,7 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 			for (int32 Bay = 0; Bay < M.NX * M.NY; ++Bay)
 			{
 				const FRHRoomRow* Row = Defs->GetRoom(GetBayRoom(HabId, Bay));
-				if (Row && Row->SliceActive && Row->Function == FName("Infirmary"))
+				if (Row && Row->SliceActive && Row->Function == NInfirmary)
 				{
 					return true;
 				}
@@ -6541,7 +6743,7 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 	for (const FRHBuildingInstance& B : Buildings)
 	{
 		const FRHRoomRow* Row = GetProvidedRoom(B, /*bRequireOnline*/ true);
-		if (Row && Row->Function == FName("Infirmary"))
+		if (Row && Row->Function == NInfirmary)
 		{
 			return true;
 		}
@@ -7088,6 +7290,7 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	}
 	RatedHabs.Remove(Id);
 	HabBayRooms.Remove(Id);
+	++ZoningVersion; // C1: its bays are gone
 	HabNetsNotedSmall.Remove(Id);
 	// BM-6: the fittings on its walls (their refund is in the salvage too).
 	TSet<int32> WallsGone;
@@ -7721,6 +7924,13 @@ uint32 URHSimWorldSubsystem::FurnitureMask(int32 Slot, const FIntPoint& Size)
 
 const FRHFurnitureInstance* URHSimWorldSubsystem::FindFurniture(int32 Id) const
 {
+	// C1: O(1) through the index RebuildFurnitureCache keeps. The size check and
+	// the Id check make a stale index fall back to the scan, never a wrong piece.
+	if (FurnitureIndexById.Num() == Furniture.Num())
+	{
+		const int32* Index = FurnitureIndexById.Find(Id);
+		return (Index && Furniture.IsValidIndex(*Index) && Furniture[*Index].Id == Id) ? &Furniture[*Index] : nullptr;
+	}
 	return Furniture.FindByPredicate([Id](const FRHFurnitureInstance& F) { return F.Id == Id; });
 }
 
@@ -7819,9 +8029,15 @@ int32 URHSimWorldSubsystem::AnchorSlotFor(const FVector2D& LocalFromCellMinCm, i
 
 void URHSimWorldSubsystem::RebuildFurnitureCache()
 {
+	++FurnitureVersion; // C1: the keyed caches (bed assignment) re-derive on their next read
 	FurnishedCells.Reset();
-	for (const FRHFurnitureInstance& F : Furniture)
+	FurnitureIndexById.Reset();
+	FurnitureIndexById.Reserve(Furniture.Num());
+	ComfortPieces.Reset();
+	for (int32 FurnIndex = 0; FurnIndex < Furniture.Num(); ++FurnIndex)
 	{
+		const FRHFurnitureInstance& F = Furniture[FurnIndex];
+		FurnitureIndexById.Add(F.Id, FurnIndex);
 		FRHCellFurnish& CF = FurnishedCells.FindOrAdd(F.Key);
 		CF.Ids.Add(F.Id);
 		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
@@ -7830,6 +8046,10 @@ void URHSimWorldSubsystem::RebuildFurnitureCache()
 			continue;
 		}
 		CF.Occupied |= FurnitureMask(F.Slot, GetFurnitureSize(*Row, F.Rot));
+		if (Row->HopeComfort > 0.f)
+		{
+			ComfortPieces.Add(FurnIndex);
+		}
 		if (Row->Provides == NAME_FurnBed)
 		{
 			CF.Beds += Row->Capacity;
@@ -7885,8 +8105,9 @@ bool URHSimWorldSubsystem::IsFurnishKeyValid(const FIntVector& Key, FString* Out
 
 bool URHSimWorldSubsystem::IsLivingKey(const FIntVector& Key) const
 {
+	static const FName NLiving(TEXT("Living"));
 	const FRHRoomRow* Room = Defs ? Defs->GetRoom(GetCellRoom(Key)) : nullptr;
-	return Room && Room->SliceActive && Room->Function == FName("Living");
+	return Room && Room->SliceActive && Room->Function == NLiving;
 }
 
 bool URHSimWorldSubsystem::IsFurnitureCellWorking(const FIntVector& Key) const
@@ -8060,29 +8281,56 @@ int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int32>* Exclu
 	}
 	// Every carved cell holds the legacy beds, except a Living cell with bed
 	// pieces, which holds exactly its beds.
-	TMap<int32, int32> CellBeds;
-	for (const FRHFurnitureInstance& F : Furniture)
+	int32 BedCells = 0, Sum = 0;
+	if (!Exclude)
 	{
-		if (F.Key.Z != 0 || F.Key.X != Level || (Exclude && Exclude->Contains(F.Id)))
+		// C1: read off the per-cell tallies RebuildFurnitureCache keeps (a cell's
+		// Beds is the capacity of its bed pieces) - one entry per furnished cell,
+		// not one pass over every piece with a row lookup each. Integer sums:
+		// the map's visiting order cannot matter.
+		for (const TPair<FIntVector, FRHCellFurnish>& Cell : FurnishedCells)
 		{
-			continue;
+			if (Cell.Key.Z != 0 || Cell.Key.X != Level || Cell.Value.BedPieces == 0 || !IsLivingKey(Cell.Key))
+			{
+				continue;
+			}
+			++BedCells;
+			Sum += Cell.Value.Beds;
 		}
-		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
-		if (Row && Row->Provides == NAME_FurnBed && IsLivingKey(F.Key))
+	}
+	else
+	{
+		// What-if (a sale preview): the same count with some pieces taken away.
+		TMap<int32, int32> CellBeds;
+		for (const FRHFurnitureInstance& F : Furniture)
 		{
-			CellBeds.FindOrAdd(F.Key.Y) += Row->Capacity;
+			if (F.Key.Z != 0 || F.Key.X != Level || Exclude->Contains(F.Id))
+			{
+				continue;
+			}
+			const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
+			if (Row && Row->Provides == NAME_FurnBed && IsLivingKey(F.Key))
+			{
+				CellBeds.FindOrAdd(F.Key.Y) += Row->Capacity;
+			}
+		}
+		BedCells = CellBeds.Num();
+		for (const auto& P : CellBeds)
+		{
+			Sum += P.Value; // an integer sum: order-free
 		}
 	}
-	if (CellBeds.Num() == 0)
+	const int32 Beds = BedCells == 0 ? (int32)(Carved * ColonistsPerCell) : (int32)((Carved - BedCells) * ColonistsPerCell) + Sum;
+	if (bVerifyCaches && !Exclude)
 	{
-		return (int32)(Carved * ColonistsPerCell);
+		const TSet<int32> Nothing;
+		const int32 PerPiece = CountFloorBeds(Level, &Nothing); // the original per-piece count
+		if (PerPiece != Beds)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: floor %d bed count %d from the cell tallies, %d counting piece by piece"), Level, Beds, PerPiece);
+		}
 	}
-	int32 Sum = 0;
-	for (const auto& P : CellBeds)
-	{
-		Sum += P.Value; // an integer sum: order-free
-	}
-	return (int32)((Carved - CellBeds.Num()) * ColonistsPerCell) + Sum;
+	return Beds;
 }
 
 int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TSet<int32>* Exclude) const
@@ -8160,15 +8408,35 @@ int32 URHSimWorldSubsystem::GetCellSeats(const FIntVector& Key) const
 double URHSimWorldSubsystem::GetFurnishingsHope(double* OutRaw) const
 {
 	double Sum = 0.0;
-	for (const FRHFurnitureInstance& F : Furniture)
+	// C1: only the pieces that lift Hope, in the piece order they were always
+	// summed in (a Hope-less bunk bed added nothing but a row lookup per call).
+	// Whether a row may stand in a room is a string parse, so each (row, room
+	// function) answer is kept for the rest of the call.
+	struct FStandsIn { const FRHFurnitureRow* Row; FName Function; bool bAllowed; };
+	TArray<FStandsIn, TInlineAllocator<16>> StandsIn;
+	const auto Allowed = [&StandsIn](const FRHFurnitureRow& Piece, FName Function)
 	{
+		for (const FStandsIn& Known : StandsIn)
+		{
+			if (Known.Row == &Piece && Known.Function == Function)
+			{
+				return Known.bAllowed;
+			}
+		}
+		const bool bAllowed = URHDefinitionsSubsystem::FurnitureAllowsFunction(Piece, Function);
+		StandsIn.Add({ &Piece, Function, bAllowed });
+		return bAllowed;
+	};
+	for (const int32 PieceIndex : ComfortPieces)
+	{
+		const FRHFurnitureInstance& F = Furniture[PieceIndex];
 		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F.Row) : nullptr;
 		if (!Row || Row->HopeComfort <= 0.f || !IsFurnitureCellWorking(F.Key))
 		{
 			continue;
 		}
 		const FRHRoomRow* Room = Defs->GetRoom(GetCellRoom(F.Key));
-		if (Room && URHDefinitionsSubsystem::FurnitureAllowsFunction(*Row, Room->Function))
+		if (Room && Allowed(*Row, Room->Function))
 		{
 			Sum += Row->HopeComfort;
 		}
@@ -8395,7 +8663,7 @@ void URHSimWorldSubsystem::BuildBedAssignments(const TArray<int32>& ByIdOrder)
 	TMap<FIntPoint, int32> NextSlot;
 	for (const int32 Id : ByIdOrder)
 	{
-		const FRHColonist* Col = Colonists.FindByPredicate([Id](const FRHColonist& X) { return X.Id == Id; });
+		const FRHColonist* Col = FindColonist(Id);
 		if (!Col)
 		{
 			continue;
@@ -10050,6 +10318,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Clock->Debug_SetSimSeconds(SimSeconds);
 	Clock->SetSpeed(1.f);
 	LastAutosaveSol = Clock->GetSol();
+	// C1: the roster, the zoning and the furniture all arrived wholesale, so every
+	// derived lookup and keyed cache is dropped and rebuilt from what loaded.
+	bColonistIndexDirty = true;
+	++ColonistSetVersion;
+	++ZoningVersion;
+	bBedKeyValid = false;
 	RefreshJobs(); // derived, never saved - rebuilt from the loaded roster + rooms
 
 	// Transient edge state re-derives from the loaded clock: a mid-storm load

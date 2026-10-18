@@ -435,6 +435,9 @@ public:
 	// floor's fill and Food from the pool - the habitability chain's first
 	// consumers. Sustained loss of support evacuates them back to orbit.
 	const TArray<FRHColonist>& GetColonists() const { return Colonists; }
+	// A colonist by Id in O(1) (C1: the Id -> index map is derived, never saved,
+	// and kept in step with arrivals, evacuations and loads). Null if no such Id.
+	const FRHColonist* FindColonist(int32 Id) const;
 	int32 GetPopulation() const { return Colonists.Num(); }
 	// Total certified beds and the free remainder (capacity minus population).
 	int32 GetHousingCapacity() const;
@@ -454,6 +457,10 @@ public:
 	// Harness: set the Phase-1 vault flag without the milestone (BM-1 tests:
 	// surface beds open to crew only once the vault is certified).
 	void Debug_SetVaultRated(bool bRated) { bVaultRated = bRated; }
+	// C1 harness: one agent-band sub-step (StepSim is private). The -scale suite
+	// times it next to EraStep; the caller advances the clock first, as the
+	// era-driving suites do.
+	void Debug_StepSim(float SubDt) { StepSim(SubDt); }
 	// BM-3 harness: post tasks, read one, and stock a given building's store.
 	void Debug_StepTaskBoard() { StepTaskBoard(); }
 	bool Debug_GetTask(int32 TaskId, FRHTask& Out) const;
@@ -741,7 +748,11 @@ public:
 	void GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const;
 	static constexpr int32 MaxSeatPriority = 32;
 	// A work station's function: its seats take colonists.
-	static bool IsSeatFunction(FName Fn) { return Fn == FName("Lab") || Fn == FName("Workstation") || Fn == FName("Garden"); }
+	static bool IsSeatFunction(FName Fn)
+	{
+		static const FName NLab(TEXT("Lab")), NWorkstation(TEXT("Workstation")), NGarden(TEXT("Garden"));
+		return Fn == NLab || Fn == NWorkstation || Fn == NGarden;
+	}
 	// Lazy seat fill (T3): with LazySeatFillSols > 0, unassigned seats are
 	// not filled at once - an idle colonist takes charge of an open seat each
 	// LazySeatFillSols. 0 (the shipped default) = instant fill, as before.
@@ -1325,6 +1336,26 @@ private:
 	TMap<FIntVector, FRHCellFurnish> FurnishedCells;
 	TMap<int32, int32> ColonistBedPiece;     // derived (RefreshJobs)
 	TMap<int32, int32> ColonistSeatPiece;    // derived (RefreshJobs)
+	// C1 (living-city foundations): derived lookups and change counters. Nothing
+	// here is saved; every one is rebuilt on load or by the call that changes
+	// its input, so a load can never leave a stale copy.
+	TMap<int32, int32> FurnitureIndexById;   // piece Id -> Furniture index (RebuildFurnitureCache)
+	TArray<int32> ComfortPieces;             // Furniture indices of pieces that lift Hope, ascending (RebuildFurnitureCache)
+	uint32 FurnitureVersion = 1;             // bumped by RebuildFurnitureCache
+	uint32 ZoningVersion = 1;                // bumped when a cell/bay is re-zoned, a hab goes, or a colony loads
+	uint32 ColonistSetVersion = 1;           // bumped when Colonists gains, loses or reloads an entry
+	// The bed assignment is a pure function of (colonist roster, furniture,
+	// zoning): RefreshJobs re-derives it only when one of the three has moved.
+	bool bBedKeyValid = false;
+	uint32 BedKeyColonists = 0, BedKeyFurniture = 0, BedKeyZoning = 0;
+	// -RHVerifyCaches (command line): every keyed cache that is about to be
+	// REUSED is re-derived from scratch and compared, and a difference is a
+	// LogRedHopeSim error. The battery's safety net for "recompute only on
+	// change" - a stale cache is a bug the line-diff might not see.
+	bool bVerifyCaches = false;
+	mutable TMap<int32, int32> ColonistIndexById; // colonist Id -> Colonists index
+	mutable bool bColonistIndexDirty = true;
+	void RebuildColonistIndex() const;
 	void RebuildFurnitureCache();
 	bool IsFurnishKeyValid(const FIntVector& Key, FString* OutReason = nullptr) const;
 	bool IsLivingKey(const FIntVector& Key) const;
@@ -1626,7 +1657,11 @@ private:
 	// Runtime only (the alert channel; garden yield is untouched).
 	double GardenLastDarkSimSeconds = -1.0e12;
 	// A room function that grows crops (Garden = grow-lit, Greenhouse = glazed).
-	bool IsGardenFunction(FName Fn) const { return Fn == FName("Garden") || Fn == FName("Greenhouse"); }
+	bool IsGardenFunction(FName Fn) const
+	{
+		static const FName NGarden(TEXT("Garden")), NGreenhouse(TEXT("Greenhouse"));
+		return Fn == NGarden || Fn == NGreenhouse;
+	}
 	// The water loop (M2 Gate D+). Colonists draw potable water (part of the
 	// life-support contract, like O2/Food); recycling reclaims most but degrades
 	// POTABILITY - a single 0..1 pool-quality scalar that decays as the crew
