@@ -80,6 +80,11 @@ struct FRHNeedsChargeConditionInstanceData
 // M0-c charging etiquette as a transition predicate: battery below the seek
 // fraction, not mid-delivery (finish the drop first), and a pad exists (no
 // pad -> keep working; a dead robot is the player's lesson, not a stuck sim).
+// 2026-10-17: the reserve is also distance-aware - a robot heads home once its
+// charge only just covers the drive to the nearest pad (with a margin), and a
+// delivery is finished first only if the drop AND the drive home both fit. A
+// flat 25% did not cover a 700 m round trip (the Ice_B expansion), and a robot
+// that dies on the open plain never recovers.
 USTRUCT(meta = (DisplayName = "RH Needs Charge"))
 struct REDHOPESIM_API FRHNeedsChargeCondition : public FMassStateTreeConditionBase
 {
@@ -94,4 +99,5 @@ struct REDHOPESIM_API FRHNeedsChargeCondition : public FMassStateTreeConditionBa
 	TStateTreeExternalDataHandle<FTransformFragment> TransformHandle;
 	TStateTreeExternalDataHandle<FRHBatteryFragment> BatteryHandle;
 	TStateTreeExternalDataHandle<FRHTaskFragment> TaskHandle;
+	TStateTreeExternalDataHandle<FRHRobotFragment> RobotHandle;
 };

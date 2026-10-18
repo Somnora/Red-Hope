@@ -372,7 +372,20 @@ bool FRHNeedsChargeCondition::Link(FStateTreeLinker& Linker)
 	Linker.LinkExternalData(TransformHandle);
 	Linker.LinkExternalData(BatteryHandle);
 	Linker.LinkExternalData(TaskHandle);
+	Linker.LinkExternalData(RobotHandle);
 	return true;
+}
+
+namespace
+{
+	// Wh a robot spends driving DistCm at its own speed and move draw (the
+	// Drain idiom: W x sol-hours, 50 sim-s to the sol-hour), with a 25% margin
+	// plus a little slack for the approach and the queue at the pad.
+	float DriveWh(const FRHRobotFragment& Robot, double DistCm)
+	{
+		const double Secs = DistCm / FMath::Max(1.0, (double)Robot.SpeedMps * 100.0);
+		return (float)(Robot.DrawMoveW * Secs / 50.0 * 1.25) + Robot.DrawMoveW * 0.5f;
+	}
 }
 
 bool FRHNeedsChargeCondition::TestCondition(FStateTreeExecutionContext& Context) const
@@ -384,18 +397,35 @@ bool FRHNeedsChargeCondition::TestCondition(FStateTreeExecutionContext& Context)
 	}
 	const FRHBatteryFragment& Battery = Context.GetExternalData(BatteryHandle);
 	const FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	const FRHRobotFragment& Robot = Context.GetExternalData(RobotHandle);
+	const FVector Pos = Context.GetExternalData(TransformHandle).GetTransform().GetLocation();
 
-	const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
-	if (ChargeFrac >= Sim->GetChargeSeekFraction())
-	{
-		return false;
-	}
-	// Mid-delivery: finish the drop first (M0-c rule).
-	if ((ERHTaskType)Task.TaskType == ERHTaskType::Haul && Task.Phase == 2)
-	{
-		return false;
-	}
 	int32 PadId = 0;
 	FVector PadLoc;
-	return Sim->FindNearestChargePad(Context.GetExternalData(TransformHandle).GetTransform().GetLocation(), PadId, PadLoc);
+	if (!Sim->FindNearestChargePad(Pos, PadId, PadLoc))
+	{
+		return false; // no pad: keep working (M0-c)
+	}
+	const float HomeWh = DriveWh(Robot, FVector::DistXY(Pos, PadLoc));
+	const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+	if (ChargeFrac >= Sim->GetChargeSeekFraction() && Battery.ChargeWh >= HomeWh)
+	{
+		return false;
+	}
+	// Mid-delivery: finish the drop first (M0-c rule) - when the drop and the
+	// drive home from it both fit in the charge left. Otherwise go now: the
+	// cargo is lost either way, the robot is not.
+	if ((ERHTaskType)Task.TaskType == ERHTaskType::Haul && Task.Phase == 2)
+	{
+		int32 DropPadId = 0;
+		FVector DropPadLoc;
+		const bool bPadFromDrop = Sim->FindNearestChargePad(Task.TargetCm, DropPadId, DropPadLoc);
+		const float ViaDropWh = DriveWh(Robot, FVector::DistXY(Pos, Task.TargetCm))
+			+ DriveWh(Robot, FVector::DistXY(Task.TargetCm, bPadFromDrop ? DropPadLoc : PadLoc));
+		if (Battery.ChargeWh >= ViaDropWh)
+		{
+			return false;
+		}
+	}
+	return true;
 }
