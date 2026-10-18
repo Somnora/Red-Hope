@@ -28,6 +28,11 @@
 # (config-row overrides, and -RHQuotas=<row> for any dormant quota row; both
 # log loudly).
 #
+# Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
+# may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
+# Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
+# hand-play checkpoints are made this way by scripts/unreal/rh_checkpoints.sh.
+#
 # Output: Saved/RHPlaytest/<label>.log (full) and <label>.txt (the [Playtest]
 # lines - the timeline, per-sol vitals and the REPORT block).
 #
@@ -48,7 +53,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

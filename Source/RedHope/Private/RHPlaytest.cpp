@@ -27,6 +27,11 @@
 // calls for: survey far north, chain pylons out to Ice_B, drill it and put a
 // Water Plant beside the drill. It ends at the sol limit (or if the colony
 // empties), prints the report, and quits.
+//
+// Given a save slot, it saves the colony at the sol limit first: that is how
+// the hand-play checkpoints are made (scripts/unreal/rh_checkpoints.sh). The
+// director then loads a real game in progress, played by this bot up to that
+// sol, instead of the RH.Demo showcase colony.
 
 #include "CoreMinimal.h"
 #include "RedHope.h"
@@ -45,7 +50,7 @@ namespace
 	struct FPlaytest
 	{
 		TWeakObjectPtr<UWorld> World;
-		int32 TargetSols = 30;
+		double TargetSols = 30.0; // may be fractional (a checkpoint saved after sunrise)
 		// "rush": every opening order at once (a player who places all the
 		// kits and the Forge straight away). "guide": the guide's order - the
 		// first power and the Charging Pad, and only once the pad stands, the
@@ -55,6 +60,8 @@ namespace
 		// "Bring the first crew" step used to say. Without it, the ship also
 		// brings soil, seeds and comforts.
 		bool bLeanCargo = false;
+		// Saved at the sol limit when set (RH_<SaveSlot>.sav): the checkpoints.
+		FString SaveSlot;
 		TSet<FName> Issued;                 // plan steps already ordered
 		TArray<TPair<FString, double>> Milestones; // what, sol - first time only
 		TSet<FString> MilestoneSet;
@@ -204,6 +211,24 @@ namespace
 		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 		const URHSimClockSubsystem* C = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT ======== ended: %s at sol %.2f"), Why, C ? SolNow(C) : 0.0);
+		if (!P.SaveSlot.IsEmpty() && Sim)
+		{
+			// Only a colony that reached the sol limit is a checkpoint; an
+			// emptied one is not saved, and the script sees no save.
+			FString Error;
+			if (FCString::Strcmp(Why, TEXT("sol limit")) != 0)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("[Playtest] SAVE skipped: slot '%s' not written (%s)"), *P.SaveSlot, Why);
+			}
+			else if (Sim->SaveColony(P.SaveSlot, Error))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] SAVED slot '%s' at sol %.2f"), *P.SaveSlot, C ? SolNow(C) : 0.0);
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Error, TEXT("[Playtest] SAVE failed: slot '%s': %s"), *P.SaveSlot, *Error);
+			}
+		}
 		for (const TPair<FString, double>& M : P.Milestones)
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  sol %6.2f  %s"), M.Value, *M.Key);
@@ -591,7 +616,7 @@ namespace
 		{
 			Finish(World, TEXT("the colony emptied"));
 		}
-		else if (C->GetSol() >= P.TargetSols)
+		else if (SolNow(C) >= P.TargetSols)
 		{
 			Finish(World, TEXT("sol limit"));
 		}
@@ -600,7 +625,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30] [rush|guide] [lean] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -617,9 +642,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		GPlaytest = MakeShared<FPlaytest>();
 		FPlaytest& P = *GPlaytest;
 		P.World = World;
-		P.TargetSols = Args.Num() > 0 ? FMath::Max(1, FCString::Atoi(*Args[0])) : 30;
+		P.TargetSols = Args.Num() > 0 ? FMath::Max(0.1, FCString::Atod(*Args[0])) : 30.0;
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
+		P.SaveSlot = Args.Num() > 3 ? Args[3] : FString();
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
@@ -669,7 +695,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ALERT   %s"), SolOf(), *Line);
 		});
 
-		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %d sols at %.0fx, %s order, %s crew cargo"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
-			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"));
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
+			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
+			P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

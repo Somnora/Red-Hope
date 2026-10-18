@@ -1,6 +1,12 @@
-# QA Boot Card — 2026-10-17, against `480bda5`
+# QA Boot Card — 2026-10-17, updated for the crew phase (`8fa8299` and later)
 
-This is the hand-play card for everything built since August: build mode
+**New first: §0, the crew phase.** The crew-phase package (D1a-D5a, built
+10-17) is a game that only exists from sol ~15 to sol ~110, and no preset
+reached it: they all start from `RH.Demo`'s showcase colony. Three presets
+now start real games instead. Your open crew-phase questions (the end of
+`docs/qa/2026-10-17/crew-phase-brief.md`) are answered by playing §0.
+
+The rest of the card is unchanged. It covers everything built since August: build mode
 (BM-1 to BM-6 plus the prefab), alive pass 2, the MPFB crew, EVA suits and
 airlocks, the build drawer, and the sound and score. Almost none of it has
 been played by hand. The captures prove what renders; they cannot click,
@@ -15,6 +21,9 @@ of this card.
 No editor is needed. Each preset is one line:
 
 ```bash
+bash scripts/unreal/rh_sandbox.sh opening    # §0a a new game from sol 0
+bash scripts/unreal/rh_sandbox.sh midgame    # §0b a real game at sol 28.35: the next ship and the ice are yours
+bash scripts/unreal/rh_sandbox.sh late       # §0c a real game at sol 62.35: Ice_B worked, round 5 of the ladder
 bash scripts/unreal/rh_sandbox.sh build      # §1 build mode: a surface habitat, stocked
 bash scripts/unreal/rh_sandbox.sh crew       # §2 crew life: floor -1 furnished
 bash scripts/unreal/rh_sandbox.sh surface    # §3 robots: every building, a dig running
@@ -22,14 +31,72 @@ bash scripts/unreal/rh_sandbox.sh            # §4-6 the everything demo, riding
 SOUND=1 bash scripts/unreal/rh_sandbox.sh    # §7 the listening test (any preset)
 ```
 
-`LOW=1` gives 1280x720 at 30 fps on a busy machine. Quit with Cmd+Q. The
-backquote key opens the console for the commands below. Every preset spends
-its first ~25-30 s at 60x so the world has filled in before you get it.
+`LOW=1` gives 1280x720 at 30 fps on a busy machine. Quit with Cmd+Q. Only
+`opening` shows the title menu; the others skip it, because its CONTINUE
+button loads the quick-save slot over the preset. Every boot shows the
+WELCOME tip: click GOT IT. The
+backquote key opens the console for the commands below. The §1-§6 presets
+spend their first ~25-30 s at 60x so the world has filled in before you get
+it; the §0 presets start at 1x.
 
 Controls:
 - Right-drag orbits the camera and the wheel zooms.
 - Left-click places, selects and confirms. Esc cancels.
 - T rotates the furnishing or fitting you are holding.
+- Speed: Space pauses. **1** = 1x, **2** = 3x, **3** = 8x. One sol is about
+  20 minutes at 1x and 2.5 minutes at 8x. **4** = 60x skips time, but at that
+  speed the robots park and nothing gets built, so play the crew phase at 8x.
+
+## 0. The crew phase — `opening`, `midgame`, `late`
+
+`midgame` and `late` are real games, not set-ups. Both are saved just after
+sunrise and open at 1x over the colony. The playtest bot played
+each one from sol 0, using only player orders, in the guide's order, and
+saved it. The layout is the bot's, not a designed base: solar rows by the
+Lander, a pylon chain to the ice. The first boot after any code or data
+change re-makes the save (`scripts/unreal/rh_checkpoints.sh`, 2-5 minutes;
+the terminal says so). Saves from before 10-17 (format v32 and older) no
+longer load.
+
+### 0a. `opening` — a new game from sol 0
+
+The title menu, then NEW COLONY: the intro shot, the Lander, the starting
+kits and the guide on step 1, exactly as a player starts.
+
+| Try this | Good looks like |
+|---|---|
+| Follow the guide at 3x-8x through the first night | At sunset the Forge and Electrolyzer go idle: the day shift is on for both by default. If the bank still runs dry, the guide's POWER step asks you to put a machine on the day shift |
+| Select the Forge | Its card has a **Day shift** toggle; every heavy machine has one |
+| Note the pace | The bot met quota 1 at sol 5.6 and landed the first crew at sol 14.7. Before the day shift it was sol 4.2 and 10.5 |
+
+### 0b. `midgame` — sol 28.35, lean cargo
+
+The crew ship brought the Crew Pod alone. Four crew live in the vault on
+about 67 sols of provisions, with no garden. Q3 (2,500 kg structural, 1,200 kg
+O2, 250 kg H2) is nearly met, and the next ship's manifest is empty. Ice_A
+runs low about two sols in.
+
+| Try this | Good looks like |
+|---|---|
+| Watch the Objective panel | Q3 is met around sol 29.6. Then the cargo is yours to pick: Earth Soil Pallet + Seed Vault start a garden; a Spare Parts Crate keeps the fleet repaired |
+| LAUNCH | The ship lands 3 sols later, and the CEO renews Q3 with bills x1.25 (round 1). There is always a next ship |
+| Around sol 30.6: **ICE_A RUNNING LOW** | The alert, then the Next Step panel switches to the WATER steps: survey about 700 m north, chain Grid Pylons out to Ice_B, drill it, and put a Water Plant beside the drill. **Do it yourself** - that is the mid-game goal. The bot took 6 sols |
+| The Crew panel | Hope sits around 71 STEADY and should climb into THRIVING (75-89) as the garden and comforts come in. THRIVING is meant to be the normal good state now |
+| Optional: `RH.AddStock Food -150` in the console | Neither checkpoint ever runs short of food, so this provokes it: **FOOD RUNNING LOW**, a food line in the Crew panel, and the guide's FOOD step jumps the queue |
+
+### 0c. `late` — sol 62.35, full cargo
+
+The bot has played the whole mid-game. Six people live in the colony, two of
+them born on Mars. The garden is producing, Ice_B is drilled, and round 5 of
+the ladder is open (7.6 t structural; the Objective panel reads "bills up
+205%"). Hope is 98 FLOURISHING. Eight Solar Array kits from later ships sit
+unplaced: the bot only places the first ship's. BUILD > Power places them.
+
+| Try this | Good looks like |
+|---|---|
+| `RH.Hope` in the console | The breakdown: Milestones is at 30 points, and holds Hope at 100 by itself. This is open question 1 |
+| Fill and launch round 5 | Each Specialty Toolkit adds +15% build speed, with no cap. This is open question 3 |
+| Play at 8x to about sol 87 (an hour) | **ICE_B RUNNING LOW**, "the last known ice". The stock carries the colony well past sol 110. This is open question 4 |
 
 ## 1. Build mode — `build` preset
 
@@ -139,13 +206,32 @@ The mix is set from the console with the `rh.AudioMaster`, `rh.AudioMusic`,
 - **Unfurnished rooms:** where there is no furniture, crew use the old ring
   of spots around the room's centre.
 - **Old saves:** a colonist already housed in a bed-less lounge stays
-  there without a bed.
+  there without a bed. Saves from before 10-17 (format v32 and older) don't
+  load at all.
+- **The checkpoints' layout** is the playtest bot's, not a designed base.
+- **New alert and guide wording** (ICE / FOOD / POWER / the CEO's renewals)
+  is Gate-D placeholder text, rows D86-D122.
 - **Surface jobs:** surface residents get no job seats in a surface
   Workstation bay in RH.HabDemo, so nobody sits at its desks there.
 - **Parked robots:** a parked robot is drawn up to ~38 m from its sim
   position until its next task (ruled acceptable).
 
 ## Verdicts I need back
+
+**From §0, the crew phase** (the open questions in the brief):
+- **A. The opening's pace (`opening`):** the day shift moves the first crew
+  from sol 10.5 to 14.7. Keep it, or switch the default off
+  (`DayShiftDefaultsOn=0`) and keep the toggle?
+- **B. The mid-game (`midgame`):** does the ice warning come in time? Does
+  the guide get you to Ice_B without help? Is picking each ship's cargo a
+  good decision or a chore?
+- **C. Hope:** does THRIVING feel like the normal good state? Late on, should
+  the Milestones line be capped, fade, or stay (a mature colony flourishes)?
+- **D. Cargo stacking (`late`):** cap the Toolkit bonus, or leave it?
+- **E. After Ice_B:** a third ice deposit, the dormant agri water recycling,
+  or nothing yet?
+
+**From §1-§7:**
 
 1. **Build mode by hand:** does placing, zoning, furnishing, fitting and
    demolishing feel right? Note anything fiddly - snapping, hover, T, the

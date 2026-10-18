@@ -6,6 +6,9 @@
 #   bash scripts/unreal/rh_sandbox.sh interior     # same as default, explicit
 #   bash scripts/unreal/rh_sandbox.sh build        # a surface habitat, stocked to build, zone, furnish and fit
 #   bash scripts/unreal/rh_sandbox.sh crew         # floor -1 furnished: the crew sleep, work, eat and unwind
+#   bash scripts/unreal/rh_sandbox.sh opening      # a NEW GAME from sol 0 - no showcase colony, the guide from step 1
+#   bash scripts/unreal/rh_sandbox.sh midgame      # a real game at sol 28 (lean cargo): the next ship and the ice are yours
+#   bash scripts/unreal/rh_sandbox.sh late         # a real game at sol 62 (full cargo): Ice_B worked, round 5 of the ladder
 #   LOW=1 bash scripts/unreal/rh_sandbox.sh        # 1280x720 + 30fps cap for a busy machine
 #   SOUND=1 bash scripts/unreal/rh_sandbox.sh      # with sound and the score (the listening test)
 #
@@ -37,7 +40,29 @@ else
   RESX=1600; RESY=900; EXTRA=""
 fi
 
+# Every preset but `opening` skips the title menu: the preset has already set
+# the colony up behind it, and the title's CONTINUE loads the quick-save slot
+# over whatever the preset (or a loaded checkpoint) built.
+TITLE="-RHNoTitle"
 case "$PRESET" in
+opening)
+  # A new game, exactly as a player starts one: the title menu, NEW COLONY,
+  # the intro shot, the Lander, the starting kits, the guide on step 1. No
+  # RH.Demo. Judge the opening's pace here (the day shift: Forge and
+  # Electrolyzer idle at night by default).
+  TITLE=""
+  CMDS="r.setres ${RESX}x${RESY}w$EXTRA"
+  ;;
+midgame|late)
+  # The crew-phase checkpoints (2026-10-17): games the RH.Playtest bot played
+  # from a fresh start and saved. rh_checkpoints.sh re-makes the save first if
+  # the code or data changed since it was made (a few minutes, once). It is
+  # loaded two seconds in, once the fresh colony and every visualizer are up;
+  # the save carries the bot's 16x, so the speed comes back to 1x after it.
+  SLOT="Midgame"; [ "$PRESET" = "late" ] && SLOT="Late"
+  bash "$PROJ_DIR/scripts/unreal/rh_checkpoints.sh" "$PRESET" || { echo "no checkpoint - not booting"; exit 1; }
+  CMDS="r.setres ${RESX}x${RESY}w, RH.After 2 RH.Load $SLOT, RH.After 2.5 RH.SetSpeed 1, RH.After 3 RH.Floor 0, RH.After 3.5 RH.Cam 35 35 0.5$EXTRA"
+  ;;
 surface)
   # Everything placed, then back up top: the building set in daylight, and a
   # dig designation at the regolith deposit so the robot fleet visibly WORKS -
@@ -76,4 +101,4 @@ echo "useful once it is up:  RH.Floor 0|-1   RH.Cam <Xm> <Ym> <zoom 0-1>   RH.Se
 # listening test for the sound pass and the score.
 if [ "${SOUND:-0}" = "1" ]; then NOSOUND=""; else NOSOUND="-nosound"; fi
 exec "$UE" "$PROJ" "$MAP" -game -windowed -resx="$RESX" -resy="$RESY" \
-  $NOSOUND "-ExecCmds=$CMDS"
+  $NOSOUND $TITLE "-ExecCmds=$CMDS"

@@ -516,7 +516,12 @@ is pending**: the tree was clean at `4706e5f`, and every C++ commit from
    `docs/qa-boot-card.md` was rewritten for this on 2026-10-17 (against
    `480bda5`): one sandbox preset per area (`rh_sandbox.sh build | crew |
    surface`, `SOUND=1` for the listening test), what to try by hand, what
-   good looks like, the frames already shot, and the verdicts wanted.
+   good looks like, the frames already shot, and the verdicts wanted. Later
+   the same day it gained §0, the crew phase: `opening` (a new game from the
+   title), and `midgame` / `late`, real games the playtest bot played to sol
+   28.35 and 62.35 and saved (`scripts/unreal/rh_checkpoints.sh` re-makes a
+   save whenever the code or data has changed). Before that, no preset
+   reached the crew phase.
 
 2. **Director decisions from the playtest** (`docs/qa/2026-10-15/playtest.md`;
    **one-reply brief with recommendations: `docs/qa/2026-10-17/crew-phase-brief.md`**,
