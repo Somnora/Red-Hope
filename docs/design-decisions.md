@@ -392,3 +392,22 @@ The ship was a grey-box freighter that appeared with the first landing and never
 - Rejected: Ship A (the July cargo lander with tanks) and Ship B (a 16 m vertical freighter that towers over the colony).
 - **It lands and leaves (director: "yes land and leave").** It comes down onto a landing pad east of the colony, timed to touch down on the sim's arrival, with engines and a light glowing. It sits a sol, then lifts off. The pad stays behind until the next ship.
 - **Presentation only:** the sim's ship is still the quota phase and the ETA.
+
+### The grand vision: four rulings (2026-10-18)
+
+Asked how Red Hope could become as grand as SimCity (giant Mars cities, deep trade, territories), the director ruled:
+1. **No combat.** Conflict stays trade, espionage, politics and resilience. This confirms the brief's v1 non-goal and extends it past v1:
+   - defence means shielding, shelters, sealed compartments and protected convoys;
+   - offence means leverage: embargoes, covert operations, competition for colonists through Hope.
+2. **Thousands of people.** The city targets a population in the thousands. That needs a population model with individuals near the camera and aggregates beyond it, so it comes first.
+3. **Several regions.** Rival settlements get their own territories on a regional map, not one shared valley.
+4. **Start with step 1, the living city:** roads, rover traffic, districts, and the scalable population model.
+5. **Politics stays (director, same day: "we should still have politics").** No combat does not mean no conflict. Politics is how conflict happens in Red Hope, and it grows with the city:
+   - **Outside:** Earth, the CEO arc, the Solidarity Dilemma and the identity axis; rivals with their own regions, with diplomacy, treaties, trade blocs, embargoes and covert operations; the endings.
+   - **Inside (new with a city of thousands):** districts and groups with their own interests, and the brief's social threats (factions, strikes) at city scale. The form of civic voice (councils, elections or another) is an open question for when the city exists.
+
+The order after that, agreed in the same exchange:
+- 2: going deep (tunnels, transit, cavern districts, atriums);
+- 3: economy (markets, exchange rates, regional specialization, a Martian currency);
+- 4: territories (the regional map, visible rival cities and convoys);
+- 5: rising (surface towers gated by terraforming, a growth time-lapse, landmarks).
