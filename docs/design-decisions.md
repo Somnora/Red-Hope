@@ -423,3 +423,12 @@ The director answered `docs/qa/2026-10-18/living-city-plan.md` with all four rec
 Build-order note: C1 (foundations) is pure performance work and must leave every battery run line-identical. Two items first listed under C1 change behaviour, so they move to C2, where baselines move on purpose:
 - proportional sharing of food, water and air in a shortage;
 - one alert per event instead of one per colonist.
+
+### C2, population at scale: Q5a Q6a Q7a (2026-10-18)
+
+The director answered `docs/qa/2026-10-18/c2-population-brief.md` with all three recommendations:
+- **Q5a, immigration:** a thriving city draws settlers on every supply ship, more as Hope rises and homes stand free. It stops at full housing, and rivals will compete for the same people in the politics step.
+- **Q6a, shortages:** rationing is shared fairly across the affected home. If a shortage lasts, people leave gradually, in proportion to how deep and how long it is; no one is singled out by roster order.
+- **Q7a, the Big Arrival:** a one-off wave of about 100 colonists, after about 20 sols at THRIVING with 100 free beds. The CEO announces he is coming; his landing belongs to the politics step.
+
+Together with the per-head Hope re-weighting (today's colonies scoring within a point or two), these define gate C2. Numbers are placeholders, and new wording is Gate-D placeholder copy.

@@ -2,7 +2,7 @@
 
 C1 makes the sim fast enough for thousands without changing anything a player sees. C2 is where the game itself changes so a city of thousands *plays* right. It builds on Q1a: everyone stays a named individual.
 
-Three things change: how Hope is counted, what happens in a shortage, and how people arrive. Every number below is a placeholder chosen so that **today's colonies score within a point or two of now**. The battery suites that pin Hope are re-derived on purpose, as D3a's were, and every moved line is explained in the commit. **Reply with the letters**, e.g. "Q5a Q6a Q7a".
+Three things change: how Hope is counted, what happens in a shortage, and how people arrive. Every number below is a placeholder chosen so that **today's colonies score within a point or two of now**. The battery suites that pin Hope are re-derived on purpose, as D3a's were, and every moved line is explained in the commit. **Answered 2026-10-18: Q5a Q6a Q7a** (all three recommendations).
 
 New player-facing wording (alerts, panels) is Gate-D placeholder copy.
 
