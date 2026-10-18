@@ -1068,6 +1068,23 @@ public:
 	{
 		if (FRHDepositState* D = FindDeposit(Id)) { D->RemainingKg = FMath::Max(0.0, Kg); }
 	}
+	// Harness: drop every open task (so a routing test sees fresh postings).
+	void Debug_ClearTasks() { Tasks.Reset(); }
+	// Harness: set a deposit's dug pile (pile-haul routing tests).
+	void Debug_SetDepositPileKg(int32 Id, double Kg)
+	{
+		if (FRHDepositState* D = FindDeposit(Id)) { D->PileKg = FMath::Max(0.0, Kg); }
+	}
+	// Harness: where the open haul task from a deposit's pile is bound - its To
+	// building id, or 0 if none is posted.
+	int32 Debug_GetOpenHaulDestFromDeposit(int32 DepositId) const
+	{
+		for (const FRHTask& T : Tasks)
+		{
+			if (T.Type == ERHTaskType::Haul && T.From.DepositId == DepositId) { return T.To.BuildingId; }
+		}
+		return 0;
+	}
 	// Harness (D2a): empty the low-ice latch so a test can prove LoadColony
 	// rebuilds it (and resets a stale one).
 	void Debug_ClearIceLowLatch() { IceLowAnnounced.Reset(); }

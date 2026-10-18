@@ -3849,6 +3849,35 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(LastAlert().Contains(TEXT("ICE_B RUNNING LOW")) && LastAlert().Contains(TEXT("Ration water")) && !LastAlert().Contains(TEXT("Survey")),
 			FString::Printf(TEXT("I12 the last-ice alert gives no survey advice: \"%s\""), *LastAlert()));
 
+		// I13. Deposit piles follow the same rule (2026-10-17): a pile goes to
+		// the nearest building that wants it; a store takes it only when nothing
+		// here consumes it. With a Forge whose hopper is full, regolith waits in
+		// its pile - before this it went to the Lander for good (50 t of
+		// Regolith_A's 60 t by sol 45 in the playtest) and the Forge starved.
+		{
+			const FRHDepositState* RegA = Dep("Regolith_A");
+			const int32 RegId = RegA ? RegA->Id : 0;
+			const auto PileDest = [&]()
+			{
+				Sim->Debug_SetDepositPileKg(RegId, 500.0);
+				Sim->Debug_StepTaskBoard();
+				return Sim->Debug_GetOpenHaulDestFromDeposit(RegId);
+			};
+			Sim->Debug_ClearTasks();
+			const int32 NoForge = PileDest();
+			const int32 LanderId = LastIdOf(TEXT("Lander"));
+			Sim->Debug_PlaceInstant(FName("Forge"), FVector(RegA ? RegA->LocationCm.X : 0.0, RegA ? RegA->LocationCm.Y + 1500.0 : 0.0, 0.0));
+			const int32 ForgeId = LastIdOf(TEXT("Forge"));
+			Sim->Debug_ClearTasks();
+			const int32 WithRoom = PileDest();
+			Sim->Debug_AddSolidAt(ForgeId, FName("Regolith"), 300.0, false);
+			Sim->Debug_ClearTasks();
+			const int32 HopperFull = PileDest();
+			Expect(RegId != 0 && ForgeId != 0 && NoForge == LanderId && WithRoom == ForgeId && HopperFull == 0,
+				FString::Printf(TEXT("I13 regolith pile: no Forge -> the store #%d (posted to #%d); Forge with room -> the Forge #%d (#%d); Forge hopper full -> waits in the pile (#%d)"),
+					LanderId, NoForge, ForgeId, WithRoom, HopperFull));
+		}
+
 		Sim->OnAlert.Remove(AlertH);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ICE LOW TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);

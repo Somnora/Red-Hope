@@ -118,7 +118,7 @@ The 10-15 playtest found the game ended at sol ~10. The supply line ran out, wat
 **Open:**
 - Hope still reaches 100 after sol ~60, through the Milestones line.
 - The day shift slows the opening (first crew at sol 14.4, was 10.5).
-- The repeating ladder stalls by about round 3, because bills are holdings.
+- ~~The repeating ladder stalls by about round 3.~~ Resolved: it was a hauling bug. Surplus regolith went to the Lander for good, and piles now wait for the Forge. Q3 rounds 0-7 are now met by sol 103.
 - Cargo effects stack without limit.
 - Ice_B is the last ice.
 

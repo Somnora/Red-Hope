@@ -776,8 +776,14 @@ void URHSimWorldSubsystem::StepUplink()
 
 void URHSimWorldSubsystem::StepTaskBoard()
 {
-	// Haul: deposit piles worth collecting -> Forge hopper (if a Forge wants
-	// that resource) else Stockpile-capable store (Stockpile or Lander).
+	// Haul: deposit piles worth collecting -> the NEAREST production building
+	// that wants that resource (a slice recipe consumes it and the hopper holds
+	// under two batches), else a store (Stockpile or Lander). A store only takes
+	// the pile when nothing on the level consumes it, or it is a construction
+	// material (the rule the output leg already follows, D2a): regolith the
+	// Forge is not ready for waits in its pile. Before this, the surplus went to
+	// the Lander for good - nothing brings store regolith back to the Forge - and
+	// 50 t of Regolith_A's 60 t sat there by sol 45 while the Forge starved.
 	for (const FRHDepositState& D : Deposits)
 	{
 		if (D.PileKg < HaulLoadMinKg)
@@ -787,14 +793,23 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		FRHSiteRef From; From.DepositId = D.Id;
 
 		int32 DestId = 0;
+		double BestDistCm = 0.0;
+		bool bAnyConsumer = false; // some building here takes it, hopper full or not
+		const auto Consider = [&](const FRHBuildingInstance& Cand)
+		{
+			const double DistCm = FVector::DistXY(D.LocationCm, Cand.LocationCm);
+			if (DestId == 0 || DistCm < BestDistCm || (DistCm == BestDistCm && Cand.Id < DestId))
+			{
+				DestId = Cand.Id;
+				BestDistCm = DistCm;
+			}
+		};
 		for (const FRHBuildingInstance& B : Buildings)
 		{
 			if (B.bUnderConstruction || B.Level != D.Level)
 			{
 				continue;
 			}
-			// A production building wants the resource if some slice recipe
-			// there consumes it and the hopper holds less than two batches.
 			if (Defs->FindRunnableRecipe(B.DefName, [&](const TMap<FName, double>& Inputs)
 				{
 					const double* Need = Inputs.Find(D.Type);
@@ -802,22 +817,21 @@ void URHSimWorldSubsystem::StepTaskBoard()
 					{
 						return false;
 					}
+					bAnyConsumer = true;
 					const double* Have = B.InputKg.Find(D.Type);
 					return (!Have || *Have < *Need * 2.0);
 				}))
 			{
-				DestId = B.Id;
-				break;
+				Consider(B);
 			}
 		}
-		if (DestId == 0)
+		if (DestId == 0 && (!bAnyConsumer || ConstructionMaterials.Contains(D.Type)))
 		{
 			for (const FRHBuildingInstance& B : Buildings)
 			{
 				if (!B.bUnderConstruction && B.Level == D.Level && (B.DefName == NAME_Stockpile || B.DefName == NAME_Lander))
 				{
-					DestId = B.Id;
-					break;
+					Consider(B);
 				}
 			}
 		}

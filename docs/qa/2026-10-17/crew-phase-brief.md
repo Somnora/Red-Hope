@@ -181,7 +181,11 @@ Each commit ran the full battery green with the pins unchanged, and every line m
    - Quota 1 lands at sol 6.4 (was 4.2) and the first crew at sol 14.4 (was 10.5), with about half the Struct at sol 20.
    - Part of the old pace was free night work: a sliver of bank charge ran a whole step's load before clamping.
    - `DayShiftDefaultsOn=0` reverts the defaults.
-3. **The repeating ladder stalls by about round 3.**
+3. **~~The repeating ladder stalls by about round 3.~~ Resolved 2026-10-17: it was a bug.**
+   - Surplus Regolith_A was hauled to the Lander and never smelted: 50.6 t of the 60 t sat there by sol 45.
+   - Fixed: piles wait for the Forge. Structural now reaches 13.6 t by sol 109, and Q3 rounds 0-7 are met, with the gap between rounds widening from 5 to 18 sols.
+   - The original note follows.
+   The repeating ladder stalls by about round 3.
    - Bills are holdings and are never paid, and they grow 25% a round. Structural plateaus near 6 t, so round 3 (4.9 t structural) and later rounds go unmet, and ships stop after sol ~45.
    - Options: deduct bills on launch, slow the growth, or scale awards.
 4. **Cargo effects stack without limit** now that ships repeat. Each Specialty Toolkit adds +15% build speed, uncapped.
