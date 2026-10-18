@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 34;  // v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 35;  // v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -132,6 +132,21 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
 	CrewPodColonists = (int32)Defs->GetConfigScalar(FName("CrewPodColonists"), CrewPodColonists);
 	CrewPodFoodKg = Defs->GetConfigScalar(FName("CrewPodFoodKg"), CrewPodFoodKg);
+	// C2b: arrivals at scale (the same fallbacks as RH_Config.csv).
+	ColonistTransportColonists = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("ColonistTransportColonists"), ColonistTransportColonists));
+	ColonistTransportFoodKgPerColonist = FMath::Max(0.0, Defs->GetConfigScalar(FName("ColonistTransportFoodKgPerColonist"), ColonistTransportFoodKgPerColonist));
+	BirthRefPop = FMath::Max(1.0, Defs->GetConfigScalar(FName("BirthRefPop"), BirthRefPop));
+	ImmigrationHopeMin = Defs->GetConfigScalar(FName("ImmigrationHopeMin"), ImmigrationHopeMin);
+	ImmigrationHopeFloor = Defs->GetConfigScalar(FName("ImmigrationHopeFloor"), ImmigrationHopeFloor);
+	ImmigrationBase = FMath::Max(0.0, Defs->GetConfigScalar(FName("ImmigrationBase"), ImmigrationBase));
+	ImmigrationPerCapita = FMath::Max(0.0, Defs->GetConfigScalar(FName("ImmigrationPerCapita"), ImmigrationPerCapita));
+	ImmigrationCapPerShip = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("ImmigrationCapPerShip"), ImmigrationCapPerShip));
+	ImmigrationReserveBeds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("ImmigrationReserveBeds"), ImmigrationReserveBeds));
+	BigArrivalHopeMin = Defs->GetConfigScalar(FName("BigArrivalHopeMin"), BigArrivalHopeMin);
+	BigArrivalStreakSolsNeeded = Defs->GetConfigScalar(FName("BigArrivalStreakSols"), BigArrivalStreakSolsNeeded);
+	BigArrivalFreeBeds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalFreeBeds"), BigArrivalFreeBeds));
+	BigArrivalColonists = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalColonists"), BigArrivalColonists));
+	MoveHomeIntervalSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("MoveHomeIntervalSols"), MoveHomeIntervalSols));
 	ColonistEvacSols = Defs->GetConfigScalar(FName("ColonistEvacSols"), ColonistEvacSols);
 	HopeBase = Defs->GetConfigScalar(FName("HopeBase"), HopeBase);
 	HopeHousingMax = Defs->GetConfigScalar(FName("HopeHousingMax"), HopeHousingMax);
@@ -450,6 +465,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepPopulation(SubDt);
 	StepHope(SubDt); // after population so the mood reflects this step's support state
 	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
+	StepBigArrival(SubDt); // and one that holds its Hope draws the big wave, once (C2b)
 	StepDiscovery(SubDt); // and its labs uncover what Mars is hiding
 	StepTrade(SubDt); // the convoy rolls toward the neighbors
 	StepEarth(SubDt); // and Earth watches Mars connect to itself
@@ -604,6 +620,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepPopulation(DtSimSeconds);
 	StepHope(DtSimSeconds); // same order as the agent band (parity)
 	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
+	StepBigArrival(DtSimSeconds); // same order as the agent band (parity)
 	StepDiscovery(DtSimSeconds); // same order as the agent band (parity)
 	StepTrade(DtSimSeconds); // same order as the agent band (parity)
 	StepEarth(DtSimSeconds); // same order as the agent band (parity)
@@ -1521,6 +1538,9 @@ void URHSimWorldSubsystem::StepQuota()
 			{
 				ApplyManifestItemEffect(Item);
 			}
+			// C2b (Q5a): a thriving colony draws settlers on the supply line - after the
+			// cargo, so any pods and transports have taken their beds first.
+			ApplyImmigration();
 			// Slice end card.
 			UE_LOG(LogRedHopeSim, Display,
 				TEXT("=== THE PROGRAM CONTINUES: sols elapsed %d | quota met sol %d (deadline %d) | fleet + colony operational ==="),
@@ -1698,6 +1718,32 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 				: FString::Printf(TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
 					GetFreeHousing(), CrewPodColonists));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
+		}
+	}
+	else if (ItemName == FName("ColonistTransport"))
+	{
+		// C2b: the crew pod at scale. The same rule - colonists disembark only into
+		// certified housing, and the WHOLE transport stays aboard if the beds are
+		// not there - with fifty kilos of provisions for every colonist it carries.
+		const double FoodKg = ColonistTransportFoodKgPerColonist * ColonistTransportColonists;
+		if (GetFreeHousing() >= ColonistTransportColonists)
+		{
+			const int32 Housed = Debug_AddColonists(ColonistTransportColonists);
+			AddStock(FName("Food"), FoodKg);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("A COLONIST TRANSPORT HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
+				Housed, FoodKg));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: %d colonists housed, +%.0f kg Food ==="), Housed, FoodKg);
+		}
+		else
+		{
+			// Gate-D placeholder copy, in the pod's style.
+			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
+				? FString::Printf(TEXT("COLONIST TRANSPORT RETURNED — no certified housing (%d beds free, %d needed). Zone Living Quarters bays in your rated habitat before the next ship."),
+					GetFreeHousing(), ColonistTransportColonists)
+				: FString::Printf(TEXT("COLONIST TRANSPORT RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
+					GetFreeHousing(), ColonistTransportColonists));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), ColonistTransportColonists);
 		}
 	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
@@ -2913,79 +2959,91 @@ void URHSimWorldSubsystem::Debug_ForceRateFloor(int32 Level)
 	UE_LOG(LogRedHopeSim, Display, TEXT("Debug_ForceRateFloor: floor %d certified (%d cells)"), Level, Cells);
 }
 
+void URHSimWorldSubsystem::InitFillState(FRHFillState& State, const TSet<int32>* SkipIds) const
+{
+	// C1: occupancy and capacity are counted ONCE per batch, then kept current as
+	// each colonist moves in (the roster, the beds, the rated floors and the
+	// networks cannot change inside the loop). Counting them afresh for every
+	// arrival made a crew of K cost K x N. SkipIds leaves some residents out of
+	// the count (C2b: the ones about to move home).
+	for (const FRHColonist& C : Colonists)
+	{
+		if (SkipIds && SkipIds->Contains(C.Id))
+		{
+			continue;
+		}
+		++State.FloorResidents.FindOrAdd(C.HomeLevel);
+		if (C.HomeHab != 0)
+		{
+			++State.HabResidents.FindOrAdd(C.HomeHab);
+		}
+	}
+	State.NetRatedNow.Init(-1, HabNets.Num());
+}
+
+bool URHSimWorldSubsystem::PickFillHome(FRHFillState& State, int32& OutLevel, int32& OutHab) const
+{
+	// Shallowest certified floor with a free bed (deterministic fill
+	// order); then (BM-1) the rated surface networks in root order, their
+	// members by Id.
+	OutLevel = 0;
+	OutHab = 0;
+	for (int32 Level = -1; Level >= -MaxDepth; --Level)
+	{
+		if (!RatedFloors.Contains(Level))
+		{
+			continue;
+		}
+		int32* Beds = State.FloorBeds.Find(Level);
+		if (!Beds)
+		{
+			Beds = &State.FloorBeds.Add(Level, CountFloorBeds(Level, nullptr));
+		}
+		if (State.FloorResidents.FindRef(Level) < *Beds)
+		{
+			OutLevel = Level;
+			return true;
+		}
+	}
+	for (int32 n = 0; bVaultRated && n < HabNets.Num(); ++n)
+	{
+		if (State.NetRatedNow[n] < 0)
+		{
+			State.NetRatedNow[n] = IsNetRated(HabNets[n]) ? 1 : 0;
+		}
+		if (State.NetRatedNow[n] == 0)
+		{
+			continue;
+		}
+		for (const int32 Id : HabNets[n].Members)
+		{
+			int32* Beds = State.HabBeds.Find(Id);
+			if (!Beds)
+			{
+				Beds = &State.HabBeds.Add(Id, GetHabBeds(Id));
+			}
+			if (State.HabResidents.FindRef(Id) < *Beds)
+			{
+				OutHab = Id;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
 	int32 Housed = 0;
-	// C1: occupancy and capacity are counted ONCE per call, then kept current as
-	// each colonist moves in (the roster, the beds, the rated floors and the
-	// networks cannot change inside this loop). Counting them afresh for every
-	// arrival made a crew of K cost K x N.
-	TMap<int32, int32> FloorResidents, HabResidents;
-	TMap<int32, int32> FloorBeds, HabBeds;
-	TArray<int8> NetRatedNow; // per HabNets index: -1 not asked yet, else 0/1
+	FRHFillState Fill;
 	if (Count > 0)
 	{
-		for (const FRHColonist& C : Colonists)
-		{
-			++FloorResidents.FindOrAdd(C.HomeLevel);
-			if (C.HomeHab != 0)
-			{
-				++HabResidents.FindOrAdd(C.HomeHab);
-			}
-		}
-		NetRatedNow.Init(-1, HabNets.Num());
+		InitFillState(Fill);
 	}
 	for (int32 i = 0; i < Count; ++i)
 	{
-		// Shallowest certified floor with a free bed (deterministic fill
-		// order); then (BM-1) the rated surface networks in root order, their
-		// members by Id.
 		int32 Home = 0, HomeHab = 0;
-		bool bFound = false;
-		for (int32 Level = -1; Level >= -MaxDepth; --Level)
-		{
-			if (!RatedFloors.Contains(Level))
-			{
-				continue;
-			}
-			int32* Beds = FloorBeds.Find(Level);
-			if (!Beds)
-			{
-				Beds = &FloorBeds.Add(Level, CountFloorBeds(Level, nullptr));
-			}
-			if (FloorResidents.FindRef(Level) < *Beds)
-			{
-				Home = Level;
-				bFound = true;
-				break;
-			}
-		}
-		for (int32 n = 0; bVaultRated && !bFound && n < HabNets.Num(); ++n)
-		{
-			if (NetRatedNow[n] < 0)
-			{
-				NetRatedNow[n] = IsNetRated(HabNets[n]) ? 1 : 0;
-			}
-			if (NetRatedNow[n] == 0)
-			{
-				continue;
-			}
-			for (const int32 Id : HabNets[n].Members)
-			{
-				int32* Beds = HabBeds.Find(Id);
-				if (!Beds)
-				{
-					Beds = &HabBeds.Add(Id, GetHabBeds(Id));
-				}
-				if (HabResidents.FindRef(Id) < *Beds)
-				{
-					HomeHab = Id;
-					bFound = true;
-					break;
-				}
-			}
-		}
-		if (!bFound)
+		if (!PickFillHome(Fill, Home, HomeHab))
 		{
 			break; // no certified bed left
 		}
@@ -3012,11 +3070,11 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 		}
 		if (HomeHab)
 		{
-			++HabResidents.FindOrAdd(HomeHab);
+			++Fill.HabResidents.FindOrAdd(HomeHab);
 		}
 		else
 		{
-			++FloorResidents.FindOrAdd(Home);
+			++Fill.FloorResidents.FindOrAdd(Home);
 		}
 		bEverHadCrew = true; // M4 Gate D: the collapse ending checks "had a crew, lost it"
 		++Housed;
@@ -3623,6 +3681,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		}
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
+	StepMoveHome(SubDt); // C2b: once a sol, anyone whose home has lost their bed moves to a free one
 	static const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen"));
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 
@@ -4646,6 +4705,58 @@ double URHSimWorldSubsystem::GetFoodRunwaySols() const
 	return Draw > 0.0 ? GetStock(FName("Food")) / Draw : 1.0e9;
 }
 
+int32 URHSimWorldSubsystem::LivingCellWeight(const FIntVector& Key) const
+{
+	// BM-4: a Living cell with beds counts its beds, else 1 (the legacy rule).
+	const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+	return (CF && CF->BedPieces > 0) ? CF->Beds : 1;
+}
+
+int32 URHSimWorldSubsystem::GetHousingComfortCapacity() const
+{
+	// What the Housing term divides the population by: the weight of every live
+	// Living cell on a rated floor, and of every live Living bay in a rated surface
+	// network. An integer sum, so no visiting order can matter. GetColonyHope reads
+	// this same function.
+	static const FName NLiving(TEXT("Living"));
+	int32 Total = 0;
+	for (const TPair<int32, TArray<FName>>& Pair : FloorRoomCells)
+	{
+		if (!RatedFloors.Contains(Pair.Key)) // rooms function only on certified floors
+		{
+			continue;
+		}
+		for (int32 i = 0; i < Pair.Value.Num(); ++i)
+		{
+			const FRHRoomRow* Row = Defs ? Defs->GetRoom(Pair.Value[i]) : nullptr;
+			if (Row && Row->SliceActive && Row->Function == NLiving)
+			{
+				Total += LivingCellWeight(FIntVector(Pair.Key, i, 0));
+			}
+		}
+	}
+	for (const FRHHabNetCache& Net : HabNets)
+	{
+		if (!IsNetRated(Net))
+		{
+			continue;
+		}
+		for (const int32 HabId : Net.Members)
+		{
+			const FRHHabMemberCache& M = HabMembers.FindChecked(HabId);
+			for (int32 Bay = 0; Bay < M.NX * M.NY; ++Bay)
+			{
+				const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetBayRoom(HabId, Bay)) : nullptr;
+				if (Row && Row->SliceActive && Row->Function == NLiving)
+				{
+					Total += LivingCellWeight(FIntVector(0, Bay, HabId));
+				}
+			}
+		}
+	}
+	return Total;
+}
+
 URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() const
 {
 	// Pure derived read (approved M0 decision: Hope is an index, never a
@@ -4676,13 +4787,9 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	}
 
 	const int32 Pop = Colonists.Num();
-	int32 LQCells = 0;
-	// BM-4: a Living cell with beds counts its beds, else 1 (the legacy rule).
-	const auto LivingWeight = [this](const FIntVector& K)
-	{
-		const FRHCellFurnish* CF = FurnishedCells.Find(K);
-		return (CF && CF->BedPieces > 0) ? CF->Beds : 1;
-	};
+	// C2b: the Housing term's denominator is GetHousingComfortCapacity, the one helper
+	// the settlers' cap shares (BM-4: a Living cell with beds counts its beds, else 1).
+	const int32 LQCells = GetHousingComfortCapacity();
 	static const FName NLiving(TEXT("Living")), NHallway(TEXT("Hallway"));
 	// C1: a room row's refused tags, split once per call. They were re-split for
 	// every candidate (emitter, refuser) pair - a string parse in a C^2 loop.
@@ -4750,11 +4857,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			Rows[i] = Row;
 			bAnyEmitter |= !Row->EmitsTags.IsEmpty();
 			RefuserCells += Row->RefusesTags.IsEmpty() ? 0 : 1;
-			if (Row->Function == NLiving)
-			{
-				LQCells += LivingWeight(FIntVector(Level, i, 0)); // housing quality, counted below - never double-dipped
-			}
-			else if (Row->MoraleWeight > 0.f)
+			if (Row->Function != NLiving && Row->MoraleWeight > 0.f) // Living is housing, counted by GetHousingComfortCapacity - never double-dipped
 			{
 				TallyRoom(Row);
 			}
@@ -4915,11 +5018,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				continue;
 			}
 			RefuserCells += Row->RefusesTags.IsEmpty() ? 0 : 1;
-			if (Row->Function == NLiving)
-			{
-				LQCells += LivingWeight(BayKeys[RI]);
-			}
-			else if (Row->MoraleWeight > 0.f)
+			if (Row->Function != NLiving && Row->MoraleWeight > 0.f)
 			{
 				TallyRoom(Row);
 			}
@@ -5133,41 +5232,260 @@ void URHSimWorldSubsystem::StepGrowth(float SubDt)
 		HopeGrowthStreakSols = 0.0; // conditions lapsed: momentum resets (earned, not banked)
 		return;
 	}
-	HopeGrowthStreakSols += DtSols;
+	// C2b: births per head. The streak runs at max(1, N / BirthRefPop) x real time, so
+	// a colony of BirthRefPop or fewer grows exactly as it always did (the factor is
+	// exactly 1.0) and a city of ten times that gets ten times the births. The gates
+	// above are untouched; only the rate scales. Linear in dt, so both bands agree.
+	const double PerHead = FMath::Max(1.0, (double)Colonists.Num() / BirthRefPop);
+	HopeGrowthStreakSols += DtSols * PerHead;
 	if (HopeGrowthStreakSols < HopeGrowthIntervalSols)
 	{
 		return;
 	}
-	HopeGrowthStreakSols -= HopeGrowthIntervalSols;
+	// A big step in a big city can owe more than one birth (an era step of a city of
+	// thousands); a normal step owes exactly one, as before.
+	const int32 Due = HopeGrowthIntervalSols > 0.0 ? FMath::Max(1, FMath::FloorToInt(HopeGrowthStreakSols / HopeGrowthIntervalSols)) : 1;
+	for (int32 Birth = 0; Birth < Due; ++Birth)
+	{
+		HopeGrowthStreakSols -= HopeGrowthIntervalSols;
 
-	// A birth: one colonist via the existing certified-housing path (respects
-	// the bed gate; if the last bed vanished this step, Debug_AddColonists no-
-	// ops and the streak simply re-accrues next eligible window).
+		// A birth: one colonist via the existing certified-housing path (respects
+		// the bed gate; if the last bed vanished this step, Debug_AddColonists no-
+		// ops and the streak simply re-accrues next eligible window).
+		const int32 Before = Colonists.Num();
+		Debug_AddColonists(1);
+		if (Colonists.Num() <= Before)
+		{
+			return;
+		}
+		++BirthsOnMars;
+		Colonists.Last().bMarsBorn = true; // C2a: the Mars-born are the last to be recalled in a shortage
+		const FString Name = Colonists.Last().Name;
+		if (!bFirstBornAnnounced)
+		{
+			// The brief's landmark beat: the first human born on Mars. A one-time
+			// Hope surge (folded into GetColonyHope) and the seed of the M3 identity
+			// axis. Wording is a Gate-D framing-review placeholder (celebration, not
+			// clinical). Never retracts.
+			bFirstBornAnnounced = true;
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("THE FIRST MARTIAN IS BORN — %s, the first human native to Mars. The colony is no longer a mission. It is a home."), *Name));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FIRST MARTIAN-BORN: %s ==="), *Name);
+		}
+		else if ((double)Before <= BirthRefPop)
+		{
+			OnAlert.Broadcast(FString::Printf(TEXT("A CHILD IS BORN — %s joins the colony (%d born on Mars)."), *Name, BirthsOnMars));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== MARTIAN-BORN: %s (%d total) ==="), *Name, BirthsOnMars);
+		}
+		else
+		{
+			// A city's births are a rate, not a news item (C2b, one alert per event,
+			// never one per person): a banner on every tenth, the log on all. Gate-D
+			// placeholder copy.
+			if (BirthsOnMars % 10 == 0)
+			{
+				OnAlert.Broadcast(FString::Printf(TEXT("THE COLONY GROWS — %d children born on Mars so far."), BirthsOnMars));
+			}
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== MARTIAN-BORN: %s (%d total) ==="), *Name, BirthsOnMars);
+		}
+	}
+}
+
+int32 URHSimWorldSubsystem::GetImmigrationCount(double Hope, int32 Pop, int32 FreeBeds, int32 ComfortCapacity) const
+{
+	// floor((Hope - Floor) / (100 - Floor) x max(Base, PerCapita x N)), capped at the
+	// per-ship cap, at the free beds less ImmigrationReserveBeds (settlers never take
+	// the last bed(s), so a Mars-born child always has one: births come first) and at
+	// the comfortable room left, ComfortCapacity - N: settlers come only while the
+	// Housing term can still serve everyone at full value, and never push it down.
+	// A colony with nobody in it has no
+	// reputation to draw on (and the pre-crew baselines stay untouched).
+	if (Pop <= 0 || FreeBeds <= 0 || Hope < ImmigrationHopeMin)
+	{
+		return 0;
+	}
+	const double Span = FMath::Max(100.0 - ImmigrationHopeFloor, (double)KINDA_SMALL_NUMBER);
+	const double Draw = FMath::Max(ImmigrationBase, ImmigrationPerCapita * (double)Pop);
+	const double Raw = FMath::Clamp(Hope - ImmigrationHopeFloor, 0.0, Span) * Draw / Span;
+	const int32 Room = FMath::Min(FMath::Max(0, FreeBeds - ImmigrationReserveBeds), FMath::Max(0, ComfortCapacity - Pop));
+	return FMath::Clamp(FMath::FloorToInt(Raw), 0, FMath::Min(ImmigrationCapPerShip, Room));
+}
+
+int32 URHSimWorldSubsystem::ApplyImmigration()
+{
+	// Q5a: a thriving city draws settlers on every supply ship. They are not Mars-
+	// born, and they are housed the way pods are (Debug_AddColonists's fill order).
+	// One alert for the whole group, never one per person. Gate-D placeholder copy.
+	const int32 Want = GetImmigrationCount(HopeSmoothed, Colonists.Num(), GetFreeHousing(), GetHousingComfortCapacity());
+	if (Want <= 0)
+	{
+		return 0;
+	}
 	const int32 Before = Colonists.Num();
-	Debug_AddColonists(1);
-	if (Colonists.Num() <= Before)
+	const int32 Housed = Debug_AddColonists(Want);
+	if (Housed <= 0)
+	{
+		return 0;
+	}
+	ImmigrantsTotal += Housed;
+	OnAlert.Broadcast(FString::Printf(TEXT("%d settler%s arrived with the supply ship, drawn by the colony's reputation."),
+		Housed, Housed == 1 ? TEXT("") : TEXT("s")));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== IMMIGRATION: %d settler%s with the supply ship (smoothed Hope %.1f, population %d -> %d, %d settlers in all) ==="),
+		Housed, Housed == 1 ? TEXT("") : TEXT("s"), HopeSmoothed, Before, Colonists.Num(), ImmigrantsTotal);
+	return Housed;
+}
+
+void URHSimWorldSubsystem::StepBigArrival(float SubDt)
+{
+	// Q7a, once: sols with smoothed Hope at BigArrivalHopeMin or better are streaked
+	// (the streak resets the moment Hope drops below); at BigArrivalStreakSols of
+	// them, with BigArrivalFreeBeds free, a wave of BigArrivalColonists lands at once
+	// with provisions, as a transport would carry. A threshold on a monotone
+	// accumulator, linear in dt: both bands cross on the same step window. The
+	// CEO's own landing belongs to the politics step - this only announces it.
+	if (bBigArrivalDone)
 	{
 		return;
 	}
-	++BirthsOnMars;
-	Colonists.Last().bMarsBorn = true; // C2a: the Mars-born are the last to be recalled in a shortage
-	const FString Name = Colonists.Last().Name;
-	if (!bFirstBornAnnounced)
+	if (Colonists.Num() == 0 || HopeSmoothed < BigArrivalHopeMin)
 	{
-		// The brief's landmark beat: the first human born on Mars. A one-time
-		// Hope surge (folded into GetColonyHope) and the seed of the M3 identity
-		// axis. Wording is a Gate-D framing-review placeholder (celebration, not
-		// clinical). Never retracts.
-		bFirstBornAnnounced = true;
-		OnAlert.Broadcast(FString::Printf(
-			TEXT("THE FIRST MARTIAN IS BORN — %s, the first human native to Mars. The colony is no longer a mission. It is a home."), *Name));
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== FIRST MARTIAN-BORN: %s ==="), *Name);
+		BigArrivalStreakSols = 0.0;
+		return;
 	}
-	else
+	BigArrivalStreakSols += SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	if (BigArrivalStreakSols < BigArrivalStreakSolsNeeded || BigArrivalColonists <= 0 || GetFreeHousing() < BigArrivalFreeBeds)
 	{
-		OnAlert.Broadcast(FString::Printf(TEXT("A CHILD IS BORN — %s joins the colony (%d born on Mars)."), *Name, BirthsOnMars));
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== MARTIAN-BORN: %s (%d total) ==="), *Name, BirthsOnMars);
+		return;
 	}
+	const int32 Before = Colonists.Num();
+	const int32 Housed = Debug_AddColonists(BigArrivalColonists);
+	if (Housed <= 0)
+	{
+		return;
+	}
+	bBigArrivalDone = true;
+	const double FoodKg = ColonistTransportFoodKgPerColonist * Housed;
+	AddStock(FName("Food"), FoodKg);
+	// Gate-D placeholder copy.
+	OnAlert.Broadcast(FString::Printf(
+		TEXT("THE BIG ARRIVAL — %d settlers land at once: the colony held its Hope long enough to be trusted with a city. They bring %.0f kg of provisions."),
+		Housed, FoodKg));
+	OnAlert.Broadcast(TEXT("THE CEO HAS ANNOUNCED HE WILL COME TO MARS WITH THE NEXT WAVE."));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== BIG ARRIVAL (Sol %d): %d settlers, +%.0f kg Food (smoothed Hope %.1f, streak %.1f sols, population %d -> %d); the CEO will come with the next wave ==="),
+		Clock ? Clock->GetSol() : 0, Housed, FoodKg, HopeSmoothed, BigArrivalStreakSols, Before, Colonists.Num());
+}
+
+void URHSimWorldSubsystem::StepMoveHome(float SubDt)
+{
+	// One pass per MoveHomeIntervalSols (a sol): an accumulator with a threshold, as
+	// the other slow clocks are. 0 turns it off.
+	if (MoveHomeIntervalSols <= 0.0)
+	{
+		MoveHomeAccSols = 0.0;
+		return;
+	}
+	MoveHomeAccSols += SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	if (MoveHomeAccSols < MoveHomeIntervalSols)
+	{
+		return;
+	}
+	MoveHomeAccSols -= MoveHomeIntervalSols;
+	RehomeResidents();
+}
+
+int32 URHSimWorldSubsystem::RehomeResidents()
+{
+	// The minimal correctness rule: a colonist whose home no longer has a bed for
+	// them moves to a free bed elsewhere. A home is out of beds for its residents
+	// when its floor lost its rating, its beds were sold or demolished, or it
+	// holds more residents than beds. In a home with fewer beds than residents the
+	// oldest hands keep theirs and the newest (highest Id) are the ones displaced.
+	// The displaced are placed highest Id first by the arrival fill order. One
+	// pass over the roster, one over the homes, one over the displaced: O(N). No
+	// free bed anywhere: they stay, and the shortage and recall rules take over.
+	const int32 Pop = Colonists.Num();
+	if (Pop == 0)
+	{
+		return 0;
+	}
+	TMap<int32, TArray<int32>> FloorResidents, HabResidents; // home -> roster indices (lookup only, never iterated for an outcome)
+	for (int32 i = 0; i < Pop; ++i)
+	{
+		const FRHColonist& C = Colonists[i];
+		if (C.HomeHab != 0)
+		{
+			HabResidents.FindOrAdd(C.HomeHab).Add(i);
+		}
+		else
+		{
+			FloorResidents.FindOrAdd(C.HomeLevel).Add(i);
+		}
+	}
+	TArray<int32> Displaced; // roster indices
+	const auto Displace = [&](TArray<int32>& Residents, int32 Beds)
+	{
+		if (Residents.Num() <= Beds)
+		{
+			return;
+		}
+		Residents.Sort([this](int32 A, int32 B) { return Colonists[A].Id < Colonists[B].Id; });
+		for (int32 k = FMath::Max(Beds, 0); k < Residents.Num(); ++k)
+		{
+			Displaced.Add(Residents[k]);
+		}
+	};
+	for (TPair<int32, TArray<int32>>& Home : FloorResidents)
+	{
+		Displace(Home.Value, RatedFloors.Contains(Home.Key) ? CountFloorBeds(Home.Key, nullptr) : 0);
+	}
+	for (TPair<int32, TArray<int32>>& Home : HabResidents)
+	{
+		Displace(Home.Value, (bVaultRated && IsHabRated(Home.Key)) ? GetHabBeds(Home.Key) : 0);
+	}
+	if (Displaced.Num() == 0)
+	{
+		return 0;
+	}
+	Displaced.Sort([this](int32 A, int32 B) { return Colonists[A].Id > Colonists[B].Id; });
+	TSet<int32> DisplacedIds;
+	DisplacedIds.Reserve(Displaced.Num());
+	for (const int32 Index : Displaced)
+	{
+		DisplacedIds.Add(Colonists[Index].Id);
+	}
+	FRHFillState Fill;
+	InitFillState(Fill, &DisplacedIds);
+	int32 Moved = 0;
+	for (const int32 Index : Displaced)
+	{
+		int32 Level = 0, Hab = 0;
+		if (!PickFillHome(Fill, Level, Hab))
+		{
+			break; // the fill order is the same for everyone: when it is full, it is full for the rest
+		}
+		FRHColonist& C = Colonists[Index];
+		C.HomeLevel = Hab ? 0 : Level;
+		C.HomeHab = Hab;
+		if (Hab)
+		{
+			++Fill.HabResidents.FindOrAdd(Hab);
+		}
+		else
+		{
+			++Fill.FloorResidents.FindOrAdd(Level);
+		}
+		++Moved;
+	}
+	if (Moved > 0)
+	{
+		++ColonistSetVersion; // beds are assigned per home: re-derive them
+		// One alert per batch, never one per person. Gate-D placeholder copy.
+		OnAlert.Broadcast(FString::Printf(TEXT("MOVED HOME: %d resident%s moved to free beds elsewhere — their homes no longer had a bed for them."),
+			Moved, Moved == 1 ? TEXT("") : TEXT("s")));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== MOVED HOME: %d of %d displaced resident%s found free beds (%d stay) ==="),
+			Moved, Displaced.Num(), Displaced.Num() == 1 ? TEXT("") : TEXT("s"), Displaced.Num() - Moved);
+	}
+	return Moved;
 }
 
 FName URHSimWorldSubsystem::GetNextDiscovery() const
@@ -10078,6 +10396,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			Ar << KeyCopy << Saved.Acc << Saved.OnsetResidents;
 		}
 	}
+	// Arrivals at scale (save v35, C2b): the Big Arrival's streak and once-only flag,
+	// the move-home accumulator, and the settlers who came with ships.
+	{
+		uint8 BigDone = bBigArrivalDone ? 1 : 0;
+		Ar << BigArrivalStreakSols << BigDone << MoveHomeAccSols << ImmigrantsTotal;
+	}
 	// Room designations (save v11).
 	Ar << FloorRoomCells;
 	// The garden (save v12).
@@ -10460,6 +10784,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Ar << AccKey << Loaded.Acc << Loaded.OnsetResidents;
 			HomeClocks.Add(AccKey, Loaded);
 		}
+	}
+	// Arrivals at scale (save v35, C2b).
+	{
+		uint8 BigDone = 0;
+		Ar << BigArrivalStreakSols << BigDone << MoveHomeAccSols << ImmigrantsTotal;
+		bBigArrivalDone = BigDone != 0;
 	}
 	// Room designations (save v11). Map repopulates wholesale.
 	FloorRoomCells.Empty();

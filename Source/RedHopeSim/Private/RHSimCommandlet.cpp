@@ -2504,20 +2504,29 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(!Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1) && bSurfaceDown && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9),
 				TEXT("S12b network 1's filter off: only it fails (no shaft link); its four lose support; the infirmary in B goes offline"));
 		}
-		RunSols(2.5); // four residents at ration 0 are all recalled by about 2.0 sols (C2a: one every half sol), newest first
+		RunSols(2.5); // four residents at ration 0: one recall every half sol, newest first (C2a) - and (C2b) once a sol the colony moves anyone whose home has no bed for them to a free bed elsewhere: floor -1 has one free (S12's recall), so one of the surface four, the newest still here, moves in and is saved
 		{
 			const TArray<FRHColonist>& Cs = Sim->GetColonists();
-			bool bOk = Cs.Num() == 4; // the floor's three oldest and PQ's one
-			for (int32 i = 0; bOk && i < 3; ++i) { bOk &= Cs[i].HomeLevel == -1 && Cs[i].HomeHab == 0; }
-			bOk = bOk && Cs[3].HomeHab == PQ && Sim->GetHabResidents(A) == 0 && Sim->GetHabResidents(Hh) == 0 && Sim->GetHousingCapacity() == 5;
-			Expect(bOk, FString::Printf(TEXT("S12b the four surface residents are recalled; floor and PQ stay (pop %d, capacity %d)"), Sim->GetPopulation(), Sim->GetHousingCapacity()));
+			int32 OnFloor = 0, OnPQ = 0, FromSurface = 0, FloorFromSurface = 0, Oldest = 0;
+			for (const FRHColonist& Col : Cs)
+			{
+				OnFloor += (Col.HomeHab == 0 && Col.HomeLevel == -1) ? 1 : 0;
+				OnPQ += Col.HomeHab == PQ ? 1 : 0;
+				FromSurface += Col.Id <= 4 ? 1 : 0; // Ids 1-4 were the surface four (network 1)
+				FloorFromSurface += (Col.Id <= 4 && Col.HomeHab == 0 && Col.HomeLevel == -1) ? 1 : 0;
+				Oldest += (Col.Id >= 5 && Col.Id <= 7 && Col.HomeHab == 0 && Col.HomeLevel == -1) ? 1 : 0;
+			}
+			// The floor's three oldest stay, one of the surface four moved onto the floor, PQ's one stays; the other three were recalled.
+			bool bOk = Cs.Num() == 5 && OnFloor == 4 && OnPQ == 1 && FromSurface == 1 && FloorFromSurface == 1 && Oldest == 3;
+			bOk = bOk && Sim->GetHabResidents(A) == 0 && Sim->GetHabResidents(Hh) == 0 && Sim->GetHousingCapacity() == 5;
+			Expect(bOk, FString::Printf(TEXT("S12b three of the four surface residents are recalled, the fourth moves to the floor's free bed (C2b); floor and PQ stay (pop %d, capacity %d, %d on the floor, %d in PQ)"), Sim->GetPopulation(), Sim->GetHousingCapacity(), OnFloor, OnPQ));
 			TArray<FIntPoint> Before;
 			for (const FRHColonist& Col : Cs) { Before.Add(FIntPoint(Col.HomeLevel, Col.HomeHab)); }
 			Err.Reset();
 			Sim->SaveColony(TEXT("surfacehabtest2"), Err);
 			Sim->Debug_AddColonists(1);
 			Sim->LoadColony(TEXT("surfacehabtest2"), Err);
-			bool bSame = Sim->GetPopulation() == 4;
+			bool bSame = Sim->GetPopulation() == Before.Num();
 			for (int32 i = 0; bSame && i < Sim->GetColonists().Num(); ++i)
 			{
 				bSame &= FIntPoint(Sim->GetColonists()[i].HomeLevel, Sim->GetColonists()[i].HomeHab) == Before[i];
@@ -6315,6 +6324,686 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// C2b self-test (living-city gate 2b, 2026-10-18): ARRIVALS AT SCALE.
+	// `-arrivals`. Fails loudly; it has no timing lines. The fixture is a shaft
+	// of three floors of 200 cells whose beds are the legacy rule (a carved cell
+	// holds ColonistsPerCell), so a suite can move the capacity by moving one
+	// number. The smoothed Hope is held with Debug_SetHopeBase / SetHopeSmoothed
+	// (the index itself is the real one). The checks:
+	//  (b) births per head: the growth streak runs at max(1, N / BirthRefPop) x
+	//      real time - exactly dt at N = 10 and 25, dt x 26 / 25 at 26, dt x 10 at
+	//      250 - and the births follow (one in 20 sols at 10, one in 2 at 250);
+	//  (a) the Colonist Transport lands with enough beds and stays aboard, whole,
+	//      without (19 free of 20 needed), and a real ship lands one;
+	//  (c) the immigration count against the formula at several Hope levels and
+	//      sizes, the free-bed cap and the per-ship cap, applied for real: the
+	//      settlers are not Mars-born and arrive under one alert - first through a
+	//      real supply ship's landing, then directly;
+	//  (d) the Big Arrival: no fire before 20 sols, none without 100 free beds,
+	//      the streak resets when Hope drops, it fires once at 20 with beds (two
+	//      alerts, the food), never again, and a save / load round trip holds the
+	//      streak and the flag;
+	//  (e) moving home, against an independent model of the rule: residents over a
+	//      floor's beds (the newest, highest Id, are displaced), a floor that lost
+	//      its rating, no free bed anywhere (they stay), once a sol, and the cost
+	//      of a big move;
+	//  (f) one alert per event, counted at OnAlert, in every path above.
+	if (FParse::Param(*Params, TEXT("arrivals")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST (C2b, 2026-10-18) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("ARRV ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("ARRV FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr double DtSols = EraDt / SolLen;
+		constexpr int32 StepsPerSolA = (int32)(SolLen / EraDt);
+		constexpr int32 Floors = 3;
+		constexpr int32 CellsPerFloor = 200; // leak (200 x 2 kg/sol) stays under the trunk's push: the floors stay rated
+		const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen")), NStruct(TEXT("Struct")), NHydrogen(TEXT("Hydrogen"));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString R;
+
+		// P0. Pure data: the thirteen config rows and the manifest row come off the
+		// synced DataTables alone (no override, no C++ fallback), so a DT that
+		// drifted from the CSV fails here and not silently.
+		const TPair<const TCHAR*, double> Pins[] = {
+			{ TEXT("ColonistTransportColonists"), 20.0 }, { TEXT("ColonistTransportFoodKgPerColonist"), 50.0 }, { TEXT("BirthRefPop"), 25.0 },
+			{ TEXT("ImmigrationHopeMin"), 75.0 }, { TEXT("ImmigrationHopeFloor"), 70.0 }, { TEXT("ImmigrationBase"), 4.0 },
+			{ TEXT("ImmigrationPerCapita"), 0.2 }, { TEXT("ImmigrationCapPerShip"), 50.0 }, { TEXT("BigArrivalHopeMin"), 75.0 },
+			{ TEXT("BigArrivalStreakSols"), 20.0 }, { TEXT("BigArrivalFreeBeds"), 100.0 }, { TEXT("BigArrivalColonists"), 100.0 },
+			{ TEXT("MoveHomeIntervalSols"), 1.0 }, { TEXT("ImmigrationReserveBeds"), 1.0 } };
+		FString PinText;
+		bool bPins = true;
+		for (const TPair<const TCHAR*, double>& Pin : Pins)
+		{
+			const double Got = DefsSub ? DefsSub->GetConfigTableScalar(FName(Pin.Key), -1.0) : -1.0;
+			bPins &= Near(Got, Pin.Value, 1e-9);
+			PinText += FString::Printf(TEXT(" %s=%g"), Pin.Key, Got);
+		}
+		Expect(bPins, FString::Printf(TEXT("P0 DT_Config pins:%s"), *PinText));
+		Expect(Sim->GetColonistTransportColonists() == 20 && Near(Sim->GetColonistTransportFoodKgPerColonist(), 50.0, 1e-9) && Near(Sim->GetBirthRefPop(), 25.0, 1e-9)
+			&& Near(Sim->GetImmigrationHopeMin(), 75.0, 1e-9) && Near(Sim->GetImmigrationHopeFloor(), 70.0, 1e-9) && Near(Sim->GetImmigrationBase(), 4.0, 1e-9)
+			&& Near(Sim->GetImmigrationPerCapita(), 0.2, 1e-9) && Sim->GetImmigrationCapPerShip() == 50 && Near(Sim->GetBigArrivalHopeMin(), 75.0, 1e-9)
+			&& Near(Sim->GetBigArrivalStreakSolsNeeded(), 20.0, 1e-9) && Sim->GetBigArrivalFreeBeds() == 100 && Sim->GetBigArrivalColonists() == 100
+			&& Near(Sim->GetMoveHomeIntervalSols(), 1.0, 1e-9) && Sim->GetImmigrationReserveBeds() == 1,
+			TEXT("P0 the sim reads the same values (no override or fallback in play)"));
+		const FRHManifestItemRow* TransportRow = DefsSub ? DefsSub->GetManifestItem(FName("ColonistTransport")) : nullptr;
+		const FRHManifestItemRow* PodRow = DefsSub ? DefsSub->GetManifestItem(FName("CrewPod")) : nullptr;
+		Expect(TransportRow && TransportRow->SliceActive && Near(TransportRow->Mass_kg, 8000.0, 1e-9) && TransportRow->Category == TEXT("Crew") && PodRow && PodRow->SliceActive,
+			FString::Printf(TEXT("P0 DT_ManifestItems has ColonistTransport (%s, mass %.0f kg, category %s) beside CrewPod"),
+				TransportRow ? (TransportRow->SliceActive ? TEXT("SliceActive") : TEXT("dormant")) : TEXT("MISSING"), TransportRow ? TransportRow->Mass_kg : -1.0, TransportRow ? *TransportRow->Category : TEXT("-")));
+		if (!bPins || !TransportRow || !TransportRow->SliceActive || Fails > 0)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("ARRV FAIL: the data is not in place; the suite stops"));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST END: %d check(s), %d failure(s) ==="), Checks, Fails + 1);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
+		}
+
+		// Alerts, counted where the player's banner would hear them.
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Prefix) { int32 N = 0; for (const FString& A : Alerts) { N += A.StartsWith(Prefix) ? 1 : 0; } return N; };
+		const auto CountAlertsWith = [&Alerts](const TCHAR* Needle) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Needle) ? 1 : 0; } return N; };
+		// What the world looked like when a transport's colonists stepped off.
+		struct FLandSnap { bool bSet = false; int32 Pop = 0, FreeBeds = 0; double Hope = 0.0; };
+		FLandSnap Snap;
+		const FDelegateHandle SnapH = Sim->OnAlert.AddLambda([&Snap, Sim](const FString& S)
+		{
+			if (!Snap.bSet && S.StartsWith(TEXT("A COLONIST TRANSPORT HAS LANDED")))
+			{
+				Snap.bSet = true;
+				Snap.Pop = Sim->GetPopulation();
+				Snap.FreeBeds = Sim->GetFreeHousing();
+				Snap.Hope = Sim->GetHopeSmoothed();
+			}
+		});
+		int32 Landings = 0;
+		const FDelegateHandle ShipH = Sim->OnShipArrived.AddLambda([&Landings](const TArray<FName>&) { ++Landings; });
+
+		const auto TopUp = [&]()
+		{
+			Sim->Debug_AddFreshWater(500.0 * EraDt / SolLen);
+			Sim->Debug_SetBatteryWh(1.0e9);
+		};
+		const auto EraStepOnce = [&]()
+		{
+			TopUp();
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto RunSteps = [&](int32 Steps) { for (int32 K = 0; K < Steps; ++K) { EraStepOnce(); } };
+		const auto RunSolsA = [&](double NSols) { RunSteps(FMath::RoundToInt(NSols * StepsPerSolA)); };
+		const auto SetStock = [&](FName Res, double Kg) { Sim->AddStock(Res, -Sim->GetStock(Res)); Sim->AddStock(Res, Kg); };
+		// Hold the colony's mood: the real Hope index sits above the base, so a base of
+		// 95 keeps it near 100 and a base of 40 sinks the smoothed value below every gate.
+		const auto HoldHope = [&](double V) { Sim->Debug_SetHopeBase(V); Sim->Debug_SetHopeSmoothed(V); };
+		const auto Lapse = [&]() { HoldHope(40.0); EraStepOnce(); HoldHope(95.0); }; // one step below every gate: every streak resets
+		// Capacity: beds per floor B give 3 x B beds. Leaves exactly Want free by moving
+		// the beds, re-homing whoever is over them, and filling the rest.
+		const auto SetFree = [&](int32 Want) -> bool
+		{
+			const int32 Pop = Sim->GetPopulation();
+			const int32 PerFloor = (Pop + Want + Floors - 1) / Floors;
+			Sim->Debug_SetColonistsPerCell((PerFloor + 0.5) / CellsPerFloor);
+			Sim->Debug_RehomeResidents(); // anyone over a floor's new beds moves now, not at the next sol
+			const int32 Fill = Sim->GetHousingCapacity() - Want - Pop;
+			if (Fill > 0) { Sim->Debug_AddColonists(Fill); }
+			return Sim->GetFreeHousing() == Want;
+		};
+		const auto MaxColonistId = [&]() { int32 Top = 0; for (const FRHColonist& C : Sim->GetColonists()) { Top = FMath::Max(Top, C.Id); } return Top; };
+		const auto NewcomersFine = [&](int32 AboveId, int32 Expected) -> bool
+		{
+			int32 Seen = 0;
+			bool bOk = true;
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				if (C.Id > AboveId)
+				{
+					++Seen;
+					bOk &= !C.bMarsBorn && C.HomeHab == 0 && C.HomeLevel < 0 && C.HomeLevel >= -Floors && Sim->IsFloorRated(C.HomeLevel);
+				}
+			}
+			return bOk && Seen == Expected;
+		};
+		const auto NoFloorOverBeds = [&]() -> bool
+		{
+			int32 Residents[Floors + 1] = { 0, 0, 0, 0 };
+			for (const FRHColonist& C : Sim->GetColonists()) { if (C.HomeHab == 0 && C.HomeLevel < 0 && C.HomeLevel >= -Floors) { ++Residents[-C.HomeLevel]; } }
+			bool bOk = true;
+			for (int32 L = 1; L <= Floors; ++L) { bOk &= Residents[L] <= Sim->GetFloorBeds(-L); }
+			return bOk;
+		};
+
+		// Comfortable room: the Housing term's denominator is the bed-weighted Living cells
+		// (one each on this fixture, which has no furniture). Zones the first Target of the
+		// 600 cells Living and clears the rest, so settlers' cap can be moved by one number.
+		const auto SetComfort = [&](int32 Target)
+		{
+			for (int32 Flat = 0; Flat < Floors * CellsPerFloor; ++Flat)
+			{
+				const int32 Level = -(Flat / CellsPerFloor + 1), Index = Flat % CellsPerFloor;
+				FString Why;
+				if (!Sim->DesignateRoom(Level, Index, Flat < Target ? FName("LivingQuarters") : NAME_None, Why))
+				{
+					UE_LOG(LogRedHopeSim, Error, TEXT("ARRV: zoning floor %d cell %d failed: %s"), Level, Index, *Why);
+					++Fails;
+				}
+			}
+		};
+		// Setup: power, a shaft, floors with an air filter each, every stock deep, a
+		// quota the stocks already meet. Beds: five a cell until a test says otherwise.
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("Lander")) { LanderId = B.Id; } }
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -1000.0, 0.0));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -2000.0, 0.0));
+		Sim->AddStock(NOxygen, 1.0e8);
+		Sim->AddStock(NWater, 1.0e8);
+		Sim->AddStock(NFood, 1.0e8);
+		Sim->AddStock(NHydrogen, 1.0e6);
+		Sim->Debug_AddSolidAt(LanderId, NStruct, 1.0e6, false);
+		const FVector Head(3000.0, 3000.0, 0.0);
+		Sim->ExtendShaft(Floors, Head);
+		bool bCarved = true;
+		for (int32 L = 1; L <= Floors; ++L) { bCarved &= Sim->ExcavateFloor(-L, CellsPerFloor, R); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_PlaceInstant(FName("AirFilter"), Head, -L); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+		Sim->Debug_SetColonistsPerCell(5.0);
+		SetComfort(Floors * CellsPerFloor);      // every cell a Living cell: room for 600 at full Housing
+		Sim->Debug_SetHopeGates(101.0, 101.0);   // no research, no births, until a test turns births on
+		Sim->Debug_SetBigArrivalDone(true);      // the Big Arrival waits for its own test
+		HoldHope(95.0);
+		EraStepOnce();
+		Expect(bCarved && Sim->GetShaftDepth() == Floors && Sim->IsFloorRated(-1) && Sim->IsFloorRated(-Floors) && Sim->GetPopulation() == 0 && Sim->GetHousingCapacity() == Floors * 1000 && Sim->GetHousingComfortCapacity() == Floors * CellsPerFloor,
+			FString::Printf(TEXT("setup: shaft to -%d, %d cells a floor, every floor rated, %d beds, %d comfortable places (every cell Living), nobody yet, Hope held near 100"), Floors, CellsPerFloor, Sim->GetHousingCapacity(), Sim->GetHousingComfortCapacity()));
+
+		// (b) Births per head. The streak gains dt x max(1, N / 25) in an eligible step.
+		Sim->Debug_SetHopeGates(101.0, 75.0);
+		Sim->Debug_AddColonists(10);
+		Expect(Sim->GetPopulation() == 10 && Sim->GetBirthsOnMars() == 0, TEXT("b a colony of ten, no births yet"));
+		Lapse();
+		Expect(Sim->GetHopeGrowthStreakSols() == 0.0 && Sim->GetPopulation() == 10, TEXT("b the streak is zero after a lapse (conditions lapsed: momentum resets)"));
+		EraStepOnce();
+		const double Streak10 = Sim->GetHopeGrowthStreakSols();
+		EraStepOnce();
+		Expect(Near(Streak10, DtSols, 1e-12) && Near(Sim->GetHopeGrowthStreakSols(), 2.0 * DtSols, 1e-12),
+			FString::Printf(TEXT("b N=10: the streak gains exactly dt a step (%.9f then %.9f; dt = %.9f sol) - identical to the old law"), Streak10, Sim->GetHopeGrowthStreakSols(), DtSols));
+		// The births at N = 10: nothing for 19.95 sols, then one by 20.05 (identical to today).
+		Lapse();
+		RunSteps(399);
+		const int32 BirthsEarly = Sim->GetBirthsOnMars();
+		RunSteps(3);
+		Expect(BirthsEarly == 0 && Sim->GetBirthsOnMars() == 1 && Sim->GetPopulation() == 11 && CountAlerts(TEXT("THE FIRST MARTIAN IS BORN")) == 1 && CountAlerts(TEXT("A CHILD IS BORN")) == 0,
+			FString::Printf(TEXT("b N=10: no birth by sol 19.95 (%d), the first Martian by sol 20.1 (%d born, population %d), one first-born alert"), BirthsEarly, Sim->GetBirthsOnMars(), Sim->GetPopulation()));
+		bool bBornMars = Sim->GetColonists().Last().bMarsBorn;
+		// N = 25 and 26: the boundary of the reference population.
+		Sim->Debug_AddColonists(25 - Sim->GetPopulation());
+		Lapse();
+		EraStepOnce();
+		const double Streak25 = Sim->GetHopeGrowthStreakSols();
+		Sim->Debug_AddColonists(1);
+		Lapse();
+		EraStepOnce();
+		const double Streak26 = Sim->GetHopeGrowthStreakSols();
+		Expect(Sim->GetPopulation() == 26 && Near(Streak25, DtSols, 1e-12) && Near(Streak26, DtSols * 26.0 / 25.0, 1e-12),
+			FString::Printf(TEXT("b N=25: dt (%.9f); N=26: dt x 26/25 (%.9f, expect %.9f) - the rate starts to scale one resident past the reference"), Streak25, Streak26, DtSols * 26.0 / 25.0));
+		// N = 250: ten times the rate.
+		Sim->Debug_AddColonists(250 - Sim->GetPopulation());
+		Lapse();
+		EraStepOnce();
+		const double Streak250 = Sim->GetHopeGrowthStreakSols();
+		Expect(Sim->GetPopulation() == 250 && Near(Streak250, DtSols * 10.0, 1e-12),
+			FString::Printf(TEXT("b N=250: the streak gains dt x 10 a step (%.9f, expect %.9f)"), Streak250, DtSols * 10.0));
+		Lapse();
+		Alerts.Reset();
+		const int32 BirthsBefore250 = Sim->GetBirthsOnMars();
+		RunSteps(39); // 1.95 sols
+		const int32 Births195 = Sim->GetBirthsOnMars() - BirthsBefore250;
+		RunSteps(2);  // 2.05 sols
+		const int32 Births205 = Sim->GetBirthsOnMars() - BirthsBefore250;
+		RunSteps(41); // 4.1 sols
+		const int32 Births41 = Sim->GetBirthsOnMars() - BirthsBefore250;
+		bBornMars &= Sim->GetColonists().Last().bMarsBorn;
+		Expect(Births195 == 0 && Births205 == 1 && Births41 == 2 && Sim->GetPopulation() == 252 && bBornMars,
+			FString::Printf(TEXT("b N=250: no birth by sol 1.95 (%d), one by 2.05 (%d), two by 4.1 (%d) - ten times the births of a crew (one in 20 sols); every birth is Mars-born (%d)"),
+				Births195, Births205, Births41, (int32)bBornMars));
+		Expect(CountAlerts(TEXT("A CHILD IS BORN")) == 0 && CountAlerts(TEXT("THE FIRST MARTIAN")) == 0 && CountAlerts(TEXT("THE COLONY GROWS")) == 0,
+			FString::Printf(TEXT("f %d births in a city, %d birth alerts (a city's births are a rate: a banner on every tenth, never one per child)"), Births41, CountAlerts(TEXT("A CHILD")) + CountAlerts(TEXT("THE COLONY GROWS"))));
+		Sim->Debug_SetHopeGates(101.0, 101.0);
+
+		// (a) The Colonist Transport. Twenty colonists and fifty kilos of food each; it
+		// lands whole or not at all.
+		{
+			const bool bFree20 = SetFree(20);
+			Expect(bFree20, FString::Printf(TEXT("a setup: exactly 20 beds free (%d of %d), population %d"), Sim->GetFreeHousing(), Sim->GetHousingCapacity(), Sim->GetPopulation()));
+			Alerts.Reset();
+			const int32 PopA = Sim->GetPopulation(), TopId = MaxColonistId();
+			const double FoodA = Sim->GetStock(NFood);
+			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
+			Expect(Sim->GetPopulation() == PopA + 20 && Sim->GetFreeHousing() == 0 && Near(Sim->GetStock(NFood) - FoodA, 1000.0, 1e-6) && NewcomersFine(TopId, 20) && NoFloorOverBeds(),
+				FString::Printf(TEXT("a 20 beds free of 20 needed: the transport lands - population %d -> %d, +%.0f kg Food (20 x 50), all housed on rated floors, none Mars-born"),
+					PopA, Sim->GetPopulation(), Sim->GetStock(NFood) - FoodA));
+			Expect(Alerts.Num() == 1 && CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")) == 1 && Alerts[0].Contains(TEXT("20 colonists")) && Alerts[0].Contains(TEXT("1000 kg")),
+				FString::Printf(TEXT("f the landing is one alert, not one per colonist: %d alert(s), \"%s\""), Alerts.Num(), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// No beds at all.
+			Alerts.Reset();
+			const int32 PopB = Sim->GetPopulation();
+			const double FoodB = Sim->GetStock(NFood);
+			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
+			Expect(Sim->GetPopulation() == PopB && Near(Sim->GetStock(NFood), FoodB, 1e-9) && Alerts.Num() == 1 && Alerts[0].StartsWith(TEXT("COLONIST TRANSPORT RETURNED")) && Alerts[0].Contains(TEXT("0 beds free, 20 needed")),
+				FString::Printf(TEXT("a 0 beds free: the whole transport stays aboard - population %d, Food unchanged, \"%s\""), Sim->GetPopulation(), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// One bed short: still all or nothing.
+			const bool bFree19 = SetFree(19);
+			Expect(bFree19, FString::Printf(TEXT("a setup: exactly 19 beds free (%d)"), Sim->GetFreeHousing()));
+			Alerts.Reset();
+			const int32 PopC = Sim->GetPopulation();
+			const double FoodC = Sim->GetStock(NFood);
+			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
+			Expect(Sim->GetPopulation() == PopC && Sim->GetFreeHousing() == 19 && Near(Sim->GetStock(NFood), FoodC, 1e-9) && Alerts.Num() == 1 && Alerts[0].Contains(TEXT("19 beds free, 20 needed")),
+				FString::Printf(TEXT("a 19 beds free of 20: nobody steps off (population %d, %d beds still free, Food unchanged), \"%s\""), Sim->GetPopulation(), Sim->GetFreeHousing(), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// Beds appear: it lands.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			Alerts.Reset();
+			const int32 PopD = Sim->GetPopulation(), TopD = MaxColonistId();
+			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
+			Expect(Sim->GetPopulation() == PopD + 20 && NewcomersFine(TopD, 20) && Alerts.Num() == 1 && CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")) == 1,
+				FString::Printf(TEXT("a with beds again the next transport lands: population %d -> %d, one alert"), PopD, Sim->GetPopulation()));
+		}
+
+		// (a) + (c) A real supply ship. Its manifest carries a Colonist Transport, so the
+		// cargo lands first and the settlers fill what beds are left: 29 free, the
+		// transport takes 20, the settlers are capped at the 9 remaining.
+		{
+			const bool bFree29 = SetFree(29);
+			Expect(bFree29, FString::Printf(TEXT("a ship setup: exactly 29 beds free (%d), population %d"), Sim->GetFreeHousing(), Sim->GetPopulation()));
+			HoldHope(95.0);
+			for (const auto& L : Sim->GetQuotaProgress())
+			{
+				const double Gap = L.Value.Value + 1.0 - L.Value.Key;
+				if (Gap > 0.0) { Sim->AddStock(L.Key, Gap); }
+			}
+			RunSteps(4);
+			FString Err;
+			const bool bAwaiting = Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest;
+			const bool bAdded = bAwaiting && Sim->AddManifestItem(FName("ColonistTransport"), Err);
+			const bool bLaunched = bAdded && Sim->LaunchShip(Err);
+			Expect(bAwaiting && bAdded && bLaunched,
+				FString::Printf(TEXT("a quota met, the Colonist Transport (8000 kg) fits the award (%.0f kg) and the ship launches (%s)"), Sim->GetAwardMassKg(), *Err));
+			Alerts.Reset();
+			Snap = FLandSnap();
+			const int32 LandBefore = Landings;
+			const int32 PopShip = Sim->GetPopulation(), TopShip = MaxColonistId();
+			const int32 SettlersBefore = Sim->GetImmigrantsTotal();
+			for (int32 K = 0; K < 6 * StepsPerSolA && Landings == LandBefore; ++K) { EraStepOnce(); }
+			const int32 ExpectedSettlers = Snap.bSet ? Sim->GetImmigrationCount(Snap.Hope, Snap.Pop, Snap.FreeBeds, Sim->GetHousingComfortCapacity()) : -1;
+			Expect(Landings == LandBefore + 1 && Snap.bSet && Snap.Pop == PopShip + 20 && Snap.FreeBeds == 9 && Snap.Hope >= 75.0,
+				FString::Printf(TEXT("a the ship lands and its transport steps off first: population %d -> %d, %d beds left, smoothed Hope %.1f"), PopShip, Snap.Pop, Snap.FreeBeds, Snap.Hope));
+			Expect(ExpectedSettlers == 8 && Sim->GetImmigrantsTotal() - SettlersBefore == 8 && Sim->GetPopulation() == PopShip + 20 + 8 && Sim->GetFreeHousing() == 1 && NewcomersFine(TopShip, 28) && NoFloorOverBeds(),
+				FString::Printf(TEXT("c the same landing draws settlers: the formula allows %d at Hope %.1f and a population of %d, only 9 beds are free and one is held back for a Mars-born child, so 8 arrive and one bed stays free (population %d); none Mars-born, none over a floor's beds"),
+					Snap.Pop > 0 ? FMath::FloorToInt(FMath::Clamp(Snap.Hope - 70.0, 0.0, 30.0) * FMath::Max(4.0, 0.2 * Snap.Pop) / 30.0) : 0, Snap.Hope, Snap.Pop, Sim->GetPopulation()));
+			Expect(CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")) == 1 && CountAlertsWith(TEXT("8 settlers arrived with the supply ship, drawn by the colony's reputation.")) == 1,
+				FString::Printf(TEXT("f one alert for the transport and one for all eight settlers: %d + %d"), CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")), CountAlertsWith(TEXT("settlers arrived"))));
+			// Births come first: the bed the settlers left free goes to the next Mars-born child.
+			Sim->Debug_SetHopeGates(101.0, 75.0);
+			Lapse();
+			const int32 BirthsPre = Sim->GetBirthsOnMars();
+			const int32 PopPreBirth = Sim->GetPopulation();
+			RunSolsA(2.5);
+			Expect(Sim->GetBirthsOnMars() == BirthsPre + 1 && Sim->GetPopulation() == PopPreBirth + 1 && Sim->GetFreeHousing() == 0 && Sim->GetColonists().Last().bMarsBorn,
+				FString::Printf(TEXT("c births come first: the one bed the settlers kept free went to a Mars-born child within 2.5 sols (%d born, population %d, %d beds free)"), Sim->GetBirthsOnMars() - BirthsPre, Sim->GetPopulation(), Sim->GetFreeHousing()));
+			Sim->Debug_SetHopeGates(101.0, 101.0);
+		}
+
+		// (c) The count, against the formula floor((Hope - 70) / 30 x max(4, 0.2 N)),
+		// capped at 50 and at the free beds; nothing under Hope 75 or with nobody there.
+		{
+			struct FCase { double Hope; int32 Pop, FreeBeds, Comfort, Want; };
+			constexpr int32 Roomy = 100000; // comfortable room never binds
+			const FCase Cases[] = {
+				{ 74.9, 100, 500, Roomy, 0 },  // under the minimum
+				{ 75.0, 10, 500, Roomy, 0 },   // 5 x 4 / 30 = 0.67
+				{ 75.0, 100, 500, Roomy, 3 },  // 5 x 20 / 30 = 3.33
+				{ 85.0, 10, 500, Roomy, 2 },   // 15 x 4 / 30 = 2 (the floor of 4 beats 0.2 x 10)
+				{ 90.0, 10, 500, Roomy, 2 },   // 20 x 4 / 30 = 2.67
+				{ 100.0, 10, 500, Roomy, 4 },  // 30 x 4 / 30
+				{ 85.0, 100, 500, Roomy, 10 }, // 15 x 20 / 30 = 10
+				{ 95.0, 250, 500, Roomy, 41 }, // 25 x 50 / 30 = 41.67
+				{ 100.0, 250, 500, Roomy, 50 },// 50: the full draw is the cap
+				{ 100.0, 1000, 500, Roomy, 50 },// 200 capped at 50 a ship
+				{ 80.0, 1000, 500, Roomy, 50 },// 66 capped at 50
+				{ 72.0, 1000, 500, Roomy, 0 }, // under the minimum at any size
+				{ 100.0, 1000, 7, Roomy, 6 },  // the free beds cap it, less the one held back for births
+				{ 100.0, 250, 2, Roomy, 1 },   // two free: one settler, one bed kept
+				{ 100.0, 250, 1, Roomy, 0 },   // one free bed is the births' bed: nobody comes
+				{ 100.0, 250, 0, Roomy, 0 },   // no beds, nobody comes
+				{ 100.0, 0, 500, Roomy, 0 },   // nobody here, no reputation
+				{ 100.0, 250, 500, 260, 10 },  // comfortable room: 260 places for 250 people
+				{ 100.0, 250, 500, 250, 0 },   // the Housing term is exactly full: nobody comes
+				{ 100.0, 250, 500, 100, 0 },   // already past comfort: nobody comes, never negative
+				{ 100.0, 250, 8, 260, 7 },     // the beds bind before the comfortable room (8 - 1 < 10)
+				{ 100.0, 250, 500, 0, 0 } };   // no Living cells at all: no comfortable room
+			bool bAll = true;
+			FString CaseText;
+			for (const FCase& Case : Cases)
+			{
+				const int32 Got = Sim->GetImmigrationCount(Case.Hope, Case.Pop, Case.FreeBeds, Case.Comfort);
+				bAll &= Got == Case.Want;
+				CaseText += FString::Printf(TEXT(" (Hope %.1f, N %d, %d free, room for %d) -> %d%s;"), Case.Hope, Case.Pop, Case.FreeBeds, Case.Comfort, Got, Got == Case.Want ? TEXT("") : *FString::Printf(TEXT(" EXPECTED %d"), Case.Want));
+			}
+			Expect(bAll, FString::Printf(TEXT("c the formula, the per-ship cap of 50, the free-bed cap with its reserve, the comfortable-room cap and the Hope minimum:%s"), *CaseText));
+
+			// Applied for real. 500 beds free; settlers drawn at Hope 85, 75, 100, 74.9.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			const auto Apply = [&](double Hope, int32 WantSettlers, const TCHAR* Tag)
+			{
+				Sim->Debug_SetHopeSmoothed(Hope);
+				Alerts.Reset();
+				const int32 PopX = Sim->GetPopulation(), TopX = MaxColonistId(), TotalX = Sim->GetImmigrantsTotal();
+				const int32 Came = Sim->Debug_Immigrate();
+				const bool bAlertOk = WantSettlers == 0
+					? Alerts.Num() == 0
+					: (Alerts.Num() == 1 && Alerts[0] == FString::Printf(TEXT("%d settler%s arrived with the supply ship, drawn by the colony's reputation."), WantSettlers, WantSettlers == 1 ? TEXT("") : TEXT("s")));
+				Expect(Came == WantSettlers && Sim->GetPopulation() == PopX + WantSettlers && Sim->GetImmigrantsTotal() == TotalX + WantSettlers && NewcomersFine(TopX, WantSettlers) && bAlertOk,
+					FString::Printf(TEXT("c %s: Hope %.1f at a population of %d draws %d settlers (%d came, population %d), not Mars-born, housed on rated floors, %d alert(s)%s"),
+						Tag, Hope, PopX, WantSettlers, Came, Sim->GetPopulation(), Alerts.Num(), Alerts.Num() == 1 ? *FString::Printf(TEXT(": \"%s\""), *Alerts[0]) : TEXT("")));
+			};
+			const auto Floor0 = [](double V) { return (int32)FMath::FloorToDouble(V); };
+			const auto FullDraw = [&](double AtPop) { return FMath::Max(Sim->GetImmigrationBase(), Sim->GetImmigrationPerCapita() * AtPop); };
+			const double Pop1 = Sim->GetPopulation();
+			Apply(85.0, Floor0(15.0 * FullDraw(Pop1) / 30.0), TEXT("a thriving city"));
+			const double Pop2 = Sim->GetPopulation();
+			Apply(75.0, Floor0(5.0 * FullDraw(Pop2) / 30.0), TEXT("the minimum Hope"));
+			Apply(74.9, 0, TEXT("just under the minimum"));
+			Apply(100.0, 50, TEXT("full Hope in a city: the per-ship cap"));
+			// The free-bed cap, applied: 3 beds free, full Hope in a city of 300.
+			const bool bFree3 = SetFree(3);
+			Expect(bFree3, FString::Printf(TEXT("c setup: exactly 3 beds free (%d), population %d"), Sim->GetFreeHousing(), Sim->GetPopulation()));
+			Apply(100.0, 2, TEXT("three free beds, one held back for births"));
+			Expect(Sim->GetFreeHousing() == 1, FString::Printf(TEXT("c the two settlers left the last bed free for a Mars-born child (%d free)"), Sim->GetFreeHousing()));
+			Apply(100.0, 0, TEXT("the last free bed is reserved: nobody comes"));
+			Sim->Debug_SetColonistsPerCell(5.0);
+
+			// Settlers never push the Housing term below its maximum. Room for exactly five more
+			// at full Housing: five come, the term holds; then it is exactly full and nobody does.
+			const double HousingMax = Sim->GetHopeHousingMax();
+			SetComfort(Sim->GetPopulation() + 5);
+			const double HousingBefore5 = Sim->GetColonyHope().Housing;
+			Apply(100.0, 5, TEXT("room for five at full Housing"));
+			const double HousingAfter5 = Sim->GetColonyHope().Housing;
+			Expect(Near(HousingBefore5, HousingMax, 1e-9) && Near(HousingAfter5, HousingMax, 1e-9) && Sim->GetHousingComfortCapacity() == Sim->GetPopulation(),
+				FString::Printf(TEXT("c the Housing term was %.4f before the five settlers and is %.4f after (maximum %.4f): the comfortable room (%d) is exactly the population (%d)"),
+					HousingBefore5, HousingAfter5, HousingMax, Sim->GetHousingComfortCapacity(), Sim->GetPopulation()));
+			Apply(100.0, 0, TEXT("the Housing term is exactly full: nobody comes"));
+			Expect(Near(Sim->GetColonyHope().Housing, HousingMax, 1e-9), TEXT("c still at the maximum after the refused ship"));
+			// Already below the maximum (fewer Living cells than people): nobody comes, and the term does not move.
+			SetComfort(Sim->GetPopulation() - 10);
+			const double HousingShort = Sim->GetColonyHope().Housing;
+			Apply(100.0, 0, TEXT("ten people short of comfortable room"));
+			Expect(HousingShort < HousingMax - 1e-9 && Near(Sim->GetColonyHope().Housing, HousingShort, 1e-12),
+				FString::Printf(TEXT("c the Housing term, already %.4f of %.4f, is not lowered further by a ship that brings nobody (%.4f)"), HousingShort, HousingMax, Sim->GetColonyHope().Housing));
+			SetComfort(Floors * CellsPerFloor);
+		}
+
+		// (d) The Big Arrival.
+		{
+			Sim->Debug_SetColonistsPerCell(5.0);
+			Sim->Debug_SetBigArrivalDone(false);
+			HoldHope(95.0);
+			Lapse(); // a clean streak
+			Expect(Sim->GetBigArrivalStreakSols() == 0.0 && !Sim->IsBigArrivalDone() && Sim->GetFreeHousing() >= 100,
+				FString::Printf(TEXT("d the streak starts at zero (%.3f), not done, %d beds free"), Sim->GetBigArrivalStreakSols(), Sim->GetFreeHousing()));
+			const int32 PopD0 = Sim->GetPopulation();
+			Alerts.Reset();
+			RunSolsA(5.0);
+			Expect(Near(Sim->GetBigArrivalStreakSols(), 5.0, 1e-9),
+				FString::Printf(TEXT("d five sols at Hope %.1f: the streak reads %.9f sols"), Sim->GetHopeSmoothed(), Sim->GetBigArrivalStreakSols()));
+			// Linear in dt: one 120 s step is two 60 s steps.
+			const double Streak5 = Sim->GetBigArrivalStreakSols();
+			TopUp();
+			Clock->Debug_AdvanceSimSeconds(2.0 * EraDt);
+			Sim->EraStep((float)(2.0 * EraDt));
+			Expect(Near(Sim->GetBigArrivalStreakSols() - Streak5, 2.0 * DtSols, 1e-12),
+				FString::Printf(TEXT("d linear in dt: one 120 s step adds %.9f sol, two 60 s steps add %.9f"), Sim->GetBigArrivalStreakSols() - Streak5, 2.0 * DtSols));
+			// The streak resets the moment Hope drops below 75.
+			Lapse();
+			Expect(Sim->GetBigArrivalStreakSols() == 0.0 && !Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopD0,
+				FString::Printf(TEXT("d one step under Hope 75 resets the streak to %.3f"), Sim->GetBigArrivalStreakSols()));
+
+			// Without the beds: 99 free. The streak runs past 20 sols and nothing lands.
+			const bool bFree99 = SetFree(99);
+			Expect(bFree99, FString::Printf(TEXT("d setup: exactly 99 beds free (%d)"), Sim->GetFreeHousing()));
+			const int32 PopNoBeds = Sim->GetPopulation();
+			Alerts.Reset();
+			RunSolsA(21.0);
+			Expect(Sim->GetBigArrivalStreakSols() >= 20.9 && !Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopNoBeds && CountAlerts(TEXT("THE BIG ARRIVAL")) == 0,
+				FString::Printf(TEXT("d 99 free beds, 21 sols at THRIVING: the streak reads %.2f but the wave does not land (population %d, done %d)"), Sim->GetBigArrivalStreakSols(), Sim->GetPopulation(), (int32)Sim->IsBigArrivalDone()));
+			// Beds appear: the very next step lands it, once.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			SetStock(NFood, 100000.0);
+			const int32 PopPre = Sim->GetPopulation(), TopPre = MaxColonistId();
+			const int32 TotalPre = Sim->GetImmigrantsTotal();
+			Alerts.Reset();
+			EraStepOnce();
+			const double FoodDrawn = PopPre * Sim->GetColonistFoodKgPerSol() * DtSols;
+			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopPre + 100 && NewcomersFine(TopPre, 100) && NoFloorOverBeds(),
+				FString::Printf(TEXT("d the beds appear and the Big Arrival lands: population %d -> %d, 100 settlers housed on rated floors, none Mars-born"), PopPre, Sim->GetPopulation()));
+			Expect(Near(Sim->GetStock(NFood), 100000.0 - FoodDrawn + 5000.0, 1e-6) && Sim->GetImmigrantsTotal() == TotalPre,
+				FString::Printf(TEXT("d with their food: %.3f kg (expect 100000 - %.3f eaten by the %d already here + 5000 for the hundred = %.3f)"), Sim->GetStock(NFood), FoodDrawn, PopPre, 100000.0 - FoodDrawn + 5000.0));
+			Expect(Alerts.Num() == 2 && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1 && CountAlerts(TEXT("THE CEO HAS ANNOUNCED HE WILL COME")) == 1,
+				FString::Printf(TEXT("f two alerts for a hundred people, one for the arrival and one for the CEO: %d alert(s), %d + %d"), Alerts.Num(), CountAlerts(TEXT("THE BIG ARRIVAL")), CountAlerts(TEXT("THE CEO HAS ANNOUNCED"))));
+			const double StreakAtFire = Sim->GetBigArrivalStreakSols();
+			const int32 PopAfter = Sim->GetPopulation();
+			RunSolsA(40.0);
+			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopAfter && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1 && Sim->GetBigArrivalStreakSols() == StreakAtFire,
+				FString::Printf(TEXT("d forty sols later it has not come again: population %d, %d Big Arrival alert(s) in all, the streak parked at %.2f"), Sim->GetPopulation(), CountAlerts(TEXT("THE BIG ARRIVAL")), Sim->GetBigArrivalStreakSols()));
+
+			// Exactly at 20: from a clean streak, it fires on the step the streak reaches 20 -
+			// not one step before - and a save / load round trip holds the streak and the flag.
+			Sim->Debug_SetBigArrivalDone(false);
+			Lapse();
+			RunSolsA(7.0);
+			const double Streak7 = Sim->GetBigArrivalStreakSols();
+			const int32 PopSave = Sim->GetPopulation(), TotalSave = Sim->GetImmigrantsTotal();
+			const double MoveAccSave = Sim->GetMoveHomeAccSols();
+			FString Err;
+			const bool bSaved7 = Sim->SaveColony(TEXT("arrivalstest"), Err);
+			Expect(Near(Streak7, 7.0, 1e-9) && !Sim->IsBigArrivalDone() && bSaved7,
+				FString::Printf(TEXT("d saved mid-streak: %.9f sols, not done (%s)"), Streak7, *Err));
+			int32 FireStep = -1;
+			for (int32 K = 1; K <= 14 * StepsPerSolA && FireStep < 0; ++K)
+			{
+				EraStepOnce();
+				if (Sim->IsBigArrivalDone()) { FireStep = K; }
+			}
+			// 13 more sols = 260 steps reach 20.0; a float sum may take one more.
+			Expect(FireStep >= 259 && FireStep <= 261 && Sim->GetPopulation() == PopSave + 100 && Sim->GetBigArrivalStreakSols() >= 20.0 - 1e-9,
+				FString::Printf(TEXT("d from sol 7 it lands on step %d (13 sols = 260 steps), never before: population %d -> %d, streak %.6f"), FireStep, PopSave, Sim->GetPopulation(), Sim->GetBigArrivalStreakSols()));
+			const bool bLoaded7 = Sim->LoadColony(TEXT("arrivalstest"), Err);
+			Expect(bLoaded7 && Err.IsEmpty(), FString::Printf(TEXT("d loaded (%s)"), *Err));
+			Expect(Sim->GetBigArrivalStreakSols() == Streak7 && !Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopSave && Sim->GetImmigrantsTotal() == TotalSave && Sim->GetMoveHomeAccSols() == MoveAccSave,
+				FString::Printf(TEXT("d the round trip holds the streak bit for bit (%.9f), the flag (done %d), the headcount (%d), the settler count (%d) and the move-home clock (%.9f)"),
+					Sim->GetBigArrivalStreakSols(), (int32)Sim->IsBigArrivalDone(), Sim->GetPopulation(), Sim->GetImmigrantsTotal(), Sim->GetMoveHomeAccSols()));
+			int32 FireStep2 = -1;
+			for (int32 K = 1; K <= 14 * StepsPerSolA && FireStep2 < 0; ++K)
+			{
+				EraStepOnce();
+				if (Sim->IsBigArrivalDone()) { FireStep2 = K; }
+			}
+			Expect(FireStep2 == FireStep && Sim->GetPopulation() == PopSave + 100,
+				FString::Printf(TEXT("d the run after the load is the run without it: it lands on step %d again (was %d)"), FireStep2, FireStep));
+			// Done is saved too: it stays done after a reload and never comes again.
+			const bool bSavedDone = Sim->SaveColony(TEXT("arrivalsdone"), Err);
+			Expect(bSavedDone && Sim->IsBigArrivalDone(), FString::Printf(TEXT("d saved after the Big Arrival (%s)"), *Err));
+			RunSolsA(3.0);
+			const bool bLoadedDone = Sim->LoadColony(TEXT("arrivalsdone"), Err);
+			Expect(bLoadedDone && Err.IsEmpty() && Sim->IsBigArrivalDone(), FString::Printf(TEXT("d reloaded: done %d (%s)"), (int32)Sim->IsBigArrivalDone(), *Err));
+			const int32 PopDone = Sim->GetPopulation();
+			RunSolsA(25.0);
+			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopDone,
+				FString::Printf(TEXT("d the flag rides the save: 25 sols after the reload, population %d, no second wave"), Sim->GetPopulation()));
+		}
+
+		// (e) Moving home. The model is independent of the code: per floor the lowest Ids
+		// keep the beds there are (none, if the floor is not rated); the rest, highest
+		// Id first, take the shallowest rated floor with a free bed; when none is free
+		// the rest stay.
+		{
+			using FHomes = TMap<int32, int32>; // Id -> floor level
+			const auto Homes = [&]() -> FHomes { FHomes M; for (const FRHColonist& C : Sim->GetColonists()) { M.Add(C.Id, C.HomeLevel); } return M; };
+			const auto Predict = [&](const FHomes& Now, const int32 Beds[Floors + 1], const bool Rated[Floors + 1], FHomes& Out, int32* OutDisplaced = nullptr) -> int32
+			{
+				Out = Now;
+				TArray<int32> ByFloor[Floors + 1];
+				for (const TPair<int32, int32>& P : Now) { ByFloor[-P.Value].Add(P.Key); }
+				int32 Count[Floors + 1] = { 0, 0, 0, 0 };
+				TArray<int32> Displaced;
+				for (int32 L = 1; L <= Floors; ++L)
+				{
+					ByFloor[L].Sort();
+					const int32 Cap = Rated[L] ? Beds[L] : 0;
+					Count[L] = FMath::Min(ByFloor[L].Num(), Cap);
+					for (int32 K = Cap; K < ByFloor[L].Num(); ++K) { Displaced.Add(ByFloor[L][K]); }
+				}
+				Displaced.Sort([](int32 A, int32 B) { return A > B; });
+				if (OutDisplaced) { *OutDisplaced = Displaced.Num(); }
+				int32 Moved = 0;
+				for (const int32 Id : Displaced)
+				{
+					int32 Target = 0;
+					for (int32 L = 1; L <= Floors && !Target; ++L) { if (Rated[L] && Count[L] < Beds[L]) { Target = L; } }
+					if (!Target) { break; }
+					++Count[Target];
+					Out[Id] = -Target;
+					++Moved;
+				}
+				return Moved;
+			};
+			const auto SameHomes = [&](const FHomes& A, const FHomes& B) -> bool
+			{
+				if (A.Num() != B.Num()) { return false; }
+				for (const TPair<int32, int32>& P : A) { const int32* Other = B.Find(P.Key); if (!Other || *Other != P.Value) { return false; } }
+				return true;
+			};
+			const auto PerFloor = [&]() -> FString
+			{
+				int32 Residents[Floors + 1] = { 0, 0, 0, 0 };
+				for (const FRHColonist& C : Sim->GetColonists()) { if (C.HomeHab == 0 && C.HomeLevel < 0 && C.HomeLevel >= -Floors) { ++Residents[-C.HomeLevel]; } }
+				return FString::Printf(TEXT("floors -1/-2/-3: %d / %d / %d"), Residents[1], Residents[2], Residents[3]);
+			};
+			const bool AllRated[Floors + 1] = { false, true, true, true };
+
+			// Settle: everything housed, every floor rated, five beds a cell. A sol passes with
+			// nobody over a floor's beds, so nobody moves.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+			RunSolsA(2.0);
+			const FHomes Settled = Homes();
+			const int32 PopE = Sim->GetPopulation();
+			Expect(NoFloorOverBeds(), FString::Printf(TEXT("e settled: population %d, %s, nobody over a floor's beds"), PopE, *PerFloor()));
+
+			// e1. Beds removed: every floor drops to Bnew beds, floor -1's newest are displaced.
+			const int32 Bnew = FMath::Max(1, (PopE + Floors - 1) / Floors + 4);
+			Sim->Debug_SetColonistsPerCell((Bnew + 0.5) / CellsPerFloor);
+			const int32 Beds1[Floors + 1] = { 0, Bnew, Bnew, Bnew };
+			FHomes Want1;
+			const int32 Moved1Want = Predict(Settled, Beds1, AllRated, Want1);
+			Expect(Moved1Want > 0 && Sim->GetHousingCapacity() == Floors * Bnew,
+				FString::Printf(TEXT("e1 the beds are removed: %d beds a floor (%d in all) for %d residents, the model says %d must move"), Bnew, Sim->GetHousingCapacity(), PopE, Moved1Want));
+			// Once a sol: nothing happens until the move-home clock crosses a whole sol.
+			Alerts.Reset();
+			const double Acc0 = Sim->GetMoveHomeAccSols();
+			int32 MoveStep = -1;
+			for (int32 K = 1; K <= 2 * StepsPerSolA && MoveStep < 0; ++K)
+			{
+				EraStepOnce();
+				if (!SameHomes(Homes(), Settled)) { MoveStep = K; }
+			}
+			Expect(MoveStep >= 1 && Acc0 + MoveStep * DtSols >= 1.0 - 1e-9 && Acc0 + (MoveStep - 1) * DtSols < 1.0 + 1e-9,
+				FString::Printf(TEXT("e1 once a sol: the clock read %.3f, nobody moved until step %d (%.3f + %d x %.3f reaches a whole sol)"), Acc0, MoveStep, Acc0, MoveStep, DtSols));
+			const FHomes After1 = Homes();
+			// The model is evaluated against the population as it was: births and arrivals are off, nobody leaves.
+			Expect(SameHomes(After1, Want1) && Sim->GetPopulation() == PopE && NoFloorOverBeds(),
+				FString::Printf(TEXT("e1 every resident is where the model puts them (the oldest hands keep their beds, the newest %d moved, highest Id first, to the shallowest free bed): %s"), Moved1Want, *PerFloor()));
+			Expect(Alerts.Num() >= 1 && CountAlerts(TEXT("MOVED HOME")) == 1 && CountAlertsWith(*FString::Printf(TEXT("%d resident"), Moved1Want)) == 1,
+				FString::Printf(TEXT("f one alert for the whole batch of %d, not one per person: %d MOVED HOME alert(s)"), Moved1Want, CountAlerts(TEXT("MOVED HOME"))));
+			RunSolsA(3.0);
+			Expect(CountAlerts(TEXT("MOVED HOME")) == 1 && SameHomes(Homes(), After1),
+				FString::Printf(TEXT("e1 three sols on, no one else moves and there is no second alert (%d MOVED HOME alerts): the pass is idempotent"), CountAlerts(TEXT("MOVED HOME"))));
+
+			// e2. A floor loses its rating: all of its residents are displaced.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			RunSolsA(1.0);
+			const FHomes Before2 = Homes();
+			Sim->Debug_UnrateFloor(-1);
+			bool bRated2[Floors + 1] = { false, false, true, true };
+			const int32 Beds2[Floors + 1] = { 0, 1000, 1000, 1000 };
+			FHomes Want2;
+			const int32 Moved2Want = Predict(Before2, Beds2, bRated2, Want2);
+			Alerts.Reset();
+			const int32 Moved2 = Sim->Debug_RehomeResidents();
+			Expect(Moved2 == Moved2Want && Moved2 > 0 && SameHomes(Homes(), Want2) && CountAlerts(TEXT("MOVED HOME")) == 1 && Alerts.Num() == 1,
+				FString::Printf(TEXT("e2 floor -1 loses its rating: its residents move to floor -2 and -3 (%d moved, the model says %d), %s, %d alert(s)"), Moved2, Moved2Want, *PerFloor(), Alerts.Num()));
+			// e3. Fewer beds than people: three floors of Bt beds hold seven fewer than the
+			// population, so someone is displaced and the free beds run out - the rest stay.
+			Sim->Debug_ForceRateFloor(-1);
+			const int32 PopFull = Sim->GetPopulation();
+			const int32 Bt = (PopFull - 7) / Floors;
+			Sim->Debug_SetColonistsPerCell((Bt + 0.5) / CellsPerFloor);
+			const FHomes Before3 = Homes();
+			const int32 Beds3[Floors + 1] = { 0, Bt, Bt, Bt };
+			FHomes Want3;
+			int32 Displaced3 = 0;
+			const int32 Moved3Want = Predict(Before3, Beds3, AllRated, Want3, &Displaced3);
+			Alerts.Reset();
+			const int32 Moved3 = Sim->Debug_RehomeResidents();
+			Expect(Moved3 == Moved3Want && Moved3 > 0 && Displaced3 > Moved3 && SameHomes(Homes(), Want3) && Sim->GetPopulation() == PopFull && Alerts.Num() == 1,
+				FString::Printf(TEXT("e3 %d beds a floor for %d residents: %d displaced, %d found a bed (the model says %d), %d stay with nowhere to go (population %d), %d alert(s)"),
+					Bt, PopFull, Displaced3, Moved3, Moved3Want, Displaced3 - Moved3, Sim->GetPopulation(), Alerts.Num()));
+			// No bed anywhere: nobody moves, no alert, nobody is lost.
+			Sim->Debug_SetColonistsPerCell(0.0);
+			const FHomes Before4 = Homes();
+			Alerts.Reset();
+			const int32 Moved4 = Sim->Debug_RehomeResidents();
+			Expect(Moved4 == 0 && SameHomes(Homes(), Before4) && Alerts.Num() == 0 && Sim->GetPopulation() == PopFull,
+				FString::Printf(TEXT("e4 no free bed anywhere: nobody moves (%d), nobody is lost (population %d), %d alert(s) - the shortage and recall rules take over"), Moved4, Sim->GetPopulation(), Alerts.Num()));
+			// Restore.
+			Sim->Debug_SetColonistsPerCell(5.0);
+			for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+			const int32 Moved5 = Sim->Debug_RehomeResidents();
+			Expect(Moved5 == 0 && NoFloorOverBeds(), FString::Printf(TEXT("e with every floor rated and the beds back: a pass moves nobody (%d)"), Moved5));
+
+			// e5. The cost of a big move: a city of 1,500 loses beds, hundreds move in one pass.
+			Sim->Debug_AddColonists(1500 - Sim->GetPopulation());
+			const int32 PopBig = Sim->GetPopulation();
+			Sim->Debug_SetColonistsPerCell((600 + 0.5) / CellsPerFloor);
+			Alerts.Reset();
+			const double T0 = FPlatformTime::Seconds();
+			const int32 MovedBig = Sim->Debug_RehomeResidents();
+			const double MoveMs = (FPlatformTime::Seconds() - T0) * 1000.0;
+			const double T1 = FPlatformTime::Seconds();
+			const int32 MovedAgain = Sim->Debug_RehomeResidents();
+			const double AgainMs = (FPlatformTime::Seconds() - T1) * 1000.0;
+			Expect(PopBig >= 1400 && MovedBig > 100 && MovedAgain == 0 && NoFloorOverBeds() && CountAlerts(TEXT("MOVED HOME")) == 1 && Alerts.Num() == 1,
+				FString::Printf(TEXT("e a city of %d, beds cut to 600 a floor: %d moved in one pass under one alert (%d alert(s)); a second pass moves %d"), PopBig, MovedBig, Alerts.Num(), MovedAgain));
+			Expect(MoveMs <= 250.0 && AgainMs <= 100.0, FString::Printf(TEXT("e the move took %.2f ms and the idle pass %.2f ms (budgets 250 / 100 on a shared machine)"), MoveMs, AgainMs));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnAlert.Remove(SnapH);
+		Sim->OnShipArrived.Remove(ShipH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -6475,6 +7164,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		for (int32 L = 1; L <= Floors; ++L) { for (int32 I = 0; I < CellsPerFloor; ++I) { SeatsTotal += Sim->GetCellSeats(FIntVector(-L, I, 0)); } }
 		UE_LOG(LogRedHopeSim, Display, TEXT("SCALE layout: %d cells, %d pieces, %d beds, %d work seats"), Floors * CellsPerFloor, Sim->GetFurniture().Num(), Capacity, SeatsTotal);
 Sim->Debug_SetHopeGates(50.0, 50.0); // C2a: research and births run in every timed step (see the growth ladder)
+		Sim->Debug_SetHopeGrowthIntervalSols(1.0e9); // C2b: births scale per head, so at these sizes the streak would birth every few sols - the interval is held out of reach: the growth step still runs and accrues in every timed step, and the headcount stays exact
 
 		// Digests: every derived value that must survive a refactor, hashed at full
 		// precision (raw double bits) and in the colonist array's own order.
@@ -6717,6 +7407,45 @@ Sim->Debug_SetHopeGates(50.0, 50.0); // C2a: research and births run in every ti
 			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest reloaded: %08x"), Assignments());
 		}
 
+		// C2b: arrivals at scale stay cheap. Two thousand colonists come in through the new
+		// arrival paths - eight supply ships' worth of settlers (50 each, the per-ship cap;
+		// the city's comfortable room is what limits settlers, and it is not endless) and
+		// eighty Colonist Transports (20 each, beds only) - one alert per event, every arrival housed
+		// on a rated floor with a bed and not Mars-born; then a move-home pass over the
+		// whole city (nobody is over a bed, so nobody moves) must cost next to nothing.
+		double ArrivalsMs = 0.0, RehomeMs = 0.0;
+		if (!bCapped)
+		{
+			const int32 FreeBefore = Sim->GetFreeHousing();
+			const int32 PopBefore = Sim->GetPopulation();
+			const int32 TopId = Sim->GetColonists().Num() ? Sim->GetColonists().Last().Id : 0;
+			const int32 SettlersBefore = Sim->GetImmigrantsTotal();
+			const double HopeBefore = Sim->GetHopeSmoothed();
+			Expect(FreeBefore >= 2000, FString::Printf(TEXT("arrivals: %d beds free for 2,000 more (population %d of %d)"), FreeBefore, PopBefore, Sim->GetHousingCapacity()));
+			int32 ArrivalAlerts = 0;
+			const FDelegateHandle ArrivalH = Sim->OnAlert.AddLambda([&ArrivalAlerts](const FString&) { ++ArrivalAlerts; });
+			Sim->Debug_SetHopeSmoothed(100.0);
+			const double Arr0 = FPlatformTime::Seconds();
+			int32 SettlersCame = 0;
+			for (int32 K = 0; K < 8; ++K) { SettlersCame += Sim->Debug_Immigrate(); }
+			for (int32 K = 0; K < 80; ++K) { Sim->Debug_DeliverCargo(FName("ColonistTransport")); }
+			ArrivalsMs = (FPlatformTime::Seconds() - Arr0) * 1000.0;
+			Sim->OnAlert.Remove(ArrivalH);
+			Sim->Debug_SetHopeSmoothed(HopeBefore);
+			int32 NewcomersOk = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { NewcomersOk += (C.Id > TopId && !C.bMarsBorn && C.HomeHab == 0 && Sim->IsFloorRated(C.HomeLevel)) ? 1 : 0; }
+			Expect(Sim->GetPopulation() == PopBefore + 2000 && SettlersCame == 400 && Sim->GetImmigrantsTotal() == SettlersBefore + 400 && NewcomersOk == 2000 && Sim->GetFreeHousing() == FreeBefore - 2000,
+				FString::Printf(TEXT("arrivals: 2,000 colonists through 8 settler ships and 80 transports: population %d -> %d (%d settlers), %d of them housed on rated floors and not Mars-born"), PopBefore, Sim->GetPopulation(), SettlersCame, NewcomersOk));
+			Expect(ArrivalAlerts == 88, FString::Printf(TEXT("arrivals: %d alerts for 88 events (one per transport, one per ship's settlers), never one per colonist"), ArrivalAlerts));
+			const double Reh0 = FPlatformTime::Seconds();
+			const int32 Moved = Sim->Debug_RehomeResidents();
+			RehomeMs = (FPlatformTime::Seconds() - Reh0) * 1000.0;
+			Expect(Moved == 0, FString::Printf(TEXT("arrivals: a move-home pass over %d colonists, none over a bed, moves %d"), Sim->GetPopulation(), Moved));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE arrivals: 2,000 colonists (8 settler ships + 80 transports) in %.1f ms | move-home pass over %d colonists %.2f ms"), ArrivalsMs, Sim->GetPopulation(), RehomeMs);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			VerifyAt(TEXT("after arrivals"));
+		}
+
 		// Budgets (wall clock, shared machine): about seven times the numbers a
 		// quiet run records, and well under what the old per-step rebuilds cost.
 		if (Table.Num() == UE_ARRAY_COUNT(Targets))
@@ -6729,6 +7458,8 @@ Sim->Debug_SetHopeGates(50.0, 50.0); // C2a: research and births run in every ti
 			Expect(At5000.EraMs <= 3.0, FString::Printf(TEXT("budget: era step at N=5000 %.3f ms (<= 3.0)"), At5000.EraMs));
 			Expect(At5000.HopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope at N=5000 %.3f ms (<= 0.5)"), At5000.HopeMs));
 			Expect(At5000.AddMs <= 50.0, FString::Printf(TEXT("budget: moving 2,000 colonists in took %.1f ms (<= 50)"), At5000.AddMs));
+			Expect(ArrivalsMs <= 50.0, FString::Printf(TEXT("budget: 2,000 colonists through the arrival paths (8 settler ships + 80 transports) took %.1f ms (<= 50)"), ArrivalsMs));
+			Expect(RehomeMs <= 5.0, FString::Printf(TEXT("budget: a move-home pass over the whole city took %.2f ms (<= 5)"), RehomeMs));
 		}
 
 		Sim->OnCommandRejected.Remove(RejectH);

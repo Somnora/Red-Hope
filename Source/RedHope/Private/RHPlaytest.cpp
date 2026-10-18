@@ -80,6 +80,11 @@ namespace
 		// worst moments seen.
 		int32 LastPop = 0;
 		int32 Recalled = 0, Born = 0;
+		// C2b: arrivals are told apart. Births and settlers come off the sim's own
+		// counters (a population edge cannot say which it was); the Big Arrival is
+		// the done-flag flipping, noted at its sol.
+		int32 BirthsSeen = 0, SettlersSeen = 0;
+		double BigArrivalSol = -1.0;
 		double MinHope = 100.0, MaxHope = 0.0, MinFoodSols = 1.0e9;
 		int32 MaxUnsupported = 0;
 		// D1a: the current ship round's cadence, logged as a ROUND line when its
@@ -243,9 +248,17 @@ namespace
 		}
 		if (P.CrewLandedSol >= 0.0)
 		{
-			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
-				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.MaxUnsupported, P.MinHope, P.MaxHope,
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, immigrated %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
+				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.SettlersSeen, P.MaxUnsupported, P.MinHope, P.MaxHope,
 				P.MinFoodSols < 1.0e8 ? P.MinFoodSols : 0.0);
+			if (P.BigArrivalSol >= 0.0)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival landed at sol %.2f"), P.BigArrivalSol);
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival did not land (Big Arrival streak %.1f sols)"), Sim ? Sim->GetBigArrivalStreakSols() : 0.0);
+			}
 		}
 		if (Sim)
 		{
@@ -587,17 +600,29 @@ namespace
 			if (Sim->GetPlantedCellCount() > 0) { Mark(P, C, TEXT("first garden planted")); }
 			if (Sim->GetProducingCellCount() > 0) { Mark(P, C, TEXT("first harvest")); }
 
-			// Recalls and births, by population edges.
+			// Recalls by population edges; births, settlers and the Big Arrival off the
+			// sim's own counters (C2b).
 			const int32 Pop = Sim->GetPopulation();
 			if (P.LastPop > 0 && Pop < P.LastPop)
 			{
 				P.Recalled += P.LastPop - Pop;
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f RECALL  %d colonist(s) left for orbit (pop %d)"), SolNow(C), P.LastPop - Pop, Pop);
 			}
-			else if (P.LastPop > 0 && Pop > P.LastPop)
+			if (Sim->GetBirthsOnMars() > P.BirthsSeen)
 			{
-				P.Born += Pop - P.LastPop;
-				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  +%d (pop %d)"), SolNow(C), Pop - P.LastPop, Pop);
+				P.Born += Sim->GetBirthsOnMars() - P.BirthsSeen;
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  +%d born (pop %d, %d born on Mars so far)"), SolNow(C), Sim->GetBirthsOnMars() - P.BirthsSeen, Pop, Sim->GetBirthsOnMars());
+				P.BirthsSeen = Sim->GetBirthsOnMars();
+			}
+			if (Sim->GetImmigrantsTotal() > P.SettlersSeen)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f SETTLERS  +%d with the supply ship (pop %d, %d settlers so far)"), SolNow(C), Sim->GetImmigrantsTotal() - P.SettlersSeen, Pop, Sim->GetImmigrantsTotal());
+				P.SettlersSeen = Sim->GetImmigrantsTotal();
+			}
+			if (P.BigArrivalSol < 0.0 && Sim->IsBigArrivalDone())
+			{
+				P.BigArrivalSol = SolNow(C);
+				Mark(P, C, TEXT("the Big Arrival landed"));
 			}
 			P.LastPop = Pop;
 			int32 Unsupported = 0;

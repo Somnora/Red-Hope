@@ -484,6 +484,51 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// --- Arrivals at scale (C2b, living-city gate 2b; every number a placeholder in RH_Config) ---
+	// Births, immigration, the Big Arrival and moving home. Births scale per head
+	// (the streak runs at max(1, N / BirthRefPop) x real time); each supply ship that
+	// lands on a thriving colony brings settlers; a colony that holds its Hope draws
+	// one big wave, once; and residents whose home has lost their bed move to a free
+	// one. The wording of every alert is Gate-D placeholder copy.
+	// How many settlers a ship brings: floor((Hope - Floor) / (100 - Floor) x
+	// max(Base, PerCapita x N)), capped at the per-ship cap, at the free beds less
+	// ImmigrationReserveBeds (births come first), and at the comfortable room left
+	// (ComfortCapacity - Pop: settlers never push the Housing term below its maximum);
+	// 0 below the Hope minimum. Pure arithmetic - the landing and the suites share it.
+	int32 GetImmigrationCount(double Hope, int32 Pop, int32 FreeBeds, int32 ComfortCapacity) const;
+	// The population the Housing term can serve at full value: the bed-weighted Living
+	// cells and bays on rated floors and rated surface networks, exactly the number
+	// GetColonyHope divides by (the helper both use). Settlers never push past it.
+	int32 GetHousingComfortCapacity() const;
+	int32 GetImmigrantsTotal() const { return ImmigrantsTotal; }
+	double GetBigArrivalStreakSols() const { return BigArrivalStreakSols; }
+	bool IsBigArrivalDone() const { return bBigArrivalDone; }
+	double GetMoveHomeAccSols() const { return MoveHomeAccSols; }
+	double GetHopeGrowthStreakSols() const { return HopeGrowthStreakSols; }
+	double GetBirthRefPop() const { return BirthRefPop; }
+	int32 GetColonistTransportColonists() const { return ColonistTransportColonists; }
+	double GetColonistTransportFoodKgPerColonist() const { return ColonistTransportFoodKgPerColonist; }
+	double GetImmigrationHopeMin() const { return ImmigrationHopeMin; }
+	double GetImmigrationHopeFloor() const { return ImmigrationHopeFloor; }
+	double GetImmigrationBase() const { return ImmigrationBase; }
+	double GetImmigrationPerCapita() const { return ImmigrationPerCapita; }
+	int32 GetImmigrationCapPerShip() const { return ImmigrationCapPerShip; }
+	int32 GetImmigrationReserveBeds() const { return ImmigrationReserveBeds; }
+	double GetBigArrivalHopeMin() const { return BigArrivalHopeMin; }
+	double GetBigArrivalStreakSolsNeeded() const { return BigArrivalStreakSolsNeeded; }
+	int32 GetBigArrivalFreeBeds() const { return BigArrivalFreeBeds; }
+	int32 GetBigArrivalColonists() const { return BigArrivalColonists; }
+	double GetMoveHomeIntervalSols() const { return MoveHomeIntervalSols; }
+	// Harness: the settlers a supply ship lands, without the ship (returns how many
+	// found beds); the smoothed Hope and the growth interval a suite pins; the Big
+	// Arrival's flag; one move-home pass on its own (returns how many moved).
+	int32 Debug_Immigrate() { return ApplyImmigration(); }
+	void Debug_SetHopeSmoothed(double V) { HopeSmoothed = V; UpdateHopeBand(); }
+	void Debug_SetHopeBase(double V) { HopeBase = V; }
+	void Debug_SetHopeGrowthIntervalSols(double V) { HopeGrowthIntervalSols = V; }
+	void Debug_SetBigArrivalDone(bool bDone) { bBigArrivalDone = bDone; }
+	int32 Debug_RehomeResidents() { return RehomeResidents(); }
+	void Debug_UnrateFloor(int32 Level) { RatedFloors.Remove(Level); } // a floor that lost its rating (the next StepHabitability may re-rate it)
 	// C2a harness: a floor's O2 fill, and how many colonists a carved cell houses
 	// without furniture (the legacy bed rule), so a suite can hold thousands
 	// without furnishing thousands of beds.
@@ -1229,6 +1274,25 @@ private:
 	// and eat pooled Food; support edges alert; sustained loss evacuates.
 	// Runs in BOTH bands; no-ops at zero population (regression-safe).
 	void StepPopulation(float SubDt);
+	// C2b: the arrival fill order, shared by new arrivals and by moving home. A
+	// colonist goes to the shallowest rated floor with a free bed, then to the rated
+	// surface networks in root order (their members by Id). The state holds the
+	// residents and beds per home so a whole batch costs one pass over the roster.
+	struct FRHFillState
+	{
+		TMap<int32, int32> FloorResidents, HabResidents;
+		TMap<int32, int32> FloorBeds, HabBeds;
+		TArray<int8> NetRatedNow; // per HabNets index: -1 not asked yet, else 0/1
+	};
+	void InitFillState(FRHFillState& State, const TSet<int32>* SkipIds = nullptr) const;
+	bool PickFillHome(FRHFillState& State, int32& OutLevel, int32& OutHab) const;
+	// C2b: settlers with a landing supply ship (called as the ship lands).
+	int32 ApplyImmigration();
+	int32 LivingCellWeight(const FIntVector& Key) const; // a Living cell with beds counts its beds, else 1
+	// C2b: the Big Arrival's streak; one move-home pass per MoveHomeIntervalSols.
+	void StepBigArrival(float SubDt);
+	void StepMoveHome(float SubDt);
+	int32 RehomeResidents();
 	// Construction shortage (M1-d Gate B): resource -> kg the open sites need
 	// beyond everything the colony holds. Drives demand-preferred recipe
 	// selection and the store->producer feed leg. Empty when nothing builds -
@@ -1542,6 +1606,28 @@ private:
 	bool bFirstBornAnnounced = false;     // serialized: the milestone fires once, never retracts
 	int32 BirthsOnMars = 0;               // serialized: native-born count (M3 identity seed)
 	void StepGrowth(float SubDt);
+	// C2b: arrivals at scale (config rows, placeholders). Births: the streak runs at
+	// max(1, N / BirthRefPop) x dt, so N <= BirthRefPop is exactly as it always was.
+	double BirthRefPop = 25.0;
+	int32 ColonistTransportColonists = 20;           // colonists per Colonist Transport cargo item
+	double ColonistTransportFoodKgPerColonist = 50.0; // provisions landed with each colonist
+	double ImmigrationHopeMin = 75.0;                // smoothed Hope a landing needs to draw settlers
+	double ImmigrationHopeFloor = 70.0;              // the Hope at which the draw is zero
+	double ImmigrationBase = 4.0;                    // settlers at full draw for a small colony
+	double ImmigrationPerCapita = 0.2;               // ... or this share of the population, if larger
+	int32 ImmigrationCapPerShip = 50;
+	int32 ImmigrationReserveBeds = 1;                // free beds settlers leave open for Mars-born children (births come first)
+	double BigArrivalHopeMin = 75.0;                 // smoothed Hope the streak counts at
+	double BigArrivalStreakSolsNeeded = 20.0;        // sols of it
+	int32 BigArrivalFreeBeds = 100;                  // free beds the wave needs
+	int32 BigArrivalColonists = 100;
+	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
+	// SAVED (v35): the Big Arrival's running streak and its once-only flag, the
+	// move-home accumulator, and the settlers who came with ships (a count).
+	double BigArrivalStreakSols = 0.0;
+	bool bBigArrivalDone = false;
+	double MoveHomeAccSols = 0.0;
+	int32 ImmigrantsTotal = 0;
 	// Discoveries (save v16): the ordered log of what the colony has uncovered
 	// (each name's HopeBonus is a permanent milestone) + the seat-hours accrued
 	// toward the next. Linear accumulation on a threshold = era-parity-safe.
