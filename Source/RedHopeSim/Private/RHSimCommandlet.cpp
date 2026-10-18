@@ -200,6 +200,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	// M2 Gate B self-test: room designations on carved cells, the adjacency
 	// calculus (emit/refuse, hallway+filtration cure), jobs, and the Hope
 	// index arithmetic - exact doubles. Save v11 round-trip. `-rooms`.
+	// D3a (2026-10-17): fails loudly, and it is the PIN for the three Hope
+	// weights (HopeHousingMax 7.5, HopePerMoralePoint 2.5, HopePerJob 1.5) - the
+	// literals below are the ruling's numbers, read from the DT row itself.
 	if (FParse::Param(*Params, TEXT("rooms")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS & HOPE TEST (M2 Gate B) ==="));
@@ -212,19 +215,46 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
-		// DT_Rooms is synced (Gate B): these six functions ship SliceActive=true.
-		// Assert it against the REAL asset so this test is a pure-data verifier -
-		// if the DT ever regresses vs the CSV, it fails loudly instead of a
-		// silent in-memory patch masking the drift.
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("ROOMS FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+
+		// R0. Pure data: DT_Rooms is synced (Gate B) - these six functions ship
+		// SliceActive=true - and the three Hope weights ride the synced DT_Config.
+		// Both are asserted against the REAL assets, so a DT that regresses vs the
+		// CSV fails loudly instead of a silent in-memory patch masking the drift.
+		// The weights are read from the table row alone (no -RHConfig override, no
+		// C++ fallback): -1 fails a missing row, and a pre-D3a 15 / 5 / 3 fails.
+		bool bData = true;
 		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Workstation"), TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway") })
 		{
 			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
-			if (!Row || !Row->SliceActive)
-			{
-				UE_LOG(LogRedHopeSim, Error, TEXT("ROOMS: DT_Rooms row '%s' missing or not SliceActive - DT/CSV out of sync"), RowName);
-				return 1;
-			}
+			const bool bRow = Row && Row->SliceActive;
+			Expect(bRow, FString::Printf(TEXT("R0 DT_Rooms row '%s' present and SliceActive (DT/CSV)"), RowName));
+			bData &= bRow;
+		}
+		const double DtHousing = DefsSub->GetConfigTableScalar(FName("HopeHousingMax"), -1.0);
+		const double DtMorale = DefsSub->GetConfigTableScalar(FName("HopePerMoralePoint"), -1.0);
+		const double DtJob = DefsSub->GetConfigTableScalar(FName("HopePerJob"), -1.0);
+		// A stale DT_Config fails here but does NOT abort: the rest of the suite
+		// then shows every number the old weights moved, not only the first.
+		Expect(Near(DtHousing, 7.5, 1e-9) && Near(DtMorale, 2.5, 1e-9) && Near(DtJob, 1.5, 1e-9),
+			FString::Printf(TEXT("R0 DT_Config HopeHousingMax 7.5 / HopePerMoralePoint 2.5 / HopePerJob 1.5, the table row says %.3f / %.3f / %.3f (D3a, DT/CSV)"),
+				DtHousing, DtMorale, DtJob));
+		Expect(Near(Sim->GetHopeHousingMax(), 7.5, 1e-9) && Near(Sim->GetHopePerMoralePoint(), 2.5, 1e-9) && Near(Sim->GetHopePerJob(), 1.5, 1e-9),
+			FString::Printf(TEXT("R0 the sim reads %.3f / %.3f / %.3f (an override or a fallback would show here)"),
+				Sim->GetHopeHousingMax(), Sim->GetHopePerMoralePoint(), Sim->GetHopePerJob()));
+		if (!bData)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END: %d failure(s) ==="), Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
 		}
 
 		// Certify a 6-cell vault and house 4 colonists (stocked so support
@@ -242,47 +272,52 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->Debug_AddColonists(4);
 		RunSols(0.1); // one pass so jobs/support settle
 
-		// 1) Baseline: no designations. 50 base + 5 vault milestone.
+		// R1. Baseline: no designations. 50 base + 5 vault milestone.
 		auto H = Sim->GetColonyHope();
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS baseline: hope=%.2f rated=%d pop=%d (expect 55.00, 1, 4)"),
-			H.Total, (int32)Sim->IsFloorRated(-1), Sim->GetPopulation());
+		Expect(Near(H.Total, 55.0, 1e-9) && Sim->IsFloorRated(-1) && Sim->GetPopulation() == 4,
+			FString::Printf(TEXT("R1 baseline: hope=%.2f rated=%d pop=%d (expect 55.00, 1, 4)"), H.Total, (int32)Sim->IsFloorRated(-1), Sim->GetPopulation()));
 
-		// 2) Refusals: a still-dormant function (Smoking - Gate D, SliceActive
+		// R2. Refusals: a still-dormant function (Smoking - Gate D, SliceActive
 		// FALSE in the synced DT) and an uncarved cell index. Both refused.
 		const bool bDormant = Sim->DesignateRoom(-1, 0, FName("Smoking"), R);
 		const bool bFar = Sim->DesignateRoom(-1, 9, FName("Dining"), R);
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS refusals: dormant=%d cell9=%d (expect 0, 0)"), (int32)bDormant, (int32)bFar);
+		Expect(!bDormant && !bFar, FString::Printf(TEXT("R2 refusals: dormant=%d cell9=%d (expect 0, 0)"), (int32)bDormant, (int32)bFar));
 
-		// 3) A bad kitchen: Cooking@0 (1,0) beside LQ@1 (1,1), Dining@2 (0,1)
+		// R3. A bad kitchen: Cooking@0 (1,0) beside LQ@1 (1,1), Dining@2 (0,1)
 		// diagonal across the shaft corner. Both offended - dist 1 has no
 		// between, dist 2's common neighbor is the LQ, not a hallway.
+		// 55 + housing 7.5 x 1/4 + rooms (0.3 + 0.6) x 2.5 - 2 pairs x 8.
 		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
 		Sim->DesignateRoom(-1, 2, FName("Dining"), R);
 		Sim->DesignateRoom(-1, 0, FName("Cooking"), R);
 		H = Sim->GetColonyHope();
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS bad kitchen: hope=%.2f pairs=%d housing=%.2f rooms=%.2f (expect 47.25, 2, 3.75, 4.50)"),
-			H.Total, H.OffendedPairs, H.Housing, H.Rooms);
+		Expect(Near(H.Total, 43.125, 1e-6) && H.OffendedPairs == 2 && Near(H.Housing, 1.875, 1e-9) && Near(H.Rooms, 2.25, 1e-6),
+			FString::Printf(TEXT("R3 bad kitchen: hope=%.3f pairs=%d housing=%.3f rooms=%.2f (expect 43.125, 2, 1.875, 2.25)"),
+				H.Total, H.OffendedPairs, H.Housing, H.Rooms));
 
-		// 4) The cure: move Cooking to (-1,0) with the Hallway at (-1,1)
+		// R4. The cure: move Cooking to (-1,0) with the Hallway at (-1,1)
 		// between it and Dining, circulator running - partition + filtration
 		// cancels the pair (habitat vision §4). Lab@5 seats one colonist.
+		// 55 + housing 1.875 + rooms (0.3 + 0.6 + 0.3) x 2.5 + jobs 1 x 1.5.
 		Sim->DesignateRoom(-1, 0, NAME_None, R);
 		Sim->DesignateRoom(-1, 4, FName("Cooking"), R);
 		Sim->DesignateRoom(-1, 3, FName("Hallway"), R);
 		Sim->DesignateRoom(-1, 5, FName("Lab"), R);
 		RunSols(0.1); // jobs refresh in the population step
 		H = Sim->GetColonyHope();
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS cured layout: hope=%.2f pairs=%d jobs=%.2f seats=%d (expect 67.75, 0, 3.00, 1)"),
-			H.Total, H.OffendedPairs, H.Jobs, H.FilledSeats);
+		Expect(Near(H.Total, 61.375, 1e-6) && H.OffendedPairs == 0 && Near(H.Jobs, 1.5, 1e-9) && H.FilledSeats == 1,
+			FString::Printf(TEXT("R4 cured layout: hope=%.3f pairs=%d jobs=%.2f seats=%d (expect 61.375, 0, 1.50, 1)"),
+				H.Total, H.OffendedPairs, H.Jobs, H.FilledSeats));
 
-		// 5) Greed test: swap the hallway for more quarters - the partition
+		// R5. Greed test: swap the hallway for more quarters - the partition
 		// dies and both offenses return. More beds, less Hope: a real tradeoff.
 		Sim->DesignateRoom(-1, 3, FName("LivingQuarters"), R);
 		H = Sim->GetColonyHope();
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS greed swap: hope=%.2f pairs=%d housing=%.2f (expect 55.50, 2, 7.50)"),
-			H.Total, H.OffendedPairs, H.Housing);
+		Expect(Near(H.Total, 47.25, 1e-6) && H.OffendedPairs == 2 && Near(H.Housing, 3.75, 1e-9),
+			FString::Printf(TEXT("R5 greed swap: hope=%.3f pairs=%d housing=%.3f (expect 47.25, 2, 3.75)"),
+				H.Total, H.OffendedPairs, H.Housing));
 
-		// 6) The Designate verb rides the uplink like any order.
+		// R6. The Designate verb rides the uplink like any order.
 		FRHCommand Cmd;
 		Cmd.Verb = FName("Designate");
 		Cmd.Target = FName("Workstation");
@@ -290,22 +325,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Cmd.Value = 0;
 		Sim->EnqueueCommand(Cmd);
 		RunSols(0.1);
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS uplink designate: cell0=%s (expect Workstation)"),
-			*Sim->GetRoomAt(-1, 0).ToString());
+		Expect(Sim->GetRoomAt(-1, 0) == FName("Workstation"),
+			FString::Printf(TEXT("R6 uplink designate: cell0=%s (expect Workstation)"), *Sim->GetRoomAt(-1, 0).ToString()));
 
-		// 7) Save v11 round-trip: designations + jobs + the exact Hope total.
+		// R7. Save v11 round-trip: designations + jobs + the exact Hope total
+		// (47.25 + Workstation 0.2 x 2.5 + a second seat 1.5 = 49.25).
 		const double HopeBefore = Sim->GetColonyHope().Total;
 		FString Err;
-		Sim->SaveColony(TEXT("roomstest"), Err);
-		Sim->LoadColony(TEXT("roomstest"), Err);
+		const bool bSaved = Sim->SaveColony(TEXT("roomstest"), Err);
+		const bool bLoaded = Sim->LoadColony(TEXT("roomstest"), Err);
 		H = Sim->GetColonyHope();
-		UE_LOG(LogRedHopeSim, Display, TEXT("ROOMS save/load v11: cell4=%s cell3=%s hope=%.2f (expect Cooking, LivingQuarters, %.2f) seats=%d (expect 2)"),
-			*Sim->GetRoomAt(-1, 4).ToString(), *Sim->GetRoomAt(-1, 3).ToString(), H.Total, HopeBefore, H.FilledSeats);
+		Expect(bSaved && bLoaded && Sim->GetRoomAt(-1, 4) == FName("Cooking") && Sim->GetRoomAt(-1, 3) == FName("LivingQuarters")
+			&& Near(HopeBefore, 49.25, 1e-6) && Near(H.Total, HopeBefore, 1e-9) && H.FilledSeats == 2,
+			FString::Printf(TEXT("R7 save/load v11: cell4=%s cell3=%s hope=%.3f (expect Cooking, LivingQuarters, 49.25 = the pre-save %.3f) seats=%d (expect 2)"),
+				*Sim->GetRoomAt(-1, 4).ToString(), *Sim->GetRoomAt(-1, 3).ToString(), H.Total, HopeBefore, H.FilledSeats));
 
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END ==="));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
-		return 0;
+		return Fails > 0 ? 1 : 0;
 	}
 
 	// M2 Gate D self-test (abstract slice): comforts - luxury draw per colonist,
@@ -573,9 +611,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
-	// M2 Gate D+ self-test: the GENERATIONAL CARROT - a flourishing colony grows,
+	// M2 Gate D+ self-test: the GENERATIONAL CARROT - a thriving colony grows,
 	// the food-buffer + housing gates, the first-Martian-born milestone + its
 	// Hope surge, streak reset on lapse, save v15. `-growth`.
+	// D3a (2026-10-17): fails loudly. The recipe is the SHIPPED tuning's proof
+	// that a sensible layout (quarters, a T2 lab beside a plain lab, a dining
+	// room, a comforts crate) sits in THRIVING and reaches the 75 growth gate;
+	// with halved weights the old two-Lab recipe tops out at 66.25 and the
+	// births quietly stop.
 	if (FParse::Param(*Params, TEXT("growth")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST (M2 Gate D+) ==="));
@@ -594,11 +637,28 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 			}
 		};
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("GROWTH FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
-		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab") })
+		bool bData = true;
+		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("ChemTableLarge"), TEXT("Dining") })
 		{
 			const FRHRoomRow* Row = DefsSub ? DefsSub->GetRoom(FName(RowName)) : nullptr;
-			if (!Row || !Row->SliceActive) { UE_LOG(LogRedHopeSim, Error, TEXT("GROWTH: DT_Rooms '%s' not active"), RowName); return 1; }
+			const bool bRow = Row && Row->SliceActive;
+			Expect(bRow, FString::Printf(TEXT("DT_Rooms row '%s' present and SliceActive (DT/CSV)"), RowName));
+			bData &= bRow;
+		}
+		if (!bData)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST END: %d failure(s) ==="), Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
 		}
 
 		// Certify an 8-cell vault, house 2 (so there is HOUSING HEADROOM to grow
@@ -615,73 +675,107 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->AddStock(FName("Food"), 4000.0); // deep buffer -> food gate always met
 		RunSols(2.5);
 		Sim->Debug_AddColonists(2);
-		// Rooms: 2 quarters (housing), a Lab (jobs+morale) -> Hope well into THRIVING.
+		// Rooms: 2 quarters (housing), a Large Chem Table first in carve order (the
+		// Lab function's morale weight is the FIRST cell's: 1.0) beside a plain
+		// Lab (2 job seats), a Dining room, and a comforts crate.
 		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
 		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
-		Sim->DesignateRoom(-1, 2, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 2, FName("ChemTableLarge"), R);
 		Sim->DesignateRoom(-1, 3, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 4, FName("Dining"), R);
+		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
 		RunSols(14.0); // let the smoothed mood settle above the growth threshold
-		               // (instant ~77.5; the exp smoother needs > 2 Tau to cross 75)
+		               // (instant 77.5; the exp smoother needs > 2 Tau to cross 75)
 
-		// 1) Eligible + growing: smoothed Hope >= 75, free beds, food buffer.
-		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH eligible: smoothed=%.1f band=%s eligible=%d pop=%d beds-free=%d"),
-			Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), (int32)Sim->IsGrowthEligible(),
-			Sim->GetPopulation(), Sim->GetFreeHousing());
+		// G1. Eligible + growing: smoothed Hope >= 75, THRIVING, free beds, food
+		// buffer. Instant = 50 + vault 5 + housing 7.5 + rooms (Lab fn 1.0 x 2.5 +
+		// Dining 0.6 x 2.5 = 4.0) + jobs 2 x 1.5 + comforts 8 = 77.5.
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+			Expect(Near(H.Housing, 7.5, 1e-9) && Near(H.Rooms, 4.0, 1e-6) && Near(H.Jobs, 3.0, 1e-9) && Near(H.Comforts, 8.0, 1e-9)
+				&& H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && Near(H.Total, 77.5, 1e-6),
+				FString::Printf(TEXT("G1 instant Hope %.6f = 50 + vault 5 + housing %.2f + rooms %.2f + jobs %.2f + comforts %.2f, water/food penalty %.6f/%.6f (expect 77.5 = 7.5 + 4.0 + 3.0 + 8.0, 0/0)"),
+					H.Total, H.Housing, H.Rooms, H.Jobs, H.Comforts, H.WaterPenalty, H.FoodPenalty));
+			Expect(Sim->GetHopeSmoothed() >= 75.0 && Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Thriving && Sim->IsGrowthEligible(),
+				FString::Printf(TEXT("G1 eligible: smoothed=%.1f band=%s eligible=%d pop=%d beds-free=%d (expect >=75, THRIVING - a sensible layout lives there, FLOURISHING takes extra care - 1)"),
+					Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), (int32)Sim->IsGrowthEligible(), Sim->GetPopulation(), Sim->GetFreeHousing()));
+		}
 
-		// 2) Run one full growth interval (20 sols) -> exactly one birth, and it
+		// G2. Run one full growth interval (20 sols) -> exactly one birth, and it
 		// is the FIRST MARTIAN (milestone + a Hope surge folded into the index).
 		const int32 Pop0 = Sim->GetPopulation();
 		const double MilestonesBefore = Sim->GetColonyHope().Milestones;
 		RunSols(20.5);
-		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH first birth: pop %d->%d births=%d firstBorn=%d (expect 2->3, 1, 1)"),
-			Pop0, Sim->GetPopulation(), Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn());
-		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH milestone: Hope milestones %.1f -> %.1f (expect 5.0 -> 11.0 = vault + first-born)"),
-			MilestonesBefore, Sim->GetColonyHope().Milestones);
+		Expect(Pop0 == 2 && Sim->GetPopulation() == 3 && Sim->GetBirthsOnMars() == 1 && Sim->HasFirstBorn(),
+			FString::Printf(TEXT("G2 first birth: pop %d->%d births=%d firstBorn=%d (expect 2->3, 1, 1)"),
+				Pop0, Sim->GetPopulation(), Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn()));
+		Expect(Near(MilestonesBefore, 5.0, 1e-9) && Near(Sim->GetColonyHope().Milestones, 11.0, 1e-9),
+			FString::Printf(TEXT("G2 milestone: Hope milestones %.1f -> %.1f (expect 5.0 -> 11.0 = vault + first-born)"),
+				MilestonesBefore, Sim->GetColonyHope().Milestones));
 
-		// 3) Streak RESETS when the colony stops flourishing: crash Hope by
-		// gutting housing quality (evict the quarters) -> not eligible -> streak 0.
-		Sim->DesignateRoom(-1, 0, NAME_None, R);
-		Sim->DesignateRoom(-1, 1, NAME_None, R);
-		Sim->DesignateRoom(-1, 2, NAME_None, R);
-		Sim->DesignateRoom(-1, 3, NAME_None, R);
+		// G3. Streak RESETS when the colony stops thriving: crash Hope by
+		// gutting housing quality and the rooms (clear every designation) -> not
+		// eligible -> streak 0. The comforts crate remains, so the mood settles
+		// near 69-70 (printed, not asserted) - under the 75 gate either way.
+		for (int32 Cell = 0; Cell < 5; ++Cell)
+		{
+			Sim->DesignateRoom(-1, Cell, NAME_None, R);
+		}
 		RunSols(8.0); // mood falls out of THRIVING
-		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH lapse: smoothed=%.1f eligible=%d progress=%.2f (expect not-eligible, 0.00)"),
-			Sim->GetHopeSmoothed(), (int32)Sim->IsGrowthEligible(), Sim->GetGrowthProgress());
+		Expect(!Sim->IsGrowthEligible() && Near(Sim->GetGrowthProgress(), 0.0, 1e-9),
+			FString::Printf(TEXT("G3 lapse: smoothed=%.1f band=%s eligible=%d progress=%.2f (expect not-eligible, 0.00)"),
+				Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), (int32)Sim->IsGrowthEligible(), Sim->GetGrowthProgress()));
 
-		// 4) Save v15 round-trip: births + first-born flag survive.
+		// G4. Save v15 round-trip: births + first-born flag survive.
 		const int32 BirthsBefore = Sim->GetBirthsOnMars();
 		FString Err;
-		Sim->SaveColony(TEXT("growthtest"), Err);
-		Sim->LoadColony(TEXT("growthtest"), Err);
-		UE_LOG(LogRedHopeSim, Display, TEXT("GROWTH save/load v15: births %d->%d firstBorn=%d (expect identical, 1)"),
-			BirthsBefore, Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn());
+		const bool bSaved = Sim->SaveColony(TEXT("growthtest"), Err);
+		const bool bLoaded = Sim->LoadColony(TEXT("growthtest"), Err);
+		Expect(bSaved && bLoaded && BirthsBefore == Sim->GetBirthsOnMars() && Sim->GetBirthsOnMars() == 1 && Sim->HasFirstBorn(),
+			FString::Printf(TEXT("G4 save/load v15: births %d->%d firstBorn=%d (expect identical, 1)"),
+				BirthsBefore, Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn()));
 
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST END ==="));
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
-		return 0;
+		return Fails > 0 ? 1 : 0;
 	}
 
 	// M2 Gate D+ self-test: DISCOVERIES (the Flourishing layer) - staffed Labs
 	// accrue seat-hours while smoothed Hope holds above the threshold; rows pop
 	// in authored Order with permanent Hope milestones + stock rewards; progress
 	// keeps across a pause; save v16. `-discovery`.
+	// D3a (2026-10-17): fails loudly. Under the halved Hope weights 85 is no
+	// longer reachable from rooms and jobs alone (that recipe tops out at
+	// 75.75): the shipped tuning needs furnished rooms and comforts, and this
+	// recipe proves it still gets there while the room-and-job part alone does not.
 	if (FParse::Param(*Params, TEXT("discovery")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST (M2 Gate D+) ==="));
 		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
 		// Fresh-water topping keeps potability out of the Hope math (the water
 		// loop is separately tested; this isolates the discovery gate).
-		const auto RunSols = [&](double Sols)
+		const auto Step = [&]()
 		{
 			const double StepSols = URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds;
+			Sim->Debug_AddFreshWater(100.0 * StepSols);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
+		const auto RunSols = [&](double Sols)
+		{
 			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
 			{
-				Sim->Debug_AddFreshWater(100.0 * StepSols);
-				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
-				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+				Step();
 			}
 		};
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DISC ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DISC FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
 		// Pure-data: the four authored rows ride the synced DT_Discoveries
 		// (2026-07-16) - assert the arithmetic-bearing columns instead of
 		// injecting, so this suite fails loudly on DT/CSV drift.
@@ -689,25 +783,74 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		const auto CheckDisc = [&](const TCHAR* Name, int32 Order, float SeatH, float Bonus, FName Reward, float Kg) -> bool
 		{
 			const FRHDiscoveryRow* Row = DefsSub->GetDiscovery(FName(Name));
-			if (!Row || !Row->SliceActive || Row->Order != Order || Row->LabSeatHours != SeatH
-				|| Row->HopeBonus != Bonus || Row->RewardResource != Reward || Row->RewardKg != Kg)
-			{
-				UE_LOG(LogRedHopeSim, Error, TEXT("DISCOVERY: row %s missing/drifted - DT/CSV drift"), Name);
-				return false;
-			}
+			const bool bRow = Row && Row->SliceActive && Row->Order == Order && Row->LabSeatHours == SeatH
+				&& Row->HopeBonus == Bonus && Row->RewardResource == Reward && Row->RewardKg == Kg;
+			Expect(bRow, FString::Printf(TEXT("D0 DT_Discoveries row %s: order %d, %.0f seat-hours, +%.0f Hope, reward %s x %.0f (DT/CSV)"),
+				Name, Order, SeatH, Bonus, *Reward.ToString(), Kg));
+			return bRow;
+		};
+		bool bData = true;
+		bData &= CheckDisc(TEXT("CropStrain"), 1, 100.f, 2.f, FName("Seeds"), 50.f);
+		bData &= CheckDisc(TEXT("RegolithCeramics"), 2, 150.f, 2.f, FName("Struct"), 100.f);
+		bData &= CheckDisc(TEXT("SubsurfaceBrine"), 3, 200.f, 3.f, FName("Water"), 150.f);
+		bData &= CheckDisc(TEXT("MicrobialLife"), 4, 300.f, 8.f, NAME_None, 0.f);
+		if (!bData)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST END: %d failure(s) ==="), Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
+		}
+		const TArray<FName> Authored = { FName("CropStrain"), FName("RegolithCeramics"), FName("SubsurfaceBrine"), FName("MicrobialLife") };
+		const auto LogIsAuthoredPrefix = [&]()
+		{
+			const TArray<FName>& Log = Sim->GetDiscoveryLog();
+			if (Log.Num() > Authored.Num()) { return false; }
+			for (int32 i = 0; i < Log.Num(); ++i) { if (Log[i] != Authored[i]) { return false; } }
 			return true;
 		};
-		if (!CheckDisc(TEXT("CropStrain"), 1, 100.f, 2.f, FName("Seeds"), 50.f)) { return 1; }
-		if (!CheckDisc(TEXT("RegolithCeramics"), 2, 150.f, 2.f, FName("Struct"), 100.f)) { return 1; }
-		if (!CheckDisc(TEXT("SubsurfaceBrine"), 3, 200.f, 3.f, FName("Water"), 150.f)) { return 1; }
-		if (!CheckDisc(TEXT("MicrobialLife"), 4, 300.f, 8.f, NAME_None, 0.f)) { return 1; }
+		const auto LogBonusSum = [&]()
+		{
+			double Sum = 0.0;
+			for (const FName& Found : Sim->GetDiscoveryLog())
+			{
+				const FRHDiscoveryRow* Row = DefsSub->GetDiscovery(Found);
+				Sum += Row ? (double)Row->HopeBonus : 0.0;
+			}
+			return Sum;
+		};
+		const auto LogText = [&]()
+		{
+			FString Out;
+			for (const FName& Found : Sim->GetDiscoveryLog()) { Out += (Out.IsEmpty() ? TEXT("") : TEXT(",")) + Found.ToString(); }
+			return Out.IsEmpty() ? FString(TEXT("none")) : Out;
+		};
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		// Furnish orders ride the uplink like any order: one order, one step.
+		const auto Furnish = [&](const TCHAR* Row, int32 Cell, int32 Slot)
+		{
+			FRHCommand C; C.Verb = FName("Furnish"); C.Target = FName(Row); C.Level = -1;
+			C.Location = Sim->GetCellCentreCm(FIntVector(-1, Cell, 0));
+			C.Value = URHSimWorldSubsystem::EncodeFurnish(Cell, Slot, 0);
+			Sim->EnqueueCommand(C);
+			Step();
+		};
 
-		// A flourishing 2-person colony: instant Hope 88.5 (base 50 + housing 15
-		// + Lab 1.5 + Dining 3 + jobs 6 + vault 5 + comforts 8), no emitters so
-		// zero adjacency noise. The smoother crosses 85 at ~7.2 sols.
+		// A thriving 2-person colony that has to EARN the research gate. Cells:
+		// c0, c1 Living; c2 Large Chem Table, c3 Lab (2 Lab seats, the T2 table
+		// first in carve order so the Lab function's morale weight is 1.0);
+		// c4 Dining; c5 Large Workbench (UNSTAFFED: the two colonists fill the
+		// seats in carve order, so c2 and c3 take them); c6 Infirmary. Lab seat
+		// yield 1.35 + 1.0 = 2.35 (not the old 2.0), so accrual is ~17% faster
+		// before mastery. Instant Hope (no emitters, so no adjacency noise):
+		// 50 + vault 5 + housing 7.5 + rooms (2.5 + 1.5 + 2.5 + 1.25 = 7.75) +
+		// jobs 2 x 1.5 + comforts 8 + furnishings 6 (a dining table and five
+		// plants, 140 Struct from the Lander's 400) = 87.25. The smoother crosses
+		// 85 about 8 sols after the crew arrives (it was about 7.2).
 		FString R;
 		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
-		Sim->ExcavateFloor(-1, 6, R);
+		Sim->ExcavateFloor(-1, 7, R);
 		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
@@ -716,50 +859,105 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->AddStock(FName("Food"), 4000.0);
 		RunSols(2.5);
 		Sim->Debug_AddColonists(2);
-		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
-		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
-		Sim->DesignateRoom(-1, 2, FName("Lab"), R);
-		Sim->DesignateRoom(-1, 3, FName("Lab"), R);
-		Sim->DesignateRoom(-1, 4, FName("Dining"), R);
+		const bool bZoned = Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R)
+			&& Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R)
+			&& Sim->DesignateRoom(-1, 2, FName("ChemTableLarge"), R)
+			&& Sim->DesignateRoom(-1, 3, FName("Lab"), R)
+			&& Sim->DesignateRoom(-1, 4, FName("Dining"), R)
+			&& Sim->DesignateRoom(-1, 5, FName("WorkbenchLarge"), R)
+			&& Sim->DesignateRoom(-1, 6, FName("Infirmary"), R);
+		Expect(bZoned, TEXT("DS1 setup: c0, c1 Living, c2 Large Chem Table, c3 Lab, c4 Dining, c5 Large Workbench, c6 Infirmary all accepted"));
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		const double StructShelf0 = Sim->GetTotalSolid(FName("Struct"));
+		Furnish(TEXT("DiningTable"), 4, 0);
+		for (const int32 Slot : { 2, 3, 6, 7, 8 }) { Furnish(TEXT("Plant"), 4, Slot); }
+		const double StructSpent = StructShelf0 - Sim->GetTotalSolid(FName("Struct"));
+		Expect(Rejects.Num() == 0 && Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9),
+			FString::Printf(TEXT("DS1 six furnish orders (a dining table and five plants in c4): %d rejected, Furnishings %.1f (expect 0, 6.0)%s%s"),
+				Rejects.Num(), Sim->GetColonyHope().Furnishings, Rejects.Num() ? TEXT(" - ") : TEXT(""), Rejects.Num() ? *Rejects.Last() : TEXT("")));
+		// The furniture spends from the Lander's own shelf (GetTotalSolid), not
+		// the stock pool the ceramics reward lands in (GetStock) - two ledgers.
+		Expect(Near(StructSpent, 140.0, 1e-6),
+			FString::Printf(TEXT("DS1 the six orders cost %.1f Struct off the Lander's shelf (expect 140 = 40 + 5 x 20)"), StructSpent));
+		RunSols(0.1); // one pass so jobs settle
+		Expect(Sim->GetColonyHope().FilledSeats == 2 && Near(Sim->GetLabYieldSeatSum(), 2.35, 1e-6) && Near(Sim->GetWorkstationYieldSeatSum(), 0.0, 1e-6),
+			FString::Printf(TEXT("DS1 seats: filled %d, Lab yield %.2f, Workstation yield %.2f (expect 2, 2.35, 0.00: the Large Workbench stays unstaffed)"),
+				Sim->GetColonyHope().FilledSeats, Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum()));
+		const double Struct0 = Sim->GetStock(FName("Struct"));
 
-		// 1) Below the threshold nothing accrues (the smoothed mood lags).
-		RunSols(1.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("DISC gate: smoothed=%.1f accruing=%d progress=%.2f (expect <85, 0, 0.00)"),
-			Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress());
+		// DS2. Below the threshold nothing accrues (the smoothed mood lags).
+		RunSols(0.9);
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+			Expect(Sim->GetHopeSmoothed() < 85.0 && !Sim->IsResearchAccruing() && Near(Sim->GetDiscoveryProgress(), 0.0, 1e-9),
+				FString::Printf(TEXT("DS2 gate: smoothed=%.1f accruing=%d progress=%.2f (expect <85, 0, 0.00)"),
+					Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress()));
+			Expect(Near(H.Total, 87.25, 1e-6) && Near(H.Furnishings, 6.0, 1e-9) && Near(H.Comforts, 8.0, 1e-9)
+				&& H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.AdjacencyPenalty == 0.0,
+				FString::Printf(TEXT("DS2 instant Hope %.3f with furnishings %.1f, comforts %.1f and no penalties (expect 87.25, 6.0, 8.0)"),
+					H.Total, H.Furnishings, H.Comforts));
+			// The D3a claim: rooms and jobs alone no longer reach the research
+			// gate. The crew has to be given comforts and a furnished home.
+			const double Bare = H.Total - H.Furnishings - H.Comforts;
+			Expect(Bare < Sim->GetHopeDiscoveryThreshold(),
+				FString::Printf(TEXT("DS3 without furnishings and comforts the same colony reads %.2f, under the %.0f research gate (the extra care is what opens research)"),
+					Bare, Sim->GetHopeDiscoveryThreshold()));
+		}
 
-		// 2) 10 sols in: the mood crossed ~85 near sol 7; 2 Lab seats x 48
-		// seat-h/sol -> CropStrain (100) pops. Seeds +50, milestone 5->7.
+		// DS4. 10 sols in: the mood crossed ~85 near sol 8; 2.35 yield-seats x
+		// 24 seat-h/sol (before mastery) -> CropStrain (100) pops. Seeds +50, milestone 5->7.
+		// The exact count is pinned from the pre-derivation run on the shipped
+		// tuning: CropStrain popped about 0.7 sol before this read and
+		// RegolithCeramics (150) is about a third of the way, so each side has
+		// at least 0.7 sol of margin.
 		const double Seeds0 = Sim->GetStock(FName("Seeds"));
 		RunSols(9.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("DISC first: found=%d next=%s seeds +%.0f milestones=%.1f (expect 1, RegolithCeramics, 50, 7.0)"),
-			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
-			Sim->GetStock(FName("Seeds")) - Seeds0, Sim->GetColonyHope().Milestones);
+		Expect(Sim->GetDiscoveryLog().Num() >= 1 && Sim->GetDiscoveryLog()[0] == FName("CropStrain") && LogIsAuthoredPrefix()
+			&& Near(Sim->GetStock(FName("Seeds")) - Seeds0, 50.0, 1e-9) && Near(Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum(), 1e-9),
+			FString::Printf(TEXT("DS4 first window: found=%d [%s] next=%s (%.3f of the way) seeds +%.0f milestones=%.1f (expect >=1 starting CropStrain, +50, 5 + the found rows' bonus = %.1f)"),
+				Sim->GetDiscoveryLog().Num(), *LogText(), *Sim->GetNextDiscovery().ToString(), Sim->GetDiscoveryProgress(),
+				Sim->GetStock(FName("Seeds")) - Seeds0, Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum()));
+		Expect(Sim->GetDiscoveryLog().Num() == 1 && Sim->GetNextDiscovery() == FName("RegolithCeramics"),
+			FString::Printf(TEXT("DS4 pin: exactly CropStrain found, RegolithCeramics next (found=%d next=%s; the shipped tuning's pace - re-pin it if the tuning moves)"),
+				Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString()));
 
-		// 3) 4 more sols: the lab crew's MASTERY has been ramping since they
+		// DS5. 6 more sols: the lab crew's MASTERY has been ramping since they
 		// took their posts (alive pass - skill accrues with job time), so the
-		// accrual rate runs well above the fresh-crew 48/sol by now: ceramics
-		// (150) AND the brine seep (200) both pop by sol 14. Struct +100
-		// exactly (ceramics' reward; brine rewards Water).
-		const double Struct0 = Sim->GetStock(FName("Struct"));
-		RunSols(4.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("DISC second: found=%d next=%s struct +%.0f milestones=%.1f (expect 3, MicrobialLife, 100, 12.0)"),
-			Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString(),
-			Sim->GetStock(FName("Struct")) - Struct0, Sim->GetColonyHope().Milestones);
+		// accrual rate runs above the fresh-crew rate by now. The log stays an
+		// ordered prefix of the authored four; the ceramics reward (Struct +100,
+		// into the stock pool) is exactly 100 per RegolithCeramics found since
+		// the post-furnishing baseline (brine rewards Water). The window is long
+		// enough to leave the fourth row about half done, so the pinned count of
+		// three has about two sols of margin either way.
+		RunSols(6.0);
+		{
+			const double StructGained = Sim->GetStock(FName("Struct")) - Struct0;
+			const int32 Ceramics = Sim->HasDiscovered(FName("RegolithCeramics")) ? 1 : 0;
+			Expect(Sim->GetDiscoveryLog().Num() >= 1 && LogIsAuthoredPrefix() && Near(StructGained, 100.0 * Ceramics, 1e-9)
+				&& Near(Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum(), 1e-9),
+				FString::Printf(TEXT("DS5 second window: found=%d [%s] next=%s (%.3f of the way) struct +%.0f (expect 100 x ceramics found = %d) milestones=%.1f (expect 5 + the found rows' bonus = %.1f)"),
+					Sim->GetDiscoveryLog().Num(), *LogText(), *Sim->GetNextDiscovery().ToString(), Sim->GetDiscoveryProgress(), StructGained, Ceramics * 100,
+					Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum()));
+			Expect(Sim->GetDiscoveryLog().Num() == 3 && Sim->GetNextDiscovery() == FName("MicrobialLife") && Near(StructGained, 100.0, 1e-9),
+				FString::Printf(TEXT("DS5 pin: exactly the first three found, MicrobialLife next, Struct +%.0f (found=%d next=%s)"),
+					StructGained, Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString()));
+		}
 
-		// 4) Save v16 round-trip: the log and the partial progress survive.
+		// DS6. Save v16 round-trip: the log and the partial progress survive.
 		const int32 FoundBefore = Sim->GetDiscoveryLog().Num();
 		const double ProgressBefore = Sim->GetDiscoveryProgress();
 		FString Err;
-		Sim->SaveColony(TEXT("disctest"), Err);
-		Sim->LoadColony(TEXT("disctest"), Err);
-		UE_LOG(LogRedHopeSim, Display, TEXT("DISC save/load v16: found %d->%d progress %.3f->%.3f (expect identical)"),
-			FoundBefore, Sim->GetDiscoveryLog().Num(), ProgressBefore, Sim->GetDiscoveryProgress());
+		const bool bSaved = Sim->SaveColony(TEXT("disctest"), Err);
+		const bool bLoaded = Sim->LoadColony(TEXT("disctest"), Err);
+		Expect(bSaved && bLoaded && FoundBefore == Sim->GetDiscoveryLog().Num() && Near(ProgressBefore, Sim->GetDiscoveryProgress(), 1e-9),
+			FString::Printf(TEXT("DS6 save/load v16: found %d->%d progress %.3f->%.3f (expect identical)"),
+				FoundBefore, Sim->GetDiscoveryLog().Num(), ProgressBefore, Sim->GetDiscoveryProgress()));
 
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST END ==="));
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISCOVERIES TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
-		return 0;
+		return Fails > 0 ? 1 : 0;
 	}
 
 	// M3 Gate A self-test: RIVALS & TRADE - convoy dispatch (committed costs),
@@ -2084,7 +2282,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			for (const FRHColonist& Col : Sim->GetColonists()) { bAll &= Col.bSupported; }
 			// The push fills H to 200 kg, then its two residents breathe in the
 			// same step (StepPopulation runs after StepHabitability): within 0.1.
-			Expect(Near(Sim->GetHabO2Kg(Hh), 200.0, 0.1) && bAll && Near(Sim->GetColonyHope().Housing, 15.0, 1e-6),
+			Expect(Near(Sim->GetHabO2Kg(Hh), 200.0, 0.1) && bAll && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax(), 1e-6),
 				FString::Printf(TEXT("S8 refilled: H %.3f kg, all supported, Housing %.2f"), Sim->GetHabO2Kg(Hh), Sim->GetColonyHope().Housing));
 		}
 		Expect(!Sim->DesignateBay(A, 0, NAME_None, Why), FString::Printf(TEXT("S8 the bed guard keeps A's sleeper's bed (%s)"), *Why));
@@ -2151,17 +2349,19 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
 			FIntVector St;
 			const bool bSt = Sim->GetColonistStation(1, St);
-			Expect(Hp.OffendedPairs == 1 && Near(Hp.AdjacencyPenalty, 8.0, 1e-9) && Near(Hp.Rooms, 6.5, 1e-6),
+			// Rooms: floor Workstation + network Workstation (0.2 each), Cooking
+			// 0.3, Dining 0.6, each x HopePerMoralePoint (3.25 at D3a).
+			Expect(Hp.OffendedPairs == 1 && Near(Hp.AdjacencyPenalty, 8.0, 1e-9) && Near(Hp.Rooms, (0.2 + 0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6),
 				FString::Printf(TEXT("S10 Hope: Q-R offends, the corridor partitions P-R (pairs %d, adj %.1f, rooms %.2f)"), Hp.OffendedPairs, Hp.AdjacencyPenalty, Hp.Rooms));
-			Expect(Hp.FilledSeats == 4 && Near(Hp.Jobs, 12.0, 1e-9) && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Near(Sim->GetWorkstationYieldSeatSum(), 2.0, 1e-4)
-				&& bSt && St == FIntVector(-1, 0, 0) && Near(Hp.Housing, 15.0 * 5.0 / 9.0, 1e-6),
+			Expect(Hp.FilledSeats == 4 && Near(Hp.Jobs, 4.0 * Sim->GetHopePerJob(), 1e-9) && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Near(Sim->GetWorkstationYieldSeatSum(), 2.0, 1e-4)
+				&& bSt && St == FIntVector(-1, 0, 0) && Near(Hp.Housing, Sim->GetHopeHousingMax() * 5.0 / 9.0, 1e-6),
 				FString::Printf(TEXT("S10 seats: floor first (filled %d, jobs %.0f, lab %.2f, ws %.2f, housing %.3f)"), Hp.FilledSeats, Hp.Jobs,
 					Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum(), Hp.Housing));
 		}
 		Sim->DesignateBay(PQ, 1, NAME_None, Why);
-		Expect(Sim->GetColonyHope().OffendedPairs == 0 && Near(Sim->GetColonyHope().Rooms, 3.5, 1e-6), TEXT("S10 clearing the Dining bay clears the pair"));
+		Expect(Sim->GetColonyHope().OffendedPairs == 0 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.2 + 0.3) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 clearing the Dining bay clears the pair"));
 		Sim->DesignateBay(PQ, 1, FName("Dining"), Why);
-		Expect(Sim->GetColonyHope().OffendedPairs == 1 && Near(Sim->GetColonyHope().Rooms, 6.5, 1e-6), TEXT("S10 re-zoned: the pair is back"));
+		Expect(Sim->GetColonyHope().OffendedPairs == 1 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 re-zoned: the pair is back"));
 		{
 			FRHCommand As; As.Verb = FName("Assign"); As.Level = 0; As.Location = FVector(2000.f, 0.f, 0.f);
 			Sim->EnqueueCommand(As);
@@ -2792,7 +2992,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
 			Expect(Sim->GetHousingCapacity() == 7 && Seats(C1) == FIntPoint(1, 1) && Seats(C3) == FIntPoint(2, 2) && Seats(C5) == FIntPoint(1, 1)
 				&& H.FilledSeats == 4 && Near(Sim->GetWorkstationYieldSeatSum(), 3.7, 1e-6) && Near(Sim->GetLabYieldSeatSum(), 1.0, 1e-6)
-				&& Near(H.Housing, 15.0 * 2.0 / 7.0, 1e-6) && H.Furnishings == 0.0 && Sim->GetFurniture().Num() == 0,
+				&& Near(H.Housing, Sim->GetHopeHousingMax() * 2.0 / 7.0, 1e-6) && H.Furnishings == 0.0 && Sim->GetFurniture().Num() == 0,
 				FString::Printf(TEXT("F1 legacy: capacity %d, seats c1/c3/c5 1/2/1, filled %d, workstation sum %.2f, housing %.4f, furnishings 0"),
 					Sim->GetHousingCapacity(), H.FilledSeats, Sim->GetWorkstationYieldSeatSum(), H.Housing));
 		}
@@ -2831,14 +3031,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(!CanPlace(TEXT("Cot"), C0, 2, 0, Why) && Why.Contains(TEXT("transit")), FString::Printf(TEXT("F3 a spot with an order in flight (%s)"), *Why));
 		Step();
 		Spent += 40.0;
-		Expect(Sim->GetHousingCapacity() == 8 && Near(Sim->GetColonyHope().Housing, 15.0 * 3.0 / 7.0, 1e-6),
+		Expect(Sim->GetHousingCapacity() == 8 && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax() * 3.0 / 7.0, 1e-6),
 			FString::Printf(TEXT("F3 two cots: capacity 8, housing %.4f"), Sim->GetColonyHope().Housing));
 		Expect(Furnish(TEXT("Cot"), C0, 8) && Furnish(TEXT("Cot"), C0, 10, 1), TEXT("F3 cots 3 and 4 (one turned)"));
 		Spent += 80.0;
-		Expect(Sim->GetHousingCapacity() == 10 && Near(Sim->GetColonyHope().Housing, 15.0 * 5.0 / 7.0, 1e-6) && Sim->GetCellBeds(C0) == 4,
+		Expect(Sim->GetHousingCapacity() == 10 && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax() * 5.0 / 7.0, 1e-6) && Sim->GetCellBeds(C0) == 4,
 			FString::Printf(TEXT("F3 four cots: capacity %d, housing %.4f, c0 beds %d"), Sim->GetHousingCapacity(), Sim->GetColonyHope().Housing, Sim->GetCellBeds(C0)));
 		Expect(!CanPlace(TEXT("Cot"), C0, 5, 0, Why) && Why.Contains(TEXT("Overlaps")), FString::Printf(TEXT("F3 a fifth cot overlaps (%s)"), *Why));
-		Expect(Sim->Debug_AddColonists(4) == 3 && Sim->GetPopulation() == 10 && Near(Sim->GetColonyHope().Housing, 7.5, 1e-6),
+		Expect(Sim->Debug_AddColonists(4) == 3 && Sim->GetPopulation() == 10 && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax() * 0.5, 1e-6),
 			FString::Printf(TEXT("F3 three more colonists fill the beds (pop %d, housing %.2f)"), Sim->GetPopulation(), Sim->GetColonyHope().Housing));
 
 		// F4. The bed guard.
@@ -2857,7 +3057,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(Furnish(TEXT("Workbench"), C3, 8, 1) && Seats(C3) == FIntPoint(3, 3) && Sim->GetColonyHope().FilledSeats == 6 && Near(Sim->GetWorkstationYieldSeatSum(), 6.05, 1e-6),
 			FString::Printf(TEXT("F5 + a workbench: c3 seats 3 (filled %d, sum %.2f)"), Sim->GetColonyHope().FilledSeats, Sim->GetWorkstationYieldSeatSum()));
 		Expect(Furnish(TEXT("LabBench"), C5, 0) && Seats(C5) == FIntPoint(2, 2) && Near(Sim->GetLabYieldSeatSum(), 2.0, 1e-6)
-			&& Sim->GetColonyHope().FilledSeats == 7 && Near(Sim->GetColonyHope().Jobs, 21.0, 1e-6),
+			&& Sim->GetColonyHope().FilledSeats == 7 && Near(Sim->GetColonyHope().Jobs, 7.0 * Sim->GetHopePerJob(), 1e-6),
 			FString::Printf(TEXT("F5 a lab bench: c5 seats 2, filled %d, jobs %.1f"), Sim->GetColonyHope().FilledSeats, Sim->GetColonyHope().Jobs));
 		Spent += 40.0 * 3 + 80.0 + 80.0;
 		{
@@ -2880,10 +3080,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// F7. Re-zoning.
 		Expect(!Sim->DesignateRoom(-1, 0, FName("Lab"), Why) && Why.Contains(TEXT("Cot")), FString::Printf(TEXT("F7 c0 to Lab refused (%s)"), *Why));
 		Expect(!Sim->DesignateRoom(-1, 4, FName("LivingQuarters"), Why) && Why.Contains(TEXT("Dining Table")), FString::Printf(TEXT("F7 c4 to Living refused (%s)"), *Why));
-		Expect(Furnish(TEXT("Plant"), C2, 15) && Sim->DesignateRoom(-1, 2, FName("Dining"), Why) && Near(Sim->GetColonyHope().Housing, 6.0, 1e-6)
+		Expect(Furnish(TEXT("Plant"), C2, 15) && Sim->DesignateRoom(-1, 2, FName("Dining"), Why) && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax() * 0.4, 1e-6)
 			&& Sim->GetHousingCapacity() == 10, FString::Printf(TEXT("F7 a plant goes Living -> Dining with its room; housing %.2f, capacity %d"), Sim->GetColonyHope().Housing, Sim->GetHousingCapacity()));
 		Spent += 20.0;
-		Expect(!Sim->DesignateRoom(-1, 2, NAME_None, Why) && Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R) && Near(Sim->GetColonyHope().Housing, 7.5, 1e-6),
+		Expect(!Sim->DesignateRoom(-1, 2, NAME_None, Why) && Sim->DesignateRoom(-1, 2, FName("LivingQuarters"), R) && Near(Sim->GetColonyHope().Housing, Sim->GetHopeHousingMax() * 0.5, 1e-6),
 			FString::Printf(TEXT("F7 clearing c2 refused (%s); back to Living"), *Why));
 
 		// F8. Selling.
@@ -3660,22 +3860,38 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	// workstation fabrication bonus, discovery-driven room UNLOCK + banked
 	// FUNDING, the Infirmary evac grace, and unlock persistence across a
 	// save/load. `-tiers`.
+	// D3a (2026-10-17): fails loudly. The recipe is the shipped tuning's proof
+	// that a furnished, comforted six-person colony still clears the 85
+	// research gate: quarters on three cells, the T2 benches FIRST in carve
+	// order (the first cell of a function sets its morale weight), a dining
+	// room with a table and plants, and comforts.
 	if (FParse::Param(*Params, TEXT("tiers")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST (v25) ==="));
 		const int32 StepsPerSolH = (int32)(URHSimClockSubsystem::SolLengthSimSeconds / URHSimClockSubsystem::EraStepSimSeconds);
+		const auto Step = [&]()
+		{
+			// 6 drinkers decay potability fast - feed enough fresh melt to
+			// hold it above the floor, or the water Hope penalty pins the
+			// smoothed mood just under the 85 discovery gate.
+			Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
+			Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+		};
 		const auto RunSols = [&](double Sols)
 		{
 			for (int32 S = 0; S < (int32)(Sols * StepsPerSolH); ++S)
 			{
-				// 6 drinkers decay potability fast - feed enough fresh melt to
-				// hold it above the floor, or the water Hope penalty pins the
-				// smoothed mood just under the 85 discovery gate.
-				Sim->Debug_AddFreshWater(500.0 * URHSimClockSubsystem::EraStepSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
-				Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds);
-				Sim->EraStep(URHSimClockSubsystem::EraStepSimSeconds);
+				Step();
 			}
 		};
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("TIERS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("TIERS FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 		// Pure-data: the tier ladder's stations ride the synced DT_Rooms
 		// (2026-07-16) - assert the arithmetic-bearing columns instead of
@@ -3683,18 +3899,24 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		const auto CheckRoom = [&](const TCHAR* Name, FName Function, int32 Tier, int32 Seats, float Yield, bool bActive) -> bool
 		{
 			const FRHRoomRow* Row = DefsSub->GetRoom(FName(Name));
-			if (!Row || Row->SliceActive != bActive || Row->Function != Function
-				|| Row->Tier != Tier || Row->SeatCount != Seats || Row->YieldMul != Yield)
-			{
-				UE_LOG(LogRedHopeSim, Error, TEXT("TIERS: room %s missing/drifted - DT/CSV drift"), Name);
-				return false;
-			}
-			return true;
+			const bool bRow = Row && Row->SliceActive == bActive && Row->Function == Function
+				&& Row->Tier == Tier && Row->SeatCount == Seats && Row->YieldMul == Yield;
+			Expect(bRow, FString::Printf(TEXT("T0 DT_Rooms row %s: %s tier %d, %d seat(s), x%.2f, %s (DT/CSV)"),
+				Name, *Function.ToString(), Tier, Seats, Yield, bActive ? TEXT("active") : TEXT("dormant")));
+			return bRow;
 		};
-		if (!CheckRoom(TEXT("WorkbenchLarge"), FName("Workstation"), 2, 2, 1.35f, true)) { return 1; }
-		if (!CheckRoom(TEXT("ChemTableLarge"), FName("Lab"), 2, 1, 1.35f, true)) { return 1; }
-		if (!CheckRoom(TEXT("Workshop"), FName("Workstation"), 3, 3, 1.8f, false)) { return 1; } // DORMANT until unlocked
-		if (!CheckRoom(TEXT("Infirmary"), FName("Infirmary"), 1, 1, 1.0f, true)) { return 1; }
+		bool bData = true;
+		bData &= CheckRoom(TEXT("WorkbenchLarge"), FName("Workstation"), 2, 2, 1.35f, true);
+		bData &= CheckRoom(TEXT("ChemTableLarge"), FName("Lab"), 2, 1, 1.35f, true);
+		bData &= CheckRoom(TEXT("Workshop"), FName("Workstation"), 3, 3, 1.8f, false); // DORMANT until unlocked
+		bData &= CheckRoom(TEXT("Infirmary"), FName("Infirmary"), 1, 1, 1.0f, true);
+		if (!bData)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST END: %d failure(s) ==="), Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
+		}
 		// The unlocking discovery stays a SYNTHETIC inject (test-only row, not
 		// in the CSV): first in the sequence (Order 0 outranks the authored
 		// rows), cheap enough to pop fast once the mood crosses 85.
@@ -3704,8 +3926,19 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		DUnlock.Alert = TEXT("BREAKTHROUGH — ceramics strong enough for machine housings.");
 		DUnlock.SliceActive = true;
 		DefsSub->Debug_InjectDiscovery(FName("TestCeramics"), DUnlock);
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		// Furnish orders ride the uplink like any order: one order, one step.
+		const auto Furnish = [&](const TCHAR* Row, int32 Cell, int32 Slot)
+		{
+			FRHCommand C; C.Verb = FName("Furnish"); C.Target = FName(Row); C.Level = -1;
+			C.Location = Sim->GetCellCentreCm(FIntVector(-1, Cell, 0));
+			C.Value = URHSimWorldSubsystem::EncodeFurnish(Cell, Slot, 0);
+			Sim->EnqueueCommand(C);
+			Step();
+		};
 
-		// A flourishing colony (the -discovery recipe, plus the tier benches).
+		// A thriving colony (the -discovery recipe, plus the tier benches).
 		FString R;
 		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
 		Sim->ExcavateFloor(-1, 10, R);
@@ -3717,62 +3950,92 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->AddStock(FName("Food"), 6000.0);
 		RunSols(2.5);
 		const int32 Housed = Sim->Debug_AddColonists(6);
-		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
-		Sim->DesignateRoom(-1, 1, FName("Workstation"), R);     // T1: 1 seat, x1.0
-		Sim->DesignateRoom(-1, 2, FName("WorkbenchLarge"), R);  // T2: 2 seats, x1.35
-		Sim->DesignateRoom(-1, 3, FName("Lab"), R);             // T1: 1 seat, x1.0
-		Sim->DesignateRoom(-1, 4, FName("ChemTableLarge"), R);  // T2: 1 seat, x1.35
-		Sim->DesignateRoom(-1, 5, FName("Dining"), R);
+		const bool bZoned = Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R)
+			&& Sim->DesignateRoom(-1, 1, FName("WorkbenchLarge"), R)  // T2: 2 seats, x1.35 (first Workstation cell: weight 1.0)
+			&& Sim->DesignateRoom(-1, 2, FName("Workstation"), R)     // T1: 1 seat, x1.0
+			&& Sim->DesignateRoom(-1, 3, FName("ChemTableLarge"), R)  // T2: 1 seat, x1.35 (first Lab cell: weight 1.0)
+			&& Sim->DesignateRoom(-1, 4, FName("Lab"), R)             // T1: 1 seat, x1.0
+			&& Sim->DesignateRoom(-1, 5, FName("Dining"), R)
+			&& Sim->DesignateRoom(-1, 8, FName("LivingQuarters"), R)
+			&& Sim->DesignateRoom(-1, 9, FName("LivingQuarters"), R);  // c6, c7 stay free: Workshop, Infirmary
+		Expect(bZoned, TEXT("T1 setup: c0, c8, c9 Living, c1 Large Workbench, c2 Workstation, c3 Large Chem Table, c4 Lab, c5 Dining all accepted"));
 		// Six colonists drain a comforts crate quickly - stock several so the
 		// comforts fraction holds at 1.0 through the whole march.
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
+		// The dining room's table and plants: Furnishings 6 (140 Struct from the
+		// Lander's 400).
+		Furnish(TEXT("DiningTable"), 5, 0);
+		for (const int32 Slot : { 2, 3, 6, 7, 8 }) { Furnish(TEXT("Plant"), 5, Slot); }
+		Expect(Rejects.Num() == 0 && Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9),
+			FString::Printf(TEXT("T1 six furnish orders (a dining table and five plants in c5): %d rejected, Furnishings %.1f (expect 0, 6.0)%s%s"),
+				Rejects.Num(), Sim->GetColonyHope().Furnishings, Rejects.Num() ? TEXT(" - ") : TEXT(""), Rejects.Num() ? *Rejects.Last() : TEXT("")));
 		RunSols(0.2);
 
-		// 1) Seat math: 5 job seats (1+2+1+1), yield sums weigh the tiers.
+		// T1. Seat math: 5 job seats (2+1+1+1), yield sums weigh the tiers. Instant
+		// Hope = 50 + vault 5 + housing 7.5 x 3/6 + rooms (2.5 + 2.5 + 1.5 = 6.5) +
+		// jobs 5 x 1.5 + comforts 8 + furnishings 6 = 86.75.
 		const double EvacBase = Sim->GetEffectiveEvacSols();
 		Sim->Debug_SetWorkstationFabBonus(0.1);
-		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS seats: housed=%d filled=%d labSum=%.2f wsSum=%.2f fabMul=%.3f (expect 6, 5, 2.35, 3.70, 1.370)"),
-			Housed, Sim->GetColonyHope().FilledSeats, Sim->GetLabYieldSeatSum(),
-			Sim->GetWorkstationYieldSeatSum(), Sim->GetWorkstationFabMul());
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+			Expect(Housed == 6 && H.FilledSeats == 5 && Near(Sim->GetLabYieldSeatSum(), 2.35, 1e-6)
+				&& Near(Sim->GetWorkstationYieldSeatSum(), 3.70, 1e-6) && Near(Sim->GetWorkstationFabMul(), 1.370, 1e-6),
+				FString::Printf(TEXT("T1 seats: housed=%d filled=%d labSum=%.2f wsSum=%.2f fabMul=%.3f (expect 6, 5, 2.35, 3.70, 1.370)"),
+					Housed, H.FilledSeats, Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum(), Sim->GetWorkstationFabMul()));
+			Expect(Near(H.Total, 86.75, 1e-6) && H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.AdjacencyPenalty == 0.0,
+				FString::Printf(TEXT("T1 instant Hope %.3f = 50 + 5 + housing %.2f + rooms %.2f + jobs %.2f + comforts %.2f + furnishings %.2f, no penalties (expect 86.75)"),
+					H.Total, H.Housing, H.Rooms, H.Jobs, H.Comforts, H.Furnishings));
+		}
 
-		// 2) The dormant Workshop refuses designation (locked by research).
+		// T2. The dormant Workshop refuses designation (locked by research).
 		FString RefuseMsg;
 		const bool bRefused = !Sim->DesignateRoom(-1, 6, FName("Workshop"), RefuseMsg);
-		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS locked: workshopRefused=%d (expect 1: '%s')"),
-			(int32)bRefused, *RefuseMsg);
+		Expect(bRefused, FString::Printf(TEXT("T2 locked: workshopRefused=%d (expect 1: '%s')"), (int32)bRefused, *RefuseMsg));
 
-		// 3) March to the breakthrough: the smoothed mood clears 85 once the
-		// water and comforts hold; 2.35 yield-seats x 48 seat-h/sol clears 50
-		// seat-hours fast. Funding banks; the Workshop unlocks and ACCEPTS.
+		// T3. March to the breakthrough: the smoothed mood clears 85 once the
+		// water and comforts hold; 2.35 yield-seats x 24 seat-h/sol clears 50
+		// seat-hours fast. Funding banks; the Workshop unlocks and ACCEPTS. The
+		// march is long enough that CropStrain (which also funds 500) may pop
+		// too, so the pending funding is checked against the found rows, not 500.
 		RunSols(12.0);
 		FString AcceptMsg;
 		const bool bAccepted = Sim->DesignateRoom(-1, 6, FName("Workshop"), AcceptMsg);
-		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS unlock: found=%d pending=%.0f workshopAccepted=%d smoothed=%.1f accruing=%d progress=%.2f next=%s (expect >=1, 500, 1)"),
-			Sim->GetDiscoveryLog().Num(), Sim->GetPendingResearchFundingKg(), (int32)bAccepted,
-			Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress(),
-			*Sim->GetNextDiscovery().ToString());
+		double FundingSum = 0.0;
+		for (const FName& Found : Sim->GetDiscoveryLog())
+		{
+			const FRHDiscoveryRow* Row = DefsSub->GetDiscovery(Found);
+			FundingSum += Row ? (double)Row->FundingKg : 0.0;
+		}
+		Expect(Sim->GetDiscoveryLog().Num() >= 1 && Sim->GetDiscoveryLog()[0] == FName("TestCeramics") && bAccepted
+			&& Near(Sim->GetPendingResearchFundingKg(), FundingSum, 1e-9),
+			FString::Printf(TEXT("T3 unlock: found=%d first=%s pending=%.0f (expect the found rows' funding = %.0f) workshopAccepted=%d smoothed=%.1f accruing=%d progress=%.2f next=%s (expect >=1 starting TestCeramics, 1)"),
+				Sim->GetDiscoveryLog().Num(), Sim->GetDiscoveryLog().Num() ? *Sim->GetDiscoveryLog()[0].ToString() : TEXT("none"),
+				Sim->GetPendingResearchFundingKg(), FundingSum, (int32)bAccepted,
+				Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress(), *Sim->GetNextDiscovery().ToString()));
 
-		// 4) Infirmary: designating one stretches the evac countdown by the
+		// T4. Infirmary: designating one stretches the evac countdown by the
 		// configured grace (prevention framing - more time to fix the fault).
 		Sim->DesignateRoom(-1, 7, FName("Infirmary"), R);
-		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS infirmary: evac %.1f -> %.1f sols (expect 2.0 -> 3.0)"),
-			EvacBase, Sim->GetEffectiveEvacSols());
+		Expect(Near(EvacBase, 2.0, 1e-9) && Near(Sim->GetEffectiveEvacSols(), 3.0, 1e-9),
+			FString::Printf(TEXT("T4 infirmary: evac %.1f -> %.1f sols (expect 2.0 -> 3.0)"), EvacBase, Sim->GetEffectiveEvacSols()));
 
-		// 5) Save v25 round-trip: the unlock re-applies from the discovery log
+		// T5. Save v25 round-trip: the unlock re-applies from the discovery log
 		// (row flips are in-memory), seat sums re-derive, the grace holds.
 		FString Err;
-		Sim->SaveColony(TEXT("tierstest"), Err);
-		Sim->LoadColony(TEXT("tierstest"), Err);
+		const bool bSaved = Sim->SaveColony(TEXT("tierstest"), Err);
+		const bool bLoaded = Sim->LoadColony(TEXT("tierstest"), Err);
 		const FRHRoomRow* WShop = DefsSub->GetRoom(FName("Workshop"));
-		UE_LOG(LogRedHopeSim, Display, TEXT("TIERS save/load v25: workshopActive=%d labSum=%.2f evac=%.1f (expect 1, 2.35, 3.0)"),
-			(int32)(WShop && WShop->SliceActive), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols());
+		Expect(bSaved && bLoaded && WShop && WShop->SliceActive && Near(Sim->GetLabYieldSeatSum(), 2.35, 1e-6) && Near(Sim->GetEffectiveEvacSols(), 3.0, 1e-9),
+			FString::Printf(TEXT("T5 save/load v25: workshopActive=%d labSum=%.2f evac=%.1f (expect 1, 2.35, 3.0)"),
+				(int32)(WShop && WShop->SliceActive), Sim->GetLabYieldSeatSum(), Sim->GetEffectiveEvacSols()));
 
-		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST END ==="));
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== STATION TIERS TEST END: %d failure(s) ==="), Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
-		return 0;
+		return Fails > 0 ? 1 : 0;
 	}
 
 	// Greenhouse-agriculture self-test (2026-07-10 spec, Gates A/B/D): crops
@@ -4030,12 +4293,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 
 		// 4) DISPUTES surface when needs go unmet (food emptied) - and stop
 		// once restored.
+		const double SmoothedSupplied = Sim->GetHopeSmoothed();
 		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
 		RunSols(1.0);
 		const int32 DisputesStarving = Moments[2];
+		// The mood only falls through the starved sol (the instant sits far below
+		// it), so this read is its minimum: the margin over the dispute gate.
+		const double SmoothedStarved = Sim->GetHopeSmoothed();
 		Sim->AddStock(FName("Food"), 4000.0);
 		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE disputes: starving hour -> %d disputes (expect 2 - every beat while unmet)"),
 			DisputesStarving);
+		UE_LOG(LogRedHopeSim, Display, TEXT("ALIVE mood margin: smoothed Hope %.1f supplied, %.1f after the starved sol (dispute gate 45: while supplied, disputes need it to stay above)"),
+			SmoothedSupplied, SmoothedStarved);
 
 		// 5) FIRST HARVEST: plant the garden, accumulate 1 kg -> milestone once,
 		// +4 Hope milestone, a Celebrate moment.

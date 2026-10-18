@@ -170,6 +170,9 @@ public:
 
 	// Config scalars from DT_Config (Value column parsed as double).
 	double GetConfigScalar(FName Name, double Default) const;
+	// The DT_Config row only: ignores -RHConfig overrides and the C++ fallback,
+	// so a pure-data check cannot be satisfied by anything but the synced row.
+	double GetConfigTableScalar(FName Name, double Missing) const;
 
 	// Dev-only in-memory row injection (headless tests exercise rows that a new
 	// gate ADDS before the live DT is MCP-synced - the whole-row extension of

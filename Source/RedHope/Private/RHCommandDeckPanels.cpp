@@ -710,6 +710,16 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			{
 				Parts.Add(FString::Printf(TEXT("Layout: %d pair%s of rooms clash."), H.OffendedPairs, H.OffendedPairs == 1 ? TEXT("") : TEXT("s")));
 			}
+			// D3a, Gate-D framing PLACEHOLDERS (inventory D29). The research gate and
+			// the FLOURISHING edge sit above where rooms and jobs alone reach.
+			if (S->GetLabYieldSeatSum() > 0.0 && !S->GetNextDiscovery().IsNone() && S->GetHopeSmoothed() < S->GetHopeDiscoveryThreshold())
+			{
+				Parts.Add(FString::Printf(TEXT("Labs research once Hope holds %.0f."), S->GetHopeDiscoveryThreshold()));
+			}
+			if (S->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Thriving)
+			{
+				Parts.Add(FString::Printf(TEXT("FLOURISHING at %.0f takes extra care: comforts, furnished rooms, windows."), S->GetHopeFlourishingEnter()));
+			}
 			if (S->GetBirthsOnMars() > 0)
 			{
 				Parts.Add(FString::Printf(TEXT("Born on Mars: %d."), S->GetBirthsOnMars()));
@@ -727,7 +737,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 		SNew(SBox)
 		.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->IsGrowthEligible()) ? EVisibility::Visible : EVisibility::Collapsed; })
 		[
-			BarRow(Txt(TEXT("Flourishing - next arrival")),
+			BarRow(Txt(TEXT("Thriving - next arrival")),
 				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S ? FString::Printf(TEXT("%.0f%%"), S->GetGrowthProgress() * 100.0) : FString()); }),
 				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S ? (float)S->GetGrowthProgress() : 0.f); }),
 				FSlateColor(D::Gold))

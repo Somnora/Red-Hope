@@ -6,6 +6,9 @@
 # Env:
 #   RH_BATTERY_LOGDIR  where per-suite logs land
 #                      (default <proj>/Saved/RHBattery)
+#   RH_BATTERY_EXTRA   extra switches appended to EVERY run (word-split), e.g.
+#                      "-RHConfig=HopeHousingMax=7.5,HopePerJob=1.5" to run an
+#                      older binary under newer balance as an equivalence reference
 #
 # MUST be bash. zsh does not word-split an unquoted "$ARGS", which silently
 # collapses "-sols=10 -agri" into a single argument - so every suite run turns
@@ -28,6 +31,7 @@ UE="/Volumes/Unreal/UE_5.8/Engine/Binaries/Mac/UnrealEditor-Cmd"
 PROJ_DIR="/Volumes/Unreal/red_hope/red_hope"
 PROJ="$PROJ_DIR/red_hope.uproject"
 LOGDIR="${RH_BATTERY_LOGDIR:-$PROJ_DIR/Saved/RHBattery}"
+EXTRA="${RH_BATTERY_EXTRA:-}"
 rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 SUITES="crew habitat vault borer rooms garden luxury hopedrive greenhouse water
@@ -38,7 +42,8 @@ FAILED=0
 
 run_one() {
   local name="$1"; shift
-  "$UE" "$PROJ" -run=RHSim "$@" -unattended -nosound -stdout > "$LOGDIR/$name.log" 2>&1
+  # shellcheck disable=SC2086 -- $EXTRA is deliberately unquoted (bash word-splits it)
+  "$UE" "$PROJ" -run=RHSim "$@" $EXTRA -unattended -nosound -stdout > "$LOGDIR/$name.log" 2>&1
   local errs done_line
   errs=$(grep -c "LogRedHopeSim: Error" "$LOGDIR/$name.log")
   done_line=$(grep -c "Execution of commandlet took" "$LOGDIR/$name.log")

@@ -308,6 +308,11 @@ public:
 	int32 GetColonistSeatPiece(int32 ColonistId) const { return ColonistSeatPiece.FindRef(ColonistId); }
 	double GetFurnitureRefundFraction() const { return FurnitureRefundFraction; }
 	double GetHopeFurnishingsMax() const { return HopeFurnishingsMax; }
+	// The Hope weights (D3a): the suites derive their expectations from these
+	// instead of hard-coding the tuning.
+	double GetHopeHousingMax() const { return HopeHousingMax; }
+	double GetHopePerMoralePoint() const { return HopePerMoralePoint; }
+	double GetHopePerJob() const { return HopePerJob; }
 	int32 GetFloorBeds(int32 Level) const { return CountFloorBeds(Level, nullptr); }
 	// --- Wall fittings (BM-6, 2026-10-16) ---
 	// Windows, doors and airlocks on the derived walls of BUILT surface
@@ -544,6 +549,10 @@ public:
 	double GetDiscoveryProgress() const;
 	// Whether Labs are currently accruing (flourishing + at least one staffed seat).
 	bool IsResearchAccruing() const;
+	// The smoothed-Hope gate for research (85) and the Thriving|Flourishing
+	// enter edge (90): pure reads for the Crew panel and the suites.
+	double GetHopeDiscoveryThreshold() const { return HopeDiscoveryThreshold; }
+	double GetHopeFlourishingEnter() const { return HopeBandUp[3]; }
 
 	// --- Rivals & trade (M3 Gate A, "The Neighbors") ---
 	// One rover convoy runs barter with a rival settlement: dispatch is an
@@ -1313,9 +1322,11 @@ private:
 	int32 LastOpenSeats = 0;
 	void RefreshJobs();
 	double HopeBase = 50.0;
-	double HopeHousingMax = 15.0;       // full when LivingQuarters cells >= population
-	double HopePerMoralePoint = 5.0;    // per room type per rated floor (Living excluded)
-	double HopePerJob = 3.0;
+	// The three weights below must equal RH_Config.csv (D3a): GetConfigScalar
+	// falls back here when the DT row is missing.
+	double HopeHousingMax = 7.5;        // full when LivingQuarters cells >= population
+	double HopePerMoralePoint = 2.5;    // per room type per rated floor (Living excluded)
+	double HopePerJob = 1.5;
 	double HopeAdjacencyPenalty = 8.0;  // per offended (emitter, refuser) pair
 	double HopeUnsupportedPenalty = 10.0;
 	double HopeVaultMilestone = 5.0;

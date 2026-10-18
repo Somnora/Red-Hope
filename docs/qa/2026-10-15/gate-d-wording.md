@@ -51,7 +51,7 @@ File key: **SIM** = `Source/RedHopeSim/Private/RHSimWorldSubsystem.cpp` · **PAN
 | D28 | Alert banner + golden card · SIM:2285 | `THE FIRST MARTIAN HARVEST — food grown in OUR ground is on the table. The crew is celebrating in the mess.` | fine as is | keep |
 | D29 | Crew panel's "what moves Hope" prose, built from pieces · PANELS:679, 684–685, 689, 693, 697, 701 | `Water is only %.0f%% drinkable.` / `Garden: %d of %d plots growing, %+.1f kg food a sol%s.` (`%s` = ` - grow-lights dark`) / `Comforts reach %d of %d crew.` / `Layout: %d pair%s of rooms clash.` / `Born on Mars: %d.` / `Discoveries: %d.` | fine as is | keep |
 | D30 | Crew panel, under Hope · PANELS:664 | `work pace %.0f%%` | fine as is | keep |
-| D31 | Crew panel progress bar (births) · PANELS:712 | `Flourishing - next arrival` | Fine: it calls a birth "an arrival". | keep |
+| D31 | Crew panel progress bar (births) · PANELS:712 | `Flourishing - next arrival` | Fine: it calls a birth "an arrival". | keep; label superseded 2026-10-17 by D111 |
 | D32 | Golden RARE MATERIALS card · DECK:1676 | `COMFORTS UNPACKED — small joys for the crew's long nights.` | fine as is | keep |
 
 ## 4. Crises
@@ -172,6 +172,16 @@ All rows are PLACEHOLDER pending this review. Each is prevention-framed and name
 | D108 | Objective panel prose, Open phase, round above 0 · PANELS | `Earth renews the quota with every bill raised. Stockpile it to earn the next supply ship.` | PLACEHOLDER. | keep pending review |
 | D109 | Objective panel header, Open phase, round above 0 · PANELS | `Q3 - round 2, bills up 56% - DUE SOL 61` (the percentage is cumulative on the authored bills) | PLACEHOLDER. | keep pending review |
 | D110 | Guide step "Bring the first crew" body (it touches food; replaces the line that said it may be the last ship) · GUIDE | `Your vault has %d bed%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: a garden is how they will eat, and each later ship is a whole quota away. Meet the next quota to earn it.` | PLACEHOLDER. Prevention-framed: the fix first, no hunger imagery. | keep pending review |
+
+## 10. Hope weights halved (D3a, added 2026-10-17)
+
+All rows are PLACEHOLDER pending this review, and ship now by the director's ruling on D3a. They are plain statements of where the Hope thresholds sit and what lifts a colony past them: nothing about the people's mood being judged.
+
+| ID | Where | Current | Concern | Proposed |
+|---|---|---|---|---|
+| D111 | Crew panel progress bar (births), replaces the text of D31 · PANELS | `Thriving - next arrival` | PLACEHOLDER. The bar shows once smoothed Hope is 75 or more, the lower edge of the THRIVING band (the growth gate). After D3a a well-run colony reads THRIVING, so the old `Flourishing` label named the wrong band. The bar also shows while the band is FLOURISHING (75+ covers both), where `Thriving` is still true but names one band; a band-neutral `Hope 75+ - next arrival` is the alternative. | keep pending review |
+| D112 | Crew panel, "What is moving Hope" prose (a new piece under D29), while a Lab seat is staffed, a discovery is waiting and smoothed Hope is under the research gate · PANELS | `Labs research once Hope holds %.0f.` (renders `85`, read from config) | PLACEHOLDER. A plain statement of the gate, so the player knows why the research bar is not moving. | keep pending review |
+| D113 | Crew panel, "What is moving Hope" prose (a new piece under D29), while the band is THRIVING · PANELS | `FLOURISHING at %.0f takes extra care: comforts, furnished rooms, windows.` (renders `90`, read from config) | PLACEHOLDER. Prevention-framed and names the remedy; "extra care" is the colony's care of its home, not a judgment of the crew. | keep pending review |
 
 ## Patterns to adopt game-wide
 

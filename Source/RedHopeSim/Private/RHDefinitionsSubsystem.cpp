@@ -568,6 +568,15 @@ double URHDefinitionsSubsystem::GetConfigScalar(FName Name, double Default) cons
 	return Default;
 }
 
+double URHDefinitionsSubsystem::GetConfigTableScalar(FName Name, double Missing) const
+{
+	if (const FRHConfigRow* Row = ConfigTable ? ConfigTable->FindRow<FRHConfigRow>(Name, TEXT("GetConfigTableScalar"), false) : nullptr)
+	{
+		return FCString::Atod(*Row->Value);
+	}
+	return Missing;
+}
+
 float URHDefinitionsSubsystem::EvalSolarCurve(float SolFraction) const
 {
 	if (SolarCurveTable)
