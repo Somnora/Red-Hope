@@ -411,3 +411,15 @@ The order after that, agreed in the same exchange:
 - 3: economy (markets, exchange rates, regional specialization, a Martian currency);
 - 4: territories (the regional map, visible rival cities and convoys);
 - 5: rising (surface towers gated by terraforming, a growth time-lapse, landmarks).
+
+### Step 1, the living city: Q1a Q2a Q3a Q4a (2026-10-18)
+
+The director answered `docs/qa/2026-10-18/living-city-plan.md` with all four recommendations:
+- **Q1a:** everyone stays a named individual in the sim. The screen shows the nearest people in full and the rest as crowds.
+- **Q2a:** hybrid growth. The player places production, power and life support; zoned home and service districts build themselves when there is demand and material.
+- **Q3a:** the player draws roads. Robots and vehicles are faster on them, and heavy cargo rovers need them.
+- **Q4a:** commuting is simulated as flows between districts. A long commute costs Hope and work time, and the street traffic is drawn from those flows. Freight rovers are real vehicles.
+
+Build-order note: C1 (foundations) is pure performance work and must leave every battery run line-identical. Two items first listed under C1 change behaviour, so they move to C2, where baselines move on purpose:
+- proportional sharing of food, water and air in a shortage;
+- one alert per event instead of one per colonist.
