@@ -50,10 +50,14 @@ struct REDHOPESIM_API FRHColonist
 	// Serialized inline in the colonist record (save v29).
 	UPROPERTY() int32 HomeHab = 0;
 	UPROPERTY() bool bSupported = true;     // life support met this step
-	// Sustained unsupported time; at ColonistEvacSols the Program pulls the
-	// colonist back to orbit (abstract, prevention-framed consequence - the
-	// mental-health directive's discipline; wording is Gate-D review fodder).
+	// Sustained time on short rations (C2a: a readout for the panels; recall is
+	// driven by the home's departure accumulator, not by this clock). The
+	// consequence stays abstract and prevention-framed - the mental-health
+	// directive's discipline; wording is Gate-D review fodder.
 	UPROPERTY() double UnsupportedSimSeconds = 0.0;
+	// C2a: born on Mars (StepGrowth). Mars-born colonists leave last in a shortage.
+	// Serialized in the colonist record (save v34).
+	UPROPERTY() bool bMarsBorn = false;
 	// Alive pass: sols worked per job function. Skill grows with practice -
 	// output multiplier ramps 1x -> 2x at SkillMasterySols (linear = identical
 	// across both time bands). Serialized sorted (save v24).
@@ -318,7 +322,12 @@ public:
 	// instead of hard-coding the tuning.
 	double GetHopeHousingMax() const { return HopeHousingMax; }
 	double GetHopePerMoralePoint() const { return HopePerMoralePoint; }
-	double GetHopePerJob() const { return HopePerJob; }
+	double GetHopeJobsMax() const { return HopeJobsMax; }
+	double GetHopeUnsupportedMax() const { return HopeUnsupportedMax; }
+	double GetHopeUnsupportedSteepness() const { return HopeUnsupportedSteepness; }
+	double GetHopeAdjacencyMax() const { return HopeAdjacencyMax; }
+	double GetRoomServesResidents() const { return RoomServesResidents; }
+	double GetComfortRefPop() const { return ComfortRefPop; }
 	int32 GetFloorBeds(int32 Level) const { return CountFloorBeds(Level, nullptr); }
 	// --- Wall fittings (BM-6, 2026-10-16) ---
 	// Windows, doors and airlocks on the derived walls of BUILT surface
@@ -444,9 +453,53 @@ public:
 	int32 GetFreeHousing() const { return GetHousingCapacity() - Colonists.Num(); }
 	double GetColonistEvacSols() const { return ColonistEvacSols; }
 	double GetColonistFoodKgPerSol() const { return ColonistFoodKgPerSol; }
+	double GetColonistO2KgPerSol() const { return ColonistO2KgPerSol; }
+	// C2a: shared rationing. A HOME is a rated floor or a surface-habitat network;
+	// food and water are colony-wide pools, air is per home. When a pool runs short
+	// every resident of a home gets the same fraction of the ration. One entry per
+	// home from the last population step, ascending Key; derived each step, never
+	// saved (the departure accumulators and the deficit are).
+	struct FRHHomeRation
+	{
+		int32 Key = 0;        // the floor level (<= 0), or the network's root hab Id (> 0)
+		int32 HomeLevel = 0;
+		int32 HomeHab = 0;    // a resident's hab Id; 0 = a floor
+		int32 Residents = 0;
+		double Fraction = 1.0; // the ration each resident got: min over food, water, air
+		FName Limiting;        // Oxygen, Water or Food (the scarcest); None at a full ration
+	};
+	const TArray<FRHHomeRation>& GetHomeRations() const { return HomeRations; }
+	// Sum over homes of residents x (1 - ration): the deficit Hope reads.
+	double GetDeficitEquivalent() const { return DeficitEquivalent; }
+	// A home's departure accumulator (one resident leaves each time it reaches 1)
+	// and the residents it was counted on: the home's size when the shortage began
+	// (raised if the home grew since). 0 for a home on a full ration.
+	double GetHomeDepartureAcc(int32 HomeKey) const { const FRHHomeClock* C = HomeClocks.Find(HomeKey); return C ? C->Acc : 0.0; }
+	int32 GetHomeOnsetResidents(int32 HomeKey) const { const FRHHomeClock* C = HomeClocks.Find(HomeKey); return C ? C->OnsetResidents : 0; }
+	// "Floor -2" / "Surface habitat #6" (the network's root) - the name the rationing alerts use.
+	FString GetHomeLabel(int32 HomeLevel, int32 HomeHab) const;
+	// The ration this colonist's home got in the last step (1 = full). A home with
+	// no entry yet (an arrival since the last step) reads as full.
+	double GetColonistRation(const FRHColonist& C) const;
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// C2a harness: a floor's O2 fill, and how many colonists a carved cell houses
+	// without furniture (the legacy bed rule), so a suite can hold thousands
+	// without furnishing thousands of beds.
+	void Debug_SetFloorO2Kg(int32 Level, double Kg) { FloorO2Kg.FindOrAdd(Level) = FMath::Max(0.0, Kg); }
+	void Debug_SetColonistsPerCell(double V) { ColonistsPerCell = FMath::Max(0.0, V); }
+	// C2a harness: the smoothed-Hope gates for research and for births. Per head, a
+	// city of thousands does not reach 75 or 85 (that is the design), and the
+	// -scale suite wants the research and growth steps in what it times.
+	void Debug_SetHopeGates(double DiscoveryThreshold, double GrowthThreshold) { HopeDiscoveryThreshold = DiscoveryThreshold; HopeGrowthThreshold = GrowthThreshold; }
+	// C2a harness: one population step on its own (rationing, departures, alerts),
+	// and the Mars-born flag a birth sets, so a suite can set up who leaves last.
+	void Debug_StepPopulation(float SubDt) { StepPopulation(SubDt); }
+	void Debug_SetMarsBorn(int32 ColonistId, bool bMarsBorn)
+	{
+		if (FRHColonist* C = const_cast<FRHColonist*>(FindColonist(ColonistId))) { C->bMarsBorn = bMarsBorn; }
+	}
 	// BM-1: beds in a hab's Living bays (x ColonistsPerCell) and who sleeps there.
 	int32 GetHabBeds(int32 HabId) const;
 	int32 GetHabResidents(int32 HabId) const;
@@ -508,6 +561,13 @@ public:
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
 		int32 OffendedPairs = 0, FilledSeats = 0;
+		// C2a (per head): the shares behind the terms. AdjacencyPenalty is
+		// HopeAdjacencyMax x OffendedRefusers / RefuserCells (OffendedPairs stays the
+		// raw pair count, for the layout hint); UnsupportedPenalty is
+		// HopeUnsupportedMax x min(1, steepness x DeficitEquivalent / Population);
+		// Jobs is HopeJobsMax x FilledSeats / Population.
+		int32 OffendedRefusers = 0, RefuserCells = 0, Population = 0;
+		double DeficitEquivalent = 0;
 		double Total = 0;
 	};
 	FRHHopeBreakdown GetColonyHope() const;
@@ -1405,7 +1465,17 @@ private:
 	double ColonistFoodKgPerSol = 0.62; // pooled Food draw
 	int32 CrewPodColonists = 4;         // colonists per CrewPod cargo item
 	double CrewPodFoodKg = 200.0;       // provisions landed with each pod
-	double ColonistEvacSols = 2.0;      // sustained unsupported time before evacuation
+	double ColonistEvacSols = 2.0;      // C2a: sols a home takes to empty at ration 0 (a ration of r takes EvacSols / (1 - r))
+	// C2a: per short home, OnsetResidents x (1 - ration) x dt / (EffectiveEvacSols x
+	// sol) accumulates in Acc; each whole 1 recalls one resident. OnsetResidents is
+	// the home's size when the shortage began, raised if the home grew since, so a
+	// total failure empties the home in EvacSols: the recall RATE is set by the
+	// shortage, it does not slow as the home shrinks. SAVED (v34), sorted by key.
+	// A home back on a full ration, or with no one left, drops its entry.
+	struct FRHHomeClock { double Acc = 0.0; int32 OnsetResidents = 0; };
+	TMap<int32, FRHHomeClock> HomeClocks;
+	double DeficitEquivalent = 0.0;     // SAVED (v34): the last step's sum of residents x (1 - ration)
+	TArray<FRHHomeRation> HomeRations;  // derived each step
 	// Rooms & Hope (M2 Gate B). FloorRoomCells: per floor, the room function of
 	// each carved cell by spiral index (NAME_None = undesignated). Serialized
 	// (save v11). ColonistJobs is derived (rebuilt each population step + on
@@ -1432,10 +1502,16 @@ private:
 	// The three weights below must equal RH_Config.csv (D3a): GetConfigScalar
 	// falls back here when the DT row is missing.
 	double HopeHousingMax = 7.5;        // full when LivingQuarters cells >= population
-	double HopePerMoralePoint = 2.5;    // per room type per rated floor (Living excluded)
-	double HopePerJob = 1.5;
-	double HopeAdjacencyPenalty = 8.0;  // per offended (emitter, refuser) pair
-	double HopeUnsupportedPenalty = 10.0;
+	double HopePerMoralePoint = 2.5;    // per room type, colony-wide, x its coverage (Living excluded)
+	// C2a (per head): every term is a share or a rate. The same fallbacks as
+	// RH_Config.csv; HopePerJob / HopeAdjacencyPenalty / HopeUnsupportedPenalty
+	// are retired (rows kept in the CSV, unused).
+	double HopeJobsMax = 7.5;             // x FilledSeats / Population
+	double HopeUnsupportedMax = 30.0;     // x min(1, steepness x deficit share)
+	double HopeUnsupportedSteepness = 3.0;
+	double HopeAdjacencyMax = 16.0;       // x offended refuser cells / refuser cells (a fully offended small layout = the old two pairs, 2 x 8)
+	double RoomServesResidents = 25.0;    // one room of a type covers this many residents
+	double ComfortRefPop = 8.0;           // Furnishings and Views sums are per resident, at this crew size
 	double HopeVaultMilestone = 5.0;
 	// Hope-drives-the-colony state (save v13). HopeSmoothed low-passes the
 	// instantaneous index; HopeBand is the hysteresis band it currently sits in

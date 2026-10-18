@@ -343,9 +343,9 @@ namespace
 				int32 Unsupported = 0;
 				for (const FRHColonist& Col : Sim->GetColonists()) { Unsupported += Col.bSupported ? 0 : 1; }
 				const double Draw = Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol();
-				UE_LOG(LogRedHope, Display, TEXT("[Playtest] CREW %d | pop %d unsupported %d | hope %.0f %s (now %.0f: housing %.0f rooms %.0f jobs %.0f comforts %.0f milestones %.0f, -adjacency %.0f -unsupported %.0f -water %.0f -food %.0f) | food %.0f kg = %.0f sols, garden %d/%d producing | water %.0f kg %.0f%% drinkable | tempo %.0f%%"),
-					C->GetSol(), Sim->GetPopulation(), Unsupported, Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), H.Total,
-					H.Housing, H.Rooms, H.Jobs, H.Comforts, H.Milestones, H.AdjacencyPenalty, H.UnsupportedPenalty, H.WaterPenalty, H.FoodPenalty,
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] CREW %d | pop %d unsupported %d (short-ration deficit %.1f) | hope %.0f %s (now %.0f: housing %.0f rooms %.0f jobs %.0f (%d seats) comforts %.0f furnishings %.0f views %.0f milestones %.0f, -adjacency %.0f (%d/%d refuser cells) -unsupported %.0f -water %.0f -food %.0f) | food %.0f kg = %.0f sols, garden %d/%d producing | water %.0f kg %.0f%% drinkable | tempo %.0f%%"),
+					C->GetSol(), Sim->GetPopulation(), Unsupported, H.DeficitEquivalent, Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), H.Total,
+					H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Comforts, H.Furnishings, H.Views, H.Milestones, H.AdjacencyPenalty, H.OffendedRefusers, H.RefuserCells, H.UnsupportedPenalty, H.WaterPenalty, H.FoodPenalty,
 					Sim->GetStock(FName("Food")), Draw > 0.0 ? Sim->GetStock(FName("Food")) / Draw : 0.0,
 					Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(),
 					Sim->GetStock(FName("Water")), Sim->GetWaterPotability() * 100.0, Sim->GetHumanWorkTempo() * 100.0);

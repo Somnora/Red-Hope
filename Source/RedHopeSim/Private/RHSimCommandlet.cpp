@@ -182,14 +182,28 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->GetPopulation(),
 			Sim->GetColonists().Num() > 0 ? *Sim->GetColonists()[0].Name : TEXT("-"));
 
-		// 6) Starve the pool: unsupported edge, then evacuation after 2 sols.
+		// 6) Starve the pool: everyone goes on short rations at once, and then the
+		// colony shrinks GRADUALLY (C2a, shared rationing). With the ration at 0 a
+		// home accumulates the residents it had when the shortage began x 1 /
+		// EvacSols (2) per sol, and each whole 1 recalls one resident, newest first:
+		// four residents leave at 4 / 2 = 2 a sol, one every half sol, at about
+		// 0.55, 1.05, 1.55 and 2.0 sols (the clock ticks in 60 s steps and 0.1 added
+		// ten times falls a hair short of 1, so the first lands one step after the
+		// half sol; the clock carries the remainder, so the rest keep the half-sol
+		// beat). The home is empty in EvacSols. (It was all four together at 2.0.)
 		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
-		RunSols(0.5);
-		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 0.5 sol: pop=%d unsupported=%d (expect 4, 4)"),
+		RunSols(0.4);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 0.4 sol: pop=%d unsupported=%d (expect 4, 4 - the first recall falls at 0.5 sol)"),
 			Sim->GetPopulation(),
 			[&]{ int32 N=0; for (const FRHColonist& C : Sim->GetColonists()) { N += C.bSupported ? 0 : 1; } return N; }());
-		RunSols(2.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 2.5 sols: pop=%d (expect 0 - evacuated)"), Sim->GetPopulation());
+		RunSols(0.4);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 0.8 sol: pop=%d (expect 3 - the newest recalled just after 0.5 sol)"), Sim->GetPopulation());
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 1.3 sols: pop=%d (expect 2 - one more at 1.0 sol: a steady one every half sol)"), Sim->GetPopulation());
+		RunSols(0.5);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 1.8 sols: pop=%d (expect 1)"), Sim->GetPopulation());
+		RunSols(0.7);
+		UE_LOG(LogRedHopeSim, Display, TEXT("CREW starved 2.5 sols: pop=%d (expect 0 - the home emptied in its 2 sols)"), Sim->GetPopulation());
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW TEST END ==="));
 		GEngine->DestroyWorldContext(World);
@@ -200,9 +214,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	// M2 Gate B self-test: room designations on carved cells, the adjacency
 	// calculus (emit/refuse, hallway+filtration cure), jobs, and the Hope
 	// index arithmetic - exact doubles. Save v11 round-trip. `-rooms`.
-	// D3a (2026-10-17): fails loudly, and it is the PIN for the three Hope
-	// weights (HopeHousingMax 7.5, HopePerMoralePoint 2.5, HopePerJob 1.5) - the
-	// literals below are the ruling's numbers, read from the DT row itself.
+	// D3a (2026-10-17): fails loudly, and it is the PIN for the Hope weights. C2a
+	// (2026-10-18) re-derived it for per-head Hope: the pins are HopeHousingMax
+	// 7.5, HopePerMoralePoint 2.5 and the C2a rows (HopeJobsMax 7.5,
+	// HopeUnsupportedMax 30, HopeUnsupportedSteepness 3, HopeAdjacencyMax 16,
+	// RoomServesResidents 25, ComfortRefPop 8) - the literals below are the
+	// rulings' numbers, read from the DT row itself.
 	if (FParse::Param(*Params, TEXT("rooms")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS & HOPE TEST (M2 Gate B) ==="));
@@ -225,11 +242,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 
 		// R0. Pure data: DT_Rooms is synced (Gate B) - these six functions ship
-		// SliceActive=true - and the three Hope weights ride the synced DT_Config.
+		// SliceActive=true - and the Hope weights ride the synced DT_Config.
 		// Both are asserted against the REAL assets, so a DT that regresses vs the
 		// CSV fails loudly instead of a silent in-memory patch masking the drift.
 		// The weights are read from the table row alone (no -RHConfig override, no
-		// C++ fallback): -1 fails a missing row, and a pre-D3a 15 / 5 / 3 fails.
+		// C++ fallback): -1 fails a missing row, a pre-D3a 15 / 5 fails, and a DT
+		// that predates C2a has no HopeJobsMax at all.
 		bool bData = true;
 		for (const TCHAR* RowName : { TEXT("LivingQuarters"), TEXT("Lab"), TEXT("Workstation"), TEXT("Dining"), TEXT("Cooking"), TEXT("Hallway") })
 		{
@@ -240,15 +258,26 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		}
 		const double DtHousing = DefsSub->GetConfigTableScalar(FName("HopeHousingMax"), -1.0);
 		const double DtMorale = DefsSub->GetConfigTableScalar(FName("HopePerMoralePoint"), -1.0);
-		const double DtJob = DefsSub->GetConfigTableScalar(FName("HopePerJob"), -1.0);
+		const double DtJob = DefsSub->GetConfigTableScalar(FName("HopeJobsMax"), -1.0);
+		const double DtUnsupMax = DefsSub->GetConfigTableScalar(FName("HopeUnsupportedMax"), -1.0);
+		const double DtSteep = DefsSub->GetConfigTableScalar(FName("HopeUnsupportedSteepness"), -1.0);
+		const double DtAdjMax = DefsSub->GetConfigTableScalar(FName("HopeAdjacencyMax"), -1.0);
+		const double DtServes = DefsSub->GetConfigTableScalar(FName("RoomServesResidents"), -1.0);
+		const double DtRefPop = DefsSub->GetConfigTableScalar(FName("ComfortRefPop"), -1.0);
 		// A stale DT_Config fails here but does NOT abort: the rest of the suite
 		// then shows every number the old weights moved, not only the first.
-		Expect(Near(DtHousing, 7.5, 1e-9) && Near(DtMorale, 2.5, 1e-9) && Near(DtJob, 1.5, 1e-9),
-			FString::Printf(TEXT("R0 DT_Config HopeHousingMax 7.5 / HopePerMoralePoint 2.5 / HopePerJob 1.5, the table row says %.3f / %.3f / %.3f (D3a, DT/CSV)"),
+		Expect(Near(DtHousing, 7.5, 1e-9) && Near(DtMorale, 2.5, 1e-9) && Near(DtJob, 7.5, 1e-9),
+			FString::Printf(TEXT("R0 DT_Config HopeHousingMax 7.5 / HopePerMoralePoint 2.5 / HopeJobsMax 7.5, the table row says %.3f / %.3f / %.3f (D3a + C2a, DT/CSV)"),
 				DtHousing, DtMorale, DtJob));
-		Expect(Near(Sim->GetHopeHousingMax(), 7.5, 1e-9) && Near(Sim->GetHopePerMoralePoint(), 2.5, 1e-9) && Near(Sim->GetHopePerJob(), 1.5, 1e-9),
-			FString::Printf(TEXT("R0 the sim reads %.3f / %.3f / %.3f (an override or a fallback would show here)"),
-				Sim->GetHopeHousingMax(), Sim->GetHopePerMoralePoint(), Sim->GetHopePerJob()));
+		Expect(Near(DtUnsupMax, 30.0, 1e-9) && Near(DtSteep, 3.0, 1e-9) && Near(DtAdjMax, 16.0, 1e-9) && Near(DtServes, 25.0, 1e-9) && Near(DtRefPop, 8.0, 1e-9),
+			FString::Printf(TEXT("R0 DT_Config HopeUnsupportedMax 30 / steepness 3 / HopeAdjacencyMax 16 / RoomServesResidents 25 / ComfortRefPop 8, the table row says %.3f / %.3f / %.3f / %.3f / %.3f (C2a, DT/CSV)"),
+				DtUnsupMax, DtSteep, DtAdjMax, DtServes, DtRefPop));
+		Expect(Near(Sim->GetHopeHousingMax(), 7.5, 1e-9) && Near(Sim->GetHopePerMoralePoint(), 2.5, 1e-9) && Near(Sim->GetHopeJobsMax(), 7.5, 1e-9)
+			&& Near(Sim->GetHopeUnsupportedMax(), 30.0, 1e-9) && Near(Sim->GetHopeUnsupportedSteepness(), 3.0, 1e-9) && Near(Sim->GetHopeAdjacencyMax(), 16.0, 1e-9)
+			&& Near(Sim->GetRoomServesResidents(), 25.0, 1e-9) && Near(Sim->GetComfortRefPop(), 8.0, 1e-9),
+			FString::Printf(TEXT("R0 the sim reads %.3f / %.3f / %.3f / %.3f / %.3f / %.3f / %.3f / %.3f (an override or a fallback would show here)"),
+				Sim->GetHopeHousingMax(), Sim->GetHopePerMoralePoint(), Sim->GetHopeJobsMax(), Sim->GetHopeUnsupportedMax(), Sim->GetHopeUnsupportedSteepness(),
+				Sim->GetHopeAdjacencyMax(), Sim->GetRoomServesResidents(), Sim->GetComfortRefPop()));
 		if (!bData)
 		{
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END: %d failure(s) ==="), Fails);
@@ -286,36 +315,45 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// R3. A bad kitchen: Cooking@0 (1,0) beside LQ@1 (1,1), Dining@2 (0,1)
 		// diagonal across the shaft corner. Both offended - dist 1 has no
 		// between, dist 2's common neighbor is the LQ, not a hallway.
-		// 55 + housing 7.5 x 1/4 + rooms (0.3 + 0.6) x 2.5 - 2 pairs x 8.
+		// C2a: 55 + housing 7.5 x 1/4 + rooms (0.3 + 0.6) x 2.5 (one room of each
+		// serves 25 residents, so coverage is 1) - adjacency 16 x 2 offended refuser
+		// cells (LQ, Dining) / 2 refuser cells (every refuser cell offended = the old
+		// two pairs x 8) = 55 + 1.875 + 2.25 - 16 = 43.125, as before C2a.
 		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
 		Sim->DesignateRoom(-1, 2, FName("Dining"), R);
 		Sim->DesignateRoom(-1, 0, FName("Cooking"), R);
 		H = Sim->GetColonyHope();
-		Expect(Near(H.Total, 43.125, 1e-6) && H.OffendedPairs == 2 && Near(H.Housing, 1.875, 1e-9) && Near(H.Rooms, 2.25, 1e-6),
-			FString::Printf(TEXT("R3 bad kitchen: hope=%.3f pairs=%d housing=%.3f rooms=%.2f (expect 43.125, 2, 1.875, 2.25)"),
-				H.Total, H.OffendedPairs, H.Housing, H.Rooms));
+		Expect(Near(H.Total, 43.125, 1e-6) && H.OffendedPairs == 2 && H.OffendedRefusers == 2 && H.RefuserCells == 2 && Near(H.AdjacencyPenalty, 16.0, 1e-9)
+			&& Near(H.Housing, 1.875, 1e-9) && Near(H.Rooms, 2.25, 1e-6),
+			FString::Printf(TEXT("R3 bad kitchen: hope=%.3f pairs=%d offended %d of %d refuser cells (-%.1f) housing=%.3f rooms=%.2f (expect 43.125, 2, 2 of 2, -16.0, 1.875, 2.25)"),
+				H.Total, H.OffendedPairs, H.OffendedRefusers, H.RefuserCells, H.AdjacencyPenalty, H.Housing, H.Rooms));
 
 		// R4. The cure: move Cooking to (-1,0) with the Hallway at (-1,1)
 		// between it and Dining, circulator running - partition + filtration
 		// cancels the pair (habitat vision §4). Lab@5 seats one colonist.
-		// 55 + housing 1.875 + rooms (0.3 + 0.6 + 0.3) x 2.5 + jobs 1 x 1.5.
+		// C2a: 55 + housing 1.875 + rooms (0.3 + 0.6 + 0.3) x 2.5 + jobs 7.5 x 1
+		// seat / 4 people (1.875) = 61.75.
 		Sim->DesignateRoom(-1, 0, NAME_None, R);
 		Sim->DesignateRoom(-1, 4, FName("Cooking"), R);
 		Sim->DesignateRoom(-1, 3, FName("Hallway"), R);
 		Sim->DesignateRoom(-1, 5, FName("Lab"), R);
 		RunSols(0.1); // jobs refresh in the population step
 		H = Sim->GetColonyHope();
-		Expect(Near(H.Total, 61.375, 1e-6) && H.OffendedPairs == 0 && Near(H.Jobs, 1.5, 1e-9) && H.FilledSeats == 1,
-			FString::Printf(TEXT("R4 cured layout: hope=%.3f pairs=%d jobs=%.2f seats=%d (expect 61.375, 0, 1.50, 1)"),
-				H.Total, H.OffendedPairs, H.Jobs, H.FilledSeats));
+		Expect(Near(H.Total, 61.75, 1e-6) && H.OffendedPairs == 0 && H.OffendedRefusers == 0 && H.RefuserCells == 2 && Near(H.Jobs, 1.875, 1e-9) && H.FilledSeats == 1,
+			FString::Printf(TEXT("R4 cured layout: hope=%.3f pairs=%d offended %d of %d refuser cells jobs=%.3f seats=%d (expect 61.75, 0, 0 of 2, 1.875, 1)"),
+				H.Total, H.OffendedPairs, H.OffendedRefusers, H.RefuserCells, H.Jobs, H.FilledSeats));
 
 		// R5. Greed test: swap the hallway for more quarters - the partition
 		// dies and both offenses return. More beds, less Hope: a real tradeoff.
+		// C2a: refuser cells are now LQ@1, Dining@2 and the new LQ@3; Cooking@4
+		// offends LQ@3 (dist 1) and Dining@2 (dist 2, no partition) but not LQ@1
+		// (dist 3): 2 of 3 cells = 16 x 2/3 = 10.667. 55 + housing 7.5 x 2/4 (3.75) +
+		// rooms 3.0 + jobs 1.875 - 10.667 = 52.958333.
 		Sim->DesignateRoom(-1, 3, FName("LivingQuarters"), R);
 		H = Sim->GetColonyHope();
-		Expect(Near(H.Total, 47.25, 1e-6) && H.OffendedPairs == 2 && Near(H.Housing, 3.75, 1e-9),
-			FString::Printf(TEXT("R5 greed swap: hope=%.3f pairs=%d housing=%.3f (expect 47.25, 2, 3.75)"),
-				H.Total, H.OffendedPairs, H.Housing));
+		Expect(Near(H.Total, 52.958333, 1e-6) && H.OffendedPairs == 2 && H.OffendedRefusers == 2 && H.RefuserCells == 3 && Near(H.AdjacencyPenalty, 32.0 / 3.0, 1e-9) && Near(H.Housing, 3.75, 1e-9),
+			FString::Printf(TEXT("R5 greed swap: hope=%.3f pairs=%d offended %d of %d refuser cells (-%.3f) housing=%.3f (expect 52.958, 2, 2 of 3, -10.667, 3.75)"),
+				H.Total, H.OffendedPairs, H.OffendedRefusers, H.RefuserCells, H.AdjacencyPenalty, H.Housing));
 
 		// R6. The Designate verb rides the uplink like any order.
 		FRHCommand Cmd;
@@ -328,16 +366,17 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(Sim->GetRoomAt(-1, 0) == FName("Workstation"),
 			FString::Printf(TEXT("R6 uplink designate: cell0=%s (expect Workstation)"), *Sim->GetRoomAt(-1, 0).ToString()));
 
-		// R7. Save v11 round-trip: designations + jobs + the exact Hope total
-		// (47.25 + Workstation 0.2 x 2.5 + a second seat 1.5 = 49.25).
+		// R7. Save round-trip: designations + jobs + the exact Hope total
+		// (C2a: 52.958333 + Workstation 0.2 x 2.5 + a second seat, jobs 7.5 x 2/4 = 3.75
+		// instead of 1.875, = 52.958333 + 0.5 + 1.875 = 55.333333).
 		const double HopeBefore = Sim->GetColonyHope().Total;
 		FString Err;
 		const bool bSaved = Sim->SaveColony(TEXT("roomstest"), Err);
 		const bool bLoaded = Sim->LoadColony(TEXT("roomstest"), Err);
 		H = Sim->GetColonyHope();
 		Expect(bSaved && bLoaded && Sim->GetRoomAt(-1, 4) == FName("Cooking") && Sim->GetRoomAt(-1, 3) == FName("LivingQuarters")
-			&& Near(HopeBefore, 49.25, 1e-6) && Near(H.Total, HopeBefore, 1e-9) && H.FilledSeats == 2,
-			FString::Printf(TEXT("R7 save/load v11: cell4=%s cell3=%s hope=%.3f (expect Cooking, LivingQuarters, 49.25 = the pre-save %.3f) seats=%d (expect 2)"),
+			&& Near(HopeBefore, 55.333333, 1e-6) && Near(H.Total, HopeBefore, 1e-9) && H.FilledSeats == 2,
+			FString::Printf(TEXT("R7 save/load v34: cell4=%s cell3=%s hope=%.3f (expect Cooking, LivingQuarters, 55.333 = the pre-save %.3f) seats=%d (expect 2)"),
 				*Sim->GetRoomAt(-1, 4).ToString(), *Sim->GetRoomAt(-1, 3).ToString(), H.Total, HopeBefore, H.FilledSeats));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROOMS TEST END: %d failure(s) ==="), Fails);
@@ -685,16 +724,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->DesignateRoom(-1, 4, FName("Dining"), R);
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
 		RunSols(14.0); // let the smoothed mood settle above the growth threshold
-		               // (instant 77.5; the exp smoother needs > 2 Tau to cross 75)
+		               // (instant 82.0 under C2a's per-head jobs; 77.5 before - the exp smoother crosses 75 sooner)
 
 		// G1. Eligible + growing: smoothed Hope >= 75, THRIVING, free beds, food
-		// buffer. Instant = 50 + vault 5 + housing 7.5 + rooms (Lab fn 1.0 x 2.5 +
-		// Dining 0.6 x 2.5 = 4.0) + jobs 2 x 1.5 + comforts 8 = 77.5.
+		// buffer. C2a instant = 50 + vault 5 + housing 7.5 + rooms (Lab fn 1.0 x 2.5 +
+		// Dining 0.6 x 2.5 = 4.0, one room of each serves 25 so coverage is 1) +
+		// jobs 7.5 x 2 seats / 2 people (the employment rate is 1) + comforts 8 =
+		// 82.0 (it was 77.5 with 2 x 1.5 for the seats).
 		{
 			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
-			Expect(Near(H.Housing, 7.5, 1e-9) && Near(H.Rooms, 4.0, 1e-6) && Near(H.Jobs, 3.0, 1e-9) && Near(H.Comforts, 8.0, 1e-9)
-				&& H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && Near(H.Total, 77.5, 1e-6),
-				FString::Printf(TEXT("G1 instant Hope %.6f = 50 + vault 5 + housing %.2f + rooms %.2f + jobs %.2f + comforts %.2f, water/food penalty %.6f/%.6f (expect 77.5 = 7.5 + 4.0 + 3.0 + 8.0, 0/0)"),
+			Expect(Near(H.Housing, 7.5, 1e-9) && Near(H.Rooms, 4.0, 1e-6) && Near(H.Jobs, 7.5, 1e-9) && Near(H.Comforts, 8.0, 1e-9)
+				&& H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && Near(H.Total, 82.0, 1e-6),
+				FString::Printf(TEXT("G1 instant Hope %.6f = 50 + vault 5 + housing %.2f + rooms %.2f + jobs %.2f + comforts %.2f, water/food penalty %.6f/%.6f (expect 82.0 = 7.5 + 4.0 + 7.5 + 8.0, 0/0)"),
 					H.Total, H.Housing, H.Rooms, H.Jobs, H.Comforts, H.WaterPenalty, H.FoodPenalty));
 			Expect(Sim->GetHopeSmoothed() >= 75.0 && Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Thriving && Sim->IsGrowthEligible(),
 				FString::Printf(TEXT("G1 eligible: smoothed=%.1f band=%s eligible=%d pop=%d beds-free=%d (expect >=75, THRIVING - a sensible layout lives there, FLOURISHING takes extra care - 1)"),
@@ -712,6 +753,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(Near(MilestonesBefore, 5.0, 1e-9) && Near(Sim->GetColonyHope().Milestones, 11.0, 1e-9),
 			FString::Printf(TEXT("G2 milestone: Hope milestones %.1f -> %.1f (expect 5.0 -> 11.0 = vault + first-born)"),
 				MilestonesBefore, Sim->GetColonyHope().Milestones));
+		// C2a: the child is flagged Mars-born (it is the last to be recalled in a
+		// shortage); the founders are not.
+		Expect(Sim->GetColonists().Num() == 3 && Sim->GetColonists().Last().bMarsBorn && !Sim->GetColonists()[0].bMarsBorn && !Sim->GetColonists()[1].bMarsBorn,
+			FString::Printf(TEXT("G2 the birth is flagged Mars-born, the two founders are not (%d / %d / %d; expect 0 / 0 / 1)"),
+				Sim->GetColonists().Num() > 0 ? (int32)Sim->GetColonists()[0].bMarsBorn : -1, Sim->GetColonists().Num() > 1 ? (int32)Sim->GetColonists()[1].bMarsBorn : -1,
+				Sim->GetColonists().Num() > 0 ? (int32)Sim->GetColonists().Last().bMarsBorn : -1));
 
 		// G3. Streak RESETS when the colony stops thriving: crash Hope by
 		// gutting housing quality and the rooms (clear every designation) -> not
@@ -731,8 +778,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		FString Err;
 		const bool bSaved = Sim->SaveColony(TEXT("growthtest"), Err);
 		const bool bLoaded = Sim->LoadColony(TEXT("growthtest"), Err);
-		Expect(bSaved && bLoaded && BirthsBefore == Sim->GetBirthsOnMars() && Sim->GetBirthsOnMars() == 1 && Sim->HasFirstBorn(),
-			FString::Printf(TEXT("G4 save/load v15: births %d->%d firstBorn=%d (expect identical, 1)"),
+		Expect(bSaved && bLoaded && BirthsBefore == Sim->GetBirthsOnMars() && Sim->GetBirthsOnMars() == 1 && Sim->HasFirstBorn()
+			&& Sim->GetColonists().Num() == 3 && Sim->GetColonists().Last().bMarsBorn && !Sim->GetColonists()[0].bMarsBorn,
+			FString::Printf(TEXT("G4 save/load v34: births %d->%d firstBorn=%d, the child still Mars-born (expect identical, 1, 1)"),
 				BirthsBefore, Sim->GetBirthsOnMars(), (int32)Sim->HasFirstBorn()));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== GENERATIONAL CARROT TEST END: %d failure(s) ==="), Fails);
@@ -845,9 +893,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// yield 1.35 + 1.0 = 2.35 (not the old 2.0), so accrual is ~17% faster
 		// before mastery. Instant Hope (no emitters, so no adjacency noise):
 		// 50 + vault 5 + housing 7.5 + rooms (2.5 + 1.5 + 2.5 + 1.25 = 7.75) +
-		// jobs 2 x 1.5 + comforts 8 + furnishings 6 (a dining table and five
-		// plants, 140 Struct from the Lander's 400) = 87.25. The smoother crosses
-		// 85 about 8 sols after the crew arrives (it was about 7.2).
+		// jobs 7.5 x 2 seats / 2 people + comforts 8 + furnishings 6 (a dining
+		// table and five plants, 140 Struct from the Lander's 400; per head, the
+		// sum x 8 / 2 people is far over the cap) = 91.75. C2a: it was 87.25 with
+		// 2 x 1.5 for the seats - a colony with a seat for everyone now earns the
+		// whole jobs line - so the smoother crosses 85 about 5 sols after the crew
+		// arrives (it was about 8) and the pins below (DS4, DS5) moved up with it.
 		FString R;
 		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
 		Sim->ExcavateFloor(-1, 7, R);
@@ -892,10 +943,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Sim->GetHopeSmoothed() < 85.0 && !Sim->IsResearchAccruing() && Near(Sim->GetDiscoveryProgress(), 0.0, 1e-9),
 				FString::Printf(TEXT("DS2 gate: smoothed=%.1f accruing=%d progress=%.2f (expect <85, 0, 0.00)"),
 					Sim->GetHopeSmoothed(), (int32)Sim->IsResearchAccruing(), Sim->GetDiscoveryProgress()));
-			Expect(Near(H.Total, 87.25, 1e-6) && Near(H.Furnishings, 6.0, 1e-9) && Near(H.Comforts, 8.0, 1e-9)
+			Expect(Near(H.Total, 91.75, 1e-6) && Near(H.Furnishings, 6.0, 1e-9) && Near(H.Comforts, 8.0, 1e-9) && Near(H.Jobs, 7.5, 1e-9)
 				&& H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.AdjacencyPenalty == 0.0,
-				FString::Printf(TEXT("DS2 instant Hope %.3f with furnishings %.1f, comforts %.1f and no penalties (expect 87.25, 6.0, 8.0)"),
-					H.Total, H.Furnishings, H.Comforts));
+				FString::Printf(TEXT("DS2 instant Hope %.3f with furnishings %.1f, comforts %.1f, jobs %.1f and no penalties (expect 91.75, 6.0, 8.0, 7.5)"),
+					H.Total, H.Furnishings, H.Comforts, H.Jobs));
 			// The D3a claim: rooms and jobs alone no longer reach the research
 			// gate. The crew has to be given comforts and a furnished home.
 			const double Bare = H.Total - H.Furnishings - H.Comforts;
@@ -904,12 +955,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					Bare, Sim->GetHopeDiscoveryThreshold()));
 		}
 
-		// DS4. 10 sols in: the mood crossed ~85 near sol 8; 2.35 yield-seats x
-		// 24 seat-h/sol (before mastery) -> CropStrain (100) pops. Seeds +50, milestone 5->7.
-		// The exact count is pinned from the pre-derivation run on the shipped
-		// tuning: CropStrain popped about 0.7 sol before this read and
-		// RegolithCeramics (150) is about a third of the way, so each side has
-		// at least 0.7 sol of margin.
+		// DS4. 10 sols in: the mood crossed ~85 about 5 sols after the crew landed
+		// (instant 91.75 under C2a; it crossed near sol 8 at 87.25); 2.35 yield-seats x
+		// 24 seat-h/sol (before mastery) pop CropStrain (100) and then RegolithCeramics
+		// (150). Seeds +50, milestone 5 -> 9. The exact count is pinned from the
+		// C2a run on the shipped tuning: 352 seat-hours are in (the first two rows need
+		// 250, the third 450), SubsurfaceBrine (200) is about half done, so each side has
+		// about 1.5 sols of margin.
 		const double Seeds0 = Sim->GetStock(FName("Seeds"));
 		RunSols(9.0);
 		Expect(Sim->GetDiscoveryLog().Num() >= 1 && Sim->GetDiscoveryLog()[0] == FName("CropStrain") && LogIsAuthoredPrefix()
@@ -917,8 +969,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			FString::Printf(TEXT("DS4 first window: found=%d [%s] next=%s (%.3f of the way) seeds +%.0f milestones=%.1f (expect >=1 starting CropStrain, +50, 5 + the found rows' bonus = %.1f)"),
 				Sim->GetDiscoveryLog().Num(), *LogText(), *Sim->GetNextDiscovery().ToString(), Sim->GetDiscoveryProgress(),
 				Sim->GetStock(FName("Seeds")) - Seeds0, Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum()));
-		Expect(Sim->GetDiscoveryLog().Num() == 1 && Sim->GetNextDiscovery() == FName("RegolithCeramics"),
-			FString::Printf(TEXT("DS4 pin: exactly CropStrain found, RegolithCeramics next (found=%d next=%s; the shipped tuning's pace - re-pin it if the tuning moves)"),
+		Expect(Sim->GetDiscoveryLog().Num() == 2 && Sim->GetDiscoveryLog()[1] == FName("RegolithCeramics") && Sim->GetNextDiscovery() == FName("SubsurfaceBrine"),
+			FString::Printf(TEXT("DS4 pin: exactly CropStrain and RegolithCeramics found, SubsurfaceBrine next (found=%d next=%s; the shipped tuning's pace - re-pin it if the tuning moves)"),
 				Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString()));
 
 		// DS5. 6 more sols: the lab crew's MASTERY has been ramping since they
@@ -926,9 +978,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// accrual rate runs above the fresh-crew rate by now. The log stays an
 		// ordered prefix of the authored four; the ceramics reward (Struct +100,
 		// into the stock pool) is exactly 100 per RegolithCeramics found since
-		// the post-furnishing baseline (brine rewards Water). The window is long
-		// enough to leave the fourth row about half done, so the pinned count of
-		// three has about two sols of margin either way.
+		// the post-furnishing baseline (brine rewards Water). C2a: the window now
+		// finishes the fourth row (750 seat-hours in all; about 830 are in, a margin
+		// of a sol of lab time), so all four are found and nothing is next.
 		RunSols(6.0);
 		{
 			const double StructGained = Sim->GetStock(FName("Struct")) - Struct0;
@@ -938,8 +990,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("DS5 second window: found=%d [%s] next=%s (%.3f of the way) struct +%.0f (expect 100 x ceramics found = %d) milestones=%.1f (expect 5 + the found rows' bonus = %.1f)"),
 					Sim->GetDiscoveryLog().Num(), *LogText(), *Sim->GetNextDiscovery().ToString(), Sim->GetDiscoveryProgress(), StructGained, Ceramics * 100,
 					Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum()));
-			Expect(Sim->GetDiscoveryLog().Num() == 3 && Sim->GetNextDiscovery() == FName("MicrobialLife") && Near(StructGained, 100.0, 1e-9),
-				FString::Printf(TEXT("DS5 pin: exactly the first three found, MicrobialLife next, Struct +%.0f (found=%d next=%s)"),
+			Expect(Sim->GetDiscoveryLog().Num() == 4 && Sim->GetNextDiscovery().IsNone() && Near(StructGained, 100.0, 1e-9),
+				FString::Printf(TEXT("DS5 pin: all four found, nothing next, Struct +%.0f (found=%d next=%s)"),
 					StructGained, Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString()));
 		}
 
@@ -1747,13 +1799,16 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING save/load v25: declared=%s epilogue=%d (expect Independent Mars Federation, 1)"),
 			Sim->GetEndingName(Sim->GetDeclaredEnding()), (int32)Sim->IsEpilogueDeclared());
 
-		// 5) COLLAPSE: strip the stores; the crew go unsupported, evacuate at
-		// the countdown, and the emptied colony declares Collapse ONCE -
+		// 5) COLLAPSE: strip the stores; the crew go on no rations and are
+		// recalled gradually, and the emptied colony declares Collapse ONCE -
 		// abstract, with the recovery path named (Gate-D placeholder wording).
+		// C2a: two residents at ration 0 are recalled at 2 x 1 / 2 = 1 a sol, at
+		// 1.0 and 2.0 sols, so the colony is empty a sol and a half before the
+		// 3.5 sols run out (it was both together at 2.0).
 		Sim->AddStock(FName("Food"), -Sim->GetStock(FName("Food")));
 		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
 		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
-		RunSols(3.5); // evac countdown (2 sols unsupported) + margin
+		RunSols(3.5); // the two recalls (1.0 and 2.0 sols) + margin
 		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING collapse: pop=%d declared=%d projected=%s (expect 0, 1, Collapse)"),
 			Sim->GetPopulation(), (int32)Sim->IsCollapseDeclared(),
 			Sim->GetEndingName(Sim->GetProjectedEnding()));
@@ -2349,19 +2404,24 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
 			FIntVector St;
 			const bool bSt = Sim->GetColonistStation(1, St);
-			// Rooms: floor Workstation + network Workstation (0.2 each), Cooking
-			// 0.3, Dining 0.6, each x HopePerMoralePoint (3.25 at D3a).
-			Expect(Hp.OffendedPairs == 1 && Near(Hp.AdjacencyPenalty, 8.0, 1e-9) && Near(Hp.Rooms, (0.2 + 0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6),
-				FString::Printf(TEXT("S10 Hope: Q-R offends, the corridor partitions P-R (pairs %d, adj %.1f, rooms %.2f)"), Hp.OffendedPairs, Hp.AdjacencyPenalty, Hp.Rooms));
-			Expect(Hp.FilledSeats == 4 && Near(Hp.Jobs, 4.0 * Sim->GetHopePerJob(), 1e-9) && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Near(Sim->GetWorkstationYieldSeatSum(), 2.0, 1e-4)
+			// C2a. Rooms: a Workstation on the floor and one in the network are one
+			// function, counted once (0.2), then Cooking 0.3 and Dining 0.6, each x
+			// HopePerMoralePoint; one room of each serves 25 of the 9, so coverage is 1.
+			// Adjacency: Q-R offends the Dining bay: 1 pair, and 1 of the 6 refuser cells
+			// (the four Living bays of network 1 - A:0, C:1, H:0, H:1 - plus PQ's Living
+			// and Dining bays; the floor has none) = 16 / 6 = 2.667.
+			Expect(Hp.OffendedPairs == 1 && Hp.OffendedRefusers == 1 && Hp.RefuserCells == 6 && Near(Hp.AdjacencyPenalty, Sim->GetHopeAdjacencyMax() / 6.0, 1e-9)
+				&& Near(Hp.Rooms, (0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6),
+				FString::Printf(TEXT("S10 Hope: Q-R offends, the corridor partitions P-R (pairs %d, %d of %d refuser cells, adj %.1f, rooms %.2f)"), Hp.OffendedPairs, Hp.OffendedRefusers, Hp.RefuserCells, Hp.AdjacencyPenalty, Hp.Rooms));
+			Expect(Hp.FilledSeats == 4 && Near(Hp.Jobs, Sim->GetHopeJobsMax() * 4.0 / 9.0, 1e-9) && Near(Sim->GetLabYieldSeatSum(), 4.0, 1e-4) && Near(Sim->GetWorkstationYieldSeatSum(), 2.0, 1e-4)
 				&& bSt && St == FIntVector(-1, 0, 0) && Near(Hp.Housing, Sim->GetHopeHousingMax() * 5.0 / 9.0, 1e-6),
 				FString::Printf(TEXT("S10 seats: floor first (filled %d, jobs %.0f, lab %.2f, ws %.2f, housing %.3f)"), Hp.FilledSeats, Hp.Jobs,
 					Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum(), Hp.Housing));
 		}
 		Sim->DesignateBay(PQ, 1, NAME_None, Why);
-		Expect(Sim->GetColonyHope().OffendedPairs == 0 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.2 + 0.3) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 clearing the Dining bay clears the pair"));
+		Expect(Sim->GetColonyHope().OffendedPairs == 0 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.3) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 clearing the Dining bay clears the pair"));
 		Sim->DesignateBay(PQ, 1, FName("Dining"), Why);
-		Expect(Sim->GetColonyHope().OffendedPairs == 1 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 re-zoned: the pair is back"));
+		Expect(Sim->GetColonyHope().OffendedPairs == 1 && Near(Sim->GetColonyHope().Rooms, (0.2 + 0.3 + 0.6) * Sim->GetHopePerMoralePoint(), 1e-6), TEXT("S10 re-zoned: the pair is back"));
 		{
 			FRHCommand As; As.Verb = FName("Assign"); As.Level = 0; As.Location = FVector(2000.f, 0.f, 0.f);
 			Sim->EnqueueCommand(As);
@@ -2409,14 +2469,21 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		RunSols(0.05);
 		Expect(Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1), TEXT("S11 a step after the load: the ratings held (a lost rating could not be regained on a dry pool)"));
 
-		// S12. Loss and recovery.
+		// S12. Loss and recovery. C2a: a home with no air is recalled GRADUALLY - a
+		// home of four at ration 0 loses one resident (the newest first) every half
+		// sol, not all of them together after two. The floor lost its rating first,
+		// so within this sol its newest resident (Id 8) is the only one gone (the next
+		// is due at a full sol); the networks lost theirs a few steps later and their
+		// first recall is still to come.
+		int32 NewestOnFloor = 0;
+		for (const FRHColonist& Col : Sim->GetColonists()) { if (Col.HomeHab == 0 && Col.HomeLevel == -1) { NewestOnFloor = FMath::Max(NewestOnFloor, Col.Id); } }
 		RunSols(1.0);
 		{
 			bool bNone = true;
 			for (const FRHColonist& Col : Sim->GetColonists()) { bNone &= !Col.bSupported; }
 			Expect(!Sim->IsHabRated(A) && !Sim->IsHabRated(PQ) && !Sim->IsFloorRated(-1) && bNone && Sim->GetHousingCapacity() == 0 && Sim->GetColonyHope().FilledSeats == 0
-				&& Near(Sim->GetLabYieldSeatSum(), 0.0, 1e-9) && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9) && Sim->GetPopulation() == 9,
-				TEXT("S12 a dry pool: every rating lost, everyone unsupported, no seats, no infirmary, nobody recalled yet"));
+				&& Near(Sim->GetLabYieldSeatSum(), 0.0, 1e-9) && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9) && Sim->GetPopulation() == 8 && NewestOnFloor == 8 && !Sim->FindColonist(NewestOnFloor),
+				FString::Printf(TEXT("S12 a dry pool: every rating lost, everyone unsupported, no seats, no infirmary, one recalled so far - floor -1's newest (Id %d); pop %d (expect 8)"), NewestOnFloor, Sim->GetPopulation()));
 		}
 		Sim->AddStock(NOx, 6000.0);
 		RunSols(1.0);
@@ -2432,17 +2499,17 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		RunSols(0.1);
 		{
 			const TArray<FRHColonist>& Cs = Sim->GetColonists();
-			bool bSurfaceDown = Cs.Num() == 9;
+			bool bSurfaceDown = Cs.Num() == 8; // 9 before the floor's newest was recalled in S12
 			for (int32 i = 0; bSurfaceDown && i < 4; ++i) { bSurfaceDown &= !Cs[i].bSupported; }
 			Expect(!Sim->IsHabRated(A) && Sim->IsHabRated(PQ) && Sim->IsFloorRated(-1) && bSurfaceDown && Near(Sim->GetEffectiveEvacSols(), 2.0, 1e-9),
 				TEXT("S12b network 1's filter off: only it fails (no shaft link); its four lose support; the infirmary in B goes offline"));
 		}
-		RunSols(2.5);
+		RunSols(2.5); // four residents at ration 0 are all recalled by about 2.0 sols (C2a: one every half sol), newest first
 		{
 			const TArray<FRHColonist>& Cs = Sim->GetColonists();
-			bool bOk = Cs.Num() == 5;
-			for (int32 i = 0; bOk && i < 4; ++i) { bOk &= Cs[i].HomeLevel == -1 && Cs[i].HomeHab == 0; }
-			bOk = bOk && Cs[4].HomeHab == PQ && Sim->GetHabResidents(A) == 0 && Sim->GetHabResidents(Hh) == 0 && Sim->GetHousingCapacity() == 5;
+			bool bOk = Cs.Num() == 4; // the floor's three oldest and PQ's one
+			for (int32 i = 0; bOk && i < 3; ++i) { bOk &= Cs[i].HomeLevel == -1 && Cs[i].HomeHab == 0; }
+			bOk = bOk && Cs[3].HomeHab == PQ && Sim->GetHabResidents(A) == 0 && Sim->GetHabResidents(Hh) == 0 && Sim->GetHousingCapacity() == 5;
 			Expect(bOk, FString::Printf(TEXT("S12b the four surface residents are recalled; floor and PQ stay (pop %d, capacity %d)"), Sim->GetPopulation(), Sim->GetHousingCapacity()));
 			TArray<FIntPoint> Before;
 			for (const FRHColonist& Col : Cs) { Before.Add(FIntPoint(Col.HomeLevel, Col.HomeHab)); }
@@ -2450,7 +2517,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->SaveColony(TEXT("surfacehabtest2"), Err);
 			Sim->Debug_AddColonists(1);
 			Sim->LoadColony(TEXT("surfacehabtest2"), Err);
-			bool bSame = Sim->GetPopulation() == 5;
+			bool bSame = Sim->GetPopulation() == 4;
 			for (int32 i = 0; bSame && i < Sim->GetColonists().Num(); ++i)
 			{
 				bSame &= FIntPoint(Sim->GetColonists()[i].HomeLevel, Sim->GetColonists()[i].HomeHab) == Before[i];
@@ -3057,7 +3124,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(Furnish(TEXT("Workbench"), C3, 8, 1) && Seats(C3) == FIntPoint(3, 3) && Sim->GetColonyHope().FilledSeats == 6 && Near(Sim->GetWorkstationYieldSeatSum(), 6.05, 1e-6),
 			FString::Printf(TEXT("F5 + a workbench: c3 seats 3 (filled %d, sum %.2f)"), Sim->GetColonyHope().FilledSeats, Sim->GetWorkstationYieldSeatSum()));
 		Expect(Furnish(TEXT("LabBench"), C5, 0) && Seats(C5) == FIntPoint(2, 2) && Near(Sim->GetLabYieldSeatSum(), 2.0, 1e-6)
-			&& Sim->GetColonyHope().FilledSeats == 7 && Near(Sim->GetColonyHope().Jobs, 7.0 * Sim->GetHopePerJob(), 1e-6),
+			&& Sim->GetColonyHope().FilledSeats == 7 && Near(Sim->GetColonyHope().Jobs, Sim->GetHopeJobsMax() * 7.0 / 10.0, 1e-6),
 			FString::Printf(TEXT("F5 a lab bench: c5 seats 2, filled %d, jobs %.1f"), Sim->GetColonyHope().FilledSeats, Sim->GetColonyHope().Jobs));
 		Spent += 40.0 * 3 + 80.0 + 80.0;
 		{
@@ -3069,13 +3136,17 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(bSeats && bBeds, TEXT("F5 derived assignments: seats 1,2 desks; 3 desk; 4,5 workbench; 6,7 lab bench; beds 1-4 cots, 5-10 legacy"));
 		}
 
-		// F6. Comfort.
-		Expect(Furnish(TEXT("DiningTable"), C4, 0) && Near(Sim->GetColonyHope().Furnishings, 1.0, 1e-9),
+		// F6. Comfort. C2a: the Furnishings line is per resident - the raw sum x
+		// ComfortRefPop (8) / the 10 people = x 0.8 - and then capped at 6. A dining
+		// table (1) is 0.8; with five plants the raw sum is 6, so 4.8; a sixth plant
+		// makes 7 and 5.6, still under the cap; two more (raw 9 = 7.2) reach it.
+		Expect(Furnish(TEXT("DiningTable"), C4, 0) && Near(Sim->GetColonyHope().Furnishings, 0.8, 1e-9),
 			FString::Printf(TEXT("F6 a dining table: Furnishings %.1f"), Sim->GetColonyHope().Furnishings));
 		for (const int32 S : { 2, 3, 6, 7, 8 }) { Furnish(TEXT("Plant"), C4, S); }
-		Expect(Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9), FString::Printf(TEXT("F6 + five plants: Furnishings %.1f"), Sim->GetColonyHope().Furnishings));
-		Expect(Furnish(TEXT("Plant"), C4, 9) && Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9), TEXT("F6 a sixth plant: capped at 6"));
-		Spent += 40.0 + 6 * 20.0;
+		Expect(Near(Sim->GetColonyHope().Furnishings, 4.8, 1e-9), FString::Printf(TEXT("F6 + five plants: Furnishings %.1f"), Sim->GetColonyHope().Furnishings));
+		Expect(Furnish(TEXT("Plant"), C4, 9) && Near(Sim->GetColonyHope().Furnishings, 5.6, 1e-9), TEXT("F6 a sixth plant: 5.6, under the cap"));
+		Expect(Furnish(TEXT("Plant"), C4, 10) && Furnish(TEXT("Plant"), C4, 11) && Near(Sim->GetColonyHope().Furnishings, 6.0, 1e-9), TEXT("F6 two more plants: capped at 6"));
+		Spent += 40.0 + 8 * 20.0;
 
 		// F7. Re-zoning.
 		Expect(!Sim->DesignateRoom(-1, 0, FName("Lab"), Why) && Why.Contains(TEXT("Cot")), FString::Printf(TEXT("F7 c0 to Lab refused (%s)"), *Why));
@@ -3094,10 +3165,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Refunded += 30.0;
 			const double Out1 = LanderKg(TEXT("Struct"), true);
 			TMap<FName, double> Refund;
-			Expect(Sim->CanSellCell(C4, Why, &Refund) && Near(Refund.FindRef(NStruct), 120.0, 1e-6) && SellCell(C4)
-				&& Near(LanderKg(TEXT("Struct"), true) - Out1, 120.0, 1e-6) && Sim->GetCellFurniture(C4) == 0 && Sim->DesignateRoom(-1, 4, NAME_None, R),
-				TEXT("F8 everything in c4 sold in one order (+120 = 0.75 x 160); the cell can be cleared again"));
-			Refunded += 120.0;
+			Expect(Sim->CanSellCell(C4, Why, &Refund) && Near(Refund.FindRef(NStruct), 150.0, 1e-6) && SellCell(C4)
+				&& Near(LanderKg(TEXT("Struct"), true) - Out1, 150.0, 1e-6) && Sim->GetCellFurniture(C4) == 0 && Sim->DesignateRoom(-1, 4, NAME_None, R),
+				TEXT("F8 everything in c4 sold in one order (+150 = 0.75 x 200: the table and eight plants); the cell can be cleared again"));
+			Refunded += 150.0;
 			Expect(Near(Sim->GetTotalSolid(NStruct), StructStart - Spent + Refunded, 1e-3),
 				FString::Printf(TEXT("F8 the Struct ledger closes: %.1f = %.1f - %.0f + %.0f"), Sim->GetTotalSolid(NStruct), StructStart, Spent, Refunded));
 		}
@@ -3117,8 +3188,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Spent += 20.0;
 			RunSols(1.0);
 			Sim->Debug_SetVaultRated(true);
-			Expect(Sim->IsHabRated(A) && Near(Sim->GetColonyHope().Furnishings, F0 + 1.0, 1e-9),
-				FString::Printf(TEXT("F9 rated: the plant counts (%.1f -> %.1f)"), F0, Sim->GetColonyHope().Furnishings));
+			Expect(Sim->IsHabRated(A) && Near(Sim->GetColonyHope().Furnishings, F0 + 1.0 * Sim->GetComfortRefPop() / Sim->GetPopulation(), 1e-9),
+				FString::Printf(TEXT("F9 rated: the plant counts, per resident (%.1f -> %.1f; expect +8 / %d people)"), F0, Sim->GetColonyHope().Furnishings, Sim->GetPopulation()));
 			Expect(Sim->GetHabBeds(B) == 0,
 				FString::Printf(TEXT("F9 B:0 holds only a plant: a Living bay furnished without beds sleeps nobody (ruling 2026-10-16) - B has %d beds"), Sim->GetHabBeds(B)));
 		}
@@ -3970,7 +4041,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// A thriving colony (the -discovery recipe, plus the tier benches).
 		FString R;
 		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
-		Sim->ExcavateFloor(-1, 10, R);
+		Sim->ExcavateFloor(-1, 11, R); // C2a: one more Living cell (c10) - see T1; 12 would not fill in the 2.5 sols
 		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
 		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
@@ -3986,8 +4057,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			&& Sim->DesignateRoom(-1, 4, FName("Lab"), R)             // T1: 1 seat, x1.0
 			&& Sim->DesignateRoom(-1, 5, FName("Dining"), R)
 			&& Sim->DesignateRoom(-1, 8, FName("LivingQuarters"), R)
-			&& Sim->DesignateRoom(-1, 9, FName("LivingQuarters"), R);  // c6, c7 stay free: Workshop, Infirmary
-		Expect(bZoned, TEXT("T1 setup: c0, c8, c9 Living, c1 Large Workbench, c2 Workstation, c3 Large Chem Table, c4 Lab, c5 Dining all accepted"));
+			&& Sim->DesignateRoom(-1, 9, FName("LivingQuarters"), R)   // c6, c7 stay free: Workshop, Infirmary
+			&& Sim->DesignateRoom(-1, 10, FName("LivingQuarters"), R); // C2a: five seats for six people earn 6.25 of the jobs line, not 7.5; a fourth home (+1.25) makes it up
+		Expect(bZoned, TEXT("T1 setup: c0, c8, c9, c10 Living, c1 Large Workbench, c2 Workstation, c3 Large Chem Table, c4 Lab, c5 Dining all accepted"));
 		// Six colonists drain a comforts crate quickly - stock several so the
 		// comforts fraction holds at 1.0 through the whole march.
 		Sim->Debug_DeliverCargo(FName("LuxuryGoods"));
@@ -4002,9 +4074,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Rejects.Num(), Sim->GetColonyHope().Furnishings, Rejects.Num() ? TEXT(" - ") : TEXT(""), Rejects.Num() ? *Rejects.Last() : TEXT("")));
 		RunSols(0.2);
 
-		// T1. Seat math: 5 job seats (2+1+1+1), yield sums weigh the tiers. Instant
-		// Hope = 50 + vault 5 + housing 7.5 x 3/6 + rooms (2.5 + 2.5 + 1.5 = 6.5) +
-		// jobs 5 x 1.5 + comforts 8 + furnishings 6 = 86.75.
+		// T1. Seat math: 5 job seats (2+1+1+1), yield sums weigh the tiers. C2a
+		// instant Hope = 50 + vault 5 + housing 7.5 x 4/6 (5.0) + rooms (2.5 + 2.5 +
+		// 1.5 = 6.5) + jobs 7.5 x 5 seats / 6 people (6.25) + comforts 8 +
+		// furnishings 6 = 86.75. (Before: housing 3 of 6 homes = 3.75 and jobs 5 x 1.5
+		// = 7.5 gave the same 86.75; the fourth home keeps the margin over the 85
+		// research gate that the per-head jobs line took away.)
 		const double EvacBase = Sim->GetEffectiveEvacSols();
 		Sim->Debug_SetWorkstationFabBonus(0.1);
 		{
@@ -4013,7 +4088,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				&& Near(Sim->GetWorkstationYieldSeatSum(), 3.70, 1e-6) && Near(Sim->GetWorkstationFabMul(), 1.370, 1e-6),
 				FString::Printf(TEXT("T1 seats: housed=%d filled=%d labSum=%.2f wsSum=%.2f fabMul=%.3f (expect 6, 5, 2.35, 3.70, 1.370)"),
 					Housed, H.FilledSeats, Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum(), Sim->GetWorkstationFabMul()));
-			Expect(Near(H.Total, 86.75, 1e-6) && H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.AdjacencyPenalty == 0.0,
+			Expect(Near(H.Total, 86.75, 1e-6) && Near(H.Housing, 5.0, 1e-9) && Near(H.Jobs, 6.25, 1e-9) && H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.AdjacencyPenalty == 0.0,
 				FString::Printf(TEXT("T1 instant Hope %.3f = 50 + 5 + housing %.2f + rooms %.2f + jobs %.2f + comforts %.2f + furnishings %.2f, no penalties (expect 86.75)"),
 					H.Total, H.Housing, H.Rooms, H.Jobs, H.Comforts, H.Furnishings));
 		}
@@ -4426,11 +4501,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("WATER save/load v14: potability %.4f -> %.4f (expect identical)"),
 			PSave, Sim->GetWaterPotability());
 
-		// 6) Thirst is fatal: empty the tanks -> unsupported -> evacuated.
+		// 6) Thirst is fatal: empty the tanks -> everyone on short rations -> the
+		// colony is recalled gradually (C2a: four residents at ration 0 leave one
+		// every half sol, near 0.55, 1.05, 1.55 and 2.0 sols; see -crew).
 		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
-		RunSols(0.5);
-		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 0.5 sol: unsupported=%d (expect 4 - no water)"), 4 - Supported());
-		RunSols(2.0);
+		RunSols(0.4);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 0.4 sol: unsupported=%d (expect 4 - no water)"), 4 - Supported());
+		RunSols(0.9);
+		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 1.3 sols: pop=%d (expect 2 - recalled for thirst, one every half sol)"), Sim->GetPopulation());
+		RunSols(1.2);
 		UE_LOG(LogRedHopeSim, Display, TEXT("WATER dry 2.5 sols: pop=%d (expect 0 - evacuated for thirst)"), Sim->GetPopulation());
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== WATER LOOP TEST END ==="));
@@ -4576,24 +4655,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(CountAlerts(FoodKey) == 2 && LastAlertWith(FoodKey).Contains(TEXT("about 8 sols left")),
 			FString::Printf(TEXT("F7 recovered past 15, dropped to 9: %d food alerts, newest \"%s\""), CountAlerts(FoodKey), *LastAlertWith(FoodKey)));
 
-		// F8. An abrupt empty: everyone fails the draw that very step, so LIFE
-		// SUPPORT owns the banner and the episode latches silently. Refilling
-		// restores support; nobody is evacuated.
+		// F8. An abrupt empty: everyone is on short rations that very step, so the
+		// SHORT RATIONS alert owns the banner and the episode latches silently. C2a:
+		// ONE alert for the home (it was one LIFE SUPPORT per colonist, four of
+		// them). Refilling restores support; nobody is evacuated.
 		{
 			SetRunway(30.0);
 			RunSteps(1);
-			const int32 Food0 = CountAlerts(FoodKey), Life0 = CountAlerts(TEXT("LIFE SUPPORT"));
+			const int32 Food0 = CountAlerts(FoodKey), Short0 = CountAlerts(TEXT("SHORT RATIONS")), Life0 = CountAlerts(TEXT("LIFE SUPPORT"));
 			SetRunway(0.0);
 			RunSteps(1);
-			Expect(CountAlerts(FoodKey) == Food0 && CountAlerts(TEXT("LIFE SUPPORT")) == Life0 + 4 && Pen() == 10.0,
-				FString::Printf(TEXT("F8 larder emptied in one go: food alerts %d -> %d (silent), LIFE SUPPORT +%d (expect 4), FoodPenalty %.1f"),
-					Food0, CountAlerts(FoodKey), CountAlerts(TEXT("LIFE SUPPORT")) - Life0, Pen()));
+			Expect(CountAlerts(FoodKey) == Food0 && CountAlerts(TEXT("SHORT RATIONS")) == Short0 + 1 && CountAlerts(TEXT("LIFE SUPPORT")) == Life0 && Pen() == 10.0,
+				FString::Printf(TEXT("F8 larder emptied in one go: food alerts %d -> %d (silent), SHORT RATIONS +%d (expect 1, one for the home), per-colonist LIFE SUPPORT +%d (expect 0), FoodPenalty %.1f"),
+					Food0, CountAlerts(FoodKey), CountAlerts(TEXT("SHORT RATIONS")) - Short0, CountAlerts(TEXT("LIFE SUPPORT")) - Life0, Pen()));
 			SetRunway(40.0);
 			RunSteps(1);
 			int32 Supported = 0;
 			for (const FRHColonist& C : Sim->GetColonists()) { Supported += C.bSupported ? 1 : 0; }
-			Expect(Pen() == 0.0 && Supported == 4 && Sim->GetPopulation() == 4 && CountAlerts(TEXT("EVACUATED")) == 0,
-				FString::Printf(TEXT("F8 refilled: FoodPenalty %.1f, %d of 4 supported, pop %d, no evacuation"), Pen(), Supported, Sim->GetPopulation()));
+			Expect(Pen() == 0.0 && Supported == 4 && Sim->GetPopulation() == 4 && CountAlerts(TEXT("RECALLED:")) == 0 && CountAlerts(TEXT("RATIONS RESTORED")) >= 1,
+				FString::Printf(TEXT("F8 refilled: FoodPenalty %.1f, %d of 4 supported, pop %d, nobody recalled (%d RECALLED alerts), %d RATIONS RESTORED"), Pen(), Supported, Sim->GetPopulation(), CountAlerts(TEXT("RECALLED:")), CountAlerts(TEXT("RATIONS RESTORED"))));
 		}
 
 		// F9. The load-time latch RE-DERIVE. Each half makes the runtime latch
@@ -5671,6 +5751,570 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return 0;
 	}
 
+	// C2a self-test (living-city gate 2a, 2026-10-18): HOPE PER HEAD, SHARED
+	// RATIONING, ONE ALERT PER EVENT. `-percapita`. Fails loudly.
+	// The fixture is one deep shaft (five floors of 200 cells) holding a colony
+	// that grows 10 -> 100 -> 1,000 -> 5,000 in units of ten people. Each unit is
+	// one Living cell and one Lab cell (the legacy rules: a bed per cell at
+	// ColonistsPerCell, a seat per Lab cell), so every share is the same at every
+	// size: a tenth of the colony's cells are homes, a tenth are work posts, and
+	// one Lab room serves 25 residents ten times over. The checks:
+	//  (a) the same proportions of support, jobs and rooms give the same Hope at
+	//      N = 10, 100, 1,000 and 5,000 (term by term), and each term follows its
+	//      formula: Rooms counted once colony-wide with its coverage, Jobs capped
+	//      at the employment rate, Adjacency by refuser cells (not pairs),
+	//      Furnishings per resident;
+	//  (b) a shortage is shared evenly: every resident of a home gets the same
+	//      ration, food and water by colony, air by home, ration = the minimum;
+	//  (c) departures follow a linear law: a home recalls the residents it had
+	//      when the shortage began x (1 - r) x sols / EvacSols, at a steady rate
+	//      (a total failure empties it in EvacSols, half a ration takes twice as
+	//      long), the newest non-Mars-born go first and the Mars-born last; the
+	//      accumulator is linear in dt (step size does not matter) and the
+	//      Infirmary stretches it;
+	//  (d) one alert per event, counted at OnAlert;
+	//  (e) save / load holds the accumulators, and the run after a load is the
+	//      run that would have happened without it.
+	if (FParse::Param(*Params, TEXT("percapita")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== PER-CAPITA TEST (C2a, 2026-10-18) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("PCAP ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("PCAP FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double AgentDt = (double)URHSimClockSubsystem::SubStepSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr int32 Floors = 5;
+		constexpr int32 CellsPerFloor = 200; // leak (200 x 2 kg/sol) stays under the trunk's push: the floors stay rated
+		const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen")), NStruct(TEXT("Struct"));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		using FHope = URHSimWorldSubsystem::FRHHopeBreakdown;
+		FString R;
+
+		// P0. Pure data: every Hope weight rides the synced DT_Config. The values
+		// are read from the table row alone (no override, no C++ fallback), so a
+		// DT that drifted from the CSV fails here and not silently.
+		const TPair<const TCHAR*, double> Pins[] = {
+			{ TEXT("HopeHousingMax"), 7.5 }, { TEXT("HopePerMoralePoint"), 2.5 }, { TEXT("HopeJobsMax"), 7.5 },
+			{ TEXT("HopeUnsupportedMax"), 30.0 }, { TEXT("HopeUnsupportedSteepness"), 3.0 }, { TEXT("HopeAdjacencyMax"), 16.0 },
+			{ TEXT("RoomServesResidents"), 25.0 }, { TEXT("ComfortRefPop"), 8.0 } };
+		FString PinText;
+		bool bPins = true;
+		for (const TPair<const TCHAR*, double>& Pin : Pins)
+		{
+			const double Got = DefsSub ? DefsSub->GetConfigTableScalar(FName(Pin.Key), -1.0) : -1.0;
+			bPins &= Near(Got, Pin.Value, 1e-9);
+			PinText += FString::Printf(TEXT(" %s=%g"), Pin.Key, Got);
+		}
+		Expect(bPins, FString::Printf(TEXT("P0 DT_Config pins (HopeHousingMax 7.5, HopePerMoralePoint 2.5, HopeJobsMax 7.5, HopeUnsupportedMax 30, steepness 3, HopeAdjacencyMax 16, RoomServesResidents 25, ComfortRefPop 8):%s"), *PinText));
+		Expect(Near(Sim->GetHopeJobsMax(), 7.5, 1e-9) && Near(Sim->GetHopeUnsupportedMax(), 30.0, 1e-9) && Near(Sim->GetHopeUnsupportedSteepness(), 3.0, 1e-9)
+			&& Near(Sim->GetHopeAdjacencyMax(), 16.0, 1e-9) && Near(Sim->GetRoomServesResidents(), 25.0, 1e-9) && Near(Sim->GetComfortRefPop(), 8.0, 1e-9),
+			TEXT("P0 the sim reads the same weights (no override or fallback in play)"));
+		const FRHRoomRow* LabRow = DefsSub ? DefsSub->GetRoom(FName("Lab")) : nullptr;
+		const FRHRoomRow* LivingRow = DefsSub ? DefsSub->GetRoom(FName("LivingQuarters")) : nullptr;
+		if (!bPins || !LabRow || !LabRow->SliceActive || !LivingRow || !LivingRow->SliceActive)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("PCAP FAIL: the data is not in place (pins %d, Lab row %d, Living row %d); the suite stops"), (int32)bPins, LabRow != nullptr, LivingRow != nullptr);
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== PER-CAPITA TEST END: %d check(s), %d failure(s) ==="), Checks, Fails + 1);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return 1;
+		}
+		const double LabWeight = LabRow->MoraleWeight;
+		const double HousingMax = Sim->GetHopeHousingMax(), PerMorale = Sim->GetHopePerMoralePoint(), JobsMax = Sim->GetHopeJobsMax();
+		const double UnsuppMax = Sim->GetHopeUnsupportedMax(), Steep = Sim->GetHopeUnsupportedSteepness(), AdjMax = Sim->GetHopeAdjacencyMax();
+		const double Serves = Sim->GetRoomServesResidents(), RefPop = Sim->GetComfortRefPop();
+		const double EvacSols = Sim->GetColonistEvacSols();
+		const double FoodPerSol = Sim->GetColonistFoodKgPerSol(), O2PerSol = Sim->GetColonistO2KgPerSol();
+
+		// Alerts, counted where the player's banner would hear them.
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Prefix) { int32 N = 0; for (const FString& A : Alerts) { N += A.StartsWith(Prefix) ? 1 : 0; } return N; };
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+
+		const auto TopUp = [&](double Dt)
+		{
+			Sim->Debug_AddFreshWater(500.0 * Dt / SolLen);
+			Sim->Debug_SetBatteryWh(1.0e9);
+		};
+		const auto EraStepOnce = [&]()
+		{
+			TopUp(EraDt);
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->EraStep((float)EraDt);
+		};
+		// Emptied first, then filled: from 1e8 kg a single "add the difference" would
+		// round away the fraction of a kilogram a small colony's ration is made of.
+		const auto SetStock = [&](FName Res, double Kg) { Sim->AddStock(Res, -Sim->GetStock(Res)); Sim->AddStock(Res, Kg); };
+		const auto Cell = [&](int32 Index) { return FIntVector(-(Index / CellsPerFloor + 1), Index % CellsPerFloor, 0); }; // flat cell -> (level, index)
+		const auto Zone = [&](int32 Flat, FName Room)
+		{
+			const FIntVector K = Cell(Flat);
+			if (!Sim->DesignateRoom(K.X, K.Y, Room, R)) { UE_LOG(LogRedHopeSim, Error, TEXT("PCAP: zoning floor %d cell %d as %s failed: %s"), K.X, K.Y, *Room.ToString(), *R); ++Fails; }
+		};
+		const auto ZoneAt = [&](int32 Level, int32 Index, FName Room)
+		{
+			if (!Sim->DesignateRoom(Level, Index, Room, R)) { UE_LOG(LogRedHopeSim, Error, TEXT("PCAP: zoning floor %d cell %d as %s failed: %s"), Level, Index, *Room.ToString(), *R); ++Fails; }
+		};
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("Lander")) { LanderId = B.Id; } }
+
+		// Setup: power, a deep shaft, big floors, an air filter on each, every stock deep.
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -1000.0, 0.0));
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -2000.0, 0.0));
+		Sim->AddStock(NOxygen, 1.0e8);
+		Sim->AddStock(NWater, 1.0e8);
+		Sim->AddStock(NFood, 1.0e8);
+		Sim->Debug_AddSolidAt(LanderId, NStruct, 1.0e6, false);
+		const FVector Head(3000.0, 3000.0, 0.0);
+		Sim->ExtendShaft(Floors, Head);
+		bool bCarved = true;
+		for (int32 L = 1; L <= Floors; ++L) { bCarved &= Sim->ExcavateFloor(-L, CellsPerFloor, R); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_PlaceInstant(FName("AirFilter"), Head, -L); }
+		for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+		Sim->Debug_SetColonistsPerCell(5.0); // a floor houses 1,000 without furnishing a bed
+		EraStepOnce();
+		Expect(bCarved && Sim->GetShaftDepth() == Floors && Sim->IsFloorRated(-1) && Sim->IsFloorRated(-Floors) && Sim->GetPopulation() == 0 && Sim->GetHousingCapacity() == 5000,
+			FString::Printf(TEXT("setup: shaft to -%d, %d cells a floor, every floor rated, %d beds, nobody yet"), Floors, CellsPerFloor, Sim->GetHousingCapacity()));
+
+		// (a) The ladder.
+		const int32 Ladder[] = { 10, 100, 1000, 5000 };
+		TArray<FHope> Steady, Short;
+		int32 ZonedUnits = 0;
+		const auto FoodNeedAt = [&](double Dt) { return FoodPerSol * (Dt / SolLen); };
+		for (const int32 N : Ladder)
+		{
+			const int32 Units = N / 10;
+			for (; ZonedUnits < Units; ++ZonedUnits)
+			{
+				Zone(2 * ZonedUnits, FName("LivingQuarters"));
+				Zone(2 * ZonedUnits + 1, FName("Lab"));
+			}
+			const int32 Housed = Sim->Debug_AddColonists(N - Sim->GetPopulation());
+			EraStepOnce();
+			EraStepOnce();
+			const FHope H = Sim->GetColonyHope();
+			Steady.Add(H);
+			Expect(Housed > 0 && Sim->GetPopulation() == N && H.Population == N,
+				FString::Printf(TEXT("a N=%d: %d colonists housed, population %d"), N, Housed, Sim->GetPopulation()));
+			Expect(Near(H.Housing, HousingMax * 0.1, 1e-9) && Near(H.Rooms, LabWeight * PerMorale, 1e-9) && H.FilledSeats == Units && Near(H.Jobs, JobsMax * 0.1, 1e-9)
+				&& H.AdjacencyPenalty == 0.0 && H.UnsupportedPenalty == 0.0 && H.WaterPenalty == 0.0 && H.FoodPenalty == 0.0,
+				FString::Printf(TEXT("a N=%d, a tenth housed and a tenth at work, Labs cover the colony: housing %.4f, rooms %.4f (the Lab bonus, once - %d Lab cells), jobs %.4f (%d seats), no adjacency / unsupported / water / food term"),
+					N, H.Housing, H.Rooms, Units, H.Jobs, H.FilledSeats));
+			Expect(Near(H.Total, 50.0 + H.Milestones + H.Housing + H.Rooms + H.Jobs, 1e-9) && Near(H.Total, Steady[0].Total, 1e-9),
+				FString::Printf(TEXT("a N=%d: Hope %.6f = base 50 + milestones %.2f + the three terms, the same as at N=%d (%.6f)"), N, H.Total, H.Milestones, Ladder[0], Steady[0].Total));
+
+			// The same share of the colony (a fifth) on short rations: the food pool
+			// runs 20% short, so every home's ration is 0.8.
+			SetStock(NFood, 0.8 * N * FoodNeedAt(AgentDt));
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			const FHope HS = Sim->GetColonyHope();
+			Short.Add(HS);
+			bool bNoneSupported = true;
+			for (const FRHColonist& C : Sim->GetColonists()) { bNoneSupported &= !C.bSupported; }
+			Expect(bNoneSupported && Sim->GetPopulation() == N && Near(HS.DeficitEquivalent, 0.2 * N, 1e-6 * N)
+				&& Near(HS.UnsupportedPenalty, UnsuppMax * FMath::Min(1.0, Steep * 0.2), 1e-6) && Near(HS.Total, Short[0].Total, 1e-6),
+				FString::Printf(TEXT("a N=%d, a fifth short (ration 0.8 for all): deficit %.2f of %d, unsupported -%.4f (expect %.1f = 30 x min(1, 3 x 0.2)), Hope %.6f (the same as at N=%d: %.6f), nobody left yet"),
+					N, HS.DeficitEquivalent, N, HS.UnsupportedPenalty, UnsuppMax * FMath::Min(1.0, Steep * 0.2), HS.Total, Ladder[0], Short[0].Total));
+			SetStock(NFood, 1.0e8);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			bool bAllFed = true;
+			for (const FRHColonist& C : Sim->GetColonists()) { bAllFed &= C.bSupported; }
+			Expect(bAllFed && Near(Sim->GetDeficitEquivalent(), 0.0, 1e-12) && Sim->GetHomeDepartureAcc(-1) == 0.0,
+				FString::Printf(TEXT("a N=%d: food restored, everyone back on a full ration, the accumulators reset (acc %.6f)"), N, Sim->GetHomeDepartureAcc(-1)));
+
+			if (N == 10)
+			{
+				// Jobs: seats beyond the colony add nothing. Eleven more Lab cells on
+				// the empty floor -5 make 12 seats for 10 people.
+				for (int32 K = 0; K < 11; ++K) { ZoneAt(-5, 110 + K, FName("Lab")); }
+				EraStepOnce();
+				const FHope HJ = Sim->GetColonyHope();
+				Expect(HJ.FilledSeats == 10 && Near(HJ.Jobs, JobsMax, 1e-9),
+					FString::Printf(TEXT("jobs cap: 12 seats for 10 people fill 10; jobs %.4f = HopeJobsMax %.1f (it was 1.5 a seat, uncapped)"), HJ.Jobs, JobsMax));
+				for (int32 K = 0; K < 11; ++K) { ZoneAt(-5, 110 + K, NAME_None); }
+
+				// Linear in dt: one era step on empty rations and 600 agent steps move a
+				// home's accumulator the same distance (nobody leaves yet: 0.25 < 1).
+				SetStock(NFood, 0.0);
+				Sim->Debug_StepPopulation((float)EraDt);
+				const double AccEra = Sim->GetHomeDepartureAcc(-1);
+				Expect(Near(AccEra, N * 1.0 * EraDt / (EvacSols * SolLen), 1e-12) && Sim->GetPopulation() == N,
+					FString::Printf(TEXT("c one 60 s step at ration 0: the home's clock reads %.6f (expect %d x 60 / (%.1f x 1200) = %.6f), nobody gone"), AccEra, N, EvacSols, N * EraDt / (EvacSols * SolLen)));
+				SetStock(NFood, 1.0e8);
+				Sim->Debug_StepPopulation((float)AgentDt);
+				for (int32 K = 0; K < 600; ++K)
+				{
+					SetStock(NFood, 0.0);
+					Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+				}
+				Expect(Near(Sim->GetHomeDepartureAcc(-1), AccEra, 1e-6) && Sim->GetPopulation() == N,
+					FString::Printf(TEXT("c 600 steps of 0.1 s: %.6f against one 60 s step %.6f - the clock does not depend on the step size"), Sim->GetHomeDepartureAcc(-1), AccEra));
+				SetStock(NFood, 1.0e8);
+				Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+
+				// The Infirmary stretches the clock: 2 sols becomes 3.
+				ZoneAt(-5, 130, FName("Infirmary"));
+				SetStock(NFood, 0.0);
+				Sim->Debug_StepPopulation((float)EraDt);
+				Expect(Near(Sim->GetEffectiveEvacSols(), EvacSols + 1.0, 1e-9) && Near(Sim->GetHomeDepartureAcc(-1), N * 1.0 * EraDt / ((EvacSols + 1.0) * SolLen), 1e-12),
+					FString::Printf(TEXT("c with an Infirmary online: %.1f sols, the clock reads %.6f (expect %.6f)"), Sim->GetEffectiveEvacSols(), Sim->GetHomeDepartureAcc(-1), N * EraDt / ((EvacSols + 1.0) * SolLen)));
+				SetStock(NFood, 1.0e8);
+				Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+				ZoneAt(-5, 130, NAME_None);
+			}
+			if (N == 10 || N == 1000)
+			{
+				// Adjacency counts refuser CELLS, not pairs: one Living cell between two
+				// kitchens is two offended pairs and one offended cell, out of every
+				// refuser cell in the colony.
+				ZoneAt(-5, 100, FName("Cooking"));
+				ZoneAt(-5, 101, FName("LivingQuarters"));
+				ZoneAt(-5, 102, FName("Cooking"));
+				const FHope HA = Sim->GetColonyHope();
+				const double AdjExpect = AdjMax * 1.0 / (Units + 1);
+				Expect(HA.OffendedPairs == 2 && HA.OffendedRefusers == 1 && HA.RefuserCells == Units + 1 && Near(HA.AdjacencyPenalty, AdjExpect, 1e-9),
+					FString::Printf(TEXT("adjacency N=%d: %d pairs, %d offended cell of %d refuser cells, penalty %.4f (expect 16 x 1 / %d = %.4f; the old rule was 8 a pair = 16)"),
+						N, HA.OffendedPairs, HA.OffendedRefusers, HA.RefuserCells, HA.AdjacencyPenalty, Units + 1, AdjExpect));
+				ZoneAt(-5, 100, NAME_None); ZoneAt(-5, 101, NAME_None); ZoneAt(-5, 102, NAME_None);
+			}
+			if (N == 1000)
+			{
+				// Rooms: the Lab bonus is counted once and scaled by min(1, rooms x 25 / people).
+				const auto LabCount = [&](int32 K)
+				{
+					for (int32 I = 0; I < Units; ++I) { ZoneAt(-1, 2 * I + 1, I < K ? FName("Lab") : NAME_None); }
+				};
+				bool bCover = true;
+				FString CoverText;
+				for (const int32 K : { 100, 40, 39, 20, 1 })
+				{
+					LabCount(K);
+					const double Cover = FMath::Min(1.0, K * Serves / N);
+					const double Rooms = Sim->GetColonyHope().Rooms;
+					bCover &= Near(Rooms, LabWeight * PerMorale * Cover, 1e-9);
+					CoverText += FString::Printf(TEXT(" %d rooms -> %.4f (coverage %.3f);"), K, Rooms, Cover);
+				}
+				LabCount(Units);
+				Expect(bCover && Near(Sim->GetColonyHope().Rooms, LabWeight * PerMorale, 1e-9),
+					FString::Printf(TEXT("rooms coverage at N=1000 (a Lab room serves 25): the Lab bonus %.2f x coverage:%s restored to %.4f"), LabWeight * PerMorale, *CoverText, Sim->GetColonyHope().Rooms));
+			}
+		}
+		Expect(Sim->GetBirthsOnMars() == 0 && Sim->GetPopulation() == 5000, TEXT("no births muddied the headcount"));
+
+		// Furnishings are per resident: four sofas (2 Hope each) in a Living cell.
+		{
+			const FIntVector K5(-5, 150, 0); // flat cell 950: an even cell, a Living cell
+			int32 Queued = 0;
+			for (const int32 Slot : { 0, 2, 8, 10 })
+			{
+				FRHCommand Order; Order.Verb = FName("Furnish"); Order.Target = FName("Sofa"); Order.Level = K5.X;
+				Order.Location = Sim->GetCellCentreCm(K5);
+				Order.Value = URHSimWorldSubsystem::EncodeFurnish(K5.Y, Slot, 0);
+				Sim->EnqueueCommand(Order);
+				++Queued;
+			}
+			EraStepOnce();
+			const FHope HF = Sim->GetColonyHope();
+			const double PerHead = RefPop / 5000.0;
+			Expect(Rejects.Num() == 0 && Sim->GetFurniture().Num() == Queued && Near(HF.Furnishings, FMath::Min(Sim->GetHopeFurnishingsMax(), 8.0 * PerHead), 1e-9),
+				FString::Printf(TEXT("furnishings per resident: %d sofas = 8 Hope raw, x %.0f / 5000 = %.5f at N=5000 (cap %.0f), %d orders refused"),
+					Sim->GetFurniture().Num(), RefPop, HF.Furnishings, Sim->GetHopeFurnishingsMax(), Rejects.Num()));
+		}
+
+		// Homes, for (b)-(e): five floors of a thousand.
+		struct FFloor { int32 Level = 0; TArray<int32> Ids; };
+		const auto Roster = [&]() -> TArray<FFloor>
+		{
+			TArray<FFloor> Out;
+			for (int32 L = 1; L <= Floors; ++L) { FFloor F; F.Level = -L; Out.Add(F); }
+			for (const FRHColonist& C : Sim->GetColonists()) { if (C.HomeHab == 0 && C.HomeLevel < 0 && C.HomeLevel >= -Floors) { Out[-C.HomeLevel - 1].Ids.Add(C.Id); } }
+			for (FFloor& F : Out) { F.Ids.Sort(); }
+			return Out;
+		};
+		const auto RationOf = [&](int32 Level) -> const URHSimWorldSubsystem::FRHHomeRation*
+		{
+			for (const URHSimWorldSubsystem::FRHHomeRation& Home : Sim->GetHomeRations()) { if (Home.Key == Level) { return &Home; } }
+			return nullptr;
+		};
+		const auto Restore = [&]()
+		{
+			SetStock(NFood, 1.0e8);
+			SetStock(NWater, 1.0e8);
+			for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+		};
+		{
+			const TArray<FFloor> Homes = Roster();
+			bool bThousand = true;
+			for (const FFloor& F : Homes) { bThousand &= F.Ids.Num() == 1000; }
+			Expect(bThousand, TEXT("homes: 1,000 residents on each of the five floors"));
+		}
+
+		// (b) A shortage is shared evenly. Food runs 30% short for the whole
+		// colony; floor -2 has 40% of its air and floor -4 55%. Floors -1, -3 and
+		// -5 are limited by food (0.7); -2 and -4 by air.
+		{
+			const TArray<FFloor> Homes = Roster();
+			const double N = Sim->GetPopulation();
+			const double O2Need = O2PerSol * (AgentDt / SolLen);
+			SetStock(NFood, 0.7 * N * FoodNeedAt(AgentDt));
+			Sim->Debug_SetFloorO2Kg(-2, 0.4 * Homes[1].Ids.Num() * O2Need);
+			Sim->Debug_SetFloorO2Kg(-4, 0.55 * Homes[3].Ids.Num() * O2Need);
+			const double O2Before1 = Sim->GetFloorO2Kg(-1);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			const double Want[5] = { 0.7, 0.4, 0.7, 0.55, 0.7 };
+			const TCHAR* Limit[5] = { TEXT("Food"), TEXT("Oxygen"), TEXT("Food"), TEXT("Oxygen"), TEXT("Food") };
+			bool bRations = Sim->GetHomeRations().Num() == 5, bEven = true, bNoneFed = true;
+			double DeficitWant = 0.0;
+			FString RationText;
+			for (int32 I = 0; I < 5; ++I)
+			{
+				const URHSimWorldSubsystem::FRHHomeRation* Home = RationOf(-(I + 1));
+				bRations &= Home && Near(Home->Fraction, Want[I], 1e-6) && Home->Limiting == FName(Limit[I]) && Home->Residents == Homes[I].Ids.Num();
+				RationText += FString::Printf(TEXT(" floor %d %.3f (%s);"), -(I + 1), Home ? Home->Fraction : -1.0, Home ? *Home->Limiting.ToString() : TEXT("-"));
+				DeficitWant += Homes[I].Ids.Num() * (1.0 - Want[I]);
+				for (const int32 Id : Homes[I].Ids)
+				{
+					const FRHColonist* C = Sim->FindColonist(Id);
+					bNoneFed &= C && !C->bSupported;
+					bEven &= C && Near(Sim->GetColonistRation(*C), Want[I], 1e-6);
+				}
+			}
+			Expect(bRations && bEven && bNoneFed,
+				FString::Printf(TEXT("b every resident of a home gets the home's ration, nobody is fed in full while the home is short (the old rule fed the first 70%% and starved the rest):%s every resident reads the same"), *RationText));
+			Expect(Near(Sim->GetDeficitEquivalent(), DeficitWant, 1e-6 * N) && Near(Sim->GetStock(NFood), 0.0, 1e-9) && Near(Sim->GetFloorO2Kg(-2), 0.0, 1e-9) && Near(Sim->GetFloorO2Kg(-4), 0.0, 1e-9)
+				&& Near(Sim->GetFloorO2Kg(-1), O2Before1 - Homes[0].Ids.Num() * O2Need, 1e-6) && Sim->GetPopulation() == 5000,
+				FString::Printf(TEXT("b the whole pool is taken and nothing more: deficit %.2f (expect %.2f), Food %.6f kg left, floor -2 / -4 air %.6f / %.6f kg left, floor -1 air down %.6f kg (expect %.6f)"),
+					Sim->GetDeficitEquivalent(), DeficitWant, Sim->GetStock(NFood), Sim->GetFloorO2Kg(-2), Sim->GetFloorO2Kg(-4), O2Before1 - Sim->GetFloorO2Kg(-1), Homes[0].Ids.Num() * O2Need));
+			Restore();
+			Expect(Near(Sim->GetDeficitEquivalent(), 0.0, 1e-12) && Sim->GetHomeRations().Num() == 5 && RationOf(-2) && Near(RationOf(-2)->Fraction, 1.0, 1e-12),
+				TEXT("b rations restored: every home back at 1.0, the deficit gone"));
+		}
+
+		// (d) One alert per event, and (c) departures at a ration of 0.55 (a deficit
+		// of 0.45: a quarter-hundredth of a sol's worth of clock per resident per
+		// step is 11.25 for a home of a thousand, so no step lands on a whole number
+		// and floating-point noise cannot move a recall). Food runs short for the
+		// whole colony: five homes of a thousand. The clock counts the residents the
+		// home had when the shortage began (1,000), however many have left since.
+		constexpr double ShortRation = 0.55;
+		const auto ShortFood = [&]() { SetStock(NFood, ShortRation * Sim->GetPopulation() * FoodNeedAt(EraDt)); };
+		const double DtSols = EraDt / SolLen;
+		Alerts.Reset();
+		TArray<int32> Before;
+		for (const FFloor& F : Roster()) { Before.Add(F.Ids.Num()); }
+		ShortFood();
+		EraStepOnce();
+		{
+			bool bRate = true, bOnset = true;
+			FString RateText;
+			int32 Gone = 0;
+			const TArray<FFloor> After = Roster();
+			for (int32 I = 0; I < 5; ++I)
+			{
+				const int32 Departed = Before[I] - After[I].Ids.Num();
+				Gone += Departed;
+				const double Rate = Before[I] * (1.0 - ShortRation) / EvacSols * DtSols; // onset residents x (1 - r) / EvacSols per sol, over this step
+				bRate &= Departed == FMath::FloorToInt(Rate + 1e-9);
+				bOnset &= Sim->GetHomeOnsetResidents(-(I + 1)) == Before[I];
+				RateText += FString::Printf(TEXT(" floor %d %d (rate %.2f);"), -(I + 1), Departed, Rate);
+			}
+			Expect(bRate && bOnset && Gone == 55,
+				FString::Printf(TEXT("c ration 0.55, one 60 s step: each home of 1,000 recalled 1000 x 0.45 x 0.05 sol / %.0f = 11.25 -> 11 residents:%s %d in all, every clock counting on its 1,000 at onset"), EvacSols, *RateText, Gone));
+			Expect(CountAlerts(TEXT("SHORT RATIONS")) == 5 && CountAlerts(TEXT("RECALLED")) == 5 && Alerts.Num() == 10 && CountAlerts(TEXT("LIFE SUPPORT")) == 0 && CountAlerts(TEXT("EVACUATED")) == 0,
+				FString::Printf(TEXT("d the shortage begins: %d alert(s) in all - %d SHORT RATIONS (one per home, not one per resident), %d RECALLED (one batch per home), %d old per-person LIFE SUPPORT / EVACUATED"),
+					Alerts.Num(), CountAlerts(TEXT("SHORT RATIONS")), CountAlerts(TEXT("RECALLED")), CountAlerts(TEXT("LIFE SUPPORT")) + CountAlerts(TEXT("EVACUATED"))));
+			bool bText = false, bBatch = false;
+			for (const FString& A : Alerts)
+			{
+				bText |= A.StartsWith(TEXT("SHORT RATIONS")) && A.Contains(TEXT("Floor -3")) && A.Contains(TEXT("food")) && A.Contains(TEXT("1000 residents"));
+				bBatch |= A.StartsWith(TEXT("RECALLED")) && A.Contains(TEXT("11 residents of Floor -3"));
+			}
+			Expect(bText && bBatch, TEXT("d the alerts name the home, the count and the resource: \"... Floor -3 - food is running short for 1000 residents ...\" and \"11 residents of Floor -3 recalled to orbit\""));
+		}
+		Alerts.Reset();
+		Before.Reset();
+		for (const FFloor& F : Roster()) { Before.Add(F.Ids.Num()); }
+		ShortFood();
+		EraStepOnce();
+		{
+			// The second step is the same step: the clock counts the 1,000 of onset,
+			// not the 989 left, so 0.25 + 11.25 = 11.5 -> 11 again (22.5 in two steps).
+			bool bSteady = true;
+			const TArray<FFloor> After = Roster();
+			for (int32 I = 0; I < 5; ++I) { bSteady &= Before[I] - After[I].Ids.Num() == 11 && Sim->GetHomeOnsetResidents(-(I + 1)) == 1000; }
+			Expect(CountAlerts(TEXT("SHORT RATIONS")) == 0 && CountAlerts(TEXT("RECALLED")) == 5 && Alerts.Num() == 5 && bSteady,
+				FString::Printf(TEXT("d still short: no second SHORT RATIONS (it is an edge), one RECALLED batch per home: %d alert(s); c every home recalled 11 more - the rate does not slow as the home shrinks (it counts its 1,000, not the 989 left)"), Alerts.Num()));
+		}
+
+		// (e) Save / load in the middle of it: the clocks and the onset sizes come
+		// back exactly, and the step after a load is the step that would have happened.
+		{
+			TArray<double> Acc0;
+			TArray<int32> Onset0;
+			for (int32 L = 1; L <= Floors; ++L) { Acc0.Add(Sim->GetHomeDepartureAcc(-L)); Onset0.Add(Sim->GetHomeOnsetResidents(-L)); }
+			const double Deficit0 = Sim->GetDeficitEquivalent();
+			const int32 Pop0 = Sim->GetPopulation();
+			// Four Mars-born, to prove the flag rides the save.
+			const TArray<FFloor> Homes0 = Roster();
+			for (int32 K = 0; K < 4; ++K) { Sim->Debug_SetMarsBorn(Homes0[K].Ids[0], true); }
+			bool bFractional = true;
+			for (const double A : Acc0) { bFractional &= A > 0.05 && A < 1.0; }
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("percaptest"), Err), FString::Printf(TEXT("e saved %d colonists mid-shortage (%s)"), Pop0, *Err));
+			ShortFood();
+			EraStepOnce();
+			const int32 PopX1 = Sim->GetPopulation();
+			TArray<double> AccX1;
+			for (int32 L = 1; L <= Floors; ++L) { AccX1.Add(Sim->GetHomeDepartureAcc(-L)); }
+			TArray<int32> IdsX1;
+			for (const FRHColonist& C : Sim->GetColonists()) { IdsX1.Add(C.Id); }
+			Expect(Sim->LoadColony(TEXT("percaptest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("e loaded (%s)"), *Err));
+			bool bAcc = true, bOnset = true;
+			for (int32 L = 1; L <= Floors; ++L) { bAcc &= Sim->GetHomeDepartureAcc(-L) == Acc0[L - 1]; bOnset &= Sim->GetHomeOnsetResidents(-L) == Onset0[L - 1] && Onset0[L - 1] == 1000; }
+			int32 MarsBorn = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { MarsBorn += C.bMarsBorn ? 1 : 0; }
+			Expect(bFractional && bAcc && bOnset && Sim->GetDeficitEquivalent() == Deficit0 && Sim->GetPopulation() == Pop0 && MarsBorn == 4,
+				FString::Printf(TEXT("e the round trip holds the per-home clocks bit for bit (%.4f %.4f %.4f %.4f %.4f) and the onset sizes (%d %d %d %d %d), the deficit %.2f, the headcount %d, %d Mars-born"),
+					Sim->GetHomeDepartureAcc(-1), Sim->GetHomeDepartureAcc(-2), Sim->GetHomeDepartureAcc(-3), Sim->GetHomeDepartureAcc(-4), Sim->GetHomeDepartureAcc(-5),
+					Sim->GetHomeOnsetResidents(-1), Sim->GetHomeOnsetResidents(-2), Sim->GetHomeOnsetResidents(-3), Sim->GetHomeOnsetResidents(-4), Sim->GetHomeOnsetResidents(-5),
+					Sim->GetDeficitEquivalent(), Sim->GetPopulation(), MarsBorn));
+			ShortFood();
+			EraStepOnce();
+			bool bSame = Sim->GetPopulation() == PopX1 && Sim->GetPopulation() == IdsX1.Num();
+			for (int32 L = 1; L <= Floors; ++L) { bSame &= Sim->GetHomeDepartureAcc(-L) == AccX1[L - 1]; }
+			int32 Matching = 0;
+			for (int32 I = 0; I < Sim->GetColonists().Num() && I < IdsX1.Num(); ++I) { Matching += Sim->GetColonists()[I].Id == IdsX1[I] ? 1 : 0; }
+			Expect(bSame && Matching == IdsX1.Num(),
+				FString::Printf(TEXT("e the step after the load matches the step without it: population %d vs %d, clocks equal, the same %d of %d residents in the same order"), Sim->GetPopulation(), PopX1, Matching, IdsX1.Num()));
+			for (const FRHColonist& C : Sim->GetColonists()) { Sim->Debug_SetMarsBorn(C.Id, false); }
+		}
+
+		// Recovery: one RATIONS RESTORED per home, the clocks and onset sizes reset, then quiet.
+		Alerts.Reset();
+		SetStock(NFood, 1.0e8);
+		EraStepOnce();
+		bool bClear = true;
+		for (int32 L = 1; L <= Floors; ++L) { bClear &= Sim->GetHomeDepartureAcc(-L) == 0.0 && Sim->GetHomeOnsetResidents(-L) == 0; }
+		Expect(CountAlerts(TEXT("RATIONS RESTORED")) == 5 && Alerts.Num() == 5 && bClear && Near(Sim->GetDeficitEquivalent(), 0.0, 1e-12),
+			FString::Printf(TEXT("d recovery: %d alert(s), %d RATIONS RESTORED (one per home), every clock and onset size back to 0"), Alerts.Num(), CountAlerts(TEXT("RATIONS RESTORED"))));
+		Alerts.Reset();
+		EraStepOnce();
+		Expect(Alerts.Num() == 0, FString::Printf(TEXT("d quiet again: %d alert(s) on a full ration"), Alerts.Num()));
+
+		// (c) A deep, long shortage: one sol (20 steps) at ration 0.55. The law is
+		// linear: a home recalls onset residents x (1 - r) x sols / EvacSols, floored
+		// - 22.5 percent of its size here - so the colony shrinks by 0.45 / 2 in a sol
+		// (0.775 of what it was), not by a share of what is left.
+		{
+			TArray<int32> Start;
+			for (const FFloor& F : Roster()) { Start.Add(F.Ids.Num()); }
+			const int32 PopStart = Sim->GetPopulation();
+			for (int32 K = 0; K < 20; ++K) { ShortFood(); EraStepOnce(); }
+			bool bLinear = true;
+			FString RecText;
+			const TArray<FFloor> After = Roster();
+			for (int32 I = 0; I < 5; ++I)
+			{
+				const int32 Want = Start[I] - FMath::FloorToInt(Start[I] * (1.0 - ShortRation) * (20 * DtSols) / EvacSols + 1e-9);
+				bLinear &= After[I].Ids.Num() == Want;
+				RecText += FString::Printf(TEXT(" %d -> %d (expect %d);"), Start[I], After[I].Ids.Num(), Want);
+			}
+			const double Linear = PopStart * (1.0 - (1.0 - ShortRation) * (20 * DtSols) / EvacSols);
+			Expect(bLinear && Near(Sim->GetPopulation(), Linear, 0.01 * PopStart),
+				FString::Printf(TEXT("c one sol at ration 0.55: each home loses floor(onset x 0.45 x 1 sol / %.0f):%s the colony %d -> %d (the linear law: %d x (1 - 0.45 / %.0f) = %.0f)"),
+					EvacSols, *RecText, PopStart, Sim->GetPopulation(), PopStart, EvacSols, Linear));
+			Restore();
+			EraStepOnce();
+		}
+
+		// (c) Who leaves: ration 0 for one step. Floor -1's twenty newest are
+		// Mars-born; floor -5 is all Mars-born but its five oldest; the rest are not.
+		{
+			const TArray<FFloor> Homes = Roster();
+			TSet<int32> MarsBorn;
+			for (int32 K = 0; K < 20; ++K) { MarsBorn.Add(Homes[0].Ids[Homes[0].Ids.Num() - 1 - K]); }
+			for (int32 K = 5; K < Homes[4].Ids.Num(); ++K) { MarsBorn.Add(Homes[4].Ids[K]); }
+			for (const int32 Id : MarsBorn) { Sim->Debug_SetMarsBorn(Id, true); }
+			TSet<int32> Wanted;
+			TArray<int32> WantedPerFloor;
+			for (const FFloor& F : Homes)
+			{
+				const int32 K = FMath::FloorToInt(F.Ids.Num() * 1.0 * EraDt / (EvacSols * SolLen) + 1e-9);
+				TArray<int32> Order = F.Ids;
+				Order.Sort([&MarsBorn](int32 A, int32 B) { const bool MA = MarsBorn.Contains(A), MB = MarsBorn.Contains(B); return MA != MB ? !MA : A > B; });
+				for (int32 I = 0; I < K; ++I) { Wanted.Add(Order[I]); }
+				WantedPerFloor.Add(K);
+			}
+			SetStock(NFood, 0.0);
+			Alerts.Reset();
+			EraStepOnce();
+			TSet<int32> Gone;
+			for (const FFloor& F : Homes) { for (const int32 Id : F.Ids) { if (!Sim->FindColonist(Id)) { Gone.Add(Id); } } }
+			bool bMarsKept = true;
+			for (int32 K = 0; K < 20; ++K) { bMarsKept &= !Gone.Contains(Homes[0].Ids[Homes[0].Ids.Num() - 1 - K]); }
+			bool bOldestNonMars = true;
+			for (int32 K = 0; K < 5; ++K) { bOldestNonMars &= Gone.Contains(Homes[4].Ids[K]); }
+			int32 MarsGoneOnLast = 0;
+			for (int32 K = 5; K < Homes[4].Ids.Num(); ++K) { MarsGoneOnLast += Gone.Contains(Homes[4].Ids[K]) ? 1 : 0; }
+			Expect(Gone.Num() == Wanted.Num() && Gone.Includes(Wanted) && Wanted.Includes(Gone),
+				FString::Printf(TEXT("c who leaves, ration 0: %d recalled (%d %d %d %d %d by floor, each N / 40), exactly the newest arrivals of each home, Mars-born last"),
+					Gone.Num(), WantedPerFloor[0], WantedPerFloor[1], WantedPerFloor[2], WantedPerFloor[3], WantedPerFloor[4]));
+			Expect(bMarsKept && bOldestNonMars && MarsGoneOnLast == WantedPerFloor[4] - 5,
+				FString::Printf(TEXT("c floor -1: its 20 newest, all Mars-born, stay while older non-Mars-born leave; floor -5: the five non-Mars-born go first (they hold the OLDEST Ids), then %d Mars-born from the highest Id"), MarsGoneOnLast));
+			Expect(CountAlerts(TEXT("SHORT RATIONS")) == 5 && CountAlerts(TEXT("RECALLED")) == 5 && Alerts.Num() == 10,
+				FString::Printf(TEXT("d %d people recalled across five homes, %d alerts"), Gone.Num(), Alerts.Num()));
+			for (const FRHColonist& C : Sim->GetColonists()) { Sim->Debug_SetMarsBorn(C.Id, false); }
+		}
+		Restore();
+
+		// Furnishings still read per resident at the smaller colony.
+		{
+			const double N = Sim->GetPopulation();
+			const FHope HF = Sim->GetColonyHope();
+			Expect(Near(HF.Furnishings, FMath::Min(Sim->GetHopeFurnishingsMax(), 8.0 * RefPop / N), 1e-9) && N < 5000,
+				FString::Printf(TEXT("furnishings per resident: at N=%.0f the four sofas read %.5f (expect 8 x 8 / %.0f)"), N, HF.Furnishings, N));
+		}
+		// (c) A total failure empties a home in EvacSols: the food is gone and stays
+		// gone. After one sol each home has lost half its onset size (the rate is
+		// steady, not a share of what is left); after the two sols it has lost all
+		// of it, give or take the one resident the last fraction of a step leaves.
+		{
+			TArray<int32> Start;
+			for (const FFloor& F : Roster()) { Start.Add(F.Ids.Num()); }
+			SetStock(NFood, 0.0);
+			for (int32 K = 0; K < 20; ++K) { EraStepOnce(); }
+			bool bHalf = true;
+			FString HalfText;
+			const TArray<FFloor> Half = Roster();
+			for (int32 I = 0; I < 5; ++I)
+			{
+				bHalf &= FMath::Abs(Half[I].Ids.Num() - (Start[I] - Start[I] / 2)) <= 1;
+				HalfText += FString::Printf(TEXT(" %d -> %d;"), Start[I], Half[I].Ids.Num());
+			}
+			Expect(bHalf, FString::Printf(TEXT("c ration 0 for one sol (EvacSols %.0f): every home has lost half its onset size:%s"), EvacSols, *HalfText));
+			for (int32 K = 0; K < 20; ++K) { EraStepOnce(); }
+			Expect(Sim->GetPopulation() <= 5, FString::Printf(TEXT("c ration 0 for the %.0f sols: the colony is down to %d (every home at most one resident from empty)"), EvacSols, Sim->GetPopulation()));
+			for (int32 K = 0; K < 2; ++K) { EraStepOnce(); }
+			Expect(Sim->GetPopulation() == 0 && Sim->GetHomeRations().Num() == 0 && Sim->GetDeficitEquivalent() == 0.0,
+				FString::Printf(TEXT("c ...and empty a step or two after: %d residents, %d homes on the books"), Sim->GetPopulation(), Sim->GetHomeRations().Num()));
+		}
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== PER-CAPITA TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -5679,8 +6323,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	// GetColonyHope (the deck reads it every frame) and the Debug_AddColonists
 	// call that got there, against budgets. Correctness at scale is asserted
 	// too: the population is exactly N, every Id resolves, everyone is housed,
-	// supported and in a bed with room, and the seats fill. Then half the crew
-	// is starved out and evacuated (the roster shifts under every lookup) and a
+	// supported and in a bed with room, and the seats fill. Then the food runs
+	// half short (C2a: everyone gets half a ration, each home recalls its newest
+	// residents on its clock, and the roster shifts under every lookup) and a
 	// save/load round trip must restore every assignment. A DIGEST line per
 	// size hashes every derived value bit-for-bit, so a refactor that must not
 	// change behaviour is proven by diffing two runs of this suite. Timings are
@@ -5694,6 +6339,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("SCALE ok: %s"), *What); }
 			else { UE_LOG(LogRedHopeSim, Error, TEXT("SCALE FAIL: %s"), *What); ++Fails; }
 		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
 		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
 		constexpr double AgentDt = (double)URHSimClockSubsystem::SubStepSeconds;
 		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
@@ -5828,6 +6474,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		int32 SeatsTotal = 0;
 		for (int32 L = 1; L <= Floors; ++L) { for (int32 I = 0; I < CellsPerFloor; ++I) { SeatsTotal += Sim->GetCellSeats(FIntVector(-L, I, 0)); } }
 		UE_LOG(LogRedHopeSim, Display, TEXT("SCALE layout: %d cells, %d pieces, %d beds, %d work seats"), Floors * CellsPerFloor, Sim->GetFurniture().Num(), Capacity, SeatsTotal);
+Sim->Debug_SetHopeGates(50.0, 50.0); // C2a: research and births run in every timed step (see the growth ladder)
 
 		// Digests: every derived value that must survive a refactor, hashed at full
 		// precision (raw double bits) and in the colonist array's own order.
@@ -5841,7 +6488,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 H = 0;
 			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
 			for (const double V : { Hp.Housing, Hp.Rooms, Hp.Jobs, Hp.Furnishings, Hp.Views, Hp.AdjacencyPenalty }) { MixD(H, V); }
-			MixI(H, Hp.OffendedPairs); MixI(H, Hp.FilledSeats);
+			MixI(H, Hp.OffendedPairs); MixI(H, Hp.FilledSeats); MixI(H, Hp.OffendedRefusers); MixI(H, Hp.RefuserCells); // C2a: the shares behind the per-head terms
 			MixI(H, Sim->GetStaffedSeats()); MixD(H, Sim->GetLabYieldSeatSum()); MixD(H, Sim->GetWorkstationYieldSeatSum());
 			MixI(H, Sim->GetHousingCapacity()); MixI(H, Sim->GetFreeHousing()); MixI(H, Sim->GetPopulation());
 			for (int32 L = 1; L <= Floors; ++L)
@@ -5871,7 +6518,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 H = Assignments();
 			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
 			for (const double V : { Hp.Base, Hp.Milestones, Hp.Comforts, Hp.UnsupportedPenalty, Hp.WaterPenalty, Hp.FoodPenalty, Hp.CrisisPenalty, Hp.Solidarity, Hp.Total }) { MixD(H, V); }
-			MixD(H, Sim->GetHopeSmoothed()); MixI(H, (int32)Sim->GetHopeBand());
+			MixD(H, Sim->GetHopeSmoothed()); MixI(H, (int32)Sim->GetHopeBand()); MixD(H, Sim->GetDeficitEquivalent()); // C2a
 			MixD(H, Sim->GetCrewSkillMul(FName("Lab"))); MixD(H, Sim->GetCrewSkillMul(FName("Garden"))); MixD(H, Sim->GetCrewSkillMul(FName("Workstation")));
 			for (const FName& Res : { NFood, NWater, NOxygen, NSoil, NSeeds }) { MixD(H, Sim->GetStock(Res)); }
 			MixD(H, Sim->GetWaterPotability()); MixD(H, Sim->GetGardenFoodCumKg()); MixD(H, Sim->GetPower().BatteryWh);
@@ -5880,7 +6527,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			for (int32 L = 1; L <= Floors; ++L) { MixD(H, Sim->GetFloorO2Kg(-L)); MixI(H, Sim->IsFloorRated(-L) ? 1 : 0); }
 			for (const FRHColonist& C : Sim->GetColonists())
 			{
-				MixI(H, C.bSupported ? 1 : 0); MixD(H, C.UnsupportedSimSeconds);
+				MixI(H, C.bSupported ? 1 : 0); MixD(H, C.UnsupportedSimSeconds); MixI(H, C.bMarsBorn ? 1 : 0); // C2a
 				TArray<TPair<FString, double>> Skills;
 				for (const TPair<FName, double>& S : C.SkillSols) { Skills.Emplace(S.Key.ToString(), S.Value); }
 				Skills.Sort([](const TPair<FString, double>& A, const TPair<FString, double>& B) { return A.Key < B.Key; });
@@ -5930,6 +6577,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(bPiecesOk, FString::Printf(TEXT("%s: every bed piece holds no more than its capacity (%d colonists share %d pieces)"), *Tag, N, PerPiece.Num()));
 			Expect(bStations && Employed == FMath::Min(N, SeatsTotal) && Sim->GetColonyHope().FilledSeats == Employed,
 				FString::Printf(TEXT("%s: %d at work posts (min of N and %d seats), %d idle, every worker has a station"), *Tag, Employed, SeatsTotal, Idle));
+			// C2a: Hope per head. Jobs is the employment rate (7.5 x seats / people, capped
+			// at 7.5), adjacency a share of the refuser cells, and the index falls with
+			// the city's size instead of sitting at the 100 the uncapped jobs line used
+			// to pin it at.
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			Expect(Near(Hp.Jobs, Sim->GetHopeJobsMax() * FMath::Min(1.0, (double)Hp.FilledSeats / N), 1e-9) && Hp.Total > 40.0 && Hp.Total < 99.0
+				&& Hp.RefuserCells > 0 && Hp.OffendedRefusers > 0 && Near(Hp.AdjacencyPenalty, Sim->GetHopeAdjacencyMax() * Hp.OffendedRefusers / Hp.RefuserCells, 1e-9),
+				FString::Printf(TEXT("%s: Hope per head %.2f = 50 + milestones %.2f + housing %.2f + rooms %.2f + jobs %.2f (%d seats for %d) + furnishings %.2f - adjacency %.2f (%d of %d refuser cells) - unsupported %.2f"),
+					*Tag, Hp.Total, Hp.Milestones, Hp.Housing, Hp.Rooms, Hp.Jobs, Hp.FilledSeats, N, Hp.Furnishings, Hp.AdjacencyPenalty, Hp.OffendedRefusers, Hp.RefuserCells, Hp.UnsupportedPenalty));
 		};
 
 		// The growth ladder.
@@ -5948,9 +6604,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Housed == Want, FString::Printf(TEXT("N=%d: Debug_AddColonists(%d) housed %d"), Target, Want, Housed));
 			if (Table.Num() == 1)
 			{
-				// Five sols with a thousand at work: the smoothed Hope climbs past the
-				// discovery line (85), so the research and growth paths run in every
-				// measured step from here on. (No birth: that needs 20 sols.)
+				// Five sols with a thousand at work. C2a: Hope is per head now, so a
+				// city of thousands on this layout sits near 70 and no longer climbs
+				// past the research line (85) or the growth line (75) by itself (the
+				// uncapped jobs line used to pin it at 100). The two gates were lowered
+				// to 50 at the start so the research and growth paths still run in every
+				// measured step. (No birth: that needs 20 sols.)
 				for (int32 K = 0; K < 5 * (int32)(SolLen / EraDt); ++K) { EraStepOnce(); }
 			}
 			// Settle: the first step after a change rebuilds whatever is derived.
@@ -5997,30 +6656,52 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(!bCapped && Table.Num() == UE_ARRAY_COUNT(Targets), TEXT("every size ran: no step took over 5 s"));
 		Expect(Sim->GetBirthsOnMars() == 0 && Sim->GetPopulation() == (Table.Num() ? Table.Last().N : -1), TEXT("no births muddied the headcount (growth needs 20 sols; the run is about a dozen)"));
 
-		// Evacuation at scale. Only the newest half of the crew is fed (the draw
-		// walks the roster from its last slot down), so the older half goes
-		// unsupported and, after the countdown, is pulled back to orbit - every
-		// removal shifts the slots of everyone after it.
+		// Recall at scale (C2a). The colony's food runs half short for two sols
+		// (40 era steps): every resident of every home gets half a ration - not
+		// "the newest half eats" - so every home's clock runs, and each home
+		// recalls its newest residents first. The law is linear: a home recalls its
+		// size at onset x (1 - 0.5) x sols / EvacSols (the old rule recalled the unfed
+		// half, all at once, after two sols). Every recall shifts the roster under
+		// every lookup. (The layout has Infirmary cells, so the clock runs on 3 sols,
+		// not 2: in two sols the colony loses 0.5 x 2 / 3, a third, and keeps 0.667.)
 		if (!bCapped)
 		{
 			const int32 Before = Sim->GetPopulation();
-			const double RationKg = Sim->GetColonistFoodKgPerSol() * EraDt / SolLen;
-			int32 StarvedSteps = 0;
-			for (; StarvedSteps < 90 && Sim->GetPopulation() == Before; ++StarvedSteps)
+			TMap<int32, int32> FloorOf;
+			FloorOf.Reserve(Before);
+			for (const FRHColonist& C : Sim->GetColonists()) { FloorOf.Add(C.Id, C.HomeLevel); }
+			int32 MinGone[Floors + 1], MaxKept[Floors + 1];
+			for (int32 L = 0; L <= Floors; ++L) { MinGone[L] = TNumericLimits<int32>::Max(); MaxKept[L] = 0; }
+			for (int32 K = 0; K < 40; ++K)
 			{
-				Sim->AddStock(NFood, (Before / 2 + 0.5) * RationKg - Sim->GetStock(NFood));
+				Sim->AddStock(NFood, -Sim->GetStock(NFood));
+				Sim->AddStock(NFood, 0.5 * Sim->GetPopulation() * Sim->GetColonistFoodKgPerSol() * EraDt / SolLen);
 				EraStepOnce();
 			}
 			const int32 Left = Sim->GetPopulation();
-			Expect(Left < Before && Left >= Before / 2 && Left <= Before / 2 + 600,
-				FString::Printf(TEXT("evacuation: %d of %d pulled back after %d starved steps (the unfed half; gardens fed a few more)"), Before - Left, Before, StarvedSteps));
-			Sim->AddStock(NFood, 1.0e8 - Sim->GetStock(NFood));
+			bool bNewestFirst = true;
+			for (const TPair<int32, int32>& P : FloorOf)
+			{
+				const int32 L = -P.Value;
+				if (L < 1 || L > Floors) { continue; }
+				if (Sim->FindColonist(P.Key)) { MaxKept[L] = FMath::Max(MaxKept[L], P.Key); }
+				else { MinGone[L] = FMath::Min(MinGone[L], P.Key); }
+			}
+			int32 PerFloorGone = 0;
+			for (int32 L = 1; L <= Floors; ++L) { bNewestFirst &= MaxKept[L] < MinGone[L]; PerFloorGone += MinGone[L] != TNumericLimits<int32>::Max() ? 1 : 0; }
+			const double Expected = Before * (1.0 - 0.5 * (40.0 * EraDt / SolLen) / Sim->GetEffectiveEvacSols());
+			Expect(Left < Before && Near(Left, Expected, 0.03 * Before) && PerFloorGone == Floors, // the gardens' food lifts the ration a hair over 0.5, so a few fewer leave
+				FString::Printf(TEXT("recall: %d of %d recalled over two sols at half rations (the linear law says about %.0f left; every one of the %d floors lost some)"), Before - Left, Before, Expected, Floors));
+			Expect(bNewestFirst,
+				TEXT("recall: on every floor each resident who stayed arrived before each one who left (newest first, the roster shifts under every lookup)"));
+			Sim->AddStock(NFood, -Sim->GetStock(NFood));
+			Sim->AddStock(NFood, 1.0e8);
 			for (int32 K = 0; K < 3; ++K) { EraStepOnce(); }
 			const FRHColonist* Oldest = Sim->GetColonists().Num() ? &Sim->GetColonists()[0] : nullptr;
-			Expect(Sim->FindColonist(1) == nullptr && Oldest && Oldest->Id > Before / 4 && Sim->FindColonist(Oldest->Id) == Oldest,
-				FString::Printf(TEXT("evacuation: the oldest hands are gone, the roster now starts at #%d and every lookup follows the shift"), Oldest ? Oldest->Id : 0));
-			VerifyAt(TEXT("after evacuation"));
-			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest evacuated: %08x (%d left)"), Digest(), Left);
+			Expect(Sim->FindColonist(1) != nullptr && Oldest && Oldest->Id == 1 && Sim->FindColonist(Oldest->Id) == Oldest,
+				FString::Printf(TEXT("recall: the oldest hands stay, the roster still starts at #%d and every lookup follows the shift"), Oldest ? Oldest->Id : 0));
+			VerifyAt(TEXT("after recall"));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE digest recalled: %08x (%d left)"), Digest(), Left);
 
 			// Save / load: every derived assignment must come back exactly.
 			const uint32 AssignedBefore = Assignments();

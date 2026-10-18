@@ -710,6 +710,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			{
 				Parts.Add(FString::Printf(TEXT("Layout: %d pair%s of rooms clash."), H.OffendedPairs, H.OffendedPairs == 1 ? TEXT("") : TEXT("s")));
 			}
+			if (S->GetDeficitEquivalent() > 0.0)
+			{
+				// C2a, Gate-D framing PLACEHOLDER: the Hope line for a shared shortage.
+				Parts.Add(FString::Printf(TEXT("Rations: the equivalent of %.0f of %d residents is short of a full ration."), S->GetDeficitEquivalent(), S->GetPopulation()));
+			}
 			// D3a, Gate-D framing PLACEHOLDERS (inventory D29). The research gate and
 			// the FLOURISHING edge sit above where rooms and jobs alone reach.
 			if (S->GetLabYieldSeatSum() > 0.0 && !S->GetNextDiscovery().IsNone() && S->GetHopeSmoothed() < S->GetHopeDiscoveryThreshold())
@@ -830,9 +835,9 @@ void SRHCommandDeck::RefreshRosterPanel()
 					const FRHColonist& C = S->GetColonists()[Index];
 					if (!C.bSupported)
 					{
-						// Placeholder wording (Gate-D framing review).
-						const double EvacIn = S->GetEffectiveEvacSols() - C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
-						return Txt(FString::Printf(TEXT("needs support - recalled in %.1f sols"), FMath::Max(EvacIn, 0.0)));
+						// Placeholder wording (Gate-D framing review). C2a: the shortage is
+						// shared, so the line shows the ration the home gets, not a countdown.
+						return Txt(FString::Printf(TEXT("needs support - %.0f%% rations"), S->GetColonistRation(C) * 100.0));
 					}
 					const FName Job = S->GetColonistJob(C.Id);
 					const FString Home = C.HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C.HomeLevel));

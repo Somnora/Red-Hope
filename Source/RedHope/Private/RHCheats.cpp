@@ -446,10 +446,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRHHope(
 		if (!Sim) { return; }
 		const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
 		UE_LOG(LogRedHope, Display,
-			TEXT("[RH.Hope] instant %.1f | smoothed %.1f  %s  tempo %.0f%% | base %.0f housing +%.1f rooms +%.1f jobs +%.1f (%d seats) milestones +%.1f comforts +%.1f | adjacency -%.1f (%d pairs) unsupported -%.1f water -%.1f (potability %.0f%%) food -%.1f (runway %.1f sols)"),
+			TEXT("[RH.Hope] instant %.1f | smoothed %.1f  %s  tempo %.0f%% | base %.0f housing +%.1f rooms +%.1f jobs +%.1f (%d seats for %d) milestones +%.1f comforts +%.1f furnishings +%.1f views +%.1f | adjacency -%.1f (%d of %d refuser cells offended, %d pairs) unsupported -%.1f (%.1f of %d on short rations) water -%.1f (potability %.0f%%) food -%.1f (runway %.1f sols)"),
 			H.Total, Sim->GetHopeSmoothed(), Sim->GetHopeBandName(), Sim->GetHumanWorkTempo() * 100.0,
-			H.Base, H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Milestones, H.Comforts,
-			H.AdjacencyPenalty, H.OffendedPairs, H.UnsupportedPenalty, H.WaterPenalty, Sim->GetWaterPotability() * 100.0, H.FoodPenalty, Sim->GetFoodRunwaySols());
+			H.Base, H.Housing, H.Rooms, H.Jobs, H.FilledSeats, H.Population, H.Milestones, H.Comforts, H.Furnishings, H.Views,
+			H.AdjacencyPenalty, H.OffendedRefusers, H.RefuserCells, H.OffendedPairs, H.UnsupportedPenalty, H.DeficitEquivalent, H.Population,
+			H.WaterPenalty, Sim->GetWaterPotability() * 100.0, H.FoodPenalty, Sim->GetFoodRunwaySols());
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHEarth(
@@ -1145,23 +1146,30 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSetShieldTax(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHCrew(
 	TEXT("RH.Crew"),
-	TEXT("RH.Crew - log the colonist roster: name, home floor, support state, evacuation timer."),
+	TEXT("RH.Crew - log the colonist roster: name, home floor, support state, ration; and each home's ration and departure clock."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
 		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
 		if (!Sim) { return; }
-		UE_LOG(LogRedHope, Display, TEXT("[RH.Crew] population %d | housing %d beds (%d free) | Food %.0f kg"),
-			Sim->GetPopulation(), Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetStock(FName("Food")));
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Crew] population %d | housing %d beds (%d free) | Food %.0f kg | short-ration deficit %.1f"),
+			Sim->GetPopulation(), Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetStock(FName("Food")), Sim->GetDeficitEquivalent());
+		for (const URHSimWorldSubsystem::FRHHomeRation& Home : Sim->GetHomeRations())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  home %-20s %d resident(s)  ration %.0f%%%s  departure clock %.2f of 1 (counted on %d residents at onset)"),
+				*Sim->GetHomeLabel(Home.HomeLevel, Home.HomeHab), Home.Residents, Home.Fraction * 100.0,
+				Home.Limiting.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (%s short)"), *Home.Limiting.ToString()),
+				Sim->GetHomeDepartureAcc(Home.Key), Sim->GetHomeOnsetResidents(Home.Key));
+		}
 		for (const FRHColonist& C : Sim->GetColonists())
 		{
-			const double EvacSols = C.UnsupportedSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds;
 			const FName Job = Sim->GetColonistJob(C.Id);
-			UE_LOG(LogRedHope, Display, TEXT("  %-12s floor %d  %-12s %s%s"),
+			UE_LOG(LogRedHope, Display, TEXT("  %-12s floor %d  %-12s %s%s%s"),
 				*C.Name, C.HomeLevel,
 				Job.IsNone() ? TEXT("(no post)") : *Job.ToString(),
-				C.bSupported ? TEXT("supported") : TEXT("UNSUPPORTED"),
-				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (evac in %.1f sols)"), Sim->GetEffectiveEvacSols() - EvacSols));
+				C.bSupported ? TEXT("supported") : TEXT("SHORT RATIONS"),
+				C.bSupported ? TEXT("") : *FString::Printf(TEXT("  (ration %.0f%%)"), Sim->GetColonistRation(C) * 100.0),
+				C.bMarsBorn ? TEXT("  [Mars-born]") : TEXT(""));
 		}
 	}));
 

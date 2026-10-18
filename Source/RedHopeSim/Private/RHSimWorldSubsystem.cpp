@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 33;  // v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 34;  // v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -136,9 +136,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeBase = Defs->GetConfigScalar(FName("HopeBase"), HopeBase);
 	HopeHousingMax = Defs->GetConfigScalar(FName("HopeHousingMax"), HopeHousingMax);
 	HopePerMoralePoint = Defs->GetConfigScalar(FName("HopePerMoralePoint"), HopePerMoralePoint);
-	HopePerJob = Defs->GetConfigScalar(FName("HopePerJob"), HopePerJob);
-	HopeAdjacencyPenalty = Defs->GetConfigScalar(FName("HopeAdjacencyPenalty"), HopeAdjacencyPenalty);
-	HopeUnsupportedPenalty = Defs->GetConfigScalar(FName("HopeUnsupportedPenalty"), HopeUnsupportedPenalty);
+	// C2a (per head). HopePerJob, HopeAdjacencyPenalty and HopeUnsupportedPenalty are retired.
+	HopeJobsMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeJobsMax"), HopeJobsMax));
+	HopeUnsupportedMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeUnsupportedMax"), HopeUnsupportedMax));
+	HopeUnsupportedSteepness = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeUnsupportedSteepness"), HopeUnsupportedSteepness));
+	HopeAdjacencyMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeAdjacencyMax"), HopeAdjacencyMax));
+	RoomServesResidents = FMath::Max(1.0, Defs->GetConfigScalar(FName("RoomServesResidents"), RoomServesResidents));
+	ComfortRefPop = FMath::Max(0.0, Defs->GetConfigScalar(FName("ComfortRefPop"), ComfortRefPop));
 	HopeVaultMilestone = Defs->GetConfigScalar(FName("HopeVaultMilestone"), HopeVaultMilestone);
 	GardenSoilKgPerCell = Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), GardenSoilKgPerCell);
 	GardenSeedsKgPerCell = Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), GardenSeedsKgPerCell);
@@ -3530,6 +3534,36 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	}
 }
 
+FString URHSimWorldSubsystem::GetHomeLabel(int32 HomeLevel, int32 HomeHab) const
+{
+	// Placeholder copy (Gate-D review): the name a rationing alert gives a home. A
+	// surface network is named by its root, so two networks never share a name.
+	if (HomeHab == 0)
+	{
+		return FString::Printf(TEXT("Floor %d"), HomeLevel);
+	}
+	const FRHHabNetCache* Net = FindHabNet(HomeHab);
+	return FString::Printf(TEXT("Surface habitat #%d"), Net ? Net->Root : HomeHab);
+}
+
+double URHSimWorldSubsystem::GetColonistRation(const FRHColonist& C) const
+{
+	int32 Key = C.HomeLevel;
+	if (C.HomeHab != 0)
+	{
+		const FRHHabNetCache* Net = FindHabNet(C.HomeHab);
+		Key = Net ? Net->Root : C.HomeHab;
+	}
+	for (const FRHHomeRation& Home : HomeRations)
+	{
+		if (Home.Key == Key)
+		{
+			return Home.Fraction;
+		}
+	}
+	return 1.0;
+}
+
 void URHSimWorldSubsystem::StepPopulation(float SubDt)
 {
 	// Jobs re-derive every step (rooms/floors/roster all change them); the
@@ -3569,6 +3603,9 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	if (Colonists.Num() == 0)
 	{
 		ComfortsSupplied = 0;
+		DeficitEquivalent = 0.0; // C2a: no homes, no rations, no one on their way out
+		HomeClocks.Reset();
+		HomeRations.Reset();
 		bFoodLowAnnounced = false; // no crew, no larder episode (D4a; runtime only)
 		FreshWaterThisStepKg = 0.0; // no consumer to fold it into potability
 		// Ending resolution (v25): a colony that HAD people and lost them all
@@ -3586,15 +3623,15 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		}
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
-	static const FName NFood(TEXT("Food")), NWater(TEXT("Water"));
+	static const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen"));
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
 
 	int32 SuppliedThisStep = 0;
 	double WaterDrawnThisStep = 0.0; // for greywater reclaim + potability
-	bool bAnyHungry = false; // D4a: someone failed the food draw this step
+	bool bAnyHungry = false; // D4a: the food pool fell short this step
 	// C1: the evacuation countdown is the same for everyone this step (nothing in
 	// the loop moves a floor's rating, a room or a building), so the infirmary
-	// scan runs once, on first need - not once per unsupported colonist.
+	// scan runs once, on first need - not once per short home.
 	bool bEvacSolsKnown = false;
 	double EvacSolsNow = 0.0;
 	const auto EvacSolsThisStep = [&]()
@@ -3606,22 +3643,172 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		}
 		return EvacSolsNow;
 	};
-	for (int32 i = Colonists.Num() - 1; i >= 0; --i)
+
+	// --- C2a: shared rationing ---
+	// A HOME is a rated floor, or a surface-habitat network. Food and water are
+	// colony-wide pools and air is per home. Each pool is drawn once for the
+	// people it serves: if it covers them all, everyone is fed; if not, every
+	// resident gets the SAME fraction of the ration and the whole of what there
+	// was is taken - never "the first in the roster eats, the last goes without".
+	// A home's ration is the smallest fraction across food, water and air.
+	const int32 Pop0 = Colonists.Num();
+	struct FHome
+	{
+		int32 Key = 0, HomeLevel = 0, HomeHab = 0, Residents = 0;
+		bool bWasShort = false;   // someone here was already short at the start of the step
+		double RAir = 1.0, R = 1.0;
+		int32 Limit = 0;          // 0 none, 1 air, 2 water, 3 food (ties go in that order)
+		int32 Departing = 0;
+	};
+	// Floors are keyed by level (<= 0), a surface network by its root hab Id (> 0).
+	const auto HomeKeyOf = [this](const FRHColonist& C) -> int32
+	{
+		if (C.HomeHab == 0)
+		{
+			return C.HomeLevel;
+		}
+		const FRHHabNetCache* Net = FindHabNet(C.HomeHab);
+		return Net ? Net->Root : C.HomeHab;
+	};
+	TArray<int32> KeyOf;
+	KeyOf.SetNumUninitialized(Pop0);
+	TArray<FHome> Homes;
+	TMap<int32, int32> HomeSlot; // key -> index into Homes (lookup only, never iterated)
+	for (int32 i = 0; i < Pop0; ++i)
+	{
+		const FRHColonist& C = Colonists[i];
+		const int32 Key = HomeKeyOf(C);
+		KeyOf[i] = Key;
+		int32* Found = HomeSlot.Find(Key);
+		if (!Found)
+		{
+			FHome Fresh;
+			Fresh.Key = Key;
+			Fresh.HomeLevel = C.HomeLevel;
+			Fresh.HomeHab = C.HomeHab;
+			Found = &HomeSlot.Add(Key, Homes.Add(Fresh));
+		}
+		FHome& Home = Homes[*Found];
+		++Home.Residents;
+		Home.bWasShort |= !C.bSupported;
+	}
+	Homes.Sort([](const FHome& A, const FHome& B) { return A.Key < B.Key; });
+	HomeSlot.Reset();
+	for (int32 h = 0; h < Homes.Num(); ++h)
+	{
+		HomeSlot.Add(Homes[h].Key, h);
+	}
+
+	// The draws repeat the per-colonist arithmetic exactly (one subtraction per
+	// person, in the same order), so a colony that is fully supplied sees the
+	// numbers it always did. Cover returns how many people the pool feeds in full.
+	const auto Cover = [](double Pool, double Need, int32 Count, double& OutLeft, double* OutDrawn) -> int32
+	{
+		int32 Fed = 0;
+		OutLeft = Pool;
+		while (Fed < Count && OutLeft >= Need)
+		{
+			OutLeft -= Need;
+			if (OutDrawn)
+			{
+				*OutDrawn += Need;
+			}
+			++Fed;
+		}
+		return Fed;
+	};
+	const double NeedO2 = ColonistO2KgPerSol * DtSols;
+	for (FHome& Home : Homes)
+	{
+		if (Home.HomeHab != 0)
+		{
+			// BM-1: a surface resident breathes from the whole network (drawn per
+			// resident below). A network that is not rated has no air to share.
+			const FRHHabNetCache* Net = FindHabNet(Home.HomeHab);
+			if (Net && IsNetRated(*Net))
+			{
+				const double Supply = GetHabNetworkO2Kg(Home.HomeHab);
+				double Left = 0.0;
+				Home.RAir = Cover(Supply, NeedO2, Home.Residents, Left, nullptr) == Home.Residents ? 1.0
+					: FMath::Clamp(Supply / (Home.Residents * NeedO2), 0.0, 1.0);
+			}
+			else
+			{
+				Home.RAir = 0.0;
+			}
+		}
+		else if (RatedFloors.Contains(Home.HomeLevel))
+		{
+			// Breathe: draw from the home floor's fill. The trunk refills it (the
+			// M1-d loop); a crowd can out-breathe a starved circulator.
+			double& FillKg = FloorO2Kg.FindOrAdd(Home.HomeLevel);
+			double Left = 0.0;
+			if (Cover(FillKg, NeedO2, Home.Residents, Left, nullptr) == Home.Residents)
+			{
+				FillKg = Left;
+				Home.RAir = 1.0;
+			}
+			else
+			{
+				Home.RAir = FMath::Clamp(FillKg / (Home.Residents * NeedO2), 0.0, 1.0);
+				FillKg = FMath::Min(FillKg, 0.0); // all there was is taken (never below zero, never a refund)
+			}
+		}
+		else
+		{
+			Home.RAir = 0.0;
+		}
+	}
+	// Eat and drink: the pooled Food and Water (the ice-cap imperative: no water
+	// is as fatal as no air or food).
+	const auto DrawPool = [this, Pop0, &Cover](FName Resource, double Need, double* OutDrawn) -> double
+	{
+		const double Have = GetStock(Resource);
+		double Left = 0.0;
+		double Drawn = 0.0;
+		const int32 Fed = Cover(Have, Need, Pop0, Left, &Drawn);
+		double Ration = 1.0;
+		if (Fed < Pop0)
+		{
+			Ration = Have > 0.0 ? FMath::Clamp(Have / (Pop0 * Need), 0.0, 1.0) : 0.0;
+			Left = FMath::Min(Have, 0.0); // all there was is taken (never below zero, never a refund)
+			Drawn = FMath::Max(Have, 0.0);
+		}
+		if (Drawn > 0.0)
+		{
+			double& Amount = Stocks.FindOrAdd(Resource);
+			Amount = Left;
+			OnStockChanged.Broadcast(Resource, Amount);
+		}
+		if (OutDrawn)
+		{
+			*OutDrawn += Drawn;
+		}
+		return Ration;
+	};
+	const double RFood = DrawPool(NFood, ColonistFoodKgPerSol * DtSols, nullptr);
+	const double RWater = DrawPool(NWater, ColonistWaterKgPerSol * DtSols, &WaterDrawnThisStep);
+	bAnyHungry = RFood < 1.0;
+	for (FHome& Home : Homes)
+	{
+		Home.R = 1.0;
+		if (Home.RAir < Home.R) { Home.R = Home.RAir; Home.Limit = 1; }
+		if (RWater < Home.R)    { Home.R = RWater;    Home.Limit = 2; }
+		if (RFood < Home.R)     { Home.R = RFood;     Home.Limit = 3; }
+	}
+
+	for (int32 i = Pop0 - 1; i >= 0; --i)
 	{
 		FRHColonist& C = Colonists[i];
+		const FHome& Home = Homes[HomeSlot.FindChecked(KeyOf[i])];
 
-		// Breathe: draw from the home floor's fill. The trunk refills it (the
-		// M1-d loop); a crowd can now out-breathe a starved circulator.
-		bool bAir = false;
-		if (C.HomeHab != 0)
+		// BM-1: a surface resident breathes from the whole network - their own hab
+		// first, then the other members in ascending Id.
+		if (C.HomeHab != 0 && Home.RAir > 0.0)
 		{
-			// BM-1: a surface resident breathes from the whole network - their
-			// own hab first, then the other members in ascending Id.
-			const FRHHabNetCache* Net = FindHabNet(C.HomeHab);
-			const double NeedO2 = ColonistO2KgPerSol * DtSols;
-			if (Net && IsNetRated(*Net) && GetHabNetworkO2Kg(C.HomeHab) >= NeedO2)
+			if (const FRHHabNetCache* Net = FindHabNet(C.HomeHab))
 			{
-				double Left = NeedO2;
+				double Left = NeedO2 * Home.RAir;
 				const auto Take = [this, &Left](int32 Id)
 				{
 					if (double* V = HabO2Kg.Find(Id))
@@ -3639,39 +3826,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 						Take(Id);
 					}
 				}
-				bAir = true;
 			}
-		}
-		else if (RatedFloors.Contains(C.HomeLevel))
-		{
-			double& FillKg = FloorO2Kg.FindOrAdd(C.HomeLevel);
-			const double NeedO2 = ColonistO2KgPerSol * DtSols;
-			if (FillKg >= NeedO2)
-			{
-				FillKg -= NeedO2;
-				bAir = true;
-			}
-		}
-		// Eat: pooled Food (network stock, arrives with each pod; the garden
-		// is Gate C's answer to this clock running down).
-		bool bFed = false;
-		const double NeedFood = ColonistFoodKgPerSol * DtSols;
-		if (GetStock(NFood) >= NeedFood)
-		{
-			AddStock(NFood, -NeedFood);
-			bFed = true;
-		}
-		bAnyHungry |= !bFed;
-
-		// Drink: pooled Water (M2 Gate D+ water loop). Part of the support
-		// contract - no water is as fatal as no air/food (the ice-cap imperative).
-		bool bWatered = false;
-		const double NeedWater = ColonistWaterKgPerSol * DtSols;
-		if (GetStock(NWater) >= NeedWater)
-		{
-			AddStock(NWater, -NeedWater);
-			WaterDrawnThisStep += NeedWater;
-			bWatered = true;
 		}
 
 		// Comforts (M2 Gate D, abstract): a luxury ration when stocked. Never
@@ -3693,44 +3848,141 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			C.SkillSols.FindOrAdd(Job) += DtSols;
 		}
 
-		const bool bNowSupported = bAir && bFed && bWatered;
-		if (C.bSupported && !bNowSupported)
-		{
-			// Edge alert: name the missing leg so the fix is obvious.
-			const TCHAR* Leg = !bAir ? (C.HomeHab ? TEXT("home habitat lost its air") : TEXT("home floor lost its air"))
-				: (!bWatered ? TEXT("water tanks empty") : TEXT("food stores empty"));
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("LIFE SUPPORT: %s is unsupported — %s. Evacuation in %.1f sols unless restored."),
-				*C.Name, Leg, EvacSolsThisStep()));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST UNSUPPORTED: %s (%s) ==="), *C.Name, Leg);
-		}
-		C.bSupported = bNowSupported;
-
-		if (bNowSupported)
-		{
-			C.UnsupportedSimSeconds = 0.0;
-			continue;
-		}
-		C.UnsupportedSimSeconds += SubDt;
-		// Infirmary (station tiers, Gate A): an online infirmary stretches the
-		// countdown - more time to fix the missing leg (prevention framing).
-		const double EvacSols = EvacSolsThisStep();
-		if (C.UnsupportedSimSeconds >= EvacSols * URHSimClockSubsystem::SolLengthSimSeconds)
-		{
-			// Abstract, prevention-framed consequence (mental-health directive):
-			// the Program pulls the colonist back to orbit. Wording is a
-			// Gate-D framing-review placeholder.
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("EVACUATED: %s returned to orbit — life support failed for %.1f sols."),
-				*C.Name, EvacSols));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (unsupported %.1f sols) ==="),
-				*C.Name, EvacSols);
-			Colonists.RemoveAt(i);
-			bColonistIndexDirty = true; // everyone after i moved down one slot
-			++ColonistSetVersion;
-		}
+		// bSupported reads "on a full ration" (the panels and the births keep
+		// reading it that way); UnsupportedSimSeconds is the time spent short.
+		C.bSupported = Home.R >= 1.0;
+		C.UnsupportedSimSeconds = C.bSupported ? 0.0 : C.UnsupportedSimSeconds + SubDt;
 	}
 	ComfortsSupplied = SuppliedThisStep;
+
+	// One alert per EVENT, not per person: a home goes on short rations, a home
+	// recovers, a batch of residents is recalled. Short homes accumulate toward a
+	// departure in proportion to how deep and how long the shortage is: each
+	// recall costs one whole unit of OnsetResidents x (1 - ration) x sols /
+	// EffectiveEvacSols, where OnsetResidents is the home's size when it went
+	// short (raised if it grew). So a total failure empties a home in
+	// EffectiveEvacSols at a steady rate (a home of four loses one every half sol),
+	// and half a ration takes twice as long - the clock does not slow as the home
+	// shrinks. All wording is a Gate-D framing-review placeholder
+	// (docs/qa/2026-10-15/gate-d-wording.md).
+	const auto Plural = [](int32 Count) { return Count == 1 ? TEXT("") : TEXT("s"); };
+	const auto LegName = [](int32 Limit) { return Limit == 1 ? TEXT("air") : (Limit == 2 ? TEXT("water") : TEXT("food")); };
+	bool bAnyDeparting = false;
+	for (FHome& Home : Homes)
+	{
+		const bool bShort = Home.R < 1.0;
+		if (bShort && !Home.bWasShort)
+		{
+			const FString Label = GetHomeLabel(Home.HomeLevel, Home.HomeHab);
+			OnAlert.Broadcast(FString::Printf(
+				TEXT("SHORT RATIONS: %s — %s is running short for %d resident%s. Restore it to bring rations back to full; if it lasts, residents are recalled to orbit a few at a time."),
+				*Label, LegName(Home.Limit), Home.Residents, Plural(Home.Residents)));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HOME SHORT RATIONS: %s (%s, %d resident%s, ration %.0f%%) ==="),
+				*Label, LegName(Home.Limit), Home.Residents, Plural(Home.Residents), Home.R * 100.0);
+		}
+		else if (!bShort && Home.bWasShort)
+		{
+			const FString Label = GetHomeLabel(Home.HomeLevel, Home.HomeHab);
+			OnAlert.Broadcast(FString::Printf(TEXT("RATIONS RESTORED: %s is back on full rations (%d resident%s)."),
+				*Label, Home.Residents, Plural(Home.Residents)));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HOME RATIONS RESTORED: %s (%d resident%s) ==="), *Label, Home.Residents, Plural(Home.Residents));
+		}
+		if (!bShort)
+		{
+			HomeClocks.Remove(Home.Key); // a full ration resets the clock and the onset size, as the countdown always did
+			continue;
+		}
+		// Infirmary (station tiers, Gate A): an online infirmary stretches the
+		// countdown - more time to fix the missing leg (prevention framing).
+		const double EvacSeconds = FMath::Max(EvacSolsThisStep() * (double)URHSimClockSubsystem::SolLengthSimSeconds, (double)KINDA_SMALL_NUMBER);
+		FRHHomeClock& HomeClock = HomeClocks.FindOrAdd(Home.Key);
+		HomeClock.OnsetResidents = FMath::Max(HomeClock.OnsetResidents, Home.Residents); // the size at onset (a new clock reads 0), raised if the home grew
+		HomeClock.Acc += HomeClock.OnsetResidents * (1.0 - Home.R) * (double)SubDt / EvacSeconds;
+		while (HomeClock.Acc >= 1.0 && Home.Departing < Home.Residents)
+		{
+			++Home.Departing;
+			HomeClock.Acc -= 1.0;
+		}
+		bAnyDeparting |= Home.Departing > 0;
+	}
+
+	TSet<int32> Leaving; // colonist Ids recalled this step
+	if (bAnyDeparting)
+	{
+		// One pass gathers each leaving home's residents; the newest arrival goes
+		// first (highest Id), and the Mars-born go last of all.
+		TArray<TArray<int32>> Candidates;
+		Candidates.SetNum(Homes.Num());
+		for (int32 i = 0; i < Pop0; ++i)
+		{
+			const int32 h = HomeSlot.FindChecked(KeyOf[i]);
+			if (Homes[h].Departing > 0)
+			{
+				Candidates[h].Add(i);
+			}
+		}
+		for (int32 h = 0; h < Homes.Num(); ++h)
+		{
+			const FHome& Home = Homes[h];
+			if (Home.Departing == 0)
+			{
+				continue;
+			}
+			TArray<int32>& Pool = Candidates[h];
+			Pool.Sort([this](int32 A, int32 B)
+			{
+				const FRHColonist& CA = Colonists[A];
+				const FRHColonist& CB = Colonists[B];
+				return CA.bMarsBorn != CB.bMarsBorn ? !CA.bMarsBorn : CA.Id > CB.Id;
+			});
+			const FString Label = GetHomeLabel(Home.HomeLevel, Home.HomeHab);
+			for (int32 k = 0; k < Home.Departing; ++k)
+			{
+				const FRHColonist& Gone = Colonists[Pool[k]];
+				Leaving.Add(Gone.Id);
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (%s, rations short %.1f sols) ==="),
+					*Gone.Name, *Label, Gone.UnsupportedSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+			}
+			// Abstract, prevention-framed consequence (mental-health directive):
+			// the Program recalls people to orbit.
+			OnAlert.Broadcast(FString::Printf(TEXT("RECALLED: %d resident%s of %s recalled to orbit — rations stayed short for too long."),
+				Home.Departing, Plural(Home.Departing), *Label));
+		}
+		Colonists.RemoveAll([&Leaving](const FRHColonist& C) { return Leaving.Contains(C.Id); });
+		bColonistIndexDirty = true; // everyone after a recalled colonist moved down
+		++ColonistSetVersion;
+	}
+
+	// What Hope reads, and the readout for the panels: who is short, and by how much.
+	DeficitEquivalent = 0.0;
+	HomeRations.Reset();
+	for (const FHome& Home : Homes)
+	{
+		const int32 Remaining = Home.Residents - Home.Departing;
+		if (Remaining <= 0)
+		{
+			HomeClocks.Remove(Home.Key); // nobody left to leave
+			continue;
+		}
+		DeficitEquivalent += Remaining * (1.0 - Home.R);
+		FRHHomeRation Ration;
+		Ration.Key = Home.Key;
+		Ration.HomeLevel = Home.HomeLevel;
+		Ration.HomeHab = Home.HomeHab;
+		Ration.Residents = Remaining;
+		Ration.Fraction = Home.R;
+		Ration.Limiting = Home.Limit == 0 ? NAME_None : (Home.Limit == 1 ? NOxygen : (Home.Limit == 2 ? NWater : NFood));
+		HomeRations.Add(Ration);
+	}
+	// A home that vanished (a floor lost its rating with nobody on it, a network
+	// re-rooted) takes its accumulator with it.
+	for (auto It = HomeClocks.CreateIterator(); It; ++It)
+	{
+		if (!HomeSlot.Contains(It.Key()))
+		{
+			It.RemoveCurrent();
+		}
+	}
 
 	// The water loop (M2 Gate D+). Recycling reclaims most of what the crew
 	// drank - stretching the supply - but every cycle degrades POTABILITY. Only
@@ -3826,9 +4078,17 @@ void URHSimWorldSubsystem::StepMoments(float SubDt)
 	const uint32 Seed = HashCombine(FCrc::StrCrc32(TEXT("moment")), (uint32)(MomentCounter * 2654435761u));
 	++MomentCounter;
 	const int32 Pop = Colonists.Num();
+	if (Pop < 2)
+	{
+		// C2a: every moment is between two DIFFERENT people. A lone survivor (a
+		// shortage can now leave one for sols) has nobody to argue with or unwind
+		// beside, so the beat passes silently - and a colony emptied this very step
+		// has nobody to index (the pick below divides by the headcount).
+		return;
+	}
 	const int32 IdxA = (int32)(Seed % (uint32)Pop);
 	int32 IdxB = (int32)((Seed >> 8) % (uint32)Pop);
-	if (IdxB == IdxA && Pop > 1)
+	if (IdxB == IdxA)
 	{
 		IdxB = (IdxA + 1) % Pop; // never pair a colonist with themselves
 	}
@@ -4439,18 +4699,46 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		}
 		return *Found;
 	};
+	// C2a: the Rooms bonus is counted ONCE per room function colony-wide (it was
+	// once per rated floor and surface network), scaled below by how well that
+	// function's rooms cover the residents. Tallied in first-occurrence order -
+	// shallowest rated floor first, then the networks by root - so the sum order
+	// never depends on a map's visiting order. Adjacency is a share of refuser
+	// cells over floors and networks together.
+	struct FRoomTally { FName Function; double Weight = 0.0; int32 Count = 0; };
+	TArray<FRoomTally> RoomTallies;
+	const auto TallyRoom = [&RoomTallies](const FRHRoomRow* Row)
+	{
+		for (FRoomTally& T : RoomTallies)
+		{
+			if (T.Function == Row->Function)
+			{
+				++T.Count;
+				return;
+			}
+		}
+		FRoomTally Fresh;
+		Fresh.Function = Row->Function;
+		Fresh.Weight = Row->MoraleWeight; // the first row seen sets the weight, as it always did
+		Fresh.Count = 1;
+		RoomTallies.Add(Fresh);
+	};
+	int32 RefuserCells = 0, OffendedRefusers = 0;
+	TArray<int32> RatedLevels;
 	for (const auto& Pair : FloorRoomCells)
 	{
-		const int32 Level = Pair.Key;
-		if (!RatedFloors.Contains(Level))
+		if (RatedFloors.Contains(Pair.Key)) // rooms function only on certified floors
 		{
-			continue; // rooms function only on certified floors
+			RatedLevels.Add(Pair.Key);
 		}
-		const TArray<FName>& Cells = Pair.Value;
+	}
+	RatedLevels.Sort([](int32 A, int32 B) { return A > B; });
+	for (const int32 Level : RatedLevels)
+	{
+		const TArray<FName>& Cells = FloorRoomCells.FindChecked(Level);
 		// Each cell's live room row (null = none, or dormant), looked up once.
 		TArray<const FRHRoomRow*> Rows;
 		Rows.SetNumZeroed(Cells.Num());
-		TArray<FName> FunctionsCounted; // per room type per rated floor
 		bool bAnyEmitter = false;
 		for (int32 i = 0; i < Cells.Num(); ++i)
 		{
@@ -4461,17 +4749,14 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			}
 			Rows[i] = Row;
 			bAnyEmitter |= !Row->EmitsTags.IsEmpty();
+			RefuserCells += Row->RefusesTags.IsEmpty() ? 0 : 1;
 			if (Row->Function == NLiving)
 			{
 				LQCells += LivingWeight(FIntVector(Level, i, 0)); // housing quality, counted below - never double-dipped
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
-				if (!FunctionsCounted.Contains(Row->Function))
-				{
-					FunctionsCounted.Add(Row->Function);
-					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
-				}
+				TallyRoom(Row);
 			}
 		}
 
@@ -4530,6 +4815,8 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			FIntPoint(2, 0), FIntPoint(-2, 0), FIntPoint(0, 2), FIntPoint(0, -2),
 			FIntPoint(1, 1), FIntPoint(1, -1), FIntPoint(-1, 1), FIntPoint(-1, -1) };
 		bool bCircKnown = false, bCirculated = false;
+		TArray<uint8> Offended; // per cell: some emitter offends this refuser (the share counts cells, once each)
+		Offended.Init(0, Cells.Num());
 		for (int32 E = 0; E < Cells.Num(); ++E)
 		{
 			const FRHRoomRow* ERow = Rows[E];
@@ -4588,6 +4875,11 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 					}
 				}
 				++Out.OffendedPairs;
+				if (!Offended[R])
+				{
+					Offended[R] = 1;
+					++OffendedRefusers;
+				}
 			}
 		}
 	}
@@ -4615,7 +4907,6 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				BayKeys.Add(FIntVector(0, Bay, HabId));
 			}
 		}
-		TArray<FName> FunctionsCounted; // per room type per network
 		for (int32 RI = 0; RI < Rows.Num(); ++RI)
 		{
 			const FRHRoomRow* Row = Rows[RI];
@@ -4623,19 +4914,18 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			{
 				continue;
 			}
+			RefuserCells += Row->RefusesTags.IsEmpty() ? 0 : 1;
 			if (Row->Function == NLiving)
 			{
 				LQCells += LivingWeight(BayKeys[RI]);
 			}
 			else if (Row->MoraleWeight > 0.f)
 			{
-				if (!FunctionsCounted.Contains(Row->Function))
-				{
-					FunctionsCounted.Add(Row->Function);
-					Out.Rooms += Row->MoraleWeight * HopePerMoralePoint;
-				}
+				TallyRoom(Row);
 			}
 		}
+		TArray<uint8> Offended; // per bay, as on a floor
+		Offended.Init(0, Rows.Num());
 		const bool bCirc = IsNetCirculated(Net);
 		for (int32 E = 0; E < Rows.Num(); ++E)
 		{
@@ -4685,8 +4975,22 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 					}
 				}
 				++Out.OffendedPairs;
+				if (!Offended[R])
+				{
+					Offended[R] = 1;
+					++OffendedRefusers;
+				}
 			}
 		}
+	}
+
+	// Rooms: each function's weight, once, times its coverage - one room of a type
+	// serves RoomServesResidents people. A colony no bigger than one room serves
+	// (and an empty one, which nobody needs a room for) takes the whole bonus.
+	for (const FRoomTally& T : RoomTallies)
+	{
+		const double Coverage = Pop > 0 ? FMath::Min(1.0, (double)T.Count * RoomServesResidents / (double)Pop) : 1.0;
+		Out.Rooms += T.Weight * HopePerMoralePoint * Coverage;
 	}
 
 	if (Pop > 0)
@@ -4694,27 +4998,46 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		Out.Housing = HopeHousingMax * FMath::Min(1.0, (double)LQCells / (double)Pop);
 	}
 	Out.FilledSeats = ColonistJobs.Num();
-	Out.Jobs = Out.FilledSeats * HopePerJob;
+	Out.Population = Pop;
+	if (Pop > 0)
+	{
+		// C2a: the employment rate, not a head count of seats.
+		Out.Jobs = HopeJobsMax * FMath::Min(1.0, (double)Out.FilledSeats / (double)Pop);
+	}
 	if (Pop > 0)
 	{
 		// Comforts lift scales with the supplied fraction; never negative.
 		Out.Comforts = HopeLuxuryBonus * FMath::Clamp((double)ComfortsSupplied / (double)Pop, 0.0, 1.0);
 	}
+	// C2a: the comfort sums are per resident - the same sum x ComfortRefPop / pop,
+	// then the same caps - so a crew of ComfortRefPop scores as before and a city
+	// is not lifted by furnishing one room.
+	const double PerHead = ComfortRefPop / (double)FMath::Max(Pop, 1);
 	if (Pop > 0 && Furniture.Num() > 0)
 	{
-		Out.Furnishings = GetFurnishingsHope(); // BM-4: bonus-only, capped
+		double Raw = 0.0;
+		GetFurnishingsHope(&Raw);
+		Out.Furnishings = FMath::Min(Raw * PerHead, HopeFurnishingsMax); // BM-4: bonus-only, capped
 	}
 	if (Pop > 0 && WallFeatures.Num() > 0)
 	{
-		Out.Views = GetViewsHope(); // BM-6: windows, bonus-only, capped
+		double Raw = 0.0;
+		GetViewsHope(&Raw);
+		Out.Views = FMath::Min(Raw * PerHead, HopeViewsMax); // BM-6: windows, bonus-only, capped
 	}
-	Out.AdjacencyPenalty = Out.OffendedPairs * HopeAdjacencyPenalty;
-	for (const FRHColonist& C : Colonists)
+	// C2a: adjacency is the share of refuser cells an emitter offends (pairs stay
+	// counted for the layout hint); unsupported is the share of the colony short of
+	// a full ration, steep so one in three on nothing costs the whole line.
+	Out.OffendedRefusers = OffendedRefusers;
+	Out.RefuserCells = RefuserCells;
+	if (RefuserCells > 0)
 	{
-		if (!C.bSupported)
-		{
-			Out.UnsupportedPenalty += HopeUnsupportedPenalty;
-		}
+		Out.AdjacencyPenalty = HopeAdjacencyMax * (double)OffendedRefusers / (double)RefuserCells;
+	}
+	Out.DeficitEquivalent = DeficitEquivalent;
+	if (Pop > 0 && DeficitEquivalent > 0.0)
+	{
+		Out.UnsupportedPenalty = HopeUnsupportedMax * FMath::Min(1.0, HopeUnsupportedSteepness * DeficitEquivalent / (double)Pop);
 	}
 	// Water quality (M2 Gate D+): grim recycled water saps morale below the
 	// potability floor - the first scarcity-driven Hope input. Scales with how
@@ -4827,6 +5150,7 @@ void URHSimWorldSubsystem::StepGrowth(float SubDt)
 		return;
 	}
 	++BirthsOnMars;
+	Colonists.Last().bMarsBorn = true; // C2a: the Mars-born are the last to be recalled in a shortage
 	const FString Name = Colonists.Last().Name;
 	if (!bFirstBornAnnounced)
 	{
@@ -8472,9 +8796,13 @@ bool URHSimWorldSubsystem::PreviewFurnishEffect(FName RowName, const FIntVector&
 	{
 		Out.SeatsAfter = ((CF && CF->SeatPieces > 0) ? CF->JobSeats : 0) + Row->Capacity;
 	}
+	// C2a: the Furnishings line is per resident now (see GetColonyHope), so the hint
+	// shows the same scaled figure the Hope breakdown will.
 	double Raw = 0.0;
-	Out.ComfortBefore = GetFurnishingsHope(&Raw);
-	Out.ComfortAfter = FMath::Min(HopeFurnishingsMax, Raw + (IsFurnitureCellWorking(Key) ? (double)Row->HopeComfort : 0.0));
+	GetFurnishingsHope(&Raw);
+	const double PerHead = ComfortRefPop / (double)FMath::Max(Colonists.Num(), 1);
+	Out.ComfortBefore = FMath::Min(HopeFurnishingsMax, Raw * PerHead);
+	Out.ComfortAfter = FMath::Min(HopeFurnishingsMax, (Raw + (IsFurnitureCellWorking(Key) ? (double)Row->HopeComfort : 0.0)) * PerHead);
 	return true;
 }
 
@@ -9704,7 +10032,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		}
 		for (FRHColonist& C : Colonists)
 		{
-			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds; // HomeHab: v29
+			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds << C.bMarsBorn; // HomeHab: v29, bMarsBorn: v34
 		// Skills (save v24): sorted for deterministic bytes; load repopulates.
 		if (Ar.IsLoading())
 		{
@@ -9731,6 +10059,23 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 				Ar << FnCopy << Sols;
 			}
 		}
+		}
+	}
+	// Shared rationing (save v34, C2a): the deficit Hope reads, and each short
+	// home's departure accumulator and onset size, sorted by home key for
+	// deterministic bytes.
+	{
+		Ar << DeficitEquivalent;
+		TArray<int32> AccKeys;
+		HomeClocks.GetKeys(AccKeys);
+		AccKeys.Sort();
+		int32 AccCount = AccKeys.Num();
+		Ar << AccCount;
+		for (const int32 AccKey : AccKeys)
+		{
+			int32 KeyCopy = AccKey;
+			FRHHomeClock Saved = HomeClocks[AccKey];
+			Ar << KeyCopy << Saved.Acc << Saved.OnsetResidents;
 		}
 	}
 	// Room designations (save v11).
@@ -10071,7 +10416,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		}
 		for (FRHColonist& C : Colonists)
 		{
-			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds; // HomeHab: v29
+			Ar << C.Id << C.Name << C.HomeLevel << C.HomeHab << C.bSupported << C.UnsupportedSimSeconds << C.bMarsBorn; // HomeHab: v29, bMarsBorn: v34
 		// Skills (save v24): sorted for deterministic bytes; load repopulates.
 		if (Ar.IsLoading())
 		{
@@ -10098,6 +10443,22 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				Ar << FnCopy << Sols;
 			}
 		}
+		}
+	}
+	// Shared rationing (save v34, C2a). The per-home readout is derived: it is
+	// rebuilt by the next population step.
+	{
+		Ar << DeficitEquivalent;
+		HomeClocks.Reset();
+		HomeRations.Reset();
+		int32 AccCount = 0;
+		Ar << AccCount;
+		for (int32 i = 0; i < AccCount; ++i)
+		{
+			int32 AccKey = 0;
+			FRHHomeClock Loaded;
+			Ar << AccKey << Loaded.Acc << Loaded.OnsetResidents;
+			HomeClocks.Add(AccKey, Loaded);
 		}
 	}
 	// Room designations (save v11). Map repopulates wholesale.

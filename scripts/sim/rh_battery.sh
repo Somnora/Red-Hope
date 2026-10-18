@@ -1,5 +1,5 @@
 #!/bin/bash
-# Full headless self-test battery: the baseline plus all 35 suites.
+# Full headless self-test battery: the baseline plus all 36 suites.
 #
 #   bash scripts/sim/rh_battery.sh [sols]
 #
@@ -7,7 +7,7 @@
 #   RH_BATTERY_LOGDIR  where per-suite logs land
 #                      (default <proj>/Saved/RHBattery)
 #   RH_BATTERY_EXTRA   extra switches appended to EVERY run (word-split), e.g.
-#                      "-RHConfig=HopeHousingMax=7.5,HopePerJob=1.5" to run an
+#                      "-RHConfig=HopeHousingMax=7.5,HopeJobsMax=7.5" to run an
 #                      older binary under newer balance as an equivalence reference
 #
 # MUST be bash. zsh does not word-split an unquoted "$ARGS", which silently
@@ -36,7 +36,7 @@ rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 SUITES="crew habitat vault borer rooms garden luxury hopedrive greenhouse water
          growth discovery trade earth solidarity covert espionage preemptive
-         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food resupply dayshift"
+         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food resupply dayshift percapita"
 
 FAILED=0
 
@@ -55,7 +55,7 @@ run_one() {
 
 echo "=== baseline (no suite switch), $SOLS sols ==="
 run_one baseline "-sols=$SOLS"
-echo "=== 35 suites ==="
+echo "=== 36 suites ==="
 for s in $SUITES; do
   run_one "$s" "-sols=$SOLS" "-$s"
 done
