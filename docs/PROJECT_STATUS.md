@@ -1,11 +1,11 @@
 # The Red Hope — Project Status
 
-**Snapshot: 2026-10-16 (build mode complete: BM-1..BM-6 and the BM-1b prefab; alive pass 2).** The 10-15 snapshot ran
+**Snapshot: 2026-10-17 (build mode, alive pass 2, and the crew-phase package D1a-D5a).** The 10-15 snapshot ran
 through `fdffc75`; the one before was 2026-08-18 (`b306100`). This is the working source-of-truth snapshot: what the
 game IS, what is built, what changed, and what is owed. Ordered by the
 three-phase arc from the design brief (`docs/the-red-hope-design-brief.md`).
 Everything is on `main` (local `main` matches the `origin/main` tracking ref,
-`https://github.com/Somnora/Red-Hope.git`). Save format **v32**.
+`https://github.com/Somnora/Red-Hope.git`). Save format **v33**.
 
 ## 2026-10-16: build mode, suits and airlocks
 
@@ -94,6 +94,35 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   habitat, placed whole". Sheet: `docs/media/hab-thumbnails.jpg`. The
   director then renamed the prefab "Habitat" (was "Habitat Module") and
   approved its blurb, dropping the placeholder tag.
+
+## 2026-10-17: the crew phase gets a game (director: "D1a D2a D3a D4a D5a")
+
+The 10-15 playtest found the game ended at sol ~10. The supply line ran out, water went undrinkable from sol ~60, Hope pinned at 100 with no warning before food ran out, and the grid blacked out every night. The director approved all five fixes from `docs/qa/2026-10-17/crew-phase-brief.md`.
+
+**Commits:**
+
+| Commit | Change |
+|---|---|
+| D2a `ea78003` | Ice running low: an alert, guide steps to Ice_B, and nearest-consumer hauling |
+| D4a `7d958c4` | Food-runway Hope line and FOOD RUNNING LOW |
+| D1a `defe9ef` | Q3 live and the ladder repeats x1.25/round; save v32 |
+| `af1371e` | Distance-aware robot charge reserve |
+| D3a `7c3b502` | Hope weights halved; four suites converted to fail loudly |
+| D5a `3f4441d` | Day shift; save v33 |
+
+**Result** (110-sol playtest):
+- The lean colony now survives (pop 7, before: emptied at sol 77).
+- Water holds (66 t).
+- The first warning comes at sol ~30, not sol 75.
+
+**Open:**
+- Hope still reaches 100 after sol ~60, through the Milestones line.
+- The day shift slows the opening (first crew at sol 14.4, was 10.5).
+- The repeating ladder stalls by about round 3, because bills are holdings.
+- Cargo effects stack without limit.
+- Ice_B is the last ice.
+
+Full results table: the end of the brief.
 
 ## 2026-10-16: alive pass 2 (presentation only; RedHopeSim untouched)
 

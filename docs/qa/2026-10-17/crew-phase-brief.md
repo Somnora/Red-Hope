@@ -137,3 +137,55 @@ Not covered here, and still separate decisions:
   orbit" being said of a Mars-born child;
 - quota 1's slack: met at sol 4.2 of 10. I'd leave it, since it is the
   tutorial.
+
+---
+
+## Results — built 2026-10-17 (director answered "D1a D2a D3a D4a D5a")
+
+**Commits.**
+
+| Commit | What it does |
+|---|---|
+| D2a `ea78003` | Ice running low |
+| D4a `7d958c4` | Food runway |
+| D1a `defe9ef` | Repeating ladder, save v32 |
+| `af1371e` | Robots head home before they run flat (found by the playtests) |
+| D3a `7c3b502` | Hope weights halved |
+| D5a `3f4441d` | Day shift, save v33 |
+
+Each commit ran the full battery green with the pins unchanged, and every line moved in the diff is explained in its commit message. The battery is now 36 runs. Four new fails-loudly suites were added (`-icelow`, `-food`, `-resupply`, `-dayshift`), and four old print-only suites were converted to fail loudly (`-rooms`, `-growth`, `-discovery`, `-tiers`).
+
+**Two fixes the playtests forced along the way:**
+- **Hauling (D2a).** Hauls went to the *first* consumer in building order, and surplus ice was dumped at the Lander. They now go to the nearest consumer, and ice waits at its drill.
+- **Robot charging (`af1371e`).** Robots sought a charger at a flat 25% and always finished a delivery. They ran flat 700 m out and never recovered. The reserve is now distance-aware.
+
+**Final playtest** (`rh_playtest.sh 110`, guide path):
+
+| | Before (b61f975) | After (3f4441d) |
+|---|---|---|
+| Lean run (Crew Pod alone on ship 2) | emptied at sol 77.5 (6 recalled, incl. 2 Mars-born) | **alive at sol 110**: pop 7, 3 born, 0 recalled |
+| Full cargo | pop 8 at sol 110 | pop 8 at sol 110, 4 born |
+| First warning | sol 75 (food at zero; recall at 77) | sol ~30 ICE_A RUNNING LOW, then ICE_B RUNNING LOW at ~84, WATER QUALITY LOW at ~105 |
+| Water | undrinkable from sol ~60; 1.4 t left at sol 110 (full) | expansion to Ice_B by sol 37-38; 66 t in store at sol 110 |
+| Smoothed Hope | 100 FLOURISHING from sol 16 | STEADY/THRIVING (68-85) to sol ~60-70, then FLOURISHING (see below) |
+| Supply | ships end at sol ~10 | Q3 rounds 0-2 met by sol 45 |
+| Night grid | machines shed 12-16% | shed 9-10%; power short 50% (nights run on the bank) |
+| First crew | sol 10.5 | sol 14.4 (the day shift slows the opening) |
+
+**Open for the director** (also in `docs/design-decisions.md`):
+
+1. **Hope still reaches 100 late.**
+   - D3a works up to sol ~60. After that the permanent Milestones line (vault, harvest, first-born, discoveries) reaches ~30 points and lifts Hope past the clamp by itself.
+   - Options: cap it (like Furnishings and Views), let it fade, or accept that a mature colony flourishes.
+2. **The day shift slows the opening.**
+   - Quota 1 lands at sol 6.4 (was 4.2) and the first crew at sol 14.4 (was 10.5), with about half the Struct at sol 20.
+   - Part of the old pace was free night work: a sliver of bank charge ran a whole step's load before clamping.
+   - `DayShiftDefaultsOn=0` reverts the defaults.
+3. **The repeating ladder stalls by about round 3.**
+   - Bills are holdings and are never paid, and they grow 25% a round. Structural plateaus near 6 t, so round 3 (4.9 t structural) and later rounds go unmet, and ships stop after sol ~45.
+   - Options: deduct bills on launch, slow the growth, or scale awards.
+4. **Cargo effects stack without limit** now that ships repeat. Each Specialty Toolkit adds +15% build speed, uncapped.
+5. **Next water horizon.**
+   - Ice_B is the last ice in the data. It runs low at sol ~84, and potability starts falling at sol ~105.
+   - The stock (66 t) carries the colony well past sol 110, but a third water source, or the dormant agri recycling, is the next step.
+6. **Gate-D wording.** Every new player string is a PLACEHOLDER row in `docs/qa/2026-10-15/gate-d-wording.md` (D86-D122).
