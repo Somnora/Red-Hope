@@ -1417,6 +1417,14 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		ShipVisual->Destroy();
 		ShipVisual = nullptr;
 	}
+	if (LandingPadVisual)
+	{
+		LandingPadVisual->Destroy();
+		LandingPadVisual = nullptr;
+	}
+	ShipBeat = 0;
+	ShipLandedSimSeconds = -1.0;
+	ShipEtaLanded = -1.0;
 	// Shaft mirror rebuilds from the loaded counts on the next Tick.
 	if (ShaftVisual)
 	{
@@ -1469,12 +1477,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		HandleBuildingAdded(B);
 	}
 	SpawnDepositMarkers();
-	// Completed is only a passing state now (the ladder repeats, D1a); a ship has
-	// landed once any quota past the first has opened, so the pad keeps its lander.
-	if (Sim->GetQuotaPhase() == ERHQuotaPhase::Completed || Sim->GetQuotaOpenedSol() > 0)
-	{
-		HandleShipArrived(Sim->GetManifestItems());
-	}
+	RestoreSupplyShip(Sim);
 	ApplyViewLevel(); // the reloaded colony honors the elevator's floor
 	UE_LOG(LogRedHope, Display, TEXT("Colony visuals rebuilt from loaded state (%d buildings)"), Sim->GetBuildings().Num());
 }
@@ -2684,57 +2687,272 @@ void URHColonyVisualizerSubsystem::HandleQuotaMet(int32 Sol, double AwardKg)
 	}
 }
 
+namespace
+{
+	// The supply ship's landing site (director's pick 2026-10-17, "Ship C"):
+	// the east pad, where the gray-box freighter used to stand.
+	const FVector ShipPadCm(4000.f, -4000.f, 0.f);
+	constexpr float ShipDropCm = 6000.f;        // where the descent starts / the climb ends
+	constexpr double ShipBurnRealSeconds = 8.0; // descent and lift-off, real time at any speed
+	constexpr double ShipStaySols = 1.0;        // on the pad, then it leaves
+	const TCHAR* SupplyShipPath = TEXT("/Game/RedHope/Art/Models2/SupplyShip/SupplyShip/StaticMeshes/SupplyShip.SupplyShip");
+	const TCHAR* LandingPadPath = TEXT("/Game/RedHope/Art/Models2/LandingPad/LandingPad/StaticMeshes/LandingPad.LandingPad");
+}
+
 void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
+{
+	// The landing itself is UpdateSupplyShip's: the ship comes down ahead of the
+	// sim's arrival time, sits a sol, and lifts off. The arrival only lands a
+	// ship that was not already on its way down (a speed jump past the descent,
+	// or a load just before the touchdown).
+	if (ShipBeat == 0)
+	{
+		const UWorld* World = GetWorld();
+		const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+		SpawnSupplyShip(true);
+		ShipLandedSimSeconds = Clock ? Clock->GetSimSecondsTotal() : 0.0;
+	}
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 15.f, FColor::Cyan,
+			FString::Printf(TEXT("SUPPLY SHIP LANDED: %d items transferred. The Program continues."), Items.Num()));
+	}
+}
+
+void URHColonyVisualizerSubsystem::EnsureLandingPad()
+{
+	UWorld* World = GetWorld();
+	if (!World || LandingPadVisual)
+	{
+		return;
+	}
+	UStaticMesh* PadMesh = LoadObject<UStaticMesh>(nullptr, LandingPadPath);
+	if (!PadMesh)
+	{
+		return; // no art, no pad: the ship still lands on the ground
+	}
+	AStaticMeshActor* Pad = World->SpawnActor<AStaticMeshActor>(ShipPadCm, FRotator::ZeroRotator);
+	if (!Pad)
+	{
+		return;
+	}
+	Pad->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+	Pad->GetStaticMeshComponent()->SetStaticMesh(PadMesh);
+	Pad->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+#if WITH_EDITOR
+	Pad->SetActorLabel(TEXT("Sim_LandingPad"));
+#endif
+	// The edge lights glow softly all the time.
+	if (UMaterialInstanceDynamic* Mid = Pad->GetStaticMeshComponent()->CreateAndSetMaterialInstanceDynamic(0))
+	{
+		Mid->SetScalarParameterValue(FName("PoweredState"), 1.f);
+	}
+	Pad->SetActorHiddenInGame(IsUnderground());
+	LandingPadVisual = Pad;
+}
+
+float URHColonyVisualizerSubsystem::ShipPadTopCm() const
+{
+	if (LandingPadVisual)
+	{
+		return (float)LandingPadVisual->GetComponentsBoundingBox(true).Max.Z;
+	}
+	return 0.f;
+}
+
+void URHColonyVisualizerSubsystem::SpawnSupplyShip(bool bLanded)
 {
 	UWorld* World = GetWorld();
 	if (!World)
 	{
 		return;
 	}
-	// The landing beat, gray-box edition: a second lander on the east pad.
 	if (ShipVisual)
 	{
-		return; // already on the pad (reload path re-fires the arrival state)
+		ShipVisual->Destroy();
+		ShipVisual = nullptr;
 	}
-	// Reference sheet CargoLander: horizontal bone-white freighter hull on
-	// dark legs, wedge cockpit, amber cargo bay glowing at the flank.
-	using namespace RHCanon;
-	const FVector PadCm(4000.f, -4000.f, 0.f);
-	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(PadCm + FVector(0, 0, 330.f), FRotator::ZeroRotator);
-	if (Ship)
+	EnsureLandingPad();
+	const FVector Rest = ShipPadCm + FVector(0, 0, ShipPadTopCm());
+	AStaticMeshActor* Ship = World->SpawnActor<AStaticMeshActor>(Rest + FVector(0, 0, bLanded ? 0.f : ShipDropCm), FRotator::ZeroRotator);
+	if (!Ship)
 	{
-		Ship->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
-		Ship->GetStaticMeshComponent()->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
-		Ship->SetActorScale3D(FVector(11.f, 4.5f, 3.2f)); // long hull, nose +X
-#if WITH_EDITOR
-		Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
-#endif
-		ApplyTint(Ship, BoneWhite);
-		// Wedge cockpit (dark glass) at the nose.
-		AddAccent(Ship, TEXT("/Engine/BasicShapes/Cube.Cube"), PadCm + FVector(620.f, 0, 300.f),
-			FRotator(0, 0, -28.f), FVector(2.2f, 3.8f, 1.6f), FLinearColor(0.05f, 0.07f, 0.09f));
-		// Amber cargo bay, open on the south flank.
-		AddAccent(Ship, TEXT("/Engine/BasicShapes/Cube.Cube"), PadCm + FVector(-120.f, -230.f, 260.f),
-			FRotator::ZeroRotator, FVector(3.4f, 0.12f, 1.8f), TintFor(FName("Stockpile")), AmberGlow * 0.5f);
-		// Dorsal dome + four dark legs.
-		AddAccent(Ship, TEXT("/Engine/BasicShapes/Sphere.Sphere"), PadCm + FVector(-350.f, 0, 510.f),
-			FRotator::ZeroRotator, FVector(1.6f, 1.6f, 1.0f), DarkSlate);
-		for (int32 Leg = 0; Leg < 4; ++Leg)
+		return;
+	}
+	UStaticMeshComponent* Mesh = Ship->GetStaticMeshComponent();
+	Mesh->SetMobility(EComponentMobility::Movable);
+	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	if (UStaticMesh* ShipMesh = LoadObject<UStaticMesh>(nullptr, SupplyShipPath))
+	{
+		// Code-built at true scale (scripts/blender/rh_build_supplyship.py),
+		// pivot at the feet: no fitting.
+		Mesh->SetStaticMesh(ShipMesh);
+		if (UMaterialInstanceDynamic* Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0))
 		{
-			const FVector Out((Leg % 2 ? 1.f : -1.f) * 380.f, (Leg < 2 ? 1.f : -1.f) * 220.f, 0);
-			AddAccent(Ship, TEXT("/Engine/BasicShapes/Cube.Cube"), PadCm + Out + FVector(0, 0, 90.f),
-				FRotator(0, 0, (Leg < 2 ? -1.f : 1.f) * 18.f), FVector(0.35f, 0.35f, 1.9f), DarkSlate);
+			Mid->SetScalarParameterValue(FName("PoweredState"), 1.f);
+			Mid->SetScalarParameterValue(FName("EmissiveAmount"), 0.f);
+			ShipMid = Mid;
 		}
-		AddLabel(Ship, TEXT("Supply Ship"), BoneWhite, 620.f);
-		// Surface furniture: hidden if the player is underground when the ship
-		// lands (adversarial-review finding), shown again on the next SURF view.
-		Ship->SetActorHiddenInGame(IsUnderground());
-		ShipVisual = Ship;
 	}
-	if (GEngine)
+	else
 	{
-		GEngine->AddOnScreenDebugMessage(-1, 15.f, FColor::Cyan,
-			FString::Printf(TEXT("SUPPLY SHIP LANDED: %d items transferred. The Program continues."), Items.Num()));
+		// Art missing: a plain deck-sized block, so the beat still plays.
+		Mesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+		Mesh->SetRelativeScale3D(FVector(8.8f, 8.8f, 2.f));
+		ApplyTint(Ship, RHCanon::BoneWhite);
+	}
+#if WITH_EDITOR
+	Ship->SetActorLabel(TEXT("Sim_SupplyShip"));
+#endif
+	// The burn: a warm light under the deck that rides down with the ship.
+	UPointLightComponent* Burn = NewObject<UPointLightComponent>(Ship);
+	Burn->SetupAttachment(Ship->GetRootComponent());
+	Burn->SetMobility(EComponentMobility::Movable);
+	Burn->SetIntensityUnits(ELightUnits::Candelas);
+	Burn->SetIntensity(0.f);
+	Burn->SetLightColor(FColor(255, 168, 82));
+	Burn->SetAttenuationRadius(2600.f);
+	Burn->SetCastShadows(false);
+	Burn->RegisterComponent();
+	Burn->SetRelativeLocation(FVector(0, 0, 40.f));
+	ShipBurnLight = Burn;
+	Ship->SetActorHiddenInGame(IsUnderground());
+	ShipVisual = Ship;
+	ShipBeat = bLanded ? 2 : 1;
+	UE_LOG(LogRedHope, Display, TEXT("[Ship] %s (%s)"), bLanded ? TEXT("on the pad") : TEXT("descending"),
+		LoadObject<UStaticMesh>(nullptr, SupplyShipPath) ? TEXT("SupplyShip model") : TEXT("placeholder block"));
+	ShipBeatStartReal = FPlatformTime::Seconds();
+	if (bLanded)
+	{
+		AddLabel(Ship, TEXT("Supply Ship"), RHCanon::BoneWhite, 700.f);
+	}
+}
+
+void URHColonyVisualizerSubsystem::SetShipBurn(float Amount)
+{
+	if (UMaterialInstanceDynamic* Mid = ShipMid.Get())
+	{
+		Mid->SetScalarParameterValue(FName("EmissiveAmount"), 2.5f * Amount);
+	}
+	if (UPointLightComponent* Burn = ShipBurnLight.Get())
+	{
+		Burn->SetIntensity(3500.f * Amount);
+	}
+}
+
+void URHColonyVisualizerSubsystem::UpdateSupplyShip(const URHSimWorldSubsystem* Sim)
+{
+	const UWorld* World = GetWorld();
+	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	if (!Sim || !Clock)
+	{
+		return;
+	}
+	const double Now = Clock->GetSimSecondsTotal();
+	const bool bInbound = Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound;
+	const double StaySim = ShipStaySols * URHSimClockSubsystem::SolLengthSimSeconds;
+	// The landing site is cleared the moment the first ship is on its way.
+	if (bInbound && !LandingPadVisual)
+	{
+		EnsureLandingPad();
+	}
+	const double RealNow = FPlatformTime::Seconds();
+	const float T = (float)FMath::Clamp((RealNow - ShipBeatStartReal) / ShipBurnRealSeconds, 0.0, 1.0);
+	const FVector Rest = ShipPadCm + FVector(0, 0, ShipPadTopCm());
+	switch (ShipBeat)
+	{
+	case 0: // away: start down so the touchdown lands on the sim's arrival
+	{
+		const double Lead = ShipBurnRealSeconds * FMath::Max(Clock->GetSpeed(), 0.0001f);
+		if (bInbound && Sim->GetShipEtaSimSeconds() - Now <= Lead)
+		{
+			SpawnSupplyShip(false);
+			ShipEtaLanded = Sim->GetShipEtaSimSeconds();
+		}
+		break;
+	}
+	case 1: // descending: fast from altitude, slowing onto the pad, engines lit
+		if (ShipVisual)
+		{
+			ShipVisual->SetActorLocation(Rest + FVector(0, 0, ShipDropCm * FMath::Pow(1.f - T, 2.2f)));
+		}
+		SetShipBurn(T < 0.92f ? 1.f : (1.f - T) / 0.08f);
+		if (T >= 1.f)
+		{
+			ShipBeat = 2;
+			ShipLandedSimSeconds = Now;
+			SetShipBurn(0.f);
+			UE_LOG(LogRedHope, Display, TEXT("[Ship] touched down (sim ETA %.0f s, now %.0f s)"), Sim->GetShipEtaSimSeconds(), Now);
+			if (ShipVisual)
+			{
+				AddLabel(ShipVisual, TEXT("Supply Ship"), RHCanon::BoneWhite, 700.f);
+			}
+		}
+		break;
+	case 2: // on the pad for a sol; leaves early if the NEXT ship is already due
+		// (this ship's own arrival can still be pending in the sim when the
+		// descent ends ahead of it - it carries the ETA it came down on).
+		if (Now - ShipLandedSimSeconds >= StaySim
+			|| (bInbound && Sim->GetShipEtaSimSeconds() != ShipEtaLanded && Sim->GetShipEtaSimSeconds() - Now < StaySim))
+		{
+			ShipBeat = 3;
+			ShipBeatStartReal = RealNow;
+			UE_LOG(LogRedHope, Display, TEXT("[Ship] lifting off after %.2f sols on the pad"), (Now - ShipLandedSimSeconds) / URHSimClockSubsystem::SolLengthSimSeconds);
+			// The label was placed at the pad (absolute); it must not hang in
+			// the air once the ship climbs: drop it on lift-off.
+			if (ShipVisual)
+			{
+				TArray<UTextRenderComponent*> Labels;
+				ShipVisual->GetComponents(Labels);
+				for (UTextRenderComponent* L : Labels)
+				{
+					L->DestroyComponent();
+				}
+			}
+		}
+		break;
+	case 3: // lifting off: slow to start, accelerating away
+		if (ShipVisual)
+		{
+			ShipVisual->SetActorLocation(Rest + FVector(0, 0, 1.5f * ShipDropCm * FMath::Pow(T, 2.2f)));
+		}
+		SetShipBurn(T < 0.1f ? T / 0.1f : 1.f);
+		if (T >= 1.f)
+		{
+			if (ShipVisual)
+			{
+				ShipVisual->Destroy();
+				ShipVisual = nullptr;
+			}
+			ShipBeat = 0;
+			UE_LOG(LogRedHope, Display, TEXT("[Ship] gone; the pad waits for the next one"));
+		}
+		break;
+	default:
+		ShipBeat = 0;
+		break;
+	}
+}
+
+void URHColonyVisualizerSubsystem::RestoreSupplyShip(const URHSimWorldSubsystem* Sim)
+{
+	const UWorld* World = GetWorld();
+	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	// Completed is only a passing state now (the ladder repeats, D1a); a ship has
+	// landed once any quota past the first has opened.
+	if (!Sim || !Clock || !(Sim->GetQuotaPhase() == ERHQuotaPhase::Completed || Sim->GetQuotaOpenedSol() > 0))
+	{
+		return;
+	}
+	EnsureLandingPad();
+	// Each landing opens the next quota, so its sol is the last touchdown a save
+	// keeps: a ship that landed under a sol ago is still on the pad.
+	const double LandedAt = Sim->GetQuotaOpenedSol() * (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	if (Sim->GetQuotaPhase() != ERHQuotaPhase::ShipInbound
+		&& Clock->GetSimSecondsTotal() - LandedAt < ShipStaySols * URHSimClockSubsystem::SolLengthSimSeconds)
+	{
+		SpawnSupplyShip(true);
+		ShipLandedSimSeconds = LandedAt;
 	}
 }
 
@@ -2759,6 +2977,8 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		bEnvironmentHidden = IsUnderground();
 		EnvironmentRigActor->SetActorHiddenInGame(bEnvironmentHidden);
 	}
+	// The supply ship's beat: down ahead of the arrival, a sol on the pad, gone.
+	UpdateSupplyShip(Sim);
 	// Dig sites follow the dig: a cheap state-keyed rebuild, twice a second.
 	if (FPlatformTime::Seconds() >= NextDepositRefreshRealSeconds)
 	{
@@ -3980,6 +4200,10 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	if (ShipVisual)
 	{
 		ShipVisual->SetActorHiddenInGame(!bSurface);
+	}
+	if (LandingPadVisual)
+	{
+		LandingPadVisual->SetActorHiddenInGame(!bSurface);
 	}
 	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
 	{

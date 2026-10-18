@@ -93,6 +93,15 @@ private:
 	void HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason);
 	void HandleQuotaMet(int32 Sol, double AwardKg);
 	void HandleShipArrived(const TArray<FName>& Items);
+	// The supply ship (2026-10-17, "Ship C"): a landing pad east of the colony,
+	// a descent timed onto the sim's arrival, a sol on the pad, a lift-off.
+	// Presentation only - the sim's ship is the quota phase and the ETA.
+	void EnsureLandingPad();
+	void SpawnSupplyShip(bool bLanded);
+	void SetShipBurn(float Amount);
+	void UpdateSupplyShip(const URHSimWorldSubsystem* Sim);
+	void RestoreSupplyShip(const URHSimWorldSubsystem* Sim);
+	float ShipPadTopCm() const;
 	// Discovery (M1-b): marker + notice the moment a scout's survey reports.
 	void HandleDepositDiscovered(const FRHDepositState& Deposit);
 	// Empty surveys report too - paid-for knowledge, even when it's "nothing".
@@ -310,6 +319,13 @@ private:
 	TMap<FName, uint8> RivalMarkerState;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ConvoyVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
+	UPROPERTY() TObjectPtr<AStaticMeshActor> LandingPadVisual;
+	uint8 ShipBeat = 0;                // 0 away, 1 descending, 2 on the pad, 3 lifting off
+	double ShipBeatStartReal = 0.0;    // real seconds: the burns run in real time
+	double ShipLandedSimSeconds = -1.0;
+	double ShipEtaLanded = -1.0;       // the sim ETA the current ship came down on
+	TWeakObjectPtr<UPointLightComponent> ShipBurnLight;
+	TWeakObjectPtr<class UMaterialInstanceDynamic> ShipMid;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShaftVisual;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> CarveTileVisuals;
 	UPROPERTY() TObjectPtr<AActor> SliceRigActor;

@@ -95,6 +95,15 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
   director then renamed the prefab "Habitat" (was "Habitat Module") and
   approved its blurb, dropping the placeholder tag.
 
+## 2026-10-17: the last surface placeholders designed
+
+From concept sheets, the director picked the Charging Pad "Pad C", the dig site "Deposit B" (regolith, ice and ore), and the supply ship "Ship C", which lands and leaves:
+- **Charging Pad.** A code-built induction disc. Its rings brighten while a robot is docked.
+- **Dig sites.** Each is a generated mesh following the deposit's state: a mound, then a dig, with a floor, terraces, an access notch, a spoil heap, and claim stakes. They sit on the terrain as drawn.
+- **Supply ship.** A code-built cargo frame and landing pad. It descends onto its pad timed to the sim's arrival, stays a sol, and lifts off.
+
+All of it is presentation only, apart from one read-only sim getter. Commits `a3764a7` and the supply-ship commit. Decisions are in `docs/design-decisions.md`.
+
 ## 2026-10-17: the crew phase gets a game (director: "D1a D2a D3a D4a D5a")
 
 The 10-15 playtest found the game ended at sol ~10. The supply line ran out, water went undrinkable from sol ~60, Hope pinned at 100 with no warning before food ran out, and the grid blacked out every night. The director approved all five fixes from `docs/qa/2026-10-17/crew-phase-brief.md`.

@@ -79,7 +79,7 @@ runs low about two sols in.
 | Try this | Good looks like |
 |---|---|
 | Watch the Objective panel | Q3 is met around sol 29.6. Then the cargo is yours to pick: Earth Soil Pallet + Seed Vault start a garden; a Spare Parts Crate keeps the fleet repaired |
-| LAUNCH | The ship lands 3 sols later, and the CEO renews Q3 with bills x1.25 (round 1). There is always a next ship |
+| LAUNCH | A landing pad appears east of the colony. 3 sols later the supply ship comes down onto it, engines glowing; it sits a sol, then lifts off. The CEO renews Q3 with bills x1.25 (round 1). There is always a next ship |
 | Around sol 30.6: **ICE_A RUNNING LOW** | The alert, then the Next Step panel switches to the WATER steps: survey about 700 m north, chain Grid Pylons out to Ice_B, drill it, and put a Water Plant beside the drill. **Do it yourself** - that is the mid-game goal. The bot took 6 sols |
 | The Crew panel | Hope sits around 71 STEADY and should climb into THRIVING (75-89) as the garden and comforts come in. THRIVING is meant to be the normal good state now |
 | Optional: `RH.AddStock Food -150` in the console | Neither checkpoint ever runs short of food, so this provokes it: **FOOD RUNNING LOW**, a food line in the Crew panel, and the guide's FOOD step jumps the queue |
@@ -230,6 +230,8 @@ The mix is set from the console with the `rh.AudioMaster`, `rh.AudioMusic`,
 - **D. Cargo stacking (`late`):** cap the Toolkit bonus, or leave it?
 - **E. After Ice_B:** a third ice deposit, the dormant agri water recycling,
   or nothing yet?
+
+- **F. The new surface art:** the Charging Pad (rings brighten while a robot charges), the dig sites (a mound until worked, then flags, terraces and a spoil heap; regolith, ice and ore each look different), and the supply ship and its landing pad. Keep, or what is wrong?
 
 **From §1-§7:**
 
