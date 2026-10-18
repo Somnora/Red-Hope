@@ -4941,6 +4941,486 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// D5a self-test (2026-10-17): the per-machine DAY SHIFT. A day-shift machine
+	// spends only the daylight share of each step on its batch and draws idle
+	// power for the rest. Pins the data (config window, defaults, the derived
+	// eligibility set, the solar curve edges), the daylight helper, the shipped
+	// defaults, the night rest / dusk partial / night work with the shift off /
+	// manual-OFF-trumps arithmetic (exact), the presentation reads, ERA PARITY
+	// (the same work hours at dt 60 s aligned, dt 1 s, and dt 60 s offset by
+	// 30 s), the dawn-lag residual of an overnight shed (measured and bounded,
+	// not hidden), the night the bank now survives (and its control), and the
+	// save round trip with the strict v32 refusal. The clock only ever moves
+	// FORWARD here. Fails loudly. `-dayshift`.
+	if (FParse::Param(*Params, TEXT("dayshift")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DAY SHIFT TEST (D5a, 2026-10-17) ==="));
+		int32 Fails = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DAYSHIFT ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DAYSHIFT FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		const auto Finish = [&]() -> int32
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== DAY SHIFT TEST END: %d failure(s) ==="), Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return Fails > 0 ? 1 : 0;
+		};
+		const double SolL = URHSimClockSubsystem::SolLengthSimSeconds;
+		const double Tight = 1e-9;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString Err;
+
+		// One era-style step: pin the bank (never shed) or leave it free.
+		const auto Step = [&](double Dt, bool bPin)
+		{
+			if (bPin) { Sim->Debug_SetBatteryWh(1.0e9); }
+			Clock->Debug_AdvanceSimSeconds(Dt);
+			Sim->EraStep((float)Dt);
+		};
+		// Move the clock FORWARD to the next occurrence of a sol fraction (stay put
+		// if already there). Never rewinds: a rewind would replay the uplink
+		// ordering, the power-history ring and the quota and ship clocks.
+		const auto AdvanceTo = [&](double Frac)
+		{
+			const double Now = Clock->GetSimSecondsTotal();
+			const double Sols0 = FMath::FloorToDouble(Now / SolL);
+			const double Target = Frac * SolL;
+			const double T = (Sols0 + (Target < Now - Sols0 * SolL ? 1.0 : 0.0)) * SolL + Target;
+			if (T > Now) { Clock->Debug_AdvanceSimSeconds(T - Now); }
+		};
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { Id = B.Id; } } return Id; };
+		const auto Find = [&](int32 Id) -> const FRHBuildingInstance* { for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == Id) { return &B; } } return nullptr; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0));
+			return LastIdOf(Def);
+		};
+
+		// DS0. Pure data (fail-fast on drift: every later number assumes it). The
+		// config reads skip -RHConfig overrides, so only the synced DT_Config row
+		// can satisfy them. The default set and the derived eligibility set are
+		// exact sets over the whole building table.
+		{
+			const double Start = DefsSub->GetConfigTableScalar(FName("DayShiftStartFrac"), -1.0);
+			const double End = DefsSub->GetConfigTableScalar(FName("DayShiftEndFrac"), -1.0);
+			const double On = DefsSub->GetConfigTableScalar(FName("DayShiftDefaultsOn"), -1.0);
+			TArray<FString> DefaultNames, EligibleNames;
+			DefsSub->ForEachBuilding([&](FName Name, const FRHBuildingRow&)
+			{
+				if (DefsSub->GetConfigTableScalar(FName(*FString::Printf(TEXT("DayShiftDefault_%s"), *Name.ToString())), 0.0) >= 0.5) { DefaultNames.Add(Name.ToString()); }
+				if (Sim->CanDayShift(Name)) { EligibleNames.Add(Name.ToString()); }
+			});
+			DefaultNames.Sort();
+			EligibleNames.Sort();
+			const FString Defaults = FString::Join(DefaultNames, TEXT(","));
+			const FString Eligible = FString::Join(EligibleNames, TEXT(","));
+			const bool bCurve = Near(DefsSub->EvalSolarCurve(0.25f), 0.0, 1e-6) && Near(DefsSub->EvalSolarCurve(0.75f), 0.0, 1e-6)
+				&& Near(DefsSub->EvalSolarCurve(0.0f), 0.0, 1e-6)
+				&& DefsSub->EvalSolarCurve(0.26f) > 0.f && DefsSub->EvalSolarCurve(0.74f) > 0.f && DefsSub->EvalSolarCurve(0.5f) > 0.f;
+			const bool bData = Near(Start, 0.25, 1e-12) && Near(End, 0.75, 1e-12) && Near(On, 1.0, 1e-12)
+				&& Near(Sim->GetDayShiftStartFrac(), Start, 1e-12) && Near(Sim->GetDayShiftEndFrac(), End, 1e-12) && Sim->GetDayShiftDefaultsOn()
+				&& Defaults == TEXT("Electrolyzer,Forge") && Eligible == TEXT("Borer,Electrolyzer,Forge,IceDrill,WaterPlant") && bCurve;
+			Expect(bData, FString::Printf(TEXT("DS0 RH_Config window %.2f..%.2f, defaults-on %.0f; DayShiftDefault_ rows {%s}; day-shift-capable {%s}; solar curve 0 at both edges and 0, up inside (DT/CSV)"),
+				Start, End, On, *Defaults, *Eligible));
+			if (!bData)
+			{
+				return Finish();
+			}
+		}
+
+		// DS1. The daylight helper: the share of [T0, T1] in the window, wrap-safe.
+		{
+			const double Cases[][3] = { {240, 300, 0.0}, {300, 360, 1.0}, {270, 330, 0.5}, {870, 930, 0.5}, {900, 960, 0.0}, {0, 1200, 0.5},
+				{0, 2400, 0.5}, {1500, 1560, 1.0}, {1440, 1500, 0.0}, {1140, 1560, 60.0 / 420.0}, {300, 300, 1.0}, {900, 900, 0.0}, {299.5, 299.5, 0.0} };
+			bool bAll = true;
+			FString Got;
+			for (const auto& C : Cases)
+			{
+				const double G = Sim->GetDaylightFraction(C[0], C[1]);
+				bAll &= Near(G, C[2], 1e-12);
+				Got += FString::Printf(TEXT("[%.1f,%.1f]=%.4f "), C[0], C[1], G);
+			}
+			Expect(bAll, FString::Printf(TEXT("DS1 daylight share: %s(expect 0 1 .5 .5 0 .5 .5 1 0 .1429 | points 1 0 0)"), *Got));
+		}
+
+		// DS2. Defaults and eligibility on a real colony. Debug_PlaceInstant routes
+		// through the same AddBuilding as the uplink Build order.
+		const int32 LanderId = LastIdOf(TEXT("Lander"));
+		const int32 F = Place(TEXT("Forge"), 2000, 1500);
+		const int32 E = Place(TEXT("Electrolyzer"), 2000, -1500);
+		const int32 W = Place(TEXT("WaterPlant"), 3000, -1500);
+		const int32 Bo = Place(TEXT("Borer"), 3000, 1500);
+		const int32 A = Place(TEXT("AirFilter"), 4000, 0);
+		const int32 P = Place(TEXT("ChargePad"), 4000, 1500);
+		const int32 K = Place(TEXT("BatteryBank"), 1000, 3500);
+		const int32 M = Place(TEXT("LabModule"), 1000, -3500);
+		{
+			Expect(Sim->IsDayShift(F) && Sim->IsDayShift(E) && !Sim->IsDayShift(W) && !Sim->IsDayShift(Bo) && !Sim->IsDayShift(A)
+				&& !Sim->IsDayShift(P) && !Sim->IsDayShift(K) && !Sim->IsDayShift(M) && !Sim->IsDayShift(LanderId),
+				TEXT("DS2 a new Forge and Electrolyzer start on the day shift; a Water Plant, Borer, Air Filter, pad, bank, lab and the Lander do not"));
+			Expect(Sim->CanDayShift(FName("Forge")) && Sim->CanDayShift(FName("Electrolyzer")) && Sim->CanDayShift(FName("WaterPlant"))
+				&& Sim->CanDayShift(FName("IceDrill")) && Sim->CanDayShift(FName("Borer"))
+				&& !Sim->CanDayShift(FName("Lander")) && !Sim->CanDayShift(FName("AirFilter")) && !Sim->CanDayShift(FName("ChargePad"))
+				&& !Sim->CanDayShift(FName("BatteryBank")) && !Sim->CanDayShift(FName("LabModule")) && !Sim->CanDayShift(FName("Floodmast"))
+				&& !Sim->CanDayShift(FName("SolarArray")),
+				TEXT("DS2 eligibility: Forge, Electrolyzer, Water Plant, Ice Drill, Borer yes; Lander, Air Filter, pad, bank, lab, Floodmast, Solar Array never"));
+			const bool bRefusedAir = !Sim->SetDayShift(A, true) && !Sim->IsDayShift(A);
+			const bool bRefusedMissing = !Sim->SetDayShift(987654, true);
+			const bool bAcceptedWater = Sim->SetDayShift(W, true) && Sim->IsDayShift(W);
+			Expect(bRefusedAir && bRefusedMissing && bAcceptedWater,
+				FString::Printf(TEXT("DS2 SetDayShift refuses the Air Filter (%d) and a missing building (%d), accepts the Water Plant (%d)"),
+					bRefusedAir ? 1 : 0, bRefusedMissing ? 1 : 0, bAcceptedWater ? 1 : 0));
+			// Isolate: only the Forge, the bank and the Lander draw, so the LoadW
+			// arithmetic below is exact.
+			for (int32 Id : { E, W, Bo, A, P, M }) { Sim->SetManualPower(Id, false); }
+		}
+		const FRHBuildingRow* LanderDef = DefsSub->GetBuilding(FName("Lander"));
+		const FRHBuildingRow* BankDef = DefsSub->GetBuilding(FName("BatteryBank"));
+		const FRHBuildingRow* ForgeDef = DefsSub->GetBuilding(FName("Forge"));
+		const FRHBuildingRow* ElecDef = DefsSub->GetBuilding(FName("Electrolyzer"));
+		const double IdleBase = LanderDef->PowerIdle_W + BankDef->PowerIdle_W; // 25 W: Lander + the one bank
+		const double ForgeSpan = ForgeDef->PowerDraw_W - ForgeDef->PowerIdle_W;
+		const FName NStruct(TEXT("Struct"));
+		const auto Rem = [&](int32 Id) { const FRHBuildingInstance* B = Find(Id); return B ? B->BatchRemaining_h : -1.0; };
+		const auto LoadW = [&]() { return Sim->GetPower().LoadW; };
+
+		// DS3. Night rest: a batch running at noon pauses at night, loses nothing,
+		// and the machine draws idle only.
+		Sim->Debug_AddSolidAt(F, FName("Regolith"), 5000.0, false);
+		AdvanceTo(0.45); // T = 540
+		Step(60.0, true); // noon step [540, 600]: the whole step is daylight
+		const double Rem0 = Rem(F);
+		Expect(Near(Rem0, 2.0 - 1.2, Tight) && Near(LoadW(), IdleBase + ForgeDef->PowerDraw_W, Tight) && !Sim->IsDayShiftResting(F),
+			FString::Printf(TEXT("DS3 noon step: a 2 h batch spent 1.2 h (left %.4f, expect 0.8); load %.1f W = idle %.0f + Forge draw %.0f; not resting"),
+				Rem0, LoadW(), IdleBase, ForgeDef->PowerDraw_W));
+		AdvanceTo(0.95); // T = 1140
+		const double StructBeforeNight = Sim->GetTotalSolid(NStruct);
+		bool bRestOk = true;
+		FString RestLog;
+		for (int32 i = 0; i < 3; ++i)
+		{
+			Step(60.0, true); // [1140,1200] [1200,1260] [1260,1320]: all night
+			bRestOk &= Near(Rem(F), Rem0, Tight) && Near(LoadW(), IdleBase + ForgeDef->PowerIdle_W, Tight)
+				&& Near(Sim->GetTotalSolid(NStruct), StructBeforeNight, Tight);
+			RestLog += FString::Printf(TEXT("[rem %.4f load %.1f W] "), Rem(F), LoadW());
+		}
+		Expect(bRestOk && Sim->IsDayShiftResting(F),
+			FString::Printf(TEXT("DS3 three night steps: batch exactly paused at %.4f h, nothing produced, load = idle %.0f W; resting reads true %s"),
+				Rem0, IdleBase + ForgeDef->PowerIdle_W, *RestLog));
+
+		// DS4. Dusk partial: a step half in daylight spends half its budget and
+		// draws half its above-idle power.
+		AdvanceTo(0.725); // T = 2070
+		Step(60.0, true); // [2070, 2130] = sol 1 [870, 930]: half daylight
+		Expect(Near(Rem(F), Rem0 - 0.6, Tight) && Near(LoadW(), IdleBase + ForgeDef->PowerIdle_W + ForgeSpan * 0.5, Tight),
+			FString::Printf(TEXT("DS4 dusk step: batch spent 0.6 h (left %.4f, expect %.4f); load %.1f W (expect %.1f = idle + %.0f x 0.5)"),
+				Rem(F), Rem0 - 0.6, LoadW(), IdleBase + ForgeDef->PowerIdle_W + ForgeSpan * 0.5, ForgeSpan));
+
+		// DS5. The shift switched off: the same machine works through the night.
+		// (Struct is measured as the colony total - era logistics moves finished
+		// outputs off the Forge every step.)
+		Sim->SetDayShift(F, false);
+		const double StructBeforeFinish = Sim->GetTotalSolid(NStruct);
+		Step(60.0, true); // [2130, 2190]: night
+		Expect(Near(Sim->GetTotalSolid(NStruct) - StructBeforeFinish, 25.0, Tight) && Near(Rem(F), 1.0, Tight)
+			&& Near(LoadW(), IdleBase + ForgeDef->PowerDraw_W, Tight) && !Sim->IsDayShiftResting(F),
+			FString::Printf(TEXT("DS5 shift off at night: the 0.2 h batch finished (+%.1f Struct, expect 25), a new one started (left %.4f, expect 1.0), load %.1f W, not resting"),
+				Sim->GetTotalSolid(NStruct) - StructBeforeFinish, Rem(F), LoadW()));
+
+		// DS6. Manual OFF trumps the day shift: zero draw, batch frozen, even at noon.
+		Sim->SetDayShift(F, true);
+		Sim->SetManualPower(F, false);
+		const double RemBeforeOff = Rem(F);
+		AdvanceTo(0.45); // T = 2940
+		Step(60.0, true); // [2940, 3000]: noon
+		Expect(Near(Rem(F), RemBeforeOff, Tight) && Near(LoadW(), IdleBase, Tight) && !Sim->IsDayShiftResting(F),
+			FString::Printf(TEXT("DS6 manually OFF at noon: batch frozen at %.4f h, load %.1f W (expect %.0f: the Forge is off the grid entirely)"),
+				Rem(F), LoadW(), IdleBase));
+		Sim->SetManualPower(F, true);
+
+		// DS7. Era parity: the Electrolyzer (1 h batches) does the same work hours
+		// per sol at dt 60 s aligned, dt 1 s, and dt 60 s offset by half a step.
+		// Work = completed batches (O2 / 8.9) + the running batch's progress.
+		Sim->SetManualPower(F, false);
+		Sim->SetManualPower(E, true);
+		Sim->SetDayShift(E, true);
+		Sim->AddStock(FName("Water"), 1.0e5);
+		const FName NO2(TEXT("Oxygen"));
+		const FRHRecipeRow* ElecRec = DefsSub->GetRecipe(FName("Electrolysis"));
+		const double ElecBatchH = ElecRec ? ElecRec->BatchTime_h : 1.0;
+		const double O2PerBatch = ElecRec ? URHDefinitionsSubsystem::ParseResourceList(ElecRec->Outputs).FindRef(NO2) : 8.9;
+		struct FMeter { double O2 = 0.0; double Pend = 0.0; };
+		const auto Meter = [&]()
+		{
+			FMeter Snap;
+			Snap.O2 = Sim->GetStock(NO2);
+			const FRHBuildingInstance* Elec = Find(E);
+			Snap.Pend = (Elec && Elec->BatchRemaining_h > 0.0) ? ElecBatchH - Elec->BatchRemaining_h : 0.0;
+			return Snap;
+		};
+		const auto WorkBetween = [&](const FMeter& From, const FMeter& To)
+		{
+			return FMath::RoundToDouble((To.O2 - From.O2) / O2PerBatch) * ElecBatchH + To.Pend - From.Pend;
+		};
+		const double ShiftH = 24.0 * (Sim->GetDayShiftEndFrac() - Sim->GetDayShiftStartFrac()); // 12 sol-hours
+		double WorkAligned = 0.0, WorkFine = 0.0, WorkOffset = 0.0;
+		AdvanceTo(0.0);
+		Expect(!Sim->IsDaylightNow() && Near(Clock->GetSimSecondsTotal() / SolL, FMath::RoundToDouble(Clock->GetSimSecondsTotal() / SolL), 1e-12),
+			TEXT("DS7 the sol boundary is night (the shift is not running at T = k x 1200)"));
+		{
+			const FMeter From = Meter();
+			for (int32 i = 0; i < 20; ++i) { Step(60.0, true); }
+			WorkAligned = WorkBetween(From, Meter());
+		}
+		{
+			const FMeter From = Meter();
+			for (int32 i = 0; i < 1200; ++i) { Step(1.0, true); }
+			WorkFine = WorkBetween(From, Meter());
+		}
+		{
+			Clock->Debug_AdvanceSimSeconds(30.0); // an era grid offset by half a step: sunrise and sunset fall mid-step
+			const FMeter From = Meter();
+			for (int32 i = 0; i < 20; ++i) { Step(60.0, true); }
+			WorkOffset = WorkBetween(From, Meter());
+		}
+		Expect(Near(WorkAligned, ShiftH, 1e-6) && Near(WorkFine, ShiftH, 1e-6) && Near(WorkOffset, ShiftH, 1e-6),
+			FString::Printf(TEXT("DS7 era parity: Electrolyzer work per sol %.6f h (dt 60 aligned), %.6f h (dt 1), %.6f h (dt 60 offset 30 s); expect %.1f each"),
+				WorkAligned, WorkFine, WorkOffset, ShiftH));
+
+		// DS7d. The dawn lag, measured. Production reads the shed state the
+		// previous step's power pass set, so a day-shift machine that was shed
+		// overnight loses its first dawn step: a whole era step in the era band, a
+		// blink in the agent band. Scenario: a drained bank all night (the bank is
+		// zeroed before every night step) with a Water Plant that is NOT on the day
+		// shift, so the grid sheds the resting Electrolyzer too. Eight arrays carry
+		// the day. Work is measured from sunrise to sunset in each band.
+		{
+			for (int32 i = 0; i < 8; ++i) { Place(TEXT("SolarArray"), 5000.0 + 400.0 * i, -3000.0); }
+			Sim->SetManualPower(W, true);
+			Sim->SetDayShift(W, false);
+			Sim->Debug_AddSolidAt(W, FName("Ice"), 1.0e5, false);
+			struct FBand { double Dt = 0.0; int32 NightSteps = 0; int32 NightShed = 0; bool bLastNightShed = false; int32 NightKey = -1; int32 Latched = -1; double FirstDawnWork = 0.0; double DayWork = 0.0; };
+			const auto RunBand = [&](double Dt)
+			{
+				FBand R;
+				R.Dt = Dt;
+				AdvanceTo(0.75); // dusk
+				R.NightKey = Sim->GetNightIndexNow();
+				const int32 NightSteps = (int32)FMath::RoundToDouble(0.5 * SolL / Dt);
+				for (int32 i = 0; i < NightSteps; ++i)
+				{
+					Sim->Debug_SetBatteryWh(0.0); // drained
+					Step(Dt, false);
+					++R.NightSteps;
+					R.NightShed += Sim->GetPower().ShedCount > 0 ? 1 : 0;
+				}
+				const FRHBuildingInstance* Eb = Find(E);
+				R.bLastNightShed = Eb && !Eb->bPowered;
+				R.Latched = Sim->GetLastBlackoutNight();
+				const FMeter DawnFrom = Meter();
+				Step(Dt, false);
+				R.FirstDawnWork = WorkBetween(DawnFrom, Meter());
+				const int32 DaySteps = (int32)FMath::RoundToDouble(0.5 * SolL / Dt) - 1;
+				for (int32 i = 0; i < DaySteps; ++i) { Step(Dt, false); }
+				R.DayWork = WorkBetween(DawnFrom, Meter());
+				return R;
+			};
+			const FBand Era = RunBand(60.0);
+			const FBand Fine = RunBand(1.0);
+			const double EraLoss = 60.0 / 50.0 - Era.FirstDawnWork;
+			const double FineLoss = 1.0 / 50.0 - Fine.FirstDawnWork;
+			Expect(Era.NightShed == Era.NightSteps && Fine.NightShed == Fine.NightSteps && Era.bLastNightShed && Fine.bLastNightShed,
+				FString::Printf(TEXT("DS7d premise: every night step shed (era %d/%d, fine %d/%d) and the resting Electrolyzer was shed on the last one (era %d, fine %d)"),
+					Era.NightShed, Era.NightSteps, Fine.NightShed, Fine.NightSteps, Era.bLastNightShed ? 1 : 0, Fine.bLastNightShed ? 1 : 0));
+			Expect(Era.NightKey >= 0 && Era.Latched == Era.NightKey && Fine.NightKey == Era.NightKey + 1 && Fine.Latched == Fine.NightKey,
+				FString::Printf(TEXT("DS7d the guide's blackout latch names each night it shed in (era night %d latched %d, fine night %d latched %d)"),
+					Era.NightKey, Era.Latched, Fine.NightKey, Fine.Latched));
+			Expect(Near(EraLoss, 60.0 / 50.0, Tight) && FineLoss >= -Tight && FineLoss <= 1.0 / 50.0 + Tight,
+				FString::Printf(TEXT("DS7d first-dawn-step loss: era %.3f h (the whole 1.2 h step, expect 1.200), fine %.4f h (at most one 0.02 h step)"), EraLoss, FineLoss));
+			Expect(Era.DayWork <= ShiftH + 1e-6 && Fine.DayWork <= ShiftH + 1e-6 && Near(Era.DayWork, Fine.DayWork, 60.0 / 50.0 + 1e-6),
+				FString::Printf(TEXT("DS7d sunrise-to-sunset work after an overnight shed: era %.3f h, fine %.3f h, gap %.3f h (documented tolerance: one era step, 1.2 h); an unshed shift is %.1f h"),
+					Era.DayWork, Fine.DayWork, FMath::Abs(Era.DayWork - Fine.DayWork), ShiftH));
+		}
+
+		// DS7e. In-game burst parity. The clock publishes up to four era steps in
+		// ONE frame (a hitch) and has already advanced the whole frame, so every
+		// step would read the same end time. Sim Tick gives each step its own
+		// window end, so a burst that straddles sunset or sunrise still works
+		// exactly the daylight it spans: 90 s of daylight is 1.8 sol-hours at
+		// dusk, 150 s is 3.0 at dawn. (Without the per-step end all four steps read
+		// the frame's last window: 0 h at dusk, 4.8 h at dawn.) Driven through the
+		// real clock Tick and sim Tick at the era speed ceiling.
+		{
+			Sim->SetManualPower(W, false);
+			Step(60.0, true); // settle: power flags and batches
+			const auto BurstWork = [&](double SunEdgeFrac, double SecondsBefore, int32& OutPublished)
+			{
+				AdvanceTo(SunEdgeFrac - SecondsBefore / SolL);
+				Sim->Debug_SetBatteryWh(Sim->GetPower().BatteryCapWh);
+				const FMeter From = Meter();
+				Clock->SetSpeed(64.f);
+				Clock->Tick(3.75f); // 3.75 s x 64 = 240 sim-s: four whole era steps in one frame
+				OutPublished = Clock->GetEraStepsThisFrame();
+				Sim->Tick(3.75f);
+				Clock->SetSpeed(1.f);
+				return WorkBetween(From, Meter());
+			};
+			int32 PubDusk = 0, PubDawn = 0;
+			const double WorkDusk = BurstWork(0.75, 90.0, PubDusk);
+			const double WorkDawn = BurstWork(0.25, 90.0, PubDawn);
+			Expect(PubDusk == 4 && PubDawn == 4 && Near(WorkDusk, 90.0 / 50.0, 1e-6) && Near(WorkDawn, 150.0 / 50.0, 1e-6),
+				FString::Printf(TEXT("DS7e one-frame burst of %d/%d era steps across the sun edge: %.6f h of work at sunset (90 s of daylight, expect 1.8), %.6f h at sunrise (150 s, expect 3.0)"),
+					PubDusk, PubDawn, WorkDusk, WorkDawn));
+		}
+
+		// DS8. The bank through the night, run with the real bank (no pin): both
+		// heavy machines on the day shift, then the same night with the shift off.
+		{
+			Sim->SetManualPower(F, true);
+			Sim->SetManualPower(E, true);
+			Sim->SetManualPower(W, false);
+			Sim->SetDayShift(F, true);
+			Sim->SetDayShift(E, true);
+			Sim->Debug_AddSolidAt(F, FName("Regolith"), 5000.0, false);
+			AdvanceTo(0.5);
+			for (int32 i = 0; i < 5; ++i) { Step(60.0, true); } // noon to dusk, pinned: both machines are mid-batch
+			const double CapWh = LanderDef->StorageWh + BankDef->StorageWh;
+			const double ShiftIdleW = IdleBase + ForgeDef->PowerIdle_W + ElecDef->PowerIdle_W;
+			const double FullW = IdleBase + ForgeDef->PowerDraw_W + ElecDef->PowerDraw_W;
+			const double GenNightW = LanderDef->PowerGenBase_W;
+			int32 ShedFlips = 0, LatchChanges = 0, LatchEnd = -1;
+			const auto Night = [&](int32& OutShedSteps, double& OutMinWh, double& OutFirstLoadW)
+			{
+				Sim->Debug_SetBatteryWh(CapWh);
+				OutShedSteps = 0;
+				OutMinWh = 1.0e12;
+				ShedFlips = 0;
+				LatchChanges = 0;
+				bool bPrevShed = false;
+				int32 PrevLatch = Sim->GetLastBlackoutNight();
+				for (int32 i = 0; i < 10; ++i)
+				{
+					Step(60.0, false); // unpinned: the bank is the only buffer
+					const bool bShed = Sim->GetPower().ShedCount > 0;
+					OutShedSteps += bShed ? 1 : 0;
+					ShedFlips += (i > 0 && bShed != bPrevShed) ? 1 : 0;
+					bPrevShed = bShed;
+					LatchChanges += Sim->GetLastBlackoutNight() != PrevLatch ? 1 : 0;
+					PrevLatch = Sim->GetLastBlackoutNight();
+					OutMinWh = FMath::Min(OutMinWh, Sim->GetPower().BatteryWh);
+					if (i == 0) { OutFirstLoadW = LoadW(); }
+				}
+				LatchEnd = PrevLatch;
+			};
+			const double NeedWh = (FullW - GenNightW) * 12.0; // 600 s = 12 sol-hours
+			Expect(Near(Sim->GetPower().BatteryCapWh, CapWh, 1e-6) && Near(Clock->GetSimSecondsTotal() - FMath::FloorToDouble(Clock->GetSimSecondsTotal() / SolL) * SolL, 0.75 * SolL, 1e-6),
+				FString::Printf(TEXT("DS8 setup: dusk, bank capacity %.0f Wh (expect Lander + one bank = %.0f)"), Sim->GetPower().BatteryCapWh, CapWh));
+			int32 ShedA = 0;
+			double MinA = 0.0, FirstLoadA = 0.0;
+			const int32 KeyA = Sim->GetNightIndexNow();
+			const int32 LatchBeforeA = Sim->GetLastBlackoutNight();
+			Night(ShedA, MinA, FirstLoadA);
+			const int32 LatchAfterA = Sim->GetLastBlackoutNight();
+			const double FinalA = Sim->GetPower().BatteryWh;
+			const double ExpectA = CapWh + (GenNightW - ShiftIdleW) * 12.0;
+			Expect(ShedA == 0 && MinA > 0.0 && Near(FirstLoadA, ShiftIdleW, Tight) && Near(FinalA, ExpectA, 1e-6) && LatchAfterA == LatchBeforeA && LatchAfterA != KeyA,
+				FString::Printf(TEXT("DS8 on the day shift: ten night steps, %d shed; load %.0f W (all resting); bank %.0f Wh at dawn (expect %.0f = %.0f + (%.0f gen - %.0f idle) x 12 h); min %.0f"),
+					ShedA, FirstLoadA, FinalA, ExpectA, CapWh, GenNightW, ShiftIdleW, MinA));
+			for (int32 i = 0; i < 10; ++i) { Step(60.0, true); } // the day: both machines pick their batches back up
+			Sim->SetDayShift(F, false);
+			Sim->SetDayShift(E, false);
+			int32 ShedB = 0;
+			double MinB = 0.0, FirstLoadB = 0.0;
+			const int32 KeyB = Sim->GetNightIndexNow();
+			Night(ShedB, MinB, FirstLoadB);
+			Expect(ShedB > 0 || MinB <= 0.0,
+				FString::Printf(TEXT("DS8 control, shift off: the same night needs about %.0f Wh (%.0f W x 12 h) against %.0f Wh stored: %d shed step(s), bank minimum %.0f Wh, first-step load %.0f W"),
+					NeedWh, FullW - GenNightW, CapWh, ShedB, MinB, FirstLoadB));
+			// The guide must not strobe: the shed flag alternates through the night
+			// while the bank scrapes empty (it reads 0 or 1 on successive steps), and
+			// the latch the guide keys on changes exactly once - to this night - and
+			// then holds to sunrise.
+			Expect(ShedB > 0 && ShedFlips >= 1 && LatchChanges == 1 && LatchEnd == KeyB && LatchEnd != KeyA,
+				FString::Printf(TEXT("DS8 control: the shed flag flipped %d time(s) across the night but the blackout latch changed %d time(s), ending on night %d (this night %d, the quiet night was %d)"),
+					ShedFlips, LatchChanges, LatchEnd, KeyB, KeyA));
+		}
+
+		// DS9. The presentation reads: how many machines are resting, and the
+		// night key the guide latches a blackout to.
+		{
+			Sim->SetManualPower(F, true);
+			Sim->SetManualPower(E, true);
+			Sim->SetDayShift(F, true);
+			Sim->SetDayShift(E, true);
+			AdvanceTo(0.95);
+			const bool bNight = !Sim->IsDaylightNow();
+			const int32 Count = Sim->GetDayShiftRestingCount();
+			const int32 NightKey = Sim->GetNightIndexNow();
+			Sim->SetManualPower(F, false);
+			const int32 CountOff = Sim->GetDayShiftRestingCount();
+			const bool bOffNotResting = !Sim->IsDayShiftResting(F) && Sim->IsDayShiftResting(E);
+			Sim->SetManualPower(F, true);
+			Expect(bNight && Count == 2 && CountOff == 1 && bOffNotResting,
+				FString::Printf(TEXT("DS9 at midnight: %d machine(s) resting (expect 2: Forge + Electrolyzer); with the Forge manually off %d (expect 1)"), Count, CountOff));
+			AdvanceTo(0.2495);
+			const bool bBeforeDawn = !Sim->IsDaylightNow() && Sim->GetNightIndexNow() == NightKey;
+			AdvanceTo(0.25);
+			const bool bDawn = Sim->IsDaylightNow() && Sim->GetDayShiftRestingCount() == 0;
+			AdvanceTo(0.5);
+			const bool bNoon = Sim->IsDaylightNow() && Sim->GetDayShiftRestingCount() == 0 && !Sim->IsDayShiftResting(F);
+			AdvanceTo(0.75);
+			const bool bNextNight = !Sim->IsDaylightNow() && Sim->GetNightIndexNow() == NightKey + 1;
+			Expect(bBeforeDawn && bDawn && bNoon && bNextNight,
+				FString::Printf(TEXT("DS9 the night key holds to the last second before sunrise (%d), sunrise is daylight with 0 resting (%d), noon 0 resting (%d), and sunset starts the next night key %d -> %d (%d)"),
+					bBeforeDawn ? 1 : 0, bDawn ? 1 : 0, bNoon ? 1 : 0, NightKey, Sim->GetNightIndexNow(), bNextNight ? 1 : 0));
+		}
+
+		// DS10. Save round trip. An explicit pre-save state, every mutable flag
+		// flipped, then the load must restore the pre-save values exactly.
+		{
+			Sim->SetDayShift(F, true);
+			Sim->SetDayShift(E, false);
+			Sim->SetDayShift(W, true);
+			const int32 BuildingsBefore = Sim->GetBuildings().Num();
+			const bool bSaved = Sim->SaveColony(TEXT("dayshifttest"), Err);
+			Sim->SetDayShift(F, false);
+			Sim->SetDayShift(E, true);
+			Sim->SetDayShift(W, false);
+			const bool bMutated = !Sim->IsDayShift(F) && Sim->IsDayShift(E) && !Sim->IsDayShift(W);
+			FString LoadErr;
+			const bool bLoaded = Sim->LoadColony(TEXT("dayshifttest"), LoadErr);
+			Expect(bSaved && bMutated && bLoaded && LoadErr.IsEmpty() && Sim->IsDayShift(F) && !Sim->IsDayShift(E) && Sim->IsDayShift(W) && !Sim->IsDayShift(A)
+				&& Sim->GetBuildings().Num() == BuildingsBefore,
+				FString::Printf(TEXT("DS10 save v33 round trip (saved %d, loaded %d): Forge %d Electrolyzer %d Water Plant %d Air Filter %d (expect 1 0 1 0), %d buildings %s"),
+					bSaved ? 1 : 0, bLoaded ? 1 : 0, Sim->IsDayShift(F) ? 1 : 0, Sim->IsDayShift(E) ? 1 : 0, Sim->IsDayShift(W) ? 1 : 0, Sim->IsDayShift(A) ? 1 : 0,
+					Sim->GetBuildings().Num(), *LoadErr));
+
+			// The strict rule stands: the same file stamped as v32 (no day-shift
+			// byte per building) is refused loudly and the live colony is untouched.
+			const FString SlotPath = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_dayshifttest.sav");
+			const FString OldPath = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_dayshifttest32.sav");
+			TArray<uint8> Bytes;
+			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *SlotPath) && Bytes.Num() > 8;
+			bool bRefused = false;
+			if (bRead)
+			{
+				Bytes[4] = 32; Bytes[5] = 0; Bytes[6] = 0; Bytes[7] = 0; // header: magic u32, then version u32
+				FFileHelper::SaveArrayToFile(Bytes, *OldPath);
+				FString OldErr;
+				bRefused = !Sim->LoadColony(TEXT("dayshifttest32"), OldErr) && OldErr.Contains(TEXT("Save format mismatch"));
+				IFileManager::Get().Delete(*OldPath);
+			}
+			Expect(bRead && bRefused && Sim->IsDayShift(F) && !Sim->IsDayShift(E) && Sim->IsDayShift(W) && Sim->GetBuildings().Num() == BuildingsBefore,
+				FString::Printf(TEXT("DS10 a v32-stamped save is refused (read %d, refused %d); the live flags are untouched"), bRead ? 1 : 0, bRefused ? 1 : 0));
+		}
+
+		return Finish();
+	}
+
 	// M2 Gate C self-test: the garden - zoned cells auto-plant from pooled
 	// Soil/Seeds on a rated floor, yield Food per sol against a Water draw,
 	// pause dry, survive save v12, forfeit soil on re-zoning. `-garden`.

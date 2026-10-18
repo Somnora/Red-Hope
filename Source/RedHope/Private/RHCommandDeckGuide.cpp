@@ -47,6 +47,10 @@ namespace
 	{
 		const URHSimWorldSubsystem* Sim = nullptr;
 		const URHDefinitionsSubsystem* Defs = nullptr;
+		// D5a: the night the grid last shed something (the sim's runtime latch,
+		// -1 = none). The shed flag alternates every sim step while the bank
+		// scrapes empty, so interrupts key on this, never on the flag.
+		int32 BlackoutNight = -1;
 	};
 
 	// Buildings of a type placed so far (under construction counts: the order
@@ -120,6 +124,29 @@ namespace
 			}
 		}
 		return Best;
+	}
+
+	// D5a: tonight is a night the bank ran dry in (latched by the sim, so it
+	// holds steady to sunrise instead of flipping with every sim step).
+	bool BlackoutTonight(const FGuideCtx& C)
+	{
+		return C.BlackoutNight >= 0 && !C.Sim->IsDaylightNow() && C.BlackoutNight == C.Sim->GetNightIndexNow();
+	}
+
+	// D5a: the first finished heavy machine that could work the day shift and is
+	// not on it (and not switched off). Standing is enough - no batch state in
+	// it, so it cannot flicker with a batch ending - and the lowest id wins, so
+	// the machine the text names is stable too.
+	const FRHBuildingInstance* NightHog(const FGuideCtx& C)
+	{
+		for (const FRHBuildingInstance& B : C.Sim->GetBuildings())
+		{
+			if (!B.bUnderConstruction && !B.bManualOff && !B.bDayShift && C.Sim->CanDayShift(B.DefName))
+			{
+				return &B;
+			}
+		}
+		return nullptr;
 	}
 
 	// The first quota has been met at least once: the ladder's opening rung is
@@ -392,7 +419,9 @@ namespace
 	// Food (D4a) ranks first: a larder under the Hope line's floor is the
 	// nearest clock, and an ice interrupt would otherwise hide the chain's
 	// "Keep them well" food warning. The Done predicates compare a stage or a
-	// runway, never an array index, so ranking is free to change.
+	// runway, never an array index, so ranking is free to change. The day-shift
+	// step (D5a) ranks next: a blackout night is the nearest clock after food, and
+	// it only applies for the one night.
 	const TArray<FGuideStep>& Interrupts()
 	{
 		static const TArray<FGuideStep> S = {
@@ -417,6 +446,23 @@ namespace
 				[](const FGuideCtx& C) { return C.Sim->GetPopulation() == 0 || C.Sim->GetFoodRunwaySols() >= C.Sim->GetFoodRunwayFloorSols(); },
 				[](const FGuideCtx& C) { return (float)FMath::Clamp(C.Sim->GetFoodRunwaySols() / FMath::Max(1.0, C.Sim->GetFoodRunwayFloorSols()), 0.0, 1.0); },
 				NAME_None, NAME_None },
+			// Gate-D neutral (it is about power, not people): the fix first. Lights
+			// the Day shift button on the machine the player has selected.
+			// Applies only on a night the bank ran dry in (latched) while a heavy
+			// machine still runs all hours; sunrise ends it. A blackout is a
+			// nightly event from sol 3, so it never blocks the chain for long.
+			{ TEXT("POWER"), TEXT("Put machines on the day shift"),
+				[](const FGuideCtx& C)
+				{
+					const FRHBuildingInstance* Hog = NightHog(C);
+					const FRHBuildingRow* HogDef = Hog ? C.Defs->GetBuilding(Hog->DefName) : nullptr;
+					FString Machine = HogDef ? HogDef->DisplayName : FString(TEXT("heavy machine"));
+					Machine.RemoveFromStart(TEXT("The ")); // "your Borer", not "your The Borer"
+					return FString::Printf(TEXT("The battery bank ran dry after sunset, so the grid is switching machines off to keep the rest running. Heavy machines can work the DAY SHIFT: they run while the sun is up and rest at night on a trickle of power. Click your %s and switch its Day shift on. More Battery Banks carry more of the night."),
+						*Machine);
+				},
+				[](const FGuideCtx& C) { return !(BlackoutTonight(C) && NightHog(C) != nullptr); },
+				NoBar(), NAME_None, FName("DayShift") },
 			{ TEXT("WATER"), TEXT("Find more ice"),
 				[](const FGuideCtx& C)
 				{
@@ -486,7 +532,7 @@ void SRHCommandDeck::RefreshGuide()
 	{
 		return;
 	}
-	const FGuideCtx C{ Sim, Defs };
+	const FGuideCtx C{ Sim, Defs, Sim->GetLastBlackoutNight() };
 	const TArray<FGuideStep>& S = Steps();
 	int32 Now = S.Num() - 1;
 	for (int32 i = GuideHighWater; i < S.Num(); ++i)
@@ -527,7 +573,10 @@ void SRHCommandDeck::RefreshGuide()
 	}
 	if (Int != GuideInterrupt)
 	{
-		if (GuideStep >= 0 && GuideInterrupt != INDEX_NONE && (Int == INDEX_NONE || Int > GuideInterrupt) && !bTipsOff)
+		// The day-shift step also ends at sunrise, whatever the player did: that is
+		// not a "Done", so it gets no tick or cue.
+		if (GuideStep >= 0 && GuideInterrupt != INDEX_NONE && (Int == INDEX_NONE || Int > GuideInterrupt) && !bTipsOff
+			&& !(Interrupts()[GuideInterrupt].Order == FName("DayShift") && Sim->IsDaylightNow()))
 		{
 			ToastLine = FString::Printf(TEXT("Done: %s"), Interrupts()[GuideInterrupt].Title);
 			ToastUntil = FSlateApplication::Get().GetCurrentTime() + 4.0;
@@ -567,6 +616,26 @@ bool SRHCommandDeck::IsGuideTarget(FName Key) const
 	{
 		// The floor cell lights only while the player is still upstairs.
 		return GetGuideOrder() == Key && PC.IsValid() && PC->GetActiveLevel() == 0;
+	}
+	if (Key == FName("DayShift"))
+	{
+		// Lights only while the interrupt is live AND pressing the button helps:
+		// the selected machine can day-shift and is not on it yet. Every input is
+		// steady (latched night, building flags) - nothing here flips per step.
+		const URHSimWorldSubsystem* Sim = GetSim();
+		const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+		if (!Sim || Id == 0 || GetGuideOrder() != Key)
+		{
+			return false;
+		}
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.Id == Id)
+			{
+				return !B.bUnderConstruction && !B.bDayShift && Sim->CanDayShift(B.DefName);
+			}
+		}
+		return false;
 	}
 	return GetGuideOrder() == Key || GetGuideBuildDef() == Key;
 }
@@ -616,7 +685,7 @@ void SRHCommandDeck::SetTipsOff(bool bOff)
 TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 {
 	auto Step = [this]() -> const FGuideStep* { return ShownStep(GuideInterrupt, GuideStep); };
-	auto Ctx = [this]() { return FGuideCtx{ GetSim(), GetDefs() }; };
+	auto Ctx = [this]() { const URHSimWorldSubsystem* S = GetSim(); return FGuideCtx{ S, GetDefs(), S ? S->GetLastBlackoutNight() : -1 }; };
 
 	TSharedRef<SWidget> Header = SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 7.f, 0.f)

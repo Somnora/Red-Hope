@@ -1281,6 +1281,17 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 			[
 				SNew(STextBlock).Text(Txt(TEXT("last 3 sols"))).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
 			]
+			// D5a (placeholder copy, director review): why USING drops at night.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::TextDim)
+				.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetDayShiftRestingCount() > 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+				.Text_Lambda([this]()
+				{
+					const URHSimWorldSubsystem* S = GetSim();
+					return Txt(FString::Printf(TEXT("DAY SHIFT: %d machine(s) resting until sunrise"), S ? S->GetDayShiftRestingCount() : 0));
+				})
+			]
 		],
 		Summary);
 }
@@ -1530,7 +1541,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
 		[
-			Prose(MakeAttributeLambda([DetailRow]()
+			Prose(MakeAttributeLambda([this, DetailRow]()
 			{
 				const FRHBuildingRow* R = DetailRow();
 				if (!R) { return FText::GetEmpty(); }
@@ -1545,6 +1556,16 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 					? FString::Printf(TEXT("Takes %.0f min to build at 1x."), R->BuildTime_s / 60.f)
 					: FString::Printf(TEXT("Takes %.0f s to build at 1x."), R->BuildTime_s));
 				if (R->ImportOnly) { Facts.Add(TEXT("Shipped from Earth as a kit - order more on the supply ship.")); }
+				// D5a (placeholder copy, director review): the day shift, where the machine can take it.
+				if (const URHSimWorldSubsystem* DayShiftSim = GetSim())
+				{
+					if (DayShiftSim->CanDayShift(GetDetailBuildDef()))
+					{
+						Facts.Add(DayShiftSim->IsDayShiftDefault(GetDetailBuildDef())
+							? TEXT("Works the day shift by default: runs while the sun is up and rests at night on idle power. Change it on the machine's card.")
+							: TEXT("Can work the day shift - switch it on from the machine's card to save the battery for the night."));
+					}
+				}
 				if (R->Pressurized && R->DragSized) { Facts.Add(TEXT("Drag to size it in 10 m bays on the grid; modules set edge to edge join one habitat. Build time and cost are per bay.")); }
 				else if (R->Pressurized)
 				{

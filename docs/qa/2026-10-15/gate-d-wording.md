@@ -183,6 +183,24 @@ All rows are PLACEHOLDER pending this review, and ship now by the director's rul
 | D112 | Crew panel, "What is moving Hope" prose (a new piece under D29), while a Lab seat is staffed, a discovery is waiting and smoothed Hope is under the research gate · PANELS | `Labs research once Hope holds %.0f.` (renders `85`, read from config) | PLACEHOLDER. A plain statement of the gate, so the player knows why the research bar is not moving. | keep pending review |
 | D113 | Crew panel, "What is moving Hope" prose (a new piece under D29), while the band is THRIVING · PANELS | `FLOURISHING at %.0f takes extra care: comforts, furnished rooms, windows.` (renders `90`, read from config) | PLACEHOLDER. Prevention-framed and names the remedy; "extra care" is the colony's care of its home, not a judgment of the crew. | keep pending review |
 
+## 11. The day shift (D5a, added 2026-10-17)
+
+All rows are PLACEHOLDER pending this review, and ship now by the director's ruling on D5a. They are about power and machines only: no row touches morale, sickness, evacuation, food or water, so none is a Gate-D framing risk in itself. They are listed so the wording is reviewed in one place.
+
+| ID | Where | Current | Concern | Proposed |
+|---|---|---|---|---|
+| D114 | Guide interrupt step, panel header and title, on a night the battery bank ran dry while a heavy machine still runs all hours · GUIDE | Header `NEXT STEP  -  POWER` (the `n / N` counter blank), title `Put machines on the day shift` | PLACEHOLDER. A new stage label, ranked after FOOD and before the WATER steps. It applies for one night at a time (a latch on the night the blackout was seen, so nothing flashes) and ends at sunrise. | keep pending review |
+| D115 | Same step, body · GUIDE | `The battery bank ran dry after sunset, so the grid is switching machines off to keep the rest running. Heavy machines can work the DAY SHIFT: they run while the sun is up and rest at night on a trickle of power. Click your %s and switch its Day shift on. More Battery Banks carry more of the night.` (`%s` = the first heavy machine not on the day shift: Water Plant, Ice Drill, Borer, ...) | PLACEHOLDER. Names the fix first. "Switching machines off" is the grid's behaviour, said plainly. | keep pending review |
+| D116 | Selected-machine card, button (Forge, Electrolyzer, Water Plant, Ice Drill, Borer) · DECK | `DAY SHIFT: ON` / `DAY SHIFT: OFF` | PLACEHOLDER. Shows the state; pressing it flips it. | keep pending review |
+| D117 | Same card, status line while a day-shift machine rests at night · DECK `GetInspectText` | `DAY SHIFT - resting until sunrise (idle draw, batch paused)` | PLACEHOLDER. Replaces `ONLINE` while resting. | keep pending review |
+| D118 | Same card, status line for a day-shift machine by day, under `ONLINE` · DECK `GetInspectText` | `DAY SHIFT - works while the sun is up, rests at night` | PLACEHOLDER. | keep pending review |
+| D119 | Same card, batch line while resting · DECK `GetInspectText` | `batch -> %s: %.2f h left (paused until sunrise)` | PLACEHOLDER. | keep pending review |
+| D120 | Build drawer, fact line for a machine that starts on the day shift (Forge, Electrolyzer) · PANELS | `Works the day shift by default: runs while the sun is up and rests at night on idle power. Change it on the machine's card.` | PLACEHOLDER. | keep pending review |
+| D121 | Build drawer, fact line for any other machine that can take it (Water Plant, Ice Drill, Borer) · PANELS | `Can work the day shift - switch it on from the machine's card to save the battery for the night.` | PLACEHOLDER. | keep pending review |
+| D122 | POWER panel, expanded, while at least one machine is resting · PANELS | `DAY SHIFT: %d machine(s) resting until sunrise` | PLACEHOLDER. Explains why USING drops at night. | keep pending review |
+
+(The `Done: Put machines on the day shift` toast of the usual interrupt format shows only when the step is resolved at night. It is suppressed at sunrise, so a morning is never reported as the player's doing. Dev-only strings, the `RH.DayShift` help and warning and the sim log lines, are not player-facing and are not listed.)
+
 ## Patterns to adopt game-wide
 
 1. **One recall vocabulary.** People are *recalled* and *safe in orbit*. They are never evacuated, returned, lost or failed. Every line must read right for a Mars-born child, who has never been to orbit and whose home is Mars.

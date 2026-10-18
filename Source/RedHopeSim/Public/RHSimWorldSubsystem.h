@@ -98,6 +98,12 @@ struct REDHOPESIM_API FRHBuildingInstance
 	// to stretch the battery through a storm - zero draw, zero gen, batches
 	// frozen (even H2), until switched back on. Serialized (save v9).
 	UPROPERTY() bool bManualOff = false;
+	// D5a (director ruling 2026-10-17): a day-shift machine spends only the
+	// daylight share of each step on its batch and draws idle power for the
+	// rest (no new night starts; the batch pauses and nothing is lost). Manual
+	// OFF still trumps it. A per-machine player choice, so it is saved inline in
+	// the building record (save v33).
+	UPROPERTY() bool bDayShift = false;
 	// Agri Gate C (save v28): beds per side of a drag-sized structure (the
 	// greenhouse dome). 1 x 1 for every fixed-size building.
 	UPROPERTY() int32 SizeX = 1;
@@ -826,6 +832,41 @@ public:
 	// structure off switch + a colony-wide fleet hold; both survive save/load.
 	bool SetManualPower(int32 BuildingId, bool bOn);
 	bool IsManualOff(int32 BuildingId) const;
+	// --- Day shift (D5a, director ruling 2026-10-17) ---
+	// A heavy machine on the day shift works only while the sun is up (the window
+	// is RH_Config DayShiftStartFrac..DayShiftEndFrac of the sol) and rests on idle
+	// power at night. Both the production budget and the above-idle draw of a step
+	// scale by that step's DAYLIGHT SHARE, which is linear in dt - so total work
+	// and energy per sol are the same at any step size or alignment (era parity).
+	// Offered only where a machine has something to pause: PowerDraw > PowerIdle
+	// and a recipe (or the Borer's bore/carve work) - never life support, rooms or
+	// pads. Manual OFF still overrides, shedding and load priority are unchanged.
+	bool SetDayShift(int32 BuildingId, bool bOn);
+	bool IsDayShift(int32 BuildingId) const;
+	bool CanDayShift(FName DefName) const;
+	// RH_Config DayShiftDefault_<Def> (and the DayShiftDefaultsOn A/B master
+	// switch): a NEW instance of this definition starts on the day shift.
+	bool IsDayShiftDefault(FName DefName) const;
+	// On the day shift, finished, not switched off, and the sun is down.
+	bool IsDayShiftResting(int32 BuildingId) const;
+	int32 GetDayShiftRestingCount() const;
+	// Sun above the day-shift window's edge right now (point test on the clock).
+	bool IsDaylightNow() const;
+	// A stable key for the night the clock is in (changes at sunset; it also holds
+	// through the daylight that follows it, so pair it with IsDaylightNow()).
+	int32 GetNightIndexNow() const;
+	// The night key of the last night the grid shed something (the bank ran dry
+	// after sunset), -1 if none since boot or load. A runtime latch, never saved
+	// and read by nothing in the sim: the guide shows its day-shift step for the
+	// rest of THAT night instead of reading the shed flag, which flips every sim
+	// step while the bank scrapes empty (photosensitivity: nothing may flash).
+	int32 GetLastBlackoutNight() const { return LastBlackoutNight; }
+	// The share of [T0, T1] (sim seconds) inside the day-shift window, 0..1.
+	// Pure and wrap-safe; public so the -dayshift suite can pin it.
+	double GetDaylightFraction(double T0, double T1) const;
+	double GetDayShiftStartFrac() const { return DayShiftStartFrac; }
+	double GetDayShiftEndFrac() const { return DayShiftEndFrac; }
+	bool GetDayShiftDefaultsOn() const { return bDayShiftDefaultsOn; }
 	// Held robots finish their current task, then claim nothing new (they
 	// idle/dock instead of burning charge on work).
 	void SetFleetHold(bool bHold);
@@ -1141,6 +1182,21 @@ private:
 	double HaulLoadMinKg = 100.0;
 	float ChargeSeekFraction = 0.25f;
 	float ChargeResumeFraction = 0.9f;
+	// D5a day shift, RH_Config (header defaults equal the CSV values).
+	double DayShiftStartFrac = 0.25;
+	double DayShiftEndFrac = 0.75;
+	bool bDayShiftDefaultsOn = true;
+	// Daylight seconds accumulated from sim time 0 up to T (sol-periodic).
+	double DaylightSecondsUpTo(double T) const;
+	// In-game burst parity: when several steps run in one frame against the
+	// same advanced clock, Tick gives each its own end time here (>= 0) so the
+	// daylight share is computed for the step's own window. The commandlet
+	// leaves it at -1 and reads the clock, which it advances per step.
+	double StepEndOverride = -1.0;
+	double GetStepEndSeconds() const;
+	bool IsDaylightAt(double T) const;
+	int32 NightIndexAt(double T) const;
+	int32 LastBlackoutNight = -1; // D5a runtime latch, see GetLastBlackoutNight
 	double LanderDockRateW = 100.0; // RH_Config LanderDockRate_W
 	// Fleet reality (M1-b): DT_Config rows.
 	float WearDegradeThreshold = 50.f;

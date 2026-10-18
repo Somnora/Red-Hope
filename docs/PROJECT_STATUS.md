@@ -181,25 +181,25 @@ Everything is on `main` (local `main` matches the `origin/main` tracking ref,
 - **Agri Gate C**: the drag-sized surface Greenhouse Dome (`585ee8e` sim, save
   v28; `ea2a791` drag placement + a glass shell built in code).
 
-**Verification bar.** The full headless battery is **the 10-sol baseline + 34
-suites (35 runs)**, plus the byte-identical regression pins (`power: gen 50 W
+**Verification bar.** The full headless battery is **the 10-sol baseline + 35
+suites (36 runs)**, plus the byte-identical regression pins (`power: gen 50 W
 load 20 W`, `deposit Regolith_A: 40645 kg`), which have not moved once across
 the art, audio, interface, playtest, tiered-production, dome and build-mode
 work. Last reported fully green on the BM-1b commit (32 runs) ("0 suite(s) not green", pins
 unchanged); also on `d180f12` (BM-4), `3332e21` (BM-3), `e6ee887`, `585ee8e`,
-`f77b962`, `63f452f`, `4706e5f` and earlier. Fourteen suites fail loudly on any
+`f77b962`, `63f452f`, `4706e5f` and earlier. Fifteen suites fail loudly on any
 mismatch: `-staff`, `-dome`, `-surfacehab`, `-demolish`, `-furnish`, `-walls`,
-`-prefab`, `-icelow`, `-food`, `-resupply`, and, since D3a (2026-10-17),
-`-rooms`, `-growth`, `-discovery` and `-tiers`, converted from print-only (the
-run count is unchanged, 35). `-rooms` is the pin for the three halved Hope
-weights (7.5 / 2.5 / 1.5), read from the DT_Config row alone. The rest are
-still print-only.
+`-prefab`, `-icelow`, `-food`, `-resupply`, `-dayshift` (D5a, 2026-10-17),
+and, since D3a (2026-10-17), `-rooms`, `-growth`, `-discovery` and `-tiers`,
+converted from print-only (the run count is 36 with `-dayshift`). `-rooms`
+is the pin for the three halved Hope weights (7.5 / 2.5 / 1.5), read from the
+DT_Config row alone. The rest are still print-only.
 ```bash
-bash scripts/sim/rh_battery.sh            # all 35 runs; MUST be bash
+bash scripts/sim/rh_battery.sh            # all 36 runs; MUST be bash
 UnrealEditor-Cmd red_hope.uproject -run=RHSim -sols=10 -<suite> -unattended -nosound -stdout
 # suites: crew habitat vault borer rooms garden luxury hopedrive greenhouse water
 #         growth discovery trade earth solidarity covert espionage preemptive
-#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food resupply
+#         crisis alive ladder ending tiers agri staff dome surfacehab demolish furnish walls prefab icelow food resupply dayshift
 #         (+ no-switch = the baseline)
 ```
 

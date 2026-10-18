@@ -814,6 +814,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPower(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDayShift(
+	TEXT("RH.DayShift"),
+	TEXT("RH.DayShift <BuildingId> <0|1> - day shift for a heavy machine (1 = works while the sun is up, idles at night)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DayShift <BuildingId> <0|1>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			if (!Sim->SetDayShift(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]) != 0))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RH.DayShift: #%s is not a completed heavy machine"), *Args[0]);
+			}
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHHoldFleet(
 	TEXT("RH.HoldFleet"),
 	TEXT("RH.HoldFleet <0|1> - 1: robots finish current tasks then claim nothing new (ride out a storm on stored charge); 0: release."),

@@ -29,7 +29,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 32;  // v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 33;  // v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -87,6 +87,18 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HaulLoadMinKg = FMath::Max(25.0, PileCapKg / 5.0);
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
+	// D5a: the day shift's working window (sol fractions) and the A/B master
+	// switch for the per-definition defaults. A malformed window fails loudly
+	// (the battery greps Error) and falls back to sunrise..sunset of the curve.
+	DayShiftStartFrac = Defs->GetConfigScalar(FName("DayShiftStartFrac"), DayShiftStartFrac);
+	DayShiftEndFrac = Defs->GetConfigScalar(FName("DayShiftEndFrac"), DayShiftEndFrac);
+	if (!(DayShiftStartFrac >= 0.0 && DayShiftStartFrac < DayShiftEndFrac && DayShiftEndFrac <= 1.0))
+	{
+		UE_LOG(LogRedHopeSim, Error, TEXT("DayShift window invalid (start %.3f, end %.3f) - using 0.25..0.75"), DayShiftStartFrac, DayShiftEndFrac);
+		DayShiftStartFrac = 0.25;
+		DayShiftEndFrac = 0.75;
+	}
+	bDayShiftDefaultsOn = Defs->GetConfigScalar(FName("DayShiftDefaultsOn"), 1.0) >= 0.5;
 	LanderDockRateW = Defs->GetConfigScalar(FName("LanderDockRate_W"), LanderDockRateW);
 	LazySeatFillSols = Defs->GetConfigScalar(FName("LazySeatFillSols"), LazySeatFillSols);
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
@@ -378,11 +390,17 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 	{
 		return;
 	}
+	// The clock has already advanced the whole frame, so every step of a burst
+	// would read the same end time. Give each step its own window end (D5a era
+	// parity: the day-shift share is computed per step, not per frame).
 	const int32 Steps = Clock->GetStepsThisFrame();
+	const double FrameEndSeconds = Clock->GetSimSecondsTotal();
 	for (int32 i = 0; i < Steps; ++i)
 	{
+		StepEndOverride = FrameEndSeconds - (double)(Steps - 1 - i) * URHSimClockSubsystem::SubStepSeconds;
 		StepSim(URHSimClockSubsystem::SubStepSeconds);
 	}
+	StepEndOverride = -1.0;
 
 	// Era band: agent sub-steps stop publishing; the ledger integrator runs.
 	// Any agent-fidelity event yanks the throttle back to 1x (auto-drop).
@@ -404,8 +422,10 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 	const int32 EraSteps = Clock->GetEraStepsThisFrame();
 	for (int32 i = 0; i < EraSteps; ++i)
 	{
+		StepEndOverride = FrameEndSeconds - (double)(EraSteps - 1 - i) * URHSimClockSubsystem::EraStepSimSeconds;
 		EraStep(URHSimClockSubsystem::EraStepSimSeconds);
 	}
+	StepEndOverride = -1.0;
 }
 
 void URHSimWorldSubsystem::StepSim(float SubDt)
@@ -1055,6 +1075,11 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 		}
 		return false;
 	};
+	// D5a: the share of this step that falls in daylight - what a day-shift
+	// machine may spend. The clock has already advanced to the step's end in
+	// both bands (GetStepEndSeconds adds the in-game burst correction).
+	const double StepEndS = GetStepEndSeconds();
+	const double DayFrac = GetDaylightFraction(StepEndS - SubDt, StepEndS);
 
 	for (FRHBuildingInstance& B : Buildings)
 	{
@@ -1072,6 +1097,13 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 		const bool bExtractor = BDef && BDef->RequiresDeposit;
 
 		double BudgetH = SubDt / 50.0; // sol-hour = 50 sim-s
+		if (B.bDayShift)
+		{
+			// D5a: works only the daylight share of this step (era parity: linear
+			// in dt). At night BudgetH = 0 - the batch pauses, nothing new starts,
+			// nothing is lost. An H2-fuelled batch pauses too (its fuel is paid).
+			BudgetH *= DayFrac;
+		}
 		// Bounded loop: at most a handful of batch boundaries fit in one era
 		// step; the guard is against a zero-time recipe row, not real data.
 		for (int32 Guard = 0; Guard < 8 && BudgetH > 0.0; ++Guard)
@@ -1778,6 +1810,129 @@ bool URHSimWorldSubsystem::IsManualOff(int32 BuildingId) const
 		}
 	}
 	return false;
+}
+
+// --- D5a: the day shift --------------------------------------------------
+
+bool URHSimWorldSubsystem::CanDayShift(FName DefName) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
+	if (!Def || !(Def->PowerDraw_W > Def->PowerIdle_W))
+	{
+		return false; // nothing above idle to rest
+	}
+	// Work to pause: a recipe (Forge, Electrolyzer, Water Plant, Ice Drill) or the
+	// Borer's designation work. Life support, rooms, pads and storage never qualify.
+	return Def->CanBore || Defs->FindRunnableRecipe(DefName, [](const TMap<FName, double>&) { return true; }) != nullptr;
+}
+
+bool URHSimWorldSubsystem::IsDayShiftDefault(FName DefName) const
+{
+	return bDayShiftDefaultsOn
+		&& Defs->GetConfigScalar(FName(*FString::Printf(TEXT("DayShiftDefault_%s"), *DefName.ToString())), 0.0) >= 0.5;
+}
+
+bool URHSimWorldSubsystem::SetDayShift(int32 BuildingId, bool bOn)
+{
+	FRHBuildingInstance* B = FindBuilding(BuildingId);
+	if (!B || B->bUnderConstruction || !CanDayShift(B->DefName))
+	{
+		return false;
+	}
+	B->bDayShift = bOn;
+	UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d day shift %s"),
+		*B->DefName.ToString(), B->Id, bOn ? TEXT("ON (rests at night)") : TEXT("OFF (works through the night)"));
+	return true;
+}
+
+bool URHSimWorldSubsystem::IsDayShift(int32 BuildingId) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Id == BuildingId)
+		{
+			return B.bDayShift;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsDayShiftResting(int32 BuildingId) const
+{
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Id == BuildingId)
+		{
+			return B.bDayShift && !B.bManualOff && !B.bUnderConstruction && !IsDaylightNow();
+		}
+	}
+	return false;
+}
+
+int32 URHSimWorldSubsystem::GetDayShiftRestingCount() const
+{
+	if (IsDaylightNow())
+	{
+		return 0;
+	}
+	int32 N = 0;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		N += (B.bDayShift && !B.bManualOff && !B.bUnderConstruction) ? 1 : 0;
+	}
+	return N;
+}
+
+// Sol-periodic daylight seconds from sim time 0 to T. Era parity: a step's
+// daylight share is (D(T1) - D(T0)) / (T1 - T0), so work and draw are linear in
+// dt and exact at any step size or alignment. Aligned values (300/900/60) are
+// exact in double.
+double URHSimWorldSubsystem::DaylightSecondsUpTo(double T) const
+{
+	const double L = URHSimClockSubsystem::SolLengthSimSeconds;
+	const double S = DayShiftStartFrac * L;
+	const double E = DayShiftEndFrac * L;
+	const double Sols = FMath::FloorToDouble(T / L);
+	return Sols * (E - S) + FMath::Clamp(T - Sols * L - S, 0.0, E - S);
+}
+
+double URHSimWorldSubsystem::GetDaylightFraction(double T0, double T1) const
+{
+	if (T1 - T0 <= KINDA_SMALL_NUMBER)
+	{
+		const double L = URHSimClockSubsystem::SolLengthSimSeconds;
+		const double F = (T1 - FMath::FloorToDouble(T1 / L) * L) / L;
+		return (F >= DayShiftStartFrac && F < DayShiftEndFrac) ? 1.0 : 0.0;
+	}
+	return FMath::Clamp((DaylightSecondsUpTo(T1) - DaylightSecondsUpTo(T0)) / (T1 - T0), 0.0, 1.0);
+}
+
+double URHSimWorldSubsystem::GetStepEndSeconds() const
+{
+	return StepEndOverride >= 0.0 ? StepEndOverride : (Clock ? Clock->GetSimSecondsTotal() : 0.0);
+}
+
+bool URHSimWorldSubsystem::IsDaylightAt(double T) const
+{
+	return GetDaylightFraction(T, T) > 0.5;
+}
+
+// Night k runs from sunset on sol k-1 to sunrise on sol k (the key also holds
+// through that morning's daylight, so callers pair it with IsDaylightAt).
+int32 URHSimWorldSubsystem::NightIndexAt(double T) const
+{
+	const double L = URHSimClockSubsystem::SolLengthSimSeconds;
+	return FMath::FloorToInt((T + (1.0 - DayShiftEndFrac) * L) / L);
+}
+
+bool URHSimWorldSubsystem::IsDaylightNow() const
+{
+	return IsDaylightAt(Clock ? Clock->GetSimSecondsTotal() : 0.0);
+}
+
+int32 URHSimWorldSubsystem::GetNightIndexNow() const
+{
+	return NightIndexAt(Clock ? Clock->GetSimSecondsTotal() : 0.0);
 }
 
 void URHSimWorldSubsystem::SetFleetHold(bool bHold)
@@ -4677,6 +4832,10 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	// The storm's whole mechanical grip is one multiplier on solar generation
 	// (M1-c): the bank-and-shedding stack from M0-c does the rest.
 	const float Solar = Defs->EvalSolarCurve(Clock->GetSolFraction()) * (float)GetDustFactorNow();
+	// D5a: the same daylight share StepProduction used, so a day-shift machine's
+	// above-idle draw and its work scale together.
+	const double StepEndS = GetStepEndSeconds();
+	const double DayFrac = GetDaylightFraction(StepEndS - SubDt, StepEndS);
 
 	// Pass 1: generation, storage, and each building's wanted draw.
 	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; };
@@ -4712,7 +4871,10 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		E.B = &B;
 		// M1-d: a Hydrogen-fuelled batch bought its energy up-front - the grid
 		// sees only idle draw while it runs.
-		E.WantW = (B.BatchRemaining_h > 0.0 && !B.bBatchOnH2) ? Def->PowerDraw_W : Def->PowerIdle_W;
+		// D5a: a day-shift machine draws above idle only for its daylight share.
+		const bool bGridBatch = B.BatchRemaining_h > 0.0 && !B.bBatchOnH2;
+		E.WantW = !bGridBatch ? Def->PowerIdle_W
+			: (B.bDayShift ? Def->PowerIdle_W + (Def->PowerDraw_W - Def->PowerIdle_W) * DayFrac : Def->PowerDraw_W);
 		E.Priority = Def->LoadPriority;
 		Loads.Add(E);
 	}
@@ -4748,6 +4910,14 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	const double DeltaWh = (GenW - LoadW) * (SubDt / 50.0);
 	Power.BatteryWh = FMath::Clamp(Power.BatteryWh + DeltaWh, 0.0, CapWh);
 	Power.bDeficit = Power.ShedCount > 0;
+	// D5a: remember the night the grid had to shed (runtime only; nothing in the
+	// sim reads it). Shedding needs an empty bank and a deficit, so a shed at night
+	// IS the bank running dry - and the shed flag itself alternates every step
+	// while the bank scrapes empty, so the guide latches on this instead.
+	if (Power.ShedCount > 0 && !IsDaylightAt(StepEndS))
+	{
+		LastBlackoutNight = NightIndexAt(StepEndS);
+	}
 
 	// Strip-chart ring: one sample per sol-hour, last 3 sols (72 entries).
 	const int64 Hour = (int64)(Clock->GetSimSecondsTotal() / 50.0);
@@ -6472,6 +6642,9 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	Instance.LocationCm.Z = Level * FloorHeightCm; // Z is derived, never authored
 
 	const FRHBuildingRow* Def = Defs->GetBuilding(DefName);
+	// D5a: a new heavy machine starts on the day shift where the config says so.
+	// Every placement path (uplink Build, debug, showcase) routes through here.
+	Instance.bDayShift = Def && CanDayShift(DefName) && IsDayShiftDefault(DefName);
 	if (Def && Def->DragSized)
 	{
 		const int32 Cap = GetMaxBedsPerSide(Def);
@@ -9187,7 +9360,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY; // size: v28
+		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY // size: v28
+		   << B.bDayShift; // day shift: v33
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 	}
@@ -9492,6 +9666,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ManifestItems.Reset();
 	FleetCounts.Reset();
 	RepairClaims.Reset();  // claim state is runtime-only; robots re-claim
+	LastBlackoutNight = -1; // D5a runtime latch: re-seen within a step if the blackout continues
 	PadQueues.Reset();
 	SurveyHistory.Reset();
 	bFleetDeployed = true; // robots respawn explicitly below
@@ -9519,7 +9694,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		FRHBuildingInstance B;
 		Ar << B.Id << B.DefName << B.LocationCm << B.Level << B.bUnderConstruction << B.bPowered
 		   << B.BuildRemaining_s << B.BatchRemaining_h << B.ActiveRecipe << B.AttachedDepositId
-		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY; // size: v28
+		   << B.bBatchOnH2 << B.bManualOff << B.SizeX << B.SizeY // size: v28
+		   << B.bDayShift; // day shift: v33
 		SerializeResourceMap(Ar, B.InputKg);
 		SerializeResourceMap(Ar, B.OutputKg);
 		Buildings.Add(MoveTemp(B));

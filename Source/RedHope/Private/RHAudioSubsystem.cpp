@@ -312,7 +312,8 @@ void URHAudioSubsystem::TickMachines(float DeltaTime, int32 ViewLevel, double Fl
 			// Working = full, idle = a murmur, off / shed / building / another
 			// floor = silent.
 			const bool bRunning = B.bPowered && !B.bManualOff && !B.bUnderConstruction;
-			const bool bBatch = B.BatchRemaining_h > 0.0 || !B.ActiveRecipe.IsNone();
+			// D5a: a day-shift machine resting at night murmurs - its batch is paused.
+			const bool bBatch = (B.BatchRemaining_h > 0.0 || !B.ActiveRecipe.IsNone()) && !(B.bDayShift && !Sim->IsDaylightNow());
 			float Target = !bRunning || B.Level != ViewLevel ? 0.f : (bBatch || B.DefName == FName("AirFilter")
 				|| B.DefName == FName("BatteryBank") || B.DefName == FName("ComputeModule") || B.DefName == FName("Lander")
 				|| B.DefName == FName("HumidityRegulator") ? 1.f : 0.35f);

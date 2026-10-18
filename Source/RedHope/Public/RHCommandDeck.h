@@ -73,6 +73,9 @@ private:
 	FText GetExcavateActionLabel() const;
 	EVisibility GetExcavateActionVisibility() const;
 	EVisibility GetActionPowerVisibility() const;
+	// DAY SHIFT (D5a): on a finished heavy machine (Forge, Electrolyzer, Water
+	// Plant, Ice Drill, Borer) - works while the sun is up, idles at night.
+	EVisibility GetDayShiftVisibility() const;
 	// ASSIGN STAFF (tiered production T4): on a selected work station - a zoned
 	// seat cell or a built Lab module - puts it first in the colony's staff
 	// order (uplink verb "Assign").
@@ -140,6 +143,8 @@ private:
 	// breaker on the inspected structure + the colony-wide fleet hold.
 	FReply HandlePowerToggle();
 	FText GetPowerToggleLabel() const;
+	FReply HandleDayShiftToggle();
+	FText GetDayShiftLabel() const;
 	FReply HandleFleetHold();
 	FText GetFleetHoldLabel() const;
 	FReply HandleSpeed(float Tier);

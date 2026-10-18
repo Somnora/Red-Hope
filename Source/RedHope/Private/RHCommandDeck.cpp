@@ -422,6 +422,16 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 										FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePowerToggle))
 								]
 							]
+							// D5a: the day shift - a heavy machine works while the sun is up
+							// and idles at night. Lit by the guide on a blackout night.
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetDayShiftVisibility)
+								[
+									GuideHalo(FName("DayShift"), DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetDayShiftLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDayShiftToggle)))
+								]
+							]
 							// BM-3: demolish / cancel a site, with what comes back.
 							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 3.f, 0.f, 0.f))
 							[
@@ -1284,7 +1294,15 @@ FText SRHCommandDeck::GetInspectText() const
 		}
 		else
 		{
-			Text += B->bPowered ? TEXT("\nONLINE") : TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)");
+			// D5a (placeholder copy, director review): a day-shift machine reads
+			// RESTING by night, and says what its shift is by day.
+			const bool bResting = B->bPowered && Sim->IsDayShiftResting(B->Id);
+			Text += !B->bPowered ? TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)")
+				: (bResting ? TEXT("\nDAY SHIFT - resting until sunrise (idle draw, batch paused)") : TEXT("\nONLINE"));
+			if (B->bDayShift && !bResting)
+			{
+				Text += TEXT("\nDAY SHIFT - works while the sun is up, rests at night");
+			}
 		}
 		// BM-2: a habitat shell reads its network - size, rating and why not,
 		// air, beds and residents (placeholder copy, director review).
@@ -1360,7 +1378,8 @@ FText SRHCommandDeck::GetInspectText() const
 		}
 		if (B->BatchRemaining_h > 0.0)
 		{
-			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h);
+			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left%s"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h,
+				Sim->IsDayShiftResting(B->Id) ? TEXT(" (paused until sunrise)") : TEXT(""));
 		}
 		else if (Def && (Def->PowerDraw_W > 0.f || Def->RequiresDeposit))
 		{
@@ -1695,6 +1714,14 @@ EVisibility SRHCommandDeck::GetActionPowerVisibility() const
 	return bPowered ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
+EVisibility SRHCommandDeck::GetDayShiftVisibility() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	const URHSimWorldSubsystem* Sim = GetSim();
+	return (B && Def && Sim && !B->bUnderConstruction && Sim->CanDayShift(B->DefName)) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
 FText SRHCommandDeck::GetKnownGroundText() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -1977,6 +2004,18 @@ FReply SRHCommandDeck::HandlePowerToggle()
 	return FReply::Handled();
 }
 
+FReply SRHCommandDeck::HandleDayShiftToggle()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	if (Sim && Id != 0)
+	{
+		Sim->SetDayShift(Id, !Sim->IsDayShift(Id)); // a direct toggle, like the breaker - no uplink lag
+	}
+	return FReply::Handled();
+}
+
 bool SRHCommandDeck::IsDemolishInFlight(int32 BuildingId) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -2110,6 +2149,15 @@ FText SRHCommandDeck::GetPowerToggleLabel() const
 	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
 	const bool bOff = Sim && Id != 0 && Sim->IsManualOff(Id);
 	return FText::FromString(bOff ? TEXT("Switch ON") : TEXT("Switch OFF"));
+}
+
+FText SRHCommandDeck::GetDayShiftLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
+	const bool bOn = Sim && Id != 0 && Sim->IsDayShift(Id);
+	return FText::FromString(bOn ? TEXT("DAY SHIFT: ON") : TEXT("DAY SHIFT: OFF"));
 }
 
 FReply SRHCommandDeck::HandleFleetHold()
