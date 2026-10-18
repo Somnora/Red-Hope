@@ -20,9 +20,21 @@ namespace RHMarsTerrain
 	// shows instead of hovering at the old z=0 plane.
 	REDHOPE_API float GroundZCm(double XCm, double YCm);
 
+	// The height of the scenery ground mesh AS DRAWN at a world XY (cm): the
+	// coarse faceted lattice BuildScenery emits, which departs from GroundZCm
+	// between its vertices (by up to a dune's height far out). Ground-hugging
+	// overlays (deposit dig sites) sit on this, so they meet the terrain the
+	// player sees instead of folding through it.
+	REDHOPE_API float SceneryGroundZCm(double XCm, double YCm);
+
 	// Builds the scenery mesh components onto the rig actor: ground relief +
 	// basalt patches, boulders + pebbles (with crater rim rubble), and the
 	// three mountain bands + mesas + the hero massif's flat foothill bench
 	// (the "habitat at the base of a mountain" build spot). Call once per rig.
 	REDHOPE_API void BuildScenery(AActor& Rig);
+
+	// One scenery boulder (the same crumpled icosphere, faceted) appended to
+	// caller-owned mesh arrays - deposit dig sites dress their rims with it so
+	// their rocks match the scenery's.
+	REDHOPE_API void AppendRock(TArray<FVector>& V, TArray<int32>& I, TArray<FVector>& N, const FVector& CenterCm, const FVector& RadiiCm, float YawDeg, uint32 Seed);
 }

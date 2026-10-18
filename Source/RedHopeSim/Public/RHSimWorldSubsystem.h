@@ -934,6 +934,9 @@ public:
 	double RequestChargeWh(int32 PadBuildingId, double SubDt, FMassEntityHandle Robot = FMassEntityHandle());
 	void JoinPadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
 	void LeavePadQueue(int32 PadBuildingId, FMassEntityHandle Robot);
+	// Presentation readout: robots docked at (queued on) a pad right now. The
+	// Charging Pad's rings brighten and breathe while this is non-zero.
+	int32 GetPadDockedCount(int32 PadBuildingId) const { const TArray<FMassEntityHandle>* Q = PadQueues.Find(PadBuildingId); return Q ? Q->Num() : 0; }
 	float GetChargeSeekFraction() const { return ChargeSeekFraction; }
 	float GetChargeResumeFraction() const { return ChargeResumeFraction; }
 

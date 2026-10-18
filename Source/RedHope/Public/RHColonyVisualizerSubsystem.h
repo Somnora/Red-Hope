@@ -103,6 +103,10 @@ private:
 	void HandleColonyReloaded();
 	void SpawnDepositMarkers();
 	void SpawnDepositMarker(const FRHDepositState& Deposit);
+	// The dig site's generated ground (2026-10-17): mound, cut, heap and rocks
+	// from the deposit's state; the claim stakes the first time it is worked.
+	void BuildDepositGround(AStaticMeshActor* Actor, const FRHDepositState& Deposit);
+	void RefreshDepositMarkers(const URHSimWorldSubsystem* Sim);
 	FVector ScaleFor(const FRHBuildingInstance& Instance) const;
 	// Canon visual language (director's reference set, ~/Martians/assets):
 	// bone-white or dark-slate industrial bodies, hazard-yellow details, and
@@ -202,6 +206,12 @@ private:
 	// one after the first scale, so scaling off it would compound.
 	TMap<int32, float> AuthoredPulseDepth;
 	UPROPERTY() TArray<TObjectPtr<AStaticMeshActor>> DepositMarkers;
+	TMap<int32, TWeakObjectPtr<AStaticMeshActor>> DepositMarkerById;
+	TMap<int32, uint32> DepositShapeKey;  // what each dig site was last built from
+	TSet<int32> DepositClaimDressed;       // stakes and beacon already placed
+	double NextDepositRefreshRealSeconds = 0.0;
+	FBox GroundPadBox = FBox(ForceInit);  // the map's MarsGround pad, once found
+	bool bGroundPadMeasured = false;
 	// (level, spiral index, 0) -> the tile actor + what function it last showed.
 	TMap<FIntVector, TWeakObjectPtr<AStaticMeshActor>> TileByCell;
 	TMap<FIntVector, FName> AppliedRoomTint;

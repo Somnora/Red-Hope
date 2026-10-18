@@ -374,3 +374,21 @@ The crew-phase playtests showed structural flat at ~4 t from sol 45, the Forge i
 - **The fix.** The pile leg now follows D2a's output rule: nearest consumer first, and a store only when nothing on the level consumes the resource or it is a construction material.
 - **The effect.** Structural reaches 13.6 t by sol 109, and Q3 rounds 0-7 are met. The gap between rounds widens from 5 to 18 sols as the x1.25 bills grow, and hydrogen becomes the slow line.
 - **Next.** Regolith_A will still run out a little past sol 110, and Regolith_B (100 t, 300 m west, already visible) is never designated. Extending D2a's running-low alert and guide steps to regolith (and ore) is the natural follow-up.
+
+### Surface art: the Charging Pad and the dig sites (2026-10-17)
+
+The director called out the last surface placeholders. The Charging Pad was a dark box with a post and a glowing ball; deposits were flat tinted squares. From a concept sheet of three directions each, rendered at the game camera:
+- **Pad C, the induction disc.** A 4 m slate disc with two amber coil rings and a service mast. The rings idle dim and brighten, pulsing, while a robot is docked.
+- **Deposit B, the dig site, for regolith, ice and ore.** An untouched deposit is a natural mound with rocks. Once worked, it has survey flags and a beacon, a flat floor where the robots and the Ice Drill stand, two terraces, a notch toward the Lander, and a spoil heap that tracks the pile. The dig widens as the deposit is used up.
+- Rejected:
+  - Pad A (a cradle with a gantry).
+  - Pad B (a booth, then a lean-to). A full roof hid everything from the 54-degree camera.
+  - Deposit A (the natural look only, kept as the untouched state).
+  - Deposit C (rubble only, with no readable boundary).
+
+### The supply ship (2026-10-17)
+
+The ship was a grey-box freighter that appeared with the first landing and never left. The director picked **Ship C, the cargo frame**: a wide, low octagonal deck carrying six containers you can read from above, a Lander-style cockpit pod, four legs and an engine cluster, in the Lander's livery. It stays low, so it never blocks the colony view.
+- Rejected: Ship A (the July cargo lander with tanks) and Ship B (a 16 m vertical freighter that towers over the colony).
+- **It lands and leaves (director: "yes land and leave").** It comes down onto a landing pad east of the colony, timed to touch down on the sim's arrival, with engines and a light glowing. It sits a sol, then lifts off. The pad stays behind until the next ship.
+- **Presentation only:** the sim's ship is still the quota phase and the ETA.

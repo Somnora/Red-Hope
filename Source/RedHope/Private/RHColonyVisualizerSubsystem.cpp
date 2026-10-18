@@ -17,6 +17,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
@@ -1408,6 +1409,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		}
 	}
 	DepositMarkers.Reset();
+	DepositMarkerById.Reset();
+	DepositShapeKey.Reset();
+	DepositClaimDressed.Reset();
 	if (ShipVisual)
 	{
 		ShipVisual->Destroy();
@@ -1494,6 +1498,175 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarkers()
 	}
 }
 
+namespace
+{
+	// A deposit dig site's shape (the director's pick, 2026-10-17: "deposit B"
+	// on the concept sheet). Everything is derived from the sim's deposit state,
+	// so it reloads and rebuilds from nothing:
+	//   - an untouched deposit is a low mound of looser ground, ragged at the
+	//     edge, with rocks around it (the "natural" look);
+	//   - once worked (designated, claimed or anything taken out) a flat floor
+	//     at ground level opens in the middle - where the diggers stand and the
+	//     Ice Drill sits, so nothing drawn at ground height floats or sinks -
+	//     with two terraces stepping up to the untouched deposit, a notch cut
+	//     toward the Lander (the way in), and the dug pile as a heap on the floor.
+	//     The floor widens as the deposit is used up; a spent deposit is all floor.
+	// Sizes come from the SURVEYED mass (InitialKg), so the site no longer
+	// shrinks as it is mined; the dig grows instead.
+	struct FRHDepositShape
+	{
+		float R = 800.f;      // outer radius, cm
+		float Fade = 180.f;   // the rim's slope down to the terrain
+		float Rf = 0.f;       // floor radius (0 = untouched)
+		float W = 70.f;       // terrace width
+		float Hp = 55.f;      // untouched deposit height above the terrain
+		float RampYaw = 0.f;  // radians, toward the Lander
+		FVector2D PileC = FVector2D::ZeroVector;
+		float PileR = 0.f, PileH = 0.f;
+		bool bWorked = false;
+		uint32 Seed = 1;
+	};
+
+	float SmoothStepF(float E0, float E1, float X)
+	{
+		const float T = FMath::Clamp((X - E0) / (E1 - E0), 0.f, 1.f);
+		return T * T * (3.f - 2.f * T);
+	}
+
+	FRHDepositShape MakeDepositShape(const FRHDepositState& D, double PileCapKg)
+	{
+		FRHDepositShape S;
+		const double Initial = D.InitialKg > 0.0 ? D.InitialKg : D.RemainingKg;
+		const float Mined = Initial > 0.0 ? (float)FMath::Clamp(1.0 - D.RemainingKg / Initial, 0.0, 1.0) : 0.f;
+		// 60 t ~ 8.3 m radius, the old marker's footprint; 100 t ~ 10.8 m.
+		S.R = FMath::Clamp((float)FMath::Sqrt(FMath::Max(Initial, 0.0)) * 3.4f, 500.f, 1500.f);
+		S.Fade = 0.22f * S.R;
+		S.Hp = D.Type == FName("Ice") ? 45.f : D.Type == FName("Ore") ? 60.f : 55.f;
+		S.bWorked = Mined > 0.0005f || D.bDesignated || D.DigClaims > 0;
+		S.RampYaw = FMath::Atan2(-D.LocationCm.Y, -D.LocationCm.X);
+		S.Seed = (uint32)D.Id * 7919u + 17u;
+		if (S.bWorked)
+		{
+			// Ice and ore carry a drill or a rig in the middle: a wider first floor.
+			// Ore is dug like regolith; a small deposit keeps its terraces.
+			const float Rf0 = D.Type == FName("Ice") ? 380.f : FMath::Min(300.f, 0.4f * S.R);
+			const float RfMax = FMath::Max(Rf0, S.R - S.Fade - 2.f * S.W - 30.f);
+			S.Rf = FMath::Lerp(Rf0, RfMax, FMath::Pow(Mined, 0.7f));
+		}
+		if (D.PileKg > 1.0 && PileCapKg > 0.0)
+		{
+			const float F = FMath::Sqrt((float)FMath::Clamp(D.PileKg / PileCapKg, 0.0, 1.0));
+			S.PileR = 50.f + 70.f * F;
+			S.PileH = 20.f + 70.f * F;
+			// On the floor, away from the diggers at the centre and opposite the
+			// way in.
+			const float Dist = FMath::Max(150.f, FMath::Min(0.62f * FMath::Max(S.Rf, 300.f), FMath::Max(S.Rf, 300.f) - 40.f));
+			S.PileC = FVector2D(FMath::Cos(S.RampYaw + PI), FMath::Sin(S.RampYaw + PI)) * Dist;
+		}
+		return S;
+	}
+
+	float DepositNoise(float X, float Y, uint32 Seed, float Freq)
+	{
+		return FMath::PerlinNoise2D(FVector2D(X * Freq + (Seed % 997) * 0.37f, Y * Freq + (Seed % 613) * 0.53f));
+	}
+
+	// The rim's wobble: outside the dig the rings are pushed in and out by a
+	// noise of the bearing, so the deposit meets the terrain on a ragged line
+	// while the terraces stay round.
+	float DepositWobble(const FRHDepositShape& S, float RingR, float Yaw)
+	{
+		const float Taper = SmoothStepF(S.Rf + 2.f * S.W + 60.f, 0.8f * S.R, RingR);
+		return Taper * 0.09f * S.R * FMath::PerlinNoise2D(FVector2D(FMath::Cos(Yaw) * 2.3f + (S.Seed % 101) * 0.71f, FMath::Sin(Yaw) * 2.3f + (S.Seed % 89) * 0.43f));
+	}
+
+	// Height above the terrain (cm) of the deposit's own ground. R is the
+	// ring's parametric radius (before the wobble) and X, Y the actual point,
+	// which only the surface noise reads.
+	float DepositHeight(const FRHDepositShape& S, float R, float Yaw, float X, float Y, float* OutRamp = nullptr)
+	{
+		float H;
+		float Ramp = 0.f;
+		if (R > S.R)
+		{
+			H = -14.f; // the skirt tucks under the terrain: no seam to z-fight
+		}
+		else if (!S.bWorked)
+		{
+			H = S.Hp * 0.8f * SmoothStepF(S.R, S.R - S.Fade - 0.25f * S.R, R)
+				+ S.Hp * 0.18f * DepositNoise(X, Y, S.Seed, 0.004f) * SmoothStepF(S.R, S.R - S.Fade, R);
+		}
+		else
+		{
+			H = R <= S.Rf ? 0.f
+				: S.Hp * 0.5f * SmoothStepF(S.Rf, S.Rf + 28.f, R) + S.Hp * 0.5f * SmoothStepF(S.Rf + S.W, S.Rf + S.W + 28.f, R);
+			H *= SmoothStepF(S.R, S.R - S.Fade, R);
+			const float DA = FMath::Abs(FMath::FindDeltaAngleRadians(S.RampYaw, Yaw));
+			Ramp = SmoothStepF(0.50f, 0.28f, DA);
+			H *= 1.f - 0.85f * Ramp;
+			H += S.Hp * 0.12f * DepositNoise(X, Y, S.Seed, 0.004f) * SmoothStepF(S.Rf, S.Rf + 60.f, R) * SmoothStepF(S.R, S.R - S.Fade, R);
+			H += 2.f * DepositNoise(X, Y, S.Seed + 5u, 0.02f) * (R <= S.Rf ? 1.f : 0.f);
+		}
+		if (OutRamp) { *OutRamp = Ramp; }
+		return H;
+	}
+
+	// Per deposit type: the five sections' surfaces - 0 the terrain's own look
+	// (unused since the rim meets the terrain by geometry), 1 untouched
+	// deposit, 2 the cut, 3 the heap, 4 rocks. bWhite
+	// swaps the rust regolith texture for flat white so the tint IS the colour
+	// (frost and blue ice cannot be reached by tinting a rust texture).
+	struct FRHDepositSurface { FLinearColor Tint; bool bWhite; float Rough; float TileCm; };
+	void DepositSurfaces(FName Type, FRHDepositSurface Out[5])
+	{
+		Out[0] = { FLinearColor(1.f, 1.f, 1.f), false, 0.95f, 900.f };
+		if (Type == FName("Ice"))
+		{
+			Out[1] = { FLinearColor(0.60f, 0.55f, 0.53f), true, 0.85f, 900.f };   // dusty frost
+			Out[2] = { FLinearColor(0.40f, 0.60f, 0.78f), true, 0.30f, 900.f };   // exposed ice
+			Out[3] = { FLinearColor(0.52f, 0.60f, 0.68f), true, 0.60f, 900.f };   // ice spoil
+			Out[4] = { FLinearColor(0.85f, 0.80f, 0.80f), false, 0.90f, 500.f };  // frosted rock
+		}
+		else if (Type == FName("Ore"))
+		{
+			Out[1] = { FLinearColor(0.45f, 0.42f, 0.47f), false, 0.90f, 900.f };  // dark basalt
+			Out[2] = { FLinearColor(0.030f, 0.032f, 0.040f), true, 0.65f, 900.f }; // fresh slate
+			Out[3] = { FLinearColor(0.38f, 0.36f, 0.42f), false, 0.80f, 900.f };
+			Out[4] = { FLinearColor(0.32f, 0.31f, 0.36f), false, 0.85f, 500.f };
+		}
+		else
+		{
+			Out[1] = { FLinearColor(1.32f, 1.16f, 1.00f), false, 0.95f, 900.f };  // loose, lighter
+			Out[2] = { FLinearColor(0.58f, 0.44f, 0.38f), false, 0.95f, 900.f };  // fresh cut
+			Out[3] = { FLinearColor(1.15f, 0.90f, 0.74f), false, 0.95f, 900.f };  // spoil: loose, lighter than the cut
+			Out[4] = { FLinearColor(0.60f, 0.55f, 0.52f), false, 0.95f, 500.f };  // the scenery's boulder tint
+		}
+	}
+
+	struct FRHDepAcc
+	{
+		TArray<FVector> V;
+		TArray<int32> I;
+		TArray<FVector> N;
+		// RHMarsTerrain's winding: for (A, B, C) the face normal is
+		// (C - A) x (B - A), and it must point up to face the camera.
+		void Tri(const FVector& A, const FVector& B, const FVector& C)
+		{
+			FVector Nm = FVector::CrossProduct(C - A, B - A).GetSafeNormal();
+			if (Nm.IsNearlyZero())
+			{
+				return;
+			}
+			const bool bFlip = Nm.Z < 0.f;
+			const int32 Base = V.Num();
+			V.Add(A); V.Add(bFlip ? C : B); V.Add(bFlip ? B : C);
+			Nm = bFlip ? -Nm : Nm;
+			N.Add(Nm); N.Add(Nm); N.Add(Nm);
+			I.Add(Base); I.Add(Base + 1); I.Add(Base + 2);
+		}
+	};
+}
+
 void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 {
 	UWorld* World = GetWorld();
@@ -1501,24 +1674,46 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	{
 		return;
 	}
-	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	// Footprint scales gently with mass: 60 t ~ 16 m across.
-	const float Side = FMath::Clamp(FMath::Sqrt(D.RemainingKg) * 0.065f, 8.f, 30.f);
-	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(
-		D.LocationCm + FVector(0, 0, 6.f + RHMarsTerrain::GroundZCm(D.LocationCm.X, D.LocationCm.Y)),
-		FRotator::ZeroRotator);
+	// The dig site is a generated mesh on a container actor at ground zero;
+	// the mesh carries the terrain height itself (RHMarsTerrain::GroundZCm).
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(FVector(D.LocationCm.X, D.LocationCm.Y, 0.f), FRotator::ZeroRotator);
 	if (!Actor)
 	{
 		return;
 	}
 	Actor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
-	Actor->GetStaticMeshComponent()->SetStaticMesh(Cube);
-	// A thin pad, not a platform: 12 cm proud of the terrain reads as ground.
-	Actor->SetActorScale3D(FVector(Side, Side, 0.12f));
 #if WITH_EDITOR
 	Actor->SetActorLabel(FString::Printf(TEXT("Sim_Dep_%s"), *D.RowName.ToString()));
 #endif
-	// Ground-truth colors: regolith rust, ore slate, ice pale blue.
+	UProceduralMeshComponent* PMC = NewObject<UProceduralMeshComponent>(Actor, TEXT("DigSite"));
+	PMC->SetupAttachment(Actor->GetRootComponent());
+	PMC->RegisterComponent();
+	PMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PMC->SetCastShadow(true);
+	UMaterialInterface* Surf = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_MarsSurface.M_MarsSurface"));
+	UTexture2D* Regolith = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"));
+	UTexture2D* White = LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EngineResources/WhiteSquareTexture.WhiteSquareTexture"));
+	FRHDepositSurface Surfaces[5];
+	DepositSurfaces(D.Type, Surfaces);
+	for (int32 Sec = 0; Sec < 5; ++Sec)
+	{
+		if (!Surf)
+		{
+			break;
+		}
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Surf, PMC);
+		UTexture2D* Tex = Surfaces[Sec].bWhite && White ? White : Regolith;
+		if (Tex)
+		{
+			Mid->SetTextureParameterValue(FName("SurfTex"), Tex);
+		}
+		Mid->SetScalarParameterValue(FName("TileCm"), Surfaces[Sec].TileCm);
+		Mid->SetVectorParameterValue(FName("Tint"), Surfaces[Sec].Tint);
+		Mid->SetScalarParameterValue(FName("Rough"), Surfaces[Sec].Rough);
+		PMC->SetMaterial(Sec, Mid);
+	}
+	BuildDepositGround(Actor, D);
+	// Ground-truth label colours: regolith rust, ore slate, ice pale blue.
 	FLinearColor DepColor(0.55f, 0.30f, 0.12f);
 	if (D.Type == FName("Ore"))
 	{
@@ -1528,24 +1723,238 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	{
 		DepColor = FLinearColor(0.75f, 0.90f, 1.00f);
 	}
-	// The director's "giant checkerboard": ApplyTint dresses the pad in
-	// M_Graybox, whose blockout grid stretched across a 16-30 m cube face is
-	// exactly a checkerboard. Deposits are GROUND, so wear the terrain's own
-	// regolith texture, world-tiled, tinted per type - the label and tinted
-	// hue still say what it is, the surface now says where it is.
-	if (!ApplySurface(Actor->GetStaticMeshComponent(),
-		TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"),
-		340.f, DepColor * FLinearColor(1.6f, 1.5f, 1.6f), 0.95f))
-	{
-		ApplyTint(Actor, DepColor); // graybox fallback beats invisible
-	}
 	// Players read the material, not the data row (interface pass: no raw IDs).
-	AddLabel(Actor, D.Type.ToString() + TEXT(" deposit"), DepColor, Side * 50.f + 260.f);
+	const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	const FRHDepositShape Shape = MakeDepositShape(D, Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0);
+	AddLabel(Actor, D.Type.ToString() + TEXT(" deposit"), DepColor, Shape.R + 260.f);
+	UE_LOG(LogRedHope, Display, TEXT("Dig site: %s (%s) at (%.0f, %.0f) m, %.1f m across, %s"), *D.RowName.ToString(), *D.Type.ToString(),
+		D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0, Shape.R / 50.f, Shape.bWorked ? TEXT("worked") : TEXT("untouched"));
 	// Surface furniture: born hidden if the player is currently underground
 	// (adversarial-review finding - a discovery mid-descent used to pop the
 	// marker into the pit view until the next floor change).
 	Actor->SetActorHiddenInGame(IsUnderground());
 	DepositMarkers.Add(Actor);
+	DepositMarkerById.Add(D.Id, Actor);
+}
+
+void URHColonyVisualizerSubsystem::BuildDepositGround(AStaticMeshActor* Actor, const FRHDepositState& D)
+{
+	UProceduralMeshComponent* PMC = Actor ? Actor->FindComponentByClass<UProceduralMeshComponent>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!PMC)
+	{
+		return;
+	}
+	const FRHDepositShape S = MakeDepositShape(D, Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0);
+	const FVector2D Origin(D.LocationCm.X, D.LocationCm.Y);
+	// The ground the player SEES: the scenery's faceted relief, or the map's
+	// flat MarsGround pad where the pad lies above it (the pad is a 5 km plane
+	// at z=0, so it covers every dune trough and the whole colony flat). A few cm proud, as the old
+	// marker sat, so the faceted terrain does not poke through.
+	const auto Ground = [&](float X, float Y)
+	{
+		float Z = RHMarsTerrain::SceneryGroundZCm(Origin.X + X, Origin.Y + Y);
+		if (bGroundPadMeasured && GroundPadBox.IsValid
+			&& FMath::IsWithin(Origin.X + X, GroundPadBox.Min.X, GroundPadBox.Max.X)
+			&& FMath::IsWithin(Origin.Y + Y, GroundPadBox.Min.Y, GroundPadBox.Max.Y))
+		{
+			Z = FMath::Max(Z, (float)GroundPadBox.Max.Z);
+		}
+		return Z + 4.f;
+	};
+
+	// Concentric rings, faceted like the terrain: the terrace edges come out
+	// round, and every surface boundary falls on a ring. The outermost rings
+	// dip under the terrain, so the deposit meets the ground on its own line.
+	FRHDepAcc Acc[5];
+	TArray<float> Rings;
+	const float Outer = S.R + 50.f;
+	for (float Rr = 25.f; Rr < Outer; Rr += 25.f)
+	{
+		Rings.Add(Rr);
+	}
+	Rings.Add(Outer);
+	const float CutR = S.Rf + 2.f * S.W + 20.f;
+	if (S.bWorked)
+	{
+		for (const float Edge : { S.Rf, S.Rf + 28.f, S.Rf + S.W, S.Rf + S.W + 28.f, CutR })
+		{
+			Rings.Add(Edge);
+		}
+	}
+	Rings.Sort();
+	for (int32 k = Rings.Num() - 1; k > 0; --k)
+	{
+		if (Rings[k] - Rings[k - 1] < 4.f)
+		{
+			Rings.RemoveAt(k); // near-duplicate edges make slivers
+		}
+	}
+	const int32 Segs = FMath::Clamp(FMath::RoundToInt(2.f * PI * S.R / 30.f), 64, 256);
+	const auto RingPoint = [&](float Rr, int32 j, float* OutRamp = nullptr) -> FVector
+	{
+		const float Yaw = 2.f * PI * j / Segs;
+		const float Ra = Rr + DepositWobble(S, Rr, Yaw);
+		const float X = FMath::Cos(Yaw) * Ra, Y = FMath::Sin(Yaw) * Ra;
+		return FVector(X, Y, Ground(X, Y) + DepositHeight(S, Rr, Yaw, X, Y, OutRamp));
+	};
+	const auto SectionFor = [&](float MidR, float Ramp)
+	{
+		return S.bWorked && (MidR < CutR || (Ramp > 0.5f && MidR < S.R - 0.5f * S.Fade)) ? 2 : 1;
+	};
+	const FVector Centre(0.f, 0.f, Ground(0.f, 0.f) + DepositHeight(S, 0.f, 0.f, 0.f, 0.f));
+	for (int32 j = 0; j < Segs; ++j)
+	{
+		Acc[SectionFor(Rings[0] * 0.5f, 0.f)].Tri(Centre, RingPoint(Rings[0], j), RingPoint(Rings[0], (j + 1) % Segs));
+	}
+	for (int32 k = 0; k + 1 < Rings.Num(); ++k)
+	{
+		for (int32 j = 0; j < Segs; ++j)
+		{
+			float Ramp = 0.f;
+			const FVector A = RingPoint(Rings[k], j, &Ramp);
+			const FVector B = RingPoint(Rings[k + 1], j);
+			const FVector C = RingPoint(Rings[k + 1], (j + 1) % Segs);
+			const FVector E = RingPoint(Rings[k], (j + 1) % Segs);
+			const int32 Sec = SectionFor(0.5f * (Rings[k] + Rings[k + 1]), Ramp);
+			Acc[Sec].Tri(A, B, C);
+			Acc[Sec].Tri(A, C, E);
+		}
+	}
+
+	// The dug pile: its own little dome on the floor, rim tucked under.
+	if (S.PileR > 0.f)
+	{
+		const int32 HSegs = 28;
+		const auto HeapPoint = [&](float Rr, int32 j) -> FVector
+		{
+			const float Yaw = 2.f * PI * j / HSegs;
+			const float X = S.PileC.X + FMath::Cos(Yaw) * Rr, Y = S.PileC.Y + FMath::Sin(Yaw) * Rr;
+			const float H = Rr >= S.PileR ? -2.f
+				: S.PileH * FMath::Pow(1.f - Rr / S.PileR, 1.3f) * (1.f + 0.15f * DepositNoise(X, Y, S.Seed + 9u, 0.03f));
+			const float Under = DepositHeight(S, FMath::Sqrt(X * X + Y * Y), FMath::Atan2(Y, X), X, Y);
+			return FVector(X, Y, Ground(X, Y) + Under + H);
+		};
+		const float Top = S.PileH * (1.f + 0.15f * DepositNoise(S.PileC.X, S.PileC.Y, S.Seed + 9u, 0.03f));
+		const FVector Peak(S.PileC.X, S.PileC.Y, Ground(S.PileC.X, S.PileC.Y) + Top);
+		const float HRings[] = { 0.2f, 0.45f, 0.7f, 0.9f, 1.0f, 1.08f };
+		for (int32 j = 0; j < HSegs; ++j)
+		{
+			Acc[3].Tri(Peak, HeapPoint(S.PileR * HRings[0], j), HeapPoint(S.PileR * HRings[0], (j + 1) % HSegs));
+			for (int32 k = 0; k + 1 < (int32)UE_ARRAY_COUNT(HRings); ++k)
+			{
+				const FVector A = HeapPoint(S.PileR * HRings[k], j), B = HeapPoint(S.PileR * HRings[k + 1], j);
+				const FVector C = HeapPoint(S.PileR * HRings[k + 1], (j + 1) % HSegs), E = HeapPoint(S.PileR * HRings[k], (j + 1) % HSegs);
+				Acc[3].Tri(A, B, C);
+				Acc[3].Tri(A, C, E);
+			}
+		}
+	}
+
+	// Rocks around the rim (the scenery's own boulders), clear of the way in;
+	// a few on the untouched deposit.
+	FRandomStream Rand((int32)S.Seed);
+	const int32 NumRocks = FMath::Clamp(FMath::RoundToInt(S.R / 60.f), 8, 22);
+	for (int32 k = 0; k < NumRocks; ++k)
+	{
+		// Draw everything first so the stream never depends on a skip.
+		const float Yaw = Rand.FRandRange(-PI, PI);
+		const float Rr = Rand.FRandRange(0.62f, 1.08f) * S.R;
+		const float Sz = Rand.FRandRange(0.35f, 1.05f);
+		const float Spin = Rand.FRandRange(0.f, 360.f);
+		const uint32 RockSeed = (uint32)Rand.RandRange(1, 1 << 24);
+		if (S.bWorked && FMath::Abs(FMath::FindDeltaAngleRadians(S.RampYaw, Yaw)) < 0.5f)
+		{
+			continue;
+		}
+		if (S.bWorked && Rr < S.Rf + 2.f * S.W + 40.f)
+		{
+			continue; // the dig took it
+		}
+		const float Ra = Rr + DepositWobble(S, Rr, Yaw);
+		const float X = FMath::Cos(Yaw) * Ra, Y = FMath::Sin(Yaw) * Ra;
+		const FVector Radii(Sz * 55.f * Rand.FRandRange(0.7f, 1.4f), Sz * 55.f * Rand.FRandRange(0.7f, 1.4f), Sz * 40.f);
+		const float Z = Ground(X, Y) + FMath::Max(0.f, DepositHeight(S, Rr, Yaw, X, Y)) - Radii.Z * 0.35f;
+		RHMarsTerrain::AppendRock(Acc[4].V, Acc[4].I, Acc[4].N, FVector(X, Y, Z), Radii, Spin, RockSeed);
+	}
+
+	for (int32 Sec = 0; Sec < 5; ++Sec)
+	{
+		if (Acc[Sec].I.Num() > 0)
+		{
+			PMC->CreateMeshSection(Sec, Acc[Sec].V, Acc[Sec].I, Acc[Sec].N,
+				TArray<FVector2D>(), TArray<FColor>(), TArray<FProcMeshTangent>(), false);
+			PMC->SetMeshSectionVisible(Sec, true);
+		}
+		else if (Sec < PMC->GetNumSections())
+		{
+			PMC->ClearMeshSection(Sec);
+		}
+	}
+
+	// The claim: survey stakes with flags around the rim and a beacon by the
+	// way in, the moment the deposit is worked. Absolute world-space accents.
+	if (S.bWorked && !DepositClaimDressed.Contains(D.Id))
+	{
+		DepositClaimDressed.Add(D.Id);
+		const TCHAR* Cyl = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
+		const TCHAR* Cube = TEXT("/Engine/BasicShapes/Cube.Cube");
+		const TCHAR* Sphere = TEXT("/Engine/BasicShapes/Sphere.Sphere");
+		const float StakeR = S.R + 35.f;
+		for (int32 k = 0; k < 8; ++k)
+		{
+			const float Yaw = S.RampYaw + PI / 8.f + k * (PI / 4.f);
+			const FVector2D At = Origin + FVector2D(FMath::Cos(Yaw), FMath::Sin(Yaw)) * StakeR;
+			const float Gz = Ground(At.X - Origin.X, At.Y - Origin.Y) - 4.f;
+			AddAccent(Actor, Cyl, FVector(At.X, At.Y, Gz + 70.f), FRotator::ZeroRotator, FVector(0.05f, 0.05f, 1.4f), RHCanon::BoneWhite);
+			// The flag streams tangentially, so from above it reads as a tick
+			// around the ring, not a dot.
+			const FVector Tangent(-FMath::Sin(Yaw), FMath::Cos(Yaw), 0.f);
+			AddAccent(Actor, Cube, FVector(At.X, At.Y, Gz + 124.f) + Tangent * 20.f, FRotator(0.f, FMath::RadiansToDegrees(Yaw), 0.f),
+				FVector(0.02f, 0.40f, 0.26f), RHCanon::HazYellow);
+		}
+		const FVector2D BeaconAt = Origin + FVector2D(FMath::Cos(S.RampYaw + 0.62f), FMath::Sin(S.RampYaw + 0.62f)) * (S.R + 60.f);
+		const float Bz = Ground(BeaconAt.X - Origin.X, BeaconAt.Y - Origin.Y) - 4.f;
+		AddAccent(Actor, Cyl, FVector(BeaconAt.X, BeaconAt.Y, Bz + 95.f), FRotator::ZeroRotator, FVector(0.12f, 0.12f, 1.9f), RHCanon::DarkSlate);
+		AddAccent(Actor, Sphere, FVector(BeaconAt.X, BeaconAt.Y, Bz + 200.f), FRotator::ZeroRotator, FVector(0.22f), RHCanon::HazYellow, RHCanon::AmberGlow);
+	}
+}
+
+void URHColonyVisualizerSubsystem::RefreshDepositMarkers(const URHSimWorldSubsystem* Sim)
+{
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	// The map's ground pad is found by the scenery pass, after the first dig
+	// sites were built: measure it once, then rebuild every site on it.
+	if (!bGroundPadMeasured && GroundActor.IsValid())
+	{
+		bGroundPadMeasured = true;
+		GroundPadBox = GroundActor->GetComponentsBoundingBox(true);
+		DepositShapeKey.Reset();
+		UE_LOG(LogRedHope, Display, TEXT("Dig sites: ground pad spans (%.0f..%.0f, %.0f..%.0f) m, top z %.1f cm"),
+			GroundPadBox.Min.X / 100.0, GroundPadBox.Max.X / 100.0, GroundPadBox.Min.Y / 100.0, GroundPadBox.Max.Y / 100.0, GroundPadBox.Max.Z);
+	}
+	const double PileCap = Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0;
+	for (const FRHDepositState& D : Sim->GetDeposits())
+	{
+		const TWeakObjectPtr<AStaticMeshActor>* Found = DepositMarkerById.Find(D.Id);
+		AStaticMeshActor* Actor = Found ? Found->Get() : nullptr;
+		if (!Actor)
+		{
+			continue;
+		}
+		// Rebuild only when the picture would change: half-percent steps of the
+		// dig, 20 kg steps of the pile, and the worked switch.
+		const FRHDepositShape S = MakeDepositShape(D, PileCap);
+		const double Initial = D.InitialKg > 0.0 ? D.InitialKg : D.RemainingKg;
+		const uint32 Mined = Initial > 0.0 ? (uint32)FMath::RoundToInt(200.0 * FMath::Clamp(1.0 - D.RemainingKg / Initial, 0.0, 1.0)) : 0u;
+		const uint32 Key = HashCombine(HashCombine(GetTypeHash(Mined), GetTypeHash((uint32)FMath::RoundToInt(D.PileKg / 20.0))), GetTypeHash(S.bWorked));
+		uint32& Last = DepositShapeKey.FindOrAdd(D.Id, ~0u);
+		if (Last != Key)
+		{
+			Last = Key;
+			BuildDepositGround(Actor, D);
+		}
+	}
 }
 
 void URHColonyVisualizerSubsystem::HandleSurveyCompleted(const FRHSurveyRecord& Record)
@@ -1963,6 +2372,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			{ FName("Electrolyzer"),  FString(TEXT("/Game/RedHope/Art/Models2/Electrolyzer/Electrolyzer/StaticMeshes/Electrolyzer.Electrolyzer")) },
 			{ FName("IceDrill"),      FString(TEXT("/Game/RedHope/Art/Models2/IceDrill/IceDrill/StaticMeshes/IceDrill.IceDrill")) },
 			{ FName("Pylon"),         FString(TEXT("/Game/RedHope/Art/Models2/Pylon/Pylon/StaticMeshes/Pylon.Pylon")) },
+			// Code-built 2026-10-17 (scripts/blender/rh_build_chargepad.py, the
+			// director's "Pad C": an induction disc, amber coil rings, a service
+			// mast). It drew primitives before - NEW coverage, no fallback.
+			{ FName("ChargePad"),     FString(TEXT("/Game/RedHope/Art/Models2/ChargePad/ChargePad/StaticMeshes/ChargePad.ChargePad")) },
 			// Re-bakes of the two worst paint offenders from the director's
 			// 2026-08-18 photo notes. The old extractor2/RH_AirFilter2 assets
 			// stay on disk under RealModelPaths as the rh.ModelSetV2=0
@@ -2027,7 +2440,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		// keeps its squeeze: its legs are part of the model and the director
 		// signed off its size.
 		FVector Fit = Scale;
-		if (Instance.DefName == FName("Electrolyzer") || Instance.DefName == FName("WaterPlant"))
+		if (Instance.DefName == FName("Electrolyzer") || Instance.DefName == FName("WaterPlant") || Instance.DefName == FName("ChargePad"))
 		{
 			const URHDefinitionsSubsystem* FitDefs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 			if (const FRHBuildingRow* FitDef = FitDefs ? FitDefs->GetBuilding(Instance.DefName) : nullptr)
@@ -2346,6 +2759,12 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		bEnvironmentHidden = IsUnderground();
 		EnvironmentRigActor->SetActorHiddenInGame(bEnvironmentHidden);
 	}
+	// Dig sites follow the dig: a cheap state-keyed rebuild, twice a second.
+	if (FPlatformTime::Seconds() >= NextDepositRefreshRealSeconds)
+	{
+		NextDepositRefreshRealSeconds = FPlatformTime::Seconds() + 0.5;
+		RefreshDepositMarkers(Sim);
+	}
 	// Territory made visible: one disc per coverage node, every frame - on
 	// the floor the elevator shows.
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
@@ -2379,7 +2798,10 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// parameter simply does not exist and the write is a no-op.
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
-		const uint8 Want = B.bUnderConstruction ? 2 : (B.bPowered ? 1 : 0);
+		// 3 = a powered Charging Pad with a robot on it: same "running" look,
+		// plus brighter, breathing rings (see below).
+		const bool bPadInUse = B.DefName == FName("ChargePad") && B.bPowered && !B.bUnderConstruction && Sim->GetPadDockedCount(B.Id) > 0;
+		const uint8 Want = B.bUnderConstruction ? 2 : (bPadInUse ? 3 : (B.bPowered ? 1 : 0));
 		if (const uint8* Applied = AppliedPowerState.Find(B.Id))
 		{
 			if (*Applied == Want)
@@ -2410,7 +2832,14 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		AppliedPowerState.Add(B.Id, Want);
 		if (Mid)
 		{
-			Mid->SetScalarParameterValue(FName("PoweredState"), Want == 1 ? 1.f : 0.f);
+			Mid->SetScalarParameterValue(FName("PoweredState"), (Want == 1 || Want == 3) ? 1.f : 0.f);
+			if (B.DefName == FName("ChargePad"))
+			{
+				// The rings idle low and come up, breathing, while a robot charges.
+				Mid->SetScalarParameterValue(FName("EmissiveAmount"), Want == 3 ? 0.4f : 0.05f);
+				Mid->SetScalarParameterValue(FName("PulseDepth"), Want == 3 ? 0.35f : 0.f);
+				Mid->SetScalarParameterValue(FName("PulseSpeed"), 1.2f);
+			}
 		}
 		// A Floodmast on a shed breaker goes dark with everything else.
 		// (Named FoundLamp, not Found: this scope already has a `Found` for the
@@ -2419,7 +2848,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			if (UPointLightComponent* Lamp = FoundLamp->Get())
 			{
-				Lamp->SetVisibility(Want == 1);
+				Lamp->SetVisibility(Want == 1 || Want == 3);
 			}
 		}
 	}

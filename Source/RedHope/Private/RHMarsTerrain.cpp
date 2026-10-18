@@ -555,4 +555,69 @@ void BuildScenery(AActor& Rig)
 	UE_LOG(LogRedHope, Display, TEXT("Mars scenery built: %d triangles across 8 sections"), TotalTris);
 }
 
+float SceneryGroundZCm(double X, double Y)
+{
+	// Mirrors AppendGround's lattice exactly: 144 sectors, 56 rings from 40 m
+	// to 4.6 km on an exponential spacing, each quad split (A, B, C) + (A, C, D),
+	// vertices at MeshZ. The facet under a point is planar, so a barycentric
+	// blend of its triangle IS the surface drawn there.
+	const int32 Sectors = 144, Rings = 56;
+	const auto RingR = [](int32 J) { return 4000.f * FMath::Pow(115.f, (float)J / (float)(Rings - 1)); };
+	const auto Vert = [&](int32 J, int32 K)
+	{
+		K = (K % Sectors + Sectors) % Sectors;
+		const float Rr = RingR(J);
+		const float Th = (float)K * 2.f * PI / (float)Sectors;
+		const double VX = FMath::Cos(Th) * Rr, VY = FMath::Sin(Th) * Rr;
+		return FVector(VX, VY, MeshZ(VX, VY, Rr));
+	};
+	const auto PlaneZ = [X, Y](const FVector& P0, const FVector& P1, const FVector& P2, bool& bInside)
+	{
+		const double D = (P1.Y - P2.Y) * (P0.X - P2.X) + (P2.X - P1.X) * (P0.Y - P2.Y);
+		if (FMath::Abs(D) < 1e-6)
+		{
+			bInside = false;
+			return (float)P0.Z;
+		}
+		const double L0 = ((P1.Y - P2.Y) * (X - P2.X) + (P2.X - P1.X) * (Y - P2.Y)) / D;
+		const double L1 = ((P2.Y - P0.Y) * (X - P2.X) + (P0.X - P2.X) * (Y - P2.Y)) / D;
+		const double L2 = 1.0 - L0 - L1;
+		bInside = L0 >= -1e-4 && L1 >= -1e-4 && L2 >= -1e-4;
+		return (float)(L0 * P0.Z + L1 * P1.Z + L2 * P2.Z);
+	};
+	const double R = FMath::Sqrt(X * X + Y * Y);
+	double Th = FMath::Atan2(Y, X);
+	if (Th < 0.0)
+	{
+		Th += 2.0 * PI;
+	}
+	const int32 K = FMath::Clamp((int32)(Th / (2.0 * PI / Sectors)), 0, Sectors - 1);
+	bool bInside = false;
+	if (R < RingR(0))
+	{
+		return PlaneZ(FVector(0, 0, MeshZ(0, 0, 0.f)), Vert(0, K), Vert(0, K + 1), bInside);
+	}
+	if (R >= RingR(Rings - 1))
+	{
+		return MeshZ(X, Y, (float)R);
+	}
+	const int32 J = FMath::Clamp((int32)(FMath::Loge(R / 4000.0) / FMath::Loge(115.0) * (Rings - 1)), 0, Rings - 2);
+	const FVector A = Vert(J, K), B = Vert(J, K + 1), C = Vert(J + 1, K + 1), Dv = Vert(J + 1, K);
+	const float Z = PlaneZ(A, B, C, bInside);
+	return bInside ? Z : PlaneZ(A, C, Dv, bInside);
+}
+
+void AppendRock(TArray<FVector>& V, TArray<int32>& I, TArray<FVector>& N, const FVector& CenterCm, const FVector& RadiiCm, float YawDeg, uint32 Seed)
+{
+	FAcc Acc;
+	AppendBoulder(Acc, CenterCm, RadiiCm, YawDeg, Seed, true);
+	const int32 Base = V.Num();
+	V.Append(Acc.V);
+	N.Append(Acc.N);
+	for (const int32 Idx : Acc.I)
+	{
+		I.Add(Base + Idx);
+	}
+}
+
 } // namespace RHMarsTerrain
