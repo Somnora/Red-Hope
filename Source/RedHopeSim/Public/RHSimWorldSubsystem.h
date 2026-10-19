@@ -4,6 +4,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "RHSimTypes.h"
 #include "RHRoads.h"
+#include "RHDistricts.h"
 #include "RHSimWorldSubsystem.generated.h"
 
 class URHDefinitionsSubsystem;
@@ -24,8 +25,10 @@ struct REDHOPESIM_API FRHCommand
 
 	UPROPERTY() FName Verb;                     // Build, Dig, ...
 	UPROPERTY() FName Target;                   // definition/deposit row name
-	// Transient queue handle (uplink panel cancel); reassigned on load,
-	// never serialized.
+	// The queue handle the uplink panel cancels by. Serialized with the queue (save
+	// v37) so a loaded order keeps its own Id: every loaded order used to come back
+	// as Id 0, and the deck's cancel then removed the FIRST queued order whichever
+	// one it was meant for.
 	UPROPERTY() int32 CommandId = 0;
 	UPROPERTY() FVector Location = FVector::ZeroVector;
 	// C4: the second end point of a BuildRoad order (Location is the first).
@@ -38,6 +41,9 @@ struct REDHOPESIM_API FRHCommand
 	UPROPERTY() double Value = 0.0;
 	UPROPERTY() double IssuedAtSimSeconds = 0.0;
 	UPROPERTY() double ExecuteAtSimSeconds = 0.0;
+	// C5a: free text an order carries (RenameDistrict's new name). Serialized with the
+	// queue (save v37). An FString, never an FName: names are case-sensitive.
+	UPROPERTY() FString Text;
 };
 
 // A colonist as the sim knows them (M2 Gate A1). Colonists are population
@@ -543,6 +549,13 @@ public:
 	// (ComfortCapacity - Pop: settlers never push the Housing term below its maximum);
 	// 0 below the Hope minimum. Pure arithmetic - the landing and the suites share it.
 	int32 GetImmigrationCount(double Hope, int32 Pop, int32 FreeBeds, int32 ComfortCapacity) const;
+	// C5a: GetImmigrationCount in its two halves, so the city's Housing demand measures
+	// headroom with the SAME limits arrivals use. The raw part is what a ship would bring
+	// if room allowed (the Hope draw, capped per ship: 0 below the Hope minimum or with
+	// nobody here); the room part is min(FreeBeds - ReserveBeds, ComfortCapacity - Pop),
+	// floored at 0. GetImmigrationCount = (FreeBeds <= 0) ? 0 : min(raw, room).
+	int32 GetImmigrationRaw(double Hope, int32 Pop) const;
+	int32 GetImmigrationRoom(int32 Pop, int32 FreeBeds, int32 ComfortCapacity) const;
 	// The population the Housing term can serve at full value: the bed-weighted Living
 	// cells and bays on rated floors and rated surface networks, exactly the number
 	// GetColonyHope divides by (the helper both use). Settlers never push past it.
@@ -1115,6 +1128,61 @@ public:
 	// Harness: the labour left, as if every Fabricator had finished.
 	void Debug_FinishRoads();
 
+	// --- Districts (C5a, living-city gate 5a, 2026-10-19) ---
+	// The player ZONES districts: a Kind (Homes | Industry | Farming | Research | Civic)
+	// painted on surface ground as 10 m lattice cells, or on a whole underground floor.
+	// A district has a generated Mars place-name (renamable), a region id, and a Level.
+	// The gate is INERT until one is painted: no existing suite paints, so no existing
+	// output moves. Three uplink verbs, the same lag as every order, every one of them
+	// rejected with a reason when it cannot apply:
+	//   PaintDistrict   Target = Kind. Level 0: a rectangle, Location and LocationB two
+	//                   points whose lattice cells are its corners (either order). Level
+	//                   < 0: that whole floor. Same Kind joins the one district it
+	//                   overlaps (it keeps its Id); a rectangle over another Kind, or over
+	//                   two districts, is refused. At most 32 x 32 cells an order, every
+	//                   cell inside grid coverage; a floor must be reached by the shaft.
+	//   EraseDistrict   Value = Id: the whole district goes (its Id is never reused).
+	//   RenameDistrict  Value = Id, Text = the name (trimmed, capped at 32 characters,
+	//                   never empty; case-sensitive).
+	// Membership is DERIVED, never saved: a building (or a surface habitat's every bay)
+	// belongs to the district holding its anchor lattice cell - the bay-0 / GridMin cell
+	// of a shell, the footprint centre of anything else - so a habitat is never split by
+	// a district edge; an underground building or cell to its floor's district; a
+	// colonist to their home's. The membership caches rebuild lazily, when read, keyed on
+	// (districts, zoning, colonists, furniture) and the building set, and -RHVerifyCaches
+	// re-derives and compares them every time one is reused.
+	const TArray<FRHDistrict>& GetDistricts() const { return Districts; }
+	const FRHDistrict* FindDistrict(int32 Id) const;
+	uint32 GetDistrictsVersion() const { return DistrictsVersion; }
+	int32 GetNextDistrictId() const { return NextDistrictId; }
+	// The lattice cell holding a world point (cell centres are multiples of 10 m), and the
+	// world point at a cell's centre.
+	static FIntPoint LatticeOf(const FVector& Cm);
+	static FVector LatticeCentreCm(const FIntPoint& Cell) { return FVector((double)Cell.X * 1000.0, (double)Cell.Y * 1000.0, 0.0); }
+	// True if the order would be accepted right now (the ghost polls it every frame;
+	// ExecuteCommand runs the same check when the order lands). A floor order ignores
+	// FromCm and ToCm.
+	bool CanPaintDistrict(FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview = nullptr) const;
+	bool CanEraseDistrict(int32 Id, FString& OutReason) const;
+	bool CanRenameDistrict(int32 Id, const FString& Typed, FString& OutReason, FString* OutName = nullptr) const;
+	// Membership reads. 0 = in no district.
+	int32 GetDistrictAtCell(const FIntPoint& Cell) const;
+	int32 GetDistrictOfFloor(int32 Level) const;
+	int32 GetDistrictAtPoint(int32 Level, const FVector& Cm) const;       // the district painted on the ground at a point
+	int32 GetDistrictOfBuilding(int32 BuildingId) const;
+	int32 GetDistrictOfBay(int32 HabId, int32 Bay) const { return GetDistrictOfBuilding(HabId); } // a bay is its building's
+	int32 GetDistrictOfCell(int32 Level, int32 CellIndex) const { return CellIndex >= 0 ? GetDistrictOfFloor(Level) : 0; } // an underground cell is its floor's
+	int32 GetDistrictOfColonist(int32 ColonistId) const;                  // their home's
+	// One entry per district, in the order of GetDistricts().
+	void GetDistrictCounts(TArray<FRHDistrictCounts>& Out) const;
+	// The city's demand: colony-wide Housing, Jobs, Services and Air (C5a: a readout;
+	// the sim does not act on it). A pure function of state.
+	FRHCityDemand GetCityDemand() const;
+	// Harness: true unless a derived district cache is being REUSED while stale (its key
+	// still matches but a fresh derivation differs). A cache whose key has moved reads as
+	// fresh: it rebuilds on its next read.
+	bool Debug_DistrictCachesFresh() const;
+
 	// --- Robot work API (game-thread, called by Mass processors) ---
 	FVector GetSiteLocation(const FRHSiteRef& Site) const;
 	// Excavator: ground -> pile, respecting pile cap and remaining mass.
@@ -1447,6 +1515,57 @@ private:
 	// Strip (segment + width) against a footprint; the order's strip against everything.
 	bool RoadStripHitsBox(const FVector2D& A, const FVector2D& B, const FVector2D& Centre, const FVector2D& Half) const;
 
+	// Districts (C5a). SAVED (v37): the list (ascending Id, each with its sorted lattice) and
+	// the next Id. Everything below it is DERIVED and rebuilt lazily; nothing derived is saved.
+	TArray<FRHDistrict> Districts;
+	int32 NextDistrictId = 1;               // SAVED; Ids are never reused
+	uint32 DistrictsVersion = 1;            // bumped by a paint, an erase, a rename and a load
+	// Ground ownership: lattice cell -> district Id, floor -> district Id, Id -> index into
+	// Districts. Lookups only, never iterated. Keyed on DistrictsVersion.
+	struct FRHDistrictGeo
+	{
+		bool bValid = false;
+		uint32 Version = 0;
+		TMap<FIntPoint, int32> CellOwner;
+		TMap<int32, int32> FloorOwner;
+		TMap<int32, int32> IndexById;
+	};
+	// Who belongs to which district: building Id -> district Id, and per-district (Districts
+	// order) counts of buildings, shell bays and residents. Keyed on
+	// (DistrictsVersion, ZoningVersion, ColonistSetVersion, FurnitureVersion) plus the building
+	// set (its count and the next building Id, which move on every add and every demolish).
+	struct FRHDistrictMembershipKey
+	{
+		uint32 Districts = 0, Zoning = 0, Colonists = 0, Furniture = 0;
+		int32 BuildingCount = 0, NextBuilding = 0;
+		bool operator==(const FRHDistrictMembershipKey& O) const
+		{
+			return Districts == O.Districts && Zoning == O.Zoning && Colonists == O.Colonists && Furniture == O.Furniture
+				&& BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
+		}
+	};
+	struct FRHDistrictMembership
+	{
+		bool bValid = false;
+		FRHDistrictMembershipKey Key;
+		TMap<int32, int32> OfBuilding;
+		TArray<int32> Buildings, Bays, Residents;
+	};
+	mutable FRHDistrictGeo DistrictGeo;
+	mutable FRHDistrictMembership DistrictMembers;
+	const FRHDistrictGeo& EnsureDistrictGeo() const;
+	void DeriveDistrictGeo(FRHDistrictGeo& Out) const;
+	const FRHDistrictMembership& EnsureDistrictMembership() const;
+	void DeriveDistrictMembership(FRHDistrictMembership& Out) const;
+	FRHDistrictMembershipKey MakeDistrictMembershipKey() const;
+	// The lattice cell a surface building is anchored on: bay 0 (GridMin) for a shell of any
+	// state, the footprint centre for anything else.
+	FIntPoint GetBuildingAnchorLattice(const FRHBuildingInstance& B) const;
+	// The three verbs' workers: false with a reason (the order is rejected, never "executed").
+	bool ExecutePaintDistrict(const FRHCommand& Cmd, FString& OutReason);
+	bool ExecuteEraseDistrict(const FRHCommand& Cmd, FString& OutReason);
+	bool ExecuteRenameDistrict(const FRHCommand& Cmd, FString& OutReason);
+
 	TMap<FName, double> Stocks;             // fluids/gases/abstract (network-instant)
 	TMap<int32, TMap<FName, double>> PendingOutputs; // building id -> outputs owed when its batch completes
 	TArray<FRHCommand> UplinkQueue;
@@ -1501,7 +1620,7 @@ private:
 	TSet<FMassEntityHandle> RepairClaims;
 	TMap<int32, TArray<FMassEntityHandle>> PadQueues;
 	TArray<FRHSurveyRecord> SurveyHistory; // serialized (save v4)
-	int32 NextCommandId = 1;               // transient uplink handles
+	int32 NextCommandId = 1;               // uplink handles (each order's own; saved with the queue, v37; a load raises this past the loaded ones)
 	TArray<FVector3f> PowerHistory;        // transient strip-chart ring
 	int64 LastPowerSampleHour = -1;
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this

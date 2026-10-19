@@ -1,10 +1,12 @@
 #include "RHPlayerController.h"
 #include "RedHope.h"
 #include "RHStrategyPawn.h"
+#include "RHMarsTerrain.h"
 #include "RHCommandDeck.h"
 #include "RHMenus.h"
 #include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHDistrictVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -512,6 +514,125 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 		}
 	}
+	else if (bDistrictMode)
+	{
+		// The district ghost (C5a): the sim's own preflight, drawn. Surface: the lattice rectangle
+		// from the anchor to the cursor (a single cell before the press); underground: the whole
+		// floor's carved cells. Kind-coloured when the order would be accepted right now, red when
+		// it would not (the hint says why); the uplink re-checks on arrival.
+		const FLinearColor KindTint = URHDistrictVisualizerSubsystem::KindColor(DistrictKind);
+		const FString KindName = URHDistrictVisualizerSubsystem::KindWord(DistrictKind);
+		if (ActiveLevel < 0)
+		{
+			FString Reason;
+			FRHDistrictPaintPreview Pre;
+			const bool bOk = Sim->CanPaintDistrict(DistrictKind, ActiveLevel, FVector::ZeroVector, FVector::ZeroVector, Reason, &Pre);
+			const FColor Color = bOk ? KindTint.ToFColor(true) : FColor::Red;
+			const FVector Head = Sim->GetShaftHeadCm();
+			const float Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
+			const int32 Carved = Sim->GetFloorCarvedCells(ActiveLevel);
+			for (int32 i = 0; i < Carved; ++i)
+			{
+				const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i);
+				DrawDebugBox(World, FVector(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, Z + 40.f), FVector(480.f, 480.f, 25.f), Color, false, -1.f, 0, 5.f);
+			}
+			HintText = bOk
+				? FString::Printf(TEXT("DISTRICT %s: click to make floor %d (%d cell%s) a %s district, the whole floor - transmits in %.0f sim-s, right-click to finish"),
+					*KindName, ActiveLevel, Carved, Carved == 1 ? TEXT("") : TEXT("s"), *KindName, Sim->GetOrderLagSeconds())
+				: FString::Printf(TEXT("DISTRICT %s: %s"), *KindName, *Reason);
+			HintColor = bOk ? KindTint : FLinearColor(1.f, 0.4f, 0.3f);
+		}
+		else
+		{
+			FVector Ground = FVector::ZeroVector;
+			const bool bHave = bDistrictForced || CursorToGround(Ground);
+			if (bHave)
+			{
+				const FIntPoint Cur = bDistrictForced ? DistrictForcedTo : URHSimWorldSubsystem::LatticeOf(Ground);
+				const FIntPoint From = bDistrictDragging ? DistrictAnchor : Cur;
+				const FVector FromCm = URHSimWorldSubsystem::LatticeCentreCm(From), ToCm = URHSimWorldSubsystem::LatticeCentreCm(Cur);
+				FString Reason;
+				FRHDistrictPaintPreview Pre;
+				const bool bOk = Sim->CanPaintDistrict(DistrictKind, 0, FromCm, ToCm, Reason, &Pre);
+				const FColor Color = bOk ? KindTint.ToFColor(true) : FColor::Red;
+				const FIntPoint Lo(FMath::Min(From.X, Cur.X), FMath::Min(From.Y, Cur.Y)), Hi(FMath::Max(From.X, Cur.X), FMath::Max(From.Y, Cur.Y));
+				const int32 W = Hi.X - Lo.X + 1, H = Hi.Y - Lo.Y + 1;
+				const double MidX = 0.5 * (Lo.X + Hi.X) * 1000.0, MidY = 0.5 * (Lo.Y + Hi.Y) * 1000.0;
+				const float Ground0 = (float)RHMarsTerrain::GroundZCm(MidX, MidY);
+				const FVector Mid(MidX, MidY, Ground0 + 30.f);
+				DrawDebugBox(World, Mid, FVector(W * 500.f, H * 500.f, 30.f), Color, false, -1.f, 0, 12.f);
+				if (W <= RHDistricts::MaxPaintSide && H <= RHDistricts::MaxPaintSide && (W > 1 || H > 1))
+				{
+					// The lattice, so the player sees the 10 m cells the order will take.
+					for (int32 X = 1; X < W; ++X)
+					{
+						const float XX = (float)((Lo.X + X - 0.5) * 1000.0);
+						DrawDebugLine(World, FVector(XX, (Lo.Y - 0.5) * 1000.0, Ground0 + 25.f), FVector(XX, (Hi.Y + 0.5) * 1000.0, Ground0 + 25.f), Color, false, -1.f, 0, 3.f);
+					}
+					for (int32 Y = 1; Y < H; ++Y)
+					{
+						const float YY = (float)((Lo.Y + Y - 0.5) * 1000.0);
+						DrawDebugLine(World, FVector((Lo.X - 0.5) * 1000.0, YY, Ground0 + 25.f), FVector((Hi.X + 0.5) * 1000.0, YY, Ground0 + 25.f), Color, false, -1.f, 0, 3.f);
+					}
+				}
+				if (Pre.CellsOutside > 0 && W * H <= 400)
+				{
+					// Every cell past the grid's reach carries a red mark.
+					for (int32 X = Lo.X; X <= Hi.X; ++X)
+					{
+						for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+						{
+							const FVector C = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X, Y));
+							if (!Sim->IsInCoverage(C, 0))
+							{
+								DrawDebugBox(World, FVector(C.X, C.Y, Ground0 + 35.f), FVector(260.f, 260.f, 20.f), FColor::Red, false, -1.f, 0, 6.f);
+							}
+						}
+					}
+				}
+				FString Tip;
+				if (bOk)
+				{
+					const FRHDistrict* Joined = Pre.JoinId != 0 ? Sim->FindDistrict(Pre.JoinId) : nullptr;
+					Tip = FString::Printf(TEXT("DISTRICT %s: %d x %d cells (%.0f x %.0f m, %d new) - %s"), *KindName, W, H, W * 10.f, H * 10.f, Pre.CellsNew,
+						Joined ? *FString::Printf(TEXT("joins %s"), *Joined->Name) : TEXT("founds a new district"));
+					Tip += bDistrictDragging ? FString::Printf(TEXT("\nrelease to transmit (Δ %.0f sim-s), right-click to cancel"), Sim->GetOrderLagSeconds())
+						: FString(TEXT("\nclick and drag to paint a rectangle (up to 32 x 32 cells of 10 m), right-click to finish"));
+				}
+				else
+				{
+					Tip = FString::Printf(TEXT("DISTRICT %s: %s"), *KindName, *Reason);
+				}
+				HintText = Tip;
+				HintColor = bOk ? KindTint : FLinearColor(1.f, 0.4f, 0.3f);
+				// Release ends the drag: transmit when the ghost is clean, else buzz and stay armed.
+				if (bDistrictDragging && !bDistrictForced && !IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bDistrictDragging = false;
+					if (bOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("PaintDistrict");
+						Cmd.Target = DistrictKind;
+						Cmd.Level = 0;
+						Cmd.Location = FromCm;
+						Cmd.LocationB = ToCm;
+						Sim->EnqueueCommand(Cmd);
+						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+						SetConfirm(FString::Printf(TEXT("District order transmitted: %s, %d x %d cells"), *KindName, W, H), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					else
+					{
+						URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+					}
+				}
+			}
+			if (!bDistrictForced && bDistrictDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bDistrictDragging = false; // released with no cursor on the ground: nothing to paint
+			}
+		}
+	}
 	else if (bDigMode)
 	{
 		FVector Ground;
@@ -928,6 +1049,28 @@ void ARHPlayerController::Tick(float DeltaTime)
 				}
 				continue;
 			}
+			if (C.Verb == FName("PaintDistrict"))
+			{
+				// C5a: a district order in flight - the rectangle it will take, in the Kind's colour, with its countdown.
+				const double PEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+				const FColor PCol = URHDistrictVisualizerSubsystem::KindColor(C.Target).ToFColor(true);
+				if (C.Level == 0 && ActiveLevel == 0)
+				{
+					const FIntPoint PA = URHSimWorldSubsystem::LatticeOf(C.Location), PB = URHSimWorldSubsystem::LatticeOf(C.LocationB);
+					const FIntPoint PLo(FMath::Min(PA.X, PB.X), FMath::Min(PA.Y, PB.Y)), PHi(FMath::Max(PA.X, PB.X), FMath::Max(PA.Y, PB.Y));
+					const double PMidX = 0.5 * (PLo.X + PHi.X) * 1000.0, PMidY = 0.5 * (PLo.Y + PHi.Y) * 1000.0;
+					const float PZ = (float)RHMarsTerrain::GroundZCm(PMidX, PMidY);
+					DrawDebugBox(World, FVector(PMidX, PMidY, PZ + 20.f), FVector((PHi.X - PLo.X + 1) * 500.f, (PHi.Y - PLo.Y + 1) * 500.f, 20.f), PCol, false, -1.f, 0, 5.f);
+					DrawDebugString(World, FVector(PMidX, PMidY, PZ + 260.f), FString::Printf(TEXT("%s district  Δ %.0fs"), *C.Target.ToString(), PEta), nullptr, FColor(180, 235, 255), 0.f, true, 1.1f);
+				}
+				else if (C.Level < 0 && C.Level == ActiveLevel)
+				{
+					const FVector PHead = Sim->GetShaftHeadCm();
+					DrawDebugString(World, FVector(PHead.X, PHead.Y, C.Level * (float)Sim->GetFloorHeightCm() + 260.f), FString::Printf(TEXT("Floor %d: %s district  Δ %.0fs"), C.Level, *C.Target.ToString(), PEta),
+						nullptr, FColor(180, 235, 255), 0.f, true, 1.1f);
+				}
+				continue;
+			}
 			if (C.Verb != FName("Build") || C.Level != ActiveLevel)
 			{
 				continue;
@@ -1086,6 +1229,35 @@ void ARHPlayerController::OnClick()
 		{
 			RoadAnchorCm = SnapRoadPoint(Ground);
 			bRoadDragging = true;
+		}
+	}
+	else if (bDistrictMode)
+	{
+		if (ActiveLevel < 0)
+		{
+			// Underground a click makes the whole floor a district (the ghost already says if it cannot).
+			FString Reason;
+			if (Sim->CanPaintDistrict(DistrictKind, ActiveLevel, FVector::ZeroVector, FVector::ZeroVector, Reason))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("PaintDistrict");
+				Cmd.Target = DistrictKind;
+				Cmd.Level = ActiveLevel;
+				Sim->EnqueueCommand(Cmd);
+				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+				SetConfirm(FString::Printf(TEXT("District order transmitted: floor %d becomes a %s district"), ActiveLevel, *URHDistrictVisualizerSubsystem::KindWord(DistrictKind)), FLinearColor(0.2f, 0.9f, 1.f));
+			}
+			else
+			{
+				URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				SetConfirm(Reason, FLinearColor(1.f, 0.4f, 0.3f));
+			}
+		}
+		else
+		{
+			// Anchor a corner; Tick sizes the rectangle and transmits on release.
+			DistrictAnchor = URHSimWorldSubsystem::LatticeOf(Ground);
+			bDistrictDragging = true;
 		}
 	}
 	else if (bZoneMode)
@@ -1295,7 +1467,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bRoadMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bRoadMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -1441,10 +1613,35 @@ FVector ARHPlayerController::SnapRoadPoint(const FVector& GroundCm) const
 	return Snapped;
 }
 
+void ARHPlayerController::BeginDistrictPaint(FName Kind)
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bDistrictMode = true;
+	bDistrictDragging = false;
+	bDistrictForced = false;
+	DistrictKind = RHDistricts::ResolveKind(Kind);
+	if (DistrictKind.IsNone())
+	{
+		bDistrictMode = false; // not one of the five kinds: nothing to paint
+	}
+}
+
+void ARHPlayerController::Debug_DistrictGhost(FName Kind, const FIntPoint& FromCell, const FIntPoint& ToCell)
+{
+	BeginDistrictPaint(Kind);
+	bDistrictDragging = bDistrictMode;
+	bDistrictForced = bDistrictMode;
+	DistrictAnchor = FromCell;
+	DistrictForcedTo = ToCell;
+}
+
 void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
 	bRoadMode = false;
 	bRoadDragging = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bFurnishMode = false;
@@ -1456,6 +1653,8 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 void ARHPlayerController::BeginDigDesignation()
 {
 	bRoadMode = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
 	bSurveyMode = false;
 	bFurnishMode = false;
@@ -1466,6 +1665,8 @@ void ARHPlayerController::BeginDigDesignation()
 void ARHPlayerController::BeginSurveyDesignation()
 {
 	bRoadMode = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
 	bExcavateMode = false;
@@ -1502,6 +1703,22 @@ void ARHPlayerController::Debug_ShowWallsTab()
 	if (Deck.IsValid())
 	{
 		Deck->Debug_SetRowTab(2);
+	}
+}
+
+void ARHPlayerController::Debug_ShowDistrictTab()
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetRowTab(3);
+	}
+}
+
+void ARHPlayerController::Debug_SetCityExpanded(bool bOn)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetCityExpanded(bOn);
 	}
 }
 
@@ -1575,6 +1792,8 @@ const FRHFurnitureInstance* ARHPlayerController::FindFurnitureAt(const FVector& 
 void ARHPlayerController::BeginExcavateDesignation()
 {
 	bRoadMode = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
@@ -1589,6 +1808,8 @@ void ARHPlayerController::BeginExcavateDesignation()
 void ARHPlayerController::BeginZoneDesignation(FName Room)
 {
 	bRoadMode = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
@@ -1651,7 +1872,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bRoadMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
+	if (PendingBuildDef.IsNone() && !bRoadMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -1664,6 +1885,10 @@ void ARHPlayerController::CancelModes()
 	bRoadMode = false;
 	bRoadDragging = false;
 	bRoadForced = false;
+	bDistrictMode = false;
+	bDistrictDragging = false;
+	bDistrictForced = false;
+	DistrictKind = NAME_None;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;

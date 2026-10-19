@@ -7646,6 +7646,685 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// C5a self-test (living-city gate 5a, 2026-10-19): DISTRICTS AND DEMAND. `-districts`.
+	// Fails loudly. The fixture is the -surfacehab recipe: a Lander (30 m of coverage) and a
+	// Pylon (40 m), a shaft to -2 whose floor -1 rates, and a rated four-bay surface network
+	// (two 2x1 shells edge to edge) beside a lone shell that straddles a district edge, with
+	// eight colonists - four on floor -1, two in each of the network's shells. The checks:
+	//  (a) paint (a rectangle of 10 m lattice cells, or a whole floor): a new district; the
+	//      same Kind joins the one it overlaps and keeps its Id; adjacent is not overlapping;
+	//      another Kind is refused; a rectangle over two districts is refused; the 32 x 32
+	//      cap; every cell inside coverage; nothing new to paint; the floor rules;
+	//  (b) erase and rename: Ids are never reused; names are trimmed, capped at 32, never
+	//      empty, and "Gale" and "gale" stay two names; names are a pure function of the Id,
+	//      with the "II" / "III" suffix once the forty are used;
+	//  (c) membership of buildings, bays, underground cells and colonists, with a habitat
+	//      that spans a district edge belonging to ONE district (its bay-0 cell);
+	//  (d) each demand term on constructed cases, Housing against GetImmigrationCount's own
+	//      room limits and the Big Arrival's free-bed gate, before and after the vault;
+	//  (e) a save/load round trip, a queued RenameDistrict keeping its Text, queued orders
+	//      keeping distinct CommandIds, and the cancel that now takes the order it names;
+	//  (f) the derived caches are never stale; a colony that paints nothing is untouched.
+	if (FParse::Param(*Params, TEXT("districts")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISTRICTS TEST (C5a, 2026-10-19) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DISTRICTS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DISTRICTS FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		const FName NHomes(TEXT("Homes")), NIndustry(TEXT("Industry")), NFarming(TEXT("Farming")), NResearch(TEXT("Research")), NCivic(TEXT("Civic"));
+		const FName NOx(TEXT("Oxygen")), NFood(TEXT("Food"));
+		FString Why, R, Note;
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const auto Land = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto RunSols = [&](double Sols)
+		{
+			for (int32 S = 0; S < (int32)(Sols * SolLen / EraDt); ++S)
+			{
+				Sim->Debug_AddFreshWater(500.0 * EraDt / SolLen);
+				Land();
+			}
+		};
+		// One order, one era step (the 60 s step covers the 45 s order lag). True when it was not rejected.
+		const auto Send = [&](const FRHCommand& C)
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(C);
+			Land();
+			Note = Rejects.Num() == R0 ? FString(TEXT("accepted")) : Rejects.Last();
+			return Rejects.Num() == R0;
+		};
+		const auto PaintCmd = [](FName Kind, int32 X1, int32 Y1, int32 X2, int32 Y2, int32 Level = 0)
+		{
+			FRHCommand C;
+			C.Verb = FName("PaintDistrict");
+			C.Target = Kind;
+			C.Level = Level;
+			C.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X1, Y1));
+			C.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X2, Y2));
+			return C;
+		};
+		const auto FloorCmd = [&](FName Kind, int32 Level) { return PaintCmd(Kind, 0, 0, 0, 0, Level); };
+		const auto EraseCmd = [](int32 Id) { FRHCommand C; C.Verb = FName("EraseDistrict"); C.Value = (double)Id; return C; };
+		const auto RenameCmd = [](int32 Id, const FString& Name) { FRHCommand C; C.Verb = FName("RenameDistrict"); C.Value = (double)Id; C.Text = Name; return C; };
+		const auto Paint = [&](FName Kind, int32 X1, int32 Y1, int32 X2, int32 Y2) { return Send(PaintCmd(Kind, X1, Y1, X2, Y2)); };
+		const auto CanPaint = [&](FName Kind, int32 X1, int32 Y1, int32 X2, int32 Y2, FString& Out, FRHDistrictPaintPreview* Pre = nullptr)
+		{
+			Out.Reset();
+			return Sim->CanPaintDistrict(Kind, 0, URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X1, Y1)), URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X2, Y2)), Out, Pre);
+		};
+		const auto LatticeEq = [](const FIntPoint& P, int32 X, int32 Y) { return P.X == X && P.Y == Y; };
+		const auto Find = [&](int32 Id) { return Sim->FindDistrict(Id); };
+		const auto FirstOf = [&](const TCHAR* Def)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName(Def)) { return B.Id; } }
+			return 0;
+		};
+		const auto NameOf = [&](int32 Id) { const FRHDistrict* D = Sim->FindDistrict(Id); return D ? D->Name : FString(); };
+		const auto IdOf = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName(Def) && B.Level == Level && FMath::Abs(B.LocationCm.X - X) < 1.0 && FMath::Abs(B.LocationCm.Y - Y) < 1.0) { return B.Id; }
+			}
+			return 0;
+		};
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return IdOf(Def, X, Y, Level);
+		};
+		const auto MixBytes = [](uint32& H, const void* P, int32 Bytes) { H = FCrc::MemCrc32(P, Bytes, H); };
+		const auto MixI = [&MixBytes](uint32& H, int32 V) { MixBytes(H, &V, 4); };
+		const auto MixS = [&MixBytes](uint32& H, const FString& S) { MixBytes(H, *S, S.Len() * (int32)sizeof(TCHAR)); }; // case-sensitive, unlike the string CRCs
+		const auto DistrictDigest = [&]() -> uint32
+		{
+			uint32 H = 0;
+			MixI(H, Sim->GetNextDistrictId());
+			for (const FRHDistrict& D : Sim->GetDistricts())
+			{
+				MixI(H, D.Id); MixS(H, D.Kind.ToString()); MixS(H, D.Name); MixI(H, D.RegionId); MixI(H, D.Level);
+				MixI(H, D.Lattice.Num());
+				for (const FIntPoint& P : D.Lattice) { MixI(H, P.X); MixI(H, P.Y); }
+			}
+			return H;
+		};
+		const auto SortedUnique = [](const TArray<FIntPoint>& L)
+		{
+			for (int32 i = 1; i < L.Num(); ++i)
+			{
+				if (!(L[i - 1].X < L[i].X || (L[i - 1].X == L[i].X && L[i - 1].Y < L[i].Y))) { return false; }
+			}
+			return true;
+		};
+		const auto CountsOf = [&](int32 Id) -> FRHDistrictCounts
+		{
+			TArray<FRHDistrictCounts> All;
+			Sim->GetDistrictCounts(All);
+			for (const FRHDistrictCounts& C : All) { if (C.DistrictId == Id) { return C; } }
+			return FRHDistrictCounts();
+		};
+
+		// --- D0. A colony that paints nothing: inert. ---
+		{
+			TArray<FRHDistrictCounts> Counts;
+			Sim->GetDistrictCounts(Counts);
+			const FRHCityDemand Idle = Sim->GetCityDemand();
+			Expect(Sim->GetDistricts().Num() == 0 && Sim->GetNextDistrictId() == 1 && Counts.Num() == 0 && Sim->GetDistrictOfBuilding(1) == 0
+				&& Sim->GetDistrictAtCell(FIntPoint(0, 0)) == 0 && Sim->GetDistrictOfFloor(-1) == 0 && Sim->FindDistrict(1) == nullptr && Sim->Debug_DistrictCachesFresh(),
+				TEXT("D0 a fresh colony has no districts, no counts and no membership; Id 1 is next"));
+			Expect(Idle.Population == 0 && Near(Idle.Housing, 0.0, 0.0) && Near(Idle.Jobs, 0.0, 0.0) && Near(Idle.Services, 0.0, 0.0) && Near(Idle.Air, 0.0, 0.0)
+				&& Idle.HousingBedsShort == 0 && Idle.ServiceGaps.Num() == 0 && Idle.HousingLimit.IsNone(),
+				TEXT("D0 with nobody here the city wants nothing: every demand reads 0"));
+			Send([&] { FRHCommand C; C.Verb = FName("Frobnicate"); return C; }());
+			Expect(Note.Contains(TEXT("Unknown order")) && Note.Contains(TEXT("Frobnicate")), FString::Printf(TEXT("D0 an order no worker knows is refused, never executed (%s)"), *Note));
+			Expect(LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(0, 0, 0)), 0, 0) && LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(499.9, 0, 0)), 0, 0)
+				&& LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(500.0, 0, 0)), 1, 0) && LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(-500.0, 0, 0)), 0, 0)
+				&& LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(-501.0, -1500.0, 0)), -1, -1) && LatticeEq(URHSimWorldSubsystem::LatticeOf(FVector(3000.0, -1000.0, 0)), 3, -1),
+				TEXT("D0 a lattice cell spans [10k - 5, 10k + 5) m: the habitat bays' own half-open floor"));
+		}
+
+		// --- D1. Names: a pure function of the Id. ---
+		{
+			const int32 Count = RHDistricts::GetNameCount();
+			TSet<FString> Distinct;
+			for (int32 Id = 1; Id <= Count; ++Id) { Distinct.Add(RHDistricts::NameForId(Id)); }
+			Expect(Count == 40 && Distinct.Num() == 40 && RHDistricts::NameForId(1) == TEXT("Gale") && RHDistricts::NameForId(2) == TEXT("Jezero")
+				&& RHDistricts::NameForId(3) == TEXT("Holden") && RHDistricts::NameForId(40) == TEXT("Protonilus"),
+				FString::Printf(TEXT("D1 forty distinct Martian place names, walked by Id (1 %s, 2 %s, 40 %s)"), *RHDistricts::NameForId(1), *RHDistricts::NameForId(2), *RHDistricts::NameForId(40)));
+			Expect(RHDistricts::NameForId(41) == TEXT("Gale II") && RHDistricts::NameForId(42) == TEXT("Jezero II") && RHDistricts::NameForId(80) == TEXT("Protonilus II")
+				&& RHDistricts::NameForId(81) == TEXT("Gale III") && RHDistricts::NameForId(121) == TEXT("Gale IV") && RHDistricts::NameForId(161) == TEXT("Gale V")
+				&& RHDistricts::NameForId(361) == TEXT("Gale X") && RHDistricts::NameForId(481) == TEXT("Gale XIII"),
+				FString::Printf(TEXT("D1 after the forty the walk starts again with a roman suffix (41 %s, 81 %s, 121 %s, 361 %s)"), *RHDistricts::NameForId(41), *RHDistricts::NameForId(81), *RHDistricts::NameForId(121), *RHDistricts::NameForId(361)));
+			Expect(RHDistricts::RomanSuffix(1).IsEmpty() && RHDistricts::RomanSuffix(0).IsEmpty() && RHDistricts::RomanSuffix(2) == TEXT("II") && RHDistricts::RomanSuffix(4) == TEXT("IV")
+				&& RHDistricts::RomanSuffix(9) == TEXT("IX") && RHDistricts::RomanSuffix(14) == TEXT("XIV") && RHDistricts::RomanSuffix(40) == TEXT("XL") && RHDistricts::RomanSuffix(90) == TEXT("XC")
+				&& RHDistricts::RomanSuffix(1994) == TEXT("MCMXCIV") && RHDistricts::RomanSuffix(3999) == TEXT("MMMCMXCIX") && RHDistricts::RomanSuffix(4000).IsEmpty(),
+				TEXT("D1 the suffix is a roman numeral from II (none for 1, none past 3999)"));
+			Expect(RHDistricts::NameForId(7) == RHDistricts::NameForId(7) && RHDistricts::NameForId(1000) == RHDistricts::NameForId(1000) && RHDistricts::NameForId(0) == TEXT("Gale"),
+				TEXT("D1 the same Id is always the same name"));
+			const TArray<FName>& Kinds = RHDistricts::GetKinds();
+			Expect(Kinds.Num() == 5 && RHDistricts::ResolveKind(NHomes) == NHomes && RHDistricts::ResolveKind(NCivic) == NCivic && RHDistricts::ResolveKind(FName("Mining")).IsNone()
+				&& RHDistricts::ResolveKind(NAME_None).IsNone(), TEXT("D1 five kinds: Homes, Industry, Farming, Research, Civic; anything else is none"));
+		}
+
+		// --- D2. Painting the surface. Only the Lander (30 m of coverage) stands. ---
+		{
+			FRHDistrictPaintPreview Pre;
+			// The ghost before the order: it is a preflight, it changes nothing.
+			Expect(CanPaint(NHomes, -2, -2, 2, 2, Why, &Pre) && Pre.CellsInRect == 25 && Pre.CellsNew == 25 && Pre.CellsOutside == 0 && Pre.JoinId == 0 && Pre.Min == FIntPoint(-2, -2) && Pre.Max == FIntPoint(2, 2),
+				FString::Printf(TEXT("D2 the preflight for a 5 x 5 rectangle round the Lander: 25 cells, all new, none outside (%s)"), *Why));
+			const FRHCommand First = PaintCmd(NHomes, 2, 2, -2, -2); // corners in either order
+			Sim->EnqueueCommand(First);
+			Expect(Sim->GetDistricts().Num() == 0, TEXT("D2 the order is in flight: nothing painted until the signal lands"));
+			Land();
+			const FRHDistrict* D1 = Find(1);
+			Expect(Sim->GetDistricts().Num() == 1 && D1 && D1->Kind == NHomes && D1->Level == 0 && D1->RegionId == 0 && D1->Lattice.Num() == 25 && SortedUnique(D1->Lattice)
+				&& D1->Name == TEXT("Gale") && Sim->GetNextDistrictId() == 2,
+				TEXT("D2 the order lands: district #1 'Gale', Homes, 25 sorted cells, region 0, surface"));
+			Expect(Sim->GetDistrictAtCell(FIntPoint(0, 0)) == 1 && Sim->GetDistrictAtCell(FIntPoint(-2, 2)) == 1 && Sim->GetDistrictAtCell(FIntPoint(3, 0)) == 0
+				&& Sim->GetDistrictAtPoint(0, FVector(0, 0, 0)) == 1 && Sim->GetDistrictAtPoint(0, FVector(1999, 0, 0)) == 1 && Sim->GetDistrictAtPoint(0, FVector(2501, 0, 0)) == 0,
+				TEXT("D2 the ground reads back: cell (0,0) and (-2,2) are #1, (3,0) is open"));
+			// The same Kind joins the district it overlaps, and keeps its Id.
+			Expect(CanPaint(NHomes, 2, 0, 3, 0, Why, &Pre) && Pre.JoinId == 1 && Pre.CellsNew == 1 && Pre.CellsInRect == 2, TEXT("D2 painting Homes over its own edge: the preview says it joins #1 with one new cell"));
+			Expect(Paint(NHomes, 2, 0, 3, 0) && Sim->GetDistricts().Num() == 1 && Find(1) && Find(1)->Lattice.Num() == 26 && SortedUnique(Find(1)->Lattice) && Sim->GetDistrictAtCell(FIntPoint(3, 0)) == 1
+				&& Sim->GetNextDistrictId() == 2, FString::Printf(TEXT("D2 same Kind joins: still one district (#1 keeps its Id), now 26 cells (%s)"), *Note));
+			// Adjacent is not overlapping: it founds its own district.
+			Expect(Paint(NHomes, 0, 3, 0, 3) && Sim->GetDistricts().Num() == 2 && Find(2) && Find(2)->Kind == NHomes && Find(2)->Lattice.Num() == 1 && Find(2)->Name == TEXT("Jezero")
+				&& Sim->GetDistrictAtCell(FIntPoint(0, 3)) == 2, FString::Printf(TEXT("D2 a Homes cell that only touches #1 founds #2 'Jezero' (%s)"), *Note));
+			// Another Kind over it: refused, with the reason, and at the seam too.
+			Expect(!CanPaint(NIndustry, 1, 1, 1, 1, Why) && Why.Contains(TEXT("Homes")) && Why.Contains(TEXT("Gale")), FString::Printf(TEXT("D2 the preflight refuses Industry over Homes (%s)"), *Why));
+			Expect(!Paint(NIndustry, 1, 1, 1, 1) && Note.Contains(TEXT("Homes")) && Sim->GetDistricts().Num() == 2 && Find(1)->Kind == NHomes && Find(1)->Lattice.Num() == 26,
+				FString::Printf(TEXT("D2 the uplink refuses it too, naming the district (%s); #1 is untouched"), *Note));
+			// Two districts under one rectangle: refused.
+			Expect(!CanPaint(NHomes, 0, 2, 0, 3, Why) && Why.Contains(TEXT("two districts")) && Why.Contains(TEXT("Gale")) && Why.Contains(TEXT("Jezero")),
+				FString::Printf(TEXT("D2 a rectangle over #1 and #2 is refused, even of their own Kind (%s)"), *Why));
+			Expect(!Paint(NHomes, 0, 2, 0, 3) && Note.Contains(TEXT("two districts")) && Sim->GetDistricts().Num() == 2, FString::Printf(TEXT("D2 the uplink refuses it too (%s)"), *Note));
+			// Nothing new to paint.
+			Expect(!CanPaint(NHomes, -1, -1, 1, 1, Why, &Pre) && Why.Contains(TEXT("already part of Gale")) && Pre.CellsNew == 0 && Pre.JoinId == 1, FString::Printf(TEXT("D2 painting ground a district already holds is refused (%s)"), *Why));
+			// The cap: 32 x 32 cells an order.
+			Expect(!CanPaint(NHomes, 10, 10, 42, 42, Why, &Pre) && Why.Contains(TEXT("at a time")) && Pre.CellsInRect == 0, FString::Printf(TEXT("D2 33 x 33 is over the cap (%s)"), *Why));
+			Expect(!CanPaint(NHomes, 0, 10, 32, 10, Why) && Why.Contains(TEXT("at a time")) && !CanPaint(NHomes, 0, 10, 0, 42, Why) && Why.Contains(TEXT("at a time")),
+				TEXT("D2 33 x 1 and 1 x 33 are over the cap too"));
+			Expect(!CanPaint(NHomes, 10, 10, 41, 41, Why, &Pre) && !Why.Contains(TEXT("at a time")) && Why.Contains(TEXT("coverage")) && Pre.CellsInRect == 1024 && Pre.CellsOutside == 1024,
+				FString::Printf(TEXT("D2 32 x 32 is within the cap (1,024 cells) and fails on coverage instead (%s)"), *Why));
+			Expect(!Paint(NHomes, 0, 10, 32, 10) && Note.Contains(TEXT("at a time")), TEXT("D2 the uplink applies the cap too"));
+			// Coverage: every cell's centre inside the grid's reach.
+			Expect(!CanPaint(NIndustry, 4, 0, 4, 0, Why, &Pre) && Why.Contains(TEXT("coverage")) && Pre.CellsOutside == 1 && Pre.CellsInRect == 1,
+				FString::Printf(TEXT("D2 one cell 40 m out is past the Lander's 30 m (%s)"), *Why));
+			Expect(!CanPaint(NHomes, 3, 3, 3, 3, Why) && Why.Contains(TEXT("coverage")), TEXT("D2 the corner (3,3) is 42 m out: refused on coverage"));
+			Expect(!Paint(NIndustry, 4, 0, 4, 0) && Note.Contains(TEXT("coverage")) && Sim->GetDistricts().Num() == 2, FString::Printf(TEXT("D2 the uplink refuses it on coverage too (%s)"), *Note));
+			Place(TEXT("Pylon"), 5000, 0); // 40 m of reach about (50, 0) m
+			Expect(CanPaint(NIndustry, 4, -1, 5, 1, Why, &Pre) && Pre.CellsOutside == 0 && Pre.CellsNew == 6, FString::Printf(TEXT("D2 a Pylon at (50, 0) m covers the ground round it (%s)"), *Why));
+			Expect(Paint(NIndustry, 4, -1, 5, 1) && Find(3) && Find(3)->Kind == NIndustry && Find(3)->Lattice.Num() == 6 && Find(3)->Name == TEXT("Holden") && Sim->GetDistricts().Num() == 3,
+				FString::Printf(TEXT("D2 Industry founds #3 'Holden': 6 cells (%s)"), *Note));
+			// A kind that does not exist, and a floor that does not.
+			Expect(!Paint(FName("Mining"), -1, -1, -1, -1) && Note.Contains(TEXT("not a district kind")) && !Sim->CanPaintDistrict(NHomes, 1, FVector::ZeroVector, FVector::ZeroVector, Why) && Why.Contains(TEXT("No such floor")),
+				TEXT("D2 a sixth kind and a floor above the surface are refused"));
+			Expect(Sim->GetDistricts().Num() == 3 && Sim->GetNextDistrictId() == 4, TEXT("D2 three districts so far; refusals consumed no Id"));
+		}
+
+		// --- D3. Erase, Ids never reused, rename. ---
+		{
+			Expect(!Send(EraseCmd(99)) && Note.Contains(TEXT("No such district")) && Sim->GetDistricts().Num() == 3, FString::Printf(TEXT("D3 erasing a district that is not there is refused (%s)"), *Note));
+			Expect(Send(EraseCmd(2)) && Sim->GetDistricts().Num() == 2 && Find(2) == nullptr && Sim->GetDistrictAtCell(FIntPoint(0, 3)) == 0 && Find(1) && Find(3),
+				FString::Printf(TEXT("D3 EraseDistrict #2: it and its ground are gone, #1 and #3 stand (%s)"), *Note));
+			Expect(Paint(NCivic, 0, 3, 0, 3) && Find(4) && Find(4)->Name == TEXT("Eberswalde") && Find(4)->Kind == NCivic && Find(2) == nullptr && Sim->GetNextDistrictId() == 5,
+				TEXT("D3 the next district is #4 'Eberswalde': an erased Id (#2) is never reused"));
+			// Rename.
+			Expect(Send(RenameCmd(1, TEXT("  Olympus Mons  "))) && NameOf(1) == TEXT("Olympus Mons"), FString::Printf(TEXT("D3 rename trims: '%s'"), *NameOf(1)));
+			const FString Forty = TEXT("ABCDEFGHIJabcdefghijABCDEFGHIJabcdefghij"); // 40 characters
+			Expect(Send(RenameCmd(3, Forty)) && NameOf(3).Len() == 32 && NameOf(3) == Forty.Left(32), FString::Printf(TEXT("D3 rename caps at 32 characters: '%s'"), *NameOf(3)));
+			Expect(Send(RenameCmd(3, TEXT("   ") + Forty + TEXT("   "))) && NameOf(3) == Forty.Left(32), FString::Printf(TEXT("D3 the trim comes before the cap: spaces round a 40-character name cost it nothing ('%s')"), *NameOf(3)));
+			Expect(Send(RenameCmd(3, TEXT("Thirty-one-characters-no-spaces tail"))) && NameOf(3) == TEXT("Thirty-one-characters-no-spaces") && NameOf(3).Len() == 31,
+				FString::Printf(TEXT("D3 a cut that lands on a space is trimmed again, never a trailing space ('%s')"), *NameOf(3)));
+			const FString Before = NameOf(1);
+			Expect(!Send(RenameCmd(1, TEXT("   "))) && Note.Contains(TEXT("cannot be empty")) && NameOf(1) == Before, FString::Printf(TEXT("D3 an empty name is refused and the old one stays (%s)"), *Note));
+			Expect(!Send(RenameCmd(1, FString())) && NameOf(1) == Before && !Send(RenameCmd(77, TEXT("Nowhere"))) && Note.Contains(TEXT("No such district")), TEXT("D3 a blank name and an unknown district are refused"));
+			Expect(Send(RenameCmd(4, TEXT("Hel\nlo\tWorld"))) && NameOf(4) == TEXT("HelloWorld"), FString::Printf(TEXT("D3 control characters are dropped, so a name stays on one line ('%s')"), *NameOf(4)));
+			// Case: two names that differ only by case stay two names (an FName would fold them).
+			Expect(Send(RenameCmd(1, TEXT("gale"))) && Send(RenameCmd(3, TEXT("GALE"))) && Send(RenameCmd(4, TEXT("Gale"))),
+				TEXT("D3 three renames: gale, GALE and Gale"));
+			const FString N1 = NameOf(1), N3 = NameOf(3), N4 = NameOf(4);
+			Expect(N1 == TEXT("gale") && N3 == TEXT("GALE") && N4 == TEXT("Gale") && !N1.Equals(N3, ESearchCase::CaseSensitive) && !N1.Equals(N4, ESearchCase::CaseSensitive)
+				&& !N3.Equals(N4, ESearchCase::CaseSensitive) && FName(*N1) == FName(*N3), // the last term is the trap: as FNames they are the same
+				FString::Printf(TEXT("D3 names that differ only by case stay distinct as typed: '%s' '%s' '%s'"), *N1, *N3, *N4));
+			Send(RenameCmd(1, TEXT("Gale"))); Send(RenameCmd(3, TEXT("Holden"))); Send(RenameCmd(4, TEXT("Eberswalde")));
+			Expect(NameOf(1) == TEXT("Gale") && NameOf(3) == TEXT("Holden") && NameOf(4) == TEXT("Eberswalde"), TEXT("D3 renamed back to the generated names (duplicates would be allowed; these are not)"));
+			Expect(!Send(FloorCmd(NHomes, -1)) && Note.Contains(TEXT("not reached")) && Sim->GetDistricts().Num() == 3, FString::Printf(TEXT("D3 a floor the shaft has not reached is refused (%s)"), *Note));
+		}
+
+		// --- Setup: power, stock, a shaft to -2, floor -1 rated, a rated four-bay network, a lone shell, eight colonists. ---
+		const FVector Head(1000.f, 1000.f, 0.f);
+		Place(TEXT("SolarArray"), 3500, 1000);   // lattice (4, 1): inside Industry #3
+		Place(TEXT("SolarArray"), 3500, 2000);   // lattice (4, 2): open ground
+		Place(TEXT("BatteryBank"), 1000, 3500);  // lattice (1, 4): open ground
+		const int32 ForgeId = Place(TEXT("Forge"), 0, 1000); // lattice (0, 1): inside Homes #1
+		Sim->AddStock(FName("Struct"), 5000.0);
+		Sim->AddStock(NOx, 6000.0);
+		Sim->AddStock(FName("Water"), 4000.0);
+		Sim->AddStock(NFood, 6000.0);
+		Sim->Debug_SetBigArrivalDone(true); // out of the way until the Housing cases bring it back
+		Sim->ExtendShaft(2, Head);
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->ExcavateFloor(-2, 3, R);
+		const int32 FloorFilter = Place(TEXT("AirFilter"), 1000, 1500, 1, 1, -1);
+		const int32 Hab1 = Place(TEXT("HabModule"), 3500, 0, 2, 1);      // bays (3,0) and (4,0): bay 0 in Homes #1, bay 1 in Industry #3
+		const int32 Hab3 = Place(TEXT("HabModule"), 3500, -1000, 2, 1);  // bays (3,-1) and (4,-1): bay 0 in open ground, bay 1 in Industry #3
+		const int32 Hab4 = Place(TEXT("HabModule"), 5500, 1000, 2, 1);   // bays (5,1) and (6,1): bay 0 in Industry #3, bay 1 in open ground; alone, so never rated
+		const int32 HabFilter = Place(TEXT("AirFilter"), 3000, 0);       // inside Hab1's bay 0
+		Expect(ForgeId && FloorFilter && Hab1 && Hab3 && Hab4 && HabFilter, TEXT("setup: the Forge, the floor filter, three shells and a surface filter placed"));
+		RunSols(3.0);
+		Expect(Sim->IsFloorRated(-1) && Sim->HasVaultRating() && Sim->IsHabRated(Hab1) && Sim->IsHabRated(Hab3) && !Sim->IsHabRated(Hab4) && Sim->GetHabNetworkBays(Hab1) == 4,
+			FString::Printf(TEXT("setup: floor -1 rated, the vault certified, Hab1 and Hab3 one rated network of %d bays, Hab4 alone and unrated"), Sim->GetHabNetworkBays(Hab1)));
+		for (int32 Cell = 0; Cell < 4; ++Cell) { Sim->DesignateRoom(-1, Cell, FName("LivingQuarters"), R); }
+		for (const int32 H : { Hab1, Hab3 }) { for (int32 Bay = 0; Bay < 2; ++Bay) { Sim->DesignateBay(H, Bay, FName("LivingQuarters"), R); } }
+		Expect(Sim->GetHousingCapacity() == 8 && Sim->GetHousingComfortCapacity() == 8, FString::Printf(TEXT("setup: 8 certified beds (4 on floor -1, 2 + 2 in the network): capacity %d, comfort %d"), Sim->GetHousingCapacity(), Sim->GetHousingComfortCapacity()));
+		Expect(Sim->Debug_AddColonists(8) == 8, TEXT("setup: eight colonists housed"));
+		{
+			int32 OnFloor = 0, InHab1 = 0, InHab3 = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { OnFloor += C.HomeLevel == -1 ? 1 : 0; InHab1 += C.HomeHab == Hab1 ? 1 : 0; InHab3 += C.HomeHab == Hab3 ? 1 : 0; }
+			Expect(OnFloor == 4 && InHab1 == 2 && InHab3 == 2, FString::Printf(TEXT("setup: floors fill first - %d on floor -1, %d in Hab1, %d in Hab3"), OnFloor, InHab1, InHab3));
+		}
+		Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+
+		// --- D4. Floors: a whole floor is a district. ---
+		{
+			Expect(!Send(FloorCmd(NHomes, -3)) && Note.Contains(TEXT("not reached")) && !Sim->CanPaintDistrict(NHomes, -6, FVector::ZeroVector, FVector::ZeroVector, Why) && Why.Contains(TEXT("No such floor")),
+				TEXT("D4 floor -3 is not reached by the shaft, floor -6 does not exist: both refused"));
+			FRHDistrictPaintPreview Pre;
+			Expect(Sim->CanPaintDistrict(NHomes, -1, FVector(9.0e6, 9.0e6, 0.0), FVector(-9.0e6, 9.0e6, 0.0), Why, &Pre) && Pre.bFloor && Pre.JoinId == 0,
+				TEXT("D4 a floor order ignores the rectangle and the coverage rule entirely"));
+			Expect(Send(FloorCmd(NHomes, -1)) && Find(5) && Find(5)->IsFloor() && Find(5)->Level == -1 && Find(5)->Lattice.Num() == 0 && Find(5)->Kind == NHomes
+				&& Find(5)->Name == TEXT("Gusev") && Sim->GetDistrictOfFloor(-1) == 5, FString::Printf(TEXT("D4 floor -1 becomes Homes #5 'Gusev' (%s)"), *Note));
+			Expect(!Send(FloorCmd(NHomes, -1)) && Note.Contains(TEXT("already")) && !Send(FloorCmd(NIndustry, -1)) && Note.Contains(TEXT("erase it first")) && Sim->GetDistricts().Num() == 4,
+				FString::Printf(TEXT("D4 a floor holds one district: Homes again is 'already', Industry is 'erase it first' (%s)"), *Note));
+			Expect(Send(FloorCmd(NResearch, -2)) && Find(6) && Find(6)->Level == -2 && Find(6)->Kind == NResearch && Sim->GetDistrictOfFloor(-2) == 6 && Sim->GetDistrictOfFloor(-3) == 0,
+				TEXT("D4 floor -2 becomes Research #6"));
+			Expect(Sim->GetDistrictOfCell(-1, 0) == 5 && Sim->GetDistrictOfCell(-1, 3) == 5 && Sim->GetDistrictOfCell(-2, 2) == 6 && Sim->GetDistrictOfCell(-3, 0) == 0
+				&& Sim->GetDistrictOfCell(-1, -1) == 0 && Sim->GetDistrictAtPoint(-1, FVector(123456, 0, 0)) == 5 && Sim->GetDistrictAtPoint(0, FVector(123456, 0, 0)) == 0,
+				TEXT("D4 an underground cell belongs to its floor's district (and no cell belongs to a floor with none)"));
+			Expect(Sim->GetDistricts().Num() == 5 && Sim->GetDistricts()[0].Id == 1 && Sim->GetDistricts()[1].Id == 3 && Sim->GetDistricts()[2].Id == 4 && Sim->GetDistricts()[3].Id == 5 && Sim->GetDistricts()[4].Id == 6,
+				TEXT("D4 the list stays in ascending Id order"));
+		}
+
+		// --- D5. Membership: buildings, bays, cells, colonists. One district per building. ---
+		{
+			Expect(Sim->GetDistrictOfBuilding(ForgeId) == 1 && Sim->GetDistrictOfBuilding(FirstOf(TEXT("Lander"))) == 1 && Sim->GetDistrictOfBuilding(IdOf(TEXT("Pylon"), 5000, 0)) == 3
+				&& Sim->GetDistrictOfBuilding(IdOf(TEXT("SolarArray"), 3500, 1000)) == 3 && Sim->GetDistrictOfBuilding(IdOf(TEXT("SolarArray"), 3500, 2000)) == 0 && Sim->GetDistrictOfBuilding(IdOf(TEXT("BatteryBank"), 1000, 3500)) == 0
+				&& Sim->GetDistrictOfBuilding(FloorFilter) == 5 && Sim->GetDistrictOfBuilding(9999) == 0,
+				TEXT("D5 a building belongs to the district holding its footprint centre: the Forge and the Lander #1, the Pylon and a solar array #3, open ground none; a building underground its floor's (#5)"));
+			Expect(Sim->GetDistrictOfBuilding(Hab1) == 1 && Sim->GetDistrictOfBay(Hab1, 0) == 1 && Sim->GetDistrictOfBay(Hab1, 1) == 1 && Sim->GetDistrictAtCell(FIntPoint(4, 0)) == 3,
+				TEXT("D5 Hab1 has bay 0 in Homes #1 and bay 1 over Industry #3's ground: both bays are #1's, the shell is never split"));
+			Expect(Sim->GetDistrictOfBuilding(Hab3) == 0 && Sim->GetDistrictOfBay(Hab3, 0) == 0 && Sim->GetDistrictOfBay(Hab3, 1) == 0 && Sim->GetDistrictAtCell(FIntPoint(4, -1)) == 3,
+				TEXT("D5 Hab3 has bay 0 on open ground and bay 1 inside Industry #3: its anchor is bay 0, so both bays are in no district"));
+			Expect(Sim->GetDistrictOfBuilding(Hab4) == 3 && Sim->GetDistrictOfBay(Hab4, 0) == 3 && Sim->GetDistrictOfBay(Hab4, 1) == 3 && Sim->GetDistrictAtCell(FIntPoint(6, 1)) == 0,
+				TEXT("D5 Hab4 has bay 0 in Industry #3 and bay 1 on open ground: both bays are #3's"));
+			Expect(Sim->GetDistrictOfBuilding(HabFilter) == 1, TEXT("D5 a filter inside Hab1's bay 0 belongs to its own footprint cell (#1)"));
+			// Colonists: their home's district.
+			int32 OnFloor = 0, InHab1 = 0, InHab3 = 0, Elsewhere = 0;
+			bool bHomesMatch = true;
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				const int32 D = Sim->GetDistrictOfColonist(C.Id);
+				if (C.HomeHab == 0) { OnFloor += D == 5 ? 1 : 0; bHomesMatch &= D == Sim->GetDistrictOfFloor(C.HomeLevel); }
+				else if (C.HomeHab == Hab1) { InHab1 += D == 1 ? 1 : 0; }
+				else if (C.HomeHab == Hab3) { InHab3 += D == 0 ? 1 : 0; }
+				else { ++Elsewhere; }
+			}
+			Expect(OnFloor == 4 && InHab1 == 2 && InHab3 == 2 && Elsewhere == 0 && bHomesMatch && Sim->GetDistrictOfColonist(0) == 0 && Sim->GetDistrictOfColonist(9999) == 0,
+				FString::Printf(TEXT("D5 a colonist belongs to their home's district: %d on floor -1 (#5), %d in Hab1 (#1), %d in Hab3 (none)"), OnFloor, InHab1, InHab3));
+			// The counts, checked against an independent walk.
+			const FRHDistrictCounts C1 = CountsOf(1), C3 = CountsOf(3), C5 = CountsOf(5), C6 = CountsOf(6);
+			int32 BuildingsIn1 = 0, BuildingsIn3 = 0, BuildingsIn5 = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				const int32 D = Sim->GetDistrictOfBuilding(B.Id);
+				BuildingsIn1 += D == 1 ? 1 : 0; BuildingsIn3 += D == 3 ? 1 : 0; BuildingsIn5 += D == 5 ? 1 : 0;
+			}
+			Expect(C1.Buildings == BuildingsIn1 && C1.Buildings == 4 && C1.Bays == 2 && C1.Residents == 2 && C1.Beds == Sim->GetHabBeds(Hab1) && C1.Beds == 2 && C1.Cells == 26 && C1.Seats == 0,
+				FString::Printf(TEXT("D5 Gale: %d buildings (Lander, Forge, Hab1, its filter), %d bays, %d residents, %d beds, %d cells"), C1.Buildings, C1.Bays, C1.Residents, C1.Beds, C1.Cells));
+			Expect(C3.Buildings == BuildingsIn3 && C3.Buildings == 3 && C3.Bays == 2 && C3.Residents == 0 && C3.Beds == 0 && C3.Cells == 6,
+				FString::Printf(TEXT("D5 Holden: %d buildings (Pylon, a solar array, Hab4), %d bays, no residents, no beds (Hab4 is not rated)"), C3.Buildings, C3.Bays));
+			Expect(C5.Buildings == BuildingsIn5 && C5.Buildings == 1 && C5.Residents == 4 && C5.Beds == Sim->GetFloorBeds(-1) && C5.Beds == 4 && C5.Cells == Sim->GetFloorCarvedCells(-1) && C5.Cells == 4,
+				FString::Printf(TEXT("D5 floor -1: %d building, %d residents, %d beds, %d carved cells"), C5.Buildings, C5.Residents, C5.Beds, C5.Cells));
+			Expect(C6.Cells == 3 && C6.Residents == 0 && C6.Beds == 0 && C6.Seats == 0 && C6.Buildings == 0, TEXT("D5 floor -2 (not rated): 3 carved cells, nothing else"));
+			int32 ResidentsInDistricts = 0, BedsInDistricts = 0;
+			TArray<FRHDistrictCounts> All;
+			Sim->GetDistrictCounts(All);
+			for (const FRHDistrictCounts& C : All) { ResidentsInDistricts += C.Residents; BedsInDistricts += C.Beds; }
+			Expect(All.Num() == Sim->GetDistricts().Num() && All[0].DistrictId == 1 && All.Last().DistrictId == 6 && ResidentsInDistricts == 6 && ResidentsInDistricts <= Sim->GetPopulation() && BedsInDistricts == 6 && BedsInDistricts <= Sim->GetHousingCapacity(),
+				FString::Printf(TEXT("D5 the counts come in district order and add up: %d of %d residents and %d of %d certified beds sit in districts (Hab3's two and two are in none)"), ResidentsInDistricts, Sim->GetPopulation(), BedsInDistricts, Sim->GetHousingCapacity()));
+			Expect(Sim->Debug_DistrictCachesFresh(), TEXT("D5 the membership caches match a fresh derivation"));
+		}
+
+		// --- D6. Demand: Housing. ---
+		// Hope is pinned per case; settlers' wants come from the same formula arrivals use.
+		const auto SetHope = [&](double V) { Sim->Debug_SetHopeSmoothed(V); };
+		{
+			SetHope(100.0);
+			FRHCityDemand Dm = Sim->GetCityDemand();
+			// Full: 8 people, 8 certified beds, 8 comfortable. Hope 100 draws 4 settlers.
+			Expect(Dm.Population == 8 && Dm.FreeBeds == 0 && Dm.ComfortCapacity == 8 && Dm.bVaultCertified && Dm.bSettlersDraw && Dm.SettlersWanted == Sim->GetImmigrationRaw(100.0, 8) && Dm.SettlersWanted == 4
+				&& Dm.SettlerRoom == 0 && Dm.SettlerBedsShort == 5 && Dm.HousingBedsShort == 5 && Dm.HousingBedsWanted == 5 && Dm.HousingLimit == FName("FreeBeds") && Near(Dm.Housing, 1.0, 1e-12) && !Dm.bBigArrivalPending,
+				FString::Printf(TEXT("D6 full house at Hope 100: 4 settlers wanted and the reserve bed = 5 beds short of 5, bound by the free-bed term (short %d, limit %s, bar %.2f)"), Dm.HousingBedsShort, *Dm.HousingLimit.ToString(), Dm.Housing));
+			SetHope(80.0);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.SettlersWanted == 1 && Dm.SettlersWanted == Sim->GetImmigrationRaw(80.0, 8) && Dm.bSettlersDraw && Dm.HousingBedsShort == 2 && Dm.HousingBedsWanted == 2,
+				FString::Printf(TEXT("D6 at Hope 80 a ship would bring 1: the want follows Hope (1 settler + 1 reserve = 2 beds short, %d)"), Dm.HousingBedsShort));
+			SetHope(60.0);
+			Dm = Sim->GetCityDemand();
+			Expect(!Dm.bSettlersDraw && Dm.SettlersWanted > 0 && Sim->GetImmigrationRaw(60.0, 8) == 0 && Dm.HousingBedsShort == Dm.SettlersWanted + Sim->GetImmigrationReserveBeds(),
+				FString::Printf(TEXT("D6 below the Hope minimum nobody is drawn, so the want is the small base (one Crew Pod, %d) - not the ship formula's 0"), Dm.SettlersWanted));
+			// The split is the same arithmetic as before.
+			bool bSplitSame = true;
+			for (const double Hope : { 0.0, 74.9, 75.0, 80.0, 90.0, 100.0 })
+			{
+				for (const int32 Pop : { 0, 1, 8, 50, 400 })
+				{
+					for (const int32 Free : { -3, 0, 1, 2, 9, 500 })
+					{
+						for (const int32 Comfort : { 0, 8, 12, 100, 900 })
+						{
+							const int32 Whole = Sim->GetImmigrationCount(Hope, Pop, Free, Comfort);
+							const int32 Parts = (Pop <= 0 || Free <= 0 || Hope < Sim->GetImmigrationHopeMin()) ? 0 : FMath::Min(Sim->GetImmigrationRaw(Hope, Pop), Sim->GetImmigrationRoom(Pop, Free, Comfort));
+							bSplitSame &= Whole == Parts && Whole >= 0 && Whole <= Sim->GetImmigrationCapPerShip();
+						}
+					}
+				}
+			}
+			Expect(bSplitSame && Sim->GetImmigrationRoom(8, 6, 8) == 0 && Sim->GetImmigrationRoom(8, 6, 11) == 3 && Sim->GetImmigrationRoom(8, 3, 100) == 2 && Sim->GetImmigrationRoom(8, 0, 100) == 0 && Sim->GetImmigrationRoom(8, -5, 100) == 0,
+				TEXT("D6 GetImmigrationCount is exactly min(raw, room) over 900 combinations; room is min(free - reserve, comfort - pop) floored at 0"));
+		}
+		// Room on floor -1: carve six more cells (legacy beds: a bed a cell, wherever zoned), so the floor has ten beds
+		// but only four Living cells - free beds up, comfortable room not.
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_SetFloorO2Kg(-1, 1000.0); // the new volume pressurized at once, so the floor never drops its rating (a lost rating would start the recall clock)
+		Land();
+		Expect(Sim->IsFloorRated(-1) && Sim->GetFloorCarvedCells(-1) == 10 && Sim->GetPopulation() == 8, FString::Printf(TEXT("setup: floor -1 carved to 10 cells and re-rated (pop %d)"), Sim->GetPopulation()));
+		Sim->DesignateRoom(-1, 4, FName("Workstation"), R);
+		Sim->DesignateRoom(-1, 5, FName("Lab"), R);
+		Sim->DesignateRoom(-1, 6, FName("Dining"), R);
+		Sim->DesignateRoom(-1, 7, FName("Cooking"), R);
+		Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+		{
+			SetHope(100.0);
+			FRHCityDemand Dm = Sim->GetCityDemand();
+			// 10 + 4 = 14 certified beds, 8 colonists: 6 free. Comfort is the 4 + 4 Living cells and bays: 8.
+			Expect(Dm.FreeBeds == 6 && Sim->GetFreeHousing() == 6 && Dm.ComfortCapacity == 8 && Dm.SettlersWanted == 4 && Dm.SettlerRoom == 0 && Dm.SettlerBedsShort == 4 && Dm.HousingLimit == FName("Comfort")
+				&& Dm.HousingBedsShort == 4 && Near(Dm.Housing, 4.0 / 5.0, 1e-12),
+				FString::Printf(TEXT("D6 beds to spare, comfort to want: 6 free but 0 comfortable room - 4 short, bound by the comfort term (limit %s, bar %.2f)"), *Dm.HousingLimit.ToString(), Dm.Housing));
+			Expect(Dm.SettlerBedsShort == Dm.SettlersWanted - Sim->GetImmigrationCount(100.0, Dm.Population, Dm.FreeBeds, Dm.ComfortCapacity),
+				TEXT("D6 beds short = settlers wanted - the settlers the arrival function would land (the demand IS the arrivals' own limit)"));
+			Sim->DesignateRoom(-1, 8, FName("LivingQuarters"), R);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.ComfortCapacity == 9 && Dm.SettlerRoom == 1 && Dm.SettlerBedsShort == 3 && Dm.HousingLimit == FName("Comfort") && Near(Dm.Housing, 3.0 / 5.0, 1e-12)
+				&& Dm.SettlerBedsShort == Dm.SettlersWanted - Sim->GetImmigrationCount(100.0, 8, 6, 9),
+				FString::Printf(TEXT("D6 one more Living cell: comfortable room 1 (short %d, bar %.2f); the ship would land %d"), Dm.SettlerBedsShort, Dm.Housing, Sim->GetImmigrationCount(100.0, 8, 6, 9)));
+			// Before the vault is certified surface beds count in comfort but not in the free beds.
+			Sim->Debug_SetVaultRated(false);
+			const FRHCityDemand Pre = Sim->GetCityDemand();
+			Sim->Debug_SetVaultRated(true);
+			Expect(!Pre.bVaultCertified && Pre.ComfortCapacity == Dm.ComfortCapacity && Pre.FreeBeds == Dm.FreeBeds - 4 && Pre.FreeBeds == 2 && Pre.SettlerBedsShort == 3 && Pre.HousingLimit == FName("FreeBeds") && Dm.HousingLimit == FName("Comfort"),
+				FString::Printf(TEXT("D6 before the vault: the 4 surface beds lift comfort (%d) but not the free beds (%d, was %d), so the free-bed term binds (%s); after, the comfort term does (%s)"),
+					Pre.ComfortCapacity, Pre.FreeBeds, Dm.FreeBeds, *Pre.HousingLimit.ToString(), *Dm.HousingLimit.ToString()));
+			// The Big Arrival: its gate is GetFreeHousing() >= BigArrivalFreeBeds.
+			Sim->Debug_SetBigArrivalDone(false);
+			SetHope(100.0);
+			Land();
+			SetHope(100.0);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.bBigArrivalPending && Sim->GetBigArrivalStreakSols() > 0.0 && !Sim->IsBigArrivalDone() && Dm.BigArrivalBedsShort == Sim->GetBigArrivalFreeBeds() - Sim->GetFreeHousing() && Dm.BigArrivalBedsShort == 94
+				&& Dm.HousingBedsShort == 94 && Dm.HousingBedsWanted == Sim->GetBigArrivalFreeBeds() && Dm.HousingLimit == FName("BigArrival") && Near(Dm.Housing, 0.94, 1e-12),
+				FString::Printf(TEXT("D6 the Big Arrival is pending (streak %.3f sols) and needs 100 free beds against 6: 94 short, the headline (bar %.2f, limit %s)"), Sim->GetBigArrivalStreakSols(), Dm.Housing, *Dm.HousingLimit.ToString()));
+			// Sweep the legacy beds-a-cell rate across the gate: short = max(0, 100 - free), and zero exactly when the wave could land.
+			bool bGateMatches = true;
+			int32 SawShort = 0, SawClear = 0;
+			for (int32 K = 0; K <= 80; ++K)
+			{
+				Sim->Debug_SetColonistsPerCell(6.0 + K * 0.05);
+				const FRHCityDemand Sw = Sim->GetCityDemand();
+				const bool bGate = Sim->GetFreeHousing() >= Sim->GetBigArrivalFreeBeds();
+				bGateMatches &= Sw.BigArrivalBedsShort == FMath::Max(0, Sim->GetBigArrivalFreeBeds() - Sim->GetFreeHousing()) && (Sw.BigArrivalBedsShort == 0) == bGate;
+				SawShort += Sw.BigArrivalBedsShort > 0 ? 1 : 0; SawClear += Sw.BigArrivalBedsShort == 0 ? 1 : 0;
+			}
+			Sim->Debug_SetColonistsPerCell(1.0);
+			Expect(bGateMatches && SawShort > 5 && SawClear > 5, FString::Printf(TEXT("D6 over 81 bed rates the Big Arrival term is max(0, 100 - free) and 0 exactly when its own gate opens (%d short, %d clear)"), SawShort, SawClear));
+			Sim->Debug_SetBigArrivalDone(true);
+			Dm = Sim->GetCityDemand();
+			Expect(!Dm.bBigArrivalPending && Dm.BigArrivalBedsShort == 0 && Dm.HousingBedsShort == 3, TEXT("D6 once the wave has landed it wants nothing more"));
+			// A bigger Hope draws a bigger want: sampled across the draw.
+			SetHope(100.0);
+			const int32 W100 = Sim->GetCityDemand().SettlersWanted;
+			SetHope(85.0);
+			const int32 W85 = Sim->GetCityDemand().SettlersWanted;
+			Expect(W100 > W85 && W85 > 0 && W100 == Sim->GetImmigrationRaw(100.0, 8) && W85 == Sim->GetImmigrationRaw(85.0, 8), FString::Printf(TEXT("D6 the want rises with Hope (%d at 85, %d at 100)"), W85, W100));
+		}
+
+		// --- D7. Demand: Jobs. ---
+		{
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			FRHCityDemand Dm = Sim->GetCityDemand();
+			// Two work cells (a Workstation, a Lab) = 2 seats, 8 people.
+			Expect(Dm.TotalSeats == 2 && Dm.FilledSeats == 2 && Dm.FilledSeats == Sim->GetColonyHope().FilledSeats && Dm.Unemployed == 6 && Dm.SeatsShort == 6 && Near(Dm.Jobs, 0.75, 1e-12),
+				FString::Printf(TEXT("D7 8 people, 2 seats, both filled: 6 without a seat, 6 seats short, bar %.2f"), Dm.Jobs));
+			// Lazy fill: an unstaffed seat is open but nobody has taken it yet.
+			Sim->Debug_SetLazySeatFillSols(1000.0);
+			Sim->DesignateRoom(-1, 9, FName("Workstation"), R);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.TotalSeats == 3 && Dm.FilledSeats == 2 && Dm.Unemployed == 6 && Dm.SeatsShort == 5 && Near(Dm.Jobs, 6.0 / 8.0, 1e-12),
+				FString::Printf(TEXT("D7 a third seat opens but lazy fill leaves it unstaffed: 3 seats, 2 filled - 6 idle but only 5 seats short (%d, %d)"), Dm.Unemployed, Dm.SeatsShort));
+			Sim->Debug_SetLazySeatFillSols(0.0);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.TotalSeats == 3 && Dm.FilledSeats == 3 && Dm.Unemployed == 5 && Dm.SeatsShort == 5 && Near(Dm.Jobs, 5.0 / 8.0, 1e-12),
+				FString::Printf(TEXT("D7 instant fill again: all 3 seats staffed, 5 idle, 5 short (bar %.3f)"), Dm.Jobs));
+			Expect(CountsOf(5).Seats == 3 && CountsOf(1).Seats == 0 && Dm.TotalSeats == CountsOf(5).Seats + CountsOf(1).Seats + CountsOf(3).Seats + CountsOf(6).Seats,
+				TEXT("D7 the per-district seats add up to the city's: all 3 are on floor -1"));
+		}
+
+		// --- D8. Demand: Services. ---
+		{
+			FRHCityDemand Dm = Sim->GetCityDemand();
+			// Present: Workstation (2 cells), Lab, Dining, Cooking - one room serves 25 residents, 8 people: covered in full.
+			// Absent: Garden 0.5, Greenhouse 0.5, Infirmary 0.5: a gap of 1 each.
+			TMap<FName, FRHServiceGap> ByFn;
+			for (const FRHServiceGap& G : Dm.ServiceGaps) { ByFn.Add(G.Function, G); }
+			const double WeightSum = 0.5 + 0.3 + 0.2 + 0.6 + 0.3 + 0.5 + 0.5;
+			const double Covered = 0.3 + 0.2 + 0.6 + 0.3;
+			Expect(ByFn.Num() == 7 && Dm.ServiceGaps.Num() == 7 && !ByFn.Contains(FName("Living")) && !ByFn.Contains(FName("Hallway")) && !ByFn.Contains(FName("Smoking")),
+				FString::Printf(TEXT("D8 seven service functions earn Hope (Garden, Greenhouse, Lab, Workstation, Dining, Cooking, Infirmary): %d listed; Living, Hallway and the dormant rows are not"), Dm.ServiceGaps.Num()));
+			Expect(ByFn[FName("Dining")].Rooms == 1 && Near(ByFn[FName("Dining")].Gap, 0.0, 1e-12) && ByFn[FName("Workstation")].Rooms == 2 && Near(ByFn[FName("Workstation")].Coverage, 1.0, 1e-12)
+				&& ByFn[FName("Garden")].Rooms == 0 && Near(ByFn[FName("Garden")].Gap, 1.0, 1e-12) && ByFn[FName("Infirmary")].Rooms == 0 && Near(ByFn[FName("Infirmary")].Weight, 0.5, 1e-12),
+				TEXT("D8 a function with rooms covers 8 people in full (gap 0); one with none has a gap of 1 and the weight of its first tier"));
+			Expect(Dm.ServiceGaps[0].Function == FName("Garden") && Dm.ServiceGaps[1].Function == FName("Greenhouse") && Dm.ServiceGaps[2].Function == FName("Infirmary") && Near(Dm.ServiceGaps[0].Gap, 1.0, 1e-12) && Near(Dm.ServiceGaps[3].Gap, 0.0, 1e-12),
+				FString::Printf(TEXT("D8 worst first, ties by weight then name: %s, %s, %s ..."), *Dm.ServiceGaps[0].Function.ToString(), *Dm.ServiceGaps[1].Function.ToString(), *Dm.ServiceGaps[2].Function.ToString()));
+			Expect(Near(Dm.Services, 1.0 - Covered / WeightSum, 1e-6), FString::Printf(TEXT("D8 the bar is the share of the Rooms bonus left on the table: 1 - %.1f / %.1f = %.4f (got %.4f)"), Covered, WeightSum, 1.0 - Covered / WeightSum, Dm.Services));
+			// The Hope term reads the same coverage: a function with rooms and enough of them earns its whole weight.
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			Expect(Near(Hp.Rooms, Covered * Sim->GetHopePerMoralePoint(), 1e-6), FString::Printf(TEXT("D8 and the Hope index agrees: Rooms %.3f = covered weight %.1f x %.1f"), Hp.Rooms, Covered, Sim->GetHopePerMoralePoint()));
+			// Fifty people: one room covers half of them (25 / 50).
+			Sim->Debug_SetColonistsPerCell(10.0);
+			Sim->Debug_AddColonists(42);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			TMap<FName, FRHServiceGap> ByFn50;
+			for (const FRHServiceGap& G : Dm.ServiceGaps) { ByFn50.Add(G.Function, G); }
+			Expect(Dm.Population == 50 && Near(ByFn50[FName("Dining")].Coverage, 0.5, 1e-12) && Near(ByFn50[FName("Dining")].Gap, 0.5, 1e-12) && Near(ByFn50[FName("Lab")].Coverage, 0.5, 1e-12)
+				&& Near(ByFn50[FName("Workstation")].Coverage, 1.0, 1e-12) && Near(ByFn50[FName("Garden")].Gap, 1.0, 1e-12),
+				FString::Printf(TEXT("D8 at 50 people one Dining room covers half (gap 0.5), two Workstation rooms all; a missing Garden stays at 1 (pop %d)"), Dm.Population));
+			const double Covered50 = 0.5 * 0.3 + 1.0 * 0.2 + 0.5 * 0.6 + 0.5 * 0.3;
+			Expect(Near(Dm.Services, 1.0 - Covered50 / WeightSum, 1e-6) && Near(Sim->GetColonyHope().Rooms, Covered50 * Sim->GetHopePerMoralePoint(), 1e-6),
+				FString::Printf(TEXT("D8 bar %.4f = 1 - %.2f / %.1f, and Hope's Rooms %.3f reads the same coverage"), Dm.Services, Covered50, WeightSum, Sim->GetColonyHope().Rooms));
+		}
+
+		// --- D9. Demand: Air. ---
+		{
+			FRHCityDemand Dm = Sim->GetCityDemand();
+			const int32 FloorResidents = CountsOf(5).Residents;
+			Expect(Dm.Homes == 2 && Dm.HomesShort == 0 && Dm.ResidentsShort == 0 && Near(Dm.Air, 0.0, 0.0) && Dm.ScarcestLeg.IsNone() && FloorResidents == 46
+				&& Near(Dm.MinOxygenMarginSols, FMath::Min(Sim->GetFloorO2Kg(-1) / (46.0 * Sim->GetColonistO2KgPerSol()), Sim->GetHabNetworkO2Kg(Hab1) / (4.0 * Sim->GetColonistO2KgPerSol())), 1e-6),
+				FString::Printf(TEXT("D9 two homes on full rations; the tightest oxygen margin is %.1f sols (floor -1: %.0f kg for 46, the network: %.0f kg for 4)"), Dm.MinOxygenMarginSols, Sim->GetFloorO2Kg(-1), Sim->GetHabNetworkO2Kg(Hab1)));
+			// The floor's air runs out: its residents are short, the network's are not.
+			Sim->Debug_SetFloorO2Kg(-1, 0.0);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.HomesShort == 1 && Dm.HomesShortOnAir == 1 && Dm.ResidentsShort == 46 && Dm.ScarcestLeg == FName("Oxygen") && Near(Dm.Air, 46.0 / 50.0, 1e-12) && Near(Dm.MinOxygenMarginSols, 0.0, 1e-9),
+				FString::Printf(TEXT("D9 floor -1 out of air: 1 home short on air, 46 of 50 residents, the leg is %s, bar %.2f, margin %.2f sols"), *Dm.ScarcestLeg.ToString(), Dm.Air, Dm.MinOxygenMarginSols));
+			Sim->Debug_SetFloorO2Kg(-1, 1000.0);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.HomesShort == 0 && Near(Dm.Air, 0.0, 0.0), TEXT("D9 the air back: no home short"));
+			// Food out: every home is short on a ration, and the leg says why.
+			const double FoodHeld = Sim->GetStock(NFood);
+			Sim->AddStock(NFood, -FoodHeld);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Dm = Sim->GetCityDemand();
+			Expect(Dm.HomesShort == 2 && Dm.HomesShortOnAir == 0 && Dm.ResidentsShort == 50 && Dm.ScarcestLeg == FName("Food") && Near(Dm.Air, 1.0, 1e-12),
+				FString::Printf(TEXT("D9 food out: both homes are short on rations (%d homes, %d residents), none for want of air, the leg is %s - the bar counts every short ration"), Dm.HomesShort, Dm.ResidentsShort, *Dm.ScarcestLeg.ToString()));
+			Sim->AddStock(NFood, FoodHeld);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Expect(Sim->GetCityDemand().HomesShort == 0, TEXT("D9 the food back: every home on a full ration"));
+		}
+
+		// --- D10. Membership caches: never stale. ---
+		{
+			bool bFresh = Sim->Debug_DistrictCachesFresh();
+			const auto Touch = [&]() { Sim->GetDistrictOfBuilding(ForgeId); CountsOf(1); Sim->GetDistrictOfColonist(1); };
+			Touch();
+			// A building appears (the building set moves the key), a colonist leaves nothing behind, a bay is rezoned, a piece of furniture lands.
+			const int32 Extra = Place(TEXT("SolarArray"), 4500, 3000); // lattice (5, 3): open ground
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			Touch();
+			Expect(Extra != 0 && Sim->GetDistrictOfBuilding(Extra) == 0 && bFresh, TEXT("D10 a building added after a read: the cache rebuilds on its next read (open ground, no district)"));
+			const int32 InGale = Place(TEXT("Stockpile"), 0, -1500); // lattice (0, -1): Homes #1
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			Expect(Sim->GetDistrictOfBuilding(InGale) == 1 && CountsOf(1).Buildings == 5 && Sim->Debug_DistrictCachesFresh(), TEXT("D10 a building placed inside a district is counted at once"));
+			Touch();
+			FRHCommand Demolish; Demolish.Verb = FName("Demolish"); Demolish.Target = FName("Building"); Demolish.Value = (double)Extra;
+			Send(Demolish);
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			Expect(Sim->HasBuilding(Extra) == false && Sim->GetDistrictOfBuilding(Extra) == 0 && Sim->Debug_DistrictCachesFresh() && CountsOf(1).Buildings == 5, FString::Printf(TEXT("D10 a building demolished: gone from the membership, the rest intact (%s)"), *Note));
+			Touch();
+			Sim->DesignateBay(Hab4, 0, FName("LivingQuarters"), R);
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			Touch();
+			Sim->Debug_AddColonists(1);
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			const int32 Newest = Sim->GetColonists().Num() ? Sim->GetColonists().Last().Id : 0;
+			Expect(Sim->GetDistrictOfColonist(Newest) == Sim->GetDistrictOfFloor(Sim->FindColonist(Newest) ? Sim->FindColonist(Newest)->HomeLevel : 0) && CountsOf(5).Residents == 47,
+				TEXT("D10 a colonist arriving after a read lands in their home's district count (47 on floor -1)"));
+			Touch();
+			// Moving home: a floor that loses its rating loses its beds, and the residents move to free ones elsewhere.
+			Sim->Debug_UnrateFloor(-1);
+			const int32 Moved = Sim->Debug_RehomeResidents();
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			int32 StillOnFloor = 0, NowInHab1 = 0;
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				StillOnFloor += (C.HomeHab == 0 && C.HomeLevel == -1) ? 1 : 0;
+				NowInHab1 += C.HomeHab == Hab1 ? 1 : 0;
+			}
+			Expect(Moved > 0 && CountsOf(5).Residents == StillOnFloor && CountsOf(1).Residents == NowInHab1 && NowInHab1 > 2 && StillOnFloor == 47 - Moved && Sim->Debug_DistrictCachesFresh(),
+				FString::Printf(TEXT("D10 a floor loses its rating and %d residents move home: Gusev holds %d, Gale %d - the counts follow the move"), Moved, CountsOf(5).Residents, CountsOf(1).Residents));
+			Touch();
+			Send(RenameCmd(5, TEXT("Gusev Crater")));
+			bFresh &= Sim->Debug_DistrictCachesFresh();
+			Expect(NameOf(5) == TEXT("Gusev Crater") && bFresh, TEXT("D10 across a building, a demolish, a zoning change, an arrival and a rename the caches were never stale"));
+		}
+
+		// --- D11. Save / load: districts, the queue, CommandIds, Text. ---
+		{
+			// A district order, a rename and a building order in flight: three queued orders, three Ids.
+			Rejects.Reset();
+			Sim->EnqueueCommand(RenameCmd(1, TEXT("  Mons Olympus  ")));
+			Sim->EnqueueCommand(PaintCmd(NFarming, -3, 0, -3, 0));
+			FRHCommand DigOrder; DigOrder.Verb = FName("Dig"); DigOrder.Target = FName("Regolith_A");
+			Sim->EnqueueCommand(DigOrder);
+			const TArray<FRHCommand> QueuedBefore = Sim->GetUplinkQueue();
+			Expect(QueuedBefore.Num() == 3 && QueuedBefore[0].CommandId != QueuedBefore[1].CommandId && QueuedBefore[1].CommandId != QueuedBefore[2].CommandId && QueuedBefore[0].CommandId != QueuedBefore[2].CommandId
+				&& QueuedBefore[0].CommandId > 0 && QueuedBefore[0].Text == TEXT("  Mons Olympus  "), TEXT("D11 three orders queued, each with its own CommandId; the rename carries its Text"));
+			const uint32 DigestBefore = DistrictDigest();
+			const int32 VersionBefore = (int32)Sim->GetDistrictsVersion();
+			const int32 Districts0 = Sim->GetDistricts().Num();
+			const FRHDistrictCounts C1Before = CountsOf(1), C5Before = CountsOf(5);
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("districtstest"), Err), FString::Printf(TEXT("D11 saved (%s)"), *Err));
+			// Change everything the save holds.
+			Send(EraseCmd(3));
+			Send(RenameCmd(1, TEXT("Changed")));
+			Sim->Debug_PlaceInstant(FName("Stockpile"), FVector(0, -1500, 0));
+			for (const FRHCommand& Q : TArray<FRHCommand>(Sim->GetUplinkQueue())) { Sim->CancelUplinkCommand(Q.CommandId); }
+			// (The three queued orders landed with the first of those steps: a Farming district, #7, appeared too.)
+			Expect(DistrictDigest() != DigestBefore && Find(3) == nullptr && Find(7) != nullptr && Sim->GetUplinkQueue().Num() == 0, TEXT("D11 districts, names and the queue were changed after the save"));
+			Expect(Sim->LoadColony(TEXT("districtstest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("D11 loaded (%s)"), *Err));
+			Expect(DistrictDigest() == DigestBefore && Sim->GetDistricts().Num() == Districts0 && Sim->GetDistrictsVersion() != (uint32)VersionBefore,
+				FString::Printf(TEXT("D11 the districts round-trip exactly: every Id, kind, name, region, level, sorted lattice and the next Id (digest %08x)"), DistrictDigest()));
+			const FRHDistrictCounts C1After = CountsOf(1), C5After = CountsOf(5);
+			Expect(C1After.Buildings == C1Before.Buildings && C1After.Bays == C1Before.Bays && C1After.Residents == C1Before.Residents && C1After.Cells == C1Before.Cells
+				&& C5After.Residents == C5Before.Residents && C5After.Buildings == C5Before.Buildings && Sim->Debug_DistrictCachesFresh(),
+				TEXT("D11 membership re-derives from the loaded colony: the same counts"));
+			bool bQueueOk = Sim->GetUplinkQueue().Num() == 3;
+			for (int32 i = 0; bQueueOk && i < 3; ++i)
+			{
+				const FRHCommand& A = Sim->GetUplinkQueue()[i];
+				const FRHCommand& B = QueuedBefore[i];
+				bQueueOk &= A.Verb == B.Verb && A.Target == B.Target && A.CommandId == B.CommandId && A.Text == B.Text && A.Location == B.Location && A.LocationB == B.LocationB
+					&& A.Level == B.Level && A.Value == B.Value && A.ExecuteAtSimSeconds == B.ExecuteAtSimSeconds;
+			}
+			Expect(bQueueOk && Sim->GetUplinkQueue()[0].Text == TEXT("  Mons Olympus  ") && Sim->GetUplinkQueue()[0].CommandId != Sim->GetUplinkQueue()[1].CommandId,
+				TEXT("D11 the queue round-trips: Verb, Target, both end points, Value, due time, the RenameDistrict's Text and every CommandId (distinct, not 0)"));
+			// A new order never reuses a loaded Id.
+			Sim->EnqueueCommand(RenameCmd(4, TEXT("Later")));
+			const int32 Fresh = Sim->GetUplinkQueue().Last().CommandId;
+			Expect(Fresh > QueuedBefore[0].CommandId && Fresh > QueuedBefore[1].CommandId && Fresh > QueuedBefore[2].CommandId, FString::Printf(TEXT("D11 an order sent after the load gets Id %d, past every loaded Id"), Fresh));
+			// The cancel fix: cancelling the second order removes the second, not the first.
+			const FRHCommand Q0 = Sim->GetUplinkQueue()[0], Q1 = Sim->GetUplinkQueue()[1], Q2 = Sim->GetUplinkQueue()[2];
+			Expect(Sim->CancelUplinkCommand(Q1.CommandId) && Sim->GetUplinkQueue().Num() == 3 && Sim->GetUplinkQueue()[0].CommandId == Q0.CommandId && Sim->GetUplinkQueue()[1].CommandId == Q2.CommandId
+				&& Sim->GetUplinkQueue()[0].Verb == FName("RenameDistrict") && Sim->GetUplinkQueue()[1].Verb == FName("Dig") && Sim->GetUplinkQueue()[2].CommandId == Fresh,
+				TEXT("D11 after a load, cancelling the second order removes THE SECOND (it used to take whichever was first: every loaded order was Id 0)"));
+			Expect(!Sim->CancelUplinkCommand(Q1.CommandId) && Sim->GetUplinkQueue().Num() == 3, TEXT("D11 cancelling it again finds nothing: the signal beat the cancel"));
+			// The queued rename lands after the load with its Text.
+			Rejects.Reset();
+			Land();
+			Expect(NameOf(1) == TEXT("Mons Olympus") && NameOf(4) == TEXT("Later") && Sim->GetUplinkQueue().Num() == 0 && Sim->GetDistricts().Num() == Districts0,
+				FString::Printf(TEXT("D11 the queued RenameDistrict lands after the load: '%s' (trimmed from its saved Text), and the one sent after it: '%s'; the cancelled paint never landed"), *NameOf(1), *NameOf(4)));
+			Expect(Rejects.Num() == 0, FString::Printf(TEXT("D11 nothing in the loaded queue was rejected (%d)"), Rejects.Num()));
+		}
+
+		// --- D12. Determinism and the final reads. ---
+		{
+			TArray<FRHDistrictCounts> A, B;
+			Sim->GetDistrictCounts(A);
+			Sim->GetDistrictCounts(B);
+			bool bSame = A.Num() == B.Num();
+			for (int32 i = 0; bSame && i < A.Num(); ++i) { bSame &= A[i].DistrictId == B[i].DistrictId && A[i].Buildings == B[i].Buildings && A[i].Bays == B[i].Bays && A[i].Residents == B[i].Residents && A[i].Beds == B[i].Beds && A[i].Seats == B[i].Seats && A[i].Cells == B[i].Cells; }
+			const FRHCityDemand X = Sim->GetCityDemand(), Y = Sim->GetCityDemand();
+			bool bDemandSame = X.Housing == Y.Housing && X.Jobs == Y.Jobs && X.Services == Y.Services && X.Air == Y.Air && X.ServiceGaps.Num() == Y.ServiceGaps.Num();
+			for (int32 i = 0; bDemandSame && i < X.ServiceGaps.Num(); ++i) { bDemandSame &= X.ServiceGaps[i].Function == Y.ServiceGaps[i].Function && X.ServiceGaps[i].Gap == Y.ServiceGaps[i].Gap; }
+			Expect(bSame && bDemandSame && Sim->Debug_DistrictCachesFresh(), TEXT("D12 the counts and the demand are pure functions of state: asked twice, the same"));
+				Sim->Debug_SetColonistsPerCell(1.0);
+		}
+
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISTRICTS TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -8103,6 +8782,142 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(NetworkMs <= 10.0, FString::Printf(TEXT("budget: laying the %d-edge network took %.1f ms (<= 10)"), BuiltEdges, NetworkMs));
 			Expect(PlanMs <= 10.0, FString::Printf(TEXT("budget: 100 robots planning their first leg took %.2f ms (<= 10)"), PlanMs));
 			Expect(StepsTotal <= 0 || DriveMs / StepsTotal <= 0.002, FString::Printf(TEXT("budget: a robot-step along a road took %.4f ms (<= 0.002)"), StepsTotal > 0 ? DriveMs / StepsTotal : 0.0));
+		}
+
+		// C5a: districts at scale. Fifty districts over the scale colony: forty-five on the
+		// surface (a 3 x 3 block of lattice cells round a Pylon, each holding two buildings, a
+		// Pylon and a Stockpile, kinds cycling through the five) and one on each of the five
+		// floors (every floor's cells and every colonist's home are in a district), landing
+		// through the real PaintDistrict order. Then: the membership caches rebuild (cold, the
+		// first read after a change) and are read warm; GetDistrictCounts and GetCityDemand run
+		// over the whole city; and everything adds up: every resident, every certified bed and
+		// every seat is in exactly one district, and a save and a load give the same counts.
+		// Budgets are wall clock on a shared machine, set well over a quiet run (see below).
+		{
+			const FName DistrictKinds[] = { FName("Homes"), FName("Industry"), FName("Farming"), FName("Research"), FName("Civic") };
+			const int32 SurfaceDistricts = 45;
+			// Budgets (wall clock, shared machine): about twenty times a quiet run (a cold rebuild
+			// 0.04 ms, a warm lookup 0.00002 ms, the counts 0.02 ms, the demand 0.06 ms). A rebuild on
+			// every lookup, or a scan of the roster per resident, would cost whole milliseconds a call.
+			constexpr double BudgetColdMs = 1.0, BudgetWarmMs = 0.002, BudgetCountsMs = 1.0, BudgetDemandMs = 1.0;
+			for (int32 K = 0; K < SurfaceDistricts; ++K)
+			{
+				const int32 CX = -45 + (K % 9) * 10, CY = 20 + (K / 9) * 10; // 100 m apart, west of the road network
+				const FVector At = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(CX, CY));
+				Sim->Debug_PlaceInstant(FName("Pylon"), At);
+				Sim->Debug_PlaceInstant(FName("Stockpile"), At + FVector(1000.0, 0.0, 0.0));
+			}
+			int32 DistrictRejects = 0;
+			const FDelegateHandle DistrictRejectH = Sim->OnCommandRejected.AddLambda([&DistrictRejects](const FRHCommand&, const FString&) { ++DistrictRejects; });
+			const double Paint0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < SurfaceDistricts; ++K)
+			{
+				const int32 CX = -45 + (K % 9) * 10, CY = 20 + (K / 9) * 10;
+				FRHCommand Order;
+				Order.Verb = FName("PaintDistrict");
+				Order.Target = DistrictKinds[K % 5];
+				Order.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(CX - 1, CY - 1));
+				Order.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(CX + 2, CY + 1)); // 4 x 3: the Pylon cell, the Stockpile cell beside it, and their neighbours
+				Sim->EnqueueCommand(Order);
+			}
+			for (int32 L = 1; L <= Floors; ++L)
+			{
+				FRHCommand Order;
+				Order.Verb = FName("PaintDistrict");
+				Order.Target = DistrictKinds[(SurfaceDistricts + L) % 5];
+				Order.Level = -L;
+				Sim->EnqueueCommand(Order);
+			}
+			EraStepOnce();
+			const double PaintMs = (FPlatformTime::Seconds() - Paint0) * 1000.0;
+			Sim->OnCommandRejected.Remove(DistrictRejectH);
+			Expect(DistrictRejects == 0 && Sim->GetDistricts().Num() == SurfaceDistricts + Floors && Sim->GetNextDistrictId() == SurfaceDistricts + Floors + 1,
+				FString::Printf(TEXT("districts: %d PaintDistrict orders landed (45 surface blocks of 12 cells, 5 floors), %d refused, %.1f ms with the era step"), SurfaceDistricts + Floors, DistrictRejects, PaintMs));
+			Expect(Sim->GetDistricts().Last().Id == 50 && Sim->GetDistricts().Last().Name == RHDistricts::NameForId(50) && Sim->FindDistrict(41) && Sim->FindDistrict(41)->Name == TEXT("Gale II") && Sim->FindDistrict(50)->Name == TEXT("Arcadia II"),
+				TEXT("districts: names follow the Id: #41 is 'Gale II', #50 'Arcadia II' - the walk of forty names has started again"));
+
+			// Everything is in exactly one district: sums against the colony's own totals.
+			TArray<FRHDistrictCounts> Counts;
+			const double Cold0 = FPlatformTime::Seconds();
+			Sim->GetDistrictCounts(Counts);
+			const double ColdFirstMs = (FPlatformTime::Seconds() - Cold0) * 1000.0;
+			int64 SumResidents = 0, SumBeds = 0, SumSeats = 0, SumBuildings = 0, SumCells = 0;
+			for (const FRHDistrictCounts& C : Counts) { SumResidents += C.Residents; SumBeds += C.Beds; SumSeats += C.Seats; SumBuildings += C.Buildings; SumCells += C.Cells; }
+			int32 FloorBuildings = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { FloorBuildings += B.Level < 0 ? 1 : 0; }
+			const FRHCityDemand Dm = Sim->GetCityDemand();
+			Expect(Counts.Num() == SurfaceDistricts + Floors && SumResidents == Sim->GetPopulation() && SumBeds == Sim->GetHousingCapacity() && SumSeats == Dm.TotalSeats,
+				FString::Printf(TEXT("districts: every resident (%lld of %d), every certified bed (%lld of %d) and every work seat (%lld of %d) is in exactly one district"),
+					SumResidents, Sim->GetPopulation(), SumBeds, Sim->GetHousingCapacity(), SumSeats, Dm.TotalSeats));
+			Expect(SumBuildings == 2 * SurfaceDistricts + FloorBuildings && SumCells == 12 * SurfaceDistricts + Sim->GetFloorCarvedCells(-1) + Sim->GetFloorCarvedCells(-2) + Sim->GetFloorCarvedCells(-3) + Sim->GetFloorCarvedCells(-4) + Sim->GetFloorCarvedCells(-5),
+				FString::Printf(TEXT("districts: %lld buildings (2 a surface block, %d on the floors) and %lld cells counted"), SumBuildings, FloorBuildings, SumCells));
+			Expect(Dm.Population == Sim->GetPopulation() && Dm.ServiceGaps.Num() == 7 && Dm.Housing >= 0.0 && Dm.Housing <= 1.0 && Dm.Jobs > 0.5 && Dm.Services > 0.0 && Dm.Services < 1.0 && Dm.Air >= 0.0 && Dm.Air <= 1.0,
+				FString::Printf(TEXT("districts: the city's demand at %d people reads Housing %.2f, Jobs %.2f (%d seats), Services %.2f, Air %.2f"), Dm.Population, Dm.Housing, Dm.Jobs, Dm.TotalSeats, Dm.Services, Dm.Air));
+
+			// Timing: a cold rebuild (the first read after a change - a rename bumps the district version), warm reads, the whole-city counts and the demand.
+			constexpr int32 ColdReps = 5, WarmReps = 200, CountReps = 50, DemandReps = 50;
+			const int32 Probe = Sim->GetBuildings().Num() > 0 ? Sim->GetBuildings()[0].Id : 0;
+			double ColdTotal = 0.0;
+			for (int32 K = 0; K < ColdReps; ++K)
+			{
+				FRHCommand Rename;
+				Rename.Verb = FName("RenameDistrict");
+				Rename.Value = (double)(1 + K);
+				Rename.Text = FString::Printf(TEXT("Scale %d"), K);
+				Sim->EnqueueCommand(Rename);
+				EraStepOnce();
+				const double T0 = FPlatformTime::Seconds();
+				Sim->GetDistrictOfBuilding(Probe);
+				ColdTotal += FPlatformTime::Seconds() - T0;
+			}
+			const double ColdMs = ColdTotal * 1000.0 / ColdReps;
+			int32 WarmSink = 0;
+			const double W0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < WarmReps; ++K) { WarmSink += Sim->GetDistrictOfColonist(1 + K * 7) + Sim->GetDistrictOfBuilding(Probe); }
+			const double WarmMs = (FPlatformTime::Seconds() - W0) * 1000.0 / WarmReps;
+			const double C0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < CountReps; ++K) { Sim->GetDistrictCounts(Counts); }
+			const double CountsMs = (FPlatformTime::Seconds() - C0) * 1000.0 / CountReps;
+			double DemandSink = 0.0;
+			const double D0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < DemandReps; ++K) { DemandSink += Sim->GetCityDemand().Services; }
+			const double DemandMs = (FPlatformTime::Seconds() - D0) * 1000.0 / DemandReps;
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE districts: %d districts, %d buildings, %d colonists | membership rebuild %.3f ms cold (first counts call %.3f ms) | warm read %.5f ms | counts %.3f ms | demand %.3f ms (sink %d %.4f)"),
+				Sim->GetDistricts().Num(), Sim->GetBuildings().Num(), Sim->GetPopulation(), ColdMs, ColdFirstMs, WarmMs, CountsMs, DemandMs, WarmSink, DemandSink);
+			Expect(Sim->Debug_DistrictCachesFresh() && Sim->FindDistrict(1) && Sim->FindDistrict(1)->Name == TEXT("Scale 0"), TEXT("districts: the caches were never stale across the five renames and the reads"));
+
+			// A save and a load: the districts and their membership come back the same.
+			TArray<FRHDistrictCounts> Before = Counts;
+			FString DistrictErr;
+			const int32 DistrictsBefore = Sim->GetDistricts().Num();
+			Expect(Sim->SaveColony(TEXT("scaledistricts"), DistrictErr), FString::Printf(TEXT("districts: saved %d districts with %d colonists (%s)"), DistrictsBefore, Sim->GetPopulation(), *DistrictErr));
+			Sim->EnqueueCommand([] { FRHCommand E; E.Verb = FName("EraseDistrict"); E.Value = 1.0; return E; }());
+			EraStepOnce();
+			Expect(Sim->GetDistricts().Num() == DistrictsBefore - 1, TEXT("districts: an erase after the save"));
+			Expect(Sim->LoadColony(TEXT("scaledistricts"), DistrictErr) && DistrictErr.IsEmpty() && Sim->GetDistricts().Num() == DistrictsBefore, FString::Printf(TEXT("districts: loaded (%s)"), *DistrictErr));
+			Sim->GetDistrictCounts(Counts);
+			bool bSameCounts = Counts.Num() == Before.Num();
+			for (int32 i = 0; bSameCounts && i < Counts.Num(); ++i)
+			{
+				bSameCounts &= Counts[i].DistrictId == Before[i].DistrictId && Counts[i].Buildings == Before[i].Buildings && Counts[i].Bays == Before[i].Bays
+					&& Counts[i].Residents == Before[i].Residents && Counts[i].Beds == Before[i].Beds && Counts[i].Seats == Before[i].Seats && Counts[i].Cells == Before[i].Cells;
+			}
+			Expect(bSameCounts && Sim->FindDistrict(1) && Sim->FindDistrict(1)->Name == TEXT("Scale 0") && Sim->Debug_DistrictCachesFresh(), TEXT("districts: after the load every district's counts are exactly what they were"));
+
+			// Budgets: about ten times a quiet run, as the other suites set them.
+			Expect(ColdMs <= BudgetColdMs, FString::Printf(TEXT("budget: a cold membership rebuild over %d buildings and %d colonists took %.3f ms (<= %.1f)"), Sim->GetBuildings().Num(), Sim->GetPopulation(), ColdMs, BudgetColdMs));
+			// -RHVerifyCaches re-derives the cache behind every lookup (that is its job), so a "warm" read is a
+			// rebuild there: the warm budget is for plain runs.
+			if (FParse::Param(*Params, TEXT("RHVerifyCaches")))
+			{
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE ok: budget: a warm district lookup took %.5f ms (not budgeted under -RHVerifyCaches: every lookup re-derives the cache)"), WarmMs);
+			}
+			else
+			{
+				Expect(WarmMs <= BudgetWarmMs, FString::Printf(TEXT("budget: a warm district lookup took %.5f ms (<= %.3f)"), WarmMs, BudgetWarmMs));
+			}
+			Expect(CountsMs <= BudgetCountsMs, FString::Printf(TEXT("budget: GetDistrictCounts over %d districts took %.3f ms (<= %.1f)"), Sim->GetDistricts().Num(), CountsMs, BudgetCountsMs));
+			Expect(DemandMs <= BudgetDemandMs, FString::Printf(TEXT("budget: GetCityDemand at %d people took %.3f ms (<= %.1f)"), Sim->GetPopulation(), DemandMs, BudgetDemandMs));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
+#include "RHDistricts.h"
 
 class ARHPlayerController;
 class ITableRow;
@@ -108,10 +109,16 @@ private:
 	FReply HandleSellFurniture();
 	// BM-6: the WALLS tab - windows, doors, airlocks.
 	FReply HandleFit(FName Row);
-	int32 RowTab = 0; // the zone row's tab: 0 ZONE, 1 FURNISH, 2 WALLS
+	// C5a: the DISTRICT tab - a Kind arms the controller's district paint mode (the City panel's
+	// kind chips do the same).
+	FReply HandleDistrict(FName Kind);
+	int32 RowTab = 0; // the zone row's tab: 0 ZONE, 1 FURNISH, 2 WALLS, 3 DISTRICT
 public:
 	void Debug_SetFurnishTab(bool bOn) { RowTab = bOn ? 1 : 0; }
-	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 2); }
+	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 3); }
+	// Capture/QA (RH.DeckCity): fold the City panel open or shut.
+	// Opening it also folds the Crew and Fleet panels, so the City panel fits the right column.
+	void Debug_SetCityExpanded(bool bOn) { bCityExpanded = bOn; if (bOn) { bCrewExpanded = false; bFleetExpanded = false; } }
 private:
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.
@@ -190,6 +197,12 @@ private:
 	TSharedRef<SWidget> BuildVitalsStrip();
 	TSharedRef<SWidget> BuildObjectivePanel();
 	TSharedRef<SWidget> BuildCrewPanel();
+	// C5a: the CITY panel - four demand bars with their plain-words prose, the kind chips that arm
+	// district painting, and the district list (name field, counts, erase).
+	TSharedRef<SWidget> BuildCityPanel();
+	EVisibility GetCityVisibility() const;
+	void RefreshCityPanel();
+	const FRHCityDemand& GetCityDemandShown() const { return CityDemand; }
 	TSharedRef<SWidget> BuildFleetPanel();
 	TSharedRef<SWidget> BuildPoliticsPanel();
 	TSharedRef<SWidget> BuildPowerPanel();
@@ -247,6 +260,14 @@ private:
 	TArray<FName> BuildCategoryOrder;
 	bool bFleetExpanded = false;
 	bool bCrewExpanded = true;
+	bool bCityExpanded = true;
+	// The City panel's snapshot, refreshed a few times a second (the demand walks every room), and
+	// the district list's rebuild signal (the districts' version).
+	FRHCityDemand CityDemand;
+	TMap<int32, FRHDistrictCounts> CityCounts;
+	double CityRefreshedAt = -1.0e9;
+	uint32 CityVersionShown = MAX_uint32;
+	TSharedPtr<class SVerticalBox> CityDistrictList;
 	bool bRosterExpanded = false;
 	bool bPoliticsExpanded = false;
 	bool bPowerExpanded = false;

@@ -14,6 +14,7 @@
 #include "RHCommandDeck.h"
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
+#include "RHDistrictVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -940,6 +941,336 @@ void SRHCommandDeck::RefreshRosterPanel()
 		RosterItems.Add(MakeShared<int32>(C.Id));
 	}
 	RosterListView->RequestListRefresh();
+}
+
+// --- City (C5a): demand bars, the paint chips, the district list ---
+
+namespace
+{
+	// A room function in the words the Build menu uses.
+	FString ServiceLabel(FName Function)
+	{
+		static const TMap<FName, FString> Labels = {
+			{ FName("Garden"), TEXT("Gardening Stations") }, { FName("Greenhouse"), TEXT("Greenhouses") }, { FName("Lab"), TEXT("Laboratories") },
+			{ FName("Workstation"), TEXT("Workstations") }, { FName("Dining"), TEXT("Dining Rooms") }, { FName("Cooking"), TEXT("Cooking Stations") },
+			{ FName("Infirmary"), TEXT("Infirmaries") },
+		};
+		const FString* L = Labels.Find(Function);
+		return L ? *L : Function.ToString();
+	}
+
+	const TCHAR* PluralS(int32 N) { return N == 1 ? TEXT("") : TEXT("s"); }
+
+	// 0 = nothing missing (cool), 1 = all of it missing (warm). Never red: a want is not an alarm.
+	FSlateColor DemandColor(double Level)
+	{
+		return FSlateColor(FMath::Lerp(D::Teal, D::Amber, (float)FMath::Clamp(Level, 0.0, 1.0)));
+	}
+}
+
+EVisibility SRHCommandDeck::GetCityVisibility() const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	return (S && (S->GetPopulation() > 0 || S->GetDistricts().Num() > 0)) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+void SRHCommandDeck::RefreshCityPanel()
+{
+	const URHSimWorldSubsystem* Sim = GetSim();
+	if (!Sim || !bCityExpanded || GetCityVisibility() == EVisibility::Collapsed)
+	{
+		return;
+	}
+	// The demand walks every room and the counts every district: a few times a second is plenty.
+	const double Now = FPlatformTime::Seconds();
+	if (Now - CityRefreshedAt >= 0.4)
+	{
+		CityRefreshedAt = Now;
+		CityDemand = Sim->GetCityDemand();
+		TArray<FRHDistrictCounts> Counts;
+		Sim->GetDistrictCounts(Counts);
+		CityCounts.Reset();
+		for (const FRHDistrictCounts& C : Counts) { CityCounts.Add(C.DistrictId, C); }
+	}
+	if (!CityDistrictList.IsValid() || Sim->GetDistrictsVersion() == CityVersionShown)
+	{
+		return;
+	}
+	CityVersionShown = Sim->GetDistrictsVersion();
+	CityDistrictList->ClearChildren();
+	if (Sim->GetDistricts().Num() == 0)
+	{
+		CityDistrictList->AddSlot().AutoHeight()
+		[
+			// Placeholder wording (Gate-D review): what a district is, in a line.
+			Prose(Txt(TEXT("No districts yet. Pick a kind above and drag a rectangle on the ground, or click a floor underground. Each district gets a name you can change, and its residents, beds and seats are counted here.")), D::TextDim, 9)
+		];
+		return;
+	}
+	for (const FRHDistrict& Dist : Sim->GetDistricts())
+	{
+		const int32 Id = Dist.Id;
+		const FName Kind = Dist.Kind;
+		const int32 Level = Dist.Level;
+		const FLinearColor Tint = URHDistrictVisualizerSubsystem::KindColor(Kind);
+		CityDistrictList->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 6.f, 0.f)
+				[
+					SNew(SBox).WidthOverride(5.f)
+					[
+						SNew(SBorder).BorderImage(D::RoundedWhite()).BorderBackgroundColor(Tint)
+					]
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					// The name is a text field: Enter transmits a RenameDistrict order (the sim trims it,
+					// caps it at 32 characters and refuses an empty one).
+					SNew(SEditableTextBox)
+					.Font(D::Label(10))
+					.Text(Txt(Dist.Name))
+					.ToolTipText(Txt(TEXT("Type a new name and press Enter.")))
+					.OnTextCommitted_Lambda([this, Id](const FText& Typed, ETextCommit::Type Commit)
+					{
+						const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+						URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+						const FRHDistrict* Current = S ? S->FindDistrict(Id) : nullptr;
+						if (Commit != ETextCommit::OnEnter || !Current || Typed.ToString() == Current->Name)
+						{
+							return;
+						}
+						FString Why;
+						if (!S->CanRenameDistrict(Id, Typed.ToString(), Why))
+						{
+							PC->PostConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+							return;
+						}
+						FRHCommand Cmd;
+						Cmd.Verb = FName("RenameDistrict");
+						Cmd.Value = (double)Id;
+						Cmd.Text = Typed.ToString();
+						S->EnqueueCommand(Cmd);
+						PC->PostConfirm(FString::Printf(TEXT("Rename transmitted: %s"), *Cmd.Text.TrimStartAndEnd()), FLinearColor(0.2f, 0.9f, 1.f));
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+				[
+					SNew(SButton)
+					.ButtonStyle(&D::FlatButtonStyle())
+					.ContentPadding(FMargin(4.f, 0.f))
+					.ToolTipText(Txt(TEXT("Erase this district (its name is not reused).")))
+					.OnClicked_Lambda([this, Id]()
+					{
+						const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+						URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+						FString Why;
+						if (S && S->CanEraseDistrict(Id, Why))
+						{
+							FRHCommand Cmd;
+							Cmd.Verb = FName("EraseDistrict");
+							Cmd.Value = (double)Id;
+							S->EnqueueCommand(Cmd);
+							PC->PostConfirm(TEXT("Erase transmitted"), FLinearColor(0.2f, 0.9f, 1.f));
+						}
+						return FReply::Handled();
+					})
+					[
+						SNew(SBox).WidthOverride(12.f).HeightOverride(12.f)
+						[
+							SNew(SImage).Image(D::Icon(FName("close"))).ColorAndOpacity(D::TextDim)
+						]
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(11.f, 1.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+				.Text_Lambda([this, Id, Kind, Level]()
+				{
+					const FRHDistrictCounts* C = CityCounts.Find(Id);
+					const FString Where = Level < 0 ? FString::Printf(TEXT("floor %d"), Level) : FString::Printf(TEXT("%d cell%s"), C ? C->Cells : 0, PluralS(C ? C->Cells : 0));
+					return Txt(FString::Printf(TEXT("%s  -  %s  -  %d resident%s  -  %d bed%s  -  %d seat%s"), *URHDistrictVisualizerSubsystem::KindWord(Kind), *Where,
+						C ? C->Residents : 0, PluralS(C ? C->Residents : 0), C ? C->Beds : 0, PluralS(C ? C->Beds : 0), C ? C->Seats : 0, PluralS(C ? C->Seats : 0)));
+				})
+			]
+		];
+	}
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
+{
+	// One demand: its bar, its right-hand figure and its prose. All wording is PLACEHOLDER pending the
+	// director's Gate-D framing review (docs/qa/2026-10-15/gate-d-wording.md D137-D144): plain, naming
+	// the fix, never a threat.
+	const auto Demand = [this](const TCHAR* Name, TFunction<double(const FRHCityDemand&)> Level, TFunction<FString(const FRHCityDemand&)> Figure, TFunction<FString(const FRHCityDemand&)> Words) -> TSharedRef<SWidget>
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				BarRow(Txt(Name),
+					MakeAttributeLambda([this, Figure]() { return Txt(Figure(CityDemand)); }),
+					MakeAttributeLambda([this, Level]() { return TOptional<float>((float)Level(CityDemand)); }),
+					MakeAttributeLambda([this, Level]() { return DemandColor(Level(CityDemand)); }))
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				Prose(MakeAttributeLambda([this, Words]() { return Txt(Words(CityDemand)); }), D::TextDim, 9)
+			];
+	};
+	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+	Body->AddSlot().AutoHeight()
+	[
+		Demand(TEXT("Housing"),
+			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Housing : 0.0; },
+			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.HousingBedsShort <= 0 ? FString(TEXT("room to grow")) : FString::Printf(TEXT("%d bed%s short"), Dm.HousingBedsShort, PluralS(Dm.HousingBedsShort))); },
+			[](const FRHCityDemand& Dm) -> FString
+			{
+				if (Dm.Population <= 0) { return TEXT("Housing: nobody lives here yet."); }
+				if (Dm.HousingBedsShort <= 0) { return TEXT("Housing: there is room for everyone the next ship could bring."); }
+				if (Dm.HousingLimit == FName("BigArrival"))
+				{
+					return FString::Printf(TEXT("Housing: the Big Arrival waits on %d more free bed%s (it needs %d free)."), Dm.BigArrivalBedsShort, PluralS(Dm.BigArrivalBedsShort), Dm.FreeBeds + Dm.BigArrivalBedsShort);
+				}
+				const FString Who = Dm.bSettlersDraw ? FString::Printf(TEXT("the next ship's %d settler%s"), Dm.SettlersWanted, PluralS(Dm.SettlersWanted)) : FString::Printf(TEXT("a Crew Pod of %d"), Dm.SettlersWanted);
+				if (Dm.HousingLimit == FName("Comfort"))
+				{
+					const int32 Left = FMath::Max(0, Dm.ComfortCapacity - Dm.Population);
+					return FString::Printf(TEXT("Housing: %s for newcomers - zone %d more Living Quarters so everyone stays well housed when %s %s."),
+						Left == 0 ? TEXT("no comfortable place is left") : *FString::Printf(TEXT("only %d comfortable place%s left"), Left, PluralS(Left)), Dm.SettlerBedsShort, *Who,
+						(Dm.bSettlersDraw && Dm.SettlersWanted != 1) ? TEXT("arrive") : TEXT("arrives"));
+				}
+				return FString::Printf(TEXT("Housing: %d more certified bed%s would make room for %s (%d free).%s"), Dm.SettlerBedsShort, PluralS(Dm.SettlerBedsShort), *Who, Dm.FreeBeds,
+					Dm.bVaultCertified ? TEXT("") : TEXT(" Surface beds open to the crew once the vault is certified."));
+			})
+	];
+	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		Demand(TEXT("Jobs"),
+			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Jobs : 0.0; },
+			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.Unemployed <= 0 ? FString(TEXT("everyone works")) : FString::Printf(TEXT("%d without a post"), Dm.Unemployed)); },
+			[](const FRHCityDemand& Dm) -> FString
+			{
+				if (Dm.Population <= 0) { return TEXT("Jobs: nobody lives here yet."); }
+				if (Dm.Unemployed <= 0) { return TEXT("Jobs: every resident has a work post."); }
+				if (Dm.SeatsShort > 0)
+				{
+					return FString::Printf(TEXT("Jobs: %d of %d residents have a work post; %d more seat%s would employ everyone."), Dm.FilledSeats, Dm.Population, Dm.SeatsShort, PluralS(Dm.SeatsShort));
+				}
+				return FString::Printf(TEXT("Jobs: %d of %d residents have a work post; the rest of the seats are open and not staffed yet."), Dm.FilledSeats, Dm.Population);
+			})
+	];
+	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		Demand(TEXT("Services"),
+			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Services : 0.0; },
+			[](const FRHCityDemand& Dm) { return (Dm.ServiceGaps.Num() == 0 || Dm.ServiceGaps[0].Gap <= 0.0) ? FString(Dm.Population > 0 ? TEXT("all covered") : TEXT("")) : FString::Printf(TEXT("most wanted: %s"), *ServiceLabel(Dm.ServiceGaps[0].Function)); },
+			[](const FRHCityDemand& Dm) -> FString
+			{
+				if (Dm.Population <= 0) { return TEXT("Services: nobody lives here yet."); }
+				TArray<FString> Worst;
+				for (const FRHServiceGap& Gap : Dm.ServiceGaps)
+				{
+					if (Gap.Gap > 0.0 && Worst.Num() < 3) { Worst.Add(ServiceLabel(Gap.Function).ToLower()); }
+				}
+				if (Worst.Num() == 0) { return TEXT("Services: every room type that lifts Hope covers the colony."); }
+				return FString::Printf(TEXT("Services: the colony would gain most from more %s."), *FString::Join(Worst, TEXT(", ")));
+			})
+	];
+	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		Demand(TEXT("Air"),
+			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Air : 0.0; },
+			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.HomesShort <= 0 ? FString(TEXT("full rations")) : FString::Printf(TEXT("%d on short rations"), Dm.ResidentsShort)); },
+			[](const FRHCityDemand& Dm) -> FString
+			{
+				if (Dm.Population <= 0) { return TEXT("Air: nobody lives here yet."); }
+				if (Dm.HomesShort <= 0)
+				{
+					return Dm.MinOxygenMarginSols >= 0.0 ? FString::Printf(TEXT("Air: every home is on a full ration; the tightest oxygen margin is %.1f sols."), Dm.MinOxygenMarginSols) : FString(TEXT("Air: every home is on a full ration."));
+				}
+				const TCHAR* Leg = Dm.ScarcestLeg == FName("Oxygen") ? TEXT("air") : (Dm.ScarcestLeg == FName("Water") ? TEXT("water") : TEXT("food"));
+				return FString::Printf(TEXT("Air: %d home%s (%d resident%s) on short rations - %s is the scarcest. Restore it to bring rations back to full."),
+					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg);
+			})
+	];
+	// Paint chips: the same kinds as the DISTRICT tab, here so the panel is enough on its own.
+	TSharedRef<SWrapBox> Chips = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(3.f, 3.f));
+	for (const FName& Kind : RHDistricts::GetKinds())
+	{
+		Chips->AddSlot()
+		[
+			SNew(SButton)
+			.ButtonStyle(&D::TintButtonStyle())
+			.ContentPadding(FMargin(7.f, 2.f))
+			.ButtonColorAndOpacity_Lambda([this, Kind]()
+			{
+				const bool bArmed = PC.IsValid() && PC->IsDistrictMode() && PC->GetDistrictKind() == Kind;
+				const FLinearColor T = URHDistrictVisualizerSubsystem::KindColor(Kind);
+				return FSlateColor(bArmed ? FLinearColor(T.R * 0.75f, T.G * 0.75f, T.B * 0.75f, 1.f) : FLinearColor(T.R * 0.28f, T.G * 0.28f, T.B * 0.28f, 0.95f));
+			})
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDistrict, Kind))
+			[
+				SNew(STextBlock).Font(D::Label(9)).Text(Txt(URHDistrictVisualizerSubsystem::KindWord(Kind))).ColorAndOpacity(D::Text)
+			]
+		];
+	}
+	Body->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+	[
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::TextDim).Text(Txt(TEXT("PAINT A DISTRICT")))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+		[
+			Chips
+		]
+	];
+	CityDistrictList = SNew(SVerticalBox);
+	CityVersionShown = MAX_uint32; // the list is built empty: the first refresh fills it
+	Body->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+	[
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::TextDim)
+			.Text_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(FString::Printf(TEXT("DISTRICTS  (%d)"), S ? S->GetDistricts().Num() : 0)); })
+		]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(SBox).MaxDesiredHeight(260.f)
+			[
+				SNew(SScrollBox).ScrollBarThickness(FVector2D(4.f, 4.f))
+				+ SScrollBox::Slot()
+				[
+					CityDistrictList.ToSharedRef()
+				]
+			]
+		]
+	];
+
+	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Font(D::Label(10)).ColorAndOpacity(D::TextDim)
+			.Text_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); const int32 N = S ? S->GetDistricts().Num() : 0; return Txt(FString::Printf(TEXT("%d DISTRICT%s"), N, N == 1 ? TEXT("") : TEXT("S"))); })
+			.Visibility_Lambda([this]() { return bCityExpanded ? EVisibility::Collapsed : EVisibility::Visible; })
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			ExpandToggle(&bCityExpanded)
+		];
+	return SNew(SBox)
+		.Visibility(this, &SRHCommandDeck::GetCityVisibility)
+		[
+			D::Panel(FName("dome"), Txt(TEXT("CITY")), D::Sky,
+				SNew(SBox).Visibility_Lambda([this]() { return bCityExpanded ? EVisibility::Visible : EVisibility::Collapsed; })[Body],
+				Summary)
+		];
 }
 
 // --- Fleet ---

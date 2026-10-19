@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 36;  // v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 37;  // v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -5453,15 +5453,34 @@ int32 URHSimWorldSubsystem::GetImmigrationCount(double Hope, int32 Pop, int32 Fr
 	// Housing term can still serve everyone at full value, and never push it down.
 	// A colony with nobody in it has no
 	// reputation to draw on (and the pre-crew baselines stay untouched).
+	// C5a: the same arithmetic in two halves (the city's Housing demand reads both).
 	if (Pop <= 0 || FreeBeds <= 0 || Hope < ImmigrationHopeMin)
+	{
+		return 0;
+	}
+	return FMath::Min(GetImmigrationRaw(Hope, Pop), GetImmigrationRoom(Pop, FreeBeds, ComfortCapacity));
+}
+
+int32 URHSimWorldSubsystem::GetImmigrationRaw(double Hope, int32 Pop) const
+{
+	// What a ship would bring if room allowed: floor((Hope - Floor) / (100 - Floor) x
+	// max(Base, PerCapita x N)), capped at the per-ship cap; 0 below the Hope minimum or
+	// with nobody here.
+	if (Pop <= 0 || Hope < ImmigrationHopeMin)
 	{
 		return 0;
 	}
 	const double Span = FMath::Max(100.0 - ImmigrationHopeFloor, (double)KINDA_SMALL_NUMBER);
 	const double Draw = FMath::Max(ImmigrationBase, ImmigrationPerCapita * (double)Pop);
 	const double Raw = FMath::Clamp(Hope - ImmigrationHopeFloor, 0.0, Span) * Draw / Span;
-	const int32 Room = FMath::Min(FMath::Max(0, FreeBeds - ImmigrationReserveBeds), FMath::Max(0, ComfortCapacity - Pop));
-	return FMath::Clamp(FMath::FloorToInt(Raw), 0, FMath::Min(ImmigrationCapPerShip, Room));
+	return FMath::Clamp(FMath::FloorToInt(Raw), 0, FMath::Max(0, ImmigrationCapPerShip));
+}
+
+int32 URHSimWorldSubsystem::GetImmigrationRoom(int32 Pop, int32 FreeBeds, int32 ComfortCapacity) const
+{
+	// Settlers never take the last bed(s) (births come first) and never push the Housing
+	// term below its maximum: min(FreeBeds - ReserveBeds, ComfortCapacity - Pop), floored at 0.
+	return FMath::Min(FMath::Max(0, FreeBeds - ImmigrationReserveBeds), FMath::Max(0, ComfortCapacity - Pop));
 }
 
 int32 URHSimWorldSubsystem::ApplyImmigration()
@@ -6791,6 +6810,25 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
+	}
+	else if (Cmd.Verb == FName("PaintDistrict") || Cmd.Verb == FName("EraseDistrict") || Cmd.Verb == FName("RenameDistrict"))
+	{
+		// C5a: districts. Each worker re-runs its own preflight and says why it refuses.
+		FString Reason;
+		const bool bOk = Cmd.Verb == FName("PaintDistrict") ? ExecutePaintDistrict(Cmd, Reason)
+			: (Cmd.Verb == FName("EraseDistrict") ? ExecuteEraseDistrict(Cmd, Reason) : ExecuteRenameDistrict(Cmd, Reason));
+		if (!bOk)
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else
+	{
+		// An order no worker knows is refused, never "executed" (C5a: a new verb that was
+		// never wired in, or a misspelt one, used to fall through to the broadcast below).
+		OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown order '%s'"), *Cmd.Verb.ToString()));
+		return;
 	}
 
 	OnCommandExecuted.Broadcast(Cmd);
@@ -10460,7 +10498,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHCommand& C : UplinkQueue)
 	{
-		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds; // LocationB: v36
+		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds // LocationB: v36
+		   << C.CommandId << C.Text; // CommandId and Text: v37
 	}
 
 	Num = SavedBuildings.Num();
@@ -10766,6 +10805,22 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		int32 NextNode = RoadGraph.NextNodeId, NextEdge = RoadGraph.NextEdgeId;
 		Ar << NextNode << NextEdge;
 	}
+	// Districts (save v37, C5a): in Id order, each with its sorted lattice, then the next Id.
+	// Membership, the ground maps and the counts are DERIVED and rebuilt on first read.
+	{
+		int32 DistrictCount = Districts.Num();
+		Ar << DistrictCount;
+		for (const FRHDistrict& D : Districts)
+		{
+			int32 DId = D.Id, DRegion = D.RegionId, DLevel = D.Level;
+			FName DKind = D.Kind;
+			FString DName = D.Name;
+			TArray<FIntPoint> DLattice = D.Lattice;
+			Ar << DId << DKind << DName << DRegion << DLevel << DLattice;
+		}
+		int32 NextDistrict = NextDistrictId;
+		Ar << NextDistrict;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -10840,7 +10895,11 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHCommand C;
-		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds; // LocationB: v36
+		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds // LocationB: v36
+		   << C.CommandId << C.Text; // CommandId and Text: v37
+		// A loaded order keeps its own handle; later orders count on from past the highest
+		// (never into a loaded order's Id, never below the live counter).
+		NextCommandId = FMath::Max(NextCommandId, C.CommandId + 1);
 		UplinkQueue.Add(MoveTemp(C));
 	}
 
@@ -11239,6 +11298,46 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v36: road edge #%d joins a node that does not exist"), E.Id);
 			}
 		}
+	}
+	// Districts (save v37, C5a). The ground maps and the membership caches re-derive on first read.
+	{
+		Districts.Reset();
+		int32 DistrictCount = 0;
+		Ar << DistrictCount;
+		TSet<FIntPoint> Held; // a lattice cell belongs to one district at most
+		TSet<int32> FloorsHeld;
+		for (int32 i = 0; i < DistrictCount; ++i)
+		{
+			FRHDistrict D;
+			Ar << D.Id << D.Kind << D.Name << D.RegionId << D.Level << D.Lattice;
+			D.Lattice.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+			bool bBad = RHDistricts::ResolveKind(D.Kind).IsNone() || D.Id <= 0 || (Districts.Num() > 0 && D.Id <= Districts.Last().Id) || D.Level > 0;
+			if (D.IsFloor())
+			{
+				bBad |= !D.Lattice.IsEmpty() || FloorsHeld.Contains(D.Level);
+				FloorsHeld.Add(D.Level);
+			}
+			else
+			{
+				for (const FIntPoint& Cell : D.Lattice)
+				{
+					bBad |= Held.Contains(Cell);
+					Held.Add(Cell);
+				}
+			}
+			if (bBad)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v37: district #%d '%s' (%s, level %d) is malformed or overlaps another"), D.Id, *D.Name, *D.Kind.ToString(), D.Level);
+			}
+			Districts.Add(MoveTemp(D));
+		}
+		Ar << NextDistrictId;
+		if (Districts.Num() > 0 && NextDistrictId <= Districts.Last().Id)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v37: next district Id %d is not past the highest (#%d); raised"), NextDistrictId, Districts.Last().Id);
+			NextDistrictId = Districts.Last().Id + 1;
+		}
+		++DistrictsVersion; // the ground maps and the membership caches re-derive on first read
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

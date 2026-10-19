@@ -3,6 +3,7 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHDistrictVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
 #include "Sound/SoundBase.h"
 #include "RHAgentSubsystem.h"
@@ -97,6 +98,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					Self->GuideHighWater = 0;
 					Self->GuideStep = -1;
 					Self->GuideInterrupt = INDEX_NONE;
+					// The loaded queue keeps its own CommandIds (save v37), so a load that brings back the
+					// very Ids the list shows could pass for "no change": force the rows (their labels and the
+					// Id each cancel button holds) to be rebuilt from the loaded queue.
+					Self->UplinkIdsShown.Reset();
+					Self->UplinkIdsShown.Add(INDEX_NONE);
 				}
 			});
 		}
@@ -112,6 +118,35 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	TSharedRef<SHorizontalBox> ZonePalette = SNew(SHorizontalBox);
 	TSharedRef<SHorizontalBox> FurnishPalette = SNew(SHorizontalBox);
 	TSharedRef<SHorizontalBox> WallsPalette = SNew(SHorizontalBox);
+	// C5a: the DISTRICT tab - one chip per Kind, in the Kind's own colour; the lit chip is the armed one.
+	TSharedRef<SHorizontalBox> DistrictPalette = SNew(SHorizontalBox);
+	for (const FName& Kind : RHDistricts::GetKinds())
+	{
+		DistrictPalette->AddSlot().AutoWidth()
+		[
+			SNew(SBox).Padding(FMargin(2.f, 0.f))
+			.ToolTipText(FText::FromString(FString::Printf(TEXT("%s district: drag a rectangle of 10 m cells on the ground (up to 32 x 32), or click a floor underground. Right-click to finish."), *URHDistrictVisualizerSubsystem::KindWord(Kind))))
+			[
+				SNew(SButton)
+				.ButtonStyle(&RHDeck::TintButtonStyle())
+				.ButtonColorAndOpacity_Lambda([this, Kind]()
+				{
+					const bool bArmed = PC.IsValid() && PC->IsDistrictMode() && PC->GetDistrictKind() == Kind;
+					const FLinearColor Tint = URHDistrictVisualizerSubsystem::KindColor(Kind);
+					return FSlateColor(bArmed ? FLinearColor(Tint.R * 0.75f, Tint.G * 0.75f, Tint.B * 0.75f, 1.f) : FLinearColor(Tint.R * 0.28f, Tint.G * 0.28f, Tint.B * 0.28f, 0.95f));
+				})
+				.ContentPadding(FMargin(9.f, 5.f))
+				.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDistrict, Kind))
+				[
+					SNew(STextBlock).Text(FText::FromString(URHDistrictVisualizerSubsystem::KindWord(Kind))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+				]
+			]
+		];
+	}
+	DistrictPalette->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(10.f, 0.f, 0.f, 0.f))
+	[
+		SNew(STextBlock).Text(FText::FromString(TEXT("drag on the ground, or click a floor underground"))).Font(RHDeck::Body(9)).ColorAndOpacity(RHDeck::TextDim)
+	];
 	int32 ZoneCount = 0;
 	int32 MaxDepth = 5;
 	if (const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr)
@@ -591,6 +626,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
+						BuildCityPanel()
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+					[
 						BuildFleetPanel()
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
@@ -794,6 +833,17 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 								SNew(STextBlock).Text(FText::FromString(TEXT("WALLS"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
 							]
 						]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 8.f, 0.f))
+						[
+							SNew(SButton)
+							.ButtonStyle(&RHDeck::TintButtonStyle())
+							.ButtonColorAndOpacity_Lambda([this]() { return FSlateColor(RowTab == 3 ? FLinearColor(0.15f, 0.45f, 0.55f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)); })
+							.ContentPadding(FMargin(8.f, 4.f))
+							.OnClicked_Lambda([this]() { RowTab = 3; return FReply::Handled(); })
+							[
+								SNew(STextBlock).Text(FText::FromString(TEXT("DISTRICT"))).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+							]
+						]
 						+ SHorizontalBox::Slot().AutoWidth()
 						[
 							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 0 ? EVisibility::Visible : EVisibility::Collapsed; }) [ ZonePalette ]
@@ -805,6 +855,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						+ SHorizontalBox::Slot().AutoWidth()
 						[
 							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 2 ? EVisibility::Visible : EVisibility::Collapsed; }) [ WallsPalette ]
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(SBox).Visibility_Lambda([this]() { return RowTab == 3 ? EVisibility::Visible : EVisibility::Collapsed; }) [ DistrictPalette ]
 						]
 					]
 				]
@@ -1002,6 +1056,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshUplinkPanel();
 	RefreshFleetPanel();
 	RefreshRosterPanel();
+	RefreshCityPanel();
 	RefreshGuide();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
@@ -1127,6 +1182,20 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		{
 			// C4: "Road 120 m" (the straight line between its two ends), not a bare verb.
 			Label = FString::Printf(TEXT("Road %.0f m"), FVector::Dist2D(C.Location, C.LocationB) / 100.0);
+		}
+		if (C.Verb == FName("PaintDistrict"))
+		{
+			// C5a: "Paint Homes district" / "Floor -1: Homes district".
+			Label = C.Level < 0 ? FString::Printf(TEXT("Floor %d: %s district"), C.Level, *C.Target.ToString()) : FString::Printf(TEXT("Paint %s district"), *C.Target.ToString());
+		}
+		else if (C.Verb == FName("EraseDistrict"))
+		{
+			const FRHDistrict* Doomed = Sim->FindDistrict((int32)C.Value);
+			Label = Doomed ? FString::Printf(TEXT("Erase %s"), *Doomed->Name) : FString::Printf(TEXT("Erase district #%d"), (int32)C.Value);
+		}
+		else if (C.Verb == FName("RenameDistrict"))
+		{
+			Label = FString::Printf(TEXT("Rename district #%d: %s"), (int32)C.Value, *C.Text);
 		}
 		if (C.Verb == FName("Demolish"))
 		{
@@ -1881,6 +1950,15 @@ FReply SRHCommandDeck::HandleZone(FName Room)
 	if (PC.IsValid())
 	{
 		PC->BeginZoneDesignation(Room);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleDistrict(FName Kind)
+{
+	if (PC.IsValid())
+	{
+		PC->BeginDistrictPaint(Kind);
 	}
 	return FReply::Handled();
 }

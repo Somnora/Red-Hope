@@ -10,6 +10,7 @@
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHCrewVisualizerSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
+#include "RHDistrictVisualizerSubsystem.h"
 #include "RHFrameStats.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -1782,6 +1783,124 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(
 		}
 		PC->Debug_RoadGhost(FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f),
 			FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
+	TEXT("RH.District"),
+	TEXT("RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>> - C5a districts. Cells are 10 m lattice cells (cell 0,0 is centred on the Lander, x1..x2 and y1..y2 corners in either order). paint, floor, erase and rename transmit the real uplink orders; mode arms the paint tool, ghost holds its drag ghost for a screenshot (no args to clear), labels shows every name, tab and city fold the deck."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
+		const FString Sub = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("list"));
+		const auto Cell = [&Args](int32 First) { return FIntPoint(FCString::Atoi(*Args[First]), FCString::Atoi(*Args[First + 1])); };
+		const auto LogPreflight = [&](const TCHAR* What, FName Kind, int32 Level, const FVector& From, const FVector& To)
+		{
+			FString Reason;
+			FRHDistrictPaintPreview Pre;
+			const bool bOk = Sim->CanPaintDistrict(Kind, Level, From, To, Reason, &Pre);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] %s %s: %d cell%s in the rectangle, %d new, %d outside coverage%s - %s"), What, *Kind.ToString(),
+				Pre.CellsInRect, Pre.CellsInRect == 1 ? TEXT("") : TEXT("s"), Pre.CellsNew, Pre.CellsOutside,
+				Pre.JoinId != 0 ? *FString::Printf(TEXT(", joins #%d"), Pre.JoinId) : TEXT(""), bOk ? TEXT("accepted for transmission") : *Reason);
+		};
+		if (Sub == TEXT("list"))
+		{
+			TArray<FRHDistrictCounts> Counts;
+			Sim->GetDistrictCounts(Counts);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] %d district%s (v%u, next Id %d); the shaft head stands at (%.0f, %.0f) m, bored to floor -%d"), Sim->GetDistricts().Num(), Sim->GetDistricts().Num() == 1 ? TEXT("") : TEXT("s"),
+				Sim->GetDistrictsVersion(), Sim->GetNextDistrictId(), Sim->GetShaftHeadCm().X / 100.0, Sim->GetShaftHeadCm().Y / 100.0, Sim->GetShaftDepth());
+			for (int32 i = 0; i < Sim->GetDistricts().Num(); ++i)
+			{
+				const FRHDistrict& D = Sim->GetDistricts()[i];
+				const FRHDistrictCounts& C = Counts[i];
+				UE_LOG(LogRedHope, Display, TEXT("[RH.District]   #%d '%s' %s %s: %d cell%s, %d building%s, %d bay%s, %d resident%s, %d bed%s, %d seat%s"), D.Id, *D.Name, *D.Kind.ToString(),
+					D.IsFloor() ? *FString::Printf(TEXT("floor %d"), D.Level) : TEXT("surface"), C.Cells, C.Cells == 1 ? TEXT("") : TEXT("s"), C.Buildings, C.Buildings == 1 ? TEXT("") : TEXT("s"),
+					C.Bays, C.Bays == 1 ? TEXT("") : TEXT("s"), C.Residents, C.Residents == 1 ? TEXT("") : TEXT("s"), C.Beds, C.Beds == 1 ? TEXT("") : TEXT("s"), C.Seats, C.Seats == 1 ? TEXT("") : TEXT("s"));
+			}
+			return;
+		}
+		if (Sub == TEXT("demand"))
+		{
+			const FRHCityDemand Dm = Sim->GetCityDemand();
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] demand at %d: Housing %.2f (%d bed(s) short of %d, limit %s; free %d, comfortable %d, vault %s) | Jobs %.2f (%d of %d seats filled, %d short) | Services %.2f (worst %s) | Air %.2f (%d home(s) short, margin %.1f sols)"),
+				Dm.Population, Dm.Housing, Dm.HousingBedsShort, Dm.HousingBedsWanted, *Dm.HousingLimit.ToString(), Dm.FreeBeds, Dm.ComfortCapacity, Dm.bVaultCertified ? TEXT("certified") : TEXT("not yet"),
+				Dm.Jobs, Dm.FilledSeats, Dm.TotalSeats, Dm.SeatsShort, Dm.Services, Dm.ServiceGaps.Num() > 0 ? *Dm.ServiceGaps[0].Function.ToString() : TEXT("-"), Dm.Air, Dm.HomesShort, Dm.MinOxygenMarginSols);
+			return;
+		}
+		if (Sub == TEXT("paint") && Args.Num() >= 6)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("PaintDistrict");
+			Cmd.Target = FName(*Args[1]);
+			Cmd.Location = URHSimWorldSubsystem::LatticeCentreCm(Cell(2));
+			Cmd.LocationB = URHSimWorldSubsystem::LatticeCentreCm(Cell(4));
+			LogPreflight(TEXT("paint"), Cmd.Target, 0, Cmd.Location, Cmd.LocationB);
+			Sim->EnqueueCommand(Cmd); // transmitted either way: the seam re-checks when it lands (and says why it refuses)
+			return;
+		}
+		if (Sub == TEXT("floor") && Args.Num() >= 3)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("PaintDistrict");
+			Cmd.Target = FName(*Args[1]);
+			Cmd.Level = FCString::Atoi(*Args[2]);
+			LogPreflight(TEXT("floor"), Cmd.Target, Cmd.Level, FVector::ZeroVector, FVector::ZeroVector);
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		if (Sub == TEXT("erase") && Args.Num() >= 2)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("EraseDistrict");
+			Cmd.Value = FCString::Atoi(*Args[1]);
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		if (Sub == TEXT("rename") && Args.Num() >= 3)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("RenameDistrict");
+			Cmd.Value = FCString::Atoi(*Args[1]);
+			TArray<FString> Words;
+			for (int32 i = 2; i < Args.Num(); ++i) { Words.Add(Args[i]); }
+			Cmd.Text = FString::Join(Words, TEXT(" "));
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		if (Sub == TEXT("labels") && Args.Num() >= 2)
+		{
+			if (URHDistrictVisualizerSubsystem* Viz = World->GetSubsystem<URHDistrictVisualizerSubsystem>())
+			{
+				Viz->SetShowAllLabels(FCString::Atoi(*Args[1]) != 0);
+			}
+			return;
+		}
+		if (PC && Sub == TEXT("mode") && Args.Num() >= 2)
+		{
+			PC->BeginDistrictPaint(FName(*Args[1]));
+			return;
+		}
+		if (PC && Sub == TEXT("ghost"))
+		{
+			if (Args.Num() >= 6) { PC->Debug_DistrictGhost(FName(*Args[1]), Cell(2), Cell(4)); }
+			else { PC->CancelModes(); }
+			return;
+		}
+		if (PC && Sub == TEXT("tab"))
+		{
+			PC->Debug_ShowDistrictTab();
+			return;
+		}
+		if (PC && Sub == TEXT("city"))
+		{
+			PC->Debug_SetCityExpanded(Args.Num() < 2 || FCString::Atoi(*Args[1]) != 0);
+			return;
+		}
+		UE_LOG(LogRedHope, Error, TEXT("Usage: RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>>"));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDepositLeft(

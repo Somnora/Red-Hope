@@ -42,6 +42,18 @@ public:
 	// Capture/QA (RH.RoadGhost): hold the road ghost mid-drag from one point to
 	// another, as if the mouse were down there; it never transmits.
 	void Debug_RoadGhost(const FVector& FromCm, const FVector& ToCm);
+	// District paint mode (C5a): pick a Kind on the deck's DISTRICT tab (or the City panel). On the
+	// surface press anchors a corner of a lattice rectangle (10 m cells, at most 32 x 32), drag sizes
+	// it under a ghost that shows the sim's own preflight - the cells it adds, the district it joins,
+	// what is out of grid coverage - and release transmits a PaintDistrict order; underground one
+	// click makes the floor you are on a district. The mode stays armed for the next district;
+	// cancel exits.
+	void BeginDistrictPaint(FName Kind);
+	bool IsDistrictMode() const { return bDistrictMode; }
+	FName GetDistrictKind() const { return DistrictKind; }
+	// Capture/QA (RH.District ghost): hold the paint ghost mid-drag between two lattice cells, as if
+	// the mouse were down there; it never transmits.
+	void Debug_DistrictGhost(FName Kind, const FIntPoint& FromCell, const FIntPoint& ToCell);
 	// Paint-to-size excavation (M1-d Gate A2): click anchors a corner on the
 	// active subsurface floor, drag sizes the rectangle, release transmits an
 	// Excavate order counted in 10x10 m cells.
@@ -62,6 +74,9 @@ public:
 	void BeginFit(FName Row);
 	bool IsFitMode() const { return bFitMode; }
 	void Debug_ShowWallsTab();
+	// Capture/QA (RH.DeckDistrict): show the deck's DISTRICT tab; RH.DeckCity folds the City panel.
+	void Debug_ShowDistrictTab();
+	void Debug_SetCityExpanded(bool bOn);
 	bool IsFurnishMode() const { return bFurnishMode; }
 	FName GetFurnishRow() const { return FurnishRow; }
 	bool IsSellMode() const { return bSellMode; }
@@ -205,6 +220,13 @@ private:
 	// A ground point snapped to the road grid, and to an existing junction within
 	// 4 m of it (so a stretch can start exactly where another ends).
 	FVector SnapRoadPoint(const FVector& GroundCm) const;
+	// District paint state (C5a).
+	bool bDistrictMode = false;
+	bool bDistrictDragging = false;
+	bool bDistrictForced = false;
+	FName DistrictKind;
+	FIntPoint DistrictAnchor = FIntPoint::ZeroValue;
+	FIntPoint DistrictForcedTo = FIntPoint::ZeroValue;
 	// Zone designation state (M2 Gate B).
 	bool bZoneMode = false;
 	FName ZoneRoom;
