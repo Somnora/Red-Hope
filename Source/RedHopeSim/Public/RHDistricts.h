@@ -51,6 +51,10 @@ struct REDHOPESIM_API FRHDistrict
 	int32 RegionId = 0;         // several regions are step 4; the field rides along from the start
 	int32 Level = 0;            // 0 = surface; < 0 = the whole of that underground floor
 	TArray<FIntPoint> Lattice;  // surface only, sorted by (X, Y), no duplicates
+	// C5b: the player's growth switch. On (the default), a Homes or Civic district is built up
+	// by the colony itself when it has demand and material; off, the colony leaves it alone (a
+	// project already open still finishes). Saved with the district (v38).
+	bool bGrowth = true;
 
 	bool IsFloor() const { return Level < 0; }
 };

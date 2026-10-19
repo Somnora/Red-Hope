@@ -992,6 +992,42 @@ void SRHCommandDeck::RefreshCityPanel()
 		CityCounts.Reset();
 		for (const FRHDistrictCounts& C : Counts) { CityCounts.Add(C.DistrictId, C); }
 	}
+	// C5b: the growth list - one bar a project; a bar reads its project live, so only a start, a finish or a refund rebuilds it.
+	if (CityGrowthList.IsValid() && (Sim->GetGrowthVersion() != CityGrowthVersionShown || Sim->GetDistrictsVersion() != CityGrowthDistrictsShown))
+	{
+		CityGrowthVersionShown = Sim->GetGrowthVersion();
+		CityGrowthDistrictsShown = Sim->GetDistrictsVersion();
+		CityGrowthList->ClearChildren();
+		if (Sim->GetGrowthProjects().Num() == 0)
+		{
+			CityGrowthList->AddSlot().AutoHeight()
+			[
+				// Placeholder wording (Gate-D review).
+				Prose(Txt(TEXT("Nothing is being built. In a Homes or Civic district the city builds for itself when homes or services run short and it has the material to spare.")), D::TextDim, 9)
+			];
+		}
+		for (const FRHGrowthProject& Project : Sim->GetGrowthProjects())
+		{
+			const int32 DistrictId = Project.DistrictId;
+			const FRHDistrict* Owner = Sim->FindDistrict(DistrictId);
+			const FString Name = Owner ? Owner->Name : FString::Printf(TEXT("#%d"), DistrictId);
+			const FName OwnerKind = Owner ? Owner->Kind : FName();
+			const FString What = Sim->DescribeGrowthProject(Project);
+			const auto Live = [this, DistrictId]() -> const FRHGrowthProject*
+			{
+				const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+				const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+				return S ? S->FindGrowthProject(DistrictId) : nullptr;
+			};
+			CityGrowthList->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+			[
+				BarRow(Txt(FString::Printf(TEXT("%s: %s"), *Name, *What)),
+					MakeAttributeLambda([Live]() { const FRHGrowthProject* P = Live(); return Txt(FString::Printf(TEXT("%.0f%%"), P ? P->Progress() * 100.0 : 100.0)); }),
+					MakeAttributeLambda([Live]() { const FRHGrowthProject* P = Live(); return TOptional<float>(P ? (float)P->Progress() : 1.f); }),
+					FSlateColor(URHDistrictVisualizerSubsystem::KindColor(OwnerKind)))
+			];
+		}
+	}
 	if (!CityDistrictList.IsValid() || Sim->GetDistrictsVersion() == CityVersionShown)
 	{
 		return;
@@ -1097,6 +1133,65 @@ void SRHCommandDeck::RefreshCityPanel()
 						C ? C->Residents : 0, PluralS(C ? C->Residents : 0), C ? C->Beds : 0, PluralS(C ? C->Beds : 0), C ? C->Seats : 0, PluralS(C ? C->Seats : 0)));
 				})
 			]
+			// C5b: Homes and Civic districts grow by themselves; this line says what they are doing, and the chip is the switch.
+			+ SVerticalBox::Slot().AutoHeight().Padding(11.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				.Visibility((Kind == FName("Homes") || Kind == FName("Civic")) ? EVisibility::Visible : EVisibility::Collapsed)
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Text_Lambda([this, Id]()
+					{
+						const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+						const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+						if (!S) { return FText(); }
+						if (const FRHGrowthProject* P = S->FindGrowthProject(Id))
+						{
+							return Txt(FString::Printf(TEXT("Growing: %s - %.0f%%"), *S->DescribeGrowthProject(*P), P->Progress() * 100.0));
+						}
+						if (!S->IsDistrictGrowthOn(Id)) { return Txt(TEXT("Growth is switched off.")); }
+						FString Note = S->GetGrowthNote(Id);
+						if (Note == TEXT("a project is under way")) { Note.Reset(); } // from before the project ended; the next sol's check rewrites it
+						return Txt(Note.IsEmpty() ? FString(TEXT("Waiting for the next sol's check.")) : FString::Printf(TEXT("Not growing: %s."), *Note));
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+				[
+					SNew(SButton)
+					.ButtonStyle(&D::TintButtonStyle())
+					.ContentPadding(FMargin(6.f, 1.f))
+					.ToolTipText(Txt(TEXT("When on, the city builds homes (a Homes district) or services (a Civic district) here by itself, when they run short and it has the material to spare. A project already under way still finishes.")))
+					.ButtonColorAndOpacity_Lambda([this, Id]()
+					{
+						const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+						const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+						const bool bOn = S && S->IsDistrictGrowthOn(Id);
+						return FSlateColor(bOn ? FLinearColor(D::Teal.R * 0.45f, D::Teal.G * 0.45f, D::Teal.B * 0.45f, 0.95f) : FLinearColor(0.16f, 0.18f, 0.2f, 0.95f));
+					})
+					.OnClicked_Lambda([this, Id]()
+					{
+						const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+						URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+						if (S)
+						{
+							const bool bNow = !S->IsDistrictGrowthOn(Id);
+							S->SetDistrictGrowth(Id, bNow);
+							PC->PostConfirm(bNow ? TEXT("Growth switched on") : TEXT("Growth switched off"), FLinearColor(0.2f, 0.9f, 1.f));
+						}
+						return FReply::Handled();
+					})
+					[
+						SNew(STextBlock).Font(D::Label(8)).ColorAndOpacity(D::Text)
+						.Text_Lambda([this, Id]()
+						{
+							const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+							const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+							return Txt((S && S->IsDistrictGrowthOn(Id)) ? TEXT("GROWTH ON") : TEXT("GROWTH OFF"));
+						})
+					]
+				]
+			]
 		];
 	}
 }
@@ -1196,6 +1291,28 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 				return FString::Printf(TEXT("Air: %d home%s (%d resident%s) on short rations - %s is the scarcest. Restore it to bring rations back to full."),
 					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg);
 			})
+	];
+	// C5b: what the city is building. The projects' bars, and the reason when the whole city's growth is paused.
+	CityGrowthList = SNew(SVerticalBox);
+	CityGrowthVersionShown = MAX_uint32; // built empty: the first refresh fills it
+	CityGrowthDistrictsShown = MAX_uint32;
+	Body->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+	[
+		SNew(SVerticalBox)
+		.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetDistricts().Num() > 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::TextDim)
+			.Text_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); const int32 N = S ? S->GetGrowthProjects().Num() : 0; return Txt(FString::Printf(TEXT("GROWTH  (%d under way)"), N)); })
+		]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			Prose(MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S && !S->GetGrowthPause().IsEmpty() ? FString::Printf(TEXT("Growth %s."), *S->GetGrowthPause()) : FString()); }), D::Amber, 9)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+		[
+			CityGrowthList.ToSharedRef()
+		]
 	];
 	// Paint chips: the same kinds as the DISTRICT tab, here so the panel is enough on its own.
 	TSharedRef<SWrapBox> Chips = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(3.f, 3.f));

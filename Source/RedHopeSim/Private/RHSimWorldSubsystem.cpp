@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 37;  // v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 38;  // v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -157,6 +157,23 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	BigArrivalFreeBeds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalFreeBeds"), BigArrivalFreeBeds));
 	BigArrivalColonists = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalColonists"), BigArrivalColonists));
 	MoveHomeIntervalSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("MoveHomeIntervalSols"), MoveHomeIntervalSols));
+	// C5b: city growth (the same fallbacks as RH_Config.csv).
+	GrowthReserveStructKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthReserveStructKg"), GrowthReserveStructKg));
+	GrowthReserveO2Sols = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthReserveO2Sols"), GrowthReserveO2Sols));
+	GrowthModuleSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthModuleSols"), GrowthModuleSols));
+	GrowthCellSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthCellSols"), GrowthCellSols));
+	GrowthRoomSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthRoomSols"), GrowthRoomSols));
+	GrowthCellsPerProject = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("GrowthCellsPerProject"), GrowthCellsPerProject));
+	GrowthBunksPerHome = FMath::Clamp((int32)Defs->GetConfigScalar(FName("GrowthBunksPerHome"), GrowthBunksPerHome), 0, 4);
+	Defs->ForEachRoom([](FName RowName, const FRHRoomRow& Row)
+	{
+		// A civic service is zoned beside homes: it must never emit Odor. A row that does is refused at
+		// planning time; saying so here, once, is what makes a data slip loud.
+		if (Row.CivicService && URHSimWorldSubsystem::RoomEmitsTag(Row, TEXT("Odor")))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("Room row '%s' is a CivicService but emits Odor - the city will never zone it"), *RowName.ToString());
+		}
+	});
 	ColonistEvacSols = Defs->GetConfigScalar(FName("ColonistEvacSols"), ColonistEvacSols);
 	HopeBase = Defs->GetConfigScalar(FName("HopeBase"), HopeBase);
 	HopeHousingMax = Defs->GetConfigScalar(FName("HopeHousingMax"), HopeHousingMax);
@@ -476,6 +493,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepHope(SubDt); // after population so the mood reflects this step's support state
 	StepGrowth(SubDt); // a flourishing colony grows (reads the mood StepHope just set)
 	StepBigArrival(SubDt); // and one that holds its Hope draws the big wave, once (C2b)
+	StepCityGrowth(SubDt); // and its districts grow, one project a sol (C5b)
 	StepDiscovery(SubDt); // and its labs uncover what Mars is hiding
 	StepTrade(SubDt); // the convoy rolls toward the neighbors
 	StepEarth(SubDt); // and Earth watches Mars connect to itself
@@ -642,6 +660,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepHope(DtSimSeconds); // same order as the agent band (parity)
 	StepGrowth(DtSimSeconds); // same order as the agent band (parity)
 	StepBigArrival(DtSimSeconds); // same order as the agent band (parity)
+	StepCityGrowth(DtSimSeconds); // same order as the agent band (parity)
 	StepDiscovery(DtSimSeconds); // same order as the agent band (parity)
 	StepTrade(DtSimSeconds); // same order as the agent band (parity)
 	StepEarth(DtSimSeconds); // same order as the agent band (parity)
@@ -4948,6 +4967,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 	// every candidate (emitter, refuser) pair - a string parse in a C^2 loop.
 	// The reference RefusesOf returns is valid until the next call.
 	TMap<const FRHRoomRow*, TArray<FString>> RefuseCache;
+	TMap<const FRHRoomRow*, TArray<FString>> EmitCache; // C5b: the surface loop splits each emitting row once
 	const auto RefusesOf = [&RefuseCache](const FRHRoomRow* Row) -> const TArray<FString>&
 	{
 		TArray<FString>* Found = RefuseCache.Find(Row);
@@ -5179,22 +5199,52 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		TArray<uint8> Offended; // per bay, as on a floor
 		Offended.Init(0, Rows.Num());
 		const bool bCirc = IsNetCirculated(Net);
+		// An emitter reaches the twelve cells within Manhattan distance two, as on a floor, so each looks them up in a
+		// position index instead of comparing itself with every bay of its network (emitters x bays: a 500-bay network
+		// with a hundred emitters cost 0.4 ms a read, C5b -scale). The pairs it finds are the same ones; only the search
+		// changed, and a network with no emitter builds no index at all.
+		bool bAnyEmitter = false;
+		for (const FRHRoomRow* Row : Rows)
+		{
+			bAnyEmitter |= Row && !Row->EmitsTags.IsEmpty();
+		}
+		if (!bAnyEmitter)
+		{
+			continue;
+		}
+		TMap<FIntPoint, int32> IndexAt; // lookups only, never iterated
+		IndexAt.Reserve(Rows.Num());
+		for (int32 I = 0; I < Rows.Num(); ++I)
+		{
+			IndexAt.Add(Pos[I], I);
+		}
+		static const FIntPoint Reach[12] = {
+			FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1),
+			FIntPoint(2, 0), FIntPoint(-2, 0), FIntPoint(0, 2), FIntPoint(0, -2),
+			FIntPoint(1, 1), FIntPoint(1, -1), FIntPoint(-1, 1), FIntPoint(-1, -1) };
 		for (int32 E = 0; E < Rows.Num(); ++E)
 		{
 			if (!Rows[E] || Rows[E]->EmitsTags.IsEmpty())
 			{
 				continue;
 			}
-			TArray<FString> Emits;
-			Rows[E]->EmitsTags.ParseIntoArray(Emits, TEXT(";"));
-			for (int32 R = 0; R < Rows.Num(); ++R)
+			TArray<FString>* Cached = EmitCache.Find(Rows[E]);
+			if (!Cached)
 			{
-				if (R == E || !Rows[R] || Rows[R]->RefusesTags.IsEmpty())
+				TArray<FString> Tags;
+				Rows[E]->EmitsTags.ParseIntoArray(Tags, TEXT(";"));
+				Cached = &EmitCache.Add(Rows[E], MoveTemp(Tags));
+			}
+			const TArray<FString>& Emits = *Cached; // EmitCache is not added to inside this emitter's loop
+			for (const FIntPoint& Off : Reach)
+			{
+				const int32* Found = IndexAt.Find(Pos[E] + Off);
+				if (!Found)
 				{
 					continue;
 				}
-				const int32 Dist = FMath::Abs(Pos[E].X - Pos[R].X) + FMath::Abs(Pos[E].Y - Pos[R].Y);
-				if (Dist > 2)
+				const int32 R = *Found;
+				if (!Rows[R] || Rows[R]->RefusesTags.IsEmpty())
 				{
 					continue;
 				}
@@ -5208,18 +5258,19 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 				{
 					continue;
 				}
-				if (Dist == 2 && bCirc)
+				if (FMath::Abs(Off.X) + FMath::Abs(Off.Y) == 2 && bCirc)
 				{
+					// A Hallway on any bay 4-adjacent to BOTH ends partitions the pair (straight runs have one such bay,
+					// diagonals two): the emitter's four neighbours that are Hallways and one step from the refuser.
 					bool bPartitioned = false;
-					for (int32 Hx = 0; Hx < Rows.Num() && !bPartitioned; ++Hx)
+					for (int32 U = 0; U < 4 && !bPartitioned; ++U)
 					{
-						if (!Rows[Hx] || Rows[Hx]->Function != NHallway)
+						const int32* H = IndexAt.Find(Pos[E] + Reach[U]);
+						if (H && Rows[*H] && Rows[*H]->Function == NHallway)
 						{
-							continue;
+							const FIntPoint Gap = Pos[*H] - Pos[R];
+							bPartitioned = FMath::Abs(Gap.X) + FMath::Abs(Gap.Y) == 1;
 						}
-						const int32 DE = FMath::Abs(Pos[Hx].X - Pos[E].X) + FMath::Abs(Pos[Hx].Y - Pos[E].Y);
-						const int32 DR = FMath::Abs(Pos[Hx].X - Pos[R].X) + FMath::Abs(Pos[Hx].Y - Pos[R].Y);
-						bPartitioned = (DE == 1 && DR == 1);
 					}
 					if (bPartitioned)
 					{
@@ -6022,7 +6073,7 @@ const FRHRoomRow* URHSimWorldSubsystem::GetDomeRoom(const FRHBuildingInstance& B
 	return (Row && IsGardenFunction(Row->Function)) ? Row : nullptr;
 }
 
-bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY) const
+bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY, bool bCheckMaterials) const
 {
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(DefName) : nullptr;
 	if (!Def)
@@ -6361,7 +6412,11 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 			}
 		}
 	}
-	if (Def->ImportOnly)
+	if (!bCheckMaterials)
+	{
+		// C5b: the bill is already paid (growth takes it whole at the start); the site rules above are all that is left.
+	}
+	else if (Def->ImportOnly)
 	{
 		// Imported hardware: needs flat-pack stock, never Struct.
 		const int32* Stock = ImportStock.Find(DefName);
@@ -9014,7 +9069,7 @@ uint32 URHSimWorldSubsystem::BuildingMaskInCell(const FIntVector& Key, uint32 Pr
 	return M;
 }
 
-bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued) const
+bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued, bool bCheckCost) const
 {
 	if (!Defs || !Defs->HasFurnitureCatalogue())
 	{
@@ -9108,6 +9163,10 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 				return false;
 			}
 		}
+	}
+	if (!bCheckCost)
+	{
+		return true; // C5b: the city's growth has paid its bill whole at the start
 	}
 	for (const auto& Line : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
 	{
@@ -10816,10 +10875,39 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			FName DKind = D.Kind;
 			FString DName = D.Name;
 			TArray<FIntPoint> DLattice = D.Lattice;
-			Ar << DId << DKind << DName << DRegion << DLevel << DLattice;
+			uint8 DGrowth = D.bGrowth ? 1 : 0; // v38
+			Ar << DId << DKind << DName << DRegion << DLevel << DLattice << DGrowth;
 		}
 		int32 NextDistrict = NextDistrictId;
 		Ar << NextDistrict;
+	}
+	// City growth (save v38, C5b): the round-robin cursor and the sol whose boundary has been checked, then
+	// the open projects in ascending DistrictId, each with its bill in name order. The notes, the pause and
+	// this sol's alert tallies are runtime readouts and are never saved.
+	{
+		Ar << GrowthCursor << GrowthCheckedSol;
+		int32 ProjectCount = GrowthProjects.Num();
+		Ar << ProjectCount;
+		for (const FRHGrowthProject& P : GrowthProjects)
+		{
+			int32 PDistrict = P.DistrictId, PLevel = P.Level, PHab = P.HabId, PCells = P.Cells, PFirst = P.FirstCell, PIndex = P.Index;
+			uint8 PKind = (uint8)P.Kind, PCarve = P.bCarve ? 1 : 0;
+			FIntPoint PCell = P.Cell, PSize = P.Size;
+			FName PRoom = P.Room;
+			double PTotal = P.TotalSols, PRemaining = P.RemainingSols;
+			Ar << PDistrict << PKind << PLevel << PCell << PSize << PHab << PCells << PFirst << PIndex << PCarve << PRoom << PTotal << PRemaining;
+			TArray<FName> BillKeys;
+			P.Bill.GetKeys(BillKeys);
+			BillKeys.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+			int32 BillCount = BillKeys.Num();
+			Ar << BillCount;
+			for (const FName& K : BillKeys)
+			{
+				FName Key = K;
+				double Kg = P.Bill.FindChecked(K);
+				Ar << Key << Kg;
+			}
+		}
 	}
 
 	const FString Path = SaveSlotToPath(Slot);
@@ -11309,7 +11397,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		for (int32 i = 0; i < DistrictCount; ++i)
 		{
 			FRHDistrict D;
-			Ar << D.Id << D.Kind << D.Name << D.RegionId << D.Level << D.Lattice;
+			uint8 DGrowth = 1;
+			Ar << D.Id << D.Kind << D.Name << D.RegionId << D.Level << D.Lattice << DGrowth;
+			D.bGrowth = DGrowth != 0; // v38
 			D.Lattice.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
 			bool bBad = RHDistricts::ResolveKind(D.Kind).IsNone() || D.Id <= 0 || (Districts.Num() > 0 && D.Id <= Districts.Last().Id) || D.Level > 0;
 			if (D.IsFloor())
@@ -11338,6 +11428,45 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			NextDistrictId = Districts.Last().Id + 1;
 		}
 		++DistrictsVersion; // the ground maps and the membership caches re-derive on first read
+	}
+	// City growth (save v38, C5b).
+	{
+		GrowthProjects.Reset();
+		GrowthNotes.Reset();
+		GrowthPause.Reset();
+		GrowthSolStarted.Reset();
+		GrowthSolFinished.Reset();
+		GrowthSolRefused.Reset();
+		Ar << GrowthCursor << GrowthCheckedSol;
+		int32 ProjectCount = 0;
+		Ar << ProjectCount;
+		for (int32 i = 0; i < ProjectCount; ++i)
+		{
+			FRHGrowthProject P;
+			uint8 PKind = 0, PCarve = 0;
+			Ar << P.DistrictId << PKind << P.Level << P.Cell << P.Size << P.HabId << P.Cells << P.FirstCell << P.Index << PCarve << P.Room << P.TotalSols << P.RemainingSols;
+			P.Kind = (ERHGrowthKind)PKind;
+			P.bCarve = PCarve != 0;
+			int32 BillCount = 0;
+			Ar << BillCount;
+			for (int32 b = 0; b < BillCount; ++b)
+			{
+				FName Key;
+				double Kg = 0.0;
+				Ar << Key << Kg;
+				P.Bill.Add(Key, Kg);
+			}
+			const FRHDistrict* Owner = FindDistrict(P.DistrictId);
+			const bool bKindOk = Owner && PKind <= (uint8)ERHGrowthKind::CivicRoom && ((P.Kind == ERHGrowthKind::CivicRoom) == (Owner->Kind == FName(TEXT("Civic"))));
+			const bool bSorted = GrowthProjects.Num() == 0 || GrowthProjects.Last().DistrictId < P.DistrictId;
+			if (!bKindOk || !bSorted)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v38: the growth project of district #%d is malformed (no such district, the wrong kind, or out of order); dropped"), P.DistrictId);
+				continue;
+			}
+			GrowthProjects.Add(MoveTemp(P));
+		}
+		++GrowthVersion;
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

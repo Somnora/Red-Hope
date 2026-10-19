@@ -17,7 +17,7 @@ namespace
 	constexpr float DashGapCm = 200.f;
 	constexpr float GhostWidthFrac = 0.55f; // the dashes are narrower than the road they promise
 
-	struct FAcc
+	struct FRoadAcc
 	{
 		TArray<FVector> V;
 		TArray<int32> I;
@@ -120,7 +120,7 @@ void URHRoadVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim)
 	const FRHRoadGraph& G = Sim.GetRoadGraph();
 	const FRHRoadParams& Prm = Sim.GetRoadParams();
 	const float HalfW = 0.5f * (float)Prm.WidthCm;
-	FAcc Built, Planned;
+	FRoadAcc Built, Planned;
 	TSet<int32> BuiltNodes; // lookups only
 	for (const FRHRoadEdge& E : G.Edges)
 	{

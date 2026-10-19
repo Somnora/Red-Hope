@@ -250,6 +250,13 @@ struct REDHOPESIM_API FRHRoomRow : public FTableRowBase
 	// Output multiplier per filled seat: Lab-line seats multiply discovery
 	// seat-hour accrual; Workstation-line seats feed the fabrication bonus.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float YieldMul = 1.f;
+	// C5b (2026-10-19): a service the city may zone for itself inside a Civic district when
+	// that function's coverage has a gap (Dining, Infirmary). A CivicService row must never
+	// emit Odor (it is zoned beside homes): the sim refuses one that does, loudly.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool CivicService = false;
+	// C5b: the furniture rows the city fits such a room with, "DiningTable;Chair;Chair" - a
+	// piece a row, repeats allowed. Their cost is part of the project's bill.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString CivicFurniture;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };

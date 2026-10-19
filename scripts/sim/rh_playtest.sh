@@ -28,6 +28,14 @@
 # (config-row overrides, and -RHQuotas=<row> for any dormant quota row; both
 # log loudly).
 #
+# City layer (C5b): RH_PLAYTEST_DISTRICTS=1 adds the districts option - the bot paints a
+# Homes district over floor -1 once it rates (and over a rated surface habitat, if it has one),
+# carves and rates floor -2 for a Civic district, and the timeline gains GROWTH lines (each
+# project's start and end, one a sol) and a REPORT block of what the city built:
+#   RH_PLAYTEST_DISTRICTS=1 bash scripts/sim/rh_playtest.sh 110 c5b_full guide full
+# RH_PLAYTEST_NOGROWTH=1 (with the above) is the control: the same painting and the same
+# second floor, but the city's growth is switched off, so the difference is the growth alone.
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -53,7 +61,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

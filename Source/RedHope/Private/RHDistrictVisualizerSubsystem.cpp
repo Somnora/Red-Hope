@@ -20,7 +20,7 @@ namespace
 	constexpr float BorderOpacity = 0.75f;
 	constexpr float LabelLiftCm = 450.f;   // the name floats above the roofs, so a building never hides it
 
-	struct FAcc
+	struct FWashAcc
 	{
 		TArray<FVector> V;
 		TArray<int32> I;
@@ -47,11 +47,11 @@ namespace
 	};
 
 	// Section k of a mesh: fills 0..4 then borders 5..9, one per Kind.
-	void Flush(UProceduralMeshComponent* Mesh, TArray<FAcc>& Sections)
+	void Flush(UProceduralMeshComponent* Mesh, TArray<FWashAcc>& Sections)
 	{
 		for (int32 S = 0; S < Sections.Num(); ++S)
 		{
-			FAcc& A = Sections[S];
+			FWashAcc& A = Sections[S];
 			if (A.V.Num() > 0)
 			{
 				Mesh->CreateMeshSection_LinearColor(S, A.V, A.I, A.N, A.UV, A.C, A.T, false);
@@ -76,7 +76,7 @@ namespace
 
 	// One quad across a cell edge: from (Ax, Ay) to (Bx, By), BorderWidthCm in toward (InX, InY).
 	template <typename HeightFn>
-	void EdgeStrip(FAcc& Acc, double Ax, double Ay, double Bx, double By, double InX, double InY, HeightFn Height)
+	void EdgeStrip(FWashAcc& Acc, double Ax, double Ay, double Bx, double By, double InX, double InY, HeightFn Height)
 	{
 		const FVector A = Height(Ax, Ay), B = Height(Bx, By);
 		const FVector A2 = Height(Ax + InX * BorderWidthCm, Ay + InY * BorderWidthCm), B2 = Height(Bx + InX * BorderWidthCm, By + InY * BorderWidthCm);
@@ -212,7 +212,7 @@ UTextRenderComponent* URHDistrictVisualizerSubsystem::MakeLabel(const FString& T
 
 void URHDistrictVisualizerSubsystem::RebuildSurface(const URHSimWorldSubsystem& Sim)
 {
-	TArray<FAcc> Sections;
+	TArray<FWashAcc> Sections;
 	Sections.SetNum(KindCount * 2);
 	ClearLabels(SurfaceLabels);
 	const auto Ground = [](double X, double Y) { return OnGround(X, Y, FillLiftCm); };
@@ -243,7 +243,7 @@ void URHDistrictVisualizerSubsystem::RebuildSurface(const URHSimWorldSubsystem& 
 				}
 			}
 			// The border: a strip inside every edge that opens onto ground this district does not hold.
-			FAcc& B = Sections[KindCount + K];
+			FWashAcc& B = Sections[KindCount + K];
 			const double Xm = 0.5 * (X0 + X1), Ym = 0.5 * (Y0 + Y1);
 			if (!Cells.Contains(FIntPoint(C.X - 1, C.Y)))
 			{
@@ -289,7 +289,7 @@ void URHDistrictVisualizerSubsystem::RebuildSurface(const URHSimWorldSubsystem& 
 
 void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Sim, int32 Level)
 {
-	TArray<FAcc> Sections;
+	TArray<FWashAcc> Sections;
 	Sections.SetNum(KindCount * 2);
 	ClearLabels(FloorLabels);
 	const int32 DistrictId = Sim.GetDistrictOfFloor(Level);
@@ -314,7 +314,7 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 			const double X0 = Head.X + (C.X - 0.5) * 1000.0, X1 = Head.X + (C.X + 0.5) * 1000.0;
 			const double Y0 = Head.Y + (C.Y - 0.5) * 1000.0, Y1 = Head.Y + (C.Y + 0.5) * 1000.0;
 			Sections[K].Quad(Fill(X0, Y0), Fill(X1, Y0), Fill(X1, Y1), Fill(X0, Y1));
-			FAcc& B = Sections[KindCount + K];
+			FWashAcc& B = Sections[KindCount + K];
 			if (!Cells.Contains(FIntPoint(C.X - 1, C.Y))) { EdgeStrip(B, X0, Y0, X0, Y1, 1, 0, Edge); }
 			if (!Cells.Contains(FIntPoint(C.X + 1, C.Y))) { EdgeStrip(B, X1, Y0, X1, Y1, -1, 0, Edge); }
 			if (!Cells.Contains(FIntPoint(C.X, C.Y - 1))) { EdgeStrip(B, X0, Y0, X1, Y0, 0, 1, Edge); }

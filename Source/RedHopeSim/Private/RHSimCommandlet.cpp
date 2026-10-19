@@ -7668,6 +7668,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("districts")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== DISTRICTS TEST (C5a, 2026-10-19) ==="));
+		// C5b: this suite paints Homes and Civic districts over a colony with material and demand, and its
+		// checks are about the districts themselves; what the colony builds in them is the -citygrowth suite's.
+		Sim->Debug_SetGrowthEnabled(false);
 		int32 Fails = 0, Checks = 0;
 		const auto Expect = [&](bool bOk, const FString& What)
 		{
@@ -8325,6 +8328,863 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// C5b self-test (living-city gate 5b, 2026-10-19): CITY GROWTH. `-citygrowth` (the -growth suite is the births').
+	// Fails loudly. The fixture is the -districts recipe grown a little: a Lander (30 m of coverage) and two
+	// Pylons (40 m each, east and west), two rated four-bay surface networks (N1 east, N2 west, each two 2 x 1
+	// shells edge to edge with a filter inside), a shaft to -2 with floors -1 and -2 carved to four cells and
+	// rated, eight colonists (four on floor -1, four in N1) and five districts: #1 Homes over N1's ground, #2
+	// Civic over N2's, #3 Homes on floor -1, #4 Civic on floor -2 and #5 Industry. A SolarArray stands on
+	// lattice cell (2,0) and the Pylon on (5,0), so the nearest free ground to N1 is the 2 x 2 at (3,1). The
+	// first CEO quota stays OPEN (Water is held under its 200 kg bill), so its Struct and Oxygen bills stand
+	// between growth and the stores. The base state is saved once and every scenario starts from a load of it.
+	//  (a) the data: the seven Growth config rows, the CivicService and CivicFurniture columns, and the bunk bed;
+	//  (b) a colony with no districts never grows (with demand and material), and the bill, the money and the
+	//      pauses: per-resource reserves and the open quota's bill (Struct, Oxygen), Shielding short, the whole
+	//      bill atomically, a construction site's hopper never counted, the quota met and its bill gone;
+	//  (c) the gates: Homes need a housing shortfall, Industry never grows, an open project and a switched-off
+	//      district are skipped, the two pauses (a home on short rations, Hope failing);
+	//  (d) surface Homes: the nearest candidate, the largest module that fits, only INSIDE the district, touching
+	//      only the target network, off a road, the sealed-network skip, the completion step;
+	//  (e) underground Homes: a rated floor, four cells carved directly, bunks, no Borer, no hydrogen;
+	//  (f) civic: the worst gap (and the lexical tie), a room already under way counted, the adjacency check, the
+	//      carve when no cell is free, a CivicService that emits Odor is never zoned;
+	//  (g) one start per sol colony-wide, round-robin by Id, one alert a sol, a home staying rated through each
+	//      completion;
+	//  (h) a completion whose site changed refunds the whole bill; an erase cancels with a full refund; the
+	//      toggle survives a save; a project saved halfway finishes on the SAME step as a twin that never saved;
+	//  (i) ten sols in the era band and in the agent band: the same ledger.
+	if (FParse::Param(*Params, TEXT("citygrowth")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CITY GROWTH TEST (C5b, 2026-10-19) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("CITYGROWTH ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("CITYGROWTH FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double AgentDt = (double)URHSimClockSubsystem::SubStepSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		const FName NHomes(TEXT("Homes")), NIndustry(TEXT("Industry")), NCivic(TEXT("Civic"));
+		const FName NStruct(TEXT("Struct")), NShield(TEXT("Shielding")), NOx(TEXT("Oxygen")), NWater(TEXT("Water")), NFood(TEXT("Food")), NHyd(TEXT("Hydrogen"));
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		FString R, Note;
+		TArray<FString> Rejects, Alerts;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		const auto GrowthAlerts = [&]() { int32 N = 0; for (const FString& A : Alerts) { N += A.StartsWith(TEXT("CITY GROWTH")) ? 1 : 0; } return N; };
+		double PinHope = -1.0; // >= 0: smoothed Hope is held there before every step
+		const auto SetHope = [&](double V) { PinHope = V; if (V >= 0.0) { Sim->Debug_SetHopeSmoothed(V); } };
+		// What the start log saw: (sol of the check, district) for every project that opened, in order.
+		TArray<FIntPoint> StartLog;
+		TSet<int32> SeenOpen;
+		const auto Poll = [&]()
+		{
+			TSet<int32> Now;
+			for (const FRHGrowthProject& P : Sim->GetGrowthProjects())
+			{
+				Now.Add(P.DistrictId);
+				if (!SeenOpen.Contains(P.DistrictId)) { StartLog.Add(FIntPoint(Sim->GetGrowthCheckedSol(), P.DistrictId)); }
+			}
+			SeenOpen = Now;
+		};
+		const auto Land = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			if (PinHope >= 0.0) { Sim->Debug_SetHopeSmoothed(PinHope); }
+			Sim->EraStep((float)EraDt);
+			Poll();
+		};
+		const auto Steps = [&](int32 N) { for (int32 K = 0; K < N; ++K) { Land(); } };
+		const auto RunSols = [&](double SolCount) { Steps(FMath::RoundToInt32(SolCount * SolLen / EraDt)); };
+		const auto Send = [&](const FRHCommand& C)
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(C);
+			Land();
+			Note = Rejects.Num() == R0 ? FString(TEXT("accepted")) : Rejects.Last();
+			return Rejects.Num() == R0;
+		};
+		const auto PaintCmd = [](FName Kind, int32 X1, int32 Y1, int32 X2, int32 Y2, int32 Level = 0)
+		{
+			FRHCommand C;
+			C.Verb = FName("PaintDistrict");
+			C.Target = Kind;
+			C.Level = Level;
+			C.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X1, Y1));
+			C.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(X2, Y2));
+			return C;
+		};
+		const auto EraseCmd = [](int32 Id) { FRHCommand C; C.Verb = FName("EraseDistrict"); C.Value = (double)Id; return C; };
+		const auto IdOf = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName(Def) && B.Level == Level && FMath::Abs(B.LocationCm.X - X) < 1.0 && FMath::Abs(B.LocationCm.Y - Y) < 1.0) { return B.Id; }
+			}
+			return 0;
+		};
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return IdOf(Def, X, Y, Level);
+		};
+		const auto Held = [&](FName Res) { return Sim->GetGrowthAvailability(Res).Held; };
+		// Set a resource's holdings to exactly Kg by moving the pool (the fixture keeps its solids there).
+		const auto SetHeld = [&](FName Res, double Kg) { Sim->AddStock(Res, Kg - Held(Res)); };
+		const auto Open = [&](int32 Id) { return Sim->FindGrowthProject(Id); };
+		const auto NoteOf = [&](int32 Id) { return Sim->GetGrowthNote(Id); };
+		const auto CountBuildings = [&](const TCHAR* Def) { int32 N = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { N += B.DefName == FName(Def) ? 1 : 0; } return N; };
+		const auto PiecesIn = [&](const FIntVector& Key) -> TArray<FName>
+		{
+			TArray<int32> Ids;
+			Sim->GetCellFurniture(Key, &Ids);
+			TArray<FName> Rows;
+			for (const int32 Id : Ids) { if (const FRHFurnitureInstance* F = Sim->FindFurniture(Id)) { Rows.Add(F->Row); } }
+			Rows.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+			return Rows;
+		};
+		const auto CountRow = [](const TArray<FName>& Rows, const TCHAR* Name) { int32 N = 0; for (const FName& F : Rows) { N += F == FName(Name) ? 1 : 0; } return N; };
+		// Run until the district's project is gone (finished or refunded); returns the steps it took (-1: never).
+		// No new project starts behind it (the master switch is off while it runs), so "gone" means this one.
+		const auto RunToEnd = [&](int32 District, int32 MaxSteps)
+		{
+			Sim->Debug_SetGrowthEnabled(false);
+			int32 Took = -1;
+			for (int32 K = 1; K <= MaxSteps && Took < 0; ++K) { Land(); if (!Open(District)) { Took = K; } }
+			Sim->Debug_SetGrowthEnabled(true);
+			return Took;
+		};
+		const auto OnlyDistricts = [&](std::initializer_list<int32> On)
+		{
+			for (const FRHDistrict& D : TArray<FRHDistrict>(Sim->GetDistricts()))
+			{
+				bool bOn = false;
+				for (const int32 Id : On) { bOn |= Id == D.Id; }
+				Sim->SetDistrictGrowth(D.Id, bOn);
+			}
+		};
+		// A digest of what a ledger comparison reads.
+		struct FLedger
+		{
+			double Struct = 0, Shielding = 0, Oxygen = 0, Food = 0;
+			int32 Cells1 = 0, Cells2 = 0, Habs = 0, Pieces = 0, Beds = 0, Free = 0, Started = 0, Completed = 0;
+		};
+		const auto Ledger = [&]() -> FLedger
+		{
+			FLedger L;
+			L.Struct = Held(NStruct); L.Shielding = Held(NShield); L.Oxygen = Sim->GetStock(NOx); L.Food = Sim->GetStock(NFood);
+			L.Cells1 = Sim->GetFloorCarvedCells(-1); L.Cells2 = Sim->GetFloorCarvedCells(-2); L.Habs = CountBuildings(TEXT("HabModule"));
+			L.Pieces = Sim->GetFurniture().Num(); L.Beds = Sim->GetHousingCapacity(); L.Free = Sim->GetFreeHousing();
+			return L;
+		};
+
+		// ---------------- (a) The data ----------------
+		{
+			const TPair<const TCHAR*, double> Pins[] = { { TEXT("GrowthReserveStructKg"), 1000.0 }, { TEXT("GrowthReserveO2Sols"), 10.0 }, { TEXT("GrowthModuleSols"), 1.0 },
+				{ TEXT("GrowthCellSols"), 1.0 }, { TEXT("GrowthRoomSols"), 0.5 }, { TEXT("GrowthCellsPerProject"), 4.0 }, { TEXT("GrowthBunksPerHome"), 2.0 } };
+			bool bAllPinned = true;
+			for (const TPair<const TCHAR*, double>& Pin : Pins) { bAllPinned &= Near(DefsSub->GetConfigTableScalar(FName(Pin.Key), -1.0), Pin.Value, 1e-9); }
+			Expect(bAllPinned && Near(Sim->GetGrowthReserveStructKg(), 1000.0, 1e-9) && Near(Sim->GetGrowthReserveO2Sols(), 10.0, 1e-9) && Near(Sim->GetGrowthModuleSols(), 1.0, 1e-9)
+				&& Near(Sim->GetGrowthCellSols(), 1.0, 1e-9) && Near(Sim->GetGrowthRoomSols(), 0.5, 1e-9) && Sim->GetGrowthCellsPerProject() == 4 && Sim->GetGrowthBunksPerHome() == 2,
+				TEXT("a1 the seven Growth rows are in DT_Config (Struct reserve 1000, O2 reserve 10 sols, module 1.0, cells 1.0, room 0.5 sols, 4 cells, 2 bunks) and the sim reads them (DT/CSV)"));
+			int32 CivicRows = 0;
+			bool bClean = true, bPiecesOk = true;
+			FString CivicList;
+			DefsSub->ForEachRoom([&](FName Name, const FRHRoomRow& Row)
+			{
+				if (!Row.CivicService) { return; }
+				++CivicRows;
+				CivicList += Name.ToString() + TEXT(" ");
+				bClean &= !URHSimWorldSubsystem::RoomEmitsTag(Row, TEXT("Odor")) && Row.MoraleWeight > 0.f && Row.Function != FName("Living");
+				TArray<FString> Parts;
+				Row.CivicFurniture.ParseIntoArray(Parts, TEXT(";"));
+				bPiecesOk &= Parts.Num() > 0;
+				for (const FString& P : Parts)
+				{
+					const FRHFurnitureRow* F = DefsSub->GetFurniture(FName(*P));
+					bPiecesOk &= F && F->SliceActive && URHDefinitionsSubsystem::FurnitureAllowsFunction(*F, Row.Function);
+				}
+			});
+			const FRHRoomRow* Dining = DefsSub->GetRoom(FName("Dining"));
+			const FRHRoomRow* Infirmary = DefsSub->GetRoom(FName("Infirmary"));
+			Expect(CivicRows == 2 && Dining && Dining->CivicService && Dining->CivicFurniture == TEXT("DiningTable;Chair;Chair") && Infirmary && Infirmary->CivicService && Infirmary->CivicFurniture == TEXT("Locker;Lamp;Plant"),
+				FString::Printf(TEXT("a2 exactly two live rows are CivicService - %s - with their furniture recipes (DT/CSV)"), *CivicList));
+			Expect(bClean && bPiecesOk && !DefsSub->GetRoom(FName("Garden"))->CivicService && !DefsSub->GetRoom(FName("Cooking"))->CivicService && !DefsSub->GetRoom(FName("LivingQuarters"))->CivicService,
+				TEXT("a3 no CivicService row emits Odor, each has a Hope weight, and every recipe piece is a live furniture row allowed in its room; Garden, Cooking and Living are not civic"));
+			const FRHFurnitureRow* Bunk = DefsSub->GetFurniture(FName("BunkBed"));
+			Expect(Bunk && Bunk->SliceActive && Bunk->Provides == FName("Bed") && Bunk->Capacity == 2 && Near(URHDefinitionsSubsystem::GetFurnitureCost(*Bunk).FindRef(NStruct), 80.0, 1e-9)
+				&& URHDefinitionsSubsystem::FurnitureAllowsFunction(*Bunk, FName("Living")), TEXT("a4 the Bunk Bed (2 beds, Struct 80, Living rooms) is the home's bed"));
+		}
+
+		// ---------------- Setup ----------------
+		Sim->Debug_SetGrowthEnabled(false); // until the base is saved
+		Sim->Debug_SetBigArrivalDone(true);
+		const FVector Head(1000.f, 1000.f, 0.f);
+		Place(TEXT("Pylon"), 5000, 0);
+		Place(TEXT("Pylon"), -5000, 0);
+		Place(TEXT("SolarArray"), -2000, -3500);
+		Place(TEXT("SolarArray"), 2000, -3500);
+		Place(TEXT("BatteryBank"), 0, -3500);
+		const int32 Blocker = Place(TEXT("SolarArray"), 2000, 0); // on lattice cell (2,0): west of N1, in district #1
+		const int32 HabA = Place(TEXT("HabModule"), 3500, 0, 2, 1);      // bays (3,0) (4,0)
+		const int32 HabB = Place(TEXT("HabModule"), 3500, -1000, 2, 1);  // bays (3,-1) (4,-1)
+		const int32 FiltN1 = Place(TEXT("AirFilter"), 3000, 0);
+		const int32 HabC = Place(TEXT("HabModule"), -3500, 0, 2, 1);     // bays (-4,0) (-3,0)
+		const int32 HabD = Place(TEXT("HabModule"), -3500, -1000, 2, 1); // bays (-4,-1) (-3,-1)
+		const int32 FiltN2 = Place(TEXT("AirFilter"), -3000, 0);
+		Sim->AddStock(NStruct, 5000.0);
+		Sim->AddStock(NShield, 3000.0);
+		Sim->AddStock(NOx, 6000.0);
+		Sim->AddStock(NWater, 150.0); // under the quota's 200: the first quota stays OPEN
+		Sim->AddStock(NFood, 6000.0);
+		Sim->ExtendShaft(2, Head);
+		Sim->ExcavateFloor(-1, 4, R);
+		Sim->ExcavateFloor(-2, 4, R);
+		const int32 FiltF1 = Place(TEXT("AirFilter"), 1000, 1500, 1, 1, -1);
+		const int32 FiltF2 = Place(TEXT("AirFilter"), 1000, 1500, 1, 1, -2);
+		Expect(Blocker && HabA && HabB && HabC && HabD && FiltN1 && FiltN2 && FiltF1 && FiltF2, TEXT("setup: two pylons, a blocker array, four shells, four filters placed"));
+		RunSols(3.0);
+		Expect(Sim->IsFloorRated(-1) && Sim->IsFloorRated(-2) && Sim->HasVaultRating() && Sim->IsHabRated(HabA) && Sim->IsHabRated(HabC) && Sim->GetHabNetworkBays(HabA) == 4 && Sim->GetHabNetworkBays(HabC) == 4
+			&& Sim->GetHabNetworkRoot(HabB) == HabA && Sim->GetHabNetworkRoot(HabD) == HabC,
+			FString::Printf(TEXT("setup: floors -1 and -2 rated, the vault certified, N1 (root #%d) and N2 (root #%d) rated at four bays each"), Sim->GetHabNetworkRoot(HabA), Sim->GetHabNetworkRoot(HabC)));
+		for (int32 Cell = 0; Cell < 4; ++Cell) { Sim->DesignateRoom(-1, Cell, FName("LivingQuarters"), R); }
+		for (const int32 H : { HabA, HabB }) { for (int32 Bay = 0; Bay < 2; ++Bay) { Sim->DesignateBay(H, Bay, FName("LivingQuarters"), R); } }
+		Sim->DesignateRoom(-2, 2, FName("Lab"), R);
+		Sim->DesignateRoom(-2, 3, FName("Workstation"), R);
+		// Painted before anyone lives here: four districts of the five and the Industry one.
+		Expect(Send(PaintCmd(NHomes, 2, -2, 8, 2)) && Send(PaintCmd(NCivic, -8, -2, -2, 2)) && Send(PaintCmd(NHomes, 0, 0, 0, 0, -1)) && Send(PaintCmd(NCivic, 0, 0, 0, 0, -2)) && Send(PaintCmd(NIndustry, -1, 2, 1, 2))
+			&& Sim->GetDistricts().Num() == 5 && Sim->FindDistrict(1)->Kind == NHomes && Sim->FindDistrict(2)->Kind == NCivic && Sim->FindDistrict(3)->Level == -1 && Sim->FindDistrict(4)->Level == -2 && Sim->FindDistrict(5)->Kind == NIndustry,
+			FString::Printf(TEXT("setup: five districts painted - #1 Homes over N1, #2 Civic over N2, #3 Homes floor -1, #4 Civic floor -2, #5 Industry (%s)"), *Note));
+		Expect(Sim->GetDistrictOfBuilding(HabA) == 1 && Sim->GetDistrictOfBuilding(HabB) == 1 && Sim->GetDistrictOfBuilding(HabC) == 2 && Sim->GetDistrictOfBuilding(HabD) == 2 && Sim->IsDistrictGrowthOn(1) && Sim->IsDistrictGrowthOn(4) && !Sim->IsDistrictGrowthOn(99),
+			TEXT("setup: N1's shells belong to #1, N2's to #2; every district opens with growth on; a district that is not there has no switch"));
+
+		// ---------------- (b) No people, then no districts: no growth ----------------
+		{
+			Sim->Debug_SetGrowthEnabled(true);
+			const int32 SolBefore = Sim->GetGrowthCheckedSol();
+			Alerts.Reset();
+			RunSols(3.0);
+			Expect(Sim->GetGrowthProjects().Num() == 0 && Sim->GetPopulation() == 0 && Sim->GetGrowthCheckedSol() >= SolBefore + 2 && GrowthAlerts() == 0 && Sim->GetGrowthCursor() == 0,
+				FString::Printf(TEXT("b1 nobody lives here: three sols with five districts, no project, no alert, the sol check kept time (sol %d -> %d)"), SolBefore, Sim->GetGrowthCheckedSol()));
+			Expect(NoteOf(1).Contains(TEXT("nobody lives here")) && NoteOf(3).Contains(TEXT("nobody lives here")) && NoteOf(5).IsEmpty(), FString::Printf(TEXT("b1 the Homes districts say why: '%s'; Industry says nothing"), *NoteOf(1)));
+			Sim->Debug_SetGrowthEnabled(false);
+		}
+		Expect(Sim->Debug_AddColonists(8) == 8, TEXT("setup: eight colonists housed"));
+		Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+		Sim->Debug_SetColonistsPerCell(1.0);
+		{
+			int32 OnFloor1 = 0, OnFloor2 = 0, InNets = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { OnFloor1 += (C.HomeHab == 0 && C.HomeLevel == -1) ? 1 : 0; OnFloor2 += (C.HomeHab == 0 && C.HomeLevel == -2) ? 1 : 0; InNets += C.HomeHab != 0 ? 1 : 0; }
+			const FRHCityDemand Dm = Sim->GetCityDemand();
+			Expect(OnFloor1 == 4 && OnFloor2 == 4 && InNets == 0 && Dm.HousingBedsShort > 0 && Dm.ServiceGaps.Num() > 0,
+				FString::Printf(TEXT("setup: floors fill first - four on floor -1, four on floor -2 (every carved cell is a bed), none in the networks; the city is short %d bed(s) (%s), so there is demand"), Dm.HousingBedsShort, *Dm.HousingLimit.ToString()));
+		}
+		// No districts, with demand and material and Hope: nothing is built. (A separate run from a saved base below.)
+		FString Err;
+		Expect(Sim->SaveColony(TEXT("citygrowth_base"), Err), FString::Printf(TEXT("setup: the base state is saved (%s)"), *Err));
+		const auto LoadBase = [&]()
+		{
+			FString E;
+			const bool bOk = Sim->LoadColony(TEXT("citygrowth_base"), E) && E.IsEmpty();
+			Sim->Debug_SetGrowthEnabled(true);
+			Sim->Debug_SetBigArrivalDone(true);
+			Sim->Debug_SetColonistsPerCell(1.0);
+			PinHope = -1.0;
+			Rejects.Reset(); Alerts.Reset(); StartLog.Reset(); SeenOpen.Reset();
+			return bOk;
+		};
+
+		// ---------------- (b2) A colony with no districts ----------------
+		{
+			Expect(LoadBase(), TEXT("b2 base loaded"));
+			for (int32 Id = 1; Id <= 5; ++Id) { Send(EraseCmd(Id)); }
+			Expect(Sim->GetDistricts().Num() == 0, TEXT("b2 every district erased"));
+			SetHope(100.0);
+			Alerts.Reset();
+			const FLedger L0 = Ledger();
+			RunSols(3.0);
+			const FLedger L1 = Ledger();
+			Expect(Sim->GetGrowthProjects().Num() == 0 && GrowthAlerts() == 0 && L1.Habs == L0.Habs && L1.Cells1 == L0.Cells1 && L1.Pieces == L0.Pieces && Near(L1.Struct, L0.Struct, 1e-6) && Sim->GetCityDemand().HousingBedsShort > 0,
+				TEXT("b2 no districts, with housing short, Hope pinned at 100 and thousands of kg of material: three sols build nothing and say nothing"));
+		}
+
+		// ---------------- (b3) Money ----------------
+		{
+			Expect(LoadBase(), TEXT("b3 base loaded"));
+			OnlyDistricts({ 3 }); // floor -1 Homes: bill Struct 640 (4 cells x 2 bunks x 80), Oxygen 400 (4 x 100)
+			SetHope(80.0);
+			Sim->Debug_SetHopeSmoothed(80.0);
+			Expect(Near(Sim->GetGrowthAvailability(NStruct).Reserve, 1000.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).Reserve, 10.0 * 8.0 * 0.75, 1e-9) && Near(Sim->GetGrowthAvailability(NShield).Reserve, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NWater).Reserve, 0.0, 1e-9),
+				TEXT("b3 the reserves: Struct 1000; Oxygen 10 sols x 8 colonists x 0.75 = 60 kg (the breathing floor); Shielding and the rest none"));
+			Expect(Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 300.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 50.0, 1e-9) && Near(Sim->GetGrowthAvailability(NShield).QuotaBill, 0.0, 1e-9),
+				TEXT("b3 the open quota's bills stand between growth and the stores: Struct 300, Oxygen 50 (Q1 is open: its Water bill of 200 is not met)"));
+			const double StructHeld = Held(NStruct), OxHeld = Held(NOx);
+			const URHSimWorldSubsystem::FRHGrowthAvailability SA = Sim->GetGrowthAvailability(NStruct);
+			Expect(Near(SA.Free, SA.Held - 300.0 - 1000.0, 1e-9) && Near(SA.Held, StructHeld, 1e-9) && Near(StructHeld, 5400.0, 1e-3), FString::Printf(TEXT("b3 free = held - quota - reserve: %.0f = %.0f - 300 - 1000 (the pool's 5,000 and the Lander's starter 400)"), SA.Free, SA.Held));
+			// Struct one kilo short of reserve + quota + bill.
+			SetHeld(NStruct, 300.0 + 1000.0 + 640.0 - 1.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(TEXT("Struct")), FString::Printf(TEXT("b3 Struct one kilo short (%.0f held): no project - '%s'"), Held(NStruct), *NoteOf(3)));
+			SetHeld(NStruct, 300.0 + 1000.0 + 640.0 + 1.0);
+			const double OxBefore = Held(NOx), StructBefore = Held(NStruct);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b3 Struct one kilo over: the project starts"));
+			const FRHGrowthProject* P = Open(3);
+			Expect(P && P->Kind == ERHGrowthKind::FloorCells && P->Cells == 4 && P->Level == -1 && Near(P->Bill.FindRef(NStruct), 640.0, 1e-9) && Near(P->Bill.FindRef(NOx), 400.0, 1e-9) && P->Bill.Num() == 2 && Near(P->TotalSols, 1.0, 1e-9) && Near(P->RemainingSols, 1.0, 1e-9),
+				TEXT("b3 the floor project's bill is Struct 640 and the Oxygen fill of its four new cells, 400 kg: nothing else; a sol's work"));
+			Expect(Near(Held(NStruct), StructBefore - 640.0, 1e-6) && Near(Held(NOx), OxBefore - 400.0, 1e-6) && Sim->GetGrowthCursor() == 3, TEXT("b3 the whole bill left the holdings at the start, and the cursor rests on #3"));
+			// Oxygen: a fresh load, Struct ample, O2 one kilo short of reserve + quota + bill (60 + 50 + 400).
+			Expect(LoadBase(), TEXT("b3 base loaded again"));
+			OnlyDistricts({ 3 });
+			SetHope(80.0);
+			SetHeld(NOx, 60.0 + 50.0 + 400.0 - 1.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(3).Contains(TEXT("Oxygen")), FString::Printf(TEXT("b3 Oxygen one kilo short of reserve + quota + bill (%.0f held): no project - '%s'"), Held(NOx), *NoteOf(3)));
+			SetHeld(NOx, 60.0 + 50.0 + 400.0 + 1.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b3 one kilo over: the project starts"));
+			// Shielding short on the surface bill (Struct plentiful): nothing is taken, not even the Struct that would fit.
+			Expect(LoadBase(), TEXT("b3 base loaded a third time"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			SetHeld(NShield, 0.0);
+			const double StructAll = Held(NStruct), OxAll = Held(NOx);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && !Open(1) && NoteOf(1).Contains(TEXT("Shielding")) && Near(Held(NStruct), StructAll, 1e-9) && Near(Held(NOx), OxAll, 1e-9),
+				FString::Printf(TEXT("b3 Shielding held at 0: the module's bill does not fit, and nothing is taken - the Struct and Oxygen stay where they are ('%s')"), *NoteOf(1)));
+			SetHeld(NShield, 199.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && Near(Held(NStruct), StructAll, 1e-9), TEXT("b3 Shielding 199 of the 200 the four bays need: still nothing, still nothing taken"));
+			SetHeld(NShield, 200.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(1) && Near(Held(NShield), 0.0, 1e-6), TEXT("b3 Shielding 200: the project starts and takes the last of it"));
+			// A construction site's hopper is spoken for: it is never free.
+			Expect(LoadBase(), TEXT("b3 base loaded a fourth time"));
+			FRHCommand Build; Build.Verb = FName("Build"); Build.Target = FName("Stockpile"); Build.Location = FVector(0.0, -2000.0, 0.0);
+			Send(Build);
+			int32 SiteId = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.bUnderConstruction) { SiteId = B.Id; } }
+			const double HeldBefore = Held(NStruct), TotalBefore = Sim->GetTotalSolid(NStruct);
+			Sim->Debug_AddSolidAt(SiteId, NStruct, 7000.0, false);
+			Expect(SiteId != 0 && Near(Held(NStruct), HeldBefore, 1e-6) && Near(Sim->GetTotalSolid(NStruct), TotalBefore + 7000.0, 1e-6),
+				FString::Printf(TEXT("b3 a construction site (#%d) holds 7,000 kg of Struct: GetTotalSolid sees it, growth's holdings do not (%.0f)"), SiteId, Held(NStruct)));
+			// The quota met: its bill is gone.
+			Expect(LoadBase(), TEXT("b3 base loaded a fifth time"));
+			Sim->AddStock(NWater, 400.0);
+			Steps(2);
+			Expect(Sim->GetQuotaPhase() != ERHQuotaPhase::Open && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 0.0, 1e-9)
+				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 1000.0, 1e-6),
+				TEXT("b3 once the quota is met nothing is being collected: its bill drops out and free = held - 1000"));
+		}
+
+		// ---------------- (c) Gates and pauses ----------------
+		{
+			Expect(LoadBase(), TEXT("c base loaded"));
+			SetHope(80.0);
+			OnlyDistricts({ 5 });
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && Sim->GetGrowthProjects().Num() == 0, TEXT("c1 an Industry district never grows: the player places Industry, Farming and Research (Q2a)"));
+			OnlyDistricts({ 3 });
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("c2 Homes on floor -1 with housing short, Hope 80 and money: the project starts"));
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(3).Contains(TEXT("under way")) && Sim->GetGrowthProjects().Num() == 1, FString::Printf(TEXT("c2 a district with an open project is skipped ('%s')"), *NoteOf(3)));
+			// The switch.
+			Expect(LoadBase(), TEXT("c base loaded"));
+			SetHope(80.0);
+			OnlyDistricts({ 3 });
+			Expect(Sim->SetDistrictGrowth(3, false) && !Sim->IsDistrictGrowthOn(3) && !Sim->SetDistrictGrowth(99, true), TEXT("c3 the switch moves for a district that is there, and for none that is not"));
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(3).Contains(TEXT("switched off")), FString::Printf(TEXT("c3 growth switched off: no project ('%s')"), *NoteOf(3)));
+			Sim->SetDistrictGrowth(3, true);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("c3 switched back on: the project starts"));
+			// A project already open still finishes when its district is switched off.
+			Sim->SetDistrictGrowth(3, false);
+			const int32 Cells0 = Sim->GetFloorCarvedCells(-1);
+			Expect(RunToEnd(3, 40) > 0 && Sim->GetFloorCarvedCells(-1) == Cells0 + 4, TEXT("c3 a project that is open when its district is switched off still finishes (the switch stops new starts)"));
+			// The switch is part of the save.
+			Sim->SetDistrictGrowth(4, true);
+			Expect(Sim->SaveColony(TEXT("citygrowth_switch"), Err) && !Sim->IsDistrictGrowthOn(3) && Sim->SetDistrictGrowth(4, true), TEXT("c3 saved with #3 off and #4 on, then both switches flipped"));
+			Sim->SetDistrictGrowth(3, true);
+			Sim->SetDistrictGrowth(4, false);
+			Expect(Sim->LoadColony(TEXT("citygrowth_switch"), Err) && !Sim->IsDistrictGrowthOn(3) && Sim->IsDistrictGrowthOn(4), TEXT("c3 loaded: #3 is still off and #4 back on - the switch round-trips"));
+		}
+		{
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 3 });
+			// A home on short rations: no start.
+			SetHope(80.0);
+			const double Food = Sim->GetStock(NFood);
+			Sim->AddStock(NFood, -Food);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Expect(Sim->GetHomeRations().Num() > 0 && Sim->GetHomeRations()[0].Fraction < 1.0 && Sim->Debug_RunGrowthCheck() == 0 && Sim->GetGrowthPause().Contains(TEXT("short rations")) && Sim->GetGrowthProjects().Num() == 0,
+				FString::Printf(TEXT("c4 food out, a home on short rations: no start - '%s'"), *Sim->GetGrowthPause()));
+			Sim->AddStock(NFood, Food);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Sim->GetGrowthPause().IsEmpty(), TEXT("c4 the food back, rations full: the project starts and the pause is gone"));
+			// Hope failing: no start.
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 3 });
+			Sim->Debug_SetHopeSmoothed(8.0);
+			Expect(Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 0 && Sim->GetGrowthPause().Contains(TEXT("Hope")) && Sim->GetGrowthProjects().Num() == 0,
+				FString::Printf(TEXT("c5 smoothed Hope at 8, the Failing band: no start - '%s'"), *Sim->GetGrowthPause()));
+			Sim->Debug_SetHopeSmoothed(40.0);
+			Expect(Sim->GetHopeBand() != URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 1, TEXT("c5 Hope back to 40 (Strained): the project starts - only Failing pauses it"));
+			// Housing not short: no Homes project.
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 1, 3 });
+			SetHope(80.0);
+			for (int32 Bay = 0; Bay < 2; ++Bay) { Sim->DesignateBay(HabC, Bay, FName("LivingQuarters"), R); Sim->DesignateBay(HabD, Bay, FName("LivingQuarters"), R); }
+			Sim->DesignateRoom(-2, 0, FName("LivingQuarters"), R);
+			Sim->DesignateRoom(-2, 1, FName("LivingQuarters"), R);
+			const FRHCityDemand Roomy = Sim->GetCityDemand();
+			Expect(Roomy.HousingBedsShort <= 0 && Sim->Debug_RunGrowthCheck() == 0 && NoteOf(1).Contains(TEXT("not short")) && NoteOf(3).Contains(TEXT("not short")),
+				FString::Printf(TEXT("c6 six more Living places zoned: housing short %d, so no Homes project - '%s'"), Roomy.HousingBedsShort, *NoteOf(1)));
+		}
+
+		// ---------------- (d) Surface Homes ----------------
+		{
+			Expect(LoadBase(), TEXT("d base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(1), TEXT("d1 the surface Homes project starts"));
+			const FRHGrowthProject P1 = *Open(1);
+			const FRHDistrict* D1 = Sim->FindDistrict(1);
+			bool bInside = true;
+			for (int32 DY = 0; DY < P1.Size.Y; ++DY) { for (int32 DX = 0; DX < P1.Size.X; ++DX) { bInside &= Sim->GetDistrictAtCell(P1.Cell + FIntPoint(DX, DY)) == 1; } }
+			Expect(P1.Kind == ERHGrowthKind::SurfaceModule && P1.Cell == FIntPoint(3, 1) && P1.Size == FIntPoint(2, 2) && P1.HabId == HabA && P1.Level == 0 && bInside && D1,
+				FString::Printf(TEXT("d1 the nearest candidate to the network root: the 2 x 2 at lattice (%d,%d), every cell inside the district (cells (2,0) is blocked by the array, (5,0) by the pylon)"), P1.Cell.X, P1.Cell.Y));
+			Expect(Near(P1.Bill.FindRef(NStruct), 1440.0, 1e-9) && Near(P1.Bill.FindRef(NShield), 200.0, 1e-9) && Near(P1.Bill.FindRef(NOx), 400.0, 1e-9) && P1.Bill.Num() == 3 && Near(P1.TotalSols, 1.0, 1e-9),
+				TEXT("d1 the bill: four bays at Struct 200 and Shielding 50, eight bunks at Struct 80, 100 kg of air a bay = Struct 1,440, Shielding 200, Oxygen 400"));
+			Expect(Sim->GetGrowthProjectBeds(P1) == 16 && Sim->DescribeGrowthProject(P1).Contains(TEXT("4 new home bays")), FString::Printf(TEXT("d1 it will add 16 beds: '%s'"), *Sim->DescribeGrowthProject(P1)));
+			// Determinism: the same state chooses the same site.
+			Expect(LoadBase(), TEXT("d base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			Sim->Debug_RunGrowthCheck();
+			const FRHGrowthProject P1b = Open(1) ? *Open(1) : FRHGrowthProject();
+			Expect(P1b.Cell == P1.Cell && P1b.Size == P1.Size && P1b.HabId == P1.HabId && P1b.Bill.Num() == P1.Bill.Num() && Near(P1b.Bill.FindRef(NStruct), P1.Bill.FindRef(NStruct), 1e-12), TEXT("d2 loaded again: the very same site and bill - the choice is deterministic"));
+			// The completion, step by step: the network stays rated, the new air is full from the first step.
+			const double RootO2Before = Sim->GetHabNetworkO2Kg(HabA);
+			const int32 HabsBefore = CountBuildings(TEXT("HabModule"));
+			bool bRatedThrough = true;
+			int32 Took = -1;
+			for (int32 K = 1; K <= 40 && Took < 0; ++K)
+			{
+				Land();
+				bRatedThrough &= Sim->IsHabRated(HabA) && Sim->IsHabRated(HabB) && Sim->IsFloorRated(-1);
+				if (!Open(1)) { Took = K; }
+			}
+			Expect(Took >= 20 && Took <= 21, FString::Printf(TEXT("d3 a sol's work is %d era steps (20 x 60 s): the countdown is linear"), Took));
+			int32 NewId = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("HabModule") && B.SizeX == 2 && B.SizeY == 2) { NewId = B.Id; } }
+			const FRHBuildingInstance* NB = nullptr;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == NewId) { NB = &B; } }
+			Expect(CountBuildings(TEXT("HabModule")) == HabsBefore + 1 && NB && !NB->bUnderConstruction && Near(NB->LocationCm.X, 3500.0, 1e-6) && Near(NB->LocationCm.Y, 1500.0, 1e-6) && Sim->GetHabNetworkRoot(NewId) == HabA && Sim->GetHabNetworkBays(HabA) == 8,
+				TEXT("d3 the module stands: completed at once (no site, no robots), at lattice (3,1) 2 x 2, joined to N1 - eight bays"));
+			int32 Living = 0, Bunks = 0;
+			for (int32 Bay = 0; Bay < 4; ++Bay)
+			{
+				Living += Sim->GetBayRoom(NewId, Bay) == FName("LivingQuarters") ? 1 : 0;
+				Bunks += CountRow(PiecesIn(FIntVector(0, Bay, NewId)), TEXT("BunkBed"));
+			}
+			Expect(Living == 4 && Bunks == 8 && Sim->GetHabBeds(NewId) == 16 && Near(Sim->GetHabO2Kg(NewId), 400.0, 25.0), FString::Printf(TEXT("d3 four Living bays with two bunks each: %d bunks, %d beds, %.0f kg of air"), Bunks, Sim->GetHabBeds(NewId), Sim->GetHabO2Kg(NewId)));
+			Expect(bRatedThrough && Sim->IsHabRated(NewId) && Sim->GetHabNetworkO2Kg(HabA) >= RootO2Before + 380.0 - 60.0, TEXT("d3 N1 and floor -1 stayed rated at EVERY step through the completion, and the new bays' air was in place (the O2 pre-fill)"));
+			Expect(Sim->GetDistrictOfBuilding(NewId) == 1 && Sim->GetDistrictOfBay(NewId, 3) == 1, TEXT("d3 the new module belongs to district #1"));
+			// Only the target network: a lone shell north of the 2 x 2 spoils it; the 2 x 1 fits.
+			Expect(LoadBase(), TEXT("d base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			const int32 Lone = Place(TEXT("HabModule"), 3000, 3000); // lattice (3,3), outside the district: touches (3,2)
+			Sim->Debug_RunGrowthCheck();
+			const FRHGrowthProject* P2 = Open(1);
+			Expect(Lone && P2 && P2->Cell == FIntPoint(3, 1) && P2->Size == FIntPoint(2, 1),
+				FString::Printf(TEXT("d4 a lone shell on (3,3): the 2 x 2 at (3,1) would touch it, so the city builds the 2 x 1 at (%d,%d) - a module touches ONLY the network it extends"), P2 ? P2->Cell.X : -99, P2 ? P2->Cell.Y : -99));
+			// A road across the best ground: off the strip.
+			Expect(LoadBase(), TEXT("d base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			Sim->Debug_LayRoad(FVector(1500.0, 1500.0, 0.0), FVector(5500.0, 1500.0, 0.0), true);
+			Sim->Debug_RunGrowthCheck();
+			const FRHGrowthProject* P3 = Open(1);
+			FString RoadWhat;
+			bool bClear = P3 != nullptr;
+			if (P3)
+			{
+				const FVector Centre((P3->Cell.X + (P3->Size.X - 1) * 0.5) * 1000.0, (P3->Cell.Y + (P3->Size.Y - 1) * 0.5) * 1000.0, 0.0);
+				bClear = !Sim->FindRoadOverlap(Centre, FVector2D(P3->Size.X * 500.0, P3->Size.Y * 500.0), RoadWhat) && P3->Cell != FIntPoint(3, 1);
+			}
+			Expect(bClear, FString::Printf(TEXT("d5 a road along y = 15 m: the module is off the strip, at (%d,%d) %d x %d"), P3 ? P3->Cell.X : -99, P3 ? P3->Cell.Y : -99, P3 ? P3->Size.X : 0, P3 ? P3->Size.Y : 0));
+			// Door-sealed networks are skipped, and the note says so.
+			Expect(LoadBase(), TEXT("d base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			const auto Fit = [&](const TCHAR* Row, double X, double Y, int32 Dir)
+			{
+				FRHCommand C; C.Verb = FName("Fit"); C.Target = FName(Row); C.Location = FVector(X, Y, 0.0); C.Value = (double)Dir;
+				return Send(C);
+			};
+			Expect(Fit(TEXT("PressureDoor"), 3000, -1000, 2) && Fit(TEXT("PressureDoor"), 4000, -1000, 2) && Sim->IsHabNetworkSealed(HabA),
+				FString::Printf(TEXT("d6 a door in each of N1's two doorways seals it (%s)"), *Note));
+			SetHope(80.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && !Open(1) && NoteOf(1).Contains(TEXT("door-sealed")), FString::Printf(TEXT("d6 a sealed network is not extended - the note says so: '%s'"), *NoteOf(1)));
+			// No habitat of the district: Homes district with nothing to extend.
+			Expect(LoadBase(), TEXT("d base loaded"));
+			Expect(Send(PaintCmd(NHomes, -1, -2, 1, -1)) && Sim->GetDistricts().Num() == 6, FString::Printf(TEXT("d7 a sixth district, Homes on open ground with no habitat (%s)"), *Note));
+			OnlyDistricts({ 6 });
+			SetHope(80.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(6).Contains(TEXT("founds habitats")), FString::Printf(TEXT("d7 a Homes district with no habitat: nothing to extend - '%s' (the player founds habitats, the city grows them)"), *NoteOf(6)));
+		}
+
+		// ---------------- (d8) No site, no order: growth never touches the era band ----------------
+		{
+			Expect(LoadBase(), TEXT("d8 base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			FString W0, W1;
+			const bool bBefore = Sim->CanEnterEraMode(W0);
+			const int32 Tasks0 = Sim->GetOpenTaskCount();
+			Sim->Debug_RunGrowthCheck();
+			const bool bAfter = Sim->CanEnterEraMode(W1);
+			int32 Sites = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { Sites += B.bUnderConstruction ? 1 : 0; }
+			Expect(Open(1) && bBefore == bAfter && W0 == W1 && Sites == 0 && Sim->GetOpenTaskCount() == Tasks0 && Sim->GetUplinkQueue().Num() == 0,
+				FString::Printf(TEXT("d8 with a surface project open: no construction site, no task, no uplink order - CanEnterEraMode answers as before (%s%s)"), bAfter ? TEXT("yes") : TEXT("no: "), *W1));
+			// The placement check without the material part: the same site, no Struct and no Shielding in the stores.
+			SetHeld(NStruct, 0.0);
+			SetHeld(NShield, 0.0);
+			FString Why;
+			Sim->Debug_SetGrowthEnabled(false);
+			const bool bWith = Sim->CanPlaceBuildingSized(FName("HabModule"), FVector(3000.0, 2000.0, 0.0), Why, 0, 1, 1, true);
+			FString WhyNot;
+			const bool bWithout = Sim->CanPlaceBuildingSized(FName("HabModule"), FVector(3000.0, 2000.0, 0.0), WhyNot, 0, 1, 1, false);
+			Expect(!bWith && Why.Contains(TEXT("Insufficient")) && bWithout, FString::Printf(TEXT("d8 with the stores empty a habitat bay is refused for want of material (%s) and accepted with the material check off - every other rule still holds (%s)"), *Why, *WhyNot));
+			Expect(!Sim->CanPlaceBuildingSized(FName("HabModule"), FVector(2000.0, 0.0, 0.0), Why, 0, 1, 1, false) && !Sim->CanPlaceBuildingSized(FName("HabModule"), FVector(3000.0, 0.0, 0.0), Why, 0, 1, 1, false),
+				TEXT("d8 ... and the site rules still bite with the material check off: a bay on the array and a bay on N1's own ground are refused"));
+		}
+
+		// ---------------- (e) Underground Homes ----------------
+		{
+			Expect(LoadBase(), TEXT("e base loaded"));
+			OnlyDistricts({ 3 });
+			SetHope(80.0);
+			const double Hyd0 = Sim->GetStock(NHyd);
+			Sim->Debug_UnrateFloor(-1);
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(3).Contains(TEXT("not rated")), FString::Printf(TEXT("e1 only on a RATED floor: floor -1 unrated, no project - '%s'"), *NoteOf(3)));
+			Expect(LoadBase(), TEXT("e base loaded"));
+			OnlyDistricts({ 3 });
+			SetHope(80.0);
+			const int32 Beds0 = Sim->GetFloorBeds(-1), Comfort0 = Sim->GetHousingComfortCapacity();
+			Sim->Debug_RunGrowthCheck();
+			const FRHGrowthProject* P = Open(3);
+			Expect(P && P->Kind == ERHGrowthKind::FloorCells && P->FirstCell == 4 && P->Cells == 4, TEXT("e2 the project: four cells at the end of the floor, from index 4"));
+			const double Fill0 = Sim->GetFloorO2Kg(-1);
+			bool bRated = true;
+			int32 Took = -1;
+			for (int32 K = 1; K <= 40 && Took < 0; ++K) { Land(); bRated &= Sim->IsFloorRated(-1); if (!Open(3)) { Took = K; } }
+			Expect(Took >= 20 && Took <= 21 && Sim->GetFloorCarvedCells(-1) == 8, FString::Printf(TEXT("e2 carved directly after a sol: %d cells on floor -1 (%d steps)"), Sim->GetFloorCarvedCells(-1), Took));
+			int32 LivingCells = 0, Bunks = 0, Cells4to7 = 0;
+			for (int32 Cell = 4; Cell < 8; ++Cell)
+			{
+				LivingCells += Sim->GetRoomAt(-1, Cell) == FName("LivingQuarters") ? 1 : 0;
+				Bunks += CountRow(PiecesIn(FIntVector(-1, Cell, 0)), TEXT("BunkBed"));
+				Cells4to7 += Sim->GetCellBeds(FIntVector(-1, Cell, 0)) == 4 ? 1 : 0;
+			}
+			Expect(LivingCells == 4 && Bunks == 8 && Cells4to7 == 4 && Sim->GetFloorBeds(-1) == Beds0 + 16 && Sim->GetHousingComfortCapacity() == Comfort0 + 16,
+				FString::Printf(TEXT("e2 four Living cells, two bunks each (%d), four beds a cell: floor beds %d -> %d, comfortable room %d -> %d"), Bunks, Beds0, Sim->GetFloorBeds(-1), Comfort0, Sim->GetHousingComfortCapacity()));
+			Expect(bRated && Sim->IsFloorRated(-1) && Sim->GetFloorO2Kg(-1) >= Fill0 + 400.0 - 60.0, FString::Printf(TEXT("e3 floor -1 stayed rated at every step through the carve; its air %.0f -> %.0f kg (the 400 kg of new volume pre-filled)"), Fill0, Sim->GetFloorO2Kg(-1)));
+			Expect(Sim->GetCarveQueued(-1) == 0 && Near(Sim->GetStock(NHyd), Hyd0, 1e-9), TEXT("e3 no Borer, no hydrogen: nothing queued, the hydrogen stock untouched"));
+			Expect(Sim->GetDistrictOfCell(-1, 7) == 3 && Sim->GetFloorCarvedCells(-1) == 8, TEXT("e3 the new cells belong to floor -1's district"));
+		}
+
+		// ---------------- (f) Civic ----------------
+		{
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 4 }); // floor -2: cells 0 and 1 free, 2 a Lab, 3 a Workstation
+			SetHope(80.0);
+			const FRHCityDemand Dm = Sim->GetCityDemand();
+			double DiningGap = -1.0, InfGap = -1.0;
+			for (const FRHServiceGap& G : Dm.ServiceGaps) { if (G.Function == FName("Dining")) { DiningGap = G.Gap; } if (G.Function == FName("Infirmary")) { InfGap = G.Gap; } }
+			Expect(Near(DiningGap, 1.0, 1e-12) && Near(InfGap, 1.0, 1e-12), TEXT("f1 no dining room and no infirmary: both civic gaps are 1"));
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(4) && Open(4)->Kind == ERHGrowthKind::CivicRoom, TEXT("f1 a Civic project starts"));
+			const FRHGrowthProject F1 = *Open(4);
+			Expect(F1.Room == FName("Dining") && F1.Level == -2 && F1.Index == 0 && !F1.bCarve && Near(F1.Bill.FindRef(NStruct), 80.0, 1e-9) && F1.Bill.Num() == 1 && Near(F1.TotalSols, 0.5, 1e-9),
+				TEXT("f1 a tie at gap 1: the lexically first function wins - Dining, in the first free cell (0); a table and two chairs, Struct 80; half a sol"));
+			const int32 Took = RunToEnd(4, 30);
+			const TArray<FName> Dined = PiecesIn(FIntVector(-2, 0, 0));
+			Expect(Took >= 10 && Took <= 11 && Sim->GetRoomAt(-2, 0) == FName("Dining") && Dined.Num() == 3 && CountRow(Dined, TEXT("DiningTable")) == 1 && CountRow(Dined, TEXT("Chair")) == 2,
+				FString::Printf(TEXT("f2 after half a sol (%d steps) cell 0 is a Dining room with its table and two chairs (%d pieces)"), Took, Dined.Num()));
+			// With the dining room standing, the infirmary is the worst gap - and a second sol later it starts.
+			Sim->Debug_RunGrowthCheck();
+			Expect(Open(4) && Open(4)->Room == FName("Infirmary") && Open(4)->Index == 1 && Near(Open(4)->Bill.FindRef(NStruct), 60.0, 1e-9), TEXT("f3 dining covered: the next civic project is the Infirmary, in cell 1, Struct 60 (locker, lamp, plant)"));
+			RunToEnd(4, 30);
+			const TArray<FName> Inf = PiecesIn(FIntVector(-2, 1, 0));
+			Expect(Sim->GetRoomAt(-2, 1) == FName("Infirmary") && Inf.Num() == 3 && CountRow(Inf, TEXT("Locker")) == 1 && CountRow(Inf, TEXT("Lamp")) == 1 && CountRow(Inf, TEXT("Plant")) == 1, TEXT("f3 cell 1 is an Infirmary with its locker, lamp and plant"));
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(4).Contains(TEXT("covered")), FString::Printf(TEXT("f3 both civic services covered: no more projects - '%s'"), *NoteOf(4)));
+			// The worst gap, not the first name: fifty people, a dining room (half cover), no infirmary.
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 4 });
+			SetHope(80.0);
+			Sim->DesignateRoom(-2, 0, FName("Dining"), R);
+			Sim->Debug_SetColonistsPerCell(10.0);
+			Sim->Debug_AddColonists(42);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			const FRHCityDemand Fifty = Sim->GetCityDemand();
+			double D50 = -1.0, I50 = -1.0;
+			for (const FRHServiceGap& G : Fifty.ServiceGaps) { if (G.Function == FName("Dining")) { D50 = G.Gap; } if (G.Function == FName("Infirmary")) { I50 = G.Gap; } }
+			Sim->Debug_RunGrowthCheck();
+			Expect(Fifty.Population == 50 && Near(D50, 0.5, 1e-12) && Near(I50, 1.0, 1e-12) && Open(4) && Open(4)->Room == FName("Infirmary"),
+				FString::Printf(TEXT("f4 fifty people, dining half covered (gap %.2f), no infirmary (gap %.2f): the WORST gap wins over the first name - %s"), D50, I50, Open(4) ? *Open(4)->Room.ToString() : TEXT("nothing")));
+			// A room under way counts: with the Infirmary on its way, the next worst is Dining.
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 2, 4 });
+			SetHope(80.0);
+			Sim->Debug_RunGrowthCheck();
+			Expect(Open(2) && Open(2)->Room == FName("Dining") && !Open(4), TEXT("f5 two Civic districts, one start a sol: N2's #2 takes the Dining room (the cursor starts at 0)"));
+			Sim->Debug_RunGrowthCheck();
+			Expect(Open(4) && Open(4)->Room == FName("Infirmary"), TEXT("f5 the same sol's second check (a harness call): the Dining room under way counts as covered, so #4 builds the Infirmary, not a second Dining room"));
+		}
+		{
+			// Adjacency, on a floor and on a surface network.
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 2 });
+			SetHope(80.0);
+			Sim->DesignateBay(HabC, 0, FName("Cooking"), R); // N2 bay (-4,0): emits Odor; every other bay of N2 is within two
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && !Open(2) && NoteOf(2).Contains(TEXT("offend")), FString::Printf(TEXT("f6 a Cooking bay (Odor) in N2: Dining refuses Odor, every free bay is within two - no project, and none is built beside it even though an Infirmary would not mind - '%s'"), *NoteOf(2)));
+			Sim->DesignateBay(HabC, 0, NAME_None, R);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(2) && Open(2)->Room == FName("Dining") && Open(2)->HabId == HabC && Open(2)->Index == 0, TEXT("f6 the Cooking bay cleared: the Dining room goes in N2's first free bay"));
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 4 });
+			SetHope(80.0);
+			Sim->DesignateRoom(-2, 0, FName("Cooking"), R); // cell 0 (1,0): cell 1 (1,1) is next to it
+			Expect(Sim->Debug_RunGrowthCheck() == 0 && NoteOf(4).Contains(TEXT("offend")), FString::Printf(TEXT("f7 a Cooking cell beside the only free cell on floor -2: no Dining room there - '%s'"), *NoteOf(4)));
+			// The carve: no free cell on the civic floor.
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 4 });
+			SetHope(80.0);
+			Sim->DesignateRoom(-2, 0, FName("Dining"), R);
+			Sim->DesignateRoom(-2, 1, FName("Infirmary"), R);
+			Sim->Debug_SetColonistsPerCell(10.0);
+			Sim->Debug_AddColonists(42);
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Sim->Debug_RunGrowthCheck();
+			const FRHGrowthProject* Carve = Open(4);
+			Expect(Carve && Carve->bCarve && Carve->Index == INDEX_NONE && Carve->Room == FName("Dining") && Near(Carve->Bill.FindRef(NOx), 100.0, 1e-9) && Near(Carve->Bill.FindRef(NStruct), 80.0, 1e-9),
+				TEXT("f8 every cell of the civic floor is in use and fifty people want a second dining room: it carves one - Struct 80 and 100 kg of air for the new cell"));
+			const double FillBefore = Sim->GetFloorO2Kg(-2);
+			bool bRated = true;
+			Sim->Debug_SetGrowthEnabled(false); // this one project, and no second behind it
+			for (int32 K = 0; K < 30 && Open(4); ++K) { Land(); bRated &= Sim->IsFloorRated(-2); }
+			Sim->Debug_SetGrowthEnabled(true);
+			const TArray<FName> New = PiecesIn(FIntVector(-2, 4, 0));
+			Expect(Sim->GetFloorCarvedCells(-2) == 5 && Sim->GetRoomAt(-2, 4) == FName("Dining") && New.Num() == 3 && bRated && Sim->GetFloorO2Kg(-2) >= FillBefore + 100.0 - 20.0,
+				FString::Printf(TEXT("f8 the floor has five cells, cell 4 is the new Dining room with its table and chairs, and floor -2 stayed rated (air %.0f -> %.0f)"), FillBefore, Sim->GetFloorO2Kg(-2)));
+		}
+
+		// ---------------- (g) One start a sol, round-robin, one alert a sol ----------------
+		{
+			Expect(LoadBase(), TEXT("g base loaded"));
+			Sim->Debug_SetBigArrivalDone(false);
+			SetHope(100.0);
+			Sim->AddStock(NStruct, 15000.0);
+			Sim->AddStock(NShield, 5000.0);
+			Sim->AddStock(NOx, 3000.0);
+			Steps(2); // the Big Arrival's streak starts: its 100 free beds are the standing shortfall
+			Expect(Sim->GetCityDemand().bBigArrivalPending && Sim->GetCityDemand().HousingBedsShort > 50, FString::Printf(TEXT("g setup: the Big Arrival is pending, %d beds short"), Sim->GetCityDemand().HousingBedsShort));
+			Alerts.Reset(); StartLog.Reset(); SeenOpen.Reset();
+			bool bRated = true;
+			const int32 Boundary0 = Sim->GetGrowthCheckedSol();
+			for (int32 K = 0; K < 6 * 20 + 2; ++K) { Land(); bRated &= Sim->IsFloorRated(-1) && Sim->IsFloorRated(-2) && Sim->IsHabRated(HabA) && Sim->IsHabRated(HabC); }
+			TArray<int32> Order; TSet<int32> SolsSeen; bool bOnePerSol = true;
+			for (const FIntPoint& S : StartLog) { Order.Add(S.Y); bOnePerSol &= !SolsSeen.Contains(S.X); SolsSeen.Add(S.X); }
+			FString OrderText;
+			for (const int32 Id : Order) { OrderText += FString::Printf(TEXT("#%d "), Id); }
+			Expect(StartLog.Num() >= 5 && Order[0] == 1 && Order[1] == 2 && Order[2] == 3 && Order[3] == 4 && Order[4] == 1 && bOnePerSol,
+				FString::Printf(TEXT("g1 four districts eligible at the first boundary and ONE starts per sol, round-robin by Id from the cursor: %s(never two in a sol)"), *OrderText));
+			bool bConsecutive = true;
+			for (int32 i = 1; i < StartLog.Num(); ++i) { bConsecutive &= StartLog[i].X == StartLog[i - 1].X + 1; }
+			Expect(bConsecutive && StartLog[0].X >= Boundary0, TEXT("g1 the starts fall on consecutive sol boundaries"));
+			Expect(bRated && Sim->GetFloorCarvedCells(-1) >= 8 && Sim->GetHabNetworkBays(HabA) >= 8 && CountBuildings(TEXT("HabModule")) >= 5, FString::Printf(TEXT("g2 every home stayed rated at EVERY step through all the completions: floor -1 now %d cells, N1 %d bays"), Sim->GetFloorCarvedCells(-1), Sim->GetHabNetworkBays(HabA)));
+			const int32 BoundariesCrossed = Sim->GetGrowthCheckedSol() - Boundary0;
+			Expect(GrowthAlerts() >= SolsSeen.Num() && GrowthAlerts() <= BoundariesCrossed && GrowthAlerts() >= 5, FString::Printf(TEXT("g3 one growth alert per sol colony-wide, however many projects start or finish: %d alerts over %d sol boundaries (%d sols had a start)"), GrowthAlerts(), BoundariesCrossed, SolsSeen.Num()));
+			bool bBoth = false;
+			for (const FString& A : Alerts) { bBoth |= A.StartsWith(TEXT("CITY GROWTH")) && A.Contains(TEXT("under way")) && A.Contains(TEXT("finished")); }
+			Expect(bBoth, TEXT("g3 starts and finishes are summarised in the same banner when they fall in the same sol"));
+			Sim->Debug_SetBigArrivalDone(true);
+		}
+
+		// ---------------- (h) A changed site refunds; an erase cancels; a saved project finishes with its twin ----------------
+		{
+			// Surface: the site is taken before the countdown ends.
+			Expect(LoadBase(), TEXT("h base loaded"));
+			OnlyDistricts({ 1 });
+			SetHope(80.0);
+			const double S0 = Held(NStruct), H0 = Held(NShield);
+			Sim->Debug_RunGrowthCheck();
+			Sim->Debug_SetGrowthEnabled(false); // the open project runs on; no new one starts
+			Expect(Open(1) && Near(Held(NStruct), S0 - 1440.0, 1e-6), TEXT("h1 a surface project is open and has taken its bill"));
+			Place(TEXT("SolarArray"), 3500, 1500); // a machine on the site
+			Alerts.Reset();
+			const int32 Habs0 = CountBuildings(TEXT("HabModule"));
+			double OxStep = 0.0;
+			for (int32 K = 0; K < 40 && Open(1); ++K) { const double Before = Held(NOx); Land(); OxStep = Held(NOx) - Before; }
+			Expect(!Open(1) && CountBuildings(TEXT("HabModule")) == Habs0 && Near(Held(NStruct), S0, 1e-6) && Near(Held(NShield), H0, 1e-6) && OxStep > 300.0,
+				FString::Printf(TEXT("h1 the site was taken: nothing is built and the whole bill is back (Struct %.0f of %.0f, Shielding %.0f of %.0f; the air rose %.0f kg in the step it came back)"), Held(NStruct), S0, Held(NShield), H0, OxStep));
+			bool bNotBuilt = false;
+			for (const FString& A : Alerts) { bNotBuilt |= A.StartsWith(TEXT("CITY GROWTH")) && A.Contains(TEXT("not built")); }
+			Sim->Debug_SetGrowthEnabled(true);
+			Steps(25); // reach the next sol boundary so the one alert goes out
+			for (const FString& A : Alerts) { bNotBuilt |= A.StartsWith(TEXT("CITY GROWTH")) && A.Contains(TEXT("not built")); }
+			Expect(bNotBuilt, TEXT("h1 the alert says it was not built and the materials are back"));
+			// Civic: the cell is zoned by someone else meanwhile.
+			Expect(LoadBase(), TEXT("h base loaded"));
+			OnlyDistricts({ 4 });
+			SetHope(80.0);
+			const double SC = Held(NStruct);
+			Sim->Debug_RunGrowthCheck();
+			Sim->Debug_SetGrowthEnabled(false);
+			Expect(Open(4) && Open(4)->Index == 0 && Near(Held(NStruct), SC - 80.0, 1e-6), TEXT("h2 a Dining project on floor -2 cell 0 is open"));
+			Sim->DesignateRoom(-2, 0, FName("Lab"), R);
+			RunToEnd(4, 30);
+			Expect(Sim->GetRoomAt(-2, 0) == FName("Lab") && PiecesIn(FIntVector(-2, 0, 0)).Num() == 0 && Near(Held(NStruct), SC, 1e-6), TEXT("h2 the cell was zoned meanwhile: the Dining room is not built over it, nothing was furnished, the Struct is back"));
+			// Underground: the floor loses its rating before the end.
+			Expect(LoadBase(), TEXT("h base loaded"));
+			OnlyDistricts({ 3 });
+			SetHope(80.0);
+			const double SF = Held(NStruct);
+			Sim->Debug_RunGrowthCheck();
+			Sim->Debug_SetGrowthEnabled(false);
+			Expect(Open(3), TEXT("h3 a floor project is open"));
+			const int32 CellsF = Sim->GetFloorCarvedCells(-1);
+			double OxBack = 0.0;
+			for (int32 K = 0; K < 40 && Open(3); ++K)
+			{
+				Sim->Debug_SetFloorO2Kg(-1, 0.0); // empty and unrated each step: it cannot re-rate before the project ends
+				Sim->Debug_UnrateFloor(-1);
+				const double Before = Held(NOx);
+				Land();
+				OxBack = Held(NOx) - Before;
+			}
+			Expect(Sim->GetFloorCarvedCells(-1) == CellsF && Near(Held(NStruct), SF, 1e-6) && OxBack > 300.0, FString::Printf(TEXT("h3 floor -1 lost its rating: nothing carved, the Struct is back (%.0f of %.0f) and the air rose %.0f kg in the step it came back (the refunded 400)"), Held(NStruct), SF, OxBack));
+			// Erase: a full refund, nothing applied.
+			Expect(LoadBase(), TEXT("h base loaded"));
+			OnlyDistricts({ 1, 3 });
+			SetHope(100.0);
+			Sim->Debug_SetBigArrivalDone(false);
+			Steps(2);
+			const double SE = Held(NStruct), HE = Held(NShield);
+			Sim->Debug_RunGrowthCheck();
+			Expect(Open(1), TEXT("h4 a surface project is open"));
+			const int32 HabsE = CountBuildings(TEXT("HabModule"));
+			Expect(Near(Held(NStruct), SE - 1440.0, 1e-6) && Send(EraseCmd(1)) && !Open(1) && Sim->FindDistrict(1) == nullptr && Sim->GetGrowthProjects().Num() == 0,
+				TEXT("h4 the district is erased: its open project is cancelled"));
+			Expect(Near(Held(NStruct), SE, 1e-6) && Near(Held(NShield), HE, 1e-6) && CountBuildings(TEXT("HabModule")) == HabsE, TEXT("h4 the refund is the full bill (Struct and Shielding exactly), and nothing was built"));
+			Sim->Debug_SetBigArrivalDone(true);
+		}
+		{
+			// The twin: a project saved halfway finishes on the SAME step as one that never saved. Two kinds, one after the other.
+			for (const int32 District : { 3, 1 })
+			{
+				Expect(LoadBase(), TEXT("h5 base loaded"));
+				OnlyDistricts({ District });
+				SetHope(80.0);
+				Sim->Debug_RunGrowthCheck();
+				Steps(District == 3 ? 10 : 13);
+				Expect(Open(District), FString::Printf(TEXT("h5 district #%d: its project is halfway"), District));
+				const FRHGrowthProject Mid = *Open(District);
+				Expect(Sim->SaveColony(TEXT("citygrowth_twin"), Err), FString::Printf(TEXT("h5 saved mid-project (%s)"), *Err));
+				const int32 TwinSteps = RunToEnd(District, 60);
+				const FLedger Twin = Ledger();
+				const double TwinHope = Sim->GetHopeSmoothed();
+				const int32 TwinSol = Sim->GetGrowthCheckedSol(), TwinCursor = Sim->GetGrowthCursor();
+				Expect(Sim->LoadColony(TEXT("citygrowth_twin"), Err) && Err.IsEmpty() && Open(District), FString::Printf(TEXT("h5 loaded (%s)"), *Err));
+				const FRHGrowthProject Back = *Open(District);
+				bool bSame = Back.DistrictId == Mid.DistrictId && Back.Kind == Mid.Kind && Back.Level == Mid.Level && Back.Cell == Mid.Cell && Back.Size == Mid.Size && Back.HabId == Mid.HabId && Back.Cells == Mid.Cells
+					&& Back.FirstCell == Mid.FirstCell && Back.Index == Mid.Index && Back.bCarve == Mid.bCarve && Back.Room == Mid.Room && Back.TotalSols == Mid.TotalSols && Back.RemainingSols == Mid.RemainingSols && Back.Bill.Num() == Mid.Bill.Num();
+				for (const TPair<FName, double>& L : Mid.Bill) { bSame &= Back.Bill.FindRef(L.Key) == L.Value; }
+				Expect(bSame && Sim->GetGrowthCursor() == District, FString::Printf(TEXT("h5 the loaded project is the saved one, field for field (remaining %.4f sol, cursor %d)"), Back.RemainingSols, Sim->GetGrowthCursor()));
+				const int32 LoadedSteps = RunToEnd(District, 60);
+				const FLedger Loaded = Ledger();
+				Expect(LoadedSteps == TwinSteps && LoadedSteps > 0 && Loaded.Cells1 == Twin.Cells1 && Loaded.Habs == Twin.Habs && Loaded.Pieces == Twin.Pieces && Loaded.Beds == Twin.Beds && Near(Loaded.Struct, Twin.Struct, 1e-6)
+					&& Near(Loaded.Oxygen, Twin.Oxygen, 1e-6) && Near(Loaded.Shielding, Twin.Shielding, 1e-6) && Near(Sim->GetHopeSmoothed(), TwinHope, 1e-9) && Sim->GetGrowthCheckedSol() == TwinSol && Sim->GetGrowthCursor() == TwinCursor,
+					FString::Printf(TEXT("h5 district #%d: the loaded colony finishes on step %d, the twin that never saved on step %d - and the ledgers match (cells %d, habs %d, pieces %d, Struct %.1f)"), District, LoadedSteps, TwinSteps, Loaded.Cells1, Loaded.Habs, Loaded.Pieces, Loaded.Struct));
+			}
+		}
+
+		// ---------------- (i) Ten sols: the era band and the agent band run the same code ----------------
+		{
+			Expect(LoadBase(), TEXT("i base loaded"));
+			Sim->Debug_SetBigArrivalDone(false);
+			SetHope(100.0);
+			Sim->AddStock(NStruct, 15000.0);
+			Sim->AddStock(NShield, 5000.0);
+			Sim->AddStock(NOx, 3000.0);
+			Steps(2);
+			Sim->Debug_SetBigArrivalDone(false);
+			Expect(Sim->SaveColony(TEXT("citygrowth_parity"), Err), FString::Printf(TEXT("i the parity start is saved (%s)"), *Err));
+			// Era band: 200 steps of 60 s.
+			int32 EraStarted = 0;
+			TSet<int32> OpenEra;
+			const FLedger E0 = Ledger();
+			const auto CountStarts = [&](TSet<int32>& Was, int32& Started)
+			{
+				for (const FRHGrowthProject& P : Sim->GetGrowthProjects()) { if (!Was.Contains(P.DistrictId)) { ++Started; } }
+				Was.Empty();
+				for (const FRHGrowthProject& P : Sim->GetGrowthProjects()) { Was.Add(P.DistrictId); }
+			};
+			for (int32 K = 0; K < 200; ++K) { Land(); CountStarts(OpenEra, EraStarted); }
+			const FLedger E1 = Ledger();
+			const double EraSeconds = EraDt;
+			// Agent band: the same ten sols in 0.1 s sub-steps (120,000 of them).
+			Expect(Sim->LoadColony(TEXT("citygrowth_parity"), Err) && Err.IsEmpty(), TEXT("i the parity start is loaded for the agent band"));
+			Sim->Debug_SetGrowthEnabled(true);
+			Sim->Debug_SetBigArrivalDone(false);
+			int32 AgentStarted = 0;
+			TSet<int32> OpenAgent;
+			const FLedger A0 = Ledger();
+			const int32 AgentSteps = FMath::RoundToInt32(10.0 * SolLen / AgentDt);
+			for (int32 K = 0; K < AgentSteps; ++K)
+			{
+				Clock->Debug_AdvanceSimSeconds(AgentDt);
+				Sim->Debug_SetBatteryWh(1.0e9);
+				Sim->Debug_SetHopeSmoothed(100.0);
+				Sim->Debug_StepSim(URHSimClockSubsystem::SubStepSeconds);
+				CountStarts(OpenAgent, AgentStarted);
+			}
+			const FLedger A1 = Ledger();
+			const auto Within = [](double A, double B, double Frac) { return FMath::Abs(A - B) <= Frac * FMath::Max(1.0, FMath::Max(FMath::Abs(A), FMath::Abs(B))); };
+			UE_LOG(LogRedHopeSim, Display, TEXT("CITYGROWTH ledger over 10 sols - era: %d started, Struct %.1f -> %.1f, Shielding %.1f -> %.1f, Oxygen %.1f -> %.1f, floor -1 %d -> %d cells, %d modules, %d pieces, %d beds | agent: %d started, Struct %.1f -> %.1f, Shielding %.1f -> %.1f, Oxygen %.1f -> %.1f, floor -1 %d -> %d cells, %d modules, %d pieces, %d beds (%d sub-steps of %.1f s against %d steps of %.0f s)"),
+				EraStarted, E0.Struct, E1.Struct, E0.Shielding, E1.Shielding, E0.Oxygen, E1.Oxygen, E0.Cells1, E1.Cells1, E1.Habs, E1.Pieces, E1.Beds,
+				AgentStarted, A0.Struct, A1.Struct, A0.Shielding, A1.Shielding, A0.Oxygen, A1.Oxygen, A0.Cells1, A1.Cells1, A1.Habs, A1.Pieces, A1.Beds, AgentSteps, AgentDt, 200, EraSeconds);
+			Expect(EraStarted >= 8 && AgentStarted == EraStarted && A1.Habs == E1.Habs && A1.Cells1 == E1.Cells1 && A1.Cells2 == E1.Cells2 && A1.Pieces == E1.Pieces && A1.Beds == E1.Beds && A1.Free == E1.Free,
+				FString::Printf(TEXT("i1 ten sols: the era band started %d projects and the agent band %d; the same modules (%d), cells (%d), furnishings (%d) and beds (%d)"), EraStarted, AgentStarted, E1.Habs, E1.Cells1, E1.Pieces, E1.Beds));
+			Expect(Within(A1.Struct, E1.Struct, 0.05) && Within(A1.Shielding, E1.Shielding, 0.05) && Within(A1.Oxygen, E1.Oxygen, 0.05) && Within(A1.Food, E1.Food, 0.05),
+				FString::Printf(TEXT("i2 the ledgers agree within 5%%: Struct %.1f vs %.1f, Shielding %.1f vs %.1f, Oxygen %.1f vs %.1f, Food %.1f vs %.1f (the same code: expect identical)"), E1.Struct, A1.Struct, E1.Shielding, A1.Shielding, E1.Oxygen, A1.Oxygen, E1.Food, A1.Food));
+			Sim->Debug_SetBigArrivalDone(true);
+		}
+
+		// ---------------- (f9) A CivicService that emits Odor is never zoned (the last scenario: it injects a row) ----------------
+		{
+			// A CivicService that emits Odor is never zoned: it would win the lexical tie ("Canteen" < "Dining").
+			Expect(LoadBase(), TEXT("f base loaded"));
+			OnlyDistricts({ 4 });
+			SetHope(80.0);
+			FRHRoomRow Canteen;
+			Canteen.DisplayName = TEXT("Canteen");
+			Canteen.Function = FName("Canteen");
+			Canteen.EmitsTags = TEXT("Odor");
+			Canteen.MoraleWeight = 0.6f;
+			Canteen.CivicService = true;
+			Canteen.CivicFurniture = TEXT("DiningTable");
+			Canteen.SliceActive = true;
+			DefsSub->Debug_InjectRoom(FName("Canteen"), Canteen);
+			bool bSeen = false;
+			for (const FRHServiceGap& G : Sim->GetCityDemand().ServiceGaps) { bSeen |= G.Function == FName("Canteen") && Near(G.Gap, 1.0, 1e-12); }
+			Sim->Debug_RunGrowthCheck();
+			Expect(bSeen && Open(4) && Open(4)->Room == FName("Dining"), TEXT("f9 a CivicService row that emits Odor ('Canteen', gap 1, first by name) is in the demand and never zoned: the city builds the Dining room"));
+		}
+
+		Sim->OnCommandRejected.Remove(RejectH);
+		Sim->OnAlert.Remove(AlertH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== CITY GROWTH TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -8918,6 +9778,162 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			Expect(CountsMs <= BudgetCountsMs, FString::Printf(TEXT("budget: GetDistrictCounts over %d districts took %.3f ms (<= %.1f)"), Sim->GetDistricts().Num(), CountsMs, BudgetCountsMs));
 			Expect(DemandMs <= BudgetDemandMs, FString::Printf(TEXT("budget: GetCityDemand at %d people took %.3f ms (<= %.1f)"), Sim->GetPopulation(), DemandMs, BudgetDemandMs));
+		}
+
+		// C5b: growth at scale, on the surface. A Homes district of 30 x 30 lattice cells under a grid of 49
+		// Pylons, a seed network of four rated bays, and the city grows it ITSELF - one project a sol, the very
+		// code a game runs - until the network has about 500 bays (a standing housing shortfall, plenty of
+		// material, Hope held high). Then 100 of the grown bays become Cooking stations (they emit Odor; the rest
+		// are Living quarters that refuse it): the worst case for the surface adjacency term, which pairs every
+		// emitter with every refuser in its network. The Hope read must stay inside the 0.5 ms budget with the
+		// five-floor city underneath it (if it does not, the surface term is cached on ZoningVersion).
+		if (Table.Num() == UE_ARRAY_COUNT(Targets))
+		{
+			constexpr int32 WantedBays = 500;
+			const FName NHomes(TEXT("Homes")), NStruct(TEXT("Struct")), NShield(TEXT("Shielding")), NOx(TEXT("Oxygen"));
+			const double HopeBefore0 = FPlatformTime::Seconds();
+			double HopeSinkBefore = 0.0;
+			for (int32 K = 0; K < HopeReps; ++K) { HopeSinkBefore += Sim->GetColonyHope().Total; }
+			const double HopeBeforeMs = (FPlatformTime::Seconds() - HopeBefore0) * 1000.0 / HopeReps;
+			for (int32 I = 0; I < 7; ++I)
+			{
+				for (int32 J = 0; J < 7; ++J) { Sim->Debug_PlaceInstant(FName("Pylon"), FVector(69000.0 + 5000.0 * I, -101000.0 + 5000.0 * J, 0.0)); }
+			}
+			const int32 SeedA = ([&]() { Sim->Debug_PlaceInstant(FName("HabModule"), FVector(84500.0, -85000.0, 0.0), 0, 2, 1); return Sim->GetBuildings().Last().Id; })();
+			Sim->Debug_PlaceInstant(FName("HabModule"), FVector(84500.0, -86000.0, 0.0), 0, 2, 1);
+			Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(84000.0, -85000.0, 0.0));
+			const int32 SeedB = SeedA + 1;
+			FString ZoneErr;
+			for (const int32 H : { SeedA, SeedB }) { for (int32 Bay = 0; Bay < 2; ++Bay) { Sim->DesignateBay(H, Bay, FName("LivingQuarters"), ZoneErr); } }
+			Sim->AddStock(NStruct, 1.0e7);
+			Sim->AddStock(NShield, 1.0e6);
+			Sim->AddStock(NOx, 1.0e7);
+			for (int32 K = 0; K < 80 && !Sim->IsHabRated(SeedA); ++K) { EraStepOnce(); }
+			FRHCommand Paint;
+			Paint.Verb = FName("PaintDistrict");
+			Paint.Target = NHomes;
+			Paint.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(70, -100));
+			Paint.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(99, -71));
+			const int32 DistrictsBefore = Sim->GetDistricts().Num();
+			Sim->EnqueueCommand(Paint);
+			EraStepOnce();
+			const int32 SurfaceDistrict = Sim->GetDistricts().Num() > DistrictsBefore ? Sim->GetDistricts().Last().Id : 0;
+			Expect(Sim->IsHabRated(SeedA) && Sim->GetHabNetworkBays(SeedA) == 4 && SurfaceDistrict != 0 && Sim->FindDistrict(SurfaceDistrict)->Lattice.Num() == 900 && Sim->GetDistrictOfBuilding(SeedA) == SurfaceDistrict,
+				FString::Printf(TEXT("growth: a rated four-bay seed in a 900-cell Homes district #%d under 49 pylons"), SurfaceDistrict));
+			// Let the city build. Growth is on by default in every district; the other districts' projects (the scale colony's
+			// Homes and Civic ones) are switched off so the clock measures this one network.
+			for (const FRHDistrict& D : TArray<FRHDistrict>(Sim->GetDistricts())) { Sim->SetDistrictGrowth(D.Id, D.Id == SurfaceDistrict); }
+			Sim->Debug_SetBigArrivalDone(false);
+			Sim->Debug_SetBigArrivalFreeBeds(10000000);
+			// A surface network's air push is a flat 20 kg an hour, so past about 240 bays the leak (2 kg a bay a sol) outruns it and
+			// the network would lose its rating on its own: the harness holds every grown shell full, as it holds the floors.
+			const auto HoldAir = [&]()
+			{
+				for (const FRHBuildingInstance& B : Sim->GetBuildings())
+				{
+					if (B.DefName == FName("HabModule") && B.Level == 0 && !B.bUnderConstruction) { Sim->Debug_SetHabO2Kg(B.Id, Sim->GetHabO2RequiredKg(B.Id)); }
+				}
+			};
+			int32 SolsRun = 0, Bays = 4;
+			double GrowTotal = 0.0, GrowMax = 0.0, OtherTotal = 0.0;
+			int32 GrowSteps = 0, OtherSteps = 0;
+			const int32 Modules0 = [&]() { int32 N = 0; for (const FRHBuildingInstance& B : Sim->GetBuildings()) { N += B.DefName == FName("HabModule") ? 1 : 0; } return N; }();
+			const double Grow0 = FPlatformTime::Seconds();
+			while (Bays < WantedBays && SolsRun < 600)
+			{
+				for (int32 K = 0; K < (int32)(SolLen / EraDt); ++K)
+				{
+					Sim->Debug_SetHopeSmoothed(100.0);
+					// The five floors' air is held full (the harness's surplus: a thousand people on a floor breathe faster than a
+					// circulator pushes, and a few hundred sols would recall them - this is the surface network's clock, not theirs).
+					for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_SetFloorO2Kg(-L, Sim->GetFloorO2RequiredKg(-L)); }
+					HoldAir();
+					const int32 CheckedBefore = Sim->GetGrowthCheckedSol();
+					TopUp(EraDt);
+					Clock->Debug_AdvanceSimSeconds(EraDt);
+					const double S0 = FPlatformTime::Seconds();
+					Sim->EraStep((float)EraDt);
+					const double Took = FPlatformTime::Seconds() - S0;
+					if (Sim->GetGrowthCheckedSol() > CheckedBefore) { GrowTotal += Took; GrowMax = FMath::Max(GrowMax, Took); ++GrowSteps; } else { OtherTotal += Took; ++OtherSteps; }
+				}
+				++SolsRun;
+				Bays = Sim->GetHabNetworkBays(SeedA);
+			}
+			const double GrowWallS = FPlatformTime::Seconds() - Grow0;
+			int32 Modules1 = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings()) { Modules1 += B.DefName == FName("HabModule") ? 1 : 0; }
+			Expect(Bays >= WantedBays - 20 && Bays <= WantedBays + 40 && Modules1 > Modules0 + 100 && Sim->IsHabRated(SeedA),
+				FString::Printf(TEXT("growth: the city grew the seed to %d bays in %d sols with %d modules of its own, in %.1f s of wall clock; the network is still rated"), Bays, SolsRun, Modules1 - Modules0, GrowWallS));
+			Expect(Sim->IsFloorRated(-1) && Sim->IsFloorRated(-3) && Sim->IsFloorRated(-5) && Sim->GetPopulation() > 4000,
+				TEXT("growth: the five-floor city underneath was never disturbed (floors rated, the population in place)"));
+			// Hope and the sol-boundary step with 500 grown bays, then the emitters.
+			const double HopeGrown0 = FPlatformTime::Seconds();
+			double HopeSinkGrown = 0.0;
+			for (int32 K = 0; K < HopeReps; ++K) { HopeSinkGrown += Sim->GetColonyHope().Total; }
+			const double HopeGrownMs = (FPlatformTime::Seconds() - HopeGrown0) * 1000.0 / HopeReps;
+			// 100 of the grown bays become Cooking stations: sell their beds (one Sell order each, all landing in one step), then zone them.
+			TArray<TPair<int32, int32>> Emitters; // (shell, bay)
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName != FName("HabModule") || B.Level != 0 || B.bUnderConstruction || Sim->GetDistrictOfBuilding(B.Id) != SurfaceDistrict) { continue; }
+				const int32 Count = B.SizeX * B.SizeY;
+				for (int32 Bay = 0; Bay < Count; ++Bay)
+				{
+					if (Emitters.Num() < 100 && (B.Id + Bay) % 4 == 0 && Sim->GetHabNetworkRoot(B.Id) == SeedA) { Emitters.Emplace(B.Id, Bay); }
+				}
+			}
+			for (const TPair<int32, int32>& E : Emitters)
+			{
+				const FRHBuildingInstance* Shell = nullptr;
+				for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == E.Key) { Shell = &B; break; } }
+				if (!Shell) { continue; }
+				FRHCommand Sell;
+				Sell.Verb = FName("Sell");
+				Sell.Target = FName("Cell");
+				Sell.Level = 0;
+				Sell.Location = Sim->GetBayCentreCm(*Shell, E.Value);
+				Sim->EnqueueCommand(Sell);
+			}
+			EraStepOnce();
+			int32 Zoned = 0;
+			for (const TPair<int32, int32>& E : Emitters) { Zoned += Sim->DesignateBay(E.Key, E.Value, FName("Cooking"), ZoneErr) ? 1 : 0; }
+			EraStepOnce();
+			const URHSimWorldSubsystem::FRHHopeBreakdown Hp = Sim->GetColonyHope();
+			const double HopeEmit0 = FPlatformTime::Seconds();
+			double HopeSinkEmit = 0.0;
+			for (int32 K = 0; K < HopeReps; ++K) { HopeSinkEmit += Sim->GetColonyHope().Total; }
+			const double HopeEmitMs = (FPlatformTime::Seconds() - HopeEmit0) * 1000.0 / HopeReps;
+			// A sol-boundary step at this size (growth's start check over the 500-bay network), and an agent step.
+			double BoundaryMs = 0.0, AgentSurfaceMs = 0.0;
+			for (int32 K = 0; K < (int32)(SolLen / EraDt) + 1 && BoundaryMs == 0.0; ++K)
+			{
+				Sim->Debug_SetHopeSmoothed(100.0);
+				for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_SetFloorO2Kg(-L, Sim->GetFloorO2RequiredKg(-L)); }
+				HoldAir();
+				const int32 CheckedBefore = Sim->GetGrowthCheckedSol();
+				TopUp(EraDt);
+				Clock->Debug_AdvanceSimSeconds(EraDt);
+				const double S0 = FPlatformTime::Seconds();
+				Sim->EraStep((float)EraDt);
+				if (Sim->GetGrowthCheckedSol() > CheckedBefore) { BoundaryMs = (FPlatformTime::Seconds() - S0) * 1000.0; }
+			}
+			HoldAir();
+			for (int32 K = 0; K < 50; ++K)
+			{
+				TopUp(AgentDt);
+				Clock->Debug_AdvanceSimSeconds(AgentDt);
+				const double S0 = FPlatformTime::Seconds();
+				Sim->Debug_StepSim(URHSimClockSubsystem::SubStepSeconds);
+				AgentSurfaceMs += (FPlatformTime::Seconds() - S0) * 1000.0 / 50.0;
+			}
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE growth: %d bays grown in %d sols (%d modules) | era step on a boundary sol %.3f ms avg, %.3f ms worst (%d), other steps %.3f ms (%d) | sol-boundary step at %d bays %.3f ms | hope read %.3f ms before the surface network, %.3f ms with %d grown bays, %.3f ms with %d Cooking stations (%d zoned; adjacency %.2f, %d of %d refuser cells offended, sink %.2f %.2f %.2f) | agent step %.3f ms"),
+				Bays, SolsRun, Modules1 - Modules0, GrowSteps > 0 ? GrowTotal * 1000.0 / GrowSteps : 0.0, GrowMax * 1000.0, GrowSteps, OtherSteps > 0 ? OtherTotal * 1000.0 / OtherSteps : 0.0, OtherSteps,
+				Bays, BoundaryMs, HopeBeforeMs, HopeGrownMs, Bays, HopeEmitMs, Emitters.Num(), Zoned, Hp.AdjacencyPenalty, Hp.OffendedRefusers, Hp.RefuserCells, HopeSinkBefore, HopeSinkGrown, HopeSinkEmit, AgentSurfaceMs);
+			Expect(Zoned == Emitters.Num() && Emitters.Num() == 100 && Hp.OffendedRefusers > 100 && Hp.RefuserCells > 900, // the floors' Living cells and the surface bays together
+				FString::Printf(TEXT("growth: 100 grown bays are Cooking stations among the Living bays: %d of %d refuser cells are offended (adjacency %.2f)"), Hp.OffendedRefusers, Hp.RefuserCells, Hp.AdjacencyPenalty));
+			Expect(HopeEmitMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope with the five floors and a surface network of %d bays with 100 odor emitters took %.3f ms (<= 0.5)"), Bays, HopeEmitMs));
+			Expect(BoundaryMs <= 25.0, FString::Printf(TEXT("budget: a sol-boundary era step (growth's start check over a %d-bay network and 5,400 colonists) took %.3f ms (<= 25)"), Bays, BoundaryMs));
+			Expect(AgentSurfaceMs <= 3.0, FString::Printf(TEXT("budget: an agent step with the surface network took %.3f ms (<= 3.0)"), AgentSurfaceMs));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

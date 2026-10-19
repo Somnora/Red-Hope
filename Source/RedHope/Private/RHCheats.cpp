@@ -12,6 +12,7 @@
 #include "RHDefinitionsSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHFrameStats.h"
+#include "RHGrowthVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
@@ -1787,7 +1788,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 	TEXT("RH.District"),
-	TEXT("RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>> - C5a districts. Cells are 10 m lattice cells (cell 0,0 is centred on the Lander, x1..x2 and y1..y2 corners in either order). paint, floor, erase and rename transmit the real uplink orders; mode arms the paint tool, ghost holds its drag ghost for a screenshot (no args to clear), labels shows every name, tab and city fold the deck."),
+	TEXT("RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>> - C5a districts. Cells are 10 m lattice cells (cell 0,0 is centred on the Lander, x1..x2 and y1..y2 corners in either order). paint, floor, erase and rename transmit the real uplink orders; growth switches a district's own growth on or off (C5b; instant, like the machine switches); mode arms the paint tool, ghost holds its drag ghost for a screenshot (no args to clear), labels shows every name, tab and city fold the deck."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -1871,6 +1872,20 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 			Sim->EnqueueCommand(Cmd);
 			return;
 		}
+		if (Sub == TEXT("growth") && Args.Num() >= 3)
+		{
+			const int32 Id = FCString::Atoi(*Args[1]);
+			const bool bOn = FCString::Atoi(*Args[2]) != 0;
+			if (Sim->SetDistrictGrowth(Id, bOn))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.District] #%d growth %s"), Id, bOn ? TEXT("ON") : TEXT("OFF"));
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Error, TEXT("[RH.District] growth: no district #%d"), Id);
+			}
+			return;
+		}
 		if (Sub == TEXT("labels") && Args.Num() >= 2)
 		{
 			if (URHDistrictVisualizerSubsystem* Viz = World->GetSubsystem<URHDistrictVisualizerSubsystem>())
@@ -1900,7 +1915,56 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 			PC->Debug_SetCityExpanded(Args.Num() < 2 || FCString::Atoi(*Args[1]) != 0);
 			return;
 		}
-		UE_LOG(LogRedHope, Error, TEXT("Usage: RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>>"));
+		UE_LOG(LogRedHope, Error, TEXT("Usage: RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>>"));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
+	TEXT("RH.Growth"),
+	TEXT("RH.Growth [now] - C5b: list the city's growth. The open projects (what, how far, what is left, the bill), each Homes and Civic district's switch and why it is not growing, the pause, and the free material per resource (held - quota bill - reserve). 'now' runs the sol-boundary start check at once (DEBUG: it runs by itself at every sol, one project at most)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("now"), ESearchCase::IgnoreCase))
+		{
+			const int32 Started = Sim->Debug_RunGrowthCheck();
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth] the start check ran: %d project%s started"), Started, Started == 1 ? TEXT("") : TEXT("s"));
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Growth] %d project%s under way (growth v%u; last sol checked %d; the cursor rests on district #%d)%s%s"), Sim->GetGrowthProjects().Num(), Sim->GetGrowthProjects().Num() == 1 ? TEXT("") : TEXT("s"),
+			Sim->GetGrowthVersion(), Sim->GetGrowthCheckedSol(), Sim->GetGrowthCursor(), Sim->GetGrowthPause().IsEmpty() ? TEXT("") : TEXT(" - "), *Sim->GetGrowthPause());
+		for (const FRHGrowthProject& P : Sim->GetGrowthProjects())
+		{
+			const FRHDistrict* D = Sim->FindDistrict(P.DistrictId);
+			FString Bill;
+			TArray<FName> Keys;
+			P.Bill.GetKeys(Keys);
+			Keys.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+			for (const FName& K : Keys) { Bill += FString::Printf(TEXT("%s%s %.0f"), Bill.IsEmpty() ? TEXT("") : TEXT(", "), *K.ToString(), P.Bill.FindChecked(K)); }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   #%d '%s' (%s): %s - %.0f%% done, %.2f of %.2f sol left; bill %s"), P.DistrictId, D ? *D->Name : TEXT("?"), D ? *D->Kind.ToString() : TEXT("?"),
+				*Sim->DescribeGrowthProject(P), P.Progress() * 100.0, P.RemainingSols, P.TotalSols, *Bill);
+		}
+		for (const FRHDistrict& D : Sim->GetDistricts())
+		{
+			if (D.Kind != FName("Homes") && D.Kind != FName("Civic"))
+			{
+				continue;
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   district #%d '%s' (%s%s): growth %s%s%s"), D.Id, *D.Name, *D.Kind.ToString(), D.IsFloor() ? *FString::Printf(TEXT(", floor %d"), D.Level) : TEXT(""),
+				D.bGrowth ? TEXT("ON") : TEXT("OFF"), Sim->FindGrowthProject(D.Id) ? TEXT(", a project is under way") : TEXT(""),
+				Sim->GetGrowthNote(D.Id).IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" - %s"), *Sim->GetGrowthNote(D.Id)));
+		}
+		for (const TCHAR* Res : { TEXT("Struct"), TEXT("Shielding"), TEXT("Oxygen") })
+		{
+			const URHSimWorldSubsystem::FRHGrowthAvailability A = Sim->GetGrowthAvailability(FName(Res));
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the open quota - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.Reserve, A.Free);
+		}
+		if (const URHGrowthVisualizerSubsystem* Viz = World->GetSubsystem<URHGrowthVisualizerSubsystem>())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %d scaffold%s drawn in the viewed level"), Viz->GetDrawnProjectCount(), Viz->GetDrawnProjectCount() == 1 ? TEXT("") : TEXT("s"));
+		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDepositLeft(

@@ -571,6 +571,7 @@ bool URHSimWorldSubsystem::ExecuteEraseDistrict(const FRHCommand& Cmd, FString& 
 	{
 		return false;
 	}
+	CancelGrowthProject(Id, TEXT("its district was erased")); // C5b: an open project is cancelled with a full refund (nothing was applied)
 	const int32 Index = EnsureDistrictGeo().IndexById.FindRef(Id);
 	UE_LOG(LogRedHopeSim, Display, TEXT("District #%d '%s' (%s) erased"), Districts[Index].Id, *Districts[Index].Name, *Districts[Index].Kind.ToString());
 	Districts.RemoveAt(Index);

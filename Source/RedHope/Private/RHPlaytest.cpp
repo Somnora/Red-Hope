@@ -28,6 +28,13 @@
 // Water Plant beside the drill. It ends at the sol limit (or if the colony
 // empties), prints the report, and quits.
 //
+// With districts=1 (rh_playtest.sh passes it when RH_PLAYTEST_DISTRICTS is set) it also plays
+// the city layer (C5b): it paints a Homes district over floor -1 once that rates (and over a
+// surface habitat, if the colony has a rated one - the guide's path founds none), carves and
+// rates a second floor for a Civic district, and logs what the city builds in them - each
+// project's start and end, a GROWTH line a sol, and a REPORT block of the projects, their kinds
+// and their sols. The colony is otherwise played exactly as without the option.
+//
 // Given a save slot, it saves the colony at the sol limit first: that is how
 // the hand-play checkpoints are made (scripts/unreal/rh_checkpoints.sh). The
 // director then loads a real game in progress, played by this bot up to that
@@ -62,6 +69,13 @@ namespace
 		bool bLeanCargo = false;
 		// Saved at the sol limit when set (RH_<SaveSlot>.sav): the checkpoints.
 		FString SaveSlot;
+		// C5b: paint districts and log what the city builds in them.
+		bool bDistricts = false;
+		bool bNoGrowth = false; // the control: the districts are painted and floor -2 is made, but the city builds nothing
+		TMap<int32, double> GrowthLastRemaining; // district -> the open project's RemainingSols at the last look: a rise means a new project replaced it
+		struct FGrowthRecord { int32 DistrictId = 0; ERHGrowthKind Kind = ERHGrowthKind::SurfaceModule; double StartSol = 0.0, EndSol = -1.0; FString What; };
+		TArray<FGrowthRecord> GrowthRecords;
+		TSet<int32> GrowthOpen; // districts with a project at the last look
 		TSet<FName> Issued;                 // plan steps already ordered
 		TArray<TPair<FString, double>> Milestones; // what, sol - first time only
 		TSet<FString> MilestoneSet;
@@ -260,6 +274,24 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival did not land (Big Arrival streak %.1f sols)"), Sim ? Sim->GetBigArrivalStreakSols() : 0.0);
 			}
 		}
+		if (P.bDistricts)
+		{
+			int32 Surface = 0, Floor = 0, Civic = 0, Done = 0;
+			for (const FPlaytest::FGrowthRecord& G : P.GrowthRecords)
+			{
+				Surface += G.Kind == ERHGrowthKind::SurfaceModule ? 1 : 0;
+				Floor += G.Kind == ERHGrowthKind::FloorCells ? 1 : 0;
+				Civic += G.Kind == ERHGrowthKind::CivicRoom ? 1 : 0;
+				Done += G.EndSol >= 0.0 ? 1 : 0;
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  growth: %d project%s started (%d surface module%s, %d floor cell batch%s, %d civic room%s), %d finished or closed; %d district%s"),
+				P.GrowthRecords.Num(), P.GrowthRecords.Num() == 1 ? TEXT("") : TEXT("s"), Surface, Surface == 1 ? TEXT("") : TEXT("s"), Floor, Floor == 1 ? TEXT("") : TEXT("es"), Civic, Civic == 1 ? TEXT("") : TEXT("s"),
+				Done, Sim ? Sim->GetDistricts().Num() : 0, (Sim && Sim->GetDistricts().Num() == 1) ? TEXT("") : TEXT("s"));
+			for (const FPlaytest::FGrowthRecord& G : P.GrowthRecords)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT   growth: district #%d, sol %.2f to %.2f: %s"), G.DistrictId, G.StartSol, G.EndSol, *G.What);
+			}
+		}
 		if (Sim)
 		{
 			Sim->OnCommandRejected.Remove(P.hRejected);
@@ -362,6 +394,16 @@ namespace
 					Sim->GetStock(FName("Food")), Draw > 0.0 ? Sim->GetStock(FName("Food")) / Draw : 0.0,
 					Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(),
 					Sim->GetStock(FName("Water")), Sim->GetWaterPotability() * 100.0, Sim->GetHumanWorkTempo() * 100.0);
+			}
+			if (P.bDistricts && Sim->GetDistricts().Num() > 0)
+			{
+				FString Open;
+				for (const FRHGrowthProject& GP : Sim->GetGrowthProjects()) { Open += FString::Printf(TEXT("%s#%d %s %.0f%%"), Open.IsEmpty() ? TEXT("") : TEXT("; "), GP.DistrictId, *Sim->DescribeGrowthProject(GP), GP.Progress() * 100.0); }
+				const URHSimWorldSubsystem::FRHGrowthAvailability SA = Sim->GetGrowthAvailability(FName("Struct"));
+				const FRHCityDemand Dm = Sim->GetCityDemand();
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] GROWTH %d | %d district%s | open: %s | Struct free %.0f (%.0f held - %.0f quota - %.0f reserve) | housing short %d (%s) | %s"),
+					C->GetSol(), Sim->GetDistricts().Num(), Sim->GetDistricts().Num() == 1 ? TEXT("") : TEXT("s"), Open.IsEmpty() ? TEXT("none") : *Open, SA.Free, SA.Held, SA.QuotaBill, SA.Reserve,
+					Dm.HousingBedsShort, *Dm.HousingLimit.ToString(), Sim->GetGrowthPause().IsEmpty() ? TEXT("not paused") : *Sim->GetGrowthPause());
 			}
 			P.SolLogged = C->GetSol();
 			P.DeficitSec = P.ShedSec = P.IdleRobotSec = P.SampleSec = 0.0;
@@ -636,6 +678,114 @@ namespace
 			}
 		}
 
+		// --- The city layer (districts=1) ---
+		if (P.bDistricts)
+		{
+			Sim->Debug_SetGrowthEnabled(!P.bNoGrowth);
+			const auto Paint = [&](FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, const FString& Label)
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("PaintDistrict");
+				Cmd.Target = Kind;
+				Cmd.Level = Level;
+				Cmd.Location = FromCm;
+				Cmd.LocationB = ToCm;
+				Order(Sim, C, Cmd, Label);
+			};
+			// The vault floor is the first district, painted Homes once it rates.
+			if (Sim->IsFloorRated(-1) && Once(TEXT("districtHomes")))
+			{
+				Paint(FName("Homes"), -1, FVector::ZeroVector, FVector::ZeroVector, TEXT("Paint a Homes district over floor -1"));
+			}
+			// A rated surface habitat, if the colony has one, gets a Homes district round it (the guide's path founds none).
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.Level == 0 && !B.bUnderConstruction && B.DefName == FName("HabModule") && Sim->IsHabRated(B.Id) && Once(TEXT("districtHab")))
+				{
+					const FIntPoint L = URHSimWorldSubsystem::LatticeOf(B.LocationCm);
+					Paint(FName("Homes"), 0, URHSimWorldSubsystem::LatticeCentreCm(L - FIntPoint(3, 3)), URHSimWorldSubsystem::LatticeCentreCm(L + FIntPoint(3, 3)),
+						FString::Printf(TEXT("Paint a Homes district round surface habitat #%d"), B.Id));
+					break;
+				}
+			}
+			// The Civic district is a second floor: bored, carved, filtered and rated like the first, then painted.
+			if (P.CrewLandedSol >= 0.0 && Sim->IsFloorRated(-1))
+			{
+				if (Sim->GetShaftDepth() < 2 && Once(TEXT("bore2")))
+				{
+					FRHCommand Bore; Bore.Verb = FName("Bore"); Bore.Value = 2;
+					Order(Sim, C, Bore, TEXT("Bore to -2 (a floor for the Civic district)"));
+				}
+				if (Sim->GetShaftDepth() >= 2 && Once(TEXT("carve2")))
+				{
+					FRHCommand Exc; Exc.Verb = FName("Excavate"); Exc.Level = -2; Exc.Value = Sim->GetMinLivableCells();
+					Exc.Location = Sim->GetShaftHeadCm();
+					Order(Sim, C, Exc, FString::Printf(TEXT("Excavate %d cells on -2"), Sim->GetMinLivableCells()));
+				}
+				if (Sim->GetFloorCarvedCells(-2) >= Sim->GetMinLivableCells() && Once(TEXT("filter2")))
+				{
+					const FVector H = Sim->GetShaftHeadCm();
+					OrderBuild(Sim, C, FName("AirFilter"), H.X / 100.f + 15.f, H.Y / 100.f, -2);
+				}
+				if (Sim->IsFloorRated(-2))
+				{
+					Mark(P, C, TEXT("floor -2 livable"));
+					if (Once(TEXT("districtCivic")))
+					{
+						Paint(FName("Civic"), -2, FVector::ZeroVector, FVector::ZeroVector, TEXT("Paint a Civic district over floor -2"));
+					}
+				}
+			}
+			// What the city builds: every project's start and end. A project can end and the next begin in the same step (a sol boundary),
+			// so a district whose open project has MORE time left than at the last look has a new one.
+			TSet<int32> OpenNow;
+			for (const FRHGrowthProject& GP : Sim->GetGrowthProjects())
+			{
+				OpenNow.Add(GP.DistrictId);
+				const double* Last = P.GrowthLastRemaining.Find(GP.DistrictId);
+				const bool bReplaced = P.GrowthOpen.Contains(GP.DistrictId) && Last && GP.RemainingSols > *Last + 1.0e-6;
+				if (bReplaced)
+				{
+					for (int32 i = P.GrowthRecords.Num() - 1; i >= 0; --i)
+					{
+						if (P.GrowthRecords[i].DistrictId == GP.DistrictId && P.GrowthRecords[i].EndSol < 0.0)
+						{
+							P.GrowthRecords[i].EndSol = SolNow(C);
+							UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  ends in district #%d: %s"), SolNow(C), GP.DistrictId, *P.GrowthRecords[i].What);
+							break;
+						}
+					}
+				}
+				P.GrowthLastRemaining.Add(GP.DistrictId, GP.RemainingSols);
+				if (!P.GrowthOpen.Contains(GP.DistrictId) || bReplaced)
+				{
+					FPlaytest::FGrowthRecord Rec;
+					Rec.DistrictId = GP.DistrictId;
+					Rec.Kind = GP.Kind;
+					Rec.StartSol = SolNow(C);
+					Rec.What = Sim->DescribeGrowthProject(GP);
+					P.GrowthRecords.Add(Rec);
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  begins in district #%d: %s"), SolNow(C), GP.DistrictId, *Rec.What);
+				}
+			}
+			for (const int32 Id : P.GrowthOpen)
+			{
+				if (!OpenNow.Contains(Id))
+				{
+					for (int32 i = P.GrowthRecords.Num() - 1; i >= 0; --i)
+					{
+						if (P.GrowthRecords[i].DistrictId == Id && P.GrowthRecords[i].EndSol < 0.0)
+						{
+							P.GrowthRecords[i].EndSol = SolNow(C);
+							UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f GROWTH  ends in district #%d: %s"), SolNow(C), Id, *P.GrowthRecords[i].What);
+							break;
+						}
+					}
+				}
+			}
+			P.GrowthOpen = OpenNow;
+		}
+
 		// --- The end ---
 		if (P.CrewLandedSol >= 0.0 && Sim->GetPopulation() == 0)
 		{
@@ -650,7 +800,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -670,7 +820,13 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.TargetSols = Args.Num() > 0 ? FMath::Max(0.1, FCString::Atod(*Args[0])) : 30.0;
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
-		P.SaveSlot = Args.Num() > 3 ? Args[3] : FString();
+		// Args[3..]: a save slot and/or the option "districts=1" (C5b), in either order.
+		for (int32 i = 3; i < Args.Num(); ++i)
+		{
+			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
+			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
+			else if (P.SaveSlot.IsEmpty()) { P.SaveSlot = Args[i]; }
+		}
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
@@ -722,6 +878,6 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
 			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
-			P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot));
+			*FString::Printf(TEXT("%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

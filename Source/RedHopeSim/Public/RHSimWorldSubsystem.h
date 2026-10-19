@@ -5,6 +5,7 @@
 #include "RHSimTypes.h"
 #include "RHRoads.h"
 #include "RHDistricts.h"
+#include "RHGrowth.h"
 #include "RHSimWorldSubsystem.generated.h"
 
 class URHDefinitionsSubsystem;
@@ -216,6 +217,8 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnSurveyCompleted, const FRHSurveyRecord&
 // distinct from the notice line (director finding: the refusal read as
 // "nothing happened").
 DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnAlert, const FString&);
+// C5b: a growth project started, finished, was refunded or cancelled, or a district's growth switch moved.
+DECLARE_MULTICAST_DELEGATE(FRHOnGrowthChanged);
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
@@ -262,8 +265,11 @@ public:
 	// at the seam, and the world may have changed during the signal delay
 	// (that is the game).
 	bool CanPlaceBuilding(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level = 0) const;
-	// The same, for a drag-sized structure of SizeX x SizeY beds (Agri Gate C).
-	bool CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY) const;
+	// The same, for a drag-sized structure of SizeX x SizeY beds (Agri Gate C). bCheckMaterials
+	// false skips the two stock checks (imported units on hand, material sufficiency) and keeps
+	// every other rule: the city's growth has paid its bill already and asks only whether the
+	// SITE still takes the building (C5b).
+	bool CanPlaceBuildingSized(FName DefName, const FVector& LocationCm, FString& OutReason, int32 Level, int32 SizeX, int32 SizeY, bool bCheckMaterials = true) const;
 	// Drag-sized structures (the greenhouse dome). A Build order carries its
 	// size in Value as SizeX * 1000 + SizeY (0 = 1 x 1).
 	static double EncodeBuildSize(int32 SizeX, int32 SizeY) { return (double)(SizeX * 1000 + SizeY); }
@@ -330,7 +336,8 @@ public:
 	static int32 AnchorSlotFor(const FVector2D& LocalFromCellMinCm, int32 W, int32 H);
 	// Preflight for a Furnish order. The ghost polls it; ExecuteCommand runs it
 	// again without the in-transit check (the order itself is no longer queued).
-	bool CanPlaceFurniture(FName Row, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued = true) const;
+	// bCheckCost false skips the stock check (the city's growth has paid its bill already, C5b).
+	bool CanPlaceFurniture(FName Row, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued = true, bool bCheckCost = true) const;
 	bool CanSellFurniture(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
 	bool CanSellCell(const FIntVector& Key, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
 	// A cell's effective beds and work seats (furnished, or the legacy number).
@@ -587,12 +594,18 @@ public:
 	void Debug_SetHopeBase(double V) { HopeBase = V; }
 	void Debug_SetHopeGrowthIntervalSols(double V) { HopeGrowthIntervalSols = V; }
 	void Debug_SetBigArrivalDone(bool bDone) { bBigArrivalDone = bDone; }
+	// C5b harness: the free beds the Big Arrival waits for. A suite that wants a standing housing
+	// shortfall (the city's growth builds toward it) raises it past anything the colony can reach.
+	void Debug_SetBigArrivalFreeBeds(int32 Beds) { BigArrivalFreeBeds = FMath::Max(0, Beds); }
 	int32 Debug_RehomeResidents() { return RehomeResidents(); }
 	void Debug_UnrateFloor(int32 Level) { RatedFloors.Remove(Level); } // a floor that lost its rating (the next StepHabitability may re-rate it)
 	// C2a harness: a floor's O2 fill, and how many colonists a carved cell houses
 	// without furniture (the legacy bed rule), so a suite can hold thousands
 	// without furnishing thousands of beds.
 	void Debug_SetFloorO2Kg(int32 Level, double Kg) { FloorO2Kg.FindOrAdd(Level) = FMath::Max(0.0, Kg); }
+	// C5b harness: a surface habitat shell's own O2 fill, so a suite can hold a big network full (its push is a flat
+	// O2FillRateKgPerHour, so past about 240 bays the leak outruns it).
+	void Debug_SetHabO2Kg(int32 HabId, double Kg) { HabO2Kg.FindOrAdd(HabId) = FMath::Max(0.0, Kg); }
 	void Debug_SetColonistsPerCell(double V) { ColonistsPerCell = FMath::Max(0.0, V); }
 	// C2a harness: the smoothed-Hope gates for research and for births. Per head, a
 	// city of thousands does not reach 75 or 85 (that is the design), and the
@@ -1183,6 +1196,81 @@ public:
 	// fresh: it rebuilds on its next read.
 	bool Debug_DistrictCachesFresh() const;
 
+	// --- City growth (C5b, living-city gate 5b, 2026-10-19) ---
+	// Inside HOME and CIVIC districts the colony builds for itself, from its own holdings,
+	// when there is demand and material (the Q2a ruling; the player still places production,
+	// power, life support and anything special). Growth is a PROJECT RECORD (FRHGrowthProject),
+	// never an order: no uplink lag, no construction site, no robots - so CanEnterEraMode is
+	// never affected and the agent band and the era band run the very same code.
+	//   When   At each sol boundary (the first step whose end falls in a new sol, a threshold on
+	//          the monotone clock, both bands) at most ONE project starts colony-wide. Districts
+	//          are taken round-robin by Id from a saved cursor; a district with an open project,
+	//          or with its growth switch off, is skipped. No start while any home is on a short
+	//          ration or smoothed Hope is in the Failing band.
+	//   Gates  Homes: the city's Housing shortfall (GetCityDemand's HousingBedsShort, less the
+	//          beds already under way) is above zero. Civic: some CivicService room function
+	//          (RH_Rooms) has a coverage gap, counting rooms already under way.
+	//   Money  Per resource, free = uncommitted holdings - the open quota's bill for it - its
+	//          reserve (GrowthReserveStructKg of Struct; for Oxygen GrowthReserveO2Sols of the
+	//          whole colony's breathing; nothing for the rest). Uncommitted = what the C4 road
+	//          bill counts: completed buildings on linked floors plus the pool, never a
+	//          construction site's hopper. The WHOLE bill (Struct, Shielding, bed or room
+	//          furniture, and the Oxygen fill of the new bays or cells) is taken at the start,
+	//          atomically, or no project starts.
+	//   What   Surface Homes: the next Habitat Bay module of at most 2 x 2 bays on free lattice
+	//          cells INSIDE the district, edge-adjacent to a RATED, not door-sealed network that
+	//          has a bay in the district and touching no other shell; every bay centre covered, off
+	//          roads and buildings; candidates by squared lattice distance to the network root,
+	//          then (X, Y). Underground Homes: GrowthCellsPerProject cells on a RATED floor. Civic:
+	//          the worst-covered CivicService function (ties by lexical name) in a free cell or bay
+	//          of the district - a cell is carved if a Civic floor has none free - after an
+	//          adjacency check, so the new room offends nobody and is offended by nobody.
+	//   Done   RemainingSols counts down linearly (GrowthModuleSols / GrowthCellSols /
+	//          GrowthRoomSols). In ONE step the site is re-checked (placement without the material
+	//          check), then the building is added, the cells carved, the rooms zoned and furnished
+	//          directly, and the new air filled from the bill, so a home stays rated through it. A
+	//          site that no longer fits refunds the bill and closes the project; so does an erase.
+	// Alerts: one banner a sol colony-wide (starts and finishes together), never per project.
+	const TArray<FRHGrowthProject>& GetGrowthProjects() const { return GrowthProjects; }
+	const FRHGrowthProject* FindGrowthProject(int32 DistrictId) const;
+	uint32 GetGrowthVersion() const { return GrowthVersion; }
+	int32 GetGrowthCursor() const { return GrowthCursor; }
+	int32 GetGrowthCheckedSol() const { return GrowthCheckedSol; }
+	// A district's growth switch (Homes and Civic districts only do anything with it). Instant,
+	// like the machine switches: it is a standing choice, not an order. False if no such district.
+	bool SetDistrictGrowth(int32 DistrictId, bool bOn);
+	bool IsDistrictGrowthOn(int32 DistrictId) const;
+	// Why a district is not growing, from the last sol's check ("" = nothing in the way, or never
+	// checked), and why the whole city's growth is paused. Runtime readouts: derived at each check,
+	// never saved and never read by the sim.
+	FString GetGrowthNote(int32 DistrictId) const { const FString* N = GrowthNotes.Find(DistrictId); return N ? *N : FString(); }
+	const FString& GetGrowthPause() const { return GrowthPause; }
+	// Does a room row emit this adjacency tag? (A CivicService row must never emit Odor.)
+	static bool RoomEmitsTag(const FRHRoomRow& Row, const TCHAR* Tag);
+	// One resource's room to build: free = Held - QuotaBill - Reserve.
+	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, Reserve = 0.0, Free = 0.0; };
+	FRHGrowthAvailability GetGrowthAvailability(FName Resource) const;
+	// The words for a project ("4 new home bays", "a new dining room"), shared by the alert, the
+	// City panel and the cheat.
+	FString DescribeGrowthProject(const FRHGrowthProject& Project) const;
+	// Beds a Homes project will add (its Living sites x the bunk beds each gets).
+	int32 GetGrowthProjectBeds(const FRHGrowthProject& Project) const;
+	double GetGrowthReserveStructKg() const { return GrowthReserveStructKg; }
+	double GetGrowthReserveO2Sols() const { return GrowthReserveO2Sols; }
+	double GetGrowthModuleSols() const { return GrowthModuleSols; }
+	double GetGrowthCellSols() const { return GrowthCellSols; }
+	double GetGrowthRoomSols() const { return GrowthRoomSols; }
+	int32 GetGrowthCellsPerProject() const { return GrowthCellsPerProject; }
+	int32 GetGrowthBunksPerHome() const { return GrowthBunksPerHome; }
+	// Harness / cheat (RH.Growth now): the sol-boundary start check, right now. Returns how many
+	// projects it started (0 or 1). The real check runs by itself at each sol boundary.
+	int32 Debug_RunGrowthCheck() { return RunGrowthStartCheck(); }
+	// Harness: the master switch (default on). The -districts suite paints Homes and Civic
+	// districts over a colony with material and demand, and its checks are about districts, so it
+	// switches growth off; the -citygrowth suite is about growth. Not saved.
+	void Debug_SetGrowthEnabled(bool bOn) { bGrowthEnabled = bOn; }
+	FRHOnGrowthChanged OnGrowthChanged;
+
 	// --- Robot work API (game-thread, called by Mass processors) ---
 	FVector GetSiteLocation(const FRHSiteRef& Site) const;
 	// Excavator: ground -> pile, respecting pile cap and remaining mass.
@@ -1566,6 +1654,58 @@ private:
 	bool ExecuteEraseDistrict(const FRHCommand& Cmd, FString& OutReason);
 	bool ExecuteRenameDistrict(const FRHCommand& Cmd, FString& OutReason);
 
+	// City growth (C5b). SAVED (v38): the open projects (ascending DistrictId, at most one a
+	// district), the round-robin cursor (the Id of the district a project last started in) and the
+	// sol whose boundary check has run; a district's switch rides in FRHDistrict. Everything else
+	// is runtime: the notes, the pause, this sol's alert tallies.
+	TArray<FRHGrowthProject> GrowthProjects;
+	int32 GrowthCursor = 0;
+	int32 GrowthCheckedSol = 0;
+	uint32 GrowthVersion = 1;               // bumped by a start, a finish, a refund, a cancel, a switch and a load
+	bool bGrowthEnabled = true;             // harness master switch, never saved
+	TMap<int32, FString> GrowthNotes;       // district Id -> why it is not growing (lookups only)
+	FString GrowthPause;
+	TArray<FString> GrowthSolStarted, GrowthSolFinished, GrowthSolRefused; // this sol's events, for its one alert
+	// DT_Config rows (header defaults equal the CSV).
+	double GrowthReserveStructKg = 1000.0;
+	double GrowthReserveO2Sols = 10.0;
+	double GrowthModuleSols = 1.0;
+	double GrowthCellSols = 1.0;
+	double GrowthRoomSols = 0.5;
+	int32 GrowthCellsPerProject = 4;
+	int32 GrowthBunksPerHome = 2;
+	void StepCityGrowth(float SubDt);
+	int32 RunGrowthStartCheck();
+	void EmitGrowthAlert(int32 Sol);
+	// Money.
+	double GetGrowthHoldingsKg(FName Resource) const;
+	double GetOpenQuotaBillKg(FName Resource) const;
+	bool GrowthBillFits(const TMap<FName, double>& Bill, FString& OutWhy) const;
+	void TakeGrowthResource(FName Resource, double Kg);
+	void StartGrowthProject(FRHGrowthProject&& Project);
+	void CancelGrowthProject(int32 DistrictId, const TCHAR* Why);
+	// Planning: each fills Out (district, kind, target, bill, time) or says why not.
+	bool PlanSurfaceHomes(const FRHDistrict& District, FRHGrowthProject& Out, FString& OutWhy) const;
+	bool PlanFloorHomes(const FRHDistrict& District, FRHGrowthProject& Out, FString& OutWhy) const;
+	bool PlanCivic(const FRHDistrict& District, const FRHCityDemand& Demand, FRHGrowthProject& Out, FString& OutWhy) const;
+	void GatherShellSiteCells(TMap<FIntPoint, int32>& Out) const;
+	void GatherFloorRoomGrid(int32 Level, TMap<FIntPoint, const FRHRoomRow*>& Out) const;
+	bool ZoningWouldOffend(const FRHRoomRow& Row, const FIntPoint& Pos, const TMap<FIntPoint, const FRHRoomRow*>& Rooms) const;
+	bool IsCellFreeForRoom(int32 Level, int32 Cell) const;
+	bool IsBayFreeForRoom(int32 HabId, int32 Bay) const;
+	FName GetGrowthLivingRoom() const;
+	void GetGrowthBunkPieces(TArray<FName>& Out) const;
+	void AddGrowthFurnitureCost(const TArray<FName>& Pieces, TMap<FName, double>& Bill) const;
+	void ParseCivicPieces(const FRHRoomRow& Row, TArray<FName>& Out) const;
+	// Completion: the site re-check and the direct build; false (with a reason) refunds.
+	bool CompleteGrowthProject(const FRHGrowthProject& Project, FString& OutWhy);
+	bool CompleteSurfaceModule(const FRHGrowthProject& Project, const FRHDistrict& District, FString& OutWhy);
+	bool CompleteFloorCells(const FRHGrowthProject& Project, FString& OutWhy);
+	bool CompleteCivicRoom(const FRHGrowthProject& Project, FString& OutWhy);
+	// Furnish a fresh room: each piece at the first slot it fits (Rot 0, no queue or cost check - the
+	// bill is paid); returns the cost of the pieces that found no slot, which the caller refunds.
+	TMap<FName, double> FurnishGrowthRoom(const FIntVector& Key, const TArray<FName>& Pieces);
+
 	TMap<FName, double> Stocks;             // fluids/gases/abstract (network-instant)
 	TMap<int32, TMap<FName, double>> PendingOutputs; // building id -> outputs owed when its batch completes
 	TArray<FRHCommand> UplinkQueue;
@@ -1681,6 +1821,10 @@ private:
 	TMap<int32, FRHHabMemberCache> HabMembers;  // lookup only, NEVER iterated
 	void RebuildHabTopology();
 	const FRHHabNetCache* FindHabNet(int32 HabId) const;
+	// City growth (C5b): the planners that read the networks.
+	bool CheckSurfaceModuleSite(int32 DistrictId, const FRHHabNetCache& Net, const FIntPoint& Anchor, const FIntPoint& Size, const TMap<FIntPoint, int32>& SiteCells, FString& OutWhy) const;
+	bool FindSurfaceModuleSite(const FRHDistrict& District, const FRHHabNetCache& Net, FIntPoint& OutAnchor, FIntPoint& OutSize, FString& OutWhy) const;
+	void GatherNetRoomGrid(const FRHHabNetCache& Net, TMap<FIntPoint, const FRHRoomRow*>& Out) const;
 	bool IsNetRated(const FRHHabNetCache& N) const;
 	bool IsNetCirculated(const FRHHabNetCache& N) const;
 	bool IsNetShaftLinked(const FRHHabNetCache& N) const;

@@ -1380,6 +1380,7 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		Sim->OnCommandExecuted.AddWeakLambda(this, [this](const FRHCommand&) { MarkPassesDirty(); });
 		Sim->OnFurnitureChanged.AddWeakLambda(this, [this](const FIntVector&) { MarkPassesDirty(); });
 		Sim->OnWallFeatureChanged.AddWeakLambda(this, [this](const FIntVector&) { MarkPassesDirty(); });
+		Sim->OnGrowthChanged.AddWeakLambda(this, [this]() { MarkPassesDirty(); }); // C5b: a project began or ended: rooms, cells and beds changed with no order
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{

@@ -268,6 +268,9 @@ private:
 	double CityRefreshedAt = -1.0e9;
 	uint32 CityVersionShown = MAX_uint32;
 	TSharedPtr<class SVerticalBox> CityDistrictList;
+	// C5b: the open growth projects (rebuilt when the sim's growth or district version moves; each row's bar reads the live project).
+	uint32 CityGrowthVersionShown = MAX_uint32, CityGrowthDistrictsShown = MAX_uint32;
+	TSharedPtr<class SVerticalBox> CityGrowthList;
 	bool bRosterExpanded = false;
 	bool bPoliticsExpanded = false;
 	bool bPowerExpanded = false;
