@@ -67,6 +67,9 @@ struct REDHOPESIM_API FRHTaskFragment : public FMassFragment
 	uint8 Phase = 0;       // 0 ToFrom/ToSite, 1 Working/Loading, 2 ToDest, 3 Unloading
 	int32 TaskId = 0;
 	int32 DigDepositId = 0;
+	// C4: the road edge a Fabricator is building (a labour-only Build task). Its
+	// own slot: DigDepositId already means a site or a pad id for other tasks.
+	int32 RoadEdgeId = 0;
 	FVector TargetCm = FVector::ZeroVector;
 	FName CargoResource;
 	float CargoKg = 0.f;

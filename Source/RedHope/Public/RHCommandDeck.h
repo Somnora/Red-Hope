@@ -119,6 +119,13 @@ private:
 	EVisibility GetKnownGroundVisibility() const;
 	FText GetMapLabel() const;
 	FReply HandleBuild(FName DefName);
+	// C4: the Road card in BUILD > Logistics. UI only - a road is not a building
+	// (no DT_Buildings row, no site, no footprint): the card arms the controller's
+	// road mode, and its numbers come from the sim's road config.
+	FReply HandleRoad();
+	TSharedRef<SWidget> BuildRoadCard();
+	bool IsRoadDetail() const;
+	static const FName RoadCardName;
 	// Sims-style categorized build menu (M2 Gate D+ UX, part 2): a row of
 	// category tabs; picking one shows only that category's buildings. Category
 	// comes from the DataTable (FRHBuildingRow.Category), with a code-derived

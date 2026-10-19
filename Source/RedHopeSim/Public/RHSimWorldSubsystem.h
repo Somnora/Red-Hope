@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "RHSimTypes.h"
+#include "RHRoads.h"
 #include "RHSimWorldSubsystem.generated.h"
 
 class URHDefinitionsSubsystem;
@@ -27,6 +28,10 @@ struct REDHOPESIM_API FRHCommand
 	// never serialized.
 	UPROPERTY() int32 CommandId = 0;
 	UPROPERTY() FVector Location = FVector::ZeroVector;
+	// C4: the second end point of a BuildRoad order (Location is the first).
+	// Serialized with the uplink queue (save v36), so a queued road order keeps
+	// both ends across a save and a load.
+	UPROPERTY() FVector LocationB = FVector::ZeroVector;
 	// Z-model (M1-b): the floor an order targets. 0 = surface; subsurface
 	// floors become orderable when the shaft exists (M1-d).
 	UPROPERTY() int32 Level = 0;
@@ -62,6 +67,23 @@ struct REDHOPESIM_API FRHColonist
 	// output multiplier ramps 1x -> 2x at SkillMasterySols (linear = identical
 	// across both time bands). Serialized sorted (save v24).
 	TMap<FName, double> SkillSols;
+};
+
+// C4: one robot's planned trip along the roads. Runtime only (never saved): it is
+// planned lazily the first time a robot drives to a target while any road is
+// built, and re-planned only when that target changes. Presentation reads it to
+// draw the robot exactly along the sim's waypoints.
+struct FRHRobotRoadPath
+{
+	FVector TargetCm = FVector::ZeroVector; // the target the trip was planned for, compared exactly
+	FVector StartCm = FVector::ZeroVector;  // where the robot stood when it was planned
+	// Empty = drive straight (no road beats the straight line). Otherwise the
+	// entry node .. exit node, then the target as the last waypoint.
+	TArray<FVector> Waypoints;
+	TArray<int32> LegEdge;                  // the edge each leg runs along to reach its waypoint; 0 = off road
+	int32 Next = 0;                         // the leg being driven
+	int32 Serial = 0;                       // new for every plan: presentation re-syncs on it
+	bool IsRoadTrip() const { return Waypoints.Num() > 1; }
 };
 
 // A planted cell's crop state (greenhouse-agriculture Gate A, save v26).
@@ -1025,6 +1047,7 @@ public:
 	const TArray<FRHDepositState>& GetDeposits() const { return Deposits; }
 	const FRHPowerState& GetPower() const { return Power; }
 	int32 GetOpenTaskCount() const { return Tasks.Num(); }
+	const TArray<FRHTask>& GetTasks() const { return Tasks; }
 	// Colony-held solids: sum of building stores (deposit piles are not
 	// collected yet, so they do not count toward quota).
 	double GetTotalSolid(FName Resource) const;
@@ -1033,6 +1056,64 @@ public:
 	void AddStock(FName Resource, double Delta);
 	// Quota progress vs the active quota (bills scaled by the repeat round, D1a): resource -> (have, need).
 	TMap<FName, TPair<double, double>> GetQuotaProgress() const;
+
+	// --- Roads (C4, 2026-10-18) ---
+	// You lay roads; robots build them (labour only), then drive them 1.6x faster.
+	// A BuildRoad uplink order carries both end points (Location and LocationB),
+	// snapped to the road grid. The bill (Struct per metre of NEW road) is taken
+	// from the stores the moment the order lands, whole or not at all; there is no
+	// haul. Each new edge is a labour-only Build task for a Fabricator.
+	struct FRHRoadPreview
+	{
+		int32 Pieces = 0;          // new edges this order lays
+		int32 Splits = 0;          // existing edges it splits (junctions, crossings)
+		int32 LengthCm = 0;        // the new road's length
+		double BillKg = 0.0;       // Struct the order costs
+		double HaveKg = 0.0;       // Struct the stores hold
+		TArray<TPair<FVector, FVector>> NewSegmentsCm; // each new edge's end points, for the ghost
+		TArray<FVector> NodesCm;                       // every junction and bend the order touches
+	};
+	const FRHRoadGraph& GetRoadGraph() const { return RoadGraph; }
+	const FRHRoadParams& GetRoadParams() const { return RoadParams; }
+	bool HasBuiltRoads() const { return RoadGraph.BuiltEdgeCount > 0; }
+	double GetRoadStructKgPerMeter() const { return RoadStructKgPerMeter; }
+	double GetRoadBuildMetersPerHour() const { return RoadBuildMetersPerHour; }
+	double GetRoadSpeedMul() const { return RoadSpeedMul; }
+	// A world point snapped to the road grid (Z = 0).
+	FVector SnapToRoadGrid(const FVector& LocationCm) const;
+	// True if a BuildRoad order from FromCm to ToCm would be accepted right now
+	// (both ends and every junction in coverage, the strip clear of every building,
+	// site and in-flight order, the bill affordable). The ghost polls it every
+	// frame; ExecuteCommand runs the SAME check when the order lands.
+	bool CanPlaceRoad(const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHRoadPreview* OutPreview = nullptr) const;
+	// Struct the stores hold for a road (completed buildings on linked floors).
+	double GetRoadStructAvailableKg() const;
+	// Does a footprint (centre, half-extents) overlap a road strip - built or
+	// planned - or the strip of a BuildRoad order still in flight? Roads and
+	// buildings keep clear of each other from both sides.
+	bool FindRoadOverlap(const FVector& CentreCm, const FVector2D& HalfCm, FString& OutWhat) const;
+	// The speed a robot gets on an edge right now: RoadSpeedMul on a built one,
+	// 1 on a demolished or missing one (looked up live, never cached).
+	double GetRoadEdgeSpeedMul(int32 EdgeId) const;
+	// The shared movement call (RH::MoveAlong): one trip step toward TargetCm,
+	// along the roads where they beat the straight line. Planned lazily, re-planned
+	// only when TargetCm changes. True on arrival, exactly as MoveToward.
+	bool MoveAlongRoads(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt);
+	// Presentation: the robot's current road trip (nullptr when it has none).
+	const FRHRobotRoadPath* GetRobotRoadPath(FMassEntityHandle Entity) const { return RobotPaths.Find(Entity); }
+	// The route a trip between two points would take now, for tests and readouts.
+	bool PlanRoadRoute(const FVector& FromCm, const FVector& ToCm, FRHRoadRoute& OutRoute) const;
+	// Fabricator labour on a road edge: true when the edge is built (or gone).
+	bool ApplyRoadWork(int32 EdgeId, double Seconds);
+	// Harness: lay a road with no cost, no lag, no coverage rule. Built = instant;
+	// else the edges are planned with their labour tasks posted. Returns the new
+	// edge Ids (the splits are in the graph, not in this list).
+	TArray<int32> Debug_LayRoad(const FVector& FromCm, const FVector& ToCm, bool bBuilt);
+	// Harness: a road edge vanishes (road demolish is a follow-up gate; this is
+	// the hook the tests use to prove robots cope).
+	bool Debug_RemoveRoadEdge(int32 EdgeId);
+	// Harness: the labour left, as if every Fabricator had finished.
+	void Debug_FinishRoads();
 
 	// --- Robot work API (game-thread, called by Mass processors) ---
 	FVector GetSiteLocation(const FRHSiteRef& Site) const;
@@ -1348,6 +1429,23 @@ private:
 	FRHDepositState* FindDeposit(int32 Id);
 	FRHTask* FindTask(int32 Id);
 	bool HasOpenTask(ERHTaskType Type, const FRHSiteRef& From, const FRHSiteRef& To, FName Resource = NAME_None) const;
+
+	// Roads (C4). The graph and its tuning (DT_Config; header defaults equal the
+	// CSV). Saved (v36); robot trips are runtime only and rebuilt on load.
+	FRHRoadGraph RoadGraph;
+	FRHRoadParams RoadParams;
+	double RoadStructKgPerMeter = 2.0;
+	double RoadBuildMetersPerHour = 30.0;
+	double RoadSpeedMul = 1.6;
+	TMap<FMassEntityHandle, FRHRobotRoadPath> RobotPaths; // lookups only, never iterated
+	int32 NextPathSerial = 1;
+	void ExecuteBuildRoad(const FRHCommand& Cmd);
+	// Takes Kg of Struct out of the stores, whole or not at all.
+	bool TakeRoadStruct(double Kg);
+	void PostRoadTasks(const FRHRoadAddResult& Added);
+	bool PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm) const;
+	// Strip (segment + width) against a footprint; the order's strip against everything.
+	bool RoadStripHitsBox(const FVector2D& A, const FVector2D& B, const FVector2D& Centre, const FVector2D& Half) const;
 
 	TMap<FName, double> Stocks;             // fluids/gases/abstract (network-instant)
 	TMap<int32, TMap<FName, double>> PendingOutputs; // building id -> outputs owed when its batch completes

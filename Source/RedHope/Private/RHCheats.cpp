@@ -101,6 +101,41 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCam(
 			Xm, Ym, ZoomT, Pawn->GetViewDistanceCm() / 100.f, Pitch, Yaw);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHCamRobot(
+	TEXT("RH.CamRobot"),
+	TEXT("RH.CamRobot [ZoomT=0.04] [YawDeg=0] [PitchOffsetDeg=0] - frame the robot on a road trip (else the first robot) where it stands now. Robots move: chain it with RH.After to follow one."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
+		const URHAgentSubsystem* Agents = World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr;
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Pawn || !Agents || !Sim)
+		{
+			return;
+		}
+		const float ZoomT = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 0.04f;
+		const float Yaw = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.f;
+		const float Pitch = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f;
+		FVector Best = FVector::ZeroVector;
+		bool bFound = false, bOnRoad = false;
+		Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float)
+		{
+			const FRHRobotRoadPath* Road = Sim->GetRobotRoadPath(Entity);
+			const bool bRoad = Road && Road->IsRoadTrip();
+			if (!bFound || (bRoad && !bOnRoad))
+			{
+				Best = PosCm;
+				bFound = true;
+				bOnRoad = bRoad;
+			}
+		});
+		if (bFound)
+		{
+			Pawn->SetCameraPose(FVector2D(Best.X, Best.Y), ZoomT, Pitch, Yaw);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.CamRobot] framed a robot at (%.0f, %.0f) m%s"), Best.X / 100.f, Best.Y / 100.f, bOnRoad ? TEXT(" on a road trip") : TEXT(""));
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHCamCrew(
 	TEXT("RH.CamCrew"),
 	TEXT("RH.CamCrew [Index=0] [ZoomT=0.05] [YawDeg=0] - frame the Nth crew figure where it currently stands. Walkers move, so a fixed RH.Cam pose can miss them entirely."),
@@ -1693,6 +1728,62 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSurvey(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHRoad(
+	TEXT("RH.Road"),
+	TEXT("RH.Road <x1m> <y1m> <x2m> <y2m> - transmit a BuildRoad order (uplink) from P to Q, in metres; the Struct leaves the stores when it lands and Fabricators build it. No arguments: log the road network."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		if (Args.Num() == 0)
+		{
+			const FRHRoadGraph& G = Sim->GetRoadGraph();
+			int32 Open = 0;
+			for (const FRHRoadEdge& E : G.Edges) { Open += E.bBuilt ? 0 : 1; }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Road] %d nodes, %d edges (%d built, %d open), %.0f m built, %.0f kg Struct in the stores"),
+				G.Nodes.Num(), G.Edges.Num(), G.BuiltEdgeCount, Open, (double)G.BuiltLengthCm() / 100.0, Sim->GetRoadStructAvailableKg());
+			return;
+		}
+		if (Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Road <x1m> <y1m> <x2m> <y2m>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("BuildRoad");
+		Cmd.Location = FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f);
+		Cmd.LocationB = FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f);
+		FString Reason;
+		URHSimWorldSubsystem::FRHRoadPreview Pre;
+		const bool bOk = Sim->CanPlaceRoad(Cmd.Location, Cmd.LocationB, Reason, &Pre);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Road] (%.0f, %.0f) -> (%.0f, %.0f) m: %d stretch(es), %d split(s), %.0f m, %.0f kg Struct of %.0f held - %s"),
+			Cmd.Location.X / 100.f, Cmd.Location.Y / 100.f, Cmd.LocationB.X / 100.f, Cmd.LocationB.Y / 100.f,
+			Pre.Pieces, Pre.Splits, (double)Pre.LengthCm / 100.0, Pre.BillKg, Pre.HaveKg, bOk ? TEXT("accepted for transmission") : *Reason);
+		Sim->EnqueueCommand(Cmd); // transmitted either way: the seam re-checks when it lands (and says why it refuses)
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(
+	TEXT("RH.RoadGhost"),
+	TEXT("RH.RoadGhost <x1m> <y1m> <x2m> <y2m> - DEBUG: hold the road card's drag ghost between two points (as if the mouse were down there) for a screenshot; it never transmits. RH.RoadGhost with no arguments clears it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!PC)
+		{
+			return;
+		}
+		if (Args.Num() < 4)
+		{
+			PC->CancelModes();
+			return;
+		}
+		PC->Debug_RoadGhost(FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f),
+			FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHDepositLeft(
 	TEXT("RH.DepositLeft"),
 	TEXT("RH.DepositLeft <Row> <kg> - DEBUG: set a deposit's remaining mass (ice-low alert and guide smoke; e.g. Ice_A 7600)."),
@@ -1736,7 +1827,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHWear(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHFleet(
 	TEXT("RH.Fleet"),
-	TEXT("RH.Fleet - log every robot: class, position, battery, wear (degrade/halt flags)."),
+	TEXT("RH.Fleet - log every robot: position, wear (degrade/halt flags), and the leg of any road trip it is on."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
@@ -1756,8 +1847,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFleet(
 			{
 				Flag = TEXT("  degraded");
 			}
-			UE_LOG(LogRedHope, Display, TEXT("  robot %d at (%.0f, %.0f) m: wear %.1f (work rate x%.2f)%s"),
-				Entity.Index, PosCm.X / 100.f, PosCm.Y / 100.f, Wear, Sim->GetWearWorkMul(Wear), Flag);
+			const FRHRobotRoadPath* Road = Sim->GetRobotRoadPath(Entity);
+			UE_LOG(LogRedHope, Display, TEXT("  robot %d at (%.0f, %.0f) m: wear %.1f (work rate x%.2f)%s%s"),
+				Entity.Index, PosCm.X / 100.f, PosCm.Y / 100.f, Wear, Sim->GetWearWorkMul(Wear), Flag,
+				(Road && Road->IsRoadTrip()) ? *FString::Printf(TEXT("  ON A ROAD TRIP (leg %d of %d)"), Road->Next + 1, Road->Waypoints.Num()) : TEXT(""));
 		});
 	}));
 

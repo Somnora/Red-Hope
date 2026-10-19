@@ -103,6 +103,14 @@ private:
 		TArray<FVector> Path;                       // drawn route, DrawCm at start -> target
 		float PathLenCm = 0.f;
 		FVector LastSyncedCm = FVector::ZeroVector; // where the synced trip left it
+		// C4: a trip along the sim's road waypoints. Path is then the drawn
+		// polyline for the WHOLE sim path (detours on the off-road legs, the exact
+		// waypoints on the road legs), and progress is ARC LENGTH along the sim's
+		// path mapped leg by leg onto it - never the straight-distance fraction.
+		bool bRoadTrip = false;
+		int32 RoadSerial = -1;                      // the sim path this was planned from
+		TArray<float> LegSimEndCm;                  // cumulative sim length at the end of each leg
+		TArray<float> LegDrawEndCm;                 // cumulative drawn length at the end of each leg
 		double IdleS = 0.0;                         // sim-paced time idle (parking)
 		// Free walks (not tied to sim progress): to a parking slot, or back to
 		// the sim's position when a task begins where the robot already is.

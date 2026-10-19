@@ -33,6 +33,15 @@ public:
 	void BeginPlacement(FName BuildingDef);
 	void BeginDigDesignation();
 	void BeginSurveyDesignation();
+	// Road mode (C4): BUILD > Logistics > Road. Press anchors the first end (it snaps
+	// to an existing junction when one is near), drag aims the second with a ghost
+	// strip and a live length / bill / preflight readout, release transmits a
+	// BuildRoad order. The mode stays armed for the next stretch; cancel exits.
+	void BeginRoad();
+	bool IsRoadMode() const { return bRoadMode; }
+	// Capture/QA (RH.RoadGhost): hold the road ghost mid-drag from one point to
+	// another, as if the mouse were down there; it never transmits.
+	void Debug_RoadGhost(const FVector& FromCm, const FVector& ToCm);
 	// Paint-to-size excavation (M1-d Gate A2): click anchors a corner on the
 	// active subsurface floor, drag sizes the rectangle, release transmits an
 	// Excavate order counted in 10x10 m cells.
@@ -67,6 +76,7 @@ public:
 	bool IsDigMode() const { return bDigMode; }
 	bool IsSurveyMode() const { return bSurveyMode; }
 	bool IsExcavateMode() const { return bExcavateMode; }
+	bool IsRoadDragging() const { return bRoadDragging; }
 	bool IsZoneMode() const { return bZoneMode; }
 	FName GetZoneRoom() const { return ZoneRoom; }
 	// The elevator (M1-d): which floor the player is looking at and ordering
@@ -186,6 +196,15 @@ private:
 	FVector BuildAnchorCm = FVector::ZeroVector;
 	// The drag's footprint centre and beds per side for the cursor at GroundCm.
 	void ComputeDragFootprint(const FVector& GroundCm, const FRHBuildingRow* Def, int32 MaxBeds, FVector& OutCenter, FIntPoint& OutSize) const;
+	// Road mode state (C4).
+	bool bRoadMode = false;
+	bool bRoadDragging = false;
+	FVector RoadAnchorCm = FVector::ZeroVector;
+	bool bRoadForced = false;
+	FVector RoadForcedToCm = FVector::ZeroVector;
+	// A ground point snapped to the road grid, and to an existing junction within
+	// 4 m of it (so a stretch can start exactly where another ends).
+	FVector SnapRoadPoint(const FVector& GroundCm) const;
 	// Zone designation state (M2 Gate B).
 	bool bZoneMode = false;
 	FName ZoneRoom;

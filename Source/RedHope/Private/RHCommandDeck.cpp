@@ -1123,6 +1123,11 @@ void SRHCommandDeck::RefreshUplinkPanel()
 			const FRHFurnitureInstance* SF = C.Target == FName("Furniture") ? Sim->FindFurniture((int32)C.Value) : nullptr;
 			Label = SF ? FString::Printf(TEXT("Sell %s #%d"), *SF->Row.ToString(), SF->Id) : FString(TEXT("Sell a room's furniture"));
 		}
+		if (C.Verb == FName("BuildRoad"))
+		{
+			// C4: "Road 120 m" (the straight line between its two ends), not a bare verb.
+			Label = FString::Printf(TEXT("Road %.0f m"), FVector::Dist2D(C.Location, C.LocationB) / 100.0);
+		}
 		if (C.Verb == FName("Demolish"))
 		{
 			// BM-3: "Demolish Forge #7", not the raw target slot.

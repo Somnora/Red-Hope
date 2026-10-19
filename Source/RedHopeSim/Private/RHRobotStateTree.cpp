@@ -94,6 +94,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				Task.TaskType = (uint8)ERHTaskType::Build;
 				Task.TaskId = Board.Id;
 				Task.DigDepositId = Board.To.BuildingId; // reused slot: construction site id
+				Task.RoadEdgeId = Board.To.RoadEdgeId;   // C4: a road edge is labour only, in its own slot
 				// Cross-level sites are worked from the shaft head (M1-d).
 				Task.TargetCm = Sim->GetApproachPoint(Board.To, /*RobotLevel*/ 0);
 				Task.Phase = 0;
@@ -128,7 +129,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 	case ERHTaskType::Survey:
 	{
 		DrawW = Robot.DrawMoveW;
-		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 		{
 			// WorkRate = survey radius in meters (DT_Robots).
 			Sim->CompleteSurvey(Task.TaskId, Robot.WorkRate);
@@ -169,7 +170,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		if (Task.Phase == 0)
 		{
 			DrawW = Robot.DrawMoveW;
-			if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 			{
 				Task.Phase = 1;
 			}
@@ -189,7 +190,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		DrawW = Robot.DrawMoveW;
 		if (Task.Phase == 0) // to pickup
 		{
-			if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 			{
 				Task.Phase = 1;
 			}
@@ -211,7 +212,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		}
 		else if (Task.Phase == 2) // to dropoff
 		{
-			if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 			{
 				Sim->HaulUnload(Task.TaskId, Task.CargoKg);
 				Task = FRHTaskFragment();
@@ -225,7 +226,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		if (Task.Phase == 0)
 		{
 			DrawW = Robot.DrawMoveW;
-			if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 			{
 				Task.Phase = 1;
 			}
@@ -233,7 +234,11 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		else
 		{
 			DrawW = Robot.DrawWorkW;
-			if (Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul))
+			// C4: a road edge is labour only (its own slot, never the site id).
+			const bool bDone = Task.RoadEdgeId > 0
+				? Sim->ApplyRoadWork(Task.RoadEdgeId, DeltaTime * Robot.WorkRate * WearMul)
+				: Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul);
+			if (bDone)
 			{
 				Sim->CompleteTask(Task.TaskId);
 				Task = FRHTaskFragment();
@@ -343,7 +348,7 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 	}
 	if (Task.Phase == 0)
 	{
-		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 		{
 			Task.Phase = 1;
 			Sim->JoinPadQueue(Task.DigDepositId, Entity); // docked: take a queue slot

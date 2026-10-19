@@ -413,6 +413,105 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 		}
 	}
+	else if (bRoadMode)
+	{
+		// The road ghost (C4): the strip the order would lay, drawn from the sim's own
+		// preflight on a copy of the graph - so splits and crossings show before the
+		// click. Green is an order that would be accepted right now; the uplink
+		// re-checks on arrival.
+		FVector Ground;
+		if (ActiveLevel != 0)
+		{
+			HintText = TEXT("ROAD: roads run on the surface - ride the elevator back up first");
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+		else if (bRoadForced ? (Ground = RoadForcedToCm, true) : CursorToGround(Ground))
+		{
+			const FVector Cursor = SnapRoadPoint(Ground);
+			const FVector From = bRoadDragging ? RoadAnchorCm : Cursor;
+			const float HalfW = 0.5f * (float)Sim->GetRoadParams().WidthCm;
+			if (!bRoadDragging || FVector::Dist2D(From, Cursor) < 1.0)
+			{
+				DrawDebugBox(World, Cursor + FVector(0, 0, 20.f), FVector(HalfW * 0.5f, HalfW * 0.5f, 20.f), FColor::Cyan, false, -1.f, 0, 6.f);
+				HintText = FString::Printf(TEXT("ROAD: click and drag from one point to another to lay a road (%.0f kg of Struct a metre, built by your Fabricators; %.1fx faster to drive). Release to transmit, right-click to finish"),
+					Sim->GetRoadStructKgPerMeter(), Sim->GetRoadSpeedMul());
+				HintColor = FLinearColor(0.3f, 0.9f, 1.f);
+			}
+			else
+			{
+				FString Reason;
+				URHSimWorldSubsystem::FRHRoadPreview Pre;
+				const bool bOk = Sim->CanPlaceRoad(From, Cursor, Reason, &Pre);
+				const FColor Color = bOk ? FColor::Green : FColor::Red;
+				// The strips (outline + centre line) and every junction or bend the order touches.
+				const auto Strip = [&](const FVector& A, const FVector& B)
+				{
+					const FVector Dir = (B - A).GetSafeNormal2D();
+					const FVector Side(-Dir.Y * HalfW, Dir.X * HalfW, 0.f);
+					const FVector Up(0, 0, 25.f);
+					DrawDebugLine(World, A + Side + Up, B + Side + Up, Color, false, -1.f, 0, 5.f);
+					DrawDebugLine(World, A - Side + Up, B - Side + Up, Color, false, -1.f, 0, 5.f);
+					DrawDebugLine(World, A + Up, B + Up, Color, false, -1.f, 0, 3.f);
+					DrawDebugLine(World, A + Side + Up, A - Side + Up, Color, false, -1.f, 0, 3.f);
+					DrawDebugLine(World, B + Side + Up, B - Side + Up, Color, false, -1.f, 0, 3.f);
+				};
+				if (Pre.NewSegmentsCm.Num() > 0)
+				{
+					for (const TPair<FVector, FVector>& Seg : Pre.NewSegmentsCm)
+					{
+						Strip(Seg.Key, Seg.Value);
+					}
+					for (const FVector& N : Pre.NodesCm)
+					{
+						DrawDebugBox(World, N + FVector(0, 0, 30.f), FVector(60.f, 60.f, 30.f), Color, false, -1.f, 0, 4.f);
+					}
+				}
+				else
+				{
+					Strip(From, Cursor); // nothing to lay (already a road, or refused outright): show the line asked for
+				}
+				FString Tip = FString::Printf(TEXT("ROAD %.0f m"), (double)Pre.LengthCm / 100.0);
+				if (Pre.Pieces > 0)
+				{
+					Tip += FString::Printf(TEXT("  ·  %d stretch%s"), Pre.Pieces, Pre.Pieces == 1 ? TEXT("") : TEXT("es"));
+					if (Pre.Splits > 0)
+					{
+						Tip += FString::Printf(TEXT("  ·  joins %d road%s"), Pre.Splits, Pre.Splits == 1 ? TEXT("") : TEXT("s"));
+					}
+					Tip += FString::Printf(TEXT("\nbill: %.0f kg Struct (the stores hold %.0f)  ·  %.0f s to lay at one Fabricator"), Pre.BillKg, Pre.HaveKg,
+						(double)Pre.LengthCm / 100.0 / FMath::Max(0.1, Sim->GetRoadBuildMetersPerHour()) * 50.0);
+				}
+				Tip += bOk ? TEXT("\nrelease to transmit, right-click to cancel") : FString::Printf(TEXT("\n%s"), *Reason);
+				HintText = Tip;
+				HintColor = FLinearColor(Color);
+				// Release ends the drag: transmit when green, else buzz and stay armed.
+				if (!bRoadForced && !IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bRoadDragging = false;
+					if (bOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("BuildRoad");
+						Cmd.Location = From;
+						Cmd.LocationB = Cursor;
+						Cmd.Level = 0;
+						Sim->EnqueueCommand(Cmd);
+						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+						SetConfirm(FString::Printf(TEXT("Road transmitted: %.0f m from (%.0f, %.0f) to (%.0f, %.0f) m, %.0f kg Struct"),
+							(double)Pre.LengthCm / 100.0, From.X / 100.f, From.Y / 100.f, Cursor.X / 100.f, Cursor.Y / 100.f, Pre.BillKg), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					else
+					{
+						URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+					}
+				}
+			}
+			if (!bRoadForced && bRoadDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bRoadDragging = false; // released on the spot it was pressed: nothing to lay
+			}
+		}
+	}
 	else if (bDigMode)
 	{
 		FVector Ground;
@@ -980,6 +1079,15 @@ void ARHPlayerController::OnClick()
 			bExcavateDragging = true;
 		}
 	}
+	else if (bRoadMode)
+	{
+		// Anchor the first end; Tick aims the second and transmits on release.
+		if (ActiveLevel == 0)
+		{
+			RoadAnchorCm = SnapRoadPoint(Ground);
+			bRoadDragging = true;
+		}
+	}
 	else if (bZoneMode)
 	{
 		// Paint one cell per click; the mode stays armed (several rooms of the
@@ -1187,7 +1295,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bRoadMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -1289,8 +1397,54 @@ void ARHPlayerController::SetTipsOn(bool bOn)
 	}
 }
 
+void ARHPlayerController::BeginRoad()
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bRoadMode = true;
+	bRoadDragging = false;
+	bRoadForced = false;
+}
+
+void ARHPlayerController::Debug_RoadGhost(const FVector& FromCm, const FVector& ToCm)
+{
+	BeginRoad();
+	bRoadDragging = true;
+	bRoadForced = true;
+	RoadAnchorCm = SnapRoadPoint(FromCm);
+	RoadForcedToCm = ToCm;
+}
+
+FVector ARHPlayerController::SnapRoadPoint(const FVector& GroundCm) const
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return GroundCm;
+	}
+	FVector Snapped = Sim->SnapToRoadGrid(GroundCm);
+	// An existing junction within 4 m wins, so a stretch starts exactly where
+	// another ends (ties fall to the lower node Id, the graph's own order).
+	const FRHRoadGraph& G = Sim->GetRoadGraph();
+	double Best = 400.0;
+	for (const FRHRoadNode& N : G.Nodes)
+	{
+		const FIntPoint P = G.NodeCm(N, Sim->GetRoadParams());
+		const double D = FVector::Dist2D(FVector((double)P.X, (double)P.Y, 0.0), Snapped);
+		if (D <= Best && D > 0.0)
+		{
+			Best = D;
+			Snapped = FVector((double)P.X, (double)P.Y, 0.0);
+		}
+	}
+	Snapped.Z = GroundCm.Z;
+	return Snapped;
+}
+
 void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
+	bRoadMode = false;
+	bRoadDragging = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bFurnishMode = false;
@@ -1301,6 +1455,7 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 
 void ARHPlayerController::BeginDigDesignation()
 {
+	bRoadMode = false;
 	PendingBuildDef = NAME_None;
 	bSurveyMode = false;
 	bFurnishMode = false;
@@ -1310,6 +1465,7 @@ void ARHPlayerController::BeginDigDesignation()
 
 void ARHPlayerController::BeginSurveyDesignation()
 {
+	bRoadMode = false;
 	PendingBuildDef = NAME_None;
 	bDigMode = false;
 	bExcavateMode = false;
@@ -1418,6 +1574,7 @@ const FRHFurnitureInstance* ARHPlayerController::FindFurnitureAt(const FVector& 
 
 void ARHPlayerController::BeginExcavateDesignation()
 {
+	bRoadMode = false;
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
@@ -1431,6 +1588,7 @@ void ARHPlayerController::BeginExcavateDesignation()
 
 void ARHPlayerController::BeginZoneDesignation(FName Room)
 {
+	bRoadMode = false;
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
@@ -1493,7 +1651,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
+	if (PendingBuildDef.IsNone() && !bRoadMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -1503,6 +1661,9 @@ void ARHPlayerController::CancelModes()
 	}
 	PendingBuildDef = NAME_None;
 	bBuildDragging = false;
+	bRoadMode = false;
+	bRoadDragging = false;
+	bRoadForced = false;
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;

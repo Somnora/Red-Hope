@@ -1482,10 +1482,90 @@ FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
 	return FString::Join(Parts, TEXT(" + ")) + (R->DragSized ? (R->Pressurized ? TEXT(" per bay") : TEXT(" per bed")) : TEXT(""));
 }
 
+const FName SRHCommandDeck::RoadCardName(TEXT("Road"));
+
+bool SRHCommandDeck::IsRoadDetail() const
+{
+	return HoveredBuildDef == RoadCardName && SelectedBuildCategory == FName("Logistics");
+}
+
+FReply SRHCommandDeck::HandleRoad()
+{
+	if (PC.IsValid())
+	{
+		PC->BeginRoad();
+	}
+	// Fold the drawer so the ground is clear to draw on.
+	bBuildDrawerOpen = false;
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildRoadCard()
+{
+	const auto CostText = [this]()
+	{
+		const URHSimWorldSubsystem* S = GetSim();
+		return FString::Printf(TEXT("%.0f kg struct a metre"), S ? S->GetRoadStructKgPerMeter() : 2.0);
+	};
+	const auto Short = [this]()
+	{
+		// Red while the stores could not pay even ten metres.
+		const URHSimWorldSubsystem* S = GetSim();
+		return S && S->GetRoadStructAvailableKg() + KINDA_SMALL_NUMBER < S->GetRoadStructKgPerMeter() * 10.0;
+	};
+	return SNew(SBox).WidthOverride(128.f).Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+	[
+		SNew(SButton)
+		.ButtonStyle(&D::ButtonStyle())
+		.ContentPadding(FMargin(6.f, 6.f, 6.f, 7.f))
+		.OnHovered_Lambda([this]() { HoveredBuildDef = RoadCardName; })
+		.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRoad))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(SBox).WidthOverride(96.f).HeightOverride(96.f).HAlign(HAlign_Center).VAlign(VAlign_Center)
+				[
+					D::IconImage(FName("structure"), FSlateColor(D::TextDim), 48.f)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
+			[
+				SNew(SBox).MinDesiredHeight(30.f).VAlign(VAlign_Top)
+				[
+					SNew(STextBlock).Text(Txt(TEXT("Road"))).Font(D::Label(10)).ColorAndOpacity(D::Text).AutoWrapText(true)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 4.f, 0.f)
+				[
+					D::IconImage(FName("structure"), FSlateColor(D::TextDim), 10.f)
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(8)).AutoWrapText(true)
+					.Text_Lambda([CostText]() { return Txt(CostText()); })
+					.ColorAndOpacity_Lambda([Short]() { return FSlateColor(Short() ? D::Red : D::Text); })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Text(Txt(TEXT("drag to lay"))).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+			]
+		]
+	];
+}
+
 FName SRHCommandDeck::GetDetailBuildDef() const
 {
 	// The hovered card while it belongs to the open category, else that
 	// category's first card - the panel is never empty.
+	if (IsRoadDetail())
+	{
+		return RoadCardName; // C4: the UI-only Road card has no building row behind it
+	}
 	FName First = NAME_None;
 	for (const TPair<FName, FName>& E : BuildEntries)
 	{
@@ -1599,6 +1679,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 				Cards->AddSlot().AutoWidth()[BuildCard(E.Key)];
 			}
 		}
+		if (Cat == FName("Logistics"))
+		{
+			Cards->AddSlot().AutoWidth()[BuildRoadCard()]; // C4
+		}
 		Rows->AddSlot().AutoHeight()
 		[
 			SNew(SBox).Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SRHCommandDeck::GetBuildCatVisibility, Cat)))
@@ -1623,18 +1707,34 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 			SNew(STextBlock).Font(D::Label(13)).ColorAndOpacity(D::Amber)
 			.Text_Lambda([this, DetailRow]()
 			{
+				if (IsRoadDetail()) { return Txt(TEXT("Road")); }
 				const FRHBuildingRow* R = DetailRow();
 				return R ? Txt(R->DisplayName.IsEmpty() ? GetDetailBuildDef().ToString() : R->DisplayName) : FText::GetEmpty();
 			})
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
 		[
-			Prose(MakeAttributeLambda([DetailRow]() { const FRHBuildingRow* R = DetailRow(); return R ? Txt(R->Blurb) : FText::GetEmpty(); }), D::Text, 9)
+			Prose(MakeAttributeLambda([this, DetailRow]()
+			{
+				if (IsRoadDetail())
+				{
+					return Txt(TEXT("Compacted regolith between two points. Robots drive it faster than open ground, and they will not cut across a building to use it. Buildings cannot stand on a road."));
+				}
+				const FRHBuildingRow* R = DetailRow();
+				return R ? Txt(R->Blurb) : FText::GetEmpty();
+			}), D::Text, 9)
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
 		[
 			Prose(MakeAttributeLambda([this, DetailRow]()
 			{
+				if (IsRoadDetail())
+				{
+					const URHSimWorldSubsystem* RS = GetSim();
+					if (!RS) { return FText::GetEmpty(); }
+					return Txt(FString::Printf(TEXT("Click and drag from one point to another; it snaps to the 2 m grid and joins any road it meets.\nYour Fabricators lay it, %.0f m to the sol-hour each, with no hauling: the Struct leaves the stores when the order lands.\nRobots drive it %.1fx faster. It must be inside the grid, and clear of buildings."),
+						RS->GetRoadBuildMetersPerHour(), RS->GetRoadSpeedMul()));
+				}
 				const FRHBuildingRow* R = DetailRow();
 				if (!R) { return FText::GetEmpty(); }
 				FString Short, Long;
@@ -1694,6 +1794,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 			SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true)
 			.Text_Lambda([this, DetailRow]()
 			{
+				if (IsRoadDetail())
+				{
+					const URHSimWorldSubsystem* RS = GetSim();
+					return RS ? Txt(FString::Printf(TEXT("Costs %.0f kg of Struct a metre; the stores hold %s"), RS->GetRoadStructKgPerMeter(), *Mass(RS->GetRoadStructAvailableKg()))) : FText::GetEmpty();
+				}
 				const FRHBuildingRow* R = DetailRow();
 				bool bShort;
 				const FString L = BuildCostLine(GetDetailBuildDef(), bShort);

@@ -9,8 +9,6 @@
 #include "MassExecutionContext.h"
 #include "MassStateTreeFragments.h"
 
-using RH::MoveToward;
-
 URHRobotTaskProcessor::URHRobotTaskProcessor()
 	: EntityQuery(*this)
 {
@@ -121,7 +119,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						{
 							break; // died en route to the pad
 						}
-						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
 						{
 							Task.Phase = 1;
 						}
@@ -175,6 +173,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 							Task.TaskType = (uint8)ERHTaskType::Build;
 							Task.TaskId = Board.Id;
 							Task.DigDepositId = Board.To.BuildingId; // reused slot: construction site id
+							Task.RoadEdgeId = Board.To.RoadEdgeId;   // C4: a road edge is labour only, in its own slot
 							// Cross-level sites are worked from the shaft head (M1-d).
 							Task.TargetCm = Sim->GetApproachPoint(Board.To, /*RobotLevel*/ 0);
 							Task.Phase = 0;
@@ -194,7 +193,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					if (Task.Phase == 0)
 					{
 						DrawW = Robot.DrawMoveW;
-						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
 						{
 							Task.Phase = 1;
 						}
@@ -214,7 +213,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					DrawW = Robot.DrawMoveW;
 					if (Task.Phase == 0) // to pickup
 					{
-						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
 						{
 							Task.Phase = 1;
 						}
@@ -236,7 +235,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					}
 					else if (Task.Phase == 2) // to dropoff
 					{
-						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
 						{
 							Sim->HaulUnload(Task.TaskId, Task.CargoKg);
 							Task = FRHTaskFragment();
@@ -250,7 +249,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					if (Task.Phase == 0)
 					{
 						DrawW = Robot.DrawMoveW;
-						if (MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
 						{
 							Task.Phase = 1;
 						}
@@ -258,7 +257,11 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					else
 					{
 						DrawW = Robot.DrawWorkW;
-						if (Sim->ApplyBuildWork(Task.DigDepositId, SubDt * Robot.WorkRate))
+						// C4: a road edge is labour only (its own slot, never the site id).
+						const bool bDone = Task.RoadEdgeId > 0
+							? Sim->ApplyRoadWork(Task.RoadEdgeId, SubDt * Robot.WorkRate)
+							: Sim->ApplyBuildWork(Task.DigDepositId, SubDt * Robot.WorkRate);
+						if (bDone)
 						{
 							Sim->CompleteTask(Task.TaskId);
 							Task = FRHTaskFragment();

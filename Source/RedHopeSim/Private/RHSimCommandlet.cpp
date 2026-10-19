@@ -3,6 +3,8 @@
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
+#include "RHAgentSubsystem.h"
+#include "RHRobotMovement.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "HAL/FileManager.h"
@@ -7004,6 +7006,646 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// C4 self-test (living-city gate 4, 2026-10-18): ROADS. The graph (merging,
+	// splitting, junctions, crossings), the order and its preflight (coverage,
+	// placement conflicts from both sides, the atomic bill), the labour-only
+	// construction and the era refusal, deterministic routing (the same route twice,
+	// ties, the same route after a save and a load), a road trip against the straight
+	// line, the charge reserve, a road demolished under a robot, and the save round
+	// trip of the graph and of a queued BuildRoad order with both end points. The
+	// headless world has no Mass ticking, so robots are played by the harness through
+	// the very same sim calls the brains make (TryClaimBuild, RH::MoveAlong,
+	// ApplyRoadWork); the real robots are proven by the live capture and the paired
+	// agent/era run. Fails loudly. `-roads`.
+	if (FParse::Param(*Params, TEXT("roads")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROADS TEST (C4, 2026-10-18) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("ROADS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("ROADS FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NStruct(TEXT("Struct"));
+		FString Why;
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& S) { Rejects.Add(S); });
+		const auto LastReject = [&Rejects]() { return Rejects.Num() ? Rejects.Last() : FString(); };
+		const auto Land = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto Graph = [&]() -> const FRHRoadGraph& { return Sim->GetRoadGraph(); };
+		const auto Have = [&]() { return Sim->GetRoadStructAvailableKg(); };
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("Lander")) { LanderId = B.Id; } }
+		const auto RoadCmd = [](double X1, double Y1, double X2, double Y2)
+		{
+			FRHCommand C;
+			C.Verb = FName("BuildRoad");
+			C.Location = FVector(X1, Y1, 0.0);
+			C.LocationB = FVector(X2, Y2, 0.0);
+			return C;
+		};
+		// One BuildRoad order, one era step (the 60 s step covers the 45 s order lag).
+		// True when it was not rejected.
+		FString OrderNote;
+		const auto OrderRoad = [&](double X1, double Y1, double X2, double Y2)
+		{
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(RoadCmd(X1, Y1, X2, Y2));
+			Land();
+			OrderNote = Rejects.Num() == R0 ? FString(TEXT("accepted")) : Rejects.Last();
+			return Rejects.Num() == R0;
+		};
+		const auto Can = [&](double X1, double Y1, double X2, double Y2, FString& Out)
+		{
+			return Sim->CanPlaceRoad(FVector(X1, Y1, 0.0), FVector(X2, Y2, 0.0), Out);
+		};
+		const auto DegreeOf = [&](int32 NodeId)
+		{
+			int32 D = 0;
+			for (const FRHRoadEdge& E : Graph().Edges) { D += (E.A == NodeId || E.B == NodeId) ? 1 : 0; }
+			return D;
+		};
+		const auto NodeAtCm = [&](double X, double Y)
+		{
+			return Graph().FindNodeAt(FIntPoint(FMath::RoundToInt(X / 200.0), FMath::RoundToInt(Y / 200.0)));
+		};
+		const auto RoadTasks = [&]()
+		{
+			int32 N = 0;
+			for (const FRHTask& T : Sim->GetTasks()) { N += (T.Type == ERHTaskType::Build && T.To.RoadEdgeId > 0) ? 1 : 0; }
+			return N;
+		};
+		const auto MixBytes = [](uint32& H, const void* P, int32 Bytes) { H = FCrc::MemCrc32(P, Bytes, H); };
+		const auto GraphDigest = [&]() -> uint32
+		{
+			uint32 H = 0;
+			const FRHRoadGraph& G = Graph();
+			for (const FRHRoadNode& N : G.Nodes) { MixBytes(H, &N.Id, 4); MixBytes(H, &N.GridPos.X, 4); MixBytes(H, &N.GridPos.Y, 4); }
+			for (const FRHRoadEdge& E : G.Edges)
+			{
+				const int32 Built = E.bBuilt ? 1 : 0;
+				MixBytes(H, &E.Id, 4); MixBytes(H, &E.A, 4); MixBytes(H, &E.B, 4); MixBytes(H, &E.LengthCm, 4);
+				MixBytes(H, &Built, 4); MixBytes(H, &E.BuildProgress, 4); MixBytes(H, &E.RegionId, 4);
+			}
+			MixBytes(H, &G.NextNodeId, 4); MixBytes(H, &G.NextEdgeId, 4);
+			return H;
+		};
+		const auto SameRoute = [](const FRHRoadRoute& A, const FRHRoadRoute& B)
+		{
+			return A.bRoad == B.bRoad && A.NodeIds == B.NodeIds && A.EdgeIds == B.EdgeIds && A.CostUnits == B.CostUnits
+				&& A.OffInCm == B.OffInCm && A.OffOutCm == B.OffOutCm && A.RoadCm == B.RoadCm;
+		};
+		const FRHRobotRow* FabRow = DefsSub ? DefsSub->GetRobot(FName("RC_F")) : nullptr;
+		const float FabSpeed = FabRow ? FabRow->Speed_mps : 2.5f;
+		const float FabWork = FabRow ? FabRow->WorkRate : 1.f;
+		const float FabDrawW = FabRow ? FabRow->DrawMove_W : 90.f;
+
+		// One harness Fabricator, played through the brains' own calls: claim the
+		// nearest Build task, drive to its approach point, work it, complete it.
+		struct FSimFab { FTransform T; FMassEntityHandle H; FRHTask Board; bool bHas = false; int32 Phase = 0; FVector Target = FVector::ZeroVector; };
+		const auto FabStep = [&](FSimFab& F) -> int32
+		{
+			if (!F.bHas)
+			{
+				if (Sim->TryClaimBuild(F.H, F.T.GetLocation(), F.Board))
+				{
+					F.bHas = true;
+					F.Phase = 0;
+					F.Target = Sim->GetApproachPoint(F.Board.To, 0);
+				}
+				return 0;
+			}
+			if (F.Phase == 0)
+			{
+				if (RH::MoveAlong(*Sim, F.H, F.T, F.Target, FabSpeed, AgentDt)) { F.Phase = 1; }
+				return 0;
+			}
+			const int32 Edge = F.Board.To.RoadEdgeId;
+			const bool bDone = Edge > 0 ? Sim->ApplyRoadWork(Edge, AgentDt * FabWork) : true;
+			if (bDone) { Sim->CompleteTask(F.Board.Id); F.bHas = false; return Edge; }
+			return 0;
+		};
+		// A harness robot drives one trip with the shared helper: the sub-steps taken
+		// (-1 past the cap).
+		const auto Drive = [&](const FVector& From, const FVector& To, FMassEntityHandle H, float Dt)
+		{
+			FTransform T(FQuat::Identity, From);
+			int32 Steps = 0;
+			while (!RH::MoveAlong(*Sim, H, T, To, FabSpeed, Dt))
+			{
+				if (++Steps > 20000) { return -1; }
+			}
+			return Steps + 1;
+		};
+		const auto DriveStraight = [&](const FVector& From, const FVector& To, float Dt)
+		{
+			FTransform T(FQuat::Identity, From);
+			int32 Steps = 0;
+			while (!RH::MoveToward(T, To, FabSpeed, Dt))
+			{
+				if (++Steps > 20000) { return -1; }
+			}
+			return Steps + 1;
+		};
+		// The straight-line charge reserve the brain uses (RHRobotStateTree.cpp DriveWh).
+		const auto ReserveWh = [&](double StraightCm)
+		{
+			const double Secs = StraightCm / FMath::Max(1.0, (double)FabSpeed * 100.0);
+			return (float)(FabDrawW * Secs / 50.0 * 1.25) + FabDrawW * 0.5f;
+		};
+		int32 NextHandle = 100;
+		const auto Fresh = [&]() { return FMassEntityHandle(NextHandle++, 1); };
+
+		// R0. The data: every config row came off the table.
+		{
+			const FRHRoadParams& P = Sim->GetRoadParams();
+			Expect(P.GridCm == 200 && P.WidthCm == 600 && P.MaxEdgeCm == 4000 && P.EntryCandidates == 4 && P.SpeedMulPermille == 1600
+				&& Near(Sim->GetRoadStructKgPerMeter(), 2.0, 1e-9) && Near(Sim->GetRoadSpeedMul(), 1.6, 1e-9) && Sim->GetRoadBuildMetersPerHour() > 0.0
+				&& FabRow != nullptr,
+				FString::Printf(TEXT("R0 data: grid %d cm, width %d cm, max edge %d cm, K %d, speed x%.1f, %.1f kg/m, %.0f m per sol-hour (DT_Config rows)"),
+					P.GridCm, P.WidthCm, P.MaxEdgeCm, P.EntryCandidates, Sim->GetRoadSpeedMul(), Sim->GetRoadStructKgPerMeter(), Sim->GetRoadBuildMetersPerHour()));
+			Expect(LanderId != 0 && Graph().Nodes.Num() == 0 && Graph().Edges.Num() == 0 && !Sim->HasBuiltRoads(),
+				TEXT("R0 the default colony has no road at all (no starter road)"));
+		}
+
+		// R1. With zero built edges the movement call sequence is exactly today's: the
+		// helper and MoveToward agree bit for bit, every step, to the stop.
+		{
+			const FMassEntityHandle H = Fresh();
+			FTransform A(FQuat::Identity, FVector(0.0, -3000.0, 0.0)), B = A;
+			const FVector Goal(6000.0, -2600.0, 0.0);
+			bool bSame = true, bArrA = false, bArrB = false;
+			int32 N = 0;
+			for (; N < 2000 && !(bArrA && bArrB); ++N)
+			{
+				bArrA = RH::MoveAlong(*Sim, H, A, Goal, FabSpeed, AgentDt);
+				bArrB = RH::MoveToward(B, Goal, FabSpeed, AgentDt);
+				bSame &= A.GetLocation() == B.GetLocation() && A.GetRotation().Equals(B.GetRotation(), 0.0) && bArrA == bArrB;
+			}
+			Expect(bSame && bArrA && bArrB && Sim->GetRobotRoadPath(H) == nullptr,
+				FString::Printf(TEXT("R1 no built edge: RH::MoveAlong == RH::MoveToward bit for bit over %d steps, and no path is kept"), N));
+		}
+
+		// R2. Era mode does not learn road distance: ten sols of era ledger with a
+		// finished network are the ten sols without it, to the last bit.
+		{
+			FString Err;
+			Expect(Sim->SaveColony(TEXT("roadsbase"), Err), FString::Printf(TEXT("R2 saved the starting colony (%s)"), *Err));
+			const auto Ledger = [&]() -> TArray<double>
+			{
+				TArray<double> L;
+				for (const FName& Res : { FName("Struct"), FName("Regolith"), FName("Ore"), FName("Ice") }) { L.Add(Sim->GetTotalSolid(Res)); }
+				for (const FName& Res : { FName("Water"), FName("Oxygen"), FName("Hydrogen") }) { L.Add(Sim->GetStock(Res)); }
+				L.Add(Sim->GetPower().BatteryWh);
+				for (const FRHDepositState& D : Sim->GetDeposits()) { L.Add(D.RemainingKg); L.Add(D.PileKg); }
+				return L;
+			};
+			const int32 TenSols = 10 * (int32)(SolLen / EraDt);
+			// Both legs start from a loaded copy, so nothing but the roads can differ.
+			Expect(Sim->LoadColony(TEXT("roadsbase"), Err) && Err.IsEmpty(), FString::Printf(TEXT("R2 loaded the starting colony for the plain leg (%s)"), *Err));
+			for (int32 K = 0; K < TenSols; ++K) { Land(); }
+			const TArray<double> Plain = Ledger();
+			Expect(Sim->LoadColony(TEXT("roadsbase"), Err) && Err.IsEmpty(), FString::Printf(TEXT("R2 reloaded the starting colony (%s)"), *Err));
+			Sim->Debug_LayRoad(FVector(1000.0, -2000.0, 0.0), FVector(9000.0, -2000.0, 0.0), true);
+			Sim->Debug_LayRoad(FVector(5000.0, -2000.0, 0.0), FVector(5000.0, 2000.0, 0.0), true);
+			Expect(Sim->HasBuiltRoads() && Graph().Edges.Num() >= 4, FString::Printf(TEXT("R2 a finished network of %d edges stands"), Graph().Edges.Num()));
+			for (int32 K = 0; K < TenSols; ++K) { Land(); }
+			const TArray<double> Roaded = Ledger();
+			bool bEqual = Plain.Num() == Roaded.Num() && Plain.Num() > 0;
+			double MaxDelta = 0.0;
+			for (int32 i = 0; bEqual && i < Plain.Num(); ++i) { MaxDelta = FMath::Max(MaxDelta, FMath::Abs(Plain[i] - Roaded[i])); bEqual &= Plain[i] == Roaded[i]; }
+			Expect(bEqual && Plain[0] > 0.0,
+				FString::Printf(TEXT("R2 the 10-sol era ledger is identical with and without roads (%d lines, max delta %.9f): era keeps its teleport model"), Plain.Num(), MaxDelta));
+			Expect(Sim->LoadColony(TEXT("roadsbase"), Err) && Err.IsEmpty() && Graph().Edges.Num() == 0 && !Sim->HasBuiltRoads(),
+				TEXT("R2 back to the starting colony, and a load clears the graph"));
+		}
+
+		// The world: three pylons stretch the grid east along the south side, and the
+		// stores hold plenty of Struct for the roads (each test that needs less sets it).
+		Sim->Debug_PlaceInstant(FName("Pylon"), FVector(3000.0, -3200.0, 0.0));
+		Sim->Debug_PlaceInstant(FName("Pylon"), FVector(7000.0, -3200.0, 0.0));
+		Sim->Debug_PlaceInstant(FName("Pylon"), FVector(11000.0, -3200.0, 0.0));
+		Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+		Land();
+		const double StructStart = Have();
+		Expect(StructStart >= 5000.0, FString::Printf(TEXT("R3 the stores hold %.0f kg of Struct for roads"), StructStart));
+		const auto SetStruct = [&](double Kg) { Sim->Debug_AddSolidAt(LanderId, NStruct, Kg - Have(), false); };
+
+		// R3. The preflight: coverage, an empty order.
+		{
+			FString R;
+			Expect(!Can(20000, -2000, 24000, -2000, R) && R.Contains(TEXT("coverage")), FString::Printf(TEXT("R3 outside the grid is refused (%s)"), *R));
+			Expect(!Can(2000, -2000, 2050, -2040, R) && R.Contains(TEXT("two different")), FString::Printf(TEXT("R3 both ends on one grid cell is refused (%s)"), *R));
+			Expect(!Can(1000, -2000, 24000, -2000, R) && R.Contains(TEXT("coverage")), FString::Printf(TEXT("R3 one end outside the grid is refused too (%s)"), *R));
+			Expect(!Can(1000, -2000, 30000, -2000, R), FString::Printf(TEXT("R3 an over-long order is refused (%s)"), *R));
+		}
+
+		// R4. Road A: 40 m east-west. Two edges, the bill taken whole, a labour task per
+		// edge, and no haul anywhere.
+		{
+			URHSimWorldSubsystem::FRHRoadPreview Pre;
+			FString R;
+			const bool bCan = Sim->CanPlaceRoad(FVector(1000, -2000, 0), FVector(5000, -2000, 0), R, &Pre);
+			Expect(bCan && Pre.Pieces == 2 && Pre.LengthCm == 4000 && Near(Pre.BillKg, 80.0, 1e-9) && Near(Pre.HaveKg, StructStart, 1e-9) && Pre.NewSegmentsCm.Num() == 2 && Pre.Splits == 0,
+				FString::Printf(TEXT("R4 preflight: %d pieces, %d cm, bill %.0f kg of the %.0f held, ghost has %d segments"), Pre.Pieces, Pre.LengthCm, Pre.BillKg, Pre.HaveKg, Pre.NewSegmentsCm.Num()));
+			const double Before = Have();
+			const int32 TasksBefore = RoadTasks();
+			Expect(OrderRoad(1000, -2000, 5000, -2000), FString::Printf(TEXT("R4 the order landed (%s)"), *OrderNote));
+			Expect(Graph().Nodes.Num() == 3 && Graph().Edges.Num() == 2 && !Graph().Edges[0].bBuilt && !Graph().Edges[1].bBuilt && !Sim->HasBuiltRoads(),
+				FString::Printf(TEXT("R4 graph: %d nodes, %d edges, all planned"), Graph().Nodes.Num(), Graph().Edges.Num()));
+			Expect(Graph().Edges[0].LengthCm == 2000 && Graph().Edges[1].LengthCm == 2000 && NodeAtCm(1000, -2000) != 0 && NodeAtCm(3000, -2000) != 0 && NodeAtCm(5000, -2000) != 0,
+				TEXT("R4 two 20 m edges on the grid, joined at the 30 m node"));
+			Expect(Near(Before - Have(), 80.0, 1e-6), FString::Printf(TEXT("R4 the bill left the stores whole: %.4f kg (expect 80)"), Before - Have()));
+			Sim->Debug_StepTaskBoard();
+			int32 RoadHauls = 0;
+			for (const FRHTask& T : Sim->GetTasks()) { RoadHauls += (T.Type == ERHTaskType::Haul && (T.To.RoadEdgeId > 0 || T.From.RoadEdgeId > 0)) ? 1 : 0; }
+			Expect(RoadTasks() == TasksBefore + 2 && RoadHauls == 0, FString::Printf(TEXT("R4 two labour tasks posted, no haul for a road (%d road hauls)"), RoadHauls));
+		}
+
+		// R5. Atomic payment: an order the stores cannot pay is refused and takes
+		// nothing; one the stores can pay to the last kilogram is taken whole.
+		{
+			SetStruct(50.0);
+			const uint32 D0 = GraphDigest();
+			const int32 T0 = RoadTasks();
+			FString R;
+			Expect(!Can(2000, -6000, 12000, -6000, R) && R.Contains(TEXT("Insufficient Struct")), FString::Printf(TEXT("R5 the preflight refuses a 200 kg road on 50 kg (%s)"), *R));
+			const bool bOk = OrderRoad(2000, -6000, 12000, -6000);
+			Expect(!bOk && LastReject().Contains(TEXT("Insufficient Struct")) && GraphDigest() == D0 && RoadTasks() == T0 && Near(Have(), 50.0, 1e-9),
+				FString::Printf(TEXT("R5 the order is refused at the seam and nothing moves: graph unchanged, no task, %.4f kg still held (%s)"), Have(), *LastReject()));
+			SetStruct(20.0);
+			const int32 E0 = Graph().Edges.Num();
+			Expect(OrderRoad(12000, -2000, 13000, -2000) && Graph().Edges.Num() == E0 + 1 && Near(Have(), 0.0, 1e-9),
+				FString::Printf(TEXT("R5 a 10 m road on exactly 20 kg is paid whole: %.9f kg left"), Have()));
+			SetStruct(StructStart);
+		}
+
+		// R6. Splitting: a 100 m drag is cut into edges no longer than the cap.
+		{
+			URHSimWorldSubsystem::FRHRoadPreview Pre;
+			FString R;
+			Expect(Sim->CanPlaceRoad(FVector(2000, -6000, 0), FVector(12000, -6000, 0), R, &Pre) && Pre.Pieces == 3 && Pre.LengthCm == 10000 && Near(Pre.BillKg, 200.0, 1e-9),
+				FString::Printf(TEXT("R6 preflight: a 100 m drag is %d pieces, %d cm, %.0f kg"), Pre.Pieces, Pre.LengthCm, Pre.BillKg));
+			const int32 E0 = Graph().Edges.Num(), N0 = Graph().Nodes.Num();
+			Expect(OrderRoad(2000, -6000, 12000, -6000), FString::Printf(TEXT("R6 the order landed (%s)"), *OrderNote));
+			int32 Longest = 0, Sum = 0;
+			for (int32 i = E0; i < Graph().Edges.Num(); ++i) { Longest = FMath::Max(Longest, Graph().Edges[i].LengthCm); Sum += Graph().Edges[i].LengthCm; }
+			bool bOnGrid = true;
+			for (int32 i = N0; i < Graph().Nodes.Num(); ++i) { bOnGrid &= Graph().Nodes[i].GridPos.X * 200 % 200 == 0 && NodeAtCm(Graph().Nodes[i].GridPos.X * 200.0, Graph().Nodes[i].GridPos.Y * 200.0) == Graph().Nodes[i].Id; }
+			Expect(Graph().Edges.Num() == E0 + 3 && Graph().Nodes.Num() == N0 + 4 && Longest <= 4000 && Sum == 10000 && bOnGrid,
+				FString::Printf(TEXT("R6 three edges (longest %d cm, total %d cm), four nodes, every node on the grid"), Longest, Sum));
+		}
+
+		// R7. Merging: a node only merges on exactly the same grid cell.
+		{
+			const int32 N0 = Graph().Nodes.Num();
+			const int32 Shared = NodeAtCm(12000, -6000);
+			Expect(Shared != 0 && DegreeOf(Shared) == 1, TEXT("R7 the long road ends on a free node"));
+			Expect(OrderRoad(12000, -6000, 14000, -4000), FString::Printf(TEXT("R7 a road from that end landed (%s)"), *OrderNote));
+			Expect(Graph().Nodes.Num() == N0 + 1 && DegreeOf(Shared) == 2 && NodeAtCm(12000, -6000) == Shared,
+				FString::Printf(TEXT("R7 the shared end merged: %d new node (not 2), its degree %d"), Graph().Nodes.Num() - N0, DegreeOf(Shared)));
+			const int32 Off = NodeAtCm(12200, -6000);
+			Expect(Off == 0, TEXT("R7 a node one cell off is a different node (nothing within a cell merges)"));
+		}
+
+		// R8. A junction: an end point within half the road's width of an edge splits
+		// that edge there. Only the new piece is billed; the far half of the split edge
+		// is a new edge with its own labour task.
+		{
+			URHSimWorldSubsystem::FRHRoadPreview Pre;
+			FString R;
+			Expect(Sim->CanPlaceRoad(FVector(2000, -1800, 0), FVector(2000, -800, 0), R, &Pre) && Pre.Pieces == 1 && Pre.Splits == 1 && Pre.LengthCm == 1000 && Near(Pre.BillKg, 20.0, 1e-9),
+				FString::Printf(TEXT("R8 preflight: %d new piece, %d split, %d cm, %.0f kg"), Pre.Pieces, Pre.Splits, Pre.LengthCm, Pre.BillKg));
+			const int32 E0 = Graph().Edges.Num(), N0 = Graph().Nodes.Num(), T0 = RoadTasks();
+			const double Before = Have();
+			Expect(OrderRoad(2000, -1800, 2000, -800), FString::Printf(TEXT("R8 the order landed (%s)"), *OrderNote));
+			const int32 J = NodeAtCm(2000, -1800);
+			int32 HalfLen = 0, HalfCount = 0;
+			for (const FRHRoadEdge& E : Graph().Edges) { if ((E.A == J || E.B == J) && E.LengthCm > 1010 && E.LengthCm < 1030) { HalfLen = E.LengthCm; ++HalfCount; } }
+			Expect(J != 0 && Graph().Edges.Num() == E0 + 2 && Graph().Nodes.Num() == N0 + 2 && DegreeOf(J) == 3 && HalfCount == 2 && HalfLen == 1020,
+				FString::Printf(TEXT("R8 the 20 m edge split at the junction into two %d cm halves; %d edges and %d nodes added, junction degree %d"), HalfLen, Graph().Edges.Num() - E0, Graph().Nodes.Num() - N0, DegreeOf(J)));
+			Expect(Near(Before - Have(), 20.0, 1e-6) && RoadTasks() == T0 + 2,
+				FString::Printf(TEXT("R8 billed for the new piece only (%.2f kg), a task for it and one for the far half (%d tasks added)"), Before - Have(), RoadTasks() - T0));
+		}
+
+		// R9. A crossing splits both roads at the crossing point.
+		{
+			URHSimWorldSubsystem::FRHRoadPreview Pre;
+			FString R;
+			Expect(Sim->CanPlaceRoad(FVector(4000, -3600, 0), FVector(4000, -400, 0), R, &Pre) && Pre.Pieces == 2 && Pre.Splits == 1 && Pre.LengthCm == 3200 && Near(Pre.BillKg, 64.0, 1e-9),
+				FString::Printf(TEXT("R9 preflight: the drag is %d pieces after the crossing, %d split, %d cm, %.0f kg"), Pre.Pieces, Pre.Splits, Pre.LengthCm, Pre.BillKg));
+			const int32 E0 = Graph().Edges.Num(), N0 = Graph().Nodes.Num();
+			Expect(OrderRoad(4000, -3600, 4000, -400), FString::Printf(TEXT("R9 the order landed (%s)"), *OrderNote));
+			const int32 X = NodeAtCm(4000, -2000);
+			Expect(X != 0 && DegreeOf(X) == 4 && Graph().Edges.Num() == E0 + 3 && Graph().Nodes.Num() == N0 + 3,
+				FString::Printf(TEXT("R9 the crossing is a node of degree %d; %d edges and %d nodes added (two pieces + the split of the old road)"), DegreeOf(X), Graph().Edges.Num() - E0, Graph().Nodes.Num() - N0));
+		}
+
+		// R10. Laying a road again changes nothing, even when it runs through a junction.
+		{
+			const uint32 D0 = GraphDigest();
+			const double Before = Have();
+			FString R;
+			Expect(!Can(4000, -3600, 4000, -400, R) && R.Contains(TEXT("already laid")), FString::Printf(TEXT("R10 the same order again is refused (%s)"), *R));
+			Expect(!Can(1000, -2000, 5000, -2000, R) && R.Contains(TEXT("already laid")), FString::Printf(TEXT("R10 a drag along a road that already has its junctions is refused (%s)"), *R));
+			OrderRoad(4000, -3600, 4000, -400);
+			Expect(GraphDigest() == D0 && Near(Have(), Before, 1e-9), TEXT("R10 and at the seam nothing changed and nothing was paid"));
+		}
+
+		// R11. Placement conflicts, from both sides.
+		{
+			FString R;
+			Sim->Debug_PlaceInstant(FName("Pylon"), FVector(8000.0, -1600.0, 0.0));
+			Expect(!Can(7000, -1600, 9000, -1600, R) && R.Contains(TEXT("run through")), FString::Printf(TEXT("R11 a road through a building is refused (%s)"), *R));
+			Expect(!Can(7000, -1800, 9000, -1800, R), FString::Printf(TEXT("R11 a road whose strip clips a building is refused (%s)"), *R));
+			Expect(Can(7000, -2000, 9000, -2000, R), FString::Printf(TEXT("R11 a road flush against a building is clear (%s)"), *R));
+			Expect(!Sim->CanPlaceBuilding(FName("Pylon"), FVector(2000, -2100, 0), R) && R.Contains(TEXT("road being built")),
+				FString::Printf(TEXT("R11 a building on a planned road is refused (%s)"), *R));
+			Expect(!Sim->CanPlaceBuilding(FName("Pylon"), FVector(7000, -6350, 0), R) && R.Contains(TEXT("road")),
+				FString::Printf(TEXT("R11 a building whose footprint clips a road strip is refused (%s)"), *R));
+			Expect(Sim->CanPlaceBuilding(FName("Pylon"), FVector(7000, -6400, 0), R), FString::Printf(TEXT("R11 a building flush against a road strip is clear (%s)"), *R));
+			// In flight, both ways.
+			Sim->EnqueueCommand(RoadCmd(9000, -5000, 11000, -5000));
+			const int32 RoadOrderId = Sim->GetUplinkQueue().Last().CommandId;
+			Expect(!Sim->CanPlaceBuilding(FName("Pylon"), FVector(10000, -5000, 0), R) && R.Contains(TEXT("in transit")),
+				FString::Printf(TEXT("R11 a building across a road order still in flight is refused (%s)"), *R));
+			Expect(Sim->CancelUplinkCommand(RoadOrderId) && Sim->CanPlaceBuilding(FName("Pylon"), FVector(10000, -5000, 0), R), TEXT("R11 cancel the road order and the spot is free"));
+			FRHCommand B;
+			B.Verb = FName("Build");
+			B.Target = FName("Pylon");
+			B.Location = FVector(10000, -5000, 0);
+			Sim->EnqueueCommand(B);
+			const int32 BuildOrderId = Sim->GetUplinkQueue().Last().CommandId;
+			Expect(!Can(9000, -5000, 11000, -5000, R) && R.Contains(TEXT("in transit")), FString::Printf(TEXT("R11 a road across a building order still in flight is refused (%s)"), *R));
+			Expect(Sim->CancelUplinkCommand(BuildOrderId) && Can(9000, -5000, 11000, -5000, R), TEXT("R11 cancel the building order and the road is clear"));
+			// At the seam: the road order that lands after a building took the spot is refused.
+			const int32 R0 = Rejects.Num();
+			Sim->EnqueueCommand(RoadCmd(7000, -1600, 9000, -1600));
+			Land();
+			Expect(Rejects.Num() == R0 + 1 && LastReject().Contains(TEXT("run through")), FString::Printf(TEXT("R11 the seam re-checks: the order that lands across a building is refused (%s)"), *LastReject()));
+		}
+
+		// R12. Labour: a Fabricator claims each edge, drives to its midpoint, and works
+		// it. No Struct moves (it was paid at the order), and the era band refuses
+		// 60x while an edge is open.
+		{
+			Expect(!Sim->CanEnterEraMode(Why) && Why.Contains(TEXT("road")), FString::Printf(TEXT("R12 era mode is refused while a road edge is under construction (%s)"), *Why));
+			int32 Planned = 0;
+			for (const FRHRoadEdge& E : Graph().Edges) { Planned += E.bBuilt ? 0 : 1; }
+			const int32 TasksOpen = RoadTasks();
+			Expect(Planned > 0 && TasksOpen == Planned, FString::Printf(TEXT("R12 %d planned edges, %d labour tasks: one each"), Planned, TasksOpen));
+			const double StructBefore = Have();
+			FSimFab F;
+			F.T = FTransform(FQuat::Identity, FVector(-800.0, -600.0, 0.0));
+			F.H = Fresh();
+			int32 Done = 0, Steps = 0, FirstBuiltStep = -1;
+			for (; Steps < 400000 && RoadTasks() > 0; ++Steps)
+			{
+				if (FabStep(F) != 0)
+				{
+					++Done;
+					if (FirstBuiltStep < 0) { FirstBuiltStep = Steps; }
+				}
+			}
+			int32 Open = 0;
+			for (const FRHRoadEdge& E : Graph().Edges) { Open += E.bBuilt ? 0 : 1; }
+			Expect(Open == 0 && RoadTasks() == 0 && Done == Planned && Sim->HasBuiltRoads(),
+				FString::Printf(TEXT("R12 one Fabricator built all %d edges in %.0f sim-s (the first at %.0f s); none left open"), Done, Steps * (double)AgentDt, FirstBuiltStep * (double)AgentDt));
+			Expect(Near(Have(), StructBefore, 1e-9), TEXT("R12 labour only: not a kilogram of Struct moved while the edges were built"));
+			Why.Reset();
+			const bool bEraOk = Sim->CanEnterEraMode(Why);
+			Expect(bEraOk || !Why.Contains(TEXT("road")), FString::Printf(TEXT("R12 with every edge built the era band no longer refuses for roads (%s)"), bEraOk ? TEXT("allowed") : *Why));
+			// The labour rate: a 20 m edge at RoadBuildMetersPerHour.
+			const TArray<int32> Lone = Sim->Debug_LayRoad(FVector(20000, 2000, 0), FVector(22000, 2000, 0), false);
+			int32 WorkSteps = 0;
+			if (Lone.Num() == 1) { while (WorkSteps < 5000 && !Sim->ApplyRoadWork(Lone[0], AgentDt * FabWork)) { ++WorkSteps; } ++WorkSteps; }
+			const double ExpectSteps = 20.0 / (Sim->GetRoadBuildMetersPerHour() / 50.0) / AgentDt;
+			Expect(Lone.Num() == 1 && Near(WorkSteps, ExpectSteps, 3.0) && Graph().FindEdge(Lone[0]) && Graph().FindEdge(Lone[0])->bBuilt,
+				FString::Printf(TEXT("R12 a 20 m edge took %d work steps (expect %.1f at %.0f m per sol-hour)"), WorkSteps, ExpectSteps, Sim->GetRoadBuildMetersPerHour()));
+			Sim->Debug_RemoveRoadEdge(Lone.Num() ? Lone[0] : 0);
+			Sim->Debug_FinishRoads();
+		}
+
+		// R13. Routes. Trip 1 runs along road A; the same plan twice; the same plan on a
+		// copy of the graph; the trip arrives sooner than the straight line; and the
+		// shared helper carries the leftover time across waypoints (a coarse step
+		// arrives when a fine one does).
+		const FVector S1(1000.0, -2400.0, 0.0), T1(5000.0, -2400.0, 0.0);
+		int32 RoadSteps1 = 0, StraightSteps1 = 0;
+		FRHRoadRoute Route1;
+		{
+			FRHRoadRoute A, B, C;
+			const bool bA = Sim->PlanRoadRoute(S1, T1, A), bB = Sim->PlanRoadRoute(S1, T1, B);
+			const FRHRoadGraph Copy = Graph();
+			const bool bC = Copy.PlanRoute(FIntPoint(1000, -2400), FIntPoint(5000, -2400), Sim->GetRoadParams(), C) && C.bRoad;
+			Route1 = A;
+			Expect(bA && bB && bC && SameRoute(A, B) && SameRoute(A, C), TEXT("R13 the same route twice, and on a copy of the graph, is the same route"));
+			Expect(A.OffInCm == 400 && A.OffOutCm == 400 && A.RoadCm == 4040 && A.NodeIds.Num() == 5 && A.EdgeIds.Num() == 4,
+				FString::Printf(TEXT("R13 trip 1: %d cm off road in, %d road nodes, %d cm of road, %d cm off road out"), A.OffInCm, A.NodeIds.Num(), A.RoadCm, A.OffOutCm));
+			const FMassEntityHandle H = Fresh();
+			FTransform Tr(FQuat::Identity, S1);
+			bool bPathOk = false;
+			for (int32 K = 0; K < 10; ++K) { RH::MoveAlong(*Sim, H, Tr, T1, FabSpeed, AgentDt); }
+			if (const FRHRobotRoadPath* P = Sim->GetRobotRoadPath(H))
+			{
+				bPathOk = P->IsRoadTrip() && P->Waypoints.Num() == A.NodeIds.Num() + 1 && P->LegEdge.Num() == P->Waypoints.Num() && P->LegEdge[0] == 0
+					&& P->LegEdge[1] == A.EdgeIds[0] && P->Waypoints.Last() == T1 && P->TargetCm == T1;
+			}
+			Expect(bPathOk, TEXT("R13 the robot's stored path is entry..exit then the target, each leg naming its edge"));
+			const FMassEntityHandle H2 = Fresh(), H3 = Fresh(), H4 = Fresh();
+			RoadSteps1 = Drive(S1, T1, H2, AgentDt);
+			StraightSteps1 = DriveStraight(S1, T1, AgentDt);
+			const double ExpectRoad = ((double)A.OffInCm + A.RoadCm / Sim->GetRoadSpeedMul() + A.OffOutCm - 300.0) / (FabSpeed * 100.0) / AgentDt;
+			Expect(RoadSteps1 > 0 && StraightSteps1 > 0 && RoadSteps1 < StraightSteps1 && Near(RoadSteps1, ExpectRoad, 2.0) && Sim->GetRobotRoadPath(H2) == nullptr,
+				FString::Printf(TEXT("R13 the road trip arrived in %d steps against %d straight (the arithmetic says %.1f); its path is dropped on arrival"), RoadSteps1, StraightSteps1, ExpectRoad));
+			// Leftover time carries across waypoints: ten seconds of driving ends in the
+			// same place whether it is taken in 0.1 s, 0.5 s, 2.5 s or 10 s steps. (Without
+			// the carry every waypoint would eat the rest of its step.)
+			const auto After10s = [&](FMassEntityHandle Hh, float Dt)
+			{
+				FTransform Tr(FQuat::Identity, S1);
+				const int32 N = FMath::RoundToInt(10.f / Dt);
+				for (int32 K = 0; K < N; ++K) { RH::MoveAlong(*Sim, Hh, Tr, T1, FabSpeed, Dt); }
+				return Tr.GetLocation();
+			};
+			const FVector Fine = After10s(H3, 0.1f), Half = After10s(H4, 0.5f), Wide = After10s(Fresh(), 2.5f), Whole = After10s(Fresh(), 10.f);
+			const double Spread = FMath::Max(FMath::Max(FVector::Dist2D(Fine, Half), FVector::Dist2D(Fine, Wide)), FVector::Dist2D(Fine, Whole));
+			Expect(Spread < 0.5 && FVector::Dist2D(Fine, S1) > 1500.0,
+				FString::Printf(TEXT("R13 leftover time carries across waypoints: 10 s of driving ends %.0f cm along the trip whatever the step (0.1 / 0.5 / 2.5 / 10 s agree within %.4f cm)"), FVector::Dist2D(Fine, S1), Spread));
+			FRHRoadRoute Short;
+			const FVector S3(1000.0, -2400.0, 0.0), T3(1800.0, -2400.0, 0.0);
+			Expect(!Sim->PlanRoadRoute(S3, T3, Short) && Drive(S3, T3, Fresh(), AgentDt) == DriveStraight(S3, T3, AgentDt),
+				TEXT("R13 a short hop beside the road is not routed over it: the straight line is no slower, so it is driven straight"));
+		}
+
+		// R14. Ties, and the diamond. Two routes of equal cost: the lower node Id wins,
+		// every time, on every copy.
+		{
+			Sim->Debug_LayRoad(FVector(30000, 0, 0), FVector(32000, 2000, 0), true);   // A-B
+			Sim->Debug_LayRoad(FVector(32000, 2000, 0), FVector(34000, 0, 0), true);   // B-D
+			Sim->Debug_LayRoad(FVector(30000, 0, 0), FVector(32000, -2000, 0), true);  // A-C
+			Sim->Debug_LayRoad(FVector(32000, -2000, 0), FVector(34000, 0, 0), true);  // C-D
+			const int32 NA = NodeAtCm(30000, 0), NB = NodeAtCm(32000, 2000), NC = NodeAtCm(32000, -2000), ND = NodeAtCm(34000, 0);
+			FRHRoadRoute A, B, C;
+			const FVector From(30000, 0, 0), To(34000, 0, 0);
+			const bool bA = Sim->PlanRoadRoute(From, To, A);
+			const bool bB = Sim->PlanRoadRoute(From, To, B);
+			const FRHRoadGraph Copy = Graph();
+			const bool bC = Copy.PlanRoute(FIntPoint(30000, 0), FIntPoint(34000, 0), Sim->GetRoadParams(), C) && C.bRoad;
+			Expect(NA && NB && NC && ND && NB < NC && bA && bB && bC && SameRoute(A, B) && SameRoute(A, C),
+				TEXT("R14 two equal routes: the same one three times"));
+			Expect(A.NodeIds.Num() == 3 && A.NodeIds[0] == NA && A.NodeIds[1] == NB && A.NodeIds[2] == ND,
+				FString::Printf(TEXT("R14 the tie goes to the lower node Id: via node %d (the other way is %d)"), A.NodeIds.Num() > 1 ? A.NodeIds[1] : 0, NC));
+			// An equidistant start: the four nodes tie; the lowest Id is the entry.
+			FRHRoadRoute E1, E2;
+			const bool bE1 = Sim->PlanRoadRoute(FVector(32000, 0, 0), FVector(36000, 0, 0), E1);
+			const bool bE2 = Sim->PlanRoadRoute(FVector(32000, 0, 0), FVector(36000, 0, 0), E2);
+			Expect(bE1 == bE2 && SameRoute(E1, E2), TEXT("R14 an equidistant start plans the same route every time"));
+		}
+
+		// R15. The charge reserve. The brain keeps the straight-line reserve (a robot
+		// heads home once its charge covers the straight drive home, with a margin).
+		// A road trip is never longer in TIME than the straight line, so that reserve
+		// covers the time-based drain along the road route: 40 trips in the network.
+		{
+			uint32 Rng = 20261018u;
+			const auto Rand = [&Rng]() { Rng = Rng * 1664525u + 1013904223u; return (double)((Rng >> 8) & 0xFFFF) / 65535.0; };
+			int32 RoadTrips = 0, Covered = 0, Total = 0;
+			double Worst = 1.0e9;
+			for (int32 K = 0; K < 60 && Total < 40; ++K)
+			{
+				const FVector S(Rand() * 6000.0, -4500.0 + Rand() * 5000.0, 0.0), T(Rand() * 6000.0, -4500.0 + Rand() * 5000.0, 0.0);
+				const double Straight = FVector::Dist2D(S, T);
+				if (Straight < 1500.0) { continue; }
+				++Total;
+				FRHRoadRoute R;
+				const bool bRoad = Sim->PlanRoadRoute(S, T, R);
+				const int32 Steps = Drive(S, T, Fresh(), AgentDt);
+				const float DrainWh = Steps * AgentDt * FabDrawW / 50.f;
+				RoadTrips += bRoad ? 1 : 0;
+				const double Slack = ReserveWh(Straight) - DrainWh;
+				Worst = FMath::Min(Worst, Slack);
+				Covered += (Steps > 0 && Slack >= 0.0) ? 1 : 0;
+			}
+			Expect(Total == 40 && RoadTrips >= 3 && Covered == Total,
+				FString::Printf(TEXT("R15 the straight-line reserve covers the road route's drain on %d of %d trips (%d of them on a road; the tightest has %.1f Wh to spare)"), Covered, Total, RoadTrips, Worst));
+		}
+
+		// R16. A road demolished under a robot slows it and does not strand it; one
+		// demolished under a Fabricator moves it on. The refund follows the structure rule.
+		{
+			const FMassEntityHandle H = Fresh();
+			FTransform Tr(FQuat::Identity, S1);
+			const int32 Baseline = Drive(S1, T1, Fresh(), AgentDt);
+			int32 Steps = 0;
+			bool bArrived = false;
+			for (; Steps < 50; ++Steps) { bArrived = RH::MoveAlong(*Sim, H, Tr, T1, FabSpeed, AgentDt); }
+			const FRHRobotRoadPath* P = Sim->GetRobotRoadPath(H);
+			int32 Under = 0;
+			if (P && P->IsRoadTrip()) { for (int32 L = P->Next; L < P->LegEdge.Num(); ++L) { if (P->LegEdge[L] > 0) { Under = P->LegEdge[L]; break; } } }
+			const FRHRoadEdge* EdgeRow = Under ? Graph().FindEdge(Under) : nullptr;
+			const double RefundExpect = EdgeRow ? (double)EdgeRow->LengthCm / 100.0 * Sim->GetRoadStructKgPerMeter() * Sim->GetSalvageFraction() : -1.0;
+			const double HaveBefore = Have();
+			Expect(!bArrived && Under != 0 && EdgeRow && EdgeRow->bBuilt, FString::Printf(TEXT("R16 5 s into the trip the robot drives edge #%d"), Under));
+			Expect(Sim->Debug_RemoveRoadEdge(Under) && Graph().FindEdge(Under) == nullptr && Near(Have() - HaveBefore, RefundExpect, 1e-6),
+				FString::Printf(TEXT("R16 the edge is demolished under it; the standing road refunds %.2f kg (SalvageFraction of its bill)"), Have() - HaveBefore));
+			for (; !bArrived && Steps < 5000; ++Steps) { bArrived = RH::MoveAlong(*Sim, H, Tr, T1, FabSpeed, AgentDt); }
+			Expect(bArrived && Steps > Baseline && Steps <= Baseline + 20 && Sim->GetRobotRoadPath(H) == nullptr,
+				FString::Printf(TEXT("R16 it still arrives, %d steps against %d undisturbed: slowed by the lost %.1fx on the rest of that leg, never stranded"), Steps, Baseline, Sim->GetRoadSpeedMul()));
+			FRHRoadRoute After;
+			Sim->PlanRoadRoute(S1, T1, After);
+			Expect(!After.EdgeIds.Contains(Under), TEXT("R16 later plans no longer route over the demolished edge"));
+			// A site demolished under a Fabricator.
+			const TArray<int32> Site = Sim->Debug_LayRoad(FVector(24000, 2000, 0), FVector(26000, 2000, 0), false);
+			FSimFab F;
+			F.T = FTransform(FQuat::Identity, FVector(23800.0, 2000.0, 0.0));
+			F.H = Fresh();
+			int32 Guard = 0;
+			while (!F.bHas && Guard++ < 100) { FabStep(F); }
+			while (F.bHas && F.Phase == 0 && Guard++ < 50000) { FabStep(F); }
+			const double HaveSite = Have();
+			const double BillSite = Site.Num() ? Graph().FindEdge(Site[0])->LengthCm / 100.0 * Sim->GetRoadStructKgPerMeter() : -1.0;
+			const bool bWorking = F.bHas && F.Phase == 1;
+			Sim->Debug_RemoveRoadEdge(Site.Num() ? Site[0] : 0);
+			const int32 Finished = FabStep(F);
+			Expect(Site.Num() == 1 && bWorking && Finished == Site[0] && !F.bHas && Near(Have() - HaveSite, BillSite, 1e-6),
+				FString::Printf(TEXT("R16 a site demolished under its Fabricator: it moves on, and the whole bill (%.0f kg) comes back"), Have() - HaveSite));
+		}
+
+		// R17. The save: the graph (with progress), a queued BuildRoad order with BOTH
+		// end points, and routes and trips that re-plan to the same thing after a load.
+		{
+			const TArray<int32> Part = Sim->Debug_LayRoad(FVector(16000, -1000, 0), FVector(18000, -1000, 0), false);
+			if (Part.Num() == 1) { for (int32 K = 0; K < 100; ++K) { Sim->ApplyRoadWork(Part[0], AgentDt); } }
+			const FRHRoadEdge* PartEdge = Part.Num() ? Graph().FindEdge(Part[0]) : nullptr;
+			const float PartProgress = PartEdge ? PartEdge->BuildProgress : 0.f;
+			const bool bPartial = PartEdge && !PartEdge->bBuilt && PartProgress > 0.05f && PartProgress < 0.95f;
+			Sim->EnqueueCommand(RoadCmd(13000, -1600, 14600, -2400)); // the second end point is the load-bearing one
+			const FRHCommand Queued = Sim->GetUplinkQueue().Last();
+			const FVector From(1000, -2400, 0), To(5000, -2400, 0);
+			FRHRoadRoute RouteBefore, RouteAfter;
+			const bool bPlanBefore = Sim->PlanRoadRoute(From, To, RouteBefore);
+			const uint32 D0 = GraphDigest();
+			const int32 E0 = Graph().Edges.Num(), N0 = Graph().Nodes.Num();
+			// Where a fresh robot is after 50 steps of this trip.
+			const auto After50 = [&](FMassEntityHandle H)
+			{
+				FTransform Tr(FQuat::Identity, From);
+				for (int32 K = 0; K < 50; ++K) { RH::MoveAlong(*Sim, H, Tr, To, FabSpeed, AgentDt); }
+				return Tr.GetLocation();
+			};
+			const FVector P50Before = After50(Fresh());
+			FString Err;
+			Expect(bPartial && Sim->SaveColony(TEXT("roadstest"), Err), FString::Printf(TEXT("R17 saved with an edge %.0f%% built and a BuildRoad order in the queue (%s)"), PartProgress * 100.f, *Err));
+			// Change everything the save holds.
+			Sim->Debug_LayRoad(FVector(40000, 0, 0), FVector(42000, 0, 0), true);
+			Sim->Debug_RemoveRoadEdge(Graph().Edges.Num() ? Graph().Edges[0].Id : 0);
+			Sim->CancelUplinkCommand(Queued.CommandId);
+			Expect(GraphDigest() != D0 && Sim->GetUplinkQueue().Num() == 0, TEXT("R17 the graph and the queue were changed after the save"));
+			Expect(Sim->LoadColony(TEXT("roadstest"), Err) && Err.IsEmpty(), FString::Printf(TEXT("R17 loaded (%s)"), *Err));
+			Expect(GraphDigest() == D0 && Graph().Edges.Num() == E0 && Graph().Nodes.Num() == N0,
+				FString::Printf(TEXT("R17 the graph round-trips: %d nodes, %d edges, every id, end, length, built flag, progress and next id exact"), Graph().Nodes.Num(), Graph().Edges.Num()));
+			const FRHRoadEdge* PartAfter = Part.Num() ? Graph().FindEdge(Part[0]) : nullptr;
+			Expect(PartAfter && PartAfter->BuildProgress == PartProgress && !PartAfter->bBuilt, TEXT("R17 the half-built edge keeps its progress to the bit"));
+			bool bQueueOk = Sim->GetUplinkQueue().Num() == 1;
+			if (bQueueOk)
+			{
+				const FRHCommand& Q = Sim->GetUplinkQueue()[0];
+				bQueueOk = Q.Verb == FName("BuildRoad") && Q.Location == Queued.Location && Q.LocationB == Queued.LocationB
+					&& Q.ExecuteAtSimSeconds == Queued.ExecuteAtSimSeconds && Q.LocationB != FVector::ZeroVector;
+			}
+			Expect(bQueueOk, TEXT("R17 the queued BuildRoad order survives with both end points"));
+			// The same route, and a robot that re-plans to the same spot, before the order lands.
+			const bool bPlanAfter = Sim->PlanRoadRoute(From, To, RouteAfter);
+			Expect(bPlanBefore && bPlanAfter && SameRoute(RouteBefore, RouteAfter), TEXT("R17 the same trip plans the same route after the load"));
+			Expect(After50(Fresh()) == P50Before, TEXT("R17 a robot re-plans after the load and stands on exactly the same spot after 50 steps"));
+			// The order lands after the load and lays a road between its two ends.
+			const int32 Tasks0 = RoadTasks();
+			const int32 RejectsBefore = Rejects.Num();
+			Land();
+			OrderNote = Rejects.Num() == RejectsBefore ? FString(TEXT("accepted")) : Rejects.Last();
+			Expect(NodeAtCm(13000, -1600) != 0 && NodeAtCm(14600, -2400) != 0 && RoadTasks() > Tasks0 && Graph().Edges.Num() > E0,
+				FString::Printf(TEXT("R17 and it lands: a road from (130, -16) m to (146, -24) m, %d new labour tasks (%s)"), RoadTasks() - Tasks0, *OrderNote));
+		}
+
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ROADS TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -7370,6 +8012,97 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(At5000.AddMs <= 50.0, FString::Printf(TEXT("budget: moving 2,000 colonists in took %.1f ms (<= 50)"), At5000.AddMs));
 			Expect(ArrivalsMs <= 50.0, FString::Printf(TEXT("budget: 2,000 colonists through the arrival paths (8 settler ships + 80 transports) took %.1f ms (<= 50)"), ArrivalsMs));
 			Expect(RehomeMs <= 5.0, FString::Printf(TEXT("budget: a move-home pass over the whole city took %.2f ms (<= 5)"), RehomeMs));
+		}
+
+		// C4: roads at scale. A network of about 250 built edges (a lattice of ten long
+		// drags each way, every crossing a junction), then a hundred robots each plan
+		// a trip and drive it to the stop with the shared movement helper: planning is a
+		// K-nearest scan and one Dijkstra, driving is a map lookup per step. The same
+		// hundred plans twice must be the same hundred routes, and the road trips must
+		// beat the straight line in total.
+		{
+			const double Net0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < 10; ++K)
+			{
+				Sim->Debug_LayRoad(FVector(40000.0, 40000.0 + K * 2000.0, 0.0), FVector(58000.0, 40000.0 + K * 2000.0, 0.0), true);
+				Sim->Debug_LayRoad(FVector(40000.0 + K * 2000.0, 40000.0, 0.0), FVector(40000.0 + K * 2000.0, 58000.0, 0.0), true);
+			}
+			const double NetworkMs = (FPlatformTime::Seconds() - Net0) * 1000.0;
+			const FRHRoadGraph& Net = Sim->GetRoadGraph();
+			int32 BuiltEdges = 0;
+			for (const FRHRoadEdge& E : Net.Edges) { BuiltEdges += E.bBuilt ? 1 : 0; }
+			Expect(BuiltEdges >= 200 && Sim->HasBuiltRoads(), FString::Printf(TEXT("roads: a network of %d built edges on %d nodes laid in %.1f ms"), BuiltEdges, Net.Nodes.Num(), NetworkMs));
+			constexpr int32 Robots = 100;
+			uint32 Rng = 77123u;
+			const auto Rand = [&Rng]() { Rng = Rng * 1664525u + 1013904223u; return (double)((Rng >> 8) & 0xFFFF) / 65535.0; };
+			TArray<FVector> TripStarts, TripEnds;
+			for (int32 i = 0; i < Robots; ++i)
+			{
+				TripStarts.Add(FVector(40000.0 + Rand() * 18000.0, 40000.0 + Rand() * 18000.0, 0.0));
+				TripEnds.Add(FVector(40000.0 + Rand() * 18000.0, 40000.0 + Rand() * 18000.0, 0.0));
+			}
+			const float RobotSpeed = 2.5f;
+			TArray<FTransform> Bots;
+			for (int32 i = 0; i < Robots; ++i) { Bots.Add(FTransform(FQuat::Identity, TripStarts[i])); }
+			// The first call of each trip plans it.
+			const double Plan0 = FPlatformTime::Seconds();
+			TArray<bool> Arrived;
+			Arrived.Init(false, Robots);
+			for (int32 i = 0; i < Robots; ++i) { Arrived[i] = RH::MoveAlong(*Sim, FMassEntityHandle(5000 + i, 1), Bots[i], TripEnds[i], RobotSpeed, AgentDt); }
+			const double PlanMs = (FPlatformTime::Seconds() - Plan0) * 1000.0;
+			int32 RoadTrips = 0;
+			for (int32 i = 0; i < Robots; ++i) { RoadTrips += (Sim->GetRobotRoadPath(FMassEntityHandle(5000 + i, 1)) && Sim->GetRobotRoadPath(FMassEntityHandle(5000 + i, 1))->IsRoadTrip()) ? 1 : 0; }
+			// Drive them all to the stop.
+			const double Drive0 = FPlatformTime::Seconds();
+			int32 StepsTotal = 0;
+			for (int32 Step = 0; Step < 6000; ++Step)
+			{
+				bool bAny = false;
+				for (int32 i = 0; i < Robots; ++i)
+				{
+					if (Arrived[i]) { continue; }
+					bAny = true;
+					Arrived[i] = RH::MoveAlong(*Sim, FMassEntityHandle(5000 + i, 1), Bots[i], TripEnds[i], RobotSpeed, AgentDt);
+					++StepsTotal;
+				}
+				if (!bAny) { break; }
+			}
+			const double DriveMs = (FPlatformTime::Seconds() - Drive0) * 1000.0;
+			int32 Done = 0;
+			for (int32 i = 0; i < Robots; ++i) { Done += Arrived[i] ? 1 : 0; }
+			double StraightSteps = 0.0;
+			for (int32 i = 0; i < Robots; ++i) { StraightSteps += FMath::Max(0.0, FVector::Dist2D(TripStarts[i], TripEnds[i]) - 300.0) / (RobotSpeed * 100.0 * AgentDt) + 1.0; }
+			Expect(Done == Robots && RoadTrips >= 50 && (double)StepsTotal < StraightSteps,
+				FString::Printf(TEXT("roads: %d of %d robots arrived, %d trips on roads, %d sub-steps in all against %.0f straight-line"), Done, Robots, RoadTrips, StepsTotal, StraightSteps));
+			// The same hundred plans, twice.
+			const auto RoutesDigest = [&]() -> uint32
+			{
+				uint32 H = 0;
+				for (int32 i = 0; i < Robots; ++i)
+				{
+					FRHRoadRoute R;
+					Sim->PlanRoadRoute(TripStarts[i], TripEnds[i], R);
+					for (const int32 N : R.NodeIds) { H = FCrc::MemCrc32(&N, 4, H); }
+					for (const int32 E : R.EdgeIds) { H = FCrc::MemCrc32(&E, 4, H); }
+					H = FCrc::MemCrc32(&R.CostUnits, 8, H);
+				}
+				return H;
+			};
+			const double Rep0 = FPlatformTime::Seconds();
+			const uint32 DigestA = RoutesDigest();
+			const double ReplanMs = (FPlatformTime::Seconds() - Rep0) * 1000.0;
+			const uint32 DigestB = RoutesDigest();
+			Expect(DigestA == DigestB, FString::Printf(TEXT("roads: the same %d plans twice are the same routes (digest %08x)"), Robots, DigestA));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE roads: %d edges | network laid %.1f ms | %d robots planned in %.2f ms (%.3f ms each) | replanned in %.2f ms | %d drive steps in %.2f ms (%.4f ms per robot-step)"),
+				BuiltEdges, NetworkMs, Robots, PlanMs, PlanMs / Robots, ReplanMs, StepsTotal, DriveMs, StepsTotal > 0 ? DriveMs / StepsTotal : 0.0);
+			// Budgets (wall clock, shared machine): about ten times a quiet run (0.5 ms, 0.83 ms
+			// and 0.0001 ms here; the last is a map lookup and a float step, so it gets twenty).
+			// A plan that cost O(edges) per robot per STEP, or a Dijkstra per sub-step, would
+			// blow all three by orders of magnitude: a frame of 100 robots x 32 sub-steps is
+			// 3,200 robot-steps, which at 0.002 ms is 6 ms, a third of a 60 fps frame at the very worst.
+			Expect(NetworkMs <= 10.0, FString::Printf(TEXT("budget: laying the %d-edge network took %.1f ms (<= 10)"), BuiltEdges, NetworkMs));
+			Expect(PlanMs <= 10.0, FString::Printf(TEXT("budget: 100 robots planning their first leg took %.2f ms (<= 10)"), PlanMs));
+			Expect(StepsTotal <= 0 || DriveMs / StepsTotal <= 0.002, FString::Printf(TEXT("budget: a robot-step along a road took %.4f ms (<= 0.002)"), StepsTotal > 0 ? DriveMs / StepsTotal : 0.0));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

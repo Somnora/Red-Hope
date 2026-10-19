@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 35;  // v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 36;  // v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -41,6 +41,7 @@ namespace
 	{
 		Ar << Site.BuildingId;
 		Ar << Site.DepositId;
+		Ar << Site.RoadEdgeId; // v36
 	}
 
 	void SerializeResourceMap(FArchive& Ar, TMap<FName, double>& Map)
@@ -127,6 +128,15 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	{
 		SealedLeakMul = Sealed->SliceActive ? FMath::Clamp((double)Sealed->LeakMul, 0.0, 1.0) : 1.0;
 	}
+	// C4 roads (header defaults equal the CSV values).
+	RoadParams.GridCm = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("RoadGridCm"), RoadParams.GridCm));
+	RoadParams.WidthCm = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("RoadWidthCm"), RoadParams.WidthCm));
+	RoadParams.MaxEdgeCm = FMath::Max(3 * RoadParams.GridCm, (int32)Defs->GetConfigScalar(FName("RoadMaxEdgeCm"), RoadParams.MaxEdgeCm));
+	RoadParams.EntryCandidates = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("RoadEntryCandidates"), RoadParams.EntryCandidates));
+	RoadStructKgPerMeter = FMath::Max(0.0, Defs->GetConfigScalar(FName("RoadStructKgPerMeter"), RoadStructKgPerMeter));
+	RoadBuildMetersPerHour = FMath::Max(0.1, Defs->GetConfigScalar(FName("RoadBuildMetersPerHour"), RoadBuildMetersPerHour));
+	RoadSpeedMul = FMath::Max(1.0, Defs->GetConfigScalar(FName("RoadSpeedMul"), RoadSpeedMul));
+	RoadParams.SpeedMulPermille = FMath::RoundToInt(RoadSpeedMul * 1000.0);
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -513,6 +523,17 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 		if (B.bUnderConstruction)
 		{
 			OutReason = FString::Printf(TEXT("construction in progress (%s #%d)"), *B.DefName.ToString(), B.Id);
+			return false;
+		}
+	}
+	// C4: a road edge under construction is agent-fidelity work too - the era
+	// band parks the fabricators, so it would never finish (and era logistics does
+	// not know road distance).
+	for (const FRHRoadEdge& E : RoadGraph.Edges)
+	{
+		if (!E.bBuilt)
+		{
+			OutReason = FString::Printf(TEXT("road construction in progress (edge #%d)"), E.Id);
 			return false;
 		}
 	}
@@ -6243,6 +6264,18 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				return false;
 			}
 		}
+		// C4: roads and buildings keep clear of each other from both sides - a
+		// built road, a road being built, and a BuildRoad order in transit all
+		// claim their strip.
+		if (Level == 0)
+		{
+			FString RoadWhat;
+			if (FindRoadOverlap(FVector(OverlapLoc.X, OverlapLoc.Y, 0.0), FVector2D(HalfX, HalfY), RoadWhat))
+			{
+				OutReason = FString::Printf(TEXT("Footprint overlaps %s"), *RoadWhat);
+				return false;
+			}
+		}
 		// In-flight orders block too (director finding, M1-d hand-play): during
 		// the signal-lag window the same spot happily accepted a second order,
 		// and the collision only surfaced ~45 s later as a confusing rejection.
@@ -6379,6 +6412,10 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			--ImportStock.FindOrAdd(Cmd.Target); // consumption happens at execution, not preview
 		}
 		AddBuilding(Cmd.Target, Cmd.Location, /*bInstant*/ Def->BuildTime_s <= 0.0, Cmd.Level, Size.X, Size.Y);
+	}
+	else if (Cmd.Verb == FName("BuildRoad"))
+	{
+		ExecuteBuildRoad(Cmd); // C4: rejects through OnCommandRejected itself
 	}
 	else if (Cmd.Verb == FName("Dig"))
 	{
@@ -9587,6 +9624,14 @@ TMap<FName, TPair<double, double>> URHSimWorldSubsystem::GetQuotaProgress() cons
 
 FVector URHSimWorldSubsystem::GetSiteLocation(const FRHSiteRef& Site) const
 {
+	if (Site.RoadEdgeId > 0)
+	{
+		// C4: a road edge is worked from its midpoint.
+		if (const FRHRoadEdge* Edge = RoadGraph.FindEdge(Site.RoadEdgeId))
+		{
+			return RoadGraph.EdgeMidpointCm(*Edge, RoadParams);
+		}
+	}
 	if (Site.BuildingId > 0)
 	{
 		for (const FRHBuildingInstance& B : Buildings)
@@ -9607,6 +9652,9 @@ FVector URHSimWorldSubsystem::GetSiteLocation(const FRHSiteRef& Site) const
 			}
 		}
 	}
+	// Reaching here means the site is gone (or was never set). A valid reference
+	// that resolves to nothing is a bug in whoever kept it: say so, once.
+	ensureMsgf(!Site.IsValid(), TEXT("GetSiteLocation: site (building %d, deposit %d, road edge %d) does not exist"), Site.BuildingId, Site.DepositId, Site.RoadEdgeId);
 	return FVector::ZeroVector;
 }
 
@@ -10310,6 +10358,7 @@ bool URHSimWorldSubsystem::HasOpenTask(ERHTaskType Type, const FRHSiteRef& From,
 	{
 		if (T.Type == Type && T.From.BuildingId == From.BuildingId && T.From.DepositId == From.DepositId
 			&& T.To.BuildingId == To.BuildingId && T.To.DepositId == To.DepositId
+			&& T.From.RoadEdgeId == From.RoadEdgeId && T.To.RoadEdgeId == To.RoadEdgeId
 			&& (Resource.IsNone() || T.Resource == Resource))
 		{
 			return true;
@@ -10411,7 +10460,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Num;
 	for (FRHCommand& C : UplinkQueue)
 	{
-		Ar << C.Verb << C.Target << C.Location << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds; // LocationB: v36
 	}
 
 	Num = SavedBuildings.Num();
@@ -10693,6 +10742,30 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// Quota repeat round (save v32, D1a).
 	Ar << QuotaRepeatRound;
+	// The road graph (save v36, C4): nodes, edges and their build progress, in Id
+	// order, then the next Ids. The lookups, the route adjacency and every robot's
+	// trip are DERIVED: a robot re-plans from the loaded graph.
+	{
+		int32 NodeCount = RoadGraph.Nodes.Num();
+		Ar << NodeCount;
+		for (const FRHRoadNode& N : RoadGraph.Nodes)
+		{
+			int32 NId = N.Id;
+			FIntPoint NGrid = N.GridPos;
+			Ar << NId << NGrid;
+		}
+		int32 EdgeCount = RoadGraph.Edges.Num();
+		Ar << EdgeCount;
+		for (const FRHRoadEdge& E : RoadGraph.Edges)
+		{
+			int32 EId = E.Id, EA = E.A, EB = E.B, ELen = E.LengthCm, ERegion = E.RegionId;
+			uint8 EBuilt = E.bBuilt ? 1 : 0;
+			float EProgress = E.BuildProgress;
+			Ar << EId << EA << EB << ELen << EBuilt << EProgress << ERegion;
+		}
+		int32 NextNode = RoadGraph.NextNodeId, NextEdge = RoadGraph.NextEdgeId;
+		Ar << NextNode << NextEdge;
+	}
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -10767,7 +10840,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHCommand C;
-		Ar << C.Verb << C.Target << C.Location << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds;
+		Ar << C.Verb << C.Target << C.Location << C.LocationB << C.Level << C.Value << C.IssuedAtSimSeconds << C.ExecuteAtSimSeconds; // LocationB: v36
 		UplinkQueue.Add(MoveTemp(C));
 	}
 
@@ -11134,6 +11207,38 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v32: quota repeat round %d is negative; clamped to 0"), QuotaRepeatRound);
 		QuotaRepeatRound = 0;
+	}
+	// The road graph (save v36, C4). Every robot's trip was cleared with the robots.
+	{
+		RoadGraph.Reset();
+		RobotPaths.Reset();
+		int32 NodeCount = 0;
+		Ar << NodeCount;
+		for (int32 i = 0; i < NodeCount; ++i)
+		{
+			FRHRoadNode N;
+			Ar << N.Id << N.GridPos;
+			RoadGraph.Nodes.Add(N);
+		}
+		int32 EdgeCount = 0;
+		Ar << EdgeCount;
+		for (int32 i = 0; i < EdgeCount; ++i)
+		{
+			FRHRoadEdge E;
+			uint8 EBuilt = 0;
+			Ar << E.Id << E.A << E.B << E.LengthCm << EBuilt << E.BuildProgress << E.RegionId;
+			E.bBuilt = EBuilt != 0;
+			RoadGraph.Edges.Add(E);
+		}
+		Ar << RoadGraph.NextNodeId << RoadGraph.NextEdgeId;
+		RoadGraph.RebuildDerived();
+		for (const FRHRoadEdge& E : RoadGraph.Edges)
+		{
+			if (!RoadGraph.FindNode(E.A) || !RoadGraph.FindNode(E.B))
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v36: road edge #%d joins a node that does not exist"), E.Id);
+			}
+		}
 	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm

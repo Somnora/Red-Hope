@@ -378,21 +378,82 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 	{
 		// A trip: the drawn route, at the sim's progress fraction.
 		const FVector Target(Task->TargetCm.X, Task->TargetCm.Y, SimPos.Z);
-		if (!T.bTrip || FVector::Dist2D(Target, T.TripTargetCm) > 150.f)
+		// C4: with a road trip in the sim, the figure is drawn along the sim's own
+		// waypoints at the sim's ARC LENGTH progress (the sim really does drive them).
+		const URHSimWorldSubsystem* RoadSim = (GetWorld() && Tracked.IsValidIndex(i)) ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const FRHRobotRoadPath* Road = RoadSim ? RoadSim->GetRobotRoadPath(Tracked[i]) : nullptr;
+		if (Road && Road->IsRoadTrip() && Road->TargetCm == Task->TargetCm)
 		{
-			T.bTrip = true;
-			T.bFree = false;
-			T.TripTargetCm = Target;
-			T.SimStartDistCm = FMath::Max((float)FVector::Dist2D(SimPos, Target), 1.f);
-			PlanRoute(T.DrawCm, Target, T.Path);
-			T.PathLenCm = PathLength(T.Path);
+			if (!T.bTrip || !T.bRoadTrip || T.RoadSerial != Road->Serial)
+			{
+				T.bTrip = true;
+				T.bFree = false;
+				T.bRoadTrip = true;
+				T.RoadSerial = Road->Serial;
+				T.TripTargetCm = Target;
+				T.Path.Reset();
+				T.LegSimEndCm.Reset();
+				T.LegDrawEndCm.Reset();
+				T.Path.Add(T.DrawCm);
+				FVector SimPrev = Road->StartCm, DrawPrev = T.DrawCm;
+				float SimAcc = 0.f, DrawAcc = 0.f;
+				for (int32 Leg = 0; Leg < Road->Waypoints.Num(); ++Leg)
+				{
+					const FVector W(Road->Waypoints[Leg].X, Road->Waypoints[Leg].Y, SimPos.Z);
+					SimAcc += (float)FVector::Dist2D(SimPrev, W);
+					if (Road->LegEdge[Leg] == 0)
+					{
+						// Off road: the same detour around footprints the sim does not take.
+						TArray<FVector> Detour;
+						PlanRoute(DrawPrev, W, Detour);
+						for (int32 k = 1; k < Detour.Num(); ++k)
+						{
+							T.Path.Add(Detour[k]);
+						}
+						DrawAcc += PathLength(Detour);
+					}
+					else
+					{
+						T.Path.Add(W); // a road leg: the sim's waypoint, exactly
+						DrawAcc += (float)FVector::Dist2D(DrawPrev, W);
+					}
+					T.LegSimEndCm.Add(SimAcc);
+					T.LegDrawEndCm.Add(DrawAcc);
+					SimPrev = W;
+					DrawPrev = W;
+				}
+				T.PathLenCm = DrawAcc;
+			}
+			// Where the sim is, as arc length along its own path: the legs behind it
+			// plus how far along the leg it is driving.
+			const int32 LegNow = FMath::Clamp(Road->Next, 0, T.LegSimEndCm.Num() - 1);
+			const FVector LegFrom = LegNow == 0 ? Road->StartCm : Road->Waypoints[LegNow - 1];
+			const float SimBefore = LegNow == 0 ? 0.f : T.LegSimEndCm[LegNow - 1];
+			const float DrawBefore = LegNow == 0 ? 0.f : T.LegDrawEndCm[LegNow - 1];
+			const float SimLeg = FMath::Max(T.LegSimEndCm[LegNow] - SimBefore, 1.f);
+			const float Frac = FMath::Clamp((float)FVector::Dist2D(LegFrom, SimPos) / SimLeg, 0.f, 1.f);
+			Desired = PointAlong(T.Path, DrawBefore + Frac * (T.LegDrawEndCm[LegNow] - DrawBefore));
+			T.LastSyncedCm = Desired;
 		}
-		const float S = FMath::Clamp(1.f - (float)FVector::Dist2D(SimPos, T.TripTargetCm) / T.SimStartDistCm, 0.f, 1.f);
-		// Ease in and out: slower off the mark and into the stop, quicker in
-		// the middle - the same arrival time.
-		const float Eased = S - 0.22f * FMath::Sin(2.f * PI * S) / (2.f * PI);
-		Desired = PointAlong(T.Path, Eased * T.PathLenCm);
-		T.LastSyncedCm = Desired;
+		else
+		{
+			if (!T.bTrip || T.bRoadTrip || FVector::Dist2D(Target, T.TripTargetCm) > 150.f)
+			{
+				T.bTrip = true;
+				T.bFree = false;
+				T.bRoadTrip = false;
+				T.TripTargetCm = Target;
+				T.SimStartDistCm = FMath::Max((float)FVector::Dist2D(SimPos, Target), 1.f);
+				PlanRoute(T.DrawCm, Target, T.Path);
+				T.PathLenCm = PathLength(T.Path);
+			}
+			const float S = FMath::Clamp(1.f - (float)FVector::Dist2D(SimPos, T.TripTargetCm) / T.SimStartDistCm, 0.f, 1.f);
+			// Ease in and out: slower off the mark and into the stop, quicker in
+			// the middle - the same arrival time.
+			const float Eased = S - 0.22f * FMath::Sin(2.f * PI * S) / (2.f * PI);
+			Desired = PointAlong(T.Path, Eased * T.PathLenCm);
+			T.LastSyncedCm = Desired;
+		}
 	}
 	else if (bMoving)
 	{

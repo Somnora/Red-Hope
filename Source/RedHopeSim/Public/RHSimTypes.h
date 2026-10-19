@@ -32,8 +32,9 @@ enum class ERHQuotaPhase : uint8
 	Completed
 };
 
-// A place solids can be: a building (Id > 0) or a deposit pile (Id > 0 in
-// deposit space). Exactly one side is set.
+// A place work happens: a building (Id > 0), a deposit pile (Id > 0 in deposit
+// space), or (C4) a road edge under construction (Id > 0 in edge space; a road is
+// labour only, so it is only ever the To of a Build task). Exactly one is set.
 USTRUCT()
 struct REDHOPESIM_API FRHSiteRef
 {
@@ -41,8 +42,9 @@ struct REDHOPESIM_API FRHSiteRef
 
 	UPROPERTY() int32 BuildingId = 0;
 	UPROPERTY() int32 DepositId = 0;
+	UPROPERTY() int32 RoadEdgeId = 0;
 
-	bool IsValid() const { return BuildingId > 0 || DepositId > 0; }
+	bool IsValid() const { return BuildingId > 0 || DepositId > 0 || RoadEdgeId > 0; }
 };
 
 // One claimable unit of colony work. Plain data; the task board in

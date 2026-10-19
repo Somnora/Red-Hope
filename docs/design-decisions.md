@@ -432,3 +432,15 @@ The director answered `docs/qa/2026-10-18/c2-population-brief.md` with all three
 - **Q7a, the Big Arrival:** a one-off wave of about 100 colonists, after about 20 sols at THRIVING with 100 free beds. The CEO announces he is coming; his landing belongs to the politics step.
 
 Together with the per-head Hope re-weighting (today's colonies scoring within a point or two), these define gate C2. Numbers are placeholders, and new wording is Gate-D placeholder copy.
+
+### C4, roads: how they are built, and one deviation from the plan (2026-10-18)
+
+Roads are the first real path network in the sim. What C4 settles:
+- **You draw a road from point P to point Q.** It goes up the uplink with the usual lag as a `BuildRoad` order carrying both end points. The graph is integer all the way: nodes sit on the 2 m road grid, edge lengths are whole centimetres, and every tie falls to the lower Id.
+- **The bill is paid up front, the labour is done by robots.** The order takes `RoadStructKgPerMeter` (2 kg/m) of Struct out of the stores in one go, or is refused and takes nothing. There is no haul leg. Each new edge is then a labour-only Build task for a Fabricator, at `RoadBuildMetersPerHour` (placeholder).
+- **Roads and buildings keep clear of each other from both sides.** A footprint may not overlap a built road, a road being built, or the strip of a road order still in flight; a road may not run through a building, a site or a building order in flight.
+- **Robots drive roads 1.6x faster.** A trip goes straight to an entry node, along built edges, then straight from an exit node to the target. The road is used only when it is strictly quicker than the straight line, by a speed-free integer test. A road demolished mid-trip costs the robot its speed bonus, not its way.
+- **Both brains share one movement helper.** With no built road it is exactly the old `MoveToward` call, so a colony without roads is unchanged. There is no starter road in the default colony.
+- **Not in C4 (follow-up):** demolishing and salvaging a road from the deck, edge marker posts, and a partial-fill look for a road under construction.
+
+**Deviation from the plan, for the director.** The C4 row of the living-city plan says "era mode learns road distance and hauler throughput". It does not. Era logistics keeps its teleport model: material moves with no distance and no hauler capacity, so there is no road distance for it to learn. Era mode instead refuses to start while a road edge is under construction (the era band parks the fabricators, so it would never finish), and the agent/era ledger parity bar is checked with the roads finished first. Roads make the agent band quicker and so closer to era, never further. Teaching era mode distance and throughput would be a change to the whole logistics model, not to roads, and belongs with the cargo rovers (C6), when there is real traffic to be faithful to.
