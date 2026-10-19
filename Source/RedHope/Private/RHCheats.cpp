@@ -1959,7 +1959,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 		for (const TCHAR* Res : { TEXT("Struct"), TEXT("Shielding"), TEXT("Oxygen") })
 		{
 			const URHSimWorldSubsystem::FRHGrowthAvailability A = Sim->GetGrowthAvailability(FName(Res));
-			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the open quota - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.Reserve, A.Free);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the %s - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.Reserve, A.Free);
 		}
 		if (const URHGrowthVisualizerSubsystem* Viz = World->GetSubsystem<URHGrowthVisualizerSubsystem>())
 		{

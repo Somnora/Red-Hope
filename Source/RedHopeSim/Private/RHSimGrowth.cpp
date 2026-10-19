@@ -190,13 +190,20 @@ double URHSimWorldSubsystem::GetGrowthHoldingsKg(FName Resource) const
 	return Total;
 }
 
-double URHSimWorldSubsystem::GetOpenQuotaBillKg(FName Resource) const
+double URHSimWorldSubsystem::GetProtectedQuotaBillKg(FName Resource, bool& bOutNext) const
 {
 	// The quota's bills are HOLDINGS (it is met when the colony holds them), so while a quota is
-	// open, growth must leave them standing; once it is met, nothing is being collected.
-	if (QuotaPhase != ERHQuotaPhase::Open)
+	// open, growth must leave them standing. Once it is met nothing is being collected, but the
+	// ladder is about to ask for the next round's bills (awaiting the manifest, ship inbound, or
+	// resting): growth that spends stock down between rounds slows the ladder, so those are the ones
+	// it leaves standing then (C5c).
+	bOutNext = QuotaPhase != ERHQuotaPhase::Open;
+	if (bOutNext)
 	{
-		return 0.0;
+		TMap<FName, double> Next;
+		GetNextQuotaBills(Next);
+		const double* Bill = Next.Find(Resource);
+		return Bill ? *Bill : 0.0;
 	}
 	for (const TPair<FName, TPair<double, double>>& Line : GetQuotaProgress())
 	{
@@ -212,7 +219,7 @@ URHSimWorldSubsystem::FRHGrowthAvailability URHSimWorldSubsystem::GetGrowthAvail
 {
 	FRHGrowthAvailability A;
 	A.Held = GetGrowthHoldingsKg(Resource);
-	A.QuotaBill = GetOpenQuotaBillKg(Resource);
+	A.QuotaBill = GetProtectedQuotaBillKg(Resource, A.bNextRound);
 	if (Resource == NAME_GrowthStruct)
 	{
 		A.Reserve = GrowthReserveStructKg;
@@ -237,8 +244,8 @@ bool URHSimWorldSubsystem::GrowthBillFits(const TMap<FName, double>& Bill, FStri
 		const FRHGrowthAvailability A = GetGrowthAvailability(Res);
 		if (Need > A.Free + GrowthBillEps)
 		{
-			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the open quota - %.0f reserve)"),
-				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill, A.Reserve);
+			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the %s - %.0f reserve)"),
+				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.Reserve);
 			return false;
 		}
 	}

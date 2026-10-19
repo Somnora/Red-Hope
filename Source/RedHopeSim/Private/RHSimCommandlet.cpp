@@ -6350,6 +6350,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//      its rating, no free bed anywhere (they stay), once a sol, and the cost
 	//      of a big move;
 	//  (f) one alert per event, counted at OnAlert, in every path above.
+	//  (g) C5c, the Big Arrival and life support: each leg's arithmetic (O2 against (N + 100) x
+	//      draw x BigArrivalLifeSupportSols; Food with the wave's provisions counted, and Water,
+	//      against FoodRunwayFloorSols), the wave holding with its streak running while air, water or
+	//      food are short, the demand's words while it holds, and the landing on the step they recover.
 	if (FParse::Param(*Params, TEXT("arrivals")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST (C2b, 2026-10-18) ==="));
@@ -6371,7 +6375,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 		FString R;
 
-		// P0. Pure data: the thirteen config rows and the manifest row come off the
+		// P0. Pure data: the fifteen config rows and the manifest row come off the
 		// synced DataTables alone (no override, no C++ fallback), so a DT that
 		// drifted from the CSV fails here and not silently.
 		const TPair<const TCHAR*, double> Pins[] = {
@@ -6379,7 +6383,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{ TEXT("ImmigrationHopeMin"), 75.0 }, { TEXT("ImmigrationHopeFloor"), 70.0 }, { TEXT("ImmigrationBase"), 4.0 },
 			{ TEXT("ImmigrationPerCapita"), 0.2 }, { TEXT("ImmigrationCapPerShip"), 50.0 }, { TEXT("BigArrivalHopeMin"), 75.0 },
 			{ TEXT("BigArrivalStreakSols"), 20.0 }, { TEXT("BigArrivalFreeBeds"), 100.0 }, { TEXT("BigArrivalColonists"), 100.0 },
-			{ TEXT("MoveHomeIntervalSols"), 1.0 }, { TEXT("ImmigrationReserveBeds"), 1.0 } };
+			{ TEXT("MoveHomeIntervalSols"), 1.0 }, { TEXT("ImmigrationReserveBeds"), 1.0 }, { TEXT("BigArrivalLifeSupportSols"), 10.0 } };
 		FString PinText;
 		bool bPins = true;
 		for (const TPair<const TCHAR*, double>& Pin : Pins)
@@ -6393,7 +6397,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			&& Near(Sim->GetImmigrationHopeMin(), 75.0, 1e-9) && Near(Sim->GetImmigrationHopeFloor(), 70.0, 1e-9) && Near(Sim->GetImmigrationBase(), 4.0, 1e-9)
 			&& Near(Sim->GetImmigrationPerCapita(), 0.2, 1e-9) && Sim->GetImmigrationCapPerShip() == 50 && Near(Sim->GetBigArrivalHopeMin(), 75.0, 1e-9)
 			&& Near(Sim->GetBigArrivalStreakSolsNeeded(), 20.0, 1e-9) && Sim->GetBigArrivalFreeBeds() == 100 && Sim->GetBigArrivalColonists() == 100
-			&& Near(Sim->GetMoveHomeIntervalSols(), 1.0, 1e-9) && Sim->GetImmigrationReserveBeds() == 1,
+			&& Near(Sim->GetMoveHomeIntervalSols(), 1.0, 1e-9) && Sim->GetImmigrationReserveBeds() == 1 && Near(Sim->GetBigArrivalLifeSupportSols(), 10.0, 1e-9),
 			TEXT("P0 the sim reads the same values (no override or fallback in play)"));
 		const FRHManifestItemRow* TransportRow = DefsSub ? DefsSub->GetManifestItem(FName("ColonistTransport")) : nullptr;
 		const FRHManifestItemRow* PodRow = DefsSub ? DefsSub->GetManifestItem(FName("CrewPod")) : nullptr;
@@ -6995,6 +6999,145 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(PopBig >= 1400 && MovedBig > 100 && MovedAgain == 0 && NoFloorOverBeds() && CountAlerts(TEXT("MOVED HOME")) == 1 && Alerts.Num() == 1,
 				FString::Printf(TEXT("e a city of %d, beds cut to 600 a floor: %d moved in one pass under one alert (%d alert(s)); a second pass moves %d"), PopBig, MovedBig, Alerts.Num(), MovedAgain));
 			Expect(MoveMs <= 250.0 && AgainMs <= 100.0, FString::Printf(TEXT("e the move took %.2f ms and the idle pass %.2f ms (budgets 250 / 100 on a shared machine)"), MoveMs, AgainMs));
+		}
+
+		// (g) The Big Arrival and life support (C5c). The wave waits - its streak keeps running - until the
+		// colony could carry N + 100: the O2 pool holds (N + 100) x the draw x BigArrivalLifeSupportSols, and the
+		// Food runway (counting the wave's own provisions) and the Water runway at N + 100 reach the floor. Run
+		// last, at the 1,500 the (e) block left, with the beds put back.
+		{
+			Sim->Debug_SetHopeGates(101.0, 101.0); // no births: the headcount moves only by the wave
+			Sim->Debug_SetColonistsPerCell(5.0);
+			for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+			Sim->Debug_RehomeResidents();
+			const double O2Draw = Sim->GetColonistO2KgPerSol(), FoodDraw = Sim->GetColonistFoodKgPerSol(), WaterDraw = Sim->GetColonistWaterKgPerSol();
+			const double LifeSols = Sim->GetBigArrivalLifeSupportSols(), FoodFloor = Sim->GetFoodRunwayFloorSols();
+			const double WaveFood = Sim->GetColonistTransportFoodKgPerColonist() * 100.0;
+			const auto Rich = [&]() { SetStock(NOxygen, 1.0e8); SetStock(NWater, 1.0e8); SetStock(NFood, 1.0e8); };
+			// A complete, held streak with only the beds missing; true if it got there.
+			const auto ReadyStreak = [&]() -> bool
+			{
+				Sim->Debug_SetBigArrivalDone(false);
+				Sim->Debug_SetBigArrivalFreeBeds(1000000);
+				Rich();
+				HoldHope(95.0);
+				Lapse();
+				RunSolsA(21.0);
+				return Sim->GetBigArrivalStreakSols() >= 20.9 && !Sim->IsBigArrivalDone();
+			};
+
+			// g0. The arithmetic of each leg, at the instant (a pure function): Oxygen against (N + 100) x draw x sols,
+			// Food and Water against the floor with the wave counted.
+			Rich();
+			const int32 NG = Sim->GetPopulation();
+			const int32 PeopleG = NG + 100;
+			const double NeedO2 = (double)PeopleG * O2Draw * LifeSols;
+			URHSimWorldSubsystem::FRHBigArrivalSupport Sup = Sim->GetBigArrivalSupport();
+			Expect(Sup.AllOk() && Sup.People == PeopleG && Sup.Wave == 100 && Near(Sup.O2NeedKg, NeedO2, 1e-6) && NG >= 1000 && Near(LifeSols, 10.0, 1e-9),
+				FString::Printf(TEXT("g0 a city of %d, the wave 100: everyone to carry is %d, the air it needs is %.1f kg (= %d x %.2f x %.0f sols), all three legs ok when stocks are deep"), NG, Sup.People, Sup.O2NeedKg, PeopleG, O2Draw, LifeSols));
+			SetStock(NOxygen, NeedO2 - 0.01);
+			Sup = Sim->GetBigArrivalSupport();
+			const bool bAirShort = !Sup.bO2Ok && Sup.bFoodOk && Sup.bWaterOk;
+			SetStock(NOxygen, NeedO2);
+			Sup = Sim->GetBigArrivalSupport();
+			Expect(bAirShort && Sup.bO2Ok, TEXT("g0 air: 0.01 kg under the need is short, exactly the need is enough (>=)"));
+			SetStock(NOxygen, 1.0e8);
+			const double WaterNeed = FoodFloor * (double)PeopleG * WaterDraw;
+			SetStock(NWater, WaterNeed - 1.0);
+			Sup = Sim->GetBigArrivalSupport();
+			const bool bWaterShort = !Sup.bWaterOk && Sup.bO2Ok && Sup.bFoodOk;
+			SetStock(NWater, WaterNeed + 1.0);
+			Sup = Sim->GetBigArrivalSupport();
+			Expect(bWaterShort && Sup.bWaterOk && Near(Sup.WaterRunwaySols, (WaterNeed + 1.0) / ((double)PeopleG * WaterDraw), 1e-9),
+				FString::Printf(TEXT("g0 water: 1 kg under %.0f kg (= %.0f sols of %d people's %.1f kg) is short, 1 kg over is enough"), WaterNeed, FoodFloor, PeopleG, WaterDraw));
+			SetStock(NWater, 1.0e8);
+			const double FoodNeed = FoodFloor * (double)PeopleG * FoodDraw - WaveFood; // the wave's own provisions already count
+			SetStock(NFood, FoodNeed - 1.0);
+			Sup = Sim->GetBigArrivalSupport();
+			const bool bFoodShort = !Sup.bFoodOk && Sup.bO2Ok && Sup.bWaterOk;
+			SetStock(NFood, FoodNeed + 1.0);
+			Sup = Sim->GetBigArrivalSupport();
+			Expect(FoodNeed > 0.0 && bFoodShort && Sup.bFoodOk && Near(Sup.FoodRunwaySols, (FoodNeed + 1.0 + WaveFood) / ((double)PeopleG * FoodDraw), 1e-9),
+				FString::Printf(TEXT("g0 food: the larder must hold %.0f kg (%.0f sols of %d people's draw less the wave's own %.0f kg); 1 kg under is short, 1 kg over is enough (runway %.3f sols)"), FoodNeed, FoodFloor, PeopleG, WaveFood, Sup.FoodRunwaySols));
+			Rich();
+
+			// g1. Air and water short, food deep: the streak completes, the beds are there, the wave holds.
+			const bool bReady1 = ReadyStreak();
+			Sim->Debug_SetBigArrivalFreeBeds(100);
+			Expect(bReady1 && Sim->GetFreeHousing() >= 100 && !Sim->GetCityDemand().bBigArrivalWaitsOnSupply && Sim->GetCityDemand().BigArrivalAirNote.IsEmpty() && Sim->GetCityDemand().BigArrivalRationsNote.IsEmpty(),
+				FString::Printf(TEXT("g1 setup: a complete streak (%.2f sols), %d beds free, deep stocks; the wave is not held by life support, so the demand says nothing of it"), Sim->GetBigArrivalStreakSols(), Sim->GetFreeHousing()));
+			const double NeedO2b = (double)(Sim->GetPopulation() + 100) * O2Draw * LifeSols;
+			const double WaterNeedb = FoodFloor * (double)(Sim->GetPopulation() + 100) * WaterDraw;
+			SetStock(NOxygen, 0.5 * NeedO2b);
+			SetStock(NWater, 0.5 * WaterNeedb);
+			const FRHCityDemand Held = Sim->GetCityDemand();
+			Expect(Held.bBigArrivalWaitsOnSupply && Held.bBigArrivalShortAir && Held.bBigArrivalShortWater && !Held.bBigArrivalShortFood
+				&& Held.BigArrivalAirNote == TEXT("The settlers are ready to come once the air reserve can carry 100 more.")
+				&& Held.BigArrivalRationsNote == TEXT("The settlers are ready to come once the water store can carry 100 more."),
+				FString::Printf(TEXT("g1 air and water at half: the demand says \"%s\" and \"%s\""), *Held.BigArrivalAirNote, *Held.BigArrivalRationsNote));
+			const int32 PopHold = Sim->GetPopulation();
+			const double StreakHold = Sim->GetBigArrivalStreakSols();
+			Alerts.Reset();
+			RunSolsA(3.0);
+			Expect(!Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopHold && CountAlerts(TEXT("THE BIG ARRIVAL")) == 0 && Sim->GetBigArrivalStreakSols() > StreakHold + 2.9,
+				FString::Printf(TEXT("g1 three sols with the air and water short: the wave does not land (population %d, %d Big Arrival alert(s)) and the streak keeps running (%.2f -> %.2f)"), Sim->GetPopulation(), CountAlerts(TEXT("THE BIG ARRIVAL")), StreakHold, Sim->GetBigArrivalStreakSols()));
+			// The air recovers; the water still holds it; then the water recovers and it lands, once.
+			SetStock(NOxygen, 3.0 * NeedO2b);
+			EraStepOnce();
+			const FRHCityDemand AirBack = Sim->GetCityDemand();
+			Expect(!Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopHold && AirBack.bBigArrivalWaitsOnSupply && !AirBack.bBigArrivalShortAir && AirBack.BigArrivalAirNote.IsEmpty()
+				&& AirBack.BigArrivalRationsNote == TEXT("The settlers are ready to come once the water store can carry 100 more."),
+				TEXT("g1 the air recovers and the water alone holds the wave: the air note is gone, the water note stands"));
+			SetStock(NWater, 3.0 * WaterNeedb);
+			const int32 TopG = MaxColonistId();
+			Alerts.Reset();
+			EraStepOnce();
+			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopHold + 100 && NewcomersFine(TopG, 100) && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1 && Alerts.Num() == 2,
+				FString::Printf(TEXT("g1 the water recovers: the very next step lands the wave once (population %d -> %d, %d alert(s))"), PopHold, Sim->GetPopulation(), Alerts.Num()));
+			const FRHCityDemand After = Sim->GetCityDemand();
+			Expect(!After.bBigArrivalPending && !After.bBigArrivalWaitsOnSupply && After.BigArrivalAirNote.IsEmpty() && After.BigArrivalRationsNote.IsEmpty(),
+				TEXT("g1 landed: nothing is pending and the demand has no life-support note"));
+
+			// g2. Food short, air and water deep, against the real floor of 10 sols: a new wave holds on the
+			// larder, even with its own provisions; and food and water together read as one note.
+			const bool bReady2 = ReadyStreak();
+			Sim->Debug_SetBigArrivalFreeBeds(100);
+			const int32 PopF = Sim->GetPopulation();
+			const double FoodNeedF = FoodFloor * (double)(PopF + 100) * FoodDraw - WaveFood;
+			const double WaterNeedF = FoodFloor * (double)(PopF + 100) * WaterDraw;
+			SetStock(NFood, 0.4 * FoodNeedF);
+			SetStock(NWater, 0.5 * WaterNeedF);
+			const FRHCityDemand Both = Sim->GetCityDemand();
+			Expect(bReady2 && FoodNeedF > 0.0 && Both.bBigArrivalWaitsOnSupply && Both.bBigArrivalShortFood && Both.bBigArrivalShortWater && !Both.bBigArrivalShortAir && Both.BigArrivalAirNote.IsEmpty()
+				&& Both.BigArrivalRationsNote == TEXT("The settlers are ready to come once the food and water stores can carry 100 more."),
+				FString::Printf(TEXT("g2 a second wave, food and water short: one rations note, \"%s\", and no air note"), *Both.BigArrivalRationsNote));
+			SetStock(NWater, 1.0e8);
+			const FRHCityDemand FoodOnly = Sim->GetCityDemand();
+			Expect(FoodOnly.bBigArrivalShortFood && !FoodOnly.bBigArrivalShortWater && FoodOnly.BigArrivalRationsNote == TEXT("The settlers are ready to come once the food store can carry 100 more."),
+				FString::Printf(TEXT("g2 water back: \"%s\""), *FoodOnly.BigArrivalRationsNote));
+			Alerts.Reset();
+			RunSolsA(1.0);
+			Expect(!Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopF && CountAlerts(TEXT("THE BIG ARRIVAL")) == 0,
+				FString::Printf(TEXT("g2 a sol with the larder at %.0f kg of the %.0f it needs: the wave holds (population %d)"), Sim->GetStock(NFood), FoodNeedF, Sim->GetPopulation()));
+			SetStock(NFood, 3.0 * FoodNeedF);
+			Alerts.Reset();
+			EraStepOnce();
+			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopF + 100 && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1,
+				FString::Printf(TEXT("g2 the larder recovers: the wave lands on the next step (population %d -> %d)"), PopF, Sim->GetPopulation()));
+
+			// g3. Supply short before the streak completes says nothing: the wave is not ready yet.
+			Sim->Debug_SetBigArrivalDone(false);
+			Sim->Debug_SetBigArrivalFreeBeds(100);
+			Rich();
+			HoldHope(95.0);
+			Lapse();
+			RunSolsA(5.0);
+			SetStock(NOxygen, 1.0);
+			const FRHCityDemand Early = Sim->GetCityDemand();
+			Expect(Early.bBigArrivalPending && !Early.bBigArrivalWaitsOnSupply && Early.BigArrivalAirNote.IsEmpty() && Early.BigArrivalRationsNote.IsEmpty(),
+				FString::Printf(TEXT("g3 five sols into the streak, with the air gone: the wave is pending but not yet waiting on life support (streak %.2f of 20)"), Sim->GetBigArrivalStreakSols()));
+			Sim->Debug_SetBigArrivalDone(true);
+			Rich();
 		}
 
 		Sim->OnAlert.Remove(AlertH);
@@ -8341,6 +8484,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//  (b) a colony with no districts never grows (with demand and material), and the bill, the money and the
 	//      pauses: per-resource reserves and the open quota's bill (Struct, Oxygen), Shielding short, the whole
 	//      bill atomically, a construction site's hopper never counted, the quota met and its bill gone;
+	//      (b4, C5c) between quota rounds (awaiting the manifest, ship inbound) growth leaves the NEXT
+	//      round's bill standing, checked on each resource's one-kilo boundary, the ladder walked for real
+	//      (Q2, Q3, round 1, round 2) so the protected bill is the bill that then opens, and the ladder's end;
 	//  (c) the gates: Homes need a housing shortfall, Industry never grows, an open project and a switched-off
 	//      district are skipped, the two pauses (a home on short rations, Hope failing);
 	//  (d) surface Homes: the nearest candidate, the largest module that fits, only INSIDE the district, touching
@@ -8669,9 +8815,97 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(LoadBase(), TEXT("b3 base loaded a fifth time"));
 			Sim->AddStock(NWater, 400.0);
 			Steps(2);
-			Expect(Sim->GetQuotaPhase() != ERHQuotaPhase::Open && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 0.0, 1e-9)
+			// C5c moved this line: Q1 met no longer frees the stores. Between rounds growth leaves the NEXT round's bill
+			// standing - Q1's next is Q2's authored Struct 600 / Oxygen 150 (/ Hydrogen 40) - so free = held - 600 - 1000.
+			Expect(Sim->GetQuotaPhase() != ERHQuotaPhase::Open && Sim->GetGrowthAvailability(NStruct).bNextRound && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 600.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 150.0, 1e-9)
+				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 600.0 - 1000.0, 1e-6),
+				TEXT("b3 once Q1 is met its bill drops out and the next round's (Q2: Struct 600, Oxygen 150) stands in its place: free = held - 600 - 1000 (C5c; it was held - 1000 when nothing was protected between rounds)"));
+		}
+
+		// ---------------- (b4) Between quota rounds growth leaves the NEXT round's bill standing (C5c) ----------------
+		{
+			const auto MeetQuota = [&]() -> bool
+			{
+				for (const auto& L : Sim->GetQuotaProgress())
+				{
+					const double Gap = L.Value.Value + 50.0 - L.Value.Key;
+					if (Gap > 0.0) { Sim->AddStock(L.Key, Gap); }
+				}
+				for (int32 K = 0; K < 40 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open; ++K) { Land(); }
+				return Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest;
+			};
+			const auto LaunchAndLand = [&]() -> bool
+			{
+				FString LErr;
+				if (!Sim->LaunchShip(LErr)) { return false; }
+				for (int32 K = 0; K < 40 * (int32)(SolLen / EraDt) && Sim->GetQuotaPhase() != ERHQuotaPhase::Open; ++K) { Land(); }
+				return Sim->GetQuotaPhase() == ERHQuotaPhase::Open;
+			};
+			// One growth start check against a standing bill: a kilo short of reserve + bill + project is refused, a kilo over starts.
+			const auto Boundary = [&](FName Res, double Reserve, double Bill, double Project, const TCHAR* Phase, const TCHAR* Round) -> bool
+			{
+				Sim->Debug_SetGrowthEnabled(true);
+				OnlyDistricts({ 3 });
+				SetHope(80.0);
+				SetHeld(Res == NStruct ? NOx : NStruct, 1.0e6); // the other resource is never the one in the way
+				SetHeld(Res, Reserve + Bill + Project - 1.0);
+				const bool bRefused = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(*Res.ToString()) && NoteOf(3).Contains(TEXT("next quota round"));
+				const FString Why = NoteOf(3);
+				SetHeld(Res, Reserve + Bill + Project + 1.0);
+				const bool bStarts = Sim->Debug_RunGrowthCheck() == 1 && Open(3);
+				Expect(bRefused && bStarts, FString::Printf(TEXT("b4 %s (%s): %s one kilo under reserve %.0f + the next round's bill %.0f + the project %.0f is refused ('%s'), one kilo over starts it"), Phase, Round, *Res.ToString(), Reserve, Bill, Project, *Why));
+				return bRefused && bStarts;
+			};
+
+			// Q1 met, awaiting the manifest: the next round is Q2, Struct 600 / Oxygen 150 / Hydrogen 40.
+			Expect(LoadBase(), TEXT("b4 base loaded"));
+			Sim->Debug_SetGrowthEnabled(false);
+			Expect(MeetQuota() && Sim->GetActiveQuotaName() == FName("Q1"), FString::Printf(TEXT("b4 setup: Q1 met, awaiting the manifest (phase %d)"), (int32)Sim->GetQuotaPhase()));
+			Boundary(NStruct, 1000.0, 600.0, 640.0, TEXT("awaiting the manifest"), TEXT("Q1 -> Q2"));
+			Expect(LoadBase(), TEXT("b4 base loaded again"));
+			Sim->Debug_SetGrowthEnabled(false);
+			MeetQuota();
+			Boundary(NOx, 60.0, 150.0, 400.0, TEXT("awaiting the manifest"), TEXT("Q1 -> Q2"));
+			// Ship inbound: the same bill stands.
+			Expect(LoadBase(), TEXT("b4 base loaded a third time"));
+			Sim->Debug_SetGrowthEnabled(false);
+			MeetQuota();
+			FString LaunchErr;
+			Expect(Sim->LaunchShip(LaunchErr) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 600.0, 1e-9) && Near(Sim->GetGrowthAvailability(NHyd).QuotaBill, 40.0, 1e-9) && Sim->GetGrowthAvailability(NStruct).bNextRound,
+				FString::Printf(TEXT("b4 the ship is inbound (phase %d): the next round's bill still stands, Struct 600 and Hydrogen 40 (%s)"), (int32)Sim->GetQuotaPhase(), *LaunchErr));
+			Boundary(NStruct, 1000.0, 600.0, 640.0, TEXT("ship inbound"), TEXT("Q1 -> Q2"));
+			// The open quota's own bill is unchanged while it is Open (the b3 numbers): not the next round's.
+			Expect(LoadBase(), TEXT("b4 base loaded a fourth time"));
+			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::Open && !Sim->GetGrowthAvailability(NStruct).bNextRound && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 300.0, 1e-9) && Near(Sim->GetGrowthAvailability(NHyd).QuotaBill, 0.0, 1e-9),
+				TEXT("b4 while Q1 is open its own bill (Struct 300, no Hydrogen) is what stands, not the next round's"));
+
+			// The ladder walked for real: at each round's end the protected bill is what the ladder then opens
+			// (Q2's, then Q3's, then Q3 x 1.25 and x 1.25^2 in whole kg), the same numbers GetQuotaProgress reads after it.
+			Sim->Debug_SetGrowthEnabled(false);
+			struct FNextBill { const TCHAR* Name; double S, O, H; };
+			const FNextBill Ladder[4] = { { TEXT("Q2"), 600.0, 150.0, 40.0 }, { TEXT("Q3"), 2500.0, 1200.0, 250.0 }, { TEXT("Q3 round 1"), 3125.0, 1500.0, 313.0 }, { TEXT("Q3 round 2"), 3906.0, 1875.0, 391.0 } };
+			for (const FNextBill& Rung : Ladder)
+			{
+				const bool bMet = MeetQuota();
+				const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx), AH = Sim->GetGrowthAvailability(NHyd);
+				const bool bPred = AS.bNextRound && Near(AS.QuotaBill, Rung.S, 1e-9) && Near(AO.QuotaBill, Rung.O, 1e-9) && Near(AH.QuotaBill, Rung.H, 1e-9);
+				const bool bLanded = LaunchAndLand();
+				const TMap<FName, TPair<double, double>> Opened = Sim->GetQuotaProgress();
+				const bool bSame = Opened.Num() == 3 && Near(Opened.FindRef(NStruct).Value, AS.QuotaBill, 1e-9) && Near(Opened.FindRef(NOx).Value, AO.QuotaBill, 1e-9) && Near(Opened.FindRef(NHyd).Value, AH.QuotaBill, 1e-9);
+				Expect(bMet && bPred && bLanded && bSame,
+					FString::Printf(TEXT("b4 the ladder, for real: before %s opens the protected bill reads Struct %.0f / Oxygen %.0f / Hydrogen %.0f (expect %.0f / %.0f / %.0f), and the quota that then opens asks %.0f / %.0f / %.0f - the same"),
+						Rung.Name, AS.QuotaBill, AO.QuotaBill, AH.QuotaBill, Rung.S, Rung.O, Rung.H, Opened.FindRef(NStruct).Value, Opened.FindRef(NOx).Value, Opened.FindRef(NHyd).Value));
+			}
+			// On the last rung's round 2, met and awaiting: the next round is round 3, 4883 / 2344 / 488.
+			Expect(MeetQuota() && Sim->GetQuotaRepeatRound() == 2 && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 4883.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 2344.0, 1e-9) && Near(Sim->GetGrowthAvailability(NHyd).QuotaBill, 488.0, 1e-9),
+				FString::Printf(TEXT("b4 Q3 round 2 met: the next round (3) stands at Struct %.0f / Oxygen %.0f / Hydrogen 488 - the current round's bill x 1.25, rounded as the ladder rounds"), Sim->GetGrowthAvailability(NStruct).QuotaBill, Sim->GetGrowthAvailability(NOx).QuotaBill));
+			Boundary(NStruct, 1000.0, 4883.0, 640.0, TEXT("awaiting the manifest"), TEXT("Q3 round 2 -> 3"));
+			// With the repeat switched off the ladder ends: nothing is coming, so nothing stands.
+			Sim->Debug_SetQuotaRepeatBillMul(0.0);
+			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 0.0, 1e-9)
 				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 1000.0, 1e-6),
-				TEXT("b3 once the quota is met nothing is being collected: its bill drops out and free = held - 1000"));
+				TEXT("b4 the repeat knob at 0 on the last rung: the ladder ends, no bill stands, free = held - 1000"));
+			Sim->Debug_SetQuotaRepeatBillMul(1.25);
 		}
 
 		// ---------------- (c) Gates and pauses ----------------

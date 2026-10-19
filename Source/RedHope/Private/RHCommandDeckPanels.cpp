@@ -1283,13 +1283,19 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 			[](const FRHCityDemand& Dm) -> FString
 			{
 				if (Dm.Population <= 0) { return TEXT("Air: nobody lives here yet."); }
+				// C5c: the Big Arrival waiting on air, food or water says so (placeholder, D153).
+				FString Waiting;
+				for (const FString* Note : { &Dm.BigArrivalAirNote, &Dm.BigArrivalRationsNote })
+				{
+					if (!Note->IsEmpty()) { Waiting += TEXT(" ") + *Note; }
+				}
 				if (Dm.HomesShort <= 0)
 				{
-					return Dm.MinOxygenMarginSols >= 0.0 ? FString::Printf(TEXT("Air: every home is on a full ration; the tightest oxygen margin is %.1f sols."), Dm.MinOxygenMarginSols) : FString(TEXT("Air: every home is on a full ration."));
+					return (Dm.MinOxygenMarginSols >= 0.0 ? FString::Printf(TEXT("Air: every home is on a full ration; the tightest oxygen margin is %.1f sols."), Dm.MinOxygenMarginSols) : FString(TEXT("Air: every home is on a full ration."))) + Waiting;
 				}
 				const TCHAR* Leg = Dm.ScarcestLeg == FName("Oxygen") ? TEXT("air") : (Dm.ScarcestLeg == FName("Water") ? TEXT("water") : TEXT("food"));
 				return FString::Printf(TEXT("Air: %d home%s (%d resident%s) on short rations - %s is the scarcest. Restore it to bring rations back to full."),
-					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg);
+					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg) + Waiting;
 			})
 	];
 	// C5b: what the city is building. The projects' bars, and the reason when the whole city's growth is paused.

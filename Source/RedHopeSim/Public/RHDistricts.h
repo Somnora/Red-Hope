@@ -147,4 +147,14 @@ struct FRHCityDemand
 	FName ScarcestLeg;              // the leg short in the home with the lowest ration (Oxygen, Water, Food), else None
 	double MinOxygenMarginSols = -1.0; // the tightest home's margin; -1 when there is no home with residents
 	double Air = 0.0;               // ResidentsShort / Population
+
+	// --- The Big Arrival's life-support wait (C5c) ---
+	// True while the wave is ready in every other way (its Hope streak is complete and the beds are
+	// there) and holds only for want of air, food or water that could carry N + the wave. The notes
+	// are the deck's words (Gate-D placeholder, D153): the air note for the oxygen leg, the rations
+	// note for food and water; both empty when nothing is waiting on supply.
+	bool bBigArrivalWaitsOnSupply = false;
+	bool bBigArrivalShortAir = false, bBigArrivalShortFood = false, bBigArrivalShortWater = false;
+	FString BigArrivalAirNote;
+	FString BigArrivalRationsNote;
 };

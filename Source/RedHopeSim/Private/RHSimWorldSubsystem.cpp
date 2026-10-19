@@ -156,6 +156,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	BigArrivalStreakSolsNeeded = Defs->GetConfigScalar(FName("BigArrivalStreakSols"), BigArrivalStreakSolsNeeded);
 	BigArrivalFreeBeds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalFreeBeds"), BigArrivalFreeBeds));
 	BigArrivalColonists = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalColonists"), BigArrivalColonists));
+	BigArrivalLifeSupportSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("BigArrivalLifeSupportSols"), BigArrivalLifeSupportSols));
 	MoveHomeIntervalSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("MoveHomeIntervalSols"), MoveHomeIntervalSols));
 	// C5b: city growth (the same fallbacks as RH_Config.csv).
 	GrowthReserveStructKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthReserveStructKg"), GrowthReserveStructKg));
@@ -1679,6 +1680,61 @@ void URHSimWorldSubsystem::AdvanceQuotaLadder()
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== QUOTA LADDER: %s opens (sol %d, deadline sol %d)%s ==="),
 		*Best.ToString(), QuotaOpenedSol, DueSol,
 		QuotaRepeatRound > 0 ? *FString::Printf(TEXT(" - round %d, bills x%.4g"), QuotaRepeatRound, GetQuotaBillScale()) : TEXT(""));
+}
+
+double URHSimWorldSubsystem::ScaleQuotaBill(double RawKg, int32 Round) const
+{
+	// Round 0 keeps the raw bill (bit-identical to pre-D1a); renewals scale it and round to whole kg
+	// so the shown bill is the threshold.
+	if (Round <= 0)
+	{
+		return RawKg;
+	}
+	const double Scale = QuotaRepeatBillMul <= 0.0 ? 1.0 : FMath::Pow(QuotaRepeatBillMul, (double)Round); // as GetQuotaBillScale
+	return FMath::RoundToDouble(RawKg * Scale);
+}
+
+void URHSimWorldSubsystem::GetNextQuotaBills(TMap<FName, double>& Out) const
+{
+	// Which row AdvanceQuotaLadder would open next, by the same (DeadlineSol, name) walk, and at
+	// which round; its bills through the same scaling GetQuotaProgress uses.
+	Out.Reset();
+	const FRHQuotaRow* Cur = Defs ? Defs->GetQuota(ActiveQuota) : nullptr;
+	if (!Cur)
+	{
+		return;
+	}
+	FName Best = NAME_None;
+	int32 BestDeadline = MAX_int32;
+	Defs->ForEachQuota([&](FName Name, const FRHQuotaRow& Row)
+	{
+		const bool bAfterCur = Row.DeadlineSol > Cur->DeadlineSol ||
+			(Row.DeadlineSol == Cur->DeadlineSol && ActiveQuota.LexicalLess(Name));
+		const bool bBeatsBest = Row.DeadlineSol < BestDeadline ||
+			(Row.DeadlineSol == BestDeadline && (Best.IsNone() || Name.LexicalLess(Best)));
+		if (bAfterCur && bBeatsBest)
+		{
+			BestDeadline = Row.DeadlineSol;
+			Best = Name;
+		}
+	});
+	int32 Round = 0;
+	if (Best.IsNone())
+	{
+		if (QuotaRepeatBillMul <= 0.0)
+		{
+			return; // the ladder ends: nothing is coming
+		}
+		Best = ActiveQuota;
+		Round = QuotaRepeatRound + 1;
+	}
+	if (const FRHQuotaRow* Next = Defs->GetQuota(Best))
+	{
+		for (const auto& Req : URHDefinitionsSubsystem::ParseResourceList(Next->Requirements))
+		{
+			Out.Add(Req.Key, ScaleQuotaBill(Req.Value, Round));
+		}
+	}
 }
 
 double URHSimWorldSubsystem::GetQuotaBillScale() const
@@ -5580,6 +5636,13 @@ void URHSimWorldSubsystem::StepBigArrival(float SubDt)
 	{
 		return;
 	}
+	// C5c: the colony must be able to carry N + the wave. The streak keeps running; the wave waits
+	// for air, food and water (the first lean playtest landed 100 into an air that could not carry
+	// them, and 44 were recalled).
+	if (!GetBigArrivalSupport().AllOk())
+	{
+		return;
+	}
 	const int32 Before = Colonists.Num();
 	const int32 Housed = Debug_AddColonists(BigArrivalColonists);
 	if (Housed <= 0)
@@ -5596,6 +5659,28 @@ void URHSimWorldSubsystem::StepBigArrival(float SubDt)
 	OnAlert.Broadcast(TEXT("THE CEO HAS ANNOUNCED HE WILL COME TO MARS WITH THE NEXT WAVE."));
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== BIG ARRIVAL (Sol %d): %d settlers, +%.0f kg Food (smoothed Hope %.1f, streak %.1f sols, population %d -> %d); the CEO will come with the next wave ==="),
 		Clock ? Clock->GetSol() : 0, Housed, FoodKg, HopeSmoothed, BigArrivalStreakSols, Before, Colonists.Num());
+}
+
+URHSimWorldSubsystem::FRHBigArrivalSupport URHSimWorldSubsystem::GetBigArrivalSupport() const
+{
+	FRHBigArrivalSupport Out;
+	Out.Wave = BigArrivalColonists;
+	Out.People = Colonists.Num() + BigArrivalColonists;
+	Out.FloorSols = FoodRunwayFloorSols;
+	// Air: the pool the growth reserve reads, against everyone's breathing for BigArrivalLifeSupportSols.
+	Out.O2HeldKg = GetGrowthHoldingsKg(FName("Oxygen"));
+	Out.O2NeedKg = (double)Out.People * ColonistO2KgPerSol * BigArrivalLifeSupportSols;
+	Out.bO2Ok = Out.O2HeldKg >= Out.O2NeedKg;
+	// Food: the larder plus what the wave lands with, over N + wave's draw, as GetFoodRunwaySols reads it.
+	const double FoodDraw = (double)Out.People * ColonistFoodKgPerSol;
+	const double FoodKg = GetStock(FName("Food")) + ColonistTransportFoodKgPerColonist * (double)BigArrivalColonists;
+	Out.FoodRunwaySols = FoodDraw > 0.0 ? FoodKg / FoodDraw : 1.0e9;
+	Out.bFoodOk = Out.FoodRunwaySols >= FoodRunwayFloorSols;
+	// Water: the wave brings none, so it is the pool against N + wave's draw.
+	const double WaterDraw = (double)Out.People * ColonistWaterKgPerSol;
+	Out.WaterRunwaySols = WaterDraw > 0.0 ? GetStock(FName("Water")) / WaterDraw : 1.0e9;
+	Out.bWaterOk = Out.WaterRunwaySols >= FoodRunwayFloorSols;
+	return Out;
 }
 
 void URHSimWorldSubsystem::StepMoveHome(float SubDt)
@@ -9710,7 +9795,7 @@ TMap<FName, TPair<double, double>> URHSimWorldSubsystem::GetQuotaProgress() cons
 			}
 			// Round 0 keeps the raw bill (bit-identical to pre-D1a); renewals scale
 			// it and round to whole kg so the shown bill is the threshold.
-			const double Need = QuotaRepeatRound > 0 ? FMath::RoundToDouble(Req.Value * GetQuotaBillScale()) : Req.Value;
+			const double Need = ScaleQuotaBill(Req.Value, QuotaRepeatRound);
 			Progress.Add(Req.Key, TPair<double, double>(Have, Need));
 		}
 	}

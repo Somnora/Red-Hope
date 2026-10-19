@@ -585,6 +585,22 @@ public:
 	double GetBigArrivalStreakSolsNeeded() const { return BigArrivalStreakSolsNeeded; }
 	int32 GetBigArrivalFreeBeds() const { return BigArrivalFreeBeds; }
 	int32 GetBigArrivalColonists() const { return BigArrivalColonists; }
+	double GetBigArrivalLifeSupportSols() const { return BigArrivalLifeSupportSols; }
+	// C5c: can the colony carry its present population PLUS the Big Arrival's wave? Per leg: the O2
+	// pool against (N + wave) x ColonistO2KgPerSol x BigArrivalLifeSupportSols (the pool the growth
+	// reserve reads), and the Food (counting the provisions the wave lands with) and Water runways at
+	// N + wave against FoodRunwayFloorSols. The wave does not fire while any leg is short; its streak
+	// keeps running. A pure function of state.
+	struct FRHBigArrivalSupport
+	{
+		int32 Wave = 0;            // BigArrivalColonists
+		int32 People = 0;          // N + Wave: whom the colony would have to carry
+		double O2HeldKg = 0.0, O2NeedKg = 0.0;
+		double FoodRunwaySols = 0.0, WaterRunwaySols = 0.0, FloorSols = 0.0;
+		bool bO2Ok = true, bFoodOk = true, bWaterOk = true;
+		bool AllOk() const { return bO2Ok && bFoodOk && bWaterOk; }
+	};
+	FRHBigArrivalSupport GetBigArrivalSupport() const;
 	double GetMoveHomeIntervalSols() const { return MoveHomeIntervalSols; }
 	// Harness: the settlers a supply ship lands, without the ship (returns how many
 	// found beds); the smoothed Hope and the growth interval a suite pins; the Big
@@ -597,6 +613,7 @@ public:
 	// C5b harness: the free beds the Big Arrival waits for. A suite that wants a standing housing
 	// shortfall (the city's growth builds toward it) raises it past anything the colony can reach.
 	void Debug_SetBigArrivalFreeBeds(int32 Beds) { BigArrivalFreeBeds = FMath::Max(0, Beds); }
+	void Debug_SetBigArrivalLifeSupportSols(double Sols) { BigArrivalLifeSupportSols = FMath::Max(0.0, Sols); }
 	int32 Debug_RehomeResidents() { return RehomeResidents(); }
 	void Debug_UnrateFloor(int32 Level) { RatedFloors.Remove(Level); } // a floor that lost its rating (the next StepHabitability may re-rate it)
 	// C2a harness: a floor's O2 fill, and how many colonists a carved cell houses
@@ -1210,8 +1227,9 @@ public:
 	//   Gates  Homes: the city's Housing shortfall (GetCityDemand's HousingBedsShort, less the
 	//          beds already under way) is above zero. Civic: some CivicService room function
 	//          (RH_Rooms) has a coverage gap, counting rooms already under way.
-	//   Money  Per resource, free = uncommitted holdings - the open quota's bill for it - its
-	//          reserve (GrowthReserveStructKg of Struct; for Oxygen GrowthReserveO2Sols of the
+	//   Money  Per resource, free = uncommitted holdings - the quota bill for it (the OPEN quota's;
+	//          between rounds - awaiting the manifest, ship inbound, resting - the NEXT round's,
+	//          C5c) - its reserve (GrowthReserveStructKg of Struct; for Oxygen GrowthReserveO2Sols of the
 	//          whole colony's breathing; nothing for the rest). Uncommitted = what the C4 road
 	//          bill counts: completed buildings on linked floors plus the pool, never a
 	//          construction site's hopper. The WHOLE bill (Struct, Shielding, bed or room
@@ -1248,7 +1266,8 @@ public:
 	// Does a room row emit this adjacency tag? (A CivicService row must never emit Odor.)
 	static bool RoomEmitsTag(const FRHRoomRow& Row, const TCHAR* Tag);
 	// One resource's room to build: free = Held - QuotaBill - Reserve.
-	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, Reserve = 0.0, Free = 0.0; };
+	// QuotaBill is the OPEN quota's bill while it is open, else (C5c) the NEXT round's (bNextRound).
+	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, Reserve = 0.0, Free = 0.0; bool bNextRound = false; };
 	FRHGrowthAvailability GetGrowthAvailability(FName Resource) const;
 	// The words for a project ("4 new home bays", "a new dining room"), shared by the alert, the
 	// City panel and the cheat.
@@ -1384,6 +1403,14 @@ public:
 	// knob off, else QuotaRepeatBillMul^round (every bill, not award/deadline).
 	int32 GetQuotaRepeatRound() const { return QuotaRepeatRound; }
 	double GetQuotaBillScale() const;
+	// One raw bill at a renewal round: the raw number at round 0 (or with the knob off), else
+	// round(raw x QuotaRepeatBillMul^round) in whole kg. The ONE scaling the ladder's bills use
+	// (GetQuotaProgress reads it for the open round; growth reads it for the next).
+	double ScaleQuotaBill(double RawKg, int32 Round) const;
+	// C5c: the bills of the round the ladder opens NEXT, per resource - the next authored rung's
+	// raw bills, or, with the rungs exhausted and the repeat knob on, the last rung's bills at
+	// round + 1. Empty when the ladder would end. Mirrors AdvanceQuotaLadder without calling it.
+	void GetNextQuotaBills(TMap<FName, double>& Out) const;
 	// Manifest budget banked by completed discoveries (FundingKg), paid out on
 	// top of the next quota award - research funds the program.
 	double GetPendingResearchFundingKg() const { return PendingResearchFundingKg; }
@@ -1679,7 +1706,9 @@ private:
 	void EmitGrowthAlert(int32 Sol);
 	// Money.
 	double GetGrowthHoldingsKg(FName Resource) const;
-	double GetOpenQuotaBillKg(FName Resource) const;
+	// The quota bill growth leaves standing: the open quota's while it is open, else (C5c) the next
+	// round's (GetNextQuotaBills). bOutNext says which.
+	double GetProtectedQuotaBillKg(FName Resource, bool& bOutNext) const;
 	bool GrowthBillFits(const TMap<FName, double>& Bill, FString& OutWhy) const;
 	void TakeGrowthResource(FName Resource, double Kg);
 	void StartGrowthProject(FRHGrowthProject&& Project);
@@ -2007,6 +2036,7 @@ private:
 	double BigArrivalStreakSolsNeeded = 20.0;        // sols of it
 	int32 BigArrivalFreeBeds = 100;                  // free beds the wave needs
 	int32 BigArrivalColonists = 100;
+	double BigArrivalLifeSupportSols = 10.0;         // C5c: sols of the whole colony's O2 the wave needs on hand
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
 	// SAVED (v35): the Big Arrival's running streak and its once-only flag, the
 	// move-home accumulator, and the settlers who came with ships (a count).

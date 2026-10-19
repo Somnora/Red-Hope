@@ -272,6 +272,13 @@ namespace
 			else
 			{
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival did not land (Big Arrival streak %.1f sols)"), Sim ? Sim->GetBigArrivalStreakSols() : 0.0);
+				if (Sim && Sim->GetBigArrivalStreakSols() >= Sim->GetBigArrivalStreakSolsNeeded())
+				{
+					const URHSimWorldSubsystem::FRHBigArrivalSupport BS = Sim->GetBigArrivalSupport();
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival is %s: air %.0f of %.0f kg (%s), food runway %.1f sols (%s), water runway %.1f sols (%s) against a floor of %.0f"),
+						BS.AllOk() ? TEXT("not held by life support") : TEXT("WAITING ON LIFE SUPPORT"), BS.O2HeldKg, BS.O2NeedKg, BS.bO2Ok ? TEXT("ok") : TEXT("short"),
+						BS.FoodRunwaySols, BS.bFoodOk ? TEXT("ok") : TEXT("short"), BS.WaterRunwaySols, BS.bWaterOk ? TEXT("ok") : TEXT("short"), BS.FloorSols);
+				}
 			}
 		}
 		if (P.bDistricts)
