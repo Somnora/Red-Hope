@@ -25,6 +25,9 @@ public class RedHope : ModuleRules
 			"RedHopeSim"
 		});
 
+		// RH.FrameStats reads the engine's game / render / GPU frame timers.
+		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "RHI" });
+
 		if (Target.bBuildEditor)
 		{
 			// RH.BuildRobotStateTree: the tree asset is authored in code

@@ -3032,6 +3032,138 @@ bool URHSimWorldSubsystem::PickFillHome(FRHFillState& State, int32& OutLevel, in
 	return false;
 }
 
+URHSimWorldSubsystem::FRHScaleColonyReport URHSimWorldSubsystem::Debug_BuildScaleColony(int32 ColonistTarget)
+{
+	// The body of the -scale suite's setup (RHSimCommandlet.cpp), moved here so a
+	// running game can build the same colony. Every order and number is unchanged.
+	FRHScaleColonyReport Rep;
+	constexpr int32 Floors = 5;
+	constexpr int32 CellsPerFloor = 210;
+	constexpr int32 GardenCells = 10;      // the tail of each floor's spiral
+	Rep.Floors = Floors;
+	Rep.CellsPerFloor = CellsPerFloor;
+	if (!Clock || GetShaftDepth() > 0)
+	{
+		Rep.bFresh = false;
+		Rep.Errors.Add(TEXT("Debug_BuildScaleColony needs a fresh colony (no shaft yet) and a sim clock"));
+		return Rep;
+	}
+	constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+	constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	const FDelegateHandle RejectH = OnCommandRejected.AddLambda([&Rep](const FRHCommand&, const FString&) { ++Rep.Rejected; });
+	const auto EraStepOnce = [&]()
+	{
+		Debug_AddFreshWater(500.0 * EraDt / SolLen);
+		Debug_SetBatteryWh(1.0e9);
+		Clock->Debug_AdvanceSimSeconds(EraDt);
+		EraStep((float)EraDt);
+	};
+	FString R;
+	int32 LanderId = 0;
+	for (const FRHBuildingInstance& B : GetBuildings()) { if (B.DefName == FName("Lander")) { LanderId = B.Id; } }
+
+	// Setup: power, a deep shaft, big floors, an air filter on each.
+	Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -1000.0, 0.0));
+	Debug_PlaceInstant(FName("SolarArray"), FVector(3500.0, -2000.0, 0.0));
+	const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen")), NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds")), NStruct(TEXT("Struct"));
+	AddStock(NOxygen, 1.0e8);
+	AddStock(NWater, 1.0e8);
+	AddStock(NFood, 1.0e8);
+	AddStock(NSoil, 250.0 * 400.0);
+	AddStock(NSeeds, 50.0 * 400.0);
+	Debug_AddSolidAt(LanderId, NStruct, 2.0e7, false);
+	const FVector Head(3000.0, 3000.0, 0.0);
+	ExtendShaft(Floors, Head);
+	bool bCarved = true;
+	for (int32 L = 1; L <= Floors; ++L) { bCarved &= ExcavateFloor(-L, CellsPerFloor, R); }
+	for (int32 L = 1; L <= Floors; ++L) { Debug_PlaceInstant(FName("AirFilter"), Head, -L); }
+	for (int32 L = 1; L <= Floors; ++L) { Debug_ForceRateFloor(-L); }
+	EraStepOnce();
+	Rep.bSetupOk = bCarved && GetShaftDepth() == Floors && IsFloorRated(-1) && IsFloorRated(-Floors);
+
+	// Zoning. Gardens (odor emitters) sit at the tail of each floor's spiral;
+	// on floors -1..-4 every cell within reach of one is a non-refuser, so the
+	// colony's Hope is not buried under offended pairs. Floor -5 is left to
+	// offend: no buffer, two Cooking emitters among the Living cells, and a
+	// Hallway every thirty cells - the adjacency code runs both ways, with
+	// some pairs partitioned and some not.
+	TArray<FIntPoint> LabCells, WorkCells, DiningCells, LivingCells; // (level, cell)
+	for (int32 L = 1; L <= Floors; ++L)
+	{
+		TArray<FIntPoint> Pos;
+		for (int32 I = 0; I < CellsPerFloor; ++I) { Pos.Add(SpiralCell(I)); }
+		for (int32 I = 0; I < CellsPerFloor; ++I)
+		{
+			bool bNearGarden = false;
+			for (int32 G = CellsPerFloor - GardenCells; G < CellsPerFloor && L < Floors; ++G)
+			{
+				bNearGarden |= (FMath::Abs(Pos[I].X - Pos[G].X) + FMath::Abs(Pos[I].Y - Pos[G].Y)) <= 2;
+			}
+			FName Room;
+			if (I >= CellsPerFloor - GardenCells) { Room = FName("Garden"); }
+			else if (bNearGarden) { Room = I % 3 == 0 ? FName("Lab") : (I % 3 == 1 ? FName("Workstation") : FName("Hallway")); }
+			else if (L == Floors && I % 97 == 5) { Room = FName("Cooking"); }
+			else
+			{
+				switch (I % 10)
+				{
+				case 7: Room = FName("Workstation"); break;
+				case 8: Room = FName("Dining"); break;
+				case 9: Room = (I / 10) % 3 == 2 ? FName("Hallway") : ((I / 10) % 3 == 0 ? FName("Lab") : FName("Infirmary")); break;
+				default: Room = FName("LivingQuarters"); break;
+				}
+			}
+			if (!DesignateRoom(-L, I, Room, R)) { Rep.Errors.Add(FString::Printf(TEXT("zoning floor %d cell %d failed: %s"), -L, I, *R)); }
+			if (Room == FName("LivingQuarters")) { ++Rep.ZonedLiving; LivingCells.Add(FIntPoint(-L, I)); }
+			else if (Room == FName("Garden")) { ++Rep.ZonedGarden; ++Rep.ZonedSeat; }
+			else if (Room == FName("Workstation")) { ++Rep.ZonedSeat; WorkCells.Add(FIntPoint(-L, I)); }
+			else if (Room == FName("Lab")) { ++Rep.ZonedSeat; LabCells.Add(FIntPoint(-L, I)); }
+			else { ++Rep.ZonedOther; if (Room == FName("Dining")) { DiningCells.Add(FIntPoint(-L, I)); } }
+		}
+	}
+
+	// Furnishing, through the same Furnish orders the -furnish suite sends:
+	// four bunk beds in every Living cell, four benches in every work and lab
+	// cell (each replaces the legacy single seat), a table in each Dining.
+	// Batched so one era step lands a few hundred orders.
+	int32 Queued = 0;
+	const auto FurnishOrder = [&](const TCHAR* Piece, int32 Level, int32 Cell, int32 Slot)
+	{
+		const FIntVector Key(Level, Cell, 0);
+		FRHCommand Order; Order.Verb = FName("Furnish"); Order.Target = FName(Piece); Order.Level = Level;
+		Order.Location = GetCellCentreCm(Key);
+		Order.Value = EncodeFurnish(Cell, Slot, 0);
+		EnqueueCommand(Order);
+		if (++Queued >= 400) { EraStepOnce(); Queued = 0; }
+	};
+	for (const FIntPoint& Cell : LivingCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("BunkBed"), Cell.X, Cell.Y, Slot); } }
+	for (const FIntPoint& Cell : WorkCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("Workbench"), Cell.X, Cell.Y, Slot); } }
+	for (const FIntPoint& Cell : LabCells) { for (const int32 Slot : { 0, 2, 8, 10 }) { FurnishOrder(TEXT("LabBench"), Cell.X, Cell.Y, Slot); } }
+	for (const FIntPoint& Cell : DiningCells) { FurnishOrder(TEXT("DiningTable"), Cell.X, Cell.Y, 0); }
+	EraStepOnce();
+	if (LabCells.Num() > 1 && WorkCells.Num() > 1)
+	{
+		for (const FIntPoint* Station : { &LabCells[1], &WorkCells[1], &LabCells[LabCells.Num() / 2], &WorkCells[WorkCells.Num() / 2], &LabCells.Last(), &WorkCells.Last() })
+		{
+			FRHCommand Assign; Assign.Verb = FName("Assign"); Assign.Level = Station->X; Assign.Value = (double)Station->Y;
+			EnqueueCommand(Assign);
+			++Rep.StationOrders;
+		}
+	}
+	EraStepOnce();
+	Rep.Capacity = GetHousingCapacity();
+	for (int32 L = 1; L <= Floors; ++L) { for (int32 I = 0; I < CellsPerFloor; ++I) { Rep.SeatsTotal += GetCellSeats(FIntVector(-L, I, 0)); } }
+	OnCommandRejected.Remove(RejectH);
+	Rep.WorkCells = WorkCells;
+	Debug_SetHopeGates(50.0, 50.0); // research and births run in every step
+	Debug_SetHopeGrowthIntervalSols(1.0e9); // births scale per head: hold the interval out of reach so the headcount stays exact
+	if (ColonistTarget > 0)
+	{
+		Rep.Housed = Debug_AddColonists(FMath::Max(0, ColonistTarget - GetPopulation()));
+	}
+	return Rep;
+}
+
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
 	int32 Housed = 0;

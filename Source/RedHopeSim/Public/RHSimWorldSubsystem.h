@@ -484,6 +484,31 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// C3 (living-city gate 3): the -scale suite's big colony as ONE debug call, so
+	// the same city can be stood up in a running game (RH.CityBench) and measured
+	// on screen. A shaft to -5 with 210 carved cells a floor (1,050), every floor
+	// rated and zoned (living, work, lab, dining, gardens), furnished with bunks
+	// and benches (about 3,400 pieces), air and power held in surplus, six work
+	// stations assigned first; then colonists are moved in up to ColonistTarget (0 = the layout only).
+	// DEBUG ONLY: it drives the same public orders a player would (excavate,
+	// designate, furnish, assign) and the debug stock setters, advances the sim
+	// clock, and adds no saved field. Needs a fresh colony (no shaft yet).
+	struct FRHScaleColonyReport
+	{
+		bool bFresh = true;          // false: a shaft already existed, nothing was built
+		bool bSetupOk = false;       // shaft to -Floors, every floor rated
+		int32 Floors = 0;
+		int32 CellsPerFloor = 0;
+		int32 ZonedLiving = 0, ZonedSeat = 0, ZonedGarden = 0, ZonedOther = 0;
+		int32 StationOrders = 0;
+		int32 Rejected = 0;          // orders the sim refused while building
+		int32 SeatsTotal = 0;        // work seats across the floors
+		int32 Capacity = 0;          // certified beds
+		int32 Housed = 0;            // colonists moved in by this call
+		TArray<FIntPoint> WorkCells; // (level, cell), in zoning order
+		TArray<FString> Errors;
+	};
+	FRHScaleColonyReport Debug_BuildScaleColony(int32 ColonistTarget);
 	// --- Arrivals at scale (C2b, living-city gate 2b; every number a placeholder in RH_Config) ---
 	// Births, immigration, the Big Arrival and moving home. Births scale per head
 	// (the streak runs at max(1, N / BirthRefPop) x real time); each supply ship that

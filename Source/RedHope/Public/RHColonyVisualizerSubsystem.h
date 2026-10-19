@@ -8,6 +8,7 @@ class AStaticMeshActor;
 class UInstancedStaticMeshComponent;
 class UPointLightComponent;
 class UStaticMeshComponent;
+class UTextRenderComponent;
 class URHSimWorldSubsystem;
 struct FRHBuildingInstance;
 struct FRHCommand;
@@ -69,6 +70,13 @@ public:
 	// 0 closed .. 1 open: the cab's sliding doors (0 when only the legacy
 	// lattice cage exists). The audio subsystem plays the slide and chime off it.
 	float GetElevatorDoorAlpha() const { return bElevatorIsCab ? ElevatorWakeAlpha : 0.f; }
+	// RH.FrameStats: the actors the colony mirror keeps (a building actor each,
+	// plus one tile actor per carved cell).
+	int32 GetBuildingActorCount() const { return BuildingVisuals.Num(); }
+	// Bumped whenever a prop or furnishing component is added, removed, or shown
+	// or hidden: the crew's obstacle list rebuilds only when this moves.
+	uint32 GetPropsVersion() const { return PropsVersion; }
+	int32 GetTileActorCount() const { return TileByCell.Num(); }
 
 	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
 	// against each building's AUTHORED PulseDepth, so the art-bible mix between
@@ -85,6 +93,34 @@ public:
 	void ApplyCutaway();
 
 private:
+	// C3: the per-frame passes (dome crops, habitat shells, furnishings, room
+	// tiles, clutter) re-run when the sim says something changed - an order, a
+	// building, a furnishing, a wall feature, a reload, a new tile - and on a slow
+	// safety poll for the state that moves with time and fires no event (a crop's
+	// growth stage, a habitat's rating). They used to walk every cell, bay and
+	// furnishing and build their text keys every frame.
+	uint32 PropsVersion = 1;
+	bool bPassesDirty = true;
+	double NextPassPollS = 0.0;
+	bool bRoomsDirty = true;
+	double NextRoomPassS = 0.0;
+	void MarkPassesDirty() { bPassesDirty = true; bHoverDirty = true; bRoomsDirty = true; }
+	// Cell lights follow the grid every frame, but only a change of the inputs
+	// (grid state, which floors circulate, which lights exist) touches them.
+	uint32 AppliedLightKey = 0;
+	bool bLightKeyValid = false;
+	uint32 LightMulVersion = 0;
+	// Hover labels (director 2026-07-10): a registry of every tile and building
+	// label with a position, bucketed in a grid; the cursor asks the grid for
+	// what is near it and only labels that change state are touched.
+	struct FHoverLabel { TWeakObjectPtr<UTextRenderComponent> Label; FVector2D Pos = FVector2D::ZeroVector; float RadiusCm = 0.f; };
+	TArray<FHoverLabel> HoverLabels;
+	TMap<int64, TArray<int32>> HoverGrid;
+	TArray<int32> HoverLit;
+	bool bHoverDirty = true;
+	void RebuildHoverRegistry();
+	void UpdateHoverLabels(const FVector& CursorCm);
+
 	void HandleBuildingAdded(const FRHBuildingInstance& Instance);
 	void HandleBuildingCompleted(const FRHBuildingInstance& Instance);
 	// BM-3: a structure demolished (or a site cancelled) - its actor goes, and
@@ -246,7 +282,7 @@ private:
 	// or habitat actor (a bay) - floor-cut hiding and lifecycle come free -
 	// reconciled against the sim every tick by signature (row, cell, slot,
 	// rotation); a furnished cell's automatic room-prop hides.
-	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; FString Sig; FVector FrameCm = FVector::ZeroVector; float YawDeg = 0.f; FVector2D HalfCm = FVector2D::ZeroVector; };
+	struct FRHFurnVis { TWeakObjectPtr<UStaticMeshComponent> Comp; uint32 Sig = 0; FVector FrameCm = FVector::ZeroVector; float YawDeg = 0.f; FVector2D HalfCm = FVector2D::ZeroVector; };
 	TMap<int32, FRHFurnVis> FurnitureVis;
 	// BM-6: door leaves in doored doorways (drawn by RefreshHabShells, owned
 	// by the shell), keyed by the wall edge; they part for passing crew.

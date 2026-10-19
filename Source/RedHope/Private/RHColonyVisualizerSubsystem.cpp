@@ -7,6 +7,7 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHCrewVisualizerSubsystem.h"
 #include "RHElevatorLayout.h"
+#include "RHFrameStats.h"
 #include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
@@ -1375,6 +1376,10 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		Sim->OnSurveyCompleted.AddUObject(this, &URHColonyVisualizerSubsystem::HandleSurveyCompleted);
 		Sim->OnAlert.AddUObject(this, &URHColonyVisualizerSubsystem::HandleAlert);
 		Sim->OnColonyReloaded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleColonyReloaded);
+		// C3: anything that can change what the per-frame passes draw wakes them.
+		Sim->OnCommandExecuted.AddWeakLambda(this, [this](const FRHCommand&) { MarkPassesDirty(); });
+		Sim->OnFurnitureChanged.AddWeakLambda(this, [this](const FIntVector&) { MarkPassesDirty(); });
+		Sim->OnWallFeatureChanged.AddWeakLambda(this, [this](const FIntVector&) { MarkPassesDirty(); });
 		// Mirror anything the sim placed before we subscribed (the Lander).
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
@@ -1465,6 +1470,12 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		ConvoyVisual = nullptr;
 	}
 	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
+	MarkPassesDirty();
+	++PropsVersion;
+	bLightKeyValid = false;
+	HoverLabels.Reset();
+	HoverGrid.Reset();
+	HoverLit.Reset();
 
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -2072,18 +2083,23 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 	for (const FRHFurnitureInstance& F : Sim->GetFurniture())
 	{
 		Live.Add(F.Id);
-		const FString Sig = FString::Printf(TEXT("%s|%d,%d,%d|%d|%d"), *F.Row.ToString(), F.Key.X, F.Key.Y, F.Key.Z, F.Slot, F.Rot);
+		// A hash of (row, cell, slot, rotation): the same identity the old string
+		// key carried, without formatting thousands of strings per pass.
+		uint32 Sig = HashCombine(GetTypeHash(F.Row), GetTypeHash(F.Key));
+		Sig = HashCombine(Sig, (uint32)(F.Slot * 8 + F.Rot));
+		Sig = Sig == 0 ? 1u : Sig;
 		FRHFurnVis& Vis = FurnitureVis.FindOrAdd(F.Id);
 		UStaticMeshComponent* Comp = Vis.Comp.Get();
 		if (!Comp || Vis.Sig != Sig)
 		{
+			++PropsVersion;
 			if (Comp)
 			{
 				Comp->DestroyComponent();
 				Comp = nullptr;
 			}
 			Vis.Comp = nullptr;
-			Vis.Sig.Reset();
+			Vis.Sig = 0;
 			AActor* Owner = F.Key.Z == 0 ? (AActor*)TileByCell.FindRef(FIntVector(F.Key.X, F.Key.Y, 0)).Get() : (AActor*)BuildingVisuals.FindRef(F.Key.Z).Get();
 			float FitCm = 0.f;
 			const FString Path = FurniturePropPath(F.Row, FitCm);
@@ -2092,7 +2108,8 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 			FVector2D Half;
 			if (!Mesh || !Sim->GetFurnitureFootprintCm(F.Row, F.Key, F.Slot, F.Rot, Centre, Half))
 			{
-				continue; // its tile / habitat actor isn't up yet: next tick
+				bPassesDirty = true; // its tile / habitat actor isn't up yet: try again next tick
+				continue;
 			}
 			Comp = NewObject<UStaticMeshComponent>(Owner);
 			Comp->SetupAttachment(Owner->GetRootComponent());
@@ -2145,6 +2162,7 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 			{
 				Gone->DestroyComponent(); // sold
 			}
+			++PropsVersion;
 			It.RemoveCurrent();
 		}
 	}
@@ -2162,17 +2180,21 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 		{
 			Prop->SetVisibility(false);
 			PropsHiddenForFurniture.Add(Pair.Key);
+			++PropsVersion;
 		}
 		else if (!bFurnished && PropsHiddenForFurniture.Contains(Pair.Key))
 		{
 			Prop->SetVisibility(true);
 			PropsHiddenForFurniture.Remove(Pair.Key);
+			++PropsVersion;
 		}
 	}
 }
 
 void URHColonyVisualizerSubsystem::HandleBuildingRemoved(const FRHBuildingInstance& Instance)
 {
+	MarkPassesDirty();
+	++PropsVersion;
 	// The actor owns everything drawn for it (shell walls, floor tiles, room
 	// props and lamps, dome glass and crops, its light); neighbouring shells
 	// redraw on their own next Tick because their wall keys change.
@@ -2263,6 +2285,7 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 
 void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance& Instance)
 {
+	MarkPassesDirty();
 	UWorld* World = GetWorld();
 	if (!World || BuildingVisuals.Contains(Instance.Id))
 	{
@@ -2627,6 +2650,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 
 void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInstance& Instance)
 {
+	MarkPassesDirty();
 	// Foundation -> finished form: rebuild the visual outright so the full
 	// treatment (height, hue, tilt, silhouette accents) applies in one path.
 	if (TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(Instance.Id))
@@ -2958,6 +2982,7 @@ void URHColonyVisualizerSubsystem::RestoreSupplyShip(const URHSimWorldSubsystem*
 
 void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 {
+	RHFrameStats::FScope StatScope(RHFrameStats::Colony);
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -3004,9 +3029,18 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		}
 	}
 
-	RefreshDomeCrops();
-	RefreshHabShells();
-	RefreshFurniture(Sim);
+	// C3: the key-building passes run on change (see MarkPassesDirty), plus a
+	// one-second safety poll for time-driven state.
+	const double RealNow = FPlatformTime::Seconds();
+	if (bPassesDirty || RealNow >= NextPassPollS)
+	{
+		bPassesDirty = false;
+		NextPassPollS = RealNow + 1.0;
+		RefreshDomeCrops();
+		RefreshHabShells();
+		RefreshFurniture(Sim);
+		bHoverDirty = true; // the passes may have added labels
+	}
 	AnimateDoors(DeltaTime);
 
 	// Is it working? A machine that has been shed by the power priority, or
@@ -3082,7 +3116,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 
 	// Hover-gated labels (director 2026-07-10: station and room names show
 	// only under the cursor - a working town, not a diagram). One deproject,
-	// then proximity-toggle every tile label and building label.
+	// then the registry's grid answers "what is near the cursor".
 	{
 		FVector CursorCm(1.0e12, 1.0e12, 0);
 		if (APlayerController* PC = World->GetFirstPlayerController())
@@ -3098,29 +3132,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 				}
 			}
 		}
-		for (const auto& TP : TileByCell)
-		{
-			if (AStaticMeshActor* Tile = TP.Value.Get())
-			{
-				if (UTextRenderComponent* L = Tile->FindComponentByClass<UTextRenderComponent>())
-				{
-					L->SetVisibility(FVector::Dist2D(Tile->GetActorLocation(), CursorCm) < 600.f);
-				}
-			}
-		}
-		for (const auto& BP : BuildingVisuals)
-		{
-			if (AStaticMeshActor* B = BP.Value)
-			{
-				const bool bNear = FVector::Dist2D(B->GetActorLocation(), CursorCm) < 800.f;
-				TArray<UTextRenderComponent*> Texts;
-				B->GetComponents(Texts);
-				for (UTextRenderComponent* L : Texts)
-				{
-					L->SetVisibility(bNear);
-				}
-			}
-		}
+		UpdateHoverLabels(CursorCm);
 	}
 
 	// The elevator rides the open floor, and its doors ease open whenever a
@@ -3192,6 +3204,100 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	// Sovereignty mirror (M3/M4): rival markers + the trade rover, same pattern.
 	RefreshSovereigntyVisuals();
+}
+
+void URHColonyVisualizerSubsystem::RebuildHoverRegistry()
+{
+	// Every tile's room label (radius 6 m round the tile) and every text
+	// component on every building actor (8 m round the actor), bucketed by XY in
+	// 10 m cells so a cursor query touches the 3 x 3 cells around it. Floors
+	// share XY, exactly as the old scan compared XY only; the floor cut hides the
+	// labels of every floor but the viewed one.
+	bHoverDirty = false;
+	HoverLabels.Reset();
+	HoverGrid.Reset();
+	HoverLit.Reset();
+	const auto Add = [this](UTextRenderComponent* L, const FVector& At, float Radius)
+	{
+		FHoverLabel E;
+		E.Label = L;
+		E.Pos = FVector2D(At.X, At.Y);
+		E.RadiusCm = Radius;
+		const int64 Cx = (int64)FMath::FloorToInt(At.X / 1000.f) & 0xFFFFFF;
+		const int64 Cy = (int64)FMath::FloorToInt(At.Y / 1000.f) & 0xFFFFFF;
+		HoverGrid.FindOrAdd((Cx << 24) | Cy).Add(HoverLabels.Num());
+		HoverLabels.Add(E);
+		L->SetVisibility(false); // lit only while the cursor is near
+	};
+	for (const auto& TP : TileByCell)
+	{
+		if (AStaticMeshActor* Tile = TP.Value.Get())
+		{
+			if (UTextRenderComponent* L = Tile->FindComponentByClass<UTextRenderComponent>())
+			{
+				Add(L, Tile->GetActorLocation(), 600.f);
+			}
+		}
+	}
+	for (const auto& BP : BuildingVisuals)
+	{
+		if (AStaticMeshActor* B = BP.Value)
+		{
+			TArray<UTextRenderComponent*> Texts;
+			B->GetComponents(Texts);
+			for (UTextRenderComponent* L : Texts)
+			{
+				Add(L, B->GetActorLocation(), 800.f);
+			}
+		}
+	}
+}
+
+void URHColonyVisualizerSubsystem::UpdateHoverLabels(const FVector& CursorCm)
+{
+	if (bHoverDirty)
+	{
+		RebuildHoverRegistry();
+	}
+	TArray<int32> Lit;
+	if (CursorCm.X < 1.0e11)
+	{
+		const int32 Cx0 = FMath::FloorToInt(CursorCm.X / 1000.f);
+		const int32 Cy0 = FMath::FloorToInt(CursorCm.Y / 1000.f);
+		for (int32 Dx = -1; Dx <= 1; ++Dx)
+		{
+			for (int32 Dy = -1; Dy <= 1; ++Dy)
+			{
+				const int64 Key = (((int64)(Cx0 + Dx) & 0xFFFFFF) << 24) | ((int64)(Cy0 + Dy) & 0xFFFFFF);
+				if (const TArray<int32>* Bucket = HoverGrid.Find(Key))
+				{
+					for (const int32 I : *Bucket)
+					{
+						const FHoverLabel& E = HoverLabels[I];
+						if (FVector2D::Distance(E.Pos, FVector2D(CursorCm.X, CursorCm.Y)) < E.RadiusCm)
+						{
+							Lit.Add(I);
+						}
+					}
+				}
+			}
+		}
+	}
+	for (const int32 I : HoverLit)
+	{
+		if (!Lit.Contains(I))
+		{
+			if (UTextRenderComponent* L = HoverLabels[I].Label.Get()) { L->SetVisibility(false); }
+		}
+	}
+	for (const int32 I : Lit)
+	{
+		if (!HoverLit.Contains(I))
+		{
+			if (UTextRenderComponent* L = HoverLabels[I].Label.Get()) { L->SetVisibility(true); }
+		}
+	}
+	HoverLit = MoveTemp(Lit);
 }
 
 void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
@@ -3365,6 +3471,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 				HeadTile->SetActorHiddenInGame(ViewLevel != L);
 				CarveTileVisuals.Add(HeadTile);
 				TileByCell.Add(FIntVector(L, -1, 0), HeadTile);
+				MarkPassesDirty();
 			}
 		}
 		int32& Have = TilesSpawnedPerLevel.FindOrAdd(L);
@@ -3386,6 +3493,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 			CarveTileVisuals.Add(Tile);
 			TileByCell.Add(FIntVector(L, Have, 0), Tile);
 			++Have;
+			MarkPassesDirty(); // the room, prop and furnishing passes dress it next
 		}
 	}
 
@@ -3527,8 +3635,22 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 	{
 		return;
 	}
+	// C3: the tile pass (room tint, label, prop, light per cell) runs on change
+	// (see MarkPassesDirty) and on a one-second safety poll - a crop's growth
+	// stage folds into the room key and fires no event.
+	const double RoomsNow = FPlatformTime::Seconds();
+	const bool bRoomsPass = bRoomsDirty || RoomsNow >= NextRoomPassS;
+	if (bRoomsPass)
+	{
+		bRoomsDirty = false;
+		NextRoomPassS = RoomsNow + 1.0;
+	}
 	for (auto& Pair : TileByCell)
 	{
+		if (!bRoomsPass)
+		{
+			break;
+		}
 		AStaticMeshActor* Tile = Pair.Value.Get();
 		if (!Tile)
 		{
@@ -3633,7 +3755,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		}
 		if (!PropMesh)
 		{
-			if (Prop) { Prop->SetVisibility(false); } // room cleared / no furniture
+			if (Prop) { Prop->SetVisibility(false); ++PropsVersion; } // room cleared / no furniture
 		}
 		else
 		{
@@ -3647,6 +3769,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 				Prop->RegisterComponent();
 				RoomPropByCell.Add(Pair.Key, Prop);
 			}
+			++PropsVersion;
 			Prop->SetStaticMesh(PropMesh);
 			Prop->SetVisibility(true);
 			// Fit the prop's larger horizontal dimension to a human-scale
@@ -3737,6 +3860,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			}
 			Light->SetLightColor(Temp);
 			LightMulByCell.Add(Pair.Key, Mul);
+			++LightMulVersion;
 		}
 	}
 
@@ -3747,18 +3871,33 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 	const FRHPowerState& Power = Sim->GetPower();
 	const float GridMul = (Power.bDeficit || Power.ShedCount > 0) ? 0.30f : 1.0f;
 	constexpr float BaseCandela = 120.f;
-	for (auto& LPair : LightByCell)
+	// C3: only a change of the inputs - the grid's state, which floors circulate,
+	// which lights exist, a room's brightness multiplier - touches the lights.
+	uint32 LightKey = HashCombine((uint32)(GridMul < 1.f ? 1 : 0), (uint32)LightByCell.Num());
+	LightKey = HashCombine(LightKey, LightMulVersion);
+	uint32 CirculationMask = 0;
+	for (int32 L = 0; L <= Sim->GetMaxDepth(); ++L)
 	{
-		UPointLightComponent* Light = LPair.Value.Get();
-		if (!Light)
+		CirculationMask |= Sim->IsFloorCirculated(-L) ? (1u << FMath::Min(L, 31)) : 0u;
+	}
+	LightKey = HashCombine(LightKey, CirculationMask);
+	if (!bLightKeyValid || LightKey != AppliedLightKey)
+	{
+		bLightKeyValid = true;
+		AppliedLightKey = LightKey;
+		for (auto& LPair : LightByCell)
 		{
-			continue;
-		}
-		const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
-		const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul * RoomMul : 0.f;
-		if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.5f))
-		{
-			Light->SetIntensity(Want);
+			UPointLightComponent* Light = LPair.Value.Get();
+			if (!Light)
+			{
+				continue;
+			}
+			const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
+			const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul * RoomMul : 0.f;
+			if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.5f))
+			{
+				Light->SetIntensity(Want);
+			}
 		}
 	}
 
@@ -3783,22 +3922,27 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		TEXT("/Game/RedHope/Art/Dress/RH_drum/StaticMeshes/RH_drum.RH_drum"),
 		TEXT("/Game/RedHope/Art/Props2/locker/StaticMeshes/locker.locker"),
 	};
+	TMap<int32, int32> ResidentsPerLevel;
+	if (bRoomsPass)
+	{
+		for (const FRHColonist& C : Sim->GetColonists())
+		{
+			++ResidentsPerLevel.FindOrAdd(C.HomeLevel);
+		}
+	}
 	for (const auto& TilesPair : TilesSpawnedPerLevel)
 	{
+		if (!bRoomsPass)
+		{
+			break;
+		}
 		const int32 L = TilesPair.Key;
 		const int32 Carved = TilesPair.Value;
 		if (Carved <= 0)
 		{
 			continue;
 		}
-		int32 Residents = 0;
-		for (const FRHColonist& C : Sim->GetColonists())
-		{
-			if (C.HomeLevel == L)
-			{
-				++Residents;
-			}
-		}
+		const int32 Residents = ResidentsPerLevel.FindRef(L);
 		if (Residents <= 0)
 		{
 			continue; // uninhabited floors stay bare

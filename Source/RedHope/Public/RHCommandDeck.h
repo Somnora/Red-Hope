@@ -4,6 +4,9 @@
 #include "Widgets/SCompoundWidget.h"
 
 class ARHPlayerController;
+class ITableRow;
+class STableViewBase;
+template <typename ItemType> class SListView;
 
 // Command deck v1 (M1-a Gate C): the mission-control surface. Pure C++ Slate
 // (UMG authoring is unavailable to this toolchain); functional gray-box now,
@@ -246,8 +249,19 @@ private:
 	TArray<FFleetRowView> FleetRows;
 	TArray<FName> FleetDefsShown;
 	TSharedPtr<class SVerticalBox> FleetList;
-	TSharedPtr<class SVerticalBox> RosterList;
-	int32 RosterCountShown = -1;
+	// The roster (C3): a virtualized list - only the rows on screen exist - whose
+	// rows bind by colonist Id (never by array index, which shifts under every
+	// arrival and departure), with a name search and filters. Rebuilt when the
+	// roster's membership or support state changes, so a same-count turnover (one
+	// leaves, one arrives) refreshes it too.
+	enum class ERosterFilter : uint8 { All, Unsupported, MarsBorn, FirstCrew };
+	TSharedPtr<SListView<TSharedPtr<int32>>> RosterListView;
+	TArray<TSharedPtr<int32>> RosterItems;
+	ERosterFilter RosterFilter = ERosterFilter::All;
+	FString RosterSearch;
+	uint32 RosterSigShown = 0;
+	bool bRosterSigValid = false;
+	TSharedRef<ITableRow> GenerateRosterRow(TSharedPtr<int32> Item, const TSharedRef<STableViewBase>& Owner);
 
 	TWeakObjectPtr<ARHPlayerController> PC;
 	// Info-card + toast state.

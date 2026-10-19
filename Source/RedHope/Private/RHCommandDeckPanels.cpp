@@ -24,6 +24,9 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSpacer.h"
@@ -773,12 +776,54 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			ExpandToggle(&bRosterExpanded)
 		]
 	];
+	// Search + filters + the virtualized list.
+	const auto FilterChip = [this](const TCHAR* Label, ERosterFilter Which) -> TSharedRef<SWidget>
+	{
+		return SNew(SButton)
+			.ButtonStyle(&D::TintButtonStyle())
+			.ContentPadding(FMargin(6.f, 1.f))
+			.ButtonColorAndOpacity_Lambda([this, Which]() { return RosterFilter == Which ? D::Teal * 0.45f : FLinearColor(0.05f, 0.08f, 0.10f, 0.9f); })
+			.OnClicked_Lambda([this, Which]() { RosterFilter = Which; return FReply::Handled(); })
+			[
+				SNew(STextBlock).Font(D::Label(9)).Text(Txt(Label)).ColorAndOpacity(D::Text)
+			];
+	};
 	Body->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
 	[
 		SNew(SBox)
 		.Visibility_Lambda([this]() { return bRosterExpanded ? EVisibility::Visible : EVisibility::Collapsed; })
 		[
-			SAssignNew(RosterList, SVerticalBox)
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SEditableTextBox)
+				.Font(D::Body(9))
+				.HintText(Txt(TEXT("search by name or #id")))
+				.OnTextChanged_Lambda([this](const FText& T) { RosterSearch = T.ToString(); })
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 3.f)
+			[
+				SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(3.f, 3.f))
+				+ SWrapBox::Slot()[FilterChip(TEXT("ALL"), ERosterFilter::All)]
+				+ SWrapBox::Slot()[FilterChip(TEXT("SHORT RATIONS"), ERosterFilter::Unsupported)]
+				+ SWrapBox::Slot()[FilterChip(TEXT("MARS-BORN"), ERosterFilter::MarsBorn)]
+				+ SWrapBox::Slot()[FilterChip(TEXT("FIRST CREW"), ERosterFilter::FirstCrew)]
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+				.Text_Lambda([this]() { return Txt(FString::Printf(TEXT("showing %d"), RosterItems.Num())); })
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SBox).MaxDesiredHeight(230.f)
+				[
+					SAssignNew(RosterListView, SListView<TSharedPtr<int32>>)
+					.ListItemsSource(&RosterItems)
+					.OnGenerateRow(this, &SRHCommandDeck::GenerateRosterRow)
+					.SelectionMode(ESelectionMode::None)
+				]
+			]
 		]
 	];
 
@@ -802,57 +847,99 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 		];
 }
 
-void SRHCommandDeck::RefreshRosterPanel()
+TSharedRef<ITableRow> SRHCommandDeck::GenerateRosterRow(TSharedPtr<int32> Item, const TSharedRef<STableViewBase>& Owner)
 {
-	const URHSimWorldSubsystem* Sim = GetSim();
-	if (!Sim || !RosterList.IsValid() || Sim->GetColonists().Num() == RosterCountShown)
-	{
-		return;
-	}
-	RosterCountShown = Sim->GetColonists().Num();
-	RosterList->ClearChildren();
-	for (int32 Index = 0; Index < RosterCountShown; ++Index)
-	{
-		RosterList->AddSlot().AutoHeight().Padding(0.f, 1.f)
+	// Bound by Id: the row asks the sim for ITS colonist every frame it is on
+	// screen, so it can never show someone else after the roster shifts.
+	const int32 Id = Item.IsValid() ? *Item : 0;
+	return SNew(STableRow<TSharedPtr<int32>>, Owner)
+		.Padding(FMargin(0.f, 1.f))
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot().FillWidth(1.f)
 			[
 				SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text)
-				.Text_Lambda([this, Index]()
+				.Text_Lambda([this, Id]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
-					return (S && S->GetColonists().IsValidIndex(Index)) ? Txt(S->GetColonists()[Index].Name) : FText::GetEmpty();
+					const FRHColonist* C = S ? S->FindColonist(Id) : nullptr;
+					return C ? Txt(C->Name) : FText::GetEmpty();
 				})
 			]
 			+ SHorizontalBox::Slot().AutoWidth()
 			[
 				SNew(STextBlock).Font(D::Body(9))
-				.Text_Lambda([this, Index]()
+				.Text_Lambda([this, Id]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
-					if (!S || !S->GetColonists().IsValidIndex(Index)) { return FText::GetEmpty(); }
-					const FRHColonist& C = S->GetColonists()[Index];
-					if (!C.bSupported)
+					const FRHColonist* C = S ? S->FindColonist(Id) : nullptr;
+					if (!C) { return FText::GetEmpty(); }
+					if (!C->bSupported)
 					{
 						// Placeholder wording (Gate-D framing review). C2a: the shortage is
 						// shared, so the line shows the ration the home gets, not a countdown.
-						return Txt(FString::Printf(TEXT("needs support - %.0f%% rations"), S->GetColonistRation(C) * 100.0));
+						return Txt(FString::Printf(TEXT("needs support - %.0f%% rations"), S->GetColonistRation(*C) * 100.0));
 					}
-					const FName Job = S->GetColonistJob(C.Id);
-					const FString Home = C.HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C.HomeLevel));
+					const FName Job = S->GetColonistJob(C->Id);
+					const FString Home = C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C->HomeLevel));
 					return Txt(FString::Printf(TEXT("%s%s%s"), *Home,
 						Job.IsNone() ? TEXT("") : TEXT("  -  "), Job.IsNone() ? TEXT("") : *Job.ToString().ToLower()));
 				})
-				.ColorAndOpacity_Lambda([this, Index]()
+				.ColorAndOpacity_Lambda([this, Id]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
-					const bool bOk = !S || !S->GetColonists().IsValidIndex(Index) || S->GetColonists()[Index].bSupported;
-					return FSlateColor(bOk ? D::TextDim : D::Amber);
+					const FRHColonist* C = S ? S->FindColonist(Id) : nullptr;
+					return FSlateColor((!C || C->bSupported) ? D::TextDim : D::Amber);
 				})
 			]
 		];
+}
+
+void SRHCommandDeck::RefreshRosterPanel()
+{
+	// Nothing to do while the roster is folded; open, it re-filters when the
+	// roster's membership or anyone's support state changes (Id, support and
+	// Mars-born are hashed in roster order, so one leaving as one arrives - the
+	// same count - still shows), or when the search or filter changes.
+	const URHSimWorldSubsystem* Sim = GetSim();
+	if (!bRosterExpanded || !Sim || !RosterListView.IsValid())
+	{
+		return;
 	}
+	uint32 Sig = HashCombine((uint32)RosterFilter, GetTypeHash(RosterSearch));
+	for (const FRHColonist& C : Sim->GetColonists())
+	{
+		Sig = (Sig * 16777619u) ^ (uint32)(C.Id * 4 + (C.bSupported ? 1 : 0) + (C.bMarsBorn ? 2 : 0));
+	}
+	if (bRosterSigValid && Sig == RosterSigShown)
+	{
+		return;
+	}
+	RosterSigShown = Sig;
+	bRosterSigValid = true;
+	// "First crew" = the original roster of twenty named faces, never the
+	// Mars-born (placeholder definition, pending the director's ruling).
+	constexpr int32 FirstCrewCount = 20;
+	FString Needle = RosterSearch.TrimStartAndEnd();
+	const bool bById = Needle.StartsWith(TEXT("#")) && Needle.Mid(1).IsNumeric();
+	const int32 WantId = bById ? FCString::Atoi(*Needle.Mid(1)) : 0;
+	RosterItems.Reset();
+	for (const FRHColonist& C : Sim->GetColonists())
+	{
+		switch (RosterFilter)
+		{
+		case ERosterFilter::Unsupported: if (C.bSupported) { continue; } break;
+		case ERosterFilter::MarsBorn: if (!C.bMarsBorn) { continue; } break;
+		case ERosterFilter::FirstCrew: if (C.bMarsBorn || C.Id > FirstCrewCount) { continue; } break;
+		default: break;
+		}
+		if (bById ? C.Id != WantId : (!Needle.IsEmpty() && !C.Name.Contains(Needle, ESearchCase::IgnoreCase)))
+		{
+			continue;
+		}
+		RosterItems.Add(MakeShared<int32>(C.Id));
+	}
+	RosterListView->RequestListRefresh();
 }
 
 // --- Fleet ---

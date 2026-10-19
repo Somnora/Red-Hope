@@ -10,6 +10,7 @@
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHCrewVisualizerSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
+#include "RHFrameStats.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
@@ -17,7 +18,10 @@
 #include "Engine/World.h"
 #include "HAL/PlatformMemory.h"
 #include "HAL/PlatformMisc.h"
+#include "Containers/Ticker.h"
 #include "Misc/CoreDelegates.h"
+#include "RenderTimer.h"
+#include "DynamicRHI.h"
 #include "TimerManager.h"
 #include "UnrealClient.h"
 
@@ -1184,6 +1188,151 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAddColonists(
 			const int32 Housed = Sim->Debug_AddColonists(FCString::Atoi(*Args[0]));
 			UE_LOG(LogRedHope, Display, TEXT("Housed %d colonist(s); population %d"), Housed, Sim->GetPopulation());
 		}
+	}));
+
+// C3 (living-city gate 3): the -scale suite's big colony in a running game, and
+// the instrument that measures what it costs on screen.
+static FAutoConsoleCommandWithWorldAndArgs GRHCityBench(
+	TEXT("RH.CityBench"),
+	TEXT("RH.CityBench <N> - DEBUG: stand up the -scale suite's city (shaft to -5, 1,050 furnished cells, five floors) and move N colonists in. Needs a fresh colony (no shaft yet). For measuring crowds: pair with RH.Floor -1 and RH.FrameStats."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CityBench <N>"));
+			return;
+		}
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		const int32 N = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 5000);
+		const double T0 = FPlatformTime::Seconds();
+		const URHSimWorldSubsystem::FRHScaleColonyReport Rep = Sim->Debug_BuildScaleColony(N);
+		for (const FString& E : Rep.Errors) { UE_LOG(LogRedHope, Error, TEXT("RH.CityBench: %s"), *E); }
+		// Everyone starts in residence, as after a load: not 3,000 people marching in
+		// from the supply pad one frame later.
+		if (URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>())
+		{
+			Crew->Debug_SettleCrew();
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[CityBench] %d colonists housed (target %d, population %d) | %d floors x %d cells | %d beds, %d work seats, %d refused orders | built in %.0f ms"),
+			Rep.Housed, N, Sim->GetPopulation(), Rep.Floors, Rep.CellsPerFloor, Rep.Capacity, Rep.SeatsTotal, Rep.Rejected, (FPlatformTime::Seconds() - T0) * 1000.0);
+	}));
+
+namespace
+{
+	// One RH.FrameStats window in flight. A core-ticker callback runs once a
+	// frame: the gap between calls is the real frame time (render, RHI and sleep
+	// included), and the slot totals the two visualizers accumulated since the
+	// last call are that frame's game-thread cost.
+	struct FFrameStatsRun
+	{
+		TWeakObjectPtr<UWorld> World;
+		double Seconds = 10.0;
+		double StartS = 0.0;
+		double LastS = 0.0;
+		TArray<float> FrameMs;
+		double SlotMs[RHFrameStats::SlotCount] = { 0.0, 0.0 };
+		double GameMs = 0.0, RenderMs = 0.0, GpuMs = 0.0; // engine's own per-frame thread timers, summed
+		int32 Frames = 0;
+		FString Tag;
+		int32 StartPromotions = 0, StartDemotions = 0;
+		TArray<FString> Spikes; // frames over 150 ms: when, how long, what the two visualizers cost in it
+	};
+	TSharedPtr<FFrameStatsRun> GFrameStatsRun;
+
+	void ReportFrameStats(const FFrameStatsRun& Run)
+	{
+		TArray<float> Sorted = Run.FrameMs;
+		Sorted.Sort();
+		const int32 N = Sorted.Num();
+		if (N == 0) { UE_LOG(LogRedHope, Warning, TEXT("[FrameStats] no frames sampled")); return; }
+		double Sum = 0.0;
+		for (const float F : Sorted) { Sum += F; }
+		const float Med = Sorted[N / 2];
+		const float P95 = Sorted[FMath::Min(N - 1, (int32)FMath::CeilToInt(0.95f * N) - 1)];
+		int32 Actors = 0, Skel = 0, Pooled = 0, Crowd = 0, CrowdDet = 0, Promos = 0, Demos = 0, CrowdAll = 0, TrackedN = 0;
+		bool bTier = false;
+		int32 BuildActors = 0, TileActors = 0, Pop = 0, ViewLevel = 0;
+		if (UWorld* W = Run.World.Get())
+		{
+			if (const URHCrewVisualizerSubsystem* Crew = W->GetSubsystem<URHCrewVisualizerSubsystem>())
+			{
+				const URHCrewVisualizerSubsystem::FFigureCounts C = Crew->GetFigureCounts();
+				Actors = C.Actors; Skel = C.Skeletal; Pooled = C.Pooled; Crowd = C.CrowdInstances; CrowdDet = C.CrowdDetail; Promos = C.Promotions - Run.StartPromotions; Demos = C.Demotions - Run.StartDemotions; CrowdAll = C.CrowdRecords; TrackedN = C.Tracked; bTier = C.bTiered;
+			}
+			if (const URHColonyVisualizerSubsystem* Colony = W->GetSubsystem<URHColonyVisualizerSubsystem>())
+			{
+				BuildActors = Colony->GetBuildingActorCount();
+				TileActors = Colony->GetTileActorCount();
+				ViewLevel = Colony->GetViewLevel();
+			}
+			if (const URHSimWorldSubsystem* Sim = W->GetSubsystem<URHSimWorldSubsystem>()) { Pop = Sim->GetPopulation(); }
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s window %.1f s, %d frames | frame ms: avg %.2f, median %.2f, p95 %.2f, max %.2f (median %.1f fps) | population %d, view floor %d | crew: %s, %d full figures tracked, %d figure actors (%d skeletal, %d pooled), %d crowd records (%d drawn on the viewed floor, %d of them in full mesh detail), tier swaps in the window: %d promotions / %d demotions | colony: %d building actors, %d tile actors | game-thread ms/frame: crew tick %.3f, colony tick %.3f | engine threads ms/frame: game %.1f, render %.1f, GPU %.1f"),
+			*Run.Tag, Run.Seconds, N, Sum / N, Med, P95, Sorted.Last(), Med > 0.f ? 1000.f / Med : 0.f, Pop, ViewLevel,
+			bTier ? TEXT("crowd mode") : TEXT("all full"), TrackedN, Actors, Skel, Pooled, CrowdAll, Crowd, CrowdDet, Promos, Demos, BuildActors, TileActors,
+			Run.SlotMs[RHFrameStats::Crew] / N, Run.SlotMs[RHFrameStats::Colony] / N, Run.GameMs / N, Run.RenderMs / N, Run.GpuMs / N);
+	}
+}
+
+static FAutoConsoleCommandWithWorldAndArgs GRHFrameStats(
+	TEXT("RH.FrameStats"),
+	TEXT("RH.FrameStats <Seconds=10> [Tag] - DEBUG: sample real frame times for a window, then log [FrameStats]: avg, median and p95 ms, crew figure actors and skeletal components, building actors, and the game-thread ms the crew and colony visualizer ticks cost per frame."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		if (GFrameStatsRun.IsValid())
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("RH.FrameStats: a window is already running"));
+			return;
+		}
+		TSharedPtr<FFrameStatsRun> Run = MakeShared<FFrameStatsRun>();
+		Run->World = World;
+		Run->Seconds = Args.Num() > 0 ? FMath::Max(0.5, (double)FCString::Atof(*Args[0])) : 10.0;
+		Run->Tag = Args.Num() > 1 ? Args[1] : TEXT("");
+		Run->StartS = FPlatformTime::Seconds();
+		Run->LastS = Run->StartS;
+		if (const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>())
+		{
+			const URHCrewVisualizerSubsystem::FFigureCounts C0 = Crew->GetFigureCounts();
+			Run->StartPromotions = C0.Promotions;
+			Run->StartDemotions = C0.Demotions;
+		}
+		for (double& S : RHFrameStats::GSlotSeconds) { S = 0.0; }
+		GFrameStatsRun = Run;
+		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] sampling %.1f s"), Run->Seconds);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Run](float)
+		{
+			const double Now = FPlatformTime::Seconds();
+			Run->FrameMs.Add((float)((Now - Run->LastS) * 1000.0));
+			Run->LastS = Now;
+			if (Run->FrameMs.Last() > 150.f && Run->Spikes.Num() < 8)
+			{
+				Run->Spikes.Add(FString::Printf(TEXT("+%.1fs %.0f ms (crew %.1f, colony %.1f)"), Now - Run->StartS, Run->FrameMs.Last(),
+					RHFrameStats::GSlotSeconds[RHFrameStats::Crew] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Colony] * 1000.0));
+			}
+			for (int32 S = 0; S < RHFrameStats::SlotCount; ++S)
+			{
+				Run->SlotMs[S] += RHFrameStats::GSlotSeconds[S] * 1000.0;
+				RHFrameStats::GSlotSeconds[S] = 0.0;
+			}
+			Run->GameMs += FPlatformTime::ToMilliseconds(GGameThreadTime);
+			Run->RenderMs += FPlatformTime::ToMilliseconds(GRenderThreadTime);
+			Run->GpuMs += FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles());
+			if (Now - Run->StartS < Run->Seconds)
+			{
+				return true;
+			}
+			// Drop the first sample: it spans the command itself, not a frame.
+			if (Run->FrameMs.Num() > 1) { Run->FrameMs.RemoveAt(0); }
+			ReportFrameStats(*Run);
+			if (Run->Spikes.Num() > 0)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s frames over 150 ms: %s"), *Run->Tag, *FString::Join(Run->Spikes, TEXT("; ")));
+			}
+			GFrameStatsRun.Reset();
+			return false;
+		}));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDeliver(

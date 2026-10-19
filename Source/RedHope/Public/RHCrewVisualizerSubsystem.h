@@ -5,9 +5,14 @@
 #include "RHHabLayout.h"
 #include "RHCrewVisualizerSubsystem.generated.h"
 
+class AActor;
+struct FStreamableHandle;
+class UInstancedStaticMeshComponent;
+class USkeletalMesh;
 class USkeletalMeshComponent;
 class UStaticMeshComponent;
 struct FRHColonist;
+struct FRHBuildingInstance;
 class UTextRenderComponent;
 
 // Presentation mirror of the crew (M2 Gate A2): one small suited figure per
@@ -25,6 +30,17 @@ class UTextRenderComponent;
 //               back down ("the crew takes air", the A2 spec's surface beat).
 // Visibility obeys the pit view's hard cut: a figure shows iff the floor it
 // currently stands on IS the viewed floor.
+//
+// Crowds (C3, living-city gate 3): a colony of thousands cannot be thousands of
+// animated actors. Up to rh.CrewFullFigures colonists are FULL figures - the
+// animated walkers above, name plates, emotes, furniture, airlocks, suits - and
+// a colony that small is entirely full, exactly as before. Past that, only the
+// nearest that many to the camera on the viewed floor are full (re-ranked a few
+// times a second, with hysteresis so figures do not flicker between tiers);
+// everyone else on the viewed floor is an instance of a static colonist mesh,
+// walking a simplified presentation routine (home, work post, a wander spot; no
+// avoidance, no components of their own), and everyone on other floors costs
+// nothing per frame. Walker actors are pooled, not spawned and destroyed.
 UCLASS()
 class REDHOPE_API URHCrewVisualizerSubsystem : public UTickableWorldSubsystem
 {
@@ -149,8 +165,155 @@ public:
 	// a fixed point and hoping someone walks through it. False when the index
 	// is past the roster or that figure no longer exists.
 	bool Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const;
+	// RH.FrameStats: what the crew mirror is made of right now.
+	struct FFigureCounts { int32 Actors = 0; int32 Skeletal = 0; int32 Pooled = 0; int32 CrowdInstances = 0; int32 CrowdRecords = 0; int32 CrowdDetail = 0; int32 Promotions = 0; int32 Demotions = 0; int32 Tracked = 0; bool bTiered = false; };
+	FFigureCounts GetFigureCounts() const;
+	// RH.CityBench: re-seed every figure in residence (as after a reload) instead
+	// of marching the new colonists in from the supply pad.
+	void Debug_SettleCrew() { HandleColonyReloaded(); }
 
 private:
+	// ---- Crowds (C3) ----
+	// A colonist drawn as an instance: a place, a place to go, a clock. No actor.
+	struct FCrowdFigure
+	{
+		int32 Id = 0;
+		int32 Level = 0;
+		uint8 Variant = 0;           // which of the 20 roster meshes
+		float Scale = 1.f;           // build height / the mesh's fitted height
+		bool bMoving = false;
+		bool bDetail = false;        // drawn with the full static mesh (else the cheap primitive figure)
+		FVector Pos = FVector::ZeroVector;
+		FVector Target = FVector::ZeroVector;
+		float YawDeg = 0.f;
+		double NextDecideS = 0.0;    // world seconds
+		// Cached posts (a bed's side, the desk's chair), re-derived when the
+		// layout stamp moves. Zero = none.
+		FVector BedSpot = FVector::ZeroVector;
+		FVector WorkSpot = FVector::ZeroVector;
+		uint32 SpotStamp = 0;
+	};
+	// A walker actor between uses: hidden, not ticking, mesh and rig intact.
+	struct FPooledFigure
+	{
+		TWeakObjectPtr<AActor> Actor;
+		TWeakObjectPtr<USkeletalMeshComponent> Skel;
+		TWeakObjectPtr<UTextRenderComponent> Name;
+		TWeakObjectPtr<UTextRenderComponent> Emote;
+	};
+	// Uniform grid over the full figures for the per-frame "who is near me"
+	// questions (steering and easing apart): O(neighbours), not O(everyone).
+	struct FFigureGrid
+	{
+		static constexpr float CellCm = 160.f;
+		TArray<TPair<int32, FVector>> Entries;
+		TMap<int64, TArray<int32>> Cells;
+		static int64 KeyOf(int32 Level, const FVector& P)
+		{
+			const int64 Cx = (int64)FMath::FloorToInt(P.X / CellCm) & 0xFFFFFF;
+			const int64 Cy = (int64)FMath::FloorToInt(P.Y / CellCm) & 0xFFFFFF;
+			return ((int64)(Level + 128) << 48) | (Cx << 24) | Cy;
+		}
+		void Reset() { Entries.Reset(); Cells.Reset(); }
+		void Add(int32 Level, int32 Id, const FVector& P)
+		{
+			Cells.FindOrAdd(KeyOf(Level, P)).Add(Entries.Num());
+			Entries.Emplace(Id, P);
+		}
+		// Calls Fn(Id, Pos) for every entry within one grid cell of P on Level
+		// (a superset of "within CellCm"); the caller applies its own radius.
+		template <typename F>
+		void ForNear(int32 Level, const FVector& P, F&& Fn) const
+		{
+			for (int32 Dx = -1; Dx <= 1; ++Dx)
+			{
+				for (int32 Dy = -1; Dy <= 1; ++Dy)
+				{
+					if (const TArray<int32>* Bucket = Cells.Find(KeyOf(Level, P + FVector(Dx * CellCm, Dy * CellCm, 0.f))))
+					{
+						for (const int32 I : *Bucket) { Fn(Entries[I].Key, Entries[I].Value); }
+					}
+				}
+			}
+		}
+	};
+
+	// Assets are loaded once: every clip change and suit swap used to LoadObject.
+	UObject* LoadCachedObject(const FString& Path, UClass* Class);
+	USkeletalMesh* CachedSkeletalMesh(const FString& Path);
+	class UAnimSequence* CachedAnim(const FString& Path);
+	UPROPERTY(Transient) TMap<FName, TObjectPtr<UObject>> AssetCache;
+
+	// Every face's walker and clips, requested in the background when crowd mode starts.
+	void PreloadCrewAssets();
+	TSharedPtr<FStreamableHandle> PreloadHandle;
+
+	// Pool of walker actors.
+	TArray<FPooledFigure> FigurePool;
+	void ReleaseFigure(FCrewVisual& Vis);
+
+	// The tiers.
+	TMap<int32, TArray<FCrowdFigure>> CrowdFloors; // level -> figures drawn as instances
+	bool bTiered = false;
+	uint32 RosterSignature = 0;
+	bool bRosterSignatureValid = false;
+	double NextRerankS = 0.0;
+	int32 LastRankLevel = INT32_MIN;
+	int32 PendingPromotions = 0;
+	int32 PromotionsTotal = 0, DemotionsTotal = 0; // tier swaps since boot, for RH.FrameStats
+	void SyncRoster(const TArray<FRHColonist>& Roster, int32 ViewLevel, double Now);
+	void RerankTiers(int32 ViewLevel, double Now);
+	bool PromoteToFull(const FRHColonist& C, const FCrowdFigure& F, double Now);
+	void DemoteToCrowd(int32 ColonistId);
+	FVector HomeWanderCm(const FRHColonist& C);
+	void AddCrowdFigure(const FRHColonist& C, double Now);
+	void TickCrowd(float DeltaTime, float Pace, double Now, int32 ViewLevel);
+	void CrowdDecide(FCrowdFigure& F, const FRHColonist* C, double Now);
+	// The instanced crowd: one ISM per roster mesh on one host actor.
+	UPROPERTY(Transient) TObjectPtr<AActor> CrowdActor;
+	UPROPERTY(Transient) TArray<TObjectPtr<UInstancedStaticMeshComponent>> CrowdISMs;
+	TArray<float> CrowdFitScale;
+	TArray<FVector> CrowdBaseScale; // per variant: 180 cm / mesh height (or the primitive's proportions)
+	TArray<float> CrowdZOffsetCm;   // per variant: lifts the primitive fallback onto the floor
+	UPROPERTY(Transient) TObjectPtr<UInstancedStaticMeshComponent> ProxyBodyISM;
+	UPROPERTY(Transient) TObjectPtr<UInstancedStaticMeshComponent> ProxyHeadISM;
+	TArray<FTransform> ProxyBodyXforms, ProxyHeadXforms;
+	int32 CrowdDetailCount = 0;
+	TMap<int32, int32> CrowdLevelById; // colonist Id -> the floor of the crowd record it is in
+	TWeakObjectPtr<UTextRenderComponent> LastSpawnName, LastSpawnEmote; // SpawnFigure's plates (new or pooled)
+	TArray<TArray<FTransform>> CrowdXforms; // per variant, this frame
+	int32 CrowdInstanceCount = 0;
+	void EnsureCrowdRig();
+	void ClearCrowdRig();
+
+	// Caches keyed on the layout stamp, which any building / furnishing / order
+	// event bumps (and which expires after a few seconds regardless).
+	uint32 LayoutStamp = 1;
+	double LayoutStampBornS = 0.0;
+	uint32 CachesStamp = 0;
+	void BumpLayoutStamp() { ++LayoutStamp; }
+	void RefreshCaches(double Now);
+	struct FLevelRooms { TMap<FName, int32> FirstByRoom; TMap<FName, int32> FirstByFunction; int32 Carved = -1; };
+	TMap<int32, FLevelRooms> RoomCells;                 // level -> first cell per room / job function
+	const FLevelRooms& RoomCellsFor(int32 Level);
+	TMap<int32, TArray<FVector>> HabCentresByRoot;      // network root -> every bay centre
+	TMap<TPair<int32, FName>, FVector> HabRoomFirst;    // (root, room) -> first matching bay centre
+	bool bHabCacheValid = false;
+	TMap<int32, const FRHBuildingInstance*> BuildingsById; // valid until the next building event
+	bool bBuildingIndexValid = false;
+	bool bAirlocksValid = false;
+	uint32 AssignCacheStamp = 0;
+	TMap<int32, TArray<int32>> BedUsers, SeatUsers;     // piece -> colonist Ids (ascending)
+	double AssignCacheBornS = -1.0e9;
+	uint32 AssignCacheRoster = 0;
+	void RefreshAssignCache(double Now);
+	TMap<int64, TArray<TPair<int32, int32>>> HomePlaces; // (home key, meal) -> (piece, berth)
+	TMap<uint64, int32> SeatOwners;                      // (piece, berth) -> colonist Id, full figures
+	static uint64 SeatKey(int32 Piece, int32 Berth) { return ((uint64)(uint32)Piece << 8) | (uint64)(uint8)Berth; }
+	uint32 FurnitureObstacleVersion = 0;
+	double FurnitureObstacleBornS = -1.0e9;
+	FFigureGrid FullGrid;
+	void HandleLayoutEvent() { BumpLayoutStamp(); }
 	void HandleColonyReloaded();
 	// Alive pass: the sim's crew-life beats made visible - pairs gather for
 	// pastimes, a helper walks to the worker they're joining, disputes read as
@@ -185,16 +348,16 @@ private:
 	// deterministic seat around the cell centre keyed by SeatSeed (colonist Id)
 	// so workers stand at the bench, not inside it; zero when none exists.
 	// OutFaceYawDeg (optional) = the yaw that faces the prop from that seat.
-	FVector JobPointCm(int32 Level, FName JobFunction, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	FVector JobPointCm(int32 Level, FName JobFunction, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
 	// Same seat ring, but keyed by ROOM ROW NAME instead of job function - for
 	// off-shift beats at rooms that aren't jobs (a meal at the Dining table).
-	FVector RoomSeatCm(int32 Level, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	FVector RoomSeatCm(int32 Level, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
 	// BM-2: a surface resident's spots in their habitat NETWORK. RoomRowName
 	// None = a wander point in any bay; else a seat at the first bay of that
 	// room (members by Id, bays in order). Zero vector when none exists.
-	FVector HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	FVector HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
 	// BM-2: the seat at a colonist's actual station (bay or in-bay module).
-	FVector StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg = nullptr) const;
+	FVector StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
 	// Director 2026-10-16: on the surface, people walk through doorways and
 	// airlocks. Routes a surface walk From -> To into waypoints + acts.
 	void SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const;
@@ -205,10 +368,10 @@ private:
 	bool FurnitureSeatFor(int32 PieceId, int32 Berth, const FString& Activity, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const;
 	// The berth of a sim-assigned bed or work-seat piece a colonist uses:
 	// their rank (by Id) among the colonists the sim gave that same piece.
-	int32 AssignedBerth(int32 ColonistId, int32 PieceId, bool bBed) const;
+	int32 AssignedBerth(int32 ColonistId, int32 PieceId, bool bBed);
 	// A free presentation seat in the colonist's home (dining at meals, sofa
 	// and living-room seats off duty) - one nobody else is in or heading to.
-	bool FindHomeSeat(const FRHColonist& C, bool bMeal, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg) const;
+	bool FindHomeSeat(const FRHColonist& C, bool bMeal, float HeightCm, FFurnitureSeat& Out, float& OutFaceYawDeg);
 	// The airlocks this frame (derived from the habitat layout, see RHHabLayout.h).
 	TArray<FRHAirlock> Airlocks;
 
