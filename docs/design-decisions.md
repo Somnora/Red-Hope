@@ -470,3 +470,17 @@ The design is `docs/qa/2026-10-19/c5-districts-design.md`, section C5b-R (it rep
 - **Done.** RemainingSols counts down linearly. In one step the site is re-checked (placement without the material check), then the building is added, the cells carved, the rooms zoned and furnished directly, and the new air filled from the bill so the home stays rated. A site that no longer fits refunds the whole bill; so does erasing the district.
 - **Data.** New RH_Rooms columns `CivicService` (TRUE for Dining and Infirmary) and `CivicFurniture`; seven Growth rows in RH_Config (the six asked for plus GrowthBunksPerHome).
 - **Deviations and open points, for the director.** (1) A surface network's air push is a flat `O2FillRateKgPerHour`, so past about 240 bays its leak (2 kg a bay a sol) outruns the push and it loses its rating on its own; growth keeps extending it (the rules say nothing else), so a big enough Homes district can grow a network out of its own air. A cap, or a push that scales with bays, is a follow-up. (2) Homes growth runs no adjacency check (the plan puts it on Civic only): on a floor the new cells land where the spiral says, and beside Gardens they cost Hope. (3) The growth switch is instant, like the machine switches, not an uplink order. (4) The surface adjacency term of the Hope index looks emitters up by position (twelve cells) instead of comparing every pair: the same pairs (the -scale sink digest is identical), and a Hope read with 500 grown bays and a hundred emitters drops from 0.42 ms to 0.13 ms.
+
+### Growth versus Earth's quotas: the player's City / Earth share (2026-10-19)
+
+C5b/C5c playtests showed growth and the quota ladder competing for the same Struct (bills rise x1.25 per round, about as fast as the Forge):
+- sparing only the open quota gave a city of 117, with the third supply round at sol 104;
+- also sparing the next round put the quotas back on time (sol 45) but stopped growth (pop 8).
+
+The director chose **option a: the player sets a City / Earth share** in the City panel (default 50%), deciding how much of the colony's spare material grows the city versus the next quota. It is a deliberately political choice: build Mars, or pay Earth. Tuned by playtest so both the city and the supply line move at the default.
+
+Also ruled: the City panel's "Air" bar is renamed **"Rations"**. It also fills on food and water shortages.
+
+Queued with it:
+- the Big Arrival's life-support gate becomes production-aware (net O2, food and water production must carry the new draw, not just stock on hand);
+- settler ships get the same check.
