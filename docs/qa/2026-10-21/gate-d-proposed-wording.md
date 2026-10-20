@@ -9,6 +9,8 @@ This is a proposal for the director's Gate-D framing review. It covers every row
 
 **Totals:** 169 rows: 43 proposed, 122 kept, 4 retired (their strings no longer exist), and 9 mechanics flagged for the director.
 
+**Answered 2026-10-21: the director approved ALL proposed rows as written.** The flagged mechanics F1-F9 are not yet ruled. Application follows D1 in one commit (strings, CSV rows with DT live-sync, and any suite assertions on alert text).
+
 **To answer,** write something like: "approve all proposed except D21: keep STRAINED; F4: discuss". Approved text is applied exactly as written. CSV rows need a DT live-sync. Only strings change, so the battery baseline must stay identical, except suites that assert on alert text, which will be updated in the same commit.
 
 **File key:**
