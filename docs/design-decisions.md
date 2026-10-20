@@ -536,3 +536,13 @@ The director's "yes to both" to the two follow-ups C5d left open. No save change
 
   At the default 50% the target is met: 124 people by sol 110 with nobody recalled and the third Q3 round at sol 44. How it is met: a ship's settlers are three at this size (floor((Hope - 70) / 30 x max(4, 0.2 N))), so the settlers alone reach 19 people by sol 90 (the sol the wave lands); the several dozen is the Big Arrival. The old bot under the new rule reaches only 10 and recalls nobody (under C5d's rule it recalled 6): the rule alone keeps the colony fed, the bot is what lets it grow. The quota term is what moves the supply line (rounds at 31 / 34 / 44 against 36 / 46 / 59).
 - **Limits the playtests show (open points).** (1) After the wave the colony is under-fed: at sol 110 the 50% run makes 37 kg of food a sol against 77 drawn (the wave's 5,000 kg of provisions last about 60 sols), and 64 against 74 at 75%. Power is the brake: the bot throttles on owed kits (10 owed at the end), the ships bring at most two plus eight kits, and the power was short about half the run even before the wave; without the throttle the garden floor ran 70 cells and the lights went dark. (2) Water production is zero at sol 110: Ice_B is the last known ice and runs out (the alert says so); the bot's extra drill and plant sit on it. A third survey is not in the bot. (3) The Electrolyzer count and the garden's size are rules of thumb of the bot (about 100 kg of oxygen per Electrolyzer, 0.8 of a cell's nameplate food), not the sim's.
+
+### C6, traffic: the director's answers (2026-10-20)
+
+Design, professor review (BLOCKED), revision and re-review (CLEARED WITH CONDITIONS): `docs/qa/2026-10-20/c6-traffic-design.md`. Answers: **Q1a Q2a Q3a** (all three recommendations).
+
+- **Q1a. Cargo rovers come from Earth** as a manifest item (`CargoRover`), like extra haulers. They are real sim vehicles that need roads.
+- **Q2a. A commute is each colonist's own trip,** from their actual home to their actual workplace, by roads, open ground and lifts.
+  - Districts group the trips for the flow picture and the traffic overlay. They are never an exemption: unzoned ends and trips inside one big district count.
+  - The cost (Hope by the share of long commuters, and work time) phases in with population, from 60 to 160 people. So a crew-sized colony never feels it, and building a road can only shorten trips; it never switches a penalty on.
+- **Q3a. Roads can be torn up,** with 50% of their Struct back, like buildings. A rover already on a removed road slows to a crawl and finishes its trip.
