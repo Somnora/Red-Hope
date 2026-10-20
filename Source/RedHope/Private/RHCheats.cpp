@@ -1977,7 +1977,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 			const URHSimWorldSubsystem::FRHSupportLeg L = Sim->GetSupportLeg(FName(Res), Sim->GetPopulation());
 			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: makes %.1f kg/sol, draws %.1f at %d people (net %.1f), stock %.0f = %.1f sols of the deficit"), Res, L.ProductionPerSol, L.DrawPerSol, Sim->GetPopulation(), L.NetPerSol(), L.StockKg, L.CoverSols);
 		}
-		UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   life support carries %d more settler%s (a deficit must be covered by the stock for %.0f sols)"), Sim->GetSettlerSupportRoom(), Sim->GetSettlerSupportRoom() == 1 ? TEXT("") : TEXT("s"), Sim->GetLifeSupportDeficitCoverSols());
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   life support carries %d more settler%s (settlers need net production >= 0 on every leg and the stores behind it; the Big Arrival may also lean on %.0f sols of stock)"), Sim->GetSettlerSupportRoom(), Sim->GetSettlerSupportRoom() == 1 ? TEXT("") : TEXT("s"), Sim->GetLifeSupportDeficitCoverSols());
 		if (const URHGrowthVisualizerSubsystem* Viz = World->GetSubsystem<URHGrowthVisualizerSubsystem>())
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %d scaffold%s drawn in the viewed level"), Viz->GetDrawnProjectCount(), Viz->GetDrawnProjectCount() == 1 ? TEXT("") : TEXT("s"));

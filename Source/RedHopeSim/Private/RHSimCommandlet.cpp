@@ -6359,9 +6359,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//  (h) C5d, life support counts PRODUCTION: each leg's measured production against its draw at N + the wave
 	//      (net >= 0, or the stock covering the deficit for LifeSupportDeficitCoverSols sols) on its boundary; the
 	//      old lean state (pop 8, oxygen 30 a sol against 81, 1,510 kg in the pool) refused where C5c passed it; the
-	//      wave holding on production and landing when it recovers; settler ships capped to what each leg carries
-	//      (boundaries, the zero case, the demand's words); the ledger (window mean, the open tally, a gap, the
-	//      save / load round trip) and a real Electrolyzer feeding it.
+	//      wave holding on production and landing when it recovers; the ledger (window mean, the open tally, a gap,
+	//      the save / load round trip) and a real Electrolyzer feeding it.
+	//      C5e, settlers come only on NET PRODUCTION: a ship is capped to the least of the three legs, each of which
+	//      needs net production >= 0 at N + k (the stock cover does not admit settlers; boundaries at the kilo and the
+	//      hundredth) AND C5c's stock check at N + k; both must pass; the demand's words for production short, stores
+	//      short and both. Before block h the harness credits the ledger every step (bLedgerAmple), so the earlier
+	//      blocks' ships still carry their settlers.
 	if (FParse::Param(*Params, TEXT("arrivals")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST (C2b, 2026-10-18) ==="));
@@ -6446,10 +6450,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		const FDelegateHandle ShipH = Sim->OnShipArrived.AddLambda([&Landings](const TArray<FName>&) { ++Landings; });
 
 		double InjectO2 = 0.0, InjectWater = 0.0, InjectFood = 0.0; // C5d (block h): kg a sol the harness "makes" every step, as a machine would
+		// C5e: settlers come only on net production, so the blocks before h (real ships, the settler formula, the
+		// scale run) need a ledger that shows a colony making far more than it draws. The harness credits the ledger
+		// (not the stores) every step while this is on; block h sets its own figures and switches it off.
+		bool bLedgerAmple = true;
 		const auto TopUp = [&]()
 		{
 			Sim->Debug_AddFreshWater(500.0 * EraDt / SolLen);
 			Sim->Debug_SetBatteryWh(1.0e9);
+			if (bLedgerAmple)
+			{
+				for (const FName& Res : { NOxygen, NWater, NFood }) { Sim->Debug_NoteProduced(Res, 1.0e7 * EraDt / SolLen); }
+			}
 			for (const TPair<FName, double>& Make : { TPair<FName, double>(NOxygen, InjectO2), TPair<FName, double>(NWater, InjectWater), TPair<FName, double>(NFood, InjectFood) })
 			{
 				if (Make.Value > 0.0)
@@ -7187,6 +7199,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				const bool bLoaded = Sim->LoadColony(TEXT("arrivals_base"), E) && E.IsEmpty();
 				Alerts.Reset();
 				InjectO2 = InjectWater = InjectFood = 0.0;
+				bLedgerAmple = false;
 				Sim->Debug_SetHopeGates(101.0, 101.0);
 				Sim->Debug_SetColonistsPerCell(5.0);
 				Sim->Debug_SetBigArrivalDone(true);
@@ -7299,53 +7312,123 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				InjectO2 = 0.0;
 			}
 
-			// h3. Settler ships: capped to what each leg carries. A city of 200 at Hope 95 draws min(50, 33) = 33 settlers; the
-			// other two legs are ample and the leg under test makes nothing, so it carries k more where
-			// stock / 40 = (N + k) x per-head draw + the fixed draw (the leak): k = floor((stock / 40 - fixed) / per-head) - N.
+			// h3. Settler ships (C5e: settlers come only on NET PRODUCTION). A city of 200 at Hope 95 draws min(50, 33) = 33
+			// settlers. Per leg, production must cover the draw at N + k (net >= 0: the stock cover that lets the Big Arrival
+			// through does NOT admit settlers) AND the stock must pass C5c's check at N + k (the O2 pool >= heads x 0.75 x 10;
+			// the Food and Water runways at heads >= 10 sols). The leg under test is the only one that binds; the other two are ample.
 			{
 				Expect(LoadSmall(200, true), TEXT("h3 setup: a city of 200 on three rated floors, Hope held at 95"));
 				const int32 WantH = Sim->GetImmigrationCount(Sim->GetHopeSmoothed(), Sim->GetPopulation(), Sim->GetFreeHousing(), Sim->GetHousingComfortCapacity());
 				Expect(WantH == 33, FString::Printf(TEXT("h3 a ship would bring %d settlers at Hope %.1f and a population of 200 (floor(25/30 x max(4, 0.2 x 200)) = 33, beds enough)"), WantH, Sim->GetHopeSmoothed()));
-				const auto Settlers = [&](const FLeg& L, double StockKg, int32& OutRoom, int32& OutHeldLogs) -> int32
+				const double FloorDays = Sim->GetFoodRunwayFloorSols();
+				const double O2Days = Sim->GetBigArrivalLifeSupportSols();
+				// C5c's stock check per head: O2 x BigArrivalLifeSupportSols; the raw water and food draw x FoodRunwayFloorSols.
+				const double StockHead[3] = { O2Head * O2Days, Sim->GetColonistWaterKgPerSol() * FloorDays, FoodHead * FloorDays };
+				// What a leg's stock must hold for the stock check to carry Heads people (these three are pool resources: no store to add).
+				const auto StockFor = [&](int32 LegIx, double Heads) -> double { return Heads * StockHead[LegIx]; };
+				// The production that carries exactly Heads people on a leg: heads x per-head draw + the fixed draw (the leak).
+				const auto MadeFor = [&](const FLeg& L, double Heads) { return Heads * L.PerHead + L.Fixed; };
+				// One ship with leg LegIx binding on production (ProdKg) and stock (StockKg); the other legs ample.
+				const auto Settlers = [&](int32 LegIx, double ProdKg, double StockKg, int32& OutRoom, int32& OutAlerts) -> int32
 				{
 					LoadSmall(200, true);
 					Ample();
-					Sim->Debug_SetProductionPerSol(L.Res, 0.0);
-					SetStock(L.Res, StockKg);
+					Sim->Debug_SetProductionPerSol(Legs[LegIx].Res, ProdKg);
+					SetStock(Legs[LegIx].Res, StockKg);
 					OutRoom = Sim->GetSettlerSupportRoom();
 					Alerts.Reset();
 					const int32 Came = Sim->Debug_Immigrate();
-					OutHeldLogs = CountAlertsWith(TEXT("settlers arrived"));
+					OutAlerts = CountAlertsWith(TEXT("settlers arrived"));
 					return Came;
 				};
-				// The stock that carries exactly Heads people (a fractional head count keeps the floor away from a rounding edge).
-				const auto ForHeads = [&](const FLeg& L, double Heads) { return Cover * (Heads * L.PerHead + L.Fixed); };
-				for (const FLeg& L : Legs)
+				for (int32 LegIx = 0; LegIx < 3; ++LegIx)
 				{
-					// 205.4 heads' worth of stock carries 5 more of the 33 wanted; 204.6 carries 4.
-					int32 RoomOver = 0, AlertsOver = 0, RoomUnder = 0, AlertsUnder = 0;
-					const int32 CameOver = Settlers(L, ForHeads(L, 205.4), RoomOver, AlertsOver);
-					const int32 PopOver = Sim->GetPopulation();
-					const int32 CameUnder = Settlers(L, ForHeads(L, 204.6), RoomUnder, AlertsUnder);
-					Expect(CameOver == 5 && RoomOver == 5 && AlertsOver == 1 && PopOver == 205 && CameUnder == 4 && RoomUnder == 4 && AlertsUnder == 1,
-						FString::Printf(TEXT("h3 %s binding: %.1f kg stored carries 205.4 people (%d came of the 33 wanted, room %d, one alert); %.1f kg carries 204.6 (%d came, room %d)"), L.Name, ForHeads(L, 205.4), CameOver, RoomOver, ForHeads(L, 204.6), CameUnder, RoomUnder));
+					const FLeg& L = Legs[LegIx];
+					// Production binding. 205.4 heads' worth of production carries 5 more of the 33 wanted; 204.6 carries 4;
+					// exactly 205 carries 5 and 0.01 kg a sol under it carries 4; stock ample throughout.
+					int32 RoomA = 0, AlertsA = 0, RoomB = 0, AlertsB = 0, RoomC = 0, AlertsC = 0, RoomD = 0, AlertsD = 0;
+					const int32 CameA = Settlers(LegIx, MadeFor(L, 205.4), 1.0e8, RoomA, AlertsA);
+					const int32 PopA = Sim->GetPopulation();
+					const int32 CameB = Settlers(LegIx, MadeFor(L, 204.6), 1.0e8, RoomB, AlertsB);
+					const int32 CameC = Settlers(LegIx, MadeFor(L, 205.0), 1.0e8, RoomC, AlertsC);
+					const int32 CameD = Settlers(LegIx, MadeFor(L, 205.0) - 0.01, 1.0e8, RoomD, AlertsD);
+					Expect(CameA == 5 && RoomA == 5 && AlertsA == 1 && PopA == 205 && CameB == 4 && RoomB == 4 && AlertsB == 1 && CameC == 5 && RoomC == 5 && CameD == 4 && RoomD == 4,
+						FString::Printf(TEXT("h3 %s production binding: %.2f kg a sol made carries 205.4 people (%d came of the 33 wanted, room %d, one alert); %.2f carries 204.6 (%d, room %d); exactly the draw at 205 (%.2f) carries 5 (%d), 0.01 under it carries 4 (%d)"),
+							L.Name, MadeFor(L, 205.4), CameA, RoomA, MadeFor(L, 204.6), CameB, RoomB, MadeFor(L, 205.0), CameC, CameD));
+					// Stock alone no longer admits anyone: production 0 and a store of a hundred million kilos (the old cover would have
+					// carried 33 on it), and a deficit of one kilo a sol with the same store.
+					int32 RoomZ = 0, AlertsZ = 0, RoomY = 0, AlertsY = 0;
+					const int32 CameZ = Settlers(LegIx, 0.0, 1.0e8, RoomZ, AlertsZ);
+					const int32 CameY = Settlers(LegIx, MadeFor(L, 200.0) - 1.0, 1.0e8, RoomY, AlertsY);
+					Expect(CameZ == 0 && RoomZ == 0 && AlertsZ == 0 && CameY == 0 && RoomY == 0 && AlertsY == 0 && Sim->GetPopulation() == 200,
+						FString::Printf(TEXT("h3 %s: a store of 100 million kg with nothing made (room %d) and with the present population short by a kilo a sol (room %d) admits nobody - the stock cover no longer carries settlers, and no banner for the settlers who did not come"), L.Name, RoomZ, RoomY));
+					// The stock check binding, production ample. 205.4 heads' worth of stock carries 5; 204.6 carries 4.
+					int32 RoomS = 0, AlertsS = 0, RoomT = 0, AlertsT = 0;
+					const int32 CameS = Settlers(LegIx, 1.0e7, StockFor(LegIx, 205.4), RoomS, AlertsS);
+					const int32 CameT = Settlers(LegIx, 1.0e7, StockFor(LegIx, 204.6), RoomT, AlertsT);
+					Expect(CameS == 5 && RoomS == 5 && AlertsS == 1 && CameT == 4 && RoomT == 4 && AlertsT == 1,
+						FString::Printf(TEXT("h3 %s stock binding: stores that back 205.4 people (the %.2f kg a head of C5c's check) carry 5 (%d came, room %d); 204.6 carry 4 (%d, room %d), with production ample"), L.Name, StockHead[LegIx], CameS, RoomS, CameT, RoomT));
 				}
-				// The demand says so, in the Rations prose's own words, while a ship would be held.
+				// Both must pass: the production for 210 people with stores for 203.5 gives 3; stores for 210 with production for 203.5 gives 3.
 				{
-					Expect(LoadSmall(200, true), TEXT("h3 setup for the demand: a city of 200"));
+					LoadSmall(200, true);
 					Ample();
-					Sim->Debug_SetProductionPerSol(NOxygen, 0.0);
-					SetStock(NOxygen, ForHeads(Legs[0], 205.4));
-					Sim->Debug_SetHopeSmoothed(95.0);
-					const FRHCityDemand Dm = Sim->GetCityDemand();
-					Expect(Dm.bSettlersDraw && Dm.bSettlersHeldBySupply && Dm.SettlersWanted == 33 && Dm.SettlerSupportRoom == 5 && Dm.SettlerSupportNote == TEXT("The next ship's settlers are held to 5: the colony's air, water and food production can carry no more yet."),
-						FString::Printf(TEXT("h3 the demand while the ship would be held: wanted %d, carried %d - \"%s\""), Dm.SettlersWanted, Dm.SettlerSupportRoom, *Dm.SettlerSupportNote));
+					Sim->Debug_SetProductionPerSol(NFood, MadeFor(Legs[2], 210.0));
+					SetStock(NFood, StockFor(2, 203.5));
+					const int32 RoomA = Sim->GetSettlerSupportRoom();
+					const URHSimWorldSubsystem::FRHSettlerLegRoom FoodA = Sim->GetSettlerLegRoom(NFood);
+					Sim->Debug_SetProductionPerSol(NFood, MadeFor(Legs[2], 203.5));
+					SetStock(NFood, StockFor(2, 210.0));
+					const int32 RoomB = Sim->GetSettlerSupportRoom();
+					const URHSimWorldSubsystem::FRHSettlerLegRoom FoodB = Sim->GetSettlerLegRoom(NFood);
+					Expect(RoomA == 3 && FoodA.ProductionRoom == 10 && FoodA.StockRoom == 3 && RoomB == 3 && FoodB.ProductionRoom == 3 && FoodB.StockRoom == 10,
+						FString::Printf(TEXT("h3 both checks must pass: food made for 210 with a larder for 203.5 gives production room %d, stock room %d, ship room %d; made for 203.5 with a larder for 210 gives %d, %d, %d"),
+							FoodA.ProductionRoom, FoodA.StockRoom, RoomA, FoodB.ProductionRoom, FoodB.StockRoom, RoomB));
+				}
+				// The legs are independent: the ship is held to the TIGHTEST leg (oxygen carries 12, water 9, food 7).
+				{
+					LoadSmall(200, true);
+					Sim->Debug_SetProductionPerSol(NOxygen, MadeFor(Legs[0], 212.4));
+					Sim->Debug_SetProductionPerSol(NWater, MadeFor(Legs[1], 209.4));
+					Sim->Debug_SetProductionPerSol(NFood, MadeFor(Legs[2], 207.4));
+					for (const FLeg& L : Legs) { SetStock(L.Res, 1.0e8); }
+					const int32 Came = Sim->Debug_Immigrate();
+					Expect(Came == 7 && Sim->GetPopulation() == 207, FString::Printf(TEXT("h3 oxygen carries 12, water 9, food 7: the ship brings the least, %d"), Came));
+				}
+				// The demand says so, in plain words, while a ship would be held (D156): production short; stores short; both.
+				{
+					const auto DemandFor = [&](double O2Made, double O2Stock, double FoodMade, double FoodStock) -> FRHCityDemand
+					{
+						LoadSmall(200, true);
+						Ample();
+						Sim->Debug_SetProductionPerSol(NOxygen, O2Made);
+						SetStock(NOxygen, O2Stock);
+						Sim->Debug_SetProductionPerSol(NFood, FoodMade);
+						SetStock(NFood, FoodStock);
+						Sim->Debug_SetHopeSmoothed(95.0);
+						return Sim->GetCityDemand();
+					};
+					const FRHCityDemand Dm = DemandFor(MadeFor(Legs[0], 205.4), 1.0e8, 1.0e7, 1.0e8);
+					Expect(Dm.bSettlersDraw && Dm.bSettlersHeldBySupply && Dm.SettlersWanted == 33 && Dm.SettlerSupportRoom == 5 && Dm.bSettlersShortAir && !Dm.bSettlersShortWater && !Dm.bSettlersShortFood && !Dm.bSettlersShortStores
+						&& Dm.SettlerSupportNote == TEXT("The next ship's settlers are held to 5: they come only on what the colony already makes, and its oxygen production would not carry them."),
+						FString::Printf(TEXT("h3 the demand while oxygen production holds the ship: wanted %d, carried %d - \"%s\""), Dm.SettlersWanted, Dm.SettlerSupportRoom, *Dm.SettlerSupportNote));
+					const FRHCityDemand Dm2 = DemandFor(1.0e7, StockFor(0, 205.4), 1.0e7, 1.0e8);
+					Expect(Dm2.bSettlersHeldBySupply && Dm2.SettlerSupportRoom == 5 && !Dm2.bSettlersShortAir && !Dm2.bSettlersShortFood && !Dm2.bSettlersShortWater && Dm2.bSettlersShortStores
+						&& Dm2.SettlerSupportNote == TEXT("The next ship's settlers are held to 5: the colony's oxygen stores are too thin to back them."),
+						FString::Printf(TEXT("h3 the demand while only the oxygen stores hold it: \"%s\""), *Dm2.SettlerSupportNote));
+					const FRHCityDemand Dm3 = DemandFor(MadeFor(Legs[0], 205.4), StockFor(0, 207.4), MadeFor(Legs[2], 201.4), 1.0e8);
+					Expect(Dm3.bSettlersHeldBySupply && Dm3.SettlerSupportRoom == 1 && Dm3.bSettlersShortAir && Dm3.bSettlersShortFood && !Dm3.bSettlersShortWater && Dm3.bSettlersShortStores
+						&& Dm3.SettlerSupportNote == TEXT("The next ship's settlers are held to 1: they come only on what the colony already makes, and its oxygen and food production would not carry them. Its oxygen stores are also too thin."),
+						FString::Printf(TEXT("h3 the demand with oxygen and food production short and the oxygen store thin: \"%s\""), *Dm3.SettlerSupportNote));
+					const FRHCityDemand Dm4 = DemandFor(1.0e7, 1.0e8, 1.0e7, 1.0e8);
+					Expect(Dm4.bSettlersDraw && !Dm4.bSettlersHeldBySupply && Dm4.SettlerSupportNote.IsEmpty() && !Dm4.bSettlersShortAir && !Dm4.bSettlersShortFood && !Dm4.bSettlersShortWater && !Dm4.bSettlersShortStores,
+						TEXT("h3 every leg ample: the demand says nothing about the settlers"));
 				}
 				// Nothing carried: the ship brings nobody and says nothing loud (the held settlers are not a banner).
 				{
-					int32 Room = 0, Logs = 0;
-					const int32 Came = Settlers(Legs[2], 0.0, Room, Logs);
-					Expect(Came == 0 && Room == 0 && Logs == 0 && Sim->GetPopulation() == 200, TEXT("h3 a larder of 0 and no food made: no settler comes, no banner for the settlers that did not"));
+					int32 Room = 0, Alerts0 = 0;
+					const int32 Came = Settlers(2, 0.0, 0.0, Room, Alerts0);
+					Expect(Came == 0 && Room == 0 && Alerts0 == 0 && Sim->GetPopulation() == 200, TEXT("h3 a larder of 0 and no food made: no settler comes, no banner for the settlers that did not"));
 				}
 				// Everything ample: the whole 33.
 				{
@@ -10167,6 +10250,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			int32 ArrivalAlerts = 0;
 			const FDelegateHandle ArrivalH = Sim->OnAlert.AddLambda([&ArrivalAlerts](const FString&) { ++ArrivalAlerts; });
 			Sim->Debug_SetHopeSmoothed(100.0);
+			for (const TCHAR* Res : { TEXT("Oxygen"), TEXT("Water"), TEXT("Food") }) { Sim->Debug_SetProductionPerSol(FName(Res), 1.0e9); } // C5e: settlers come only on net production
 			const double Arr0 = FPlatformTime::Seconds();
 			int32 SettlersCame = 0;
 			for (int32 K = 0; K < 8; ++K) { SettlersCame += Sim->Debug_Immigrate(); }

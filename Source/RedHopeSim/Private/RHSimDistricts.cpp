@@ -819,15 +819,47 @@ FRHCityDemand URHSimWorldSubsystem::GetCityDemand() const
 		}
 	}
 
-	// --- Settler ships, held to what life support carries (C5d) ---
+	// --- Settler ships, held to what life support carries (C5d, C5e) ---
+	// Settlers come only on net production: each leg's measured production must already carry N + the
+	// settlers (the stock cover that lets the Big Arrival through does not admit them), and its stock must
+	// back them too (GetSettlerLegRoom). Gate-D placeholder copy (D156): plain, says what to build.
 	if (Out.bSettlersDraw)
 	{
-		Out.SettlerSupportRoom = GetSettlerSupportRoom();
+		const FName Legs[3] = { FName("Oxygen"), FName("Water"), FName("Food") };
+		FRHSettlerLegRoom Rooms[3];
+		Out.SettlerSupportRoom = MAX_int32;
+		for (int32 i = 0; i < 3; ++i)
+		{
+			Rooms[i] = GetSettlerLegRoom(Legs[i]);
+			Out.SettlerSupportRoom = FMath::Min(Out.SettlerSupportRoom, Rooms[i].Room());
+		}
 		const int32 Housed = FMath::Min(Out.SettlersWanted, Out.SettlerRoom);
 		if (Housed > 0 && Out.SettlerSupportRoom < Housed)
 		{
 			Out.bSettlersHeldBySupply = true;
-			Out.SettlerSupportNote = FString::Printf(TEXT("The next ship's settlers are held to %d: the colony's air, water and food production can carry no more yet."), FMath::Max(0, Out.SettlerSupportRoom));
+			Out.bSettlersShortAir = Rooms[0].ProductionRoom < Housed;
+			Out.bSettlersShortWater = Rooms[1].ProductionRoom < Housed;
+			Out.bSettlersShortFood = Rooms[2].ProductionRoom < Housed;
+			Out.bSettlersShortStores = Rooms[0].StockRoom < Housed || Rooms[1].StockRoom < Housed || Rooms[2].StockRoom < Housed;
+			const auto Names = [&](bool bStores) -> FString
+			{
+				TArray<FString> Short;
+				const TCHAR* Words[3] = { TEXT("oxygen"), TEXT("water"), TEXT("food") };
+				for (int32 i = 0; i < 3; ++i)
+				{
+					if ((bStores ? Rooms[i].StockRoom : Rooms[i].ProductionRoom) < Housed) { Short.Add(Words[i]); }
+				}
+				return Short.Num() == 3 ? FString(TEXT("oxygen, water and food")) : FString::Join(Short, TEXT(" and "));
+			};
+			const int32 Held = FMath::Max(0, Out.SettlerSupportRoom);
+			const bool bMade = Out.bSettlersShortAir || Out.bSettlersShortWater || Out.bSettlersShortFood;
+			Out.SettlerSupportNote = bMade
+				? FString::Printf(TEXT("The next ship's settlers are held to %d: they come only on what the colony already makes, and its %s production would not carry them."), Held, *Names(false))
+				: FString::Printf(TEXT("The next ship's settlers are held to %d: the colony's %s stores are too thin to back them."), Held, *Names(true));
+			if (bMade && Out.bSettlersShortStores)
+			{
+				Out.SettlerSupportNote += FString::Printf(TEXT(" Its %s stores are also too thin."), *Names(true));
+			}
 		}
 	}
 	return Out;

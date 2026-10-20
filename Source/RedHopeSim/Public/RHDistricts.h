@@ -159,10 +159,14 @@ struct FRHCityDemand
 	FString BigArrivalRationsNote;
 
 	// --- Settler ships and life support (C5d) ---
-	// The next ship's settlers are capped to what air, water and food production (and their stock)
-	// can carry (GetSettlerSupportRoom). Set when a ship would bring settlers, housing would take them
-	// all, and life support takes fewer; the note is the deck's words (Gate-D placeholder, D156).
+	// The next ship's settlers are capped to what air, water and food NET production carries, with the
+	// stock behind it (GetSettlerSupportRoom, C5e). Set when a ship would bring settlers, housing would take
+	// them all, and life support takes fewer; the note is the deck's words (Gate-D placeholder, D156).
+	// The Short flags name the legs whose PRODUCTION would not carry the ship (the thing a player builds);
+	// bSettlersShortStores is set when any leg's stock check is short too.
 	int32 SettlerSupportRoom = 0;
 	bool bSettlersHeldBySupply = false;
+	bool bSettlersShortAir = false, bSettlersShortFood = false, bSettlersShortWater = false;
+	bool bSettlersShortStores = false;
 	FString SettlerSupportNote;
 };

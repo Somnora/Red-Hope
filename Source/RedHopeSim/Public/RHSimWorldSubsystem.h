@@ -610,7 +610,8 @@ public:
 	// machines' real duty: power shed, the night, the ice. Draw is what the people take at the current rates:
 	// breathing (plus the standing leak of every rated floor and network), the water the recycling does not
 	// return, and food. A leg can carry a head count when its production covers its draw (net >= 0) or, short of
-	// that, its stock covers the deficit for LifeSupportDeficitCoverSols sols.
+	// that, its stock covers the deficit for LifeSupportDeficitCoverSols sols (the Big Arrival's rule; C5e: settlers
+	// need net >= 0 - see GetSettlerLegRoom).
 	struct FRHSupportLeg
 	{
 		FName Resource;
@@ -622,8 +623,21 @@ public:
 		double NetPerSol() const { return ProductionPerSol - DrawPerSol; }
 	};
 	FRHSupportLeg GetSupportLeg(FName Resource, int32 People, double ExtraStockKg = 0.0) const;
-	// The most NEW people (settlers) the colony's life support carries on top of its present population by
-	// the same rule: every leg must carry N + k. A pure function; 0 when a leg is already short.
+	// C5e: settlers come only on NET PRODUCTION. The most NEW people (settlers) a ship may bring on top of the
+	// present population N, per leg (Oxygen, Water, Food): the leg's measured production must cover its draw at
+	// N + k (net >= 0 - the stock-cover allowance of the FRHSupportLeg rule does NOT admit settlers; it still
+	// serves the Big Arrival), AND its stock must pass C5c's stock check at N + k (the O2 pool against
+	// (N + k) x ColonistO2KgPerSol x BigArrivalLifeSupportSols; the Food and Water runways at N + k against
+	// FoodRunwayFloorSols - settlers land with no provisions). Both must hold. MAX_int32 = no limit on that
+	// side; otherwise capped at 1e6, floored at 0. Pure functions of state.
+	struct FRHSettlerLegRoom
+	{
+		int32 ProductionRoom = MAX_int32; // what net production carries
+		int32 StockRoom = MAX_int32;      // what C5c's stock check carries
+		int32 Room() const { return FMath::Min(ProductionRoom, StockRoom); }
+	};
+	FRHSettlerLegRoom GetSettlerLegRoom(FName Resource) const;
+	// The most NEW people a ship may bring: the least Room() of the three legs; 0 when a leg is already short.
 	int32 GetSettlerSupportRoom() const;
 	// C5c + C5d: can the colony carry its present population PLUS the Big Arrival's wave? Per leg, TWO
 	// checks, both required. Stock (C5c): the O2 pool against (N + wave) x ColonistO2KgPerSol x
@@ -1015,6 +1029,8 @@ public:
 	// honest "your farm is actually running" read).
 	int32 GetProducingCellCount() const { return ProducingCells; }
 	double GetGardenFoodKgPerSolPerCell() const { return GardenFoodKgPerSolPerCell; }
+	double GetGardenSoilKgPerCell() const { return GardenSoilKgPerCell; }   // planting a cell takes this much Soil ...
+	double GetGardenSeedsKgPerCell() const { return GardenSeedsKgPerCell; } // ... and this much Seeds (one SoilPallet / SeedVault funds 4 cells)
 	double GetGardenWaterKgPerSolPerCell() const { return GardenWaterKgPerSolPerCell; }
 	// Garden power fork reads (deck): the grow-light load this step, and whether
 	// the bank went dark on it (a legibility cue - "your gardens lost power").

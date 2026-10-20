@@ -33,7 +33,10 @@
 // surface habitat, if the colony has a rated one - the guide's path founds none), carves and
 // rates a second floor for a Civic district, and logs what the city builds in them - each
 // project's start and end, a GROWTH line a sol, and a REPORT block of the projects, their kinds
-// and their sols. The colony is otherwise played exactly as without the option.
+// and their sols. The colony is otherwise played exactly as without the option, except that (C5e)
+// the bot also grows its life support with the city - Electrolyzers, a garden floor and the soil, seeds
+// and solar kits it needs, Water Plants and Ice Drills - from what the City panel says the next arrivals
+// would need (a LIFESUPPORT line a sol); lifesupport=0 (RH_PLAYTEST_LIFESUPPORT=0) switches that off.
 //
 // Given a save slot, it saves the colony at the sol limit first: that is how
 // the hand-play checkpoints are made (scripts/unreal/rh_checkpoints.sh). The
@@ -54,6 +57,8 @@
 
 namespace
 {
+	constexpr int32 GGardenLevel = -3; // C5e: the floor the bot farms on (-1 is the vault, -2 the Civic district)
+
 	struct FPlaytest
 	{
 		TWeakObjectPtr<UWorld> World;
@@ -72,11 +77,18 @@ namespace
 		// C5b: paint districts and log what the city builds in them.
 		bool bDistricts = false;
 		bool bNoGrowth = false; // the control: the districts are painted and floor -2 is made, but the city builds nothing
-		// C5d: the player's answer to "the settlers are ready once oxygen production can carry N more" - up to three more
-		// Electrolyzers, one every eight sols while the City panel says the Big Arrival waits on oxygen production.
+		// C5e: the player grows the colony's life support with the city (the default whenever districts are painted;
+		// lifesupport=0 switches it off). Once a sol it reads what the City panel says the next arrivals would need
+		// and builds what is missing through the same player orders as the rest of the bot: Electrolyzers for oxygen,
+		// Water Plants and Ice Drills for water, a garden floor (zoned, planted from the soil and seeds the ships
+		// bring) for food - and solar kits and batteries for the power all of it draws.
 		bool bLifeSupport = false;
-		int32 LifeSupportOrders = 0;
-		int32 LifeSupportNextSol = 0;
+		int32 LsNextElectrolyzerSol = 0, LsNextWaterSol = 0;
+		int32 LsSolarOwed = 0, LsBatteryOwed = 0; // kits owed for what was ordered, bought with the next ship
+		int32 LsInboundCells = 0;                 // garden cells' worth of soil and seeds on the ship in flight
+		int32 LsGardenSlots = 0;                  // cells ordered carved on the garden floor
+		int32 LsExtraPairs = 0, LsExtraSolar = 0, LsExtraBattery = 0; // what the cargo added beyond the standing list
+		TMap<FName, int32> LsAdded;               // building -> orders placed by this module
 		TMap<int32, double> GrowthLastRemaining; // district -> the open project's RemainingSols at the last look: a rise means a new project replaced it
 		struct FGrowthRecord { int32 DistrictId = 0; ERHGrowthKind Kind = ERHGrowthKind::SurfaceModule; double StartSol = 0.0, EndSol = -1.0; FString What; };
 		TArray<FGrowthRecord> GrowthRecords;
@@ -310,9 +322,24 @@ namespace
 			if (Sim)
 			{
 				const URHSimWorldSubsystem::FRHSupportLeg O2 = Sim->GetSupportLeg(FName("Oxygen"), Sim->GetPopulation()), Fd = Sim->GetSupportLeg(FName("Food"), Sim->GetPopulation());
-				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  city: %d beds built (%d free), population %d, share %.0f%% city; oxygen made %.0f vs %.0f drawn, food made %.1f vs %.1f drawn (kg a sol)%s"),
-					Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetPopulation(), Sim->GetCityShare() * 100.0, O2.ProductionPerSol, O2.DrawPerSol, Fd.ProductionPerSol, Fd.DrawPerSol,
-					P.bLifeSupport ? *FString::Printf(TEXT("; the player answered with %d more Electrolyzer(s)"), P.LifeSupportOrders) : TEXT(""));
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  city: %d beds built (%d free), population %d, share %.0f%% city; oxygen made %.0f vs %.0f drawn, food made %.1f vs %.1f drawn (kg a sol)"),
+					Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetPopulation(), Sim->GetCityShare() * 100.0, O2.ProductionPerSol, O2.DrawPerSol, Fd.ProductionPerSol, Fd.DrawPerSol);
+				// C5e: what the player added for the colony's life support.
+				if (P.bLifeSupport)
+				{
+					FString Added;
+					for (const FName& Def : { FName("Electrolyzer"), FName("IceDrill"), FName("WaterPlant"), FName("AirFilter") })
+					{
+						if (const int32* N = P.LsAdded.Find(Def)) { Added += FString::Printf(TEXT("%s%s x%d"), Added.IsEmpty() ? TEXT("") : TEXT(", "), *Def.ToString(), *N); }
+					}
+					int32 PlantedOnGarden = 0;
+					for (int32 i = 0; i < Sim->GetFloorCarvedCells(GGardenLevel); ++i) { PlantedOnGarden += Sim->IsGardenPlanted(GGardenLevel, i) ? 1 : 0; }
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  life support added by the player: %s; garden floor %d: %d cells carved of %d ordered, %d planted; the cargo added %d soil and seed pair(s), %d solar kit(s), %d battery pack(s); %d solar and %d battery kit(s) still owed"),
+						Added.IsEmpty() ? TEXT("no buildings") : *Added, GGardenLevel, Sim->GetFloorCarvedCells(GGardenLevel), P.LsGardenSlots, PlantedOnGarden, P.LsExtraPairs, P.LsExtraSolar, P.LsExtraBattery, P.LsSolarOwed, P.LsBatteryOwed);
+					int32 Arrays = 0, Banks = 0;
+					for (const FRHBuildingInstance& B : Sim->GetBuildings()) { Arrays += (B.DefName == FName("SolarArray") && !B.bUnderConstruction) ? 1 : 0; Banks += (B.DefName == FName("BatteryBank") && !B.bUnderConstruction) ? 1 : 0; }
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  power at the end: %d Solar Arrays, %d Battery Banks; %d garden cells planted in all, %d producing"), Arrays, Banks, Sim->GetPlantedCellCount(), Sim->GetProducingCellCount());
+				}
 			}
 		}
 		if (Sim)
@@ -346,6 +373,235 @@ namespace
 	// ~70 m (a pylon joins the grid within 80 m) and the last is 32 m from the
 	// ice (coverage reaches 40 m).
 	const FVector2D GIceBChain[] = { {6, 70}, {12, 140}, {18, 210}, {24, 280}, {30, 350}, {36, 420}, {42, 490}, {48, 560}, {54, 630}, {60, 668} };
+
+	// --- C5e: the player grows the colony's life support with the city ---
+	// The planning numbers are a player's rules of thumb, not the sim's: an Electrolyzer makes about 100 kg of oxygen a
+	// sol (measured 104-107), a garden cell about 0.8 of its nameplate food, an Electrolyzer's 600 W takes about three
+	// Solar Arrays (~96 W each on average), a grow-light's 60 W round the clock about 0.7 of one, and a bank carries
+	// the lights' night at about 0.2 a cell.
+	constexpr double GElectrolyzerKgPerSol = 100.0;
+	constexpr double GCellYieldDerate = 0.8;
+	constexpr double GArraysPerElectrolyzer = 3.0, GArraysPerCell = 0.7, GBanksPerCell = 0.2;
+	constexpr int32 GMaxElectrolyzers = 8, GMaxWaterPairs = 4, GMaxPairsPerShip = 6, GMaxExtraKitsPerShip = 8, GMaxCellsPerOrder = 12, GMaxOwedKits = 6;
+
+	// Buildings of a type, sites included; with bSitesOnly, only those still under construction.
+	int32 CountBuildings(const URHSimWorldSubsystem* Sim, FName Def, bool bSitesOnly = false)
+	{
+		int32 N = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			N += (B.DefName == Def && (!bSitesOnly || B.bUnderConstruction)) ? 1 : 0;
+		}
+		return N;
+	}
+
+	// The first free spot, row by row, on the grid inside the first pylon's reach (the kits' own side of the base).
+	bool FindGridSpot(const URHSimWorldSubsystem* Sim, FName Def, FVector2D& Out)
+	{
+		for (int32 Y = 22; Y <= 86; Y += 8)
+		{
+			for (int32 X = 22; X <= 86; X += 8)
+			{
+				FString Why;
+				if (Sim->CanPlaceBuilding(Def, FVector(X * 100.0, Y * 100.0, 0.0), Why))
+				{
+					Out = FVector2D(X, Y);
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// What the City panel says the next arrivals would need, and what the colony has to meet it.
+	struct FLsPlan
+	{
+		int32 Pop = 0, Heads = 0;        // who is here; whom to plan for
+		URHSimWorldSubsystem::FRHSupportLeg O2, Water, Food; // the legs at Heads
+		int32 NeedCells = 0;             // garden cells that would feed Heads
+		int32 Planted = 0, Fundable = 0, Inbound = 0, PlantedOnGarden = 0; // cells growing, plantable from the stores, on the ship in flight, growing on the garden floor
+		int32 Missing = 0;               // NeedCells - (Planted + Fundable + Inbound)
+		double QuotaO2PerSol = 0.0;      // the open quota's oxygen still to make, per sol left to its deadline (Earth's ladder takes the same oxygen the city breathes)
+		bool bShortO2 = false, bShortWater = false, bShortFood = false;
+	};
+
+	FLsPlan MakeLsPlan(const FPlaytest& P, const URHSimWorldSubsystem* Sim)
+	{
+		FLsPlan Plan;
+		Plan.Pop = Sim->GetPopulation();
+		const FRHCityDemand Dm = Sim->GetCityDemand();
+		// The next two ships' settlers (a ship is a quota round away; what is ordered now is ready for the one after),
+		// or the Big Arrival's wave once it is ready and waits on supply.
+		const int32 Housed = Dm.bSettlersDraw ? FMath::Min(Dm.SettlersWanted, Dm.SettlerRoom) : 0;
+		Plan.Heads = Plan.Pop + 2 * Housed;
+		if (Dm.bBigArrivalWaitsOnSupply)
+		{
+			Plan.Heads = FMath::Max(Plan.Heads, Plan.Pop + Sim->GetBigArrivalColonists());
+		}
+		Plan.O2 = Sim->GetSupportLeg(FName("Oxygen"), Plan.Heads);
+		Plan.Water = Sim->GetSupportLeg(FName("Water"), Plan.Heads);
+		Plan.Food = Sim->GetSupportLeg(FName("Food"), Plan.Heads);
+		Plan.bShortO2 = Plan.O2.NetPerSol() < 0.0;
+		Plan.bShortWater = Plan.Water.NetPerSol() < 0.0;
+		Plan.bShortFood = Plan.Food.NetPerSol() < 0.0;
+		const double Yield = FMath::Max(0.1, GCellYieldDerate * Sim->GetGardenFoodKgPerSolPerCell());
+		Plan.NeedCells = FMath::CeilToInt(Plan.Food.DrawPerSol / Yield);
+		Plan.Planted = Sim->GetPlantedCellCount();
+		const double Soil = Sim->GetStock(FName("Soil")) / FMath::Max(1.0, Sim->GetGardenSoilKgPerCell());
+		const double Seeds = Sim->GetStock(FName("Seeds")) / FMath::Max(1.0, Sim->GetGardenSeedsKgPerCell());
+		Plan.Fundable = FMath::FloorToInt(FMath::Min(Soil, Seeds) + 1.0e-9);
+		Plan.Inbound = P.LsInboundCells;
+		for (int32 i = 0; i < Sim->GetFloorCarvedCells(GGardenLevel); ++i)
+		{
+			Plan.PlantedOnGarden += Sim->IsGardenPlanted(GGardenLevel, i) ? 1 : 0;
+		}
+		Plan.Missing = Plan.NeedCells - (Plan.Planted + Plan.Fundable + Plan.Inbound);
+		if (Sim->GetQuotaPhase() == ERHQuotaPhase::Open)
+		{
+			const URHDefinitionsSubsystem* Defs = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const FRHQuotaRow* Row = Defs ? Defs->GetQuota(Sim->GetActiveQuotaName()) : nullptr;
+			const TMap<FName, TPair<double, double>> Progress = Sim->GetQuotaProgress();
+			const TPair<double, double>* O2Line = Progress.Find(FName("Oxygen"));
+			if (Row && O2Line)
+			{
+				const double Now = Sim->GetWorld()->GetSubsystem<URHSimClockSubsystem>() ? SolNow(Sim->GetWorld()->GetSubsystem<URHSimClockSubsystem>()) : 0.0;
+				const double Left = FMath::Max(3.0, (double)(Sim->GetQuotaOpenedSol() + Row->DeadlineSol) - Now);
+				// At most one Electrolyzer's worth: an overdue quota (the deadline is soft) must not buy a whole plant a sol.
+				Plan.QuotaO2PerSol = FMath::Min(FMath::Max(0.0, O2Line->Value - O2Line->Key) / Left, GElectrolyzerKgPerSol);
+			}
+		}
+		return Plan;
+	}
+
+	// One order of a building at the first of the spots that fits; the module's tally and a LIFESUPPORT line record it.
+	bool LsBuild(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, FName Def, const FVector2D* Spots, int32 NumSpots, const FString& Why)
+	{
+		for (int32 i = 0; i < NumSpots; ++i)
+		{
+			FString Reason;
+			if (Sim->CanPlaceBuilding(Def, FVector(Spots[i].X * 100.0, Spots[i].Y * 100.0, 0.0), Reason))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  %s: %s ordered"), SolNow(C), *Why, *Def.ToString());
+				OrderBuild(Sim, C, Def, Spots[i].X, Spots[i].Y);
+				P.LsAdded.FindOrAdd(Def) += 1;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Once a sol, from the same player orders as the rest of the bot.
+	void LifeSupportStep(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
+	{
+		if (!P.bLifeSupport || !P.bDistricts || Sim->GetPopulation() <= 0)
+		{
+			return;
+		}
+		const int32 SolI = C->GetSol();
+		const FLsPlan Plan = MakeLsPlan(P, Sim);
+		const int32 Electrolyzers = CountBuildings(Sim, FName("Electrolyzer"));
+		const int32 NeedElectrolyzers = FMath::CeilToInt((Plan.O2.DrawPerSol + Plan.QuotaO2PerSol) / GElectrolyzerKgPerSol);
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] LIFESUPPORT %d | pop %d, planning for %d | oxygen %.0f made vs %.0f + %.0f quota (%d Electrolyzer(s) of %d) | water %.0f vs %.0f | food %.1f vs %.1f (%d cells need, %d planted + %d in store + %d inbound = missing %d; %d slots on floor %d) | kits owed: %d solar, %d battery"),
+			SolI, Plan.Pop, Plan.Heads, Plan.O2.ProductionPerSol, Plan.O2.DrawPerSol, Plan.QuotaO2PerSol, Electrolyzers, NeedElectrolyzers, Plan.Water.ProductionPerSol, Plan.Water.DrawPerSol,
+			Plan.Food.ProductionPerSol, Plan.Food.DrawPerSol, Plan.NeedCells, Plan.Planted, Plan.Fundable, Plan.Inbound, Plan.Missing, P.LsGardenSlots, GGardenLevel, P.LsSolarOwed, P.LsBatteryOwed);
+
+		// Power permitting: nothing that draws more is ordered while more solar kits are owed than a ship brings (the kits come by
+		// ship, GMaxExtraKitsPerShip at most, so the colony does not out-build its power).
+		const bool bPowerOk = P.LsSolarOwed <= GMaxOwedKits;
+
+		// Oxygen: Electrolyzers, one at a time (the previous one is built before the next is ordered), while the oxygen made does not
+		// carry the people planned for and what Earth's open quota still wants of it by its deadline.
+		if (bPowerOk && Plan.O2.ProductionPerSol < Plan.O2.DrawPerSol + Plan.QuotaO2PerSol && Electrolyzers < NeedElectrolyzers && Electrolyzers < GMaxElectrolyzers && CountBuildings(Sim, FName("Electrolyzer"), true) == 0 && SolI >= P.LsNextElectrolyzerSol)
+		{
+			static const FVector2D Spots[] = { FVector2D(-12, -16), FVector2D(12, -16), FVector2D(-24, -16), FVector2D(24, -16), FVector2D(-12, -26), FVector2D(12, -26), FVector2D(0, -26), FVector2D(-12, -6), FVector2D(12, -6) };
+			if (LsBuild(P, Sim, C, FName("Electrolyzer"), Spots, UE_ARRAY_COUNT(Spots), FString::Printf(TEXT("oxygen made %.0f of the %.0f kg a sol that %d people draw, plus %.0f for the open quota"), Plan.O2.ProductionPerSol, Plan.O2.DrawPerSol, Plan.Heads, Plan.QuotaO2PerSol)))
+			{
+				P.LsNextElectrolyzerSol = SolI + 3;
+				P.LsSolarOwed += FMath::CeilToInt(GArraysPerElectrolyzer);
+			}
+		}
+
+		// Water: another Ice Drill and Water Plant, one pair at a time, on the ice already surveyed (Ice_A, or Ice_B once its drill runs).
+		if (Plan.bShortWater && SolI >= P.LsNextWaterSol && CountBuildings(Sim, FName("WaterPlant"), true) == 0 && CountBuildings(Sim, FName("IceDrill"), true) == 0)
+		{
+			const int32 Plants = CountBuildings(Sim, FName("WaterPlant")), Drills = CountBuildings(Sim, FName("IceDrill"));
+			if (Drills < GMaxWaterPairs && Plants < GMaxWaterPairs && Drills <= Plants)
+			{
+				const FRHDepositState* Ice = KnownIce(Sim);
+				const FRHDepositState* IceB = nullptr;
+				for (const FRHDepositState& D : Sim->GetDeposits()) { if (D.bDiscovered && D.RowName == FName("Ice_B")) { IceB = &D; } }
+				const bool bOnB = IceB && FindBuilt(Sim, FName("IceDrill"), &IceB->LocationCm);
+				const FRHDepositState* Target = bOnB ? IceB : Ice;
+				if (Target)
+				{
+					const FVector2D Base(Target->LocationCm.X / 100.0, Target->LocationCm.Y / 100.0);
+					const FVector2D DrillSpots[] = { Base + FVector2D(8, 0), Base + FVector2D(-8, 0), Base + FVector2D(0, 8), Base + FVector2D(0, -8), Base + FVector2D(8, 8), Base + FVector2D(-8, -8) };
+					static const FVector2D PlantsA[] = { FVector2D(20, 6), FVector2D(26, 6), FVector2D(20, 12), FVector2D(26, 12) };
+					static const FVector2D PlantsB[] = { FVector2D(54, 696), FVector2D(54, 684), FVector2D(42, 696), FVector2D(42, 684) };
+					const FString Why = FString::Printf(TEXT("water made %.0f of the %.0f kg a sol that %d people draw"), Plan.Water.ProductionPerSol, Plan.Water.DrawPerSol, Plan.Heads);
+					const bool bDrill = LsBuild(P, Sim, C, FName("IceDrill"), DrillSpots, UE_ARRAY_COUNT(DrillSpots), Why);
+					const bool bPlant = LsBuild(P, Sim, C, FName("WaterPlant"), bOnB ? PlantsB : PlantsA, 4, Why);
+					if (bDrill || bPlant)
+					{
+						P.LsNextWaterSol = SolI + 5;
+						P.LsSolarOwed += 1;
+					}
+				}
+			}
+		}
+
+		// Food: a garden floor. The soil and seeds come by ship (the cargo asks for them); the floor is bored, carved, filtered and
+		// zoned Gardening Station here, ahead of them; the cells plant themselves from the stores.
+		const int32 Carved = Sim->GetFloorCarvedCells(GGardenLevel);
+		// (Not in the first sols after the crew lands: the ledger has not yet seen the garden's first yield.)
+		if (Plan.bShortFood && SolNow(C) >= P.CrewLandedSol + 6.0 && Sim->GetShaftDepth() >= 2 && Plan.NeedCells - Plan.Planted > 0)
+		{
+			if (Sim->GetShaftDepth() < GGardenLevel * -1 && P.Issued.Contains(FName("bore2")) && !P.Issued.Contains(FName("bore3")))
+			{
+				P.Issued.Add(FName("bore3"));
+				FRHCommand Bore; Bore.Verb = FName("Bore"); Bore.Value = -GGardenLevel;
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  food made %.1f of the %.1f kg a sol that %d people draw: a garden floor, bore to %d"), SolNow(C), Plan.Food.ProductionPerSol, Plan.Food.DrawPerSol, Plan.Heads, GGardenLevel);
+				Order(Sim, C, Bore, FString::Printf(TEXT("Bore to %d (a garden floor)"), GGardenLevel));
+			}
+			if (Sim->GetShaftDepth() >= -GGardenLevel)
+			{
+				// Cells wanted on the floor: what the stores and the ship in flight will plant, and the next ship's pairs (at most
+				// GMaxPairsPerShip of them) for the cells still missing, less the slots already carved and not yet planted.
+				const int32 Plantable = Plan.Fundable + Plan.Inbound + FMath::Clamp(Plan.Missing, 0, 4 * GMaxPairsPerShip);
+				const int32 Wanted = Plantable - (P.LsGardenSlots - Plan.PlantedOnGarden);
+				const int32 Cells = FMath::Min(Wanted, GMaxCellsPerOrder);
+				if (bPowerOk && Cells > 0)
+				{
+					FRHCommand Exc; Exc.Verb = FName("Excavate"); Exc.Level = GGardenLevel; Exc.Value = FMath::Max(Cells, P.LsGardenSlots == 0 ? Sim->GetMinLivableCells() : 0);
+					Exc.Location = Sim->GetShaftHeadCm();
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  food: %d garden cells more are wanted on floor %d (%d cells need, %d planted, %d slots carved or ordered)"), SolNow(C), (int32)Exc.Value, GGardenLevel, Plan.NeedCells, Plan.Planted, P.LsGardenSlots);
+					Order(Sim, C, Exc, FString::Printf(TEXT("Excavate %d cells on %d (garden)"), (int32)Exc.Value, GGardenLevel));
+					P.LsGardenSlots += (int32)Exc.Value;
+					P.LsSolarOwed += FMath::CeilToInt(GArraysPerCell * Exc.Value);
+					P.LsBatteryOwed += FMath::CeilToInt(GBanksPerCell * Exc.Value);
+				}
+			}
+		}
+		if (Carved >= Sim->GetMinLivableCells() && !P.Issued.Contains(FName("filter3")))
+		{
+			P.Issued.Add(FName("filter3"));
+			const FVector H = Sim->GetShaftHeadCm();
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  the garden floor: an Air Filter on %d"), SolNow(C), GGardenLevel);
+			OrderBuild(Sim, C, FName("AirFilter"), H.X / 100.f + 15.f, H.Y / 100.f, GGardenLevel);
+			P.LsAdded.FindOrAdd(FName("AirFilter")) += 1;
+		}
+		// Zone every carved cell a Gardening Station (zoning is free; a cell plants itself once the floor rates and the stores allow).
+		for (int32 i = 0; i < Carved; ++i)
+		{
+			const FName Tok(*FString::Printf(TEXT("gz%d"), i));
+			if (!P.Issued.Contains(Tok))
+			{
+				P.Issued.Add(Tok);
+				FRHCommand Z; Z.Verb = FName("Designate"); Z.Level = GGardenLevel; Z.Value = i; Z.Target = FName("Garden");
+				Order(Sim, C, Z, FString::Printf(TEXT("Zone %d cell %d as Garden"), GGardenLevel, i));
+			}
+		}
+	}
 
 	void Tick()
 	{
@@ -405,27 +661,8 @@ namespace
 				Sim->GetStock(FName("Hydrogen")), Sim->GetStock(FName("Food")),
 				*Sim->GetActiveQuotaName().ToString(), *FString::Printf(TEXT("%s%s"), Sim->GetQuotaRepeatRound() > 0 ? *FString::Printf(TEXT(" r%d"), Sim->GetQuotaRepeatRound()) : TEXT(""), *Quota),
 				P.SampleSec > 0.0 ? P.IdleRobotSec / P.SampleSec : 0.0, P.StrandedMax, Sim->GetPopulation());
-			// C5d (lifesupport=1): the settlers are ready but for oxygen production, so the player builds another Electrolyzer.
-			if (P.bLifeSupport && P.bDistricts && Sim->GetPopulation() > 0 && !Sim->IsBigArrivalDone() && P.LifeSupportOrders < 3 && C->GetSol() >= P.LifeSupportNextSol)
-			{
-				const FRHCityDemand Wait = Sim->GetCityDemand();
-				if (Wait.bBigArrivalWaitsOnSupply && Wait.bBigArrivalShortAir)
-				{
-					static const FVector2D Spots[] = { FVector2D(-12, -16), FVector2D(12, -16), FVector2D(-24, -16), FVector2D(24, -16), FVector2D(-12, -26), FVector2D(12, -26), FVector2D(0, -26), FVector2D(-12, -6), FVector2D(12, -6) };
-					for (const FVector2D& Spot : Spots)
-					{
-						FString Why;
-						if (Sim->CanPlaceBuilding(FName("Electrolyzer"), FVector(Spot.X * 100.0, Spot.Y * 100.0, 0.0), Why))
-						{
-							OrderBuild(Sim, C, FName("Electrolyzer"), Spot.X, Spot.Y);
-							++P.LifeSupportOrders;
-							P.LifeSupportNextSol = C->GetSol() + 8;
-							UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  the settlers wait on oxygen production (%s): Electrolyzer #%d ordered"), SolNow(C), *Wait.BigArrivalAirNote, P.LifeSupportOrders);
-							break;
-						}
-					}
-				}
-			}
+			// C5e: the player grows the colony's life support with the city (districts on, lifesupport=0 off).
+			LifeSupportStep(P, Sim, C);
 			if (Sim->GetPopulation() > 0)
 			{
 				const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
@@ -583,10 +820,29 @@ namespace
 			{
 				OrderBuild(Sim, C, FName("SolarArray"), GSolarMore[Idx].X, GSolarMore[Idx].Y);
 			}
+			else if (P.bLifeSupport && P.bDistricts && Idx >= (int32)UE_ARRAY_COUNT(GSolarMore) && !P.Issued.Contains(FName(*FString::Printf(TEXT("solar+%d"), Idx))))
+			{
+				// C5e: the kits the life-support cargo asked for go down on the grid inside the first pylon's reach.
+				FVector2D Spot;
+				if (FindGridSpot(Sim, FName("SolarArray"), Spot) && Once(*FString::Printf(TEXT("solar+%d"), Idx)))
+				{
+					OrderBuild(Sim, C, FName("SolarArray"), Spot.X, Spot.Y);
+				}
+			}
 		}
 		if (Sim->GetImportStock(FName("BatteryBank")) > 0 && FindBuilt(Sim, FName("Pylon"), &P1) && Once(TEXT("battery+")))
 		{
 			OrderBuild(Sim, C, FName("BatteryBank"), GBatteryMore[0].X, GBatteryMore[0].Y);
+		}
+		else if (P.bLifeSupport && P.bDistricts && Sim->GetImportStock(FName("BatteryBank")) > 0 && FindBuilt(Sim, FName("Pylon"), &P1) && CountBuildings(Sim, FName("BatteryBank")) > (int32)UE_ARRAY_COUNT(GBattery))
+		{
+			// C5e: and further banks, one at a time, as each earlier one is on the books (the standing list's first extra bank is a site by now).
+			const FName Tok(*FString::Printf(TEXT("battery+%d"), CountBuildings(Sim, FName("BatteryBank"))));
+			FVector2D Spot;
+			if (!P.Issued.Contains(Tok) && FindGridSpot(Sim, FName("BatteryBank"), Spot) && Once(*Tok.ToString()))
+			{
+				OrderBuild(Sim, C, FName("BatteryBank"), Spot.X, Spot.Y);
+			}
 		}
 
 		// The vault.
@@ -645,8 +901,31 @@ namespace
 		{
 			Once(*Cargo3Tok);
 			Mark(P, C, FString::Printf(TEXT("quota %s met (round %d)"), *Sim->GetActiveQuotaName().ToString(), Sim->GetQuotaRepeatRound()));
-			LoadCargo(Sim, C, { FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack"),
-				FName("PartsCrate"), FName("PartsCrate") }, FName("PartsCrate"));
+			// C5e: the colony's life support asks the ship for what it is short of: soil and seeds for the garden cells the food
+			// leg needs (a pair funds four), the solar kits and batteries owed for what was ordered. The standing list is the
+			// same list when nothing is short.
+			int32 ExtraPairs = 0, ExtraSolar = 0, ExtraBattery = 0;
+			if (P.bLifeSupport && P.bDistricts && Sim->GetPopulation() > 0)
+			{
+				const FLsPlan Plan = MakeLsPlan(P, Sim);
+				ExtraPairs = Plan.bShortFood ? FMath::Clamp(FMath::DivideAndRoundUp(Plan.Missing, 4), 0, GMaxPairsPerShip) : 0;
+				ExtraSolar = FMath::Clamp(P.LsSolarOwed, 0, GMaxExtraKitsPerShip);
+				ExtraBattery = FMath::Clamp(P.LsBatteryOwed, 0, GMaxExtraKitsPerShip / 2);
+				P.LsSolarOwed -= ExtraSolar;
+				P.LsBatteryOwed -= ExtraBattery;
+				P.LsInboundCells = 4 * (1 + ExtraPairs);
+				P.LsExtraPairs += ExtraPairs;
+				P.LsExtraSolar += ExtraSolar;
+				P.LsExtraBattery += ExtraBattery;
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  the cargo adds %d soil and seed pair(s) (%d cells missing), %d solar kit(s) and %d battery pack(s)"), SolNow(C), ExtraPairs, Plan.Missing, ExtraSolar, ExtraBattery);
+			}
+			TArray<FName> Cargo3 = { FName("SoilPallet"), FName("SeedVault") };
+			for (int32 i = 0; i < ExtraPairs; ++i) { Cargo3.Add(FName("SoilPallet")); Cargo3.Add(FName("SeedVault")); }
+			Cargo3.Append({ FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack") });
+			for (int32 i = 0; i < ExtraSolar; ++i) { Cargo3.Add(FName("SolarPack")); }
+			for (int32 i = 0; i < ExtraBattery; ++i) { Cargo3.Add(FName("BatteryPack")); }
+			Cargo3.Append({ FName("PartsCrate"), FName("PartsCrate") });
+			LoadCargo(Sim, C, Cargo3, FName("PartsCrate"));
 		}
 		if (Sim->GetPopulation() > 0)
 		{
@@ -846,7 +1125,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifesupport=1] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifesupport=0] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -866,14 +1145,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.TargetSols = Args.Num() > 0 ? FMath::Max(0.1, FCString::Atod(*Args[0])) : 30.0;
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
-		// Args[3..]: a save slot and/or the option "districts=1" (C5b), in either order.
+		// Args[3..]: a save slot and/or the options "districts=1" (C5b), "nogrowth=1", "lifesupport=0|1" (C5e), in any order.
+		bool bLifeSupportOff = false;
 		for (int32 i = 3; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
-			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { P.bLifeSupport = true; }
+			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { bLifeSupportOff = false; }
+			else if (Args[i].Equals(TEXT("lifesupport=0"), ESearchCase::IgnoreCase)) { bLifeSupportOff = true; }
 			else if (P.SaveSlot.IsEmpty()) { P.SaveSlot = Args[i]; }
 		}
+		// C5e: painting districts means playing the city's life support too, unless lifesupport=0 says not to.
+		P.bLifeSupport = P.bDistricts && !bLifeSupportOff;
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
@@ -910,6 +1193,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f SHIP    landed: %s"), SolOf(), *List);
 			if (GPlaytest.IsValid())
 			{
+				GPlaytest->LsInboundCells = 0; // the ship's soil and seeds are in the stores now
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ROUND   %s: opened sol %d, met sol %d, launched sol %.2f, landed sol %.2f | cargo: %s"),
 					SolOf(), *GPlaytest->RoundName, GPlaytest->RoundOpenedSol, GPlaytest->RoundMetSol, GPlaytest->RoundLaunchSol, SolOf(), *GPlaytest->RoundCargo);
 			}
@@ -925,6 +1209,6 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
 			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
-			*FString::Printf(TEXT("%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
+			*FString::Printf(TEXT("%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

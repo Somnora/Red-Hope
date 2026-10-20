@@ -5828,26 +5828,57 @@ URHSimWorldSubsystem::FRHSupportLeg URHSimWorldSubsystem::GetSupportLeg(FName Re
 	return Leg;
 }
 
+URHSimWorldSubsystem::FRHSettlerLegRoom URHSimWorldSubsystem::GetSettlerLegRoom(FName Resource) const
+{
+	// C5e: settlers come only on NET PRODUCTION, and the stock must back them too. Per leg, the most k with
+	//   production >= (N + k) x PerHead + Fixed          (net >= 0 after they land: no stock-cover allowance)
+	//   stock check at N + k                             (C5c: the O2 pool >= (N + k) x O2 x BigArrivalLifeSupportSols;
+	//                                                     the Food / Water runway at N + k >= FoodRunwayFloorSols)
+	// Solved in closed form for N + k as a head count, then floored and taken off N. The 1e-9 head keeps a
+	// production that equals the draw exactly from losing a person to rounding.
+	FRHSettlerLegRoom Out;
+	const int32 Pop = Colonists.Num();
+	const FRHSupportLeg Leg = GetSupportLeg(Resource, Pop);
+	double PerHead = 0.0, Fixed = 0.0, StockPerHead = 0.0;
+	if (Resource == FName("Oxygen"))
+	{
+		PerHead = ColonistO2KgPerSol;
+		Fixed = GetStandingO2LeakKgPerSol();
+		StockPerHead = ColonistO2KgPerSol * BigArrivalLifeSupportSols;
+	}
+	else if (Resource == FName("Water"))
+	{
+		PerHead = ColonistWaterKgPerSol * (1.0 - FMath::Clamp(GreywaterReturnFraction, 0.0, 1.0)); // the recycling returns most of it
+		StockPerHead = ColonistWaterKgPerSol * FoodRunwayFloorSols; // the runway counts the whole draw, as GetBigArrivalSupport reads it
+	}
+	else if (Resource == FName("Food"))
+	{
+		PerHead = ColonistFoodKgPerSol;
+		StockPerHead = ColonistFoodKgPerSol * FoodRunwayFloorSols;
+	}
+	const auto RoomFor = [Pop](double Heads) -> int32
+	{
+		const double K = FMath::FloorToDouble(Heads + 1.0e-9) - (double)Pop;
+		return K <= 0.0 ? 0 : (int32)FMath::Min(K, 1.0e6);
+	};
+	if (PerHead > 0.0)
+	{
+		Out.ProductionRoom = RoomFor((Leg.ProductionPerSol - Fixed) / PerHead);
+	}
+	if (StockPerHead > 0.0)
+	{
+		Out.StockRoom = RoomFor(Leg.StockKg / StockPerHead);
+	}
+	return Out;
+}
+
 int32 URHSimWorldSubsystem::GetSettlerSupportRoom() const
 {
-	// Every leg carries N + k when production + stock / cover-sols >= its draw at N + k (the unified form of
-	// "net >= 0, or the stock covers the deficit for LifeSupportDeficitCoverSols sols"). Solved for k per leg.
-	const int32 Pop = Colonists.Num();
 	int32 Room = MAX_int32;
-	const auto Limit = [&](FName Resource, double PerHead, double Fixed)
+	for (const FName Resource : { FName("Oxygen"), FName("Water"), FName("Food") })
 	{
-		if (PerHead <= 0.0 || LifeSupportDeficitCoverSols <= 0.0)
-		{
-			return; // nothing a head draws, or the stock fallback is switched to "always covered"
-		}
-		const FRHSupportLeg Leg = GetSupportLeg(Resource, Pop);
-		const double Supply = Leg.ProductionPerSol + Leg.StockKg / LifeSupportDeficitCoverSols;
-		const double K = FMath::FloorToDouble((Supply - Fixed) / PerHead) - (double)Pop;
-		Room = FMath::Min(Room, K <= 0.0 ? 0 : (int32)FMath::Min(K, 1.0e6));
-	};
-	Limit(FName("Oxygen"), ColonistO2KgPerSol, GetStandingO2LeakKgPerSol());
-	Limit(FName("Water"), ColonistWaterKgPerSol * (1.0 - FMath::Clamp(GreywaterReturnFraction, 0.0, 1.0)), 0.0);
-	Limit(FName("Food"), ColonistFoodKgPerSol, 0.0);
+		Room = FMath::Min(Room, GetSettlerLegRoom(Resource).Room());
+	}
 	return Room;
 }
 

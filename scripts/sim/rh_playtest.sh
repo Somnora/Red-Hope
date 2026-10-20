@@ -36,9 +36,13 @@
 # RH_PLAYTEST_NOGROWTH=1 (with the above) is the control: the same painting and the same
 # second floor, but the city's growth is switched off, so the difference is the growth alone.
 #
-# RH_PLAYTEST_LIFESUPPORT=1 (with districts) is the player's answer to the City panel's "the settlers are
-# ready once oxygen production can carry N more" (C5d): up to three more Electrolyzers, one every eight
-# sols while the Big Arrival waits on oxygen production. Off by default, so the runs stay comparable.
+# With districts, the bot also grows the colony's life support with the city (C5e): once a sol it reads what
+# the City panel says the next settler ships or the Big Arrival would need - oxygen, water and food production -
+# and builds what is missing through the same player orders: Electrolyzers, Water Plants and Ice Drills, a garden
+# floor (-3: bored, carved, filtered, zoned Gardening Station, planted from the soil and seeds the ships bring),
+# and the solar kits and batteries all of that draws. A LIFESUPPORT line a sol logs its books. Runs without
+# districts are unchanged. RH_PLAYTEST_LIFESUPPORT=0 switches it off (the C5d bot: one Electrolyzer, two
+# garden cells), e.g. for the growth-off control.
 #
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
@@ -65,7 +69,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=1}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.
