@@ -1,6 +1,8 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RedHope.h"
 #include "RHMarsTerrain.h"
+#include "RHStrategyPawn.h"
+#include "GameFramework/PlayerController.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -17,6 +19,10 @@
 
 namespace
 {
+	// C6b: the cargo rover's kit model (scripts/blender/rh_build_rover.py, imported by rh_import_hs.py): true
+	// scale (5 m long), pivot centred on the tyre soles, front at +X.
+	const TCHAR* RoverMeshPath = TEXT("/Game/RedHope/Art/Models2/Rover/Rover/StaticMeshes/Rover.Rover");
+	const FName RoverClassName(TEXT("Rover"));
 	const TCHAR* RobotWalkerMesh = TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robot.RH_Walker_robot");
 	// Every clip lives beside the mesh as RH_Walker_robot<Suffix>. The full
 	// task set (Dig/Haul/Charge/Operate/Repair + Walk/Idle) shipped with the
@@ -32,6 +38,30 @@ static TAutoConsoleVariable<float> CVarRobotStrideCm(
 	TEXT("rh.RobotStrideCm"),
 	94.4f,
 	TEXT("Ground distance (cm) the robot Walk clip depicts per cycle, at the runtime scale. Drives animation rate so feet do not slide."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarRoverYawOffsetDeg(
+	TEXT("rh.RoverYawOffsetDeg"),
+	0.f,
+	TEXT("C6b: yaw (degrees) added to the cargo rover model so its cab leads along the direction of travel (the model is built front at +X; this calibrates the glTF import's axis mapping)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarRoverFollowCam(
+	TEXT("rh.RoverFollowCam"),
+	0.f,
+	TEXT("DEBUG/QA: when above 0, the strategy camera follows the first cargo rover every frame at this zoomT (0-1), pitch offset rh.RoverFollowPitch. For capture bursts of a rover turning."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarRoverFollowPitch(
+	TEXT("rh.RoverFollowPitch"),
+	62.f,
+	TEXT("DEBUG/QA: pitch offset (degrees) of the rh.RoverFollowCam view."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarRoverTurnLog(
+	TEXT("rh.RoverTurnLog"),
+	0,
+	TEXT("DEBUG/QA: every 0.2 s of real time, log each cargo rover's drawn position, body heading, the direction it is actually moving, the angle between them (drift) and the corner speed factor."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRobotPlantCm(
@@ -331,6 +361,162 @@ FVector URHAgentVisualizerSubsystem::ParkSlotCm(int32 Index) const
 	return FVector(Lander.X - Half.X - 400.0, Lander.Y, 0.0);
 }
 
+bool URHAgentVisualizerSubsystem::IsRoverIndex(int32 i) const
+{
+	return RoverVis.IsValidIndex(i) && RoverVis[i].Body.IsValid();
+}
+
+FVector URHAgentVisualizerSubsystem::AdvanceRover(int32 i, const FVector& SimPos, float SimSpeed, const FRHTaskFragment* Task, float DeltaTime, float& OutYawDeg, bool bHeavy)
+{
+	// Turn radius of a rover, centimetres (placeholder, director review): the fillet shrinks on short legs. A walker
+	// takes a 1.8 m turn and pivots on the spot at 260 degrees a second.
+	const float RoverTurnRadiusCm = bHeavy ? 700.f : 180.f;
+	const float PivotDegPerS = bHeavy ? 110.f : 260.f;
+	FRoverDrive& D = RoverVis[i].Drive;
+	const FVector2D Sim2(SimPos.X, SimPos.Y);
+	const auto Out3 = [&](const FVector2D& P) { return FVector(P.X, P.Y, SimPos.Z); };
+	if (!D.bInit || FVector2D::Distance(D.Pos, Sim2) > 8000.0)
+	{
+		// First sight, or a jump the drive cannot explain (a load, a teleport): snap.
+		D = FRoverDrive();
+		D.bInit = true;
+		// A walker picks up where its figure was drawn (its road leg may follow a free walk); a rover where the sim has it.
+		const bool bFromDrawn = !bHeavy && Trips.IsValidIndex(i) && Trips[i].bInit && FVector2D::Distance(FVector2D(Trips[i].DrawCm.X, Trips[i].DrawCm.Y), Sim2) <= 8000.0;
+		D.Pos = bFromDrawn ? FVector2D(Trips[i].DrawCm.X, Trips[i].DrawCm.Y) : Sim2;
+		D.Yaw = FacingYawDeg.IsValidIndex(i) ? FacingYawDeg[i] : 0.f;
+		OutYawDeg = D.Yaw;
+		return Out3(D.Pos);
+	}
+	const URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	const float Pace = Clock ? FMath::Min(Clock->GetSpeed(), 8.f) : 1.f;
+	const bool bTask = Task && Task->TaskType != 0;
+	const bool bMoving = SimSpeed > 15.f;
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+
+	if (bTask && bMoving && Sim)
+	{
+		const FVector2D Target2(Task->TargetCm.X, Task->TargetCm.Y);
+		const FRHRobotRoadPath* Road = Sim->GetRobotRoadPath(Tracked[i]);
+		const bool bRoad = Road && Road->IsRoadTrip() && Road->TargetCm == Task->TargetCm;
+		const bool bNew = !D.bTrip || D.bRoadTrip != bRoad || (bRoad ? D.Serial != Road->Serial : FVector2D::Distance(Target2, D.Target) > 150.0);
+		if (bNew)
+		{
+			// The raw path: where the figure is drawn now, then the sim's waypoints (an off-road leg detours round footprints).
+			TArray<FVector2D> Raw;
+			D.LegVertex.Reset();
+			D.LegSimEnd.Reset();
+			const auto AddPt = [&Raw](const FVector2D& P) -> int32
+			{
+				if (Raw.Num() > 0 && FVector2D::Distance(Raw.Last(), P) < 1.0) { return Raw.Num() - 1; }
+				return Raw.Add(P);
+			};
+			AddPt(D.Pos);
+			if (bRoad)
+			{
+				FVector SimPrev = Road->StartCm;
+				FVector DrawPrev = Out3(D.Pos);
+				float SimAcc = 0.f;
+				for (int32 Leg = 0; Leg < Road->Waypoints.Num(); ++Leg)
+				{
+					const FVector W(Road->Waypoints[Leg].X, Road->Waypoints[Leg].Y, SimPos.Z);
+					SimAcc += (float)FVector::Dist2D(SimPrev, W);
+					int32 Vertex = Raw.Num() - 1;
+					if (Road->LegEdge[Leg] == 0)
+					{
+						TArray<FVector> Detour;
+						PlanRoute(DrawPrev, W, Detour);
+						for (int32 k = 1; k < Detour.Num(); ++k) { Vertex = AddPt(FVector2D(Detour[k].X, Detour[k].Y)); }
+					}
+					else
+					{
+						Vertex = AddPt(FVector2D(W.X, W.Y));
+					}
+					D.LegVertex.Add(Vertex);
+					D.LegSimEnd.Add(SimAcc);
+					SimPrev = W;
+					DrawPrev = W;
+				}
+			}
+			else
+			{
+				TArray<FVector> Detour;
+				PlanRoute(Out3(D.Pos), FVector(Target2.X, Target2.Y, SimPos.Z), Detour);
+				for (int32 k = 1; k < Detour.Num(); ++k) { AddPt(FVector2D(Detour[k].X, Detour[k].Y)); }
+				D.SimStartDist = FMath::Max((float)FVector2D::Distance(Sim2, Target2), 1.f);
+			}
+			RHPath::Round(Raw, RoverTurnRadiusCm, D.Path);
+			D.bTrip = true;
+			D.bRoadTrip = bRoad;
+			D.Serial = bRoad ? Road->Serial : -1;
+			D.Target = Target2;
+			D.DrawS = 0.f;
+			D.SimS = 0.f;
+		}
+		// Where the sim is, as arc length along the rounded path.
+		if (bRoad && D.LegVertex.Num() > 0)
+		{
+			const int32 LegNow = FMath::Clamp(Road->Next, 0, D.LegVertex.Num() - 1);
+			const FVector LegFrom = LegNow == 0 ? Road->StartCm : Road->Waypoints[LegNow - 1];
+			const float SimBefore = LegNow == 0 ? 0.f : D.LegSimEnd[LegNow - 1];
+			const float SimLeg = FMath::Max(D.LegSimEnd[LegNow] - SimBefore, 1.f);
+			const float Frac = FMath::Clamp((float)FVector::Dist2D(LegFrom, SimPos) / SimLeg, 0.f, 1.f);
+			const float SBefore = LegNow == 0 ? 0.f : D.Path.SAtRawVertex(D.LegVertex[LegNow - 1]);
+			D.SimS = FMath::Max(D.SimS, FMath::Lerp(SBefore, D.Path.SAtRawVertex(D.LegVertex[LegNow]), Frac));
+		}
+		else
+		{
+			D.SimS = FMath::Max(D.SimS, FMath::Clamp(1.f - (float)FVector2D::Distance(Sim2, D.Target) / D.SimStartDist, 0.f, 1.f) * D.Path.Len);
+		}
+	}
+	else if (D.bTrip && FVector2D::Distance(Sim2, D.Target) < 400.0)
+	{
+		D.SimS = D.Path.Len; // arrived (loading, unloading, charging): the drawn truck drives the rest of the way in
+	}
+	else if (!bTask && !bMoving && D.bTrip)
+	{
+		D.SimS = D.Path.Len;
+	}
+	else if (bMoving && !bTask)
+	{
+		// Moving with no task target (no rover does today): follow the sim, heading along the move.
+		const FVector2D Move = Sim2 - D.Pos;
+		if (Move.Size() > 1.0) { D.Yaw = FMath::RadiansToDegrees(FMath::Atan2((float)Move.Y, (float)Move.X)); }
+		D.bTrip = false;
+		D.Pos = Sim2;
+		OutYawDeg = D.Yaw;
+		return SimPos;
+	}
+
+	if (D.bTrip && D.Path.Pts.Num() > 1)
+	{
+		float TangentYaw = 0.f;
+		RHPath::PointAt(D.Path, D.DrawS, TangentYaw);
+		const float Turn = FMath::FindDeltaAngleDegrees(D.Yaw, TangentYaw);
+		if (D.DrawS < 1.f && D.SimS > 5.f && FMath::Abs(Turn) > 20.f)
+		{
+			// A trip that starts facing the wrong way (pickup, pad, U-turn): a slow pivot on the spot, then away.
+			D.Yaw = FMath::FixedTurn(D.Yaw, TangentYaw, PivotDegPerS * FMath::Max(Pace, 1.f) * DeltaTime); // a rover's 180 deg takes under 2 s: the lag it costs is bounded
+		}
+		else
+		{
+			const float Lag = D.SimS - D.DrawS;
+			// Ease down into a corner, within a lag bounded to about 3 m behind the sim, and catch up after it.
+			const float Eased = Lag > 300.f ? 1.f : RHPath::CornerFactor(D.Path, D.DrawS);
+			const float Rate = FMath::Min(SimSpeed * Eased + 1.5f * FMath::Max(Lag, 0.f), SimSpeed * 2.5f + 300.f);
+			D.DrawS = FMath::Clamp(D.DrawS + Rate * DeltaTime, 0.f, FMath::Min(D.SimS, D.Path.Len));
+			float Yaw = TangentYaw;
+			D.Pos = RHPath::PointAt(D.Path, D.DrawS, Yaw);
+			D.Yaw = Yaw; // the heading is the tangent of the drawn path: no sliding
+		}
+		if (D.DrawS >= D.Path.Len - 0.5f && !bMoving)
+		{
+			D.bTrip = false; // parked where the path ended, heading as it arrived
+		}
+	}
+	OutYawDeg = D.Yaw;
+	return Out3(D.Pos);
+}
+
 FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos, float SimSpeed, const FRHTaskFragment* Task, float DeltaTime)
 {
 	if (!Trips.IsValidIndex(i) || CVarRobotRouting.GetValueOnGameThread() == 0)
@@ -476,7 +662,7 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 			MaxSpeed = FreeWalkCmS * 1.5f * Pace;
 		}
 	}
-	else if (T.IdleS > ParkAfterIdleS)
+	else if (T.IdleS > ParkAfterIdleS && !IsRoverIndex(i))
 	{
 		T.bTrip = false;
 		Desired = FreeWalkTo(ParkSlotCm(i));
@@ -521,6 +707,15 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 		}
 	}
 	CargoLumps.Reset();
+	for (FRoverVis& R : RoverVis)
+	{
+		if (UStaticMeshComponent* B = R.Body.Get()) { B->DestroyComponent(); }
+		for (TWeakObjectPtr<UStaticMeshComponent>& C : R.Crates)
+		{
+			if (UStaticMeshComponent* Crate = C.Get()) { Crate->DestroyComponent(); }
+		}
+	}
+	RoverVis.Reset();
 	SkelBodies.Reset();
 	PlayingClip.Reset();
 	FeetLiftCm.Reset();
@@ -541,9 +736,74 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 	const FTransform Proto(FQuat::Identity, FVector::ZeroVector, FVector(1.f, 1.f, 1.f));
 	AActor* Holder = Parts.Num() > 0 && Parts[0] ? Parts[0]->GetOwner() : nullptr;
 	USkeletalMesh* Walker = bUseSkeletal ? LoadObject<USkeletalMesh>(nullptr, RobotWalkerMesh) : nullptr;
+	const UMassEntitySubsystem* TrackMass = GetWorld() ? GetWorld()->GetSubsystem<UMassEntitySubsystem>() : nullptr;
+	// Sized up to the tracked count before the new entities are added: every parallel array below stays index-aligned.
+	RoverVis.SetNum(Tracked.Num() - Entities.Num());
 	for (int32 i = 0; i < Entities.Num(); ++i)
 	{
-		if (Walker && Holder)
+		const FRHRobotFragment* RobotDef = TrackMass ? TrackMass->GetEntityManager().GetFragmentDataPtr<FRHRobotFragment>(Entities[i]) : nullptr;
+		const bool bRover = Holder && RobotDef && RobotDef->RobotClass == RoverClassName;
+		FRoverVis& NewRover = RoverVis.AddDefaulted_GetRef();
+		if (bRover)
+		{
+			// The truck: one static mesh at true scale, pivot on the tyre soles. Missing art falls back to a
+			// tinted slab, so the beat still plays.
+			UStaticMeshComponent* Body = NewObject<UStaticMeshComponent>(Holder);
+			Body->RegisterComponent();
+			Holder->AddInstanceComponent(Body);
+			Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Body->SetAbsolute(true, true, true);
+			if (UStaticMesh* RoverMesh = LoadObject<UStaticMesh>(nullptr, RoverMeshPath))
+			{
+				Body->SetStaticMesh(RoverMesh);
+				if (UMaterialInstanceDynamic* Mid = Body->CreateAndSetMaterialInstanceDynamic(0))
+				{
+					Mid->SetScalarParameterValue(FName("PoweredState"), 1.f);
+				}
+			}
+			else
+			{
+				Body->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+				Body->SetWorldScale3D(FVector(4.7f, 2.4f, 1.1f));
+				if (UMaterialInterface* Gray = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
+				{
+					UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Gray, Body);
+					Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.85f, 0.5f, 0.17f));
+					Body->SetMaterial(0, Mid);
+				}
+			}
+			Body->SetVisibility(!bSliceHidden);
+			NewRover.Body = Body;
+			UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+			UMaterialInterface* CrateBase = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox"));
+			for (int32 C = 0; C < 3; ++C)
+			{
+				UStaticMeshComponent* Crate = NewObject<UStaticMeshComponent>(Holder);
+				Crate->RegisterComponent();
+				Holder->AddInstanceComponent(Crate);
+				Crate->SetStaticMesh(CubeMesh);
+				Crate->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Crate->SetAbsolute(true, true, true);
+				if (CrateBase)
+				{
+					UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(CrateBase, Crate);
+					Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.44f, 0.21f, 0.10f));
+					Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor::Black);
+					Crate->SetMaterial(0, Mid);
+				}
+				Crate->SetVisibility(false);
+				NewRover.Crates[C] = Crate;
+			}
+		}
+		if (bRover && Walker)
+		{
+			// Index-aligned placeholders: the rover owns no walker, lump or clip.
+			SkelBodies.Add(nullptr);
+			CargoLumps.Add(nullptr);
+			PlayingClip.Add(NAME_None);
+			FeetLiftCm.Add(0.f);
+		}
+		else if (Walker && Holder)
 		{
 			// One skeletal walker per robot; the ISM layers stay empty.
 			USkeletalMeshComponent* Skel = NewObject<USkeletalMeshComponent>(Holder);
@@ -619,6 +879,17 @@ void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 			S->SetVisibility(!bHidden);
 		}
 	}
+	for (FRoverVis& R : RoverVis)
+	{
+		if (UStaticMeshComponent* B = R.Body.Get()) { B->SetVisibility(!bHidden); }
+		if (bHidden)
+		{
+			for (TWeakObjectPtr<UStaticMeshComponent>& C : R.Crates)
+			{
+				if (UStaticMeshComponent* Crate = C.Get()) { Crate->SetVisibility(false); }
+			}
+		}
+	}
 	// Cargo lumps follow the slice hide; the Tick below re-shows only loaded ones.
 	if (bHidden)
 	{
@@ -691,6 +962,112 @@ void URHAgentVisualizerSubsystem::EnsureMeshComponent()
 	Parts[(int32)EPart::ArmR] = MakeLayer(TEXT("ArmR"), JointBlack, FLinearColor::Black);
 }
 
+void URHAgentVisualizerSubsystem::UpdateRover(int32 i, const FVector& Pos, float YawDeg, float TerrainZ, const FRHTaskFragment* Task, float CapKg)
+{
+	FRoverVis& R = RoverVis[i];
+	UStaticMeshComponent* Body = R.Body.Get();
+	if (!Body)
+	{
+		return;
+	}
+	const float Yaw = YawDeg + CVarRoverYawOffsetDeg.GetValueOnGameThread();
+	if (Body->IsVisible() == bSliceHidden)
+	{
+		Body->SetVisibility(!bSliceHidden);
+	}
+	// Pivot on the tyre soles: the sim's own Z (a walker's mid-body convention) is ignored for a truck.
+	Body->SetWorldLocationAndRotation(FVector(Pos.X, Pos.Y, TerrainZ), FRotator(0.f, Yaw, 0.f));
+
+	// The load: up to three crates from the headboard backwards, taller with the load fraction, tinted by what is aboard.
+	const float Cargo = Task ? Task->CargoKg : 0.f;
+	const float Frac = FMath::Clamp(Cargo / FMath::Max(CapKg, 1.f), 0.f, 1.f);
+	const int32 Want = (bSliceHidden || Cargo <= 0.f) ? 0 : (Frac <= 0.34f ? 1 : (Frac <= 0.67f ? 2 : 3));
+	if (Want > 0 && Task && Task->CargoResource != R.CrateResource)
+	{
+		R.CrateResource = Task->CargoResource;
+		const FString Res = Task->CargoResource.ToString();
+		FLinearColor Tint(0.44f, 0.21f, 0.10f); // regolith and ore
+		if (Res == TEXT("Struct") || Res == TEXT("Metal") || Res == TEXT("Parts")) { Tint = FLinearColor(0.50f, 0.54f, 0.60f); }
+		else if (Res == TEXT("Water") || Res == TEXT("Ice")) { Tint = FLinearColor(0.38f, 0.62f, 0.85f); }
+		for (const TWeakObjectPtr<UStaticMeshComponent>& C : R.Crates)
+		{
+			if (UStaticMeshComponent* Crate = C.Get())
+			{
+				if (UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Crate->GetMaterial(0)))
+				{
+					Mid->SetVectorParameterValue(FName("Tint"), Tint);
+				}
+			}
+		}
+	}
+	const FVector Fwd = FRotator(0.f, Yaw, 0.f).Vector();
+	const FVector Side = FVector(-Fwd.Y, Fwd.X, 0.f);
+	constexpr float BedCentreCm = -82.f, BedTopCm = 86.f, SlotCm = 98.f;
+	const float CrateH = 45.f + 45.f * Frac;
+	for (int32 C = 0; C < 3; ++C)
+	{
+		UStaticMeshComponent* Crate = R.Crates[C].Get();
+		if (!Crate)
+		{
+			continue;
+		}
+		const bool bShow = C < Want;
+		if (Crate->IsVisible() != bShow)
+		{
+			Crate->SetVisibility(bShow);
+		}
+		if (bShow)
+		{
+			const float Along = BedCentreCm + SlotCm * (1 - C); // slot 0 against the headboard, then back
+			const FVector At = FVector(Pos.X, Pos.Y, TerrainZ) + Fwd * Along + FVector(0.f, 0.f, BedTopCm + CrateH * 0.5f);
+			Crate->SetWorldLocationAndRotation(At + Side * ((C == 1) ? 4.f : -3.f), FRotator(0.f, Yaw + (C - 1) * 3.f, 0.f));
+			Crate->SetWorldScale3D(FVector(0.88f, 1.72f - 0.06f * C, CrateH * (1.f - 0.06f * C) / 100.f));
+		}
+	}
+	R.CratesShown = Want;
+
+	// QA hooks (off by default): follow the first rover with the camera, and log heading against actual motion.
+	const float FollowZoom = CVarRoverFollowCam.GetValueOnGameThread();
+	if (FollowZoom > 0.f && i == FirstRoverIndex())
+	{
+		const APlayerController* FollowPC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+		if (ARHStrategyPawn* Cam = FollowPC ? Cast<ARHStrategyPawn>(FollowPC->GetPawn()) : nullptr)
+		{
+			Cam->SetCameraPose(FVector2D(Pos.X, Pos.Y), FollowZoom, CVarRoverFollowPitch.GetValueOnGameThread(), 0.f);
+		}
+	}
+	if (CVarRoverTurnLog.GetValueOnGameThread() != 0)
+	{
+		const double Now = FPlatformTime::Seconds();
+		if (Now >= R.NextLogS)
+		{
+			R.NextLogS = Now + 0.2;
+			const FVector2D Move = FVector2D(Pos.X, Pos.Y) - R.LogPos;
+			float Drift = 0.f, MoveYaw = 0.f;
+			const bool bMoved = Move.Size() > 12.0 && R.bLogPos;
+			if (bMoved)
+			{
+				MoveYaw = FMath::RadiansToDegrees(FMath::Atan2((float)Move.Y, (float)Move.X));
+				Drift = FMath::Abs(FMath::FindDeltaAngleDegrees(YawDeg, MoveYaw));
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[RoverTurn] #%d at (%.1f, %.1f) m heading %.1f deg, moving %s%.1f deg, drift %.1f deg, corner factor %.2f, drawn %.0f of %.0f cm, sim %.0f"),
+				i, Pos.X / 100.f, Pos.Y / 100.f, YawDeg, bMoved ? TEXT("") : TEXT("(still) "), MoveYaw, Drift,
+				R.Drive.Path.Pts.Num() > 1 ? RHPath::CornerFactor(R.Drive.Path, R.Drive.DrawS) : 1.f, R.Drive.DrawS, R.Drive.Path.Len, R.Drive.SimS);
+			R.LogPos = FVector2D(Pos.X, Pos.Y);
+			R.bLogPos = true;
+		}
+	}
+}
+
+int32 URHAgentVisualizerSubsystem::FirstRoverIndex() const
+{
+	for (int32 k = 0; k < RoverVis.Num(); ++k)
+	{
+		if (RoverVis[k].Body.IsValid()) { return k; }
+	}
+	return INDEX_NONE;
+}
+
 void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 {
 	if (Parts.Num() == 0 || Tracked.Num() == 0 || DeltaTime <= 0.f)
@@ -732,7 +1109,43 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			SimLastPosCm[i] = SimPos;
 		}
-		const FVector Pos = AdvanceDrawn(i, SimPos, SimSpeed, EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]), DeltaTime);
+		float RoverYaw = 0.f;
+		const FRHTaskFragment* DriveTask = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
+		const bool bRoverI = IsRoverIndex(i);
+		// Road legs: a rover always, any other robot while it drives a sim road trip (and until that trip is drawn to its end).
+		bool bDrive = bRoverI;
+		if (!bRoverI && RoverVis.IsValidIndex(i) && CVarRobotRouting.GetValueOnGameThread() != 0)
+		{
+			FRoverDrive& WalkDrive = RoverVis[i].Drive;
+			const URHSimWorldSubsystem* DriveSim = GetWorld()->GetSubsystem<URHSimWorldSubsystem>();
+			const FRHRobotRoadPath* WalkRoad = DriveSim ? DriveSim->GetRobotRoadPath(Tracked[i]) : nullptr;
+			bDrive = WalkDrive.bTrip || (DriveTask && DriveTask->TaskType != 0 && SimSpeed > 15.f && WalkRoad && WalkRoad->IsRoadTrip() && WalkRoad->TargetCm == DriveTask->TargetCm);
+			if (!bDrive)
+			{
+				WalkDrive.bInit = false; // its figure moves some other way now: the next road leg starts from where it is drawn
+			}
+		}
+		FVector Pos;
+		if (bDrive)
+		{
+			Pos = AdvanceRover(i, SimPos, SimSpeed, DriveTask, DeltaTime, RoverYaw, bRoverI);
+			if (!bRoverI && Trips.IsValidIndex(i))
+			{
+				// Keep the walker's own trip state in step, so a parking or catch-up walk starts from here.
+				FRobotTrip& WT = Trips[i];
+				WT.bInit = true;
+				WT.DrawCm = FVector(Pos.X, Pos.Y, SimPos.Z);
+				WT.LastSyncedCm = WT.DrawCm;
+				WT.bTrip = true;
+				WT.bRoadTrip = false;
+				WT.bFree = false;
+				WT.IdleS = 0.0;
+			}
+		}
+		else
+		{
+			Pos = AdvanceDrawn(i, SimPos, SimSpeed, DriveTask, DeltaTime);
+		}
 		if (bRouteLog)
 		{
 			// Inside a footprint that isn't the trip's own (its target's).
@@ -768,11 +1181,31 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		const float Speed = LastPosCm[i].IsNearlyZero() ? 0.f : (float)Delta.Size() / DeltaTime; // cm/s
 		LastPosCm[i] = Pos;
 		const float Stride = FMath::Clamp(Speed / 220.f, 0.f, 1.f); // full swing at a brisk walk
-		if (Speed > 15.f)
+		if (bDrive)
+		{
+			FacingYawDeg[i] = RoverYaw; // a road leg's heading is its drawn path's tangent (AdvanceRover), never smoothed on its own
+		}
+		else if (Speed > 15.f)
 		{
 			const float TargetYaw = FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X));
 			const float Gap = FMath::Abs(FMath::FindDeltaAngleDegrees(FacingYawDeg[i], TargetYaw));
 			FacingYawDeg[i] = FMath::FixedTurn(FacingYawDeg[i], TargetYaw, FMath::Clamp(Gap * 5.f, 40.f, 420.f) * DeltaTime);
+		}
+		if (!IsRoverIndex(i) && CVarRoverTurnLog.GetValueOnGameThread() != 0 && Speed > 30.f)
+		{
+			// QA: how far a walker's body heading is from the way it is actually moving, on a road trip.
+			const URHSimWorldSubsystem* LogSim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			const FRHRobotRoadPath* LogRoad = LogSim ? LogSim->GetRobotRoadPath(Tracked[i]) : nullptr;
+			if (LogRoad && LogRoad->IsRoadTrip())
+			{
+				const float MoveYaw = FMath::RadiansToDegrees(FMath::Atan2((float)Delta.Y, (float)Delta.X));
+				const float WalkDrift = FMath::Abs(FMath::FindDeltaAngleDegrees(FacingYawDeg[i], MoveYaw));
+				if (WalkDrift > 8.f)
+				{
+					UE_LOG(LogRedHope, Display, TEXT("[WalkerTurn] #%d on a road leg at (%.1f, %.1f) m heading %.0f moving %.0f: body is %.0f deg off its motion (speed %.0f cm/s)"),
+						i, Pos.X / 100.f, Pos.Y / 100.f, FacingYawDeg[i], MoveYaw, WalkDrift, Speed);
+				}
+			}
 		}
 		StridePhase[i] += (Speed / 46.f) * DeltaTime; // ~one full cycle per stride length
 		const float Swing = 26.f * Stride * FMath::Sin(StridePhase[i] * 2.f * PI);
@@ -782,6 +1215,23 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		// presentation, so the figure rides the terrain height at its feet
 		// (zero across the colony flat, real ground out at the far deposits).
 		const float TerrainZ = RHMarsTerrain::GroundZCm(Pos.X, Pos.Y);
+
+		if (IsRoverIndex(i))
+		{
+			// A cargo rover: the truck mesh and its crates, no walker and no cube figure.
+			const FRHRobotFragment* RoverDef = EntityManager.GetFragmentDataPtr<FRHRobotFragment>(Tracked[i]);
+			UpdateRover(i, Pos, FacingYawDeg[i], TerrainZ, EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]), RoverDef ? RoverDef->CargoCapKg : 1000.f);
+			if (!bUseSkeletal)
+			{
+				// The cube figure's ISM layers keep one instance per tracked entity: park this one, invisible.
+				const FTransform Hidden(FQuat::Identity, FVector(0.f, 0.f, -100000.f), FVector(0.001f));
+				for (int32 P = 0; P < (int32)EPart::COUNT; ++P)
+				{
+					Out[P].Add(Hidden);
+				}
+			}
+			continue;
+		}
 
 		// Skeletal path: one component per robot - place it feet-down at the
 		// entity, face travel, swap Walk/Idle on the speed threshold. The clip

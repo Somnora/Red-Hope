@@ -470,12 +470,12 @@ TArray<int32> URHSimWorldSubsystem::Debug_LayRoad(const FVector& FromCm, const F
 	return Added.NewEdgeIds;
 }
 
-void URHSimWorldSubsystem::RemoveRoadEdgeWithRefund(int32 EdgeId)
+bool URHSimWorldSubsystem::RemoveRoadEdgeWithRefund(int32 EdgeId)
 {
 	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
 	if (!E)
 	{
-		return;
+		return false;
 	}
 	// The refund mirrors a demolished structure: a site gives back everything the
 	// order paid for it; a standing road returns SalvageFraction of it. To the Lander.
@@ -491,10 +491,11 @@ void URHSimWorldSubsystem::RemoveRoadEdgeWithRefund(int32 EdgeId)
 			{
 				B.OutputKg.FindOrAdd(NAME_StructRes) += RefundKg;
 				OnStockChanged.Broadcast(NAME_StructRes, GetTotalSolid(NAME_StructRes));
-				break;
+				return true;
 			}
 		}
 	}
+	return false;
 }
 
 bool URHSimWorldSubsystem::Debug_RemoveRoadEdge(int32 EdgeId)
@@ -536,9 +537,18 @@ bool URHSimWorldSubsystem::ExecuteDemolishRoad(const FRHCommand& Cmd, FString& O
 	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
 	const bool bBuilt = E->bBuilt;
 	const double LengthM = (double)E->LengthCm / 100.0;
-	RemoveRoadEdgeWithRefund(EdgeId);
-	UE_LOG(LogRedHopeSim, Display, TEXT("Road edge #%d demolished (%s, %.0f m): %.0f kg Struct back at the Lander"),
-		EdgeId, bBuilt ? TEXT("standing") : TEXT("unbuilt"), LengthM, RefundKg);
+	const bool bRefunded = RemoveRoadEdgeWithRefund(EdgeId);
+	if (bRefunded)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Road edge #%d demolished (%s, %.0f m): %.0f kg Struct back at the Lander"),
+			EdgeId, bBuilt ? TEXT("standing") : TEXT("unbuilt"), LengthM, RefundKg);
+	}
+	else
+	{
+		// No completed Lander to receive it: the edge is gone, and nothing came back.
+		UE_LOG(LogRedHopeSim, Display, TEXT("Road edge #%d demolished (%s, %.0f m): no Lander to take the Struct back"),
+			EdgeId, bBuilt ? TEXT("standing") : TEXT("unbuilt"), LengthM);
+	}
 	return true;
 }
 

@@ -519,6 +519,14 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					SAssignNew(UplinkList, SVerticalBox)
 				]
 			]
+			// C6b: the TRAFFIC legend, while the overlay is on (top left: the right column has no room).
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+			[
+				SNew(SBox).WidthOverride(300.f)
+				[
+					BuildTrafficLegend()
+				]
+			]
 		]
 
 		// World-pressure banner (M1-c): the sky has agency now. The alert
@@ -598,7 +606,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		[
 			SNew(SBox).WidthOverride(RightColumnPx)
 			[
-				SNew(SScrollBox)
+				SAssignNew(RightScroll, SScrollBox)
 				.ScrollBarThickness(FVector2D(4.f, 4.f))
 				+ SScrollBox::Slot()
 				[
@@ -900,6 +908,12 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetMapLabel)),
 							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleMap))
+					]
+					// C6b: the traffic overlay lives beside the survey map.
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetTrafficLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTraffic))
 					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[

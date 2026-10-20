@@ -15,6 +15,7 @@
 #include "RHGrowthVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
+#include "RHTrafficVisualizerSubsystem.h"
 #include "Data/RHRows.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -1910,6 +1911,94 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(
 		}
 		PC->Debug_RoadGhost(FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f),
 			FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckScroll(
+	TEXT("RH.DeckScroll"),
+	TEXT("RH.DeckScroll <OffsetPx=0> - DEBUG/QA: scroll the command deck's right-hand column to a pixel offset, for a screenshot of a panel below the fold."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr)
+		{
+			PC->Debug_ScrollDeck(Args.Num() > 0 ? FCString::Atof(*Args[0]) : 0.f);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHTraffic(
+	TEXT("RH.Traffic"),
+	TEXT("RH.Traffic <overlay [0|1] | status | noon | hover <xm> <ym> | home [DefName=Habitat] | demolish <xm> <ym>> - C6b traffic. overlay switches the TRAFFIC heat overlay on or off (no argument toggles); noon sets the clock to mid-morning so a capture is lit; status logs the drawn shuttles and cars, the busiest road and the cursor edge; home DEBUG-re-homes every colonist round-robin into the finished surface buildings of a def (Id order), to stage a commuting city: with floor work seats it makes every trip surface-to-shaft; demolish holds the Demolish Road tool's hover on a ground point for a screenshot (RH.RoadGhost-style, never transmits; no arguments clears it)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		URHTrafficVisualizerSubsystem* Traffic = World ? World->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!Sim || !Traffic)
+		{
+			return;
+		}
+		const FString Sub = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("status"));
+		if (Sub == TEXT("overlay"))
+		{
+			Traffic->SetOverlayOn(Args.Num() > 1 ? FCString::Atoi(*Args[1]) != 0 : !Traffic->IsOverlayOn());
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Traffic] overlay %s"), Traffic->IsOverlayOn() ? TEXT("on") : TEXT("off"));
+			return;
+		}
+		if (Sub == TEXT("home"))
+		{
+			const FName Def(*(Args.Num() > 1 ? Args[1] : FString(TEXT("Habitat"))));
+			TArray<int32> Homes;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == Def && B.Level == 0 && !B.bUnderConstruction)
+				{
+					Homes.Add(B.Id);
+				}
+			}
+			if (Homes.Num() == 0)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("[RH.Traffic] no finished surface '%s' to move people into (RH.Spawn one first)"), *Def.ToString());
+				return;
+			}
+			int32 Index = 0;
+			for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+			{
+				Sim->Debug_SetColonistHome(C.Id, Homes[Index % Homes.Num()], 0);
+				++Index;
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Traffic] %d colonists re-homed round-robin into %d '%s' building(s)"), Index, Homes.Num(), *Def.ToString());
+			return;
+		}
+		if (Sub == TEXT("hover"))
+		{
+			// DEBUG: hold the overlay's hover on a ground point (metres) for a screenshot; no arguments releases it.
+			Traffic->SetForcedHover(Args.Num() >= 3 ? FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f) : FVector::ZeroVector, Args.Num() >= 3);
+			return;
+		}
+		if (Sub == TEXT("noon"))
+		{
+			// DEBUG: the sim clock to mid-morning of the current sol, so a capture is lit (a city built by RH.CityBench can start at night).
+			if (URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>())
+			{
+				Clock->Debug_SetSimSeconds((double)Clock->GetSol() * (double)URHSimClockSubsystem::SolLengthSimSeconds + 0.3 * (double)URHSimClockSubsystem::SolLengthSimSeconds);
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Traffic] the clock is at sol %d, fraction %.2f"), Clock->GetSol(), Clock->GetSolFraction());
+			}
+			return;
+		}
+		if (Sub == TEXT("demolish"))
+		{
+			if (!PC) { return; }
+			if (Args.Num() < 3)
+			{
+				PC->CancelModes();
+				return;
+			}
+			PC->Debug_RoadDemolishHover(FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f));
+			return;
+		}
+		const URHSimWorldSubsystem::FRHCommuteSummary Commute = Sim->GetCommuteSummary();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Traffic] %d vehicle(s) drawn (%d shuttles, %d cars) over %d district flow(s); commute ramp %.2f, %d commute, %d long; overlay %s, busiest road %d, %d loaded; hover: %s"),
+			Traffic->GetVehicleCount(), Traffic->GetShuttleCount(), Traffic->GetCarCount(), Traffic->GetFlowGroupCount(), Commute.Ramp, Commute.Commuters, Commute.LongCommuters,
+			Traffic->IsOverlayOn() ? TEXT("on") : TEXT("off"), Traffic->GetPeakLoad(), Traffic->GetLoadedEdges(), Traffic->GetHoverText().IsEmpty() ? TEXT("-") : *Traffic->GetHoverText());
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(

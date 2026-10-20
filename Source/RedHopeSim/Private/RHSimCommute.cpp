@@ -301,6 +301,29 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		++Out.Flow[Trip.Cell];
 		Out.LongFlow[Trip.Cell] += Trip.bLong ? 1 : 0;
 	}
+	// The readers binary-search Ids. Colonists are Id-ascending today (appended with a rising counter), but nothing here
+	// may rely on it: when they are not, Ids and Dists are sorted together by Id.
+	bool bIdsAscending = true;
+	for (int32 i = 1; i < Out.Ids.Num() && bIdsAscending; ++i)
+	{
+		bIdsAscending = Out.Ids[i - 1] < Out.Ids[i];
+	}
+	if (!bIdsAscending)
+	{
+		TArray<int32> Order;
+		Order.Reserve(Out.Ids.Num());
+		for (int32 i = 0; i < Out.Ids.Num(); ++i) { Order.Add(i); }
+		Order.Sort([&Out](int32 A, int32 B) { return Out.Ids[A] < Out.Ids[B]; });
+		TArray<int32> SortedIds;
+		TArray<int64> SortedDists;
+		for (const int32 At : Order)
+		{
+			SortedIds.Add(Out.Ids[At]);
+			SortedDists.Add(Out.Dists[At]);
+		}
+		Out.Ids = MoveTemp(SortedIds);
+		Out.Dists = MoveTemp(SortedDists);
+	}
 	// Trips nobody makes (an unresolvable anchor) are dropped.
 	Out.Trips.RemoveAll([](const FRHCommuteTrip& T) { return !T.bMeasured; });
 	Out.LongIds.Sort();

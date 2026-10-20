@@ -11876,6 +11876,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		bRoverWaitAnnounced = false;
 		bCommuteAlerted = false;
 		JobAssignLast.Reset();
+		ColonistStations.Reset(); // derived by RefreshJobs: nothing from before the load may answer a read until it re-runs
 		++JobsVersion;
 		CommuteFlows = FRHCommuteFlows();
 		CommuteMemo = FRHCommuteMemo();

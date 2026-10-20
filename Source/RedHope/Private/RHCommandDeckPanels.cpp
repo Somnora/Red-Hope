@@ -15,6 +15,7 @@
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
 #include "RHDistrictVisualizerSubsystem.h"
+#include "RHTrafficVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -714,6 +715,12 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			{
 				Parts.Add(FString::Printf(TEXT("Layout: %d pair%s of rooms clash."), H.OffendedPairs, H.OffendedPairs == 1 ? TEXT("") : TEXT("s")));
 			}
+			if (H.CommutePenalty > 0.0)
+			{
+				// C6b, Gate-D framing PLACEHOLDER (D161): the commute term, shown only while it is nonzero.
+				Parts.Add(FString::Printf(TEXT("Long trips to work: -%.1f Hope (%d of %d people travel over %.0f m; homes nearer their work would give it back)."),
+					H.CommutePenalty, H.LongCommuters, S->GetPopulation(), (double)S->GetCommuteLongCm() / 100.0));
+			}
 			if (S->GetDeficitEquivalent() > 0.0)
 			{
 				// C2a, Gate-D framing PLACEHOLDER: the Hope line for a shared shortage.
@@ -991,6 +998,34 @@ void SRHCommandDeck::RefreshCityPanel()
 		Sim->GetDistrictCounts(Counts);
 		CityCounts.Reset();
 		for (const FRHDistrictCounts& C : Counts) { CityCounts.Add(C.DistrictId, C); }
+		// C6b, Gate-D framing PLACEHOLDER (D162): the long commuters and the busiest route, once the population ramp is open.
+		CityCommuteLine.Reset();
+		const URHSimWorldSubsystem::FRHCommuteSummary Commute = Sim->GetCommuteSummary();
+		if (Commute.Ramp > 0.0 && Commute.Commuters > 0)
+		{
+			TArray<URHSimWorldSubsystem::FRHCommuteFlow> Flows;
+			Sim->GetCommuteFlows(Flows);
+			const URHSimWorldSubsystem::FRHCommuteFlow* Busiest = nullptr;
+			for (const URHSimWorldSubsystem::FRHCommuteFlow& F : Flows)
+			{
+				// The busiest route between two DIFFERENT districts (the Unzoned row counts as one); ties to the earlier pair.
+				if (F.HomeDistrictId != F.WorkDistrictId && (!Busiest || F.Count > Busiest->Count)) { Busiest = &F; }
+			}
+			const auto NameOf = [Sim](int32 Id) -> FString
+			{
+				const FRHDistrict* D = Id != 0 ? Sim->FindDistrict(Id) : nullptr;
+				return D ? D->Name : FString(TEXT("unzoned ground"));
+			};
+			const double Share = Commute.Pop > 0 ? 100.0 * (double)Commute.LongCommuters / (double)Commute.Pop : 0.0;
+			CityCommuteLine = Commute.LongCommuters > 0
+				? FString::Printf(TEXT("Commuting: %d of %d people (%.0f%%) travel over %.0f m to work; homes nearer their work would give them time back."),
+					Commute.LongCommuters, Commute.Pop, Share, (double)Sim->GetCommuteLongCm() / 100.0)
+				: FString::Printf(TEXT("Commuting: %d people travel to work; nobody is over %.0f m."), Commute.Commuters, (double)Sim->GetCommuteLongCm() / 100.0);
+			if (Busiest)
+			{
+				CityCommuteLine += FString::Printf(TEXT(" Busiest route: %s to %s, %d people."), *NameOf(Busiest->HomeDistrictId), *NameOf(Busiest->WorkDistrictId), Busiest->Count);
+			}
+		}
 	}
 	// C5b: the growth list - one bar a project; a bar reads its project live, so only a start, a finish or a refund rebuilds it.
 	if (CityGrowthList.IsValid() && (Sim->GetGrowthVersion() != CityGrowthVersionShown || Sim->GetDistrictsVersion() != CityGrowthDistrictsShown))
@@ -1299,6 +1334,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg) + Waiting;
 			})
 	];
+	// C6b: the commute line (placeholder D162), shown once there is something to say.
+	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]() { return CityCommuteLine.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+		[
+			Prose(MakeAttributeLambda([this]() { return Txt(CityCommuteLine); }), D::TextDim, 9)
+		]
+	];
 	// C5d: the City / Earth share. How much of the colony's spare material may grow the city instead of being held
 	// for Earth's next quota. Five steps; it applies at once. Wording is PLACEHOLDER (D155).
 	{
@@ -1465,6 +1509,103 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 
 // --- Fleet ---
 
+void SRHCommandDeck::Debug_ScrollRight(float OffsetPx)
+{
+	if (RightScroll.IsValid())
+	{
+		RightScroll->SetScrollOffset(OffsetPx);
+	}
+}
+
+EVisibility SRHCommandDeck::GetTrafficLegendVisibility() const
+{
+	return (PC.IsValid() && PC->IsTrafficOverlayOn()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetTrafficLabel() const
+{
+	return FText::FromString(PC.IsValid() && PC->IsTrafficOverlayOn() ? TEXT("Traffic [on]") : TEXT("Traffic"));
+}
+
+FReply SRHCommandDeck::HandleTraffic()
+{
+	if (PC.IsValid())
+	{
+		PC->ToggleTrafficOverlay();
+	}
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildTrafficLegend()
+{
+	// C6b: the TRAFFIC overlay's legend. The ramp from an edge nobody rides to the busiest, the busiest edge's
+	// load, and the numbers of the road under the cursor. Gate-D framing PLACEHOLDER copy (D166).
+	TSharedRef<SHorizontalBox> Swatches = SNew(SHorizontalBox);
+	for (int32 Bin = 0; Bin < URHTrafficVisualizerSubsystem::HeatBins; ++Bin)
+	{
+		Swatches->AddSlot().FillWidth(1.f).Padding(Bin == 0 ? 0.f : 2.f, 0.f, 0.f, 0.f)
+		[
+			SNew(SBox).HeightOverride(10.f)
+			[
+				SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(URHTrafficVisualizerSubsystem::HeatColor(Bin))
+			]
+		];
+	}
+	const auto Traffic = [this]() -> const URHTrafficVisualizerSubsystem*
+	{
+		const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+		return W ? W->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
+	};
+	return SNew(SBox)
+		.Visibility(this, &SRHCommandDeck::GetTrafficLegendVisibility)
+		[
+			D::Panel(FName("structure"), Txt(TEXT("TRAFFIC")), D::Amber,
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					Swatches
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.f)
+					[
+						SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).Text(Txt(TEXT("unused")))
+					]
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).Text(Txt(TEXT("quiet  to  busiest")))
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+				[
+					Prose(MakeAttributeLambda([this, Traffic]()
+					{
+						const URHTrafficVisualizerSubsystem* T = Traffic();
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!T || !S) { return FText::GetEmpty(); }
+						FString Text = FString::Printf(TEXT("Each road is washed by the people who ride it plus %d for every freight rover on it. The busiest road carries %d."),
+							URHTrafficVisualizerSubsystem::RoverHeatWeight, T->GetPeakLoad());
+						if (S->GetCommuteRamp() <= 0.0)
+						{
+							Text += TEXT(" Commuting is not counted until the colony passes 60 people.");
+						}
+						else
+						{
+							Text += FString::Printf(TEXT(" %d shuttle%s and %d car%s on the streets."), T->GetShuttleCount(), T->GetShuttleCount() == 1 ? TEXT("") : TEXT("s"), T->GetCarCount(), T->GetCarCount() == 1 ? TEXT("") : TEXT("s"));
+						}
+						return Txt(Text);
+					}), D::TextDim, 9)
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true).ColorAndOpacity(D::Text)
+					.Text_Lambda([Traffic]() { const URHTrafficVisualizerSubsystem* T = Traffic(); return T && !T->GetHoverText().IsEmpty() ? Txt(T->GetHoverText()) : Txt(TEXT("Point at a road for its numbers.")); })
+				])
+		];
+}
+
 TSharedRef<SWidget> SRHCommandDeck::BuildFleetPanel()
 {
 	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
@@ -1501,7 +1642,23 @@ TSharedRef<SWidget> SRHCommandDeck::BuildFleetPanel()
 	return D::Panel(FName("robot"), Txt(TEXT("FLEET")), D::Teal,
 		SNew(SBox).Visibility_Lambda([this]() { return bFleetExpanded ? EVisibility::Visible : EVisibility::Collapsed; })
 		[
-			SAssignNew(FleetList, SVerticalBox)
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SAssignNew(FleetList, SVerticalBox)
+			]
+			// C6b, Gate-D framing PLACEHOLDER (D164): rovers that came on the ship and wait for a road to land on.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Amber).AutoWrapText(true)
+				.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetRoversWaitingAboard() > 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+				.Text_Lambda([this]()
+				{
+					const URHSimWorldSubsystem* S = GetSim();
+					const int32 N = S ? S->GetRoversWaitingAboard() : 0;
+					return Txt(FString::Printf(TEXT("%d cargo rover%s waiting aboard the Lander for a road."), N, N == 1 ? TEXT("") : TEXT("s")));
+				})
+			]
 		],
 		Summary);
 }
@@ -1517,11 +1674,15 @@ void SRHCommandDeck::RefreshFleetPanel()
 	}
 	TArray<FRHRobotPanelRow> Rows;
 	Agents->CollectPanelRows(Rows);
+	const URHSimWorldSubsystem* Sim = GetSim();
+	TArray<FRHRoverState> RoverStates;
+	if (Sim) { Sim->GetRoverStates(RoverStates); }
 	// Friendly names from the robot table; repeats get a number, never an ID.
 	TMap<FName, int32> Total, Seen;
 	for (const FRHRobotPanelRow& R : Rows) { ++Total.FindOrAdd(R.DefName); }
 	FleetRows.Reset(Rows.Num());
 	TArray<FName> Members;
+	int32 RoverSeen = 0;
 	for (const FRHRobotPanelRow& R : Rows)
 	{
 		const FRHRobotRow* Def = Defs->GetRobot(R.DefName);
@@ -1530,7 +1691,20 @@ void SRHCommandDeck::RefreshFleetPanel()
 		{
 			Name += FString::Printf(TEXT(" %d"), ++Seen.FindOrAdd(R.DefName));
 		}
-		FleetRows.Add({ Name, R.TaskType, R.ChargeFrac, R.Wear });
+		FFleetRowView Row = { Name, R.TaskType, R.ChargeFrac, R.Wear };
+		Row.bRover = R.RobotClass == FName("Rover");
+		if (Row.bRover)
+		{
+			// The k-th rover row is the k-th rover state (both walk the robots in spawn order).
+			const int32 RoverIndex = RoverSeen++;
+			if (RoverStates.IsValidIndex(RoverIndex))
+			{
+				Row.CargoKg = RoverStates[RoverIndex].CargoKg;
+				const FRHRobotRoadPath* Path = Sim ? Sim->GetRoverRoadPath(RoverStates[RoverIndex].Entity) : nullptr;
+				Row.bOnRoad = Path && Path->IsRoadTrip();
+			}
+		}
+		FleetRows.Add(Row);
 		Members.Add(R.DefName);
 	}
 	if (Members == FleetDefsShown || !FleetList.IsValid())
@@ -1561,6 +1735,12 @@ void SRHCommandDeck::RefreshFleetPanel()
 						const FFleetRowView& R = FleetRows[Index];
 						if (R.Wear >= S->GetWearHaltThreshold()) { return Txt(TEXT("Broken down")); }
 						if (R.Charge <= 0.f) { return Txt(TEXT("Out of charge")); }
+						if (R.bRover && R.Task == 2)
+						{
+							// C6b, Gate-D framing PLACEHOLDER (D163): the rover's status, in words about the load and the road.
+							return Txt(R.CargoKg > 0.f ? FString::Printf(TEXT("Hauling %.0f kg"), R.CargoKg) : FString(TEXT("To a pickup")));
+						}
+						if (R.bRover && R.Task == 0) { return Txt(S->GetFreightTaskCount() > 0 ? TEXT("Needs a road") : TEXT("Standing by")); }
 						if (R.Wear >= S->GetWearDegradeThreshold()) { return Txt(FString::Printf(TEXT("%s, worn"), TaskWord(R.Task))); }
 						return Txt(TaskWord(R.Task));
 					})
@@ -2079,8 +2259,80 @@ TSharedRef<SWidget> SRHCommandDeck::BuildRoadCard()
 	];
 }
 
+const FName SRHCommandDeck::RoadDemolishCardName(TEXT("DemolishRoad"));
+
+bool SRHCommandDeck::IsRoadDemolishDetail() const
+{
+	return HoveredBuildDef == RoadDemolishCardName && SelectedBuildCategory == FName("Logistics");
+}
+
+FReply SRHCommandDeck::HandleRoadDemolish()
+{
+	if (PC.IsValid())
+	{
+		PC->BeginRoadDemolish();
+	}
+	bBuildDrawerOpen = false; // the ground must be clear to point at a road
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildRoadDemolishCard()
+{
+	// C6b (Q3a). UI only, like the Road card: no building row behind it. Gate-D placeholder copy (D165).
+	return SNew(SBox).WidthOverride(128.f).Padding(FMargin(0.f, 0.f, 6.f, 0.f))
+	[
+		SNew(SButton)
+		.ButtonStyle(&D::ButtonStyle())
+		.ContentPadding(FMargin(6.f, 6.f, 6.f, 7.f))
+		.OnHovered_Lambda([this]() { HoveredBuildDef = RoadDemolishCardName; })
+		.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRoadDemolish))
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+			[
+				SNew(SBox).WidthOverride(96.f).HeightOverride(96.f).HAlign(HAlign_Center).VAlign(VAlign_Center)
+				[
+					D::IconImage(FName("close"), FSlateColor(D::TextDim), 48.f)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 5.f, 0.f, 0.f)
+			[
+				SNew(SBox).MinDesiredHeight(30.f).VAlign(VAlign_Top)
+				[
+					SNew(STextBlock).Text(Txt(TEXT("Demolish Road"))).Font(D::Label(10)).ColorAndOpacity(D::Text).AutoWrapText(true)
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 4.f, 0.f)
+				[
+					D::IconImage(FName("structure"), FSlateColor(D::TextDim), 10.f)
+				]
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(8)).AutoWrapText(true).ColorAndOpacity(D::Text)
+					.Text_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						return Txt(FString::Printf(TEXT("%.0f%% of the struct back"), S ? S->GetSalvageFraction() * 100.0 : 50.0));
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Text(Txt(TEXT("click a road"))).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+			]
+		]
+	];
+}
+
 FName SRHCommandDeck::GetDetailBuildDef() const
 {
+	if (IsRoadDemolishDetail())
+	{
+		return RoadDemolishCardName; // C6b: the UI-only card has no building row behind it
+	}
 	// The hovered card while it belongs to the open category, else that
 	// category's first card - the panel is never empty.
 	if (IsRoadDetail())
@@ -2203,6 +2455,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 		if (Cat == FName("Logistics"))
 		{
 			Cards->AddSlot().AutoWidth()[BuildRoadCard()]; // C4
+			Cards->AddSlot().AutoWidth()[BuildRoadDemolishCard()]; // C6b
 		}
 		Rows->AddSlot().AutoHeight()
 		[
@@ -2229,6 +2482,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 			.Text_Lambda([this, DetailRow]()
 			{
 				if (IsRoadDetail()) { return Txt(TEXT("Road")); }
+				if (IsRoadDemolishDetail()) { return Txt(TEXT("Demolish Road")); }
 				const FRHBuildingRow* R = DetailRow();
 				return R ? Txt(R->DisplayName.IsEmpty() ? GetDetailBuildDef().ToString() : R->DisplayName) : FText::GetEmpty();
 			})
@@ -2237,6 +2491,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 		[
 			Prose(MakeAttributeLambda([this, DetailRow]()
 			{
+				if (IsRoadDemolishDetail())
+				{
+					return Txt(TEXT("Tears a road up. Half of its Struct comes back to the Lander; a stretch still being laid gives back everything it was paid. Robots and rovers already on it finish their trip, only slower."));
+				}
 				if (IsRoadDetail())
 				{
 					return Txt(TEXT("Compacted regolith between two points. Robots drive it faster than open ground, and they will not cut across a building to use it. Buildings cannot stand on a road."));
@@ -2249,6 +2507,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 		[
 			Prose(MakeAttributeLambda([this, DetailRow]()
 			{
+				if (IsRoadDemolishDetail())
+				{
+					return Txt(TEXT("Hover a road to light it, then click to send the order. It lands after the signal lag, and can be cancelled until then. Trips that rode it find another way, or walk."));
+				}
 				if (IsRoadDetail())
 				{
 					const URHSimWorldSubsystem* RS = GetSim();
@@ -2315,6 +2577,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 			SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true)
 			.Text_Lambda([this, DetailRow]()
 			{
+				if (IsRoadDemolishDetail())
+				{
+					return Txt(TEXT("Costs nothing; the Struct comes back to the Lander."));
+				}
 				if (IsRoadDetail())
 				{
 					const URHSimWorldSubsystem* RS = GetSim();

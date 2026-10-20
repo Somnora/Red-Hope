@@ -4,10 +4,12 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "MassEntityTypes.h"
 #include "Mass/EntityHandle.h"
+#include "RHPathRounding.h"
 #include "RHAgentVisualizerSubsystem.generated.h"
 
 class UInstancedStaticMeshComponent;
 class USkeletalMeshComponent;
+class UStaticMeshComponent;
 struct FRHTaskFragment;
 
 // Scaffold presentation for sim agents: instanced meshes, transforms copied
@@ -78,6 +80,46 @@ private:
 	// accessor, no sim recompile.
 	TArray<TWeakObjectPtr<UStaticMeshComponent>> CargoLumps;
 	bool bUseSkeletal = false;
+	// C6b: a cargo rover (RobotClass Rover, the RC_R row) is a truck, not a walker: one static mesh (the
+	// code-built Rover kit model, scripts/blender/rh_build_rover.py) driven along the sim's road path by
+	// the same arc-length drawing the walkers use, plus up to three crates on its bed while the task
+	// fragment carries CargoKg. Parallel to Tracked; Body is null for every other robot. Reads only the
+	// public Mass fragments, never writes the sim.
+	// Road legs of EVERY robot are driven this way (a walker with a smaller radius and a quicker pivot).
+	// A rover turns like a heavy vehicle: its drawn path is the sim's waypoints with every corner rounded to a
+	// fillet, its heading is always the tangent of that path at its drawn position (it cannot slide), it eases
+	// down into tight turns within a bounded lag behind the sim's own arc-length progress, and pivots slowly
+	// on the spot when a trip starts facing the wrong way.
+	struct FRoverDrive
+	{
+		bool bInit = false;
+		FVector2D Pos = FVector2D::ZeroVector;
+		float Yaw = 0.f;
+		bool bTrip = false, bRoadTrip = false;
+		int32 Serial = -1;
+		FVector2D Target = FVector2D::ZeroVector;
+		float SimStartDist = 1.f;
+		RHPath::FRounded Path;
+		TArray<int32> LegVertex;   // raw vertex index at the end of each sim leg
+		TArray<float> LegSimEnd;   // cumulative sim length at the end of each leg
+		float DrawS = 0.f, SimS = 0.f;
+	};
+	struct FRoverVis
+	{
+		FRoverDrive Drive;
+		TWeakObjectPtr<UStaticMeshComponent> Body;
+		TWeakObjectPtr<UStaticMeshComponent> Crates[3];
+		FName CrateResource;
+		int32 CratesShown = 0;
+		double NextLogS = 0.0; // rh.RoverTurnLog
+		FVector2D LogPos = FVector2D::ZeroVector;
+		bool bLogPos = false;
+	};
+	TArray<FRoverVis> RoverVis;
+	bool IsRoverIndex(int32 i) const;
+	int32 FirstRoverIndex() const;
+	FVector AdvanceRover(int32 i, const FVector& SimPos, float SimSpeed, const FRHTaskFragment* Task, float DeltaTime, float& OutYawDeg, bool bHeavy);
+	void UpdateRover(int32 i, const FVector& Pos, float YawDeg, float TerrainZ, const FRHTaskFragment* Task, float CapKg);
 	TArray<FMassEntityHandle> Tracked;
 	// Per-entity gait state, parallel to Tracked: last ground position (for
 	// speed), smoothed facing yaw, and the accumulated stride phase.

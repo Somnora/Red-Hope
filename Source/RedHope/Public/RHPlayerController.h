@@ -42,6 +42,18 @@ public:
 	// Capture/QA (RH.RoadGhost): hold the road ghost mid-drag from one point to
 	// another, as if the mouse were down there; it never transmits.
 	void Debug_RoadGhost(const FVector& FromCm, const FVector& ToCm);
+	// Demolish Road tool (C6b, Q3a): BUILD > Logistics > Demolish Road. Hover lights the road edge under
+	// the cursor (white outline, with the sim's own CanDemolishRoad preflight and the 50% salvage on the
+	// hint), a click transmits the DemolishRoad order and the confirm line states the salvage. The mode
+	// stays armed for the next edge; cancel exits.
+	void BeginRoadDemolish();
+	bool IsRoadDemolishMode() const { return bRoadDemolishMode; }
+	// Capture/QA (RH.RoadDemolishHover): hold the tool's hover on a ground point, as if the cursor were
+	// there; it never transmits.
+	void Debug_RoadDemolishHover(const FVector& AtCm);
+	// The traffic overlay (C6b): heat on the road strips, a legend on the deck; lives beside the survey map.
+	void ToggleTrafficOverlay();
+	bool IsTrafficOverlayOn() const;
 	// District paint mode (C5a): pick a Kind on the deck's DISTRICT tab (or the City panel). On the
 	// surface press anchors a corner of a lattice rectangle (10 m cells, at most 32 x 32), drag sizes
 	// it under a ghost that shows the sim's own preflight - the cells it adds, the district it joins,
@@ -122,6 +134,8 @@ public:
 	// Capture/QA (RH.Menu): open a menu screen by name (title, pause,
 	// settings, credits, none).
 	void Debug_OpenMenu(const FString& Name);
+	// Capture/QA (RH.DeckScroll): scroll the deck's right column to a pixel offset.
+	void Debug_ScrollDeck(float OffsetPx);
 	// Capture/QA (RH.DeckExpand): unfold every deck panel.
 	void Debug_ExpandDeck(bool bRoster);
 	// Capture/QA (RH.DeckBuild): open the deck's build drawer on a category.
@@ -220,6 +234,10 @@ private:
 	// A ground point snapped to the road grid, and to an existing junction within
 	// 4 m of it (so a stretch can start exactly where another ends).
 	FVector SnapRoadPoint(const FVector& GroundCm) const;
+	// Demolish Road state (C6b).
+	bool bRoadDemolishMode = false;
+	bool bRoadDemolishForced = false;
+	FVector RoadDemolishForcedCm = FVector::ZeroVector;
 	// District paint state (C5a).
 	bool bDistrictMode = false;
 	bool bDistrictDragging = false;

@@ -7,6 +7,7 @@
 #include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
+#include "RHTrafficVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -511,6 +512,62 @@ void ARHPlayerController::Tick(float DeltaTime)
 			if (!bRoadForced && bRoadDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
 			{
 				bRoadDragging = false; // released on the spot it was pressed: nothing to lay
+			}
+		}
+	}
+	else if (bRoadDemolishMode)
+	{
+		// The Demolish Road tool (C6b, Q3a): the edge under the cursor lit white (amber once an order for
+		// it is already in flight), the sim's own preflight and the salvage on the hint.
+		FVector Ground;
+		if (ActiveLevel != 0)
+		{
+			HintText = TEXT("DEMOLISH ROAD: roads run on the surface - ride the elevator back up first");
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+		else if (bRoadDemolishForced ? (Ground = RoadDemolishForcedCm, true) : CursorToGround(Ground))
+		{
+			const float HalfW = 0.5f * (float)Sim->GetRoadParams().WidthCm;
+			const int32 EdgeId = URHTrafficVisualizerSubsystem::FindEdgeNear(*Sim, Ground, HalfW + 150.f);
+			const FRHRoadEdge* Edge = Sim->GetRoadGraph().FindEdge(EdgeId);
+			if (!Edge)
+			{
+				HintText = TEXT("DEMOLISH ROAD: click a road to tear it up (half its Struct comes back to the Lander); right-click to finish");
+				HintColor = FLinearColor(1.f, 0.75f, 0.3f);
+			}
+			else
+			{
+				FString Reason;
+				double RefundKg = 0.0;
+				const bool bOk = Sim->CanDemolishRoad(EdgeId, Reason, &RefundKg);
+				const bool bInFlight = Sim->GetUplinkQueue().ContainsByPredicate([EdgeId](const FRHCommand& C)
+					{
+						return C.Verb == FName("DemolishRoad") && FMath::RoundToInt(C.Value) == EdgeId;
+					});
+				const FColor Color = !bOk ? FColor::Red : (bInFlight ? FColor(255, 190, 60) : FColor::White);
+				const FRHRoadGraph& Graph = Sim->GetRoadGraph();
+				const FIntPoint A = Graph.NodeCm(Edge->A, Sim->GetRoadParams()), B = Graph.NodeCm(Edge->B, Sim->GetRoadParams());
+				const FVector Pa(A.X, A.Y, RHMarsTerrain::GroundZCm(A.X, A.Y) + 30.f), Pb(B.X, B.Y, RHMarsTerrain::GroundZCm(B.X, B.Y) + 30.f);
+				const FVector Dir = (Pb - Pa).GetSafeNormal2D();
+				const FVector Side(-Dir.Y * HalfW, Dir.X * HalfW, 0.f);
+				DrawDebugLine(World, Pa + Side, Pb + Side, Color, false, -1.f, 0, 7.f);
+				DrawDebugLine(World, Pa - Side, Pb - Side, Color, false, -1.f, 0, 7.f);
+				DrawDebugLine(World, Pa, Pb, Color, false, -1.f, 0, 4.f);
+				DrawDebugLine(World, Pa + Side, Pa - Side, Color, false, -1.f, 0, 4.f);
+				DrawDebugLine(World, Pb + Side, Pb - Side, Color, false, -1.f, 0, 4.f);
+				if (!bOk)
+				{
+					HintText = FString::Printf(TEXT("DEMOLISH ROAD #%d: %s"), EdgeId, *Reason);
+					HintColor = FLinearColor(1.f, 0.4f, 0.3f);
+				}
+				else
+				{
+					HintText = FString::Printf(TEXT("DEMOLISH ROAD #%d (%.0f m, %s): click to tear it up - %.0f kg of Struct comes back (%s)%s\nrobots and rovers on it finish their trip; right-click to finish"),
+						EdgeId, (double)Edge->LengthCm / 100.0, Edge->bBuilt ? TEXT("standing") : TEXT("still being laid"), RefundKg,
+						Edge->bBuilt ? TEXT("50% salvage") : TEXT("the whole bill"),
+						bInFlight ? TEXT(" - an order for it is already on its way") : TEXT(""));
+					HintColor = FLinearColor(1.f, 0.85f, 0.4f);
+				}
 			}
 		}
 	}
@@ -1103,6 +1160,15 @@ void ARHPlayerController::Tick(float DeltaTime)
 		}
 	}
 
+	// The traffic overlay's hover (C6b): the cursor's ground point, while no tool owns the click.
+	if (URHTrafficVisualizerSubsystem* Traffic = World->GetSubsystem<URHTrafficVisualizerSubsystem>())
+	{
+		FVector HoverGround = FVector::ZeroVector;
+		const bool bToolArmed = !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bDistrictMode || bDigMode || bSurveyMode
+			|| bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode;
+		Traffic->SetHoverGround(HoverGround, Traffic->IsOverlayOn() && ActiveLevel == 0 && !bToolArmed && CursorToGround(HoverGround));
+	}
+
 	// The inspected station bay (BM-2): an emerald frame; leaving the surface drops it.
 	if (HasSelectedBay())
 	{
@@ -1229,6 +1295,37 @@ void ARHPlayerController::OnClick()
 		{
 			RoadAnchorCm = SnapRoadPoint(Ground);
 			bRoadDragging = true;
+		}
+	}
+	else if (bRoadDemolishMode)
+	{
+		// C6b (Q3a): the edge under the cursor, with the same refusals the sim's preflight gives.
+		if (ActiveLevel == 0)
+		{
+			const float HalfW = 0.5f * (float)Sim->GetRoadParams().WidthCm;
+			const int32 EdgeId = URHTrafficVisualizerSubsystem::FindEdgeNear(*Sim, Ground, HalfW + 150.f);
+			FString Reason;
+			double RefundKg = 0.0;
+			if (EdgeId != 0 && Sim->CanDemolishRoad(EdgeId, Reason, &RefundKg))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("DemolishRoad");
+				Cmd.Value = (double)EdgeId;
+				Sim->EnqueueCommand(Cmd);
+				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+				const FRHRoadEdge* Edge = Sim->GetRoadGraph().FindEdge(EdgeId);
+				SetConfirm(FString::Printf(TEXT("Demolish transmitted: road #%d, %.0f m - %.0f kg of Struct comes back (%s)"), EdgeId,
+					Edge ? (double)Edge->LengthCm / 100.0 : 0.0, RefundKg, Edge && Edge->bBuilt ? TEXT("50% salvage") : TEXT("the whole bill, it was never built")),
+					FLinearColor(0.2f, 0.9f, 1.f));
+			}
+			else
+			{
+				URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+				if (!Reason.IsEmpty())
+				{
+					SetConfirm(Reason, FLinearColor(1.f, 0.4f, 0.3f));
+				}
+			}
 		}
 	}
 	else if (bDistrictMode)
@@ -1467,7 +1564,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bRoadMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -1613,6 +1710,43 @@ FVector ARHPlayerController::SnapRoadPoint(const FVector& GroundCm) const
 	return Snapped;
 }
 
+void ARHPlayerController::Debug_ScrollDeck(float OffsetPx)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_ScrollRight(OffsetPx);
+	}
+}
+
+void ARHPlayerController::BeginRoadDemolish()
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bRoadDemolishMode = true;
+	bRoadDemolishForced = false;
+}
+
+void ARHPlayerController::Debug_RoadDemolishHover(const FVector& AtCm)
+{
+	BeginRoadDemolish();
+	bRoadDemolishForced = true;
+	RoadDemolishForcedCm = AtCm;
+}
+
+void ARHPlayerController::ToggleTrafficOverlay()
+{
+	if (URHTrafficVisualizerSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr)
+	{
+		Traffic->SetOverlayOn(!Traffic->IsOverlayOn());
+	}
+}
+
+bool ARHPlayerController::IsTrafficOverlayOn() const
+{
+	const URHTrafficVisualizerSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
+	return Traffic && Traffic->IsOverlayOn();
+}
+
 void ARHPlayerController::BeginDistrictPaint(FName Kind)
 {
 	CancelModes();
@@ -1639,6 +1773,7 @@ void ARHPlayerController::Debug_DistrictGhost(FName Kind, const FIntPoint& FromC
 void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bRoadDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
@@ -1653,6 +1788,7 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 void ARHPlayerController::BeginDigDesignation()
 {
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1665,6 +1801,7 @@ void ARHPlayerController::BeginDigDesignation()
 void ARHPlayerController::BeginSurveyDesignation()
 {
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1792,6 +1929,7 @@ const FRHFurnitureInstance* ARHPlayerController::FindFurnitureAt(const FVector& 
 void ARHPlayerController::BeginExcavateDesignation()
 {
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1808,6 +1946,7 @@ void ARHPlayerController::BeginExcavateDesignation()
 void ARHPlayerController::BeginZoneDesignation(FName Room)
 {
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1872,7 +2011,7 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bRoadMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
+	if (PendingBuildDef.IsNone() && !bRoadMode && !bRoadDemolishMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -1883,8 +2022,10 @@ void ARHPlayerController::CancelModes()
 	PendingBuildDef = NAME_None;
 	bBuildDragging = false;
 	bRoadMode = false;
+	bRoadDemolishMode = false;
 	bRoadDragging = false;
 	bRoadForced = false;
+	bRoadDemolishForced = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	bDistrictForced = false;

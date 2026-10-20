@@ -28,6 +28,8 @@ public:
 	// The settings menu's "Guide and tips" switch.
 	bool AreTipsOn() const { return !bTipsOff; }
 	void SetTipsOn(bool bOn) { SetTipsOff(!bOn); }
+	// Capture/QA (RH.DeckScroll): scroll the right-hand column to a pixel offset (a tall city outgrows the screen).
+	void Debug_ScrollRight(float OffsetPx);
 	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
 	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
 	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).
@@ -133,6 +135,16 @@ private:
 	TSharedRef<SWidget> BuildRoadCard();
 	bool IsRoadDetail() const;
 	static const FName RoadCardName;
+	// C6b: the Demolish Road card beside it (arms the controller's demolish tool), and the traffic overlay's
+	// button and legend panel.
+	FReply HandleRoadDemolish();
+	TSharedRef<SWidget> BuildRoadDemolishCard();
+	bool IsRoadDemolishDetail() const;
+	static const FName RoadDemolishCardName;
+	FReply HandleTraffic();
+	FText GetTrafficLabel() const;
+	TSharedRef<SWidget> BuildTrafficLegend();
+	EVisibility GetTrafficLegendVisibility() const;
 	// Sims-style categorized build menu (M2 Gate D+ UX, part 2): a row of
 	// category tabs; picking one shows only that category's buildings. Category
 	// comes from the DataTable (FRHBuildingRow.Category), with a code-derived
@@ -266,8 +278,11 @@ private:
 	FRHCityDemand CityDemand;
 	TMap<int32, FRHDistrictCounts> CityCounts;
 	double CityRefreshedAt = -1.0e9;
+	// C6b: the commute line of the City panel (long commuters and the busiest route), refreshed with the demand.
+	FString CityCommuteLine;
 	uint32 CityVersionShown = MAX_uint32;
 	TSharedPtr<class SVerticalBox> CityDistrictList;
+	TSharedPtr<class SScrollBox> RightScroll;
 	// C5b: the open growth projects (rebuilt when the sim's growth or district version moves; each row's bar reads the live project).
 	uint32 CityGrowthVersionShown = MAX_uint32, CityGrowthDistrictsShown = MAX_uint32;
 	TSharedPtr<class SVerticalBox> CityGrowthList;
@@ -276,7 +291,8 @@ private:
 	bool bPowerExpanded = false;
 	// Fleet rows, refreshed each Tick from the agent snapshot; the list widget
 	// rebuilds only when membership changes (rows read by index).
-	struct FFleetRowView { FString Name; uint8 Task = 0; float Charge = 0.f; float Wear = 0.f; };
+	// C6b: a cargo rover's row also knows its load and whether it is on a road trip (its status line).
+	struct FFleetRowView { FString Name; uint8 Task = 0; float Charge = 0.f; float Wear = 0.f; bool bRover = false; float CargoKg = 0.f; bool bOnRoad = false; };
 	TArray<FFleetRowView> FleetRows;
 	TArray<FName> FleetDefsShown;
 	TSharedPtr<class SVerticalBox> FleetList;

@@ -589,6 +589,17 @@ The director accepted all three points raised at C6a's report:
 2. The R3 asymmetry stays: a rover returns its cargo on break-off, while a hauler still loses up to 200 kg as before. Changing haulers is a later balance move.
 3. The playtest bot lays no roads and buys no rovers, so commuting is proven by `-traffic`, not by the 110-sol playtests (the longest trip was 120 m against the 300 m line).
 
+### C6b, traffic, the presentation half (2026-10-20, not yet committed)
+
+Presentation only (`Source/RedHope`); it reads the C6a const accessors and writes no sim state. Gate-D copy is rows D161 to D166.
+
+- **Rovers** are a code-built kit model (`scripts/blender/rh_build_rover.py`, a low six-wheeled flatbed, 9.7k tris) imported with `rh_import_hs.py` under `Models2/Rover`, drawn by `URHAgentVisualizerSubsystem` with up to three crates on the bed while `CargoKg > 0`. The mesh has no separate wheels, so none spin.
+- **Heavy-vehicle turning** (director feedback, live): a drawn road leg is the sim's waypoints with every corner filleted (`RHPathRounding.h`; 7 m radius for a rover, 1.8 m for a walker, smaller on short legs). The body heading is always the tangent of that path, drawn progress is arc length along it, speed eases to 0.45x into a 90 degree corner within a lag of about 3 m behind the sim, and a trip that starts facing the wrong way pivots on the spot (rover 110 deg/s, walker 260). Walkers drifted the same way on road legs (QA log: 93 samples, up to 169 degrees off their motion, against 2 samples and 32 degrees after the change) and now use the same drive. Shuttles ride filleted routes and linger through corners. Trade-off: a pivot at a trip start lets the drawn rover trail the sim by up to its pivot time (a rover's 180 degrees: about 1.6 s).
+- **Shuttles and cars** (`URHTrafficVisualizerSubsystem`): instanced cubes, at most 400, seeded by (home district, work district, k). They are drawn only while the population ramp is open, because below it the sim measures no commute (there is nothing to draw and no cache is touched). The overlay does not force them on.
+- **TRAFFIC overlay**: a button beside Map, a heat wash per built edge (separate procedural mesh, six material bins, since the road strip's material takes no vertex colour), a legend at the top left with the hover line. **Demolish Road** is a second card beside Road in BUILD > Logistics; one click transmits the order, the hint states the salvage first and the confirm line after.
+- **C6a nits**: `LoadColony` resets `ColonistStations`; the demolish log no longer says "back at the Lander" without a completed Lander; the commute flows sort Ids and Dists together if the colonists are ever not Id-ascending. The 42-run battery diff against `battery_post_c6a` shows timing digits only.
+- **QA hooks** (all off by default): `RH.Traffic overlay|status|noon|home|hover|demolish`, `RH.DeckScroll`, `rh.RoverFollowCam`, `rh.RoverTurnLog`, `rh.RoverYawOffsetDeg`.
+
 ### Step 4, territories: Q1a Q2a Q3a Q4a (2026-10-20)
 
 The director answered `docs/qa/2026-10-20/territories-plan.md` (gates T1-T8) with all four recommendations:

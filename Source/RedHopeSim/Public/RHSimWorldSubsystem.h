@@ -1842,7 +1842,8 @@ private:
 	// Strip (segment + width) against a footprint; the order's strip against everything.
 	bool RoadStripHitsBox(const FVector2D& A, const FVector2D& B, const FVector2D& Centre, const FVector2D& Half) const;
 	// The refund and removal both Debug_RemoveRoadEdge and the DemolishRoad order share.
-	void RemoveRoadEdgeWithRefund(int32 EdgeId);
+	// True when a refund reached the Lander (false: no completed Lander, or nothing to refund).
+	bool RemoveRoadEdgeWithRefund(int32 EdgeId);
 
 	// Cargo rovers (C6a). DT_Config rows (header defaults equal the CSV); all runtime state is derived.
 	double RoverOffRoadSpeedMul = 0.3;      // crawl off the road, and on a missing edge
