@@ -7,7 +7,7 @@ The director's rulings (`docs/design-decisions.md`, "The grand vision: four ruli
 - **several regions** later (step 4);
 - step 2 is **going deep**: tunnels, transit, cavern districts, atriums.
 
-This brief turns step 2 into gates and asks four questions. It is design only. Nothing here is built, and C6 (traffic) is still in progress in the same tree; step 2 starts after C6b.
+This brief turns step 2 into gates and asks four questions. **Answered 2026-10-20: Q1a Q2a Q3a Q4a** (all four recommendations): robots ride the lifts and work on any floor; you paint the shapes the Borer carves; deeper is slower to dig and warmer but better shielded, with floors -1 to -5 unchanged; lifts and trams have capacity, counted from the flows. It is design only. Nothing here is built, and C6 (traffic) is still in progress in the same tree; step 2 starts after C6b.
 
 Every number below is a placeholder for the director. The appendix records what the code does today, with file:line. Line numbers in `RHSimCommute.cpp` will move: C6a is being written there now.
 
