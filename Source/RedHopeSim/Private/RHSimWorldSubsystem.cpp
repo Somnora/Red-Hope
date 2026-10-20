@@ -10,6 +10,7 @@
 #include "Serialization/NameAsStringProxyArchive.h"
 #include "Misc/Crc.h"
 #include "Misc/CommandLine.h"
+#include "Algo/BinarySearch.h"
 
 namespace
 {
@@ -30,7 +31,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 39;  // v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 40;  // v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -75,6 +76,18 @@ void URHSimWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Defs = Collection.InitializeDependency<URHDefinitionsSubsystem>();
 	Clock = Collection.InitializeDependency<URHSimClockSubsystem>();
 	bVerifyCaches = FParse::Param(FCommandLine::Get(), TEXT("RHVerifyCaches"));
+	bCommuteAudit = FParse::Param(FCommandLine::Get(), TEXT("RHCommuteAudit")); // C6a: record the maxima over every step
+}
+
+void URHSimWorldSubsystem::Deinitialize()
+{
+	if (bCommuteAudit)
+	{
+		// C6a (C2): one line at the end of the run - the MAXIMA over every step, never a snapshot.
+		UE_LOG(LogRedHopeSim, Display, TEXT("COMMUTE AUDIT: %d steps measured | peak pop %d | peak ramp %.4f | max employed commute %lld cm | max long commuters %d | margin below the long line (%lld cm) %lld cm"),
+			CommuteAudit.Steps, CommuteAudit.PeakPop, CommuteAudit.PeakRamp, CommuteAudit.MaxDistCm, CommuteAudit.MaxLong, CommuteLongCm, CommuteLongCm - CommuteAudit.MaxDistCm);
+	}
+	Super::Deinitialize();
 }
 
 void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -137,6 +150,38 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	RoadBuildMetersPerHour = FMath::Max(0.1, Defs->GetConfigScalar(FName("RoadBuildMetersPerHour"), RoadBuildMetersPerHour));
 	RoadSpeedMul = FMath::Max(1.0, Defs->GetConfigScalar(FName("RoadSpeedMul"), RoadSpeedMul));
 	RoadParams.SpeedMulPermille = FMath::RoundToInt(RoadSpeedMul * 1000.0);
+	// C6a rovers (header defaults equal the CSV values).
+	RoverOffRoadSpeedMul = FMath::Clamp(Defs->GetConfigScalar(FName("RoverOffRoadSpeedMul"), RoverOffRoadSpeedMul), 0.05, 1.0);
+	RoverLastLegCm = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("RoverLastLegCm"), RoverLastLegCm));
+	FreightMinCm = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("FreightMinCm"), FreightMinCm));
+	FreightHaulerFallbackSec = FMath::Max(0.0, Defs->GetConfigScalar(FName("FreightHaulerFallbackSec"), FreightHaulerFallbackSec));
+	RoverReserveDetourMul = FMath::Max(1.0, Defs->GetConfigScalar(FName("RoverReserveDetourMul"), RoverReserveDetourMul));
+	RoverClaimPlans = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("RoverClaimPlans"), RoverClaimPlans));
+	// The charge-reserve proof (design R7): a rover's worst trip to a pad is the straight line at its crawl,
+	// 1 / RoverOffRoadSpeedMul times the straight-line drain, and DriveWh bounds it at RoverReserveDetourMul x 1.25
+	// of it. The proof needs RoverReserveDetourMul x 1.25 >= 1 / RoverOffRoadSpeedMul: clamp the multiplier up, loudly.
+	if (RoverReserveDetourMul * 1.25 < 1.0 / RoverOffRoadSpeedMul)
+	{
+		const double Needed = 1.0 / (RoverOffRoadSpeedMul * 1.25);
+		UE_LOG(LogRedHopeSim, Error, TEXT("RoverReserveDetourMul %.2f x 1.25 does not cover a crawl of %.2fx (needs %.2f): clamped up"), RoverReserveDetourMul, RoverOffRoadSpeedMul, Needed);
+		RoverReserveDetourMul = Needed;
+	}
+	RoverRoadParams = RoadParams;
+	RoverRoadParams.SpeedMulPermille = FMath::RoundToInt(1000.0 * RoadSpeedMul / RoverOffRoadSpeedMul);
+	RoverProfile.Params = &RoverRoadParams;
+	RoverProfile.OffRoadMul = RoverOffRoadSpeedMul;
+	RoverProfile.MissingEdgeMul = RoverOffRoadSpeedMul;
+	// C6a commuting.
+	CommuteRoadSpeedMul = FMath::Max(1.0, Defs->GetConfigScalar(FName("CommuteRoadSpeedMul"), CommuteRoadSpeedMul));
+	CommuteShaftCmPerFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteShaftCmPerFloor"), CommuteShaftCmPerFloor));
+	CommuteLongCm = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteLongCm"), (double)CommuteLongCm));
+	CommuteRampStartPop = FMath::Max(0.0, Defs->GetConfigScalar(FName("CommuteRampStartPop"), CommuteRampStartPop));
+	CommuteRampFullPop = FMath::Max(CommuteRampStartPop + 1.0, Defs->GetConfigScalar(FName("CommuteRampFullPop"), CommuteRampFullPop));
+	HopeCommuteMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeCommuteMax"), HopeCommuteMax));
+	HopeCommuteSteepness = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeCommuteSteepness"), HopeCommuteSteepness));
+	CommuteWorkMul = FMath::Clamp(Defs->GetConfigScalar(FName("CommuteWorkMul"), CommuteWorkMul), 0.0, 1.0);
+	CommuteAlertShare = FMath::Clamp(Defs->GetConfigScalar(FName("CommuteAlertShare"), CommuteAlertShare), 0.0, 1.0);
+	++CommuteCfgVersion;
 	ColonistsPerCell = Defs->GetConfigScalar(FName("ColonistsPerCell"), ColonistsPerCell);
 	ColonistO2KgPerSol = Defs->GetConfigScalar(FName("ColonistO2KgPerSol"), ColonistO2KgPerSol);
 	ColonistFoodKgPerSol = Defs->GetConfigScalar(FName("ColonistFoodKgPerSol"), ColonistFoodKgPerSol);
@@ -406,6 +451,7 @@ void URHSimWorldSubsystem::DeployFleetOnce()
 		bFleetDeployed = true;
 		SpawnStartingFleet();
 	}
+	DeployWaitingRovers(); // C6a: a rover aboard the Lander lands the first step a road exists (both bands)
 }
 
 FMassEntityHandle URHSimWorldSubsystem::SpawnRobotTracked(FName RowName, const FRHRobotRow& Row, const FVector& PosCm, float ChargeWh, float Wear, TArray<FMassEntityHandle>& OutSpawned)
@@ -490,7 +536,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	// arc advances, power settles.
 	StepEventEdges();
 	StepUplink();
-	StepTaskBoard();
+	StepTaskBoard(SubDt);
 	StepProduction(SubDt);
 	StepDepositAlerts(); // D2a: same position in both bands (parity)
 	StepHabitability(SubDt);
@@ -505,6 +551,10 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	StepEarth(SubDt); // and Earth watches Mars connect to itself
 	StepQuota();
 	StepPower(SubDt);
+	if (bCommuteAudit)
+	{
+		AuditCommuteStep();
+	}
 }
 
 void URHSimWorldSubsystem::StepEventEdges()
@@ -672,6 +722,10 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	StepEarth(DtSimSeconds); // same order as the agent band (parity)
 	StepQuota();
 	StepPower(DtSimSeconds);
+	if (bCommuteAudit)
+	{
+		AuditCommuteStep();
+	}
 }
 
 void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
@@ -843,8 +897,39 @@ void URHSimWorldSubsystem::StepUplink()
 	}
 }
 
-void URHSimWorldSubsystem::StepTaskBoard()
+void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 {
+	// C6a: the active cargo rovers, counted once a step (a rover's wear and charge are fragments). With none,
+	// every task is posted exactly as before and nothing below this block differs from v39.
+	{
+		static const FName NRover(TEXT("Rover"));
+		const URHAgentSubsystem* AgentsForRovers = bFleetHold ? nullptr : GetWorld()->GetSubsystem<URHAgentSubsystem>();
+		ActiveRovers = AgentsForRovers ? AgentsForRovers->CountActiveRobots(NRover, WearHaltThreshold) : 0;
+		RefreshFreightFlags();
+		if (ActiveRovers > 0 && SubDt > 0.f)
+		{
+			for (FRHTask& T : Tasks)
+			{
+				if (T.Type == ERHTaskType::Haul && T.bFreight && !T.ClaimedBy.IsValid())
+				{
+					T.UnclaimedAgentSec += SubDt; // agent-band seconds only: EraStep never posts or claims
+				}
+			}
+		}
+	}
+	static const FName NRoverRow(TEXT("RC_R"));
+	const FRHRobotRow* RoverRow = ActiveRovers > 0 ? Defs->GetRobot(NRoverRow) : nullptr;
+	const double RoverCapKg = RoverRow ? (double)RoverRow->Cargo_kg : 0.0;
+	// A rover trip's load: what is there, the rover's hold, and (for a consumer) what its hopper has room for.
+	const auto RoverLoadKg = [RoverCapKg](double AvailableKg, double RoomKg)
+	{
+		double Kg = FMath::Min(AvailableKg, RoverCapKg);
+		if (RoomKg >= 0.0)
+		{
+			Kg = FMath::Min(Kg, RoomKg);
+		}
+		return Kg;
+	};
 	// Haul: deposit piles worth collecting -> the NEAREST production building
 	// that wants that resource (a slice recipe consumes it and the hopper holds
 	// under two batches), else a store (Stockpile or Lander). A store only takes
@@ -864,13 +949,16 @@ void URHSimWorldSubsystem::StepTaskBoard()
 		int32 DestId = 0;
 		double BestDistCm = 0.0;
 		bool bAnyConsumer = false; // some building here takes it, hopper full or not
-		const auto Consider = [&](const FRHBuildingInstance& Cand)
+		double DestRoomKg = -1.0;  // C6a: a consumer's room (2 x Need - Have) at the chosen destination; < 0 = a store, uncapped
+		double CandRoomKg = 0.0;
+		const auto Consider = [&](const FRHBuildingInstance& Cand, double RoomKg)
 		{
 			const double DistCm = FVector::DistXY(D.LocationCm, Cand.LocationCm);
 			if (DestId == 0 || DistCm < BestDistCm || (DistCm == BestDistCm && Cand.Id < DestId))
 			{
 				DestId = Cand.Id;
 				BestDistCm = DistCm;
+				DestRoomKg = RoomKg;
 			}
 		};
 		for (const FRHBuildingInstance& B : Buildings)
@@ -888,10 +976,15 @@ void URHSimWorldSubsystem::StepTaskBoard()
 					}
 					bAnyConsumer = true;
 					const double* Have = B.InputKg.Find(D.Type);
-					return (!Have || *Have < *Need * 2.0);
+					const bool bRoom = (!Have || *Have < *Need * 2.0);
+					if (bRoom)
+					{
+						CandRoomKg = *Need * 2.0 - (Have ? *Have : 0.0);
+					}
+					return bRoom;
 				}))
 			{
-				Consider(B);
+				Consider(B, CandRoomKg);
 			}
 		}
 		if (DestId == 0 && (!bAnyConsumer || ConstructionMaterials.Contains(D.Type)))
@@ -900,7 +993,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			{
 				if (!B.bUnderConstruction && B.Level == D.Level && (B.DefName == NAME_Stockpile || B.DefName == NAME_Lander))
 				{
-					Consider(B);
+					Consider(B, -1.0);
 				}
 			}
 		}
@@ -915,7 +1008,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 				T.From = From;
 				T.To = To;
 				T.Resource = D.Type;
-				T.AmountKg = FMath::Min(D.PileKg, 200.0);
+				SetHaulAmount(T, FMath::Min(D.PileKg, 200.0), RoverLoadKg(D.PileKg, DestRoomKg));
 				Tasks.Add(T);
 			}
 		}
@@ -938,13 +1031,16 @@ void URHSimWorldSubsystem::StepTaskBoard()
 			int32 DestId = 0;
 			double BestDistCm = 0.0;
 			bool bAnyConsumer = false; // some machine here takes it, hopper full or not
-			const auto Consider = [&](const FRHBuildingInstance& Cand)
+			double DestRoomKg = -1.0;  // C6a: see the deposit leg
+			double CandRoomKg = 0.0;
+			const auto Consider = [&](const FRHBuildingInstance& Cand, double RoomKg)
 			{
 				const double DistCm = FVector::DistXY(B.LocationCm, Cand.LocationCm);
 				if (DestId == 0 || DistCm < BestDistCm || (DistCm == BestDistCm && Cand.Id < DestId))
 				{
 					DestId = Cand.Id;
 					BestDistCm = DistCm;
+					DestRoomKg = RoomKg;
 				}
 			};
 			for (const FRHBuildingInstance& C : Buildings)
@@ -962,10 +1058,15 @@ void URHSimWorldSubsystem::StepTaskBoard()
 						}
 						bAnyConsumer = true;
 						const double* Have = C.InputKg.Find(Out.Key);
-						return (!Have || *Have < *Need * 2.0);
+						const bool bRoom = (!Have || *Have < *Need * 2.0);
+						if (bRoom)
+						{
+							CandRoomKg = *Need * 2.0 - (Have ? *Have : 0.0);
+						}
+						return bRoom;
 					}))
 				{
-					Consider(C);
+					Consider(C, CandRoomKg);
 				}
 			}
 			// Overflow to a store only for what construction draws from stores,
@@ -978,7 +1079,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 				{
 					if (!S.bUnderConstruction && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander) && S.Id != B.Id && S.Level == B.Level)
 					{
-						Consider(S);
+						Consider(S, -1.0);
 					}
 				}
 			}
@@ -994,7 +1095,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 					T.From = From;
 					T.To = To;
 					T.Resource = Out.Key;
-					T.AmountKg = FMath::Min(Out.Value, 200.0);
+					SetHaulAmount(T, FMath::Min(Out.Value, 200.0), RoverLoadKg(Out.Value, DestRoomKg));
 					Tasks.Add(T);
 				}
 			}
@@ -1040,6 +1141,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 					{
 						continue;
 					}
+					double WantsRoomKg = 0.0; // C6a: the qualifying recipe's room, 2 x Need - Have
 					const FRHRecipeRow* Wants = Defs->FindRunnableRecipe(C.DefName,
 						[&](const TMap<FName, double>& Inputs)
 						{
@@ -1049,7 +1151,12 @@ void URHSimWorldSubsystem::StepTaskBoard()
 								return false;
 							}
 							const double* Have = C.InputKg.Find(Held.Key);
-							return (!Have || *Have < *Need * 2.0);
+							const bool bRoom = (!Have || *Have < *Need * 2.0);
+							if (bRoom)
+							{
+								WantsRoomKg = *Need * 2.0 - (Have ? *Have : 0.0);
+							}
+							return bRoom;
 						}, OutputsShort);
 					if (!Wants)
 					{
@@ -1065,7 +1172,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 						T.From = From;
 						T.To = To;
 						T.Resource = Held.Key;
-						T.AmountKg = FMath::Min(Held.Value, 200.0);
+						SetHaulAmount(T, FMath::Min(Held.Value, 200.0), RoverLoadKg(Held.Value, WantsRoomKg));
 						Tasks.Add(T);
 					}
 					break;
@@ -1125,7 +1232,7 @@ void URHSimWorldSubsystem::StepTaskBoard()
 					T.From = From;
 					T.To = To;
 					T.Resource = Cost.Key;
-					T.AmountKg = FMath::Min(NeedKg, 200.0);
+					SetHaulAmount(T, FMath::Min(NeedKg, 200.0), RoverLoadKg(NeedKg, -1.0));
 					Tasks.Add(T);
 				}
 			}
@@ -1790,6 +1897,13 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 				OnRobotsSpawned.Broadcast(NewUnits);
 			}
 		}
+	}
+	else if (ItemName == FName("CargoRover"))
+	{
+		// C6a (Q1a): the ExtraHauler pattern, but a rover needs a road to land on. It waits aboard in ImportStock
+		// under its robot row name (NOT a building flat-pack: placement's lookup can never match a robot row).
+		++ImportStock.FindOrAdd(FName("RC_R"));
+		DeployWaitingRovers();
 	}
 	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); }
 	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); }
@@ -4340,6 +4454,24 @@ double URHSimWorldSubsystem::GetCrewSkillMul(FName Function) const
 {
 	// The average mastery of everyone currently holding that job: a fresh hand
 	// works at 1x, a master at 2x. Nobody employed -> exactly 1.0 (baselines).
+	// C6a hook (a), Garden only (Lab and Workstation are cut once, in their seat sums, by RefreshJobs): a long
+	// commuter's term counts 1 - Ramp x (1 - CommuteWorkMul). The branch is taken only while someone is long.
+	static const FName NGardenFn(TEXT("Garden"));
+	const TArray<int32>* LongIds = nullptr;
+	double LongMul = 1.0;
+	if (Function == NGardenFn)
+	{
+		const double Ramp = GetCommuteRamp();
+		if (Ramp > 0.0)
+		{
+			const FRHCommuteFlows& CF = EnsureCommuteFlows();
+			if (CF.LongCount > 0)
+			{
+				LongIds = &CF.LongIds;
+				LongMul = 1.0 - Ramp * (1.0 - CommuteWorkMul);
+			}
+		}
+	}
 	double Sum = 0.0;
 	int32 Count = 0;
 	for (const FRHColonist& C : Colonists)
@@ -4347,7 +4479,12 @@ double URHSimWorldSubsystem::GetCrewSkillMul(FName Function) const
 		if (GetColonistJob(C.Id) == Function)
 		{
 			const double* Sols = C.SkillSols.Find(Function);
-			Sum += 1.0 + FMath::Min(1.0, (Sols ? *Sols : 0.0) / FMath::Max(SkillMasterySols, KINDA_SMALL_NUMBER));
+			double Term = 1.0 + FMath::Min(1.0, (Sols ? *Sols : 0.0) / FMath::Max(SkillMasterySols, KINDA_SMALL_NUMBER));
+			if (LongIds && Algo::BinarySearch(*LongIds, C.Id) != INDEX_NONE)
+			{
+				Term *= LongMul;
+			}
+			Sum += Term;
 			++Count;
 		}
 	}
@@ -4663,12 +4800,23 @@ void URHSimWorldSubsystem::RefreshJobs()
 	WorkstationYieldSeatSum = 0.0;
 	LastIdleColonists = 0;
 	LastOpenSeats = 0;
+	JobAssignNow.Reset();
 	if (Colonists.Num() == 0 || !Defs)
 	{
 		ColonistBedPiece.Reset();
 		bBedKeyValid = false;
+		if (JobAssignLast.Num() > 0)
+		{
+			JobAssignLast.Reset();
+			++JobsVersion; // C6a: the assignment changed (it is empty now)
+		}
 		return;
 	}
+	// C6a: the commute's work-time hook (b) needs each filled Lab / Workstation seat's yield per colonist. Recorded
+	// only while the population ramp is open (it is 0 below CommuteRampStartPop, which is every small colony).
+	const double CommuteRampNow = GetCommuteRamp();
+	struct FCommuteSeat { int32 Id; bool bLab; double Yield; };
+	TArray<FCommuteSeat> CommuteSeats;
 	TArray<int32> ByIdOrder;
 	ByIdOrder.Reserve(Colonists.Num());
 	bool bByIdSorted = true;
@@ -4808,6 +4956,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 			const int32 Id = ByIdOrder[Next++];
 			ColonistJobs.Add(Id, S.Row->Function);
 			ColonistStations.Add(Id, S.Key);
+			JobAssignNow.Add({ Id, S.Key });
 			if (SeatIds.IsValidIndex(Seat))
 			{
 				ColonistSeatPiece.Add(Id, SeatIds[Seat]);
@@ -4817,10 +4966,37 @@ void URHSimWorldSubsystem::RefreshJobs()
 			if (S.Row->Function == NLab)
 			{
 				LabYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
+				if (CommuteRampNow > 0.0) { CommuteSeats.Add({ Id, true, (double)FMath::Max(0.f, S.Row->YieldMul) }); }
 			}
 			else if (S.Row->Function == NWorkstation)
 			{
 				WorkstationYieldSeatSum += FMath::Max(0.f, S.Row->YieldMul);
+				if (CommuteRampNow > 0.0) { CommuteSeats.Add({ Id, false, (double)FMath::Max(0.f, S.Row->YieldMul) }); }
+			}
+		}
+	}
+	// C6a: the assignment as this call made it, against the last call's (RefreshJobs runs from nine call sites).
+	// Any difference bumps JobsVersion, which the commute flows are keyed on.
+	if (!(JobAssignNow == JobAssignLast))
+	{
+		JobAssignLast = JobAssignNow;
+		++JobsVersion;
+	}
+	// C6a hook (b), Lab and Workstation: a long commuter's seat counts 1 - Ramp x (1 - CommuteWorkMul). Discovery reads
+	// LabYieldSeatSum x the skill average and fabrication reads WorkstationYieldSeatSum alone, so cutting the SEAT SUM here
+	// (and leaving the skill average uncut) cuts each exactly once. No branch is taken below the ramp or with nobody long.
+	if (CommuteRampNow > 0.0 && CommuteSeats.Num() > 0)
+	{
+		const FRHCommuteFlows& CF = EnsureCommuteFlows();
+		if (CF.LongCount > 0)
+		{
+			const double Cut = CommuteRampNow * (1.0 - CommuteWorkMul);
+			for (const FCommuteSeat& Seat : CommuteSeats)
+			{
+				if (Algo::BinarySearch(CF.LongIds, Seat.Id) != INDEX_NONE)
+				{
+					(Seat.bLab ? LabYieldSeatSum : WorkstationYieldSeatSum) -= Seat.Yield * Cut;
+				}
 			}
 		}
 	}
@@ -5437,9 +5613,17 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		if (ActiveCrisis == ERHCrisis::Malfunction)      { Out.CrisisPenalty = CrisisMalfunctionHope; }
 		else if (ActiveCrisis == ERHCrisis::Environmental) { Out.CrisisPenalty = CrisisEnvironmentHope; }
 	}
+	// C6a: commuting. Zero (and +0.0) below the population ramp or with nobody on a long trip, so Total is
+	// bit-identical to v39 there: x - 0.0 == x for every finite double.
+	{
+		const FRHCommuteSummary Commute = GetCommuteSummary();
+		Out.CommutePenalty = Commute.Penalty;
+		Out.Commuters = Commute.Commuters;
+		Out.LongCommuters = Commute.LongCommuters;
+	}
 	Out.Total = FMath::Clamp(
 		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity
-		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty, 0.0, 100.0);
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty - Out.CommutePenalty, 0.0, 100.0);
 	return Out;
 }
 
@@ -5454,6 +5638,7 @@ void URHSimWorldSubsystem::StepHope(float SubDt)
 	const double Alpha = 1.0 - FMath::Exp(-DtSols / FMath::Max(HopeSmoothTauSols, KINDA_SMALL_NUMBER));
 	HopeSmoothed += (Instant - HopeSmoothed) * Alpha;
 	UpdateHopeBand();
+	NoteCommuteAlert(); // C6a: one alert when the long share first crosses CommuteAlertShare (needs Long > 0)
 }
 
 void URHSimWorldSubsystem::UpdateHopeBand()
@@ -7145,6 +7330,16 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// M4 Gate C: spend Influence to lift an Earth-ordered embargo.
 		FString Reason;
 		if (!ResolvePacify(Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else if (Cmd.Verb == FName("DemolishRoad"))
+	{
+		// C6a (Q3a): a real order, with an explicit reject reason.
+		FString Reason;
+		if (!ExecuteDemolishRoad(Cmd, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -10134,7 +10329,9 @@ bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& 
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHTask& T : Tasks)
 	{
-		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid() && GetSiteLevel(T.From) == RobotLevel)
+		// C6a: a freight task is the rovers' while one is active, until it has waited out the fallback.
+		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid() && GetSiteLevel(T.From) == RobotLevel
+			&& !(T.bFreight && T.UnclaimedAgentSec < FreightHaulerFallbackSec))
 		{
 			const double Dist = FVector::DistXY(GetSiteLocation(T.From), RobotPosCm);
 			if (Dist < BestDist)
@@ -10203,7 +10400,7 @@ bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLo
 	return true;
 }
 
-void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg)
+void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource)
 {
 	if (FRHTask* T = FindTask(TaskId))
 	{
@@ -10212,7 +10409,15 @@ void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg)
 			B->InputKg.FindOrAdd(T->Resource) += CargoKg;
 			OnStockChanged.Broadcast(T->Resource, GetTotalSolid(T->Resource));
 		}
+		else if (!ReturnResource.IsNone())
+		{
+			ReturnHaulCargo(TaskId, ReturnResource, CargoKg); // a rover's load is never dropped on the ground
+		}
 		CompleteTask(TaskId);
+	}
+	else if (!ReturnResource.IsNone())
+	{
+		ReturnHaulCargo(TaskId, ReturnResource, CargoKg); // R3: the task is gone (a demolish removed it): the load goes to the Lander
 	}
 }
 
@@ -11663,6 +11868,17 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		RoadGraph.Reset();
 		RobotPaths.Reset();
+		// C6a: everything the rovers and the commute derive is rebuilt, never loaded. The version counters only go
+		// up across a load (JobsVersion included), so a key can never hit a stale entry from before it.
+		ActiveRovers = 0;
+		bFreightWasActive = false;
+		FreightBuiltVersion = MAX_uint32;
+		bRoverWaitAnnounced = false;
+		bCommuteAlerted = false;
+		JobAssignLast.Reset();
+		++JobsVersion;
+		CommuteFlows = FRHCommuteFlows();
+		CommuteMemo = FRHCommuteMemo();
 		int32 NodeCount = 0;
 		Ar << NodeCount;
 		for (int32 i = 0; i < NodeCount; ++i)

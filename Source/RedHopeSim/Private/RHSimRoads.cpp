@@ -24,8 +24,19 @@ namespace
 	}
 }
 
-bool RH::MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt)
+bool RH::MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover)
 {
+	if (bRover)
+	{
+		// C6a: a rover's crawl is in every branch, the no-roads one included (a network that lost its
+		// last edge under it leaves it crawling, never running).
+		const FRHMoveProfile& Profile = Sim.GetRoverMoveProfile();
+		if (!Sim.HasBuiltRoads())
+		{
+			return MoveToward(Transform, TargetCm, SpeedMps * (float)Profile.OffRoadMul, Dt);
+		}
+		return Sim.MoveAlongRoads(Entity, Transform, TargetCm, SpeedMps, Dt, &Profile);
+	}
 	if (!Sim.HasBuiltRoads())
 	{
 		return MoveToward(Transform, TargetCm, SpeedMps, Dt);
@@ -309,10 +320,14 @@ void URHSimWorldSubsystem::ExecuteBuildRoad(const FRHCommand& Cmd)
 		Added.NewEdgeIds.Num(), (double)Added.NewLengthCm / 100.0, Pre.BillKg, Added.SplitEdgeIds.Num());
 }
 
-double URHSimWorldSubsystem::GetRoadEdgeSpeedMul(int32 EdgeId) const
+double URHSimWorldSubsystem::GetRoadEdgeSpeedMul(int32 EdgeId, const FRHMoveProfile* Profile) const
 {
 	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
-	return (E && E->bBuilt) ? RoadSpeedMul : 1.0;
+	if (E && E->bBuilt)
+	{
+		return RoadSpeedMul;
+	}
+	return Profile ? Profile->MissingEdgeMul : 1.0;
 }
 
 bool URHSimWorldSubsystem::PlanRoadRoute(const FVector& FromCm, const FVector& ToCm, FRHRoadRoute& OutRoute) const
@@ -320,7 +335,7 @@ bool URHSimWorldSubsystem::PlanRoadRoute(const FVector& FromCm, const FVector& T
 	return RoadGraph.PlanRoute(ToWholeCm(FromCm), ToWholeCm(ToCm), RoadParams, OutRoute) && OutRoute.bRoad;
 }
 
-bool URHSimWorldSubsystem::PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm) const
+bool URHSimWorldSubsystem::PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm, const FRHRoadParams& Params) const
 {
 	Path.TargetCm = TargetCm;
 	Path.StartCm = FromCm;
@@ -328,7 +343,7 @@ bool URHSimWorldSubsystem::PlanRobotPath(FRHRobotRoadPath& Path, const FVector& 
 	Path.LegEdge.Reset();
 	Path.Next = 0;
 	FRHRoadRoute Route;
-	if (!PlanRoadRoute(FromCm, TargetCm, Route))
+	if (!RoadGraph.PlanRoute(ToWholeCm(FromCm), ToWholeCm(TargetCm), Params, Route) || !Route.bRoad)
 	{
 		return false; // drive straight
 	}
@@ -343,14 +358,19 @@ bool URHSimWorldSubsystem::PlanRobotPath(FRHRobotRoadPath& Path, const FVector& 
 	return true;
 }
 
-bool URHSimWorldSubsystem::MoveAlongRoads(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt)
+bool URHSimWorldSubsystem::MoveAlongRoads(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, const FRHMoveProfile* Profile)
 {
+	// C6a: a robot passes no profile and every line below runs exactly as in v39 (the multipliers are
+	// 1.0 and the literal calls are kept); a rover's speed is scaled by its off-road crawl on every
+	// leg that is not a built edge, and on both end legs.
+	const double OffMul = Profile ? Profile->OffRoadMul : 1.0;
+	const float OffSpeedMps = Profile ? SpeedMps * (float)OffMul : SpeedMps;
 	FRHRobotRoadPath* Path = RobotPaths.Find(Entity);
 	if (!Path || Path->TargetCm != TargetCm)
 	{
 		// Planned on first use, and again only when the target changes exactly.
 		FRHRobotRoadPath& Slot = RobotPaths.FindOrAdd(Entity);
-		PlanRobotPath(Slot, Transform.GetLocation(), TargetCm);
+		PlanRobotPath(Slot, Transform.GetLocation(), TargetCm, Profile ? *Profile->Params : RoadParams);
 		Slot.Serial = NextPathSerial++;
 		Path = &Slot;
 	}
@@ -365,7 +385,7 @@ bool URHSimWorldSubsystem::MoveAlongRoads(FMassEntityHandle Entity, FTransform& 
 		{
 			const int32 Leg = Path->Next;
 			const FVector W = Path->Waypoints[Leg];
-			const double Mul = Path->LegEdge[Leg] == 0 ? 1.0 : GetRoadEdgeSpeedMul(Path->LegEdge[Leg]);
+			const double Mul = Path->LegEdge[Leg] == 0 ? OffMul : GetRoadEdgeSpeedMul(Path->LegEdge[Leg], Profile);
 			const double V = (double)SpeedMps * 100.0 * Mul; // cm per second
 			FVector Pos = Transform.GetLocation();
 			const FVector To(W.X - Pos.X, W.Y - Pos.Y, 0.0);
@@ -394,14 +414,14 @@ bool URHSimWorldSubsystem::MoveAlongRoads(FMassEntityHandle Entity, FTransform& 
 				return false;
 			}
 		}
-		const bool bArrivedRoad = RH::MoveToward(Transform, TargetCm, SpeedMps, (float)FMath::Max(0.0, RemT));
+		const bool bArrivedRoad = RH::MoveToward(Transform, TargetCm, OffSpeedMps, (float)FMath::Max(0.0, RemT));
 		if (bArrivedRoad)
 		{
 			RobotPaths.Remove(Entity);
 		}
 		return bArrivedRoad;
 	}
-	const bool bArrived = RH::MoveToward(Transform, TargetCm, SpeedMps, Dt);
+	const bool bArrived = RH::MoveToward(Transform, TargetCm, OffSpeedMps, Dt);
 	if (bArrived)
 	{
 		RobotPaths.Remove(Entity);
@@ -450,12 +470,12 @@ TArray<int32> URHSimWorldSubsystem::Debug_LayRoad(const FVector& FromCm, const F
 	return Added.NewEdgeIds;
 }
 
-bool URHSimWorldSubsystem::Debug_RemoveRoadEdge(int32 EdgeId)
+void URHSimWorldSubsystem::RemoveRoadEdgeWithRefund(int32 EdgeId)
 {
 	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
 	if (!E)
 	{
-		return false;
+		return;
 	}
 	// The refund mirrors a demolished structure: a site gives back everything the
 	// order paid for it; a standing road returns SalvageFraction of it. To the Lander.
@@ -475,6 +495,50 @@ bool URHSimWorldSubsystem::Debug_RemoveRoadEdge(int32 EdgeId)
 			}
 		}
 	}
+}
+
+bool URHSimWorldSubsystem::Debug_RemoveRoadEdge(int32 EdgeId)
+{
+	if (!RoadGraph.FindEdge(EdgeId))
+	{
+		return false;
+	}
+	RemoveRoadEdgeWithRefund(EdgeId);
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanDemolishRoad(int32 EdgeId, FString& OutReason, double* OutRefundKg) const
+{
+	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
+	if (!E)
+	{
+		OutReason = TEXT("That road is already gone");
+		return false;
+	}
+	if (OutRefundKg)
+	{
+		const double BillKg = (double)E->LengthCm / 100.0 * RoadStructKgPerMeter;
+		*OutRefundKg = E->bBuilt ? BillKg * SalvageFraction : BillKg;
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::ExecuteDemolishRoad(const FRHCommand& Cmd, FString& OutReason)
+{
+	// Value is the edge Id. The preflight is re-run here, when the order lands: another demolish order, or
+	// the Debug hook, may have taken the edge while this one was in transit.
+	const int32 EdgeId = FMath::RoundToInt(Cmd.Value);
+	double RefundKg = 0.0;
+	if (!CanDemolishRoad(EdgeId, OutReason, &RefundKg))
+	{
+		return false;
+	}
+	const FRHRoadEdge* E = RoadGraph.FindEdge(EdgeId);
+	const bool bBuilt = E->bBuilt;
+	const double LengthM = (double)E->LengthCm / 100.0;
+	RemoveRoadEdgeWithRefund(EdgeId);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Road edge #%d demolished (%s, %.0f m): %.0f kg Struct back at the Lander"),
+		EdgeId, bBuilt ? TEXT("standing") : TEXT("unbuilt"), LengthM, RefundKg);
 	return true;
 }
 

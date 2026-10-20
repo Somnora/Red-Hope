@@ -61,6 +61,31 @@ struct FRHTask
 	// deposits; a survey targets bare ground by definition).
 	FVector TargetCm = FVector::ZeroVector;
 	FMassEntityHandle ClaimedBy;
+	// C6a: runtime only, never saved (the save writes a task field by field). A freight haul is
+	// one a cargo rover may take: road-served at both ends, on the surface, long enough, and
+	// bigger than a hauler's load. Set when the task is posted and re-derived when the built
+	// road set changes or the fleet gains or loses its first active rover.
+	bool bFreight = false;
+	// Agent-band seconds this freight task has waited unclaimed (StepTaskBoard advances it, so
+	// an era stretch never counts): haulers may take it once it passes FreightHaulerFallbackSec.
+	double UnclaimedAgentSec = 0.0;
+};
+
+// C6a: one cargo rover as presentation and the sim's readouts see it: where it is, how it is
+// doing and what it carries. Snapshotted in one pass (stable spawn order) so C6b's drawing and the
+// fleet panel never touch the entity manager.
+struct FRHRoverState
+{
+	FMassEntityHandle Entity;
+	FName DefName;
+	FVector PosCm = FVector::ZeroVector;
+	float ChargeFrac = 0.f;
+	float Wear = 0.f;
+	uint8 TaskType = 0;    // ERHTaskType
+	uint8 Phase = 0;
+	int32 TaskId = 0;
+	FName CargoResource;
+	float CargoKg = 0.f;
 };
 
 // One completed survey (M1-b director request): where the colony has looked,

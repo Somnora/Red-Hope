@@ -50,6 +50,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
 	float DrawW = Robot.DrawIdleW;
+	const bool bRover = Robot.RobotClass == FName("Rover"); // C6a: a cargo rover drives with its own movement profile
 	// Fleet reality (M1-b): worn machinery works slower - linear from the
 	// degrade threshold down to nothing at halt (the processor's halt gate
 	// stops ticking before the multiplier ever reaches zero).
@@ -77,6 +78,21 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		{
 			FRHTask Board;
 			if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board))
+			{
+				Task.TaskType = (uint8)ERHTaskType::Haul;
+				Task.TaskId = Board.Id;
+				Task.CargoResource = Board.Resource;
+				Task.CargoKg = 0.f;
+				Task.TargetCm = Sim->GetSiteLocation(Board.From);
+				Task.Phase = 0;
+			}
+		}
+		else if (bRover)
+		{
+			// C6a: a rover takes freight only, and only what it can reach by road (R6).
+			FRHTask Board;
+			const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+			if (Sim->TryClaimFreight(Entity, Transform.GetLocation(), ChargeFrac, Board))
 			{
 				Task.TaskType = (uint8)ERHTaskType::Haul;
 				Task.TaskId = Board.Id;
@@ -190,7 +206,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		DrawW = Robot.DrawMoveW;
 		if (Task.Phase == 0) // to pickup
 		{
-			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, bRover))
 			{
 				Task.Phase = 1;
 			}
@@ -212,9 +228,9 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		}
 		else if (Task.Phase == 2) // to dropoff
 		{
-			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, bRover))
 			{
-				Sim->HaulUnload(Task.TaskId, Task.CargoKg);
+				Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None);
 				Task = FRHTaskFragment();
 			}
 		}
@@ -281,6 +297,7 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 	}
 	FTransform& Transform = Context.GetExternalData(TransformHandle).GetMutableTransform();
 	FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
+	const FRHRobotFragment& Robot = Context.GetExternalData(RobotHandle);
 	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
 
 	// Put the claim back before leaving (M0-c etiquette block).
@@ -291,6 +308,12 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 	}
 	else if (Current == ERHTaskType::Haul || Current == ERHTaskType::Build || Current == ERHTaskType::Survey)
 	{
+		// C6a (R3): a rover that breaks off a delivery puts its load back before the fragment is reset - a hauler
+		// still loses its (up to 200 kg), a rover's is 1 t. The load goes to the task's source, else the Lander.
+		if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f && Robot.RobotClass == FName("Rover"))
+		{
+			Sim->ReturnHaulCargo(Task.TaskId, Task.CargoResource, Task.CargoKg);
+		}
 		Sim->AbandonTask(Task.TaskId);
 	}
 	else if (Current == ERHTaskType::Repair)
@@ -300,7 +323,11 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 
 	int32 PadId = 0;
 	FVector PadLoc;
-	if (!Sim->FindNearestChargePad(Transform.GetLocation(), PadId, PadLoc))
+	// C6a: a rover docks only at a road-served pad.
+	const bool bPadFound = Robot.RobotClass == FName("Rover")
+		? Sim->FindNearestRoverPad(Transform.GetLocation(), PadId, PadLoc)
+		: Sim->FindNearestChargePad(Transform.GetLocation(), PadId, PadLoc);
+	if (!bPadFound)
 	{
 		return EStateTreeRunStatus::Failed; // pad vanished since the condition passed
 	}
@@ -348,7 +375,7 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 	}
 	if (Task.Phase == 0)
 	{
-		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, Robot.RobotClass == FName("Rover")))
 		{
 			Task.Phase = 1;
 			Sim->JoinPadQueue(Task.DigDepositId, Entity); // docked: take a queue slot
@@ -386,6 +413,7 @@ namespace
 	// Wh a robot spends driving DistCm at its own speed and move draw (the
 	// Drain idiom: W x sol-hours, 50 sim-s to the sol-hour), with a 25% margin
 	// plus a little slack for the approach and the queue at the pad.
+	// C6a: a rover's DistCm arrives already multiplied by RoverReserveDetourMul (an O(1) bound on its worst trip).
 	float DriveWh(const FRHRobotFragment& Robot, double DistCm)
 	{
 		const double Secs = DistCm / FMath::Max(1.0, (double)Robot.SpeedMps * 100.0);
@@ -407,26 +435,31 @@ bool FRHNeedsChargeCondition::TestCondition(FStateTreeExecutionContext& Context)
 
 	int32 PadId = 0;
 	FVector PadLoc;
-	if (!Sim->FindNearestChargePad(Pos, PadId, PadLoc))
+	const bool bRover = Robot.RobotClass == FName("Rover");
+	// C6a: a rover's pad is the nearest ROAD-SERVED one, and every drive it budgets is bounded by
+	// RoverReserveDetourMul x the straight line: the worst trip is the crawl, straight / (0.3 v), and
+	// 3.0 x 1.25 >= 1 / 0.3 (asserted at config load), so the reserve always covers it.
+	const double Detour = bRover ? Sim->GetRoverReserveDetourMul() : 1.0;
+	if (!(bRover ? Sim->FindNearestRoverPad(Pos, PadId, PadLoc) : Sim->FindNearestChargePad(Pos, PadId, PadLoc)))
 	{
 		return false; // no pad: keep working (M0-c)
 	}
-	const float HomeWh = DriveWh(Robot, FVector::DistXY(Pos, PadLoc));
+	const float HomeWh = DriveWh(Robot, FVector::DistXY(Pos, PadLoc) * Detour);
 	const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
 	if (ChargeFrac >= Sim->GetChargeSeekFraction() && Battery.ChargeWh >= HomeWh)
 	{
 		return false;
 	}
 	// Mid-delivery: finish the drop first (M0-c rule) - when the drop and the
-	// drive home from it both fit in the charge left. Otherwise go now: the
-	// cargo is lost either way, the robot is not.
+	// drive home from it both fit in the charge left. Otherwise go now: a hauler's
+	// cargo is lost either way (the robot is not); a rover's goes back (C6a, R3).
 	if ((ERHTaskType)Task.TaskType == ERHTaskType::Haul && Task.Phase == 2)
 	{
 		int32 DropPadId = 0;
 		FVector DropPadLoc;
-		const bool bPadFromDrop = Sim->FindNearestChargePad(Task.TargetCm, DropPadId, DropPadLoc);
-		const float ViaDropWh = DriveWh(Robot, FVector::DistXY(Pos, Task.TargetCm))
-			+ DriveWh(Robot, FVector::DistXY(Task.TargetCm, bPadFromDrop ? DropPadLoc : PadLoc));
+		const bool bPadFromDrop = bRover ? Sim->FindNearestRoverPad(Task.TargetCm, DropPadId, DropPadLoc) : Sim->FindNearestChargePad(Task.TargetCm, DropPadId, DropPadLoc);
+		const float ViaDropWh = DriveWh(Robot, FVector::DistXY(Pos, Task.TargetCm) * Detour)
+			+ DriveWh(Robot, FVector::DistXY(Task.TargetCm, bPadFromDrop ? DropPadLoc : PadLoc) * Detour);
 		if (Battery.ChargeWh >= ViaDropWh)
 		{
 			return false;

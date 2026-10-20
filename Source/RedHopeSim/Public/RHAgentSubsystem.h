@@ -5,6 +5,7 @@
 #include "MassEntityTypes.h"
 #include "MassArchetypeTypes.h"
 #include "Mass/EntityHandle.h"
+#include "RHSimTypes.h"
 #include "RHAgentSubsystem.generated.h"
 
 // Snapshot of one robot for the sim-owned save payload. Task claims are not
@@ -81,6 +82,14 @@ public:
 	void Debug_SetAllWear(float Wear);
 	// Fleet panel snapshot (M1-b Gate C), stable spawn order.
 	void CollectPanelRows(TArray<FRHRobotPanelRow>& OutRows) const;
+	// C6a: robots of a class that can work now - wear under the halt line and charge left. The task
+	// board counts the active cargo rovers once a step through this (a robot's battery and wear
+	// are fragments, which ForEachRobotState does not read).
+	int32 CountActiveRobots(FName RobotClass, float WearHalt) const;
+	// C6a: every robot of a class, stable spawn order (cargo rovers: the readout for C6b and the cheats).
+	void CollectRobotsOfClass(FName RobotClass, TArray<FRHRoverState>& OutStates) const;
+// Test knob (RH.Rover drain): set every robot of a class to a fraction of its battery.
+void Debug_SetChargeFrac(FName RobotClass, float Frac);
 
 	int32 GetAgentCount() const { return SpawnedCount; }
 

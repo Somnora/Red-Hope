@@ -64,6 +64,13 @@ struct FRHRoadRoute
 	int64 CostUnits = 0;          // SpeedMulPermille x off-road cm + 1000 x road cm
 };
 
+// C6a: whole-centimetre rounded square root, the one the planner uses for every
+// straight-line length (the commute metric shares it so the two never disagree).
+namespace RHRoads
+{
+	REDHOPESIM_API int32 RoundSqrtCm(int64 SquaredCm);
+}
+
 struct REDHOPESIM_API FRHRoadGraph
 {
 	// Ascending Id. Nodes are never removed, so Nodes[Id - 1] is node Id.
@@ -115,6 +122,24 @@ struct REDHOPESIM_API FRHRoadGraph
 
 	// Total length of built edges (cm), for readouts.
 	int64 BuiltLengthCm() const;
+
+	// C6a: the built node nearest a point (0 when no node touches a built edge), by squared
+	// distance, ties by node Id. OutDistCm is the straight distance in whole cm.
+	int32 NearestBuiltNode(FIntPoint AtCm, const FRHRoadParams& Prm, int32* OutDistCm = nullptr) const;
+	// C6a: PlanRoute's loop without the early exit - one Dijkstra from a virtual source joined to
+	// the K nearest built nodes of StartCm at their off-road cost (SpeedMulPermille x cm), the
+	// same tie rules. Dist (MAX_int64 = unreached), PrevNode (0 = an entry) and PrevEdge are
+	// indexed by node Id - 1 and sized to Nodes.Num().
+	void DistancesFrom(FIntPoint StartCm, const FRHRoadParams& Prm, TArray<int64>& Dist, TArray<int32>& PrevNode, TArray<int32>& PrevEdge) const;
+	// The K nearest built nodes to a point (K = Prm.EntryCandidates), nearest first, ties by node
+	// Id, each with its straight off-road distance in whole cm. The exit (or entry) candidates
+	// PlanRoute tries, exposed so a caller can memoize them per position.
+	struct FExit { int32 NodeId = 0; int32 OffCm = 0; };
+	void NearestBuiltNodes(FIntPoint AtCm, const FRHRoadParams& Prm, TArray<FExit>& Out) const;
+	// The cheapest road cost (the same units as PlanRoute's CostUnits) from the source of a
+	// DistancesFrom run through one of the Exits, MAX_int64 when no built road reaches any.
+	// OutExitNode is the node the route leaves the road at, OutOffOutCm the straight leg after it.
+	static int64 RoadCostVia(const TArray<FExit>& Exits, const FRHRoadParams& Prm, const TArray<int64>& Dist, int32* OutExitNode = nullptr, int32* OutOffOutCm = nullptr);
 
 private:
 	struct FAdj { int32 Edge = 0; int32 Other = 0; int32 Len = 0; };

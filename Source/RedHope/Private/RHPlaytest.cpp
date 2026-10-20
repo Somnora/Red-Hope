@@ -118,6 +118,9 @@ namespace
 		double BigArrivalSol = -1.0;
 		double MinHope = 100.0, MaxHope = 0.0, MinFoodSols = 1.0e9;
 		int32 MaxUnsupported = 0;
+		// C6a: what commuting did to the run. The Hope term is read where the Hope range is.
+		int32 PeakPop = 0, MaxLongCommuters = 0, CommuteSamples = 0;
+		double PeakRamp = 0.0, MaxLongShare = 0.0, MaxCommutePenalty = 0.0, SumCommutePenalty = 0.0, LongestTripM = 0.0;
 		// D1a: the current ship round's cadence, logged as a ROUND line when its
 		// ship lands (opened -> met -> launched -> landed, plus the cargo).
 		FString RoundName;
@@ -282,6 +285,9 @@ namespace
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, immigrated %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
 				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.SettlersSeen, P.MaxUnsupported, P.MinHope, P.MaxHope,
 				P.MinFoodSols < 1.0e8 ? P.MinFoodSols : 0.0);
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  commute: peak population %d, peak ramp %.3f, most long commuters at once %d (at most %.1f%% of the population), the commute's Hope cost at most %.3f and %.3f on average over the run, the longest trip %.0f m; %d cargo rover(s) deployed, %d aboard"),
+				P.PeakPop, P.PeakRamp, P.MaxLongCommuters, 100.0 * P.MaxLongShare, P.MaxCommutePenalty, P.CommuteSamples > 0 ? P.SumCommutePenalty / P.CommuteSamples : 0.0, P.LongestTripM,
+				Sim ? Sim->GetActiveRoverCount() : 0, Sim ? Sim->GetRoversWaitingAboard() : 0);
 			if (P.BigArrivalSol >= 0.0)
 			{
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival landed at sol %.2f"), P.BigArrivalSol);
@@ -997,6 +1003,15 @@ namespace
 			P.MaxUnsupported = FMath::Max(P.MaxUnsupported, Unsupported);
 			if (Pop > 0)
 			{
+				const URHSimWorldSubsystem::FRHCommuteSummary Commute = Sim->GetCommuteSummary();
+				P.PeakPop = FMath::Max(P.PeakPop, Pop);
+				P.PeakRamp = FMath::Max(P.PeakRamp, Commute.Ramp);
+				P.MaxLongCommuters = FMath::Max(P.MaxLongCommuters, Commute.LongCommuters);
+				P.MaxLongShare = FMath::Max(P.MaxLongShare, (double)Commute.LongCommuters / (double)Pop);
+				P.MaxCommutePenalty = FMath::Max(P.MaxCommutePenalty, Commute.Penalty);
+				P.SumCommutePenalty += Commute.Penalty;
+				++P.CommuteSamples;
+				P.LongestTripM = FMath::Max(P.LongestTripM, (double)Commute.MaxDistCm / 100.0);
 				P.MinHope = FMath::Min(P.MinHope, Sim->GetHopeSmoothed());
 				P.MaxHope = FMath::Max(P.MaxHope, Sim->GetHopeSmoothed());
 				P.MinFoodSols = FMath::Min(P.MinFoodSols, Sim->GetStock(FName("Food")) / FMath::Max(0.01, Pop * Sim->GetColonistFoodKgPerSol()));

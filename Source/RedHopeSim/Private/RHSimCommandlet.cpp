@@ -9919,6 +9919,985 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// C6a self-test (living-city gate 6a, 2026-10-20): TRAFFIC. The sim half of C6: cargo rovers and commuting.
+	// Rovers: the data, landing (with and without a road, in both bands), the road-only claim and its reachability
+	// (R6), the 1 t load and the 2-batch hopper cap (R5), the speed profile on all four movement branches (R7), the
+	// charge-reserve proof, the cargo that is returned (R3) and the cargo that goes through the existing Lander
+	// redirect when its destination is demolished, a rover on a road demolished under it, freight left to the
+	// haulers after the fallback, and the player's road demolish (C5). Commuting (variant a): hand-computed integer
+	// distances, the district flow matrix with its Unzoned row and column, the determinism of the position memo, every
+	// cache key (a road that finishes, a road that is removed, a reshuffle of seats that must cost no Dijkstra), the
+	// population ramp at 59 / 60 / 110 / 160 / 161, the Hope term, and ONE work hook per job function (Labs are not
+	// cut twice). Then the save round trip, and an agent / era ledger case with roads, rovers and long commuters.
+	// The headless world has no Mass ticking, so rovers are played by the harness through the very same sim calls
+	// the brains make (TryClaimFreight, RH::MoveAlong, HaulLoad, HaulUnload, ReturnHaulCargo); the real brains are
+	// proven by the live playtest. Fails loudly. `-traffic`.
+	if (FParse::Param(*Params, TEXT("traffic")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== TRAFFIC TEST (C6a, 2026-10-20) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("TRAFFIC ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("TRAFFIC FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double Va, double Vb, double Tol) { return FMath::Abs(Va - Vb) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NStruct(TEXT("Struct")), NRegolith(TEXT("Regolith")), NOxygen(TEXT("Oxygen")), NWater(TEXT("Water")), NFood(TEXT("Food"));
+		const FName NRoverRow(TEXT("RC_R"));
+		FString Why;
+		TArray<FString> Rejects, Alerts;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& Text) { Rejects.Add(Text); });
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& Text) { Alerts.Add(Text); });
+		const auto LastReject = [&Rejects]() { return Rejects.Num() ? Rejects.Last() : FString(); };
+		const auto Land = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto AgentStepOnce = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds((double)AgentDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->Debug_StepSim(AgentDt);
+		};
+		const auto Graph = [&]() -> const FRHRoadGraph& { return Sim->GetRoadGraph(); };
+		const auto Cm = [](const FVector& V) { return FIntPoint(FMath::RoundToInt(V.X), FMath::RoundToInt(V.Y)); };
+		const auto Straight = [](const FIntPoint& Pa, const FIntPoint& Pb) { const int64 Dx = (int64)Pa.X - Pb.X, Dy = (int64)Pa.Y - Pb.Y; return (int64)RHRoads::RoundSqrtCm(Dx * Dx + Dy * Dy); };
+		const auto IdOf = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+			{
+				if (Bd.DefName == FName(Def) && Bd.Level == Level && FMath::Abs(Bd.LocationCm.X - X) < 1.0 && FMath::Abs(Bd.LocationCm.Y - Y) < 1.0) { return Bd.Id; }
+			}
+			return 0;
+		};
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level);
+			return IdOf(Def, X, Y, Level);
+		};
+		const auto FindB = [&](int32 Id) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.Id == Id) { return &Bd; } }
+			return nullptr;
+		};
+		const auto OutKg = [&](int32 Id, FName Res) { const FRHBuildingInstance* Bd = FindB(Id); const double* V = Bd ? Bd->OutputKg.Find(Res) : nullptr; return V ? *V : 0.0; };
+		const auto InKg = [&](int32 Id, FName Res) { const FRHBuildingInstance* Bd = FindB(Id); const double* V = Bd ? Bd->InputKg.Find(Res) : nullptr; return V ? *V : 0.0; };
+		const auto SolidTotal = [&](FName Res) { double Sum = 0.0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { const double* In = Bd.InputKg.Find(Res); const double* Out = Bd.OutputKg.Find(Res); Sum += (In ? *In : 0.0) + (Out ? *Out : 0.0); } return Sum; };
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Lander")) { LanderId = Bd.Id; } }
+		int32 NextHandle = 700;
+		const auto Fresh = [&]() { return FMassEntityHandle(NextHandle++, 1); };
+		const auto FindTaskBy = [&](int32 FromId, int32 ToId) -> FRHTask
+		{
+			for (const FRHTask& Tk : Sim->GetTasks()) { if (Tk.Type == ERHTaskType::Haul && Tk.From.BuildingId == FromId && (ToId == 0 || Tk.To.BuildingId == ToId)) { return Tk; } }
+			return FRHTask();
+		};
+		const auto RoverCount = [&]() { TArray<FRHRoverState> Rs; Sim->GetRoverStates(Rs); return Rs.Num(); };
+		URHAgentSubsystem* AgentsSub = World->GetSubsystem<URHAgentSubsystem>();
+		const auto RobotCount = [&]() { TArray<FRHRobotPanelRow> Rows; if (AgentsSub) { AgentsSub->CollectPanelRows(Rows); } return Rows.Num(); };
+		const auto SetCommute = [&](double StartPop, double FullPop, double LongCm) { Sim->Debug_SetCommuteTuning(StartPop, FullPop, LongCm, 6000.0); };
+		const auto CommuteClosed = [&]() { SetCommute(1.0e9, 2.0e9, 30000.0); };
+		const auto CommuteOpen = [&]() { SetCommute(0.0, 1.0, 30000.0); };
+		const auto CommuteDefault = [&]() { SetCommute(60.0, 160.0, 30000.0); };
+		// The reference answer for a surface leg: the planner itself under the commuters' params, planned from the lower end.
+		const auto Oracle = [&](FIntPoint Pa, FIntPoint Pb) -> int64
+		{
+			if (Pa == Pb) { return 0; }
+			const bool bSwap = Pb.X < Pa.X || (Pb.X == Pa.X && Pb.Y < Pa.Y);
+			const FIntPoint Lo = bSwap ? Pb : Pa, Hi = bSwap ? Pa : Pb;
+			FRHRoadParams Cp = Sim->GetRoadParams();
+			Cp.SpeedMulPermille = 4000;
+			FRHRoadRoute Rt;
+			if (Graph().PlanRoute(Lo, Hi, Cp, Rt) && Rt.bRoad) { return (Rt.CostUnits + Cp.SpeedMulPermille / 2) / Cp.SpeedMulPermille; }
+			return Straight(Lo, Hi);
+		};
+
+		const FRHRobotRow* RoverRow = DefsSub ? DefsSub->GetRobot(NRoverRow) : nullptr;
+		const FRHManifestItemRow* RoverItem = DefsSub ? DefsSub->GetManifestItem(FName("CargoRover")) : nullptr;
+		const float RoverSpeed = RoverRow ? RoverRow->Speed_mps : 5.f;
+		const float RoverCargoCap = RoverRow ? RoverRow->Cargo_kg : 1000.f;
+
+		// --- X0. The data: every number came off the synced tables, none from a C++ fallback. ---
+		{
+			Expect(RoverRow && RoverRow->RobotClass == FName("Rover") && RoverRow->StartingCount == 0 && RoverRow->SliceActive && Near(RoverRow->Battery_Wh, 6000.0, 1e-3) && Near(RoverRow->DrawMove_W, 200.0, 1e-3)
+				&& Near(RoverRow->DrawWork_W, 20.0, 1e-3) && Near(RoverRow->DrawIdle_W, 8.0, 1e-3) && Near(RoverRow->Speed_mps, 5.0, 1e-3) && Near(RoverRow->Cargo_kg, 1000.0, 1e-3) && Near(RoverRow->WearPerActiveSol, 6.0, 1e-3),
+				TEXT("X0 DT_Robots RC_R: class Rover, 6000 Wh, 200 / 20 / 8 W, 5 m/s, 1000 kg, wear 6, none at the start"));
+			Expect(RoverItem && RoverItem->SliceActive && Near(RoverItem->Mass_kg, 3500.0, 1e-3) && RoverItem->Category == TEXT("Fleet"), TEXT("X0 DT_ManifestItems CargoRover: 3,500 kg, Fleet"));
+			const TPair<const TCHAR*, double> Pins[] = {
+				{ TEXT("RoverOffRoadSpeedMul"), 0.3 }, { TEXT("RoverLastLegCm"), 3000 }, { TEXT("FreightMinCm"), 8000 }, { TEXT("FreightHaulerFallbackSec"), 300 }, { TEXT("RoverReserveDetourMul"), 3.0 },
+				{ TEXT("RoverClaimPlans"), 4 }, { TEXT("CommuteRoadSpeedMul"), 4.0 }, { TEXT("CommuteShaftCmPerFloor"), 6000 }, { TEXT("CommuteLongCm"), 30000 }, { TEXT("CommuteRampStartPop"), 60 },
+				{ TEXT("CommuteRampFullPop"), 160 }, { TEXT("HopeCommuteMax"), 4 }, { TEXT("HopeCommuteSteepness"), 2 }, { TEXT("CommuteWorkMul"), 0.85 }, { TEXT("CommuteAlertShare"), 0.10 } };
+			bool bPins = true;
+			FString Missing;
+			for (const TPair<const TCHAR*, double>& Pin : Pins)
+			{
+				const double Got = DefsSub ? DefsSub->GetConfigTableScalar(FName(Pin.Key), -1.0) : -1.0;
+				if (!Near(Got, Pin.Value, 1e-9)) { bPins = false; Missing += FString::Printf(TEXT(" %s=%g"), Pin.Key, Got); }
+			}
+			Expect(bPins, FString::Printf(TEXT("X0 DT_Config rows (the 15 C6a pins)%s"), bPins ? TEXT(" all on the table") : *Missing));
+			Expect(Sim->GetRoverRoadParams().SpeedMulPermille == 5333 && Near(Sim->GetRoverOffRoadSpeedMul(), 0.3, 1e-12) && Sim->GetRoverMoveProfile().Params == &Sim->GetRoverRoadParams()
+				&& Near(Sim->GetRoverMoveProfile().OffRoadMul, 0.3, 1e-12) && Near(Sim->GetRoverMoveProfile().MissingEdgeMul, 0.3, 1e-12) && Sim->GetRoadParams().SpeedMulPermille == 1600,
+				FString::Printf(TEXT("X0 the rover plans with SpeedMulPermille %d = round(1000 x 1.6 / 0.3) (robots keep 1600) and a crawl of 0.3 on every non-road branch"), Sim->GetRoverRoadParams().SpeedMulPermille));
+			Expect(Sim->GetRoverReserveDetourMul() * 1.25 >= 1.0 / Sim->GetRoverOffRoadSpeedMul(),
+				FString::Printf(TEXT("X0 the reserve proof holds on the data: %.2f x 1.25 = %.3f >= 1 / %.1f = %.3f"), Sim->GetRoverReserveDetourMul(), Sim->GetRoverReserveDetourMul() * 1.25, Sim->GetRoverOffRoadSpeedMul(), 1.0 / Sim->GetRoverOffRoadSpeedMul()));
+			Expect(!Sim->HasBuiltRoads() && Sim->GetPopulation() == 0 && Sim->GetCommuteRamp() == 0.0 && Sim->GetImportStock(NRoverRow) == 0 && RoverCount() == 0 && Sim->GetCommuteFlowRebuilds() == 0,
+				TEXT("X0 a fresh colony: no road, nobody here, the ramp closed, no rover, no commute cache touched"));
+			if (!RoverRow || !RoverItem)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("TRAFFIC FAIL: the rover rows are not in the tables; the suite stops"));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== TRAFFIC TEST END: %d check(s), %d failure(s) ==="), Checks, Fails + 1);
+				GEngine->DestroyWorldContext(World);
+				World->DestroyWorld(false);
+				return 1;
+			}
+		}
+
+		// --- X1. The speed profile with no road at all: the first of the four branches. ---
+		{
+			const FMassEntityHandle H = Fresh();
+			FTransform Ta(FQuat::Identity, FVector(0.0, -3000.0, 0.0)), Tb = Ta, Tc = Ta;
+			const FVector Goal(6000.0, -2600.0, 0.0);
+			bool bSame = true, bArrA = false, bArrB = false, bArrC = false;
+			int32 Steps = 0, StepsRobot = 0;
+			for (; Steps < 4000 && !(bArrA && bArrB); ++Steps)
+			{
+				bArrA = RH::MoveAlong(*Sim, H, Ta, Goal, RoverSpeed, AgentDt, true);
+				bArrB = RH::MoveToward(Tb, Goal, RoverSpeed * (float)Sim->GetRoverOffRoadSpeedMul(), AgentDt);
+				bSame &= bArrA == bArrB && Ta.GetLocation() == Tb.GetLocation() && Ta.GetRotation().Equals(Tb.GetRotation(), 0.0);
+			}
+			for (; StepsRobot < 4000 && !bArrC; ++StepsRobot) { bArrC = RH::MoveAlong(*Sim, H, Tc, Goal, RoverSpeed, AgentDt, false); }
+			Expect(bSame && bArrA && bArrB && Steps > 2 * StepsRobot && Steps < 4 * StepsRobot,
+				FString::Printf(TEXT("X1 no built road: a rover's MoveAlong is MoveToward at 0.3x bit for bit (%d steps), a robot's is not (%d steps); no path kept (%d)"), Steps, StepsRobot, Sim->GetRobotRoadPath(H) != nullptr ? 1 : 0));
+		}
+
+		// --- X2. The static world: two floors, the spine road, the common buildings. Saved as the base every scenario loads. ---
+		const FVector Head(3000.0, 3000.0, 0.0);
+		constexpr int32 FloorCells = 200;
+		FString Rz;
+		{
+			Sim->AddStock(NOxygen, 1.0e8);
+			Sim->AddStock(NWater, 1.0e8);
+			Sim->AddStock(NFood, 1.0e8);
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			Sim->ExtendShaft(2, Head);
+			bool bCarved = Sim->ExcavateFloor(-1, 10, Rz); // ten cells: the arrival fill puts the first 50 here and the rest below
+			bCarved &= Sim->ExcavateFloor(-2, FloorCells, Rz);
+			for (int32 L = 1; L <= 2; ++L) { Sim->Debug_PlaceInstant(FName("AirFilter"), Head, -L); }
+			for (int32 L = 1; L <= 2; ++L) { Sim->Debug_ForceRateFloor(-L); }
+			Sim->Debug_SetColonistsPerCell(5.0);
+			Land();
+			// Floor -1 houses 50 (ten cells at 5 a cell); floor -2 houses 1,000 and holds every seat: ten Lab, ten Workstation, ten Garden.
+			for (int32 K = 0; K < 10; ++K) { Sim->DesignateRoom(-1, K, FName("LivingQuarters"), Rz); }
+			for (int32 K = 0; K < 60; ++K) { Sim->DesignateRoom(-2, K, FName("LivingQuarters"), Rz); }
+			for (int32 K = 0; K < 10; ++K) { Sim->DesignateRoom(-2, 60 + K, FName("Lab"), Rz); }
+			for (int32 K = 0; K < 10; ++K) { Sim->DesignateRoom(-2, 70 + K, FName("Workstation"), Rz); }
+			for (int32 K = 0; K < 10; ++K) { Sim->DesignateRoom(-2, 80 + K, FName("Garden"), Rz); }
+			Sim->Debug_LayRoad(FVector(-2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			Place(TEXT("ChargePad"), 3000.0, -800.0);
+			Place(TEXT("Forge"), 28000.0, -800.0);
+			Place(TEXT("Stockpile"), 12000.0, -800.0);
+			Land();
+			Expect(bCarved && Sim->GetShaftDepth() == 2 && Sim->IsFloorRated(-1) && Sim->IsFloorRated(-2) && Sim->HasBuiltRoads() && Graph().BuiltEdgeCount >= 8 && Sim->GetHousingCapacity() == 1050,
+				FString::Printf(TEXT("X2 the world: shaft to -2, both floors rated, %d beds, a built spine of %d edges (%.0f m), a pad, a Forge and a Stockpile"), Sim->GetHousingCapacity(), Graph().BuiltEdgeCount, (double)Graph().BuiltLengthCm() / 100.0));
+		}
+		const int32 PadId = IdOf(TEXT("ChargePad"), 3000.0, -800.0), ForgeId = IdOf(TEXT("Forge"), 28000.0, -800.0), StockId = IdOf(TEXT("Stockpile"), 12000.0, -800.0);
+		FString SaveErr;
+		Expect(PadId && ForgeId && StockId && Sim->SaveColony(TEXT("trafficworld"), SaveErr), FString::Printf(TEXT("X2 the world is saved for every scenario (%s)"), *SaveErr));
+		const auto LoadWorld = [&]()
+		{
+			FString Le;
+			const bool bOk = Sim->LoadColony(TEXT("trafficworld"), Le);
+			if (!bOk || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("TRAFFIC: loading the base world failed: %s"), *Le); ++Fails; }
+			Rejects.Reset();
+			Alerts.Reset();
+			return bOk;
+		};
+		// The edge whose midpoint is nearest a point.
+		const auto EdgeNear = [&](double X, double Y) -> int32
+		{
+			int32 BestEdge = 0;
+			double BestD = TNumericLimits<double>::Max();
+			for (const FRHRoadEdge& Ed : Graph().Edges)
+			{
+				const FVector Mid = Graph().EdgeMidpointCm(Ed, Sim->GetRoadParams());
+				const double Dd = FVector::DistXY(Mid, FVector(X, Y, 0.0));
+				if (Dd < BestD) { BestD = Dd; BestEdge = Ed.Id; }
+			}
+			return BestEdge;
+		};
+		// A harness rover, played through the brains' own calls.
+		struct FSimRover { FTransform T; FMassEntityHandle H; FRHTask Board; bool bHas = false; int32 Phase = 0; FVector Target = FVector::ZeroVector; float CargoKg = 0.f; FName CargoRes; double UsedWh = 0.0; int32 Steps = 0; };
+		const auto RoverStep = [&](FSimRover& Rv, float ChargeFrac) -> bool // true when it delivered on this step
+		{
+			++Rv.Steps;
+			if (!Rv.bHas)
+			{
+				if (Sim->TryClaimFreight(Rv.H, Rv.T.GetLocation(), ChargeFrac, Rv.Board))
+				{
+					Rv.bHas = true;
+					Rv.Phase = 0;
+					Rv.Target = Sim->GetSiteLocation(Rv.Board.From);
+				}
+				return false;
+			}
+			Rv.UsedWh += RoverRow->DrawMove_W * (AgentDt / 50.0);
+			if (Rv.Phase == 0)
+			{
+				if (RH::MoveAlong(*Sim, Rv.H, Rv.T, Rv.Target, RoverSpeed, AgentDt, true)) { Rv.Phase = 1; }
+				return false;
+			}
+			if (Rv.Phase == 1)
+			{
+				float Loaded = 0.f;
+				FVector Drop = FVector::ZeroVector;
+				if (Sim->HaulLoad(Rv.Board.Id, RoverCargoCap, Loaded, Drop)) { Rv.CargoKg = Loaded; Rv.CargoRes = Rv.Board.Resource; Rv.Target = Drop; Rv.Phase = 2; }
+				else { Rv.bHas = false; }
+				return false;
+			}
+			if (RH::MoveAlong(*Sim, Rv.H, Rv.T, Rv.Target, RoverSpeed, AgentDt, true))
+			{
+				Sim->HaulUnload(Rv.Board.Id, Rv.CargoKg, Rv.CargoRes);
+				Rv.CargoKg = 0.f;
+				Rv.bHas = false;
+				return true;
+			}
+			return false;
+		};
+		const auto MakeRover = [&](const FVector& At) { FSimRover Rv; Rv.T = FTransform(FQuat::Identity, At); Rv.H = Fresh(); return Rv; };
+		// A rover trip with the shared helper: the sub-steps taken (-1 past the cap).
+		const auto DriveRover = [&](const FVector& From, const FVector& To, bool bRover)
+		{
+			const FMassEntityHandle H = Fresh();
+			FTransform T(FQuat::Identity, From);
+			int32 Steps = 0;
+			while (!RH::MoveAlong(*Sim, H, T, To, RoverSpeed, AgentDt, bRover)) { if (++Steps > 40000) { return -1; } }
+			return Steps + 1;
+		};
+		// What a rover trip should take by the profile: off-road legs at 0.3 v, the road at 1.6 v, the last 3 m not driven.
+		const auto ExpectedRoverSteps = [&](const FVector& From, const FVector& To) -> double
+		{
+			FRHRoadRoute Rt;
+			const double V = RoverSpeed * 100.0;
+			if (Graph().PlanRoute(Cm(From), Cm(To), Sim->GetRoverRoadParams(), Rt) && Rt.bRoad)
+			{
+				return (Rt.OffInCm / (V * 0.3) + Rt.RoadCm / (V * Sim->GetRoadSpeedMul()) + FMath::Max(0, Rt.OffOutCm - 300) / (V * 0.3)) / AgentDt;
+			}
+			return FMath::Max(0.0, (double)Straight(Cm(From), Cm(To)) - 300.0) / (V * 0.3) / AgentDt;
+		};
+
+		// --- X3. Landing: aboard with no road, on a road node once there is one, in either band. ---
+		{
+			LoadWorld();
+			const int32 Agents0 = RobotCount();
+			const TArray<int32> EdgeIds = [&]() { TArray<int32> Ids; for (const FRHRoadEdge& Ed : Graph().Edges) { Ids.Add(Ed.Id); } return Ids; }();
+			for (const int32 Id : EdgeIds) { Sim->Debug_RemoveRoadEdge(Id); }
+			Expect(!Sim->HasBuiltRoads(), TEXT("X3 every road taken up: a colony with no road"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Expect(RoverCount() == 0 && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetRoversWaitingAboard() == 1 && RobotCount() == Agents0,
+				TEXT("X3 no road: the rover waits aboard under ImportStock[RC_R] and no robot is made"));
+			bool bAlerted = false;
+			for (const FString& A : Alerts) { bAlerted |= A == TEXT("A cargo rover is waiting aboard the Lander for a road."); }
+			Expect(bAlerted, TEXT("X3 the Gate-D placeholder alert says it is waiting for a road (D158)"));
+			Sim->Debug_LayRoad(FVector(-2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			AgentStepOnce();
+			TArray<FRHRoverState> Rs;
+			Sim->GetRoverStates(Rs);
+			// The built node nearest the Lander, ties by node Id.
+			int32 BestNode = 0;
+			int64 BestD2 = TNumericLimits<int64>::Max();
+			for (const FRHRoadEdge& Ed : Graph().Edges)
+			{
+				for (const int32 Nid : { Ed.A, Ed.B })
+				{
+					const FIntPoint Np = Graph().NodeCm(Nid, Sim->GetRoadParams());
+					const int64 D2 = (int64)Np.X * Np.X + (int64)Np.Y * Np.Y;
+					if (Ed.bBuilt && (D2 < BestD2 || (D2 == BestD2 && Nid < BestNode))) { BestD2 = D2; BestNode = Nid; }
+				}
+			}
+			const FIntPoint NodeAt = Graph().NodeCm(BestNode, Sim->GetRoadParams());
+			Expect(Rs.Num() == 1 && Sim->GetImportStock(NRoverRow) == 0 && Rs[0].DefName == NRoverRow && Near(Rs[0].PosCm.X, NodeAt.X, 0.5) && Near(Rs[0].PosCm.Y, NodeAt.Y, 0.5) && Near(Rs[0].ChargeFrac, 1.0, 1e-6),
+				FString::Printf(TEXT("X3 the first AGENT step with a built node deploys it, fully charged, at node #%d (%d, %d) m, the one nearest the Lander"), BestNode, NodeAt.X / 100, NodeAt.Y / 100));
+			// The era band does the same.
+			LoadWorld();
+			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Expect(RoverCount() == 0 && Sim->GetImportStock(NRoverRow) == 2, TEXT("X3 two rovers aboard, still no road"));
+			Sim->Debug_LayRoad(FVector(-2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			Land();
+			Expect(RoverCount() == 2 && Sim->GetImportStock(NRoverRow) == 0, TEXT("X3 the first ERA step with a built node deploys both (the same code in both bands)"));
+			// With a road already there, delivery lands it at once.
+			LoadWorld();
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Expect(RoverCount() == 1 && Sim->GetImportStock(NRoverRow) == 0 && Sim->GetImportStock(FName("SolarArray")) == 6, TEXT("X3 a road already standing: delivery deploys at once, and the starter flat-packs are untouched"));
+		}
+
+		// --- X4. Freight: the claim, the 1 t load, the speed on a road, mass conserved. ---
+		{
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			const double MassBefore = SolidTotal(NStruct);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Ft = FindTaskBy(ForgeId, StockId);
+			Expect(Sim->GetActiveRoverCount() == 1 && Ft.Id != 0 && Ft.bFreight && Near(Ft.AmountKg, 1000.0, 1e-9) && Sim->GetFreightTaskCount() == 1,
+				FString::Printf(TEXT("X4 an active rover and 1,200 kg of Struct 220 m from a store, both on the road: ONE freight task of %.0f kg (the rover's hold, not 200)"), Ft.AmountKg));
+			FRHTask Tmp;
+			Expect(!Sim->TryClaimHaul(Fresh(), FVector(27000.0, -800.0, 0.0), Tmp), TEXT("X4 a hauler skips the freight task while a rover is active"));
+			FSimRover Rv = MakeRover(FVector(3000.0, -800.0, 0.0)); // at the pad
+			const double E1 = ExpectedRoverSteps(Rv.T.GetLocation(), Sim->GetSiteLocation(Ft.From));
+			const double E2 = ExpectedRoverSteps(Sim->GetSiteLocation(Ft.From), Sim->GetApproachPoint(Ft.To, 0));
+			int32 Delivered = 0;
+			float PeakLoad = 0.f;
+			for (int32 K = 0; K < 8000 && !Delivered; ++K)
+			{
+				Delivered += RoverStep(Rv, 1.f) ? 1 : 0;
+				PeakLoad = FMath::Max(PeakLoad, Rv.CargoKg);
+			}
+			Expect(Delivered == 1 && Near(PeakLoad, 1000.0, 1e-3) && Near(InKg(StockId, NStruct), 1000.0, 1e-6) && Near(OutKg(ForgeId, NStruct), 200.0, 1e-6) && Near(SolidTotal(NStruct), MassBefore, 1e-6),
+				FString::Printf(TEXT("X4 the rover loaded %.0f kg (the cap of 1,000, from 1,200), delivered it, the Forge keeps %.0f, the store holds %.0f; Struct %.3f -> %.3f"), PeakLoad, OutKg(ForgeId, NStruct), InKg(StockId, NStruct), MassBefore, SolidTotal(NStruct)));
+			Expect(Rv.Steps >= (int32)(E1 + E2) - 30 && Rv.Steps <= (int32)(E1 + E2) + 10, // a rover stops 3 m short of a site, so the second leg starts a little nearer than the site itself
+				FString::Printf(TEXT("X4 the trip took %d steps; the profile says %.0f + %.0f (off-road legs at 0.3x, the spine at %.1fx x 5 m/s = 8 m/s)"), Rv.Steps, E1, E2, Sim->GetRoadSpeedMul()));
+			Expect(Rv.UsedWh > 0.0 && Rv.UsedWh < RoverRow->Battery_Wh * 0.2, FString::Printf(TEXT("X4 it spent %.2f Wh of a %.0f Wh battery"), Rv.UsedWh, RoverRow->Battery_Wh));
+		}
+
+		// --- X5. Hauler fallback, and the era clock does not count. ---
+		{
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			FRHTask Ft = FindTaskBy(ForgeId, StockId);
+			Sim->Debug_StepTaskBoard(100.f);
+			Sim->Debug_StepTaskBoard(100.f);
+			FRHTask Tmp;
+			const bool bBlocked200 = !Sim->TryClaimHaul(Fresh(), FVector(27000.0, -800.0, 0.0), Tmp);
+			Ft = FindTaskBy(ForgeId, StockId);
+			const double Waited200 = Ft.UnclaimedAgentSec;
+			Expect(bBlocked200 && Near(Waited200, 200.0, 1e-6), FString::Printf(TEXT("X5 after 200 unclaimed agent-seconds a hauler is still refused the freight task (waited %.0f)"), Waited200));
+			Sim->Debug_StepTaskBoard(100.f);
+			Expect(Sim->TryClaimHaul(Fresh(), FVector(27000.0, -800.0, 0.0), Tmp) && Tmp.Id == Ft.Id,
+				TEXT("X5 at 300 agent-seconds a hauler may take the freight task"));
+			float Loaded = 0.f;
+			FVector Drop;
+			const double Before = SolidTotal(NStruct);
+			Sim->HaulLoad(Tmp.Id, 200.f, Loaded, Drop); // a hauler's RC_H hold
+			Sim->HaulUnload(Tmp.Id, Loaded);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Again = FindTaskBy(ForgeId, StockId);
+			Expect(Near(Loaded, 200.0, 1e-6) && Near(SolidTotal(NStruct), Before, 1e-6) && Near(OutKg(ForgeId, NStruct), 1000.0, 1e-6) && Again.Id != Ft.Id && Again.bFreight && Near(Again.AmountKg, 1000.0, 1e-9) && Near(Again.UnclaimedAgentSec, 0.0, 1e-9),
+				FString::Printf(TEXT("X5 the hauler moved %.0f kg and the rest was re-posted as a fresh freight task (#%d, %.0f kg, waited %.0f s)"), Loaded, Again.Id, Again.AmountKg, Again.UnclaimedAgentSec));
+			// The era clock does not count: 200 agent-seconds, then two ERA steps (120 s of sim time), is still 200.
+			Sim->Debug_StepTaskBoard(200.f);
+			Land();
+			Land();
+			const FRHTask Held = FindTaskBy(ForgeId, StockId);
+			Expect(Held.Id == Again.Id && Near(Held.UnclaimedAgentSec, 200.0, 1e-6),
+				FString::Printf(TEXT("X5 after two ERA steps the freight task has still waited %.0f agent-seconds, not 320: era never posts, claims or counts"), Held.UnclaimedAgentSec));
+		}
+
+		// --- X6. What is freight: hopper room (R5), road-served ends, length, and the rover's own claim. ---
+		{
+			LoadWorld();
+			const int32 BorerId = Place(TEXT("Borer"), 24000.0, -800.0);
+			const int32 Forge2 = Place(TEXT("Forge"), 16000.0, -800.0);
+			Sim->Debug_AddSolidAt(BorerId, NRegolith, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			FRHTask Bt = FindTaskBy(BorerId, 0);
+			Expect(Bt.Id != 0 && Bt.To.BuildingId == ForgeId && !Bt.bFreight && Near(Bt.AmountKg, 200.0, 1e-9),
+				FString::Printf(TEXT("X6 (R5) a Borer's 1,200 kg of Regolith for a Forge that takes 100 a batch: the room is 2 x 100 - 0 = 200, not over a hauler's load, so NOT freight: a %.0f kg hauler task to Forge #%d"), Bt.AmountKg, Bt.To.BuildingId));
+			Sim->Debug_AddSolidAt(ForgeId, NRegolith, 250.0, false); // the first Forge now holds more than two batches
+			Sim->Debug_ClearTasks();
+			Sim->Debug_StepTaskBoard();
+			Bt = FindTaskBy(BorerId, 0);
+			Expect(Bt.Id != 0 && Bt.To.BuildingId == Forge2 && !Bt.bFreight && Near(Bt.AmountKg, 200.0, 1e-9),
+				TEXT("X6 (R5) with the first Forge full to two batches the load goes to the second, again within its 2-batch room: no hopper is ever hoarded by a freight load"));
+			Sim->Debug_ClearTasks();
+			const int32 Far = Place(TEXT("Forge"), 10000.0, 6000.0); // 80 m off the spine: not road-served
+			Sim->Debug_AddSolidAt(Far, NStruct, 1200.0, true);
+			const int32 NearForge = Place(TEXT("Forge"), 20000.0, -3000.0); // 10 m off the spine
+			const int32 StockNear = Place(TEXT("Stockpile"), 24000.0, -3000.0); // 40 m from it: a short haul
+			Sim->Debug_AddSolidAt(NearForge, NStruct, 1200.0, true);
+			Sim->Debug_StepTaskBoard();
+			FRHTask TmpU;
+			const FRHTask FarT = FindTaskBy(Far, 0);
+			const FRHTask ShortT = FindTaskBy(NearForge, 0);
+			Expect(FarT.Id != 0 && !FarT.bFreight && Near(FarT.AmountKg, 200.0, 1e-9) && ShortT.Id != 0 && ShortT.To.BuildingId != 0 && !ShortT.bFreight,
+				FString::Printf(TEXT("X6 a pickup 80 m off the road (a %.0f kg task) and a 40 m haul are not freight: haulers keep them; the rover has nothing to claim (%d freight tasks)"), FarT.AmountKg, Sim->GetFreightTaskCount()));
+			Expect(Sim->GetFreightTaskCount() == 0 && !Sim->TryClaimFreight(Fresh(), FVector(3000.0, -800.0, 0.0), 1.f, TmpU), TEXT("X6 TryClaimFreight takes nothing: a rover never takes a non-freight haul"));
+			(void)StockNear;
+		}
+
+		// --- X7. Claim reachability (R6): a rover claims only what it reaches by road. ---
+		{
+			LoadWorld();
+			const int32 F4 = Place(TEXT("Forge"), 24000.0, -800.0);
+			const FName NHabSegment(TEXT("HabSegment")); // nothing consumes it, so it goes to the nearest store (a Forge would take Struct itself)
+			Sim->Debug_AddSolidAt(F4, NHabSegment, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			Expect(Sim->GetFreightTaskCount() == 1 && FindTaskBy(F4, StockId).bFreight, TEXT("X7 before the split: the 100 m haul F4 -> the Stockpile is freight"));
+			const int32 Cut = EdgeNear(7000.0, -2000.0);
+			Sim->Debug_RemoveRoadEdge(Cut); // the network splits: West (the pad, the Lander) and East (F4 and the Stockpile)
+			Sim->Debug_StepTaskBoard();
+			FRHTask Got;
+			const bool bWestClaim = Sim->TryClaimFreight(Fresh(), FVector(3000.0, -800.0, 0.0), 1.f, Got);
+			Expect(Sim->GetFreightTaskCount() == 1 && !bWestClaim,
+				TEXT("X7 the road is cut: the task is still freight (both ends are in the East) but the rover in the West does NOT claim it - no road leads there, it would crawl cross-country"));
+			Sim->Debug_StepTaskBoard(300.f);
+			FRHTask HaulerGot;
+			Expect(Sim->TryClaimHaul(Fresh(), FVector(23000.0, -800.0, 0.0), HaulerGot) && HaulerGot.From.BuildingId == F4,
+				TEXT("X7 a hauler takes it after the 300 s fallback"));
+			Sim->AbandonTask(HaulerGot.Id);
+			const bool bEastClaim = Sim->TryClaimFreight(Fresh(), FVector(23000.0, -800.0, 0.0), 1.f, Got) && Got.From.BuildingId == F4;
+			Expect(bEastClaim, TEXT("X7 a rover standing in the East claims it at once"));
+		}
+
+		// --- X8. The speed profile on the other three branches, a rover on a removed edge, and the charge reserve. ---
+		{
+			LoadWorld();
+			// Branches 2 and 3: the first and last legs. A trip 30 m off the road at each end plans a road trip; each end leg crawls.
+			const FVector From(-2000.0, 1000.0, 0.0), To(28000.0, 1000.0, 0.0);
+			FRHRoadRoute Plan;
+			const bool bPlan = Graph().PlanRoute(Cm(From), Cm(To), Sim->GetRoverRoadParams(), Plan) && Plan.bRoad;
+			const int32 Rover1 = DriveRover(From, To, true), Robot1 = DriveRover(From, To, false);
+			const double ExpectRover = ExpectedRoverSteps(From, To);
+			Expect(bPlan && Plan.OffInCm >= 2500 && Plan.OffOutCm >= 2500 && Rover1 > 0 && Near(Rover1, ExpectRover, 6.0) && Robot1 > 0 && Rover1 > Robot1,
+				FString::Printf(TEXT("X8 first and last legs: %d cm in and %d cm out of the road crawl at 0.3x: the rover took %d steps (the profile says %.0f), a robot %d"), Plan.OffInCm, Plan.OffOutCm, Rover1, ExpectRover, Robot1));
+			// Branch 4: an edge removed (by the player's order) under a moving rover. It still arrives; the leg it was on crawls.
+			const FMassEntityHandle H = Fresh();
+			FTransform T(FQuat::Identity, FVector(-2000.0, -2000.0, 0.0));
+			const FVector Goal(30000.0, -2000.0, 0.0);
+			const int32 Undisturbed = DriveRover(T.GetLocation(), Goal, true);
+			int32 Steps = 0, RemovedAt = -1;
+			int32 CutEdge = 0;
+			bool bArrived = false;
+			for (; Steps < 40000 && !bArrived; ++Steps)
+			{
+				bArrived = RH::MoveAlong(*Sim, H, T, Goal, RoverSpeed, AgentDt, true);
+				if (RemovedAt < 0 && Steps == Undisturbed / 3)
+				{
+					const FRHRobotRoadPath* Path = Sim->GetRobotRoadPath(H);
+					CutEdge = (Path && Path->IsRoadTrip() && Path->Next < Path->LegEdge.Num()) ? Path->LegEdge[Path->Next] : 0;
+					FRHCommand Dem;
+					Dem.Verb = FName("DemolishRoad");
+					Dem.Value = (double)CutEdge;
+					Sim->EnqueueCommand(Dem);
+					Land();
+					RemovedAt = Steps;
+				}
+			}
+			Expect(CutEdge != 0 && Graph().FindEdge(CutEdge) == nullptr && bArrived && Steps > Undisturbed + 4,
+				FString::Printf(TEXT("X8 edge #%d demolished by order under a moving rover at step %d: it still ARRIVES, in %d steps against %d undisturbed (the rest of that leg at 0.3x)"), CutEdge, RemovedAt, Steps, Undisturbed));
+			// The no-road branch again, now with roads removed under a rover: crawling, never running.
+			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
+			const int32 Crawl = DriveRover(FVector(0.0, 0.0, 0.0), FVector(15000.0, 0.0, 0.0), true);
+			Expect(!Sim->HasBuiltRoads() && Near(Crawl, ExpectedRoverSteps(FVector(0.0, 0.0, 0.0), FVector(15000.0, 0.0, 0.0)), 4.0),
+				FString::Printf(TEXT("X8 every edge gone: the same trip is the straight crawl at 0.3x (%d steps)"), Crawl));
+			// The charge reserve. Worst trip: the straight line at the crawl. The reserve: DriveWh(3.0 x straight) with its 25%% margin and a half-step slack.
+			const double Draw = RoverRow->DrawMove_W;
+			const auto ReserveWh = [&](double Dcm) { return Draw * (Dcm * Sim->GetRoverReserveDetourMul() / (RoverSpeed * 100.0)) / 50.0 * 1.25 + Draw * 0.5; };
+			bool bCovered = true;
+			double Worst = 0.0;
+			for (const double D : { 500.0, 3000.0, 15000.0, 60000.0, 200000.0 })
+			{
+				const double CrawlWh = Draw * (D / (RoverSpeed * 100.0 * Sim->GetRoverOffRoadSpeedMul())) / 50.0;
+				bCovered &= CrawlWh <= ReserveWh(D);
+				Worst = FMath::Max(Worst, CrawlWh / ReserveWh(D));
+			}
+			const double DrivenWh = Crawl * Draw * (AgentDt / 50.0);
+			Expect(bCovered && DrivenWh <= ReserveWh(15000.0),
+				FString::Printf(TEXT("X8 charge reserve: the crawl never costs more than the reserve (worst ratio %.3f); the 150 m crawl just driven spent %.1f Wh of its %.1f Wh reserve"), Worst, DrivenWh, ReserveWh(15000.0)));
+			// Any road plan beats crawling the straight line, strictly.
+			LoadWorld();
+			bool bAlwaysQuicker = true;
+			int32 Planned = 0;
+			const double V = RoverSpeed * 100.0;
+			const FVector Trips[][2] = { { FVector(-2000.0, 500.0, 0.0), FVector(26000.0, 900.0, 0.0) }, { FVector(1000.0, -1000.0, 0.0), FVector(20000.0, -5000.0, 0.0) }, { FVector(5000.0, -2500.0, 0.0), FVector(29000.0, 800.0, 0.0) } };
+			for (const FVector (&Tr)[2] : Trips)
+			{
+				FRHRoadRoute Rt;
+				if (Graph().PlanRoute(Cm(Tr[0]), Cm(Tr[1]), Sim->GetRoverRoadParams(), Rt) && Rt.bRoad)
+				{
+					++Planned;
+					const double Plan_s = Rt.OffInCm / (V * 0.3) + Rt.RoadCm / (V * Sim->GetRoadSpeedMul()) + Rt.OffOutCm / (V * 0.3);
+					bAlwaysQuicker &= Plan_s < (double)Straight(Cm(Tr[0]), Cm(Tr[1])) / (V * 0.3);
+				}
+			}
+			Expect(Planned == 3 && bAlwaysQuicker, TEXT("X8 every planned road trip is strictly quicker than crawling the straight line (the planner's cost is the time, M = 5333)"));
+		}
+
+		// --- X9. R3: a rover never destroys its load. ---
+		{
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			FSimRover Rv = MakeRover(FVector(26000.0, -800.0, 0.0));
+			for (int32 K = 0; K < 3000 && Rv.Phase < 2; ++K) { RoverStep(Rv, 1.f); }
+			const double Cargo = Rv.CargoKg;
+			const double InFlight = SolidTotal(NStruct) + Cargo;
+			Expect(Rv.Phase == 2 && Near(Cargo, 1000.0, 1e-3), FString::Printf(TEXT("X9 a loaded rover heads for the store with %.0f kg"), Cargo));
+			// Forced to charge mid-delivery: the brains call ReturnHaulCargo, then abandon the task.
+			Sim->ReturnHaulCargo(Rv.Board.Id, NStruct, Cargo);
+			Sim->AbandonTask(Rv.Board.Id);
+			const FRHTask Back = FindTaskBy(ForgeId, StockId);
+			Expect(Near(SolidTotal(NStruct), InFlight, 1e-6) && Near(OutKg(ForgeId, NStruct), 1200.0, 1e-6) && Back.Id == Rv.Board.Id && !Back.ClaimedBy.IsValid(),
+				FString::Printf(TEXT("X9 forced to charge mid-delivery: the colony's Struct is %.6f before and %.6f after (to 1e-6), the Forge holds 1,200 again and the task is open for the next rover"), InFlight, SolidTotal(NStruct)));
+
+			// The destination demolished mid-trip goes through the EXISTING Lander redirect (RemoveBuilding, :8448-8454),
+			// not through ReturnHaulCargo: the task's To becomes the Lander, and the arrival credits the Lander's InputKg.
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			FSimRover Rw = MakeRover(FVector(26000.0, -800.0, 0.0));
+			for (int32 K = 0; K < 3000 && Rw.Phase < 2; ++K) { RoverStep(Rw, 1.f); }
+			for (int32 K = 0; K < 100; ++K) { RoverStep(Rw, 1.f); }
+			FRHCommand Dem;
+			Dem.Verb = FName("Demolish");
+			Dem.Target = FName("Building");
+			Dem.Value = (double)StockId;
+			Sim->EnqueueCommand(Dem);
+			Land();
+			const FRHTask Redirected = FindTaskBy(ForgeId, 0);
+			const double LanderIn0 = InKg(LanderId, NStruct), LanderOut0 = OutKg(LanderId, NStruct);
+			bool bDone = false;
+			for (int32 K = 0; K < 8000 && !bDone; ++K) { bDone = RoverStep(Rw, 1.f); }
+			Expect(Rw.Phase == 2 || bDone, TEXT("X9 the demolish landed while the rover was loaded"));
+			Expect(FindB(StockId) == nullptr && Redirected.To.BuildingId == LanderId && bDone && Near(InKg(LanderId, NStruct) - LanderIn0, 1000.0, 1e-6) && Near(OutKg(LanderId, NStruct) - LanderOut0, 0.0, 1e-9),
+				FString::Printf(TEXT("X9 the store demolished mid-trip: the task's To was redirected to the Lander (#%d), the rover arrived and the Lander's InputKg rose by %.0f kg (the existing path), its OutputKg by %.0f"), Redirected.To.BuildingId, InKg(LanderId, NStruct) - LanderIn0, OutKg(LanderId, NStruct) - LanderOut0));
+
+			// The guard: the task is gone altogether (near-unreachable today). The rover's load goes to the Lander instead of vanishing.
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			FSimRover Rg = MakeRover(FVector(26000.0, -800.0, 0.0));
+			for (int32 K = 0; K < 3000 && Rg.Phase < 2; ++K) { RoverStep(Rg, 1.f); }
+			const double Total0 = SolidTotal(NStruct) + Rg.CargoKg;
+			Sim->CompleteTask(Rg.Board.Id); // the task vanishes under the rover
+			const double LanderOut1 = OutKg(LanderId, NStruct);
+			bool bDoneG = false;
+			for (int32 K = 0; K < 8000 && !bDoneG; ++K) { bDoneG = RoverStep(Rg, 1.f); }
+			Expect(bDoneG && Near(OutKg(LanderId, NStruct) - LanderOut1, 1000.0, 1e-6) && Near(SolidTotal(NStruct), Total0, 1e-6),
+				FString::Printf(TEXT("X9 the task gone when it arrives: the %.0f kg goes to the Lander's stores (OutputKg), Struct %.3f -> %.3f"), OutKg(LanderId, NStruct) - LanderOut1, Total0, SolidTotal(NStruct)));
+		}
+
+		// --- X10. Road demolish (C5): a real order, 50% salvage, a gone edge refused, the cache keys bumped. ---
+		{
+			LoadWorld();
+			const double SalvageFrac = DefsSub->GetConfigTableScalar(FName("SalvageFraction"), 0.5);
+			const auto DemolishCmd = [](int32 EdgeId) { FRHCommand C; C.Verb = FName("DemolishRoad"); C.Value = (double)EdgeId; return C; };
+			const int32 Standing = EdgeNear(20000.0, -2000.0);
+			const FRHRoadEdge* E0 = Graph().FindEdge(Standing);
+			const double Bill = E0 ? (double)E0->LengthCm / 100.0 * Sim->GetRoadStructKgPerMeter() : 0.0;
+			const double Out0 = OutKg(LanderId, NStruct);
+			const int32 Built0 = Graph().BuiltEdgeCount;
+			const uint32 BuiltV0 = Graph().BuiltVersion;
+			Sim->EnqueueCommand(DemolishCmd(Standing));
+			Land();
+			Expect(E0 && Near(SalvageFrac, 0.5, 1e-12) && Graph().FindEdge(Standing) == nullptr && Graph().BuiltEdgeCount == Built0 - 1 && Graph().BuiltVersion > BuiltV0 && Near(OutKg(LanderId, NStruct) - Out0, Bill * 0.5, 1e-9) && Rejects.Num() == 0,
+				FString::Printf(TEXT("X10 DemolishRoad on a standing edge (a %.0f kg bill): it is gone, the built set is %d -> %d, BuiltVersion bumped %u -> %u, and %.2f kg (50%%) of Struct is back at the Lander"), Bill, Built0, Graph().BuiltEdgeCount, BuiltV0, Graph().BuiltVersion, OutKg(LanderId, NStruct) - Out0));
+			// An edge still being built: the whole bill back, its labour task gone, the built set untouched.
+			const TArray<int32> Planned = Sim->Debug_LayRoad(FVector(40000.0, -6000.0, 0.0), FVector(48000.0, -6000.0, 0.0), false);
+			int32 BuildTasks0 = 0;
+			for (const FRHTask& Tk : Sim->GetTasks()) { BuildTasks0 += (Tk.Type == ERHTaskType::Build && Tk.To.RoadEdgeId > 0) ? 1 : 0; }
+			const int32 Open = Planned.Num() > 0 ? Planned[0] : 0;
+			const FRHRoadEdge* E1 = Graph().FindEdge(Open);
+			const double Bill1 = E1 ? (double)E1->LengthCm / 100.0 * Sim->GetRoadStructKgPerMeter() : 0.0;
+			const double Out1 = OutKg(LanderId, NStruct);
+			const uint32 BuiltV1 = Graph().BuiltVersion;
+			Sim->EnqueueCommand(DemolishCmd(Open));
+			Land();
+			int32 BuildTasks1 = 0, OnGone = 0;
+			for (const FRHTask& Tk : Sim->GetTasks()) { BuildTasks1 += (Tk.Type == ERHTaskType::Build && Tk.To.RoadEdgeId > 0) ? 1 : 0; OnGone += (Tk.To.RoadEdgeId == Open) ? 1 : 0; }
+			Expect(Open != 0 && !Graph().FindEdge(Open) && BuildTasks1 == BuildTasks0 - 1 && OnGone == 0 && Graph().BuiltVersion == BuiltV1 && Near(OutKg(LanderId, NStruct) - Out1, Bill1, 1e-9),
+				FString::Printf(TEXT("X10 DemolishRoad on an unbuilt edge: its Build task is gone (%d -> %d), the whole %.0f kg bill is back, the built road set and BuiltVersion are untouched"), BuildTasks0, BuildTasks1, OutKg(LanderId, NStruct) - Out1));
+			// A gone edge is refused with a reason (the same order twice).
+			Sim->EnqueueCommand(DemolishCmd(Standing));
+			Land();
+			Expect(LastReject().Contains(TEXT("already gone")), FString::Printf(TEXT("X10 ordering an edge that is gone is refused with a reason (%s)"), *LastReject()));
+			Sim->EnqueueCommand(DemolishCmd(999999));
+			Land();
+			Expect(LastReject().Contains(TEXT("already gone")), TEXT("X10 an edge that never existed is refused the same way"));
+		}
+
+		// --- X11. Commute distances: hand-computed integers, the planner as the oracle, symmetric, deterministic. ---
+		{
+			LoadWorld();
+			const FIntPoint A(-2000, -2000), B(30000, -2000);
+			const int64 AB = Sim->GetCommuteDistanceCm(0, A, 0, B);
+			Expect(AB == 8000 && Sim->GetCommuteDistanceCm(0, B, 0, A) == 8000,
+				FString::Printf(TEXT("X11 the spine end to end: 32,000 cm of road at 4x is (4,000 x 0 + 1,000 x 32,000 + 4,000 x 0 + 2,000) / 4,000 = 8000 cm; got %lld and %lld the other way"), AB, Sim->GetCommuteDistanceCm(0, B, 0, A)));
+			Expect(Sim->GetCommuteDistanceCm(0, FIntPoint(-2000, 1000), 0, B) == 11000 && Sim->GetCommuteDistanceCm(0, FIntPoint(-2000, 1000), 0, FIntPoint(30000, -5000)) == 14000,
+				TEXT("X11 3,000 cm off the road at one end adds 3,000 (11000), at both ends 6,000 (14000): off-road cm count one for one"));
+			Expect(Sim->GetCommuteDistanceCm(0, A, 0, FIntPoint(-1000, -2000)) == 1000 && Sim->GetCommuteDistanceCm(0, A, 0, A) == 0,
+				TEXT("X11 a trip the road cannot shorten is the straight line (1000), and staying put is 0"));
+			Expect(Sim->GetCommuteDistanceCm(0, FIntPoint(100000, 0), 0, FIntPoint(100000, 30000)) == 30000,
+				TEXT("X11 far from every road: the straight line, 30,000 cm"));
+			const FIntPoint ShaftCm(FMath::RoundToInt(Sim->GetShaftHeadCm().X), FMath::RoundToInt(Sim->GetShaftHeadCm().Y));
+			Expect(ShaftCm == FIntPoint(3000, 3000), FString::Printf(TEXT("X11 the shaft head stands at (%d, %d) cm"), ShaftCm.X, ShaftCm.Y));
+			const int64 FloorToSurface = Sim->GetCommuteDistanceCm(-2, FIntPoint(0, 0), 0, B);
+			Expect(FloorToSurface == 12000 + Oracle(ShaftCm, B) && Sim->GetCommuteDistanceCm(0, B, -2, FIntPoint(5, 5)) == FloorToSurface && FloorToSurface < 12000 + Straight(ShaftCm, B),
+				FString::Printf(TEXT("X11 floor -2 to the surface: 2 floors x 6,000 + the surface leg from the shaft head = %lld (the planner says %lld), the same both ways, and the road helps"), FloorToSurface, 12000 + Oracle(ShaftCm, B)));
+			Expect(Sim->GetCommuteDistanceCm(-1, FIntPoint(9, 9), -2, FIntPoint(7, 7)) == 6000 && Sim->GetCommuteDistanceCm(-2, FIntPoint::ZeroValue, -2, FIntPoint(1, 1)) == 0 && Sim->GetCommuteDistanceCm(-2, FIntPoint::ZeroValue, -1, FIntPoint::ZeroValue) == 6000,
+				TEXT("X11 floor to floor is |difference| x 6,000 (the surface position is ignored); the same floor is 0"));
+			// A second network apart from the first: a trip between them cannot ride a road.
+			Sim->Debug_LayRoad(FVector(60000.0, 60000.0, 0.0), FVector(70000.0, 60000.0, 0.0), true);
+			const FIntPoint P1(60000, 60000), P2(70000, 60000);
+			Expect(Sim->GetCommuteDistanceCm(0, P1, 0, P2) == 2500 && Sim->GetCommuteDistanceCm(0, A, 0, P2) == Straight(A, P2) && Sim->GetCommuteDistanceCm(0, A, 0, P2) == Oracle(A, P2),
+				FString::Printf(TEXT("X11 inside the new network: 10,000 cm at 4x = 2500; between the two networks (disconnected): the straight line, %lld cm"), Sim->GetCommuteDistanceCm(0, A, 0, P2)));
+			// Deterministic: the same fifteen pairs from a cold memo, and the memo ran fewer Dijkstras than there were queries.
+			const FIntPoint Pts[] = { A, B, FIntPoint(-2000, 1000), FIntPoint(30000, -5000), FIntPoint(1000, -1500), FIntPoint(12000, 700), FIntPoint(24000, -2600), P1, P2, ShaftCm, FIntPoint(61000, 3000) };
+			const auto Digest = [&]() -> uint32
+			{
+				uint32 Hd = 0;
+				for (int32 i = 0; i < UE_ARRAY_COUNT(Pts); ++i)
+				{
+					for (int32 j = 0; j < UE_ARRAY_COUNT(Pts); ++j)
+					{
+						const int64 D = Sim->GetCommuteDistanceCm(0, Pts[i], 0, Pts[j]);
+						Hd = FCrc::MemCrc32(&D, 8, Hd);
+					}
+				}
+				return Hd;
+			};
+			bool bOracle = true;
+			for (int32 i = 0; i < UE_ARRAY_COUNT(Pts); ++i) { for (int32 j = 0; j < UE_ARRAY_COUNT(Pts); ++j) { bOracle &= Sim->GetCommuteDistanceCm(0, Pts[i], 0, Pts[j]) == Oracle(Pts[i], Pts[j]); } }
+			const uint32 D1 = Digest();
+			Sim->Debug_ReroutePosition();
+			const int32 Runs0 = Sim->GetCommuteDijkstraRuns();
+			const uint32 D2 = Digest();
+			const int32 Runs1 = Sim->GetCommuteDijkstraRuns();
+			Expect(bOracle && D1 == D2 && Runs1 - Runs0 < UE_ARRAY_COUNT(Pts) * UE_ARRAY_COUNT(Pts) / 2,
+				FString::Printf(TEXT("X11 all %d pairs equal the planner's answer, the same digest %08x from a cold memo, and the memo ran %d Dijkstras for them (not one a pair)"), (int32)(UE_ARRAY_COUNT(Pts) * UE_ARRAY_COUNT(Pts)), D2, Runs1 - Runs0));
+			// The same network laid in two orders: the same distances (node Ids differ, the answers do not).
+			uint32 OrderDigest[2] = { 0, 0 };
+			for (int32 Order = 0; Order < 2; ++Order)
+			{
+				LoadWorld();
+				for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
+				const FVector Ra(-2000.0, -2000.0, 0.0), Rb(30000.0, -2000.0, 0.0), Rc(10000.0, -6000.0, 0.0), Rd(10000.0, 4000.0, 0.0);
+				if (Order == 0) { Sim->Debug_LayRoad(Ra, Rb, true); Sim->Debug_LayRoad(Rc, Rd, true); }
+				else { Sim->Debug_LayRoad(Rc, Rd, true); Sim->Debug_LayRoad(Ra, Rb, true); }
+				OrderDigest[Order] = Digest();
+			}
+			Expect(OrderDigest[0] == OrderDigest[1], FString::Printf(TEXT("X11 the same two crossing roads laid in either order give the same distances (digest %08x vs %08x)"), OrderDigest[0], OrderDigest[1]));
+		}
+
+		// --- X12. Who commutes where: the flow matrix, with its Unzoned row and column. ---
+		{
+			LoadWorld();
+			const int32 Housed = Sim->Debug_AddColonists(8);
+			CommuteOpen();
+			Place(TEXT("Pylon"), 60000.0, 3000.0);
+			const int32 HabA = Place(TEXT("Stockpile"), 61000.0, 3000.0); // stands in for a surface habitat: a building with an anchor
+			const int32 HabB = Place(TEXT("Stockpile"), -30000.0, 30000.0); // unzoned
+			const int32 Works = Place(TEXT("Stockpile"), 30000.0, 30000.0);  // unzoned
+			FRHCommand PaintFloor, PaintSurface;
+			PaintFloor.Verb = FName("PaintDistrict"); PaintFloor.Target = FName("Homes"); PaintFloor.Level = -1;
+			PaintSurface.Verb = FName("PaintDistrict"); PaintSurface.Target = FName("Industry");
+			PaintSurface.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(59, 2)); PaintSurface.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(62, 4));
+			Sim->EnqueueCommand(PaintFloor);
+			Sim->EnqueueCommand(PaintSurface);
+			Land();
+			const int32 HomesId = Sim->GetDistrictOfFloor(-1), IndustryId = Sim->GetDistrictOfBuilding(HabA);
+			Expect(Housed == 8 && Sim->GetDistricts().Num() == 2 && HomesId != 0 && IndustryId != 0 && HomesId != IndustryId && Sim->GetDistrictOfFloor(-2) == 0 && Sim->GetDistrictOfBuilding(HabB) == 0 && Sim->GetDistrictOfBuilding(Works) == 0,
+				FString::Printf(TEXT("X12 setup: 8 colonists, floor -1 is Homes #%d, a surface block is Industry #%d around the stand-in habitat, floor -2 and two buildings are unzoned"), HomesId, IndustryId));
+			Sim->Debug_RefreshJobs();
+			Sim->Debug_ClearColonistStations();
+			Sim->Debug_SetColonistHome(2, HabA, 0);
+			Sim->Debug_SetColonistHome(4, HabA, 0);
+			Sim->Debug_SetColonistHome(5, HabB, 0);
+			Sim->Debug_SetColonistHome(6, 0, -2);
+			Sim->Debug_SetColonistStation(1, FIntVector(-1, 5, 0));            // floor cell, same floor as home
+			Sim->Debug_SetColonistStation(2, FIntVector(-1, 7, 0));            // hab home, floor seat
+			Sim->Debug_SetColonistStation(3, FIntVector(0, INDEX_NONE, HabA)); // floor home, a module on the surface
+			Sim->Debug_SetColonistStation(4, FIntVector(0, 0, HabA));          // hab home, a bay seat in the same building
+			Sim->Debug_SetColonistStation(5, FIntVector(-1, 3, 0));            // an unzoned home
+			Sim->Debug_SetColonistStation(6, FIntVector(0, INDEX_NONE, HabA)); // an unzoned floor home
+			Sim->Debug_SetColonistStation(7, FIntVector(0, INDEX_NONE, Works)); // an unzoned seat
+			const URHSimWorldSubsystem::FRHCommuteSummary S = Sim->GetCommuteSummary();
+			TArray<URHSimWorldSubsystem::FRHCommuteFlow> Flows;
+			Sim->GetCommuteFlows(Flows);
+			const auto Cell = [&Flows](int32 HomeId, int32 WorkId) { for (const URHSimWorldSubsystem::FRHCommuteFlow& F : Flows) { if (F.HomeDistrictId == HomeId && F.WorkDistrictId == WorkId) { return F.Count; } } return 0; };
+			TArray<int32> Flat;
+			int32 Dim = 0;
+			Sim->GetCommuteFlowMatrix(Flat, Dim);
+			int32 Sum = 0;
+			for (const int32 V : Flat) { Sum += V; }
+			Expect(S.Employed == 7 && S.Pop == 8 && Dim == 3 && Flat.Num() == 9 && Sum == 7 && Flows.Num() == 7,
+				FString::Printf(TEXT("X12 7 of 8 are employed and measured (the unemployed one is not): a %d x %d matrix holding %d trips in %d cells"), Dim, Dim, Sum, Flows.Num()));
+			Expect(Cell(HomesId, HomesId) == 1 && Cell(IndustryId, HomesId) == 1 && Cell(HomesId, IndustryId) == 1 && Cell(IndustryId, IndustryId) == 1 && Cell(0, HomesId) == 1 && Cell(0, IndustryId) == 1 && Cell(HomesId, 0) == 1,
+				TEXT("X12 floor home + floor seat; hab home + floor seat; floor home + module seat; hab home + bay seat; unzoned hab home; unzoned floor home; unzoned seat: each in its own cell, the Unzoned row and column counted, never exempt"));
+			Expect(Sim->GetColonistCommuteCm(1) == 0 && Sim->GetColonistCommuteCm(4) == 0 && Sim->GetColonistCommuteCm(8) == -1 && Sim->GetColonistCommuteCm(2) > 0 && Sim->GetColonistCommuteCm(7) > 0,
+				FString::Printf(TEXT("X12 a trip inside one anchor is 0 (#1 %lld, #4 %lld) - the distance, not the district, decides; #8 has no workplace (%lld); #2 rides %lld cm, #7 %lld cm"), Sim->GetColonistCommuteCm(1), Sim->GetColonistCommuteCm(4), Sim->GetColonistCommuteCm(8), Sim->GetColonistCommuteCm(2), Sim->GetColonistCommuteCm(7)));
+			const int64 Want2 = Sim->GetCommuteDistanceCm(0, Cm(FindB(HabA)->LocationCm), -1, FIntPoint::ZeroValue);
+			const int64 Want7 = Sim->GetCommuteDistanceCm(-1, FIntPoint::ZeroValue, 0, Cm(FindB(Works)->LocationCm));
+			Expect(Sim->GetColonistCommuteCm(2) == Want2 && Sim->GetColonistCommuteCm(7) == Want7 && Want2 > 6000 && Sim->IsLongCommuter(2) == (Want2 > 30000),
+				FString::Printf(TEXT("X12 colonist #2 (stand-in habitat, floor -1 seat) commutes %lld cm = 6,000 + the surface leg; #7 (floor -1 to the unzoned yard) %lld"), Want2, Want7));
+		}
+
+		// --- X13. The caches: every key input bumps and recomputes; a reshuffle of seats costs no Dijkstra; a road that finishes (or goes) is seen. ---
+		{
+			LoadWorld();
+			Sim->Debug_AddColonists(8);
+			CommuteOpen();
+			const int32 Far = Place(TEXT("Stockpile"), 61000.0, 3000.0);
+			Sim->Debug_RefreshJobs();
+			Sim->Debug_ClearColonistStations();
+			Sim->Debug_SetColonistHome(1, Far, 0);
+			Sim->Debug_SetColonistStation(1, FIntVector(-1, 2, 0));
+			const int32 R0 = Sim->GetCommuteFlowRebuilds();
+			const URHSimWorldSubsystem::FRHCommuteSummary S0 = Sim->GetCommuteSummary();
+			const double Pen0 = Sim->GetColonyHope().CommutePenalty;
+			const int32 Dij0 = Sim->GetCommuteDijkstraRuns();
+			Expect(S0.Employed == 1 && S0.LongCommuters == 1 && Near(Pen0, 4.0 * FMath::Min(1.0, 2.0 * 1.0 / 8.0), 1e-12) && Sim->GetCommuteFlowRebuilds() == R0 + 1 && Dij0 >= 1,
+				FString::Printf(TEXT("X13 a far habitat (%lld cm from its floor seat): 1 long commuter of 8, penalty %.4f = 4 x min(1, 2 x 1 / 8), one cold build and %d Dijkstra(s)"), Sim->GetColonistCommuteCm(1), Pen0, Dij0));
+			Sim->GetCommuteSummary();
+			Sim->GetColonyHope();
+			Expect(Sim->GetCommuteFlowRebuilds() == R0 + 1 && Sim->Debug_CommuteCachesFresh(), TEXT("X13 an unchanged read (and a Hope read) returns the cache: no rebuild"));
+			const auto Rebuilt = [&](const TCHAR* What, auto&& Poke)
+			{
+				const int32 Before = Sim->GetCommuteFlowRebuilds();
+				Poke();
+				Sim->GetCommuteSummary();
+				Expect(Sim->GetCommuteFlowRebuilds() == Before + 1 && Sim->Debug_CommuteCachesFresh(), FString::Printf(TEXT("X13 %s: the flows are rebuilt (once) and the cache stays fresh"), What));
+			};
+			Rebuilt(TEXT("the roster changes (a rehome)"), [&]() { Sim->Debug_SetColonistHome(1, Far, 0); });
+			Rebuilt(TEXT("the seat assignment changes (JobsVersion)"), [&]() { Sim->Debug_BumpJobsVersion(); });
+			Expect(Sim->GetCommuteDijkstraRuns() == Dij0, FString::Printf(TEXT("X13 and the reshuffle ran NO Dijkstra: the position memo is independent of the job assignment (%d runs, still %d)"), Sim->GetCommuteDijkstraRuns(), Dij0));
+			Rebuilt(TEXT("a district is painted, erased or renamed (DistrictsVersion)"), [&]() { Sim->Debug_BumpDistrictsVersion(); });
+			Rebuilt(TEXT("a building stands"), [&]() { Place(TEXT("Stockpile"), 45000.0, 20000.0); });
+			Rebuilt(TEXT("the shaft's zoning changes (a cell is re-zoned)"), [&]() { Sim->DesignateRoom(-2, 150, FName("Garden"), Rz); });
+			Rebuilt(TEXT("the tuning changes"), [&]() { CommuteOpen(); });
+			// Roads. An unbuilt shortcut changes nothing the flows see; finishing it changes the answer; taking it up changes it back.
+			const int32 RebuildsA = Sim->GetCommuteFlowRebuilds();
+			const TArray<int32> Shortcut = Sim->Debug_LayRoad(FVector(2000.0, 3000.0, 0.0), FVector(61000.0, 3000.0, 0.0), false);
+			Sim->GetCommuteSummary();
+			Expect(Shortcut.Num() >= 2 && Sim->GetCommuteFlowRebuilds() == RebuildsA && Sim->GetCommuteSummary().LongCommuters == 1,
+				FString::Printf(TEXT("X13 an unbuilt %d-edge shortcut is no road yet: no rebuild, still 1 long commuter"), Shortcut.Num()));
+			const double HopeBefore = Sim->GetColonyHope().Total;
+			const int32 DijA = Sim->GetCommuteDijkstraRuns();
+			Sim->Debug_FinishRoads(); // a road finishes and nothing else changes
+			const URHSimWorldSubsystem::FRHCommuteSummary SFin = Sim->GetCommuteSummary();
+			const double HopeAfter = Sim->GetColonyHope().Total;
+			Expect(Sim->GetCommuteFlowRebuilds() == RebuildsA + 1 && SFin.LongCommuters == 0 && Near(Sim->GetColonyHope().CommutePenalty, 0.0, 0.0) && Near(HopeAfter - HopeBefore, 1.0, 1e-9) && Sim->GetCommuteDijkstraRuns() > DijA && Sim->GetColonistCommuteCm(1) < 30000,
+				FString::Printf(TEXT("X13 the shortcut FINISHES, nothing else changes: the key sees it (BuiltVersion), the commute falls to %lld cm, the long count to 0 and Hope rises by %.6f (the penalty it was costing)"), Sim->GetColonistCommuteCm(1), HopeAfter - HopeBefore));
+			const int32 MidEdge = Shortcut.Num() > 0 ? Shortcut[Shortcut.Num() / 2] : 0;
+			Sim->Debug_RemoveRoadEdge(MidEdge); // the middle of the shortcut: its two halves no longer meet
+			Expect(Sim->GetCommuteSummary().LongCommuters == 1 && Sim->GetCommuteFlowRebuilds() == RebuildsA + 2 && Sim->Debug_CommuteCachesFresh(),
+				TEXT("X13 an edge in the middle of the shortcut is taken up: the next read sees it - 1 long commuter again"));
+		}
+
+		// --- X14. The population ramp: 59 / 60 / 110 / 160 / 161, the Hope term, and ONE work hook per job function. ---
+		{
+			LoadWorld();
+			Sim->Debug_SetWorkstationFabBonus(0.1);
+			SetCommute(60.0, 160.0, 5000.0); // the shipped ramp; a long trip is 50 m so floor -1 to floor -2 (60 m) is long
+			using FHope = URHSimWorldSubsystem::FRHHopeBreakdown;
+			const auto TwinHope = [&]() -> double
+			{
+				SetCommute(1.0e9, 2.0e9, 5000.0);
+				const double Total = Sim->GetColonyHope().Total;
+				SetCommute(60.0, 160.0, 5000.0);
+				return Total;
+			};
+			const int32 R0 = Sim->GetCommuteFlowRebuilds();
+			Sim->Debug_AddColonists(59);
+			Sim->Debug_RefreshJobs();
+			const FHope H59 = Sim->GetColonyHope();
+			Expect(Sim->GetPopulation() == 59 && Sim->GetCommuteRamp() == 0.0 && Sim->GetCommuteSummary().Ramp == 0.0 && Sim->GetCommuteSummary().LongCommuters == 0 && H59.CommutePenalty == 0.0 && Sim->GetCommuteFlowRebuilds() == R0,
+				FString::Printf(TEXT("X14 59 people: ramp %.3f, the zero summary, penalty +0.0, and not one cache touched (%d rebuilds) by the Hope read or RefreshJobs"), Sim->GetCommuteRamp(), Sim->GetCommuteFlowRebuilds() - R0));
+			Sim->Debug_AddColonists(1);
+			Sim->Debug_RefreshJobs();
+			Expect(Sim->GetPopulation() == 60 && Sim->GetCommuteRamp() == 0.0 && Sim->GetCommuteFlowRebuilds() == R0 && Sim->GetColonyHope().CommutePenalty == 0.0 && FMath::Abs(Sim->GetColonyHope().Total - TwinHope()) == 0.0,
+				TEXT("X14 60 people: still ramp 0 (the ramp starts above 60); Hope bit-identical to the closed twin"));
+			Sim->Debug_AddColonists(50);
+			Sim->Debug_RefreshJobs();
+			const FHope H110 = Sim->GetColonyHope();
+			const URHSimWorldSubsystem::FRHCommuteSummary S110 = Sim->GetCommuteSummary();
+			const double Want110 = 0.5 * 4.0 * FMath::Min(1.0, 2.0 * 30.0 / 110.0);
+			Expect(Sim->GetPopulation() == 110 && Near(S110.Ramp, 0.5, 1e-12) && S110.Employed == 30 && S110.LongCommuters == 30 && Near(S110.WorkMul, 0.925, 1e-12) && Near(H110.CommutePenalty, Want110, 1e-12) && Near(TwinHope() - H110.Total, Want110, 1e-9),
+				FString::Printf(TEXT("X14 110 people: ramp %.3f, 30 of 30 workers long, penalty %.6f = 0.5 x 4 x min(1, 2 x 30 / 110), work x%.4f; Hope is %.6f under its closed twin"), S110.Ramp, H110.CommutePenalty, S110.WorkMul, TwinHope() - H110.Total));
+			Expect(Near(Sim->GetLabYieldSeatSum(), 10.0 * 0.925, 1e-9) && Near(Sim->GetWorkstationYieldSeatSum(), 10.0 * 0.925, 1e-9),
+				FString::Printf(TEXT("X14 at 110 the seat sums are cut to 1 - 0.5 x 0.15 = 0.925 a seat: Lab %.4f, Workstation %.4f (of 10 each)"), Sim->GetLabYieldSeatSum(), Sim->GetWorkstationYieldSeatSum()));
+			Sim->Debug_AddColonists(50);
+			Sim->Debug_RefreshJobs();
+			const URHSimWorldSubsystem::FRHCommuteSummary S160 = Sim->GetCommuteSummary();
+			const FHope H160 = Sim->GetColonyHope();
+			Expect(Sim->GetPopulation() == 160 && S160.Ramp == 1.0 && Near(H160.CommutePenalty, 4.0 * FMath::Min(1.0, 2.0 * 30.0 / 160.0), 1e-12) && Near(S160.WorkMul, 0.85, 1e-12),
+				FString::Printf(TEXT("X14 160 people: ramp %.3f (full), penalty %.6f = 4 x min(1, 2 x 30 / 160), work x%.2f"), S160.Ramp, H160.CommutePenalty, S160.WorkMul));
+			// R2: at the full ramp, every function sees exactly 0.85 of its twin - Labs are NOT cut twice.
+			SetCommute(1.0e9, 2.0e9, 5000.0);
+			Sim->Debug_RefreshJobs();
+			const double LabSumT = Sim->GetLabYieldSeatSum(), WsSumT = Sim->GetWorkstationYieldSeatSum();
+			const double LabSkillT = Sim->GetCrewSkillMul(FName("Lab")), GardenSkillT = Sim->GetCrewSkillMul(FName("Garden")), WsSkillT = Sim->GetCrewSkillMul(FName("Workstation"));
+			const double FabSeatT = (Sim->GetWorkstationFabMul() - 1.0) / 0.1;
+			SetCommute(60.0, 160.0, 5000.0);
+			Sim->Debug_RefreshJobs();
+			const double LabDiscovery = Sim->GetLabYieldSeatSum() * Sim->GetCrewSkillMul(FName("Lab")), LabDiscoveryT = LabSumT * LabSkillT;
+			Expect(Near(LabSumT, 10.0, 1e-12) && Near(Sim->GetLabYieldSeatSum(), 0.85 * LabSumT, 1e-12) && Sim->GetCrewSkillMul(FName("Lab")) == LabSkillT && Near(LabDiscovery, 0.85 * LabDiscoveryT, 1e-12),
+				FString::Printf(TEXT("X14 R2 Labs: seat sum %.4f = 0.85 x %.4f, the skill average is NOT cut (%.6f = %.6f), so discovery counts %.4f = exactly 0.85 x %.4f - never 0.85 squared"), Sim->GetLabYieldSeatSum(), LabSumT, Sim->GetCrewSkillMul(FName("Lab")), LabSkillT, LabDiscovery, LabDiscoveryT));
+			Expect(Near(Sim->GetWorkstationYieldSeatSum(), 0.85 * WsSumT, 1e-12) && Near((Sim->GetWorkstationFabMul() - 1.0) / 0.1, 0.85 * FabSeatT, 1e-12) && Sim->GetCrewSkillMul(FName("Workstation")) == WsSkillT,
+				FString::Printf(TEXT("X14 R2 Workstations: seat sum %.4f = 0.85 x %.4f, the fabrication multiplier's seat term %.4f = 0.85 x %.4f, the skill average untouched"), Sim->GetWorkstationYieldSeatSum(), WsSumT, (Sim->GetWorkstationFabMul() - 1.0) / 0.1, FabSeatT));
+			Expect(Near(Sim->GetCrewSkillMul(FName("Garden")), 0.85 * GardenSkillT, 1e-12) && Near(GardenSkillT, 1.0, 1e-12),
+				FString::Printf(TEXT("X14 R2 Garden: the skill average %.6f = 0.85 x %.6f (the Garden hook is the skill average alone)"), Sim->GetCrewSkillMul(FName("Garden")), GardenSkillT));
+			// One colonist rehomed on the same floor as their seat: no longer long; then everyone.
+			Sim->Debug_SetColonistHome(1, 0, -2);
+			Sim->Debug_RefreshJobs();
+			Expect(Sim->GetCommuteSummary().LongCommuters == 29 && Near(Sim->GetLabYieldSeatSum(), 9.0 * 0.85 + 1.0, 1e-12) && Near(Sim->GetColonyHope().CommutePenalty, 4.0 * FMath::Min(1.0, 2.0 * 29.0 / 160.0), 1e-12),
+				FString::Printf(TEXT("X14 rehoming one worker next to their seat: 29 long, Lab seat sum %.4f = 9 x 0.85 + 1, penalty %.6f"), Sim->GetLabYieldSeatSum(), Sim->GetColonyHope().CommutePenalty));
+			for (int32 Id = 2; Id <= 30; ++Id) { Sim->Debug_SetColonistHome(Id, 0, -2); }
+			Sim->Debug_RefreshJobs();
+			Expect(Sim->GetCommuteSummary().LongCommuters == 0 && Sim->GetColonyHope().CommutePenalty == 0.0 && Sim->GetLabYieldSeatSum() == LabSumT && Sim->GetWorkstationYieldSeatSum() == WsSumT && Sim->GetCrewSkillMul(FName("Garden")) == GardenSkillT
+				&& Sim->GetColonyHope().Total == TwinHope(),
+				TEXT("X14 everyone rehomed on their seat's floor: no long commuter, penalty +0.0, every sum and the Hope Total bit-identical to the closed twin"));
+			Sim->Debug_AddColonists(1);
+			Sim->Debug_RefreshJobs();
+			Expect(Sim->GetPopulation() == 161 && Sim->GetCommuteRamp() == 1.0 && Sim->GetCommuteSummary().Ramp == 1.0, TEXT("X14 161 people: the ramp is clamped at 1"));
+			// The alert: once, when the long share first reaches 10% (a runtime latch).
+			const int32 Alerts0 = Alerts.Num();
+			for (int32 Id = 1; Id <= 20; ++Id) { Sim->Debug_SetColonistHome(Id, 0, -1); }
+			Sim->Debug_RefreshJobs();
+			Land();
+			int32 CommuteAlerts = 0;
+			for (int32 i = Alerts0; i < Alerts.Num(); ++i) { CommuteAlerts += Alerts[i].Contains(TEXT("travel over")) && Alerts[i].Contains(TEXT("to work")) ? 1 : 0; }
+			Land();
+			int32 CommuteAlerts2 = 0;
+			for (int32 i = Alerts0; i < Alerts.Num(); ++i) { CommuteAlerts2 += Alerts[i].Contains(TEXT("travel over")) && Alerts[i].Contains(TEXT("to work")) ? 1 : 0; }
+			Expect(CommuteAlerts == 1 && CommuteAlerts2 == 1,
+				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
+		}
+
+		// --- X15. Save v40: no new field, a rover and its waiting aboard round-trip, a v39 save is refused. ---
+		{
+			LoadWorld();
+			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			FString Er;
+			Expect(Sim->SaveColony(TEXT("trafficsave1"), Er) && Sim->GetImportStock(NRoverRow) == 1, FString::Printf(TEXT("X15 saved a colony with a rover waiting aboard (%s)"), *Er));
+			const FString Path1 = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficsave1.sav");
+			TArray<uint8> Bytes;
+			uint32 Ver = 0;
+			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
+			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
+			Expect(bRead && Ver == 40, FString::Printf(TEXT("X15 the file says version %u (expect 40)"), Ver));
+			uint32 V39 = 39;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V39, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv39.sav")));
+			FString Le39;
+			const int32 PopBefore = Sim->GetPopulation();
+			Expect(!Sim->LoadColony(TEXT("trafficv39"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/40")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v39 save is refused and the live colony untouched (%s)"), *Le39));
+			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
+			FString Lerr;
+			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
+				FString::Printf(TEXT("X15 the load restores exactly one rover aboard (ImportStock[RC_R] = %d), none deployed (%s)"), Sim->GetImportStock(NRoverRow), *Lerr));
+			Sim->Debug_LayRoad(FVector(-2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			Land();
+			Expect(RoverCount() == 1 && Sim->GetImportStock(NRoverRow) == 0, TEXT("X15 and it lands the first step with a road, after the load"));
+
+			LoadWorld();
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_StepTaskBoard();
+			TArray<FRHRoverState> Before;
+			Sim->GetRoverStates(Before);
+			const FRHTask Ft0 = FindTaskBy(ForgeId, StockId);
+			Expect(Sim->SaveColony(TEXT("trafficsave2"), Er) && Ft0.bFreight && Before.Num() == 1, TEXT("X15 saved a colony with a deployed rover and a freight task on the board"));
+			Expect(Sim->LoadColony(TEXT("trafficsave2"), Lerr) && Lerr.IsEmpty(), FString::Printf(TEXT("X15 loaded it (%s)"), *Lerr));
+			TArray<FRHRoverState> After;
+			Sim->GetRoverStates(After);
+			const FRHTask Ft1 = FindTaskBy(ForgeId, StockId);
+			Expect(After.Num() == 1 && After[0].DefName == NRoverRow && After[0].PosCm.Equals(Before[0].PosCm, 0.01) && Near(After[0].ChargeFrac, Before[0].ChargeFrac, 1e-4) && Near(After[0].Wear, Before[0].Wear, 1e-4)
+				&& Ft1.Id == Ft0.Id && Near(Ft1.AmountKg, 1000.0, 1e-9) && !Ft1.bFreight && Sim->GetFreightTaskCount() == 0 && Sim->GetActiveRoverCount() == 0,
+				TEXT("X15 after the load: the rover is where it was, as charged and as worn; the task keeps its 1,000 kg but the freight flag (runtime, not saved) is clear until the board runs"));
+			Sim->Debug_StepTaskBoard();
+			Expect(Sim->GetFreightTaskCount() == 1 && FindTaskBy(ForgeId, StockId).bFreight && Sim->GetActiveRoverCount() == 1, TEXT("X15 the first board step re-derives it: freight again, one active rover"));
+		}
+
+		// --- X16. Era parity: an agent and an era run of the same colony - roads, two rovers, long commuters, the ramp crossing from 0 into (0, 1) mid-run. ---
+		{
+			LoadWorld();
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_SetWorkstationFabBonus(0.1);
+			SetCommute(60.0, 160.0, 5000.0);
+			Sim->Debug_AddColonists(50);
+			Sim->Debug_RefreshJobs();
+			FString Pe;
+			Expect(Sim->SaveColony(TEXT("trafficparity"), Pe) && RoverCount() == 2 && Sim->GetPopulation() == 50 && Sim->GetCommuteRamp() == 0.0,
+				FString::Printf(TEXT("X16 the colony: 50 people (ramp closed), two rovers, a road network; saved (%s)"), *Pe));
+			struct FLedger
+			{
+				double Hope = 0, Food = 0, Water = 0, Oxygen = 0, Struct = 0, LabSum = 0, WsSum = 0, Penalty = 0, Skill = 0;
+				int32 Pop = 0, Long = 0, Employed = 0, Rovers = 0;
+				double Ramp = 0;
+			};
+			const auto RunLeg = [&](bool bAgent, FLedger& OutStart, int32& OutSteps) -> FLedger
+			{
+				FString Le;
+				if (!Sim->LoadColony(TEXT("trafficparity"), Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("TRAFFIC: parity leg load failed: %s"), *Le); ++Fails; }
+				const auto Take = [&]() -> FLedger
+				{
+					FLedger L;
+					const URHSimWorldSubsystem::FRHCommuteSummary Cs = Sim->GetCommuteSummary();
+					L.Hope = Sim->GetHopeSmoothed(); L.Food = Sim->GetStock(NFood); L.Water = Sim->GetStock(NWater); L.Oxygen = Sim->GetStock(NOxygen); L.Struct = SolidTotal(NStruct);
+					L.LabSum = Sim->GetLabYieldSeatSum(); L.WsSum = Sim->GetWorkstationYieldSeatSum(); L.Penalty = Sim->GetColonyHope().CommutePenalty; L.Skill = Sim->GetCrewSkillMul(FName("Garden"));
+					L.Pop = Sim->GetPopulation(); L.Long = Cs.LongCommuters; L.Employed = Cs.Employed; L.Rovers = RoverCount(); L.Ramp = Cs.Ramp;
+					return L;
+				};
+				OutStart = Take();
+				OutSteps = 0;
+				const int32 PerHalf = bAgent ? 5 * (int32)(SolLen / (double)AgentDt) : 5 * (int32)(SolLen / EraDt);
+				for (int32 Half = 0; Half < 2; ++Half)
+				{
+					for (int32 K = 0; K < PerHalf; ++K)
+					{
+						if (bAgent) { Sim->Debug_AddFreshWater(500.0 * (double)AgentDt / SolLen); AgentStepOnce(); }
+						else { Sim->Debug_AddFreshWater(500.0 * EraDt / SolLen); Land(); }
+						++OutSteps;
+					}
+					if (Half == 0) { Sim->Debug_AddColonists(60); Sim->Debug_RefreshJobs(); }
+				}
+				return Take();
+			};
+			FLedger StartAgent, StartEra, EndAgent, EndEra;
+			int32 AgentSteps = 0, EraSteps = 0;
+			const double Wall0 = FPlatformTime::Seconds();
+			EndAgent = RunLeg(true, StartAgent, AgentSteps);
+			const double AgentWall = FPlatformTime::Seconds() - Wall0;
+			EndEra = RunLeg(false, StartEra, EraSteps);
+			const auto Within = [&Near](double Va, double Vb, double Frac) { return Near(Va, Vb, Frac * FMath::Max(FMath::Max(FMath::Abs(Va), FMath::Abs(Vb)), 1.0e-9)); };
+			Expect(StartAgent.Pop == StartEra.Pop && StartAgent.Long == StartEra.Long && StartAgent.Employed == StartEra.Employed && StartAgent.Ramp == StartEra.Ramp && StartAgent.Penalty == StartEra.Penalty && StartAgent.LabSum == StartEra.LabSum && StartAgent.Long == 0,
+				FString::Printf(TEXT("X16 at the split the two bands hold the same commute state: pop %d, ramp %.3f, employed %d, long %d, penalty %.6f, Lab seat sum %.4f"), StartAgent.Pop, StartAgent.Ramp, StartAgent.Employed, StartAgent.Long, StartAgent.Penalty, StartAgent.LabSum));
+			Expect(EndAgent.Pop == 110 && EndEra.Pop == 110 && EndAgent.Long == EndEra.Long && EndAgent.Long == 30 && EndAgent.Employed == EndEra.Employed && Near(EndAgent.Ramp, 0.5, 1e-12) && EndAgent.Ramp == EndEra.Ramp
+				&& EndAgent.Penalty == EndEra.Penalty && EndAgent.LabSum == EndEra.LabSum && EndAgent.WsSum == EndEra.WsSum && Within(EndAgent.Skill, EndEra.Skill, 0.05) && EndAgent.Rovers == 2 && EndEra.Rovers == 2 && EndAgent.Penalty > 1.0,
+				FString::Printf(TEXT("X16 after the ramp crossed into (0, 1) mid-run the two bands agree EXACTLY on the commute: ramp %.3f, %d long of %d, penalty %.6f vs %.6f, Lab seat sum %.4f vs %.4f, garden skill %.4f vs %.4f"),
+					EndAgent.Ramp, EndAgent.Long, EndAgent.Employed, EndAgent.Penalty, EndEra.Penalty, EndAgent.LabSum, EndEra.LabSum, EndAgent.Skill, EndEra.Skill));
+			Expect(Within(EndAgent.Hope, EndEra.Hope, 0.05) && Within(EndAgent.Food, EndEra.Food, 0.05) && Within(EndAgent.Water, EndEra.Water, 0.05) && Within(EndAgent.Oxygen, EndEra.Oxygen, 0.05),
+				FString::Printf(TEXT("X16 the 10-sol ledgers agree within 5%%: Hope %.3f / %.3f, Food %.1f / %.1f, Water %.1f / %.1f, Oxygen %.1f / %.1f (agent / era; %d agent steps in %.1f s, %d era steps; the headless agent band has no robots ticking, so the robot-fed ledger lines are the live paired run's)"),
+					EndAgent.Hope, EndEra.Hope, EndAgent.Food, EndEra.Food, EndAgent.Water, EndEra.Water, EndAgent.Oxygen, EndEra.Oxygen, AgentSteps, AgentWall, EraSteps));
+		}
+
+		Sim->OnCommandRejected.Remove(RejectH);
+		Sim->OnAlert.Remove(AlertH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== TRAFFIC TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// C1 self-test (living-city gate 1, 2026-10-18): THE SCALE SUITE. Stands up
 	// a big colony (a shaft to -5, ~1,000 carved cells zoned and furnished with
 	// bunks and benches, air and power held up each step, gardens on every
@@ -10669,6 +11648,167 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(HopeEmitMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope with the five floors and a surface network of %d bays with 100 odor emitters took %.3f ms (<= 0.5)"), Bays, HopeEmitMs));
 			Expect(BoundaryMs <= 25.0, FString::Printf(TEXT("budget: a sol-boundary era step (growth's start check over a %d-bay network and 5,400 colonists) took %.3f ms (<= 25)"), Bays, BoundaryMs));
 			Expect(AgentSurfaceMs <= 3.0, FString::Printf(TEXT("budget: an agent step with the surface network took %.3f ms (<= 3.0)"), AgentSurfaceMs));
+		}
+
+		// C6a: commuting at scale (the position memo of C4, independent of the job assignment). 5,000+ colonists, 20 districts
+		// (5 floors and 15 surface blocks), the 250-edge network. Every colonist is re-homed in a surface building and given a
+		// surface workplace (the harness hooks, as the -traffic suite's), so every one of them is measured over a real network:
+		// first with the 15 painted blocks' buildings as the anchors (the districts case), then with 500 habitats' worth of
+		// distinct anchors. Cold = the first read after a change (the position memo and the flows), flows only = a JobsVersion
+		// bump with a warm memo (a reshuffle of seats must cost no Dijkstra), warm = an unchanged read. 100 rover plans must stay
+		// inside the C4 robot-plan budget. Budgets are wall clock on a shared machine. `-scale`.
+		if (Table.Num() == UE_ARRAY_COUNT(Targets))
+		{
+			for (const FRHDistrict& Old : TArray<FRHDistrict>(Sim->GetDistricts()))
+			{
+				FRHCommand Erase;
+				Erase.Verb = FName("EraseDistrict");
+				Erase.Value = (double)Old.Id;
+				Sim->EnqueueCommand(Erase);
+			}
+			EraStepOnce();
+			const FName CvKinds[] = { FName("Homes"), FName("Industry"), FName("Farming"), FName("Research"), FName("Civic") };
+			for (int32 K = 0; K < 15; ++K)
+			{
+				const int32 CX = -45 + (K % 9) * 10, CY = 20 + (K / 9) * 10;
+				FRHCommand Order;
+				Order.Verb = FName("PaintDistrict");
+				Order.Target = CvKinds[K % 5];
+				Order.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(CX - 1, CY - 1));
+				Order.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(CX + 2, CY + 1));
+				Sim->EnqueueCommand(Order);
+			}
+			for (int32 L = 1; L <= Floors; ++L)
+			{
+				FRHCommand Order;
+				Order.Verb = FName("PaintDistrict");
+				Order.Target = CvKinds[L % 5];
+				Order.Level = -L;
+				Sim->EnqueueCommand(Order);
+			}
+			EraStepOnce();
+			TArray<int32> BlockBuildings; // the Stockpile in each painted block
+			for (int32 K = 0; K < 15; ++K)
+			{
+				const FVector At = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(-45 + (K % 9) * 10, 20 + (K / 9) * 10)) + FVector(1000.0, 0.0, 0.0);
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Stockpile") && Bd.Level == 0 && FVector::DistXY(Bd.LocationCm, At) < 1.0) { BlockBuildings.Add(Bd.Id); break; } }
+			}
+			Expect(Sim->GetDistricts().Num() == 20 && BlockBuildings.Num() == 15 && Sim->GetPopulation() >= 5000,
+				FString::Printf(TEXT("commute: %d districts (5 floors + 15 surface blocks), %d anchors in them, %d colonists, %d built road edges"), Sim->GetDistricts().Num(), BlockBuildings.Num(), Sim->GetPopulation(), Sim->GetRoadGraph().BuiltEdgeCount));
+			Sim->Debug_SetCommuteTuning(0.0, 1.0, 30000.0, 6000.0);
+			struct FCommuteLine { int32 Anchors = 0; double ColdMs = 0.0, FlowsMs = 0.0, WarmMs = 0.0, HopeMs = 0.0; int32 Runs = 0, Employed = 0, Long = 0; uint32 Digest = 0; };
+			const auto CommuteBench = [&](const TArray<int32>& Homes, const TArray<int32>& Works) -> FCommuteLine
+			{
+				FCommuteLine Out;
+				Sim->Debug_ClearColonistStations();
+				int32 Index = 0;
+				for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+				{
+					Sim->Debug_SetColonistHome(C.Id, Homes[Index % Homes.Num()], 0);
+					Sim->Debug_SetColonistStation(C.Id, FIntVector(0, INDEX_NONE, Works[(Index * 7 + 3) % Works.Num()]));
+					++Index;
+				}
+				TSet<int32> Distinct;
+				for (const int32 Id : Homes) { Distinct.Add(Id); }
+				for (const int32 Id : Works) { Distinct.Add(Id); }
+				Out.Anchors = Distinct.Num();
+				Sim->Debug_ReroutePosition();
+				const int32 Runs0 = Sim->GetCommuteDijkstraRuns();
+				const double C0 = FPlatformTime::Seconds();
+				const URHSimWorldSubsystem::FRHCommuteSummary Cold = Sim->GetCommuteSummary();
+				Out.ColdMs = (FPlatformTime::Seconds() - C0) * 1000.0;
+				Out.Runs = Sim->GetCommuteDijkstraRuns() - Runs0;
+				Out.Employed = Cold.Employed;
+				Out.Long = Cold.LongCommuters;
+				double FlowsTotal = 0.0;
+				constexpr int32 FlowReps = 20;
+				for (int32 K = 0; K < FlowReps; ++K)
+				{
+					Sim->Debug_BumpJobsVersion();
+					const double F0 = FPlatformTime::Seconds();
+					Sim->GetCommuteSummary();
+					FlowsTotal += FPlatformTime::Seconds() - F0;
+				}
+				Out.FlowsMs = FlowsTotal * 1000.0 / FlowReps;
+				double WarmSink = 0.0;
+				constexpr int32 WarmReps = 2000;
+				const double W0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < WarmReps; ++K) { WarmSink += Sim->GetCommuteSummary().Penalty; }
+				Out.WarmMs = (FPlatformTime::Seconds() - W0) * 1000.0 / WarmReps;
+				double HopeSink = 0.0;
+				const double H0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < HopeReps; ++K) { HopeSink += Sim->GetColonyHope().Total; }
+				Out.HopeMs = (FPlatformTime::Seconds() - H0) * 1000.0 / HopeReps;
+				TArray<URHSimWorldSubsystem::FRHCommuteFlow> Flows;
+				Sim->GetCommuteFlows(Flows);
+				for (const URHSimWorldSubsystem::FRHCommuteFlow& F : Flows) { Out.Digest = FCrc::MemCrc32(&F, (int32)sizeof(F), Out.Digest); }
+				Out.Digest = FCrc::MemCrc32(&WarmSink, 8, Out.Digest);
+				(void)HopeSink;
+				return Out;
+			};
+			const FCommuteLine Districts20 = CommuteBench(BlockBuildings, BlockBuildings);
+			const bool bVerifyOn = FParse::Param(*Params, TEXT("RHVerifyCaches"));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE commute (20 districts): %d colonists measured over %d anchors | cold (position memo %d Dijkstras + flows) %.3f ms | flows only (a JobsVersion bump, warm memo) %.3f ms | warm read %.5f ms | GetColonyHope %.3f ms | %d long | digest %08x"),
+				Districts20.Employed, Districts20.Anchors, Districts20.Runs, Districts20.ColdMs, Districts20.FlowsMs, Districts20.WarmMs, Districts20.HopeMs, Districts20.Long, Districts20.Digest);
+			Expect(Districts20.Employed == Sim->GetPopulation() && Sim->Debug_CommuteCachesFresh() && Districts20.Runs <= Districts20.Anchors,
+				FString::Printf(TEXT("commute: every one of %d colonists is measured, the flow cache is fresh, and the memo ran %d Dijkstras for %d anchors"), Sim->GetPopulation(), Districts20.Runs, Districts20.Anchors));
+			Expect(Districts20.ColdMs <= 5.0, FString::Printf(TEXT("budget: a cold position memo + flows at %d colonists, 20 districts took %.3f ms (<= 5)"), Sim->GetPopulation(), Districts20.ColdMs));
+			Expect(Districts20.FlowsMs <= 1.0, FString::Printf(TEXT("budget: flows only (a JobsVersion bump, no Dijkstra) at %d colonists took %.3f ms (<= 1)"), Sim->GetPopulation(), Districts20.FlowsMs));
+			if (bVerifyOn) { UE_LOG(LogRedHopeSim, Display, TEXT("SCALE ok: budget: a warm commute read took %.5f ms (not budgeted under -RHVerifyCaches: every read re-derives the flows)"), Districts20.WarmMs); }
+			else { Expect(Districts20.WarmMs <= 0.01, FString::Printf(TEXT("budget: a warm commute read took %.5f ms (<= 0.01)"), Districts20.WarmMs)); }
+			Expect(Districts20.HopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope with the commute term at %d colonists took %.3f ms (<= 0.5)"), Sim->GetPopulation(), Districts20.HopeMs));
+			// 500 habitats' worth of distinct anchors.
+			TArray<int32> Habs;
+			for (int32 K = 0; K < 500; ++K)
+			{
+				Sim->Debug_PlaceInstant(FName("Stockpile"), FVector(40000.0 + (K % 25) * 700.0, 40000.0 + (K / 25) * 850.0, 0.0));
+				Habs.Add(Sim->GetBuildings().Last().Id);
+			}
+			const FCommuteLine Habs500 = CommuteBench(Habs, Habs);
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE commute (500 habitats): %d colonists measured over %d anchors | cold (position memo %d Dijkstras + flows) %.3f ms | flows only %.3f ms | warm read %.5f ms | GetColonyHope %.3f ms | %d long | digest %08x"),
+				Habs500.Employed, Habs500.Anchors, Habs500.Runs, Habs500.ColdMs, Habs500.FlowsMs, Habs500.WarmMs, Habs500.HopeMs, Habs500.Long, Habs500.Digest);
+			Expect(Habs500.Employed == Sim->GetPopulation() && Habs500.Anchors == 500 && Sim->Debug_CommuteCachesFresh(),
+				FString::Printf(TEXT("commute: 500 distinct anchors, all %d colonists measured, the cache fresh (%d Dijkstras)"), Habs500.Employed, Habs500.Runs));
+			Expect(Habs500.ColdMs <= 10.0, FString::Printf(TEXT("budget: a cold position memo + flows over 500 distinct anchors took %.3f ms (<= 10)"), Habs500.ColdMs));
+			Expect(Habs500.FlowsMs <= 1.0, FString::Printf(TEXT("budget: flows only over 500 anchors took %.3f ms (<= 1)"), Habs500.FlowsMs));
+			Expect(Habs500.HopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope over 500 anchors took %.3f ms (<= 0.5)"), Habs500.HopeMs));
+			// The same digest twice from a cold memo: the answers are a pure function of the network and the anchors.
+			const FCommuteLine Again = CommuteBench(Habs, Habs);
+			Expect(Again.Digest == Habs500.Digest, FString::Printf(TEXT("commute: the same 500-anchor city measured again from a cold memo gives the same flows (digest %08x)"), Again.Digest));
+			// A hundred rover plans, with the rover's own params, against the C4 robot-plan budget (10 ms): the same hundred twice are the same routes.
+			{
+				constexpr int32 RoverPlans = 100;
+				uint32 Seed = 91731u;
+				const auto Rnd = [&Seed]() { Seed = Seed * 1664525u + 1013904223u; return (double)((Seed >> 8) & 0xFFFF) / 65535.0; };
+				TArray<FIntPoint> From, To;
+				for (int32 i = 0; i < RoverPlans; ++i)
+				{
+					From.Add(FIntPoint(FMath::RoundToInt(40000.0 + Rnd() * 18000.0), FMath::RoundToInt(40000.0 + Rnd() * 18000.0)));
+					To.Add(FIntPoint(FMath::RoundToInt(40000.0 + Rnd() * 18000.0), FMath::RoundToInt(40000.0 + Rnd() * 18000.0)));
+				}
+				const auto PlansDigest = [&](int32& OutRoad) -> uint32
+				{
+					uint32 Hd = 0;
+					OutRoad = 0;
+					for (int32 i = 0; i < RoverPlans; ++i)
+					{
+						FRHRoadRoute R;
+						const bool bRoad = Sim->GetRoadGraph().PlanRoute(From[i], To[i], Sim->GetRoverRoadParams(), R) && R.bRoad;
+						OutRoad += bRoad ? 1 : 0;
+						for (const int32 N : R.NodeIds) { Hd = FCrc::MemCrc32(&N, 4, Hd); }
+						Hd = FCrc::MemCrc32(&R.CostUnits, 8, Hd);
+					}
+					return Hd;
+				};
+				int32 Road1 = 0, Road2 = 0;
+				const double P0 = FPlatformTime::Seconds();
+				const uint32 PlanA = PlansDigest(Road1);
+				const double PlanMs = (FPlatformTime::Seconds() - P0) * 1000.0;
+				const uint32 PlanB = PlansDigest(Road2);
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE rover plans: %d plans with the rover's params (M = %d) in %.2f ms (%.3f ms each), %d of them on the road"), RoverPlans, Sim->GetRoverRoadParams().SpeedMulPermille, PlanMs, PlanMs / RoverPlans, Road1);
+				Expect(PlanA == PlanB && Road1 == Road2 && Road1 >= 50, FString::Printf(TEXT("commute: the same %d rover plans twice are the same routes (digest %08x, %d on the road)"), RoverPlans, PlanA, Road1));
+				Expect(PlanMs <= 10.0, FString::Printf(TEXT("budget: 100 rover plans took %.2f ms (<= 10, the C4 robot-plan budget)"), PlanMs));
+			}
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

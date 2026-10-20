@@ -823,7 +823,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDuct(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 	TEXT("RH.AddSolid"),
-	TEXT("RH.AddSolid <DefName> <Resource> <Kg> - DEBUG: drop solid stock into the first completed building of a def."),
+	TEXT("RH.AddSolid <DefName> <Resource> <Kg> [out] - DEBUG: drop solid stock into the first completed building of a def (its hopper; with 'out', its output shelf - what a hauler or rover collects)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 3)
@@ -833,6 +833,19 @@ static FAutoConsoleCommandWithWorldAndArgs GRHAddSolid(
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
+			if (Args.Num() > 3 && Args[3].Equals(TEXT("out"), ESearchCase::IgnoreCase))
+			{
+				for (const FRHBuildingInstance& B : Sim->GetBuildings())
+				{
+					if (B.DefName == FName(*Args[0]) && !B.bUnderConstruction)
+					{
+						Sim->Debug_AddSolidAt(B.Id, FName(*Args[1]), FCString::Atod(*Args[2]), /*bOutput*/ true);
+						return;
+					}
+				}
+				UE_LOG(LogRedHope, Warning, TEXT("RH.AddSolid: no completed '%s'"), *Args[0]);
+				return;
+			}
 			Sim->Debug_AddSolid(FName(*Args[0]), FName(*Args[1]), FCString::Atod(*Args[2]));
 		}
 	}));
@@ -1765,6 +1778,119 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRoad(
 			Cmd.Location.X / 100.f, Cmd.Location.Y / 100.f, Cmd.LocationB.X / 100.f, Cmd.LocationB.Y / 100.f,
 			Pre.Pieces, Pre.Splits, (double)Pre.LengthCm / 100.0, Pre.BillKg, Pre.HaveKg, bOk ? TEXT("accepted for transmission") : *Reason);
 		Sim->EnqueueCommand(Cmd); // transmitted either way: the seam re-checks when it lands (and says why it refuses)
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHRoadInstant(
+	TEXT("RH.RoadInstant"),
+	TEXT("RH.RoadInstant <x1m> <y1m> <x2m> <y2m> - DEBUG: lay a FINISHED road from P to Q at once (no cost, no lag, no coverage rule, no labour). For look-dev and the live rover smoke."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.RoadInstant <x1m> <y1m> <x2m> <y2m>"));
+			return;
+		}
+		const TArray<int32> Ids = Sim->Debug_LayRoad(FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f), FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f), true);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.RoadInstant] %d finished edge(s) laid"), Ids.Num());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHRoadDemolish(
+	TEXT("RH.RoadDemolish"),
+	TEXT("RH.RoadDemolish <edgeId> - C6a (Q3a): transmit a DemolishRoad order (uplink) for one road edge. A standing edge refunds 50% of its Struct to the Lander, an unbuilt one the whole bill; a robot or rover already on it finishes its trip (a rover crawls the rest of that leg). Ids: RH.Road with no arguments logs the network; the road overlay prints them."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.RoadDemolish <edgeId>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("DemolishRoad");
+		Cmd.Value = (double)FCString::Atoi(*Args[0]);
+		FString Reason;
+		double RefundKg = 0.0;
+		const bool bOk = Sim->CanDemolishRoad(FCString::Atoi(*Args[0]), Reason, &RefundKg);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.RoadDemolish] edge #%d - %s"), FCString::Atoi(*Args[0]), bOk ? *FString::Printf(TEXT("accepted for transmission, %.1f kg of Struct back at the Lander"), RefundKg) : *Reason);
+		Sim->EnqueueCommand(Cmd); // transmitted either way: the seam re-checks when it lands (and says why it refuses)
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHRover(
+	TEXT("RH.Rover"),
+	TEXT("RH.Rover <spawn | list | drain <fraction>> - C6a cargo rovers. spawn delivers a CargoRover as if the ship had landed (it deploys at the built road node nearest the Lander, or waits aboard until a road exists); list logs every rover (position, charge, wear, task, load), the freight tasks open and the rovers waiting aboard; drain sets every rover's battery to a fraction of its capacity (DEBUG: forces the charge break-off, to watch a loaded rover put its cargo back)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		const FString Sub = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("list"));
+		if (Sub == TEXT("drain"))
+		{
+			if (URHAgentSubsystem* Agents = World->GetSubsystem<URHAgentSubsystem>())
+			{
+				const float Frac = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 0.1f;
+				Agents->Debug_SetChargeFrac(FName("Rover"), Frac);
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Rover] every rover's battery set to %.0f%%"), Frac * 100.f);
+			}
+			return;
+		}
+		if (Sub == TEXT("spawn"))
+		{
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Rover] a cargo rover delivered: %d waiting aboard"), Sim->GetRoversWaitingAboard());
+			return;
+		}
+		TArray<FRHRoverState> Rovers;
+		Sim->GetRoverStates(Rovers);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Rover] %d rover(s), %d active, %d waiting aboard, %d freight task(s) open; a road %s; %.0f kg of Struct on the stores' shelves (a load in flight is not)"), Rovers.Num(), Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(), Sim->GetFreightTaskCount(), Sim->HasBuiltRoads() ? TEXT("stands") : TEXT("does not exist yet"), Sim->GetTotalSolid(FName("Struct")));
+		for (const FRHRoverState& R : Rovers)
+		{
+			const FRHRobotRoadPath* Path = Sim->GetRoverRoadPath(R.Entity);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Rover]   %s at (%.0f, %.0f) m, charge %.0f%%, wear %.0f, task %d phase %d #%d, carrying %.0f kg of %s%s"), *R.DefName.ToString(), R.PosCm.X / 100.0, R.PosCm.Y / 100.0, R.ChargeFrac * 100.f, R.Wear,
+				(int32)R.TaskType, (int32)R.Phase, R.TaskId, R.CargoKg, *R.CargoResource.ToString(), Path && Path->IsRoadTrip() ? TEXT(", on a road trip") : TEXT(""));
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCommute(
+	TEXT("RH.Commute"),
+	TEXT("RH.Commute [flows | edges] - C6a commuting: the ramp, the people measured, the long commuters, the Hope term and the work multiplier, the longest trip and the cache counters. flows logs each district-to-district flow (Unzoned = 0); edges logs the commuters on each road edge. Everything below the population ramp reads zero by design."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		const FString Sub = Args.Num() > 0 ? Args[0].ToLower() : FString();
+		const URHSimWorldSubsystem::FRHCommuteSummary S = Sim->GetCommuteSummary();
+		if (Sub.IsEmpty())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Commute] population %d, ramp %.3f (%s), %d employed measured, %d commute, %d LONG (over %.0f m), Hope term -%.3f, a long commuter's work x%.3f, the longest trip %.0f m; flows rebuilt %d times, %d Dijkstras run"),
+				Sim->GetPopulation(), Sim->GetCommuteRamp(), Sim->GetCommuteRamp() <= 0.0 ? TEXT("closed: nothing is measured") : TEXT("open"), S.Employed, S.Commuters, S.LongCommuters, (double)Sim->GetCommuteLongCm() / 100.0, S.Penalty, S.WorkMul, (double)S.MaxDistCm / 100.0,
+				Sim->GetCommuteFlowRebuilds(), Sim->GetCommuteDijkstraRuns());
+			return;
+		}
+		if (Sub == TEXT("flows"))
+		{
+			TArray<URHSimWorldSubsystem::FRHCommuteFlow> Flows;
+			Sim->GetCommuteFlows(Flows);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Commute] %d flow(s) between districts (0 = Unzoned)"), Flows.Num());
+			for (const URHSimWorldSubsystem::FRHCommuteFlow& F : Flows)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Commute]   #%d -> #%d: %d people, %d long"), F.HomeDistrictId, F.WorkDistrictId, F.Count, F.LongCount);
+			}
+			return;
+		}
+		TArray<TPair<int32, int32>> Loads;
+		Sim->GetCommuteEdgeLoads(Loads);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Commute] %d road edge(s) carry commuters"), Loads.Num());
+		for (const TPair<int32, int32>& L : Loads)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Commute]   edge #%d: %d commuters"), L.Key, L.Value);
+		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(

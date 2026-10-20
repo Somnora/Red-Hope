@@ -62,6 +62,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 			FRHBatteryFragment& Battery = Batteries[i];
 			const FRHRobotFragment& Robot = Robots[i];
 			FRHTaskFragment& Task = TaskFrags[i];
+			const bool bRover = Robot.RobotClass == FName("Rover"); // C6a: a cargo rover, with its own profile and pads
 
 			for (int32 Step = 0; Step < Steps; ++Step)
 			{
@@ -77,7 +78,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 				{
 					int32 PadId = 0;
 					FVector PadLoc;
-					if (Sim->FindNearestChargePad(Transform.GetLocation(), PadId, PadLoc))
+					if (bRover ? Sim->FindNearestRoverPad(Transform.GetLocation(), PadId, PadLoc) : Sim->FindNearestChargePad(Transform.GetLocation(), PadId, PadLoc))
 					{
 						// Put the claim back before leaving.
 						if (Current == ERHTaskType::Dig)
@@ -86,6 +87,11 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						}
 						else if (Current == ERHTaskType::Haul || Current == ERHTaskType::Build)
 						{
+							// C6a (R3): a rover's load goes back before the fragment is reset.
+							if (bRover && Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
+							{
+								Sim->ReturnHaulCargo(Task.TaskId, Task.CargoResource, Task.CargoKg);
+							}
 							Sim->AbandonTask(Task.TaskId);
 						}
 						Task = FRHTaskFragment();
@@ -119,7 +125,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						{
 							break; // died en route to the pad
 						}
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
 						{
 							Task.Phase = 1;
 						}
@@ -156,6 +162,21 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					{
 						FRHTask Board;
 						if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board))
+						{
+							Task.TaskType = (uint8)ERHTaskType::Haul;
+							Task.TaskId = Board.Id;
+							Task.CargoResource = Board.Resource;
+							Task.CargoKg = 0.f;
+							Task.TargetCm = Sim->GetSiteLocation(Board.From);
+							Task.Phase = 0;
+						}
+					}
+					else if (bRover)
+					{
+						// C6a: freight only, and only what it can reach by road.
+						FRHTask Board;
+						const float ClaimChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+						if (Sim->TryClaimFreight(Entity, Transform.GetLocation(), ClaimChargeFrac, Board))
 						{
 							Task.TaskType = (uint8)ERHTaskType::Haul;
 							Task.TaskId = Board.Id;
@@ -213,7 +234,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					DrawW = Robot.DrawMoveW;
 					if (Task.Phase == 0) // to pickup
 					{
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
 						{
 							Task.Phase = 1;
 						}
@@ -235,9 +256,9 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					}
 					else if (Task.Phase == 2) // to dropoff
 					{
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
 						{
-							Sim->HaulUnload(Task.TaskId, Task.CargoKg);
+							Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None);
 							Task = FRHTaskFragment();
 						}
 					}

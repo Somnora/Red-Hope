@@ -40,6 +40,11 @@ namespace
 	}
 }
 
+int32 RHRoads::RoundSqrtCm(int64 SquaredCm)
+{
+	return RoundSqrt(SquaredCm);
+}
+
 void FRHRoadGraph::Reset()
 {
 	Nodes.Reset();
@@ -577,4 +582,176 @@ bool FRHRoadGraph::PlanRoute(FIntPoint StartCm, FIntPoint TargetCm, const FRHRoa
 	Out.CostUnits = BestTotal;
 	Out.bRoad = true;
 	return true;
+}
+
+int32 FRHRoadGraph::NearestBuiltNode(FIntPoint AtCm, const FRHRoadParams& Prm, int32* OutDistCm) const
+{
+	if (BuiltEdgeCount <= 0)
+	{
+		return 0;
+	}
+	EnsureAdjacency();
+	int32 Best = 0;
+	int64 BestD2 = MAX_int64;
+	for (int32 i = 0; i < Nodes.Num(); ++i)
+	{
+		if (BuiltAdj[i].Num() == 0)
+		{
+			continue;
+		}
+		const FIntPoint Np = NodeCm(Nodes[i], Prm);
+		const int64 Dx = (int64)Np.X - AtCm.X, Dy = (int64)Np.Y - AtCm.Y;
+		const int64 D2 = Dx * Dx + Dy * Dy;
+		if (D2 < BestD2 || (D2 == BestD2 && Nodes[i].Id < Best))
+		{
+			BestD2 = D2;
+			Best = Nodes[i].Id;
+		}
+	}
+	if (OutDistCm)
+	{
+		*OutDistCm = Best != 0 ? RoundSqrt(BestD2) : MAX_int32;
+	}
+	return Best;
+}
+
+void FRHRoadGraph::DistancesFrom(FIntPoint StartCm, const FRHRoadParams& Prm, TArray<int64>& Dist, TArray<int32>& PrevNode, TArray<int32>& PrevEdge) const
+{
+	const int32 N = Nodes.Num();
+	Dist.Init(MAX_int64, N);
+	PrevNode.Init(0, N);
+	PrevEdge.Init(0, N);
+	if (BuiltEdgeCount <= 0 || N == 0)
+	{
+		return;
+	}
+	EnsureAdjacency();
+	const int64 M = Prm.SpeedMulPermille;
+	const int32 K = FMath::Max(1, Prm.EntryCandidates);
+	struct FNear { int64 D2; int32 NodeId; };
+	TArray<FNear> Entries;
+	for (int32 i = 0; i < N; ++i)
+	{
+		if (BuiltAdj[i].Num() == 0)
+		{
+			continue;
+		}
+		const FIntPoint Np = NodeCm(Nodes[i], Prm);
+		const int64 Dx = (int64)Np.X - StartCm.X, Dy = (int64)Np.Y - StartCm.Y;
+		const FNear Cand{ Dx * Dx + Dy * Dy, Nodes[i].Id };
+		int32 Pos = Entries.Num();
+		while (Pos > 0 && (Entries[Pos - 1].D2 > Cand.D2 || (Entries[Pos - 1].D2 == Cand.D2 && Entries[Pos - 1].NodeId > Cand.NodeId)))
+		{
+			--Pos;
+		}
+		if (Pos < K)
+		{
+			Entries.Insert(Cand, Pos);
+			if (Entries.Num() > K)
+			{
+				Entries.SetNum(K);
+			}
+		}
+	}
+	TArray<uint8> Settled;
+	Settled.Init(0, N);
+	struct FItem { int64 Cost; int32 NodeId; };
+	TArray<FItem> Heap;
+	const auto Less = [](const FItem& A, const FItem& B) { return A.Cost != B.Cost ? A.Cost < B.Cost : A.NodeId < B.NodeId; };
+	for (const FNear& E : Entries)
+	{
+		const int64 Cost = M * RoundSqrt(E.D2);
+		Dist[E.NodeId - 1] = Cost;
+		Heap.HeapPush(FItem{ Cost, E.NodeId }, Less);
+	}
+	while (Heap.Num() > 0)
+	{
+		FItem Top;
+		Heap.HeapPop(Top, Less, EAllowShrinking::No);
+		const int32 Ui = Top.NodeId - 1;
+		if (Settled[Ui] || Top.Cost > Dist[Ui])
+		{
+			continue;
+		}
+		Settled[Ui] = 1;
+		for (const FAdj& A : BuiltAdj[Ui])
+		{
+			const int32 Vi = A.Other - 1;
+			const int64 Nc = Top.Cost + 1000 * (int64)A.Len;
+			if (!Settled[Vi] && Nc < Dist[Vi])
+			{
+				Dist[Vi] = Nc;
+				PrevNode[Vi] = Top.NodeId;
+				PrevEdge[Vi] = A.Edge;
+				Heap.HeapPush(FItem{ Nc, A.Other }, Less);
+			}
+		}
+	}
+}
+
+void FRHRoadGraph::NearestBuiltNodes(FIntPoint AtCm, const FRHRoadParams& Prm, TArray<FExit>& Out) const
+{
+	Out.Reset();
+	if (BuiltEdgeCount <= 0)
+	{
+		return;
+	}
+	EnsureAdjacency();
+	const int32 K = FMath::Max(1, Prm.EntryCandidates);
+	struct FNear { int64 D2; int32 NodeId; };
+	TArray<FNear> Near;
+	for (int32 i = 0; i < Nodes.Num(); ++i)
+	{
+		if (BuiltAdj[i].Num() == 0)
+		{
+			continue;
+		}
+		const FIntPoint Np = NodeCm(Nodes[i], Prm);
+		const int64 Dx = (int64)Np.X - AtCm.X, Dy = (int64)Np.Y - AtCm.Y;
+		const FNear Cand{ Dx * Dx + Dy * Dy, Nodes[i].Id };
+		int32 Pos = Near.Num();
+		while (Pos > 0 && (Near[Pos - 1].D2 > Cand.D2 || (Near[Pos - 1].D2 == Cand.D2 && Near[Pos - 1].NodeId > Cand.NodeId)))
+		{
+			--Pos;
+		}
+		if (Pos < K)
+		{
+			Near.Insert(Cand, Pos);
+			if (Near.Num() > K)
+			{
+				Near.SetNum(K);
+			}
+		}
+	}
+	for (const FNear& X : Near)
+	{
+		FExit E;
+		E.NodeId = X.NodeId;
+		E.OffCm = RoundSqrt(X.D2);
+		Out.Add(E);
+	}
+}
+
+int64 FRHRoadGraph::RoadCostVia(const TArray<FExit>& Exits, const FRHRoadParams& Prm, const TArray<int64>& Dist, int32* OutExitNode, int32* OutOffOutCm)
+{
+	const int64 M = Prm.SpeedMulPermille;
+	int32 BestExit = 0, BestOff = 0;
+	int64 BestTotal = MAX_int64;
+	for (const FExit& X : Exits)
+	{
+		if (X.NodeId - 1 >= Dist.Num() || Dist[X.NodeId - 1] == MAX_int64)
+		{
+			continue;
+		}
+		const int64 Total = Dist[X.NodeId - 1] + M * X.OffCm;
+		if (Total < BestTotal || (Total == BestTotal && X.NodeId < BestExit))
+		{
+			BestTotal = Total;
+			BestExit = X.NodeId;
+			BestOff = X.OffCm;
+		}
+	}
+	if (OutExitNode) { *OutExitNode = BestExit; }
+	if (OutOffOutCm) { *OutOffOutCm = BestOff; }
+	return BestTotal;
 }

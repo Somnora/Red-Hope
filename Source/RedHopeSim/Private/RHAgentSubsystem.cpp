@@ -304,6 +304,83 @@ void URHAgentSubsystem::CollectPanelRows(TArray<FRHRobotPanelRow>& OutRows) cons
 	}
 }
 
+int32 URHAgentSubsystem::CountActiveRobots(FName RobotClass, float WearHalt) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return 0;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	int32 Count = 0;
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (EntityManager.IsEntityValid(Entity)
+			&& EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity).RobotClass == RobotClass
+			&& EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear < WearHalt
+			&& EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity).ChargeWh > 0.f)
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+void URHAgentSubsystem::CollectRobotsOfClass(FName RobotClass, TArray<FRHRoverState>& OutStates) const
+{
+	OutStates.Reset();
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (!EntityManager.IsEntityValid(Entity))
+		{
+			continue;
+		}
+		const FRHRobotFragment& Robot = EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity);
+		if (Robot.RobotClass != RobotClass)
+		{
+			continue;
+		}
+		const FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
+		const FRHTaskFragment& Task = EntityManager.GetFragmentDataChecked<FRHTaskFragment>(Entity);
+		FRHRoverState S;
+		S.Entity = Entity;
+		S.DefName = Robot.DefName;
+		S.PosCm = EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform().GetLocation();
+		S.ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
+		S.Wear = EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear;
+		S.TaskType = Task.TaskType;
+		S.Phase = Task.Phase;
+		S.TaskId = Task.TaskId;
+		S.CargoResource = Task.CargoResource;
+		S.CargoKg = Task.CargoKg;
+		OutStates.Add(S);
+	}
+}
+
+void URHAgentSubsystem::Debug_SetChargeFrac(FName RobotClass, float Frac)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return;
+	}
+	FMassEntityManager& EntityManager = MassSubsystem->GetMutableEntityManager();
+	for (const FMassEntityHandle& Entity : RobotHandles)
+	{
+		if (EntityManager.IsEntityValid(Entity) && EntityManager.GetFragmentDataChecked<FRHRobotFragment>(Entity).RobotClass == RobotClass)
+		{
+			FRHBatteryFragment& Battery = EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity);
+			Battery.ChargeWh = Battery.CapacityWh * FMath::Clamp(Frac, 0.f, 1.f);
+		}
+	}
+}
+
 void URHAgentSubsystem::DespawnAllRobots()
 {
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();

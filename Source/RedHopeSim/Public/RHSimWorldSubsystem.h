@@ -93,6 +93,18 @@ struct FRHRobotRoadPath
 	bool IsRoadTrip() const { return Waypoints.Num() > 1; }
 };
 
+// C6a: how a class of robot moves between roads. Robots pass no profile (today's behaviour: the
+// movement code keeps its literal calls behind that test); a cargo rover runs the road at its speed
+// times the road's multiplier, but crawls at OffRoadMul everywhere else - off the road, on a missing
+// or unbuilt edge, and on both end legs - and plans with its own params, whose speed multiplier is
+// round(1000 x RoadSpeedMul / OffRoadMul) so the planner's cost is the time a rover would take.
+struct FRHMoveProfile
+{
+	const FRHRoadParams* Params = nullptr;
+	double OffRoadMul = 1.0;
+	double MissingEdgeMul = 1.0;
+};
+
 // A planted cell's crop state (greenhouse-agriculture Gate A, save v26).
 // Parallel to PlantedCells: a planted cell WITHOUT an entry here is a legacy
 // flat-yield cell (pre-crop saves, or crops dormant at plant time). Growth
@@ -231,6 +243,7 @@ class REDHOPESIM_API URHSimWorldSubsystem : public UTickableWorldSubsystem
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
 	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override
@@ -709,7 +722,7 @@ public:
 	// era-driving suites do.
 	void Debug_StepSim(float SubDt) { StepSim(SubDt); }
 	// BM-3 harness: post tasks, read one, and stock a given building's store.
-	void Debug_StepTaskBoard() { StepTaskBoard(); }
+	void Debug_StepTaskBoard(float SubDt = 0.f) { StepTaskBoard(SubDt); }
 	bool Debug_GetTask(int32 TaskId, FRHTask& Out) const;
 	void Debug_AddSolidAt(int32 BuildingId, FName Resource, double Kg, bool bOutput);
 	// Harness: run a cargo item's landing effect directly (the commandlet's
@@ -754,6 +767,11 @@ public:
 		double FoodPenalty = 0; // D4a: stored positive - a food runway under FoodRunwayFloorSols at today's draw (soft cap HopeFoodPenalty)
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
+		// C6a: Ramp x HopeCommuteMax x min(1, HopeCommuteSteepness x LongCommuters / Population); stored positive,
+		// the LAST term of the subtraction. +0.0 whenever the population ramp is closed or nobody is long, so Total is
+		// bit-identical to v39 there (x - 0.0 == x).
+		double CommutePenalty = 0;
+		int32 Commuters = 0, LongCommuters = 0;
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		// C2a (per head): the shares behind the terms. AdjacencyPenalty is
 		// HopeAdjacencyMax x OffendedRefusers / RefuserCells (OffendedPairs stays the
@@ -1198,11 +1216,13 @@ public:
 	bool FindRoadOverlap(const FVector& CentreCm, const FVector2D& HalfCm, FString& OutWhat) const;
 	// The speed a robot gets on an edge right now: RoadSpeedMul on a built one,
 	// 1 on a demolished or missing one (looked up live, never cached).
-	double GetRoadEdgeSpeedMul(int32 EdgeId) const;
+	// C6a: with a rover profile a missing or unbuilt edge gives the profile's MissingEdgeMul (0.3), not 1.
+	double GetRoadEdgeSpeedMul(int32 EdgeId, const FRHMoveProfile* Profile = nullptr) const;
 	// The shared movement call (RH::MoveAlong): one trip step toward TargetCm,
 	// along the roads where they beat the straight line. Planned lazily, re-planned
 	// only when TargetCm changes. True on arrival, exactly as MoveToward.
-	bool MoveAlongRoads(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt);
+	// Profile == nullptr is a robot (today's behaviour, literal calls); a rover passes GetRoverMoveProfile().
+	bool MoveAlongRoads(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, const FRHMoveProfile* Profile = nullptr);
 	// Presentation: the robot's current road trip (nullptr when it has none).
 	const FRHRobotRoadPath* GetRobotRoadPath(FMassEntityHandle Entity) const { return RobotPaths.Find(Entity); }
 	// The route a trip between two points would take now, for tests and readouts.
@@ -1218,6 +1238,124 @@ public:
 	bool Debug_RemoveRoadEdge(int32 EdgeId);
 	// Harness: the labour left, as if every Fabricator had finished.
 	void Debug_FinishRoads();
+
+	// --- Road demolish (C6a, Q3a) ---
+	// A real player order through the uplink: DemolishRoad, Value = the edge Id. A standing edge
+	// refunds RoadStructKgPerMeter x its length x SalvageFraction (50%) of Struct to the Lander, an
+	// unbuilt one the whole bill; any Build task on it goes; a robot (or rover) already on it finishes
+	// its trip - the edge is simply missing now (robots 1.0x, rovers 0.3x). Removing a built edge
+	// bumps the road graph's BuiltVersion, which re-derives every key built on it. The order is
+	// refused with a reason when the edge is gone.
+	bool CanDemolishRoad(int32 EdgeId, FString& OutReason, double* OutRefundKg = nullptr) const;
+	// What the uplink does when the order lands (false with the reason when refused).
+	bool ExecuteDemolishRoad(const FRHCommand& Cmd, FString& OutReason);
+
+	// --- Cargo rovers (C6a, Q1a / Q3a) ---
+	// A cargo rover is a robot row of class Rover (RC_R) that arrives as the CargoRover manifest item.
+	// It spawns at the built node nearest the Lander, or waits aboard (ImportStock["RC_R"], NOT a
+	// building flat-pack: placement's lookup can never match a robot row) until a road exists. It takes
+	// only FREIGHT hauls (see FRHTask::bFreight), crawls off the road, and docks only at road-served pads.
+	int32 GetActiveRoverCount() const { return ActiveRovers; }
+	int32 GetRoversWaitingAboard() const { return GetImportStock(FName("RC_R")); }
+	// Is a point road-served: a built node within RoverLastLegCm of it.
+	bool IsRoadServed(const FVector& PointCm) const;
+	// The nearest road-served charge pad (a working Charging Pad, else the Lander's dock), false with none.
+	bool FindNearestRoverPad(const FVector& RobotPosCm, int32& OutBuildingId, FVector& OutLocationCm) const;
+	// Takes the nearest reachable freight task (see the design, R6). ChargeFrac gates a rover that has no pad.
+	bool TryClaimFreight(FMassEntityHandle Rover, const FVector& RoverPosCm, float ChargeFrac, FRHTask& OutTask);
+	// A rover that breaks off a delivery puts its load back: the task's source pile or building, else
+	// the Lander (the live-colony twin of SaveColony's snapshot return). Haulers still lose theirs.
+	void ReturnHaulCargo(int32 TaskId, FName Resource, double Kg);
+	const FRHMoveProfile& GetRoverMoveProfile() const { return RoverProfile; }
+	double GetRoverOffRoadSpeedMul() const { return RoverOffRoadSpeedMul; }
+	double GetRoverReserveDetourMul() const { return RoverReserveDetourMul; }
+	int32 GetRoverLastLegCm() const { return RoverLastLegCm; }
+	int32 GetFreightMinCm() const { return FreightMinCm; }
+	double GetFreightHaulerFallbackSec() const { return FreightHaulerFallbackSec; }
+	int32 GetRoverClaimPlans() const { return RoverClaimPlans; }
+	const FRHRoadParams& GetRoverRoadParams() const { return RoverRoadParams; }
+	// A readout for C6b and the fleet panel: every rover, with its charge, wear, task and load.
+	void GetRoverStates(TArray<FRHRoverState>& Out) const;
+	// The rover's current road trip (the same RobotPaths entry a robot's trip lives in).
+	const FRHRobotRoadPath* GetRoverRoadPath(FMassEntityHandle Entity) const { return RobotPaths.Find(Entity); }
+	// Freight tasks open right now (a count, for readouts and tests).
+	int32 GetFreightTaskCount() const;
+	// Harness: re-run the freight classification now.
+	void Debug_StepTaskBoardFreight() { RefreshFreightFlags(); }
+
+	// --- Commuting (C6a, Q2a) ---
+	// Every employed colonist is measured, from their actual home to their actual workplace, over roads
+	// (commuters ride at CommuteRoadSpeedMul x), open ground and lifts (CommuteShaftCmPerFloor a floor).
+	// Districts only group the trips into a flow matrix (rows home, columns work; the last row and column
+	// are "Unzoned"): they are never an exemption. A trip over CommuteLongCm is long. The whole thing
+	// phases in with population: Ramp = clamp((Pop - CommuteRampStartPop) / (CommuteRampFullPop - Start),
+	// 0, 1). At Ramp 0 every entry point returns the zero summary before touching any cache. Hope loses
+	// Ramp x HopeCommuteMax x min(1, HopeCommuteSteepness x Long / Pop); a long commuter's work counts
+	// 1 - Ramp x (1 - CommuteWorkMul), through ONE hook per job function (Lab and Workstation: the seat
+	// sums at the end of RefreshJobs; Garden: the skill average). Everything is derived and never saved.
+	struct FRHCommuteSummary
+	{
+		double Ramp = 0.0;
+		double Penalty = 0.0;      // the Hope term (positive; Total subtracts it)
+		double WorkMul = 1.0;      // what a long commuter's work counts
+		int32 Pop = 0;
+		int32 Employed = 0;        // colonists with a workplace and a home anchor: every one is measured
+		int32 Commuters = 0;       // employed with a trip over zero
+		int32 LongCommuters = 0;
+		int64 MaxDistCm = 0;
+	};
+	struct FRHCommuteFlow
+	{
+		int32 HomeDistrictId = 0;  // 0 = Unzoned
+		int32 WorkDistrictId = 0;
+		int32 Count = 0;
+		int32 LongCount = 0;
+	};
+	// One distinct trip between two anchors (a surface point, or a floor at the shaft head) with the people
+	// who make it and the road edges its surface part rides: what C6b draws the shuttles along.
+	struct FRHCommutePair
+	{
+		int32 HomeLevel = 0, WorkLevel = 0;
+		FIntPoint HomePosCm = FIntPoint::ZeroValue, WorkPosCm = FIntPoint::ZeroValue;
+		int32 HomeDistrictId = 0, WorkDistrictId = 0; // of the first colonist who makes it
+		int32 Count = 0;
+		int64 DistCm = 0;
+		TArray<int32> EdgeIds;                        // the road edges the surface part rides (may be empty)
+	};
+	double GetCommuteRamp() const;
+	FRHCommuteSummary GetCommuteSummary() const;
+	// The colonist's trip in cm, or -1 when they are not measured (no workplace or no home, or Ramp 0).
+	int64 GetColonistCommuteCm(int32 ColonistId) const;
+	bool IsLongCommuter(int32 ColonistId) const;
+	// The flow matrix, row-major over Dim x Dim (Districts order, then Unzoned); empty at Ramp 0.
+	void GetCommuteFlowMatrix(TArray<int32>& OutFlat, int32& OutDim) const;
+	void GetCommuteFlows(TArray<FRHCommuteFlow>& Out) const;     // non-empty cells, ascending (home, work)
+	void GetCommutePairs(TArray<FRHCommutePair>& Out) const;     // distinct trips, ascending anchors
+	// Commuters per road edge (sum of each trip's people over the edges its route rides), ascending edge Id.
+	void GetCommuteEdgeLoads(TArray<TPair<int32, int32>>& Out) const;
+	// The real distance between two anchors (whole walking-equivalent cm): the harness's hand-computed integers.
+	int64 GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm) const;
+	// Cache counters, for the suites: how many times the flows were rebuilt, how many Dijkstras the position memo has run.
+	int32 GetCommuteFlowRebuilds() const { return CommuteFlowRebuilds; }
+	int32 GetCommuteDijkstraRuns() const { return CommuteDijkstraRuns; }
+	// The audit (-RHCommuteAudit): the maxima over every step of the run (the commandlet prints them at the end).
+	struct FRHCommuteAudit { int32 Steps = 0, PeakPop = 0, MaxLong = 0; double PeakRamp = 0.0; int64 MaxDistCm = 0; };
+	const FRHCommuteAudit& GetCommuteAudit() const { return CommuteAudit; }
+	bool IsCommuteAuditOn() const { return bCommuteAudit; }
+	double GetCommuteWorkMulCfg() const { return CommuteWorkMul; }
+	int64 GetCommuteLongCm() const { return CommuteLongCm; }
+	// Harness. Home / station overrides stand in for a laid-out city, and the version bumps are the real ones.
+	bool Debug_SetColonistHome(int32 ColonistId, int32 HomeHab, int32 HomeLevel);
+	bool Debug_SetColonistStation(int32 ColonistId, const FIntVector& Key);
+	void Debug_ClearColonistStations() { ColonistStations.Reset(); ++JobsVersion; }
+	void Debug_RefreshJobs() { RefreshJobs(); }
+	void Debug_BumpJobsVersion() { ++JobsVersion; }
+	void Debug_BumpDistrictsVersion() { ++DistrictsVersion; }
+	void Debug_ReroutePosition(); // forget the position memo (a cold start)
+	uint32 GetJobsVersion() const { return JobsVersion; }
+	void Debug_SetCommuteTuning(double StartPop, double FullPop, double LongCm, double PerFloorCm) { CommuteRampStartPop = StartPop; CommuteRampFullPop = FullPop; CommuteLongCm = (int64)LongCm; CommuteShaftCmPerFloor = (int32)PerFloorCm; ++CommuteCfgVersion; }
+	// True when the cached flows match a fresh derivation (the suites' own -RHVerifyCaches).
+	bool Debug_CommuteCachesFresh() const;
 
 	// --- Districts (C5a, living-city gate 5a, 2026-10-19) ---
 	// The player ZONES districts: a Kind (Homes | Industry | Farming | Research | Civic)
@@ -1377,7 +1515,9 @@ public:
 	// and the dropoff location.
 	bool HaulLoad(int32 TaskId, float CargoCapKg, float& OutLoadedKg, FVector& OutDropoffCm);
 	// Delivers cargo to the task's To building and completes the task.
-	void HaulUnload(int32 TaskId, float CargoKg);
+	// C6a: a rover passes its cargo resource as ReturnResource; if the destination or the task is gone when it
+	// arrives, the load goes back through ReturnHaulCargo instead of vanishing. Haulers pass nothing (unchanged).
+	void HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource = NAME_None);
 	// Fabricator: claim nearest construction; apply work seconds. Work only
 	// progresses once the site's materials are delivered.
 	bool TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel = 0);
@@ -1621,7 +1761,7 @@ public:
 private:
 	void StepSim(float SubDt);
 	void StepUplink();
-	void StepTaskBoard();
+	void StepTaskBoard(float SubDt = 0.f);
 	void StepProduction(float SubDt);
 	void StepDepositAlerts(); // D2a: one-shot "ice running low" per deposit
 	bool HasHealthyDiscoveredIce() const; // known, mass left, above the low line
@@ -1698,9 +1838,121 @@ private:
 	// Takes Kg of Struct out of the stores, whole or not at all.
 	bool TakeRoadStruct(double Kg);
 	void PostRoadTasks(const FRHRoadAddResult& Added);
-	bool PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm) const;
+	bool PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm, const FRHRoadParams& Params) const;
 	// Strip (segment + width) against a footprint; the order's strip against everything.
 	bool RoadStripHitsBox(const FVector2D& A, const FVector2D& B, const FVector2D& Centre, const FVector2D& Half) const;
+	// The refund and removal both Debug_RemoveRoadEdge and the DemolishRoad order share.
+	void RemoveRoadEdgeWithRefund(int32 EdgeId);
+
+	// Cargo rovers (C6a). DT_Config rows (header defaults equal the CSV); all runtime state is derived.
+	double RoverOffRoadSpeedMul = 0.3;      // crawl off the road, and on a missing edge
+	int32 RoverLastLegCm = 3000;            // the furthest a rover leaves the road at each end
+	int32 FreightMinCm = 8000;              // shorter hauls stay with haulers
+	double FreightHaulerFallbackSec = 300.0;// haulers take freight left unclaimed this long (agent-band seconds)
+	double RoverReserveDetourMul = 3.0;     // the charge reserve's bound over the straight line
+	int32 RoverClaimPlans = 4;              // route plans a rover may spend on one claim attempt
+	FRHRoadParams RoverRoadParams;          // RoadParams with SpeedMulPermille = round(1000 x RoadSpeedMul / RoverOffRoadSpeedMul)
+	FRHMoveProfile RoverProfile;
+	int32 ActiveRovers = 0;                 // counted once a step at the top of StepTaskBoard
+	bool bFreightWasActive = false;
+	uint32 FreightBuiltVersion = MAX_uint32;
+	bool bRoverWaitAnnounced = false;       // runtime latch, reset at load (the bWaterQualityAnnounced precedent)
+	void DeployWaitingRovers();
+	void RefreshFreightFlags();
+	// Is this haul a freight run: both ends on the surface and road-served, the straight run long enough.
+	bool IsFreightRoute(const FRHTask& T) const;
+	// Fixes a freshly posted haul's amount and freight flag. LegacyKg is today's amount; RoverKg is what a
+	// rover trip would carry (the 2-batch room for a consumer, uncapped for a store, the need for a site).
+	void SetHaulAmount(FRHTask& T, double LegacyKg, double RoverKg) const;
+
+	// Commuting (C6a). Config (DT_Config; header defaults equal the CSV) and derived, mutable caches.
+	double CommuteRoadSpeedMul = 4.0;
+	int32 CommuteShaftCmPerFloor = 6000;
+	int64 CommuteLongCm = 30000;
+	double CommuteRampStartPop = 60.0;
+	double CommuteRampFullPop = 160.0;
+	double HopeCommuteMax = 4.0;
+	double HopeCommuteSteepness = 2.0;
+	double CommuteWorkMul = 0.85;
+	double CommuteAlertShare = 0.10;
+	uint32 CommuteCfgVersion = 1;
+	bool bCommuteAlerted = false;           // runtime latch, reset at load
+	bool bCommuteAudit = false;             // -RHCommuteAudit
+	FRHCommuteAudit CommuteAudit;
+	void AuditCommuteStep();
+	void NoteCommuteAlert();
+	// The seat assignment as the last RefreshJobs call left it, to detect a change cheaply: the (Id, station) sequence in fill order.
+	struct FRHJobAssign
+	{
+		int32 Id = 0;
+		FIntVector Key = FIntVector::ZeroValue;
+		bool operator==(const FRHJobAssign& O) const { return Id == O.Id && Key == O.Key; }
+	};
+	TArray<FRHJobAssign> JobAssignLast, JobAssignNow;
+	uint32 JobsVersion = 1;                 // bumped when RefreshJobs' assignment differs from its last call's
+	struct FRHCommuteKey
+	{
+		uint32 Districts = 0, Colonists = 0, Zoning = 0, Furniture = 0, Jobs = 0, Built = 0, Cfg = 0;
+		FIntPoint Shaft = FIntPoint::ZeroValue;
+		int32 BuildingCount = 0, NextBuilding = 0;
+		bool operator==(const FRHCommuteKey& O) const
+		{
+			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
+				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
+		}
+	};
+	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
+	// finished surface distance per pair of positions. Keyed on (BuiltVersion, ShaftHead, the commuters' road speed)
+	// only - never on the job assignment - so a reshuffle of seats re-runs no Dijkstra.
+	struct FRHCommutePosInfo
+	{
+		FIntPoint Pos = FIntPoint::ZeroValue;
+		int32 SourceIdx = INDEX_NONE;       // into Sources, once a Dijkstra has run from here
+		bool bExitsKnown = false;
+		TArray<FRHRoadGraph::FExit> Exits;
+	};
+	struct FRHCommuteSssp { TArray<int64> Dist; TArray<int32> PrevNode, PrevEdge; };
+	struct FRHCommuteMemo
+	{
+		bool bValid = false;
+		uint32 Built = 0;
+		FIntPoint Shaft = FIntPoint::ZeroValue;
+		int32 SpeedPermille = 0;
+		TMap<FIntPoint, int32> PosIndex;    // lookups only, never iterated
+		TArray<FRHCommutePosInfo> Pos;
+		TArray<FRHCommuteSssp> Sources;
+		TMap<uint64, TPair<int64, bool>> PairCm; // (distance cm, rides a road); lookups only
+	};
+	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; };
+	struct FRHCommuteFlows
+	{
+		bool bValid = false;
+		FRHCommuteKey Key;
+		int32 Dim = 1;                      // Districts.Num() + 1 (the last is Unzoned)
+		TArray<int32> Flow, LongFlow;       // Dim x Dim
+		TArray<int32> Ids;                  // measured colonists, colonist order (ascending Id)
+		TArray<int64> Dists;
+		TArray<int32> LongIds;              // ascending
+		int32 Employed = 0, Commuters = 0, LongCount = 0;
+		int64 MaxDistCm = 0;
+		TArray<FRHCommuteTrip> Trips;       // distinct trips, sorted by anchors
+		mutable bool bEdgeLoadValid = false;
+		mutable TArray<TPair<int32, int32>> EdgeLoad;
+		mutable TArray<TArray<int32>> TripEdges; // parallel to Trips, filled with EdgeLoad
+	};
+	mutable FRHCommuteMemo CommuteMemo;
+	mutable FRHCommuteFlows CommuteFlows;
+	mutable int32 CommuteFlowRebuilds = 0;
+	mutable int32 CommuteDijkstraRuns = 0;
+	FRHRoadParams CommuteParams() const;
+	FRHCommuteKey MakeCommuteKey() const;
+	const FRHCommuteFlows& EnsureCommuteFlows() const;
+	void DeriveCommuteFlows(FRHCommuteFlows& Out) const;
+	// Surface(A, B) = min(straight, road) in walking-equivalent cm; OutEdges (optional) gets the road edges the trip rides.
+	int64 CommuteSurfaceCm(FIntPoint A, FIntPoint B, TArray<int32>* OutEdges = nullptr) const;
+	int32 CommuteIntern(FIntPoint P) const;
+	void CommuteFillEdgeLoad(const FRHCommuteFlows& F) const;
+	void ResetCommuteMemoIfStale() const;
 
 	// Districts (C5a). SAVED (v37): the list (ascending Id, each with its sorted lattice) and
 	// the next Id. Everything below it is DERIVED and rebuilt lazily; nothing derived is saved.
@@ -1816,7 +2068,10 @@ private:
 	TArray<FRHBuildingInstance> Buildings;
 	TArray<FRHDepositState> Deposits;
 	TArray<FRHTask> Tasks;
-	TMap<FName, int32> ImportStock;         // starter flat-packs (SolarArray, BatteryBank)
+	// Starter flat-packs (SolarArray, BatteryBank), keyed by BUILDING DefName. C6a: it also holds "RC_R" - cargo rovers
+	// waiting aboard the Lander for a road. That key is a ROBOT row name, NOT a building flat-pack: placement's lookup can never
+	// match it, and any "list the flat-packs" UI must skip it (GetRoversWaitingAboard reads it).
+	TMap<FName, int32> ImportStock;
 	FRHPowerState Power;
 	double OrderLagSeconds = 45.0;
 	double PileCapKg = 500.0;

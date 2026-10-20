@@ -5,3 +5,4 @@ RC_F,Fabricator RC-F,Fabricator,2500,90,150,5,2.5,50,1.0,7,1,,TRUE,"WorkRate = b
 RC_S,Scout RC-S,Scout,800,60,40,3,7.0,0,60,4,1,,TRUE,"WorkRate = survey radius m; reveals deposits; long theoretical range, thin margins"
 RC_M,Maintenance RC-M,Maintenance,1200,70,80,5,3.5,20,25,3,1,,TRUE,"WorkRate = wear removed per spare part; carries 2 parts"
 RC_E2,Advanced Excavator RC-E2,Excavator,3000,110,130,5,2.5,60,100,8,0,,TRUE,"Manifest-only; double dig rate; the fleet-growth temptation"
+RC_R,Cargo Rover RC-R,Rover,6000,200,20,8,5.0,1000,0,6,0,,TRUE,"C6a (2026-10-20): the colony's freight vehicle. Arrives as the CargoRover manifest item (StartingCount 0) and needs a road: it runs a built edge at 5.0 x RoadSpeedMul = 8 m/s but crawls at RoverOffRoadSpeedMul everywhere else, takes only FREIGHT hauls (road-served, 80 m or more, over a hauler's 200 kg) and docks only at road-served pads. Cargo 1 t. All numbers placeholder, director review"

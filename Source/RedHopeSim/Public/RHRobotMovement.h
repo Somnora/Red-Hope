@@ -34,5 +34,7 @@ namespace RH
 	// the trip once per target (straight to an entry node, along the graph, straight
 	// from an exit node) and drives it, carrying the step's leftover time across
 	// waypoints. True on arrival.
-	bool MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt);
+	// C6a: bRover drives it as a cargo rover - the road at its speed, everything else (the straight
+	// line with no road, both end legs, a missing edge) at the rover's off-road crawl.
+	bool MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover = false);
 }

@@ -546,3 +546,53 @@ Design, professor review (BLOCKED), revision and re-review (CLEARED WITH CONDITI
   - Districts group the trips for the flow picture and the traffic overlay. They are never an exemption: unzoned ends and trips inside one big district count.
   - The cost (Hope by the share of long commuters, and work time) phases in with population, from 60 to 160 people. So a crew-sized colony never feels it, and building a road can only shorten trips; it never switches a penalty on.
 - **Q3a. Roads can be torn up,** with 50% of their Struct back, like buildings. A rover already on a removed road slows to a crawl and finishes its trip.
+
+### C6a, traffic, the simulation half: what it settles, and where it chose (2026-10-20)
+
+The design, its professor review and re-review, and the director's answers Q1a Q2a Q3a are in `docs/qa/2026-10-20/c6-traffic-design.md` (its "C6a, AS BUILT" section carries the build notes). Save v40, strict, **no new saved field** (a rover saves as any robot, an undeployed one in `ImportStock["RC_R"]`, a freight task as any haul; every commute, flow, freight and path cache is derived). C6b (shuttles, the TRAFFIC overlay, the demolish UI) is not built; its const accessors are (`GetCommuteFlowMatrix`, `GetCommuteFlows`, `GetCommutePairs`, `GetCommuteEdgeLoads`, `GetRoverStates`, `GetRoverRoadPath`).
+
+- **Rovers.** `CargoRover` manifest item (3,500 kg) and the `RC_R` robot row on the one archetype. It deploys at the built node nearest the Lander (ties by node Id), or waits aboard under `ImportStock["RC_R"]` in both bands. Movement takes a profile (`FRHMoveProfile`): a rover plans with `SpeedMulPermille = round(1000 x 1.6 / 0.3) = 5333` and crawls at 0.3x on every non-road branch (no road, first and last leg, a missing edge). Freight = both ends road-served (a built node within 30 m), on the surface, 80 m or more apart, and a load over a hauler's 200 kg (the rover's 1,000 kg, or a consumer's 2-batch room). A rover claims the straight-nearest freight task it can reach by road (at most 4 plans); haulers take freight only after 300 agent-seconds unclaimed. Rovers dock only at road-served pads; the charge reserve is `DriveWh(3.0 x straight)`, checked at config load against the crawl (3.75 >= 3.33). A rover that breaks off a delivery puts its load back (`ReturnHaulCargo`).
+- **Commuting (Q2a, variant a).** Every employed colonist is measured from their actual home to their actual workplace (roads at 4x, lifts at 60 m a floor); districts only group the trips into the flow matrix (an Unzoned row and column, nobody exempt). Hope loses `Ramp x 4 x min(1, 2 x long / pop)`; a long commuter's work counts `1 - Ramp x 0.15`, through one hook per job function (Lab and Workstation in the seat sums, Garden in the skill average). The population ramp is 60 to 160.
+- **Road demolish (Q3a).** The uplink order `DemolishRoad` (spec in the design doc, C5): 50% Struct back for a standing edge, the whole bill for an unbuilt one.
+
+**Deviations from the design text, for the director.**
+1. `CommuteShaftCmPerFloor` 6000 and `CommuteLongCm` 30000 (the re-review's optional revert), not the REVISION's 2000 / 40000: the battery does not need the change.
+2. The re-review asked for the demolish cases in `-roads` and `-traffic`. `-roads` is unchanged, because a new case there is a moved line under the commit gate; the order's cases are `-traffic` X10 and X8.
+3. `TryClaimFreight` accepts a pickup within `RoverLastLegCm` of the rover without a plan (a rover standing at a site: a plan would say "no road beats the straight line" and refuse it). Anything further needs a plan that rides a road with both end legs within 30 m (R6 as written).
+4. **R3 leaves an asymmetry for the director:** a rover that breaks off a delivery returns its load, a hauler still loses up to 200 kg on a forced charge (unifying them would move the battery).
+5. `-RHCommuteAudit` measures the flows every step even where the ramp is closed (that is its job); it feeds nothing back and is off by default.
+6. The headless agent band has no Mass ticking, so `-traffic` plays rovers through the brains' own sim calls; the brains themselves were proven live (windowless game: a rover claimed a freight task, loaded 1,000 kg of Struct, delivered it; forced to charge mid-delivery it returned the load to the Forge, reopened the task and drove to the road-served pad). The playtest bot does not buy rovers: it lays no road, so a rover would only wait aboard.
+7. New dev cheats: `RH.Rover spawn|list|drain`, `RH.RoadDemolish`, `RH.RoadInstant`, `RH.Commute [flows|edges]`, and `RH.AddSolid ... out`.
+8. The `-scale` flows pass was first measured at 1.5 ms (budget 1 ms) and 11 ms cold over 500 anchors (budget 10); it now looks each trip up once per distinct (home, work) pair instead of per colonist, and runs at 0.14 ms and 4.2 ms.
+9. Gate-D rows D158 to D160 hold the new alerts and data copy; the Hope line and City panel line are C6b's.
+
+### Step 2, going deep: Q1a Q2a Q3a Q4a (2026-10-20)
+
+The director answered `docs/qa/2026-10-20/going-deep-plan.md` (gates D1-D8) with all four recommendations:
+- **Q1a:** robots ride the lifts and work on any floor; a lift has a cargo capacity.
+- **Q2a:** you paint the shapes (cells, tunnel lines, cavern boxes) on a floor's lattice, and the Borer carves them in order.
+- **Q3a:** deeper floors are slower to dig and warmer (they need cooling power), but better shielded. Floors -1 to -5 keep today's numbers.
+- **Q4a:** lifts and trams have capacity. A crowded lift adds a wait to every commute through it, counted from the flows; no car is simulated one by one.
+
+### Step 3, economy: Q1a Q2a Q3a Q4a (2026-10-20)
+
+The director answered `docs/qa/2026-10-20/economy-plan.md` (gates E1-E8) with all four recommendations:
+- **Q1a:** Earth pays in credits. Unspent credits carry over, and each ship keeps a mass cap (ruling 7's packing feel stays).
+- **Q2a:** Earth takes the quota. The cargo leaves on the supply ship and is paid for, so holding a stockpile no longer meets a round, and the City/Earth share becomes a real cost. This moves balance on purpose.
+- **Q3a:** a Martian currency comes later, as a political act (the identity axis leaning Martian, or a Defy choice). Earth reads it as a step away; rivals may join it as a trade bloc.
+- **Q4a:** no money inside the city. Money is the colony's books; wellbeing stays Hope, which is never spent (ruling 11), keeping poverty mechanics out of the mental-health framing.
+
+### C6a sign-off: three deviations accepted (2026-10-20)
+
+The director accepted all three points raised at C6a's report:
+1. The road-demolish cases live in `-traffic` only, not in `-roads` too. Adding them to `-roads` would move that suite's log under the line-diff gate.
+2. The R3 asymmetry stays: a rover returns its cargo on break-off, while a hauler still loses up to 200 kg as before. Changing haulers is a later balance move.
+3. The playtest bot lays no roads and buys no rovers, so commuting is proven by `-traffic`, not by the 110-sol playtests (the longest trip was 120 m against the 300 m line).
+
+### Step 4, territories: Q1a Q2a Q3a Q4a (2026-10-20)
+
+The director answered `docs/qa/2026-10-20/territories-plan.md` (gates T1-T8) with all four recommendations:
+- **Q1a:** regions off screen run in aggregate on the era integrator (the 5% parity bar); only the region on screen runs in full.
+- **Q2a:** several settlements, each a real city with its own stores, power, people and Hope; one capital deals with Earth; they trade by convoy and are actors in inside politics.
+- **Q3a:** territory is held by presence and treaty: settlement coverage claims ground, treaties draw borders, contested sites go to treaty or arbitration. Never by force.
+- **Q4a:** convoys face weather, breakdowns and covert interference (delay or skim, costly if caught), protected by escorts, shielded cargo and waystation shelters. No raids, no attacks.

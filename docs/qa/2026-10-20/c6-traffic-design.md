@@ -365,12 +365,13 @@ d5 stays inert because no sim step runs between `Debug_LayRoad` (`RHSimCommandle
   - When `Ramp == 0` every entry point returns the zero summary before touching any cache.
   - Roads only ever SHORTEN `Surface` (it is a min with the straight line), so a road can never raise the penalty. Painting a district changes no distance. The ramp is continuous in population.
   - The only step left is a single colonist crossing `CommuteLongCm`, which is inherent to a share.
-- **Why the battery stays line-identical under (a).**
+- **Why the battery stays line-identical under (a).** *(Corrected by re-review C1 and C3, 2026-10-20; the first version cited the wrong suite and carried a fallback that would have gutted the feature.)*
   - Judging by the explicit `Debug_AddColonists` calls (births and ships during a run are not counted here), every battery suite except four peaks at 50 colonists or fewer. Two of those four are themselves capped at 50: -districts (`:8678`, 8 + 42) and -citygrowth (`:9657`, `:9695`, 8 + 42). So the ramp is exactly 0 there, which is why the start is 60, not 50.
-  - The other two exceed 60: -percapita (N = 250, `:6603`) and -arrivals (N up to 1,500, `:7028`, plus the Big Arrival). There the ramp is open, so identity needs zero long commuters.
-  - Those colonies live and work on floors at the shaft. The worst case is `4 x CommuteShaftCmPerFloor = 80 m` with `CommuteShaftCmPerFloor` at 2000, below `CommuteLongCm`, raised here to 40000.
-  - This is argued, not run. The implementer must run the battery once with a new `-RHCommuteAudit` switch, which logs each suite's population, Ramp and maximum commute (default off, so it adds no lines). Every suite must show Long = 0 before the commit.
-  - If one does not, raise `CommuteRampStartPop` above that suite's peak, record it in the commit, and do not edit the suite.
+  - The other two exceed 60, and **-percapita peaks at 5,000, not 250**: its ladder is `{10, 100, 1000, 5000}` (`:5899`, filled at `:5911`). The N = 250 call (`:6603`), the 1,500 (`:7028`), the Colonist Transports (`:6634-6660`) and the Big Arrival (`:6799-6850`) belong to -arrivals. The ramp is open in both, so identity needs zero long commuters.
+  - They hold it for one reason: **floor-only homes and seats**. Both build floor homes with `Debug_SetColonistsPerCell` and floor Lab seats; the only surface buildings are SolarArrays (`:5881-5882`, `:6543-6544`). Every employed colonist's trip is `|Lh - Lw| x CommuteShaftCmPerFloor`, at most 4 floors x 6,000 cm = 240 m, under `CommuteLongCm` 300 m, so Long = 0, the penalty is `Ramp x 4 x 0 = +0.0`, and `x - 0.0 == x`. Neither work hook takes its branch. The percapita pin `Near(H.Total, 50 + Milestones + Housing + Rooms + Jobs, 1e-9)` (`:5922-5923`) is untouched.
+  - The retune to 2,000 / 40,000 is NOT needed for identity (even the original 6,000 / 30,000 clears it), so it is **not made**: the shipped rows are `CommuteShaftCmPerFloor` 6000 and `CommuteLongCm` 30000, the re-review's optional revert (logged in design-decisions under C6a).
+  - This is argued, not run. The proof is two things, and the order matters: **(1)** the line diff of all 42 runs (the baseline plus 41 suites) against the C5e logs (`battery_post_c5e`), with today's masks, is the commit gate; **(2)** `-RHCommuteAudit` explains a diff and bounds the margin. It records the MAXIMUM over every step of the run (not one snapshot) and prints one line at the end: steps measured, peak population, peak ramp, the longest employed-colonist trip, the most long commuters at once, and the margin `CommuteLongCm - longest trip`. It measures the flows even where the ramp is closed (that is the point: what the distances WOULD be); it feeds nothing back; default off, so it adds no lines. The diff tool is `scripts/sim/diff_battery.py` (tracked since the C4 gate; the re-review's "not tracked in git" was wrong).
+  - **There is no fallback.** The earlier "raise `CommuteRampStartPop` above that suite's peak" is deleted (re-review C3): -percapita's peak is 5,000, so raising the start above it would switch commuting off for every realistic city. If the audit finds Long > 0 anywhere, either the layout reason above is wrong (fix this text) or the line move is intended; in the second case the commit lists it for director sign-off, and nothing is tuned away.
 - **New and changed rows for (a):** `CommuteRampStartPop` 60, `CommuteRampFullPop` 160, `CommuteShaftCmPerFloor` 2000 (was 6000), `CommuteLongCm` 40000 (was 30000).
 - **Trade-off.** The doc's original rule ("inert whenever no districts are painted or no road exists") is replaced by the ramp. Small colonies never feel commuting, roads or not. That is a design change the director must accept.
 
@@ -475,3 +476,37 @@ d5 stays inert because no sim step runs between `Debug_LayRoad` (`RHSimCommandle
 - **Q3b (no demolish):** C5 falls away. R3, R6 and R7 are still required, because `Debug_RemoveRoadEdge` exists and T8 uses it.
 
 VERDICT: CLEARED WITH CONDITIONS. Build after C1-C5 are written into the doc (C5 only if Q3a), with the 42-run line diff against 891a700 as the commit gate.
+
+---
+
+# C6a, AS BUILT (2026-10-20): the sim half
+
+Build notes for the re-review's conditions. Variant (a), Q1a, Q2a and Q3a throughout. C6b (shuttles, the TRAFFIC overlay, the demolish UI) comes later; its const accessors are in place.
+
+## C1. The suite facts
+Corrected in place in R8 above: -percapita peaks at 5,000; 250, 1,500, the transports and the Big Arrival are -arrivals'; both stay inert because homes and seats are floor-only (at most 4 floors x 6,000 cm = 240 m < 300 m).
+
+## C2. The audit and the gate
+`-RHCommuteAudit` (a command-line switch read in `Initialize`, like `-RHVerifyCaches`): every `StepSim` and `EraStep` ends with `AuditCommuteStep`, which keeps the peak population, the peak ramp, the longest employed-colonist trip, the most long commuters and the step count; `Deinitialize` prints them as one `COMMUTE AUDIT:` line with the margin below the long line. The commit gate is `bash scripts/sim/rh_battery.sh 10` ending `BATTERY COMPLETE: 0 suite(s) not green`, then `diff_battery.py` of its logs against the C5e logs with 0 differing lines in every pre-existing suite; the new `traffic.log` is the only new one. `rh_battery.sh` now lists `traffic` (41 suites, 42 runs).
+
+## C3. No fallback
+Deleted, see R8.
+
+## C4. The position memo
+`FRHCommuteMemo` is keyed on (BuiltVersion, ShaftHead, the commuters' road speed) and NEVER on the job assignment. Entries are keyed by anchor POSITION in whole cm: one Dijkstra per source position (`FRHRoadGraph::DistancesFrom`, the `PlanRoute` loop without the early exit and with the same tie rules), the K nearest built nodes per position, and the finished surface distance per pair of positions (canonical on (low, high) by (X, Y), planned from the low end: O5). The flows (`FRHCommuteFlows`) are keyed on a superset of every input (R1): districts, colonist set, zoning, furniture, JobsVersion, BuiltVersion, shaft head, building count, next building Id, and the commute config. So a reshuffle of seats re-runs the O(N) flows pass and no Dijkstra, and a road that finishes or goes re-derives both. `-traffic` pins that; `-scale` adds the 5,000-colonist budget check (20 districts, 250 edges, a JobsVersion-only bump <= 1 ms, a cold memo + flows <= 5 ms; 500 distinct anchors <= 10 ms; 100 rover plans <= 10 ms).
+
+## C5. Road demolish: the player's verb (Q3a)
+The verb is `DemolishRoad`, through the uplink, `Value` = the edge Id. It is a real player order: the same lag as every order, a preflight that says why, and a worker re-run when the order lands.
+
+- **Accepted** when the edge exists (a standing edge or one still being built). **Refused** with `That road is already gone` when it does not (another demolish order or the debug hook took it while this one was in transit; an Id that never existed).
+- **Effect** is exactly `Debug_RemoveRoadEdge`'s (`RemoveRoadEdgeWithRefund`, shared): the edge's Build tasks are removed; `RoadGraph.RemoveEdge` runs; the refund goes to the Lander's `OutputKg`: `SalvageFraction` (50%) of `length m x RoadStructKgPerMeter` for a standing edge, the whole bill for an unbuilt one (the order paid for it).
+- **State and keys.** Removing a standing edge bumps `BuiltVersion` (`RHRoads.cpp`), which already invalidates the commute flows, the position memo, the adjacency, and re-derives every `bFreight` (O2). An unbuilt edge changes none of them. No new saved field: the graph is already saved (v36), so demolish state round-trips with it.
+- **Under a moving robot or rover.** No re-plan (C4 item 5): the leg runs at the edge's live speed, which for a missing edge is 1.0x for a robot and 0.3x for a rover; both still arrive. An in-flight rover whose destination building is demolished goes through the existing Lander redirect (below), not through this verb.
+- **Tests.** `-traffic` X10: a standing edge (the 50% refund, BuiltVersion bumped), an unbuilt edge (the whole bill, the Build task gone, BuiltVersion untouched), a gone edge refused with a reason; X8: demolish under a moving rover; X13: the keys. `-roads` is unchanged: its log is under the commit gate's line diff, so a new case there would be a moved line. Its `Debug_RemoveRoadEdge` cases (R16) now run the shared worker and pass line for line; the order's own cases live in `-traffic` (logged as a deviation).
+- **Not here (C6b):** the demolish UI and the confirmation, the overlay's hover on an edge. `RH.RoadDemolish <edgeId>` transmits the order.
+
+## The "destination demolished mid-trip" test (re-review correction)
+It passes through the EXISTING Lander redirect in `RemoveBuilding` (`RHSimWorldSubsystem.cpp`, "cargo already bound for it comes home to the Lander instead": a claimed haul's `To` becomes the Lander), and `HaulUnload` then credits the Lander's `InputKg`. `-traffic` X9 is named and asserted that way: the task's To is the Lander, the Lander's `InputKg` rose by the load, its `OutputKg` did not. The new `ReturnHaulCargo` is covered by the other two X9 cases: a forced charge mid-delivery (mass conserved to 1e-6, the load back in the source, the task open) and the near-unreachable no-task guard (the load goes to the Lander's `OutputKg`).
+
+## The numbers as built
+`RoverOffRoadSpeedMul` 0.3, `RoverLastLegCm` 3000, `FreightMinCm` 8000, `FreightHaulerFallbackSec` 300, `RoverReserveDetourMul` 3.0, `RoverClaimPlans` 4, `CommuteRoadSpeedMul` 4.0, `CommuteShaftCmPerFloor` 6000, `CommuteLongCm` 30000, `CommuteRampStartPop` 60, `CommuteRampFullPop` 160, `HopeCommuteMax` 4, `HopeCommuteSteepness` 2, `CommuteWorkMul` 0.85, `CommuteAlertShare` 0.10 (RH_Config); `RC_R` (RH_Robots); `CargoRover` (RH_ManifestItems). Save v40, strict, no new field.
