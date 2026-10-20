@@ -782,27 +782,52 @@ FRHCityDemand URHSimWorldSubsystem::GetCityDemand() const
 	}
 	Out.Air = FMath::Clamp((double)Out.ResidentsShort / (double)Pop, 0.0, 1.0);
 
-	// --- The Big Arrival, ready but for life support (C5c) ---
-	// Its streak is complete and the beds are there: only air, food or water holds it. Gate-D
-	// placeholder copy (D153): plain, names what to restore, never a threat.
+	// --- The Big Arrival, ready but for life support (C5c, C5d) ---
+	// Its streak is complete and the beds are there: only air, food or water holds it - the stocks (C5c) or what
+	// the colony makes against what N + the wave would draw (C5d). Gate-D placeholder copy (D153): plain, names
+	// what to restore, never a threat.
 	if (Out.bBigArrivalPending && BigArrivalStreakSols >= BigArrivalStreakSolsNeeded && Out.FreeBeds >= BigArrivalFreeBeds)
 	{
 		const FRHBigArrivalSupport Support = GetBigArrivalSupport();
 		if (!Support.AllOk())
 		{
 			Out.bBigArrivalWaitsOnSupply = true;
-			Out.bBigArrivalShortAir = !Support.bO2Ok;
-			Out.bBigArrivalShortFood = !Support.bFoodOk;
-			Out.bBigArrivalShortWater = !Support.bWaterOk;
+			Out.bBigArrivalShortAir = !Support.O2Carried();
+			Out.bBigArrivalShortFood = !Support.FoodCarried();
+			Out.bBigArrivalShortWater = !Support.WaterCarried();
 			if (Out.bBigArrivalShortAir)
 			{
-				Out.BigArrivalAirNote = FString::Printf(TEXT("The settlers are ready to come once the air reserve can carry %d more."), Support.Wave);
+				const TCHAR* What = (!Support.bO2Ok && !Support.O2Leg.bOk) ? TEXT("air reserve and oxygen production") : (!Support.bO2Ok ? TEXT("air reserve") : TEXT("oxygen production"));
+				Out.BigArrivalAirNote = FString::Printf(TEXT("The settlers are ready to come once the %s can carry %d more."), What, Support.Wave);
+				if (!Support.O2Leg.bOk)
+				{
+					Out.BigArrivalAirNote += FString::Printf(TEXT(" The colony makes about %.0f kg of oxygen a sol and would need %.0f."), Support.O2Leg.ProductionPerSol, Support.O2Leg.DrawPerSol);
+				}
 			}
 			if (Out.bBigArrivalShortFood || Out.bBigArrivalShortWater)
 			{
-				const TCHAR* What = Out.bBigArrivalShortFood && Out.bBigArrivalShortWater ? TEXT("food and water stores") : (Out.bBigArrivalShortFood ? TEXT("food store") : TEXT("water store"));
-				Out.BigArrivalRationsNote = FString::Printf(TEXT("The settlers are ready to come once the %s can carry %d more."), What, Support.Wave);
+				// "food and water stores" (the C5c words) for stock; "food and water production" for what is made; both, joined.
+				const auto Phrase = [](bool bFood, bool bWater, const TCHAR* Noun, const TCHAR* NounBoth) -> FString
+				{
+					return bFood && bWater ? FString::Printf(TEXT("food and water %s"), NounBoth) : (bFood ? FString::Printf(TEXT("food %s"), Noun) : (bWater ? FString::Printf(TEXT("water %s"), Noun) : FString()));
+				};
+				const FString StockPhrase = Phrase(!Support.bFoodOk, !Support.bWaterOk, TEXT("store"), TEXT("stores"));
+				const FString MadePhrase = Phrase(!Support.FoodLeg.bOk, !Support.WaterLeg.bOk, TEXT("production"), TEXT("production"));
+				const FString Joined = StockPhrase + (!StockPhrase.IsEmpty() && !MadePhrase.IsEmpty() ? TEXT(" and ") : TEXT("")) + MadePhrase;
+				Out.BigArrivalRationsNote = FString::Printf(TEXT("The settlers are ready to come once the %s can carry %d more."), *Joined, Support.Wave);
 			}
+		}
+	}
+
+	// --- Settler ships, held to what life support carries (C5d) ---
+	if (Out.bSettlersDraw)
+	{
+		Out.SettlerSupportRoom = GetSettlerSupportRoom();
+		const int32 Housed = FMath::Min(Out.SettlersWanted, Out.SettlerRoom);
+		if (Housed > 0 && Out.SettlerSupportRoom < Housed)
+		{
+			Out.bSettlersHeldBySupply = true;
+			Out.SettlerSupportNote = FString::Printf(TEXT("The next ship's settlers are held to %d: the colony's air, water and food production can carry no more yet."), FMath::Max(0, Out.SettlerSupportRoom));
 		}
 	}
 	return Out;

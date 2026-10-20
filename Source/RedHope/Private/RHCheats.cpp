@@ -1827,7 +1827,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 		if (Sub == TEXT("demand"))
 		{
 			const FRHCityDemand Dm = Sim->GetCityDemand();
-			UE_LOG(LogRedHope, Display, TEXT("[RH.District] demand at %d: Housing %.2f (%d bed(s) short of %d, limit %s; free %d, comfortable %d, vault %s) | Jobs %.2f (%d of %d seats filled, %d short) | Services %.2f (worst %s) | Air %.2f (%d home(s) short, margin %.1f sols)"),
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] demand at %d: Housing %.2f (%d bed(s) short of %d, limit %s; free %d, comfortable %d, vault %s) | Jobs %.2f (%d of %d seats filled, %d short) | Services %.2f (worst %s) | Rations %.2f (%d home(s) short, margin %.1f sols)"),
 				Dm.Population, Dm.Housing, Dm.HousingBedsShort, Dm.HousingBedsWanted, *Dm.HousingLimit.ToString(), Dm.FreeBeds, Dm.ComfortCapacity, Dm.bVaultCertified ? TEXT("certified") : TEXT("not yet"),
 				Dm.Jobs, Dm.FilledSeats, Dm.TotalSeats, Dm.SeatsShort, Dm.Services, Dm.ServiceGaps.Num() > 0 ? *Dm.ServiceGaps[0].Function.ToString() : TEXT("-"), Dm.Air, Dm.HomesShort, Dm.MinOxygenMarginSols);
 			return;
@@ -1920,13 +1920,22 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 	TEXT("RH.Growth"),
-	TEXT("RH.Growth [now] - C5b: list the city's growth. The open projects (what, how far, what is left, the bill), each Homes and Civic district's switch and why it is not growing, the pause, and the free material per resource (held - quota bill - reserve). 'now' runs the sol-boundary start check at once (DEBUG: it runs by itself at every sol, one project at most)."),
+	TEXT("RH.Growth [now | share <0..1>] - C5b: list the city's growth. The open projects (what, how far, what is left, the bill), each Homes and Civic district's switch and why it is not growing, the pause, the City / Earth share, the free material per resource (held - quota bill - reserve) and the life-support books (production made against the draw). 'now' runs the sol-boundary start check at once (DEBUG: it runs by itself at every sol, one project at most). 'share <0..1>' sets the City / Earth share (C5d: how much of the spare material may grow the city; 1 = all of it, 0 = Earth's next quota is held whole; instant, saved)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 		if (!Sim)
 		{
 			return;
+		}
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("share"), ESearchCase::IgnoreCase))
+		{
+			if (Args.Num() < 2)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Growth share <0..1>"));
+				return;
+			}
+			Sim->SetCityShare(FCString::Atod(*Args[1]));
 		}
 		if (Args.Num() > 0 && Args[0].Equals(TEXT("now"), ESearchCase::IgnoreCase))
 		{
@@ -1956,11 +1965,19 @@ static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 				D.bGrowth ? TEXT("ON") : TEXT("OFF"), Sim->FindGrowthProject(D.Id) ? TEXT(", a project is under way") : TEXT(""),
 				Sim->GetGrowthNote(D.Id).IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" - %s"), *Sim->GetGrowthNote(D.Id)));
 		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   City / Earth share: %.0f%% city, %.0f%% Earth (default %.0f%%)"), Sim->GetCityShare() * 100.0, (1.0 - Sim->GetCityShare()) * 100.0, Sim->GetCityShareDefault() * 100.0);
 		for (const TCHAR* Res : { TEXT("Struct"), TEXT("Shielding"), TEXT("Oxygen") })
 		{
 			const URHSimWorldSubsystem::FRHGrowthAvailability A = Sim->GetGrowthAvailability(FName(Res));
-			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the %s - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.Reserve, A.Free);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the %s (of %.0f) - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.FullBill, A.Reserve, A.Free);
 		}
+		// C5d: the life-support books at the present head count, and at the head count the next settler ship or the Big Arrival would make it.
+		for (const TCHAR* Res : { TEXT("Oxygen"), TEXT("Water"), TEXT("Food") })
+		{
+			const URHSimWorldSubsystem::FRHSupportLeg L = Sim->GetSupportLeg(FName(Res), Sim->GetPopulation());
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: makes %.1f kg/sol, draws %.1f at %d people (net %.1f), stock %.0f = %.1f sols of the deficit"), Res, L.ProductionPerSol, L.DrawPerSol, Sim->GetPopulation(), L.NetPerSol(), L.StockKg, L.CoverSols);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   life support carries %d more settler%s (a deficit must be covered by the stock for %.0f sols)"), Sim->GetSettlerSupportRoom(), Sim->GetSettlerSupportRoom() == 1 ? TEXT("") : TEXT("s"), Sim->GetLifeSupportDeficitCoverSols());
 		if (const URHGrowthVisualizerSubsystem* Viz = World->GetSubsystem<URHGrowthVisualizerSubsystem>())
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %d scaffold%s drawn in the viewed level"), Viz->GetDrawnProjectCount(), Viz->GetDrawnProjectCount() == 1 ? TEXT("") : TEXT("s"));

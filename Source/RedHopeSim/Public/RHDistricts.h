@@ -136,7 +136,7 @@ struct FRHCityDemand
 	TArray<FRHServiceGap> ServiceGaps;
 	double Services = 0.0;
 
-	// --- Air ---
+	// --- Rations (the bar the deck calls Rations; the field keeps its C5a name, Air) ---
 	// Homes on short rations (the C2a ration under 1, whatever its scarcest leg) and
 	// the oxygen margin in sols per home: the home's O2 fill over what its residents
 	// breathe in a sol.
@@ -157,4 +157,12 @@ struct FRHCityDemand
 	bool bBigArrivalShortAir = false, bBigArrivalShortFood = false, bBigArrivalShortWater = false;
 	FString BigArrivalAirNote;
 	FString BigArrivalRationsNote;
+
+	// --- Settler ships and life support (C5d) ---
+	// The next ship's settlers are capped to what air, water and food production (and their stock)
+	// can carry (GetSettlerSupportRoom). Set when a ship would bring settlers, housing would take them
+	// all, and life support takes fewer; the note is the deck's words (Gate-D placeholder, D156).
+	int32 SettlerSupportRoom = 0;
+	bool bSettlersHeldBySupply = false;
+	FString SettlerSupportNote;
 };

@@ -586,19 +586,64 @@ public:
 	int32 GetBigArrivalFreeBeds() const { return BigArrivalFreeBeds; }
 	int32 GetBigArrivalColonists() const { return BigArrivalColonists; }
 	double GetBigArrivalLifeSupportSols() const { return BigArrivalLifeSupportSols; }
-	// C5c: can the colony carry its present population PLUS the Big Arrival's wave? Per leg: the O2
-	// pool against (N + wave) x ColonistO2KgPerSol x BigArrivalLifeSupportSols (the pool the growth
-	// reserve reads), and the Food (counting the provisions the wave lands with) and Water runways at
-	// N + wave against FoodRunwayFloorSols. The wave does not fire while any leg is short; its streak
-	// keeps running. A pure function of state.
+	double GetLifeSupportDeficitCoverSols() const { return LifeSupportDeficitCoverSols; }
+	// C5d production ledger. The mean kg a sol the colony made of Oxygen, Water or Food over the last
+	// ProductionWindowSols completed sols (0 before the first sol completes, and for any other resource).
+	// Saved (v39). Harness: Debug_SetProductionPerSol fills the whole window with one figure, as if the
+	// colony had been making that much; Debug_SetLifeSupportDeficitCoverSols sets the cover horizon (0
+	// switches the production check's stock fallback to "always covered", the C5c-only behaviour).
+	double GetProductionPerSol(FName Resource) const;
+	int32 GetProductionWindowSols() const { return ProductionWindowSols; }
+	void Debug_SetProductionPerSol(FName Resource, double KgPerSol);
+	// Harness: credit kg to a leg's open tally as if a machine had made it (the real seams call NoteProduced), the
+	// open sol's tally, and the sol the ledger last rolled at (it rolls when the clock enters a new sol).
+	void Debug_NoteProduced(FName Resource, double Kg) { NoteProduced(Resource, Kg); }
+	double GetProductionOpenKg(FName Resource) const { const int32 Leg = ProductionLeg(Resource); return Leg == INDEX_NONE ? 0.0 : ProdAccKg[Leg]; }
+	int32 GetProductionCheckedSol() const { return ProductionCheckedSol; }
+	void Debug_SetLifeSupportDeficitCoverSols(double Sols) { LifeSupportDeficitCoverSols = FMath::Max(0.0, Sols); }
+	// The standing oxygen leak of every rated floor and rated surface network, kg a sol (it is part of the
+	// Oxygen leg's draw: it is paid whoever lives there).
+	double GetStandingO2LeakKgPerSol() const;
+	// C5d: the colony's life-support books, per leg (Oxygen, Water, Food). Production is MEASURED where the sim
+	// grants it (a finished Electrolysis or MeltIce batch, the garden's yield and its oxygen emission) and read
+	// as the mean of the last ProductionWindowSols COMPLETED sols (GetProductionPerSol), so it carries the
+	// machines' real duty: power shed, the night, the ice. Draw is what the people take at the current rates:
+	// breathing (plus the standing leak of every rated floor and network), the water the recycling does not
+	// return, and food. A leg can carry a head count when its production covers its draw (net >= 0) or, short of
+	// that, its stock covers the deficit for LifeSupportDeficitCoverSols sols.
+	struct FRHSupportLeg
+	{
+		FName Resource;
+		double ProductionPerSol = 0.0;
+		double DrawPerSol = 0.0;   // at the head count asked about
+		double StockKg = 0.0;      // what the leg may spend (the Oxygen pool; Water; Food plus any provisions landing with the wave)
+		double CoverSols = 0.0;    // StockKg / deficit (1e9 when the leg has no deficit)
+		bool bOk = true;
+		double NetPerSol() const { return ProductionPerSol - DrawPerSol; }
+	};
+	FRHSupportLeg GetSupportLeg(FName Resource, int32 People, double ExtraStockKg = 0.0) const;
+	// The most NEW people (settlers) the colony's life support carries on top of its present population by
+	// the same rule: every leg must carry N + k. A pure function; 0 when a leg is already short.
+	int32 GetSettlerSupportRoom() const;
+	// C5c + C5d: can the colony carry its present population PLUS the Big Arrival's wave? Per leg, TWO
+	// checks, both required. Stock (C5c): the O2 pool against (N + wave) x ColonistO2KgPerSol x
+	// BigArrivalLifeSupportSols (the pool the growth reserve reads), and the Food (counting the provisions
+	// the wave lands with) and Water runways at N + wave against FoodRunwayFloorSols. Production (C5d): the
+	// leg's measured production against its draw at N + wave - net >= 0, or the stock covering the deficit
+	// for LifeSupportDeficitCoverSols sols (the FRHSupportLeg rule). The wave does not fire while any is short;
+	// its streak keeps running. A pure function of state.
 	struct FRHBigArrivalSupport
 	{
 		int32 Wave = 0;            // BigArrivalColonists
 		int32 People = 0;          // N + Wave: whom the colony would have to carry
 		double O2HeldKg = 0.0, O2NeedKg = 0.0;
 		double FoodRunwaySols = 0.0, WaterRunwaySols = 0.0, FloorSols = 0.0;
-		bool bO2Ok = true, bFoodOk = true, bWaterOk = true;
-		bool AllOk() const { return bO2Ok && bFoodOk && bWaterOk; }
+		bool bO2Ok = true, bFoodOk = true, bWaterOk = true;   // the stock checks (C5c)
+		FRHSupportLeg O2Leg, FoodLeg, WaterLeg;                // the production checks (C5d), at N + wave
+		bool O2Carried() const { return bO2Ok && O2Leg.bOk; }
+		bool FoodCarried() const { return bFoodOk && FoodLeg.bOk; }
+		bool WaterCarried() const { return bWaterOk && WaterLeg.bOk; }
+		bool AllOk() const { return O2Carried() && FoodCarried() && WaterCarried(); }
 	};
 	FRHBigArrivalSupport GetBigArrivalSupport() const;
 	double GetMoveHomeIntervalSols() const { return MoveHomeIntervalSols; }
@@ -1227,9 +1272,9 @@ public:
 	//   Gates  Homes: the city's Housing shortfall (GetCityDemand's HousingBedsShort, less the
 	//          beds already under way) is above zero. Civic: some CivicService room function
 	//          (RH_Rooms) has a coverage gap, counting rooms already under way.
-	//   Money  Per resource, free = uncommitted holdings - the quota bill for it (the OPEN quota's;
-	//          between rounds - awaiting the manifest, ship inbound, resting - the NEXT round's,
-	//          C5c) - its reserve (GrowthReserveStructKg of Struct; for Oxygen GrowthReserveO2Sols of the
+	//   Money  Per resource, free = uncommitted holdings - the quota bill for it (the OPEN quota's, whole;
+	//          between rounds - awaiting the manifest, ship inbound, resting - (1 - CityShare) x the NEXT
+	//          round's, C5c and C5d: the player's City / Earth share) - its reserve (GrowthReserveStructKg of Struct; for Oxygen GrowthReserveO2Sols of the
 	//          whole colony's breathing; nothing for the rest). Uncommitted = what the C4 road
 	//          bill counts: completed buildings on linked floors plus the pool, never a
 	//          construction site's hopper. The WHOLE bill (Struct, Shielding, bed or room
@@ -1266,9 +1311,20 @@ public:
 	// Does a room row emit this adjacency tag? (A CivicService row must never emit Odor.)
 	static bool RoomEmitsTag(const FRHRoomRow& Row, const TCHAR* Tag);
 	// One resource's room to build: free = Held - QuotaBill - Reserve.
-	// QuotaBill is the OPEN quota's bill while it is open, else (C5c) the NEXT round's (bNextRound).
-	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, Reserve = 0.0, Free = 0.0; bool bNextRound = false; };
+	// QuotaBill is what growth leaves standing for Earth: the OPEN quota's whole bill while it is open (a quota
+	// is met by holding its bill, so growth never eats quota progress); between rounds (C5c) the NEXT round's
+	// bill, held back in proportion to the City / Earth share (C5d): (1 - CityShare) x the next bill. FullBill is
+	// the bill before the share (equal to QuotaBill while the quota is open). So the share is the one dial:
+	// 1 spends everything above the reserve and the open bill (C5b), 0 spares the whole next bill (C5c).
+	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, FullBill = 0.0, Reserve = 0.0, Free = 0.0; bool bNextRound = false; };
 	FRHGrowthAvailability GetGrowthAvailability(FName Resource) const;
+	// The City / Earth share (C5d): a colony-wide policy value, 0..1, the player's standing choice (the City
+	// panel, RH.Growth share). It applies at once, like the growth switch, and is SAVED (v39). Default
+	// GrowthCityShareDefault. 1 = all the spare material may grow the city; 0 = Earth's next quota is held whole.
+	double GetCityShare() const { return CityShare; }
+	double GetCityShareDefault() const { return GrowthCityShareDefault; }
+	void SetCityShare(double Share); // clamps to 0..1; logs and broadcasts only on a change
+	void Debug_SetCityShare(double Share) { CityShare = FMath::Clamp(Share, 0.0, 1.0); ++GrowthVersion; } // silent harness setter
 	// The words for a project ("4 new home bays", "a new dining room"), shared by the alert, the
 	// City panel and the cheat.
 	FString DescribeGrowthProject(const FRHGrowthProject& Project) const;
@@ -1696,6 +1752,8 @@ private:
 	// DT_Config rows (header defaults equal the CSV).
 	double GrowthReserveStructKg = 1000.0;
 	double GrowthReserveO2Sols = 10.0;
+	double GrowthCityShareDefault = 0.5;    // C5d: what a new colony's City / Earth share starts at
+	double CityShare = 0.5;                 // SAVED (v39): the player's City / Earth share, 0..1
 	double GrowthModuleSols = 1.0;
 	double GrowthCellSols = 1.0;
 	double GrowthRoomSols = 0.5;
@@ -1706,8 +1764,9 @@ private:
 	void EmitGrowthAlert(int32 Sol);
 	// Money.
 	double GetGrowthHoldingsKg(FName Resource) const;
-	// The quota bill growth leaves standing: the open quota's while it is open, else (C5c) the next
-	// round's (GetNextQuotaBills). bOutNext says which.
+	// The quota bill growth has to weigh, BEFORE the City / Earth share: the open quota's while it is open,
+	// else (C5c) the next round's (GetNextQuotaBills). bOutNext says which. GetGrowthAvailability scales
+	// the next round's by (1 - CityShare).
 	double GetProtectedQuotaBillKg(FName Resource, bool& bOutNext) const;
 	bool GrowthBillFits(const TMap<FName, double>& Bill, FString& OutWhy) const;
 	void TakeGrowthResource(FName Resource, double Kg);
@@ -2037,6 +2096,20 @@ private:
 	int32 BigArrivalFreeBeds = 100;                  // free beds the wave needs
 	int32 BigArrivalColonists = 100;
 	double BigArrivalLifeSupportSols = 10.0;         // C5c: sols of the whole colony's O2 the wave needs on hand
+	double LifeSupportDeficitCoverSols = 40.0;       // C5d: sols of a production deficit the stock must cover (wave and settlers)
+	int32 ProductionWindowSols = 3;                  // C5d: completed sols the measured production is averaged over (1..ProdMaxWindow)
+	// C5d production ledger (SAVED, v39): kg made this (open) sol per leg, a ring of the kg made in each of the
+	// last completed sols, and the sol the ledger last rolled at. Legs: 0 Oxygen, 1 Water, 2 Food.
+	static constexpr int32 ProdLegs = 3;
+	static constexpr int32 ProdMaxWindow = 8;
+	double ProdAccKg[ProdLegs] = { 0.0, 0.0, 0.0 };
+	double ProdRing[ProdLegs][ProdMaxWindow] = {};
+	int32 ProdRingFilled = 0;                        // completed sols recorded, up to ProdMaxWindow
+	int32 ProdRingHead = 0;                          // the next ring slot to write
+	int32 ProductionCheckedSol = 0;
+	static int32 ProductionLeg(FName Resource);      // 0..2, or INDEX_NONE
+	void NoteProduced(FName Resource, double Kg);    // called where the sim grants a leg's output
+	void RollProductionLedger(int32 SolNow);         // a threshold on the monotone clock, both bands
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
 	// SAVED (v35): the Big Arrival's running streak and its once-only flag, the
 	// move-home accumulator, and the settlers who came with ships (a count).

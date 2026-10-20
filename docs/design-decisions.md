@@ -484,3 +484,29 @@ Also ruled: the City panel's "Air" bar is renamed **"Rations"**. It also fills o
 Queued with it:
 - the Big Arrival's life-support gate becomes production-aware (net O2, food and water production must carry the new draw, not just stock on hand);
 - settler ships get the same check.
+
+### C5d, the City / Earth share and production-aware life support: what it settles, and where it chose (2026-10-19)
+
+Save v39. It builds the director's ruling above.
+
+- **The share.** `CityShare` in 0..1, a saved, colony-wide policy value, set at once (like the growth switch) from the City panel (five chips, 0 / 25 / 50 / 75 / 100% city, labelled "CITY <-> EARTH", placeholder D155) or `RH.Growth share <0..1>`. A new colony starts at the new row `GrowthCityShareDefault` (0.5).
+- **The rule, as asked and unrefined.** Growth's free = held - reserve - the OPEN quota's whole bill - (1 - share) x the NEXT round's bill; between rounds the open-bill term is empty, while a quota is Open the next-bill term is. So share 1 spends everything above the reserve (C5b) and share 0 holds the next round whole (C5c). It is a pure function of state: deterministic, linear in time, and the same in the agent and era bands. `GetGrowthAvailability` reports the held-back bill (`QuotaBill`) and the whole one (`FullBill`).
+- **The dial, 110-sol districts playtests (full cargo; C5b / C5c / growth-off for reference).** Q3 rounds met on sols; growth projects started; beds built (the city's target population); population at 110.
+
+| City share | Q3 rounds 1-3 met | projects | beds | pop at 110 |
+|---|---|---|---|---|
+| C5b (no protection) | 36 / 54 / 104 | 10 | - | 117 (wave at 106) |
+| 0% (= C5c) | 36 / 40 / 45 | 1 | 13 | 8 |
+| 25% | 36 / 40 / 45 | 3 | 29 | 14 |
+| **50% (default)** | **36 / 46 / 60** | **7** | **93** | 8 (see below) |
+| 75% | 36 / 54 / 83 | 9 | 125 | 13 |
+| 100% | 36 / 54 / 103 | 9 | 125 | 12 |
+| 50%, lean | 36 / 46 / 59 | 7 | 93 | 12 |
+
+- **Why 50%.** It is the highest step that keeps the third Q3 round at about sol 60 (60.45 full, 59 lean) and it builds seven projects against one at 0%. The ladder is a step function, so 40% and 50% give the same table and 60% already slips to 70. The default is also one of the panel's chips.
+- **The unrefined rule is kept** because the playtests do not demand a refinement: both the supply line and the city move across the dial. Growth can only start between rounds while Struct is the binding resource (an open round holds its whole bill), so the cadence is a few projects per round, not one every few sols.
+- **Production is measured.** The sim has no production estimator (the deck's and Hope's runway are stock over draw), and the machines' nameplate overstates what they make (an Electrolyzer on the day shift makes half its 213.6 kg a sol; the old lean colony made about 30-100 against a nameplate of 213). So the sim now credits production where it grants it (a finished Electrolysis or MeltIce batch, the garden's yield and oxygen) into a ledger, and reads the mean of the last `ProductionWindowSols` (3) COMPLETED sols (`GetProductionPerSol`). It rolls at the first step of a new sol, a threshold on the monotone clock, in both bands; a long jump records empty sols. Saved (the open tally, the ring, the sol it rolled at).
+- **The life-support rule.** A leg (Oxygen, Water, Food) carries a head count when its production covers its draw (net >= 0) or its stock covers the deficit for `LifeSupportDeficitCoverSols` sols. Draw: breathing (0.75 kg a head) plus the standing leak of every rated floor and network, the water the recycling does not return (15% of 2 kg a head), food (0.62 kg a head). The Big Arrival needs the new check AND C5c's stock checks (kept as they were); a wave's own provisions count as food stock. Settler ships are capped to the most people every leg carries (closed form, `GetSettlerSupportRoom`), the log says when a ship is held, and the City panel's Rations line says so (D156). The Rations prose covers the production case too (D153).
+- **A deviation, for the director: the cover is 40 sols, in its own row.** As specified ("the stock must cover BigArrivalLifeSupportSols of the deficit", 10 sols) the check can never refuse anything C5c passes, because a deficit never exceeds the whole draw: stock >= 10 x draw already implies stock >= 10 x deficit. The old lean state (sol 85, 8 people, oxygen 30 a sol against 81, 1,510 kg in the pool) passes at 10 sols (1,510 >= 10 x 51) and is refused only above 29.6. So the cover has its own row, 40 (about one supply round, the soonest an Electrolyzer kit can come), and `BigArrivalLifeSupportSols` still sets C5c's separate stock check (its pin is unchanged). Make the cover 10 and production stops mattering.
+- **What the playtests showed about the gate (not a tuning problem).** The scripted player farms two garden cells and runs one Electrolyzer, so the colony can feed about ten people. The wave is held on oxygen production at 75% and 100% (107 kg a sol made against 166 drawn at 113 people, 1,080 kg in the pool, the growth projects having spent the rest on new cells' air); at 25% it has no beds. With one more Electrolyzer, ordered when the City panel says the settlers wait on oxygen production (`RH_PLAYTEST_LIFESUPPORT=1`, off by default), the 75% run lands the wave at sol 90 and reaches a population of 117. At 50% the settlers (which the stock cover admits) outgrow the larder, which the bot never expands: 14 people by sol 64, food gone at 105, 6 recalled. That is the rule working as ruled (the stock buys the player forty sols to build farms), not a bug, but the director may want settlers held to net production only.
+- **Open points.** The several-dozen population at 110 is not reachable by the dial alone for this reason: it needs the player's farms and electrolyzers. Settlers' provisions (the wave brings 50 kg a head, a ship's settlers none) are unchanged.

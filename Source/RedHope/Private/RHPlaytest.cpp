@@ -72,6 +72,11 @@ namespace
 		// C5b: paint districts and log what the city builds in them.
 		bool bDistricts = false;
 		bool bNoGrowth = false; // the control: the districts are painted and floor -2 is made, but the city builds nothing
+		// C5d: the player's answer to "the settlers are ready once oxygen production can carry N more" - up to three more
+		// Electrolyzers, one every eight sols while the City panel says the Big Arrival waits on oxygen production.
+		bool bLifeSupport = false;
+		int32 LifeSupportOrders = 0;
+		int32 LifeSupportNextSol = 0;
 		TMap<int32, double> GrowthLastRemaining; // district -> the open project's RemainingSols at the last look: a rise means a new project replaced it
 		struct FGrowthRecord { int32 DistrictId = 0; ERHGrowthKind Kind = ERHGrowthKind::SurfaceModule; double StartSol = 0.0, EndSol = -1.0; FString What; };
 		TArray<FGrowthRecord> GrowthRecords;
@@ -278,6 +283,9 @@ namespace
 					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  the Big Arrival is %s: air %.0f of %.0f kg (%s), food runway %.1f sols (%s), water runway %.1f sols (%s) against a floor of %.0f"),
 						BS.AllOk() ? TEXT("not held by life support") : TEXT("WAITING ON LIFE SUPPORT"), BS.O2HeldKg, BS.O2NeedKg, BS.bO2Ok ? TEXT("ok") : TEXT("short"),
 						BS.FoodRunwaySols, BS.bFoodOk ? TEXT("ok") : TEXT("short"), BS.WaterRunwaySols, BS.bWaterOk ? TEXT("ok") : TEXT("short"), BS.FloorSols);
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  its production legs at %d people: oxygen %.1f made vs %.1f drawn (%s), water %.1f vs %.1f (%s), food %.1f vs %.1f (%s) kg a sol"),
+						BS.People, BS.O2Leg.ProductionPerSol, BS.O2Leg.DrawPerSol, BS.O2Leg.bOk ? TEXT("ok") : TEXT("short"), BS.WaterLeg.ProductionPerSol, BS.WaterLeg.DrawPerSol, BS.WaterLeg.bOk ? TEXT("ok") : TEXT("short"),
+						BS.FoodLeg.ProductionPerSol, BS.FoodLeg.DrawPerSol, BS.FoodLeg.bOk ? TEXT("ok") : TEXT("short"));
 				}
 			}
 		}
@@ -297,6 +305,14 @@ namespace
 			for (const FPlaytest::FGrowthRecord& G : P.GrowthRecords)
 			{
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT   growth: district #%d, sol %.2f to %.2f: %s"), G.DistrictId, G.StartSol, G.EndSol, *G.What);
+			}
+			// C5d: the city's size and what feeds it (the target population is the housing the city built; the population is who is there).
+			if (Sim)
+			{
+				const URHSimWorldSubsystem::FRHSupportLeg O2 = Sim->GetSupportLeg(FName("Oxygen"), Sim->GetPopulation()), Fd = Sim->GetSupportLeg(FName("Food"), Sim->GetPopulation());
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  city: %d beds built (%d free), population %d, share %.0f%% city; oxygen made %.0f vs %.0f drawn, food made %.1f vs %.1f drawn (kg a sol)%s"),
+					Sim->GetHousingCapacity(), Sim->GetFreeHousing(), Sim->GetPopulation(), Sim->GetCityShare() * 100.0, O2.ProductionPerSol, O2.DrawPerSol, Fd.ProductionPerSol, Fd.DrawPerSol,
+					P.bLifeSupport ? *FString::Printf(TEXT("; the player answered with %d more Electrolyzer(s)"), P.LifeSupportOrders) : TEXT(""));
 			}
 		}
 		if (Sim)
@@ -389,6 +405,27 @@ namespace
 				Sim->GetStock(FName("Hydrogen")), Sim->GetStock(FName("Food")),
 				*Sim->GetActiveQuotaName().ToString(), *FString::Printf(TEXT("%s%s"), Sim->GetQuotaRepeatRound() > 0 ? *FString::Printf(TEXT(" r%d"), Sim->GetQuotaRepeatRound()) : TEXT(""), *Quota),
 				P.SampleSec > 0.0 ? P.IdleRobotSec / P.SampleSec : 0.0, P.StrandedMax, Sim->GetPopulation());
+			// C5d (lifesupport=1): the settlers are ready but for oxygen production, so the player builds another Electrolyzer.
+			if (P.bLifeSupport && P.bDistricts && Sim->GetPopulation() > 0 && !Sim->IsBigArrivalDone() && P.LifeSupportOrders < 3 && C->GetSol() >= P.LifeSupportNextSol)
+			{
+				const FRHCityDemand Wait = Sim->GetCityDemand();
+				if (Wait.bBigArrivalWaitsOnSupply && Wait.bBigArrivalShortAir)
+				{
+					static const FVector2D Spots[] = { FVector2D(-12, -16), FVector2D(12, -16), FVector2D(-24, -16), FVector2D(24, -16), FVector2D(-12, -26), FVector2D(12, -26), FVector2D(0, -26), FVector2D(-12, -6), FVector2D(12, -6) };
+					for (const FVector2D& Spot : Spots)
+					{
+						FString Why;
+						if (Sim->CanPlaceBuilding(FName("Electrolyzer"), FVector(Spot.X * 100.0, Spot.Y * 100.0, 0.0), Why))
+						{
+							OrderBuild(Sim, C, FName("Electrolyzer"), Spot.X, Spot.Y);
+							++P.LifeSupportOrders;
+							P.LifeSupportNextSol = C->GetSol() + 8;
+							UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFESUPPORT  the settlers wait on oxygen production (%s): Electrolyzer #%d ordered"), SolNow(C), *Wait.BigArrivalAirNote, P.LifeSupportOrders);
+							break;
+						}
+					}
+				}
+			}
 			if (Sim->GetPopulation() > 0)
 			{
 				const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
@@ -408,9 +445,11 @@ namespace
 				for (const FRHGrowthProject& GP : Sim->GetGrowthProjects()) { Open += FString::Printf(TEXT("%s#%d %s %.0f%%"), Open.IsEmpty() ? TEXT("") : TEXT("; "), GP.DistrictId, *Sim->DescribeGrowthProject(GP), GP.Progress() * 100.0); }
 				const URHSimWorldSubsystem::FRHGrowthAvailability SA = Sim->GetGrowthAvailability(FName("Struct"));
 				const FRHCityDemand Dm = Sim->GetCityDemand();
-				UE_LOG(LogRedHope, Display, TEXT("[Playtest] GROWTH %d | %d district%s | open: %s | Struct free %.0f (%.0f held - %.0f quota - %.0f reserve) | housing short %d (%s) | %s"),
-					C->GetSol(), Sim->GetDistricts().Num(), Sim->GetDistricts().Num() == 1 ? TEXT("") : TEXT("s"), Open.IsEmpty() ? TEXT("none") : *Open, SA.Free, SA.Held, SA.QuotaBill, SA.Reserve,
-					Dm.HousingBedsShort, *Dm.HousingLimit.ToString(), Sim->GetGrowthPause().IsEmpty() ? TEXT("not paused") : *Sim->GetGrowthPause());
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] GROWTH %d | %d district%s | open: %s | Struct free %.0f (%.0f held - %.0f quota - %.0f reserve; share %.0f%% city) | housing short %d (%s) | %s | O2 made %.0f/sol, water %.0f, food %.1f | settlers carried %d | #1: %s"),
+					C->GetSol(), Sim->GetDistricts().Num(), Sim->GetDistricts().Num() == 1 ? TEXT("") : TEXT("s"), Open.IsEmpty() ? TEXT("none") : *Open, SA.Free, SA.Held, SA.QuotaBill, SA.Reserve, Sim->GetCityShare() * 100.0,
+					Dm.HousingBedsShort, *Dm.HousingLimit.ToString(), Sim->GetGrowthPause().IsEmpty() ? TEXT("not paused") : *Sim->GetGrowthPause(),
+					Sim->GetProductionPerSol(FName("Oxygen")), Sim->GetProductionPerSol(FName("Water")), Sim->GetProductionPerSol(FName("Food")), Sim->GetSettlerSupportRoom(),
+					Sim->FindGrowthProject(1) ? TEXT("under way") : (Sim->GetGrowthNote(1).IsEmpty() ? TEXT("-") : *Sim->GetGrowthNote(1).Left(120)));
 			}
 			P.SolLogged = C->GetSol();
 			P.DeficitSec = P.ShedSec = P.IdleRobotSec = P.SampleSec = 0.0;
@@ -807,7 +846,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifesupport=1] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -832,6 +871,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
+			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { P.bLifeSupport = true; }
 			else if (P.SaveSlot.IsEmpty()) { P.SaveSlot = Args[i]; }
 		}
 		P.LastSimSec = Clock->GetSimSecondsTotal();

@@ -131,6 +131,19 @@ bool URHSimWorldSubsystem::SetDistrictGrowth(int32 DistrictId, bool bOn)
 	return true;
 }
 
+void URHSimWorldSubsystem::SetCityShare(double Share)
+{
+	const double Clamped = FMath::Clamp(Share, 0.0, 1.0);
+	if (Clamped == CityShare)
+	{
+		return;
+	}
+	CityShare = Clamped;
+	++GrowthVersion;
+	UE_LOG(LogRedHopeSim, Display, TEXT("City / Earth share set to %.0f%% city, %.0f%% Earth"), Clamped * 100.0, (1.0 - Clamped) * 100.0);
+	OnGrowthChanged.Broadcast();
+}
+
 bool URHSimWorldSubsystem::IsDistrictGrowthOn(int32 DistrictId) const
 {
 	const FRHDistrict* D = FindDistrict(DistrictId);
@@ -219,7 +232,10 @@ URHSimWorldSubsystem::FRHGrowthAvailability URHSimWorldSubsystem::GetGrowthAvail
 {
 	FRHGrowthAvailability A;
 	A.Held = GetGrowthHoldingsKg(Resource);
-	A.QuotaBill = GetProtectedQuotaBillKg(Resource, A.bNextRound);
+	A.FullBill = GetProtectedQuotaBillKg(Resource, A.bNextRound);
+	// C5d: the open quota's bill stands whole (a quota is met by holding it); between rounds, the share of the
+	// next round's bill that goes to Earth stands, and the rest (CityShare of it) may grow the city.
+	A.QuotaBill = A.bNextRound ? (1.0 - CityShare) * A.FullBill : A.FullBill;
 	if (Resource == NAME_GrowthStruct)
 	{
 		A.Reserve = GrowthReserveStructKg;
@@ -245,7 +261,8 @@ bool URHSimWorldSubsystem::GrowthBillFits(const TMap<FName, double>& Bill, FStri
 		if (Need > A.Free + GrowthBillEps)
 		{
 			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the %s - %.0f reserve)"),
-				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.Reserve);
+				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill,
+				A.bNextRound ? *FString::Printf(TEXT("next quota round (%.0f%% of its bill, the Earth share)"), (1.0 - CityShare) * 100.0) : TEXT("open quota"), A.Reserve);
 			return false;
 		}
 	}
@@ -475,6 +492,7 @@ void URHSimWorldSubsystem::StepCityGrowth(float SubDt)
 	{
 		GrowthCheckedSol = SolNow;
 	}
+	RollProductionLedger(SolNow); // C5d: the sol's production goes into the window (one compare a step otherwise)
 	if (Districts.Num() == 0 && GrowthProjects.Num() == 0)
 	{
 		return; // no districts, no growth: the colony is exactly as it was

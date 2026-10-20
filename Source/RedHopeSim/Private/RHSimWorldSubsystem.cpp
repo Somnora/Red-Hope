@@ -30,7 +30,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 38;  // v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 39;  // v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -157,6 +157,11 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	BigArrivalFreeBeds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalFreeBeds"), BigArrivalFreeBeds));
 	BigArrivalColonists = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("BigArrivalColonists"), BigArrivalColonists));
 	BigArrivalLifeSupportSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("BigArrivalLifeSupportSols"), BigArrivalLifeSupportSols));
+	// C5d: life-support production gates and the City / Earth share (the same fallbacks as RH_Config.csv).
+	LifeSupportDeficitCoverSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("LifeSupportDeficitCoverSols"), LifeSupportDeficitCoverSols));
+	ProductionWindowSols = FMath::Clamp((int32)Defs->GetConfigScalar(FName("ProductionWindowSols"), ProductionWindowSols), 1, ProdMaxWindow);
+	GrowthCityShareDefault = FMath::Clamp(Defs->GetConfigScalar(FName("GrowthCityShareDefault"), GrowthCityShareDefault), 0.0, 1.0);
+	CityShare = GrowthCityShareDefault;
 	MoveHomeIntervalSols = FMath::Max(0.0, Defs->GetConfigScalar(FName("MoveHomeIntervalSols"), MoveHomeIntervalSols));
 	// C5b: city growth (the same fallbacks as RH_Config.csv).
 	GrowthReserveStructKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("GrowthReserveStructKg"), GrowthReserveStructKg));
@@ -1209,6 +1214,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 						else
 						{
 							AddStock(Res.Key, Res.Value);
+							NoteProduced(Res.Key, Res.Value); // C5d: the production ledger (Oxygen, Water; nothing else is a leg)
 							// Fresh ice-melt makeup restores water potability (M2
 							// Gate D+ water loop). MeltIce is the only Water output;
 							// StepPopulation consumes this and resets it each step.
@@ -3729,6 +3735,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 					ColonyCO2Kg -= WantCO2;
 					CellMul *= DuctYieldBonusMul;
 					AddStock(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
+					NoteProduced(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
 				}
 			}
 		}
@@ -3742,6 +3749,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		const double YieldKg = (Crop ? (double)Crop->YieldKgPerSol : GardenFoodKgPerSolPerCell)
 			* CellMul * HumanTempo * LightFactor * GardenSkillMul * DtSols;
 		AddStock(NFood, YieldKg);
+		NoteProduced(NFood, YieldKg);
 		// Soil depletion (Gate B): mature production spends the bed. Fertilizer
 		// refills it in place; an empty colony larder lets the cell revert to
 		// unplanted (the plant loop re-emplaces it when stocks allow).
@@ -5595,7 +5603,22 @@ int32 URHSimWorldSubsystem::ApplyImmigration()
 	// Q5a: a thriving city draws settlers on every supply ship. They are not Mars-
 	// born, and they are housed the way pods are (Debug_AddColonists's fill order).
 	// One alert for the whole group, never one per person. Gate-D placeholder copy.
-	const int32 Want = GetImmigrationCount(HopeSmoothed, Colonists.Num(), GetFreeHousing(), GetHousingComfortCapacity());
+	const int32 Wanted = GetImmigrationCount(HopeSmoothed, Colonists.Num(), GetFreeHousing(), GetHousingComfortCapacity());
+	if (Wanted <= 0)
+	{
+		return 0;
+	}
+	// C5d: a ship brings no more settlers than the colony's air, water and food can carry (the old lean
+	// colony took 100 people into an oxygen supply of 30 kg a sol against a draw of 81).
+	const int32 Want = FMath::Min(Wanted, GetSettlerSupportRoom());
+	if (Want < Wanted)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== IMMIGRATION held by life support: %d settler%s wanted, %d carried (oxygen %.1f kg/sol made vs %.1f drawn at the present population; water %.1f vs %.1f; food %.1f vs %.1f) ==="),
+			Wanted, Wanted == 1 ? TEXT("") : TEXT("s"), Want,
+			GetProductionPerSol(FName("Oxygen")), GetSupportLeg(FName("Oxygen"), Colonists.Num()).DrawPerSol,
+			GetProductionPerSol(FName("Water")), GetSupportLeg(FName("Water"), Colonists.Num()).DrawPerSol,
+			GetProductionPerSol(FName("Food")), GetSupportLeg(FName("Food"), Colonists.Num()).DrawPerSol);
+	}
 	if (Want <= 0)
 	{
 		return 0;
@@ -5680,7 +5703,152 @@ URHSimWorldSubsystem::FRHBigArrivalSupport URHSimWorldSubsystem::GetBigArrivalSu
 	const double WaterDraw = (double)Out.People * ColonistWaterKgPerSol;
 	Out.WaterRunwaySols = WaterDraw > 0.0 ? GetStock(FName("Water")) / WaterDraw : 1.0e9;
 	Out.bWaterOk = Out.WaterRunwaySols >= FoodRunwayFloorSols;
+	// C5d: and what the colony MAKES against what N + wave would draw (the wave's provisions count as food stock).
+	Out.O2Leg = GetSupportLeg(FName("Oxygen"), Out.People);
+	Out.FoodLeg = GetSupportLeg(FName("Food"), Out.People, ColonistTransportFoodKgPerColonist * (double)BigArrivalColonists);
+	Out.WaterLeg = GetSupportLeg(FName("Water"), Out.People);
 	return Out;
+}
+
+// --- C5d: production and the life-support books ---------------------------------------------
+
+int32 URHSimWorldSubsystem::ProductionLeg(FName Resource)
+{
+	static const FName NOxygen(TEXT("Oxygen")), NWater(TEXT("Water")), NFood(TEXT("Food"));
+	return Resource == NOxygen ? 0 : (Resource == NWater ? 1 : (Resource == NFood ? 2 : INDEX_NONE));
+}
+
+void URHSimWorldSubsystem::NoteProduced(FName Resource, double Kg)
+{
+	const int32 Leg = ProductionLeg(Resource);
+	if (Leg != INDEX_NONE && Kg > 0.0)
+	{
+		ProdAccKg[Leg] += Kg;
+	}
+}
+
+void URHSimWorldSubsystem::RollProductionLedger(int32 SolNow)
+{
+	// A threshold on the monotone clock, so the agent band and the era band roll on the same step window. The
+	// open sol's tally goes into the ring; any further sols skipped in one step (a long jump) are recorded as
+	// empty - at most a full ring's worth of them.
+	if (SolNow <= ProductionCheckedSol)
+	{
+		return;
+	}
+	const int32 Passed = FMath::Min(SolNow - ProductionCheckedSol, ProdMaxWindow);
+	ProductionCheckedSol = SolNow;
+	for (int32 i = 0; i < Passed; ++i)
+	{
+		for (int32 Leg = 0; Leg < ProdLegs; ++Leg)
+		{
+			ProdRing[Leg][ProdRingHead] = i == 0 ? ProdAccKg[Leg] : 0.0;
+		}
+		ProdRingHead = (ProdRingHead + 1) % ProdMaxWindow;
+		ProdRingFilled = FMath::Min(ProdRingFilled + 1, ProdMaxWindow);
+	}
+	for (int32 Leg = 0; Leg < ProdLegs; ++Leg)
+	{
+		ProdAccKg[Leg] = 0.0;
+	}
+}
+
+double URHSimWorldSubsystem::GetProductionPerSol(FName Resource) const
+{
+	const int32 Leg = ProductionLeg(Resource);
+	const int32 N = FMath::Min(ProdRingFilled, ProductionWindowSols);
+	if (Leg == INDEX_NONE || N <= 0)
+	{
+		return 0.0;
+	}
+	double Sum = 0.0;
+	for (int32 i = 1; i <= N; ++i)
+	{
+		Sum += ProdRing[Leg][(ProdRingHead - i + 2 * ProdMaxWindow) % ProdMaxWindow];
+	}
+	return Sum / (double)N;
+}
+
+void URHSimWorldSubsystem::Debug_SetProductionPerSol(FName Resource, double KgPerSol)
+{
+	const int32 Leg = ProductionLeg(Resource);
+	if (Leg == INDEX_NONE)
+	{
+		return;
+	}
+	for (int32 i = 0; i < ProdMaxWindow; ++i)
+	{
+		ProdRing[Leg][i] = FMath::Max(0.0, KgPerSol);
+	}
+	ProdRingFilled = ProdMaxWindow; // the whole window is "known"; the other legs keep what they had
+}
+
+double URHSimWorldSubsystem::GetStandingO2LeakKgPerSol() const
+{
+	double Leak = 0.0;
+	for (const int32 Level : RatedFloors)
+	{
+		Leak += (double)GetFloorCarvedCells(Level) * O2LeakKgPerCellPerSol;
+	}
+	for (const FRHHabNetCache& Net : HabNets)
+	{
+		if (IsNetRated(Net))
+		{
+			Leak += GetHabNetworkLeakKgPerSol(Net.Root);
+		}
+	}
+	return Leak;
+}
+
+URHSimWorldSubsystem::FRHSupportLeg URHSimWorldSubsystem::GetSupportLeg(FName Resource, int32 People, double ExtraStockKg) const
+{
+	FRHSupportLeg Leg;
+	Leg.Resource = Resource;
+	Leg.ProductionPerSol = GetProductionPerSol(Resource);
+	const double Heads = (double)FMath::Max(0, People);
+	if (Resource == FName("Oxygen"))
+	{
+		Leg.DrawPerSol = Heads * ColonistO2KgPerSol + GetStandingO2LeakKgPerSol();
+		Leg.StockKg = GetGrowthHoldingsKg(Resource);
+	}
+	else if (Resource == FName("Water"))
+	{
+		Leg.DrawPerSol = Heads * ColonistWaterKgPerSol * (1.0 - FMath::Clamp(GreywaterReturnFraction, 0.0, 1.0)); // the recycling returns most of it
+		Leg.StockKg = GetStock(Resource);
+	}
+	else
+	{
+		Leg.DrawPerSol = Heads * ColonistFoodKgPerSol;
+		Leg.StockKg = GetStock(Resource);
+	}
+	Leg.StockKg += ExtraStockKg;
+	const double Deficit = -Leg.NetPerSol();
+	Leg.CoverSols = Deficit > 0.0 ? Leg.StockKg / Deficit : 1.0e9;
+	Leg.bOk = Deficit <= 0.0 || Leg.StockKg >= LifeSupportDeficitCoverSols * Deficit;
+	return Leg;
+}
+
+int32 URHSimWorldSubsystem::GetSettlerSupportRoom() const
+{
+	// Every leg carries N + k when production + stock / cover-sols >= its draw at N + k (the unified form of
+	// "net >= 0, or the stock covers the deficit for LifeSupportDeficitCoverSols sols"). Solved for k per leg.
+	const int32 Pop = Colonists.Num();
+	int32 Room = MAX_int32;
+	const auto Limit = [&](FName Resource, double PerHead, double Fixed)
+	{
+		if (PerHead <= 0.0 || LifeSupportDeficitCoverSols <= 0.0)
+		{
+			return; // nothing a head draws, or the stock fallback is switched to "always covered"
+		}
+		const FRHSupportLeg Leg = GetSupportLeg(Resource, Pop);
+		const double Supply = Leg.ProductionPerSol + Leg.StockKg / LifeSupportDeficitCoverSols;
+		const double K = FMath::FloorToDouble((Supply - Fixed) / PerHead) - (double)Pop;
+		Room = FMath::Min(Room, K <= 0.0 ? 0 : (int32)FMath::Min(K, 1.0e6));
+	};
+	Limit(FName("Oxygen"), ColonistO2KgPerSol, GetStandingO2LeakKgPerSol());
+	Limit(FName("Water"), ColonistWaterKgPerSol * (1.0 - FMath::Clamp(GreywaterReturnFraction, 0.0, 1.0)), 0.0);
+	Limit(FName("Food"), ColonistFoodKgPerSol, 0.0);
+	return Room;
 }
 
 void URHSimWorldSubsystem::StepMoveHome(float SubDt)
@@ -10995,6 +11163,26 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		}
 	}
 
+	// The City / Earth share and the production ledger (save v39, C5d): the player's standing share, then the
+	// open sol's tally per leg, the ring of completed sols (its fill, its head and every slot) and the sol the
+	// ledger last rolled at. The windowed means are derived.
+	{
+		double Share = CityShare;
+		Ar << Share;
+		int32 RingFilled = ProdRingFilled, RingHead = ProdRingHead, CheckedSol = ProductionCheckedSol;
+		Ar << RingFilled << RingHead << CheckedSol;
+		for (int32 Leg = 0; Leg < ProdLegs; ++Leg)
+		{
+			double Acc = ProdAccKg[Leg];
+			Ar << Acc;
+			for (int32 i = 0; i < ProdMaxWindow; ++i)
+			{
+				double Kg = ProdRing[Leg][i];
+				Ar << Kg;
+			}
+		}
+	}
+
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
 	{
@@ -11550,6 +11738,27 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				continue;
 			}
 			GrowthProjects.Add(MoveTemp(P));
+		}
+		++GrowthVersion;
+	}
+	// The City / Earth share and the production ledger (save v39, C5d).
+	{
+		Ar << CityShare;
+		Ar << ProdRingFilled << ProdRingHead << ProductionCheckedSol;
+		for (int32 Leg = 0; Leg < ProdLegs; ++Leg)
+		{
+			Ar << ProdAccKg[Leg];
+			for (int32 i = 0; i < ProdMaxWindow; ++i)
+			{
+				Ar << ProdRing[Leg][i];
+			}
+		}
+		if (!(CityShare >= 0.0 && CityShare <= 1.0) || ProdRingFilled < 0 || ProdRingFilled > ProdMaxWindow || ProdRingHead < 0 || ProdRingHead >= ProdMaxWindow)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v39: the City / Earth share (%.3f) or the production ledger (filled %d, head %d) is out of range; clamped"), CityShare, ProdRingFilled, ProdRingHead);
+			CityShare = FMath::Clamp(FMath::IsNaN(CityShare) ? GrowthCityShareDefault : CityShare, 0.0, 1.0);
+			ProdRingFilled = FMath::Clamp(ProdRingFilled, 0, ProdMaxWindow);
+			ProdRingHead = FMath::Clamp(ProdRingHead, 0, ProdMaxWindow - 1);
 		}
 		++GrowthVersion;
 	}

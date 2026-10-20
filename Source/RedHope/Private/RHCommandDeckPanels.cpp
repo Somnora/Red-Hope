@@ -1277,27 +1277,94 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 	];
 	Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
 	[
-		Demand(TEXT("Air"),
+		Demand(TEXT("Rations"),
 			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Air : 0.0; },
 			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.HomesShort <= 0 ? FString(TEXT("full rations")) : FString::Printf(TEXT("%d on short rations"), Dm.ResidentsShort)); },
 			[](const FRHCityDemand& Dm) -> FString
 			{
-				if (Dm.Population <= 0) { return TEXT("Air: nobody lives here yet."); }
-				// C5c: the Big Arrival waiting on air, food or water says so (placeholder, D153).
+				if (Dm.Population <= 0) { return TEXT("Rations: nobody lives here yet."); }
+				// C5c, C5d: the Big Arrival waiting on air, food or water (their stock or their production), and a
+				// settler ship held to what the colony can carry, say so (placeholder, D153 and D156).
 				FString Waiting;
-				for (const FString* Note : { &Dm.BigArrivalAirNote, &Dm.BigArrivalRationsNote })
+				for (const FString* Note : { &Dm.BigArrivalAirNote, &Dm.BigArrivalRationsNote, &Dm.SettlerSupportNote })
 				{
 					if (!Note->IsEmpty()) { Waiting += TEXT(" ") + *Note; }
 				}
 				if (Dm.HomesShort <= 0)
 				{
-					return (Dm.MinOxygenMarginSols >= 0.0 ? FString::Printf(TEXT("Air: every home is on a full ration; the tightest oxygen margin is %.1f sols."), Dm.MinOxygenMarginSols) : FString(TEXT("Air: every home is on a full ration."))) + Waiting;
+					return (Dm.MinOxygenMarginSols >= 0.0 ? FString::Printf(TEXT("Rations: every home is on a full ration; the tightest oxygen margin is %.1f sols."), Dm.MinOxygenMarginSols) : FString(TEXT("Rations: every home is on a full ration."))) + Waiting;
 				}
 				const TCHAR* Leg = Dm.ScarcestLeg == FName("Oxygen") ? TEXT("air") : (Dm.ScarcestLeg == FName("Water") ? TEXT("water") : TEXT("food"));
-				return FString::Printf(TEXT("Air: %d home%s (%d resident%s) on short rations - %s is the scarcest. Restore it to bring rations back to full."),
+				return FString::Printf(TEXT("Rations: %d home%s (%d resident%s) on short rations - %s is the scarcest. Restore it to bring rations back to full."),
 					Dm.HomesShort, PluralS(Dm.HomesShort), Dm.ResidentsShort, PluralS(Dm.ResidentsShort), Leg) + Waiting;
 			})
 	];
+	// C5d: the City / Earth share. How much of the colony's spare material may grow the city instead of being held
+	// for Earth's next quota. Five steps; it applies at once. Wording is PLACEHOLDER (D155).
+	{
+		TSharedRef<SHorizontalBox> ShareChips = SNew(SHorizontalBox);
+		for (int32 Step = 0; Step <= 4; ++Step)
+		{
+			const double Value = 0.25 * (double)Step;
+			ShareChips->AddSlot().AutoWidth().Padding(Step == 0 ? 0.f : 3.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SButton)
+				.ButtonStyle(&D::TintButtonStyle())
+				.ContentPadding(FMargin(8.f, 2.f))
+				.ToolTipText(Txt(FString::Printf(TEXT("%d%% of the colony's spare material may grow the city; %d%% is held for Earth's next quota."), Step * 25, 100 - Step * 25)))
+				.ButtonColorAndOpacity_Lambda([this, Step]()
+				{
+					const URHSimWorldSubsystem* S = GetSim();
+					const bool bPicked = S && FMath::RoundToInt(S->GetCityShare() * 4.0) == Step; // the nearest step (RH.Growth share can set in-between values)
+					return FSlateColor(bPicked ? FLinearColor(D::Sky.R * 0.6f, D::Sky.G * 0.6f, D::Sky.B * 0.6f, 1.f) : FLinearColor(0.16f, 0.18f, 0.2f, 0.95f));
+				})
+				.OnClicked_Lambda([this, Value]()
+				{
+					const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+					URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+					if (S)
+					{
+						S->SetCityShare(Value);
+						PC->PostConfirm(FString::Printf(TEXT("City / Earth share: %.0f%% city, %.0f%% Earth"), Value * 100.0, (1.0 - Value) * 100.0), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					return FReply::Handled();
+				})
+				[
+					SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::Text).Text(Txt(FString::Printf(TEXT("%d%%"), Step * 25)))
+				]
+			];
+		}
+		Body->AddSlot().AutoHeight().Padding(0.f, 10.f, 0.f, 0.f)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::TextDim).Text(Txt(TEXT("CITY <-> EARTH")))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text)
+					.Text_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						const double Share = S ? S->GetCityShare() : 0.5;
+						return Txt(FString::Printf(TEXT("%.0f%% city  /  %.0f%% Earth"), Share * 100.0, (1.0 - Share) * 100.0));
+					})
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				ShareChips
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				Prose(MakeAttributeLambda([]() { return Txt(TEXT("How much of the colony's spare material may build the city, instead of being held back for Earth's next quota. More city grows it faster; more Earth keeps the supply line fuller.")); }), D::TextDim, 9)
+			]
+		];
+	}
 	// C5b: what the city is building. The projects' bars, and the reason when the whole city's growth is paused.
 	CityGrowthList = SNew(SVerticalBox);
 	CityGrowthVersionShown = MAX_uint32; // built empty: the first refresh fills it

@@ -6354,6 +6354,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//      draw x BigArrivalLifeSupportSols; Food with the wave's provisions counted, and Water,
 	//      against FoodRunwayFloorSols), the wave holding with its streak running while air, water or
 	//      food are short, the demand's words while it holds, and the landing on the step they recover.
+	//      Block g runs with the production check's stock fallback off (cover 0), so it still tests those stock
+	//      legs on their own.
+	//  (h) C5d, life support counts PRODUCTION: each leg's measured production against its draw at N + the wave
+	//      (net >= 0, or the stock covering the deficit for LifeSupportDeficitCoverSols sols) on its boundary; the
+	//      old lean state (pop 8, oxygen 30 a sol against 81, 1,510 kg in the pool) refused where C5c passed it; the
+	//      wave holding on production and landing when it recovers; settler ships capped to what each leg carries
+	//      (boundaries, the zero case, the demand's words); the ledger (window mean, the open tally, a gap, the
+	//      save / load round trip) and a real Electrolyzer feeding it.
 	if (FParse::Param(*Params, TEXT("arrivals")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ARRIVALS TEST (C2b, 2026-10-18) ==="));
@@ -6399,6 +6407,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			&& Near(Sim->GetBigArrivalStreakSolsNeeded(), 20.0, 1e-9) && Sim->GetBigArrivalFreeBeds() == 100 && Sim->GetBigArrivalColonists() == 100
 			&& Near(Sim->GetMoveHomeIntervalSols(), 1.0, 1e-9) && Sim->GetImmigrationReserveBeds() == 1 && Near(Sim->GetBigArrivalLifeSupportSols(), 10.0, 1e-9),
 			TEXT("P0 the sim reads the same values (no override or fallback in play)"));
+		Expect(Near(DefsSub ? DefsSub->GetConfigTableScalar(FName("LifeSupportDeficitCoverSols"), -1.0) : -1.0, 40.0, 1e-9) && Near(DefsSub ? DefsSub->GetConfigTableScalar(FName("ProductionWindowSols"), -1.0) : -1.0, 3.0, 1e-9)
+			&& Near(Sim->GetLifeSupportDeficitCoverSols(), 40.0, 1e-9) && Sim->GetProductionWindowSols() == 3,
+			TEXT("P0 the C5d rows are in DT_Config (deficit cover 40 sols, production window 3 sols) and the sim reads them"));
 		const FRHManifestItemRow* TransportRow = DefsSub ? DefsSub->GetManifestItem(FName("ColonistTransport")) : nullptr;
 		const FRHManifestItemRow* PodRow = DefsSub ? DefsSub->GetManifestItem(FName("CrewPod")) : nullptr;
 		Expect(TransportRow && TransportRow->SliceActive && Near(TransportRow->Mass_kg, 8000.0, 1e-9) && TransportRow->Category == TEXT("Crew") && PodRow && PodRow->SliceActive,
@@ -6434,10 +6445,19 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		int32 Landings = 0;
 		const FDelegateHandle ShipH = Sim->OnShipArrived.AddLambda([&Landings](const TArray<FName>&) { ++Landings; });
 
+		double InjectO2 = 0.0, InjectWater = 0.0, InjectFood = 0.0; // C5d (block h): kg a sol the harness "makes" every step, as a machine would
 		const auto TopUp = [&]()
 		{
 			Sim->Debug_AddFreshWater(500.0 * EraDt / SolLen);
 			Sim->Debug_SetBatteryWh(1.0e9);
+			for (const TPair<FName, double>& Make : { TPair<FName, double>(NOxygen, InjectO2), TPair<FName, double>(NWater, InjectWater), TPair<FName, double>(NFood, InjectFood) })
+			{
+				if (Make.Value > 0.0)
+				{
+					Sim->AddStock(Make.Key, Make.Value * EraDt / SolLen);
+					Sim->Debug_NoteProduced(Make.Key, Make.Value * EraDt / SolLen);
+				}
+			}
 		};
 		const auto EraStepOnce = [&]()
 		{
@@ -6529,6 +6549,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		EraStepOnce();
 		Expect(bCarved && Sim->GetShaftDepth() == Floors && Sim->IsFloorRated(-1) && Sim->IsFloorRated(-Floors) && Sim->GetPopulation() == 0 && Sim->GetHousingCapacity() == Floors * 1000 && Sim->GetHousingComfortCapacity() == Floors * CellsPerFloor,
 			FString::Printf(TEXT("setup: shaft to -%d, %d cells a floor, every floor rated, %d beds, %d comfortable places (every cell Living), nobody yet, Hope held near 100"), Floors, CellsPerFloor, Sim->GetHousingCapacity(), Sim->GetHousingComfortCapacity()));
+
+		// C5d: the empty, rated three-floor colony is kept, so block h can return to it (a small city for the
+		// settler and replay checks) after the big one the other blocks leave.
+		{
+			FString BaseErr;
+			Expect(Sim->SaveColony(TEXT("arrivals_base"), BaseErr), FString::Printf(TEXT("setup: the empty three-floor colony is saved for block h (%s)"), *BaseErr));
+		}
 
 		// (b) Births per head. The streak gains dt x max(1, N / 25) in an eligible step.
 		Sim->Debug_SetHopeGates(101.0, 75.0);
@@ -7008,6 +7035,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		{
 			Sim->Debug_SetHopeGates(101.0, 101.0); // no births: the headcount moves only by the wave
 			Sim->Debug_SetColonistsPerCell(5.0);
+			Sim->Debug_SetLifeSupportDeficitCoverSols(0.0); // C5d: this block is C5c's STOCK legs on their own; block h is the production check
 			for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
 			Sim->Debug_RehomeResidents();
 			const double O2Draw = Sim->GetColonistO2KgPerSol(), FoodDraw = Sim->GetColonistFoodKgPerSol(), WaterDraw = Sim->GetColonistWaterKgPerSol();
@@ -7138,6 +7166,267 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("g3 five sols into the streak, with the air gone: the wave is pending but not yet waiting on life support (streak %.2f of 20)"), Sim->GetBigArrivalStreakSols()));
 			Sim->Debug_SetBigArrivalDone(true);
 			Rich();
+		}
+
+		// (h) Life support counts PRODUCTION (C5d). A leg carries a head count when what the colony MAKES covers
+		// what they draw (net >= 0) or, short of that, its stock covers the deficit for LifeSupportDeficitCoverSols
+		// (40) sols. Draw: breathing (+ the standing leak of the rated floors), the water the recycling does not
+		// return, food. Each check runs on a small colony loaded from the empty three-floor base, so the numbers
+		// are exact; the wave also has to pass C5c's stock legs, which a rich stock does here.
+		{
+			const double Cover = 40.0;
+			const double GreyKeep = 1.0 - (DefsSub ? DefsSub->GetConfigTableScalar(FName("GreywaterReturnFraction"), -1.0) : -1.0);
+			const double Leak = (double)Floors * CellsPerFloor * 2.0; // three rated floors: 600 cells x 2 kg a sol
+			const double O2Head = Sim->GetColonistO2KgPerSol(), WaterHead = Sim->GetColonistWaterKgPerSol() * GreyKeep, FoodHead = Sim->GetColonistFoodKgPerSol();
+			const double WaveFoodH = Sim->GetColonistTransportFoodKgPerColonist() * 100.0;
+			struct FLeg { FName Res; const TCHAR* Name; double PerHead, Fixed; };
+			const FLeg Legs[3] = { { NOxygen, TEXT("oxygen"), O2Head, Leak }, { NWater, TEXT("water"), WaterHead, 0.0 }, { NFood, TEXT("food"), FoodHead, 0.0 } };
+			const auto LoadSmall = [&](int32 Pop, bool bRated) -> bool
+			{
+				FString E;
+				const bool bLoaded = Sim->LoadColony(TEXT("arrivals_base"), E) && E.IsEmpty();
+				Alerts.Reset();
+				InjectO2 = InjectWater = InjectFood = 0.0;
+				Sim->Debug_SetHopeGates(101.0, 101.0);
+				Sim->Debug_SetColonistsPerCell(5.0);
+				Sim->Debug_SetBigArrivalDone(true);
+				Sim->Debug_SetBigArrivalFreeBeds(100);
+				Sim->Debug_SetLifeSupportDeficitCoverSols(Cover);
+				for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+				HoldHope(95.0);
+				if (Pop > 0) { Sim->Debug_AddColonists(Pop); } // housed while the floors are rated
+				if (!bRated) { for (int32 L = 1; L <= Floors; ++L) { Sim->Debug_UnrateFloor(-L); } }
+				return bLoaded && Sim->GetPopulation() == Pop;
+			};
+			const auto Ample = [&]() { for (const FLeg& L : Legs) { Sim->Debug_SetProductionPerSol(L.Res, 1.0e7); SetStock(L.Res, 1.0e8); } };
+
+			// h0. The arithmetic of each leg at the head count N + 100, on its boundary: net exactly 0 needs nothing in
+			// stock; a deficit of D kg a sol needs 40 x D kg, to the hundredth of a kilo.
+			Expect(LoadSmall(200, true) && Near(Sim->GetStandingO2LeakKgPerSol(), Leak, 1e-9) && Near(Sim->GetLifeSupportDeficitCoverSols(), Cover, 1e-9) && Sim->GetProductionWindowSols() == 3,
+				FString::Printf(TEXT("h0 setup: a city of %d on three rated floors (the standing leak %.0f kg a sol), the cover %.0f sols, the production window %d sols"), Sim->GetPopulation(), Sim->GetStandingO2LeakKgPerSol(), Sim->GetLifeSupportDeficitCoverSols(), Sim->GetProductionWindowSols()));
+			const int32 NH = Sim->GetPopulation();
+			const int32 PeopleH = NH + 100;
+			for (const FLeg& L : Legs)
+			{
+				const double Draw = (double)PeopleH * L.PerHead + L.Fixed;
+				Sim->Debug_SetProductionPerSol(L.Res, Draw);
+				SetStock(L.Res, 0.0);
+				const URHSimWorldSubsystem::FRHSupportLeg Even = Sim->GetSupportLeg(L.Res, PeopleH);
+				Sim->Debug_SetProductionPerSol(L.Res, Draw - 0.01);
+				const URHSimWorldSubsystem::FRHSupportLeg Under = Sim->GetSupportLeg(L.Res, PeopleH);
+				Sim->Debug_SetProductionPerSol(L.Res, Draw - 1.0);
+				SetStock(L.Res, Cover - 0.01);
+				const URHSimWorldSubsystem::FRHSupportLeg Short = Sim->GetSupportLeg(L.Res, PeopleH);
+				SetStock(L.Res, Cover + 0.01);
+				const URHSimWorldSubsystem::FRHSupportLeg Covered = Sim->GetSupportLeg(L.Res, PeopleH);
+				Expect(Even.bOk && Near(Even.DrawPerSol, Draw, 1e-9) && Near(Even.NetPerSol(), 0.0, 1e-9) && Even.CoverSols > 1.0e8 && !Under.bOk && !Short.bOk && Covered.bOk && Near(Covered.CoverSols, Cover + 0.01, 1e-6),
+					FString::Printf(TEXT("h0 %s at %d people draws %.2f kg a sol: production equal carries it with an empty store; 0.01 kg a sol under with none is short; a 1 kg deficit with %.2f kg stored is short, with %.2f kg covered (%.2f sols)"),
+						L.Name, PeopleH, Draw, Cover - 0.01, Cover + 0.01, Covered.CoverSols));
+			}
+			// The wave's own provisions count as food stock, and the legs the support reports are the same numbers.
+			Ample();
+			SetStock(NFood, 1000.0);
+			Sim->Debug_SetProductionPerSol(NFood, 0.0);
+			URHSimWorldSubsystem::FRHBigArrivalSupport Sup = Sim->GetBigArrivalSupport();
+			Expect(Near(Sup.FoodLeg.StockKg, 1000.0 + WaveFoodH, 1e-9) && Sup.People == PeopleH && Sup.O2Leg.Resource == NOxygen && Sup.WaterLeg.Resource == NWater && Near(Sup.FoodLeg.DrawPerSol, (double)PeopleH * FoodHead, 1e-9),
+				FString::Printf(TEXT("h0 the wave's food leg counts the %.0f kg it lands with beside the %.0f kg stored (%.0f), against %.2f kg a sol drawn at %d people"), WaveFoodH, 1000.0, Sup.FoodLeg.StockKg, Sup.FoodLeg.DrawPerSol, Sup.People));
+
+			// h1. The old lean state, replayed: sol 85, a colony of 8, oxygen made at 30 kg a sol, 1,510 kg in the pool, 159 kg of
+			// food (the wave brings 5,000 more), water in the tens of thousands. The wave would draw 81 kg of oxygen a sol.
+			// C5c's stock checks passed it (and it ran out of air by sol 108); the production check refuses it.
+			Expect(LoadSmall(8, false), TEXT("h1 setup: a colony of 8, the floors unrated (no standing leak: the draw is the people's alone)"));
+			Sim->Debug_SetProductionPerSol(NOxygen, 30.0);
+			Sim->Debug_SetProductionPerSol(NWater, 400.0);
+			Sim->Debug_SetProductionPerSol(NFood, 2.0);
+			SetStock(NOxygen, 1510.0);
+			SetStock(NWater, 52000.0);
+			SetStock(NFood, 159.0);
+			Sup = Sim->GetBigArrivalSupport();
+			Expect(Sup.People == 108 && Near(Sup.O2Leg.DrawPerSol, 81.0, 1e-9) && Near(Sup.O2Leg.NetPerSol(), -51.0, 1e-9) && Sup.bO2Ok && Sup.bFoodOk && Sup.bWaterOk && Sup.FoodLeg.bOk && Sup.WaterLeg.bOk && !Sup.O2Leg.bOk && !Sup.AllOk(),
+				FString::Printf(TEXT("h1 the old lean state at 108 people: oxygen %.0f made against %.0f drawn (net %.0f) with 1,510 kg stored covers %.1f sols of the deficit, under %.0f - the wave is refused on oxygen production while every stock check still passes"),
+					Sup.O2Leg.ProductionPerSol, Sup.O2Leg.DrawPerSol, Sup.O2Leg.NetPerSol(), Sup.O2Leg.CoverSols, Cover));
+			Sim->Debug_SetLifeSupportDeficitCoverSols(0.0);
+			const bool bOld = Sim->GetBigArrivalSupport().AllOk();
+			Sim->Debug_SetLifeSupportDeficitCoverSols(10.0);
+			const bool bTenSols = Sim->GetBigArrivalSupport().O2Leg.bOk;
+			Sim->Debug_SetLifeSupportDeficitCoverSols(Cover);
+			Expect(bOld && bTenSols && !Sim->GetBigArrivalSupport().AllOk(),
+				TEXT("h1 the same state passes under C5c's stock checks alone, and under a 10-sol cover (1,510 kg >= 10 x 51), and is refused only at the 40-sol cover"));
+			SetStock(NOxygen, 51.0 * Cover - 0.01);
+			const bool bJustShort = !Sim->GetBigArrivalSupport().O2Leg.bOk;
+			SetStock(NOxygen, 51.0 * Cover + 0.01);
+			Expect(bJustShort && Sim->GetBigArrivalSupport().O2Leg.bOk, TEXT("h1 the cover's boundary on that state: 51 x 40 = 2,040 kg of oxygen carries the wave, 0.01 kg under does not"));
+
+			// h2. The wave holds on production, its streak running, and lands once the colony makes enough. The pool holds
+			// C5c's stock (300 x 0.75 x 10 = 2,250 kg) but not 40 sols of the deficit (40 x 1,425 = 57,000 kg).
+			{
+				Expect(LoadSmall(200, true), TEXT("h2 setup: a city of 200 on three rated floors"));
+				Ample();
+				Sim->Debug_SetBigArrivalDone(false);
+				Sim->Debug_SetBigArrivalFreeBeds(1000000); // only the beds hold it while the streak builds
+				HoldHope(95.0);
+				Lapse();
+				RunSolsA(21.0);
+				const bool bStreak = Sim->GetBigArrivalStreakSols() >= 20.9 && !Sim->IsBigArrivalDone();
+				Sim->Debug_SetBigArrivalFreeBeds(100);
+				InjectO2 = 0.0;
+				Sim->Debug_SetProductionPerSol(NOxygen, 0.0);
+				Sim->Debug_SetProductionPerSol(NWater, 1.0e7);
+				Sim->Debug_SetProductionPerSol(NFood, 1.0e7);
+				SetStock(NOxygen, 20000.0);
+				const int32 PopHold = Sim->GetPopulation();
+				Expect(bStreak && PopHold == 200, FString::Printf(TEXT("h2 a complete streak (%.2f sols) and beds for the wave: the wave has not landed (population %d), and now only life support can hold it"), Sim->GetBigArrivalStreakSols(), PopHold));
+				const double DrawO2 = (double)(PopHold + 100) * O2Head + Leak;
+				const FRHCityDemand Held = Sim->GetCityDemand();
+				const FString WantNote = FString::Printf(TEXT("The settlers are ready to come once the oxygen production can carry 100 more. The colony makes about 0 kg of oxygen a sol and would need %.0f."), DrawO2);
+				Expect(Held.bBigArrivalWaitsOnSupply && Held.bBigArrivalShortAir && !Held.bBigArrivalShortFood && !Held.bBigArrivalShortWater && Held.BigArrivalAirNote == WantNote && Held.BigArrivalRationsNote.IsEmpty() && Sim->GetBigArrivalSupport().bO2Ok,
+					FString::Printf(TEXT("h2 with 20,000 kg of oxygen (C5c's stock check passes) and none made: the demand says \"%s\""), *Held.BigArrivalAirNote));
+				const double StreakHold = Sim->GetBigArrivalStreakSols();
+				Alerts.Reset();
+				RunSolsA(3.0);
+				Expect(!Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopHold && CountAlerts(TEXT("THE BIG ARRIVAL")) == 0 && Sim->GetBigArrivalStreakSols() > StreakHold + 2.9,
+					FString::Printf(TEXT("h2 three sols with oxygen made at 0: the wave does not land (population %d) and the streak keeps running (%.2f -> %.2f)"), Sim->GetPopulation(), StreakHold, Sim->GetBigArrivalStreakSols()));
+				// The machines come on: 4,000 kg a sol, well over the draw. The window is three sols, so it takes time to show.
+				InjectO2 = 4000.0;
+				EraStepOnce();
+				const bool bNotYet = !Sim->IsBigArrivalDone();
+				const int32 TopH = MaxColonistId();
+				int32 Steps = 1;
+				while (!Sim->IsBigArrivalDone() && Steps < 5 * StepsPerSolA) { EraStepOnce(); ++Steps; }
+				const double LandedAfter = (double)Steps / (double)StepsPerSolA;
+				Expect(bNotYet && Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopHold + 100 && NewcomersFine(TopH, 100) && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1 && LandedAfter < 4.5,
+					FString::Printf(TEXT("h2 oxygen now made at 4,000 a sol: the wave does not land on the first step, and lands %.2f sols later, once the three-sol window shows enough (population %d -> %d, %d alert)"), LandedAfter, PopHold, Sim->GetPopulation(), CountAlerts(TEXT("THE BIG ARRIVAL"))));
+				InjectO2 = 0.0;
+			}
+
+			// h3. Settler ships: capped to what each leg carries. A city of 200 at Hope 95 draws min(50, 33) = 33 settlers; the
+			// other two legs are ample and the leg under test makes nothing, so it carries k more where
+			// stock / 40 = (N + k) x per-head draw + the fixed draw (the leak): k = floor((stock / 40 - fixed) / per-head) - N.
+			{
+				Expect(LoadSmall(200, true), TEXT("h3 setup: a city of 200 on three rated floors, Hope held at 95"));
+				const int32 WantH = Sim->GetImmigrationCount(Sim->GetHopeSmoothed(), Sim->GetPopulation(), Sim->GetFreeHousing(), Sim->GetHousingComfortCapacity());
+				Expect(WantH == 33, FString::Printf(TEXT("h3 a ship would bring %d settlers at Hope %.1f and a population of 200 (floor(25/30 x max(4, 0.2 x 200)) = 33, beds enough)"), WantH, Sim->GetHopeSmoothed()));
+				const auto Settlers = [&](const FLeg& L, double StockKg, int32& OutRoom, int32& OutHeldLogs) -> int32
+				{
+					LoadSmall(200, true);
+					Ample();
+					Sim->Debug_SetProductionPerSol(L.Res, 0.0);
+					SetStock(L.Res, StockKg);
+					OutRoom = Sim->GetSettlerSupportRoom();
+					Alerts.Reset();
+					const int32 Came = Sim->Debug_Immigrate();
+					OutHeldLogs = CountAlertsWith(TEXT("settlers arrived"));
+					return Came;
+				};
+				// The stock that carries exactly Heads people (a fractional head count keeps the floor away from a rounding edge).
+				const auto ForHeads = [&](const FLeg& L, double Heads) { return Cover * (Heads * L.PerHead + L.Fixed); };
+				for (const FLeg& L : Legs)
+				{
+					// 205.4 heads' worth of stock carries 5 more of the 33 wanted; 204.6 carries 4.
+					int32 RoomOver = 0, AlertsOver = 0, RoomUnder = 0, AlertsUnder = 0;
+					const int32 CameOver = Settlers(L, ForHeads(L, 205.4), RoomOver, AlertsOver);
+					const int32 PopOver = Sim->GetPopulation();
+					const int32 CameUnder = Settlers(L, ForHeads(L, 204.6), RoomUnder, AlertsUnder);
+					Expect(CameOver == 5 && RoomOver == 5 && AlertsOver == 1 && PopOver == 205 && CameUnder == 4 && RoomUnder == 4 && AlertsUnder == 1,
+						FString::Printf(TEXT("h3 %s binding: %.1f kg stored carries 205.4 people (%d came of the 33 wanted, room %d, one alert); %.1f kg carries 204.6 (%d came, room %d)"), L.Name, ForHeads(L, 205.4), CameOver, RoomOver, ForHeads(L, 204.6), CameUnder, RoomUnder));
+				}
+				// The demand says so, in the Rations prose's own words, while a ship would be held.
+				{
+					Expect(LoadSmall(200, true), TEXT("h3 setup for the demand: a city of 200"));
+					Ample();
+					Sim->Debug_SetProductionPerSol(NOxygen, 0.0);
+					SetStock(NOxygen, ForHeads(Legs[0], 205.4));
+					Sim->Debug_SetHopeSmoothed(95.0);
+					const FRHCityDemand Dm = Sim->GetCityDemand();
+					Expect(Dm.bSettlersDraw && Dm.bSettlersHeldBySupply && Dm.SettlersWanted == 33 && Dm.SettlerSupportRoom == 5 && Dm.SettlerSupportNote == TEXT("The next ship's settlers are held to 5: the colony's air, water and food production can carry no more yet."),
+						FString::Printf(TEXT("h3 the demand while the ship would be held: wanted %d, carried %d - \"%s\""), Dm.SettlersWanted, Dm.SettlerSupportRoom, *Dm.SettlerSupportNote));
+				}
+				// Nothing carried: the ship brings nobody and says nothing loud (the held settlers are not a banner).
+				{
+					int32 Room = 0, Logs = 0;
+					const int32 Came = Settlers(Legs[2], 0.0, Room, Logs);
+					Expect(Came == 0 && Room == 0 && Logs == 0 && Sim->GetPopulation() == 200, TEXT("h3 a larder of 0 and no food made: no settler comes, no banner for the settlers that did not"));
+				}
+				// Everything ample: the whole 33.
+				{
+					LoadSmall(200, true);
+					Ample();
+					const int32 Came = Sim->Debug_Immigrate();
+					Expect(Came == 33 && Sim->GetSettlerSupportRoom() >= 1000000, TEXT("h3 every leg ample: all 33 settlers come, the cap is out of the way"));
+				}
+			}
+
+			// h4. The ledger. Production is credited where the sim grants it and averaged over the last three COMPLETED sols.
+			{
+				Expect(LoadSmall(0, true), TEXT("h4 setup: an empty colony"));
+				Ample();
+				// Align: step until the ledger rolls, so the next StepsPerSol steps are exactly one sol's tally.
+				InjectO2 = 100.0;
+				const int32 Rolled0 = Sim->GetProductionCheckedSol();
+				for (int32 K = 0; K < 2 * StepsPerSolA && Sim->GetProductionCheckedSol() == Rolled0; ++K) { EraStepOnce(); }
+				RunSteps(3 * StepsPerSolA);
+				const double Steady = Sim->GetProductionPerSol(NOxygen);
+				Expect(Sim->GetProductionCheckedSol() > Rolled0 && Near(Steady, 100.0, 1e-6) && Near(Sim->GetProductionPerSol(NWater), 0.0, 0.0),
+					FString::Printf(TEXT("h4 oxygen made at 100 kg a sol for three whole sols reads %.6f kg a sol (the mean of the last three completed sols); water, made at none, reads 0"), Steady));
+				InjectO2 = 400.0;
+				RunSteps(StepsPerSolA);
+				const double Burst = Sim->GetProductionPerSol(NOxygen);
+				InjectO2 = 0.0;
+				RunSteps(StepsPerSolA);
+				const double Then0 = Sim->GetProductionPerSol(NOxygen);
+				RunSteps(2 * StepsPerSolA);
+				const double Gone = Sim->GetProductionPerSol(NOxygen);
+				Expect(Near(Burst, (100.0 + 100.0 + 400.0) / 3.0, 1e-6) && Near(Then0, (100.0 + 400.0 + 0.0) / 3.0, 1e-6) && Near(Gone, 0.0, 1e-9),
+					FString::Printf(TEXT("h4 one sol at 400 moves the mean to %.3f (expect 200); then one sol of nothing to %.3f (expect 166.667); two more and it is %.3f - a three-sol window, completed sols only"), Burst, Then0, Gone));
+				// The open sol is not in the mean, and shows in the open tally.
+				InjectO2 = 100.0;
+				RunSteps(5);
+				Expect(Near(Sim->GetProductionPerSol(NOxygen), 0.0, 1e-9) && Near(Sim->GetProductionOpenKg(NOxygen), 5.0 * 100.0 * EraDt / SolLen, 1e-9),
+					FString::Printf(TEXT("h4 five steps into a sol: the open tally holds %.4f kg and the mean (completed sols) does not move"), Sim->GetProductionOpenKg(NOxygen)));
+				InjectO2 = 0.0;
+				// A long gap (the clock jumps four sols in one step) empties the window.
+				RunSteps(StepsPerSolA);
+				InjectO2 = 100.0;
+				RunSteps(3 * StepsPerSolA);
+				const int32 SolBefore = Sim->GetProductionCheckedSol();
+				const double Before = Sim->GetProductionPerSol(NOxygen);
+				InjectO2 = 0.0;
+				Clock->Debug_AdvanceSimSeconds(4.0 * SolLen);
+				Sim->EraStep((float)EraDt);
+				Expect(Before > 50.0 && Sim->GetProductionCheckedSol() >= SolBefore + 4 && Near(Sim->GetProductionPerSol(NOxygen), 0.0, 1e-9),
+					FString::Printf(TEXT("h4 the clock jumps four sols in one step: the ledger rolled %d sols and the window reads %.3f (it was %.1f) - idle sols are recorded as empty"), Sim->GetProductionCheckedSol() - SolBefore, Sim->GetProductionPerSol(NOxygen), Before));
+				// The save keeps the ring, the open tally and the sol it rolled at.
+				Sim->Debug_SetProductionPerSol(NOxygen, 123.5);
+				Sim->Debug_NoteProduced(NWater, 77.0);
+				const int32 CheckedSave = Sim->GetProductionCheckedSol();
+				FString SaveErr;
+				const bool bSaved = Sim->SaveColony(TEXT("arrivals_ledger"), SaveErr);
+				Sim->Debug_SetProductionPerSol(NOxygen, 5.0);
+				Sim->Debug_NoteProduced(NWater, 1000.0);
+				const bool bLoaded = Sim->LoadColony(TEXT("arrivals_ledger"), SaveErr) && SaveErr.IsEmpty();
+				Expect(bSaved && bLoaded && Near(Sim->GetProductionPerSol(NOxygen), 123.5, 1e-12) && Near(Sim->GetProductionOpenKg(NWater), 77.0, 1e-12) && Sim->GetProductionCheckedSol() == CheckedSave,
+					FString::Printf(TEXT("h4 saved with oxygen at 123.5 a sol and 77 kg of water in the open tally, then changed and loaded: the ledger is back (%.1f, %.1f kg, rolled at sol %d)"), Sim->GetProductionPerSol(NOxygen), Sim->GetProductionOpenKg(NWater), Sim->GetProductionCheckedSol()));
+			}
+
+			// h5. A real machine feeds it: an Electrolyzer (8.9 kg of oxygen and 1.1 of hydrogen a batch) on the day shift,
+			// watered and powered. The ledger's mean oxygen per sol is 8.9 / 1.1 of the hydrogen the pool gained over the same
+			// three completed sols, and it is the nameplate or less (the day shift).
+			{
+				Expect(LoadSmall(0, true), TEXT("h5 setup: an empty colony"));
+				Ample();
+				Sim->Debug_PlaceInstant(FName("Electrolyzer"), FVector(2000.0, -1500.0, 0.0));
+				const FName NH2(TEXT("Hydrogen"));
+				const int32 R0 = Sim->GetProductionCheckedSol();
+				for (int32 K = 0; K < 2 * StepsPerSolA && Sim->GetProductionCheckedSol() == R0; ++K) { EraStepOnce(); }
+				const double H2Start = Sim->GetStock(NH2);
+				RunSteps(3 * StepsPerSolA);
+				const double H2Made = Sim->GetStock(NH2) - H2Start;
+				const double O2PerSol = Sim->GetProductionPerSol(NOxygen);
+				const double Nameplate = 8.9 * (SolLen / 50.0); // a batch an hour, every sol-hour
+				Expect(O2PerSol > 20.0 && O2PerSol <= Nameplate + 1e-6 && H2Made > 0.0 && Near(O2PerSol * 3.0 / H2Made, 8.9 / 1.1, 0.01),
+					FString::Printf(TEXT("h5 a real Electrolyzer: oxygen %.2f kg a sol on the ledger (nameplate %.1f), %.2f kg of hydrogen over the same three sols: oxygen / hydrogen %.4f (expect %.4f)"), O2PerSol, Nameplate, H2Made, H2Made > 0.0 ? O2PerSol * 3.0 / H2Made : 0.0, 8.9 / 1.1));
+			}
+			Sim->Debug_SetLifeSupportDeficitCoverSols(Cover);
 		}
 
 		Sim->OnAlert.Remove(AlertH);
@@ -8487,6 +8776,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//      (b4, C5c) between quota rounds (awaiting the manifest, ship inbound) growth leaves the NEXT
 	//      round's bill standing, checked on each resource's one-kilo boundary, the ladder walked for real
 	//      (Q2, Q3, round 1, round 2) so the protected bill is the bill that then opens, and the ladder's end;
+	//      (b5, C5d) the City / Earth share: free = held - reserve - the open quota's whole bill - (1 - share) x the
+	//      NEXT round's bill, checked at share 0 / 0.25 / 0.5 / 0.75 / 1 on each resource's one-kilo boundary, the
+	//      open bill never scaled, the dial applying at once (the same holdings refuse at 0 and start at 0.5), the
+	//      clamp, the one broadcast a change, and the share's save / load round trip. The fixture below holds the
+	//      next round WHOLE (share 0, C5c's rule) so b3 and b4 keep their derivations;
 	//  (c) the gates: Homes need a housing shortfall, Industry never grows, an open project and a switched-off
 	//      district are skipped, the two pauses (a home on short rations, Hope failing);
 	//  (d) surface Homes: the nearest candidate, the largest module that fits, only INSIDE the district, touching
@@ -8637,6 +8931,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(bAllPinned && Near(Sim->GetGrowthReserveStructKg(), 1000.0, 1e-9) && Near(Sim->GetGrowthReserveO2Sols(), 10.0, 1e-9) && Near(Sim->GetGrowthModuleSols(), 1.0, 1e-9)
 				&& Near(Sim->GetGrowthCellSols(), 1.0, 1e-9) && Near(Sim->GetGrowthRoomSols(), 0.5, 1e-9) && Sim->GetGrowthCellsPerProject() == 4 && Sim->GetGrowthBunksPerHome() == 2,
 				TEXT("a1 the seven Growth rows are in DT_Config (Struct reserve 1000, O2 reserve 10 sols, module 1.0, cells 1.0, room 0.5 sols, 4 cells, 2 bunks) and the sim reads them (DT/CSV)"));
+			{
+				const TPair<const TCHAR*, double> Pins2[] = { { TEXT("GrowthCityShareDefault"), 0.5 }, { TEXT("ProductionWindowSols"), 3.0 }, { TEXT("LifeSupportDeficitCoverSols"), 40.0 } };
+				bool bPinned2 = true;
+				for (const TPair<const TCHAR*, double>& Pin : Pins2) { bPinned2 &= Near(DefsSub->GetConfigTableScalar(FName(Pin.Key), -1.0), Pin.Value, 1e-9); }
+				Expect(bPinned2 && Near(Sim->GetCityShareDefault(), 0.5, 1e-9) && Sim->GetProductionWindowSols() == 3 && Near(Sim->GetLifeSupportDeficitCoverSols(), 40.0, 1e-9),
+					TEXT("a2 the three C5d rows are in DT_Config (City / Earth share default 0.5, production window 3 sols, deficit cover 40 sols) and the sim reads them (DT/CSV)"));
+			}
 			int32 CivicRows = 0;
 			bool bClean = true, bPiecesOk = true;
 			FString CivicList;
@@ -8731,6 +9032,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		}
 		// No districts, with demand and material and Hope: nothing is built. (A separate run from a saved base below.)
 		FString Err;
+		// C5d: a fresh colony starts at the data's City / Earth share (50%). The fixture then holds the next quota
+		// round WHOLE (share 0: C5c's rule), so the b3 / b4 derivations below stand; b5 tests the share itself.
+		Expect(Near(Sim->GetCityShare(), 0.5, 0.0) && Near(Sim->GetCityShareDefault(), 0.5, 0.0), FString::Printf(TEXT("setup: a fresh colony starts at the default City / Earth share, %.0f%% city"), Sim->GetCityShare() * 100.0));
+		Sim->Debug_SetCityShare(0.0);
 		Expect(Sim->SaveColony(TEXT("citygrowth_base"), Err), FString::Printf(TEXT("setup: the base state is saved (%s)"), *Err));
 		const auto LoadBase = [&]()
 		{
@@ -8900,12 +9205,124 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(MeetQuota() && Sim->GetQuotaRepeatRound() == 2 && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 4883.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 2344.0, 1e-9) && Near(Sim->GetGrowthAvailability(NHyd).QuotaBill, 488.0, 1e-9),
 				FString::Printf(TEXT("b4 Q3 round 2 met: the next round (3) stands at Struct %.0f / Oxygen %.0f / Hydrogen 488 - the current round's bill x 1.25, rounded as the ladder rounds"), Sim->GetGrowthAvailability(NStruct).QuotaBill, Sim->GetGrowthAvailability(NOx).QuotaBill));
 			Boundary(NStruct, 1000.0, 4883.0, 640.0, TEXT("awaiting the manifest"), TEXT("Q3 round 2 -> 3"));
+			// C5d: on that same rung the share scales the round-3 bill in whole numbers of the ladder's own rounding:
+			// share 0.5 holds back half of 4883 / 2344 / 488 (2441.5 / 1172 / 244 - exact in binary), share 1 none.
+			{
+				bool bRung = true;
+				for (const double Sh : { 0.5, 1.0, 0.0 })
+				{
+					Sim->Debug_SetCityShare(Sh);
+					const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx), AH = Sim->GetGrowthAvailability(NHyd);
+					bRung &= AS.bNextRound && Near(AS.FullBill, 4883.0, 1e-9) && Near(AS.QuotaBill, (1.0 - Sh) * 4883.0, 1e-9) && Near(AO.QuotaBill, (1.0 - Sh) * 2344.0, 1e-9) && Near(AH.QuotaBill, (1.0 - Sh) * 488.0, 1e-9)
+						&& Near(AS.Free, Held(NStruct) - (1.0 - Sh) * 4883.0 - 1000.0, 1e-6);
+				}
+				Expect(bRung, TEXT("b5 Q3 round 2 met, round 3 next (4883 / 2344 / 488): the held-back bill is (1 - share) x it at share 0.5 (2441.5 / 1172 / 244), 1 (none) and 0 (all), and free follows"));
+			}
 			// With the repeat switched off the ladder ends: nothing is coming, so nothing stands.
 			Sim->Debug_SetQuotaRepeatBillMul(0.0);
 			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 0.0, 1e-9)
 				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 1000.0, 1e-6),
 				TEXT("b4 the repeat knob at 0 on the last rung: the ladder ends, no bill stands, free = held - 1000"));
 			Sim->Debug_SetQuotaRepeatBillMul(1.25);
+
+			// ---------------- (b5) The City / Earth share (C5d) ----------------
+			// Between rounds growth leaves (1 - share) x the next round's bill standing; while the quota is Open its
+			// own bill stands whole whatever the share. One kilo under / over the boundary at each share.
+			{
+				// Q1 met, awaiting the manifest: Q2 is next, Struct 600 / Oxygen 150 / Hydrogen 40.
+				const auto MetBase = [&]() -> bool { const bool bL = LoadBase(); Sim->Debug_SetGrowthEnabled(false); return bL && MeetQuota() && Sim->GetActiveQuotaName() == FName("Q1"); };
+				// The dial, end to end: the quota's bill, the free material, linear in the share.
+				Expect(MetBase(), TEXT("b5 setup: Q1 met, awaiting the manifest, next round Q2"));
+				bool bDial = true;
+				FString DialText;
+				for (const double Sh : { 0.0, 0.25, 0.5, 0.75, 1.0 })
+				{
+					Sim->Debug_SetCityShare(Sh);
+					const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx), AH = Sim->GetGrowthAvailability(NHyd);
+					const double Hold = 1.0 - Sh;
+					bDial &= AS.bNextRound && Near(AS.FullBill, 600.0, 1e-9) && Near(AO.FullBill, 150.0, 1e-9) && Near(AH.FullBill, 40.0, 1e-9)
+						&& Near(AS.QuotaBill, Hold * 600.0, 1e-9) && Near(AO.QuotaBill, Hold * 150.0, 1e-9) && Near(AH.QuotaBill, Hold * 40.0, 1e-9)
+						&& Near(AS.Free, Held(NStruct) - Hold * 600.0 - 1000.0, 1e-6) && Near(AO.Free, Held(NOx) - Hold * 150.0 - AO.Reserve, 1e-6);
+					DialText += FString::Printf(TEXT(" %.0f%%->%.0f"), Sh * 100.0, AS.QuotaBill);
+				}
+				Expect(bDial, FString::Printf(TEXT("b5 between rounds the bill held for Earth is (1 - share) x the next round's, linear: Struct 600 at city share%s; Oxygen and Hydrogen the same fraction; free = held - reserve - that"), *DialText));
+
+				// The boundaries. Struct: reserve 1000 + the held-back bill + the 640 project; Oxygen: reserve 60 + the held-back bill + 400.
+				const auto Pair = [&](double Share, FName Res, double Reserve, double Bill, double Project, const TCHAR* Round)
+				{
+					Expect(MetBase(), FString::Printf(TEXT("b5 base loaded, Q1 met, for share %.0f%% on %s"), Share * 100.0, *Res.ToString()));
+					Sim->Debug_SetCityShare(Share);
+					Boundary(Res, Reserve, Bill, Project, TEXT("awaiting the manifest"), Round);
+				};
+				Pair(0.5, NStruct, 1000.0, 300.0, 640.0, TEXT("share 50%"));
+				Pair(0.5, NOx, 60.0, 75.0, 400.0, TEXT("share 50%"));
+				Pair(0.25, NStruct, 1000.0, 450.0, 640.0, TEXT("share 25%"));
+				Pair(0.75, NStruct, 1000.0, 150.0, 640.0, TEXT("share 75%"));
+				Pair(1.0, NStruct, 1000.0, 0.0, 640.0, TEXT("share 100%"));
+				Pair(1.0, NOx, 60.0, 0.0, 400.0, TEXT("share 100%"));
+
+				// It applies at once: the same holdings are refused at share 0 and start at 0.5, with no step between.
+				{
+					Expect(MetBase(), TEXT("b5 base loaded, Q1 met, for the instant dial"));
+					Sim->Debug_SetGrowthEnabled(true);
+					OnlyDistricts({ 3 });
+					SetHope(80.0);
+					SetHeld(NOx, 1.0e6);
+					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 + 1.0);
+					int32 Broadcasts = 0;
+					const FDelegateHandle ShareH = Sim->OnGrowthChanged.AddLambda([&Broadcasts]() { ++Broadcasts; });
+					Sim->Debug_SetCityShare(0.0);
+					const bool bRefused0 = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(TEXT("next quota round"));
+					const FString Why0 = NoteOf(3);
+					Sim->SetCityShare(0.5);
+					const int32 ByDial = Broadcasts;
+					const bool bStarts = Sim->Debug_RunGrowthCheck() == 1 && Open(3); // the start itself broadcasts too
+					Expect(bRefused0 && bStarts && ByDial == 1 && Broadcasts == 2,
+						FString::Printf(TEXT("b5 the dial is instant: %.0f kg of Struct is refused at 0%% city ('%s'), and the next check after the dial moves to 50%% starts the project (the dial broadcast once: %d)"), 1000.0 + 300.0 + 640.0 + 1.0, *Why0, ByDial));
+					Sim->SetCityShare(0.5); // no change: no broadcast, no log line
+					Expect(Broadcasts == 2, TEXT("b5 setting the share it already has changes nothing and broadcasts nothing"));
+					Sim->SetCityShare(1.7);
+					const bool bHigh = Near(Sim->GetCityShare(), 1.0, 0.0);
+					Sim->SetCityShare(-0.3);
+					const bool bLow = Near(Sim->GetCityShare(), 0.0, 0.0);
+					Expect(bHigh && bLow && Broadcasts == 4, TEXT("b5 the share is clamped to 0..1 (1.7 -> 1, -0.3 -> 0), one broadcast a change"));
+					Sim->OnGrowthChanged.Remove(ShareH);
+				}
+
+				// While Q1 is Open its own bill stands whole at every share: Struct 300 is never scaled.
+				{
+					Expect(LoadBase(), TEXT("b5 base loaded, Q1 open"));
+					OnlyDistricts({ 3 });
+					SetHope(80.0);
+					bool bOpenWhole = Sim->GetQuotaPhase() == ERHQuotaPhase::Open;
+					for (const double Sh : { 0.0, 0.5, 1.0 })
+					{
+						Sim->Debug_SetCityShare(Sh);
+						const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx);
+						bOpenWhole &= !AS.bNextRound && Near(AS.QuotaBill, 300.0, 1e-9) && Near(AS.FullBill, 300.0, 1e-9) && Near(AO.QuotaBill, 50.0, 1e-9) && Near(AS.Free, Held(NStruct) - 300.0 - 1000.0, 1e-6);
+					}
+					Expect(bOpenWhole, TEXT("b5 while Q1 is open its bill (Struct 300, Oxygen 50) is held back whole at share 0, 0.5 and 1: the share never touches the open quota"));
+					Sim->Debug_SetCityShare(1.0);
+					SetHeld(NOx, 1.0e6);
+					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 - 1.0);
+					const bool bRefusedOpen = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(TEXT("open quota"));
+					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 + 1.0);
+					Expect(bRefusedOpen && Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b5 at share 100% with Q1 open: one kilo under reserve 1000 + the open bill 300 + the project 640 is still refused, one kilo over starts"));
+				}
+
+				// The save: the share and the dial's effect round-trip.
+				{
+					Expect(MetBase(), TEXT("b5 base loaded, Q1 met, for the save"));
+					Sim->SetCityShare(0.75);
+					const double FreeAt75 = Sim->GetGrowthAvailability(NStruct).Free;
+					FString SaveErr;
+					const bool bSaved = Sim->SaveColony(TEXT("citygrowth_share"), SaveErr);
+					Sim->SetCityShare(0.1);
+					const bool bLoaded = Sim->LoadColony(TEXT("citygrowth_share"), SaveErr) && SaveErr.IsEmpty();
+					Expect(bSaved && bLoaded && Near(Sim->GetCityShare(), 0.75, 0.0) && Near(Sim->GetGrowthAvailability(NStruct).Free, FreeAt75, 1e-9) && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.25 * 600.0, 1e-9),
+						FString::Printf(TEXT("b5 saved at 75%% city, set to 10%%, loaded: the share is back at %.0f%% and the held-back Struct bill is %.0f (a quarter of 600)"), Sim->GetCityShare() * 100.0, Sim->GetGrowthAvailability(NStruct).QuotaBill));
+				}
+			}
 		}
 
 		// ---------------- (c) Gates and pauses ----------------
@@ -9946,7 +10363,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(SumBuildings == 2 * SurfaceDistricts + FloorBuildings && SumCells == 12 * SurfaceDistricts + Sim->GetFloorCarvedCells(-1) + Sim->GetFloorCarvedCells(-2) + Sim->GetFloorCarvedCells(-3) + Sim->GetFloorCarvedCells(-4) + Sim->GetFloorCarvedCells(-5),
 				FString::Printf(TEXT("districts: %lld buildings (2 a surface block, %d on the floors) and %lld cells counted"), SumBuildings, FloorBuildings, SumCells));
 			Expect(Dm.Population == Sim->GetPopulation() && Dm.ServiceGaps.Num() == 7 && Dm.Housing >= 0.0 && Dm.Housing <= 1.0 && Dm.Jobs > 0.5 && Dm.Services > 0.0 && Dm.Services < 1.0 && Dm.Air >= 0.0 && Dm.Air <= 1.0,
-				FString::Printf(TEXT("districts: the city's demand at %d people reads Housing %.2f, Jobs %.2f (%d seats), Services %.2f, Air %.2f"), Dm.Population, Dm.Housing, Dm.Jobs, Dm.TotalSeats, Dm.Services, Dm.Air));
+				FString::Printf(TEXT("districts: the city's demand at %d people reads Housing %.2f, Jobs %.2f (%d seats), Services %.2f, Rations %.2f"), Dm.Population, Dm.Housing, Dm.Jobs, Dm.TotalSeats, Dm.Services, Dm.Air));
 
 			// Timing: a cold rebuild (the first read after a change - a rename bumps the district version), warm reads, the whole-city counts and the demand.
 			constexpr int32 ColdReps = 5, WarmReps = 200, CountReps = 50, DemandReps = 50;
