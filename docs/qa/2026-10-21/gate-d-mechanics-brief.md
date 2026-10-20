@@ -2,6 +2,8 @@
 
 The director approved all the proposed Gate-D wording (`gate-d-proposed-wording.md`). This brief covers the nine mechanics that wording flagged, F1-F9, which are still open. Nothing has been changed in code or data; this file is the only edit.
 
+**Answered 2026-10-21: F1b F2b F3a F4a F5b F6b F7b F8b F9a** (all recommendations). They will be built together with the approved Gate-D wording, after D1.
+
 **To answer, copy and edit this line:**
 
 > F1b F2b F3a F4a F5b F6b F7b F8b F9a
