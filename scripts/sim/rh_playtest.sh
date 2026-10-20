@@ -44,6 +44,13 @@
 # districts are unchanged. RH_PLAYTEST_LIFESUPPORT=0 switches it off (the C5d bot: one Electrolyzer, two
 # garden cells), e.g. for the growth-off control.
 #
+# With districts, the bot also plays the living city (C6c): once the colony has Struct to spare beyond the open quota's bill it
+# lays roads (a spine past the industry cluster, a spur to the shaft head, a road across the solar fields to the Ice Drill on
+# Ice_A, with a relay pylon where the grid's discs do not meet), orders a Cargo Rover when freight tasks are open on the road,
+# plans the garden for the Big Arrival's wave once it is in sight (free beds or Hope's streak), and fills ships with Solar Array
+# kits instead of Spare Parts Crates. ROADS and LIVING lines log it; the REPORT block lists roads, rovers, freight and the end
+# books. RH_PLAYTEST_ROADS=0 switches all of it off and gives the C6a bot back exactly (line-identical).
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -69,7 +76,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.
