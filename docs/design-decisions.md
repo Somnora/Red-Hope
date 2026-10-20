@@ -596,3 +596,11 @@ The director answered `docs/qa/2026-10-20/territories-plan.md` (gates T1-T8) wit
 - **Q2a:** several settlements, each a real city with its own stores, power, people and Hope; one capital deals with Earth; they trade by convoy and are actors in inside politics.
 - **Q3a:** territory is held by presence and treaty: settlement coverage claims ground, treaties draw borders, contested sites go to treaty or arbitration. Never by force.
 - **Q4a:** convoys face weather, breakdowns and covert interference (delay or skim, costly if caught), protected by escorts, shielded cargo and waystation shelters. No raids, no attacks.
+
+### Step 5, rising: Q1a Q2a Q3a Q4a (2026-10-20)
+
+The director answered `docs/qa/2026-10-20/rising-plan.md` (gates R1-R8) with all four recommendations. With this, all five steps of the grand vision are planned and answered.
+- **Q1a:** terraforming goes partway in one game: thicker air and less radiation, enough for towers and open-air greenhouses, never breathable. The underground city stays meaningful.
+- **Q2a:** terraforming thresholds open each tower height class; heavy shielding can build one class early, at a price.
+- **Q3a:** landmarks are a short authored list of unique civic projects (names placeholder), each counted once in Hope; some move the identity axis or rival relations; one per settlement or per planet, set per row.
+- **Q4a:** the time-lapse can be watched any time from the City panel, and it also plays at the epilogue.

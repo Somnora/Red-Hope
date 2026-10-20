@@ -13,7 +13,7 @@ Steps 2-4 are answered (Q1a-Q4a each). This step builds on their hooks:
 - **economy:** credits (E2), markets (E4) and treaties and trade blocs (E6) pay for and argue over big projects;
 - **territories:** the colony record (T1), regions and settlements (T2, T4), and off-screen regions run in aggregate (T3).
 
-This brief turns step 5 into gates and asks four questions. It is design only. Nothing here is built, and C6 is still in progress in the same tree.
+This brief turns step 5 into gates and asks four questions. **Answered 2026-10-20: Q1a Q2a Q3a Q4a** (all four recommendations). It is design only. Nothing here is built, and C6 is still in progress in the same tree.
 
 Every number below is a placeholder for the director. The appendix records what the code does today, with file:line.
 
