@@ -650,3 +650,351 @@ Other files: `RHSimRovers.cpp` (`IsRoadServed :34`, `FindNearestRoverPad :40`, `
 - **(b) is worse than it looks.** A row near Ice_B within 300 m of Ice_B's own plant at (48, 690) would make that plant illegal for the bot. Moving the row out past 300 m makes the road longer than (c)'s. Its pylon saving is eaten by the extra road.
 - **Recommendation: (c).** It keeps the ruling's words, uses the same bearing, code and bot plan as (a), and avoids any conflict with Ice_B's plant. It costs 0.69 t more Struct. If the 110-sol bar fails on Struct (the report names it), falling back to (a) is a two-number CSV edit, and the deviation is logged at the gate.
 - Ice_D moves out to 760 m in set (c). Ice_E (806 m) is the same in both sets.
+
+---
+
+# REVISION (2026-10-21)
+
+**This is the W1 spec to build from.** It is complete on its own. It replaces sections 1-9 at the top of this file, draft B (`w1-distant-ice-draft-b.md`), and the "MERGED DESIGN AND REVISION" section above, wherever any of them differ.
+- **Base:** B, as the first review chose.
+- **Carried in:** the first review's changes 1-12 and its grafts from A, tagged [P1-n]. Every NEW item of the second review (3, 4, 5, 7b, 8, 9, 10, 12, 13), tagged [P2-n]. Its optional O1, O2, O5, O6, O7 and O8, adopted.
+- **Declined:** P2-O3 (drop RegionId). The brief asked for a step-4 hook. It costs one row column and no saved field.
+- **Anchors** are `git show 992383d:<path>`. D1 touches none of this logic; only line numbers drift. [P1-12] Build only after D1 commits, then re-anchor every reference to that commit. The table in the MERGED section above gives today's D1-tree lines.
+
+## 0. For the director (things to tell; one needs a ruling)
+
+**Ruling needed: where is the first new ice?** [P1-10] The ruling says "farther out". Ice_B is 702 m out.
+- **Costs.** The bot's Struct cost to open the FIRST outpost, from its standing roads and coverage: pylons at 70 m and 40 kg each, road at 2 kg/m, a drill at 80 kg. A CargoRover is needed in every case.
+  - **(a)** 453 m ESE at (390, -230): 6 pylons + 368 m of road + the drill = **1,056 kg**. Nearer than Ice_B.
+  - **(b)** about 790 m N, along the bot's Ice_B chain: **about 2.1 t**. A row near Ice_B would forbid Ice_B's own plant at (48, 690). Moving the row past 300 m from that plant lengthens the road.
+  - **(c)** 720 m ESE at (624, -360): 10 pylons + 635 m of road + the drill = **1,749 kg** (+693 kg, +66% over (a)).
+- **Recommendation: (c).** It keeps the ruling's words, and every outpost is then farther out than Ice_B, so the rule reads "ice beyond Ice_B comes home raw". If the 110-sol bar fails on Struct, the bot report says so. Falling back to (a) is a CSV edit (two numbers per row).
+- **Row sets.**
+  - (c): Ice_C (624, -360), Ice_D (-20, -760), Ice_E (-700, 400).
+  - (a): Ice_C (390, -230), Ice_D (-20, -620), Ice_E (-700, 400).
+  - Ice_C 80 t, Ice_D 120 t, Ice_E 200 t in both.
+
+**To tell: Ice_B and the outposts follow different rules.** [P2-13]
+- Ice_B (702 m) may be melted on site. The guide says so (D97), and the bot does it at (48, 690) (`RHPlaytest.cpp:1106`).
+- An outpost refuses any Water Plant within 300 m. The rule rides on a row flag the player cannot see.
+- What the player is shown:
+  - the dig site's label reads "Outpost ice deposit";
+  - the refusal says why;
+  - under (c), every outpost lies beyond Ice_B.
+- Under (a), a 453 m deposit is refused where a 702 m one is not. That reads as arbitrary.
+- Making Ice_B an outpost too would move -icelow I11, the bot and D97. It is not proposed.
+
+**To tell: what the player now sees when Ice_B runs low.** [P2-7b] This change is real and shipped, even though -icelow's log hides it (section 9).
+- **The moment:** Ice_A and Ice_B are both found and low.
+- **Before (992383d):**
+  - The alert reads `ICE_B RUNNING LOW — about N t of ice left. The last known ice. Ration water: recycling stretches it, and the Water Plant restores it while ice remains.` That is D87; its approved text reads "Stretch the water ...".
+  - The guide shows no ice step (stage -1).
+- **After W1:**
+  - The alert reads `ICE_B RUNNING LOW — about N t of ice left. Survey for more ice farther out: outpost ice comes home by road and cargo rover.` (new row G4).
+  - The guide shows "Find more ice" with the outpost hint (stage 0), until all five deposits are found.
+  - D87 appears only when every ice row is found and low.
+- The commit message and the design-decisions entry quote both texts.
+
+**To tell: Gate-D wording.** [P2-13] W1 adds new wording, and makes some approved rows wrong for outposts.
+- **New rows, all placeholders for review:**
+  - G1, Dig refusal: `Outpost ice is drilled, not dug - place an Ice Drill on it.`
+  - G2, placement refusal: `Outpost ice comes home raw: build the Water Plant at least 300 m away.`
+  - G3, hint alert, once per row: `ICE SIGNATURES — about %d m %s of the Lander. ORDER > Survey there; the scout reports anything within 60 m.`
+  - G4, RUNNING LOW advice: `Survey for more ice farther out: outpost ice comes home by road and cargo rover.`
+  - G5, guide "Find more ice" body for the hint (a sibling of D90): `%s has about %.0f t of ice left. Ice signatures lie about %d m %s of the Lander: ORDER > Survey there.`
+  - G6, guide stage 2 body for an outpost (replaces D93 there): `BUILD > Production > Ice Drill, placed on %s. Outpost ice comes home by road and cargo rover, never by hauler.`
+  - G7, guide stage 4, "Road the outpost home": `%s's ice comes home raw. BUILD > Logistics > Road from the colony's roads to within 30 m of the drill, and to a Water Plant at least 300 m from it.`
+  - G8, guide stage 5, "Bring a cargo rover": `The road is ready. Add a Cargo Rover to the next supply ship - haulers do not run outpost ice.`
+  - G9, the dig-site label: `Outpost ice deposit`.
+- **Approved rows W1 affects:**
+  - D93: false for an outpost. G6 takes its place for outposts, and D93 stays for Ice_A and Ice_B.
+  - D97: never shown for an outpost.
+  - D87: now arrives only when all five deposits are found and low.
+  - D91: in the shipped data it is replaced by G5 whenever an outpost hint is open, which is every time D91 used to show.
+  - D86: stays while Ice_B is hidden. G4 replaces it once only outposts are hidden.
+  - If the Gate-D wording lands before W1, -icelow I12's "Ration water" check moves with D87's approved text. That move belongs to the Gate-D gate, not W1.
+
+## 1. Data
+- **`FRHDepositRow`** (`RHRows.h:202-212`) gains two columns:
+  - `Outpost` (bool): TRUE on the three new rows, FALSE on the six old ones.
+  - `RegionId` (int32): 0 everywhere.
+  - This is a struct change, so the director compiles, the CSV is re-imported and the DT live-synced.
+- **`FRHDepositState`** (`RHSimTypes.h:108`) gains `bOutpost` and `RegionId`.
+  - Both are set at init (`RHSimWorldSubsystem.cpp:392-406`) and re-derived by RowName at load, beside `InitialKg` (`:11534-11549`).
+  - Neither is saved.
+- **`FRHTask`** gains a runtime `bOutpostSource` [P2-O1]. It is true when `From` is a drill attached to an outpost deposit. It is set at post and re-derived for every task after a load. It is not saved (tasks are written field by field, `:10880-10885`).
+- **Three hidden rows** (`SurfaceVisible` FALSE, `SliceActive` TRUE) are appended after Ice_B, using the section 0 set. Ids 1-6 are unchanged; the new rows are 7, 8 and 9. Rows are appended only (`ForEachDeposit` walks row-map order, `RHDefinitionsSubsystem.cpp:338-352`).
+- **Authored, not generated.**
+  - The sim may not read `RHMarsTerrain` (the module rule), so a generator could not avoid scenery.
+  - A seed would be a new saved, determinism-bearing number.
+  - Row order is the hint order.
+
+## 2. Finding them [P1-8]
+- **`CompleteSurvey` is unchanged** (`:10672-10710`). A scout reveals every hidden deposit within its `WorkRate` (RC_S: 60 m). There is no new reveal path and no new roll.
+- **`GetOutpostHint(FVector& OutCentreCm) const`** returns the lowest-Id undiscovered outpost, but only once every non-outpost Ice row is discovered. In play that is when Ice_B is found, about sol 45.
+  - Its centre is the row rounded to `OutpostHintGridCm` (50 m), half away from zero, in integer cm.
+  - The worst offset is 35.4 m, which is under 60 m. The centres are, set (c): (600, -350), (0, -750), (-700, 400); set (a): (400, -250), (0, -600), (-700, 400).
+- **The rival roll is untouched** (`:10712-10746`). One completed survey makes one roll, seeded by `SurveyHistory.Num()`. Extra surveys only move which survey finds a rival, deterministically.
+- **The hint alert (G3)** fires once when a row's hint opens.
+  - Its latch is runtime. At load it is rebuilt as "every row whose hint is already open, or that is found", like the ice-low latch (`:12041-12048`). It never re-fires after a load.
+  - The survey map draws the hint as a dashed 60 m ring.
+- **The RUNNING LOW advice** (`:1540-1547`) reads G4 when every undiscovered Ice row is an outpost. "The last known ice" (D87) appears only when no Ice row is undiscovered.
+
+## 3. Working them: the outpost rules
+**R1. No melting near an outpost (placement).**
+- `CanPlaceBuildingSized` (`:6545`) refuses, on level 0, any Def whose slice recipe consumes Ice, within `OutpostMeltMinCm` (300 m) of a FOUND outpost, with reason G2. Today only the WaterPlant has such a recipe.
+- Undiscovered rows are not checked, so the refusal leaks nothing.
+- Routing (R3) is the guarantee. A plant built before the discovery is never a destination.
+
+**R2. No digging, in both bands.** [P1-2]
+- The `Dig` verb (`:6963-6984`) refuses an outpost with reason G1. The player issues Dig by clicking any deposit (`RHPlayerController.cpp:1488-1494`), so the refusal is needed.
+- As defence in depth, `TryClaimDig` (`:10295-10320`), the board's pile leg (`:933-1015`) and `EraLogistics`' dig loop (`:766-822`) skip `bOutpost`.
+
+**R3. The destination helper: freight first, nearest of the plants that pass.** [P2-3]
+- The signature is `FindOutpostDestination(const FRHBuildingInstance& Drill, bool bIgnoreRoom, int32& OutId, double& OutRoomKg) const`.
+- **Candidates:** finished level-0 buildings with an Ice-consuming recipe that stand at least `OutpostMeltMinCm` from the drill's deposit. Unless `bIgnoreRoom`, they must also hold `Have + 200 < OutpostHopperKg`.
+- **Order:** sorted by integer straight cm from the drill, ties to the lower Id.
+- **Walk:** test candidates in that order with `IsFreightRoute(drill, candidate)` (`RHSimRovers.cpp:83-97`). That test covers road-served at both ends, connectivity and `FreightMinCm`. Plan at most `RoverClaimPlans` (4) routes per call. The first candidate that passes wins.
+- So an unserved plant that happens to be nearer never blocks a served one.
+- **There is never a store.** `OutRoomKg = OutpostHopperKg - Have`.
+
+**R4. The outpost branch of the output leg; never a store.** [P1-6, P1-7, P2-9, P2-O8]
+- **Where:** the first test inside `for (const auto& Out : B.OutputKg)` (`:1017`). When `B` is an outpost drill and `Out.Key` is Ice, run this branch and `continue`. The generic branch, including the `!bAnyConsumer` store overflow (`:1072-1082`), never sees outpost ice.
+- **Post** when ALL of these hold:
+  - `ActiveRovers > 0`;
+  - there is no LIVE task from this drill (R7);
+  - R3 returns a plant;
+  - `Kg = min(Out, RC_R.Cargo_kg, Room) > 200`.
+- **The task:** `AmountKg = Kg`, `bFreight = true`, `bOutpostSource = true`. `SetHaulAmount` is not used.
+- **Final remnant (O8):** once the source deposit's `RemainingKg == 0`, a last task of `Out >= HaulLoadMinKg` (25 kg) is allowed under the same conditions, so no ice is stranded at an empty drill.
+- **Real load size** [P2-9].
+  - DrillIce credits 40 kg at the end of each 1 h (50 s) batch (`:1310-1316`). So a task posts on the first step with more than 200 kg at the drill, which is 240 kg.
+  - `HaulLoad` takes `min(cap, AmountKg)` (`:10353-10360`).
+  - During a round trip the drill adds about 130 kg at set (a), or about 180 kg at set (c), which is still under 240. So **every trip carries about 240 kg, about four trips a sol per drill.**
+  - A rover is busy about 640 s (a) to 900 s (c) of each 1,200 s sol per outpost drill. That is about one rover per outpost drill.
+  - There is no "1 t a trip". The ruling needs no throughput argument.
+- **The hopper deviation from C6 R5, logged.** A plant takes outpost loads up to 1,200 kg, and plants fill one after another. Water pools, so this is harmless. Every non-outpost leg keeps `2 x Need` exactly.
+
+**R5. Haulers never take outpost ice.** [P2-O1, P2-O6]
+- `TryClaimHaul` (`:10322-10345`) skips `T.bOutpostSource`, whatever `bFreight` says. That covers the moment after a load and before the first board step. There is no 300 s fallback.
+- **Corrected energy** [P1-9]: a hauler uses about 384 Wh on a 480 m round trip, or about 576 Wh at 720 m, against 1,125 Wh above its seek fraction. That is 3 trips, or 2, per charge.
+- Two haulers would still match a drill (0.8 kg/s). So the rule is by source. A rule by distance would move battery hauls.
+
+**R6. Refresh deletes only outpost tasks.** [P2-12]
+- In `RefreshFreightFlags` (`RHSimRovers.cpp:119-142`), an UNCLAIMED task with `bOutpostSource` is kept (`bFreight = true`) only while `ActiveRovers > 0` and `IsFreightRoute` still passes. Otherwise it is DELETED, and R4 re-posts it later.
+- Deleting loses no ice: a task holds no mass.
+- **Non-outpost tasks keep `:135` exactly,** so -traffic X4-X7 and X15 are unaffected.
+- The earlier claim that W1 "closes a latent C6 trap" is withdrawn. Outpost tasks are never at 200 kg or less, and the C6 edge is a liveness item for a later gate.
+
+**R7. A halted rover never holds the lane.** [P2-4]
+- `HasOpenTask` counts claimed tasks (`:10941-10953`), and a halted or flat rover keeps its claim without ticking (`RHRobotBrainProcessor.cpp:103-110`).
+- **New const accessor:** `URHAgentSubsystem::IsRobotLive(FMassEntityHandle, float WearHalt)`. It returns the brain's own test: the entity is valid, `Wear < WearHalt`, and `ChargeWh > 0` or the robot is docked (Charge task, phase 1).
+- **New check for R4:** `HasLiveOutpostTask(DrillId)` is true if any Haul task from that drill is unclaimed, or is claimed by a live robot. It replaces `HasOpenTask` in R4 only.
+- **The dead claim stays.** That rover keeps its cargo, counted as in flight. It delivers if an RC-M repair revives it, which works for wear only. A flat rover off a pad is never revived (the existing rule), so its load stays aboard. That is the one way outpost ice can be stranded, and it is logged.
+- A second rover gets the new task.
+
+**R8. Cap the far drill's buffer.** [P2-5]
+- In `StepProduction`'s extractor check (`InputsOk`, `:1438-1452`), an outpost drill starts no batch while `OutputKg[Ice] >= OutpostDrillBufferKg` (1,000 kg). A batch already running finishes, so the buffer is at most 1,040 kg.
+- `StepProduction` runs in both bands (`StepSim :540`, `EraStep :711`).
+- **Effects:**
+  - with no rover the deposit is not drained into the drill;
+  - RUNNING LOW, stage 4 and D87 stay truthful;
+  - an idle drill draws 15 W, not 250 W.
+
+**R9. Guide stages** (`GetIceExpansionStage`, `:1594-1626`).
+- The existing loop skips outposts, so every value -icelow pins is kept.
+- If that loop resolves (-1), or no non-outpost deposit is healthy, the found healthy outposts are read in Id order:
+  - stage 1 (carry the grid) if not reached;
+  - stage 2 (drill, G6) if not drilled;
+  - stage 4 (road, G7) if `FindOutpostDestination(.., bIgnoreRoom = true, ..)` finds nothing;
+  - stage 5 (rover, G8) if no live rover exists and none waits in `ImportStock["RC_R"]` (adopting P2-O2);
+  - otherwise -1.
+- Stage 3 (D97) is never offered for an outpost.
+
+## 4. Power and coverage [P1-5]
+- **No new rule.** Power is one pool, and coverage is placement only (`:10128-10145`). A drill must be in coverage (`:6746`). A pylon links within 80 m (`:6714-6729`) and covers 40 m.
+- Every road node must be covered, and edges are at most 40 m (`RHSimRoads.cpp:213-221`). So the road needs the same chain the drill needs. An outpost pylon or a self-powered drill would save nothing.
+- **Geometry:**
+  - Pylons stand **at most 70 m apart**, which leaves a ±19.4 m lens at the midpoint.
+  - They stand **6-10 m to one side of the road line**. The 3 m strip half-width plus the pylon's 1 m half-extent (`RHSimRoads.cpp:224-244`) is cleared at 4 m or more.
+  - Every planned road node is checked against the standing and planned discs before any pylon is ordered.
+
+## 5. Rovers and energy [P1-9]
+- **The road-served rule works at any distance.** `PlanRoute` is integer, with int64 costs and K=4 entries (`RHRoads.h:64`, `RHRoads.cpp:428-580`). One order lays at most 64 pieces (about 2.3 km, `RHRoads.h:111`).
+- **Rover reserve.** `DriveWh(3 x straight to the pad)` from the pad at (10, 20), against a 6 kWh battery:
+  - 1.47 kWh at 453 m;
+  - 2.27 kWh at 720 m;
+  - 2.52 kWh at 806 m.
+- **A 240 kg round trip** uses about 0.54 kWh at (a), or about 0.75 kWh at (c). The home pad gives 500 W.
+- The C6 R7 reserve proof holds unchanged.
+
+## 6. Era: as strict as the agent band [P1-4]
+- **The outpost branch comes first in `EraLogistics`' output loop** (`:824`). For an outpost drill's Ice it moves `Kg` (the R4 rule, including the remnant) from the drill to R3's plant, and only if ALL of these hold:
+  - `!bFleetHold`;
+  - `CountActiveRobots(Rover, WearHaltThreshold) > 0` (`RHAgentSubsystem.cpp:307-327`, a read-only fragment read);
+  - a road-served rover pad exists (`FindNearestRoverPad` succeeds), since an agent-band rover below its seek fraction with no such pad claims nothing (`RHSimRovers.cpp:160-169`);
+  - R3 returns the nearest plant that passes the freight test, ties to the lower Id.
+- **Then it `continue`s, and never goes to a store.** The generic era loop (`:824-879`), including its store fallback at `:862-873`, never sees outpost ice.
+- The era dig loop skips outposts (R2). The R8 cap applies through `StepProduction`.
+- **Known limit:** `EraStep` applies no wear (`:701-725`), so a long era stint is optimistic about rover availability. It falls outside the 10-sol bar.
+
+## 7. The playtest bot (`RHPlaytest.cpp`; default on with roads; `RH_PLAYTEST_OUTPOST=0` returns the C6c bot line for line, proved by diff)
+1. **Survey** the hint centre as soon as `GetOutpostHint` answers, once per row. A survey costs nothing, so there is no Struct gate (P2-O7). This replaces the "no third ice" branch (`:632-639`).
+2. **Plan once per row.**
+   - The road line runs from built node (76, -2) to 20 m short of the drill centre, ending inside the 30 m last leg and clear of the drill's 3 m half-footprint.
+   - Pylons stand on the parallel line 8 m to the left, at s = 40, 110, 180, ... m, plus one within 40 m of the drill. For (c) the first is at about (114, -17), 75 m from the relay at (44, 10).
+   - Every road node, at most 36 m apart, must lie in a standing or planned disc. If not, the plan is logged and dropped.
+   - The bill: (a) **1,056 kg**, (c) **1,749 kg**.
+3. **Build.**
+   - Pylons one at a time, each when the previous one stands, through `CanPlaceBuilding` (the `GIceBChain` pattern, `:423-426`).
+   - Road stretches of at most 120 m a sol, only over nodes covered by standing pylons, through `CanPlaceRoad` under the C6c Struct rule.
+   - The drill once its pylon stands.
+4. **Rover.** Order one CargoRover with the drill if none is deployed, aboard or on the way. The open-freight count (`:442`) cannot start it, because outpost tasks need an active rover. The home plant (14, 6) and pad (10, 20) are already road-served from (8, -2).
+5. **Report** (A's fields). An `outpost:` line gives:
+   - the sols of the hint, the survey, the first and last pylon, the last road stretch, the drill, the rover's order and its deployment;
+   - the number of outpost loads, their mean kg, and total tonnes;
+   - water made over drawn at the end.
+   - Per ship, it prints `GetSettlerLegRoom(Water).ProductionRoom` against `Housed = min(SettlersWanted, SettlerRoom)`.
+   - It also says whether Struct held the program back (sols) and names any rival found by the extra surveys.
+6. **Bar** [P1-11]: three runs (50% full, 50% lean, 75% full), 110 sols. All of these must hold:
+   - water made > 0 at sol 110;
+   - outpost tonnes > 0;
+   - for every ship after the first outpost load, `ProductionRoom(Water) >= Housed`.
+   - `bSettlersShortWater` is not used, because it is set only while settlers are held (`RHSimDistricts.cpp:836-841`).
+   - Nothing is tuned to pass.
+
+## 8. Scenery check [P2-10]
+- The sim is blind to the scenery meshes.
+  - A hero peak's base radius is 231-660 m, stretched up to 1.44x by ridge noise (`RHMarsTerrain.cpp:198-200`, `:370-377`, `:405-406`).
+  - Mesa bases are 216-612 m (`:400-401`).
+  - Set (c)'s Ice_C (-30 degrees, 720 m) and Ice_E (806 m) are the likely victims.
+- **Implementer task, before F1 pins positions:** capture each dig site, and each chain and road line, in the editor through the Unreal MCP. Move any row whose 60 m disc lies under a mesh or rises more than 3 m. Each move is a CSV edit, re-checked by F1 and the hint-offset rule.
+- The second review's Python emulation is a reason to look, not a finding.
+- The `DepositCm[]` corridor list (`RHMarsTerrain.cpp:437-445`) is not extended, because rovers drive roads.
+
+## 9. Inertness, the exact battery gate, save [P1-1, P1-3, P1-12]
+- **Every acting branch keys on a found outpost or an outpost drill:** R1-R9 and the era branch. The read-only paths are the hint and the advice. No suite reveals an outpost except -icelow's spend call.
+- **The gate:** `bash scripts/sim/rh_battery.sh 10` with 0 not green. Then `diff_battery.py` against D1's committed battery logs gives **exactly 88 differing lines**, and these lines only:
+  - **86 lines:** in each of the 43 pre-existing logs (the baseline plus 42 suites after D1), the init line `Colony sim online. Lag ... Deposits 6. Starter Struct ...` (`RHSimWorldSubsystem.cpp:424-425`) becomes `Deposits 9.` The reason is three new rows.
+  - **2 lines:** in `roads.log`, `R2 the 10-sol era ledger is identical with and without roads (20 lines, ...` becomes `(26 lines, ...`. `Plain.Num()` is 8 + 2 x deposits (`RHSimCommandlet.cpp:7726`, `:7744`).
+  - **Nothing else moves.** The save "(N bytes" is already masked. Any other differing line fails the gate.
+  - **No mask is committed.** A reading filter, if used, is anchored on `Colony sim online`, stays out of the repo, and never hides R2.
+- **Runs.** After D1: 42 suites, 43 runs. W1 adds `farice`: **43 suites, 44 runs**. `rh_battery.sh` adds `farice` to SUITES and its header and echo say "43 suites (44 runs)". `farice.log` is NEW.
+- **-icelow keeps every line** [P1-3].
+  - Directly after I8, `Debug_SpendOutpostIce()` sets each outpost `bDiscovered = true` and `RemainingKg = 0`, and adds its Id to `IceLowAnnounced` directly. It broadcasts and prints nothing.
+  - Traced through the suite:
+    - I9 gives stage 1 then 2, with `!HasUndiscoveredIce`.
+    - At I10 the rebuild (`:12041-12048`) re-marks the spent rows.
+    - I11 gives stage 3 then -1, and 3 alerts.
+    - I12 gives -1 and "Ration water".
+  - No hint opens, because the outposts are found before Ice_B.
+  - Placed before I6, the call would turn I6's -1 into 3. Removing the rows instead fails I3 (`RHSimCommandlet.cpp:3768-3778`).
+  - **The behaviour this hides is disclosed in section 0** [P2-7b], and -farice F4 pins it.
+- **Save v42, strict.** It is required [P1-12].
+  - Deposits load whole from the save (`:11527-11533`), and the version must match exactly (`:11455`). Without the bump, a v41 save would load without rows 7-9, so no hint would ever open.
+  - There is no new field: `bOutpost`, `RegionId`, `bOutpostSource`, the latches and the hint are all derived.
+  - The version comment reads: "v42: outpost ice rows (no new field; the fence keeps a v41 save from loading without them)".
+
+## 10. Tests: new suite `-farice` (fails loudly)
+- **F1. Data:**
+  - the three rows (mass, position, hidden, Outpost, RegionId 0);
+  - the old six rows with Outpost FALSE;
+  - Ids 1-6 by name and 7-9 in order;
+  - config rows read with a -1 sentinel;
+  - each row within RC_S `WorkRate` of its 50 m hint centre.
+- **F2. Inert twin.**
+  - 20 sols with the outposts hidden, against a twin built with the test-only `Debug_RemoveOutpostRows()`. That call is used here only, never in -icelow.
+  - The digest compares stocks, deposits 1-6 (P2-O5), tasks and power: bit-identical.
+- **F3. Hint and survey:**
+  - no hint while Ice_B is hidden;
+  - the Ice_C hint once Ice_A and Ice_B are found, at the 50 m centre;
+  - a scout survey there reveals the row, and one 61 m off does not;
+  - surveying Ice_E first leaves the hint on Ice_C;
+  - G3 fires once and does not re-fire after a load;
+  - the same survey count gives the same `DiscoveredRivals`.
+- **F4. Advice and stages (the disclosed change):**
+  - near ice found and low with outposts hidden: stage 0 and G4, not D87;
+  - outpost stages 1, 2, 4, 5, then -1, and never 3;
+  - all found and spent: -1 and D87.
+- **F5. Refusals:**
+  - Dig on an outpost: refused with G1;
+  - a Water Plant at 299 m (refused, G2) and at 301 m (accepted);
+  - no refusal before discovery, though R3 skips that plant;
+  - era dig and `TryClaimDig` skip an outpost whose `bDesignated` is forced by a harness call.
+- **F6. Coverage:** a drill outside coverage is refused; a chain at 70 m links; the drill attaches to the outpost Id.
+- **F7. No store, ever:**
+  - no rover: 5 t at the drill posts nothing;
+  - no Water Plant anywhere, or the only one still a site: nothing goes to the Lander or a Stockpile, in either band.
+- **F8. Destination** [P2-3]:
+  - a nearer plant at 465 m that is not road-served is skipped, and a served one at 480 m is chosen;
+  - a plant inside 300 m is skipped;
+  - a plant with `Have + 200 >= 1200` is skipped;
+  - the plan cap of 4 holds.
+- **F9. Legs:**
+  - a rover but no road: no task;
+  - road and rover: `AmountKg = 240` at a fresh drill, with `bFreight` and `bOutpostSource` set;
+  - a hauler never claims it in 600 agent-seconds, nor right after a load (P2-O6);
+  - a demolished edge deletes the unclaimed task;
+  - a non-outpost freight task through `RefreshFreightFlags` behaves exactly as in C6.
+- **F10. Halted rover** [P2-4]: rover A halts by wear with 240 kg aboard. Rover B gets a new task, and deliveries resume. Mass is conserved, with A's cargo counted in flight. After an RC-M repair, A delivers.
+- **F11. Buffer** [P2-5]: 30 sols with no rover. The drill holds at most 1,040 kg, the deposit is not low, there is no RUNNING LOW, stage 5 shows, and the drill draws idle power.
+- **F12. End to end, agent band, Ice_A and Ice_B spent:**
+  - chain, road, rover, drill;
+  - water made > 0 within 3 sols;
+  - mass conserved to 1e-6 kg (drilled = at drill + in flight + hoppers + melted / 0.9);
+  - the final remnant empties the drill.
+- **F13. Hopper:** one plant fills to 1,200 kg, then a second plant is fed. A non-outpost leg to the same plant still uses `2 x Need`.
+- **F14. Era gate:** nothing moves with no rover, with `bFleetHold`, with no road-served pad, with no route, or when the only plant is inside 300 m. With everything in place, loads move through R3.
+- **F15. Era parity** [P1-4c, P2-8]: 10 sols agent against era from one save (set (c) Ice_C, chain, road, one rover). All three checks must pass:
+  - the H2O ledger (0.9 x ice at drills, in hoppers and in flight, plus the Water stock) is within 5%;
+  - the water MELTED (production ledger, `NoteProduced`) is within 5%, or within one load plus one hopper (0.9 x 1,440 kg);
+  - at the end, the agent band's ice at the drill plus in flight is at most 2 x the largest load posted.
+- **F16. Save and determinism:**
+  - a v42 round trip mid-trip with outposts found (cargo returns per SaveColony);
+  - flags re-derived;
+  - v41 refused;
+  - two runs give identical task Ids, amounts and delivery steps.
+
+## 11. Placeholder numbers (docs/data, live-synced; every note ends "Placeholder, director review")
+- **RH_Deposits:** the `Outpost` and `RegionId` columns; Ice_C 80000, Ice_D 120000 and Ice_E 200000 at the positions of the set the director picks.
+- **RH_Config:**
+  - `OutpostMeltMinCm` 30000;
+  - `OutpostHopperKg` 1200;
+  - `OutpostDrillBufferKg` 1000;
+  - `OutpostHintGridCm` 5000.
+- **Unchanged:** FreightMinCm, RoverLastLegCm, RoverClaimPlans (reused by R3), the hauler fallback, the road cost, and every robot and building row.
+
+## 12. Risks
+1. **Struct.** 1.06 t for (a), 1.75 t for (c). The C6c bot funded 445 kg by about sol 38. The bar may fail on Struct, and the report must name it.
+2. **Rover priority.** `TryClaimFreight` takes the nearest pickup, so home freight could delay outpost loads. There is none today.
+3. **A flat rover strands its load** (R7). This is the existing no-revival rule, logged.
+4. **Scenery** (section 8): positions may move after the editor capture.
+5. **The hopper deviation** (R4) and **no hauler fallback** (R5) are deliberate and logged.
+6. **No wear in era** (section 6).
+7. **Row order.** A re-import that reorders rows moves Ids and the battery. F1 pins it.
+8. **The extra surveys** may find a rival sooner in play. That is deterministic, and the bot reports it.
+
+## 13. Traceability
+| item | where |
+|---|---|
+| P1-1 battery lines, no mask, 44 runs | 9 |
+| P1-2 Dig | R2, F5 |
+| P1-3 -icelow call | 9 |
+| P1-4 era gate (a-d) | 6, F14, F15 |
+| P1-5 chain geometry | 4, 7.2 |
+| P1-6 far hopper | R4, F13 |
+| P1-7 never a store | R4, 6, F7 |
+| P1-8 hint | 2, F3 |
+| P1-9 energy | R5, 5 |
+| P1-10 distance | 0 |
+| P1-11 bot bar | 7.6 |
+| P1-12 sequencing, v42 | header, 9 |
+| P2-3 destination | R3, F8 |
+| P2-4 halted rover | R7, F10 |
+| P2-5 buffer cap | R8, F11 |
+| P2-7b disclosure | 0, F4 |
+| P2-8 water melted | F15 |
+| P2-9 load size | R4 |
+| P2-10 scenery | 8 |
+| P2-12 C6 claim, refresh gate | R6, F9 |
+| P2-13 Gate-D, Ice_B vs Ice_C | 0 |
