@@ -384,8 +384,10 @@ TMap<FName, double> URHSimWorldSubsystem::FurnishGrowthRoom(const FIntVector& Ke
 bool URHSimWorldSubsystem::IsCellFreeForRoom(int32 Level, int32 Cell) const
 {
 	const FIntVector Key(Level, Cell, 0);
+	// D3 (O1): growth never zones a tunnel's cell (the line would turn into a row of rooms); the player still may. Inert with no tunnel.
 	return Cell >= 0 && Cell < GetFloorCarvedCells(Level) && GetRoomAt(Level, Cell).IsNone() && GetCellFurniture(Key) == 0
-		&& FindModuleOnCell(Level, Cell) == nullptr && BuildingMaskInCell(Key) == 0u;
+		&& FindModuleOnCell(Level, Cell) == nullptr && BuildingMaskInCell(Key) == 0u
+		&& (Tunnels.Num() == 0 || !IsTunnelChainCell(Level, GetFloorCell(Level, Cell)));
 }
 
 bool URHSimWorldSubsystem::IsBayFreeForRoom(int32 HabId, int32 Bay) const

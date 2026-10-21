@@ -51,6 +51,14 @@ public:
 	// Capture/QA (RH.RoadDemolishHover): hold the tool's hover on a ground point, as if the cursor were
 	// there; it never transmits.
 	void Debug_RoadDemolishHover(const FVector& AtCm);
+	// Tunnel brush (D3, Q2a): the deck's Tunnel button on a floor view. Press anchors the first end on the lattice, drag aims the
+	// second with the sim's own preview (an L: along X, then along Y; the live cell count, Borer-hours, spoil and the preflight's
+	// reason), release transmits a DigTunnel order. The mode stays armed for the next tunnel; cancel exits.
+	void BeginTunnel();
+	bool IsTunnelMode() const { return bTunnelMode; }
+	// Capture/QA (RH.TunnelGhost): hold the brush's ghost mid-drag on a floor between two lattice points, as if the mouse
+	// were down there; it never transmits.
+	void Debug_TunnelGhost(int32 Level, const FIntPoint& FromCell, const FIntPoint& ToCell);
 	// The traffic overlay (C6b): heat on the road strips, a legend on the deck; lives beside the survey map.
 	void ToggleTrafficOverlay();
 	bool IsTrafficOverlayOn() const;
@@ -236,6 +244,12 @@ private:
 	// A ground point snapped to the road grid, and to an existing junction within
 	// 4 m of it (so a stretch can start exactly where another ends).
 	FVector SnapRoadPoint(const FVector& GroundCm) const;
+	// Tunnel brush state (D3).
+	bool bTunnelMode = false;
+	bool bTunnelDragging = false;
+	bool bTunnelForced = false;
+	FVector TunnelAnchorCm = FVector::ZeroVector;
+	FVector TunnelForcedToCm = FVector::ZeroVector;
 	// Demolish Road state (C6b).
 	bool bRoadDemolishMode = false;
 	bool bRoadDemolishForced = false;

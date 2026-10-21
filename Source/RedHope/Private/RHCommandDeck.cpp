@@ -347,6 +347,34 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	{
 		AddFloorCell(-Floor);
 	}
+	// D3 (Q2a): the tunnel brush, once any shaft is bored; below it the viewed floor's tunnels (RefreshTunnelList).
+	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 1.f))
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]()
+		{
+			const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+			const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			return (S && S->GetShaftDepth() >= 1) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity_Lambda([this]()
+			{
+				return FSlateColor((PC.IsValid() && PC->IsTunnelMode()) ? FLinearColor(0.55f, 0.32f, 0.06f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f));
+			})
+			.ContentPadding(FMargin(9.f, 4.f))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTunnel))
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("Tunnel"))).Font(RHDeck::Label(10)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+			]
+		]
+	];
+	ShaftStrip->AddSlot().AutoHeight()
+	[
+		SAssignNew(TunnelList, SVerticalBox)
+	];
 
 	// Speed tiers light up while live, so the bar says how fast time runs.
 	auto SpeedButton = [this](const TCHAR* Label, float Tier) -> TSharedRef<SWidget>
@@ -1104,6 +1132,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshFleetPanel();
 	RefreshRosterPanel();
 	RefreshCityPanel();
+	RefreshTunnelList();
 	RefreshGuide();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
@@ -2067,6 +2096,115 @@ FReply SRHCommandDeck::HandleSinkShaft()
 		}
 	}
 	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleTunnel()
+{
+	// D3: arms the controller's tunnel brush; on the surface it says to pick a floor first (the brush's own hint repeats it).
+	if (PC.IsValid())
+	{
+		if (PC->IsTunnelMode())
+		{
+			PC->CancelModes();
+		}
+		else
+		{
+			PC->BeginTunnel();
+			if (PC->GetActiveLevel() >= 0)
+			{
+				PC->PostConfirm(TEXT("Tunnel: pick a subsurface floor on the elevator first"), FLinearColor(1.f, 0.6f, 0.2f));
+			}
+		}
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleCancelTunnel(int32 TunnelId)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && Sim->FindTunnel(TunnelId))
+	{
+		FRHCommand Cmd;
+		Cmd.Verb = FName("CancelTunnel");
+		Cmd.Value = TunnelId;
+		Sim->EnqueueCommand(Cmd);
+		PC->PostConfirm(FString::Printf(TEXT("Cancel transmitted: tunnel %d - no new cell starts; a batch under way lands its cell"), TunnelId), FLinearColor(0.2f, 0.9f, 1.f));
+	}
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::RefreshTunnelList()
+{
+	// The viewed floor's tunnels, rebuilt only when the list, a carved cell or the viewed floor changes (the key); the rows' own
+	// text reads live. Finished and cancelled tunnels are not listed: a finished one is a corridor, a cancelled one is a label
+	// on the floor.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !TunnelList.IsValid())
+	{
+		return;
+	}
+	const int32 Level = PC->GetActiveLevel();
+	uint32 Key = FCrc::MemCrc32(&Level, sizeof(Level), (uint32)Sim->GetTunnelsVersion());
+	const uint32 Cells = Sim->GetFloorCellsVersion(), Shafts = Sim->GetShaftsVersion();
+	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
+	Key = FCrc::MemCrc32(&Shafts, sizeof(Shafts), Key);
+	if (Key == TunnelListKey)
+	{
+		return;
+	}
+	TunnelListKey = Key;
+	TunnelList->ClearChildren();
+	if (Level >= 0)
+	{
+		return;
+	}
+	bool bAny = false;
+	for (const FRHTunnel& T : Sim->GetTunnels())
+	{
+		if (T.Level != Level || !Sim->IsTunnelOpen(T))
+		{
+			continue;
+		}
+		if (!bAny)
+		{
+			bAny = true;
+			TunnelList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 2.f))
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("TUNNELS"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
+			];
+		}
+		const int32 Id = T.Id;
+		const bool bStalled = Sim->IsTunnelStalled(T);
+		// The strip is narrow, so a row is three short lines: the tunnel and what is left, whether anyone is carving it, and the cancel.
+		TunnelList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)))
+			.ContentPadding(FMargin(5.f, 3.f))
+			.ToolTipText(FText::FromString(FString::Printf(TEXT("Tunnel %d: %d of %d cells left%s. Click to cancel it: no new cell starts; a batch under way lands its cell"),
+				Id, Sim->GetTunnelUncarved(T), URHSimWorldSubsystem::GetTunnelChainLength(T.A, T.B), bStalled ? TEXT(" - stalled: no Borer serves either end") : TEXT(""))))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleCancelTunnel, Id))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d  %d left"), Id, Sim->GetTunnelUncarved(T)))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::Text)
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(bStalled ? TEXT("stalled") : TEXT("digging"))).Font(RHDeck::Label(8))
+					.ColorAndOpacity(bStalled ? FSlateColor(FLinearColor(1.f, 0.6f, 0.2f)) : RHDeck::TextDim)
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("cancel"))).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
+				]
+			]
+		];
+	}
 }
 
 FReply SRHCommandDeck::HandleExcavate()

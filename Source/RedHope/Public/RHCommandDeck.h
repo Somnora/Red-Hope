@@ -166,6 +166,13 @@ private:
 	EVisibility GetSinkShaftVisibility() const;
 	FText GetSinkShaftLabel() const;
 	FReply HandleSinkShaft();
+	// D3 (Q2a): the Tunnel brush button on the shaft strip, and the card under it listing the viewed floor's tunnels, each with
+	// its progress (or "stalled", O11) and a Cancel.
+	FReply HandleTunnel();
+	FReply HandleCancelTunnel(int32 TunnelId);
+	void RefreshTunnelList();
+	TSharedPtr<class SVerticalBox> TunnelList;
+	uint32 TunnelListKey = MAX_uint32;
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
 	FText GetFloorLabel(int32 Level) const;

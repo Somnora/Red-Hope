@@ -308,6 +308,34 @@ struct FRHShaft
 	int32 BorerId = 0;                // the Borer that anchors it; 0 = none (shaft 0 anchored by ExtendShaft, the test path)
 };
 
+namespace RH
+{
+	// D3: caps shared by the config clamps and the save's refusals, so a save made under any row value loads.
+	constexpr int32 TunnelMaxCellsCap = 256;
+	constexpr int32 MaxOpenTunnelsCap = 64;
+	constexpr int32 MaxTunnelRecords = 4096;  // every tunnel ever ordered stays on the list (finished and cancelled ones included)
+}
+
+// D3 (tunnels): a painted line of ordinary carved lattice cells that joins digs on one floor. The record is the order; the
+// chain is derived, literally: an L from A along X to (B.X, A.Y), then along Y to B (both ends included, so the chain is
+// |dx| + |dy| + 1 points). The Borer carves it cell by cell with the CarveCell recipe, from A and, when B stands beside a
+// carved cell (bTwoEnded), from B as well. Every cell it carves goes through AppendCarvedCell like any other, so ordinals stay
+// add-only. Ids are dense in order of ordering and never reused. Written only by URHSimWorldSubsystem.
+struct FRHTunnel
+{
+	int32 Id = 0;
+	int32 RegionId = 0;               // always 0 in D3
+	int32 Level = 0;                  // the floor (< 0)
+	FIntPoint A = FIntPoint::ZeroValue; // lattice points in region 0's frame
+	FIntPoint B = FIntPoint::ZeroValue;
+	bool bTwoEnded = false;           // B had a carved 4-neighbour when it was ordered: the Borer carves from B as well
+	bool bCancelled = false;          // no new batch starts; the cells already carved stay, and a batch in flight lands its cell
+	mutable bool bFinished = false;   // derived, never saved: every chain point is carved (cells are never removed, so it stays true)
+	mutable bool bCounted = false;    // derived, never saved: the uncarved count below is good for CountedAt (a FloorCellsVersion)
+	mutable uint32 CountedAt = 0;
+	mutable int32 CountLeft = 0;
+};
+
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
 // Robot movement/work executes in Mass processors against the same
@@ -578,6 +606,53 @@ public:
 	int32 GetBoreTargetDepth(int32 ShaftId) const { return Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].BoreTargetDepth : 0; }
 	int32 GetCarveQueued(int32 Level) const { int32 Sum = 0; for (const FRHShaft& Sh : Shafts) { const int32* C = Sh.CarveQueue.Find(Level); Sum += C ? *C : 0; } return Sum; }
 	int32 GetCarveQueued(int32 Level, int32 ShaftId) const { const int32* C = Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].CarveQueue.Find(Level) : nullptr; return C ? *C : 0; }
+
+	// --- D3: tunnels ---
+	// One tunnel is one DigTunnel order (see FRHTunnel). Tunnel cells are ordinary cells of FRHFloor::Cells, carved by the Borer.
+	const TArray<FRHTunnel>& GetTunnels() const { return Tunnels; }
+	const FRHTunnel* FindTunnel(int32 Id) const { for (const FRHTunnel& T : Tunnels) { if (T.Id == Id) { return &T; } } return nullptr; }
+	int32 GetNextTunnelId() const { return NextTunnelId; }
+	uint32 GetTunnelsVersion() const { return TunnelsVersion; } // up on every order, cancel and load; presentation caches key on it (and on GetFloorCellsVersion)
+	int32 GetTunnelMaxCells() const { return TunnelMaxCells; }
+	int32 GetMaxOpenTunnels() const { return MaxOpenTunnels; }
+	static int32 GetTunnelChainLength(const FIntPoint& A, const FIntPoint& B) { return FMath::Abs(B.X - A.X) + FMath::Abs(B.Y - A.Y) + 1; }
+	// Chain point Index of 0..Length-1 from A: X first, then Y.
+	static FIntPoint GetTunnelChainPoint(const FIntPoint& A, const FIntPoint& B, int32 Index);
+	static bool IsOnTunnelChain(const FIntPoint& A, const FIntPoint& B, const FIntPoint& P);
+	// Chain points not yet carved (0 once finished). Open = not cancelled and something left to carve.
+	int32 GetTunnelUncarved(const FRHTunnel& T) const;
+	bool IsTunnelOpen(const FRHTunnel& T) const { return !T.bCancelled && GetTunnelUncarved(T) > 0; }
+	int32 GetOpenTunnelCount() const;
+	// Batches in flight on a tunnel, either end.
+	int32 GetTunnelBatchesInFlight(int32 TunnelId) const;
+	// Transient (never saved, not reset by a load): tunnel batches that have completed, and how many of them found no cell to carve
+	// (spoil dropped, no cell: the O5 live case, or a record naming a tunnel the file no longer lists).
+	int32 GetTunnelBatchesLanded() const { return TunnelBatchesLanded; }
+	int32 GetTunnelBatchesEmpty() const { return TunnelBatchesEmpty; }
+	// True when P is a point of any tunnel's chain on Level, whatever the tunnel's state (growth never zones one).
+	bool IsTunnelChainCell(int32 Level, const FIntPoint& P) const;
+	// The front a Borer would carve next: the first uncarved chain point from the A end (or the B end), and the lowest-ordinal
+	// carved 4-neighbour it grows from. False when nothing is left or the end has no carved neighbour.
+	bool GetTunnelFront(const FRHTunnel& T, bool bBEnd, FIntPoint& OutPoint, FIntPoint& OutFrom) const;
+	// O11: an open tunnel with no batch in flight whose every front is served by no completed Borer.
+	bool IsTunnelStalled(const FRHTunnel& T) const;
+	struct FRHTunnelPreview
+	{
+		FIntPoint A = FIntPoint::ZeroValue, B = FIntPoint::ZeroValue;
+		int32 Cells = 0;           // chain length
+		bool bTwoEnded = false;
+		TArray<FIntPoint> Chain;   // from A, in carve order from the A end
+	};
+	// The DigTunnel preflight (refusals 1-7 of the D3 design), with the reason. Level + two points in cm (snapped to the lattice
+	// here); the deck pre-checks with it and the order runs it again at execute time.
+	bool CanDigTunnel(int32 Level, const FVector& ACm, const FVector& BCm, FString& OutReason, FRHTunnelPreview* OutPreview = nullptr) const;
+	// Harness: carve up to N cells of a tunnel now, from its A end (then its B end), through the same path a finished batch takes.
+	// Returns how many cells were appended. Spoil banks at the shaft head, unhauled, like ExcavateFloor.
+	int32 Debug_CarveTunnelCells(int32 TunnelId, int32 N);
+	// Harness: the DigTunnel order without the uplink (the same preflight and the same execution). OutId is the new tunnel's Id.
+	bool Debug_DigTunnel(int32 Level, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
+	// Harness: growth's free-cell test (private; the -tunnels suite pins that it skips tunnel cells).
+	bool Debug_IsCellFreeForRoom(int32 Level, int32 Cell) const { return IsCellFreeForRoom(Level, Cell); }
 
 	// --- Habitability chain (M1-d Gate B) ---
 	// A carved floor is bored -> shielded (free from overburden; the M1-c
@@ -2359,6 +2434,21 @@ private:
 	int32 NearestReachingShaft(int32 Level, const FIntPoint& P) const;
 	bool ExecuteSinkShaft(int32 BorerId, FString& OutReason);
 	bool CheckSinkColumn(const FIntPoint& Column, int32 BorerId, FString& OutReason) const; // refusals 7-9
+	// D3 (tunnels). Saved straight after the shaft block (save v45): NextTunnelId, TunnelCount, then the tunnels in Id order.
+	TArray<FRHTunnel> Tunnels;
+	int32 NextTunnelId = 1;
+	uint32 TunnelsVersion = 0;
+	int32 TunnelBatchesLanded = 0;
+	int32 TunnelBatchesEmpty = 0;
+	int32 TunnelMaxCells = 64;             // config TunnelMaxCells, clamped to [2, RH::TunnelMaxCellsCap]
+	int32 MaxOpenTunnels = 8;              // config MaxOpenTunnels, clamped to [1, RH::MaxOpenTunnelsCap]
+	void ExecuteDigTunnel(const FRHCommand& Cmd);
+	void ExecuteCancelTunnel(const FRHCommand& Cmd);
+	bool FindTunnelWork(int32 WorkShaft, FIntPoint& OutItem) const; // the Borer loop's tunnel branch: (2, Id) = A end, (3, Id) = B end
+	void CompleteTunnelCell(int32 TunnelId, bool bBEnd, int32 BorerId);
+	const FRHTunnel* FindLiveTunnelOnPoint(const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) tunnel whose UNCARVED chain holds P
+	void WriteTunnelBlock(FArchive& Ar) const;
+	bool ReadTunnelBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, TArray<FRHTunnel>& OutTunnels, int32& OutNextId, FString& OutError) const;
 	void ExtendShaftOf(int32 ShaftId, int32 ToDepth);
 	void WriteShaftBlock(FArchive& Ar) const;
 	bool ReadShaftBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, TArray<FRHShaft>& OutShafts, FString& OutError) const;

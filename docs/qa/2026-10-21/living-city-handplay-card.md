@@ -241,6 +241,37 @@ Then press **Next shaft** on the SHAFT strip.
 
 ---
 
+## D3. Tunnels (step 2, going deep; option c, tunnels only)
+
+**Setup:** the D2 setup (two digs, 300 m apart). Orders wait for the uplink lag, so set `RH.Lag 0` first.
+```
+RH.Lag 0
+RH.Demo
+RH.Spawn Pylon 330 12
+RH.SinkNow 330 12 1
+RH.ExcavateNow -1 12 1
+RH.Floor -1
+```
+Then press **Tunnel** on the SHAFT strip, click on the rock beside the first dig and drag toward the second, and release. (Console: `RH.DigTunnel -1 2 0 30 0`, lattice cells of 10 m with the first head at (0,0); `RH.Status` lists tunnels.) A Borer carves it: `RH.Spawn Borer 20 12` is a helper that works shaft 0 and carves the end beside the first dig. `RH.SinkNow` is the debug path and leaves shaft 1 with no Borer, so the far end stays stalled until you sink shaft 1 with a Borer (the D2 real path above); then both ends are carved. With no Borer at all, `RH.TunnelNow 1` carves the tunnel at once and `RH.TunnelNow 1 14` carves half.
+
+- [ ] While you drag, a box shows on every cell of the line (X first, then Y), green when the order would be accepted and red when not, and the hint says the cell count, Borer-hours, tons of spoil and the reason: yes/no
+- [ ] After the order the line stays as a dashed amber ghost, with a label `Tunnel 1: 29 cells left`, or `stalled - no Borer serves either end` while no Borer works either end: yes/no
+- [ ] With a Borer working each end the tunnel is carved from both ends, one cell a Borer every 3 sol-hours, and the dashed part shrinks toward the middle: yes/no
+- [ ] The finished tunnel is a dark corridor with a pale centre stripe, and the two digs read as one place: yes/no
+- [ ] The TUNNELS card under the floor buttons lists the tunnel (`#1 29 left`, `digging` or `stalled`), and clicking it (**cancel**) stops new cells; the cells already dug stay, and the rest of the line stays as a ghost marked `cancelled`: yes/no
+- [ ] Sinking a shaft on an unfinished tunnel's line is refused with the tunnel's number: yes/no
+- [ ] Civic growth never puts a room in a tunnel cell (you still can, by hand): yes/no
+
+**Known, not bugs (option c, 2026-10-21, see `docs/design-decisions.md`, "D3, tunnels"):**
+- Robots do not go below. Fitted lifts, riding, cross-level claims and charging, and repair across floors are D4's, with lift capacity. Haulers and Fabricators still serve a floor from the shaft head.
+- The commute ignores tunnels until floor homes and seats get a cell (D6): a trip between two digs on one floor is still 0 m.
+- A tunnel cell costs what any cell costs: air fill, leak and a legacy bed. A long tunnel on a rated floor needs more oxygen.
+- Era mode still carves a tunnel (it is Borer work in both bands); it is not refused while one is open.
+
+**Verdict:** OK / change / discuss: ____
+
+---
+
 ## The big picture: 15 minutes in the City checkpoint
 
 Does the city feel alive? Play at 3x-8x and use the mouse wherever you can.

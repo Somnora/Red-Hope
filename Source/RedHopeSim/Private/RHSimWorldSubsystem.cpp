@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 44;  // v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 45;  // v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -130,6 +130,21 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxShafts %d is outside 1..%d - clamped to %d"), Row, RH::MaxShaftsCap, MaxShafts);
 		}
 		RebuildShaftDerived();
+	}
+	{
+		// D3: both rows are clamped here and the save refuses against the caps, so a save made under any row value loads.
+		const int32 CellsRow = (int32)Defs->GetConfigScalar(FName("TunnelMaxCells"), 64.0);
+		TunnelMaxCells = FMath::Clamp(CellsRow, 2, RH::TunnelMaxCellsCap);
+		if (TunnelMaxCells != CellsRow)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("TunnelMaxCells %d is outside 2..%d - clamped to %d"), CellsRow, RH::TunnelMaxCellsCap, TunnelMaxCells);
+		}
+		const int32 OpenRow = (int32)Defs->GetConfigScalar(FName("MaxOpenTunnels"), 8.0);
+		MaxOpenTunnels = FMath::Clamp(OpenRow, 1, RH::MaxOpenTunnelsCap);
+		if (MaxOpenTunnels != OpenRow)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxOpenTunnels %d is outside 1..%d - clamped to %d"), OpenRow, RH::MaxOpenTunnelsCap, MaxOpenTunnels);
+		}
 	}
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
@@ -1458,6 +1473,10 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 								Sh.Depth >= Sh.BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
 						}
 					}
+					else if (Work->X >= 2) // D3: a tunnel cell opens, from the end this batch was started on (A = 2, B = 3)
+					{
+						CompleteTunnelCell(Work->Y, Work->X == 3, B.Id);
+					}
 					else // carve: one cell opens on its floor
 					{
 						CarveNextCell(Work->Y, WorkShaft);
@@ -1520,6 +1539,11 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 							break;
 						}
 					}
+					// D3: a tunnel's front, only once bore and the carve queue found nothing, and only with a tunnel on the list.
+					if (WorkRecipeName.IsNone() && Tunnels.Num() > 0 && FindTunnelWork(WorkShaft, WorkItem))
+					{
+						WorkRecipeName = FName("CarveCell");
+					}
 				}
 				if (const FRHRecipeRow* Work = WorkRecipeName.IsNone() ? nullptr : Defs->GetRecipe(WorkRecipeName))
 				{
@@ -1544,9 +1568,21 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					B.ActiveRecipe = WorkRecipeName;
 					PendingOutputs.Add(B.Id, URHDefinitionsSubsystem::ParseResourceList(Work->Outputs));
 					B.BatchRemaining_h = Work->BatchTime_h;
-					UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, floor %d)"),
-						*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
-						B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y);
+					if (WorkItem.X >= 2)
+					{
+						// O4: a tunnel batch's Y is the tunnel Id, so it gets its own line (the floor line below would print it as a floor).
+						const FRHTunnel* WorkTunnel = FindTunnel(WorkItem.Y);
+						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, tunnel %d, %s end, floor %d)"),
+							*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
+							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y,
+							WorkItem.X == 3 ? TEXT("B") : TEXT("A"), WorkTunnel ? WorkTunnel->Level : 0);
+					}
+					else
+					{
+						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, floor %d)"),
+							*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
+							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y);
+					}
 					continue; // budget flows into the new batch
 				}
 			}
@@ -7379,6 +7415,12 @@ bool URHSimWorldSubsystem::CheckSinkColumn(const FIntPoint& Column, int32 BorerI
 			return false;
 		}
 	}
+	// D3 (O9 extended): a column may not land on an uncarved point of an unfinished tunnel, or the tunnel could never finish.
+	if (const FRHTunnel* Held = FindLiveTunnelOnPoint(Column))
+	{
+		OutReason = FString::Printf(TEXT("That column lies on tunnel #%d on floor %d, which is not finished"), Held->Id, Held->Level);
+		return false;
+	}
 	for (const FRHBuildingInstance& B : Buildings)
 	{
 		if (B.Level < 0 && B.Id != BorerId && CmToLattice(Shafts[0].HeadCm, B.LocationCm) == Column)
@@ -7486,6 +7528,560 @@ bool URHSimWorldSubsystem::Debug_SinkShaftAt(const FVector& HeadCm, int32 Depth,
 	OutShaftId = Shafts.Last().Id;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d sunk at (%d, %d) (harness)"), OutShaftId, Column.X, Column.Y);
 	ExtendShaftOf(OutShaftId, Depth);
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// D3: tunnels. A tunnel is a painted L of ordinary lattice cells (X first, then Y). The Borer carves it with the CarveCell recipe,
+// from the A end and, when B stands beside a carved cell, from the B end too. Every cell goes through AppendCarvedCell.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+FIntPoint URHSimWorldSubsystem::GetTunnelChainPoint(const FIntPoint& A, const FIntPoint& B, int32 Index)
+{
+	const int32 Dx = B.X - A.X, Dy = B.Y - A.Y;
+	const int32 AbsDx = FMath::Abs(Dx);
+	if (Index <= AbsDx)
+	{
+		return FIntPoint(A.X + (Dx < 0 ? -Index : Index), A.Y);
+	}
+	const int32 Down = Index - AbsDx;
+	return FIntPoint(B.X, A.Y + (Dy < 0 ? -Down : Down));
+}
+
+bool URHSimWorldSubsystem::IsOnTunnelChain(const FIntPoint& A, const FIntPoint& B, const FIntPoint& P)
+{
+	if (P.Y == A.Y && P.X >= FMath::Min(A.X, B.X) && P.X <= FMath::Max(A.X, B.X))
+	{
+		return true;
+	}
+	return P.X == B.X && P.Y >= FMath::Min(A.Y, B.Y) && P.Y <= FMath::Max(A.Y, B.Y);
+}
+
+int32 URHSimWorldSubsystem::GetTunnelUncarved(const FRHTunnel& T) const
+{
+	if (T.bFinished)
+	{
+		return 0;
+	}
+	if (T.bCounted && T.CountedAt == FloorCellsVersion)
+	{
+		return T.CountLeft; // no cell was carved or planned anywhere since the last count
+	}
+	const FRHFloor* Floor = FindFloor(T.Level);
+	const int32 Len = GetTunnelChainLength(T.A, T.B);
+	int32 Left = 0;
+	for (int32 i = 0; i < Len; ++i)
+	{
+		if (!Floor || !Floor->IndexOf.Contains(GetTunnelChainPoint(T.A, T.B, i)))
+		{
+			++Left;
+		}
+	}
+	T.bCounted = true;
+	T.CountedAt = FloorCellsVersion;
+	T.CountLeft = Left;
+	if (Left == 0)
+	{
+		T.bFinished = true; // cells are never removed, so a finished chain stays finished
+	}
+	return Left;
+}
+
+int32 URHSimWorldSubsystem::GetOpenTunnelCount() const
+{
+	int32 N = 0;
+	for (const FRHTunnel& T : Tunnels)
+	{
+		N += IsTunnelOpen(T) ? 1 : 0;
+	}
+	return N;
+}
+
+int32 URHSimWorldSubsystem::GetTunnelBatchesInFlight(int32 TunnelId) const
+{
+	int32 N = 0;
+	for (const auto& W : PendingBoreWork)
+	{
+		N += (W.Value.X >= 2 && W.Value.Y == TunnelId) ? 1 : 0;
+	}
+	return N;
+}
+
+bool URHSimWorldSubsystem::IsTunnelChainCell(int32 Level, const FIntPoint& P) const
+{
+	for (const FRHTunnel& T : Tunnels)
+	{
+		if (T.Level == Level && IsOnTunnelChain(T.A, T.B, P))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+const FRHTunnel* URHSimWorldSubsystem::FindLiveTunnelOnPoint(const FIntPoint& P, int32 ExceptId) const
+{
+	// "Live" = still protected: open, or cancelled with a batch in flight that may yet carve its next cell.
+	for (const FRHTunnel& T : Tunnels)
+	{
+		if (T.Id == ExceptId || !IsOnTunnelChain(T.A, T.B, P))
+		{
+			continue;
+		}
+		const FRHFloor* Floor = FindFloor(T.Level);
+		if (Floor && Floor->IndexOf.Contains(P))
+		{
+			continue; // already carved: no longer a point it still has to carve
+		}
+		if (IsTunnelOpen(T) || (GetTunnelUncarved(T) > 0 && GetTunnelBatchesInFlight(T.Id) > 0))
+		{
+			return &T;
+		}
+	}
+	return nullptr;
+}
+
+bool URHSimWorldSubsystem::GetTunnelFront(const FRHTunnel& T, bool bBEnd, FIntPoint& OutPoint, FIntPoint& OutFrom) const
+{
+	const FRHFloor* Floor = FindFloor(T.Level);
+	if (!Floor)
+	{
+		return false;
+	}
+	const int32 Len = GetTunnelChainLength(T.A, T.B);
+	for (int32 k = 0; k < Len; ++k)
+	{
+		const FIntPoint P = GetTunnelChainPoint(T.A, T.B, bBEnd ? Len - 1 - k : k);
+		if (Floor->IndexOf.Contains(P))
+		{
+			continue;
+		}
+		// The first uncarved point from this end. It grows from its lowest-ordinal carved 4-neighbour.
+		int32 BestOrdinal = INDEX_NONE;
+		for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+		{
+			const int32 O = Floor->FindOrdinal(P + D);
+			if (O != INDEX_NONE && (BestOrdinal == INDEX_NONE || O < BestOrdinal))
+			{
+				BestOrdinal = O;
+			}
+		}
+		if (BestOrdinal == INDEX_NONE)
+		{
+			return false;
+		}
+		OutPoint = P;
+		OutFrom = Floor->Cells[BestOrdinal];
+		return true;
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::FindTunnelWork(int32 WorkShaft, FIntPoint& OutItem) const
+{
+	// Open tunnels by Id on the floors WorkShaft reaches. The A front when WorkShaft serves it, else the B front (two-ended) under the
+	// same test. A tunnel starts a batch only while its uncarved points outnumber its batches in flight.
+	for (const FRHTunnel& T : Tunnels)
+	{
+		if (T.bCancelled || !ShaftReaches(WorkShaft, T.Level))
+		{
+			continue;
+		}
+		const int32 Uncarved = GetTunnelUncarved(T);
+		if (Uncarved == 0 || Uncarved <= GetTunnelBatchesInFlight(T.Id))
+		{
+			continue;
+		}
+		FIntPoint P, From;
+		if (GetTunnelFront(T, false, P, From) && ServingShaft(T.Level, From) == WorkShaft)
+		{
+			OutItem = FIntPoint(2, T.Id);
+			return true;
+		}
+		if (T.bTwoEnded && GetTunnelFront(T, true, P, From) && ServingShaft(T.Level, From) == WorkShaft)
+		{
+			OutItem = FIntPoint(3, T.Id);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsTunnelStalled(const FRHTunnel& T) const
+{
+	if (!IsTunnelOpen(T) || GetTunnelBatchesInFlight(T.Id) > 0)
+	{
+		return false;
+	}
+	const auto Served = [&](bool bBEnd)
+	{
+		FIntPoint P, From;
+		if (!GetTunnelFront(T, bBEnd, P, From))
+		{
+			return false;
+		}
+		const int32 S = ServingShaft(T.Level, From);
+		if (S == INDEX_NONE)
+		{
+			return false;
+		}
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+			if (Def && Def->CanBore && !B.bUnderConstruction && GetBorerShaft(B.Id) == S)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	return !Served(false) && !(T.bTwoEnded && Served(true));
+}
+
+bool URHSimWorldSubsystem::CanDigTunnel(int32 Level, const FVector& ACm, const FVector& BCm, FString& OutReason, FRHTunnelPreview* OutPreview) const
+{
+	// Refusals 1-7 of the D3 design, each with a reason.
+	// 1. The floor must be reached by some shaft.
+	if (Level >= 0 || Level < -MaxDepth || DeepestShaft < -Level)
+	{
+		OutReason = FString::Printf(TEXT("Floor %d is not reached - bore a shaft that deep first"), Level);
+		return false;
+	}
+	const FVector Origin = Shafts[0].HeadCm;
+	const FIntPoint A = CmToLattice(Origin, ACm), B = CmToLattice(Origin, BCm);
+	// 2. Length: at least two cells, at most TunnelMaxCells (checked in int64: the order carries arbitrary points).
+	const int64 Len64 = (int64)FMath::Abs((int64)B.X - A.X) + (int64)FMath::Abs((int64)B.Y - A.Y) + 1;
+	if (Len64 < 2)
+	{
+		OutReason = TEXT("A tunnel needs two different points");
+		return false;
+	}
+	if (Len64 > TunnelMaxCells)
+	{
+		OutReason = FString::Printf(TEXT("A tunnel runs at most %d cells (this one would be %lld)"), TunnelMaxCells, Len64);
+		return false;
+	}
+	const int32 Len = (int32)Len64;
+	const FRHFloor* Floor = FindFloor(Level);
+	const auto Carved = [&](const FIntPoint& P) { return Floor && Floor->IndexOf.Contains(P); };
+	const auto BesideCarved = [&](const FIntPoint& P)
+	{
+		for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+		{
+			if (Carved(P + D)) { return true; }
+		}
+		return false;
+	};
+	// 3. It starts in rock at the edge of a dig.
+	if (Carved(A))
+	{
+		OutReason = TEXT("A tunnel starts in rock at the edge of a dig - that point is already dug");
+		return false;
+	}
+	if (!BesideCarved(A))
+	{
+		OutReason = TEXT("Start a tunnel at the edge of a dig");
+		return false;
+	}
+	TArray<FIntPoint> Chain;
+	Chain.Reserve(Len);
+	for (int32 i = 0; i < Len; ++i)
+	{
+		Chain.Add(GetTunnelChainPoint(A, B, i));
+	}
+	for (const FIntPoint& P : Chain)
+	{
+		// 4. Through rock only.
+		if (Carved(P))
+		{
+			OutReason = FString::Printf(TEXT("A tunnel runs through rock - (%d, %d) is already dug"), P.X, P.Y);
+			return false;
+		}
+		// 5. Never through a shaft column.
+		if (ShaftColumns.Contains(P))
+		{
+			OutReason = FString::Printf(TEXT("A shaft stands on the line at (%d, %d)"), P.X, P.Y);
+			return false;
+		}
+		// 6. Never across another open tunnel's uncarved line (a T-join starts beside a carved tunnel cell).
+		for (const FRHTunnel& Other : Tunnels)
+		{
+			if (Other.Level == Level && IsTunnelOpen(Other) && IsOnTunnelChain(Other.A, Other.B, P))
+			{
+				OutReason = FString::Printf(TEXT("The line crosses tunnel #%d at (%d, %d)"), Other.Id, P.X, P.Y);
+				return false;
+			}
+		}
+	}
+	// 7. At most MaxOpenTunnels open at once.
+	if (GetOpenTunnelCount() >= MaxOpenTunnels)
+	{
+		OutReason = FString::Printf(TEXT("No more open tunnels - %d at a time"), MaxOpenTunnels);
+		return false;
+	}
+	if (OutPreview)
+	{
+		OutPreview->A = A;
+		OutPreview->B = B;
+		OutPreview->Cells = Len;
+		OutPreview->bTwoEnded = BesideCarved(B);
+		OutPreview->Chain = MoveTemp(Chain);
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::ExecuteDigTunnel(const FRHCommand& Cmd)
+{
+	// The preflight runs here, at execute time, because the line can be dug (or a shaft sunk on it) while the order is in flight.
+	FString Reason;
+	FRHTunnelPreview Pre;
+	if (!CanDigTunnel(Cmd.Level, Cmd.Location, Cmd.LocationB, Reason, &Pre))
+	{
+		OnCommandRejected.Broadcast(Cmd, Reason);
+		return;
+	}
+	FRHTunnel T;
+	T.Id = NextTunnelId++;
+	T.Level = Cmd.Level;
+	T.A = Pre.A;
+	T.B = Pre.B;
+	T.bTwoEnded = Pre.bTwoEnded;
+	Tunnels.Add(T);
+	++TunnelsVersion;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Tunnel %d ordered on floor %d: (%d, %d) to (%d, %d), %d cells%s"),
+		T.Id, T.Level, T.A.X, T.A.Y, T.B.X, T.B.Y, Pre.Cells, T.bTwoEnded ? TEXT(", carved from both ends") : TEXT(""));
+}
+
+void URHSimWorldSubsystem::ExecuteCancelTunnel(const FRHCommand& Cmd)
+{
+	const int32 Id = FMath::RoundToInt(Cmd.Value);
+	FRHTunnel* T = nullptr;
+	for (FRHTunnel& Each : Tunnels)
+	{
+		if (Each.Id == Id) { T = &Each; break; }
+	}
+	if (!T)
+	{
+		OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown tunnel #%d"), Id));
+		return;
+	}
+	if (T->bCancelled)
+	{
+		OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Tunnel #%d is already cancelled"), Id));
+		return;
+	}
+	if (GetTunnelUncarved(*T) == 0)
+	{
+		OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Tunnel #%d is already finished"), Id));
+		return;
+	}
+	T->bCancelled = true;
+	++TunnelsVersion;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Tunnel %d cancelled with %d cell(s) uncarved (%d batch(es) in flight will land)"),
+		Id, GetTunnelUncarved(*T), GetTunnelBatchesInFlight(Id));
+}
+
+void URHSimWorldSubsystem::CompleteTunnelCell(int32 TunnelId, bool bBEnd, int32 BorerId)
+{
+	// A finished tunnel batch: its spoil already dropped at the Borer with the batch's outputs. The cell is the first uncarved chain
+	// point from the end the batch was started on, read NOW (the end is fixed at batch start, the point is not: a spiral, a plan or
+	// another batch may have carved it). Nothing to carve, a column on the point, or a tunnel the file no longer lists: spoil, no cell.
+	++TunnelBatchesLanded;
+	const FRHTunnel* T = FindTunnel(TunnelId);
+	if (!T)
+	{
+		++TunnelBatchesEmpty;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Borer #%d: tunnel %d is no longer listed - spoil, no cell"), BorerId, TunnelId);
+		return;
+	}
+	FIntPoint P, From;
+	if (!GetTunnelFront(*T, bBEnd, P, From) || ShaftColumns.Contains(P))
+	{
+		++TunnelBatchesEmpty;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Borer #%d: tunnel %d has no cell left to carve from its %s end - spoil, no cell"),
+			BorerId, TunnelId, bBEnd ? TEXT("B") : TEXT("A"));
+		return;
+	}
+	FRHFloor& Floor = FindOrAddFloor(T->Level);
+	Floor.Plan.Remove(P); // a painted point that the tunnel carves first leaves the plan (a carved point in the plan is a refused save)
+	AppendCarvedCell(Floor, P);
+	const int32 Left = GetTunnelUncarved(*T);
+	if (Left == 0)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Tunnel %d carved cell (%d, %d) on floor %d - tunnel complete (%d cells)"),
+			TunnelId, P.X, P.Y, T->Level, GetTunnelChainLength(T->A, T->B));
+	}
+	else
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Tunnel %d carved cell (%d, %d) on floor %d (%d left)"), TunnelId, P.X, P.Y, T->Level, Left);
+	}
+}
+
+int32 URHSimWorldSubsystem::Debug_CarveTunnelCells(int32 TunnelId, int32 N)
+{
+	const FRHTunnel* T = FindTunnel(TunnelId);
+	if (!T)
+	{
+		return 0;
+	}
+	int32 Done = 0;
+	for (; Done < N; ++Done)
+	{
+		// A two-ended tunnel alternates its ends (A first), as two Borers would; a one-ended one carves from A.
+		FIntPoint P, From;
+		bool bBEnd = T->bTwoEnded && (Done & 1) != 0;
+		if (!GetTunnelFront(*T, bBEnd, P, From) && !(T->bTwoEnded && GetTunnelFront(*T, bBEnd = !bBEnd, P, From)))
+		{
+			break;
+		}
+		if (ShaftColumns.Contains(P))
+		{
+			break;
+		}
+		CompleteTunnelCell(TunnelId, bBEnd, 0);
+		SpoilPileKg += SpoilKgPerCell;
+	}
+	return Done;
+}
+
+bool URHSimWorldSubsystem::Debug_DigTunnel(int32 Level, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason)
+{
+	OutId = INDEX_NONE;
+	FRHCommand Cmd;
+	Cmd.Verb = FName("DigTunnel");
+	Cmd.Level = Level;
+	Cmd.Location = LatticeToCm(Shafts[0].HeadCm, A);
+	Cmd.LocationB = LatticeToCm(Shafts[0].HeadCm, B);
+	if (!CanDigTunnel(Level, Cmd.Location, Cmd.LocationB, OutReason))
+	{
+		return false;
+	}
+	ExecuteDigTunnel(Cmd);
+	OutId = NextTunnelId - 1;
+	return true;
+}
+
+void URHSimWorldSubsystem::WriteTunnelBlock(FArchive& Ar) const
+{
+	// Save v45, straight after the shaft block: NextTunnelId, TunnelCount, then per tunnel in Id order Id, RegionId, Level, A.X,
+	// A.Y, B.X, B.Y, bTwoEnded, bCancelled (an int32 each, a bool is four bytes). An empty list is 8 bytes.
+	int32 Next = NextTunnelId, Count = Tunnels.Num();
+	Ar << Next << Count;
+	for (const FRHTunnel& T : Tunnels)
+	{
+		int32 Id = T.Id, Region = T.RegionId, Level = T.Level, Ax = T.A.X, Ay = T.A.Y, Bx = T.B.X, By = T.B.Y;
+		bool bTwo = T.bTwoEnded, bCancel = T.bCancelled;
+		Ar << Id << Region << Level << Ax << Ay << Bx << By << bTwo << bCancel;
+	}
+}
+
+bool URHSimWorldSubsystem::ReadTunnelBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, TArray<FRHTunnel>& OutTunnels, int32& OutNextId, FString& OutError) const
+{
+	// Structural refusals only, taken before the live colony is touched: they set OutError and log nothing at Error level.
+	const auto Refuse = [&OutError](const FString& Why) { OutError = FString::Printf(TEXT("Save tunnel list invalid: %s"), *Why); return false; };
+	OutTunnels.Reset();
+	OutNextId = 1;
+	int32 Next = 0, Count = 0;
+	Ar << Next << Count;
+	if (Ar.IsError() || Next < 1 || Count < 0 || Count > RH::MaxTunnelRecords || Count >= Next || (int64)Count * 36 > (int64)Ar.TotalSize() - Ar.Tell())
+	{
+		return Refuse(FString::Printf(TEXT("next id %d, tunnel count %d"), Next, Count));
+	}
+	int32 DeepestLoaded = 0;
+	TSet<FIntPoint> Columns;
+	for (const FRHShaft& Sh : InShafts)
+	{
+		DeepestLoaded = FMath::Max(DeepestLoaded, Sh.Depth);
+		Columns.Add(Sh.Column);
+	}
+	const auto FloorOf = [&Floors](int32 Level) -> const FRHFloor*
+	{
+		for (const FRHFloor& F : Floors) { if (F.Level == Level) { return &F; } }
+		return nullptr;
+	};
+	TSet<FIntVector> OpenPoints; // (level, x, y) of every uncarved point of an open tunnel
+	int32 Open = 0, PrevId = 0;
+	for (int32 n = 0; n < Count; ++n)
+	{
+		FRHTunnel T;
+		int32 Ax = 0, Ay = 0, Bx = 0, By = 0;
+		bool bTwo = false, bCancel = false;
+		Ar << T.Id << T.RegionId << T.Level << Ax << Ay << Bx << By << bTwo << bCancel;
+		if (Ar.IsError())
+		{
+			return Refuse(TEXT("the tunnel list is cut short"));
+		}
+		T.A = FIntPoint(Ax, Ay);
+		T.B = FIntPoint(Bx, By);
+		T.bTwoEnded = bTwo;
+		T.bCancelled = bCancel;
+		if (T.Id < 1 || T.Id <= PrevId || T.Id >= Next)
+		{
+			return Refuse(FString::Printf(TEXT("tunnel ids must ascend and stay below %d, found %d after %d"), Next, T.Id, PrevId));
+		}
+		PrevId = T.Id;
+		if (T.RegionId != 0)
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d names region %d (only region 0 exists)"), T.Id, T.RegionId));
+		}
+		if (T.Level >= 0 || T.Level < -MaxDepth || DeepestLoaded < -T.Level)
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d is on floor %d, which is outside -1..-%d or reached by no shaft"), T.Id, T.Level, MaxDepth));
+		}
+		const int64 Len64 = (int64)FMath::Abs((int64)T.B.X - T.A.X) + (int64)FMath::Abs((int64)T.B.Y - T.A.Y) + 1;
+		if (Len64 < 2 || Len64 > RH::TunnelMaxCellsCap)
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d runs %lld cells (the range is 2..%d)"), T.Id, Len64, RH::TunnelMaxCellsCap));
+		}
+		const FRHFloor* Floor = FloorOf(T.Level);
+		const auto Carved = [Floor](const FIntPoint& P) { return Floor && Floor->IndexOf.Contains(P); };
+		const auto BesideCarved = [&Carved](const FIntPoint& P)
+		{
+			for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+			{
+				if (Carved(P + D)) { return true; }
+			}
+			return false;
+		};
+		if (!Carved(T.A) && !BesideCarved(T.A))
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d starts at (%d,%d), which is neither dug nor beside a dug cell"), T.Id, T.A.X, T.A.Y));
+		}
+		if (T.bTwoEnded && !Carved(T.B) && !BesideCarved(T.B))
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d is two-ended but (%d,%d) is neither dug nor beside a dug cell"), T.Id, T.B.X, T.B.Y));
+		}
+		bool bUncarved = false;
+		for (int32 i = 0; i < (int32)Len64; ++i)
+		{
+			const FIntPoint P = GetTunnelChainPoint(T.A, T.B, i);
+			if (Carved(P))
+			{
+				continue;
+			}
+			bUncarved = true;
+			if (T.bCancelled)
+			{
+				continue; // a cancelled tunnel's rock may be sunk on later
+			}
+			if (Columns.Contains(P))
+			{
+				return Refuse(FString::Printf(TEXT("tunnel %d has a shaft column (%d,%d) on its uncarved line"), T.Id, P.X, P.Y));
+			}
+			bool bRepeat = false;
+			OpenPoints.Add(FIntVector(T.Level, P.X, P.Y), &bRepeat);
+			if (bRepeat)
+			{
+				return Refuse(FString::Printf(TEXT("tunnel %d shares the uncarved point (%d,%d) with another open tunnel"), T.Id, P.X, P.Y));
+			}
+		}
+		if (bUncarved && !T.bCancelled && ++Open > RH::MaxOpenTunnelsCap)
+		{
+			return Refuse(FString::Printf(TEXT("more than %d open tunnels"), RH::MaxOpenTunnelsCap));
+		}
+		OutTunnels.Add(T);
+	}
+	OutNextId = Next;
 	return true;
 }
 
@@ -8331,6 +8927,14 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
+	}
+	else if (Cmd.Verb == FName("DigTunnel"))
+	{
+		ExecuteDigTunnel(Cmd); // D3: rejects through OnCommandRejected itself
+	}
+	else if (Cmd.Verb == FName("CancelTunnel"))
+	{
+		ExecuteCancelTunnel(Cmd);
 	}
 	else if (Cmd.Verb == FName("Assign"))
 	{
@@ -12343,6 +12947,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << Magic << Version << SimSeconds << Speed;
 	WriteFloorTable(Ar); // v41: the floor table sits straight after the header (a load validates it before any teardown)
 	WriteShaftBlock(Ar); // v44: and the shaft list straight after it, so the floor block's offsets do not move
+	WriteTunnelBlock(Ar); // v45: and the tunnel list straight after that, so the shaft block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -12784,6 +13389,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v45: the tunnel list, validated the same way (against the floors and shafts just read), into locals.
+	TArray<FRHTunnel> LoadedTunnels;
+	int32 LoadedNextTunnelId = 1;
+	if (!ReadTunnelBlock(Ar, LoadedFloors, LoadedShafts, LoadedTunnels, LoadedNextTunnelId, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -12923,6 +13535,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	RebuildFloorIndex();
 	++FloorCellsVersion;
 	Shafts = MoveTemp(LoadedShafts);
+	Tunnels = MoveTemp(LoadedTunnels);
+	NextTunnelId = LoadedNextTunnelId;
+	++TunnelsVersion;
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a
 	// Borer that anchors two shafts keeps the lower Id.
 	{

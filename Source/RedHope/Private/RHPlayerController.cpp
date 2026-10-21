@@ -723,6 +723,83 @@ void ARHPlayerController::Tick(float DeltaTime)
 			HintColor = FLinearColor(0.3f, 0.9f, 1.f);
 		}
 	}
+	else if (bTunnelMode)
+	{
+		// The tunnel ghost (D3, Q2a): the L the order would dig (along X, then along Y), cell by cell, from the sim's own preflight -
+		// green is an order that would be accepted right now (the uplink re-checks on arrival), red names the refusal.
+		FVector Ground;
+		if (ActiveLevel >= 0)
+		{
+			HintText = TEXT("TUNNEL: tunnels are dug on a floor - pick a subsurface floor on the elevator first");
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+		else if (bTunnelForced ? (Ground = TunnelForcedToCm, true) : CursorToGround(Ground))
+		{
+			const FVector Origin = Sim->GetShaftHeadCm();
+			const FIntPoint Cursor = URHSimWorldSubsystem::CmToLattice(Origin, Ground);
+			const FIntPoint From = bTunnelDragging ? URHSimWorldSubsystem::CmToLattice(Origin, TunnelAnchorCm) : Cursor;
+			// An uncarved cell is rock under the sand skirt the floor view lays at ground level: its marks sit there.
+			const auto CellBox = [&](const FIntPoint& P, const FColor& Color, float Half)
+			{
+				const FVector C = URHSimWorldSubsystem::LatticeToCm(Origin, P);
+				DrawDebugBox(World, FVector(C.X, C.Y, 40.f), FVector(Half, Half, 30.f), Color, false, -1.f, 0, 6.f);
+			};
+			if (!bTunnelDragging || From == Cursor)
+			{
+				CellBox(Cursor, FColor::Orange, 450.f);
+				HintText = TEXT("TUNNEL: click on the rock beside a dig and drag to where it should come out, release to transmit. The line runs along X, then along Y; your Borers carve it one cell at a time, from both ends when the far end stands beside a dig. Right-click to finish");
+				HintColor = FLinearColor(1.f, 0.6f, 0.1f);
+			}
+			else
+			{
+				FString Reason;
+				URHSimWorldSubsystem::FRHTunnelPreview Pre;
+				const bool bOk = Sim->CanDigTunnel(ActiveLevel, URHSimWorldSubsystem::LatticeToCm(Origin, From), URHSimWorldSubsystem::LatticeToCm(Origin, Cursor), Reason, &Pre);
+				const FColor Color = bOk ? FColor::Green : FColor::Red;
+				const int32 Len = FMath::Min(URHSimWorldSubsystem::GetTunnelChainLength(From, Cursor), 200);
+				for (int32 i = 0; i < Len; ++i)
+				{
+					CellBox(URHSimWorldSubsystem::GetTunnelChainPoint(From, Cursor, i), Color, 400.f);
+				}
+				const URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+				const FRHRecipeRow* Carve = DefsSub ? DefsSub->GetRecipe(FName("CarveCell")) : nullptr;
+				const double HoursPerCell = Carve ? Carve->BatchTime_h : 3.0;
+				const double SpoilPerCell = Carve ? URHDefinitionsSubsystem::ParseResourceList(Carve->Outputs).FindRef(FName("Regolith")) : 1200.0;
+				FString Tip = FString::Printf(TEXT("TUNNEL floor %d: %d cell%s  ·  %.0f Borer-hours  ·  %.1f t spoil"), ActiveLevel, Pre.Cells > 0 ? Pre.Cells : Len, (Pre.Cells > 0 ? Pre.Cells : Len) == 1 ? TEXT("") : TEXT("s"),
+					(Pre.Cells > 0 ? Pre.Cells : Len) * HoursPerCell, (Pre.Cells > 0 ? Pre.Cells : Len) * SpoilPerCell / 1000.0);
+				if (bOk && Pre.bTwoEnded)
+				{
+					Tip += TEXT("  ·  carved from both ends");
+				}
+				Tip += bOk ? TEXT("\nrelease to transmit, right-click to cancel") : FString::Printf(TEXT("\n%s"), *Reason);
+				HintText = Tip;
+				HintColor = FLinearColor(Color);
+				if (!bTunnelForced && !IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bTunnelDragging = false;
+					if (bOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("DigTunnel");
+						Cmd.Level = ActiveLevel;
+						Cmd.Location = URHSimWorldSubsystem::LatticeToCm(Origin, From);
+						Cmd.LocationB = URHSimWorldSubsystem::LatticeToCm(Origin, Cursor);
+						Sim->EnqueueCommand(Cmd);
+						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+						SetConfirm(FString::Printf(TEXT("Tunnel transmitted: %d cells on floor %d from (%d, %d) to (%d, %d)"), Pre.Cells, ActiveLevel, From.X, From.Y, Cursor.X, Cursor.Y), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					else
+					{
+						URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+					}
+				}
+			}
+			if (!bTunnelForced && bTunnelDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bTunnelDragging = false; // released on the spot it was pressed: nothing to dig
+			}
+		}
+	}
 	else if (bExcavateMode)
 	{
 		// Paint-to-size (M1-d): the rect on the active floor, sized in 10x10 m
@@ -1180,7 +1257,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 	if (URHTrafficVisualizerSubsystem* Traffic = World->GetSubsystem<URHTrafficVisualizerSubsystem>())
 	{
 		FVector HoverGround = FVector::ZeroVector;
-		const bool bToolArmed = !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bDistrictMode || bDigMode || bSurveyMode
+		const bool bToolArmed = !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bTunnelMode || bDistrictMode || bDigMode || bSurveyMode
 			|| bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode;
 		Traffic->SetHoverGround(HoverGround, Traffic->IsOverlayOn() && ActiveLevel == 0 && !bToolArmed && CursorToGround(HoverGround));
 	}
@@ -1293,6 +1370,15 @@ void ARHPlayerController::OnClick()
 		{
 			// Invalid spot: the ghost already says why; the click only buzzes.
 			URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+		}
+	}
+	else if (bTunnelMode)
+	{
+		// Anchor the first end; Tick aims the second and transmits on release.
+		if (ActiveLevel < 0)
+		{
+			TunnelAnchorCm = Ground;
+			bTunnelDragging = true;
 		}
 	}
 	else if (bExcavateMode)
@@ -1580,7 +1666,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bTunnelMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -1734,6 +1820,30 @@ void ARHPlayerController::Debug_ScrollDeck(float OffsetPx)
 	}
 }
 
+void ARHPlayerController::BeginTunnel()
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bTunnelMode = true;
+	bTunnelDragging = false;
+	bTunnelForced = false;
+}
+
+void ARHPlayerController::Debug_TunnelGhost(int32 Level, const FIntPoint& FromCell, const FIntPoint& ToCell)
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	SetActiveLevel(Level);
+	BeginTunnel();
+	bTunnelDragging = true;
+	bTunnelForced = true;
+	TunnelAnchorCm = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), FromCell);
+	TunnelForcedToCm = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), ToCell);
+}
+
 void ARHPlayerController::BeginRoadDemolish()
 {
 	CancelModes();
@@ -1790,6 +1900,8 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 {
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bRoadDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
@@ -1805,6 +1917,8 @@ void ARHPlayerController::BeginDigDesignation()
 {
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1818,6 +1932,8 @@ void ARHPlayerController::BeginSurveyDesignation()
 {
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1946,6 +2062,8 @@ void ARHPlayerController::BeginExcavateDesignation()
 {
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -1963,6 +2081,8 @@ void ARHPlayerController::BeginZoneDesignation(FName Room)
 {
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	PendingBuildDef = NAME_None;
@@ -2050,7 +2170,7 @@ void ARHPlayerController::FocusNextShaft()
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bRoadMode && !bRoadDemolishMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
+	if (PendingBuildDef.IsNone() && !bRoadMode && !bRoadDemolishMode && !bTunnelMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -2062,9 +2182,12 @@ void ARHPlayerController::CancelModes()
 	bBuildDragging = false;
 	bRoadMode = false;
 	bRoadDemolishMode = false;
+	bTunnelMode = false;
+	bTunnelDragging = false;
 	bRoadDragging = false;
 	bRoadForced = false;
 	bRoadDemolishForced = false;
+	bTunnelForced = false;
 	bDistrictMode = false;
 	bDistrictDragging = false;
 	bDistrictForced = false;

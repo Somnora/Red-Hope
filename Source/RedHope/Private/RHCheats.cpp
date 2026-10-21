@@ -440,6 +440,87 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSinkNow(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDigTunnel(
+	TEXT("RH.DigTunnel"),
+	TEXT("RH.DigTunnel <Level> <Ax> <Ay> <Bx> <By> - order a tunnel on a floor between two LATTICE points (10 m cells, the shaft head is (0,0)): an L along X, then along Y, carved by the Borers cell by cell (uplink). A must be rock at the edge of a dig. RH.Status lists the tunnels."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 5)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DigTunnel <Level> <Ax> <Ay> <Bx> <By>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const FVector Origin = Sim->GetShaftHeadCm();
+			FRHCommand Cmd;
+			Cmd.Verb = FName("DigTunnel");
+			Cmd.Level = FCString::Atoi(*Args[0]);
+			Cmd.Location = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2])));
+			Cmd.LocationB = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(FCString::Atoi(*Args[3]), FCString::Atoi(*Args[4])));
+			FString Why;
+			if (!Sim->CanDigTunnel(Cmd.Level, Cmd.Location, Cmd.LocationB, Why))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.DigTunnel] would be refused now: %s (the order is sent anyway; the uplink checks again on arrival)"), *Why);
+			}
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCancelTunnel(
+	TEXT("RH.CancelTunnel"),
+	TEXT("RH.CancelTunnel <Id> - cancel a tunnel (uplink): no new cell starts, the cells carved stay, a batch under way lands its cell."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CancelTunnel <Id>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("CancelTunnel");
+			Cmd.Value = FCString::Atod(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHTunnelNow(
+	TEXT("RH.TunnelNow"),
+	TEXT("RH.TunnelNow <Id> [Cells=all] - DEBUG: carve up to N cells of a tunnel instantly (bypasses the Borer; spoil banks at the head, unhauled)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.TunnelNow <Id> [Cells]"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const int32 Laid = Sim->Debug_CarveTunnelCells(FCString::Atoi(*Args[0]), Args.Num() > 1 ? FCString::Atoi(*Args[1]) : Sim->GetTunnelMaxCells());
+			UE_LOG(LogRedHope, Display, TEXT("[RH.TunnelNow] %d cell(s) carved"), Laid);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHTunnelGhost(
+	TEXT("RH.TunnelGhost"),
+	TEXT("RH.TunnelGhost <Level> <Ax> <Ay> <Bx> <By> - DEBUG: hold the Tunnel brush's drag ghost on a floor between two lattice points (as if the mouse were down there) for a screenshot; it never transmits. With no arguments it clears the brush."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!PC)
+		{
+			return;
+		}
+		if (Args.Num() < 5)
+		{
+			PC->CancelModes();
+			return;
+		}
+		PC->Debug_TunnelGhost(FCString::Atoi(*Args[0]), FIntPoint(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2])), FIntPoint(FCString::Atoi(*Args[3]), FCString::Atoi(*Args[4])));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 	TEXT("RH.Excavate"),
 	TEXT("RH.Excavate <Level> <Cells> [shaft=0] - order N 10x10 cells carved on a floor that shaft reaches (uplink; its Borer works the queue)."),
@@ -1728,6 +1809,13 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 			}
 			UE_LOG(LogRedHope, Display, TEXT("  shaft %d: floor -%d of ordered -%d | column (%d, %d) | Borer #%d%s"),
 				K, Sh.Depth, Sh.BoreTargetDepth, Sh.Column.X, Sh.Column.Y, Sh.BorerId, *Queue);
+		}
+		// D3: one line per tunnel.
+		for (const FRHTunnel& T : Sim->GetTunnels())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  tunnel %d: floor %d | (%d, %d) to (%d, %d) | %d of %d cells left%s%s%s"),
+				T.Id, T.Level, T.A.X, T.A.Y, T.B.X, T.B.Y, Sim->GetTunnelUncarved(T), URHSimWorldSubsystem::GetTunnelChainLength(T.A, T.B),
+				T.bTwoEnded ? TEXT(" | two-ended") : TEXT(""), T.bCancelled ? TEXT(" | cancelled") : TEXT(""), Sim->IsTunnelStalled(T) ? TEXT(" | stalled") : TEXT(""));
 		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{
