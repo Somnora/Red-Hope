@@ -31,7 +31,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 40;  // v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 41;  // v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -1351,10 +1351,9 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					}
 					else // carve: one cell opens on its floor
 					{
-						int32& Carved = FloorCarvedCells.FindOrAdd(Work->Y);
-						++Carved;
+						CarveNextCell(Work->Y);
 						UE_LOG(LogRedHopeSim, Display, TEXT("Carved cell on floor %d (%d carved, %d queued)"),
-							Work->Y, Carved, GetCarveQueued(Work->Y));
+							Work->Y, GetFloorCarvedCells(Work->Y), GetCarveQueued(Work->Y));
 					}
 					PendingBoreWork.Remove(B.Id);
 				}
@@ -2364,9 +2363,11 @@ bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
 void URHSimWorldSubsystem::StepHabitability(float SubDt)
 {
 	static const FName NOxygen(TEXT("Oxygen"));
-	for (int32 Level = -1; Level >= -MaxDepth; --Level)
+	for (const FRHFloor& Floor : FloorTable) // D1: the floors that exist, shallowest first (the old -1..-MaxDepth walk minus the empty ones)
 	{
-		const int32 Cells = GetFloorCarvedCells(Level);
+		const int32 Level = Floor.Level;
+		ensure(Level >= -MaxDepth);
+		const int32 Cells = Floor.Cells.Num();
 		if (Cells == 0 || !IsLevelConnected(Level))
 		{
 			continue;
@@ -2716,10 +2717,10 @@ bool URHSimWorldSubsystem::IsWhollyInBay(const FRHBuildingInstance& Hab, const F
 FIntPoint URHSimWorldSubsystem::CellPos(const FIntVector& Key) const
 {
 	// Comparable only within ONE floor or ONE network: underground cells use
-	// the spiral around the shaft head; bays use the world bay lattice.
+	// the floor's lattice around the shaft head; bays use the world bay lattice.
 	if (Key.X < 0)
 	{
-		return SpiralCell(Key.Y);
+		return GetFloorCell(Key.X, Key.Y);
 	}
 	const FRHHabMemberCache* M = HabMembers.Find(Key.Z);
 	return (M && M->NX > 0) ? M->GridMin + FIntPoint(Key.Y % M->NX, Key.Y / M->NX) : FIntPoint(MIN_int32, MIN_int32);
@@ -3204,8 +3205,10 @@ bool URHSimWorldSubsystem::PickFillHome(FRHFillState& State, int32& OutLevel, in
 	// members by Id.
 	OutLevel = 0;
 	OutHab = 0;
-	for (int32 Level = -1; Level >= -MaxDepth; --Level)
+	for (const FRHFloor& Floor : FloorTable) // D1: the floors that exist, shallowest first
 	{
+		const int32 Level = Floor.Level;
+		ensure(Level >= -MaxDepth);
 		if (!RatedFloors.Contains(Level))
 		{
 			continue;
@@ -3307,7 +3310,7 @@ URHSimWorldSubsystem::FRHScaleColonyReport URHSimWorldSubsystem::Debug_BuildScal
 	for (int32 L = 1; L <= Floors; ++L)
 	{
 		TArray<FIntPoint> Pos;
-		for (int32 I = 0; I < CellsPerFloor; ++I) { Pos.Add(SpiralCell(I)); }
+		for (int32 I = 0; I < CellsPerFloor; ++I) { Pos.Add(GetFloorCell(-L, I)); }
 		for (int32 I = 0; I < CellsPerFloor; ++I)
 		{
 			bool bNearGarden = false;
@@ -4593,22 +4596,267 @@ FIntPoint URHSimWorldSubsystem::SpiralCell(int32 Index)
 	// (the shaft column's own cell): (1,0), (1,1), (0,1), (-1,1), ...
 	// Moved sim-side at Gate B: room adjacency made cell GEOMETRY gameplay,
 	// so the sim owns the layout; presentation reads this same function.
-	int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
+	FRHSpiralWalk Walk;
+	FIntPoint P(0, 0);
 	for (int32 i = 0; i <= Index; ++i)
 	{
-		X += DX; Y += DY;
-		if (++LegPos == LegLen)
+		P = Walk.Next();
+	}
+	return P;
+}
+
+FRHFloor& URHSimWorldSubsystem::FindOrAddFloor(int32 Level)
+{
+	if (const int32* I = FloorIndexByLevel.Find(Level))
+	{
+		return FloorTable[*I];
+	}
+	// Sorted by (region, Level descending). Region 0 is the only region in D1.
+	int32 At = 0;
+	while (At < FloorTable.Num() && FloorTable[At].Level > Level)
+	{
+		++At;
+	}
+	FRHFloor Fresh;
+	Fresh.Level = Level;
+	FloorTable.Insert(MoveTemp(Fresh), At);
+	RebuildFloorIndex();
+	return FloorTable[At];
+}
+
+void URHSimWorldSubsystem::RebuildFloorIndex()
+{
+	FloorIndexByLevel.Reset();
+	for (int32 i = 0; i < FloorTable.Num(); ++i)
+	{
+		FloorIndexByLevel.Add(FloorTable[i].Level, i);
+	}
+}
+
+void URHSimWorldSubsystem::AppendCarvedCell(FRHFloor& Floor, const FIntPoint& P)
+{
+	Floor.IndexOf.Add(P, Floor.Cells.Num());
+	Floor.Cells.Add(P);
+	++FloorCellsVersion;
+}
+
+FIntPoint URHSimWorldSubsystem::CarveNextCell(int32 Level)
+{
+	FRHFloor& Floor = FindOrAddFloor(Level);
+	FIntPoint P(0, 0);
+	if (Floor.Plan.Num() > 0)
+	{
+		P = Floor.Plan[0];
+		Floor.Plan.RemoveAt(0);
+	}
+	else
+	{
+		for (;;) // the cursor skips spiral points that are already carved; it never moves past an uncarved one
 		{
-			LegPos = 0;
-			const int32 T = DX; DX = -DY; DY = T; // turn left
-			if (++LegsDone == 2)
+			FRHSpiralWalk Probe = Floor.Walk;
+			const FIntPoint Q = Probe.Next();
+			if (Floor.IndexOf.Contains(Q))
 			{
-				LegsDone = 0;
-				++LegLen;
+				Floor.Walk = Probe;
+				continue;
 			}
+			P = Q;
+			break;
 		}
 	}
-	return FIntPoint(X, Y);
+	AppendCarvedCell(Floor, P);
+	return P;
+}
+
+void URHSimWorldSubsystem::PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out) const
+{
+	Out.Reset();
+	const FRHFloor* Floor = FindFloor(Level);
+	FRHFloor Empty;
+	if (!Floor)
+	{
+		Floor = &Empty;
+	}
+	const int32 FromPlan = FMath::Min(N, Floor->Plan.Num());
+	for (int32 i = 0; i < FromPlan; ++i)
+	{
+		Out.Add(Floor->Plan[i]);
+	}
+	FRHSpiralWalk Probe = Floor->Walk;
+	while (Out.Num() < N)
+	{
+		const FIntPoint Q = Probe.Next();
+		if (!Floor->IndexOf.Contains(Q) && !Out.Contains(Q))
+		{
+			Out.Add(Q);
+		}
+	}
+}
+
+FIntPoint URHSimWorldSubsystem::GetFloorCell(int32 Level, int32 Index) const
+{
+	if (const FRHFloor* Floor = FindFloor(Level))
+	{
+		if (Floor->Cells.IsValidIndex(Index))
+		{
+			return Floor->Cells[Index];
+		}
+	}
+	++FloorCellFallbacks;
+	return SpiralCell(Index);
+}
+
+FVector URHSimWorldSubsystem::GetFloorCellCentreCm(int32 Level, int32 Index) const
+{
+	const FIntPoint P = GetFloorCell(Level, Index);
+	return FVector(ShaftHeadCm.X + P.X * 1000.0, ShaftHeadCm.Y + P.Y * 1000.0, Level * FloorHeightCm);
+}
+
+bool URHSimWorldSubsystem::Debug_PaintCarve(int32 Level, const FIntPoint& P, FString& OutReason)
+{
+	if (Level >= 0 || !IsLevelConnected(Level))
+	{
+		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
+		return false;
+	}
+	if (P == FIntPoint(0, 0))
+	{
+		OutReason = TEXT("That is the shaft column");
+		return false;
+	}
+	const int32* Slot = FloorIndexByLevel.Find(Level);
+	if (!Slot)
+	{
+		OutReason = FString::Printf(TEXT("Floor %d has no carved cell yet - the first cell comes from the Borer or ExcavateFloor"), Level);
+		return false; // a floor in the table always holds at least one cell (the save refuses an empty one)
+	}
+	FRHFloor& Floor = FloorTable[*Slot];
+	if (Floor.IndexOf.Contains(P))
+	{
+		OutReason = TEXT("Already carved");
+		return false;
+	}
+	if (Floor.Plan.Contains(P))
+	{
+		OutReason = TEXT("Already painted");
+		return false;
+	}
+	Floor.Plan.Add(P);
+	++FloorCellsVersion;
+	return true;
+}
+
+void URHSimWorldSubsystem::WriteFloorTable(FArchive& Ar) const
+{
+	// Save v41, straight after the header: FloorCount, then per floor in table order RegionId, Level,
+	// NCells x (X, Y), NPlan x (X, Y). No origin: region 0's origin is the shaft head, saved further on.
+	int32 FloorCount = FloorTable.Num();
+	Ar << FloorCount;
+	for (const FRHFloor& F : FloorTable)
+	{
+		int32 Region = F.RegionId, Level = F.Level, NCells = F.Cells.Num(), NPlan = F.Plan.Num();
+		Ar << Region << Level << NCells;
+		for (const FIntPoint& P : F.Cells) { int32 X = P.X, Y = P.Y; Ar << X << Y; }
+		Ar << NPlan;
+		for (const FIntPoint& P : F.Plan) { int32 X = P.X, Y = P.Y; Ar << X << Y; }
+	}
+}
+
+bool URHSimWorldSubsystem::ReadFloorTable(FArchive& Ar, TArray<FRHFloor>& OutFloors, FString& OutError) const
+{
+	// Every refusal here is a structural one, taken before the live colony is touched: it sets OutError and
+	// returns false, and logs nothing at Error level.
+	const auto Refuse = [&OutError](const FString& Why) { OutError = FString::Printf(TEXT("Save floor table invalid: %s"), *Why); return false; };
+	OutFloors.Reset();
+	int32 FloorCount = 0;
+	Ar << FloorCount;
+	if (Ar.IsError() || FloorCount < 0 || FloorCount > 64)
+	{
+		return Refuse(FString::Printf(TEXT("floor count %d"), FloorCount));
+	}
+	for (int32 n = 0; n < FloorCount; ++n)
+	{
+		FRHFloor F;
+		int32 NCells = 0;
+		Ar << F.RegionId << F.Level << NCells;
+		if (Ar.IsError())
+		{
+			return Refuse(TEXT("the table is cut short"));
+		}
+		if (F.RegionId != 0)
+		{
+			return Refuse(FString::Printf(TEXT("floor %d names region %d (only region 0 exists)"), F.Level, F.RegionId));
+		}
+		if (F.Level >= 0 || F.Level < -MaxDepth)
+		{
+			return Refuse(FString::Printf(TEXT("floor level %d is outside -1..-%d"), F.Level, MaxDepth));
+		}
+		for (const FRHFloor& Prev : OutFloors)
+		{
+			if (Prev.RegionId == F.RegionId && Prev.Level == F.Level)
+			{
+				return Refuse(FString::Printf(TEXT("floor %d is listed twice"), F.Level));
+			}
+		}
+		if (NCells < 1 || (int64)NCells * 8 > (int64)Ar.TotalSize() - Ar.Tell())
+		{
+			return Refuse(FString::Printf(TEXT("floor %d lists %d cells"), F.Level, NCells));
+		}
+		F.Cells.Reserve(NCells);
+		for (int32 i = 0; i < NCells; ++i)
+		{
+			int32 X = 0, Y = 0;
+			Ar << X << Y;
+			const FIntPoint P(X, Y);
+			if (Ar.IsError())
+			{
+				return Refuse(TEXT("the table is cut short"));
+			}
+			if (P == FIntPoint(0, 0))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d lists the shaft column (0,0) as a cell"), F.Level));
+			}
+			if (F.IndexOf.Contains(P))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d lists cell (%d,%d) twice"), F.Level, X, Y));
+			}
+			F.IndexOf.Add(P, F.Cells.Num());
+			F.Cells.Add(P);
+		}
+		int32 NPlan = 0;
+		Ar << NPlan;
+		if (Ar.IsError() || NPlan < 0 || (int64)NPlan * 8 > (int64)Ar.TotalSize() - Ar.Tell())
+		{
+			return Refuse(FString::Printf(TEXT("floor %d lists %d planned cells"), F.Level, NPlan));
+		}
+		TSet<FIntPoint> Seen;
+		for (int32 i = 0; i < NPlan; ++i)
+		{
+			int32 X = 0, Y = 0;
+			Ar << X << Y;
+			const FIntPoint P(X, Y);
+			if (Ar.IsError())
+			{
+				return Refuse(TEXT("the table is cut short"));
+			}
+			if (P == FIntPoint(0, 0))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d plans the shaft column (0,0)"), F.Level));
+			}
+			if (F.IndexOf.Contains(P))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d plans cell (%d,%d), which is already carved"), F.Level, X, Y));
+			}
+			if (Seen.Contains(P))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d plans cell (%d,%d) twice"), F.Level, X, Y));
+			}
+			Seen.Add(P);
+			F.Plan.Add(P);
+		}
+		OutFloors.Add(MoveTemp(F));
+	}
+	return true;
 }
 
 bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName RoomName, FString& OutReason)
@@ -4836,8 +5084,10 @@ void URHSimWorldSubsystem::RefreshJobs()
 	{
 		return Row && Row->SliceActive && (Row->Function == NLab || Row->Function == NWorkstation || Row->Function == NGarden);
 	};
-	for (int32 Level = -1; Level >= -MaxDepth; --Level)
+	for (const FRHFloor& Floor : FloorTable) // D1: the floors that exist, shallowest first
 	{
+		const int32 Level = Floor.Level;
+		ensure(Level >= -MaxDepth);
 		if (!RatedFloors.Contains(Level))
 		{
 			continue;
@@ -5097,18 +5347,9 @@ int32 URHSimWorldSubsystem::FindCarvedCellAt(int32 Level, const FVector& Locatio
 	{
 		return INDEX_NONE;
 	}
-	// Cell centres sit at the shaft head + SpiralCell x 10 m (the visualizer's
-	// carve tiles use the same mapping).
-	const FIntPoint P(FMath::RoundToInt((LocationCm.X - ShaftHeadCm.X) / 1000.0),
-		FMath::RoundToInt((LocationCm.Y - ShaftHeadCm.Y) / 1000.0));
-	for (int32 i = 0; i < Carved; ++i)
-	{
-		if (SpiralCell(i) == P)
-		{
-			return i;
-		}
-	}
-	return INDEX_NONE;
+	// Cell centres sit at the shaft head (region 0's origin) + the floor's lattice point x 10 m (the
+	// visualizer's carve tiles use the same mapping). Measured from the head, never from world 0.
+	return FindFloorCell(Level, CmToLattice(ShaftHeadCm, LocationCm));
 }
 
 double URHSimWorldSubsystem::GetFoodRunwaySols() const
@@ -5289,25 +5530,16 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		{
 			continue;
 		}
+		// D1: the floor table owns where each cell is. NRooms is the room array's length (the carve count as of
+		// the last designation: never longer than the floor, possibly shorter), so only the first NRooms cells exist
+		// for this pass and both searches below see exactly that set.
+		const int32 NRooms = Cells.Num();
+		const FRHFloor* FloorHere = FindFloor(Level);
 		TArray<FIntPoint> Pos;
-		Pos.SetNumUninitialized(Cells.Num());
+		Pos.SetNumUninitialized(NRooms);
+		for (int32 i = 0; i < NRooms; ++i)
 		{
-			int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0; // SpiralCell's walk, once
-			for (int32 i = 0; i < Cells.Num(); ++i)
-			{
-				X += DX; Y += DY;
-				Pos[i] = FIntPoint(X, Y);
-				if (++LegPos == LegLen)
-				{
-					LegPos = 0;
-					const int32 T = DX; DX = -DY; DY = T;
-					if (++LegsDone == 2)
-					{
-						LegsDone = 0;
-						++LegLen;
-					}
-				}
-			}
+			Pos[i] = GetFloorCell(Level, i);
 		}
 		FIntPoint Lo = Pos[0], Hi = Pos[0];
 		for (const FIntPoint& P : Pos)
@@ -5316,15 +5548,31 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			Hi = FIntPoint(FMath::Max(Hi.X, P.X), FMath::Max(Hi.Y, P.Y));
 		}
 		const int32 GridW = Hi.X - Lo.X + 1;
-		TArray<int32> Grid;
-		Grid.Init(INDEX_NONE, GridW * (Hi.Y - Lo.Y + 1));
-		for (int32 i = 0; i < Cells.Num(); ++i)
+		const int64 BoxArea = (int64)GridW * (Hi.Y - Lo.Y + 1);
+		// The dense grid when the bounding box is at most 8 x NRooms (every spiral floor: a spiral prefix's box is
+		// under that); otherwise the table's own hash lookup, so a long painted tunnel never allocates a huge box.
+		const bool bUseGrid = AdjacencyMode == 1 || (AdjacencyMode == 0 && BoxArea <= 8 * (int64)NRooms);
+		if (!bUseGrid)
 		{
-			Grid[(Pos[i].Y - Lo.Y) * GridW + (Pos[i].X - Lo.X)] = i;
+			++AdjacencyFallbackRuns;
+		}
+		TArray<int32> Grid;
+		if (bUseGrid)
+		{
+			Grid.Init(INDEX_NONE, (int32)BoxArea);
+			for (int32 i = 0; i < NRooms; ++i)
+			{
+				Grid[(Pos[i].Y - Lo.Y) * GridW + (Pos[i].X - Lo.X)] = i;
+			}
 		}
 		const auto CellAt = [&](const FIntPoint& P) -> int32
 		{
-			return (P.X < Lo.X || P.X > Hi.X || P.Y < Lo.Y || P.Y > Hi.Y) ? (int32)INDEX_NONE : Grid[(P.Y - Lo.Y) * GridW + (P.X - Lo.X)];
+			if (bUseGrid)
+			{
+				return (P.X < Lo.X || P.X > Hi.X || P.Y < Lo.Y || P.Y > Hi.Y) ? (int32)INDEX_NONE : Grid[(P.Y - Lo.Y) * GridW + (P.X - Lo.X)];
+			}
+			const int32 Ord = FloorHere ? FloorHere->FindOrdinal(P) : (int32)INDEX_NONE;
+			return Ord >= NRooms ? (int32)INDEX_NONE : Ord; // a cell carved past the last designation is no room yet
 		};
 		static const FIntPoint Reach[12] = {
 			FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1),
@@ -6362,8 +6610,11 @@ bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutR
 		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
 		return false;
 	}
-	int32& Carved = FloorCarvedCells.FindOrAdd(Level);
-	Carved += Cells;
+	for (int32 i = 0; i < Cells; ++i)
+	{
+		CarveNextCell(Level);
+	}
+	const int32 Carved = GetFloorCarvedCells(Level);
 	const double Spoil = Cells * SpoilKgPerCell;
 	SpoilPileKg += Spoil;
 	// Gate B: dig-spoil chemicals for the fertilizer chain (crop-layer gated).
@@ -9382,7 +9633,7 @@ FVector URHSimWorldSubsystem::GetCellCentreCm(const FIntVector& Key) const
 		const FRHBuildingInstance* B = FindBuildingById(Key.Z);
 		return B ? GetBayCentreCm(*B, Key.Y) : FVector::ZeroVector;
 	}
-	const FIntPoint P = SpiralCell(Key.Y);
+	const FIntPoint P = GetFloorCell(Key.X, Key.Y);
 	return FVector(ShaftHeadCm.X + P.X * 1000.0, ShaftHeadCm.Y + P.Y * 1000.0, Key.X * FloorHeightCm);
 }
 
@@ -11034,6 +11285,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	double SimSeconds = Clock->GetSimSecondsTotal();
 	float Speed = Clock->GetSpeed();
 	Ar << Magic << Version << SimSeconds << Speed;
+	WriteFloorTable(Ar); // v41: the floor table sits straight after the header (a load validates it before any teardown)
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -11104,7 +11356,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 
 	// Shaft & excavation + designations (save v5/v6).
-	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
+	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg;
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
 	// Habitability chain (save v7).
 	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
@@ -11459,6 +11711,14 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		return false;
 	}
 
+	// v41: the floor table, validated before anything live is torn down. A bad table is a refusal through
+	// OutError, never an Error line, and leaves the running colony exactly as it was.
+	TArray<FRHFloor> LoadedFloors;
+	if (!ReadFloorTable(Ar, LoadedFloors, OutError))
+	{
+		return false;
+	}
+
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
 	{
@@ -11582,8 +11842,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	}
 
 	// Shaft & excavation + designations (save v5/v6). Maps repopulate wholesale.
-	FloorCarvedCells.Empty();
-	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg << FloorCarvedCells;
+	FloorTable = MoveTemp(LoadedFloors);
+	RebuildFloorIndex();
+	++FloorCellsVersion;
+	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg;
 	CarveQueue.Empty();
 	PendingBoreWork.Empty();
 	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
@@ -11591,6 +11853,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	FloorO2Kg.Empty();
 	RatedFloors.Empty();
 	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
+	// A rated floor with no floor in the table cannot have been saved by this build: repair and keep (D1).
+	for (TSet<int32>::TIterator It(RatedFloors); It; ++It)
+	{
+		if (!FloorIndexByLevel.Contains(*It))
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: floor %d was rated but has no cells in the floor table - the rating is dropped"), *It);
+			It.RemoveCurrent();
+		}
+	}
 	// Population (save v10).
 	{
 		int32 PopNum = Colonists.Num();
@@ -11655,6 +11926,21 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Room designations (save v11). Map repopulates wholesale.
 	FloorRoomCells.Empty();
 	Ar << FloorRoomCells;
+	// A room array longer than its floor, or for a Level with no floor, is repaired (D1): the house way, a warning.
+	for (TMap<int32, TArray<FName>>::TIterator It(FloorRoomCells); It; ++It)
+	{
+		const int32 Have = GetFloorCarvedCells(It.Key());
+		if (Have == 0)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: room designations for floor %d, which has no cells - dropped"), It.Key());
+			It.RemoveCurrent();
+		}
+		else if (It.Value().Num() > Have)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: floor %d lists %d room cells but carved %d - truncated"), It.Key(), It.Value().Num(), Have);
+			It.Value().SetNum(Have);
+		}
+	}
 	// The garden (save v12).
 	{
 		TArray<FIntVector> Planted;

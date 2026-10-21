@@ -232,6 +232,51 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FRHOnAlert, const FString&);
 // C5b: a growth project started, finished, was refunded or cancelled, or a district's growth switch moved.
 DECLARE_MULTICAST_DELEGATE(FRHOnGrowthChanged);
 
+// D1 (floors become places): the square-spiral walk SpiralCell is built on, one step at a time, so a
+// floor can keep a cursor on it instead of re-walking from the head for every cell.
+struct FRHSpiralWalk
+{
+	int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
+	// The next point of the walk: (1,0), (1,1), (0,1), (-1,1), ... never (0,0), never a repeat.
+	FIntPoint Next()
+	{
+		X += DX; Y += DY;
+		const FIntPoint Out(X, Y);
+		if (++LegPos == LegLen)
+		{
+			LegPos = 0;
+			const int32 T = DX; DX = -DY; DY = T; // turn left
+			if (++LegsDone == 2)
+			{
+				LegsDone = 0;
+				++LegLen;
+			}
+		}
+		return Out;
+	}
+};
+
+// D1: one carved floor as an ordered, add-only table of lattice cells (10 m units, in region 0's frame:
+// the shaft head). An ORDINAL is a cell's position in Cells; it is permanent because nothing removes or
+// reorders a cell, which is why rooms, furniture, seats, planted cells and queued orders keep keying on it.
+// Cells is written only by URHSimWorldSubsystem::AppendCarvedCell. IndexOf is derived (added to on
+// append, rebuilt at load) and is only ever looked up, never iterated.
+struct FRHFloor
+{
+	int32 RegionId = 0;
+	int32 Level = 0;
+	const TArray<FIntPoint>& GetCells() const { return Cells; }
+	const TArray<FIntPoint>& GetPlan() const { return Plan; }
+	int32 FindOrdinal(const FIntPoint& P) const { const int32* I = IndexOf.Find(P); return I ? *I : (int32)INDEX_NONE; }
+
+private:
+	friend class URHSimWorldSubsystem;
+	TArray<FIntPoint> Cells;           // carve order, append-only, no duplicates, never the shaft column (0,0)
+	TArray<FIntPoint> Plan;            // painted, not yet carved, in paint order; the Borer carves these first
+	TMap<FIntPoint, int32> IndexOf;    // lattice point -> ordinal (derived)
+	FRHSpiralWalk Walk;                // transient: positioned so Walk.Next() is the lowest spiral point not yet skipped
+};
+
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
 // task board -> production -> power, in that fixed order, per sub-step.
 // Robot movement/work executes in Mass processors against the same
@@ -438,7 +483,33 @@ public:
 	// fabricator works the head). Robots themselves stay surface-bound until
 	// a later gate sends them below.
 	FVector GetApproachPoint(const FRHSiteRef& Site, int32 RobotLevel) const;
-	int32 GetFloorCarvedCells(int32 Level) const { const int32* C = FloorCarvedCells.Find(Level); return C ? *C : 0; }
+	int32 GetFloorCarvedCells(int32 Level) const { const int32* I = FloorIndexByLevel.Find(Level); return I ? FloorTable[*I].Cells.Num() : 0; }
+	// --- D1: floors as places ---
+	// The floor table, shallowest first (region, then Level descending: -1 before -2). Only floors with a cell.
+	const TArray<FRHFloor>& GetFloors() const { return FloorTable; }
+	const FRHFloor* FindFloor(int32 Level) const { const int32* I = FloorIndexByLevel.Find(Level); return I ? &FloorTable[*I] : nullptr; }
+	TArray<int32> GetFloorLevels() const { TArray<int32> Out; for (const FRHFloor& F : FloorTable) { Out.Add(F.Level); } return Out; }
+	// The lattice point of ordinal Index on Level. An ordinal outside [0, count) answers SpiralCell(Index), which
+	// is exactly what it answered before D1, and counts a fallback (the -deep suite asserts none happen).
+	FIntPoint GetFloorCell(int32 Level, int32 Index) const;
+	// The ordinal of a lattice point on Level, or INDEX_NONE.
+	int32 FindFloorCell(int32 Level, const FIntPoint& P) const { const FRHFloor* F = FindFloor(Level); return F ? F->FindOrdinal(P) : (int32)INDEX_NONE; }
+	// World centre of ordinal Index on Level: region 0's origin (the shaft head) + lattice x 10 m, at the floor's Z.
+	FVector GetFloorCellCentreCm(int32 Level, int32 Index) const;
+	// The two directions of that map around any origin, with the exact expressions the sim and the presentation use.
+	static FVector LatticeToCm(const FVector& OriginCm, const FIntPoint& P) { return FVector(OriginCm.X + P.X * 1000.0, OriginCm.Y + P.Y * 1000.0, 0.0); }
+	static FIntPoint CmToLattice(const FVector& OriginCm, const FVector& Cm) { return FIntPoint(FMath::RoundToInt((Cm.X - OriginCm.X) / 1000.0), FMath::RoundToInt((Cm.Y - OriginCm.Y) / 1000.0)); }
+	// The N points that N successive carves of Level would append (the plan first, then the lowest uncarved spiral
+	// points), without carving. The Borer, ExcavateFloor and the growth ghost all use this one rule.
+	void PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out) const;
+	uint32 GetFloorCellsVersion() const { return FloorCellsVersion; }
+	int32 GetFloorCellFallbacks() const { return FloorCellFallbacks; }
+	int32 GetAdjacencyFallbackRuns() const { return AdjacencyFallbackRuns; }
+	// Harness: paint a lattice point onto Level's plan (the Borer carves the plan, in paint order, before the
+	// spiral). Refused, with a reason: a floor that is not reached, the shaft column, a carved point, a repeat.
+	bool Debug_PaintCarve(int32 Level, const FIntPoint& P, FString& OutReason);
+	// Harness: 0 = the adjacency pass picks its own search, 1 = force the dense grid, 2 = force the hash lookup.
+	void Debug_SetAdjacencyMode(int32 Mode) { AdjacencyMode = Mode; }
 	double GetSpoilPileKg() const { return SpoilPileKg; }
 	FVector GetShaftHeadCm() const { return ShaftHeadCm; }
 	// Designation reads (M1-d Gate A2): the player's standing orders the Borer
@@ -998,7 +1069,7 @@ public:
 	// built, switched on, powered, on a rated floor.
 	const FRHRoomRow* GetProvidedRoom(const FRHBuildingInstance& B, bool bRequireOnline) const;
 	// The carved cell (spiral index) under a point on a subsurface floor, or
-	// INDEX_NONE - the inverse of SpiralCell around the shaft head.
+	// INDEX_NONE - the inverse of the floor table around the shaft head.
 	int32 FindCarvedCellAt(int32 Level, const FVector& LocationCm) const;
 
 	// --- Staffing (tiered production T2/T3, save v27) ---
@@ -2130,7 +2201,19 @@ private:
 	// Shaft & excavation state (M1-d Gate A; serialized, save v6).
 	int32 ShaftDepth = 0;                  // floors the trunk reaches below surface (0 = none)
 	FVector ShaftHeadCm = FVector::ZeroVector; // surface column the shaft descends from
-	TMap<int32, int32> FloorCarvedCells;   // Level -> carved 10x10 cell count
+	TArray<FRHFloor> FloorTable;           // D1: the floor table (saved straight after the header, save v41)
+	TMap<int32, int32> FloorIndexByLevel;  // derived: Level -> index in FloorTable; re-derived whenever a floor is inserted
+	uint32 FloorCellsVersion = 0;          // up on every append, plan change and load; presentation caches key on it
+	mutable int32 FloorCellFallbacks = 0;  // transient: ordinal reads outside [0, count)
+	mutable int32 AdjacencyFallbackRuns = 0; // transient: floors the adjacency pass searched through the hash lookup
+	int32 AdjacencyMode = 0;               // harness: see Debug_SetAdjacencyMode
+	// D1 internals. Nothing here takes or returns a floor index that outlives a carve.
+	FRHFloor& FindOrAddFloor(int32 Level);
+	void RebuildFloorIndex();
+	void AppendCarvedCell(FRHFloor& Floor, const FIntPoint& P);
+	FIntPoint CarveNextCell(int32 Level);  // the Borer's rule: the next planned cell, else the lowest uncarved spiral cell
+	void WriteFloorTable(FArchive& Ar) const;
+	bool ReadFloorTable(FArchive& Ar, TArray<FRHFloor>& OutFloors, FString& OutError) const;
 	double SpoilPileKg = 0.0;              // debug-cheat spoil only; Borer batches drop spoil at the building
 	// Designation queues (A2; serialized): the Borer works these through the
 	// batch integrator. Bore first, then carve shallowest-first (deterministic).

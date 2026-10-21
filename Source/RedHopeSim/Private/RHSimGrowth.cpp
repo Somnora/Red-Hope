@@ -46,29 +46,6 @@ namespace
 		}
 	}
 
-	// SpiralCell's walk, once for the first Count cells of a floor.
-	void GrowthSpiralPositions(int32 Count, TArray<FIntPoint>& Out)
-	{
-		Out.Reset();
-		Out.Reserve(Count);
-		int32 X = 0, Y = 0, DX = 1, DY = 0, LegLen = 1, LegPos = 0, LegsDone = 0;
-		for (int32 i = 0; i < Count; ++i)
-		{
-			X += DX; Y += DY;
-			Out.Add(FIntPoint(X, Y));
-			if (++LegPos == LegLen)
-			{
-				LegPos = 0;
-				const int32 T = DX; DX = -DY; DY = T;
-				if (++LegsDone == 2)
-				{
-					LegsDone = 0;
-					++LegLen;
-				}
-			}
-		}
-	}
-
 	bool GrowthListHas(const FString& List, const FString& Tag)
 	{
 		TArray<FString> Parts;
@@ -425,14 +402,12 @@ void URHSimWorldSubsystem::GatherFloorRoomGrid(int32 Level, TMap<FIntPoint, cons
 {
 	Out.Reset();
 	const int32 Carved = GetFloorCarvedCells(Level);
-	TArray<FIntPoint> Pos;
-	GrowthSpiralPositions(Carved, Pos);
 	for (int32 i = 0; i < Carved; ++i)
 	{
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(GetRoomAt(Level, i)) : nullptr;
 		if (Row && Row->SliceActive)
 		{
-			Out.Add(Pos[i], Row);
+			Out.Add(GetFloorCell(Level, i), Row);
 		}
 	}
 }
@@ -1049,8 +1024,8 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 		TMap<FIntPoint, const FRHRoomRow*> Grid;
 		GatherFloorRoomGrid(Level, Grid);
 		const int32 Carved = GetFloorCarvedCells(Level);
-		TArray<FIntPoint> Pos;
-		GrowthSpiralPositions(Carved + 1, Pos);
+		TArray<FIntPoint> NextCell; // the cell a carve would add now: the plan first, else the lowest uncarved spiral cell
+		PeekCarveCells(Level, 1, NextCell);
 		int32 Free = 0, Chosen = INDEX_NONE;
 		for (int32 i = 0; i < Carved && Chosen == INDEX_NONE; ++i)
 		{
@@ -1059,7 +1034,7 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 				continue;
 			}
 			++Free;
-			if (!ZoningWouldOffend(Row, Pos[i], Grid))
+			if (!ZoningWouldOffend(Row, GetFloorCell(Level, i), Grid))
 			{
 				Chosen = i;
 			}
@@ -1076,7 +1051,7 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 		else
 		{
 			// No free cell on the floor: carve one at its end (if the spot is clear of odor).
-			if (ZoningWouldOffend(Row, Pos[Carved], Grid))
+			if (ZoningWouldOffend(Row, NextCell[0], Grid))
 			{
 				OutWhy = TEXT("the cell it would carve sits beside a room it would offend or that would offend it");
 				return false;
@@ -1273,18 +1248,18 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 		GatherFloorRoomGrid(P.Level, Grid);
 		int32 Cell = P.Index;
 		const int32 Carved = GetFloorCarvedCells(P.Level);
-		TArray<FIntPoint> Pos;
-		GrowthSpiralPositions(Carved + 1, Pos);
+		TArray<FIntPoint> NextCell;
+		PeekCarveCells(P.Level, 1, NextCell);
 		if (P.bCarve)
 		{
 			Cell = Carved; // the cell goes on the end of the floor, wherever it ends now
-			if (ZoningWouldOffend(*Row, Pos[Carved], Grid))
+			if (ZoningWouldOffend(*Row, NextCell[0], Grid))
 			{
 				OutWhy = TEXT("the cell it would carve now sits beside a room it would offend");
 				return false;
 			}
 		}
-		else if (!IsCellFreeForRoom(P.Level, Cell) || ZoningWouldOffend(*Row, Pos[Cell], Grid))
+		else if (!IsCellFreeForRoom(P.Level, Cell) || ZoningWouldOffend(*Row, GetFloorCell(P.Level, Cell), Grid))
 		{
 			OutWhy = FString::Printf(TEXT("cell %d is no longer free or clear of odor"), Cell);
 			return false;

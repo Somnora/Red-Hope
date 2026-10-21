@@ -590,7 +590,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			const int32 Carved = Sim->GetFloorCarvedCells(ActiveLevel);
 			for (int32 i = 0; i < Carved; ++i)
 			{
-				const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i);
+				const FIntPoint P = Sim->GetFloorCell(ActiveLevel, i);
 				DrawDebugBox(World, FVector(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, Z + 40.f), FVector(480.f, 480.f, 25.f), Color, false, -1.f, 0, 5.f);
 			}
 			HintText = bOk
@@ -819,7 +819,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				if (Cell != INDEX_NONE)
 				{
 					const FVector Head = Sim->GetShaftHeadCm();
-					const FIntPoint P = URHSimWorldSubsystem::SpiralCell(Cell);
+					const FIntPoint P = Sim->GetFloorCell(ActiveLevel, Cell);
 					const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, Ground.Z);
 					DrawDebugBox(World, Center + FVector(0, 0, 60.f), FVector(500.f, 500.f, 60.f),
 						FColor::Emerald, false, -1.f, 0, 10.f);
@@ -1199,7 +1199,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 		else
 		{
 			const FVector Head = Sim->GetShaftHeadCm();
-			const FIntPoint P = URHSimWorldSubsystem::SpiralCell(SelectedCellIndex);
+			const FIntPoint P = Sim->GetFloorCell(ActiveLevel, SelectedCellIndex);
 			const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, ActiveLevel * Sim->GetFloorHeightCm());
 			DrawDebugBox(World, Center + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
 		}
@@ -1973,7 +1973,7 @@ int32 ARHPlayerController::FindCellAt(const FVector& GroundCm, int32 Level) cons
 	const int32 Carved = Sim->GetFloorCarvedCells(Level);
 	for (int32 i = 0; i < Carved; ++i)
 	{
-		const FIntPoint Cell = URHSimWorldSubsystem::SpiralCell(i);
+		const FIntPoint Cell = Sim->GetFloorCell(Level, i);
 		if (FMath::Abs(GroundCm.X - (Head.X + Cell.X * 1000.0)) <= 500.0 &&
 			FMath::Abs(GroundCm.Y - (Head.Y + Cell.Y * 1000.0)) <= 500.0)
 		{

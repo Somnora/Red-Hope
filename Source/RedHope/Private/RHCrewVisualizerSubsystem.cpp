@@ -837,7 +837,7 @@ FVector URHCrewVisualizerSubsystem::JobPointCm(int32 Level, FName JobFunction, i
 	RefreshCaches(0.0);
 	if (const int32* Cell = RoomCellsFor(Level).FirstByFunction.Find(JobFunction))
 	{
-		return SeatOnRing(Sim->GetShaftHeadCm(), URHSimWorldSubsystem::SpiralCell(*Cell),
+		return SeatOnRing(Sim->GetShaftHeadCm(), Sim->GetFloorCell(Level, *Cell),
 			Level * Sim->GetFloorHeightCm(), SeatSeed, OutFaceYawDeg);
 	}
 	return FVector::ZeroVector;
@@ -856,7 +856,7 @@ FVector URHCrewVisualizerSubsystem::RoomSeatCm(int32 Level, FName RoomRowName, i
 	RefreshCaches(0.0);
 	if (const int32* Cell = RoomCellsFor(Level).FirstByRoom.Find(RoomRowName))
 	{
-		return SeatOnRing(Sim->GetShaftHeadCm(), URHSimWorldSubsystem::SpiralCell(*Cell),
+		return SeatOnRing(Sim->GetShaftHeadCm(), Sim->GetFloorCell(Level, *Cell),
 			Level * Sim->GetFloorHeightCm(), SeatSeed, OutFaceYawDeg);
 	}
 	return FVector::ZeroVector;
@@ -1259,7 +1259,7 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 	FVector Candidate = FVector::ZeroVector;
 	for (int32 Try = 0; Try < 8; ++Try)
 	{
-		const FIntPoint Cell = URHColonyVisualizerSubsystem::SpiralCell(FMath::RandRange(0, Carved - 1));
+		const FIntPoint Cell = Sim->GetFloorCell(Level, FMath::RandRange(0, Carved - 1));
 		Candidate = FVector(
 			Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),

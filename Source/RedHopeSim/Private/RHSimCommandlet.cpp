@@ -1885,7 +1885,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->DesignateRoom(-1, 0, FName("LivingQuarters"), R);
 		Sim->DesignateRoom(-1, 1, FName("LivingQuarters"), R);
 		const FVector Head = Sim->GetShaftHeadCm();
-		const auto CellCentre = [&](int32 i) { const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i); return FVector(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, 0.0); };
+		const auto CellCentre = [&](int32 i) { const FIntPoint P = Sim->GetFloorCell(-1, i); return FVector(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, 0.0); };
 
 		// 2) Placement gates.
 		FString Why;
@@ -10779,7 +10779,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v40: no new field, a rover and its waiting aboard round-trip, a v39 save is refused. ---
+		// --- X15. Save v41 (v40 added no field): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10791,14 +10791,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 40, FString::Printf(TEXT("X15 the file says version %u (expect 40)"), Ver));
-			uint32 V39 = 39;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V39, 4); }
-			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv39.sav")));
+			Expect(bRead && Ver == 41, FString::Printf(TEXT("X15 the file says version %u (expect 41)"), Ver));
+			uint32 V40 = 40;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V40, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv40.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv39"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/40")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
-				FString::Printf(TEXT("X15 a v39 save is refused and the live colony untouched (%s)"), *Le39));
+			Expect(!Sim->LoadColony(TEXT("trafficv40"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/41")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v40 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
 			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
@@ -10893,6 +10893,704 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->OnCommandRejected.Remove(RejectH);
 		Sim->OnAlert.Remove(AlertH);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== TRAFFIC TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
+	// D1 self-test (going deep, gate 1, 2026-10-21): FLOORS BECOME PLACES. A floor is an ordered, add-only table of lattice
+	// cells (10 m units in the shaft head's frame) plus a painted plan; the Borer carves the next planned cell, else the lowest
+	// uncarved spiral cell. Nothing visible changes: every battery line stays, and this suite is the proof that the table is
+	// the same spiral on every floor that exists today and a real shape on the ones painted here. K1 the Borer and
+	// ExcavateFloor against the spiral (hard-coded first twelve), exact centres and the inverse; K2 a plan pending across
+	// a save and load against a control; K3 the lattice round trip at four origins and through the sim at off-grid heads;
+	// K4 furniture, seats, planted cells and Hope through save and load; K5 a painted shape (Borer-carved, in the painted
+	// order) with hand-counted adjacency, seats in carve order and a furnishing; K6 refusals (paint and load), colony
+	// untouched; K6b a room array longer than its floor is repaired; K7 sparse levels (-1 and -3 only); K8 the adjacency
+	// grid and the hash fallback agree, with cells carved past the last designation; K9 every ordinal keeps its point
+	// through a save and a load; K10 the peek equals the carve (ExcavateFloor, a growth FloorCells project, a growth
+	// carving CivicRoom) with a plan pending. Fails loudly. `-deep`.
+	if (FParse::Param(*Params, TEXT("deep")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DEEP TEST (D1, 2026-10-21) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("DEEP ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("DEEP FAIL: %s"), *What); ++Fails; }
+		};
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NStruct(TEXT("Struct")), NShield(TEXT("Shielding")), NOx(TEXT("Oxygen")), NWater(TEXT("Water")), NFood(TEXT("Food")), NSoil(TEXT("Soil")), NSeeds(TEXT("Seeds"));
+		const FName NLiving(TEXT("LivingQuarters")), NCooking(TEXT("Cooking")), NHallway(TEXT("Hallway")), NLab(TEXT("Lab")), NWorkstation(TEXT("Workstation")), NGarden(TEXT("Garden")), NDining(TEXT("Dining"));
+		FString R, Why;
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& Text) { Rejects.Add(Text); });
+		double PinHope = -1.0; // >= 0: smoothed Hope is held there before every step
+		const auto Step = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			if (PinHope >= 0.0) { Sim->Debug_SetHopeSmoothed(PinHope); }
+			Sim->EraStep((float)EraDt);
+		};
+		const auto Steps = [&](int32 N) { for (int32 K = 0; K < N; ++K) { Step(); } };
+		const auto RunSols = [&](double Count) { Steps(FMath::RoundToInt32(Count * SolLen / EraDt)); };
+		const auto LanderIdOf = [&]() { int32 Id = 0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Lander")) { Id = Bd.Id; } } return Id; };
+		const auto IdOfDef = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName(Def)) { Id = Bd.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return IdOfDef(Def);
+		};
+		struct FFloorSnap { TArray<FIntPoint> Cells, Plan; };
+		const auto Snap = [&](int32 Lv) { FFloorSnap Sn; if (const FRHFloor* Fl = Sim->FindFloor(Lv)) { Sn.Cells = Fl->GetCells(); Sn.Plan = Fl->GetPlan(); } return Sn; };
+		// The reference answer for a carve: the plan in order, then the lowest uncarved spiral points. Written from the rule alone.
+		const auto Oracle = [](TArray<FIntPoint> Have, TArray<FIntPoint> Plan, int32 N)
+		{
+			TArray<FIntPoint> Out;
+			int32 Spiral = 0;
+			for (int32 K = 0; K < N; ++K)
+			{
+				if (Plan.Num() > 0) { Have.Add(Plan[0]); Out.Add(Plan[0]); Plan.RemoveAt(0); continue; }
+				FIntPoint P = URHSimWorldSubsystem::SpiralCell(Spiral);
+				while (Have.Contains(P)) { P = URHSimWorldSubsystem::SpiralCell(++Spiral); }
+				Have.Add(P);
+				Out.Add(P);
+			}
+			return Out;
+		};
+		const auto Concat = [](TArray<FIntPoint> Aa, const TArray<FIntPoint>& Bb) { Aa.Append(Bb); return Aa; };
+		const auto DeepPath = [](const TCHAR* Slot) { return FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), Slot); };
+		FString SaveErr;
+		const bool bBaseSaved = Sim->SaveColony(TEXT("deepbase"), SaveErr);
+		Expect(bBaseSaved && Sim->GetFloors().Num() == 0 && Sim->GetFloorLevels().Num() == 0 && Sim->GetFloorCarvedCells(-1) == 0 && Sim->FindFloor(-1) == nullptr,
+			FString::Printf(TEXT("K0 a fresh colony has no floor in the table, and its empty table is saved as the base every case loads (%s)"), *SaveErr));
+		const auto Reset = [&]()
+		{
+			FString E;
+			const bool bOk = Sim->LoadColony(TEXT("deepbase"), E);
+			if (!bOk || !E.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("DEEP FAIL: loading the base failed: %s"), *E); ++Fails; }
+			Rejects.Reset();
+			PinHope = -1.0;
+			return bOk;
+		};
+		const auto BorerKit = [&](double Bx, double By)
+		{
+			FRHBuildingRow* BorerRow = const_cast<FRHBuildingRow*>(DefsSub ? DefsSub->GetBuilding(FName("Borer")) : nullptr);
+			if (BorerRow) { BorerRow->CanBore = true; BorerRow->H2BurnKgPerHour = 1.5f; }
+			Place(TEXT("Borer"), Bx, By);
+			Place(TEXT("SolarArray"), 3500.0, 1000.0);
+			Place(TEXT("BatteryBank"), 1000.0, 3500.0);
+			return BorerRow != nullptr;
+		};
+		const auto SendCmd = [&](const FRHCommand& C) { Sim->EnqueueCommand(C); };
+		// Borer: bore to floor -1 and carve N cells on it, by uplink orders. Returns the cells carved.
+		const auto BoreAndCarve = [&](int32 N, int32 MaxSteps)
+		{
+			FRHCommand Bore; Bore.Verb = FName("Bore"); Bore.Value = 1;
+			SendCmd(Bore);
+			for (int32 K = 0; K < MaxSteps && Sim->GetShaftDepth() < 1; ++K) { Step(); }
+			if (N > 0)
+			{
+				FRHCommand Exc; Exc.Verb = FName("Excavate"); Exc.Level = -1; Exc.Value = (double)N;
+				SendCmd(Exc);
+				for (int32 K = 0; K < MaxSteps && Sim->GetFloorCarvedCells(-1) < N; ++K) { Step(); }
+			}
+			return Sim->GetFloorCarvedCells(-1);
+		};
+		// More carve orders on an existing shaft.
+		const auto CarveMore = [&](int32 N, int32 MaxSteps)
+		{
+			const int32 Want = Sim->GetFloorCarvedCells(-1) + N;
+			FRHCommand Exc; Exc.Verb = FName("Excavate"); Exc.Level = -1; Exc.Value = (double)N;
+			SendCmd(Exc);
+			for (int32 K = 0; K < MaxSteps && Sim->GetFloorCarvedCells(-1) < Want; ++K) { Step(); }
+			return Sim->GetFloorCarvedCells(-1);
+		};
+		const double FloorH = Sim->GetFloorHeightCm();
+
+		// --- K1. The Borer, then ExcavateFloor, against the spiral: same cells in the same order, exact centres, the inverse. ---
+		{
+			Reset();
+			const bool bKit = BorerKit(2000.0, 2000.0);
+			const int32 Carved = BoreAndCarve(30, 6000);
+			Expect(bKit && Sim->GetShaftDepth() == 1 && Carved == 30 && Sim->GetCarveQueued(-1) == 0,
+				FString::Printf(TEXT("K1 the Borer bored floor -1 and carved %d cells (the order was 30)"), Carved));
+			Expect(Sim->ExcavateFloor(-1, 30, R) && Sim->GetFloorCarvedCells(-1) == 60, FString::Printf(TEXT("K1 ExcavateFloor carved 30 more (%d)"), Sim->GetFloorCarvedCells(-1)));
+			const FRHFloor* Fl = Sim->FindFloor(-1);
+			const FVector Hd = Sim->GetShaftHeadCm();
+			bool bSpiral = Fl && Fl->GetCells().Num() == 60, bCentre = true, bInverse = true, bPlan = Fl && Fl->GetPlan().Num() == 0;
+			for (int32 i = 0; bSpiral && i < 60; ++i)
+			{
+				const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i);
+				bSpiral &= Fl->GetCells()[i] == P && Sim->GetFloorCell(-1, i) == P;
+				const FVector Expected(Hd.X + P.X * 1000.0, Hd.Y + P.Y * 1000.0, -1 * FloorH); // the pre-D1 expression, == and no tolerance
+				const FVector Got = Sim->GetFloorCellCentreCm(-1, i);
+				bCentre &= Got.X == Expected.X && Got.Y == Expected.Y && Got.Z == Expected.Z && Sim->GetCellCentreCm(FIntVector(-1, i, 0)) == Expected;
+				bInverse &= Sim->FindCarvedCellAt(-1, Got) == i && Sim->FindFloorCell(-1, P) == i;
+			}
+			Expect(bSpiral && bPlan, TEXT("K1 on all 60 cells Cells[i] == SpiralCell(i) and the plan is empty"));
+			Expect(bCentre, TEXT("K1 every centre equals Head + lattice x 1000 and Level x floor height bit for bit (==, not a tolerance)"));
+			Expect(bInverse, TEXT("K1 FindCarvedCellAt(centre) is the ordinal and FindFloorCell(point) agrees, for all 60"));
+			const FIntPoint Lit[12] = { FIntPoint(1, 0), FIntPoint(1, 1), FIntPoint(0, 1), FIntPoint(-1, 1), FIntPoint(-1, 0), FIntPoint(-1, -1), FIntPoint(0, -1), FIntPoint(1, -1), FIntPoint(2, -1), FIntPoint(2, 0), FIntPoint(2, 1), FIntPoint(2, 2) };
+			bool bLit = Fl != nullptr;
+			for (int32 i = 0; bLit && i < 12; ++i) { bLit &= Fl->GetCells()[i] == Lit[i]; }
+			Expect(bLit && Hd == FVector(2000.0, 2000.0, 0.0), TEXT("K1 the first twelve carved cells are (1,0) (1,1) (0,1) (-1,1) (-1,0) (-1,-1) (0,-1) (1,-1) (2,-1) (2,0) (2,1) (2,2), and the head is the Borer's own spot"));
+			Expect(Fl && !Fl->GetCells().Contains(FIntPoint(0, 0)) && Sim->FindFloorCell(-1, FIntPoint(0, 0)) == INDEX_NONE, TEXT("K1 the shaft column is never a cell"));
+		}
+
+		// --- K2. A painted plan pending across a save and a load carves exactly what a colony that never saved carves. ---
+		{
+			TArray<FIntPoint> Paint;
+			// Some points sit ON the spiral path ahead ((1,1), (0,1)): the spiral must skip them once the plan has carved them.
+			for (const FIntPoint& P : { FIntPoint(1, 1), FIntPoint(6, 0), FIntPoint(7, 0), FIntPoint(7, 1), FIntPoint(0, 1), FIntPoint(6, 2), FIntPoint(8, 2), FIntPoint(9, 2), FIntPoint(9, 3), FIntPoint(9, 4),
+				FIntPoint(8, 4), FIntPoint(7, 4), FIntPoint(7, 5), FIntPoint(7, 6), FIntPoint(6, 6), FIntPoint(5, 6), FIntPoint(4, 6), FIntPoint(3, 6), FIntPoint(3, 5), FIntPoint(3, 4) }) { Paint.Add(P); }
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Expect(Sim->ExcavateFloor(-1, 1, R), TEXT("K2 one spiral cell first"));
+			bool bPainted = true;
+			for (const FIntPoint& P : Paint) { bPainted &= Sim->Debug_PaintCarve(-1, P, Why); }
+			Expect(bPainted && Snap(-1).Plan == Paint, TEXT("K2 twenty points painted (two of them on the spiral's own path), kept in paint order"));
+			Expect(Sim->ExcavateFloor(-1, 11, R) && Sim->GetFloorCarvedCells(-1) == 12 && Snap(-1).Plan.Num() == 9, TEXT("K2 eleven more carved: twelve cells, nine points left in the plan"));
+			const FFloorSnap Mid = Snap(-1);
+			const uint32 VersionBefore = Sim->GetFloorCellsVersion();
+			Expect(Sim->SaveColony(TEXT("deepk2"), SaveErr), FString::Printf(TEXT("K2 saved mid-plan (%s)"), *SaveErr));
+			Expect(Sim->ExcavateFloor(-1, 6, R), TEXT("K2 the control carved six more without saving"));
+			const FFloorSnap Control = Snap(-1);
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("deepk2"), Le) && Le.IsEmpty() && Snap(-1).Cells == Mid.Cells && Snap(-1).Plan == Mid.Plan && Sim->GetFloorCellsVersion() > VersionBefore,
+				FString::Printf(TEXT("K2 the load restores the twelve cells and the nine-point plan, and the version counter went up (%s)"), *Le));
+			Expect(Sim->ExcavateFloor(-1, 6, R), TEXT("K2 six more carved after the load"));
+			const FFloorSnap After = Snap(-1);
+			Expect(After.Cells == Control.Cells && After.Plan == Control.Plan && After.Cells.Num() == 18 && After.Plan.Num() == 3,
+				FString::Printf(TEXT("K2 after save, load and six more the cells, their order and the plan left over (%d) equal the control's"), After.Plan.Num()));
+			TArray<FIntPoint> Want = Concat(TArray<FIntPoint>({ FIntPoint(1, 0) }), Oracle(TArray<FIntPoint>({ FIntPoint(1, 0) }), Paint, 17));
+			Expect(After.Cells == Want, TEXT("K2 and both equal the rule written out: the plan first in paint order, then the spiral"));
+			// Past the plan: the spiral skips the points the plan already carved.
+			Expect(Sim->ExcavateFloor(-1, 20, R) && Snap(-1).Plan.Num() == 0, TEXT("K2 the plan runs out"));
+			const FFloorSnap Tail = Snap(-1);
+			bool bNoDup = true;
+			for (int32 i = 0; i < Tail.Cells.Num(); ++i) { bNoDup &= Tail.Cells.Find(Tail.Cells[i]) == i; }
+			TArray<FIntPoint> Want2 = Concat(TArray<FIntPoint>({ FIntPoint(1, 0) }), Oracle(TArray<FIntPoint>({ FIntPoint(1, 0) }), Paint, 37));
+			Expect(bNoDup && Tail.Cells == Want2 && Tail.Cells.Num() == 38, TEXT("K2 past the plan the spiral skips (1,1) and (0,1), which the plan carved first: no point twice, the order still the rule's"));
+		}
+
+		// --- K3. Lattice -> centre -> lattice at four origins, then through the sim at off-grid heads. ---
+		{
+			const FVector Origins[4] = { FVector(1000.0, 1000.0, 0.0), FVector(3000.0, 3000.0, 0.0), FVector(123456.7, -98765.4, 0.0), FVector(-2.0e6, 2.0e6, 0.0) };
+			bool bAll = true;
+			int64 Count = 0;
+			for (const FVector& O : Origins)
+			{
+				for (int32 Px = -300; Px <= 300 && bAll; ++Px)
+				{
+					for (int32 Py = -300; Py <= 300; ++Py)
+					{
+						const FIntPoint P(Px, Py);
+						bAll &= URHSimWorldSubsystem::CmToLattice(O, URHSimWorldSubsystem::LatticeToCm(O, P)) == P;
+						++Count;
+					}
+				}
+			}
+			Expect(bAll, FString::Printf(TEXT("K3 lattice -> centre -> lattice gives the point back: %lld points over four origins, [-300,300]^2 each"), Count));
+			bool bThroughSim = true;
+			for (const FVector& O : { FVector(123456.7, -98765.4, 0.0), FVector(-2.0e6, 2.0e6, 0.0) })
+			{
+				Reset();
+				Sim->ExtendShaft(1, O);
+				Sim->ExcavateFloor(-1, 80, R);
+				for (int32 i = 0; i < 80; ++i) { bThroughSim &= Sim->FindCarvedCellAt(-1, Sim->GetFloorCellCentreCm(-1, i)) == i; }
+				bThroughSim &= Sim->GetShaftHeadCm() == O;
+			}
+			Expect(bThroughSim, TEXT("K3 through the sim at the two off-grid heads: FindCarvedCellAt(GetFloorCellCentreCm(i)) == i for 80 cells each, the head kept bit for bit"));
+		}
+
+		// --- K4. Furniture, seats, planted cells and Hope through a save and a load. ---
+		// --- K9 rides on it: every ordinal keeps its point. ---
+		{
+			Reset();
+			const int32 LanderId = LanderIdOf();
+			Sim->AddStock(NOx, 6000.0);
+			Sim->AddStock(NWater, 4000.0);
+			Sim->AddStock(NFood, 6000.0);
+			Sim->AddStock(NSoil, 2000.0);
+			Sim->AddStock(NSeeds, 200.0);
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 4000.0, false);
+			{
+				TArray<FName> CropNames;
+				DefsSub->ForEachCropRow([&CropNames](FName Name, const FRHCropRow&) { CropNames.Add(Name); });
+				for (const FName& Name : CropNames) { DefsSub->ActivateCropRow(Name); }
+			}
+			DefsSub->ActivateRoomRow(FName("LabFull"));
+			Sim->ExtendShaft(1, FVector(1000.0, 1000.0, 0.0));
+			Sim->ExcavateFloor(-1, 12, R);
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -1);
+			const int32 HabId = Place(TEXT("HabModule"), -2000.0, -500.0, 1, 2);
+			Step();
+			Sim->Debug_ForceRateFloor(-1);
+			Step();
+			Expect(Sim->IsFloorRated(-1) && HabId != 0, TEXT("K4 setup: a rated floor of twelve cells and a surface habitat of two bays"));
+			Expect(Sim->DesignateRoom(-1, 0, NLiving, R) && Sim->DesignateRoom(-1, 1, NLiving, R) && Sim->DesignateRoom(-1, 2, NWorkstation, R) && Sim->DesignateRoom(-1, 3, NLab, R)
+				&& Sim->DesignateRoom(-1, 4, NGarden, R) && Sim->DesignateRoom(-1, 5, NGarden, R) && Sim->DesignateRoom(-1, 6, NDining, R)
+				&& Sim->DesignateBay(HabId, 0, NLiving, R) && Sim->DesignateBay(HabId, 1, NWorkstation, R), FString::Printf(TEXT("K4 zoning: floor c0 c1 Living, c2 Workstation, c3 Lab, c4 c5 Garden, c6 Dining; bay 0 Living, bay 1 Workstation (%s)"), *R));
+			const FVector LabAt(Sim->GetFloorCellCentreCm(-1, 7).X, Sim->GetFloorCellCentreCm(-1, 7).Y, 0.0);
+			Sim->Debug_PlaceInstant(FName("LabModule"), LabAt, -1);
+			const int32 LabId = IdOfDef(TEXT("LabModule"));
+			Sim->Debug_AddColonists(6);
+			RunSols(0.3);
+			const auto FurnishAt = [&](const TCHAR* Row, const FIntVector& Key, int32 Slot)
+			{
+				FRHCommand C; C.Verb = FName("Furnish"); C.Target = FName(Row); C.Level = Key.Z == 0 ? Key.X : 0;
+				C.Location = Sim->GetCellCentreCm(Key);
+				C.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Z == 0 ? Key.Y : 0, Slot, 0);
+				const int32 R0 = Rejects.Num();
+				SendCmd(C);
+				Step();
+				return Rejects.Num() == R0;
+			};
+			const FIntVector C0(-1, 0, 0), C2(-1, 2, 0), C3(-1, 3, 0), Bay0(0, 0, HabId), Bay1(0, 1, HabId);
+			Expect(FurnishAt(TEXT("Cot"), C0, 0) && FurnishAt(TEXT("Cot"), C0, 2) && FurnishAt(TEXT("Desk"), C2, 8) && FurnishAt(TEXT("LabBench"), C3, 0)
+				&& FurnishAt(TEXT("Cot"), Bay0, 0) && FurnishAt(TEXT("Desk"), Bay1, 0), FString::Printf(TEXT("K4 six pieces placed: two cots and a desk and a lab bench on the floor, a cot and a desk in the bays (%s)"), Rejects.Num() ? *Rejects.Last() : TEXT("-")));
+			const auto AssignCmd = [&](const FRHCommand& C) { SendCmd(C); Step(); };
+			{
+				FRHCommand As; As.Verb = FName("Assign"); As.Level = -1; As.Value = 2; AssignCmd(As);
+				FRHCommand AsBay; AsBay.Verb = FName("Assign"); AsBay.Level = 0; AsBay.Location = Sim->GetCellCentreCm(Bay1); AssignCmd(AsBay);
+				FRHCommand AsMod; AsMod.Verb = FName("Assign"); AsMod.Target = FName("Building"); AsMod.Value = (double)LabId; AssignCmd(AsMod);
+			}
+			RunSols(0.3);
+			Expect(Sim->GetSeatPriority().Num() == 3 && Sim->GetSeatPriority()[0] == FIntVector(-1, INDEX_NONE, LabId) && Sim->GetSeatPriority()[1] == Bay1 && Sim->GetSeatPriority()[2] == C2,
+				FString::Printf(TEXT("K4 the seat order holds a module, a bay and a floor cell (%d entries)"), Sim->GetSeatPriority().Num()));
+			Expect(Sim->IsGardenPlanted(-1, 4) && Sim->IsGardenPlanted(-1, 5) && Sim->GetCellCrop(-1, 4) != NAME_None && Sim->GetCellCrop(-1, 5) != NAME_None,
+				FString::Printf(TEXT("K4 two garden cells are planted, each with its crop (%s, %s)"), *Sim->GetCellCrop(-1, 4).ToString(), *Sim->GetCellCrop(-1, 5).ToString()));
+			Sim->Debug_RefreshJobs();
+			struct FWorldSnap
+			{
+				TArray<FString> Pieces; TArray<FIntVector> Seat; TArray<FString> Plants; TArray<FIntPoint> Points; TArray<FIntPoint> Stations; TArray<FIntPoint> Assign; TArray<int32> Beds;
+				int32 Cap = 0, Pop = 0, Filled = 0; double Housing = 0, Jobs = 0, Furn = 0, Rooms = 0, Adj = 0, Total = 0;
+			};
+			const auto Take = [&]()
+			{
+				FWorldSnap Ws;
+				for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { Ws.Pieces.Add(FString::Printf(TEXT("%d:%s:%d,%d,%d:%d:%d"), F.Id, *F.Row.ToString(), F.Key.X, F.Key.Y, F.Key.Z, F.Slot, F.Rot)); }
+				Ws.Seat = Sim->GetSeatPriority();
+				for (int32 i = 0; i < 12; ++i)
+				{
+					Ws.Plants.Add(FString::Printf(TEXT("%d:%d:%s:%d"), i, Sim->IsGardenPlanted(-1, i) ? 1 : 0, *Sim->GetCellCrop(-1, i).ToString(), Sim->GetCellCropStage(-1, i)));
+					Ws.Points.Add(Sim->GetFloorCell(-1, i));
+					Ws.Beds.Add(Sim->GetCellBeds(FIntVector(-1, i, 0)));
+					int32 Fi = 0, Cp = 0;
+					Sim->GetStationSeats(FIntVector(-1, i, 0), Fi, Cp);
+					Ws.Stations.Add(FIntPoint(Fi, Cp));
+				}
+				for (const FRHColonist& Col : Sim->GetColonists()) { Ws.Assign.Add(FIntPoint(Sim->GetColonistBedPiece(Col.Id), Sim->GetColonistSeatPiece(Col.Id))); }
+				const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+				Ws.Cap = Sim->GetHousingCapacity(); Ws.Pop = Sim->GetPopulation(); Ws.Filled = H.FilledSeats;
+				Ws.Housing = H.Housing; Ws.Jobs = H.Jobs; Ws.Furn = H.Furnishings; Ws.Rooms = H.Rooms; Ws.Adj = H.AdjacencyPenalty; Ws.Total = H.Total;
+				return Ws;
+			};
+			const FWorldSnap Before = Take();
+			Expect(Before.Pieces.Num() == 6 && Before.Pop > 0 && Sim->GetAdjacencyFallbackRuns() == 0 && Before.Housing > 0.0,
+				FString::Printf(TEXT("K4 before the save: %d pieces, %d people, housing %.3f, adjacency searched on its grid (fallback runs %d)"), Before.Pieces.Num(), Before.Pop, Before.Housing, Sim->GetAdjacencyFallbackRuns()));
+			Expect(Sim->SaveColony(TEXT("deepk4"), SaveErr), FString::Printf(TEXT("K4 saved (%s)"), *SaveErr));
+			FurnishAt(TEXT("Cot"), C0, 8);
+			Sim->ExcavateFloor(-1, 3, R);
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("deepk4"), Le) && Le.IsEmpty(), FString::Printf(TEXT("K4 loaded (%s)"), *Le));
+			const FWorldSnap After = Take();
+			Expect(Before.Pieces == After.Pieces && Before.Seat == After.Seat && Before.Plants == After.Plants && Before.Beds == After.Beds && Before.Stations == After.Stations && Before.Assign == After.Assign,
+				TEXT("K4 the reload matches: every piece's key and slot, the seat order (floor cell, module, bay), each planted cell and its crop and stage, beds, seats, every assignment"));
+			Expect(Before.Cap == After.Cap && Before.Pop == After.Pop && Before.Filled == After.Filled && Before.Housing == After.Housing && Before.Jobs == After.Jobs && Before.Furn == After.Furn
+				&& Before.Rooms == After.Rooms && Before.Adj == After.Adj && Before.Total == After.Total, TEXT("K4 and the Hope breakdown is exactly equal, line by line"));
+			Expect(Before.Points == After.Points && Sim->GetFloorCarvedCells(-1) == 12, TEXT("K9 every ordinal 0..11 maps to the same lattice point before and after the save and the load"));
+			bool bKeysEqual = true;
+			for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { bKeysEqual &= F.Key.X <= 0 && (F.Key.Z != 0 || (F.Key.Y >= 0 && F.Key.Y < 12)); }
+			Expect(bKeysEqual && Sim->GetFloorCellFallbacks() == 0, TEXT("K4 the ordinal keys are still (Level, ordinal, 0) and no read fell back to the spiral"));
+		}
+
+		// --- K5. A painted, non-spiral shape, carved by the Borer in the painted order. ---
+		{
+			Reset();
+			const int32 LanderId = LanderIdOf();
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 4000.0, false);
+			Sim->AddStock(NOx, 6000.0);
+			Sim->AddStock(NWater, 4000.0);
+			Sim->AddStock(NFood, 6000.0);
+			const bool bKit = BorerKit(2000.0, 2000.0);
+			Expect(bKit && BoreAndCarve(1, 6000) == 1 && Snap(-1).Cells == TArray<FIntPoint>({ FIntPoint(1, 0) }), TEXT("K5 the Borer bored floor -1 and carved its first cell, (1,0)"));
+			TArray<FIntPoint> Shape;
+			for (int32 X = 13; X >= 6; --X) { Shape.Add(FIntPoint(X, 0)); } // the line, 60 m from the head, laid from its far end
+			for (const FIntPoint& P : { FIntPoint(21, 0), FIntPoint(20, -1), FIntPoint(22, 1), FIntPoint(20, 1), FIntPoint(22, -1), FIntPoint(21, -1), FIntPoint(20, 0), FIntPoint(22, 0), FIntPoint(21, 1) }) { Shape.Add(P); }
+			bool bPainted = true;
+			for (const FIntPoint& P : Shape) { bPainted &= Sim->Debug_PaintCarve(-1, P, Why); }
+			Expect(bPainted && Shape.Num() == 17, TEXT("K5 painted: an 8-cell line and a 3 x 3 block, in a deliberately non-spiral order"));
+			const int32 Carved = CarveMore(17, 8000);
+			const FFloorSnap Sn = Snap(-1);
+			Expect(Carved == 18 && Sn.Plan.Num() == 0 && Sn.Cells == Concat(TArray<FIntPoint>({ FIntPoint(1, 0) }), Shape), FString::Printf(TEXT("K5 the Borer carved the shape in the painted order (%d cells, nothing left in the plan)"), Carved));
+			const FVector Hd = Sim->GetShaftHeadCm();
+			bool bInverse = true;
+			for (int32 i = 0; i < Sn.Cells.Num(); ++i) { bInverse &= Sim->FindCarvedCellAt(-1, Sim->GetFloorCellCentreCm(-1, i)) == i && Sim->GetFloorCellCentreCm(-1, i) == FVector(Hd.X + Sn.Cells[i].X * 1000.0, Hd.Y + Sn.Cells[i].Y * 1000.0, -FloorH); }
+			Expect(bInverse, TEXT("K5 FindCarvedCellAt inverts every cell of the shape, and its centre is where the lattice says"));
+			// Rate the floor: filter, power, certification.
+			Place(TEXT("AirFilter"), Hd.X, Hd.Y, 1, 1, -1);
+			Step();
+			Sim->Debug_ForceRateFloor(-1);
+			Step();
+			Sim->Debug_SetColonistsPerCell(1.0);
+			Expect(Sim->IsFloorRated(-1), TEXT("K5 the shaped floor is rated"));
+			// Ordinals: 0 (1,0); 1..8 the line (13,0)..(6,0); 9..17 the block (21,0) (20,-1) (22,1) (20,1) (22,-1) (21,-1) (20,0) (22,0) (21,1).
+			Expect(Sim->DesignateRoom(-1, 1, NLiving, R) && Sim->DesignateRoom(-1, 2, NCooking, R) && Sim->DesignateRoom(-1, 4, NLiving, R)
+				&& Sim->DesignateRoom(-1, 9, NCooking, R) && Sim->DesignateRoom(-1, 10, NLiving, R) && Sim->DesignateRoom(-1, 11, NLiving, R), TEXT("K5 zoned: Cooking beside a Living cell on the line (distance 1) and one two cells away, Cooking in the block with two diagonal Living cells"));
+			// Seats: Labs at ordinals 14, 6, 12, 7 (scrambled across line and block); Living cells already zoned.
+			for (const int32 Lab : { 14, 6, 12, 7 }) { Sim->DesignateRoom(-1, Lab, NLab, R); }
+			Sim->Debug_RefreshJobs();
+			Step();
+			const auto Offences = [&]() { return Sim->GetColonyHope().OffendedPairs; };
+			Expect(Offences() == 4, FString::Printf(TEXT("K5 hand count with no Hallway: Cooking(12,0) offends Living(13,0) at distance 1 and Living(10,0) at 2, Cooking(21,0) offends (20,-1) and (22,1) at 2 = 4 (got %d)"), Offences()));
+			Expect(Sim->DesignateRoom(-1, 3, NHallway, R) && Offences() == 3, FString::Printf(TEXT("K5 a Hallway on (11,0) between Cooking(12,0) and Living(10,0) cancels that pair: 3 (got %d)"), Offences()));
+			Expect(Sim->DesignateRoom(-1, 15, NHallway, R) && Offences() == 2, FString::Printf(TEXT("K5 a Hallway on (20,0) cancels the (21,0)-(20,-1) diagonal: 2 (got %d)"), Offences()));
+			Expect(Sim->DesignateRoom(-1, 16, NHallway, R) && Offences() == 1, FString::Printf(TEXT("K5 a Hallway on (22,0) cancels the (21,0)-(22,1) diagonal: 1, the distance-1 pair stays (got %d)"), Offences()));
+			Expect(Sim->GetAdjacencyFallbackRuns() == 0, TEXT("K5 the adjacency pass used its grid on the painted floor (the box is small enough)"));
+			// Seats fill in carve order.
+			Expect(Sim->Debug_AddColonists(3) == 3, TEXT("K5 three colonists housed in the three Living cells"));
+			Sim->Debug_RefreshJobs();
+			FIntVector St1, St2, St3;
+			const bool bS1 = Sim->GetColonistStation(1, St1), bS2 = Sim->GetColonistStation(2, St2), bS3 = Sim->GetColonistStation(3, St3);
+			Expect(bS1 && bS2 && bS3 && St1 == FIntVector(-1, 6, 0) && St2 == FIntVector(-1, 7, 0) && St3 == FIntVector(-1, 12, 0),
+				FString::Printf(TEXT("K5 the Lab seats fill in carve order, not paint or screen order: colonists 1-3 sit at cells %d, %d, %d (expect 6, 7, 12)"), bS1 ? St1.Y : -9, bS2 ? St2.Y : -9, bS3 ? St3.Y : -9));
+			// A furnishing resolves to its cell.
+			FIntVector Key;
+			const FVector Centre10 = Sim->GetFloorCellCentreCm(-1, 10);
+			Expect(Sim->ResolveFurnitureKey(-1, Centre10, Key) && Key == FIntVector(-1, 10, 0), TEXT("K5 a point on the block's cell (20,-1) resolves to key (-1, 10, 0)"));
+			{
+				FRHCommand C; C.Verb = FName("Furnish"); C.Target = FName("Cot"); C.Level = Key.X; C.Location = Sim->GetCellCentreCm(Key); C.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Y, 0, 0);
+				const int32 R0 = Rejects.Num();
+				SendCmd(C);
+				Step();
+				Expect(Rejects.Num() == R0 && Sim->GetCellFurniture(Key) == 1 && Sim->GetCellBeds(Key) >= 1,
+					FString::Printf(TEXT("K5 a cot ordered at that cell's centre lands on it: %d piece(s), %d bed(s) (%s)"), Sim->GetCellFurniture(Key), Sim->GetCellBeds(Key), Rejects.Num() > R0 ? *Rejects.Last() : TEXT("accepted")));
+			}
+			Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("K5 no ordinal read fell back to the spiral"));
+		}
+
+		// --- K6. Refusals: paint and load. ---
+		{
+			Reset();
+			Expect(!Sim->Debug_PaintCarve(-1, FIntPoint(5, 5), Why) && Why.Contains(TEXT("not reached")), FString::Printf(TEXT("K6 a floor the shaft has not reached refuses a plan (%s)"), *Why));
+			Sim->ExtendShaft(2, FVector(3000.0, 3000.0, 0.0));
+			Expect(!Sim->Debug_PaintCarve(-1, FIntPoint(5, 5), Why) && Why.Contains(TEXT("no carved cell")), FString::Printf(TEXT("K6 a reached floor with no cell yet refuses it too (%s)"), *Why));
+			Sim->ExcavateFloor(-1, 6, R);
+			Expect(!Sim->Debug_PaintCarve(-1, FIntPoint(0, 0), Why) && Why.Contains(TEXT("shaft column")), FString::Printf(TEXT("K6 the shaft column cannot be painted (%s)"), *Why));
+			Expect(!Sim->Debug_PaintCarve(-1, FIntPoint(1, 0), Why) && Why.Contains(TEXT("carved")), FString::Printf(TEXT("K6 a carved point cannot be painted (%s)"), *Why));
+			Expect(Sim->Debug_PaintCarve(-1, FIntPoint(9, 9), Why) && !Sim->Debug_PaintCarve(-1, FIntPoint(9, 9), Why) && Why.Contains(TEXT("painted")), FString::Printf(TEXT("K6 a point cannot be painted twice (%s)"), *Why));
+			Expect(Sim->Debug_PaintCarve(-1, FIntPoint(9, 10), Why) && Snap(-1).Plan.Num() == 2, TEXT("K6 a second point is accepted: a plan of two"));
+			Expect(Sim->SaveColony(TEXT("deepk6"), SaveErr), FString::Printf(TEXT("K6 saved a colony with six cells and a plan of two (%s)"), *SaveErr));
+			TArray<uint8> Good;
+			const bool bRead = FFileHelper::LoadFileToArray(Good, *DeepPath(TEXT("deepk6"))) && Good.Num() > 80;
+			uint32 Ver = 0;
+			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
+			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
+			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
+			Expect(bRead && Ver == 41 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
+			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
+			{
+				FFileHelper::SaveArrayToFile(Bytes, *DeepPath(Slot));
+				const int32 PopA = Sim->GetPopulation(), BuildA = Sim->GetBuildings().Num(), CellsA = Sim->GetFloorCarvedCells(-1), DepthA = Sim->GetShaftDepth(), PlanA = Snap(-1).Plan.Num();
+				const uint32 VerA = Sim->GetFloorCellsVersion();
+				const bool bLoaded = Sim->LoadColony(Slot, OutErr);
+				const bool bSame = Sim->GetPopulation() == PopA && Sim->GetBuildings().Num() == BuildA && Sim->GetFloorCarvedCells(-1) == CellsA && Sim->GetShaftDepth() == DepthA && Snap(-1).Plan.Num() == PlanA && Sim->GetFloorCellsVersion() == VerA;
+				return !bLoaded && bSame;
+			};
+			FString E1, E2, E3, E4, E5, E6;
+			{
+				TArray<uint8> Dup = Good;
+				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v41 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+			}
+			{
+				TArray<uint8> Col = Good;
+				const int32 Zero = 0;
+				FMemory::Memcpy(Col.GetData() + PlanAt, &Zero, 4); FMemory::Memcpy(Col.GetData() + PlanAt + 4, &Zero, 4);
+				Expect(TryFile(TEXT("deepk6col"), Col, E2) && E2.Contains(TEXT("floor table")) && E2.Contains(TEXT("shaft column")), FString::Printf(TEXT("K6 (0,0) in a plan is refused (%s)"), *E2));
+			}
+			{
+				TArray<uint8> Carved = Good;
+				FMemory::Memcpy(Carved.GetData() + PlanAt, Good.GetData() + CellsAt, 8); // a plan point that is already carved
+				Expect(TryFile(TEXT("deepk6car"), Carved, E3) && E3.Contains(TEXT("floor table")) && E3.Contains(TEXT("already carved")), FString::Printf(TEXT("K6 a plan point that is already carved is refused (%s)"), *E3));
+			}
+			{
+				TArray<uint8> Shallow = Good;
+				const int32 Surface = 0;
+				FMemory::Memcpy(Shallow.GetData() + 28, &Surface, 4);
+				Expect(TryFile(TEXT("deepk6lvl"), Shallow, E4) && E4.Contains(TEXT("floor table")), FString::Printf(TEXT("K6 a floor at level 0 is refused (%s)"), *E4));
+			}
+			{
+				TArray<uint8> Many = Good;
+				const int32 Big = 65;
+				FMemory::Memcpy(Many.GetData() + 20, &Big, 4);
+				Expect(TryFile(TEXT("deepk6cnt"), Many, E5) && E5.Contains(TEXT("floor table")), FString::Printf(TEXT("K6 a floor count over 64 is refused (%s)"), *E5));
+			}
+			{
+				TArray<uint8> Old = Good;
+				const uint32 V40 = 40;
+				FMemory::Memcpy(Old.GetData() + 4, &V40, 4);
+				Expect(TryFile(TEXT("deepk6v40"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/41")), FString::Printf(TEXT("K6 a v40 file is refused and the colony untouched (%s)"), *E6));
+			}
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
+		}
+
+		// --- K6b. A room array longer than its floor is repaired on load, not refused. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Sim->ExcavateFloor(-1, 10, R);
+			for (int32 i = 0; i < 9; ++i) { Sim->DesignateRoom(-1, i, i % 2 == 0 ? NLiving : NWorkstation, R); }
+			Expect(Sim->GetFloorRoomCells().FindRef(-1).Num() == 10, TEXT("K6b setup: ten cells, a room array of ten"));
+			Expect(Sim->SaveColony(TEXT("deepk6b"), SaveErr), FString::Printf(TEXT("K6b saved (%s)"), *SaveErr));
+			TArray<uint8> Good;
+			const bool bRead = FFileHelper::LoadFileToArray(Good, *DeepPath(TEXT("deepk6b")));
+			const int32 OldBlock = 4 + 12 + 10 * 8 + 4; // FloorCount, region + level + NCells, ten cells, NPlan (no plan)
+			TArray<uint8> Spliced;
+			if (bRead)
+			{
+				Spliced.Append(Good.GetData(), 20);
+				const int32 One = 1, Zero = 0, Lvl = -1, Five = 5;
+				Spliced.Append((const uint8*)&One, 4); Spliced.Append((const uint8*)&Zero, 4); Spliced.Append((const uint8*)&Lvl, 4); Spliced.Append((const uint8*)&Five, 4);
+				Spliced.Append(Good.GetData() + 36, 5 * 8); // the first five cells
+				Spliced.Append((const uint8*)&Zero, 4);
+				Spliced.Append(Good.GetData() + 20 + OldBlock, Good.Num() - 20 - OldBlock);
+			}
+			FFileHelper::SaveArrayToFile(Spliced, *DeepPath(TEXT("deepk6bcut")));
+			FString Le;
+			const bool bLoaded = bRead && Sim->LoadColony(TEXT("deepk6bcut"), Le);
+			Expect(bLoaded && Sim->GetFloorCarvedCells(-1) == 5 && Sim->GetFloorRoomCells().FindRef(-1).Num() == 5 && Sim->GetRoomAt(-1, 4) == NLiving && Sim->GetRoomAt(-1, 3) == NWorkstation && Sim->GetRoomAt(-1, 8).IsNone(),
+				FString::Printf(TEXT("K6b a room array of ten over a floor of five loads, truncated to five, the first five rooms intact (%s)"), *Le));
+		}
+
+		// --- K7. Sparse levels: bore to -3 and carve only -1 and -3. ---
+		{
+			Reset();
+			const int32 LanderId = LanderIdOf();
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 2000.0, false);
+			Sim->AddStock(NOx, 20000.0);
+			Sim->AddStock(NWater, 4000.0);
+			Sim->AddStock(NFood, 6000.0);
+			Sim->ExtendShaft(3, FVector(1000.0, 1000.0, 0.0));
+			Sim->ExcavateFloor(-1, 12, R);
+			Sim->ExcavateFloor(-3, 12, R);
+			Expect(Sim->GetShaftDepth() == 3 && Sim->GetFloorLevels() == TArray<int32>({ -1, -3 }) && Sim->GetFloorCarvedCells(-2) == 0 && Sim->FindFloor(-2) == nullptr && Sim->GetFloors().Num() == 2,
+				TEXT("K7 the shaft reaches -3 and only -1 and -3 are carved: GetFloorLevels() is [-1, -3], shallowest first"));
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -1);
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -3);
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -2);
+			Steps(10);
+			Expect(Sim->GetFloorO2Kg(-1) > 0.0 && Sim->GetFloorO2Kg(-3) > 0.0 && Sim->GetFloorO2Kg(-2) == 0.0,
+				FString::Printf(TEXT("K7 StepHabitability visited the two floors that exist and nothing else: air -1 %.1f kg, -3 %.1f kg, -2 %.1f kg"), Sim->GetFloorO2Kg(-1), Sim->GetFloorO2Kg(-3), Sim->GetFloorO2Kg(-2)));
+			Sim->Debug_ForceRateFloor(-1);
+			Sim->Debug_ForceRateFloor(-3);
+			Sim->Debug_SetColonistsPerCell(1.0);
+			Sim->DesignateRoom(-1, 0, NLiving, R); Sim->DesignateRoom(-1, 1, NLiving, R);
+			Sim->DesignateRoom(-3, 0, NLiving, R); Sim->DesignateRoom(-3, 1, NLiving, R);
+			const int32 BedsOn1 = Sim->GetFloorBeds(-1);
+			Expect(Sim->IsFloorRated(-1) && Sim->IsFloorRated(-3) && !Sim->IsFloorRated(-2) && BedsOn1 > 0 && Sim->Debug_AddColonists(BedsOn1 + 2) == BedsOn1 + 2,
+				FString::Printf(TEXT("K7 floors -1 and -3 rated; floor -1 holds %d beds, and %d colonists are housed (two more than it holds)"), BedsOn1, BedsOn1 + 2));
+			int32 On1 = 0, On3 = 0;
+			bool bOrder = true;
+			for (const FRHColonist& Col : Sim->GetColonists())
+			{
+				On1 += Col.HomeLevel == -1 ? 1 : 0;
+				On3 += Col.HomeLevel == -3 ? 1 : 0;
+				bOrder &= (Col.Id <= BedsOn1) == (Col.HomeLevel == -1);
+			}
+			Expect(On1 == BedsOn1 && On3 == 2 && bOrder, FString::Printf(TEXT("K7 the arrival fill walks the floors that exist, shallowest first: floor -1 fills (%d), the overflow goes to -3 (%d), in Id order"), On1, On3));
+			Sim->DesignateRoom(-3, 2, NLab, R);
+			Sim->DesignateRoom(-1, 2, NWorkstation, R);
+			Sim->Debug_RefreshJobs();
+			FIntVector Sa, Sb;
+			Expect(Sim->GetColonistStation(1, Sa) && Sim->GetColonistStation(2, Sb) && Sa == FIntVector(-1, 2, 0) && Sb == FIntVector(-3, 2, 0), TEXT("K7 the seat scan agrees: the shallower floor's station first, then the deeper one's"));
+		}
+
+		// --- K8. The adjacency grid and the hash fallback agree on a sparse painted floor, with cells carved past the last designation. ---
+		{
+			Reset();
+			Sim->AddStock(NOx, 6000.0);
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Sim->ExcavateFloor(-1, 1, R);
+			TArray<FIntPoint> Shape;
+			for (int32 X = 6; X <= 13; ++X) { Shape.Add(FIntPoint(X, 0)); }
+			for (int32 Y = -1; Y <= 1; ++Y) { for (int32 X = 80; X <= 82; ++X) { Shape.Add(FIntPoint(X, Y)); } }
+			bool bPainted = true;
+			for (const FIntPoint& P : Shape) { bPainted &= Sim->Debug_PaintCarve(-1, P, Why); }
+			Sim->ExcavateFloor(-1, 17, R);
+			Place(TEXT("AirFilter"), 3000.0, 3500.0, 1, 1, -1);
+			Step();
+			Sim->Debug_ForceRateFloor(-1);
+			Step();
+			// Ordinals: 0 (1,0); 1..8 the line (6,0)..(13,0); 9..17 the block row by row, (80,-1) first.
+			Expect(bPainted && Sim->IsFloorRated(-1) && Sim->DesignateRoom(-1, 0, NCooking, R) && Sim->DesignateRoom(-1, 3, NLiving, R) && Sim->DesignateRoom(-1, 4, NCooking, R) && Sim->DesignateRoom(-1, 6, NLiving, R)
+				&& Sim->DesignateRoom(-1, 9, NLiving, R) && Sim->DesignateRoom(-1, 13, NCooking, R) && Sim->DesignateRoom(-1, 14, NLiving, R) && Sim->DesignateRoom(-1, 17, NLiving, R),
+				TEXT("K8 setup: a sparse floor (a line, a gap of 66 cells, a block), 18 cells designated"));
+			Expect(Sim->GetFloorRoomCells().FindRef(-1).Num() == 18 && Sim->ExcavateFloor(-1, 4, R) && Sim->GetFloorCarvedCells(-1) == 22 && Sim->GetFloorRoomCells().FindRef(-1).Num() == 18,
+				TEXT("K8 four more cells carved past the last designation: 22 cells, the room array stays at 18 (and (1,1), beside the Cooking cell (1,0), is among them)"));
+			struct FAdj { int32 Pairs = 0, Offended = 0, Refusers = 0, Runs = 0; double Total = 0.0, Penalty = 0.0; };
+			const auto Measure = [&](int32 Mode)
+			{
+				Sim->Debug_SetAdjacencyMode(Mode);
+				const int32 Runs0 = Sim->GetAdjacencyFallbackRuns();
+				const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+				FAdj A;
+				A.Pairs = H.OffendedPairs; A.Offended = H.OffendedRefusers; A.Refusers = H.RefuserCells; A.Total = H.Total; A.Penalty = H.AdjacencyPenalty;
+				A.Runs = Sim->GetAdjacencyFallbackRuns() - Runs0;
+				Sim->Debug_SetAdjacencyMode(0);
+				return A;
+			};
+			const auto Equal = [](const FAdj& Aa, const FAdj& Bb) { return Aa.Pairs == Bb.Pairs && Aa.Offended == Bb.Offended && Aa.Refusers == Bb.Refusers && Aa.Total == Bb.Total && Aa.Penalty == Bb.Penalty; };
+			const FAdj Grid = Measure(1), Hash = Measure(2), Auto = Measure(0);
+			Expect(Grid.Pairs == 5 && Grid.Offended == 5 && Grid.Refusers == 5, FString::Printf(TEXT("K8 hand count: Cooking(9,0) offends Living(8,0) and Living(11,0), Cooking(81,0) offends (80,-1) (82,1) (82,0) = 5 pairs, 5 refusers (grid: %d, %d, %d)"), Grid.Pairs, Grid.Offended, Grid.Refusers));
+			Expect(Equal(Grid, Hash) && Equal(Grid, Auto) && Grid.Runs == 0 && Hash.Runs >= 1 && Auto.Runs >= 1,
+				FString::Printf(TEXT("K8 the dense grid, the hash lookup and the automatic choice give identical counts and Hope (%d pairs; fallback runs: grid %d, hash %d, auto %d - the box is 82 x 3 against 8 x 18)"), Grid.Pairs, Grid.Runs, Hash.Runs, Auto.Runs));
+			Expect(Sim->DesignateRoom(-1, 5, NHallway, R) && Sim->GetFloorRoomCells().FindRef(-1).Num() == 22, TEXT("K8 a Hallway on (10,0) between Cooking(9,0) and Living(11,0); the room array grows to the carve count"));
+			const FAdj Grid2 = Measure(1), Hash2 = Measure(2);
+			Expect(Grid2.Pairs == 4 && Equal(Grid2, Hash2), FString::Printf(TEXT("K8 with the Hallway both searches count 4 pairs and the same Hope (%d, %d)"), Grid2.Pairs, Hash2.Pairs));
+			// A floor carved past its last designation, again: the cells (1,1).. now sit inside the array, so carve past it once more.
+			Sim->ExcavateFloor(-1, 3, R);
+			const FAdj Grid3 = Measure(1), Hash3 = Measure(2);
+			Expect(Sim->GetFloorCarvedCells(-1) == 25 && Equal(Grid3, Hash3) && Grid3.Pairs == 4, TEXT("K8 and again after three more cells beyond the array: grid and hash agree, 4 pairs"));
+		}
+
+		// --- K10. The peek is the carve: ExcavateFloor, a growth FloorCells project and a growth carving CivicRoom, with a plan pending. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Sim->ExcavateFloor(-1, 3, R);
+			Sim->Debug_PaintCarve(-1, FIntPoint(5, 5), Why);
+			Sim->Debug_PaintCarve(-1, FIntPoint(5, 6), Why);
+			TArray<FIntPoint> Peek5;
+			Sim->PeekCarveCells(-1, 5, Peek5);
+			const FFloorSnap Pre = Snap(-1);
+			Expect(Sim->ExcavateFloor(-1, 5, R), TEXT("K10 five cells carved with a plan of two pending"));
+			const FFloorSnap Post = Snap(-1);
+			TArray<FIntPoint> Appended;
+			for (int32 i = Pre.Cells.Num(); i < Post.Cells.Num(); ++i) { Appended.Add(Post.Cells[i]); }
+			Expect(Peek5.Num() == 5 && Peek5 == Appended && Peek5[0] == FIntPoint(5, 5) && Peek5[1] == FIntPoint(5, 6) && Post.Plan.Num() == 0,
+				TEXT("K10 PeekCarveCells(-1, 5) is exactly the five cells ExcavateFloor then appended: the two painted points, then the spiral from where it stopped"));
+			TArray<FIntPoint> Peek0;
+			Sim->PeekCarveCells(-1, 0, Peek0);
+			TArray<FIntPoint> PeekA, PeekB;
+			Sim->PeekCarveCells(-1, 3, PeekA);
+			Sim->PeekCarveCells(-1, 3, PeekB);
+			Expect(Peek0.Num() == 0 && PeekA == PeekB && Snap(-1).Cells == Post.Cells, TEXT("K10 a peek changes nothing and is repeatable"));
+		}
+		{
+			// The growth world: two rated floors, a Homes floor district over -1 and a Civic one over -2 (the -citygrowth recipe, floors only).
+			const FName NHomes(TEXT("Homes")), NCivic(TEXT("Civic"));
+			Reset();
+			Sim->Debug_SetGrowthEnabled(false);
+			Sim->Debug_SetBigArrivalDone(true);
+			const FVector Head(1000.0, 1000.0, 0.0);
+			Sim->AddStock(NStruct, 5000.0);
+			Sim->AddStock(NShield, 3000.0);
+			Sim->AddStock(NOx, 6000.0);
+			Sim->AddStock(NWater, 150.0);
+			Sim->AddStock(NFood, 6000.0);
+			Sim->ExtendShaft(2, Head);
+			Sim->ExcavateFloor(-1, 4, R);
+			Sim->ExcavateFloor(-2, 4, R);
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -1);
+			Place(TEXT("AirFilter"), 1000.0, 1500.0, 1, 1, -2);
+			RunSols(3.0);
+			Expect(Sim->IsFloorRated(-1) && Sim->IsFloorRated(-2), TEXT("K10 growth world: both floors rated"));
+			for (int32 Cell = 0; Cell < 4; ++Cell) { Sim->DesignateRoom(-1, Cell, NLiving, R); }
+			Sim->DesignateRoom(-2, 0, NDining, R);
+			Sim->DesignateRoom(-2, 1, FName("Infirmary"), R);
+			Sim->DesignateRoom(-2, 2, NLab, R);
+			Sim->DesignateRoom(-2, 3, NWorkstation, R);
+			const auto PaintFloor = [&](FName Kind, int32 Level)
+			{
+				FRHCommand C; C.Verb = FName("PaintDistrict"); C.Target = Kind; C.Level = Level;
+				C.Location = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(0, 0));
+				C.LocationB = URHSimWorldSubsystem::LatticeCentreCm(FIntPoint(0, 0));
+				const int32 R0 = Rejects.Num();
+				SendCmd(C);
+				Step();
+				return Rejects.Num() == R0;
+			};
+			Expect(PaintFloor(NHomes, -1) && PaintFloor(NCivic, -2) && Sim->GetDistricts().Num() == 2, TEXT("K10 growth world: district #1 Homes over floor -1, #2 Civic over floor -2"));
+			Expect(Sim->Debug_AddColonists(8) == 8, TEXT("K10 growth world: eight colonists housed"));
+			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+			Sim->Debug_SetColonistsPerCell(1.0);
+			Sim->Debug_SetCityShare(0.0);
+			Expect(Sim->SaveColony(TEXT("deepgrowth"), SaveErr), FString::Printf(TEXT("K10 growth world saved (%s)"), *SaveErr));
+			const auto LoadGrowth = [&]()
+			{
+				FString E;
+				const bool bOk = Sim->LoadColony(TEXT("deepgrowth"), E) && E.IsEmpty();
+				Sim->Debug_SetGrowthEnabled(true);
+				Sim->Debug_SetBigArrivalDone(true);
+				Sim->Debug_SetColonistsPerCell(1.0);
+				PinHope = 80.0;
+				Sim->Debug_SetHopeSmoothed(80.0);
+				return bOk;
+			};
+			const auto OnlyDistrict = [&](int32 On) { for (const FRHDistrict& D : TArray<FRHDistrict>(Sim->GetDistricts())) { Sim->SetDistrictGrowth(D.Id, D.Id == On); } };
+			const auto RunToEnd = [&](int32 DistrictId, int32 MaxSteps)
+			{
+				Sim->Debug_SetGrowthEnabled(false);
+				int32 Took = -1;
+				for (int32 K = 1; K <= MaxSteps && Took < 0; ++K) { Step(); if (!Sim->FindGrowthProject(DistrictId)) { Took = K; } }
+				Sim->Debug_SetGrowthEnabled(true);
+				return Took;
+			};
+			// (a) FloorCells on floor -1 with a plan of two pending: four cells = the two painted points, then two spiral cells.
+			{
+				Expect(LoadGrowth(), TEXT("K10a growth world loaded"));
+				OnlyDistrict(1);
+				Sim->Debug_PaintCarve(-1, FIntPoint(7, 7), Why);
+				Sim->Debug_PaintCarve(-1, FIntPoint(7, 8), Why);
+				Sim->Debug_RunGrowthCheck();
+				const FRHGrowthProject* P = Sim->FindGrowthProject(1);
+				Expect(P && P->Kind == ERHGrowthKind::FloorCells && P->Cells == 4 && P->FirstCell == 4, TEXT("K10a a FloorCells project starts on floor -1: four cells, from index 4"));
+				TArray<FIntPoint> Ghost; // what the visualizer's ghost draws: the sim's own peek
+				Sim->PeekCarveCells(-1, 4, Ghost);
+				const int32 Took = RunToEnd(1, 60);
+				const FFloorSnap Done = Snap(-1);
+				TArray<FIntPoint> Added;
+				for (int32 i = 4; i < Done.Cells.Num(); ++i) { Added.Add(Done.Cells[i]); }
+				Expect(Took > 0 && Done.Cells.Num() == 8 && Ghost.Num() == 4 && Ghost == Added && Done.Plan.Num() == 0 && Ghost[0] == FIntPoint(7, 7) && Ghost[1] == FIntPoint(7, 8),
+					FString::Printf(TEXT("K10a the cells the growth carved equal the ghost's peek: (7,7) (7,8) then two spiral cells (%d steps)"), Took));
+			}
+			// (b) A civic project that carves: every cell of floor -2 is in use, fifty people want a second dining room; a plan is pending.
+			{
+				Expect(LoadGrowth(), TEXT("K10b growth world loaded"));
+				OnlyDistrict(2);
+				Sim->Debug_SetColonistsPerCell(10.0);
+				Sim->Debug_AddColonists(42);
+				Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
+				Sim->Debug_PaintCarve(-2, FIntPoint(5, 5), Why);
+				Sim->Debug_PaintCarve(-2, FIntPoint(5, 6), Why);
+				PinHope = 80.0;
+				Sim->Debug_SetHopeSmoothed(80.0);
+				Sim->Debug_RunGrowthCheck();
+				const FRHGrowthProject* P = Sim->FindGrowthProject(2);
+				Expect(P && P->Kind == ERHGrowthKind::CivicRoom && P->bCarve && P->Level == -2 && P->Room == NDining,
+					FString::Printf(TEXT("K10b a civic project that carves its own cell starts on floor -2 (%s)"), P ? *P->Room.ToString() : TEXT("none")));
+				TArray<FIntPoint> Next;
+				Sim->PeekCarveCells(-2, 1, Next);
+				const int32 Took = RunToEnd(2, 60);
+				const FFloorSnap Done = Snap(-2);
+				Expect(Took > 0 && Done.Cells.Num() == 5 && Next.Num() == 1 && Next[0] == FIntPoint(5, 5) && Done.Cells.Last() == Next[0] && Sim->GetFloorCell(-2, 4) == FIntPoint(5, 5) && Sim->GetRoomAt(-2, 4) == NDining,
+					FString::Printf(TEXT("K10b the cell the offence check looked at is the one the carve appended, (5,5), and the new Dining room stands on it (%d steps)"), Took));
+				Expect(Done.Plan.Num() == 1 && Done.Plan[0] == FIntPoint(5, 6), TEXT("K10b the second painted point is still waiting in the plan"));
+			}
+		}
+
+		Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("K9 over the whole suite not one ordinal read fell outside its floor and back to the spiral"));
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== DEEP TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return Fails > 0 ? 1 : 0;

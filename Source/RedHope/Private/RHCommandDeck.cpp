@@ -1098,7 +1098,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedCell())
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
-		const FIntPoint P = URHSimWorldSubsystem::SpiralCell(PC->GetSelectedCellIndex());
+		const FIntPoint P = Sim->GetFloorCell(PC->GetSelectedCellLevel(), PC->GetSelectedCellIndex());
 		const FVector Anchor(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, PC->GetSelectedCellLevel() * Sim->GetFloorHeightCm() + 300.0);
 		FVector2D ScreenPx;
 		if (PC->ProjectWorldLocationToScreen(Anchor, ScreenPx, false))

@@ -250,11 +250,12 @@ void URHGrowthVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 		else if (P.Kind == ERHGrowthKind::FloorCells && P.Level == Level && Level < 0)
 		{
 			// The cells go on at the end of the floor, wherever it ends now.
-			const int32 Carved = Sim.GetFloorCarvedCells(Level);
+			TArray<FIntPoint> Peek; // the cells a carve of this size would add, by the sim's own rule (the plan, then the spiral)
+			Sim.PeekCarveCells(Level, P.Cells, Peek);
 			double SumX = 0.0, SumY = 0.0;
 			for (int32 k = 0; k < P.Cells; ++k)
 			{
-				const FIntPoint Pos = URHSimWorldSubsystem::SpiralCell(Carved + k);
+				const FIntPoint Pos = Peek[k];
 				const double Cx = Head.X + Pos.X * 1000.0, Cy = Head.Y + Pos.Y * 1000.0;
 				GhostCell(Cx, Cy, /*bCross*/ true);
 				SumX += Cx; SumY += Cy;
@@ -265,8 +266,9 @@ void URHGrowthVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 		}
 		else if (P.Kind == ERHGrowthKind::CivicRoom && P.Level == Level && Level < 0)
 		{
-			const int32 Index = P.bCarve ? Sim.GetFloorCarvedCells(Level) : P.Index;
-			const FIntPoint Pos = URHSimWorldSubsystem::SpiralCell(FMath::Max(0, Index));
+			TArray<FIntPoint> Peek;
+			Sim.PeekCarveCells(Level, 1, Peek);
+			const FIntPoint Pos = P.bCarve ? Peek[0] : Sim.GetFloorCell(Level, FMath::Max(0, P.Index));
 			const double Cx = Head.X + Pos.X * 1000.0, Cy = Head.Y + Pos.Y * 1000.0;
 			GhostCell(Cx, Cy, P.bCarve);
 			LabelAt = FVector(Cx, Cy, (P.bCarve ? 0.0 : FloorZ) + 330.f);

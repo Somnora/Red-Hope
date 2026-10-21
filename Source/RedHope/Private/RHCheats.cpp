@@ -470,7 +470,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRooms(
 			for (int32 i = 0; i < Carved; ++i)
 			{
 				const FName Room = Sim->GetRoomAt(L, i);
-				const FIntPoint P = URHSimWorldSubsystem::SpiralCell(i);
+				const FIntPoint P = Sim->GetFloorCell(L, i);
 				Line += FString::Printf(TEXT("\n  cell %d (%+d,%+d): %s"), i, P.X, P.Y,
 					Room.IsNone() ? TEXT("-") : *Room.ToString());
 			}

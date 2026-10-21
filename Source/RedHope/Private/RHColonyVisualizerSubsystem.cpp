@@ -3478,7 +3478,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 		int32& Have = TilesSpawnedPerLevel.FindOrAdd(L);
 		while (Have < Want)
 		{
-			const FIntPoint Cell = SpiralCell(Have);
+			const FIntPoint Cell = Sim->GetFloorCell(L, Have);
 			const FVector Head = Sim->GetShaftHeadCm();
 			const FVector Center(Head.X + Cell.X * 1000.0, Head.Y + Cell.Y * 1000.0, L * FloorH - 15.0);
 			AStaticMeshActor* Tile = SpawnBox(Center, FVector(10.f, 10.f, 0.3f),
@@ -4160,13 +4160,6 @@ AStaticMeshActor* URHColonyVisualizerSubsystem::SpawnBox(const FVector& CenterCm
 	return Actor;
 }
 
-FIntPoint URHColonyVisualizerSubsystem::SpiralCell(int32 Index)
-{
-	// Gate B moved the canonical layout sim-side (adjacency made cell geometry
-	// gameplay); this forwards so existing presentation callers keep working.
-	return URHSimWorldSubsystem::SpiralCell(Index);
-}
-
 void URHColonyVisualizerSubsystem::ApplyCutaway()
 {
 	if (!WallISM)
@@ -4587,12 +4580,12 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	const int32 Pit = ViewLevel; // the floor being looked into
 
 	// The open pocket on the pit floor: the shaft's own cell plus every
-	// carved cell (spiral layout - identical math to the floor tiles).
+	// carved cell (the floor table's lattice - identical math to the floor tiles).
 	TSet<FIntPoint> Open;
 	Open.Add(FIntPoint(0, 0));
 	for (int32 i = 0; i < Carved; ++i)
 	{
-		Open.Add(SpiralCell(i));
+		Open.Add(Sim->GetFloorCell(Pit, i));
 	}
 
 	const FVector Head = Sim->GetShaftHeadCm();

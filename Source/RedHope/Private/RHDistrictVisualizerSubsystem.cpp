@@ -304,11 +304,11 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 		const auto Fill = Flat(FloorFillLiftCm);
 		const auto Edge = Flat(FloorBorderLiftCm);
 		TSet<FIntPoint> Cells; // lookups only
-		for (int32 i = 0; i < Carved; ++i) { Cells.Add(URHSimWorldSubsystem::SpiralCell(i)); }
+		for (int32 i = 0; i < Carved; ++i) { Cells.Add(Sim.GetFloorCell(Level, i)); }
 		FIntPoint Lo(MAX_int32, MAX_int32), Hi(MIN_int32, MIN_int32);
 		for (int32 i = 0; i < Carved; ++i)
 		{
-			const FIntPoint C = URHSimWorldSubsystem::SpiralCell(i);
+			const FIntPoint C = Sim.GetFloorCell(Level, i);
 			Lo = FIntPoint(FMath::Min(Lo.X, C.X), FMath::Min(Lo.Y, C.Y));
 			Hi = FIntPoint(FMath::Max(Hi.X, C.X), FMath::Max(Hi.Y, C.Y));
 			const double X0 = Head.X + (C.X - 0.5) * 1000.0, X1 = Head.X + (C.X + 0.5) * 1000.0;
@@ -326,7 +326,7 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 		double BestD = TNumericLimits<double>::Max();
 		for (int32 i = 0; i < Carved; ++i)
 		{
-			const FIntPoint C = URHSimWorldSubsystem::SpiralCell(i);
+			const FIntPoint C = Sim.GetFloorCell(Level, i);
 			const double Dist = FMath::Square(C.X - MidX) + FMath::Square(C.Y - MidY);
 			if (Dist < BestD) { BestD = Dist; Best = C; }
 		}
