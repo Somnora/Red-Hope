@@ -1,7 +1,10 @@
-Name,Type,Mass_kg,LocX_m,LocY_m,SurfaceVisible,SliceActive,Notes
-Regolith_A,Regolith,60000,20,-30,TRUE,TRUE,"Adjacent to landing flat; the first dig zone"
-Regolith_B,Regolith,100000,-300,40,TRUE,TRUE,Reserve patch west
-Ore_A,Ore,8000,-160,-150,TRUE,TRUE,"220 m SW; surface-visible; uncomfortable without forward pad"
-Ore_B,Ore,15000,-80,-440,FALSE,TRUE,"450 m S; scout-only"
-Ice_A,Ice,30000,130,130,FALSE,TRUE,"180 m NE behind ridge; scout-only; the first go-look moment"
-Ice_B,Ice,60000,60,700,FALSE,TRUE,"700 m N; visible on survey, out of practical reach -- M1 expansion bait"
+Name,Type,Mass_kg,LocX_m,LocY_m,SurfaceVisible,SliceActive,Outpost,RegionId,Notes
+Regolith_A,Regolith,60000,20,-30,TRUE,TRUE,FALSE,0,"Adjacent to landing flat; the first dig zone"
+Regolith_B,Regolith,100000,-300,40,TRUE,TRUE,FALSE,0,Reserve patch west
+Ore_A,Ore,8000,-160,-150,TRUE,TRUE,FALSE,0,"220 m SW; surface-visible; uncomfortable without forward pad"
+Ore_B,Ore,15000,-80,-440,FALSE,TRUE,FALSE,0,"450 m S; scout-only"
+Ice_A,Ice,30000,130,130,FALSE,TRUE,FALSE,0,"180 m NE behind ridge; scout-only; the first go-look moment"
+Ice_B,Ice,60000,60,700,FALSE,TRUE,FALSE,0,"700 m N; visible on survey, out of practical reach -- M1 expansion bait"
+Ice_C,Ice,80000,624,-360,FALSE,TRUE,TRUE,0,"W1 outpost, the first: 720 m ESE (bearing -30 deg, the same as the drafted 453 m site); drilled, never dug; its raw ice comes home by cargo rover. Placeholder, director review"
+Ice_D,Ice,120000,-100,-750,FALSE,TRUE,TRUE,0,"W1 outpost: 757 m S by W, Ore_B lies on the way; moved from (-20, -760) after the scenery capture (a 6.7 m rise and a peak base 43 m away). Placeholder, director review"
+Ice_E,Ice,200000,-400,700,FALSE,TRUE,TRUE,0,"W1 outpost: 806 m NNW; moved from (-700, 400) after the scenery capture (inside a mesa base). Placeholder, director review"

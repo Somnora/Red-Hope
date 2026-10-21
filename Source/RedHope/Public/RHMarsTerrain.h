@@ -27,6 +27,11 @@ namespace RHMarsTerrain
 	// player sees instead of folding through it.
 	REDHOPE_API float SceneryGroundZCm(double XCm, double YCm);
 
+	// W1: the distance (cm) from a point to the nearest peak, massif or mesa base outline the scenery drew,
+	// negative when the point is inside one; the largest value when none is built (before BuildScenery has
+	// run). The height field does not contain these meshes, so a deposit site is checked against this.
+	REDHOPE_API float SceneryClearanceCm(double XCm, double YCm);
+
 	// Builds the scenery mesh components onto the rig actor: ground relief +
 	// basalt patches, boulders + pebbles (with crater rim rubble), and the
 	// three mountain bands + mesas + the hero massif's flat foothill bench

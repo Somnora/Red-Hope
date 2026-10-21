@@ -51,6 +51,12 @@
 # kits instead of Spare Parts Crates. ROADS and LIVING lines log it; the REPORT block lists roads, rovers, freight and the end
 # books. RH_PLAYTEST_ROADS=0 switches all of it off and gives the C6a bot back exactly (line-identical).
 #
+# Outposts (W1, distant ice): with roads on, the bot also opens the first outpost deposit (Ice_C, 720 m out): it surveys the hint the
+# guide gives once Ice_A and Ice_B are found, lays a pylon chain 70 m apart beside the road line, the road in stretches of at most 120 m
+# a sol, drills the ice and orders a Cargo Rover; every order obeys the C6c Struct rule, so it waits when Struct is short and says so.
+# OUTPOST lines log it, SHIPLEG lines give each ship's Water room, and the REPORT block adds the outpost line and the bar (water made
+# at the end, outpost freight, Water room per ship after the first load). RH_PLAYTEST_OUTPOST=0 switches the program off.
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -76,7 +82,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

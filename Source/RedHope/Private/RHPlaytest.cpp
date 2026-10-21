@@ -45,6 +45,12 @@
 // is in sight (free beds and Hope's streak), loads Spare Parts first and Solar Array kits (which cost no Struct) up to a cap
 // in every ship, and holds back a new Ice Drill on a deposit the alert calls low. ROADS and LIVING lines log it.
 //
+// W1 (distant ice; outpost=0 / RH_PLAYTEST_OUTPOST=0 gives the C6c bot back): with roads on, the player opens the first outpost
+// deposit. When the guide's hint opens (Ice_A and Ice_B found) it surveys the hint's centre, once per row; when the first outpost is
+// found it plans ONE program from the road's end at (76, -2) m - a pylon chain 70 m apart on a line 8 m beside the road, the road
+// itself in stretches of at most 120 m a sol over covered nodes, the Ice Drill once its pylon stands, and a Cargo Rover on the ship
+// after the first pylon - every order under the C6c Struct rule, so it waits when Struct is short and says so. OUTPOST lines log it.
+//
 // Given a save slot, it saves the colony at the sol limit first: that is how
 // the hand-play checkpoints are made (scripts/unreal/rh_checkpoints.sh). The
 // director then loads a real game in progress, played by this bot up to that
@@ -153,6 +159,27 @@ namespace
 		int32 RoundOpenedSol = 0, RoundMetSol = -1;
 		double RoundLaunchSol = -1.0;
 		FString RoundCargo;
+		// W1: the outpost program (on whenever the living city is; outpost=0 switches it off).
+		bool bOutpost = false;
+		struct FOutpostPlan
+		{
+			int32 State = 0;                  // 0 not planned, 1 building, 2 dropped, 3 standing
+			int32 DepositId = 0;
+			FString Name;
+			FVector2D Start = FVector2D::ZeroVector, End = FVector2D::ZeroVector, Dir = FVector2D::ZeroVector, Site = FVector2D::ZeroVector;
+			double LengthM = 0.0, BillKg = 0.0, RoadDoneM = 0.0, HoldUntilSimSec = 0.0;
+			TArray<FVector2D> Pylons;
+			int32 PylonsOrdered = 0, RoadTriesSol = 0, LastRoadSol = -1, LastTrySol = -1, Tries = 0;
+			bool bDrillOrdered = false;
+		} Outpost;
+		TSet<int32> OutpostSurveyed;
+		double OutpostHintSol = -1.0, OutpostSurveySol = -1.0, OutpostFoundSol = -1.0, OutpostFirstPylonSol = -1.0, OutpostLastPylonSol = -1.0, OutpostRoadSol = -1.0;
+		double OutpostDrillOrderSol = -1.0, OutpostDrillBuiltSol = -1.0, OutpostRoverOrderSol = -1.0, OutpostRoverDeploySol = -1.0, OutpostFirstLoadSol = -1.0;
+		double OutpostLoadedKg = 0.0;
+		int32 OutpostLoads = 0, OutpostStructHeldSols = 0, OutpostLastHeldSol = -1;
+		TArray<int32> OutpostHeldSols;
+		struct FShipLeg { double Sol = 0.0; int32 ProdRoom = 0, StockRoom = 0, Wanted = 0, Room = 0, Housed = 0; bool bAfterLoad = false; };
+		TArray<FShipLeg> ShipLegs;
 		FTimerHandle Timer;
 		FDelegateHandle hRejected, hCompleted, hQuota, hShip, hDeposit, hAlert;
 	};
@@ -391,6 +418,33 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  at the end (%d people): water made %.0f vs %.0f drawn kg a sol (%.1f t in store, %d sol(s) the bot held back a new drill on a low deposit); food made %.1f vs %.1f drawn (%.0f kg = %.0f sols in store, %d/%d garden cells producing); water or food short at the end: %s"),
 					Sim->GetPopulation(), W.ProductionPerSol, W.DrawPerSol, Sim->GetStock(FName("Water")) / 1000.0, P.WaterNoPairSols, F.ProductionPerSol, F.DrawPerSol, Sim->GetStock(FName("Food")), Sim->GetStock(FName("Food")) / FoodDraw,
 					Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(), (W.NetPerSol() < 0.0 || F.NetPerSol() < 0.0) ? TEXT("yes") : TEXT("no"));
+				// W1: the outpost program's own report, and the bar (nothing is tuned to pass; a miss says why).
+				if (P.bOutpost)
+				{
+					const FPlaytest::FOutpostPlan& Pl = P.Outpost;
+					FString Held;
+					for (const int32 HeldSol : P.OutpostHeldSols) { Held += FString::Printf(TEXT("%s%d"), Held.IsEmpty() ? TEXT("") : TEXT(", "), HeldSol); }
+					FString Rivals;
+					if (const URHDefinitionsSubsystem* DefsSub = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr)
+					{
+						DefsSub->ForEachRivalRow([&](FName RivalName, const FRHRivalRow&) { if (Sim->IsRivalDiscovered(RivalName)) { Rivals += FString::Printf(TEXT("%s%s"), Rivals.IsEmpty() ? TEXT("") : TEXT(", "), *RivalName.ToString()); } });
+					}
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  outpost %s (%s): sols of the hint %.2f, the first survey %.2f, the outpost found %.2f, the first pylon %.2f, the last pylon standing %.2f, the last road stretch ordered %.2f (%.0f of %.0f m), the drill ordered %.2f and running %.2f, the rover ordered %.2f and deployed %.2f (-1 = never)"),
+						Pl.Name.IsEmpty() ? TEXT("none") : *Pl.Name, Pl.State == 0 ? TEXT("never planned") : (Pl.State == 2 ? TEXT("DROPPED") : TEXT("planned")), P.OutpostHintSol, P.OutpostSurveySol, P.OutpostFoundSol, P.OutpostFirstPylonSol, P.OutpostLastPylonSol,
+						P.OutpostRoadSol, Pl.RoadDoneM, Pl.LengthM, P.OutpostDrillOrderSol, P.OutpostDrillBuiltSol, P.OutpostRoverOrderSol, P.OutpostRoverDeploySol);
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  outpost freight %.1f t in %d load(s) (mean %.0f kg; the first load at sol %.2f); water made %.0f vs %.0f drawn kg a sol at the end; Struct held the program back on %d sol(s)%s%s; plan bill %.0f kg; rivals found by the surveys: %s"),
+						P.OutpostLoadedKg / 1000.0, P.OutpostLoads, P.OutpostLoads > 0 ? P.OutpostLoadedKg / P.OutpostLoads : 0.0, P.OutpostFirstLoadSol, W.ProductionPerSol, W.DrawPerSol, P.OutpostStructHeldSols,
+						Held.IsEmpty() ? TEXT("") : TEXT(" (sol "), *(Held.IsEmpty() ? FString() : Held + TEXT(")")), Pl.BillKg, Rivals.IsEmpty() ? TEXT("none") : *Rivals);
+					bool bShipsOk = true;
+					int32 ShipsAfter = 0;
+					for (const FPlaytest::FShipLeg& Leg : P.ShipLegs)
+					{
+						UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT   ship at sol %.2f: Water production room %d (stock room %d) against %d settlers housed (wanted %d, room %d)%s"), Leg.Sol, Leg.ProdRoom, Leg.StockRoom, Leg.Housed, Leg.Wanted, Leg.Room, Leg.bAfterLoad ? TEXT(" - after the first outpost load") : TEXT(""));
+						if (Leg.bAfterLoad) { ++ShipsAfter; bShipsOk &= Leg.ProdRoom >= Leg.Housed; }
+					}
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  outpost bar: water made > 0 at the end: %s; outpost freight > 0 t: %s; every ship after the first outpost load had Water production room for the settlers it housed: %s (%d ship(s))"),
+						W.ProductionPerSol > 0.0 ? TEXT("PASS") : TEXT("FAIL"), P.OutpostLoadedKg > 0.0 ? TEXT("PASS") : TEXT("FAIL"), (ShipsAfter > 0 && bShipsOk) ? TEXT("PASS") : (ShipsAfter == 0 ? TEXT("no ship landed after the first load") : TEXT("FAIL")), ShipsAfter);
+				}
 			}
 		}
 		if (Sim)
@@ -778,6 +832,12 @@ namespace
 	// already on the way count.
 	int32 RoversToOrder(const FPlaytest& P, const URHSimWorldSubsystem* Sim)
 	{
+		// W1: the outpost program has begun building and no rover is deployed, aboard or on the way: one rides the next ship, so it is
+		// waiting when the drill stands (the open-freight rule cannot start it: outpost tasks do not exist without an active rover).
+		if (P.bOutpost && P.Outpost.State == 1 && P.Outpost.PylonsOrdered > 0 && Sim->GetActiveRoverCount() + Sim->GetRoversWaitingAboard() + P.RoversInFlight == 0)
+		{
+			return 1;
+		}
 		if (!RoadLaneToIce(Sim))
 		{
 			return 0;
@@ -879,8 +939,242 @@ namespace
 		}
 	}
 
+	// --- W1: the player opens the first outpost ---
+	// The road line runs from the built node at (76, -2) m (the end of the leg to the solar fields) toward the deposit and ends 20 m
+	// short of it (the strip clears the drill's footprint, and the end is inside a rover's last leg). A power pylon is a node of the
+	// grid: pylons stand on a parallel line 8 m beside the road (clear of its 6 m strip and the pylon's own metre), the first 40 m
+	// along it, then every 70 m (a pylon links within 80 m and covers 40 m, so the discs overlap), and one within 40 m of the drill.
+	// Every road node must lie in a pylon's disc, or in standing coverage, before any order is placed; a plan that fails is dropped.
+	constexpr double GOutpostFirstPylonM = 40.0, GOutpostPylonSpacingM = 70.0, GOutpostPylonOffsetM = 8.0, GOutpostRoadStretchM = 120.0;
+	constexpr double GOutpostRoadEndShortM = 20.0, GOutpostFinalPylonShortM = 15.0, GOutpostNodeSampleM = 30.0, GOutpostPylonReachM = 40.0;
+	constexpr double GOutpostPylonKg = 40.0, GOutpostDrillKg = 80.0, GOutpostHoldSimSec = 600.0;
+	constexpr int32 GOutpostMaxTries = 8;
+	const FVector2D GOutpostRoadStart(76, -2);
+
+	// The Struct rule the roads follow (C6c): an order goes only while Struct beyond the open quota's bill covers it and the spare.
+	bool OutpostStructOk(const URHSimWorldSubsystem* Sim, double CostKg, double& OutSpare)
+	{
+		const URHSimWorldSubsystem::FRHGrowthAvailability Av = Sim->GetGrowthAvailability(FName("Struct"));
+		OutSpare = Av.Held - Av.QuotaBill - CostKg;
+		return OutSpare >= GRoadSpareKg;
+	}
+
+	// Plans the program for a found outpost deposit. False (with the reason) when a road node would sit outside every disc.
+	bool OutpostMakePlan(FPlaytest& P, const URHSimWorldSubsystem* Sim, const FRHDepositState& D, FString& OutWhy)
+	{
+		FPlaytest::FOutpostPlan& Pl = P.Outpost;
+		Pl.DepositId = D.Id;
+		Pl.Name = D.RowName.ToString();
+		Pl.Site = FVector2D(D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0);
+		Pl.Start = GOutpostRoadStart;
+		const FVector2D Delta = Pl.Site - Pl.Start;
+		const double L = Delta.Size();
+		Pl.Dir = Delta / L;
+		Pl.LengthM = L - GOutpostRoadEndShortM;
+		Pl.End = Pl.Start + Pl.Dir * Pl.LengthM;
+		const FVector2D Left(-Pl.Dir.Y, Pl.Dir.X);
+		Pl.Pylons.Reset();
+		const double SFinal = L - GOutpostFinalPylonShortM;
+		double Sm = GOutpostFirstPylonM;
+		while (SFinal - Sm > GOutpostPylonSpacingM)
+		{
+			Pl.Pylons.Add(Pl.Start + Pl.Dir * Sm + Left * GOutpostPylonOffsetM);
+			Sm += GOutpostPylonSpacingM;
+		}
+		Pl.Pylons.Add(Pl.Start + Pl.Dir * Sm + Left * GOutpostPylonOffsetM);
+		if (SFinal - Sm > 5.0) { Pl.Pylons.Add(Pl.Start + Pl.Dir * SFinal + Left * GOutpostPylonOffsetM); }
+		// Every road node (sampled every 30 m, plus the end) inside a planned disc or standing coverage.
+		for (double T = 0.0; ; T += GOutpostNodeSampleM)
+		{
+			const double At = FMath::Min(T, Pl.LengthM);
+			const FVector2D Pt = Pl.Start + Pl.Dir * At;
+			bool bCovered = Sim->IsInCoverage(FVector(Pt.X * 100.0, Pt.Y * 100.0, 0.0), 0);
+			for (const FVector2D& Py : Pl.Pylons) { bCovered |= FVector2D::Distance(Py, Pt) <= GOutpostPylonReachM - 0.5; }
+			if (!bCovered)
+			{
+				OutWhy = FString::Printf(TEXT("the road node %.0f m along (%.0f, %.0f) m would lie outside every pylon's disc"), At, Pt.X, Pt.Y);
+				return false;
+			}
+			if (At >= Pl.LengthM) { break; }
+		}
+		Pl.BillKg = Pl.Pylons.Num() * GOutpostPylonKg + Pl.LengthM * 2.0 + GOutpostDrillKg;
+		return true;
+	}
+
+	// One look a tick: survey the hint, plan once, then pylons (one at a time), road stretches (a sol), the drill. One order a tick,
+	// and none for GOutpostHoldSimSec after it (so the Struct it takes has left the stores before the next is judged).
+	void OutpostStep(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
+	{
+		if (!P.bOutpost || !P.bLiving)
+		{
+			return;
+		}
+		FPlaytest::FOutpostPlan& Pl = P.Outpost;
+		const double Sol = SolNow(C), SimNow = C->GetSimSecondsTotal();
+		const int32 SolI = C->GetSol();
+		// Survey the hint's centre at once, once per row (a survey costs no Struct).
+		FVector Hint;
+		int32 HintId = 0;
+		if (Sim->GetOutpostHint(Hint, &HintId))
+		{
+			if (P.OutpostHintSol < 0.0) { P.OutpostHintSol = Sol; }
+			if (!P.OutpostSurveyed.Contains(HintId))
+			{
+				P.OutpostSurveyed.Add(HintId);
+				if (P.OutpostSurveySol < 0.0) { P.OutpostSurveySol = Sol; }
+				int32 Meters = 0;
+				const FString Where = URHSimWorldSubsystem::DescribeBearing(FVector::ZeroVector, Hint, Meters);
+				FRHCommand Survey; Survey.Verb = FName("Survey"); Survey.Location = FVector(Hint.X, Hint.Y, 0.f);
+				Order(Sim, C, Survey, FString::Printf(TEXT("Survey at (%.0f, %.0f) m (the ice hint, %d m %s)"), Hint.X / 100.0, Hint.Y / 100.0, Meters, *Where));
+			}
+		}
+		if (Pl.State == 0)
+		{
+			// The first outpost found, once the road to the solar fields is ordered (the program starts at its end).
+			if (P.RoadLegState.Num() != GNumRoadLegs || P.RoadLegState[2] != 1) { return; }
+			for (const FRHDepositState& D : Sim->GetDeposits())
+			{
+				if (!D.bOutpost || !D.bDiscovered || D.RemainingKg <= 0.0) { continue; }
+				if (P.OutpostFoundSol < 0.0) { P.OutpostFoundSol = Sol; }
+				FString Why;
+				if (OutpostMakePlan(P, Sim, D, Why))
+				{
+					Pl.State = 1;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST %s found: a program of %d pylon(s), %.0f m of road from (%.0f, %.0f) to (%.0f, %.0f) m and a drill: %.0f kg of Struct in all"),
+						Sol, *Pl.Name, Pl.Pylons.Num(), Pl.LengthM, Pl.Start.X, Pl.Start.Y, Pl.End.X, Pl.End.Y, Pl.BillKg);
+				}
+				else
+				{
+					Pl.State = 2;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST %s found, but the plan is DROPPED: %s"), Sol, *D.RowName.ToString(), *Why);
+				}
+				break;
+			}
+			return;
+		}
+		if (Pl.State != 1 || SimNow < Pl.HoldUntilSimSec)
+		{
+			return;
+		}
+		const auto HeldNote = [&](const TCHAR* What, double SpareKg)
+		{
+			if (P.OutpostLastHeldSol != SolI)
+			{
+				P.OutpostLastHeldSol = SolI;
+				++P.OutpostStructHeldSols;
+				P.OutpostHeldSols.Add(SolI);
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST waits for Struct: %s (spare after it %.0f kg, the rule keeps %.0f)"), Sol, What, SpareKg, GRoadSpareKg);
+			}
+		};
+		const auto Hold = [&]() { Pl.HoldUntilSimSec = SimNow + GOutpostHoldSimSec; };
+		const auto TryFail = [&](const FString& Why)
+		{
+			// A refusal for something other than Struct: counted once a sol; the program is dropped after GOutpostMaxTries sols.
+			if (Pl.LastTrySol != SolI)
+			{
+				Pl.LastTrySol = SolI;
+				if (++Pl.Tries >= GOutpostMaxTries)
+				{
+					Pl.State = 2;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST program DROPPED after %d sols of refusals: %s"), Sol, GOutpostMaxTries, *Why);
+				}
+				else
+				{
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST refused (%d of %d): %s"), Sol, Pl.Tries, GOutpostMaxTries, *Why);
+				}
+			}
+		};
+		// 1. The next pylon, once the one before it stands (until then the road below may still be laid over what stands).
+		if (Pl.PylonsOrdered < Pl.Pylons.Num())
+		{
+			const int32 I = Pl.PylonsOrdered;
+			const FVector Prev = I > 0 ? FVector(Pl.Pylons[I - 1].X * 100.0, Pl.Pylons[I - 1].Y * 100.0, 0.0) : FVector::ZeroVector;
+			if (I == 0 || FindBuilt(Sim, FName("Pylon"), &Prev))
+			{
+				const FVector At(Pl.Pylons[I].X * 100.0, Pl.Pylons[I].Y * 100.0, 0.0);
+				FString Why;
+				double Spare = 0.0;
+				if (!OutpostStructOk(Sim, GOutpostPylonKg, Spare)) { HeldNote(*FString::Printf(TEXT("pylon %d of %d"), I + 1, Pl.Pylons.Num()), Spare); }
+				else if (!Sim->CanPlaceBuilding(FName("Pylon"), At, Why)) { TryFail(FString::Printf(TEXT("pylon %d at (%.0f, %.0f) m: %s"), I + 1, Pl.Pylons[I].X, Pl.Pylons[I].Y, *Why)); }
+				else
+				{
+					OrderBuild(Sim, C, FName("Pylon"), Pl.Pylons[I].X, Pl.Pylons[I].Y);
+					if (P.OutpostFirstPylonSol < 0.0) { P.OutpostFirstPylonSol = Sol; }
+					++Pl.PylonsOrdered;
+					Hold();
+					return;
+				}
+			}
+		}
+		// The last pylon is up: the time it stood.
+		const FVector LastAt(Pl.Pylons.Last().X * 100.0, Pl.Pylons.Last().Y * 100.0, 0.0);
+		const bool bChainStands = Pl.PylonsOrdered == Pl.Pylons.Num() && FindBuilt(Sim, FName("Pylon"), &LastAt) != nullptr;
+		if (bChainStands && P.OutpostLastPylonSol < 0.0) { P.OutpostLastPylonSol = Sol; }
+		// 2. The road, a stretch a sol, over nodes the standing pylons already cover.
+		if (Pl.RoadDoneM < Pl.LengthM - 0.01 && Pl.LastRoadSol != SolI)
+		{
+			const double ToM = FMath::Min(Pl.RoadDoneM + GOutpostRoadStretchM, Pl.LengthM);
+			bool bCovered = true;
+			for (double T = Pl.RoadDoneM; ; T += GOutpostNodeSampleM)
+			{
+				const double At = FMath::Min(T, ToM);
+				const FVector2D Pt = Pl.Start + Pl.Dir * At;
+				bCovered &= Sim->IsInCoverage(FVector(Pt.X * 100.0, Pt.Y * 100.0, 0.0), 0);
+				if (At >= ToM) { break; }
+			}
+			if (bCovered)
+			{
+				const FVector2D FromPt = Pl.Start + Pl.Dir * Pl.RoadDoneM, ToPt = Pl.Start + Pl.Dir * ToM;
+				const FVector A(FromPt.X * 100.0, FromPt.Y * 100.0, 0.0), B(ToPt.X * 100.0, ToPt.Y * 100.0, 0.0);
+				FString Why;
+				URHSimWorldSubsystem::FRHRoadPreview Pre;
+				if (!Sim->CanPlaceRoad(A, B, Why, &Pre))
+				{
+					if (Why.StartsWith(TEXT("Insufficient Struct"))) { HeldNote(*FString::Printf(TEXT("the road stretch to %.0f m: %s"), ToM, *Why), -1.0); }
+					else { TryFail(FString::Printf(TEXT("the road stretch to %.0f m: %s"), ToM, *Why)); }
+				}
+				else
+				{
+					double Spare = 0.0;
+					if (!OutpostStructOk(Sim, Pre.BillKg, Spare)) { HeldNote(*FString::Printf(TEXT("the road stretch to %.0f m needs %.0f kg"), ToM, Pre.BillKg), Spare); }
+					else
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("BuildRoad");
+						Cmd.Location = A;
+						Cmd.LocationB = B;
+						Order(Sim, C, Cmd, FString::Printf(TEXT("BuildRoad (%.0f, %.0f) to (%.0f, %.0f) m: the outpost road, %.0f to %.0f m of %.0f, %d piece(s), %.0f kg Struct (%.0f spare after)"),
+							FromPt.X, FromPt.Y, ToPt.X, ToPt.Y, Pl.RoadDoneM, ToM, Pl.LengthM, Pre.Pieces, Pre.BillKg, Spare));
+						Pl.RoadDoneM = ToM;
+						Pl.LastRoadSol = SolI;
+						P.OutpostRoadSol = Sol;
+						Hold();
+						return;
+					}
+				}
+			}
+		}
+		// 3. The drill, once its pylon stands.
+		if (bChainStands && !Pl.bDrillOrdered)
+		{
+			const FRHDepositState* D = nullptr;
+			for (const FRHDepositState& Dp : Sim->GetDeposits()) { if (Dp.Id == Pl.DepositId) { D = &Dp; } }
+			FString Why;
+			double Spare = 0.0;
+			if (D && !OutpostStructOk(Sim, GOutpostDrillKg, Spare)) { HeldNote(TEXT("the Ice Drill"), Spare); }
+			else if (D && !Sim->CanPlaceBuilding(FName("IceDrill"), D->LocationCm, Why)) { TryFail(FString::Printf(TEXT("the Ice Drill on %s: %s"), *Pl.Name, *Why)); }
+			else if (D)
+			{
+				OrderBuild(Sim, C, FName("IceDrill"), D->LocationCm.X / 100.f, D->LocationCm.Y / 100.f);
+				Pl.bDrillOrdered = true;
+				P.OutpostDrillOrderSol = Sol;
+				Hold();
+			}
+		}
+	}
+
 	// Rovers: one look at every rover each tick; what a rover picks up (its cargo rising) is freight loaded.
-	void RoverTally(FPlaytest& P, const URHSimWorldSubsystem* Sim)
+	void RoverTally(FPlaytest& P, const URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
 	{
 		TArray<FRHRoverState> Rovers;
 		Sim->GetRoverStates(Rovers);
@@ -892,6 +1186,13 @@ namespace
 			{
 				P.RoverLoadedKg += R.CargoKg - Last;
 				++P.RoverLoads;
+				// W1: a load taken within 60 m of the outpost drill is outpost ice.
+				if (P.Outpost.State == 1 && FVector2D::Distance(FVector2D(R.PosCm.X / 100.0, R.PosCm.Y / 100.0), P.Outpost.Site) < 60.0)
+				{
+					P.OutpostLoadedKg += R.CargoKg - Last;
+					++P.OutpostLoads;
+					if (P.OutpostFirstLoadSol < 0.0) { P.OutpostFirstLoadSol = SolNow(C); }
+				}
 			}
 			P.RoverLastCargoKg.Add(Key, R.CargoKg);
 		}
@@ -943,7 +1244,7 @@ namespace
 		}
 		if (P.bLiving)
 		{
-			RoverTally(P, Sim);
+			RoverTally(P, Sim, C);
 			P.FreightMaxThisSol = FMath::Max(P.FreightMaxThisSol, FMath::Max(Sim->GetFreightTaskCount(), FreightCandidates(Sim)));
 			P.GenWSec += Pw.GenW * Dt; P.LoadWSec += Pw.LoadW * Dt; P.PowSec += Dt;
 		}
@@ -975,6 +1276,18 @@ namespace
 					C->GetSol(), G.BuiltEdgeCount, G.Edges.Num(), (double)G.BuiltLengthCm() / 100.0, Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(), P.RoversInFlight, P.RoverLoadedKg / 1000.0, P.RoverLoads,
 					P.FreightSamples.Num() > 0 ? P.FreightSamples.Last() : 0, MeanOpenFreight(P), P.PowSec > 0.0 ? P.GenWSec / P.PowSec : 0.0, P.PowSec > 0.0 ? P.LoadWSec / P.PowSec : 0.0, Sim->GetPower().BatteryCapWh > 0.0 ? 100.0 * Sim->GetPower().BatteryWh / Sim->GetPower().BatteryCapWh : 0.0, Sim->GetStock(FName("SpareParts")));
 				P.GenWSec = P.LoadWSec = P.PowSec = 0.0;
+				if (P.bOutpost)
+				{
+					const FPlaytest::FOutpostPlan& Pl = P.Outpost;
+					const URHSimWorldSubsystem::FRHGrowthAvailability SA2 = Sim->GetGrowthAvailability(FName("Struct"));
+					const URHSimWorldSubsystem::FRHSupportLeg WaterLeg = Sim->GetSupportLeg(FName("Water"), Sim->GetPopulation());
+					FVector Hint;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] OUTPOST %d | %s | hint %s, surveyed %d | pylons %d of %d ordered | road %.0f of %.0f m | drill %s | rovers %d deployed, %d aboard | outpost freight %.1f t in %d load(s) | Struct held %.0f against the quota's %.0f | water made %.0f vs %.0f drawn"),
+						C->GetSol(), Pl.State == 0 ? TEXT("not planned") : (Pl.State == 1 ? TEXT("building") : (Pl.State == 2 ? TEXT("DROPPED") : TEXT("standing"))),
+						Sim->GetOutpostHint(Hint) ? TEXT("open") : TEXT("closed"), P.OutpostSurveyed.Num(), Pl.PylonsOrdered, Pl.Pylons.Num(), Pl.RoadDoneM, Pl.LengthM,
+						Pl.bDrillOrdered ? (P.OutpostDrillBuiltSol >= 0.0 ? TEXT("running") : TEXT("ordered")) : TEXT("not ordered"), Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(),
+						P.OutpostLoadedKg / 1000.0, P.OutpostLoads, SA2.Held, SA2.QuotaBill, WaterLeg.ProductionPerSol, WaterLeg.DrawPerSol);
+				}
 			}
 			if (Sim->GetPopulation() > 0)
 			{
@@ -1107,6 +1420,15 @@ namespace
 			}
 			const FVector MeltB(4800.f, 69000.f, 0.f);
 			if (FindBuilt(Sim, FName("WaterPlant"), &MeltB)) { Mark(P, C, TEXT("Water Plant beside Ice_B")); }
+		}
+
+		// W1: the outpost program (surveys, one pylon at a time, the road in stretches, the drill).
+		OutpostStep(P, Sim, C);
+		if (P.bOutpost && P.Outpost.State == 1)
+		{
+			const FVector SiteCm(P.Outpost.Site.X * 100.0, P.Outpost.Site.Y * 100.0, 0.0);
+			if (P.OutpostDrillBuiltSol < 0.0 && FindBuilt(Sim, FName("IceDrill"), &SiteCm)) { P.OutpostDrillBuiltSol = SolNow(C); Mark(P, C, TEXT("outpost Ice Drill running")); }
+			if (P.OutpostRoverDeploySol < 0.0 && P.OutpostRoverOrderSol >= 0.0 && Sim->GetActiveRoverCount() > 0) { P.OutpostRoverDeploySol = SolNow(C); Mark(P, C, TEXT("outpost rover deployed")); }
 		}
 
 		// The first ship: power before people.
@@ -1264,6 +1586,7 @@ namespace
 				P.RoversInFlight += RoversNow;
 				P.RoversOrdered += RoversNow;
 				if (P.RoverFirstOrderSol < 0.0) { P.RoverFirstOrderSol = SolNow(C); }
+				if (P.bOutpost && P.Outpost.State == 1 && P.OutpostRoverOrderSol < 0.0) { P.OutpostRoverOrderSol = SolNow(C); }
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIVING  the cargo adds %d Cargo Rover(s): freight open (the sol's most) averaged %.1f over the last %d sols, %d rover(s) deployed, %d aboard, %d already on the way"),
 					SolNow(C), RoversNow, MeanOpenFreight(P), FMath::Min(P.FreightSamples.Num(), GFreightWindowSols), Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(), P.RoversInFlight - RoversNow);
 			}
@@ -1529,7 +1852,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
 		// Args[3..]: a save slot and/or the options "districts=1" (C5b), "nogrowth=1", "lifesupport=0|1" (C5e), in any order.
-		bool bLifeSupportOff = false, bRoadsOff = false;
+		bool bLifeSupportOff = false, bRoadsOff = false, bOutpostOff = false;
 		for (int32 i = 3; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
@@ -1538,12 +1861,16 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			else if (Args[i].Equals(TEXT("lifesupport=0"), ESearchCase::IgnoreCase)) { bLifeSupportOff = true; }
 			else if (Args[i].Equals(TEXT("roads=1"), ESearchCase::IgnoreCase)) { bRoadsOff = false; }
 			else if (Args[i].Equals(TEXT("roads=0"), ESearchCase::IgnoreCase)) { bRoadsOff = true; }
+			else if (Args[i].Equals(TEXT("outpost=1"), ESearchCase::IgnoreCase)) { bOutpostOff = false; }
+			else if (Args[i].Equals(TEXT("outpost=0"), ESearchCase::IgnoreCase)) { bOutpostOff = true; }
 			else if (P.SaveSlot.IsEmpty()) { P.SaveSlot = Args[i]; }
 		}
 		// C5e: painting districts means playing the city's life support too, unless lifesupport=0 says not to.
 		P.bLifeSupport = P.bDistricts && !bLifeSupportOff;
 		// C6c: and the living city (roads, rovers, a colony fed ahead of the wave) whenever districts are painted, unless roads=0 says not to.
 		P.bLiving = P.bDistricts && !bRoadsOff;
+		// W1: and the outpost program with it, unless outpost=0 says not to.
+		P.bOutpost = P.bLiving && !bOutpostOff;
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
@@ -1573,11 +1900,30 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 				GPlaytest->RoundCargo.Reset();
 			}
 		});
-		P.hShip = Sim->OnShipArrived.AddLambda([SolOf](const TArray<FName>& Items)
+		P.hShip = Sim->OnShipArrived.AddLambda([SolOf, WeakSim](const TArray<FName>& Items)
 		{
 			FString List;
 			for (const FName& I : Items) { List += I.ToString() + TEXT(" "); }
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f SHIP    landed: %s"), SolOf(), *List);
+			// W1: what the Water leg allows this ship's settlers (the bar reads it per ship, not the "short on water" flag, which is set
+			// only while settlers are waiting).
+			if (GPlaytest.IsValid() && GPlaytest->bOutpost && WeakSim.IsValid())
+			{
+				const URHSimWorldSubsystem* S = WeakSim.Get();
+				const URHSimWorldSubsystem::FRHSettlerLegRoom WaterRoom = S->GetSettlerLegRoom(FName("Water"));
+				const FRHCityDemand Dm = S->GetCityDemand();
+				FPlaytest::FShipLeg Leg;
+				Leg.Sol = SolOf();
+				Leg.ProdRoom = WaterRoom.ProductionRoom;
+				Leg.StockRoom = WaterRoom.StockRoom;
+				Leg.Wanted = Dm.SettlersWanted;
+				Leg.Room = Dm.SettlerRoom;
+				Leg.Housed = Dm.bSettlersDraw ? FMath::Min(Dm.SettlersWanted, Dm.SettlerRoom) : 0;
+				Leg.bAfterLoad = GPlaytest->OutpostFirstLoadSol >= 0.0;
+				GPlaytest->ShipLegs.Add(Leg);
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f SHIPLEG water: production room %d, stock room %d | settlers wanted %d, room %d, housed %d%s"), Leg.Sol,
+					Leg.ProdRoom, Leg.StockRoom, Leg.Wanted, Leg.Room, Leg.Housed, Leg.bAfterLoad ? TEXT(" | after the first outpost load") : TEXT(""));
+			}
 			if (GPlaytest.IsValid())
 			{
 				GPlaytest->LsInboundCells = 0; // the ship's soil and seeds are in the stores now
@@ -1598,6 +1944,6 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
 			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
-			*FString::Printf(TEXT("%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
+			*FString::Printf(TEXT("%s%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bOutpost ? TEXT(", and opens the first outpost") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

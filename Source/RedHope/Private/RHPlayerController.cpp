@@ -1158,6 +1158,19 @@ void ARHPlayerController::Tick(float DeltaTime)
 			DrawDebugCircle(World, S.PointCm + FVector(0, 0, 25.f), S.RadiusM * 100.f,
 				64, Ring, false, -1.f, 0, 5.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
 		}
+		// W1: where the guide says to look next for outpost ice: a dashed 60 m ring (the hint centre, never the spot itself).
+		FVector HintCm;
+		if (Sim->GetOutpostHint(HintCm))
+		{
+			constexpr int32 Segments = 48;
+			constexpr float RingCm = 6000.f;
+			for (int32 K = 0; K < Segments; K += 2)
+			{
+				const float A0 = 2.f * PI * K / Segments, A1 = 2.f * PI * (K + 1) / Segments;
+				DrawDebugLine(World, HintCm + FVector(FMath::Cos(A0) * RingCm, FMath::Sin(A0) * RingCm, 25.f), HintCm + FVector(FMath::Cos(A1) * RingCm, FMath::Sin(A1) * RingCm, 25.f),
+					FColor(255, 200, 80), false, -1.f, 0, 5.f);
+			}
+		}
 	}
 
 	// The traffic overlay's hover (C6b): the cursor's ground point, while no tool owns the click.

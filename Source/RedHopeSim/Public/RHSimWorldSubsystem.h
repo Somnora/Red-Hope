@@ -1199,7 +1199,34 @@ public:
 	// What the player can still do about a low ice deposit: -1 nothing to
 	// resolve, 0 find more ice, 1 carry the grid to healthy ice, 2 drill it,
 	// 3 melt it where it is drilled (no finished Water Plant near the drill).
-	int32 GetIceExpansionStage() const;
+	// W1: stages 4 (lay a road) and 5 (bring a cargo rover) are the outposts'; stages 1 and 2 may be too. OutDepositId
+	// names the outpost the stage concerns (0 when it comes from the near deposits).
+	int32 GetIceExpansionStage(int32* OutDepositId = nullptr) const;
+
+	// --- Outposts (W1, distant ice) ---
+	// An outpost deposit (DT_Deposits.Outpost) is drilled, never dug. Its raw ice comes home by cargo
+	// rover to a Water Plant at least OutpostMeltMinCm away - never melted beside the drill, never carried
+	// by a hauler, never put in a store. Everything below keys on a FOUND outpost, an outpost drill or a
+	// task's bOutpostSource, so a colony that has found none behaves exactly as before.
+	// The hint: the lowest-Id undiscovered outpost row, once every non-outpost Ice row is found. Its centre
+	// is the row rounded (half away from zero) to the OutpostHintGridCm grid, so it names an area and not
+	// the spot, and a scout surveying the centre always reveals the row.
+	bool GetOutpostHint(FVector& OutCentreCm, int32* OutDepositId = nullptr) const;
+	// "east-south-east" and a distance rounded to 10 m, from the Lander, for the guide and the alert copy.
+	static FString DescribeBearing(const FVector& FromCm, const FVector& ToCm, int32& OutMeters);
+	bool IsOutpostDrill(const FRHBuildingInstance& B) const;
+	// The plant an outpost drill's ice is carried to: finished level-0 buildings with an Ice-consuming recipe
+	// at least OutpostMeltMinCm from the deposit, unless bIgnoreRoom with room for a load (Have + 200 below
+	// OutpostHopperKg), nearest first (integer straight cm, ties to the lower Id), the first whose freight
+	// route passes (at most RoverClaimPlans route plans a call). OutRoomKg is OutpostHopperKg - Have. There is
+	// never a store.
+	bool FindOutpostDestination(const FRHBuildingInstance& Drill, bool bIgnoreRoom, int32& OutId, double& OutRoomKg) const;
+	// A Haul task from this drill that is unclaimed, or claimed by a robot that can still work.
+	bool HasLiveOutpostTask(int32 DrillId) const;
+	int32 GetOutpostMeltMinCm() const { return OutpostMeltMinCm; }
+	double GetOutpostHopperKg() const { return OutpostHopperKg; }
+	int32 GetOutpostHintGridCm() const { return OutpostHintGridCm; }
+	double GetOutpostDrillBufferKg() const { return OutpostDrillBufferKg; }
 
 	// --- Storm power discipline (director ruling, M1-d hand-play) ---
 	// "Shut off some of the robots, tools, areas so you're not wasting battery
@@ -1801,6 +1828,37 @@ public:
 		}
 		return 0;
 	}
+	// Harness (W1): -icelow pins the two-deposit D2a contract, so after I8 every outpost is marked found
+	// and spent (and latched, so nothing is announced). Broadcasts and prints nothing.
+	void Debug_SpendOutpostIce()
+	{
+		for (FRHDepositState& D : Deposits)
+		{
+			if (D.bOutpost)
+			{
+				D.bDiscovered = true;
+				D.RemainingKg = 0.0;
+				IceLowAnnounced.Add(D.Id);
+				OutpostHintAnnounced.Add(D.Id);
+			}
+		}
+	}
+	// Harness (W1, -farice F2 only): the twin colony without the outpost rows. Removes the trailing rows.
+	void Debug_RemoveOutpostRows() { Deposits.RemoveAll([](const FRHDepositState& D) { return D.bOutpost; }); }
+	// Harness (W1): empty the hint latch so a test can prove LoadColony rebuilds it.
+	void Debug_ClearOutpostHintLatch() { OutpostHintAnnounced.Reset(); }
+	// Harness (W1): force a deposit's designation (the Dig verb refuses an outpost, so a hand-made state is needed).
+	void Debug_SetDepositDesignated(int32 Id, bool bOn)
+	{
+		if (FRHDepositState* D = FindDeposit(Id)) { D->bDesignated = bOn; }
+	}
+	// Harness (W1): the open outpost freight tasks (a drill's posted loads).
+	int32 Debug_CountOutpostTasks() const
+	{
+		int32 N = 0;
+		for (const FRHTask& T : Tasks) { N += (T.Type == ERHTaskType::Haul && T.bOutpostSource) ? 1 : 0; }
+		return N;
+	}
 	// Harness (D2a): empty the low-ice latch so a test can prove LoadColony
 	// rebuilds it (and resets a stale one).
 	void Debug_ClearIceLowLatch() { IceLowAnnounced.Reset(); }
@@ -1861,6 +1919,7 @@ private:
 	void StepProduction(float SubDt);
 	void StepDepositAlerts(); // D2a: one-shot "ice running low" per deposit
 	bool HasHealthyDiscoveredIce() const; // known, mass left, above the low line
+	bool HasUndiscoveredNonOutpostIce() const; // W1: ice still to find that is not an outpost
 	void StepQuota();
 	void StepPower(float SubDt);
 	// Habitability integrator (M1-d Gate B): leak drains every pressurized
@@ -2722,6 +2781,14 @@ private:
 	bool bFoodLowAnnounced = false; // runtime edge, re-derived on load (never saved)
 	double IceLowAlertFraction = 0.25;  // D2a, RH_Config (0 disables)
 	double IceWaterPlantNear_m = 100.0; // D2a, RH_Config: a Water Plant this close counts as "beside" the drill
+	// W1 outposts (RH_Config; header defaults equal the CSV).
+	int32 OutpostMeltMinCm = 30000;         // no ice-melting building this close to a FOUND outpost; outpost ice never goes to one
+	double OutpostHopperKg = 1200.0;        // a plant's hopper for outpost loads (every other leg keeps 2 x Need)
+	int32 OutpostHintGridCm = 5000;         // the hint centre's rounding grid (50 m)
+	double OutpostDrillBufferKg = 1000.0;   // an outpost drill starts no batch while it holds this much ice
+	// W1 runtime latch: outpost rows whose hint has been announced (or that are found). Never saved;
+	// rebuilt at load like the low-ice latch.
+	TSet<int32> OutpostHintAnnounced;
 	// D2a: resources construction draws from stores (Struct plus every
 	// building / furnishing / fitting bill line). Only these overflow to a
 	// store when their consumer's hopper is full; anything else (drill ice)

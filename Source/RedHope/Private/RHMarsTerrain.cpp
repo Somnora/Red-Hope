@@ -187,6 +187,14 @@ namespace
 	// (buttress ridgelines running apex-to-base) and per height (spurs), with
 	// vertical crag jitter that fades at apex and base. TopT > 0 truncates
 	// into a mesa and caps it.
+	// W1: the base outline of every peak and mesa BuildScenery drew, so a deposit site can be checked against
+	// the meshes (the height field does not contain them). Rebuilt with the scenery; read by RH.TerrainProbe.
+	TArray<TArray<FVector2D>>& PeakOutlines()
+	{
+		static TArray<TArray<FVector2D>> List;
+		return List;
+	}
+
 	void AppendPeak(FAcc& Acc, const FVector2D& CenterXY, float Hcm, float BaseRcm, uint32 Seed, float TopT = 0.f)
 	{
 		const int32 Sectors = 26, Rings = 9;
@@ -202,6 +210,15 @@ namespace
 				+ Hcm * 0.05f * Spur * FMath::Sin(Tt * PI);
 			return FVector(CenterXY.X + FMath::Cos(Th) * Rr, CenterXY.Y + FMath::Sin(Th) * Rr, Z);
 		};
+		{
+			TArray<FVector2D> Outline;
+			for (int32 K = 0; K < Sectors; ++K)
+			{
+				const FVector Base = P(K, Rings);
+				Outline.Add(FVector2D(Base.X, Base.Y));
+			}
+			PeakOutlines().Add(MoveTemp(Outline));
+		}
 		const FVector Axis(CenterXY.X, CenterXY.Y, BaseZ);
 		const auto SideHint = [&](const FVector& At)
 		{
@@ -360,6 +377,7 @@ void BuildScenery(AActor& Rig)
 	const bool bTextured = SurfMat && Regolith;
 
 	FAcc GroundBase, GroundPatch, Boulders, Pebbles, NearPeaks, MidPeaks, FarPeaks, Mesas;
+	PeakOutlines().Reset();
 
 	AppendGround(GroundBase, GroundPatch);
 
@@ -553,6 +571,31 @@ void BuildScenery(AActor& Rig)
 	const int32 TotalTris = (GroundBase.I.Num() + GroundPatch.I.Num() + Boulders.I.Num() + Pebbles.I.Num()
 		+ NearPeaks.I.Num() + MidPeaks.I.Num() + FarPeaks.I.Num() + Mesas.I.Num()) / 3;
 	UE_LOG(LogRedHope, Display, TEXT("Mars scenery built: %d triangles across 8 sections"), TotalTris);
+}
+
+float SceneryClearanceCm(double XCm, double YCm)
+{
+	float Best = TNumericLimits<float>::Max();
+	bool bInsideAny = false;
+	const FVector2D P(XCm, YCm);
+	for (const TArray<FVector2D>& Outline : PeakOutlines())
+	{
+		bool bInside = false;
+		float D = TNumericLimits<float>::Max();
+		for (int32 K = 0, N = Outline.Num(); K < N; ++K)
+		{
+			const FVector2D& A = Outline[K];
+			const FVector2D& B = Outline[(K + 1) % N];
+			if ((A.Y > P.Y) != (B.Y > P.Y) && P.X < (B.X - A.X) * (P.Y - A.Y) / (B.Y - A.Y) + A.X)
+			{
+				bInside = !bInside;
+			}
+			D = FMath::Min(D, (float)FMath::PointDistToSegment(FVector(P.X, P.Y, 0.0), FVector(A.X, A.Y, 0.0), FVector(B.X, B.Y, 0.0)));
+		}
+		bInsideAny |= bInside;
+		Best = FMath::Min(Best, D);
+	}
+	return bInsideAny ? -Best : Best;
 }
 
 float SceneryGroundZCm(double X, double Y)

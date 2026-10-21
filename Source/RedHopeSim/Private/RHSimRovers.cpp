@@ -127,10 +127,27 @@ void URHSimWorldSubsystem::RefreshFreightFlags()
 	}
 	bFreightWasActive = bActive;
 	FreightBuiltVersion = RoadGraph.BuiltVersion;
+	bool bAnyOutpostGone = false;
 	for (FRHTask& T : Tasks)
 	{
 		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid())
 		{
+			if (T.bOutpostSource)
+			{
+				// W1: an unclaimed outpost task is kept only while a rover could still take it (an active rover and a
+				// freight route). Otherwise it is DELETED, never handed to a hauler; the board re-posts it when it
+				// passes again. A task holds no mass, so nothing is lost. Non-outpost tasks keep the rule below exactly.
+				if (bActive && IsFreightRoute(T))
+				{
+					T.bFreight = true;
+				}
+				else
+				{
+					T.AmountKg = -1.0; // marked for removal below
+					bAnyOutpostGone = true;
+				}
+				continue;
+			}
 			const bool bWas = T.bFreight;
 			T.bFreight = bActive && T.AmountKg > HaulerLoadKg && IsFreightRoute(T);
 			if (!T.bFreight || !bWas)
@@ -138,6 +155,10 @@ void URHSimWorldSubsystem::RefreshFreightFlags()
 				T.UnclaimedAgentSec = 0.0;
 			}
 		}
+	}
+	if (bAnyOutpostGone)
+	{
+		Tasks.RemoveAll([](const FRHTask& T) { return T.bOutpostSource && !T.ClaimedBy.IsValid() && T.AmountKg < 0.0; });
 	}
 }
 

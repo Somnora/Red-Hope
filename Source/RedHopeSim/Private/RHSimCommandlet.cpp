@@ -3832,6 +3832,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		for (int32 i = 0; i < 2 * 1440; ++i) { Step(60.0); }
 		Expect(CountAlerts(TEXT("RUNNING LOW")) == 1 && Sim->IsIceDepositLow(*Dep("Ice_A")),
 			TEXT("I8 two more sols of drawing: still one alert, still low"));
+		// W1: the three outpost rows (Ice_C, Ice_D, Ice_E) are marked found and spent, and latched, so this suite stays the
+		// D2a two-deposit contract and every line below is unchanged (I9 reads "nothing left to find" and I12 the last-ice
+		// text). No alert is raised and nothing is printed. -farice F4 pins what this hides: with an outpost hidden, a low
+		// Ice_B reads the outpost advice, not the last-ice one.
+		Sim->Debug_SpendOutpostIce();
 
 		// I9. The expansion stages, then the setup for the save: Ice_B found
 		// (healthy, out of the grid) -> carry the grid -> a pylon covers it.
@@ -10791,7 +10796,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v42 (v40 added no field; v41 and v42 are D1's floor table and F2b's recalled list): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
+		// --- X15. Save v43 (v40 added no field; v41, v42 and v43 are D1's floor table, F2b's recalled list and W1's outpost rows): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10803,14 +10808,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 42, FString::Printf(TEXT("X15 the file says version %u (expect 42)"), Ver));
-			uint32 V41 = 41;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V41, 4); }
-			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv41.sav")));
+			Expect(bRead && Ver == 43, FString::Printf(TEXT("X15 the file says version %u (expect 43)"), Ver));
+			uint32 V42 = 42;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V42, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv42.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv41"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/42")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
-				FString::Printf(TEXT("X15 a v41 save is refused and the live colony untouched (%s)"), *Le39));
+			Expect(!Sim->LoadColony(TEXT("trafficv42"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/43")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v42 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
 			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
@@ -11182,6 +11187,923 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("EP4 both bands end with the pile at its cap: agent %.1f kg, era %.1f kg"), Agent.Pile, Era.Pile));
 			Expect(Within(Agent.Dug - Agent.Pile - Agent.HopperGain, Era.Dug - Era.Pile - Era.HopperGain, 0.05),
 				FString::Printf(TEXT("EP4 and what the Forge took (dug, less the pile and the hopper's gain) agrees within 5%%: agent %.1f kg, era %.1f kg"), Agent.Dug - Agent.Pile - Agent.HopperGain, Era.Dug - Era.Pile - Era.HopperGain));
+		}
+
+		return Finish();
+	}
+
+	// W1 self-test (distant ice, 2026-10-21): the OUTPOST deposits (Ice_C, Ice_D, Ice_E) and the rules that bring their raw ice home.
+	// An outpost is drilled, never dug; its ice goes by cargo rover over built roads to a Water Plant at least 300 m away - never melted
+	// beside the drill, never carried by a hauler, never put in a store - in both bands. F1 the data (the three rows, the six old ones, the
+	// four config pins, the 50 m hint centre inside the scout's 60 m); F2 the inert twin (20 sols with the outposts hidden against a twin
+	// without them: stocks, deposits 1-6, tasks and power bit-identical); F3 the hint, a real survey, the order, the rival roll and the
+	// one-time alert; F4 the advice and the guide stages (the disclosed change: Ice_B low no longer reads "the last known ice" while an
+	// outpost is hidden); F5 the refusals (Dig, a Water Plant at 299 and 301 m, no leak before discovery, era dig); F6 coverage and the 70 m
+	// chain; F7 no rover and no plant mean no task and no store; F8 the destination helper (a nearer unserved plant, a plant inside 300 m,
+	// the hopper line, the plan cap); F9 the freight leg (240 kg, no hauler, a load, a demolished edge, non-outpost freight untouched);
+	// F10 a halted claimant never holds the lane; F11 the buffer cap; F12 end to end in the agent band with mass conserved; F13 the
+	// 1,200 kg hopper against 2 x Need; F14 the era gate; F15 the paired 10-sol ledger; F16 the save (v43, v42 refused) and determinism.
+	// The headless world has no Mass ticking, so the rover is played by the harness through the very same sim calls the brains make
+	// (TryClaimFreight, RH::MoveAlong, HaulLoad, HaulUnload), on the REAL rover entity so the lane's liveness test sees it. Fails loudly. `-farice`.
+	if (FParse::Param(*Params, TEXT("farice")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FAR ICE TEST (W1, 2026-10-21) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("FARICE ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("FARICE FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double Va, double Vb, double Tol) { return FMath::Abs(Va - Vb) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		URHAgentSubsystem* AgentsSub = World->GetSubsystem<URHAgentSubsystem>();
+		const FName NIce(TEXT("Ice")), NWater(TEXT("Water")), NStruct(TEXT("Struct")), NRoverRow(TEXT("RC_R"));
+		TArray<FString> Rejects, Alerts;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& Text) { Rejects.Add(Text); });
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& Text) { Alerts.Add(Text); });
+		const auto CountAlerts = [&Alerts](const TCHAR* Needle) { int32 Count = 0; for (const FString& Al : Alerts) { Count += Al.Contains(Needle) ? 1 : 0; } return Count; };
+		const auto Finish = [&]() -> int32
+		{
+			Sim->OnCommandRejected.Remove(RejectH);
+			Sim->OnAlert.Remove(AlertH);
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== FAR ICE TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return Fails > 0 ? 1 : 0;
+		};
+		const auto Land = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto AgentOnce = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds((double)AgentDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->Debug_StepSim(AgentDt);
+		};
+		const auto Dep = [&](const ANSICHAR* Row) -> const FRHDepositState*
+		{
+			for (const FRHDepositState& Dp : Sim->GetDeposits()) { if (Dp.RowName == FName(Row)) { return &Dp; } }
+			return nullptr;
+		};
+		const auto DepId = [&](const ANSICHAR* Row) { const FRHDepositState* Dp = Dep(Row); return Dp ? Dp->Id : 0; };
+		const auto FindB = [&](int32 Id) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.Id == Id) { return &Bd; } }
+			return nullptr;
+		};
+		const auto InKg = [&](int32 Id, FName Res) { const FRHBuildingInstance* Bd = FindB(Id); const double* Val = Bd ? Bd->InputKg.Find(Res) : nullptr; return Val ? *Val : 0.0; };
+		const auto OutKg = [&](int32 Id, FName Res) { const FRHBuildingInstance* Bd = FindB(Id); const double* Val = Bd ? Bd->OutputKg.Find(Res) : nullptr; return Val ? *Val : 0.0; };
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName(Def)) { Id = Bd.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double Xcm, double Ycm)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(Xcm, Ycm, 0.0), 0);
+			return LastIdOf(Def);
+		};
+		const auto Graph = [&]() -> const FRHRoadGraph& { return Sim->GetRoadGraph(); };
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Lander")) { LanderId = Bd.Id; } }
+		int32 NextHandle = 5000;
+		const auto Fresh = [&]() { return FMassEntityHandle(NextHandle++, 1); }; // never a live entity
+		const auto OpenTask = [&](int32 FromId) -> FRHTask
+		{
+			for (const FRHTask& Tk : Sim->GetTasks()) { if (Tk.Type == ERHTaskType::Haul && Tk.From.BuildingId == FromId) { return Tk; } }
+			return FRHTask();
+		};
+		const auto CountTasksFrom = [&](int32 FromId) { int32 Count = 0; for (const FRHTask& Tk : Sim->GetTasks()) { Count += (Tk.Type == ERHTaskType::Haul && Tk.From.BuildingId == FromId) ? 1 : 0; } return Count; };
+		const auto RoverEntity = [&](int32 Index) -> FMassEntityHandle { TArray<FRHRoverState> Rs; Sim->GetRoverStates(Rs); return Rs.IsValidIndex(Index) ? Rs[Index].Entity : FMassEntityHandle(); };
+		const auto RoverCount = [&]() { TArray<FRHRoverState> Rs; Sim->GetRoverStates(Rs); return Rs.Num(); };
+		const auto SetLeft = [&](const ANSICHAR* Row, double Kg) { if (const FRHDepositState* Dp = Dep(Row)) { Sim->Debug_SetDepositRemainingKg(Dp->Id, Kg); } };
+
+		// The three rows as the hint and the rig use them (cm).
+		const FVector CLoc(62400.0, -36000.0, 0.0), DLoc(-10000.0, -75000.0, 0.0), ELoc(-40000.0, 70000.0, 0.0);
+		const FVector CUnit = FVector(CLoc.X - 30000.0, CLoc.Y + 2000.0, 0.0).GetSafeNormal(); // the outpost road's line, from the spine's end
+
+		// --- F1. The data: the three rows, the six old ones, the config, the hint centre inside the scout's reach. ---
+		{
+			TArray<FName> RowOrder;
+			bool bOldOk = true;
+			struct FPin { const ANSICHAR* Name; double Mass, X, Y; };
+			const FPin Pins[] = { { "Ice_C", 80000.0, 624.0, -360.0 }, { "Ice_D", 120000.0, -100.0, -750.0 }, { "Ice_E", 200000.0, -400.0, 700.0 } };
+			bool bPin[3] = { false, false, false };
+			DefsSub->ForEachDeposit([&](FName RowName, const FRHDepositRow& Row)
+			{
+				RowOrder.Add(RowName);
+				for (int32 K = 0; K < 3; ++K)
+				{
+					if (RowName == FName(Pins[K].Name))
+					{
+						bPin[K] = Row.Type == NIce && Near(Row.Mass_kg, Pins[K].Mass, 1e-6) && Near(Row.LocX_m, Pins[K].X, 1e-6) && Near(Row.LocY_m, Pins[K].Y, 1e-6)
+							&& !Row.SurfaceVisible && Row.SliceActive && Row.Outpost && Row.RegionId == 0;
+					}
+				}
+				if (!RowName.ToString().StartsWith(TEXT("Ice_C")) && !RowName.ToString().StartsWith(TEXT("Ice_D")) && !RowName.ToString().StartsWith(TEXT("Ice_E")))
+				{
+					bOldOk &= !Row.Outpost && Row.RegionId == 0;
+				}
+			});
+			for (int32 K = 0; K < 3; ++K)
+			{
+				Expect(bPin[K], FString::Printf(TEXT("F1 %s: an Ice row of %.0f t at (%.0f, %.0f) m, hidden, active, Outpost, RegionId 0 (DT/CSV)"), ANSI_TO_TCHAR(Pins[K].Name), Pins[K].Mass / 1000.0, Pins[K].X, Pins[K].Y));
+			}
+			const TCHAR* Order[] = { TEXT("Regolith_A"), TEXT("Regolith_B"), TEXT("Ore_A"), TEXT("Ore_B"), TEXT("Ice_A"), TEXT("Ice_B"), TEXT("Ice_C"), TEXT("Ice_D"), TEXT("Ice_E") };
+			bool bOrder = RowOrder.Num() == 9 && Sim->GetDeposits().Num() == 9;
+			for (int32 K = 0; bOrder && K < 9; ++K) { bOrder &= RowOrder[K] == FName(Order[K]) && Sim->GetDeposits()[K].RowName == FName(Order[K]) && Sim->GetDeposits()[K].Id == K + 1; }
+			Expect(bOrder && bOldOk, TEXT("F1 nine rows in file order, so Ids 1-6 are unmoved by name and 7, 8, 9 are Ice_C, Ice_D, Ice_E; the six old rows are not outposts (a re-import that reorders would move every Id)"));
+			bool bState = true;
+			for (const FRHDepositState& Dp : Sim->GetDeposits()) { bState &= (Dp.bOutpost == (Dp.Id >= 7)) && Dp.RegionId == 0 && (Dp.Id < 7 || !Dp.bDiscovered); }
+			Expect(bState, TEXT("F1 the sim carries the flags: bOutpost on Ids 7-9 only, RegionId 0, the three still hidden"));
+			const double MeltMin = DefsSub->GetConfigTableScalar(FName("OutpostMeltMinCm"), -1.0), Hopper = DefsSub->GetConfigTableScalar(FName("OutpostHopperKg"), -1.0);
+			const double Grid = DefsSub->GetConfigTableScalar(FName("OutpostHintGridCm"), -1.0), Buffer = DefsSub->GetConfigTableScalar(FName("OutpostDrillBufferKg"), -1.0);
+			Expect(Near(MeltMin, 30000.0, 1e-9) && Near(Hopper, 1200.0, 1e-9) && Near(Grid, 5000.0, 1e-9) && Near(Buffer, 1000.0, 1e-9),
+				FString::Printf(TEXT("F1 RH_Config on the synced table (sentinel -1): OutpostMeltMinCm %.0f, OutpostHopperKg %.0f, OutpostHintGridCm %.0f, OutpostDrillBufferKg %.0f"), MeltMin, Hopper, Grid, Buffer));
+			Expect(Sim->GetOutpostMeltMinCm() == 30000 && Near(Sim->GetOutpostHopperKg(), 1200.0, 1e-9) && Sim->GetOutpostHintGridCm() == 5000 && Near(Sim->GetOutpostDrillBufferKg(), 1000.0, 1e-9),
+				TEXT("F1 and the sim reads all four"));
+			const FRHRobotRow* ScoutRow = DefsSub->GetRobot(FName("RC_S"));
+			double WorstOffsetM = 0.0;
+			for (const FPin& Pn : Pins)
+			{
+				const double Cx = FMath::RoundHalfFromZero(Pn.X / 50.0) * 50.0, Cy = FMath::RoundHalfFromZero(Pn.Y / 50.0) * 50.0;
+				WorstOffsetM = FMath::Max(WorstOffsetM, FMath::Sqrt((Cx - Pn.X) * (Cx - Pn.X) + (Cy - Pn.Y) * (Cy - Pn.Y)));
+			}
+			Expect(ScoutRow && Near(ScoutRow->WorkRate, 60.0, 1e-6) && WorstOffsetM < ScoutRow->WorkRate && WorstOffsetM < 35.4,
+				FString::Printf(TEXT("F1 each row lies within the scout's 60 m of its 50 m hint centre (worst %.1f m)"), WorstOffsetM));
+			bool bBeyond = true;
+			const double IceBDist = FMath::Sqrt(60.0 * 60.0 + 700.0 * 700.0);
+			for (const FPin& Pn : Pins) { bBeyond &= FMath::Sqrt(Pn.X * Pn.X + Pn.Y * Pn.Y) > IceBDist + 10.0; }
+			Expect(bBeyond, FString::Printf(TEXT("F1 every outpost lies farther out than Ice_B (%.0f m): Ice_C %.0f m, Ice_D %.0f m, Ice_E %.0f m"), IceBDist, CLoc.Size2D() / 100.0, DLoc.Size2D() / 100.0, ELoc.Size2D() / 100.0));
+			if (!bPin[0] || !bPin[1] || !bPin[2])
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("FARICE FAIL: the outpost rows are not in the tables (sync DT_Deposits); the suite stops"));
+				++Fails;
+				return Finish();
+			}
+		}
+
+		FString SaveErr;
+		Expect(Sim->SaveColony(TEXT("farice_fresh"), SaveErr), FString::Printf(TEXT("F1 the fresh colony is saved as the base every scenario loads (%s)"), *SaveErr));
+		const auto LoadFresh = [&]()
+		{
+			FString Le;
+			const bool bOk = Sim->LoadColony(TEXT("farice_fresh"), Le);
+			if (!bOk || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("FARICE: loading the fresh colony failed: %s"), *Le); ++Fails; }
+			Rejects.Reset();
+			Alerts.Reset();
+			return bOk;
+		};
+		// A survey as a player's order and a scout's arrival: the order lands, the task is posted, the scout "completes" it.
+		const auto SurveyAt = [&](double Xcm, double Ycm, double RadiusM = 60.0)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Survey");
+			Cmd.Location = FVector(Xcm, Ycm, 0.0);
+			Sim->EnqueueCommand(Cmd);
+			for (int32 K = 0; K < 400; ++K)
+			{
+				for (const FRHTask& Tk : Sim->GetTasks())
+				{
+					if (Tk.Type == ERHTaskType::Survey && FVector::DistXY(Tk.TargetCm, Cmd.Location) < 1.0)
+					{
+						Sim->CompleteSurvey(Tk.Id, RadiusM);
+						return true;
+					}
+				}
+				Land();
+			}
+			return false;
+		};
+		const auto Revealed = [&](const ANSICHAR* Row) { const FRHDepositState* Dp = Dep(Row); return Dp && Dp->bDiscovered; };
+
+		// --- F2. Inert: 20 sols with the outposts hidden against a twin without them. ---
+		{
+			const auto Digest = [&]() -> uint32
+			{
+				uint32 Hash = 2166136261u;
+				const auto Mix = [&Hash](double Val) { uint64 Bits = 0; FMemory::Memcpy(&Bits, &Val, 8); Hash = (Hash ^ (uint32)Bits) * 16777619u; Hash = (Hash ^ (uint32)(Bits >> 32)) * 16777619u; };
+				for (const FRHDepositState& Dp : Sim->GetDeposits()) { if (Dp.Id <= 6) { Mix(Dp.Id); Mix(Dp.RemainingKg); Mix(Dp.PileKg); Mix(Dp.bDiscovered ? 1.0 : 0.0); Mix(Dp.bDesignated ? 1.0 : 0.0); } }
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+				{
+					Mix(Bd.Id); Mix(Bd.BatchRemaining_h);
+					for (const auto& In : Bd.InputKg) { Mix(In.Value); }
+					for (const auto& Out : Bd.OutputKg) { Mix(Out.Value); }
+				}
+				for (const FRHTask& Tk : Sim->GetTasks()) { Mix(Tk.Id); Mix((double)(int32)Tk.Type); Mix(Tk.AmountKg); Mix(Tk.From.BuildingId); Mix(Tk.To.BuildingId); }
+				const FRHPowerState& Pw = Sim->GetPower();
+				Mix(Pw.GenW); Mix(Pw.LoadW); Mix(Pw.BatteryWh);
+				for (const TCHAR* Res : { TEXT("Water"), TEXT("Oxygen"), TEXT("Hydrogen"), TEXT("Food") }) { Mix(Sim->GetStock(FName(Res))); }
+				for (const TCHAR* Res : { TEXT("Struct"), TEXT("Regolith"), TEXT("Ice"), TEXT("Ore"), TEXT("Shielding") }) { Mix(Sim->GetTotalSolid(FName(Res))); }
+				return Hash;
+			};
+			const auto RunTwin = [&](bool bRemoveRows, int32& OutDeposits, double& OutIceLeft, double& OutWater)
+			{
+				LoadFresh();
+				if (bRemoveRows) { Sim->Debug_RemoveOutpostRows(); }
+				OutDeposits = Sim->GetDeposits().Num();
+				const int32 IceA = Sim->Debug_RevealDeposit(FName("Ice_A"));
+				Sim->Debug_PlaceInstant(FName("IceDrill"), Dep("Ice_A")->LocationCm);
+				Place(TEXT("WaterPlant"), 6000.0, -3000.0);
+				Place(TEXT("Forge"), 4000.0, -3000.0);
+				for (int32 K = 0; K < (int32)(20.0 * SolLen / EraDt); ++K) { Land(); }
+				OutIceLeft = Dep("Ice_A")->RemainingKg;
+				OutWater = Sim->GetStock(NWater);
+				return IceA != 0 ? Digest() : 0u;
+			};
+			int32 NWith = 0, NTwin = 0;
+			double IceWith = 0.0, IceTwin = 0.0, WaterWith = 0.0, WaterTwin = 0.0;
+			const uint32 DigestWith = RunTwin(false, NWith, IceWith, WaterWith);
+			const uint32 DigestTwin = RunTwin(true, NTwin, IceTwin, WaterTwin);
+			Expect(NWith == 9 && NTwin == 6 && IceWith < 30000.0 - 1000.0 && WaterWith > 100.0,
+				FString::Printf(TEXT("F2 the twin has %d deposit rows against %d, and the run is not idle: Ice_A drilled down to %.0f kg, %.0f kg of water made in 20 sols"), NTwin, NWith, IceWith, WaterWith));
+			Expect(DigestWith == DigestTwin && Near(IceWith, IceTwin, 0.0) && Near(WaterWith, WaterTwin, 0.0),
+				FString::Printf(TEXT("F2 20 sols with the outposts hidden: stocks, deposits 1-6, tasks, buildings and power are bit-identical to the twin without them (digest %08x / %08x)"), DigestWith, DigestTwin));
+		}
+
+		// --- F3. The hint, a real survey, the order, the rival roll, the one alert. ---
+		{
+			LoadFresh();
+			FVector Hint = FVector::ZeroVector;
+			int32 HintId = 0;
+			const bool bNoneHidden = !Sim->GetOutpostHint(Hint);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			const bool bNoneBHidden = !Sim->GetOutpostHint(Hint);
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			const bool bHint = Sim->GetOutpostHint(Hint, &HintId);
+			Expect(bNoneHidden && bNoneBHidden && bHint && HintId == DepId("Ice_C") && Near(Hint.X, 60000.0, 1e-6) && Near(Hint.Y, -35000.0, 1e-6),
+				FString::Printf(TEXT("F3 no hint while Ice_A or Ice_B is hidden; once both are found the hint is Ice_C's row (#%d) at the 50 m centre (%.0f, %.0f) m"), HintId, Hint.X / 100.0, Hint.Y / 100.0));
+			Alerts.Reset();
+			Land();
+			Land();
+			Expect(CountAlerts(TEXT("ICE SIGNATURES")) == 1 && CountAlerts(TEXT("about 690 m east-south-east of the Lander")) == 1,
+				FString::Printf(TEXT("F3 the hint alert fires once as it opens, and not again (%d): \"%s\""), CountAlerts(TEXT("ICE SIGNATURES")), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// The latch is runtime and rebuilt at load: a load inside the open hint never re-fires it.
+			Sim->SaveColony(TEXT("farice_hint"), SaveErr);
+			Sim->Debug_ClearOutpostHintLatch();
+			FString Le;
+			Alerts.Reset();
+			const bool bLoaded = Sim->LoadColony(TEXT("farice_hint"), Le);
+			Land();
+			Expect(bLoaded && CountAlerts(TEXT("ICE SIGNATURES")) == 0, TEXT("F3 a load inside the open hint (latch emptied first) does not announce it again: the load rebuilt the latch"));
+			// A scout's survey 61 m off the row finds nothing; on the centre it finds the row.
+			const double Offset61 = CLoc.X + 6100.0;
+			const bool bMissSurvey = SurveyAt(Offset61, CLoc.Y);
+			const bool bMiss = bMissSurvey && !Revealed("Ice_C");
+			const bool bHitSurvey = SurveyAt(Hint.X, Hint.Y);
+			Expect(bMiss && bHitSurvey && Revealed("Ice_C"),
+				FString::Printf(TEXT("F3 a survey 61 m east of Ice_C finds nothing; a survey on the hint centre reveals it (found: %d)"), Revealed("Ice_C") ? 1 : 0));
+			FVector Next = FVector::ZeroVector;
+			int32 NextId = 0;
+			Expect(Sim->GetOutpostHint(Next, &NextId) && NextId == DepId("Ice_D") && Near(Next.X, -10000.0, 1e-6) && Near(Next.Y, -75000.0, 1e-6),
+				FString::Printf(TEXT("F3 the hint moves on to Ice_D (#%d) at (%.0f, %.0f) m"), NextId, Next.X / 100.0, Next.Y / 100.0));
+			// The order is the guide's: surveying Ice_E's ground first finds Ice_E and leaves the hint on Ice_C.
+			LoadFresh();
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			SurveyAt(ELoc.X, ELoc.Y);
+			FVector Still = FVector::ZeroVector;
+			int32 StillId = 0;
+			Expect(Revealed("Ice_E") && !Revealed("Ice_C") && Sim->GetOutpostHint(Still, &StillId) && StillId == DepId("Ice_C"),
+				TEXT("F3 surveying Ice_E's ground first finds Ice_E and leaves the hint on Ice_C (the order is the guide's, not the sim's)"));
+			// The rival roll is seeded by the survey COUNT alone: the same count gives the same rivals with or without the outpost surveys.
+			const auto RivalSig = [&](bool bOutpostPoints)
+			{
+				LoadFresh();
+				Sim->Debug_RevealDeposit(FName("Ice_A"));
+				Sim->Debug_RevealDeposit(FName("Ice_B"));
+				const FVector Points[] = { FVector(60000.0, -35000.0, 0.0), FVector(-10000.0, -75000.0, 0.0), FVector(-40000.0, 70000.0, 0.0) };
+				const FVector Blanks[] = { FVector(90000.0, 90000.0, 0.0), FVector(-90000.0, 90000.0, 0.0), FVector(-90000.0, -90000.0, 0.0) };
+				for (int32 K = 0; K < 3; ++K) { SurveyAt(bOutpostPoints ? Points[K].X : Blanks[K].X, bOutpostPoints ? Points[K].Y : Blanks[K].Y); }
+				for (int32 K = 0; K < 5; ++K) { SurveyAt(Blanks[K % 3].X + 5000.0 * (K + 1), Blanks[K % 3].Y); }
+				FString Sig;
+				DefsSub->ForEachRivalRow([&](FName RivalName, const FRHRivalRow&) { Sig += Sim->IsRivalDiscovered(RivalName) ? TEXT("1") : TEXT("0"); });
+				return FString::Printf(TEXT("%d:%s"), Sim->GetSurveyHistory().Num(), *Sig);
+			};
+			const FString SigOutpost = RivalSig(true), SigBlank = RivalSig(false);
+			Expect(SigOutpost == SigBlank && SigOutpost.StartsWith(TEXT("8:")),
+				FString::Printf(TEXT("F3 eight surveys give the same DiscoveredRivals with or without the three outpost finds (%s / %s)"), *SigOutpost, *SigBlank));
+		}
+
+		// --- F4. The advice and the guide stages: the disclosed change, then the outpost stages. ---
+		{
+			LoadFresh();
+			const int32 IdA = Sim->Debug_RevealDeposit(FName("Ice_A")), IdB = Sim->Debug_RevealDeposit(FName("Ice_B"));
+			SetLeft("Ice_A", 1000.0);
+			SetLeft("Ice_B", 2000.0);
+			Alerts.Reset();
+			Land();
+			Expect(IdA != 0 && IdB != 0 && CountAlerts(TEXT("ICE_A RUNNING LOW")) == 1 && CountAlerts(TEXT("ICE_B RUNNING LOW")) == 1
+				&& CountAlerts(TEXT("Survey for more ice farther out: outpost ice comes home by road and cargo rover.")) == 2 && CountAlerts(TEXT("The last known ice")) == 0 && Sim->GetIceExpansionStage() == 0,
+				FString::Printf(TEXT("F4 Ice_A and Ice_B both low with the outposts hidden: the advice is the outpost line, not the last known ice, and the guide stage is %d (find more ice)"), Sim->GetIceExpansionStage()));
+			// The outpost stages, one step at a time. Never stage 3.
+			TArray<int32> Seen;
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			Seen.Add(Sim->GetIceExpansionStage()); // 1: found, outside the grid
+			const int32 Pylon = [&]() { Sim->Debug_PlaceInstant(FName("Pylon"), CLoc + FVector(0.0, -1000.0, 0.0)); return LastIdOf(TEXT("Pylon")); }();
+			Seen.Add(Sim->GetIceExpansionStage()); // 2: covered, not drilled
+			const int32 Drill = Place(TEXT("IceDrill"), CLoc.X, CLoc.Y);
+			Seen.Add(Sim->GetIceExpansionStage()); // 4: drilled, no plant
+			const int32 Plant = Place(TEXT("WaterPlant"), 6000.0, -600.0);
+			Seen.Add(Sim->GetIceExpansionStage()); // 4: a plant but no road
+			Sim->Debug_LayRoad(FVector(2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			Sim->Debug_LayRoad(FVector(30000.0, -2000.0, 0.0), CLoc - CUnit * 2000.0, true);
+			Place(TEXT("ChargePad"), 3000.0, -800.0);
+			Seen.Add(Sim->GetIceExpansionStage()); // 5: the road is ready, no rover
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Seen.Add(Sim->GetIceExpansionStage()); // -1: a live rover
+			Expect(Pylon != 0 && Drill != 0 && Plant != 0 && Seen.Num() == 6 && Seen[0] == 1 && Seen[1] == 2 && Seen[2] == 4 && Seen[3] == 4 && Seen[4] == 5 && Seen[5] == -1 && !Seen.Contains(3),
+				FString::Printf(TEXT("F4 the outpost stages: found %d (carry the grid), covered %d (drill it), drilled %d (road), plant %d (road), road %d (bring a rover), rover %d (resolved); never 3"), Seen[0], Seen[1], Seen[2], Seen[3], Seen[4], Seen[5]));
+			// All found and spent: the last-ice advice returns, and no interrupt.
+			LoadFresh();
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			Sim->Debug_SpendOutpostIce();
+			SetLeft("Ice_A", 1000.0);
+			SetLeft("Ice_B", 2000.0);
+			Alerts.Reset();
+			Land();
+			Expect(CountAlerts(TEXT("The last known ice")) == 2 && CountAlerts(TEXT("outpost ice comes home")) == 0 && CountAlerts(TEXT("ICE SIGNATURES")) == 0 && Sim->GetIceExpansionStage() == -1 && !Sim->HasUndiscoveredIce(),
+				TEXT("F4 every ice row found and low or spent: the old last-ice advice (D87), no outpost line, no hint, stage -1"));
+		}
+
+		// --- F5. Refusals. ---
+		{
+			LoadFresh();
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			const auto SendDig = [&](const TCHAR* Row)
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Dig");
+				Cmd.Target = FName(Row);
+				const int32 Before = Rejects.Num();
+				Sim->EnqueueCommand(Cmd);
+				for (int32 K = 0; K < 200 && Rejects.Num() == Before; ++K) { Land(); }
+				return Rejects.Num() > Before ? Rejects.Last() : FString();
+			};
+			const FString Hidden = SendDig(TEXT("Ice_C"));
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			const FString Found = SendDig(TEXT("Ice_C"));
+			Expect(Hidden.Contains(TEXT("Unknown deposit")) && !Hidden.Contains(TEXT("Outpost")) && Found == TEXT("Outpost ice is drilled, not dug - place an Ice Drill on it.") && !Dep("Ice_C")->bDesignated,
+				FString::Printf(TEXT("F5 Dig on Ice_C: hidden it is an unknown deposit (no leak), found it is refused with the outpost line (\"%s\"), and nothing is designated"), *Found));
+			// A Water Plant at 299 m is refused, at 301 m accepted; before discovery neither is.
+			LoadFresh();
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			const FVector P299 = CLoc + FVector(29900.0, 0.0, 0.0), P301 = CLoc + FVector(30100.0, 0.0, 0.0);
+			Sim->Debug_PlaceInstant(FName("Pylon"), FVector(CLoc.X + 29900.0, CLoc.Y - 2000.0, 0.0));
+			Sim->Debug_PlaceInstant(FName("Pylon"), FVector(CLoc.X + 30100.0, CLoc.Y - 2000.0, 0.0));
+			FString WhyHidden299, WhyHidden301, Why299, Why301;
+			const bool bHidden299 = Sim->CanPlaceBuilding(FName("WaterPlant"), P299, WhyHidden299), bHidden301 = Sim->CanPlaceBuilding(FName("WaterPlant"), P301, WhyHidden301);
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			const bool bFound299 = Sim->CanPlaceBuilding(FName("WaterPlant"), P299, Why299), bFound301 = Sim->CanPlaceBuilding(FName("WaterPlant"), P301, Why301);
+			Expect(bHidden299 && bHidden301 && !bFound299 && bFound301 && Why299.Contains(TEXT("Outpost ice comes home raw")) && Why299.Contains(TEXT("300 m")),
+				FString::Printf(TEXT("F5 a Water Plant 299 m from Ice_C: allowed while it is hidden (no leak), refused once found (\"%s\"); at 301 m allowed"), *Why299));
+			FString WhyPad;
+			Expect(Sim->CanPlaceBuilding(FName("ChargePad"), P299, WhyPad), FString::Printf(TEXT("F5 the refusal is for ice-consuming buildings only: a Charging Pad 299 m out is allowed (%s)"), *WhyPad));
+			// The dig leg skips an outpost even when a hand-made state designates it.
+			LoadFresh();
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			Sim->Debug_SetDepositDesignated(DepId("Ice_C"), true);
+			for (int32 K = 0; K < 30; ++K) { Land(); }
+			const int32 Claim = Sim->TryClaimDig(CLoc);
+			if (Claim != 0) { Sim->ReleaseDigClaim(Claim); }
+			Expect(Near(Dep("Ice_C")->RemainingKg, 80000.0, 1e-9) && Near(Dep("Ice_C")->PileKg, 0.0, 1e-9) && Claim != DepId("Ice_C") && Dep("Ice_C")->DigClaims == 0,
+				FString::Printf(TEXT("F5 designation forced on Ice_C: 30 era steps leave it at 80,000 kg with no pile, and an excavator standing on it is sent to deposit #%d instead"), Claim));
+		}
+
+		// --- F6. Coverage and the chain. ---
+		{
+			LoadFresh();
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			FString Why;
+			const bool bOutside = !Sim->CanPlaceBuilding(FName("IceDrill"), CLoc, Why);
+			const bool bWhyCoverage = Why.Contains(TEXT("Outside grid coverage"));
+			FString WhyFar;
+			const bool bTooFar = !Sim->CanPlaceBuilding(FName("Pylon"), FVector(CLoc.X, CLoc.Y, 0.0).GetSafeNormal() * 8500.0, WhyFar) && WhyFar.Contains(TEXT("link range"));
+			Expect(bOutside && bWhyCoverage && bTooFar, FString::Printf(TEXT("F6 an Ice Drill outside the grid is refused (%s), and so is a pylon 85 m out of the Lander (%s)"), *Why, *WhyFar));
+			const FVector Dir = FVector(CLoc.X, CLoc.Y, 0.0).GetSafeNormal();
+			int32 Linked = 0;
+			for (int32 K = 1; K <= 10; ++K)
+			{
+				const FVector At = Dir * 7000.0 * K;
+				FString WhyP;
+				if (Sim->CanPlaceBuilding(FName("Pylon"), At, WhyP)) { ++Linked; Sim->Debug_PlaceInstant(FName("Pylon"), At); }
+			}
+			FString WhyD;
+			const bool bDrillOk = Sim->CanPlaceBuilding(FName("IceDrill"), CLoc, WhyD);
+			Sim->Debug_PlaceInstant(FName("IceDrill"), CLoc);
+			const int32 DrillId = LastIdOf(TEXT("IceDrill"));
+			const FRHBuildingInstance* DrillB = FindB(DrillId);
+			Expect(Linked == 10 && bDrillOk && DrillB && DrillB->AttachedDepositId == DepId("Ice_C"),
+				FString::Printf(TEXT("F6 a chain of ten pylons 70 m apart, each one linking to the last (%d of 10), covers Ice_C: the drill is accepted (%s) and attaches to deposit #%d"), Linked, *WhyD, DrillB ? DrillB->AttachedDepositId : 0));
+		}
+
+		// --- The rig: the home plant and pad on a spine, a spur to the drill, an Ice Drill on Ice_C. ---
+		struct FRig { int32 Drill = 0, Plant = 0, Pad = 0; };
+		const auto BuildRig = [&](bool bPlant, bool bSpur, bool bPad) -> FRig
+		{
+			LoadFresh();
+			FRig Rg;
+			Sim->Debug_RevealDeposit(FName("Ice_C"));
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 5000.0, false);
+			Sim->Debug_LayRoad(FVector(2000.0, -2000.0, 0.0), FVector(30000.0, -2000.0, 0.0), true);
+			if (bSpur) { Sim->Debug_LayRoad(FVector(30000.0, -2000.0, 0.0), CLoc - CUnit * 2000.0, true); }
+			if (bPad) { Rg.Pad = Place(TEXT("ChargePad"), 3000.0, -800.0); }
+			if (bPlant) { Rg.Plant = Place(TEXT("WaterPlant"), 6000.0, -600.0); }
+			Rg.Drill = Place(TEXT("IceDrill"), CLoc.X, CLoc.Y);
+			return Rg;
+		};
+		const auto IceTotal = [&]() { return Sim->GetTotalSolid(NIce); };
+
+
+		// The rover, played through the brains' own calls on the REAL entity (so the lane's liveness test sees a live claimant).
+		const FRHRobotRow* RoverRow = DefsSub->GetRobot(NRoverRow);
+		const float RoverSpeed = RoverRow ? RoverRow->Speed_mps : 5.f;
+		const float RoverCap = RoverRow ? RoverRow->Cargo_kg : 1000.f;
+		struct FSimRover { FTransform T; FMassEntityHandle H; FRHTask Board; bool bHas = false; int32 Phase = 0; FVector Target = FVector::ZeroVector; float CargoKg = 0.f; FName CargoRes; };
+		const auto RoverStep = [&](FSimRover& Rv) -> bool // true when it delivered on this step
+		{
+			if (!Rv.bHas)
+			{
+				if (Sim->TryClaimFreight(Rv.H, Rv.T.GetLocation(), 1.f, Rv.Board))
+				{
+					Rv.bHas = true;
+					Rv.Phase = 0;
+					Rv.Target = Sim->GetSiteLocation(Rv.Board.From);
+				}
+				return false;
+			}
+			if (Rv.Phase == 0)
+			{
+				if (RH::MoveAlong(*Sim, Rv.H, Rv.T, Rv.Target, RoverSpeed, AgentDt, true)) { Rv.Phase = 1; }
+				return false;
+			}
+			if (Rv.Phase == 1)
+			{
+				float Loaded = 0.f;
+				FVector Drop = FVector::ZeroVector;
+				if (Sim->HaulLoad(Rv.Board.Id, RoverCap, Loaded, Drop)) { Rv.CargoKg = Loaded; Rv.CargoRes = Rv.Board.Resource; Rv.Target = Drop; Rv.Phase = 2; }
+				else { Rv.bHas = false; }
+				return false;
+			}
+			if (RH::MoveAlong(*Sim, Rv.H, Rv.T, Rv.Target, RoverSpeed, AgentDt, true))
+			{
+				Sim->HaulUnload(Rv.Board.Id, Rv.CargoKg, Rv.CargoRes);
+				Rv.CargoKg = 0.f;
+				Rv.bHas = false;
+				return true;
+			}
+			return false;
+		};
+		const auto Edge = [&](double Xcm, double Ycm) -> int32 // the road edge whose midpoint is nearest a point
+		{
+			int32 BestEdge = 0;
+			double BestD = TNumericLimits<double>::Max();
+			for (const FRHRoadEdge& Ed : Graph().Edges)
+			{
+				const double Dd = FVector::DistXY(Graph().EdgeMidpointCm(Ed, Sim->GetRoadParams()), FVector(Xcm, Ycm, 0.0));
+				if (Dd < BestD) { BestD = Dd; BestEdge = Ed.Id; }
+			}
+			return BestEdge;
+		};
+
+		// --- F7. No rover, no plant, a plant still a site: no task, and never a store. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 5000.0, true);
+			Sim->Debug_StepTaskBoard();
+			const bool bNoTask = Sim->Debug_CountOutpostTasks() == 0 && CountTasksFrom(Rg.Drill) == 0;
+			for (int32 K = 0; K < 3; ++K) { Land(); }
+			Expect(bNoTask && Near(OutKg(Rg.Drill, NIce), 5000.0, 1e-9) && Near(InKg(Rg.Plant, NIce), 0.0, 1e-9) && Near(InKg(LanderId, NIce), 0.0, 1e-9) && Near(IceTotal(), 5000.0, 1e-9),
+				TEXT("F7 no rover: 5,000 kg at the drill posts nothing, in the agent board or after three era steps; it stays at the drill (a plant, a road and a pad all stand)"));
+			FRig Rb = BuildRig(false, true, true);
+			const int32 StockId = Place(TEXT("Stockpile"), 12000.0, -800.0);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(Rb.Drill, NIce, 5000.0, true);
+			Sim->Debug_StepTaskBoard();
+			const bool bNoTaskB = Sim->Debug_CountOutpostTasks() == 0 && CountTasksFrom(Rb.Drill) == 0 && Sim->GetActiveRoverCount() == 1;
+			for (int32 K = 0; K < 3; ++K) { Land(); }
+			Expect(bNoTaskB && Near(OutKg(Rb.Drill, NIce), 5000.0, 1e-9) && Near(InKg(StockId, NIce), 0.0, 1e-9) && Near(InKg(LanderId, NIce), 0.0, 1e-9),
+				TEXT("F7 a rover and a road but no Water Plant anywhere: nothing goes to the Lander or a Stockpile, in either band (ice at a drill is never stored)"));
+			FRig Rc = BuildRig(false, true, true);
+			Sim->Debug_PlaceInstant(FName("Pylon"), FVector(3000.0, -1500.0, 0.0));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			FRHCommand Order;
+			Order.Verb = FName("Build");
+			Order.Target = FName("WaterPlant");
+			Order.Location = FVector(6000.0, -600.0, 0.0);
+			Order.Level = 0;
+			Sim->EnqueueCommand(Order);
+			for (int32 K = 0; K < 3; ++K) { Land(); }
+			const int32 SiteId = LastIdOf(TEXT("WaterPlant"));
+			const FRHBuildingInstance* Site = FindB(SiteId);
+			Sim->Debug_AddSolidAt(Rc.Drill, NIce, 5000.0, true);
+			Sim->Debug_StepTaskBoard();
+			for (int32 K = 0; K < 3; ++K) { Land(); }
+			Expect(Site && Site->bUnderConstruction && Sim->Debug_CountOutpostTasks() == 0 && OutKg(Rc.Drill, NIce) >= 5000.0 && Near(IceTotal(), OutKg(Rc.Drill, NIce), 1e-9) && Near(InKg(SiteId, NIce), 0.0, 1e-9),
+				FString::Printf(TEXT("F7 the only Water Plant is still a construction site (#%d, site %d): it is not a destination, and nothing moves (the drill holds %.0f kg, and no ice is anywhere else)"),
+					SiteId, Site && Site->bUnderConstruction ? 1 : 0, OutKg(Rc.Drill, NIce)));
+		}
+
+		// --- F8. The destination: freight first, the nearest of the plants that pass. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			const int32 Unserved = Place(TEXT("WaterPlant"), 30000.0, 5000.0);
+			const FRHBuildingInstance* DrillB = FindB(Rg.Drill);
+			const FRHBuildingInstance* Served = FindB(Rg.Plant);
+			const FRHBuildingInstance* Nearer = FindB(Unserved);
+			int32 Dest = 0;
+			double Room = 0.0;
+			const bool bFound = DrillB && Sim->FindOutpostDestination(*DrillB, false, Dest, Room);
+			Expect(bFound && Dest == Rg.Plant && Near(Room, 1200.0, 1e-9) && Nearer && Served && FVector::DistXY(Nearer->LocationCm, DrillB->LocationCm) < FVector::DistXY(Served->LocationCm, DrillB->LocationCm) && !Sim->IsRoadServed(Nearer->LocationCm),
+				FString::Printf(TEXT("F8 a plant 522 m from the drill but off the road is skipped for the served one at 666 m: destination #%d (the served plant #%d), room %.0f kg"), Dest, Rg.Plant, Room));
+			// A plant inside 300 m of the deposit is skipped, though it is the nearest and road-served.
+			FRig Rh = BuildRig(true, true, true);
+			const int32 Inner = Place(TEXT("WaterPlant"), CLoc.X - CUnit.X * 25000.0, CLoc.Y - CUnit.Y * 25000.0);
+			const FRHBuildingInstance* InnerB = FindB(Inner);
+			const FRHBuildingInstance* DrillH = FindB(Rh.Drill);
+			int32 DestH = 0;
+			double RoomH = 0.0;
+			const bool bFoundH = DrillH && Sim->FindOutpostDestination(*DrillH, false, DestH, RoomH);
+			Expect(bFoundH && DestH == Rh.Plant && InnerB && Sim->IsRoadServed(InnerB->LocationCm) && FVector::DistXY(InnerB->LocationCm, CLoc) < 30000.0,
+				FString::Printf(TEXT("F8 a road-served plant 250 m from Ice_C is not a destination (it would melt beside the drill): the home plant #%d is, not #%d"), DestH, Inner));
+			// The hopper line: Have + 200 under 1,200.
+			FRig Ri = BuildRig(true, true, true);
+			Sim->Debug_AddSolidAt(Ri.Plant, NIce, 999.0, false);
+			int32 DestI = 0, DestJ = 0;
+			double RoomI = 0.0, RoomJ = 0.0;
+			const bool bAt999 = Sim->FindOutpostDestination(*FindB(Ri.Drill), false, DestI, RoomI);
+			Sim->Debug_AddSolidAt(Ri.Plant, NIce, 1.0, false);
+			const bool bAt1000 = Sim->FindOutpostDestination(*FindB(Ri.Drill), false, DestJ, RoomJ);
+			int32 DestK = 0;
+			double RoomK = 0.0;
+			const bool bIgnoring = Sim->FindOutpostDestination(*FindB(Ri.Drill), true, DestK, RoomK);
+			Expect(bAt999 && DestI == Ri.Plant && Near(RoomI, 201.0, 1e-9) && !bAt1000 && bIgnoring && DestK == Ri.Plant && Near(RoomK, 200.0, 1e-9),
+				FString::Printf(TEXT("F8 the hopper line: a plant holding 999 kg qualifies with room %.0f (999 + 200 < 1,200); at 1,000 it does not (and the guide's read, ignoring room, still sees it)"), RoomI));
+			// The plan cap: four route plans a call.
+			FRig Rj = BuildRig(true, true, true);
+			const double UnservedX[] = { 30000.0, 32000.0, 34000.0, 36000.0 };
+			for (int32 K = 0; K < 3; ++K) { Place(TEXT("WaterPlant"), UnservedX[K], 5000.0); }
+			int32 Dest3 = 0, Dest4 = 0;
+			double Room3 = 0.0, Room4 = 0.0;
+			const bool bThree = Sim->FindOutpostDestination(*FindB(Rj.Drill), false, Dest3, Room3);
+			Place(TEXT("WaterPlant"), UnservedX[3], 5000.0);
+			const bool bFour = Sim->FindOutpostDestination(*FindB(Rj.Drill), false, Dest4, Room4);
+			Expect(bThree && Dest3 == Rj.Plant && !bFour && Dest4 == 0,
+				FString::Printf(TEXT("F8 the plan cap: with three nearer unserved plants the served one is the fourth plan and wins; with four it is the fifth and nothing is found (%d)"), Dest4));
+		}
+
+		// --- F9. The freight leg. ---
+		{
+			FRig Rg = BuildRig(true, false, true); // a spine, but no spur to the drill
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 300.0, true);
+			Sim->Debug_StepTaskBoard();
+			Expect(Sim->GetActiveRoverCount() == 1 && Sim->Debug_CountOutpostTasks() == 0 && CountTasksFrom(Rg.Drill) == 0 && Near(OutKg(Rg.Drill, NIce), 300.0, 1e-9),
+				TEXT("F9 a rover and a spine but no road to the drill: no task, the ice waits at the drill"));
+			FRig Rh = BuildRig(true, true, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			FRHTask First;
+			int32 Steps = 0;
+			for (; Steps < 8000; ++Steps) { AgentOnce(); First = OpenTask(Rh.Drill); if (First.Id != 0) { break; } }
+			Expect(First.Id != 0 && Near(First.AmountKg, 240.0, 1e-9) && First.bFreight && First.bOutpostSource && First.To.BuildingId == Rh.Plant && Near(OutKg(Rh.Drill, NIce), 240.0, 1e-9) && Sim->Debug_CountOutpostTasks() == 1,
+				FString::Printf(TEXT("F9 a rover and a road: the drill's first load posts on the first step over 200 kg, %d steps in: task #%d of %.0f kg (40 kg batches), freight and outpost-sourced, to the home plant #%d"), Steps, First.Id, First.AmountKg, First.To.BuildingId));
+			// No hauler, ever.
+			FRHTask Tmp;
+			for (int32 K = 0; K < 7; ++K) { Sim->Debug_StepTaskBoard(100.f); }
+			const FRHTask Waited = OpenTask(Rh.Drill);
+			Expect(Waited.Id == First.Id && Waited.UnclaimedAgentSec >= 600.0 - 1e-6 && !Sim->TryClaimHaul(Fresh(), CLoc, Tmp),
+				FString::Printf(TEXT("F9 a hauler standing at the drill is refused after the task has waited %.0f agent-seconds (the fallback that frees other freight at 300 s never applies to outpost ice)"), Waited.UnclaimedAgentSec));
+			// A load: the flag is runtime, re-derived, and a hauler cannot take the task right after it.
+			FString Le;
+			const bool bSaved = Sim->SaveColony(TEXT("farice_leg"), Le);
+			const bool bLoaded = Sim->LoadColony(TEXT("farice_leg"), Le) && Le.IsEmpty();
+			const FRHTask Loaded = OpenTask(Rh.Drill);
+			FRHTask Tmp2;
+			const bool bRefused = !Sim->TryClaimHaul(Fresh(), CLoc, Tmp2);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Again = OpenTask(Rh.Drill);
+			Expect(bSaved && bLoaded && Loaded.Id == First.Id && Loaded.bOutpostSource && !Loaded.bFreight && bRefused && Again.Id == First.Id && Again.bFreight,
+				TEXT("F9 after a save and load: the same task is back with its outpost flag re-derived (it is not saved), a hauler is refused before any board step, and the first step makes it freight again"));
+			// A demolished edge deletes the unclaimed task, and no ice is lost.
+			const int32 Mid = Edge(CLoc.X - CUnit.X * 25000.0, CLoc.Y - CUnit.Y * 25000.0);
+			const FRHRoadEdge* MidEdge = Graph().FindEdge(Mid);
+			const FIntPoint EndA = MidEdge ? Graph().NodeCm(MidEdge->A, Sim->GetRoadParams()) : FIntPoint(0, 0), EndB = MidEdge ? Graph().NodeCm(MidEdge->B, Sim->GetRoadParams()) : FIntPoint(0, 0);
+			const double Held = OutKg(Rh.Drill, NIce);
+			const bool bRemoved = Mid != 0 && Sim->Debug_RemoveRoadEdge(Mid);
+			Sim->Debug_StepTaskBoard();
+			const bool bGone = OpenTask(Rh.Drill).Id == 0 && Sim->Debug_CountOutpostTasks() == 0;
+			Sim->Debug_StepTaskBoard();
+			const bool bStaysGone = CountTasksFrom(Rh.Drill) == 0 && Near(OutKg(Rh.Drill, NIce), Held, 1e-9);
+			Sim->Debug_LayRoad(FVector(EndA.X, EndA.Y, 0.0), FVector(EndB.X, EndB.Y, 0.0), true);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Back = OpenTask(Rh.Drill);
+			Expect(bRemoved && bGone && bStaysGone && Back.Id != 0 && Back.bFreight && Back.bOutpostSource,
+				TEXT("F9 a demolished edge on the lane deletes the unclaimed task (no ice moves, none is lost, no hauler gets it); laying it again, the board posts it afresh"));
+			// Non-outpost freight is exactly as in C6: a broken lane clears the flag and keeps the task.
+			FRig Rk = BuildRig(true, true, true);
+			const int32 ForgeId = Place(TEXT("Forge"), 28000.0, -800.0), StockId = Place(TEXT("Stockpile"), 12000.0, -800.0);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(ForgeId, NStruct, 1200.0, true);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Ft = OpenTask(ForgeId);
+			const int32 SpineEdge = Edge(20000.0, -2000.0);
+			Sim->Debug_RemoveRoadEdge(SpineEdge);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask Ft2 = OpenTask(ForgeId);
+			Expect(StockId != 0 && Ft.Id != 0 && Ft.bFreight && !Ft.bOutpostSource && Near(Ft.AmountKg, 1000.0, 1e-9) && Ft2.Id == Ft.Id && !Ft2.bFreight && !Ft2.bOutpostSource,
+				TEXT("F9 a Forge's 1,000 kg freight task through RefreshFreightFlags behaves as in C6: a broken spine clears its freight flag but the task stays (only outpost tasks are deleted)"));
+		}
+
+		// --- F10. A halted claimant never holds the lane. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			const FMassEntityHandle RoverA = RoverEntity(0), RoverB = RoverEntity(1);
+			const float Halt = Sim->GetWearHaltThreshold();
+			const bool bLive0 = AgentsSub->IsRobotLive(RoverA, Halt) && AgentsSub->IsRobotLive(RoverB, Halt) && !AgentsSub->IsRobotLive(Fresh(), Halt);
+			AgentsSub->Debug_SetAllWear(100.f);
+			const bool bWorn = !AgentsSub->IsRobotLive(RoverA, Halt) && AgentsSub->CountActiveRobots(FName("Rover"), Halt) == 0;
+			AgentsSub->Debug_SetAllWear(0.f);
+			const bool bRevived = AgentsSub->IsRobotLive(RoverA, Halt) && AgentsSub->CountActiveRobots(FName("Rover"), Halt) == 2;
+			Expect(RoverCount() == 2 && bLive0 && bWorn && bRevived,
+				TEXT("F10 the liveness test: two rovers are live, a worn-out rover (wear at the halt line) is not and none counts as active, a repair brings them back; a handle that is no entity is never live"));
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 300.0, true);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask T1 = OpenTask(Rg.Drill);
+			FRHTask BoardA;
+			const FMassEntityHandle DeadA = Fresh(); // rover A: it claims and loads, then it halts (its claim stays, and it does not tick)
+			const bool bClaimA = Sim->TryClaimFreight(DeadA, FVector(3000.0, -800.0, 0.0), 1.f, BoardA);
+			float LoadedA = 0.f;
+			FVector DropA;
+			const bool bLoadA = bClaimA && Sim->HaulLoad(BoardA.Id, RoverCap, LoadedA, DropA);
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 300.0, true);
+			Sim->Debug_StepTaskBoard();
+			const int32 TasksNow = CountTasksFrom(Rg.Drill);
+			FRHTask BoardB;
+			const bool bClaimB = Sim->TryClaimFreight(RoverB, FVector(3000.0, -800.0, 0.0), 1.f, BoardB);
+			Expect(T1.Id != 0 && bClaimA && BoardA.Id == T1.Id && bLoadA && Near(LoadedA, 300.0, 1e-3) && TasksNow == 2 && bClaimB && BoardB.Id != T1.Id && Near(BoardB.AmountKg, 300.0, 1e-9),
+				FString::Printf(TEXT("F10 rover A claimed task #%d and loaded %.0f kg, then halted (its claim stands, it does not work): the next board step gives rover B a fresh task #%d of %.0f kg"), T1.Id, LoadedA, BoardB.Id, BoardB.AmountKg));
+			// B is live: while it holds its claim the drill posts nothing more.
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 300.0, true);
+			Sim->Debug_StepTaskBoard();
+			const int32 TasksWhileB = CountTasksFrom(Rg.Drill);
+			float LoadedB = 0.f;
+			FVector DropB;
+			const bool bLoadB = Sim->HaulLoad(BoardB.Id, RoverCap, LoadedB, DropB);
+			Sim->HaulUnload(BoardB.Id, LoadedB, NIce);
+			const double InFlight = (double)LoadedA;
+			Expect(TasksWhileB == 2 && bLoadB && Near(LoadedB, 300.0, 1e-3) && Near(InKg(Rg.Plant, NIce), 300.0, 1e-9) && Near(IceTotal() + InFlight, 900.0, 1e-9),
+				FString::Printf(TEXT("F10 a live claimant holds the lane (still %d tasks); B delivered %.0f kg, the plant holds %.0f, A's %.0f kg are in flight, the drill %.0f: 900 kg in, 900 kg accounted"), TasksWhileB, LoadedB, InKg(Rg.Plant, NIce), InFlight, OutKg(Rg.Drill, NIce)));
+			// A repair revives A: it delivers its own load against its own claim.
+			Sim->HaulUnload(BoardA.Id, LoadedA, NIce);
+			Expect(Near(InKg(Rg.Plant, NIce), 600.0, 1e-9) && Near(IceTotal(), 900.0, 1e-9),
+				FString::Printf(TEXT("F10 after the repair A delivers: the plant holds %.0f kg, the drill %.0f, all 900 kg conserved (%.0f)"), InKg(Rg.Plant, NIce), OutKg(Rg.Drill, NIce), IceTotal()));
+		}
+
+		// --- F11. The buffer cap: no rover, 30 sols. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			SetLeft("Ice_A", 1000.0);
+			SetLeft("Ice_B", 2000.0);
+			Alerts.Reset();
+			for (int32 K = 0; K < 2; ++K) { Land(); }
+			const double LoadWhileDrilling = Sim->GetPower().LoadW;
+			for (int32 K = 0; K < (int32)(30.0 * SolLen / EraDt); ++K) { Land(); }
+			const double Held = OutKg(Rg.Drill, NIce), LoadIdle = Sim->GetPower().LoadW;
+			Expect(Held >= 1000.0 && Held <= 1040.0 && !Sim->IsIceDepositLow(*Dep("Ice_C")) && CountAlerts(TEXT("ICE_C RUNNING LOW")) == 0 && Sim->GetIceExpansionStage() == 5 && Dep("Ice_C")->RemainingKg > 80000.0 - 1100.0,
+				FString::Printf(TEXT("F11 30 sols with no rover: the drill holds %.0f kg (the 1,000 kg buffer, plus a batch) and idles, the deposit has %.0f kg left and is not low, no RUNNING LOW for it, the guide shows stage %d (bring a rover)"), Held, Dep("Ice_C")->RemainingKg, Sim->GetIceExpansionStage()));
+			Expect(LoadWhileDrilling - LoadIdle > 200.0 && LoadWhileDrilling - LoadIdle < 260.0,
+				FString::Printf(TEXT("F11 and the idle drill draws its 15 W, not 250 W: the colony load fell from %.0f W to %.0f W"), LoadWhileDrilling, LoadIdle));
+		}
+
+		// --- Agent-band driver: the harness rover, a ledger of the ice, a trace for determinism. ---
+		struct FLeg
+		{
+			double Drilled = 0.0, WaterGain = 0.0, DrillOut = 0.0, InFlight = 0.0, Hopper = 0.0, MaxLoad = 0.0, MaxErr = 0.0, H2O = 0.0;
+			int32 Deliveries = 0, FirstWaterStep = -1, Steps = 0;
+			uint32 Trace = 2166136261u;
+		};
+		const auto Ledger = [&](const FRig& Rg, double Water0, double Drilled0, double InFlightKg, double& OutErr)
+		{
+			const FRHBuildingInstance* DrillNow = FindB(Rg.Drill);
+			const FRHBuildingInstance* PlantNow = FindB(Rg.Plant);
+			const double Drilled = Drilled0 - Dep("Ice_C")->RemainingKg;
+			const double Accounted = OutKg(Rg.Drill, NIce) + ((DrillNow && DrillNow->BatchRemaining_h > 0.0) ? 40.0 : 0.0) + InFlightKg + InKg(Rg.Plant, NIce) + ((PlantNow && PlantNow->BatchRemaining_h > 0.0) ? 50.0 : 0.0) + (Sim->GetStock(NWater) - Water0) / 0.9;
+			OutErr = FMath::Abs(Drilled - Accounted);
+		};
+		const auto RunAgent = [&](const FRig& Rg, int32 NSols, double SolFrac = 1.0) -> FLeg
+		{
+			FLeg Lg;
+			const double Water0 = Sim->GetStock(NWater), Drilled0 = Dep("Ice_C")->RemainingKg;
+			FSimRover Rv;
+			Rv.T = FTransform(FQuat::Identity, FVector(3000.0, -800.0, 0.0));
+			Rv.H = RoverEntity(0);
+			const int32 Total = (int32)((double)NSols * SolFrac * SolLen / (double)AgentDt);
+			const auto Mix = [&Lg](double Val) { uint64 Bits = 0; FMemory::Memcpy(&Bits, &Val, 8); Lg.Trace = (Lg.Trace ^ (uint32)Bits) * 16777619u; Lg.Trace = (Lg.Trace ^ (uint32)(Bits >> 32)) * 16777619u; };
+			int32 LastTask = 0;
+			for (; Lg.Steps < Total; ++Lg.Steps)
+			{
+				AgentOnce();
+				const FRHTask Open = OpenTask(Rg.Drill);
+				if (Open.Id != 0 && Open.Id != LastTask) { LastTask = Open.Id; Lg.MaxLoad = FMath::Max(Lg.MaxLoad, Open.AmountKg); Mix((double)Open.Id); Mix(Open.AmountKg); Mix((double)Lg.Steps); }
+				if (RoverStep(Rv)) { ++Lg.Deliveries; Mix((double)Lg.Steps); Mix(InKg(Rg.Plant, NIce)); }
+				if (Lg.FirstWaterStep < 0 && Sim->GetStock(NWater) - Water0 > 0.0) { Lg.FirstWaterStep = Lg.Steps; }
+				if (Lg.Steps % 100 == 0)
+				{
+					double Err = 0.0;
+					Ledger(Rg, Water0, Drilled0, Rv.Phase == 2 ? (double)Rv.CargoKg : 0.0, Err);
+					Lg.MaxErr = FMath::Max(Lg.MaxErr, Err);
+				}
+			}
+			Lg.InFlight = Rv.Phase == 2 ? (double)Rv.CargoKg : 0.0;
+			Lg.Drilled = Drilled0 - Dep("Ice_C")->RemainingKg;
+			Lg.WaterGain = Sim->GetStock(NWater) - Water0;
+			Lg.DrillOut = OutKg(Rg.Drill, NIce);
+			Lg.Hopper = InKg(Rg.Plant, NIce);
+			Lg.H2O = 0.9 * (Lg.DrillOut + Lg.Hopper + Lg.InFlight) + Lg.WaterGain;
+			return Lg;
+		};
+
+		// --- F12. End to end in the agent band, Ice_A and Ice_B spent: chain, road, rover, drill; water; mass conserved. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			SetLeft("Ice_A", 0.0);
+			SetLeft("Ice_B", 0.0);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			const FLeg Lg = RunAgent(Rg, 3);
+			Expect(Lg.FirstWaterStep >= 0 && Lg.FirstWaterStep < (int32)(3.0 * SolLen / (double)AgentDt) && Lg.WaterGain > 0.0 && Lg.Deliveries >= 3,
+				FString::Printf(TEXT("F12 the road, the rover and the drill on Ice_C with the home ice spent: water first made %.2f sols in, %.0f kg in 3 sols, %d deliveries"), (double)Lg.FirstWaterStep * AgentDt / SolLen, Lg.WaterGain, Lg.Deliveries));
+			Expect(Lg.MaxErr < 1e-6 && Near(Lg.Drilled, 3.0 * 960.0, 80.0),
+				FString::Printf(TEXT("F12 mass is conserved to 1e-6 kg at every 100th step over 3 sols (worst error %.3e kg): drilled %.0f kg = at the drill %.0f + in flight %.0f + in the hopper %.0f + melted %.0f / 0.9"), Lg.MaxErr, Lg.Drilled, Lg.DrillOut, Lg.InFlight, Lg.Hopper, Lg.WaterGain));
+			// The last of a deposit: 120 kg left posts one final 120 kg load, and the drill is emptied.
+			FRig Rh = BuildRig(true, true, true);
+			SetLeft("Ice_C", 120.0);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			const FLeg Fin = RunAgent(Rh, 1, 1.5);
+			Expect(Near(Dep("Ice_C")->RemainingKg, 0.0, 1e-9) && Near(Fin.DrillOut, 0.0, 1e-9) && Near(Fin.InFlight, 0.0, 1e-9) && Fin.Deliveries == 1 && Fin.MaxErr < 1e-6 && Near(Fin.Hopper + Fin.WaterGain / 0.9, 120.0, 1e-6),
+				FString::Printf(TEXT("F12 the last 120 kg of a deposit posts as ONE final load (under 200 kg), the drill ends empty (%.0f kg), %d delivery, and all 120 kg are accounted: hopper %.0f + melted %.0f / 0.9 (error %.1e)"), Fin.DrillOut, Fin.Deliveries, Fin.Hopper, Fin.WaterGain, Fin.MaxErr));
+		}
+
+		// --- F13. The 1,200 kg hopper against 2 x Need. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			const int32 Second = Place(TEXT("WaterPlant"), 10000.0, -600.0); // also served, and nearer the drill
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 1500.0, true);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask T0 = OpenTask(Rg.Drill);
+			Sim->Debug_ClearTasks();
+			Sim->Debug_AddSolidAt(Second, NIce, 900.0, false);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask T1 = OpenTask(Rg.Drill);
+			Sim->Debug_ClearTasks();
+			Sim->Debug_AddSolidAt(Second, NIce, 100.0, false);
+			Sim->Debug_StepTaskBoard();
+			const FRHTask T2 = OpenTask(Rg.Drill);
+			Expect(T0.Id != 0 && T0.To.BuildingId == Second && Near(T0.AmountKg, 1000.0, 1e-9) && T1.To.BuildingId == Second && Near(T1.AmountKg, 300.0, 1e-9) && T2.To.BuildingId == Rg.Plant && Near(T2.AmountKg, 1000.0, 1e-9),
+				FString::Printf(TEXT("F13 the nearer plant takes a 1,000 kg load empty; at 900 kg it takes the 300 kg of room it has; at 1,000 kg (1,000 + 200 is not under 1,200) the load goes to the second plant #%d, not the nearer #%d"), T2.To.BuildingId, Second));
+			// Every other leg keeps 2 x Need: an ordinary drill's ice is not posted to a plant holding 100 kg.
+			FRig Rh = BuildRig(true, true, true);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_PlaceInstant(FName("IceDrill"), Dep("Ice_A")->LocationCm);
+			const int32 DrillA = LastIdOf(TEXT("IceDrill"));
+			Sim->Debug_AddSolidAt(Rh.Plant, NIce, 99.0, false);
+			Sim->Debug_AddSolidAt(DrillA, NIce, 500.0, true);
+			Sim->Debug_StepTaskBoard();
+			const int32 DestAt99 = Sim->Debug_GetOpenHaulDestFrom(DrillA, NIce);
+			Sim->Debug_ClearTasks();
+			Sim->Debug_AddSolidAt(Rh.Plant, NIce, 1.0, false);
+			Sim->Debug_StepTaskBoard();
+			const int32 DestAt100 = Sim->Debug_GetOpenHaulDestFrom(DrillA, NIce);
+			Expect(DrillA != 0 && DestAt99 == Rh.Plant && DestAt100 == 0,
+				FString::Printf(TEXT("F13 a non-outpost drill's ice still follows 2 x Need: posted to the plant holding 99 kg (#%d), not to the same plant at 100 kg (#%d)"), DestAt99, DestAt100));
+		}
+
+		// --- F14. The era gate: nothing moves unless a rover could carry it; then a load moves. ---
+		{
+			struct FCase { const TCHAR* Name; bool bPlant, bSpur, bPad, bRover, bHold, bInner; };
+			const FCase Cases[] = {
+				{ TEXT("no rover"), true, true, true, false, false, false },
+				{ TEXT("fleet hold"), true, true, true, true, true, false },
+				{ TEXT("no road-served pad"), true, true, false, true, false, false },
+				{ TEXT("no route to the drill"), true, false, true, true, false, false },
+				{ TEXT("the only plant inside 300 m"), false, true, true, true, false, true } };
+			for (const FCase& Cs : Cases)
+			{
+				FRig Rg = BuildRig(Cs.bPlant, Cs.bSpur, Cs.bPad);
+				int32 InnerId = 0;
+				if (Cs.bInner) { InnerId = Place(TEXT("WaterPlant"), CLoc.X - CUnit.X * 25000.0, CLoc.Y - CUnit.Y * 25000.0); }
+				if (Cs.bRover) { Sim->Debug_DeliverCargo(FName("CargoRover")); }
+				Sim->SetFleetHold(Cs.bHold);
+				Sim->Debug_AddSolidAt(Rg.Drill, NIce, 5000.0, true);
+				for (int32 K = 0; K < 2; ++K) { Land(); }
+				int32 PadId = 0;
+				FVector PadAt;
+				const bool bPad = Sim->FindNearestRoverPad(FVector::ZeroVector, PadId, PadAt);
+				Expect(Near(OutKg(Rg.Drill, NIce), 5000.0, 1e-9) && Near(InKg(Rg.Plant, NIce), 0.0, 1e-9) && Near(InKg(InnerId, NIce), 0.0, 1e-9) && Near(InKg(LanderId, NIce), 0.0, 1e-9) && (Cs.bPad || !bPad),
+					FString::Printf(TEXT("F14 era, %s: two steps move nothing (the drill keeps 5,000 kg, no plant, store or Lander gains ice)"), Cs.Name));
+				Sim->SetFleetHold(false);
+			}
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 5000.0, true);
+			Land();
+			Expect(Near(OutKg(Rg.Drill, NIce), 4000.0, 1e-9) && InKg(Rg.Plant, NIce) > 800.0 && InKg(Rg.Plant, NIce) <= 1000.0 && Near(InKg(LanderId, NIce), 0.0, 1e-9),
+				FString::Printf(TEXT("F14 era with a rover, a pad, a road and a plant: one step carries the rover's 1,000 kg to the home plant (the drill keeps %.0f; the plant holds %.0f after melting)"), OutKg(Rg.Drill, NIce), InKg(Rg.Plant, NIce)));
+		}
+
+		// --- F14b. The same rule for a home drill's ice in era (the era regolith gap's A2): it waits at its drill for a full plant. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_PlaceInstant(FName("IceDrill"), Dep("Ice_A")->LocationCm);
+			const int32 DrillA = LastIdOf(TEXT("IceDrill"));
+			Sim->Debug_AddSolidAt(Rg.Plant, NIce, 150.0, false); // over 2 x Need: the plant takes no more of a home drill's ice
+			Sim->Debug_AddSolidAt(DrillA, NIce, 500.0, true);
+			Land();
+			Expect(DrillA != Rg.Drill && OutKg(DrillA, NIce) >= 500.0 && Near(InKg(LanderId, NIce), 0.0, 1e-9),
+				FString::Printf(TEXT("F14 era, a home drill's ice with the plant full: it waits at the drill (%.0f kg) and the Lander gains none (%.0f), the agent band's rule through MayOverflowToStore"), OutKg(DrillA, NIce), InKg(LanderId, NIce)));
+		}
+
+		// --- F15. The paired 10-sol ledger: the agent band against the era band from one save. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			SetLeft("Ice_A", 0.0);
+			SetLeft("Ice_B", 0.0);
+			Sim->Debug_RevealDeposit(FName("Ice_A"));
+			Sim->Debug_RevealDeposit(FName("Ice_B"));
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			FString Le;
+			Expect(Sim->SaveColony(TEXT("farice_pair"), Le), FString::Printf(TEXT("F15 the colony (a road to a drill on Ice_C, one rover, a home plant) is saved for both legs (%s)"), *Le));
+			const int32 LegSols = 10;
+			Sim->LoadColony(TEXT("farice_pair"), Le);
+			const FLeg Agent = RunAgent(Rg, LegSols);
+			Sim->LoadColony(TEXT("farice_pair"), Le);
+			const double WaterE0 = Sim->GetStock(NWater), DrilledE0 = Dep("Ice_C")->RemainingKg;
+			for (int32 K = 0; K < (int32)((double)LegSols * SolLen / EraDt); ++K) { Land(); }
+			FLeg Era;
+			Era.Drilled = DrilledE0 - Dep("Ice_C")->RemainingKg;
+			Era.WaterGain = Sim->GetStock(NWater) - WaterE0;
+			Era.DrillOut = OutKg(Rg.Drill, NIce);
+			Era.Hopper = InKg(Rg.Plant, NIce);
+			Era.H2O = 0.9 * (Era.DrillOut + Era.Hopper) + Era.WaterGain;
+			const auto Within = [&Near](double Va, double Vb, double Frac) { return Near(Va, Vb, Frac * FMath::Max(FMath::Max(FMath::Abs(Va), FMath::Abs(Vb)), 1.0e-9)); };
+			Expect(Agent.Drilled > 8000.0 && Era.Drilled > 8000.0 && Agent.WaterGain > 3000.0 && Era.WaterGain > 3000.0,
+				FString::Printf(TEXT("F15 both legs worked: %d sols, the agent drilled %.0f kg and made %.0f kg of water (%d deliveries), the era band drilled %.0f and made %.0f"), LegSols, Agent.Drilled, Agent.WaterGain, Agent.Deliveries, Era.Drilled, Era.WaterGain));
+			Expect(Within(Agent.H2O, Era.H2O, 0.05),
+				FString::Printf(TEXT("F15 the H2O ledger (0.9 x ice at the drill, in the hopper and in flight, plus the water made) agrees within 5%%: agent %.1f kg, era %.1f kg (%.2f%%)"), Agent.H2O, Era.H2O, 100.0 * (Era.H2O - Agent.H2O) / FMath::Max(1.0, Agent.H2O)));
+			Expect(Within(Agent.WaterGain, Era.WaterGain, 0.05) || Near(Agent.WaterGain, Era.WaterGain, 0.9 * (240.0 + 1200.0)),
+				FString::Printf(TEXT("F15 and the water MELTED agrees (a band that delivered nothing would not): agent %.1f kg, era %.1f kg, within 5%% or one load plus one hopper (%.0f kg)"), Agent.WaterGain, Era.WaterGain, 0.9 * (240.0 + 1200.0)));
+			Expect(Agent.DrillOut + Agent.InFlight <= 2.0 * Agent.MaxLoad + 1e-9 && Agent.MaxLoad >= 240.0,
+				FString::Printf(TEXT("F15 at the end the agent band holds %.0f kg at the drill and in flight, at most two of its largest load (%.0f kg): it is not backing up"), Agent.DrillOut + Agent.InFlight, Agent.MaxLoad));
+		}
+
+		// --- F16. The save (v43; v42 refused) and determinism. ---
+		{
+			FRig Rg = BuildRig(true, true, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->Debug_AddSolidAt(Rg.Drill, NIce, 600.0, true);
+			Sim->Debug_StepTaskBoard();
+			FString Le;
+			const bool bSaved = Sim->SaveColony(TEXT("farice_ver"), Le);
+			const FString Path = FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_farice_ver.sav");
+			TArray<uint8> Bytes;
+			uint32 Ver = 0;
+			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path) && Bytes.Num() > 16;
+			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
+			uint32 V42 = 42;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V42, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_farice_v42.sav")));
+			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
+			FString Le42;
+			const bool bRefused = !Sim->LoadColony(TEXT("farice_v42"), Le42);
+			Expect(bSaved && bRead && Ver == 43 && bRefused && Le42.Contains(TEXT("Save format mismatch")) && Le42.Contains(TEXT("/43")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 43); a v42 save is refused and the live colony untouched (%s)"), Ver, *Le42));
+			FString Lg;
+			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
+			const FRHTask Back = OpenTask(Rg.Drill);
+			Expect(bBack && Back.Id != 0 && Back.bOutpostSource && Near(Back.AmountKg, 600.0, 1e-9),
+				TEXT("F16 the v43 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
+			// Determinism: the same colony, run twice, makes the same loads at the same steps.
+			FRig Rd = BuildRig(true, true, true);
+			Sim->Debug_DeliverCargo(FName("CargoRover"));
+			Sim->SaveColony(TEXT("farice_det"), Le);
+			const FLeg RunA = RunAgent(Rd, 1);
+			Sim->LoadColony(TEXT("farice_det"), Le);
+			const FLeg RunB = RunAgent(Rd, 1);
+			Expect(RunA.Deliveries >= 3 && RunA.Trace == RunB.Trace && RunA.Deliveries == RunB.Deliveries && Near(RunA.WaterGain, RunB.WaterGain, 0.0) && Near(RunA.Drilled, RunB.Drilled, 0.0),
+				FString::Printf(TEXT("F16 determinism: two one-sol runs from one save make the same task Ids, amounts and delivery steps (%d deliveries, trace %08x / %08x) and the same water (%.3f kg)"), RunA.Deliveries, RunA.Trace, RunB.Trace, RunA.WaterGain));
 		}
 
 		return Finish();
@@ -11582,7 +12504,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 42 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 43 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -11597,7 +12519,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v42 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v43 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -11624,9 +12546,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			{
 				TArray<uint8> Old = Good;
-				const uint32 V41 = 41;
-				FMemory::Memcpy(Old.GetData() + 4, &V41, 4);
-				Expect(TryFile(TEXT("deepk6v41"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/42")), FString::Printf(TEXT("K6 a v41 file is refused and the colony untouched (%s)"), *E6));
+				const uint32 V42 = 42;
+				FMemory::Memcpy(Old.GetData() + 4, &V42, 4);
+				Expect(TryFile(TEXT("deepk6v42"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/43")), FString::Printf(TEXT("K6 a v42 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -11896,7 +12818,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//  (e) F2b + F7b: a shortage recalls the Mars-born last, they wait in orbit (their own Ids and names), the colony is quiet
 	//      (one banner, re-armed when people return, no path declared and the epilogue clock paused while it lasts), and they
 	//      come home first when a later ship lands with every home on full rations and a bed free: the guards, the order, the
-	//      partial return, a real supply ship at low Hope, and the save round trip at v42 (D123, D125, D13).
+	//      partial return, a real supply ship at low Hope, and the save round trip at v43 (D123, D125, D13).
 	if (FParse::Param(*Params, TEXT("framing")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== FRAMING TEST (Gate-D pass, 2026-10-21) ==="));
@@ -12178,7 +13100,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Ids.Num() == Sim->GetPopulation(), TEXT("e4 every colonist Id is still unique after the return"));
 		}
 		{
-			// e5: both at once, the plural banner, and the save round trip at v42.
+			// e5: both at once, the plural banner, and the save round trip at v43.
 			Reset();
 			Sim->Debug_AddColonists(4);
 			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
@@ -12191,7 +13113,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 42, FString::Printf(TEXT("e5 the file says version %u (expect 42)"), Ver));
+			Expect(bRead && Ver == 43, FString::Printf(TEXT("e5 the file says version %u (expect 43)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),

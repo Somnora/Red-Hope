@@ -476,6 +476,14 @@ namespace
 							return FString::Printf(TEXT("%s has about %.0f t of ice left. More lies far to the north: ORDER > Survey, then click open ground about 700 m north of the Lander, a little to the east - the scout reports anything within 60 m."), *Name, Left);
 						}
 					}
+					// W1 (Gate-D placeholder, row G5): the outpost hint, once Ice_A and Ice_B are both found. It names an area, not the spot.
+					FVector HintCm;
+					if (C.Sim->GetOutpostHint(HintCm))
+					{
+						int32 Meters = 0;
+						const FString Where = URHSimWorldSubsystem::DescribeBearing(FVector::ZeroVector, HintCm, Meters);
+						return FString::Printf(TEXT("%s has about %.0f t of ice left. Ice signatures lie about %d m %s of the Lander: ORDER > Survey there."), *Name, Left, Meters, *Where);
+					}
 					return FString::Printf(TEXT("%s has about %.0f t of ice left, and no untouched ice is known. ORDER > Survey new ground - every circle a scout covers stays on your map."), *Name, Left);
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 0; },
@@ -494,7 +502,15 @@ namespace
 			{ TEXT("WATER"), TEXT("Drill the new ice"),
 				[](const FGuideCtx& C)
 				{
+					int32 OutpostId = 0;
+					C.Sim->GetIceExpansionStage(&OutpostId);
 					const FRHDepositState* Fresh = HealthyIce(C);
+					for (const FRHDepositState& Dp : C.Sim->GetDeposits()) { if (Dp.Id == OutpostId) { Fresh = &Dp; } }
+					if (Fresh && Fresh->bOutpost)
+					{
+						// W1 (Gate-D placeholder, row G6): replaces the hauled-like-the-first-drill's sentence, which is false here.
+						return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Outpost ice comes home by road and cargo rover, never by hauler."), *Fresh->RowName.ToString());
+					}
 					return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Its ice is hauled to the Water Plant like the first drill's."),
 						Fresh ? *Fresh->RowName.ToString() : TEXT("the new ice"));
 				},
@@ -509,6 +525,22 @@ namespace
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 3; },
 				NoBar(), FName("WaterPlant"), NAME_None },
+			// W1 (Gate-D placeholder, rows G7 and G8): outpost ice is never melted beside its drill and never carried by a hauler.
+			{ TEXT("WATER"), TEXT("Road the outpost home"),
+				[](const FGuideCtx& C)
+				{
+					int32 OutpostId = 0;
+					C.Sim->GetIceExpansionStage(&OutpostId);
+					FString Name(TEXT("The outpost"));
+					for (const FRHDepositState& Dp : C.Sim->GetDeposits()) { if (Dp.Id == OutpostId) { Name = Dp.RowName.ToString(); } }
+					return FString::Printf(TEXT("%s's ice comes home raw. BUILD > Logistics > Road from the colony's roads to within 30 m of the drill, and to a Water Plant at least 300 m from it."), *Name);
+				},
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 4; },
+				NoBar(), NAME_None, NAME_None },
+			{ TEXT("WATER"), TEXT("Bring a cargo rover"),
+				Fixed(TEXT("The road is ready. Add a Cargo Rover to the next supply ship - haulers do not run outpost ice.")),
+				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 5; },
+				NoBar(), NAME_None, NAME_None },
 		};
 		return S;
 	}

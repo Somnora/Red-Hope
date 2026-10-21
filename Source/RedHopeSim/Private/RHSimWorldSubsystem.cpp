@@ -24,6 +24,8 @@ namespace
 	const FName NAME_WallWindow(TEXT("Window"));
 	const FName NAME_WallAirlock(TEXT("Airlock"));
 	const FName NAME_Glass(TEXT("Glass"));
+	// W1: the smallest last load of an emptied outpost deposit (the floor of the hauler's pile-load minimum).
+	constexpr double OutpostFinalLoadMinKg = 25.0;
 
 	// Save format: versioned binary, sim-owned (approved architecture). Bump
 	// the version on any payload change; old versions refuse loudly.
@@ -31,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 42;  // v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 43;  // v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -265,6 +267,10 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	FoodRunwayRearmSols = FMath::Max(FoodRunwayFloorSols, Defs->GetConfigScalar(FName("FoodRunwayRearmSols"), FoodRunwayRearmSols)); // hysteresis is never negative
 	IceLowAlertFraction = Defs->GetConfigScalar(FName("IceLowAlertFraction"), IceLowAlertFraction);
 	IceWaterPlantNear_m = Defs->GetConfigScalar(FName("IceWaterPlantNear_m"), IceWaterPlantNear_m);
+	OutpostMeltMinCm = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("OutpostMeltMinCm"), OutpostMeltMinCm));
+	OutpostHopperKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("OutpostHopperKg"), OutpostHopperKg));
+	OutpostHintGridCm = FMath::Max(1, (int32)Defs->GetConfigScalar(FName("OutpostHintGridCm"), OutpostHintGridCm));
+	OutpostDrillBufferKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("OutpostDrillBufferKg"), OutpostDrillBufferKg));
 	ConstructionMaterials.Reset();
 	ConstructionMaterials.Add(FName("Struct"));
 	Defs->ForEachBuilding([this](FName, const FRHBuildingRow& Row)
@@ -402,6 +408,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		D.InitialKg = Row.Mass_kg;
 		D.LocationCm = FVector(Row.LocX_m * 100.f, Row.LocY_m * 100.f, 0.f);
 		D.bDiscovered = Row.SurfaceVisible;
+		D.bOutpost = Row.Outpost;
+		D.RegionId = Row.RegionId;
 		Deposits.Add(D);
 	});
 
@@ -771,7 +779,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 		{
 			break;
 		}
-		if (!D.bDesignated || D.RemainingKg <= 0.0)
+		if (!D.bDesignated || D.bOutpost || D.RemainingKg <= 0.0) // W1: an outpost is drilled, never dug
 		{
 			continue;
 		}
@@ -850,6 +858,34 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			{
 				continue;
 			}
+			// W1: an outpost drill's ice is as strict here as in the agent band. A load moves from the drill to the
+			// plant FindOutpostDestination names only while a rover could carry it (an active rover, a road-served
+			// pad, the freight route), and never to a store; otherwise it waits at the drill. Same rule, same helper
+			// and the same load sizing as the board's output leg.
+			if (IsOutpostDrill(B))
+			{
+				static const FName NRoverClass(TEXT("Rover"));
+				static const FName NRoverRow(TEXT("RC_R"));
+				const FRHDepositState* Src = FindDeposit(B.AttachedDepositId);
+				const bool bFinal = Src && Src->RemainingKg <= 0.0 && B.BatchRemaining_h <= 0.0 && !PendingOutputs.Contains(B.Id);
+				const URHAgentSubsystem* Agents = (bFleetHold || !(Src && Out.Key == Src->Type && (Out.Value > 200.0 || (bFinal && Out.Value >= OutpostFinalLoadMinKg)))) ? nullptr : GetWorld()->GetSubsystem<URHAgentSubsystem>();
+				const FRHRobotRow* RoverRow = Defs->GetRobot(NRoverRow);
+				int32 PadId = 0;
+				FVector PadAt;
+				int32 PlantId = 0;
+				double RoomKg = 0.0;
+				if (Agents && RoverRow && Agents->CountActiveRobots(NRoverClass, WearHaltThreshold) > 0 && FindNearestRoverPad(FVector::ZeroVector, PadId, PadAt)
+					&& FindOutpostDestination(B, /*bIgnoreRoom*/ false, PlantId, RoomKg))
+				{
+					const double Kg = FMath::Min3(Out.Value, (double)RoverRow->Cargo_kg, RoomKg);
+					if (FRHBuildingInstance* Plant = (Kg > 200.0 || (bFinal && Kg >= OutpostFinalLoadMinKg)) ? FindBuilding(PlantId) : nullptr)
+					{
+						Plant->InputKg.FindOrAdd(Out.Key) += Kg;
+						Out.Value -= Kg;
+					}
+				}
+				continue;
+			}
 			FRHBuildingInstance* Dest = nullptr;
 			for (FRHBuildingInstance& C : Buildings)
 			{
@@ -872,7 +908,11 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 					break;
 				}
 			}
-			if (!Dest)
+			// The same rule the agent band's output leg follows (MayOverflowToStore): a store takes only a
+			// construction material, or what nothing on the level consumes. Otherwise it waits at its producer -
+			// before this, a home Ice Drill whose Water Plant was full stocked the Lander in era and the ice
+			// was never melted (era regolith gap, A2).
+			if (!Dest && MayOverflowToStore(Out.Key, B.Level, B.Id))
 			{
 				for (FRHBuildingInstance& S : Buildings)
 				{
@@ -953,7 +993,7 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 	// 50 t of Regolith_A's 60 t sat there by sol 45 while the Forge starved.
 	for (const FRHDepositState& D : Deposits)
 	{
-		if (D.PileKg < HaulLoadMinKg)
+		if (D.PileKg < HaulLoadMinKg || D.bOutpost)
 		{
 			continue;
 		}
@@ -1035,6 +1075,40 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 	{
 		for (const auto& Out : B.OutputKg)
 		{
+			// W1: an outpost drill's ice is posted ONLY as a rover freight run to a plant that passes the freight
+			// test, and never anywhere else: not to a hauler, and not to a store (the generic branch below, with its
+			// overflow, never sees it). With no rover, no road or no plant it waits at the drill under the buffer cap.
+			if (IsOutpostDrill(B))
+			{
+				const FRHDepositState* Src = FindDeposit(B.AttachedDepositId);
+				// The last of a deposit: once nothing is left underground and no batch is running, a final load
+				// of at least OutpostFinalLoadMinKg posts even at 200 kg or less, so no ice is stranded at an empty drill.
+				const bool bFinal = Src && Src->RemainingKg <= 0.0 && B.BatchRemaining_h <= 0.0 && !PendingOutputs.Contains(B.Id);
+				// The cheap tests first: planning a route is not free and this runs every sub-step.
+				if (ActiveRovers > 0 && Src && Out.Key == Src->Type && (Out.Value > 200.0 || (bFinal && Out.Value >= OutpostFinalLoadMinKg)) && !HasLiveOutpostTask(B.Id))
+				{
+					int32 PlantId = 0;
+					double RoomKg = 0.0;
+					if (FindOutpostDestination(B, /*bIgnoreRoom*/ false, PlantId, RoomKg))
+					{
+						const double Kg = FMath::Min3(Out.Value, RoverCapKg, RoomKg);
+						if (Kg > 200.0 || (bFinal && Kg >= OutpostFinalLoadMinKg))
+						{
+							FRHTask T;
+							T.Id = NextTaskId++;
+							T.Type = ERHTaskType::Haul;
+							T.From.BuildingId = B.Id;
+							T.To.BuildingId = PlantId;
+							T.Resource = Out.Key;
+							T.AmountKg = Kg;
+							T.bFreight = true;
+							T.bOutpostSource = true;
+							Tasks.Add(T);
+						}
+					}
+				}
+				continue;
+			}
 			if (Out.Value < HaulLoadMinKg || B.DefName == NAME_Stockpile || B.DefName == NAME_Lander)
 			{
 				continue;
@@ -1456,6 +1530,16 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					{
 						if (Dep.Id == B.AttachedDepositId) { D = &Dep; break; }
 					}
+					if (D && D->bOutpost)
+					{
+						// W1: an outpost drill idles at its buffer, so with no rover the deposit is not
+						// drained into a drill nobody empties. A batch already running finishes.
+						const double* Held = B.OutputKg.Find(D->Type);
+						if (Held && *Held >= OutpostDrillBufferKg)
+						{
+							return false;
+						}
+					}
 					return D && D->RemainingKg > 0.0;
 				}
 				for (const auto& In : Inputs)
@@ -1551,8 +1635,24 @@ void URHSimWorldSubsystem::StepDepositAlerts()
 		{
 			Advice = TEXT("The last known ice. Stretch the water: recycling makes it last, and the Water Plant restores it while ice remains.");
 		}
+		else if (!HasUndiscoveredNonOutpostIce())
+		{
+			// W1 (Gate-D placeholder, row G4): only outposts are left to find.
+			Advice = TEXT("Survey for more ice farther out: outpost ice comes home by road and cargo rover.");
+		}
 		OnAlert.Broadcast(FString::Printf(TEXT("%s RUNNING LOW — about %.0f t of ice left. %s"),
 			*D.RowName.ToString().ToUpper(), D.RemainingKg / 1000.0, Advice));
+	}
+	// W1: the outpost hint opens (once per row; the latch is runtime and rebuilt at load, so a load never
+	// re-fires it). Gate-D placeholder copy, row G3. No log line, like the low-ice alert.
+	FVector HintCm;
+	int32 HintId = 0;
+	if (GetOutpostHint(HintCm, &HintId) && !OutpostHintAnnounced.Contains(HintId))
+	{
+		OutpostHintAnnounced.Add(HintId);
+		int32 Meters = 0;
+		const FString Where = DescribeBearing(FVector::ZeroVector, HintCm, Meters);
+		OnAlert.Broadcast(FString::Printf(TEXT("ICE SIGNATURES — about %d m %s of the Lander. ORDER > Survey there; the scout reports anything within 60 m."), Meters, *Where));
 	}
 }
 
@@ -1574,6 +1674,20 @@ bool URHSimWorldSubsystem::HasUndiscoveredIce() const
 	return false;
 }
 
+// W1: the ice still to find that is NOT an outpost. The hint opens only when this is false, and the
+// RUNNING LOW advice reads the outpost line only when this is false and an outpost is still hidden.
+bool URHSimWorldSubsystem::HasUndiscoveredNonOutpostIce() const
+{
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Type == FName("Ice") && !D.bDiscovered && !D.bOutpost)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 bool URHSimWorldSubsystem::HasHealthyDiscoveredIce() const
 {
 	for (const FRHDepositState& D : Deposits)
@@ -1586,13 +1700,150 @@ bool URHSimWorldSubsystem::HasHealthyDiscoveredIce() const
 	return false;
 }
 
+bool URHSimWorldSubsystem::GetOutpostHint(FVector& OutCentreCm, int32* OutDepositId) const
+{
+	if (HasUndiscoveredNonOutpostIce())
+	{
+		return false;
+	}
+	for (const FRHDepositState& D : Deposits) // Id order: row order is the hint order
+	{
+		if (D.bOutpost && D.Type == FName("Ice") && !D.bDiscovered)
+		{
+			const double Grid = (double)OutpostHintGridCm;
+			OutCentreCm = FVector(FMath::RoundHalfFromZero(D.LocationCm.X / Grid) * Grid, FMath::RoundHalfFromZero(D.LocationCm.Y / Grid) * Grid, 0.0);
+			if (OutDepositId)
+			{
+				*OutDepositId = D.Id;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+FString URHSimWorldSubsystem::DescribeBearing(const FVector& FromCm, const FVector& ToCm, int32& OutMeters)
+{
+	static const TCHAR* Names[16] = { TEXT("north"), TEXT("north-north-east"), TEXT("north-east"), TEXT("east-north-east"),
+		TEXT("east"), TEXT("east-south-east"), TEXT("south-east"), TEXT("south-south-east"),
+		TEXT("south"), TEXT("south-south-west"), TEXT("south-west"), TEXT("west-south-west"),
+		TEXT("west"), TEXT("west-north-west"), TEXT("north-west"), TEXT("north-north-west") };
+	const double Dx = ToCm.X - FromCm.X, Dy = ToCm.Y - FromCm.Y; // +X east, +Y north
+	OutMeters = FMath::RoundToInt(FMath::Sqrt(Dx * Dx + Dy * Dy) / 100.0 / 10.0) * 10;
+	double Bearing = 90.0 - FMath::RadiansToDegrees(FMath::Atan2(Dy, Dx)); // clockwise from north
+	Bearing = FMath::Fmod(Bearing + 360.0, 360.0);
+	return Names[FMath::RoundToInt(Bearing / 22.5) % 16];
+}
+
+bool URHSimWorldSubsystem::IsOutpostDrill(const FRHBuildingInstance& B) const
+{
+	if (B.AttachedDepositId == 0)
+	{
+		return false;
+	}
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Id == B.AttachedDepositId)
+		{
+			return D.bOutpost;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::FindOutpostDestination(const FRHBuildingInstance& Drill, bool bIgnoreRoom, int32& OutId, double& OutRoomKg) const
+{
+	OutId = 0;
+	OutRoomKg = 0.0;
+	const FRHDepositState* Src = nullptr;
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Id == Drill.AttachedDepositId) { Src = &D; break; }
+	}
+	if (!Src || !Src->bOutpost || Drill.Level != 0)
+	{
+		return false;
+	}
+	struct FCand { int32 StraightCm; int32 BuildingId; double RoomKg; };
+	TArray<FCand> Cands;
+	const FName Ice = Src->Type;
+	for (const FRHBuildingInstance& C : Buildings)
+	{
+		if (C.bUnderConstruction || C.Level != 0 || C.Id == Drill.Id)
+		{
+			continue;
+		}
+		if (FVector::DistXY(C.LocationCm, Src->LocationCm) < (double)OutpostMeltMinCm)
+		{
+			continue;
+		}
+		if (!Defs->FindRunnableRecipe(C.DefName, [&Ice](const TMap<FName, double>& Inputs) { return Inputs.Contains(Ice); }))
+		{
+			continue;
+		}
+		const double* Have = C.InputKg.Find(Ice);
+		const double HaveKg = Have ? *Have : 0.0;
+		if (!bIgnoreRoom && !(HaveKg + 200.0 < OutpostHopperKg))
+		{
+			continue;
+		}
+		Cands.Add({ FMath::RoundToInt(FVector::DistXY(C.LocationCm, Drill.LocationCm)), C.Id, OutpostHopperKg - HaveKg });
+	}
+	Cands.Sort([](const FCand& A, const FCand& B) { return A.StraightCm != B.StraightCm ? A.StraightCm < B.StraightCm : A.BuildingId < B.BuildingId; });
+	int32 Plans = 0;
+	for (const FCand& C : Cands)
+	{
+		if (Plans >= RoverClaimPlans)
+		{
+			break;
+		}
+		++Plans;
+		FRHTask Probe;
+		Probe.Type = ERHTaskType::Haul;
+		Probe.From.BuildingId = Drill.Id;
+		Probe.To.BuildingId = C.BuildingId;
+		if (IsFreightRoute(Probe))
+		{
+			OutId = C.BuildingId;
+			OutRoomKg = C.RoomKg;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::HasLiveOutpostTask(int32 DrillId) const
+{
+	const URHAgentSubsystem* Agents = GetWorld() ? GetWorld()->GetSubsystem<URHAgentSubsystem>() : nullptr;
+	for (const FRHTask& T : Tasks)
+	{
+		if (T.Type != ERHTaskType::Haul || T.From.BuildingId != DrillId)
+		{
+			continue;
+		}
+		// A halted or flat rover keeps its claim without ticking, so a claim alone does not hold the lane.
+		if (!T.ClaimedBy.IsValid() || (Agents && Agents->IsRobotLive(T.ClaimedBy, WearHaltThreshold)))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // What the player can still do about a low ice deposit, as one pure read the
 // guide and the suite share: -1 nothing to resolve (no low deposit, or no way
 // out - the last ice), 0 find more, 1 carry the grid to healthy ice, 2 drill it,
 // 3 melt it where it is drilled (a drilled healthy deposit with no finished
 // Water Plant within IceWaterPlantNear_m: its ice is a long haul from any plant).
-int32 URHSimWorldSubsystem::GetIceExpansionStage() const
+// W1: the aggregate over the NON-outpost deposits is the D2a one, unchanged. When it resolves (-1), or no
+// non-outpost deposit is healthy, the found healthy outposts are read in Id order: 1 carry the grid, 2 drill,
+// 4 lay a road (no plant it can reach), 5 bring a cargo rover. Stage 3 is never offered for an outpost.
+int32 URHSimWorldSubsystem::GetIceExpansionStage(int32* OutDepositId) const
 {
+	if (OutDepositId)
+	{
+		*OutDepositId = 0;
+	}
 	bool bAnyLow = false;
 	for (const FRHDepositState& D : Deposits)
 	{
@@ -1606,13 +1857,14 @@ int32 URHSimWorldSubsystem::GetIceExpansionStage() const
 	{
 		return HasUndiscoveredIce() ? 0 : -1;
 	}
-	bool bReached = false, bDrilled = false, bMelted = false;
+	bool bReached = false, bDrilled = false, bMelted = false, bAnyNear = false;
 	for (const FRHDepositState& D : Deposits)
 	{
-		if (D.Type != FName("Ice") || !D.bDiscovered || D.RemainingKg <= 0.0 || IsIceDepositLow(D))
+		if (D.bOutpost || D.Type != FName("Ice") || !D.bDiscovered || D.RemainingKg <= 0.0 || IsIceDepositLow(D))
 		{
 			continue;
 		}
+		bAnyNear = true;
 		bool bHasDrill = false, bHasPlant = false;
 		for (const FRHBuildingInstance& B : Buildings)
 		{
@@ -1624,11 +1876,53 @@ int32 URHSimWorldSubsystem::GetIceExpansionStage() const
 		bMelted |= bHasDrill && bHasPlant;
 		bReached |= bHasDrill || IsInCoverage(D.LocationCm, 0);
 	}
-	if (bDrilled)
+	if (bAnyNear)
 	{
-		return bMelted ? -1 : 3;
+		const int32 Near = bDrilled ? (bMelted ? -1 : 3) : (bReached ? 2 : 1);
+		if (Near != -1)
+		{
+			return Near;
+		}
 	}
-	return bReached ? 2 : 1;
+	// The outposts, found and healthy, in Id order.
+	const URHAgentSubsystem* Agents = GetWorld() ? GetWorld()->GetSubsystem<URHAgentSubsystem>() : nullptr;
+	static const FName NRover(TEXT("Rover"));
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (!D.bOutpost || D.Type != FName("Ice") || !D.bDiscovered || D.RemainingKg <= 0.0 || IsIceDepositLow(D))
+		{
+			continue;
+		}
+		const FRHBuildingInstance* Drill = nullptr;
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			if (B.DefName == FName("IceDrill") && B.AttachedDepositId == D.Id) { Drill = &B; break; }
+		}
+		if (OutDepositId)
+		{
+			*OutDepositId = D.Id;
+		}
+		if (!Drill)
+		{
+			return IsInCoverage(D.LocationCm, 0) ? 2 : 1;
+		}
+		int32 PlantId = 0;
+		double RoomKg = 0.0;
+		if (!FindOutpostDestination(*Drill, /*bIgnoreRoom*/ true, PlantId, RoomKg))
+		{
+			return 4;
+		}
+		const bool bLiveRover = Agents && Agents->CountActiveRobots(NRover, WearHaltThreshold) > 0;
+		if (!bLiveRover && GetImportStock(FName("RC_R")) <= 0)
+		{
+			return 5;
+		}
+		if (OutDepositId)
+		{
+			*OutDepositId = 0;
+		}
+	}
+	return -1;
 }
 
 void URHSimWorldSubsystem::StepQuota()
@@ -6892,6 +7186,32 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 		OutReason = FString::Printf(TEXT("Unknown building '%s'"), *DefName.ToString());
 		return false;
 	}
+	// W1: no melting near a FOUND outpost. Its ice comes home raw, so an ice-consuming building (today only
+	// the Water Plant) refuses to stand within OutpostMeltMinCm of one. Undiscovered rows are not checked, so
+	// the refusal leaks nothing; routing (FindOutpostDestination) is what guarantees a plant built before the
+	// discovery is never a destination. Gate-D placeholder copy, row G2.
+	if (Level == 0 && OutpostMeltMinCm > 0)
+	{
+		bool bConsumesIce = false;
+		bool bChecked = false;
+		for (const FRHDepositState& D : Deposits)
+		{
+			if (!D.bOutpost || !D.bDiscovered || D.Level != 0)
+			{
+				continue;
+			}
+			if (!bChecked)
+			{
+				bChecked = true;
+				bConsumesIce = Defs->FindRunnableRecipe(DefName, [](const TMap<FName, double>& Inputs) { return Inputs.Contains(FName("Ice")); }) != nullptr;
+			}
+			if (bConsumesIce && FVector::DistXY(D.LocationCm, LocationCm) < (double)OutpostMeltMinCm)
+			{
+				OutReason = FString::Printf(TEXT("Outpost ice comes home raw: build the Water Plant at least %d m away."), OutpostMeltMinCm / 100);
+				return false;
+			}
+		}
+	}
 	// Z-model (M1-d Gate A): the surface is always buildable; a subsurface floor
 	// opens once the shaft trunk reaches it. Out-of-range or above-surface
 	// refuses; a real floor the bore hasn't reached refuses with the fix ("bore
@@ -7312,6 +7632,12 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			// message must not leak that something is there).
 			if (D.RowName == Cmd.Target && D.bDiscovered)
 			{
+				if (D.bOutpost)
+				{
+					// W1: outpost ice is drilled, never dug (Gate-D placeholder copy, row G1).
+					OnCommandRejected.Broadcast(Cmd, TEXT("Outpost ice is drilled, not dug - place an Ice Drill on it."));
+					return;
+				}
 				D.bDesignated = true;
 				bFound = true;
 				UE_LOG(LogRedHopeSim, Display, TEXT("Dig designation: %s (%s, %.0f t remaining)"),
@@ -10659,7 +10985,7 @@ int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm, int32 RobotLe
 	double BestDist = TNumericLimits<double>::Max();
 	for (FRHDepositState& D : Deposits)
 	{
-		if (D.Level == RobotLevel && D.bDesignated && D.RemainingKg > 0.0 && D.DigClaims < 2)
+		if (D.Level == RobotLevel && D.bDesignated && !D.bOutpost && D.RemainingKg > 0.0 && D.DigClaims < 2)
 		{
 			const double Dist = FVector::DistXY(D.LocationCm, RobotPosCm);
 			if (Dist < BestDist)
@@ -10687,7 +11013,8 @@ bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& 
 	for (FRHTask& T : Tasks)
 	{
 		// C6a: a freight task is the rovers' while one is active, until it has waited out the fallback.
-		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid() && GetSiteLevel(T.From) == RobotLevel
+		// W1: an outpost's ice is never a hauler's, whatever bFreight says and however long it has waited.
+		if (T.Type == ERHTaskType::Haul && !T.ClaimedBy.IsValid() && GetSiteLevel(T.From) == RobotLevel && !T.bOutpostSource
 			&& !(T.bFreight && T.UnclaimedAgentSec < FreightHaulerFallbackSec))
 		{
 			const double Dist = FVector::DistXY(GetSiteLocation(T.From), RobotPosCm);
@@ -11901,13 +12228,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	}
 	// D2a: the surveyed mass is data, not save state - re-derive it by row.
 	{
-		TMap<FName, double> RowMass;
-		Defs->ForEachDeposit([&RowMass](FName RowName, const FRHDepositRow& Row) { RowMass.Add(RowName, Row.Mass_kg); });
+		TMap<FName, TTuple<double, bool, int32>> RowData; // mass, W1 outpost, W1 region
+		Defs->ForEachDeposit([&RowData](FName RowName, const FRHDepositRow& Row) { RowData.Add(RowName, MakeTuple((double)Row.Mass_kg, (bool)Row.Outpost, (int32)Row.RegionId)); });
 		for (FRHDepositState& D : Deposits)
 		{
-			if (const double* Mass = RowMass.Find(D.RowName))
+			if (const TTuple<double, bool, int32>* Data = RowData.Find(D.RowName))
 			{
-				D.InitialKg = *Mass;
+				D.InitialKg = Data->Get<0>();
+				D.bOutpost = Data->Get<1>();
+				D.RegionId = Data->Get<2>();
 			}
 			else
 			{
@@ -11926,6 +12255,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		SerializeSite(Ar, T.To);
 		Ar << T.Resource << T.AmountKg << T.TargetCm;
 		T.Type = (ERHTaskType)Type;
+		// W1: runtime only - re-derived from the loaded drill, so a hauler cannot claim a far task
+		// after a load and before the first board step.
+		if (T.Type == ERHTaskType::Haul && T.From.BuildingId > 0)
+		{
+			if (const FRHBuildingInstance* Src = FindBuildingById(T.From.BuildingId))
+			{
+				T.bOutpostSource = IsOutpostDrill(*Src);
+			}
+		}
 		Tasks.Add(MoveTemp(T));
 	}
 
@@ -12441,6 +12779,23 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		if (IsIceDepositLow(D))
 		{
 			IceLowAnnounced.Add(D.Id);
+		}
+	}
+	// W1: an outpost hint already open, or an outpost already found, is already announced.
+	OutpostHintAnnounced.Reset();
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.bOutpost && D.bDiscovered)
+		{
+			OutpostHintAnnounced.Add(D.Id);
+		}
+	}
+	{
+		FVector HintCm;
+		int32 HintId = 0;
+		if (GetOutpostHint(HintCm, &HintId))
+		{
+			OutpostHintAnnounced.Add(HintId);
 		}
 	}
 	// D4a: a save loaded inside a food episode must not re-announce it (already below = latched).

@@ -209,6 +209,11 @@ struct REDHOPESIM_API FRHDepositRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float LocY_m = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SurfaceVisible = true;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	// W1 (distant ice): an outpost deposit is drilled, never dug; its raw ice comes home by cargo rover to a
+	// Water Plant at least OutpostMeltMinCm away (never melted beside the drill, never carried by hauler).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool Outpost = false;
+	// Step-4 hook: 0 = the home region. The same convention as FRHDistrict::RegionId.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 RegionId = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

@@ -66,6 +66,10 @@ struct FRHTask
 	// bigger than a hauler's load. Set when the task is posted and re-derived when the built
 	// road set changes or the fleet gains or loses its first active rover.
 	bool bFreight = false;
+	// W1: runtime only, never saved. True when From is an Ice Drill attached to an outpost deposit.
+	// Haulers never claim such a task (no fallback); RefreshFreightFlags deletes it when it stops being
+	// freight. Set at post and re-derived for every task after a load.
+	bool bOutpostSource = false;
 	// Agent-band seconds this freight task has waited unclaimed (StepTaskBoard advances it, so
 	// an era stretch never counts): haulers may take it once it passes FreightHaulerFallbackSec.
 	double UnclaimedAgentSec = 0.0;
@@ -128,4 +132,8 @@ struct REDHOPESIM_API FRHDepositState
 	UPROPERTY() bool bDiscovered = true;
 	UPROPERTY() bool bDesignated = false;
 	UPROPERTY() int32 DigClaims = 0;  // excavators currently working it
+	// W1: from the row (DT_Deposits.Outpost / RegionId), set at begin-play and re-derived by row
+	// name on load; never saved. An outpost is drilled, never dug, and its ice comes home raw.
+	UPROPERTY() bool bOutpost = false;
+	UPROPERTY() int32 RegionId = 0;
 };

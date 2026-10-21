@@ -326,6 +326,30 @@ int32 URHAgentSubsystem::CountActiveRobots(FName RobotClass, float WearHalt) con
 	return Count;
 }
 
+bool URHAgentSubsystem::IsRobotLive(FMassEntityHandle Entity, float WearHalt) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem)
+	{
+		return false;
+	}
+	const FMassEntityManager& EntityManager = MassSubsystem->GetEntityManager();
+	if (!EntityManager.IsEntityValid(Entity))
+	{
+		return false;
+	}
+	if (EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear >= WearHalt)
+	{
+		return false;
+	}
+	if (EntityManager.GetFragmentDataChecked<FRHBatteryFragment>(Entity).ChargeWh > 0.f)
+	{
+		return true;
+	}
+	const FRHTaskFragment& Task = EntityManager.GetFragmentDataChecked<FRHTaskFragment>(Entity);
+	return (ERHTaskType)Task.TaskType == ERHTaskType::Charge && Task.Phase == 1;
+}
+
 void URHAgentSubsystem::CollectRobotsOfClass(FName RobotClass, TArray<FRHRoverState>& OutStates) const
 {
 	OutStates.Reset();

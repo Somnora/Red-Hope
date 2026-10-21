@@ -1742,7 +1742,8 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	// Players read the material, not the data row (interface pass: no raw IDs).
 	const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
 	const FRHDepositShape Shape = MakeDepositShape(D, Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0);
-	AddLabel(Actor, D.Type.ToString() + TEXT(" deposit"), DepColor, Shape.R + 260.f);
+	// W1: an outpost is drilled, never dug (Gate-D placeholder copy, row G9).
+	AddLabel(Actor, D.bOutpost ? FString(TEXT("Outpost ice deposit")) : D.Type.ToString() + TEXT(" deposit"), DepColor, Shape.R + 260.f);
 	UE_LOG(LogRedHope, Display, TEXT("Dig site: %s (%s) at (%.0f, %.0f) m, %.1f m across, %s"), *D.RowName.ToString(), *D.Type.ToString(),
 		D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0, Shape.R / 50.f, Shape.bWorked ? TEXT("worked") : TEXT("untouched"));
 	// Surface furniture: born hidden if the player is currently underground

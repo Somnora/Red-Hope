@@ -86,6 +86,10 @@ public:
 	// board counts the active cargo rovers once a step through this (a robot's battery and wear
 	// are fragments, which ForEachRobotState does not read).
 	int32 CountActiveRobots(FName RobotClass, float WearHalt) const;
+	// W1: the brain's own halt test for one robot: it ticks only while its wear is under the halt line
+	// and it has charge, or is docked at a pad (a Charge task in phase 1), which can refill a dead
+	// battery. A halted robot keeps its claim without working, so the outpost lane asks this.
+	bool IsRobotLive(FMassEntityHandle Entity, float WearHalt) const;
 	// C6a: every robot of a class, stable spawn order (cargo rovers: the readout for C6b and the cheats).
 	void CollectRobotsOfClass(FName RobotClass, TArray<FRHRoverState>& OutStates) const;
 // Test knob (RH.Rover drain): set every robot of a class to a fraction of its battery.

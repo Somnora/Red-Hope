@@ -290,3 +290,28 @@ Three player-facing strings that this list did not have. All three were reviewed
 | U1 | Alert banner, a surface habitat rated livable · SIM | `SURFACE HABITAT RATED LIVABLE — %d bays pressurized and circulated under a shielded hull; %d beds.%s%s` | **Final 2026-10-21.** Reviewed; kept as written. |
 | U2 | Crew moment, a colonist takes an empty seat · SIM | `%s took charge of an empty %s seat.` | **Final 2026-10-21.** Reviewed; kept as written. |
 | U3 | Selected Infirmary card · DECK | `\nINFIRMARY ONLINE - the recall window is one sol longer` | **Final 2026-10-21.** Approved as `\nINFIRMARY ONLINE - one extra sol to restore rations` and applied. |
+
+## Rows added by W1, distant ice (2026-10-21)
+
+New player-facing strings from W1. They are PLACEHOLDER copy, neutral in register (they are about ice, roads and machines, never about people or mood), and wait for the director's review. They are not part of the approved set above. The rule they all follow: the fix first.
+
+| ID | Where | Current | Status (2026-10-21) |
+|---|---|---|---|
+| G1 | Order rejection banner, a Dig order on a found outpost deposit · SIM `ExecuteCommand` (Dig) | `Outpost ice is drilled, not dug - place an Ice Drill on it.` | PLACEHOLDER, pending review. An undiscovered outpost still reads `Unknown deposit '<row>'`, so nothing leaks. |
+| G2 | Placement refusal reason, an ice-consuming building (the Water Plant) within 300 m of a found outpost · SIM `CanPlaceBuildingSized` | `Outpost ice comes home raw: build the Water Plant at least 300 m away.` (the distance is `OutpostMeltMinCm` / 100) | PLACEHOLDER, pending review. Names the fix. Not checked for an undiscovered outpost. |
+| G3 | Alert banner, once per outpost row, when its hint opens (Ice_A and Ice_B are both found); not re-fired by a load · SIM `StepDepositAlerts` | `ICE SIGNATURES — about %d m %s of the Lander. ORDER > Survey there; the scout reports anything within 60 m.` `%d` is the hint centre's distance rounded to 10 m, `%s` a 16-point bearing such as `east-south-east`. The centre is the row rounded to a 50 m grid, never the spot. | PLACEHOLDER, pending review. |
+| G4 | The RUNNING LOW alert's advice, when the ice still to find is outposts only · SIM `StepDepositAlerts` | `%s RUNNING LOW — about %.0f t of ice left. Survey for more ice farther out: outpost ice comes home by road and cargo rover.` Example: "ICE_B RUNNING LOW — about 3 t of ice left. Survey for more ice farther out: outpost ice comes home by road and cargo rover." | PLACEHOLDER, pending review. This is a shipped change the -icelow log hides: before W1, a low Ice_B with the outposts hidden read the D87 last-ice line and the guide showed no ice step; now it reads this line and the guide shows "Find more ice" until all five deposits are found. |
+| G5 | Guide step "Find more ice", while the outpost hint is open · GUIDE | `%s has about %.0f t of ice left. Ice signatures lie about %d m %s of the Lander: ORDER > Survey there.` A sibling of D90; it replaces D91 whenever a hint is open. | PLACEHOLDER, pending review. |
+| G6 | Guide step "Drill the new ice", for an outpost · GUIDE | `BUILD > Production > Ice Drill, placed on %s. Outpost ice comes home by road and cargo rover, never by hauler.` | PLACEHOLDER, pending review. Replaces D93 for an outpost (D93's "hauled to the Water Plant like the first drill's" is false there); D93 stays for Ice_A and Ice_B. |
+| G7 | Guide step "Road the outpost home" (stage 4), a drilled outpost with no road to a plant 300 m away · GUIDE | `%s's ice comes home raw. BUILD > Logistics > Road from the colony's roads to within 30 m of the drill, and to a Water Plant at least 300 m from it.` | PLACEHOLDER, pending review. |
+| G8 | Guide step "Bring a cargo rover" (stage 5), the road is ready and no rover is deployed or aboard · GUIDE | `The road is ready. Add a Cargo Rover to the next supply ship - haulers do not run outpost ice.` | PLACEHOLDER, pending review. |
+| G9 | The dig-site label over an outpost deposit · COLONYVIZ `SpawnDepositMarker` | `Outpost ice deposit` (other deposits read `<Type> deposit`) | PLACEHOLDER, pending review. |
+| G10 | The survey map's hint ring · PC `RHPlayerController.cpp` Tick | A dashed 60 m ring (amber) round the hint centre, drawn with the survey map overlay. No text. | PLACEHOLDER, pending review. An art placeholder. |
+| G11 | Data copy: the three new RH_Deposits rows' Notes and the four new RH_Config rows' Notes (`OutpostMeltMinCm`, `OutpostHopperKg`, `OutpostHintGridCm`, `OutpostDrillBufferKg`) · DATA | Each Note says what the number does and ends `Placeholder, director review`. | PLACEHOLDER. Designer-facing. |
+
+Approved rows W1 makes untrue or moves, for the director:
+- **D93** ("Its ice is hauled to the Water Plant like the first drill's") is false at stage 2 for an outpost; G6 takes its place there.
+- **D97** (stage 3, "Melt it where you drill it") is never shown for an outpost: its ice is never melted beside the drill.
+- **D87** now arrives only when every ice row, the outposts included, is found and low or spent.
+- **D91** is replaced by G5 whenever an outpost hint is open, which is every time D91 used to show.
+- **D86** stays while Ice_B is hidden; G4 takes over once only outposts are hidden.

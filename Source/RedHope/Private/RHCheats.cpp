@@ -12,6 +12,7 @@
 #include "RHDefinitionsSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHFrameStats.h"
+#include "RHMarsTerrain.h"
 #include "RHGrowthVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -102,6 +103,39 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCam(
 		Pawn->SetCameraPose(FVector2D(Xm * 100.f, Ym * 100.f), ZoomT, Pitch, Yaw);
 		UE_LOG(LogRedHope, Display, TEXT("[RH.Cam] focus (%.0f, %.0f) m | zoomT %.2f = %.0f m out | pitch offset %.0f | yaw %.0f"),
 			Xm, Ym, ZoomT, Pawn->GetViewDistanceCm() / 100.f, Pitch, Yaw);
+	}));
+
+// W1: where may an outpost deposit stand? The height field is readable (the scenery's peaks and mesas are
+// meshes and are NOT in it - only a capture shows those), so this reports what the field says over the
+// 60 m scout disc: the ground height at the centre and the largest rise over it.
+static FAutoConsoleCommandWithWorldAndArgs GRHTerrainProbe(
+	TEXT("RH.TerrainProbe"),
+	TEXT("RH.TerrainProbe <Xm> <Ym> [RadiusM=60] - READ-ONLY: the scenery height field at a point and its largest rise and fall over the disc (sampled on 3 rings). Peaks and mesas are meshes, not height: capture the site too."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.TerrainProbe <Xm> <Ym> [RadiusM=60]"));
+			return;
+		}
+		const double Xcm = FCString::Atod(*Args[0]) * 100.0, Ycm = FCString::Atod(*Args[1]) * 100.0;
+		const double Rcm = (Args.Num() > 2 ? FCString::Atod(*Args[2]) : 60.0) * 100.0;
+		const float Centre = RHMarsTerrain::GroundZCm(Xcm, Ycm);
+		float Lo = Centre, Hi = Centre, DrawnLo = RHMarsTerrain::SceneryGroundZCm(Xcm, Ycm), DrawnHi = DrawnLo;
+		for (int32 Ring = 1; Ring <= 3; ++Ring)
+		{
+			for (int32 K = 0; K < 16; ++K)
+			{
+				const double A = K * 2.0 * PI / 16.0, R = Rcm * Ring / 3.0;
+				const float G = RHMarsTerrain::GroundZCm(Xcm + FMath::Cos(A) * R, Ycm + FMath::Sin(A) * R);
+				const float Dr = RHMarsTerrain::SceneryGroundZCm(Xcm + FMath::Cos(A) * R, Ycm + FMath::Sin(A) * R);
+				Lo = FMath::Min(Lo, G); Hi = FMath::Max(Hi, G);
+				DrawnLo = FMath::Min(DrawnLo, Dr); DrawnHi = FMath::Max(DrawnHi, Dr);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.TerrainProbe] (%.0f, %.0f) m r %.0f m: field z %.2f m at the centre, %.2f..%.2f m over the disc (rise %.2f m, spread %.2f m); drawn lattice %.2f..%.2f m (spread %.2f m); nearest peak or mesa base %.0f m away (negative = inside)"),
+			Xcm / 100.0, Ycm / 100.0, Rcm / 100.0, Centre / 100.f, Lo / 100.f, Hi / 100.f, (Hi - Centre) / 100.f, (Hi - Lo) / 100.f, DrawnLo / 100.f, DrawnHi / 100.f, (DrawnHi - DrawnLo) / 100.f,
+			RHMarsTerrain::SceneryClearanceCm(Xcm, Ycm) / 100.f);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHCamRobot(
