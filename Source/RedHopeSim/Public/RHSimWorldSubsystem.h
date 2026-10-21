@@ -284,7 +284,28 @@ private:
 	TArray<FIntPoint> Cells;           // carve order, append-only, no duplicates, never the shaft column (0,0)
 	TArray<FIntPoint> Plan;            // painted, not yet carved, in paint order; the Borer carves these first
 	TMap<FIntPoint, int32> IndexOf;    // lattice point -> ordinal (derived)
-	FRHSpiralWalk Walk;                // transient: positioned so Walk.Next() is the lowest spiral point not yet skipped
+	TArray<FRHSpiralWalk> Walks;       // transient, one cursor per shaft (D2; Walks[0] is D1's Walk): positioned so Walks[S].Next() is the lowest spiral point of shaft S not yet skipped
+};
+
+namespace RH
+{
+	// D2: one constant for both the MaxShafts config clamp and the save's shaft-count refusal, so a save made under any row value loads.
+	constexpr int32 MaxShaftsCap = 16;
+}
+
+// D2 (more shafts): one shaft = its own head, depth, bore target, carve queue and anchoring Borer. Shafts[0] is the
+// D1 shaft and always exists (Depth 0 and a zero head until the first bore). Ids are dense, equal their index and are
+// never reused. Written only by URHSimWorldSubsystem.
+struct FRHShaft
+{
+	int32 Id = 0;
+	int32 RegionId = 0;               // always 0 in D2
+	FIntPoint Column = FIntPoint(0, 0); // the lattice point in region 0's frame; shaft 0 is (0,0) by construction
+	FVector HeadCm = FVector::ZeroVector; // shaft 0: the Borer's own off-grid spot (region 0's origin); shaft k: LatticeToCm(origin, Column)
+	int32 Depth = 0;                  // floors bored below the surface
+	int32 BoreTargetDepth = 0;        // ordered depth; the anchor bores while Depth < this
+	TMap<int32, int32> CarveQueue;    // Level -> cells still to carve (decremented at batch START)
+	int32 BorerId = 0;                // the Borer that anchors it; 0 = none (shaft 0 anchored by ExtendShaft, the test path)
 };
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
@@ -482,8 +503,35 @@ public:
 	// floor joins the grid (power/O2/coverage carried by the trunk) once the
 	// bore reaches its depth. Excavation on a reached floor carves 10x10 cells,
 	// emitting regolith spoil to the shaft-head pile (hauled to the Forge in A2).
-	int32 GetShaftDepth() const { return ShaftDepth; }
-	bool IsLevelConnected(int32 Level) const { return Level == 0 || (Level < 0 && -Level <= ShaftDepth); }
+	// R6 (D2): GetShaftDepth() is the DEEPEST shaft; GetBoreTargetDepth() is SHAFT 0's. They answer about different
+	// shafts, so code that combines them (Max(GetShaftDepth(), GetBoreTargetDepth())) is a bug that compiles: use the
+	// per-shaft overloads. GetShaftHeadCm() below is region 0's ORIGIN (= shaft 0's head), never "the shaft".
+	int32 GetShaftDepth() const { return DeepestShaft; }
+	int32 GetShaftDepth(int32 ShaftId) const { return Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].Depth : 0; }
+	bool IsLevelConnected(int32 Level) const { return Level == 0 || (Level < 0 && -Level <= DeepestShaft); }
+	// D2: the shaft list. Shafts[0] always exists.
+	const TArray<FRHShaft>& GetShafts() const { return Shafts; }
+	int32 GetShaftCount() const { return Shafts.Num(); }
+	const FRHShaft& GetShaft(int32 ShaftId) const { return Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId] : Shafts[0]; }
+	int32 GetMaxShafts() const { return MaxShafts; }
+	// Shaft S reaches floor L (L < 0) when it is bored at least that deep.
+	bool ShaftReaches(int32 ShaftId, int32 Level) const { return Level < 0 && Shafts.IsValidIndex(ShaftId) && Shafts[ShaftId].Depth >= -Level; }
+	// The shaft a Borer works: the one it anchors, else 0 (an unanchored Borer is a helper on shaft 0).
+	int32 GetBorerShaft(int32 BuildingId) const { const int32* S = BorerShaft.Find(BuildingId); return S ? *S : 0; }
+	bool IsBorerAnchor(int32 BuildingId) const { return BorerShaft.Contains(BuildingId); }
+	// The shaft whose head serves lattice point P on Level (see the D2 design, section 7): the shafts that reach Level; of
+	// those, the ones that touch P's dig when P is carved; the nearest column (squared lattice distance), ties to the
+	// lower Id. INDEX_NONE when no shaft reaches Level (Level 0 answers 0).
+	int32 ServingShaft(int32 Level, const FIntPoint& P) const;
+	uint32 GetShaftsVersion() const { return ShaftsVersion; }
+	// The SinkShaft preflight (refusals 1-9 of the D2 design), with the reason; the deck pre-checks with it and the order
+	// re-runs it at execute time.
+	bool CanSinkShaft(int32 BorerId, FString& OutReason) const;
+	// Harness: the analogue of ExtendShaft for shaft k > 0. Runs refusals 4-8 of the SinkShaft order (no Borer), then
+	// bores the new shaft to Depth. HeadCm snaps to region 0's lattice.
+	bool Debug_SinkShaftAt(const FVector& HeadCm, int32 Depth, int32& OutShaftId, FString& OutReason);
+	// Harness: how long the last cold dig labelling took (microseconds) and how many labellings have run.
+	int32 GetDigLabelRuns() const { return DigLabelRuns; }
 	// Two floors exchange materials iff the trunk reaches both (the lift is
 	// the only cross-level connector - underground proposal §5).
 	bool AreLevelsLinked(int32 A, int32 B) const { return A == B || (IsLevelConnected(A) && IsLevelConnected(B)); }
@@ -511,7 +559,8 @@ public:
 	static FIntPoint CmToLattice(const FVector& OriginCm, const FVector& Cm) { return FIntPoint(FMath::RoundToInt((Cm.X - OriginCm.X) / 1000.0), FMath::RoundToInt((Cm.Y - OriginCm.Y) / 1000.0)); }
 	// The N points that N successive carves of Level would append (the plan first, then the lowest uncarved spiral
 	// points), without carving. The Borer, ExcavateFloor and the growth ghost all use this one rule.
-	void PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out) const;
+	// S = the shaft whose carve it is; INDEX_NONE = the lowest-Id shaft that reaches Level (shaft 0 when none does).
+	void PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out, int32 ShaftId = INDEX_NONE) const;
 	uint32 GetFloorCellsVersion() const { return FloorCellsVersion; }
 	int32 GetFloorCellFallbacks() const { return FloorCellFallbacks; }
 	int32 GetAdjacencyFallbackRuns() const { return AdjacencyFallbackRuns; }
@@ -521,11 +570,14 @@ public:
 	// Harness: 0 = the adjacency pass picks its own search, 1 = force the dense grid, 2 = force the hash lookup.
 	void Debug_SetAdjacencyMode(int32 Mode) { AdjacencyMode = Mode; }
 	double GetSpoilPileKg() const { return SpoilPileKg; }
-	FVector GetShaftHeadCm() const { return ShaftHeadCm; }
+	// Region 0's ORIGIN = shaft 0's head (R6: new code that wants "the shaft" reads GetShaft(Id).HeadCm).
+	FVector GetShaftHeadCm() const { return Shafts[0].HeadCm; }
 	// Designation reads (M1-d Gate A2): the player's standing orders the Borer
-	// works through, batch by batch.
-	int32 GetBoreTargetDepth() const { return BoreTargetDepth; }
-	int32 GetCarveQueued(int32 Level) const { const int32* C = CarveQueue.Find(Level); return C ? *C : 0; }
+	// works through, batch by batch. No-argument: SHAFT 0's target (R6); the sum of every shaft's queue for a level.
+	int32 GetBoreTargetDepth() const { return Shafts[0].BoreTargetDepth; }
+	int32 GetBoreTargetDepth(int32 ShaftId) const { return Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].BoreTargetDepth : 0; }
+	int32 GetCarveQueued(int32 Level) const { int32 Sum = 0; for (const FRHShaft& Sh : Shafts) { const int32* C = Sh.CarveQueue.Find(Level); Sum += C ? *C : 0; } return Sum; }
+	int32 GetCarveQueued(int32 Level, int32 ShaftId) const { const int32* C = Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].CarveQueue.Find(Level) : nullptr; return C ? *C : 0; }
 
 	// --- Habitability chain (M1-d Gate B) ---
 	// A carved floor is bored -> shielded (free from overburden; the M1-c
@@ -1279,7 +1331,8 @@ public:
 	void ExtendShaft(int32 ToDepth, const FVector& HeadCm);
 	// Carve Cells (10x10 units) on a reached subsurface floor; emits per-cell
 	// spoil. Fails (with reason) if the floor is not reached.
-	bool ExcavateFloor(int32 Level, int32 Cells, FString& OutReason);
+	// ShaftId = the shaft whose reach is tested (and whose spiral carves); INDEX_NONE = the lowest-Id shaft that reaches Level.
+	bool ExcavateFloor(int32 Level, int32 Cells, FString& OutReason, int32 ShaftId = INDEX_NONE);
 
 	// --- Reads (out) ---
 	const TArray<FRHBuildingInstance>& GetBuildings() const { return Buildings; }
@@ -2056,11 +2109,12 @@ private:
 	{
 		uint32 Districts = 0, Colonists = 0, Zoning = 0, Furniture = 0, Jobs = 0, Built = 0, Cfg = 0;
 		FIntPoint Shaft = FIntPoint::ZeroValue;
+		uint32 ShaftReach = 0;               // D2: up on every SinkShaft, and on a bore only while there is more than one shaft
 		int32 BuildingCount = 0, NextBuilding = 0;
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
-				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
+				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -2113,6 +2167,9 @@ private:
 	// Surface(A, B) = min(straight, road) in walking-equivalent cm; OutEdges (optional) gets the road edges the trip rides.
 	int64 CommuteSurfaceCm(FIntPoint A, FIntPoint B, TArray<int32>* OutEdges = nullptr) const;
 	int32 CommuteIntern(FIntPoint P) const;
+	// D2: the shaft a floor anchor on Level uses for a trip to surface point P: the cheapest over the shafts that reach Level,
+	// ties to the lower Id; shaft 0 when none reaches Level (today's formula never checked reach). One shaft: always 0, no call.
+	int32 PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm) const;
 	void CommuteFillEdgeLoad(const FRHCommuteFlows& F) const;
 	void ResetCommuteMemoIfStale() const;
 
@@ -2289,8 +2346,34 @@ private:
 	double FloorHeightCm = 400.0;
 	int32 MaxDepth = 5;
 	// Shaft & excavation state (M1-d Gate A; serialized, save v6).
-	int32 ShaftDepth = 0;                  // floors the trunk reaches below surface (0 = none)
-	FVector ShaftHeadCm = FVector::ZeroVector; // surface column the shaft descends from
+	TArray<FRHShaft> Shafts = { FRHShaft() }; // D2: saved straight after the floor table (save v44). Shafts[0] always exists.
+	// D2 derived state, rebuilt by RebuildShaftDerived (never saved):
+	int32 DeepestShaft = 0;                // max Depth over the shafts
+	TSet<FIntPoint> ShaftColumns;          // every shaft's column, (0,0) included; lookups only
+	TMap<int32, int32> BorerShaft;         // anchoring Borer Id -> shaft Id; lookups only
+	uint32 ShaftsVersion = 0;              // up on sink, on every Depth change, on the first head fix and on load
+	uint32 ShaftReachVersion = 0;          // the commute flows key: up on every sink, and on a bore while Shafts.Num() > 1
+	int32 MaxShafts = 4;                   // config MaxShafts, clamped to [1, RH::MaxShaftsCap]
+	void RebuildShaftDerived();
+	int32 ResolveShaftTarget(FName Target) const; // NAME_None / "Shaft0" -> 0, "Shaft<k>" -> k, else INDEX_NONE
+	int32 NearestReachingShaft(int32 Level, const FIntPoint& P) const;
+	bool ExecuteSinkShaft(int32 BorerId, FString& OutReason);
+	bool CheckSinkColumn(const FIntPoint& Column, int32 BorerId, FString& OutReason) const; // refusals 7-9
+	void ExtendShaftOf(int32 ShaftId, int32 ToDepth);
+	void WriteShaftBlock(FArchive& Ar) const;
+	bool ReadShaftBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, TArray<FRHShaft>& OutShafts, FString& OutError) const;
+	// The 4-connected digs of a floor (derived, cached on FloorCellsVersion + ShaftsVersion, lookups only).
+	struct FRHDigInfo
+	{
+		bool bValid = false;
+		uint32 CellsVersion = 0, ShaftsVer = 0;
+		TArray<int32> DigOf;               // ordinal -> dig label
+		TArray<TArray<int32>> Touching;    // dig label -> ascending shaft Ids that touch it
+	};
+	const FRHDigInfo& EnsureDigInfo(int32 Level) const;
+	mutable TMap<int32, FRHDigInfo> DigCache;
+	mutable int32 DigLabelRuns = 0;
+	bool IsBayNearShaftHead(const FVector& BayCentreCm) const; // a head whose shaft has Depth >= 1
 	TArray<FRHFloor> FloorTable;           // D1: the floor table (saved straight after the header, save v41)
 	TMap<int32, int32> FloorIndexByLevel;  // derived: Level -> index in FloorTable; re-derived whenever a floor is inserted
 	uint32 FloorCellsVersion = 0;          // up on every append, plan change and load; presentation caches key on it
@@ -2301,14 +2384,13 @@ private:
 	FRHFloor& FindOrAddFloor(int32 Level);
 	void RebuildFloorIndex();
 	void AppendCarvedCell(FRHFloor& Floor, const FIntPoint& P);
-	FIntPoint CarveNextCell(int32 Level);  // the Borer's rule: the next planned cell, else the lowest uncarved spiral cell
+	FIntPoint CarveNextCell(int32 Level, int32 ShaftId = 0);  // the Borer's rule for shaft S: the first planned cell S owns, else S's lowest uncarved spiral cell
 	void WriteFloorTable(FArchive& Ar) const;
 	bool ReadFloorTable(FArchive& Ar, TArray<FRHFloor>& OutFloors, FString& OutError) const;
 	double SpoilPileKg = 0.0;              // debug-cheat spoil only; Borer batches drop spoil at the building
 	// Designation queues (A2; serialized): the Borer works these through the
 	// batch integrator. Bore first, then carve shallowest-first (deterministic).
-	int32 BoreTargetDepth = 0;             // ordered trunk depth; work proceeds while ShaftDepth < this
-	TMap<int32, int32> CarveQueue;         // Level -> cells still to carve (decremented at batch START)
+	// (The bore target and the carve queue are per shaft now: FRHShaft.)
 	// Batch-in-flight work records (BuildingId -> X: 0=bore floor/1=carve cell,
 	// Y: level). Applied at batch completion; serialized so a mid-batch save
 	// resumes and still advances the shaft.

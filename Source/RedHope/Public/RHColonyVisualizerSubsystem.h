@@ -365,6 +365,21 @@ private:
 	UPROPERTY() TObjectPtr<AActor> EnvironmentRigActor;
 	bool bEnvironmentHidden = false;
 	FIntVector LastRigKey = FIntVector(-999, -999, -999); // (depth, pit level, carved count)
+	uint32 LastRigShaftKey = 0;                            // D2: the shaft list's version while there is more than one shaft (0 with one: the one-shaft key is unchanged)
+	// D2: the elevator head of every shaft sunk after shaft 0 (index k - 1): an invisible anchor actor that owns a
+	// static cab and a fill light, shown only on the floors that shaft reaches. Shaft 0's cage, doors and lamp stay the
+	// members above. The cab does not animate doors, and crew still board at shaft 0 (D2 presentation is minimal).
+	struct FExtraShaftVisual
+	{
+		TWeakObjectPtr<AStaticMeshActor> Anchor;
+		TWeakObjectPtr<UStaticMeshComponent> Cab;
+		TWeakObjectPtr<UPointLightComponent> Fill;
+		int32 DepthSeen = 0;
+	};
+	TArray<FExtraShaftVisual> ExtraShafts;
+	void UpdateExtraShaftVisuals(const class URHSimWorldSubsystem* Sim);   // spawn / respawn on a depth change
+	void PlaceExtraShaftVisuals(const class URHSimWorldSubsystem* Sim);    // every tick and view change: position and visibility
+	void ClearExtraShaftVisuals();
 	TMap<int32, int32> TilesSpawnedPerLevel;
 	TWeakObjectPtr<AActor> GroundActor;
 	bool bGroundSearched = false;

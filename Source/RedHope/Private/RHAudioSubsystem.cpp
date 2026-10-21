@@ -5,7 +5,9 @@
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
 #include "Components/AudioComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
@@ -228,7 +230,23 @@ void URHAudioSubsystem::Tick(float DeltaTime)
 	const bool bStorm = Event && Event->Type == FName("DustStorm");
 	TickAmbience(DeltaTime, ViewLevel < 0, bStorm);
 	TickMachines(DeltaTime, ViewLevel, Sim->GetFloorHeightCm());
-	const FVector Head = Sim->GetShaftHeadCm();
+	FVector Head = Sim->GetShaftHeadCm();
+	// D2: with more than one shaft the elevator you hear is the head nearest the camera (among the shafts that reach the viewed floor).
+	if (Sim->GetShaftCount() > 1)
+	{
+		const APlayerController* PC = World->GetFirstPlayerController();
+		const FVector Cam = (PC && PC->PlayerCameraManager) ? PC->PlayerCameraManager->GetCameraLocation() : Head;
+		double BestCm = TNumericLimits<double>::Max();
+		for (const FRHShaft& Sh : Sim->GetShafts())
+		{
+			if (ViewLevel < 0 && !Sim->ShaftReaches(Sh.Id, ViewLevel))
+			{
+				continue;
+			}
+			const double D = FVector::DistXY(Cam, Sh.HeadCm);
+			if (D < BestCm) { BestCm = D; Head = Sh.HeadCm; }
+		}
+	}
 	TickElevator(FVector(Head.X + RHElevator::DoorPlaneX, Head.Y, ViewLevel * Sim->GetFloorHeightCm() + 120.0));
 	TickEvents();
 	// Phase for the score: Automation until the crew land, Habitation with

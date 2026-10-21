@@ -366,14 +366,22 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBuild(
 		}
 	}));
 
+// D2: the optional trailing [shaft] argument of RH.Bore / RH.Excavate / RH.ExcavateNow. 0 (or none) is shaft 0 (the order's Target stays
+// empty, as every order before D2); k > 0 is Target "Shaft<k>".
+static FName RHShaftTarget(const TArray<FString>& Args, int32 At)
+{
+	const int32 K = Args.Num() > At ? FCString::Atoi(*Args[At]) : 0;
+	return K > 0 ? FName(*FString::Printf(TEXT("Shaft%d"), K)) : FName(NAME_None);
+}
+
 static FAutoConsoleCommandWithWorldAndArgs GRHBore(
 	TEXT("RH.Bore"),
-	TEXT("RH.Bore <ToDepth> - order the shaft trunk bored down to the given floor (uplink; needs a Borer online, works batch by batch)."),
+	TEXT("RH.Bore <ToDepth> [shaft=0] - order the shaft trunk bored down to the given floor (uplink; needs a Borer online, works batch by batch). shaft k > 0 is a shaft sunk with RH.SinkShaft."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Bore <ToDepth>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Bore <ToDepth> [shaft]"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -381,18 +389,65 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBore(
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Bore");
 			Cmd.Value = FCString::Atod(*Args[0]);
+			Cmd.Target = RHShaftTarget(Args, 1);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSinkShaft(
+	TEXT("RH.SinkShaft"),
+	TEXT("RH.SinkShaft <BorerId> - order a new shaft sunk where that Borer stands (uplink). Needs shaft 0 bored, a completed Borer inside coverage that anchors no shaft and has no batch in flight, and a free column (RH.Status lists the shafts)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.SinkShaft <BorerId>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("SinkShaft");
+			Cmd.Value = FCString::Atod(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHSinkNow(
+	TEXT("RH.SinkNow"),
+	TEXT("RH.SinkNow <Xm> <Ym> [Depth=1] - DEBUG: sink a new shaft instantly at that spot (snapped to the lattice; bypasses Borer/uplink, runs the column checks) and bore it to Depth (spoil banks at its head, unhauled)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.SinkNow <Xm> <Ym> [Depth]"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			int32 NewId = INDEX_NONE;
+			FString Why;
+			const FVector Head(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f);
+			const int32 Depth = Args.Num() > 2 ? FCString::Atoi(*Args[2]) : 1;
+			if (Sim->Debug_SinkShaftAt(Head, Depth, NewId, Why))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.SinkNow] shaft %d sunk and bored to -%d"), NewId, Sim->GetShaftDepth(NewId));
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.SinkNow] refused: %s"), *Why);
+			}
 		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 	TEXT("RH.Excavate"),
-	TEXT("RH.Excavate <Level> <Cells> - order N 10x10 cells carved on a reached floor (uplink; the Borer works the queue)."),
+	TEXT("RH.Excavate <Level> <Cells> [shaft=0] - order N 10x10 cells carved on a floor that shaft reaches (uplink; its Borer works the queue)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 2)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Excavate <Level> <Cells>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Excavate <Level> <Cells> [shaft]"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
@@ -401,6 +456,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 			Cmd.Verb = FName("Excavate");
 			Cmd.Level = FCString::Atoi(*Args[0]);
 			Cmd.Value = FCString::Atod(*Args[1]);
+			Cmd.Target = RHShaftTarget(Args, 2);
 			Sim->EnqueueCommand(Cmd);
 		}
 	}));
@@ -1528,18 +1584,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHBoreNow(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHExcavateNow(
 	TEXT("RH.ExcavateNow"),
-	TEXT("RH.ExcavateNow <Level> <Cells> - DEBUG: carve instantly (bypasses Borer/uplink; spoil banks at the head, unhauled)."),
+	TEXT("RH.ExcavateNow <Level> <Cells> [shaft] - DEBUG: carve instantly (bypasses Borer/uplink; spoil banks at the head, unhauled). No shaft = the lowest-Id shaft that reaches the floor."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 2)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ExcavateNow <Level> <Cells>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ExcavateNow <Level> <Cells> [shaft]"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
 			FString Reason;
-			if (!Sim->ExcavateFloor(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]), Reason))
+			if (!Sim->ExcavateFloor(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]), Reason, Args.Num() > 2 ? FCString::Atoi(*Args[2]) : (int32)INDEX_NONE))
 			{
 				UE_LOG(LogRedHope, Warning, TEXT("Excavate: %s"), *Reason);
 			}
@@ -1649,7 +1705,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 			FString Carve;
 			for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
 			{
-				const int32 Queued = Sim->GetCarveQueued(L);
+				const int32 Queued = Sim->GetCarveQueued(L, 0);
 				const int32 Carved = Sim->GetFloorCarvedCells(L);
 				if (Queued > 0 || Carved > 0)
 				{
@@ -1657,8 +1713,21 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 						Queued > 0 ? *FString::Printf(TEXT(" (+%d queued)"), Queued) : TEXT(""));
 				}
 			}
+			// D2: shaft 0's line keeps today's text (per-shaft getters: GetShaftDepth() is the DEEPEST shaft).
 			UE_LOG(LogRedHope, Display, TEXT("  shaft: floor -%d of ordered -%d%s"),
-				Sim->GetShaftDepth(), Sim->GetBoreTargetDepth(), *Carve);
+				Sim->GetShaftDepth(0), Sim->GetBoreTargetDepth(0), *Carve);
+		}
+		// One more line per shaft sunk after shaft 0.
+		for (int32 K = 1; K < Sim->GetShaftCount(); ++K)
+		{
+			const FRHShaft& Sh = Sim->GetShaft(K);
+			FString Queue;
+			for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
+			{
+				if (Sim->GetCarveQueued(L, K) > 0) { Queue += FString::Printf(TEXT("  %d: +%d queued"), L, Sim->GetCarveQueued(L, K)); }
+			}
+			UE_LOG(LogRedHope, Display, TEXT("  shaft %d: floor -%d of ordered -%d | column (%d, %d) | Borer #%d%s"),
+				K, Sh.Depth, Sh.BoreTargetDepth, Sh.Column.X, Sh.Column.Y, Sh.BorerId, *Queue);
 		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{

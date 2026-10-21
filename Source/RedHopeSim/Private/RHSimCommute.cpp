@@ -57,8 +57,9 @@ URHSimWorldSubsystem::FRHCommuteKey URHSimWorldSubsystem::MakeCommuteKey() const
 	K.Jobs = JobsVersion;
 	K.Built = RoadGraph.BuiltVersion;
 	K.Cfg = CommuteCfgVersion;
-	K.Shaft = ToWholeCmCommute(ShaftHeadCm);
-	K.BuildingCount = Buildings.Num();
+	K.Shaft = ToWholeCmCommute(Shafts[0].HeadCm);
+	K.ShaftReach = ShaftReachVersion; // D2: constant while there is one shaft
+K.BuildingCount = Buildings.Num();
 	K.NextBuilding = NextBuildingId;
 	return K;
 }
@@ -67,7 +68,7 @@ void URHSimWorldSubsystem::ResetCommuteMemoIfStale() const
 {
 	FRHCommuteMemo& M = CommuteMemo;
 	const int32 Permille = FMath::RoundToInt(CommuteRoadSpeedMul * 1000.0);
-	const FIntPoint Shaft = ToWholeCmCommute(ShaftHeadCm);
+	const FIntPoint Shaft = ToWholeCmCommute(Shafts[0].HeadCm); // the memo never keys on the other heads: they are only more interned positions
 	// The memo is a pure function of the built graph, the shaft head and the commuters' road speed - never of who
 	// works where. The size cap only bounds memory: results are pure, so a flush never changes an answer.
 	if (!M.bValid || M.Built != RoadGraph.BuiltVersion || M.Shaft != Shaft || M.SpeedPermille != Permille || M.Pos.Num() > 16384)
@@ -166,21 +167,44 @@ int64 URHSimWorldSubsystem::CommuteSurfaceCm(FIntPoint A, FIntPoint B, TArray<in
 	return Result.Key;
 }
 
+int32 URHSimWorldSubsystem::PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm) const
+{
+	if (Shafts.Num() == 1)
+	{
+		return 0; // one shaft: today's calls, in today's order
+	}
+	int32 Best = INDEX_NONE;
+	int64 BestCm = 0;
+	for (int32 S = 0; S < Shafts.Num(); ++S)
+	{
+		if (!ShaftReaches(S, Level))
+		{
+			continue;
+		}
+		const int64 Cm = CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), SurfacePosCm);
+		if (Best == INDEX_NONE || Cm < BestCm) // strict: ties go to the lower Id
+		{
+			Best = S;
+			BestCm = Cm;
+		}
+	}
+	return Best == INDEX_NONE ? 0 : Best; // no shaft reaches Level: shaft 0's head, as the formula always read it
+}
+
 int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm) const
 {
 	const int64 Per = CommuteShaftCmPerFloor;
-	const FIntPoint Shaft = ToWholeCmCommute(ShaftHeadCm);
 	if (HomeLevel < 0 && WorkLevel < 0)
 	{
 		return (int64)FMath::Abs(HomeLevel - WorkLevel) * Per;
 	}
 	if (HomeLevel < 0)
 	{
-		return (int64)(-HomeLevel) * Per + CommuteSurfaceCm(Shaft, WorkPosCm);
+		return (int64)(-HomeLevel) * Per + CommuteSurfaceCm(ToWholeCmCommute(Shafts[PickCommuteShaft(HomeLevel, WorkPosCm)].HeadCm), WorkPosCm);
 	}
 	if (WorkLevel < 0)
 	{
-		return (int64)(-WorkLevel) * Per + CommuteSurfaceCm(HomePosCm, Shaft);
+		return (int64)(-WorkLevel) * Per + CommuteSurfaceCm(HomePosCm, ToWholeCmCommute(Shafts[PickCommuteShaft(WorkLevel, HomePosCm)].HeadCm));
 	}
 	return CommuteSurfaceCm(HomePosCm, WorkPosCm);
 }
@@ -271,6 +295,12 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			{
 				bOk &= SurfaceBuildingPos(Station->Z, Work.Pos);
 				WorkDistrictId = Mem.OfBuilding.FindRef(Station->Z);
+			}
+			if (bOk && Shafts.Num() > 1)
+			{
+				// D2: a floor anchor sits at the head of the shaft this trip uses (the cheapest that reaches its floor).
+				if (Home.Level < 0 && Work.Level == 0) { Home.Pos = ToWholeCmCommute(Shafts[PickCommuteShaft(Home.Level, Work.Pos)].HeadCm); }
+				else if (Work.Level < 0 && Home.Level == 0) { Work.Pos = ToWholeCmCommute(Shafts[PickCommuteShaft(Work.Level, Home.Pos)].HeadCm); }
 			}
 			T.bMeasured = bOk;
 			if (bOk)
@@ -467,15 +497,13 @@ void URHSimWorldSubsystem::CommuteFillEdgeLoad(const FRHCommuteFlows& F) const
 	F.TripEdges.Reset();
 	F.TripEdges.SetNum(F.Trips.Num());
 	TMap<int32, int32> Load; // lookups only; read out sorted
-	const FIntPoint Shaft = F.Key.Shaft;
 	for (int32 i = 0; i < F.Trips.Num(); ++i)
 	{
+		// D2: a floor anchor's Pos already holds the head of the shaft the trip uses (shaft 0's, with one shaft), so the road load
+		// follows the same head as the distance.
 		const FRHCommuteTrip& T = F.Trips[i];
-		FIntPoint A = T.HomePos, B = T.WorkPos;
-		bool bSurfacePart = true;
-		if (T.HomeLevel < 0 && T.WorkLevel < 0) { bSurfacePart = false; }
-		else if (T.HomeLevel < 0) { A = Shaft; }
-		else if (T.WorkLevel < 0) { B = Shaft; }
+		const FIntPoint A = T.HomePos, B = T.WorkPos;
+		const bool bSurfacePart = !(T.HomeLevel < 0 && T.WorkLevel < 0);
 		if (bSurfacePart)
 		{
 			CommuteSurfaceCm(A, B, &F.TripEdges[i]);

@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 43;  // v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 44;  // v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -122,6 +122,15 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
 	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
 	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
+	{
+		const int32 Row = (int32)Defs->GetConfigScalar(FName("MaxShafts"), 4.0);
+		MaxShafts = FMath::Clamp(Row, 1, RH::MaxShaftsCap);
+		if (MaxShafts != Row)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxShafts %d is outside 1..%d - clamped to %d"), Row, RH::MaxShaftsCap, MaxShafts);
+		}
+		RebuildShaftDerived();
+	}
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
 	RepairWearPerPart = (float)Defs->GetConfigScalar(FName("RepairWearPerPart"), RepairWearPerPart);
@@ -1422,21 +1431,46 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				// the spoil already dropped with the outputs above.
 				if (const FIntPoint* Work = PendingBoreWork.Find(B.Id))
 				{
+					const int32 WorkShaft = GetBorerShaft(B.Id); // D2: the shaft this Borer works (its own, else shaft 0 as a helper)
+					FRHShaft& Sh = Shafts[WorkShaft];
 					if (Work->X == 0) // bore: the trunk descends one floor
 					{
-						if (ShaftDepth == 0)
+						if (Sh.Depth == 0 && WorkShaft == 0)
 						{
-							ShaftHeadCm = B.LocationCm; // the column is fixed by the Borer
+							Sh.HeadCm = B.LocationCm; // the column is fixed by the Borer
+							Sh.BorerId = B.Id;        // D2: and the Borer anchors shaft 0
+							++ShaftsVersion;          // the first head fix
 						}
-						++ShaftDepth;
-						UE_LOG(LogRedHopeSim, Display, TEXT("Shaft reached floor -%d%s"), ShaftDepth,
-							ShaftDepth >= BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
+						++Sh.Depth;
+						RebuildShaftDerived();
+						if (Shafts.Num() > 1)
+						{
+							++ShaftReachVersion;
+						}
+						if (WorkShaft == 0)
+						{
+							UE_LOG(LogRedHopeSim, Display, TEXT("Shaft reached floor -%d%s"), Sh.Depth,
+								Sh.Depth >= Sh.BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
+						}
+						else
+						{
+							UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d reached floor -%d%s"), WorkShaft, Sh.Depth,
+								Sh.Depth >= Sh.BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
+						}
 					}
 					else // carve: one cell opens on its floor
 					{
-						CarveNextCell(Work->Y);
-						UE_LOG(LogRedHopeSim, Display, TEXT("Carved cell on floor %d (%d carved, %d queued)"),
-							Work->Y, GetFloorCarvedCells(Work->Y), GetCarveQueued(Work->Y));
+						CarveNextCell(Work->Y, WorkShaft);
+						if (WorkShaft == 0)
+						{
+							UE_LOG(LogRedHopeSim, Display, TEXT("Carved cell on floor %d (%d carved, %d queued)"),
+								Work->Y, GetFloorCarvedCells(Work->Y), GetCarveQueued(Work->Y));
+						}
+						else
+						{
+							UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d carved cell on floor %d (%d carved, %d queued)"),
+								WorkShaft, Work->Y, GetFloorCarvedCells(Work->Y), GetCarveQueued(Work->Y));
+						}
 					}
 					PendingBoreWork.Remove(B.Id);
 				}
@@ -1458,24 +1492,28 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 			{
 				FName WorkRecipeName = NAME_None;
 				FIntPoint WorkItem(0, 0);
+				// D2: this Borer works one shaft S - the one it anchors, else shaft 0 as a helper. The bore-in-flight scan
+				// only counts records whose Borer maps to S; the carve gate is "S reaches L", never "the deepest shaft does".
+				const int32 WorkShaft = GetBorerShaft(B.Id);
+				FRHShaft& WorkSh = Shafts[WorkShaft];
 				bool bFloorWorkInFlight = false;
 				for (const auto& W : PendingBoreWork)
 				{
-					if (W.Value.X == 0) { bFloorWorkInFlight = true; break; }
+					if (W.Value.X == 0 && GetBorerShaft(W.Key) == WorkShaft) { bFloorWorkInFlight = true; break; }
 				}
-				if (BoreTargetDepth > ShaftDepth && !bFloorWorkInFlight)
+				if (WorkSh.BoreTargetDepth > WorkSh.Depth && !bFloorWorkInFlight)
 				{
 					WorkRecipeName = FName("BoreFloor");
-					WorkItem = FIntPoint(0, -(ShaftDepth + 1));
+					WorkItem = FIntPoint(0, -(WorkSh.Depth + 1));
 				}
 				else
 				{
 					TArray<int32> Levels;
-					CarveQueue.GenerateKeyArray(Levels);
+					WorkSh.CarveQueue.GenerateKeyArray(Levels);
 					Levels.Sort([](int32 A, int32 C) { return A > C; }); // -1 before -2
 					for (int32 L : Levels)
 					{
-						if (CarveQueue[L] > 0 && IsLevelConnected(L))
+						if (WorkSh.CarveQueue[L] > 0 && ShaftReaches(WorkShaft, L))
 						{
 							WorkRecipeName = FName("CarveCell");
 							WorkItem = FIntPoint(1, L);
@@ -1500,7 +1538,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					}
 					if (WorkItem.X == 1)
 					{
-						--CarveQueue[WorkItem.Y]; // committed at start
+						--WorkSh.CarveQueue[WorkItem.Y]; // committed at start
 					}
 					PendingBoreWork.Add(B.Id, WorkItem);
 					B.ActiveRecipe = WorkRecipeName;
@@ -2640,9 +2678,21 @@ void URHSimWorldSubsystem::Debug_AddSolid(FName DefName, FName Resource, double 
 FVector URHSimWorldSubsystem::GetApproachPoint(const FRHSiteRef& Site, int32 RobotLevel) const
 {
 	const int32 SiteLevel = GetSiteLevel(Site);
-	if (SiteLevel != RobotLevel && AreLevelsLinked(SiteLevel, RobotLevel) && ShaftDepth > 0)
+	if (SiteLevel != RobotLevel && AreLevelsLinked(SiteLevel, RobotLevel) && DeepestShaft > 0)
 	{
-		FVector Head = ShaftHeadCm;
+		// D2: the head of the shaft that serves the site. Both levels are reached here (AreLevelsLinked), so the deepest
+		// shaft reaches the deeper one and the candidate set is never empty: INDEX_NONE cannot occur, and still falls back to 0.
+		int32 Serving = 0;
+		if (Shafts.Num() > 1)
+		{
+			const int32 Deeper = FMath::Min(SiteLevel, RobotLevel);
+			Serving = ServingShaft(Deeper, CmToLattice(Shafts[0].HeadCm, GetSiteLocation(Site)));
+			if (!ensure(Serving != INDEX_NONE))
+			{
+				Serving = 0;
+			}
+		}
+		FVector Head = Shafts[Serving].HeadCm;
 		Head.Z = RobotLevel * FloorHeightCm;
 		return Head;
 	}
@@ -3231,12 +3281,24 @@ bool URHSimWorldSubsystem::IsNetShaftLinked(const FRHHabNetCache& N) const
 			const FRHHabMemberCache& M = HabMembers.FindChecked(Id);
 			for (int32 Bay = 0; B && Bay < M.NX * M.NY; ++Bay)
 			{
-				const FVector C = GetBayCentreCm(*B, Bay);
-				if (FMath::Max(FMath::Abs(C.X - ShaftHeadCm.X), FMath::Abs(C.Y - ShaftHeadCm.Y)) <= ShaftLinkRangeCm + 0.5)
+				if (IsBayNearShaftHead(GetBayCentreCm(*B, Bay)))
 				{
 					return true;
 				}
 			}
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsBayNearShaftHead(const FVector& C) const
+{
+	// A bay within ShaftLinkRangeCm of ANY head whose shaft has Depth >= 1 (a boolean over the shafts, so Id order cannot matter).
+	for (const FRHShaft& Sh : Shafts)
+	{
+		if (Sh.Depth >= 1 && FMath::Max(FMath::Abs(C.X - Sh.HeadCm.X), FMath::Abs(C.Y - Sh.HeadCm.Y)) <= ShaftLinkRangeCm + 0.5)
+		{
+			return true;
 		}
 	}
 	return false;
@@ -4992,24 +5054,73 @@ void URHSimWorldSubsystem::AppendCarvedCell(FRHFloor& Floor, const FIntPoint& P)
 	++FloorCellsVersion;
 }
 
-FIntPoint URHSimWorldSubsystem::CarveNextCell(int32 Level)
+int32 URHSimWorldSubsystem::NearestReachingShaft(int32 Level, const FIntPoint& P) const
+{
+	// The shaft that owns an UNCARVED point: the nearest column among the shafts that reach Level (squared lattice
+	// distance, int64), ties to the lower Id. INDEX_NONE when none reaches Level.
+	int32 Best = INDEX_NONE;
+	int64 BestD2 = 0;
+	for (int32 S = 0; S < Shafts.Num(); ++S)
+	{
+		if (!ShaftReaches(S, Level))
+		{
+			continue;
+		}
+		const int64 Dx = (int64)P.X - Shafts[S].Column.X, Dy = (int64)P.Y - Shafts[S].Column.Y;
+		const int64 D2 = Dx * Dx + Dy * Dy;
+		if (Best == INDEX_NONE || D2 < BestD2)
+		{
+			Best = S;
+			BestD2 = D2;
+		}
+	}
+	return Best;
+}
+
+FIntPoint URHSimWorldSubsystem::CarveNextCell(int32 Level, int32 ShaftId)
 {
 	FRHFloor& Floor = FindOrAddFloor(Level);
+	const FIntPoint Column = Shafts[ShaftId].Column;
 	FIntPoint P(0, 0);
-	if (Floor.Plan.Num() > 0)
+	// D2: the first plan point S owns, in paint order. With one shaft every plan point is shaft 0's.
+	int32 PlanAt = INDEX_NONE;
+	for (int32 i = 0; i < Floor.Plan.Num(); ++i)
 	{
-		P = Floor.Plan[0];
-		Floor.Plan.RemoveAt(0);
+		if (Shafts.Num() == 1 || NearestReachingShaft(Level, Floor.Plan[i]) == ShaftId)
+		{
+			PlanAt = i;
+			break;
+		}
+	}
+	if (PlanAt != INDEX_NONE)
+	{
+		P = Floor.Plan[PlanAt];
+		Floor.Plan.RemoveAt(PlanAt);
 	}
 	else
 	{
-		for (;;) // the cursor skips spiral points that are already carved; it never moves past an uncarved one
+		if (Floor.Walks.Num() <= ShaftId)
 		{
-			FRHSpiralWalk Probe = Floor.Walk;
-			const FIntPoint Q = Probe.Next();
-			if (Floor.IndexOf.Contains(Q))
+			Floor.Walks.SetNum(ShaftId + 1);
+		}
+		// The cursor skips only PERMANENT blockers (carved points, shaft columns); it never moves past an uncarved point, and a
+		// plan point (carved by its owner sooner or later) is stepped over by the probe without moving the cursor.
+		FRHSpiralWalk Probe = Floor.Walks[ShaftId];
+		bool bCursorLive = true;
+		for (;;)
+		{
+			const FIntPoint Q = Column + Probe.Next();
+			if (Floor.IndexOf.Contains(Q) || ShaftColumns.Contains(Q))
 			{
-				Floor.Walk = Probe;
+				if (bCursorLive)
+				{
+					Floor.Walks[ShaftId] = Probe;
+				}
+				continue;
+			}
+			if (Floor.Plan.Num() > 0 && Floor.Plan.Contains(Q))
+			{
+				bCursorLive = false;
 				continue;
 			}
 			P = Q;
@@ -5020,29 +5131,179 @@ FIntPoint URHSimWorldSubsystem::CarveNextCell(int32 Level)
 	return P;
 }
 
-void URHSimWorldSubsystem::PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out) const
+void URHSimWorldSubsystem::PeekCarveCells(int32 Level, int32 N, TArray<FIntPoint>& Out, int32 ShaftId) const
 {
 	Out.Reset();
+	if (ShaftId == INDEX_NONE)
+	{
+		ShaftId = 0;
+		for (int32 S = 0; S < Shafts.Num(); ++S)
+		{
+			if (ShaftReaches(S, Level)) { ShaftId = S; break; }
+		}
+	}
 	const FRHFloor* Floor = FindFloor(Level);
 	FRHFloor Empty;
 	if (!Floor)
 	{
 		Floor = &Empty;
 	}
-	const int32 FromPlan = FMath::Min(N, Floor->Plan.Num());
-	for (int32 i = 0; i < FromPlan; ++i)
+	for (int32 i = 0; i < Floor->Plan.Num() && Out.Num() < N; ++i)
 	{
-		Out.Add(Floor->Plan[i]);
+		if (Shafts.Num() == 1 || NearestReachingShaft(Level, Floor->Plan[i]) == ShaftId)
+		{
+			Out.Add(Floor->Plan[i]);
+		}
 	}
-	FRHSpiralWalk Probe = Floor->Walk;
+	FRHSpiralWalk Probe = Floor->Walks.IsValidIndex(ShaftId) ? Floor->Walks[ShaftId] : FRHSpiralWalk();
+	const FIntPoint Column = Shafts[ShaftId].Column;
 	while (Out.Num() < N)
 	{
-		const FIntPoint Q = Probe.Next();
-		if (!Floor->IndexOf.Contains(Q) && !Out.Contains(Q))
+		const FIntPoint Q = Column + Probe.Next();
+		if (!Floor->IndexOf.Contains(Q) && !ShaftColumns.Contains(Q) && !Out.Contains(Q) && !(Floor->Plan.Num() > 0 && Floor->Plan.Contains(Q)))
 		{
 			Out.Add(Q);
 		}
 	}
+}
+
+void URHSimWorldSubsystem::RebuildShaftDerived()
+{
+	DeepestShaft = 0;
+	ShaftColumns.Reset();
+	BorerShaft.Reset();
+	for (const FRHShaft& Sh : Shafts)
+	{
+		DeepestShaft = FMath::Max(DeepestShaft, Sh.Depth);
+		ShaftColumns.Add(Sh.Column);
+		if (Sh.BorerId != 0)
+		{
+			BorerShaft.Add(Sh.BorerId, Sh.Id);
+		}
+	}
+	++ShaftsVersion;
+	DigCache.Reset();
+}
+
+const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int32 Level) const
+{
+	FRHDigInfo& Info = DigCache.FindOrAdd(Level);
+	if (Info.bValid && Info.CellsVersion == FloorCellsVersion && Info.ShaftsVer == ShaftsVersion)
+	{
+		return Info;
+	}
+	++DigLabelRuns;
+	Info.bValid = true;
+	Info.CellsVersion = FloorCellsVersion;
+	Info.ShaftsVer = ShaftsVersion;
+	Info.DigOf.Reset();
+	Info.Touching.Reset();
+	const FRHFloor* Floor = FindFloor(Level);
+	if (!Floor)
+	{
+		return Info;
+	}
+	// Dig labels: a flood fill over 4-neighbours, seeded in ordinal order, so the labelling is a pure function of the cells.
+	const int32 NCells = Floor->Cells.Num();
+	Info.DigOf.Init(INDEX_NONE, NCells);
+	int32 Digs = 0;
+	TArray<int32> Stack;
+	for (int32 Seed = 0; Seed < NCells; ++Seed)
+	{
+		if (Info.DigOf[Seed] != INDEX_NONE)
+		{
+			continue;
+		}
+		Info.DigOf[Seed] = Digs;
+		Stack.Add(Seed);
+		while (Stack.Num())
+		{
+			const FIntPoint Cur = Floor->Cells[Stack.Pop()];
+			for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+			{
+				const int32 O = Floor->FindOrdinal(Cur + D);
+				if (O != INDEX_NONE && Info.DigOf[O] == INDEX_NONE)
+				{
+					Info.DigOf[O] = Digs;
+					Stack.Add(O);
+				}
+			}
+		}
+		++Digs;
+	}
+	// A shaft touches a dig when one of the dig's cells lies in the 8 cells around its column.
+	Info.Touching.SetNum(Digs);
+	for (const FRHShaft& Sh : Shafts)
+	{
+		for (int32 Dy = -1; Dy <= 1; ++Dy)
+		{
+			for (int32 Dx = -1; Dx <= 1; ++Dx)
+			{
+				const int32 O = (Dx || Dy) ? Floor->FindOrdinal(Sh.Column + FIntPoint(Dx, Dy)) : (int32)INDEX_NONE;
+				if (O != INDEX_NONE)
+				{
+					Info.Touching[Info.DigOf[O]].AddUnique(Sh.Id);
+				}
+			}
+		}
+	}
+	return Info;
+}
+
+int32 URHSimWorldSubsystem::ServingShaft(int32 Level, const FIntPoint& P) const
+{
+	if (Level == 0)
+	{
+		return 0;
+	}
+	if (Shafts.Num() == 1)
+	{
+		return ShaftReaches(0, Level) ? 0 : (int32)INDEX_NONE; // rule 1; no component work with one shaft
+	}
+	// Rule 1: the shafts that reach Level.
+	TArray<int32> Candidates;
+	for (int32 S = 0; S < Shafts.Num(); ++S)
+	{
+		if (ShaftReaches(S, Level)) { Candidates.Add(S); }
+	}
+	if (Candidates.Num() == 0)
+	{
+		return INDEX_NONE;
+	}
+	// Rule 2: P carved - keep the candidates that touch P's dig, when any do.
+	const FRHFloor* Floor = FindFloor(Level);
+	const int32 Ordinal = Floor ? Floor->FindOrdinal(P) : (int32)INDEX_NONE;
+	if (Ordinal != INDEX_NONE)
+	{
+		const FRHDigInfo& Info = EnsureDigInfo(Level);
+		if (Info.DigOf.IsValidIndex(Ordinal))
+		{
+			const TArray<int32>& Touch = Info.Touching[Info.DigOf[Ordinal]];
+			TArray<int32> Kept;
+			for (const int32 S : Candidates)
+			{
+				if (Touch.Contains(S)) { Kept.Add(S); }
+			}
+			if (Kept.Num() > 0)
+			{
+				Candidates = MoveTemp(Kept);
+			}
+		}
+	}
+	// Rule 3: the smallest squared lattice distance; ties to the lower Id (candidates are ascending).
+	int32 Best = Candidates[0];
+	int64 BestD2 = TNumericLimits<int64>::Max();
+	for (const int32 S : Candidates)
+	{
+		const int64 Dx = (int64)P.X - Shafts[S].Column.X, Dy = (int64)P.Y - Shafts[S].Column.Y;
+		const int64 D2 = Dx * Dx + Dy * Dy;
+		if (D2 < BestD2)
+		{
+			Best = S;
+			BestD2 = D2;
+		}
+	}
+	return Best;
 }
 
 FIntPoint URHSimWorldSubsystem::GetFloorCell(int32 Level, int32 Index) const
@@ -5061,7 +5322,7 @@ FIntPoint URHSimWorldSubsystem::GetFloorCell(int32 Level, int32 Index) const
 FVector URHSimWorldSubsystem::GetFloorCellCentreCm(int32 Level, int32 Index) const
 {
 	const FIntPoint P = GetFloorCell(Level, Index);
-	return FVector(ShaftHeadCm.X + P.X * 1000.0, ShaftHeadCm.Y + P.Y * 1000.0, Level * FloorHeightCm);
+	return FVector(Shafts[0].HeadCm.X + P.X * 1000.0, Shafts[0].HeadCm.Y + P.Y * 1000.0, Level * FloorHeightCm);
 }
 
 bool URHSimWorldSubsystem::Debug_PaintCarve(int32 Level, const FIntPoint& P, FString& OutReason)
@@ -5071,7 +5332,7 @@ bool URHSimWorldSubsystem::Debug_PaintCarve(int32 Level, const FIntPoint& P, FSt
 		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
 		return false;
 	}
-	if (P == FIntPoint(0, 0))
+	if (ShaftColumns.Contains(P))
 	{
 		OutReason = TEXT("That is the shaft column");
 		return false;
@@ -5207,6 +5468,132 @@ bool URHSimWorldSubsystem::ReadFloorTable(FArchive& Ar, TArray<FRHFloor>& OutFlo
 			F.Plan.Add(P);
 		}
 		OutFloors.Add(MoveTemp(F));
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::WriteShaftBlock(FArchive& Ar) const
+{
+	// Save v44, straight after the floor table: ShaftCount, then per shaft in Id order Id, RegionId, Depth, BoreTargetDepth,
+	// BorerId; then HeadCm for shaft 0 or Column.X, Column.Y for a shaft k > 0 (its head is derived); then the carve queue as
+	// a count and (Level, Cells) pairs in ascending Level (a TMap's own order is not deterministic).
+	int32 ShaftCount = Shafts.Num();
+	Ar << ShaftCount;
+	for (const FRHShaft& Sh : Shafts)
+	{
+		int32 Id = Sh.Id, Region = Sh.RegionId, Depth = Sh.Depth, Target = Sh.BoreTargetDepth, Borer = Sh.BorerId;
+		Ar << Id << Region << Depth << Target << Borer;
+		if (Sh.Id == 0)
+		{
+			FVector Head = Sh.HeadCm;
+			Ar << Head;
+		}
+		else
+		{
+			int32 X = Sh.Column.X, Y = Sh.Column.Y;
+			Ar << X << Y;
+		}
+		TArray<int32> Levels;
+		Sh.CarveQueue.GenerateKeyArray(Levels);
+		Levels.Sort();
+		int32 NQueue = Levels.Num();
+		Ar << NQueue;
+		for (int32 L : Levels)
+		{
+			int32 Cells = Sh.CarveQueue[L];
+			Ar << L << Cells;
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::ReadShaftBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, TArray<FRHShaft>& OutShafts, FString& OutError) const
+{
+	// Structural refusals only, taken before the live colony is touched: they set OutError and log nothing at Error level.
+	const auto Refuse = [&OutError](const FString& Why) { OutError = FString::Printf(TEXT("Save shaft list invalid: %s"), *Why); return false; };
+	OutShafts.Reset();
+	int32 ShaftCount = 0;
+	Ar << ShaftCount;
+	if (Ar.IsError() || ShaftCount < 1 || ShaftCount > RH::MaxShaftsCap)
+	{
+		return Refuse(FString::Printf(TEXT("shaft count %d"), ShaftCount));
+	}
+	for (int32 n = 0; n < ShaftCount; ++n)
+	{
+		FRHShaft Sh;
+		Ar << Sh.Id << Sh.RegionId << Sh.Depth << Sh.BoreTargetDepth << Sh.BorerId;
+		if (n == 0) // position, not the id the file claims, decides the layout
+		{
+			Ar << Sh.HeadCm;
+		}
+		else
+		{
+			int32 X = 0, Y = 0;
+			Ar << X << Y;
+			Sh.Column = FIntPoint(X, Y);
+		}
+		int32 NQueue = 0;
+		Ar << NQueue;
+		if (Ar.IsError() || NQueue < 0 || NQueue > MaxDepth || (int64)NQueue * 8 > (int64)Ar.TotalSize() - Ar.Tell())
+		{
+			return Refuse(FString::Printf(TEXT("the shaft table is cut short or lists %d queued floors"), NQueue));
+		}
+		for (int32 i = 0; i < NQueue; ++i)
+		{
+			int32 L = 0, Cells = 0;
+			Ar << L << Cells;
+			if (Ar.IsError())
+			{
+				return Refuse(TEXT("the shaft table is cut short"));
+			}
+			if (L >= 0 || L < -MaxDepth || Cells < 0)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d queues %d cells on floor %d"), n, Cells, L));
+			}
+			if (-L > Sh.Depth)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d queues cells on floor %d, below its depth"), n, L));
+			}
+			Sh.CarveQueue.Add(L, Cells);
+		}
+		if (Sh.Id != n)
+		{
+			return Refuse(FString::Printf(TEXT("shaft ids must run 0..%d, found %d at %d"), ShaftCount - 1, Sh.Id, n));
+		}
+		if (Sh.RegionId != 0)
+		{
+			return Refuse(FString::Printf(TEXT("shaft %d names region %d (only region 0 exists)"), n, Sh.RegionId));
+		}
+		if (Sh.Depth < 0 || Sh.Depth > MaxDepth || Sh.BoreTargetDepth < 0 || Sh.BoreTargetDepth > MaxDepth)
+		{
+			return Refuse(FString::Printf(TEXT("shaft %d has depth %d and target %d (the range is 0..%d)"), n, Sh.Depth, Sh.BoreTargetDepth, MaxDepth));
+		}
+		if (n > 0)
+		{
+			if (OutShafts[0].Depth == 0)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d exists while shaft 0 is not bored"), n));
+			}
+			if (Sh.Column == FIntPoint(0, 0))
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d stands on shaft 0's column (0,0)"), n));
+			}
+			for (const FRHShaft& Prev : OutShafts)
+			{
+				if (Prev.Column == Sh.Column)
+				{
+					return Refuse(FString::Printf(TEXT("shafts %d and %d share the column (%d,%d)"), Prev.Id, n, Sh.Column.X, Sh.Column.Y));
+				}
+			}
+			for (const FRHFloor& F : Floors)
+			{
+				if (F.IndexOf.Contains(Sh.Column) || F.Plan.Contains(Sh.Column))
+				{
+					return Refuse(FString::Printf(TEXT("shaft %d's column (%d,%d) is a cell or a planned cell on floor %d"), n, Sh.Column.X, Sh.Column.Y, F.Level));
+				}
+			}
+			Sh.HeadCm = LatticeToCm(OutShafts[0].HeadCm, Sh.Column);
+		}
+		OutShafts.Add(MoveTemp(Sh));
 	}
 	return true;
 }
@@ -5701,7 +6088,7 @@ int32 URHSimWorldSubsystem::FindCarvedCellAt(int32 Level, const FVector& Locatio
 	}
 	// Cell centres sit at the shaft head (region 0's origin) + the floor's lattice point x 10 m (the
 	// visualizer's carve tiles use the same mapping). Measured from the head, never from world 0.
-	return FindFloorCell(Level, CmToLattice(ShaftHeadCm, LocationCm));
+	return FindFloorCell(Level, CmToLattice(Shafts[0].HeadCm, LocationCm));
 }
 
 double URHSimWorldSubsystem::GetFoodRunwaySols() const
@@ -6957,18 +7344,173 @@ double URHSimWorldSubsystem::GetHumanWorkTempo() const
 	return Tempo;
 }
 
+int32 URHSimWorldSubsystem::ResolveShaftTarget(FName Target) const
+{
+	// Bore and Excavate pick their shaft through Cmd.Target: NAME_None is shaft 0 (every existing order), "Shaft<k>" is shaft k.
+	if (Target.IsNone())
+	{
+		return 0;
+	}
+	const FString Name = Target.ToString();
+	if (!Name.StartsWith(TEXT("Shaft")) || Name.Len() <= 5 || Name.Len() > 8 || !Name.Mid(5).IsNumeric() || Name.Mid(5).Contains(TEXT(".")) || Name.Mid(5).Contains(TEXT("-")))
+	{
+		return INDEX_NONE;
+	}
+	const int32 K = FCString::Atoi(*Name.Mid(5));
+	return Shafts.IsValidIndex(K) ? K : (int32)INDEX_NONE;
+}
+
+bool URHSimWorldSubsystem::CheckSinkColumn(const FIntPoint& Column, int32 BorerId, FString& OutReason) const
+{
+	// Refusals 7-9 of SinkShaft (the Borer's own are checked by the caller).
+	for (const FRHShaft& Sh : Shafts)
+	{
+		if (Sh.Column == Column)
+		{
+			OutReason = FString::Printf(TEXT("Shaft %d already stands on that column"), Sh.Id);
+			return false;
+		}
+	}
+	for (const FRHFloor& F : FloorTable)
+	{
+		if (F.IndexOf.Contains(Column) || F.Plan.Contains(Column))
+		{
+			OutReason = FString::Printf(TEXT("That column is already dug or planned on floor %d"), F.Level);
+			return false;
+		}
+	}
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level < 0 && B.Id != BorerId && CmToLattice(Shafts[0].HeadCm, B.LocationCm) == Column)
+		{
+			OutReason = FString::Printf(TEXT("A building stands on that column on floor %d"), B.Level);
+			return false;
+		}
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanSinkShaft(int32 BorerId, FString& OutReason) const
+{
+	const FRHBuildingInstance* B = FindBuildingById(BorerId);
+	const FRHBuildingRow* Def = (B && Defs) ? Defs->GetBuilding(B->DefName) : nullptr;
+	if (!B || !Def || !Def->CanBore)
+	{
+		OutReason = TEXT("That is not a Borer");
+		return false;
+	}
+	if (B->bUnderConstruction)
+	{
+		OutReason = TEXT("The Borer is still under construction");
+		return false;
+	}
+	if (const int32* Anchored = BorerShaft.Find(BorerId))
+	{
+		OutReason = FString::Printf(TEXT("That Borer already anchors shaft %d"), *Anchored);
+		return false;
+	}
+	if (PendingBoreWork.Contains(BorerId))
+	{
+		OutReason = TEXT("The Borer has a batch in flight - wait for its batch");
+		return false;
+	}
+	if (Shafts[0].Depth == 0)
+	{
+		OutReason = TEXT("Bore the first shaft first");
+		return false;
+	}
+	if (Shafts.Num() >= MaxShafts)
+	{
+		OutReason = FString::Printf(TEXT("No more shafts - the colony may sink %d"), MaxShafts);
+		return false;
+	}
+	if (!IsInCoverage(B->LocationCm, 0))
+	{
+		OutReason = TEXT("The Borer is outside coverage");
+		return false;
+	}
+	return CheckSinkColumn(CmToLattice(Shafts[0].HeadCm, B->LocationCm), BorerId, OutReason);
+}
+
+bool URHSimWorldSubsystem::ExecuteSinkShaft(int32 BorerId, FString& OutReason)
+{
+	// The preflight runs here, at execute time, because the column can be carved while the order is in flight.
+	if (!CanSinkShaft(BorerId, OutReason))
+	{
+		return false;
+	}
+	const FRHBuildingInstance* B = FindBuildingById(BorerId);
+	const FIntPoint Column = CmToLattice(Shafts[0].HeadCm, B->LocationCm);
+	FRHShaft Fresh;
+	Fresh.Id = Shafts.Num();
+	Fresh.Column = Column;
+	Fresh.HeadCm = LatticeToCm(Shafts[0].HeadCm, Column);
+	Fresh.BorerId = BorerId;
+	Shafts.Add(MoveTemp(Fresh));
+	RebuildShaftDerived();
+	++ShaftReachVersion;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d sunk at (%d, %d) by Borer #%d"), Shafts.Last().Id, Column.X, Column.Y, BorerId);
+	return true;
+}
+
+bool URHSimWorldSubsystem::Debug_SinkShaftAt(const FVector& HeadCm, int32 Depth, int32& OutShaftId, FString& OutReason)
+{
+	OutShaftId = INDEX_NONE;
+	if (Shafts[0].Depth == 0)
+	{
+		OutReason = TEXT("Bore the first shaft first");
+		return false;
+	}
+	if (Shafts.Num() >= MaxShafts)
+	{
+		OutReason = FString::Printf(TEXT("No more shafts - the colony may sink %d"), MaxShafts);
+		return false;
+	}
+	if (!IsInCoverage(HeadCm, 0))
+	{
+		OutReason = TEXT("The head is outside coverage");
+		return false;
+	}
+	const FIntPoint Column = CmToLattice(Shafts[0].HeadCm, HeadCm);
+	if (!CheckSinkColumn(Column, 0, OutReason))
+	{
+		return false;
+	}
+	FRHShaft Fresh;
+	Fresh.Id = Shafts.Num();
+	Fresh.Column = Column;
+	Fresh.HeadCm = LatticeToCm(Shafts[0].HeadCm, Column);
+	Shafts.Add(MoveTemp(Fresh));
+	RebuildShaftDerived();
+	++ShaftReachVersion;
+	OutShaftId = Shafts.Last().Id;
+	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d sunk at (%d, %d) (harness)"), OutShaftId, Column.X, Column.Y);
+	ExtendShaftOf(OutShaftId, Depth);
+	return true;
+}
+
 void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
 {
+	if (ToDepth <= 0)
+	{
+		return;
+	}
+	if (Shafts[0].Depth == 0)
+	{
+		Shafts[0].HeadCm = HeadCm; // the column is fixed on the first bore
+	}
+	ExtendShaftOf(0, ToDepth);
+}
+
+void URHSimWorldSubsystem::ExtendShaftOf(int32 ShaftId, int32 ToDepth)
+{
+	FRHShaft& Sh = Shafts[ShaftId];
 	ToDepth = FMath::Clamp(ToDepth, 0, MaxDepth);
-	if (ToDepth <= ShaftDepth)
+	if (ToDepth <= Sh.Depth)
 	{
 		return; // the trunk never retracts
 	}
-	if (ShaftDepth == 0)
-	{
-		ShaftHeadCm = HeadCm; // the column is fixed on the first bore
-	}
-	const int32 NewFloors = ToDepth - ShaftDepth;
+	const int32 NewFloors = ToDepth - Sh.Depth;
 	const double Spoil = NewFloors * ShaftSpoilKgPerFloor;
 	SpoilPileKg += Spoil;
 	// Gate B: a chemical fraction of fresh dig spoil feeds the fertilizer
@@ -6978,26 +7520,49 @@ void URHSimWorldSubsystem::ExtendShaft(int32 ToDepth, const FVector& HeadCm)
 	{
 		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
 	}
-	ShaftDepth = ToDepth;
-	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
-		ShaftDepth, NewFloors, Spoil, SpoilPileKg);
+	Sh.Depth = ToDepth;
+	RebuildShaftDerived();
+	if (Shafts.Num() > 1)
+	{
+		++ShaftReachVersion;
+	}
+	if (ShaftId == 0)
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Shaft bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
+			Sh.Depth, NewFloors, Spoil, SpoilPileKg);
+	}
+	else
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d bored to floor -%d (%d new floor(s), +%.0f kg spoil; pile %.0f kg)"),
+			ShaftId, Sh.Depth, NewFloors, Spoil, SpoilPileKg);
+	}
 }
 
-bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutReason)
+bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutReason, int32 ShaftId)
 {
 	if (Cells <= 0)
 	{
 		OutReason = TEXT("Nothing to excavate");
 		return false;
 	}
-	if (Level >= 0 || !IsLevelConnected(Level))
+	// D2: with an explicit shaft the test is "that shaft reaches Level"; INDEX_NONE picks the lowest-Id shaft that does.
+	int32 CarveShaft = ShaftId;
+	if (CarveShaft == INDEX_NONE)
 	{
-		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
+		for (int32 S = 0; S < Shafts.Num() && CarveShaft == INDEX_NONE; ++S)
+		{
+			CarveShaft = ShaftReaches(S, Level) ? S : INDEX_NONE;
+		}
+	}
+	if (Level >= 0 || CarveShaft == INDEX_NONE || !ShaftReaches(CarveShaft, Level))
+	{
+		OutReason = CarveShaft > 0 ? FString::Printf(TEXT("Floor %d not reached by shaft %d - bore it deeper first"), Level, CarveShaft)
+			: FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Level);
 		return false;
 	}
 	for (int32 i = 0; i < Cells; ++i)
 	{
-		CarveNextCell(Level);
+		CarveNextCell(Level, CarveShaft);
 	}
 	const int32 Carved = GetFloorCarvedCells(Level);
 	const double Spoil = Cells * SpoilKgPerCell;
@@ -7225,6 +7790,20 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 	{
 		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper"), Level);
 		return false;
+	}
+	// D2 (O4): nothing underground stands on the column of a shaft k > 0. Shaft 0's column keeps today's behaviour (tests place
+	// floor buildings at the head), a known gap.
+	if (Level < 0 && Shafts.Num() > 1)
+	{
+		const FIntPoint Spot = CmToLattice(Shafts[0].HeadCm, LocationCm);
+		for (int32 S = 1; S < Shafts.Num(); ++S)
+		{
+			if (Shafts[S].Column == Spot)
+			{
+				OutReason = TEXT("That is a shaft column");
+				return false;
+			}
+		}
 	}
 	// BM-1: pressurized habitat shells stand on the surface, in whole bays.
 	if (Def->Pressurized)
@@ -7665,11 +8244,19 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// M1-d Gate A2: order the shaft trunk down to Value floors. The Borer
 		// works it one BoreFloor batch per floor; designations are standing
 		// orders, so deeper re-orders just raise the target.
+		// D2: Target picks the shaft (NAME_None = shaft 0, "Shaft<k>" = shaft k).
+		const int32 BoreShaftId = ResolveShaftTarget(Cmd.Target);
+		if (BoreShaftId == INDEX_NONE)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown shaft '%s'"), *Cmd.Target.ToString()));
+			return;
+		}
 		bool bHaveBorer = false;
 		for (const FRHBuildingInstance& B : Buildings)
 		{
 			const FRHBuildingRow* D = Defs->GetBuilding(B.DefName);
-			if (D && D->CanBore && !B.bUnderConstruction)
+			// Shaft 0: a complete Borer that is shaft 0's or a helper. Shaft k: the complete Borer that anchors it.
+			if (D && D->CanBore && !B.bUnderConstruction && GetBorerShaft(B.Id) == BoreShaftId)
 			{
 				bHaveBorer = true;
 				break;
@@ -7677,17 +8264,27 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		}
 		if (!bHaveBorer)
 		{
-			OnCommandRejected.Broadcast(Cmd, TEXT("No Borer online - build one first"));
+			OnCommandRejected.Broadcast(Cmd, BoreShaftId == 0 ? FString(TEXT("No Borer online - build one first"))
+				: FString::Printf(TEXT("Shaft %d has no Borer online"), BoreShaftId));
 			return;
 		}
+		FRHShaft& BoreSh = Shafts[BoreShaftId];
 		const int32 Target = FMath::Clamp((int32)Cmd.Value, 0, MaxDepth);
-		if (Target <= ShaftDepth)
+		if (Target <= BoreSh.Depth)
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Shaft already at floor -%d"), ShaftDepth));
+			OnCommandRejected.Broadcast(Cmd, BoreShaftId == 0 ? FString::Printf(TEXT("Shaft already at floor -%d"), BoreSh.Depth)
+				: FString::Printf(TEXT("Shaft %d already at floor -%d"), BoreShaftId, BoreSh.Depth));
 			return;
 		}
-		BoreTargetDepth = FMath::Max(BoreTargetDepth, Target);
-		UE_LOG(LogRedHopeSim, Display, TEXT("Bore designation: shaft to floor -%d (now -%d)"), BoreTargetDepth, ShaftDepth);
+		BoreSh.BoreTargetDepth = FMath::Max(BoreSh.BoreTargetDepth, Target);
+		if (BoreShaftId == 0)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Bore designation: shaft to floor -%d (now -%d)"), BoreSh.BoreTargetDepth, BoreSh.Depth);
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Bore designation: shaft %d to floor -%d (now -%d)"), BoreShaftId, BoreSh.BoreTargetDepth, BoreSh.Depth);
+		}
 	}
 	else if (Cmd.Verb == FName("Excavate"))
 	{
@@ -7699,14 +8296,41 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, TEXT("Excavation needs a subsurface floor and a cell count"));
 			return;
 		}
-		if (!IsLevelConnected(Cmd.Level))
+		const int32 ExcShaftId = ResolveShaftTarget(Cmd.Target); // D2: NAME_None = shaft 0, "Shaft<k>" = shaft k
+		if (ExcShaftId == INDEX_NONE)
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Cmd.Level));
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown shaft '%s'"), *Cmd.Target.ToString()));
 			return;
 		}
-		CarveQueue.FindOrAdd(Cmd.Level) += Cells;
-		UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d (%d queued there)"),
-			Cells, Cmd.Level, CarveQueue[Cmd.Level]);
+		if (!ShaftReaches(ExcShaftId, Cmd.Level))
+		{
+			OnCommandRejected.Broadcast(Cmd, ExcShaftId == 0 ? FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper first"), Cmd.Level)
+				: FString::Printf(TEXT("Floor %d not reached by shaft %d - bore it deeper first"), Cmd.Level, ExcShaftId));
+			return;
+		}
+		int32& Queued = Shafts[ExcShaftId].CarveQueue.FindOrAdd(Cmd.Level);
+		Queued += Cells;
+		if (ExcShaftId == 0)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d (%d queued there)"),
+				Cells, Cmd.Level, Queued);
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Excavation designation: %d cell(s) on floor %d for shaft %d (%d queued there)"),
+				Cells, Cmd.Level, ExcShaftId, Queued);
+		}
+	}
+	else if (Cmd.Verb == FName("SinkShaft"))
+	{
+		// D2: Value = the Borer's building Id. The preflight runs here, at execute time, because the column can be
+		// carved while the order is in flight.
+		FString Reason;
+		if (!ExecuteSinkShaft((int32)Cmd.Value, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 	}
 	else if (Cmd.Verb == FName("Assign"))
 	{
@@ -9065,7 +9689,7 @@ bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMa
 		OutReason = TEXT("Grid pylons hold your territory - a standing pylon cannot be demolished yet");
 		return false;
 	}
-	if (Def && Def->CanBore && ((!B->bUnderConstruction && ShaftDepth > 0) || PendingBoreWork.Contains(Id)))
+	if (Def && Def->CanBore && (BorerShaft.Contains(Id) || (!B->bUnderConstruction && Shafts[0].Depth > 0) || PendingBoreWork.Contains(Id)))
 	{
 		OutReason = TEXT("The Borer anchors the shaft - it stays once boring has begun");
 		return false;
@@ -9164,8 +9788,7 @@ bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMa
 			const FRHBuildingInstance* MB = FindBuildingById(M);
 			for (int32 Bay = 0; MB && RatedFloors.Contains(-1) && Bay < MC.NX * MC.NY; ++Bay)
 			{
-				const FVector C = GetBayCentreCm(*MB, Bay);
-				if (FMath::Max(FMath::Abs(C.X - ShaftHeadCm.X), FMath::Abs(C.Y - ShaftHeadCm.Y)) <= ShaftLinkRangeCm + 0.5)
+				if (IsBayNearShaftHead(GetBayCentreCm(*MB, Bay)))
 				{
 					Air[P] = true;
 				}
@@ -10046,7 +10669,7 @@ FVector URHSimWorldSubsystem::GetCellCentreCm(const FIntVector& Key) const
 		return B ? GetBayCentreCm(*B, Key.Y) : FVector::ZeroVector;
 	}
 	const FIntPoint P = GetFloorCell(Key.X, Key.Y);
-	return FVector(ShaftHeadCm.X + P.X * 1000.0, ShaftHeadCm.Y + P.Y * 1000.0, Key.X * FloorHeightCm);
+	return FVector(Shafts[0].HeadCm.X + P.X * 1000.0, Shafts[0].HeadCm.Y + P.Y * 1000.0, Key.X * FloorHeightCm);
 }
 
 bool URHSimWorldSubsystem::GetFurnitureFootprintCm(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FVector& OutCentre, FVector2D& OutHalf) const
@@ -11719,6 +12342,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	float Speed = Clock->GetSpeed();
 	Ar << Magic << Version << SimSeconds << Speed;
 	WriteFloorTable(Ar); // v41: the floor table sits straight after the header (a load validates it before any teardown)
+	WriteShaftBlock(Ar); // v44: and the shaft list straight after it, so the floor block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -11789,8 +12413,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 
 	// Shaft & excavation + designations (save v5/v6).
-	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg;
-	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
+	// (v44: the shaft depth, head, bore target and carve queue live in the shaft block after the floor table.)
+	Ar << SpoilPileKg;
+	Ar << PendingBoreWork;
 	// Habitability chain (save v7).
 	Ar << FloorO2Kg << RatedFloors << bVaultRated << bFleetHold;
 	// Population (save v10).
@@ -12153,6 +12778,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v44: the shaft list, validated the same way (against the floors just read), into a local.
+	TArray<FRHShaft> LoadedShafts;
+	if (!ReadShaftBlock(Ar, LoadedFloors, LoadedShafts, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -12291,10 +12922,43 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	FloorTable = MoveTemp(LoadedFloors);
 	RebuildFloorIndex();
 	++FloorCellsVersion;
-	Ar << ShaftDepth << ShaftHeadCm << SpoilPileKg;
-	CarveQueue.Empty();
+	Shafts = MoveTemp(LoadedShafts);
+	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a
+	// Borer that anchors two shafts keeps the lower Id.
+	{
+		TSet<int32> Anchored;
+		for (FRHShaft& Sh : Shafts)
+		{
+			if (Sh.BorerId == 0)
+			{
+				continue;
+			}
+			const FRHBuildingInstance* Anchor = FindBuildingById(Sh.BorerId);
+			const FRHBuildingRow* AnchorDef = (Anchor && Defs) ? Defs->GetBuilding(Anchor->DefName) : nullptr;
+			if (!AnchorDef || !AnchorDef->CanBore)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("Load: shaft %d names Borer #%d, which is no Borer - it is unanchored"), Sh.Id, Sh.BorerId);
+				Sh.BorerId = 0;
+			}
+			else if (Anchored.Contains(Sh.BorerId))
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("Load: Borer #%d anchors two shafts - shaft %d is unanchored"), Sh.BorerId, Sh.Id);
+				Sh.BorerId = 0;
+			}
+			else
+			{
+				Anchored.Add(Sh.BorerId);
+			}
+		}
+	}
+	RebuildShaftDerived();
+	if (Shafts.Num() > 1)
+	{
+		++ShaftReachVersion;
+	}
+	Ar << SpoilPileKg;
 	PendingBoreWork.Empty();
-	Ar << BoreTargetDepth << CarveQueue << PendingBoreWork;
+	Ar << PendingBoreWork;
 	// Habitability chain (save v7).
 	FloorO2Kg.Empty();
 	RatedFloors.Empty();

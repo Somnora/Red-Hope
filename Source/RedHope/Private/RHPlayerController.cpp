@@ -757,13 +757,16 @@ void ARHPlayerController::Tick(float DeltaTime)
 				if (!IsInputKeyDown(EKeys::LeftMouseButton))
 				{
 					bExcavateDragging = false;
-					if (bFloorOk)
+					// D2: the order goes to the shaft that serves the drag's centre (INDEX_NONE = no shaft reaches this floor: no order).
+					const int32 Serving = bFloorOk ? Sim->ServingShaft(ActiveLevel, URHSimWorldSubsystem::CmToLattice(Sim->GetShaftHeadCm(), Center)) : (int32)INDEX_NONE;
+					if (bFloorOk && Serving != INDEX_NONE)
 					{
 						FRHCommand Cmd;
 						Cmd.Verb = FName("Excavate");
 						Cmd.Level = ActiveLevel;
 						Cmd.Value = Cells;
 						Cmd.Location = Center;
+						if (Serving > 0) { Cmd.Target = FName(*FString::Printf(TEXT("Shaft%d"), Serving)); }
 						Sim->EnqueueCommand(Cmd);
 						SetConfirm(FString::Printf(TEXT("Excavation transmitted: %d cell(s) on floor %d"), Cells, ActiveLevel),
 							FLinearColor(0.2f, 0.9f, 1.f));
@@ -2019,6 +2022,29 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 		Colony->SetViewLevel(ActiveLevel);
 	}
 	SelectedBuildingId = 0; // the card belongs to the floor you left
+}
+
+void ARHPlayerController::FocusNextShaft()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	ARHStrategyPawn* Cam = StrategyPawn();
+	if (!Sim || !Cam || Sim->GetShaftCount() < 2)
+	{
+		return;
+	}
+	// The head the camera is nearest to, then the one after it in Id order.
+	const FVector Focus = Cam->GetFocusPointCm();
+	int32 Nearest = 0;
+	double NearestCm = TNumericLimits<double>::Max();
+	for (const FRHShaft& Sh : Sim->GetShafts())
+	{
+		const double D = FVector::DistXY(Focus, Sh.HeadCm);
+		if (D < NearestCm) { NearestCm = D; Nearest = Sh.Id; }
+	}
+	const FRHShaft& Next = Sim->GetShaft((Nearest + 1) % Sim->GetShaftCount());
+	Cam->SetFocusXYCm(FVector2D(Next.HeadCm.X, Next.HeadCm.Y));
+	SetConfirm(FString::Printf(TEXT("Camera on shaft %d"), Next.Id), FLinearColor(0.2f, 0.9f, 1.f));
 }
 
 void ARHPlayerController::CancelModes()

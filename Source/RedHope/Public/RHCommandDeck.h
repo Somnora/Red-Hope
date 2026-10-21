@@ -162,6 +162,10 @@ private:
 	// next target so the button says what it will do.
 	FReply HandleBore();
 	FText GetBoreLabel() const;
+	// D2: "Sink a shaft here" on a Borer that anchors no shaft (pre-checks the sim's SinkShaft preflight).
+	EVisibility GetSinkShaftVisibility() const;
+	FText GetSinkShaftLabel() const;
+	FReply HandleSinkShaft();
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
 	FText GetFloorLabel(int32 Level) const;

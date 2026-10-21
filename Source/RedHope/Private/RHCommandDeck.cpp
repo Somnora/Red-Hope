@@ -318,6 +318,30 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		];
 	};
+	// D2: once there is more than one shaft, a button walks the camera from head to head (Id order).
+	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f, 0.f, 3.f))
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]()
+		{
+			const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+			const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			return (S && S->GetShaftCount() > 1) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ContentPadding(FMargin(9.f, 3.f))
+			.OnClicked_Lambda([this]()
+			{
+				if (PC.IsValid()) { PC->FocusNextShaft(); }
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("Next shaft"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
+			]
+		]
+	];
 	AddFloorCell(0);
 	for (int32 Floor = 1; Floor <= MaxDepth; ++Floor)
 	{
@@ -440,6 +464,14 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 								[
 									GuideHalo(FName("Excavate"), DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetExcavateActionLabel)),
 										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExcavate)))
+								]
+							]
+							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
+							[
+								SNew(SBox).Visibility(this, &SRHCommandDeck::GetSinkShaftVisibility)
+								[
+									DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetSinkShaftLabel)),
+										FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSinkShaft))
 								]
 							]
 							+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 3.f))
@@ -1485,11 +1517,19 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\nrunning on H2 - no grid draw, works through shedding");
 			}
+			// D2: the card says which shaft this Borer works (an unanchored Borer helps shaft 0), and reads THAT shaft's depth,
+			// target and queue (GetShaftDepth() with no argument is the deepest shaft, not this one).
+			const int32 WorkShaft = Sim->GetBorerShaft(B->Id);
+			if (Sim->GetShaftCount() > 1 || Sim->IsBorerAnchor(B->Id))
+			{
+				Text += Sim->IsBorerAnchor(B->Id) ? FString::Printf(TEXT("\nANCHORS shaft %d"), WorkShaft)
+					: FString(TEXT("\nHELPS shaft 0 (anchors none)"));
+			}
 			Text += FString::Printf(TEXT("\nSHAFT: floor -%d of -%d ordered"),
-				Sim->GetShaftDepth(), FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()));
+				Sim->GetShaftDepth(WorkShaft), FMath::Max(Sim->GetShaftDepth(WorkShaft), Sim->GetBoreTargetDepth(WorkShaft)));
 			for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)
 			{
-				const int32 Queued = Sim->GetCarveQueued(L);
+				const int32 Queued = Sim->GetCarveQueued(L, WorkShaft);
 				const int32 Carved = Sim->GetFloorCarvedCells(L);
 				if (Queued > 0 || Carved > 0)
 				{
@@ -1980,6 +2020,55 @@ FReply SRHCommandDeck::HandleDistrict(FName Kind)
 	return FReply::Handled();
 }
 
+// D2 (placeholder copy for the Gate-D framing review, docs/qa/2026-10-15/gate-d-wording.md): the Borer card's "sink a shaft" verb.
+EVisibility SRHCommandDeck::GetSinkShaftVisibility() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return (B && Def && Def->CanBore && !B->bUnderConstruction && Sim && !Sim->IsBorerAnchor(B->Id)) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetSinkShaftLabel() const
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Why;
+	if (B && Sim && !Sim->CanSinkShaft(B->Id, Why))
+	{
+		return FText::FromString(FString::Printf(TEXT("Sink a shaft here - %s"), *Why));
+	}
+	return FText::FromString(TEXT("Sink a shaft here"));
+}
+
+FReply SRHCommandDeck::HandleSinkShaft()
+{
+	const FRHBuildingRow* Def = nullptr;
+	const FRHBuildingInstance* B = FindSelected(PC, Def);
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Why;
+	if (B && Sim)
+	{
+		if (Sim->CanSinkShaft(B->Id, Why))
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("SinkShaft");
+			Cmd.Value = B->Id;
+			Sim->EnqueueCommand(Cmd);
+			PC->PostConfirm(TEXT("Shaft order transmitted: the Borer will sink a new shaft where it stands"), FLinearColor(0.2f, 0.9f, 1.f));
+		}
+		else
+		{
+			PC->PostConfirm(Why, FLinearColor(1.f, 0.6f, 0.2f));
+		}
+	}
+	return FReply::Handled();
+}
+
 FReply SRHCommandDeck::HandleExcavate()
 {
 	if (PC.IsValid())
@@ -1989,6 +2078,17 @@ FReply SRHCommandDeck::HandleExcavate()
 	return FReply::Handled();
 }
 
+namespace
+{
+	// D2: the shaft the deck's Bore acts on: the selected Borer's (an unanchored one helps shaft 0), else shaft 0.
+	int32 DeckShaft(const TWeakObjectPtr<ARHPlayerController>& PC, const URHSimWorldSubsystem* Sim)
+	{
+		const FRHBuildingRow* Def = nullptr;
+		const FRHBuildingInstance* B = FindSelected(PC, Def);
+		return (Sim && B && Def && Def->CanBore) ? Sim->GetBorerShaft(B->Id) : 0;
+	}
+}
+
 FReply SRHCommandDeck::HandleBore()
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -1996,10 +2096,14 @@ FReply SRHCommandDeck::HandleBore()
 	if (Sim)
 	{
 		// One floor past whatever is already reached OR ordered - repeat
-		// clicks stack the designation deeper (clamped by the sim).
+		// clicks stack the designation deeper (clamped by the sim). D2: reached and ordered are
+		// BOTH the selected Borer's shaft's (mixing the deepest shaft with shaft 0's target would
+		// order shaft 0 a floor past shaft 1's depth).
+		const int32 S = DeckShaft(PC, Sim);
 		FRHCommand Cmd;
 		Cmd.Verb = FName("Bore");
-		Cmd.Value = FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()) + 1;
+		Cmd.Value = FMath::Max(Sim->GetShaftDepth(S), Sim->GetBoreTargetDepth(S)) + 1;
+		if (S > 0) { Cmd.Target = FName(*FString::Printf(TEXT("Shaft%d"), S)); }
 		Sim->EnqueueCommand(Cmd);
 	}
 	return FReply::Handled();
@@ -2009,7 +2113,8 @@ FText SRHCommandDeck::GetBoreLabel() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const int32 Next = Sim ? FMath::Max(Sim->GetShaftDepth(), Sim->GetBoreTargetDepth()) + 1 : 1;
+	const int32 S = DeckShaft(PC, Sim);
+	const int32 Next = Sim ? FMath::Max(Sim->GetShaftDepth(S), Sim->GetBoreTargetDepth(S)) + 1 : 1;
 	if (Sim && Next > Sim->GetMaxDepth())
 	{
 		return FText::FromString(TEXT("Bore (max)"));

@@ -54,6 +54,9 @@ public:
 	// descent is smoothed in Tick so the ride reads as motion, not a cut
 	// (director watch-through finding: "I didn't see the elevator move").
 	void SetFocusZCm(float Zcm) { TargetFocusZCm = Zcm; }
+	// D2: the next-shaft move re-centres the focus on a head without touching zoom, pitch or yaw.
+	void SetFocusXYCm(const FVector2D& XYCm) { FocusPointCm.X = XYCm.X; FocusPointCm.Y = XYCm.Y; }
+	FVector GetFocusPointCm() const { return FocusPointCm; }
 
 	// 0 = ground register (25 m), 1 = orbital register (3000 m).
 	// Default 0.45 ~= 215 m: the whole starting colony in frame with readable

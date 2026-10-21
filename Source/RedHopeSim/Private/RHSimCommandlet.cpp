@@ -10796,7 +10796,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v43 (v40 added no field; v41, v42 and v43 are D1's floor table, F2b's recalled list and W1's outpost rows): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
+		// --- X15. Save v44 (v40 added no field; v41, v42, v43 and v44 are D1's floor table, F2b's recalled list, W1's outpost rows and D2's shaft list): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10808,14 +10808,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 43, FString::Printf(TEXT("X15 the file says version %u (expect 43)"), Ver));
-			uint32 V42 = 42;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V42, 4); }
-			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv42.sav")));
+			Expect(bRead && Ver == 44, FString::Printf(TEXT("X15 the file says version %u (expect 44)"), Ver));
+			uint32 V43 = 43;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V43, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv43.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv42"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/43")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
-				FString::Printf(TEXT("X15 a v42 save is refused and the live colony untouched (%s)"), *Le39));
+			Expect(!Sim->LoadColony(TEXT("trafficv43"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/44")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v43 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
 			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
@@ -11202,7 +11202,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	// chain; F7 no rover and no plant mean no task and no store; F8 the destination helper (a nearer unserved plant, a plant inside 300 m,
 	// the hopper line, the plan cap); F9 the freight leg (240 kg, no hauler, a load, a demolished edge, non-outpost freight untouched);
 	// F10 a halted claimant never holds the lane; F11 the buffer cap; F12 end to end in the agent band with mass conserved; F13 the
-	// 1,200 kg hopper against 2 x Need; F14 the era gate; F15 the paired 10-sol ledger; F16 the save (v43, v42 refused) and determinism.
+	// 1,200 kg hopper against 2 x Need; F14 the era gate; F15 the paired 10-sol ledger; F16 the save (v44, v43 refused) and determinism.
 	// The headless world has no Mass ticking, so the rover is played by the harness through the very same sim calls the brains make
 	// (TryClaimFreight, RH::MoveAlong, HaulLoad, HaulUnload), on the REAL rover entity so the lane's liveness test sees it. Fails loudly. `-farice`.
 	if (FParse::Param(*Params, TEXT("farice")))
@@ -12069,7 +12069,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("F15 at the end the agent band holds %.0f kg at the drill and in flight, at most two of its largest load (%.0f kg): it is not backing up"), Agent.DrillOut + Agent.InFlight, Agent.MaxLoad));
 		}
 
-		// --- F16. The save (v43; v42 refused) and determinism. ---
+		// --- F16. The save (v44; v43 refused) and determinism. ---
 		{
 			FRig Rg = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12082,19 +12082,19 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			uint32 V42 = 42;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V42, 4); }
-			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_farice_v42.sav")));
+			uint32 V43 = 43;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V43, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_farice_v43.sav")));
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
-			FString Le42;
-			const bool bRefused = !Sim->LoadColony(TEXT("farice_v42"), Le42);
-			Expect(bSaved && bRead && Ver == 43 && bRefused && Le42.Contains(TEXT("Save format mismatch")) && Le42.Contains(TEXT("/43")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 43); a v42 save is refused and the live colony untouched (%s)"), Ver, *Le42));
+			FString Le43;
+			const bool bRefused = !Sim->LoadColony(TEXT("farice_v43"), Le43);
+			Expect(bSaved && bRead && Ver == 44 && bRefused && Le43.Contains(TEXT("Save format mismatch")) && Le43.Contains(TEXT("/44")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 44); a v43 save is refused and the live colony untouched (%s)"), Ver, *Le43));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
 			Expect(bBack && Back.Id != 0 && Back.bOutpostSource && Near(Back.AmountKg, 600.0, 1e-9),
-				TEXT("F16 the v43 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
+				TEXT("F16 the v44 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
 			// Determinism: the same colony, run twice, makes the same loads at the same steps.
 			FRig Rd = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12504,7 +12504,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 43 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 44 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12519,7 +12519,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v43 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v44 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -12546,9 +12546,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			{
 				TArray<uint8> Old = Good;
-				const uint32 V42 = 42;
-				FMemory::Memcpy(Old.GetData() + 4, &V42, 4);
-				Expect(TryFile(TEXT("deepk6v42"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/43")), FString::Printf(TEXT("K6 a v42 file is refused and the colony untouched (%s)"), *E6));
+				const uint32 V43 = 43;
+				FMemory::Memcpy(Old.GetData() + 4, &V43, 4);
+				Expect(TryFile(TEXT("deepk6v43"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/44")), FString::Printf(TEXT("K6 a v43 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -12807,6 +12807,942 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// D2 self-test (more shafts, 2026-10-21): a list of shafts, each with its own head, depth, Borer, carve queue and plan. Fails
+	// loudly. With one shaft nothing moves (every other suite is line-identical); this suite is the only place two shafts exist.
+	//  SH0 the fresh colony; SH1 one shaft is D1; SH2/SH2b the SinkShaft refusals (including the execute-time race); SH3 the sink;
+	//  SH4 Bore and Excavate pick a shaft through Target; SH4b the work loop (concurrent bores, helpers, the former helper);
+	//  SH5 two Borers carve one floor; SH6 a column on a cell; SH7 plan ownership; SH8 which head serves a cell; SH9 haulers;
+	//  SH10 commute heads; SH11/SH11b the air link, demolish, and the floor-wide reach deviation; SH12 save, load, era;
+	//  SH13 growth's calls. `-shafts`.
+	if (FParse::Param(*Params, TEXT("shafts")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SHAFTS TEST (D2, 2026-10-21) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("SHAFTS ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("SHAFTS FAIL: %s"), *What); ++Fails; }
+		};
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NStruct(TEXT("Struct")), NOx(TEXT("Oxygen")), NLiving(TEXT("LivingQuarters"));
+		const FName NBoreFloor(TEXT("BoreFloor")), NCarveCell(TEXT("CarveCell"));
+		FString R, Why;
+		TArray<FString> Rejects;
+		const FDelegateHandle RejectH = Sim->OnCommandRejected.AddLambda([&Rejects](const FRHCommand&, const FString& Text) { Rejects.Add(Text); });
+		const auto LastReject = [&]() { return Rejects.Num() > 0 ? Rejects.Last() : FString(); };
+		const auto Step = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto Steps = [&](int32 N) { for (int32 K = 0; K < N; ++K) { Step(); } };
+		const auto FindB = [&](int32 Id) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.Id == Id) { return &Bd; } }
+			return nullptr;
+		};
+		const auto IdOfDef = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName(Def)) { Id = Bd.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 SX = 1, int32 SY = 1, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level, SX, SY);
+			return IdOfDef(Def);
+		};
+		const auto Recipe = [&](int32 Id) { const FRHBuildingInstance* Bd = FindB(Id); return Bd ? Bd->ActiveRecipe : FName(NAME_None); };
+		const auto Cells = [&](int32 Level) { TArray<FIntPoint> Out; if (const FRHFloor* Fl = Sim->FindFloor(Level)) { Out = Fl->GetCells(); } return Out; };
+		const auto Plan = [&](int32 Level) { TArray<FIntPoint> Out; if (const FRHFloor* Fl = Sim->FindFloor(Level)) { Out = Fl->GetPlan(); } return Out; };
+		const auto Tail = [](const TArray<FIntPoint>& All, int32 N) { TArray<FIntPoint> Out; for (int32 i = FMath::Max(0, All.Num() - N); i < All.Num(); ++i) { Out.Add(All[i]); } return Out; };
+		const auto Origin = [&]() { return Sim->GetShaftHeadCm(); };
+		const auto Straight = [](const FIntPoint& Pa, const FIntPoint& Pb) { const int64 Dx = (int64)Pa.X - Pb.X, Dy = (int64)Pa.Y - Pb.Y; return (int64)RHRoads::RoundSqrtCm(Dx * Dx + Dy * Dy); };
+		const auto Cm = [](const FVector& V) { return FIntPoint(FMath::RoundToInt(V.X), FMath::RoundToInt(V.Y)); };
+		// The reference answer for shaft S's spiral: the column plus the walk, skipping points already carved and every column.
+		const auto OracleS = [](TArray<FIntPoint> Have, const TArray<FIntPoint>& Cols, const FIntPoint& Column, int32 N)
+		{
+			TArray<FIntPoint> Out;
+			int32 Index = 0;
+			for (int32 K = 0; K < N; ++K)
+			{
+				FIntPoint P = Column + URHSimWorldSubsystem::SpiralCell(Index++);
+				while (Have.Contains(P) || Cols.Contains(P)) { P = Column + URHSimWorldSubsystem::SpiralCell(Index++); }
+				Have.Add(P);
+				Out.Add(P);
+			}
+			return Out;
+		};
+		const auto NoDup = [](const TArray<FIntPoint>& All) { bool bOk = true; for (int32 i = 0; i < All.Num(); ++i) { bOk &= All.Find(All[i]) == i; } return bOk; };
+		const auto SaveFilePath = [](const TCHAR* Slot) { return FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), Slot); };
+		FString SaveErr;
+		const bool bBaseSaved = Sim->SaveColony(TEXT("shaftsbase"), SaveErr);
+		const auto Reset = [&]()
+		{
+			FString E;
+			const bool bOk = Sim->LoadColony(TEXT("shaftsbase"), E);
+			if (!bOk || !E.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("SHAFTS FAIL: loading the base failed: %s"), *E); ++Fails; }
+			Rejects.Reset();
+			return bOk;
+		};
+		// A Borer (CanBore is patched in memory, as -borer does, so this proves the code path), power, a bank.
+		const auto Kit = [&](double Bx, double By)
+		{
+			FRHBuildingRow* BorerRow = const_cast<FRHBuildingRow*>(DefsSub ? DefsSub->GetBuilding(FName("Borer")) : nullptr);
+			if (BorerRow) { BorerRow->CanBore = true; BorerRow->H2BurnKgPerHour = 1.5f; }
+			const int32 Id = Place(TEXT("Borer"), Bx, By);
+			Place(TEXT("SolarArray"), 3500.0, 1000.0);
+			Place(TEXT("BatteryBank"), 1000.0, 3500.0);
+			return Id;
+		};
+		const auto Send = [&](const FRHCommand& C)
+		{
+			Sim->EnqueueCommand(C);
+			for (int32 K = 0; K < 10 && Sim->GetUplinkQueue().Num() > 0; ++K) { Step(); }
+		};
+		const auto BoreOrder = [&](int32 To, const TCHAR* Shaft)
+		{
+			FRHCommand C; C.Verb = FName("Bore"); C.Value = To; if (Shaft) { C.Target = FName(Shaft); }
+			Send(C);
+		};
+		const auto ExcOrder = [&](int32 Level, int32 N, const TCHAR* Shaft)
+		{
+			FRHCommand C; C.Verb = FName("Excavate"); C.Level = Level; C.Value = N; if (Shaft) { C.Target = FName(Shaft); }
+			Send(C);
+		};
+		const auto SinkOrder = [&](int32 BorerId)
+		{
+			const int32 N0 = Sim->GetShaftCount();
+			Rejects.Reset();
+			FRHCommand C; C.Verb = FName("SinkShaft"); C.Value = BorerId;
+			Send(C);
+			return Sim->GetShaftCount() == N0 + 1;
+		};
+		const auto UntilDepth = [&](int32 S, int32 D, int32 Max) { for (int32 K = 0; K < Max && Sim->GetShaftDepth(S) < D; ++K) { Step(); } return Sim->GetShaftDepth(S) >= D; };
+		const auto UntilCells = [&](int32 Level, int32 N, int32 Max) { for (int32 K = 0; K < Max && Sim->GetFloorCarvedCells(Level) < N; ++K) { Step(); } return Sim->GetFloorCarvedCells(Level) >= N; };
+		const FVector Head0(2000.0, 2000.0, 0.0);              // shaft 0's head in every test: the first Borer, or ExtendShaft's argument
+		const FVector Loc1(32400.0, 2700.0, 0.0);              // the second Borer: 300 m east, off the lattice (snaps to column (30,1), head (32000,3000))
+		const FVector Head1(32000.0, 3000.0, 0.0);
+		const FVector Loc2(-2000.0, 2000.0, 0.0);              // a third Borer inside the Lander's coverage
+		const auto TwoBorers = [&](int32& OutB0, int32& OutB1)
+		{
+			OutB0 = Kit(2000.0, 2000.0);
+			Place(TEXT("Pylon"), 32000.0, 2000.0);
+			OutB1 = Place(TEXT("Borer"), Loc1.X, Loc1.Y);
+		};
+		// Shaft 0 bored to -1 by its own Borer (it becomes the anchor), then the second Borer sunk as shaft 1.
+		const auto TwoShafts = [&](int32& OutB0, int32& OutB1)
+		{
+			TwoBorers(OutB0, OutB1);
+			BoreOrder(1, nullptr);
+			UntilDepth(0, 1, 4000);
+			return SinkOrder(OutB1);
+		};
+		const auto LanderId = IdOfDef(TEXT("Lander"));
+
+		// --- SH0. The fresh colony: one shaft, nothing bored, no head. ---
+		{
+			Expect(bBaseSaved, FString::Printf(TEXT("SH0 the fresh colony is saved as the base every case loads (%s)"), *SaveErr));
+			Expect(Sim->GetShaftCount() == 1 && Sim->GetShaft(0).Id == 0 && Sim->GetShaft(0).Depth == 0 && Sim->GetShaft(0).HeadCm == FVector::ZeroVector && Sim->GetShaft(0).Column == FIntPoint(0, 0) && Sim->GetShaft(0).BorerId == 0,
+				TEXT("SH0 a fresh colony has exactly shaft 0: depth 0, a zero head, column (0,0), no Borer"));
+			Expect(Sim->GetMaxShafts() == 4 && RH::MaxShaftsCap == 16 && Sim->GetShaftDepth() == 0 && Sim->GetBoreTargetDepth() == 0 && !Sim->IsLevelConnected(-1) && Sim->IsLevelConnected(0),
+				FString::Printf(TEXT("SH0 MaxShafts is %d (row 4), the load cap is %d, nothing is reached yet"), Sim->GetMaxShafts(), RH::MaxShaftsCap));
+			Expect(Sim->ServingShaft(0, FIntPoint(5, 5)) == 0 && Sim->ServingShaft(-1, FIntPoint(1, 0)) == INDEX_NONE,
+				TEXT("SH0 ServingShaft: the surface answers 0, an unreached floor answers INDEX_NONE (the fast path obeys rule 1)"));
+		}
+
+		// --- SH1. One shaft is D1: the same head, the same serving shaft, the same approach point. ---
+		{
+			Reset();
+			const int32 B0 = Kit(2000.0, 2000.0);
+			BoreOrder(1, nullptr);
+			Expect(UntilDepth(0, 1, 4000), TEXT("SH1 the Borer bored floor -1"));
+			ExcOrder(-1, 30, nullptr);
+			Expect(UntilCells(-1, 30, 4000) && Sim->GetCarveQueued(-1) == 0, FString::Printf(TEXT("SH1 and carved 30 cells (%d)"), Sim->GetFloorCarvedCells(-1)));
+			const FVector HeadNow = Sim->GetShaftHeadCm();
+			Expect(HeadNow == Sim->GetShaft(0).HeadCm && FMemory::Memcmp(&HeadNow, &Sim->GetShaft(0).HeadCm, sizeof(FVector)) == 0 && HeadNow == FVector(2000.0, 2000.0, 0.0),
+				TEXT("SH1 GetShaftHeadCm() is Shafts[0].HeadCm bit for bit, and is the Borer's own spot"));
+			Expect(Sim->GetShaft(0).BorerId == B0 && Sim->GetBorerShaft(B0) == 0 && Sim->IsBorerAnchor(B0) && Sim->GetShaftCount() == 1 && Sim->GetShaftDepth() == 1 && Sim->GetShaftDepth(0) == 1,
+				TEXT("SH1 the first bore anchored shaft 0 to the Borer that did it"));
+			bool bServing = true;
+			TArray<FIntPoint> All = Cells(-1);
+			for (const FIntPoint& P : All) { bServing &= Sim->ServingShaft(-1, P) == 0; }
+			for (int32 K = 30; K < 50; ++K) { bServing &= Sim->ServingShaft(-1, URHSimWorldSubsystem::SpiralCell(K)) == 0; }
+			bServing &= Sim->ServingShaft(-2, FIntPoint(1, 1)) == INDEX_NONE && Sim->ServingShaft(-1, FIntPoint(0, 0)) == 0;
+			Expect(bServing && All.Num() == 30, TEXT("SH1 ServingShaft is 0 for all 30 carved cells and for 20 uncarved ones, INDEX_NONE below the shaft"));
+			const FVector Spot = Sim->GetFloorCellCentreCm(-1, 3);
+			Sim->Debug_PlaceInstant(FName("AirFilter"), Spot, -1);
+			const int32 OnFloor = IdOfDef(TEXT("AirFilter"));
+			FRHSiteRef FloorSite; FloorSite.BuildingId = OnFloor;
+			FRHSiteRef SurfSite; SurfSite.BuildingId = B0;
+			FVector Old = Sim->GetShaftHeadCm(); Old.Z = 0 * Sim->GetFloorHeightCm(); // the pre-D2 formula
+			Expect(OnFloor != 0 && Sim->GetApproachPoint(FloorSite, 0) == Old && Sim->GetApproachPoint(SurfSite, 0) == Sim->GetSiteLocation(SurfSite),
+				TEXT("SH1 GetApproachPoint for a floor site is the old formula (the head, Z at the robot's level), compared with ==; a surface site is its own spot"));
+			Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("SH1 no ordinal read fell back to the spiral"));
+		}
+
+		// --- SH2. The SinkShaft refusals, one per preflight item, each checked by its reason. ---
+		{
+			// 1. Not a Borer.
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				BoreOrder(1, nullptr);
+				UntilDepth(0, 1, 4000);
+				const bool bOk = SinkOrder(LanderId);
+				Expect(!bOk && LastReject().Contains(TEXT("not a Borer")), FString::Printf(TEXT("SH2 refusal 1: the Lander is not a Borer (%s)"), *LastReject()));
+				// 2. Shaft 0's own Borer.
+				const bool bOwn = SinkOrder(B0);
+				Expect(!bOwn && LastReject().Contains(TEXT("already anchors shaft 0")), FString::Printf(TEXT("SH2 refusal 2: shaft 0's own Borer (%s)"), *LastReject()));
+				// 3. A batch in flight (the second Borer helps shaft 0 carve).
+				ExcOrder(-1, 8, nullptr);
+				for (int32 K = 0; K < 100 && Recipe(B1) != NCarveCell; ++K) { Step(); }
+				const bool bFlight = Recipe(B1) == NCarveCell && SinkOrder(B1);
+				Expect(!bFlight && LastReject().Contains(TEXT("batch in flight")), FString::Printf(TEXT("SH2 refusal 3: a Borer with a batch in flight waits for it (%s)"), *LastReject()));
+			}
+			// Under construction: a Borer site.
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				BoreOrder(1, nullptr);
+				UntilDepth(0, 1, 4000);
+				FRHCommand Build; Build.Verb = FName("Build"); Build.Target = FName("Borer"); Build.Location = Loc2;
+				Send(Build);
+				int32 Site = 0;
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Borer") && Bd.bUnderConstruction) { Site = Bd.Id; } }
+				const bool bOk = Site != 0 && SinkOrder(Site);
+				Expect(Site != 0 && !bOk && LastReject().Contains(TEXT("under construction")), FString::Printf(TEXT("SH2 refusal 1b: a Borer still under construction (%s)"), *LastReject()));
+			}
+			// 4. Shaft 0 unbored.
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				const bool bOk = SinkOrder(B1);
+				Expect(!bOk && LastReject().Contains(TEXT("first shaft first")) && Sim->GetShaftCount() == 1, FString::Printf(TEXT("SH2 refusal 4: shaft 0 is not bored yet (%s)"), *LastReject()));
+				int32 DummyId = INDEX_NONE;
+				Expect(!Sim->Debug_SinkShaftAt(Head1, 1, DummyId, Why) && DummyId == INDEX_NONE && Why.Contains(TEXT("first shaft first")), FString::Printf(TEXT("SH2 refusal 4 on the harness path (%s)"), *Why));
+			}
+			// 5. Over MaxShafts (the harness sinks three; the fourth sink is the fifth shaft).
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				Sim->ExtendShaft(1, Head0);
+				int32 Id = INDEX_NONE;
+				Place(TEXT("Pylon"), 2000.0, 32000.0);
+				Place(TEXT("Pylon"), -28000.0, 2000.0);
+				const bool bA = Sim->Debug_SinkShaftAt(Head1, 1, Id, Why) && Id == 1;
+				const bool bB = Sim->Debug_SinkShaftAt(FVector(2000.0, 32000.0, 0.0), 1, Id, Why) && Id == 2;
+				const bool bC = Sim->Debug_SinkShaftAt(FVector(-28000.0, 2000.0, 0.0), 1, Id, Why) && Id == 3;
+				Expect(bA && bB && bC && Sim->GetShaftCount() == Sim->GetMaxShafts(), FString::Printf(TEXT("SH2 setup: shafts 1, 2 and 3 sunk by the harness (%d of %d)"), Sim->GetShaftCount(), Sim->GetMaxShafts()));
+				Place(TEXT("Pylon"), 2000.0, -28000.0);
+				const bool bD = Sim->Debug_SinkShaftAt(FVector(2000.0, -28000.0, 0.0), 1, Id, Why);
+				Expect(!bD && Id == INDEX_NONE && Why.Contains(TEXT("No more shafts")) && Sim->GetShaftCount() == 4, FString::Printf(TEXT("SH2 refusal 5 on the harness path: a fifth shaft (%s)"), *Why));
+				const bool bE = SinkOrder(B1);
+				Expect(!bE && LastReject().Contains(TEXT("No more shafts")), FString::Printf(TEXT("SH2 refusal 5 on the order: the second Borer (%s)"), *LastReject()));
+			}
+			// 6. Out of coverage.
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				BoreOrder(1, nullptr);
+				UntilDepth(0, 1, 4000);
+				int32 Id = INDEX_NONE;
+				Expect(!Sim->Debug_SinkShaftAt(FVector(90000.0, 0.0, 0.0), 1, Id, Why) && Why.Contains(TEXT("outside coverage")), FString::Printf(TEXT("SH2 refusal 6 on the harness path: a head far from any pylon (%s)"), *Why));
+				const int32 Far = Place(TEXT("Borer"), 90000.0, 0.0);
+				Expect(!SinkOrder(Far) && LastReject().Contains(TEXT("outside coverage")), FString::Printf(TEXT("SH2 refusal 6 on the order: a Borer outside coverage (%s)"), *LastReject()));
+			}
+			// 7. The same column as another shaft.
+			Reset();
+			{
+				int32 B0 = 0, B1 = 0;
+				TwoBorers(B0, B1);
+				Sim->ExtendShaft(1, Head0);
+				int32 Id = INDEX_NONE;
+				Expect(Sim->Debug_SinkShaftAt(Head1, 1, Id, Why) && Id == 1, TEXT("SH2 setup: shaft 1 on column (30,1)"));
+				Expect(!Sim->Debug_SinkShaftAt(Head1, 1, Id, Why) && Why.Contains(TEXT("already stands")), FString::Printf(TEXT("SH2 refusal 7 on the harness path: shaft 1's own column (%s)"), *Why));
+				const int32 Twin = Place(TEXT("Borer"), 32100.0, 3300.0); // snaps to the same lattice point
+				Expect(!SinkOrder(Twin) && LastReject().Contains(TEXT("already stands")), FString::Printf(TEXT("SH2 refusal 7 on the order: a Borer that snaps onto shaft 1's column (%s)"), *LastReject()));
+				const int32 AtZero = Place(TEXT("Borer"), 2300.0, 1800.0); // snaps to (0,0), shaft 0's column
+				Expect(!SinkOrder(AtZero) && LastReject().Contains(TEXT("already stands")), FString::Printf(TEXT("SH2 refusal 7 on the order: a Borer that snaps onto shaft 0's column (%s)"), *LastReject()));
+			}
+			// 8. A column carved on -1, carved only on -3, or in a plan; 9. a building on the column.
+			Reset();
+			{
+				Place(TEXT("Pylon"), 4000.0, 2000.0);
+				Place(TEXT("Pylon"), 9000.0, 9000.0);
+				Sim->ExtendShaft(3, Head0);
+				Sim->ExcavateFloor(-3, 5, R);
+				int32 Id = INDEX_NONE;
+				const FVector AtCell = URHSimWorldSubsystem::LatticeToCm(Head0, FIntPoint(1, 0));
+				Expect(!Sim->Debug_SinkShaftAt(AtCell, 1, Id, Why) && Why.Contains(TEXT("floor -3")), FString::Printf(TEXT("SH2 refusal 8: a column carved on floor -3 only (%s)"), *Why));
+				Sim->ExcavateFloor(-1, 5, R);
+				Expect(!Sim->Debug_SinkShaftAt(AtCell, 1, Id, Why) && Why.Contains(TEXT("floor -1")), FString::Printf(TEXT("SH2 refusal 8: a column carved on floor -1 (%s)"), *Why));
+				Expect(Sim->Debug_PaintCarve(-1, FIntPoint(5, 5), Why), TEXT("SH2 setup: (5,5) painted onto floor -1's plan"));
+				Expect(!Sim->Debug_SinkShaftAt(URHSimWorldSubsystem::LatticeToCm(Head0, FIntPoint(5, 5)), 1, Id, Why) && Why.Contains(TEXT("planned")), FString::Printf(TEXT("SH2 refusal 8: a column in a plan (%s)"), *Why));
+				Sim->Debug_PlaceInstant(FName("AirFilter"), URHSimWorldSubsystem::LatticeToCm(Head0, FIntPoint(7, 7)), -1);
+				Expect(!Sim->Debug_SinkShaftAt(URHSimWorldSubsystem::LatticeToCm(Head0, FIntPoint(7, 7)), 1, Id, Why) && Why.Contains(TEXT("building stands")) && Sim->GetShaftCount() == 1,
+					FString::Printf(TEXT("SH2 refusal 9: an air filter stands on that column of floor -1 (%s)"), *Why));
+			}
+		}
+
+		// --- SH2b. The execute-time race: a column that is free when the order is sent is carved before it lands. ---
+		{
+			Reset();
+			Kit(2000.0, 2000.0);
+			Place(TEXT("Pylon"), 4000.0, 4000.0);
+			const int32 B1 = Place(TEXT("Borer"), 4000.0, 2000.0); // snaps to (2,0): the tenth cell of shaft 0's spiral
+			Sim->ExtendShaft(1, Head0);
+			FRHCommand C; C.Verb = FName("SinkShaft"); C.Value = B1;
+			Sim->EnqueueCommand(C);
+			Sim->ExcavateFloor(-1, 10, R); // before the order lands: (2,0) is carved
+			const bool bCarved = Sim->FindFloorCell(-1, FIntPoint(2, 0)) != INDEX_NONE;
+			Rejects.Reset();
+			for (int32 K = 0; K < 5 && Sim->GetUplinkQueue().Num() > 0; ++K) { Step(); }
+			Expect(bCarved && Sim->GetShaftCount() == 1 && LastReject().Contains(TEXT("floor -1")) && LastReject().Contains(TEXT("dug")),
+				FString::Printf(TEXT("SH2b the order is refused at the uplink step with refusal 8's text, and no shaft is added (%s)"), *LastReject()));
+		}
+
+		// --- SH3. The sink: the column, the head and the anchor. ---
+		{
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			TwoBorers(B0, B1);
+			BoreOrder(1, nullptr);
+			UntilDepth(0, 1, 4000);
+			const uint32 V0 = Sim->GetShaftsVersion();
+			const bool bOk = SinkOrder(B1);
+			const FRHShaft& S1 = Sim->GetShaft(1);
+			const FRHBuildingInstance* Bd1 = FindB(B1);
+			const FIntPoint Want = URHSimWorldSubsystem::CmToLattice(Origin(), Bd1 ? Bd1->LocationCm : FVector::ZeroVector);
+			Expect(bOk && Sim->GetShaftCount() == 2 && S1.Id == 1 && S1.RegionId == 0 && S1.Column == Want && Want == FIntPoint(30, 1),
+				FString::Printf(TEXT("SH3 shaft 1 stands on the column the Borer snaps to, (%d,%d)"), S1.Column.X, S1.Column.Y));
+			Expect(S1.HeadCm == URHSimWorldSubsystem::LatticeToCm(Origin(), S1.Column) && S1.HeadCm == Head1 && S1.HeadCm != Bd1->LocationCm,
+				TEXT("SH3 its head is LatticeToCm(origin, column) exactly, (32000, 3000), and not the Borer's own off-grid spot (R3)"));
+			Expect(S1.Depth == 0 && S1.BoreTargetDepth == 0 && S1.BorerId == B1 && Sim->GetBorerShaft(B1) == 1 && Sim->IsBorerAnchor(B1) && !Sim->IsBorerAnchor(IdOfDef(TEXT("Lander"))) && Sim->GetShaftsVersion() > V0,
+				TEXT("SH3 depth 0, no bore target, anchored to its Borer; the shaft version went up"));
+			Expect(Sim->GetShaftDepth() == 1 && Sim->GetShaftDepth(1) == 0 && Sim->GetShaftHeadCm() == Head0 && Sim->ServingShaft(-1, FIntPoint(30, 1)) == 0,
+				TEXT("SH3 the colony still reaches -1 only through shaft 0; the origin did not move; shaft 1 reaches nothing yet"));
+		}
+
+		// --- SH4. Bore and Excavate pick their shaft through Target. ---
+		{
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH4 setup: shaft 0 at -1, shaft 1 sunk"));
+			BoreOrder(2, TEXT("Shaft1"));
+			Expect(UntilDepth(1, 2, 6000), TEXT("SH4 shaft 1 bored to -2 while shaft 0 sat at -1"));
+			Expect(Sim->IsLevelConnected(-2) && Sim->GetShaftDepth() == 2 && Sim->GetShaftDepth(0) == 1 && Sim->GetShaftDepth(1) == 2 && Sim->GetBoreTargetDepth() == 1 && Sim->GetBoreTargetDepth(1) == 2,
+				TEXT("SH4 floor -2 is connected, the deepest is 2, shaft 0 is 1, shaft 1 is 2; the no-argument target is shaft 0's (1)"));
+			Rejects.Reset();
+			ExcOrder(-2, 3, nullptr);
+			Expect(Rejects.Num() == 1 && LastReject() == TEXT("Floor -2 not reached - bore the shaft deeper first"), FString::Printf(TEXT("SH4 Excavate -2 with no Target is shaft 0's, and is refused with today's text (%s)"), *LastReject()));
+			ExcOrder(-2, 3, TEXT("Shaft0"));
+			Expect(Rejects.Num() == 2 && LastReject() == TEXT("Floor -2 not reached - bore the shaft deeper first"), TEXT("SH4 Target Shaft0 says the same"));
+			ExcOrder(-2, 3, TEXT("Shaft1"));
+			Expect(Rejects.Num() == 2, TEXT("SH4 Excavate -2 with Target Shaft1 is accepted"));
+			Expect(UntilCells(-2, 3, 2000) && Sim->GetCarveQueued(-2, 1) == 0 && Sim->GetCarveQueued(-2) == 0, FString::Printf(TEXT("SH4 shaft 1's Borer carved the three cells (%d)"), Sim->GetFloorCarvedCells(-2)));
+			Expect(Cells(-2) == OracleS(TArray<FIntPoint>(), { FIntPoint(0, 0), FIntPoint(30, 1) }, FIntPoint(30, 1), 3), TEXT("SH4 and they are shaft 1's own spiral: its column plus (1,0) (1,1) (0,1)"));
+			ExcOrder(-1, 1, TEXT("Shaft9"));
+			Expect(Rejects.Num() == 3 && LastReject().Contains(TEXT("Unknown shaft")), FString::Printf(TEXT("SH4 Shaft9 is refused as unknown (%s)"), *LastReject()));
+			ExcOrder(-1, 1, TEXT("Banana"));
+			Expect(Rejects.Num() == 4 && LastReject().Contains(TEXT("Unknown shaft")), FString::Printf(TEXT("SH4 so is any other name (%s)"), *LastReject()));
+			BoreOrder(1, TEXT("Shaft1"));
+			Expect(Rejects.Num() == 5 && LastReject().Contains(TEXT("Shaft 1 already at floor -2")), FString::Printf(TEXT("SH4 shaft 1's bore texts name it (%s)"), *LastReject()));
+			BoreOrder(1, nullptr);
+			Expect(Rejects.Num() == 6 && LastReject() == TEXT("Shaft already at floor -1"), FString::Printf(TEXT("SH4 shaft 0's keep today's text (%s)"), *LastReject()));
+		}
+
+		// --- SH4b. The work loop with two shafts: concurrent bores, helpers, the former helper. ---
+		{
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH4b setup: shaft 0 anchored by Borer A, shaft 1 by Borer B"));
+			const int32 B2 = Place(TEXT("Borer"), Loc2.X, Loc2.Y); // a helper
+			Expect(B2 != B0 && B2 != B1 && !Sim->IsBorerAnchor(B2) && Sim->GetBorerShaft(B2) == 0, TEXT("SH4b the third Borer is an unanchored helper, which works shaft 0"));
+			BoreOrder(2, nullptr);
+			BoreOrder(1, TEXT("Shaft1"));
+			bool bBoth = false, bHelperDoubles = false;
+			for (int32 K = 0; K < 400 && (Sim->GetShaftDepth(0) < 2 || Sim->GetShaftDepth(1) < 1); ++K)
+			{
+				const bool bA = Recipe(B0) == NBoreFloor, bB = Recipe(B1) == NBoreFloor, bH = Recipe(B2) == NBoreFloor;
+				bBoth |= bA && bB;
+				bHelperDoubles |= bA && bH;
+				Step();
+			}
+			Expect(bBoth, TEXT("SH4b both anchors had a BoreFloor batch in flight in the same step: the scan is per shaft"));
+			Expect(!bHelperDoubles && Sim->GetShaftDepth(0) == 2 && Sim->GetShaftDepth(1) == 1, FString::Printf(TEXT("SH4b the helper never started a shaft-0 bore beside its anchor's; each shaft went down one floor (%d, %d)"), Sim->GetShaftDepth(0), Sim->GetShaftDepth(1)));
+			// The helper takes shaft 0's carve queue, never shaft 1's.
+			bool bHelperCarved = false;
+			ExcOrder(-1, 6, nullptr);
+			for (int32 K = 0; K < 300 && Sim->GetFloorCarvedCells(-1) < 6; ++K) { bHelperCarved |= Recipe(B2) == NCarveCell; Step(); }
+			Expect(bHelperCarved && Cells(-1) == OracleS(TArray<FIntPoint>(), { FIntPoint(0, 0), FIntPoint(30, 1) }, FIntPoint(0, 0), 6), TEXT("SH4b the helper took part in shaft 0's carve queue, and all six cells are shaft 0's spiral"));
+			Steps(5);
+			bool bHelperOnOne = false;
+			ExcOrder(-1, 4, TEXT("Shaft1"));
+			for (int32 K = 0; K < 300 && Sim->GetFloorCarvedCells(-1) < 10; ++K) { bHelperOnOne |= Recipe(B2) == NCarveCell; Step(); }
+			Expect(!bHelperOnOne && Sim->GetFloorCarvedCells(-1) == 10 && Sim->GetCarveQueued(-1) == 0, FString::Printf(TEXT("SH4b with shaft 0's queue empty the helper idled and never took shaft 1's (%d cells)"), Sim->GetFloorCarvedCells(-1)));
+			Expect(Tail(Cells(-1), 4) == OracleS(Tail(Cells(-1), 0), { FIntPoint(0, 0), FIntPoint(30, 1) }, FIntPoint(30, 1), 4), TEXT("SH4b shaft 1's four cells are its own spiral, carved by its own Borer"));
+			// The former helper moves over once it is sunk.
+			Steps(6);
+			Expect(Recipe(B2) == NAME_None && SinkOrder(B2), TEXT("SH4b the idle helper is sunk as shaft 2 (its batch is done)"));
+			Expect(Sim->GetShaftCount() == 3 && Sim->GetBorerShaft(B2) == 2 && Sim->GetShaft(2).Column == FIntPoint(-4, 0), FString::Printf(TEXT("SH4b shaft 2 stands on column (%d,%d), anchored to it"), Sim->GetShaft(2).Column.X, Sim->GetShaft(2).Column.Y));
+			bool bFormerTakes = false;
+			ExcOrder(-1, 6, nullptr);
+			for (int32 K = 0; K < 300 && Sim->GetFloorCarvedCells(-1) < 16; ++K) { bFormerTakes |= Recipe(B2) == NCarveCell; Step(); }
+			Expect(!bFormerTakes && Sim->GetFloorCarvedCells(-1) == 16, FString::Printf(TEXT("SH4b shaft 0's new queue waited for shaft 0's anchor: the former helper never touched it (%d cells)"), Sim->GetFloorCarvedCells(-1)));
+			BoreOrder(1, TEXT("Shaft2"));
+			Expect(UntilDepth(2, 1, 4000), TEXT("SH4b the former helper bores its own shaft 2"));
+			const int32 Before = Sim->GetFloorCarvedCells(-1);
+			ExcOrder(-1, 3, TEXT("Shaft2"));
+			Expect(UntilCells(-1, Before + 3, 2000), TEXT("SH4b and carves its own queue"));
+			Expect(Tail(Cells(-1), 3) == OracleS(Tail(Cells(-1), 0), { FIntPoint(0, 0), FIntPoint(30, 1), FIntPoint(-4, 0) }, FIntPoint(-4, 0), 3), TEXT("SH4b shaft 2's three cells are its own spiral around (-4,0)"));
+			// Work records stay with their shaft across a save and a load taken mid-batch.
+			BoreOrder(2, TEXT("Shaft1"));
+			BoreOrder(2, TEXT("Shaft2"));
+			for (int32 K = 0; K < 100 && !(Recipe(B1) == NBoreFloor && Recipe(B2) == NBoreFloor); ++K) { Step(); }
+			const bool bBothFlying = Recipe(B1) == NBoreFloor && Recipe(B2) == NBoreFloor;
+			Expect(bBothFlying && Sim->SaveColony(TEXT("shaftsb"), SaveErr), FString::Printf(TEXT("SH4b saved with a bore in flight on shafts 1 and 2 (%s)"), *SaveErr));
+			Steps(40);
+			const int32 D0 = Sim->GetShaftDepth(0), D1 = Sim->GetShaftDepth(1), D2 = Sim->GetShaftDepth(2);
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("shaftsb"), Le) && Le.IsEmpty() && Sim->GetShaftDepth(1) == 1 && Sim->GetShaftDepth(2) == 1 && Sim->GetBorerShaft(B1) == 1 && Sim->GetBorerShaft(B2) == 2,
+				FString::Printf(TEXT("SH4b the load restores both shafts mid-batch (%s)"), *Le));
+			Steps(40);
+			Expect(Sim->GetShaftDepth(0) == D0 && Sim->GetShaftDepth(1) == D1 && Sim->GetShaftDepth(2) == D2 && D0 == 2 && D1 == 2 && D2 == 2,
+				FString::Printf(TEXT("SH4b each bore lands on its own shaft after the load: depths %d, %d, %d, as in the colony that never saved"), Sim->GetShaftDepth(0), Sim->GetShaftDepth(1), Sim->GetShaftDepth(2)));
+		}
+
+		// --- SH5. Two Borers carve one floor: literal cells, interleaved ordinals, no column, the same ordinals after a load. ---
+		{
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH5 setup: two shafts"));
+			BoreOrder(1, TEXT("Shaft1"));
+			Expect(UntilDepth(1, 1, 4000), TEXT("SH5 shaft 1 reaches -1"));
+			ExcOrder(-1, 12, nullptr);
+			ExcOrder(-1, 12, TEXT("Shaft1"));
+			Expect(UntilCells(-1, 24, 2000), FString::Printf(TEXT("SH5 both Borers carved 12 cells each (%d)"), Sim->GetFloorCarvedCells(-1)));
+			const TArray<FIntPoint> All = Cells(-1);
+			TArray<FIntPoint> Mine, Theirs;
+			TArray<int32> MineAt, TheirsAt;
+			for (int32 i = 0; i < All.Num(); ++i)
+			{
+				if (All[i].X >= 20) { Theirs.Add(All[i]); TheirsAt.Add(i); } else { Mine.Add(All[i]); MineAt.Add(i); }
+			}
+			const FIntPoint Lit[12] = { FIntPoint(1, 0), FIntPoint(1, 1), FIntPoint(0, 1), FIntPoint(-1, 1), FIntPoint(-1, 0), FIntPoint(-1, -1), FIntPoint(0, -1), FIntPoint(1, -1), FIntPoint(2, -1), FIntPoint(2, 0), FIntPoint(2, 1), FIntPoint(2, 2) };
+			bool bLit = Mine.Num() == 12 && Theirs.Num() == 12;
+			for (int32 i = 0; bLit && i < 12; ++i) { bLit &= Mine[i] == Lit[i] && Theirs[i] == FIntPoint(30, 1) + Lit[i]; }
+			Expect(bLit, TEXT("SH5 shaft 0's cells are (1,0) (1,1) (0,1) (-1,1) ... and shaft 1's are column (30,1) plus the same literal walk, each in carve order"));
+			Expect(MineAt.Num() > 0 && TheirsAt.Num() > 0 && TheirsAt[0] < MineAt.Last() && MineAt[0] < TheirsAt.Last(), FString::Printf(TEXT("SH5 the ordinals interleave: shaft 1's first cell is ordinal %d, shaft 0's last is %d"), TheirsAt.Num() ? TheirsAt[0] : -1, MineAt.Num() ? MineAt.Last() : -1));
+			Expect(NoDup(All) && !All.Contains(FIntPoint(0, 0)) && !All.Contains(FIntPoint(30, 1)), TEXT("SH5 no point twice, and no shaft column is a cell"));
+			bool bOrd = true;
+			for (int32 i = 0; i < All.Num(); ++i) { bOrd &= Sim->FindFloorCell(-1, All[i]) == i && Sim->GetFloorCell(-1, i) == All[i]; }
+			Expect(bOrd && Sim->SaveColony(TEXT("shaftsc"), SaveErr), TEXT("SH5 every ordinal names its point, and the colony is saved"));
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("shaftsc"), Le) && Le.IsEmpty() && Cells(-1) == All, FString::Printf(TEXT("SH5 after a load every ordinal maps to the same point (%s)"), *Le));
+			bool bOrd2 = true;
+			for (int32 i = 0; i < All.Num(); ++i) { bOrd2 &= Sim->FindFloorCell(-1, All[i]) == i; }
+			Expect(bOrd2 && Sim->GetShaftCount() == 2 && Sim->GetShaft(1).Column == FIntPoint(30, 1) && Sim->GetShaft(1).HeadCm == Head1 && Sim->GetShaft(1).BorerId == B1 && Sim->GetBorerShaft(B1) == 1, TEXT("SH5 and the loaded shaft 1 has its column, its derived head and its anchor back"));
+		}
+
+		// --- SH6. A column on a cell: the walk skips it, and a spiral skips the other shaft's cells. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 4500.0, 3000.0);
+			Expect(Sim->ExcavateFloor(-1, 4, R), TEXT("SH6 shaft 0 carved four cells"));
+			int32 Id = INDEX_NONE;
+			Expect(Sim->Debug_SinkShaftAt(FVector(6000.0, 3000.0, 0.0), 1, Id, Why) && Id == 1 && Sim->GetShaft(1).Column == FIntPoint(3, 0), TEXT("SH6 shaft 1 sunk at (3,0), a spiral point of shaft 0 not yet carved"));
+			Expect(Sim->ExcavateFloor(-1, 60, R, 0), TEXT("SH6 shaft 0 carved 60 more"));
+			const TArray<FIntPoint> A = Cells(-1);
+			Expect(A.Num() == 64 && NoDup(A) && !A.Contains(FIntPoint(3, 0)) && !A.Contains(FIntPoint(0, 0)), TEXT("SH6 64 cells, no duplicate, and (3,0) was skipped"));
+			Expect(A == OracleS(TArray<FIntPoint>(), { FIntPoint(0, 0), FIntPoint(3, 0) }, FIntPoint(0, 0), 64), TEXT("SH6 shaft 0's cells are the spiral with its own column and shaft 1's column left out"));
+			Expect(Sim->ExcavateFloor(-1, 20, R, 1), TEXT("SH6 shaft 1 carved 20"));
+			const TArray<FIntPoint> B = Cells(-1);
+			Expect(NoDup(B) && B.Num() == 84 && Tail(B, 20) == OracleS(A, { FIntPoint(0, 0), FIntPoint(3, 0) }, FIntPoint(3, 0), 20) && !B.Contains(FIntPoint(3, 0)),
+				TEXT("SH6 shaft 1's cells are the walk around (3,0) with shaft 0's cells skipped: none twice, none on a column"));
+		}
+
+		// --- SH7. Plan ownership: each Borer takes its own points, in paint order; a later shaft takes points over. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			Place(TEXT("Pylon"), 18000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Expect(Id == 1 && Sim->ExcavateFloor(-1, 1, R, 0) && Sim->ExcavateFloor(-1, 1, R, 1), TEXT("SH7 setup: shaft 1 at (30,0), one cell each so the floor exists"));
+			const FIntPoint P1(2, 5), Q1(28, 4), P2(3, 5), Q2(29, 4);
+			bool bPaint = true;
+			for (const FIntPoint& P : { P1, Q1, P2, Q2 }) { bPaint &= Sim->Debug_PaintCarve(-1, P, Why); }
+			Expect(bPaint && Plan(-1) == TArray<FIntPoint>({ P1, Q1, P2, Q2 }), TEXT("SH7 four points painted, two near each head, interleaved in paint order"));
+			TArray<FIntPoint> Peek0, Peek1;
+			Sim->PeekCarveCells(-1, 3, Peek0, 0);
+			Sim->PeekCarveCells(-1, 3, Peek1, 1);
+			Expect(Peek0.Num() == 3 && Peek0[0] == P1 && Peek0[1] == P2 && Peek1.Num() == 3 && Peek1[0] == Q1 && Peek1[1] == Q2, TEXT("SH7 PeekCarveCells(S) takes S's own points first, in paint order: (2,5) (3,5) for shaft 0, (28,4) (29,4) for shaft 1"));
+			const int32 N0 = Sim->GetFloorCarvedCells(-1);
+			Sim->ExcavateFloor(-1, 3, R, 0);
+			Expect(Tail(Cells(-1), 3) == Peek0 && Cells(-1).Num() == N0 + 3 && Plan(-1) == TArray<FIntPoint>({ Q1, Q2 }), TEXT("SH7 what shaft 0 appends is what it peeked, and the other shaft's points stay in the plan"));
+			Sim->ExcavateFloor(-1, 3, R, 1);
+			Expect(Tail(Cells(-1), 3) == Peek1 && Plan(-1).Num() == 0, TEXT("SH7 shaft 1's carve matches its peek, and the plan is empty"));
+			// A third shaft, sunk later, takes over the points nearest to it.
+			const FIntPoint P3(14, 2);
+			Expect(Sim->Debug_PaintCarve(-1, P3, Why), TEXT("SH7 (14,2) painted"));
+			TArray<FIntPoint> Before, After0, After2;
+			Sim->PeekCarveCells(-1, 1, Before, 0);
+			Expect(Before.Num() == 1 && Before[0] == P3, TEXT("SH7 with two shafts the point is shaft 0's"));
+			Expect(Sim->Debug_SinkShaftAt(FVector(18000.0, 3000.0, 0.0), 1, Id, Why) && Id == 2 && Sim->GetShaft(2).Column == FIntPoint(15, 0), TEXT("SH7 shaft 2 sunk at (15,0)"));
+			Sim->PeekCarveCells(-1, 1, After0, 0);
+			Sim->PeekCarveCells(-1, 1, After2, 2);
+			Expect(After0.Num() == 1 && After0[0] != P3 && After2.Num() == 1 && After2[0] == P3, TEXT("SH7 now (14,2) is shaft 2's: shaft 0 no longer takes it, shaft 2 does"));
+		}
+
+		// --- SH8. Which head serves a cell. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 12, R, 0);
+			Sim->ExcavateFloor(-1, 12, R, 1);
+			const TArray<FIntPoint> All = Cells(-1);
+			bool bA = true, bB = true;
+			for (const FIntPoint& P : All) { if (P.X < 15) { bA &= Sim->ServingShaft(-1, P) == 0; } else { bB &= Sim->ServingShaft(-1, P) == 1; } }
+			Expect(Id == 1 && All.Num() == 24 && bA && bB, TEXT("SH8 two digs: a cell in dig A is served by shaft 0, a cell in dig B by shaft 1"));
+			Expect(Sim->ServingShaft(-1, FIntPoint(15, 0)) == 0 && Sim->ServingShaft(-1, FIntPoint(15, 5)) == 0 && Sim->ServingShaft(-1, FIntPoint(16, 0)) == 1 && Sim->ServingShaft(-2, FIntPoint(1, 1)) == INDEX_NONE && Sim->ServingShaft(0, FIntPoint(9, 9)) == 0,
+				TEXT("SH8 an equidistant point goes to the lower Id; one step closer to shaft 1 goes to shaft 1; an unreached floor is INDEX_NONE; the surface is 0"));
+			// Islands: painted points nobody touches fall back to the nearest shaft.
+			Expect(Sim->Debug_PaintCarve(-1, FIntPoint(20, 10), Why) && Sim->Debug_PaintCarve(-1, FIntPoint(-10, -8), Why), TEXT("SH8 two island points painted"));
+			Sim->ExcavateFloor(-1, 1, R, 1);
+			Sim->ExcavateFloor(-1, 1, R, 0);
+			Expect(Sim->FindFloorCell(-1, FIntPoint(20, 10)) != INDEX_NONE && Sim->FindFloorCell(-1, FIntPoint(-10, -8)) != INDEX_NONE && Sim->ServingShaft(-1, FIntPoint(20, 10)) == 1 && Sim->ServingShaft(-1, FIntPoint(-10, -8)) == 0,
+				TEXT("SH8 an island that no shaft touches is served by the nearest: (20,10) by shaft 1, (-10,-8) by shaft 0"));
+			// A painted line joins the digs: the nearest touching shaft serves.
+			bool bLine = true;
+			for (int32 X = 3; X <= 28; ++X) { bLine &= Sim->Debug_PaintCarve(-1, FIntPoint(X, 0), Why); }
+			Sim->ExcavateFloor(-1, 13, R, 0);
+			Sim->ExcavateFloor(-1, 13, R, 1);
+			Expect(bLine && Plan(-1).Num() == 0 && Sim->FindFloorCell(-1, FIntPoint(15, 0)) != INDEX_NONE && Sim->FindFloorCell(-1, FIntPoint(16, 0)) != INDEX_NONE, TEXT("SH8 a 26-cell line from (3,0) to (28,0) is carved: 13 by each shaft, split at the midpoint"));
+			Expect(Sim->ServingShaft(-1, FIntPoint(10, 0)) == 0 && Sim->ServingShaft(-1, FIntPoint(20, 0)) == 1 && Sim->ServingShaft(-1, FIntPoint(15, 0)) == 0 && Sim->ServingShaft(-1, FIntPoint(29, -1)) == 1 && Sim->ServingShaft(-1, FIntPoint(-1, 1)) == 0,
+				TEXT("SH8 the digs are one now and both shafts touch it: the nearest serves - (10,0) shaft 0, (20,0) and (29,-1) shaft 1, (15,0) the tie to shaft 0"));
+		}
+		// SH8b: rule 2. A dig that only shaft 1 touches is served by shaft 1 even where shaft 0 is nearer.
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 11000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(11000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 4, R, 0);
+			Sim->ExcavateFloor(-1, 100, R, 1);
+			int32 Near0 = 0;
+			bool bAllOne = true;
+			for (const FIntPoint& P : Cells(-1))
+			{
+				if (P.X < 3) { continue; }
+				const int64 D0 = (int64)P.X * P.X + (int64)P.Y * P.Y, D1 = (int64)(P.X - 8) * (P.X - 8) + (int64)P.Y * P.Y;
+				if (D0 < D1) { ++Near0; bAllOne &= Sim->ServingShaft(-1, P) == 1; }
+			}
+			Expect(Id == 1 && Sim->GetShaft(1).Column == FIntPoint(8, 0) && Near0 > 0 && bAllOne, FString::Printf(TEXT("SH8b %d cells of the dig under shaft 1 lie nearer to shaft 0, and shaft 1 serves every one: the dig touches only shaft 1 (rule 2)"), Near0));
+		}
+
+		// --- SH9. Haulers: the drop-off is the head that serves the site, with Z at the robot's level; the cargo lands. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 8, R, 0);
+			Sim->ExcavateFloor(-1, 8, R, 1);
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 4000.0, false);
+			Sim->AddStock(NOx, 100.0);
+			const FVector SpotA = Sim->GetFloorCellCentreCm(-1, 2);
+			FVector SpotB = FVector::ZeroVector;
+			for (int32 i = 0; i < Sim->GetFloorCarvedCells(-1); ++i) { if (Sim->GetFloorCell(-1, i).X >= 20) { SpotB = Sim->GetFloorCellCentreCm(-1, i); break; } }
+			FRHCommand BuildA, BuildB;
+			BuildA.Verb = BuildB.Verb = FName("Build");
+			BuildA.Target = BuildB.Target = FName("AirFilter");
+			BuildA.Level = BuildB.Level = -1;
+			BuildA.Location = SpotA; BuildB.Location = SpotB;
+			Send(BuildA);
+			Send(BuildB);
+			int32 SiteA = 0, SiteB = 0;
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+			{
+				if (Bd.DefName == FName("AirFilter") && Bd.Level == -1 && Bd.bUnderConstruction) { (FVector::DistXY(Bd.LocationCm, SpotB) < 1.0 ? SiteB : SiteA) = Bd.Id; }
+			}
+			Expect(SiteA != 0 && SiteB != 0 && Rejects.Num() == 0, FString::Printf(TEXT("SH9 two build sites on floor -1, one in each dig (%d, %d)"), SiteA, SiteB));
+			FRHSiteRef RefA, RefB; RefA.BuildingId = SiteA; RefB.BuildingId = SiteB;
+			FVector HeadA = Sim->GetShaft(0).HeadCm; HeadA.Z = 0.0;
+			FVector HeadB = Sim->GetShaft(1).HeadCm; HeadB.Z = 0.0;
+			Expect(Sim->GetApproachPoint(RefA, 0) == HeadA && Sim->GetApproachPoint(RefB, 0) == HeadB && HeadA != HeadB,
+				TEXT("SH9 the approach point of the site in dig A is head 0 and of the site in dig B is head 1, Z at the robot's level"));
+			Sim->Debug_StepTaskBoard();
+			int32 HaulsA = 0, HaulsB = 0;
+			bool bDropsOk = true, bLanded = true;
+			for (int32 K = 0; K < 8; ++K)
+			{
+				FRHTask Haul;
+				const FMassEntityHandle Hauler(960000 + K, 1);
+				if (!Sim->TryClaimHaul(Hauler, FVector::ZeroVector, Haul) || (Haul.To.BuildingId != SiteA && Haul.To.BuildingId != SiteB)) { continue; }
+				float Loaded = 0.f;
+				FVector Drop = FVector::ZeroVector;
+				if (!Sim->HaulLoad(Haul.Id, 60.f, Loaded, Drop)) { continue; }
+				const bool bB = Haul.To.BuildingId == SiteB;
+				(bB ? HaulsB : HaulsA) += 1;
+				bDropsOk &= Drop == (bB ? HeadB : HeadA);
+				const FRHBuildingInstance* Site = FindB(Haul.To.BuildingId);
+				const double Had = Site && Site->InputKg.Find(NStruct) ? *Site->InputKg.Find(NStruct) : 0.0;
+				Sim->HaulUnload(Haul.Id, Loaded);
+				Site = FindB(Haul.To.BuildingId);
+				const double Has = Site && Site->InputKg.Find(NStruct) ? *Site->InputKg.Find(NStruct) : 0.0;
+				bLanded &= Has > Had;
+			}
+			Expect(HaulsA > 0 && HaulsB > 0 && bDropsOk && bLanded, FString::Printf(TEXT("SH9 haulers took %d loads to dig A and %d to dig B: each drop-off was the serving head with Z 0, and each load landed in its site"), HaulsA, HaulsB));
+			bool bBuildOk = true;
+			int32 Builds = 0;
+			for (int32 K = 0; K < 4; ++K)
+			{
+				FRHTask Build;
+				if (Sim->TryClaimBuild(FMassEntityHandle(961000 + K, 1), FVector::ZeroVector, Build) && (Build.To.BuildingId == SiteA || Build.To.BuildingId == SiteB))
+				{
+					++Builds;
+					bBuildOk &= Sim->GetApproachPoint(Build.To, 0) == (Build.To.BuildingId == SiteB ? HeadB : HeadA);
+				}
+			}
+			Expect(bBuildOk, FString::Printf(TEXT("SH9 %d build claim(s) go to the head that serves their site"), Builds));
+			Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("SH9 no ordinal read fell back to the spiral (FloorCellFallbacks is 0)"));
+		}
+
+		// --- SH10. Commute: a floor home uses the cheapest head, ties to the lower Id; the road load follows the same head. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 12, R, 0);
+			Place(TEXT("AirFilter"), 0.0, 0.0, 1, 1, -1);
+			Sim->Debug_ForceRateFloor(-1);
+			Sim->Debug_SetColonistsPerCell(1.0);
+			for (int32 i = 0; i < 3; ++i) { Sim->DesignateRoom(-1, i, NLiving, R); }
+			Sim->Debug_SetCommuteTuning(0.0, 1.0, 30000.0, 6000.0);
+			const int32 NearOne = Place(TEXT("Stockpile"), 36000.0, 7000.0);  // 5,000 cm from head 1 (3-4-5), 33,241 from head 0
+			const int32 NearZero = Place(TEXT("Stockpile"), 6000.0, 7000.0);  // 5,000 cm from head 0
+			const int32 Middle = Place(TEXT("Stockpile"), 18000.0, 8000.0);   // 15,811 cm from both
+			Expect(Id == 1 && Sim->Debug_AddColonists(3) == 3, TEXT("SH10 setup: two heads, three colonists housed on floor -1"));
+			Sim->Debug_RefreshJobs();
+			Sim->Debug_ClearColonistStations();
+			Sim->Debug_SetColonistStation(1, FIntVector(0, INDEX_NONE, NearOne));
+			Sim->Debug_SetColonistStation(2, FIntVector(0, INDEX_NONE, NearZero));
+			Sim->Debug_SetColonistStation(3, FIntVector(0, INDEX_NONE, Middle));
+			Sim->Debug_SetColonistHome(1, 0, -1);
+			Sim->Debug_SetColonistHome(2, 0, -1);
+			Sim->Debug_SetColonistHome(3, 0, -1);
+			const int64 Per = 6000;
+			const FIntPoint H0 = Cm(Sim->GetShaft(0).HeadCm), H1 = Cm(Sim->GetShaft(1).HeadCm);
+			const int64 Want1 = Per + 5000, Want2 = Per + 5000, Want3 = Per + Straight(H0, FIntPoint(18000, 8000));
+			Expect(Sim->GetColonistCommuteCm(1) == Want1 && Sim->GetColonistCommuteCm(2) == Want2 && Sim->GetColonistCommuteCm(3) == Want3 && Straight(H0, FIntPoint(18000, 8000)) == Straight(H1, FIntPoint(18000, 8000)),
+				FString::Printf(TEXT("SH10 1 x 6,000 + the surface leg from the cheapest head: %lld (5,000 from head 1), %lld (5,000 from head 0), %lld (the tie, %lld from either)"),
+					Sim->GetColonistCommuteCm(1), Sim->GetColonistCommuteCm(2), Sim->GetColonistCommuteCm(3), Straight(H0, FIntPoint(18000, 8000))));
+			TArray<URHSimWorldSubsystem::FRHCommutePair> Pairs;
+			Sim->GetCommutePairs(Pairs);
+			FIntPoint Anchor1 = FIntPoint::ZeroValue, Anchor2 = FIntPoint::ZeroValue, Anchor3 = FIntPoint::ZeroValue;
+			for (const URHSimWorldSubsystem::FRHCommutePair& P : Pairs)
+			{
+				if (P.WorkPosCm == FIntPoint(36000, 7000)) { Anchor1 = P.HomePosCm; }
+				else if (P.WorkPosCm == FIntPoint(6000, 7000)) { Anchor2 = P.HomePosCm; }
+				else if (P.WorkPosCm == FIntPoint(18000, 8000)) { Anchor3 = P.HomePosCm; }
+			}
+			Expect(Pairs.Num() == 3 && Anchor1 == H1 && Anchor2 == H0 && Anchor3 == H0, FString::Printf(TEXT("SH10 each trip's floor anchor is the head it uses: head 1 (%d,%d), head 0, and the tie goes to head 0"), Anchor1.X, Anchor1.Y));
+			Expect(Sim->GetCommuteDistanceCm(-1, FIntPoint::ZeroValue, 0, FIntPoint(36000, 7000)) == Want1 && Sim->GetCommuteDistanceCm(0, FIntPoint(36000, 7000), -1, FIntPoint(77, 77)) == Want1,
+				TEXT("SH10 the distance reads the same whichever end is the floor"));
+			Expect(Sim->GetCommuteDistanceCm(-3, FIntPoint::ZeroValue, 0, FIntPoint(36000, 7000)) == 3 * Per + Straight(H0, FIntPoint(36000, 7000)),
+				FString::Printf(TEXT("SH10 with no shaft reaching floor -3 the formula falls back to shaft 0's head, as it always read it: 3 x 6,000 + %lld"), Straight(H0, FIntPoint(36000, 7000))));
+			// Roads: a road from head 1 to the job beside it carries the trip; the load follows the same head.
+			Sim->Debug_LayRoad(FVector(33000.0, 3000.0, 0.0), FVector(36000.0, 7000.0, 0.0), true);
+			TArray<URHSimWorldSubsystem::FRHCommutePair> Pairs2;
+			Sim->GetCommutePairs(Pairs2);
+			int32 EdgesOne = 0, EdgesZero = 0;
+			for (const URHSimWorldSubsystem::FRHCommutePair& P : Pairs2)
+			{
+				if (P.WorkPosCm == FIntPoint(36000, 7000)) { EdgesOne = P.EdgeIds.Num(); }
+				else if (P.WorkPosCm == FIntPoint(6000, 7000)) { EdgesZero = P.EdgeIds.Num(); }
+			}
+			TArray<TPair<int32, int32>> Loads;
+			Sim->GetCommuteEdgeLoads(Loads);
+			int32 LoadSum = 0;
+			for (const TPair<int32, int32>& L : Loads) { LoadSum += L.Value; }
+			Expect(EdgesOne > 0 && EdgesZero == 0 && LoadSum >= EdgesOne && Sim->GetColonistCommuteCm(1) < Want1, FString::Printf(TEXT("SH10 the road laid beside head 1 carries trip 1 (%d edge(s), load %d), not the trip from head 0 (%d), and shortens it to %lld"), EdgesOne, LoadSum, EdgesZero, Sim->GetColonistCommuteCm(1)));
+			Expect(Sim->Debug_CommuteCachesFresh(), TEXT("SH10 the commute caches match a fresh derivation"));
+		}
+
+		// --- SH11. The air link and demolish: a habitat beside head 1 is circulated with floor -1 rated, shaft 1 having dug nothing. ---
+		{
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH11 setup: two shafts, shaft 1 sunk and still at depth 0"));
+			Expect(Sim->ExcavateFloor(-1, 4, R, 0), TEXT("SH11 shaft 0 carved 4 cells on -1"));
+			Place(TEXT("AirFilter"), 0.0, 0.0, 1, 1, -1);
+			Sim->AddStock(NOx, 4000.0);
+			Sim->Debug_ForceRateFloor(-1);
+			Steps(3);
+			const int32 PQ = Place(TEXT("HabModule"), 32500.0, 3000.0, 2, 1);
+			const int32 Corr = Place(TEXT("HabCorridor"), 32000.0, 4000.0);
+			Steps(3);
+			Expect(Sim->IsFloorRated(-1) && PQ != 0 && Corr != 0 && !Sim->IsHabNetworkCirculated(PQ), TEXT("SH11 with shaft 1 at depth 0 a habitat beside its head is NOT linked (the link wants a head whose shaft has Depth >= 1)"));
+			BoreOrder(1, TEXT("Shaft1"));
+			Expect(UntilDepth(1, 1, 4000) && Sim->GetFloorCarvedCells(-1) == 4, TEXT("SH11 shaft 1 bored to -1 and carved nothing"));
+			Steps(3);
+			Expect(Sim->IsFloorRated(-1) && Sim->IsHabNetworkCirculated(PQ) && Sim->IsHabNetworkCirculated(Corr), TEXT("SH11 now the habitat beside head 1 is circulated through floor -1's rating, though shaft 1 has carved nothing on -1 (a deviation, see D2 item 1)"));
+			const int32 Far = Place(TEXT("HabModule"), -30500.0, -30000.0, 2, 1);
+			Steps(3);
+			Expect(Far != 0 && !Sim->IsHabNetworkCirculated(Far), TEXT("SH11 a habitat beside no head is not"));
+			FString Why11;
+			Expect(!Sim->CanDemolishBuilding(B1, Why11) && Why11.Contains(TEXT("anchors the shaft")), FString::Printf(TEXT("SH11 shaft 1's Borer cannot be demolished (%s)"), *Why11));
+			Expect(!Sim->CanDemolishBuilding(B0, Why11) && Why11.Contains(TEXT("anchors the shaft")), TEXT("SH11 nor can shaft 0's"));
+			const int32 Helper = Place(TEXT("Borer"), Loc2.X, Loc2.Y);
+			Expect(!Sim->CanDemolishBuilding(Helper, Why11) && Why11.Contains(TEXT("anchors the shaft")), TEXT("SH11 nor can a helper once shaft 0 is bored (today's rule)"));
+			// O4: nothing stands on shaft 1's column underground.
+			FString Why4;
+			const FVector OnColumn = Sim->GetShaft(1).HeadCm;
+			Expect(!Sim->CanPlaceBuilding(FName("AirFilter"), OnColumn, Why4, -1) && Why4.Contains(TEXT("shaft column")), FString::Printf(TEXT("SH11 a floor building on shaft 1's column is refused (%s)"), *Why4));
+			Expect(Sim->CanPlaceBuilding(FName("AirFilter"), URHSimWorldSubsystem::LatticeToCm(Origin(), FIntPoint(5, 0)), Why4, -1), TEXT("SH11 a floor building a few cells from the column is fine"));
+		}
+		// SH11b. The deviation, pinned: a dig with no air filter is Livable through another dig's filter, and a resident can live there.
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 8, R, 0);
+			Place(TEXT("AirFilter"), 0.0, 0.0, 1, 1, -1);
+			Sim->ExcavateFloor(-1, 2, R, 1);
+			Sim->AddStock(NOx, 4000.0);
+			Sim->Debug_ForceRateFloor(-1);
+			Steps(5);
+			int32 FiltersB = 0;
+			TArray<int32> BOrdinals;
+			for (int32 i = 0; i < Sim->GetFloorCarvedCells(-1); ++i) { if (Sim->GetFloorCell(-1, i).X >= 20) { BOrdinals.Add(i); } }
+			const int32 CellsB = BOrdinals.Num();
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.Level == -1 && Bd.DefName == FName("AirFilter") && URHSimWorldSubsystem::CmToLattice(Origin(), Bd.LocationCm).X >= 20) { ++FiltersB; } }
+			Sim->Debug_SetColonistsPerCell(1.0);
+			for (const int32 O : BOrdinals) { Sim->DesignateRoom(-1, O, NLiving, R); }
+			const int32 Housed = Sim->Debug_AddColonists(2);
+			bool bInB = Housed == 2;
+			for (const FRHColonist& C : Sim->GetColonists()) { bInB &= C.HomeLevel == -1; }
+			Expect(Id == 1 && CellsB == 2 && FiltersB == 0 && Sim->IsFloorRated(-1) && Sim->GetFloorCarvedCells(-1) == 10 && Sim->GetFloorBeds(-1) == 10 && bInB,
+				FString::Printf(TEXT("SH11b dig A has the air filter and 8 cells; dig B has 2 cells and no filter, and floor -1 is rated: B is Livable through A's filter, its cells count in the floor's %d beds (4 would be the minimum, B alone is 2), and two residents are housed on the floor"), Sim->GetFloorBeds(-1)));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SHAFTS DEVIATION (accepted 2026-10-21, D2 item 1): a floor is one place however many digs it has - a dig with no air filter is rated through another dig's, the size minimum counts the whole floor, a commute between two digs is 0 m. Per-dig reach is deferred to D6."));
+		}
+
+		// --- SH12. Save, load and era with two shafts. ---
+		{
+			// (a) A colony saved mid-batch with a queue, a plan and a batch in flight on each Borer equals one that never saved.
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH12 setup: two shafts"));
+			BoreOrder(1, TEXT("Shaft1"));
+			UntilDepth(1, 1, 4000);
+			ExcOrder(-1, 10, nullptr);
+			ExcOrder(-1, 10, TEXT("Shaft1"));
+			for (int32 K = 0; K < 400 && !(Sim->GetFloorCarvedCells(-1) >= 2 && Recipe(B0) == NCarveCell && Recipe(B1) == NCarveCell); ++K) { Step(); }
+			const bool bBothFlying = Recipe(B0) == NCarveCell && Recipe(B1) == NCarveCell;
+			Expect(bBothFlying && Sim->GetFloorCarvedCells(-1) >= 2, FString::Printf(TEXT("SH12 both Borers have a carve batch in flight (%d cells so far)"), Sim->GetFloorCarvedCells(-1)));
+			Expect(Sim->Debug_PaintCarve(-1, FIntPoint(4, 6), Why) && Sim->Debug_PaintCarve(-1, FIntPoint(26, 3), Why), TEXT("SH12 a plan point painted near each head"));
+			const auto Digest = [&]()
+			{
+				FString D;
+				for (const FRHShaft& Sh : Sim->GetShafts())
+				{
+					D += FString::Printf(TEXT("[%d r%d d%d t%d b%d c%d,%d h%.1f,%.1f,%.1f q"), Sh.Id, Sh.RegionId, Sh.Depth, Sh.BoreTargetDepth, Sh.BorerId, Sh.Column.X, Sh.Column.Y, Sh.HeadCm.X, Sh.HeadCm.Y, Sh.HeadCm.Z);
+					TArray<int32> Ls; Sh.CarveQueue.GenerateKeyArray(Ls); Ls.Sort();
+					for (const int32 L : Ls) { D += FString::Printf(TEXT(" %d=%d"), L, Sh.CarveQueue[L]); }
+					D += TEXT("]");
+				}
+				D += FString::Printf(TEXT(" cells%d plan%d"), Sim->GetFloorCarvedCells(-1), Plan(-1).Num());
+				for (const FIntPoint& P : Cells(-1)) { D += FString::Printf(TEXT(";%d,%d"), P.X, P.Y); }
+				for (const FIntPoint& P : Plan(-1)) { D += FString::Printf(TEXT("|%d,%d"), P.X, P.Y); }
+				return D;
+			};
+			const FString AtSave = Digest();
+			Expect(Sim->SaveColony(TEXT("shaftsmid"), SaveErr), FString::Printf(TEXT("SH12 saved (%s)"), *SaveErr));
+			Steps(60);
+			const FString Control = Digest();
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("shaftsmid"), Le) && Le.IsEmpty() && Digest() == AtSave && Recipe(B0) == NCarveCell && Recipe(B1) == NCarveCell && Sim->GetBorerShaft(B1) == 1,
+				FString::Printf(TEXT("SH12 the load restores both shafts, both queues, the plan and both batches in flight (%s)"), *Le));
+			Steps(60);
+			Expect(Digest() == Control && Sim->GetFloorCarvedCells(-1) >= 14, FString::Printf(TEXT("SH12 run on for 60 steps: the loaded colony equals the control that never saved (%d cells)"), Sim->GetFloorCarvedCells(-1)));
+			Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("SH12 no ordinal fell back"));
+		}
+		{
+			// (b) Hand-made files: refused with "shaft list", the colony untouched.
+			Reset();
+			Sim->ExtendShaft(1, Head0);
+			Place(TEXT("Pylon"), 32000.0, 2000.0);
+			Place(TEXT("Pylon"), 2000.0, 32000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(Head1, 1, Id, Why);
+			Sim->Debug_SinkShaftAt(FVector(2000.0, 32000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 6, R, 0);
+			Place(TEXT("Pylon"), 4000.0, 4000.0);
+			ExcOrder(-1, 2, TEXT("Shaft1")); // no Borer works it: the queue stays
+			Expect(Sim->GetShaftCount() == 3 && Sim->GetCarveQueued(-1, 1) == 2 && Sim->SaveColony(TEXT("shaftsgood"), SaveErr), FString::Printf(TEXT("SH12 a colony with three shafts, six cells and a queue on shaft 1 is saved (%s)"), *SaveErr));
+			TArray<uint8> Good;
+			const bool bRead = FFileHelper::LoadFileToArray(Good, *SaveFilePath(TEXT("shaftsgood"))) && Good.Num() > 100;
+			const auto Rd = [&](int32 At) { int32 V = 0; if (bRead && At >= 0 && At + 4 <= Good.Num()) { FMemory::Memcpy(&V, Good.GetData() + At, 4); } return V; };
+			// The floor block: FloorCount, then per floor (region, level, NCells, cells, NPlan, plan). The shaft block follows it.
+			int32 At = 20;
+			const int32 FloorCount = Rd(At); At += 4;
+			const int32 CellsAt = At + 12;
+			for (int32 F = 0; F < FloorCount; ++F) { const int32 NC = Rd(At + 8); At += 12 + NC * 8; const int32 NP = Rd(At); At += 4 + NP * 8; }
+			const int32 BlockAt = At;
+			int32 ShaftAt[3] = { 0, 0, 0 };
+			int32 Cursor = BlockAt + 4;
+			for (int32 K = 0; K < 3; ++K) { ShaftAt[K] = Cursor; const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
+			Expect(bRead && FloorCount == 1 && Rd(BlockAt) == 3 && Rd(ShaftAt[1]) == 1 && Rd(ShaftAt[1] + 8) == 1 && Rd(ShaftAt[1] + 28) == 1 && Rd(ShaftAt[2] + 20) == 0 && Rd(ShaftAt[2] + 24) == 30,
+				FString::Printf(TEXT("SH12 the saved layout reads back as written: three shafts, shaft 1 at depth 1 with one queued floor, shaft 2 on column (0,30) (block at %d)"), BlockAt));
+			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
+			{
+				FFileHelper::SaveArrayToFile(Bytes, *SaveFilePath(Slot));
+				const int32 PopA = Sim->GetPopulation(), BuildA = Sim->GetBuildings().Num(), CellsA = Sim->GetFloorCarvedCells(-1), ShaftsA = Sim->GetShaftCount(), DepthA = Sim->GetShaftDepth(), QueueA = Sim->GetCarveQueued(-1);
+				const uint32 VerA = Sim->GetFloorCellsVersion(), ShVerA = Sim->GetShaftsVersion();
+				const bool bLoaded = Sim->LoadColony(Slot, OutErr);
+				const bool bSame = Sim->GetPopulation() == PopA && Sim->GetBuildings().Num() == BuildA && Sim->GetFloorCarvedCells(-1) == CellsA && Sim->GetShaftCount() == ShaftsA && Sim->GetShaftDepth() == DepthA && Sim->GetCarveQueued(-1) == QueueA
+					&& Sim->GetFloorCellsVersion() == VerA && Sim->GetShaftsVersion() == ShVerA;
+				return !bLoaded && bSame;
+			};
+			FString E1, E2, E3, E4, E5, E6, E7;
+			{
+				TArray<uint8> Bad = Good;
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[1] + 20, Good.GetData() + CellsAt, 8); // shaft 1's column becomes the first carved cell
+				Expect(TryFile(TEXT("shaftsh1"), Bad, E1) && E1.Contains(TEXT("shaft list")) && E1.Contains(TEXT("cell")), FString::Printf(TEXT("SH12 a shaft column that is a carved cell is refused, the colony untouched (%s)"), *E1));
+			}
+			{
+				TArray<uint8> Bad = Good;
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[2] + 20, Good.GetData() + ShaftAt[1] + 20, 8); // shaft 2 gets shaft 1's column
+				Expect(TryFile(TEXT("shaftsh2"), Bad, E2) && E2.Contains(TEXT("shaft list")) && E2.Contains(TEXT("share")), FString::Printf(TEXT("SH12 a repeated column is refused (%s)"), *E2));
+			}
+			{
+				TArray<uint8> Bad = Good;
+				const int32 Zero = 0;
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[0] + 8, &Zero, 4); // shaft 0's depth
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[0] + 12, &Zero, 4);
+				Expect(TryFile(TEXT("shaftsh3"), Bad, E3) && E3.Contains(TEXT("shaft list")) && E3.Contains(TEXT("not bored")), FString::Printf(TEXT("SH12 shaft 1 with shaft 0 unbored is refused (%s)"), *E3));
+			}
+			{
+				TArray<uint8> Bad = Good;
+				const int32 Seventeen = 17;
+				FMemory::Memcpy(Bad.GetData() + BlockAt, &Seventeen, 4);
+				Expect(TryFile(TEXT("shaftsh4"), Bad, E4) && E4.Contains(TEXT("shaft list")) && E4.Contains(TEXT("shaft count")), FString::Printf(TEXT("SH12 a shaft count over the cap of 16 is refused (%s)"), *E4));
+			}
+			{
+				TArray<uint8> Bad = Good;
+				const int32 Zero = 0;
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[1] + 8, &Zero, 4); // shaft 1's depth falls to 0 under its queued floor -1
+				Expect(TryFile(TEXT("shaftsh5"), Bad, E5) && E5.Contains(TEXT("shaft list")) && E5.Contains(TEXT("below its depth")), FString::Printf(TEXT("SH12 a queue below its shaft's depth is refused (%s)"), *E5));
+			}
+			{
+				TArray<uint8> Bad = Good;
+				const int32 One = 1;
+				FMemory::Memcpy(Bad.GetData() + ShaftAt[2], &One, 4); // shaft 2 claims Id 1
+				Expect(TryFile(TEXT("shaftsh6"), Bad, E6) && E6.Contains(TEXT("shaft list")), FString::Printf(TEXT("SH12 ids that do not run 0..n-1 are refused (%s)"), *E6));
+			}
+			{
+				TArray<uint8> Old = Good;
+				const uint32 V43 = 43;
+				FMemory::Memcpy(Old.GetData() + 4, &V43, 4);
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/44")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+			}
+			FString Le;
+			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
+				FString::Printf(TEXT("SH12 and the good file still loads, shafts, columns, derived heads and queue intact (%s)"), *Le));
+		}
+		{
+			// (c) Era against the agent band with two shafts: the ledger agrees within 5%, and era carves shaft 1's queue.
+			Reset();
+			int32 B0 = 0, B1 = 0;
+			Expect(TwoShafts(B0, B1), TEXT("SH12 pair setup: two shafts"));
+			BoreOrder(1, TEXT("Shaft1"));
+			UntilDepth(1, 1, 4000);
+			ExcOrder(-1, 40, nullptr);
+			ExcOrder(-1, 40, TEXT("Shaft1"));
+			FString PairErr;
+			Expect(Sim->SaveColony(TEXT("shaftspair"), PairErr), FString::Printf(TEXT("SH12 the colony is saved for both legs (%s)"), *PairErr));
+			struct FLeg { int32 Mine = 0, Theirs = 0; int32 Steps = 0; };
+			const auto RunLeg = [&](bool bAgent) -> FLeg
+			{
+				FString Le;
+				if (!Sim->LoadColony(TEXT("shaftspair"), Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("SHAFTS: leg load failed: %s"), *Le); ++Fails; }
+				FLeg L;
+				if (bAgent)
+				{
+					const int32 Total = 10 * (int32)(SolLen / (double)AgentDt);
+					for (; L.Steps < Total; ++L.Steps)
+					{
+						Clock->Debug_AdvanceSimSeconds((double)AgentDt);
+						Sim->Debug_SetBatteryWh(1.0e9);
+						Sim->Debug_StepSim(AgentDt);
+					}
+				}
+				else
+				{
+					const int32 Total = 10 * (int32)(SolLen / EraDt);
+					for (; L.Steps < Total; ++L.Steps) { Step(); }
+				}
+				for (const FIntPoint& P : Cells(-1)) { (P.X >= 20 ? L.Theirs : L.Mine) += 1; }
+				return L;
+			};
+			const FLeg Agent = RunLeg(true);
+			const FLeg Era = RunLeg(false);
+			const auto Within = [](double Va, double Vb, double Frac) { return FMath::Abs(Va - Vb) <= Frac * FMath::Max(FMath::Max(FMath::Abs(Va), FMath::Abs(Vb)), 1.0e-9); };
+			Expect(Era.Mine >= 30 && Era.Theirs >= 30 && Agent.Mine >= 30 && Agent.Theirs >= 30,
+				FString::Printf(TEXT("SH12 both bands carved on both shafts: era %d + %d cells, agent %d + %d"), Era.Mine, Era.Theirs, Agent.Mine, Agent.Theirs));
+			Expect(Within(Agent.Mine, Era.Mine, 0.05) && Within(Agent.Theirs, Era.Theirs, 0.05) && Within(Agent.Mine + Agent.Theirs, Era.Mine + Era.Theirs, 0.05),
+				FString::Printf(TEXT("SH12 over 10 sols the Borer ledgers agree within 5%%: cells on shaft 0 agent %d, era %d; on shaft 1 agent %d, era %d (era teleports logistics and ignores which shaft serves a site)"),
+					Agent.Mine, Era.Mine, Agent.Theirs, Era.Theirs));
+		}
+
+		// --- SH13. Growth's two calls with two shafts: ExcavateFloor and PeekCarveCells default to the lowest-Id shaft that reaches the floor. ---
+		{
+			Reset();
+			Sim->ExtendShaft(1, FVector(3000.0, 3000.0, 0.0));
+			Place(TEXT("Pylon"), 33000.0, 3000.0);
+			int32 Id = INDEX_NONE;
+			Sim->Debug_SinkShaftAt(FVector(33000.0, 3000.0, 0.0), 1, Id, Why);
+			Sim->ExcavateFloor(-1, 6, R);
+			Sim->ExcavateFloor(-1, 6, R, 1);
+			TArray<FIntPoint> Ghost, Ghost0;
+			Sim->PeekCarveCells(-1, 5, Ghost);
+			Sim->PeekCarveCells(-1, 5, Ghost0, 0);
+			const int32 N0 = Sim->GetFloorCarvedCells(-1);
+			Expect(Sim->ExcavateFloor(-1, 5, R), TEXT("SH13 five cells carved with no shaft named"));
+			const TArray<FIntPoint> Got = Tail(Cells(-1), 5);
+			Expect(Id == 1 && Got == Ghost && Ghost == Ghost0 && Cells(-1).Num() == N0 + 5 && Got[0].X < 15 && Got[4].X < 15,
+				TEXT("SH13 the ghost equals the cells appended, and they came through shaft 0 (the lowest Id that reaches the floor)"));
+			TArray<FIntPoint> Ghost2;
+			Sim->PeekCarveCells(-2, 3, Ghost2);
+			FString Why2;
+			Expect(Ghost2.Num() == 3 && !Sim->ExcavateFloor(-2, 3, Why2) && Why2 == TEXT("Floor -2 not reached - bore the shaft deeper first"), FString::Printf(TEXT("SH13 floor -2 is unreached: today's text (%s), and a peek still answers shaft 0's spiral"), *Why2));
+		}
+
+		Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("SH over the whole suite not one ordinal read fell outside its floor and back to the spiral"));
+		Sim->OnCommandRejected.Remove(RejectH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== SHAFTS TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
 	// Gate-D framing pass self-test (2026-10-21): the director's approved wording and the F1-F9 mechanics rulings.
 	// Fails loudly. `-framing`.
 	//  (a) data: the Lounge (the dormant Smoking row, F8b) and the two manifest Effect copies (D82, D136) in the live DTs;
@@ -12818,7 +13754,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	//  (e) F2b + F7b: a shortage recalls the Mars-born last, they wait in orbit (their own Ids and names), the colony is quiet
 	//      (one banner, re-armed when people return, no path declared and the epilogue clock paused while it lasts), and they
 	//      come home first when a later ship lands with every home on full rations and a bed free: the guards, the order, the
-	//      partial return, a real supply ship at low Hope, and the save round trip at v43 (D123, D125, D13).
+	//      partial return, a real supply ship at low Hope, and the save round trip at v44 (D123, D125, D13).
 	if (FParse::Param(*Params, TEXT("framing")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== FRAMING TEST (Gate-D pass, 2026-10-21) ==="));
@@ -13100,7 +14036,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Ids.Num() == Sim->GetPopulation(), TEXT("e4 every colonist Id is still unique after the return"));
 		}
 		{
-			// e5: both at once, the plural banner, and the save round trip at v43.
+			// e5: both at once, the plural banner, and the save round trip at v44.
 			Reset();
 			Sim->Debug_AddColonists(4);
 			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
@@ -13113,7 +14049,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 43, FString::Printf(TEXT("e5 the file says version %u (expect 43)"), Ver));
+			Expect(bRead && Ver == 44, FString::Printf(TEXT("e5 the file says version %u (expect 44)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -14120,6 +15056,120 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE rover plans: %d plans with the rover's params (M = %d) in %.2f ms (%.3f ms each), %d of them on the road"), RoverPlans, Sim->GetRoverRoadParams().SpeedMulPermille, PlanMs, PlanMs / RoverPlans, Road1);
 				Expect(PlanA == PlanB && Road1 == Road2 && Road1 >= 50, FString::Printf(TEXT("commute: the same %d rover plans twice are the same routes (digest %08x, %d on the road)"), RoverPlans, PlanA, Road1));
 				Expect(PlanMs <= 10.0, FString::Printf(TEXT("budget: 100 rover plans took %.2f ms (<= 10, the C4 robot-plan budget)"), PlanMs));
+			}
+
+			// D2: four shafts. Shafts 1-3 are sunk 600 m out on three sides and each digs 210 cells on every one of the five floors
+			// (shaft 0 already has its 210 a floor), so each floor is four digs of 210 cells on one lattice, 4,200 cells in all.
+			// Everything above is measured BEFORE this block and does not move. Here: the cold dig labelling of a four-dig floor,
+			// 2,500 GetApproachPoint calls over sites in all four digs, a cold commute memo with four heads (every colonist
+			// re-homed on a floor with a surface workplace, 500 distinct anchors, so each trip chooses among four heads) and the Hope
+			// read on floors whose digs are 600 m apart (the adjacency pass takes the hash lookup there). Wall clock.
+			{
+				const FVector ShaftHeads[3] = { FVector(63000.0, 3000.0, 0.0), FVector(3000.0, 63000.0, 0.0), FVector(-57000.0, 3000.0, 0.0) };
+				bool bSunk = true, bCarved4 = true;
+				FString SinkWhy;
+				int32 CellsBefore4 = 0;
+				for (int32 L = 1; L <= Floors; ++L) { CellsBefore4 += Sim->GetFloorCarvedCells(-L); }
+				for (int32 K = 0; K < 3; ++K)
+				{
+					Sim->Debug_PlaceInstant(FName("Pylon"), ShaftHeads[K]);
+					int32 NewId = INDEX_NONE;
+					bSunk &= Sim->Debug_SinkShaftAt(ShaftHeads[K], Floors, NewId, SinkWhy) && NewId == K + 1;
+				}
+				const double Carve0 = FPlatformTime::Seconds();
+				for (int32 S = 1; S <= 3; ++S)
+				{
+					for (int32 L = 1; L <= Floors; ++L) { FString CarveWhy; bCarved4 &= Sim->ExcavateFloor(-L, CellsPerFloor, CarveWhy, S); }
+				}
+				const double CarveMs = (FPlatformTime::Seconds() - Carve0) * 1000.0;
+				int32 FloorCells4 = 0;
+				for (int32 L = 1; L <= Floors; ++L) { FloorCells4 += Sim->GetFloorCarvedCells(-L); }
+				Expect(bSunk && bCarved4 && Sim->GetShaftCount() == 4 && FloorCells4 - CellsBefore4 == 3 * Floors * CellsPerFloor,
+					FString::Printf(TEXT("shafts: shafts 1-3 sunk 600 m out and %d cells carved by them (3 shafts x %d floors x %d), %d cells on the five floors in all, in %.1f ms (%s)"), FloorCells4 - CellsBefore4, Floors, CellsPerFloor, FloorCells4, CarveMs, *SinkWhy));
+				// Zone every new cell Living: the floors' room arrays now run over four digs 600 m apart, so the adjacency pass takes the
+				// hash lookup (R4) and GetColonyHope below is measured on exactly that.
+				{
+					FString ZoneWhy;
+					for (int32 L = 1; L <= Floors; ++L)
+					{
+						for (int32 I = CellsPerFloor; I < Sim->GetFloorCarvedCells(-L); ++I) { Sim->DesignateRoom(-L, I, FName("LivingQuarters"), ZoneWhy); }
+					}
+				}
+				// Cold dig labelling: the first lookup on each floor after the carve builds its labelling.
+				double LabelWorstMs = 0.0, LabelTotalMs = 0.0;
+				const int32 LabelRuns0 = Sim->GetDigLabelRuns();
+				bool bServes = true;
+				for (int32 L = 1; L <= Floors; ++L)
+				{
+					const FIntPoint Probe = Sim->GetFloorCell(-L, CellsPerFloor * 2 + 3);
+					const double T0 = FPlatformTime::Seconds();
+					bServes &= Sim->ServingShaft(-L, Probe) == 2;
+					const double Ms = (FPlatformTime::Seconds() - T0) * 1000.0;
+					LabelWorstMs = FMath::Max(LabelWorstMs, Ms);
+					LabelTotalMs += Ms;
+				}
+				Expect(bServes && Sim->GetDigLabelRuns() - LabelRuns0 == Floors, FString::Printf(TEXT("shafts: a cell of shaft 2's dig is served by shaft 2 on every floor (%d labellings)"), Sim->GetDigLabelRuns() - LabelRuns0));
+				Expect(LabelWorstMs <= 1.0, FString::Printf(TEXT("budget: a cold dig labelling of a floor of four digs (840 cells) took %.4f ms worst of %d (<= 1)"), LabelWorstMs, Floors));
+				// 2,500 GetApproachPoint calls: sites standing in every dig of every floor.
+				TArray<FRHSiteRef> Sites;
+				for (int32 L = 1; L <= Floors; ++L)
+				{
+					for (int32 S = 0; S < 4; ++S)
+					{
+						Sim->Debug_PlaceInstant(FName("Stockpile"), Sim->GetFloorCellCentreCm(-L, S * CellsPerFloor + 7), -L);
+						FRHSiteRef Ref; Ref.BuildingId = Sim->GetBuildings().Last().Id;
+						Sites.Add(Ref);
+					}
+				}
+				uint32 ApproachDigest = 0;
+				bool bHeads = true;
+				const double Ap0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 2500; ++K)
+				{
+					const FRHSiteRef& Ref = Sites[K % Sites.Num()];
+					const FVector Drop = Sim->GetApproachPoint(Ref, 0);
+					ApproachDigest = FCrc::MemCrc32(&Drop, (int32)sizeof(Drop), ApproachDigest);
+					bHeads &= Drop == FVector(Sim->GetShaft((K % Sites.Num()) % 4).HeadCm.X, Sim->GetShaft((K % Sites.Num()) % 4).HeadCm.Y, 0.0);
+				}
+				const double ApproachMs = (FPlatformTime::Seconds() - Ap0) * 1000.0;
+				Expect(bHeads, TEXT("shafts: every site's approach point is the head of the dig it stands in"));
+				Expect(ApproachMs <= 5.0, FString::Printf(TEXT("budget: 2,500 GetApproachPoint calls over %d sites in four digs took %.3f ms (%.5f ms each) (<= 5, the 0.002 ms robot step each)"), Sites.Num(), ApproachMs, ApproachMs / 2500.0));
+				// A cold commute memo with four heads.
+				Sim->Debug_ClearColonistStations();
+				{
+					int32 Index = 0;
+					for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+					{
+						Sim->Debug_SetColonistHome(C.Id, 0, -(1 + Index % Floors));
+						Sim->Debug_SetColonistStation(C.Id, FIntVector(0, INDEX_NONE, Habs[(Index * 7 + 3) % Habs.Num()]));
+						++Index;
+					}
+				}
+				Sim->Debug_ReroutePosition();
+				const int32 FourRuns0 = Sim->GetCommuteDijkstraRuns();
+				const double Four0 = FPlatformTime::Seconds();
+				const URHSimWorldSubsystem::FRHCommuteSummary FourCold = Sim->GetCommuteSummary();
+				const double FourColdMs = (FPlatformTime::Seconds() - Four0) * 1000.0;
+				const int32 FourRuns = Sim->GetCommuteDijkstraRuns() - FourRuns0;
+				double FourFlowsTotal = 0.0;
+				for (int32 K = 0; K < 20; ++K)
+				{
+					Sim->Debug_BumpJobsVersion();
+					const double F0 = FPlatformTime::Seconds();
+					Sim->GetCommuteSummary();
+					FourFlowsTotal += FPlatformTime::Seconds() - F0;
+				}
+				const double FourFlowsMs = FourFlowsTotal * 1000.0 / 20.0;
+				double FourHopeSink = 0.0;
+				const double FH0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < HopeReps; ++K) { FourHopeSink += Sim->GetColonyHope().Total; }
+				const double FourHopeMs = (FPlatformTime::Seconds() - FH0) * 1000.0 / HopeReps;
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE shafts (4 shafts x %d floors x %d cells): carve %.1f ms | cold dig labelling %.4f ms worst, %.4f ms for the five floors | 2,500 GetApproachPoint %.3f ms | commute with four heads: %d colonists over %d anchors, cold (%d Dijkstras + flows) %.3f ms, flows only %.3f ms | GetColonyHope %.3f ms (adjacency fallback runs %d) | approach digest %08x | %.1f"),
+					Floors, CellsPerFloor, CarveMs, LabelWorstMs, LabelTotalMs, ApproachMs, FourCold.Employed, Habs.Num(), FourRuns, FourColdMs, FourFlowsMs, FourHopeMs, Sim->GetAdjacencyFallbackRuns(), ApproachDigest, FourHopeSink);
+				Expect(FourCold.Employed == Sim->GetPopulation() && Sim->Debug_CommuteCachesFresh(), FString::Printf(TEXT("shafts: every one of %d colonists is measured with four heads, the flow cache is fresh"), Sim->GetPopulation()));
+				Expect(FourColdMs <= 10.0, FString::Printf(TEXT("budget: a cold position memo + flows over 500 anchors with four heads took %.3f ms (<= 10, the one-shaft budget)"), FourColdMs));
+				Expect(FourFlowsMs <= 1.0, FString::Printf(TEXT("budget: flows only over 500 anchors with four heads took %.3f ms (<= 1)"), FourFlowsMs));
+				Expect(FourHopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope on five floors of four digs took %.3f ms (<= 0.5)"), FourHopeMs));
 			}
 		}
 

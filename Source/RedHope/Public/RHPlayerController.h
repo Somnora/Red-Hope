@@ -110,6 +110,8 @@ public:
 	// on. 0 = surface; -N needs no shaft to LOOK, only to order work there.
 	void SetActiveLevel(int32 Level);
 	int32 GetActiveLevel() const { return ActiveLevel; }
+	// D2: move the camera to the next shaft head in Id order (wraps). A no-op with one shaft.
+	void FocusNextShaft();
 	// The deck's visible feedback channels (M1-b Gate C: GEngine debug text
 	// provably hides under the Slate deck, so the deck renders these instead).
 	// Confirm = one-shot notice with expiry (order sent, save/load result);

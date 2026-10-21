@@ -1439,6 +1439,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		ShaftVisual = nullptr;
 	}
 	LastShaftDepthSeen = 0;
+	ClearExtraShaftVisuals();
 	for (AStaticMeshActor* Tile : CarveTileVisuals)
 	{
 		if (Tile)
@@ -1472,6 +1473,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		ConvoyVisual = nullptr;
 	}
 	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
+	LastRigShaftKey = 0;
 	MarkPassesDirty();
 	++PropsVersion;
 	bLightKeyValid = false;
@@ -3142,11 +3144,17 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// colonist stands near the shaft head (director 2026-07-09) - the cage is
 	// where crew "board" for the between-floors hard cut, so the doors parting
 	// for an approaching figure is what sells the ride.
+	PlaceExtraShaftVisuals(Sim);
 	if (UStaticMeshComponent* CageComp = ElevatorCage.Get())
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
 		const double FloorH = Sim->GetFloorHeightCm();
 		const double FloorZ = ViewLevel * FloorH;
+		// D2: shaft 0's cab is shown only on floors shaft 0 reaches (the deepest shaft can be another).
+		const bool bOwnFloor = !IsUnderground() || Sim->ShaftReaches(0, ViewLevel);
+		CageComp->SetVisibility(bOwnFloor);
+		if (UStaticMeshComponent* DoorA = ElevatorDoorA.Get()) { DoorA->SetVisibility(bOwnFloor); }
+		if (UStaticMeshComponent* DoorB = ElevatorDoorB.Get()) { DoorB->SetVisibility(bOwnFloor); }
 		if (bElevatorIsCab)
 		{
 			// The cab's pivot IS its floor centre (RHElevatorLayout.h), so it
@@ -3441,6 +3449,8 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 		LastShaftDepthSeen = Depth;
 	}
 
+	UpdateExtraShaftVisuals(Sim);
+
 	// Carved cells: one 10x10 m floor tile per completed cell, spiraling out
 	// from the shaft head. The sim tracks per-floor COUNTS (A1 model); the
 	// spiral is the canonical layout - honest about how much, canonical about
@@ -3477,6 +3487,29 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 				MarkPassesDirty();
 			}
 		}
+		// D2: the same deck plate under every later shaft's head on each floor that shaft reaches (sentinel key -1 - k; the
+		// room passes skip a negative ordinal, and the view-level pass hides it by its height like any tile).
+		for (int32 K = 1; K < Sim->GetShaftCount(); ++K)
+		{
+			if (Sim->ShaftReaches(K, L) && !TileByCell.Contains(FIntVector(L, -1 - K, 0)))
+			{
+				const FVector KHead = Sim->GetShaft(K).HeadCm;
+				if (AStaticMeshActor* KTile = SpawnBox(FVector(KHead.X, KHead.Y, L * FloorH - 15.0), FVector(10.f, 10.f, 0.3f),
+					FLinearColor(0.20f, 0.15f, 0.11f), FLinearColor::Black))
+				{
+					ApplySurface(KTile->GetStaticMeshComponent(),
+						TEXT("/Game/RedHope/Art/Surfaces/T_HabFloor_Deck.T_HabFloor_Deck"),
+						1000.f, FLinearColor(0.30f, 0.30f, 0.32f), 0.6f);
+#if WITH_EDITOR
+					KTile->SetActorLabel(FString::Printf(TEXT("Sim_ShaftFloor_%d_%d"), K, L));
+#endif
+					KTile->SetActorHiddenInGame(ViewLevel != L);
+					CarveTileVisuals.Add(KTile);
+					TileByCell.Add(FIntVector(L, -1 - K, 0), KTile);
+					MarkPassesDirty();
+				}
+			}
+		}
 		int32& Have = TilesSpawnedPerLevel.FindOrAdd(L);
 		while (Have < Want)
 		{
@@ -3505,6 +3538,107 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 	// The pit itself (skirt + walls) tracks the carved shape; key-checked, so
 	// this is a no-op except on the frame something actually changed.
 	RebuildSliceRig();
+}
+
+void URHColonyVisualizerSubsystem::ClearExtraShaftVisuals()
+{
+	for (FExtraShaftVisual& X : ExtraShafts)
+	{
+		if (AStaticMeshActor* A = X.Anchor.Get())
+		{
+			A->Destroy();
+		}
+	}
+	ExtraShafts.Reset();
+}
+
+void URHColonyVisualizerSubsystem::UpdateExtraShaftVisuals(const URHSimWorldSubsystem* Sim)
+{
+	// D2: one anchor + cab + fill light per shaft sunk after shaft 0, built once the shaft is bored (rebuilt on a depth change).
+	const double FloorH = Sim->GetFloorHeightCm();
+	for (int32 K = 1; K < Sim->GetShaftCount(); ++K)
+	{
+		if (ExtraShafts.Num() < K)
+		{
+			ExtraShafts.SetNum(K);
+		}
+		FExtraShaftVisual& X = ExtraShafts[K - 1];
+		const FRHShaft& Sh = Sim->GetShaft(K);
+		if (Sh.Depth <= 0 || (X.Anchor.IsValid() && X.DepthSeen == Sh.Depth))
+		{
+			continue;
+		}
+		if (AStaticMeshActor* Old = X.Anchor.Get())
+		{
+			Old->Destroy();
+		}
+		const FVector Center(Sh.HeadCm.X, Sh.HeadCm.Y, -Sh.Depth * FloorH * 0.5);
+		AStaticMeshActor* Anchor = SpawnBox(Center, FVector(2.2f, 2.2f, Sh.Depth * FloorH / 100.0), RHCanon::DarkSlate, FLinearColor::Black);
+		if (!Anchor)
+		{
+			continue;
+		}
+		if (Anchor->GetStaticMeshComponent())
+		{
+			Anchor->GetStaticMeshComponent()->SetVisibility(false); // hide only the box; the children keep their own visibility
+		}
+#if WITH_EDITOR
+		Anchor->SetActorLabel(FString::Printf(TEXT("Sim_Shaft_%d"), K));
+#endif
+		Anchor->SetActorHiddenInGame(!IsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
+		X.Anchor = Anchor;
+		X.DepthSeen = Sh.Depth;
+		UPointLightComponent* Fill = NewObject<UPointLightComponent>(Anchor, TEXT("FloorFill"));
+		Fill->SetupAttachment(Anchor->GetRootComponent());
+		Fill->SetMobility(EComponentMobility::Movable);
+		Fill->SetAbsolute(true, true, true);
+		Fill->SetIntensityUnits(ELightUnits::Candelas);
+		Fill->SetIntensity(22.f);
+		Fill->SetLightColor(FColor(170, 190, 215));
+		Fill->SetAttenuationRadius(4000.f);
+		Fill->SetCastShadows(false);
+		Fill->RegisterComponent();
+		X.Fill = Fill;
+		// The code-built cab (RHElevatorLayout.h): true scale, pivot at its floor centre. Doors stay shut.
+		if (UStaticMesh* Cage = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/RedHope/Art/Machines/RH_ElevatorCab/StaticMeshes/RH_ElevatorCab.RH_ElevatorCab")))
+		{
+			UStaticMeshComponent* CabComp = NewObject<UStaticMeshComponent>(Anchor, TEXT("ElevatorCage"));
+			CabComp->SetupAttachment(Anchor->GetRootComponent());
+			CabComp->SetMobility(EComponentMobility::Movable);
+			CabComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			CabComp->SetAbsolute(true, true, true);
+			CabComp->RegisterComponent();
+			CabComp->SetStaticMesh(Cage);
+			CabComp->SetWorldScale3D(FVector(1.f));
+			X.Cab = CabComp;
+		}
+	}
+}
+
+void URHColonyVisualizerSubsystem::PlaceExtraShaftVisuals(const URHSimWorldSubsystem* Sim)
+{
+	const double FloorH = Sim->GetFloorHeightCm();
+	for (int32 K = 1; K <= ExtraShafts.Num() && K < Sim->GetShaftCount(); ++K)
+	{
+		FExtraShaftVisual& X = ExtraShafts[K - 1];
+		AStaticMeshActor* Anchor = X.Anchor.Get();
+		if (!Anchor)
+		{
+			continue;
+		}
+		const FVector Head = Sim->GetShaft(K).HeadCm;
+		const double FloorZ = ViewLevel * FloorH;
+		// Shown only below the surface and only on floors this shaft reaches.
+		Anchor->SetActorHiddenInGame(!IsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
+		if (UStaticMeshComponent* Cab = X.Cab.Get())
+		{
+			Cab->SetWorldLocation(FVector(Head.X, Head.Y, FloorZ));
+		}
+		if (UPointLightComponent* Fill = X.Fill.Get())
+		{
+			Fill->SetWorldLocation(FVector(Head.X, Head.Y, FloorZ + 350.0));
+		}
+	}
 }
 
 FLinearColor URHColonyVisualizerSubsystem::RoomTint(FName RoomRowName) const
@@ -4366,6 +4500,7 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	{
 		ShaftVisual->SetActorHiddenInGame(bSurface);
 	}
+	PlaceExtraShaftVisuals(Sim);
 
 	RebuildSliceRig();
 }
@@ -4544,11 +4679,14 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 
 	const int32 Carved = IsUnderground() ? Sim->GetFloorCarvedCells(ViewLevel) : 0;
 	const FIntVector Key(Depth, ViewLevel, Carved);
-	if (Key == LastRigKey)
+	// D2: with more than one shaft the rig also depends on which shafts reach the floor (their depths and the list itself).
+	const uint32 ShaftKey = Sim->GetShaftCount() > 1 ? Sim->GetShaftsVersion() : 0u;
+	if (Key == LastRigKey && ShaftKey == LastRigShaftKey)
 	{
 		return;
 	}
 	LastRigKey = Key;
+	LastRigShaftKey = ShaftKey;
 
 	EnsureSliceRig();
 	if (!SkirtISM || !WallISM)
@@ -4585,6 +4723,18 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	// carved cell (the floor table's lattice - identical math to the floor tiles).
 	TSet<FIntPoint> Open;
 	Open.Add(FIntPoint(0, 0));
+	// D2: every shaft column that reaches this floor is open (column (0,0) is shaft 0's); the skirt below spans every head.
+	int32 SkirtMinX = -30, SkirtMaxX = 30, SkirtMinY = -30, SkirtMaxY = 30;
+	for (int32 K = 1; K < Sim->GetShaftCount(); ++K)
+	{
+		if (Sim->ShaftReaches(K, Pit))
+		{
+			const FIntPoint Col = Sim->GetShaft(K).Column;
+			Open.Add(Col);
+			SkirtMinX = FMath::Min(SkirtMinX, Col.X - 30); SkirtMaxX = FMath::Max(SkirtMaxX, Col.X + 30);
+			SkirtMinY = FMath::Min(SkirtMinY, Col.Y - 30); SkirtMaxY = FMath::Max(SkirtMaxY, Col.Y + 30);
+		}
+	}
 	for (int32 i = 0; i < Carved; ++i)
 	{
 		Open.Add(Sim->GetFloorCell(Pit, i));
@@ -4597,10 +4747,9 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	// Sand skirt: the surface, minus the hole. 30 cells (~300 m) each way
 	// covers the playfield at every practical zoom; beyond it the void only
 	// shows at orbital register (gray-box note, not a bug).
-	constexpr int32 SkirtCells = 30;
-	for (int32 GX = -SkirtCells; GX <= SkirtCells; ++GX)
+	for (int32 GX = SkirtMinX; GX <= SkirtMaxX; ++GX)
 	{
-		for (int32 GY = -SkirtCells; GY <= SkirtCells; ++GY)
+		for (int32 GY = SkirtMinY; GY <= SkirtMaxY; ++GY)
 		{
 			if (Open.Contains(FIntPoint(GX, GY)))
 			{

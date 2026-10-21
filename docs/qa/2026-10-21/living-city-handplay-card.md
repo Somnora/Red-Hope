@@ -209,6 +209,38 @@ RH.Traffic overlay 1
 
 ---
 
+## D2. More shafts (step 2, going deep)
+
+**Setup:** a fresh colony with the debug demo (shaft 0 at -1, eight cells, four crew), then a second shaft 300 m east. Orders wait for the uplink lag, so set `RH.Lag 0` first.
+```
+RH.Lag 0
+RH.Demo
+RH.Spawn Pylon 330 12
+RH.Spawn Borer 330 12
+RH.SinkNow 330 12 1
+RH.ExcavateNow -1 12 1
+RH.Floor -1
+```
+Then press **Next shaft** on the SHAFT strip.
+`RH.SinkNow` is the debug path. For the real path, build or `RH.Spawn` a second Borer inside coverage, then select it and press **Sink a shaft here** (or `RH.SinkShaft <BorerId>`), then `RH.Bore 1 1` and `RH.Excavate -1 12 1`. `RH.Status` lists every shaft.
+
+- [ ] The Borer card says **ANCHORS shaft 1** (or **HELPS shaft 0** for a Borer you have not sunk), and its SHAFT lines read that shaft: yes/no
+- [ ] **Sink a shaft here** shows the reason on the button while it cannot (shaft 0 not bored, outside coverage, a batch in flight, the column already dug): yes/no
+- [ ] The **Next shaft** button on the SHAFT strip walks the camera head to head, and the second elevator cab stands at the second head on floor -1: yes/no
+- [ ] Floor -1 shows both digs, 300 m apart, each with its own deck plate under the cab, and the pit walls and skirt cover both: yes/no
+- [ ] `RH.Bore 3` (shaft 0) and `RH.Bore 2 1` (shaft 1) go to different shafts; the deck's Bore button acts on the selected Borer's shaft: yes/no
+- [ ] The excavate drag on floor -1 near the second head sends the order to shaft 1 (the confirm line says so in the log: `Excavation designation ... for shaft 1`): yes/no
+
+**Known, not bugs (accepted 2026-10-21, see `docs/design-decisions.md`, "D2, more shafts"):**
+- A floor is still one place. A dig with no air filter is rated through another dig's filter, and a habitat beside a new shaft's head links to floor -1's air even before that shaft has dug anything.
+- Crew still board the elevator at shaft 0 whichever dig they live in; the second cab's doors do not slide. D3 and D4 route crew through the head that serves them.
+- An unanchored second Borer helps shaft 0. The card says so.
+- The commute between two digs on one floor is 0 m.
+
+**Verdict:** OK / change / discuss: ____
+
+---
+
 ## The big picture: 15 minutes in the City checkpoint
 
 Does the city feel alive? Play at 3x-8x and use the mouse wherever you can.

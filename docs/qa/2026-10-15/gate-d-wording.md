@@ -315,3 +315,17 @@ Approved rows W1 makes untrue or moves, for the director:
 - **D87** now arrives only when every ice row, the outposts included, is found and low or spent.
 - **D91** is replaced by G5 whenever an outpost hint is open, which is every time D91 used to show.
 - **D86** stays while Ice_B is hidden; G4 takes over once only outposts are hidden.
+
+## Rows added by D2, more shafts (2026-10-21)
+
+New player-facing strings from D2. They are PLACEHOLDER copy, neutral in register (they are about shafts, Borers and floors, never about people or mood), and wait for the director's review. They are not part of the approved set above. The rule they all follow: say what is wrong and what fixes it.
+
+| ID | Where | Current | Status (2026-10-21) |
+|---|---|---|---|
+| H1 | Order rejection banner, a SinkShaft order refused at the uplink step · SIM `CanSinkShaft` | One of: `That is not a Borer` / `The Borer is still under construction` / `That Borer already anchors shaft %d` / `The Borer has a batch in flight - wait for its batch` / `Bore the first shaft first` / `No more shafts - the colony may sink %d` / `The Borer is outside coverage` / `Shaft %d already stands on that column` / `That column is already dug or planned on floor %d` / `A building stands on that column on floor %d`. The deck's button shows the same reason. | PLACEHOLDER, pending review. |
+| H2 | Order rejection banner, a Bore or Excavate order for a shaft other than shaft 0 · SIM `ExecuteCommand` | `Unknown shaft '%s'` / `Shaft %d has no Borer online` / `Shaft %d already at floor -%d` / `Floor %d not reached by shaft %d - bore it deeper first`. Shaft 0 keeps today's `No Borer online - build one first`, `Shaft already at floor -%d` and `Floor %d not reached - bore the shaft deeper first`. | PLACEHOLDER, pending review. |
+| H3 | Placement refusal reason, a floor building on the column of a shaft sunk after shaft 0 · SIM `CanPlaceBuildingSized` | `That is a shaft column` (the same words the paint refusal already used for the column of shaft 0) | PLACEHOLDER, pending review. |
+| H4 | Selected Borer card · DECK | A line before SHAFT: `ANCHORS shaft %d` or `HELPS shaft 0 (anchors none)` (shown once there is a second shaft, or once the Borer anchors one). The SHAFT and per-floor lines now read the shaft that Borer works. | PLACEHOLDER, pending review. |
+| H5 | Selected Borer card, a Borer that anchors no shaft · DECK | Button `Sink a shaft here`, or `Sink a shaft here - <reason from H1>` while it cannot. On a click: the confirm line `Shaft order transmitted: the Borer will sink a new shaft where it stands`, or the reason. | PLACEHOLDER, pending review. |
+| H6 | The SHAFT strip, once a second shaft exists · DECK | Button `Next shaft`; the confirm line `Camera on shaft %d` | PLACEHOLDER, pending review. |
+| H7 | Data copy: the new RH_Config row `MaxShafts` Note · DATA | `D2: how many shafts the colony may sink in all, shaft 0 included. The save and the config both clamp it to 1..16 (RH::MaxShaftsCap), so a save made under any value loads. Placeholder, director review` | PLACEHOLDER, pending review. The number 4 is also a placeholder. |
