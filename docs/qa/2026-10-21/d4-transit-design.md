@@ -1295,3 +1295,9 @@ I verified each line in `Saved/baselines/battery_post_d3` (48 logs). A grep for 
 - **Playtests:** the default and `districts=1` 110-sol runs are byte-identical under the mask against the post-D3 runs. `lifts=1` passes 1.8's assertions, with O7's changes.
 - **-scale** stays within every budget (without the tram parts under [Q-B D6]), and the one-shaft, no-car numbers do not move.
 - **Logged:** the deviations above, and the director's answers to Q-A and Q-B once given.
+
+
+# DIRECTOR ANSWER (2026-10-21)
+
+- **Q-A (a):** the first lift car costs 400 kg of Struct (the config row stays at 400). Fitting it is the switch that turns D4 on for every shaft.
+- **Q-B (a):** trams are deferred to D6, with people. D4 builds NO tram verb, record, edge, row, test or visual; use the "D6" branches of the REVISION throughout. The save default block is 0, -1, 0.
