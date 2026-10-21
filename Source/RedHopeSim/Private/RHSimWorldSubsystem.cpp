@@ -801,23 +801,36 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			DigBudgetKg -= TakeKg;
 			break;
 		}
-		// Leftover budget digs to a store, exactly like the agent band's
-		// pile->hauler->Stockpile flow (paired-run finding: era extracted 27%
-		// less and held 58% less raw regolith because the surplus dig was
-		// simply never modeled - the Session 9 "digs only to feed demanding
-		// consumers" limitation, now closed).
+		// Leftover budget: the agent band's rule, through the same helper its
+		// haul legs ask (MayOverflowToStore). Dig the surplus to a store
+		// (Stockpile or Lander) only when nothing on the level consumes the
+		// resource or it is a construction material. Otherwise the agents'
+		// excavators stand by at a full pile (the pile drains only to a
+		// consumer, 8fa8299): the leftover tops the pile up to its cap and is
+		// dropped - it neither goes to a store nor on to the next deposit, and
+		// the ore it did not dig stays in the deposit. Before this the era
+		// band stockpiled every surplus kg in the Lander, far past what the
+		// agent band digs (era regolith gap, fix A).
 		if (DigBudgetKg > 0.0)
 		{
-			for (FRHBuildingInstance& S : Buildings)
+			if (MayOverflowToStore(D.Type, D.Level))
 			{
-				if (!S.bUnderConstruction && S.Level == D.Level && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
+				for (FRHBuildingInstance& S : Buildings)
 				{
-					const double TakeKg = FMath::Min(DigBudgetKg, D.RemainingKg);
-					D.RemainingKg -= TakeKg;
-					S.InputKg.FindOrAdd(D.Type) += TakeKg;
-					DigBudgetKg -= TakeKg;
-					break;
+					if (!S.bUnderConstruction && S.Level == D.Level && (S.DefName == NAME_Stockpile || S.DefName == NAME_Lander))
+					{
+						const double TakeKg = FMath::Min(DigBudgetKg, D.RemainingKg);
+						D.RemainingKg -= TakeKg;
+						S.InputKg.FindOrAdd(D.Type) += TakeKg;
+						DigBudgetKg -= TakeKg;
+						break;
+					}
 				}
+			}
+			else
+			{
+				DigDeposit(D.Id, DigBudgetKg);
+				DigBudgetKg = 0.0;
 			}
 		}
 	}
@@ -948,7 +961,6 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 
 		int32 DestId = 0;
 		double BestDistCm = 0.0;
-		bool bAnyConsumer = false; // some building here takes it, hopper full or not
 		double DestRoomKg = -1.0;  // C6a: a consumer's room (2 x Need - Have) at the chosen destination; < 0 = a store, uncapped
 		double CandRoomKg = 0.0;
 		const auto Consider = [&](const FRHBuildingInstance& Cand, double RoomKg)
@@ -974,7 +986,6 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 					{
 						return false;
 					}
-					bAnyConsumer = true;
 					const double* Have = B.InputKg.Find(D.Type);
 					const bool bRoom = (!Have || *Have < *Need * 2.0);
 					if (bRoom)
@@ -987,7 +998,7 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 				Consider(B, CandRoomKg);
 			}
 		}
-		if (DestId == 0 && (!bAnyConsumer || ConstructionMaterials.Contains(D.Type)))
+		if (DestId == 0 && MayOverflowToStore(D.Type, D.Level))
 		{
 			for (const FRHBuildingInstance& B : Buildings)
 			{
@@ -1030,7 +1041,6 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 			}
 			int32 DestId = 0;
 			double BestDistCm = 0.0;
-			bool bAnyConsumer = false; // some machine here takes it, hopper full or not
 			double DestRoomKg = -1.0;  // C6a: see the deposit leg
 			double CandRoomKg = 0.0;
 			const auto Consider = [&](const FRHBuildingInstance& Cand, double RoomKg)
@@ -1056,7 +1066,6 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 						{
 							return false;
 						}
-						bAnyConsumer = true;
 						const double* Have = C.InputKg.Find(Out.Key);
 						const bool bRoom = (!Have || *Have < *Need * 2.0);
 						if (bRoom)
@@ -1073,7 +1082,7 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 			// or what nothing here consumes (D2a: drill ice hauled to the Lander
 			// sat there for good - 7 t in the playtest - and the long trips
 			// starved the Water Plant; it now waits at the drill for the plant).
-			if (DestId == 0 && (!bAnyConsumer || ConstructionMaterials.Contains(Out.Key)))
+			if (DestId == 0 && MayOverflowToStore(Out.Key, B.Level, B.Id))
 			{
 				for (const FRHBuildingInstance& S : Buildings)
 				{
@@ -10598,6 +10607,26 @@ double URHSimWorldSubsystem::DigDeposit(int32 DepositId, double Kg)
 	D->RemainingKg -= Dug;
 	D->PileKg += Dug;
 	return Dug;
+}
+
+bool URHSimWorldSubsystem::MayOverflowToStore(FName Resource, int32 Level, int32 SourceBuildingId) const
+{
+	if (ConstructionMaterials.Contains(Resource))
+	{
+		return true;
+	}
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.bUnderConstruction || B.Level != Level || B.Id == SourceBuildingId)
+		{
+			continue;
+		}
+		if (Defs->FindRunnableRecipe(B.DefName, [&Resource](const TMap<FName, double>& Inputs) { return Inputs.Contains(Resource); }))
+		{
+			return false; // a machine here takes it, hopper full or not: it waits for that machine
+		}
+	}
+	return true;
 }
 
 bool URHSimWorldSubsystem::IsDepositWorkable(int32 DepositId) const

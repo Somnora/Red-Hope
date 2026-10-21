@@ -10910,6 +10910,283 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		return Fails > 0 ? 1 : 0;
 	}
 
+	// Era regolith parity self-test (era regolith gap, fix A, 2026-10-21): the era band follows the agent band's
+	// routing rule for dug material, through the ONE helper both ask (MayOverflowToStore). Before the fix the era
+	// dig leg stockpiled every surplus kg in the Lander while the agent's excavators stood by at a full pile: era
+	// dug far more regolith than the agent and held it where no Forge could reach it (the era stall). EP0 the data;
+	// EP1 the helper itself (no consumer, a consumer, another floor, the source machine, a construction material,
+	// ice); EP2 the era dig leg with no Forge (the surplus goes to the Lander, as it always did); EP3 with a Forge
+	// whose hopper is full, at night: the Lander is untouched, the pile fills to its cap and stops, the deposit
+	// falls by exactly the pile (the ore it did not dig stays in the ground), and a second designated deposit is
+	// not touched; EP4 the paired run - an agent leg, whose excavators and haulers are played by the harness
+	// through the very same sim calls the brains make (the headless world has no Mass ticking; the real brains are
+	// the live paired run's), against an era leg of the same colony: regolith dug, regolith in the Lander and Struct
+	// made, within the 5% bar. Fails loudly. `-eraparity`.
+	if (FParse::Param(*Params, TEXT("eraparity")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== ERA PARITY TEST (era regolith gap, fix A, 2026-10-21) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("ERAPARITY ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("ERAPARITY FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double Va, double Vb, double Tol) { return FMath::Abs(Va - Vb) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NRegolith(TEXT("Regolith")), NStruct(TEXT("Struct")), NIce(TEXT("Ice"));
+		const auto Finish = [&]() -> int32
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== ERA PARITY TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+			GEngine->DestroyWorldContext(World);
+			World->DestroyWorld(false);
+			return Fails > 0 ? 1 : 0;
+		};
+		const auto EraOnce = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto AgentOnce = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds((double)AgentDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->Debug_StepSim(AgentDt);
+		};
+		// Move the clock FORWARD to the next occurrence of a sol fraction (never rewinds).
+		const auto AdvanceTo = [&](double Frac)
+		{
+			const double Now = Clock->GetSimSecondsTotal();
+			const double Sols0 = FMath::FloorToDouble(Now / SolLen);
+			const double Target = Frac * SolLen;
+			const double T = (Sols0 + (Target < Now - Sols0 * SolLen ? 1.0 : 0.0)) * SolLen + Target;
+			if (T > Now) { Clock->Debug_AdvanceSimSeconds(T - Now); }
+		};
+		const auto Dep = [&](const ANSICHAR* Row) -> const FRHDepositState*
+		{
+			for (const FRHDepositState& Dp : Sim->GetDeposits()) { if (Dp.RowName == FName(Row)) { return &Dp; } }
+			return nullptr;
+		};
+		const auto FindB = [&](int32 Id) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.Id == Id) { return &Bd; } }
+			return nullptr;
+		};
+		const auto InKg = [&](int32 Id, FName Res) { const FRHBuildingInstance* Bd = FindB(Id); const double* V = Bd ? Bd->InputKg.Find(Res) : nullptr; return V ? *V : 0.0; };
+		const auto LastIdOf = [&](const TCHAR* Def) { int32 Id = 0; for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName(Def)) { Id = Bd.Id; } } return Id; };
+		const auto Place = [&](const TCHAR* Def, double X, double Y, int32 Level = 0)
+		{
+			Sim->Debug_PlaceInstant(FName(Def), FVector(X, Y, 0.0), Level);
+			return LastIdOf(Def);
+		};
+		const auto Designate = [&](const TCHAR* Row)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Dig");
+			Cmd.Target = FName(Row);
+			Sim->EnqueueCommand(Cmd);
+		};
+		int32 LanderId = 0;
+		for (const FRHBuildingInstance& Bd : Sim->GetBuildings()) { if (Bd.DefName == FName("Lander")) { LanderId = Bd.Id; } }
+
+		// --- EP0. The data every number below rests on. ---
+		const FRHRobotRow* ExcRow = DefsSub ? DefsSub->GetRobot(FName("RC_E")) : nullptr;
+		const FRHRobotRow* HaulRow = DefsSub ? DefsSub->GetRobot(FName("RC_H")) : nullptr;
+		const double PileCap = DefsSub ? DefsSub->GetConfigTableScalar(FName("PilesCapacity_kg"), -1.0) : -1.0;
+		{
+			bool bSmelt = false;
+			if (DefsSub)
+			{
+				bSmelt = DefsSub->FindRunnableRecipe(FName("Forge"), [&](const TMap<FName, double>& In) { const double* N = In.Find(NRegolith); return N && Near(*N, 100.0, 1e-9); }) != nullptr;
+			}
+			Expect(ExcRow && HaulRow && ExcRow->RobotClass == FName("Excavator") && ExcRow->StartingCount == 2 && Near(ExcRow->WorkRate, 50.0, 1e-6) && HaulRow->StartingCount == 2 && Near(HaulRow->Cargo_kg, 200.0, 1e-6)
+				&& Near(PileCap, 500.0, 1e-9) && bSmelt && Dep("Regolith_A") && Dep("Regolith_B"),
+				FString::Printf(TEXT("EP0 data: 2 RC-E at 50 kg/h, 2 RC-H of 200 kg, pile cap %.0f kg, the Forge's SmeltRegolith takes 100 kg, deposits Regolith_A and Regolith_B (DT/CSV)"), PileCap));
+			if (!ExcRow || !HaulRow || !Dep("Regolith_A") || !Dep("Regolith_B"))
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("ERAPARITY FAIL: the rows are not in the tables; the suite stops"));
+				++Fails;
+				return Finish();
+			}
+		}
+		const int32 DepA = Dep("Regolith_A")->Id, DepB = Dep("Regolith_B")->Id;
+		const double StartA = Dep("Regolith_A")->RemainingKg;
+		// Era's fleet rate: every RC-E x WorkRate x the charge duty (the integrator's own derivation), per sim-second.
+		const double PadRateW = [&]() { const FRHBuildingRow* Pad = DefsSub->GetBuilding(FName("ChargePad")); return Pad ? (double)Pad->PowerDraw_W : 500.0; }();
+		const double EraKgPerStep = [&]()
+		{
+			const double WorkH = ExcRow->Battery_Wh * (Sim->GetChargeResumeFraction() - Sim->GetChargeSeekFraction()) / FMath::Max(1.f, ExcRow->DrawWork_W);
+			const double ChargeH = ExcRow->Battery_Wh * (Sim->GetChargeResumeFraction() - Sim->GetChargeSeekFraction()) / PadRateW;
+			return (double)ExcRow->StartingCount * ExcRow->WorkRate * (WorkH / FMath::Max(0.1, WorkH + ChargeH)) * (EraDt / 50.0);
+		}();
+
+		// The first step executes the uplink order; step until the dig is designated (it is lagged).
+		Designate(TEXT("Regolith_A"));
+		for (int32 K = 0; K < 200 && !Dep("Regolith_A")->bDesignated; ++K) { EraOnce(); }
+		Expect(Dep("Regolith_A")->bDesignated && !Dep("Regolith_B")->bDesignated && EraKgPerStep > 50.0 && EraKgPerStep < 150.0,
+			FString::Printf(TEXT("EP0 Regolith_A is designated for digging, Regolith_B is not; the era fleet's rate is %.2f kg per 60 s step"), EraKgPerStep));
+
+		// --- EP1. The helper: the one rule. ---
+		int32 ForgeId = 0;
+		{
+			Expect(Sim->MayOverflowToStore(NRegolith, 0) && Sim->MayOverflowToStore(NIce, 0),
+				TEXT("EP1 no machine takes regolith or ice yet: either may overflow to a store"));
+			const int32 PlantId = Place(TEXT("WaterPlant"), 6000.0, -3000.0);
+			Expect(PlantId != 0 && !Sim->MayOverflowToStore(NIce, 0) && Sim->MayOverflowToStore(NIce, 0, PlantId) && Sim->MayOverflowToStore(NIce, -1) && Sim->MayOverflowToStore(NRegolith, 0),
+				TEXT("EP1 a Water Plant on the level takes ice: ice waits for the plant (W1's ice leg asks this same helper), regolith still may overflow, ice may on another floor or from the plant itself"));
+			Expect(Sim->MayOverflowToStore(NStruct, 0) && Sim->MayOverflowToStore(NStruct, -1),
+				TEXT("EP1 Struct is a construction material: it may always overflow to a store"));
+		}
+
+		// --- EP2. The era dig leg with nothing here that consumes regolith: the surplus goes to the Lander. ---
+		{
+			AdvanceTo(0.85);
+			const double Land0 = InKg(LanderId, NRegolith), A0 = Dep("Regolith_A")->RemainingKg;
+			EraOnce();
+			const double Gain = InKg(LanderId, NRegolith) - Land0, Dug = A0 - Dep("Regolith_A")->RemainingKg;
+			Expect(Near(Gain, EraKgPerStep, 1e-6) && Near(Dug, EraKgPerStep, 1e-6) && Near(Dep("Regolith_A")->PileKg, 0.0, 1e-9),
+				FString::Printf(TEXT("EP2 no Forge: one era step digs %.3f kg and all of it goes to the Lander (+%.3f), the pile stays empty"), Dug, Gain));
+		}
+
+		// --- EP3. The same step with a Forge whose hopper is full: nothing reaches the Lander, the pile fills and stops. ---
+		{
+			ForgeId = Place(TEXT("Forge"), 4000.0, -3000.0);
+			Expect(ForgeId != 0 && !Sim->MayOverflowToStore(NRegolith, 0) && Sim->MayOverflowToStore(NRegolith, -1) && Sim->MayOverflowToStore(NRegolith, 0, ForgeId) && Sim->MayOverflowToStore(NStruct, 0),
+				TEXT("EP3 a Forge on the level takes regolith: it may not overflow there, may on another floor, and may when the Forge itself is the source; Struct still may"));
+			Sim->Debug_AddSolidAt(ForgeId, NRegolith, 600.0, false); // two batches is 200: the hopper is full, and stays so through the night
+			Designate(TEXT("Regolith_B"));
+			for (int32 K = 0; K < 200 && !Dep("Regolith_B")->bDesignated; ++K) { EraOnce(); }
+			AdvanceTo(0.76); // the night: the Forge's day shift is 0.25 to 0.75, and eight 60 s steps end at 0.16
+			Sim->Debug_SetDepositPileKg(DepA, 0.0);
+			Sim->Debug_SetDepositPileKg(DepB, 0.0);
+			const double Hop0 = InKg(ForgeId, NRegolith);
+			const double Land0 = InKg(LanderId, NRegolith), A0 = Dep("Regolith_A")->RemainingKg, B0 = Dep("Regolith_B")->RemainingKg;
+			Expect(Hop0 >= 200.0 && Dep("Regolith_B")->bDesignated,
+				FString::Printf(TEXT("EP3 set up: the Forge hopper holds %.0f kg (over its 200 kg of two batches), Regolith_B is designated too, both piles empty"), Hop0));
+			EraOnce();
+			Expect(Near(InKg(LanderId, NRegolith), Land0, 1e-9) && Near(Dep("Regolith_A")->PileKg, EraKgPerStep, 1e-6) && Near(A0 - Dep("Regolith_A")->RemainingKg, EraKgPerStep, 1e-6),
+				FString::Printf(TEXT("EP3 one step with the hopper full: the Lander is untouched, the pile takes the %.3f kg, the deposit is down by the same %.3f"), Dep("Regolith_A")->PileKg, A0 - Dep("Regolith_A")->RemainingKg));
+			int32 Steps = 1;
+			for (; Steps < 7; ++Steps) { EraOnce(); }
+			Expect(Near(Dep("Regolith_A")->PileKg, PileCap, 1e-6) && Near(A0 - Dep("Regolith_A")->RemainingKg, PileCap, 1e-6) && Near(InKg(LanderId, NRegolith), Land0, 1e-9) && Near(InKg(ForgeId, NRegolith), Hop0, 1e-9),
+				FString::Printf(TEXT("EP3 after %d steps (%.0f kg of budget against a 500 kg pile): the pile is at its cap (%.1f), the deposit is down by exactly the pile (%.1f), the Lander and the hopper are unchanged"), Steps, EraKgPerStep * Steps, Dep("Regolith_A")->PileKg, A0 - Dep("Regolith_A")->RemainingKg));
+			Expect(Near(Dep("Regolith_B")->RemainingKg, B0, 1e-9) && Near(Dep("Regolith_B")->PileKg, 0.0, 1e-9),
+				TEXT("EP3 the leftover is dropped, not moved on: the second designated deposit is untouched (mass and pile)"));
+			Sim->Debug_SetDepositPileKg(DepA, PileCap - 50.0);
+			const double A1 = Dep("Regolith_A")->RemainingKg;
+			EraOnce();
+			Expect(Near(Dep("Regolith_A")->PileKg, PileCap, 1e-6) && Near(A1 - Dep("Regolith_A")->RemainingKg, 50.0, 1e-6) && Near(InKg(LanderId, NRegolith), Land0, 1e-9),
+				TEXT("EP3 a pile 50 kg under its cap takes exactly 50 kg more and no more (the top-up is clamped to the room, as the agents' DigDeposit is)"));
+		}
+
+		// --- EP4. The paired run: an agent leg against an era leg of the same colony. ---
+		{
+			const int32 LegSols = 10; // the M1 acceptance bar is 10 sols; one Forge batch (100 kg) is then under 2% of the dig
+			// The colony: a Forge beside the dig, the Lander the only store, Regolith_A the only dig, the bank pinned. A clean slate first.
+			Sim->Debug_SetDepositPileKg(DepA, 0.0);
+			Sim->Debug_SetDepositPileKg(DepB, 0.0);
+			Sim->Debug_SetDepositRemainingKg(DepA, StartA);
+			AdvanceTo(0.25); // the start of the Forge's day shift
+			FString SaveErr;
+			Expect(Sim->SaveColony(TEXT("eraparity"), SaveErr), FString::Printf(TEXT("EP4 the colony is saved for both legs (%s)"), *SaveErr));
+			struct FLeg { double Dug = 0, LanderRegolith = 0, Struct = 0, Pile = 0, HopperGain = 0; int32 Steps = 0; };
+			const auto Take = [&](double A0, double Land0, double Struct0, double Hopper0) -> FLeg
+			{
+				FLeg L;
+				L.Dug = A0 - Dep("Regolith_A")->RemainingKg;
+				L.LanderRegolith = InKg(LanderId, NRegolith) - Land0;
+				L.Struct = Sim->GetTotalSolid(NStruct) - Struct0;
+				L.Pile = Dep("Regolith_A")->PileKg;
+				L.HopperGain = InKg(ForgeId, NRegolith) - Hopper0;
+				return L;
+			};
+			// The agent's robots, played through the brains' own calls: an excavator claims a dig and digs while the site is workable; a hauler
+			// claims the nearest haul, loads, takes the trip (the real distance at its speed, plus the 10 s each way at the ends) and unloads.
+			struct FHarnessHauler { FMassEntityHandle H; bool bHas = false; FRHTask Board; float CargoKg = 0.f; int32 Wait = 0; };
+			int32 NextHandle = 900;
+			const auto RunLeg = [&](bool bAgent) -> FLeg
+			{
+				FString Le;
+				if (!Sim->LoadColony(TEXT("eraparity"), Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("ERAPARITY: leg load failed: %s"), *Le); ++Fails; }
+				const double A0 = Dep("Regolith_A")->RemainingKg, Land0 = InKg(LanderId, NRegolith), Struct0 = Sim->GetTotalSolid(NStruct), Hopper0 = InKg(ForgeId, NRegolith);
+				int32 Steps = 0;
+				if (bAgent)
+				{
+					TArray<int32> Claims;
+					for (int32 K = 0; K < ExcRow->StartingCount; ++K) { Claims.Add(0); }
+					TArray<FHarnessHauler> Haulers;
+					for (int32 K = 0; K < HaulRow->StartingCount; ++K) { FHarnessHauler Hh; Hh.H = FMassEntityHandle(NextHandle++, 1); Haulers.Add(Hh); }
+					const int32 Total = LegSols * (int32)(SolLen / (double)AgentDt);
+					for (; Steps < Total; ++Steps)
+					{
+						for (int32& Claim : Claims)
+						{
+							if (Claim != 0 && Sim->IsDepositSpent(Claim)) { Sim->ReleaseDigClaim(Claim); Claim = 0; }
+							if (Claim == 0) { Claim = Sim->TryClaimDig(FVector::ZeroVector); }
+							if (Claim != 0 && Sim->IsDepositWorkable(Claim)) { Sim->DigDeposit(Claim, ExcRow->WorkRate * (AgentDt / 50.f)); }
+						}
+						for (FHarnessHauler& Hh : Haulers)
+						{
+							if (!Hh.bHas)
+							{
+								if (Sim->TryClaimHaul(Hh.H, FVector::ZeroVector, Hh.Board))
+								{
+									float Loaded = 0.f;
+									FVector Drop = FVector::ZeroVector;
+									if (Sim->HaulLoad(Hh.Board.Id, HaulRow->Cargo_kg, Loaded, Drop))
+									{
+										const double TripCm = FVector::DistXY(Sim->GetSiteLocation(Hh.Board.From), Drop) * 2.0;
+										Hh.CargoKg = Loaded;
+										Hh.Wait = (int32)(TripCm / (HaulRow->Speed_mps * 100.0 * AgentDt)) + (int32)(20.0 / AgentDt);
+										Hh.bHas = true;
+									}
+									else { Sim->AbandonTask(Hh.Board.Id); }
+								}
+							}
+							else if (--Hh.Wait <= 0)
+							{
+								Sim->HaulUnload(Hh.Board.Id, Hh.CargoKg);
+								Hh.bHas = false;
+							}
+						}
+						AgentOnce();
+					}
+				}
+				else
+				{
+					const int32 Total = LegSols * (int32)(SolLen / EraDt);
+					for (; Steps < Total; ++Steps) { EraOnce(); }
+				}
+				FLeg L = Take(A0, Land0, Struct0, Hopper0);
+				L.Steps = Steps;
+				return L;
+			};
+			const double Wall0 = FPlatformTime::Seconds();
+			const FLeg Agent = RunLeg(true);
+			const double AgentWall = FPlatformTime::Seconds() - Wall0;
+			const FLeg Era = RunLeg(false);
+			const auto Within = [&Near](double Va, double Vb, double Frac) { return Near(Va, Vb, Frac * FMath::Max(FMath::Max(FMath::Abs(Va), FMath::Abs(Vb)), 1.0e-9)); };
+			Expect(Agent.Dug > 1000.0 && Agent.Struct > 100.0 && Era.Dug > 1000.0 && Era.Struct > 100.0,
+				FString::Printf(TEXT("EP4 both legs worked: %d sols, the agent dug %.0f kg and made %.0f kg of Struct (%d substeps in %.1f s), the era leg dug %.0f and made %.0f"), LegSols, Agent.Dug, Agent.Struct, Agent.Steps, AgentWall, Era.Dug, Era.Struct));
+			Expect(Within(Agent.Dug, Era.Dug, 0.05),
+				FString::Printf(TEXT("EP4 regolith DUG agrees within 5%%: agent %.1f kg, era %.1f kg (%.2f%%); the unfixed era band dug the whole fleet rate, %.0f kg"), Agent.Dug, Era.Dug, 100.0 * (Era.Dug - Agent.Dug) / FMath::Max(1.0, Agent.Dug), EraKgPerStep * (SolLen / EraDt) * LegSols));
+			Expect(Near(Agent.LanderRegolith, Era.LanderRegolith, 0.05 * FMath::Max(Agent.Dug, Era.Dug)) && Era.LanderRegolith < 0.05 * Era.Dug,
+				FString::Printf(TEXT("EP4 regolith in the LANDER agrees within 5%% of what was dug: agent +%.1f kg, era +%.1f kg"), Agent.LanderRegolith, Era.LanderRegolith));
+			Expect(Within(Agent.Struct, Era.Struct, 0.05),
+				FString::Printf(TEXT("EP4 Struct made agrees within 5%%: agent %.1f kg, era %.1f kg (%.2f%%)"), Agent.Struct, Era.Struct, 100.0 * (Era.Struct - Agent.Struct) / FMath::Max(1.0, Agent.Struct)));
+			Expect(Near(Agent.Pile, PileCap, 1e-6) && Near(Era.Pile, PileCap, 1e-6),
+				FString::Printf(TEXT("EP4 both bands end with the pile at its cap: agent %.1f kg, era %.1f kg"), Agent.Pile, Era.Pile));
+			Expect(Within(Agent.Dug - Agent.Pile - Agent.HopperGain, Era.Dug - Era.Pile - Era.HopperGain, 0.05),
+				FString::Printf(TEXT("EP4 and what the Forge took (dug, less the pile and the hopper's gain) agrees within 5%%: agent %.1f kg, era %.1f kg"), Agent.Dug - Agent.Pile - Agent.HopperGain, Era.Dug - Era.Pile - Era.HopperGain));
+		}
+
+		return Finish();
+	}
+
 	// D1 self-test (going deep, gate 1, 2026-10-21): FLOORS BECOME PLACES. A floor is an ordered, add-only table of lattice
 	// cells (10 m units in the shaft head's frame) plus a painted plan; the Borer carves the next planned cell, else the lowest
 	// uncarved spiral cell. Nothing visible changes: every battery line stays, and this suite is the proof that the table is

@@ -1594,6 +1594,12 @@ public:
 	FVector GetSiteLocation(const FRHSiteRef& Site) const;
 	// Excavator: ground -> pile, respecting pile cap and remaining mass.
 	double DigDeposit(int32 DepositId, double Kg);
+	// The ONE rule for dug or produced material nobody has room for (8fa8299, D2a; era parity fix A): it may go to
+	// a store (Stockpile or Lander) only when no completed machine on the level takes it as a recipe input (hopper
+	// full or not), or it is a construction material. Otherwise it waits where it is. The agent band's pile leg and
+	// output leg and EraLogistics all ask this, so the bands cannot drift apart again. SourceBuildingId skips the
+	// producing machine itself (an output leg); 0 for a deposit. W1's ice leg is the next caller.
+	bool MayOverflowToStore(FName Resource, int32 Level, int32 SourceBuildingId = 0) const;
 	bool IsDepositWorkable(int32 DepositId) const; // designated, mass left, pile below cap
 	bool IsDepositSpent(int32 DepositId) const;    // no mass left underground or undesignated
 	void ReleaseDigClaim(int32 DepositId);
