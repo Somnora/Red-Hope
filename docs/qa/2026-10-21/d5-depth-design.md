@@ -186,3 +186,9 @@ No sim array is sized by `MaxDepth`. Every per-floor store is a `TMap` or the fl
 2. The baseline radiation print stops at the cool line (section 5).
 3. Cooling counts every carved deep cell, not only rated floors (unless Q-B changes it).
 4. "Better shielded" is a Hope term, not a radiation number, because the index is already zero past -4.
+
+
+# DIRECTOR ANSWER (2026-10-21)
+
+- **Q-A (a):** shielding pays as a small capped Hope bonus (up to +3) for residents homed below the cut-off, built like the window bonus.
+- **Q-B (a):** a cooling shortfall costs Hope only (warmth up to -5), fully recoverable when power returns. It never touches the livable rating, arrivals or recall.
