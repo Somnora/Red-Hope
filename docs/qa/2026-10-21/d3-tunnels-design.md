@@ -670,3 +670,8 @@ Under (c), O1, O2, O4, O5, O10 and O11 stay in D3. O3, O7, O8 and O9 move to D4 
 - **Playtests:** the default and `districts=1` runs are byte-identical under the mask. Under (a) or (b), `lifts=1` passes its five assertions.
 - **-scale** stays within every budget, and the one-shaft numbers are unchanged.
 - **Logged:** the deviations above, Q-A's answer, and the D4 note (the lift load charges the hand-off).
+
+
+# DIRECTOR ANSWER (2026-10-21)
+
+**Q-A: (c).** D3 builds tunnels only: painted tunnel lines carved by the Borer as ordinary lattice cells, joining digs on a floor. Robots going below (fitted lifts, riding, charging, cross-level claims and repair, the lifts=1 playtest) moves to D4, together with lift capacity, carrying this design and REVISION items 1-4 and 6 into D4 unchanged. Deviation 8 applies: Q1a's robots-below moves from D3 to D4.
