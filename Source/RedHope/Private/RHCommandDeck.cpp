@@ -1,4 +1,5 @@
 #include "RHCommandDeck.h"
+#include "RHOrderWords.h"
 #include "RHDeckStyle.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
@@ -1177,9 +1178,10 @@ void SRHCommandDeck::RefreshUplinkPanel()
 	for (const FRHCommand& C : Sim->GetUplinkQueue())
 	{
 		const int32 Id = C.CommandId;
+		const URHDefinitionsSubsystem* LabelDefs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 		FString Label = C.Target.IsNone()
-			? C.Verb.ToString()
-			: FString::Printf(TEXT("%s %s"), *C.Verb.ToString(), *C.Target.ToString());
+			? RHOrder::VerbText(C.Verb)
+			: FString::Printf(TEXT("%s %s"), *RHOrder::VerbText(C.Verb), *RHOrder::TargetText(LabelDefs, C.Target));
 		if (C.Verb == FName("Sell") && C.Target == FName("WallFeature"))
 		{
 			// BM-6: "Sell Window #3".
@@ -1308,7 +1310,8 @@ EVisibility SRHCommandDeck::GetCrewVisibility() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	return (Sim && Sim->GetPopulation() > 0) ? EVisibility::Visible : EVisibility::Collapsed;
+	// F7b: a quiet colony keeps the panel, with its one line, instead of vanishing.
+	return (Sim && (Sim->GetPopulation() > 0 || Sim->IsColonyQuiet())) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 FText SRHCommandDeck::GetInspectText() const
@@ -1445,7 +1448,7 @@ FText SRHCommandDeck::GetInspectText() const
 			else if (Provided->Function == FName("Infirmary"))
 			{
 				Text += bOnline
-					? FString(TEXT("\nINFIRMARY ONLINE - the recall window is one sol longer"))
+					? FString(TEXT("\nINFIRMARY ONLINE - one extra sol to restore rations"))
 					: FString(TEXT("\nINFIRMARY IDLE - needs power and a livable floor"));
 			}
 			else if (!bOnline)

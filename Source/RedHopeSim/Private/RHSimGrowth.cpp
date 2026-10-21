@@ -537,8 +537,9 @@ int32 URHSimWorldSubsystem::RunGrowthStartCheck()
 	{
 		return 0;
 	}
-	// The pauses: a city whose people are short of air, food or water does not start building,
-	// and neither does one whose Hope is failing.
+	// The pauses: a city whose people are short of air, food or water does not start building.
+	// At the lowest Hope band (LOW) it keeps building Civic rooms, the services that lift Hope,
+	// and only the new homes wait (F5b, Gate-D review, 2026-10-21).
 	int32 ShortHomes = 0;
 	for (const FRHHomeRation& Home : HomeRations)
 	{
@@ -549,10 +550,10 @@ int32 URHSimWorldSubsystem::RunGrowthStartCheck()
 		GrowthPause = FString::Printf(TEXT("paused: %d home%s on short rations"), ShortHomes, GrowthPlural(ShortHomes));
 		return 0;
 	}
-	if (HopeBand == ERHHopeBand::Failing)
+	const bool bHomesWait = HopeBand == ERHHopeBand::Failing;
+	if (bHomesWait)
 	{
-		GrowthPause = TEXT("paused: the colony's Hope is failing");
-		return 0;
+		GrowthPause = TEXT("only builds services for now: new homes wait for Hope to recover");
 	}
 
 	const FRHCityDemand Demand = GetCityDemand();
@@ -600,6 +601,11 @@ int32 URHSimWorldSubsystem::RunGrowthStartCheck()
 			if (BedsShort <= 0)
 			{
 				GrowthNotes.Add(D.Id, Demand.Population <= 0 ? TEXT("nobody lives here yet") : TEXT("housing is not short"));
+				continue;
+			}
+			if (bHomesWait)
+			{
+				GrowthNotes.Add(D.Id, TEXT("new homes wait for Hope to recover"));
 				continue;
 			}
 			bPlanned = D.IsFloor() ? PlanFloorHomes(D, P, Why) : PlanSurfaceHomes(D, P, Why);

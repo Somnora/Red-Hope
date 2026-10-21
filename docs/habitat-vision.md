@@ -21,7 +21,7 @@ Rooms are designated functions within the hab shell (agent note: rooms-as-data, 
 - **Workstation**, **Labs**
 - **Living quarters**
 - **Dining rooms** and **cooking stations**
-- **Smoking areas** — when humans arrive, they can **grow tobacco once they can cultivate luxuries**: morale for when basic needs are met (extends the brief's Hope/luxury canon; LuxuryGoods manifest item already exists)
+- ~~**Smoking areas** — when humans arrive, they can **grow tobacco once they can cultivate luxuries**: morale for when basic needs are met (extends the brief's Hope/luxury canon; LuxuryGoods manifest item already exists)~~ **Struck 2026-10-21 (Gate-D framing review, F8b):** tobacco is not a comfort in this game. The dormant room is re-themed as a **Lounge** (a quiet room; DisplayName and Notes only, the row key `Smoking` stays). It stays dormant.
 
 ## 3. Life support infrastructure (in-hab)
 
@@ -68,7 +68,7 @@ The director's closing concern — "with how the game is structured now, I don't
   - **Hab-module/room data schema** (rooms as data rows: function, adjacency tags, filtration/plumbing needs) so M2 activates content, not schema — same discipline as the M0 dormant rows.
   - **Pressurized-door/compartment model** (compartments as the pressure/atmosphere unit; doors as edges). The storm-breach retreat mechanic needs the graph even before breaches exist.
   - Buildable-dormant: water filtering station, septic/fertilizer area, air filtration station (the 2026-07-05 ruling already puts treatment facilities in M1-d).
-- **M2 (humans arrive):** room functions go live — living quarters, dining/cooking, labs, gardens; the morale/sickness adjacency system (director review on presentation per the mental-health directive); drinking-water psychology; luxury crops incl. tobacco + smoking areas; windows/domes morale; interior view mode; suits; surface hab modules + lego connection + paint-to-size shells; vehicles/tools for humans and robots.
+- **M2 (humans arrive):** room functions go live — living quarters, dining/cooking, labs, gardens; the morale/sickness adjacency system (director review on presentation per the mental-health directive); drinking-water psychology; luxury crops (tobacco struck 2026-10-21, see §2) + the dormant Lounge; windows/domes morale; interior view mode; suits; surface hab modules + lego connection + paint-to-size shells; vehicles/tools for humans and robots.
 - **Not scheduled yet:** anything Phase 3.
 
 Rationale for the split: M1-d stays the tight "first vault" exit the rulings define, but every schema the hab vision needs (rooms, compartments, doors, filtration coverage) is born there so the M2 human layer lands on prepared ground instead of a rewrite.

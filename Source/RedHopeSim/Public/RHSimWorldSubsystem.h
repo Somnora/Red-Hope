@@ -76,6 +76,16 @@ struct REDHOPESIM_API FRHColonist
 	TMap<FName, double> SkillSols;
 };
 
+// F2b (Gate-D review, 2026-10-21): a Mars-born colonist recalled to orbit waits there, safe, and comes
+// home first when a later supply ship lands with every home on full rations and a bed free. The list
+// keeps the order of the recalls, oldest first. Serialized (save v42).
+struct FRHRecalledMarsBorn
+{
+	int32 Id = 0;
+	FString Name;
+	friend FArchive& operator<<(FArchive& Ar, FRHRecalledMarsBorn& R) { return Ar << R.Id << R.Name; }
+};
+
 // C4: one robot's planned trip along the roads. Runtime only (never saved): it is
 // planned lazily the first time a robot drives to a target while any road is
 // built, and re-planned only when that target changes. Presentation reads it to
@@ -603,6 +613,10 @@ public:
 	// Harness/cheat: house N colonists into certified housing (respects the
 	// capacity gate; returns how many actually found beds).
 	int32 Debug_AddColonists(int32 Count);
+	// F2b: the Mars-born waiting in orbit, oldest recall first; and the harness call for the part of a
+	// ship landing that brings them home (returns how many came home).
+	const TArray<FRHRecalledMarsBorn>& GetRecalledMarsBorn() const { return RecalledMarsBorn; }
+	int32 Debug_HomeAgain() { return ApplyHomeAgain(); }
 	// C3 (living-city gate 3): the -scale suite's big colony as ONE debug call, so
 	// the same city can be stood up in a running game (RH.CityBench) and measured
 	// on screen. A shaft to -5 with 210 carved cells a floor (1,050), every floor
@@ -873,7 +887,7 @@ public:
 	// HumanNature axis - the spec's "human evolution vs destruction" made mechanical.
 	enum class ERHCrisis : uint8 { None = 0, Malfunction, Environmental };
 	// M4 Gate D endings: where the two axes (Identity + HumanNature) point.
-	enum class ERHEnding : uint8 { Undetermined = 0, CorporateJewel, IndependentFederation, MartianColdWar, Collapse };
+	enum class ERHEnding : uint8 { Undetermined = 0, CorporateJewel, IndependentFederation, MartianColdWar };
 	double GetHopeSmoothed() const { return HopeSmoothed; }
 	ERHHopeBand GetHopeBand() const { return HopeBand; }
 	const TCHAR* GetHopeBandName() const;
@@ -1024,21 +1038,26 @@ public:
 	ERHCrisis GetActiveCrisis() const { return ActiveCrisis; }
 	const TCHAR* GetActiveCrisisName() const;
 	double GetCrisisRemaining() const { return CrisisRemainingSols; }
-	// Which ending the colony is trending toward (a pure read of the two axes +
-	// a collapse check); Undetermined while the colony is still contested.
+	// Which ending the colony is trending toward (a pure read of the two axes);
+	// Undetermined while the colony is still contested. An empty colony is not an
+	// ending: it is a state (IsColonyQuiet), and the political read ignores it (F7b).
 	ERHEnding GetProjectedEnding() const;
 	const TCHAR* GetEndingName(ERHEnding Ending) const;
 	// --- Ending resolution (save v25): the game structure closes its loop.
 	// Once a path is DECLARED (bEndingDeclared), holding the same projected
 	// ending for EpilogueSustainSols fires the one-time EPILOGUE card - the
-	// story of this Mars is written; the sandbox keeps running. Collapse
-	// (had crew, lost it all) declares its own one-time card in
-	// StepPopulation - abstract and prevention-framed with the recovery path
-	// named (Gate-D wording review owns the final copy).
+	// story of this Mars is written; the sandbox keeps running. The quiet
+	// colony (had crew, everyone recalled) is a state, not an ending (F7b): it
+	// announces itself once in StepPopulation, re-arms when people return, and
+	// pauses the epilogue clock while it lasts.
 	ERHEnding GetDeclaredEnding() const { return (ERHEnding)DeclaredEnding; }
 	bool IsEndingDeclared() const { return bEndingDeclared; }
 	bool IsEpilogueDeclared() const { return bEpilogueDeclared; }
-	bool IsCollapseDeclared() const { return bCollapseDeclared; }
+	bool IsQuietAnnounced() const { return bQuietAnnounced; }
+	// F7b: the quiet colony - a colony that once had people and has none now. A state the
+	// colony recovers from, shown on the Earth and Crew panels as one line.
+	bool IsColonyQuiet() const { return bEverHadCrew && Colonists.Num() == 0; }
+	const TCHAR* GetQuietColonyLine() const { return TEXT("The colony is quiet: everyone is safe in orbit"); }
 	double GetPathSustainSols() const { return PathSustainSols; }
 	// Harness/cheat: force the crisis selector to fire now (natural cadence is in
 	// StepCrisis). Returns the crisis that fired.
@@ -1860,6 +1879,12 @@ private:
 	bool PickFillHome(FRHFillState& State, int32& OutLevel, int32& OutHab) const;
 	// C2b: settlers with a landing supply ship (called as the ship lands).
 	int32 ApplyImmigration();
+	// F2b: the recalled Mars-born come home on a landing ship, ahead of the settlers and with no Hope
+	// gate, while every home is on a full ration and a bed is free.
+	int32 ApplyHomeAgain();
+	// Debug_AddColonists, and the F2b return: with Returning set, the colonists housed are the first
+	// entries of that list (their own Id and name, Mars-born), not new people.
+	int32 AddColonists(int32 Count, const TArray<FRHRecalledMarsBorn>* Returning);
 	int32 LivingCellWeight(const FIntVector& Key) const; // a Living cell with beds counts its beds, else 1
 	// C2b: the Big Arrival's streak; one move-home pass per MoveHomeIntervalSols.
 	void StepBigArrival(float SubDt);
@@ -2352,6 +2377,7 @@ private:
 	// Population (M2 Gate A1; serialized, save v10). Config rows drive every
 	// rate - no hardcoded balance.
 	TArray<FRHColonist> Colonists;
+	TArray<FRHRecalledMarsBorn> RecalledMarsBorn; // F2b: waiting in orbit (save v42)
 	int32 NextColonistId = 1;
 	double ColonistsPerCell = 1.0;      // certified beds per carved cell on a rated floor
 	double ColonistO2KgPerSol = 0.75;   // breathing draw against the home floor's fill
@@ -2739,7 +2765,7 @@ private:
 	uint8 DeclaredEnding = 0;      // ERHEnding recorded at PATH IS SET
 	double PathSustainSols = 0.0;  // sols the projected ending has held since
 	bool bEpilogueDeclared = false;
-	bool bCollapseDeclared = false;
+	bool bQuietAnnounced = false; // the quiet-colony banner has fired for this quiet spell (saved in the v25 slot that held bCollapseDeclared)
 	double EpilogueSustainSols = 15.0;        // config EpilogueSustainSols
 	// Long-game weather (config WeatherCycleSols, 0 = off): past the authored
 	// schedule, events repeat on this period - deterministic, data-driven.

@@ -399,9 +399,9 @@ namespace
 					}
 					if (Pop > 0 && C.Sim->GetWaterPotability() < C.Sim->GetWaterPotabilityFloor() + 0.15)
 					{
-						return FString(TEXT("The water is going stale - the crew drinks it over and over. Fresh ice-melt restores it: if the Ice Drill's deposit is spent, survey for more ice and drill it."));
+						return FString(TEXT("The water is going stale from recycling. Fresh ice-melt restores it: if the Ice Drill's deposit is spent, survey for more ice and drill it."));
 					}
-					return FString(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets how hard they work. That's the first hour - hide this guide any time."));
+					return FString(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets the colony's work pace. That's the first hour - hide this guide any time."));
 				},
 				[](const FGuideCtx&) { return false; },
 				NoBar(), NAME_None, NAME_None },

@@ -12,6 +12,7 @@
 // director's Gate-D framing review (prevention-framed, abstract, never graphic).
 
 #include "RHCommandDeck.h"
+#include "RHOrderWords.h"
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
 #include "RHDistrictVisualizerSubsystem.h"
@@ -327,10 +328,10 @@ TSharedRef<SWidget> SRHCommandDeck::BuildVitalsStrip()
 					if (!S) { return FText::GetEmpty(); }
 					int32 Unsupported = 0;
 					for (const FRHColonist& C : S->GetColonists()) { Unsupported += C.bSupported ? 0 : 1; }
-					return Txt(Unsupported > 0 ? FString::Printf(TEXT("%d need support"), Unsupported)
+					return Txt(Unsupported > 0 ? FString::Printf(TEXT("%d on short rations"), Unsupported)
 						: FString::Printf(TEXT("%d bed%s free"), S->GetFreeHousing(), S->GetFreeHousing() == 1 ? TEXT("") : TEXT("s")));
 				}),
-				MakeAttributeLambda(HasCrew), TAttribute<TOptional<float>>(), FSlateColor(D::Teal), 92.f)
+				MakeAttributeLambda(HasCrew), TAttribute<TOptional<float>>(), FSlateColor(D::Teal), 124.f) // wide enough for "12 on short rations" (D4)
 		]
 		// Hope - the game's central index - gets the widest tile and its band colour.
 		+ SHorizontalBox::Slot().AutoWidth()
@@ -687,6 +688,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			const URHSimWorldSubsystem* S = GetSim();
 			if (!S) { return FText::GetEmpty(); }
 			TArray<FString> Parts;
+			if (S->IsColonyQuiet())
+			{
+				// F7b, Gate-D framing PLACEHOLDER: an emptied colony is a state, not an ending.
+				Parts.Add(FString::Printf(TEXT("%s."), S->GetQuietColonyLine()));
+			}
 			const URHSimWorldSubsystem::FRHHopeBreakdown H = S->GetColonyHope();
 			if (S->GetWaterPotability() < S->GetWaterPotabilityFloor())
 			{
@@ -699,7 +705,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 				const double FoodNet = S->GetProducingCellCount() * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
 				Parts.Add(S->GetPlantedCellCount() > 0 && FoodNet >= 0.0
 					? FString::Printf(TEXT("Food: about %d sol%s in store - the garden is refilling it."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s"))
-					: FString::Printf(TEXT("Food: about %d sol%s in store - running short weighs on the crew. Grow more: zone Gardening Station cells."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s")));
+					: FString::Printf(TEXT("Food: about %d sol%s in store - a thin larder lowers Hope. Grow more: zone Gardening Station cells."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s")));
 			}
 			if (S->GetPlantedCellCount() > 0)
 			{
@@ -886,7 +892,7 @@ TSharedRef<ITableRow> SRHCommandDeck::GenerateRosterRow(TSharedPtr<int32> Item, 
 					{
 						// Placeholder wording (Gate-D framing review). C2a: the shortage is
 						// shared, so the line shows the ration the home gets, not a countdown.
-						return Txt(FString::Printf(TEXT("needs support - %.0f%% rations"), S->GetColonistRation(*C) * 100.0));
+						return Txt(FString::Printf(TEXT("short rations - %.0f%% of full"), S->GetColonistRation(*C) * 100.0));
 					}
 					const FName Job = S->GetColonistJob(C->Id);
 					const FString Home = C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C->HomeLevel));
@@ -1281,7 +1287,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 	[
 		Demand(TEXT("Jobs"),
 			[](const FRHCityDemand& Dm) { return Dm.Population > 0 ? Dm.Jobs : 0.0; },
-			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.Unemployed <= 0 ? FString(TEXT("everyone works")) : FString::Printf(TEXT("%d without a post"), Dm.Unemployed)); },
+			[](const FRHCityDemand& Dm) { return Dm.Population <= 0 ? FString() : (Dm.Unemployed <= 0 ? FString(TEXT("everyone works")) : FString::Printf(TEXT("%d awaiting a post"), Dm.Unemployed)); },
 			[](const FRHCityDemand& Dm) -> FString
 			{
 				if (Dm.Population <= 0) { return TEXT("Jobs: nobody lives here yet."); }
@@ -1834,7 +1840,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 				]
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					D::Button(Txt(TEXT("PACIFY  (spend influence)")),
+					D::Button(Txt(TEXT("REASSURE  (spend influence)")),
 						FOnClicked::CreateLambda([this]()
 						{
 							const URHSimWorldSubsystem* S = GetSim();
@@ -1865,11 +1871,16 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 			const double HN = S->GetHumanNatureAxis();
 			if (FMath::Abs(HN) > 0.5)
 			{
-				Lines.Add(FString::Printf(TEXT("Conduct: %s"), HN > 5.0 ? TEXT("diplomatic") : (HN < -5.0 ? TEXT("predatory") : TEXT("watched"))));
+				Lines.Add(FString::Printf(TEXT("Conduct: %s"), HN > 5.0 ? TEXT("diplomatic") : (HN < -5.0 ? TEXT("opportunist") : TEXT("mixed"))));
 			}
 			if (S->GetActiveCrisis() != URHSimWorldSubsystem::ERHCrisis::None)
 			{
 				Lines.Add(FString::Printf(TEXT("%s - %.1f sols"), S->GetActiveCrisisName(), S->GetCrisisRemaining()));
+			}
+			if (S->IsColonyQuiet())
+			{
+				// F7b, Gate-D framing PLACEHOLDER: an emptied colony is a state, not an ending.
+				Lines.Add(FString(S->GetQuietColonyLine()));
 			}
 			const auto Ending = S->GetProjectedEnding();
 			if (Ending != URHSimWorldSubsystem::ERHEnding::Undetermined)
@@ -1967,7 +1978,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 							]
 							+ SWrapBox::Slot()
 							[
-								SNew(SBox).ToolTipText(Txt(TEXT("Sabotage: disrupt their trade for a while. A hostile act.")))
+								SNew(SBox).ToolTipText(Txt(TEXT("Sabotage: disrupt their trade for a while. A serious breach of trust.")))
 								[
 									D::Button(Txt(TEXT("SABOTAGE")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRivalVerb, FName("Sabotage"), RowName))
 								]
@@ -2036,7 +2047,7 @@ FReply SRHCommandDeck::HandleRivalVerb(FName Verb, FName Target)
 	Sim->EnqueueCommand(Cmd);
 	if (PC.IsValid())
 	{
-		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s"), *Verb.ToString(), *Target.ToString()), D::Teal);
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s"), *RHOrder::VerbText(Verb), *RHOrder::TargetText(GetDefs(), Target)), D::Teal);
 	}
 	return FReply::Handled();
 }

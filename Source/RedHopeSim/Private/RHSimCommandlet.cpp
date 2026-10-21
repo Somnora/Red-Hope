@@ -1645,7 +1645,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		const auto EFed = Sim->GetProjectedEnding();
 		for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(-10); } // -> -100 Destructive, still Martian
 		const auto EWar = Sim->GetProjectedEnding();
-		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS endings: earth=%s martian-evolved=%s martian-destructive=%s (expect Corporate Jewel, Independent Mars Federation, Martian Cold War)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("CRISIS endings: earth=%s martian-evolved=%s martian-destructive=%s (expect Corporate Jewel, Independent Mars Federation, A Divided Mars)"),
 			Sim->GetEndingName(EJewel), Sim->GetEndingName(EFed), Sim->GetEndingName(EWar));
 
 		// 5) Save v23 round-trip: crisis + ending milestone survive.
@@ -1735,8 +1735,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	}
 
 	// v25 self-test: ENDING RESOLUTION - the declared path's epilogue after a
-	// sustained hold (wavering resets the clock), and the one-time Collapse
-	// declaration when a colony that had people empties. `-ending`.
+	// sustained hold (wavering resets the clock), and the one-time quiet-colony
+	// banner when a colony that had people empties (a state, not an ending, F7b). `-ending`.
 	if (FParse::Param(*Params, TEXT("ending")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST (v25) ==="));
@@ -1802,8 +1802,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->GetEndingName(Sim->GetDeclaredEnding()), (int32)Sim->IsEpilogueDeclared());
 
 		// 5) COLLAPSE: strip the stores; the crew go on no rations and are
-		// recalled gradually, and the emptied colony declares Collapse ONCE -
-		// abstract, with the recovery path named (Gate-D placeholder wording).
+		// recalled gradually, and the emptied colony announces that it is quiet
+		// ONCE - abstract, with the recovery path named (Gate-D placeholder wording).
 		// C2a: two residents at ration 0 are recalled at 2 x 1 / 2 = 1 a sol, at
 		// 1.0 and 2.0 sols, so the colony is empty a sol and a half before the
 		// 3.5 sols run out (it was both together at 2.0).
@@ -1811,8 +1811,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Sim->AddStock(FName("Water"), -Sim->GetStock(FName("Water")));
 		Sim->AddStock(FName("Oxygen"), -Sim->GetStock(FName("Oxygen")));
 		RunSols(3.5); // the two recalls (1.0 and 2.0 sols) + margin
-		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING collapse: pop=%d declared=%d projected=%s (expect 0, 1, Collapse)"),
-			Sim->GetPopulation(), (int32)Sim->IsCollapseDeclared(),
+		UE_LOG(LogRedHopeSim, Display, TEXT("ENDING quiet: pop=%d quiet=%d announced=%d projected=%s (expect 0, 1, 1, Independent Mars Federation: the political read, an empty colony is not an ending)"),
+			Sim->GetPopulation(), (int32)Sim->IsColonyQuiet(), (int32)Sim->IsQuietAnnounced(),
 			Sim->GetEndingName(Sim->GetProjectedEnding()));
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING RESOLUTION TEST END ==="));
@@ -2281,7 +2281,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(CountAlerts(TEXT("RATED LIVABLE")) == 1 && LastAlert().Contains(TEXT("0 beds")) && !Sim->HasVaultRating() && Sim->GetColonyHope().Milestones == 0.0
 			&& Milestones == 0 && Sim->GetHousingCapacity() == 0, TEXT("S6 one RATED alert naming 0 beds; never the vault milestone"));
 		Sim->Debug_DeliverCargo(FName("CrewPod"));
-		Expect(Sim->GetPopulation() == 0 && LastAlert().Contains(TEXT("CREW POD RETURNED")) && LastAlert().Contains(TEXT("vault")),
+		Expect(Sim->GetPopulation() == 0 && LastAlert().Contains(TEXT("CREW POD STAYED ABOARD")) && LastAlert().Contains(TEXT("vault")),
 			FString::Printf(TEXT("S6 no vault yet: the pod is turned away and points at the vault (%s)"), *LastAlert()));
 
 		// S7. Zoning bays.
@@ -3928,7 +3928,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// a lever that exists instead of a survey.
 		Expect(!Sim->HasUndiscoveredIce() && Sim->IsIceDepositLow(*Dep("Ice_A")) && Sim->IsIceDepositLow(*Dep("Ice_B")) && Sim->GetIceExpansionStage() == -1,
 			TEXT("I12 both ice bodies low, none unsurveyed: HasUndiscoveredIce false, expansion stage -1"));
-		Expect(LastAlert().Contains(TEXT("ICE_B RUNNING LOW")) && LastAlert().Contains(TEXT("Ration water")) && !LastAlert().Contains(TEXT("Survey")),
+		Expect(LastAlert().Contains(TEXT("ICE_B RUNNING LOW")) && LastAlert().Contains(TEXT("Stretch the water")) && !LastAlert().Contains(TEXT("Survey")),
 			FString::Printf(TEXT("I12 the last-ice alert gives no survey advice: \"%s\""), *LastAlert()));
 
 		// I13. Deposit piles follow the same rule (2026-10-17): a pile goes to
@@ -6642,7 +6642,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 PopB = Sim->GetPopulation();
 			const double FoodB = Sim->GetStock(NFood);
 			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
-			Expect(Sim->GetPopulation() == PopB && Near(Sim->GetStock(NFood), FoodB, 1e-9) && Alerts.Num() == 1 && Alerts[0].StartsWith(TEXT("COLONIST TRANSPORT RETURNED")) && Alerts[0].Contains(TEXT("0 beds free, 20 needed")),
+			Expect(Sim->GetPopulation() == PopB && Near(Sim->GetStock(NFood), FoodB, 1e-9) && Alerts.Num() == 1 && Alerts[0].StartsWith(TEXT("COLONIST TRANSPORT STAYED ABOARD")) && Alerts[0].Contains(TEXT("0 beds free, 20 needed")),
 				FString::Printf(TEXT("a 0 beds free: the whole transport stays aboard - population %d, Food unchanged, \"%s\""), Sim->GetPopulation(), Alerts.Num() ? *Alerts[0] : TEXT("-")));
 			// One bed short: still all or nothing.
 			const bool bFree19 = SetFree(19);
@@ -9449,14 +9449,26 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Sim->AddStock(NFood, Food);
 			Sim->Debug_StepPopulation(URHSimClockSubsystem::SubStepSeconds);
 			Expect(Sim->Debug_RunGrowthCheck() == 1 && Sim->GetGrowthPause().IsEmpty(), TEXT("c4 the food back, rations full: the project starts and the pause is gone"));
-			// Hope failing: no start.
+			// Hope LOW (the Failing band): the new homes wait (F5b); the services do not.
 			Expect(LoadBase(), TEXT("c base loaded"));
 			OnlyDistricts({ 3 });
 			Sim->Debug_SetHopeSmoothed(8.0);
-			Expect(Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 0 && Sim->GetGrowthPause().Contains(TEXT("Hope")) && Sim->GetGrowthProjects().Num() == 0,
-				FString::Printf(TEXT("c5 smoothed Hope at 8, the Failing band: no start - '%s'"), *Sim->GetGrowthPause()));
+			Expect(Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 0 && Sim->GetGrowthPause().Contains(TEXT("new homes wait for Hope to recover")) && NoteOf(3).Contains(TEXT("new homes wait for Hope to recover")) && Sim->GetGrowthProjects().Num() == 0,
+				FString::Printf(TEXT("c5 smoothed Hope at 8, the Failing band, housing short: the Homes district waits - '%s' / '%s'"), *Sim->GetGrowthPause(), *NoteOf(3)));
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 4 });
+			Sim->Debug_SetHopeSmoothed(8.0);
+			Expect(Sim->GetHopeBand() == URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 1 && Open(4) && Open(4)->Kind == ERHGrowthKind::CivicRoom,
+				TEXT("c5 the same Hope at 8 with a Civic district only: the service room starts - Civic rooms are a Hope remedy and keep building (F5b)"));
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 3, 4 });
+			Sim->Debug_SetHopeSmoothed(8.0);
+			Expect(Sim->Debug_RunGrowthCheck() == 1 && Open(4) && !Open(3) && Sim->GetGrowthProjects().Num() == 1 && NoteOf(3).Contains(TEXT("new homes wait for Hope to recover")),
+				TEXT("c5 Homes #3 and Civic #4 together at Hope 8: the one start of the sol is the Civic room, and the Homes district says it waits"));
+			Expect(LoadBase(), TEXT("c base loaded"));
+			OnlyDistricts({ 3 });
 			Sim->Debug_SetHopeSmoothed(40.0);
-			Expect(Sim->GetHopeBand() != URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 1, TEXT("c5 Hope back to 40 (Strained): the project starts - only Failing pauses it"));
+			Expect(Sim->GetHopeBand() != URHSimWorldSubsystem::ERHHopeBand::Failing && Sim->Debug_RunGrowthCheck() == 1 && Sim->GetGrowthPause().IsEmpty(), TEXT("c5 Hope back to 40 (Unsettled): the Homes project starts and the note is gone - only the Failing band holds new homes"));
 			// Housing not short: no Homes project.
 			Expect(LoadBase(), TEXT("c base loaded"));
 			OnlyDistricts({ 1, 3 });
@@ -10779,7 +10791,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v41 (v40 added no field): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
+		// --- X15. Save v42 (v40 added no field; v41 and v42 are D1's floor table and F2b's recalled list): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10791,14 +10803,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 41, FString::Printf(TEXT("X15 the file says version %u (expect 41)"), Ver));
-			uint32 V40 = 40;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V40, 4); }
-			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv40.sav")));
+			Expect(bRead && Ver == 42, FString::Printf(TEXT("X15 the file says version %u (expect 42)"), Ver));
+			uint32 V41 = 41;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V41, 4); }
+			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv41.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv40"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/41")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
-				FString::Printf(TEXT("X15 a v40 save is refused and the live colony untouched (%s)"), *Le39));
+			Expect(!Sim->LoadColony(TEXT("trafficv41"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/42")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v41 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
 			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
@@ -11293,7 +11305,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 41 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 42 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -11308,7 +11320,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v41 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v42 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -11335,9 +11347,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			{
 				TArray<uint8> Old = Good;
-				const uint32 V40 = 40;
-				FMemory::Memcpy(Old.GetData() + 4, &V40, 4);
-				Expect(TryFile(TEXT("deepk6v40"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/41")), FString::Printf(TEXT("K6 a v40 file is refused and the colony untouched (%s)"), *E6));
+				const uint32 V41 = 41;
+				FMemory::Memcpy(Old.GetData() + 4, &V41, 4);
+				Expect(TryFile(TEXT("deepk6v41"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/42")), FString::Printf(TEXT("K6 a v41 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -11591,6 +11603,409 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		Expect(Sim->GetFloorCellFallbacks() == 0, TEXT("K9 over the whole suite not one ordinal read fell outside its floor and back to the spiral"));
 		Sim->OnCommandRejected.Remove(RejectH);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== DEEP TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
+		GEngine->DestroyWorldContext(World);
+		World->DestroyWorld(false);
+		return Fails > 0 ? 1 : 0;
+	}
+
+	// Gate-D framing pass self-test (2026-10-21): the director's approved wording and the F1-F9 mechanics rulings.
+	// Fails loudly. `-framing`.
+	//  (a) data: the Lounge (the dormant Smoking row, F8b) and the two manifest Effect copies (D82, D136) in the live DTs;
+	//  (b) the Hope bands and the political endings by their approved names (D20, D21, D15), and no "collapse" ending: an
+	//      empty colony does not change the projected ending (F7b);
+	//  (c) F1b: a dispute pair is never someone born on Mars (and passes quietly with fewer than two others), pastimes still use
+	//      everyone, a colony with nobody born here still disputes (D23);
+	//  (d) F6b: the 0.60 work-pace floor holds after the Malfunction multiplier, and the Hope curve is untouched (D35, D36, D34);
+	//  (e) F2b + F7b: a shortage recalls the Mars-born last, they wait in orbit (their own Ids and names), the colony is quiet
+	//      (one banner, re-armed when people return, no path declared and the epilogue clock paused while it lasts), and they
+	//      come home first when a later ship lands with every home on full rations and a bed free: the guards, the order, the
+	//      partial return, a real supply ship at low Hope, and the save round trip at v42 (D123, D125, D13).
+	if (FParse::Param(*Params, TEXT("framing")))
+	{
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FRAMING TEST (Gate-D pass, 2026-10-21) ==="));
+		int32 Fails = 0, Checks = 0;
+		const auto Expect = [&](bool bOk, const FString& What)
+		{
+			++Checks;
+			if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("FRAMING ok: %s"), *What); }
+			else { UE_LOG(LogRedHopeSim, Error, TEXT("FRAMING FAIL: %s"), *What); ++Fails; }
+		};
+		const auto Near = [](double A, double B, double Tol) { return FMath::Abs(A - B) <= Tol; };
+		constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+		constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+		URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOx(TEXT("Oxygen"));
+		using ERHCrew = URHSimWorldSubsystem::ERHCrewMoment;
+		FString R;
+		TArray<FString> Alerts;
+		const FDelegateHandle AlertH = Sim->OnAlert.AddLambda([&Alerts](const FString& S) { Alerts.Add(S); });
+		struct FMoment { uint8 Type; int32 A, B; FString Text; };
+		TArray<FMoment> Moments;
+		const FDelegateHandle MomentH = Sim->OnCrewMoment.AddLambda([&Moments](uint8 Type, int32 A, int32 B, const FString& Text) { Moments.Add({ Type, A, B, Text }); });
+		const auto CountAlerts = [&](const TCHAR* Needle) { int32 N = 0; for (const FString& A : Alerts) { N += A.Contains(Needle) ? 1 : 0; } return N; };
+		const auto Step = [&]()
+		{
+			Clock->Debug_AdvanceSimSeconds(EraDt);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			Sim->EraStep((float)EraDt);
+		};
+		const auto RunSols = [&](double Count) { const int32 N = FMath::RoundToInt32(Count * SolLen / EraDt); for (int32 K = 0; K < N; ++K) { Step(); } };
+		const auto Stock = [&](double Kg) { for (const FName Res : { NFood, NWater, NOx }) { Sim->AddStock(Res, Kg - Sim->GetStock(Res)); } };
+		const auto HasMarsBornIn = [&](const TArray<FMoment>& Ms)
+		{
+			int32 N = 0;
+			for (const FMoment& M : Ms)
+			{
+				const FRHColonist* A = Sim->FindColonist(M.A);
+				const FRHColonist* B = Sim->FindColonist(M.B);
+				N += ((A && A->bMarsBorn) || (B && B->bMarsBorn)) ? 1 : 0;
+			}
+			return N;
+		};
+
+		// ---------------- (a) The data ----------------
+		{
+			const FRHRoomRow* Lounge = DefsSub ? DefsSub->GetRoom(FName("Smoking")) : nullptr;
+			Expect(Lounge && Lounge->DisplayName == TEXT("Lounge") && !Lounge->SliceActive && Lounge->Function == FName("Smoking") && Near(Lounge->MoraleWeight, 0.8, 1e-6) && !Lounge->Notes.Contains(TEXT("tobacco")),
+				TEXT("a1 F8b: the dormant room keeps its key (Smoking) and Function, its 0.8 weight and its dormancy, and is the Lounge - no tobacco in the Notes (DT/CSV)"));
+			const FRHManifestItemRow* Pod = DefsSub ? DefsSub->GetManifestItem(FName("CrewPod")) : nullptr;
+			const FRHManifestItemRow* Transport = DefsSub ? DefsSub->GetManifestItem(FName("ColonistTransport")) : nullptr;
+			Expect(Pod && Pod->Effect == TEXT("+4 colonists into certified housing; +200 kg Food; stays aboard, safe, if no beds")
+				&& Transport && Transport->Effect == TEXT("+20 colonists into certified housing; +1000 kg Food (50 kg each); everyone stays aboard, safe, if the beds are not free"),
+				TEXT("a3 D82 and D136: the Crew Pod and Colonist Transport Effect copy says they stay aboard, safe (DT/CSV)"));
+		}
+
+		// ---------------- The fixture: a rated vault floor with six beds, saved empty ----------------
+		Sim->Debug_SetHopeGates(101.0, 101.0); // no research and no births: the headcounts below stay exact
+		Sim->ExtendShaft(1, FVector(1000.f, 1000.f, 0.f));
+		Sim->ExcavateFloor(-1, 6, R);
+		Sim->Debug_PlaceInstant(FName("SolarArray"), FVector(3500.f, 1000.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("BatteryBank"), FVector(1000.f, 3500.f, 0.f));
+		Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.f, 1500.f, 0.f), -1);
+		Stock(4000.0);
+		RunSols(2.5);
+		for (int32 Cell = 0; Cell < 6; ++Cell) { Sim->DesignateRoom(-1, Cell, FName("LivingQuarters"), R); }
+		Expect(!Sim->DesignateRoom(-1, 0, FName("Smoking"), R) && R.Contains(TEXT("not a designatable room function")), FString::Printf(TEXT("a2 F8b: the Lounge is still dormant: zoning it is refused (%s)"), *R));
+		FString SaveErr;
+		Expect(Sim->IsFloorRated(-1) && Sim->HasVaultRating() && Sim->GetPopulation() == 0 && Sim->GetHousingCapacity() >= 6 && Sim->SaveColony(TEXT("framing_base"), SaveErr),
+			FString::Printf(TEXT("setup: floor -1 rated, six Living cells, nobody yet, saved as the base every case loads (%s)"), *SaveErr));
+		const auto Reset = [&]()
+		{
+			FString E;
+			const bool bOk = Sim->LoadColony(TEXT("framing_base"), E) && E.IsEmpty();
+			if (!bOk) { UE_LOG(LogRedHopeSim, Error, TEXT("FRAMING FAIL: loading the base failed: %s"), *E); ++Fails; }
+			Sim->Debug_SetHopeGates(101.0, 101.0);
+			Sim->Debug_SetColonistsPerCell(1.0);
+			Alerts.Reset(); Moments.Reset();
+			return bOk;
+		};
+		// One crew-moment beat on its own: the stores and the floor's air topped up, so rations stay full, and 0.6 of a sol
+		// of population step (one beat is due every 0.5).
+		const auto Beat = [&]() { Stock(4000.0); Sim->Debug_SetFloorO2Kg(-1, 2000.0); Sim->Debug_StepPopulation((float)(0.6 * SolLen)); };
+		const auto Names = [&]() { TMap<int32, FString> M; for (const FRHColonist& C : Sim->GetColonists()) { M.Add(C.Id, C.Name); } return M; };
+		// The stores back and the floor certified again (a starved colony's air runs thin and the floor loses its rating), so
+		// the beds are there for whoever arrives next.
+		const auto Recover = [&]() { Stock(4000.0); Sim->Debug_ForceRateFloor(-1); };
+		// Strip the stores and step until the colony has no one left; returns the sols it took (-1 if it never emptied).
+		const auto Starve = [&]()
+		{
+			Stock(0.0);
+			for (int32 K = 0; K < 8 * (int32)(SolLen / EraDt); ++K)
+			{
+				Step();
+				Stock(0.0);
+				if (Sim->GetPopulation() == 0) { return (double)K * EraDt / SolLen; }
+			}
+			return -1.0;
+		};
+
+		// ---------------- (b) The bands and the endings ----------------
+		{
+			Reset();
+			Sim->Debug_AddColonists(2);
+			Sim->Debug_SetHopeSmoothed(8.0);
+			const FString Low = Sim->GetHopeBandName();
+			Sim->Debug_SetHopeSmoothed(40.0);
+			const FString Unsettled = Sim->GetHopeBandName();
+			Sim->Debug_SetHopeSmoothed(60.0);
+			const FString Steady = Sim->GetHopeBandName();
+			Expect(Low == TEXT("LOW") && Unsettled == TEXT("UNSETTLED") && Steady == TEXT("STEADY"), FString::Printf(TEXT("b1 D20, D21: Hope 8 reads '%s', 40 '%s', 60 '%s'"), *Low, *Unsettled, *Steady));
+			Expect(FString(Sim->GetEndingName(URHSimWorldSubsystem::ERHEnding::MartianColdWar)) == TEXT("A Divided Mars")
+				&& FString(Sim->GetEndingName(URHSimWorldSubsystem::ERHEnding::CorporateJewel)) == TEXT("Corporate Jewel of Earth")
+				&& FString(Sim->GetEndingName(URHSimWorldSubsystem::ERHEnding::IndependentFederation)) == TEXT("Independent Mars Federation"),
+				TEXT("b2 D15: the destructive Martian ending is 'A Divided Mars'; the other two keep their names"));
+		}
+
+		// ---------------- (c) F1b: nobody born on Mars is in a dispute ----------------
+		{
+			Reset();
+			Sim->Debug_AddColonists(6);
+			for (const int32 Id : { 4, 5, 6 }) { Sim->Debug_SetMarsBorn(Id, true); }
+			Sim->Debug_SetHopeSmoothed(10.0); // under DisputeHopeBelow: every moment is a dispute
+			Moments.Reset();
+			for (int32 K = 0; K < 60; ++K) { Beat(); }
+			int32 Disputes = 0, Born = 0, SameId = 0, Worded = 0;
+			for (const FMoment& M : Moments)
+			{
+				if (M.Type != (uint8)ERHCrew::Dispute) { continue; }
+				++Disputes;
+				const FRHColonist* A = Sim->FindColonist(M.A);
+				const FRHColonist* B = Sim->FindColonist(M.B);
+				Born += ((A && A->bMarsBorn) || (B && B->bMarsBorn) || !A || !B) ? 1 : 0;
+				SameId += M.A == M.B ? 1 : 0;
+				Worded += (M.Text.StartsWith(TEXT("Tension on floor -1 — ")) && M.Text.EndsWith(TEXT(" are at odds over the shortages. Restocking will ease it."))) ? 1 : 0;
+			}
+			Expect(Disputes >= 50 && Born == 0 && SameId == 0 && Worded == Disputes,
+				FString::Printf(TEXT("c1 six colonists, three born on Mars, Hope 10: %d of %d beats are disputes and %d involve a Mars-born (expect 0), %d pair someone with themselves, %d carry the approved D23 wording"), Disputes, Moments.Num(), Born, SameId, Worded));
+			// With only one colonist from Earth left, the beat passes quietly.
+			Sim->Debug_SetMarsBorn(2, true);
+			Sim->Debug_SetMarsBorn(3, true);
+			Moments.Reset();
+			for (int32 K = 0; K < 30; ++K) { Beat(); }
+			Expect(Moments.Num() == 0, FString::Printf(TEXT("c2 only one colonist from Earth: 30 beats, %d moments - nothing is staged between a person and a child"), Moments.Num()));
+			// Pastimes and join-ins still use everyone.
+			Sim->Debug_SetHopeSmoothed(100.0);
+			Moments.Reset();
+			for (int32 K = 0; K < 80; ++K) { Beat(); }
+			int32 Calm = 0;
+			for (const FMoment& M : Moments) { Calm += M.Type != (uint8)ERHCrew::Dispute ? 1 : 0; }
+			Expect(Calm == Moments.Num() && Calm >= 70 && HasMarsBornIn(Moments) > 0,
+				FString::Printf(TEXT("c3 Hope 100: %d calm moments in 80 beats and %d of them involve someone born on Mars - pastimes are not filtered"), Calm, HasMarsBornIn(Moments)));
+			// Nobody born on Mars: the dispute draw runs over everyone.
+			Expect(Reset(), TEXT("c4 base loaded"));
+			Sim->Debug_AddColonists(6);
+			Sim->Debug_SetHopeSmoothed(10.0);
+			Moments.Reset();
+			for (int32 K = 0; K < 40; ++K) { Beat(); }
+			TSet<int32> Seen;
+			int32 Disp = 0;
+			for (const FMoment& M : Moments) { if (M.Type == (uint8)ERHCrew::Dispute) { ++Disp; Seen.Add(M.A); Seen.Add(M.B); } }
+			Expect(Disp >= 35 && Seen.Num() >= 5, FString::Printf(TEXT("c4 a colony with nobody born on Mars: %d disputes over %d different colonists - the draw still reaches everyone"), Disp, Seen.Num()));
+		}
+
+		// ---------------- (d) F6b: the work-pace floor ----------------
+		{
+			Reset();
+			Sim->Debug_AddColonists(2);
+			const double Floor = DefsSub ? DefsSub->GetConfigScalar(FName("HopeTempoMin"), -1.0) : -1.0;
+			Sim->Debug_SetHopeSmoothed(0.0);
+			const double CalmLow = Sim->GetHumanWorkTempo();
+			Sim->Debug_SetHopeSmoothed(100.0);
+			const double CalmHigh = Sim->GetHumanWorkTempo();
+			Expect(Near(Floor, 0.60, 1e-9) && Near(CalmLow, 0.70, 1e-9) && Near(CalmHigh, 1.25, 1e-9),
+				FString::Printf(TEXT("d1 without a crisis the Hope curve is as ruled: Hope 0 -> %.3f, Hope 100 -> %.3f (floor row %.2f)"), CalmLow, CalmHigh, Floor));
+			Sim->Debug_ShiftHumanNature(-100.0);
+			Alerts.Reset();
+			const URHSimWorldSubsystem::ERHCrisis Fired = Sim->Debug_TriggerCrisis();
+			Expect(Fired == URHSimWorldSubsystem::ERHCrisis::Malfunction && FString(Sim->GetActiveCrisisName()) == TEXT("SYSTEMS MALFUNCTION")
+				&& CountAlerts(TEXT("SYSTEMS MALFUNCTION — blowback from covert work: automation stalls, units go idle, work slows. It passes in a few sols.")) == 1,
+				TEXT("d2 D35: a Malfunction fires with the approved banner"));
+			double Worst = 9.0;
+			for (const double Hope : { 0.0, 10.0, 20.0, 40.0, 50.0 })
+			{
+				Sim->Debug_SetHopeSmoothed(Hope);
+				Worst = FMath::Min(Worst, Sim->GetHumanWorkTempo());
+			}
+			Sim->Debug_SetHopeSmoothed(0.0);
+			const double AtZero = Sim->GetHumanWorkTempo();
+			Sim->Debug_SetHopeSmoothed(100.0);
+			const double AtTop = Sim->GetHumanWorkTempo();
+			Expect(Near(AtZero, 0.60, 1e-12) && Worst >= 0.60 - 1e-12 && Near(AtTop, 0.75, 1e-12),
+				FString::Printf(TEXT("d3 F6b: in a Malfunction the pace never falls under 0.60 (lowest over Hope 0..50: %.4f; Hope 0 would have been 0.42, now %.4f), and above the floor the multiplier still applies (Hope 100: 1.25 x 0.6 = %.4f)"), Worst, AtZero, AtTop));
+			Sim->Debug_ShiftHumanNature(+200.0);
+			Alerts.Reset();
+			const URHSimWorldSubsystem::ERHCrisis Fired2 = Sim->Debug_TriggerCrisis();
+			Expect(Fired2 == URHSimWorldSubsystem::ERHCrisis::Environmental && FString(Sim->GetActiveCrisisName()) == TEXT("DRY SPELL")
+				&& CountAlerts(TEXT("DRY SPELL — the colony's water draw spikes for a few sols. Keep the tanks full and it passes.")) == 1,
+				TEXT("d4 D34, D36: the Environmental crisis is the DRY SPELL, with the approved banner"));
+			Sim->Debug_SetHopeSmoothed(0.0);
+			Expect(Near(Sim->GetHumanWorkTempo(), 0.70, 1e-12), TEXT("d5 a dry spell does not touch the work pace: Hope 0 is still 0.70"));
+		}
+
+		// ---------------- (e) F2b and F7b: recall, the quiet colony, and coming home ----------------
+		FString Err;
+		{
+			// e1: the recall order, the waiting list, and the quiet colony.
+			Reset();
+			Sim->Debug_AddColonists(4);
+			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
+			const TMap<int32, FString> Before = Names();
+			Expect(Sim->GetPopulation() == 4 && Sim->GetRecalledMarsBorn().Num() == 0 && !Sim->IsColonyQuiet() && !Sim->IsQuietAnnounced(), TEXT("e1 four colonists, two of them Mars-born (Ids 3 and 4), nobody in orbit, the colony not quiet"));
+			Alerts.Reset();
+			const double Took = Starve();
+			RunSols(0.1);
+			const TArray<FRHRecalledMarsBorn>& Wait = Sim->GetRecalledMarsBorn();
+			Expect(Took > 0.0 && Sim->GetPopulation() == 0 && Wait.Num() == 2 && Wait[0].Id == 4 && Wait[1].Id == 3 && Wait[0].Name == Before.FindRef(4) && Wait[1].Name == Before.FindRef(3),
+				FString::Printf(TEXT("e1 no food, water or air: everyone is recalled by sol %.2f, and the two Mars-born wait in orbit in the order they went - Id %d (%s) then Id %d (%s)"),
+					Took, Wait.Num() > 0 ? Wait[0].Id : 0, Wait.Num() > 0 ? *Wait[0].Name : TEXT("-"), Wait.Num() > 1 ? Wait[1].Id : 0, Wait.Num() > 1 ? *Wait[1].Name : TEXT("-")));
+			Expect(CountAlerts(TEXT("SHORT RATIONS: ")) >= 1 && CountAlerts(TEXT("if it lasts, the Program recalls residents to safety in orbit, a few at a time.")) == CountAlerts(TEXT("SHORT RATIONS: "))
+				&& CountAlerts(TEXT(", now safe in orbit — rations were short too long. Restoring the supply keeps the rest at home.")) >= 1 && CountAlerts(TEXT("RECALLED: ")) == CountAlerts(TEXT(", now safe in orbit")),
+				FString::Printf(TEXT("e1 D123, D125: the short-rations banner names the Program's protective act, and every recall banner says they are safe in orbit and names the fix (%d short, %d recalled)"), CountAlerts(TEXT("SHORT RATIONS: ")), CountAlerts(TEXT("RECALLED: "))));
+			// The quiet colony.
+			Expect(Sim->IsColonyQuiet() && Sim->IsQuietAnnounced() && CountAlerts(TEXT("THE COLONY IS QUIET — everyone is safe in orbit. The machines keep the lights on. Restore housing and life support, and people can come home to Mars.")) == 1
+				&& CountAlerts(TEXT("STANDS EMPTY")) == 0 && Sim->GetProjectedEnding() == URHSimWorldSubsystem::ERHEnding::Undetermined,
+				FString::Printf(TEXT("e2 F7b, D13: the emptied colony is quiet, it said so once with the approved banner, and the projected ending is not touched by it (%s); the panels' line reads '%s'"), Sim->GetEndingName(Sim->GetProjectedEnding()), Sim->GetQuietColonyLine()));
+			Alerts.Reset();
+			RunSols(2.0);
+			Expect(CountAlerts(TEXT("THE COLONY IS QUIET")) == 0 && Sim->IsColonyQuiet(), TEXT("e2 two more quiet sols: no second banner, still quiet"));
+
+			// e3: the guards. A home on short rations holds them in orbit.
+			Recover();
+			Sim->Debug_AddColonists(2);
+			Stock(0.0);
+			Sim->Debug_StepPopulation(10.0f);
+			bool bAnyShort = false;
+			for (const URHSimWorldSubsystem::FRHHomeRation& H : Sim->GetHomeRations()) { bAnyShort |= H.Fraction < 1.0; }
+			Alerts.Reset();
+			Expect(bAnyShort && Sim->GetFreeHousing() >= 1 && Sim->Debug_HomeAgain() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && CountAlerts(TEXT("HOME AGAIN")) == 0 && !Sim->IsColonyQuiet(),
+				TEXT("e3 a home on short rations and a bed free: nobody comes home, both still wait in orbit, no banner"));
+			Stock(4000.0);
+			Sim->Debug_StepPopulation(10.0f);
+			// No bed free.
+			const int32 Cap = Sim->GetHousingCapacity();
+			Sim->Debug_AddColonists(Cap - Sim->GetPopulation());
+			Sim->Debug_StepPopulation(10.0f);
+			Expect(Sim->GetFreeHousing() == 0 && Sim->Debug_HomeAgain() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && CountAlerts(TEXT("HOME AGAIN")) == 0,
+				FString::Printf(TEXT("e3 every home on a full ration but no bed free (%d of %d filled): nobody comes home, both still wait"), Sim->GetPopulation(), Cap));
+		}
+		{
+			// e4: the partial return, then the rest, oldest recall first, with their own Ids and names.
+			Reset();
+			Sim->Debug_AddColonists(4);
+			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
+			const TMap<int32, FString> Before = Names();
+			Starve();
+			RunSols(0.1);
+			Expect(Sim->GetRecalledMarsBorn().Num() == 2, TEXT("e4 setup: two Mars-born in orbit"));
+			Recover();
+			Sim->Debug_AddColonists(Sim->GetHousingCapacity() - 1); // leave exactly one bed
+			Sim->Debug_StepPopulation(10.0f);
+			Alerts.Reset();
+			const int32 PopBefore = Sim->GetPopulation();
+			const int32 Came1 = Sim->Debug_HomeAgain();
+			const FRHColonist* First = Sim->FindColonist(4);
+			Expect(Sim->GetFreeHousing() == 0 && Came1 == 1 && Sim->GetPopulation() == PopBefore + 1 && First && First->bMarsBorn && First->Name == Before.FindRef(4) && Sim->GetRecalledMarsBorn().Num() == 1 && Sim->GetRecalledMarsBorn()[0].Id == 3
+				&& Sim->FindColonist(3) == nullptr && CountAlerts(TEXT("HOME AGAIN: 1 born on Mars is back with their colony.")) == 1 && Alerts.Num() == 1,
+				FString::Printf(TEXT("e4 one bed free: one comes home - the first recalled, Id 4, by name (%s), Mars-born - one banner ('%s'), the other still waits"), *Before.FindRef(4), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// More beds: the colony's beds double.
+			Sim->Debug_SetColonistsPerCell(2.0);
+			Alerts.Reset();
+			const int32 Came2 = Sim->Debug_HomeAgain();
+			const FRHColonist* Second = Sim->FindColonist(3);
+			Expect(Came2 == 1 && Second && Second->bMarsBorn && Second->Name == Before.FindRef(3) && Sim->GetRecalledMarsBorn().Num() == 0 && CountAlerts(TEXT("HOME AGAIN: 1 born on Mars is back with their colony.")) == 1,
+				TEXT("e4 more beds: the second comes home, Id 3, by name, and the list is empty"));
+			Alerts.Reset();
+			Expect(Sim->Debug_HomeAgain() == 0 && Alerts.Num() == 0, TEXT("e4 nobody left in orbit: a landing brings no one home and says nothing"));
+			TSet<int32> Ids;
+			for (const FRHColonist& C : Sim->GetColonists()) { Ids.Add(C.Id); }
+			Expect(Ids.Num() == Sim->GetPopulation(), TEXT("e4 every colonist Id is still unique after the return"));
+		}
+		{
+			// e5: both at once, the plural banner, and the save round trip at v42.
+			Reset();
+			Sim->Debug_AddColonists(4);
+			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
+			const TMap<int32, FString> Before = Names();
+			Starve();
+			RunSols(0.1);
+			Recover();
+			Expect(Sim->GetRecalledMarsBorn().Num() == 2 && Sim->SaveColony(TEXT("framing_orbit"), Err), FString::Printf(TEXT("e5 setup: two in orbit, saved (%s)"), *Err));
+			TArray<uint8> Bytes;
+			uint32 Ver = 0;
+			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
+			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
+			Expect(bRead && Ver == 42, FString::Printf(TEXT("e5 the file says version %u (expect 42)"), Ver));
+			Sim->Debug_AddColonists(1);
+			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
+				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
+				FString::Printf(TEXT("e5 the load restores the list - two waiting, Ids 4 then 3, their own names - over a colony that had moved on (%s)"), *Err));
+			Sim->Debug_SetHopeGates(101.0, 101.0);
+			Alerts.Reset();
+			const int32 Came = Sim->Debug_HomeAgain();
+			Expect(Came == 2 && Sim->GetPopulation() == 2 && Sim->GetRecalledMarsBorn().Num() == 0 && CountAlerts(TEXT("HOME AGAIN: 2 born on Mars are back with their colony.")) == 1 && Alerts.Num() == 1 && !Sim->IsColonyQuiet(),
+				FString::Printf(TEXT("e5 a ship over a quiet colony on full rations: both come home in one banner ('%s'), and the colony is not quiet any more"), Alerts.Num() ? *Alerts[0] : TEXT("-")));
+			// Saved again with nobody in orbit: the list is empty on load.
+			Expect(Sim->SaveColony(TEXT("framing_home"), Err) && Sim->LoadColony(TEXT("framing_orbit"), Err) && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->LoadColony(TEXT("framing_home"), Err) && Sim->GetRecalledMarsBorn().Num() == 0 && Sim->GetPopulation() == 2,
+				TEXT("e5 and the empty list round-trips too: saved home, loaded in orbit, loaded home again"));
+		}
+		{
+			// e6: a real supply ship, at low Hope. The Mars-born come home with no Hope gate.
+			Reset();
+			Sim->Debug_SetBigArrivalDone(true);
+			Sim->Debug_AddColonists(4);
+			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
+			Starve();
+			Expect(Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetPopulation() == 0, TEXT("e6 setup: a quiet colony with two Mars-born in orbit"));
+			Sim->Debug_AddColonists(1); // a pod's arrival, so the ship's quota can be met by a living colony
+			Stock(4000.0);
+			for (const auto& L : Sim->GetQuotaProgress())
+			{
+				const double Gap = L.Value.Value + 1.0 - L.Value.Key;
+				if (Gap > 0.0) { Sim->AddStock(L.Key, Gap); }
+			}
+			RunSols(0.3);
+			const bool bAwaiting = Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest;
+			FString LaunchErr;
+			const bool bLaunched = bAwaiting && Sim->LaunchShip(LaunchErr);
+			Expect(bAwaiting && bLaunched, FString::Printf(TEXT("e6 the quota met, the ship launches (%s)"), *LaunchErr));
+			Alerts.Reset();
+			Sim->Debug_SetHopeSmoothed(10.0);
+			const int32 Pop0 = Sim->GetPopulation();
+			bool bLanded = false;
+			for (int32 K = 0; K < 6 * (int32)(SolLen / EraDt) && !bLanded; ++K)
+			{
+				Step();
+				Sim->Debug_SetHopeSmoothed(10.0);
+				bLanded = CountAlerts(TEXT("HOME AGAIN")) > 0;
+			}
+			Expect(bLanded && Sim->GetRecalledMarsBorn().Num() == 0 && Sim->GetPopulation() == Pop0 + 2 && CountAlerts(TEXT("HOME AGAIN: 2 born on Mars are back with their colony.")) == 1 && Sim->GetHopeSmoothed() < 45.0,
+				FString::Printf(TEXT("e6 the ship lands with smoothed Hope at %.0f, far under the settlers' 75: both Mars-born come home anyway (population %d -> %d), one banner"), Sim->GetHopeSmoothed(), Pop0, Sim->GetPopulation()));
+		}
+		{
+			// e7: F7b. No path is declared over an empty colony; the epilogue clock waits; both resume when people return.
+			Reset();
+			Sim->Debug_AddColonists(2);
+			Sim->Debug_SetEpilogueSustainSols(30.0);
+			for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftIdentity(+10); }
+			for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+			RunSols(0.2);
+			Expect(Sim->IsEndingDeclared() && Sim->GetDeclaredEnding() == URHSimWorldSubsystem::ERHEnding::IndependentFederation, TEXT("e7 a housed colony with a Martian, evolved lean declares the Independent Mars Federation"));
+			RunSols(1.0);
+			const double Held0 = Sim->GetPathSustainSols();
+			Expect(Held0 > 0.9 && !Sim->IsEpilogueDeclared(), FString::Printf(TEXT("e7 the epilogue clock runs while people are here (%.2f sols held, 30 needed)"), Held0));
+			Starve();
+			RunSols(0.1);
+			const double AtQuiet = Sim->GetPathSustainSols();
+			RunSols(6.0);
+			Expect(Sim->IsColonyQuiet() && Near(Sim->GetPathSustainSols(), AtQuiet, 1e-12) && AtQuiet > 0.0 && !Sim->IsEpilogueDeclared() && Sim->GetProjectedEnding() == URHSimWorldSubsystem::ERHEnding::IndependentFederation,
+				FString::Printf(TEXT("e7 six quiet sols: the clock holds at %.4f (neither running nor reset), no epilogue, and the political read is as it was"), Sim->GetPathSustainSols()));
+			Recover();
+			Sim->Debug_AddColonists(2);
+			RunSols(1.0);
+			Expect(!Sim->IsColonyQuiet() && !Sim->IsQuietAnnounced() && Sim->GetPathSustainSols() > AtQuiet + 0.9,
+				FString::Printf(TEXT("e7 people back: the clock runs on from where it stopped (%.2f -> %.2f), and the quiet banner is armed again"), AtQuiet, Sim->GetPathSustainSols()));
+			Alerts.Reset();
+			Starve();
+			RunSols(0.1);
+			Expect(Sim->IsColonyQuiet() && CountAlerts(TEXT("THE COLONY IS QUIET")) == 1, TEXT("e7 a second quiet spell gets its own banner (the latch re-armed)"));
+			// No path is declared over an empty colony.
+			Expect(Reset(), TEXT("e7 base loaded"));
+			Sim->Debug_AddColonists(2);
+			Starve();
+			RunSols(0.1);
+			for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftIdentity(+10); }
+			for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftHumanNature(+10); }
+			RunSols(0.5);
+			Expect(Sim->IsColonyQuiet() && !Sim->IsEndingDeclared(), TEXT("e7 a Martian, evolved lean over a quiet colony: no path is declared"));
+			Recover();
+			Sim->Debug_AddColonists(2);
+			RunSols(0.5);
+			Expect(!Sim->IsColonyQuiet() && Sim->IsEndingDeclared(), TEXT("e7 people back: the path is declared"));
+		}
+
+		Sim->OnAlert.Remove(AlertH);
+		Sim->OnCrewMoment.Remove(MomentH);
+		UE_LOG(LogRedHopeSim, Display, TEXT("=== FRAMING TEST END: %d check(s), %d failure(s) ==="), Checks, Fails);
 		GEngine->DestroyWorldContext(World);
 		World->DestroyWorld(false);
 		return Fails > 0 ? 1 : 0;

@@ -5,7 +5,7 @@ Lab,Laboratory,Lab,,,TRUE,FALSE,0.3,1,ChemTableLarge,1,1.0,FALSE,,TRUE,"ACTIVE M
 Workstation,Workstation,Workstation,,,TRUE,FALSE,0.2,1,WorkbenchLarge,1,1.0,FALSE,,TRUE,"ACTIVE M2 Gate B: crew work posts beside robots; a job seat per cell; T1 of the Workstation line"
 Dining,Dining Room,Dining,,Odor,TRUE,TRUE,0.6,1,,1,1.0,TRUE,DiningTable;Chair;Chair,TRUE,"ACTIVE M2 Gate B: meals together - morale. C5b (2026-10-19): CivicService - inside a Civic district the city zones it itself when dining coverage has a gap, and furnishes it with CivicFurniture (a table and two chairs). Never an Odor emitter."
 Cooking,Cooking Station,Cooking,Odor,,TRUE,TRUE,0.3,1,,1,1.0,FALSE,,TRUE,"ACTIVE M2 Gate B: emits kitchen Odor; pairs with Dining"
-Smoking,Smoking Area,Smoking,Odor,,TRUE,FALSE,0.8,1,,1,1.0,FALSE,,FALSE,"Dormant M2 Gate D: luxury room - usable once tobacco is cultivated (§2); high morale, strong filtration need"
+Smoking,Lounge,Smoking,Odor,,TRUE,FALSE,0.8,1,,1,1.0,FALSE,,FALSE,"Dormant M2 Gate D: luxury room, a quiet lounge - re-themed 2026-10-21 (Gate-D review, F8b); the row key and Function stay; high morale, strong filtration need"
 Hallway,Hallway,Hallway,,,FALSE,FALSE,0.0,1,,1,1.0,FALSE,,TRUE,"ACTIVE M2 Gate B: the partition room - directly between an Odor emitter and a refuser it CANCELS the adjacency penalty (with the floor's filtration running, §4)"
 Septic,Septic / Fertilizer Works,Septic,Odor;Contagion,,TRUE,TRUE,0.0,1,,1,1.0,FALSE,,FALSE,"Dormant M2 Gate C: feces->fertilizer; strongest emitter - keep it partitioned"
 WaterWorks,Water Filtration Works,WaterWorks,,,FALSE,TRUE,0.0,1,,1,1.0,FALSE,,FALSE,"Dormant M2 Gate C: urine->urea+water; drinking recycled water has a morale/sickness cost (§4)"

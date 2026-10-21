@@ -1,4 +1,5 @@
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHOrderWords.h"
 #include "RHHabLayout.h"
 #include "RedHope.h"
 #include "RHSimClockSubsystem.h"
@@ -2670,7 +2671,7 @@ void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, 
 	UE_LOG(LogRedHope, Warning, TEXT("ORDER REJECTED: %s %s - %s"),
 		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
 	LastNotice = FString::Printf(TEXT("REJECTED %s %s: %s"),
-		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
+		*RHOrder::VerbText(Cmd.Verb), *RHOrder::TargetText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Cmd.Target), *Reason);
 	LastNoticeRealSeconds = FPlatformTime::Seconds();
 }
 

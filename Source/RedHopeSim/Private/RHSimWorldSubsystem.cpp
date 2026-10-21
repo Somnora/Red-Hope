@@ -31,7 +31,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 41;  // v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 42;  // v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -1540,7 +1540,7 @@ void URHSimWorldSubsystem::StepDepositAlerts()
 		}
 		else if (!HasUndiscoveredIce())
 		{
-			Advice = TEXT("The last known ice. Ration water: recycling stretches it, and the Water Plant restores it while ice remains.");
+			Advice = TEXT("The last known ice. Stretch the water: recycling makes it last, and the Water Plant restores it while ice remains.");
 		}
 		OnAlert.Broadcast(FString::Printf(TEXT("%s RUNNING LOW — about %.0f t of ice left. %s"),
 			*D.RowName.ToString().ToUpper(), D.RemainingKg / 1000.0, Advice));
@@ -1691,6 +1691,8 @@ void URHSimWorldSubsystem::StepQuota()
 			{
 				ApplyManifestItemEffect(Item);
 			}
+			// F2b: the recalled Mars-born come home first - after the cargo, ahead of the settlers.
+			ApplyHomeAgain();
 			// C2b (Q5a): a thriving colony draws settlers on the supply line - after the
 			// cargo, so any pods and transports have taken their beds first.
 			ApplyImmigration();
@@ -1928,9 +1930,9 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 			// BM-1: with a rated surface habitat the fix is beds, not a vault
 			// (Gate-D placeholder copy).
 			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
-				? FString::Printf(TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Zone Living Quarters bays in your rated habitat before the next ship."),
+				? FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
 					GetFreeHousing(), CrewPodColonists)
-				: FString::Printf(TEXT("CREW POD RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
+				: FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Certify a vault floor before the next ship."),
 					GetFreeHousing(), CrewPodColonists));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
 		}
@@ -1954,9 +1956,9 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		{
 			// Gate-D placeholder copy, in the pod's style.
 			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
-				? FString::Printf(TEXT("COLONIST TRANSPORT RETURNED — no certified housing (%d beds free, %d needed). Zone Living Quarters bays in your rated habitat before the next ship."),
+				? FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
 					GetFreeHousing(), ColonistTransportColonists)
-				: FString::Printf(TEXT("COLONIST TRANSPORT RETURNED — no certified housing (%d beds free, %d needed). Certify a vault floor before the next ship."),
+				: FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Certify a vault floor before the next ship."),
 					GetFreeHousing(), ColonistTransportColonists));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), ColonistTransportColonists);
 		}
@@ -3385,8 +3387,17 @@ URHSimWorldSubsystem::FRHScaleColonyReport URHSimWorldSubsystem::Debug_BuildScal
 
 int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 {
+	return AddColonists(Count, nullptr);
+}
+
+int32 URHSimWorldSubsystem::AddColonists(int32 Count, const TArray<FRHRecalledMarsBorn>* Returning)
+{
 	int32 Housed = 0;
 	FRHFillState Fill;
+	if (Returning)
+	{
+		Count = FMath::Min(Count, Returning->Num());
+	}
 	if (Count > 0)
 	{
 		InitFillState(Fill);
@@ -3399,17 +3410,27 @@ int32 URHSimWorldSubsystem::Debug_AddColonists(int32 Count)
 			break; // no certified bed left
 		}
 		FRHColonist C;
-		C.Id = NextColonistId++;
-		// Full name via the Latin-square diagonal walk over the two 40-pools:
-		// first = K mod 40, surname = (K + K/40) mod 40 - the first 1600 ids all
-		// land on DISTINCT first+surname pairs, with varied surnames from id 1.
-		const int32 FirstCount = UE_ARRAY_COUNT(GRHFirstNames);
-		const int32 LastCount = UE_ARRAY_COUNT(GRHCallsigns);
-		const int32 K = C.Id - 1;
-		C.Name = FString::Printf(TEXT("%s %s"), GRHFirstNames[K % FirstCount], GRHCallsigns[(K + K / FirstCount) % LastCount]);
-		if (K >= FirstCount * LastCount)
+		if (Returning)
 		{
-			C.Name += FString::Printf(TEXT(" %d"), K / (FirstCount * LastCount) + 1);
+			// F2b: a recalled Mars-born child coming home keeps their own Id and name.
+			C.Id = (*Returning)[i].Id;
+			C.Name = (*Returning)[i].Name;
+			C.bMarsBorn = true;
+		}
+		else
+		{
+			C.Id = NextColonistId++;
+			// Full name via the Latin-square diagonal walk over the two 40-pools:
+			// first = K mod 40, surname = (K + K/40) mod 40 - the first 1600 ids all
+			// land on DISTINCT first+surname pairs, with varied surnames from id 1.
+			const int32 FirstCount = UE_ARRAY_COUNT(GRHFirstNames);
+			const int32 LastCount = UE_ARRAY_COUNT(GRHCallsigns);
+			const int32 K = C.Id - 1;
+			C.Name = FString::Printf(TEXT("%s %s"), GRHFirstNames[K % FirstCount], GRHCallsigns[(K + K / FirstCount) % LastCount]);
+			if (K >= FirstCount * LastCount)
+			{
+				C.Name += FString::Printf(TEXT(" %d"), K / (FirstCount * LastCount) + 1);
+			}
 		}
 		C.HomeLevel = HomeHab ? 0 : Home;
 		C.HomeHab = HomeHab;
@@ -3794,7 +3815,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			if (!Row || !IsGardenFunction(Row->Function))
 			{
 				OnAlert.Broadcast(FString::Printf(
-					TEXT("GARDEN LOST: floor %d cell %d was re-zoned — the emplaced soil is forfeit."), Level, Cell));
+					TEXT("GARDEN CLEARED: floor %d cell %d was re-zoned — its soil can't be recovered."), Level, Cell));
 				PlantedCrops.Remove(*It); // the crop goes with the bed
 				It.RemoveCurrent();
 				continue;
@@ -4019,21 +4040,21 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		HomeRations.Reset();
 		bFoodLowAnnounced = false; // no crew, no larder episode (D4a; runtime only)
 		FreshWaterThisStepKg = 0.0; // no consumer to fold it into potability
-		// Ending resolution (v25): a colony that HAD people and lost them all
-		// declares Collapse - once, loudly, and with the recovery path named
-		// (prevention framing; the projected-ending read stays live either
-		// way). All wording is a Gate-D framing-review placeholder.
-		if (bEverHadCrew && !bCollapseDeclared)
+		// The quiet colony (F7b, 2026-10-21): a colony that HAD people and lost them all is in a
+		// state, not an ending. It says so once per quiet spell, with the recovery path named
+		// (prevention framing), and the latch re-arms when people return (see below). The
+		// projected ending ignores it, and the epilogue clock waits while it lasts.
+		if (bEverHadCrew && !bQuietAnnounced)
 		{
-			bCollapseDeclared = true;
+			bQuietAnnounced = true;
 			OnAlert.Broadcast(TEXT(
-				"THE COLONY STANDS EMPTY — everyone has returned to orbit. The machines keep the lights on. "
-				"Restore housing and life support, and people will come back to Mars."));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== ENDING PATH: %s (the colony emptied; recoverable) ==="),
-				GetEndingName(ERHEnding::Collapse));
+				"THE COLONY IS QUIET — everyone is safe in orbit. The machines keep the lights on. "
+				"Restore housing and life support, and people can come home to Mars."));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== THE COLONY IS QUIET (everyone recalled; recoverable) ==="));
 		}
 		return; // pre-crew colonies: zero cost, zero divergence
 	}
+	bQuietAnnounced = false; // F7b: people are here, so the next quiet spell announces itself again
 	StepMoveHome(SubDt); // C2b: once a sol, anyone whose home has lost their bed moves to a free one
 	static const FName NFood(TEXT("Food")), NWater(TEXT("Water")), NOxygen(TEXT("Oxygen"));
 	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
@@ -4287,7 +4308,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		{
 			const FString Label = GetHomeLabel(Home.HomeLevel, Home.HomeHab);
 			OnAlert.Broadcast(FString::Printf(
-				TEXT("SHORT RATIONS: %s — %s is running short for %d resident%s. Restore it to bring rations back to full; if it lasts, residents are recalled to orbit a few at a time."),
+				TEXT("SHORT RATIONS: %s — %s is running short for %d resident%s. Restore it to bring rations back to full; if it lasts, the Program recalls residents to safety in orbit, a few at a time."),
 				*Label, LegName(Home.Limit), Home.Residents, Plural(Home.Residents)));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== HOME SHORT RATIONS: %s (%s, %d resident%s, ration %.0f%%) ==="),
 				*Label, LegName(Home.Limit), Home.Residents, Plural(Home.Residents), Home.R * 100.0);
@@ -4352,12 +4373,17 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			{
 				const FRHColonist& Gone = Colonists[Pool[k]];
 				Leaving.Add(Gone.Id);
+				if (Gone.bMarsBorn)
+				{
+					// F2b: a recalled Mars-born waits in orbit and comes home on a later ship.
+					RecalledMarsBorn.Add({ Gone.Id, Gone.Name });
+				}
 				UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST EVACUATED: %s (%s, rations short %.1f sols) ==="),
 					*Gone.Name, *Label, Gone.UnsupportedSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
 			}
 			// Abstract, prevention-framed consequence (mental-health directive):
 			// the Program recalls people to orbit.
-			OnAlert.Broadcast(FString::Printf(TEXT("RECALLED: %d resident%s of %s recalled to orbit — rations stayed short for too long."),
+			OnAlert.Broadcast(FString::Printf(TEXT("RECALLED: %d resident%s of %s, now safe in orbit — rations were short too long. Restoring the supply keeps the rest at home."),
 				Home.Departing, Plural(Home.Departing), *Label));
 		}
 		Colonists.RemoveAll([&Leaving](const FRHColonist& C) { return Leaving.Contains(C.Id); });
@@ -4418,7 +4444,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	if (WaterPotability < WaterPotabilityFloor && !bWaterQualityAnnounced)
 	{
 		bWaterQualityAnnounced = true;
-		OnAlert.Broadcast(TEXT("WATER QUALITY LOW — the crew is drinking heavily-recycled water. Drill the ice caps to restore it."));
+		OnAlert.Broadcast(TEXT("WATER QUALITY LOW — most of the water is recycled now. Fresh ice-melt restores it: drill more ice."));
 	}
 	else if (WaterPotability >= WaterPotabilityFloor)
 	{
@@ -4498,9 +4524,10 @@ void URHSimWorldSubsystem::StepMoments(float SubDt)
 {
 	// A deterministic heartbeat of visible crew life. Every interval, a seeded
 	// pick (content hash + the saved counter) chooses a moment:
-	//  - needs unmet or Hope low -> a DISPUTE (abstracted: raised voices, a
-	//    heated disagreement - never violence, and NO Hope penalty; the
-	//    friction is a visible symptom, not a second punishment)
+	//  - needs unmet or Hope low -> a DISPUTE (abstracted: two people at odds
+	//    over the shortages - never violence, and NO Hope penalty; the
+	//    friction is a visible symptom, not a second punishment; never between
+	//    people born on Mars, F1b)
 	//  - otherwise a JOIN-IN (a free colonist drifts over to help a worker)
 	//    or a PASTIME (two crew unwind together, flavored by disposition)
 	// All copy is Gate-D framing-review placeholder.
@@ -4521,28 +4548,50 @@ void URHSimWorldSubsystem::StepMoments(float SubDt)
 		// has nobody to index (the pick below divides by the headcount).
 		return;
 	}
-	const int32 IdxA = (int32)(Seed % (uint32)Pop);
-	int32 IdxB = (int32)((Seed >> 8) % (uint32)Pop);
-	if (IdxB == IdxA)
-	{
-		IdxB = (IdxA + 1) % Pop; // never pair a colonist with themselves
-	}
-	const FRHColonist& A = Colonists[IdxA];
-	const FRHColonist& B = Colonists[IdxB];
-
 	bool bAnyUnsupported = false;
 	for (const FRHColonist& C : Colonists)
 	{
 		bAnyUnsupported |= !C.bSupported;
 	}
+	const bool bDispute = bAnyUnsupported || HopeSmoothed < DisputeHopeBelow;
 
-	if ((bAnyUnsupported || HopeSmoothed < DisputeHopeBelow) && A.Id != B.Id)
+	// F1b (Gate-D review, 2026-10-21): a dispute pair is drawn from the people who came from
+	// Earth, never someone born on Mars. With fewer than two of them the beat passes quietly, as
+	// it does for a lone colonist. The same seeded draw runs over the Earth-born list, so a colony
+	// with nobody born here draws exactly the pair it always did. Pastimes and join-ins still use
+	// everyone.
+	TArray<int32, TInlineAllocator<64>> EarthBorn;
+	if (bDispute)
+	{
+		for (int32 i = 0; i < Pop; ++i)
+		{
+			if (!Colonists[i].bMarsBorn)
+			{
+				EarthBorn.Add(i);
+			}
+		}
+		if (EarthBorn.Num() < 2)
+		{
+			return;
+		}
+	}
+	const int32 Pool = bDispute ? EarthBorn.Num() : Pop;
+	const int32 IdxA = (int32)(Seed % (uint32)Pool);
+	int32 IdxB = (int32)((Seed >> 8) % (uint32)Pool);
+	if (IdxB == IdxA)
+	{
+		IdxB = (IdxA + 1) % Pool; // never pair a colonist with themselves
+	}
+	const FRHColonist& A = Colonists[bDispute ? EarthBorn[IdxA] : IdxA];
+	const FRHColonist& B = Colonists[bDispute ? EarthBorn[IdxB] : IdxB];
+
+	if (bDispute && A.Id != B.Id)
 	{
 		// Placeholder copy (Gate-D review).
 		const FString Text = A.HomeHab != 0
-			? FString::Printf(TEXT("Raised voices in the surface habitat — %s and %s are arguing over the shortages. Morale is wearing thin."),
+			? FString::Printf(TEXT("Tension in the surface habitat — %s and %s are at odds over the shortages. Restocking will ease it."),
 				*A.Name, *B.Name)
-			: FString::Printf(TEXT("Raised voices on floor %d — %s and %s are arguing over the shortages. Morale is wearing thin."),
+			: FString::Printf(TEXT("Tension on floor %d — %s and %s are at odds over the shortages. Restocking will ease it."),
 				A.HomeLevel, *A.Name, *B.Name);
 		OnCrewMoment.Broadcast((uint8)ERHCrewMoment::Dispute, A.Id, B.Id, Text);
 		UE_LOG(LogRedHopeSim, Display, TEXT("MOMENT dispute: %s vs %s"), *A.Name, *B.Name);
@@ -6031,6 +6080,37 @@ int32 URHSimWorldSubsystem::GetImmigrationRoom(int32 Pop, int32 FreeBeds, int32 
 	return FMath::Min(FMath::Max(0, FreeBeds - ImmigrationReserveBeds), FMath::Max(0, ComfortCapacity - Pop));
 }
 
+int32 URHSimWorldSubsystem::ApplyHomeAgain()
+{
+	// F2b (Gate-D review, 2026-10-21): the Mars-born recalled to orbit come home first. On a landing
+	// ship, while every home is on a full ration and a bed is free, they return in the order they
+	// were recalled, with their own names, ahead of any settler and with no Hope gate. One alert for
+	// the whole group. Gate-D placeholder copy.
+	if (RecalledMarsBorn.Num() == 0 || GetFreeHousing() < 1)
+	{
+		return 0;
+	}
+	for (const FRHHomeRation& Home : HomeRations)
+	{
+		if (Home.Fraction < 1.0)
+		{
+			return 0;
+		}
+	}
+	const int32 Before = Colonists.Num();
+	const int32 Housed = AddColonists(RecalledMarsBorn.Num(), &RecalledMarsBorn);
+	if (Housed <= 0)
+	{
+		return 0;
+	}
+	RecalledMarsBorn.RemoveAt(0, Housed);
+	OnAlert.Broadcast(FString::Printf(TEXT("HOME AGAIN: %d born on Mars %s back with their colony."),
+		Housed, Housed == 1 ? TEXT("is") : TEXT("are")));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== HOME AGAIN: %d Mars-born back from orbit with the supply ship (population %d -> %d, %d still waiting) ==="),
+		Housed, Before, Colonists.Num(), RecalledMarsBorn.Num());
+	return Housed;
+}
+
 int32 URHSimWorldSubsystem::ApplyImmigration()
 {
 	// Q5a: a thriving city draws settlers on every supply ship. They are not Mars-
@@ -6420,7 +6500,7 @@ int32 URHSimWorldSubsystem::RehomeResidents()
 	{
 		++ColonistSetVersion; // beds are assigned per home: re-derive them
 		// One alert per batch, never one per person. Gate-D placeholder copy.
-		OnAlert.Broadcast(FString::Printf(TEXT("MOVED HOME: %d resident%s moved to free beds elsewhere — their homes no longer had a bed for them."),
+		OnAlert.Broadcast(FString::Printf(TEXT("MOVED HOME: %d resident%s settled into free beds elsewhere — their old home's beds were removed or lost their rating."),
 			Moved, Moved == 1 ? TEXT("") : TEXT("s")));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== MOVED HOME: %d of %d displaced resident%s found free beds (%d stay) ==="),
 			Moved, Displaced.Num(), Displaced.Num() == 1 ? TEXT("") : TEXT("s"), Displaced.Num() - Moved);
@@ -6545,8 +6625,8 @@ const TCHAR* URHSimWorldSubsystem::GetHopeBandName() const
 {
 	switch (HopeBand)
 	{
-	case ERHHopeBand::Failing:     return TEXT("FAILING");
-	case ERHHopeBand::Strained:    return TEXT("STRAINED");
+	case ERHHopeBand::Failing:     return TEXT("LOW");
+	case ERHHopeBand::Strained:    return TEXT("UNSETTLED");
 	case ERHHopeBand::Steady:      return TEXT("STEADY");
 	case ERHHopeBand::Thriving:    return TEXT("THRIVING");
 	case ERHHopeBand::Flourishing: return TEXT("FLOURISHING");
@@ -6564,10 +6644,12 @@ double URHSimWorldSubsystem::GetHumanWorkTempo() const
 	}
 	double Tempo = FMath::Clamp(1.0 + HopeTempoSlope * (HopeSmoothed - HopeBase), HopeTempoMin, HopeTempoMax);
 	// M4 Gate D: a Malfunction crisis slows human labor while it runs (automation
-	// stutters, units go inert) - recoverable, clears when the crisis ends.
+	// stutters, units go inert) - recoverable, clears when the crisis ends. F6b (Gate-D
+	// review, 2026-10-21): the HopeTempoMin floor holds after the multiplier too, so the
+	// pace is never under it ("a strained colony is slow, never dead").
 	if (ActiveCrisis == ERHCrisis::Malfunction)
 	{
-		Tempo *= CrisisWorkPenalty;
+		Tempo = FMath::Max(Tempo * CrisisWorkPenalty, HopeTempoMin);
 	}
 	return Tempo;
 }
@@ -7488,12 +7570,12 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		}
 		if (DefectedRivals.Contains(Cmd.Target))
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s defected to Earth - relations are hostile, no trade"), *Rival->DisplayName));
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has sided with Earth - relations are frozen, no trade"), *Rival->DisplayName));
 			return;
 		}
 		if (EmbargoGrace.Contains(Cmd.Target))
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has embargoed you under Earth pressure - pacify them first"), *Rival->DisplayName));
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has embargoed you under Earth pressure - reassure them first"), *Rival->DisplayName));
 			return;
 		}
 		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
@@ -7871,7 +7953,7 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 {
 	if (!IsRivalAvailable(Rival))
 	{
-		OutReason = FString::Printf(TEXT("No such settlement '%s' to move against"), *Rival.ToString());
+		OutReason = FString::Printf(TEXT("No contact with '%s'"), *Rival.ToString());
 		return false;
 	}
 	const FRHRivalRow* Row = Defs->GetRival(Rival);
@@ -7886,7 +7968,7 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 		double& Rel = RelationRef(Rival);
 		Rel = FMath::Clamp(Rel - CovertRelationHitCaught, 0.0, 100.0);
 		OnAlert.Broadcast(FString::Printf(
-			TEXT("COVERT OP EXPOSED — %s caught your people in the act. Relations with %s crater; they will remember this."),
+			TEXT("COVERT OP EXPOSED — %s caught your team in the act. Relations with %s drop sharply."),
 			*Row->DisplayName, *Row->Nation));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT CAUGHT: %s (relation %.0f, hidden %.0f, humanNature %.0f) ==="),
 			*Row->DisplayName, Rel, Hidden, HumanNatureAxis);
@@ -7995,7 +8077,7 @@ bool URHSimWorldSubsystem::ResolveSabotage(FName Rival, FString& OutReason)
 		double& Rel = RelationRef(Rival);
 		Rel = FMath::Clamp(Rel - CovertRelationHitCaught, 0.0, 100.0);
 		OnAlert.Broadcast(FString::Printf(
-			TEXT("SABOTAGE EXPOSED — %s traced the blackout to you. Relations crater; the act still bit (their systems are down)."),
+			TEXT("SABOTAGE EXPOSED — %s traced the blackout to you. Relations drop sharply; their systems are still down."),
 			*Row->DisplayName));
 	}
 	else
@@ -8081,10 +8163,10 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 	// The ending milestone (M4 Gate D): fire once when the colony first arrives
 	// at a definite political outcome (a strong, settled allegiance). Never
 	// retracts - it's the story's declared direction, celebrated on arrival.
-	if (!bEndingDeclared)
+	if (!bEndingDeclared && !IsColonyQuiet()) // F7b: no path is declared over an empty colony
 	{
 		const ERHEnding E = GetProjectedEnding();
-		if (E != ERHEnding::Undetermined && E != ERHEnding::Collapse)
+		if (E != ERHEnding::Undetermined)
 		{
 			bEndingDeclared = true;
 			DeclaredEnding = (uint8)E; // the epilogue clock (v25) measures against this
@@ -8099,9 +8181,11 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 	// Ending resolution (v25): hold the declared path for EpilogueSustainSols
 	// and the story is WRITTEN - a one-time epilogue card; the sandbox keeps
 	// running. Wavering resets the clock (the path must be re-earned), the
-	// declaration itself never retracts. Threshold-on-monotone-accumulator =
-	// era-parity-safe, like growth. Wording is a Gate-D review placeholder.
-	if (bEndingDeclared && !bEpilogueDeclared)
+	// declaration itself never retracts. The clock waits, neither running nor
+	// resetting, while the colony is quiet (F7b): an epilogue is never written over an
+	// empty colony. Threshold-on-monotone-accumulator = era-parity-safe, like growth.
+	// Wording is a Gate-D review placeholder.
+	if (bEndingDeclared && !bEpilogueDeclared && !IsColonyQuiet())
 	{
 		if ((uint8)GetProjectedEnding() == DeclaredEnding)
 		{
@@ -8172,7 +8256,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 				Rel = FMath::Min(Rel, DefectRelationFloor);
 				const FRHRivalRow* Row = Defs ? Defs->GetRival(Name) : nullptr;
 				OnAlert.Broadcast(FString::Printf(
-					TEXT("DEFECTION — %s has sided with Earth. The route is closed and relations are locked hostile."),
+					TEXT("DEFECTION — %s has sided with Earth. The route is closed and relations are frozen."),
 					Row ? *Row->DisplayName : *Name.ToString()));
 				UE_LOG(LogRedHopeSim, Display, TEXT("=== DEFECTION: %s (relation %.0f) ==="),
 					Row ? *Row->DisplayName : *Name.ToString(), Rel);
@@ -8210,7 +8294,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 			EmbargoGrace.Add(Target, EmbargoGraceSols);
 			const FRHRivalRow* Row = Defs->GetRival(Target);
 			OnAlert.Broadcast(FString::Printf(
-				TEXT("EARTH LEANS ON %s — under pressure from Earth, they have suspended trade with you. Pacify them within %.0f sols or they defect."),
+				TEXT("EARTH LEANS ON %s — under pressure from Earth, they have suspended trade with you. Reassure them within %.0f sols or they side with Earth."),
 				Row ? *Row->DisplayName : *Target.ToString(), EmbargoGraceSols));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== EMBARGO: %s (Earth tension %.0f, grace %.0f sols) ==="),
 				Row ? *Row->DisplayName : *Target.ToString(), EarthTension, EmbargoGraceSols);
@@ -8227,7 +8311,7 @@ bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
 	}
 	if (Influence < PacifyInfluenceCost)
 	{
-		OutReason = FString::Printf(TEXT("Not enough Influence to pacify (%.0f needed, %.0f on hand)"),
+		OutReason = FString::Printf(TEXT("Not enough Influence to reassure them (%.0f needed, %.0f on hand)"),
 			PacifyInfluenceCost, Influence);
 		return false;
 	}
@@ -8237,7 +8321,7 @@ bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
 	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNaturePacifyShift, -100.0, 100.0);
 	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
 	OnAlert.Broadcast(FString::Printf(
-		TEXT("PACIFIED — %s sees reason and ignores Earth's order. Trade resumes; tension eases."),
+		TEXT("REASSURED — %s sets Earth's order aside. Trade resumes; tension eases."),
 		Row ? *Row->DisplayName : *Rival.ToString()));
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== PACIFIED: %s (influence %.0f, tension %.0f) ==="),
 		Row ? *Row->DisplayName : *Rival.ToString(), Influence, EarthTension);
@@ -8249,7 +8333,7 @@ const TCHAR* URHSimWorldSubsystem::GetActiveCrisisName() const
 	switch (ActiveCrisis)
 	{
 	case ERHCrisis::Malfunction:  return TEXT("SYSTEMS MALFUNCTION");
-	case ERHCrisis::Environmental: return TEXT("ENVIRONMENTAL STRAIN");
+	case ERHCrisis::Environmental: return TEXT("DRY SPELL");
 	default: return TEXT("none");
 	}
 }
@@ -8267,12 +8351,12 @@ void URHSimWorldSubsystem::TriggerCrisis()
 	++CrisisCount;
 	if (ActiveCrisis == ERHCrisis::Malfunction)
 	{
-		OnAlert.Broadcast(TEXT("SYSTEMS MALFUNCTION — automation across the colony stutters and stalls. Units are going inert; crews are stretched. It will pass, but it bites."));
+		OnAlert.Broadcast(TEXT("SYSTEMS MALFUNCTION — blowback from covert work: automation stalls, units go idle, work slows. It passes in a few sols."));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISIS: MALFUNCTION (%.0f sols, humanNature %.0f) ==="), CrisisDurationSols, HumanNatureAxis);
 	}
 	else
 	{
-		OnAlert.Broadcast(TEXT("ENVIRONMENTAL STRAIN — a systems-stress test on the colony's reserves. Water demand spikes; hold together and it passes."));
+		OnAlert.Broadcast(TEXT("DRY SPELL — the colony's water draw spikes for a few sols. Keep the tanks full and it passes."));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CRISIS: ENVIRONMENTAL (%.0f sols, humanNature %.0f) ==="), CrisisDurationSols, HumanNatureAxis);
 	}
 }
@@ -8306,7 +8390,7 @@ void URHSimWorldSubsystem::StepCrisis(float SubDt)
 			CrisisRemainingSols = 0.0;
 			OnAlert.Broadcast(Was == ERHCrisis::Malfunction
 				? TEXT("RECOVERED — the malfunction is contained; automation is coming back online.")
-				: TEXT("WEATHERED — the environmental strain has passed; the colony held."));
+				: TEXT("WEATHERED — the dry spell has passed; the colony held."));
 		}
 		return; // one crisis at a time; the interval clock waits
 	}
@@ -8387,12 +8471,6 @@ bool URHSimWorldSubsystem::HasInfirmaryOnline() const
 
 URHSimWorldSubsystem::ERHEnding URHSimWorldSubsystem::GetProjectedEnding() const
 {
-	// Collapse: a colony that once had a crew and lost all of it (the failure
-	// state, brief §66). Checked first - it overrides the political read.
-	if (bEverHadCrew && Colonists.Num() == 0)
-	{
-		return ERHEnding::Collapse;
-	}
 	// The two axes decide the political outcome once an allegiance is definite.
 	if (IdentityAxis <= -EndingIdentityThreshold)
 	{
@@ -8413,8 +8491,7 @@ const TCHAR* URHSimWorldSubsystem::GetEndingName(ERHEnding Ending) const
 	{
 	case ERHEnding::CorporateJewel:        return TEXT("Corporate Jewel of Earth");
 	case ERHEnding::IndependentFederation: return TEXT("Independent Mars Federation");
-	case ERHEnding::MartianColdWar:        return TEXT("Martian Cold War");
-	case ERHEnding::Collapse:              return TEXT("Abandonment / Collapse");
+	case ERHEnding::MartianColdWar:        return TEXT("A Divided Mars");
 	default: return TEXT("Undetermined");
 	}
 }
@@ -8475,7 +8552,7 @@ bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
 				Rel = FMath::Clamp(Rel + DilemmaDefyRelationBonus, 0.0, 100.0);
 			});
 		}
-		OnAlert.Broadcast(TEXT("YOU DEFIED EARTH — the settlements stand together. Morale rises, but your sponsor's supply priority is cut. Survive on what Mars makes."));
+		OnAlert.Broadcast(TEXT("YOU DEFIED EARTH — the settlements stand together. Hope rises, but your sponsor's supply priority is cut. Mars will have to provide."));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY: DEFIED - axis %.0f, tension %.0f, requisition x%.2f ==="),
 			IdentityAxis, EarthTension, GetRequisitionMultiplier());
 	}
@@ -11399,6 +11476,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		}
 		}
 	}
+	// The Mars-born recalled to orbit, oldest first (save v42, F2b).
+	Ar << RecalledMarsBorn;
 	// Shared rationing (save v34, C2a): the deficit Hope reads, and each short
 	// home's departure accumulator and onset size, sorted by home key for
 	// deterministic bytes.
@@ -11484,9 +11563,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// The goal ladder + ending resolution + research funding (save v25).
 	{
-		uint8 Epilogue = bEpilogueDeclared ? 1 : 0, Collapse = bCollapseDeclared ? 1 : 0;
+		uint8 Epilogue = bEpilogueDeclared ? 1 : 0, Quiet = bQuietAnnounced ? 1 : 0;
 		Ar << ActiveQuota << QuotaOpenedSol << PendingResearchFundingKg
-		   << DeclaredEnding << PathSustainSols << Epilogue << Collapse;
+		   << DeclaredEnding << PathSustainSols << Epilogue << Quiet;
 	}
 	// Crops + climate + ducts (save v26). Maps/sets serialize SORTED so the
 	// bytes are deterministic regardless of insertion history.
@@ -11901,6 +11980,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		}
 		}
 	}
+	// The Mars-born recalled to orbit, oldest first (save v42, F2b).
+	Ar << RecalledMarsBorn;
 	// Shared rationing (save v34, C2a). The per-home readout is derived: it is
 	// rebuilt by the next population step.
 	{
@@ -12019,11 +12100,11 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	}
 	// The goal ladder + ending resolution + research funding (save v25).
 	{
-		uint8 Epilogue = 0, Collapse = 0;
+		uint8 Epilogue = 0, Quiet = 0;
 		Ar << ActiveQuota << QuotaOpenedSol << PendingResearchFundingKg
-		   << DeclaredEnding << PathSustainSols << Epilogue << Collapse;
+		   << DeclaredEnding << PathSustainSols << Epilogue << Quiet;
 		bEpilogueDeclared = (Epilogue != 0);
-		bCollapseDeclared = (Collapse != 0);
+		bQuietAnnounced = (Quiet != 0);
 		if (ActiveQuota.IsNone())
 		{
 			ActiveQuota = FirstQuotaName(); // legacy safety: never load ladderless

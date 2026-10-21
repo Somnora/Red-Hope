@@ -425,8 +425,8 @@ void URHCrewVisualizerSubsystem::HandleCrewMoment(uint8 Type, int32 IdA, int32 I
 		break;
 	case URHSimWorldSubsystem::ERHCrewMoment::Dispute:
 		// Abstracted friction: an amber plate and a face-off. Words, never blows.
-		ShowEmote(*A, TEXT("! heated words !"), FColor(235, 130, 40), 9.0);
-		if (B) { ShowEmote(*B, TEXT("! heated words !"), FColor(235, 130, 40), 9.0); }
+		ShowEmote(*A, TEXT("~ at odds ~"), FColor(235, 130, 40), 9.0);
+		if (B) { ShowEmote(*B, TEXT("~ at odds ~"), FColor(235, 130, 40), 9.0); }
 		break;
 	default:
 		break;
