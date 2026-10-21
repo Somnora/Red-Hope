@@ -57,6 +57,11 @@
 # OUTPOST lines log it, SHIPLEG lines give each ship's Water room, and the REPORT block adds the outpost line and the bar (water made
 # at the end, outpost freight, Water room per ship after the first load). RH_PLAYTEST_OUTPOST=0 switches the program off.
 #
+# Night storage before rovers: with the living city, each ship's Battery Bank packs are sized to carry the night - the machines' mean
+# load plus the garden's grow lights, over 12 sol-hours of dark - and loaded ahead of the Cargo Rover; a rover that does not fit beside
+# them waits for the next ship. LIVING lines log it and the REPORT block adds a "night storage" line (sol-hours the bank stood empty,
+# grow lights dark). RH_PLAYTEST_NIGHTBANK=0 switches the rule off.
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -82,7 +87,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

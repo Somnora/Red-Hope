@@ -121,6 +121,12 @@ namespace
 		double RoverFirstOrderSol = -1.0, RoadFirstBuiltSol = -1.0;
 		int32 WaterNoPairSols = 0;                // sols the bot held back a new water pair because the last ice is low
 		double GenWSec = 0.0, LoadWSec = 0.0, PowSec = 0.0; // W x s over the current sol: the sol's mean generation and load
+		// Night storage before rovers: the machines' mean load over the last whole sol (the grow lights are counted apart), and what
+		// the rule did. nightbank=0 (RH_PLAYTEST_NIGHTBANK=0) gives the bot back without it, to compare against.
+		bool bNightBank = false;
+		double LastLoadW = 0.0;                   // the last whole sol's mean machine load (W)
+		double BankEmptySec = 0.0, LightsDarkSec = 0.0; // sim-seconds the bank stood empty / the grow lights were dark, over the run
+		int32 NightBanksKept = 0, RoverDeferrals = 0, NightBankShips = 0; // packs the rule asked for beyond the owed ones, rovers held to the next ship, ships it spoke on
 		TMap<int32, double> GrowthLastRemaining; // district -> the open project's RemainingSols at the last look: a rise means a new project replaced it
 		struct FGrowthRecord { int32 DistrictId = 0; ERHGrowthKind Kind = ERHGrowthKind::SurfaceModule; double StartSol = 0.0, EndSol = -1.0; FString What; };
 		TArray<FGrowthRecord> GrowthRecords;
@@ -247,6 +253,19 @@ namespace
 			}
 		}
 		return nullptr;
+	}
+
+	// What a list of manifest items weighs (the manifest rows' mass, as the sim's own budget check adds it up).
+	double ManifestListMassKg(const URHSimWorldSubsystem* Sim, const TArray<FName>& Items)
+	{
+		const URHDefinitionsSubsystem* Defs = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		double Total = 0.0;
+		for (const FName& Item : Items)
+		{
+			const FRHManifestItemRow* Row = Defs ? Defs->GetManifestItem(Item) : nullptr;
+			Total += Row ? Row->Mass_kg : 0.0;
+		}
+		return Total;
 	}
 
 	// The first cargo a sensible director would pick: power before people
@@ -418,6 +437,13 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  at the end (%d people): water made %.0f vs %.0f drawn kg a sol (%.1f t in store, %d sol(s) the bot held back a new drill on a low deposit); food made %.1f vs %.1f drawn (%.0f kg = %.0f sols in store, %d/%d garden cells producing); water or food short at the end: %s"),
 					Sim->GetPopulation(), W.ProductionPerSol, W.DrawPerSol, Sim->GetStock(FName("Water")) / 1000.0, P.WaterNoPairSols, F.ProductionPerSol, F.DrawPerSol, Sim->GetStock(FName("Food")), Sim->GetStock(FName("Food")) / FoodDraw,
 					Sim->GetProducingCellCount(), Sim->GetPlantedCellCount(), (W.NetPerSol() < 0.0 || F.NetPerSol() < 0.0) ? TEXT("yes") : TEXT("no"));
+				// Night storage before rovers: how long the bank stood empty (sol-hours are 50 sim-seconds) and what the rule did.
+				const double RunSolHours = C ? C->GetSimSecondsTotal() / 50.0 : 0.0;
+				int32 BanksStanding = 0;
+				for (const FRHBuildingInstance& B : Sim->GetBuildings()) { BanksStanding += (B.DefName == FName("BatteryBank") && !B.bUnderConstruction) ? 1 : 0; }
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  night storage: the bank stood empty %.0f of %.0f sol-hours (%.0f%%), the garden's grow lights were dark %.0f sol-hours; %d Battery Banks at the end; the night-bank rule is %s: it asked for %d pack(s) beyond the cells' rule on %d ship(s) and held the rover to the next ship %d time(s)"),
+					P.BankEmptySec / 50.0, RunSolHours, RunSolHours > 0.0 ? 100.0 * P.BankEmptySec / 50.0 / RunSolHours : 0.0, P.LightsDarkSec / 50.0, BanksStanding,
+					P.bNightBank ? TEXT("on") : TEXT("off"), P.NightBanksKept, P.NightBankShips, P.RoverDeferrals);
 				// W1: the outpost program's own report, and the bar (nothing is tuned to pass; a miss says why).
 				if (P.bOutpost)
 				{
@@ -494,6 +520,10 @@ namespace
 	constexpr double GPowerSurplusRatio = 1.25;
 	constexpr int32 GMaxExtraKitsLiving = 24, GLivingPartsCrates = 6, GMaxArrays = 64, GFreightWindowSols = 5, GMaxRovers = 3;
 	constexpr double GFreightTasksPerRover = 3.0; // C6c: one rover for every this many freight tasks open at once (a sol's most), on average over five sols
+	// Night storage before rovers: a bank must carry the night's load - the machines' mean load plus the grow lights, which draw on the
+	// bank round the clock - through the hours of no sun (the solar curve is zero from 0.75 to 0.25 of a sol: half of 24 sol-hours).
+	constexpr double GBankWh = 4000.0, GGrowLightW = 60.0, GNightSolHours = 12.0; // RH_Buildings StorageWh, RH_Config GardenGrowLightWPerCell
+	constexpr int32 GMaxBanks = 24;
 	constexpr int32 GMaxElectrolyzers = 8, GMaxWaterPairs = 4, GMaxPairsPerShip = 6, GMaxExtraKitsPerShip = 8, GMaxCellsPerOrder = 12, GMaxOwedKits = 6;
 
 	// Buildings of a type, sites included; with bSitesOnly, only those still under construction.
@@ -1247,6 +1277,8 @@ namespace
 			RoverTally(P, Sim, C);
 			P.FreightMaxThisSol = FMath::Max(P.FreightMaxThisSol, FMath::Max(Sim->GetFreightTaskCount(), FreightCandidates(Sim)));
 			P.GenWSec += Pw.GenW * Dt; P.LoadWSec += Pw.LoadW * Dt; P.PowSec += Dt;
+			if (Pw.BatteryCapWh > 0.0 && Pw.BatteryWh < 1.0) { P.BankEmptySec += Dt; }
+			if (Sim->AreGrowLightsDark()) { P.LightsDarkSec += Dt; }
 		}
 		if (C->GetSol() > P.SolLogged)
 		{
@@ -1275,6 +1307,7 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] LIVING %d | roads %d built of %d edge(s), %.0f m built | rovers %d deployed, %d aboard, %d on the way, %.1f t loaded in %d load(s) | freight open at most %d this sol (mean %.1f) | power mean gen %.0f W load %.0f W, bank %.0f%% | spare parts %.0f"),
 					C->GetSol(), G.BuiltEdgeCount, G.Edges.Num(), (double)G.BuiltLengthCm() / 100.0, Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(), P.RoversInFlight, P.RoverLoadedKg / 1000.0, P.RoverLoads,
 					P.FreightSamples.Num() > 0 ? P.FreightSamples.Last() : 0, MeanOpenFreight(P), P.PowSec > 0.0 ? P.GenWSec / P.PowSec : 0.0, P.PowSec > 0.0 ? P.LoadWSec / P.PowSec : 0.0, Sim->GetPower().BatteryCapWh > 0.0 ? 100.0 * Sim->GetPower().BatteryWh / Sim->GetPower().BatteryCapWh : 0.0, Sim->GetStock(FName("SpareParts")));
+				if (P.PowSec > 0.0) { P.LastLoadW = P.LoadWSec / P.PowSec; }
 				P.GenWSec = P.LoadWSec = P.PowSec = 0.0;
 				if (P.bOutpost)
 				{
@@ -1565,8 +1598,28 @@ namespace
 				ExtraPairs = Plan.bShortFood ? FMath::Clamp(FMath::DivideAndRoundUp(Plan.Missing, 4), 0, GMaxPairsPerShip) : 0;
 				ExtraSolar = FMath::Clamp(P.LsSolarOwed, 0, P.bLiving ? FMath::Clamp(GMaxArrays - ArraysHave - 2, 0, GMaxExtraKitsLiving) : GMaxExtraKitsPerShip);
 				ExtraBattery = FMath::Clamp(P.LsBatteryOwed, 0, (P.bLiving ? GMaxExtraKitsLiving : GMaxExtraKitsPerShip) / 2);
+				if (P.bNightBank)
+				{
+					// Night storage before rovers: the bank the night needs, whatever the cells ordered owe. The garden's lights draw on the bank
+					// round the clock and the machines on it all night, so the need is the machines' mean load (the last whole sol's) plus the
+					// lights of every cell that will be lit by the time this ship's banks stand: the cells planted, those the stores can plant
+					// (soil and seeds already here) and this ship's own soil and seeds, over the hours of no sun, in banks. A bank that stands,
+					// waits aboard or is on its site counts; the packs are loaded before the rover (and the kits), so the rover waits when both
+					// do not fit.
+					const int32 LitCells = Plan.Planted + Plan.Fundable + 4 * (1 + ExtraPairs);
+					const double LightsW = GGrowLightW * LitCells;
+					const int32 BanksNeeded = FMath::Clamp(FMath::CeilToInt((P.LastLoadW + LightsW) * GNightSolHours / GBankWh), 0, GMaxBanks);
+					const int32 BanksHave = CountBuildings(Sim, FName("BatteryBank")) + Sim->GetImportStock(FName("BatteryBank"));
+					const int32 BanksShort = FMath::Max(0, BanksNeeded - BanksHave);
+					const int32 Wanted = FMath::Clamp(FMath::Max(ExtraBattery, BanksShort), 0, GMaxExtraKitsLiving / 2);
+					P.NightBanksKept += FMath::Max(0, Wanted - ExtraBattery);
+					++P.NightBankShips;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIVING  night storage: machines %.0f W + %.0f W of grow lights on %d cell(s), over %.0f sol-hours of dark, need %d Battery Bank(s) of %.0f Wh; %d stand, wait aboard or are ordered, %d short; the cargo keeps %d pack(s) (%d owed by the cells' rule)"),
+						SolNow(C), P.LastLoadW, LightsW, LitCells, GNightSolHours, BanksNeeded, GBankWh, BanksHave, BanksShort, Wanted, ExtraBattery);
+					ExtraBattery = Wanted;
+				}
 				P.LsSolarOwed -= ExtraSolar;
-				P.LsBatteryOwed -= ExtraBattery;
+				P.LsBatteryOwed = FMath::Max(0, P.LsBatteryOwed - ExtraBattery);
 				P.LsInboundCells = 4 * (1 + ExtraPairs);
 				P.LsExtraPairs += ExtraPairs;
 				P.LsExtraSolar += ExtraSolar;
@@ -1578,8 +1631,23 @@ namespace
 			if (P.bLiving) { for (int32 i = 0; i < GLivingPartsCrates; ++i) { Cargo3.Add(FName("PartsCrate")); } }
 			Cargo3.Append({ FName("SoilPallet"), FName("SeedVault") });
 			for (int32 i = 0; i < ExtraPairs; ++i) { Cargo3.Add(FName("SoilPallet")); Cargo3.Add(FName("SeedVault")); }
+			// Night storage before rovers: the packs the night needs go in ahead of the rover (3.5 t of it displaced five of them in W1).
+			if (P.bNightBank) { for (int32 i = 0; i < ExtraBattery; ++i) { Cargo3.Add(FName("BatteryPack")); } }
 			// C6c: a freight rover for the road, when the open freight tasks justify one (the ship it rides is the one in flight).
-			const int32 RoversNow = P.bLiving ? RoversToOrder(P, Sim) : 0;
+			int32 RoversNow = P.bLiving ? RoversToOrder(P, Sim) : 0;
+			if (RoversNow > 0 && P.bNightBank)
+			{
+				// ... and the rover rides only if it fits beside everything loaded so far (the crates, the pairs, the packs); else the next ship.
+				const double RoverKg = ManifestListMassKg(Sim, { FName("CargoRover") }) * RoversNow;
+				const double RoomKg = Sim->GetAwardMassKg() - ManifestListMassKg(Sim, Cargo3);
+				if (RoverKg > RoomKg)
+				{
+					++P.RoverDeferrals;
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIVING  the %d Cargo Rover(s) wait for the next ship: %.0f kg of rover, %.0f kg of the %.0f kg left once the crates, the soil and seeds and the night's %d battery pack(s) are in"),
+						SolNow(C), RoversNow, RoverKg, RoomKg, Sim->GetAwardMassKg(), ExtraBattery);
+					RoversNow = 0;
+				}
+			}
 			for (int32 i = 0; i < RoversNow; ++i) { Cargo3.Add(FName("CargoRover")); }
 			if (RoversNow > 0)
 			{
@@ -1593,7 +1661,7 @@ namespace
 			Cargo3.Append({ FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack") });
 			// (C6c: the banks before the extra kits - the garden's grow lights run on the battery, so a bank is worth more than an array)
 			if (!P.bLiving) { for (int32 i = 0; i < ExtraSolar; ++i) { Cargo3.Add(FName("SolarPack")); } }
-			for (int32 i = 0; i < ExtraBattery; ++i) { Cargo3.Add(FName("BatteryPack")); }
+			if (!P.bNightBank) { for (int32 i = 0; i < ExtraBattery; ++i) { Cargo3.Add(FName("BatteryPack")); } }
 			if (P.bLiving) { for (int32 i = 0; i < ExtraSolar; ++i) { Cargo3.Add(FName("SolarPack")); } }
 			// C6c: the kits cost no Struct, but a field of them past what the colony draws only costs robot labour: the first run of this rule
 			// brought 119 and the arrays made ten times the load. So a ship fills with kits only while the colony has fewer than GMaxArrays
@@ -1852,7 +1920,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
 		// Args[3..]: a save slot and/or the options "districts=1" (C5b), "nogrowth=1", "lifesupport=0|1" (C5e), in any order.
-		bool bLifeSupportOff = false, bRoadsOff = false, bOutpostOff = false;
+		bool bLifeSupportOff = false, bRoadsOff = false, bOutpostOff = false, bNightBankOff = false;
 		for (int32 i = 3; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
@@ -1863,6 +1931,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 			else if (Args[i].Equals(TEXT("roads=0"), ESearchCase::IgnoreCase)) { bRoadsOff = true; }
 			else if (Args[i].Equals(TEXT("outpost=1"), ESearchCase::IgnoreCase)) { bOutpostOff = false; }
 			else if (Args[i].Equals(TEXT("outpost=0"), ESearchCase::IgnoreCase)) { bOutpostOff = true; }
+			else if (Args[i].Equals(TEXT("nightbank=1"), ESearchCase::IgnoreCase)) { bNightBankOff = false; }
+			else if (Args[i].Equals(TEXT("nightbank=0"), ESearchCase::IgnoreCase)) { bNightBankOff = true; }
 			else if (P.SaveSlot.IsEmpty()) { P.SaveSlot = Args[i]; }
 		}
 		// C5e: painting districts means playing the city's life support too, unless lifesupport=0 says not to.
@@ -1871,6 +1941,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.bLiving = P.bDistricts && !bRoadsOff;
 		// W1: and the outpost program with it, unless outpost=0 says not to.
 		P.bOutpost = P.bLiving && !bOutpostOff;
+		// Night storage before rovers, with the living city, unless nightbank=0 says not to.
+		P.bNightBank = P.bLiving && P.bLifeSupport && !bNightBankOff;
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
