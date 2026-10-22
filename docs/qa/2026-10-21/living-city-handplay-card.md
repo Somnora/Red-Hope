@@ -9,6 +9,14 @@ The two long boot lines in the appendix are the C3 and C6b capture boots, with t
 - The City checkpoint below is not re-made automatically. Make it again after D1.
 - Don't boot anything while the editor target is compiling.
 
+**Before you start, run the click test (about 70 seconds, no hands).** Until 10-21 nobody had clicked the deck since the menus landed on 10-15: every check drove the game by console. The test presses the real buttons (title NEW COLONY and CONTINUE, pause RESUME, a BUILD tab and card, the five speed buttons, a manifest ADD, Traffic, the Tunnel tool, a build click and a tunnel drag) and fails loudly if any is unreachable or leaks a click into the world.
+
+```bash
+bash scripts/unreal/rh_clicktest.sh     # wants: CLICKTEST VERDICT: PASS (26 steps, REACH n/n on the deck)
+```
+
+If it fails, do not hand-play: the log (`Saved/RHCapture/logs/clicktest.log`) names the step and what is in front of the button.
+
 ## How to start
 
 Run everything from the repo root: `cd /Volumes/Unreal/red_hope/red_hope`

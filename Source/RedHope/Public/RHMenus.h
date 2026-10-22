@@ -25,7 +25,9 @@ class ARHPlayerController;
 class REDHOPE_API SRHMenus : public SCompoundWidget
 {
 public:
-	SLATE_BEGIN_ARGS(SRHMenus) {}
+	// The root fills the viewport at Z 20, above the deck: it must NOT take hits itself, or it swallows every click aimed
+	// at the deck even with no menu open (2026-10-21). An open screen blocks clicks through its own Visible backdrop.
+	SLATE_BEGIN_ARGS(SRHMenus) { _Visibility = EVisibility::SelfHitTestInvisible; }
 		SLATE_ARGUMENT(TWeakObjectPtr<ARHPlayerController>, OwnerPC)
 	SLATE_END_ARGS()
 

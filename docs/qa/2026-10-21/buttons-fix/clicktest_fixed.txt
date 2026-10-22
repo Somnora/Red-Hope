@@ -1,0 +1,32 @@
+LogRedHope: Display: CLICKTEST setup.title-open PASS 
+LogRedHope: Display: RHClick: REACH 4/4
+LogRedHope: Display: CLICKTEST sweep.title PASS REACH 4/4
+LogRedHope: Display: CLICKTEST title.blocks-world PASS 
+LogRedHope: Display: CLICKTEST title.NEW COLONY PASS 
+LogRedHope: Display: RHClick: REACH 65/65
+LogRedHope: Display: CLICKTEST sweep.deck PASS REACH 65/65
+LogRedHope: Display: CLICKTEST panel.blocks-world PASS 
+LogRedHope: Display: CLICKTEST title.CONTINUE PASS 
+LogRedHope: Display: RHClick: REACH 5/5
+LogRedHope: Display: CLICKTEST sweep.pause PASS REACH 5/5
+LogRedHope: Display: CLICKTEST pause.blocks-world PASS 
+LogRedHope: Display: CLICKTEST pause.RESUME PASS 
+LogRedHope: Display: RHClick: REACH 15/15
+LogRedHope: Display: CLICKTEST sweep.settings PASS REACH 15/15
+LogRedHope: Display: CLICKTEST settings.blocks-world PASS 
+LogRedHope: Display: CLICKTEST build.tab PASS 
+LogRedHope: Display: CLICKTEST build.card PASS 
+LogRedHope: Display: CLICKTEST build.place PASS 
+LogRedHope: Display: CLICKTEST speed.II PASS 
+LogRedHope: Display: CLICKTEST speed.3x PASS 
+LogRedHope: Display: CLICKTEST speed.8x PASS 
+LogRedHope: Display: CLICKTEST speed.60x PASS 
+LogRedHope: Display: CLICKTEST speed.1x PASS 
+LogRedHope: Display: CLICKTEST manifest.ADD PASS 
+LogRedHope: Display: CLICKTEST traffic.on PASS 
+LogRedHope: Display: CLICKTEST traffic.off PASS 
+LogRedHope: Display: CLICKTEST tunnel.tool PASS 
+LogRedHope: Display: CLICKTEST tunnel.drag PASS 
+LogRedHope: Display: CLICKTEST leak.total PASS 2 world click(s) reached OnClick, 2 made on purpose (the build and the tunnel)
+LogRedHope: Display: CLICKTEST TOTAL pass=26 fail=0
+LogRedHope: Display: CLICKTEST RESULT PASS

@@ -74,6 +74,11 @@ void ARHPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		GEngine->GameViewport->RemoveViewportWidgetContent(Deck.ToSharedRef());
 	}
 	Deck.Reset();
+	if (Menus.IsValid() && GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->RemoveViewportWidgetContent(Menus.ToSharedRef());
+	}
+	Menus.Reset();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -1325,6 +1330,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 
 void ARHPlayerController::OnClick()
 {
+	++WorldClickCount;
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	if (!Sim)
@@ -1695,6 +1701,16 @@ bool ARHPlayerController::IsMenuOpen() const
 	return Menus.IsValid() && Menus->IsOpen();
 }
 
+bool ARHPlayerController::IsDeckShown() const
+{
+	return Deck.IsValid() && Deck->GetVisibility().IsVisible();
+}
+
+bool ARHPlayerController::IsBuildDrawerOpen() const
+{
+	return Deck.IsValid() && Deck->IsBuildDrawerOpen();
+}
+
 void ARHPlayerController::OpenMenuScreen(uint8 Screen)
 {
 	URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr;
@@ -1726,7 +1742,7 @@ void ARHPlayerController::CloseMenus()
 	}
 	if (Deck.IsValid())
 	{
-		Deck->SetVisibility(EVisibility::Visible); // the deck's default
+		Deck->SetVisibility(EVisibility::SelfHitTestInvisible); // the deck's default: its panels take hits, the space between does not
 	}
 	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
 	{

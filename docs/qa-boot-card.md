@@ -47,6 +47,33 @@ Controls:
   20 minutes at 1x and 2.5 minutes at 8x. **4** = 60x skips time, but at that
   speed the robots park and nothing gets built, so play the crew phase at 8x.
 
+## Before you play: the click test (every gate, every UI commit)
+
+Captures and console cheats cannot click, so a deck that ignored the mouse
+went unseen for six days (`docs/qa/2026-10-21/buttons-investigation.md`: the
+menus overlay took every click above the deck). The click test presses the
+buttons with real Slate pointer events, one boot, no hands (about 70 seconds):
+
+```bash
+bash scripts/unreal/rh_clicktest.sh          # exit 0 and "CLICKTEST VERDICT: PASS" or it is broken
+```
+
+It boots with the title up and presses: title NEW COLONY and CONTINUE, pause
+RESUME, a BUILD tab and a card (it arms the tool), a click on the ground that
+queues the build, the five speed buttons, a manifest ADD, Traffic, the Tunnel
+tool and a drag that queues a tunnel. It also asserts that every visible button
+is reachable (`REACH n/n`), that an open menu and a deck panel swallow a click,
+and that no button press leaked into the world (`leak.total`). One
+`CLICKTEST <name> PASS|FAIL <why>` line per step is in
+`Saved/RHCapture/logs/clicktest.log`. A FAIL names the step; an
+`UNREACHABLE '<label>' ... leaf=<widget>@<file>(line)` line names what is in
+front of a button. Run it before the hand-play so you are not the one who
+finds a dead button.
+
+By hand, at any boot (backquote console): `RH.Click <label>`, `RH.Hover <label>`,
+`RH.ClickSweep [why]`, `RH.ClickText <label>`, `RH.ClickAt <fx> <fy>`,
+`RH.ClickWorld <Xm> <Ym>`, `RH.DragWorld <X0m> <Y0m> <X1m> <Y1m>`.
+
 ## 0. The crew phase — `opening`, `midgame`, `late`
 
 `midgame` and `late` are real games, not set-ups. Both are saved just after

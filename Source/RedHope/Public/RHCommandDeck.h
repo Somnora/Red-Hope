@@ -17,7 +17,9 @@ template <typename ItemType> class SListView;
 class REDHOPE_API SRHCommandDeck : public SCompoundWidget
 {
 public:
-	SLATE_BEGIN_ARGS(SRHCommandDeck) {}
+	// Full-viewport root: SelfHitTestInvisible so only its panels and buttons take hits, never the empty space between
+	// them (those clicks belong to the world). CloseMenus restores exactly this.
+	SLATE_BEGIN_ARGS(SRHCommandDeck) { _Visibility = EVisibility::SelfHitTestInvisible; }
 		SLATE_ARGUMENT(TWeakObjectPtr<ARHPlayerController>, OwnerPC)
 	SLATE_END_ARGS()
 
@@ -32,6 +34,13 @@ public:
 	void Debug_ScrollRight(float OffsetPx);
 	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
 	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
+	bool IsBuildDrawerOpen() const { return bBuildDrawerOpen; }
+	// A click, release or wheel that lands on a deck panel and that no button inside took stops here: it must not also
+	// act on the world underneath (clear a selection, drop an armed build). Bubbling reaches this root even though it is
+	// SelfHitTestInvisible; the empty space between panels is not a hit, so it still reaches the world.
+	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override { return FReply::Handled(); }
+	virtual FReply OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override { return FReply::Handled(); }
+	virtual FReply OnMouseWheel(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override { return FReply::Handled(); }
 	// Drives the uplink panel rebuild (dynamic button rows can't be attributes).
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 

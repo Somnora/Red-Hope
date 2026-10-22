@@ -146,6 +146,12 @@ public:
 	// Capture/QA (RH.Menu): open a menu screen by name (title, pause,
 	// settings, credits, none).
 	void Debug_OpenMenu(const FString& Name);
+	// Click test (RHClickTest.cpp): how many clicks reached OnClick, i.e. the WORLD. A click on a button or a panel must
+	// leave it unchanged; a button that leaks its click into the world moves it (2026-10-21: every deck click did).
+	int32 GetWorldClickCount() const { return WorldClickCount; }
+	// The deck is up (not stepped aside for a menu) and its build drawer is open.
+	bool IsDeckShown() const;
+	bool IsBuildDrawerOpen() const;
 	// Capture/QA (RH.DeckScroll): scroll the deck's right column to a pixel offset.
 	void Debug_ScrollDeck(float OffsetPx);
 	// Capture/QA (RH.DeckExpand): unfold every deck panel.
@@ -215,6 +221,7 @@ private:
 	TSharedPtr<SRHCommandDeck> Deck;
 	TSharedPtr<class SRHMenus> Menus;
 	float SpeedBeforeMenu = 1.f;
+	int32 WorldClickCount = 0; // OnClick calls: the click test's leak counter
 	// The title shows at boot except for automated runs (captures and
 	// playtests pass -unattended; -RHNoTitle skips it by hand).
 	bool ShouldShowTitle() const;

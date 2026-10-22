@@ -1,0 +1,97 @@
+LogRedHope: Display: CLICKTEST setup.title-open PASS 
+LogRedHope: Display: RHClick: REACH 4/4
+LogRedHope: Display: CLICKTEST sweep.title PASS REACH 4/4
+LogRedHope: Display: CLICKTEST title.blocks-world PASS 
+LogRedHope: Display: CLICKTEST title.NEW COLONY PASS 
+LogRedHope: Display: RHClick: REACH 0/65
+LogRedHope: Display: RHClick: UNREACHABLE '<icon>' (973,127) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '<icon>' (1729,128) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,307) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,334) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,360) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,386) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,413) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,439) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,465) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,492) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,518) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,550) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,587) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,630) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,667) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ADD' (1718,694) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'LAUNCH SUPPLY SHIP' (1607,726) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '<icon>' (1727,768) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '<icon>' (1727,804) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '<icon>' (1727,899) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'GOT IT' (802,888) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'SKIP ALL TIPS' (869,888) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'SURF' (222,474) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '-1 ▦8 ●' (222,495) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '-2' (222,517) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '-3' (222,538) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '-4' (222,559) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '-5' (222,581) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Fit a lift car (400 kg Struct)' (222,623) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Tunnel' (222,651) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'ZONE' (194,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'FURNISH' (242,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'WALLS' (297,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'DISTRICT' (352,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Living Quarters' (427,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Gardening Station' (514,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Laboratory' (592,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Workstation' (657,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Dining Room' (727,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Cooking Station' (805,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Hallway' (873,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Greenhouse' (934,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Large Workbench' (1012,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Large Chem Table' (1103,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Infirmary' (1177,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Clear' (1226,943) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Power' (238,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Logistics' (301,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Production' (373,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Command' (446,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Habitat' (513,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Boring' (572,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Life Support' (640,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Dig Site' (758,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Survey' (810,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Map' (854,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Traffic' (895,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Hold Fleet' (948,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'II' (1039,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '1x' (1066,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '3x' (1095,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '8x' (1124,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE '60x' (1156,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Save' (1252,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Display: RHClick: UNREACHABLE 'Load' (1291,980) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Error: CLICKTEST sweep.deck FAIL REACH 0/65; first miss '<icon>' (973,127) leaf=SRHMenus@RHPlayerController.cpp(56)
+LogRedHope: Error: CLICKTEST panel.blocks-world FAIL LEAKED 1 click(s) into the world
+LogRedHope: Display: CLICKTEST title.CONTINUE PASS 
+LogRedHope: Display: RHClick: REACH 5/5
+LogRedHope: Display: CLICKTEST sweep.pause PASS REACH 5/5
+LogRedHope: Display: CLICKTEST pause.blocks-world PASS 
+LogRedHope: Display: CLICKTEST pause.RESUME PASS 
+LogRedHope: Display: RHClick: REACH 15/15
+LogRedHope: Display: CLICKTEST sweep.settings PASS REACH 15/15
+LogRedHope: Display: CLICKTEST settings.blocks-world PASS 
+LogRedHope: Error: CLICKTEST build.tab FAIL the drawer did not open; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST build.card FAIL the target was not found
+LogRedHope: Error: CLICKTEST build.place FAIL no Build order was transmitted
+LogRedHope: Error: CLICKTEST speed.II FAIL clock speed 1.0, expected 0; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST speed.3x FAIL clock speed 1.0, expected 3; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST speed.8x FAIL clock speed 1.0, expected 8; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST speed.60x FAIL clock speed 1.0, expected 60; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST speed.1x FAIL LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST manifest.ADD FAIL manifest has 0 line(s), expected 1; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST traffic.on FAIL the overlay did not turn on; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST traffic.off FAIL the target was not found
+LogRedHope: Error: CLICKTEST tunnel.tool FAIL the tunnel brush is not armed; LEAKED 1 click(s) into the world
+LogRedHope: Error: CLICKTEST tunnel.drag FAIL no DigTunnel order was transmitted
+LogRedHope: Error: CLICKTEST leak.total FAIL 12 world click(s) reached OnClick, 2 made on purpose (the build and the tunnel)
+LogRedHope: Display: CLICKTEST TOTAL pass=10 fail=16
+LogRedHope: Display: CLICKTEST RESULT FAIL
