@@ -61,6 +61,8 @@ URHSimWorldSubsystem::FRHCommuteKey URHSimWorldSubsystem::MakeCommuteKey() const
 	K.ShaftReach = ShaftReachVersion; // D2: constant while there is one shaft
 K.BuildingCount = Buildings.Num();
 	K.NextBuilding = NextBuildingId;
+	K.Lift = LiftVersion;             // D4: both stay 0 with no car, so no rebuild count can move
+	K.TransitWait = TransitWaitVersion;
 	return K;
 }
 
@@ -181,7 +183,10 @@ int32 URHSimWorldSubsystem::PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm
 		{
 			continue;
 		}
-		const int64 Cm = CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), SurfacePosCm);
+		// D4 (O4): with transit on, a shaft's own per-floor cost is part of the pick - it changes only on a fit (LiftVersion is
+		// in the key), never with a wait, so the pick cannot oscillate. With no car this is today's line.
+		const int64 Cm = bHasTransit ? (int64)(-Level) * CommutePerFloorCm(S) + CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), SurfacePosCm)
+			: CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), SurfacePosCm);
 		if (Best == INDEX_NONE || Cm < BestCm) // strict: ties go to the lower Id
 		{
 			Best = S;
@@ -191,8 +196,72 @@ int32 URHSimWorldSubsystem::PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm
 	return Best == INDEX_NONE ? 0 : Best; // no shaft reaches Level: shaft 0's head, as the formula always read it
 }
 
-int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm) const
+int64 URHSimWorldSubsystem::CommutePerFloorCm(int32 ShaftId) const
 {
+	return GetLiftCars(ShaftId) > 0 ? (int64)CommuteLiftCmPerFloor : (int64)CommuteShaftCmPerFloor;
+}
+
+int64 URHSimWorldSubsystem::CommuteWaitCm(int32 ShaftId) const
+{
+	return (int64)GetTransitWaitSec(ShaftId) * (int64)CommuteWaitCmPerSec;
+}
+
+void URHSimWorldSubsystem::CommuteReachList(int32 Level, TArray<int32>& Out) const
+{
+	Out.Reset();
+	for (int32 S = 0; S < Shafts.Num(); ++S)
+	{
+		if (ShaftReaches(S, Level))
+		{
+			Out.Add(S);
+		}
+	}
+	if (Out.Num() == 0)
+	{
+		Out.Add(0); // no shaft reaches it: shaft 0, as the formula always read it
+	}
+}
+
+int32 URHSimWorldSubsystem::GetCommuteShaftPeople(int32 ShaftId) const
+{
+	if (!bHasTransit || GetCommuteRamp() <= 0.0)
+	{
+		return 0;
+	}
+	const FRHCommuteFlows& F = EnsureCommuteFlows();
+	return F.ShaftPeople.IsValidIndex(ShaftId) ? F.ShaftPeople[ShaftId] : 0;
+}
+
+int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal) const
+{
+	if (bHasTransit)
+	{
+		// D4 (2.6): each underground end pays its shaft - its per-floor cost and its frozen wait as walking cm. Between two floors
+		// the trip is split over the shafts that reach the deeper one (ascending Id): this colonist's is R[Ordinal mod n]. The
+		// choice reads no wait, so a crowd lengthens trips and never moves them.
+		if (HomeLevel < 0 && WorkLevel < 0)
+		{
+			if (HomeLevel == WorkLevel)
+			{
+				return 0;
+			}
+			TArray<int32> Reach;
+			CommuteReachList(FMath::Min(HomeLevel, WorkLevel), Reach);
+			const int32 S = Reach[FMath::Max(0, Ordinal) % Reach.Num()];
+			return (int64)FMath::Abs(HomeLevel - WorkLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S);
+		}
+		if (HomeLevel < 0)
+		{
+			const int32 S = PickCommuteShaft(HomeLevel, WorkPosCm);
+			return (int64)(-HomeLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S) + CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), WorkPosCm);
+		}
+		if (WorkLevel < 0)
+		{
+			const int32 S = PickCommuteShaft(WorkLevel, HomePosCm);
+			return (int64)(-WorkLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S) + CommuteSurfaceCm(HomePosCm, ToWholeCmCommute(Shafts[S].HeadCm));
+		}
+		return CommuteSurfaceCm(HomePosCm, WorkPosCm);
+	}
 	const int64 Per = CommuteShaftCmPerFloor;
 	if (HomeLevel < 0 && WorkLevel < 0)
 	{
@@ -247,6 +316,15 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	// (distance, districts, long) is worked out once, on its first colonist; every other colonist is one map lookup.
 	TMap<uint64, int32> TripIndex; // lookups only
 	TripIndex.Reserve(256);
+	// D4: with transit on, the per-shaft commuter count (StepTransit's people load) and, for a trip between two floors, its
+	// reach list, parallel to the trip slots (valid until the trip sort below).
+	const bool bTransit = bHasTransit;
+	TArray<TArray<int32>> TripReach;
+	TArray<int64> TripDistSum;
+	if (bTransit)
+	{
+		Out.ShaftPeople.Init(0, Shafts.Num());
+	}
 	for (const FRHColonist& C : Colonists)
 	{
 		const FIntVector* Station = ColonistStations.Find(C.Id);
@@ -310,6 +388,21 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 				T.DistCm = GetCommuteDistanceCm(Home.Level, Home.Pos, Work.Level, Work.Pos);
 				T.bLong = T.DistCm > CommuteLongCm;
 				T.Cell = DistrictIndex(HomeDistrictId) * Out.Dim + DistrictIndex(WorkDistrictId);
+				if (bTransit)
+				{
+					// D4: a floor-to-surface trip uses one shaft; a trip between two floors is split (REVISION item 5).
+					if (Home.Level < 0 && Work.Level == 0) { T.ShaftId = PickCommuteShaft(Home.Level, Work.Pos); }
+					else if (Work.Level < 0 && Home.Level == 0) { T.ShaftId = PickCommuteShaft(Work.Level, Home.Pos); }
+				}
+			}
+			if (bTransit)
+			{
+				TripReach.SetNum(Out.Trips.Num());
+				TripDistSum.SetNum(Out.Trips.Num());
+				if (bOk && Home.Level < 0 && Work.Level < 0 && Home.Level != Work.Level)
+				{
+					CommuteReachList(FMath::Min(Home.Level, Work.Level), TripReach[TripSlot]);
+				}
 			}
 		}
 		FRHCommuteTrip& Trip = Out.Trips[TripSlot];
@@ -317,19 +410,52 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		{
 			continue;
 		}
+		// The colonist's own distance: the trip's, except on a split trip, where colonist k of the trip (in the order this
+		// loop walks the roster) rides shaft R[k mod n] and pays that shaft exactly. With no transit: the trip's, as before.
+		int64 Dist = Trip.DistCm;
+		bool bLong = Trip.bLong;
+		if (bTransit)
+		{
+			const TArray<int32>& Reach = TripReach[TripSlot];
+			if (Reach.Num() > 0)
+			{
+				const int32 S = Reach[Trip.Count % Reach.Num()];
+				Dist = (int64)FMath::Abs(Trip.HomeLevel - Trip.WorkLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S);
+				bLong = Dist > CommuteLongCm;
+				++Out.ShaftPeople[S];
+				TripDistSum[TripSlot] += Dist;
+			}
+			else if (Trip.ShaftId != INDEX_NONE && Out.ShaftPeople.IsValidIndex(Trip.ShaftId))
+			{
+				++Out.ShaftPeople[Trip.ShaftId];
+			}
+		}
 		++Trip.Count;
 		++Out.Employed;
 		Out.Ids.Add(C.Id);
-		Out.Dists.Add(Trip.DistCm);
-		Out.Commuters += Trip.DistCm > 0 ? 1 : 0;
-		Out.MaxDistCm = FMath::Max(Out.MaxDistCm, Trip.DistCm);
-		if (Trip.bLong)
+		Out.Dists.Add(Dist);
+		Out.Commuters += Dist > 0 ? 1 : 0;
+		Out.MaxDistCm = FMath::Max(Out.MaxDistCm, Dist);
+		if (bLong)
 		{
 			++Out.LongCount;
 			Out.LongIds.Add(C.Id);
 		}
 		++Out.Flow[Trip.Cell];
-		Out.LongFlow[Trip.Cell] += Trip.bLong ? 1 : 0;
+		Out.LongFlow[Trip.Cell] += bLong ? 1 : 0;
+	}
+	if (bTransit)
+	{
+		// For display only (GetCommutePairs): a split trip's own distance is the mean of its colonists', floored, and its
+		// long flag that mean against the line. No rule reads them.
+		for (int32 i = 0; i < Out.Trips.Num(); ++i)
+		{
+			if (TripReach.IsValidIndex(i) && TripReach[i].Num() > 0 && Out.Trips[i].Count > 0)
+			{
+				Out.Trips[i].DistCm = TripDistSum[i] / Out.Trips[i].Count;
+				Out.Trips[i].bLong = Out.Trips[i].DistCm > CommuteLongCm;
+			}
+		}
 	}
 	// The readers binary-search Ids. Colonists are Id-ascending today (appended with a rising counter), but nothing here
 	// may rely on it: when they are not, Ids and Dists are sorted together by Id.
@@ -379,7 +505,8 @@ const URHSimWorldSubsystem::FRHCommuteFlows& URHSimWorldSubsystem::EnsureCommute
 		FRHCommuteFlows Fresh;
 		DeriveCommuteFlows(Fresh);
 		if (Fresh.Flow != CommuteFlows.Flow || Fresh.LongFlow != CommuteFlows.LongFlow || Fresh.Ids != CommuteFlows.Ids
-			|| Fresh.Dists != CommuteFlows.Dists || Fresh.LongIds != CommuteFlows.LongIds || Fresh.LongCount != CommuteFlows.LongCount)
+			|| Fresh.Dists != CommuteFlows.Dists || Fresh.LongIds != CommuteFlows.LongIds || Fresh.LongCount != CommuteFlows.LongCount
+			|| Fresh.ShaftPeople != CommuteFlows.ShaftPeople)
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the commute flows cache is stale (%d long reused, %d re-derived; districts v%u, colonists v%u, jobs v%u, built v%u)"),
 				CommuteFlows.LongCount, Fresh.LongCount, DistrictsVersion, ColonistSetVersion, JobsVersion, RoadGraph.BuiltVersion);
@@ -397,7 +524,8 @@ bool URHSimWorldSubsystem::Debug_CommuteCachesFresh() const
 	FRHCommuteFlows Fresh;
 	DeriveCommuteFlows(Fresh);
 	return Fresh.Flow == CommuteFlows.Flow && Fresh.LongFlow == CommuteFlows.LongFlow && Fresh.Ids == CommuteFlows.Ids
-		&& Fresh.Dists == CommuteFlows.Dists && Fresh.LongIds == CommuteFlows.LongIds && Fresh.LongCount == CommuteFlows.LongCount;
+		&& Fresh.Dists == CommuteFlows.Dists && Fresh.LongIds == CommuteFlows.LongIds && Fresh.LongCount == CommuteFlows.LongCount
+		&& Fresh.ShaftPeople == CommuteFlows.ShaftPeople;
 }
 
 void URHSimWorldSubsystem::Debug_ReroutePosition()

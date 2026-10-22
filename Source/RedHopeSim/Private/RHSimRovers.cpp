@@ -234,6 +234,7 @@ void URHSimWorldSubsystem::ReturnHaulCargo(int32 TaskId, FName Resource, double 
 	{
 		return;
 	}
+	HaulReturnedKg += Kg; // D4: the mass balance's returned leg (transient)
 	bool bPlaced = false;
 	if (const FRHTask* T = FindTask(TaskId))
 	{
@@ -270,6 +271,8 @@ void URHSimWorldSubsystem::ReturnHaulCargo(int32 TaskId, FName Resource, double 
 	if (!bPlaced)
 	{
 		UE_LOG(LogRedHopeSim, Warning, TEXT("ReturnHaulCargo: no source and no Lander for %.1f kg of %s"), Kg, *Resource.ToString());
+		HaulReturnedKg -= Kg;
+		HaulLostKg += Kg;
 		return;
 	}
 	OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));

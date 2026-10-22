@@ -9,6 +9,8 @@
 #include "MassEntitySubsystem.h"
 #include "Mass/EntityFragments.h"
 #include "RHAgentFragments.h"
+#include "RHRobotMovement.h"
+#include "RHElevatorLayout.h"
 #include "Animation/AnimSequence.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -862,6 +864,39 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 	UE_LOG(LogRedHope, Display, TEXT("Visualizer tracking %d agents"), Tracked.Num());
 }
 
+void URHAgentVisualizerSubsystem::SetViewLevel(int32 Level)
+{
+	ViewLevel = Level;
+	SetSliceHidden(Level != 0); // the surface layer (rovers, cargo); Tick shows each walker on its own floor
+}
+
+UStaticMeshComponent* URHAgentVisualizerSubsystem::GetCabBox(int32 Index)
+{
+	while (CabBoxes.Num() <= Index)
+	{
+		AActor* Holder = Parts.Num() > 0 && Parts[0] ? Parts[0]->GetOwner() : nullptr;
+		UStaticMeshComponent* Box = Holder ? NewObject<UStaticMeshComponent>(Holder) : nullptr;
+		if (Box)
+		{
+			Box->RegisterComponent();
+			Holder->AddInstanceComponent(Box);
+			Box->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+			Box->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Box->SetAbsolute(true, true, true);
+			if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
+			{
+				UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, Box);
+				Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(0.30f, 0.36f, 0.40f));
+				Mid->SetVectorParameterValue(FName("Emissive"), FLinearColor(0.02f, 0.10f, 0.12f));
+				Box->SetMaterial(0, Mid);
+			}
+			Box->SetVisibility(false);
+		}
+		CabBoxes.Add(Box);
+	}
+	return CabBoxes[Index].Get();
+}
+
 void URHAgentVisualizerSubsystem::SetSliceHidden(bool bHidden)
 {
 	bSliceHidden = bHidden;
@@ -1089,6 +1124,13 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	}
 
 	RebuildObstacles();
+	// D4: robots below and riding are drawn where the sim has them (the surface detour planner knows no floors); a rider is
+	// lifted along its column by the ride's progress, and riders holding for a car queue beside the column.
+	const URHSimWorldSubsystem* LiftSim = GetWorld()->GetSubsystem<URHSimWorldSubsystem>();
+	const bool bLifts = LiftSim && LiftSim->HasRobotLifts();
+	const double LiftFloorH = LiftSim ? LiftSim->GetFloorHeightCm() : 400.0;
+	TMap<FIntPoint, int32> QueueRank; // (shaft, level) -> riders already queued there this frame
+	int32 CabsUsed = 0;
 	const bool bRouteLog = CVarRobotRouteLog.GetValueOnGameThread() != 0 && GetWorld()->GetTimeSeconds() >= NextRouteLogS;
 	int32 LogN = 0, LogDrawnIn = 0, LogSimIn = 0, LogParked = 0;
 	float LogGapSum = 0.f, LogGapMax = 0.f;
@@ -1126,7 +1168,36 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 			}
 		}
 		FVector Pos;
-		if (bDrive)
+		bool bInCab = false;
+		bool bDeepDraw = false;
+		FVector DeepPos = SimPos;
+		if (bLifts && !bRoverI)
+		{
+			FRHRideState Ride;
+			const FRHRobotRoadPath* DeepRoad = LiftSim->GetRobotRoadPath(Tracked[i]);
+			const bool bRiding = LiftSim->GetRideState(Tracked[i], Ride);
+			bDeepDraw = bRiding || (DeepRoad && DeepRoad->bDeep) || LiftSim->LevelOfZ(SimPos.Z) != 0;
+			if (bRiding && Ride.HoldStepsLeft > 0)
+			{
+				int32& Rank = QueueRank.FindOrAdd(FIntPoint(Ride.Shaft, Ride.FromLevel));
+				DeepPos += FVector(-150.0 * (double)(Rank + 1), 0.0, 0.0);
+				++Rank;
+			}
+			else if (bRiding)
+			{
+				DeepPos.Z = FMath::Lerp((double)Ride.FromLevel, (double)Ride.ToLevel, (double)Ride.RideFrac()) * LiftFloorH + RH::RobotZOffsetCm;
+				// The robots' car runs on the column beside the crew's cab (drawn there, so the rider is not hidden inside the cab's walls).
+				DeepPos.Y += (double)RHElevator::CabHalfY + 125.0;
+				bInCab = true;
+			}
+		}
+		if (bDeepDraw)
+		{
+			Pos = DeepPos;
+			if (Trips.IsValidIndex(i)) { Trips[i].bInit = false; } // back on the surface, the drawn walk starts from here
+			if (RoverVis.IsValidIndex(i)) { RoverVis[i].Drive.bInit = false; }
+		}
+		else if (bDrive)
 		{
 			Pos = AdvanceRover(i, SimPos, SimSpeed, DriveTask, DeltaTime, RoverYaw, bRoverI);
 			if (!bRoverI && Trips.IsValidIndex(i))
@@ -1236,10 +1307,25 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		// Skeletal path: one component per robot - place it feet-down at the
 		// entity, face travel, swap Walk/Idle on the speed threshold. The clip
 		// carries the gait, so the procedural Bob is skipped.
+		// D4: drawn only on its own floor (every robot is on the surface with no lift car).
+		const bool bOnView = bLifts ? LiftSim->LevelOfZ(Pos.Z) == ViewLevel : !bSliceHidden;
+		if (bInCab && bOnView)
+		{
+			if (UStaticMeshComponent* Cab = GetCabBox(CabsUsed++))
+			{
+				Cab->SetWorldLocationAndRotation(FVector(Pos.X, Pos.Y, Pos.Z + TerrainZ - RH::RobotZOffsetCm - 4.0), FRotator::ZeroRotator);
+				Cab->SetWorldScale3D(FVector(1.7f, 1.7f, 0.08f)); // the car's floor plate, under the rider's feet
+				if (!Cab->IsVisible()) { Cab->SetVisibility(true); }
+			}
+		}
 		if (bUseSkeletal && SkelBodies.IsValidIndex(i))
 		{
 			if (USkeletalMeshComponent* Skel = SkelBodies[i])
 			{
+				if (Skel->IsVisible() != bOnView)
+				{
+					Skel->SetVisibility(bOnView);
+				}
 				// Sprite-generated meshes face the camera, not +X - fold the
 				// shared correction (rh.WalkerYawOffsetDeg) into the yaw.
 				static const auto* YawOff = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("rh.WalkerYawOffsetDeg"));
@@ -1258,7 +1344,7 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 						const FRHTaskFragment* Task = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
 						const FRHRobotFragment* Robot = EntityManager.GetFragmentDataPtr<FRHRobotFragment>(Tracked[i]);
 						const float Cargo = Task ? Task->CargoKg : 0.f;
-						const bool bShow = !bSliceHidden && Cargo > 0.f;
+						const bool bShow = bOnView && Cargo > 0.f;
 						if (Lump->IsVisible() != bShow)
 						{
 							Lump->SetVisibility(bShow);
@@ -1339,6 +1425,15 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 			}
 			continue;
 		}
+		if (!bOnView)
+		{
+			const FTransform Hidden(FQuat::Identity, FVector(0.f, 0.f, -100000.f), FVector(0.001f));
+			for (int32 P = 0; P < (int32)EPart::COUNT; ++P)
+			{
+				Out[P].Add(Hidden);
+			}
+			continue;
+		}
 		const FTransform Entity(FRotator(0.f, FacingYawDeg[i], 0.f).Quaternion(), Pos + FVector(0, 0, Bob + TerrainZ));
 
 		// Rigid parts: offsets in entity space.
@@ -1358,6 +1453,13 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		Out[(int32)EPart::ArmR].Add(Limb(FVector(0, ShoulderHalfY, ShoulderZ), Swing * 0.7f, ArmLen, FVector(0.10f, 0.10f, 0), Entity));
 	}
 
+	for (int32 k = CabsUsed; k < CabBoxes.Num(); ++k)
+	{
+		if (UStaticMeshComponent* Cab = CabBoxes[k].Get())
+		{
+			if (Cab->IsVisible()) { Cab->SetVisibility(false); }
+		}
+	}
 	if (bRouteLog)
 	{
 		NextRouteLogS = GetWorld()->GetTimeSeconds() + 2.0;

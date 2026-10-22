@@ -49,6 +49,9 @@ public:
 	// Sliced-floor view (M1-d): robots are surface actors until later gates
 	// send them below; the whole ISM layer hides when the elevator descends.
 	void SetSliceHidden(bool bHidden);
+	// D4: the viewed floor. Each robot is drawn only on its own floor (its sim Z), so with no lift car - every robot on the
+	// surface - this is SetSliceHidden(Level != 0) exactly. Rovers never leave the surface.
+	void SetViewLevel(int32 Level);
 
 private:
 	void EnsureMeshComponent();
@@ -127,6 +130,10 @@ private:
 	TArray<float> FacingYawDeg;
 	TArray<float> StridePhase;
 	bool bSliceHidden = false;
+	int32 ViewLevel = 0;
+	// D4: a cab box around each robot riding a lift car, pooled (hidden when unused). Presentation only.
+	TArray<TWeakObjectPtr<UStaticMeshComponent>> CabBoxes;
+	UStaticMeshComponent* GetCabBox(int32 Index);
 
 	// Alive pass 2 (c), presentation only: where a robot is DRAWN. The sim
 	// walks robots in straight lines (and stays the authority on where they

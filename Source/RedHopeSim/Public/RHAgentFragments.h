@@ -71,6 +71,9 @@ struct REDHOPESIM_API FRHTaskFragment : public FMassFragment
 	// own slot: DigDepositId already means a site or a pad id for other tasks.
 	int32 RoadEdgeId = 0;
 	FVector TargetCm = FVector::ZeroVector;
+	// D4: the floor TargetCm is on (0 = the surface), set beside every TargetCm write. The deep path's replan key is
+	// (TargetCm, TargetLevel), so a level change can never turn on float noise in Z.
+	int32 TargetLevel = 0;
 	FName CargoResource;
 	float CargoKg = 0.f;
 	// Repair only: the worn robot this maintenance unit is driving to.

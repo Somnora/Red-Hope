@@ -244,6 +244,47 @@ bool URHAgentSubsystem::GetRobotPosition(FMassEntityHandle Entity, FVector& OutP
 	return true;
 }
 
+bool URHAgentSubsystem::SetRobotPosition(FMassEntityHandle Entity, const FVector& PosCm)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem || !MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		return false;
+	}
+	MassSubsystem->GetMutableEntityManager().GetFragmentDataChecked<FTransformFragment>(Entity).GetMutableTransform().SetLocation(PosCm);
+	return true;
+}
+
+bool URHAgentSubsystem::GetRobotWear(FMassEntityHandle Entity, float& OutWear) const
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (!MassSubsystem || !MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		return false;
+	}
+	OutWear = MassSubsystem->GetEntityManager().GetFragmentDataChecked<FRHWearFragment>(Entity).Wear;
+	return true;
+}
+
+void URHAgentSubsystem::Debug_SetRobotWear(FMassEntityHandle Entity, float Wear)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (MassSubsystem && MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		MassSubsystem->GetMutableEntityManager().GetFragmentDataChecked<FRHWearFragment>(Entity).Wear = FMath::Clamp(Wear, 0.f, 100.f);
+	}
+}
+
+void URHAgentSubsystem::Debug_SetRobotChargeWh(FMassEntityHandle Entity, float ChargeWh)
+{
+	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
+	if (MassSubsystem && MassSubsystem->GetEntityManager().IsEntityValid(Entity))
+	{
+		FRHBatteryFragment& Battery = MassSubsystem->GetMutableEntityManager().GetFragmentDataChecked<FRHBatteryFragment>(Entity);
+		Battery.ChargeWh = FMath::Clamp(ChargeWh, 0.f, Battery.CapacityWh);
+	}
+}
+
 float URHAgentSubsystem::RemoveRobotWear(FMassEntityHandle Entity, float Amount)
 {
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
@@ -300,6 +341,7 @@ void URHAgentSubsystem::CollectPanelRows(TArray<FRHRobotPanelRow>& OutRows) cons
 		Row.TaskType = EntityManager.GetFragmentDataChecked<FRHTaskFragment>(Entity).TaskType;
 		Row.ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
 		Row.Wear = EntityManager.GetFragmentDataChecked<FRHWearFragment>(Entity).Wear;
+		Row.PosZCm = EntityManager.GetFragmentDataChecked<FTransformFragment>(Entity).GetTransform().GetLocation().Z;
 		OutRows.Add(Row);
 	}
 }

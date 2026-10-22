@@ -4481,7 +4481,7 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	}
 	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
 	{
-		Agents->SetSliceHidden(!bSurface);
+		Agents->SetViewLevel(ViewLevel); // D4: robots on their own floor (SetSliceHidden(!bSurface) while none is below)
 	}
 	// Carve tiles: only the viewed floor's pocket shows. At SURF none match
 	// (tiles are all negative-Z) - the surface stays clean.

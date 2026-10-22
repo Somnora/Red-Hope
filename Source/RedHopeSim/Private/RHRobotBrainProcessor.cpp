@@ -1,4 +1,5 @@
 #include "RHRobotBrainProcessor.h"
+#include "RHRobotMovement.h"
 #include "RedHopeSim.h"
 #include "RHAgentFragments.h"
 #include "RHSimTypes.h"
@@ -50,10 +51,13 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 	}
 	const float SubDt = URHSimClockSubsystem::SubStepSeconds;
 	const float WearHalt = Sim->GetWearHaltThreshold();
+	// D4 (REVISION item 2(b)): each robot sub-step is stamped with its own end, the formula Tick gives the world's steps, so a
+	// ledger event's sol depends on sim time only, never on how a frame batches its sub-steps.
+	const double FrameEnd = Clock->GetSimSecondsTotal();
 
 	int32 Matched = 0;
 	EntityQuery.ForEachEntityChunk(Context,
-		[Steps, SubDt, WearHalt, &Matched, StateTreeSubsystemPtr](FMassExecutionContext& ChunkContext)
+		[Steps, SubDt, WearHalt, &Matched, StateTreeSubsystemPtr, Sim, FrameEnd](FMassExecutionContext& ChunkContext)
 	{
 		Matched += ChunkContext.GetNumEntities();
 		UMassStateTreeSubsystem& StateTreeSubsystem = *StateTreeSubsystemPtr;
@@ -109,10 +113,12 @@ void URHRobotBrainProcessor::Execute(FMassEntityManager& EntityManager, FMassExe
 				{
 					break;
 				}
+				Sim->SetRobotStepEnd(RH::RobotSubStepEnd(FrameEnd, Steps, Step, URHSimClockSubsystem::SubStepSeconds));
 				StateTreeContext.Tick(SubDt);
 			}
 		}
 	});
+	Sim->SetRobotStepEnd(-1.0);
 
 	// Ops signal: which brain population is live (logs only on change).
 	static int32 LastMatched = -1;

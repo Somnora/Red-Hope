@@ -24,7 +24,7 @@ namespace
 	}
 }
 
-bool RH::MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover)
+bool RH::MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover, float CargoKg, int32 TargetLevel)
 {
 	if (bRover)
 	{
@@ -36,6 +36,16 @@ bool RH::MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransfo
 			return MoveToward(Transform, TargetCm, SpeedMps * (float)Profile.OffRoadMul, Dt);
 		}
 		return Sim.MoveAlongRoads(Entity, Transform, TargetCm, SpeedMps, Dt, &Profile);
+	}
+	// D4: a robot below, or bound below, drives the deep network once a lift car is fitted (rovers never go below). Back on
+	// the surface with a surface target, its deep trip is forgotten and the body below runs as it always did.
+	if (Sim.HasRobotLifts())
+	{
+		if (Sim.LevelOfZ(Transform.GetLocation().Z) != 0 || TargetLevel != 0)
+		{
+			return Sim.MoveAlongDeep(Entity, Transform, TargetCm, TargetLevel, SpeedMps, Dt, CargoKg);
+		}
+		Sim.DropDeepPath(Entity);
 	}
 	if (!Sim.HasBuiltRoads())
 	{
@@ -70,42 +80,6 @@ double URHSimWorldSubsystem::GetRoadStructAvailableKg() const
 		}
 	}
 	return Total;
-}
-
-bool URHSimWorldSubsystem::TakeRoadStruct(double Kg)
-{
-	if (Kg <= 0.0)
-	{
-		return true;
-	}
-	if (GetRoadStructAvailableKg() + 1.0e-6 < Kg)
-	{
-		return false;
-	}
-	// Building order, outputs before held inputs (the order a hauler draws).
-	double Left = Kg;
-	for (FRHBuildingInstance& B : Buildings)
-	{
-		if (Left <= 0.0)
-		{
-			break;
-		}
-		if (B.bUnderConstruction || !AreLevelsLinked(B.Level, 0))
-		{
-			continue;
-		}
-		for (TMap<FName, double>* Shelf : { &B.OutputKg, &B.InputKg })
-		{
-			if (double* Held = Shelf->Find(NAME_StructRes))
-			{
-				const double Take = FMath::Min(Left, *Held);
-				*Held -= Take;
-				Left -= Take;
-			}
-		}
-	}
-	OnStockChanged.Broadcast(NAME_StructRes, GetTotalSolid(NAME_StructRes));
-	return true;
 }
 
 bool URHSimWorldSubsystem::RoadStripHitsBox(const FVector2D& A, const FVector2D& B, const FVector2D& Centre, const FVector2D& Half) const
@@ -303,8 +277,9 @@ void URHSimWorldSubsystem::ExecuteBuildRoad(const FRHCommand& Cmd)
 		OnCommandRejected.Broadcast(Cmd, Reason);
 		return;
 	}
-	// Atomic: the whole bill leaves the stores now, or the order is refused.
-	if (!TakeRoadStruct(Pre.BillKg))
+	// Atomic: the whole bill leaves the stores now, or the order is refused. D4: through the shared bill taker (the same take
+	// order; with transit on, a part taken from a floor charges its shaft).
+	if (!TakeStructForBill(Pre.BillKg, TEXT("road")))
 	{
 		OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Insufficient Struct (%.0f kg needed)"), Pre.BillKg));
 		return;

@@ -120,6 +120,8 @@ public:
 	int32 GetActiveLevel() const { return ActiveLevel; }
 	// D2: move the camera to the next shaft head in Id order (wraps). A no-op with one shaft.
 	void FocusNextShaft();
+	// D4: the shaft whose head is nearest the camera focus (0 with one shaft) - the shaft card's shaft.
+	int32 GetNearestShaftId() const;
 	// The deck's visible feedback channels (M1-b Gate C: GEngine debug text
 	// provably hides under the Slate deck, so the deck renders these instead).
 	// Confirm = one-shot notice with expiry (order sent, save/load result);

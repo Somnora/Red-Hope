@@ -347,6 +347,38 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	{
 		AddFloorCell(-Floor);
 	}
+	// D4: the shaft card - the shaft nearest the camera: its lift cars (or the hoist), load and wait, and the fit verb.
+	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 1.f))
+	[
+		SNew(SBox)
+		.WidthOverride(118.f)
+		.Visibility(this, &SRHCommandDeck::GetLiftCardVisibility)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 2.f))
+			[
+				SNew(STextBlock)
+				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetLiftCardText)))
+				.Font(RHDeck::Label(9))
+				.AutoWrapText(true)
+				.ColorAndOpacity(RHDeck::TextDim)
+			]
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SButton)
+				.ButtonStyle(&RHDeck::TintButtonStyle())
+				.ContentPadding(FMargin(7.f, 3.f))
+				.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFitLift))
+				[
+					SNew(STextBlock)
+					.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFitLiftLabel)))
+					.Font(RHDeck::Label(9))
+					.AutoWrapText(true)
+					.ColorAndOpacity(RHDeck::Text)
+				]
+			]
+		]
+	];
 	// D3 (Q2a): the tunnel brush, once any shaft is bored; below it the viewed floor's tunnels (RefreshTunnelList).
 	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 1.f))
 	[
@@ -2045,6 +2077,72 @@ FReply SRHCommandDeck::HandleDistrict(FName Kind)
 	if (PC.IsValid())
 	{
 		PC->BeginDistrictPaint(Kind);
+	}
+	return FReply::Handled();
+}
+
+// D4 (placeholder copy for the Gate-D framing review, docs/qa/2026-10-15/gate-d-wording.md rows T2-T4): the shaft card.
+EVisibility SRHCommandDeck::GetLiftCardVisibility() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return (Sim && PC.IsValid() && Sim->GetShaftDepth(PC->GetNearestShaftId()) >= 1) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetLiftCardText() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !PC.IsValid())
+	{
+		return FText::GetEmpty();
+	}
+	const int32 S = PC->GetNearestShaftId();
+	const int32 Cars = Sim->GetLiftCars(S);
+	if (!Sim->HasTransit())
+	{
+		return FText::FromString(FString::Printf(TEXT("Shaft %d: no lift car"), S));
+	}
+	const FString Head = Cars > 0 ? FString::Printf(TEXT("Shaft %d: cars %d/%d"), S, Cars, Sim->GetMaxLiftCars()) : FString::Printf(TEXT("Shaft %d: hoist"), S);
+	return FText::FromString(FString::Printf(TEXT("%s\nload %lld / %lld\nwait %d s"), *Head,
+		Sim->GetShaftPeopleLoad(S) + Sim->GetShaftCargoLoad(S), Sim->GetShaftCapacityPlaces(S), Sim->GetTransitWaitSec(S)));
+}
+
+FText SRHCommandDeck::GetFitLiftLabel() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !PC.IsValid())
+	{
+		return FText::GetEmpty();
+	}
+	FString Why;
+	double Bill = 0.0;
+	const bool bOk = Sim->CanFitLift(PC->GetNearestShaftId(), Why, &Bill);
+	const FString Verb = FString::Printf(TEXT("Fit a lift car (%.0f kg Struct)"), Bill);
+	return FText::FromString(bOk ? Verb : FString::Printf(TEXT("%s - %s"), *Verb, *Why));
+}
+
+FReply SRHCommandDeck::HandleFitLift()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && PC.IsValid())
+	{
+		const int32 S = PC->GetNearestShaftId();
+		FString Why;
+		if (Sim->CanFitLift(S, Why))
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("FitLift");
+			Cmd.Value = S;
+			Sim->EnqueueCommand(Cmd);
+			PC->PostConfirm(FString::Printf(TEXT("Lift order transmitted: a car for shaft %d"), S), FLinearColor(0.2f, 0.9f, 1.f));
+		}
+		else
+		{
+			PC->PostConfirm(Why, FLinearColor(1.f, 0.6f, 0.2f));
+		}
 	}
 	return FReply::Handled();
 }

@@ -51,6 +51,18 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 
 	float DrawW = Robot.DrawIdleW;
 	const bool bRover = Robot.RobotClass == FName("Rover"); // C6a: a cargo rover drives with its own movement profile
+	// D4: the robot's floor, read from its Z (0 for every robot until a lift car is fitted). A sub-step spent holding at a column
+	// for a ride draws idle power and accrues no wear (Move overrides the movement draw then).
+	const int32 Level = Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0;
+	const auto Move = [&](float CargoKg) -> bool
+	{
+		const bool bArrived = RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, bRover, CargoKg, Task.TargetLevel);
+		if (Sim->DidRobotHoldThisStep(Entity))
+		{
+			DrawW = Robot.DrawIdleW;
+		}
+		return bArrived;
+	};
 	// Fleet reality (M1-b): worn machinery works slower - linear from the
 	// degrade threshold down to nothing at halt (the processor's halt gate
 	// stops ticking before the multiplier ever reaches zero).
@@ -77,13 +89,14 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		else if (Robot.RobotClass == FName("Hauler"))
 		{
 			FRHTask Board;
-			if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board))
+			if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board, Level))
 			{
 				Task.TaskType = (uint8)ERHTaskType::Haul;
 				Task.TaskId = Board.Id;
 				Task.CargoResource = Board.Resource;
 				Task.CargoKg = 0.f;
-				Task.TargetCm = Sim->GetSiteLocation(Board.From);
+				// D4: the pickup at its own floor once a lift is fitted (TryClaimHaul gave only reachable ones).
+				Task.TargetCm = Sim->HasRobotLifts() ? Sim->GetRobotTarget(Board.From, Level, Transform.GetLocation(), Task.TargetLevel) : Sim->GetSiteLocation(Board.From);
 				Task.Phase = 0;
 			}
 		}
@@ -105,14 +118,14 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		else if (Robot.RobotClass == FName("Fabricator"))
 		{
 			FRHTask Board;
-			if (Sim->TryClaimBuild(Entity, Transform.GetLocation(), Board))
+			if (Sim->TryClaimBuild(Entity, Transform.GetLocation(), Board, Level))
 			{
 				Task.TaskType = (uint8)ERHTaskType::Build;
 				Task.TaskId = Board.Id;
 				Task.DigDepositId = Board.To.BuildingId; // reused slot: construction site id
 				Task.RoadEdgeId = Board.To.RoadEdgeId;   // C4: a road edge is labour only, in its own slot
-				// Cross-level sites are worked from the shaft head (M1-d).
-				Task.TargetCm = Sim->GetApproachPoint(Board.To, /*RobotLevel*/ 0);
+				// Cross-level sites are worked from the shaft head (M1-d); D4: or at the site's cell, when a fitted lift reaches it.
+				Task.TargetCm = Sim->GetRobotTarget(Board.To, Level, Transform.GetLocation(), Task.TargetLevel);
 				Task.Phase = 0;
 			}
 		}
@@ -165,10 +178,34 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 			Task = FRHTaskFragment();
 			break;
 		}
+		if (Sim->HasRobotLifts())
+		{
+			// D4 (D3 REVISION item 4): across floors, or from below, only to a halted patient - it does not move, so one deep
+			// plan serves - and never through the rock. A patient that is no longer halted (repaired, or it rode away) is released.
+			const int32 PatientLevel = Sim->LevelOfZ(TargetCm.Z);
+			if (PatientLevel != Level || Level < 0)
+			{
+				if (!Sim->IsRobotHalted(Task.RepairTarget))
+				{
+					Sim->ReleaseRepairClaim(Task.RepairTarget);
+					Task = FRHTaskFragment();
+					break;
+				}
+				Task.TargetCm = TargetCm;
+				Task.TargetLevel = PatientLevel;
+				if (Move(0.f))
+				{
+					Sim->ApplyRepairAt(Task.RepairTarget, Sim->LevelOfZ(Transform.GetLocation().Z));
+					Sim->ReleaseRepairClaim(Task.RepairTarget);
+					Task = FRHTaskFragment();
+				}
+				break;
+			}
+		}
 		Task.TargetCm = TargetCm;
 		if (RH::MoveToward(Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
 		{
-			Sim->ApplyRepairAt(Task.RepairTarget);
+			Sim->ApplyRepairAt(Task.RepairTarget, Level);
 			Sim->ReleaseRepairClaim(Task.RepairTarget);
 			Task = FRHTaskFragment();
 		}
@@ -206,7 +243,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		DrawW = Robot.DrawMoveW;
 		if (Task.Phase == 0) // to pickup
 		{
-			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, bRover))
+			if (Move(0.f))
 			{
 				Task.Phase = 1;
 			}
@@ -215,7 +252,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		{
 			float LoadedKg = 0.f;
 			FVector DropoffCm = FVector::ZeroVector;
-			if (Sim->HaulLoad(Task.TaskId, Robot.CargoCapKg, LoadedKg, DropoffCm))
+			if (Sim->HaulLoad(Task.TaskId, Robot.CargoCapKg, LoadedKg, DropoffCm, Level, &Task.TargetLevel))
 			{
 				Task.CargoKg = LoadedKg;
 				Task.TargetCm = DropoffCm;
@@ -228,10 +265,24 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		}
 		else if (Task.Phase == 2) // to dropoff
 		{
-			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, bRover))
+			// D4 (REVISION item 6): with transit on, a drop at the head for a site on another floor holds there until the
+			// cage has taken the load down (idle draw, no wear), then credits. With no transit the hold is never entered.
+			if (Sim->InHandoffHold(Entity, Task.TaskId, Transform.GetLocation()))
 			{
-				Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None);
-				Task = FRHTaskFragment();
+				DrawW = Robot.DrawIdleW;
+				if (Sim->StepHandoffHold(Entity))
+				{
+					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+					Task = FRHTaskFragment();
+				}
+			}
+			else if (Move(Task.CargoKg))
+			{
+				if (Sim->BeginHandoffHold(Entity, Task.TaskId, Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0, Transform.GetLocation()) == 0)
+				{
+					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0);
+					Task = FRHTaskFragment();
+				}
 			}
 		}
 		break;
@@ -242,7 +293,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		if (Task.Phase == 0)
 		{
 			DrawW = Robot.DrawMoveW;
-			if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime))
+			if (Move(0.f))
 			{
 				Task.Phase = 1;
 			}
@@ -253,7 +304,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 			// C4: a road edge is labour only (its own slot, never the site id).
 			const bool bDone = Task.RoadEdgeId > 0
 				? Sim->ApplyRoadWork(Task.RoadEdgeId, DeltaTime * Robot.WorkRate * WearMul)
-				: Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul);
+				: Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul, Level);
 			if (bDone)
 			{
 				Sim->CompleteTask(Task.TaskId);
@@ -313,6 +364,10 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 		if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f && Robot.RobotClass == FName("Rover"))
 		{
 			Sim->ReturnHaulCargo(Task.TaskId, Task.CargoResource, Task.CargoKg);
+		}
+		else if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
+		{
+			Sim->NoteHaulCargoLost(Task.CargoKg); // D4's mass balance: the hauler's load is lost, as it always was
 		}
 		Sim->AbandonTask(Task.TaskId);
 	}
@@ -375,13 +430,18 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 	}
 	if (Task.Phase == 0)
 	{
-		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, Robot.RobotClass == FName("Rover")))
+		if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, DeltaTime, Robot.RobotClass == FName("Rover"), 0.f, Task.TargetLevel))
 		{
 			Task.Phase = 1;
 			Sim->JoinPadQueue(Task.DigDepositId, Entity); // docked: take a queue slot
 		}
-		Drain(Battery, Robot.DrawMoveW, DeltaTime);
-		Sim->AccrueWear(Wear.Wear, Robot.WearPerSol, DeltaTime); // the drive costs wear; the dock does not
+		// D4: a sub-step holding at a column for the ride up draws idle power and costs no wear.
+		const bool bHeld = Sim->DidRobotHoldThisStep(Entity);
+		Drain(Battery, bHeld ? Robot.DrawIdleW : Robot.DrawMoveW, DeltaTime);
+		if (!bHeld)
+		{
+			Sim->AccrueWear(Wear.Wear, Robot.WearPerSol, DeltaTime); // the drive costs wear; the dock does not
+		}
 	}
 	else
 	{
@@ -432,6 +492,16 @@ bool FRHNeedsChargeCondition::TestCondition(FStateTreeExecutionContext& Context)
 	const FRHTaskFragment& Task = Context.GetExternalData(TaskHandle);
 	const FRHRobotFragment& Robot = Context.GetExternalData(RobotHandle);
 	const FVector Pos = Context.GetExternalData(TransformHandle).GetTransform().GetLocation();
+	const FMassEntityHandle Entity = static_cast<FMassStateTreeExecutionContext&>(Context).GetEntity();
+
+	// D4 (1.5): below, or with a ride boarded, the deep test decides on its own - the route-true reserve to the pad, priced
+	// with every ascent hold at MaxWaitSec; a boarded ascent is never broken off; the mid-delivery exemption is not taken.
+	// At level 0 with no ride (every robot until a lift car is fitted) it is not applicable and today's rule runs.
+	const ERHDeepCharge Deep = Sim->DeepChargeTest(Entity, Robot, Pos, Battery.ChargeWh, Battery.CapacityWh);
+	if (Deep != ERHDeepCharge::NotApplicable)
+	{
+		return Deep == ERHDeepCharge::Seek;
+	}
 
 	int32 PadId = 0;
 	FVector PadLoc;
@@ -458,8 +528,15 @@ bool FRHNeedsChargeCondition::TestCondition(FStateTreeExecutionContext& Context)
 		int32 DropPadId = 0;
 		FVector DropPadLoc;
 		const bool bPadFromDrop = bRover ? Sim->FindNearestRoverPad(Task.TargetCm, DropPadId, DropPadLoc) : Sim->FindNearestChargePad(Task.TargetCm, DropPadId, DropPadLoc);
-		const float ViaDropWh = DriveWh(Robot, FVector::DistXY(Pos, Task.TargetCm) * Detour)
+		float ViaDropWh = DriveWh(Robot, FVector::DistXY(Pos, Task.TargetCm) * Detour)
 			+ DriveWh(Robot, FVector::DistXY(Task.TargetCm, bPadFromDrop ? DropPadLoc : PadLoc) * Detour);
+		// D4 (REVISION item 6): a head hand-off holds before it credits - the hold left (or, before arrival, the projected
+		// hold) is part of finishing the drop. 0 with no transit.
+		const float HoldWh = Sim->GetHandoffHoldReserveWh(Entity, Task.TaskId, Robot, 0, Pos);
+		if (HoldWh > 0.f)
+		{
+			ViaDropWh += HoldWh;
+		}
 		if (Battery.ChargeWh >= ViaDropWh)
 		{
 			return false;

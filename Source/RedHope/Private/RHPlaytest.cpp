@@ -90,6 +90,23 @@ namespace
 		// C5b: paint districts and log what the city builds in them.
 		bool bDistricts = false;
 		bool bNoGrowth = false; // the control: the districts are painted and floor -2 is made, but the city builds nothing
+		// D4 (lifts=1, opt-in, outside the byte-identical runs): once -1 rates the player fits one lift car on shaft 0, once (and
+		// orders a station module on a carved cell below if nothing there needs a robot), and the bot asserts the transit invariants on
+		// "[Playtest] lifts:" lines, a failure as an Error line.
+		bool bLifts = false;
+		int32 LiftsFitTriedSol = -1;              // the last sol the fit was tried (the fit waits for its Struct)
+		int32 LiftFitSol = -1;                    // the sol the first car went in
+		bool bLiftsSiteBelow = false;             // a build site on a carved cell below exists or was ordered
+		int32 LiftsSiteTriedSol = -1;
+		int32 LiftThresholds0 = 0;                // TransitThresholds when the bot first saw the car
+		int32 LiftsSolLogged = -1;
+		int32 LiftsFails = 0;
+		int32 LiftsZeroChargeTicks = 0, LiftsZeroChargeSol = 0; // bot ticks a robot below sat at charge 0 (run / this sol)
+		int32 LiftsMaxBelow = 0;
+		double LiftsMaxBalanceErr = 0.0;
+		double LiftsSaveReturnedKg = 0.0;         // cargo in flight at the mid-run save: the load returns it to its source
+		int32 LiftsSaveState = 0;                 // 0 not yet, 1 loaded (compare on the next tick), 2 compared (the first robot below, else fit + 10)
+		TMap<FString, int32> LiftsSavedRobots;    // "DefName@Level" -> count, at the save
 		// C5e: the player grows the colony's life support with the city (the default whenever districts are painted;
 		// lifesupport=0 switches it off). Once a sol it reads what the City panel says the next arrivals would need
 		// and builds what is missing through the same player orders as the rest of the bot: Electrolyzers for oxygen,
@@ -669,6 +686,172 @@ namespace
 	}
 
 	// Once a sol, from the same player orders as the rest of the bot.
+	// D4: the lifts program (lifts=1). Robots are counted by (DefName, the floor their Z carries).
+	TMap<FString, int32> LiftsRobotMultiset(const URHSimWorldSubsystem* Sim, const URHAgentSubsystem* Agents, double* OutCargoKg = nullptr)
+	{
+		TMap<FString, int32> Out;
+		TArray<FRHRobotSaveState> States;
+		Agents->CollectRobotStates(States);
+		double Cargo = 0.0;
+		for (const FRHRobotSaveState& R : States)
+		{
+			++Out.FindOrAdd(FString::Printf(TEXT("%s@%d"), *R.DefName.ToString(), Sim->LevelOfZ(R.PosCm.Z)));
+			Cargo += (double)R.CargoKg;
+		}
+		if (OutCargoKg) { *OutCargoKg = Cargo; }
+		return Out;
+	}
+
+	void LiftsStep(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const URHAgentSubsystem* Agents)
+	{
+		if (!P.bLifts || !Agents)
+		{
+			return;
+		}
+		const auto Fail = [&P, C](const FString& What)
+		{
+			++P.LiftsFails;
+			UE_LOG(LogRedHope, Error, TEXT("[Playtest] lifts: FAIL sol %.2f %s"), SolNow(C), *What);
+		};
+		if (!Sim->HasTransit())
+		{
+			if (Sim->IsFloorRated(-1) && C->GetSol() != P.LiftsFitTriedSol)
+			{
+				P.LiftsFitTriedSol = C->GetSol();
+				FString Why;
+				if (Sim->CanFitLift(0, Why))
+				{
+					FRHCommand Fit;
+					Fit.Verb = FName("FitLift");
+					Fit.Value = 0;
+					Order(Sim, C, Fit, FString::Printf(TEXT("Fit a lift car on shaft 0 (%.0f kg Struct)"), Sim->GetLiftFitBillKg()));
+				}
+				else
+				{
+					UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFTS   the fit waits: %s"), SolNow(C), *Why);
+				}
+			}
+			return;
+		}
+		if (P.LiftFitSol < 0)
+		{
+			P.LiftFitSol = C->GetSol();
+			P.LiftThresholds0 = Sim->GetTransitThresholds();
+			Mark(P, C, TEXT("first lift car fitted"));
+		}
+		// Work below for the robots: unless a site stands on a carved cell below (one a lift reaches; a floor machine in rock keeps
+		// the head hand-off), the player orders one station module on a free carved cell of -1 (else -2), once a sol until it lands.
+		// The Lab the design names is locked behind research this early, so it is the Infirmary module (open from the start).
+		if (!P.bLiftsSiteBelow && C->GetSol() != P.LiftsSiteTriedSol)
+		{
+			P.LiftsSiteTriedSol = C->GetSol();
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				P.bLiftsSiteBelow |= B.Level < 0 && B.bUnderConstruction && Sim->FindCarvedCellAt(B.Level, B.LocationCm) != INDEX_NONE;
+			}
+			FString Why = TEXT("no carved cell below");
+			for (const int32 L : { -1, -2 })
+			{
+				for (int32 Ord = 0; Ord < Sim->GetFloorCarvedCells(L) && !P.bLiftsSiteBelow; ++Ord)
+				{
+					const FVector Cell = Sim->GetFloorCellCentreCm(L, Ord);
+					if (Sim->CanPlaceBuilding(FName("InfirmaryModule"), Cell, Why, L))
+					{
+						OrderBuild(Sim, C, FName("InfirmaryModule"), Cell.X / 100.f, Cell.Y / 100.f, L);
+						P.bLiftsSiteBelow = true;
+					}
+				}
+			}
+			if (!P.bLiftsSiteBelow)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIFTS   no site below yet: %s"), SolNow(C), *Why);
+			}
+		}
+		// Every tick: no robot below sits at charge 0.
+		TArray<FRHRobotPanelRow> Rows;
+		Agents->CollectPanelRows(Rows);
+		int32 Below = 0;
+		for (const FRHRobotPanelRow& R : Rows)
+		{
+			if (Sim->LevelOfZ(R.PosZCm) < 0)
+			{
+				++Below;
+				if (R.ChargeFrac <= 0.f) { ++P.LiftsZeroChargeTicks; ++P.LiftsZeroChargeSol; }
+			}
+		}
+		P.LiftsMaxBelow = FMath::Max(P.LiftsMaxBelow, Below);
+		// The mid-run save and load: the multiset of (DefName, floor) survives it.
+		if (P.LiftsSaveState == 1)
+		{
+			P.LiftsSaveState = 2;
+			const TMap<FString, int32> After = LiftsRobotMultiset(Sim, Agents);
+			FString Was, Now;
+			for (const TPair<FString, int32>& E : P.LiftsSavedRobots) { Was += FString::Printf(TEXT("%s x%d "), *E.Key, E.Value); }
+			for (const TPair<FString, int32>& E : After) { Now += FString::Printf(TEXT("%s x%d "), *E.Key, E.Value); }
+			bool bSame = After.Num() == P.LiftsSavedRobots.Num();
+			for (const TPair<FString, int32>& E : P.LiftsSavedRobots) { const int32* N = After.Find(E.Key); bSame &= N && *N == E.Value; }
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] lifts: save/load at sol %.2f keeps every robot's floor: %s | saved %s| loaded %s"), SolNow(C), bSame ? TEXT("yes") : TEXT("NO"), *Was, *Now);
+			if (!bSame) { Fail(TEXT("the save/load changed the robots' (DefName, floor) multiset")); }
+		}
+		// The save and load runs the first time a robot is below (so it carries robots off the surface), or 10 sols after the
+		// fit if none has gone down by then.
+		if (P.LiftsSaveState == 0 && (Below > 0 || C->GetSol() >= P.LiftFitSol + 10))
+		{
+			double InFlight = 0.0;
+			P.LiftsSavedRobots = LiftsRobotMultiset(Sim, Agents, &InFlight);
+			FString Err;
+			const bool bSaved = Sim->SaveColony(TEXT("lifts_mid"), Err);
+			const bool bLoaded = bSaved && Sim->LoadColony(TEXT("lifts_mid"), Err);
+			P.LiftsSaveReturnedKg += InFlight; // the load hands each in-flight load back to its source, outside the haul counters
+			P.LiftsSaveState = 1;
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] lifts: saved and loaded the colony at sol %.2f (%s), %.1f kg in flight returned to source"), SolNow(C), bLoaded ? TEXT("ok") : *Err, InFlight);
+			if (!bLoaded) { Fail(FString::Printf(TEXT("the mid-run save/load failed: %s"), *Err)); }
+			return;
+		}
+		// Once a sol: the invariants.
+		if (C->GetSol() == P.LiftsSolLogged)
+		{
+			return;
+		}
+		P.LiftsSolLogged = C->GetSol();
+		double InFlight = 0.0;
+		LiftsRobotMultiset(Sim, Agents, &InFlight);
+		const double Loaded = Sim->GetHaulLoadedKg();
+		const double Accounted = Sim->GetHaulCreditedKg() + Sim->GetHaulReturnedKg() + Sim->GetHaulLostKg() + InFlight + P.LiftsSaveReturnedKg;
+		const double Err = FMath::Abs(Loaded - Accounted);
+		P.LiftsMaxBalanceErr = FMath::Max(P.LiftsMaxBalanceErr, Err);
+		const int32 SolsSinceFit = C->GetSol() - P.LiftFitSol;
+		const int32 Thresholds = Sim->GetTransitThresholds() - P.LiftThresholds0;
+		FString Waits;
+		for (int32 S = 0; S < Sim->GetShaftCount(); ++S) { Waits += FString::Printf(TEXT("%s%d"), S ? TEXT("/") : TEXT(""), Sim->GetTransitWaitSec(S)); }
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] lifts: sol %d | below %d (most %d) | rides %d, hand-off holds %d | deliveries below %d, builds below %d | off-lattice %d | unstamped %d | thresholds %d in %d sol(s) since the fit | loaded %.3f = credited %.3f + returned %.3f + lost %.3f + in flight %.3f + save-returned %.3f (off by %.4f) | charge-0 ticks below %d | waits %s s"),
+			C->GetSol(), Below, P.LiftsMaxBelow, Sim->GetRidesBoarded(), Sim->GetHandoffHoldsBegun(), Sim->GetDeepDeliveries(), Sim->GetDeepBuildsCompleted(), Sim->GetDeepOffLattice(),
+			Sim->GetTransitUnstampedRobotWrites(), Thresholds, SolsSinceFit, Loaded, Sim->GetHaulCreditedKg(), Sim->GetHaulReturnedKg(), Sim->GetHaulLostKg(), InFlight, P.LiftsSaveReturnedKg, Err,
+			P.LiftsZeroChargeSol, *Waits);
+		if (Sim->GetDeepOffLattice() != 0) { Fail(FString::Printf(TEXT("%d robot(s) below were off the lattice"), Sim->GetDeepOffLattice())); }
+		if (Sim->GetTransitUnstampedRobotWrites() != 0) { Fail(FString::Printf(TEXT("%d robot ledger write(s) had no stamp"), Sim->GetTransitUnstampedRobotWrites())); }
+		if (FMath::Abs(Thresholds - SolsSinceFit) > 1) { Fail(FString::Printf(TEXT("%d threshold roll(s) in %d sol(s) since the fit"), Thresholds, SolsSinceFit)); }
+		if (Err > 1.0e-3) { Fail(FString::Printf(TEXT("mass is not conserved: off by %.4f kg"), Err)); }
+		if (P.LiftsZeroChargeSol > 0) { Fail(FString::Printf(TEXT("a robot below sat at charge 0 (%d tick(s) this sol)"), P.LiftsZeroChargeSol)); }
+		P.LiftsZeroChargeSol = 0;
+	}
+
+	// D4: the lifts program's end - the deliveries and builds below, and the run's verdict.
+	void LiftsReport(FPlaytest& P, const URHSimWorldSubsystem* Sim)
+	{
+		if (!P.bLifts)
+		{
+			return;
+		}
+		if (P.LiftFitSol < 0) { ++P.LiftsFails; UE_LOG(LogRedHope, Error, TEXT("[Playtest] lifts: FAIL no lift car was ever fitted")); }
+		if (Sim->GetDeepDeliveries() < 1) { ++P.LiftsFails; UE_LOG(LogRedHope, Error, TEXT("[Playtest] lifts: FAIL no delivery below (%d)"), Sim->GetDeepDeliveries()); }
+		if (Sim->GetDeepBuildsCompleted() < 1) { ++P.LiftsFails; UE_LOG(LogRedHope, Error, TEXT("[Playtest] lifts: FAIL no build completed below (%d)"), Sim->GetDeepBuildsCompleted()); }
+		if (P.LiftsSaveState != 2) { ++P.LiftsFails; UE_LOG(LogRedHope, Error, TEXT("[Playtest] lifts: FAIL the mid-run save/load never ran")); }
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] lifts: REPORT car fitted sol %d | rides %d, hand-off holds %d | deliveries below %d, builds below %d | most robots below at once %d | charge-0 ticks below %d | worst mass balance %.4f kg | off-lattice %d, unstamped %d | %d failure(s)"),
+			P.LiftFitSol, Sim->GetRidesBoarded(), Sim->GetHandoffHoldsBegun(), Sim->GetDeepDeliveries(), Sim->GetDeepBuildsCompleted(), P.LiftsMaxBelow, P.LiftsZeroChargeTicks,
+			P.LiftsMaxBalanceErr, Sim->GetDeepOffLattice(), Sim->GetTransitUnstampedRobotWrites(), P.LiftsFails);
+	}
+
 	void LifeSupportStep(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
 	{
 		if (!P.bLifeSupport || !P.bDistricts || Sim->GetPopulation() <= 0)
@@ -1885,13 +2068,18 @@ namespace
 			P.GrowthOpen = OpenNow;
 		}
 
+		// --- Lifts (lifts=1, D4) ---
+		LiftsStep(P, Sim, C, Agents);
+
 		// --- The end ---
 		if (P.CrewLandedSol >= 0.0 && Sim->GetPopulation() == 0)
 		{
+			LiftsReport(P, Sim);
 			Finish(World, TEXT("the colony emptied"));
 		}
 		else if (SolNow(C) >= P.TargetSols)
 		{
+			LiftsReport(P, Sim);
 			Finish(World, TEXT("sol limit"));
 		}
 	}
@@ -1899,7 +2087,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifesupport=0] [roads=0] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifts=1] [lifesupport=0] [roads=0] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -1925,6 +2113,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
+			else if (Args[i].Equals(TEXT("lifts=1"), ESearchCase::IgnoreCase)) { P.bLifts = true; }
 			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { bLifeSupportOff = false; }
 			else if (Args[i].Equals(TEXT("lifesupport=0"), ESearchCase::IgnoreCase)) { bLifeSupportOff = true; }
 			else if (Args[i].Equals(TEXT("roads=1"), ESearchCase::IgnoreCase)) { bRoadsOff = false; }
@@ -2016,6 +2205,6 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
 			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
-			*FString::Printf(TEXT("%s%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bOutpost ? TEXT(", and opens the first outpost") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
+			*FString::Printf(TEXT("%s%s%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bOutpost ? TEXT(", and opens the first outpost") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.bLifts ? *FString(TEXT(", lifts on (a car on shaft 0 once -1 rates)")) : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));

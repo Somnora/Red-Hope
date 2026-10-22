@@ -1,0 +1,1743 @@
+#include "RHSimWorldSubsystem.h"
+#include "RedHopeSim.h"
+#include "RHDefinitionsSubsystem.h"
+#include "RHSimClockSubsystem.h"
+#include "RHAgentSubsystem.h"
+#include "RHAgentFragments.h"
+#include "RHRobotMovement.h"
+#include "Algo/Reverse.h"
+
+// D4 (going deep, gate 4): transit - lifts, capacity and robots below (docs/qa/2026-10-21/d4-transit-design.md, the
+// REVISION and the director's answers Q-A (a), Q-B (a)). The gate is the colony's first fitted lift car: with none, every
+// function here returns before it touches anything, and every caller keeps its D3 lines. Everything a capacity decision
+// reads is an integer, written in any order to a per-sol ledger, and frozen at a world-side threshold; everything a robot
+// decides is robot-local (its plan, its hold, its ride), so no outcome depends on which robot the processor reaches first.
+
+namespace
+{
+	const FName NAME_StructTransit(TEXT("Struct"));
+	constexpr double TransitSolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+
+	int32 TransitSolOf(double Seconds)
+	{
+		return FMath::FloorToInt32(Seconds / TransitSolLen);
+	}
+
+	FIntPoint TransitWholeCm(const FVector& Cm)
+	{
+		return FIntPoint(FMath::RoundToInt32(Cm.X), FMath::RoundToInt32(Cm.Y));
+	}
+
+	// The lattice's eight steps: the four orthogonals first, then the diagonals (a diagonal needs both orthogonals carved).
+	const FIntPoint TransitSteps[8] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1), FIntPoint(1, 1), FIntPoint(-1, 1), FIntPoint(1, -1), FIntPoint(-1, -1) };
+	constexpr int64 TransitStepCm[8] = { 1000, 1000, 1000, 1000, 1414, 1414, 1414, 1414 };
+
+	struct FTransitHeapItem
+	{
+		int64 Key = 0;
+		int32 Node = 0;
+	};
+	struct FTransitHeapLess
+	{
+		bool operator()(const FTransitHeapItem& A, const FTransitHeapItem& B) const { return A.Key != B.Key ? A.Key < B.Key : A.Node < B.Node; }
+	};
+}
+
+// --- The ledger and the waits ---
+
+double URHSimWorldSubsystem::GetTransitRobotLagSeconds()
+{
+	// REVISION item 2(d): the crossing sub-step can end up to one sub-step past the boundary and its frame can run 31 more.
+	return (double)(URHSimClockSubsystem::MaxSubStepsPerFrame + 1) * (double)URHSimClockSubsystem::SubStepSeconds;
+}
+
+int32 URHSimWorldSubsystem::GetRobotWaitSec(int32 ShaftId, double Stamp) const
+{
+	if (!TransitLedgers.IsValidIndex(ShaftId))
+	{
+		return 0;
+	}
+	// A sub-step stamped at the boundary + the lag or later belongs to a frame after the crossing one, so the world has
+	// rolled in either batch order; one inside the window reads the previous sol's wait in either order (PrevWaitSec once
+	// the world has rolled, WaitSec before it - both hold the previous sol's value).
+	const FRHTransitLedger& L = TransitLedgers[ShaftId];
+	const int32 RobotSol = TransitSolOf(Stamp - GetTransitRobotLagSeconds());
+	return RobotSol == TransitCheckedSol ? L.WaitSec : L.PrevWaitSec;
+}
+
+int64 URHSimWorldSubsystem::GetShaftCapacityPlaces(int32 ShaftId) const
+{
+	if (!Shafts.IsValidIndex(ShaftId))
+	{
+		return 0;
+	}
+	const int32 Cars = Shafts[ShaftId].LiftCars;
+	return Cars > 0 ? (int64)Cars * (int64)LiftPlacesPerSol : (int64)HoistPlacesPerSol;
+}
+
+int32 URHSimWorldSubsystem::ComputeTransitWaitSec(int64 Load, int64 Cap) const
+{
+	if (Cap <= 0 || Load <= Cap)
+	{
+		return 0;
+	}
+	const int64 Wait = ((Load - Cap) * (int64)WaitSecAtDouble + Cap - 1) / Cap; // ceil, in int64
+	return (int32)FMath::Min<int64>(Wait, (int64)MaxWaitSec);
+}
+
+int64 URHSimWorldSubsystem::GetCargoPlaces(double Kg) const
+{
+	const int64 Whole = FMath::Max<int64>(0, FMath::RoundToInt64(Kg));
+	const int64 Per = FMath::Max(1, LiftKgPerPlace);
+	return (Whole + Per - 1) / Per;
+}
+
+int64 URHSimWorldSubsystem::GetShaftPeopleLoad(int32 ShaftId) const
+{
+	// REVISION item 8: 2 x the shaft's commuters x the ramp in permille, floored once per shaft. 0 (and the flows untouched)
+	// at 60 people or fewer.
+	if (!bHasTransit)
+	{
+		return 0;
+	}
+	const double Ramp = GetCommuteRamp();
+	if (Ramp <= 0.0)
+	{
+		return 0;
+	}
+	const int64 RampPermille = FMath::RoundToInt64(Ramp * 1000.0);
+	const FRHCommuteFlows& F = EnsureCommuteFlows();
+	const int64 People = F.ShaftPeople.IsValidIndex(ShaftId) ? (int64)F.ShaftPeople[ShaftId] : 0;
+	return 2 * People * RampPermille / 1000;
+}
+
+int64 URHSimWorldSubsystem::GetShaftCargoLoad(int32 ShaftId) const
+{
+	// The cargo part of the current sol's wait: the slot of sol TransitCheckedSol - 2, when its tag matches.
+	if (!TransitLedgers.IsValidIndex(ShaftId) || TransitCheckedSol < 2)
+	{
+		return 0;
+	}
+	const int32 CargoSol = TransitCheckedSol - 2;
+	const FRHTransitLedger& L = TransitLedgers[ShaftId];
+	return L.Sol[CargoSol % 3] == CargoSol ? (int64)L.Places[CargoSol % 3] : 0;
+}
+
+void URHSimWorldSubsystem::ChargeTransit(int32 ShaftId, int64 Places, int64 Kg, double Stamp)
+{
+	// A 0-place event writes nothing, and does not even reset a slot (REVISION item 4).
+	if (!bHasTransit || !TransitLedgers.IsValidIndex(ShaftId) || Places <= 0)
+	{
+		return;
+	}
+	const int32 EventSol = TransitSolOf(Stamp);
+	if (EventSol < 0)
+	{
+		return;
+	}
+	const int32 Slot = EventSol % 3;
+	FRHTransitLedger& L = TransitLedgers[ShaftId];
+	if (L.Sol[Slot] < EventSol)
+	{
+		L.Sol[Slot] = EventSol;
+		L.Kg[Slot] = 0;
+		L.Places[Slot] = 0;
+	}
+	if (L.Sol[Slot] != EventSol)
+	{
+		// The slot holds a later sol: an event three sols late. No writer can stamp one (stamps are sim time); say so.
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Transit: a ledger event for shaft %d stamped sol %d found its slot holding sol %d - dropped"), ShaftId, EventSol, L.Sol[Slot]);
+		return;
+	}
+	L.Kg[Slot] += FMath::Max<int64>(0, Kg);
+	L.Places[Slot] += (int32)FMath::Min<int64>(Places, (int64)MAX_int32 - L.Places[Slot]);
+}
+
+double URHSimWorldSubsystem::TakeRobotStamp()
+{
+	if (RobotStepEndSeconds >= 0.0)
+	{
+		return RobotStepEndSeconds;
+	}
+	++TransitUnstampedRobotWrites; // the -transit suite and the lifts=1 playtest assert this stays 0
+	return GetStepEndSeconds();
+}
+
+void URHSimWorldSubsystem::StepTransit()
+{
+	if (!bHasTransit)
+	{
+		return;
+	}
+	// The StepCityGrowth pattern: the first step whose end falls in a new sol rolls once, to the latest sol.
+	const int32 SolNow = TransitSolOf(GetStepEndSeconds());
+	if (SolNow > TransitCheckedSol)
+	{
+		RollTransit(SolNow);
+	}
+}
+
+void URHSimWorldSubsystem::RollTransit(int32 SolNow)
+{
+	// Every load first (the people part reads the flows once, before any wait moves under them), then the waits, in
+	// ascending shaft Id.
+	TArray<int64> Loads;
+	Loads.SetNum(TransitLedgers.Num());
+	const int32 CargoSol = SolNow - 2;
+	for (int32 S = 0; S < TransitLedgers.Num(); ++S)
+	{
+		const FRHTransitLedger& L = TransitLedgers[S];
+		int64 Cargo = 0;
+		if (CargoSol >= 0 && L.Sol[CargoSol % 3] == CargoSol)
+		{
+			Cargo = L.Places[CargoSol % 3];
+		}
+		Loads[S] = GetShaftPeopleLoad(S) + Cargo;
+	}
+	bool bChanged = false;
+	for (int32 S = 0; S < TransitLedgers.Num(); ++S)
+	{
+		FRHTransitLedger& L = TransitLedgers[S];
+		const int32 Wait = ComputeTransitWaitSec(Loads[S], GetShaftCapacityPlaces(S));
+		bChanged |= Wait != L.WaitSec;
+		L.PrevWaitSec = L.WaitSec;
+		L.WaitSec = Wait;
+	}
+	TransitCheckedSol = SolNow;
+	++TransitThresholds;
+	if (bChanged)
+	{
+		++TransitWaitVersion;
+	}
+}
+
+// --- Bills: the take order of C4's road bill; a part taken from a floor charges its shaft (O5) ---
+
+int32 URHSimWorldSubsystem::ServingShaftOfSite(const FRHSiteRef& Site, int32 OtherLevel) const
+{
+	// GetApproachPoint's pick, so a hand-off pays the shaft whose head it was made at.
+	if (Shafts.Num() <= 1)
+	{
+		return 0;
+	}
+	const int32 S = ServingShaft(FMath::Min(GetSiteLevel(Site), OtherLevel), CmToLattice(Shafts[0].HeadCm, GetSiteLocation(Site)));
+	return S == INDEX_NONE ? 0 : S;
+}
+
+int32 URHSimWorldSubsystem::ServingShaftOfBuilding(const FRHBuildingInstance& B) const
+{
+	if (B.Level >= 0)
+	{
+		return INDEX_NONE;
+	}
+	return ServingShaft(B.Level, CmToLattice(Shafts[0].HeadCm, B.LocationCm));
+}
+
+void URHSimWorldSubsystem::ChargeBillPart(const FRHBuildingInstance& Source, double Kg)
+{
+	if (!bHasTransit || Source.Level >= 0 || Kg <= 0.0)
+	{
+		return;
+	}
+	const int32 S = ServingShaftOfBuilding(Source);
+	if (S == INDEX_NONE)
+	{
+		return;
+	}
+	// World-side: stamped with the step's own end (REVISION item 2(a)), never the frame clock.
+	ChargeTransit(S, GetCargoPlaces(Kg), FMath::RoundToInt64(Kg), GetStepEndSeconds());
+}
+
+bool URHSimWorldSubsystem::TakeStructForBill(double Kg, const TCHAR* Why)
+{
+	if (Kg <= 0.0)
+	{
+		return true;
+	}
+	if (GetRoadStructAvailableKg() + 1.0e-6 < Kg)
+	{
+		return false;
+	}
+	// Building order, outputs before held inputs (the order a hauler draws). With no transit this is C4's TakeRoadStruct
+	// line for line: the part sum is a read, and ChargeBillPart returns at once.
+	double Left = Kg;
+	for (FRHBuildingInstance& B : Buildings)
+	{
+		if (Left <= 0.0)
+		{
+			break;
+		}
+		if (B.bUnderConstruction || !AreLevelsLinked(B.Level, 0))
+		{
+			continue;
+		}
+		double Part = 0.0;
+		for (TMap<FName, double>* Shelf : { &B.OutputKg, &B.InputKg })
+		{
+			if (double* Held = Shelf->Find(NAME_StructTransit))
+			{
+				const double Take = FMath::Min(Left, *Held);
+				*Held -= Take;
+				Left -= Take;
+				Part += Take;
+			}
+		}
+		if (bHasTransit && B.Level < 0 && Part > 0.0)
+		{
+			ChargeBillPart(B, Part);
+			UE_LOG(LogRedHopeSim, Display, TEXT("Transit: the %s bill took %.0f kg Struct from %s #%d on floor %d (%lld place(s) through its shaft)"),
+				Why, Part, *B.DefName.ToString(), B.Id, B.Level, GetCargoPlaces(Part));
+		}
+	}
+	OnStockChanged.Broadcast(NAME_StructTransit, GetTotalSolid(NAME_StructTransit));
+	return true;
+}
+
+// --- FitLift ---
+
+bool URHSimWorldSubsystem::CanFitLift(int32 ShaftId, FString& OutReason, double* OutBillKg) const
+{
+	const double Bill = GetLiftFitBillKg();
+	if (OutBillKg)
+	{
+		*OutBillKg = Bill;
+	}
+	if (!Shafts.IsValidIndex(ShaftId))
+	{
+		OutReason = FString::Printf(TEXT("Unknown shaft %d"), ShaftId);
+		return false;
+	}
+	if (Shafts[ShaftId].Depth == 0)
+	{
+		OutReason = FString::Printf(TEXT("Shaft %d is not bored yet - a lift car needs a floor to serve"), ShaftId);
+		return false;
+	}
+	if (Shafts[ShaftId].LiftCars >= MaxLiftCars)
+	{
+		OutReason = FString::Printf(TEXT("Shaft %d already has %d lift cars, the most a shaft takes"), ShaftId, Shafts[ShaftId].LiftCars);
+		return false;
+	}
+	const double Have = GetRoadStructAvailableKg();
+	if (Have + 1.0e-6 < Bill)
+	{
+		OutReason = FString::Printf(TEXT("Insufficient Struct (%.0f kg needed, %.0f on hand)"), Bill, Have);
+		return false;
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::ExecuteFitLift(const FRHCommand& Cmd, FString& OutReason)
+{
+	// The preflight runs again here, at execute time: the Struct may have gone, or another order fitted the last car.
+	const int32 ShaftId = FMath::RoundToInt32(Cmd.Value);
+	double Bill = 0.0;
+	if (!CanFitLift(ShaftId, OutReason, &Bill))
+	{
+		return false;
+	}
+	const bool bFirst = !bHasTransit;
+	// The take runs before the car is added, so the first fit's own bill moves while there is no transit system yet and
+	// writes no ledger entry (the REVISION's Q-A note).
+	if (!TakeStructForBill(Bill, TEXT("lift car")))
+	{
+		OutReason = FString::Printf(TEXT("Insufficient Struct (%.0f kg needed)"), Bill);
+		return false;
+	}
+	++Shafts[ShaftId].LiftCars;
+	bHasTransit = true;
+	++LiftVersion;
+	if (bFirst)
+	{
+		TransitLedgers.Reset();
+		TransitLedgers.SetNum(Shafts.Num()); // a hoist has a capacity too: one ledger per shaft
+		TransitCheckedSol = TransitSolOf(GetStepEndSeconds());
+	}
+	UE_LOG(LogRedHopeSim, Display, TEXT("Lift car fitted on shaft %d (%d of %d), %.0f kg Struct paid%s"),
+		ShaftId, Shafts[ShaftId].LiftCars, MaxLiftCars, Bill, bFirst ? TEXT(" - the colony's first: transit is on") : TEXT(""));
+	if (bFirst)
+	{
+		// Gate-D placeholder copy (row T1 of docs/qa/2026-10-15/gate-d-wording.md): R1, said plainly.
+		const FString Alert = FString::Printf(TEXT("The first lift car is in on shaft %d. Robots now ride it down to work on the floors. Every shaft now has a daily capacity: an unfitted one is a hoist that carries %d places a sol and holds each delivery %d s plus %d s a floor."),
+			ShaftId, HoistPlacesPerSol, HoistDwellSeconds, HoistSecondsPerFloor);
+		OnAlert.Broadcast(Alert);
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::Debug_FitLift(int32 ShaftId, FString& OutReason)
+{
+	FRHCommand Cmd;
+	Cmd.Verb = FName("FitLift");
+	Cmd.Value = ShaftId;
+	return ExecuteFitLift(Cmd, OutReason);
+}
+
+int32 URHSimWorldSubsystem::Debug_PostHaulTask(const FRHSiteRef& From, const FRHSiteRef& To, FName Resource, double Kg, FMassEntityHandle Robot)
+{
+	FRHTask T;
+	T.Id = NextTaskId++;
+	T.Type = ERHTaskType::Haul;
+	T.From = From;
+	T.To = To;
+	T.Resource = Resource;
+	T.AmountKg = Kg;
+	T.ClaimedBy = Robot;
+	Tasks.Add(T);
+	return T.Id;
+}
+
+// --- Robots below: where they may go ---
+
+int32 URHSimWorldSubsystem::LevelOfZ(double ZCm) const
+{
+	return RH::LevelOfZ(ZCm, FloorHeightCm);
+}
+
+bool URHSimWorldSubsystem::IsRouteReachable(int32 RobotLevel, const FVector& RobotPos, const FRHSiteRef& Site) const
+{
+	if (!bHasTransit)
+	{
+		return false;
+	}
+	const int32 SiteLevel = GetSiteLevel(Site);
+	if (SiteLevel >= 0)
+	{
+		return true; // the surface: every robot below has a route up (it came down a fitted landing, and those only grow)
+	}
+	const int32 Ordinal = FindCarvedCellAt(SiteLevel, GetSiteLocation(Site));
+	if (Ordinal == INDEX_NONE)
+	{
+		return false; // rock
+	}
+	const FRHDigInfo& Info = EnsureDigInfo(SiteLevel);
+	if (!Info.DigOf.IsValidIndex(Ordinal))
+	{
+		return false;
+	}
+	const int32 Dig = Info.DigOf[Ordinal];
+	if (EnsureDeepNet().FittedDigs.Contains(FIntPoint(SiteLevel, Dig)))
+	{
+		return true;
+	}
+	// Or the robot's own dig (a fitted column counts as standing in its landing's dig).
+	if (RobotLevel == SiteLevel)
+	{
+		const int32 Col = FindPortalColumnAt(RobotLevel, RobotPos);
+		if (Col != INDEX_NONE)
+		{
+			return DeepNet.Portals[Col].Dig == Dig;
+		}
+		const int32 Own = FindCarvedCellAt(RobotLevel, RobotPos);
+		return Own != INDEX_NONE && Info.DigOf.IsValidIndex(Own) && Info.DigOf[Own] == Dig;
+	}
+	return false;
+}
+
+FVector URHSimWorldSubsystem::GetRobotTarget(const FRHSiteRef& Site, int32 RobotLevel, const FVector& RobotPos, int32& OutLevel) const
+{
+	OutLevel = 0;
+	if (bHasTransit && IsRouteReachable(RobotLevel, RobotPos, Site))
+	{
+		OutLevel = GetSiteLevel(Site);
+		return GetSiteLocation(Site);
+	}
+	// The fallback is always the surface head (REVISION item 1): never the site in rock, never a bare column.
+	return GetApproachPoint(Site, 0);
+}
+
+int32 URHSimWorldSubsystem::FindPortalColumnAt(int32 Level, const FVector& PosCm) const
+{
+	if (!bHasTransit || Level >= 0)
+	{
+		return INDEX_NONE;
+	}
+	// A robot on a fitted column (its lattice point is the column) at a floor where the shaft is a portal. The lattice cell,
+	// not ArriveDistCm: a robot stopped between the landing and the column centre stands on the column's cell.
+	const FRHDeepNet& Net = EnsureDeepNet();
+	const FIntPoint P = CmToLattice(Shafts[0].HeadCm, PosCm);
+	for (int32 i = 0; i < Net.Portals.Num(); ++i)
+	{
+		if (Net.Portals[i].Level == Level && Net.Portals[i].Column == P)
+		{
+			return i;
+		}
+	}
+	return INDEX_NONE;
+}
+
+// --- The deep net (D3 section 2): fitted portals, one lattice field per landing, head-to-head surface costs ---
+
+FVector URHSimWorldSubsystem::FloorCellXY(int32 Level, int32 Ordinal) const
+{
+	const FRHFloor* Floor = FindFloor(Level);
+	const FIntPoint P = (Floor && Floor->Cells.IsValidIndex(Ordinal)) ? Floor->Cells[Ordinal] : FIntPoint::ZeroValue;
+	FVector Out = LatticeToCm(Shafts[0].HeadCm, P);
+	Out.Z = Level * FloorHeightCm;
+	return Out;
+}
+
+void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<int32>& Out) const
+{
+	// The steps BuildLatticeField takes from each cell, looked up once a floor: a diagonal only when both orthogonal cells
+	// are carved. The deep net shares one table among the landings of a floor.
+	const FRHFloor* Floor = FindFloor(Level);
+	const int32 N = Floor ? Floor->Cells.Num() : 0;
+	Out.Init(INDEX_NONE, N * 8);
+	for (int32 c = 0; c < N; ++c)
+	{
+		const FIntPoint Cur = Floor->Cells[c];
+		for (int32 k = 0; k < 8; ++k)
+		{
+			const int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
+			if (O != INDEX_NONE && (k < 4 || (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) != INDEX_NONE && Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) != INDEX_NONE)))
+			{
+				Out[c * 8 + k] = O;
+			}
+		}
+	}
+}
+
+void URHSimWorldSubsystem::BuildLatticeField(int32 Level, int32 Root, TArray<int64>& OutDist, TArray<int32>& OutToward, const TArray<int32>* Neighbours) const
+{
+	// Dijkstra over the floor's carved cells from Root: orthogonal steps 1000 cm, diagonal steps 1414 cm when both
+	// orthogonal cells are carved. Popped by (distance, ordinal); a predecessor changes only on a strict improvement.
+	const FRHFloor* Floor = FindFloor(Level);
+	const int32 N = Floor ? Floor->Cells.Num() : 0;
+	OutDist.Init(MAX_int64, N);
+	OutToward.Init(INDEX_NONE, N);
+	if (!Floor || !Floor->Cells.IsValidIndex(Root))
+	{
+		return;
+	}
+	TArray<FTransitHeapItem> Heap;
+	Heap.Reserve(N);
+	OutDist[Root] = 0;
+	Heap.HeapPush({ 0, Root }, FTransitHeapLess());
+	while (Heap.Num() > 0)
+	{
+		FTransitHeapItem Top;
+		Heap.HeapPop(Top, FTransitHeapLess(), EAllowShrinking::No);
+		if (Top.Key != OutDist[Top.Node])
+		{
+			continue;
+		}
+		const FIntPoint Cur = Floor->Cells[Top.Node];
+		for (int32 k = 0; k < 8; ++k)
+		{
+			int32 O = INDEX_NONE;
+			if (Neighbours)
+			{
+				O = (*Neighbours)[Top.Node * 8 + k];
+			}
+			else
+			{
+				O = Floor->FindOrdinal(Cur + TransitSteps[k]);
+				if (O != INDEX_NONE && k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
+				{
+					O = INDEX_NONE;
+				}
+			}
+			if (O == INDEX_NONE)
+			{
+				continue;
+			}
+			const int64 D = Top.Key + TransitStepCm[k];
+			if (D < OutDist[O])
+			{
+				OutDist[O] = D;
+				OutToward[O] = Top.Node;
+				Heap.HeapPush({ D, O }, FTransitHeapLess());
+			}
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::LatticeAStar(int32 Level, int32 From, int32 To, TArray<int32>& OutCells, int64& OutCm) const
+{
+	// The direct floor leg between two cells of one dig: A* with the octile distance (admissible and consistent on this
+	// grid), popped by (f, ordinal). OutCells runs from the cell after From to To.
+	OutCells.Reset();
+	OutCm = 0;
+	const FRHFloor* Floor = FindFloor(Level);
+	if (!Floor || !Floor->Cells.IsValidIndex(From) || !Floor->Cells.IsValidIndex(To))
+	{
+		return false;
+	}
+	if (From == To)
+	{
+		return true;
+	}
+	const FIntPoint Goal = Floor->Cells[To];
+	const auto H = [&Goal](const FIntPoint& P)
+	{
+		const int64 Dx = FMath::Abs((int64)P.X - Goal.X), Dy = FMath::Abs((int64)P.Y - Goal.Y);
+		const int64 Lo = FMath::Min(Dx, Dy), Hi = FMath::Max(Dx, Dy);
+		return Lo * 1414 + (Hi - Lo) * 1000;
+	};
+	const int32 N = Floor->Cells.Num();
+	TArray<int64> G;
+	G.Init(MAX_int64, N);
+	TArray<int32> Prev;
+	Prev.Init(INDEX_NONE, N);
+	TArray<FTransitHeapItem> Heap;
+	G[From] = 0;
+	Heap.HeapPush({ H(Floor->Cells[From]), From }, FTransitHeapLess());
+	bool bFound = false;
+	while (Heap.Num() > 0)
+	{
+		FTransitHeapItem Top;
+		Heap.HeapPop(Top, FTransitHeapLess(), EAllowShrinking::No);
+		const FIntPoint Cur = Floor->Cells[Top.Node];
+		if (Top.Key != G[Top.Node] + H(Cur))
+		{
+			continue;
+		}
+		if (Top.Node == To)
+		{
+			bFound = true;
+			break;
+		}
+		for (int32 k = 0; k < 8; ++k)
+		{
+			const int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
+			if (O == INDEX_NONE)
+			{
+				continue;
+			}
+			if (k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
+			{
+				continue;
+			}
+			const int64 D = G[Top.Node] + TransitStepCm[k];
+			if (D < G[O])
+			{
+				G[O] = D;
+				Prev[O] = Top.Node;
+				Heap.HeapPush({ D + H(Floor->Cells[O]), O }, FTransitHeapLess());
+			}
+		}
+	}
+	if (!bFound)
+	{
+		return false;
+	}
+	OutCm = G[To];
+	for (int32 O = To; O != From && O != INDEX_NONE; O = Prev[O])
+	{
+		OutCells.Add(O);
+	}
+	Algo::Reverse(OutCells);
+	return true;
+}
+
+const FRHRoadRoute& URHSimWorldSubsystem::SurfaceRoute(FIntPoint FromCm, FIntPoint ToCm) const
+{
+	// RoadGraph.PlanRoute, memoized in the deep net while the net's key (which holds the built-road version) is current. With no
+	// built road, or a stale net, it plans into a scratch route every time - the same answer, unmemoized.
+	static const FRHRoadRoute Straight;
+	if (!HasBuiltRoads())
+	{
+		return Straight;
+	}
+	const TPair<FIntPoint, FIntPoint> Key(FromCm, ToCm);
+	const bool bMemo = DeepNet.bValid && DeepNet.Built == RoadGraph.BuiltVersion;
+	if (bMemo)
+	{
+		if (const FRHRoadRoute* Hit = DeepNet.SurfaceRoutes.Find(Key))
+		{
+			return *Hit;
+		}
+		if (DeepNet.SurfaceRoutes.Num() >= 4096)
+		{
+			DeepNet.SurfaceRoutes.Reset();
+		}
+	}
+	static FRHRoadRoute Scratch;
+	FRHRoadRoute& Out = bMemo ? DeepNet.SurfaceRoutes.Add(Key) : Scratch;
+	Out = FRHRoadRoute();
+	if (!RoadGraph.PlanRoute(FromCm, ToCm, RoadParams, Out) || !Out.bRoad)
+	{
+		Out = FRHRoadRoute(); // bRoad false: drive the straight line
+	}
+	return Out;
+}
+
+int64 URHSimWorldSubsystem::SurfaceCostUnits(const FVector& A, const FVector& B, int64* OutCm) const
+{
+	// C4's cost units: the road route's CostUnits when a built road beats the straight line, else SpeedMulPermille x the
+	// rounded straight cm. OutCm is the distance walked, all of it at base speed (the reserve's safe side).
+	const FIntPoint Ac = TransitWholeCm(A), Bc = TransitWholeCm(B);
+	const FRHRoadRoute& Route = SurfaceRoute(Ac, Bc);
+	if (Route.bRoad)
+	{
+		if (OutCm)
+		{
+			*OutCm = (int64)Route.OffInCm + Route.RoadCm + Route.OffOutCm;
+		}
+		return Route.CostUnits;
+	}
+	const int64 Dx = (int64)Bc.X - Ac.X, Dy = (int64)Bc.Y - Ac.Y;
+	const int64 Straight = RHRoads::RoundSqrtCm(Dx * Dx + Dy * Dy);
+	if (OutCm)
+	{
+		*OutCm = Straight;
+	}
+	return (int64)RoadParams.SpeedMulPermille * Straight;
+}
+
+void URHSimWorldSubsystem::AppendSurfaceLegs(FRHRobotRoadPath& Path, const FVector& From, const FVector& To) const
+{
+	// The waypoints PlanRobotPath lays for the same two points: entry node .. exit node along built edges, then To.
+	const FRHRoadRoute& Route = SurfaceRoute(TransitWholeCm(From), TransitWholeCm(To));
+	if (Route.bRoad)
+	{
+		for (int32 i = 0; i < Route.NodeIds.Num(); ++i)
+		{
+			const FIntPoint N = RoadGraph.NodeCm(Route.NodeIds[i], RoadParams);
+			Path.Waypoints.Add(FVector((double)N.X, (double)N.Y, 0.0));
+			Path.LegEdge.Add(i == 0 ? 0 : Route.EdgeIds[i - 1]);
+			Path.Levels.Add(0);
+		}
+	}
+	Path.Waypoints.Add(FVector(To.X, To.Y, 0.0));
+	Path.LegEdge.Add(0);
+	Path.Levels.Add(0);
+}
+
+const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() const
+{
+	FRHDeepNet& N = DeepNet;
+	if (N.bValid && N.Cells == FloorCellsVersion && N.ShaftsV == ShaftsVersion && N.Lift == LiftVersion && N.Built == RoadGraph.BuiltVersion && N.TunnelsV == TunnelsVersion)
+	{
+		return N;
+	}
+	++DeepNetBuilds;
+	N = FRHDeepNet();
+	N.bValid = true;
+	N.Cells = FloorCellsVersion;
+	N.ShaftsV = ShaftsVersion;
+	N.Lift = LiftVersion;
+	N.Built = RoadGraph.BuiltVersion;
+	N.TunnelsV = TunnelsVersion;
+	TMap<int32, TArray<int32>> NeighboursOf; // level -> its step table, shared by every landing on it
+	for (const FRHShaft& Sh : Shafts)
+	{
+		if (Sh.LiftCars <= 0)
+		{
+			continue;
+		}
+		// The head: a surface portal at the column centre.
+		FRHDeepPortal Head;
+		Head.Shaft = Sh.Id;
+		Head.Level = 0;
+		Head.Column = Sh.Column;
+		Head.XY = FVector(Sh.HeadCm.X, Sh.HeadCm.Y, 0.0);
+		N.PortalAt.Add(FIntPoint(Sh.Id, 0), N.Portals.Num());
+		N.Heads.Add(N.Portals.Num());
+		N.Portals.Add(MoveTemp(Head));
+		// A floor portal on each level the shaft reaches where one of the column's four orthogonal neighbours is carved; the
+		// landing is the lowest-ordinal such neighbour. A dig touched only diagonally has no landing.
+		for (int32 L = -1; L >= -Sh.Depth; --L)
+		{
+			const FRHFloor* Floor = FindFloor(L);
+			if (!Floor)
+			{
+				continue;
+			}
+			int32 Landing = INDEX_NONE;
+			for (int32 k = 0; k < 4; ++k)
+			{
+				const int32 O = Floor->FindOrdinal(Sh.Column + TransitSteps[k]);
+				if (O != INDEX_NONE && (Landing == INDEX_NONE || O < Landing))
+				{
+					Landing = O;
+				}
+			}
+			if (Landing == INDEX_NONE)
+			{
+				continue;
+			}
+			FRHDeepPortal Port;
+			Port.Shaft = Sh.Id;
+			Port.Level = L;
+			Port.Column = Sh.Column;
+			Port.XY = FVector(Sh.HeadCm.X, Sh.HeadCm.Y, L * FloorHeightCm);
+			Port.Landing = Landing;
+			const FRHDigInfo& Info = EnsureDigInfo(L);
+			Port.Dig = Info.DigOf.IsValidIndex(Landing) ? Info.DigOf[Landing] : INDEX_NONE;
+			TArray<int32>* Nbr = NeighboursOf.Find(L);
+			if (!Nbr)
+			{
+				Nbr = &NeighboursOf.Add(L);
+				BuildLatticeNeighbours(L, *Nbr);
+			}
+			BuildLatticeField(L, Landing, Port.Dist, Port.Toward, Nbr);
+			N.FittedDigs.Add(FIntPoint(L, Port.Dig));
+			N.PortalAt.Add(FIntPoint(Sh.Id, L), N.Portals.Num());
+			N.Portals.Add(MoveTemp(Port));
+		}
+	}
+	const int32 NH = N.Heads.Num();
+	N.HeadToHead.Init(0, NH * NH);
+	for (int32 i = 0; i < NH; ++i)
+	{
+		for (int32 j = 0; j < NH; ++j)
+		{
+			N.HeadToHead[i * NH + j] = i == j ? 0 : SurfaceCostUnits(N.Portals[N.Heads[i]].XY, N.Portals[N.Heads[j]].XY);
+		}
+	}
+	// The planner's portal-to-portal edges that can be finite (PlanDeepRoute's Edge decides the cost; this only skips the pairs
+	// it would price MAX_int64, so the search pops and relaxes exactly as the all-pairs scan did).
+	N.Adj.SetNum(N.Portals.Num());
+	for (int32 U = 0; U < N.Portals.Num(); ++U)
+	{
+		const FRHDeepPortal& A = N.Portals[U];
+		for (int32 V = 0; V < N.Portals.Num(); ++V)
+		{
+			const FRHDeepPortal& B = N.Portals[V];
+			const bool bRide = A.Shaft == B.Shaft && A.Level != B.Level;
+			const bool bWalk = A.Level == B.Level && A.Level < 0 && A.Dig == B.Dig && B.Dist.IsValidIndex(A.Landing) && B.Dist[A.Landing] != MAX_int64;
+			const bool bHeads = A.Level == 0 && B.Level == 0;
+			if (V != U && (bRide || bWalk || bHeads))
+			{
+				N.Adj[U].Add(V);
+			}
+		}
+	}
+	return N;
+}
+
+void URHSimWorldSubsystem::Debug_GetPortals(TArray<FIntVector>& Out) const
+{
+	Out.Reset();
+	if (!bHasTransit)
+	{
+		return;
+	}
+	const FRHDeepNet& Net = EnsureDeepNet();
+	for (const FRHDeepPortal& P : Net.Portals)
+	{
+		const FRHFloor* Floor = P.Level < 0 ? FindFloor(P.Level) : nullptr;
+		const FIntPoint Land = (Floor && Floor->Cells.IsValidIndex(P.Landing)) ? Floor->Cells[P.Landing] : P.Column;
+		Out.Emplace(P.Shaft * 100 + (-P.Level), Land.X, Land.Y);
+	}
+}
+
+// --- The planner (D3 section 2, D4 1.3) ---
+
+bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm, int32 ToLevel, const FVector& ToCm, double Stamp, FRHRobotRoadPath& OutPath, FRHDeepRouteCost* OutCost) const
+{
+	++DeepPlanRuns;
+	OutPath.Waypoints.Reset();
+	OutPath.LegEdge.Reset();
+	OutPath.Levels.Reset();
+	OutPath.Next = 0;
+	OutPath.StartCm = FromCm;
+	FRHDeepRouteCost Cost;
+	if (!bHasTransit)
+	{
+		return false;
+	}
+	const FRHDeepNet& Net = EnsureDeepNet();
+	const int64 Mm = RoadParams.SpeedMulPermille;
+	const int32 NP = Net.Portals.Num();
+
+	// The two ends: the surface, a carved cell, or a fitted column (a legal position: a robot off a ride, or halted on one).
+	enum class EEnd : uint8 { Surface, Cell, Column };
+	struct FEnd { EEnd Kind = EEnd::Surface; int32 Level = 0; int32 Ordinal = INDEX_NONE; int32 Portal = INDEX_NONE; int32 Dig = INDEX_NONE; };
+	const auto Resolve = [&](int32 Level, const FVector& Cm, FEnd& Out)
+	{
+		Out = FEnd();
+		Out.Level = Level;
+		if (Level >= 0)
+		{
+			Out.Level = 0;
+			return true;
+		}
+		const int32 Col = FindPortalColumnAt(Level, Cm);
+		if (Col != INDEX_NONE)
+		{
+			Out.Kind = EEnd::Column;
+			Out.Portal = Col;
+			Out.Dig = Net.Portals[Col].Dig;
+			return true;
+		}
+		const int32 Ord = FindCarvedCellAt(Level, Cm);
+		if (Ord == INDEX_NONE)
+		{
+			return false;
+		}
+		const FRHDigInfo& Info = EnsureDigInfo(Level);
+		Out.Kind = EEnd::Cell;
+		Out.Ordinal = Ord;
+		Out.Dig = Info.DigOf.IsValidIndex(Ord) ? Info.DigOf[Ord] : INDEX_NONE;
+		return true;
+	};
+	FEnd Start, End;
+	if (!Resolve(FromLevel, FromCm, Start))
+	{
+		++DeepOffLattice; // a robot below on no carved cell and no fitted column: the -transit suite and lifts=1 assert none
+		return false;
+	}
+	if (!Resolve(ToLevel, ToCm, End))
+	{
+		return false; // a target in rock
+	}
+
+	// Ride cost at query time: the net is wait-free, the robot's waits are read by its own stamp (REVISION item 2(d)).
+	const auto RideUnits = [&](const FRHDeepPortal& A, const FRHDeepPortal& B)
+	{
+		const int64 Secs = (int64)GetRobotWaitSec(A.Shaft, Stamp) + LiftDwellSeconds + (int64)FMath::Abs(A.Level - B.Level) * LiftSecondsPerFloor;
+		return Mm * (int64)LiftPlanSpeedCmPerS * Secs;
+	};
+	// Surface legs from the start and to the target, each worked out once.
+	TArray<int64, TInlineAllocator<64>> StartToHead, HeadToEnd;
+	StartToHead.Init(-1, NP);
+	HeadToEnd.Init(-1, NP);
+	int64 DirectUnits = MAX_int64;
+	TArray<int32> DirectCells;
+	int64 DirectCm = 0;
+	if (Start.Kind == EEnd::Surface && End.Kind == EEnd::Surface)
+	{
+		DirectUnits = SurfaceCostUnits(FromCm, ToCm);
+	}
+	else if (Start.Kind == EEnd::Cell && End.Kind == EEnd::Cell && Start.Level == End.Level && Start.Dig == End.Dig)
+	{
+		if (LatticeAStar(Start.Level, Start.Ordinal, End.Ordinal, DirectCells, DirectCm))
+		{
+			DirectUnits = Mm * DirectCm;
+		}
+	}
+	// Node order: portals 0..NP-1, the start NP, the end NP + 1. Ties settle the lower index first (portals before the end).
+	const int32 SNode = NP, ENode = NP + 1, NNodes = NP + 2;
+	const auto Edge = [&](int32 U, int32 V) -> int64
+	{
+		if (U == SNode)
+		{
+			if (V == ENode)
+			{
+				return DirectUnits;
+			}
+			const FRHDeepPortal& P = Net.Portals[V];
+			switch (Start.Kind)
+			{
+			case EEnd::Surface:
+				if (P.Level != 0) { return MAX_int64; }
+				if (StartToHead[V] < 0) { StartToHead[V] = SurfaceCostUnits(FromCm, P.XY); }
+				return StartToHead[V];
+			case EEnd::Cell:
+				if (P.Level != Start.Level || P.Dig != Start.Dig || !P.Dist.IsValidIndex(Start.Ordinal) || P.Dist[Start.Ordinal] == MAX_int64) { return MAX_int64; }
+				return Mm * (P.Dist[Start.Ordinal] + 1000);
+			default:
+				return V == Start.Portal ? 0 : MAX_int64;
+			}
+		}
+		if (V == ENode)
+		{
+			const FRHDeepPortal& P = Net.Portals[U];
+			switch (End.Kind)
+			{
+			case EEnd::Surface:
+				if (P.Level != 0) { return MAX_int64; }
+				if (HeadToEnd[U] < 0) { HeadToEnd[U] = SurfaceCostUnits(P.XY, ToCm); }
+				return HeadToEnd[U];
+			case EEnd::Cell:
+				if (P.Level != End.Level || P.Dig != End.Dig || !P.Dist.IsValidIndex(End.Ordinal) || P.Dist[End.Ordinal] == MAX_int64) { return MAX_int64; }
+				return Mm * (1000 + P.Dist[End.Ordinal]);
+			default:
+				return U == End.Portal ? 0 : MAX_int64;
+			}
+		}
+		if (V == SNode || U == ENode)
+		{
+			return MAX_int64;
+		}
+		const FRHDeepPortal& A = Net.Portals[U];
+		const FRHDeepPortal& B = Net.Portals[V];
+		if (A.Shaft == B.Shaft && A.Level != B.Level)
+		{
+			return RideUnits(A, B);
+		}
+		if (A.Level == B.Level && A.Level < 0)
+		{
+			if (A.Dig != B.Dig || !B.Dist.IsValidIndex(A.Landing) || B.Dist[A.Landing] == MAX_int64) { return MAX_int64; }
+			return Mm * (1000 + B.Dist[A.Landing] + 1000);
+		}
+		if (A.Level == 0 && B.Level == 0)
+		{
+			const int32 NH = Net.Heads.Num();
+			const int32 Hi = Net.Heads.IndexOfByKey(U), Hj = Net.Heads.IndexOfByKey(V);
+			return (Hi == INDEX_NONE || Hj == INDEX_NONE) ? MAX_int64 : Net.HeadToHead[Hi * NH + Hj];
+		}
+		return MAX_int64;
+	};
+	TArray<int64, TInlineAllocator<64>> Dist;
+	Dist.Init(MAX_int64, NNodes);
+	TArray<int32, TInlineAllocator<64>> Prev;
+	Prev.Init(INDEX_NONE, NNodes);
+	TArray<bool, TInlineAllocator<64>> Done;
+	Done.Init(false, NNodes);
+	Dist[SNode] = 0;
+	for (;;)
+	{
+		int32 U = INDEX_NONE;
+		for (int32 i = 0; i < NNodes; ++i)
+		{
+			if (!Done[i] && Dist[i] != MAX_int64 && (U == INDEX_NONE || Dist[i] < Dist[U]))
+			{
+				U = i;
+			}
+		}
+		if (U == INDEX_NONE || U == ENode)
+		{
+			break;
+		}
+		Done[U] = true;
+		const auto Relax = [&](int32 V)
+		{
+			if (Done[V] || V == U)
+			{
+				return;
+			}
+			const int64 C = Edge(U, V);
+			if (C != MAX_int64 && Dist[U] + C < Dist[V])
+			{
+				Dist[V] = Dist[U] + C;
+				Prev[V] = U;
+			}
+		};
+		// Each V's relaxation is independent of the others, so only the pairs Edge can price finite are visited: from the start
+		// every node, from a portal its Adj (ascending) and the end.
+		if (U == SNode)
+		{
+			for (int32 V = 0; V < NNodes; ++V) { Relax(V); }
+		}
+		else
+		{
+			for (const int32 V : Net.Adj[U]) { Relax(V); }
+			Relax(ENode);
+		}
+	}
+	if (Dist[ENode] == MAX_int64)
+	{
+		return false;
+	}
+	Cost.CostUnits = Dist[ENode];
+	TArray<int32> Chain;
+	for (int32 V = ENode; V != INDEX_NONE; V = Prev[V])
+	{
+		Chain.Add(V);
+	}
+	Algo::Reverse(Chain); // SNode .. ENode
+
+	// The waypoints, leg by leg. A walk leg's waypoint is a cell centre, a column or a surface point; a ride leg's is the
+	// column at the floor it arrives on.
+	FRHRobotRoadPath& Path = OutPath;
+	const auto Walk = [&Path](const FVector& XY, int32 Level, int32 EdgeId = 0)
+	{
+		Path.Waypoints.Add(XY);
+		Path.LegEdge.Add(EdgeId);
+		Path.Levels.Add(Level);
+	};
+	const auto Surface = [&](const FVector& A, const FVector& B)
+	{
+		int64 Cm = 0;
+		SurfaceCostUnits(A, B, &Cm);
+		Cost.SurfaceCm += Cm;
+		AppendSurfaceLegs(Path, A, B);
+	};
+	// From a cell to a portal's landing along its field (the cell itself excluded), then onto the column.
+	const auto CellToColumn = [&](const FRHDeepPortal& P, int32 FromOrdinal)
+	{
+		Cost.LatticeCm += P.Dist[FromOrdinal] + 1000;
+		for (int32 O = P.Toward[FromOrdinal]; O != INDEX_NONE; O = P.Toward[O])
+		{
+			Walk(FloorCellXY(P.Level, O), P.Level);
+		}
+		Walk(P.XY, P.Level);
+	};
+	// From a portal's column onto its landing and on to a cell (the cell excluded: the caller walks to the target in it).
+	const auto ColumnToCell = [&](const FRHDeepPortal& P, int32 ToOrdinal)
+	{
+		Cost.LatticeCm += 1000 + P.Dist[ToOrdinal];
+		TArray<int32, TInlineAllocator<64>> Back;
+		for (int32 O = P.Toward[ToOrdinal]; O != INDEX_NONE; O = P.Toward[O])
+		{
+			Back.Add(O);
+		}
+		for (int32 i = Back.Num() - 1; i >= 0; --i)
+		{
+			Walk(FloorCellXY(P.Level, Back[i]), P.Level);
+		}
+	};
+	for (int32 c = 0; c + 1 < Chain.Num(); ++c)
+	{
+		const int32 U = Chain[c], V = Chain[c + 1];
+		if (U == SNode && V == ENode)
+		{
+			if (Start.Kind == EEnd::Surface)
+			{
+				Surface(FromCm, ToCm);
+			}
+			else
+			{
+				Cost.LatticeCm += DirectCm;
+				for (int32 i = 0; i + 1 < DirectCells.Num(); ++i)
+				{
+					Walk(FloorCellXY(Start.Level, DirectCells[i]), Start.Level);
+				}
+			}
+			continue;
+		}
+		if (U == SNode)
+		{
+			const FRHDeepPortal& P = Net.Portals[V];
+			if (Start.Kind == EEnd::Surface) { Surface(FromCm, P.XY); }
+			else if (Start.Kind == EEnd::Cell) { CellToColumn(P, Start.Ordinal); }
+			else { Walk(P.XY, P.Level); }
+			continue;
+		}
+		if (V == ENode)
+		{
+			const FRHDeepPortal& P = Net.Portals[U];
+			if (End.Kind == EEnd::Surface) { Surface(P.XY, ToCm); }
+			else if (End.Kind == EEnd::Cell) { ColumnToCell(P, End.Ordinal); }
+			continue;
+		}
+		const FRHDeepPortal& A = Net.Portals[U];
+		const FRHDeepPortal& B = Net.Portals[V];
+		if (A.Shaft == B.Shaft && A.Level != B.Level)
+		{
+			const int32 Wait = GetRobotWaitSec(A.Shaft, Stamp);
+			Path.Waypoints.Add(B.XY);
+			Path.LegEdge.Add(-(A.Shaft + 1));
+			Path.Levels.Add(B.Level);
+			Cost.RideSeconds += LiftDwellSeconds + FMath::Abs(A.Level - B.Level) * LiftSecondsPerFloor;
+			++Cost.Rides;
+			if (B.Level > A.Level)
+			{
+				++Cost.AscentRides;
+				Cost.AscentHoldSeconds += Wait;
+			}
+			else
+			{
+				Cost.DescentHoldSeconds += Wait;
+			}
+		}
+		else if (A.Level < 0)
+		{
+			// Column A, its landing, along B's field to B's landing, then B's column.
+			Cost.LatticeCm += 1000 + B.Dist[A.Landing] + 1000;
+			Walk(FloorCellXY(A.Level, A.Landing), A.Level);
+			for (int32 O = B.Toward[A.Landing]; O != INDEX_NONE; O = B.Toward[O])
+			{
+				Walk(FloorCellXY(A.Level, O), A.Level);
+			}
+			Walk(B.XY, B.Level);
+		}
+		else
+		{
+			Surface(A.XY, B.XY);
+		}
+	}
+	// The last leg is always to the target itself (an exact drive to every waypoint before it, MoveToward's arrival on it).
+	if (Path.Waypoints.Num() == 0 || !Path.Waypoints.Last().Equals(ToCm, 0.0) || Path.LegEdge.Last() != 0)
+	{
+		Walk(ToCm, End.Level);
+	}
+	else
+	{
+		Path.Waypoints.Last() = ToCm;
+		Path.Levels.Last() = End.Level;
+	}
+	if (OutCost)
+	{
+		*OutCost = Cost;
+	}
+	return true;
+}
+
+// --- One robot sub-step along the deep network ---
+
+bool URHSimWorldSubsystem::MoveAlongDeep(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, int32 TargetLevel, float SpeedMps, float Dt, float CargoKg)
+{
+	FRHRobotRoadPath* Path = RobotPaths.Find(Entity);
+	if (!Path || !Path->bDeep || Path->TargetCm != TargetCm || Path->TargetLevel != TargetLevel)
+	{
+		// A new target: plan from here. A hold or a ride in progress is discarded; the robot stays on the column at its
+		// boarding floor with its Z unchanged (Z changes only when a ride completes), which is a legal start.
+		FRHRobotRoadPath& Slot = RobotPaths.FindOrAdd(Entity);
+		const FVector Pos = Transform.GetLocation();
+		Slot = FRHRobotRoadPath();
+		Slot.bPlanFailed = !PlanDeepRoute(LevelOfZ(Pos.Z), Pos, TargetLevel, TargetCm, PeekRobotStamp(), Slot);
+		Slot.bDeep = true;
+		Slot.TargetCm = TargetCm;
+		Slot.TargetLevel = TargetLevel;
+		Slot.StartCm = Pos;
+		Slot.Serial = NextPathSerial++;
+		Path = &Slot;
+	}
+	Path->bHeldThisStep = false;
+	if (Path->bPlanFailed)
+	{
+		return false; // no route from here: stand until the target changes
+	}
+	const auto Board = [&]()
+	{
+		const int32 Leg = Path->Next;
+		const int32 Shaft = -Path->LegEdge[Leg] - 1;
+		const int32 FromLevel = LevelOfZ(Transform.GetLocation().Z);
+		Path->HoldStepsLeft = 10 * GetRobotWaitSec(Shaft, PeekRobotStamp());
+		Path->RideSteps = 10 * (LiftDwellSeconds + FMath::Abs(FromLevel - Path->Levels[Leg]) * LiftSecondsPerFloor);
+		Path->RideStepsLeft = Path->RideSteps;
+		Path->RideFromLevel = FromLevel;
+		Path->bBoarded = true;
+		++RidesBoarded;
+		// Cargo only: the robot's body is 0 places (REVISION item 4), and a 0-place event writes nothing.
+		const int64 Places = GetCargoPlaces(CargoKg);
+		if (Places > 0)
+		{
+			ChargeTransit(Shaft, Places, FMath::RoundToInt64(CargoKg), TakeRobotStamp());
+		}
+	};
+	if (Path->bBoarded)
+	{
+		if (Path->HoldStepsLeft > 0)
+		{
+			--Path->HoldStepsLeft;
+			Path->bHeldThisStep = true;
+			return false;
+		}
+		if (--Path->RideStepsLeft <= 0)
+		{
+			// The fixed sub-step point: Z flips at the end of the sub-step that ends the ride, and the robot moves no further.
+			FVector Pos = Transform.GetLocation();
+			Pos.Z = Path->Levels[Path->Next] * FloorHeightCm + RH::RobotZOffsetCm;
+			Transform.SetLocation(Pos);
+			Path->bBoarded = false;
+			++Path->Next;
+		}
+		return false;
+	}
+	double RemT = (double)Dt;
+	while (Path->Next < Path->Waypoints.Num() - 1)
+	{
+		const int32 Leg = Path->Next;
+		if (Path->LegEdge[Leg] < 0)
+		{
+			Board(); // on the column: boarding ends the sub-step, the leftover time is dropped
+			return false;
+		}
+		const FVector W = Path->Waypoints[Leg];
+		const double Mul = Path->LegEdge[Leg] > 0 ? GetRoadEdgeSpeedMul(Path->LegEdge[Leg]) : 1.0;
+		const double V = (double)SpeedMps * 100.0 * Mul;
+		FVector Pos = Transform.GetLocation();
+		const FVector To(W.X - Pos.X, W.Y - Pos.Y, 0.0);
+		const double Dist = To.Size2D();
+		if (V <= 0.0)
+		{
+			return false;
+		}
+		if (Dist > 0.0)
+		{
+			Transform.SetRotation(FRotationMatrix::MakeFromX(To).ToQuat());
+		}
+		const double Need = Dist / V;
+		if (Need <= RemT)
+		{
+			Pos.X = W.X;
+			Pos.Y = W.Y;
+			Transform.SetLocation(Pos);
+			RemT -= Need;
+			++Path->Next;
+			if (Path->Next < Path->Waypoints.Num() - 1 && Path->LegEdge[Path->Next] < 0)
+			{
+				Board();
+				return false;
+			}
+		}
+		else
+		{
+			Pos += To.GetSafeNormal2D() * (V * RemT);
+			Transform.SetLocation(Pos);
+			return false;
+		}
+	}
+	const bool bArrived = RH::MoveToward(Transform, TargetCm, SpeedMps, (float)FMath::Max(0.0, RemT));
+	if (bArrived)
+	{
+		RobotPaths.Remove(Entity);
+	}
+	return bArrived;
+}
+
+bool URHSimWorldSubsystem::GetRideState(FMassEntityHandle Entity, FRHRideState& Out) const
+{
+	const FRHRobotRoadPath* Path = RobotPaths.Find(Entity);
+	if (!Path || !Path->bDeep || !Path->bBoarded || !Path->LegEdge.IsValidIndex(Path->Next) || Path->LegEdge[Path->Next] >= 0)
+	{
+		return false;
+	}
+	Out.Shaft = -Path->LegEdge[Path->Next] - 1;
+	Out.FromLevel = Path->RideFromLevel;
+	Out.ToLevel = Path->Levels[Path->Next];
+	Out.HoldStepsLeft = Path->HoldStepsLeft;
+	Out.RideStepsLeft = Path->RideStepsLeft;
+	Out.RideSteps = Path->RideSteps;
+	return true;
+}
+
+// --- The charge reserve below (1.5, REVISION item 7) ---
+
+float URHSimWorldSubsystem::RobotDriveWh(const FRHRobotFragment& Robot, double DistCm)
+{
+	// The StateTree's DriveWh, the same expression: W x sol-hours (50 sim-s each) x 1.25, plus half an hour of the move draw.
+	const double Secs = DistCm / FMath::Max(1.0, (double)Robot.SpeedMps * 100.0);
+	return (float)(Robot.DrawMoveW * Secs / 50.0 * 1.25) + Robot.DrawMoveW * 0.5f;
+}
+
+float URHSimWorldSubsystem::DeepReserveAt(FMassEntityHandle Entity, const FRHRobotFragment& Robot, int32 Level, const FVector& PosCm, int32 PadId, const FVector& PadCm) const
+{
+	const double Stamp = PeekRobotStamp();
+	const int32 RobotSol = TransitSolOf(Stamp - GetTransitRobotLagSeconds());
+	// The memo's spot: a cell (ordinal + 1) or a column (-(portal + 1)); 0 = no memo (the surface, or off the lattice).
+	int32 Spot = 0;
+	if (Level < 0)
+	{
+		const int32 Col = FindPortalColumnAt(Level, PosCm);
+		if (Col != INDEX_NONE)
+		{
+			Spot = -(Col + 1);
+		}
+		else
+		{
+			const int32 Ord = FindCarvedCellAt(Level, PosCm);
+			Spot = Ord != INDEX_NONE ? Ord + 1 : 0;
+		}
+	}
+	FRHReserveMemo* Memo = Spot != 0 ? &ReserveMemos.FindOrAdd(Entity) : nullptr;
+	if (Memo && Memo->bValid && Memo->Level == Level && Memo->Spot == Spot && Memo->PadId == PadId && Memo->RobotSol == RobotSol
+		&& Memo->Cells == FloorCellsVersion && Memo->ShaftsV == ShaftsVersion && Memo->Lift == LiftVersion && Memo->Built == RoadGraph.BuiltVersion && Memo->TunnelsV == TunnelsVersion)
+	{
+		return Memo->Wh;
+	}
+	// The route actually driven: PlanDeepRoute to the pad EnterState picks. Its waits are the robot's own; every ascent hold
+	// is priced at MaxWaitSec (a threshold crossed on the walk to the landing can set any wait up to it), every descent at
+	// the frozen wait.
+	FRHRobotRoadPath Route;
+	FRHDeepRouteCost Cost;
+	float Wh = 0.f;
+	if (PlanDeepRoute(Level, PosCm, 0, PadCm, Stamp, Route, &Cost))
+	{
+		Wh = RobotDriveWh(Robot, (double)(Cost.LatticeCm + Cost.SurfaceCm))
+			+ (float)(Robot.DrawMoveW * (double)Cost.RideSeconds / 50.0 * 1.25)
+			+ (float)(Robot.DrawIdleW * ((double)Cost.AscentRides * (double)MaxWaitSec + (double)Cost.DescentHoldSeconds) / 50.0 * 1.25);
+	}
+	if (Memo)
+	{
+		Memo->bValid = true;
+		Memo->Level = Level;
+		Memo->Spot = Spot;
+		Memo->PadId = PadId;
+		Memo->RobotSol = RobotSol;
+		Memo->Cells = FloorCellsVersion;
+		Memo->ShaftsV = ShaftsVersion;
+		Memo->Lift = LiftVersion;
+		Memo->Built = RoadGraph.BuiltVersion;
+		Memo->TunnelsV = TunnelsVersion;
+		Memo->Wh = Wh;
+	}
+	return Wh;
+}
+
+float URHSimWorldSubsystem::DeepReserveWh(FMassEntityHandle Entity, const FRHRobotFragment& Robot, const FVector& PosCm, int32 PadId, const FVector& PadCm) const
+{
+	return DeepReserveAt(Entity, Robot, LevelOfZ(PosCm.Z), PosCm, PadId, PadCm);
+}
+
+ERHDeepCharge URHSimWorldSubsystem::DeepChargeTest(FMassEntityHandle Entity, const FRHRobotFragment& Robot, const FVector& PosCm, float ChargeWh, float CapacityWh) const
+{
+	static const FName NRoverTransit(TEXT("Rover"));
+	if (!bHasTransit || Robot.RobotClass == NRoverTransit)
+	{
+		return ERHDeepCharge::NotApplicable;
+	}
+	const int32 Level = LevelOfZ(PosCm.Z);
+	FRHRideState Ride;
+	const bool bRide = GetRideState(Entity, Ride);
+	if (Level == 0 && !bRide)
+	{
+		return ERHDeepCharge::NotApplicable; // today's surface rule runs
+	}
+	if (bRide && Ride.IsAscent())
+	{
+		return ERHDeepCharge::Keep; // an ascent heads for the pads: it is never broken off
+	}
+	float NeedWh = 0.f;
+	if (bRide)
+	{
+		// A boarded descent: the reserve as if the robot stood on the destination landing, plus the hold and the ride left.
+		const FRHDeepNet& Net = EnsureDeepNet();
+		const int32* At = Net.PortalAt.Find(FIntPoint(Ride.Shaft, Ride.ToLevel));
+		if (!At)
+		{
+			return ERHDeepCharge::Keep;
+		}
+		const FRHDeepPortal& P = Net.Portals[*At];
+		const FVector LandingCm = FloorCellXY(P.Level, P.Landing);
+		int32 PadId = 0;
+		FVector PadCm;
+		if (!FindNearestChargePad(LandingCm, PadId, PadCm))
+		{
+			return ERHDeepCharge::Keep; // no pad: keep working (M0-c)
+		}
+		NeedWh = DeepReserveAt(Entity, Robot, P.Level, LandingCm, PadId, PadCm)
+			+ (float)(Robot.DrawMoveW * ((double)Ride.RideStepsLeft / 10.0) / 50.0 * 1.25)
+			+ (float)(Robot.DrawIdleW * ((double)Ride.HoldStepsLeft / 10.0) / 50.0 * 1.25);
+	}
+	else
+	{
+		int32 PadId = 0;
+		FVector PadCm;
+		if (!FindNearestChargePad(PosCm, PadId, PadCm))
+		{
+			return ERHDeepCharge::Keep;
+		}
+		NeedWh = DeepReserveAt(Entity, Robot, Level, PosCm, PadId, PadCm);
+	}
+	const float Frac = CapacityWh > 0.f ? ChargeWh / CapacityWh : 0.f;
+	return (Frac >= GetChargeSeekFraction() && ChargeWh >= NeedWh) ? ERHDeepCharge::Keep : ERHDeepCharge::Seek;
+}
+
+// --- The head hand-off pays its shaft (2.4, REVISION item 6) ---
+
+int32 URHSimWorldSubsystem::ProjectHandoffHoldSteps(int32 TaskId, int32 RobotLevel, double Stamp) const
+{
+	if (!bHasTransit)
+	{
+		return 0;
+	}
+	const FRHTask* T = Tasks.FindByPredicate([TaskId](const FRHTask& Each) { return Each.Id == TaskId; });
+	if (!T || T->Type != ERHTaskType::Haul)
+	{
+		return 0;
+	}
+	const FRHBuildingInstance* B = FindBuildingById(T->To.BuildingId);
+	if (!B || B->Level == RobotLevel)
+	{
+		return 0;
+	}
+	const int32 S = ServingShaftOfSite(T->To, RobotLevel);
+	return 10 * (GetRobotWaitSec(S, Stamp) + GetShaftDwellSeconds(S) + FMath::Abs(B->Level - RobotLevel) * GetShaftSecondsPerFloor(S));
+}
+
+int32 URHSimWorldSubsystem::BeginHandoffHold(FMassEntityHandle Entity, int32 TaskId, int32 RobotLevel, const FVector& PosCm)
+{
+	const int32 H = ProjectHandoffHoldSteps(TaskId, RobotLevel, PeekRobotStamp());
+	if (H <= 0)
+	{
+		HandoffHolds.Remove(Entity);
+		return 0;
+	}
+	FRHHandoffHold& Hold = HandoffHolds.FindOrAdd(Entity);
+	Hold.TaskId = TaskId;
+	Hold.StepsLeft = H;
+	Hold.AtCm = PosCm;
+	++HandoffHoldsBegun;
+	return H;
+}
+
+bool URHSimWorldSubsystem::InHandoffHold(FMassEntityHandle Entity, int32 TaskId, const FVector& PosCm)
+{
+	const FRHHandoffHold* Hold = HandoffHolds.Find(Entity);
+	if (!Hold)
+	{
+		return false;
+	}
+	if (Hold->TaskId != TaskId || Hold->AtCm.X != PosCm.X || Hold->AtCm.Y != PosCm.Y)
+	{
+		HandoffHolds.Remove(Entity); // stale: another task, or a robot that has moved since (a seek reset its fragment)
+		return false;
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::StepHandoffHold(FMassEntityHandle Entity)
+{
+	FRHHandoffHold* Hold = HandoffHolds.Find(Entity);
+	if (!Hold)
+	{
+		return true;
+	}
+	if (!Tasks.ContainsByPredicate([Id = Hold->TaskId](const FRHTask& T) { return T.Id == Id; }))
+	{
+		HandoffHolds.Remove(Entity); // the task vanished (a demolish): the hold ends at once and HaulUnload handles it
+		return true;
+	}
+	if (--Hold->StepsLeft <= 0)
+	{
+		HandoffHolds.Remove(Entity);
+		return true;
+	}
+	return false;
+}
+
+float URHSimWorldSubsystem::GetHandoffHoldReserveWh(FMassEntityHandle Entity, int32 TaskId, const FRHRobotFragment& Robot, int32 RobotLevel, const FVector& PosCm) const
+{
+	if (!bHasTransit)
+	{
+		return 0.f;
+	}
+	const FRHHandoffHold* Hold = HandoffHolds.Find(Entity);
+	const bool bHolding = Hold && Hold->TaskId == TaskId && Hold->AtCm.X == PosCm.X && Hold->AtCm.Y == PosCm.Y;
+	const int32 Steps = bHolding ? Hold->StepsLeft : ProjectHandoffHoldSteps(TaskId, RobotLevel, PeekRobotStamp());
+	return Steps > 0 ? (float)(Robot.DrawIdleW * ((double)Steps / 10.0) / 50.0 * 1.25) : 0.f;
+}
+
+bool URHSimWorldSubsystem::HandoffHoldShort(FMassEntityHandle Entity, int32 TaskId, float ChargeWh, const FRHRobotFragment& Robot, const FVector& PosCm, const FVector& DropCm) const
+{
+	// The legacy brain's form of the StateTree's mid-delivery test with a hold: the drive to the drop, the hold, and the
+	// drive from the drop to its pad. True = the hauler cannot afford to finish the drop (it seeks, by today's rule).
+	const float HoldWh = GetHandoffHoldReserveWh(Entity, TaskId, Robot, LevelOfZ(PosCm.Z), PosCm);
+	if (HoldWh <= 0.f)
+	{
+		return false;
+	}
+	int32 PadId = 0;
+	FVector PadCm;
+	if (!FindNearestChargePad(DropCm, PadId, PadCm))
+	{
+		return false;
+	}
+	const float NeedWh = RobotDriveWh(Robot, FVector::DistXY(PosCm, DropCm)) + RobotDriveWh(Robot, FVector::DistXY(DropCm, PadCm)) + HoldWh;
+	return ChargeWh < NeedWh;
+}
+
+// --- Save v46: the transit block, straight after the tunnel block ---
+
+void URHSimWorldSubsystem::WriteTransitBlock(FArchive& Ar) const
+{
+	// LiftShaftCount, then (ShaftId, Cars) per fitted shaft in Id order; TransitCheckedSol; LedgerCount, then per ledger its
+	// ShaftId, three slots of (Sol, Kg as int64, Places), WaitSec and PrevWaitSec. The default colony writes 0, -1, 0: 12 bytes.
+	int32 LiftCount = 0;
+	for (const FRHShaft& Sh : Shafts)
+	{
+		LiftCount += Sh.LiftCars > 0 ? 1 : 0;
+	}
+	Ar << LiftCount;
+	for (const FRHShaft& Sh : Shafts)
+	{
+		if (Sh.LiftCars > 0)
+		{
+			int32 Id = Sh.Id, Cars = Sh.LiftCars;
+			Ar << Id << Cars;
+		}
+	}
+	int32 Checked = TransitCheckedSol;
+	Ar << Checked;
+	int32 LedgerCount = TransitLedgers.Num();
+	Ar << LedgerCount;
+	for (int32 S = 0; S < TransitLedgers.Num(); ++S)
+	{
+		const FRHTransitLedger& L = TransitLedgers[S];
+		int32 Id = S;
+		Ar << Id;
+		for (int32 k = 0; k < 3; ++k)
+		{
+			int32 Sol = L.Sol[k], Places = L.Places[k];
+			int64 Kg = L.Kg[k];
+			Ar << Sol << Kg << Places;
+		}
+		int32 Wait = L.WaitSec, Prev = L.PrevWaitSec;
+		Ar << Wait << Prev;
+	}
+}
+
+bool URHSimWorldSubsystem::ReadTransitBlock(FArchive& Ar, const TArray<FRHShaft>& InShafts, FRHLoadedTransit& Out, FString& OutError) const
+{
+	// Structural refusals only, taken before the live colony is touched: they set OutError and log nothing at Error level.
+	const auto Refuse = [&OutError](const FString& Why) { OutError = FString::Printf(TEXT("Save transit block invalid: %s"), *Why); return false; };
+	Out = FRHLoadedTransit();
+	int32 LiftCount = 0;
+	Ar << LiftCount;
+	if (Ar.IsError() || LiftCount < 0 || LiftCount > InShafts.Num() || (int64)LiftCount * 8 > (int64)Ar.TotalSize() - Ar.Tell())
+	{
+		return Refuse(FString::Printf(TEXT("lift shaft count %d"), LiftCount));
+	}
+	int32 PrevId = INDEX_NONE;
+	for (int32 n = 0; n < LiftCount; ++n)
+	{
+		int32 Id = 0, Cars = 0;
+		Ar << Id << Cars;
+		if (Ar.IsError())
+		{
+			return Refuse(TEXT("the lift list is cut short"));
+		}
+		if (!InShafts.IsValidIndex(Id))
+		{
+			return Refuse(FString::Printf(TEXT("a lift names shaft %d, which the file does not list"), Id));
+		}
+		if (Id <= PrevId)
+		{
+			return Refuse(FString::Printf(TEXT("lift shaft ids must ascend, found %d after %d"), Id, PrevId));
+		}
+		PrevId = Id;
+		if (InShafts[Id].Depth == 0)
+		{
+			return Refuse(FString::Printf(TEXT("shaft %d has a lift but is not bored"), Id));
+		}
+		if (Cars < 1 || Cars > RH::MaxLiftCarsCap)
+		{
+			return Refuse(FString::Printf(TEXT("shaft %d has %d cars (the range is 1..%d)"), Id, Cars, RH::MaxLiftCarsCap));
+		}
+		Out.Cars.Emplace(Id, Cars);
+	}
+	Ar << Out.CheckedSol;
+	if (Ar.IsError())
+	{
+		return Refuse(TEXT("the block is cut short"));
+	}
+	const bool bCars = LiftCount > 0;
+	if (bCars ? Out.CheckedSol < 0 : Out.CheckedSol != INDEX_NONE)
+	{
+		return Refuse(bCars ? FString::Printf(TEXT("the threshold sol is %d with a car fitted"), Out.CheckedSol)
+			: FString::Printf(TEXT("the threshold sol is %d with no car fitted"), Out.CheckedSol));
+	}
+	int32 LedgerCount = 0;
+	Ar << LedgerCount;
+	const int32 WantLedgers = bCars ? InShafts.Num() : 0;
+	if (Ar.IsError() || LedgerCount != WantLedgers || (int64)LedgerCount * 60 > (int64)Ar.TotalSize() - Ar.Tell())
+	{
+		return Refuse(FString::Printf(TEXT("ledger count %d (expected %d)"), LedgerCount, WantLedgers));
+	}
+	for (int32 n = 0; n < LedgerCount; ++n)
+	{
+		FRHTransitLedger L;
+		int32 Id = 0;
+		Ar << Id;
+		for (int32 k = 0; k < 3; ++k)
+		{
+			Ar << L.Sol[k] << L.Kg[k] << L.Places[k];
+		}
+		Ar << L.WaitSec << L.PrevWaitSec;
+		if (Ar.IsError())
+		{
+			return Refuse(TEXT("the ledgers are cut short"));
+		}
+		if (Id != n)
+		{
+			return Refuse(FString::Printf(TEXT("ledger %d names shaft %d (one ledger a shaft, in Id order)"), n, Id));
+		}
+		for (int32 k = 0; k < 3; ++k)
+		{
+			if (L.Sol[k] < -1)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d slot %d is tagged %d"), Id, k, L.Sol[k]));
+			}
+			if (L.Sol[k] >= 0 && L.Sol[k] % 3 != k)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d slot %d holds sol %d, which belongs in slot %d"), Id, k, L.Sol[k], L.Sol[k] % 3));
+			}
+			// TransitCheckedSol + 1 is legal: a robots-first batch can stamp the new sol before the world rolls, and a save
+			// made between the two batches of that frame records it (REVISION item 9(b)).
+			if (L.Sol[k] > Out.CheckedSol + 1)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d slot %d is tagged sol %d, after the threshold sol %d + 1"), Id, k, L.Sol[k], Out.CheckedSol));
+			}
+			if (L.Kg[k] < 0 || L.Places[k] < 0)
+			{
+				return Refuse(FString::Printf(TEXT("shaft %d slot %d holds %lld kg and %d places"), Id, k, L.Kg[k], L.Places[k]));
+			}
+		}
+		if (L.WaitSec < 0 || L.WaitSec > RH::MaxWaitSecCap || L.PrevWaitSec < 0 || L.PrevWaitSec > RH::MaxWaitSecCap)
+		{
+			return Refuse(FString::Printf(TEXT("shaft %d waits %d s (previous %d s; the range is 0..%d)"), Id, L.WaitSec, L.PrevWaitSec, RH::MaxWaitSecCap));
+		}
+		Out.Ledgers.Add(L);
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::InstallTransit(const FRHLoadedTransit& In)
+{
+	const bool bHad = bHasTransit;
+	for (FRHShaft& Sh : Shafts)
+	{
+		Sh.LiftCars = 0;
+	}
+	for (const FIntPoint& Car : In.Cars)
+	{
+		if (Shafts.IsValidIndex(Car.X))
+		{
+			Shafts[Car.X].LiftCars = Car.Y;
+		}
+	}
+	TransitCheckedSol = In.CheckedSol;
+	TransitLedgers = In.Ledgers;
+	bHasTransit = In.Cars.Num() > 0;
+	if (bHad || bHasTransit)
+	{
+		// Only a colony that has (or had) a car moves the keys: with no car on either side nothing here changes.
+		++LiftVersion;
+		++TransitWaitVersion;
+	}
+	ResetRobotTransitRuntime();
+}
+
+void URHSimWorldSubsystem::ResetRobotTransitRuntime()
+{
+	HandoffHolds.Reset();
+	ReserveMemos.Reset();
+	DeepNet = FRHDeepNet();
+	RobotStepEndSeconds = -1.0;
+}
+
+void URHSimWorldSubsystem::RepairLoadedRobots(const TArray<FMassEntityHandle>& Handles, const TArray<int32>& Levels)
+{
+	// D3 REVISION item 3 / D4 1.6, run after the floors, shafts, tunnels and transit are installed and the shaft derivations
+	// rebuilt: it judges against the loaded colony, never the one before. In order, with a Warning each.
+	URHAgentSubsystem* Agents = GetWorld() ? GetWorld()->GetSubsystem<URHAgentSubsystem>() : nullptr;
+	if (!Agents)
+	{
+		return;
+	}
+	for (int32 i = 0; i < Handles.Num() && i < Levels.Num(); ++i)
+	{
+		FVector Pos;
+		if (!Agents->GetRobotPosition(Handles[i], Pos))
+		{
+			continue;
+		}
+		const int32 Level = Levels[i];
+		if (Level != LevelOfZ(Pos.Z))
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d's saved level %d disagrees with its Z (%.0f cm) - its Z is set to the level"), i, Level, Pos.Z);
+			Pos.Z = Level * FloorHeightCm + RH::RobotZOffsetCm;
+			Agents->SetRobotPosition(Handles[i], Pos);
+		}
+		if (Level >= 0)
+		{
+			continue;
+		}
+		if (FindPortalColumnAt(Level, Pos) != INDEX_NONE)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d stands on a fitted column (saved mid-ride) - kept"), i, Level);
+			continue;
+		}
+		const int32 Ord = bHasTransit ? FindCarvedCellAt(Level, Pos) : INDEX_NONE;
+		if (Ord != INDEX_NONE)
+		{
+			const FRHDigInfo& Info = EnsureDigInfo(Level);
+			if (Info.DigOf.IsValidIndex(Ord) && EnsureDeepNet().FittedDigs.Contains(FIntPoint(Level, Info.DigOf[Ord])))
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d stands in a dig a fitted lift reaches - kept"), i, Level);
+				continue;
+			}
+		}
+		// Rock, an unfitted dig, or no lift at all: the surface deploy ring (SpawnStartingFleet's).
+		const float Angle = i * 0.8f;
+		const FVector Ring(-800.f + 250.f * i, -600.f + 150.f * FMath::Sin(Angle), RH::RobotZOffsetCm);
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d has no fitted lift reaching it - moved to the surface deploy ring"), i, Level);
+		Agents->SetRobotPosition(Handles[i], Ring);
+	}
+}

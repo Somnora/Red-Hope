@@ -13,8 +13,8 @@ namespace
 	constexpr float GhostLiftCm = 4.f;          // above the sand skirt's top (the ground, z = 0), where an uncarved cell's marks sit
 	constexpr float StripeLiftCm = 21.f;        // above the carved tiles' top face, a little over the district wash
 	constexpr float GhostRiseCm = 24.f;         // the ghost fill's height
-	constexpr float DashCm = 140.f;             // a dash on a ghost cell's outline, and the gap between dashes
-	constexpr float DashGapCm = 90.f;
+	constexpr float TunnelDashCm = 140.f;             // a dash on a ghost cell's outline, and the gap between dashes
+	constexpr float TunnelDashGapCm = 90.f;
 	constexpr float StripeWidthCm = 70.f;
 	constexpr float LabelLiftCm = 240.f;
 
@@ -62,14 +62,14 @@ namespace
 			Quad(FVector(P0.X + Side.X, P0.Y + Side.Y, Z), FVector(P1.X + Side.X, P1.Y + Side.Y, Z), FVector(P1.X - Side.X, P1.Y - Side.Y, Z), FVector(P0.X - Side.X, P0.Y - Side.Y, Z));
 		}
 
-		// A dashed line: dashes of DashCm with DashGapCm between, from P0 to P1, the last one cut to fit.
+		// A dashed line: dashes of TunnelDashCm with TunnelDashGapCm between, from P0 to P1, the last one cut to fit.
 		void Dashed(const FVector2D& P0, const FVector2D& P1, float Width, float Z)
 		{
 			const double Len = FVector2D::Distance(P0, P1);
 			const FVector2D Dir = Len > 0.0 ? (P1 - P0) / Len : FVector2D::ZeroVector;
-			for (double At = 0.0; At < Len; At += DashCm + DashGapCm)
+			for (double At = 0.0; At < Len; At += TunnelDashCm + TunnelDashGapCm)
 			{
-				Strip(P0 + Dir * At, P0 + Dir * FMath::Min(Len, At + DashCm), Width, Z);
+				Strip(P0 + Dir * At, P0 + Dir * FMath::Min(Len, At + TunnelDashCm), Width, Z);
 			}
 		}
 	};

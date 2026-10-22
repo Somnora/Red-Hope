@@ -2144,6 +2144,26 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 	SelectedBuildingId = 0; // the card belongs to the floor you left
 }
 
+int32 ARHPlayerController::GetNearestShaftId() const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const ARHStrategyPawn* Cam = StrategyPawn();
+	if (!Sim || !Cam || Sim->GetShaftCount() < 2)
+	{
+		return 0;
+	}
+	const FVector Focus = Cam->GetFocusPointCm();
+	int32 Nearest = 0;
+	double NearestCm = TNumericLimits<double>::Max();
+	for (const FRHShaft& Sh : Sim->GetShafts())
+	{
+		const double D = FVector::DistXY(Focus, Sh.HeadCm);
+		if (D < NearestCm) { NearestCm = D; Nearest = Sh.Id; }
+	}
+	return Nearest;
+}
+
 void ARHPlayerController::FocusNextShaft()
 {
 	UWorld* World = GetWorld();
@@ -2154,14 +2174,7 @@ void ARHPlayerController::FocusNextShaft()
 		return;
 	}
 	// The head the camera is nearest to, then the one after it in Id order.
-	const FVector Focus = Cam->GetFocusPointCm();
-	int32 Nearest = 0;
-	double NearestCm = TNumericLimits<double>::Max();
-	for (const FRHShaft& Sh : Sim->GetShafts())
-	{
-		const double D = FVector::DistXY(Focus, Sh.HeadCm);
-		if (D < NearestCm) { NearestCm = D; Nearest = Sh.Id; }
-	}
+	const int32 Nearest = GetNearestShaftId();
 	const FRHShaft& Next = Sim->GetShaft((Nearest + 1) % Sim->GetShaftCount());
 	Cam->SetFocusXYCm(FVector2D(Next.HeadCm.X, Next.HeadCm.Y));
 	SetConfirm(FString::Printf(TEXT("Camera on shaft %d"), Next.Id), FLinearColor(0.2f, 0.9f, 1.f));

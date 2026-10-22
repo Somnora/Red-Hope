@@ -36,5 +36,20 @@ namespace RH
 	// waypoints. True on arrival.
 	// C6a: bRover drives it as a cargo rover - the road at its speed, everything else (the straight
 	// line with no road, both end legs, a missing edge) at the rover's off-road crawl.
-	bool MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover = false);
+	// D4: TargetLevel is the floor the target is on (0 = the surface) and CargoKg what the robot carries (a ride charges
+	// the shaft's ledger its places). With a fitted lift, a robot (never a rover) that is below or bound below drives the
+	// deep network (URHSimWorldSubsystem::MoveAlongDeep); every other call runs the body above verbatim.
+	bool MoveAlong(URHSimWorldSubsystem& Sim, FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, float SpeedMps, float Dt, bool bRover = false, float CargoKg = 0.f, int32 TargetLevel = 0);
+
+	// D4 (O3): a robot's floor is read from its Z, rounded, never truncated: Z is written only when a ride completes, as
+	// Level x FloorHeightCm + RobotZOffsetCm, and every robot spawns at the offset (level 0).
+	constexpr double RobotZOffsetCm = 50.0;
+	inline int32 LevelOfZ(double ZCm, double FloorHeightCm) { return FMath::RoundToInt((ZCm - RobotZOffsetCm) / FloorHeightCm); }
+
+	// D4: the end of a robot's sub-step Step of a Steps-long frame ending at FrameEnd - its transit stamp (REVISION item 2(a)).
+	// One formula for both processors and the -transit suite's batched-frame driver, so TR5 tests the stamp the game uses.
+	inline double RobotSubStepEnd(double FrameEnd, int32 Steps, int32 Step, float SubDt)
+	{
+		return FrameEnd - (double)(Steps - 1 - Step) * (double)SubDt;
+	}
 }

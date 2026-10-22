@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 45;  // v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 46;  // v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -121,6 +121,12 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	LazySeatFillSols = Defs->GetConfigScalar(FName("LazySeatFillSols"), LazySeatFillSols);
 	AutosaveEverySols = Defs->GetConfigScalar(FName("AutosaveEverySols"), 0.0);
 	FloorHeightCm = Defs->GetConfigScalar(FName("FloorHeightMeters"), 4.0) * 100.0;
+	if (!(FloorHeightCm > 100.0))
+	{
+		// D4 (O3): a robot's floor is RoundToInt((Z - 50) / FloorHeightCm), which needs floors taller than the 50 cm spawn offset x 2.
+		UE_LOG(LogRedHopeSim, Error, TEXT("FloorHeightMeters %.2f gives floors of %.0f cm - a robot's level is read from its Z and needs more than 100 cm; using 4 m"), FloorHeightCm / 100.0, FloorHeightCm);
+		FloorHeightCm = 400.0;
+	}
 	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
 	{
 		const int32 Row = (int32)Defs->GetConfigScalar(FName("MaxShafts"), 4.0);
@@ -145,6 +151,46 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		{
 			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxOpenTunnels %d is outside 1..%d - clamped to %d"), OpenRow, RH::MaxOpenTunnelsCap, MaxOpenTunnels);
 		}
+	}
+	{
+		// D4 (transit; header defaults equal the CSV). Every capacity row and the wait's slope are asserted > 0 (the wait
+		// divides by a capacity); MaxLiftCars and MaxWaitSec are clamped to the caps the save refuses against.
+		LiftFitStructKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("LiftFitStructKg"), LiftFitStructKg));
+		FirstLiftFitStructKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("FirstLiftFitStructKg"), LiftFitStructKg));
+		const int32 CarsRow = (int32)Defs->GetConfigScalar(FName("MaxLiftCars"), MaxLiftCars);
+		MaxLiftCars = FMath::Clamp(CarsRow, 1, RH::MaxLiftCarsCap);
+		if (MaxLiftCars != CarsRow)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxLiftCars %d is outside 1..%d - clamped to %d"), CarsRow, RH::MaxLiftCarsCap, MaxLiftCars);
+		}
+		const auto PositiveRow = [this](const TCHAR* Row, int32 Default)
+		{
+			const int32 V = (int32)Defs->GetConfigScalar(FName(Row), Default);
+			if (V <= 0)
+			{
+				UE_LOG(LogRedHopeSim, Error, TEXT("%s is %d - it must be above 0; using %d"), Row, V, Default);
+				return Default;
+			}
+			return V;
+		};
+		HoistPlacesPerSol = PositiveRow(TEXT("HoistPlacesPerSol"), HoistPlacesPerSol);
+		LiftPlacesPerSol = PositiveRow(TEXT("LiftPlacesPerSol"), LiftPlacesPerSol);
+		LiftKgPerPlace = PositiveRow(TEXT("LiftKgPerPlace"), LiftKgPerPlace);
+		WaitSecAtDouble = PositiveRow(TEXT("WaitSecAtDouble"), WaitSecAtDouble);
+		HoistDwellSeconds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("HoistDwellSeconds"), HoistDwellSeconds));
+		HoistSecondsPerFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("HoistSecondsPerFloor"), HoistSecondsPerFloor));
+		LiftDwellSeconds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("LiftDwellSeconds"), LiftDwellSeconds));
+		LiftSecondsPerFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("LiftSecondsPerFloor"), LiftSecondsPerFloor));
+		LiftPlanSpeedCmPerS = FMath::Max(1, FMath::RoundToInt32(Defs->GetConfigScalar(FName("LiftPlanSpeedMps"), LiftPlanSpeedCmPerS / 100.0) * 100.0));
+		LiftPlanCm = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("LiftPlanCm"), LiftPlanCm));
+		const int32 WaitRow = (int32)Defs->GetConfigScalar(FName("MaxWaitSec"), MaxWaitSec);
+		MaxWaitSec = FMath::Clamp(WaitRow, 0, RH::MaxWaitSecCap);
+		if (MaxWaitSec != WaitRow)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxWaitSec %d is outside 0..%d - clamped to %d"), WaitRow, RH::MaxWaitSecCap, MaxWaitSec);
+		}
+		CommuteLiftCmPerFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteLiftCmPerFloor"), CommuteLiftCmPerFloor));
+		CommuteWaitCmPerSec = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteWaitCmPerSec"), CommuteWaitCmPerSec));
 	}
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
@@ -568,6 +614,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	// arc advances, power settles.
 	StepEventEdges();
 	StepUplink();
+	StepTransit(); // D4: the sol threshold of the shafts' waits, at the same index in both bands (returns at once with no lift car)
 	StepTaskBoard(SubDt);
 	StepProduction(SubDt);
 	StepDepositAlerts(); // D2a: same position in both bands (parity)
@@ -739,6 +786,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	// at 1 sim-minute. Only dig/haul need the abstract stand-in (agents park).
 	StepEventEdges(); // storm END mid-era alerts; onsets can't occur here (imminent check drops first)
 	StepUplink();
+	StepTransit(); // D4: the same index as the agent band (parity)
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
 	StepDepositAlerts(); // D2a: same position in both bands (parity)
@@ -7489,6 +7537,10 @@ bool URHSimWorldSubsystem::ExecuteSinkShaft(int32 BorerId, FString& OutReason)
 	Fresh.HeadCm = LatticeToCm(Shafts[0].HeadCm, Column);
 	Fresh.BorerId = BorerId;
 	Shafts.Add(MoveTemp(Fresh));
+	if (bHasTransit)
+	{
+		TransitLedgers.SetNum(Shafts.Num()); // D4: a shaft sunk after the first fit gets a zero ledger (a hoist has capacity too)
+	}
 	RebuildShaftDerived();
 	++ShaftReachVersion;
 	UE_LOG(LogRedHopeSim, Display, TEXT("Shaft %d sunk at (%d, %d) by Borer #%d"), Shafts.Last().Id, Column.X, Column.Y, BorerId);
@@ -7523,6 +7575,10 @@ bool URHSimWorldSubsystem::Debug_SinkShaftAt(const FVector& HeadCm, int32 Depth,
 	Fresh.Column = Column;
 	Fresh.HeadCm = LatticeToCm(Shafts[0].HeadCm, Column);
 	Shafts.Add(MoveTemp(Fresh));
+	if (bHasTransit)
+	{
+		TransitLedgers.SetNum(Shafts.Num()); // D4: see ExecuteSinkShaft
+	}
 	RebuildShaftDerived();
 	++ShaftReachVersion;
 	OutShaftId = Shafts.Last().Id;
@@ -8935,6 +8991,16 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	else if (Cmd.Verb == FName("CancelTunnel"))
 	{
 		ExecuteCancelTunnel(Cmd);
+	}
+	else if (Cmd.Verb == FName("FitLift"))
+	{
+		// D4: Value = the shaft Id. One more lift car on it; the preflight runs again here.
+		FString Reason;
+		if (!ExecuteFitLift(Cmd, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 	}
 	else if (Cmd.Verb == FName("Assign"))
 	{
@@ -12237,6 +12303,39 @@ bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& 
 	}
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
+	if (bHasTransit)
+	{
+		// D4 (REVISION item 1, O9): with a lift fitted, a robot below claims a haul only when it can reach both ends; a surface
+		// robot needs a From on the surface or reachable (an unreachable To is the head hand-off). Every candidate ranks by one
+		// key, DistXY to the pickup + floors apart x LiftPlanCm (wait-free, so no claim depends on the sol's waits); ties go to
+		// task order. The other filters are today's.
+		for (FRHTask& T : Tasks)
+		{
+			if (T.Type != ERHTaskType::Haul || T.ClaimedBy.IsValid() || T.bOutpostSource || (T.bFreight && T.UnclaimedAgentSec < FreightHaulerFallbackSec))
+			{
+				continue;
+			}
+			const int32 FromLevel = GetSiteLevel(T.From);
+			if (RobotLevel < 0 ? (!IsRouteReachable(RobotLevel, RobotPosCm, T.From) || !IsRouteReachable(RobotLevel, RobotPosCm, T.To))
+				: (FromLevel != 0 && !IsRouteReachable(RobotLevel, RobotPosCm, T.From)))
+			{
+				continue;
+			}
+			const double Key = FVector::DistXY(GetSiteLocation(T.From), RobotPosCm) + (double)FMath::Abs(RobotLevel - FromLevel) * (double)LiftPlanCm;
+			if (Key < BestDist)
+			{
+				BestDist = Key;
+				Best = &T;
+			}
+		}
+		if (Best)
+		{
+			Best->ClaimedBy = Robot;
+			OutTask = *Best;
+			return true;
+		}
+		return false;
+	}
 	for (FRHTask& T : Tasks)
 	{
 		// C6a: a freight task is the rovers' while one is active, until it has waited out the fallback.
@@ -12261,7 +12360,7 @@ bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& 
 	return false;
 }
 
-bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLoadedKg, FVector& OutDropoffCm)
+bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLoadedKg, FVector& OutDropoffCm, int32 RobotLevel, int32* OutDropLevel)
 {
 	FRHTask* T = FindTask(TaskId);
 	if (!T)
@@ -12305,13 +12404,29 @@ bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLo
 		return false;
 	}
 	OutLoadedKg = (float)Taken;
+	HaulLoadedKg += (double)OutLoadedKg; // D4: the mass balance's loaded leg (transient)
+	if (bHasTransit)
+	{
+		// D4: the drop for the robot's real floor - the site itself when it is reachable, else the surface head.
+		int32 DropLevel = 0;
+		OutDropoffCm = GetRobotTarget(T->To, RobotLevel, GetSiteLocation(T->From), DropLevel);
+		if (OutDropLevel)
+		{
+			*OutDropLevel = DropLevel;
+		}
+		return true;
+	}
+	if (OutDropLevel)
+	{
+		*OutDropLevel = 0;
+	}
 	// Cross-level delivery drives to the shaft head; the lift takes the cargo
 	// the last leg (robots are surface-bound until a later gate).
 	OutDropoffCm = GetApproachPoint(T->To, /*RobotLevel*/ 0);
 	return true;
 }
 
-void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource)
+void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource, int32 RobotLevel)
 {
 	if (FRHTask* T = FindTask(TaskId))
 	{
@@ -12319,16 +12434,38 @@ void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnR
 		{
 			B->InputKg.FindOrAdd(T->Resource) += CargoKg;
 			OnStockChanged.Broadcast(T->Resource, GetTotalSolid(T->Resource));
+			HaulCreditedKg += (double)CargoKg;
+			if (bHasTransit)
+			{
+				if (B->Level != RobotLevel)
+				{
+					// D4 (2.4): a credit across floors is the head hand-off - it pays the shaft whose head it was made at, the
+					// cargo's places, stamped by the robot's own sub-step.
+					ChargeTransit(ServingShaftOfSite(T->To, RobotLevel), GetCargoPlaces(CargoKg), FMath::RoundToInt64((double)CargoKg), TakeRobotStamp());
+				}
+				else if (RobotLevel < 0)
+				{
+					++DeepDeliveries; // delivered at the room below by a robot standing on its floor
+				}
+			}
 		}
 		else if (!ReturnResource.IsNone())
 		{
 			ReturnHaulCargo(TaskId, ReturnResource, CargoKg); // a rover's load is never dropped on the ground
+		}
+		else
+		{
+			HaulLostKg += (double)CargoKg; // D4's mass balance: a hauler's load with nowhere to go is lost, as it always was
 		}
 		CompleteTask(TaskId);
 	}
 	else if (!ReturnResource.IsNone())
 	{
 		ReturnHaulCargo(TaskId, ReturnResource, CargoKg); // R3: the task is gone (a demolish removed it): the load goes to the Lander
+	}
+	else
+	{
+		HaulLostKg += (double)CargoKg;
 	}
 }
 
@@ -12352,6 +12489,38 @@ bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector&
 	}
 	FRHTask* Best = nullptr;
 	double BestDist = TNumericLimits<double>::Max();
+	if (bHasTransit)
+	{
+		// D4 (REVISION item 1, O9): a robot below claims a site only when it can reach it; a surface robot keeps the linked
+		// floors (an unreachable site is worked from the surface head). One key for every candidate: DistXY to the robot's
+		// target + floors apart x LiftPlanCm; ties go to task order.
+		for (FRHTask& T : Tasks)
+		{
+			if (T.Type != ERHTaskType::Build || T.ClaimedBy.IsValid())
+			{
+				continue;
+			}
+			if (RobotLevel < 0 ? !IsRouteReachable(RobotLevel, RobotPosCm, T.To) : !AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
+			{
+				continue;
+			}
+			int32 TargetLevel = 0;
+			const FVector Target = GetRobotTarget(T.To, RobotLevel, RobotPosCm, TargetLevel);
+			const double Key = FVector::DistXY(Target, RobotPosCm) + (double)FMath::Abs(RobotLevel - TargetLevel) * (double)LiftPlanCm;
+			if (Key < BestDist)
+			{
+				BestDist = Key;
+				Best = &T;
+			}
+		}
+		if (Best)
+		{
+			Best->ClaimedBy = Robot;
+			OutTask = *Best;
+			return true;
+		}
+		return false;
+	}
 	for (FRHTask& T : Tasks)
 	{
 		// Cross-level claims allowed when the trunk links the floors: the
@@ -12375,7 +12544,7 @@ bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector&
 	return false;
 }
 
-bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
+bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds, int32 RobotLevel)
 {
 	FRHBuildingInstance* B = FindBuilding(BuildingId);
 	if (!B || !B->bUnderConstruction)
@@ -12427,6 +12596,10 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds)
 			}
 		}
 		UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d construction complete"), *B->DefName.ToString(), B->Id);
+		if (RobotLevel < 0)
+		{
+			++DeepBuildsCompleted; // D4: finished by a Fabricator standing below
+		}
 		OnBuildingCompleted.Broadcast(*B);
 		return true;
 	}
@@ -12678,15 +12851,52 @@ bool URHSimWorldSubsystem::TryClaimRepair(FMassEntityHandle Self, FMassEntityHan
 	FMassEntityHandle Best;
 	FVector BestPos = FVector::ZeroVector;
 	float BestWear = WearDegradeThreshold; // strictly-worse-than-threshold claims only
-	Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float Wear)
+	if (bHasTransit)
 	{
-		if (Entity != Self && Wear >= BestWear && !RepairClaims.Contains(Entity))
+		// D4 (D3 REVISION item 4): across floors - and for a unit already below - only a halted patient it can reach (a
+		// carved cell in a fitted dig, a fitted column, or the surface): a halted robot does not move, so one plan serves.
+		FVector SelfPos = FVector::ZeroVector;
+		const int32 SelfLevel = Agents->GetRobotPosition(Self, SelfPos) ? LevelOfZ(SelfPos.Z) : 0;
+		Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float Wear)
 		{
+			if (Entity == Self || Wear < BestWear || RepairClaims.Contains(Entity))
+			{
+				return;
+			}
+			const int32 PatientLevel = LevelOfZ(PosCm.Z);
+			if (PatientLevel != SelfLevel || SelfLevel < 0)
+			{
+				if (Wear < WearHaltThreshold)
+				{
+					return;
+				}
+				if (PatientLevel < 0 && FindPortalColumnAt(PatientLevel, PosCm) == INDEX_NONE)
+				{
+					const int32 Ord = FindCarvedCellAt(PatientLevel, PosCm);
+					const FRHDigInfo& Info = EnsureDigInfo(PatientLevel);
+					if (Ord == INDEX_NONE || !Info.DigOf.IsValidIndex(Ord) || !EnsureDeepNet().FittedDigs.Contains(FIntPoint(PatientLevel, Info.DigOf[Ord])))
+					{
+						return;
+					}
+				}
+			}
 			Best = Entity;
 			BestPos = PosCm;
 			BestWear = Wear;
-		}
-	});
+		});
+	}
+	else
+	{
+		Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float Wear)
+		{
+			if (Entity != Self && Wear >= BestWear && !RepairClaims.Contains(Entity))
+			{
+				Best = Entity;
+				BestPos = PosCm;
+				BestWear = Wear;
+			}
+		});
+	}
 	if (!Best.IsValid())
 	{
 		return false;
@@ -12703,12 +12913,21 @@ bool URHSimWorldSubsystem::GetRepairTargetPos(FMassEntityHandle Target, FVector&
 	return Agents && Agents->GetRobotPosition(Target, OutPosCm);
 }
 
-void URHSimWorldSubsystem::ApplyRepairAt(FMassEntityHandle Target)
+void URHSimWorldSubsystem::ApplyRepairAt(FMassEntityHandle Target, int32 RepairerLevel)
 {
 	URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
 	if (!Agents)
 	{
 		return;
+	}
+	if (bHasTransit)
+	{
+		// D4: never through the rock - only at the repairer's own floor.
+		FVector PatientPos;
+		if (!Agents->GetRobotPosition(Target, PatientPos) || LevelOfZ(PatientPos.Z) != RepairerLevel)
+		{
+			return;
+		}
 	}
 	// Spend parts against the wear, one part = RepairWearPerPart, bounded by
 	// stock. Instant at slice scale - the visit is the cost, like site work.
@@ -12731,6 +12950,13 @@ void URHSimWorldSubsystem::ApplyRepairAt(FMassEntityHandle Target)
 		UE_LOG(LogRedHopeSim, Display, TEXT("REPAIR: %.0f wear removed (%d parts, %.0f left in stock)"),
 			WearRemoved, PartsSpent, GetStock(NAME_SpareParts));
 	}
+}
+
+bool URHSimWorldSubsystem::IsRobotHalted(FMassEntityHandle Target) const
+{
+	const URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>();
+	float Wear = 0.f;
+	return Agents && Agents->GetRobotWear(Target, Wear) && Wear >= WearHaltThreshold;
 }
 
 void URHSimWorldSubsystem::ReleaseRepairClaim(FMassEntityHandle Target)
@@ -12895,6 +13121,12 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	{
 		Agents->CollectRobotStates(Robots);
 	}
+	// D4 (REVISION item 9(a)): the robot's real floor, read from its Z here (the agent subsystem knows no floor height). A
+	// colony with every robot on the surface writes 0, the same bytes as before. Before the cargo return, which skips robots.
+	for (FRHRobotSaveState& R : Robots)
+	{
+		R.Level = LevelOfZ(R.PosCm.Z);
+	}
 	for (FRHRobotSaveState& R : Robots)
 	{
 		if (R.CargoKg <= 0.f || R.TaskId == 0)
@@ -12948,6 +13180,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	WriteFloorTable(Ar); // v41: the floor table sits straight after the header (a load validates it before any teardown)
 	WriteShaftBlock(Ar); // v44: and the shaft list straight after it, so the floor block's offsets do not move
 	WriteTunnelBlock(Ar); // v45: and the tunnel list straight after that, so the shaft block's offsets do not move
+	WriteTransitBlock(Ar); // v46: and the transit block straight after it, so the tunnel block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -13396,6 +13629,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v46: the transit block (lift cars, the threshold sol, the ledgers), validated against the shafts just read, into locals.
+	FRHLoadedTransit LoadedTransit;
+	if (!ReadTransitBlock(Ar, LoadedShafts, LoadedTransit, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -13512,13 +13751,18 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 
 	Ar << Num;
 	TArray<FMassEntityHandle> Respawned;
+	TArray<int32> RespawnedLevels; // D4: parallel to Respawned (a robot whose row is gone spawns nothing and keeps no level)
 	for (int32 i = 0; i < Num; ++i)
 	{
 		FRHRobotSaveState R;
 		Ar << R.DefName << R.PosCm << R.Level << R.ChargeWh << R.Wear;
 		if (const FRHRobotRow* Row = Defs->GetRobot(R.DefName))
 		{
-			SpawnRobotTracked(R.DefName, *Row, R.PosCm, R.ChargeWh, R.Wear, Respawned);
+			const FMassEntityHandle H = SpawnRobotTracked(R.DefName, *Row, R.PosCm, R.ChargeWh, R.Wear, Respawned);
+			if (H.IsValid())
+			{
+				RespawnedLevels.Add(R.Level);
+			}
 		}
 	}
 
@@ -13538,6 +13782,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Tunnels = MoveTemp(LoadedTunnels);
 	NextTunnelId = LoadedNextTunnelId;
 	++TunnelsVersion;
+	InstallTransit(LoadedTransit); // D4: the cars onto the shafts just installed, the threshold sol and the ledgers
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a
 	// Borer that anchors two shafts keeps the lower Id.
 	{
@@ -13571,6 +13816,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		++ShaftReachVersion;
 	}
+	// D4 (1.6): the robots' floors, judged against the colony just loaded (floors, shafts, tunnels, cars), never the one before.
+	RepairLoadedRobots(Respawned, RespawnedLevels);
 	Ar << SpoilPileKg;
 	PendingBoreWork.Empty();
 	Ar << PendingBoreWork;

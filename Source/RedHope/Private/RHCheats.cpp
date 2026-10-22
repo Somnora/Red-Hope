@@ -140,7 +140,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTerrainProbe(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHCamRobot(
 	TEXT("RH.CamRobot"),
-	TEXT("RH.CamRobot [ZoomT=0.04] [YawDeg=0] [PitchOffsetDeg=0] - frame the robot on a road trip (else the first robot) where it stands now. Robots move: chain it with RH.After to follow one."),
+	TEXT("RH.CamRobot [ZoomT=0.04] [YawDeg=0] [PitchOffsetDeg=0] [ride|below] - frame the robot on a road trip (else the first robot) where it stands now. Robots move: chain it with RH.After to follow one. D4: 'ride' frames the first robot riding a lift car and 'below' the first robot on a floor (not riding), each switching the view to that robot's floor."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		ARHStrategyPawn* Pawn = FindStrategyPawn(World);
@@ -155,6 +155,45 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCamRobot(
 		const float Pitch = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f;
 		FVector Best = FVector::ZeroVector;
 		bool bFound = false, bOnRoad = false;
+		const FString Mode = Args.Num() > 3 ? Args[3].ToLower() : FString();
+		if (Mode == TEXT("ride") || Mode == TEXT("below"))
+		{
+			// D4: a rider (its floor the one it is nearer, as the visualizer draws it) or a robot standing on a floor.
+			int32 ViewLevel = 0;
+			Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float)
+			{
+				if (bFound || !Sim->HasRobotLifts())
+				{
+					return;
+				}
+				FRHRideState Ride;
+				const bool bRiding = Sim->GetRideState(Entity, Ride);
+				if (Mode == TEXT("ride") && bRiding && Ride.HoldStepsLeft == 0)
+				{
+					ViewLevel = FMath::RoundToInt32(FMath::Lerp((float)Ride.FromLevel, (float)Ride.ToLevel, Ride.RideFrac()));
+					Best = PosCm;
+					bFound = true;
+				}
+				else if (Mode == TEXT("below") && !bRiding && Sim->LevelOfZ(PosCm.Z) < 0)
+				{
+					ViewLevel = Sim->LevelOfZ(PosCm.Z);
+					Best = PosCm;
+					bFound = true;
+				}
+			});
+			if (!bFound)
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.CamRobot] no robot %s right now"), Mode == TEXT("ride") ? TEXT("riding a lift car") : TEXT("below"));
+				return;
+			}
+			if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+			{
+				PC->SetActiveLevel(ViewLevel);
+			}
+			Pawn->SetCameraPose(FVector2D(Best.X, Best.Y), ZoomT, Pitch, Yaw);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.CamRobot] framed a robot %s at (%.0f, %.0f) m, floor %d"), Mode == TEXT("ride") ? TEXT("riding") : TEXT("below"), Best.X / 100.f, Best.Y / 100.f, ViewLevel);
+			return;
+		}
 		Agents->ForEachRobotState([&](FMassEntityHandle Entity, const FVector& PosCm, float)
 		{
 			const FRHRobotRoadPath* Road = Sim->GetRobotRoadPath(Entity);
@@ -411,6 +450,69 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSinkShaft(
 			Cmd.Value = FCString::Atod(*Args[0]);
 			Sim->EnqueueCommand(Cmd);
 		}
+	}));
+
+// D4: fit a lift car on a shaft (the FitLift verb, uplink; the first car is the colony's transit system).
+static FAutoConsoleCommandWithWorldAndArgs GRHFitLift(
+	TEXT("RH.FitLift"),
+	TEXT("RH.FitLift [shaft=0] [now] - order a lift car fitted on that shaft (uplink; bills Struct: the first car FirstLiftFitStructKg, later ones LiftFitStructKg; at most MaxLiftCars a shaft). 'now' fits it at once (DEBUG, the same preflight and bill, no uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		const int32 ShaftId = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 0;
+		const bool bNow = Args.Num() > 1 && Args[1].Equals(TEXT("now"), ESearchCase::IgnoreCase);
+		FString Why;
+		if (bNow)
+		{
+			if (Sim->Debug_FitLift(ShaftId, Why))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.FitLift] shaft %d now has %d lift car(s)"), ShaftId, Sim->GetLiftCars(ShaftId));
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.FitLift] refused: %s"), *Why);
+			}
+			return;
+		}
+		if (!Sim->CanFitLift(ShaftId, Why))
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("[RH.FitLift] the order would be refused: %s"), *Why);
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("FitLift");
+		Cmd.Value = ShaftId;
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+// D4: the transit readout - every shaft's cars, load against capacity, wait, and the robots below.
+static FAutoConsoleCommandWithWorldAndArgs GRHTransit(
+	TEXT("RH.Transit"),
+	TEXT("RH.Transit - log each shaft's lift cars (or hoist), this sol's load against its capacity and its wait, and the deep counters."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim)
+		{
+			return;
+		}
+		if (!Sim->HasTransit())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Transit] no lift car fitted: the hoist is free and endless, every robot works on the surface"));
+			return;
+		}
+		for (int32 S = 0; S < Sim->GetShaftCount(); ++S)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Transit] shaft %d: %s | load %lld people + %lld cargo / %lld places | wait %d s"),
+				S, Sim->GetLiftCars(S) > 0 ? *FString::Printf(TEXT("%d/%d cars"), Sim->GetLiftCars(S), Sim->GetMaxLiftCars()) : TEXT("hoist"),
+				Sim->GetShaftPeopleLoad(S), Sim->GetShaftCargoLoad(S), Sim->GetShaftCapacityPlaces(S), Sim->GetTransitWaitSec(S));
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Transit] rides %d, hand-off holds %d, deliveries below %d, builds below %d, off-lattice %d, unstamped %d, thresholds %d"),
+			Sim->GetRidesBoarded(), Sim->GetHandoffHoldsBegun(), Sim->GetDeepDeliveries(), Sim->GetDeepBuildsCompleted(), Sim->GetDeepOffLattice(),
+			Sim->GetTransitUnstampedRobotWrites(), Sim->GetTransitThresholds());
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSinkNow(

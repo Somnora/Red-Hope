@@ -62,6 +62,14 @@
 # them waits for the next ship. LIVING lines log it and the REPORT block adds a "night storage" line (sol-hours the bank stood empty,
 # grow lights dark). RH_PLAYTEST_NIGHTBANK=0 switches the rule off.
 #
+# Lifts (D4, opt-in, never part of a byte-identical comparison): RH_PLAYTEST_LIFTS=1 adds lifts=1 - once floor -1 rates
+# the player fits one lift car on shaft 0 (and orders an Infirmary module on a free carved cell below if nothing there
+# needs a robot), saves and loads the colony the first time a robot is below (10 sols after the fit if none goes down),
+# and the bot asserts the transit invariants once a sol on "lifts:" lines (no robot off the lattice, none below at
+# charge 0, every robot ledger write stamped, one threshold roll a sol, mass conserved: loaded = credited + returned +
+# lost + in flight + returned by the load), with a REPORT line and an Error line per failure:
+#   RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_LIFTS=1 bash scripts/sim/rh_playtest.sh 40 d4_lifts guide full
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -87,7 +95,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFTS:+lifts=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

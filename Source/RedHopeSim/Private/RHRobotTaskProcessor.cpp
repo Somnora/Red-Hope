@@ -46,9 +46,11 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 		return;
 	}
 	const float SubDt = URHSimClockSubsystem::SubStepSeconds;
+	// D4 (REVISION item 2(b)): each robot sub-step is stamped with its own end, the formula Tick gives the world's steps.
+	const double FrameEnd = Clock->GetSimSecondsTotal();
 
 	EntityQuery.ForEachEntityChunk(Context,
-		[Steps, SubDt, Sim](FMassExecutionContext& ChunkContext)
+		[Steps, SubDt, Sim, FrameEnd](FMassExecutionContext& ChunkContext)
 	{
 		const TArrayView<FTransformFragment> Transforms = ChunkContext.GetMutableFragmentView<FTransformFragment>();
 		const TArrayView<FRHBatteryFragment> Batteries = ChunkContext.GetMutableFragmentView<FRHBatteryFragment>();
@@ -66,6 +68,9 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 
 			for (int32 Step = 0; Step < Steps; ++Step)
 			{
+				Sim->SetRobotStepEnd(RH::RobotSubStepEnd(FrameEnd, Steps, Step, URHSimClockSubsystem::SubStepSeconds));
+				// D4: the robot's floor, read from its Z (0 for every robot until a lift car is fitted).
+				const int32 Level = Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0;
 				// Charging etiquette: below the seek threshold, break off
 				// (unless mid-delivery - finish the drop first) and head for
 				// the nearest pad - or, with none working, the Lander's slow
@@ -73,8 +78,13 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 				// does a robot keep working until it halts.
 				const float ChargeFrac = Battery.CapacityWh > 0.f ? Battery.ChargeWh / Battery.CapacityWh : 0.f;
 				const ERHTaskType Current = (ERHTaskType)Task.TaskType;
-				const bool bMidDelivery = (Current == ERHTaskType::Haul && Task.Phase == 2);
-				if (Current != ERHTaskType::Charge && !bMidDelivery && ChargeFrac < Sim->GetChargeSeekFraction())
+				// D4: a head hand-off whose hold the charge cannot cover is not "finishing the drop" (REVISION item 6); below, or
+				// with a ride boarded, the deep test decides alone and overrides the exemption (D3 REVISION item 2(c)).
+				const bool bMidDelivery = (Current == ERHTaskType::Haul && Task.Phase == 2)
+					&& !(Sim->HasTransit() && Sim->HandoffHoldShort(Entity, Task.TaskId, Battery.ChargeWh, Robot, Transform.GetLocation(), Task.TargetCm));
+				const ERHDeepCharge Deep = Sim->DeepChargeTest(Entity, Robot, Transform.GetLocation(), Battery.ChargeWh, Battery.CapacityWh);
+				const bool bSeek = Deep == ERHDeepCharge::NotApplicable ? (!bMidDelivery && ChargeFrac < Sim->GetChargeSeekFraction()) : Deep == ERHDeepCharge::Seek;
+				if (Current != ERHTaskType::Charge && bSeek)
 				{
 					int32 PadId = 0;
 					FVector PadLoc;
@@ -91,6 +101,10 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 							if (bRover && Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
 							{
 								Sim->ReturnHaulCargo(Task.TaskId, Task.CargoResource, Task.CargoKg);
+							}
+							else if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
+							{
+								Sim->NoteHaulCargoLost(Task.CargoKg); // D4's mass balance: lost, as it always was
 							}
 							Sim->AbandonTask(Task.TaskId);
 						}
@@ -125,9 +139,13 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						{
 							break; // died en route to the pad
 						}
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover, 0.f, Task.TargetLevel))
 						{
 							Task.Phase = 1;
+						}
+						if (Sim->DidRobotHoldThisStep(Entity))
+						{
+							DrawW = Robot.DrawIdleW; // D4: holding at a column for the ride up
 						}
 					}
 					else
@@ -161,13 +179,13 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					else if (Robot.RobotClass == FName("Hauler"))
 					{
 						FRHTask Board;
-						if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board))
+						if (Sim->TryClaimHaul(Entity, Transform.GetLocation(), Board, Level))
 						{
 							Task.TaskType = (uint8)ERHTaskType::Haul;
 							Task.TaskId = Board.Id;
 							Task.CargoResource = Board.Resource;
 							Task.CargoKg = 0.f;
-							Task.TargetCm = Sim->GetSiteLocation(Board.From);
+							Task.TargetCm = Sim->HasRobotLifts() ? Sim->GetRobotTarget(Board.From, Level, Transform.GetLocation(), Task.TargetLevel) : Sim->GetSiteLocation(Board.From);
 							Task.Phase = 0;
 						}
 					}
@@ -189,14 +207,14 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					else if (Robot.RobotClass == FName("Fabricator"))
 					{
 						FRHTask Board;
-						if (Sim->TryClaimBuild(Entity, Transform.GetLocation(), Board))
+						if (Sim->TryClaimBuild(Entity, Transform.GetLocation(), Board, Level))
 						{
 							Task.TaskType = (uint8)ERHTaskType::Build;
 							Task.TaskId = Board.Id;
 							Task.DigDepositId = Board.To.BuildingId; // reused slot: construction site id
 							Task.RoadEdgeId = Board.To.RoadEdgeId;   // C4: a road edge is labour only, in its own slot
-							// Cross-level sites are worked from the shaft head (M1-d).
-							Task.TargetCm = Sim->GetApproachPoint(Board.To, /*RobotLevel*/ 0);
+							// Cross-level sites are worked from the shaft head (M1-d); D4: or at the site's cell, when a fitted lift reaches it.
+							Task.TargetCm = Sim->GetRobotTarget(Board.To, Level, Transform.GetLocation(), Task.TargetLevel);
 							Task.Phase = 0;
 						}
 					}
@@ -234,7 +252,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					DrawW = Robot.DrawMoveW;
 					if (Task.Phase == 0) // to pickup
 					{
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover, 0.f, Task.TargetLevel))
 						{
 							Task.Phase = 1;
 						}
@@ -243,7 +261,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					{
 						float LoadedKg = 0.f;
 						FVector DropoffCm = FVector::ZeroVector;
-						if (Sim->HaulLoad(Task.TaskId, Robot.CargoCapKg, LoadedKg, DropoffCm))
+						if (Sim->HaulLoad(Task.TaskId, Robot.CargoCapKg, LoadedKg, DropoffCm, Level, &Task.TargetLevel))
 						{
 							Task.CargoKg = LoadedKg;
 							Task.TargetCm = DropoffCm;
@@ -256,11 +274,28 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					}
 					else if (Task.Phase == 2) // to dropoff
 					{
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover))
+						// D4 (REVISION item 6): the head hand-off's hold, as in the StateTree brain.
+						if (Sim->InHandoffHold(Entity, Task.TaskId, Transform.GetLocation()))
 						{
-							Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None);
-							Task = FRHTaskFragment();
+							DrawW = Robot.DrawIdleW;
+							if (Sim->StepHandoffHold(Entity))
+							{
+								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+								Task = FRHTaskFragment();
+							}
 						}
+						else if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, bRover, Task.CargoKg, Task.TargetLevel))
+						{
+							if (Sim->BeginHandoffHold(Entity, Task.TaskId, Level, Transform.GetLocation()) == 0)
+							{
+								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+								Task = FRHTaskFragment();
+							}
+						}
+					}
+					if (Sim->DidRobotHoldThisStep(Entity))
+					{
+						DrawW = Robot.DrawIdleW;
 					}
 					break;
 				}
@@ -270,9 +305,13 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					if (Task.Phase == 0)
 					{
 						DrawW = Robot.DrawMoveW;
-						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt))
+						if (RH::MoveAlong(*Sim, Entity, Transform, Task.TargetCm, Robot.SpeedMps, SubDt, false, 0.f, Task.TargetLevel))
 						{
 							Task.Phase = 1;
+						}
+						if (Sim->DidRobotHoldThisStep(Entity))
+						{
+							DrawW = Robot.DrawIdleW;
 						}
 					}
 					else
@@ -281,7 +320,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						// C4: a road edge is labour only (its own slot, never the site id).
 						const bool bDone = Task.RoadEdgeId > 0
 							? Sim->ApplyRoadWork(Task.RoadEdgeId, SubDt * Robot.WorkRate)
-							: Sim->ApplyBuildWork(Task.DigDepositId, SubDt * Robot.WorkRate);
+							: Sim->ApplyBuildWork(Task.DigDepositId, SubDt * Robot.WorkRate, Level);
 						if (bDone)
 						{
 							Sim->CompleteTask(Task.TaskId);
@@ -299,4 +338,5 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 			}
 		}
 	});
+	Sim->SetRobotStepEnd(-1.0);
 }

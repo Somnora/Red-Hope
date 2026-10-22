@@ -505,7 +505,7 @@ void URHTrafficVisualizerSubsystem::RefreshLoads(const URHSimWorldSubsystem& Sim
 		// The edges still ahead of it on its current trip.
 		for (int32 Leg = FMath::Max(0, Path->Next); Leg < Path->LegEdge.Num(); ++Leg)
 		{
-			if (Path->LegEdge[Leg] != 0)
+			if (Path->LegEdge[Leg] > 0) // D4: a ride leg (< 0) is no road edge; rovers never ride, so this only guards
 			{
 				++Rovers.FindOrAdd(Path->LegEdge[Leg]);
 			}

@@ -166,6 +166,12 @@ private:
 	EVisibility GetSinkShaftVisibility() const;
 	FText GetSinkShaftLabel() const;
 	FReply HandleSinkShaft();
+	// D4: the shaft card on the strip - the shaft nearest the camera: its cars (or "hoist"), the load against capacity this sol,
+	// the wait, and "Fit a lift car (N kg Struct)" (pre-checks the sim's FitLift preflight). Gate-D placeholder copy.
+	EVisibility GetLiftCardVisibility() const;
+	FText GetLiftCardText() const;
+	FText GetFitLiftLabel() const;
+	FReply HandleFitLift();
 	// D3 (Q2a): the Tunnel brush button on the shaft strip, and the card under it listing the viewed floor's tunnels, each with
 	// its progress (or "stalled", O11) and a Cancel.
 	FReply HandleTunnel();
@@ -303,7 +309,7 @@ private:
 	// Fleet rows, refreshed each Tick from the agent snapshot; the list widget
 	// rebuilds only when membership changes (rows read by index).
 	// C6b: a cargo rover's row also knows its load and whether it is on a road trip (its status line).
-	struct FFleetRowView { FString Name; uint8 Task = 0; float Charge = 0.f; float Wear = 0.f; bool bRover = false; float CargoKg = 0.f; bool bOnRoad = false; };
+	struct FFleetRowView { FString Name; uint8 Task = 0; float Charge = 0.f; float Wear = 0.f; bool bRover = false; float CargoKg = 0.f; bool bOnRoad = false; int32 Level = 0; };
 	TArray<FFleetRowView> FleetRows;
 	TArray<FName> FleetDefsShown;
 	TSharedPtr<class SVerticalBox> FleetList;

@@ -1032,6 +1032,19 @@ void SRHCommandDeck::RefreshCityPanel()
 				CityCommuteLine += FString::Printf(TEXT(" Busiest route: %s to %s, %d people."), *NameOf(Busiest->HomeDistrictId), *NameOf(Busiest->WorkDistrictId), Busiest->Count);
 			}
 		}
+		// D4, Gate-D framing PLACEHOLDER (T6): one line per crowded shaft (a wait this sol), prevention-framed.
+		if (Sim->HasTransit())
+		{
+			for (int32 S = 0; S < Sim->GetShaftCount(); ++S)
+			{
+				const int32 Wait = Sim->GetTransitWaitSec(S);
+				if (Wait > 0)
+				{
+					CityCommuteLine += FString::Printf(TEXT("%sShaft %d is crowded: commutes through it take about %d s longer. Another car or another shaft would help."),
+						CityCommuteLine.IsEmpty() ? TEXT("") : TEXT("\n"), S, Wait);
+				}
+			}
+		}
 	}
 	// C5b: the growth list - one bar a project; a bar reads its project live, so only a start, a finish or a refund rebuilds it.
 	if (CityGrowthList.IsValid() && (Sim->GetGrowthVersion() != CityGrowthVersionShown || Sim->GetDistrictsVersion() != CityGrowthDistrictsShown))
@@ -1621,15 +1634,18 @@ TSharedRef<SWidget> SRHCommandDeck::BuildFleetPanel()
 			.Text_Lambda([this]()
 			{
 				const URHSimWorldSubsystem* S = GetSim();
-				int32 Working = 0, Trouble = 0;
+				int32 Working = 0, Trouble = 0, Below = 0;
 				for (const FFleetRowView& R : FleetRows)
 				{
 					Working += (R.Task != 0 && R.Task != 4) ? 1 : 0;
 					Trouble += (S && (R.Wear >= S->GetWearDegradeThreshold() || R.Charge <= 0.f)) ? 1 : 0;
+					Below += R.Level < 0 ? 1 : 0;
 				}
+				// D4, Gate-D framing PLACEHOLDER (T5): the "N robots below" badge.
+				const FString BelowText = Below > 0 ? FString::Printf(TEXT("  -  %d BELOW"), Below) : FString();
 				return Txt(Trouble > 0
-					? FString::Printf(TEXT("%d ROBOTS  -  %d NEED CARE"), FleetRows.Num(), Trouble)
-					: FString::Printf(TEXT("%d ROBOTS  -  %d WORKING"), FleetRows.Num(), Working));
+					? FString::Printf(TEXT("%d ROBOTS  -  %d NEED CARE%s"), FleetRows.Num(), Trouble, *BelowText)
+					: FString::Printf(TEXT("%d ROBOTS  -  %d WORKING%s"), FleetRows.Num(), Working, *BelowText));
 			})
 			.ColorAndOpacity_Lambda([this]()
 			{
@@ -1699,6 +1715,7 @@ void SRHCommandDeck::RefreshFleetPanel()
 		}
 		FFleetRowView Row = { Name, R.TaskType, R.ChargeFrac, R.Wear };
 		Row.bRover = R.RobotClass == FName("Rover");
+		Row.Level = (Sim && Sim->HasRobotLifts()) ? Sim->LevelOfZ(R.PosZCm) : 0; // D4: its floor (0 for every robot with no lift)
 		if (Row.bRover)
 		{
 			// The k-th rover row is the k-th rover state (both walk the robots in spawn order).
@@ -1757,6 +1774,21 @@ void SRHCommandDeck::RefreshFleetPanel()
 						const FFleetRowView& R = FleetRows[Index];
 						if (R.Wear >= S->GetWearHaltThreshold() || R.Charge <= 0.f) { return FSlateColor(D::Red); }
 						return FSlateColor(R.Wear >= S->GetWearDegradeThreshold() ? D::Amber : D::TextDim);
+					})
+				]
+			]
+			// D4: the floor it is on ("S" for the surface), once a lift car is fitted.
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 6.f, 0.f)
+			[
+				SNew(SBox).WidthOverride(22.f)
+				.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->HasRobotLifts()) ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::TextDim)
+					.Text_Lambda([this, Index]()
+					{
+						if (!FleetRows.IsValidIndex(Index)) { return FText::GetEmpty(); }
+						const int32 L = FleetRows[Index].Level;
+						return Txt(L == 0 ? FString(TEXT("S")) : FString::Printf(TEXT("%d"), L));
 					})
 				]
 			]

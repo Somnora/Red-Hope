@@ -267,6 +267,7 @@ void URHSimWorldSubsystem::TakeGrowthResource(FName Resource, double Kg)
 			{
 				continue;
 			}
+			double Part = 0.0;
 			for (TMap<FName, double>* Shelf : { &B.OutputKg, &B.InputKg })
 			{
 				if (double* Held = Shelf->Find(Resource))
@@ -274,8 +275,10 @@ void URHSimWorldSubsystem::TakeGrowthResource(FName Resource, double Kg)
 					const double Take = FMath::Min(Left, *Held);
 					*Held -= Take;
 					Left -= Take;
+					Part += Take;
 				}
 			}
+			ChargeBillPart(B, Part); // D4 (O5): a part taken from a floor charges its shaft's ledger; nothing with no lift car
 		}
 		OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));
 		if (Left > 0.0)

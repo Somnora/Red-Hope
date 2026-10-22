@@ -12,6 +12,7 @@ class URHDefinitionsSubsystem;
 class URHSimClockSubsystem;
 class URHAgentSubsystem;
 struct FRHRobotRow;
+struct FRHRobotFragment;
 struct FRHRoomRow;
 struct FRHFurnitureRow;
 struct FRHBuildingRow;
@@ -101,6 +102,21 @@ struct FRHRobotRoadPath
 	int32 Next = 0;                         // the leg being driven
 	int32 Serial = 0;                       // new for every plan: presentation re-syncs on it
 	bool IsRoadTrip() const { return Waypoints.Num() > 1; }
+	// D4: a deep trip (planned by MoveAlongDeep, bDeep) also carries each waypoint's floor and its rides: LegEdge < 0 is a
+	// ride on shaft -LegEdge - 1, from the column at the previous waypoint's floor to the column at Levels[leg]. A ride is
+	// boarded on the sub-step the robot reaches the column (boarding ends that sub-step); the robot then holds HoldStepsLeft
+	// sub-steps (the shaft's wait, read once at boarding) and rides RideStepsLeft; its Z flips at the end of the sub-step that
+	// takes RideStepsLeft to 0, and it moves no further in that sub-step. Everything here is robot-local and never saved.
+	TArray<int32> Levels;
+	int32 TargetLevel = 0;                  // O7: a deep trip is re-planned when (TargetCm, TargetLevel) changes
+	bool bDeep = false;
+	bool bPlanFailed = false;               // no route from here: the robot stands until its target changes
+	bool bBoarded = false;                  // on the column, committed to the ride leg Next
+	bool bHeldThisStep = false;             // the last sub-step was a hold (the brains draw idle power, no wear)
+	int32 HoldStepsLeft = 0;
+	int32 RideStepsLeft = 0;
+	int32 RideSteps = 0;                    // the boarded ride's whole length in sub-steps
+	int32 RideFromLevel = 0;                // the boarding floor
 };
 
 // C6a: how a class of robot moves between roads. Robots pass no profile (today's behaviour: the
@@ -306,6 +322,7 @@ struct FRHShaft
 	int32 BoreTargetDepth = 0;        // ordered depth; the anchor bores while Depth < this
 	TMap<int32, int32> CarveQueue;    // Level -> cells still to carve (decremented at batch START)
 	int32 BorerId = 0;                // the Borer that anchors it; 0 = none (shaft 0 anchored by ExtendShaft, the test path)
+	int32 LiftCars = 0;               // D4: lift cars fitted (0 = the unfitted hoist); saved in the transit block (v46), not the shaft block
 };
 
 namespace RH
@@ -334,6 +351,67 @@ struct FRHTunnel
 	mutable bool bCounted = false;    // derived, never saved: the uncarved count below is good for CountedAt (a FloorCellsVersion)
 	mutable uint32 CountedAt = 0;
 	mutable int32 CountLeft = 0;
+};
+
+namespace RH
+{
+	// D4: caps shared by the config clamps and the save's refusals, so a save made under any row value loads.
+	constexpr int32 MaxLiftCarsCap = 8;
+	constexpr int32 MaxWaitSecCap = 1200;  // one sol (O8)
+}
+
+// D4 (transit): one shaft's cargo ledger and its frozen waits. Three slots, one per sol modulo 3, each tagged with its sol
+// (-1 = unused). A writer adds whole kg and whole places to the slot of the sol its own step ends in (a world-side bill: the
+// step's end; a robot: its own sub-step's end), first resetting a slot whose tag is older. The threshold roll reads the slot
+// of sol SolNow-2 only when its tag matches, and freezes WaitSec for the sol; PrevWaitSec keeps the sol before, which robots
+// read inside the lag window just after a boundary. Integers added in any order give the same totals, so no wait depends on
+// which robot the processor reaches first. One ledger per shaft once a car is fitted; saved in the transit block (v46).
+struct FRHTransitLedger
+{
+	int32 Sol[3] = { -1, -1, -1 };
+	int64 Kg[3] = { 0, 0, 0 };
+	int32 Places[3] = { 0, 0, 0 };
+	int32 WaitSec = 0;
+	int32 PrevWaitSec = 0;
+};
+
+// D4: what a deep route costs, beside its planner cost: the walking (lattice and surface cm, all at base speed), the rides'
+// own seconds (dwell + floors x seconds a floor, no wait), and the holds before them. The charge reserve is built from these.
+struct FRHDeepRouteCost
+{
+	int64 CostUnits = 0;
+	int64 LatticeCm = 0;
+	int64 SurfaceCm = 0;
+	int32 RideSeconds = 0;
+	int32 Rides = 0;
+	int32 AscentRides = 0;
+	int32 DescentHoldSeconds = 0;   // descents keep the robot's frozen wait (an ascent's hold is priced at MaxWaitSec)
+	int32 AscentHoldSeconds = 0;    // the ascents' frozen waits, for readouts (the reserve does not use them)
+};
+
+// D4: a boarded ride, for the brains' charge test and for presentation (the cab).
+struct FRHRideState
+{
+	int32 Shaft = INDEX_NONE;
+	int32 FromLevel = 0;
+	int32 ToLevel = 0;
+	int32 HoldStepsLeft = 0;
+	int32 RideStepsLeft = 0;
+	int32 RideSteps = 0;
+	bool IsAscent() const { return ToLevel > FromLevel; }
+	float RideFrac() const { return RideSteps > 0 ? 1.f - (float)RideStepsLeft / (float)RideSteps : 0.f; }
+};
+
+// D4 (1.5): the deep charge test both brains share. NotApplicable at level 0 with no ride boarded (today's rule runs).
+enum class ERHDeepCharge : uint8 { NotApplicable = 0, Keep, Seek };
+
+// D4 (REVISION item 6): a hauler holding at a head while the cage takes its load down. Runtime only (never saved): valid only
+// while the robot's task is TaskId and it still stands where the hold began.
+struct FRHHandoffHold
+{
+	int32 TaskId = 0;
+	int32 StepsLeft = 0;
+	FVector AtCm = FVector::ZeroVector;
 };
 
 // Single owner of colony truth. Its Tick is the sim driver: uplink ->
@@ -653,6 +731,148 @@ public:
 	bool Debug_DigTunnel(int32 Level, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
 	// Harness: growth's free-cell test (private; the -tunnels suite pins that it skips tunnel cells).
 	bool Debug_IsCellFreeForRoom(int32 Level, int32 Cell) const { return IsCellFreeForRoom(Level, Cell); }
+
+	// --- D4: transit (lifts, capacity and robots below; docs/qa/2026-10-21/d4-transit-design.md, Q-A (a), Q-B (a)) ---
+	// The gate is the colony's first fitted lift car (FitLift, Value = shaft Id). With no car every line of D3 runs: the free,
+	// endless hoist, the instant head hand-off, robots on the surface. From the first car the colony runs its shafts as one
+	// transit system: every shaft has a capacity a sol (an unfitted shaft is a hoist), cargo and people share it, a crowded
+	// shaft holds riders and hand-offs for a wait frozen at the sol threshold, and robots ride the fitted shafts to work on
+	// the floors. HasRobotLifts() is the same test as HasTransit() (D3's name).
+	bool HasTransit() const { return bHasTransit; }
+	bool HasRobotLifts() const { return bHasTransit; }
+	int32 GetLiftCars(int32 ShaftId) const { return Shafts.IsValidIndex(ShaftId) ? Shafts[ShaftId].LiftCars : 0; }
+	int32 GetMaxLiftCars() const { return MaxLiftCars; }
+	uint32 GetLiftVersion() const { return LiftVersion; }               // up on every fit
+	uint32 GetTransitWaitVersion() const { return TransitWaitVersion; } // up when a threshold roll changes any wait
+	int32 GetTransitCheckedSol() const { return TransitCheckedSol; }    // -1 until the first fit
+	const TArray<FRHTransitLedger>& GetTransitLedgers() const { return TransitLedgers; } // one per shaft once a car is fitted
+	int32 GetTransitWaitSec(int32 ShaftId) const { return TransitLedgers.IsValidIndex(ShaftId) ? TransitLedgers[ShaftId].WaitSec : 0; }
+	// A robot reads the wait by its own sub-step's stamp: the previous sol's wait within the lag window after a boundary
+	// (MaxSubStepsPerFrame + 1 sub-steps), so robots-first and world-first batches of one frame read the same value.
+	int32 GetRobotWaitSec(int32 ShaftId, double Stamp) const;
+	static double GetTransitRobotLagSeconds();
+	// Capacity a sol in places (a place is one person, or LiftKgPerPlace of cargo): the hoist's, or cars x a car's.
+	int64 GetShaftCapacityPlaces(int32 ShaftId) const;
+	// The load the next roll would count for a shaft right now: the people part from the flows (ramp-scaled) and the cargo
+	// of the sol before last. For readouts (the shaft card); the roll computes it itself.
+	int64 GetShaftPeopleLoad(int32 ShaftId) const;
+	int64 GetShaftCargoLoad(int32 ShaftId) const;
+	// The wait a sol at a load (whole seconds): 0 up to capacity, else ceil((Load - Cap) x WaitSecAtDouble / Cap), at most MaxWaitSec.
+	int32 ComputeTransitWaitSec(int64 Load, int64 Cap) const;
+	// Places a cargo of Kg takes: ceil(RoundToInt64(Kg) / LiftKgPerPlace). A robot's body is 0 places (REVISION item 4).
+	int64 GetCargoPlaces(double Kg) const;
+	// The hand-off and ride timing rows of a shaft: the hoist's with no car, the lift's with one.
+	int32 GetShaftDwellSeconds(int32 ShaftId) const { return GetLiftCars(ShaftId) > 0 ? LiftDwellSeconds : HoistDwellSeconds; }
+	int32 GetShaftSecondsPerFloor(int32 ShaftId) const { return GetLiftCars(ShaftId) > 0 ? LiftSecondsPerFloor : HoistSecondsPerFloor; }
+	int32 GetTransitThresholds() const { return TransitThresholds; }                 // transient: rolls since boot
+	int32 GetTransitUnstampedRobotWrites() const { return TransitUnstampedRobotWrites; } // transient: robot writes with no stamp (must stay 0)
+	// The FitLift preflight (refusals 1-4), with the reason and the bill; the order runs it again when it lands.
+	bool CanFitLift(int32 ShaftId, FString& OutReason, double* OutBillKg = nullptr) const;
+	double GetLiftFitBillKg() const { return bHasTransit ? LiftFitStructKg : FirstLiftFitStructKg; }
+	// Transit rows (RH_Config; header defaults equal the CSV).
+	int32 GetHoistPlacesPerSol() const { return HoistPlacesPerSol; }
+	int32 GetLiftPlacesPerSol() const { return LiftPlacesPerSol; }
+	int32 GetLiftKgPerPlace() const { return LiftKgPerPlace; }
+	int32 GetLiftDwellSeconds() const { return LiftDwellSeconds; }
+	int32 GetLiftSecondsPerFloor() const { return LiftSecondsPerFloor; }
+	int32 GetHoistDwellSeconds() const { return HoistDwellSeconds; }
+	int32 GetHoistSecondsPerFloor() const { return HoistSecondsPerFloor; }
+	int32 GetLiftPlanSpeedCmPerS() const { return LiftPlanSpeedCmPerS; }
+	int32 GetLiftPlanCm() const { return LiftPlanCm; }
+	int32 GetWaitSecAtDouble() const { return WaitSecAtDouble; }
+	int32 GetMaxWaitSec() const { return MaxWaitSec; }
+	int32 GetCommuteLiftCmPerFloor() const { return CommuteLiftCmPerFloor; }
+	int32 GetCommuteWaitCmPerSec() const { return CommuteWaitCmPerSec; }
+	int32 GetCommuteShaftCmPerFloor() const { return CommuteShaftCmPerFloor; }
+	// The robots' stamp (REVISION item 2(b)): both processors set it before each robot sub-step to that sub-step's own end
+	// (FrameEnd - (Steps - 1 - Step) x SubStepSeconds), the formula Tick gives the world's steps, and reset it to -1 after.
+	void SetRobotStepEnd(double Seconds) { RobotStepEndSeconds = Seconds; }
+	double GetRobotStepEnd() const { return RobotStepEndSeconds; }
+
+	// --- D4: robots below ---
+	int32 LevelOfZ(double ZCm) const;
+	// Is a site somewhere a robot at (Level, Pos) can work: on the surface, or on a carved cell in a dig with a fitted
+	// landing, or in the robot's own dig. A site in rock never is. False with no fitted lift.
+	bool IsRouteReachable(int32 RobotLevel, const FVector& RobotPos, const FRHSiteRef& Site) const;
+	// Where a robot drives to serve a site: the site at its level when it is reachable, else GetApproachPoint(Site, 0) at
+	// level 0 - the head hand-off, always a surface act. With no lift: GetApproachPoint(Site, 0), as before.
+	FVector GetRobotTarget(const FRHSiteRef& Site, int32 RobotLevel, const FVector& RobotPos, int32& OutLevel) const;
+	// The deep planner (D3 section 2, D4 1.3): one Dijkstra over the fitted portals (a fitted shaft's head, and its column on
+	// each floor it reaches that has a carved orthogonal neighbour - the landing, the lowest-ordinal one). Integer cost units:
+	// SpeedMulPermille x walked cm (C4's), and a ride SpeedMulPermille x LiftPlanSpeedCmPerS x (the shaft's robot wait + dwell +
+	// floors x seconds a floor). Ties: lower cost, then lower portal index (shaft Id, then floor, shallowest first). Stamp is
+	// the robot's sub-step end (the waits it reads). False when no route exists. OutCost (optional) breaks the route down.
+	bool PlanDeepRoute(int32 FromLevel, const FVector& FromCm, int32 ToLevel, const FVector& ToCm, double Stamp, FRHRobotRoadPath& OutPath, FRHDeepRouteCost* OutCost = nullptr) const;
+	// One robot sub-step along the deep network toward (TargetCm, TargetLevel): planned on first use and again only when the
+	// target changes. True on arrival, as MoveToward. RH::MoveAlong calls it; a harness may too.
+	bool MoveAlongDeep(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, int32 TargetLevel, float SpeedMps, float Dt, float CargoKg);
+	// A robot back on the surface with a surface target: its deep trip (if any) is forgotten, so today's body runs on.
+	void DropDeepPath(FMassEntityHandle Entity) { if (const FRHRobotRoadPath* P = RobotPaths.Find(Entity)) { if (P->bDeep) { RobotPaths.Remove(Entity); } } }
+	// A boarded ride (hold or ride counters live), for the charge test and the cab. False when none.
+	bool GetRideState(FMassEntityHandle Entity, FRHRideState& Out) const;
+	// The last sub-step of this robot's deep trip was a hold at a column (idle draw, no wear).
+	bool DidRobotHoldThisStep(FMassEntityHandle Entity) const { const FRHRobotRoadPath* P = RobotPaths.Find(Entity); return P && P->bDeep && P->bHeldThisStep; }
+	// Robot on a fitted portal column (the XY within ArriveDistCm of its centre) at a floor where the shaft is a portal.
+	int32 FindPortalColumnAt(int32 Level, const FVector& PosCm) const;
+	// The charge reserve below (1.5, item 7): the route PlanDeepRoute returns to the pad EnterState would pick, priced
+	// DriveWh(walked cm) + DrawMoveW x ride seconds / 50 x 1.25, with every ascent hold at MaxWaitSec and every descent hold
+	// at the robot's frozen wait (DrawIdleW, x 1.25). Memoized per robot on (level, cell or column, pad, the net's key, the
+	// robot wait sol). With a boarded descent it is evaluated at the ride's destination landing plus the hold and ride left.
+	float DeepReserveWh(FMassEntityHandle Entity, const FRHRobotFragment& Robot, const FVector& PosCm, int32 PadId, const FVector& PadCm) const;
+	// The deep charge test: NotApplicable at level 0 with no ride boarded; Keep while an ascent is boarded (never broken off);
+	// else Seek when the charge fraction is under the seek line or the charge under the deep reserve. No pad: Keep.
+	ERHDeepCharge DeepChargeTest(FMassEntityHandle Entity, const FRHRobotFragment& Robot, const FVector& PosCm, float ChargeWh, float CapacityWh) const;
+	// Wh a robot spends driving DistCm (the brains' DriveWh: W x sol-hours x 1.25, plus half an hour of the move draw).
+	static float RobotDriveWh(const FRHRobotFragment& Robot, double DistCm);
+
+	// --- D4: the head hand-off pays its shaft (2.4, REVISION item 6) ---
+	// With transit on, a hauler that reaches a head with a cross-level drop holds there 10 x (wait + dwell + floors x seconds a
+	// floor) sub-steps before HaulUnload credits. BeginHandoffHold returns the hold (0: no hold - unload now, as before: no
+	// transit, a same-level drop, or a site gone). The entry is runtime only, keyed to the task and the spot it began at.
+	int32 BeginHandoffHold(FMassEntityHandle Entity, int32 TaskId, int32 RobotLevel, const FVector& PosCm);
+	int32 ProjectHandoffHoldSteps(int32 TaskId, int32 RobotLevel, double Stamp) const;
+	bool InHandoffHold(FMassEntityHandle Entity, int32 TaskId, const FVector& PosCm);
+	bool StepHandoffHold(FMassEntityHandle Entity); // one hold sub-step; true when the hold is over (or its task is gone)
+	int32 GetHandoffHoldStepsLeft(FMassEntityHandle Entity) const { const FRHHandoffHold* H = HandoffHolds.Find(Entity); return H ? H->StepsLeft : 0; }
+	// The Wh the hold still costs (DrawIdleW x seconds / 50 x 1.25): the entry's while holding, else the projected hold; 0 when
+	// the drop is no hand-off. The StateTree's mid-delivery exemption adds it; the legacy brain asks HandoffHoldShort.
+	float GetHandoffHoldReserveWh(FMassEntityHandle Entity, int32 TaskId, const FRHRobotFragment& Robot, int32 RobotLevel, const FVector& PosCm) const;
+	bool HandoffHoldShort(FMassEntityHandle Entity, int32 TaskId, float ChargeWh, const FRHRobotFragment& Robot, const FVector& PosCm, const FVector& DropCm) const;
+	// A robot whose load is lost at abandon (a hauler breaks off a delivery): the mass balance's lost leg.
+	void NoteHaulCargoLost(double Kg) { HaulLostKg += FMath::Max(0.0, Kg); }
+
+	// --- D4: transient counters (never saved, not reset by a load) ---
+	int32 GetDeepPlanRuns() const { return DeepPlanRuns; }
+	int32 GetDeepOffLattice() const { return DeepOffLattice; }
+	int32 GetDeepDeliveries() const { return DeepDeliveries; }
+	int32 GetDeepBuildsCompleted() const { return DeepBuildsCompleted; }
+	int32 GetRidesBoarded() const { return RidesBoarded; }
+	int32 GetHandoffHoldsBegun() const { return HandoffHoldsBegun; }
+	double GetHaulLoadedKg() const { return HaulLoadedKg; }
+	double GetHaulCreditedKg() const { return HaulCreditedKg; }
+	double GetHaulReturnedKg() const { return HaulReturnedKg; }
+	double GetHaulLostKg() const { return HaulLostKg; }
+	int32 GetDeepNetBuilds() const { return DeepNetBuilds; }
+
+	// --- D4 harness ---
+	// One agent-band step with its own end time (the body of Tick's loop), and one era step the same way.
+	void Debug_StepSimAt(float SubDt, double StepEnd) { StepEndOverride = StepEnd; StepSim(SubDt); StepEndOverride = -1.0; }
+	void Debug_EraStepAt(float Dt, double StepEnd) { StepEndOverride = StepEnd; EraStep(Dt); StepEndOverride = -1.0; }
+	// A haul task posted by the harness (never by the board), already claimed by Robot when it is valid. Returns its Id.
+	int32 Debug_PostHaulTask(const FRHSiteRef& From, const FRHSiteRef& To, FName Resource, double Kg, FMassEntityHandle Robot = FMassEntityHandle());
+	// The threshold roll to SolNow, on its own (the commute suites read the flows without a population step re-deriving jobs).
+	void Debug_RollTransit(int32 SolNow) { if (bHasTransit) { RollTransit(SolNow); } }
+	// Add places to a shaft's ledger at a stamp, as a writer would (the ledger must exist: transit on).
+	void Debug_ChargeTransit(int32 ShaftId, int32 Places, double Stamp) { ChargeTransit(ShaftId, Places, 0, Stamp); }
+	// The FitLift order without the uplink (the same preflight and execution). False with the reason.
+	bool Debug_FitLift(int32 ShaftId, FString& OutReason);
+	// Capacity rows for a test fixture (0 keeps a row).
+	void Debug_SetTransitCapacity(int32 HoistPlaces, int32 LiftPlaces) { if (HoistPlaces > 0) { HoistPlacesPerSol = HoistPlaces; } if (LiftPlaces > 0) { LiftPlacesPerSol = LiftPlaces; } }
+	void Debug_SetFirstLiftFitStructKg(double Kg) { FirstLiftFitStructKg = FMath::Max(0.0, Kg); }
+	// Forget the robot paths, the hand-off holds and the reserve memos (a harness that re-uses fake handles across fixtures).
+	void Debug_ForgetRobotTransit() { RobotPaths.Reset(); HandoffHolds.Reset(); ReserveMemos.Reset(); }
+	// The deep net's portals as (shaft, level, landing lattice point), in portal order, for the planner's tests.
+	void Debug_GetPortals(TArray<FIntVector>& Out) const;
 
 	// --- Habitability chain (M1-d Gate B) ---
 	// A carved floor is bored -> shielded (free from overburden; the M1-c
@@ -1579,7 +1799,12 @@ public:
 	// Commuters per road edge (sum of each trip's people over the edges its route rides), ascending edge Id.
 	void GetCommuteEdgeLoads(TArray<TPair<int32, int32>>& Out) const;
 	// The real distance between two anchors (whole walking-equivalent cm): the harness's hand-computed integers.
-	int64 GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm) const;
+	// D4: with transit on, each underground end pays its shaft (its own per-floor cost and its frozen wait); a trip between two
+	// floors is split over the shafts that reach the deeper one in ascending Id, and Ordinal is the colonist's place in the
+	// trip (k: shaft R[k mod n]).
+	int64 GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal = 0) const;
+	// D4: the people part of a shaft's load as the flows count it (commuters through it, before the x 2 and the ramp).
+	int32 GetCommuteShaftPeople(int32 ShaftId) const;
 	// Cache counters, for the suites: how many times the flows were rebuilt, how many Dijkstras the position memo has run.
 	int32 GetCommuteFlowRebuilds() const { return CommuteFlowRebuilds; }
 	int32 GetCommuteDijkstraRuns() const { return CommuteDijkstraRuns; }
@@ -1764,15 +1989,19 @@ public:
 	// Loads up to CargoCapKg from the task's From site. Returns false if the
 	// task is gone or nothing could be loaded; otherwise sets the loaded mass
 	// and the dropoff location.
-	bool HaulLoad(int32 TaskId, float CargoCapKg, float& OutLoadedKg, FVector& OutDropoffCm);
+	// D4: RobotLevel is the floor the robot loads on; the drop is GetRobotTarget's for it (with no lift: the head hand-off at
+	// level 0, as before), and OutDropLevel (optional) gets the drop's floor. Harness calls keep the defaults.
+	bool HaulLoad(int32 TaskId, float CargoCapKg, float& OutLoadedKg, FVector& OutDropoffCm, int32 RobotLevel = 0, int32* OutDropLevel = nullptr);
 	// Delivers cargo to the task's To building and completes the task.
 	// C6a: a rover passes its cargo resource as ReturnResource; if the destination or the task is gone when it
 	// arrives, the load goes back through ReturnHaulCargo instead of vanishing. Haulers pass nothing (unchanged).
-	void HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource = NAME_None);
+	// D4: RobotLevel is where the robot stands; with transit on, a credit to a site on another floor (the head hand-off)
+	// charges the serving shaft's ledger the cargo's places, stamped by the robot's sub-step.
+	void HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource = NAME_None, int32 RobotLevel = 0);
 	// Fabricator: claim nearest construction; apply work seconds. Work only
 	// progresses once the site's materials are delivered.
 	bool TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel = 0);
-	bool ApplyBuildWork(int32 BuildingId, double Seconds); // true when completed
+	bool ApplyBuildWork(int32 BuildingId, double Seconds, int32 RobotLevel = 0); // true when completed (D4: RobotLevel counts builds finished below)
 	void CompleteTask(int32 TaskId);
 	void AbandonTask(int32 TaskId);
 	// Charging: the nearest completed, switched-on Charging Pad on the
@@ -1821,7 +2050,10 @@ public:
 	bool GetRepairTargetPos(FMassEntityHandle Target, FVector& OutPosCm) const;
 	// On arrival: spend SpareParts (RepairWearPerPart wear each) against the
 	// target's wear until it is clean or stock runs out. Instant at slice scale.
-	void ApplyRepairAt(FMassEntityHandle Target);
+	// D4: with a lift fitted, only at the repairer's own floor (a different floor is a no-op; the caller releases).
+	void ApplyRepairAt(FMassEntityHandle Target, int32 RepairerLevel = 0);
+	// D4: halted = worn to the halt line (the brains' halt gate); a robot below is repaired only then.
+	bool IsRobotHalted(FMassEntityHandle Target) const;
 	void ReleaseRepairClaim(FMassEntityHandle Target);
 	// Everywhere the colony has surveyed (director request: surveyed-land map).
 	const TArray<FRHSurveyRecord>& GetSurveyHistory() const { return SurveyHistory; }
@@ -2124,8 +2356,6 @@ private:
 	TMap<FMassEntityHandle, FRHRobotRoadPath> RobotPaths; // lookups only, never iterated
 	int32 NextPathSerial = 1;
 	void ExecuteBuildRoad(const FRHCommand& Cmd);
-	// Takes Kg of Struct out of the stores, whole or not at all.
-	bool TakeRoadStruct(double Kg);
 	void PostRoadTasks(const FRHRoadAddResult& Added);
 	bool PlanRobotPath(FRHRobotRoadPath& Path, const FVector& FromCm, const FVector& TargetCm, const FRHRoadParams& Params) const;
 	// Strip (segment + width) against a footprint; the order's strip against everything.
@@ -2186,10 +2416,12 @@ private:
 		FIntPoint Shaft = FIntPoint::ZeroValue;
 		uint32 ShaftReach = 0;               // D2: up on every SinkShaft, and on a bore only while there is more than one shaft
 		int32 BuildingCount = 0, NextBuilding = 0;
+		uint32 Lift = 0, TransitWait = 0;    // D4: LiftVersion and TransitWaitVersion (two fields, so no two bumps collide); 0 with no car
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
-				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
+				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding
+				&& Lift == O.Lift && TransitWait == O.TransitWait;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -2214,7 +2446,9 @@ private:
 		TArray<FRHCommuteSssp> Sources;
 		TMap<uint64, TPair<int64, bool>> PairCm; // (distance cm, rides a road); lookups only
 	};
-	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; };
+	// D4: ShaftId is the shaft a floor-to-surface trip uses with transit on (INDEX_NONE for a trip with no shaft, for a split
+	// floor-to-floor trip, and always with no car: then nothing reads it).
+	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; int32 ShaftId = INDEX_NONE; };
 	struct FRHCommuteFlows
 	{
 		bool bValid = false;
@@ -2227,6 +2461,7 @@ private:
 		int32 Employed = 0, Commuters = 0, LongCount = 0;
 		int64 MaxDistCm = 0;
 		TArray<FRHCommuteTrip> Trips;       // distinct trips, sorted by anchors
+		TArray<int32> ShaftPeople;          // D4: commuters per shaft (index = shaft Id), with transit on only; StepTransit reads it
 		mutable bool bEdgeLoadValid = false;
 		mutable TArray<TPair<int32, int32>> EdgeLoad;
 		mutable TArray<TArray<int32>> TripEdges; // parallel to Trips, filled with EdgeLoad
@@ -2245,6 +2480,11 @@ private:
 	// D2: the shaft a floor anchor on Level uses for a trip to surface point P: the cheapest over the shafts that reach Level,
 	// ties to the lower Id; shaft 0 when none reaches Level (today's formula never checked reach). One shaft: always 0, no call.
 	int32 PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm) const;
+	// D4: with transit on, a shaft's per-floor cost (the hoist's 6000 or a lift's 2000) and its wait as walking cm; the shafts
+	// that reach a floor, ascending ({0} when none does).
+	int64 CommutePerFloorCm(int32 ShaftId) const;
+	int64 CommuteWaitCm(int32 ShaftId) const;
+	void CommuteReachList(int32 Level, TArray<int32>& Out) const;
 	void CommuteFillEdgeLoad(const FRHCommuteFlows& F) const;
 	void ResetCommuteMemoIfStale() const;
 
@@ -2449,6 +2689,97 @@ private:
 	const FRHTunnel* FindLiveTunnelOnPoint(const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) tunnel whose UNCARVED chain holds P
 	void WriteTunnelBlock(FArchive& Ar) const;
 	bool ReadTunnelBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, TArray<FRHTunnel>& OutTunnels, int32& OutNextId, FString& OutError) const;
+	// D4 (transit). SAVED straight after the tunnel block (save v46): the fitted cars, TransitCheckedSol and the ledgers.
+	// Everything else below is runtime; the counters are transient (never saved, not reset by a load).
+	bool bHasTransit = false;                // derived: some shaft has LiftCars > 0 (a fit sets it; a load re-derives it)
+	TArray<FRHTransitLedger> TransitLedgers; // index = shaft Id; empty until the first fit, then one per shaft
+	int32 TransitCheckedSol = INDEX_NONE;
+	uint32 LiftVersion = 0;
+	uint32 TransitWaitVersion = 0;
+	int32 TransitThresholds = 0;
+	int32 TransitUnstampedRobotWrites = 0;
+	double RobotStepEndSeconds = -1.0;
+	// RH_Config rows (header defaults equal the CSV).
+	double LiftFitStructKg = 400.0;
+	double FirstLiftFitStructKg = 400.0;     // Q-A (a): the first car costs what every car costs
+	int32 MaxLiftCars = 4;                   // clamped to [1, RH::MaxLiftCarsCap]
+	int32 HoistPlacesPerSol = 200;
+	int32 LiftPlacesPerSol = 1000;
+	int32 LiftKgPerPlace = 100;
+	int32 HoistDwellSeconds = 30;
+	int32 HoistSecondsPerFloor = 15;
+	int32 LiftDwellSeconds = 10;
+	int32 LiftSecondsPerFloor = 4;
+	int32 LiftPlanSpeedCmPerS = 400;         // LiftPlanSpeedMps x 100
+	int32 LiftPlanCm = 1500;
+	int32 WaitSecAtDouble = 120;
+	int32 MaxWaitSec = 600;                  // clamped to [0, RH::MaxWaitSecCap]
+	int32 CommuteLiftCmPerFloor = 2000;
+	int32 CommuteWaitCmPerSec = 100;
+	void StepTransit();                      // the sol threshold, both bands, straight after StepUplink
+	void RollTransit(int32 SolNow);
+	void ChargeTransit(int32 ShaftId, int64 Places, int64 Kg, double Stamp);
+	double TakeRobotStamp();                 // the robot stamp for a ledger write (the fallback is counted)
+	double PeekRobotStamp() const { return RobotStepEndSeconds >= 0.0 ? RobotStepEndSeconds : GetStepEndSeconds(); }
+	int32 ServingShaftOfSite(const FRHSiteRef& Site, int32 OtherLevel) const; // the shaft GetApproachPoint's head belongs to
+	int32 ServingShaftOfBuilding(const FRHBuildingInstance& B) const;          // a floor building's serving shaft (INDEX_NONE on the surface)
+	void ChargeBillPart(const FRHBuildingInstance& Source, double Kg);         // O5: a bill's part taken from a floor source
+	bool ExecuteFitLift(const FRHCommand& Cmd, FString& OutReason);
+	// C4's TakeRoadStruct, generalised (D4): the same take order; with transit on, a part taken from a floor charges its shaft.
+	bool TakeStructForBill(double Kg, const TCHAR* Why);
+	void WriteTransitBlock(FArchive& Ar) const;
+	struct FRHLoadedTransit { TArray<FIntPoint> Cars; int32 CheckedSol = INDEX_NONE; TArray<FRHTransitLedger> Ledgers; };
+	bool ReadTransitBlock(FArchive& Ar, const TArray<FRHShaft>& InShafts, FRHLoadedTransit& Out, FString& OutError) const;
+	void InstallTransit(const FRHLoadedTransit& In);
+	void ResetRobotTransitRuntime();
+	void RepairLoadedRobots(const TArray<FMassEntityHandle>& Handles, const TArray<int32>& Levels);
+	// Robots below: the deep net, a pure function of (cells, shafts, cars, built roads, tunnels), never saved.
+	struct FRHDeepPortal
+	{
+		int32 Shaft = 0;
+		int32 Level = 0;                     // 0 = the head
+		FIntPoint Column = FIntPoint::ZeroValue;
+		FVector XY = FVector::ZeroVector;    // the column centre, Z 0
+		int32 Landing = INDEX_NONE;          // floor portals: the landing's ordinal on Level
+		int32 Dig = INDEX_NONE;              // and its dig label
+		TArray<int64> Dist;                  // lattice cm from the landing to every ordinal of Level (MAX_int64: not in its dig)
+		TArray<int32> Toward;                // per ordinal, the next ordinal toward the landing (INDEX_NONE at the landing)
+	};
+	struct FRHDeepNet
+	{
+		bool bValid = false;
+		uint32 Cells = 0, ShaftsV = 0, Lift = 0, Built = 0, TunnelsV = 0;
+		TArray<FRHDeepPortal> Portals;       // shaft ascending, then floor 0, -1, -2, ...
+		TMap<FIntPoint, int32> PortalAt;     // (shaft, level) -> portal index; lookups only
+		TArray<int32> Heads;                 // portal indices of the heads, ascending
+		TArray<int64> HeadToHead;            // surface cost units between heads, Heads.Num() squared
+		TSet<FIntPoint> FittedDigs;          // (level, dig label) of every floor portal's landing; lookups only
+		TArray<TArray<int32>> Adj;           // per portal, ascending: the portals a finite edge reaches (a ride, a same-dig walk, head to head)
+		// Surface legs planned while this net is current, keyed (from, to) in whole cm: a pure function of the built road graph,
+		// which is in the net's key. Lookups only; cleared when it passes 4,096 legs.
+		TMap<TPair<FIntPoint, FIntPoint>, FRHRoadRoute> SurfaceRoutes;
+	};
+	mutable FRHDeepNet DeepNet;
+	mutable int32 DeepNetBuilds = 0;
+	const FRHDeepNet& EnsureDeepNet() const;
+	void BuildLatticeField(int32 Level, int32 Root, TArray<int64>& OutDist, TArray<int32>& OutToward, const TArray<int32>* Neighbours = nullptr) const;
+	void BuildLatticeNeighbours(int32 Level, TArray<int32>& Out) const; // 8 a cell in TransitSteps order; INDEX_NONE = no step
+	bool LatticeAStar(int32 Level, int32 From, int32 To, TArray<int32>& OutCells, int64& OutCm) const;
+	int64 SurfaceCostUnits(const FVector& A, const FVector& B, int64* OutCm = nullptr) const;
+	const FRHRoadRoute& SurfaceRoute(FIntPoint FromCm, FIntPoint ToCm) const; // bRoad false: the straight line (or no road)
+	void AppendSurfaceLegs(FRHRobotRoadPath& Path, const FVector& From, const FVector& To) const;
+	FVector FloorCellXY(int32 Level, int32 Ordinal) const;
+	float DeepReserveAt(FMassEntityHandle Entity, const FRHRobotFragment& Robot, int32 Level, const FVector& PosCm, int32 PadId, const FVector& PadCm) const;
+	TMap<FMassEntityHandle, FRHHandoffHold> HandoffHolds; // lookups only, never iterated
+	struct FRHReserveMemo { bool bValid = false; int32 Level = 0, Spot = 0, PadId = 0, RobotSol = 0; uint32 Cells = 0, ShaftsV = 0, Lift = 0, Built = 0, TunnelsV = 0; float Wh = 0.f; };
+	mutable TMap<FMassEntityHandle, FRHReserveMemo> ReserveMemos; // lookups only, never iterated
+	mutable int32 DeepPlanRuns = 0;
+	mutable int32 DeepOffLattice = 0;
+	int32 DeepDeliveries = 0;
+	int32 DeepBuildsCompleted = 0;
+	int32 RidesBoarded = 0;
+	int32 HandoffHoldsBegun = 0;
+	double HaulLoadedKg = 0.0, HaulCreditedKg = 0.0, HaulReturnedKg = 0.0, HaulLostKg = 0.0;
 	void ExtendShaftOf(int32 ShaftId, int32 ToDepth);
 	void WriteShaftBlock(FArchive& Ar) const;
 	bool ReadShaftBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, TArray<FRHShaft>& OutShafts, FString& OutError) const;

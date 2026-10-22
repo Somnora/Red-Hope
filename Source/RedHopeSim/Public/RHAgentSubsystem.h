@@ -36,6 +36,7 @@ struct FRHRobotPanelRow
 	uint8 TaskType = 0;    // ERHTaskType
 	float ChargeFrac = 0.f;
 	float Wear = 0.f;
+	double PosZCm = 50.0;  // D4: the robot's Z, which carries its floor (URHSimWorldSubsystem::LevelOfZ reads it)
 };
 
 // Owns agent entity lifecycles: the working robot archetype plus the
@@ -76,6 +77,14 @@ public:
 	// wear through these - the entity manager stays this subsystem's business.
 	void ForEachRobotState(TFunctionRef<void(FMassEntityHandle, const FVector&, float /*Wear*/)> Fn) const;
 	bool GetRobotPosition(FMassEntityHandle Entity, FVector& OutPosCm) const;
+	// D4 (sim only): the load repair moves a robot that cannot stay below to the surface deploy ring, or sets the Z its saved
+	// level names. False when the entity is gone.
+	bool SetRobotPosition(FMassEntityHandle Entity, const FVector& PosCm);
+	// D4: one robot's wear (the halted test of a cross-level repair). False when the entity is gone.
+	bool GetRobotWear(FMassEntityHandle Entity, float& OutWear) const;
+	// Test knobs (-transit): one robot's wear and charge.
+	void Debug_SetRobotWear(FMassEntityHandle Entity, float Wear);
+	void Debug_SetRobotChargeWh(FMassEntityHandle Entity, float ChargeWh);
 	// Reduces wear by up to Amount; returns what actually came off.
 	float RemoveRobotWear(FMassEntityHandle Entity, float Amount);
 	// Test knob (RH.Wear): set every robot's wear directly.
