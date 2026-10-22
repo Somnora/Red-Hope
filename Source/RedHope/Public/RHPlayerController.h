@@ -187,6 +187,9 @@ private:
 	void OnClick();
 	void OnCancel();
 	void OnRotate();
+	// D5 depth: PageUp / PageDown step the view one floor toward the surface / deeper (SetActiveLevel keeps its reached-depth clamp).
+	void OnFloorUp();
+	void OnFloorDown();
 	// The furnishable cell under a ground point and the slot that centres the
 	// armed piece there; false off any room.
 	bool ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
@@ -217,6 +220,8 @@ private:
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed3;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed8;
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed60;
+	UPROPERTY() TObjectPtr<UInputAction> IA_FloorUp;
+	UPROPERTY() TObjectPtr<UInputAction> IA_FloorDown;
 
 	TSharedPtr<SRHCommandDeck> Deck;
 	TSharedPtr<class SRHMenus> Menus;

@@ -300,23 +300,30 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	[
 		SNew(STextBlock).Text(FText::FromString(TEXT("SHAFT"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
 	];
-	auto AddFloorCell = [&ShaftStrip, this](int32 Level)
+	// D5 depth: the rows sit in a scroll box (SURF .. -MaxDepth) inside an SBox capped at 11 rows, so 20 floors fit the glass; the
+	// SHAFT header and "Next shaft" above it, and the lift card, the Tunnel brush and the tunnel list below it, never scroll away.
+	SAssignNew(ShaftScroll, SScrollBox).Orientation(Orient_Vertical).ScrollBarThickness(FVector2D(5.f, 5.f));
+	auto AddFloorCell = [this](int32 Level)
 	{
-		ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
-		[
-			SNew(SButton)
-			.ButtonStyle(&RHDeck::TintButtonStyle())
-			.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorCellColor, Level)))
-			.ContentPadding(FMargin(9.f, 4.f))
-			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFloor, Level))
+		TSharedRef<SWidget> Row = SNew(SBox)
+			.Padding(FMargin(0.f, 1.f))
+			.Visibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SRHCommandDeck::GetShaftRowVisibility, Level)))
 			[
-				SNew(STextBlock)
-				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorLabel, Level)))
-				.Font(RHDeck::Label(10))
-				.Justification(ETextJustify::Center)
-				.ColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorTextColor, Level)))
-			]
-		];
+				SNew(SButton)
+				.ButtonStyle(&RHDeck::TintButtonStyle())
+				.ButtonColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorCellColor, Level)))
+				.ContentPadding(FMargin(9.f, 4.f))
+				.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFloor, Level))
+				[
+					SNew(STextBlock)
+					.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorLabel, Level)))
+					.Font(RHDeck::Label(10))
+					.Justification(ETextJustify::Center)
+					.ColorAndOpacity(TAttribute<FSlateColor>::Create(TAttribute<FSlateColor>::FGetter::CreateSP(this, &SRHCommandDeck::GetFloorTextColor, Level)))
+				]
+			];
+		ShaftRows.Add(Level, Row);
+		ShaftScroll->AddSlot()[ Row ];
 	};
 	// D2: once there is more than one shaft, a button walks the camera from head to head (Id order).
 	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f, 0.f, 3.f))
@@ -347,6 +354,17 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	{
 		AddFloorCell(-Floor);
 	}
+	ShaftStrip->AddSlot().AutoHeight()
+	[
+		SNew(SBox)
+		.MaxDesiredHeight(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateLambda([this]()
+		{
+			return FOptionalSize(11.f * (ShaftRowHeight > 1.f ? ShaftRowHeight : 27.f));
+		})))
+		[
+			ShaftScroll.ToSharedRef()
+		]
+	];
 	// D4: the shaft card - the shaft nearest the camera: its lift cars (or the hoist), load and wait, and the fit verb.
 	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 1.f))
 	[
@@ -1165,6 +1183,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshRosterPanel();
 	RefreshCityPanel();
 	RefreshTunnelList();
+	FollowShaftScroll();
 	RefreshGuide();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
@@ -1642,6 +1661,14 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\n  pressurizing...");
 			}
+			// D5 depth (Gate-D placeholder copy): how far below the cool line this floor is and what its cooling asks of the grid.
+			if (B->Level < -Sim->GetDepthCostFromFloor())
+			{
+				const double Warmth = Sim->GetFloorWarmth(B->Level);
+				Text += FString::Printf(TEXT("\nDEPTH: floor %d, %d below the cool line; cooling %.0f W (tunnel cells included); %s"),
+					B->Level, Sim->GetFloorsBelowLine(B->Level), Sim->GetFloorCoolingW(B->Level),
+					Warmth > 0.0 ? *FString::Printf(TEXT("running warm (%.0f%%)"), Warmth * 100.0) : TEXT("comfortable"));
+			}
 		}
 	}
 
@@ -2104,8 +2131,12 @@ FText SRHCommandDeck::GetLiftCardText() const
 		return FText::FromString(FString::Printf(TEXT("Shaft %d: no lift car"), S));
 	}
 	const FString Head = Cars > 0 ? FString::Printf(TEXT("Shaft %d: cars %d/%d"), S, Cars, Sim->GetMaxLiftCars()) : FString::Printf(TEXT("Shaft %d: hoist"), S);
-	return FText::FromString(FString::Printf(TEXT("%s\nload %lld / %lld\nwait %d s"), *Head,
-		Sim->GetShaftPeopleLoad(S) + Sim->GetShaftCargoLoad(S), Sim->GetShaftCapacityPlaces(S), Sim->GetTransitWaitSec(S)));
+	// D5 depth: the viewed floor's cooling, tunnel cells included (Gate-D placeholder copy).
+	const int32 Viewed = PC->GetActiveLevel();
+	const FString Cool = (Viewed < -Sim->GetDepthCostFromFloor() && Sim->GetFloorCoolingW(Viewed) > 0.0)
+		? FString::Printf(TEXT("\nfloor %d cooling %.0f W (tunnels too)"), Viewed, Sim->GetFloorCoolingW(Viewed)) : FString();
+	return FText::FromString(FString::Printf(TEXT("%s\nload %lld / %lld\nwait %d s%s"), *Head,
+		Sim->GetShaftPeopleLoad(S) + Sim->GetShaftCargoLoad(S), Sim->GetShaftCapacityPlaces(S), Sim->GetTransitWaitSec(S), *Cool));
 }
 
 FText SRHCommandDeck::GetFitLiftLabel() const
@@ -2355,6 +2386,16 @@ FText SRHCommandDeck::GetBoreLabel() const
 	{
 		return FText::FromString(TEXT("Bore (max)"));
 	}
+	// D5 depth: past the cool line the button says how long the floor takes (the recipe's hours x the floor's dig permille).
+	if (Sim && Next > Sim->GetDepthCostFromFloor())
+	{
+		const URHDefinitionsSubsystem* Df = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const FRHRecipeRow* Bore = Df ? Df->GetRecipe(FName("BoreFloor")) : nullptr;
+		if (Bore)
+		{
+			return FText::FromString(FString::Printf(TEXT("Bore → -%d (%.0f h)"), Next, (double)Bore->BatchTime_h * Sim->GetDigPermille(-Next) / 1000.0));
+		}
+	}
 	return FText::FromString(FString::Printf(TEXT("Bore → -%d"), Next));
 }
 
@@ -2365,6 +2406,46 @@ FReply SRHCommandDeck::HandleFloor(int32 Level)
 		PC->SetActiveLevel(Level);
 	}
 	return FReply::Handled();
+}
+
+EVisibility SRHCommandDeck::GetShaftRowVisibility(int32 Level) const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	// SURF and -1..-DepthCostFromFloor stay exactly as they were (a dark row is solid rock). Past the cool line a row shows once a shaft
+	// has reached it, when it is the next to bore, or while it is the viewed floor; the solid rock below that collapses.
+	if (!Sim || Level >= -Sim->GetDepthCostFromFloor())
+	{
+		return EVisibility::Visible;
+	}
+	const bool bShown = Sim->IsLevelConnected(Level) || Level == -(Sim->GetShaftDepth() + 1) || (PC.IsValid() && PC->GetActiveLevel() == Level);
+	return bShown ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+void SRHCommandDeck::FollowShaftScroll()
+{
+	if (!ShaftScroll.IsValid() || !PC.IsValid())
+	{
+		return;
+	}
+	if (ShaftRowHeight <= 1.f)
+	{
+		if (const TSharedPtr<SWidget>* Surf = ShaftRows.Find(0))
+		{
+			const float H = (*Surf)->GetDesiredSize().Y;
+			ShaftRowHeight = H > 1.f ? H : 0.f; // measured once, from the SURF row
+		}
+	}
+	const int32 Level = PC->GetActiveLevel();
+	if (Level == ShaftScrollLevel)
+	{
+		return;
+	}
+	if (const TSharedPtr<SWidget>* Row = ShaftRows.Find(Level))
+	{
+		ShaftScrollLevel = Level;
+		ShaftScroll->ScrollDescendantIntoView(*Row, false, EDescendantScrollDestination::IntoView, 0.f);
+	}
 }
 
 FText SRHCommandDeck::GetFloorLabel(int32 Level) const
@@ -2379,12 +2460,27 @@ FText SRHCommandDeck::GetFloorLabel(int32 Level) const
 	const int32 Queued = Sim ? Sim->GetCarveQueued(Level) : 0;
 	// ● = rated Livable (the habitability chain complete on this floor).
 	const TCHAR* Rated = (Sim && Sim->IsFloorRated(Level)) ? TEXT(" ●") : TEXT("");
+	// D5 depth (Gate-D placeholder copy): past the cool line a floor reads its cooling, and a warm one its share.
+	FString Depth;
+	if (Sim && Level < -Sim->GetDepthCostFromFloor())
+	{
+		const double CoolW = Sim->GetFloorCoolingW(Level);
+		if (CoolW > 0.0)
+		{
+			Depth += FString::Printf(TEXT("  ❄%.0f W"), CoolW);
+		}
+		const double Warmth = Sim->GetFloorWarmth(Level);
+		if (Warmth > 0.0)
+		{
+			Depth += FString::Printf(TEXT(" ≈%.0f%%"), Warmth * 100.0);
+		}
+	}
 	if (Carved > 0 || Queued > 0)
 	{
-		return FText::FromString(FString::Printf(TEXT("%d ▦%d%s%s"), Level, Carved,
-			Queued > 0 ? TEXT("+") : TEXT(""), Rated));
+		return FText::FromString(FString::Printf(TEXT("%d ▦%d%s%s%s"), Level, Carved,
+			Queued > 0 ? TEXT("+") : TEXT(""), Rated, *Depth));
 	}
-	return FText::FromString(FString::Printf(TEXT("%d%s"), Level, Rated));
+	return FText::FromString(FString::Printf(TEXT("%d%s%s"), Level, Rated, *Depth));
 }
 
 FSlateColor SRHCommandDeck::GetFloorCellColor(int32 Level) const
@@ -2420,6 +2516,10 @@ FSlateColor SRHCommandDeck::GetFloorTextColor(int32 Level) const
 	if (bActive)
 	{
 		return ReadoutFg;
+	}
+	if (Sim && Sim->GetFloorWarmth(Level) > 0.0)
+	{
+		return FLinearColor(0.96f, 0.72f, 0.28f, 1.f); // D5 depth: a warm floor reads in a soft amber
 	}
 	return bReached ? FLinearColor(0.55f, 0.66f, 0.70f, 1.f) : FLinearColor(0.28f, 0.33f, 0.37f, 1.f);
 }

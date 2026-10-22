@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 46;  // v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 47;  // v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -127,7 +127,25 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		UE_LOG(LogRedHopeSim, Error, TEXT("FloorHeightMeters %.2f gives floors of %.0f cm - a robot's level is read from its Z and needs more than 100 cm; using 4 m"), FloorHeightCm / 100.0, FloorHeightCm);
 		FloorHeightCm = 400.0;
 	}
-	MaxDepth = (int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0);
+	ApplyMaxDepthRow((int32)Defs->GetConfigScalar(FName("MaxDepth"), 5.0));
+	{
+		// D5 depth (header defaults equal the CSV). The cut-off is clamped with the same cap the save refuses against; every
+		// cost and rate row is clamped non-negative, and the two heat rates must be above 0 (they divide).
+		ApplyDepthCostRow((int32)Defs->GetConfigScalar(FName("DepthCostFromFloor"), 5.0));
+		DigPermillePerDeepFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("DigPermillePerDeepFloor"), DigPermillePerDeepFloor));
+		CoolMilliWPerCellPerDeepFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CoolMilliWPerCellPerDeepFloor"), CoolMilliWPerCellPerDeepFloor));
+		CoolingLoadPriority = (int32)Defs->GetConfigScalar(FName("CoolingLoadPriority"), CoolingLoadPriority);
+		HeatRiseSols = Defs->GetConfigScalar(FName("HeatRiseSols"), HeatRiseSols);
+		HeatFallSols = Defs->GetConfigScalar(FName("HeatFallSols"), HeatFallSols);
+		if (!(HeatRiseSols > 0.0) || !(HeatFallSols > 0.0))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("HeatRiseSols %.3f and HeatFallSols %.3f must both be above 0 - using 1.0 and 0.5"), HeatRiseSols, HeatFallSols);
+			HeatRiseSols = 1.0;
+			HeatFallSols = 0.5;
+		}
+		HopeWarmMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeWarmMax"), HopeWarmMax));
+		HopeShelterMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeShelterMax"), HopeShelterMax));
+	}
 	{
 		const int32 Row = (int32)Defs->GetConfigScalar(FName("MaxShafts"), 4.0);
 		MaxShafts = FMath::Clamp(Row, 1, RH::MaxShaftsCap);
@@ -1599,9 +1617,17 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					// whole batch's Hydrogen deducts up-front if stocked, else
 					// the batch draws grid power.
 					B.bBatchOnH2 = false;
+					// D5 depth: the batch's hours scale by the floor's dig permille, fixed here at the start (so the dig rate is the
+					// same per sim-second in both bands). Floors -1..-DepthCostFromFloor are exactly 1000, and keep today's
+					// expressions: the hours the recipe row says, and the fuel bill as written. A bore's floor is WorkItem.Y, a
+					// carve's too; a tunnel front takes its tunnel's floor.
+					const FRHTunnel* DigTunnel = WorkItem.X >= 2 ? FindTunnel(WorkItem.Y) : nullptr;
+					const int32 DigLevel = WorkItem.X >= 2 ? (DigTunnel ? DigTunnel->Level : 0) : WorkItem.Y;
+					const int32 DigPermille = GetDigPermille(DigLevel);
+					const double BatchH = DigPermille == 1000 ? (double)Work->BatchTime_h : (double)Work->BatchTime_h * (double)DigPermille / 1000.0;
 					if (BDef->H2BurnKgPerHour > 0.f)
 					{
-						const double FuelKg = BDef->H2BurnKgPerHour * Work->BatchTime_h;
+						const double FuelKg = DigPermille == 1000 ? (double)(BDef->H2BurnKgPerHour * Work->BatchTime_h) : (double)BDef->H2BurnKgPerHour * BatchH;
 						if (GetStock(FName("Hydrogen")) >= FuelKg)
 						{
 							AddStock(FName("Hydrogen"), -FuelKg);
@@ -1615,21 +1641,20 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					PendingBoreWork.Add(B.Id, WorkItem);
 					B.ActiveRecipe = WorkRecipeName;
 					PendingOutputs.Add(B.Id, URHDefinitionsSubsystem::ParseResourceList(Work->Outputs));
-					B.BatchRemaining_h = Work->BatchTime_h;
+					B.BatchRemaining_h = BatchH;
 					if (WorkItem.X >= 2)
 					{
 						// O4: a tunnel batch's Y is the tunnel Id, so it gets its own line (the floor line below would print it as a floor).
-						const FRHTunnel* WorkTunnel = FindTunnel(WorkItem.Y);
 						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, tunnel %d, %s end, floor %d)"),
 							*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
-							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y,
-							WorkItem.X == 3 ? TEXT("B") : TEXT("A"), WorkTunnel ? WorkTunnel->Level : 0);
+							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), BatchH, WorkItem.Y,
+							WorkItem.X == 3 ? TEXT("B") : TEXT("A"), DigTunnel ? DigTunnel->Level : 0);
 					}
 					else
 					{
 						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, floor %d)"),
 							*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
-							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), Work->BatchTime_h, WorkItem.Y);
+							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), BatchH, WorkItem.Y);
 					}
 					continue; // budget flows into the new batch
 				}
@@ -6692,9 +6717,38 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		Out.Commuters = Commute.Commuters;
 		Out.LongCommuters = Commute.LongCommuters;
 	}
+	// D5 depth (Q-A (a)): Shelter, the windows' pattern - bonus-only, capped by construction (the share is at most 1). Skipped, and
+	// +0.0, while no floor past the cut-off has cells, so Total is bit-identical there: x + 0.0 == x.
+	if (Pop > 0 && HasDeepCells())
+	{
+		Out.DeepResidents = GetDeepResidents();
+		Out.Shelter = HopeShelterMax * (double)Out.DeepResidents / (double)Pop;
+	}
+	// D5 depth (Q-B (a)): a warm floor costs its residents Hope - and only Hope, it never touches the rating, air, beds, arrivals or
+	// recall directly. Floors are summed in floor-table order (shallowest first). +0.0 while no floor has Warmth > 0.
+	if (Pop > 0 && FloorWarmth.Num() > 0)
+	{
+		int32 ResidentsAt[RH::MaxDepthCap + 1] = {};
+		for (const FRHColonist& C : Colonists)
+		{
+			if (C.HomeLevel < 0 && C.HomeLevel >= -RH::MaxDepthCap)
+			{
+				++ResidentsAt[-C.HomeLevel];
+			}
+		}
+		double Weighted = 0.0;
+		for (const FRHFloor& Floor : FloorTable)
+		{
+			if (const double* W = FloorWarmth.Find(Floor.Level))
+			{
+				Weighted += (double)ResidentsAt[-Floor.Level] * *W;
+			}
+		}
+		Out.WarmPenalty = HopeWarmMax * FMath::Min(1.0, Weighted / (double)Pop);
+	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity
-		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty - Out.CommutePenalty, 0.0, 100.0);
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity + Out.Shelter
+		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty - Out.CommutePenalty - Out.WarmPenalty, 0.0, 100.0);
 	return Out;
 }
 
@@ -8240,7 +8294,8 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	const double DayFrac = GetDaylightFraction(StepEndS - SubDt, StepEndS);
 
 	// Pass 1: generation, storage, and each building's wanted draw.
-	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; };
+	// D5 depth: a deep floor's cooling is one more entry with B == nullptr (CoolLevel names the floor).
+	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; int32 CoolLevel = 0; };
 	TArray<FLoadEntry> Loads;
 	double GenW = 0.0, CapWh = 0.0;
 	for (FRHBuildingInstance& B : Buildings)
@@ -8280,6 +8335,31 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		E.Priority = Def->LoadPriority;
 		Loads.Add(E);
 	}
+	GenW += ExtraGenW; // D5 depth: the harness's constant source (0 by default, so GenW + 0.0 == GenW)
+
+	// D5 depth: one cooling entry per connected floor below the cut-off that has carved cells (floor-table order), after every
+	// building. With none, nothing below differs from the code before D5 depth.
+	int32 CoolingEntries = 0;
+	double CoolingW = 0.0;
+	for (const FRHFloor& Floor : FloorTable)
+	{
+		if (Floor.Level >= -DepthCostFromFloor)
+		{
+			continue;
+		}
+		const int64 MilliW = GetFloorCoolingMilliW(Floor.Level);
+		if (MilliW <= 0)
+		{
+			continue;
+		}
+		FLoadEntry E;
+		E.WantW = (double)MilliW / 1000.0;
+		E.Priority = CoolingLoadPriority;
+		E.CoolLevel = Floor.Level;
+		Loads.Add(E);
+		++CoolingEntries;
+		CoolingW += E.WantW;
+	}
 
 	// Pass 2: shedding. While the bank holds charge every load is served;
 	// once it empties, loads shed lowest LoadPriority first until demand
@@ -8287,24 +8367,68 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	double LoadW = 0.0;
 	for (const FLoadEntry& E : Loads)
 	{
-		E.B->bPowered = true;
+		if (E.B)
+		{
+			E.B->bPowered = true;
+		}
 		LoadW += E.WantW;
 	}
 	Power.ShedCount = 0;
-	if (Power.BatteryWh <= 0.0 && LoadW > GenW)
+	// D5 depth: "the bank is scraping". FullW is the whole load before any shed and B0 the bank at the step's start. A step scrapes
+	// when (i) it is today's shed test (B0 empty and FullW above generation) or (ii) the clamp below would fire under the full
+	// load. Shedding alone cannot drive Warmth: it sheds only on a step that starts empty, ends in surplus and refills the bank,
+	// so the next step serves everything - the shed flag alternates, the bank's emptiness does not. The short floors are the
+	// cooling entries in the shed prefix of the priority walk over the FULL load, run whether or not this step actually sheds.
+	const double FullW = LoadW;
+	const double B0 = Power.BatteryWh;
+	const bool bShedStep = B0 <= 0.0 && LoadW > GenW;
+	const bool bScraping = bShedStep || (CoolingEntries > 0 && B0 + (GenW - FullW) * (SubDt / 50.0) < 0.0);
+	uint32 ShortMask = 0;
+	if (bShedStep || (bScraping && CoolingEntries > 0))
 	{
-		Loads.Sort([](const FLoadEntry& A, const FLoadEntry& B) { return A.Priority < B.Priority; });
+		// Priority ascending; then buildings before cooling; then the deeper floor first. For two buildings this is the old
+		// comparator, so a colony with no cooling entry sorts exactly as before.
+		Loads.Sort([](const FLoadEntry& A, const FLoadEntry& B)
+		{
+			if (A.Priority != B.Priority)
+			{
+				return A.Priority < B.Priority;
+			}
+			const bool bACool = A.B == nullptr, bBCool = B.B == nullptr;
+			if (bACool != bBCool)
+			{
+				return !bACool;
+			}
+			return bACool && A.CoolLevel < B.CoolLevel;
+		});
 		for (FLoadEntry& E : Loads)
 		{
 			if (LoadW <= GenW)
 			{
 				break;
 			}
-			E.B->bPowered = false;
+			if (bShedStep)
+			{
+				if (E.B)
+				{
+					E.B->bPowered = false;
+				}
+				++Power.ShedCount;
+			}
+			if (!E.B)
+			{
+				ShortMask |= 1u << (uint32)(-E.CoolLevel);
+			}
 			LoadW -= E.WantW;
-			++Power.ShedCount;
+		}
+		if (!bShedStep)
+		{
+			LoadW = FullW; // the (ii) walk only names who would be cut: nothing is shed, the grid carries the full load
 		}
 	}
+	Power.CoolingW = CoolingW;
+	Power.CoolingFloors = CoolingEntries;
+	StepDepthWarmth(SubDt, ShortMask, CoolingEntries > 0);
 
 	Power.GenW = GenW;
 	Power.LoadW = LoadW;
@@ -13181,6 +13305,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	WriteShaftBlock(Ar); // v44: and the shaft list straight after it, so the floor block's offsets do not move
 	WriteTunnelBlock(Ar); // v45: and the tunnel list straight after that, so the shaft block's offsets do not move
 	WriteTransitBlock(Ar); // v46: and the transit block straight after it, so the tunnel block's offsets do not move
+	WriteWarmthBlock(Ar); // v47: and the warmth block straight after that, so the transit block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -13635,6 +13760,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v47: the warmth block (D5 depth), validated against the floors just read, into a local.
+	TArray<TPair<int32, double>> LoadedWarmth;
+	if (!ReadWarmthBlock(Ar, LoadedFloors, LoadedWarmth, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -13783,6 +13914,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	NextTunnelId = LoadedNextTunnelId;
 	++TunnelsVersion;
 	InstallTransit(LoadedTransit); // D4: the cars onto the shafts just installed, the threshold sol and the ledgers
+	InstallWarmth(LoadedWarmth);   // D5 depth: each floor's Warmth (a level at or above the cut-off is repaired with a Warning)
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a
 	// Borer that anchors two shafts keeps the lower Id.
 	{

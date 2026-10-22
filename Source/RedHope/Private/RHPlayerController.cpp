@@ -150,6 +150,12 @@ void ARHPlayerController::SetupInputComponent()
 	IA_Speed60 = MakeAction(TEXT("IA_Speed60"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_Speed60, EKeys::Four);
 
+	// D5 depth: PageUp / PageDown walk the view up and down the shaft strip, one floor a press.
+	IA_FloorUp = MakeAction(TEXT("IA_FloorUp"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_FloorUp, EKeys::PageUp);
+	IA_FloorDown = MakeAction(TEXT("IA_FloorDown"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_FloorDown, EKeys::PageDown);
+
 	UEnhancedInputComponent* Input = Cast<UEnhancedInputComponent>(InputComponent);
 	if (!Input)
 	{
@@ -168,6 +174,8 @@ void ARHPlayerController::SetupInputComponent()
 	Input->BindAction(IA_Speed3, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 3.f);
 	Input->BindAction(IA_Speed8, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 8.f);
 	Input->BindAction(IA_Speed60, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 60.f);
+	Input->BindAction(IA_FloorUp, ETriggerEvent::Started, this, &ARHPlayerController::OnFloorUp);
+	Input->BindAction(IA_FloorDown, ETriggerEvent::Started, this, &ARHPlayerController::OnFloorDown);
 }
 
 ARHStrategyPawn* ARHPlayerController::StrategyPawn() const
@@ -2158,6 +2166,16 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 		Colony->SetViewLevel(ActiveLevel);
 	}
 	SelectedBuildingId = 0; // the card belongs to the floor you left
+}
+
+void ARHPlayerController::OnFloorUp()
+{
+	SetActiveLevel(ActiveLevel + 1);
+}
+
+void ARHPlayerController::OnFloorDown()
+{
+	SetActiveLevel(ActiveLevel - 1);
 }
 
 int32 ARHPlayerController::GetNearestShaftId() const

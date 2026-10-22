@@ -14,6 +14,8 @@
 
 // D4: the -transit suite lives in RHSimTransitSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunTransitSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// D5 depth: the -depth suite lives in RHSimDepthSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunDepthSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -8468,7 +8470,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 
 		// --- D4. Floors: a whole floor is a district. ---
 		{
-			Expect(!Send(FloorCmd(NHomes, -3)) && Note.Contains(TEXT("not reached")) && !Sim->CanPaintDistrict(NHomes, -6, FVector::ZeroVector, FVector::ZeroVector, Why) && Why.Contains(TEXT("No such floor")),
+			Expect(!Send(FloorCmd(NHomes, -3)) && Note.Contains(TEXT("not reached")) && !Sim->CanPaintDistrict(NHomes, -(Sim->GetMaxDepth() + 1), FVector::ZeroVector, FVector::ZeroVector, Why) && Why.Contains(TEXT("No such floor")) /* D5 depth: -6 exists now (MaxDepth 20); the floor below the last one is the one that does not */,
 				TEXT("D4 floor -3 is not reached by the shaft, floor -6 does not exist: both refused"));
 			FRHDistrictPaintPreview Pre;
 			Expect(Sim->CanPaintDistrict(NHomes, -1, FVector(9.0e6, 9.0e6, 0.0), FVector(-9.0e6, 9.0e6, 0.0), Why, &Pre) && Pre.bFloor && Pre.JoinId == 0,
@@ -10800,7 +10802,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v46 (v40 added no field; v41, v42, v43, v44, v45 and v46 are D1's floor table, F2b's recalled list, W1's outpost rows, D2's shaft list, D3's tunnel list and D4's transit block): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
+		// --- X15. Save v47 (v40 added no field; v41, v42, v43, v44, v45, v46 and v47 are D1's floor table, F2b's recalled list, W1's outpost rows, D2's shaft list, D3's tunnel list, D4's transit block and D5 depth's warmth block): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10812,14 +10814,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 46, FString::Printf(TEXT("X15 the file says version %u (expect 46)"), Ver));
-			uint32 V45 = 45;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V45, 4); }
+			Expect(bRead && Ver == 47, FString::Printf(TEXT("X15 the file says version %u (expect 47)"), Ver));
+			uint32 V46 = 46;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv45.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/46")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
-				FString::Printf(TEXT("X15 a v45 save is refused and the live colony untouched (%s)"), *Le39));
+			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/47")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+				FString::Printf(TEXT("X15 a v46 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
 			Expect(Sim->LoadColony(TEXT("trafficsave1"), Lerr) && Lerr.IsEmpty() && Sim->GetImportStock(NRoverRow) == 1 && RoverCount() == 0,
@@ -12073,7 +12075,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("F15 at the end the agent band holds %.0f kg at the drill and in flight, at most two of its largest load (%.0f kg): it is not backing up"), Agent.DrillOut + Agent.InFlight, Agent.MaxLoad));
 		}
 
-		// --- F16. The save (v46; v45 refused) and determinism. ---
+		// --- F16. The save (v47; v46 refused) and determinism. ---
 		{
 			FRig Rg = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12086,19 +12088,19 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			uint32 V45 = 45;
-			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V45, 4); }
+			uint32 V46 = 46;
+			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_farice_v45.sav")));
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
 			FString Le44;
 			const bool bRefused = !Sim->LoadColony(TEXT("farice_v45"), Le44);
-			Expect(bSaved && bRead && Ver == 46 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/46")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 46); a v45 save is refused and the live colony untouched (%s)"), Ver, *Le44));
+			Expect(bSaved && bRead && Ver == 47 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/47")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 47); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
 			Expect(bBack && Back.Id != 0 && Back.bOutpostSource && Near(Back.AmountKg, 600.0, 1e-9),
-				TEXT("F16 the v46 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
+				TEXT("F16 the v47 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
 			// Determinism: the same colony, run twice, makes the same loads at the same steps.
 			FRig Rd = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12508,7 +12510,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 46 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 47 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12523,7 +12525,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v46 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v47 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -12550,9 +12552,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			{
 				TArray<uint8> Old = Good;
-				const uint32 V45 = 45;
-				FMemory::Memcpy(Old.GetData() + 4, &V45, 4);
-				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/46")), FString::Printf(TEXT("K6 a v45 file is refused and the colony untouched (%s)"), *E6));
+				const uint32 V46 = 46;
+				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
+				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/47")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -13663,9 +13665,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			}
 			{
 				TArray<uint8> Old = Good;
-				const uint32 V45 = 45;
-				FMemory::Memcpy(Old.GetData() + 4, &V45, 4);
-				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/46")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+				const uint32 V46 = 46;
+				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/47")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
@@ -14013,7 +14015,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 ShaftCount = Rd(At);
 			int32 Cursor = At + 4;
 			for (int32 K = 0; K < ShaftCount; ++K) { const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
-			Expect(bRead && Ver == 46 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
+			Expect(bRead && Ver == 47 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
 				FString::Printf(TEXT("TN1 the file says version %u; straight after the shaft block the tunnel block reads NextTunnelId %d and 0 tunnels: 8 bytes, no lift field"), Ver, Rd(Cursor)));
 		}
 
@@ -14451,8 +14453,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Expect(TryFile(TEXT("tunnelsh10"), Bad, E) && E.Contains(TEXT("tunnel list")), FString::Printf(TEXT("TN8 a file cut short in the tunnel list is refused (%s)"), *E)); }
 			{ TArray<uint8> Bad = Good; Put(Bad, TunnelAt + 4, -1);
 				Expect(TryFile(TEXT("tunnelsh11"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("tunnel count")), FString::Printf(TEXT("TN8 a negative tunnel count is refused (%s)"), *E)); }
-			{ TArray<uint8> Old = Good; const uint32 V45 = 45; FMemory::Memcpy(Old.GetData() + 4, &V45, 4);
-				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/46")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
+			{ TArray<uint8> Old = Good; const uint32 V46 = 46; FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
+				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/47")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
@@ -14641,6 +14643,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("transit")))
 	{
 		return RHRunTransitSuite(World, Clock, Sim);
+	}
+	// D5 depth self-test (depth has a price: dig time, cooling, Warmth, Shelter), fails loudly. `-depth`.
+	if (FParse::Param(*Params, TEXT("depth")))
+	{
+		return RHRunDepthSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
@@ -14924,7 +14931,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Ids.Num() == Sim->GetPopulation(), TEXT("e4 every colonist Id is still unique after the return"));
 		}
 		{
-			// e5: both at once, the plural banner, and the save round trip at v46.
+			// e5: both at once, the plural banner, and the save round trip at v47.
 			Reset();
 			Sim->Debug_AddColonists(4);
 			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
@@ -14937,7 +14944,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 46, FString::Printf(TEXT("e5 the file says version %u (expect 46)"), Ver));
+			Expect(bRead && Ver == 47, FString::Printf(TEXT("e5 the file says version %u (expect 47)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -16377,6 +16384,194 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Expect(PlanMs <= 10.0, FString::Printf(TEXT("budget: 2,500 PlanDeepRoute calls took %.3f ms (<= 10)"), PlanMs));
 				Expect(WarmReserveMs <= 1.0, FString::Printf(TEXT("budget: 10,000 warm reserve reads took %.3f ms (<= 1)"), WarmReserveMs));
 				Expect(ColdReserveMs <= 10.0, FString::Printf(TEXT("budget: 1,000 cold reserve reads took %.3f ms (<= 10)"), ColdReserveMs));
+			}
+
+			// D5 depth: twenty floors. All four shafts go to -20 (instant), each digs 210 cells on every one of -6..-20 (the four-dig
+			// layout of -1..-5, repeated), every new floor gets a filter and is rated, 2,000 colonists move to -6..-20 (the surface seats
+			// stay), and the 100 harness RC_H are re-spread over all 20 floors. Everything above is measured BEFORE this block and does not
+			// move. Here, against D4's budgets (unchanged): the cold deep net (4 + 4 x 20 = 84 portals), 2,500 PlanDeepRoute calls, 1,000
+			// cold and 10,000 warm reserve reads, a cold commute with transit on and flows only, one threshold roll; plus StepPower with
+			// fifteen cooling entries and a scraping bank (<= 0.05 ms), GetColonyHope with Shelter and Warmth live, the save and the load,
+			// and one RC_H on -20 that seeks the surface pad and docks. Wall clock.
+			{
+				constexpr int32 DeepFloors = 20;
+				bool bExtended = true, bCarvedDeep = true;
+				FString DeepWhy;
+				const double Build0 = FPlatformTime::Seconds();
+				for (int32 S = 0; S < 4; ++S) { Sim->Debug_ExtendShaftOf(S, DeepFloors); bExtended &= Sim->GetShaftDepth(S) == DeepFloors; }
+				for (int32 L = Floors + 1; L <= DeepFloors; ++L)
+				{
+					for (int32 S = 0; S < 4; ++S) { bCarvedDeep &= Sim->ExcavateFloor(-L, CellsPerFloor, DeepWhy, S); }
+					Sim->Debug_PlaceInstant(FName("AirFilter"), Sim->GetShaftHeadCm(), -L);
+				}
+				EraStepOnce();
+				for (int32 L = Floors + 1; L <= DeepFloors; ++L) { Sim->Debug_ForceRateFloor(-L); }
+				EraStepOnce();
+				const double BuildMs = (FPlatformTime::Seconds() - Build0) * 1000.0;
+				bool bRated = true;
+				int32 DeepCells = 0;
+				for (int32 L = Floors + 1; L <= DeepFloors; ++L) { bRated &= Sim->IsFloorRated(-L); DeepCells += Sim->GetFloorCarvedCells(-L); }
+				Expect(bExtended && bCarvedDeep && bRated && DeepCells == (DeepFloors - Floors) * 4 * CellsPerFloor,
+					FString::Printf(TEXT("depth: four shafts to -%d, %d cells carved on -%d..-%d (15 floors x 4 digs x %d) and every new floor rated, in %.1f ms (%s)"), DeepFloors, DeepCells, Floors + 1, DeepFloors, CellsPerFloor, BuildMs, *DeepWhy));
+				Expect(Sim->GetDeepCoolingFloorCount() == DeepFloors - Floors && Near(Sim->GetPower().CoolingW, (double)CellsPerFloor * 4.0 * 120.0, 1.0e-6),
+					FString::Printf(TEXT("depth: %d cooling floors asking %.0f W (840 cells x 120 floors-past-the-line)"), Sim->GetDeepCoolingFloorCount(), Sim->GetPower().CoolingW));
+				// 2,000 colonists to -6..-20, each with a surface seat (the era steps above re-derived the jobs, so every colonist's station is
+				// set again, as the transit block does; the rest keep homes on -1..-5).
+				Sim->Debug_ClearColonistStations();
+				{
+					int32 Index = 0;
+					for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+					{
+						Sim->Debug_SetColonistHome(C.Id, 0, Index < 2000 ? -(Floors + 1 + Index % (DeepFloors - Floors)) : -(1 + Index % Floors));
+						Sim->Debug_SetColonistStation(C.Id, FIntVector(0, INDEX_NONE, Habs[(Index * 7 + 3) % Habs.Num()]));
+						++Index;
+					}
+				}
+				Sim->Debug_ReroutePosition();
+				// The cold deep net.
+				const int32 DeepBuilds0 = Sim->GetDeepNetBuilds();
+				TArray<FIntVector> DeepPortals;
+				const double DNet0 = FPlatformTime::Seconds();
+				Sim->Debug_GetPortals(DeepPortals);
+				const double DeepNetMs = (FPlatformTime::Seconds() - DNet0) * 1000.0;
+				Expect(Sim->GetDeepNetBuilds() - DeepBuilds0 == 1 && DeepPortals.Num() == 4 + 4 * DeepFloors,
+					FString::Printf(TEXT("depth: the cold deep net is built once and holds %d portals (4 heads + 4 shafts x %d landings)"), DeepPortals.Num(), DeepFloors));
+				int32 PadId = INDEX_NONE;
+				FVector PadCm = FVector::ZeroVector;
+				const FVector DHead0(Sim->GetShaft(0).HeadCm.X, Sim->GetShaft(0).HeadCm.Y, 0.0);
+				Sim->FindNearestChargePad(DHead0, PadId, PadCm);
+				const FRHRobotRow* DHauler = DefsSub ? DefsSub->GetRobot(FName("RC_H")) : nullptr;
+				FRHRobotFragment DFrag;
+				if (DHauler)
+				{
+					DFrag.DefName = FName("RC_H"); DFrag.RobotClass = DHauler->RobotClass; DFrag.SpeedMps = DHauler->Speed_mps; DFrag.CargoCapKg = DHauler->Cargo_kg;
+					DFrag.WorkRate = DHauler->WorkRate; DFrag.DrawMoveW = DHauler->DrawMove_W; DFrag.DrawWorkW = DHauler->DrawWork_W; DFrag.DrawIdleW = DHauler->DrawIdle_W; DFrag.WearPerSol = DHauler->WearPerActiveSol;
+				}
+				const double DFloorH = Sim->GetFloorHeightCm();
+				struct FDeepBot { FMassEntityHandle H; int32 Level = 0; FVector Pos; };
+				const auto DeepBot = [&](int32 K, int32 HandleBase) -> FDeepBot
+				{
+					FDeepBot B;
+					B.Level = -(1 + K % DeepFloors);
+					const int32 Dig = (K / DeepFloors) % 4;
+					const int32 Have = Sim->GetFloorCarvedCells(B.Level);
+					int32 Ord = Dig * CellsPerFloor + 11 + (K / (DeepFloors * 4)) * 37 % CellsPerFloor;
+					Ord = FMath::Clamp(Ord, 0, Have - 1);
+					const FVector C = Sim->GetFloorCellCentreCm(B.Level, Ord);
+					B.Pos = FVector(C.X, C.Y, (double)B.Level * DFloorH + RH::RobotZOffsetCm);
+					B.H = FMassEntityHandle(HandleBase + K, 1);
+					return B;
+				};
+				TArray<FDeepBot> DRobots;
+				for (int32 K = 0; K < 100; ++K) { DRobots.Add(DeepBot(K, 1880000)); }
+				int32 DPlanned = 0, DWaypoints = 0;
+				const double DStamp = Clock->GetSimSecondsTotal();
+				const double DP0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 2500; ++K)
+				{
+					const FDeepBot& B = DRobots[K % DRobots.Num()];
+					const FDeepBot& To = DRobots[(K * 13 + 7) % DRobots.Num()];
+					FRHRobotRoadPath Path;
+					const bool bOk = (K % 2 == 0) ? Sim->PlanDeepRoute(B.Level, B.Pos, 0, PadCm, DStamp, Path) : Sim->PlanDeepRoute(B.Level, B.Pos, To.Level, To.Pos, DStamp, Path);
+					DPlanned += bOk ? 1 : 0;
+					DWaypoints += Path.Waypoints.Num();
+				}
+				const double DPlanMs = (FPlatformTime::Seconds() - DP0) * 1000.0;
+				Expect(DPlanned == 2500, FString::Printf(TEXT("depth: every one of 2,500 deep routes plans on twenty floors (%d, %d waypoints)"), DPlanned, DWaypoints));
+				int32 DPositive = 0;
+				double DSink = 0.0;
+				const double DC0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 1000; ++K)
+				{
+					const FDeepBot B = DeepBot(K, 1890000);
+					const float Wh = Sim->DeepReserveWh(B.H, DFrag, B.Pos, PadId, PadCm);
+					DPositive += Wh > 0.f ? 1 : 0;
+					DSink += Wh;
+				}
+				const double DColdReserveMs = (FPlatformTime::Seconds() - DC0) * 1000.0;
+				for (const FDeepBot& B : DRobots) { DSink += Sim->DeepReserveWh(B.H, DFrag, B.Pos, PadId, PadCm); }
+				const double DW0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 10000; ++K) { const FDeepBot& B = DRobots[K % DRobots.Num()]; DSink += Sim->DeepReserveWh(B.H, DFrag, B.Pos, PadId, PadCm); }
+				const double DWarmReserveMs = (FPlatformTime::Seconds() - DW0) * 1000.0;
+				Expect(DPositive == 1000, FString::Printf(TEXT("depth: every one of 1,000 robots on twenty floors has a reserve to the pad (%d)"), DPositive));
+				// The commute: the 2,000 deep residents with their surface seats, cold and flows only, then the threshold roll.
+				const double DTC0 = FPlatformTime::Seconds();
+				const URHSimWorldSubsystem::FRHCommuteSummary DeepCold = Sim->GetCommuteSummary();
+				const double DeepColdMs = (FPlatformTime::Seconds() - DTC0) * 1000.0;
+				double DFlowsTotal = 0.0;
+				for (int32 K = 0; K < 20; ++K) { Sim->Debug_BumpJobsVersion(); const double F0 = FPlatformTime::Seconds(); Sim->GetCommuteSummary(); DFlowsTotal += FPlatformTime::Seconds() - F0; }
+				const double DeepFlowsMs = DFlowsTotal * 1000.0 / 20.0;
+				const int32 DThresholds0 = Sim->GetTransitThresholds();
+				const int32 DRollSol = FMath::FloorToInt32(Clock->GetSimSecondsTotal() / SolLen) + 1;
+				const double DR0 = FPlatformTime::Seconds();
+				Sim->Debug_RollTransit(DRollSol);
+				const double DeepRollMs = (FPlatformTime::Seconds() - DR0) * 1000.0;
+				Expect(Sim->GetTransitThresholds() - DThresholds0 == 1 && DeepCold.Employed == Sim->GetPopulation() && Sim->Debug_CommuteCachesFresh(),
+					FString::Printf(TEXT("depth: %d colonists measured on twenty floors (%d long), one roll"), DeepCold.Employed, DeepCold.LongCommuters));
+				// StepPower with fifteen cooling entries and a scraping bank (the bank emptied before each step, so the shed walk runs).
+				constexpr int32 PowerReps = 1000;
+				const double PW0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < PowerReps; ++K) { Sim->Debug_SetBatteryWh(0.0); Sim->Debug_StepPower(AgentDt); }
+				const double PowerMs = (FPlatformTime::Seconds() - PW0) * 1000.0 / PowerReps;
+				bool bWarmAll = true;
+				for (int32 L = Floors + 1; L <= DeepFloors; ++L) { bWarmAll &= Sim->GetFloorWarmth(-L) > 0.0; }
+				Expect(Sim->GetPower().CoolingFloors == DeepFloors - Floors && bWarmAll && Sim->GetPower().ShedCount > 0,
+					FString::Printf(TEXT("depth: StepPower with %d cooling entries and a scraping bank sheds %d, and every deep floor is warming"), Sim->GetPower().CoolingFloors, Sim->GetPower().ShedCount));
+				double DHopeSink = 0.0;
+				const URHSimWorldSubsystem::FRHHopeBreakdown DHp = Sim->GetColonyHope();
+				const double DH0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < HopeReps; ++K) { DHopeSink += Sim->GetColonyHope().Total; }
+				const double DeepHopeMs = (FPlatformTime::Seconds() - DH0) * 1000.0 / HopeReps;
+				Expect(DHp.DeepResidents >= 2000 && DHp.Shelter > 0.0 && DHp.WarmPenalty > 0.0,
+					FString::Printf(TEXT("depth: Hope reads %d deep residents (Shelter +%.3f) and the warm floors (-%.4f)"), DHp.DeepResidents, DHp.Shelter, DHp.WarmPenalty));
+				// Save and load at 20 floors.
+				FString DSaveErr, DLoadErr;
+				const double DS0 = FPlatformTime::Seconds();
+				const bool bDSaved = Sim->SaveColony(TEXT("scaledepth"), DSaveErr);
+				const double DSaveMs = (FPlatformTime::Seconds() - DS0) * 1000.0;
+				const double DL0 = FPlatformTime::Seconds();
+				const bool bDLoaded = bDSaved && Sim->LoadColony(TEXT("scaledepth"), DLoadErr);
+				const double DLoadMs = (FPlatformTime::Seconds() - DL0) * 1000.0;
+				Expect(bDSaved && bDLoaded && DLoadErr.IsEmpty() && Sim->GetFloorWarmth(-(Floors + 1)) > 0.0 && Sim->GetShaftDepth(3) == DeepFloors,
+					FString::Printf(TEXT("depth: the 20-floor colony saves (%.1f ms) and loads (%.1f ms) with its warmth (%s %s)"), DSaveMs, DLoadMs, *DSaveErr, *DLoadErr));
+				// One RC_H on -20 seeks the surface pad and docks (a rested colony first: the bank full, the floors cool).
+				Sim->Debug_SetBatteryWh(1.0e9);
+				bool bDocked = false;
+				float MinCharge = 1.0e9f, ChargeAtDock = 0.f, StartCharge = 0.f, ReserveAtStart = 0.f;
+				int32 DockSteps = -1, HoldSteps = 0;
+				if (DHauler && PadId != INDEX_NONE)
+				{
+					FDeepBot Bot = DeepBot(DeepFloors - 1, 1895000); // K = 19: floor -20, the first dig
+					FTransform X(FQuat::Identity, Bot.Pos);
+					float Charge = DHauler->Battery_Wh;
+					StartCharge = Charge;
+					ReserveAtStart = Sim->DeepReserveWh(Bot.H, DFrag, Bot.Pos, PadId, PadCm);
+					for (int32 K = 1; K <= 6000 && !bDocked; ++K)
+					{
+						Sim->SetRobotStepEnd(Clock->GetSimSecondsTotal() + (double)AgentDt);
+						const bool bArrived = RH::MoveAlong(*Sim, Bot.H, X, PadCm, DFrag.SpeedMps, AgentDt, false, 0.f, 0);
+						const bool bHeld = Sim->DidRobotHoldThisStep(Bot.H);
+						HoldSteps += bHeld ? 1 : 0;
+						Charge = FMath::Max(0.f, Charge - (bHeld ? DFrag.DrawIdleW : DFrag.DrawMoveW) * (AgentDt / 50.f));
+						MinCharge = FMath::Min(MinCharge, Charge);
+						Sim->SetRobotStepEnd(-1.0);
+						Clock->Debug_AdvanceSimSeconds((double)AgentDt);
+						if (bArrived) { bDocked = true; ChargeAtDock = Charge; DockSteps = K; }
+					}
+				}
+				Expect(bDocked && MinCharge > 0.f && ChargeAtDock > 0.f && ReserveAtStart > 0.f && ReserveAtStart <= StartCharge,
+					FString::Printf(TEXT("depth: an RC_H on -20 seeks the surface pad and docks after %d sub-steps (%d held at the column), never below %.1f Wh, %.1f Wh left; its reserve to the pad read %.1f of %.1f Wh"), DockSteps, HoldSteps, MinCharge, ChargeAtDock, ReserveAtStart, StartCharge));
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE depth (4 shafts x %d floors, %d cells below -5, %d colonists): build %.1f ms | cold deep net %.4f ms (%d portals) | 2,500 PlanDeepRoute %.3f ms | 1,000 cold reserve reads %.3f ms | 10,000 warm %.3f ms | cold commute %.3f ms, flows only %.3f ms (%d long) | one roll %.4f ms | StepPower with %d cooling entries %.5f ms | GetColonyHope %.4f ms (sink %.3f) | save %.1f ms, load %.1f ms | reserve sink %.1f"),
+					DeepFloors, DeepCells, Sim->GetPopulation(), BuildMs, DeepNetMs, DeepPortals.Num(), DPlanMs, DColdReserveMs, DWarmReserveMs, DeepColdMs, DeepFlowsMs, DeepCold.LongCommuters, DeepRollMs, Sim->GetPower().CoolingFloors, PowerMs, DeepHopeMs, DHopeSink, DSaveMs, DLoadMs, DSink);
+				Expect(DeepNetMs <= 3.0, FString::Printf(TEXT("budget: a cold deep net on twenty floors took %.4f ms (<= 3)"), DeepNetMs));
+				Expect(DPlanMs <= 10.0, FString::Printf(TEXT("budget: 2,500 PlanDeepRoute calls on twenty floors took %.3f ms (<= 10)"), DPlanMs));
+				Expect(DColdReserveMs <= 10.0, FString::Printf(TEXT("budget: 1,000 cold reserve reads on twenty floors took %.3f ms (<= 10)"), DColdReserveMs));
+				Expect(DWarmReserveMs <= 1.0, FString::Printf(TEXT("budget: 10,000 warm reserve reads on twenty floors took %.3f ms (<= 1)"), DWarmReserveMs));
+				Expect(DeepColdMs <= 10.0, FString::Printf(TEXT("budget: a cold commute with transit on, 2,000 deep residents, took %.3f ms (<= 10)"), DeepColdMs));
+				Expect(DeepFlowsMs <= 1.0, FString::Printf(TEXT("budget: flows only with 2,000 deep residents took %.3f ms (<= 1)"), DeepFlowsMs));
+				Expect(DeepRollMs <= 1.0, FString::Printf(TEXT("budget: one StepTransit roll over four 20-floor shafts took %.4f ms (<= 1)"), DeepRollMs));
+				Expect(PowerMs <= 0.05, FString::Printf(TEXT("budget: StepPower with fifteen cooling entries and a scraping bank took %.5f ms (<= 0.05)"), PowerMs));
+				Expect(DeepHopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope with Shelter and Warmth live took %.4f ms (<= 0.5, the existing Hope budget)"), DeepHopeMs));
 			}
 		}
 

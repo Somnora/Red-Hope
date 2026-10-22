@@ -706,7 +706,12 @@ bool URHSimWorldSubsystem::PlanFloorHomes(const FRHDistrict& D, FRHGrowthProject
 		L.Value *= Out.Cells;
 	}
 	Out.Bill.FindOrAdd(NAME_GrowthOxygen) += Out.Cells * O2FillKgPerCell; // the new cells' air, in full: the floor stays rated
-	Out.TotalSols = GrowthCellSols;
+	// D5 depth: a floor-homes project on a floor past the cut-off takes its dig permille longer (it carves cells); at or above the
+	// cut-off the permille is exactly 1000 and the row is used as written.
+	{
+		const int32 Permille = GetDigPermille(Level);
+		Out.TotalSols = Permille == 1000 ? GrowthCellSols : GrowthCellSols * (double)Permille / 1000.0;
+	}
 	return true;
 }
 
@@ -1114,7 +1119,11 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 		}
 	}
 	AddGrowthFurnitureCost(Pieces, Out.Bill);
-	Out.TotalSols = GrowthRoomSols;
+	// D5 depth: a civic room that carves its own cell on a deep floor scales the same way; a room in an existing cell or bay does not.
+	{
+		const int32 Permille = Out.bCarve ? GetDigPermille(Out.Level) : 1000;
+		Out.TotalSols = Permille == 1000 ? GrowthRoomSols : GrowthRoomSols * (double)Permille / 1000.0;
+	}
 	return true;
 }
 

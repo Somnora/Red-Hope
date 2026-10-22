@@ -223,7 +223,9 @@ struct REDHOPESIM_API FRHPowerState
 	UPROPERTY() double BatteryWh = 0.0;
 	UPROPERTY() double BatteryCapWh = 0.0;
 	UPROPERTY() bool bDeficit = false;
-	UPROPERTY() int32 ShedCount = 0;           // buildings currently unpowered by shedding
+	UPROPERTY() int32 ShedCount = 0;           // buildings (and D5 depth cooling entries) currently unpowered by shedding
+	UPROPERTY() double CoolingW = 0.0;         // D5 depth: the deep floors' cooling load this step (inside LoadW; 0 with no deep floor)
+	UPROPERTY() int32 CoolingFloors = 0;       // D5 depth: how many deep floors carry a cooling load
 };
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FRHOnStockChanged, FName, double);
@@ -324,6 +326,13 @@ struct FRHShaft
 	int32 BorerId = 0;                // the Borer that anchors it; 0 = none (shaft 0 anchored by ExtendShaft, the test path)
 	int32 LiftCars = 0;               // D4: lift cars fitted (0 = the unfitted hoist); saved in the transit block (v46), not the shaft block
 };
+
+namespace RH
+{
+	// D5 depth: the MaxDepth config clamp and the save's range refusals share this cap. The light key packs one bit per floor
+	// into a uint32 (RHColonyVisualizerSubsystem), so the cap keeps 0..MaxDepth inside bits 0..30.
+	constexpr int32 MaxDepthCap = 30;
+}
 
 namespace RH
 {
@@ -603,6 +612,52 @@ public:
 	const FRHDepositState* FindDepositNear(const FVector& LocationCm, double MaxDistCm, int32 Level = 0) const;
 	int32 GetMaxDepth() const { return MaxDepth; }
 	double GetFloorHeightCm() const { return FloorHeightCm; }
+
+	// --- D5 depth: depth has a price (docs/qa/2026-10-21/d5-depth-design.md; Q-A (a), Q-B (a), Q-C (a)) ---
+	// Floors -1..-DepthCostFromFloor run today's code paths. Past the line a batch takes longer (an integer per-mille
+	// multiplier at batch start), every carved cell adds a cooling load to the grid, a floor the grid cannot cool slowly runs
+	// warm (Warmth 0..1, a Hope penalty only), and people homed past the line get a small capped Hope bonus (Shelter).
+	int32 GetDepthCostFromFloor() const { return DepthCostFromFloor; }
+	int32 GetDigPermillePerDeepFloor() const { return DigPermillePerDeepFloor; }
+	int32 GetCoolMilliWPerCellPerDeepFloor() const { return CoolMilliWPerCellPerDeepFloor; }
+	int32 GetCoolingLoadPriority() const { return CoolingLoadPriority; }
+	double GetHeatRiseSols() const { return HeatRiseSols; }
+	double GetHeatFallSols() const { return HeatFallSols; }
+	double GetHopeWarmMax() const { return HopeWarmMax; }
+	double GetHopeShelterMax() const { return HopeShelterMax; }
+	// 1000 + DigPermillePerDeepFloor x max(0, -Level - DepthCostFromFloor); exactly 1000 on floors -1..-DepthCostFromFloor.
+	int32 GetDigPermille(int32 Level) const;
+	// Floors past the line below which a level sits (0 on the surface and on floors -1..-DepthCostFromFloor).
+	int32 GetFloorsBelowLine(int32 Level) const { return FMath::Max(0, -Level - DepthCostFromFloor); }
+	// A deep floor's cooling in integer milliwatts: Cells x floors-below-the-line x row, over every carved cell of a connected
+	// floor, rated or not, tunnel cells included. 0 on floors -1..-DepthCostFromFloor.
+	int64 GetFloorCoolingMilliW(int32 Level) const;
+	double GetFloorCoolingW(int32 Level) const { return (double)GetFloorCoolingMilliW(Level) / 1000.0; }
+	// The floors that carry a cooling entry (a connected floor below the line with cells), shallowest first.
+	int32 GetDeepCoolingFloorCount() const;
+	// Warmth 0..1 (0 when the floor is cool or has none). Warmth costs Hope and nothing else directly.
+	double GetFloorWarmth(int32 Level) const { const double* W = FloorWarmth.Find(Level); return W ? *W : 0.0; }
+	bool IsAnyFloorWarm() const { return FloorWarmth.Num() > 0; }
+	uint32 GetWarmthVersion() const { return WarmthVersion; }
+	// Colonists homed past the line.
+	int32 GetDeepResidents() const;
+	// The Hope breakdown's two D5 depth terms, as the last additions to the total (Shelter after Solidarity, WarmPenalty after CommutePenalty).
+	// Harness (D3 debug-override precedent): force a row, and a runtime-only extra generation (0 by default, never saved) so a test sets
+	// generation without touching Warmth.
+	void Debug_SetHopeWarmMax(double V) { HopeWarmMax = FMath::Max(0.0, V); }
+	void Debug_SetExtraGenW(double W) { ExtraGenW = FMath::Max(0.0, W); }
+	double GetExtraGenW() const { return ExtraGenW; }
+	// Harness: set a floor's Warmth directly (a hand-made save, the Hope read's fixtures). The grid tests never use it: they reach Warmth
+	// through the real StepPower. <= 0 clears the floor.
+	void Debug_SetFloorWarmth(int32 Level, double Warmth) { if (Warmth > 0.0) { FloorWarmth.FindOrAdd(Level) = Warmth; } else { FloorWarmth.Remove(Level); } ++WarmthVersion; }
+	// Harness: bore shaft ShaftId to ToDepth instantly (ExtendShaft is shaft 0's; the -scale suite needs the other three).
+	void Debug_ExtendShaftOf(int32 ShaftId, int32 ToDepth) { ExtendShaftOf(ShaftId, ToDepth); }
+	double GetDisputeHopeBelow() const { return DisputeHopeBelow; }
+	// Harness: the power step on its own (the -scale suite times it with fifteen cooling entries and a scraping bank).
+	void Debug_StepPower(float SubDt) { StepPower(SubDt); }
+	// Harness: run the MaxDepth / DepthCostFromFloor row clamps (the load's own code) on a given row value; returns the stored value.
+	int32 Debug_ApplyMaxDepthRow(int32 Row) { ApplyMaxDepthRow(Row); return MaxDepth; }
+	int32 Debug_ApplyDepthCostRow(int32 Row) { ApplyDepthCostRow(Row); return DepthCostFromFloor; }
 
 	// --- Shaft & excavation (M1-d Gate A) ---
 	// The shaft is a vertical trunk bored down from ShaftHeadCm; a subsurface
@@ -1199,10 +1254,17 @@ public:
 		double FoodPenalty = 0; // D4a: stored positive - a food runway under FoodRunwayFloorSols at today's draw (soft cap HopeFoodPenalty)
 		double CrisisPenalty = 0; // stored positive (M4 Gate D active crisis)
 		double Solidarity = 0; // signed: + after Defy, - after Comply (M3 Gate C)
+		// D5 depth (Q-A (a)): HopeShelterMax x DeepResidents / Population, bonus-only and capped by construction; added straight
+		// after Solidarity. +0.0 while no floor past the line has cells (x + 0.0 == x).
+		double Shelter = 0;
+		int32 DeepResidents = 0;
 		// C6a: Ramp x HopeCommuteMax x min(1, HopeCommuteSteepness x LongCommuters / Population); stored positive,
 		// the LAST term of the subtraction. +0.0 whenever the population ramp is closed or nobody is long, so Total is
 		// bit-identical to v39 there (x - 0.0 == x).
 		double CommutePenalty = 0;
+		// D5 depth (Q-B (a)): HopeWarmMax x min(1, sum over floors of Residents x Warmth / Population); stored positive, subtracted
+		// straight after CommutePenalty (the last term). +0.0 whenever no floor has Warmth > 0.
+		double WarmPenalty = 0;
 		int32 Commuters = 0, LongCommuters = 0;
 		int32 OffendedPairs = 0, FilledSeats = 0;
 		// C2a (per head): the shares behind the terms. AdjacencyPenalty is
@@ -2659,7 +2721,28 @@ private:
 	double FabricatorSpeedMul = 1.0; // Toolkit manifest item raises this
 	// Z-model config (DT_Config: FloorHeightMeters, MaxDepth).
 	double FloorHeightCm = 400.0;
-	int32 MaxDepth = 5;
+	int32 MaxDepth = 5;                    // config MaxDepth, clamped to [1, RH::MaxDepthCap]
+	// D5 depth. Rows (header defaults equal the CSV). Saved: the warmth block only (save v47, straight after the transit block).
+	// Derived, never saved: the cooling load, the served flags, DigPermille, Shelter, the warm flag and the alert latches.
+	int32 DepthCostFromFloor = 5;          // clamped to [0, RH::MaxDepthCap]; the cut-off: floors -1..-this run today's code
+	int32 DigPermillePerDeepFloor = 150;
+	int32 CoolMilliWPerCellPerDeepFloor = 1000;
+	int32 CoolingLoadPriority = 7;
+	double HeatRiseSols = 1.0;
+	double HeatFallSols = 0.5;
+	double HopeWarmMax = 5.0;
+	double HopeShelterMax = 3.0;
+	TMap<int32, double> FloorWarmth;       // Level -> Warmth in (0, 1]; only a warm floor has an entry (saved, v47)
+	TSet<int32> WarmAlerted;               // runtime latch per floor: on at Warmth >= 0.25, off at 0 (re-armed from Warmth at load)
+	uint32 WarmthVersion = 0;              // up when any floor's Warmth crosses a 10% step (the floor tint's key)
+	double ExtraGenW = 0.0;                // harness only (Debug_SetExtraGenW): runtime, never saved
+	bool HasDeepCells() const;             // some connected floor past the cut-off has carved cells
+	void ApplyMaxDepthRow(int32 Row);
+	void ApplyDepthCostRow(int32 Row);
+	void StepDepthWarmth(float SubDt, uint32 ShortMask, bool bHasCooling); // ShortMask: bit (-Level) set for each floor the scraping walk marks short
+	void WriteWarmthBlock(FArchive& Ar) const;
+	bool ReadWarmthBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, TArray<TPair<int32, double>>& OutWarmth, FString& OutError) const;
+	void InstallWarmth(const TArray<TPair<int32, double>>& In);
 	// Shaft & excavation state (M1-d Gate A; serialized, save v6).
 	TArray<FRHShaft> Shafts = { FRHShaft() }; // D2: saved straight after the floor table (save v44). Shafts[0] always exists.
 	// D2 derived state, rebuilt by RebuildShaftDerived (never saved):

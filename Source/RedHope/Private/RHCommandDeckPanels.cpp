@@ -727,6 +727,16 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 				Parts.Add(FString::Printf(TEXT("Long trips to work: -%.1f Hope (%d of %d people travel over %.0f m; homes nearer their work would give it back)."),
 					H.CommutePenalty, H.LongCommuters, S->GetPopulation(), (double)S->GetCommuteLongCm() / 100.0));
 			}
+			if (H.Shelter > 0.0)
+			{
+				// D5 depth, Gate-D framing PLACEHOLDER (V11): the shelter bonus for living past the cool line.
+				Parts.Add(FString::Printf(TEXT("Deep homes: shelter from the sky, +%.1f Hope (%d of %d people live past floor -%d)."), H.Shelter, H.DeepResidents, S->GetPopulation(), S->GetDepthCostFromFloor()));
+			}
+			if (H.WarmPenalty > 0.0)
+			{
+				// D5 depth, Gate-D framing PLACEHOLDER (V11): warmth costs mood only, and says what brings it back.
+				Parts.Add(FString::Printf(TEXT("Warm floors: -%.1f Hope while their cooling goes short; more generation or storage brings it back."), H.WarmPenalty));
+			}
 			if (S->GetDeficitEquivalent() > 0.0)
 			{
 				// C2a, Gate-D framing PLACEHOLDER: the Hope line for a shared shortage.
@@ -2126,6 +2136,21 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
 					return Txt(FString::Printf(TEXT("DAY SHIFT: %d machine(s) resting until sunrise"), S ? S->GetDayShiftRestingCount() : 0));
+				})
+			]
+			// D5 depth (placeholder copy, director review): what the deep floors ask of the grid, and which are running warm.
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+				.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetPower().CoolingFloors > 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+				.Text_Lambda([this]()
+				{
+					const URHSimWorldSubsystem* S = GetSim();
+					if (!S) { return FText::GetEmpty(); }
+					int32 Warm = 0;
+					for (const FRHFloor& F : S->GetFloors()) { Warm += S->GetFloorWarmth(F.Level) > 0.0 ? 1 : 0; }
+					return Txt(FString::Printf(TEXT("Cooling: %.0f W for %d deep floor%s%s"), S->GetPower().CoolingW, S->GetPower().CoolingFloors, S->GetPower().CoolingFloors == 1 ? TEXT("") : TEXT("s"),
+						Warm > 0 ? *FString::Printf(TEXT(" - %d running warm: more generation or storage brings them back"), Warm) : TEXT("")));
 				})
 			]
 		],

@@ -224,6 +224,13 @@ private:
 	// Room zoning made visible (M2 Gate B): tiles retint by designated function
 	// and carry a small flat label. State-diffed per tick like the shaft mirror.
 	void RefreshRoomVisuals();
+	// D5 depth: a floor tile past the cool line darkens a step per three floors (a depth cue) and lerps toward a soft amber by its
+	// floor's Warmth. The tile's own tint (the room pass sets it, and sets it again when the room changes) is the base, remembered per
+	// material, so the multiplier never compounds. Re-applied only when a floor's Warmth crosses a 10% step (the sim's WarmthVersion).
+	void ApplyDepthTint(AStaticMeshActor* Tile, int32 Level) const;
+	void RefreshDepthTint(const class URHSimWorldSubsystem* Sim);
+	mutable TMap<TWeakObjectPtr<class UMaterialInstanceDynamic>, FLinearColor> DepthTintBase;
+	uint32 DepthTintKey = MAX_uint32;
 	FLinearColor RoomTint(FName RoomRowName) const;
 	// Content path of the furnishing prop for a room function (empty = none).
 	FString RoomPropPath(FName Room) const;

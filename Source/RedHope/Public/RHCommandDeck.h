@@ -190,6 +190,14 @@ private:
 	uint32 TunnelListKey = MAX_uint32;
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
+	// D5 depth: the strip's rows sit in a scroll box capped at 11 rows. Floors past the cool line show only once reached, next to bore
+	// or viewed (-1..-5 stay as they were); choosing a floor scrolls its row into view.
+	EVisibility GetShaftRowVisibility(int32 Level) const;
+	void FollowShaftScroll();
+	TSharedPtr<class SScrollBox> ShaftScroll;
+	TMap<int32, TSharedPtr<class SWidget>> ShaftRows; // Level -> the row (0 = SURF)
+	int32 ShaftScrollLevel = MAX_int32;               // the viewed floor the scroll last followed
+	float ShaftRowHeight = 0.f;                       // one row's desired height, measured once
 	FText GetFloorLabel(int32 Level) const;
 	FSlateColor GetFloorCellColor(int32 Level) const;
 	FSlateColor GetFloorTextColor(int32 Level) const;

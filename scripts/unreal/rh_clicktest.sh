@@ -6,6 +6,8 @@
 #
 # Usage: bash rh_clicktest.sh [label] [timeout_s]
 # Env:   RH_LOG_DIR  where the run log lands (default <proj>/Saved/RHCapture/logs)
+#        RH_CLICKTEST_PRE  console commands run before RH.ClickTest, comma-separated (D5 depth: "RH.BoreNow 14" bores the colony past
+#                          -11 first, so shaft rows scroll out of the strip and Fit lift and Tunnel must still be reached)
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.
@@ -26,7 +28,8 @@ LOGDIR="${RH_LOG_DIR:-$PROJ_DIR/Saved/RHCapture/logs}"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/$LABEL.log"
 
-CMDS="r.setres 1600x900w, RH.Demo, RH.After 3 RH.ClickTest"
+PRE="${RH_CLICKTEST_PRE:-}"
+CMDS="r.setres 1600x900w, RH.Demo, ${PRE:+$PRE, }RH.After 3 RH.ClickTest"
 
 echo "=== click test '$LABEL' ==="
 "$UE" "$PROJ" "$MAP" -game -windowed -resx=1600 -resy=900 \

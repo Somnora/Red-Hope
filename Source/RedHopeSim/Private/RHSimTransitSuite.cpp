@@ -1585,14 +1585,14 @@ int32 RHRunTransitSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		const auto Rd = [](const TArray<uint8>& Bytes, int32 Off) { int32 V = INDEX_NONE; if (Off >= 0 && Off + 4 <= Bytes.Num()) { FMemory::Memcpy(&V, Bytes.GetData() + Off, 4); } return V; };
 		const auto Put = [](TArray<uint8>& Bytes, int32 Off, int32 V) { FMemory::Memcpy(Bytes.GetData() + Off, &V, 4); };
 		const auto Put64 = [](TArray<uint8>& Bytes, int32 Off, int64 V) { FMemory::Memcpy(Bytes.GetData() + Off, &V, 8); };
-		// The default block: 0 cars, threshold sol -1, 0 ledgers - 12 bytes - and the version 46.
+		// The default block: 0 cars, threshold sol -1, 0 ledgers - 12 bytes - and the version 47.
 		Reset();
 		Expect(Sim->SaveColony(TEXT("transitdefault"), SaveErr), FString::Printf(TEXT("TR18 the base colony saves (%s)"), *SaveErr));
 		TArray<uint8> Def;
 		const bool bDef = ReadFile(TEXT("transitdefault"), Def);
 		uint32 Ver = 0; if (bDef) { FMemory::Memcpy(&Ver, Def.GetData() + 4, 4); }
 		const int32 TA = bDef ? TransitAt(Def) : -1;
-		Expect(bDef && Ver == 46 && Rd(Def, TA) == 0 && Rd(Def, TA + 4) == -1 && Rd(Def, TA + 8) == 0,
+		Expect(bDef && Ver == 47 && Rd(Def, TA) == 0 && Rd(Def, TA + 4) == -1 && Rd(Def, TA + 8) == 0,
 			FString::Printf(TEXT("TR18 the file says version %u; straight after the tunnel block the transit block reads 0 cars, threshold sol %d, %d ledgers: 12 bytes"), Ver, Rd(Def, TA + 4), Rd(Def, TA + 8)));
 
 		// (i) A robot saved mid-ascent from -1 loads on its column at its boarding floor - over a live colony with no floors at all -
@@ -1736,10 +1736,10 @@ int32 RHRunTransitSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		// The previous version.
 		{
 			TArray<uint8> Old = Good;
-			const uint32 V45 = 45;
-			FMemory::Memcpy(Old.GetData() + 4, &V45, 4);
+			const uint32 V46 = 46;
+			FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
 			FString E;
-			Expect(TryFile(TEXT("transith19"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/46")), FString::Printf(TEXT("TR18 a v45 file is refused (%s)"), *E));
+			Expect(TryFile(TEXT("transith19"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/47")), FString::Printf(TEXT("TR18 a v46 file is refused (%s)"), *E));
 		}
 		FString E;
 		Expect(Sim->LoadColony(TEXT("transitgood"), E) && E.IsEmpty() && Sim->GetLiftCars(0) == 1 && Sim->GetLiftCars(1) == 1 && Sim->GetLiftCars(2) == 0 && Sim->GetTransitLedgers().Num() == 3,

@@ -3534,10 +3534,69 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 	}
 
 	RefreshRoomVisuals();
+	RefreshDepthTint(Sim);
 
 	// The pit itself (skirt + walls) tracks the carved shape; key-checked, so
 	// this is a no-op except on the frame something actually changed.
 	RebuildSliceRig();
+}
+
+void URHColonyVisualizerSubsystem::ApplyDepthTint(AStaticMeshActor* Tile, int32 Level) const
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Tile || !Sim || Level >= -Sim->GetDepthCostFromFloor())
+	{
+		return;
+	}
+	UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Tile->GetStaticMeshComponent()->GetMaterial(0));
+	if (!Mid)
+	{
+		return;
+	}
+	FLinearColor* Known = DepthTintBase.Find(Mid);
+	if (!Known)
+	{
+		FLinearColor Now;
+		if (!Mid->GetVectorParameterValue(FName("Tint"), Now))
+		{
+			return;
+		}
+		Known = &DepthTintBase.Add(Mid, Now);
+	}
+	const int32 Below = Sim->GetFloorsBelowLine(Level);
+	const float Dark = FMath::Max(0.55f, 1.f - 0.06f * (float)((Below + 2) / 3)); // a step a three floors, from the first floor past the line
+	const FLinearColor Cooled = FLinearColor(Known->R * Dark, Known->G * Dark, Known->B * Dark, Known->A);
+	const float Warm = FMath::Clamp((float)Sim->GetFloorWarmth(Level), 0.f, 1.f);
+	Mid->SetVectorParameterValue(FName("Tint"), FMath::Lerp(Cooled, FLinearColor(0.88f, 0.56f, 0.20f, Known->A), 0.55f * Warm));
+}
+
+void URHColonyVisualizerSubsystem::RefreshDepthTint(const URHSimWorldSubsystem* Sim)
+{
+	if (!Sim)
+	{
+		return;
+	}
+	// The key moves when a floor's Warmth crosses a 10% step, when a tile is added or when a floor's cut-off row changes - never per frame.
+	const uint32 Key = HashCombine(HashCombine(Sim->GetWarmthVersion(), (uint32)TileByCell.Num()), (uint32)Sim->GetDepthCostFromFloor());
+	if (Key == DepthTintKey)
+	{
+		return;
+	}
+	DepthTintKey = Key;
+	for (auto It = DepthTintBase.CreateIterator(); It; ++It)
+	{
+		if (!It.Key().IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+	for (const auto& Pair : TileByCell)
+	{
+		if (Pair.Key.X < -Sim->GetDepthCostFromFloor())
+		{
+			ApplyDepthTint(Pair.Value.Get(), Pair.Key.X);
+		}
+	}
 }
 
 void URHColonyVisualizerSubsystem::ClearExtraShaftVisuals()
@@ -3842,6 +3901,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		{
 			ApplyTint(Tile, RoomTint(Room));
 		}
+		ApplyDepthTint(Tile, Pair.Key.X); // D5 depth: the new surface is the new base for the depth tint
 		// One flat label per tile, created on first designation, retextured on
 		// change. Building labels sit at Z=12 (surface); this one rides the
 		// tile's own floor plane.
