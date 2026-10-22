@@ -188,6 +188,14 @@ private:
 	void RefreshTunnelList();
 	TSharedPtr<class SVerticalBox> TunnelList;
 	uint32 TunnelListKey = MAX_uint32;
+	// D6a: the Cavern brush button on the shaft strip (a second press steps the box's height), and the card under it listing the
+	// viewed floor's open caverns, each with what is left and a Cancel.
+	FText GetCavernLabel() const;
+	FReply HandleCavern();
+	FReply HandleCancelCavern(int32 CavernId);
+	void RefreshCavernList();
+	TSharedPtr<class SVerticalBox> CavernList;
+	uint32 CavernListKey = MAX_uint32;
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
 	// D5 depth: the strip's rows sit in a scroll box capped at 11 rows. Floors past the cool line show only once reached, next to bore

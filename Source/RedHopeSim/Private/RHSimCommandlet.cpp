@@ -16,6 +16,8 @@
 int32 RHRunTransitSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // D5 depth: the -depth suite lives in RHSimDepthSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunDepthSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// D6a caverns: the -caverns suite lives in RHSimCavernSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -10802,7 +10804,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("X14 the Gate-D placeholder alert fires once when the long share first crosses 10%% (%d, then %d after another step)"), CommuteAlerts, CommuteAlerts2));
 		}
 
-		// --- X15. Save v47 (v40 added no field; v41, v42, v43, v44, v45, v46 and v47 are D1's floor table, F2b's recalled list, W1's outpost rows, D2's shaft list, D3's tunnel list, D4's transit block and D5 depth's warmth block): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
+		// --- X15. Save v48 (v40 added no field; v41, v42, v43, v44, v45, v46, v47 and v48 are D1's floor table, F2b's recalled list, W1's outpost rows, D2's shaft list, D3's tunnel list, D4's transit block, D5 depth's warmth block and D6a's cavern block): a rover and its waiting aboard round-trip, the previous version's save is refused. ---
 		{
 			LoadWorld();
 			for (const FRHRoadEdge& Ed : TArray<FRHRoadEdge>(Graph().Edges)) { Sim->Debug_RemoveRoadEdge(Ed.Id); }
@@ -10814,13 +10816,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 47, FString::Printf(TEXT("X15 the file says version %u (expect 47)"), Ver));
+			Expect(bRead && Ver == 48, FString::Printf(TEXT("X15 the file says version %u (expect 48)"), Ver));
 			uint32 V46 = 46;
 			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv45.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/47")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/48")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
 				FString::Printf(TEXT("X15 a v46 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
@@ -12075,7 +12077,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("F15 at the end the agent band holds %.0f kg at the drill and in flight, at most two of its largest load (%.0f kg): it is not backing up"), Agent.DrillOut + Agent.InFlight, Agent.MaxLoad));
 		}
 
-		// --- F16. The save (v47; v46 refused) and determinism. ---
+		// --- F16. The save (v48; v46 refused) and determinism. ---
 		{
 			FRig Rg = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12094,13 +12096,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
 			FString Le44;
 			const bool bRefused = !Sim->LoadColony(TEXT("farice_v45"), Le44);
-			Expect(bSaved && bRead && Ver == 47 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/47")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 47); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
+			Expect(bSaved && bRead && Ver == 48 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/48")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 48); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
 			Expect(bBack && Back.Id != 0 && Back.bOutpostSource && Near(Back.AmountKg, 600.0, 1e-9),
-				TEXT("F16 the v47 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
+				TEXT("F16 the v48 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
 			// Determinism: the same colony, run twice, makes the same loads at the same steps.
 			FRig Rd = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12510,7 +12512,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 47 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 48 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12525,7 +12527,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v47 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v48 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -12554,7 +12556,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/47")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
+				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/48")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -13667,7 +13669,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/47")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/48")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
@@ -14015,7 +14017,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 ShaftCount = Rd(At);
 			int32 Cursor = At + 4;
 			for (int32 K = 0; K < ShaftCount; ++K) { const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
-			Expect(bRead && Ver == 47 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
+			Expect(bRead && Ver == 48 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
 				FString::Printf(TEXT("TN1 the file says version %u; straight after the shaft block the tunnel block reads NextTunnelId %d and 0 tunnels: 8 bytes, no lift field"), Ver, Rd(Cursor)));
 		}
 
@@ -14454,7 +14456,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{ TArray<uint8> Bad = Good; Put(Bad, TunnelAt + 4, -1);
 				Expect(TryFile(TEXT("tunnelsh11"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("tunnel count")), FString::Printf(TEXT("TN8 a negative tunnel count is refused (%s)"), *E)); }
 			{ TArray<uint8> Old = Good; const uint32 V46 = 46; FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/47")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
+				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/48")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
@@ -14648,6 +14650,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("depth")))
 	{
 		return RHRunDepthSuite(World, Clock, Sim);
+	}
+	// D6a caverns self-test (a box of cells on up to three floors, carved by the Borers), fails loudly. `-caverns`.
+	if (FParse::Param(*Params, TEXT("caverns")))
+	{
+		return RHRunCavernsSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
@@ -14931,7 +14938,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Ids.Num() == Sim->GetPopulation(), TEXT("e4 every colonist Id is still unique after the return"));
 		}
 		{
-			// e5: both at once, the plural banner, and the save round trip at v47.
+			// e5: both at once, the plural banner, and the save round trip at v48.
 			Reset();
 			Sim->Debug_AddColonists(4);
 			for (const int32 Id : { 3, 4 }) { Sim->Debug_SetMarsBorn(Id, true); }
@@ -14944,7 +14951,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 47, FString::Printf(TEXT("e5 the file says version %u (expect 47)"), Ver));
+			Expect(bRead && Ver == 48, FString::Printf(TEXT("e5 the file says version %u (expect 48)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -16572,6 +16579,90 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Expect(DeepRollMs <= 1.0, FString::Printf(TEXT("budget: one StepTransit roll over four 20-floor shafts took %.4f ms (<= 1)"), DeepRollMs));
 				Expect(PowerMs <= 0.05, FString::Printf(TEXT("budget: StepPower with fifteen cooling entries and a scraping bank took %.5f ms (<= 0.05)"), PowerMs));
 				Expect(DeepHopeMs <= 0.5, FString::Printf(TEXT("budget: GetColonyHope with Shelter and Warmth live took %.4f ms (<= 0.5, the existing Hope budget)"), DeepHopeMs));
+			}
+
+			// D6a: caverns. One 8 x 8 x 3 cavern beside each of the four shafts on floors -1 to -3 of the 20-floor colony (each finished before
+			// the next is ordered: MaxOpenCaverns is two). Here: the preflight (2,000 calls of a full-size box), the carve (the same path a
+			// finished batch takes, so the per-cell eligibility scan of a Borer's loop is inside it; 768 cells), the cold dig labelling of a
+			// floor whose dig a cavern has just grown, and a save and a load. Run last, so no number above moves. Wall clock.
+			{
+				struct FCavernSite { int32 Shaft; FIntPoint A, B; };
+				TArray<FCavernSite> Sites;
+				bool bCavernsOk = true;
+				FString CavernWhy;
+				int32 CavernCells = 0, CavernExpected = 0;
+				double CarveTotalMs = 0.0;
+				const int32 CellsBefore = Sim->GetFloorCarvedCells(-1) + Sim->GetFloorCarvedCells(-2) + Sim->GetFloorCarvedCells(-3);
+				for (int32 S = 0; S < 4; ++S)
+				{
+					const FIntPoint Column = Sim->GetShaft(S).Column;
+					bool bFound = false;
+					for (int32 Dx = 8; Dx <= 24 && !bFound; ++Dx)
+					{
+						for (int32 Dy = -8; Dy <= 8 && !bFound; ++Dy)
+						{
+							const FIntPoint A = Column + FIntPoint(Dx, Dy), B = A + FIntPoint(7, 7);
+							URHSimWorldSubsystem::FRHCavernPreview Pre;
+							if (!Sim->CanDigCavern(-1, 3, URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), A), URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), B), CavernWhy, &Pre))
+							{
+								continue;
+							}
+							int32 NewId = INDEX_NONE;
+							if (Sim->Debug_DigCavern(-1, 3, A, B, NewId, CavernWhy))
+							{
+								FCavernSite Site; Site.Shaft = S; Site.A = A; Site.B = B;
+								Sites.Add(Site);
+								CavernExpected += Pre.Cells;
+								const double C0 = FPlatformTime::Seconds();
+								CavernCells += Sim->Debug_CarveCavernCells(NewId, 192);
+								CarveTotalMs += (FPlatformTime::Seconds() - C0) * 1000.0;
+								bFound = true;
+							}
+						}
+					}
+					bCavernsOk &= bFound;
+				}
+				const int32 CellsAfter = Sim->GetFloorCarvedCells(-1) + Sim->GetFloorCarvedCells(-2) + Sim->GetFloorCarvedCells(-3);
+				Expect(bCavernsOk && Sites.Num() == 4 && Sim->GetCaverns().Num() == 4 && Sim->GetOpenCavernCount() == 0 && CavernCells == CavernExpected && CellsAfter - CellsBefore == CavernCells && CavernCells > 0,
+					FString::Printf(TEXT("caverns: four 8 x 8 x 3 caverns ordered and carved: %d of %d cells laid (%d added to floors -1 to -3), none open (%s)"), CavernCells, CavernExpected, CellsAfter - CellsBefore, *CavernWhy));
+				// The preflight: a full-size box standing against the last cavern's east wall, which passes every refusal (its seed on each floor
+				// is a cell of that cavern), so each call walks the whole box and the seed scan.
+				double PreMs = 0.0;
+				int32 PreAccepted = 0;
+				if (Sites.Num() == 4)
+				{
+					const FVector Origin = Sim->GetShaftHeadCm();
+					const FIntPoint A(Sites[3].B.X + 1, Sites[3].A.Y), B = A + FIntPoint(7, 7);
+					const double P0 = FPlatformTime::Seconds();
+					for (int32 K = 0; K < 2000; ++K)
+					{
+						FString Why;
+						PreAccepted += Sim->CanDigCavern(-1, 3, URHSimWorldSubsystem::LatticeToCm(Origin, A), URHSimWorldSubsystem::LatticeToCm(Origin, B), Why) ? 1 : 0;
+					}
+					PreMs = (FPlatformTime::Seconds() - P0) * 1000.0;
+				}
+				// The cold dig labelling: the first lookup on each floor after the carve builds its labelling.
+				double LabelWorst = 0.0;
+				for (int32 L = 1; L <= 3 && Sites.Num() == 4; ++L)
+				{
+					const double L0 = FPlatformTime::Seconds();
+					Sim->ServingShaft(-L, Sim->GetFloorCell(-L, 0));
+					LabelWorst = FMath::Max(LabelWorst, (FPlatformTime::Seconds() - L0) * 1000.0);
+				}
+				FString CavSaveErr, CavLoadErr;
+				const double CS0 = FPlatformTime::Seconds();
+				const bool bCavSaved = Sim->SaveColony(TEXT("scalecaverns"), CavSaveErr);
+				const double CavSaveMs = (FPlatformTime::Seconds() - CS0) * 1000.0;
+				const double CL0 = FPlatformTime::Seconds();
+				const bool bCavLoaded = bCavSaved && Sim->LoadColony(TEXT("scalecaverns"), CavLoadErr);
+				const double CavLoadMs = (FPlatformTime::Seconds() - CL0) * 1000.0;
+				Expect(bCavSaved && bCavLoaded && CavLoadErr.IsEmpty() && Sim->GetCaverns().Num() == 4 && Sim->GetNextCavernId() == 5 && Sim->GetFloorCarvedCells(-1) + Sim->GetFloorCarvedCells(-2) + Sim->GetFloorCarvedCells(-3) == CellsAfter,
+					FString::Printf(TEXT("caverns: the colony with four finished caverns saves (%.1f ms) and loads (%.1f ms) with its cells (%s %s)"), CavSaveMs, CavLoadMs, *CavSaveErr, *CavLoadErr));
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE caverns (4 caverns of 8 x 8 x 3 on the 20-floor colony): carve %d cells %.2f ms | 2,000 full-box preflights %.3f ms (%d accepted) | cold labelling %.4f ms worst of three floors"),
+					CavernCells, CarveTotalMs, PreMs, PreAccepted, LabelWorst);
+				Expect(PreAccepted == 2000 && PreMs <= 100.0, FString::Printf(TEXT("budget: 2,000 accepted preflights of a full-size box took %.3f ms (<= 100; %d accepted)"), PreMs, PreAccepted));
+				Expect(CarveTotalMs <= 20.0, FString::Printf(TEXT("budget: carving %d cavern cells took %.2f ms (<= 20)"), CavernCells, CarveTotalMs));
+				Expect(LabelWorst <= 1.0, FString::Printf(TEXT("budget: a cold dig labelling of a floor a cavern has grown took %.4f ms worst of three (<= 1, the four-dig budget)"), LabelWorst));
 			}
 		}
 

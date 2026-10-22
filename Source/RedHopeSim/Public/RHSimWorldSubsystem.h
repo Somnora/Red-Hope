@@ -364,6 +364,54 @@ struct FRHTunnel
 
 namespace RH
 {
+	// D6a (caverns): the limits are CODE constants, not rows (director answer Q-B (a): up to 8 x 8 cells and 3 floors, carved with the
+	// ordinary CarveCell recipe, no new data row). The save's structural refusals test these constants directly. A later change to a
+	// limit is a code change. The *Cap constants are the ceilings a limit may be raised to without a save-format change.
+	constexpr int32 CavernMaxSide = 8;        // cells along either side of the box
+	constexpr int32 CavernMaxFloors = 3;      // floors a cavern spans
+	constexpr int32 MaxOpenCaverns = 2;       // open (not cancelled, something left to carve) at once
+	constexpr int32 CavernMaxSideCap = 32;
+	constexpr int32 CavernMaxFloorsCap = 8;
+	constexpr int32 MaxCavernRecords = 1024;  // every cavern ever ordered stays on the list (finished and cancelled ones included)
+	static_assert(CavernMaxSide <= CavernMaxSideCap && CavernMaxFloors <= CavernMaxFloorsCap && MaxOpenCaverns <= MaxCavernRecords, "the cavern limits stay under their ceilings");
+
+	// D6a: a Borer's batch-in-flight record (PendingBoreWork value) is (kind, id). Kind 0 bore, 1 carve, 2 and 3 a tunnel's A and B
+	// end (Y = tunnel Id), and from 100 a cavern (X = 100 + the floor's depth, Y = cavern Id, so the record names its floor). EVERY
+	// reader that used to ask "X >= 2" asks one of these two, so a cavern batch is never read as the tunnel whose Id it shares.
+	constexpr int32 CavernWorkBase = 100;
+	inline bool IsTunnelWork(const FIntPoint& Work) { return Work.X == 2 || Work.X == 3; }
+	inline bool IsCavernWork(const FIntPoint& Work) { return Work.X >= CavernWorkBase; }
+}
+
+// D6a (caverns): a box of ordinary lattice cells on 1..CavernMaxFloors consecutive floors, carved cell by cell by a Borer with the
+// CarveCell recipe. The record is the order. Min and Max are the box corners (region 0's frame, both ends included); Top is the
+// shallowest floor and Bottom the deepest (Top >= Bottom, both < 0). Every cell it carves goes through CarveLatticePoint, so
+// ordinals stay add-only (D1 R0): no level, no table and no key is added. ShaftId is fixed when the order executes (the nearest shaft
+// that reaches Bottom, ties to the lower Id), so a later SinkShaft cannot move the work. Ids are dense in order of ordering and
+// never reused. Written only by URHSimWorldSubsystem.
+struct FRHCavern
+{
+	int32 Id = 0;
+	int32 RegionId = 0;               // always 0
+	int32 ShaftId = 0;                // the shaft whose Borers carve it (helper Borers count as shaft 0)
+	int32 Top = 0;                    // the shallowest floor (< 0)
+	int32 Bottom = 0;                 // the deepest floor (<= Top)
+	FIntPoint Min = FIntPoint::ZeroValue;
+	FIntPoint Max = FIntPoint::ZeroValue;
+	bool bCancelled = false;          // no new batch starts; the cells already carved stay, and a batch in flight lands its cell
+	int32 GetFloors() const { return Top - Bottom + 1; }
+	int32 GetSizeX() const { return Max.X - Min.X + 1; }
+	int32 GetSizeY() const { return Max.Y - Min.Y + 1; }
+	bool ContainsLevel(int32 Level) const { return Level <= Top && Level >= Bottom; }
+	bool ContainsPoint(const FIntPoint& P) const { return P.X >= Min.X && P.X <= Max.X && P.Y >= Min.Y && P.Y <= Max.Y; }
+	mutable bool bFinished = false;   // derived, never saved: every box point on every floor is carved (cells are never removed, so it stays true)
+	mutable bool bCounted = false;    // derived, never saved: LeftOnFloor is good for CountedAt (a FloorCellsVersion)
+	mutable uint32 CountedAt = 0;
+	mutable TArray<int32> LeftOnFloor; // uncarved box points per floor, index Top - Level
+};
+
+namespace RH
+{
 	// D4: caps shared by the config clamps and the save's refusals, so a save made under any row value loads.
 	constexpr int32 MaxLiftCarsCap = 8;
 	constexpr int32 MaxWaitSecCap = 1200;  // one sol (O8)
@@ -786,6 +834,49 @@ public:
 	bool Debug_DigTunnel(int32 Level, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
 	// Harness: growth's free-cell test (private; the -tunnels suite pins that it skips tunnel cells).
 	bool Debug_IsCellFreeForRoom(int32 Level, int32 Cell) const { return IsCellFreeForRoom(Level, Cell); }
+
+	// --- D6a: caverns (docs/qa/2026-10-22/d6-caverns-design.md, MERGED DESIGN AND REVISION section 1; director answers Q-A (a), Q-B (a), Q-C (a)) ---
+	// One cavern is one DigCavern order (see FRHCavern). Cavern cells are ordinary cells of FRHFloor::Cells, carved by the Borer.
+	const TArray<FRHCavern>& GetCaverns() const { return Caverns; }
+	const FRHCavern* FindCavern(int32 Id) const { for (const FRHCavern& C : Caverns) { if (C.Id == Id) { return &C; } } return nullptr; }
+	int32 GetNextCavernId() const { return NextCavernId; }
+	uint32 GetCavernsVersion() const { return CavernsVersion; } // up on every order, cancel and load; presentation caches key on it (and on GetFloorCellsVersion)
+	// Uncarved box points on one floor of the box (0 for a floor outside it), and on the whole box. Open = not cancelled and something left.
+	int32 GetCavernUncarved(const FRHCavern& C, int32 Level) const;
+	int32 GetCavernUncarved(const FRHCavern& C) const;
+	bool IsCavernOpen(const FRHCavern& C) const { return !C.bCancelled && GetCavernUncarved(C) > 0; }
+	int32 GetOpenCavernCount() const;
+	// Batches in flight on a cavern, over all its floors and on one floor (a floor level is never a sentinel: -1 is a floor); counted with IsCavernWork.
+	int32 GetCavernBatchesInFlight(int32 CavernId) const;
+	int32 GetCavernBatchesInFlightOn(int32 CavernId, int32 Level) const;
+	// Transient (never saved, not reset by a load): cavern batches that have completed, and how many found no cell to carve.
+	int32 GetCavernBatchesLanded() const { return CavernBatchesLanded; }
+	int32 GetCavernBatchesEmpty() const { return CavernBatchesEmpty; }
+	// The horizontal eligibility rule (RC 2): an UNCARVED, non-column point of Level that is 4-adjacent to a carved cell of Level or to the
+	// column of a shaft that reaches Level. Cells are never removed, so a point that is eligible once stays eligible.
+	bool IsCavernPointEligible(int32 Level, const FIntPoint& P) const;
+	// The point a Borer carves next on one floor of a cavern: the eligible box point lowest by (X, then Y). False when none is left.
+	bool FindCavernPoint(const FRHCavern& C, int32 Level, FIntPoint& OutPoint) const;
+	struct FRHCavernPreview
+	{
+		FIntPoint Min = FIntPoint::ZeroValue, Max = FIntPoint::ZeroValue;
+		int32 Top = 0, Bottom = 0;
+		int32 Cells = 0;           // uncarved box points over all floors: what the Borers will carve
+		int32 Points = 0;          // box points over all floors
+		double BorerHours = 0.0;   // CarveCell hours for those cells, each floor at its own D5 dig time (one Borer)
+		double SpoilKg = 0.0;      // the spoil those cells drop
+		double O2Kg = 0.0;         // the O2 the floors will need once the cells are carved (O2FillKgPerCell a cell)
+	};
+	// The DigCavern preflight (refusals 1-7 of the D6 merged design), with the reason. Top = the order's Level, Floors = its Value,
+	// two corners in cm (snapped to the lattice here); the player controller pre-checks with it and the order runs it again at execute time.
+	bool CanDigCavern(int32 Top, int32 Floors, const FVector& ACm, const FVector& BCm, FString& OutReason, FRHCavernPreview* OutPreview = nullptr) const;
+	// The one carve helper (RC 3): refuses a shaft column or an already-carved point, takes the point out of the floor's Plan, and
+	// appends it. The only new path that appends a cell. False when refused.
+	bool CarveLatticePoint(int32 Level, const FIntPoint& P);
+	// Harness: the DigCavern order without the uplink (the same preflight and the same execution). OutId is the new cavern's Id.
+	bool Debug_DigCavern(int32 Top, int32 Floors, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
+	// Harness: carve up to N cells of a cavern now, through the same completion a finished batch takes. Returns how many cells were appended.
+	int32 Debug_CarveCavernCells(int32 CavernId, int32 N);
 
 	// --- D4: transit (lifts, capacity and robots below; docs/qa/2026-10-21/d4-transit-design.md, Q-A (a), Q-B (a)) ---
 	// The gate is the colony's first fitted lift car (FitLift, Value = shaft Id). With no car every line of D3 runs: the free,
@@ -2772,6 +2863,21 @@ private:
 	const FRHTunnel* FindLiveTunnelOnPoint(const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) tunnel whose UNCARVED chain holds P
 	void WriteTunnelBlock(FArchive& Ar) const;
 	bool ReadTunnelBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, TArray<FRHTunnel>& OutTunnels, int32& OutNextId, FString& OutError) const;
+	// D6a (caverns). Saved straight after the warmth block (save v48): NextCavernId, CavernCount, then the caverns in Id order.
+	TArray<FRHCavern> Caverns;
+	int32 NextCavernId = 1;
+	uint32 CavernsVersion = 0;
+	int32 CavernBatchesLanded = 0;
+	int32 CavernBatchesEmpty = 0;
+	void ExecuteDigCavern(const FRHCommand& Cmd);
+	void ExecuteCancelCavern(const FRHCommand& Cmd);
+	bool FindCavernWork(int32 WorkShaft, FIntPoint& OutItem) const; // the Borer loop's cavern branch: (100 + depth, Id), the shallowest floor with an eligible point
+	void CompleteCavernCell(int32 CavernId, int32 Level, int32 BorerId);
+	const FRHTunnel* FindLiveTunnelOnFloorPoint(int32 Level, const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) tunnel on Level whose UNCARVED chain holds P
+	const FRHCavern* FindLiveCavernOnFloorPoint(int32 Level, const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) cavern whose box holds P, uncarved on Level
+	const FRHCavern* FindLiveCavernOnColumn(const FIntPoint& Column) const; // an unfinished cavern whose box holds the column (a column spans every floor)
+	void WriteCavernBlock(FArchive& Ar) const;
+	bool ReadCavernBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, const TArray<FRHTunnel>& InTunnels, TArray<FRHCavern>& OutCaverns, int32& OutNextId, FString& OutError) const;
 	// D4 (transit). SAVED straight after the tunnel block (save v46): the fitted cars, TransitCheckedSol and the ledgers.
 	// Everything else below is runtime; the counters are transient (never saved, not reset by a load).
 	bool bHasTransit = false;                // derived: some shaft has LiftCars > 0 (a fit sets it; a load re-derives it)

@@ -55,7 +55,17 @@ public:
 	// second with the sim's own preview (an L: along X, then along Y; the live cell count, Borer-hours, spoil and the preflight's
 	// reason), release transmits a DigTunnel order. The mode stays armed for the next tunnel; cancel exits.
 	void BeginTunnel();
-	bool IsTunnelMode() const { return bTunnelMode; }
+	// Cavern brush (D6a): the deck's Cavern button on a floor view, a box variant of the tunnel brush (it shares the armed flag, so every
+	// place that disarms the tunnel brush disarms this). Press anchors one corner, drag aims the opposite corner with the sim's own
+	// preview (the cells to carve, Borer-hours, spoil, O2 and the preflight's reason), release transmits a DigCavern order: Level = the
+	// viewed floor (the top of the box), Value = Floors. Floors is 1..RH::CavernMaxFloors: the Cavern button steps it while armed.
+	void BeginCavern(int32 Floors);
+	bool IsCavernMode() const { return bTunnelMode && bCavernBrush; }
+	int32 GetCavernFloors() const { return CavernFloors; }
+	// Capture/QA (RH.CavernGhost): hold the cavern brush's ghost mid-drag on a floor between two lattice corners, as if the mouse were
+	// down there; it never transmits.
+	void Debug_CavernGhost(int32 Top, int32 Floors, const FIntPoint& FromCell, const FIntPoint& ToCell);
+	bool IsTunnelMode() const { return bTunnelMode && !bCavernBrush; }
 	// Capture/QA (RH.TunnelGhost): hold the brush's ghost mid-drag on a floor between two lattice points, as if the mouse
 	// were down there; it never transmits.
 	void Debug_TunnelGhost(int32 Level, const FIntPoint& FromCell, const FIntPoint& ToCell);
@@ -264,6 +274,9 @@ private:
 	bool bTunnelForced = false;
 	FVector TunnelAnchorCm = FVector::ZeroVector;
 	FVector TunnelForcedToCm = FVector::ZeroVector;
+	// Cavern brush state (D6a): bCavernBrush is only read while bTunnelMode is set.
+	bool bCavernBrush = false;
+	int32 CavernFloors = 1;
 	// Demolish Road state (C6b).
 	bool bRoadDemolishMode = false;
 	bool bRoadDemolishForced = false;

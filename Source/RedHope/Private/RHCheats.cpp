@@ -623,6 +623,88 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTunnelGhost(
 		PC->Debug_TunnelGhost(FCString::Atoi(*Args[0]), FIntPoint(FCString::Atoi(*Args[1]), FCString::Atoi(*Args[2])), FIntPoint(FCString::Atoi(*Args[3]), FCString::Atoi(*Args[4])));
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDigCavern(
+	TEXT("RH.DigCavern"),
+	TEXT("RH.DigCavern <TopLevel> <Floors> <Ax> <Ay> <Bx> <By> - order a cavern: a box between two LATTICE corners (10 m cells, the shaft head is (0,0)) on <Floors> floors down from <TopLevel> (at most 8 x 8 cells and 3 floors), carved by the Borers cell by cell (uplink). Every floor of the box must touch a dig or a shaft. RH.Status lists the caverns."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 6)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DigCavern <TopLevel> <Floors> <Ax> <Ay> <Bx> <By>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const FVector Origin = Sim->GetShaftHeadCm();
+			FRHCommand Cmd;
+			Cmd.Verb = FName("DigCavern");
+			Cmd.Level = FCString::Atoi(*Args[0]);
+			Cmd.Value = FCString::Atoi(*Args[1]);
+			Cmd.Location = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3])));
+			Cmd.LocationB = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(FCString::Atoi(*Args[4]), FCString::Atoi(*Args[5])));
+			FString Why;
+			if (!Sim->CanDigCavern(Cmd.Level, FCString::Atoi(*Args[1]), Cmd.Location, Cmd.LocationB, Why))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.DigCavern] would be refused now: %s (the order is sent anyway; the uplink checks again on arrival)"), *Why);
+			}
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCancelCavern(
+	TEXT("RH.CancelCavern"),
+	TEXT("RH.CancelCavern <Id> - cancel a cavern (uplink): no new cell starts, the cells carved stay, a batch under way lands its cell."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CancelCavern <Id>"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("CancelCavern");
+			Cmd.Value = FCString::Atod(*Args[0]);
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCavernNow(
+	TEXT("RH.CavernNow"),
+	TEXT("RH.CavernNow <Id> [Cells=all] - DEBUG: carve up to N cells of a cavern instantly (bypasses the Borer; spoil banks at the head, unhauled)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CavernNow <Id> [Cells]"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const int32 Laid = Sim->Debug_CarveCavernCells(FCString::Atoi(*Args[0]), Args.Num() > 1 ? FCString::Atoi(*Args[1]) : RH::CavernMaxSide * RH::CavernMaxSide * RH::CavernMaxFloors);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.CavernNow] %d cell(s) carved"), Laid);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCavernGhost(
+	TEXT("RH.CavernGhost"),
+	TEXT("RH.CavernGhost <TopLevel> <Floors> <Ax> <Ay> <Bx> <By> - DEBUG: hold the Cavern brush's drag ghost on a floor between two lattice corners (as if the mouse were down there) for a screenshot; it never transmits. With no arguments it clears the brush."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!PC)
+		{
+			return;
+		}
+		if (Args.Num() < 6)
+		{
+			PC->CancelModes();
+			return;
+		}
+		PC->Debug_CavernGhost(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]), FIntPoint(FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3])), FIntPoint(FCString::Atoi(*Args[4]), FCString::Atoi(*Args[5])));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHExcavate(
 	TEXT("RH.Excavate"),
 	TEXT("RH.Excavate <Level> <Cells> [shaft=0] - order N 10x10 cells carved on a floor that shaft reaches (uplink; its Borer works the queue)."),
@@ -1918,6 +2000,12 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 			UE_LOG(LogRedHope, Display, TEXT("  tunnel %d: floor %d | (%d, %d) to (%d, %d) | %d of %d cells left%s%s%s"),
 				T.Id, T.Level, T.A.X, T.A.Y, T.B.X, T.B.Y, Sim->GetTunnelUncarved(T), URHSimWorldSubsystem::GetTunnelChainLength(T.A, T.B),
 				T.bTwoEnded ? TEXT(" | two-ended") : TEXT(""), T.bCancelled ? TEXT(" | cancelled") : TEXT(""), Sim->IsTunnelStalled(T) ? TEXT(" | stalled") : TEXT(""));
+		}
+		// D6a: one line per cavern.
+		for (const FRHCavern& Cv : Sim->GetCaverns())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  cavern %d: floors %d..%d | (%d, %d) to (%d, %d) | %d cells left | shaft %d%s"),
+				Cv.Id, Cv.Top, Cv.Bottom, Cv.Min.X, Cv.Min.Y, Cv.Max.X, Cv.Max.Y, Sim->GetCavernUncarved(Cv), Cv.ShaftId, Cv.bCancelled ? TEXT(" | cancelled") : TEXT(""));
 		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{

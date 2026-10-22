@@ -606,6 +606,8 @@ namespace
 		FVector SpotCm = FVector::ZeroVector;
 		FVector TunnelACm = FVector::ZeroVector;
 		FVector TunnelBCm = FVector::ZeroVector;
+		FVector CavernACm = FVector::ZeroVector;
+		FVector CavernBCm = FVector::ZeroVector;
 		int32 ManifestBase = 0;
 	};
 
@@ -714,6 +716,40 @@ namespace
 							OutB = BCm;
 							return true;
 						}
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	// A cavern the sim would accept on floor -1 at one floor: a 2 x 2 box of lattice cells, off the carved cells and open tunnels (D6a).
+	// AvoidLo..AvoidHi is the lattice rectangle of the tunnel the test just ordered, which may land while the cavern is dragged.
+	bool FindCavern(const URHSimWorldSubsystem& Sim, const FIntPoint& AvoidLo, const FIntPoint& AvoidHi, FVector& OutA, FVector& OutB)
+	{
+		const FVector Origin = Sim.GetShaftHeadCm();
+		for (int32 Ring = 1; Ring <= 6; ++Ring)
+		{
+			for (int32 X = -Ring; X <= Ring; ++X)
+			{
+				for (int32 Y = -Ring; Y <= Ring; ++Y)
+				{
+					if (FMath::Max(FMath::Abs(X), FMath::Abs(Y)) != Ring)
+					{
+						continue;
+					}
+					if (X + 1 >= AvoidLo.X - 1 && X <= AvoidHi.X + 1 && Y + 1 >= AvoidLo.Y - 1 && Y <= AvoidHi.Y + 1)
+					{
+						continue;
+					}
+					const FVector ACm = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(X, Y));
+					const FVector BCm = URHSimWorldSubsystem::LatticeToCm(Origin, FIntPoint(X + 1, Y + 1));
+					FString Why;
+					if (Sim.CanDigCavern(-1, 1, ACm, BCm, Why))
+					{
+						OutA = ACm;
+						OutB = BCm;
+						return true;
 					}
 				}
 			}
@@ -1020,6 +1056,48 @@ namespace
 			}, 2.f, 0.3f, true);
 		}
 
+		// ---- the cavern tool (D6a): arm it from the shaft strip, drag a box on the floor, then step its height with a second press
+		Runner.Do(TEXT("cavern.setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(-1);
+			const FVector Origin = Sim->GetShaftHeadCm();
+			const FIntPoint TA = URHSimWorldSubsystem::CmToLattice(Origin, T->TunnelACm), TB = URHSimWorldSubsystem::CmToLattice(Origin, T->TunnelBCm);
+			if (FindCavern(*Sim, FIntPoint(FMath::Min(TA.X, TB.X), FMath::Min(TA.Y, TB.Y)), FIntPoint(FMath::Max(TA.X, TB.X), FMath::Max(TA.Y, TB.Y)), T->CavernACm, T->CavernBCm))
+			{
+				FrameCamera((T->CavernACm + T->CavernBCm) * 0.5, 0.2f);
+			}
+			else
+			{
+				Report(TEXT("cavern.setup"), false, TEXT("no valid cavern on floor -1"));
+			}
+		}, 0.9f);
+		{
+			const TSharedRef<FPress> Tool = PushPress(TEXT("cavern.tool"), LocateButton(TEXT("Cavern"), 0, true));
+			PushCheck(TEXT("cavern.tool"), Tool, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->IsCavernMode() && !PC->IsTunnelMode() && PC->GetCavernFloors() == 1) ? FString() : FString(TEXT("the cavern brush is not armed at one floor")); }, 1.f);
+			PushSettle(0.3f);
+			const TSharedRef<FPress> Drag = PushDrag(TEXT("cavern.drag"),
+				[T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->CavernACm)(OutPos); },
+				[T](FVector2D& OutPos) { return LocateWorld(T->CavernBCm)(OutPos); });
+			PushCheck(TEXT("cavern.drag"), Drag, [Drag]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim) { return FString(TEXT("no player controller or sim")); }
+				if (PC->GetWorldClickCount() != Drag->LeakBase + 1) { return FString::Printf(TEXT("the press moved OnClick by %d, expected 1"), PC->GetWorldClickCount() - Drag->LeakBase); }
+				const bool bQueued = QueueHas(*Sim, TEXT("DigCavern"), nullptr) || Sim->GetCaverns().Num() > 0 || PC->GetConfirmText().ToString().Contains(TEXT("Cavern transmitted"));
+				return bQueued ? FString() : FString(TEXT("no DigCavern order was transmitted"));
+			}, 2.f, 0.3f, true);
+			const TSharedRef<FPress> Height = PushPress(TEXT("cavern.height"), LocateButton(TEXT("Cavern: 1 floor"), 0, true));
+			PushCheck(TEXT("cavern.height"), Height, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->IsCavernMode() && PC->GetCavernFloors() == 2) ? FString() : FString(TEXT("a second press did not step the cavern brush to two floors")); }, 1.f);
+		}
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -1030,7 +1108,7 @@ namespace
 				PC->CancelModes();
 				PC->SetActiveLevel(0);
 				const int32 Actual = PC->GetWorldClickCount() - T->WorldBase;
-				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build and the tunnel)"), Actual, T->ExpectedWorld));
+				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel and the cavern)"), Actual, T->ExpectedWorld));
 			}
 			if (Sim)
 			{

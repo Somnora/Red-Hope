@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 47;  // v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 48;  // v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -1539,9 +1539,17 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 								Sh.Depth >= Sh.BoreTargetDepth ? TEXT(" - bore designation complete") : TEXT(""));
 						}
 					}
-					else if (Work->X >= 2) // D3: a tunnel cell opens, from the end this batch was started on (A = 2, B = 3)
+					else if (RH::IsCavernWork(*Work)) // D6a: a cavern cell opens on the floor named by the record (X = 100 + depth)
+					{
+						CompleteCavernCell(Work->Y, RH::CavernWorkBase - Work->X, B.Id);
+					}
+					else if (RH::IsTunnelWork(*Work)) // D3: a tunnel cell opens, from the end this batch was started on (A = 2, B = 3)
 					{
 						CompleteTunnelCell(Work->Y, Work->X == 3, B.Id);
+					}
+					else if (Work->X != 1) // a record of no known kind (a hand-made file): spoil, no cell
+					{
+						UE_LOG(LogRedHopeSim, Display, TEXT("Borer #%d: work record kind %d is unknown - spoil, no cell"), B.Id, Work->X);
 					}
 					else // carve: one cell opens on its floor
 					{
@@ -1610,6 +1618,11 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					{
 						WorkRecipeName = FName("CarveCell");
 					}
+					// D6a: a cavern's floor, only once bore, the carve queue and the tunnels found nothing, and only with a cavern on the list.
+					if (WorkRecipeName.IsNone() && Caverns.Num() > 0 && FindCavernWork(WorkShaft, WorkItem))
+					{
+						WorkRecipeName = FName("CarveCell");
+					}
 				}
 				if (const FRHRecipeRow* Work = WorkRecipeName.IsNone() ? nullptr : Defs->GetRecipe(WorkRecipeName))
 				{
@@ -1620,9 +1633,9 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					// D5 depth: the batch's hours scale by the floor's dig permille, fixed here at the start (so the dig rate is the
 					// same per sim-second in both bands). Floors -1..-DepthCostFromFloor are exactly 1000, and keep today's
 					// expressions: the hours the recipe row says, and the fuel bill as written. A bore's floor is WorkItem.Y, a
-					// carve's too; a tunnel front takes its tunnel's floor.
-					const FRHTunnel* DigTunnel = WorkItem.X >= 2 ? FindTunnel(WorkItem.Y) : nullptr;
-					const int32 DigLevel = WorkItem.X >= 2 ? (DigTunnel ? DigTunnel->Level : 0) : WorkItem.Y;
+					// carve's too; a tunnel front takes its tunnel's floor, and a cavern batch the floor its record names (D6a).
+					const FRHTunnel* DigTunnel = RH::IsTunnelWork(WorkItem) ? FindTunnel(WorkItem.Y) : nullptr;
+					const int32 DigLevel = RH::IsCavernWork(WorkItem) ? RH::CavernWorkBase - WorkItem.X : (RH::IsTunnelWork(WorkItem) ? (DigTunnel ? DigTunnel->Level : 0) : WorkItem.Y);
 					const int32 DigPermille = GetDigPermille(DigLevel);
 					const double BatchH = DigPermille == 1000 ? (double)Work->BatchTime_h : (double)Work->BatchTime_h * (double)DigPermille / 1000.0;
 					if (BDef->H2BurnKgPerHour > 0.f)
@@ -1642,7 +1655,14 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 					B.ActiveRecipe = WorkRecipeName;
 					PendingOutputs.Add(B.Id, URHDefinitionsSubsystem::ParseResourceList(Work->Outputs));
 					B.BatchRemaining_h = BatchH;
-					if (WorkItem.X >= 2)
+					if (RH::IsCavernWork(WorkItem))
+					{
+						// D6a: a cavern batch's Y is the cavern Id, so it gets its own line, as a tunnel's does.
+						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, cavern %d, floor %d)"),
+							*B.DefName.ToString(), B.Id, *WorkRecipeName.ToString(),
+							B.bBatchOnH2 ? TEXT(" on H2") : TEXT(""), BatchH, WorkItem.Y, DigLevel);
+					}
+					else if (RH::IsTunnelWork(WorkItem))
 					{
 						// O4: a tunnel batch's Y is the tunnel Id, so it gets its own line (the floor line below would print it as a floor).
 						UE_LOG(LogRedHopeSim, Display, TEXT("%s #%d %s started%s (%.0f h, tunnel %d, %s end, floor %d)"),
@@ -7523,6 +7543,12 @@ bool URHSimWorldSubsystem::CheckSinkColumn(const FIntPoint& Column, int32 BorerI
 		OutReason = FString::Printf(TEXT("That column lies on tunnel #%d on floor %d, which is not finished"), Held->Id, Held->Level);
 		return false;
 	}
+	// D6a: and not into an unfinished cavern's box, or the cavern could never finish (a column runs through every floor).
+	if (const FRHCavern* Held = FindLiveCavernOnColumn(Column))
+	{
+		OutReason = FString::Printf(TEXT("That column lies in cavern #%d (floors %d..%d), which is not finished"), Held->Id, Held->Top, Held->Bottom);
+		return false;
+	}
 	for (const FRHBuildingInstance& B : Buildings)
 	{
 		if (B.Level < 0 && B.Id != BorerId && CmToLattice(Shafts[0].HeadCm, B.LocationCm) == Column)
@@ -7712,7 +7738,7 @@ int32 URHSimWorldSubsystem::GetTunnelBatchesInFlight(int32 TunnelId) const
 	int32 N = 0;
 	for (const auto& W : PendingBoreWork)
 	{
-		N += (W.Value.X >= 2 && W.Value.Y == TunnelId) ? 1 : 0;
+		N += (RH::IsTunnelWork(W.Value) && W.Value.Y == TunnelId) ? 1 : 0;
 	}
 	return N;
 }
@@ -7921,6 +7947,12 @@ bool URHSimWorldSubsystem::CanDigTunnel(int32 Level, const FVector& ACm, const F
 				OutReason = FString::Printf(TEXT("The line crosses tunnel #%d at (%d, %d)"), Other.Id, P.X, P.Y);
 				return false;
 			}
+		}
+		// D6a: nor across an open cavern's uncarved point.
+		if (const FRHCavern* Cavern = FindLiveCavernOnFloorPoint(Level, P))
+		{
+			OutReason = FString::Printf(TEXT("The line crosses cavern #%d at (%d, %d)"), Cavern->Id, P.X, P.Y);
+			return false;
 		}
 	}
 	// 7. At most MaxOpenTunnels open at once.
@@ -9111,6 +9143,14 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	else if (Cmd.Verb == FName("DigTunnel"))
 	{
 		ExecuteDigTunnel(Cmd); // D3: rejects through OnCommandRejected itself
+	}
+	else if (Cmd.Verb == FName("DigCavern"))
+	{
+		ExecuteDigCavern(Cmd); // D6a: rejects through OnCommandRejected itself
+	}
+	else if (Cmd.Verb == FName("CancelCavern"))
+	{
+		ExecuteCancelCavern(Cmd);
 	}
 	else if (Cmd.Verb == FName("CancelTunnel"))
 	{
@@ -13306,6 +13346,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	WriteTunnelBlock(Ar); // v45: and the tunnel list straight after that, so the shaft block's offsets do not move
 	WriteTransitBlock(Ar); // v46: and the transit block straight after it, so the tunnel block's offsets do not move
 	WriteWarmthBlock(Ar); // v47: and the warmth block straight after that, so the transit block's offsets do not move
+	WriteCavernBlock(Ar); // v48: and the cavern block straight after that, so the warmth block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -13766,6 +13807,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v48: the cavern block (D6a), validated against the floors, shafts and tunnels just read, into locals.
+	TArray<FRHCavern> LoadedCaverns;
+	int32 LoadedNextCavernId = 1;
+	if (!ReadCavernBlock(Ar, LoadedFloors, LoadedShafts, LoadedTunnels, LoadedCaverns, LoadedNextCavernId, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -13913,6 +13961,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Tunnels = MoveTemp(LoadedTunnels);
 	NextTunnelId = LoadedNextTunnelId;
 	++TunnelsVersion;
+	Caverns = MoveTemp(LoadedCaverns);
+	NextCavernId = LoadedNextCavernId;
+	++CavernsVersion;
 	InstallTransit(LoadedTransit); // D4: the cars onto the shafts just installed, the threshold sol and the ledgers
 	InstallWarmth(LoadedWarmth);   // D5 depth: each floor's Warmth (a level at or above the cut-off is repaired with a Warning)
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a

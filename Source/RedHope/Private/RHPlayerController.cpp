@@ -736,6 +736,92 @@ void ARHPlayerController::Tick(float DeltaTime)
 			HintColor = FLinearColor(0.3f, 0.9f, 1.f);
 		}
 	}
+	else if (bTunnelMode && bCavernBrush)
+	{
+		// The cavern ghost (D6a): the box the order would dig on the viewed floor, from the sim's own preflight - green is an order
+		// that would be accepted right now (the uplink re-checks on arrival), red names the refusal. The box runs CavernFloors floors
+		// down from the viewed one; the marks sit on the viewed floor and the tip names the floors and the bill.
+		FVector Ground;
+		if (ActiveLevel >= 0)
+		{
+			HintText = TEXT("CAVERN: caverns are dug on a floor - pick a subsurface floor on the elevator first");
+			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
+		}
+		else if (bTunnelForced ? (Ground = TunnelForcedToCm, true) : CursorToGround(Ground))
+		{
+			const FVector Origin = Sim->GetShaftHeadCm();
+			const FIntPoint Cursor = URHSimWorldSubsystem::CmToLattice(Origin, Ground);
+			const FIntPoint From = bTunnelDragging ? URHSimWorldSubsystem::CmToLattice(Origin, TunnelAnchorCm) : Cursor;
+			const auto CellBox = [&](const FIntPoint& P, const FColor& Color, float Half)
+			{
+				const FVector C = URHSimWorldSubsystem::LatticeToCm(Origin, P);
+				DrawDebugBox(World, FVector(C.X, C.Y, 40.f), FVector(Half, Half, 30.f), Color, false, -1.f, 0, 6.f);
+			};
+			if (!bTunnelDragging || From == Cursor)
+			{
+				CellBox(Cursor, FColor::Cyan, 450.f);
+				HintText = FString::Printf(TEXT("CAVERN: click on the rock beside a dig or a shaft and drag to the opposite corner, release to transmit. The box is %d floor%s tall: this floor%s (the Cavern button changes it); your Borers carve it one cell at a time. Right-click to finish"),
+					CavernFloors, CavernFloors == 1 ? TEXT("") : TEXT("s"), CavernFloors == 1 ? TEXT("") : *FString::Printf(TEXT(" and %d below"), CavernFloors - 1));
+				HintColor = FLinearColor(0.2f, 0.85f, 0.95f);
+			}
+			else
+			{
+				FString Reason;
+				URHSimWorldSubsystem::FRHCavernPreview Pre;
+				const bool bOk = Sim->CanDigCavern(ActiveLevel, CavernFloors, URHSimWorldSubsystem::LatticeToCm(Origin, From), URHSimWorldSubsystem::LatticeToCm(Origin, Cursor), Reason, &Pre);
+				const FColor Color = bOk ? FColor::Green : FColor::Red;
+				const FIntPoint Lo(FMath::Min(From.X, Cursor.X), FMath::Min(From.Y, Cursor.Y)), Hi(FMath::Max(From.X, Cursor.X), FMath::Max(From.Y, Cursor.Y));
+				const int64 SideX = (int64)Hi.X - Lo.X + 1, SideY = (int64)Hi.Y - Lo.Y + 1;
+				if (SideX <= 16 && SideY <= 16)
+				{
+					// A box point still to carve on the viewed floor; a carved one needs no mark.
+					for (int32 X = Lo.X; X <= Hi.X; ++X)
+					{
+						for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+						{
+							if (Sim->FindFloorCell(ActiveLevel, FIntPoint(X, Y)) == INDEX_NONE)
+							{
+								CellBox(FIntPoint(X, Y), Color, 400.f);
+							}
+						}
+					}
+				}
+				const int32 Bottom = ActiveLevel - CavernFloors + 1;
+				FString Tip = FString::Printf(TEXT("CAVERN floor%s %d%s: %lld x %lld cells"), CavernFloors == 1 ? TEXT("") : TEXT("s"), ActiveLevel, CavernFloors == 1 ? TEXT("") : *FString::Printf(TEXT(" to %d"), Bottom), SideX, SideY);
+				if (bOk)
+				{
+					Tip += FString::Printf(TEXT("  ·  %d to carve  ·  %.0f Borer-hours  ·  %.1f t spoil  ·  %.1f t of O2 to fill"), Pre.Cells, Pre.BorerHours, Pre.SpoilKg / 1000.0, Pre.O2Kg / 1000.0);
+				}
+				Tip += bOk ? TEXT("\nrelease to transmit, right-click to cancel") : FString::Printf(TEXT("\n%s"), *Reason);
+				HintText = Tip;
+				HintColor = FLinearColor(Color);
+				if (!bTunnelForced && !IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bTunnelDragging = false;
+					if (bOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("DigCavern");
+						Cmd.Level = ActiveLevel;
+						Cmd.Value = CavernFloors;
+						Cmd.Location = URHSimWorldSubsystem::LatticeToCm(Origin, From);
+						Cmd.LocationB = URHSimWorldSubsystem::LatticeToCm(Origin, Cursor);
+						Sim->EnqueueCommand(Cmd);
+						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+						SetConfirm(FString::Printf(TEXT("Cavern transmitted: %d cells on %d floor%s from (%d, %d) to (%d, %d)"), Pre.Cells, CavernFloors, CavernFloors == 1 ? TEXT("") : TEXT("s"), From.X, From.Y, Cursor.X, Cursor.Y), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					else
+					{
+						URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+					}
+				}
+			}
+			if (!bTunnelForced && bTunnelDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bTunnelDragging = false; // released on the spot it was pressed: nothing to dig
+			}
+		}
+	}
 	else if (bTunnelMode)
 	{
 		// The tunnel ghost (D3, Q2a): the L the order would dig (along X, then along Y), cell by cell, from the sim's own preflight -
@@ -1849,8 +1935,35 @@ void ARHPlayerController::BeginTunnel()
 	CancelModes();
 	SelectedBuildingId = 0;
 	bTunnelMode = true;
+	bCavernBrush = false;
 	bTunnelDragging = false;
 	bTunnelForced = false;
+}
+
+void ARHPlayerController::BeginCavern(int32 Floors)
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bTunnelMode = true;
+	bCavernBrush = true;
+	CavernFloors = FMath::Clamp(Floors, 1, RH::CavernMaxFloors);
+	bTunnelDragging = false;
+	bTunnelForced = false;
+}
+
+void ARHPlayerController::Debug_CavernGhost(int32 Top, int32 Floors, const FIntPoint& FromCell, const FIntPoint& ToCell)
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	SetActiveLevel(Top);
+	BeginCavern(Floors);
+	bTunnelDragging = true;
+	bTunnelForced = true;
+	TunnelAnchorCm = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), FromCell);
+	TunnelForcedToCm = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), ToCell);
 }
 
 void ARHPlayerController::Debug_TunnelGhost(int32 Level, const FIntPoint& FromCell, const FIntPoint& ToCell)

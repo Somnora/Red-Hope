@@ -425,6 +425,35 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	[
 		SAssignNew(TunnelList, SVerticalBox)
 	];
+	// D6a: the cavern brush, beside the tunnel brush; below it the viewed floor's open caverns (RefreshCavernList). A second press steps
+	// the box's height (1..3 floors); past the last it disarms.
+	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 1.f))
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]()
+		{
+			const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+			const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			return (S && S->GetShaftDepth() >= 1) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity_Lambda([this]()
+			{
+				return FSlateColor((PC.IsValid() && PC->IsCavernMode()) ? FLinearColor(0.06f, 0.36f, 0.42f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f));
+			})
+			.ContentPadding(FMargin(9.f, 4.f))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleCavern))
+			[
+				SNew(STextBlock).Text_Lambda([this]() { return GetCavernLabel(); }).Font(RHDeck::Label(10)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+			]
+		]
+	];
+	ShaftStrip->AddSlot().AutoHeight()
+	[
+		SAssignNew(CavernList, SVerticalBox)
+	];
 
 	// Speed tiers light up while live, so the bar says how fast time runs.
 	auto SpeedButton = [this](const TCHAR* Label, float Tier) -> TSharedRef<SWidget>
@@ -1183,6 +1212,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshRosterPanel();
 	RefreshCityPanel();
 	RefreshTunnelList();
+	RefreshCavernList();
 	FollowShaftScroll();
 	RefreshGuide();
 
@@ -2326,6 +2356,134 @@ void SRHCommandDeck::RefreshTunnelList()
 				[
 					SNew(STextBlock).Text(FText::FromString(bStalled ? TEXT("stalled") : TEXT("digging"))).Font(RHDeck::Label(8))
 					.ColorAndOpacity(bStalled ? FSlateColor(FLinearColor(1.f, 0.6f, 0.2f)) : RHDeck::TextDim)
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("cancel"))).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
+				]
+			]
+		];
+	}
+}
+
+FText SRHCommandDeck::GetCavernLabel() const
+{
+	// D6a: "Cavern" until armed, then "Cavern: 2 floors" - the box's height, which the next press steps.
+	if (PC.IsValid() && PC->IsCavernMode())
+	{
+		const int32 Floors = PC->GetCavernFloors();
+		return FText::FromString(FString::Printf(TEXT("Cavern: %d floor%s"), Floors, Floors == 1 ? TEXT("") : TEXT("s")));
+	}
+	return FText::FromString(TEXT("Cavern"));
+}
+
+FReply SRHCommandDeck::HandleCavern()
+{
+	// D6a: arms the controller's cavern brush at one floor; each press while armed steps the height, and the press after the last
+	// disarms. On the surface it says to pick a floor first (the brush's own hint repeats it).
+	if (PC.IsValid())
+	{
+		if (PC->IsCavernMode())
+		{
+			const int32 Next = PC->GetCavernFloors() + 1;
+			if (Next > RH::CavernMaxFloors)
+			{
+				PC->CancelModes();
+			}
+			else
+			{
+				PC->BeginCavern(Next);
+			}
+		}
+		else
+		{
+			PC->BeginCavern(1);
+			if (PC->GetActiveLevel() >= 0)
+			{
+				PC->PostConfirm(TEXT("Cavern: pick a subsurface floor on the elevator first"), FLinearColor(1.f, 0.6f, 0.2f));
+			}
+		}
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleCancelCavern(int32 CavernId)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && Sim->FindCavern(CavernId))
+	{
+		FRHCommand Cmd;
+		Cmd.Verb = FName("CancelCavern");
+		Cmd.Value = CavernId;
+		Sim->EnqueueCommand(Cmd);
+		PC->PostConfirm(FString::Printf(TEXT("Cancel transmitted: cavern %d - no new cell starts; a batch under way lands its cell"), CavernId), FLinearColor(0.2f, 0.9f, 1.f));
+	}
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::RefreshCavernList()
+{
+	// The viewed floor's open caverns (any whose box includes the floor), rebuilt only when the list, a carved cell or the viewed floor
+	// changes (the key); the rows' own text reads live. Finished and cancelled caverns are not listed: a finished one is a hall, a
+	// cancelled one is a label on the floor.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !CavernList.IsValid())
+	{
+		return;
+	}
+	const int32 Level = PC->GetActiveLevel();
+	uint32 Key = FCrc::MemCrc32(&Level, sizeof(Level), (uint32)Sim->GetCavernsVersion());
+	const uint32 Cells = Sim->GetFloorCellsVersion(), Shafts = Sim->GetShaftsVersion();
+	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
+	Key = FCrc::MemCrc32(&Shafts, sizeof(Shafts), Key);
+	if (Key == CavernListKey)
+	{
+		return;
+	}
+	CavernListKey = Key;
+	CavernList->ClearChildren();
+	if (Level >= 0)
+	{
+		return;
+	}
+	bool bAny = false;
+	for (const FRHCavern& Cv : Sim->GetCaverns())
+	{
+		if (!Cv.ContainsLevel(Level) || !Sim->IsCavernOpen(Cv))
+		{
+			continue;
+		}
+		if (!bAny)
+		{
+			bAny = true;
+			CavernList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 2.f))
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("CAVERNS"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
+			];
+		}
+		const int32 Id = Cv.Id;
+		const FString Floors = Cv.GetFloors() == 1 ? FString::Printf(TEXT("floor %d"), Cv.Top) : FString::Printf(TEXT("floors %d..%d"), Cv.Top, Cv.Bottom);
+		// The strip is narrow, so a row is three short lines: the cavern and what is left, which floors it spans, and the cancel.
+		CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.06f, 0.09f, 0.11f, 0.95f)))
+			.ContentPadding(FMargin(5.f, 3.f))
+			.ToolTipText(FText::FromString(FString::Printf(TEXT("Cavern %d: %d cells left on %s. Click to cancel it: no new cell starts; a batch under way lands its cell"),
+				Id, Sim->GetCavernUncarved(Cv), *Floors)))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleCancelCavern, Id))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d  %d left"), Id, Sim->GetCavernUncarved(Cv)))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::Text)
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Text(FText::FromString(Floors)).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
 				]
 				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 				[
