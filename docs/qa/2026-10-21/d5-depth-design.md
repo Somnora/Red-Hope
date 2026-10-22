@@ -642,3 +642,8 @@ VERDICT: CLEARED WITH CONDITIONS
 3. DP1 names the literal `Cells x 1 W` check as the one that catches the mutation, and adds the absolute -5 hours and B's no-cooling `LoadW` pins.
 4. Item 2 and the director's note add city growth (`RHSimGrowth.cpp:558`). DP7 rules out the Failing band (or has no zoned district) and keeps Oxygen deep.
 5. The build proceeds under Q-C (a). Under (b), DP8 is re-pinned before commit; under (c), the diff is recounted.
+
+
+# DIRECTOR ANSWER (2026-10-22)
+
+- **Q-C (a):** accept it. Deep floors are for deep jobs: a deep home with a seat on its own floor commutes 0 cm and keeps the full bonus, while a deep home with a surface job may lose Hope overall below -15. No rule change; build under (a).
