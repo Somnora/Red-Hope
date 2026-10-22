@@ -41,6 +41,173 @@ namespace
 	{
 		bool operator()(const FTransitHeapItem& A, const FTransitHeapItem& B) const { return A.Key != B.Key ? A.Key < B.Key : A.Node < B.Node; }
 	};
+
+	// A floor's lattice point -> ordinal as a flat grid over the cells' bounding box: the same answers as FRHFloor::FindOrdinal (cells have no
+	// duplicates) without a hash per lookup. A box far larger than its cells (a long thin tunnel and a far cavern) keeps the hash.
+	struct FTransitFlatIndex
+	{
+		const FRHFloor* Floor = nullptr;
+		TArray<int32>* Grid = nullptr; // the caller's reused buffer
+		bool bFlat = false;
+		int32 MinX = 0, MinY = 0, W = 0, H = 0;
+
+		void Build(const FRHFloor* InFloor, TArray<int32>& InGrid)
+		{
+			Floor = InFloor;
+			Grid = &InGrid;
+			bFlat = false;
+			const TArray<FIntPoint>& Cells = Floor->GetCells();
+			if (Cells.Num() == 0)
+			{
+				return;
+			}
+			int32 MaxX = Cells[0].X, MaxY = Cells[0].Y;
+			MinX = MaxX;
+			MinY = MaxY;
+			for (const FIntPoint& P : Cells)
+			{
+				MinX = FMath::Min(MinX, P.X); MaxX = FMath::Max(MaxX, P.X);
+				MinY = FMath::Min(MinY, P.Y); MaxY = FMath::Max(MaxY, P.Y);
+			}
+			const int64 Area = ((int64)MaxX - MinX + 1) * ((int64)MaxY - MinY + 1);
+			if (Area > (int64)Cells.Num() * 64 + 4096)
+			{
+				return;
+			}
+			W = MaxX - MinX + 1;
+			H = MaxY - MinY + 1;
+			static_assert(INDEX_NONE == -1, "the grid is filled byte-wise");
+			Grid->Reset();
+			Grid->SetNumUninitialized((int32)Area, EAllowShrinking::No);
+			FMemory::Memset(Grid->GetData(), 0xFF, (SIZE_T)Area * sizeof(int32));
+			for (int32 c = 0; c < Cells.Num(); ++c)
+			{
+				(*Grid)[(Cells[c].Y - MinY) * W + (Cells[c].X - MinX)] = c;
+			}
+			bFlat = true;
+		}
+
+		int32 Find(int32 X, int32 Y) const
+		{
+			if (!bFlat)
+			{
+				return Floor->FindOrdinal(FIntPoint(X, Y));
+			}
+			const int64 Dx = (int64)X - MinX, Dy = (int64)Y - MinY;
+			return (Dx < 0 || Dy < 0 || Dx >= W || Dy >= H) ? (int32)INDEX_NONE : (*Grid)[(int32)(Dy * W + Dx)];
+		}
+	};
+
+	// PlanDeepRoute's Dijkstra state: raw arrays (the planner runs thousands of times a frame) and a binary heap ordered by FTransitHeapLess,
+	// (distance, node index). The order is a strict total order and every (distance, node) pair is pushed at most once (a push needs a strict
+	// improvement), so the sequence of nodes popped does not depend on how the heap is laid out.
+	struct FTransitSearch
+	{
+		int64* Dist = nullptr;
+		int32* Prev = nullptr;
+		bool* Done = nullptr;
+		TArray<FTransitHeapItem, TInlineAllocator<256>> Heap;
+		int32 U = 0;       // the node being settled
+		int64 DistU = 0;   // its distance
+
+		void Push(int64 Key, int32 Node)
+		{
+			const FTransitHeapLess Less;
+			const FTransitHeapItem Item{ Key, Node };
+			int32 I = Heap.AddUninitialized(1);
+			FTransitHeapItem* H = Heap.GetData();
+			while (I > 0)
+			{
+				const int32 Parent = (I - 1) >> 1;
+				if (!Less(Item, H[Parent]))
+				{
+					break;
+				}
+				H[I] = H[Parent];
+				I = Parent;
+			}
+			H[I] = Item;
+		}
+
+		FTransitHeapItem Pop()
+		{
+			const FTransitHeapLess Less;
+			FTransitHeapItem* H = Heap.GetData();
+			const FTransitHeapItem Top = H[0];
+			const int32 N = Heap.Num() - 1;
+			if (N > 0)
+			{
+				const FTransitHeapItem Last = H[N];
+				int32 I = 0;
+				for (;;)
+				{
+					int32 Child = 2 * I + 1;
+					if (Child >= N)
+					{
+						break;
+					}
+					if (Child + 1 < N && Less(H[Child + 1], H[Child]))
+					{
+						++Child;
+					}
+					if (!Less(H[Child], Last))
+					{
+						break;
+					}
+					H[I] = H[Child];
+					I = Child;
+				}
+				H[I] = Last;
+			}
+			Heap.SetNumUninitialized(N, EAllowShrinking::No);
+			return Top;
+		}
+
+		FORCEINLINE void Relax(int32 V, int64 C)
+		{
+			if (C != MAX_int64 && !Done[V] && DistU + C < Dist[V])
+			{
+				Dist[V] = DistU + C;
+				Prev[V] = U;
+				Push(Dist[V], V);
+			}
+		}
+	};
+
+	// BuildLatticeField's Dijkstra over a finished neighbour table (see there). The heap is the caller's, reused field after field: the pops
+	// are fixed by the (distance, ordinal) order alone, never by the heap's history, so a reused heap pops the same sequence.
+	void RunLatticeField(const TArray<int32>& Neighbours, int32 N, int32 Root, TArray<int64>& OutDist, TArray<int32>& OutToward, TArray<FTransitHeapItem>& Heap)
+	{
+		OutDist.Init(MAX_int64, N);
+		OutToward.Init(INDEX_NONE, N);
+		Heap.Reset();
+		OutDist[Root] = 0;
+		Heap.HeapPush({ 0, Root }, FTransitHeapLess());
+		while (Heap.Num() > 0)
+		{
+			FTransitHeapItem Top;
+			Heap.HeapPop(Top, FTransitHeapLess(), EAllowShrinking::No);
+			if (Top.Key != OutDist[Top.Node])
+			{
+				continue;
+			}
+			for (int32 k = 0; k < 8; ++k)
+			{
+				const int32 O = Neighbours[Top.Node * 8 + k];
+				if (O == INDEX_NONE)
+				{
+					continue;
+				}
+				const int64 D = Top.Key + TransitStepCm[k];
+				if (D < OutDist[O])
+				{
+					OutDist[O] = D;
+					OutToward[O] = Top.Node;
+					Heap.HeapPush({ D, O }, FTransitHeapLess());
+				}
+			}
+		}
+	}
 }
 
 // --- The ledger and the waits ---
@@ -455,11 +622,15 @@ int32 URHSimWorldSubsystem::FindPortalColumnAt(int32 Level, const FVector& PosCm
 	// not ArriveDistCm: a robot stopped between the landing and the column centre stands on the column's cell.
 	const FRHDeepNet& Net = EnsureDeepNet();
 	const FIntPoint P = CmToLattice(Shafts[0].HeadCm, PosCm);
-	for (int32 i = 0; i < Net.Portals.Num(); ++i)
+	// The portals on this level, ascending: the first with the column is the one the all-portals scan found.
+	if (Net.LevelPortals.IsValidIndex(-Level))
 	{
-		if (Net.Portals[i].Level == Level && Net.Portals[i].Column == P)
+		for (const int32 i : Net.LevelPortals[-Level])
 		{
-			return i;
+			if (Net.Portals[i].Column == P)
+			{
+				return i;
+			}
 		}
 	}
 	return INDEX_NONE;
@@ -476,22 +647,37 @@ FVector URHSimWorldSubsystem::FloorCellXY(int32 Level, int32 Ordinal) const
 	return Out;
 }
 
-void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<int32>& Out) const
+void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<int32>& Out, TArray<int32>& GridScratch) const
 {
 	// The steps BuildLatticeField takes from each cell, looked up once a floor: a diagonal only when both orthogonal cells
-	// are carved. The deep net shares one table among the landings of a floor.
+	// are carved. The deep net shares one table among the landings of a floor. The lookups run through a flat grid over the
+	// floor's box (the same answers as FindOrdinal), the orthogonals found once and the diagonals read from them.
 	const FRHFloor* Floor = FindFloor(Level);
 	const int32 N = Floor ? Floor->Cells.Num() : 0;
 	Out.Init(INDEX_NONE, N * 8);
+	if (N == 0)
+	{
+		return;
+	}
+	FTransitFlatIndex Index;
+	Index.Build(Floor, GridScratch);
 	for (int32 c = 0; c < N; ++c)
 	{
 		const FIntPoint Cur = Floor->Cells[c];
-		for (int32 k = 0; k < 8; ++k)
+		int32* Row = &Out[c * 8];
+		for (int32 k = 0; k < 4; ++k)
 		{
-			const int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
-			if (O != INDEX_NONE && (k < 4 || (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) != INDEX_NONE && Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) != INDEX_NONE)))
+			Row[k] = Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y);
+		}
+		// Steps 4..7 are (+1,+1), (-1,+1), (+1,-1), (-1,-1): the orthogonal cells they need are (X step, 0) and (0, Y step), i.e. steps
+		// 0/1 by the X sign and 2/3 by the Y sign.
+		for (int32 k = 4; k < 8; ++k)
+		{
+			const int32 XOrth = TransitSteps[k].X > 0 ? Row[0] : Row[1];
+			const int32 YOrth = TransitSteps[k].Y > 0 ? Row[2] : Row[3];
+			if (XOrth != INDEX_NONE && YOrth != INDEX_NONE)
 			{
-				Out[c * 8 + k] = O;
+				Row[k] = Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y);
 			}
 		}
 	}
@@ -503,6 +689,13 @@ void URHSimWorldSubsystem::BuildLatticeField(int32 Level, int32 Root, TArray<int
 	// orthogonal cells are carved. Popped by (distance, ordinal); a predecessor changes only on a strict improvement.
 	const FRHFloor* Floor = FindFloor(Level);
 	const int32 N = Floor ? Floor->Cells.Num() : 0;
+	if (Neighbours && Floor && Floor->Cells.IsValidIndex(Root))
+	{
+		TArray<FTransitHeapItem> OwnHeap;
+		OwnHeap.Reserve(N);
+		RunLatticeField(*Neighbours, N, Root, OutDist, OutToward, OwnHeap);
+		return;
+	}
 	OutDist.Init(MAX_int64, N);
 	OutToward.Init(INDEX_NONE, N);
 	if (!Floor || !Floor->Cells.IsValidIndex(Root))
@@ -524,18 +717,10 @@ void URHSimWorldSubsystem::BuildLatticeField(int32 Level, int32 Root, TArray<int
 		const FIntPoint Cur = Floor->Cells[Top.Node];
 		for (int32 k = 0; k < 8; ++k)
 		{
-			int32 O = INDEX_NONE;
-			if (Neighbours)
+			int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
+			if (O != INDEX_NONE && k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
 			{
-				O = (*Neighbours)[Top.Node * 8 + k];
-			}
-			else
-			{
-				O = Floor->FindOrdinal(Cur + TransitSteps[k]);
-				if (O != INDEX_NONE && k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
-				{
-					O = INDEX_NONE;
-				}
+				O = INDEX_NONE;
 			}
 			if (O == INDEX_NONE)
 			{
@@ -645,6 +830,21 @@ const FRHRoadRoute& URHSimWorldSubsystem::SurfaceRoute(FIntPoint FromCm, FIntPoi
 	{
 		if (const FRHRoadRoute* Hit = DeepNet.SurfaceRoutes.Find(Key))
 		{
+			if (bVerifyCaches)
+			{
+				// The memo outlives a net rebuild while the built-road version is unchanged: plan the leg again and compare.
+				FRHRoadRoute Fresh;
+				if (!RoadGraph.PlanRoute(FromCm, ToCm, RoadParams, Fresh) || !Fresh.bRoad)
+				{
+					Fresh = FRHRoadRoute();
+				}
+				if (Fresh.bRoad != Hit->bRoad || Fresh.NodeIds != Hit->NodeIds || Fresh.EdgeIds != Hit->EdgeIds || Fresh.OffInCm != Hit->OffInCm
+					|| Fresh.OffOutCm != Hit->OffOutCm || Fresh.RoadCm != Hit->RoadCm || Fresh.CostUnits != Hit->CostUnits)
+				{
+					UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the deep net's surface leg (%d, %d) -> (%d, %d) is stale (cost %lld kept, %lld planned; built v%u)"),
+						FromCm.X, FromCm.Y, ToCm.X, ToCm.Y, Hit->CostUnits, Fresh.CostUnits, RoadGraph.BuiltVersion);
+				}
+			}
 			return *Hit;
 		}
 		if (DeepNet.SurfaceRoutes.Num() >= 4096)
@@ -712,7 +912,15 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 		return N;
 	}
 	++DeepNetBuilds;
+	// The surface legs are a pure function of the built road graph (and the road parameters, fixed at start): the memo outlives a
+	// rebuild whose built-road version is the one it was planned under. Any other rebuild starts it empty, as it always did.
+	TMap<TPair<FIntPoint, FIntPoint>, FRHRoadRoute> KeptRoutes;
+	if (N.bValid && N.Built == RoadGraph.BuiltVersion)
+	{
+		KeptRoutes = MoveTemp(N.SurfaceRoutes);
+	}
 	N = FRHDeepNet();
+	N.SurfaceRoutes = MoveTemp(KeptRoutes);
 	N.bValid = true;
 	N.Cells = FloorCellsVersion;
 	N.ShaftsV = ShaftsVersion;
@@ -720,6 +928,9 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 	N.Built = RoadGraph.BuiltVersion;
 	N.TunnelsV = TunnelsVersion;
 	TMap<int32, TArray<int32>> NeighboursOf; // level -> its step table, shared by every landing on it
+	TArray<int32> GridScratch;                // the flat floor index, reused floor after floor
+	TArray<FTransitHeapItem> FieldHeap;       // the field search's heap, reused landing after landing
+	int32 MaxLevelDepth = 0;
 	for (const FRHShaft& Sh : Shafts)
 	{
 		if (Sh.LiftCars <= 0)
@@ -769,11 +980,12 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 			if (!Nbr)
 			{
 				Nbr = &NeighboursOf.Add(L);
-				BuildLatticeNeighbours(L, *Nbr);
+				BuildLatticeNeighbours(L, *Nbr, GridScratch);
 			}
-			BuildLatticeField(L, Landing, Port.Dist, Port.Toward, Nbr);
+			RunLatticeField(*Nbr, Floor->Cells.Num(), Landing, Port.Dist, Port.Toward, FieldHeap);
 			N.FittedDigs.Add(FIntPoint(L, Port.Dig));
 			N.PortalAt.Add(FIntPoint(Sh.Id, L), N.Portals.Num());
+			MaxLevelDepth = FMath::Max(MaxLevelDepth, -L);
 			N.Portals.Add(MoveTemp(Port));
 		}
 	}
@@ -786,9 +998,10 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 			N.HeadToHead[i * NH + j] = i == j ? 0 : SurfaceCostUnits(N.Portals[N.Heads[i]].XY, N.Portals[N.Heads[j]].XY);
 		}
 	}
-	// The planner's portal-to-portal edges that can be finite (PlanDeepRoute's Edge decides the cost; this only skips the pairs
-	// it would price MAX_int64, so the search pops and relaxes exactly as the all-pairs scan did).
-	N.Adj.SetNum(N.Portals.Num());
+	// The planner's portal-to-portal edges that can be finite (every other pair prices MAX_int64 and is never relaxed), ascending by target,
+	// each with its wait-free price stored beside it (the planner used to work the same numbers out on every pop): a ride's floors, a walk's
+	// lattice cm along the landed field, a head-to-head leg's finished surface cost.
+	N.Edges.SetNum(N.Portals.Num());
 	for (int32 U = 0; U < N.Portals.Num(); ++U)
 	{
 		const FRHDeepPortal& A = N.Portals[U];
@@ -800,9 +1013,34 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 			const bool bHeads = A.Level == 0 && B.Level == 0;
 			if (V != U && (bRide || bWalk || bHeads))
 			{
-				N.Adj[U].Add(V);
+				FRHDeepEdge E;
+				E.To = V;
+				if (bRide)
+				{
+					E.Kind = 0;
+					E.Shaft = A.Shaft;
+					E.Base = (int64)FMath::Abs(A.Level - B.Level);
+				}
+				else if (bWalk)
+				{
+					E.Kind = 1;
+					E.Base = B.Dist[A.Landing];
+				}
+				else
+				{
+					const int32 Hi = N.Heads.IndexOfByKey(U), Hj = N.Heads.IndexOfByKey(V);
+					E.Kind = 2;
+					E.Base = (Hi == INDEX_NONE || Hj == INDEX_NONE) ? MAX_int64 : N.HeadToHead[Hi * NH + Hj];
+				}
+				N.Edges[U].Add(E);
 			}
 		}
+	}
+	// The portals on each level, by -Level (0 = the heads), ascending: the planner's column and dig lookups scan one short list.
+	N.LevelPortals.SetNum(MaxLevelDepth + 1);
+	for (int32 i = 0; i < N.Portals.Num(); ++i)
+	{
+		N.LevelPortals[-N.Portals[i].Level].Add(i);
 	}
 	return N;
 }
@@ -884,16 +1122,19 @@ bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm,
 		return false; // a target in rock
 	}
 
-	// Ride cost at query time: the net is wait-free, the robot's waits are read by its own stamp (REVISION item 2(d)).
-	const auto RideUnits = [&](const FRHDeepPortal& A, const FRHDeepPortal& B)
+	// Ride cost at query time: the net is wait-free, the robot's waits are read by its own stamp (REVISION item 2(d)), once a shaft a call.
+	// A ride's price is (wait + dwell + floors x seconds a floor) x the plan speed x the road multiplier, which is
+	// RideShaftUnits[shaft] + RideFloorUnits x floors, with the wait of each shaft read once a call. The table has a slot for every shaft a
+	// portal can name (a shaft with no ledger reads 0, as GetRobotWaitSec does).
+	const int64 RideUnitsPerSec = Mm * (int64)LiftPlanSpeedCmPerS;
+	const int64 RideFloorUnits = RideUnitsPerSec * (int64)LiftSecondsPerFloor;
+	TArray<int64, TInlineAllocator<32>> RideShaftUnits;
+	RideShaftUnits.SetNumUninitialized(Shafts.Num());
+	for (int32 S = 0; S < RideShaftUnits.Num(); ++S)
 	{
-		const int64 Secs = (int64)GetRobotWaitSec(A.Shaft, Stamp) + LiftDwellSeconds + (int64)FMath::Abs(A.Level - B.Level) * LiftSecondsPerFloor;
-		return Mm * (int64)LiftPlanSpeedCmPerS * Secs;
-	};
-	// Surface legs from the start and to the target, each worked out once.
-	TArray<int64, TInlineAllocator<64>> StartToHead, HeadToEnd;
-	StartToHead.Init(-1, NP);
-	HeadToEnd.Init(-1, NP);
+		RideShaftUnits[S] = RideUnitsPerSec * ((int64)GetRobotWaitSec(S, Stamp) + LiftDwellSeconds);
+	}
+	// The direct leg from the start to the target, worked out once.
 	int64 DirectUnits = MAX_int64;
 	TArray<int32> DirectCells;
 	int64 DirectCm = 0;
@@ -909,113 +1150,104 @@ bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm,
 		}
 	}
 	// Node order: portals 0..NP-1, the start NP, the end NP + 1. Ties settle the lower index first (portals before the end).
+	// Dijkstra popped by (distance, node index) from a binary heap with lazy deletion: the sequence of nodes it settles is the one the
+	// old scan for the lowest unsettled (distance, index) found, and every relaxation is a strict improvement as before. A node's edges
+	// are priced once, when it settles: from the start every node it can reach, from a portal its stored edges and the end.
 	const int32 SNode = NP, ENode = NP + 1, NNodes = NP + 2;
-	const auto Edge = [&](int32 U, int32 V) -> int64
+	TArray<int64, TInlineAllocator<512>> Dist;
+	Dist.SetNumUninitialized(NNodes);
+	TArray<int32, TInlineAllocator<512>> Prev;
+	Prev.SetNumUninitialized(NNodes);
+	TArray<bool, TInlineAllocator<512>> Done;
+	Done.SetNumUninitialized(NNodes);
+	for (int32 i = 0; i < NNodes; ++i)
 	{
-		if (U == SNode)
-		{
-			if (V == ENode)
-			{
-				return DirectUnits;
-			}
-			const FRHDeepPortal& P = Net.Portals[V];
-			switch (Start.Kind)
-			{
-			case EEnd::Surface:
-				if (P.Level != 0) { return MAX_int64; }
-				if (StartToHead[V] < 0) { StartToHead[V] = SurfaceCostUnits(FromCm, P.XY); }
-				return StartToHead[V];
-			case EEnd::Cell:
-				if (P.Level != Start.Level || P.Dig != Start.Dig || !P.Dist.IsValidIndex(Start.Ordinal) || P.Dist[Start.Ordinal] == MAX_int64) { return MAX_int64; }
-				return Mm * (P.Dist[Start.Ordinal] + 1000);
-			default:
-				return V == Start.Portal ? 0 : MAX_int64;
-			}
-		}
-		if (V == ENode)
-		{
-			const FRHDeepPortal& P = Net.Portals[U];
-			switch (End.Kind)
-			{
-			case EEnd::Surface:
-				if (P.Level != 0) { return MAX_int64; }
-				if (HeadToEnd[U] < 0) { HeadToEnd[U] = SurfaceCostUnits(P.XY, ToCm); }
-				return HeadToEnd[U];
-			case EEnd::Cell:
-				if (P.Level != End.Level || P.Dig != End.Dig || !P.Dist.IsValidIndex(End.Ordinal) || P.Dist[End.Ordinal] == MAX_int64) { return MAX_int64; }
-				return Mm * (1000 + P.Dist[End.Ordinal]);
-			default:
-				return U == End.Portal ? 0 : MAX_int64;
-			}
-		}
-		if (V == SNode || U == ENode)
-		{
-			return MAX_int64;
-		}
-		const FRHDeepPortal& A = Net.Portals[U];
-		const FRHDeepPortal& B = Net.Portals[V];
-		if (A.Shaft == B.Shaft && A.Level != B.Level)
-		{
-			return RideUnits(A, B);
-		}
-		if (A.Level == B.Level && A.Level < 0)
-		{
-			if (A.Dig != B.Dig || !B.Dist.IsValidIndex(A.Landing) || B.Dist[A.Landing] == MAX_int64) { return MAX_int64; }
-			return Mm * (1000 + B.Dist[A.Landing] + 1000);
-		}
-		if (A.Level == 0 && B.Level == 0)
-		{
-			const int32 NH = Net.Heads.Num();
-			const int32 Hi = Net.Heads.IndexOfByKey(U), Hj = Net.Heads.IndexOfByKey(V);
-			return (Hi == INDEX_NONE || Hj == INDEX_NONE) ? MAX_int64 : Net.HeadToHead[Hi * NH + Hj];
-		}
-		return MAX_int64;
-	};
-	TArray<int64, TInlineAllocator<64>> Dist;
-	Dist.Init(MAX_int64, NNodes);
-	TArray<int32, TInlineAllocator<64>> Prev;
-	Prev.Init(INDEX_NONE, NNodes);
-	TArray<bool, TInlineAllocator<64>> Done;
-	Done.Init(false, NNodes);
+		Dist[i] = MAX_int64;
+		Prev[i] = INDEX_NONE;
+		Done[i] = false;
+	}
+	FTransitSearch Search;
+	Search.Dist = Dist.GetData();
+	Search.Prev = Prev.GetData();
+	Search.Done = Done.GetData();
 	Dist[SNode] = 0;
-	for (;;)
+	Search.Push(0, SNode);
+	while (Search.Heap.Num() > 0)
 	{
-		int32 U = INDEX_NONE;
-		for (int32 i = 0; i < NNodes; ++i)
+		const FTransitHeapItem Top = Search.Pop();
+		const int32 U = Top.Node;
+		if (Search.Done[U] || Top.Key != Search.Dist[U])
 		{
-			if (!Done[i] && Dist[i] != MAX_int64 && (U == INDEX_NONE || Dist[i] < Dist[U]))
-			{
-				U = i;
-			}
+			continue; // a superseded entry
 		}
-		if (U == INDEX_NONE || U == ENode)
+		if (U == ENode)
 		{
 			break;
 		}
-		Done[U] = true;
-		const auto Relax = [&](int32 V)
-		{
-			if (Done[V] || V == U)
-			{
-				return;
-			}
-			const int64 C = Edge(U, V);
-			if (C != MAX_int64 && Dist[U] + C < Dist[V])
-			{
-				Dist[V] = Dist[U] + C;
-				Prev[V] = U;
-			}
-		};
-		// Each V's relaxation is independent of the others, so only the pairs Edge can price finite are visited: from the start
-		// every node, from a portal its Adj (ascending) and the end.
+		Search.Done[U] = true;
+		Search.U = U;
+		Search.DistU = Search.Dist[U];
 		if (U == SNode)
 		{
-			for (int32 V = 0; V < NNodes; ++V) { Relax(V); }
+			Search.Relax(ENode, DirectUnits);
+			switch (Start.Kind)
+			{
+			case EEnd::Surface:
+				for (const int32 V : Net.Heads) { Search.Relax(V, SurfaceCostUnits(FromCm, Net.Portals[V].XY)); }
+				break;
+			case EEnd::Cell:
+				if (Net.LevelPortals.IsValidIndex(-Start.Level))
+				{
+					for (const int32 V : Net.LevelPortals[-Start.Level])
+					{
+						const FRHDeepPortal& P = Net.Portals[V];
+						if (P.Dig == Start.Dig && P.Dist.IsValidIndex(Start.Ordinal) && P.Dist[Start.Ordinal] != MAX_int64)
+						{
+							Search.Relax(V, Mm * (P.Dist[Start.Ordinal] + 1000));
+						}
+					}
+				}
+				break;
+			default:
+				Search.Relax(Start.Portal, 0);
+				break;
+			}
 		}
 		else
 		{
-			for (const int32 V : Net.Adj[U]) { Relax(V); }
-			Relax(ENode);
+			const TArray<FRHDeepEdge>& Edges = Net.Edges[U];
+			const FRHDeepEdge* EdgeIt = Edges.GetData();
+			const FRHDeepEdge* const EdgeEnd = EdgeIt + Edges.Num();
+			for (; EdgeIt != EdgeEnd; ++EdgeIt)
+			{
+				switch (EdgeIt->Kind)
+				{
+				case 0:
+					Search.Relax(EdgeIt->To, RideShaftUnits[EdgeIt->Shaft] + RideFloorUnits * EdgeIt->Base);
+					break;
+				case 1:
+					Search.Relax(EdgeIt->To, Mm * (1000 + EdgeIt->Base + 1000));
+					break;
+				default:
+					Search.Relax(EdgeIt->To, EdgeIt->Base);
+					break;
+				}
+			}
+			const FRHDeepPortal& P = Net.Portals[U];
+			int64 ToEnd = MAX_int64;
+			switch (End.Kind)
+			{
+			case EEnd::Surface:
+				if (P.Level == 0) { ToEnd = SurfaceCostUnits(P.XY, ToCm); }
+				break;
+			case EEnd::Cell:
+				if (P.Level == End.Level && P.Dig == End.Dig && P.Dist.IsValidIndex(End.Ordinal) && P.Dist[End.Ordinal] != MAX_int64) { ToEnd = Mm * (1000 + P.Dist[End.Ordinal]); }
+				break;
+			default:
+				ToEnd = U == End.Portal ? 0 : MAX_int64;
+				break;
+			}
+			Search.Relax(ENode, ToEnd);
 		}
 	}
 	if (Dist[ENode] == MAX_int64)
@@ -1023,7 +1255,7 @@ bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm,
 		return false;
 	}
 	Cost.CostUnits = Dist[ENode];
-	TArray<int32> Chain;
+	TArray<int32, TInlineAllocator<32>> Chain;
 	for (int32 V = ENode; V != INDEX_NONE; V = Prev[V])
 	{
 		Chain.Add(V);
@@ -1033,6 +1265,10 @@ bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm,
 	// The waypoints, leg by leg. A walk leg's waypoint is a cell centre, a column or a surface point; a ride leg's is the
 	// column at the floor it arrives on.
 	FRHRobotRoadPath& Path = OutPath;
+	// A long walk below is a few dozen waypoints: one allocation for each array instead of a doubling at 4, 8, 16 and 32.
+	Path.Waypoints.Reserve(64);
+	Path.LegEdge.Reserve(64);
+	Path.Levels.Reserve(64);
 	const auto Walk = [&Path](const FVector& XY, int32 Level, int32 EdgeId = 0)
 	{
 		Path.Waypoints.Add(XY);

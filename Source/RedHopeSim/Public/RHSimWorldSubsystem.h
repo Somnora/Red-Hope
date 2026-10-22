@@ -2633,6 +2633,9 @@ private:
 	// D2: the shaft a floor anchor on Level uses for a trip to surface point P: the cheapest over the shafts that reach Level,
 	// ties to the lower Id; shaft 0 when none reaches Level (today's formula never checked reach). One shaft: always 0, no call.
 	int32 PickCommuteShaft(int32 Level, FIntPoint SurfacePosCm) const;
+	// GetCommuteDistanceCm's body. KnownShaft (when not INDEX_NONE) is the PickCommuteShaft result for a floor-to-surface trip, which
+	// the caller already holds: the trip's distance is the same, without picking again.
+	int64 GetCommuteDistanceVia(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal, int32 KnownShaft) const;
 	// D4: with transit on, a shaft's per-floor cost (the hoist's 6000 or a lift's 2000) and its wait as walking cm; the shafts
 	// that reach a floor, ascending ({0} when none does).
 	int64 CommutePerFloorCm(int32 ShaftId) const;
@@ -2934,6 +2937,16 @@ private:
 		TArray<int64> Dist;                  // lattice cm from the landing to every ordinal of Level (MAX_int64: not in its dig)
 		TArray<int32> Toward;                // per ordinal, the next ordinal toward the landing (INDEX_NONE at the landing)
 	};
+	// A portal-to-portal edge a finite search can take (FRHDeepNet::Edges, ascending by To). Kind 0 a ride (Base = the floors
+	// between; the cost adds the robot's own wait for Shaft at query time), 1 a same-dig walk (Base = the lattice cm along the
+	// landed field), 2 head to head (Base = the finished surface cost units).
+	struct FRHDeepEdge
+	{
+		int32 To = 0;
+		int32 Kind = 0;
+		int32 Shaft = 0;
+		int64 Base = 0;
+	};
 	struct FRHDeepNet
 	{
 		bool bValid = false;
@@ -2943,7 +2956,8 @@ private:
 		TArray<int32> Heads;                 // portal indices of the heads, ascending
 		TArray<int64> HeadToHead;            // surface cost units between heads, Heads.Num() squared
 		TSet<FIntPoint> FittedDigs;          // (level, dig label) of every floor portal's landing; lookups only
-		TArray<TArray<int32>> Adj;           // per portal, ascending: the portals a finite edge reaches (a ride, a same-dig walk, head to head)
+		TArray<TArray<FRHDeepEdge>> Edges;   // per portal, ascending by target: the portals a finite edge reaches (a ride, a same-dig walk, head to head), each with its wait-free price
+		TArray<TArray<int32>> LevelPortals;  // by -Level (0 = the heads): the portal indices on that level, ascending; lookups only
 		// Surface legs planned while this net is current, keyed (from, to) in whole cm: a pure function of the built road graph,
 		// which is in the net's key. Lookups only; cleared when it passes 4,096 legs.
 		TMap<TPair<FIntPoint, FIntPoint>, FRHRoadRoute> SurfaceRoutes;
@@ -2952,7 +2966,7 @@ private:
 	mutable int32 DeepNetBuilds = 0;
 	const FRHDeepNet& EnsureDeepNet() const;
 	void BuildLatticeField(int32 Level, int32 Root, TArray<int64>& OutDist, TArray<int32>& OutToward, const TArray<int32>* Neighbours = nullptr) const;
-	void BuildLatticeNeighbours(int32 Level, TArray<int32>& Out) const; // 8 a cell in TransitSteps order; INDEX_NONE = no step
+	void BuildLatticeNeighbours(int32 Level, TArray<int32>& Out, TArray<int32>& GridScratch) const; // 8 a cell in TransitSteps order; INDEX_NONE = no step; GridScratch is the caller's reused flat index
 	bool LatticeAStar(int32 Level, int32 From, int32 To, TArray<int32>& OutCells, int64& OutCm) const;
 	int64 SurfaceCostUnits(const FVector& A, const FVector& B, int64* OutCm = nullptr) const;
 	const FRHRoadRoute& SurfaceRoute(FIntPoint FromCm, FIntPoint ToCm) const; // bRoad false: the straight line (or no road)

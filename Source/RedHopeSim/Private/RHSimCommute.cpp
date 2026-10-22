@@ -234,6 +234,11 @@ int32 URHSimWorldSubsystem::GetCommuteShaftPeople(int32 ShaftId) const
 
 int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal) const
 {
+	return GetCommuteDistanceVia(HomeLevel, HomePosCm, WorkLevel, WorkPosCm, Ordinal, INDEX_NONE);
+}
+
+int64 URHSimWorldSubsystem::GetCommuteDistanceVia(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal, int32 KnownShaft) const
+{
 	if (bHasTransit)
 	{
 		// D4 (2.6): each underground end pays its shaft - its per-floor cost and its frozen wait as walking cm. Between two floors
@@ -252,12 +257,12 @@ int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint Home
 		}
 		if (HomeLevel < 0)
 		{
-			const int32 S = PickCommuteShaft(HomeLevel, WorkPosCm);
+			const int32 S = KnownShaft != INDEX_NONE ? KnownShaft : PickCommuteShaft(HomeLevel, WorkPosCm);
 			return (int64)(-HomeLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S) + CommuteSurfaceCm(ToWholeCmCommute(Shafts[S].HeadCm), WorkPosCm);
 		}
 		if (WorkLevel < 0)
 		{
-			const int32 S = PickCommuteShaft(WorkLevel, HomePosCm);
+			const int32 S = KnownShaft != INDEX_NONE ? KnownShaft : PickCommuteShaft(WorkLevel, HomePosCm);
 			return (int64)(-WorkLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S) + CommuteSurfaceCm(HomePosCm, ToWholeCmCommute(Shafts[S].HeadCm));
 		}
 		return CommuteSurfaceCm(HomePosCm, WorkPosCm);
@@ -269,17 +274,19 @@ int64 URHSimWorldSubsystem::GetCommuteDistanceCm(int32 HomeLevel, FIntPoint Home
 	}
 	if (HomeLevel < 0)
 	{
-		return (int64)(-HomeLevel) * Per + CommuteSurfaceCm(ToWholeCmCommute(Shafts[PickCommuteShaft(HomeLevel, WorkPosCm)].HeadCm), WorkPosCm);
+		return (int64)(-HomeLevel) * Per + CommuteSurfaceCm(ToWholeCmCommute(Shafts[KnownShaft != INDEX_NONE ? KnownShaft : PickCommuteShaft(HomeLevel, WorkPosCm)].HeadCm), WorkPosCm);
 	}
 	if (WorkLevel < 0)
 	{
-		return (int64)(-WorkLevel) * Per + CommuteSurfaceCm(HomePosCm, ToWholeCmCommute(Shafts[PickCommuteShaft(WorkLevel, HomePosCm)].HeadCm));
+		return (int64)(-WorkLevel) * Per + CommuteSurfaceCm(HomePosCm, ToWholeCmCommute(Shafts[KnownShaft != INDEX_NONE ? KnownShaft : PickCommuteShaft(WorkLevel, HomePosCm)].HeadCm));
 	}
 	return CommuteSurfaceCm(HomePosCm, WorkPosCm);
 }
 
 void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 {
+	// Sizes only (never a value): the last derive's distinct trips tell the first insert how many to expect.
+	const int32 TripHint = FMath::Max(64, Out.Trips.Num() + Out.Trips.Num() / 8);
 	Out = FRHCommuteFlows();
 	Out.Key = MakeCommuteKey();
 	Out.bValid = true;
@@ -315,7 +322,11 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	// A trip is a pair of anchors, keyed by (home building Id or -floor, work building Id or -floor). Everything about it
 	// (distance, districts, long) is worked out once, on its first colonist; every other colonist is one map lookup.
 	TMap<uint64, int32> TripIndex; // lookups only
-	TripIndex.Reserve(256);
+	TripIndex.Reserve(TripHint);
+	Out.Trips.Reserve(TripHint);
+	Out.Ids.Reserve(Colonists.Num());
+	Out.Dists.Reserve(Colonists.Num());
+	Out.LongIds.Reserve(Colonists.Num());
 	// D4: with transit on, the per-shaft commuter count (StepTransit's people load) and, for a trip between two floors, its
 	// reach list, parallel to the trip slots (valid until the trip sort below).
 	const bool bTransit = bHasTransit;
@@ -324,6 +335,8 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	if (bTransit)
 	{
 		Out.ShaftPeople.Init(0, Shafts.Num());
+		TripReach.Reserve(TripHint);
+		TripDistSum.Reserve(TripHint);
 	}
 	for (const FRHColonist& C : Colonists)
 	{
@@ -374,25 +387,32 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 				bOk &= SurfaceBuildingPos(Station->Z, Work.Pos);
 				WorkDistrictId = Mem.OfBuilding.FindRef(Station->Z);
 			}
+			// The shaft a floor-to-surface trip uses, picked once: the anchor move below, the distance and the transit tally all asked
+			// for the same pick with the same arguments (only the floor anchor moves, never the surface point it is priced to).
+			int32 PickedShaft = INDEX_NONE;
+			if (bOk)
+			{
+				if (Home.Level < 0 && Work.Level == 0) { PickedShaft = PickCommuteShaft(Home.Level, Work.Pos); }
+				else if (Work.Level < 0 && Home.Level == 0) { PickedShaft = PickCommuteShaft(Work.Level, Home.Pos); }
+			}
 			if (bOk && Shafts.Num() > 1)
 			{
 				// D2: a floor anchor sits at the head of the shaft this trip uses (the cheapest that reaches its floor).
-				if (Home.Level < 0 && Work.Level == 0) { Home.Pos = ToWholeCmCommute(Shafts[PickCommuteShaft(Home.Level, Work.Pos)].HeadCm); }
-				else if (Work.Level < 0 && Home.Level == 0) { Work.Pos = ToWholeCmCommute(Shafts[PickCommuteShaft(Work.Level, Home.Pos)].HeadCm); }
+				if (Home.Level < 0 && Work.Level == 0) { Home.Pos = ToWholeCmCommute(Shafts[PickedShaft].HeadCm); }
+				else if (Work.Level < 0 && Home.Level == 0) { Work.Pos = ToWholeCmCommute(Shafts[PickedShaft].HeadCm); }
 			}
 			T.bMeasured = bOk;
 			if (bOk)
 			{
 				T.HomeLevel = Home.Level; T.HomePos = Home.Pos; T.WorkLevel = Work.Level; T.WorkPos = Work.Pos;
 				T.HomeDistrict = HomeDistrictId; T.WorkDistrict = WorkDistrictId;
-				T.DistCm = GetCommuteDistanceCm(Home.Level, Home.Pos, Work.Level, Work.Pos);
+				T.DistCm = GetCommuteDistanceVia(Home.Level, Home.Pos, Work.Level, Work.Pos, 0, PickedShaft);
 				T.bLong = T.DistCm > CommuteLongCm;
 				T.Cell = DistrictIndex(HomeDistrictId) * Out.Dim + DistrictIndex(WorkDistrictId);
 				if (bTransit)
 				{
 					// D4: a floor-to-surface trip uses one shaft; a trip between two floors is split (REVISION item 5).
-					if (Home.Level < 0 && Work.Level == 0) { T.ShaftId = PickCommuteShaft(Home.Level, Work.Pos); }
-					else if (Work.Level < 0 && Home.Level == 0) { T.ShaftId = PickCommuteShaft(Work.Level, Home.Pos); }
+					if (PickedShaft != INDEX_NONE) { T.ShaftId = PickedShaft; }
 				}
 			}
 			if (bTransit)
@@ -482,7 +502,16 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	}
 	// Trips nobody makes (an unresolvable anchor) are dropped.
 	Out.Trips.RemoveAll([](const FRHCommuteTrip& T) { return !T.bMeasured; });
-	Out.LongIds.Sort();
+	// Ids ascend in every real colony, and LongIds is appended in the same walk, so it is already ascending: sort only when not.
+	bool bLongAscending = true;
+	for (int32 i = 1; i < Out.LongIds.Num() && bLongAscending; ++i)
+	{
+		bLongAscending = Out.LongIds[i - 1] <= Out.LongIds[i];
+	}
+	if (!bLongAscending)
+	{
+		Out.LongIds.Sort();
+	}
 	Out.Trips.Sort([](const FRHCommuteTrip& A, const FRHCommuteTrip& B)
 	{
 		if (A.HomeLevel != B.HomeLevel) { return A.HomeLevel < B.HomeLevel; }
