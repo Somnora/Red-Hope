@@ -225,7 +225,7 @@ void URHAudioSubsystem::Tick(float DeltaTime)
 	{
 		return;
 	}
-	const int32 ViewLevel = Colony->GetViewLevel();
+	const int32 ViewLevel = Colony->IsSectionMode() ? Colony->GetSectionFocus() : Colony->GetViewLevel(); // D8: the focus floor's ambience
 	const FRHEventRow* Event = Sim->GetActiveEvent();
 	const bool bStorm = Event && Event->Type == FName("DustStorm");
 	TickAmbience(DeltaTime, ViewLevel < 0, bStorm);

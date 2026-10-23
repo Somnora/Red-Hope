@@ -17,6 +17,7 @@
 #include "RHPlayerController.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHSectionVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -1618,6 +1619,12 @@ TSharedRef<SWidget> SRHCommandDeck::BuildTrafficLegend()
 						const URHTrafficVisualizerSubsystem* T = Traffic();
 						const URHSimWorldSubsystem* S = GetSim();
 						if (!T || !S) { return FText::GetEmpty(); }
+						// D8: in the section the surface layers are hidden; the legend explains the layers below ground instead.
+						if (PC.IsValid() && PC->IsSectionOn())
+						{
+							const URHSectionVisualizerSubsystem* Section = PC->GetWorld() ? PC->GetWorld()->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+							return Txt(Section ? Section->GetLegendText() : FString());
+						}
 						FString Text = FString::Printf(TEXT("Each road is washed by the people who ride it plus %d for every freight rover on it. The busiest road carries %d."),
 							URHTrafficVisualizerSubsystem::RoverHeatWeight, T->GetPeakLoad());
 						if (S->GetCommuteRamp() <= 0.0)

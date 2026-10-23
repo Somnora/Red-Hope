@@ -6,6 +6,7 @@
 #include "RHMenus.h"
 #include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHSectionVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
@@ -156,6 +157,14 @@ void ARHPlayerController::SetupInputComponent()
 	IA_FloorDown = MakeAction(TEXT("IA_FloorDown"), EInputActionValueType::Boolean);
 	Mapping->MapKey(IA_FloorDown, EKeys::PageDown);
 
+	// D8 (the deep view): V toggles the section; Home and End jump its focus to the surface and to the deepest bored floor.
+	IA_Section = MakeAction(TEXT("IA_Section"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_Section, EKeys::V);
+	IA_SectionHome = MakeAction(TEXT("IA_SectionHome"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_SectionHome, EKeys::Home);
+	IA_SectionEnd = MakeAction(TEXT("IA_SectionEnd"), EInputActionValueType::Boolean);
+	Mapping->MapKey(IA_SectionEnd, EKeys::End);
+
 	UEnhancedInputComponent* Input = Cast<UEnhancedInputComponent>(InputComponent);
 	if (!Input)
 	{
@@ -176,6 +185,13 @@ void ARHPlayerController::SetupInputComponent()
 	Input->BindAction(IA_Speed60, ETriggerEvent::Started, this, &ARHPlayerController::SetSimSpeed, 60.f);
 	Input->BindAction(IA_FloorUp, ETriggerEvent::Started, this, &ARHPlayerController::OnFloorUp);
 	Input->BindAction(IA_FloorDown, ETriggerEvent::Started, this, &ARHPlayerController::OnFloorDown);
+	// D8: Q/E turn the section a quarter per press (the Started edge; the held orbit above does nothing while the section is on), and
+	// W/S step its plane one row a press, so their release resets the repeat.
+	Input->BindAction(IA_Orbit, ETriggerEvent::Started, this, &ARHPlayerController::OnSectionTurn);
+	Input->BindAction(IA_Pan, ETriggerEvent::Completed, this, &ARHPlayerController::OnPanCompleted);
+	Input->BindAction(IA_Section, ETriggerEvent::Started, this, &ARHPlayerController::OnSectionToggle);
+	Input->BindAction(IA_SectionHome, ETriggerEvent::Started, this, &ARHPlayerController::OnSectionHome);
+	Input->BindAction(IA_SectionEnd, ETriggerEvent::Started, this, &ARHPlayerController::OnSectionEnd);
 }
 
 ARHStrategyPawn* ARHPlayerController::StrategyPawn() const
@@ -185,6 +201,39 @@ ARHStrategyPawn* ARHPlayerController::StrategyPawn() const
 
 void ARHPlayerController::OnPan(const FInputActionValue& Value)
 {
+	if (bSectionOn)
+	{
+		// D8 R2 (a): W/S step the cut plane (one row on the press, then a held repeat); A/D pan along the plane only.
+		const FVector2D Axis = Value.Get<FVector2D>();
+		const float Dt = GetWorld()->GetDeltaSeconds();
+		if (FMath::Abs(Axis.X) >= 0.5f)
+		{
+			const int32 Dir = Axis.X > 0.f ? 1 : -1;
+			if (!bSectionStepHeld)
+			{
+				bSectionStepHeld = true;
+				SectionStepClock = 0.4f;
+				StepSectionPlane(Dir);
+			}
+			else if ((SectionStepClock -= Dt) <= 0.f)
+			{
+				SectionStepClock = 0.25f;
+				StepSectionPlane(Dir);
+			}
+		}
+		else
+		{
+			bSectionStepHeld = false;
+		}
+		if (ARHStrategyPawn* Cam = StrategyPawn())
+		{
+			const FVector2D Along = URHSectionVisualizerSubsystem::DirAlong(SectionAxis);
+			const float Cm = Axis.Y * Cam->GetViewDistanceCm() * 1.1f * Dt;
+			const FVector F = Cam->GetFocusPointCm();
+			Cam->SetFocusXYCm(FVector2D(F.X + Along.X * Cm, F.Y + Along.Y * Cm));
+		}
+		return;
+	}
 	if (ARHStrategyPawn* Cam = StrategyPawn())
 	{
 		const FVector2D Axis = Value.Get<FVector2D>();
@@ -205,6 +254,10 @@ void ARHPlayerController::OnZoom(const FInputActionValue& Value)
 
 void ARHPlayerController::OnOrbit(const FInputActionValue& Value)
 {
+	if (bSectionOn)
+	{
+		return; // D8 R2 (a): the held orbit is locked; the press turns a quarter (OnSectionTurn)
+	}
 	if (ARHStrategyPawn* Cam = StrategyPawn())
 	{
 		Cam->AddOrbit(Value.Get<float>() * 90.f * GetWorld()->GetDeltaSeconds());
@@ -251,7 +304,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 	// Mouse-drag camera (director feedback, Gate C hand-play): right-drag
 	// orbits, middle-drag pans; a right CLICK (under the drag threshold)
 	// still cancels the active placement/dig mode.
-	if (ARHStrategyPawn* Cam = StrategyPawn())
+	if (ARHStrategyPawn* Cam = bSectionOn ? nullptr : StrategyPawn()) // D8 R2 (a): no drag-orbit or free pan in the section
 	{
 		float DX = 0.f, DY = 0.f;
 		GetInputMouseDelta(DX, DY);
@@ -286,6 +339,11 @@ void ARHPlayerController::Tick(float DeltaTime)
 
 	// The hint is recomputed every frame a mode is live; the deck renders it.
 	HintText.Reset();
+	if (bSectionOn)
+	{
+		TickSection(DeltaTime); // D8 R4: ghosts, drags, holograms, hovers and selection frames are not reached
+		return;
+	}
 
 	// Placement ghost: gray-box honest - debug lines, no meshes. Green means
 	// the order would be accepted RIGHT NOW; the uplink re-checks on arrival.
@@ -1521,7 +1579,12 @@ void ARHPlayerController::Tick(float DeltaTime)
 
 void ARHPlayerController::OnClick()
 {
-	++WorldClickCount;
+	++WorldClickCount;                       // still counted: the click test's leak counter
+	if (bSectionOn)
+	{
+		HandleSectionClick();                // D8 R4: a pick and a dive, never an order
+		return;
+	}
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	if (!Sim)
@@ -1857,6 +1920,11 @@ void ARHPlayerController::OnCancel()
 	if (Menus.IsValid() && Menus->IsOpen())
 	{
 		Menus->HandleBack();
+		return;
+	}
+	if (bSectionOn)
+	{
+		ExitSection(SectionFocus); // D8 R2 (b): a menu closes first, then the section, then the pause menu
 		return;
 	}
 	if (HasActiveMode())
@@ -2379,6 +2447,11 @@ int32 ARHPlayerController::FindCellAt(const FVector& GroundCm, int32 Level) cons
 
 void ARHPlayerController::SetActiveLevel(int32 Level)
 {
+	if (bSectionOn && !bSectionExiting)
+	{
+		ExitSection(Level); // D8 R1: any other caller (RH.Floor, a card) first leaves the section, at that floor
+		return;
+	}
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	// You can only ride the elevator as deep as the shaft has actually been
@@ -2404,11 +2477,23 @@ void ARHPlayerController::SetActiveLevel(int32 Level)
 
 void ARHPlayerController::OnFloorUp()
 {
+	if (bSectionOn)
+	{
+		const bool bShift = IsInputKeyDown(EKeys::LeftShift) || IsInputKeyDown(EKeys::RightShift);
+		StepSectionFocus(bShift ? 5 : 1); // D8 R2: the focus, five floors with Shift
+		return;
+	}
 	SetActiveLevel(ActiveLevel + 1);
 }
 
 void ARHPlayerController::OnFloorDown()
 {
+	if (bSectionOn)
+	{
+		const bool bShift = IsInputKeyDown(EKeys::LeftShift) || IsInputKeyDown(EKeys::RightShift);
+		StepSectionFocus(bShift ? -5 : -1);
+		return;
+	}
 	SetActiveLevel(ActiveLevel - 1);
 }
 
@@ -2439,6 +2524,24 @@ void ARHPlayerController::FocusNextShaft()
 	ARHStrategyPawn* Cam = StrategyPawn();
 	if (!Sim || !Cam || Sim->GetShaftCount() < 2)
 	{
+		return;
+	}
+	if (bSectionOn)
+	{
+		// D8 R1: in the section, "Next shaft" re-cuts through the next bored shaft's column (Id order, wrapping).
+		for (int32 Step = 1; Step <= Sim->GetShaftCount(); ++Step)
+		{
+			const FRHShaft& Sh = Sim->GetShaft((SectionShaft + Step) % Sim->GetShaftCount());
+			if (Sh.Depth >= 1)
+			{
+				SectionShaft = Sh.Id;
+				SectionPlaneRow = URHSectionVisualizerSubsystem::DepthOf(SectionAxis, Sh.Column);
+				PushSection();
+				FrameSection(false);
+				SetConfirm(FString::Printf(TEXT("Section through shaft %d"), Sh.Id), FLinearColor(0.2f, 0.9f, 1.f));
+				break;
+			}
+		}
 		return;
 	}
 	// The head the camera is nearest to, then the one after it in Id order.
@@ -2655,4 +2758,361 @@ float ARHPlayerController::SurveyRadiusM() const
 		});
 	}
 	return Radius;
+}
+
+// --- D8: the deep view (docs/qa/2026-10-23/d8-deep-view-design.md, REVISION R1, R2, R4) ---
+
+bool ARHPlayerController::CanEnterSection() const
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return Sim && Sim->GetShaftDepth() >= 1 && !IsMenuOpen();
+}
+
+void ARHPlayerController::EnterSection()
+{
+	if (bSectionOn || !CanEnterSection())
+	{
+		return;
+	}
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+	// The section issues no order: every brush disarms, then (a second call) any card closes.
+	CancelModes();
+	CancelModes();
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->GetCameraPose(SavedFocusXY, SavedZoomT, SavedPitchOffset, SavedYaw);
+	}
+	SectionFocus = FMath::Clamp(ActiveLevel, -Sim->GetShaftDepth(), 0);
+	// The chosen shaft: the nearest bored one (the first bored one if the nearest is not).
+	SectionShaft = GetNearestShaftId();
+	if (Sim->GetShaftDepth(SectionShaft) < 1)
+	{
+		for (const FRHShaft& Sh : Sim->GetShafts())
+		{
+			if (Sh.Depth >= 1) { SectionShaft = Sh.Id; break; }
+		}
+	}
+	// The cut axis: the camera's yaw snapped to a quarter (0 looks along +X).
+	SectionAxis = ((FMath::RoundToInt32(SavedYaw / 90.f) % 4) + 4) % 4;
+	SectionPlaneRow = URHSectionVisualizerSubsystem::DepthOf(SectionAxis, Sim->GetShaft(SectionShaft).Column);
+	bSectionOn = true;
+	bSectionStepHeld = false;
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->SetSectionView(true, 8.f, (float)SectionAxis * 90.f); // Q-D (a): the thin ant farm at 8 degrees
+		// The entry lands square at once (a quarter turn later eases): the cut is read, and picked, from its first frame.
+		Cam->SetCameraPose(SavedFocusXY, SavedZoomT, SavedPitchOffset, (float)SectionAxis * 90.f);
+	}
+	PushSection();
+	FrameSection(true);
+	SetConfirm(FString::Printf(TEXT("Section through shaft %d - click a floor to go there"), SectionShaft), FLinearColor(0.2f, 0.9f, 1.f));
+}
+
+void ARHPlayerController::ExitSection(int32 ToLevel)
+{
+	if (!bSectionOn)
+	{
+		return;
+	}
+	bSectionOn = false;
+	bSectionStepHeld = false;
+	UWorld* World = GetWorld();
+	if (URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+	{
+		Colony->SetSectionMode(false, SectionFocus); // re-applies the view itself (SetViewLevel returns early on an unchanged level)
+	}
+	if (URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr)
+	{
+		Section->SetView(false, SectionFocus, SectionAxis, SectionPlaneRow);
+	}
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->SetSectionView(false, 8.f, SavedYaw);
+		Cam->SetCameraPose(SavedFocusXY, SavedZoomT, SavedPitchOffset, SavedYaw);
+	}
+	bSectionExiting = true;
+	SetActiveLevel(ToLevel);
+	bSectionExiting = false;
+}
+
+void ARHPlayerController::ToggleSection()
+{
+	if (bSectionOn)
+	{
+		ExitSection(SectionFocus);
+	}
+	else
+	{
+		EnterSection();
+	}
+}
+
+void ARHPlayerController::PushSection()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+	{
+		Colony->SetSectionMode(bSectionOn, SectionFocus);
+	}
+	if (URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr)
+	{
+		Section->SetView(bSectionOn, SectionFocus, SectionAxis, SectionPlaneRow);
+	}
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->SetFocusZCm(Sim ? SectionFocus * (float)Sim->GetFloorHeightCm() : SectionFocus * 400.f);
+	}
+}
+
+void ARHPlayerController::FrameSection(bool bRefit)
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	ARHStrategyPawn* Cam = StrategyPawn();
+	if (!Sim || !Cam)
+	{
+		return;
+	}
+	int32 DMin = 0, DMax = 0, AMin = 0, AMax = 0;
+	if (!URHSectionVisualizerSubsystem::ComputeExtent(*Sim, SectionAxis, DMin, DMax, AMin, AMax))
+	{
+		return;
+	}
+	// The focus sits on the cut face, at the middle of the carved extent along the plane: the width the zoom fits is the cut's own.
+	const FVector Origin = Sim->GetShaftHeadCm();
+	const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(SectionAxis), Da = URHSectionVisualizerSubsystem::DirAlong(SectionAxis);
+	const double DCm = ((double)SectionPlaneRow - 0.5) * 1000.0;
+	// The view stays centred on the dig; the floor labels and flow arrows left of it (PlaceLabels, RefreshOverlay) get six cells of room on
+	// each side in the fitted width, so a small dig is not pushed under the deck's right column.
+	constexpr int32 LabelRoomCells = 6;
+	const double ACm = (double)(AMin + AMax) * 0.5 * 1000.0;
+	const FVector2D Focus(Origin.X + Dd.X * DCm + Da.X * ACm, Origin.Y + Dd.Y * DCm + Da.Y * ACm);
+	if (bRefit)
+	{
+		// R2 (c): the zoom that fits the carved extent along the plane, plus 10%, into the frame's width - and at least the whole bored stack's
+		// height (through the viewport's aspect) and 120 m, so a small dig is not framed from a few metres away.
+		int32 ViewX = 16, ViewY = 9;
+		GetViewportSize(ViewX, ViewY);
+		const float Aspect = ViewY > 0 ? (float)ViewX / (float)ViewY : 16.f / 9.f;
+		const float StackCm = (float)(Sim->GetShaftDepth() + 1) * (float)Sim->GetFloorHeightCm();
+		const float WidthCm = FMath::Max3((float)(AMax - AMin + 1 + 2 * LabelRoomCells) * 1000.f * 1.1f, StackCm * 1.1f * Aspect, 12000.f);
+		FVector2D F; float Zoom = 0.f, Offset = 0.f, Yaw = 0.f;
+		Cam->GetCameraPose(F, Zoom, Offset, Yaw);
+		const float FitZoom = Cam->SolveZoomForWidthCm(WidthCm);
+		Cam->SetCameraPose(Focus, FitZoom, Offset, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[Section] framed: axis %d, plane row %d, extent depth %d..%d along %d..%d, focus (%.0f, %.0f) floor %d, zoom %.3f for %.0f m, yaw %.0f"),
+			SectionAxis, SectionPlaneRow, DMin, DMax, AMin, AMax, Focus.X, Focus.Y, SectionFocus, FitZoom, WidthCm / 100.f, Yaw);
+	}
+	else
+	{
+		Cam->SetFocusXYCm(Focus);
+	}
+}
+
+void ARHPlayerController::SetSectionFocus(int32 Level)
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int32 Clamped = FMath::Clamp(Level, Sim ? -Sim->GetShaftDepth() : 0, 0);
+	if (!bSectionOn)
+	{
+		return;
+	}
+	SectionFocus = Clamped;
+	PushSection();
+}
+
+void ARHPlayerController::StepSectionFocus(int32 Delta)
+{
+	SetSectionFocus(SectionFocus + Delta);
+}
+
+void ARHPlayerController::TurnSection(int32 Sign)
+{
+	if (!bSectionOn || Sign == 0)
+	{
+		return;
+	}
+	SetSectionAxis((SectionAxis + (Sign > 0 ? 1 : -1) + 4) % 4);
+}
+
+void ARHPlayerController::SetSectionAxis(int32 Axis)
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!bSectionOn || !Sim)
+	{
+		return;
+	}
+	SectionAxis = ((Axis % 4) + 4) % 4;
+	// The cut keeps its centre: it passes through the chosen shaft's column again, seen from the new side.
+	SectionPlaneRow = URHSectionVisualizerSubsystem::DepthOf(SectionAxis, Sim->GetShaft(SectionShaft).Column);
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		Cam->SetSectionYaw((float)SectionAxis * 90.f);
+	}
+	PushSection();
+	FrameSection(true);
+}
+
+void ARHPlayerController::StepSectionPlane(int32 Rows)
+{
+	if (!bSectionOn || Rows == 0)
+	{
+		return;
+	}
+	SetSectionPlaneRow(SectionPlaneRow + Rows);
+}
+
+void ARHPlayerController::SetSectionPlaneRow(int32 Row)
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!bSectionOn || !Sim)
+	{
+		return;
+	}
+	int32 DMin = 0, DMax = 0, AMin = 0, AMax = 0;
+	if (URHSectionVisualizerSubsystem::ComputeExtent(*Sim, SectionAxis, DMin, DMax, AMin, AMax))
+	{
+		Row = FMath::Clamp(Row, DMin - 2, DMax + 2); // R2 (a): the carved extent along the depth axis, two rows either side
+	}
+	const int32 Moved = Row - SectionPlaneRow;
+	SectionPlaneRow = Row;
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		// The camera follows the cut along the depth axis and keeps its place along the plane.
+		const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(SectionAxis);
+		const FVector F = Cam->GetFocusPointCm();
+		Cam->SetFocusXYCm(FVector2D(F.X + Dd.X * Moved * 1000.0, F.Y + Dd.Y * Moved * 1000.0));
+	}
+	PushSection();
+}
+
+bool ARHPlayerController::CutSectionAtCavern(int32 CavernId)
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return false;
+	}
+	const FRHCavern* Found = nullptr;
+	for (const FRHCavern& C : Sim->GetCaverns())
+	{
+		if (C.Id == CavernId) { Found = &C; break; }
+	}
+	if (!Found)
+	{
+		return false;
+	}
+	const FRHCavern Cv = *Found;
+	if (!bSectionOn)
+	{
+		EnterSection();
+	}
+	if (!bSectionOn)
+	{
+		return false;
+	}
+	const int32 D0 = URHSectionVisualizerSubsystem::DepthOf(SectionAxis, Cv.Min), D1 = URHSectionVisualizerSubsystem::DepthOf(SectionAxis, Cv.Max);
+	SectionPlaneRow = (FMath::Min(D0, D1) + FMath::Max(D0, D1)) / 2; // the box's middle row along the current axis
+	SectionFocus = FMath::Clamp(Cv.Bottom, -Sim->GetShaftDepth(), 0);
+	PushSection();
+	FrameSection(false);
+	SetConfirm(FString::Printf(TEXT("Section through cavern %d"), Cv.Id), FLinearColor(0.2f, 0.9f, 1.f));
+	return true;
+}
+
+void ARHPlayerController::OnSectionToggle()
+{
+	if (IsMenuOpen())
+	{
+		return;
+	}
+	ToggleSection();
+}
+
+void ARHPlayerController::OnSectionHome()
+{
+	if (bSectionOn)
+	{
+		SetSectionFocus(0);
+	}
+}
+
+void ARHPlayerController::OnSectionEnd()
+{
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (bSectionOn && Sim)
+	{
+		SetSectionFocus(-Sim->GetShaftDepth());
+	}
+}
+
+void ARHPlayerController::OnSectionTurn(const FInputActionValue& Value)
+{
+	if (bSectionOn)
+	{
+		TurnSection(Value.Get<float>() > 0.f ? 1 : -1);
+	}
+}
+
+void ARHPlayerController::OnPanCompleted()
+{
+	bSectionStepHeld = false;
+}
+
+bool ARHPlayerController::SectionPickAtCursor(int32& OutLevel, FIntPoint& OutCell) const
+{
+	const UWorld* World = GetWorld();
+	const URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+	FVector O, D;
+	return Section && DeprojectMousePositionToWorld(O, D) && Section->Pick(O, D, OutLevel, OutCell);
+}
+
+void ARHPlayerController::TickSection(float DeltaTime)
+{
+	// R1: arming any mode (a deck brush, a build card) leaves the section, onto the focus floor, with the mode still armed.
+	if (HasActiveMode())
+	{
+		ExitSection(SectionFocus);
+		return;
+	}
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && SectionFocus < -Sim->GetShaftDepth())
+	{
+		SetSectionFocus(SectionFocus); // the clamp (a load can make the city shallower)
+	}
+	int32 Level = 0;
+	FIntPoint Cell;
+	HintText = SectionPickAtCursor(Level, Cell)
+		? FString::Printf(TEXT("Floor %d - click to go there"), Level)
+		: FString(TEXT("Section - PageUp/PageDown the focus floor, W/S move the cut, Q/E turn, V or Esc to leave"));
+}
+
+void ARHPlayerController::HandleSectionClick()
+{
+	int32 Level = 0;
+	FIntPoint Cell;
+	if (!SectionPickAtCursor(Level, Cell))
+	{
+		return;
+	}
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	ExitSection(Level);
+	if (ARHStrategyPawn* Cam = StrategyPawn())
+	{
+		if (Sim)
+		{
+			const FVector At = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), Cell);
+			Cam->SetFocusXYCm(FVector2D(At.X, At.Y)); // a dive lands on the clicked cell
+		}
+	}
 }

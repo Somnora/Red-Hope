@@ -54,12 +54,13 @@ echo "=== capture '$LABEL' ==="
 echo "cmds: $CMDS"
 echo "expect: $EXPECT png(s), timeout ${TIMEOUT}s, ${RESX}x${RESY}"
 
+# RH_CAPTURE_EXTRA passes extra command-line switches before -ExecCmds (D8: -RHVerifyCaches for the live smoke), like RH_PLAYTEST_EXTRA.
 # RH_SOUND=1 keeps the audio device (audio verification: pair it with
 # rh.AudioMaster 0 in the commands so the speakers stay silent).
 SOUND_ARG="-nosound"
 [ "${RH_SOUND:-0}" = "1" ] && SOUND_ARG=""
 "$UE" "$PROJ" "$MAP" -game -windowed -resx="$RESX" -resy="$RESY" \
-  -unattended $SOUND_ARG -stdout \
+  -unattended $SOUND_ARG -stdout ${RH_CAPTURE_EXTRA:-} \
   "-ExecCmds=$CMDS" > "$LOG" 2>&1 &
 PID=$!
 

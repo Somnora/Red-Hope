@@ -427,6 +427,13 @@ void URHDistrictVisualizerSubsystem::Tick(float DeltaTime)
 		return; // nothing ever painted, nothing ever drawn
 	}
 	const ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
+	// D8: the section draws this layer's content itself, so the floor-view layer hides while it is on.
+	if (PC && PC->IsSectionOn())
+	{
+		if (Holder && !Holder->IsHidden()) { Holder->SetActorHiddenInGame(true); }
+		return;
+	}
+	if (Holder && Holder->IsHidden()) { Holder->SetActorHiddenInGame(false); }
 	const int32 Level = PC ? PC->GetActiveLevel() : 0;
 	const uint32 Version = Sim->GetDistrictsVersion();
 	if (Version != DrawnVersion)

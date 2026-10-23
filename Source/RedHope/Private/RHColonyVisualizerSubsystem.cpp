@@ -1751,7 +1751,7 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	// Surface furniture: born hidden if the player is currently underground
 	// (adversarial-review finding - a discovery mid-descent used to pop the
 	// marker into the pit view until the next floor change).
-	Actor->SetActorHiddenInGame(IsUnderground());
+	Actor->SetActorHiddenInGame(!ShowsSurface());
 	DepositMarkers.Add(Actor);
 	DepositMarkerById.Add(D.Id, Actor);
 }
@@ -2564,7 +2564,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	}
 	// Born on whatever floor the sim says; visible only if the elevator is
 	// looking at that stratum (M1-d slice view).
-	Actor->SetActorHiddenInGame(Instance.Level != ViewLevel);
+	Actor->SetActorHiddenInGame(!ShowsLevel(Instance.Level));
 	// The Floodmast exists only to light the place. It carries a real point
 	// light rather than an emissive fake, so it actually throws light onto the
 	// regolith and the hulls around it - which is the entire point of building
@@ -2776,7 +2776,7 @@ void URHColonyVisualizerSubsystem::EnsureLandingPad()
 	{
 		Mid->SetScalarParameterValue(FName("PoweredState"), 1.f);
 	}
-	Pad->SetActorHiddenInGame(IsUnderground());
+	Pad->SetActorHiddenInGame(!ShowsSurface());
 	LandingPadVisual = Pad;
 }
 
@@ -2845,7 +2845,7 @@ void URHColonyVisualizerSubsystem::SpawnSupplyShip(bool bLanded)
 	Burn->RegisterComponent();
 	Burn->SetRelativeLocation(FVector(0, 0, 40.f));
 	ShipBurnLight = Burn;
-	Ship->SetActorHiddenInGame(IsUnderground());
+	Ship->SetActorHiddenInGame(!ShowsSurface());
 	ShipVisual = Ship;
 	ShipBeat = bLanded ? 2 : 1;
 	UE_LOG(LogRedHope, Display, TEXT("[Ship] %s (%s)"), bLanded ? TEXT("on the pad") : TEXT("descending"),
@@ -3002,9 +3002,9 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// The scenery ring + ground scatter (one-time build; state-diffed hide when
 	// the elevator descends, matching the surface ground plane's behavior).
 	EnsureEnvironmentRig();
-	if (EnvironmentRigActor && bEnvironmentHidden != IsUnderground())
+	if (EnvironmentRigActor && bEnvironmentHidden != !ShowsSurface())
 	{
-		bEnvironmentHidden = IsUnderground();
+		bEnvironmentHidden = !ShowsSurface();
 		EnvironmentRigActor->SetActorHiddenInGame(bEnvironmentHidden);
 	}
 	// The supply ship's beat: down ahead of the arrival, a sol on the pad, gone.
@@ -3019,7 +3019,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// the floor the elevator shows.
 	for (const FRHBuildingInstance& B : Sim->GetBuildings())
 	{
-		if (B.Level != ViewLevel)
+		if (!ShowsLevel(B.Level))
 		{
 			continue;
 		}
@@ -3124,7 +3124,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	// then the registry's grid answers "what is near the cursor".
 	{
 		FVector CursorCm(1.0e12, 1.0e12, 0);
-		if (APlayerController* PC = World->GetFirstPlayerController())
+		if (APlayerController* PC = bSectionMode ? nullptr : World->GetFirstPlayerController()) // D8: no hover labels on hidden floors
 		{
 			FVector O, D;
 			if (PC->DeprojectMousePositionToWorld(O, D) && FMath::Abs(D.Z) > 1.0e-4)
@@ -3151,7 +3151,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		const double FloorH = Sim->GetFloorHeightCm();
 		const double FloorZ = ViewLevel * FloorH;
 		// D2: shaft 0's cab is shown only on floors shaft 0 reaches (the deepest shaft can be another).
-		const bool bOwnFloor = !IsUnderground() || Sim->ShaftReaches(0, ViewLevel);
+		const bool bOwnFloor = !bSectionMode && (!IsUnderground() || Sim->ShaftReaches(0, ViewLevel));
 		CageComp->SetVisibility(bOwnFloor);
 		if (UStaticMeshComponent* DoorA = ElevatorDoorA.Get()) { DoorA->SetVisibility(bOwnFloor); }
 		if (UStaticMeshComponent* DoorB = ElevatorDoorB.Get()) { DoorB->SetVisibility(bOwnFloor); }
@@ -3171,7 +3171,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 				FloorZ - (CB.Origin.Z - CB.BoxExtent.Z) * S));
 		}
 		float Target = 0.f;
-		if (IsUnderground())
+		if (ShowsUnderground())
 		{
 			if (const URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>())
 			{
@@ -3345,7 +3345,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 			// Born hidden at SURF (invariant D): a bore that completes while
 			// the player is at the surface must not flash its column through
 			// the ground before the next view change (mirrors carve tiles).
-			if (ShaftVisual) { ShaftVisual->SetActorHiddenInGame(!IsUnderground()); }
+			if (ShaftVisual) { ShaftVisual->SetActorHiddenInGame(!ShowsUnderground()); }
 			// The underground fill: one big dim cool light riding the viewed
 			// floor (repositioned by ApplyViewLevel), so an unpowered vault
 			// reads dim-and-cold instead of void-black at night. Owned by the
@@ -3481,7 +3481,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 				HeadTile->SetActorLabel(FString::Printf(TEXT("Sim_ShaftFloor_%d"), L));
 #endif
-				HeadTile->SetActorHiddenInGame(ViewLevel != L);
+				HeadTile->SetActorHiddenInGame(!ShowsLevel(L));
 				CarveTileVisuals.Add(HeadTile);
 				TileByCell.Add(FIntVector(L, -1, 0), HeadTile);
 				MarkPassesDirty();
@@ -3503,7 +3503,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 					KTile->SetActorLabel(FString::Printf(TEXT("Sim_ShaftFloor_%d_%d"), K, L));
 #endif
-					KTile->SetActorHiddenInGame(ViewLevel != L);
+					KTile->SetActorHiddenInGame(!ShowsLevel(L));
 					CarveTileVisuals.Add(KTile);
 					TileByCell.Add(FIntVector(L, -1 - K, 0), KTile);
 					MarkPassesDirty();
@@ -3525,7 +3525,7 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 			Tile->SetActorLabel(FString::Printf(TEXT("Sim_Carve_%d_%d"), L, Have));
 #endif
-			Tile->SetActorHiddenInGame(ViewLevel != L);
+			Tile->SetActorHiddenInGame(!ShowsLevel(L));
 			CarveTileVisuals.Add(Tile);
 			TileByCell.Add(FIntVector(L, Have, 0), Tile);
 			++Have;
@@ -3563,11 +3563,20 @@ void URHColonyVisualizerSubsystem::ApplyDepthTint(AStaticMeshActor* Tile, int32 
 		}
 		Known = &DepthTintBase.Add(Mid, Now);
 	}
-	const int32 Below = Sim->GetFloorsBelowLine(Level);
+	Mid->SetVectorParameterValue(FName("Tint"), DepthWarmTint(*Sim, *Known, Level));
+}
+
+FLinearColor URHColonyVisualizerSubsystem::DepthWarmTint(const URHSimWorldSubsystem& Sim, const FLinearColor& Base, int32 Level)
+{
+	if (Level >= -Sim.GetDepthCostFromFloor())
+	{
+		return Base;
+	}
+	const int32 Below = Sim.GetFloorsBelowLine(Level);
 	const float Dark = FMath::Max(0.55f, 1.f - 0.06f * (float)((Below + 2) / 3)); // a step a three floors, from the first floor past the line
-	const FLinearColor Cooled = FLinearColor(Known->R * Dark, Known->G * Dark, Known->B * Dark, Known->A);
-	const float Warm = FMath::Clamp((float)Sim->GetFloorWarmth(Level), 0.f, 1.f);
-	Mid->SetVectorParameterValue(FName("Tint"), FMath::Lerp(Cooled, FLinearColor(0.88f, 0.56f, 0.20f, Known->A), 0.55f * Warm));
+	const FLinearColor Cooled = FLinearColor(Base.R * Dark, Base.G * Dark, Base.B * Dark, Base.A);
+	const float Warm = FMath::Clamp((float)Sim.GetFloorWarmth(Level), 0.f, 1.f);
+	return FMath::Lerp(Cooled, FLinearColor(0.88f, 0.56f, 0.20f, Base.A), 0.55f * Warm);
 }
 
 void URHColonyVisualizerSubsystem::RefreshDepthTint(const URHSimWorldSubsystem* Sim)
@@ -3644,7 +3653,7 @@ void URHColonyVisualizerSubsystem::UpdateExtraShaftVisuals(const URHSimWorldSubs
 #if WITH_EDITOR
 		Anchor->SetActorLabel(FString::Printf(TEXT("Sim_Shaft_%d"), K));
 #endif
-		Anchor->SetActorHiddenInGame(!IsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
+		Anchor->SetActorHiddenInGame(!ShowsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
 		X.Anchor = Anchor;
 		X.DepthSeen = Sh.Depth;
 		UPointLightComponent* Fill = NewObject<UPointLightComponent>(Anchor, TEXT("FloorFill"));
@@ -3688,7 +3697,7 @@ void URHColonyVisualizerSubsystem::PlaceExtraShaftVisuals(const URHSimWorldSubsy
 		const FVector Head = Sim->GetShaft(K).HeadCm;
 		const double FloorZ = ViewLevel * FloorH;
 		// Shown only below the surface and only on floors this shaft reaches.
-		Anchor->SetActorHiddenInGame(!IsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
+		Anchor->SetActorHiddenInGame(!ShowsUnderground() || !Sim->ShaftReaches(K, ViewLevel));
 		if (UStaticMeshComponent* Cab = X.Cab.Get())
 		{
 			Cab->SetWorldLocation(FVector(Head.X, Head.Y, FloorZ));
@@ -4201,7 +4210,7 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 		return;
 	}
 	using namespace RHCanon;
-	const bool bSurface = ViewLevel == 0; // sovereignty is surface furniture
+	const bool bSurface = ShowsLevel(0); // sovereignty is surface furniture
 
 	// Settlement markers: one per AVAILABLE rival, tinted by diplomatic state.
 	// 0 normal / 1 embargoed / 2 defected / 3 sabotaged; state-diffed so the
@@ -4483,6 +4492,18 @@ void URHColonyVisualizerSubsystem::SetViewLevel(int32 Level)
 	ApplyViewLevel();
 }
 
+void URHColonyVisualizerSubsystem::SetSectionMode(bool bOn, int32 Focus)
+{
+	SectionFocus = Focus;
+	if (bSectionMode == bOn)
+	{
+		return;
+	}
+	bSectionMode = bOn;
+	// SetViewLevel returns early on an unchanged level, so the mode flip applies the view itself.
+	ApplyViewLevel();
+}
+
 void URHColonyVisualizerSubsystem::ApplyViewLevel()
 {
 	UWorld* World = GetWorld();
@@ -4496,7 +4517,7 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	// visuals show iff you are looking at THAT floor. At SURF (ViewLevel 0)
 	// that's the surface colony and nothing underground; at -N it's that
 	// floor's pocket and nothing else. One rule: visible iff BLevel==ViewLevel.
-	const bool bSurface = !IsUnderground();
+	const bool bSurface = ShowsSurface();
 	for (auto& Pair : BuildingVisuals)
 	{
 		if (!Pair.Value)
@@ -4512,7 +4533,7 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 				break;
 			}
 		}
-		Pair.Value->SetActorHiddenInGame(BLevel != ViewLevel);
+		Pair.Value->SetActorHiddenInGame(!ShowsLevel(BLevel));
 	}
 	// The underground fill light rides the elevator: it hovers over whichever
 	// floor is open. (Its owner, the shaft column, is hidden at SURF, which
@@ -4541,6 +4562,7 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	}
 	if (URHAgentVisualizerSubsystem* Agents = World->GetSubsystem<URHAgentVisualizerSubsystem>())
 	{
+		Agents->SetSectionMode(bSectionMode); // D8: robots below ground show clipped to the section's slab
 		Agents->SetViewLevel(ViewLevel); // D4: robots on their own floor (SetSliceHidden(!bSurface) while none is below)
 	}
 	// Carve tiles: only the viewed floor's pocket shows. At SURF none match
@@ -4551,14 +4573,14 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 		if (Tile)
 		{
 			const int32 TileLevel = FMath::RoundToInt32(Tile->GetActorLocation().Z / FloorH);
-			Tile->SetActorHiddenInGame(TileLevel != ViewLevel);
+			Tile->SetActorHiddenInGame(!ShowsLevel(TileLevel));
 		}
 	}
 	// The shaft column belongs to the underground read; at SURF the intact
 	// ground covers it, so hide it to avoid poking through the surface.
 	if (ShaftVisual)
 	{
-		ShaftVisual->SetActorHiddenInGame(bSurface);
+		ShaftVisual->SetActorHiddenInGame(!ShowsUnderground());
 	}
 	PlaceExtraShaftVisuals(Sim);
 
@@ -4707,7 +4729,7 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	// real bored column beneath us - but gating on the view keeps this correct
 	// regardless of how ViewLevel got set.)
 	const int32 Depth = Sim->GetShaftDepth();
-	if (!GroundActor.IsValid() && IsUnderground())
+	if (!GroundActor.IsValid() && (IsUnderground() || bSectionMode))
 	{
 		for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
 		{
@@ -4734,11 +4756,12 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	}
 	if (GroundActor.IsValid())
 	{
-		GroundActor->SetActorHiddenInGame(IsUnderground());
+		GroundActor->SetActorHiddenInGame(!ShowsSurface());
 	}
 
-	const int32 Carved = IsUnderground() ? Sim->GetFloorCarvedCells(ViewLevel) : 0;
-	const FIntVector Key(Depth, ViewLevel, Carved);
+	const int32 Carved = ShowsUnderground() ? Sim->GetFloorCarvedCells(ViewLevel) : 0;
+	const FIntVector Key(Depth, bSectionMode ? 1 : ViewLevel, Carved); // D8: 1 is no floor, so entering and leaving the section re-runs the rig
+
 	// D2: with more than one shaft the rig also depends on which shafts reach the floor (their depths and the list itself).
 	const uint32 ShaftKey = Sim->GetShaftCount() > 1 ? Sim->GetShaftsVersion() : 0u;
 	if (Key == LastRigKey && ShaftKey == LastRigShaftKey)
@@ -4773,9 +4796,9 @@ void URHColonyVisualizerSubsystem::RebuildSliceRig()
 	WallFaceDir.Reset();
 	WallVentDir.Reset();
 	AppliedCutawayKey = 0xFF;
-	if (!IsUnderground())
+	if (!ShowsUnderground())
 	{
-		return; // SURF (or above): the intact ground is the view - no pit rig
+		return; // SURF (or above), or the section: the intact ground is the view - no pit rig
 	}
 	const int32 Pit = ViewLevel; // the floor being looked into
 

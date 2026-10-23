@@ -14,6 +14,8 @@
 #include "RHFrameStats.h"
 #include "RHMarsTerrain.h"
 #include "RHGrowthVisualizerSubsystem.h"
+#include "RHSectionVisualizerSubsystem.h"
+#include "RHRobotMovement.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
@@ -1624,6 +1626,280 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCityBench(
 			Rep.Housed, N, Sim->GetPopulation(), Rep.Floors, Rep.CellsPerFloor, Rep.Capacity, Rep.SeatsTotal, Rep.Rejected, (FPlatformTime::Seconds() - T0) * 1000.0);
 	}));
 
+// D8 (the deep view, R8): the 20-floor, three-shaft bench the section's frame budget is measured on. Public sim calls only (the -scale
+// recipe, moved into the live game); nothing here is saved and the sim gains no code. Needs a fresh colony, like RH.CityBench.
+static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
+	TEXT("RH.DeepBench"),
+	TEXT("RH.DeepBench <N> - DEBUG: RH.CityBench's city, then 20 floors, three shafts on one lattice row 80 m apart with four cars each, two tunnels, an 8 x 8 x 3 cavern, 40% of the colonists re-homed to -6..-20, and 60 RC_H robots below. Pair with RH.Section and RH.FrameStats."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		if (!Sim || !Defs || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DeepBench <N> (a fresh colony)"));
+			return;
+		}
+		const int32 N = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 5000);
+		const double T0 = FPlatformTime::Seconds();
+		// 1. The five-floor city, shaft 0 at the origin, everyone housed and settled (RH.CityBench).
+		const URHSimWorldSubsystem::FRHScaleColonyReport Rep = Sim->Debug_BuildScaleColony(N);
+		for (const FString& E : Rep.Errors) { UE_LOG(LogRedHope, Error, TEXT("RH.DeepBench: %s"), *E); }
+		if (!Rep.bFresh)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.DeepBench: needs a fresh colony (a shaft already exists)"));
+			return;
+		}
+		if (URHCrewVisualizerSubsystem* Crew = World->GetSubsystem<URHCrewVisualizerSubsystem>()) { Crew->Debug_SettleCrew(); }
+		// The bank holds the deep floors' cooling and the filters for the whole window (the transit suite's pin, on the live grid).
+		Sim->Debug_SetBatteryWh(1.0e9);
+		constexpr int32 Deep = 20;
+		const int32 Built = Rep.Floors;
+		FString Why;
+		// 2. Shaft 0 to -20, its spiral carved on every new floor, a filter on each.
+		Sim->Debug_ExtendShaftOf(0, Deep);
+		const FVector Origin = Sim->GetShaftHeadCm();
+		// 3. Two more shafts on lattice row 0, 80 m either side: one cut on row 0 passes through all three columns.
+		TArray<int32> ShaftIds = { 0 };
+		for (const FIntPoint Column : { FIntPoint(8, 0), FIntPoint(-8, 0) })
+		{
+			const FVector Head = URHSimWorldSubsystem::LatticeToCm(Origin, Column);
+			Sim->Debug_PlaceInstant(FName("Pylon"), Head, 0);
+			int32 Id = INDEX_NONE;
+			if (Sim->Debug_SinkShaftAt(Head, Deep, Id, Why)) { ShaftIds.Add(Id); }
+			else { UE_LOG(LogRedHope, Error, TEXT("RH.DeepBench: shaft at (%d, %d) refused: %s"), Column.X, Column.Y, *Why); }
+		}
+		// Shaft 0 carves its 210-cell spiral on each new floor; shafts 1 and 2 carve a 10-cell landing on every floor, which joins the dig. A
+		// floor's circulation replaces at most O2FillRateKgPerHour x 1200 / 50 kg a sol (480 at the rows) against 2 kg a cell, so a live floor
+		// stays rated only under about 240 cells: three full spirals (630) would lose every floor's rating, and with it every seat and bed.
+		constexpr int32 LandingCells = 10;
+		for (int32 L = 1; L <= Deep; ++L)
+		{
+			for (const int32 S : ShaftIds)
+			{
+				if (S == 0 && L <= Built) { continue; } // the city's own floors
+				if (!Sim->ExcavateFloor(-L, S == 0 ? Rep.CellsPerFloor : LandingCells, Why, S)) { UE_LOG(LogRedHope, Warning, TEXT("RH.DeepBench: floor %d shaft %d: %s"), -L, S, *Why); }
+			}
+			if (L > Built) { Sim->Debug_PlaceInstant(FName("AirFilter"), Origin, -L); }
+		}
+		for (int32 L = 1; L <= Built; ++L) { Sim->Debug_ForceRateFloor(-L); } // the city's floors grew by the landings: filled again at once
+		// 4. Four cars on each shaft.
+		int32 Cars = 0;
+		for (const int32 S : ShaftIds)
+		{
+			for (int32 K = 0; K < 4; ++K)
+			{
+				Sim->Debug_AddSolid(FName("Lander"), FName("Struct"), Sim->GetLiftFitBillKg());
+				Cars += Sim->Debug_FitLift(S, Why) ? 1 : 0;
+			}
+		}
+		// 5. Two tunnels on row 0 (floors -4 and -14), from the dig's +X edge, 10 cells out, carved at once.
+		TArray<int32> Tunnels;
+		for (const int32 L : { -4, -14 })
+		{
+			int32 MaxX = MIN_int32;
+			if (const FRHFloor* F = Sim->FindFloor(L)) { for (const FIntPoint& P : F->GetCells()) { if (P.Y == 0) { MaxX = FMath::Max(MaxX, P.X); } } }
+			int32 Id = INDEX_NONE;
+			if (MaxX > MIN_int32 && Sim->Debug_DigTunnel(L, FIntPoint(MaxX + 1, 0), FIntPoint(MaxX + 10, 0), Id, Why))
+			{
+				Sim->Debug_CarveTunnelCells(Id, 10);
+				Tunnels.Add(Id);
+			}
+			else { UE_LOG(LogRedHope, Warning, TEXT("RH.DeepBench: tunnel on %d refused: %s"), L, *Why); }
+		}
+		// 6. One 8 x 8 x 3 cavern on -8..-10, sited by -scale's search, carved at once.
+		int32 CavernId = INDEX_NONE;
+		FIntPoint CavA(0, 0);
+		for (int32 Dx = 8; Dx <= 24 && CavernId == INDEX_NONE; ++Dx)
+		{
+			for (int32 Dy = -8; Dy <= 8 && CavernId == INDEX_NONE; ++Dy)
+			{
+				const FIntPoint A(Dx, Dy), B(Dx + 7, Dy + 7);
+				if (Sim->CanDigCavern(-8, 3, URHSimWorldSubsystem::LatticeToCm(Origin, A), URHSimWorldSubsystem::LatticeToCm(Origin, B), Why)
+					&& Sim->Debug_DigCavern(-8, 3, A, B, CavernId, Why))
+				{
+					CavA = A;
+					Sim->Debug_CarveCavernCells(CavernId, 192);
+				}
+			}
+		}
+		// 7a. Work below -5: 70 Workstation cells on each deep floor (ordinals 100..169 of shaft 0's spiral). Seats fill in colonist Id order
+		// whatever the floor, so most of them go to people who live on another floor, and the city's 330-odd seats on -1..-5 are not enough
+		// on their own for the flows check's 500 cross-floor commuters.
+		int32 Zoned = 0;
+		for (int32 L = Built + 1; L <= Deep; ++L)
+		{
+			for (int32 I = 100; I < 170; ++I)
+			{
+				Zoned += Sim->DesignateRoom(-L, I, FName("Workstation"), Why) ? 1 : 0;
+			}
+		}
+		// 7. Commuters between floors: 40% of the colonists (two in five, Id order) re-homed to -6..-20. Their seats are the city's own on
+		// -1..-5: RefreshJobs re-derives every station each time it runs (a station set by hand does not survive it), so the trips cross floors
+		// because the seats are where the homes are not.
+		int32 Index = 0, Moved = 0;
+		for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+		{
+			Moved += (Index % 5 < 2 && Sim->Debug_SetColonistHome(C.Id, 0, -(Built + 1 + Index % (Deep - Built)))) ? 1 : 0;
+			++Index;
+		}
+		// 8. 60 RC_H robots: three a floor on rows 0..2 behind the bench's cut (axis 1, looking along +Y: the plane on row y = 0 through all
+		// three columns), one in each third of those cells. Harness robots: tracked by the visualizer, never saved by the bench.
+		TArray<FMassEntityHandle> Robots;
+		URHAgentSubsystem* Agents = World->GetSubsystem<URHAgentSubsystem>();
+		const FRHRobotRow* RobotDef = Defs->GetRobot(FName("RC_H"));
+		if (Agents && RobotDef)
+		{
+			for (int32 L = 1; L <= Deep; ++L)
+			{
+				TArray<FIntPoint> Row;
+				if (const FRHFloor* F = Sim->FindFloor(-L)) { for (const FIntPoint& P : F->GetCells()) { if (P.Y >= 0 && P.Y <= 2) { Row.Add(P); } } }
+				Row.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+				for (int32 K = 0; K < 3 && Row.Num() > 0; ++K)
+				{
+					const FIntPoint P = Row[FMath::Min(Row.Num() - 1, (2 * K + 1) * Row.Num() / 6)];
+					FVector Pos = URHSimWorldSubsystem::LatticeToCm(Origin, P);
+					Pos.Z = -L * Sim->GetFloorHeightCm() + RH::RobotZOffsetCm;
+					const FMassEntityHandle H = Agents->SpawnRobot(FName("RC_H"), *RobotDef, Pos);
+					if (H.IsValid()) { Robots.Add(H); }
+				}
+			}
+			if (URHAgentVisualizerSubsystem* Viz = World->GetSubsystem<URHAgentVisualizerSubsystem>()) { Viz->TrackEntities(Robots); }
+		}
+		// The deep floors rate once their filters run (a sim step powers them): a short ticker certifies each as it becomes circulated, then
+		// logs the bench line (9).
+		const TWeakObjectPtr<UWorld> WeakWorld(World);
+		UE_LOG(LogRedHope, Display, TEXT("[DeepBench] the city: %d seats, zoned living %d / seat %d / garden %d / other %d, %d station orders, %d refused"),
+			Rep.SeatsTotal, Rep.ZonedLiving, Rep.ZonedSeat, Rep.ZonedGarden, Rep.ZonedOther, Rep.StationOrders, Rep.Rejected);
+		const FString Summary = FString::Printf(TEXT("shafts %d (columns (0, 0), (8, 0), (-8, 0); cut them all with RH.Section on 1), cars %d, tunnels %d, cavern %d at (%d, %d) on -8..-10, %d colonists re-homed below -%d, %d Workstation cells zoned below -%d, robots %d spawned"),
+			ShaftIds.Num(), Cars, Tunnels.Num(), CavernId, CavA.X, CavA.Y, Moved, Built, Zoned, Built, Robots.Num());
+		const int32 RobotsSpawned = Robots.Num();
+		TSharedRef<int32> Tries = MakeShared<int32>(0);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakWorld, Tries, Built, Summary, RobotsSpawned, T0](float)
+		{
+			UWorld* W = WeakWorld.Get();
+			URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			if (!S)
+			{
+				return false;
+			}
+			int32 Rated = 0;
+			for (int32 L = 1; L <= Deep; ++L)
+			{
+				if (!S->IsFloorRated(-L) && S->IsFloorCirculated(-L)) { S->Debug_ForceRateFloor(-L); }
+				Rated += S->IsFloorRated(-L) ? 1 : 0;
+			}
+			if (Rated < Deep && ++(*Tries) < 40)
+			{
+				return true; // again in a quarter second
+			}
+			int32 Cross = 0;
+			for (const FRHColonist& C : S->GetColonists())
+			{
+				FIntVector Key;
+				Cross += (S->GetColonistStation(C.Id, Key) && C.HomeHab == 0 && C.HomeLevel < 0 && Key.X != C.HomeLevel) ? 1 : 0;
+			}
+			const URHAgentVisualizerSubsystem* Viz = W->GetSubsystem<URHAgentVisualizerSubsystem>();
+			UE_LOG(LogRedHope, Display, TEXT("[DeepBench] %d floors | %s | floors rated %d of %d | %d colonists housed, ramp %.2f, %d floor residents working on another floor, %d seats staffed, %d orders queued | robots tracked %d | built in %.0f ms"),
+				S->GetShaftDepth(), *Summary, Rated, Deep, S->GetPopulation(), S->GetCommuteRamp(), Cross, S->GetStaffedSeats(), S->GetUplinkQueue().Num(), Viz ? Viz->GetTrackedCount() : RobotsSpawned, (FPlatformTime::Seconds() - T0) * 1000.0);
+			return false;
+		}), 0.25f);
+	}));
+
+// D8 (R8, R9 c): drive the section from the console (the bench, the captures and the smoke), and check the overlay's floor flows against an
+// independent count from the roster.
+static FAutoConsoleCommandWithWorldAndArgs GRHSection(
+	TEXT("RH.Section"),
+	TEXT("RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows> - DEBUG: the deep view's section."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!PC || !Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows>"));
+			return;
+		}
+		const FString Verb = Args[0].ToLower();
+		if (Verb == TEXT("on"))
+		{
+			PC->EnterSection();
+			if (Args.Num() > 1) { PC->SetSectionAxis(FCString::Atoi(*Args[1])); }
+		}
+		else if (Verb == TEXT("off"))
+		{
+			PC->ExitSection(PC->GetSectionFocus());
+		}
+		else if (Verb == TEXT("focus") && Args.Num() > 1)
+		{
+			PC->SetSectionFocus(FCString::Atoi(*Args[1]));
+		}
+		else if (Verb == TEXT("axis") && Args.Num() > 1)
+		{
+			PC->SetSectionAxis(FCString::Atoi(*Args[1]));
+		}
+		else if (Verb == TEXT("plane") && Args.Num() > 1)
+		{
+			PC->SetSectionPlaneRow(FCString::Atoi(*Args[1]));
+		}
+		else if (Verb == TEXT("cut") && Args.Num() > 1)
+		{
+			PC->CutSectionAtCavern(FCString::Atoi(*Args[1])); // the cavern card's Cut here
+		}
+		else if (Verb == TEXT("check") && Args.Num() > 1 && Args[1].ToLower() == TEXT("flows"))
+		{
+			// What the overlay draws: the commute's pairs between two floors, summed per (home floor, work floor).
+			TMap<FIntPoint, int32> Drawn;
+			URHSectionVisualizerSubsystem::SumFlows(*Sim, Drawn);
+			// What it should draw, from the roster alone (DeriveCommuteFlows' eligibility: a station and a home anchor).
+			TMap<FIntPoint, int32> Expected;
+			int32 Cross = 0, Stations = 0, DeepHomes = 0;
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				FIntVector Key;
+				DeepHomes += (C.HomeHab == 0 && C.HomeLevel < -5) ? 1 : 0;
+				if (!Sim->GetColonistStation(C.Id, Key) || (C.HomeHab == 0 && C.HomeLevel >= 0))
+				{
+					continue;
+				}
+				++Stations;
+				int32 HomeFloor = C.HomeLevel;
+				if (C.HomeHab != 0)
+				{
+					HomeFloor = 0;
+					for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.Id == C.HomeHab) { HomeFloor = B.Level; break; } }
+				}
+				const int32 WorkFloor = Key.X < 0 ? Key.X : 0;
+				if (HomeFloor != WorkFloor)
+				{
+					Expected.FindOrAdd(FIntPoint(HomeFloor, WorkFloor)) += 1;
+					++Cross;
+				}
+			}
+			bool bMatch = Drawn.Num() == Expected.Num();
+			FString FirstDiff;
+			for (const TPair<FIntPoint, int32>& E : Expected)
+			{
+				const int32 Got = Drawn.FindRef(E.Key);
+				if (Got != E.Value)
+				{
+					bMatch = false;
+					if (FirstDiff.IsEmpty()) { FirstDiff = FString::Printf(TEXT(", first differing pair %d -> %d: drawn %d, expected %d"), E.Key.X, E.Key.Y, Got, E.Value); }
+				}
+			}
+			const double Ramp = Sim->GetCommuteRamp();
+			const URHSectionVisualizerSubsystem* Section = World->GetSubsystem<URHSectionVisualizerSubsystem>();
+			const bool bPass = bMatch && Cross >= 500 && Ramp > 0.0;
+			UE_LOG(LogRedHope, Display, TEXT("[SectionCheck] flows: %d cross-floor commuters in %d floor pairs, matches=%d%s | ramp %.2f, %d of %d colonists with a station, %d homed below -5 | overlay refreshes %d | %s"),
+				Cross, Expected.Num(), bMatch ? 1 : 0, *FirstDiff, Ramp, Stations, Sim->GetPopulation(), DeepHomes, Section ? Section->GetOverlayRefreshes() : 0,
+				bPass ? TEXT("PASS") : (Ramp <= 0.0 ? TEXT("FAIL (the commute ramp is 0: no commuting yet)") : TEXT("FAIL")));
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RH.Section: unknown verb '%s'"), *Args[0]);
+		}
+	}));
+
 namespace
 {
 	// One RH.FrameStats window in flight. A core-ticker callback runs once a
@@ -1637,7 +1913,7 @@ namespace
 		double StartS = 0.0;
 		double LastS = 0.0;
 		TArray<float> FrameMs;
-		double SlotMs[RHFrameStats::SlotCount] = { 0.0, 0.0 };
+		double SlotMs[RHFrameStats::SlotCount] = { 0.0, 0.0, 0.0 };
 		double GameMs = 0.0, RenderMs = 0.0, GpuMs = 0.0; // engine's own per-frame thread timers, summed
 		int32 Frames = 0;
 		FString Tag;
@@ -1658,7 +1934,8 @@ namespace
 		const float P95 = Sorted[FMath::Min(N - 1, (int32)FMath::CeilToInt(0.95f * N) - 1)];
 		int32 Actors = 0, Skel = 0, Pooled = 0, Crowd = 0, CrowdDet = 0, Promos = 0, Demos = 0, CrowdAll = 0, TrackedN = 0;
 		bool bTier = false;
-		int32 BuildActors = 0, TileActors = 0, Pop = 0, ViewLevel = 0;
+		int32 BuildActors = 0, TileActors = 0, Pop = 0, ViewLevel = 0, RobotsDrawn = 0;
+		FString SectionCounts = TEXT("section off");
 		if (UWorld* W = Run.World.Get())
 		{
 			if (const URHCrewVisualizerSubsystem* Crew = W->GetSubsystem<URHCrewVisualizerSubsystem>())
@@ -1673,11 +1950,13 @@ namespace
 				ViewLevel = Colony->GetViewLevel();
 			}
 			if (const URHSimWorldSubsystem* Sim = W->GetSubsystem<URHSimWorldSubsystem>()) { Pop = Sim->GetPopulation(); }
+			if (const URHSectionVisualizerSubsystem* Section = W->GetSubsystem<URHSectionVisualizerSubsystem>()) { SectionCounts = Section->DescribeCounts(); }
+			if (const URHAgentVisualizerSubsystem* Agents = W->GetSubsystem<URHAgentVisualizerSubsystem>()) { RobotsDrawn = Agents->GetSectionDrawnCount(); }
 		}
-		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s window %.1f s, %d frames | frame ms: avg %.2f, median %.2f, p95 %.2f, max %.2f (median %.1f fps) | population %d, view floor %d | crew: %s, %d full figures tracked, %d figure actors (%d skeletal, %d pooled), %d crowd records (%d drawn on the viewed floor, %d of them in full mesh detail), tier swaps in the window: %d promotions / %d demotions | colony: %d building actors, %d tile actors | game-thread ms/frame: crew tick %.3f, colony tick %.3f | engine threads ms/frame: game %.1f, render %.1f, GPU %.1f"),
+		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s window %.1f s, %d frames | frame ms: avg %.2f, median %.2f, p95 %.2f, max %.2f (median %.1f fps) | population %d, view floor %d | crew: %s, %d full figures tracked, %d figure actors (%d skeletal, %d pooled), %d crowd records (%d drawn on the viewed floor, %d of them in full mesh detail), tier swaps in the window: %d promotions / %d demotions | colony: %d building actors, %d tile actors | game-thread ms/frame: crew tick %.3f, colony tick %.3f, section tick %.3f | section: %s, robots drawn %d | engine threads ms/frame: game %.1f, render %.1f, GPU %.1f"),
 			*Run.Tag, Run.Seconds, N, Sum / N, Med, P95, Sorted.Last(), Med > 0.f ? 1000.f / Med : 0.f, Pop, ViewLevel,
 			bTier ? TEXT("crowd mode") : TEXT("all full"), TrackedN, Actors, Skel, Pooled, CrowdAll, Crowd, CrowdDet, Promos, Demos, BuildActors, TileActors,
-			Run.SlotMs[RHFrameStats::Crew] / N, Run.SlotMs[RHFrameStats::Colony] / N, Run.GameMs / N, Run.RenderMs / N, Run.GpuMs / N);
+			Run.SlotMs[RHFrameStats::Crew] / N, Run.SlotMs[RHFrameStats::Colony] / N, Run.SlotMs[RHFrameStats::Section] / N, *SectionCounts, RobotsDrawn, Run.GameMs / N, Run.RenderMs / N, Run.GpuMs / N);
 	}
 }
 
@@ -1714,8 +1993,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFrameStats(
 			Run->LastS = Now;
 			if (Run->FrameMs.Last() > 150.f && Run->Spikes.Num() < 8)
 			{
-				Run->Spikes.Add(FString::Printf(TEXT("+%.1fs %.0f ms (crew %.1f, colony %.1f)"), Now - Run->StartS, Run->FrameMs.Last(),
-					RHFrameStats::GSlotSeconds[RHFrameStats::Crew] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Colony] * 1000.0));
+				Run->Spikes.Add(FString::Printf(TEXT("+%.1fs %.0f ms (crew %.1f, colony %.1f, section %.1f)"), Now - Run->StartS, Run->FrameMs.Last(),
+					RHFrameStats::GSlotSeconds[RHFrameStats::Crew] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Colony] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Section] * 1000.0));
 			}
 			for (int32 S = 0; S < RHFrameStats::SlotCount; ++S)
 			{

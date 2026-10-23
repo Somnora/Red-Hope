@@ -62,6 +62,13 @@ public:
 	// Presentation-only; the sim never knows what the camera looks at.
 	void SetViewLevel(int32 Level);
 	int32 GetViewLevel() const { return ViewLevel; }
+	// D8 (the deep view): the player controller owns the section state and pushes this mirror on entry, on every focus change and on exit.
+	// While it is on, every actor this mirror keeps is hidden (the section draws its own content), ViewLevel stays frozen at the entry
+	// floor, and crew, atmosphere and audio read IsSectionMode() / GetSectionFocus() from here. Leaving re-applies the view itself, since
+	// SetViewLevel returns early when the level did not change.
+	void SetSectionMode(bool bOn, int32 Focus);
+	bool IsSectionMode() const { return bSectionMode; }
+	int32 GetSectionFocus() const { return SectionFocus; }
 	// Alive pass 2: where a placed furnishing actually stands - its logical
 	// centre (with a seat's pull-up applied) on the floor, its yaw (90 x Rot:
 	// the catalogue's front faces -Y at yaw 0) and the drawn mesh's half
@@ -91,6 +98,11 @@ public:
 	// State-diffed on a (mode, hidden-sides) key, with hysteresis, so orbiting
 	// past a boundary cannot strobe the walls.
 	void ApplyCutaway();
+
+	// D8: the floor view's colour language, shared with the section (one helper each, never a copy). RoomTint is a room function's
+	// accent; DepthWarmTint is a floor tile's base after D5's depth darkening and Warmth lerp (the base itself above the cool line).
+	FLinearColor RoomTint(FName RoomRowName) const;
+	static FLinearColor DepthWarmTint(const class URHSimWorldSubsystem& Sim, const FLinearColor& Base, int32 Level);
 
 private:
 	// C3: the per-frame passes (dome crops, habitat shells, furnishings, room
@@ -220,6 +232,10 @@ private:
 	// down into (sand walls up to the rim, the dug floor at the bottom). So
 	// "underground" is the whole condition; the open floor is just ViewLevel.
 	bool IsUnderground() const { return ViewLevel < 0; }
+	// D8: the visibility rules go through these three. With the section off they are today's expressions exactly.
+	bool ShowsLevel(int32 L) const { return !bSectionMode && L == ViewLevel; }
+	bool ShowsSurface() const { return !bSectionMode && !IsUnderground(); }
+	bool ShowsUnderground() const { return !bSectionMode && IsUnderground(); }
 
 	// Room zoning made visible (M2 Gate B): tiles retint by designated function
 	// and carry a small flat label. State-diffed per tick like the shaft mirror.
@@ -231,7 +247,6 @@ private:
 	void RefreshDepthTint(const class URHSimWorldSubsystem* Sim);
 	mutable TMap<TWeakObjectPtr<class UMaterialInstanceDynamic>, FLinearColor> DepthTintBase;
 	uint32 DepthTintKey = MAX_uint32;
-	FLinearColor RoomTint(FName RoomRowName) const;
 	// Content path of the furnishing prop for a room function (empty = none).
 	FString RoomPropPath(FName Room) const;
 	// Sovereignty made visible (M3/M4): a distant settlement marker per
@@ -391,6 +406,8 @@ private:
 	TWeakObjectPtr<AActor> GroundActor;
 	bool bGroundSearched = false;
 	int32 ViewLevel = 0;
+	bool bSectionMode = false;   // D8: the controller's mirror (see SetSectionMode)
+	int32 SectionFocus = 0;
 	int32 LastShaftDepthSeen = 0;
 	FDelegateHandle AddedHandle;
 	FDelegateHandle CompletedHandle;

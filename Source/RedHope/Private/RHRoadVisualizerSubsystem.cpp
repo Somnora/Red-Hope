@@ -214,7 +214,7 @@ void URHRoadVisualizerSubsystem::Tick(float DeltaTime)
 		if (Mesh)
 		{
 			const ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
-			const bool bUnder = PC && PC->GetActiveLevel() != 0;
+			const bool bUnder = PC && (PC->IsSectionOn() || PC->GetActiveLevel() != 0); // D8
 			if (bUnder != bHidden)
 			{
 				bHidden = bUnder;

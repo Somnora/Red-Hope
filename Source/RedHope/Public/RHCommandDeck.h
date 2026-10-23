@@ -205,6 +205,8 @@ private:
 	// or viewed (-1..-5 stay as they were); choosing a floor scrolls its row into view.
 	EVisibility GetShaftRowVisibility(int32 Level) const;
 	void FollowShaftScroll();
+	// D8: the slider's range, SURF to the deepest bored floor (0 while nothing is bored).
+	int32 GetSectionSliderDepth() const;
 	TSharedPtr<class SScrollBox> ShaftScroll;
 	TMap<int32, TSharedPtr<class SWidget>> ShaftRows; // Level -> the row (0 = SURF)
 	int32 ShaftScrollLevel = MAX_int32;               // the viewed floor the scroll last followed

@@ -690,7 +690,7 @@ void URHTrafficVisualizerSubsystem::Tick(float DeltaTime)
 
 	// Underground, none of it shows (the roads hide the same way).
 	const ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
-	const bool bUnder = PC && PC->GetActiveLevel() != 0;
+	const bool bUnder = PC && (PC->IsSectionOn() || PC->GetActiveLevel() != 0); // D8: the section hides every surface layer
 	if (bUnder != bHidden)
 	{
 		bHidden = bUnder;

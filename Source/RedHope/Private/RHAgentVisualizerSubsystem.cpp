@@ -11,6 +11,7 @@
 #include "RHAgentFragments.h"
 #include "RHRobotMovement.h"
 #include "RHElevatorLayout.h"
+#include "RHSectionVisualizerSubsystem.h"
 #include "Animation/AnimSequence.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -867,7 +868,14 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 void URHAgentVisualizerSubsystem::SetViewLevel(int32 Level)
 {
 	ViewLevel = Level;
-	SetSliceHidden(Level != 0); // the surface layer (rovers, cargo); Tick shows each walker on its own floor
+	SetSliceHidden(bSectionMode || Level != 0); // the surface layer (rovers, cargo); Tick shows each walker on its own floor
+}
+
+void URHAgentVisualizerSubsystem::SetSectionMode(bool bOn)
+{
+	bSectionMode = bOn;
+	SectionDrawnCm.Reset();
+	SetSliceHidden(bOn || ViewLevel != 0);
 }
 
 UStaticMeshComponent* URHAgentVisualizerSubsystem::GetCabBox(int32 Index)
@@ -1128,6 +1136,9 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	// lifted along its column by the ride's progress, and riders holding for a car queue beside the column.
 	const URHSimWorldSubsystem* LiftSim = GetWorld()->GetSubsystem<URHSimWorldSubsystem>();
 	const bool bLifts = LiftSim && LiftSim->HasRobotLifts();
+	// D8: the section's slab test (null while the section subsystem has never run); the drawn positions restart each frame.
+	const URHSectionVisualizerSubsystem* Section = bSectionMode ? GetWorld()->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+	if (bSectionMode) { SectionDrawnCm.Reset(); }
 	const double LiftFloorH = LiftSim ? LiftSim->GetFloorHeightCm() : 400.0;
 	TMap<FIntPoint, int32> QueueRank; // (shaft, level) -> riders already queued there this frame
 	int32 CabsUsed = 0;
@@ -1308,7 +1319,10 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		// entity, face travel, swap Walk/Idle on the speed threshold. The clip
 		// carries the gait, so the procedural Bob is skipped.
 		// D4: drawn only on its own floor (every robot is on the surface with no lift car).
-		const bool bOnView = bLifts ? LiftSim->LevelOfZ(Pos.Z) == ViewLevel : !bSliceHidden;
+		const bool bOnView = bSectionMode
+			? (bLifts && Section && Section->IsInSlab(Pos)) // D8 R6: robots in front of the plane, beyond the slab or on the surface are hidden
+			: (bLifts ? LiftSim->LevelOfZ(Pos.Z) == ViewLevel : !bSliceHidden);
+		if (bSectionMode && bOnView) { SectionDrawnCm.Add(Pos); }
 		if (bInCab && bOnView)
 		{
 			if (UStaticMeshComponent* Cab = GetCabBox(CabsUsed++))

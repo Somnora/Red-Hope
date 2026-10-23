@@ -52,8 +52,16 @@ void ARHStrategyPawn::Tick(float DeltaTime)
 	// clamp keeps the gaze between "just above the horizon" (the mountain ring +
 	// sky) and straight down.
 	const float Distance = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, SmoothedZoomT);
-	const float Pitch = FMath::Clamp(
+	float Pitch = FMath::Clamp(
 		FMath::Lerp(MinPitchDeg, MaxPitchDeg, SmoothedZoomT) + SmoothedPitchOffsetDeg, -6.f, 86.f);
+	if (bSectionView)
+	{
+		// D8: the section's own pitch, decoupled from the zoom; the yaw eases to its exact quarter turn.
+		SmoothedSectionPitchDeg = FMath::FInterpTo(SmoothedSectionPitchDeg, SectionPitchDeg, DeltaTime, ZoomInterpSpeed);
+		Pitch = SmoothedSectionPitchDeg;
+		const float Delta = FMath::FindDeltaAngleDegrees(OrbitYawDeg, SectionYawDeg);
+		OrbitYawDeg = FMath::Abs(Delta) < 0.05f ? SectionYawDeg : FMath::UnwindDegrees(OrbitYawDeg + Delta * FMath::Min(1.f, DeltaTime * ZoomInterpSpeed));
+	}
 	const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, SmoothedZoomT);
 
 	const FRotator LookRot(-Pitch, OrbitYawDeg + IntroYawOffsetDeg, 0.f);
@@ -79,9 +87,53 @@ void ARHStrategyPawn::AddOrbit(float DeltaYawDeg)
 void ARHStrategyPawn::AddTilt(float DeltaPitchDeg)
 {
 	IntroSecondsLeft = 0.f;
+	if (bSectionView)
+	{
+		SectionPitchDeg = FMath::Clamp(SectionPitchDeg + DeltaPitchDeg, 5.f, 35.f); // D8: the section's own range
+		return;
+	}
 	// Offset range: enough to drag the ground-register 30-degree pitch below the
 	// horizon line (-6 after the Tick clamp) or push it fully top-down.
 	PitchOffsetDeg = FMath::Clamp(PitchOffsetDeg + DeltaPitchDeg, -42.f, 30.f);
+}
+
+void ARHStrategyPawn::GetCameraPose(FVector2D& OutFocusXYCm, float& OutZoomT, float& OutPitchOffsetDeg, float& OutYawDeg) const
+{
+	OutFocusXYCm = FVector2D(FocusPointCm.X, FocusPointCm.Y);
+	OutZoomT = ZoomT;
+	OutPitchOffsetDeg = PitchOffsetDeg;
+	OutYawDeg = OrbitYawDeg;
+}
+
+void ARHStrategyPawn::SetSectionView(bool bOn, float PitchDeg, float YawDeg)
+{
+	IntroSecondsLeft = 0.f;
+	IntroYawOffsetDeg = 0.f;
+	SectionPitchDeg = FMath::Clamp(PitchDeg, 5.f, 35.f);
+	SectionYawDeg = FMath::UnwindDegrees(YawDeg);
+	if (bOn && !bSectionView)
+	{
+		SmoothedSectionPitchDeg = SectionPitchDeg; // the entry lands at once; later tilts ease
+	}
+	bSectionView = bOn;
+}
+
+float ARHStrategyPawn::SolveZoomForWidthCm(float WidthCm) const
+{
+	// Width at the focus = 2 x Distance(z) x tan(Fov(z) / 2); both rise with z, so the width is monotone and bisection converges.
+	const auto WidthAt = [this](float Z)
+	{
+		const float D = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, Z);
+		const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, Z);
+		return 2.f * D * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5f));
+	};
+	float Lo = 0.f, Hi = 1.f;
+	for (int32 I = 0; I < 30; ++I)
+	{
+		const float Mid = 0.5f * (Lo + Hi);
+		(WidthAt(Mid) < WidthCm ? Lo : Hi) = Mid;
+	}
+	return Hi;
 }
 
 void ARHStrategyPawn::SetCameraPose(FVector2D FocusXYCm, float InZoomT, float InPitchOffsetDeg, float InYawDeg)

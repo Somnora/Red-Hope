@@ -41,6 +41,16 @@ public:
 	// The focus Z is deliberately untouched - the elevator owns it.
 	UFUNCTION(BlueprintCallable, Category = "RedHope|Camera")
 	void SetCameraPose(FVector2D FocusXYCm, float InZoomT, float InPitchOffsetDeg, float InYawDeg);
+	// The getter SetCameraPose lacked (D8): the deep view remembers the floor view's pose on entry and puts it back on exit.
+	void GetCameraPose(FVector2D& OutFocusXYCm, float& OutZoomT, float& OutPitchOffsetDeg, float& OutYawDeg) const;
+
+	// D8 (the deep view): while on, Tick uses the section's own pitch (5..35 degrees; R/F move it) instead of the zoom-coupled one, and
+	// the yaw eases to an exact multiple of 90. Distance and FOV still follow ZoomT, so the wheel only moves the camera nearer or farther.
+	void SetSectionView(bool bOn, float PitchDeg, float YawDeg);
+	bool IsSectionView() const { return bSectionView; }
+	void SetSectionYaw(float YawDeg) { SectionYawDeg = FMath::UnwindDegrees(YawDeg); } // a quarter turn keeps the tilt
+	// The zoom at which the frame is WidthCm wide at the focus (FOV is horizontal), solved by bisection on the distance and FOV curves.
+	float SolveZoomForWidthCm(float WidthCm) const;
 
 	// Current camera distance (cm) - pan speed scales with it so a screen-width
 	// drag covers similar ground at every register.
@@ -88,4 +98,9 @@ private:
 	// Any camera input, or a scripted pose, ends it at once.
 	float IntroSecondsLeft = 0.f;
 	float IntroYawOffsetDeg = 0.f;
+	// D8: the section's pitch override and its eased yaw target.
+	bool bSectionView = false;
+	float SectionPitchDeg = 8.f;
+	float SmoothedSectionPitchDeg = 8.f;
+	float SectionYawDeg = 0.f;
 };

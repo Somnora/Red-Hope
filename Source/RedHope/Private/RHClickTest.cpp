@@ -20,9 +20,13 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHStrategyPawn.h"
+#include "RHColonyVisualizerSubsystem.h"
+#include "RHSectionVisualizerSubsystem.h"
+#include "RHTrafficVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Containers/Ticker.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/World.h"
@@ -36,6 +40,8 @@
 #include "Widgets/SViewport.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/Input/SSlider.h"
+#include "Types/ISlateMetaData.h"
 
 namespace
 {
@@ -86,6 +92,8 @@ namespace
 	{
 		TSharedRef<SWidget> Widget;
 		FVector2D Centre;
+		FVector2D TopLeft = FVector2D::ZeroVector;   // D8: the laid-out box, for a slider's ends
+		FVector2D Size = FVector2D::ZeroVector;
 	};
 
 	// Every visible widget of a type under a window, with where it is laid out NOW (desktop space). The geometry is
@@ -107,7 +115,7 @@ namespace
 			const FVector2D Centre = FVector2D(At.Geometry.GetAbsolutePositionAtCoordinates(FVector2D(0.5, 0.5)));
 			if (Size.X >= 2.0 && Size.Y >= 2.0 && Mine.ContainsPoint(Centre))
 			{
-				Out.Add({ Root, Centre });
+				Out.Add({ Root, Centre, FVector2D(At.Geometry.GetAbsolutePosition()), Size });
 			}
 		}
 		FArrangedChildren Kids(EVisibility::Visible);
@@ -253,6 +261,30 @@ namespace
 				R.Missed.Add(FString::Printf(TEXT("'%s' (%.0f,%.0f) leaf=%s%s%s"), *Label, Centre.X, Centre.Y, *Leaf, Button->IsEnabled() ? TEXT("") : TEXT(" [disabled]"), *Chain));
 			}
 		}
+		// D8 (R9 b): a widget tagged RH.* (the section's depth slider) counts too, reached at its centre and at both ends.
+		TArray<FFoundWidget> Sliders;
+		GatherInWindow(TEXT("SSlider"), Sliders);
+		for (const FFoundWidget& Found : Sliders)
+		{
+			const TSharedPtr<FTagMetaData> Tag = Found.Widget->GetMetaData<FTagMetaData>();
+			if (!Tag.IsValid() || !Tag->Tag.ToString().StartsWith(TEXT("RH.")))
+			{
+				continue;
+			}
+			++R.Total;
+			const bool bVertical = Found.Size.Y >= Found.Size.X;
+			const FVector2D A = bVertical ? FVector2D(Found.Centre.X, Found.TopLeft.Y + 2.0) : FVector2D(Found.TopLeft.X + 2.0, Found.Centre.Y);
+			const FVector2D B = bVertical ? FVector2D(Found.Centre.X, Found.TopLeft.Y + Found.Size.Y - 2.0) : FVector2D(Found.TopLeft.X + Found.Size.X - 2.0, Found.Centre.Y);
+			FString Leaf;
+			if (ReachesAt(Found.Centre, Found.Widget, Leaf) && ReachesAt(A, Found.Widget, Leaf) && ReachesAt(B, Found.Widget, Leaf))
+			{
+				++R.Reached;
+			}
+			else
+			{
+				R.Missed.Add(FString::Printf(TEXT("'<%s>' (%.0f,%.0f) leaf=%s"), *Tag->Tag.ToString(), Found.Centre.X, Found.Centre.Y, *Leaf));
+			}
+		}
 		return R;
 	}
 
@@ -287,20 +319,66 @@ namespace
 		GLastPointer = Pos;
 	}
 
-	void SendDown(const FVector2D& Pos)
+	void SendDown(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton)
 	{
 		PlaceVirtualCursor(Pos);
 		TSet<FKey> Pressed;
-		Pressed.Add(EKeys::LeftMouseButton);
-		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonDownEvent(nullptr, MakeEvent(Pos, Pressed, EKeys::LeftMouseButton));
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: down at (%.0f,%.0f) handled=%d"), Pos.X, Pos.Y, bHandled ? 1 : 0);
+		Pressed.Add(Button);
+		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonDownEvent(nullptr, MakeEvent(Pos, Pressed, Button));
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: down (%s) at (%.0f,%.0f) handled=%d"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0);
 	}
 
-	void SendUp(const FVector2D& Pos)
+	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton)
 	{
 		PlaceVirtualCursor(Pos);
-		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonUpEvent(MakeEvent(Pos, TSet<FKey>(), EKeys::LeftMouseButton));
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: up at (%.0f,%.0f) handled=%d"), Pos.X, Pos.Y, bHandled ? 1 : 0);
+		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonUpEvent(MakeEvent(Pos, TSet<FKey>(), Button));
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: up (%s) at (%.0f,%.0f) handled=%d"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0);
+	}
+
+	// D8 (R9 a): a key down (with Shift held around it when asked) through Slate, as a keyboard would send it, into the game viewport.
+	void SendKeyDown(FKey Key, bool bShift)
+	{
+		FSlateApplication& App = FSlateApplication::Get();
+		App.SetAllUserFocusToGameViewport();
+		const FModifierKeysState Mods(bShift, false, false, false, false, false, false, false, false);
+		if (bShift)
+		{
+			App.ProcessKeyDownEvent(FKeyEvent(EKeys::LeftShift, Mods, 0, false, 0, 0));
+		}
+		const bool bHandled = App.ProcessKeyDownEvent(FKeyEvent(Key, Mods, 0, false, 0, 0));
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: key down %s%s handled=%d"), bShift ? TEXT("Shift+") : TEXT(""), *Key.ToString(), bHandled ? 1 : 0);
+	}
+
+	void SendKeyUp(FKey Key, bool bShift)
+	{
+		FSlateApplication& App = FSlateApplication::Get();
+		const FModifierKeysState Mods(bShift, false, false, false, false, false, false, false, false);
+		App.ProcessKeyUpEvent(FKeyEvent(Key, Mods, 0, false, 0, 0));
+		if (bShift)
+		{
+			App.ProcessKeyUpEvent(FKeyEvent(EKeys::LeftShift, FModifierKeysState(), 0, false, 0, 0));
+		}
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: key up %s%s"), bShift ? TEXT("Shift+") : TEXT(""), *Key.ToString());
+	}
+
+	// D8: any world point -> the Slate screen position of the pixel it is drawn at (WorldToSlate pins Z to the active floor).
+	bool WorldPointToSlate(const FVector& PointCm, FVector2D& OutPos)
+	{
+		ARHPlayerController* PC = GetPC();
+		if (!PC || !GEngine || !GEngine->GameViewport)
+		{
+			return false;
+		}
+		const TSharedPtr<SViewport> ViewportWidget = GEngine->GameViewport->GetGameViewportWidget();
+		FVector2D Pixels;
+		if (!ViewportWidget.IsValid() || !PC->ProjectWorldLocationToScreen(PointCm, Pixels, false))
+		{
+			return false;
+		}
+		const FGeometry Geo = ViewportWidget->GetTickSpaceGeometry();
+		const float Scale = FMath::Max(Geo.Scale, KINDA_SMALL_NUMBER);
+		OutPos = FVector2D(Geo.LocalToAbsolute(FVector2D(Pixels.X / Scale, Pixels.Y / Scale)));
+		return true;
 	}
 
 	// A ground point at the active floor's plane -> the Slate screen position of the pixel it is drawn at.
@@ -526,6 +604,77 @@ namespace
 		};
 	}
 
+	// D8 (R9 b): a point at Fraction along a tagged widget's long axis (0 = its top or left end, 1 = the other), two pixels in from each end.
+	FLocate LocateTagged(const FString& Tag, float Fraction)
+	{
+		return [Tag, Fraction](FVector2D& OutPos)
+		{
+			TArray<FFoundWidget> Sliders;
+			GatherInWindow(TEXT("SSlider"), Sliders);
+			for (const FFoundWidget& Found : Sliders)
+			{
+				const TSharedPtr<FTagMetaData> Meta = Found.Widget->GetMetaData<FTagMetaData>();
+				if (!Meta.IsValid() || Meta->Tag.ToString() != Tag)
+				{
+					continue;
+				}
+				const bool bVertical = Found.Size.Y >= Found.Size.X;
+				const double Long = bVertical ? Found.Size.Y : Found.Size.X;
+				const double At = FMath::Clamp((double)Fraction * Long, 2.0, Long - 2.0);
+				OutPos = bVertical ? FVector2D(Found.Centre.X, Found.TopLeft.Y + At) : FVector2D(Found.TopLeft.X + At, Found.Centre.Y);
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: <%s> at %.2f -> (%.0f,%.0f) leaf=%s"), *Tag, Fraction, OutPos.X, OutPos.Y, *LeafAt(OutPos));
+				return true;
+			}
+			UE_LOG(LogRedHope, Error, TEXT("RHClick: no visible widget tagged %s"), *Tag);
+			return false;
+		};
+	}
+
+	// D8: a floor's row in the shaft strip ("-3 ▦8 ●..." starts with the level).
+	FLocate LocateFloorRow(int32 Level)
+	{
+		return [Level](FVector2D& OutPos)
+		{
+			TArray<FFoundWidget> Buttons;
+			GatherInWindow(TEXT("SButton"), Buttons);
+			const FString Want = FString::Printf(TEXT("%d"), Level);
+			for (const FFoundWidget& Found : Buttons)
+			{
+				const FString Text = FirstText(Found.Widget);
+				if (Text == Want || Text.StartsWith(Want + TEXT(" ")))
+				{
+					OutPos = Found.Centre;
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: floor row '%s' at (%.0f,%.0f) leaf=%s"), *Text, OutPos.X, OutPos.Y, *LeafAt(OutPos));
+					return true;
+				}
+			}
+			UE_LOG(LogRedHope, Error, TEXT("RHClick: floor row %d not among %d visible buttons"), Level, Buttons.Num());
+			return false;
+		};
+	}
+
+	// D8 (R9 a): the cut-face centre of a floor's first carved row-0 cells in the section, on screen.
+	FLocate LocateSectionPlate(int32 Level)
+	{
+		return [Level](FVector2D& OutPos)
+		{
+			UWorld* World = FindGameWorld();
+			const URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+			FVector At;
+			if (!Section || !Section->LocatePlate(Level, At) || !WorldPointToSlate(At, OutPos))
+			{
+				UE_LOG(LogRedHope, Error, TEXT("RHClick: no section plate on floor %d on screen"), Level);
+				return false;
+			}
+			const ARHPlayerController* PC = GetPC();
+			const FVector Eye = (PC && PC->PlayerCameraManager) ? PC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
+			const FRotator Look = (PC && PC->PlayerCameraManager) ? PC->PlayerCameraManager->GetCameraRotation() : FRotator::ZeroRotator;
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: section plate %d at (%.0f,%.0f) leaf=%s (world %s, camera %s looking %s)"), Level, OutPos.X, OutPos.Y, *LeafAt(OutPos),
+				*At.ToCompactString(), *Eye.ToCompactString(), *Look.ToCompactString());
+			return true;
+		};
+	}
+
 	// Move, press, release. The press is not made if there was nothing to press.
 	TSharedRef<FPress> PushPress(const FString& Name, FLocate Locate, bool bPress = true)
 	{
@@ -583,6 +732,56 @@ namespace
 			}, 0.15f);
 		}
 		Runner.Do(Name + TEXT(" up"), [State, End]() { if (State->bFound) { SendUp(*End); } }, 0.3f);
+		return State;
+	}
+
+	// D8 (R9 a): a key press held HoldSec, recorded like a press so PushCheck fails if it reached OnClick.
+	TSharedRef<FPress> PushKey(const FString& Name, FKey Key, bool bShift = false, float HoldSec = 0.1f)
+	{
+		const TSharedRef<FPress> State = MakeShared<FPress>();
+		FRunner& Runner = FRunner::Get();
+		Runner.Do(Name + TEXT(" key down"), [State, Key, bShift]()
+		{
+			State->bFound = true;
+			if (const ARHPlayerController* PC = GetPC())
+			{
+				State->LeakBase = PC->GetWorldClickCount();
+			}
+			SendKeyDown(Key, bShift);
+		}, HoldSec);
+		Runner.Do(Name + TEXT(" key up"), [Key, bShift]() { SendKeyUp(Key, bShift); }, 0.25f);
+		return State;
+	}
+
+	// D8 (R9 a): a drag with another mouse button (RMB, MMB) from the viewport's centre, DX pixels to the right.
+	TSharedRef<FPress> PushButtonDrag(const FString& Name, FKey Button, float DX)
+	{
+		const TSharedRef<FPress> State = MakeShared<FPress>();
+		FRunner& Runner = FRunner::Get();
+		Runner.Do(Name + TEXT(" down"), [State, Button]()
+		{
+			State->bFound = LocateFraction(0.5f, 0.5f)(State->Pos);
+			if (State->bFound)
+			{
+				if (const ARHPlayerController* PC = GetPC()) { State->LeakBase = PC->GetWorldClickCount(); }
+				SendMove(State->Pos, false);
+				SendDown(State->Pos, Button);
+			}
+		}, 0.15f);
+		for (int32 Leg = 1; Leg <= 4; ++Leg)
+		{
+			Runner.Do(Name + TEXT(" drag"), [State, DX, Leg]()
+			{
+				if (State->bFound)
+				{
+					const FVector2D To = State->Pos + FVector2D(DX * Leg / 4.0, 0.0);
+					PlaceVirtualCursor(To);
+					FSlateApplication::Get().ProcessMouseMoveEvent(MakeEvent(To, TSet<FKey>(), FKey()));
+					GLastPointer = To;
+				}
+			}, 0.1f);
+		}
+		Runner.Do(Name + TEXT(" up"), [State, Button, DX]() { if (State->bFound) { SendUp(State->Pos + FVector2D(DX, 0.0), Button); } }, 0.3f);
 		return State;
 	}
 
@@ -1160,6 +1359,240 @@ namespace
 			}, 0.2f);
 		}
 
+		// ---- the deep view (D8, R9): the section's button, rows, slider, keys, turn and step, the locks, Cut here, TRAFFIC, Escape, V, the dive
+		// and the choke point that leaves it when a brush is armed. The colony is deepened first (harness calls, as cavern.setup uses).
+		Runner.Do(TEXT("section.setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->CancelModes();
+			PC->SetActiveLevel(-1);
+			if (Sim->GetShaftDepth(0) < 6)
+			{
+				Sim->Debug_ExtendShaftOf(0, 6);
+			}
+			FString Why;
+			for (int32 L = 2; L <= 3; ++L)
+			{
+				if (Sim->GetFloorCarvedCells(-L) < 8) { Sim->ExcavateFloor(-L, 8 - Sim->GetFloorCarvedCells(-L), Why, 0); }
+			}
+			// The cavern the Cut here step needs: the one cavern.drag ordered, or (if its order has not landed yet) the same box at once.
+			if (Sim->GetCaverns().Num() == 0)
+			{
+				const FVector Origin = Sim->GetShaftHeadCm();
+				int32 Id = INDEX_NONE;
+				Sim->Debug_DigCavern(-1, 1, URHSimWorldSubsystem::CmToLattice(Origin, T->CavernACm), URHSimWorldSubsystem::CmToLattice(Origin, T->CavernBCm), Id, Why);
+			}
+			Report(TEXT("section.setup"), Sim->GetShaftDepth(0) >= 6 && Sim->GetCaverns().Num() > 0,
+				FString::Printf(TEXT("shaft 0 at %d floors, %d cavern(s), -2 and -3 carved (%d, %d cells)"), Sim->GetShaftDepth(0), Sim->GetCaverns().Num(), Sim->GetFloorCarvedCells(-2), Sim->GetFloorCarvedCells(-3)));
+		}, 0.6f);
+		Runner.Do(TEXT("section.unit"), []()
+		{
+			// The section's pure helpers (R9 a): the slab classification on all four axes, the rows, the LOD bands.
+			bool bOk = true;
+			FString Why;
+			for (int32 Axis = 0; Axis < 4; ++Axis)
+			{
+				for (const FIntPoint P : { FIntPoint(3, -2), FIntPoint(-5, 7), FIntPoint(0, 0) })
+				{
+					const int32 D = URHSectionVisualizerSubsystem::DepthOf(Axis, P), A = URHSectionVisualizerSubsystem::AlongOf(Axis, P);
+					if (URHSectionVisualizerSubsystem::PointOf(Axis, D, A) != P) { bOk = false; Why += FString::Printf(TEXT(" round trip axis %d"), Axis); }
+					const int32 Plane = D;
+					if (URHSectionVisualizerSubsystem::ClassifyRow(D - Plane) != 0 || URHSectionVisualizerSubsystem::ClassifyRow(D - (Plane + 1)) != -1 || URHSectionVisualizerSubsystem::ClassifyRow(D - (Plane - 1)) != 1)
+					{
+						bOk = false; Why += FString::Printf(TEXT(" classify axis %d"), Axis);
+					}
+				}
+				const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(Axis);
+				const FIntPoint Step(FMath::RoundToInt32(Dd.X), FMath::RoundToInt32(Dd.Y));
+				if (URHSectionVisualizerSubsystem::DepthOf(Axis, Step) != 1) { bOk = false; Why += FString::Printf(TEXT(" depth direction axis %d"), Axis); }
+			}
+			bOk &= URHSectionVisualizerSubsystem::SlabRows() == 3;
+			bOk &= URHSectionVisualizerSubsystem::LodBand(-10, -10) == 0 && URHSectionVisualizerSubsystem::LodBand(-11, -10) == 0 && URHSectionVisualizerSubsystem::LodBand(-12, -10) == 1
+				&& URHSectionVisualizerSubsystem::LodBand(-15, -10) == 1 && URHSectionVisualizerSubsystem::LodBand(-16, -10) == 2 && URHSectionVisualizerSubsystem::LodBand(0, -10) == 2;
+			Report(TEXT("section.unit"), bOk, FString::Printf(TEXT("slab rows %d; round trips, classification, direction and LOD bands%s"), URHSectionVisualizerSubsystem::SlabRows(), *Why));
+		}, 0.1f);
+		{
+			const auto Section = []() -> URHSectionVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr; };
+			const auto Focus = []() { const ARHPlayerController* PC = GetPC(); return PC ? PC->GetSectionFocus() : 999; };
+			const auto Depth = []() { const URHSimWorldSubsystem* Sim = GetSim(); return Sim ? Sim->GetShaftDepth() : 0; };
+			const TSharedRef<int32> Base = MakeShared<int32>(0);
+
+			const TSharedRef<int32> QueueBase = MakeShared<int32>(0);
+			Runner.Do(TEXT("section.on base"), [QueueBase]() { if (const URHSimWorldSubsystem* Sim = GetSim()) { *QueueBase = Sim->GetUplinkQueue().Num(); } }, 0.1f);
+			const TSharedRef<FPress> On = PushPress(TEXT("section.on"), LocateButton(TEXT("Section"), 0, true));
+			PushCheck(TEXT("section.on"), On, [Section, QueueBase]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				UWorld* W = FindGameWorld();
+				const URHColonyVisualizerSubsystem* Colony = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !PC->IsSectionOn()) { return FString(TEXT("the section did not open")); }
+				if (!Colony || !Colony->IsSectionMode()) { return FString(TEXT("the colony mirror is not in section mode")); }
+				if (!Section() || !Section()->IsOn()) { return FString(TEXT("the section visualizer is off")); }
+				return (Sim && Sim->GetUplinkQueue().Num() <= *QueueBase) ? FString() : FString(TEXT("an order was queued on entry"));
+			}, 1.f);
+			PushSettle(0.5f);
+			PushSweep(TEXT("sweep.section"));
+
+			const TSharedRef<FPress> Row = PushPress(TEXT("section.row"), LocateFloorRow(-3));
+			PushCheck(TEXT("section.row"), Row, [Focus]() { return Focus() == -3 ? FString() : FString::Printf(TEXT("the focus is %d, not -3"), Focus()); }, 1.f);
+
+			const TSharedRef<FPress> Slide = PushDrag(TEXT("section.slider"), LocateTagged(TEXT("RH.SectionSlider"), 0.f), LocateTagged(TEXT("RH.SectionSlider"), 1.f));
+			PushCheck(TEXT("section.slider"), Slide, [Focus, Depth]() { return Focus() == -Depth() ? FString() : FString::Printf(TEXT("after the drag the focus is %d, not %d"), Focus(), -Depth()); }, 1.f);
+			const TSharedRef<FPress> Mid = PushPress(TEXT("section.slider.mid"), LocateTagged(TEXT("RH.SectionSlider"), 0.5f));
+			PushCheck(TEXT("section.slider.mid"), Mid, [Focus, Depth]()
+			{
+				const int32 Want = FMath::RoundToInt32(-Depth() / 2.f);
+				return FMath::Abs(Focus() - Want) <= 0 ? FString() : FString::Printf(TEXT("a click at the middle gave focus %d, not %d"), Focus(), Want);
+			}, 1.f);
+
+			Runner.Do(TEXT("section.key base"), [Base, Focus]() { *Base = Focus(); }, 0.1f);
+			const TSharedRef<FPress> Down = PushKey(TEXT("section.key"), EKeys::PageDown);
+			PushCheck(TEXT("section.key"), Down, [Base, Focus, Depth]()
+			{
+				const int32 Want = FMath::Max(*Base - 1, -Depth());
+				return Focus() == Want ? FString() : FString::Printf(TEXT("PageDown moved the focus from %d to %d, expected %d"), *Base, Focus(), Want);
+			}, 1.f);
+			const TSharedRef<FPress> Home = PushKey(TEXT("section.home"), EKeys::Home);
+			PushCheck(TEXT("section.home"), Home, [Focus]() { return Focus() == 0 ? FString() : FString::Printf(TEXT("Home gave focus %d"), Focus()); }, 1.f);
+			const TSharedRef<FPress> End = PushKey(TEXT("section.end"), EKeys::End);
+			PushCheck(TEXT("section.end"), End, [Focus, Depth]() { return Focus() == -Depth() ? FString() : FString::Printf(TEXT("End gave focus %d, not %d"), Focus(), -Depth()); }, 1.f);
+			PushKey(TEXT("section.shift home"), EKeys::Home);
+			const TSharedRef<FPress> Shift = PushKey(TEXT("section.shift"), EKeys::PageDown, /*bShift*/ true);
+			PushCheck(TEXT("section.shift"), Shift, [Focus]() { return Focus() == -5 ? FString() : FString::Printf(TEXT("Shift+PageDown from the surface gave focus %d, not -5"), Focus()); }, 1.f);
+			const TSharedRef<FPress> Up = PushKey(TEXT("section.shift.up"), EKeys::PageUp);
+			PushCheck(TEXT("section.shift.up"), Up, [Focus]() { return Focus() == -4 ? FString() : FString::Printf(TEXT("PageUp gave focus %d, not -4"), Focus()); }, 1.f);
+
+			const auto Axis = []() { const ARHPlayerController* PC = GetPC(); return PC ? PC->GetSectionAxis() : -1; };
+			Runner.Do(TEXT("section.turn base"), [Base, Axis]() { *Base = Axis(); }, 0.1f);
+			const TSharedRef<FPress> TurnQ = PushKey(TEXT("section.turn"), EKeys::Q);
+			PushCheck(TEXT("section.turn"), TurnQ, [Base, Axis]() { return Axis() == (*Base + 3) % 4 ? FString() : FString::Printf(TEXT("Q turned axis %d to %d"), *Base, Axis()); }, 1.f);
+			const TSharedRef<FPress> TurnE = PushKey(TEXT("section.turn.back"), EKeys::E);
+			PushCheck(TEXT("section.turn.back"), TurnE, [Base, Axis]() { return Axis() == *Base ? FString() : FString::Printf(TEXT("E did not turn back to %d (%d)"), *Base, Axis()); }, 1.f);
+			const TSharedRef<FPress> TurnHeld = PushKey(TEXT("section.turn.held"), EKeys::Q, false, 1.0f);
+			PushCheck(TEXT("section.turn.held"), TurnHeld, [Base, Axis]() { return Axis() == (*Base + 3) % 4 ? FString() : FString::Printf(TEXT("Q held a second turned axis %d to %d: not exactly one turn"), *Base, Axis()); }, 1.f);
+
+			const auto Plane = []() { const ARHPlayerController* PC = GetPC(); return PC ? PC->GetSectionPlaneRow() : MIN_int32; };
+			Runner.Do(TEXT("section.step base"), [Base, Plane]() { *Base = Plane(); }, 0.1f);
+			const TSharedRef<FPress> StepW = PushKey(TEXT("section.step"), EKeys::W);
+			PushCheck(TEXT("section.step"), StepW, [Base, Plane]() { return Plane() == *Base + 1 ? FString() : FString::Printf(TEXT("W moved the plane from %d to %d"), *Base, Plane()); }, 1.f);
+			const TSharedRef<FPress> StepS = PushKey(TEXT("section.step.back"), EKeys::S);
+			PushCheck(TEXT("section.step.back"), StepS, [Base, Plane]() { return Plane() == *Base ? FString() : FString::Printf(TEXT("S did not step back to %d (%d)"), *Base, Plane()); }, 1.f);
+			const TSharedRef<FPress> StepHeld = PushKey(TEXT("section.step.held"), EKeys::W, false, 1.0f);
+			PushCheck(TEXT("section.step.held"), StepHeld, [Base, Plane]() { return Plane() > *Base + 1 ? FString() : FString::Printf(TEXT("W held a second moved the plane %d row(s): no repeat"), Plane() - *Base); }, 1.f);
+
+			const TSharedRef<FVector> Pose = MakeShared<FVector>(FVector::ZeroVector);
+			Runner.Do(TEXT("section.locks base"), [Pose]()
+			{
+				if (const ARHPlayerController* PC = GetPC())
+				{
+					if (const ARHStrategyPawn* Cam = Cast<ARHStrategyPawn>(PC->GetPawn()))
+					{
+						FVector2D F; float Z = 0.f, O = 0.f, Y = 0.f;
+						Cam->GetCameraPose(F, Z, O, Y);
+						*Pose = FVector(F.X, F.Y, Y);
+					}
+				}
+			}, 0.1f);
+			const auto PoseSame = [Pose]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const ARHStrategyPawn* Cam = PC ? Cast<ARHStrategyPawn>(PC->GetPawn()) : nullptr;
+				if (!Cam) { return FString(TEXT("no camera")); }
+				FVector2D F; float Z = 0.f, O = 0.f, Y = 0.f;
+				Cam->GetCameraPose(F, Z, O, Y);
+				return (FMath::Abs(FMath::FindDeltaAngleDegrees(Y, (float)Pose->Z)) < 0.5f && FVector2D::Distance(F, FVector2D(Pose->X, Pose->Y)) < 1.0)
+					? FString() : FString::Printf(TEXT("the camera moved: yaw %.1f -> %.1f, focus moved %.0f cm"), Pose->Z, Y, FVector2D::Distance(F, FVector2D(Pose->X, Pose->Y)));
+			};
+			const TSharedRef<FPress> Rmb = PushButtonDrag(TEXT("section.locks.rmb"), EKeys::RightMouseButton, 200.f);
+			PushCheck(TEXT("section.locks.rmb"), Rmb, PoseSame, 0.f, 0.3f, /*bAllowWorldClick*/ false);
+			const TSharedRef<FPress> Mmb = PushButtonDrag(TEXT("section.locks.mmb"), EKeys::MiddleMouseButton, 200.f);
+			PushCheck(TEXT("section.locks.mmb"), Mmb, PoseSame, 0.f, 0.3f, false);
+
+			Runner.Do(TEXT("section.cut focus"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSectionFocus(-1); } }, 0.6f);
+			const TSharedRef<FPress> Cut = PushPress(TEXT("section.cut"), LocateButton(TEXT("Cut here"), 0, true));
+			PushCheck(TEXT("section.cut"), Cut, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim || Sim->GetCaverns().Num() == 0) { return FString(TEXT("no cavern")); }
+				const FRHCavern& Cv = Sim->GetCaverns()[0];
+				const int32 D0 = URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), Cv.Min), D1 = URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), Cv.Max);
+				const int32 Want = (FMath::Min(D0, D1) + FMath::Max(D0, D1)) / 2;
+				return (PC->IsSectionOn() && PC->GetSectionPlaneRow() == Want && PC->GetSectionFocus() == Cv.Bottom)
+					? FString() : FString::Printf(TEXT("plane %d (want %d), focus %d (want %d)"), PC->GetSectionPlaneRow(), Want, PC->GetSectionFocus(), Cv.Bottom);
+			}, 1.f);
+
+			const TSharedRef<int32> Refreshes = MakeShared<int32>(0);
+			Runner.Do(TEXT("section.traffic base"), [Refreshes, Section]() { *Refreshes = Section() ? Section()->GetOverlayRefreshes() : 0; }, 0.1f);
+			const TSharedRef<FPress> TOn = PushPress(TEXT("section.traffic"), LocateButton(TEXT("Traffic"), 0, true));
+			PushCheck(TEXT("section.traffic"), TOn, [Refreshes, Section]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				UWorld* W = FindGameWorld();
+				const URHTrafficVisualizerSubsystem* Traffic = W ? W->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
+				if (!PC || !PC->IsTrafficOverlayOn()) { return FString(TEXT("the overlay did not turn on")); }
+				if (!Section() || Section()->GetOverlayRefreshes() <= *Refreshes) { return FString(TEXT("the section's layers did not draw")); }
+				return (Traffic && Traffic->IsSurfaceHidden()) ? FString() : FString(TEXT("the surface traffic layers are showing in the section"));
+			}, 2.f);
+			const TSharedRef<FPress> TOff = PushPress(TEXT("section.traffic.off"), LocateButton(TEXT("Traffic [on]"), 0, true));
+			PushCheck(TEXT("section.traffic.off"), TOff, []() { const ARHPlayerController* PC = GetPC(); return (PC && !PC->IsTrafficOverlayOn()) ? FString() : FString(TEXT("the overlay did not turn off")); }, 1.f);
+
+			Runner.Do(TEXT("section.esc.menu open"), []() { if (ARHPlayerController* PC = GetPC()) { PC->OpenPauseMenu(); } }, 0.6f);
+			const TSharedRef<FPress> EscMenu = PushKey(TEXT("section.esc.menu"), EKeys::Escape);
+			PushCheck(TEXT("section.esc.menu"), EscMenu, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				return (PC && !PC->IsMenuOpen() && PC->IsSectionOn()) ? FString() : FString(TEXT("Escape over a menu did not close the menu and keep the section"));
+			}, 1.f);
+			Runner.Do(TEXT("section.esc resume"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); } }, 0.3f);
+			const TSharedRef<FPress> Esc = PushKey(TEXT("section.esc"), EKeys::Escape);
+			PushCheck(TEXT("section.esc"), Esc, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				return (PC && !PC->IsSectionOn() && !PC->IsMenuOpen()) ? FString() : FString(TEXT("Escape did not leave the section, or opened the pause menu"));
+			}, 1.f);
+
+			const TSharedRef<int32> LevelBefore = MakeShared<int32>(0);
+			Runner.Do(TEXT("section.V base"), [LevelBefore]() { if (const ARHPlayerController* PC = GetPC()) { *LevelBefore = PC->GetActiveLevel(); } }, 0.1f);
+			const TSharedRef<FPress> VOn = PushKey(TEXT("section.V"), EKeys::V);
+			PushCheck(TEXT("section.V"), VOn, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->IsSectionOn()) ? FString() : FString(TEXT("V did not open the section")); }, 1.f);
+			const TSharedRef<FPress> VOff = PushKey(TEXT("section.V.off"), EKeys::V);
+			PushCheck(TEXT("section.V.off"), VOff, [LevelBefore]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				return (PC && !PC->IsSectionOn() && PC->GetActiveLevel() == *LevelBefore) ? FString()
+					: FString::Printf(TEXT("V did not close the section back on floor %d (now %d)"), *LevelBefore, PC ? PC->GetActiveLevel() : 0);
+			}, 1.f);
+
+			PushKey(TEXT("section.dive open"), EKeys::V);
+			PushSettle(1.5f); // the focus Z rides to the section's floor (~1.5 s a floor)
+			const TSharedRef<FPress> Dive = PushPress(TEXT("section.dive"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateSectionPlate(-2)(OutPos); });
+			PushCheck(TEXT("section.dive"), Dive, [Dive]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				if (!PC) { return FString(TEXT("no player controller")); }
+				if (PC->GetWorldClickCount() != Dive->LeakBase + 1) { return FString::Printf(TEXT("the click moved OnClick by %d, expected 1"), PC->GetWorldClickCount() - Dive->LeakBase); }
+				return (!PC->IsSectionOn() && PC->GetActiveLevel() == -2) ? FString() : FString::Printf(TEXT("after the dive the section is %s and the floor %d"), PC->IsSectionOn() ? TEXT("on") : TEXT("off"), PC->GetActiveLevel());
+			}, 1.f, 0.3f, true);
+
+			// section.cut.atrium waits for D7 (Q-C (a)): D7's build adds it with GetAtriums().
+			PushKey(TEXT("section.arm open"), EKeys::V);
+			const TSharedRef<FPress> Arm = PushPress(TEXT("section.arm"), LocateButton(TEXT("Tunnel"), 0, true));
+			PushCheck(TEXT("section.arm"), Arm, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				return (PC && !PC->IsSectionOn() && PC->IsTunnelMode()) ? FString() : FString(TEXT("arming the Tunnel brush did not leave the section with the brush armed"));
+			}, 1.f);
+			Runner.Do(TEXT("section.done"), []() { if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); } }, 0.2f);
+		}
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -1170,7 +1603,7 @@ namespace
 				PC->CancelModes();
 				PC->SetActiveLevel(0);
 				const int32 Actual = PC->GetWorldClickCount() - T->WorldBase;
-				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel, the cavern and the district shape)"), Actual, T->ExpectedWorld));
+				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel, the cavern, the district shape and the section's dive)"), Actual, T->ExpectedWorld));
 			}
 			if (Sim)
 			{

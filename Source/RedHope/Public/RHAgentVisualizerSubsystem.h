@@ -52,6 +52,14 @@ public:
 	// D4: the viewed floor. Each robot is drawn only on its own floor (its sim Z), so with no lift car - every robot on the
 	// surface - this is SetSliceHidden(Level != 0) exactly. Rovers never leave the surface.
 	void SetViewLevel(int32 Level);
+	// D8 (the deep view): while the section is on, the surface layer is hidden (SetSliceHidden(true)) and a robot below ground is drawn
+	// iff the section's slab holds it (URHSectionVisualizerSubsystem::IsInSlab), at its real position. The controller's mirror, pushed
+	// through the colony visualizer. The positions drawn this frame are kept for the section's per-tunnel robot count (drawn positions
+	// from the Mass fragments, not a sim accessor).
+	void SetSectionMode(bool bOn);
+	const TArray<FVector>& GetSectionDrawnCm() const { return SectionDrawnCm; }
+	int32 GetSectionDrawnCount() const { return SectionDrawnCm.Num(); }
+	int32 GetTrackedCount() const { return Tracked.Num(); } // RH.DeepBench's line: robots the visualizer follows
 
 private:
 	void EnsureMeshComponent();
@@ -131,6 +139,8 @@ private:
 	TArray<float> StridePhase;
 	bool bSliceHidden = false;
 	int32 ViewLevel = 0;
+	bool bSectionMode = false;
+	TArray<FVector> SectionDrawnCm;
 	// D4: a cab box around each robot riding a lift car, pooled (hidden when unused). Presentation only.
 	TArray<TWeakObjectPtr<UStaticMeshComponent>> CabBoxes;
 	UStaticMeshComponent* GetCabBox(int32 Index);

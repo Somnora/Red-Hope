@@ -47,6 +47,7 @@ public:
 	// The overlay (beside Map on the command bar; RH.Traffic overlay <0|1>).
 	void SetOverlayOn(bool bOn);
 	bool IsOverlayOn() const { return bOverlay; }
+	bool IsSurfaceHidden() const { return bHidden; } // D8: the click test checks the surface layers stay hidden in the section
 	// The controller tells it where the cursor meets the ground each frame the overlay is on (and
 	// no tool owns the click); the nearest road edge under it becomes the hover.
 	void SetHoverGround(const FVector& GroundCm, bool bValid);

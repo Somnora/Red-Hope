@@ -140,6 +140,29 @@ public:
 	void FocusNextShaft();
 	// D4: the shaft whose head is nearest the camera focus (0 with one shaft) - the shaft card's shaft.
 	int32 GetNearestShaftId() const;
+
+	// D8 (the deep view, docs/qa/2026-10-23/d8-deep-view-design.md R1): the section, a cut along a vertical plane through every floor
+	// under a shaft. This controller owns all of its state and pushes a mirror to the colony visualizer and the section visualizer.
+	// ActiveLevel stays frozen at the entry floor while it is on; the slider, the strip rows and PageUp/PageDown move SectionFocus only.
+	bool CanEnterSection() const;               // some shaft is bored, no menu or title is open
+	void EnterSection();
+	void ExitSection(int32 ToLevel);            // back to the floor view, on ToLevel (through SetActiveLevel's clamp)
+	void ToggleSection();
+	bool IsSectionOn() const { return bSectionOn; }
+	int32 GetSectionFocus() const { return SectionFocus; }
+	int32 GetSectionAxis() const { return SectionAxis; }       // 0..3: the camera looks along +X, +Y, -X, -Y
+	int32 GetSectionPlaneRow() const { return SectionPlaneRow; }
+	int32 GetSectionShaft() const { return SectionShaft; }
+	// The floor the deck shows as "yours": the focus in the section, else the active floor.
+	int32 GetShownLevel() const { return bSectionOn ? SectionFocus : ActiveLevel; }
+	void SetSectionFocus(int32 Level);          // clamped to SURF..the deepest bored floor
+	void StepSectionFocus(int32 Delta);
+	void TurnSection(int32 Sign);               // a quarter turn; the cut keeps its centre
+	void StepSectionPlane(int32 Rows);          // + is away from the camera
+	void SetSectionPlaneRow(int32 Row);
+	void SetSectionAxis(int32 Axis);
+	// Cut here (a cavern's card): enter if needed, put the plane through the box's middle row and the focus on its bottom floor.
+	bool CutSectionAtCavern(int32 CavernId);
 	// The deck's visible feedback channels (M1-b Gate C: GEngine debug text
 	// provably hides under the Slate deck, so the deck renders these instead).
 	// Confirm = one-shot notice with expiry (order sent, save/load result);
@@ -208,6 +231,17 @@ private:
 	// D5 depth: PageUp / PageDown step the view one floor toward the surface / deeper (SetActiveLevel keeps its reached-depth clamp).
 	void OnFloorUp();
 	void OnFloorDown();
+	// D8: the section's own inputs (V, Home, End; Q/E edge-triggered; W/S released) and its per-frame work.
+	void OnSectionToggle();
+	void OnSectionHome();
+	void OnSectionEnd();
+	void OnSectionTurn(const FInputActionValue& Value);
+	void OnPanCompleted();
+	void TickSection(float DeltaTime);
+	void HandleSectionClick();
+	void PushSection();                          // the mirrors: colony, section visualizer, pawn
+	void FrameSection(bool bRefit);              // the camera's focus on the cut (and, with bRefit, the zoom that fits the dig)
+	bool SectionPickAtCursor(int32& OutLevel, FIntPoint& OutCell) const;
 	// The furnishable cell under a ground point and the slot that centres the
 	// armed piece there; false off any room.
 	bool ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
@@ -240,6 +274,9 @@ private:
 	UPROPERTY() TObjectPtr<UInputAction> IA_Speed60;
 	UPROPERTY() TObjectPtr<UInputAction> IA_FloorUp;
 	UPROPERTY() TObjectPtr<UInputAction> IA_FloorDown;
+	UPROPERTY() TObjectPtr<UInputAction> IA_Section;
+	UPROPERTY() TObjectPtr<UInputAction> IA_SectionHome;
+	UPROPERTY() TObjectPtr<UInputAction> IA_SectionEnd;
 
 	TSharedPtr<SRHCommandDeck> Deck;
 	TSharedPtr<class SRHMenus> Menus;
@@ -311,6 +348,17 @@ private:
 	// or INDEX_NONE. The zoning click's inverse of the sim's SpiralCell.
 	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;
 	int32 ActiveLevel = 0;
+	// D8: the section's state (R1) and the floor-view pose it put aside.
+	bool bSectionOn = false;
+	bool bSectionExiting = false;               // SetActiveLevel's own call from ExitSection (any other call leaves the section first)
+	int32 SectionFocus = 0;
+	int32 SectionAxis = 0;
+	int32 SectionPlaneRow = 0;
+	int32 SectionShaft = 0;
+	FVector2D SavedFocusXY = FVector2D::ZeroVector;
+	float SavedZoomT = 0.45f, SavedPitchOffset = 0.f, SavedYaw = 0.f;
+	bool bSectionStepHeld = false;              // W/S: one row on the press, then a repeat after 0.4 s every 0.25 s
+	float SectionStepClock = 0.f;
 	int32 SelectedBuildingId = 0;
 	int32 SelectedCellLevel = 0;
 	int32 SelectedCellIndex = INDEX_NONE;

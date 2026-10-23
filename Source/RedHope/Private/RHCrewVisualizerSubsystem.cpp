@@ -1412,13 +1412,17 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	// Hover point: the cursor projected onto the viewed floor plane. Name and
 	// activity plates show only near it (director 2026-07-10: with hundreds of
 	// colonists, always-on names are noise - hover or click to inspect).
+	// D8 (Q-B a): in the deep view's section no figure is drawn and no crowd record is kept; people below are the section's pips. The crew is
+	// told a level no floor has (1), so every figure is on "another" floor and the crowd has nobody to show; no hover plates either.
+	const bool bSectionOn = Colony->IsSectionMode();
+	const int32 CrewViewLevel = bSectionOn ? 1 : Colony->GetViewLevel();
 	FVector CursorCm(1.0e12, 1.0e12, 0);
-	if (APlayerController* PC = World->GetFirstPlayerController())
+	if (APlayerController* PC = bSectionOn ? nullptr : World->GetFirstPlayerController())
 	{
 		FVector O, D;
 		if (PC->DeprojectMousePositionToWorld(O, D) && FMath::Abs(D.Z) > 1.0e-4)
 		{
-			const double PlaneZ = Colony->GetViewLevel() * Sim->GetFloorHeightCm();
+			const double PlaneZ = CrewViewLevel * Sim->GetFloorHeightCm();
 			const double T = (PlaneZ - O.Z) / D.Z;
 			if (T > 0)
 			{
@@ -1430,7 +1434,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 	// The roster, tier by tier (C3). A change of who is here (arrivals, departures,
 	// a move home) is spotted by a hash over the roster, so the per-colonist
 	// bookkeeping runs when something changed, not every frame.
-	const int32 ViewLevel = Colony->GetViewLevel();
+	const int32 ViewLevel = CrewViewLevel;
 	{
 		uint32 Sig = (uint32)Roster.Num() * 2654435761u;
 		for (const FRHColonist& C : Roster)
@@ -2212,7 +2216,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		}
 
 		// Pit-view hard cut: the figure shows iff it stands on the viewed floor.
-		Actor->SetActorHiddenInGame(Vis->CurLevel != Colony->GetViewLevel());
+		Actor->SetActorHiddenInGame(Vis->CurLevel != CrewViewLevel);
 	}
 	bSyncedOnce = true;
 

@@ -2,5 +2,5 @@
 
 namespace RHFrameStats
 {
-	double GSlotSeconds[SlotCount] = { 0.0, 0.0 };
+	double GSlotSeconds[SlotCount] = { 0.0, 0.0, 0.0 };
 }

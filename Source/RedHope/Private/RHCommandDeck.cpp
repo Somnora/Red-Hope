@@ -20,6 +20,8 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Input/SSlider.h"
+#include "Types/ISlateMetaData.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/SBoxPanel.h"
@@ -345,6 +347,37 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		ShaftRows.Add(Level, Row);
 		ShaftScroll->AddSlot()[ Row ];
 	};
+	// D8 (the deep view): Section opens the cut through every floor under the nearest shaft, once any shaft is bored (V does the same).
+	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f, 0.f, 3.f))
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this]()
+		{
+			const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+			const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+			return (S && S->GetShaftDepth() >= 1) ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity_Lambda([this]()
+			{
+				return FSlateColor((PC.IsValid() && PC->IsSectionOn()) ? FLinearColor(0.06f, 0.36f, 0.42f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f));
+			})
+			.ContentPadding(FMargin(9.f, 3.f))
+			.ToolTipText(FText::FromString(TEXT("The deep view: every floor under the nearest shaft, cut open (V)")))
+			.OnClicked_Lambda([this]()
+			{
+				if (PC.IsValid()) { PC->ToggleSection(); }
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() { return FText::FromString((PC.IsValid() && PC->IsSectionOn()) ? TEXT("Section [on]") : TEXT("Section")); })
+				.Font(RHDeck::Label(9)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+			]
+		]
+	];
 	// D2: once there is more than one shaft, a button walks the camera from head to head (Id order).
 	ShaftStrip->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f, 0.f, 3.f))
 	[
@@ -382,7 +415,44 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			return FOptionalSize(11.f * (ShaftRowHeight > 1.f ? ShaftRowHeight : 27.f));
 		})))
 		[
-			ShaftScroll.ToSharedRef()
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				ShaftScroll.ToSharedRef()
+			]
+			// D8: the depth slider, beside the rows while the section is on: SURF at the top, the deepest bored floor at the bottom, one
+			// step a floor. Tagged so the click test can find and drag it.
+			+ SHorizontalBox::Slot().AutoWidth().Padding(FMargin(3.f, 0.f, 0.f, 0.f))
+			[
+				SNew(SBox)
+				.WidthOverride(16.f)
+				.Visibility_Lambda([this]() { return (PC.IsValid() && PC->IsSectionOn()) ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					SNew(SSlider)
+					.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.SectionSlider")))
+					.Orientation(Orient_Vertical)
+					.MinValue(0.f)
+					.MaxValue(1.f)
+					.MouseUsesStep(true)
+					.IsFocusable(false)
+					.SliderBarColor(FSlateColor(FLinearColor(0.20f, 0.30f, 0.34f)))
+					.SliderHandleColor(FSlateColor(FLinearColor(0.35f, 1.0f, 0.88f)))
+					.StepSize_Lambda([this]() { const int32 D = GetSectionSliderDepth(); return D > 0 ? 1.f / (float)D : 1.f; })
+					.Value_Lambda([this]()
+					{
+						const int32 D = GetSectionSliderDepth();
+						return (D > 0 && PC.IsValid()) ? 1.f + (float)PC->GetSectionFocus() / (float)D : 1.f;
+					})
+					.OnValueChanged_Lambda([this](float V)
+					{
+						const int32 D = GetSectionSliderDepth();
+						if (PC.IsValid() && PC->IsSectionOn() && D > 0)
+						{
+							PC->SetSectionFocus(-FMath::RoundToInt32((1.f - V) * (float)D));
+						}
+					})
+				]
+			]
 		]
 	];
 	// D4: the shaft card - the shaft nearest the camera: its lift cars (or the hoist), load and wait, and the fit verb.
@@ -2203,7 +2273,7 @@ FText SRHCommandDeck::GetLiftCardText() const
 	}
 	const FString Head = Cars > 0 ? FString::Printf(TEXT("Shaft %d: cars %d/%d"), S, Cars, Sim->GetMaxLiftCars()) : FString::Printf(TEXT("Shaft %d: hoist"), S);
 	// D5 depth: the viewed floor's cooling, tunnel cells included (Gate-D placeholder copy).
-	const int32 Viewed = PC->GetActiveLevel();
+	const int32 Viewed = PC->GetShownLevel();
 	const FString Cool = (Viewed < -Sim->GetDepthCostFromFloor() && Sim->GetFloorCoolingW(Viewed) > 0.0)
 		? FString::Printf(TEXT("\nfloor %d cooling %.0f W (tunnels too)"), Viewed, Sim->GetFloorCoolingW(Viewed)) : FString();
 	return FText::FromString(FString::Printf(TEXT("%s\nload %lld / %lld\nwait %d s%s"), *Head,
@@ -2345,7 +2415,7 @@ void SRHCommandDeck::RefreshTunnelList()
 	{
 		return;
 	}
-	const int32 Level = PC->GetActiveLevel();
+	const int32 Level = PC->GetShownLevel();
 	uint32 Key = FCrc::MemCrc32(&Level, sizeof(Level), (uint32)Sim->GetTunnelsVersion());
 	const uint32 Cells = Sim->GetFloorCellsVersion(), Shafts = Sim->GetShaftsVersion();
 	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
@@ -2474,8 +2544,11 @@ void SRHCommandDeck::RefreshCavernList()
 	{
 		return;
 	}
-	const int32 Level = PC->GetActiveLevel();
+	const int32 Level = PC->GetShownLevel();
+	// D8: in the section the list follows the focus floor and also shows finished caverns (the halls a cut opens), each with Cut here.
+	const bool bSection = PC->IsSectionOn();
 	uint32 Key = FCrc::MemCrc32(&Level, sizeof(Level), (uint32)Sim->GetCavernsVersion());
+	Key = FCrc::MemCrc32(&bSection, sizeof(bSection), Key);
 	const uint32 Cells = Sim->GetFloorCellsVersion(), Shafts = Sim->GetShaftsVersion();
 	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
 	Key = FCrc::MemCrc32(&Shafts, sizeof(Shafts), Key);
@@ -2492,7 +2565,8 @@ void SRHCommandDeck::RefreshCavernList()
 	bool bAny = false;
 	for (const FRHCavern& Cv : Sim->GetCaverns())
 	{
-		if (!Cv.ContainsLevel(Level) || !Sim->IsCavernOpen(Cv))
+		const bool bOpen = Sim->IsCavernOpen(Cv);
+		if (!Cv.ContainsLevel(Level) || (!bOpen && !(bSection && !Cv.bCancelled)))
 		{
 			continue;
 		}
@@ -2506,6 +2580,29 @@ void SRHCommandDeck::RefreshCavernList()
 		}
 		const int32 Id = Cv.Id;
 		const FString Floors = Cv.GetFloors() == 1 ? FString::Printf(TEXT("floor %d"), Cv.Top) : FString::Printf(TEXT("floors %d..%d"), Cv.Top, Cv.Bottom);
+		// D8: Cut here puts the section's plane through the box's middle row (entering the section if needed).
+		const TSharedRef<SWidget> CutHere = SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.06f, 0.20f, 0.24f, 0.95f)))
+			.ContentPadding(FMargin(5.f, 2.f))
+			.ToolTipText(FText::FromString(FString::Printf(TEXT("Cut the deep view through cavern %d"), Id)))
+			.OnClicked_Lambda([this, Id]()
+			{
+				if (PC.IsValid()) { PC->CutSectionAtCavern(Id); }
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock).Text(FText::FromString(TEXT("Cut here"))).Font(RHDeck::Label(8)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+			];
+		if (!bOpen)
+		{
+			CavernList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 1.f))
+			[
+				SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d  %s"), Id, *Floors))).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
+			];
+			CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f)) [ CutHere ];
+			continue;
+		}
 		// The strip is narrow, so a row is three short lines: the cavern and what is left, which floors it spans, and the cancel.
 		CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
 		[
@@ -2532,6 +2629,7 @@ void SRHCommandDeck::RefreshCavernList()
 				]
 			]
 		];
+		CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f)) [ CutHere ];
 	}
 }
 
@@ -2602,7 +2700,14 @@ FReply SRHCommandDeck::HandleFloor(int32 Level)
 {
 	if (PC.IsValid())
 	{
-		PC->SetActiveLevel(Level);
+		if (PC->IsSectionOn())
+		{
+			PC->SetSectionFocus(Level); // D8 R1: in the section a row moves the focus; it never leaves the section
+		}
+		else
+		{
+			PC->SetActiveLevel(Level);
+		}
 	}
 	return FReply::Handled();
 }
@@ -2617,8 +2722,15 @@ EVisibility SRHCommandDeck::GetShaftRowVisibility(int32 Level) const
 	{
 		return EVisibility::Visible;
 	}
-	const bool bShown = Sim->IsLevelConnected(Level) || Level == -(Sim->GetShaftDepth() + 1) || (PC.IsValid() && PC->GetActiveLevel() == Level);
+	const bool bShown = Sim->IsLevelConnected(Level) || Level == -(Sim->GetShaftDepth() + 1) || (PC.IsValid() && PC->GetShownLevel() == Level);
 	return bShown ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+int32 SRHCommandDeck::GetSectionSliderDepth() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	return Sim ? Sim->GetShaftDepth() : 0;
 }
 
 void SRHCommandDeck::FollowShaftScroll()
@@ -2635,7 +2747,7 @@ void SRHCommandDeck::FollowShaftScroll()
 			ShaftRowHeight = H > 1.f ? H : 0.f; // measured once, from the SURF row
 		}
 	}
-	const int32 Level = PC->GetActiveLevel();
+	const int32 Level = PC->GetShownLevel();
 	if (Level == ShaftScrollLevel)
 	{
 		return;
@@ -2686,7 +2798,7 @@ FSlateColor SRHCommandDeck::GetFloorCellColor(int32 Level) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const bool bActive = PC.IsValid() && PC->GetActiveLevel() == Level;
+	const bool bActive = PC.IsValid() && PC->GetShownLevel() == Level;
 	const bool bReached = Sim && Sim->IsLevelConnected(Level);
 	if (bActive)
 	{
@@ -2710,7 +2822,7 @@ FSlateColor SRHCommandDeck::GetFloorTextColor(int32 Level) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	const bool bActive = PC.IsValid() && PC->GetActiveLevel() == Level;
+	const bool bActive = PC.IsValid() && PC->GetShownLevel() == Level;
 	const bool bReached = Sim && Sim->IsLevelConnected(Level);
 	if (bActive)
 	{

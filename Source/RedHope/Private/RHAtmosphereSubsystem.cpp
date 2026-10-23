@@ -149,7 +149,7 @@ void URHAtmosphereSubsystem::Tick(float DeltaTime)
 	bool bUnderground = false;
 	if (const URHColonyVisualizerSubsystem* Colony = World->GetSubsystem<URHColonyVisualizerSubsystem>())
 	{
-		bUnderground = Colony->GetViewLevel() < 0;
+		bUnderground = Colony->GetViewLevel() < 0 || Colony->IsSectionMode(); // D8: the section reads as underground
 	}
 	DriveLook(DustFactor, SolFraction, bUnderground);
 }
