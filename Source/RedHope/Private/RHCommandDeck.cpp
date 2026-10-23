@@ -544,6 +544,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	[
 		SAssignNew(CavernList, SVerticalBox)
 	];
+	// D6d: the tram card - the viewed floor's lines and a Lay tram button per finished tunnel (RefreshTramList).
+	ShaftStrip->AddSlot().AutoHeight()
+	[
+		SAssignNew(TramList, SVerticalBox)
+	];
 
 	// Speed tiers light up while live, so the bar says how fast time runs.
 	auto SpeedButton = [this](const TCHAR* Label, float Tier) -> TSharedRef<SWidget>
@@ -1303,6 +1308,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshCityPanel();
 	RefreshTunnelList();
 	RefreshCavernList();
+	RefreshTramList();
 	FollowShaftScroll();
 	RefreshGuide();
 
@@ -2630,6 +2636,117 @@ void SRHCommandDeck::RefreshCavernList()
 			]
 		];
 		CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f)) [ CutHere ];
+	}
+}
+
+FReply SRHCommandDeck::HandleLayTram(int32 TunnelId)
+{
+	// D6d: the LayTramLine order (Value = the tunnel Id, uplink). The preflight says why not before anything is sent.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (Sim && PC.IsValid())
+	{
+		FString Why;
+		double Bill = 0.0;
+		if (Sim->CanLayTramLine(TunnelId, Why, &Bill))
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("LayTramLine");
+			Cmd.Value = TunnelId;
+			Sim->EnqueueCommand(Cmd);
+			PC->PostConfirm(FString::Printf(TEXT("Tram order transmitted: a line on tunnel %d (%.0f kg Struct)"), TunnelId, Bill), FLinearColor(0.2f, 0.9f, 1.f)); // Gate-D placeholder copy (row N2)
+		}
+		else
+		{
+			PC->PostConfirm(Why, FLinearColor(1.f, 0.6f, 0.2f));
+		}
+	}
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::RefreshTramList()
+{
+	// The viewed floor's tram lines and the finished tunnels that could take one, rebuilt only when the lines, the tunnels, a carved cell, the
+	// lift cars or the viewed floor change (the key); the lines' own text reads live. In the section the list follows the focus floor.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !TramList.IsValid())
+	{
+		return;
+	}
+	const int32 Level = PC->GetShownLevel();
+	uint32 Key = FCrc::MemCrc32(&Level, sizeof(Level), (uint32)Sim->GetTramVersion());
+	const uint32 Tunnels = Sim->GetTunnelsVersion(), Cells = Sim->GetFloorCellsVersion(), Lift = Sim->GetLiftVersion();
+	Key = FCrc::MemCrc32(&Tunnels, sizeof(Tunnels), Key);
+	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
+	Key = FCrc::MemCrc32(&Lift, sizeof(Lift), Key);
+	if (Key == TramListKey)
+	{
+		return;
+	}
+	TramListKey = Key;
+	TramList->ClearChildren();
+	if (Level >= 0)
+	{
+		return;
+	}
+	bool bAny = false;
+	const auto Heading = [&]()
+	{
+		if (bAny) { return; }
+		bAny = true;
+		TramList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 2.f))
+		[
+			SNew(STextBlock).Text(FText::FromString(TEXT("TRAMS"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
+		];
+	};
+	for (const FRHTramLine& L : Sim->GetTramLines())
+	{
+		if (L.Level != Level)
+		{
+			continue;
+		}
+		Heading();
+		const int32 Id = L.Id;
+		TramList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 1.f))
+		[
+			SNew(STextBlock)
+			.Text_Lambda([this, Id]()
+			{
+				const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+				const URHSimWorldSubsystem* S = W ? W->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+				const FRHTramLine* Line = S ? S->FindTramLine(Id) : nullptr;
+				return Line ? FText::FromString(FString::Printf(TEXT("Tram %d\n%d a sol\nwait %d s"), Id, S->GetTramPeople(Id), Line->WaitSec)) : FText::GetEmpty(); // Gate-D placeholder copy (row N3)
+			})
+			.Font(RHDeck::Label(8)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+		];
+	}
+	for (const FRHTunnel& T : Sim->GetTunnels())
+	{
+		if (T.Level != Level || T.bCancelled || Sim->GetTunnelUncarved(T) > 0 || Sim->FindTramOnTunnel(T.Id)
+			|| URHSimWorldSubsystem::GetTunnelChainLength(T.A, T.B) < Sim->GetTramMinCells())
+		{
+			continue;
+		}
+		Heading();
+		const int32 Id = T.Id;
+		const double Bill = (double)URHSimWorldSubsystem::GetTunnelChainLength(T.A, T.B) * Sim->GetTramStructKgPerCell();
+		TramList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity(FSlateColor(FLinearColor(0.06f, 0.20f, 0.24f, 0.95f)))
+			.ContentPadding(FMargin(5.f, 3.f))
+			.ToolTipText(FText::FromString(FString::Printf(TEXT("Lay a tram line on tunnel %d: people ride between its two ends, %.0f kg Struct. Needs a lift car. Robots never ride"), Id, Bill)))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLayTram, Id))
+			[
+				SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("Lay tram #%d"), Id))).Font(RHDeck::Label(9)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+			]
+		];
+		TramList->AddSlot().AutoHeight().HAlign(HAlign_Center)
+		[
+			SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("%.0f kg Struct"), Bill))).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
+		];
 	}
 }
 

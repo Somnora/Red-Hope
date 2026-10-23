@@ -82,6 +82,10 @@ public:
 	double GetWorstRebuildMs() const { return WorstRebuildMs; }
 	int32 GetOverlayRefreshes() const { return OverlayRefreshes; }
 	int32 GetOverlayArrowCount() const { return OverlayArrows; }
+	// D6d: the tram band as TRAFFIC last drew it - the chain cells drawn in the slab, and the lines that have any (a line outside the slab shows
+	// only in the legend).
+	int32 GetTramBandCells() const { return TramBandCells; }
+	int32 GetTramBandLines() const { return TramBandLines; }
 	bool IsSimplified() const { return bSimplified; }
 	// What TRAFFIC's legend adds below ground (empty while the section is off).
 	const FString& GetLegendText() const { return LegendText; }
@@ -187,6 +191,7 @@ private:
 	double NextOverlayS = 0.0;
 	bool bOverlayShown = false;
 	int32 OverlayRefreshes = 0, OverlayArrows = 0;
+	int32 TramBandCells = 0, TramBandLines = 0;
 	uint32 OverlayHash = 0;
 	TMap<int32, FIntPoint> FlowSums;           // floor -> (out, in)
 	FString LegendText;

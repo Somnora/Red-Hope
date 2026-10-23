@@ -16,6 +16,12 @@
 //    stands on.
 // A trip is priced WAIT-FREE (the route choice reads no wait, so a crowd lengthens trips and never flips a route from sol to sol), ties to
 // the lower shaft Id; each shaft ridden then adds its own wait (D4 2.6). People change floors by shaft only: no stairs until D7.
+//
+// D6d (trams with people): a tram line is an edge between its two STOPS (the tunnel's end cells, which are chain cells and so nodes), priced
+// wait-free at (TramHeadwaySec / 2 + ceil(length / speed)) x CommuteWaitCmPerSec. The plain fields never include a line; WalkTramCm joins the
+// floor's lines over the stops at query time (a tiny exact Dijkstra over the stops: walk, ride, walk), so the walking answers stay D6c's and
+// the lines a trip rides can be named. A line is taken only where it is STRICTLY cheaper than the walk, ties between lines go to the lower
+// index, and the route reads no wait: the chosen lines' frozen waits are added afterwards (DeepTripWaitCm).
 
 namespace
 {
@@ -151,6 +157,7 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 	Out.Level = Level;
 	Out.LandingOrd.Init(INDEX_NONE, Shafts.Num());
 	Out.LandWalk.SetNum(Shafts.Num());
+	Out.LandLines.SetNum(Shafts.Num());
 	const FRHFloor* Floor = FindFloor(Level);
 	const int32 N = Floor ? Floor->GetCells().Num() : 0;
 	if (N == 0)
@@ -289,6 +296,28 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 			}
 		}
 	}
+	// D6d: this floor's tram lines, in line order. A stop is a chain cell, so a node; a line whose stop is not carved (never, a line sits on a
+	// finished tunnel) is left out.
+	for (int32 i = 0; i < TramLines.Num(); ++i)
+	{
+		const FRHTramLine& L = TramLines[i];
+		if (L.Level != Level)
+		{
+			continue;
+		}
+		const int32 StopA = Index.Find(L.StopA.X, L.StopA.Y), StopB = Index.Find(L.StopB.X, L.StopB.Y);
+		if (StopA == INDEX_NONE || StopB == INDEX_NONE || Out.NodeOf[StopA] == INDEX_NONE || Out.NodeOf[StopB] == INDEX_NONE)
+		{
+			continue;
+		}
+		FRHWalkFloor::FWalkTram& Tram = Out.Trams.AddDefaulted_GetRef();
+		Tram.Line = i;
+		Tram.StopOrd[0] = StopA;
+		Tram.StopOrd[1] = StopB;
+		Tram.Cm = GetTramEdgeCm(L);
+	}
+	Out.StopWalk.SetNum(Out.Trams.Num() * 2);
+	Out.StopToStop.Init(MIN_int64, Out.Trams.Num() * 2 * Out.Trams.Num() * 2);
 	// One Dijkstra per door and landing; a chain cell's field is computed when an end stands on it.
 	Out.Field.SetNum(NN);
 	for (int32 u = 0; u < NN; ++u)
@@ -308,10 +337,10 @@ void URHSimWorldSubsystem::DeriveDeepWalk(FRHDeepWalk& Out) const
 	Out.Tunnels = TunnelsVersion;
 	Out.Shafts = ShaftsVersion;
 	Out.Districts = DistrictsVersion;
+	Out.Tram = TramVersion;
 	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
 	TArray<int32> Levels;
-	Geo.DeepFloor.GetKeys(Levels);
-	Levels.Sort(); // an explicit order: the map's own decides nothing
+	Geo.GetMappedLevels(Levels); // D6d: the floors that hold a shape or a tram line, ascending
 	for (const int32 Level : Levels)
 	{
 		BuildWalkFloor(Level, Out.Floors.Add(Level));
@@ -321,7 +350,7 @@ void URHSimWorldSubsystem::DeriveDeepWalk(FRHDeepWalk& Out) const
 const URHSimWorldSubsystem::FRHDeepWalk& URHSimWorldSubsystem::EnsureDeepWalk() const
 {
 	FRHDeepWalk& N = DeepWalk;
-	const bool bFresh = N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion;
+	const bool bFresh = N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion;
 	if (!bFresh)
 	{
 		++DeepWalkBuilds;
@@ -340,7 +369,7 @@ bool URHSimWorldSubsystem::IsDeepWalkFresh() const
 	// True unless the cache is being REUSED (its key still matches) while a fresh derivation differs. The lazily computed chain-cell fields
 	// are left out of the compare: they are filled on demand and are a pure function of the rest.
 	const FRHDeepWalk& N = DeepWalk;
-	if (!(N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion))
+	if (!(N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion))
 	{
 		return true; // a cache whose key has moved reads as fresh: it rebuilds on its next read
 	}
@@ -360,15 +389,30 @@ bool URHSimWorldSubsystem::IsDeepWalkFresh() const
 		}
 		const FRHWalkFloor& A = P.Value;
 		bSame &= A.Pts == Other->Pts && A.CompOf == Other->CompOf && A.NodeOf == Other->NodeOf && A.NodeOrdinal == Other->NodeOrdinal
-			&& A.CompNodes == Other->CompNodes && A.LandingOrd == Other->LandingOrd && A.Adj.Num() == Other->Adj.Num();
+			&& A.CompNodes == Other->CompNodes && A.LandingOrd == Other->LandingOrd && A.Adj.Num() == Other->Adj.Num() && A.Trams == Other->Trams;
 		for (int32 S = 0; bSame && S < Other->LandWalk.Num() && S < A.LandingOrd.Num(); ++S)
 		{
 			// An answer asked of the cached network must be the answer a fresh walk gives.
 			const TArray<int64>& Memo = Other->LandWalk[S];
 			for (int32 Cell = 0; bSame && Cell < Memo.Num(); ++Cell)
 			{
-				bSame &= Memo[Cell] == MIN_int64 || (A.LandingOrd[S] != INDEX_NONE && Memo[Cell] == WalkCm(A, Cell, A.LandingOrd[S]));
+				uint32 Lines = 0;
+				bSame &= Memo[Cell] == MIN_int64 || (A.LandingOrd[S] != INDEX_NONE && Memo[Cell] == WalkTramCm(A, Cell, A.LandingOrd[S], &Lines) && Other->LandLines[S][Cell] == Lines);
 			}
+		}
+		for (int32 S = 0; bSame && S < Other->StopWalk.Num(); ++S)
+		{
+			// The remembered walks to a stop must be what a fresh walk gives.
+			const TArray<int64>& Memo = Other->StopWalk[S];
+			for (int32 Cell = 0; bSame && Cell < Memo.Num(); ++Cell)
+			{
+				bSame &= Memo[Cell] == MIN_int64 || Memo[Cell] == WalkCm(A, Cell, A.Trams[S >> 1].StopOrd[S & 1]);
+			}
+		}
+		for (int32 U = 0; bSame && U < Other->StopToStop.Num(); ++U)
+		{
+			const int32 NS = Other->Trams.Num() * 2;
+			bSame &= Other->StopToStop[U] == MIN_int64 || Other->StopToStop[U] == WalkCm(A, A.Trams[(U / NS) >> 1].StopOrd[(U / NS) & 1], A.Trams[(U % NS) >> 1].StopOrd[(U % NS) & 1]);
 		}
 		for (int32 u = 0; bSame && u < A.Adj.Num(); ++u)
 		{
@@ -439,13 +483,156 @@ int64 URHSimWorldSubsystem::WalkCm(const FRHWalkFloor& F, int32 CellA, int32 Cel
 	return Best;
 }
 
+int64 URHSimWorldSubsystem::WalkTramCm(const FRHWalkFloor& F, int32 CellA, int32 CellB, uint32* OutLines) const
+{
+	if (OutLines)
+	{
+		*OutLines = 0;
+	}
+	const int64 Base = WalkCm(F, CellA, CellB);
+	const int32 K = F.Trams.Num();
+	if (K == 0 || !F.Pts.IsValidIndex(CellA) || !F.Pts.IsValidIndex(CellB))
+	{
+		return Base; // no line on this floor: the walk, exactly D6c's
+	}
+	++TramWalkCalls;
+	// Two exact shortcuts before the stops are asked.
+	// (1) No way on foot is no way at all: a line sits on a FINISHED tunnel, whose chain is a run of carved 4-adjacent cells walked step by step, so its
+	//     two stops are always joined on foot, and a ride only shortens a way that exists. A cell that cannot walk to B cannot ride to it either.
+	if (Base == MAX_int64)
+	{
+		++TramWalkPruned;
+		return Base;
+	}
+	// (2) A lower bound: any walk that rides takes some line k from one end e to the other, so it costs at least the octile line from A to e, the ride,
+	//     and the octile line from the other end to B (the octile line is a norm, so no walk is shorter than the straight octile line between its ends).
+	//     When even the cheapest such bound does not beat the walk, the walk stands (an equal cost is a walk, so >= is exact).
+	{
+		int64 Lower = MAX_int64;
+		for (const FRHWalkFloor::FWalkTram& Line : F.Trams)
+		{
+			for (int32 End = 0; End < 2; ++End)
+			{
+				Lower = FMath::Min(Lower, WalkOctCm(F.Pts[CellA], F.Pts[Line.StopOrd[End]]) + Line.Cm + WalkOctCm(F.Pts[CellB], F.Pts[Line.StopOrd[1 - End]]));
+			}
+		}
+		if (Lower >= Base)
+		{
+			++TramWalkPruned;
+			return Base;
+		}
+	}
+	// The stops are 2K nodes (line i: stop 2i is its first end, 2i + 1 its second). Dist[s] is the cheapest way from CellA to stop s, walking
+	// or riding; ToB[s] the walk on from there to CellB. A Dijkstra over the stops picks the lowest (cost, index), relaxes strictly, and on
+	// each hop takes the ride only where it is strictly cheaper than walking that hop: so a tie is a walk, and ties between lines go to the
+	// lower index. No wait is read.
+	const int32 N = 2 * K;
+	using FCms = TArray<int64, TInlineAllocator<16>>;
+	FCms Dist, ToB;
+	TArray<int32, TInlineAllocator<16>> Pred;
+	TArray<uint8, TInlineAllocator<16>> ViaTram, Done;
+	Dist.Init(MAX_int64, N);
+	ToB.Init(MAX_int64, N);
+	Pred.Init(INDEX_NONE, N);
+	ViaTram.Init(0, N);
+	Done.Init(0, N);
+	const auto StopOf = [&F](int32 S) { return F.Trams[S >> 1].StopOrd[S & 1]; };
+	// The walk between a stop and a cell, and between two stops, asked once a network (the walk is symmetric: DC1 and TM2 pin it).
+	const auto StopCell = [this, &F, &StopOf](int32 S, int32 Cell) -> int64
+	{
+		TArray<int64>& Memo = F.StopWalk[S];
+		if (Memo.Num() == 0)
+		{
+			Memo.Init(MIN_int64, F.Pts.Num());
+		}
+		if (Memo[Cell] == MIN_int64)
+		{
+			Memo[Cell] = WalkCm(F, Cell, StopOf(S));
+		}
+		return Memo[Cell];
+	};
+	const auto StopStop = [this, &F, &StopOf, N](int32 U, int32 V) -> int64
+	{
+		int64& Slot = F.StopToStop[U * N + V];
+		if (Slot == MIN_int64)
+		{
+			Slot = WalkCm(F, StopOf(U), StopOf(V));
+		}
+		return Slot;
+	};
+	for (int32 S = 0; S < N; ++S)
+	{
+		Dist[S] = StopCell(S, CellA);
+		ToB[S] = StopCell(S, CellB);
+	}
+	for (int32 Round = 0; Round < N; ++Round)
+	{
+		int32 U = INDEX_NONE;
+		for (int32 S = 0; S < N; ++S)
+		{
+			if (!Done[S] && Dist[S] != MAX_int64 && (U == INDEX_NONE || Dist[S] < Dist[U])) // strict: ties go to the lower stop
+			{
+				U = S;
+			}
+		}
+		if (U == INDEX_NONE)
+		{
+			break;
+		}
+		Done[U] = 1;
+		for (int32 V = 0; V < N; ++V)
+		{
+			if (Done[V])
+			{
+				continue;
+			}
+			int64 W = StopStop(U, V);
+			bool bRide = false;
+			if ((U >> 1) == (V >> 1) && F.Trams[U >> 1].Cm < W) // the two ends of one line: ride where strictly cheaper than walking the tunnel
+			{
+				W = F.Trams[U >> 1].Cm;
+				bRide = true;
+			}
+			if (W != MAX_int64 && Dist[U] + W < Dist[V])
+			{
+				Dist[V] = Dist[U] + W;
+				Pred[V] = U;
+				ViaTram[V] = bRide ? 1 : 0;
+			}
+		}
+	}
+	int64 Best = Base;
+	int32 End = INDEX_NONE;
+	for (int32 S = 0; S < N; ++S)
+	{
+		if (Dist[S] != MAX_int64 && ToB[S] != MAX_int64 && Dist[S] + ToB[S] < Best) // strict: a tie is the walk
+		{
+			Best = Dist[S] + ToB[S];
+			End = S;
+		}
+	}
+	if (End != INDEX_NONE && OutLines)
+	{
+		for (int32 S = End; Pred[S] != INDEX_NONE; S = Pred[S])
+		{
+			if (ViaTram[S])
+			{
+				*OutLines |= 1u << (uint32)F.Trams[S >> 1].Line;
+			}
+		}
+	}
+	return Best;
+}
+
 int64 URHSimWorldSubsystem::DeepTripWaitCm(const FRHDeepTrip& Trip) const
 {
 	if (!bHasTransit)
 	{
 		return 0;
 	}
-	return (Trip.Shaft1 != INDEX_NONE ? CommuteWaitCm(Trip.Shaft1) : (int64)0) + (Trip.Shaft2 != INDEX_NONE ? CommuteWaitCm(Trip.Shaft2) : (int64)0);
+	// D6d: each tram line ridden adds its own frozen wait too, after the route was chosen wait-free.
+	return (Trip.Shaft1 != INDEX_NONE ? CommuteWaitCm(Trip.Shaft1) : (int64)0) + (Trip.Shaft2 != INDEX_NONE ? CommuteWaitCm(Trip.Shaft2) : (int64)0)
+		+ TramWaitCm(Trip.Trams[0]) + TramWaitCm(Trip.Trams[1]);
 }
 
 bool URHSimWorldSubsystem::MeasureDeepTrip(const FRHDeepEnd& Home, const FRHDeepEnd& Work, FRHDeepTrip& Out) const
@@ -469,7 +656,7 @@ bool URHSimWorldSubsystem::MeasureDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 			// A remembered trip is about to be reused: measure it again and compare.
 			FRHDeepTrip Again;
 			const bool bAgain = ComputeDeepTrip(Home, Work, Again);
-			if (bAgain != Hit->bOk || (bAgain && (Again.DistCm != Hit->Trip.DistCm || Again.Shaft1 != Hit->Trip.Shaft1 || Again.Shaft2 != Hit->Trip.Shaft2 || Again.HomePos != Hit->Trip.HomePos || Again.WorkPos != Hit->Trip.WorkPos)))
+			if (bAgain != Hit->bOk || (bAgain && (Again.DistCm != Hit->Trip.DistCm || Again.Shaft1 != Hit->Trip.Shaft1 || Again.Shaft2 != Hit->Trip.Shaft2 || Again.HomePos != Hit->Trip.HomePos || Again.WorkPos != Hit->Trip.WorkPos || Again.Trams[0] != Hit->Trip.Trams[0] || Again.Trams[1] != Hit->Trip.Trams[1])))
 			{
 				UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: a remembered deep trip is stale (floor %d cell %d to floor %d cell %d: %lld cm reused, %lld re-measured)"),
 					Home.Level, Home.Cell, Work.Level, Work.Cell, Hit->Trip.DistCm, Again.DistCm);
@@ -515,17 +702,21 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 			}
 			// Asked once a cell and a shaft, for as long as the network stands: a re-derived trip is a lookup.
 			TArray<int64>& Memo = F.LandWalk[S];
+			TArray<uint32>& Lines = F.LandLines[S];
 			if (Memo.Num() == 0)
 			{
 				Memo.Init(MIN_int64, F.Pts.Num());
+				Lines.Init(0u, F.Pts.Num());
 			}
 			if (Memo[Cell] == MIN_int64)
 			{
-				Memo[Cell] = WalkCm(F, Cell, F.LandingOrd[S]);
+				Memo[Cell] = WalkTramCm(F, Cell, F.LandingOrd[S], &Lines[Cell]); // D6d: the walk with the floor's tram lines joined in, and the lines it rides
 			}
 			OutWalks[S] = Memo[Cell];
 		}
 	};
+	// The lines the walk from a cell to shaft S's landing rides (WalksTo has asked it already, so the memo holds it).
+	const auto LinesTo = [](const FRHWalkFloor& F, int32 Cell, int32 S) -> uint32 { return F.LandLines[S][Cell]; };
 
 	if (bHomeFloor != bWorkFloor)
 	{
@@ -553,6 +744,8 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 		{
 			return false;
 		}
+		const FRHWalkFloor& FloorF = bHomeFloor ? *HomeF : *WorkF;
+		Out.Trams[0] = LinesTo(FloorF, FloorEnd.Cell, BestShaft); // D6d: the lines that walk rides
 		Out.DistCm = Best;
 		Out.Shaft1 = BestShaft;
 		Out.HomePos = bHomeFloor ? HeadOf(BestShaft) : Home.SurfacePos;
@@ -566,7 +759,8 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 	if (Home.Level == Work.Level)
 	{
 		// The same floor: the walk through the digs and tunnels, or out by one shaft and back down another when that is shorter.
-		const int64 Direct = WalkCm(*HomeF, Home.Cell, Work.Cell);
+		uint32 DirectLines = 0;
+		const int64 Direct = WalkTramCm(*HomeF, Home.Cell, Work.Cell, &DirectLines);
 		WalksTo(*WorkF, Work.Cell, WalksWork);
 		int64 Via = MAX_int64;
 		int32 Via1 = INDEX_NONE, Via2 = INDEX_NONE;
@@ -595,6 +789,7 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 		if (Direct != MAX_int64 && (Via1 == INDEX_NONE || Direct <= Via))
 		{
 			Out.DistCm = Direct;
+			Out.Trams[0] = DirectLines;
 			Out.HomePos = Out.WorkPos = WalkWholeCm(Shafts[0].HeadCm); // the head anchor, as every trip that rides no shaft has
 			return true;
 		}
@@ -602,6 +797,8 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 		{
 			return false;
 		}
+		Out.Trams[0] = LinesTo(*HomeF, Home.Cell, Via1);
+		Out.Trams[1] = LinesTo(*WorkF, Work.Cell, Via2);
 		Out.DistCm = Via;
 		Out.Shaft1 = Via1;
 		Out.Shaft2 = Via2;
@@ -630,6 +827,8 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 	}
 	if (BestShaft != INDEX_NONE)
 	{
+		Out.Trams[0] = LinesTo(*HomeF, Home.Cell, BestShaft);
+		Out.Trams[1] = LinesTo(*WorkF, Work.Cell, BestShaft);
 		Out.DistCm = Best;
 		Out.Shaft1 = BestShaft;
 		Out.HomePos = Out.WorkPos = HeadOf(BestShaft);
@@ -662,6 +861,8 @@ bool URHSimWorldSubsystem::ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeep
 	{
 		return false;
 	}
+	Out.Trams[0] = LinesTo(*HomeF, Home.Cell, Via1);
+	Out.Trams[1] = LinesTo(*WorkF, Work.Cell, Via2);
 	Out.DistCm = Best;
 	Out.Shaft1 = Via1;
 	Out.Shaft2 = Via2;
@@ -677,8 +878,30 @@ int64 URHSimWorldSubsystem::Debug_WalkCm(int32 Level, int32 CellA, int32 CellB) 
 	{
 		return -1;
 	}
+	const int64 Cm = WalkTramCm(*F, CellA, CellB); // D6d: what the people walk, trams included (with no line on the floor, the plain walk)
+	return Cm == MAX_int64 ? -1 : Cm;
+}
+
+int64 URHSimWorldSubsystem::Debug_WalkCmNoTram(int32 Level, int32 CellA, int32 CellB) const
+{
+	const FRHWalkFloor* F = Level < 0 ? EnsureDeepWalk().Floors.Find(Level) : nullptr;
+	if (!F)
+	{
+		return -1;
+	}
 	const int64 Cm = WalkCm(*F, CellA, CellB);
 	return Cm == MAX_int64 ? -1 : Cm;
+}
+
+uint32 URHSimWorldSubsystem::Debug_WalkTramLines(int32 Level, int32 CellA, int32 CellB) const
+{
+	const FRHWalkFloor* F = Level < 0 ? EnsureDeepWalk().Floors.Find(Level) : nullptr;
+	uint32 Lines = 0;
+	if (F)
+	{
+		WalkTramCm(*F, CellA, CellB, &Lines);
+	}
+	return Lines;
 }
 
 int32 URHSimWorldSubsystem::Debug_WalkLanding(int32 Level, int32 ShaftId) const

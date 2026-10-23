@@ -596,7 +596,7 @@ int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		if (bRead) { FMemory::Memcpy(&Ver, W2.GetData() + 4, 4); }
 		int32 At = INDEX_NONE;
 		for (int32 I = 0; bRead && I < FMath::Min(Z.Num(), W2.Num()) && At == INDEX_NONE; ++I) { if (Z[I] != W2[I]) { At = I; } }
-		Expect(bRead && Ver == 49 && At != INDEX_NONE && Rd(Z, At) == 1 && Rd(Z, At + 4) == 0 && Rd(W2, At) == 3 && Rd(W2, At + 4) == 2 && W2.Num() == Z.Num() + 80,
+		Expect(bRead && Ver == 50 && At != INDEX_NONE && Rd(Z, At) == 1 && Rd(Z, At + 4) == 0 && Rd(W2, At) == 3 && Rd(W2, At + 4) == 2 && W2.Num() == Z.Num() + 80,
 			FString::Printf(TEXT("CV8 the file says version %u; the cavern block at byte %d: the default colony writes NextCavernId 1 and 0 caverns (8 bytes), two caverns write 3, 2 and 40 bytes each (%d -> %d bytes)"), Ver, At, Z.Num(), W2.Num()));
 		if (!bRead || At == INDEX_NONE) { return Finish(); }
 		Expect(Rd(Z, At - 4) == 0, TEXT("CV8 straight before the default block stands the warmth block's count 0"));
@@ -646,7 +646,7 @@ int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		{ TArray<uint8> T = W2; PutI(T, R1 + 20, 0); PutI(T, R1 + 24, 0); Expect(TryFile(TEXT("cavr18"), T, Err) && Err.Contains(TEXT("shaft column (0,0)")), FString::Printf(TEXT("CV8 a box over a shaft column is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W2; PutI(T, R2 + 12, -2); PutI(T, R2 + 16, -3); Expect(TryFile(TEXT("cavr19"), T, Err) && Err.Contains(TEXT("another open cavern")), FString::Printf(TEXT("CV8 two open caverns sharing an uncarved point are refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W2; PutI(T, R1 + 12, -1); PutI(T, R1 + 16, -1); PutI(T, R1 + 20, 4); PutI(T, R1 + 24, 0); PutI(T, R1 + 28, 4); PutI(T, R1 + 32, 0); Expect(TryFile(TEXT("cavr20"), T, Err) && Err.Contains(TEXT("open tunnel")), FString::Printf(TEXT("CV8 an open cavern sharing an uncarved point with an open tunnel is refused (%s)"), *Err)); }
-		{ TArray<uint8> T = W2; const uint32 V47 = 47; FMemory::Memcpy(T.GetData() + 4, &V47, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("cavr21"))); FString E47; const bool bOk = Sim->LoadColony(TEXT("cavr21"), E47); Expect(!bOk && E47.Contains(TEXT("Save format mismatch")) && E47.Contains(TEXT("version 47")) && E47.Contains(TEXT("/49")), FString::Printf(TEXT("CV8 a v47 file is refused (%s)"), *E47)); }
+		{ TArray<uint8> T = W2; const uint32 V47 = 47; FMemory::Memcpy(T.GetData() + 4, &V47, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("cavr21"))); FString E47; const bool bOk = Sim->LoadColony(TEXT("cavr21"), E47); Expect(!bOk && E47.Contains(TEXT("Save format mismatch")) && E47.Contains(TEXT("version 47")) && E47.Contains(TEXT("/50")), FString::Printf(TEXT("CV8 a v47 file is refused (%s)"), *E47)); }
 		// A cancelled cavern's rock may be sunk on later, so a column in its box is not a structural refusal; an open one is.
 		{
 			TArray<uint8> T = W2; PutI(T, R1 + 20, 0); PutI(T, R1 + 24, 0); PutI(T, R1 + 36, 1);

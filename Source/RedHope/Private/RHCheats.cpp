@@ -490,6 +490,43 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFitLift(
 		Sim->EnqueueCommand(Cmd);
 	}));
 
+// D6d: lay a tram line on a finished tunnel (the LayTramLine verb, uplink; people ride, robots never do).
+static FAutoConsoleCommandWithWorldAndArgs GRHLayTram(
+	TEXT("RH.LayTram"),
+	TEXT("RH.LayTram <TunnelId> [now] - order a tram line laid on a FINISHED tunnel of at least TramMinCells points (uplink; needs a lift car; bills TramStructKgPerCell Struct a point; at most MaxTramLines). 'now' lays it at once (DEBUG, the same preflight and bill, no uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.LayTram <TunnelId> [now]"));
+			return;
+		}
+		const int32 TunnelId = FCString::Atoi(*Args[0]);
+		const bool bNow = Args.Num() > 1 && Args[1].Equals(TEXT("now"), ESearchCase::IgnoreCase);
+		FString Why;
+		if (bNow)
+		{
+			if (Sim->Debug_LayTramLine(TunnelId, Why))
+			{
+				UE_LOG(LogRedHope, Display, TEXT("[RH.LayTram] tram line %d laid on tunnel %d"), Sim->GetNextTramId() - 1, TunnelId);
+			}
+			else
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.LayTram] refused: %s"), *Why);
+			}
+			return;
+		}
+		if (!Sim->CanLayTramLine(TunnelId, Why))
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("[RH.LayTram] the order would be refused: %s"), *Why);
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("LayTramLine");
+		Cmd.Value = TunnelId;
+		Sim->EnqueueCommand(Cmd);
+	}));
+
 // D4: the transit readout - every shaft's cars, load against capacity, wait, and the robots below.
 static FAutoConsoleCommandWithWorldAndArgs GRHTransit(
 	TEXT("RH.Transit"),
@@ -1630,7 +1667,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCityBench(
 // recipe, moved into the live game); nothing here is saved and the sim gains no code. Needs a fresh colony, like RH.CityBench.
 static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 	TEXT("RH.DeepBench"),
-	TEXT("RH.DeepBench <N> - DEBUG: RH.CityBench's city, then 20 floors, three shafts on one lattice row 80 m apart with four cars each, two tunnels, an 8 x 8 x 3 cavern, 40% of the colonists re-homed to -6..-20, and 60 RC_H robots below. Pair with RH.Section and RH.FrameStats."),
+	TEXT("RH.DeepBench <N> [trams] - DEBUG: RH.CityBench's city, then 20 floors, three shafts on one lattice row 80 m apart with four cars each, two tunnels, an 8 x 8 x 3 cavern, 40% of the colonists re-homed to -6..-20, and 60 RC_H robots below; with 'trams' the two tunnels are 14 cells long and each takes a tram line. Pair with RH.Section and RH.FrameStats."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -1641,6 +1678,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 			return;
 		}
 		const int32 N = FMath::Clamp(FCString::Atoi(*Args[0]), 0, 5000);
+		// D6d: "RH.DeepBench N trams" digs its two tunnels 14 cells long (past TramMinCells) and lays a tram line on each; without the word
+		// the bench is D8's, tunnel for tunnel.
+		const bool bTrams = Args.Num() > 1 && Args[1].Equals(TEXT("trams"), ESearchCase::IgnoreCase);
 		const double T0 = FPlatformTime::Seconds();
 		// 1. The five-floor city, shaft 0 at the origin, everyone housed and settled (RH.CityBench).
 		const URHSimWorldSubsystem::FRHScaleColonyReport Rep = Sim->Debug_BuildScaleColony(N);
@@ -1700,10 +1740,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 			int32 MaxX = MIN_int32;
 			if (const FRHFloor* F = Sim->FindFloor(L)) { for (const FIntPoint& P : F->GetCells()) { if (P.Y == 0) { MaxX = FMath::Max(MaxX, P.X); } } }
 			int32 Id = INDEX_NONE;
-			if (MaxX > MIN_int32 && Sim->Debug_DigTunnel(L, FIntPoint(MaxX + 1, 0), FIntPoint(MaxX + 10, 0), Id, Why))
+			const int32 TunnelCells = bTrams ? 14 : 10;
+			if (MaxX > MIN_int32 && Sim->Debug_DigTunnel(L, FIntPoint(MaxX + 1, 0), FIntPoint(MaxX + TunnelCells, 0), Id, Why))
 			{
-				Sim->Debug_CarveTunnelCells(Id, 10);
+				Sim->Debug_CarveTunnelCells(Id, TunnelCells);
 				Tunnels.Add(Id);
+				if (bTrams)
+				{
+					Sim->Debug_AddSolid(FName("Lander"), FName("Struct"), (double)TunnelCells * Sim->GetTramStructKgPerCell());
+					FString TramWhy;
+					if (!Sim->Debug_LayTramLine(Id, TramWhy)) { UE_LOG(LogRedHope, Warning, TEXT("RH.DeepBench: tram line on tunnel %d refused: %s"), Id, *TramWhy); }
+				}
 			}
 			else { UE_LOG(LogRedHope, Warning, TEXT("RH.DeepBench: tunnel on %d refused: %s"), L, *Why); }
 		}
@@ -2285,6 +2332,12 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		{
 			UE_LOG(LogRedHope, Display, TEXT("  cavern %d: floors %d..%d | (%d, %d) to (%d, %d) | %d cells left | shaft %d%s"),
 				Cv.Id, Cv.Top, Cv.Bottom, Cv.Min.X, Cv.Min.Y, Cv.Max.X, Cv.Max.Y, Sim->GetCavernUncarved(Cv), Cv.ShaftId, Cv.bCancelled ? TEXT(" | cancelled") : TEXT(""));
+		}
+		// D6d: one line per tram line.
+		for (const FRHTramLine& L : Sim->GetTramLines())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  tram %d: floor %d | tunnel %d, (%d, %d) to (%d, %d) | %d commuters a sol, load %lld / %lld | wait %d s (previous %d s)"),
+				L.Id, L.Level, L.TunnelId, L.StopA.X, L.StopA.Y, L.StopB.X, L.StopB.Y, Sim->GetTramPeople(L.Id), Sim->GetTramPeopleLoad(L.Id), Sim->GetTramCapacityPlaces(), L.WaitSec, L.PrevWaitSec);
 		}
 		if (const FRHEventRow* Event = Sim->GetActiveEvent())
 		{

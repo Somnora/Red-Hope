@@ -63,12 +63,13 @@ K.BuildingCount = Buildings.Num();
 	K.NextBuilding = NextBuildingId;
 	K.Lift = LiftVersion;             // D4: both stay 0 with no car, so no rebuild count can move
 	K.TransitWait = TransitWaitVersion;
-	if (EnsureDistrictGeo().DeepFloor.Num() > 0)
+	if (EnsureDistrictGeo().AnyMapped())
 	{
 		K.DeepCells = FloorCellsVersion; // D6b (RC 6): 0 for ever while no floor shape exists
 		K.DeepBeds = BedAssignVersion;
 		K.DeepTunnels = TunnelsVersion;  // D6c (RC 6): the people's walk network (cells, tunnels, shafts, districts), all 0 for ever with no mapped floor
 		K.DeepShafts = ShaftsVersion;
+		K.DeepTram = TramVersion;        // D6d (RC 6): and the tram lines (a line maps its floor); 0 for ever with no mapped floor
 	}
 	return K;
 }
@@ -332,7 +333,7 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	TripIndex.Reserve(TripHint);
 	// D6b: on a floor that holds a shape a trip is also keyed by its two districts (the same floors, the same distances, a different
 	// pair of rows), and the transit split rotates by the floor pair's own running count so no distance moves.
-	const bool bAnyShape = Geo.DeepFloor.Num() > 0;
+	const bool bAnyShape = Geo.AnyMapped(); // D6d: a floor is mapped by a shape or by a tram line
 	TMap<TTuple<uint64, uint64>, int32> ShapeTripIndex; // lookups only
 	TMap<uint64, int32> ShapePairCount;                  // lookups only
 	// D6c: on a mapped floor a trip is keyed by its two ends' cells (a home cell, a seat or module cell), and measured through the deep walk.
@@ -400,6 +401,7 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	if (bTransit)
 	{
 		Out.ShaftPeople.Init(0, Shafts.Num());
+		Out.TramPeople.Init(0, TramLines.Num());
 		TripReach.Reserve(TripHint);
 		TripDistSum.Reserve(TripHint);
 	}
@@ -417,7 +419,7 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		}
 		const int32 WorkKey = Station->X < 0 ? Station->X : Station->Z;
 		const uint64 TripKey = ((uint64)(uint32)HomeKey << 32) | (uint64)(uint32)WorkKey;
-		const bool bShapeTrip = bAnyShape && ((C.HomeHab == 0 && Geo.DeepFloor.Contains(C.HomeLevel)) || (Station->X < 0 && Geo.DeepFloor.Contains(Station->X)));
+		const bool bShapeTrip = bAnyShape && ((C.HomeHab == 0 && Geo.IsMapped(C.HomeLevel)) || (Station->X < 0 && Geo.IsMapped(Station->X)));
 		int32 ShapeHomeDistrict = 0, ShapeWorkDistrict = 0;
 		int32 TripSlot;
 		const int32* Found = nullptr;
@@ -435,14 +437,14 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			else
 			{
 				HomeEnd.Level = C.HomeLevel;
-				const int32* HomeCellOrd = Geo.DeepFloor.Contains(C.HomeLevel) ? ShapeHomes->HomeCell.Find(C.Id) : nullptr;
+				const int32* HomeCellOrd = Geo.IsMapped(C.HomeLevel) ? ShapeHomes->HomeCell.Find(C.Id) : nullptr;
 				bEnds &= HomeCellOrd != nullptr;
 				HomeEnd.Cell = HomeCellOrd ? *HomeCellOrd : (int32)INDEX_NONE;
 			}
 			if (Station->X < 0)
 			{
 				WorkEnd.Level = Station->X;
-				WorkEnd.Cell = Geo.DeepFloor.Contains(Station->X) ? (Station->Y != INDEX_NONE ? Station->Y : FloorModuleCell(Station->Z, Station->X)) : (int32)INDEX_NONE;
+				WorkEnd.Cell = Geo.IsMapped(Station->X) ? (Station->Y != INDEX_NONE ? Station->Y : FloorModuleCell(Station->Z, Station->X)) : (int32)INDEX_NONE;
 				bEnds &= WorkEnd.Cell != INDEX_NONE;
 			}
 			else
@@ -491,6 +493,8 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			T.Cell = DistrictIndex(ShapeHomeDistrict) * Out.Dim + DistrictIndex(ShapeWorkDistrict);
 			T.ShaftId = Walk.Shaft1; // set with or without a car: the readout names the shaft a walked trip rides
 			T.ShaftId2 = Walk.Shaft2;
+			T.Trams1 = Walk.Trams[0]; // D6d: the tram lines its two legs ride (their waits are already in DistCm)
+			T.Trams2 = Walk.Trams[1];
 			if (bTransit)
 			{
 				TripReach.SetNum(Out.Trips.Num()); // a walked trip is never split: its shafts are fixed
@@ -613,6 +617,21 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 					++Out.ShaftPeople[Trip.ShaftId2]; // a walked trip that rides two shafts loads both
 				}
 			}
+			if (Trip.bDeep && (Trip.Trams1 | Trip.Trams2) != 0)
+			{
+				// D6d: a walked trip loads every tram line its legs ride, one place a ride (a line it rides on both legs is loaded twice).
+				for (const uint32 Leg : { Trip.Trams1, Trip.Trams2 })
+				{
+					for (uint32 Bits = Leg; Bits != 0; Bits &= Bits - 1)
+					{
+						const int32 Line = (int32)FMath::CountTrailingZeros(Bits);
+						if (Out.TramPeople.IsValidIndex(Line))
+						{
+							++Out.TramPeople[Line];
+						}
+					}
+				}
+			}
 		}
 		if (Trip.bDeep)
 		{
@@ -714,7 +733,7 @@ const URHSimWorldSubsystem::FRHCommuteFlows& URHSimWorldSubsystem::EnsureCommute
 		DeriveCommuteFlows(Fresh);
 		if (Fresh.Flow != CommuteFlows.Flow || Fresh.LongFlow != CommuteFlows.LongFlow || Fresh.Ids != CommuteFlows.Ids
 			|| Fresh.Dists != CommuteFlows.Dists || Fresh.LongIds != CommuteFlows.LongIds || Fresh.LongCount != CommuteFlows.LongCount
-			|| Fresh.ShaftPeople != CommuteFlows.ShaftPeople || Fresh.Walked != CommuteFlows.Walked || Fresh.OffNet != CommuteFlows.OffNet)
+			|| Fresh.ShaftPeople != CommuteFlows.ShaftPeople || Fresh.TramPeople != CommuteFlows.TramPeople || Fresh.Walked != CommuteFlows.Walked || Fresh.OffNet != CommuteFlows.OffNet)
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the commute flows cache is stale (%d long reused, %d re-derived; districts v%u, colonists v%u, jobs v%u, built v%u)"),
 				CommuteFlows.LongCount, Fresh.LongCount, DistrictsVersion, ColonistSetVersion, JobsVersion, RoadGraph.BuiltVersion);
@@ -733,7 +752,7 @@ bool URHSimWorldSubsystem::Debug_CommuteCachesFresh() const
 	DeriveCommuteFlows(Fresh);
 	return Fresh.Flow == CommuteFlows.Flow && Fresh.LongFlow == CommuteFlows.LongFlow && Fresh.Ids == CommuteFlows.Ids
 		&& Fresh.Dists == CommuteFlows.Dists && Fresh.LongIds == CommuteFlows.LongIds && Fresh.LongCount == CommuteFlows.LongCount
-		&& Fresh.ShaftPeople == CommuteFlows.ShaftPeople && Fresh.Walked == CommuteFlows.Walked && Fresh.OffNet == CommuteFlows.OffNet
+		&& Fresh.ShaftPeople == CommuteFlows.ShaftPeople && Fresh.TramPeople == CommuteFlows.TramPeople && Fresh.Walked == CommuteFlows.Walked && Fresh.OffNet == CommuteFlows.OffNet
 		&& IsDeepWalkFresh();
 }
 

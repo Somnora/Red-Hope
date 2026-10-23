@@ -199,6 +199,12 @@ private:
 	void RefreshCavernList();
 	TSharedPtr<class SVerticalBox> CavernList;
 	uint32 CavernListKey = MAX_uint32;
+	// D6d: the card under the cavern list - the viewed floor's tram lines (their riders and wait, read live) and, for each finished tunnel long
+	// enough to take one, a Lay tram button (the LayTramLine order, people only).
+	FReply HandleLayTram(int32 TunnelId);
+	void RefreshTramList();
+	TSharedPtr<class SVerticalBox> TramList;
+	uint32 TramListKey = MAX_uint32;
 	// The elevator (M1-d): SURF / -1 ... -MaxDepth cells, live state.
 	FReply HandleFloor(int32 Level);
 	// D5 depth: the strip's rows sit in a scroll box capped at 11 rows. Floors past the cool line show only once reached, next to bore

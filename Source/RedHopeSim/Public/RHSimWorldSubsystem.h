@@ -438,6 +438,30 @@ struct FRHTransitLedger
 	int32 PrevWaitSec = 0;
 };
 
+namespace RH
+{
+	// D6d: the cap the MaxTramLines config clamp and the save's refusal share, so a save made under any row value loads.
+	constexpr int32 MaxTramLinesCap = 32;
+}
+
+// D6d (trams with people, docs/qa/2026-10-22/d6-caverns-design.md MERGED DESIGN section 4; director answer Q-C (a): people only, robots never
+// ride). One line is one LayTramLine order on a FINISHED tunnel of a colony with a lift car: a fast, capacity-limited link between the two
+// ends of the chain in the PEOPLE's walk network. Aggregate only: no car is simulated, the view draws one capsule per line by phase. StopA and
+// StopB are the tunnel's two end points as lattice points (never ordinals). WaitSec is the wait frozen at the sol threshold (the lifts' ledger
+// approach: StepTransit's roll, in ascending line Id); PrevWaitSec keeps the sol before. Ids ascend, are never reused, and a line is never
+// removed. Laying one makes its floor mapped. Written only by URHSimWorldSubsystem.
+struct FRHTramLine
+{
+	int32 Id = 0;
+	int32 RegionId = 0;               // always 0
+	int32 Level = 0;                  // the tunnel's floor (< 0)
+	int32 TunnelId = 0;
+	FIntPoint StopA = FIntPoint::ZeroValue;
+	FIntPoint StopB = FIntPoint::ZeroValue;
+	int32 WaitSec = 0;
+	int32 PrevWaitSec = 0;
+};
+
 // D4: what a deep route costs, beside its planner cost: the walking (lattice and surface cm, all at base speed), the rides'
 // own seconds (dwell + floors x seconds a floor, no wait), and the holds before them. The charge reserve is built from these.
 struct FRHDeepRouteCost
@@ -1031,6 +1055,47 @@ public:
 	void Debug_ForgetRobotTransit() { RobotPaths.Reset(); HandoffHolds.Reset(); ReserveMemos.Reset(); }
 	// The deep net's portals as (shaft, level, landing lattice point), in portal order, for the planner's tests.
 	void Debug_GetPortals(TArray<FIntVector>& Out) const;
+
+	// --- D6d: trams with people (docs/qa/2026-10-22/d6-caverns-design.md, MERGED DESIGN section 4; director answer Q-C (a): people only) ---
+	// One tram line is one LayTramLine order (Value = a finished tunnel's Id) in a colony with a lift car. It is an edge between the two stops
+	// in the people's walk network (never in the robots' deep net), a per-sol load against TramPlacesPerSol, and a wait frozen at StepTransit's
+	// roll. Aggregate only: no car is simulated. Laying a line makes its floor mapped (IsFloorMapped).
+	const TArray<FRHTramLine>& GetTramLines() const { return TramLines; } // ascending Id (D8's tram band reads this)
+	const FRHTramLine* FindTramLine(int32 Id) const { for (const FRHTramLine& L : TramLines) { if (L.Id == Id) { return &L; } } return nullptr; }
+	const FRHTramLine* FindTramOnTunnel(int32 TunnelId) const { for (const FRHTramLine& L : TramLines) { if (L.TunnelId == TunnelId) { return &L; } } return nullptr; }
+	int32 GetNextTramId() const { return NextTramId; }
+	uint32 GetTramVersion() const { return TramVersion; }              // up on every line laid and every load (D8's tram band keys on it)
+	// Commuters a sol on the line, as the flows count them (the people part of its load before the x 2 and the ramp): 0 at Ramp 0 and with no
+	// car. Reads the same cached flows as GetCommuteShaftPeople, so -RHVerifyCaches compares it.
+	int32 GetTramPeople(int32 LineId) const;
+	// The load the next roll would count for a line: 2 x TramPeople x the ramp in permille / 1000 (D4 item 8), floored once per line.
+	int64 GetTramPeopleLoad(int32 LineId) const;
+	int32 GetTramWaitSec(int32 LineId) const { const FRHTramLine* L = FindTramLine(LineId); return L ? L->WaitSec : 0; }
+	int64 GetTramCapacityPlaces() const { return (int64)TramPlacesPerSol; }
+	// The line's length along its chain in cm ((chain points - 1) x 1,000) and its uncrowded cost in walking-equivalent cm:
+	// (TramHeadwaySec / 2 + ceil(Length / TramSpeedCmPerS)) x CommuteWaitCmPerSec. Its wait is added after the route is chosen.
+	int64 GetTramLengthCm(const FRHTramLine& L) const { return (int64)(GetTunnelChainLength(L.StopA, L.StopB) - 1) * 1000; }
+	int64 GetTramEdgeCm(const FRHTramLine& L) const;
+	int32 GetTramMinCells() const { return TramMinCells; }
+	int32 GetMaxTramLines() const { return MaxTramLines; }
+	double GetTramStructKgPerCell() const { return TramStructKgPerCell; }
+	int32 GetTramHeadwaySec() const { return TramHeadwaySec; }
+	int32 GetTramSpeedCmPerS() const { return TramSpeedCmPerS; }
+	int32 GetTramPlacesPerSol() const { return TramPlacesPerSol; }
+	// The LayTramLine preflight (refusals 1-6 of the D6 merged design, section 4), with the reason and the Struct bill; the order runs it again when it lands.
+	bool CanLayTramLine(int32 TunnelId, FString& OutReason, double* OutBillKg = nullptr) const;
+	// Harness: the LayTramLine order without the uplink (the same preflight and execution). False with the reason.
+	bool Debug_LayTramLine(int32 TunnelId, FString& OutReason);
+	void Debug_SetMaxTramLines(int32 N) { MaxTramLines = FMath::Clamp(N, 1, RH::MaxTramLinesCap); }
+	// Harness: the line timing rows (headway in s, speed in cm/s) and a line's capacity a sol for a fixture. The timing moves TramVersion (the edge's price is built into the walk network).
+	void Debug_SetTramTiming(int32 HeadwaySec, int32 SpeedCmPerS) { TramHeadwaySec = FMath::Max(0, HeadwaySec); TramSpeedCmPerS = FMath::Max(1, SpeedCmPerS); ++TramVersion; }
+	void Debug_SetTramCapacity(int32 Places) { if (Places > 0) { TramPlacesPerSol = Places; } }
+	void Debug_SetTramStructKgPerCell(double Kg) { TramStructKgPerCell = FMath::Max(0.0, Kg); }
+	// Harness: walking cm between two cells of a mapped floor INCLUDING the trams (what the people walk); -1 when unmapped or no way through.
+	// Debug_WalkCmNoTram is the plain walk through the digs and tunnels, and Debug_WalkTramLines the bit mask of the lines (bit = index in
+	// GetTramLines) the cheapest tram-inclusive walk rides (0 when walking is as cheap).
+	int64 Debug_WalkCmNoTram(int32 Level, int32 CellA, int32 CellB) const;
+	uint32 Debug_WalkTramLines(int32 Level, int32 CellA, int32 CellB) const;
 
 	// --- Habitability chain (M1-d Gate B) ---
 	// A carved floor is bored -> shielded (free from overburden; the M1-c
@@ -1976,6 +2041,9 @@ public:
 	int32 GetCommuteWalked() const;
 	int32 GetCommuteOffNet() const;
 	int32 GetDeepWalkBuilds() const { return DeepWalkBuilds; }
+	// D6d (transient, never saved): tram-aware walks asked, answered by the lower-bound prune, and run through the stops.
+	int32 GetTramWalkCalls() const { return TramWalkCalls; }
+	int32 GetTramWalkPruned() const { return TramWalkPruned; }
 	// Harness: walking cm between two cells (ordinals) of a mapped floor; -1 when the floor is not mapped or there is no way through.
 	int64 Debug_WalkCm(int32 Level, int32 CellA, int32 CellB) const;
 	// Harness: the ordinal of shaft S's landing on a mapped floor (INDEX_NONE: none, or not mapped).
@@ -2054,7 +2122,7 @@ public:
 	int32 GetDistrictOfBay(int32 HabId, int32 Bay) const { return GetDistrictOfBuilding(HabId); } // a bay is its building's
 	int32 GetDistrictOfCell(int32 Level, int32 CellIndex) const;           // an underground cell is its floor's, or (a shaped floor) the shape holding its point
 	int32 GetDistrictOfColonist(int32 ColonistId) const;                  // their home's
-	// D6b (floor shapes). A floor is MAPPED when a deep district holds a point on it. The district holding a lattice point of an
+	// D6b (floor shapes). A floor is MAPPED when a deep district holds a point on it (D6d: or a tram line stands on it). The district holding a lattice point of an
 	// underground floor (region 0's frame): the whole-floor district, else the shape, else 0. A resident's home cell is DERIVED
 	// (never saved), for residents of mapped floors only: their bed piece's cell, else the legacy bed slots of the cells with no
 	// bed pieces in ordinal order, else INDEX_NONE (an overfull floor: they belong to no shape).
@@ -2611,12 +2679,13 @@ private:
 		uint32 Lift = 0, TransitWait = 0;    // D4: LiftVersion and TransitWaitVersion (two fields, so no two bumps collide); 0 with no car
 		uint32 DeepCells = 0, DeepBeds = 0;  // D6b (RC 6): the floor shapes' district rows move with a carve and with the bed assignment; 0 for ever with no shape
 		uint32 DeepTunnels = 0, DeepShafts = 0; // D6c (RC 6): the people's walk network also moves with a tunnel order and a shaft (separate fields, so no two bumps collide); 0 for ever with no mapped floor
+		uint32 DeepTram = 0;                 // D6d (RC 6): and with a tram line laid (TramVersion); 0 for ever with no mapped floor
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
 				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding
 				&& Lift == O.Lift && TransitWait == O.TransitWait && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds
-				&& DeepTunnels == O.DeepTunnels && DeepShafts == O.DeepShafts;
+				&& DeepTunnels == O.DeepTunnels && DeepShafts == O.DeepShafts && DeepTram == O.DeepTram;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -2645,7 +2714,8 @@ private:
 	// floor-to-floor trip, and always with no car: then nothing reads it).
 	// D6c: HomeCell and WorkCell are the cell ordinals of a trip measured through the deep walk (INDEX_NONE for every other trip and for a
 	// surface end); ShaftId2 is the second shaft of a trip that rides two (INDEX_NONE otherwise); bDeep marks a walked trip.
-	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; int32 ShaftId = INDEX_NONE; int32 HomeCell = INDEX_NONE, WorkCell = INDEX_NONE, ShaftId2 = INDEX_NONE; bool bDeep = false; };
+	// D6d: Trams1 and Trams2 are the lines (bit = index in TramLines) the two legs of a walked trip ride (see FRHDeepTrip).
+	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; int32 ShaftId = INDEX_NONE; int32 HomeCell = INDEX_NONE, WorkCell = INDEX_NONE, ShaftId2 = INDEX_NONE; bool bDeep = false; uint32 Trams1 = 0, Trams2 = 0; };
 	struct FRHCommuteFlows
 	{
 		bool bValid = false;
@@ -2660,6 +2730,7 @@ private:
 		int64 MaxDistCm = 0;
 		TArray<FRHCommuteTrip> Trips;       // distinct trips, sorted by anchors
 		TArray<int32> ShaftPeople;          // D4: commuters per shaft (index = shaft Id), with transit on only; StepTransit reads it
+		TArray<int32> TramPeople;           // D6d: commuters per tram line (index = index in TramLines), with transit on only; StepTransit reads it
 		mutable bool bEdgeLoadValid = false;
 		mutable TArray<TPair<int32, int32>> EdgeLoad;
 		mutable TArray<TArray<int32>> TripEdges; // parallel to Trips, filled with EdgeLoad
@@ -2707,11 +2778,27 @@ private:
 		TArray<TArray<TPair<int32, int64>>> Adj; // node -> (node, cm): the 4-adjacencies between chain cells and doors
 		TArray<int32> LandingOrd;              // shaft Id -> the landing's ordinal on this floor (INDEX_NONE: none)
 		mutable TArray<TArray<int64>> Field;   // node -> cm to every node (MAX_int64: none); empty until computed (a door or landing is computed at build)
-		mutable TArray<TArray<int64>> LandWalk; // shaft Id -> cell -> walking cm to that shaft's landing (MAX_int64: none; MIN_int64: not asked yet); filled on demand
+		mutable TArray<TArray<int64>> LandWalk; // shaft Id -> cell -> walking cm to that shaft's landing INCLUDING the trams (MAX_int64: none; MIN_int64: not asked yet); filled on demand
+		mutable TArray<TArray<uint32>> LandLines; // parallel to LandWalk: the lines (bit = index in TramLines) that walk rides, valid where LandWalk is
+		// D6d: the tram lines of this floor, ascending by line index. A line is an edge between its two stops (chain cells, so nodes) costing Cm,
+		// joined at query time over the stops (WalkTramCm); the plain fields above never include one.
+		struct FWalkTram
+		{
+			int32 Line = 0; int32 StopOrd[2] = { INDEX_NONE, INDEX_NONE }; int64 Cm = 0;
+			bool operator==(const FWalkTram& O) const { return Line == O.Line && StopOrd[0] == O.StopOrd[0] && StopOrd[1] == O.StopOrd[1] && Cm == O.Cm; }
+		};
+		TArray<FWalkTram> Trams;
+		// D6d: what WalkTramCm asks again and again, remembered for as long as the network stands (derived, so it dies with it): the plain walk from
+		// each stop (stop 2i is line i's first end, 2i + 1 its second) to every cell (MAX_int64: none; MIN_int64: not asked yet), and between two stops.
+		mutable TArray<TArray<int64>> StopWalk;
+		mutable TArray<int64> StopToStop;      // (2K) x (2K), the same sentinels
 	};
 	// One end of a deep trip: a surface point (Level 0) or a carved cell of a mapped floor (Level < 0).
 	struct FRHDeepEnd { int32 Level = 0; int32 Cell = INDEX_NONE; FIntPoint SurfacePos = FIntPoint::ZeroValue; };
-	struct FRHDeepTrip { int64 DistCm = 0; int32 Shaft1 = INDEX_NONE, Shaft2 = INDEX_NONE; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; };
+	// D6d: Trams[0] is the lines (bit = index in TramLines) the first leg rides (the walk from the home cell to its landing, or the whole direct
+	// walk on one floor), Trams[1] the second leg's (the walk from the work-side landing to the work cell). A line a trip rides on both legs
+	// counts on both: its load and its wait are paid per ride.
+	struct FRHDeepTrip { int64 DistCm = 0; int32 Shaft1 = INDEX_NONE, Shaft2 = INDEX_NONE; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; uint32 Trams[2] = { 0, 0 }; };
 	struct FRHDeepTripKey
 	{
 		int32 HomeLevel = 0, HomeCell = INDEX_NONE, WorkLevel = 0, WorkCell = INDEX_NONE;
@@ -2728,7 +2815,7 @@ private:
 	struct FRHDeepWalk
 	{
 		bool bValid = false;
-		uint32 Cells = 0, Tunnels = 0, Shafts = 0, Districts = 0;
+		uint32 Cells = 0, Tunnels = 0, Shafts = 0, Districts = 0, Tram = 0;
 		TMap<int32, FRHWalkFloor> Floors;      // mapped Level -> its network; lookups only, never iterated
 		// Trips remembered while the cars, the built roads and the commute tuning stand as they were (a pure function of those and the network;
 		// it dies with the network). Lookups only; dropped when it passes 65,536 trips.
@@ -2737,6 +2824,7 @@ private:
 	};
 	mutable FRHDeepWalk DeepWalk;
 	mutable int32 DeepWalkBuilds = 0;
+	mutable int32 TramWalkCalls = 0, TramWalkPruned = 0;
 	const FRHDeepWalk& EnsureDeepWalk() const;
 	void DeriveDeepWalk(FRHDeepWalk& Out) const;
 	bool IsDeepWalkFresh() const;
@@ -2745,6 +2833,12 @@ private:
 	const TArray<int64>& WalkFieldFrom(const FRHWalkFloor& F, int32 Node) const;
 	// Walking cm between two cells of one mapped floor (MAX_int64: no way through the digs and tunnels).
 	int64 WalkCm(const FRHWalkFloor& F, int32 CellA, int32 CellB) const;
+	// D6d: the same walk with the floor's tram lines joined in. A line is used only where it is STRICTLY cheaper, and ties between lines go to the
+	// lower index, so the choice reads no wait. OutLines (optional) gets the lines the cheapest walk rides (bit = index in TramLines). With no
+	// line on the floor it is WalkCm exactly.
+	int64 WalkTramCm(const FRHWalkFloor& F, int32 CellA, int32 CellB, uint32* OutLines = nullptr) const;
+	// The wait the lines of a leg add after the route is chosen: WaitSec x CommuteWaitCmPerSec over the set bits.
+	int64 TramWaitCm(uint32 Lines) const;
 	// The wait-free route of a trip with an end on a mapped floor (DistCm has no wait in it: DeepTripWaitCm adds each shaft ridden's own).
 	// False: off the net (an end has no door path to a landing, or a floor has none) - the caller keeps the head anchor. The answer is a
 	// pure function of the network, the cars, the built roads and the commute tuning, so it is remembered for as long as those stand.
@@ -2770,6 +2864,19 @@ private:
 		// every MAPPED floor -> the lowest Id of the shapes on it.
 		TMap<FIntVector, int32> DeepOwner;
 		TMap<int32, int32> DeepFloor;
+		// D6d: every floor that holds a tram line -> how many (a line maps its floor). A floor is MAPPED when it holds a shape or a line; the
+		// people's walk network, the home cells and the commute's deep trips follow IsMapped, while a whole-floor paint's refusal reads DeepFloor
+		// (a line is no shape).
+		TMap<int32, int32> TramOn;
+		bool IsMapped(int32 Level) const { return DeepFloor.Contains(Level) || TramOn.Contains(Level); }
+		bool AnyMapped() const { return DeepFloor.Num() > 0 || TramOn.Num() > 0; }
+		void GetMappedLevels(TArray<int32>& Out) const
+		{
+			Out.Reset();
+			for (const TPair<int32, int32>& P : DeepFloor) { Out.AddUnique(P.Key); }
+			for (const TPair<int32, int32>& P : TramOn) { Out.AddUnique(P.Key); }
+			Out.Sort(); // an explicit order: the maps' own decides nothing
+		}
 	};
 	// Who belongs to which district: building Id -> district Id, and per-district (Districts
 	// order) counts of buildings, shell bays and residents. Keyed on
@@ -3076,6 +3183,21 @@ private:
 	bool ReadTransitBlock(FArchive& Ar, const TArray<FRHShaft>& InShafts, FRHLoadedTransit& Out, FString& OutError) const;
 	void InstallTransit(const FRHLoadedTransit& In);
 	void ResetRobotTransitRuntime();
+	// D6d (trams with people). SAVED straight after the floor-shape block (save v50): NextTramId, TramCount, then the lines in Id order.
+	TArray<FRHTramLine> TramLines;
+	int32 NextTramId = 1;
+	uint32 TramVersion = 0;                  // up on every line laid and every load; 0 for ever in a colony that never lays one
+	// RH_Config rows (header defaults equal the CSV). Placeholders, director review.
+	int32 TramMinCells = 12;                 // the fewest chain points a line takes
+	int32 MaxTramLines = 8;                  // clamped to [1, RH::MaxTramLinesCap]
+	double TramStructKgPerCell = 20.0;       // the Struct bill per chain point
+	int32 TramHeadwaySec = 60;               // a rider waits half of this on average
+	int32 TramSpeedCmPerS = 1000;            // TramSpeedMps x 100
+	int32 TramPlacesPerSol = 600;            // a line's capacity a sol, in people
+	void ExecuteLayTramLine(const FRHCommand& Cmd);
+	void WriteTramBlock(FArchive& Ar) const;
+	struct FRHLoadedTram { TArray<FRHTramLine> Lines; int32 NextId = 1; };
+	bool ReadTramBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHTunnel>& InTunnels, const FRHLoadedTransit& InTransit, FRHLoadedTram& Out, FString& OutError) const;
 	void RepairLoadedRobots(const TArray<FMassEntityHandle>& Handles, const TArray<int32>& Levels);
 	// Robots below: the deep net, a pure function of (cells, shafts, cars, built roads, tunnels), never saved.
 	struct FRHDeepPortal

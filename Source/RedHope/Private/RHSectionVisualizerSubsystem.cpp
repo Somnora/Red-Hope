@@ -1152,6 +1152,8 @@ void URHSectionVisualizerSubsystem::ClearOverlay()
 	bOverlayShown = false;
 	OverlayHash = 0;
 	OverlayArrows = 0;
+	TramBandCells = 0;
+	TramBandLines = 0;
 	FlowSums.Reset();
 	LegendText.Reset();
 	if (const UWorld* World = GetWorld())
@@ -1280,8 +1282,45 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 		}
 	}
 
-	LegendText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places (nominal); teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s"),
-		bRamp ? TEXT("Lift labels count commuters a sol.") : TEXT("No commuting yet."));
+	// D6d: the tram band. Each line draws along its tunnel's cells on its floor, in the slab, as a band coloured by its wait (teal, amber, red as a
+	// lift's bar) and labelled with the commuters a sol; a line outside the slab shows only in the legend.
+	TramBandCells = 0;
+	TramBandLines = 0;
+	FString TramNote;
+	for (const FRHTramLine& L : Sim.GetTramLines())
+	{
+		const float W = (float)L.WaitSec / (float)FMath::Max(1, Sim.GetMaxWaitSec());
+		const FLinearColor C = W < 0.25f ? CalmColour : (W <= 0.75f ? BusyColour : LongColour);
+		const int32 Riders = Sim.GetTramPeople(L.Id);
+		const int32 Len = URHSimWorldSubsystem::GetTunnelChainLength(L.StopA, L.StopB);
+		const double Z = (double)L.Level * FloorH;
+		int32 Drawn = 0;
+		FIntPoint MidDrawn = FIntPoint::ZeroValue;
+		for (int32 i = 0; i < Len; ++i)
+		{
+			const FIntPoint P = URHSimWorldSubsystem::GetTunnelChainPoint(L.StopA, L.StopB, i);
+			if (!InSlabRow(DepthOf(Axis, P) - PlaneRow, Rows)) { continue; }
+			AddBox(Lists, C, (double)DepthOf(Axis, P) * CellCm, (double)AlongOf(Axis, P) * CellCm, Z + 120.0, 240.0, CellCm, 90.0);
+			if (Drawn == 0 || i <= Len / 2) { MidDrawn = P; }
+			++Drawn;
+		}
+		TramBandCells += Drawn;
+		TramBandLines += Drawn > 0 ? 1 : 0;
+		if (Drawn > 0)
+		{
+			const double ACm = (double)AlongOf(Axis, MidDrawn) * CellCm;
+			Labels.Add({ FString::Printf(TEXT("Tram %d · %s commuters a sol · wait %d s"), L.Id, *Grouped(Riders), L.WaitSec), C,
+				FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, Z + 330.0), 170.f, false });
+		}
+		TramNote += FString::Printf(TEXT(" Line %d on %d: %s a sol, wait %d s."), L.Id, L.Level, *Grouped(Riders), L.WaitSec);
+		Hash = MixU32(Hash, (uint32)(L.Id * 977 + L.WaitSec * 31 + Riders));
+		Hash = MixU32(Hash, (uint32)Drawn);
+	}
+	Hash = MixU32(Hash, (uint32)Sim.GetTramLines().Num());
+
+	LegendText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places (nominal); teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s%s"),
+		bRamp ? TEXT("Lift labels count commuters a sol.") : TEXT("No commuting yet."),
+		Sim.GetTramLines().Num() > 0 ? *(FString(TEXT(" A tram line is a band along its tunnel, coloured by its wait.")) + TramNote) : TEXT("")); // Gate-D placeholder copy (rows N4, N5)
 	Hash = MixU32(Hash, (uint32)Labels.Num());
 	Hash = MixU32(Hash, bRamp ? 1u : 0u);
 	bOverlayShown = true;

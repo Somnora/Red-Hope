@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 49;  // v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 50;  // v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -209,6 +209,37 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		}
 		CommuteLiftCmPerFloor = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteLiftCmPerFloor"), CommuteLiftCmPerFloor));
 		CommuteWaitCmPerSec = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("CommuteWaitCmPerSec"), CommuteWaitCmPerSec));
+	}
+	{
+		// D6d (trams; header defaults equal the CSV). MaxTramLines is clamped to the cap the save refuses against; the capacity and the speed are
+		// asserted > 0 (the wait divides by the capacity, the ride time by the speed).
+		TramMinCells = FMath::Max(2, (int32)Defs->GetConfigScalar(FName("TramMinCells"), TramMinCells));
+		const int32 LinesRow = (int32)Defs->GetConfigScalar(FName("MaxTramLines"), MaxTramLines);
+		MaxTramLines = FMath::Clamp(LinesRow, 1, RH::MaxTramLinesCap);
+		if (MaxTramLines != LinesRow)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("MaxTramLines %d is outside 1..%d - clamped to %d"), LinesRow, RH::MaxTramLinesCap, MaxTramLines);
+		}
+		TramStructKgPerCell = FMath::Max(0.0, Defs->GetConfigScalar(FName("TramStructKgPerCell"), TramStructKgPerCell));
+		TramHeadwaySec = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("TramHeadwaySec"), TramHeadwaySec));
+		const double SpeedMps = Defs->GetConfigScalar(FName("TramSpeedMps"), TramSpeedCmPerS / 100.0);
+		if (!(SpeedMps > 0.0))
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("TramSpeedMps is %.3f - it must be above 0; using %.0f"), SpeedMps, TramSpeedCmPerS / 100.0);
+		}
+		else
+		{
+			TramSpeedCmPerS = FMath::Max(1, FMath::RoundToInt32(SpeedMps * 100.0));
+		}
+		const int32 PlacesRow = (int32)Defs->GetConfigScalar(FName("TramPlacesPerSol"), TramPlacesPerSol);
+		if (PlacesRow <= 0)
+		{
+			UE_LOG(LogRedHopeSim, Error, TEXT("TramPlacesPerSol is %d - it must be above 0; using %d"), PlacesRow, TramPlacesPerSol);
+		}
+		else
+		{
+			TramPlacesPerSol = PlacesRow;
+		}
 	}
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
@@ -9155,6 +9186,10 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	{
 		ExecuteCancelCavern(Cmd);
 	}
+	else if (Cmd.Verb == FName("LayTramLine"))
+	{
+		ExecuteLayTramLine(Cmd); // D6d: Value = the tunnel Id; rejects through OnCommandRejected itself
+	}
 	else if (Cmd.Verb == FName("CancelTunnel"))
 	{
 		ExecuteCancelTunnel(Cmd);
@@ -13351,6 +13386,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	WriteWarmthBlock(Ar); // v47: and the warmth block straight after that, so the transit block's offsets do not move
 	WriteCavernBlock(Ar); // v48: and the cavern block straight after that, so the warmth block's offsets do not move
 	WriteDeepBlock(Ar);   // v49: and the floor-shape block straight after that, so the cavern block's offsets do not move
+	WriteTramBlock(Ar);   // v50: and the tram block straight after that, so the floor-shape block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -13824,6 +13860,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		return false;
 	}
+	// v50: the tram block (D6d), validated against the floors, tunnels and cars just read, into a local.
+	FRHLoadedTram LoadedTram;
+	if (!ReadTramBlock(Ar, LoadedFloors, LoadedTunnels, LoadedTransit, LoadedTram, OutError))
+	{
+		return false;
+	}
 
 	// Tear down the live colony before applying the snapshot.
 	if (URHAgentSubsystem* Agents = GetWorld()->GetSubsystem<URHAgentSubsystem>())
@@ -13974,6 +14016,17 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	Caverns = MoveTemp(LoadedCaverns);
 	NextCavernId = LoadedNextCavernId;
 	++CavernsVersion;
+	{
+		// D6d: the lines (their floors are mapped: the districts' version moves below on every load). Only a colony that has (or had) a line moves
+		// TramVersion: with none on either side of the load nothing here changes, so it stays 0 for ever in a colony that never lays one.
+		const bool bHadTram = TramLines.Num() > 0;
+		TramLines = MoveTemp(LoadedTram.Lines);
+		NextTramId = LoadedTram.NextId;
+		if (bHadTram || TramLines.Num() > 0)
+		{
+			++TramVersion;
+		}
+	}
 	InstallTransit(LoadedTransit); // D4: the cars onto the shafts just installed, the threshold sol and the ledgers
 	InstallWarmth(LoadedWarmth);   // D5 depth: each floor's Warmth (a level at or above the cut-off is repaired with a Warning)
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a

@@ -23,6 +23,7 @@
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTramVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "Containers/Ticker.h"
@@ -808,6 +809,7 @@ namespace
 		FVector CavernACm = FVector::ZeroVector;
 		FVector CavernBCm = FVector::ZeroVector;
 		int32 ManifestBase = 0;
+		int32 TramTunnelId = INDEX_NONE; // D6d: the tunnel tram.setup digs on -2
 	};
 
 	FString QuickSavePath()
@@ -1417,6 +1419,104 @@ namespace
 				&& URHSectionVisualizerSubsystem::LodBand(-15, -10) == 1 && URHSectionVisualizerSubsystem::LodBand(-16, -10) == 2 && URHSectionVisualizerSubsystem::LodBand(0, -10) == 2;
 			Report(TEXT("section.unit"), bOk, FString::Printf(TEXT("slab rows %d; round trips, classification, direction and LOD bands%s"), URHSectionVisualizerSubsystem::SlabRows(), *Why));
 		}, 0.1f);
+		// ---- the tram tool (D6d): a finished 14-point tunnel on -2 and a lift car (harness calls), then the deck's Lay tram button transmits the
+		// LayTramLine order; once it lands the line stands, its capsule shows on the floor view, and the capsule's phase runs end to end.
+		Runner.Do(TEXT("tram.setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->CancelModes();
+			PC->SetActiveLevel(-2);
+			FString Why;
+			if (!Sim->HasTransit())
+			{
+				Sim->Debug_AddSolid(FName("Lander"), FName("Struct"), Sim->GetLiftFitBillKg());
+				Sim->Debug_FitLift(0, Why);
+			}
+			Sim->Debug_AddSolid(FName("Lander"), FName("Struct"), 14.0 * Sim->GetTramStructKgPerCell());
+			int32 Id = INDEX_NONE;
+			const FIntPoint Column = Sim->GetShaft(0).Column;
+			for (int32 Dx = 2; Dx <= 8 && Id == INDEX_NONE; ++Dx)
+			{
+				for (int32 Dy = -6; Dy <= 6 && Id == INDEX_NONE; ++Dy)
+				{
+					int32 TId = INDEX_NONE;
+					if (Sim->Debug_DigTunnel(-2, Column + FIntPoint(Dx, Dy), Column + FIntPoint(Dx + 13, Dy), TId, Why)) { Id = TId; }
+				}
+			}
+			if (Id != INDEX_NONE) { Sim->Debug_CarveTunnelCells(Id, 14); }
+			T->TramTunnelId = Id;
+			const FRHTunnel* Tn = Id != INDEX_NONE ? Sim->FindTunnel(Id) : nullptr;
+			FString Pre;
+			Report(TEXT("tram.setup"), Tn && Sim->HasTransit() && Sim->GetTunnelUncarved(*Tn) == 0 && Sim->CanLayTramLine(Id, Pre) && Sim->GetTramLines().Num() == 0,
+				FString::Printf(TEXT("a finished 14-point tunnel #%d on -2, a lift car, no tram line yet (%s)"), Id, *Pre));
+		}, 0.9f);
+		Runner.Do(TEXT("tram.unit"), []()
+		{
+			// The capsule's phase (pure): out, dwell, back, dwell, over a 100 cm line with a 10 s ride and a 4 s dwell.
+			const bool bOk = FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(0.0, 10.0, 4.0, 100.0), 0.0) && FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(5.0, 10.0, 4.0, 100.0), 50.0)
+				&& FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(12.0, 10.0, 4.0, 100.0), 100.0) && FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(19.0, 10.0, 4.0, 100.0), 50.0)
+				&& FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(26.0, 10.0, 4.0, 100.0), 0.0) && FMath::IsNearlyEqual(URHTramVisualizerSubsystem::ArcAt(33.0, 10.0, 4.0, 100.0), 50.0);
+			Report(TEXT("tram.unit"), bOk, TEXT("the capsule's phase: out in the ride time, a dwell at the far stop, back, a dwell, and it repeats"));
+		}, 0.1f);
+		{
+			const TSharedRef<float> SpeedBefore = MakeShared<float>(1.f);
+			const TSharedRef<FPress> Tool = PushPress(TEXT("tram.tool"), [T](FVector2D& OutPos) { return LocateButton(FString::Printf(TEXT("Lay tram #%d"), T->TramTunnelId), 0, true)(OutPos); });
+			PushCheck(TEXT("tram.tool"), Tool, [T]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim) { return FString(TEXT("no player controller or sim")); }
+				const bool bOrdered = QueueHas(*Sim, TEXT("LayTramLine"), nullptr) || Sim->GetTramLines().Num() > 0 || PC->GetConfirmText().ToString().Contains(TEXT("Tram order transmitted"));
+				return bOrdered ? FString() : FString(TEXT("no LayTramLine order was transmitted"));
+			}, 2.f);
+			Runner.Do(TEXT("tram.land"), [SpeedBefore]() { *SpeedBefore = ClockSpeed(); if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(8.f); } }, 0.2f); // 8x: the era tiers refuse while a building is going up
+			Runner.Push(TEXT("tram.laid"), [T, SpeedBefore](double, bool bLast)
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const bool bLaid = Sim && Sim->GetTramLines().Num() == 1 && Sim->GetTramLines()[0].TunnelId == T->TramTunnelId && Sim->IsFloorMapped(-2);
+				if (!bLaid && !bLast) { return false; }
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(*SpeedBefore > 0.f ? *SpeedBefore : 1.f); }
+				Report(TEXT("tram.laid"), bLaid, bLaid ? FString::Printf(TEXT("the order landed: line %d on tunnel %d, floor -2 is mapped"), Sim->GetTramLines()[0].Id, T->TramTunnelId) : FString(TEXT("the LayTramLine order did not land")));
+				return true;
+			}, 0.2f, 20.f);
+			Runner.Push(TEXT("tram.capsule"), [](double, bool bLast)
+			{
+				UWorld* W = FindGameWorld();
+				const URHTramVisualizerSubsystem* Trams = W ? W->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
+				const ARHPlayerController* PC = GetPC();
+				const bool bShown = Trams && Trams->GetCapsuleCount() == 1 && Trams->GetShownCapsules() == 1 && PC && PC->GetActiveLevel() == -2;
+				if (!bShown && !bLast) { return false; }
+				Report(TEXT("tram.capsule"), bShown, FString::Printf(TEXT("one capsule for the one line, showing on the viewed floor (%d made, %d shown)"), Trams ? Trams->GetCapsuleCount() : -1, Trams ? Trams->GetShownCapsules() : -1));
+				return true;
+			}, 0.2f, 4.f);
+			Runner.Push(TEXT("tram.moves"), [](double, bool bLast)
+			{
+				// The capsule runs: two readings a moment apart are not the same place (the sim runs at 1x or more, the presentation clock follows it).
+				static FVector First = FVector::ZeroVector;
+				static double FirstAt = -1.0;
+				UWorld* W = FindGameWorld();
+				const URHTramVisualizerSubsystem* Trams = W ? W->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
+				FVector Now;
+				if (!Trams || !Trams->GetCapsuleAt(1, Now))
+				{
+					if (bLast) { Report(TEXT("tram.moves"), false, TEXT("no capsule to read")); return true; }
+					return false;
+				}
+				if (FirstAt < 0.0) { First = Now; FirstAt = FPlatformTime::Seconds(); return false; }
+				const bool bMoved = FVector::Dist(First, Now) > 100.0;
+				if (!bMoved && !bLast) { return false; }
+				FirstAt = -1.0;
+				Report(TEXT("tram.moves"), bMoved, FString::Printf(TEXT("the capsule moved %.0f m between two readings"), FVector::Dist(First, Now) / 100.0));
+				return true;
+			}, 0.2f, 6.f);
+		}
+
 		{
 			const auto Section = []() -> URHSectionVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr; };
 			const auto Focus = []() { const ARHPlayerController* PC = GetPC(); return PC ? PC->GetSectionFocus() : 999; };
@@ -1541,6 +1641,28 @@ namespace
 				if (!Section() || Section()->GetOverlayRefreshes() <= *Refreshes) { return FString(TEXT("the section's layers did not draw")); }
 				return (Traffic && Traffic->IsSurfaceHidden()) ? FString() : FString(TEXT("the surface traffic layers are showing in the section"));
 			}, 2.f);
+			// D6d: the tram band. The cut is moved to the line's floor and row (the section's own setters), the overlay refreshes at 2 Hz, and the
+			// band has cells in the slab; the capsules of the floor view are hidden while the section is on (D8 R1).
+			Runner.Do(TEXT("section.tram focus"), [T]()
+			{
+				ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHTramLine* L = (Sim && Sim->GetTramLines().Num() > 0) ? &Sim->GetTramLines()[0] : nullptr;
+				if (!PC || !L) { return; }
+				PC->SetSectionFocus(L->Level);
+				PC->SetSectionPlaneRow(URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), L->StopA));
+			}, 0.6f);
+			Runner.Push(TEXT("section.tram"), [Section](double, bool bLast)
+			{
+				UWorld* W = FindGameWorld();
+				const URHTramVisualizerSubsystem* Trams = W ? W->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
+				const bool bBand = Section() && Section()->GetTramBandCells() > 0 && Section()->GetTramBandLines() == 1 && Section()->GetLegendText().Contains(TEXT("tram line"));
+				const bool bHidden = Trams && Trams->GetShownCapsules() == 0;
+				if (!(bBand && bHidden) && !bLast) { return false; }
+				Report(TEXT("section.tram"), bBand && bHidden, FString::Printf(TEXT("the tram band has %d cell(s) on %d line(s) in the slab and is in the legend; the floor view's capsules are hidden (%d shown)"),
+					Section() ? Section()->GetTramBandCells() : -1, Section() ? Section()->GetTramBandLines() : -1, Trams ? Trams->GetShownCapsules() : -1));
+				return true;
+			}, 0.2f, 6.f);
 			const TSharedRef<FPress> TOff = PushPress(TEXT("section.traffic.off"), LocateButton(TEXT("Traffic [on]"), 0, true));
 			PushCheck(TEXT("section.traffic.off"), TOff, []() { const ARHPlayerController* PC = GetPC(); return (PC && !PC->IsTrafficOverlayOn()) ? FString() : FString(TEXT("the overlay did not turn off")); }, 1.f);
 
@@ -1603,7 +1725,7 @@ namespace
 				PC->CancelModes();
 				PC->SetActiveLevel(0);
 				const int32 Actual = PC->GetWorldClickCount() - T->WorldBase;
-				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel, the cavern, the district shape and the section's dive)"), Actual, T->ExpectedWorld));
+				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel, the cavern, the district shape and the section's dive; the tram tool is a deck button)"), Actual, T->ExpectedWorld));
 			}
 			if (Sim)
 			{

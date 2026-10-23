@@ -361,6 +361,13 @@ void URHSimWorldSubsystem::RollTransit(int32 SolNow)
 		}
 		Loads[S] = GetShaftPeopleLoad(S) + Cargo;
 	}
+	// D6d: the tram lines' loads, read from the same flows before any wait moves (people only: no ledger, no lag).
+	TArray<int64> TramLoads;
+	TramLoads.SetNum(TramLines.Num());
+	for (int32 i = 0; i < TramLines.Num(); ++i)
+	{
+		TramLoads[i] = GetTramPeopleLoad(TramLines[i].Id);
+	}
 	bool bChanged = false;
 	for (int32 S = 0; S < TransitLedgers.Num(); ++S)
 	{
@@ -369,6 +376,15 @@ void URHSimWorldSubsystem::RollTransit(int32 SolNow)
 		bChanged |= Wait != L.WaitSec;
 		L.PrevWaitSec = L.WaitSec;
 		L.WaitSec = Wait;
+	}
+	// D6d: then the lines', in ascending line Id: the same wait formula against TramPlacesPerSol.
+	for (int32 i = 0; i < TramLines.Num(); ++i)
+	{
+		FRHTramLine& Line = TramLines[i];
+		const int32 Wait = ComputeTransitWaitSec(TramLoads[i], (int64)TramPlacesPerSol);
+		bChanged |= Wait != Line.WaitSec;
+		Line.PrevWaitSec = Line.WaitSec;
+		Line.WaitSec = Wait;
 	}
 	TransitCheckedSol = SolNow;
 	++TransitThresholds;

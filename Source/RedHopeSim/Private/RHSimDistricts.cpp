@@ -84,6 +84,12 @@ void URHSimWorldSubsystem::DeriveDistrictGeo(FRHDistrictGeo& Out) const
 			Out.CellOwner.Add(Cell, D.Id);
 		}
 	}
+	// D6d: a floor that holds a tram line is mapped (a line is no shape: it never enters DeepFloor, DeepOwner or the paint refusal). A laid line
+	// and a load both bump DistrictsVersion, so this re-derives with the rest.
+	for (const FRHTramLine& L : TramLines)
+	{
+		++Out.TramOn.FindOrAdd(L.Level);
+	}
 }
 
 const URHSimWorldSubsystem::FRHDistrictGeo& URHSimWorldSubsystem::EnsureDistrictGeo() const
@@ -98,7 +104,7 @@ const URHSimWorldSubsystem::FRHDistrictGeo& URHSimWorldSubsystem::EnsureDistrict
 		FRHDistrictGeo Fresh;
 		DeriveDistrictGeo(Fresh);
 		if (!SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) || !SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) || !SameMap(Fresh.IndexById, DistrictGeo.IndexById)
-			|| !SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) || !SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor))
+			|| !SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) || !SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor) || !SameMap(Fresh.TramOn, DistrictGeo.TramOn))
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the district ground cache is stale (%d cells reused, %d re-derived; districts v%u)"),
 				DistrictGeo.CellOwner.Num(), Fresh.CellOwner.Num(), DistrictsVersion);
@@ -146,7 +152,7 @@ URHSimWorldSubsystem::FRHDistrictMembershipKey URHSimWorldSubsystem::MakeDistric
 
 bool URHSimWorldSubsystem::IsFloorMapped(int32 Level) const
 {
-	return Level < 0 && EnsureDistrictGeo().DeepFloor.Contains(Level);
+	return Level < 0 && EnsureDistrictGeo().IsMapped(Level); // D6d: a floor that holds a shape or a tram line
 }
 
 int32 URHSimWorldSubsystem::GetDistrictOfFloorPoint(int32 Level, const FIntPoint& P) const
@@ -187,17 +193,16 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 	Out.Districts = DistrictsVersion;
 	Out.BedAssign = BedAssignVersion;
 	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
-	if (Geo.DeepFloor.Num() == 0)
+	if (!Geo.AnyMapped())
 	{
-		return; // no shape, no mapped floor: home cells are never built
+		return; // no shape and no line: no mapped floor, home cells are never built
 	}
 	TArray<int32> Levels;
-	Geo.DeepFloor.GetKeys(Levels);
-	Levels.Sort(); // an explicit order: the map's own decides nothing
+	Geo.GetMappedLevels(Levels); // D6d: the floors that hold a shape or a tram line, ascending
 	TMap<int32, TArray<int32>> LevelResidents; // mapped Level -> colonist Ids
 	for (const FRHColonist& C : Colonists)
 	{
-		if (C.HomeHab == 0 && C.HomeLevel < 0 && Geo.DeepFloor.Contains(C.HomeLevel))
+		if (C.HomeHab == 0 && C.HomeLevel < 0 && Geo.IsMapped(C.HomeLevel))
 		{
 			LevelResidents.FindOrAdd(C.HomeLevel).Add(C.Id);
 		}
@@ -413,7 +418,7 @@ bool URHSimWorldSubsystem::Debug_DistrictCachesFresh() const
 		FRHDistrictGeo Fresh;
 		DeriveDistrictGeo(Fresh);
 		bFresh &= SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) && SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) && SameMap(Fresh.IndexById, DistrictGeo.IndexById)
-			&& SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) && SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor);
+			&& SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) && SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor) && SameMap(Fresh.TramOn, DistrictGeo.TramOn);
 	}
 	if (DistrictMembers.bValid && DistrictMembers.Key == MakeDistrictMembershipKey())
 	{
