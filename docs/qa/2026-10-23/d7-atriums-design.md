@@ -576,3 +576,10 @@ Added to section 1's table, each behind the switch:
 **Placeholders marked "director review"** (no question needed): `HopeAtriumMax` 3, stacking with Shelter (so a deep atrium resident can gain up to +6 in all); `AtriumFillPermille` 1500; `AtriumLeakPermille` 2000. An atrium has no Struct bill and no power draw.
 
 **Status.** Every required change 1-10 is written in above (R1-R10), with optional items R11-R12. Per the review's verdict, a check that each item is written suffices; no new full review round is needed.
+
+
+# DIRECTOR ANSWER (2026-10-23)
+
+- **Q-A (a):** an atrium is made by converting a finished cavern: dig it with the Cavern brush, then "Open as atrium" on its card. Two steps; D6a carving is untouched.
+- **Q-B (a):** no stairs in step 2. Floors change by shaft only, D6c's walk stays one floor at a time, and no commute moves.
+- The placeholders stand (HopeAtriumMax 3 stacking with Shelter, AtriumFillPermille 1500, AtriumLeakPermille 2000, no Struct bill, no power), marked "director review".
