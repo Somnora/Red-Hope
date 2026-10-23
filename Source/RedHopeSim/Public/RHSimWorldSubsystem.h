@@ -962,6 +962,10 @@ public:
 	bool MoveAlongDeep(FMassEntityHandle Entity, FTransform& Transform, const FVector& TargetCm, int32 TargetLevel, float SpeedMps, float Dt, float CargoKg);
 	// A robot back on the surface with a surface target: its deep trip (if any) is forgotten, so today's body runs on.
 	void DropDeepPath(FMassEntityHandle Entity) { if (const FRHRobotRoadPath* P = RobotPaths.Find(Entity)) { if (P->bDeep) { RobotPaths.Remove(Entity); } } }
+	// A Charge task's pad stands no more (demolished under the drive): true when it is gone, and the robot's deep trip with it. A
+	// ride boarded for that pad must not outlive it - the charge test reads a boarded ascent as "already going up" and never
+	// seeks, so a robot left standing on a column would run dry below. Both brains call this in the pad-gone branch.
+	bool ChargePadGone(FMassEntityHandle Entity, int32 PadId);
 	// A boarded ride (hold or ride counters live), for the charge test and the cab. False when none.
 	bool GetRideState(FMassEntityHandle Entity, FRHRideState& Out) const;
 	// The last sub-step of this robot's deep trip was a hold at a column (idle draw, no wear).

@@ -22,7 +22,8 @@
 //  TR6 the people load (ramp permille at 60, 61, 160; the k mod n split; O4); TR7 the commute wait and the caches;
 //  TR8 a second car, a second shaft; TR9 the hand-off hold (no road and road); TR10 the planner; TR11 the ride;
 //  TR12 haul and build below, the fallback, TN12b, the source-below stall; TR13 claims; TR14 charge (TN14, TN14b, TR14c);
-//  TR15 repair across levels; TR16b floor freight is hauler work; TR17 era parity; TR18 the save.
+//  TR15 repair across levels; TR16b floor freight is hauler work; TR17 era parity; TR18 the save; TR19 a pad demolished under a
+//  boarded ride; TR20 no route to a pad descends (the reserve's frozen descent hold is never charged).
 namespace
 {
 	struct FTransitSuiteBot
@@ -1744,6 +1745,122 @@ int32 RHRunTransitSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		FString E;
 		Expect(Sim->LoadColony(TEXT("transitgood"), E) && E.IsEmpty() && Sim->GetLiftCars(0) == 1 && Sim->GetLiftCars(1) == 1 && Sim->GetLiftCars(2) == 0 && Sim->GetTransitLedgers().Num() == 3,
 			FString::Printf(TEXT("TR18 and the good file still loads: three shafts, two fitted, three ledgers (%s)"), *E));
+	}
+
+	// --- TR19. A pad demolished under a boarded ride: the ride goes with it, and the robot seeks again (code review, defect 1). ---
+	{
+		Expect(OneShaft(2, 12, 12) && Fit(0), TEXT("TR19 setup: shaft 0 to -2, one car"));
+		const int32 Pad1 = PadAt();
+		FTransitSuiteBot Low = MakeBot(TEXT("RC_H"), At(-1, 1, 0));
+		int32 PadId = 0; FVector PadCm;
+		Sim->FindNearestChargePad(Low.X.GetLocation(), PadId, PadCm);
+		Low.ChargeWh = Sim->DeepReserveWh(Low.H, Low.R, Low.X.GetLocation(), PadId, PadCm) - 0.5f;
+		const ERHDeepCharge First = Sim->DeepChargeTest(Low.H, Low.R, Low.X.GetLocation(), Low.ChargeWh, Low.CapWh);
+		// The Charge drive, sub-step by sub-step, until the robot has boarded the ride up.
+		FRHRideState Ride;
+		int32 Steps = 0;
+		for (; Steps < 400 && !Sim->GetRideState(Low.H, Ride); ++Steps)
+		{
+			Sim->SetRobotStepEnd(Clock->GetSimSecondsTotal() + (double)AgentDt);
+			RH::MoveAlong(*Sim, Low.H, Low.X, PadCm, Low.R.SpeedMps, AgentDt, false, 0.f, 0);
+			Sim->SetRobotStepEnd(-1.0);
+			Drain(Low, Sim->DidRobotHoldThisStep(Low.H) ? Low.R.DrawIdleW : Low.R.DrawMoveW);
+		}
+		const bool bBoarded = Sim->GetRideState(Low.H, Ride) && Ride.IsAscent() && Sim->LevelOfZ(Low.X.GetLocation().Z) == -1;
+		const ERHDeepCharge Riding = Sim->DeepChargeTest(Low.H, Low.R, Low.X.GetLocation(), Low.ChargeWh, Low.CapWh);
+		// While the pad stands the brain's pad-gone test leaves the ride alone.
+		const bool bStanding = !Sim->ChargePadGone(Low.H, Pad1) && Sim->GetRideState(Low.H, Ride);
+		Expect(First == ERHDeepCharge::Seek && bBoarded && Riding == ERHDeepCharge::Keep && bStanding,
+			FString::Printf(TEXT("TR19 an RC-H on -1's landing at its reserve - 0.5 Wh seeks, boards the ride up after %d sub-steps (%.2f Wh left), and while it rides the ascent is kept (the pad still stands: the ride is untouched)"), Steps, Low.ChargeWh));
+		// The pad is demolished under the drive; a second pad stands further on.
+		Rejects.Reset();
+		FRHCommand Demolish; Demolish.Verb = FName("Demolish"); Demolish.Target = FName("Building"); Demolish.Value = (double)Pad1;
+		Send(Demolish);
+		const int32 Pad2 = Place(TEXT("ChargePad"), Pt(0, 8, 0), 0);
+		// The brain's Charge branch: the pad is gone, the task is reset, and no step is taken.
+		const bool bGone = Sim->ChargePadGone(Low.H, Pad1);
+		Low.T = FRHTaskFragment();
+		Sim->FindNearestChargePad(Low.X.GetLocation(), PadId, PadCm);
+		Low.ChargeWh = Sim->DeepReserveWh(Low.H, Low.R, Low.X.GetLocation(), PadId, PadCm) - 0.5f;
+		const bool bForgotten = !Sim->GetRideState(Low.H, Ride);
+		const ERHDeepCharge Again = Sim->DeepChargeTest(Low.H, Low.R, Low.X.GetLocation(), Low.ChargeWh, Low.CapWh);
+		Expect(bGone && !FindB(Pad1) && Rejects.Num() == 0 && PadId == Pad2 && bForgotten && Again == ERHDeepCharge::Seek,
+			FString::Printf(TEXT("TR19 the pad demolished (%s): the reset drops the ride, so the charge test seeks again toward the next pad (#%d) at %.2f Wh - it does not read a stale ascent as already going up"), *LastReject(), PadId, Low.ChargeWh));
+		const int32 Home = Drive(Low, PadCm, 0, 20000);
+		Expect(Home > 0 && Low.MinChargeWh > 0.f && Sim->LevelOfZ(Low.X.GetLocation().Z) == 0,
+			FString::Printf(TEXT("TR19 and it rides up and docks at the next pad in %d sub-steps with %.2f Wh at its lowest, never empty"), Home, Low.MinChargeWh));
+	}
+
+	// --- TR20. The reserve's descent hold (code review, defect 2): no route to a surface pad ever descends, so the frozen price
+	// the reserve gives a descent's wait is never charged. If this fails, price every not-yet-boarded wait at MaxWaitSec. ---
+	{
+		FRandomStream Rng(0xD420);
+		int32 Setups = 0, Layouts = 0, Plans = 0, Descents = 0, Crossed = 0, Crowded = 0, Roaded = 0;
+		for (int32 Round = 0; Round < 16; ++Round)
+		{
+			// Rounds 0-7: the two shafts joined by a tunnel on each floor, shaft 0 crowded (it waits 120 or 600 s) and shaft 1 not,
+			// so a robot in shaft 0's dig has every reason to walk across. Rounds 8-15: random digs, tunnels and crowds.
+			const bool bJoined = Round < 8;
+			const int32 Cells1 = bJoined ? 12 : Rng.RandRange(4, 12);
+			const int32 Cells2 = bJoined ? 12 : Rng.RandRange(4, 12);
+			const int32 CellsB = bJoined ? 6 : Rng.RandRange(3, 8);
+			Setups += (OneShaft(2, Cells1, Cells2) && Fit(0) && SinkOne(2, CellsB) && Fit(1)) ? 1 : 0;
+			for (const int32 L : { -1, -2 })
+			{
+				int32 Id = INDEX_NONE;
+				if (bJoined)
+				{
+					if (Sim->Debug_DigTunnel(L, FIntPoint(3, 0), FIntPoint(28, 1), Id, Why)) { Sim->Debug_CarveTunnelCells(Id, 64); }
+					continue;
+				}
+				if (Rng.RandRange(0, 2) == 0) { continue; }
+				const TArray<FIntPoint>& Have = Sim->FindFloor(L)->GetCells();
+				const FIntPoint A = Have[Rng.RandRange(0, Have.Num() - 1)] + FIntPoint(1, 0);
+				const int32 Bx = Rng.RandRange(20, 30);
+				const int32 By = Rng.RandRange(0, 2);
+				const int32 Carve = Rng.RandRange(5, 40);
+				if (Sim->Debug_DigTunnel(L, A, FIntPoint(Bx, By), Id, Why)) { Sim->Debug_CarveTunnelCells(Id, Carve); }
+			}
+			for (int32 Rd = Rng.RandRange(0, 2); Rd > 0; --Rd)
+			{
+				const double Fx = Rng.RandRange(0, 40000);
+				const double Fy = Rng.RandRange(-6000, 8000);
+				const double Len = Rng.RandRange(500, 3500);
+				Roaded += Sim->Debug_LayRoad(FVector(Fx, Fy, 0.0), FVector(Fx + Len, Fy, 0.0), true).Num() > 0 ? 1 : 0;
+			}
+			const int32 Sol = SolNow();
+			const int32 Places[4] = { 0, 1500, 2000, 6000 };
+			const int32 Load0 = bJoined ? Places[2 + (Round & 1) * 1] : Places[Rng.RandRange(0, 3)];
+			const int32 Load1 = bJoined ? 0 : Places[Rng.RandRange(0, 3)];
+			Sim->Debug_ChargeTransit(0, Load0, Sol * SolLen + 1.0);
+			Sim->Debug_ChargeTransit(1, Load1, Sol * SolLen + 1.0);
+			Sim->Debug_RollTransit(Sol + 2);
+			const double Stamp = (Sol + 2) * SolLen + 10.0;
+			Crowded += (Sim->GetTransitWaitSec(0) > 0 || Sim->GetTransitWaitSec(1) > 0) ? 1 : 0;
+			++Layouts;
+			for (const int32 L : { -1, -2 })
+			{
+				const FRHFloor* Fl = Sim->FindFloor(L);
+				for (const FIntPoint& P : Fl->GetCells())
+				{
+					for (int32 T = 0; T < 3; ++T)
+					{
+						const double Px = Rng.RandRange(0, 40000);
+						const double Py = Rng.RandRange(-6000, 8000);
+						const FVector Pad(Px, Py, 0.0);
+						FRHRobotRoadPath Path;
+						FRHDeepRouteCost Cost;
+						if (!Sim->PlanDeepRoute(L, At(L, P.X, P.Y), 0, Pad, Stamp, Path, &Cost)) { continue; }
+						++Plans;
+						Descents += Cost.Rides - Cost.AscentRides;
+						// A route that walks a tunnel below to the other shaft's column: it starts by shaft 0's dig and rides shaft 1.
+						Crossed += (P.X < 15 && Path.LegEdge.Contains(-2)) ? 1 : 0;
+					}
+				}
+			}
+		}
+		Expect(Setups == 16 && Layouts == 16 && Plans > 1000 && Crossed > 100 && Descents == 0,
+			FString::Printf(TEXT("TR20 over %d random two-shaft layouts (tunnels, %d roads, %d with a crowded shaft) %d plans from every carved cell to surface pads: %d descents (expect 0), %d of them walk a tunnel below from shaft 0's dig to ride shaft 1"), Layouts, Roaded, Crowded, Plans, Descents, Crossed));
 	}
 
 	Expect(Sim->GetDeepOffLattice() == 0, FString::Printf(TEXT("TR over the whole suite no plan started off the lattice (DeepOffLattice %d)"), Sim->GetDeepOffLattice()));

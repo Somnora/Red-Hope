@@ -127,9 +127,9 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 				{
 				case ERHTaskType::Charge:
 				{
-					if (!Sim->HasBuilding(Task.DigDepositId))
+					if (Sim->ChargePadGone(Entity, Task.DigDepositId))
 					{
-						Task = FRHTaskFragment(); // BM-3: pad demolished - re-seek next tick
+						Task = FRHTaskFragment(); // BM-3: pad demolished - re-seek next tick (D4 fix: its boarded ride goes too)
 						break;
 					}
 					if (Task.Phase == 0)

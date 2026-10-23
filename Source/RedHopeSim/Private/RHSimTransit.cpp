@@ -1507,6 +1507,16 @@ bool URHSimWorldSubsystem::MoveAlongDeep(FMassEntityHandle Entity, FTransform& T
 	return bArrived;
 }
 
+bool URHSimWorldSubsystem::ChargePadGone(FMassEntityHandle Entity, int32 PadId)
+{
+	if (HasBuilding(PadId))
+	{
+		return false;
+	}
+	DropDeepPath(Entity); // the task is reset without a step taken: a ride in progress was for the pad that is gone
+	return true;
+}
+
 bool URHSimWorldSubsystem::GetRideState(FMassEntityHandle Entity, FRHRideState& Out) const
 {
 	const FRHRobotRoadPath* Path = RobotPaths.Find(Entity);

@@ -175,6 +175,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		if (!Sim->GetRepairTargetPos(Task.RepairTarget, TargetCm))
 		{
 			Sim->ReleaseRepairClaim(Task.RepairTarget);
+			Sim->DropDeepPath(Entity); // D4 fix: reset without a step - a boarded ride must not outlive its task
 			Task = FRHTaskFragment();
 			break;
 		}
@@ -188,6 +189,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				if (!Sim->IsRobotHalted(Task.RepairTarget))
 				{
 					Sim->ReleaseRepairClaim(Task.RepairTarget);
+					Sim->DropDeepPath(Entity); // D4 fix: as above
 					Task = FRHTaskFragment();
 					break;
 				}
@@ -424,9 +426,9 @@ EStateTreeRunStatus FRHChargeTask::Tick(FStateTreeExecutionContext& Context, con
 
 	// BM-3: the pad was demolished under it - back to Work, which re-seeks a
 	// dock (the next pad, or the Lander) while the battery is still low.
-	if (!Sim->HasBuilding(Task.DigDepositId))
+	if (Sim->ChargePadGone(Entity, Task.DigDepositId))
 	{
-		return EStateTreeRunStatus::Failed;
+		return EStateTreeRunStatus::Failed; // D4 fix: a ride boarded for that pad goes with it
 	}
 	if (Task.Phase == 0)
 	{
