@@ -666,3 +666,10 @@ Anchors are at HEAD `5a7066f`. Rebase onto D6d, D6e, D7, E1 and E2 when they lan
 - the director's answers to Q-A, Q-B and Q-C;
 - E1 and E2 built first;
 - the builder's first playtest run, which confirms or refutes the forecast (R4) before any tuning.
+
+
+# DIRECTOR ANSWER (2026-10-23)
+
+- **Q-A (a):** Earth's quota cargo shares the ship's 30,000 kg. The quota loads first and sales fill the rest.
+- **Q-B (a):** 3 sols after a met quota the player may launch short. The ship carries what it can with no sales, and the shortfall is added to the next round's bill.
+- **Q-C (a):** if the 110-sol colony stalls, first the scripted player adapts (spare parts on every ship, a second Forge, pausing growth while a ship waits to load). If it still fails the bar (0 recalled, the fleet running, at least 3 Q3 rounds, the Big Arrival by sol 110), the repeat multiplier drops from 1.25 to 1.10, and both runs are reported to the director.
