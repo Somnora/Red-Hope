@@ -341,3 +341,9 @@ This section replaces the design wherever they differ. The builder's order of au
    - `ComputeSalvage` dropping 0.1 g or less (W:10410, :10417).
 
 **The verdict after revision:** CLEARED WITH CONDITIONS. R1-R8 are written in. R9 waits on the director's answer to Q-B. R6 waits on the builder's prototype numbers. Q-A also shapes E1's data. Under (a) there is one column, `EarthValue_mcr`. Under (b) the builder adds a second, `EarthSellValue_mcr`, with the same placeholder numbers. So Q-A also needs an answer before the CSV is edited.
+
+
+# DIRECTOR ANSWER (2026-10-23)
+
+- **Q-A (a):** one Earth reference value per resource, used both ways (`EarthValue_mcr`). E3 adds the launch cost on top.
+- **Q-B (a):** recycled water is netted, not produced. Water Used = drawn x (1 - GreywaterReturnFraction); `DrawPool` records nothing for water.

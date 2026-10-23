@@ -485,3 +485,9 @@ The default run cannot reach the deferral branch: every bot item is an active ro
 **The verdict after revision:** CLEARED WITH CONDITIONS. R1-R5 are written in. The conditions left are:
 - the director's answers to Q-A and Q-B;
 - E1 built first, and its own Q-A and Q-B answered, since E2 re-homes E1's landing hooks and appends after its block.
+
+
+# DIRECTOR ANSWER (2026-10-23)
+
+- **Q-A (a):** each ship carries up to 30,000 kg.
+- **Q-B (a):** the stacking cap covers only multiply or replace effects (at most 4 Toolkits and 1 Compute Core over the game). Supplies, power kits, robots, rovers and crew are limited only by credits and ship mass.
