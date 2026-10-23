@@ -100,6 +100,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		return;
 	}
 	BuildEconSlots(); // E1: the ledger's slots, from DT_Resources
+	BuildManifestEffects(); // E2a: the manifest rows' effects, resolved once
 
 	OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier0_s"), OrderLagSeconds);
 	PileCapKg = Defs->GetConfigScalar(FName("PilesCapacity_kg"), PileCapKg);
@@ -2380,97 +2381,152 @@ FString URHSimWorldSubsystem::DescribeQuotaBills() const
 	return FString::Join(Parts, TEXT(", "));
 }
 
+void URHSimWorldSubsystem::BuildManifestEffects()
+{
+	// E2a: every manifest row's Verb / Target / Amount, resolved once. A verb that is not one of the seven, or a target that is not a row of
+	// the kind the verb needs, logs a Warning and the row lands as nothing (its "cargo unloaded" line is still printed, as HEAD did for an
+	// unknown name). CR0 is the guard that no shipped row does.
+	ManifestEffects.Reset();
+	ManifestEffectWarnings = 0;
+	if (!Defs)
+	{
+		return;
+	}
+	static const TMap<FName, ERHManifestVerb> Verbs = {
+		{ FName("Stock"), ERHManifestVerb::Stock }, { FName("Kit"), ERHManifestVerb::Kit }, { FName("Robot"), ERHManifestVerb::Robot },
+		{ FName("RoverAboard"), ERHManifestVerb::RoverAboard }, { FName("FabSpeed"), ERHManifestVerb::FabSpeed },
+		{ FName("OrderLag"), ERHManifestVerb::OrderLag }, { FName("Crew"), ERHManifestVerb::Crew } };
+	Defs->ForEachManifestItem([&](FName Name, const FRHManifestItemRow& Row)
+	{
+		FRHManifestEffect E;
+		const ERHManifestVerb* Verb = Verbs.Find(Row.Verb);
+		E.Verb = Verb ? *Verb : ERHManifestVerb::None;
+		E.Target = Row.Target;
+		E.Amount = Row.Amount;
+		bool bResolves = false;
+		switch (E.Verb)
+		{
+		case ERHManifestVerb::Stock: bResolves = Defs->GetResource(E.Target) != nullptr; break;
+		case ERHManifestVerb::Kit: bResolves = Defs->GetBuilding(E.Target) != nullptr; break;
+		case ERHManifestVerb::Robot:
+		case ERHManifestVerb::RoverAboard: bResolves = Defs->GetRobot(E.Target) != nullptr; break;
+		case ERHManifestVerb::FabSpeed: bResolves = E.Target.IsNone(); break;
+		case ERHManifestVerb::OrderLag: bResolves = Defs->GetConfigTableScalar(E.Target, -1.0e300) != -1.0e300; break;
+		case ERHManifestVerb::Crew: bResolves = E.Target == FName("Pod") || E.Target == FName("Transport"); break;
+		default: break;
+		}
+		if (!bResolves)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Manifest row %s: verb '%s' with target '%s' does not resolve; it lands as nothing"),
+				*Name.ToString(), *Row.Verb.ToString(), *Row.Target.ToString());
+			++ManifestEffectWarnings;
+			return;
+		}
+		ManifestEffects.Add(Name, E);
+	});
+}
+
 void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 {
-	// Mechanical effects keyed by row name at slice scale (the CSV Effect
-	// column stays display text; data-driven effect verbs are an M1 task).
-	if (ItemName == FName("SolarPack"))       { ImportStock.FindOrAdd(FName("SolarArray"))++; }
-	else if (ItemName == FName("BatteryPack")) { ImportStock.FindOrAdd(FName("BatteryBank"))++; }
-	else if (ItemName == FName("PartsCrate"))  { AddStock(FName("SpareParts"), 10); NoteFlow(FName("SpareParts"), ERHLedgerLeg::In, 10.0); } // E1: In
-	else if (ItemName == FName("Toolkit"))     { FabricatorSpeedMul += 0.15; }
-	else if (ItemName == FName("ComputeCore"))
+	// E2a: the effect is data (DT_ManifestItems' Verb, Target, Amount), dispatched on the verb resolved at world start. Every branch is
+	// HEAD's statement for its rows: the same calls, in the same order, on the same keys, with the same log and alert text. The CSV's
+	// Effect column stays display text.
+	const FRHManifestEffect* E = ManifestEffects.Find(ItemName);
+	switch (E ? E->Verb : ERHManifestVerb::None)
 	{
-		OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier2_s"), 8.0);
-		UE_LOG(LogRedHopeSim, Display, TEXT("Compute core online: order lag now %.0f sim-s"), OrderLagSeconds);
-	}
-	else if (ItemName == FName("AdvExcavator") || ItemName == FName("ExtraHauler"))
-	{
-		const FName RobotRow = (ItemName == FName("AdvExcavator")) ? FName("RC_E2") : FName("RC_H");
-		if (const FRHRobotRow* Row = Defs->GetRobot(RobotRow))
+	case ERHManifestVerb::Stock:
+		AddStock(E->Target, E->Amount);
+		NoteFlow(E->Target, ERHLedgerLeg::In, E->Amount); // E1: In
+		break;
+	case ERHManifestVerb::Kit:
+		for (int32 K = 0; K < FMath::RoundToInt32(E->Amount); ++K) { ImportStock.FindOrAdd(E->Target)++; }
+		break;
+	case ERHManifestVerb::Robot:
+		for (int32 K = 0; K < FMath::RoundToInt32(E->Amount); ++K)
 		{
-			TArray<FMassEntityHandle> NewUnits;
-			SpawnRobotTracked(RobotRow, *Row, FVector(3000.f, -3000.f, 50.f), Row->Battery_Wh, 0.f, NewUnits);
-			if (NewUnits.Num() > 0)
+			if (const FRHRobotRow* Row = Defs->GetRobot(E->Target))
 			{
-				OnRobotsSpawned.Broadcast(NewUnits);
+				TArray<FMassEntityHandle> NewUnits;
+				SpawnRobotTracked(E->Target, *Row, FVector(3000.f, -3000.f, 50.f), Row->Battery_Wh, 0.f, NewUnits);
+				if (NewUnits.Num() > 0)
+				{
+					OnRobotsSpawned.Broadcast(NewUnits);
+				}
 			}
 		}
-	}
-	else if (ItemName == FName("CargoRover"))
-	{
+		break;
+	case ERHManifestVerb::RoverAboard:
 		// C6a (Q1a): the ExtraHauler pattern, but a rover needs a road to land on. It waits aboard in ImportStock
 		// under its robot row name (NOT a building flat-pack: placement's lookup can never match a robot row).
-		++ImportStock.FindOrAdd(FName("RC_R"));
+		for (int32 K = 0; K < FMath::RoundToInt32(E->Amount); ++K) { ++ImportStock.FindOrAdd(E->Target); }
 		DeployWaitingRovers();
-	}
-	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); NoteFlow(FName("Soil"), ERHLedgerLeg::In, 1000.0); }
-	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); NoteFlow(FName("Seeds"), ERHLedgerLeg::In, 200.0); }
-	else if (ItemName == FName("GlassCrate")) { AddStock(FName("Glass"), 400); NoteFlow(FName("Glass"), ERHLedgerLeg::In, 400.0); }
-	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); NoteFlow(FName("Luxury"), ERHLedgerLeg::In, 300.0); }
-	else if (ItemName == FName("CrewPod"))
-	{
-		// M2 Gate A1: colonists disembark ONLY into certified housing - the
-		// M1-d vault is the hard prerequisite, made literal. A pod that finds
-		// no beds stays aboard and returns with the ship (no refund; the
-		// Program does not land people into a void).
-		if (GetFreeHousing() >= CrewPodColonists)
+		break;
+	case ERHManifestVerb::FabSpeed:
+		FabricatorSpeedMul += E->Amount;
+		break;
+	case ERHManifestVerb::OrderLag:
+		OrderLagSeconds = Defs->GetConfigScalar(E->Target, E->Amount);
+		UE_LOG(LogRedHopeSim, Display, TEXT("Compute core online: order lag now %.0f sim-s"), OrderLagSeconds);
+		break;
+	case ERHManifestVerb::Crew:
+		if (E->Target == FName("Pod"))
 		{
-			const int32 Housed = Debug_AddColonists(CrewPodColonists);
-			AddStock(FName("Food"), CrewPodFoodKg);
-			NoteFlow(FName("Food"), ERHLedgerLeg::In, CrewPodFoodKg); // E1
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("THE CREW HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
-				Housed, CrewPodFoodKg));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: %d colonists housed, +%.0f kg Food ==="), Housed, CrewPodFoodKg);
+			// M2 Gate A1: colonists disembark ONLY into certified housing - the
+			// M1-d vault is the hard prerequisite, made literal. A pod that finds
+			// no beds stays aboard and returns with the ship (no refund; the
+			// Program does not land people into a void).
+			if (GetFreeHousing() >= CrewPodColonists)
+			{
+				const int32 Housed = Debug_AddColonists(CrewPodColonists);
+				AddStock(FName("Food"), CrewPodFoodKg);
+				NoteFlow(FName("Food"), ERHLedgerLeg::In, CrewPodFoodKg); // E1
+				OnAlert.Broadcast(FString::Printf(
+					TEXT("THE CREW HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
+					Housed, CrewPodFoodKg));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: %d colonists housed, +%.0f kg Food ==="), Housed, CrewPodFoodKg);
+			}
+			else
+			{
+				// BM-1: with a rated surface habitat the fix is beds, not a vault
+				// (Gate-D placeholder copy).
+				OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
+					? FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
+						GetFreeHousing(), CrewPodColonists)
+					: FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Certify a vault floor before the next ship."),
+						GetFreeHousing(), CrewPodColonists));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
+			}
 		}
 		else
 		{
-			// BM-1: with a rated surface habitat the fix is beds, not a vault
-			// (Gate-D placeholder copy).
-			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
-				? FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
-					GetFreeHousing(), CrewPodColonists)
-				: FString::Printf(TEXT("CREW POD STAYED ABOARD — %d beds free, %d needed; the crew is safe and flies back with the ship. Certify a vault floor before the next ship."),
-					GetFreeHousing(), CrewPodColonists));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== CREW POD: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), CrewPodColonists);
+			// C2b: the crew pod at scale. The same rule - colonists disembark only into
+			// certified housing, and the WHOLE transport stays aboard if the beds are
+			// not there - with fifty kilos of provisions for every colonist it carries.
+			const double FoodKg = ColonistTransportFoodKgPerColonist * ColonistTransportColonists;
+			if (GetFreeHousing() >= ColonistTransportColonists)
+			{
+				const int32 Housed = Debug_AddColonists(ColonistTransportColonists);
+				AddStock(FName("Food"), FoodKg);
+				NoteFlow(FName("Food"), ERHLedgerLeg::In, FoodKg); // E1
+				OnAlert.Broadcast(FString::Printf(
+					TEXT("A COLONIST TRANSPORT HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
+					Housed, FoodKg));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: %d colonists housed, +%.0f kg Food ==="), Housed, FoodKg);
+			}
+			else
+			{
+				// Gate-D placeholder copy, in the pod's style.
+				OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
+					? FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
+						GetFreeHousing(), ColonistTransportColonists)
+					: FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Certify a vault floor before the next ship."),
+						GetFreeHousing(), ColonistTransportColonists));
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), ColonistTransportColonists);
+			}
 		}
-	}
-	else if (ItemName == FName("ColonistTransport"))
-	{
-		// C2b: the crew pod at scale. The same rule - colonists disembark only into
-		// certified housing, and the WHOLE transport stays aboard if the beds are
-		// not there - with fifty kilos of provisions for every colonist it carries.
-		const double FoodKg = ColonistTransportFoodKgPerColonist * ColonistTransportColonists;
-		if (GetFreeHousing() >= ColonistTransportColonists)
-		{
-			const int32 Housed = Debug_AddColonists(ColonistTransportColonists);
-			AddStock(FName("Food"), FoodKg);
-			NoteFlow(FName("Food"), ERHLedgerLeg::In, FoodKg); // E1
-			OnAlert.Broadcast(FString::Printf(
-				TEXT("A COLONIST TRANSPORT HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
-				Housed, FoodKg));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: %d colonists housed, +%.0f kg Food ==="), Housed, FoodKg);
-		}
-		else
-		{
-			// Gate-D placeholder copy, in the pod's style.
-			OnAlert.Broadcast((bVaultRated && AnyHabNetRated())
-				? FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Zone Living Quarters bays in your rated habitat before the next ship."),
-					GetFreeHousing(), ColonistTransportColonists)
-				: FString::Printf(TEXT("COLONIST TRANSPORT STAYED ABOARD — %d beds free, %d needed; everyone is safe and flies back with the ship. Certify a vault floor before the next ship."),
-					GetFreeHousing(), ColonistTransportColonists));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== COLONIST TRANSPORT: stays aboard (%d beds free, %d needed) ==="), GetFreeHousing(), ColonistTransportColonists);
-		}
+		break;
+	default:
+		break;
 	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("  cargo unloaded: %s"), *ItemName.ToString());
 }

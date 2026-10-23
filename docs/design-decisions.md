@@ -1303,3 +1303,23 @@ Built from `docs/qa/2026-10-22/e1-ledger-design.md` in the order of authority th
 **Checkpoints.** `rh_checkpoints.sh all --force` re-made Midgame (sol 28.35) and Late (sol 62.35) at v51, 0 sim errors.
 
 **Known gaps.** The six unfixtured families above; SpoilChemicals never made in live data; the click test's two flaky runs; D6d's tram `-scale` budget still has well under 1 ms of headroom.
+
+### E2a manifest verbs: what it settles, and where it deviated (2026-10-23, not yet committed)
+
+Built from `docs/qa/2026-10-23/e2-earth-credit-design.md` (DIRECTOR ANSWER Q-A (a), Q-B (a); REVISION R1-R5), the first of the two commits REVISION observation 9 asks for: **the verbs only.** No money, no save bump, no stack cap.
+
+**What E2a builds.**
+- `DT_ManifestItems` gains `Verb` (FName), `Target` (FName) and `Amount` (**double**, so the Toolkit's 0.15 is HEAD's literal bit for bit), after `Effect`, which stays display text. CSV and DT synced; the CSV's other cells are byte-for-byte as before.
+- `BuildManifestEffects` resolves every row once at world start into `ManifestEffects` (`ERHManifestVerb`, target, amount): `Stock` needs a resource row, `Kit` a building row, `Robot` and `RoverAboard` a robot row, `OrderLag` a `DT_Config` row, `FabSpeed` no target, `Crew` the style key `Pod` or `Transport`. A row that does not resolve logs a Warning and lands as nothing.
+- `ApplyManifestItemEffect` keeps its signature and dispatches on the verb. Every branch is HEAD's statement for its rows: the same calls in the same order on the same keys (`ImportStock.FindOrAdd` at the same moment, so its saved key order is HEAD's), and the crew blocks' Gate-D-approved texts verbatim. E1's In records collapse to two sites, the `Stock` verb and the crew food (REVISION section 3.2).
+- Read-only accessors for the suite: `FindManifestEffect`, `GetManifestEffectWarnings`, `GetFabricatorSpeedMul`, `GetFleetCount`, `GetImportStockOrder`.
+
+**Deviations.** `Kit`, `Robot` and `RoverAboard` repeat their statement `round(Amount)` times; every row has 1, so this is HEAD's single statement. The `-credit` suite holds only CR0 and CR1 in E2a; CR2-CR10 come with E2b.
+
+**Tests.** New `-credit` suite, 18 checks, in `rh_battery.sh` (55 suites, 56 runs): CR0 the data (14 rows resolve, 0 Warnings, each verb, target and amount HEAD's literal bit for bit, a Crew target is Pod or Transport, the CSV equals the DT); CR1 one fixture per row against HEAD's deltas (five stock rows and their E1 In record, kits and the rover with ImportStock's key order, both robots with one spawn broadcast each, the Toolkit's speed once and four times bit for bit, the Compute Core's lag, both crew blocks with no beds, with HEAD's alerts word for word, and with beds, a name with no row). **Mutations**, restored by hash: a `float` cast of the amount fails 2 (the Toolkit); dropping the Stock verb's In record fails 10.
+
+**Battery.** 0 suites not green; both pins hold. Against `battery_post_e1`: 6 lines, all wall-clock digits (`economy` EC7a, `eraparity` EP4, `traffic` X16), and the new `credit.log`. Every `cargo unloaded`, crew and CEO line is unchanged.
+
+**Playtest.** The 110-sol districts run is byte-identical to `e1_full`. **Click test** 72 / 72 twice (no RedHope code changed).
+
+**-scale.** Every digest is identical (N=5000 `5f9d7352`, recalled `b193ca3a`, reloaded `d6c87c14`); the 80 Colonist Transports go through the `Crew` verb (arrivals 12-17 ms against 50). Three runs, one straight after the battery and two isolated, each missed wall-clock budgets in code E2a does not touch (the cold commutes, the cold deep net, StepPower, and in one run the approach points and GetColonyHope), by 5-30%. The machine was loaded throughout (load average 7-9: an iOS Simulator and a CrashReportClient that had been spinning since 10:03, left alone). Not re-tuned; recorded as environment.

@@ -505,6 +505,15 @@ struct FRHHandoffHold
 // task board -> production -> power, in that fixed order, per sub-step.
 // Robot movement/work executes in Mass processors against the same
 // published step count, mutating the economy only through the API below.
+// E2a: what a manifest item does when it lands, resolved once from DT_ManifestItems at world start (never a string compare per landing).
+enum class ERHManifestVerb : uint8 { None, Stock, Kit, Robot, RoverAboard, FabSpeed, OrderLag, Crew };
+struct FRHManifestEffect
+{
+	ERHManifestVerb Verb = ERHManifestVerb::None;
+	FName Target;
+	double Amount = 0.0;
+};
+
 UCLASS()
 class REDHOPESIM_API URHSimWorldSubsystem : public UTickableWorldSubsystem
 {
@@ -1410,6 +1419,13 @@ public:
 	// Harness: run a cargo item's landing effect directly (the commandlet's
 	// arrival tests skip the quota/manifest ceremony).
 	void Debug_DeliverCargo(FName ItemName) { ApplyManifestItemEffect(ItemName); }
+	// E2a: the resolved effect of a manifest row (nullptr: no row, or a verb or target that did not resolve - it lands as nothing), the
+	// number of rows that failed to resolve at world start, and read-only views the -credit suite pins the verbs against.
+	const FRHManifestEffect* FindManifestEffect(FName ItemName) const { return ManifestEffects.Find(ItemName); }
+	int32 GetManifestEffectWarnings() const { return ManifestEffectWarnings; }
+	double GetFabricatorSpeedMul() const { return FabricatorSpeedMul; }
+	int32 GetFleetCount(FName RobotRow) const { const int32* N = FleetCounts.Find(RobotRow); return N ? *N : 0; }
+	TArray<FName> GetImportStockOrder() const { TArray<FName> Keys; ImportStock.GetKeys(Keys); return Keys; }
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -2611,6 +2627,9 @@ private:
 	// Can some completed building run a slice-active recipe outputting this?
 	bool HasProducerFor(FName Resource) const;
 	void ApplyManifestItemEffect(FName ItemName);
+	void BuildManifestEffects();                     // E2a: DT_ManifestItems -> ManifestEffects, a Warning per row that does not resolve
+	TMap<FName, FRHManifestEffect> ManifestEffects;  // lookup only, never iterated
+	int32 ManifestEffectWarnings = 0;
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
 	int32 GetCropStageForKey(const FIntVector& Key) const;

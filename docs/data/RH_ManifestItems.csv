@@ -1,15 +1,15 @@
-Name,DisplayName,Mass_kg,Category,Effect,UnlockTech,SliceActive,Notes
-SoilPallet,Earth Soil Pallet,1000,Agriculture,+1000 kg Soil (fills 4 garden cells),,TRUE,"M2 Gate C: the signature gamble pays off"
-SeedVault,Seed Vault,200,Agriculture,+200 kg Seeds (plants 4 garden cells),,TRUE,"M2 Gate C: the cheap future bet matures"
-PartsCrate,Spare Parts Crate,500,Operations,+10 SpareParts,,TRUE,Fleet longevity
-Toolkit,Specialty Toolkit,300,Operations,+15% fabricator build speed,,TRUE,Immediate quality-of-life
-AdvExcavator,Advanced Excavator RC-E2,2500,Fleet,+1 RC-E2 unit,,TRUE,Biggest single production jump
-ExtraHauler,Hauler RC-H,1800,Fleet,+1 RC-H unit,,TRUE,Logistics throughput
-SolarPack,Solar Array Flat-Pack,400,Power,+1 deployable SolarArray,,TRUE,"Import-only rule: power growth is manifest-gated"
-BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,,TRUE,Night resilience
-ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,,TRUE,Latency-to-autonomy on the manifest
-LuxuryGoods,Luxury Goods,300,Comforts,+300 kg Luxury (comforts draw per colonist per sol),,TRUE,"M2 Gate D: the morale bet lands - ~90 sols of comforts for a pod of 4"
-CrewPod,Crew Pod (4 colonists),2400,Crew,"+4 colonists into certified housing; +200 kg Food; stays aboard, safe, if no beds",,TRUE,"M2 Gate A: the heaviest single item - crew vs hardware is the Phase-2 manifest decision"
-ColonistTransport,Colonist Transport (20 colonists),8000,Crew,"+20 colonists into certified housing; +1000 kg Food (50 kg each); everyone stays aboard, safe, if the beds are not free",,TRUE,"C2b (2026-10-18): the crew pod at scale - mass is a placeholder (about 3.3x the pod for 5x the people), director review"
-GlassCrate,Glass Panes Crate,600,Agriculture,+400 kg Glass (2 greenhouse cells),,TRUE,"M2 Gate D+ garden fork: greenhouse glazing - the low-power garden bet (local fabrication is a flagged follow-up)"
-CargoRover,Cargo Rover RC-R,3500,Fleet,+1 cargo rover (needs a road),,TRUE,"C6a (Q1a): freight on the roads, 1 t a trip. The ExtraHauler pattern: Earth ships it, no recipe. It waits aboard the Lander until a built road exists. Mass is a placeholder, director review"
+Name,DisplayName,Mass_kg,Category,Effect,Verb,Target,Amount,UnlockTech,SliceActive,Notes
+SoilPallet,Earth Soil Pallet,1000,Agriculture,+1000 kg Soil (fills 4 garden cells),Stock,Soil,1000,,TRUE,"M2 Gate C: the signature gamble pays off"
+SeedVault,Seed Vault,200,Agriculture,+200 kg Seeds (plants 4 garden cells),Stock,Seeds,200,,TRUE,"M2 Gate C: the cheap future bet matures"
+PartsCrate,Spare Parts Crate,500,Operations,+10 SpareParts,Stock,SpareParts,10,,TRUE,Fleet longevity
+Toolkit,Specialty Toolkit,300,Operations,+15% fabricator build speed,FabSpeed,,0.15,,TRUE,Immediate quality-of-life
+AdvExcavator,Advanced Excavator RC-E2,2500,Fleet,+1 RC-E2 unit,Robot,RC_E2,1,,TRUE,Biggest single production jump
+ExtraHauler,Hauler RC-H,1800,Fleet,+1 RC-H unit,Robot,RC_H,1,,TRUE,Logistics throughput
+SolarPack,Solar Array Flat-Pack,400,Power,+1 deployable SolarArray,Kit,SolarArray,1,,TRUE,"Import-only rule: power growth is manifest-gated"
+BatteryPack,Battery Bank Pack,600,Power,+1 deployable BatteryBank,Kit,BatteryBank,1,,TRUE,Night resilience
+ComputeCore,Compute Core,800,Autonomy,Order lag 20 s -> 8 s,OrderLag,OrderLagTier2_s,8,,TRUE,Latency-to-autonomy on the manifest
+LuxuryGoods,Luxury Goods,300,Comforts,+300 kg Luxury (comforts draw per colonist per sol),Stock,Luxury,300,,TRUE,"M2 Gate D: the morale bet lands - ~90 sols of comforts for a pod of 4"
+CrewPod,Crew Pod (4 colonists),2400,Crew,"+4 colonists into certified housing; +200 kg Food; stays aboard, safe, if no beds",Crew,Pod,0,,TRUE,"M2 Gate A: the heaviest single item - crew vs hardware is the Phase-2 manifest decision"
+ColonistTransport,Colonist Transport (20 colonists),8000,Crew,"+20 colonists into certified housing; +1000 kg Food (50 kg each); everyone stays aboard, safe, if the beds are not free",Crew,Transport,0,,TRUE,"C2b (2026-10-18): the crew pod at scale - mass is a placeholder (about 3.3x the pod for 5x the people), director review"
+GlassCrate,Glass Panes Crate,600,Agriculture,+400 kg Glass (2 greenhouse cells),Stock,Glass,400,,TRUE,"M2 Gate D+ garden fork: greenhouse glazing - the low-power garden bet (local fabrication is a flagged follow-up)"
+CargoRover,Cargo Rover RC-R,3500,Fleet,+1 cargo rover (needs a road),RoverAboard,RC_R,1,,TRUE,"C6a (Q1a): freight on the roads, 1 t a trip. The ExtraHauler pattern: Earth ships it, no recipe. It waits aboard the Lander until a built road exists. Mass is a placeholder, director review"

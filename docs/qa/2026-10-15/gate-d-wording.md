@@ -460,3 +460,11 @@ E1 adds no player-facing string: the ledger is read by nothing but the `-economy
 | P2 | Load Warning, a malformed ledger block · SIM `ReadLedgerBlock` | `LoadColony v51: the ledger block is malformed (<why>); the ledger starts empty`, the why one of: `slot count %d` / `slot %s has a negative ring entry` / `the block is cut short` / `slot %s is out of order or repeated (after %s)` / `ring fill %d, head %d, unslotted loss %lld`. The colony still loads. | PLACEHOLDER. Developer-facing. |
 | P3 | `-scale` line · COMMANDLET | `SCALE ledger (%d colonists): agent step %.4f ms on, %.4f ms off (%d each) | era step %.4f ms on, %.4f ms off (%d each) | 1,000 rolls %.3f ms over %d slots` | PLACEHOLDER. Developer-facing. |
 | P4 | Data copy · DATA | `RH_Resources` gains `EarthValue_mcr` (milli-credits per kg; per unit for HabSegment). Each valued row's Notes ends "EarthValue placeholder, director review."; Hope's ends "Hope is never valued (ruling 11)."; Power's and Research's end "No ledger slot; EarthValue 0." | PLACEHOLDER, director review (the values are the design's table). |
+
+## Rows added by E2a manifest verbs (2026-10-23)
+
+E2a moves every manifest effect into data without changing a player-facing string: the crew pod's and the transport's alerts, the "Compute core online" line and "cargo unloaded" are HEAD's text, verbatim. The one new line is developer-facing. Prefix Q.
+
+| ID | Where | Current | Status (2026-10-23) |
+|---|---|---|---|
+| Q1 | World-start Warning, a manifest row whose effect does not resolve · SIM `BuildManifestEffects` | `Manifest row %s: verb '%s' with target '%s' does not resolve; it lands as nothing` | PLACEHOLDER. Developer-facing. CR0 asserts no shipped row logs it. |

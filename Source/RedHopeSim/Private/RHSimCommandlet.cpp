@@ -26,6 +26,8 @@ int32 RHRunDeepCommuteSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWo
 int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // E1 the ledger: the -economy suite lives in RHSimEconomySuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// E2 Earth credit: the -credit suite lives in RHSimCreditSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -14683,6 +14685,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("economy")))
 	{
 		return RHRunEconomySuite(World, Clock, Sim);
+	}
+	// E2 Earth credit self-test (E2a: manifest effects as data-driven verbs, each HEAD's statement), fails loudly. `-credit`.
+	if (FParse::Param(*Params, TEXT("credit")))
+	{
+		return RHRunCreditSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
