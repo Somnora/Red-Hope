@@ -28,6 +28,8 @@
 # (config-row overrides, and -RHQuotas=<row> for any dormant quota row; both
 # log loudly).
 #
+# Earth credit (E2b): RH_PLAYTEST_CARRYOVER=1 lets the bot spend its saved credits too (the sim's credits and the
+# ship's mass cap are the budget); not a baseline.
 # City layer (C5b): RH_PLAYTEST_DISTRICTS=1 adds the districts option - the bot paints a
 # Homes district over floor -1 once it rates (and over a rated surface habitat, if it has one),
 # carves and rates floor -2 for a Civic district, and the timeline gains GROWTH lines (each
@@ -95,7 +97,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFTS:+lifts=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFTS:+lifts=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK} ${RH_PLAYTEST_CARRYOVER:+carryover=1}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.

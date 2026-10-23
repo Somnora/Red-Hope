@@ -162,11 +162,16 @@ struct REDHOPESIM_API FRHManifestItemRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float Mass_kg = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Category;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Effect;   // display text only (the picker's tooltip)
+	// E2b: the item's price in Earth credits, milli-credits (1,000 x Mass_kg by default: 1 credit a kg).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 Price_mcr = 0;
 	// E2a: what landing the item does, as data. Verb is one of Stock, Kit, Robot, RoverAboard, FabSpeed, OrderLag, Crew; Target is a
 	// resource, building, robot or config row (or Pod / Transport for Crew); Amount is a double so 0.15 is HEAD's literal bit for bit.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Verb;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Target;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") double Amount = 0.0;
+	// E2b (Q-B (a)): how many of this item the colony can ever use, landed plus aboard (0: no cap). Only effects that multiply or replace a
+	// value are capped: Toolkit 4, ComputeCore 1.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 MaxStack = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName UnlockTech;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;

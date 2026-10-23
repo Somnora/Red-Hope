@@ -512,6 +512,7 @@ struct FRHManifestEffect
 	ERHManifestVerb Verb = ERHManifestVerb::None;
 	FName Target;
 	double Amount = 0.0;
+	int32 MaxStack = 0; // E2b: landed plus aboard may not pass it (0: no cap)
 };
 
 UCLASS()
@@ -1426,6 +1427,29 @@ public:
 	double GetFabricatorSpeedMul() const { return FabricatorSpeedMul; }
 	int32 GetFleetCount(FName RobotRow) const { const int32* N = FleetCounts.Find(RobotRow); return N ? *N : 0; }
 	TArray<FName> GetImportStockOrder() const { TArray<FName> Keys; ImportStock.GetKeys(Keys); return Keys; }
+	// E2b, Earth credit (docs/qa/2026-10-23/e2-earth-credit-design.md, REVISION R1-R5). The colony's credit is int64 milli-credits, saved and
+	// never reset: Balance == Awarded - Spent, Balance >= 0. A met quota pays floor(award kg x AwardMcrPerKg); a launch spends the manifest's
+	// price; the rest carries over. Each ship's mass cap is stamped when its manifest opens and cleared when it lands. Nothing outside the
+	// manifest reads any of it (ruling 11, Q4a).
+	int64 GetCreditBalanceMcr() const { return CreditBalanceMcr; }
+	int64 GetCreditAwardedMcr() const { return CreditAwardedMcr; }
+	int64 GetCreditSpentMcr() const { return CreditSpentMcr; }
+	double GetShipMassCapKg() const { return ShipMassCapKg; }
+	double GetAwardMcrPerKg() const { return AwardMcrPerKg; }
+	double GetShipMassCapCfgKg() const { return ShipMassCapCfgKg; }
+	int32 GetManifestLanded(FName ItemName) const { const int32* N = ManifestLanded.Find(ItemName); return N ? *N : 0; }
+	int64 GetManifestCostMcr() const;               // the manifest's price, summed over ManifestItems in order (derived, never saved)
+	bool CanAddManifestItem(FName ItemName, FString& OutWhy) const; // checks 1-5 of AddManifestItem, adding nothing (the deck's ADD reads it)
+	static FString FormatCredits(int64 Mcr);        // whole credits, with the thousandths when they are not zero
+	int32 GetCreditBlockBytes() const;              // the bytes the credit block takes in a save (fixed by the capped rows)
+	// E2b harness hooks (REVISION R4), runtime only, never saved; each keeps the invariant.
+	bool Debug_OpenManifestWithAward(double Kg);    // from Open or Completed: the award, AwaitingManifest, the cap, then the real PayQuotaAward
+	void Debug_ResetManifest();                     // empties the manifest, award and cap to 0, phase Open; the credit is untouched
+	void Debug_ZeroCredits() { CreditBalanceMcr = 0; CreditAwardedMcr = 0; CreditSpentMcr = 0; }
+	void Debug_GrantCredits(int64 Mcr) { CreditPay(Mcr); }
+	void Debug_SetShipMassCapCfg(double Kg) { ShipMassCapCfgKg = Kg; }
+	void Debug_SetCreditEnabled(bool bOn) { bCreditEnabled = bOn; }
+	void Debug_PushManifestItem(FName ItemName) { ManifestItems.Add(ItemName); } // CR3: appends with no check and no log line (2,000 sequences an award)
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -2630,6 +2654,19 @@ private:
 	void BuildManifestEffects();                     // E2a: DT_ManifestItems -> ManifestEffects, a Warning per row that does not resolve
 	TMap<FName, FRHManifestEffect> ManifestEffects;  // lookup only, never iterated
 	int32 ManifestEffectWarnings = 0;
+	// E2b: Earth credit. CreditPay is the only writer of the balance's income and of the awarded total; LaunchShip the only writer of the
+	// spent total. ManifestLanded counts landings of stack-capped rows only (lookup; saved sorted by name).
+	void CreditPay(int64 Mcr);
+	void PayQuotaAward(double Kg);
+	void WriteCreditBlock(FArchive& Ar) const;
+	void ReadCreditBlock(FArchive& Ar);
+	int64 CreditBalanceMcr = 0, CreditAwardedMcr = 0, CreditSpentMcr = 0;
+	double ShipMassCapKg = 0.0;
+	TMap<FName, int32> ManifestLanded;
+	double AwardMcrPerKg = 1000.0;     // config AwardMcrPerKg
+	double ShipMassCapCfgKg = 30000.0; // config ShipMassCapKg
+	bool bCreditEnabled = true;        // CR2's twin only (runtime)
+	bool bLedgerBlockLost = false;     // load only: E1's block could not be measured, so the credit block after it is not read
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
 	int32 GetCropStageForKey(const FIntVector& Key) const;

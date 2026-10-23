@@ -519,15 +519,23 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 		];
 	}
 
-	// The manifest picker (was RH.Manifest / RH.Launch): every slice-active
-	// item with its mass; ADD greys out once the budget can't cover it.
+	// The manifest picker (was RH.Manifest / RH.Launch): every slice-active item with its mass and its price. E2b: two budgets - the
+	// Earth credits (this manifest's cost against the balance, the carry-over included) and the ship's mass cap. ADD asks the sim's own
+	// rule (CanAddManifestItem) and, when it is greyed, says why in its tooltip.
 	TSharedRef<SVerticalBox> Picker = SNew(SVerticalBox);
+	Picker->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 2.f)
+	[
+		BarRow(Txt(TEXT("Credits")),
+			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetManifestCostMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()))) : FText::GetEmpty(); }),
+			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetCreditBalanceMcr() > 0 ? (float)((double)S->GetManifestCostMcr() / (double)S->GetCreditBalanceMcr()) : 0.f); }),
+			FSlateColor(D::Amber))
+	];
 	Picker->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
 	[
-		BarRow(Txt(TEXT("Cargo budget")),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s"), *Mass(S->GetManifestMassKg()), *Mass(S->GetAwardMassKg()))) : FText::GetEmpty(); }),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetAwardMassKg() > 0.0 ? (float)(S->GetManifestMassKg() / S->GetAwardMassKg()) : 0.f); }),
-			FSlateColor(D::Amber))
+		BarRow(Txt(TEXT("Ship mass")),
+			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s"), *Mass(S->GetManifestMassKg()), *Mass(S->GetShipMassCapKg()))) : FText::GetEmpty(); }),
+			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetShipMassCapKg() > 0.0 ? (float)(S->GetManifestMassKg() / S->GetShipMassCapKg()) : 0.f); }),
+			FSlateColor(D::Teal))
 	];
 	if (const URHDefinitionsSubsystem* Defs = GetDefs())
 	{
@@ -557,17 +565,27 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 					+ SVerticalBox::Slot().AutoHeight()
 					[
 						SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
-						.Text(Txt(FString::Printf(TEXT("%s  -  %s"), *Mass(ItemKg), *Row.Effect)))
+						.Text(Txt(FString::Printf(TEXT("%s  -  %s cr  -  %s"), *Mass(ItemKg), *URHSimWorldSubsystem::FormatCredits(Row.Price_mcr), *Row.Effect)))
 					]
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.f, 0.f, 0.f, 0.f)
 				[
-					D::Button(Txt(TEXT("ADD")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleManifestAdd, RowName),
-						MakeAttributeLambda([this, ItemKg]()
-						{
-							const URHSimWorldSubsystem* S = GetSim();
-							return S && S->GetManifestMassKg() + ItemKg <= S->GetAwardMassKg() + KINDA_SMALL_NUMBER;
-						}))
+					SNew(SBox)
+					.ToolTipText_Lambda([this, RowName]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						FString Why;
+						return (S && !S->CanAddManifestItem(RowName, Why)) ? Txt(Why) : FText::GetEmpty();
+					})
+					[
+						D::Button(Txt(TEXT("ADD")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleManifestAdd, RowName),
+							MakeAttributeLambda([this, RowName]()
+							{
+								const URHSimWorldSubsystem* S = GetSim();
+								FString Why;
+								return S && S->CanAddManifestItem(RowName, Why);
+							}))
+					]
 				]
 			];
 		});
@@ -579,6 +597,20 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 	Body->AddSlot().AutoHeight()
 	[
 		SNew(SBox).Visibility(PhaseIs(ERHQuotaPhase::AwaitingManifest))[Picker]
+	];
+	// E2b: the Earth credit readout - the balance, and this round's award once a quota is met.
+	Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+	[
+		SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::TextDim)
+		.Text_Lambda([this]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			if (!S) { return FText::GetEmpty(); }
+			const int64 Award = S->GetAwardMassKg() > 0.0 ? FMath::FloorToInt64(S->GetAwardMassKg() * S->GetAwardMcrPerKg()) : 0;
+			return Txt(Award > 0
+				? FString::Printf(TEXT("Earth credit: %s cr (this round's award %s cr)"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(Award))
+				: FString::Printf(TEXT("Earth credit: %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr())));
+		})
 	];
 
 	// The Phase 1 exit, permanent once earned.

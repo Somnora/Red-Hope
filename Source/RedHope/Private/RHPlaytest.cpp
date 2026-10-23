@@ -141,6 +141,9 @@ namespace
 		// Night storage before rovers: the machines' mean load over the last whole sol (the grow lights are counted apart), and what
 		// the rule did. nightbank=0 (RH_PLAYTEST_NIGHTBANK=0) gives the bot back without it, to compare against.
 		bool bNightBank = false;
+		// E2b (opt-in, outside the byte-identical runs): carryover=1 (RH_PLAYTEST_CARRYOVER=1) drops the bot's per-ship pre-check, so the
+		// sim's own rule - the credits, carry-over included, and the ship's mass cap - is the budget.
+		bool bCarryOver = false;
 		double LastLoadW = 0.0;                   // the last whole sol's mean machine load (W)
 		double BankEmptySec = 0.0, LightsDarkSec = 0.0; // sim-seconds the bank stood empty / the grow lights were dark, over the run
 		int32 NightBanksKept = 0, RoverDeferrals = 0, NightBankShips = 0; // packs the rule asked for beyond the owed ones, rovers held to the next ship, ships it spoke on
@@ -289,12 +292,31 @@ namespace
 	// (there is nowhere for a crew to live yet), kept under the late award.
 	// FillItem (optional): once Items are in, keep adding it until the budget
 	// refuses - the bot's way of spending a big award on one thing.
+	// E2b (REVISION R3): the bot spends what HEAD spent - this round's award in kg - and leaves the carry-over. The pre-check runs only
+	// where HEAD would have reached its budget check (the manifest is open and the row is a live one), with HEAD's message byte for byte;
+	// anything else goes to the sim, whose own reason is logged as HEAD did. carryover=1 turns it off.
+	bool OverAwardBudget(const URHSimWorldSubsystem* Sim, FName Item, FString& OutWhy)
+	{
+		if ((GPlaytest.IsValid() && GPlaytest->bCarryOver) || Sim->GetQuotaPhase() != ERHQuotaPhase::AwaitingManifest)
+		{
+			return false;
+		}
+		const URHDefinitionsSubsystem* Defs = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const FRHManifestItemRow* Row = Defs ? Defs->GetManifestItem(Item) : nullptr;
+		if (!Row || !Row->SliceActive || Sim->GetManifestMassKg() + Row->Mass_kg <= Sim->GetAwardMassKg())
+		{
+			return false;
+		}
+		OutWhy = FString::Printf(TEXT("Over budget: %.0f + %.0f > %.0f kg"), Sim->GetManifestMassKg(), Row->Mass_kg, Sim->GetAwardMassKg());
+		return true;
+	}
+
 	void LoadCargo(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const TArray<FName>& Items, FName FillItem = NAME_None)
 	{
 		for (const FName& Item : Items)
 		{
 			FString Err;
-			if (Sim->AddManifestItem(Item, Err))
+			if (!OverAwardBudget(Sim, Item, Err) && Sim->AddManifestItem(Item, Err))
 			{
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f CARGO   %s"), SolNow(C), *Item.ToString());
 			}
@@ -307,7 +329,7 @@ namespace
 		{
 			int32 Filled = 0;
 			FString FillErr;
-			while (Filled < 100 && Sim->AddManifestItem(FillItem, FillErr)) { ++Filled; }
+			while (Filled < 100 && !OverAwardBudget(Sim, FillItem, FillErr) && Sim->AddManifestItem(FillItem, FillErr)) { ++Filled; }
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f CARGO   +%d more %s to fill the budget"), SolNow(C), Filled, *FillItem.ToString());
 		}
 		FString Err;
@@ -1822,7 +1844,9 @@ namespace
 			{
 				// ... and the rover rides only if it fits beside everything loaded so far (the crates, the pairs, the packs); else the next ship.
 				const double RoverKg = ManifestListMassKg(Sim, { FName("CargoRover") }) * RoversNow;
-				const double RoomKg = Sim->GetAwardMassKg() - ManifestListMassKg(Sim, Cargo3);
+				// E2b (observation 5): with carryover=1 the room is what the credits and the ship's cap admit; the default is HEAD's.
+				const double RoomKg = (P.bCarryOver ? FMath::Min(Sim->GetShipMassCapKg(), (double)Sim->GetCreditBalanceMcr() / 1000.0) : Sim->GetAwardMassKg())
+					- ManifestListMassKg(Sim, Cargo3);
 				if (RoverKg > RoomKg)
 				{
 					++P.RoverDeferrals;
@@ -2112,6 +2136,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		for (int32 i = 3; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
+			else if (Args[i].Equals(TEXT("carryover=1"), ESearchCase::IgnoreCase)) { P.bCarryOver = true; } // E2b, opt-in
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
 			else if (Args[i].Equals(TEXT("lifts=1"), ESearchCase::IgnoreCase)) { P.bLifts = true; }
 			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { bLifeSupportOff = false; }

@@ -7,17 +7,22 @@
 #include "Engine/Engine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include <cmath>
 
 // E2 Earth credit self-test (docs/qa/2026-10-23/e2-earth-credit-design.md: DIRECTOR ANSWER > REVISION R1-R5 > PROFESSOR REVIEW > design).
-// Fails loudly. `-credit`. E2a, the verbs only (REVISION observation 9): a manifest item's landing is data - DT_ManifestItems' Verb, Target
-// and Amount, resolved once at world start - and every verb reproduces HEAD's statement for its rows. There is no money yet.
+// Fails loudly. `-credit`. E2a, the verbs (REVISION observation 9): a manifest item's landing is data - DT_ManifestItems' Verb, Target and
+// Amount, resolved once at world start - and every verb reproduces HEAD's statement for its rows. E2b, the credits: a saved int64 balance
+// in milli-credits (Balance == Awarded - Spent, never negative), paid floor(award kg x AwardMcrPerKg) when a quota is met, spent at launch,
+// the rest carried over; each ship's mass cap stamped when its manifest opens and cleared when it lands; a stack cap on Toolkit (4) and
+// Compute Core (1). CR2 the award; CR3 Lemma 1 by enumeration (R1); CR4 carry-over; CR5 the cap (R2); CR6 the stack cap; CR7 launch;
+// CR8 era parity; CR9 the save (R5); CR10 ruling 11 (nothing outside the manifest moves with money). The invariant is asserted throughout.
 //  CR0 the data: every active row's verb is known and its target resolves, Amount is HEAD's literal bit for bit, a Crew target is Pod or
 //  Transport, and the CSV equals the live DT. CR1 the verbs: one fixture per active row on a fresh colony through Debug_DeliverCargo, against
 //  the deltas HEAD's branches made (written here): stock kg (and E1's In leg), kits and the ImportStock key order, robots, the rover that
 //  waits aboard with no road, the fabricator speed, the order lag, and both crew blocks with beds and without.
 int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim)
 {
-	UE_LOG(LogRedHopeSim, Display, TEXT("=== CREDIT TEST (E2a, 2026-10-23) ==="));
+	UE_LOG(LogRedHopeSim, Display, TEXT("=== CREDIT TEST (E2, 2026-10-23) ==="));
 	int32 Fails = 0, Checks = 0;
 	const auto Expect = [&](bool bOk, const FString& What)
 	{
@@ -25,6 +30,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		if (bOk) { UE_LOG(LogRedHopeSim, Display, TEXT("CREDIT ok: %s"), *What); }
 		else { UE_LOG(LogRedHopeSim, Error, TEXT("CREDIT FAIL: %s"), *What); ++Fails; }
 	};
+	const auto Info = [](const FString& What) { UE_LOG(LogRedHopeSim, Display, TEXT("CREDIT info: %s"), *What); };
 	const auto Same = [](double A, double B) { return FMemory::Memcmp(&A, &B, sizeof(double)) == 0; };
 	URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 	TArray<FString> Alerts;
@@ -240,6 +246,427 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Sim->Debug_DeliverCargo(FName("NoSuchItem"));
 			Expect(Sim->GetPopulation() == Pop0 && Sim->GetImportStockOrder() == Keys0 && Alerts.Num() == 0, TEXT("CR1 a name with no manifest row lands as nothing (HEAD printed only its cargo line)"));
 		}
+	}
+
+	// ---------------- E2b: the credits ----------------
+	constexpr double EraDt = (double)URHSimClockSubsystem::EraStepSimSeconds;
+	constexpr double SolLen = (double)URHSimClockSubsystem::SolLengthSimSeconds;
+	constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
+	const auto EraOnce = [&]() { Clock->Debug_AdvanceSimSeconds(EraDt); Sim->EraStep((float)EraDt); };
+	const auto AgentOnce = [&]() { Clock->Debug_AdvanceSimSeconds((double)AgentDt); Sim->Debug_StepSim(AgentDt); };
+	const auto Inv = [&]() { return Sim->GetCreditBalanceMcr() == Sim->GetCreditAwardedMcr() - Sim->GetCreditSpentMcr() && Sim->GetCreditBalanceMcr() >= 0; };
+	const auto Cr = [](int64 Mcr) { return URHSimWorldSubsystem::FormatCredits(Mcr); };
+	const auto Kg = [&](const TCHAR* Item) { const FRHManifestItemRow* Row = DefsSub ? DefsSub->GetManifestItem(FName(Item)) : nullptr; return Row ? (double)Row->Mass_kg : 0.0; };
+	const auto SaveFilePath = [](const TCHAR* Slot) { return FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), Slot); };
+	// A ship launched now lands in ShipTransitSols; step the era band past it.
+	const auto LandShip = [&]()
+	{
+		for (int32 K = 0; K < 10 * (int32)(SolLen / EraDt) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound; ++K) { Sim->Debug_SetBatteryWh(1.0e9); EraOnce(); }
+		return Sim->GetQuotaPhase() != ERHQuotaPhase::ShipInbound;
+	};
+	// Q1 met for real: its bill stocked, then one step (StepQuota's met branch). Returns the award the step made.
+	const auto MeetQ1 = [&](bool bAgent, double Tension, double Funding) -> double
+	{
+		Reset();
+		Sim->Debug_AddTension(Tension);
+		if (Funding > 0.0) { Sim->Debug_AddResearchFunding(Funding); }
+		Sim->AddStock(FName("Struct"), 300.0);
+		Sim->AddStock(FName("Water"), 200.0);
+		Sim->AddStock(FName("Oxygen"), 50.0);
+		for (int32 K = 0; K < 20000 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open; ++K) { bAgent ? AgentOnce() : EraOnce(); }
+		return Sim->GetAwardMassKg();
+	};
+
+	// --- CR0 (E2b). The prices, the caps and the two config rows. ---
+	{
+		int32 Priced = 0, Capped = 0, Rows = 0;
+		if (DefsSub)
+		{
+			DefsSub->ForEachManifestItem([&](FName N, const FRHManifestItemRow& Row)
+			{
+				if (!Row.SliceActive) { return; }
+				++Rows;
+				Priced += (int64)Row.Price_mcr == (int64)FMath::RoundToInt64((double)Row.Mass_kg) * 1000 ? 1 : 0;
+				const int32 Want = N == FName("Toolkit") ? 4 : (N == FName("ComputeCore") ? 1 : 0);
+				Capped += Row.MaxStack == Want ? 1 : 0;
+			});
+		}
+		double FundingSum = 0.0;
+		TArray<TPair<FName, const FRHDiscoveryRow*>> Discoveries;
+		if (DefsSub) { DefsSub->GetDiscoveriesSorted(Discoveries); }
+		for (const auto& D : Discoveries) { FundingSum += (D.Value && D.Value->SliceActive) ? D.Value->FundingKg : 0.0; }
+		const double Mcr = DefsSub ? DefsSub->GetConfigTableScalar(FName("AwardMcrPerKg"), -1.0) : -1.0;
+		const double Cap = DefsSub ? DefsSub->GetConfigTableScalar(FName("ShipMassCapKg"), -1.0) : -1.0;
+		Expect(Rows == 14 && Priced == 14 && Capped == 14 && Mcr == 1000.0 && Cap == 30000.0 && Sim->GetAwardMcrPerKg() == 1000.0 && Sim->GetShipMassCapCfgKg() == 30000.0
+			&& Cap >= 14000.0 * 1.4 + FundingSum,
+			FString::Printf(TEXT("CR0 every active row's Price_mcr is 1,000 x Mass_kg; MaxStack is 4 for the Toolkit, 1 for the Compute Core, 0 for the rest; AwardMcrPerKg %.0f and ShipMassCapKg %.0f (DT_Config), the cap above the largest award 14,000 x 1.4 + %.0f of funding = %.0f kg"),
+				Mcr, Cap, FundingSum, 14000.0 * 1.4 + FundingSum));
+	}
+
+	// --- CR2. The award: floor(award x 1,000) mcr, the floor taken once on the whole award; the award itself and the event are untouched. ---
+	{
+		int32 Below = 0, Above = 0, Exact = 0, Right = 0;
+		FString Seen;
+		for (const double T : { 0.0, 1.234, 2.345, 3.456, 4.567, 5.678, 6.789 })
+		{
+			const double A = MeetQ1(false, T, 0.0);
+			const int64 Delta = Sim->GetCreditBalanceMcr();
+			const double Frac = A - FMath::FloorToDouble(A);
+			Right += (Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Delta == FMath::FloorToInt64(A * 1000.0) && Inv()) ? 1 : 0;
+			Frac == 0.0 ? ++Exact : (Frac < 0.5 ? ++Below : ++Above);
+			Seen += FString::Printf(TEXT("%.6f "), A);
+		}
+		Expect(Right == 7 && Below > 0 && Above > 0,
+			FString::Printf(TEXT("CR2 Q1 met at seven tensions: each balance is floor(award x 1,000) mcr, with fractions below and above one half (%d, %d, and %d whole): %s"), Below, Above, Exact, *Seen));
+		// The twin with the credit switched off: the award and the OnQuotaMet argument are bit-identical, and nothing is paid.
+		double EventOn = -1.0, EventOff = -1.0;
+		double* EventInto = &EventOn;
+		const FDelegateHandle MetH = Sim->OnQuotaMet.AddLambda([&EventInto](int32, double AwardKg) { *EventInto = AwardKg; });
+		const double On = MeetQ1(true, 3.456, 0.0);
+		const int64 PaidOn = Sim->GetCreditBalanceMcr();
+		EventInto = &EventOff;
+		Sim->Debug_SetCreditEnabled(false);
+		const double Off = MeetQ1(true, 3.456, 0.0);
+		const int64 PaidOff = Sim->GetCreditBalanceMcr();
+		Sim->Debug_SetCreditEnabled(true);
+		Sim->OnQuotaMet.Remove(MetH);
+		Expect(Same(On, Off) && Same(EventOn, EventOff) && Same(EventOn, On) && PaidOn == FMath::FloorToInt64(On * 1000.0) && PaidOff == 0,
+			FString::Printf(TEXT("CR2 the agent band's award %.9f kg and its OnQuotaMet argument are bit-identical with the credit off; on, %s cr is paid, off nothing"), On, *Cr(PaidOn)));
+		// Funding rides the same floor, taken on the sum; a late award follows the late tier.
+		const double NoFund = MeetQ1(false, 3.456, 0.0);
+		const double WithFund = MeetQ1(false, 3.456, 500.0);
+		Expect(Same(WithFund, NoFund + 500.0) && Sim->GetCreditBalanceMcr() == FMath::FloorToInt64(WithFund * 1000.0) && Inv(),
+			FString::Printf(TEXT("CR2 500 kg of research funding rides the award (%.6f -> %.6f kg) and the floor is taken once on the sum: %s cr"), NoFund, WithFund, *Cr(Sim->GetCreditBalanceMcr())));
+		Reset();
+		const FRHQuotaRow* Q1 = DefsSub ? DefsSub->GetQuota(FName("Q1")) : nullptr;
+		Clock->Debug_AdvanceSimSeconds(((Q1 ? Q1->DeadlineSol : 10) + 1) * SolLen);
+		Sim->AddStock(FName("Struct"), 300.0);
+		Sim->AddStock(FName("Water"), 200.0);
+		Sim->AddStock(FName("Oxygen"), 50.0);
+		for (int32 K = 0; K < 200 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open; ++K) { EraOnce(); }
+		const double Late = Sim->GetAwardMassKg();
+		Expect(Q1 && Late > 0.0 && Late <= Q1->LateAward_kg * Sim->GetRequisitionMultiplier() + 1e-6 && Late < Q1->OnTimeAward_kg && Sim->GetCreditBalanceMcr() == FMath::FloorToInt64(Late * 1000.0) && Inv(),
+			FString::Printf(TEXT("CR2 Q1 met late pays the late tier: %.3f kg, %s cr"), Late, *Cr(Sim->GetCreditBalanceMcr())));
+	}
+
+	// --- CR3. Lemma 1 (R1) by enumeration: on a fresh ship the credits accept exactly what HEAD's rule (M + m <= A) accepts. ---
+	{
+		TArray<FName> Pool;
+		if (DefsSub) { DefsSub->ForEachManifestItem([&](FName N, const FRHManifestItemRow& Row) { if (Row.SliceActive && Row.MaxStack == 0) { Pool.Add(N); } }); }
+		Pool.Sort([](const FName& A, const FName& B) { return A.ToString().Compare(B.ToString(), ESearchCase::CaseSensitive) < 0; });
+		Reset();
+		uint32 Lcg = 20261023u;
+		const auto Next = [&Lcg]() { Lcg = Lcg * 1664525u + 1013904223u; return Lcg >> 8; };
+		int64 Decisions = 0, Mismatch = 0, Negative = 0;
+		FString Bad;
+		const double Awards[] = { 9999.3, 9998.7, 10000.0, 13207.4, 11778.0, 8380.6,
+			std::nextafter(10000.0, 0.0), std::nextafter(9999.0, 0.0), std::nextafter(13207.0, 1.0e300), std::nextafter(8380.0, 1.0e300) };
+		for (const double A : Awards)
+		{
+			for (int32 Seq = 0; Seq < 2000; ++Seq)
+			{
+				Sim->Debug_ResetManifest();
+				Sim->Debug_ZeroCredits();
+				Sim->Debug_OpenManifestWithAward(A);
+				double M = 0.0;
+				for (int32 K = 0; K < 12; ++K)
+				{
+					const FName Item = Pool[Next() % Pool.Num()];
+					const double m = Kg(*Item.ToString());
+					const bool bHead = !(M + m > A);
+					FString Why;
+					const bool bE2 = Sim->CanAddManifestItem(Item, Why);
+					++Decisions;
+					if (bHead != bE2) { ++Mismatch; if (Bad.Len() < 300) { Bad += FString::Printf(TEXT("A %.17g M %.0f + %s %.0f: head %d e2 %d (%s); "), A, M, *Item.ToString(), m, bHead, bE2, *Why); } }
+					if (bE2) { Sim->Debug_PushManifestItem(Item); M += m; }
+				}
+				Negative += Sim->GetManifestCostMcr() > Sim->GetCreditBalanceMcr() ? 1 : 0;
+			}
+		}
+		Info(FString::Printf(TEXT("CR3 the margin awards: %.17g, %.17g, %.17g, %.17g (each one ulp from a whole kg)"), Awards[6], Awards[7], Awards[8], Awards[9]));
+		Expect(Mismatch == 0 && Negative == 0 && Pool.Num() == 12 && Awards[6] < 10000.0 && Awards[7] < 9999.0 && Awards[8] > 13207.0 && Awards[9] > 8380.0,
+			FString::Printf(TEXT("CR3 %lld add decisions over 2,000 seeded sequences on each of %d awards (the margins nextafter(10000, 0), nextafter(9999, 0), nextafter(13207, +inf), nextafter(8380, +inf) included), drawn from the 12 uncapped rows: HEAD's rule and the credits agree on every one, and no manifest costs more than its balance %s"),
+				Decisions, (int32)UE_ARRAY_COUNT(Awards), *Bad));
+		// The margins, mass by mass: a manifest of exactly X - 200 kg, then a 200 kg Seed Vault, for every hundred near the award.
+		int32 Cases = 0, Agree = 0;
+		for (const double A : { Awards[6], Awards[7], Awards[8], Awards[9], 10000.0, 13207.4 })
+		{
+			const int32 Floor = (int32)FMath::FloorToDouble(A);
+			for (int32 X = (Floor / 100) * 100 - 300; X <= (Floor / 100) * 100 + 200; X += 100)
+			{
+				const int32 Y = X - 200, n = Y / 100;
+				if (Y < 0 || n == 1) { continue; }
+				Sim->Debug_ResetManifest();
+				Sim->Debug_ZeroCredits();
+				Sim->Debug_OpenManifestWithAward(A);
+				if (n % 2 == 1) { Sim->Debug_PushManifestItem(FName("LuxuryGoods")); }
+				for (int32 K = 0; K < (n % 2 == 1 ? (n - 3) / 2 : n / 2); ++K) { Sim->Debug_PushManifestItem(FName("SeedVault")); }
+				FString Why;
+				const bool bE2 = Sim->CanAddManifestItem(FName("SeedVault"), Why);
+				const bool bHead = !((double)X > A);
+				++Cases;
+				Agree += (bE2 == bHead && Sim->GetManifestMassKg() == (double)Y) ? 1 : 0;
+				if (bE2 != bHead) { Bad += FString::Printf(TEXT("A %.17g X %d: head %d e2 %d; "), A, X, bHead, bE2); }
+			}
+		}
+		Expect(Cases > 20 && Agree == Cases, FString::Printf(TEXT("CR3 at the margins: %d of %d whole-mass manifests reaching just under, at and just over each award agree %s"), Agree, Cases, *Bad));
+	}
+
+	// --- CR4. Carry-over. ---
+	{
+		Reset();
+		Sim->Debug_OpenManifestWithAward(9999.3);
+		const int64 B1 = Sim->GetCreditBalanceMcr();
+		FString Err;
+		const bool bLaunched = Sim->LaunchShip(Err);
+		const bool bKept = Sim->GetCreditBalanceMcr() == B1 && B1 == 9999300 && Inv();
+		const bool bLanded = LandShip();
+		const bool bAdvanced = Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetAwardMassKg() == 0.0 && Sim->GetCreditBalanceMcr() == B1 && Inv();
+		Sim->Debug_OpenManifestWithAward(5000.0);
+		const int64 B2 = Sim->GetCreditBalanceMcr();
+		const bool bTransport = Sim->AddManifestItem(FName("ColonistTransport"), Err); // 8,000 kg against an award of 5,000: only the carry-over pays
+		const bool bLaunched2 = Sim->LaunchShip(Err);
+		Expect(bLaunched && bKept && bLanded && bAdvanced && B2 == B1 + 5000000 && bTransport && bLaunched2 && Sim->GetCreditBalanceMcr() == B2 - 8000000 && Sim->GetCreditSpentMcr() == 8000000 && Inv(),
+			FString::Printf(TEXT("CR4 an empty first ship keeps its %s cr through the landing and the ladder's advance (award 0, balance unchanged); the next round's 5,000 cr makes %s, an 8,000 kg Colonist Transport is accepted on the carry-over, and the launch leaves %s cr (%s)"),
+				*Cr(B1), *Cr(B2), *Cr(Sim->GetCreditBalanceMcr()), *Err));
+	}
+
+	// --- CR5. The ship's mass cap (R2): stamped when the manifest opens, held in flight, cleared at landing. ---
+	{
+		Reset();
+		Sim->Debug_GrantCredits(40000000);
+		const bool bZeroOpen = Sim->GetShipMassCapKg() == 0.0;
+		Sim->Debug_OpenManifestWithAward(1000.0);
+		FString Err;
+		int32 Accepted = 0;
+		while (Accepted < 40 && Sim->AddManifestItem(FName("SoilPallet"), Err)) { ++Accepted; }
+		const bool bCapRefusal = Accepted == 30 && Err == TEXT("Over the ship's mass cap: 30000 + 1000 > 30000 kg");
+		Sim->Debug_SetShipMassCapCfg(10000.0);
+		const bool bStamped = Sim->GetShipMassCapKg() == 30000.0;
+		Sim->LaunchShip(Err);
+		const bool bInFlight = Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetShipMassCapKg() == 30000.0;
+		LandShip();
+		const bool bCleared = Sim->GetShipMassCapKg() == 0.0;
+		Sim->Debug_OpenManifestWithAward(1000.0);
+		const bool bNewCfg = Sim->GetShipMassCapKg() == 10000.0;
+		Sim->Debug_SetShipMassCapCfg(30000.0);
+		Expect(bZeroOpen && bCapRefusal && bStamped && bInFlight && bCleared && bNewCfg && Inv(),
+			FString::Printf(TEXT("CR5 with 40,000 cr the manifest takes %d Soil Pallets and refuses the next (\"%s\"); a config change to 10,000 kg mid-manifest leaves the stamped 30,000; it holds in flight, is 0 after landing, and the next ship gets 10,000"), Accepted, *Err));
+		// The repeat knob at 0: the ladder runs out and rests in Completed, where the cap is 0 (AwardMassKg stays stamped, as HEAD left it).
+		Reset();
+		Sim->Debug_SetQuotaRepeatBillMul(0.0);
+		int32 Ships = 0;
+		bool bRestOk = true;
+		for (; Ships < 8 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open; ++Ships)
+		{
+			Sim->Debug_OpenManifestWithAward(1000.0);
+			bRestOk &= Sim->GetShipMassCapKg() == 30000.0;
+			Sim->LaunchShip(Err);
+			bRestOk &= Sim->GetShipMassCapKg() == 30000.0;
+			LandShip();
+			bRestOk &= Sim->GetShipMassCapKg() == 0.0;
+		}
+		Expect(bRestOk && Sim->GetQuotaPhase() == ERHQuotaPhase::Completed && Sim->GetShipMassCapKg() == 0.0 && Sim->GetAwardMassKg() == 1000.0,
+			FString::Printf(TEXT("CR5 with the repeat knob at 0 the ladder rests in Completed after %d ships: the cap was stamped and held for each ship and is 0 at rest, while the last award stays stamped (%.0f kg)"), Ships, Sim->GetAwardMassKg()));
+		Sim->Debug_SetQuotaRepeatBillMul(DefsSub ? DefsSub->GetConfigScalar(FName("QuotaRepeatBillMul"), 1.25) : 1.25);
+	}
+
+	// --- CR6. The stack cap (Q-B (a)): landed plus aboard, refused at the manifest. ---
+	{
+		Reset();
+		Sim->Debug_GrantCredits(40000000);
+		FString Err;
+		int32 Took = 0;
+		for (int32 Ship = 0; Ship < 4; ++Ship)
+		{
+			Sim->Debug_OpenManifestWithAward(1000.0);
+			Took += Sim->AddManifestItem(FName("Toolkit"), Err) ? 1 : 0;
+			Sim->LaunchShip(Err);
+			LandShip();
+		}
+		Sim->Debug_OpenManifestWithAward(1000.0);
+		const bool bFifth = !Sim->AddManifestItem(FName("Toolkit"), Err) && Err == TEXT("Specialty Toolkit: the colony already has the most of this it can use (4)");
+		double HeadMul = 1.0;
+		for (int32 K = 0; K < 4; ++K) { HeadMul += 0.15; }
+		Expect(Took == 4 && Sim->GetManifestLanded(FName("Toolkit")) == 4 && bFifth && Same(Sim->GetFabricatorSpeedMul(), HeadMul),
+			FString::Printf(TEXT("CR6 four Toolkits on four ships are accepted and land (count %d); the fifth is refused (\"%s\"); the speed is HEAD's four += 0.15 bit for bit (%.17g)"), Sim->GetManifestLanded(FName("Toolkit")), *Err, Sim->GetFabricatorSpeedMul()));
+		Sim->Debug_DeliverCargo(FName("Toolkit")); // the harness's delivery bypasses the purchase check, and still counts
+		const bool bBypass = Sim->GetManifestLanded(FName("Toolkit")) == 5;
+		Reset();
+		Sim->Debug_GrantCredits(40000000);
+		for (int32 K = 0; K < 3; ++K) { Sim->Debug_DeliverCargo(FName("Toolkit")); }
+		Sim->Debug_OpenManifestWithAward(1000.0);
+		const bool bFourth = Sim->AddManifestItem(FName("Toolkit"), Err);
+		const bool bFifthAboard = !Sim->AddManifestItem(FName("Toolkit"), Err);
+		const bool bCore = Sim->AddManifestItem(FName("ComputeCore"), Err);
+		const bool bCore2 = !Sim->AddManifestItem(FName("ComputeCore"), Err) && Err == TEXT("Compute Core: the colony already has the most of this it can use (1)");
+		Expect(bBypass && bFourth && bFifthAboard && bCore && bCore2 && Inv(),
+			TEXT("CR6 a fifth delivered by the harness still counts; three landed and a fourth aboard refuse a fifth on the same manifest; a second Compute Core is refused"));
+	}
+
+	// --- CR7. Launch. ---
+	{
+		Reset();
+		Sim->Debug_OpenManifestWithAward(2000.0);
+		const int64 B0 = Sim->GetCreditBalanceMcr();
+		FString Err;
+		const bool bEmpty = Sim->LaunchShip(Err) && Sim->GetCreditBalanceMcr() == B0 && Sim->GetCreditSpentMcr() == 0;
+		const bool bOutside = !Sim->LaunchShip(Err) && Err == TEXT("No manifest is open");
+		LandShip();
+		Sim->Debug_OpenManifestWithAward(2000.0);
+		Sim->AddManifestItem(FName("SoilPallet"), Err);
+		FRHManifestItemRow* Row = const_cast<FRHManifestItemRow*>(DefsSub ? DefsSub->GetManifestItem(FName("SoilPallet")) : nullptr);
+		const int32 Price0 = Row ? Row->Price_mcr : 0;
+		if (Row) { Row->Price_mcr = 9000000; } // a live re-price between the add and the launch
+		const int64 B1 = Sim->GetCreditBalanceMcr();
+		const bool bRepriced = !Sim->LaunchShip(Err) && Err.StartsWith(TEXT("Over budget at launch: the manifest now costs 9000 cr against 4000 cr"))
+			&& Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Sim->GetCreditBalanceMcr() == B1;
+		if (Row) { Row->Price_mcr = Price0; }
+		const bool bThen = Sim->LaunchShip(Err) && Sim->GetCreditBalanceMcr() == B1 - 1000000;
+		Expect(bEmpty && bOutside && bRepriced && bThen && Inv(),
+			FString::Printf(TEXT("CR7 an empty launch spends 0; a launch with no manifest open is refused as at HEAD; a re-price after the add refuses the launch with the phase and balance unchanged; restored, it launches and spends %s cr"), *Cr(1000000)));
+	}
+
+	// --- CR8. Era parity: each band pays floor(1,000 x its own award) on its met step; composing and launching agree. ---
+	{
+		const double AwardEra = MeetQ1(false, 2.345, 0.0);
+		const int64 PaidEra = Sim->GetCreditBalanceMcr();
+		const int32 SolEra = Clock->GetSol();
+		Sim->SaveColony(TEXT("creditmet"), SaveErr);
+		const double AwardAgent = MeetQ1(true, 2.345, 0.0);
+		const int64 PaidAgent = Sim->GetCreditBalanceMcr();
+		const int32 SolAgent = Clock->GetSol();
+		Expect(PaidEra == FMath::FloorToInt64(AwardEra * 1000.0) && PaidAgent == FMath::FloorToInt64(AwardAgent * 1000.0),
+			FString::Printf(TEXT("CR8 each band pays the floor of its own award on its met step: era %.6f kg -> %s cr (sol %d), agent %.6f kg -> %s cr (sol %d)"),
+				AwardEra, *Cr(PaidEra), SolEra, AwardAgent, *Cr(PaidAgent), SolAgent));
+		int64 Balance[2] = { 0, 0 };
+		double Soil[2] = { 0, 0 };
+		for (int32 Band = 0; Band < 2; ++Band)
+		{
+			FString E;
+			Sim->LoadColony(TEXT("creditmet"), E);
+			Sim->AddManifestItem(FName("SoilPallet"), E);
+			for (int32 K = 0; K < (Band == 0 ? 600 : 10); ++K) { Band == 0 ? AgentOnce() : EraOnce(); }
+			Sim->AddManifestItem(FName("SoilPallet"), E);
+			Sim->LaunchShip(E);
+			Balance[Band] = Sim->GetCreditBalanceMcr();
+			const double Soil0 = Sim->GetStock(FName("Soil"));
+			for (int32 K = 0; K < 200000 && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound; ++K) { Band == 0 ? AgentOnce() : EraOnce(); }
+			Soil[Band] = Sim->GetStock(FName("Soil")) - Soil0;
+		}
+		Expect(Balance[0] == Balance[1] && Balance[0] == PaidEra - 2000000 && Soil[0] == 2000.0 && Soil[1] == 2000.0,
+			FString::Printf(TEXT("CR8 from the era-met save, two Soil Pallets composed around agent steps and around era steps launch to the same balance (%s / %s cr); the ship launched in each band lands in it with the same cargo (Soil +%.0f / +%.0f kg)"),
+				*Cr(Balance[0]), *Cr(Balance[1]), Soil[0], Soil[1]));
+	}
+
+	// --- CR9. The save (R5). ---
+	{
+		Reset();
+		Sim->Debug_DeliverCargo(FName("Toolkit"));
+		Sim->Debug_DeliverCargo(FName("ComputeCore"));
+		Sim->Debug_OpenManifestWithAward(9999.3);
+		FString Err;
+		Sim->AddManifestItem(FName("SoilPallet"), Err);
+		Sim->AddManifestItem(FName("SeedVault"), Err);
+		const int32 CreditBytes = Sim->GetCreditBlockBytes();
+		const bool bSaved = Sim->SaveColony(TEXT("creditsave"), SaveErr);
+		TArray<uint8> W;
+		const bool bRead = bSaved && FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("creditsave")));
+		uint32 Ver = 0;
+		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
+		const int32 At = W.Num() - CreditBytes;
+		const auto Rd64 = [&](int32 Off) { int64 V = 0; if (Off >= 0 && Off + 8 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 8); } return V; };
+		const auto Rd32 = [&](int32 Off) { int32 V = 0; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
+		double Cap = 0.0;
+		if (bRead) { FMemory::Memcpy(&Cap, W.GetData() + At + 24, 8); }
+		TArray<FString> Names;
+		TArray<int32> Landed;
+		int32 Cur = At + 36;
+		for (int32 n = 0; bRead && n < Rd32(At + 32); ++n)
+		{
+			const int32 Len = Rd32(Cur);
+			Names.Add(FString(ANSI_TO_TCHAR((const ANSICHAR*)(W.GetData() + Cur + 4))));
+			Cur += 4 + Len;
+			Landed.Add(Rd32(Cur));
+			Cur += 4;
+		}
+		Expect(bRead && Ver == 52 && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
+			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1 && Cur == W.Num(),
+			FString::Printf(TEXT("CR9 v%u: the credit block is the last %d bytes - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, then %d capped rows by name (%s %d, %s %d), ending the file"),
+				Ver, CreditBytes, Rd64(At), Rd64(At + 8), Rd64(At + 16), Cap, Names.Num(), Names.Num() ? *Names[0] : TEXT("?"), Landed.Num() ? Landed[0] : -1, Names.Num() > 1 ? *Names[1] : TEXT("?"), Landed.Num() > 1 ? Landed[1] : -1));
+		FString Le;
+		const bool bLoaded = Sim->LoadColony(TEXT("creditsave"), Le) && Le.IsEmpty() && Sim->SaveColony(TEXT("creditsave2"), SaveErr);
+		TArray<uint8> W2;
+		Expect(bLoaded && FFileHelper::LoadFileToArray(W2, *SaveFilePath(TEXT("creditsave2"))) && W2 == W && Sim->GetManifestItems().Num() == 2 && Sim->GetManifestLanded(FName("Toolkit")) == 1 && Inv(),
+			FString::Printf(TEXT("CR9 mid-manifest (two items aboard, a carry-over, a Toolkit and a Compute Core landed): save, load, save is byte-identical (%d bytes)"), W.Num()));
+		const auto TryBytes = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
+		{
+			FFileHelper::SaveArrayToFile(Bytes, *SaveFilePath(Slot));
+			FString E;
+			const bool bOk = Sim->LoadColony(Slot, E);
+			OutErr = E;
+			return bOk && E.IsEmpty();
+		};
+		const auto Put64 = [](TArray<uint8>& T, int32 Off, int64 V) { FMemory::Memcpy(T.GetData() + Off, &V, 8); };
+		const int64 Bal = Rd64(At), Aw = Rd64(At + 8);
+		{ TArray<uint8> T = W; Put64(T, At, -5); FString E; const bool bOk = TryBytes(TEXT("creditr1"), T, E);
+		  Expect(bOk && Sim->GetCreditBalanceMcr() == 0 && Inv(), FString::Printf(TEXT("CR9 a negative balance loads repaired to 0 with the invariant restored (awarded %lld, spent %lld)"), Sim->GetCreditAwardedMcr(), Sim->GetCreditSpentMcr())); }
+		{ TArray<uint8> T = W; Put64(T, At + 16, Aw + 7000); FString E; const bool bOk = TryBytes(TEXT("creditr2"), T, E);
+		  Expect(bOk && Sim->GetCreditBalanceMcr() == Bal && Inv(), TEXT("CR9 spent above awarded loads with spent = awarded - balance")); }
+		{ TArray<uint8> T = W; Put64(T, At, Bal + 12345); FString E; const bool bOk = TryBytes(TEXT("creditr3"), T, E);
+		  Expect(bOk && Sim->GetCreditBalanceMcr() == Bal + 12345 && Sim->GetCreditAwardedMcr() == Bal + 12345 && Sim->GetCreditSpentMcr() == 0 && Inv(),
+			TEXT("CR9 a balance above awarded - spent loads with awarded = balance and spent = 0")); }
+		{
+			// Unsorted: Toolkit's entry before ComputeCore's.
+			TArray<uint8> T;
+			T.Append(W.GetData(), At + 36);
+			const int32 First = At + 36, Second = First + 4 + Rd32(First) + 4;
+			T.Append(W.GetData() + Second, W.Num() - Second);
+			T.Append(W.GetData() + First, Second - First);
+			FString E;
+			const bool bOk = TryBytes(TEXT("creditr4"), T, E);
+			Expect(bOk && T.Num() == W.Num() && Sim->GetManifestLanded(FName("Toolkit")) == 0 && Sim->GetManifestLanded(FName("ComputeCore")) == 0 && Sim->GetCreditBalanceMcr() == Bal && Inv(),
+				TEXT("CR9 a block whose rows are out of order resets every landing count to 0 and loads, the credit kept"));
+		}
+		{ TArray<uint8> T = W; const uint32 V51 = 51; FMemory::Memcpy(T.GetData() + 4, &V51, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
+		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/52")), FString::Printf(TEXT("CR9 a v51 file is refused (%s)"), *E)); }
+		// A ship in flight keeps its cap through a round trip.
+		Sim->LoadColony(TEXT("creditsave"), Le);
+		Sim->LaunchShip(Err);
+		Sim->SaveColony(TEXT("creditinbound"), SaveErr);
+		Sim->LoadColony(TEXT("creditinbound"), Le);
+		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetShipMassCapKg() == 30000.0 && Inv(), TEXT("CR9 a save made with the ship in flight loads with its 30,000 kg cap"));
+	}
+
+	// --- CR10. Ruling 11 and Q4a: 10 sols with a million credits granted against none - nothing outside the manifest moves. ---
+	{
+		const auto Colony = [&](bool bRich) -> FString
+		{
+			Reset();
+			FString R;
+			Sim->ExtendShaft(1, FVector(1000.0, 1000.0, 0.0));
+			Sim->ExcavateFloor(-1, 12, R);
+			Sim->Debug_PlaceInstant(FName("AirFilter"), FVector(1000.0, 1500.0, 0.0), -1);
+			Sim->Debug_SetExtraGenW(1.0e6);
+			EraOnce();
+			Sim->Debug_ForceRateFloor(-1);
+			Sim->Debug_AddColonists(8);
+			Sim->AddStock(FName("Food"), 400.0);
+			Sim->AddStock(FName("Water"), 600.0);
+			Sim->AddStock(FName("Oxygen"), 600.0);
+			Sim->Debug_SetGrowthEnabled(true);
+			if (bRich) { Sim->Debug_GrantCredits(1000000000); }
+			for (int32 K = 0; K < 10 * (int32)(SolLen / EraDt); ++K) { EraOnce(); }
+			FString D = FString::Printf(TEXT("hope %.17g people %d growth %d phase %d"), Sim->GetHopeSmoothed(), Sim->GetPopulation(), Sim->GetGrowthProjects().Num(), (int32)Sim->GetQuotaPhase());
+			if (DefsSub) { DefsSub->ForEachResourceRow([&](FName N, const FRHResourceRow&) { D += FString::Printf(TEXT(" %s=%.17g"), *N.ToString(), Sim->GetStock(N)); }); }
+			return D;
+		};
+		const FString Poor = Colony(false);
+		const int64 PoorBalance = Sim->GetCreditBalanceMcr();
+		const FString Rich = Colony(true);
+		Expect(Poor == Rich && Sim->GetCreditBalanceMcr() == PoorBalance + 1000000000 && Inv(),
+			FString::Printf(TEXT("CR10 a colony granted 1,000,000 cr and its twin with none are bit-identical after 10 sols (Hope, people, growth, the quota phase, every stock: %d chars); the only difference is the grant (%s against %s cr)%s"),
+				Poor.Len(), *Cr(Sim->GetCreditBalanceMcr()), *Cr(PoorBalance), Poor == Rich ? TEXT("") : *FString::Printf(TEXT(" DIFFER: %s | %s"), *Poor.Left(200), *Rich.Left(200))));
 	}
 
 	return Finish();

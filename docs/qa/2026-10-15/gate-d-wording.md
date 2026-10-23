@@ -468,3 +468,19 @@ E2a moves every manifest effect into data without changing a player-facing strin
 | ID | Where | Current | Status (2026-10-23) |
 |---|---|---|---|
 | Q1 | World-start Warning, a manifest row whose effect does not resolve · SIM `BuildManifestEffects` | `Manifest row %s: verb '%s' with target '%s' does not resolve; it lands as nothing` | PLACEHOLDER. Developer-facing. CR0 asserts no shipped row logs it. |
+
+## Rows added by E2b Earth credit (2026-10-23)
+
+New player-facing strings from E2b (Q1a: Earth pays in credits, unspent credits carry over, each ship keeps a mass cap). They are PLACEHOLDER copy and wait for the director's review. No morale, sickness or evacuation wording is added; the CEO line keeps "kg manifest budget" verbatim (risk 3: it changes in E3). Prefix Q continues.
+
+| ID | Where | Current | Status (2026-10-23) |
+|---|---|---|---|
+| Q2 | The picker's two bars · DECK | `Credits` with `%s / %s cr` (this manifest's cost against the balance); `Ship mass` with `%s / %s` (kg against the ship's cap). They replace `Cargo budget`. | PLACEHOLDER, pending review. |
+| Q3 | Each picker row · DECK | `%s  -  %s cr  -  %s` (mass, price, effect) | PLACEHOLDER, pending review. |
+| Q4 | ADD's tooltip when greyed, and the order rejection · SIM `CanAddManifestItem` | One of: `No manifest is open (quota not met, or ship already launched)` (HEAD) / `Unknown manifest item '%s'` (HEAD) / `%s: the colony already has the most of this it can use (%d)` / `Over the ship's mass cap: %.0f + %.0f > %.0f kg` / `Over budget: %s + %s > %s cr` | PLACEHOLDER, pending review (the first two are HEAD's). |
+| Q5 | Launch refusal · SIM `LaunchShip` | `Over budget at launch: the manifest now costs %s cr against %s cr; remove or re-price items` (only after a live re-price) | PLACEHOLDER, pending review. |
+| Q6 | The credit readout under the objective · DECK | `Earth credit: %s cr` or `Earth credit: %s cr (this round's award %s cr)` | PLACEHOLDER, pending review. |
+| Q7 | Sim log lines · SIM | `Manifest: +%s (%.0f kg, %s cr) -> %.0f / %.0f kg, %s / %s cr`; `Ship launched: %d items, %.0f kg of a %.0f kg cap, %s cr spent, %s cr carried, arrival in %.0f sols` | PLACEHOLDER. Developer-facing. |
+| Q8 | `RH.Status` · CHEATS | `QUOTA MET. Manifest: %.0f kg of a %.0f kg cap (award %.0f kg), %s / %s cr [%d items] - RH.Manifest <Item>, RH.Launch`; `Earth credit: %s cr (awarded %s, spent %s); ship mass cap %.0f kg` | PLACEHOLDER. Developer-facing. |
+| Q9 | Load Warnings, a credit block repaired · SIM `ReadCreditBlock` | `LoadColony v52: ...` - a cut-short block, a negative total, a balance that disagrees with the totals (and the follow-up when spent would go negative), an invalid cap with or without a ship open, an invalid row count, counts cut short, a row out of order, a row that is not stack-capped. The colony always loads. | PLACEHOLDER. Developer-facing. |
+| Q10 | Data copy · DATA | `RH_ManifestItems` gains `Price_mcr` (1,000 x Mass_kg) and `MaxStack` (Toolkit 4, Compute Core 1); each Notes cell ends "Price placeholder, director review." `RH_Config` gains `AwardMcrPerKg` 1000 and `ShipMassCapKg` 30000. | PLACEHOLDER, director review (balance numbers). |

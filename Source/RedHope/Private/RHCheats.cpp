@@ -2276,8 +2276,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		switch (Sim->GetQuotaPhase())
 		{
 		case ERHQuotaPhase::AwaitingManifest:
-			UE_LOG(LogRedHope, Display, TEXT("  QUOTA MET. Manifest: %.0f / %.0f kg [%d items] - RH.Manifest <Item>, RH.Launch"),
-				Sim->GetManifestMassKg(), Sim->GetAwardMassKg(), Sim->GetManifestItems().Num());
+			UE_LOG(LogRedHope, Display, TEXT("  QUOTA MET. Manifest: %.0f kg of a %.0f kg cap (award %.0f kg), %s / %s cr [%d items] - RH.Manifest <Item>, RH.Launch"),
+				Sim->GetManifestMassKg(), Sim->GetShipMassCapKg(), Sim->GetAwardMassKg(), *URHSimWorldSubsystem::FormatCredits(Sim->GetManifestCostMcr()),
+				*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()), Sim->GetManifestItems().Num());
 			break;
 		case ERHQuotaPhase::ShipInbound:
 			UE_LOG(LogRedHope, Display, TEXT("  SHIP INBOUND: arrival at t=%.0f (now %.0f)"),
@@ -2289,6 +2290,10 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		default:
 			break;
 		}
+		// E2b: the Earth credit, every status.
+		UE_LOG(LogRedHope, Display, TEXT("  Earth credit: %s cr (awarded %s, spent %s); ship mass cap %.0f kg"),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditAwardedMcr()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditSpentMcr()), Sim->GetShipMassCapKg());
 		UE_LOG(LogRedHope, Display, TEXT("  import stock: solar %d, battery %d"),
 			Sim->GetImportStock(FName("SolarArray")), Sim->GetImportStock(FName("BatteryBank")));
 		if (Sim->GetShaftDepth() > 0 || Sim->GetBoreTargetDepth() > 0)

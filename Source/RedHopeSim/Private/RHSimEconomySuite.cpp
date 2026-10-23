@@ -470,6 +470,7 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 	FBusyRun BusyAgent, BusyEra;
 	{
 		const int32 BlockBytes = Sim->GetLedgerBlockBytes();
+		const int32 CreditBytes = Sim->GetCreditBlockBytes(); // E2b's block follows E1's (both sizes are fixed by tables)
 		for (const bool bAgent : { false, true })
 		{
 			const TCHAR* Band = bAgent ? TEXT("agent") : TEXT("era");
@@ -481,11 +482,12 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 			TArray<uint8> WOn, WOff;
 			const bool bRead = On.bSaved && Off.bSaved && FFileHelper::LoadFileToArray(WOn, *SaveFilePath(bAgent ? TEXT("econtwin_a1") : TEXT("econtwin_e1")))
 				&& FFileHelper::LoadFileToArray(WOff, *SaveFilePath(bAgent ? TEXT("econtwin_a0") : TEXT("econtwin_e0")));
-			const int32 Prefix = WOn.Num() - BlockBytes;
+			const int32 Prefix = WOn.Num() - BlockBytes - CreditBytes;
 			const bool bSame = bRead && WOn.Num() == WOff.Num() && Prefix > 0 && FMemory::Memcmp(WOn.GetData(), WOff.GetData(), Prefix) == 0;
-			const bool bBlockDiffers = bRead && WOn.Num() == WOff.Num() && FMemory::Memcmp(WOn.GetData() + Prefix, WOff.GetData() + Prefix, BlockBytes) != 0;
+			const bool bBlockDiffers = bRead && WOn.Num() == WOff.Num() && FMemory::Memcmp(WOn.GetData() + Prefix, WOff.GetData() + Prefix, BlockBytes) != 0
+				&& FMemory::Memcmp(WOn.GetData() + Prefix + BlockBytes, WOff.GetData() + Prefix + BlockBytes, CreditBytes) == 0;
 			Expect(bSame && bBlockDiffers,
-				FString::Printf(TEXT("EC1 %s band: both saves are %d bytes and equal from byte 0 to the E1 block (%d bytes); only the block differs (the twin's ledger is empty)"), Band, WOn.Num(), Prefix));
+				FString::Printf(TEXT("EC1 %s band: both saves are %d bytes and equal from byte 0 to the E1 block (%d bytes); only the block differs (the twin's ledger is empty), and the credit block after it is the same"), Band, WOn.Num(), Prefix));
 		}
 	}
 
@@ -819,13 +821,16 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 	{
 		LoadSlot(TEXT("econtwin_e1"));
 		const int32 BlockBytes = Sim->GetLedgerBlockBytes();
+		const int32 CreditBytes = Sim->GetCreditBlockBytes(); // E2b: the credit block ends the file now
 		const int64 Water0 = Sim->GetLedgerLifetimeG(NWater, ELeg::Made);
+		Sim->Debug_GrantCredits(1234567); // E2b: a credit the doctored ledgers below must leave untouched
+		const int64 Credit0 = Sim->GetCreditBalanceMcr();
 		Expect(Sim->SaveColony(TEXT("econsave"), SaveErr), FString::Printf(TEXT("EC6 the busy colony after 10 era sols is saved (%s)"), *SaveErr));
 		TArray<uint8> W;
 		const bool bRead = FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("econsave")));
 		uint32 Ver = 0;
 		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
-		const int32 At = W.Num() - BlockBytes;
+		const int32 At = W.Num() - BlockBytes - CreditBytes;
 		const auto RdI = [&](int32 Off) { int32 V = INDEX_NONE; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
 		// Walk the block: the count, then per slot its name (an FString: length with the terminator, then ANSI chars) and 4 legs of 80 bytes.
 		TArray<FString> Names;
@@ -844,9 +849,9 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		}
 		bool bAscending = Names.Num() == 18;
 		for (int32 i = 1; i < Names.Num(); ++i) { bAscending &= Names[i - 1].Compare(Names[i], ESearchCase::CaseSensitive) < 0; }
-		Expect(bRead && Ver == 51 && Count == 18 && bAscending && Cur + 4 * 3 + 8 == W.Num(),
-			FString::Printf(TEXT("EC6 the file says version %u; the E1 block is the last %d bytes: 18 slots, names ascending (%s .. %s), then fill, head, checked sol and the unslotted loss, ending the file"),
-				Ver, BlockBytes, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
+		Expect(bRead && Ver == 52 && Count == 18 && bAscending && Cur + 4 * 3 + 8 == W.Num() - CreditBytes,
+			FString::Printf(TEXT("EC6 the file says version %u; the E1 block is the %d bytes before the %d-byte credit block: 18 slots, names ascending (%s .. %s), then fill, head, checked sol and the unslotted loss"),
+				Ver, BlockBytes, CreditBytes, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("econsave"), Le) && Le.IsEmpty();
 		Expect(bLoaded && Sim->SaveColony(TEXT("econsave2"), SaveErr), TEXT("EC6 it loads back and saves again"));
@@ -862,10 +867,10 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 			return bOk;
 		};
 		{
-			TArray<uint8> T = W; const uint32 V50 = 50; FMemory::Memcpy(T.GetData() + 4, &V50, 4);
+			TArray<uint8> T = W; const uint32 V51 = 51; FMemory::Memcpy(T.GetData() + 4, &V51, 4);
 			FString E;
 			const bool bOk = TryBytes(TEXT("econr1"), T, E);
-			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/51")), FString::Printf(TEXT("EC6 a v50 file is refused (%s)"), *E));
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/52")), FString::Printf(TEXT("EC6 a v51 file is refused (%s)"), *E));
 		}
 		const int32 FoodSlot = Names.IndexOfByKey(TEXT("Food")), GlassSlot = Names.IndexOfByKey(TEXT("Glass"));
 		const int32 IceSlot = Names.IndexOfByKey(TEXT("Ice"));
@@ -888,7 +893,7 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 				TArray<uint8> T = W; T[NameAt[FoodSlot] + 4 + 3] = 'e';
 				FString E;
 				const bool bOk = TryBytes(TEXT("econr2"), T, E);
-				Expect(bOk && E.IsEmpty() && Sim->GetLedgerLifetimeG(NFood, ELeg::Used) == 0 && Sim->GetLedgerLifetimeG(NWater, ELeg::Made) == Water0,
+				Expect(bOk && E.IsEmpty() && Sim->GetCreditBalanceMcr() == Credit0 && Sim->GetLedgerLifetimeG(NFood, ELeg::Used) == 0 && Sim->GetLedgerLifetimeG(NWater, ELeg::Made) == Water0,
 					FString::Printf(TEXT("EC6 a block naming a row that no longer exists (Fooe) loads: that slot is skipped, Food starts at 0, Water Made is still %lld g"), Water0));
 			}
 			// Unsorted (Food and Glass swap names): the ledger resets to empty with a Warning; the colony still loads.
@@ -896,22 +901,31 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 				TArray<uint8> T = W; T[NameAt[FoodSlot] + 4] = 'G'; T[NameAt[FoodSlot] + 5] = 'l'; T[NameAt[FoodSlot] + 6] = 'a'; T[NameAt[FoodSlot] + 7] = 'z';
 				FString E;
 				const bool bOk = TryBytes(TEXT("econr3"), T, E);
-				Expect(bOk && E.IsEmpty() && AllZero() && Sim->GetColonists().Num() == 6,
-					TEXT("EC6 a block whose names are out of order resets the ledger to empty (every leg 0, the ring empty) and the colony loads"));
+				Expect(bOk && E.IsEmpty() && Sim->GetCreditBalanceMcr() == Credit0 && AllZero() && Sim->GetColonists().Num() == 6,
+					TEXT("EC6 a block whose names are out of order resets the ledger to empty (every leg 0, the ring empty) and the colony loads, its credit untouched"));
 			}
 			// A negative ring entry: reset.
 			{
 				TArray<uint8> T = W; const int64 Neg = -5; FMemory::Memcpy(T.GetData() + LegsAt[IceSlot] + 16, &Neg, 8);
 				FString E;
 				const bool bOk = TryBytes(TEXT("econr4"), T, E);
-				Expect(bOk && E.IsEmpty() && AllZero(), TEXT("EC6 a negative ring entry resets the ledger to empty and the colony loads"));
+				Expect(bOk && E.IsEmpty() && Sim->GetCreditBalanceMcr() == Credit0 && AllZero(), TEXT("EC6 a negative ring entry resets the ledger to empty and the colony loads"));
 			}
 			// A ring head out of range: reset.
 			{
-				TArray<uint8> T = W; const int32 BadHead = 8; FMemory::Memcpy(T.GetData() + W.Num() - 16, &BadHead, 4);
+				TArray<uint8> T = W; const int32 BadHead = 8; FMemory::Memcpy(T.GetData() + W.Num() - CreditBytes - 16, &BadHead, 4);
 				FString E;
 				const bool bOk = TryBytes(TEXT("econr5"), T, E);
-				Expect(bOk && E.IsEmpty() && AllZero(), TEXT("EC6 a ring head of 8 (out of range) resets the ledger to empty and the colony loads"));
+				Expect(bOk && E.IsEmpty() && Sim->GetCreditBalanceMcr() == Credit0 && AllZero(), TEXT("EC6 a ring head of 8 (out of range) resets the ledger to empty and the colony loads"));
+			}
+			// A slot count of -1: the block cannot be measured, so the credit block after it is not read - the credit starts at 0, never
+			// at bytes read from the ledger (E2b).
+			{
+				TArray<uint8> T = W; const int32 BadCount = -1; FMemory::Memcpy(T.GetData() + At, &BadCount, 4);
+				FString E;
+				const bool bOk = TryBytes(TEXT("econr6"), T, E);
+				Expect(bOk && E.IsEmpty() && AllZero() && Sim->GetCreditBalanceMcr() == 0 && Sim->GetCreditAwardedMcr() == 0 && Sim->GetCreditSpentMcr() == 0,
+					TEXT("EC6 a slot count of -1 resets the ledger, and the credit block it hides is not read: the credit starts at 0 and the colony loads"));
 			}
 		}
 		else
