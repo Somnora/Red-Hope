@@ -247,6 +247,21 @@ void URHGrowthVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 			LabelSize = (float)FMath::Clamp(0.5 * (Y1 - Y0), 140.0, 320.0) * 0.55f;
 			bDrawn = true;
 		}
+		else if (P.Points.Num() > 0 && P.Level == Level && Level < 0)
+		{
+			// D6b: a project inside a floor shape names its cells as lattice points: a cell already dug is outlined on its own floor, a
+			// point still rock is crossed on the sand over it, where the hole will open.
+			double SumX = 0.0, SumY = 0.0;
+			for (const FIntPoint& Pos : P.Points)
+			{
+				const double Cx = Head.X + Pos.X * 1000.0, Cy = Head.Y + Pos.Y * 1000.0;
+				GhostCell(Cx, Cy, /*bCross*/ Sim.FindFloorCell(Level, Pos) == INDEX_NONE);
+				SumX += Cx; SumY += Cy;
+			}
+			LabelAt = FVector(SumX / P.Points.Num(), SumY / P.Points.Num(), 330.f);
+			LabelSize = 130.f;
+			bDrawn = true;
+		}
 		else if (P.Kind == ERHGrowthKind::FloorCells && P.Level == Level && Level < 0)
 		{
 			// The cells go on at the end of the floor, wherever it ends now.

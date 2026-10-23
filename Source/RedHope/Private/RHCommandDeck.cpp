@@ -144,6 +144,26 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		];
 	}
+	// D6b: the underground choice - the whole floor (one click, as always) or a shape on the floor, 1..3 floors tall (drag a rectangle).
+	DistrictPalette->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(10.f, 0.f, 0.f, 0.f))
+	[
+		SNew(SBox)
+		.ToolTipText(FText::FromString(TEXT("What a press does underground. Whole floor: one click makes the floor you are on a district. Shape: drag a rectangle of 10 m cells on the floor you are on (rock may be painted, to zone a cavern before it is dug); 1, 2 or 3 floors tall, from this floor down. Each press steps it.")))
+		[
+			SNew(SButton)
+			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonColorAndOpacity_Lambda([this]()
+			{
+				const bool bShape = PC.IsValid() && PC->GetDistrictShapeFloors() >= 1;
+				return FSlateColor(bShape ? FLinearColor(0.06f, 0.36f, 0.42f) : FLinearColor(0.06f, 0.09f, 0.11f, 0.95f));
+			})
+			.ContentPadding(FMargin(9.f, 5.f))
+			.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDistrictShape))
+			[
+				SNew(STextBlock).Text_Lambda([this]() { return GetDistrictShapeLabel(); }).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+			]
+		]
+	];
 	DistrictPalette->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(10.f, 0.f, 0.f, 0.f))
 	[
 		SNew(STextBlock).Text(FText::FromString(TEXT("drag on the ground, or click a floor underground"))).Font(RHDeck::Body(9)).ColorAndOpacity(RHDeck::TextDim)
@@ -1344,7 +1364,8 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		if (C.Verb == FName("PaintDistrict"))
 		{
 			// C5a: "Paint Homes district" / "Floor -1: Homes district".
-			Label = C.Level < 0 ? FString::Printf(TEXT("Floor %d: %s district"), C.Level, *C.Target.ToString()) : FString::Printf(TEXT("Paint %s district"), *C.Target.ToString());
+			Label = C.Level < 0 ? (C.Value >= 1.0 ? FString::Printf(TEXT("Floor %d: %s shape, %d floor%s"), C.Level, *C.Target.ToString(), FMath::RoundToInt(C.Value), FMath::RoundToInt(C.Value) == 1 ? TEXT("") : TEXT("s"))
+				: FString::Printf(TEXT("Floor %d: %s district"), C.Level, *C.Target.ToString())) : FString::Printf(TEXT("Paint %s district"), *C.Target.ToString());
 		}
 		else if (C.Verb == FName("EraseDistrict"))
 		{
@@ -2134,6 +2155,26 @@ FReply SRHCommandDeck::HandleDistrict(FName Kind)
 	if (PC.IsValid())
 	{
 		PC->BeginDistrictPaint(Kind);
+	}
+	return FReply::Handled();
+}
+
+// D6b (placeholder copy for the Gate-D framing review, docs/qa/2026-10-15/gate-d-wording.md rows K1-K8): the underground choice.
+FText SRHCommandDeck::GetDistrictShapeLabel() const
+{
+	const int32 Floors = PC.IsValid() ? PC->GetDistrictShapeFloors() : 0;
+	if (Floors <= 0)
+	{
+		return FText::FromString(TEXT("Underground: whole floor"));
+	}
+	return FText::FromString(FString::Printf(TEXT("Underground: shape, %d floor%s"), Floors, Floors == 1 ? TEXT("") : TEXT("s")));
+}
+
+FReply SRHCommandDeck::HandleDistrictShape()
+{
+	if (PC.IsValid())
+	{
+		PC->SetDistrictShapeFloors((PC->GetDistrictShapeFloors() + 1) % (RH::CavernMaxFloors + 1)); // whole floor, 1, 2, 3, whole floor ...
 	}
 	return FReply::Handled();
 }

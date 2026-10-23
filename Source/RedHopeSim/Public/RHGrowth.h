@@ -17,6 +17,8 @@ enum class ERHGrowthKind : uint8
 	SurfaceModule = 0, // Homes, surface: the next HabModule of at most 2 x 2 bays beside a rated network
 	FloorCells = 1,    // Homes, underground: GrowthCellsPerProject new carved cells on a rated floor
 	CivicRoom = 2,     // Civic: one free cell or bay zoned as the worst-covered CivicService room
+	DeepCells = 3,     // D6b, Homes inside a floor SHAPE: up to GrowthCellsPerProject points of ONE floor of the shape, free carved cells zoned and
+	                   // eligible rock carved first (Points names them, as lattice points in the underground frame)
 };
 
 struct REDHOPESIM_API FRHGrowthProject
@@ -40,6 +42,10 @@ struct REDHOPESIM_API FRHGrowthProject
 	int32 Index = INDEX_NONE;
 	bool bCarve = false;
 	FName Room;
+	// D6b: lattice points (region 0's underground frame, never ordinals) on Level, for a project inside a floor shape. DeepCells: the
+	// points to turn into Living cells, the free carved cells (to zone) first, then the uncarved ones (to carve) from FirstCell on;
+	// a Civic project inside a shape holds its one cell (carved already, or to be carved when bCarve). Empty for every other project.
+	TArray<FIntPoint> Points;
 
 	// --- Money and time ---
 	TMap<FName, double> Bill;             // resource -> kg, taken whole at the start: Struct, Shielding, furniture, the O2 fill of new bays or cells
@@ -51,6 +57,6 @@ struct REDHOPESIM_API FRHGrowthProject
 	// The Living sites (cells or bays) a Homes project adds; 0 for a Civic one.
 	int32 HomeSites() const
 	{
-		return Kind == ERHGrowthKind::SurfaceModule ? FMath::Max(1, Size.X) * FMath::Max(1, Size.Y) : (Kind == ERHGrowthKind::FloorCells ? Cells : 0);
+		return Kind == ERHGrowthKind::SurfaceModule ? FMath::Max(1, Size.X) * FMath::Max(1, Size.Y) : ((Kind == ERHGrowthKind::FloorCells || Kind == ERHGrowthKind::DeepCells) ? Cells : 0);
 	}
 };

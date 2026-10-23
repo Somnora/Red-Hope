@@ -58,6 +58,12 @@ buttons with real Slate pointer events, one boot, no hands (about 70 seconds):
 bash scripts/unreal/rh_clicktest.sh          # exit 0 and "CLICKTEST VERDICT: PASS" or it is broken
 ```
 
+The window is 1600x900 by default. On this machine's display (1470x956 points)
+that size is clamped and the early deck steps fail on reach (11 of 36 at
+`REACH 29/66`, none of them a real bug), so **the official size here, for now,
+is 1440x860**: `RH_CLICKTEST_RES=1440x860 bash scripts/unreal/rh_clicktest.sh`
+(36 of 36, `REACH 65/65`). Captures keep their own 1600x900 default.
+
 It boots with the title up and presses: title NEW COLONY and CONTINUE, pause
 RESUME, a BUILD tab and a card (it arms the tool), a click on the ground that
 queues the build, the five speed buttons, a manifest ADD, Traffic, the Tunnel

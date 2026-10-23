@@ -39,10 +39,13 @@ namespace RHDistricts
 	REDHOPESIM_API bool NormalizeName(const FString& Typed, FString& OutName);
 }
 
-// A district. Surface districts are sets of 10 m LATTICE cells (the world 10 m
-// grid the habitat bays ride: a cell spans [10k - 5, 10k + 5) m a side, centred on
-// multiples of 10 m); an underground district is a WHOLE FLOOR (a floor is a
-// carved-cell count, not a shape; finer shapes come with going deep).
+// A district is exactly one of three things. SURFACE: a set of 10 m LATTICE cells (the world
+// 10 m grid the habitat bays ride: a cell spans [10k - 5, 10k + 5) m a side, centred on
+// multiples of 10 m), in Lattice. WHOLE FLOOR: Level < 0 with both Lattice and Deep empty - all
+// of that floor (a floor is a carved-cell count, not a shape). DEEP (D6b, floor shapes): points
+// on one or more floors, in Deep, which is region 0's UNDERGROUND frame (the lattice anchored on
+// shaft 0's off-grid head, URHSimWorldSubsystem::CmToLattice) - never the surface grid LatticeOf.
+// Lattice stays surface-only, so no reader of Lattice can ever see an underground point.
 struct REDHOPESIM_API FRHDistrict
 {
 	int32 Id = 0;               // never reused
@@ -51,19 +54,34 @@ struct REDHOPESIM_API FRHDistrict
 	int32 RegionId = 0;         // several regions are step 4; the field rides along from the start
 	int32 Level = 0;            // 0 = surface; < 0 = the whole of that underground floor
 	TArray<FIntPoint> Lattice;  // surface only, sorted by (X, Y), no duplicates
+	// D6b: a deep district's points (X, Y, Level), region 0's underground frame, sorted by Level descending (the shallowest floor
+	// first), then X, then Y, no duplicates. Level (above) is its shallowest floor. Empty for a surface or a whole-floor district.
+	TArray<FIntVector> Deep;
 	// C5b: the player's growth switch. On (the default), a Homes or Civic district is built up
 	// by the colony itself when it has demand and material; off, the colony leaves it alone (a
 	// project already open still finishes). Saved with the district (v38).
 	bool bGrowth = true;
 
-	bool IsFloor() const { return Level < 0; }
+	// A WHOLE floor: every existing caller of this keeps its meaning (a deep shape is not one).
+	bool IsFloor() const { return Level < 0 && Deep.IsEmpty(); }
+	// D6b: a shape on one or more floors.
+	bool IsDeep() const { return !Deep.IsEmpty(); }
 };
+
+namespace RHDistricts
+{
+	// The order of a deep district's points: Level descending, then X, then Y.
+	inline bool DeepLess(const FIntVector& A, const FIntVector& B)
+	{
+		return A.Z != B.Z ? A.Z > B.Z : (A.X != B.X ? A.X < B.X : A.Y < B.Y);
+	}
+}
 
 // One district's counts (GetDistrictCounts), in the order of GetDistricts().
 struct FRHDistrictCounts
 {
 	int32 DistrictId = 0;
-	int32 Cells = 0;       // surface: lattice cells painted; floor: carved cells
+	int32 Cells = 0;       // surface: lattice cells painted; floor: carved cells; deep shape: its carved points
 	int32 Buildings = 0;   // buildings (sites included) that belong to it
 	int32 Bays = 0;        // bays of the built habitat shells that belong to it
 	int32 Residents = 0;   // colonists whose home belongs to it
@@ -81,6 +99,11 @@ struct FRHDistrictPaintPreview
 	int32 CellsOutside = 0;    // rect cells outside grid coverage
 	int32 JoinId = 0;          // the district it would join (keeps its Id); 0 = founds a new one
 	bool bFloor = false;       // a whole-floor order
+	// D6b: a shape on a floor (Value >= 1). Min and Max are in the underground frame, CellsInRect and CellsNew count points over
+	// every floor of the range (shaft columns left out), CellsCarved the ones already dug.
+	bool bDeep = false;
+	int32 Floors = 0;
+	int32 CellsCarved = 0;
 };
 
 // One service room function's coverage gap (the C2a coverage rule): a function's

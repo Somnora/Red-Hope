@@ -220,7 +220,7 @@ void URHDistrictVisualizerSubsystem::RebuildSurface(const URHSimWorldSubsystem& 
 	for (const FRHDistrict& D : Sim.GetDistricts())
 	{
 		const int32 K = KindIndex(D.Kind);
-		if (D.IsFloor() || K < 0 || D.Lattice.Num() == 0)
+		if (D.IsFloor() || D.IsDeep() || K < 0 || D.Lattice.Num() == 0) // D6b: a shape is a floor thing (RebuildFloor), never on the surface wash
 		{
 			continue;
 		}
@@ -292,25 +292,56 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 	TArray<FWashAcc> Sections;
 	Sections.SetNum(KindCount * 2);
 	ClearLabels(FloorLabels);
+	// The groups on the viewed floor: the whole-floor district's carved cells (as always), and - D6b - every floor SHAPE's points on it.
+	// A shape's points are drawn where they are: a carved one on its own floor like any room, a point still rock on the sand skirt the
+	// underground view lays over everything not yet dug (its top is the ground, z = 0), where the hole will open.
+	struct FGroup { const FRHDistrict* D = nullptr; TArray<FIntPoint> Points; bool bShape = false; };
+	TArray<FGroup> Groups;
 	const int32 DistrictId = Sim.GetDistrictOfFloor(Level);
-	const FRHDistrict* D = DistrictId != 0 ? Sim.FindDistrict(DistrictId) : nullptr;
-	const int32 K = D ? KindIndex(D->Kind) : INDEX_NONE;
-	const int32 Carved = Sim.GetFloorCarvedCells(Level);
-	if (D && K >= 0 && Carved > 0)
+	if (const FRHDistrict* Whole = DistrictId != 0 ? Sim.FindDistrict(DistrictId) : nullptr)
 	{
-		const FVector Head = Sim.GetShaftHeadCm();
-		const double Z = Level * Sim.GetFloorHeightCm();
-		const auto Flat = [&Z](float Lift) { return [&Z, Lift](double X, double Y) { return FVector(X, Y, Z + Lift); }; };
-		const auto Fill = Flat(FloorFillLiftCm);
-		const auto Edge = Flat(FloorBorderLiftCm);
-		TSet<FIntPoint> Cells; // lookups only
-		for (int32 i = 0; i < Carved; ++i) { Cells.Add(Sim.GetFloorCell(Level, i)); }
-		FIntPoint Lo(MAX_int32, MAX_int32), Hi(MIN_int32, MIN_int32);
-		for (int32 i = 0; i < Carved; ++i)
+		FGroup G;
+		G.D = Whole;
+		const int32 Carved = Sim.GetFloorCarvedCells(Level);
+		for (int32 i = 0; i < Carved; ++i) { G.Points.Add(Sim.GetFloorCell(Level, i)); }
+		if (G.Points.Num() > 0) { Groups.Add(MoveTemp(G)); }
+	}
+	for (const FRHDistrict& Shape : Sim.GetDistricts())
+	{
+		if (!Shape.IsDeep())
 		{
-			const FIntPoint C = Sim.GetFloorCell(Level, i);
+			continue;
+		}
+		FGroup G;
+		G.D = &Shape;
+		G.bShape = true;
+		for (const FIntVector& P : Shape.Deep)
+		{
+			if (P.Z == Level) { G.Points.Add(FIntPoint(P.X, P.Y)); }
+		}
+		if (G.Points.Num() > 0) { Groups.Add(MoveTemp(G)); }
+	}
+	const FVector Head = Sim.GetShaftHeadCm();
+	const double Z = Level * Sim.GetFloorHeightCm();
+	for (const FGroup& G : Groups)
+	{
+		const FRHDistrict* D = G.D;
+		const int32 K = KindIndex(D->Kind);
+		if (K < 0)
+		{
+			continue;
+		}
+		const auto Flat = [](double ZBase, float Lift) { return [ZBase, Lift](double X, double Y) { return FVector(X, Y, ZBase + Lift); }; };
+		TSet<FIntPoint> Cells; // lookups only
+		for (const FIntPoint& C : G.Points) { Cells.Add(C); }
+		FIntPoint Lo(MAX_int32, MAX_int32), Hi(MIN_int32, MIN_int32);
+		for (const FIntPoint& C : G.Points)
+		{
 			Lo = FIntPoint(FMath::Min(Lo.X, C.X), FMath::Min(Lo.Y, C.Y));
 			Hi = FIntPoint(FMath::Max(Hi.X, C.X), FMath::Max(Hi.Y, C.Y));
+			const bool bRock = G.bShape && Sim.FindFloorCell(Level, C) == INDEX_NONE;
+			const auto Fill = bRock ? Flat(0.0, 4.f) : Flat(Z, FloorFillLiftCm);
+			const auto Edge = bRock ? Flat(0.0, 6.f) : Flat(Z, FloorBorderLiftCm);
 			const double X0 = Head.X + (C.X - 0.5) * 1000.0, X1 = Head.X + (C.X + 0.5) * 1000.0;
 			const double Y0 = Head.Y + (C.Y - 0.5) * 1000.0, Y1 = Head.Y + (C.Y + 0.5) * 1000.0;
 			Sections[K].Quad(Fill(X0, Y0), Fill(X1, Y0), Fill(X1, Y1), Fill(X0, Y1));
@@ -320,13 +351,12 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 			if (!Cells.Contains(FIntPoint(C.X, C.Y - 1))) { EdgeStrip(B, X0, Y0, X1, Y0, 0, 1, Edge); }
 			if (!Cells.Contains(FIntPoint(C.X, C.Y + 1))) { EdgeStrip(B, X0, Y1, X1, Y1, 0, -1, Edge); }
 		}
-		// The name on the carved cell nearest the middle of the floor's shape, above the room labels.
+		// The name on the point nearest the middle of the group's shape, above the room labels.
 		const double MidX = 0.5 * (Lo.X + Hi.X), MidY = 0.5 * (Lo.Y + Hi.Y);
-		FIntPoint Best = FIntPoint::ZeroValue;
+		FIntPoint Best = G.Points[0];
 		double BestD = TNumericLimits<double>::Max();
-		for (int32 i = 0; i < Carved; ++i)
+		for (const FIntPoint& C : G.Points)
 		{
-			const FIntPoint C = Sim.GetFloorCell(Level, i);
 			const double Dist = FMath::Square(C.X - MidX) + FMath::Square(C.Y - MidY);
 			if (Dist < BestD) { BestD = Dist; Best = C; }
 		}
@@ -335,8 +365,10 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 		FLabel Label;
 		Label.DistrictId = D->Id;
 		const double LabelX = Head.X + Best.X * 1000.0, LabelY = Head.Y + Best.Y * 1000.0;
-		Label.Text = MakeLabel(D->Name, KindColor(D->Kind), FVector(LabelX, LabelY, Z + FloorBorderLiftCm + 12.f), Size);
-		Label.Sub = MakeLabel(KindWord(D->Kind).ToUpper(), KindColor(D->Kind), FVector(LabelX - Size * 0.95, LabelY, Z + FloorBorderLiftCm + 12.f), Size * 0.5f);
+		const bool bBestRock = G.bShape && Sim.FindFloorCell(Level, Best) == INDEX_NONE;
+		const double LabelZ = (bBestRock ? 0.0 : Z) + FloorBorderLiftCm + 12.f;
+		Label.Text = MakeLabel(D->Name, KindColor(D->Kind), FVector(LabelX, LabelY, LabelZ), Size);
+		Label.Sub = MakeLabel(KindWord(D->Kind).ToUpper(), KindColor(D->Kind), FVector(LabelX - Size * 0.95, LabelY, LabelZ), Size * 0.5f);
 		FloorLabels.Add(Label);
 	}
 	Flush(FloorMesh, Sections);

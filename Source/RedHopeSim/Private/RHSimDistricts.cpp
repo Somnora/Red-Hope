@@ -66,6 +66,19 @@ void URHSimWorldSubsystem::DeriveDistrictGeo(FRHDistrictGeo& Out) const
 			Out.FloorOwner.Add(D.Level, D.Id);
 			continue;
 		}
+		if (D.IsDeep())
+		{
+			// D6b: a shape's points are region 0's underground frame and never enter CellOwner or FloorOwner.
+			for (const FIntVector& P : D.Deep)
+			{
+				Out.DeepOwner.Add(P, D.Id);
+				if (!Out.DeepFloor.Contains(P.Z))
+				{
+					Out.DeepFloor.Add(P.Z, D.Id); // the lowest Id of the shapes on the floor (Districts is Id-ascending)
+				}
+			}
+			continue;
+		}
 		for (const FIntPoint& Cell : D.Lattice)
 		{
 			Out.CellOwner.Add(Cell, D.Id);
@@ -84,7 +97,8 @@ const URHSimWorldSubsystem::FRHDistrictGeo& URHSimWorldSubsystem::EnsureDistrict
 		// The cache is about to be reused: derive it again and compare.
 		FRHDistrictGeo Fresh;
 		DeriveDistrictGeo(Fresh);
-		if (!SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) || !SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) || !SameMap(Fresh.IndexById, DistrictGeo.IndexById))
+		if (!SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) || !SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) || !SameMap(Fresh.IndexById, DistrictGeo.IndexById)
+			|| !SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) || !SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor))
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the district ground cache is stale (%d cells reused, %d re-derived; districts v%u)"),
 				DistrictGeo.CellOwner.Num(), Fresh.CellOwner.Num(), DistrictsVersion);
@@ -119,7 +133,182 @@ URHSimWorldSubsystem::FRHDistrictMembershipKey URHSimWorldSubsystem::MakeDistric
 	Key.Furniture = FurnitureVersion;
 	Key.BuildingCount = Buildings.Num();
 	Key.NextBuilding = NextBuildingId;
+	if (EnsureDistrictGeo().DeepFloor.Num() > 0)
+	{
+		// D6b (RC 6): moved only while a floor shape exists; 0 for ever otherwise.
+		Key.DeepCells = FloorCellsVersion;
+		Key.DeepBeds = BedAssignVersion;
+	}
 	return Key;
+}
+
+// --- Floor shapes: the home cell, the district of a point ------------------------------
+
+bool URHSimWorldSubsystem::IsFloorMapped(int32 Level) const
+{
+	return Level < 0 && EnsureDistrictGeo().DeepFloor.Contains(Level);
+}
+
+int32 URHSimWorldSubsystem::GetDistrictOfFloorPoint(int32 Level, const FIntPoint& P) const
+{
+	if (Level >= 0)
+	{
+		return 0;
+	}
+	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
+	if (const int32* Whole = Geo.FloorOwner.Find(Level))
+	{
+		return *Whole;
+	}
+	return Geo.DeepOwner.FindRef(FIntVector(P.X, P.Y, Level));
+}
+
+int32 URHSimWorldSubsystem::GetDistrictOfCell(int32 Level, int32 CellIndex) const
+{
+	if (CellIndex < 0)
+	{
+		return 0;
+	}
+	if (!IsFloorMapped(Level))
+	{
+		return GetDistrictOfFloor(Level); // a whole floor's, as before D6b
+	}
+	return GetDistrictOfFloorPoint(Level, GetFloorCell(Level, CellIndex));
+}
+
+void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
+{
+	Out = FRHDeepHomes();
+	Out.bValid = true;
+	Out.Colonists = ColonistSetVersion;
+	Out.Furniture = FurnitureVersion;
+	Out.Zoning = ZoningVersion;
+	Out.FloorCells = FloorCellsVersion;
+	Out.Districts = DistrictsVersion;
+	Out.BedAssign = BedAssignVersion;
+	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
+	if (Geo.DeepFloor.Num() == 0)
+	{
+		return; // no shape, no mapped floor: home cells are never built
+	}
+	TArray<int32> Levels;
+	Geo.DeepFloor.GetKeys(Levels);
+	Levels.Sort(); // an explicit order: the map's own decides nothing
+	TMap<int32, TArray<int32>> LevelResidents; // mapped Level -> colonist Ids
+	for (const FRHColonist& C : Colonists)
+	{
+		if (C.HomeHab == 0 && C.HomeLevel < 0 && Geo.DeepFloor.Contains(C.HomeLevel))
+		{
+			LevelResidents.FindOrAdd(C.HomeLevel).Add(C.Id);
+		}
+	}
+	for (const int32 Level : Levels)
+	{
+		// The beds of every carved cell, by the CountFloorBeds rule: a Living cell with bed pieces holds exactly its beds; every other
+		// cell holds legacy beds. The k-th such cell (ordinal order) offers floor((k+1) x CPC) - floor(k x CPC) of them, so the floor's
+		// total is (int32)(m x CPC) at any ColonistsPerCell, the figure CountFloorBeds gives.
+		const int32 Carved = GetFloorCarvedCells(Level);
+		TArray<int32>& Beds = Out.CellBeds.Add(Level);
+		Beds.Init(0, Carved);
+		TArray<int32> Slots; // one entry per legacy bed: the ordinal of its cell, ascending
+		int32 K = 0;
+		for (int32 i = 0; i < Carved; ++i)
+		{
+			const FIntVector Key(Level, i, 0);
+			const FRHCellFurnish* CF = FurnishedCells.Find(Key);
+			if (CF && CF->BedPieces > 0 && IsLivingKey(Key))
+			{
+				Beds[i] = CF->Beds;
+				continue;
+			}
+			const int32 N = (int32)((double)(K + 1) * ColonistsPerCell) - (int32)((double)K * ColonistsPerCell);
+			++K;
+			Beds[i] = N;
+			for (int32 j = 0; j < N; ++j)
+			{
+				Slots.Add(i);
+			}
+		}
+		TArray<int32>* Ids = LevelResidents.Find(Level);
+		if (!Ids)
+		{
+			continue;
+		}
+		Ids->Sort();
+		int32 NextSlot = 0;
+		for (const int32 Id : *Ids)
+		{
+			// A resident with a bed piece lives in that piece's cell (BuildBedAssignments gave pieces to the lowest Ids first;
+			// this reads its result and never re-derives it); the others, in Id order, take the legacy slots.
+			const FRHFurnitureInstance* Piece = nullptr;
+			if (const int32* PieceId = ColonistBedPiece.Find(Id))
+			{
+				Piece = FindFurniture(*PieceId);
+			}
+			if (Piece && Piece->Key.Z == 0 && Piece->Key.X == Level)
+			{
+				Out.HomeCell.Add(Id, Piece->Key.Y);
+			}
+			else if (Slots.IsValidIndex(NextSlot))
+			{
+				Out.HomeCell.Add(Id, Slots[NextSlot++]);
+			}
+		}
+	}
+}
+
+const URHSimWorldSubsystem::FRHDeepHomes& URHSimWorldSubsystem::EnsureDeepHomes() const
+{
+	const FRHDeepHomes& H = DeepHomes;
+	const bool bFresh = H.bValid && H.Colonists == ColonistSetVersion && H.Furniture == FurnitureVersion && H.Zoning == ZoningVersion
+		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion;
+	if (!bFresh)
+	{
+		DeriveDeepHomes(DeepHomes);
+	}
+	else if (bVerifyCaches && !IsDeepHomesFresh())
+	{
+		UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the floor-shape home cells are stale (%d reused; colonists v%u, furniture v%u, zoning v%u, cells v%u, districts v%u)"),
+			DeepHomes.HomeCell.Num(), ColonistSetVersion, FurnitureVersion, ZoningVersion, FloorCellsVersion, DistrictsVersion);
+	}
+	return DeepHomes;
+}
+
+bool URHSimWorldSubsystem::IsDeepHomesFresh() const
+{
+	// True unless the cache is being REUSED (its key still matches) while a fresh derivation differs.
+	const FRHDeepHomes& H = DeepHomes;
+	if (!(H.bValid && H.Colonists == ColonistSetVersion && H.Furniture == FurnitureVersion && H.Zoning == ZoningVersion
+		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion))
+	{
+		return true; // a cache whose key has moved reads as fresh: it rebuilds on its next read
+	}
+	FRHDeepHomes Fresh;
+	DeriveDeepHomes(Fresh);
+	if (!SameMap(Fresh.HomeCell, H.HomeCell) || Fresh.CellBeds.Num() != H.CellBeds.Num())
+	{
+		return false;
+	}
+	for (const TPair<int32, TArray<int32>>& P : Fresh.CellBeds) // a boolean AND over every entry
+	{
+		const TArray<int32>* Other = H.CellBeds.Find(P.Key);
+		if (!Other || !(*Other == P.Value))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+int32 URHSimWorldSubsystem::GetColonistHomeCell(int32 ColonistId) const
+{
+	const FRHColonist* C = FindColonist(ColonistId);
+	if (!C || C->HomeHab != 0 || C->HomeLevel >= 0 || !IsFloorMapped(C->HomeLevel))
+	{
+		return INDEX_NONE;
+	}
+	const int32* Cell = EnsureDeepHomes().HomeCell.Find(ColonistId);
+	return Cell ? *Cell : INDEX_NONE;
 }
 
 void URHSimWorldSubsystem::DeriveDistrictMembership(FRHDistrictMembership& Out) const
@@ -142,6 +331,12 @@ void URHSimWorldSubsystem::DeriveDistrictMembership(FRHDistrictMembership& Out) 
 		if (B.Level < 0)
 		{
 			DistrictId = Geo.FloorOwner.FindRef(B.Level);
+			if (DistrictId == 0 && Geo.DeepFloor.Contains(B.Level) && Shafts.Num() > 0)
+			{
+				// D6b: on a shaped floor a building belongs to the shape holding its lattice point.
+				const FIntPoint P = CmToLattice(Shafts[0].HeadCm, B.LocationCm);
+				DistrictId = Geo.DeepOwner.FindRef(FIntVector(P.X, P.Y, B.Level));
+			}
 		}
 		else if (B.Level == 0)
 		{
@@ -162,6 +357,7 @@ void URHSimWorldSubsystem::DeriveDistrictMembership(FRHDistrictMembership& Out) 
 			}
 		}
 	}
+	const FRHDeepHomes* Homes = Geo.DeepFloor.Num() > 0 ? &EnsureDeepHomes() : nullptr; // D6b: only while a shape exists
 	for (const FRHColonist& C : Colonists)
 	{
 		int32 DistrictId = 0;
@@ -172,6 +368,15 @@ void URHSimWorldSubsystem::DeriveDistrictMembership(FRHDistrictMembership& Out) 
 		else if (C.HomeLevel < 0)
 		{
 			DistrictId = Geo.FloorOwner.FindRef(C.HomeLevel);
+			if (DistrictId == 0 && Homes && Geo.DeepFloor.Contains(C.HomeLevel))
+			{
+				// D6b: a resident of a shaped floor belongs to the shape holding their home cell (none: unzoned).
+				const int32* Cell = Homes->HomeCell.Find(C.Id);
+				if (Cell)
+				{
+					DistrictId = GetDistrictOfFloorPoint(C.HomeLevel, GetFloorCell(C.HomeLevel, *Cell));
+				}
+			}
 		}
 		if (DistrictId != 0)
 		{
@@ -207,7 +412,8 @@ bool URHSimWorldSubsystem::Debug_DistrictCachesFresh() const
 	{
 		FRHDistrictGeo Fresh;
 		DeriveDistrictGeo(Fresh);
-		bFresh &= SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) && SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) && SameMap(Fresh.IndexById, DistrictGeo.IndexById);
+		bFresh &= SameMap(Fresh.CellOwner, DistrictGeo.CellOwner) && SameMap(Fresh.FloorOwner, DistrictGeo.FloorOwner) && SameMap(Fresh.IndexById, DistrictGeo.IndexById)
+			&& SameMap(Fresh.DeepOwner, DistrictGeo.DeepOwner) && SameMap(Fresh.DeepFloor, DistrictGeo.DeepFloor);
 	}
 	if (DistrictMembers.bValid && DistrictMembers.Key == MakeDistrictMembershipKey())
 	{
@@ -216,7 +422,16 @@ bool URHSimWorldSubsystem::Debug_DistrictCachesFresh() const
 		bFresh &= SameMap(Fresh.OfBuilding, DistrictMembers.OfBuilding) && Fresh.Buildings == DistrictMembers.Buildings
 			&& Fresh.Bays == DistrictMembers.Bays && Fresh.Residents == DistrictMembers.Residents;
 	}
+	bFresh &= IsDeepHomesFresh();
 	return bFresh;
+}
+
+void URHSimWorldSubsystem::Debug_DeepKeys(uint32& OutMemberCells, uint32& OutMemberBeds, uint32& OutCommuteCells) const
+{
+	const FRHDistrictMembershipKey M = MakeDistrictMembershipKey();
+	OutMemberCells = M.DeepCells;
+	OutMemberBeds = M.DeepBeds;
+	OutCommuteCells = MakeCommuteKey().DeepCells;
 }
 
 int32 URHSimWorldSubsystem::GetDistrictAtCell(const FIntPoint& Cell) const
@@ -231,7 +446,16 @@ int32 URHSimWorldSubsystem::GetDistrictOfFloor(int32 Level) const
 
 int32 URHSimWorldSubsystem::GetDistrictAtPoint(int32 Level, const FVector& Cm) const
 {
-	return Level < 0 ? GetDistrictOfFloor(Level) : GetDistrictAtCell(LatticeOf(Cm));
+	if (Level < 0)
+	{
+		const int32 Whole = GetDistrictOfFloor(Level);
+		if (Whole == 0 && Shafts.Num() > 0 && IsFloorMapped(Level))
+		{
+			return GetDistrictOfFloorPoint(Level, CmToLattice(Shafts[0].HeadCm, Cm)); // D6b: a shaped floor, in the underground frame
+		}
+		return Whole;
+	}
+	return GetDistrictAtCell(LatticeOf(Cm));
 }
 
 int32 URHSimWorldSubsystem::GetDistrictOfBuilding(int32 BuildingId) const
@@ -250,7 +474,17 @@ int32 URHSimWorldSubsystem::GetDistrictOfColonist(int32 ColonistId) const
 	{
 		return GetDistrictOfBuilding(C->HomeHab);
 	}
-	return C->HomeLevel < 0 ? GetDistrictOfFloor(C->HomeLevel) : 0;
+	if (C->HomeLevel >= 0)
+	{
+		return 0;
+	}
+	const int32 Whole = GetDistrictOfFloor(C->HomeLevel);
+	if (Whole != 0 || !IsFloorMapped(C->HomeLevel))
+	{
+		return Whole;
+	}
+	const int32 Cell = GetColonistHomeCell(ColonistId); // D6b: the shape holding their home cell
+	return Cell == INDEX_NONE ? 0 : GetDistrictOfFloorPoint(C->HomeLevel, GetFloorCell(C->HomeLevel, Cell));
 }
 
 void URHSimWorldSubsystem::GetDistrictCounts(TArray<FRHDistrictCounts>& Out) const
@@ -275,6 +509,26 @@ void URHSimWorldSubsystem::GetDistrictCounts(TArray<FRHDistrictCounts>& Out) con
 		if (D.IsFloor() && RatedFloors.Contains(D.Level))
 		{
 			C.Beds += CountFloorBeds(D.Level, nullptr); // the GetHousingCapacity rule: a rated floor's beds
+		}
+		if (D.IsDeep())
+		{
+			// D6b: a shape's Cells are its carved points; its Beds are the beds of those cells on a rated floor.
+			const FRHDeepHomes& Homes = EnsureDeepHomes();
+			C.Cells = 0;
+			for (const FIntVector& P : D.Deep)
+			{
+				const int32 Ordinal = FindFloorCell(P.Z, FIntPoint(P.X, P.Y));
+				if (Ordinal == INDEX_NONE)
+				{
+					continue;
+				}
+				++C.Cells;
+				const TArray<int32>* CellBeds = RatedFloors.Contains(P.Z) ? Homes.CellBeds.Find(P.Z) : nullptr;
+				if (CellBeds && CellBeds->IsValidIndex(Ordinal))
+				{
+					C.Beds += (*CellBeds)[Ordinal];
+				}
+			}
 		}
 	}
 	// Surface beds: a rated habitat's Living bays, once the vault is certified (the same gate
@@ -302,6 +556,10 @@ void URHSimWorldSubsystem::GetDistrictCounts(TArray<FRHDistrictCounts>& Out) con
 		else if (Station.Key.X < 0)
 		{
 			Owner = Geo.FloorOwner.FindRef(Station.Key.X);
+			if (Owner == 0 && Geo.DeepFloor.Contains(Station.Key.X))
+			{
+				Owner = GetDistrictOfFloorPoint(Station.Key.X, GetFloorCell(Station.Key.X, Station.Key.Y)); // D6b: the shape holding the cell
+			}
 		}
 		if (Owner != 0)
 		{
@@ -312,7 +570,148 @@ void URHSimWorldSubsystem::GetDistrictCounts(TArray<FRHDistrictCounts>& Out) con
 
 // --- The three verbs ---------------------------------------------------------------
 
-bool URHSimWorldSubsystem::CanPaintDistrict(FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview) const
+bool URHSimWorldSubsystem::CanPaintDeepDistrict(FName Kind, int32 Level, int32 Floors, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview, TArray<FIntVector>* OutAdded) const
+{
+	// D6b: a rectangle on the floors Level .. Level - Floors + 1, in region 0's underground frame. In place of grid coverage every
+	// floor must be reached; rock may be painted (that is how a player zones a cavern before it is dug); shaft columns are left out.
+	const FName K = RHDistricts::ResolveKind(Kind);
+	if (OutPreview)
+	{
+		OutPreview->bDeep = true;
+		OutPreview->Floors = Floors;
+	}
+	if (Floors > RH::CavernMaxFloorsCap)
+	{
+		OutReason = FString::Printf(TEXT("A shape spans 1 to %d floors (this one would span %d)"), RH::CavernMaxFloorsCap, Floors);
+		return false;
+	}
+	const int64 Bottom64 = (int64)Level - (int64)Floors + 1;
+	if (Bottom64 < -(int64)MaxDepth)
+	{
+		OutReason = FString::Printf(TEXT("No such floor (%lld)"), Bottom64);
+		return false;
+	}
+	const int32 Bottom = (int32)Bottom64;
+	if (!IsLevelConnected(Bottom) || Shafts.Num() == 0)
+	{
+		OutReason = FString::Printf(TEXT("Floor %d not reached - bore the shaft deeper"), Bottom);
+		return false;
+	}
+	const FVector Origin = Shafts[0].HeadCm;
+	const FIntPoint A = CmToLattice(Origin, FromCm), B = CmToLattice(Origin, ToCm);
+	const FIntPoint Lo(FMath::Min(A.X, B.X), FMath::Min(A.Y, B.Y)), Hi(FMath::Max(A.X, B.X), FMath::Max(A.Y, B.Y));
+	const int64 W = (int64)Hi.X - Lo.X + 1, H = (int64)Hi.Y - Lo.Y + 1;
+	if (OutPreview)
+	{
+		OutPreview->Min = Lo;
+		OutPreview->Max = Hi;
+	}
+	if (W > RHDistricts::MaxPaintSide || H > RHDistricts::MaxPaintSide)
+	{
+		OutReason = FString::Printf(TEXT("A shape is painted %d x %d cells (10 m each) at a time at most - this is %lld x %lld"),
+			RHDistricts::MaxPaintSide, RHDistricts::MaxPaintSide, W, H);
+		return false;
+	}
+	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
+	// A floor is either whole or shaped: a shape on a floor held whole is refused, naming the district to erase.
+	for (int32 L = Level; L >= Bottom; --L)
+	{
+		if (const int32* Whole = Geo.FloorOwner.Find(L))
+		{
+			const FRHDistrict& Held = Districts[Geo.IndexById.FindRef(*Whole)];
+			if (OutPreview)
+			{
+				OutPreview->JoinId = Held.Id;
+			}
+			OutReason = FString::Printf(TEXT("Floor %d is already a whole %s district (%s) - erase it first, or paint the shape on another floor"), L, *Held.Kind.ToString(), *Held.Name);
+			return false;
+		}
+	}
+	// Who holds this ground. One district at most: a rectangle over two is refused, and so is one over a district of another Kind;
+	// the same Kind joins the one it overlaps.
+	int32 First = 0, Second = 0, InRect = 0, NewPoints = 0, Carved = 0;
+	TArray<FIntVector> Added;
+	for (int32 L = Level; L >= Bottom && Second == 0; --L)
+	{
+		for (int32 X = Lo.X; X <= Hi.X && Second == 0; ++X)
+		{
+			for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+			{
+				const FIntPoint P(X, Y);
+				if (ShaftColumns.Contains(P))
+				{
+					continue; // a column runs through every floor: never a district's point
+				}
+				++InRect;
+				Carved += FindFloorCell(L, P) != INDEX_NONE ? 1 : 0;
+				const int32 Owner = Geo.DeepOwner.FindRef(FIntVector(X, Y, L));
+				if (Owner == 0)
+				{
+					++NewPoints;
+					Added.Add(FIntVector(X, Y, L));
+				}
+				else if (First == 0)
+				{
+					First = Owner;
+				}
+				else if (Owner != First)
+				{
+					Second = Owner;
+					break;
+				}
+			}
+		}
+	}
+	if (OutPreview)
+	{
+		OutPreview->CellsInRect = InRect;
+		OutPreview->CellsNew = NewPoints;
+		OutPreview->CellsCarved = Carved;
+	}
+	if (Second != 0)
+	{
+		const FRHDistrict& D1 = Districts[Geo.IndexById.FindRef(First)];
+		const FRHDistrict& D2 = Districts[Geo.IndexById.FindRef(Second)];
+		OutReason = FString::Printf(TEXT("That rectangle crosses two districts (%s and %s) - paint inside one, or on open ground"), *D1.Name, *D2.Name);
+		return false;
+	}
+	if (InRect == 0)
+	{
+		OutReason = TEXT("That rectangle is nothing but shaft columns - nothing to paint");
+		return false;
+	}
+	const FRHDistrict* Joined = First != 0 ? &Districts[Geo.IndexById.FindRef(First)] : nullptr;
+	if (Joined)
+	{
+		if (OutPreview)
+		{
+			OutPreview->JoinId = Joined->Id;
+		}
+		if (Joined->Kind != K)
+		{
+			OutReason = FString::Printf(TEXT("That ground overlaps %s, a %s district - erase it first, or paint %s elsewhere"),
+				*Joined->Name, *Joined->Kind.ToString(), *K.ToString());
+			return false;
+		}
+	}
+	if (NewPoints == 0)
+	{
+		OutReason = FString::Printf(TEXT("That ground is already part of %s"), Joined ? *Joined->Name : TEXT("a district"));
+		return false;
+	}
+	if (Geo.DeepOwner.Num() + NewPoints > RH::MaxDeepPoints)
+	{
+		OutReason = FString::Printf(TEXT("The city's shapes already hold %d points, the most the sim keeps (%d)"), Geo.DeepOwner.Num(), RH::MaxDeepPoints);
+		return false;
+	}
+	if (OutAdded)
+	{
+		*OutAdded = MoveTemp(Added);
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanPaintDistrict(FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview, int32 Floors) const
 {
 	if (OutPreview)
 	{
@@ -328,6 +727,11 @@ bool URHSimWorldSubsystem::CanPaintDistrict(FName Kind, int32 Level, const FVect
 	{
 		OutReason = FString::Printf(TEXT("No such floor (%d)"), Level);
 		return false;
+	}
+	// D6b: a shape on a floor (Value >= 1 on an underground order); Floors 0 is today's whole-floor order below, line for line.
+	if (Level < 0 && Floors >= 1)
+	{
+		return CanPaintDeepDistrict(Kind, Level, Floors, FromCm, ToCm, OutReason, OutPreview, nullptr);
 	}
 	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
 
@@ -353,6 +757,17 @@ bool URHSimWorldSubsystem::CanPaintDistrict(FName Kind, int32 Level, const FVect
 			OutReason = Held.Kind == K
 				? FString::Printf(TEXT("Floor %d is already %s (%s)"), Level, *Held.Name, *Held.Kind.ToString())
 				: FString::Printf(TEXT("Floor %d is already a %s district (%s) - erase it first"), Level, *Held.Kind.ToString(), *Held.Name);
+			return false;
+		}
+		// D6b: a floor is either whole or shaped - a whole-floor paint on a floor that holds a shape is refused, naming it.
+		if (const int32* Shaped = Geo.DeepFloor.Find(Level))
+		{
+			const FRHDistrict& Held = Districts[Geo.IndexById.FindRef(*Shaped)];
+			if (OutPreview)
+			{
+				OutPreview->JoinId = Held.Id;
+			}
+			OutReason = FString::Printf(TEXT("Floor %d already holds a shape (%s, a %s district) - erase it first"), Level, *Held.Name, *Held.Kind.ToString());
 			return false;
 		}
 		return true;
@@ -511,6 +926,13 @@ bool URHSimWorldSubsystem::CanRenameDistrict(int32 Id, const FString& Typed, FSt
 bool URHSimWorldSubsystem::ExecutePaintDistrict(const FRHCommand& Cmd, FString& OutReason)
 {
 	FRHDistrictPaintPreview Pre;
+	// D6b: Value >= 1 on an underground order is a shape that many floors tall; Value 0 (every existing order) is the whole floor.
+	const double V = Cmd.Value;
+	const int32 Floors = (Cmd.Level < 0 && !FMath::IsNaN(V) && V >= 1.0) ? (V > 1000.0 ? 1000 : FMath::RoundToInt(V)) : 0;
+	if (Floors >= 1)
+	{
+		return ExecutePaintDeepDistrict(Cmd, Floors, OutReason);
+	}
 	if (!CanPaintDistrict(Cmd.Target, Cmd.Level, Cmd.Location, Cmd.LocationB, OutReason, &Pre))
 	{
 		return false;
@@ -558,6 +980,42 @@ bool URHSimWorldSubsystem::ExecutePaintDistrict(const FRHCommand& Cmd, FString& 
 		{
 			UE_LOG(LogRedHopeSim, Display, TEXT("District #%d '%s' founded: %s, %d cell(s) on the surface"), D.Id, *D.Name, *D.Kind.ToString(), D.Lattice.Num());
 		}
+		Districts.Add(MoveTemp(D));
+	}
+	++DistrictsVersion;
+	return true;
+}
+
+bool URHSimWorldSubsystem::ExecutePaintDeepDistrict(const FRHCommand& Cmd, int32 Floors, FString& OutReason)
+{
+	FRHDistrictPaintPreview Pre;
+	TArray<FIntVector> Added;
+	if (!CanPaintDistrict(Cmd.Target, Cmd.Level, Cmd.Location, Cmd.LocationB, OutReason, &Pre, Floors) || !CanPaintDeepDistrict(Cmd.Target, Cmd.Level, Floors, Cmd.Location, Cmd.LocationB, OutReason, nullptr, &Added))
+	{
+		return false;
+	}
+	const FName Kind = RHDistricts::ResolveKind(Cmd.Target);
+	if (Pre.JoinId != 0)
+	{
+		const int32 Index = EnsureDistrictGeo().IndexById.FindRef(Pre.JoinId);
+		FRHDistrict& D = Districts[Index];
+		D.Deep.Append(Added);
+		D.Deep.Sort(RHDistricts::DeepLess);
+		D.Level = D.Deep[0].Z; // its shallowest floor
+		UE_LOG(LogRedHopeSim, Display, TEXT("District #%d '%s' (%s) grows: +%d point(s) of a shape, %d in all"), D.Id, *D.Name, *D.Kind.ToString(), Added.Num(), D.Deep.Num());
+	}
+	else
+	{
+		FRHDistrict D;
+		D.Id = NextDistrictId++;
+		D.Kind = Kind;
+		D.Name = RHDistricts::NameForId(D.Id);
+		D.RegionId = 0;
+		D.Deep = MoveTemp(Added);
+		D.Deep.Sort(RHDistricts::DeepLess);
+		D.Level = D.Deep[0].Z;
+		UE_LOG(LogRedHopeSim, Display, TEXT("District #%d '%s' founded: %s, a shape of %d point(s) on floor %d%s"), D.Id, *D.Name, *D.Kind.ToString(), D.Deep.Num(), D.Level,
+			Floors > 1 ? *FString::Printf(TEXT(" and %d below"), Floors - 1) : TEXT(""));
 		Districts.Add(MoveTemp(D));
 	}
 	++DistrictsVersion;
@@ -863,4 +1321,197 @@ FRHCityDemand URHSimWorldSubsystem::GetCityDemand() const
 		}
 	}
 	return Out;
+}
+
+// --- Save v49: the floor-shape block, straight after the cavern block ---------------------
+
+void URHSimWorldSubsystem::WriteDeepBlock(FArchive& Ar) const
+{
+	// The district skeleton (Id, Level, class: 0 surface, 1 whole floor, 2 deep - so a load can cross-check the shapes against the
+	// district list on locals, before it tears anything down), then every deep district in Id order with its sorted points (X, Y,
+	// Level), then every growth project that holds points (DistrictId, Level, its points). An empty colony is 12 bytes.
+	int32 SkeletonCount = Districts.Num();
+	Ar << SkeletonCount;
+	int32 DeepCount = 0;
+	for (const FRHDistrict& D : Districts)
+	{
+		int32 Id = D.Id, Level = D.Level, Class = D.IsDeep() ? 2 : (D.IsFloor() ? 1 : 0);
+		DeepCount += D.IsDeep() ? 1 : 0;
+		Ar << Id << Level << Class;
+	}
+	Ar << DeepCount;
+	for (const FRHDistrict& D : Districts)
+	{
+		if (!D.IsDeep())
+		{
+			continue;
+		}
+		int32 Id = D.Id, Count = D.Deep.Num();
+		Ar << Id << Count;
+		for (const FIntVector& P : D.Deep)
+		{
+			int32 X = P.X, Y = P.Y, Z = P.Z;
+			Ar << X << Y << Z;
+		}
+	}
+	int32 ProjectCount = 0;
+	for (const FRHGrowthProject& P : GrowthProjects)
+	{
+		ProjectCount += P.Points.Num() > 0 ? 1 : 0;
+	}
+	Ar << ProjectCount;
+	for (const FRHGrowthProject& P : GrowthProjects)
+	{
+		if (P.Points.Num() == 0)
+		{
+			continue;
+		}
+		int32 Id = P.DistrictId, Level = P.Level, Count = P.Points.Num();
+		Ar << Id << Level << Count;
+		for (const FIntPoint& Pt : P.Points)
+		{
+			int32 X = Pt.X, Y = Pt.Y;
+			Ar << X << Y;
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::ReadDeepBlock(FArchive& Ar, const TArray<FRHShaft>& InShafts, FRHLoadedDeep& Out, FString& OutError) const
+{
+	// Structural refusals only, taken before the live colony is touched: they set OutError and log nothing at Error level.
+	const auto Refuse = [&OutError](const FString& Why) { OutError = FString::Printf(TEXT("Save floor-shape block invalid: %s"), *Why); return false; };
+	Out = FRHLoadedDeep();
+	int32 Deepest = 0;
+	for (const FRHShaft& Sh : InShafts)
+	{
+		Deepest = FMath::Max(Deepest, Sh.Depth);
+	}
+	const auto BytesLeft = [&Ar]() { return (int64)Ar.TotalSize() - Ar.Tell(); };
+	int32 SkeletonCount = 0;
+	Ar << SkeletonCount;
+	if (Ar.IsError() || SkeletonCount < 0 || (int64)SkeletonCount * 12 > BytesLeft())
+	{
+		return Refuse(FString::Printf(TEXT("district count %d"), SkeletonCount));
+	}
+	TSet<int32> WholeLevels;
+	TMap<int32, int32> DeepLevelOfId; // deep district Id -> its Level
+	int32 PrevId = 0;
+	for (int32 i = 0; i < SkeletonCount; ++i)
+	{
+		FRHLoadedDeep::FSkeleton S;
+		Ar << S.Id << S.Level << S.Class;
+		if (Ar.IsError() || S.Id <= PrevId || S.Class < 0 || S.Class > 2 || (S.Class == 0 ? S.Level != 0 : (S.Level >= 0 || S.Level < -MaxDepth)))
+		{
+			return Refuse(FString::Printf(TEXT("district #%d (level %d, class %d) is out of order or out of range"), S.Id, S.Level, S.Class));
+		}
+		PrevId = S.Id;
+		if (S.Class == 1)
+		{
+			WholeLevels.Add(S.Level);
+		}
+		else if (S.Class == 2)
+		{
+			DeepLevelOfId.Add(S.Id, S.Level);
+		}
+		Out.Skeleton.Add(S);
+	}
+	int32 ShapeCount = 0;
+	Ar << ShapeCount;
+	if (Ar.IsError() || ShapeCount != DeepLevelOfId.Num())
+	{
+		return Refuse(FString::Printf(TEXT("%d shape(s) listed for %d deep district(s)"), ShapeCount, DeepLevelOfId.Num()));
+	}
+	TMap<FIntVector, int32> Held; // every deep point -> its district: no point sits in two
+	int32 PrevShape = 0;
+	for (int32 n = 0; n < ShapeCount; ++n)
+	{
+		FRHLoadedDeep::FShape Shape;
+		int32 Count = 0;
+		Ar << Shape.Id << Count;
+		if (Ar.IsError() || Shape.Id <= PrevShape || !DeepLevelOfId.Contains(Shape.Id))
+		{
+			return Refuse(FString::Printf(TEXT("shape #%d names no deep district, or is out of order"), Shape.Id));
+		}
+		PrevShape = Shape.Id;
+		if (Count < 1 || Count > RH::MaxDeepPoints || (int64)Count * 12 > BytesLeft())
+		{
+			return Refuse(FString::Printf(TEXT("shape #%d lists %d points (1 to %d)"), Shape.Id, Count, RH::MaxDeepPoints));
+		}
+		Shape.Points.Reserve(Count);
+		for (int32 k = 0; k < Count; ++k)
+		{
+			FIntVector P;
+			Ar << P.X << P.Y << P.Z;
+			if (Ar.IsError())
+			{
+				return Refuse(TEXT("the shape list is cut short"));
+			}
+			if (P.Z >= 0 || P.Z < -MaxDepth || -P.Z > Deepest)
+			{
+				return Refuse(FString::Printf(TEXT("shape #%d holds a point on floor %d, which is outside -1..-%d or reached by no shaft"), Shape.Id, P.Z, MaxDepth));
+			}
+			if (k > 0 && !RHDistricts::DeepLess(Shape.Points.Last(), P))
+			{
+				return Refuse(FString::Printf(TEXT("shape #%d lists (%d,%d,%d) out of order or twice"), Shape.Id, P.X, P.Y, P.Z));
+			}
+			if (WholeLevels.Contains(P.Z))
+			{
+				return Refuse(FString::Printf(TEXT("floor %d is held whole by a district and also holds shape #%d's point (%d,%d)"), P.Z, Shape.Id, P.X, P.Y));
+			}
+			if (Held.Contains(P))
+			{
+				return Refuse(FString::Printf(TEXT("the point (%d,%d) on floor %d sits in two districts"), P.X, P.Y, P.Z));
+			}
+			Held.Add(P, Shape.Id);
+			Shape.Points.Add(P);
+		}
+		if (Held.Num() > RH::MaxDeepPoints)
+		{
+			return Refuse(FString::Printf(TEXT("the shapes together hold more than %d points"), RH::MaxDeepPoints));
+		}
+		if (Shape.Points[0].Z != DeepLevelOfId.FindChecked(Shape.Id))
+		{
+			return Refuse(FString::Printf(TEXT("shape #%d starts on floor %d but its district says floor %d"), Shape.Id, Shape.Points[0].Z, DeepLevelOfId.FindChecked(Shape.Id)));
+		}
+		Out.Shapes.Add(MoveTemp(Shape));
+	}
+	int32 ProjectCount = 0;
+	Ar << ProjectCount;
+	if (Ar.IsError() || ProjectCount < 0 || ProjectCount > SkeletonCount || (int64)ProjectCount * 12 > BytesLeft())
+	{
+		return Refuse(FString::Printf(TEXT("growth project count %d"), ProjectCount));
+	}
+	int32 PrevProject = 0;
+	for (int32 n = 0; n < ProjectCount; ++n)
+	{
+		FRHLoadedDeep::FProjectPoints Pr;
+		int32 Count = 0;
+		Ar << Pr.DistrictId << Pr.Level << Count;
+		if (Ar.IsError() || Pr.DistrictId <= PrevProject || !DeepLevelOfId.Contains(Pr.DistrictId) || Pr.Level >= 0 || Pr.Level < -MaxDepth)
+		{
+			return Refuse(FString::Printf(TEXT("the growth points of district #%d (floor %d) name no deep district, or are out of order or range"), Pr.DistrictId, Pr.Level));
+		}
+		PrevProject = Pr.DistrictId;
+		if (Count < 1 || Count > RH::MaxGrowthPoints || (int64)Count * 8 > BytesLeft())
+		{
+			return Refuse(FString::Printf(TEXT("district #%d's growth project lists %d points (1 to %d)"), Pr.DistrictId, Count, RH::MaxGrowthPoints));
+		}
+		for (int32 k = 0; k < Count; ++k)
+		{
+			FIntPoint P;
+			Ar << P.X << P.Y;
+			if (Ar.IsError())
+			{
+				return Refuse(TEXT("the growth points are cut short"));
+			}
+			const int32* Owner = Held.Find(FIntVector(P.X, P.Y, Pr.Level));
+			if (!Owner || *Owner != Pr.DistrictId)
+			{
+				return Refuse(FString::Printf(TEXT("district #%d's growth point (%d,%d) on floor %d is outside its shape"), Pr.DistrictId, P.X, P.Y, Pr.Level));
+			}
+			Pr.Points.Add(P);
+		}
+		Out.Projects.Add(MoveTemp(Pr));
+	}
+	return true;
 }

@@ -1098,6 +1098,68 @@ namespace
 			PushCheck(TEXT("cavern.height"), Height, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->IsCavernMode() && PC->GetCavernFloors() == 2) ? FString() : FString(TEXT("a second press did not step the cavern brush to two floors")); }, 1.f);
 		}
 
+		// ---- the floor-shape brush (D6b): the DISTRICT tab's Underground button steps what a press does below ground (the whole floor, then a
+		// shape 1, 2 and 3 floors tall); the district brush then drags a rectangle on the floor and transmits a PaintDistrict order with the height.
+		Runner.Do(TEXT("shape.setup"), []()
+		{
+			ARHPlayerController* PC = GetPC();
+			if (!PC)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(-1);
+			PC->SetDistrictShapeFloors(0);
+		}, 0.6f);
+		{
+			const TSharedRef<FPress> Tab = PushPress(TEXT("shape.tab"), LocateButton(TEXT("DISTRICT"), 0, true));
+			PushCheck(TEXT("shape.tab"), Tab, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 0) ? FString() : FString(TEXT("an underground press should start as the whole floor")); }, 0.5f);
+			PushSettle(0.3f);
+			const TSharedRef<FPress> Step1 = PushPress(TEXT("shape.step"), LocateButton(TEXT("Underground: whole floor"), 0, true));
+			PushCheck(TEXT("shape.step"), Step1, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 1) ? FString() : FString(TEXT("the Underground button did not step to a shape of one floor")); }, 1.f);
+			const TSharedRef<FPress> Step2 = PushPress(TEXT("shape.height"), LocateButton(TEXT("Underground: shape, 1 floor"), 0, true));
+			PushCheck(TEXT("shape.height"), Step2, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 2) ? FString() : FString(TEXT("a second press did not step the shape to two floors")); }, 1.f);
+			const TSharedRef<FPress> Step3 = PushPress(TEXT("shape.height3"), LocateButton(TEXT("Underground: shape, 2 floors"), 0, true));
+			PushCheck(TEXT("shape.height3"), Step3, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 3) ? FString() : FString(TEXT("a third press did not step the shape to three floors")); }, 1.f);
+			const TSharedRef<FPress> Step4 = PushPress(TEXT("shape.whole"), LocateButton(TEXT("Underground: shape, 3 floors"), 0, true));
+			PushCheck(TEXT("shape.whole"), Step4, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 0) ? FString() : FString(TEXT("the press after three floors did not return to the whole floor")); }, 1.f);
+			const TSharedRef<FPress> Step5 = PushPress(TEXT("shape.again"), LocateButton(TEXT("Underground: whole floor"), 0, true));
+			PushCheck(TEXT("shape.again"), Step5, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetDistrictShapeFloors() == 1) ? FString() : FString(TEXT("the cycle did not come round to one floor")); }, 1.f);
+			Runner.Do(TEXT("shape.arm"), [T]()
+			{
+				ARHPlayerController* PC = GetPC();
+				if (!PC)
+				{
+					return;
+				}
+				PC->BeginDistrictPaint(FName("Homes"));
+				FrameCamera((T->CavernACm + T->CavernBCm) * 0.5, 0.2f);
+			}, 0.9f);
+			const TSharedRef<FPress> Drag = PushDrag(TEXT("shape.drag"),
+				[T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->CavernACm)(OutPos); },
+				[T](FVector2D& OutPos) { return LocateWorld(T->CavernBCm)(OutPos); });
+			PushCheck(TEXT("shape.drag"), Drag, [Drag]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim) { return FString(TEXT("no player controller or sim")); }
+				if (PC->GetWorldClickCount() != Drag->LeakBase + 1) { return FString::Printf(TEXT("the press moved OnClick by %d, expected 1"), PC->GetWorldClickCount() - Drag->LeakBase); }
+				bool bShapeOrder = false;
+				for (const FRHCommand& Cmd : Sim->GetUplinkQueue()) { bShapeOrder |= Cmd.Verb == FName("PaintDistrict") && Cmd.Level == -1 && Cmd.Value == 1.0; }
+				bShapeOrder |= Sim->GetDistricts().Num() > 0 && Sim->GetDistricts().Last().IsDeep();
+				bShapeOrder |= PC->GetConfirmText().ToString().Contains(TEXT("a Homes shape"));
+				return bShapeOrder ? FString() : FString(TEXT("no PaintDistrict order for a one-floor shape was transmitted"));
+			}, 2.f, 0.3f, true);
+			Runner.Do(TEXT("shape.done"), []()
+			{
+				if (ARHPlayerController* PC = GetPC())
+				{
+					PC->SetDistrictShapeFloors(0);
+					PC->CancelModes();
+				}
+			}, 0.2f);
+		}
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -1108,7 +1170,7 @@ namespace
 				PC->CancelModes();
 				PC->SetActiveLevel(0);
 				const int32 Actual = PC->GetWorldClickCount() - T->WorldBase;
-				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel and the cavern)"), Actual, T->ExpectedWorld));
+				Report(TEXT("leak.total"), Actual == T->ExpectedWorld, FString::Printf(TEXT("%d world click(s) reached OnClick, %d made on purpose (the build, the tunnel, the cavern and the district shape)"), Actual, T->ExpectedWorld));
 			}
 			if (Sim)
 			{

@@ -63,6 +63,11 @@ K.BuildingCount = Buildings.Num();
 	K.NextBuilding = NextBuildingId;
 	K.Lift = LiftVersion;             // D4: both stay 0 with no car, so no rebuild count can move
 	K.TransitWait = TransitWaitVersion;
+	if (EnsureDistrictGeo().DeepFloor.Num() > 0)
+	{
+		K.DeepCells = FloorCellsVersion; // D6b (RC 6): 0 for ever while no floor shape exists
+		K.DeepBeds = BedAssignVersion;
+	}
 	return K;
 }
 
@@ -323,6 +328,17 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	// (distance, districts, long) is worked out once, on its first colonist; every other colonist is one map lookup.
 	TMap<uint64, int32> TripIndex; // lookups only
 	TripIndex.Reserve(TripHint);
+	// D6b: on a floor that holds a shape a trip is also keyed by its two districts (the same floors, the same distances, a different
+	// pair of rows), and the transit split rotates by the floor pair's own running count so no distance moves.
+	const bool bAnyShape = Geo.DeepFloor.Num() > 0;
+	TMap<TTuple<uint64, uint64>, int32> ShapeTripIndex; // lookups only
+	TMap<uint64, int32> ShapePairCount;                  // lookups only
+	const FRHDeepHomes* ShapeHomes = bAnyShape ? &EnsureDeepHomes() : nullptr;
+	const auto ShapeDistrictOfCell = [this, &Geo](int32 Level, int32 Ordinal) -> int32
+	{
+		const FIntPoint P = GetFloorCell(Level, Ordinal);
+		return Geo.DeepOwner.FindRef(FIntVector(P.X, P.Y, Level));
+	};
 	Out.Trips.Reserve(TripHint);
 	Out.Ids.Reserve(Colonists.Num());
 	Out.Dists.Reserve(Colonists.Num());
@@ -352,15 +368,58 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		}
 		const int32 WorkKey = Station->X < 0 ? Station->X : Station->Z;
 		const uint64 TripKey = ((uint64)(uint32)HomeKey << 32) | (uint64)(uint32)WorkKey;
+		const bool bShapeTrip = bAnyShape && ((C.HomeHab == 0 && Geo.DeepFloor.Contains(C.HomeLevel)) || (Station->X < 0 && Geo.DeepFloor.Contains(Station->X)));
+		int32 ShapeHomeDistrict = 0, ShapeWorkDistrict = 0;
 		int32 TripSlot;
-		if (const int32* Found = TripIndex.Find(TripKey))
+		const int32* Found = nullptr;
+		if (bShapeTrip)
+		{
+			// The same lookups the membership uses (a whole floor's owner, else the shape holding the home or work cell).
+			if (C.HomeHab != 0)
+			{
+				ShapeHomeDistrict = Mem.OfBuilding.FindRef(C.HomeHab);
+			}
+			else if (const int32* WholeHome = Geo.FloorOwner.Find(C.HomeLevel))
+			{
+				ShapeHomeDistrict = *WholeHome;
+			}
+			else if (const int32* HomeCell = ShapeHomes->HomeCell.Find(C.Id))
+			{
+				ShapeHomeDistrict = ShapeDistrictOfCell(C.HomeLevel, *HomeCell);
+			}
+			if (Station->Y == INDEX_NONE || Station->X >= 0)
+			{
+				ShapeWorkDistrict = Mem.OfBuilding.FindRef(Station->Z);
+			}
+			else if (const int32* WholeWork = Geo.FloorOwner.Find(Station->X))
+			{
+				ShapeWorkDistrict = *WholeWork;
+			}
+			else
+			{
+				ShapeWorkDistrict = ShapeDistrictOfCell(Station->X, Station->Y);
+			}
+			Found = ShapeTripIndex.Find(MakeTuple(TripKey, ((uint64)(uint32)ShapeHomeDistrict << 32) | (uint64)(uint32)ShapeWorkDistrict));
+		}
+		else
+		{
+			Found = TripIndex.Find(TripKey);
+		}
+		if (Found)
 		{
 			TripSlot = *Found;
 		}
 		else
 		{
 			TripSlot = Out.Trips.AddDefaulted();
-			TripIndex.Add(TripKey, TripSlot);
+			if (bShapeTrip)
+			{
+				ShapeTripIndex.Add(MakeTuple(TripKey, ((uint64)(uint32)ShapeHomeDistrict << 32) | (uint64)(uint32)ShapeWorkDistrict), TripSlot);
+			}
+			else
+			{
+				TripIndex.Add(TripKey, TripSlot);
+			}
 			FRHCommuteTrip& T = Out.Trips[TripSlot];
 			FAnchor Home, Work;
 			int32 HomeDistrictId = 0, WorkDistrictId = 0;
@@ -374,18 +433,18 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			{
 				Home.Level = C.HomeLevel;
 				Home.Pos = Shaft;
-				HomeDistrictId = Geo.FloorOwner.FindRef(C.HomeLevel);
+				HomeDistrictId = bShapeTrip ? ShapeHomeDistrict : Geo.FloorOwner.FindRef(C.HomeLevel);
 			}
 			if (Station->X < 0)
 			{
 				Work.Level = Station->X;
 				Work.Pos = Shaft;
-				WorkDistrictId = Geo.FloorOwner.FindRef(Station->X);
+				WorkDistrictId = bShapeTrip ? ShapeWorkDistrict : Geo.FloorOwner.FindRef(Station->X);
 			}
 			else
 			{
 				bOk &= SurfaceBuildingPos(Station->Z, Work.Pos);
-				WorkDistrictId = Mem.OfBuilding.FindRef(Station->Z);
+				WorkDistrictId = bShapeTrip ? ShapeWorkDistrict : Mem.OfBuilding.FindRef(Station->Z);
 			}
 			// The shaft a floor-to-surface trip uses, picked once: the anchor move below, the distance and the transit tally all asked
 			// for the same pick with the same arguments (only the floor anchor moves, never the surface point it is priced to).
@@ -439,7 +498,13 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			const TArray<int32>& Reach = TripReach[TripSlot];
 			if (Reach.Num() > 0)
 			{
-				const int32 S = Reach[Trip.Count % Reach.Num()];
+				// On a shaped floor the rotation counts the floor pair's colonists, not this one trip's, so the split is D4's exactly.
+				int32 Turn = Trip.Count;
+				if (bShapeTrip)
+				{
+					Turn = ShapePairCount.FindOrAdd(TripKey)++;
+				}
+				const int32 S = Reach[Turn % Reach.Num()];
 				Dist = (int64)FMath::Abs(Trip.HomeLevel - Trip.WorkLevel) * CommutePerFloorCm(S) + CommuteWaitCm(S);
 				bLong = Dist > CommuteLongCm;
 				++Out.ShaftPeople[S];
@@ -517,7 +582,11 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		if (A.HomeLevel != B.HomeLevel) { return A.HomeLevel < B.HomeLevel; }
 		if (A.HomePos != B.HomePos) { return PosLess(A.HomePos, B.HomePos); }
 		if (A.WorkLevel != B.WorkLevel) { return A.WorkLevel < B.WorkLevel; }
-		return PosLess(A.WorkPos, B.WorkPos);
+		if (A.WorkPos != B.WorkPos) { return PosLess(A.WorkPos, B.WorkPos); }
+		// D6b: trips of one floor pair that differ only in their districts (a shaped floor). Every other pair of trips is already
+		// distinct above, so this moves nothing for a colony with no shape.
+		if (A.HomeDistrict != B.HomeDistrict) { return A.HomeDistrict < B.HomeDistrict; }
+		return A.WorkDistrict < B.WorkDistrict;
 	});
 }
 
@@ -754,6 +823,19 @@ bool URHSimWorldSubsystem::Debug_SetColonistHome(int32 ColonistId, int32 HomeHab
 	C->HomeHab = HomeHab;
 	C->HomeLevel = HomeHab != 0 ? 0 : HomeLevel;
 	++ColonistSetVersion;
+	return true;
+}
+
+bool URHSimWorldSubsystem::Debug_RemoveColonist(int32 ColonistId)
+{
+	if (!FindColonist(ColonistId))
+	{
+		return false;
+	}
+	Colonists.RemoveAll([ColonistId](const FRHColonist& C) { return C.Id == ColonistId; });
+	bColonistIndexDirty = true;
+	++ColonistSetVersion;
+	RefreshJobs();
 	return true;
 }
 

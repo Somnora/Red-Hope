@@ -123,6 +123,9 @@ private:
 	// C5a: the DISTRICT tab - a Kind arms the controller's district paint mode (the City panel's
 	// kind chips do the same).
 	FReply HandleDistrict(FName Kind);
+	// D6b: what an underground press paints in district mode - the whole floor, or a shape 1..3 floors tall (steps on each press).
+	FText GetDistrictShapeLabel() const;
+	FReply HandleDistrictShape();
 	int32 RowTab = 0; // the zone row's tab: 0 ZONE, 1 FURNISH, 2 WALLS, 3 DISTRICT
 public:
 	void Debug_SetFurnishTab(bool bOn) { RowTab = bOn ? 1 : 0; }

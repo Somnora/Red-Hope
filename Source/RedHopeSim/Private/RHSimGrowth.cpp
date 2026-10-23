@@ -148,6 +148,8 @@ FString URHSimWorldSubsystem::DescribeGrowthProject(const FRHGrowthProject& P) c
 		return FString::Printf(TEXT("%d new home bay%s (a %d x %d habitat module)"), P.HomeSites(), GrowthPlural(P.HomeSites()), P.Size.X, P.Size.Y);
 	case ERHGrowthKind::FloorCells:
 		return FString::Printf(TEXT("%d new home cell%s on floor %d"), P.Cells, GrowthPlural(P.Cells), P.Level);
+	case ERHGrowthKind::DeepCells:
+		return FString::Printf(TEXT("%d new home cell%s on floor %d, inside the shape"), P.Cells, GrowthPlural(P.Cells), P.Level);
 	case ERHGrowthKind::CivicRoom:
 	default:
 	{
@@ -613,7 +615,8 @@ int32 URHSimWorldSubsystem::RunGrowthStartCheck()
 				GrowthNotes.Add(D.Id, TEXT("new homes wait for Hope to recover"));
 				continue;
 			}
-			bPlanned = D.IsFloor() ? PlanFloorHomes(D, P, Why) : PlanSurfaceHomes(D, P, Why);
+			// D6b: a shape is tested first (IsDeep), so a deep district is never sent to the surface planner; a whole floor keeps PlanFloorHomes.
+			bPlanned = D.IsDeep() ? PlanDeepHomes(D, P, Why) : (D.IsFloor() ? PlanFloorHomes(D, P, Why) : PlanSurfaceHomes(D, P, Why));
 		}
 		else
 		{
@@ -713,6 +716,125 @@ bool URHSimWorldSubsystem::PlanFloorHomes(const FRHDistrict& D, FRHGrowthProject
 		Out.TotalSols = Permille == 1000 ? GrowthCellSols : GrowthCellSols * (double)Permille / 1000.0;
 	}
 	return true;
+}
+
+int32 URHSimWorldSubsystem::GatherDeepGrowthPoints(const FRHDistrict& D, int32 Level, int32 Max, bool bFreeCellsOnly, TArray<FIntPoint>& OutPoints) const
+{
+	// The growth rule inside a shape, on one floor: first the shape's free carved cells (IsCellFreeForRoom, ascending ordinal), then the
+	// uncarved shape points that are eligible (the cavern rule: 4-adjacent to a carved cell or a reaching column, never a column), the
+	// lowest by (X, then Y) each time, a later pick leaning on an earlier one. Never a point of an open tunnel's line (growth does not
+	// zone a tunnel's cell). D.Deep is sorted by Level descending, then X, then Y, so the floor's points come in ascending (X, Y).
+	OutPoints.Reset();
+	TArray<int32> Free;
+	for (const FIntVector& P : D.Deep)
+	{
+		if (P.Z != Level)
+		{
+			continue;
+		}
+		const int32 Ordinal = FindFloorCell(Level, FIntPoint(P.X, P.Y));
+		if (Ordinal != INDEX_NONE && IsCellFreeForRoom(Level, Ordinal))
+		{
+			Free.Add(Ordinal);
+		}
+	}
+	Free.Sort();
+	for (int32 i = 0; i < Free.Num() && OutPoints.Num() < Max; ++i)
+	{
+		OutPoints.Add(GetFloorCell(Level, Free[i]));
+	}
+	const int32 FreeTaken = OutPoints.Num();
+	if (bFreeCellsOnly)
+	{
+		return FreeTaken;
+	}
+	static const FIntPoint Dirs[4] = { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) };
+	while (OutPoints.Num() < Max)
+	{
+		bool bPicked = false;
+		for (const FIntVector& P : D.Deep)
+		{
+			const FIntPoint Pt(P.X, P.Y);
+			if (P.Z != Level || OutPoints.Contains(Pt) || FindFloorCell(Level, Pt) != INDEX_NONE || ShaftColumns.Contains(Pt) || FindLiveTunnelOnFloorPoint(Level, Pt) != nullptr)
+			{
+				continue;
+			}
+			bool bEligible = IsCavernPointEligible(Level, Pt);
+			for (int32 d = 0; d < 4 && !bEligible; ++d)
+			{
+				bEligible = OutPoints.Contains(Pt + Dirs[d]) && FindFloorCell(Level, Pt + Dirs[d]) == INDEX_NONE; // leans on a pick that is still to be carved
+			}
+			if (bEligible)
+			{
+				OutPoints.Add(Pt);
+				bPicked = true;
+				break;
+			}
+		}
+		if (!bPicked)
+		{
+			break;
+		}
+	}
+	return FreeTaken;
+}
+
+bool URHSimWorldSubsystem::PlanDeepHomes(const FRHDistrict& D, FRHGrowthProject& Out, FString& OutWhy) const
+{
+	// D6b, ERHGrowthKind::DeepCells. Homes inside a floor shape, on a RATED floor only: the shallowest floor of the shape that has
+	// something to offer, up to GrowthCellsPerProject points of it (free carved cells zoned first, then eligible rock carved).
+	if (GetGrowthLivingRoom().IsNone())
+	{
+		OutWhy = TEXT("no Living room row is live");
+		return false;
+	}
+	TArray<int32> Levels;
+	for (const FIntVector& P : D.Deep) // sorted by Level descending: the distinct floors, shallowest first
+	{
+		if (Levels.Num() == 0 || Levels.Last() != P.Z)
+		{
+			Levels.Add(P.Z);
+		}
+	}
+	const int32 Max = FMath::Clamp(GrowthCellsPerProject, 1, RH::MaxGrowthPoints);
+	int32 Rated = 0;
+	for (const int32 Level : Levels)
+	{
+		if (!IsLevelConnected(Level) || !RatedFloors.Contains(Level))
+		{
+			continue;
+		}
+		++Rated;
+		TArray<FIntPoint> Points;
+		const int32 FreeCount = GatherDeepGrowthPoints(D, Level, Max, false, Points);
+		if (Points.Num() == 0)
+		{
+			continue;
+		}
+		TArray<FName> Bunks;
+		GetGrowthBunkPieces(Bunks);
+		Out.Kind = ERHGrowthKind::DeepCells;
+		Out.Level = Level;
+		Out.Points = Points;
+		Out.Cells = Points.Num();
+		Out.FirstCell = FreeCount; // Points[0 .. FirstCell) are free carved cells to zone, the rest uncarved rock to carve
+		AddGrowthFurnitureCost(Bunks, Out.Bill);
+		for (TPair<FName, double>& L : Out.Bill)
+		{
+			L.Value *= Out.Cells;
+		}
+		const int32 ToCarve = Out.Cells - FreeCount;
+		if (ToCarve > 0)
+		{
+			Out.Bill.FindOrAdd(NAME_GrowthOxygen) += ToCarve * O2FillKgPerCell; // the new volume's air, in full: the floor stays rated
+		}
+		// D5 DP3's rule: the dig time scales only when a point is to be carved; zoning free cells takes the row as written.
+		const int32 Permille = ToCarve > 0 ? GetDigPermille(Level) : 1000;
+		Out.TotalSols = Permille == 1000 ? GrowthCellSols : GrowthCellSols * (double)Permille / 1000.0;
+		return true;
+	}
+	OutWhy = Rated == 0 ? FString(TEXT("no floor of the shape is rated yet")) : FString(TEXT("the shape has no free cell and no rock beside a dig to carve"));
+	return false;
 }
 
 void URHSimWorldSubsystem::GatherShellSiteCells(TMap<FIntPoint, int32>& Out) const
@@ -1029,7 +1151,95 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 	Out.Kind = ERHGrowthKind::CivicRoom;
 	Out.Room = Worst->RowName;
 	Out.Level = D.Level;
-	if (D.IsFloor())
+	if (D.IsDeep())
+	{
+		// D6b: the floor branch, restricted to the shape. The shape's free carved cells first (the shallowest floor, then ascending
+		// ordinal); with none free anywhere in it, an eligible shape point on a rated floor is carved - never the floor's next spiral
+		// cell. The one cell is held as a lattice point.
+		TArray<int32> Levels;
+		for (const FIntVector& P : D.Deep)
+		{
+			if (Levels.Num() == 0 || Levels.Last() != P.Z)
+			{
+				Levels.Add(P.Z);
+			}
+		}
+		int32 Rated = 0, FreeTotal = 0;
+		bool bChosen = false;
+		for (const int32 Level : Levels)
+		{
+			if (!IsLevelConnected(Level) || !RatedFloors.Contains(Level))
+			{
+				continue;
+			}
+			++Rated;
+			TMap<FIntPoint, const FRHRoomRow*> Grid;
+			GatherFloorRoomGrid(Level, Grid);
+			TArray<FIntPoint> FreeCells;
+			GatherDeepGrowthPoints(D, Level, RH::MaxGrowthPoints, true, FreeCells);
+			FreeTotal += FreeCells.Num();
+			for (int32 i = 0; i < FreeCells.Num() && !bChosen; ++i)
+			{
+				if (!ZoningWouldOffend(Row, FreeCells[i], Grid))
+				{
+					Out.Level = Level;
+					Out.Points.Add(FreeCells[i]);
+					bChosen = true;
+				}
+			}
+			if (bChosen)
+			{
+				break;
+			}
+		}
+		if (Rated == 0)
+		{
+			OutWhy = TEXT("no floor of the shape is rated yet");
+			return false;
+		}
+		if (!bChosen && FreeTotal > 0)
+		{
+			OutWhy = TEXT("every free cell sits beside a room it would offend or that would offend it");
+			return false;
+		}
+		if (!bChosen)
+		{
+			// No free cell in the whole shape: carve one (if the spot is clear of odor).
+			bool bOffended = false;
+			for (const int32 Level : Levels)
+			{
+				if (!IsLevelConnected(Level) || !RatedFloors.Contains(Level))
+				{
+					continue;
+				}
+				TMap<FIntPoint, const FRHRoomRow*> Grid;
+				GatherFloorRoomGrid(Level, Grid);
+				TArray<FIntPoint> Rock;
+				GatherDeepGrowthPoints(D, Level, 1, false, Rock); // no free cell here, so the first pick is the lowest eligible point
+				if (Rock.Num() == 0)
+				{
+					continue;
+				}
+				if (ZoningWouldOffend(Row, Rock[0], Grid))
+				{
+					bOffended = true;
+					continue;
+				}
+				Out.Level = Level;
+				Out.Points.Add(Rock[0]);
+				Out.bCarve = true;
+				Out.Bill.FindOrAdd(NAME_GrowthOxygen) += O2FillKgPerCell;
+				bChosen = true;
+				break;
+			}
+			if (!bChosen)
+			{
+				OutWhy = bOffended ? FString(TEXT("the cell it would carve sits beside a room it would offend or that would offend it")) : FString(TEXT("the shape has no free cell and no rock beside a dig to carve"));
+				return false;
+			}
+		}
+	}
+	else if (D.IsFloor())
 	{
 		const int32 Level = D.Level;
 		if (!IsLevelConnected(Level) || !RatedFloors.Contains(Level))
@@ -1142,6 +1352,7 @@ bool URHSimWorldSubsystem::CompleteGrowthProject(const FRHGrowthProject& P, FStr
 	case ERHGrowthKind::SurfaceModule: return CompleteSurfaceModule(P, *D, OutWhy);
 	case ERHGrowthKind::FloorCells: return CompleteFloorCells(P, OutWhy);
 	case ERHGrowthKind::CivicRoom: return CompleteCivicRoom(P, OutWhy);
+	case ERHGrowthKind::DeepCells: return CompleteDeepCells(P, OutWhy);
 	}
 	OutWhy = TEXT("unknown project kind");
 	return false;
@@ -1246,6 +1457,105 @@ bool URHSimWorldSubsystem::CompleteFloorCells(const FRHGrowthProject& P, FString
 	return true;
 }
 
+bool URHSimWorldSubsystem::CompleteDeepCells(const FRHGrowthProject& P, FString& OutWhy)
+{
+	// D6b. Re-check reach and rating, then take each point in order: a point still free is zoned; one still uncarved and still eligible
+	// (it may lean on a point carved a moment ago) is carved through CarveLatticePoint (RC 3), then zoned Living and furnished as
+	// CompleteFloorCells does. A point that fails is refunded and skipped, with a Warning; if none lands the whole bill comes back.
+	const FName LivingRow = GetGrowthLivingRoom();
+	if (!IsLevelConnected(P.Level) || !RatedFloors.Contains(P.Level))
+	{
+		OutWhy = FString::Printf(TEXT("floor %d is no longer rated"), P.Level);
+		return false;
+	}
+	if (LivingRow.IsNone())
+	{
+		OutWhy = TEXT("no Living room row is live");
+		return false;
+	}
+	if (P.Points.Num() == 0)
+	{
+		OutWhy = TEXT("the project holds no point");
+		return false;
+	}
+	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
+	TArray<FName> Bunks;
+	GetGrowthBunkPieces(Bunks);
+	TMap<FName, double> PerPoint; // what one point of the bill is (the bunks); the oxygen is shared out below
+	AddGrowthFurnitureCost(Bunks, PerPoint);
+	const int32 ToCarve = FMath::Max(0, P.Cells - FMath::Clamp(P.FirstCell, 0, P.Cells));
+	const double OxygenPerPoint = ToCarve > 0 ? P.Bill.FindRef(NAME_GrowthOxygen) / (double)ToCarve : 0.0;
+	TMap<FName, double> Refund;
+	double OxygenToFloor = 0.0;
+	int32 Applied = 0;
+	for (int32 i = 0; i < P.Points.Num(); ++i)
+	{
+		const FIntPoint Pt = P.Points[i];
+		const bool bPlannedCarve = i >= P.FirstCell;
+		FString Why;
+		int32 Ordinal = FindFloorCell(P.Level, Pt);
+		bool bFailed = false;
+		if (Geo.DeepOwner.FindRef(FIntVector(Pt.X, Pt.Y, P.Level)) != P.DistrictId)
+		{
+			Why = TEXT("the point is outside the shape");
+			bFailed = true;
+		}
+		else if (Ordinal == INDEX_NONE)
+		{
+			if (!IsCavernPointEligible(P.Level, Pt) || FindLiveTunnelOnFloorPoint(P.Level, Pt) != nullptr)
+			{
+				Why = TEXT("the rock no longer touches a dig, or a tunnel's line has taken it");
+				bFailed = true;
+			}
+			else if (!CarveLatticePoint(P.Level, Pt))
+			{
+				Why = TEXT("the point could not be carved");
+				bFailed = true;
+			}
+			else
+			{
+				Ordinal = FindFloorCell(P.Level, Pt);
+			}
+		}
+		else if (!IsCellFreeForRoom(P.Level, Ordinal))
+		{
+			Why = TEXT("the cell is no longer free");
+			bFailed = true;
+		}
+		if (bFailed)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("City growth: point (%d,%d) of floor %d is skipped: %s"), Pt.X, Pt.Y, P.Level, *Why);
+			GrowthAddLines(Refund, PerPoint, 1.0);
+			if (bPlannedCarve)
+			{
+				Refund.FindOrAdd(NAME_GrowthOxygen) += OxygenPerPoint;
+			}
+			continue;
+		}
+		++Applied;
+		if (bPlannedCarve)
+		{
+			OxygenToFloor += OxygenPerPoint; // the cell exists now: its air goes in, so the floor stays rated
+		}
+		if (!DesignateRoom(P.Level, Ordinal, LivingRow, Why))
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("City growth: cell %d of floor %d would not take %s: %s"), Ordinal, P.Level, *LivingRow.ToString(), *Why);
+			GrowthAddLines(Refund, PerPoint, 1.0);
+			continue;
+		}
+		GrowthAddLines(Refund, FurnishGrowthRoom(FIntVector(P.Level, Ordinal, 0), Bunks), 1.0);
+	}
+	if (Applied == 0)
+	{
+		OutWhy = TEXT("no point of the project could be built");
+		return false; // nothing was changed: the caller returns the whole bill
+	}
+	FloorO2Kg.FindOrAdd(P.Level) += OxygenToFloor;
+	CreditLander(Refund, true);
+	RefreshJobs();
+	return true;
+}
+
 bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString& OutWhy)
 {
 	const FRHRoomRow* Row = Defs ? Defs->GetRoom(P.Room) : nullptr;
@@ -1257,7 +1567,57 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 	TArray<FName> Pieces;
 	ParseCivicPieces(*Row, Pieces);
 	FString Why;
-	if (P.Level < 0)
+	if (P.Level < 0 && P.Points.Num() == 1)
+	{
+		// D6b: the one cell of a Civic project inside a shape, held as a lattice point: zoned if it is still free, or carved first
+		// (through CarveLatticePoint) when it was rock at the start - and still is, still eligible and clear of odor.
+		if (!IsLevelConnected(P.Level) || !RatedFloors.Contains(P.Level))
+		{
+			OutWhy = FString::Printf(TEXT("floor %d is no longer rated"), P.Level);
+			return false;
+		}
+		const FIntPoint Pt = P.Points[0];
+		if (EnsureDistrictGeo().DeepOwner.FindRef(FIntVector(Pt.X, Pt.Y, P.Level)) != P.DistrictId)
+		{
+			OutWhy = TEXT("the cell is outside the shape");
+			return false;
+		}
+		TMap<FIntPoint, const FRHRoomRow*> Grid;
+		GatherFloorRoomGrid(P.Level, Grid);
+		int32 Cell = FindFloorCell(P.Level, Pt);
+		if (Cell == INDEX_NONE)
+		{
+			if (!P.bCarve || !IsCavernPointEligible(P.Level, Pt) || FindLiveTunnelOnFloorPoint(P.Level, Pt) != nullptr)
+			{
+				OutWhy = TEXT("the rock it would carve no longer touches a dig");
+				return false;
+			}
+			if (ZoningWouldOffend(*Row, Pt, Grid))
+			{
+				OutWhy = TEXT("the cell it would carve now sits beside a room it would offend");
+				return false;
+			}
+			if (!CarveLatticePoint(P.Level, Pt))
+			{
+				OutWhy = TEXT("the cell could not be carved");
+				return false;
+			}
+			Cell = FindFloorCell(P.Level, Pt);
+			FloorO2Kg.FindOrAdd(P.Level) += P.Bill.FindRef(NAME_GrowthOxygen);
+		}
+		else if (!IsCellFreeForRoom(P.Level, Cell) || ZoningWouldOffend(*Row, Pt, Grid))
+		{
+			OutWhy = FString::Printf(TEXT("cell %d is no longer free or clear of odor"), Cell);
+			return false;
+		}
+		if (!DesignateRoom(P.Level, Cell, P.Room, Why))
+		{
+			OutWhy = Why;
+			return false; // after a carve this leaves a bare cell: not reachable (the cell is fresh and free)
+		}
+		CreditLander(FurnishGrowthRoom(FIntVector(P.Level, Cell, 0), Pieces), true);
+	}
+	else if (P.Level < 0)
 	{
 		if (!IsLevelConnected(P.Level) || !RatedFloors.Contains(P.Level))
 		{

@@ -8,6 +8,8 @@
 # Env:   RH_LOG_DIR  where the run log lands (default <proj>/Saved/RHCapture/logs)
 #        RH_CLICKTEST_PRE  console commands run before RH.ClickTest, comma-separated (D5 depth: "RH.BoreNow 14" bores the colony past
 #                          -11 first, so shaft rows scroll out of the strip and Fit lift and Tunnel must still be reached)
+#        RH_CLICKTEST_RES  window size WxH (default 1600x900; use 1440x860 on a 1470x956-point display, where 1600x900 is clamped
+#                          and the early deck steps fail on reach - the official size on this machine, docs/qa-boot-card.md)
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.
@@ -29,10 +31,11 @@ mkdir -p "$LOGDIR"
 LOG="$LOGDIR/$LABEL.log"
 
 PRE="${RH_CLICKTEST_PRE:-}"
-CMDS="r.setres 1600x900w, RH.Demo, ${PRE:+$PRE, }RH.After 3 RH.ClickTest"
+RES="${RH_CLICKTEST_RES:-1600x900}"
+CMDS="r.setres ${RES}w, RH.Demo, ${PRE:+$PRE, }RH.After 3 RH.ClickTest"
 
 echo "=== click test '$LABEL' ==="
-"$UE" "$PROJ" "$MAP" -game -windowed -resx=1600 -resy=900 \
+"$UE" "$PROJ" "$MAP" -game -windowed -resx=${RES%x*} -resy=${RES#*x} \
   -unattended -nosound -stdout -RHTitle \
   "-ExecCmds=$CMDS" > "$LOG" 2>&1 &
 PID=$!

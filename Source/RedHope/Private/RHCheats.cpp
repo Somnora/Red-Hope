@@ -2384,7 +2384,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTraffic(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 	TEXT("RH.District"),
-	TEXT("RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>> - C5a districts. Cells are 10 m lattice cells (cell 0,0 is centred on the Lander, x1..x2 and y1..y2 corners in either order). paint, floor, erase and rename transmit the real uplink orders; growth switches a district's own growth on or off (C5b; instant, like the machine switches); mode arms the paint tool, ghost holds its drag ghost for a screenshot (no args to clear), labels shows every name, tab and city fold the deck."),
+	TEXT("RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | extent <Level> | shape <Kind> <Level> <Floors> <x1> <y1> <x2> <y2> | shapeghost <Kind> <Level> <Floors> <x1> <y1> <x2> <y2> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>> - C5a districts. Cells are 10 m lattice cells (cell 0,0 is centred on the Lander, x1..x2 and y1..y2 corners in either order). paint, floor, erase and rename transmit the real uplink orders; growth switches a district's own growth on or off (C5b; instant, like the machine switches); mode arms the paint tool, ghost holds its drag ghost for a screenshot (no args to clear), labels shows every name, tab and city fold the deck."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -2415,7 +2415,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 				const FRHDistrict& D = Sim->GetDistricts()[i];
 				const FRHDistrictCounts& C = Counts[i];
 				UE_LOG(LogRedHope, Display, TEXT("[RH.District]   #%d '%s' %s %s: %d cell%s, %d building%s, %d bay%s, %d resident%s, %d bed%s, %d seat%s"), D.Id, *D.Name, *D.Kind.ToString(),
-					D.IsFloor() ? *FString::Printf(TEXT("floor %d"), D.Level) : TEXT("surface"), C.Cells, C.Cells == 1 ? TEXT("") : TEXT("s"), C.Buildings, C.Buildings == 1 ? TEXT("") : TEXT("s"),
+					D.IsDeep() ? *FString::Printf(TEXT("shape of %d point%s from floor %d to %d"), D.Deep.Num(), D.Deep.Num() == 1 ? TEXT("") : TEXT("s"), D.Level, D.Deep.Last().Z) : (D.IsFloor() ? *FString::Printf(TEXT("floor %d"), D.Level) : TEXT("surface")), C.Cells, C.Cells == 1 ? TEXT("") : TEXT("s"), C.Buildings, C.Buildings == 1 ? TEXT("") : TEXT("s"),
 					C.Bays, C.Bays == 1 ? TEXT("") : TEXT("s"), C.Residents, C.Residents == 1 ? TEXT("") : TEXT("s"), C.Beds, C.Beds == 1 ? TEXT("") : TEXT("s"), C.Seats, C.Seats == 1 ? TEXT("") : TEXT("s"));
 			}
 			return;
@@ -2437,6 +2437,50 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 			Cmd.LocationB = URHSimWorldSubsystem::LatticeCentreCm(Cell(4));
 			LogPreflight(TEXT("paint"), Cmd.Target, 0, Cmd.Location, Cmd.LocationB);
 			Sim->EnqueueCommand(Cmd); // transmitted either way: the seam re-checks when it lands (and says why it refuses)
+			return;
+		}
+		if (Sub == TEXT("extent") && Args.Num() >= 2)
+		{
+			// D6b: RH.District extent <Level> - the floor's carved cells and the lattice box they fill (the shaft head's frame), to aim a shape at.
+			const int32 Level = FCString::Atoi(*Args[1]);
+			FIntPoint Lo(MAX_int32, MAX_int32), Hi(MIN_int32, MIN_int32);
+			const int32 Carved = Sim->GetFloorCarvedCells(Level);
+			for (int32 i = 0; i < Carved; ++i)
+			{
+				const FIntPoint P = Sim->GetFloorCell(Level, i);
+				Lo = FIntPoint(FMath::Min(Lo.X, P.X), FMath::Min(Lo.Y, P.Y));
+				Hi = FIntPoint(FMath::Max(Hi.X, P.X), FMath::Max(Hi.Y, P.Y));
+			}
+			int32 Residents = 0;
+			for (const FRHColonist& C : Sim->GetColonists()) { Residents += (C.HomeHab == 0 && C.HomeLevel == Level) ? 1 : 0; }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] floor %d: %d carved cell%s%s; rated %s; %d resident%s"), Level, Carved, Carved == 1 ? TEXT("") : TEXT("s"),
+				Carved > 0 ? *FString::Printf(TEXT(" in the box (%d,%d) to (%d,%d)"), Lo.X, Lo.Y, Hi.X, Hi.Y) : TEXT(""), Sim->IsFloorRated(Level) ? TEXT("yes") : TEXT("no"),
+				Residents, Residents == 1 ? TEXT("") : TEXT("s"));
+			return;
+		}
+		if (Sub == TEXT("shape") && Args.Num() >= 8)
+		{
+			// D6b: RH.District shape <Kind> <Level> <Floors> <x1> <y1> <x2> <y2> - a floor shape, the corners in the shaft head's lattice.
+			FRHCommand Cmd;
+			Cmd.Verb = FName("PaintDistrict");
+			Cmd.Target = FName(*Args[1]);
+			Cmd.Level = FCString::Atoi(*Args[2]);
+			Cmd.Value = FCString::Atoi(*Args[3]);
+			Cmd.Location = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), Cell(4));
+			Cmd.LocationB = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), Cell(6));
+			FString Reason;
+			FRHDistrictPaintPreview Pre;
+			const bool bOk = Sim->CanPaintDistrict(Cmd.Target, Cmd.Level, Cmd.Location, Cmd.LocationB, Reason, &Pre, (int32)Cmd.Value);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.District] shape %s: %d point%s in the rectangle, %d new, %d already dug%s - %s"), *Cmd.Target.ToString(), Pre.CellsInRect, Pre.CellsInRect == 1 ? TEXT("") : TEXT("s"),
+				Pre.CellsNew, Pre.CellsCarved, Pre.JoinId != 0 ? *FString::Printf(TEXT(", joins #%d"), Pre.JoinId) : TEXT(""), bOk ? TEXT("accepted for transmission") : *Reason);
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		if (PC && Sub == TEXT("shapeghost"))
+		{
+			// RH.District shapeghost <Kind> <Level> <Floors> <x1> <y1> <x2> <y2>; no arguments puts it away.
+			if (Args.Num() >= 8) { PC->Debug_DistrictShapeGhost(FName(*Args[1]), FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3]), Cell(4), Cell(6)); }
+			else { PC->SetDistrictShapeFloors(0); PC->CancelModes(); }
 			return;
 		}
 		if (Sub == TEXT("floor") && Args.Num() >= 3)
@@ -2511,7 +2555,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDistrict(
 			PC->Debug_SetCityExpanded(Args.Num() < 2 || FCString::Atoi(*Args[1]) != 0);
 			return;
 		}
-		UE_LOG(LogRedHope, Error, TEXT("Usage: RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>>"));
+		UE_LOG(LogRedHope, Error, TEXT("Usage: RH.District <list | demand | paint <Kind> <x1> <y1> <x2> <y2> | floor <Kind> <Level> | extent <Level> | shape <Kind> <Level> <Floors> <x1> <y1> <x2> <y2> | shapeghost <Kind> <Level> <Floors> <x1> <y1> <x2> <y2> | erase <Id> | rename <Id> <Name...> | growth <Id> <0|1> | labels <0|1> | mode <Kind> | ghost <Kind> <x1> <y1> <x2> <y2> | tab | city <0|1>>"));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
@@ -2557,7 +2601,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 			{
 				continue;
 			}
-			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   district #%d '%s' (%s%s): growth %s%s%s"), D.Id, *D.Name, *D.Kind.ToString(), D.IsFloor() ? *FString::Printf(TEXT(", floor %d"), D.Level) : TEXT(""),
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   district #%d '%s' (%s%s): growth %s%s%s"), D.Id, *D.Name, *D.Kind.ToString(), D.IsDeep() ? *FString::Printf(TEXT(", shape from floor %d"), D.Level) : (D.IsFloor() ? *FString::Printf(TEXT(", floor %d"), D.Level) : TEXT("")),
 				D.bGrowth ? TEXT("ON") : TEXT("OFF"), Sim->FindGrowthProject(D.Id) ? TEXT(", a project is under way") : TEXT(""),
 				Sim->GetGrowthNote(D.Id).IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" - %s"), *Sim->GetGrowthNote(D.Id)));
 		}

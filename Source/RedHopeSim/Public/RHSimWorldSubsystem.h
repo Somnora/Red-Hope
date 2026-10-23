@@ -381,6 +381,12 @@ namespace RH
 	constexpr int32 CavernWorkBase = 100;
 	inline bool IsTunnelWork(const FIntPoint& Work) { return Work.X == 2 || Work.X == 3; }
 	inline bool IsCavernWork(const FIntPoint& Work) { return Work.X >= CavernWorkBase; }
+
+	// D6b (floor shapes): ceilings the paint order and the save's structural refusals share, so a save made by any paint loads.
+	// MaxDeepPoints is the points of every deep district together (a 32 x 32 rectangle on 8 floors is 8,192, so eight such orders
+	// fit); MaxGrowthPoints bounds one growth project's Points (GrowthCellsPerProject is a config row, clamped to it).
+	constexpr int32 MaxDeepPoints = 65536;
+	constexpr int32 MaxGrowthPoints = 256;
 }
 
 // D6a (caverns): a box of ordinary lattice cells on 1..CavernMaxFloors consecutive floors, carved cell by cell by a Borer with the
@@ -761,6 +767,8 @@ public:
 	FIntPoint GetFloorCell(int32 Level, int32 Index) const;
 	// The ordinal of a lattice point on Level, or INDEX_NONE.
 	int32 FindFloorCell(int32 Level, const FIntPoint& P) const { const FRHFloor* F = FindFloor(Level); return F ? F->FindOrdinal(P) : (int32)INDEX_NONE; }
+	// D6b: is this lattice point a shaft column (a column runs through every floor)?
+	bool IsShaftColumn(const FIntPoint& P) const { return ShaftColumns.Contains(P); }
 	// World centre of ordinal Index on Level: region 0's origin (the shaft head) + lattice x 10 m, at the floor's Z.
 	FVector GetFloorCellCentreCm(int32 Level, int32 Index) const;
 	// The two directions of that map around any origin, with the exact expressions the sim and the presentation use.
@@ -1273,7 +1281,7 @@ public:
 	// C5b harness: a surface habitat shell's own O2 fill, so a suite can hold a big network full (its push is a flat
 	// O2FillRateKgPerHour, so past about 240 bays the leak outruns it).
 	void Debug_SetHabO2Kg(int32 HabId, double Kg) { HabO2Kg.FindOrAdd(HabId) = FMath::Max(0.0, Kg); }
-	void Debug_SetColonistsPerCell(double V) { ColonistsPerCell = FMath::Max(0.0, V); }
+	void Debug_SetColonistsPerCell(double V) { ColonistsPerCell = FMath::Max(0.0, V); ++BedAssignVersion; } // D6b: the floor shapes' home cells read it
 	// C2a harness: the smoothed-Hope gates for research and for births. Per head, a
 	// city of thousands does not reach 75 or 85 (that is the design), and the
 	// -scale suite wants the research and growth steps in what it times.
@@ -1969,6 +1977,7 @@ public:
 	int64 GetCommuteLongCm() const { return CommuteLongCm; }
 	// Harness. Home / station overrides stand in for a laid-out city, and the version bumps are the real ones.
 	bool Debug_SetColonistHome(int32 ColonistId, int32 HomeHab, int32 HomeLevel);
+	bool Debug_RemoveColonist(int32 ColonistId); // D6b harness: a departure, as the recall makes one (the roster, its index and its version)
 	bool Debug_SetColonistStation(int32 ColonistId, const FIntVector& Key);
 	void Debug_ClearColonistStations() { ColonistStations.Reset(); ++JobsVersion; }
 	void Debug_RefreshJobs() { RefreshJobs(); }
@@ -2014,7 +2023,9 @@ public:
 	// True if the order would be accepted right now (the ghost polls it every frame;
 	// ExecuteCommand runs the same check when the order lands). A floor order ignores
 	// FromCm and ToCm.
-	bool CanPaintDistrict(FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview = nullptr) const;
+	// D6b: Floors >= 1 with Level < 0 is a SHAPE on the floors Level .. Level - Floors + 1 (a rectangle between the two corners, snapped
+	// by CmToLattice(shaft head, .), region 0's underground frame); Floors 0 (every existing caller) is today's whole-floor order.
+	bool CanPaintDistrict(FName Kind, int32 Level, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview = nullptr, int32 Floors = 0) const;
 	bool CanEraseDistrict(int32 Id, FString& OutReason) const;
 	bool CanRenameDistrict(int32 Id, const FString& Typed, FString& OutReason, FString* OutName = nullptr) const;
 	// Membership reads. 0 = in no district.
@@ -2023,8 +2034,16 @@ public:
 	int32 GetDistrictAtPoint(int32 Level, const FVector& Cm) const;       // the district painted on the ground at a point
 	int32 GetDistrictOfBuilding(int32 BuildingId) const;
 	int32 GetDistrictOfBay(int32 HabId, int32 Bay) const { return GetDistrictOfBuilding(HabId); } // a bay is its building's
-	int32 GetDistrictOfCell(int32 Level, int32 CellIndex) const { return CellIndex >= 0 ? GetDistrictOfFloor(Level) : 0; } // an underground cell is its floor's
+	int32 GetDistrictOfCell(int32 Level, int32 CellIndex) const;           // an underground cell is its floor's, or (a shaped floor) the shape holding its point
 	int32 GetDistrictOfColonist(int32 ColonistId) const;                  // their home's
+	// D6b (floor shapes). A floor is MAPPED when a deep district holds a point on it. The district holding a lattice point of an
+	// underground floor (region 0's frame): the whole-floor district, else the shape, else 0. A resident's home cell is DERIVED
+	// (never saved), for residents of mapped floors only: their bed piece's cell, else the legacy bed slots of the cells with no
+	// bed pieces in ordinal order, else INDEX_NONE (an overfull floor: they belong to no shape).
+	bool IsFloorMapped(int32 Level) const;
+	int32 GetDistrictOfFloorPoint(int32 Level, const FIntPoint& P) const;
+	int32 GetColonistHomeCell(int32 ColonistId) const;
+	uint32 GetBedAssignVersion() const { return BedAssignVersion; }
 	// One entry per district, in the order of GetDistricts().
 	void GetDistrictCounts(TArray<FRHDistrictCounts>& Out) const;
 	// The city's demand: colony-wide Housing, Jobs, Services and Air (C5a: a readout;
@@ -2034,6 +2053,8 @@ public:
 	// still matches but a fresh derivation differs). A cache whose key has moved reads as
 	// fresh: it rebuilds on its next read.
 	bool Debug_DistrictCachesFresh() const;
+	// D6b: the floor-shape fields of the district membership key and of the commute key (all three are 0 for ever while no floor shape exists).
+	void Debug_DeepKeys(uint32& OutMemberCells, uint32& OutMemberBeds, uint32& OutCommuteCells) const;
 
 	// --- City growth (C5b, living-city gate 5b, 2026-10-19) ---
 	// Inside HOME and CIVIC districts the colony builds for itself, from its own holdings,
@@ -2570,11 +2591,12 @@ private:
 		uint32 ShaftReach = 0;               // D2: up on every SinkShaft, and on a bore only while there is more than one shaft
 		int32 BuildingCount = 0, NextBuilding = 0;
 		uint32 Lift = 0, TransitWait = 0;    // D4: LiftVersion and TransitWaitVersion (two fields, so no two bumps collide); 0 with no car
+		uint32 DeepCells = 0, DeepBeds = 0;  // D6b (RC 6): the floor shapes' district rows move with a carve and with the bed assignment; 0 for ever with no shape
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
 				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding
-				&& Lift == O.Lift && TransitWait == O.TransitWait;
+				&& Lift == O.Lift && TransitWait == O.TransitWait && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -2658,6 +2680,10 @@ private:
 		TMap<FIntPoint, int32> CellOwner;
 		TMap<int32, int32> FloorOwner;
 		TMap<int32, int32> IndexById;
+		// D6b: (X, Y, Level) of every deep point -> district Id (lookups only; deep points never enter CellOwner or FloorOwner), and
+		// every MAPPED floor -> the lowest Id of the shapes on it.
+		TMap<FIntVector, int32> DeepOwner;
+		TMap<int32, int32> DeepFloor;
 	};
 	// Who belongs to which district: building Id -> district Id, and per-district (Districts
 	// order) counts of buildings, shell bays and residents. Keyed on
@@ -2667,10 +2693,13 @@ private:
 	{
 		uint32 Districts = 0, Zoning = 0, Colonists = 0, Furniture = 0;
 		int32 BuildingCount = 0, NextBuilding = 0;
+		// D6b (RC 6): both 0 for ever while no deep district exists, so no rebuild count of the C5 caches can move. With one, a carve
+		// re-derives the legacy bed fill (DeepCells = FloorCellsVersion) and a changed bed assignment re-derives the piece cells (DeepBeds).
+		uint32 DeepCells = 0, DeepBeds = 0;
 		bool operator==(const FRHDistrictMembershipKey& O) const
 		{
 			return Districts == O.Districts && Zoning == O.Zoning && Colonists == O.Colonists && Furniture == O.Furniture
-				&& BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding;
+				&& BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds;
 		}
 	};
 	struct FRHDistrictMembership
@@ -2682,6 +2711,21 @@ private:
 	};
 	mutable FRHDistrictGeo DistrictGeo;
 	mutable FRHDistrictMembership DistrictMembers;
+	// D6b: the derived home cells of the residents of mapped floors, and each such floor's beds per cell. A pure function of
+	// (roster, furniture, zoning, the floors' cells, the districts, the bed assignment); rebuilt lazily, and -RHVerifyCaches
+	// re-derives and compares it whenever it is reused.
+	struct FRHDeepHomes
+	{
+		bool bValid = false;
+		uint32 Colonists = 0, Furniture = 0, Zoning = 0, FloorCells = 0, Districts = 0, BedAssign = 0;
+		TMap<int32, int32> HomeCell;              // colonist Id -> ordinal on their home floor (only those with one)
+		TMap<int32, TArray<int32>> CellBeds;      // mapped Level -> the beds of each carved cell, by ordinal
+	};
+	mutable FRHDeepHomes DeepHomes;
+	const FRHDeepHomes& EnsureDeepHomes() const;
+	void DeriveDeepHomes(FRHDeepHomes& Out) const;
+	bool IsDeepHomesFresh() const;
+	uint32 BedAssignVersion = 1;             // bumped when ColonistBedPiece is re-derived (RefreshJobs); derived state, never saved
 	const FRHDistrictGeo& EnsureDistrictGeo() const;
 	void DeriveDistrictGeo(FRHDistrictGeo& Out) const;
 	const FRHDistrictMembership& EnsureDistrictMembership() const;
@@ -2692,6 +2736,7 @@ private:
 	FIntPoint GetBuildingAnchorLattice(const FRHBuildingInstance& B) const;
 	// The three verbs' workers: false with a reason (the order is rejected, never "executed").
 	bool ExecutePaintDistrict(const FRHCommand& Cmd, FString& OutReason);
+	bool ExecutePaintDeepDistrict(const FRHCommand& Cmd, int32 Floors, FString& OutReason);
 	bool ExecuteEraseDistrict(const FRHCommand& Cmd, FString& OutReason);
 	bool ExecuteRenameDistrict(const FRHCommand& Cmd, FString& OutReason);
 
@@ -2733,6 +2778,10 @@ private:
 	// Planning: each fills Out (district, kind, target, bill, time) or says why not.
 	bool PlanSurfaceHomes(const FRHDistrict& District, FRHGrowthProject& Out, FString& OutWhy) const;
 	bool PlanFloorHomes(const FRHDistrict& District, FRHGrowthProject& Out, FString& OutWhy) const;
+	bool PlanDeepHomes(const FRHDistrict& District, FRHGrowthProject& Out, FString& OutWhy) const;           // D6b: Homes inside a floor shape
+	// D6b: the shape's candidates on one floor, by the growth rule: free carved cells (ordinal order), then eligible uncarved points
+	// (ascending X, Y; a later pick may lean on an earlier one). Up to Max in all; the free-cell count is returned.
+	int32 GatherDeepGrowthPoints(const FRHDistrict& District, int32 Level, int32 Max, bool bFreeCellsOnly, TArray<FIntPoint>& OutPoints) const;
 	bool PlanCivic(const FRHDistrict& District, const FRHCityDemand& Demand, FRHGrowthProject& Out, FString& OutWhy) const;
 	void GatherShellSiteCells(TMap<FIntPoint, int32>& Out) const;
 	void GatherFloorRoomGrid(int32 Level, TMap<FIntPoint, const FRHRoomRow*>& Out) const;
@@ -2747,6 +2796,7 @@ private:
 	bool CompleteGrowthProject(const FRHGrowthProject& Project, FString& OutWhy);
 	bool CompleteSurfaceModule(const FRHGrowthProject& Project, const FRHDistrict& District, FString& OutWhy);
 	bool CompleteFloorCells(const FRHGrowthProject& Project, FString& OutWhy);
+	bool CompleteDeepCells(const FRHGrowthProject& Project, FString& OutWhy);                               // D6b
 	bool CompleteCivicRoom(const FRHGrowthProject& Project, FString& OutWhy);
 	// Furnish a fresh room: each piece at the first slot it fits (Rot 0, no queue or cost check - the
 	// bill is paid); returns the cost of the pieces that found no slot, which the caller refunds.
@@ -2881,6 +2931,22 @@ private:
 	const FRHCavern* FindLiveCavernOnColumn(const FIntPoint& Column) const; // an unfinished cavern whose box holds the column (a column spans every floor)
 	void WriteCavernBlock(FArchive& Ar) const;
 	bool ReadCavernBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, const TArray<FRHTunnel>& InTunnels, TArray<FRHCavern>& OutCaverns, int32& OutNextId, FString& OutError) const;
+	// D6b, save v49: the deep block straight after the cavern block. The district skeleton (every district's Id, Level and class, so the
+	// cross-checks against the district list run on locals BEFORE teardown), every deep district's points, and every growth project's
+	// points. Read into locals; a structural fault is an OutError, never an Error line.
+	struct FRHLoadedDeep
+	{
+		struct FSkeleton { int32 Id = 0, Level = 0, Class = 0; };         // Class: 0 surface, 1 whole floor, 2 deep
+		struct FShape { int32 Id = 0; TArray<FIntVector> Points; };
+		struct FProjectPoints { int32 DistrictId = 0, Level = 0; TArray<FIntPoint> Points; };
+		TArray<FSkeleton> Skeleton;
+		TArray<FShape> Shapes;
+		TArray<FProjectPoints> Projects;
+	};
+	void WriteDeepBlock(FArchive& Ar) const;
+	bool ReadDeepBlock(FArchive& Ar, const TArray<FRHShaft>& InShafts, FRHLoadedDeep& Out, FString& OutError) const;
+	// D6b: paint a shape (Floors >= 1) - the preflight (CanPaintDistrict's deep branch) and the points it adds.
+	bool CanPaintDeepDistrict(FName Kind, int32 Level, int32 Floors, const FVector& FromCm, const FVector& ToCm, FString& OutReason, FRHDistrictPaintPreview* OutPreview, TArray<FIntVector>* OutAdded) const;
 	// D4 (transit). SAVED straight after the tunnel block (save v46): the fitted cars, TransitCheckedSol and the ledgers.
 	// Everything else below is runtime; the counters are transient (never saved, not reset by a load).
 	bool bHasTransit = false;                // derived: some shaft has LiftCars > 0 (a fit sets it; a load re-derives it)

@@ -1112,6 +1112,8 @@ void SRHCommandDeck::RefreshCityPanel()
 		const int32 Id = Dist.Id;
 		const FName Kind = Dist.Kind;
 		const int32 Level = Dist.Level;
+		const bool bShape = Dist.IsDeep();                                       // D6b: a shape on one or more floors
+		const int32 ShapeBottom = bShape ? Dist.Deep.Last().Z : Level;
 		const FLinearColor Tint = URHDistrictVisualizerSubsystem::KindColor(Kind);
 		CityDistrictList->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
 		[
@@ -1189,10 +1191,12 @@ void SRHCommandDeck::RefreshCityPanel()
 			+ SVerticalBox::Slot().AutoHeight().Padding(11.f, 1.f, 0.f, 0.f)
 			[
 				SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
-				.Text_Lambda([this, Id, Kind, Level]()
+				.Text_Lambda([this, Id, Kind, Level, bShape, ShapeBottom]()
 				{
 					const FRHDistrictCounts* C = CityCounts.Find(Id);
-					const FString Where = Level < 0 ? FString::Printf(TEXT("floor %d"), Level) : FString::Printf(TEXT("%d cell%s"), C ? C->Cells : 0, PluralS(C ? C->Cells : 0));
+					const FString Where = bShape
+						? FString::Printf(TEXT("shape on floor%s %d%s, %d cell%s dug"), ShapeBottom == Level ? TEXT("") : TEXT("s"), Level, ShapeBottom == Level ? TEXT("") : *FString::Printf(TEXT(" to %d"), ShapeBottom), C ? C->Cells : 0, PluralS(C ? C->Cells : 0))
+						: (Level < 0 ? FString::Printf(TEXT("floor %d"), Level) : FString::Printf(TEXT("%d cell%s"), C ? C->Cells : 0, PluralS(C ? C->Cells : 0)));
 					return Txt(FString::Printf(TEXT("%s  -  %s  -  %d resident%s  -  %d bed%s  -  %d seat%s"), *URHDistrictVisualizerSubsystem::KindWord(Kind), *Where,
 						C ? C->Residents : 0, PluralS(C ? C->Residents : 0), C ? C->Beds : 0, PluralS(C ? C->Beds : 0), C ? C->Seats : 0, PluralS(C ? C->Seats : 0)));
 				})

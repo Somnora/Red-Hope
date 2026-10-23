@@ -403,7 +403,7 @@ namespace
 			for (const FPlaytest::FGrowthRecord& G : P.GrowthRecords)
 			{
 				Surface += G.Kind == ERHGrowthKind::SurfaceModule ? 1 : 0;
-				Floor += G.Kind == ERHGrowthKind::FloorCells ? 1 : 0;
+				Floor += (G.Kind == ERHGrowthKind::FloorCells || G.Kind == ERHGrowthKind::DeepCells) ? 1 : 0;
 				Civic += G.Kind == ERHGrowthKind::CivicRoom ? 1 : 0;
 				Done += G.EndSol >= 0.0 ? 1 : 0;
 			}

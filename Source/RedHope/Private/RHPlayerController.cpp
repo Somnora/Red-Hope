@@ -592,7 +592,93 @@ void ARHPlayerController::Tick(float DeltaTime)
 		// it would not (the hint says why); the uplink re-checks on arrival.
 		const FLinearColor KindTint = URHDistrictVisualizerSubsystem::KindColor(DistrictKind);
 		const FString KindName = URHDistrictVisualizerSubsystem::KindWord(DistrictKind);
-		if (ActiveLevel < 0)
+		if (ActiveLevel < 0 && DistrictShapeFloors >= 1)
+		{
+			// D6b: the shape ghost. The rectangle between the anchor and the cursor on the viewed floor (and the floors below it, as many as
+			// the deck says), in the shaft head's lattice, from the sim's own preflight: the Kind's colour when it would be accepted right
+			// now, red with the reason when not. A point already dug is marked on its floor, a point of rock on the sand over it.
+			FVector Ground = FVector::ZeroVector;
+			const FVector Origin = Sim->GetShaftHeadCm();
+			const bool bHave = bDistrictForced ? (Ground = URHSimWorldSubsystem::LatticeToCm(Origin, DistrictForcedTo), true) : CursorToGround(Ground);
+			if (bHave)
+			{
+				const FIntPoint Cur = URHSimWorldSubsystem::CmToLattice(Origin, Ground);
+				const FIntPoint From = bDistrictDragging ? DistrictAnchor : Cur;
+				const FVector FromCm = URHSimWorldSubsystem::LatticeToCm(Origin, From), ToCm = URHSimWorldSubsystem::LatticeToCm(Origin, Cur);
+				FString Reason;
+				FRHDistrictPaintPreview Pre;
+				const bool bOk = Sim->CanPaintDistrict(DistrictKind, ActiveLevel, FromCm, ToCm, Reason, &Pre, DistrictShapeFloors);
+				const FColor Color = bOk ? KindTint.ToFColor(true) : FColor::Red;
+				const FIntPoint Lo(FMath::Min(From.X, Cur.X), FMath::Min(From.Y, Cur.Y)), Hi(FMath::Max(From.X, Cur.X), FMath::Max(From.Y, Cur.Y));
+				const int64 W = (int64)Hi.X - Lo.X + 1, H = (int64)Hi.Y - Lo.Y + 1;
+				const float FloorZ = ActiveLevel * (float)Sim->GetFloorHeightCm();
+				if (W <= RHDistricts::MaxPaintSide && H <= RHDistricts::MaxPaintSide)
+				{
+					const double MidX = Origin.X + 0.5 * (Lo.X + Hi.X) * 1000.0, MidY = Origin.Y + 0.5 * (Lo.Y + Hi.Y) * 1000.0;
+					DrawDebugBox(World, FVector(MidX, MidY, 40.f), FVector(W * 500.f, H * 500.f, 30.f), Color, false, -1.f, 0, 10.f);
+					if (W <= 16 && H <= 16)
+					{
+						for (int32 X = Lo.X; X <= Hi.X; ++X)
+						{
+							for (int32 Y = Lo.Y; Y <= Hi.Y; ++Y)
+							{
+								const FIntPoint P(X, Y);
+								if (Sim->IsShaftColumn(P))
+								{
+									continue;
+								}
+								const bool bDug = Sim->FindFloorCell(ActiveLevel, P) != INDEX_NONE;
+								const FVector C = URHSimWorldSubsystem::LatticeToCm(Origin, P);
+								DrawDebugBox(World, FVector(C.X, C.Y, (bDug ? FloorZ : 0.f) + 40.f), FVector(400.f, 400.f, 25.f), Color, false, -1.f, 0, 4.f);
+							}
+						}
+					}
+				}
+				FString Tip;
+				if (bOk)
+				{
+					const FRHDistrict* Joined = Pre.JoinId != 0 ? Sim->FindDistrict(Pre.JoinId) : nullptr;
+					Tip = FString::Printf(TEXT("DISTRICT %s SHAPE, floor%s %d%s: %lld x %lld cells (%.0f x %.0f m), %d point%s (%d new, %d already dug) - %s"), *KindName,
+						DistrictShapeFloors == 1 ? TEXT("") : TEXT("s"), ActiveLevel, DistrictShapeFloors == 1 ? TEXT("") : *FString::Printf(TEXT(" to %d"), ActiveLevel - DistrictShapeFloors + 1),
+						W, H, W * 10.0, H * 10.0, Pre.CellsInRect, Pre.CellsInRect == 1 ? TEXT("") : TEXT("s"), Pre.CellsNew, Pre.CellsCarved,
+						Joined ? *FString::Printf(TEXT("joins %s"), *Joined->Name) : TEXT("founds a new district"));
+					Tip += bDistrictDragging ? FString::Printf(TEXT("\nrelease to transmit (Δ %.0f sim-s), right-click to cancel"), Sim->GetOrderLagSeconds())
+						: FString(TEXT("\nclick on the rock or the dug floor and drag to paint a rectangle (up to 32 x 32 cells of 10 m); rock may be painted, to zone a cavern before it is dug. Right-click to finish"));
+				}
+				else
+				{
+					Tip = FString::Printf(TEXT("DISTRICT %s SHAPE: %s"), *KindName, *Reason);
+				}
+				HintText = Tip;
+				HintColor = bOk ? KindTint : FLinearColor(1.f, 0.4f, 0.3f);
+				if (bDistrictDragging && !bDistrictForced && !IsInputKeyDown(EKeys::LeftMouseButton))
+				{
+					bDistrictDragging = false;
+					if (bOk)
+					{
+						FRHCommand Cmd;
+						Cmd.Verb = FName("PaintDistrict");
+						Cmd.Target = DistrictKind;
+						Cmd.Level = ActiveLevel;
+						Cmd.Value = DistrictShapeFloors;
+						Cmd.Location = FromCm;
+						Cmd.LocationB = ToCm;
+						Sim->EnqueueCommand(Cmd);
+						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+						SetConfirm(FString::Printf(TEXT("District order transmitted: a %s shape, %lld x %lld cells on %d floor%s"), *KindName, W, H, DistrictShapeFloors, DistrictShapeFloors == 1 ? TEXT("") : TEXT("s")), FLinearColor(0.2f, 0.9f, 1.f));
+					}
+					else
+					{
+						URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+					}
+				}
+			}
+			else if (!bDistrictForced && bDistrictDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
+			{
+				bDistrictDragging = false; // released with no cursor on the ground: nothing to paint
+			}
+		}
+		else if (ActiveLevel < 0)
 		{
 			FString Reason;
 			FRHDistrictPaintPreview Pre;
@@ -1299,6 +1385,17 @@ void ARHPlayerController::Tick(float DeltaTime)
 					DrawDebugBox(World, FVector(PMidX, PMidY, PZ + 20.f), FVector((PHi.X - PLo.X + 1) * 500.f, (PHi.Y - PLo.Y + 1) * 500.f, 20.f), PCol, false, -1.f, 0, 5.f);
 					DrawDebugString(World, FVector(PMidX, PMidY, PZ + 260.f), FString::Printf(TEXT("%s district  Δ %.0fs"), *C.Target.ToString(), PEta), nullptr, FColor(180, 235, 255), 0.f, true, 1.1f);
 				}
+				else if (C.Level < 0 && C.Level == ActiveLevel && C.Value >= 1.0)
+				{
+					// D6b: a shape in flight - its rectangle on the viewed floor, in the Kind's colour, with its countdown.
+					const FVector PHead = Sim->GetShaftHeadCm();
+					const FIntPoint PA = URHSimWorldSubsystem::CmToLattice(PHead, C.Location), PB = URHSimWorldSubsystem::CmToLattice(PHead, C.LocationB);
+					const FIntPoint PLo(FMath::Min(PA.X, PB.X), FMath::Min(PA.Y, PB.Y)), PHi(FMath::Max(PA.X, PB.X), FMath::Max(PA.Y, PB.Y));
+					const double PMidX = PHead.X + 0.5 * (PLo.X + PHi.X) * 1000.0, PMidY = PHead.Y + 0.5 * (PLo.Y + PHi.Y) * 1000.0;
+					DrawDebugBox(World, FVector(PMidX, PMidY, 40.f), FVector((PHi.X - PLo.X + 1) * 500.f, (PHi.Y - PLo.Y + 1) * 500.f, 30.f), PCol, false, -1.f, 0, 8.f);
+					DrawDebugString(World, FVector(PMidX, PMidY, 300.f), FString::Printf(TEXT("%s shape, %d floor%s  Δ %.0fs"), *C.Target.ToString(), FMath::RoundToInt(C.Value), FMath::RoundToInt(C.Value) == 1 ? TEXT("") : TEXT("s"), PEta),
+						nullptr, FColor(180, 235, 255), 0.f, true, 1.1f);
+				}
 				else if (C.Level < 0 && C.Level == ActiveLevel)
 				{
 					const FVector PHead = Sim->GetShaftHeadCm();
@@ -1532,7 +1629,13 @@ void ARHPlayerController::OnClick()
 	}
 	else if (bDistrictMode)
 	{
-		if (ActiveLevel < 0)
+		if (ActiveLevel < 0 && DistrictShapeFloors >= 1)
+		{
+			// D6b: anchor a corner of the shape (the shaft head's lattice); Tick sizes the rectangle and transmits on release.
+			DistrictAnchor = URHSimWorldSubsystem::CmToLattice(Sim->GetShaftHeadCm(), Ground);
+			bDistrictDragging = true;
+		}
+		else if (ActiveLevel < 0)
 		{
 			// Underground a click makes the whole floor a district (the ghost already says if it cannot).
 			FString Reason;
@@ -2022,6 +2125,24 @@ void ARHPlayerController::BeginDistrictPaint(FName Kind)
 	{
 		bDistrictMode = false; // not one of the five kinds: nothing to paint
 	}
+}
+
+void ARHPlayerController::SetDistrictShapeFloors(int32 Floors)
+{
+	DistrictShapeFloors = FMath::Clamp(Floors, 0, RH::CavernMaxFloors);
+	bDistrictDragging = false;
+	bDistrictForced = false;
+}
+
+void ARHPlayerController::Debug_DistrictShapeGhost(FName Kind, int32 Level, int32 Floors, const FIntPoint& FromCell, const FIntPoint& ToCell)
+{
+	SetActiveLevel(Level);
+	BeginDistrictPaint(Kind);
+	SetDistrictShapeFloors(Floors);
+	bDistrictDragging = bDistrictMode;
+	bDistrictForced = bDistrictMode;
+	DistrictAnchor = FromCell;
+	DistrictForcedTo = ToCell;
 }
 
 void ARHPlayerController::Debug_DistrictGhost(FName Kind, const FIntPoint& FromCell, const FIntPoint& ToCell)

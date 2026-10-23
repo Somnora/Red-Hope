@@ -84,6 +84,14 @@ public:
 	// Capture/QA (RH.District ghost): hold the paint ghost mid-drag between two lattice cells, as if
 	// the mouse were down there; it never transmits.
 	void Debug_DistrictGhost(FName Kind, const FIntPoint& FromCell, const FIntPoint& ToCell);
+	// D6b: what an UNDERGROUND press does. 0 (the default) makes the whole floor you are on a district, one click, as always; 1..3 paints
+	// a SHAPE that many floors tall, from the floor you are on and down: press a corner on the rock or the dug floor, drag to the opposite
+	// one (the lattice of the shaft head, 10 m cells, at most 32 x 32), release to transmit. The deck's DISTRICT tab steps it
+	// (whole floor, 1, 2, 3 floors). Rock may be painted, so a cavern can be zoned before it is dug.
+	int32 GetDistrictShapeFloors() const { return DistrictShapeFloors; }
+	void SetDistrictShapeFloors(int32 Floors);
+	// Capture/QA (RH.District shapeghost): hold the shape ghost mid-drag on a floor between two lattice points of the shaft head's frame.
+	void Debug_DistrictShapeGhost(FName Kind, int32 Level, int32 Floors, const FIntPoint& FromCell, const FIntPoint& ToCell);
 	// Paint-to-size excavation (M1-d Gate A2): click anchors a corner on the
 	// active subsurface floor, drag sizes the rectangle, release transmits an
 	// Excavate order counted in 10x10 m cells.
@@ -288,6 +296,7 @@ private:
 	FName DistrictKind;
 	FIntPoint DistrictAnchor = FIntPoint::ZeroValue;
 	FIntPoint DistrictForcedTo = FIntPoint::ZeroValue;
+	int32 DistrictShapeFloors = 0;           // D6b: 0 = an underground click is the whole floor; 1..3 = a shape that many floors tall
 	// Zone designation state (M2 Gate B).
 	bool bZoneMode = false;
 	FName ZoneRoom;

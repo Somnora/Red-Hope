@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 48;  // v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 49;  // v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -5919,6 +5919,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 	JobAssignNow.Reset();
 	if (Colonists.Num() == 0 || !Defs)
 	{
+		BedAssignVersion += ColonistBedPiece.IsEmpty() ? 0u : 1u; // D6b: the floor shapes' home cells read the assignment
 		ColonistBedPiece.Reset();
 		bBedKeyValid = false;
 		if (JobAssignLast.Num() > 0)
@@ -6128,6 +6129,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 	// (it was an every-step O(N^2) before). No furniture = no pieces, as before.
 	if (Furniture.Num() == 0)
 	{
+		BedAssignVersion += ColonistBedPiece.IsEmpty() ? 0u : 1u;
 		ColonistBedPiece.Reset();
 		bBedKeyValid = false;
 	}
@@ -6135,6 +6137,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 	{
 		ColonistBedPiece.Reset();
 		BuildBedAssignments(ByIdOrder);
+		++BedAssignVersion; // D6b: the pieces were re-derived
 		bBedKeyValid = true;
 		BedKeyColonists = ColonistSetVersion;
 		BedKeyFurniture = FurnitureVersion;
@@ -13347,6 +13350,7 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	WriteTransitBlock(Ar); // v46: and the transit block straight after it, so the tunnel block's offsets do not move
 	WriteWarmthBlock(Ar); // v47: and the warmth block straight after that, so the transit block's offsets do not move
 	WriteCavernBlock(Ar); // v48: and the cavern block straight after that, so the warmth block's offsets do not move
+	WriteDeepBlock(Ar);   // v49: and the floor-shape block straight after that, so the cavern block's offsets do not move
 
 	Ar << OrderLagSeconds << FabricatorSpeedMul << NextBuildingId << NextTaskId;
 	uint8 Phase = (uint8)QuotaPhase;
@@ -13811,6 +13815,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	TArray<FRHCavern> LoadedCaverns;
 	int32 LoadedNextCavernId = 1;
 	if (!ReadCavernBlock(Ar, LoadedFloors, LoadedShafts, LoadedTunnels, LoadedCaverns, LoadedNextCavernId, OutError))
+	{
+		return false;
+	}
+	// v49: the floor-shape block (D6b): the district skeleton, the shapes and the growth points, cross-checked on locals, before any teardown.
+	FRHLoadedDeep LoadedDeep;
+	if (!ReadDeepBlock(Ar, LoadedShafts, LoadedDeep, OutError))
 	{
 		return false;
 	}
@@ -14365,11 +14375,36 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Ar << D.Id << D.Kind << D.Name << D.RegionId << D.Level << D.Lattice << DGrowth;
 			D.bGrowth = DGrowth != 0; // v38
 			D.Lattice.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+			// v49 (RC 5): the district's shape is attached BEFORE the whole-floor test below, so a Homes shape and an Industry shape on
+			// one floor are two deep districts and never meet the FloorsHeld test. The block's own cross-checks ran before teardown; a
+			// disagreement left here (a hand-made file) drops the shape with a Warning, never an Error line.
+			for (FRHLoadedDeep::FShape& Shape : LoadedDeep.Shapes)
+			{
+				if (Shape.Id != D.Id)
+				{
+					continue;
+				}
+				if (D.Level < 0 && D.Lattice.IsEmpty())
+				{
+					D.Deep = MoveTemp(Shape.Points);
+					D.Level = D.Deep[0].Z;
+				}
+				else
+				{
+					UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v49: the shape of district #%d disagrees with the district list (level %d, %d surface cell(s)); the shape is dropped"), D.Id, D.Level, D.Lattice.Num());
+					Shape.Points.Reset();
+				}
+				break;
+			}
 			bool bBad = RHDistricts::ResolveKind(D.Kind).IsNone() || D.Id <= 0 || (Districts.Num() > 0 && D.Id <= Districts.Last().Id) || D.Level > 0;
 			if (D.IsFloor())
 			{
 				bBad |= !D.Lattice.IsEmpty() || FloorsHeld.Contains(D.Level);
 				FloorsHeld.Add(D.Level);
+			}
+			else if (D.IsDeep())
+			{
+				bBad |= !D.Lattice.IsEmpty() || D.Level != D.Deep[0].Z; // its points were cross-checked before teardown
 			}
 			else
 			{
@@ -14411,6 +14446,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Ar << P.DistrictId << PKind << P.Level << P.Cell << P.Size << P.HabId << P.Cells << P.FirstCell << P.Index << PCarve << P.Room << P.TotalSols << P.RemainingSols;
 			P.Kind = (ERHGrowthKind)PKind;
 			P.bCarve = PCarve != 0;
+			// v49: a project inside a floor shape holds its lattice points, from the deep block (by DistrictId, on the project's floor).
+			for (const FRHLoadedDeep::FProjectPoints& Held : LoadedDeep.Projects)
+			{
+				if (Held.DistrictId == P.DistrictId && Held.Level == P.Level)
+				{
+					P.Points = Held.Points;
+					break;
+				}
+			}
 			int32 BillCount = 0;
 			Ar << BillCount;
 			for (int32 b = 0; b < BillCount; ++b)
@@ -14421,8 +14465,16 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				P.Bill.Add(Key, Kg);
 			}
 			const FRHDistrict* Owner = FindDistrict(P.DistrictId);
-			const bool bKindOk = Owner && PKind <= (uint8)ERHGrowthKind::CivicRoom && ((P.Kind == ERHGrowthKind::CivicRoom) == (Owner->Kind == FName(TEXT("Civic"))));
+			const bool bKindOk = Owner && PKind <= (uint8)ERHGrowthKind::DeepCells && ((P.Kind == ERHGrowthKind::CivicRoom) == (Owner->Kind == FName(TEXT("Civic"))));
 			const bool bSorted = GrowthProjects.Num() == 0 || GrowthProjects.Last().DistrictId < P.DistrictId;
+			// v49: a Homes project inside a shape is DeepCells with its points; a project of a shape (Civic) has its one point; no other kind has any.
+			const bool bDeepOk = !Owner || (P.Kind == ERHGrowthKind::DeepCells ? (Owner->IsDeep() && Owner->Kind == FName(TEXT("Homes")) && P.Points.Num() > 0)
+				: (Owner->IsDeep() ? (P.Kind == ERHGrowthKind::CivicRoom && P.Points.Num() == 1) : P.Points.IsEmpty()));
+			if (bKindOk && bSorted && !bDeepOk)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v49: the growth project of district #%d does not fit its shape (its points are missing or it has none); dropped"), P.DistrictId);
+				continue;
+			}
 			if (!bKindOk || !bSorted)
 			{
 				UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v38: the growth project of district #%d is malformed (no such district, the wrong kind, or out of order); dropped"), P.DistrictId);
