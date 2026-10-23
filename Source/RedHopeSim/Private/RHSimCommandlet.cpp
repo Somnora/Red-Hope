@@ -20,6 +20,8 @@ int32 RHRunDepthSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSub
 int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // D6b floor shapes: the -deepdistricts suite lives in RHSimDeepDistrictSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunDeepDistrictsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// D6c deep commute: the -deepcommute suite lives in RHSimDeepCommuteSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunDeepCommuteSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -14663,6 +14665,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	{
 		return RHRunDeepDistrictsSuite(World, Clock, Sim);
 	}
+	// D6c deep commute self-test (walks through digs and tunnels, and by shaft where digs are not joined, on floors that hold a shape), fails loudly. `-deepcommute`.
+	if (FParse::Param(*Params, TEXT("deepcommute")))
+	{
+		return RHRunDeepCommuteSuite(World, Clock, Sim);
+	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
 	{
@@ -16670,6 +16677,113 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Expect(PreAccepted == 2000 && PreMs <= 100.0, FString::Printf(TEXT("budget: 2,000 accepted preflights of a full-size box took %.3f ms (<= 100; %d accepted)"), PreMs, PreAccepted));
 				Expect(CarveTotalMs <= 20.0, FString::Printf(TEXT("budget: carving %d cavern cells took %.2f ms (<= 20)"), CavernCells, CarveTotalMs));
 				Expect(LabelWorst <= 1.0, FString::Printf(TEXT("budget: a cold dig labelling of a floor a cavern has grown took %.4f ms worst of three (<= 1, the four-dig budget)"), LabelWorst));
+			}
+
+			// D6c: the deep commute at scale. All twenty floors of the colony are mapped (a one-point Homes shape on each, three orders of up to eight
+			// floors), a 26-cell tunnel is carved off shaft 0's dig on every floor (so each floor has a door and a chain), and every one of the 5,000+
+			// colonists is re-homed on the twenty floors, 30% of them sitting in a floor cell (some on another floor), the rest at a surface workplace.
+			// Run last, so no number above moves. Here: the cold walk network (all twenty floors), a cold commute with transit on (the network, the
+			// position memo and the trips), flows only (a JobsVersion bump with a warm network), and a warm read. Wall clock.
+			{
+				constexpr int32 MapFloors = 20;
+				// The five whole-floor districts of the commute block above go first: a floor is whole or shaped, never both.
+				for (const FRHDistrict& Old : TArray<FRHDistrict>(Sim->GetDistricts()))
+				{
+					if (Old.IsFloor())
+					{
+						FRHCommand Erase;
+						Erase.Verb = FName("EraseDistrict");
+						Erase.Value = (double)Old.Id;
+						Sim->EnqueueCommand(Erase);
+					}
+				}
+				EraStepOnce();
+				FString PaintRejects;
+				const FDelegateHandle PaintRejectH = Sim->OnCommandRejected.AddLambda([&PaintRejects](const FRHCommand&, const FString& Why) { PaintRejects += Why + TEXT(" | "); });
+				for (int32 Order = 0; Order < 3; ++Order)
+				{
+					FRHCommand Paint;
+					Paint.Verb = FName("PaintDistrict");
+					Paint.Target = FName("Homes");
+					Paint.Level = -(1 + Order * 8);
+					Paint.Value = Order < 2 ? 8.0 : 4.0;
+					Paint.Location = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), FIntPoint(300 + Order * 4, 300));
+					Paint.LocationB = Paint.Location;
+					Sim->EnqueueCommand(Paint);
+				}
+				for (int32 K = 0; K < 10 && Sim->GetUplinkQueue().Num() > 0; ++K) { EraStepOnce(); } // the uplink lag: each order lands within a step or two
+				Sim->OnCommandRejected.Remove(PaintRejectH);
+				int32 Mapped = 0, Tunnelled = 0;
+				for (int32 L = 1; L <= MapFloors; ++L) { Mapped += Sim->IsFloorMapped(-L) ? 1 : 0; }
+				for (int32 L = 1; L <= MapFloors; ++L)
+				{
+					const FIntPoint Column = Sim->GetShaft(0).Column;
+					bool bDug = false;
+					for (int32 Dx = 6; Dx <= 14 && !bDug; ++Dx)
+					{
+						for (int32 Dy = -6; Dy <= 6 && !bDug; ++Dy)
+						{
+							const FIntPoint A = Column + FIntPoint(Dx, Dy), B = A + FIntPoint(25, 0);
+							int32 TunnelId = INDEX_NONE;
+							FString TunnelWhy2;
+							if (Sim->Debug_DigTunnel(-L, A, B, TunnelId, TunnelWhy2))
+							{
+								bDug = Sim->Debug_CarveTunnelCells(TunnelId, 26) == 26;
+							}
+						}
+					}
+					Tunnelled += bDug ? 1 : 0;
+				}
+				Expect(Mapped == MapFloors && Tunnelled == MapFloors,
+					FString::Printf(TEXT("deep commute: %d of %d floors mapped, a 26-cell tunnel carved on %d of them (%s)"), Mapped, MapFloors, Tunnelled, *PaintRejects));
+				Sim->Debug_ClearColonistStations();
+				{
+					int32 Index = 0;
+					for (const FRHColonist& C : TArray<FRHColonist>(Sim->GetColonists()))
+					{
+						Sim->Debug_SetColonistHome(C.Id, 0, -(1 + Index % MapFloors));
+						if (Index % 10 < 7)
+						{
+							Sim->Debug_SetColonistStation(C.Id, FIntVector(0, INDEX_NONE, Habs[(Index * 7 + 3) % Habs.Num()]));
+						}
+						else
+						{
+							const int32 WorkFloor = 1 + (Index * 3 + 1) % MapFloors;
+							Sim->Debug_SetColonistStation(C.Id, FIntVector(-WorkFloor, (Index * 13 + 5) % FMath::Max(1, Sim->GetFloorCarvedCells(-WorkFloor)), 0));
+						}
+						++Index;
+					}
+				}
+				Sim->Debug_SetCommuteTuning(0.0, 1.0, 30000.0, 6000.0);
+				Sim->Debug_ReroutePosition();
+				const int32 WalkBuilds0 = Sim->GetDeepWalkBuilds();
+				const double WK0 = FPlatformTime::Seconds();
+				const int32 Landing0 = Sim->Debug_WalkLanding(-1, 0);
+				const double WalkMs = (FPlatformTime::Seconds() - WK0) * 1000.0;
+				const int32 WalkBuilds = Sim->GetDeepWalkBuilds() - WalkBuilds0;
+				Sim->Debug_ReroutePosition();
+				const double DC0 = FPlatformTime::Seconds();
+				const URHSimWorldSubsystem::FRHCommuteSummary DeepCold2 = Sim->GetCommuteSummary();
+				const double DeepCommuteColdMs = (FPlatformTime::Seconds() - DC0) * 1000.0;
+				const int32 Walked = Sim->GetCommuteWalked(), OffNet = Sim->GetCommuteOffNet();
+				double FlowsSum = 0.0;
+				for (int32 K = 0; K < 20; ++K) { Sim->Debug_BumpJobsVersion(); const double F0 = FPlatformTime::Seconds(); Sim->GetCommuteSummary(); FlowsSum += FPlatformTime::Seconds() - F0; }
+				const double DeepCommuteFlowsMs = FlowsSum * 1000.0 / 20.0;
+				double WarmSink2 = 0.0;
+				const double WM0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 2000; ++K) { WarmSink2 += Sim->GetCommuteSummary().Penalty; }
+				const double DeepCommuteWarmMs = (FPlatformTime::Seconds() - WM0) * 1000.0 / 2000.0;
+				Expect(Landing0 != INDEX_NONE && WalkBuilds == 1 && DeepCold2.Employed == Sim->GetPopulation() && Walked + OffNet == Sim->GetPopulation() && Walked > Sim->GetPopulation() * 9 / 10 && Sim->Debug_CommuteCachesFresh() && Sim->Debug_DeepWalkFresh(),
+					FString::Printf(TEXT("deep commute: all %d colonists measured on twenty mapped floors - %d walked, %d off the net, %d long; the network built once, the caches fresh"), DeepCold2.Employed, Walked, OffNet, DeepCold2.LongCommuters));
+				UE_LOG(LogRedHopeSim, Display, TEXT("SCALE deep commute (20 mapped floors, 20 tunnels, %d colonists, transit on): cold walk network %.3f ms | cold commute (network, memo, trips) %.3f ms | flows only %.3f ms | warm read %.5f ms (sink %.4f) | %d walked, %d off the net"),
+					Sim->GetPopulation(), WalkMs, DeepCommuteColdMs, DeepCommuteFlowsMs, DeepCommuteWarmMs, WarmSink2, Walked, OffNet);
+				Expect(WalkMs <= 5.0, FString::Printf(TEXT("budget: a cold walk network over twenty mapped floors took %.3f ms (<= 5)"), WalkMs));
+				Expect(DeepCommuteColdMs <= 10.0, FString::Printf(TEXT("budget: a cold commute with transit on, 20 mapped floors and %d colonists, took %.3f ms (<= 10)"), Sim->GetPopulation(), DeepCommuteColdMs));
+				// Not a spec budget (D6c asks for the two above and unchanged warm reads): on a mapped floor a trip is a pair of CELLS, so 4,800 residents
+				// are 4,800 distinct trips to measure from memory and sort (about 0.4 ms of it the sort), where the unshaped colonies above have a few hundred.
+				// Guarded at 3 ms so a regression shows; the figure against the 1 ms line of those colonies is a finding, reported, not a budget edit.
+				Expect(DeepCommuteFlowsMs <= 3.0, FString::Printf(TEXT("guard: flows only over twenty mapped floors (4,800 distinct trips, a pair of cells each) took %.3f ms (<= 3; the 1 ms line of the unshaped colonies is not asked of this)"), DeepCommuteFlowsMs));
+				Expect(DeepCommuteWarmMs <= 0.01, FString::Printf(TEXT("budget: a warm commute read took %.5f ms (<= 0.01)"), DeepCommuteWarmMs));
 			}
 		}
 

@@ -1951,6 +1951,8 @@ public:
 		int32 Count = 0;
 		int64 DistCm = 0;
 		TArray<int32> EdgeIds;                        // the road edges the surface part rides (may be empty)
+		int32 HomeCell = INDEX_NONE, WorkCell = INDEX_NONE; // D6c: the cell ordinals of a trip walked through a mapped floor (INDEX_NONE for every other trip and for a surface end)
+		int32 ShaftId = INDEX_NONE, ShaftId2 = INDEX_NONE;  // D6c: the shaft(s) a walked trip rides (INDEX_NONE: none); a trip that is not walked reads INDEX_NONE here
 	};
 	double GetCommuteRamp() const;
 	FRHCommuteSummary GetCommuteSummary() const;
@@ -1970,6 +1972,18 @@ public:
 	int64 GetCommuteDistanceCm(int32 HomeLevel, FIntPoint HomePosCm, int32 WorkLevel, FIntPoint WorkPosCm, int32 Ordinal = 0) const;
 	// D4: the people part of a shaft's load as the flows count it (commuters through it, before the x 2 and the ramp).
 	int32 GetCommuteShaftPeople(int32 ShaftId) const;
+	// D6c: colonists measured through the deep walk, and colonists on a trip that touches a mapped floor but keeps the head anchor (off the net).
+	int32 GetCommuteWalked() const;
+	int32 GetCommuteOffNet() const;
+	int32 GetDeepWalkBuilds() const { return DeepWalkBuilds; }
+	// Harness: walking cm between two cells (ordinals) of a mapped floor; -1 when the floor is not mapped or there is no way through.
+	int64 Debug_WalkCm(int32 Level, int32 CellA, int32 CellB) const;
+	// Harness: the ordinal of shaft S's landing on a mapped floor (INDEX_NONE: none, or not mapped).
+	int32 Debug_WalkLanding(int32 Level, int32 ShaftId) const;
+	// Harness: the walk network's own key fields of the commute key (both 0 for ever while no floor is mapped).
+	void Debug_DeepWalkKey(uint32& OutTunnels, uint32& OutShafts) const;
+	// Harness: true unless the cached walk network is being REUSED while stale (its key matches but a fresh build differs).
+	bool Debug_DeepWalkFresh() const { return IsDeepWalkFresh(); }
 	// Cache counters, for the suites: how many times the flows were rebuilt, how many Dijkstras the position memo has run.
 	int32 GetCommuteFlowRebuilds() const { return CommuteFlowRebuilds; }
 	int32 GetCommuteDijkstraRuns() const { return CommuteDijkstraRuns; }
@@ -2596,11 +2610,13 @@ private:
 		int32 BuildingCount = 0, NextBuilding = 0;
 		uint32 Lift = 0, TransitWait = 0;    // D4: LiftVersion and TransitWaitVersion (two fields, so no two bumps collide); 0 with no car
 		uint32 DeepCells = 0, DeepBeds = 0;  // D6b (RC 6): the floor shapes' district rows move with a carve and with the bed assignment; 0 for ever with no shape
+		uint32 DeepTunnels = 0, DeepShafts = 0; // D6c (RC 6): the people's walk network also moves with a tunnel order and a shaft (separate fields, so no two bumps collide); 0 for ever with no mapped floor
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
 				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding
-				&& Lift == O.Lift && TransitWait == O.TransitWait && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds;
+				&& Lift == O.Lift && TransitWait == O.TransitWait && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds
+				&& DeepTunnels == O.DeepTunnels && DeepShafts == O.DeepShafts;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -2627,7 +2643,9 @@ private:
 	};
 	// D4: ShaftId is the shaft a floor-to-surface trip uses with transit on (INDEX_NONE for a trip with no shaft, for a split
 	// floor-to-floor trip, and always with no car: then nothing reads it).
-	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; int32 ShaftId = INDEX_NONE; };
+	// D6c: HomeCell and WorkCell are the cell ordinals of a trip measured through the deep walk (INDEX_NONE for every other trip and for a
+	// surface end); ShaftId2 is the second shaft of a trip that rides two (INDEX_NONE otherwise); bDeep marks a walked trip.
+	struct FRHCommuteTrip { int32 HomeLevel = 0, WorkLevel = 0; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; int32 HomeDistrict = 0, WorkDistrict = 0; int32 Count = 0; int64 DistCm = 0; bool bMeasured = false; int32 Cell = 0; bool bLong = false; int32 ShaftId = INDEX_NONE; int32 HomeCell = INDEX_NONE, WorkCell = INDEX_NONE, ShaftId2 = INDEX_NONE; bool bDeep = false; };
 	struct FRHCommuteFlows
 	{
 		bool bValid = false;
@@ -2638,6 +2656,7 @@ private:
 		TArray<int64> Dists;
 		TArray<int32> LongIds;              // ascending
 		int32 Employed = 0, Commuters = 0, LongCount = 0;
+		int32 Walked = 0, OffNet = 0;       // D6c: colonists measured through the deep walk; colonists on a trip that touches a mapped floor but keeps the head anchor (no walk)
 		int64 MaxDistCm = 0;
 		TArray<FRHCommuteTrip> Trips;       // distinct trips, sorted by anchors
 		TArray<int32> ShaftPeople;          // D4: commuters per shaft (index = shaft Id), with transit on only; StepTransit reads it
@@ -2669,6 +2688,69 @@ private:
 	void CommuteReachList(int32 Level, TArray<int32>& Out) const;
 	void CommuteFillEdgeLoad(const FRHCommuteFlows& F) const;
 	void ResetCommuteMemoIfStale() const;
+
+	// D6c (the deep commute): the PEOPLE's walk network of a MAPPED floor (one that holds a floor shape), derived and never saved - a
+	// pure function of (the floor's cells, the tunnels, the shafts, the districts). Compartments are the 4-connected components of carved
+	// cells that are not tunnel chain points; a person walks the octile line inside one (1000 x max(|dx|,|dy|) + 414 x min, in integer cm)
+	// and tunnel cells cell by cell (1000 cm a step). The nodes are the chain cells, the DOORS (a compartment cell 4-adjacent to a carved
+	// chain cell) and the LANDINGS (the lowest-ordinal carved 4-neighbour of a reaching shaft's column); the graph's edges are the
+	// 4-adjacencies between chain cells and doors (1000 cm) and the octile line between two nodes of one compartment. One integer Dijkstra
+	// runs per door and landing (and, lazily, per chain cell an end stands on). People change floors only by shaft: no stairs (D7).
+	struct FRHWalkFloor
+	{
+		int32 Level = 0;
+		TArray<FIntPoint> Pts;                 // ordinal -> lattice point
+		TArray<int32> CompOf;                  // ordinal -> compartment (INDEX_NONE: a tunnel chain cell)
+		TArray<int32> NodeOf;                  // ordinal -> node (INDEX_NONE: no node)
+		TArray<int32> NodeOrdinal;             // node -> ordinal, ascending
+		TArray<TArray<int32>> CompNodes;       // compartment -> its doors and landings (nodes, ascending)
+		TArray<TArray<TPair<int32, int64>>> Adj; // node -> (node, cm): the 4-adjacencies between chain cells and doors
+		TArray<int32> LandingOrd;              // shaft Id -> the landing's ordinal on this floor (INDEX_NONE: none)
+		mutable TArray<TArray<int64>> Field;   // node -> cm to every node (MAX_int64: none); empty until computed (a door or landing is computed at build)
+		mutable TArray<TArray<int64>> LandWalk; // shaft Id -> cell -> walking cm to that shaft's landing (MAX_int64: none; MIN_int64: not asked yet); filled on demand
+	};
+	// One end of a deep trip: a surface point (Level 0) or a carved cell of a mapped floor (Level < 0).
+	struct FRHDeepEnd { int32 Level = 0; int32 Cell = INDEX_NONE; FIntPoint SurfacePos = FIntPoint::ZeroValue; };
+	struct FRHDeepTrip { int64 DistCm = 0; int32 Shaft1 = INDEX_NONE, Shaft2 = INDEX_NONE; FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; };
+	struct FRHDeepTripKey
+	{
+		int32 HomeLevel = 0, HomeCell = INDEX_NONE, WorkLevel = 0, WorkCell = INDEX_NONE;
+		FIntPoint HomePos = FIntPoint::ZeroValue, WorkPos = FIntPoint::ZeroValue; // a surface end's point (zero for a floor end)
+		bool operator==(const FRHDeepTripKey& O) const { return HomeLevel == O.HomeLevel && HomeCell == O.HomeCell && WorkLevel == O.WorkLevel && WorkCell == O.WorkCell && HomePos == O.HomePos && WorkPos == O.WorkPos; }
+		friend uint32 GetTypeHash(const FRHDeepTripKey& K)
+		{
+			uint32 H = HashCombine(::GetTypeHash(K.HomeLevel), ::GetTypeHash(K.HomeCell));
+			H = HashCombine(H, HashCombine(::GetTypeHash(K.WorkLevel), ::GetTypeHash(K.WorkCell)));
+			return HashCombine(H, HashCombine(GetTypeHash(K.HomePos), GetTypeHash(K.WorkPos)));
+		}
+	};
+	struct FRHDeepTripMemo { bool bOk = false; FRHDeepTrip Trip; };
+	struct FRHDeepWalk
+	{
+		bool bValid = false;
+		uint32 Cells = 0, Tunnels = 0, Shafts = 0, Districts = 0;
+		TMap<int32, FRHWalkFloor> Floors;      // mapped Level -> its network; lookups only, never iterated
+		// Trips remembered while the cars, the built roads and the commute tuning stand as they were (a pure function of those and the network;
+		// it dies with the network). Lookups only; dropped when it passes 65,536 trips.
+		mutable TMap<FRHDeepTripKey, FRHDeepTripMemo> Trips;
+		mutable uint32 TripsLift = 0, TripsBuilt = 0, TripsCfg = 0;
+	};
+	mutable FRHDeepWalk DeepWalk;
+	mutable int32 DeepWalkBuilds = 0;
+	const FRHDeepWalk& EnsureDeepWalk() const;
+	void DeriveDeepWalk(FRHDeepWalk& Out) const;
+	bool IsDeepWalkFresh() const;
+	void BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const;
+	static void RunWalkField(const FRHWalkFloor& F, int32 Source, TArray<int64>& Out);
+	const TArray<int64>& WalkFieldFrom(const FRHWalkFloor& F, int32 Node) const;
+	// Walking cm between two cells of one mapped floor (MAX_int64: no way through the digs and tunnels).
+	int64 WalkCm(const FRHWalkFloor& F, int32 CellA, int32 CellB) const;
+	// The wait-free route of a trip with an end on a mapped floor (DistCm has no wait in it: DeepTripWaitCm adds each shaft ridden's own).
+	// False: off the net (an end has no door path to a landing, or a floor has none) - the caller keeps the head anchor. The answer is a
+	// pure function of the network, the cars, the built roads and the commute tuning, so it is remembered for as long as those stand.
+	bool MeasureDeepTrip(const FRHDeepEnd& Home, const FRHDeepEnd& Work, FRHDeepTrip& Out) const;
+	bool ComputeDeepTrip(const FRHDeepEnd& Home, const FRHDeepEnd& Work, FRHDeepTrip& Out) const;
+	int64 DeepTripWaitCm(const FRHDeepTrip& Trip) const;
 
 	// Districts (C5a). SAVED (v37): the list (ascending Id, each with its sorted lattice) and
 	// the next Id. Everything below it is DERIVED and rebuilt lazily; nothing derived is saved.

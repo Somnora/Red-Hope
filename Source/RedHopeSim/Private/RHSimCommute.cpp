@@ -67,6 +67,8 @@ K.BuildingCount = Buildings.Num();
 	{
 		K.DeepCells = FloorCellsVersion; // D6b (RC 6): 0 for ever while no floor shape exists
 		K.DeepBeds = BedAssignVersion;
+		K.DeepTunnels = TunnelsVersion;  // D6c (RC 6): the people's walk network (cells, tunnels, shafts, districts), all 0 for ever with no mapped floor
+		K.DeepShafts = ShaftsVersion;
 	}
 	return K;
 }
@@ -333,11 +335,58 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 	const bool bAnyShape = Geo.DeepFloor.Num() > 0;
 	TMap<TTuple<uint64, uint64>, int32> ShapeTripIndex; // lookups only
 	TMap<uint64, int32> ShapePairCount;                  // lookups only
+	// D6c: on a mapped floor a trip is keyed by its two ends' cells (a home cell, a seat or module cell), and measured through the deep walk.
+	TMap<TTuple<uint64, uint64>, int32> DeepTripIndex;   // lookups only
+	if (bAnyShape)
+	{
+		DeepTripIndex.Reserve(TripHint);
+	}
 	const FRHDeepHomes* ShapeHomes = bAnyShape ? &EnsureDeepHomes() : nullptr;
 	const auto ShapeDistrictOfCell = [this, &Geo](int32 Level, int32 Ordinal) -> int32
 	{
 		const FIntPoint P = GetFloorCell(Level, Ordinal);
 		return Geo.DeepOwner.FindRef(FIntVector(P.X, P.Y, Level));
+	};
+	// A floor module's cell (a module station is (Level, INDEX_NONE, Building Id)): INDEX_NONE when it stands on no carved cell.
+	const auto FloorModuleCell = [this](int32 BuildingId, int32 Level)
+	{
+		const int32 At = Algo::BinarySearchBy(Buildings, BuildingId, [](const FRHBuildingInstance& Bd) { return Bd.Id; });
+		if (At == INDEX_NONE || Buildings[At].Level != Level)
+		{
+			return (int32)INDEX_NONE;
+		}
+		return FindCarvedCellAt(Level, Buildings[At].LocationCm);
+	};
+	// The district rows of a trip that touches a mapped floor: the same lookups the membership uses (a whole floor's owner, else the shape
+	// holding the home or work cell).
+	const auto ResolveShapeDistricts = [&](const FRHColonist& Col, const FIntVector& Seat, int32& OutHome, int32& OutWork)
+	{
+		OutHome = 0;
+		OutWork = 0;
+		if (Col.HomeHab != 0)
+		{
+			OutHome = Mem.OfBuilding.FindRef(Col.HomeHab);
+		}
+		else if (const int32* WholeHome = Geo.FloorOwner.Find(Col.HomeLevel))
+		{
+			OutHome = *WholeHome;
+		}
+		else if (const int32* HomeCell = ShapeHomes->HomeCell.Find(Col.Id))
+		{
+			OutHome = ShapeDistrictOfCell(Col.HomeLevel, *HomeCell);
+		}
+		if (Seat.Y == INDEX_NONE || Seat.X >= 0)
+		{
+			OutWork = Mem.OfBuilding.FindRef(Seat.Z);
+		}
+		else if (const int32* WholeWork = Geo.FloorOwner.Find(Seat.X))
+		{
+			OutWork = *WholeWork;
+		}
+		else
+		{
+			OutWork = ShapeDistrictOfCell(Seat.X, Seat.Y);
+		}
 	};
 	Out.Trips.Reserve(TripHint);
 	Out.Ids.Reserve(Colonists.Num());
@@ -372,47 +421,91 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		int32 ShapeHomeDistrict = 0, ShapeWorkDistrict = 0;
 		int32 TripSlot;
 		const int32* Found = nullptr;
+		// D6c: each end of a trip that touches a mapped floor is a surface building or a cell of a mapped floor. A trip with any other
+		// end (an unmapped floor, a resident with no home cell, a module on no cell) is OFF THE NET and keeps D6b's head anchor.
+		FRHDeepEnd HomeEnd, WorkEnd;
+		bool bDeepTrip = false;
 		if (bShapeTrip)
 		{
-			// The same lookups the membership uses (a whole floor's owner, else the shape holding the home or work cell).
+			bool bEnds = true;
 			if (C.HomeHab != 0)
 			{
-				ShapeHomeDistrict = Mem.OfBuilding.FindRef(C.HomeHab);
-			}
-			else if (const int32* WholeHome = Geo.FloorOwner.Find(C.HomeLevel))
-			{
-				ShapeHomeDistrict = *WholeHome;
-			}
-			else if (const int32* HomeCell = ShapeHomes->HomeCell.Find(C.Id))
-			{
-				ShapeHomeDistrict = ShapeDistrictOfCell(C.HomeLevel, *HomeCell);
-			}
-			if (Station->Y == INDEX_NONE || Station->X >= 0)
-			{
-				ShapeWorkDistrict = Mem.OfBuilding.FindRef(Station->Z);
-			}
-			else if (const int32* WholeWork = Geo.FloorOwner.Find(Station->X))
-			{
-				ShapeWorkDistrict = *WholeWork;
+				bEnds &= SurfaceBuildingPos(C.HomeHab, HomeEnd.SurfacePos);
 			}
 			else
 			{
-				ShapeWorkDistrict = ShapeDistrictOfCell(Station->X, Station->Y);
+				HomeEnd.Level = C.HomeLevel;
+				const int32* HomeCellOrd = Geo.DeepFloor.Contains(C.HomeLevel) ? ShapeHomes->HomeCell.Find(C.Id) : nullptr;
+				bEnds &= HomeCellOrd != nullptr;
+				HomeEnd.Cell = HomeCellOrd ? *HomeCellOrd : (int32)INDEX_NONE;
 			}
-			Found = ShapeTripIndex.Find(MakeTuple(TripKey, ((uint64)(uint32)ShapeHomeDistrict << 32) | (uint64)(uint32)ShapeWorkDistrict));
+			if (Station->X < 0)
+			{
+				WorkEnd.Level = Station->X;
+				WorkEnd.Cell = Geo.DeepFloor.Contains(Station->X) ? (Station->Y != INDEX_NONE ? Station->Y : FloorModuleCell(Station->Z, Station->X)) : (int32)INDEX_NONE;
+				bEnds &= WorkEnd.Cell != INDEX_NONE;
+			}
+			else
+			{
+				bEnds &= SurfaceBuildingPos(Station->Z, WorkEnd.SurfacePos);
+			}
+			bDeepTrip = bEnds;
+		}
+		const TTuple<uint64, uint64> DeepKey(((uint64)(uint32)HomeKey << 32) | (uint64)(uint32)HomeEnd.Cell, ((uint64)(uint32)WorkKey << 32) | (uint64)(uint32)WorkEnd.Cell);
+		if (bShapeTrip)
+		{
+			if (bDeepTrip)
+			{
+				Found = DeepTripIndex.Find(DeepKey); // keyed by cells: the district rows are worked out when the trip is made
+			}
+			else
+			{
+				ResolveShapeDistricts(C, *Station, ShapeHomeDistrict, ShapeWorkDistrict);
+				Found = ShapeTripIndex.Find(MakeTuple(TripKey, ((uint64)(uint32)ShapeHomeDistrict << 32) | (uint64)(uint32)ShapeWorkDistrict));
+			}
 		}
 		else
 		{
 			Found = TripIndex.Find(TripKey);
 		}
+		// D6c: a new trip on the net is measured through the deep walk; one the walk cannot reach falls through to the head anchor below.
+		FRHDeepTrip Walk;
+		const bool bWalked = !Found && bDeepTrip && MeasureDeepTrip(HomeEnd, WorkEnd, Walk);
 		if (Found)
 		{
 			TripSlot = *Found;
 		}
+		else if (bWalked)
+		{
+			ResolveShapeDistricts(C, *Station, ShapeHomeDistrict, ShapeWorkDistrict);
+			TripSlot = Out.Trips.AddDefaulted();
+			DeepTripIndex.Add(DeepKey, TripSlot);
+			FRHCommuteTrip& T = Out.Trips[TripSlot];
+			T.bMeasured = true;
+			T.bDeep = true;
+			T.HomeLevel = HomeEnd.Level; T.HomePos = Walk.HomePos; T.WorkLevel = WorkEnd.Level; T.WorkPos = Walk.WorkPos;
+			T.HomeCell = HomeEnd.Cell; T.WorkCell = WorkEnd.Cell;
+			T.HomeDistrict = ShapeHomeDistrict; T.WorkDistrict = ShapeWorkDistrict;
+			T.DistCm = Walk.DistCm + DeepTripWaitCm(Walk); // the route was chosen wait-free; each shaft ridden adds its own wait
+			T.bLong = T.DistCm > CommuteLongCm;
+			T.Cell = DistrictIndex(ShapeHomeDistrict) * Out.Dim + DistrictIndex(ShapeWorkDistrict);
+			T.ShaftId = Walk.Shaft1; // set with or without a car: the readout names the shaft a walked trip rides
+			T.ShaftId2 = Walk.Shaft2;
+			if (bTransit)
+			{
+				TripReach.SetNum(Out.Trips.Num()); // a walked trip is never split: its shafts are fixed
+				TripDistSum.SetNum(Out.Trips.Num());
+			}
+		}
 		else
 		{
 			TripSlot = Out.Trips.AddDefaulted();
-			if (bShapeTrip)
+			if (bDeepTrip)
+			{
+				ResolveShapeDistricts(C, *Station, ShapeHomeDistrict, ShapeWorkDistrict);
+				DeepTripIndex.Add(DeepKey, TripSlot); // off the net: the head anchor, one slot a pair of cells
+			}
+			else if (bShapeTrip)
 			{
 				ShapeTripIndex.Add(MakeTuple(TripKey, ((uint64)(uint32)ShapeHomeDistrict << 32) | (uint64)(uint32)ShapeWorkDistrict), TripSlot);
 			}
@@ -421,6 +514,8 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 				TripIndex.Add(TripKey, TripSlot);
 			}
 			FRHCommuteTrip& T = Out.Trips[TripSlot];
+			T.HomeCell = bDeepTrip ? HomeEnd.Cell : (int32)INDEX_NONE; // the sort's tie-break: several off-net trips share one head Pos (RC 11)
+			T.WorkCell = bDeepTrip ? WorkEnd.Cell : (int32)INDEX_NONE;
 			FAnchor Home, Work;
 			int32 HomeDistrictId = 0, WorkDistrictId = 0;
 			bool bOk = true;
@@ -513,7 +608,19 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 			else if (Trip.ShaftId != INDEX_NONE && Out.ShaftPeople.IsValidIndex(Trip.ShaftId))
 			{
 				++Out.ShaftPeople[Trip.ShaftId];
+				if (Trip.ShaftId2 != INDEX_NONE && Out.ShaftPeople.IsValidIndex(Trip.ShaftId2))
+				{
+					++Out.ShaftPeople[Trip.ShaftId2]; // a walked trip that rides two shafts loads both
+				}
 			}
+		}
+		if (Trip.bDeep)
+		{
+			++Out.Walked;
+		}
+		else if (bShapeTrip)
+		{
+			++Out.OffNet;
 		}
 		++Trip.Count;
 		++Out.Employed;
@@ -586,7 +693,10 @@ void URHSimWorldSubsystem::DeriveCommuteFlows(FRHCommuteFlows& Out) const
 		// D6b: trips of one floor pair that differ only in their districts (a shaped floor). Every other pair of trips is already
 		// distinct above, so this moves nothing for a colony with no shape.
 		if (A.HomeDistrict != B.HomeDistrict) { return A.HomeDistrict < B.HomeDistrict; }
-		return A.WorkDistrict < B.WorkDistrict;
+		if (A.WorkDistrict != B.WorkDistrict) { return A.WorkDistrict < B.WorkDistrict; }
+		// D6c (RC 11): trips on a mapped floor that share a head Pos and both districts differ only in their cells.
+		if (A.HomeCell != B.HomeCell) { return A.HomeCell < B.HomeCell; }
+		return A.WorkCell < B.WorkCell;
 	});
 }
 
@@ -604,7 +714,7 @@ const URHSimWorldSubsystem::FRHCommuteFlows& URHSimWorldSubsystem::EnsureCommute
 		DeriveCommuteFlows(Fresh);
 		if (Fresh.Flow != CommuteFlows.Flow || Fresh.LongFlow != CommuteFlows.LongFlow || Fresh.Ids != CommuteFlows.Ids
 			|| Fresh.Dists != CommuteFlows.Dists || Fresh.LongIds != CommuteFlows.LongIds || Fresh.LongCount != CommuteFlows.LongCount
-			|| Fresh.ShaftPeople != CommuteFlows.ShaftPeople)
+			|| Fresh.ShaftPeople != CommuteFlows.ShaftPeople || Fresh.Walked != CommuteFlows.Walked || Fresh.OffNet != CommuteFlows.OffNet)
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: the commute flows cache is stale (%d long reused, %d re-derived; districts v%u, colonists v%u, jobs v%u, built v%u)"),
 				CommuteFlows.LongCount, Fresh.LongCount, DistrictsVersion, ColonistSetVersion, JobsVersion, RoadGraph.BuiltVersion);
@@ -623,13 +733,15 @@ bool URHSimWorldSubsystem::Debug_CommuteCachesFresh() const
 	DeriveCommuteFlows(Fresh);
 	return Fresh.Flow == CommuteFlows.Flow && Fresh.LongFlow == CommuteFlows.LongFlow && Fresh.Ids == CommuteFlows.Ids
 		&& Fresh.Dists == CommuteFlows.Dists && Fresh.LongIds == CommuteFlows.LongIds && Fresh.LongCount == CommuteFlows.LongCount
-		&& Fresh.ShaftPeople == CommuteFlows.ShaftPeople;
+		&& Fresh.ShaftPeople == CommuteFlows.ShaftPeople && Fresh.Walked == CommuteFlows.Walked && Fresh.OffNet == CommuteFlows.OffNet
+		&& IsDeepWalkFresh();
 }
 
 void URHSimWorldSubsystem::Debug_ReroutePosition()
 {
 	CommuteMemo = FRHCommuteMemo();
 	CommuteFlows = FRHCommuteFlows();
+	DeepWalk = FRHDeepWalk(); // D6c: a cold start forgets the people's walk network too
 }
 
 URHSimWorldSubsystem::FRHCommuteSummary URHSimWorldSubsystem::GetCommuteSummary() const
@@ -767,6 +879,8 @@ void URHSimWorldSubsystem::GetCommutePairs(TArray<FRHCommutePair>& Out) const
 		P.HomePosCm = T.HomePos; P.WorkPosCm = T.WorkPos;
 		P.HomeDistrictId = T.HomeDistrict; P.WorkDistrictId = T.WorkDistrict;
 		P.Count = T.Count; P.DistCm = T.DistCm;
+		P.HomeCell = T.HomeCell; P.WorkCell = T.WorkCell;
+		P.ShaftId = T.bDeep ? T.ShaftId : (int32)INDEX_NONE; P.ShaftId2 = T.bDeep ? T.ShaftId2 : (int32)INDEX_NONE;
 		P.EdgeIds = F.TripEdges[i];
 		Out.Add(MoveTemp(P));
 	}
