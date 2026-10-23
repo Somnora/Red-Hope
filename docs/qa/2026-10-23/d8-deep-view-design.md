@@ -667,3 +667,11 @@ Q-A is dropped and logged as deviation 1. Each question below is settled by one 
 - Both cost about the same in frame time.
 
 **Status.** Every required change R1-R9 is written in above, and O1-O5 are adopted. Per the review's verdict, a check that each item is written in suffices; no new full review round is needed.
+
+
+# DIRECTOR ANSWER (2026-10-23)
+
+- **Q-B (a):** people below ground are shown as pips (a dot per resident on the focus floors), with commuter arrows between floors.
+- **Q-C (a):** D8 builds now, on HEAD plus D6c, once D6c commits. The tram band ships inside D6d, the atrium visuals inside D7 and the served-capacity bar inside D6e; D6d and D7 add the "Required by D8" accessors listed in this doc.
+- **Q-D (a):** the thin ant farm: every floor drawn 3 rows deep at 8 degrees, so all twenty floors read alike in one look.
+- Q-A was dropped; "beside the floor view" is logged as a deviation.
