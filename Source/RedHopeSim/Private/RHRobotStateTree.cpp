@@ -274,7 +274,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				DrawW = Robot.DrawIdleW;
 				if (Sim->StepHandoffHold(Entity))
 				{
-					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level, Task.CargoResource);
 					Task = FRHTaskFragment();
 				}
 			}
@@ -282,7 +282,7 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 			{
 				if (Sim->BeginHandoffHold(Entity, Task.TaskId, Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0, Transform.GetLocation()) == 0)
 				{
-					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0);
+					Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Sim->HasRobotLifts() ? Sim->LevelOfZ(Transform.GetLocation().Z) : 0, Task.CargoResource);
 					Task = FRHTaskFragment();
 				}
 			}
@@ -369,7 +369,7 @@ EStateTreeRunStatus FRHChargeTask::EnterState(FStateTreeExecutionContext& Contex
 		}
 		else if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
 		{
-			Sim->NoteHaulCargoLost(Task.CargoKg); // D4's mass balance: the hauler's load is lost, as it always was
+			Sim->NoteHaulCargoLost(Task.CargoResource, Task.CargoKg); // D4's mass balance: the hauler's load is lost, as it always was
 		}
 		Sim->AbandonTask(Task.TaskId);
 	}

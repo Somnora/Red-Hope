@@ -273,6 +273,7 @@ void URHSimWorldSubsystem::ReturnHaulCargo(int32 TaskId, FName Resource, double 
 		UE_LOG(LogRedHopeSim, Warning, TEXT("ReturnHaulCargo: no source and no Lander for %.1f kg of %s"), Kg, *Resource.ToString());
 		HaulReturnedKg -= Kg;
 		HaulLostKg += Kg;
+		NoteFlow(Resource, ERHLedgerLeg::Used, Kg); // E1: R2
 		return;
 	}
 	OnStockChanged.Broadcast(Resource, GetTotalSolid(Resource));

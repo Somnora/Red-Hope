@@ -314,6 +314,23 @@ void URHDefinitionsSubsystem::ForEachRoom(TFunctionRef<void(FName, const FRHRoom
 	}
 }
 
+const FRHResourceRow* URHDefinitionsSubsystem::GetResource(FName Name) const
+{
+	return ResourcesTable ? ResourcesTable->FindRow<FRHResourceRow>(Name, TEXT("GetResource"), false) : nullptr;
+}
+
+void URHDefinitionsSubsystem::ForEachResourceRow(TFunctionRef<void(FName, const FRHResourceRow&)> Fn) const
+{
+	if (!ResourcesTable)
+	{
+		return;
+	}
+	for (const auto& Pair : ResourcesTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHResourceRow*>(Pair.Value));
+	}
+}
+
 bool URHDefinitionsSubsystem::IsSolidResource(FName Name) const
 {
 	if (const FRHResourceRow* Row = ResourcesTable ? ResourcesTable->FindRow<FRHResourceRow>(Name, TEXT("IsSolidResource"), false) : nullptr)

@@ -475,6 +475,7 @@ void URHSimWorldSubsystem::StepCityGrowth(float SubDt)
 		GrowthCheckedSol = SolNow;
 	}
 	RollProductionLedger(SolNow); // C5d: the sol's production goes into the window (one compare a step otherwise)
+	RollEconomyLedger(SolNow);    // E1: the ledger rolls at the same threshold, with the same SolNow
 	if (Districts.Num() == 0 && GrowthProjects.Num() == 0)
 	{
 		return; // no districts, no growth: the colony is exactly as it was
@@ -497,8 +498,15 @@ void URHSimWorldSubsystem::StepCityGrowth(float SubDt)
 		const FRHDistrict* D = FindDistrict(Done.DistrictId);
 		const FString Name = D ? D->Name : FString::Printf(TEXT("#%d"), Done.DistrictId);
 		FString Why;
-		if (CompleteGrowthProject(Done, Why))
+		FRHGrowthApplied Applied;
+		if (CompleteGrowthProject(Done, Why, &Applied))
 		{
+			// E1 (R8): the bill became the project, less what came back to the Lander and the oxygen now in the air.
+			for (const auto& L : Done.Bill)
+			{
+				const double Air = L.Key == NAME_GrowthOxygen ? Applied.AirO2Kg : 0.0;
+				NoteFlow(L.Key, ERHLedgerLeg::Used, FMath::Max(0.0, L.Value - Applied.Credited.FindRef(L.Key) - Air));
+			}
 			GrowthSolFinished.Add(FString::Printf(TEXT("%s: %s"), *Name, *DescribeGrowthProject(Done)));
 			UE_LOG(LogRedHopeSim, Display, TEXT("=== CITY GROWTH (Sol %d): '%s' finished %s ==="), SolNow, *Name, *DescribeGrowthProject(Done));
 		}
@@ -1339,8 +1347,10 @@ bool URHSimWorldSubsystem::PlanCivic(const FRHDistrict& D, const FRHCityDemand& 
 
 // --- Completion -----------------------------------------------------------------------
 
-bool URHSimWorldSubsystem::CompleteGrowthProject(const FRHGrowthProject& P, FString& OutWhy)
+bool URHSimWorldSubsystem::CompleteGrowthProject(const FRHGrowthProject& P, FString& OutWhy, FRHGrowthApplied* OutApplied)
 {
+	FRHGrowthApplied Scratch;
+	FRHGrowthApplied& Applied = OutApplied ? *OutApplied : Scratch;
 	const FRHDistrict* D = FindDistrict(P.DistrictId);
 	if (!D)
 	{
@@ -1349,16 +1359,16 @@ bool URHSimWorldSubsystem::CompleteGrowthProject(const FRHGrowthProject& P, FStr
 	}
 	switch (P.Kind)
 	{
-	case ERHGrowthKind::SurfaceModule: return CompleteSurfaceModule(P, *D, OutWhy);
-	case ERHGrowthKind::FloorCells: return CompleteFloorCells(P, OutWhy);
-	case ERHGrowthKind::CivicRoom: return CompleteCivicRoom(P, OutWhy);
-	case ERHGrowthKind::DeepCells: return CompleteDeepCells(P, OutWhy);
+	case ERHGrowthKind::SurfaceModule: return CompleteSurfaceModule(P, *D, OutWhy, Applied);
+	case ERHGrowthKind::FloorCells: return CompleteFloorCells(P, OutWhy, Applied);
+	case ERHGrowthKind::CivicRoom: return CompleteCivicRoom(P, OutWhy, Applied);
+	case ERHGrowthKind::DeepCells: return CompleteDeepCells(P, OutWhy, Applied);
 	}
 	OutWhy = TEXT("unknown project kind");
 	return false;
 }
 
-bool URHSimWorldSubsystem::CompleteSurfaceModule(const FRHGrowthProject& P, const FRHDistrict& D, FString& OutWhy)
+bool URHSimWorldSubsystem::CompleteSurfaceModule(const FRHGrowthProject& P, const FRHDistrict& D, FString& OutWhy, FRHGrowthApplied& Ledger)
 {
 	const FRHHabNetCache* Net = FindHabNet(P.HabId);
 	const FName LivingRow = GetGrowthLivingRoom();
@@ -1399,6 +1409,7 @@ bool URHSimWorldSubsystem::CompleteSurfaceModule(const FRHGrowthProject& P, cons
 		return false; // not reachable after the site check; the bill is refunded and the module (if any) stays
 	}
 	HabO2Kg.FindOrAdd(NewId) = P.Bill.FindRef(NAME_GrowthOxygen);
+	Ledger.AirO2Kg += P.Bill.FindRef(NAME_GrowthOxygen);
 	TArray<FName> Bunks;
 	GetGrowthBunkPieces(Bunks);
 	TMap<FName, double> Unplaced;
@@ -1414,11 +1425,12 @@ bool URHSimWorldSubsystem::CompleteSurfaceModule(const FRHGrowthProject& P, cons
 		GrowthAddLines(Unplaced, FurnishGrowthRoom(FIntVector(0, Bay, NewId), Bunks), 1.0);
 	}
 	CreditLander(Unplaced, true);
+	GrowthAddLines(Ledger.Credited, Unplaced, 1.0);
 	RefreshJobs();
 	return true;
 }
 
-bool URHSimWorldSubsystem::CompleteFloorCells(const FRHGrowthProject& P, FString& OutWhy)
+bool URHSimWorldSubsystem::CompleteFloorCells(const FRHGrowthProject& P, FString& OutWhy, FRHGrowthApplied& Ledger)
 {
 	const FName LivingRow = GetGrowthLivingRoom();
 	if (!IsLevelConnected(P.Level) || !RatedFloors.Contains(P.Level))
@@ -1440,6 +1452,7 @@ bool URHSimWorldSubsystem::CompleteFloorCells(const FRHGrowthProject& P, FString
 	}
 	// The new volume is full of air from the first step.
 	FloorO2Kg.FindOrAdd(P.Level) += P.Bill.FindRef(NAME_GrowthOxygen);
+	Ledger.AirO2Kg += P.Bill.FindRef(NAME_GrowthOxygen);
 	TArray<FName> Bunks;
 	GetGrowthBunkPieces(Bunks);
 	TMap<FName, double> Unplaced;
@@ -1453,11 +1466,12 @@ bool URHSimWorldSubsystem::CompleteFloorCells(const FRHGrowthProject& P, FString
 		GrowthAddLines(Unplaced, FurnishGrowthRoom(FIntVector(P.Level, First + i, 0), Bunks), 1.0);
 	}
 	CreditLander(Unplaced, true);
+	GrowthAddLines(Ledger.Credited, Unplaced, 1.0);
 	RefreshJobs();
 	return true;
 }
 
-bool URHSimWorldSubsystem::CompleteDeepCells(const FRHGrowthProject& P, FString& OutWhy)
+bool URHSimWorldSubsystem::CompleteDeepCells(const FRHGrowthProject& P, FString& OutWhy, FRHGrowthApplied& Ledger)
 {
 	// D6b. Re-check reach and rating, then take each point in order: a point still free is zoned; one still uncarved and still eligible
 	// (it may lean on a point carved a moment ago) is carved through CarveLatticePoint (RC 3), then zoned Living and furnished as
@@ -1551,12 +1565,14 @@ bool URHSimWorldSubsystem::CompleteDeepCells(const FRHGrowthProject& P, FString&
 		return false; // nothing was changed: the caller returns the whole bill
 	}
 	FloorO2Kg.FindOrAdd(P.Level) += OxygenToFloor;
+	Ledger.AirO2Kg += OxygenToFloor;
 	CreditLander(Refund, true);
+	GrowthAddLines(Ledger.Credited, Refund, 1.0);
 	RefreshJobs();
 	return true;
 }
 
-bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString& OutWhy)
+bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString& OutWhy, FRHGrowthApplied& Ledger)
 {
 	const FRHRoomRow* Row = Defs ? Defs->GetRoom(P.Room) : nullptr;
 	if (!Row || !Row->SliceActive || !Row->CivicService || RoomEmitsTag(*Row, TEXT("Odor")))
@@ -1604,6 +1620,7 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 			}
 			Cell = FindFloorCell(P.Level, Pt);
 			FloorO2Kg.FindOrAdd(P.Level) += P.Bill.FindRef(NAME_GrowthOxygen);
+			Ledger.AirO2Kg += P.Bill.FindRef(NAME_GrowthOxygen);
 		}
 		else if (!IsCellFreeForRoom(P.Level, Cell) || ZoningWouldOffend(*Row, Pt, Grid))
 		{
@@ -1615,7 +1632,9 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 			OutWhy = Why;
 			return false; // after a carve this leaves a bare cell: not reachable (the cell is fresh and free)
 		}
-		CreditLander(FurnishGrowthRoom(FIntVector(P.Level, Cell, 0), Pieces), true);
+		const TMap<FName, double> Unplaced = FurnishGrowthRoom(FIntVector(P.Level, Cell, 0), Pieces);
+		CreditLander(Unplaced, true);
+		GrowthAddLines(Ledger.Credited, Unplaced, 1.0);
 	}
 	else if (P.Level < 0)
 	{
@@ -1652,13 +1671,16 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 				return false;
 			}
 			FloorO2Kg.FindOrAdd(P.Level) += P.Bill.FindRef(NAME_GrowthOxygen);
+			Ledger.AirO2Kg += P.Bill.FindRef(NAME_GrowthOxygen);
 		}
 		if (!DesignateRoom(P.Level, Cell, P.Room, Why))
 		{
 			OutWhy = Why;
 			return false; // after a carve this leaves a bare cell: not reachable (the cell is fresh and free)
 		}
-		CreditLander(FurnishGrowthRoom(FIntVector(P.Level, Cell, 0), Pieces), true);
+		const TMap<FName, double> Unplaced = FurnishGrowthRoom(FIntVector(P.Level, Cell, 0), Pieces);
+		CreditLander(Unplaced, true);
+		GrowthAddLines(Ledger.Credited, Unplaced, 1.0);
 	}
 	else
 	{
@@ -1680,7 +1702,9 @@ bool URHSimWorldSubsystem::CompleteCivicRoom(const FRHGrowthProject& P, FString&
 			OutWhy = Why;
 			return false;
 		}
-		CreditLander(FurnishGrowthRoom(FIntVector(0, P.Index, P.HabId), Pieces), true);
+		const TMap<FName, double> Unplaced = FurnishGrowthRoom(FIntVector(0, P.Index, P.HabId), Pieces);
+		CreditLander(Unplaced, true);
+		GrowthAddLines(Ledger.Credited, Unplaced, 1.0);
 	}
 	RefreshJobs();
 	return true;

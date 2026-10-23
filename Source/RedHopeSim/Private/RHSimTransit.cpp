@@ -472,6 +472,7 @@ bool URHSimWorldSubsystem::TakeStructForBill(double Kg, const TCHAR* Why)
 				Why, Part, *B.DefName.ToString(), B.Id, B.Level, GetCargoPlaces(Part));
 		}
 	}
+	NoteFlow(NAME_StructTransit, ERHLedgerLeg::Used, Kg - FMath::Max(Left, 0.0)); // E1: roads, lift cars and tram lines, up front
 	OnStockChanged.Broadcast(NAME_StructTransit, GetTotalSolid(NAME_StructTransit));
 	return true;
 }

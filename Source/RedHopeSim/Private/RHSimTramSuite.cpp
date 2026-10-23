@@ -607,7 +607,7 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 			for (int32 k = 0; k < 13 && bAll; ++k) { bAll &= Rd(W, I + 4 * k) == Pattern[k]; }
 			if (bAll) { At = I + 12; }
 		}
-		Expect(bRead && Ver == 50 && At != INDEX_NONE,
+		Expect(bRead && Ver == 51 && At != INDEX_NONE,
 			FString::Printf(TEXT("TM6 the file says version %u; the tram block starts at byte %d, straight after the 12-byte floor-shape block (NextTramId 3, 2 lines)"), Ver, At));
 		if (!bRead || At == INDEX_NONE) { return Finish(); }
 		Expect(Rd(W, At + 8 + 0) == 1 && Rd(W, At + 8 + 4) == 0 && Rd(W, At + 8 + 8) == -1 && Rd(W, At + 8 + 12) == 1 && Rd(W, At + 8 + 16) == 3 && Rd(W, At + 8 + 20) == 0 && Rd(W, At + 8 + 24) == 32 && Rd(W, At + 8 + 28) == 0 && Rd(W, At + 8 + 32) == WaitA && Rd(W, At + 8 + 36) == PrevA
@@ -686,7 +686,7 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 		{ TArray<uint8> T = W; PutI(T, L1 + 32, RH::MaxWaitSecCap + 1); Expect(TryFile(TEXT("tramr14"), T, Err) && Err.Contains(TEXT("waits 1201 s")), FString::Printf(TEXT("TM6 a wait past one sol (1,200 s) is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W; PutI(T, L2 + 36, -1); Expect(TryFile(TEXT("tramr15"), T, Err) && Err.Contains(TEXT("previous -1 s")), FString::Printf(TEXT("TM6 a negative previous wait is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W; T.SetNum(At + 8 + 40); Expect(TryFile(TEXT("tramr16"), T, Err) && Err.Contains(TEXT("tram line count 2")), FString::Printf(TEXT("TM6 a file cut short is refused (%s)"), *Err)); }
-		{ TArray<uint8> T = W; const uint32 V49 = 49; FMemory::Memcpy(T.GetData() + 4, &V49, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("tramr17"))); FString E49; const bool bOk = Sim->LoadColony(TEXT("tramr17"), E49); Expect(!bOk && E49.Contains(TEXT("Save format mismatch")) && E49.Contains(TEXT("version 49")) && E49.Contains(TEXT("/50")), FString::Printf(TEXT("TM6 a v49 file is refused as a version error (%s)"), *E49)); }
+		{ TArray<uint8> T = W; const uint32 V49 = 49; FMemory::Memcpy(T.GetData() + 4, &V49, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("tramr17"))); FString E49; const bool bOk = Sim->LoadColony(TEXT("tramr17"), E49); Expect(!bOk && E49.Contains(TEXT("Save format mismatch")) && E49.Contains(TEXT("version 49")) && E49.Contains(TEXT("/51")), FString::Printf(TEXT("TM6 a v49 file is refused as a version error (%s)"), *E49)); }
 		Expect(Sim->GetTramLines().Num() == 2 && Sim->GetTramWaitSec(1) == WaitA && Sim->IsFloorMapped(-1), TEXT("TM6 after all of that the colony is exactly as it was"));
 	}
 

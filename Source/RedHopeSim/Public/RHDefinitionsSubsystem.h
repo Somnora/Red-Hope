@@ -111,6 +111,10 @@ public:
 	// Hybrid logistics rule: solids (StorageType=Stockpile) are hauled;
 	// fluids/gases/abstract flow instantly in the colony-wide pool.
 	bool IsSolidResource(FName Name) const;
+	// E1: a resource row by name (null when unknown), and every resource row, dormant ones included, in the table's own order (a
+	// caller that needs an order sorts by name string).
+	const FRHResourceRow* GetResource(FName Name) const;
+	void ForEachResourceRow(TFunctionRef<void(FName, const FRHResourceRow&)> Fn) const;
 
 	// All robot rows (for starting-fleet spawn).
 	void ForEachRobot(TFunctionRef<void(FName, const FRHRobotRow&)> Fn) const;

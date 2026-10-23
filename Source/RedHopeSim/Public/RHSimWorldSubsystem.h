@@ -1021,7 +1021,7 @@ public:
 	float GetHandoffHoldReserveWh(FMassEntityHandle Entity, int32 TaskId, const FRHRobotFragment& Robot, int32 RobotLevel, const FVector& PosCm) const;
 	bool HandoffHoldShort(FMassEntityHandle Entity, int32 TaskId, float ChargeWh, const FRHRobotFragment& Robot, const FVector& PosCm, const FVector& DropCm) const;
 	// A robot whose load is lost at abandon (a hauler breaks off a delivery): the mass balance's lost leg.
-	void NoteHaulCargoLost(double Kg) { HaulLostKg += FMath::Max(0.0, Kg); }
+	void NoteHaulCargoLost(FName Resource, double Kg) { HaulLostKg += FMath::Max(0.0, Kg); NoteFlow(Resource, ERHLedgerLeg::Used, Kg); } // E1: R2
 
 	// --- D4: transient counters (never saved, not reset by a load) ---
 	int32 GetDeepPlanRuns() const { return DeepPlanRuns; }
@@ -1269,6 +1269,33 @@ public:
 	double GetProductionOpenKg(FName Resource) const { const int32 Leg = ProductionLeg(Resource); return Leg == INDEX_NONE ? 0.0 : ProdAccKg[Leg]; }
 	int32 GetProductionCheckedSol() const { return ProductionCheckedSol; }
 	void Debug_SetLifeSupportDeficitCoverSols(double Sols) { LifeSupportDeficitCoverSols = FMath::Max(0.0, Sols); }
+	// E1 (the ledger, docs/qa/2026-10-22/e1-ledger-design.md): a second ledger beside C5d's, which no rule reads yet. One slot per
+	// mass resource (every DT_Resources row but the GridBuffer and Ledger ones), sorted by name string (case-sensitive ordinal), and
+	// four legs a slot: Made (mass entering holdings from outside them), Used (mass leaving holdings into a batch, a structure, a body,
+	// a leak or nothing), In (from Earth or a rival) and Out (to a rival; to Earth from E3). A move between two holdings is never
+	// recorded. Each leg keeps the open sol's kg, a ring of the last 8 completed sols in whole grams and a lifetime total in grams; it
+	// rolls at the same threshold as C5d's. SAVED (v51), the last block of the file. Reads are for tests and later gates only.
+	enum class ERHLedgerLeg : uint8 { Made = 0, Used = 1, In = 2, Out = 3 };
+	static constexpr int32 LedgerLegs = 4;
+	static constexpr int32 LedgerRing = 8;
+	int32 GetLedgerSlotCount() const { return EconSlots.Num(); }
+	FName GetLedgerSlotName(int32 Slot) const { return EconSlots.IsValidIndex(Slot) ? EconSlots[Slot].Name : NAME_None; }
+	bool HasLedgerSlot(FName Resource) const { return EconIndex.Contains(Resource); }
+	int64 GetLedgerLifetimeG(FName Resource, ERHLedgerLeg Leg) const;
+	double GetLedgerOpenKg(FName Resource, ERHLedgerLeg Leg) const;
+	int64 GetLedgerRingG(FName Resource, ERHLedgerLeg Leg, int32 Back) const; // Back 1 = the sol just completed, up to LedgerRing
+	int64 GetLedgerWindowG(FName Resource, ERHLedgerLeg Leg) const;          // the last ProductionWindowSols completed sols
+	int64 GetLedgerRingSumG(FName Resource, ERHLedgerLeg Leg) const;         // the whole ring
+	int32 GetLedgerRingFilled() const { return EconRingFilled; }
+	int32 GetLedgerCheckedSol() const { return EconCheckedSol; }
+	int64 GetLedgerUnslottedLostG() const { return UnslottedLostG; }
+	// The whole-gram rounding at the trade boundary: llround(Kg x 1000) / 1000. An identity on every authored lot and bill.
+	static double RoundToGrams(double Kg) { return (double)FMath::RoundToInt64(Kg * 1000.0) / 1000.0; }
+	// Harness: the inert twin's switch (runtime only, never saved), a direct record, and the bytes the E1 block takes in a save.
+	void Debug_SetLedgerEnabled(bool bOn) { bLedgerEnabled = bOn; }
+	void Debug_NoteFlow(FName Resource, ERHLedgerLeg Leg, double Kg) { NoteFlow(Resource, Leg, Kg); }
+	void Debug_RollEconomyLedger(int32 SolNow) { RollEconomyLedger(SolNow); }
+	int32 GetLedgerBlockBytes() const;
 	// The standing oxygen leak of every rated floor and rated surface network, kg a sol (it is part of the
 	// Oxygen leg's draw: it is paid whoever lives there).
 	double GetStandingO2LeakKgPerSol() const;
@@ -2257,7 +2284,8 @@ public:
 	// arrives, the load goes back through ReturnHaulCargo instead of vanishing. Haulers pass nothing (unchanged).
 	// D4: RobotLevel is where the robot stands; with transit on, a credit to a site on another floor (the head hand-off)
 	// charges the serving shaft's ledger the cargo's places, stamped by the robot's sub-step.
-	void HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource = NAME_None, int32 RobotLevel = 0);
+	// E1 (R2): CargoResource names the load for the ledger alone (a loss with the task gone); it never enters the rover test.
+	void HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource = NAME_None, int32 RobotLevel = 0, FName CargoResource = NAME_None);
 	// Fabricator: claim nearest construction; apply work seconds. Work only
 	// progresses once the site's materials are delivered.
 	bool TryClaimBuild(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel = 0);
@@ -2986,11 +3014,11 @@ private:
 	void AddGrowthFurnitureCost(const TArray<FName>& Pieces, TMap<FName, double>& Bill) const;
 	void ParseCivicPieces(const FRHRoomRow& Row, TArray<FName>& Out) const;
 	// Completion: the site re-check and the direct build; false (with a reason) refunds.
-	bool CompleteGrowthProject(const FRHGrowthProject& Project, FString& OutWhy);
-	bool CompleteSurfaceModule(const FRHGrowthProject& Project, const FRHDistrict& District, FString& OutWhy);
-	bool CompleteFloorCells(const FRHGrowthProject& Project, FString& OutWhy);
-	bool CompleteDeepCells(const FRHGrowthProject& Project, FString& OutWhy);                               // D6b
-	bool CompleteCivicRoom(const FRHGrowthProject& Project, FString& OutWhy);
+	bool CompleteGrowthProject(const FRHGrowthProject& Project, FString& OutWhy, FRHGrowthApplied* OutApplied = nullptr); // E1: R8
+	bool CompleteSurfaceModule(const FRHGrowthProject& Project, const FRHDistrict& District, FString& OutWhy, FRHGrowthApplied& Applied);
+	bool CompleteFloorCells(const FRHGrowthProject& Project, FString& OutWhy, FRHGrowthApplied& Applied);
+	bool CompleteDeepCells(const FRHGrowthProject& Project, FString& OutWhy, FRHGrowthApplied& Applied);    // D6b
+	bool CompleteCivicRoom(const FRHGrowthProject& Project, FString& OutWhy, FRHGrowthApplied& Applied);
 	// Furnish a fresh room: each piece at the first slot it fits (Rot 0, no queue or cost check - the
 	// bill is paid); returns the cost of the pieces that found no slot, which the caller refunds.
 	TMap<FName, double> FurnishGrowthRoom(const FIntVector& Key, const TArray<FName>& Pieces);
@@ -3536,6 +3564,28 @@ private:
 	static int32 ProductionLeg(FName Resource);      // 0..2, or INDEX_NONE
 	void NoteProduced(FName Resource, double Kg);    // called where the sim grants a leg's output
 	void RollProductionLedger(int32 SolNow);         // a threshold on the monotone clock, both bands
+	// E1: the ledger's state (see the public reads). Slots are rebuilt from DT_Resources at world start and at load; EconIndex serves
+	// lookups only and is never iterated.
+	struct FRHEconSlot
+	{
+		FName Name;
+		double OpenKg[LedgerLegs] = { 0.0, 0.0, 0.0, 0.0 };
+		int64 RingG[LedgerLegs][LedgerRing] = {};
+		int64 LifetimeG[LedgerLegs] = { 0, 0, 0, 0 };
+	};
+	TArray<FRHEconSlot> EconSlots;
+	TMap<FName, int32> EconIndex;
+	int32 EconRingFilled = 0;
+	int32 EconRingHead = 0;
+	int32 EconCheckedSol = 0;
+	int64 UnslottedLostG = 0;                        // a haul lost with no resource named (a harness call); tests only
+	bool bLedgerEnabled = true;                      // runtime only: the inert twin's switch
+	void BuildEconSlots();                           // from DT_Resources; resets every leg
+	void NoteFlow(FName Resource, ERHLedgerLeg Leg, double Kg); // ignores Kg <= 0 and a name with no slot
+	void NoteFlowMap(const TMap<FName, double>& Kg, ERHLedgerLeg Leg) { for (const auto& P : Kg) { NoteFlow(P.Key, Leg, P.Value); } }
+	void RollEconomyLedger(int32 SolNow);            // straight after RollProductionLedger, with the same SolNow
+	void WriteLedgerBlock(FArchive& Ar) const;
+	void ReadLedgerBlock(FArchive& Ar);              // never refuses: a bad block resets the ledger with a Warning (R1)
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
 	// SAVED (v35): the Big Arrival's running streak and its once-only flag, the
 	// move-home accumulator, and the settlers who came with ships (a count).
@@ -3678,7 +3728,10 @@ private:
 	// across building stores + pool; fluids from the pool)? And spend it,
 	// draining solids from building stores in ascending-Id order (deterministic).
 	bool HasTradeLot(const TMap<FName, double>& Lot) const;
-	void SpendTradeLot(const TMap<FName, double>& Lot);
+	// E1: OutSpent, when given, receives what each line actually took (the whole line, less a solid's residual of at most 1e-4 kg).
+	void SpendTradeLot(const TMap<FName, double>& Lot, TMap<FName, double>* OutSpent = nullptr);
+	// E1: the whole-gram rounding of every line of a lot at the trade boundary (an identity on every authored lot).
+	static TMap<FName, double> RoundLotToGrams(const TMap<FName, double>& Lot) { TMap<FName, double> Out = Lot; for (auto& P : Out) { P.Value = RoundToGrams(P.Value); } return Out; }
 	// Band boundary thresholds (up>down = the hysteresis gap). Index 0 is the
 	// Failing|Strained edge, 3 is the Thriving|Flourishing edge.
 	double HopeBandUp[4]   = { 28.0, 45.0, 75.0, 90.0 };

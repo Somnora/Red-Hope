@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 50;  // v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 51;  // v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -99,6 +99,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	{
 		return;
 	}
+	BuildEconSlots(); // E1: the ledger's slots, from DT_Resources
 
 	OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier0_s"), OrderLagSeconds);
 	PileCapKg = Defs->GetConfigScalar(FName("PilesCapacity_kg"), PileCapKg);
@@ -927,6 +928,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 			const double TakeKg = FMath::Min3(DigBudgetKg, D.RemainingKg, 200.0);
 			D.RemainingKg -= TakeKg;
 			B.InputKg.FindOrAdd(D.Type) += TakeKg;
+			NoteFlow(D.Type, ERHLedgerLeg::Made, TakeKg); // E1: the era dig, straight to a hopper
 			DigBudgetKg -= TakeKg;
 			break;
 		}
@@ -951,6 +953,7 @@ void URHSimWorldSubsystem::EraLogistics(float DtSimSeconds)
 						const double TakeKg = FMath::Min(DigBudgetKg, D.RemainingKg);
 						D.RemainingKg -= TakeKg;
 						S.InputKg.FindOrAdd(D.Type) += TakeKg;
+						NoteFlow(D.Type, ERHLedgerLeg::Made, TakeKg); // E1: the era dig, to a store
 						DigBudgetKg -= TakeKg;
 						break;
 					}
@@ -1517,6 +1520,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				{
 					for (const auto& Res : *Outputs)
 					{
+						NoteFlow(Res.Key, ERHLedgerLeg::Made, Res.Value); // E1: a batch's outputs enter holdings (spoil included)
 						if (Defs->IsSolidResource(Res.Key))
 						{
 							B.OutputKg.FindOrAdd(Res.Key) += Res.Value;
@@ -1675,6 +1679,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 						if (GetStock(FName("Hydrogen")) >= FuelKg)
 						{
 							AddStock(FName("Hydrogen"), -FuelKg);
+							NoteFlow(FName("Hydrogen"), ERHLedgerLeg::Used, FuelKg); // E1: the Borer's fuel
 							B.bBatchOnH2 = true;
 						}
 					}
@@ -1797,6 +1802,7 @@ void URHSimWorldSubsystem::StepProduction(float SubDt)
 				{
 					AddStock(In.Key, -In.Value);
 				}
+				NoteFlow(In.Key, ERHLedgerLeg::Used, In.Value); // E1: a batch's inputs leave holdings at its start
 			}
 			B.ActiveRecipe = FName(*Recipe->Outputs); // display only; outputs cached:
 			PendingOutputs.Add(B.Id, Outputs);
@@ -2303,7 +2309,7 @@ double URHSimWorldSubsystem::ScaleQuotaBill(double RawKg, int32 Round) const
 	// so the shown bill is the threshold.
 	if (Round <= 0)
 	{
-		return RawKg;
+		return RoundToGrams(RawKg); // E1: whole grams at the boundary (an identity on every authored bill)
 	}
 	const double Scale = QuotaRepeatBillMul <= 0.0 ? 1.0 : FMath::Pow(QuotaRepeatBillMul, (double)Round); // as GetQuotaBillScale
 	return FMath::RoundToDouble(RawKg * Scale);
@@ -2380,7 +2386,7 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 	// column stays display text; data-driven effect verbs are an M1 task).
 	if (ItemName == FName("SolarPack"))       { ImportStock.FindOrAdd(FName("SolarArray"))++; }
 	else if (ItemName == FName("BatteryPack")) { ImportStock.FindOrAdd(FName("BatteryBank"))++; }
-	else if (ItemName == FName("PartsCrate"))  { AddStock(FName("SpareParts"), 10); }
+	else if (ItemName == FName("PartsCrate"))  { AddStock(FName("SpareParts"), 10); NoteFlow(FName("SpareParts"), ERHLedgerLeg::In, 10.0); } // E1: In
 	else if (ItemName == FName("Toolkit"))     { FabricatorSpeedMul += 0.15; }
 	else if (ItemName == FName("ComputeCore"))
 	{
@@ -2407,10 +2413,10 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		++ImportStock.FindOrAdd(FName("RC_R"));
 		DeployWaitingRovers();
 	}
-	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); }
-	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); }
-	else if (ItemName == FName("GlassCrate")) { AddStock(FName("Glass"), 400); }
-	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); }
+	else if (ItemName == FName("SoilPallet")) { AddStock(FName("Soil"), 1000); NoteFlow(FName("Soil"), ERHLedgerLeg::In, 1000.0); }
+	else if (ItemName == FName("SeedVault"))  { AddStock(FName("Seeds"), 200); NoteFlow(FName("Seeds"), ERHLedgerLeg::In, 200.0); }
+	else if (ItemName == FName("GlassCrate")) { AddStock(FName("Glass"), 400); NoteFlow(FName("Glass"), ERHLedgerLeg::In, 400.0); }
+	else if (ItemName == FName("LuxuryGoods")) { AddStock(FName("Luxury"), 300); NoteFlow(FName("Luxury"), ERHLedgerLeg::In, 300.0); }
 	else if (ItemName == FName("CrewPod"))
 	{
 		// M2 Gate A1: colonists disembark ONLY into certified housing - the
@@ -2421,6 +2427,7 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		{
 			const int32 Housed = Debug_AddColonists(CrewPodColonists);
 			AddStock(FName("Food"), CrewPodFoodKg);
+			NoteFlow(FName("Food"), ERHLedgerLeg::In, CrewPodFoodKg); // E1
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("THE CREW HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
 				Housed, CrewPodFoodKg));
@@ -2448,6 +2455,7 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		{
 			const int32 Housed = Debug_AddColonists(ColonistTransportColonists);
 			AddStock(FName("Food"), FoodKg);
+			NoteFlow(FName("Food"), ERHLedgerLeg::In, FoodKg); // E1
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("A COLONIST TRANSPORT HAS LANDED — %d colonists disembark into the vault, with %.0f kg of provisions."),
 				Housed, FoodKg));
@@ -2878,6 +2886,7 @@ bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
 void URHSimWorldSubsystem::StepHabitability(float SubDt)
 {
 	static const FName NOxygen(TEXT("Oxygen"));
+	double LedgerFloorLeakKg = 0.0;
 	for (const FRHFloor& Floor : FloorTable) // D1: the floors that exist, shallowest first (the old -1..-MaxDepth walk minus the empty ones)
 	{
 		const int32 Level = Floor.Level;
@@ -2894,6 +2903,7 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 		// what you dug; abandonment drains loudly instead of holding forever.
 		const double LeakedKg = FMath::Min(FillKg, Cells * O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
 		FillKg -= LeakedKg;
+		LedgerFloorLeakKg += LeakedKg; // E1: Used Oxygen, recorded once after the floors
 
 		// The trunk pushes O2 down; a powered circulator on the floor is what
 		// actually moves air (no circulator, no fill - the chain's last link).
@@ -2975,6 +2985,7 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 			FloorsNotedSmall.Remove(Level); // fill/size changed - re-arm the note
 		}
 	}
+	NoteFlow(NOxygen, ERHLedgerLeg::Used, LedgerFloorLeakKg);
 	StepHabNetworks(SubDt); // BM-1: after every floor, so floors keep first claim on the O2 pool
 }
 
@@ -3012,6 +3023,7 @@ void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
 			const double Leaked = FMath::Min(Fill, LeakHere);
 			Fill -= Leaked;
 			SumLeak += Leaked;
+			NoteFlow(FName(TEXT("Oxygen")), ERHLedgerLeg::Used, Leaked); // E1: a hab's leak
 			SumReq += Bays * O2FillKgPerCell;
 		}
 		const bool bCirc = IsNetCirculated(N);
@@ -4189,8 +4201,11 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			return; // waits for the next pallet/crate, silently - the deck shows the shortfall
 		}
 		AddStock(NSoil, -GardenSoilKgPerCell);
+		NoteFlow(NSoil, ERHLedgerLeg::Used, GardenSoilKgPerCell); // E1: emplaced into a garden cell
 		AddStock(NSeeds, -GardenSeedsKgPerCell);
+		NoteFlow(NSeeds, ERHLedgerLeg::Used, GardenSeedsKgPerCell);
 		if (bGreenhouse) { AddStock(NGlass, -GreenhouseGlassKgPerCell); }
+		if (bGreenhouse) { NoteFlow(NGlass, ERHLedgerLeg::Used, GreenhouseGlassKgPerCell); }
 		PlantedCells.Add(Key);
 		bSoilSpentAnnounced = false; // a fresh bed clears the spent-soil edge
 		FName PlantedCrop = NAME_None;
@@ -4262,6 +4277,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 	if (bCropsLive && GetPopulation() > 0)
 	{
 		AddStock(NCompost, CompostKgPerColonistSol * (double)GetPopulation() * DtSols);
+		NoteFlow(NCompost, ERHLedgerLeg::Made, CompostKgPerColonistSol * (double)GetPopulation() * DtSols); // E1
 		ColonyCO2Kg += CO2KgPerColonistSol * (double)GetPopulation() * DtSols;
 	}
 
@@ -4376,6 +4392,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 			continue;
 		}
 		AddStock(NWater, -NeedWater);
+		NoteFlow(NWater, ERHLedgerLeg::Used, NeedWater); // E1: crop water
 		if (Crop && (NowSols - CropState->PlantedSol) < (double)Crop->GrowSols)
 		{
 			// Immature: the crop drinks but yields nothing yet. Maturity is a
@@ -4398,6 +4415,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 					ColonyCO2Kg -= WantCO2;
 					CellMul *= DuctYieldBonusMul;
 					AddStock(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
+					NoteFlow(NOxygen, ERHLedgerLeg::Made, GardenO2EmitKgPerSolPerCell * DtSols); // E1
 					NoteProduced(NOxygen, GardenO2EmitKgPerSolPerCell * DtSols);
 				}
 			}
@@ -4412,6 +4430,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 		const double YieldKg = (Crop ? (double)Crop->YieldKgPerSol : GardenFoodKgPerSolPerCell)
 			* CellMul * HumanTempo * LightFactor * GardenSkillMul * DtSols;
 		AddStock(NFood, YieldKg);
+		NoteFlow(NFood, ERHLedgerLeg::Made, YieldKg); // E1: a harvest
 		NoteProduced(NFood, YieldKg);
 		// Soil depletion (Gate B): mature production spends the bed. Fertilizer
 		// refills it in place; an empty colony larder lets the cell revert to
@@ -4425,6 +4444,7 @@ void URHSimWorldSubsystem::StepAgriculture(float SubDt)
 				if (GetStock(NFertilizer) >= FertNeed)
 				{
 					AddStock(NFertilizer, -FertNeed);
+					NoteFlow(NFertilizer, ERHLedgerLeg::Used, FertNeed); // E1
 					CropState->SoilKg = GardenSoilKgPerCell;
 					UE_LOG(LogRedHopeSim, Display, TEXT("Fertilizer worked into floor %d cell %d (%.0f kg -> bed restored)"), Level, Cell, FertNeed);
 				}
@@ -4586,6 +4606,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 
 	int32 SuppliedThisStep = 0;
 	double WaterDrawnThisStep = 0.0; // for greywater reclaim + potability
+	double LedgerO2BreathedKg = 0.0; // E1: what the crew breathed out of floor and hab air this step (Used Oxygen, one call at the end)
 	bool bAnyHungry = false; // D4a: the food pool fell short this step
 	// C1: the evacuation countdown is the same for everyone this step (nothing in
 	// the loop moves a floor's rating, a room or a building), so the infirmary
@@ -4700,6 +4721,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			// Breathe: draw from the home floor's fill. The trunk refills it (the
 			// M1-d loop); a crowd can out-breathe a starved circulator.
 			double& FillKg = FloorO2Kg.FindOrAdd(Home.HomeLevel);
+			const double FillBeforeKg = FillKg; // E1: a before-read of a reference the code already holds
 			double Left = 0.0;
 			if (Cover(FillKg, NeedO2, Home.Residents, Left, nullptr) == Home.Residents)
 			{
@@ -4711,6 +4733,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 				Home.RAir = FMath::Clamp(FillKg / (Home.Residents * NeedO2), 0.0, 1.0);
 				FillKg = FMath::Min(FillKg, 0.0); // all there was is taken (never below zero, never a refund)
 			}
+			LedgerO2BreathedKg += FillBeforeKg - FillKg;
 		}
 		else
 		{
@@ -4744,8 +4767,10 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		}
 		return Ration;
 	};
-	const double RFood = DrawPool(NFood, ColonistFoodKgPerSol * DtSols, nullptr);
-	const double RWater = DrawPool(NWater, ColonistWaterKgPerSol * DtSols, &WaterDrawnThisStep);
+	double LedgerFoodEatenKg = 0.0;
+	const double RFood = DrawPool(NFood, ColonistFoodKgPerSol * DtSols, &LedgerFoodEatenKg);
+	const double RWater = DrawPool(NWater, ColonistWaterKgPerSol * DtSols, &WaterDrawnThisStep); // E1 (Q-B (a)): water is netted at the greywater return
+	NoteFlow(NFood, ERHLedgerLeg::Used, LedgerFoodEatenKg);
 	bAnyHungry = RFood < 1.0;
 	for (FHome& Home : Homes)
 	{
@@ -4767,13 +4792,14 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 			if (const FRHHabNetCache* Net = FindHabNet(C.HomeHab))
 			{
 				double Left = NeedO2 * Home.RAir;
-				const auto Take = [this, &Left](int32 Id)
+				const auto Take = [this, &Left, &LedgerO2BreathedKg](int32 Id)
 				{
 					if (double* V = HabO2Kg.Find(Id))
 					{
 						const double T = FMath::Min(*V, Left);
 						*V -= T;
 						Left -= T;
+						LedgerO2BreathedKg += T;
 					}
 				};
 				Take(C.HomeHab);
@@ -4795,6 +4821,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		if (GetStock(NLuxury) >= NeedLux)
 		{
 			AddStock(NLuxury, -NeedLux);
+			NoteFlow(NLuxury, ERHLedgerLeg::Used, NeedLux);
 			++SuppliedThisStep;
 		}
 
@@ -4812,6 +4839,7 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 		C.UnsupportedSimSeconds = C.bSupported ? 0.0 : C.UnsupportedSimSeconds + SubDt;
 	}
 	ComfortsSupplied = SuppliedThisStep;
+	NoteFlow(NOxygen, ERHLedgerLeg::Used, LedgerO2BreathedKg); // E1: the crew's breath, floors and habs together
 
 	// One alert per EVENT, not per person: a home goes on short rations, a home
 	// recovers, a batch of residents is recalled. Short homes accumulate toward a
@@ -4954,7 +4982,9 @@ void URHSimWorldSubsystem::StepPopulation(float SubDt)
 	// integrates identically in the agent band and the 60x era band.
 	if (WaterDrawnThisStep > 0.0)
 	{
-		AddStock(NWater, WaterDrawnThisStep * GreywaterReturnFraction);
+		const double ReturnedKg = WaterDrawnThisStep * GreywaterReturnFraction;
+		AddStock(NWater, ReturnedKg);
+		NoteFlow(NWater, ERHLedgerLeg::Used, WaterDrawnThisStep - ReturnedKg); // E1 (Q-B (a)): drawn minus returned, the water really lost
 	}
 	if (Colonists.Num() > 0)
 	{
@@ -7070,6 +7100,7 @@ void URHSimWorldSubsystem::StepBigArrival(float SubDt)
 	bBigArrivalDone = true;
 	const double FoodKg = ColonistTransportFoodKgPerColonist * Housed;
 	AddStock(FName("Food"), FoodKg);
+	NoteFlow(FName("Food"), ERHLedgerLeg::In, FoodKg); // E1: the Big Arrival's provisions
 	// Gate-D placeholder copy.
 	OnAlert.Broadcast(FString::Printf(
 		TEXT("THE BIG ARRIVAL — %d settlers land at once: the colony held its Hope long enough to be trusted with a city. They bring %.0f kg of provisions."),
@@ -7470,6 +7501,7 @@ void URHSimWorldSubsystem::StepDiscovery(float SubDt)
 	if (!Row->RewardResource.IsNone() && Row->RewardKg > 0.f)
 	{
 		AddStock(Row->RewardResource, Row->RewardKg);
+		NoteFlow(Row->RewardResource, ERHLedgerLeg::Made, Row->RewardKg); // E1: the discovery reward
 	}
 	// Research pays (v25): funding banks toward the NEXT quota award.
 	if (Row->FundingKg > 0.f)
@@ -8291,6 +8323,7 @@ void URHSimWorldSubsystem::ExtendShaftOf(int32 ShaftId, int32 ToDepth)
 	if (Spoil > 0.0 && AreCropsLive())
 	{
 		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+		NoteFlow(FName("SpoilChemicals"), ERHLedgerLeg::Made, Spoil * SpoilChemFraction); // E1 (R3 for the shaft)
 	}
 	Sh.Depth = ToDepth;
 	RebuildShaftDerived();
@@ -8343,6 +8376,7 @@ bool URHSimWorldSubsystem::ExcavateFloor(int32 Level, int32 Cells, FString& OutR
 	if (Spoil > 0.0 && AreCropsLive())
 	{
 		AddStock(FName("SpoilChemicals"), Spoil * SpoilChemFraction);
+		NoteFlow(FName("SpoilChemicals"), ERHLedgerLeg::Made, Spoil * SpoilChemFraction); // E1: the growth excavation
 	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Excavated %d cell(s) on floor %d (%d carved; +%.0f kg spoil; pile %.0f kg)"),
 		Cells, Level, Carved, Spoil, SpoilPileKg);
@@ -9279,7 +9313,9 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
-		SpendTradeLot(URHDefinitionsSubsystem::GetFurnitureCost(*Defs->GetFurniture(Cmd.Target)));
+		TMap<FName, double> Spent;
+		SpendTradeLot(URHDefinitionsSubsystem::GetFurnitureCost(*Defs->GetFurniture(Cmd.Target)), &Spent);
+		NoteFlowMap(Spent, ERHLedgerLeg::Used); // E1: the piece's materials become the piece
 		AddFurniture(Cmd.Target, Key, Slot, Rot);
 		RefreshJobs();
 	}
@@ -9299,7 +9335,9 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
-		SpendTradeLot(URHDefinitionsSubsystem::GetDoorCost(*Defs->GetDoor(Cmd.Target)));
+		TMap<FName, double> Spent;
+		SpendTradeLot(URHDefinitionsSubsystem::GetDoorCost(*Defs->GetDoor(Cmd.Target)), &Spent);
+		NoteFlowMap(Spent, ERHLedgerLeg::Used); // E1
 		AddWallFeature(Cmd.Target, Edge);
 	}
 	else if (Cmd.Verb == FName("Sell") && Cmd.Target == FName("WallFeature"))
@@ -9418,7 +9456,8 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		TMap<FName, double> Cost;
 		Cost.FindOrAdd(NHydrogen) += ConvoyH2PerRun;
 		Cost.FindOrAdd(NSpareParts) += ConvoyWearParts;
-		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot))
+		const TMap<FName, double> ExportGoods = RoundLotToGrams(URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot)); // E1: whole grams at the boundary
+		for (const auto& Item : ExportGoods)
 		{
 			Cost.FindOrAdd(Item.Key) += Item.Value;
 		}
@@ -9439,6 +9478,11 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		}
 		// Commit at departure - one spend of the validated aggregate.
 		SpendTradeLot(Cost);
+		// E1: the split, from its three parts (HasTradeLot passed, so each was spent in full: the one nominal record in E1, within 0.1 g a
+		// line). The fuel and the wear are Used; the rival's lot is Out.
+		NoteFlow(NHydrogen, ERHLedgerLeg::Used, RoundToGrams(ConvoyH2PerRun));
+		NoteFlow(NSpareParts, ERHLedgerLeg::Used, RoundToGrams(ConvoyWearParts));
+		NoteFlowMap(ExportGoods, ERHLedgerLeg::Out);
 		ConvoyRival = Cmd.Target;
 		bConvoyReturning = false;
 		ConvoyLegSols = 0.0;
@@ -9547,7 +9591,7 @@ bool URHSimWorldSubsystem::HasTradeLot(const TMap<FName, double>& Lot) const
 	return true;
 }
 
-void URHSimWorldSubsystem::SpendTradeLot(const TMap<FName, double>& Lot)
+void URHSimWorldSubsystem::SpendTradeLot(const TMap<FName, double>& Lot, TMap<FName, double>* OutSpent)
 {
 	for (const auto& Item : Lot)
 	{
@@ -9583,6 +9627,11 @@ void URHSimWorldSubsystem::SpendTradeLot(const TMap<FName, double>& Lot)
 		else
 		{
 			AddStock(Item.Key, -Remaining); // fluids/gases from the pool
+			Remaining = 0.0;
+		}
+		if (OutSpent)
+		{
+			OutSpent->FindOrAdd(Item.Key) += Item.Value - Remaining; // E1: what this line took
 		}
 	}
 }
@@ -9644,7 +9693,8 @@ void URHSimWorldSubsystem::StepTrade(float SubDt)
 	bConvoyReturning = false;
 	const FName Done = ConvoyRival;
 	ConvoyRival = NAME_None;
-	const TMap<FName, double> TheirLot = URHDefinitionsSubsystem::ParseResourceList(Rival->ExportLot);
+	const TMap<FName, double> TheirLot = RoundLotToGrams(URHDefinitionsSubsystem::ParseResourceList(Rival->ExportLot)); // E1: whole grams
+	NoteFlowMap(TheirLot, ERHLedgerLeg::In); // E1: the convoy home - every line lands, at the Lander or in the pool
 	for (const auto& Item : TheirLot)
 	{
 		if (Defs && Defs->IsSolidResource(Item.Key))
@@ -9812,7 +9862,8 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 		FString Stolen;
 		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Row->ExportLot))
 		{
-			const double Amount = Item.Value * CovertLotFraction;
+			const double Amount = RoundToGrams(Item.Value * CovertLotFraction); // E1: whole grams at the boundary
+			NoteFlow(Item.Key, ERHLedgerLeg::In, Amount); // E1: the covert loot lands like a delivery
 			if (Defs && Defs->IsSolidResource(Item.Key))
 			{
 				bool bDropped = false;
@@ -9865,13 +9916,15 @@ bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
 		OutReason = FString::Printf(TEXT("No hidden grievance with %s to defuse"), *Row->DisplayName);
 		return false;
 	}
-	const TMap<FName, double> Offering = URHDefinitionsSubsystem::ParseResourceList(Row->ImportLot);
+	const TMap<FName, double> Offering = RoundLotToGrams(URHDefinitionsSubsystem::ParseResourceList(Row->ImportLot)); // E1: whole grams
 	if (!HasTradeLot(Offering))
 	{
 		OutReason = FString::Printf(TEXT("Short of the peace offering (%s)"), *Row->ImportLot);
 		return false;
 	}
-	SpendTradeLot(Offering);
+	TMap<FName, double> Spent;
+	SpendTradeLot(Offering, &Spent);
+	NoteFlowMap(Spent, ERHLedgerLeg::Out); // E1: the peace offering leaves for the rival
 	double& Hidden = HiddenTensionRef(Rival);
 	Hidden = FMath::Clamp(Hidden - LaunderHiddenDrop, 0.0, 100.0);
 	double& Rel = RelationRef(Rival);
@@ -10211,7 +10264,9 @@ void URHSimWorldSubsystem::StepCrisis(float SubDt)
 		{
 			static const FName NWater(TEXT("Water"));
 			const double Draw = CrisisWaterDrainPerSol * DtSols;
-			AddStock(NWater, -FMath::Min(Draw, GetStock(NWater)));
+			const double DrainedKg = FMath::Min(Draw, GetStock(NWater));
+			AddStock(NWater, -DrainedKg);
+			NoteFlow(NWater, ERHLedgerLeg::Used, DrainedKg); // E1: the crisis drain (a negative stock records nothing: NoteFlow ignores Kg <= 0)
 		}
 		CrisisRemainingSols -= DtSols;
 		if (CrisisRemainingSols <= 0.0)
@@ -10922,6 +10977,9 @@ void URHSimWorldSubsystem::RemoveBuilding(int32 Id)
 	Total.KeySort(FNameLexicalLess());
 	for (const auto& L : Total)
 	{
+		// E1: only the salvage share is Made (the hull, the fittings, the furnishings); what the building held is a move.
+		const double HeldOut = Gone.OutputKg.FindRef(L.Key);
+		NoteFlow(L.Key, ERHLedgerLeg::Made, L.Value - SalvIn.FindRef(L.Key) - (HeldOut > KINDA_SMALL_NUMBER ? HeldOut : 0.0));
 		Line += FString::Printf(TEXT("%s%.0f kg %s"), Line.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
 		OnStockChanged.Broadcast(L.Key, Defs->IsSolidResource(L.Key) ? GetTotalSolid(L.Key) : GetStock(L.Key));
 	}
@@ -11261,6 +11319,7 @@ void URHSimWorldSubsystem::RemoveWallFeatures(const TSet<int32>& Ids, TMap<FName
 	const int32 Sold = WallFeatures.RemoveAll([&Ids](const FRHWallFeature& W) { return Ids.Contains(W.Id); });
 	RebuildWallFeatureIndex();
 	CreditLander(Refund, /*bOutputShelf*/ true);
+	NoteFlowMap(Refund, ERHLedgerLeg::Made); // E1: a sale re-enters holdings
 	if (OutRefund)
 	{
 		*OutRefund = Refund;
@@ -12146,6 +12205,7 @@ void URHSimWorldSubsystem::RemoveFurniture(const TSet<int32>& Ids, TMap<FName, d
 	const int32 Sold = Furniture.RemoveAll([&Ids](const FRHFurnitureInstance& F) { return Ids.Contains(F.Id); });
 	RebuildFurnitureCache();
 	CreditLander(Refund, /*bOutputShelf*/ true);
+	NoteFlowMap(Refund, ERHLedgerLeg::Made); // E1: a sale re-enters holdings
 	if (OutRefund)
 	{
 		*OutRefund = Refund;
@@ -12427,6 +12487,7 @@ double URHSimWorldSubsystem::DigDeposit(int32 DepositId, double Kg)
 	const double Dug = FMath::Min3(Kg, D->RemainingKg, FMath::Max(0.0, PileCapKg - D->PileKg));
 	D->RemainingKg -= Dug;
 	D->PileKg += Dug;
+	NoteFlow(D->Type, ERHLedgerLeg::Made, Dug); // E1: ground to pile (the agent dig, and the era band's leftover)
 	return Dug;
 }
 
@@ -12628,7 +12689,7 @@ bool URHSimWorldSubsystem::HaulLoad(int32 TaskId, float CargoCapKg, float& OutLo
 	return true;
 }
 
-void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource, int32 RobotLevel)
+void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnResource, int32 RobotLevel, FName CargoResource)
 {
 	if (FRHTask* T = FindTask(TaskId))
 	{
@@ -12658,6 +12719,7 @@ void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnR
 		else
 		{
 			HaulLostKg += (double)CargoKg; // D4's mass balance: a hauler's load with nowhere to go is lost, as it always was
+			NoteFlow(T->Resource, ERHLedgerLeg::Used, (double)CargoKg); // E1: R2
 		}
 		CompleteTask(TaskId);
 	}
@@ -12668,6 +12730,14 @@ void URHSimWorldSubsystem::HaulUnload(int32 TaskId, float CargoKg, FName ReturnR
 	else
 	{
 		HaulLostKg += (double)CargoKg;
+		if (CargoResource.IsNone())
+		{
+			UnslottedLostG += FMath::Max<int64>(0, FMath::RoundToInt64((double)CargoKg * 1000.0)); // E1 (R2): a harness call, no name
+		}
+		else
+		{
+			NoteFlow(CargoResource, ERHLedgerLeg::Used, (double)CargoKg); // E1: R2
+		}
 	}
 }
 
@@ -12778,7 +12848,9 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds, int3
 		for (const auto& Line : Cost)
 		{
 			double& Held = B->InputKg.FindOrAdd(Line.Key);
+			const double HeldBeforeKg = Held; // E1: held before minus held after (the clamp makes it min(held, bill))
 			Held = FMath::Max(0.0, Held - Line.Value);
+			NoteFlow(Line.Key, ERHLedgerLeg::Used, HeldBeforeKg - Held);
 			OnStockChanged.Broadcast(Line.Key, GetTotalSolid(Line.Key));
 		}
 		if (Def)
@@ -13147,6 +13219,7 @@ void URHSimWorldSubsystem::ApplyRepairAt(FMassEntityHandle Target, int32 Repaire
 		++PartsSpent;
 		WearRemoved += Removed;
 	}
+	NoteFlow(NAME_SpareParts, ERHLedgerLeg::Used, (double)PartsSpent); // E1: the parts go into the robot
 	if (PartsSpent > 0)
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("REPAIR: %.0f wear removed (%d parts, %.0f left in stock)"),
@@ -13774,6 +13847,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 			}
 		}
 	}
+	// E1 (save v51): the ledger, the last block of the file. Its size is fixed by the slot table, so no earlier offset moves.
+	WriteLedgerBlock(Ar);
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14558,6 +14633,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		}
 		++GrowthVersion;
 	}
+	// E1 (save v51): the ledger. Never refused: a malformed block resets it with a Warning (R1).
+	ReadLedgerBlock(Ar);
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

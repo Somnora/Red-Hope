@@ -783,7 +783,7 @@ int32 RHRunDepthSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSub
 		int32 At = INDEX_NONE;
 		for (int32 I = 0; bRead && I < FMath::Min(Z.Num(), W.Num()) && At == INDEX_NONE; ++I) { if (Z[I] != W[I]) { At = I; } }
 		const auto Rd = [&](const TArray<uint8>& Bytes, int32 Off) { int32 V = INDEX_NONE; if (Off >= 0 && Off + 4 <= Bytes.Num()) { FMemory::Memcpy(&V, Bytes.GetData() + Off, 4); } return V; };
-		Expect(bRead && Ver == 50 && At != INDEX_NONE && Rd(Z, At) == 0 && Rd(W, At) == 2 && W.Num() == Z.Num() + 32,
+		Expect(bRead && Ver == 51 && At != INDEX_NONE && Rd(Z, At) == 0 && Rd(W, At) == 2 && W.Num() == Z.Num() + 32,
 			FString::Printf(TEXT("DP11 the file says version %u; the warmth block sits at byte %d: a default colony writes 0 (4 bytes), two warm floors write 2 then 16 bytes each (%d -> %d bytes)"), Ver, At, Z.Num(), W.Num()));
 		if (!bRead || At == INDEX_NONE) { return Finish(); }
 		Expect(Rd(W, At + 4) == 0 && Rd(W, At + 8) == -9 && Rd(W, At + 20) == 0 && Rd(W, At + 24) == -10,
@@ -828,7 +828,7 @@ int32 RHRunDepthSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSub
 			T.SetNum(At + 4 + 16); // cut right after one record, but say two
 			Expect(TryFile(TEXT("depthr12"), T, Err) && Err.Contains(TEXT("warm floor count 2")), FString::Printf(TEXT("DP11 a count larger than the bytes left is refused (%s)"), *Err));
 		}
-		{ TArray<uint8> T = W; const uint32 V46 = 46; FMemory::Memcpy(T.GetData() + 4, &V46, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("depthr13"))); FString E46; const bool bOk = Sim->LoadColony(TEXT("depthr13"), E46); Expect(!bOk && E46.Contains(TEXT("Save format mismatch")) && E46.Contains(TEXT("/50")), FString::Printf(TEXT("DP11 a v46 file is refused (%s)"), *E46)); }
+		{ TArray<uint8> T = W; const uint32 V46 = 46; FMemory::Memcpy(T.GetData() + 4, &V46, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("depthr13"))); FString E46; const bool bOk = Sim->LoadColony(TEXT("depthr13"), E46); Expect(!bOk && E46.Contains(TEXT("Save format mismatch")) && E46.Contains(TEXT("/51")), FString::Printf(TEXT("DP11 a v46 file is refused (%s)"), *E46)); }
 		// The Warning repair: a level at or above the cut-off (the row moved between save and load) is dropped, the colony kept.
 		{
 			Reset();

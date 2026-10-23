@@ -104,7 +104,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 							}
 							else if (Current == ERHTaskType::Haul && Task.CargoKg > 0.f)
 							{
-								Sim->NoteHaulCargoLost(Task.CargoKg); // D4's mass balance: lost, as it always was
+								Sim->NoteHaulCargoLost(Task.CargoResource, Task.CargoKg); // D4's mass balance: lost, as it always was
 							}
 							Sim->AbandonTask(Task.TaskId);
 						}
@@ -280,7 +280,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 							DrawW = Robot.DrawIdleW;
 							if (Sim->StepHandoffHold(Entity))
 							{
-								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level, Task.CargoResource);
 								Task = FRHTaskFragment();
 							}
 						}
@@ -288,7 +288,7 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 						{
 							if (Sim->BeginHandoffHold(Entity, Task.TaskId, Level, Transform.GetLocation()) == 0)
 							{
-								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level);
+								Sim->HaulUnload(Task.TaskId, Task.CargoKg, bRover ? Task.CargoResource : NAME_None, Level, Task.CargoResource);
 								Task = FRHTaskFragment();
 							}
 						}

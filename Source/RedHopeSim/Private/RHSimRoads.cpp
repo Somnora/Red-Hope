@@ -465,6 +465,7 @@ bool URHSimWorldSubsystem::RemoveRoadEdgeWithRefund(int32 EdgeId)
 			if (B.DefName == NAME_LanderRoad && !B.bUnderConstruction)
 			{
 				B.OutputKg.FindOrAdd(NAME_StructRes) += RefundKg;
+				NoteFlow(NAME_StructRes, ERHLedgerLeg::Made, RefundKg); // E1: the refund re-enters holdings
 				OnStockChanged.Broadcast(NAME_StructRes, GetTotalSolid(NAME_StructRes));
 				return true;
 			}

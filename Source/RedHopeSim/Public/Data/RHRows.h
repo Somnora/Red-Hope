@@ -28,6 +28,10 @@ struct REDHOPESIM_API FRHResourceRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Category;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StorageType;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
+	// E1 (director answer Q-A (a)): what a kilogram is worth to Earth, in integer milli-credits (one value, used both ways; E3 adds the
+	// launch cost on top). A HabSegment's "kg" is one unit. Power, Research and Hope are 0: they have no ledger slot, and Hope is never
+	// valued. Placeholders for the director's review.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 EarthValue_mcr = 0;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

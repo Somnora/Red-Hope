@@ -60,3 +60,11 @@ struct REDHOPESIM_API FRHGrowthProject
 		return Kind == ERHGrowthKind::SurfaceModule ? FMath::Max(1, Size.X) * FMath::Max(1, Size.Y) : ((Kind == ERHGrowthKind::FloorCells || Kind == ERHGrowthKind::DeepCells) ? Cells : 0);
 	}
 };
+
+// E1 (REVISION R8): what a completed project put back into holdings - the unplaced pieces credited to the Lander and the oxygen
+// written into air. The bill less these is what the project used.
+struct REDHOPESIM_API FRHGrowthApplied
+{
+	TMap<FName, double> Credited;
+	double AirO2Kg = 0.0;
+};
