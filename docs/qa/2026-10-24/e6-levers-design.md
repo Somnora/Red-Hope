@@ -1194,3 +1194,11 @@ In the reviewer's words: "R1, R3, R5 and R8 are sound and band-exact as written,
 6. **LV8's rule comparison** is band-exact only while no rule-making act is due in the first 30 s of a sol, because the era twin's threshold step has already run such acts. The current schedule has none (the 24.0 + 10 s covert op is clean). Say so in LV8, or sample the rules at the roll.
 
 **The condition left:** fix mutation 4's line in the mutation map, as required change 1 describes. As with E4's and E5's re-reviews, the condition and the observations are applied by the builder, after the director's answers to Q-A, Q-B and Q-C.
+
+
+# DIRECTOR ANSWER (2026-10-24)
+
+The numbers are from the R10 model, reproduced by the re-review.
+- **Q-A (a):** Earth cannot embargo a pact partner. Modelled: Zarya's trade never stops; the standing trade earns 38,238 cr by sol 200, against 22,508 with no pact.
+- **Q-B (a):** a sabotage stops the target's production for the six whole sols after the act. Zarya's Ice peaks about 34% above its floor and recovers in about 20 sols.
+- **Q-C (a):** only a betrayed partner may charge a tariff: 25% both ways for 30 sols (about 2,106 cr lost). With no betrayal there is no tariff, so E4 and E5 money is untouched.
