@@ -1534,3 +1534,84 @@ The REACH sweep stays full (sweep.deck 66/66 or 67/67, sweep.section 73/73 or 74
 - P8 the labels: `p8_labels_20floors_before/after_entry`, `..._focus-10_traffic`, `p8_labels_20floors_after_*_1600`, `p8_labels_small_colony_after_entry/traffic`.
 
 **Not done.** Job Q (new art); the found-in-the-logs list (later shafts' cab doors, the warm-floor tint, "remove manifest line", the cavern ghost's O2 figure, the "Unzoned" figure).
+
+### Economy fixes: the code review's findings 1-3 (2026-10-24)
+
+Built from `docs/qa/2026-10-24/economy-code-review.md` (verdict PASS WITH FIXES), its should-fix findings 1-3. Finding 4 (the bot's false "second Forge ordered") was fixed in `bd0bc98`. Save **v54**. E4's design said "v54 if nothing lands first"; it now takes v55, and E5 and E6 move up one in turn. Each design already says the number is assigned at build time.
+
+**What it builds.**
+- **The frame (finding 2, the robust fix).** `RHSaveFrame` (`Public/RHSaveFrame.h`, `Private/RHSaveFrame.cpp`) is a shared helper. Each economy block at the end of the file is written in its own frame:
+  - a header: `uint32 Tag, uint32 PayloadBytes, uint32 CRC32` (`FCrc::MemCrc32`);
+  - the payload, written by its own `FMemoryWriter`;
+  - a footer: `uint32 PayloadBytes, uint32 Tag`.
+
+  The tags are `'RHE1'` (the ledger), `'RHE2'` (the credit) and `'RHE3'` (the export). Each reader finds its own frame in the file's bytes:
+  1. where the outer reader stands, if the header and footer agree there;
+  2. otherwise, by walking back from the end of the file (each footer names its header, and the 8 bytes before that header are the previous frame's footer).
+
+  The CRC must then match. The payload is parsed by its own `FMemoryReader`, which can never run past it. So a block that is lost, cut short or misread can no longer move where the next block is read. The `bLedgerBlockLost` and `bCreditBlockLost` coupling is gone: a lost ledger no longer zeroes the credit. Names inside a payload go through `RHSaveFrame::ReadName`, which refuses a length outside 1-256 characters or longer than what is left, so a doctored length never allocates gigabytes or logs FString's own Error. E6's levers block can reuse the helper as it stands (`'RHL6'`; E6 7.3 asked for the CRC and the footer, and both are here).
+- **The bounds (finding 2, the interim fixes, kept as defence in depth).** A loaded balance, awarded or spent total above `CreditMaxMcr` (10^12 cr) sets all three to 0 with a Warning; no real game comes near it. A loaded export price above the highest quote today's table can make is clamped to that quote, with a Warning. The highest quote is `GetEarthPriceCeilingMcrPerKg`: V x the multiplier at its clamp, 1 + `RequisitionEarthBonus`, less the launch cost. For Struct it is 4 cr/kg.
+- **The ledger reader (finding 3).** These now reset the ledger with a Warning:
+  - an open kg that is not finite or is below -0.001 kg (a real residual sits within half a gram of 0, so -0.0005 kg still loads);
+  - a negative lifetime;
+  - a checked sol other than C5d's `ProductionCheckedSol` (the two roll in lockstep from one `SolNow`);
+  - a name whose `FName` repeats an earlier one (FName equality ignores case, so "glass" after "Glass" is a repeat);
+  - bytes left over in the payload.
+
+  A reset always rolls at `ProductionCheckedSol`, never at a value read from the bad block. `NoteFlow` ignores a non-finite amount.
+- **The manifest (finding 1).**
+  - **Locked prices.** `ManifestPricesMcr` holds one price per item aboard. `AddManifestItem` locks each item at today's table price. `GetManifestCostMcr` sums the locked prices, so a data change can no longer re-price a manifest that is already composed. `GetManifestTablePriceMcr` never returns below 0.
+  - **Removal.** `RemoveManifestItem` takes the last such item off, with its locked price. Nothing is refunded, because nothing was charged: the launch is the only debit. It is open whenever the manifest is, and it is the way out of "Over budget at launch".
+  - **The save.** The prices are saved at the end of the credit block (the count, then each price in manifest order). On load, any of these prices every item aboard from today's table, with a Warning: a lost credit block, a count other than the manifest's, a price outside [0, `CreditMaxMcr`], or bytes left over.
+  - **The controls.** A REMOVE button on each picker row, enabled while that row is aboard. `RH.Manifest remove <Item>`. A click-test step, `manifest.REMOVE`.
+
+**Behaviour that changes.** A data change between ADD and LAUNCH no longer refuses the launch. At v53 it did, and with no way to remove an item, the quota ladder stopped for good. A lost or malformed ledger block now leaves the credit as saved; at v53 the credit started at 0. In normal play nothing moves: the locked price is the table price, and the bot's log lines print the same numbers.
+
+**Tests.**
+- **`-economy`, 76 checks.**
+  - EC1 compares the two saves up to the ledger's frame, and checks the credit and export frames are identical.
+  - EC6 checks the frame layout, the byte-identical round trip and v53 refused. Its old doctored cases now reseal the CRC, so the block's own checks still judge them, and a count of -1 now leaves the credit as saved.
+  - New in EC6: the review's count of 17, corrupted (the CRC catches it) and doctored (fill 6 and head 0x65746157, "Wate", read inside the frame); a count of 19; a name length one too long; the ledger's tag destroyed (the credit is found by the walk from the end); NaN and -5 kg open tallies; a -1 g lifetime; a checked sol of 1,000,000; "glass" after Glass; -0.0005 kg loads; `NoteFlow` ignores +Inf and NaN. Every case asserts the credit is exactly as saved.
+- **`-credit`, 46 checks.**
+  - CR7: the price lock (a re-price after ADD leaves 1,000 cr and the launch open), plus removal and its refusals.
+  - CR9: the frame and the locked prices in the layout; v53 refused; 0x7530... mcr totals load as 0.
+  - CR9, scenario A: a row re-priced to 50,000 cr after the save loads at its locked 1,000 cr.
+  - CR9: one price for two items prices both from the table.
+  - CR9, scenario B: a corrupted credit block loads at 0 and over budget at launch; removing both items lets the ship launch.
+- **`-export`, 30 checks.** XE10 checks the frame, a 1,000,000 cr/kg lock clamped to 4 cr/kg, a count of 17 leaving bytes over, and a corrupted block lost with the credit kept.
+- **Mutations**, each restored and checked by hash:
+  - the CRC never failing fails 2 checks (CR9 scenario B, XE10);
+  - no walk from the end fails 1 (EC6, the destroyed tag);
+  - pricing from the live table fails 2 (CR7, CR9 scenario A).
+
+  The first try at the CRC mutation (`false &&`) did not compile (`-Wunreachable-code` is an error), and the first try at the price mutation crashed the suite on a pointer bug in the mutation itself. Neither is a defect in the gate; both were redone.
+
+**Battery** (`rh_battery.sh 10`, its logs newer than both dylibs): `BATTERY COMPLETE: 0 suite(s) not green`. Against `battery_post_ui`, `diff_battery.py` gives `TOTAL differing lines: 184`:
+- 13 suites move only their version lines (53 to 54) or their file sizes; every save is 64 bytes longer (three 20-byte frames, plus the 4-byte price count);
+- `-economy` 79 lines, `-credit` 41 and `-export` 22, the tests above;
+- eraparity EP4 moves one wall-clock digit.
+
+No sim line moved in any other suite: the `Manifest: +` lines in `-citygrowth`, `-arrivals` and `-resupply` print the same numbers, because the locked price is the table price. The pins hold. New baseline: `Saved/baselines/battery_post_ecofix`.
+
+**Playtest.** `RH_PLAYTEST_DISTRICTS=1 bash scripts/sim/rh_playtest.sh 110 ecofix_full guide full` is byte-identical (`cmp`) to `Saved/baselines/ind_full_playtest.txt` (296,489 bytes, 1,732 lines, 0 sim errors).
+
+**Click test** (1440x860). `manifest.ADD` and `manifest.REMOVE` passed in all nine runs. **On the final binary, runs 8 and 9 PASS 84/84** (83 plus `manifest.REMOVE`). Every failure fell on a step this gate does not touch, and only in runs whose log holds hundreds of `ZenLocal ... Insufficient Storage (507)` lines (200-1,010 a run; runs 1, 3 and 5 also logged them and still passed):
+- Before the wrap fix below:
+  - runs 1, 3 and 5 PASS 84/84;
+  - run 2 failed `city.scroll` (997 ms frames);
+  - run 4 hit the script's 240 s timeout.
+- On the final binary:
+  - run 6 failed `section.traffic.off` and `section.arm`;
+  - run 7 failed a cascade of `shape.*` steps (310 ms frames).
+
+The system volume had 2.0 GB free, so the shader cache could not write: each boot recompiled shaders, and the load average ran at 40-100. Runs 8 and 9 logged 0 such lines and passed. The UI polish runs earlier on 2026-10-24 logged none.
+
+**Capture** (`Saved/RHCapture/ecofix`, 1440x860, looked at): every picker row has ADD, then REMOVE (greyed while that row is not aboard). The first capture showed the narrower name column clipping "Colonist Transport (20 colonists"; the name line now wraps (`ecofix_picker_wrap_00.png`), so long names take two lines and short ones stay on one.
+
+**-scale.** 0 failures. Every digest equals `Saved/d6b_scale_1.log` (`5f9d7352`, `5c609384`, `1e609e47` x2, `a579cc22`, `aef9a16a`, `1c58c27d`, `c754e9f0`). Ledger: an agent step 0.2831 ms on against 0.2822 ms off; 1,000 rolls 0.045 ms. 1,000 `CanLaunchShip` calls 0.911 ms (budget 5).
+
+**Checkpoints.** Re-made at v54: Midgame (sol 28.35) and Late (sol 62.35), 0 sim errors.
+
+**Known gaps.**
+- The price a picker row shows is today's table price. An item aboard at an older locked price shows only in the Credits bar's total.
+- The rest of the review's nits (5-11) are not built: the half-gram -1 g ring entry, the long-jump ring, unresolved rows, data validation in code, the award's float guard, the money-pump rule, and the smaller items.

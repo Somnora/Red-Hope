@@ -1531,6 +1531,14 @@ namespace
 				return (Sim && Sim->GetManifestItems().Num() == T->ManifestBase + 1) ? FString()
 					: FString::Printf(TEXT("manifest has %d line(s), expected %d"), Sim ? Sim->GetManifestItems().Num() : -1, T->ManifestBase + 1);
 			}, 1.f);
+			// v54 (economy code review, finding 1): the same row's REMOVE takes it off again.
+			const TSharedRef<FPress> Off = PushPress(TEXT("manifest.REMOVE"), LocateButton(TEXT("REMOVE"), 0, true));
+			PushCheck(TEXT("manifest.REMOVE"), Off, [T]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				return (Sim && Sim->GetManifestItems().Num() == T->ManifestBase && Sim->GetManifestPricesMcr().Num() == T->ManifestBase) ? FString()
+					: FString::Printf(TEXT("manifest has %d line(s), expected %d"), Sim ? Sim->GetManifestItems().Num() : -1, T->ManifestBase);
+			}, 1.f);
 		}
 
 		// ---- the traffic overlay flips on and off

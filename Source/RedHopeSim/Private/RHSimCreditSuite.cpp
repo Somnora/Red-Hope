@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "RHSaveFrame.h"
 #include <cmath>
 
 // E2 Earth credit self-test (docs/qa/2026-10-23/e2-earth-credit-design.md: DIRECTOR ANSWER > REVISION R1-R5 > PROFESSOR REVIEW > design).
@@ -509,7 +510,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			TEXT("CR6 a fifth delivered by the harness still counts; three landed and a fourth aboard refuse a fifth on the same manifest; a second Compute Core is refused"));
 	}
 
-	// --- CR7. Launch. ---
+	// --- CR7. Launch. v54 (economy-code-review.md finding 1): each item's price is locked when it is added, and an item can be taken off. ---
 	{
 		Reset();
 		Sim->Debug_OpenManifestWithAward(2000.0);
@@ -517,6 +518,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		FString Err;
 		const bool bEmpty = Sim->LaunchShip(Err) && Sim->GetCreditBalanceMcr() == B0 && Sim->GetCreditSpentMcr() == 0;
 		const bool bOutside = !Sim->LaunchShip(Err) && Err == TEXT("No manifest is open");
+		const bool bNoRemove = !Sim->RemoveManifestItem(FName("SoilPallet"), Err) && Err == TEXT("No manifest is open (quota not met, or ship already launched)");
 		LandShip();
 		Sim->Debug_OpenManifestWithAward(2000.0);
 		Sim->AddManifestItem(FName("SoilPallet"), Err);
@@ -524,12 +526,18 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const int32 Price0 = Row ? Row->Price_mcr : 0;
 		if (Row) { Row->Price_mcr = 9000000; } // a live re-price between the add and the launch
 		const int64 B1 = Sim->GetCreditBalanceMcr();
-		const bool bRepriced = !Sim->LaunchShip(Err) && Err.StartsWith(TEXT("Over budget at launch: the manifest now costs 9000 cr against 4000 cr"))
-			&& Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Sim->GetCreditBalanceMcr() == B1;
+		FString Why;
+		const bool bLocked = Sim->GetManifestCostMcr() == 1000000 && Sim->GetManifestPricesMcr().Num() == 1 && Sim->CanLaunchShip(Why);
+		// A second pallet at today's 9,000 cr is over budget; one that is not aboard cannot come off; the one aboard comes off, nothing refunded.
+		const bool bSecond = !Sim->AddManifestItem(FName("SoilPallet"), Err) && Err.StartsWith(TEXT("Over budget: 1000 + 9000 > 4000 cr"));
+		const bool bNotAboard = !Sim->RemoveManifestItem(FName("SeedVault"), Err) && Err == TEXT("No SeedVault is aboard");
+		const bool bOff = Sim->RemoveManifestItem(FName("SoilPallet"), Err) && Sim->GetManifestItems().Num() == 0 && Sim->GetManifestPricesMcr().Num() == 0
+			&& Sim->GetManifestCostMcr() == 0 && Sim->GetCreditBalanceMcr() == B1 && Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest;
 		if (Row) { Row->Price_mcr = Price0; }
+		Sim->AddManifestItem(FName("SoilPallet"), Err);
 		const bool bThen = Sim->LaunchShip(Err) && Sim->GetCreditBalanceMcr() == B1 - 1000000;
-		Expect(bEmpty && bOutside && bRepriced && bThen && Inv(),
-			FString::Printf(TEXT("CR7 an empty launch spends 0; a launch with no manifest open is refused as at HEAD; a re-price after the add refuses the launch with the phase and balance unchanged; restored, it launches and spends %s cr"), *Cr(1000000)));
+		Expect(bEmpty && bOutside && bNoRemove && bLocked && bSecond && bNotAboard && bOff && bThen && Inv(),
+			FString::Printf(TEXT("CR7 an empty launch spends 0; with no manifest open a launch and a removal are refused; a re-price after the add leaves the locked %s cr and the launch open; an item comes off with nothing refunded; it launches and spends %s cr"), *Cr(1000000), *Cr(1000000)));
 	}
 
 	// --- CR8. Era parity: each band pays floor(1,000 x its own award) on its met step; composing and launching agree. ---
@@ -564,7 +572,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				*Cr(Balance[0]), *Cr(Balance[1]), Soil[0], Soil[1]));
 	}
 
-	// --- CR9. The save (R5). ---
+	// --- CR9. The save (R5; v54: the frame and the locked prices, economy-code-review.md findings 1 and 2). ---
 	{
 		Reset();
 		Sim->Debug_DeliverCargo(FName("Toolkit"));
@@ -574,21 +582,22 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->AddManifestItem(FName("SoilPallet"), Err);
 		Sim->AddManifestItem(FName("SeedVault"), Err);
 		const int32 CreditBytes = Sim->GetCreditBlockBytes();
-		const int32 ExportBytes = Sim->GetExportBlockBytes(); // E3's block follows the credit block
 		const bool bSaved = Sim->SaveColony(TEXT("creditsave"), SaveErr);
 		TArray<uint8> W;
 		const bool bRead = bSaved && FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("creditsave")));
 		uint32 Ver = 0;
 		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
-		const int32 At = W.Num() - ExportBytes - CreditBytes;
+		int32 Frame = INDEX_NONE, Payload = 0, ExportFrame = INDEX_NONE, ExportPayload = 0;
+		const bool bFramed = bRead && RHSaveFrame::Find(W, RHSaveFrame::CreditTag, Frame, Payload) && RHSaveFrame::Find(W, RHSaveFrame::ExportTag, ExportFrame, ExportPayload);
+		const int32 At = Frame + RHSaveFrame::HeaderBytes;
 		const auto Rd64 = [&](int32 Off) { int64 V = 0; if (Off >= 0 && Off + 8 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 8); } return V; };
 		const auto Rd32 = [&](int32 Off) { int32 V = 0; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
 		double Cap = 0.0;
-		if (bRead) { FMemory::Memcpy(&Cap, W.GetData() + At + 24, 8); }
+		if (bFramed) { FMemory::Memcpy(&Cap, W.GetData() + At + 24, 8); }
 		TArray<FString> Names;
 		TArray<int32> Landed;
 		int32 Cur = At + 36;
-		for (int32 n = 0; bRead && n < Rd32(At + 32); ++n)
+		for (int32 n = 0; bFramed && n < Rd32(At + 32); ++n)
 		{
 			const int32 Len = Rd32(Cur);
 			Names.Add(FString(ANSI_TO_TCHAR((const ANSICHAR*)(W.GetData() + Cur + 4))));
@@ -596,10 +605,13 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Landed.Add(Rd32(Cur));
 			Cur += 4;
 		}
-		Expect(bRead && Ver == 53 && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
-			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1 && Cur == W.Num() - ExportBytes,
-			FString::Printf(TEXT("CR9 v%u: the credit block is the %d bytes before E3's export block - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, then %d capped rows by name (%s %d, %s %d)"),
-				Ver, CreditBytes, Rd64(At), Rd64(At + 8), Rd64(At + 16), Cap, Names.Num(), Names.Num() ? *Names[0] : TEXT("?"), Landed.Num() ? Landed[0] : -1, Names.Num() > 1 ? *Names[1] : TEXT("?"), Landed.Num() > 1 ? Landed[1] : -1));
+		const int32 PricesAt = Cur; // v54: the item count, then each item's locked price in manifest order
+		Expect(bFramed && Ver == 54 && Payload == CreditBytes && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
+			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1
+			&& Rd32(PricesAt) == 2 && Rd64(PricesAt + 4) == 1000000 && Rd64(PricesAt + 12) == 200000 && PricesAt + 20 == At + Payload && At + Payload + RHSaveFrame::FooterBytes == ExportFrame,
+			FString::Printf(TEXT("CR9 v%u: the credit block is a frame ('RHE2', %d payload bytes) straight before E3's - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, %d capped rows by name (%s %d, %s %d), then 2 locked prices (%lld, %lld mcr)"),
+				Ver, Payload, Rd64(At), Rd64(At + 8), Rd64(At + 16), Cap, Names.Num(), Names.Num() ? *Names[0] : TEXT("?"), Landed.Num() ? Landed[0] : -1, Names.Num() > 1 ? *Names[1] : TEXT("?"), Landed.Num() > 1 ? Landed[1] : -1,
+				Rd64(PricesAt + 4), Rd64(PricesAt + 12)));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("creditsave"), Le) && Le.IsEmpty() && Sim->SaveColony(TEXT("creditsave2"), SaveErr);
 		TArray<uint8> W2;
@@ -613,13 +625,16 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			OutErr = E;
 			return bOk && E.IsEmpty();
 		};
+		// A doctored block: the edit, then the frame's CRC rewritten, so the block's own repairs are what judge it.
+		const auto Sealed = [](TArray<uint8> T) { RHSaveFrame::Reseal(T, RHSaveFrame::CreditTag); return T; };
 		const auto Put64 = [](TArray<uint8>& T, int32 Off, int64 V) { FMemory::Memcpy(T.GetData() + Off, &V, 8); };
+		const auto Put32 = [](TArray<uint8>& T, int32 Off, int32 V) { FMemory::Memcpy(T.GetData() + Off, &V, 4); };
 		const int64 Bal = Rd64(At), Aw = Rd64(At + 8);
-		{ TArray<uint8> T = W; Put64(T, At, -5); FString E; const bool bOk = TryBytes(TEXT("creditr1"), T, E);
+		{ TArray<uint8> T = W; Put64(T, At, -5); FString E; const bool bOk = TryBytes(TEXT("creditr1"), Sealed(T), E);
 		  Expect(bOk && Sim->GetCreditBalanceMcr() == 0 && Inv(), FString::Printf(TEXT("CR9 a negative balance loads repaired to 0 with the invariant restored (awarded %lld, spent %lld)"), Sim->GetCreditAwardedMcr(), Sim->GetCreditSpentMcr())); }
-		{ TArray<uint8> T = W; Put64(T, At + 16, Aw + 7000); FString E; const bool bOk = TryBytes(TEXT("creditr2"), T, E);
+		{ TArray<uint8> T = W; Put64(T, At + 16, Aw + 7000); FString E; const bool bOk = TryBytes(TEXT("creditr2"), Sealed(T), E);
 		  Expect(bOk && Sim->GetCreditBalanceMcr() == Bal && Inv(), TEXT("CR9 spent above awarded loads with spent = awarded - balance")); }
-		{ TArray<uint8> T = W; Put64(T, At, Bal + 12345); FString E; const bool bOk = TryBytes(TEXT("creditr3"), T, E);
+		{ TArray<uint8> T = W; Put64(T, At, Bal + 12345); FString E; const bool bOk = TryBytes(TEXT("creditr3"), Sealed(T), E);
 		  Expect(bOk && Sim->GetCreditBalanceMcr() == Bal + 12345 && Sim->GetCreditAwardedMcr() == Bal + 12345 && Sim->GetCreditSpentMcr() == 0 && Inv(),
 			TEXT("CR9 a balance above awarded - spent loads with awarded = balance and spent = 0")); }
 		{
@@ -627,17 +642,55 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			TArray<uint8> T;
 			T.Append(W.GetData(), At + 36);
 			const int32 First = At + 36, Second = First + 4 + Rd32(First) + 4;
-			const int32 End = W.Num() - ExportBytes;
-			T.Append(W.GetData() + Second, End - Second);
+			T.Append(W.GetData() + Second, PricesAt - Second);
 			T.Append(W.GetData() + First, Second - First);
-			T.Append(W.GetData() + End, ExportBytes);
+			T.Append(W.GetData() + PricesAt, W.Num() - PricesAt);
 			FString E;
-			const bool bOk = TryBytes(TEXT("creditr4"), T, E);
-			Expect(bOk && T.Num() == W.Num() && Sim->GetManifestLanded(FName("Toolkit")) == 0 && Sim->GetManifestLanded(FName("ComputeCore")) == 0 && Sim->GetCreditBalanceMcr() == Bal && Inv(),
-				TEXT("CR9 a block whose rows are out of order resets every landing count to 0 and loads, the credit kept"));
+			const bool bOk = TryBytes(TEXT("creditr4"), Sealed(T), E);
+			Expect(bOk && T.Num() == W.Num() && Sim->GetManifestLanded(FName("Toolkit")) == 0 && Sim->GetManifestLanded(FName("ComputeCore")) == 0 && Sim->GetCreditBalanceMcr() == Bal
+				&& Sim->GetManifestCostMcr() == 1200000 && Inv(),
+				TEXT("CR9 a block whose rows are out of order resets every landing count to 0 and loads, the credit and the locked prices kept"));
 		}
-		{ TArray<uint8> T = W; const uint32 V52 = 52; FMemory::Memcpy(T.GetData() + 4, &V52, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
-		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/53")), FString::Printf(TEXT("CR9 a v52 file is refused (%s)"), *E)); }
+		{ TArray<uint8> T = W; const uint32 V53 = 53; FMemory::Memcpy(T.GetData() + 4, &V53, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
+		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/54")), FString::Printf(TEXT("CR9 a v53 file is refused (%s)"), *E)); }
+		// v54, finding 2: a balance of ~1e18 (the old bug's size) is not a real one: all three totals are set to 0, never kept.
+		{ TArray<uint8> T = W; Put64(T, At, 0x7530000000000000LL); Put64(T, At + 8, 0x7530000000000000LL); FString E; const bool bOk = TryBytes(TEXT("creditr6"), Sealed(T), E);
+		  Expect(bOk && Sim->GetCreditBalanceMcr() == 0 && Sim->GetCreditAwardedMcr() == 0 && Sim->GetCreditSpentMcr() == 0 && Inv(),
+			TEXT("CR9 a balance and awarded total of 0x7530... mcr (~8e18, above the 10^12 cr bound) load as 0, never kept")); }
+		// v54, finding 1, scenario A: a data change re-prices a row after the save. The manifest loads at the prices it was locked at.
+		FRHManifestItemRow* Row = const_cast<FRHManifestItemRow*>(DefsSub ? DefsSub->GetManifestItem(FName("SoilPallet")) : nullptr);
+		const int32 Price0 = Row ? Row->Price_mcr : 0;
+		if (Row) { Row->Price_mcr = 50000000; }
+		{
+			FString E;
+			const bool bOk = TryBytes(TEXT("creditr7"), W, E);
+			FString Why;
+			Expect(bOk && Sim->GetManifestCostMcr() == 1200000 && Sim->CanLaunchShip(Why) && Inv(),
+				FString::Printf(TEXT("CR9 a Soil Pallet re-priced to 50,000 cr after the save loads at its locked 1,000 cr (the manifest %s cr) and the launch stays open"), *Cr(Sim->GetManifestCostMcr())));
+		}
+		// A price count that is not the manifest's (doctored to 1 for 2 items): every item is priced from today's table, with a Warning.
+		{
+			TArray<uint8> T = W; Put32(T, PricesAt, 1);
+			FString E;
+			const bool bOk = TryBytes(TEXT("creditr8"), Sealed(T), E);
+			Expect(bOk && Sim->GetManifestCostMcr() == 50200000 && Sim->GetManifestPricesMcr().Num() == 2 && Inv(),
+				FString::Printf(TEXT("CR9 a block holding 1 locked price for 2 items prices both from today's table (%s cr)"), *Cr(Sim->GetManifestCostMcr())));
+		}
+		// Scenario B: the credit block corrupted (its CRC fails) with items aboard - the credit starts at 0 and the launch is over budget. The
+		// way out (at v53 there was none, and the quota ladder stopped for good): take the items off, then launch.
+		{
+			TArray<uint8> T = W; T[At + 3] ^= 0x40;
+			FString E;
+			const bool bOk = TryBytes(TEXT("creditr9"), T, E);
+			FString Why;
+			const bool bStuck = bOk && Sim->GetCreditBalanceMcr() == 0 && Sim->GetManifestItems().Num() == 2 && !Sim->CanLaunchShip(Why) && Why.StartsWith(TEXT("Over budget at launch"));
+			FString R1, R2, L;
+			const bool bOff = Sim->RemoveManifestItem(FName("SoilPallet"), R1) && Sim->RemoveManifestItem(FName("SeedVault"), R2) && Sim->GetManifestCostMcr() == 0;
+			const bool bLaunched = Sim->LaunchShip(L) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound;
+			Expect(bStuck && bOff && bLaunched && Inv(),
+				FString::Printf(TEXT("CR9 a corrupted credit block loads with the credit at 0 and the manifest over budget at launch (\"%s\"); removing both items lets the ship launch"), *Why.Left(60)));
+		}
+		if (Row) { Row->Price_mcr = Price0; }
 		// A ship in flight keeps its cap through a round trip.
 		Sim->LoadColony(TEXT("creditsave"), Le);
 		Sim->LaunchShip(Err);

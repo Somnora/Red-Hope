@@ -3,6 +3,8 @@
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "Data/RHRows.h"
+#include "RHSaveFrame.h"
+#include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 
 // E3, selling to Earth (docs/qa/2026-10-23/e3-selling-to-earth-design.md: DIRECTOR ANSWER > REVISION R1-R11 > PROFESSOR REVIEW > design).
@@ -450,24 +452,38 @@ int32 URHSimWorldSubsystem::GetExportBlockBytes() const
 	return Bytes.Num();
 }
 
-void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar)
+int64 URHSimWorldSubsystem::GetEarthPriceCeilingMcrPerKg(FName Resource) const
+{
+	// The highest quote today's table can make: the multiplier at its clamp, 1 + RequisitionEarthBonus (GetRequisitionMultiplier).
+	const FRHResourceRow* Row = Defs ? Defs->GetResource(Resource) : nullptr;
+	const int64 V = Row ? (int64)FMath::Max(0, Row->EarthValue_mcr) : 0;
+	const int64 Mpm = FMath::RoundToInt64((1.0 + RequisitionEarthBonus) * 1000.0);
+	return (V * Mpm) / 1000 - GetLaunchCostMcrPerKg();
+}
+
+void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar, const TArray<uint8>& File)
 {
 	// Read after teardown, so it repairs with a Warning and never refuses (E1 R1, E2 R5): names must ascend (an unsorted block drops every
 	// line and every arrears count); an unknown name is skipped; a negative kg, a priced-0 line, a line for a row Earth no longer buys, or
 	// any line outside an open manifest is dropped; lines past the stamped cap are dropped from the end of the list (R6); a negative arrears
-	// count is 0; the sales total is clamped into [0, the awarded total]. No path logs an Error.
+	// count is 0; the sales total is clamped into [0, the awarded total]. v54: the block sits in its own frame (RHSaveFrame.h); a lost one,
+	// or one with bytes left over, drops every line and arrears count; a locked price above the highest quote today's table can make is
+	// clamped to it (economy-code-review.md finding 2). No path logs an Error.
 	ExportLines.Reset();
 	QuotaArrearsKg.Reset();
 	SalesPaidMcr = 0;
-	if (bLedgerBlockLost || bCreditBlockLost)
+	TArray<uint8> Payload;
+	FString Why;
+	if (!RHSaveFrame::Read(Ar, File, RHSaveFrame::ExportTag, Payload, Why))
 	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v53: a block before the export block could not be measured; no sale or arrears is read"));
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the export block is lost (%s); no sale or arrears is read"), *Why);
 		return;
 	}
+	FMemoryReader In(Payload);
 	int64 Sales = 0;
 	int32 Count = 0;
-	Ar << Sales << Count;
-	if (Ar.IsError() || Count < 0 || Count > 4096)
+	In << Sales << Count;
+	if (In.IsError() || Count < 0 || Count > 4096)
 	{
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v53: the export block is cut short or its slot count %d is invalid; no sale or arrears is read"), Count);
 		return;
@@ -478,8 +494,9 @@ void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar)
 	for (int32 n = 0; n < Count; ++n)
 	{
 		FReadLine R;
-		Ar << R.Name << R.Kg << R.Price << R.Owed;
-		if (Ar.IsError())
+		RHSaveFrame::ReadName(In, R.Name);
+		In << R.Kg << R.Price << R.Owed;
+		if (In.IsError())
 		{
 			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v53: the export block is cut short; no sale or arrears is read"));
 			return;
@@ -489,6 +506,11 @@ void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar)
 			bSorted = false;
 		}
 		Read.Add(R);
+	}
+	if (In.Tell() != In.TotalSize())
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the export block has %lld bytes left over; no sale or arrears is read"), In.TotalSize() - In.Tell());
+		return;
 	}
 	if (Sales < 0 || Sales > CreditAwardedMcr)
 	{
@@ -521,8 +543,16 @@ void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar)
 		{
 			continue;
 		}
+		int64 Price = R.Price;
+		const int64 Ceiling = GetEarthPriceCeilingMcrPerKg(Name);
+		if (R.Kg > 0 && Price > Ceiling)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the sale of %d kg %s is locked at %s cr/kg, above the %s cr/kg today's table can quote; clamped"),
+				R.Kg, *R.Name, *FormatCredits(Price), *FormatCredits(Ceiling));
+			Price = Ceiling;
+		}
 		const TCHAR* Drop = R.Kg < 0 ? TEXT("a negative kg")
-			: (R.Kg > 0 && R.Price <= 0 ? TEXT("no positive price")
+			: (R.Kg > 0 && Price <= 0 ? TEXT("no positive price")
 			: (QuotaPhase != ERHQuotaPhase::AwaitingManifest ? TEXT("no manifest is open")
 			: (!DoesEarthBuy(Name) ? TEXT("Earth no longer buys it") : nullptr)));
 		if (Drop || R.Kg == 0)
@@ -533,7 +563,7 @@ void URHSimWorldSubsystem::ReadExportBlock(FArchive& Ar)
 		FRHExportLine Line;
 		Line.Resource = Name;
 		Line.Kg = R.Kg;
-		Line.PriceMcrPerKg = R.Price;
+		Line.PriceMcrPerKg = Price;
 		ExportLines.Add(Line);
 	}
 	// R6: the lines that no longer fit the stamped cap beside the bill go, from the end of the sorted list.

@@ -308,6 +308,7 @@ private:
 	static FName CategoryIcon(FName Category);
 	void RefreshRosterPanel();
 	FReply HandleManifestAdd(FName Item);
+	FReply HandleManifestRemove(FName Item);         // v54: one off again (the way out of "Over budget at launch")
 	FReply HandleLaunch();
 	FReply HandleLaunchShort();                      // E3: a ship that cannot load the whole quota, after the window
 	FReply HandleExportAdd(FName Resource, int32 Kg); // E3: sell surplus to Earth

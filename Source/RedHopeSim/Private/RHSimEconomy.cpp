@@ -2,6 +2,8 @@
 #include "RedHopeSim.h"
 #include "RHDefinitionsSubsystem.h"
 #include "Data/RHRows.h"
+#include "RHSaveFrame.h"
+#include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 
 // E1, the ledger (docs/qa/2026-10-22/e1-ledger-design.md, DIRECTOR ANSWER > REVISION > design). A second ledger beside C5d's: no
@@ -38,9 +40,9 @@ void URHSimWorldSubsystem::BuildEconSlots()
 
 void URHSimWorldSubsystem::NoteFlow(FName Resource, ERHLedgerLeg Leg, double Kg)
 {
-	// The one hook. It records an amount that really moved (never a nominal one), ignores Kg <= 0 and a name with no slot, and only
-	// ever writes ledger members: no sim value, branch or evaluation order depends on it (the inert twin, EC1).
-	if (!bLedgerEnabled || !(Kg > 0.0))
+	// The one hook. It records an amount that really moved (never a nominal one), ignores Kg <= 0, a non-finite amount and a name with no
+	// slot, and only ever writes ledger members: no sim value, branch or evaluation order depends on it (the inert twin, EC1).
+	if (!bLedgerEnabled || !(Kg > 0.0) || !FMath::IsFinite(Kg))
 	{
 		return;
 	}
@@ -126,7 +128,7 @@ int64 URHSimWorldSubsystem::GetLedgerRingSumG(FName Resource, ERHLedgerLeg Leg) 
 
 void URHSimWorldSubsystem::WriteLedgerBlock(FArchive& Ar) const
 {
-	// The last block of the file (v51). Its size depends only on the slot table, never on history: the count; then per slot, in sorted
+	// The ledger block (v51; framed since v54). Its size depends only on the slot table, never on history: the count; then per slot, in sorted
 	// order, the name and, per leg, the open kg, the lifetime grams and the 8 ring entries; then the ring's fill and head, the sol it last
 	// rolled at, and the unslotted haul loss.
 	int32 Count = EconSlots.Num();
@@ -160,35 +162,70 @@ int32 URHSimWorldSubsystem::GetLedgerBlockBytes() const
 	return Bytes.Num();
 }
 
-void URHSimWorldSubsystem::ReadLedgerBlock(FArchive& Ar)
+void URHSimWorldSubsystem::ReadLedgerBlock(FArchive& Ar, const TArray<uint8>& File)
 {
-	// R1: this block is never refused (nothing reads it, and it is the last thing in the file). A malformed one - an unsorted or repeated
-	// name, a ring index out of range, a negative ring entry - resets the ledger to empty with a Warning; a name with no slot (a row was
-	// removed) is skipped with a Warning; a slot the file does not hold starts at zero. No path logs an Error.
-	// E2b: the credit block follows this one, so a malformed block is still read to its end whenever its slot count is sane (every slot is a
-	// fixed size); only a bad count or a block cut short leaves the reader lost, and then the credit block is not read (bLedgerBlockLost).
+	// R1: this block is never refused (nothing reads it). A malformed one resets the ledger to empty with a Warning, rolled at C5d's sol: an
+	// unsorted or repeated name (a repeat is FName equality, which ignores case), a ring index out of range, a negative ring entry or
+	// lifetime, an open kg that is not finite or is below -0.001 kg (a real residual sits within half a gram of 0), a checked sol other than
+	// C5d's (both roll in lockstep from one SolNow), or bytes left over. A name with no slot (a row was removed) is skipped with a Warning; a
+	// slot the file does not hold starts at zero. v54: the block sits in its own frame (RHSaveFrame.h), so a lost or malformed one never
+	// moves where the credit block after it is read. No path logs an Error.
 	BuildEconSlots();
+	TArray<uint8> Payload;
+	FString Why;
+	if (!RHSaveFrame::Read(Ar, File, RHSaveFrame::LedgerTag, Payload, Why))
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the ledger block is lost (%s); the ledger starts empty"), *Why);
+		return;
+	}
+	FMemoryReader In(Payload);
 	int32 Count = 0;
-	Ar << Count;
-	const bool bCountOk = Count >= 0 && Count <= 4096 && !Ar.IsError();
-	bool bBad = !bCountOk;
-	bLedgerBlockLost = !bCountOk;
-	FString Why = bBad ? FString::Printf(TEXT("slot count %d"), Count) : FString();
+	In << Count;
+	bool bBad = In.IsError() || Count < 0 || Count > 4096;
+	Why = bBad ? FString::Printf(TEXT("slot count %d"), Count) : FString();
 	FString Prev;
+	TSet<FName> Seen;
 	struct FReadSlot { int32 Slot; double Open[LedgerLegs]; int64 Life[LedgerLegs]; int64 Ring[LedgerLegs][LedgerRing]; };
 	TArray<FReadSlot> Read;
-	for (int32 n = 0; bCountOk && n < Count; ++n)
+	for (int32 n = 0; !bBad && n < Count; ++n)
 	{
 		FString Name;
-		Ar << Name;
+		if (!RHSaveFrame::ReadName(In, Name))
+		{
+			bBad = true;
+			Why = FString::Printf(TEXT("slot %d's name cannot be read"), n);
+			break;
+		}
 		FReadSlot R;
 		R.Slot = INDEX_NONE;
 		for (int32 Leg = 0; Leg < LedgerLegs; ++Leg)
 		{
-			Ar << R.Open[Leg] << R.Life[Leg];
+			In << R.Open[Leg] << R.Life[Leg];
 			for (int32 i = 0; i < LedgerRing; ++i)
 			{
-				Ar << R.Ring[Leg][i];
+				In << R.Ring[Leg][i];
+			}
+		}
+		if (In.IsError())
+		{
+			bBad = true;
+			Why = TEXT("the block is cut short");
+			break;
+		}
+		for (int32 Leg = 0; Leg < LedgerLegs && !bBad; ++Leg)
+		{
+			if (!FMath::IsFinite(R.Open[Leg]) || R.Open[Leg] < -0.001)
+			{
+				bBad = true;
+				Why = FString::Printf(TEXT("slot %s has an open tally of %g kg"), *Name, R.Open[Leg]);
+			}
+			else if (R.Life[Leg] < 0)
+			{
+				bBad = true;
+				Why = FString::Printf(TEXT("slot %s has a negative lifetime"), *Name);
+			}
+			for (int32 i = 0; i < LedgerRing && !bBad; ++i)
+			{
 				if (R.Ring[Leg][i] < 0)
 				{
 					bBad = true;
@@ -196,24 +233,24 @@ void URHSimWorldSubsystem::ReadLedgerBlock(FArchive& Ar)
 				}
 			}
 		}
-		if (Ar.IsError())
-		{
-			bBad = true;
-			bLedgerBlockLost = true;
-			Why = TEXT("the block is cut short");
-			break;
-		}
-		if (n > 0 && Name.Compare(Prev, ESearchCase::CaseSensitive) <= 0 && !bBad)
+		const FName Key(*Name);
+		if (!bBad && n > 0 && Name.Compare(Prev, ESearchCase::CaseSensitive) <= 0)
 		{
 			bBad = true;
 			Why = FString::Printf(TEXT("slot %s is out of order or repeated (after %s)"), *Name, *Prev);
 		}
+		else if (!bBad && Seen.Contains(Key))
+		{
+			bBad = true;
+			Why = FString::Printf(TEXT("slot %s repeats an earlier name"), *Name);
+		}
+		Seen.Add(Key);
 		Prev = Name;
 		if (bBad)
 		{
-			continue; // read on to the block's end; nothing of a bad block is kept
+			break;
 		}
-		if (const int32* Slot = EconIndex.Find(FName(*Name)))
+		if (const int32* Slot = EconIndex.Find(Key))
 		{
 			R.Slot = *Slot;
 			Read.Add(R);
@@ -225,24 +262,34 @@ void URHSimWorldSubsystem::ReadLedgerBlock(FArchive& Ar)
 	}
 	int32 Filled = 0, Head = 0, Checked = 0;
 	int64 Lost = 0;
-	if (!bLedgerBlockLost)
+	if (!bBad)
 	{
-		Ar << Filled << Head << Checked << Lost;
-		if (Ar.IsError())
+		In << Filled << Head << Checked << Lost;
+		if (In.IsError())
 		{
-			bLedgerBlockLost = true;
+			bBad = true;
+			Why = TEXT("the block is cut short");
 		}
-		if (!bBad && (Ar.IsError() || Filled < 0 || Filled > LedgerRing || Head < 0 || Head >= LedgerRing || Lost < 0))
+		else if (Filled < 0 || Filled > LedgerRing || Head < 0 || Head >= LedgerRing || Lost < 0)
 		{
 			bBad = true;
 			Why = FString::Printf(TEXT("ring fill %d, head %d, unslotted loss %lld"), Filled, Head, Lost);
+		}
+		else if (Checked != ProductionCheckedSol)
+		{
+			bBad = true;
+			Why = FString::Printf(TEXT("it rolled at sol %d, C5d's ledger at sol %d"), Checked, ProductionCheckedSol);
+		}
+		else if (In.Tell() != In.TotalSize())
+		{
+			bBad = true;
+			Why = FString::Printf(TEXT("%lld bytes are left over"), In.TotalSize() - In.Tell());
 		}
 	}
 	if (bBad)
 	{
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v51: the ledger block is malformed (%s); the ledger starts empty"), *Why);
-		BuildEconSlots();
-		EconCheckedSol = Checked > 0 ? Checked : ProductionCheckedSol;
+		BuildEconSlots(); // rolled at ProductionCheckedSol, never at a value read from a bad block
 		return;
 	}
 	for (const FReadSlot& R : Read)
@@ -264,9 +311,10 @@ void URHSimWorldSubsystem::ReadLedgerBlock(FArchive& Ar)
 	UnslottedLostG = Lost;
 }
 
-// E2b, Earth credit: the credit block (docs/qa/2026-10-23/e2-earth-credit-design.md section 6, REVISION R5). After E1's block, the last
-// thing in the file: the balance, the awarded and spent totals (int64 mcr), the ship's mass cap (double), then the number of stack-capped
-// manifest rows and per row, in name order (case-sensitive ordinal), its name and its landings. Its size depends only on the manifest table.
+// E2b, Earth credit: the credit block (docs/qa/2026-10-23/e2-earth-credit-design.md section 6, REVISION R5). After E1's block: the
+// balance, the awarded and spent totals (int64 mcr), the ship's mass cap (double), then the number of stack-capped manifest rows and per
+// row, in name order (case-sensitive ordinal), its name and its landings; v54 adds the manifest's locked prices (the count, then each item's
+// price in manifest order). The block sits in its own frame (RHSaveFrame.h).
 namespace
 {
 	void GatherCappedRows(const URHDefinitionsSubsystem* Defs, TArray<FName>& Out)
@@ -295,6 +343,12 @@ void URHSimWorldSubsystem::WriteCreditBlock(FArchive& Ar) const
 		int32 Landed = GetManifestLanded(Name);
 		Ar << Text << Landed;
 	}
+	int32 Items = ManifestPricesMcr.Num();
+	Ar << Items;
+	for (int64 Price : ManifestPricesMcr)
+	{
+		Ar << Price;
+	}
 }
 
 int32 URHSimWorldSubsystem::GetCreditBlockBytes() const
@@ -305,32 +359,46 @@ int32 URHSimWorldSubsystem::GetCreditBlockBytes() const
 	return Bytes.Num();
 }
 
-void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar)
+void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar, const TArray<uint8>& File)
 {
-	// Read after teardown, so it is never refused: it repairs with a Warning (E1 R1, E2 R5). Balance and totals: a negative one is set to 0;
-	// a balance that disagrees with the totals sets Spent = Awarded - Balance; a Spent that would then be negative sets Awarded = Balance and
-	// Spent = 0. The cap: non-finite or negative is invalid; in Open or Completed it is 0; in AwaitingManifest or ShipInbound an invalid or
-	// zero cap becomes the config value, and a valid one (a ship in flight) is kept. The counts: names must ascend; an unknown name is
-	// skipped, a missing one starts at 0, and an unsorted block resets every count. No path logs an Error.
+	// Read after teardown, so it is never refused: it repairs with a Warning (E1 R1, E2 R5). Balance and totals: a lost block starts them at
+	// 0; one above CreditMaxMcr sets all three to 0 (v54: no real game comes near it, so it is a broken file, never a balance to keep); a
+	// negative one is set to 0; a balance that disagrees with the totals sets Spent = Awarded - Balance; a Spent that would then be negative
+	// sets Awarded = Balance and Spent = 0. The cap: non-finite or negative is invalid; in Open or Completed it is 0; in AwaitingManifest or
+	// ShipInbound an invalid or zero cap becomes the config value, and a valid one (a ship in flight) is kept. The counts: names must ascend;
+	// an unknown name is skipped, a missing one starts at 0, and an unsorted block resets every count. The locked prices (v54): a count other
+	// than the manifest's, a price outside [0, CreditMaxMcr], bytes left over or a lost block price every item aboard from today's table
+	// (RemoveManifestItem stays open whatever they say). No path logs an Error.
 	int64 Balance = 0, Awarded = 0, Spent = 0;
 	double Cap = 0.0;
 	ManifestLanded.Reset();
-	if (bLedgerBlockLost)
+	TArray<uint8> Payload;
+	FString Why;
+	const bool bFound = RHSaveFrame::Read(Ar, File, RHSaveFrame::CreditTag, Payload, Why);
+	FMemoryReader In(Payload);
+	if (!bFound)
 	{
-		// The ledger block before this one had a bad count or was cut short: where this block starts is unknown, and reading on would turn
-		// ledger bytes into credit. It is not read.
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the ledger block before the credit block could not be measured; the credit starts at 0"));
-		Ar.SetError();
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the credit block is lost (%s); the credit starts at 0"), *Why);
+		In.SetError();
 	}
 	else
 	{
-		Ar << Balance << Awarded << Spent << Cap;
+		In << Balance << Awarded << Spent << Cap;
+		if (In.IsError())
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block is cut short; the credit starts at 0"));
+		}
 	}
-	if (Ar.IsError())
+	if (In.IsError())
 	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block is cut short; the credit starts at 0"));
 		Balance = Awarded = Spent = 0;
 		Cap = 0.0;
+	}
+	if (Balance > CreditMaxMcr || Awarded > CreditMaxMcr || Spent > CreditMaxMcr)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: a credit total above %s cr (balance %lld, awarded %lld, spent %lld mcr) is not a real one; all three are set to 0"),
+			*FormatCredits(CreditMaxMcr), Balance, Awarded, Spent);
+		Balance = Awarded = Spent = 0;
 	}
 	if (Balance < 0 || Awarded < 0 || Spent < 0)
 	{
@@ -369,43 +437,42 @@ void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar)
 		Cap = ShipMassCapCfgKg;
 	}
 	ShipMassCapKg = Cap;
-	bCreditBlockLost = bLedgerBlockLost || Ar.IsError();
-	if (bCreditBlockLost)
-	{
-		return;
-	}
-	// E3: the export block follows, so the rows are read to their end before any is judged; only a bad count or a block cut short leaves
-	// the reader lost (bCreditBlockLost), and then the export block is not read.
-	int32 Count = 0;
-	Ar << Count;
-	if (Ar.IsError() || Count < 0 || Count > 4096)
-	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's row count %d is invalid; every landing count starts at 0"), Count);
-		bCreditBlockLost = true;
-		return;
-	}
+
+	// The landing counts: read to their end before any is judged.
 	TArray<TPair<FString, int32>> Rows;
-	for (int32 n = 0; n < Count; ++n)
+	if (!In.IsError())
 	{
-		FString Name;
-		int32 Landed = 0;
-		Ar << Name << Landed;
-		if (Ar.IsError())
+		int32 Count = 0;
+		In << Count;
+		if (In.IsError() || Count < 0 || Count > 4096)
 		{
-			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's counts are cut short; every landing count starts at 0"));
-			bCreditBlockLost = true;
-			return;
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's row count %d is invalid; every landing count starts at 0"), Count);
+			In.SetError();
 		}
-		Rows.Emplace(Name, Landed);
+		for (int32 n = 0; !In.IsError() && n < Count; ++n)
+		{
+			FString Name;
+			int32 Landed = 0;
+			RHSaveFrame::ReadName(In, Name);
+			In << Landed;
+			if (In.IsError())
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's counts are cut short; every landing count starts at 0"));
+				Rows.Reset();
+				break;
+			}
+			Rows.Emplace(Name, Landed);
+		}
 	}
-	TMap<FName, int32> Read;
+	TMap<FName, int32> Landings;
 	for (int32 n = 0; n < Rows.Num(); ++n)
 	{
 		const FString& Name = Rows[n].Key;
 		if (n > 0 && Name.Compare(Rows[n - 1].Key, ESearchCase::CaseSensitive) <= 0)
 		{
 			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: manifest row %s is out of order or repeated (after %s); every landing count starts at 0"), *Name, *Rows[n - 1].Key);
-			return;
+			Landings.Reset();
+			break;
 		}
 		const FRHManifestItemRow* Row = Defs ? Defs->GetManifestItem(FName(*Name)) : nullptr;
 		if (!Row || Row->MaxStack <= 0)
@@ -415,8 +482,45 @@ void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar)
 		}
 		if (Rows[n].Value > 0)
 		{
-			Read.Add(FName(*Name), Rows[n].Value);
+			Landings.Add(FName(*Name), Rows[n].Value);
 		}
 	}
-	ManifestLanded = MoveTemp(Read);
+	ManifestLanded = MoveTemp(Landings);
+
+	// v54 (economy-code-review.md finding 1): the price each item aboard was locked at when it was added.
+	TArray<int64> Prices;
+	bool bPricesOk = false;
+	if (!In.IsError())
+	{
+		int32 Items = -1;
+		In << Items;
+		if (!In.IsError() && Items == ManifestItems.Num())
+		{
+			Prices.SetNum(Items);
+			bPricesOk = true;
+			for (int64& Price : Prices)
+			{
+				In << Price;
+				bPricesOk &= Price >= 0 && Price <= CreditMaxMcr;
+			}
+			bPricesOk &= !In.IsError() && In.Tell() == In.TotalSize();
+		}
+		if (!bPricesOk)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the manifest's locked prices (%d for %d items aboard) are invalid; each item is priced from today's table"), Items, ManifestItems.Num());
+		}
+	}
+	else if (ManifestItems.Num() > 0)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v54: the manifest's locked prices were not read; its %d items are priced from today's table"), ManifestItems.Num());
+	}
+	if (!bPricesOk)
+	{
+		Prices.Reset();
+		for (const FName& Item : ManifestItems)
+		{
+			Prices.Add(GetManifestTablePriceMcr(Item));
+		}
+	}
+	ManifestPricesMcr = MoveTemp(Prices);
 }

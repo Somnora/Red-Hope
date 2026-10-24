@@ -7,6 +7,7 @@
 #include "Engine/Engine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "RHSaveFrame.h"
 
 // E3 selling to Earth self-test (docs/qa/2026-10-23/e3-selling-to-earth-design.md: DIRECTOR ANSWER Q-A (a), Q-B (a), Q-C (a) > REVISION
 // R1-R11 > PROFESSOR REVIEW > design). Fails loudly. `-export`. Met is HEAD's test; the launch loads the round's bill (and the export lines)
@@ -489,7 +490,7 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			FString::Printf(TEXT("XE9 (iii) a launch short of Water by the floor waits 2 sols in the era band, launches there once the bill is loadable, and the ship lands in the era band (%d %d %d %d phase %d: %s)"), bMet, bWaits, bGoes, bLands, (int32)Sim->GetQuotaPhase(), *Err));
 	}
 
-	// --- XE10. The save. ---
+	// --- XE10. The save (v54: the frame, and a locked price bounded on load, economy-code-review.md finding 2). ---
 	{
 		Reset();
 		Meet(0.0);
@@ -505,13 +506,15 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const bool bRead = FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("exportsave")));
 		uint32 Ver = 0;
 		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
-		const int32 At = W.Num() - Bytes;
+		int32 Frame = INDEX_NONE, Payload = 0;
+		const bool bFramed = bRead && RHSaveFrame::Find(W, RHSaveFrame::ExportTag, Frame, Payload);
+		const int32 At = Frame + RHSaveFrame::HeaderBytes;
 		const auto Rd32 = [&](int32 Off) { int32 V = 0; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
 		const auto Rd64 = [&](int32 Off) { int64 V = 0; if (Off >= 0 && Off + 8 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 8); } return V; };
 		TArray<FString> Names;
 		TArray<int32> KgAt, PriceAt;
 		int32 Cur = At + 12;
-		for (int32 n = 0; bRead && n < Rd32(At + 8); ++n)
+		for (int32 n = 0; bFramed && n < Rd32(At + 8); ++n)
 		{
 			const int32 Len = Rd32(Cur);
 			Names.Add(FString(ANSI_TO_TCHAR((const ANSICHAR*)(W.GetData() + Cur + 4))));
@@ -523,32 +526,51 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		bool bAscending = Names.Num() == 18;
 		for (int32 i = 1; i < Names.Num(); ++i) { bAscending &= Names[i - 1].Compare(Names[i], ESearchCase::CaseSensitive) < 0; }
 		const int32 IStruct = Names.IndexOfByKey(TEXT("Struct")), IOx = Names.IndexOfByKey(TEXT("Oxygen"));
-		Expect(bRead && Ver == 53 && Rd64(At) == 12345 && bAscending && Cur == W.Num() && IStruct != INDEX_NONE && Rd32(KgAt[IStruct]) == 900 && Rd64(PriceAt[IStruct]) == 2000 && Rd32(KgAt[IOx]) == 300,
-			FString::Printf(TEXT("XE10 v%u: the export block is the last %d bytes - sales 12,345 mcr, 18 slots by name (%s .. %s), Struct 900 kg at 2 cr, Oxygen 300 kg"), Ver, Bytes, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
+		Expect(bFramed && Ver == 54 && Payload == Bytes && Rd64(At) == 12345 && bAscending && Cur == At + Payload && At + Payload + RHSaveFrame::FooterBytes == W.Num()
+			&& IStruct != INDEX_NONE && Rd32(KgAt[IStruct]) == 900 && Rd64(PriceAt[IStruct]) == 2000 && Rd32(KgAt[IOx]) == 300,
+			FString::Printf(TEXT("XE10 v%u: the export block is the file's last frame ('RHE3', %d payload bytes) - sales 12,345 mcr, 18 slots by name (%s .. %s), Struct 900 kg at 2 cr, Oxygen 300 kg"), Ver, Payload, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("exportsave"), Le) && Le.IsEmpty() && Sim->SaveColony(TEXT("exportsave2"), SaveErr);
 		TArray<uint8> W2;
 		Expect(bLoaded && FFileHelper::LoadFileToArray(W2, *SaveFilePath(TEXT("exportsave2"))) && W2 == W && Sim->GetExportLines().Num() == 2 && Sim->GetSalesPaidMcr() == 12345,
 			FString::Printf(TEXT("XE10 mid-manifest with two lines: save, load, save is byte-identical (%d bytes)"), W.Num()));
+		const int64 Balance0 = Sim->GetCreditBalanceMcr();
 		const auto TryBytes = [&](const TCHAR* Slot, const TArray<uint8>& Bytes2)
 		{
 			FFileHelper::SaveArrayToFile(Bytes2, *SaveFilePath(Slot));
 			FString E;
 			return Sim->LoadColony(Slot, E) && E.IsEmpty();
 		};
+		// A doctored block: the edit, then the frame's CRC rewritten, so the block's own repairs are what judge it.
+		const auto Sealed = [](TArray<uint8> T) { RHSaveFrame::Reseal(T, RHSaveFrame::ExportTag); return T; };
 		const auto Put32 = [](TArray<uint8>& T, int32 Off, int32 V) { FMemory::Memcpy(T.GetData() + Off, &V, 4); };
 		const auto Put64 = [](TArray<uint8>& T, int32 Off, int64 V) { FMemory::Memcpy(T.GetData() + Off, &V, 8); };
 		bool bRepairs = true;
-		{ TArray<uint8> T = W; Put32(T, KgAt[IStruct], -5); bRepairs &= TryBytes(TEXT("exportr1"), T) && Sim->GetExportLines().Num() == 1 && Sim->GetExportLines()[0].Resource == NOx; }
-		{ TArray<uint8> T = W; Put64(T, PriceAt[IStruct], 0); bRepairs &= TryBytes(TEXT("exportr2"), T) && Sim->GetExportLines().Num() == 1; }
-		{ TArray<uint8> T = W; Put64(T, At, Sim->GetCreditAwardedMcr() + 999999999); bRepairs &= TryBytes(TEXT("exportr3"), T) && Sim->GetSalesPaidMcr() == Sim->GetCreditAwardedMcr() && Inv(); }
+		{ TArray<uint8> T = W; Put32(T, KgAt[IStruct], -5); bRepairs &= TryBytes(TEXT("exportr1"), Sealed(T)) && Sim->GetExportLines().Num() == 1 && Sim->GetExportLines()[0].Resource == NOx; }
+		{ TArray<uint8> T = W; Put64(T, PriceAt[IStruct], 0); bRepairs &= TryBytes(TEXT("exportr2"), Sealed(T)) && Sim->GetExportLines().Num() == 1; }
+		{ TArray<uint8> T = W; Put64(T, At, Sim->GetCreditAwardedMcr() + 999999999); bRepairs &= TryBytes(TEXT("exportr3"), Sealed(T)) && Sim->GetSalesPaidMcr() == Sim->GetCreditAwardedMcr() && Inv(); }
 		{
 			// Unsorted: Struct's name overwritten with "Zzzzzz" (the same length), which sorts after the Water slot that follows it.
 			TArray<uint8> T = W;
 			FMemory::Memcpy(T.GetData() + KgAt[IStruct] - 7, "Zzzzzz", 6);
-			bRepairs &= TryBytes(TEXT("exportr4"), T) && Sim->GetExportLines().Num() == 0;
+			bRepairs &= TryBytes(TEXT("exportr4"), Sealed(T)) && Sim->GetExportLines().Num() == 0;
 		}
 		Expect(bRepairs, TEXT("XE10 doctored blocks each load with a Warning: a negative kg drops that line, a priced-0 line drops, sales above awarded clamp to awarded (the invariant holds), an unsorted block drops every line"));
+		// v54: a locked price above the highest quote today's table can make is clamped to it; a slot count one short leaves bytes over and
+		// drops every line; a block that fails its CRC is lost (no line, no arrears), and the credit before it loads as saved.
+		{
+			const int64 Ceiling = Sim->GetEarthPriceCeilingMcrPerKg(NStruct);
+			TArray<uint8> T = W; Put64(T, PriceAt[IStruct], 1000000000);
+			const bool bClamped = TryBytes(TEXT("exportr7"), Sealed(T)) && Sim->GetExportLines().Num() == 2 && Sim->GetExportLines()[1].Resource == NStruct
+				&& Sim->GetExportLines()[1].PriceMcrPerKg == Ceiling && Ceiling == 4000;
+			TArray<uint8> U = W; Put32(U, At + 8, 17);
+			const bool bShort = TryBytes(TEXT("exportr8"), Sealed(U)) && Sim->GetExportLines().Num() == 0 && Sim->GetSalesPaidMcr() == 0;
+			TArray<uint8> C = W; C[KgAt[IStruct]] ^= 0x01;
+			const bool bLost = TryBytes(TEXT("exportr9"), C) && Sim->GetExportLines().Num() == 0 && Sim->GetSalesPaidMcr() == 0 && Sim->GetCreditBalanceMcr() == Balance0 && Inv();
+			Expect(bClamped && bShort && bLost,
+				FString::Printf(TEXT("XE10 a Struct line locked at 1,000,000 cr/kg loads clamped to the %s cr/kg ceiling (%s); a count of 17 leaves bytes over and drops every line (%s); a corrupted block is lost and the credit loads as saved (%s)"),
+					*Cr(Ceiling), bClamped ? TEXT("ok") : TEXT("FAIL"), bShort ? TEXT("ok") : TEXT("FAIL"), bLost ? TEXT("ok") : TEXT("FAIL")));
+		}
 		// Lines saved while the ship is inbound are dropped; arrears are kept in every phase.
 		Reset();
 		Meet(0.0);
@@ -556,9 +578,10 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->SaveColony(TEXT("exportinbound"), SaveErr);
 		TArray<uint8> WI;
 		FFileHelper::LoadFileToArray(WI, *SaveFilePath(TEXT("exportinbound")));
-		const int32 AtI = WI.Num() - Bytes;
-		int32 CurI = AtI + 12, KgI = -1;
-		for (int32 n = 0; n < 18; ++n)
+		int32 FrameI = INDEX_NONE, PayloadI = 0;
+		RHSaveFrame::Find(WI, RHSaveFrame::ExportTag, FrameI, PayloadI);
+		int32 CurI = FrameI + RHSaveFrame::HeaderBytes + 12, KgI = -1;
+		for (int32 n = 0; FrameI != INDEX_NONE && n < 18; ++n)
 		{
 			int32 Len = 0; FMemory::Memcpy(&Len, WI.GetData() + CurI, 4);
 			const FString Nm(ANSI_TO_TCHAR((const ANSICHAR*)(WI.GetData() + CurI + 4)));
@@ -567,12 +590,12 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			CurI += 16;
 		}
 		TArray<uint8> T = WI;
-		Put32(T, KgI, 500); Put64(T, KgI + 4, 2000);
-		const bool bInbound = KgI > 0 && TryBytes(TEXT("exportr5"), T) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetExportLines().Num() == 0;
-		{ TArray<uint8> V = W; const uint32 V52 = 52; FMemory::Memcpy(V.GetData() + 4, &V52, 4); FFileHelper::SaveArrayToFile(V, *SaveFilePath(TEXT("exportr6"))); }
+		if (KgI > 0) { Put32(T, KgI, 500); Put64(T, KgI + 4, 2000); }
+		const bool bInbound = KgI > 0 && TryBytes(TEXT("exportr5"), Sealed(T)) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetExportLines().Num() == 0;
+		{ TArray<uint8> V = W; const uint32 V53 = 53; FMemory::Memcpy(V.GetData() + 4, &V53, 4); FFileHelper::SaveArrayToFile(V, *SaveFilePath(TEXT("exportr6"))); }
 		FString E6;
-		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/53"));
-		Expect(bInbound && bOld, FString::Printf(TEXT("XE10 a line saved while the ship is inbound is dropped on load; a v52 file is refused (%s)"), *E6));
+		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/54"));
+		Expect(bInbound && bOld, FString::Printf(TEXT("XE10 a line saved while the ship is inbound is dropped on load; a v53 file is refused (%s)"), *E6));
 	}
 
 	// --- XE11. Ruling 11 and Q4a. ---

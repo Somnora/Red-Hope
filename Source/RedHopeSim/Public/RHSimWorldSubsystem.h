@@ -1448,8 +1448,14 @@ public:
 	double GetAwardMcrPerKg() const { return AwardMcrPerKg; }
 	double GetShipMassCapCfgKg() const { return ShipMassCapCfgKg; }
 	int32 GetManifestLanded(FName ItemName) const { const int32* N = ManifestLanded.Find(ItemName); return N ? *N : 0; }
-	int64 GetManifestCostMcr() const;               // the manifest's price, summed over ManifestItems in order (derived, never saved)
+	int64 GetManifestCostMcr() const;               // the manifest's price: the prices locked as each item was added (v54), summed
+	int64 GetManifestTablePriceMcr(FName ItemName) const; // today's price of a row (0 for a row that is gone; never below 0): what ADD locks
+	const TArray<int64>& GetManifestPricesMcr() const { return ManifestPricesMcr; } // one per ManifestItems entry, in its order
 	bool CanAddManifestItem(FName ItemName, FString& OutWhy) const; // checks 1-5 of AddManifestItem, adding nothing (the deck's ADD reads it)
+	// v54 (economy-code-review.md finding 1): takes the last such item off the open manifest with its locked price; nothing is refunded,
+	// as nothing was charged (the launch is the only debit). The way out of "Over budget at launch".
+	bool RemoveManifestItem(FName ItemName, FString& OutError);
+	static constexpr int64 CreditMaxMcr = 1000000000000000; // 10^12 cr: no real game comes near; a loaded total or price above it is a broken file
 	static FString FormatCredits(int64 Mcr);        // whole credits, with the thousandths when they are not zero
 	int32 GetCreditBlockBytes() const;              // the bytes the credit block takes in a save (fixed by the capped rows)
 	// E2b harness hooks (REVISION R4), runtime only, never saved; each keeps the invariant.
@@ -1459,7 +1465,7 @@ public:
 	void Debug_GrantCredits(int64 Mcr) { CreditPay(Mcr); }
 	void Debug_SetShipMassCapCfg(double Kg) { ShipMassCapCfgKg = Kg; }
 	void Debug_SetCreditEnabled(bool bOn) { bCreditEnabled = bOn; }
-	void Debug_PushManifestItem(FName ItemName) { ManifestItems.Add(ItemName); } // CR3: appends with no check and no log line (2,000 sequences an award)
+	void Debug_PushManifestItem(FName ItemName);     // CR3: appends at today's price with no check and no log line (2,000 sequences an award)
 	// E3, selling to Earth (docs/qa/2026-10-23/e3-selling-to-earth-design.md, REVISION R1-R11; Q-A (a), Q-B (a), Q-C (a)). Met is HEAD's test;
 	// LaunchShip now LOADS the round's bill (and any export lines) and takes it out of the colony, drawn in building-Id order from uncommitted
 	// stores and then the pool, never below a life-support floor; a launch that cannot load it is refused with the reason. QuotaShortLaunchSols
@@ -1475,6 +1481,7 @@ public:
 	int64 GetExportValueMcr() const;                 // the sum of kg x the locked price over the lines
 	int64 GetSalesPaidMcr() const { return SalesPaidMcr; }
 	int64 GetEarthPriceMcrPerKg(FName Resource) const; // today's quote: EarthValue x Mpm / 1000 - the launch cost (may be <= 0; then Earth will not buy)
+	int64 GetEarthPriceCeilingMcrPerKg(FName Resource) const; // v54: the highest quote today's table can make (Mpm at 1 + RequisitionEarthBonus); a loaded lock above it is clamped
 	int64 GetLaunchCostMcrPerKg() const;             // (LaunchH2GPerKg x V(Hydrogen) + LaunchO2GPerKg x V(Oxygen)) / 1000
 	bool DoesEarthBuy(FName Resource) const;         // an E1 slot whose row says EarthBuys
 	double GetLaunchFloorKg(FName Resource) const;   // Earth never takes what the colony breathes, drinks or eats: GrowthReserveO2Sols x people x the draw
@@ -2697,15 +2704,13 @@ private:
 	void CreditPay(int64 Mcr);
 	void PayQuotaAward(double Kg);
 	void WriteCreditBlock(FArchive& Ar) const;
-	void ReadCreditBlock(FArchive& Ar);
+	void ReadCreditBlock(FArchive& Ar, const TArray<uint8>& File); // v54: finds its own frame in File (RHSaveFrame.h)
 	int64 CreditBalanceMcr = 0, CreditAwardedMcr = 0, CreditSpentMcr = 0;
 	double ShipMassCapKg = 0.0;
 	TMap<FName, int32> ManifestLanded;
 	double AwardMcrPerKg = 1000.0;     // config AwardMcrPerKg
 	double ShipMassCapCfgKg = 30000.0; // config ShipMassCapKg
 	bool bCreditEnabled = true;        // CR2's twin only (runtime)
-	bool bLedgerBlockLost = false;     // load only: E1's block could not be measured, so the credit block after it is not read
-	bool bCreditBlockLost = false;     // load only: the same for E2's block and E3's after it
 	// E3: export lines, lifetime sales (a part of CreditAwardedMcr: 0 <= SalesPaidMcr <= CreditAwardedMcr), and the arrears a short launch
 	// leaves (one count per resource; they belong to the next round to open while a short ship is inbound or the ladder rests, to the
 	// current round while it is Open or awaiting its manifest).
@@ -2723,7 +2728,7 @@ private:
 	void GetLaunchLines(TArray<FRHLaunchLine>& Out) const; // the bill (if taken) then the export lines, one entry a resource, in load order
 	void FinishLaunch(const TCHAR* EarthClause, int64 Cost);
 	void WriteExportBlock(FArchive& Ar) const;
-	void ReadExportBlock(FArchive& Ar);
+	void ReadExportBlock(FArchive& Ar, const TArray<uint8>& File); // v54: finds its own frame in File (RHSaveFrame.h)
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
 	int32 GetCropStageForKey(const FIntVector& Key) const;
@@ -3698,7 +3703,7 @@ private:
 	void NoteFlowMap(const TMap<FName, double>& Kg, ERHLedgerLeg Leg) { for (const auto& P : Kg) { NoteFlow(P.Key, Leg, P.Value); } }
 	void RollEconomyLedger(int32 SolNow);            // straight after RollProductionLedger, with the same SolNow
 	void WriteLedgerBlock(FArchive& Ar) const;
-	void ReadLedgerBlock(FArchive& Ar);              // never refuses: a bad block resets the ledger with a Warning (R1)
+	void ReadLedgerBlock(FArchive& Ar, const TArray<uint8>& File); // never refuses: a bad block resets the ledger with a Warning (R1); v54: its own frame in File
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
 	// SAVED (v35): the Big Arrival's running streak and its once-only flag, the
 	// move-home accumulator, and the settlers who came with ships (a count).
@@ -3965,6 +3970,7 @@ private:
 	ERHQuotaPhase QuotaPhase = ERHQuotaPhase::Open;
 	double AwardMassKg = 0.0;
 	TArray<FName> ManifestItems;
+	TArray<int64> ManifestPricesMcr;                 // v54: the price each item was locked at when added, one per ManifestItems entry (saved in the credit block)
 	double ShipArrivalSimSeconds = 0.0;
 	int32 QuotaMetSol = 0;
 	// The goal ladder (save v25). ActiveQuota derives to the first

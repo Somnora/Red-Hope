@@ -690,7 +690,8 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot().AutoHeight()
 					[
-						SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text)
+						// Wraps: beside ADD and REMOVE a long name ("Colonist Transport (20 colonists)") no longer fits one line.
+						SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true)
 						.Text_Lambda([this, RowName, Name = Row.DisplayName]()
 						{
 							int32 Count = 0;
@@ -725,6 +726,12 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 								return S && S->CanAddManifestItem(RowName, Why);
 							}))
 					]
+				]
+				// v54 (economy code review, finding 1): takes one off again - the way out when the manifest is over budget at launch.
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+				[
+					D::Button(Txt(TEXT("REMOVE")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleManifestRemove, RowName),
+						MakeAttributeLambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); return S && S->GetManifestItems().Contains(RowName); }))
 				]
 			];
 		});
@@ -887,6 +894,18 @@ FReply SRHCommandDeck::HandleManifestAdd(FName Item)
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	FString Error;
 	if (Sim && !Sim->AddManifestItem(Item, Error) && PC.IsValid())
+	{
+		PC->PostConfirm(Error, D::Red);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleManifestRemove(FName Item)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Error;
+	if (Sim && !Sim->RemoveManifestItem(Item, Error) && PC.IsValid())
 	{
 		PC->PostConfirm(Error, D::Red);
 	}

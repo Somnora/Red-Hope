@@ -3066,18 +3066,19 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRadiation(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHManifest(
 	TEXT("RH.Manifest"),
-	TEXT("RH.Manifest <ItemRowName> - add an item to the open manifest (e.g. RH.Manifest SolarPack)."),
+	TEXT("RH.Manifest <ItemRowName> | remove <ItemRowName> - add an item to the open manifest (e.g. RH.Manifest SolarPack), or take one off again."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
-		if (!World || Args.Num() < 1)
+		const bool bRemove = Args.Num() >= 2 && Args[0].Equals(TEXT("remove"), ESearchCase::IgnoreCase);
+		if (!World || Args.Num() < 1 || (Args[0].Equals(TEXT("remove"), ESearchCase::IgnoreCase) && !bRemove))
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Manifest <ItemRowName>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Manifest <ItemRowName> | remove <ItemRowName>"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
 			FString Error;
-			if (!Sim->AddManifestItem(FName(*Args[0]), Error))
+			if (!(bRemove ? Sim->RemoveManifestItem(FName(*Args[1]), Error) : Sim->AddManifestItem(FName(*Args[0]), Error)))
 			{
 				UE_LOG(LogRedHope, Warning, TEXT("Manifest: %s"), *Error);
 			}
