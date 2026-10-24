@@ -2299,11 +2299,10 @@ public:
 	// Does a room row emit this adjacency tag? (A CivicService row must never emit Odor.)
 	static bool RoomEmitsTag(const FRHRoomRow& Row, const TCHAR* Tag);
 	// One resource's room to build: free = Held - QuotaBill - Reserve.
-	// QuotaBill is what growth leaves standing for Earth: the OPEN quota's whole bill while it is open (a quota
-	// is met by holding its bill, so growth never eats quota progress); between rounds (C5c) the NEXT round's
-	// bill, held back in proportion to the City / Earth share (C5d): (1 - CityShare) x the next bill. FullBill is
-	// the bill before the share (equal to QuotaBill while the quota is open). So the share is the one dial:
-	// 1 spends everything above the reserve and the open bill (C5b), 0 spares the whole next bill (C5c).
+	// QuotaBill is what growth leaves standing for Earth: (1 - CityShare) x the bill, the OPEN round's while it is
+	// open (E3b; before E3b it stood whole) and the NEXT round's between rounds (C5c, C5d). FullBill is the bill
+	// before the share. So the share is the one dial: 1 spends everything above the reserve and Owed (C5b),
+	// 0 spares the whole bill (C5c).
 	// E3: Owed is what Earth takes at launch while the manifest is open (the round's bill line, arrears included, plus this resource's export
 	// line); it sits beside QuotaBill, never inside it, so every C5d share figure reads as before. Free = Held - QuotaBill - Owed - Reserve.
 	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, FullBill = 0.0, Reserve = 0.0, Free = 0.0, Owed = 0.0; bool bNextRound = false; };
@@ -3104,7 +3103,7 @@ private:
 	double GetGrowthHoldingsKg(FName Resource) const;
 	// The quota bill growth has to weigh, BEFORE the City / Earth share: the open quota's while it is open,
 	// else (C5c) the next round's (GetNextQuotaBills). bOutNext says which. GetGrowthAvailability scales
-	// the next round's by (1 - CityShare).
+	// either by (1 - CityShare) (E3b).
 	double GetProtectedQuotaBillKg(FName Resource, bool& bOutNext) const;
 	bool GrowthBillFits(const TMap<FName, double>& Bill, FString& OutWhy) const;
 	void TakeGrowthResource(FName Resource, double Kg);

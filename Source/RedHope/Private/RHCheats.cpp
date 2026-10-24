@@ -2957,7 +2957,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHGrowth(
 		for (const TCHAR* Res : { TEXT("Struct"), TEXT("Shielding"), TEXT("Oxygen") })
 		{
 			const URHSimWorldSubsystem::FRHGrowthAvailability A = Sim->GetGrowthAvailability(FName(Res));
-			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the %s (of %.0f) - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.FullBill, A.Reserve, A.Free);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Growth]   %s: %.0f held - %.0f for the %s (the Earth share of %.0f) - %.0f reserve = %.0f free"), Res, A.Held, A.QuotaBill, A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), A.FullBill, A.Reserve, A.Free);
 		}
 		// C5d: the life-support books at the present head count, and at the head count the next settler ship or the Big Arrival would make it.
 		for (const TCHAR* Res : { TEXT("Oxygen"), TEXT("Water"), TEXT("Food") })

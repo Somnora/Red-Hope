@@ -14,7 +14,8 @@
 // paid after the manifest's debit; the bill and the sales share the ship's cap and the bill plateaus at one ship; a ship that cannot load
 // may launch short after QuotaShortLaunchSols, the shortfall owed on the next round.
 //  XE0 the data; XE1 met is unchanged; XE2 the draw order; XE3 the floor; XE4 met but not loadable; XE5 Owed; XE6 prices; XE7 a sale;
-//  XE8 the cap and the plateau; XE9 era parity (R3); XE10 the save; XE11 ruling 11; XE13 the short launch (R1). XE12 is the mutation list,
+//  XE14 the share applies to the open round (E3b);
+//  XE8 the cap and the plateau; XE9 era parity (R3); XE10 the save; XE11 ruling 11; XE13 the short launch (R1); XE14 E3b. XE12 is the mutation list,
 //  run by hand and recorded in design-decisions.
 int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim)
 {
@@ -271,7 +272,7 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				Sim->GetNextQuotaBills(Next);
 				const bool bOpen = Sim->GetQuotaPhase() == ERHQuotaPhase::Open;
 				const double HeadFull = bOpen ? Sim->GetQuotaProgress().FindRef(NStruct).Value : Next.FindRef(NStruct);
-				const double HeadBill = bOpen ? HeadFull : (1.0 - Share) * HeadFull; // HEAD's QuotaBill and FullBill, which E3 leaves alone
+				const double HeadBill = (1.0 - Share) * HeadFull; // E3b: the share scales the open round's bill as it always scaled the next's
 				const bool bOk = Near(A.Owed, OwedStruct, 1e-9) && Near(A.FullBill, HeadFull, 1e-9) && Near(A.QuotaBill, HeadBill, 1e-9) && Near(A.Free, A.Held - A.QuotaBill - A.Owed - A.Reserve, 1e-9);
 				bAll &= bOk;
 				Seen += FString::Printf(TEXT(" %.0f%%/%s owed %.0f bill %.0f;"), Share * 100.0, Phase, A.Owed, A.QuotaBill);
@@ -293,7 +294,7 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->Debug_SetEarthTakesQuota(true);
 		Sim->Debug_SetQuotaRepeatBillMul(DefsSub ? DefsSub->GetConfigScalar(FName("QuotaRepeatBillMul"), 1.10) : 1.10);
 		Expect(bAll && bRest,
-			FString::Printf(TEXT("XE5 Owed is the bill line + the export line only while the manifest is open (Struct 300 + 700), 0 when Open, inbound and at rest (Completed); QuotaBill and FullBill are HEAD's in every phase at shares 0, 0.5 and 1, and Free = Held - QuotaBill - Owed - Reserve:%s"), *Seen));
+			FString::Printf(TEXT("XE5 Owed is the bill line + the export line only while the manifest is open (Struct 300 + 700), 0 when Open, inbound and at rest (Completed); FullBill is the bill and QuotaBill is (1 - share) x it in every phase (E3b) at shares 0, 0.5 and 1, and Free = Held - QuotaBill - Owed - Reserve:%s"), *Seen));
 	}
 
 	// --- XE6. Prices: integer mcr, V x Mpm / 1000 - L, through the real multiplier. ---
@@ -650,6 +651,66 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const bool bFull = Sim->LaunchShip(Err);
 		Expect(bRound && bMet2 && bFull && Near(Water1 - Held(NWater), 60.0, 1e-6) && Sim->GetQuotaArrearsKg(NWater) == 0,
 			FString::Printf(TEXT("XE13 save, load, save with the arrears held is byte-identical; Q2's full launch loads the 60 kg of Water and the arrears clear (%d %d %d phase %d,%s; %s)"), bRound, bMet2, bFull, (int32)Sim->GetQuotaPhase(), *Prog, *Err));
+	}
+
+	// --- XE14. E3b: the City / Earth share applies to the OPEN round (director, 2026-10-24). ---
+	{
+		// Q1 is open: Struct 300, Water 200, Oxygen 50. Crew(4) gives Oxygen a breathing floor (10 sols x 4 x 0.75 = 30 kg).
+		Reset();
+		Crew(4);
+		SetPool(NStruct, 1500.0);
+		SetPool(NOx, 400.0);
+		const TMap<FName, TPair<double, double>> Prog = Sim->GetQuotaProgress();
+		const double BillS = Prog.FindRef(NStruct).Value, BillO = Prog.FindRef(NOx).Value;
+		bool bOpenNow = Sim->GetQuotaPhase() == ERHQuotaPhase::Open && BillS == 300.0 && BillO == 50.0;
+		// share 0 reproduces the old hold exactly: the whole open bill stands, nothing is owed, free = held - bill - reserve.
+		Sim->Debug_SetCityShare(0.0);
+		const auto S0 = Sim->GetGrowthAvailability(NStruct), O0 = Sim->GetGrowthAvailability(NOx);
+		const bool b0 = bOpenNow && !S0.bNextRound && S0.QuotaBill == BillS && S0.FullBill == BillS && S0.Owed == 0.0 && S0.Free == S0.Held - BillS - 1000.0
+			&& O0.QuotaBill == BillO && O0.Owed == 0.0 && O0.Free == O0.Held - BillO - O0.Reserve && O0.Reserve > 0.0;
+		Expect(b0, FString::Printf(TEXT("XE14 share 0, quota open: the whole bill stands as before E3b (Struct %.0f, Oxygen %.0f), free = held - bill - reserve (Struct %.0f, Oxygen %.0f)"), S0.QuotaBill, O0.QuotaBill, S0.Free, O0.Free));
+		// share 0.5 frees half of it, for every resource, and nothing else moves.
+		Sim->Debug_SetCityShare(0.5);
+		const auto SH = Sim->GetGrowthAvailability(NStruct), OH = Sim->GetGrowthAvailability(NOx), WH = Sim->GetGrowthAvailability(NWater);
+		const auto W0 = [&]() { Sim->Debug_SetCityShare(0.0); const auto R = Sim->GetGrowthAvailability(NWater); Sim->Debug_SetCityShare(0.5); return R; }();
+		const bool bHalf = SH.QuotaBill == 0.5 * BillS && OH.QuotaBill == 0.5 * BillO && SH.FullBill == BillS && Near(SH.Free - S0.Free, 0.5 * BillS, 1e-9) && Near(OH.Free - O0.Free, 0.5 * BillO, 1e-9)
+			&& Near(WH.Free - W0.Free, 0.5 * Prog.FindRef(NWater).Value, 1e-9) && SH.Reserve == S0.Reserve && OH.Reserve == O0.Reserve && SH.Owed == 0.0;
+		Expect(bHalf, FString::Printf(TEXT("XE14 share 0.5, quota open: half the bill is freed (Struct %.0f, Oxygen %.0f, Water %.0f), reserves unchanged, free up by exactly that"), SH.Free - S0.Free, OH.Free - O0.Free, WH.Free - W0.Free));
+		// share 1 frees all of it while open ...
+		Sim->Debug_SetCityShare(1.0);
+		const auto S1 = Sim->GetGrowthAvailability(NStruct), O1 = Sim->GetGrowthAvailability(NOx);
+		const bool bAll = S1.QuotaBill == 0.0 && O1.QuotaBill == 0.0 && Near(S1.Free, S1.Held - 1000.0, 1e-9) && Near(O1.Free, O1.Held - O1.Reserve, 1e-9);
+		// ... but once the round is met, E3's owed cargo and the life-support floor still stand, whatever the share.
+		const bool bMet = Meet(0.0);
+		SetPool(NStruct, 5000.0);
+		SetPool(NOx, 1000.0);
+		const auto S2 = Sim->GetGrowthAvailability(NStruct), O2 = Sim->GetGrowthAvailability(NOx);
+		const double Floor = Sim->GetLaunchFloorKg(NOx);
+		const bool bOwed = bMet && S2.Owed == 300.0 && O2.Owed == 50.0 && Near(S2.Free, S2.Held - 300.0 - 1000.0, 1e-9) && Near(O2.Free, O2.Held - 50.0 - Floor, 1e-9) && O2.Reserve == Floor && Floor > 0.0
+			&& Near(S2.Free, Sim->GetLaunchLoadableKg(NStruct) - 300.0 - 1000.0, 1e-9);
+		Expect(bAll && bOwed, FString::Printf(TEXT("XE14 share 1: while open all of the bill is freed (Struct free %.0f of %.0f held, bill held back %.0f); once met the %.0f / %.0f kg owed to Earth stand, the %.0f kg Struct reserve and the %.0f kg oxygen floor stand (Struct free %.0f, Oxygen free %.0f)"),
+			S1.Free, S1.Held, S1.QuotaBill, S2.Owed, O2.Owed, S2.Reserve, Floor, S2.Free, O2.Free));
+		// A short launch rolls the gap into the next round's bill, at any share (the share is growth's; Earth's bill is not scaled by it).
+		bool bRolled = true;
+		FString Rolled;
+		for (const double Share : { 0.5, 1.0 })
+		{
+			Reset();
+			Crew(4);
+			Sim->Debug_SetCityShare(Share);
+			Meet(40.0);
+			SetPool(NWater, BillOf(NWater) + Sim->GetLaunchFloorKg(NWater) - 60.0);
+			Clock->Debug_AdvanceSimSeconds((double)Sim->GetShortLaunchSol() * SolLen - Clock->GetSimSecondsTotal());
+			FString Err;
+			const bool bLaunched = Sim->LaunchShipShort(Err);
+			LandShip();
+			const TMap<FName, TPair<double, double>> Q2 = Sim->GetQuotaProgress();
+			const bool bOk = bLaunched && Sim->GetActiveQuotaName() == FName("Q2") && Q2.FindRef(NWater).Value == 60.0 && Q2.FindRef(NStruct).Value == 600.0 && Sim->GetQuotaArrearsKg(NWater) == 60;
+			const auto Q2S = Sim->GetGrowthAvailability(NStruct), Q2W = Sim->GetGrowthAvailability(NWater);
+			bRolled &= bOk && Q2S.QuotaBill == (1.0 - Share) * 600.0 && Q2W.QuotaBill == (1.0 - Share) * 60.0 && Q2S.FullBill == 600.0;
+			Rolled += FString::Printf(TEXT(" %.0f%%: Water arrears %d, Q2 Water bill %.0f, held back %.0f;"), Share * 100.0, Sim->GetQuotaArrearsKg(NWater), Q2.FindRef(NWater).Value, Q2W.QuotaBill);
+		}
+		Expect(bRolled, FString::Printf(TEXT("XE14 a short launch (Water 60 kg short) rolls the gap into Q2's bill at share 0.5 and 1, and growth then holds back (1 - share) x it with the rest:%s"), *Rolled));
 	}
 
 	return Finish();

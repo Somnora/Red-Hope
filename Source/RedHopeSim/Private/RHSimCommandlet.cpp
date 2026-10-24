@@ -9407,7 +9407,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					Sim->OnGrowthChanged.Remove(ShareH);
 				}
 
-				// While Q1 is Open its own bill stands whole at every share: Struct 300 is never scaled.
+				// E3b: while Q1 is Open the share scales its bill as it scales the next round's: (1 - share) x Struct 300 stands.
 				{
 					Expect(LoadBase(), TEXT("b5 base loaded, Q1 open"));
 					OnlyDistricts({ 3 });
@@ -9417,15 +9417,25 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					{
 						Sim->Debug_SetCityShare(Sh);
 						const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx);
-						bOpenWhole &= !AS.bNextRound && Near(AS.QuotaBill, 300.0, 1e-9) && Near(AS.FullBill, 300.0, 1e-9) && Near(AO.QuotaBill, 50.0, 1e-9) && Near(AS.Free, Held(NStruct) - 300.0 - 1000.0, 1e-6);
+						bOpenWhole &= !AS.bNextRound && Near(AS.QuotaBill, (1.0 - Sh) * 300.0, 1e-9) && Near(AS.FullBill, 300.0, 1e-9) && Near(AO.QuotaBill, (1.0 - Sh) * 50.0, 1e-9) && Near(AS.Free, Held(NStruct) - (1.0 - Sh) * 300.0 - 1000.0, 1e-6);
 					}
-					Expect(bOpenWhole, TEXT("b5 while Q1 is open its bill (Struct 300, Oxygen 50) is held back whole at share 0, 0.5 and 1: the share never touches the open quota"));
+					Expect(bOpenWhole, TEXT("b5 while Q1 is open its bill (Struct 300, Oxygen 50) is held back as (1 - share) x it at share 0, 0.5 and 1 (E3b: the share reaches the open round)"));
 					Sim->Debug_SetCityShare(1.0);
 					SetHeld(NOx, 1.0e6);
-					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 - 1.0);
+					SetHeld(NStruct, 1000.0 + 0.0 + 640.0 - 1.0);
 					const bool bRefusedOpen = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(TEXT("open quota"));
-					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 + 1.0);
-					Expect(bRefusedOpen && Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b5 at share 100% with Q1 open: one kilo under reserve 1000 + the open bill 300 + the project 640 is still refused, one kilo over starts"));
+					SetHeld(NStruct, 1000.0 + 0.0 + 640.0 + 1.0);
+					Expect(bRefusedOpen && Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b5 at share 100% with Q1 open: one kilo under reserve 1000 + the open bill held back (none at share 100%, E3b) + the project 640 is refused, one kilo over starts"));
+					// E3b: at the default 50% half of the open bill (150 of 300) stands: one kilo under reserve 1000 + 150 + 640 is refused, one over starts.
+					Expect(LoadBase(), TEXT("b5 base loaded again, Q1 open, for share 50%"));
+					OnlyDistricts({ 3 });
+					SetHope(80.0);
+					Sim->Debug_SetCityShare(0.5);
+					SetHeld(NOx, 1.0e6);
+					SetHeld(NStruct, 1000.0 + 150.0 + 640.0 - 1.0);
+					const bool bRefusedHalf = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(TEXT("open quota"));
+					SetHeld(NStruct, 1000.0 + 150.0 + 640.0 + 1.0);
+					Expect(bRefusedHalf && Sim->Debug_RunGrowthCheck() == 1 && Open(3), TEXT("b5 at share 50% with Q1 open: one kilo under reserve 1000 + half the open bill 150 + the project 640 is refused, one kilo over starts (E3b)"));
 				}
 
 				// The save: the share and the dial's effect round-trip.

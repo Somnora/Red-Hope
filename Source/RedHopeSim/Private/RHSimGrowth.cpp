@@ -212,9 +212,10 @@ URHSimWorldSubsystem::FRHGrowthAvailability URHSimWorldSubsystem::GetGrowthAvail
 	FRHGrowthAvailability A;
 	A.Held = GetGrowthHoldingsKg(Resource);
 	A.FullBill = GetProtectedQuotaBillKg(Resource, A.bNextRound);
-	// C5d: the open quota's bill stands whole (a quota is met by holding it); between rounds, the share of the
-	// next round's bill that goes to Earth stands, and the rest (CityShare of it) may grow the city.
-	A.QuotaBill = A.bNextRound ? (1.0 - CityShare) * A.FullBill : A.FullBill;
+	// C5d: between rounds, the share of the next round's bill that goes to Earth stands, and the rest (CityShare of it)
+	// may grow the city. E3b: the same share applies to the OPEN round's bill (Earth takes the cargo at launch, so a
+	// whole-bill hold starved growth); a short launch rolls the gap into the next bill (E3 Q-B). E3's Owed stays whole.
+	A.QuotaBill = (1.0 - CityShare) * A.FullBill;
 	if (Resource == NAME_GrowthStruct)
 	{
 		A.Reserve = GrowthReserveStructKg;
@@ -249,7 +250,7 @@ bool URHSimWorldSubsystem::GrowthBillFits(const TMap<FName, double>& Bill, FStri
 		{
 			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the %s%s - %.0f reserve)"),
 				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill,
-				A.bNextRound ? *FString::Printf(TEXT("next quota round (%.0f%% of its bill, the Earth share)"), (1.0 - CityShare) * 100.0) : TEXT("open quota"),
+				*FString::Printf(TEXT("%s (%.0f%% of its bill, the Earth share)"), A.bNextRound ? TEXT("next quota round") : TEXT("open quota"), (1.0 - CityShare) * 100.0),
 				A.Owed > 0.0 ? *FString::Printf(TEXT(" - %.0f owed to Earth at launch"), A.Owed) : TEXT(""), A.Reserve);
 			return false;
 		}

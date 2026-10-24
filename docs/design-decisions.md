@@ -1396,3 +1396,35 @@ Built from `docs/qa/2026-10-23/e3-selling-to-earth-design.md`: the DIRECTOR ANSW
 **The bar fails** at 1.25 and at 1.10: 0 recalled (pass), at least 3 Q3 rounds (pass), the Big Arrival by sol 110 (**fail**), the fleet (not instrumented in the bot's report; no halt alert, and every ship from Q2 brought 6-15 Parts Crates). Per Q-C (a) no further tuning is made here; both runs are reported to the director. The binding rule is growth's, not Earth's: while a round is Open its whole bill stands (the share applies only between rounds), plus `GrowthReserveStructKg` 1,000 kg, and under E3 the yard is emptied every ship. The levers the director might pull: the share applying to the open round, a smaller Struct reserve, a smaller Q3 (T3), or a growth budget of its own.
 
 **Known gaps.** Fleet wear is not measured by the bot. `-scale`'s launch-check budget ran on 8 buildings, not 200. XE1 pins against its twin, not a pre-E3 binary.
+
+### E3b: the share applies to the open round (director, 2026-10-24, not yet committed)
+
+The director's ruling, option (a), on E3's failed bar: the City / Earth share applies to the OPEN round's bill too, not only the next one. Short launches stay covered by E3 Q-B (a), so the trade-off stays real.
+
+**The rule.** `GetGrowthAvailability` (`RHSimGrowth.cpp`): `QuotaBill = (1 - CityShare) x FullBill` in every phase (it was `FullBill` whole while Open). `FullBill` is still the protected bill (the open round's while Open, else the next round's); E3's `Owed` (the manifest's bill lines and export lines while awaiting the manifest) is untouched and stands whole beside it; the reserves are untouched (Struct 1,000 kg, the oxygen breathing floor). `Free = Held - (1 - share) x FullBill - Owed - Reserve`. Same code in both bands; nothing is saved (no save change, v53 stays); no config rows. The `RH.Growth` cheat and the growth refusal text now say "(x% of its bill, the Earth share)" in both phases.
+
+**Checks** (fail loudly). `-export` XE14 (4 new checks, 29 in all) and `-citygrowth` b5 (the two open-round checks rewritten to the new rule, one new boundary at 50%). XE5 now pins `QuotaBill = (1 - share) x FullBill` in every phase. Each XE14 check was proven by a mutation, applied by hand and reverted (export.log, 29 checks):
+- Old rule (`bNextRound ? ... : FullBill`): XE5, XE14 "share 0.5 frees half" and "share 1 frees all" fail; "share 0 reproduces the old hold" still passes, as it must (at share 0 the old and new rules agree).
+- Hold floored at 25% (`Max(share, 0.25)`): XE14 "share 0" and "share 0.5" fail.
+- `Owed` dropped from `Free`: XE14 "share 1 ... owed cargo stands" and XE5 fail.
+- `Reserve` dropped from `Free`: XE14 "share 0" and "share 1" fail (the oxygen floor and the Struct reserve).
+- The short launch no longer records arrears (`Arrears.Add` commented out): XE14 "a short launch rolls the gap" and the three XE13 arrears checks fail.
+
+**Battery** (`rh_battery.sh 10`): 0 suites not green; pins hold (power gen 50 W load 20 W, deposit Regolith_A 40,645 kg). Against `battery_post_e3` only `citygrowth` (24 lines), `export` (80) and `traffic` (2) move. Reasons: the growth refusal text gains "(100% of its bill, the Earth share)" (6 lines); the citygrowth b5 open-round checks are the new rule (6 lines) plus the new 50% boundary; export gains XE14 and its fixture log lines, XE5's wording, 25 -> 29 checks; traffic X16 moves only the wall-clock timing ("2.8 s" -> "2.1 s"). No sim number moves.
+
+**Playtests** (`RH_PLAYTEST_DISTRICTS=1 ... 110 <label> guide full|lean`; x1.10 repeat):
+
+| Run | Pop at 110 | Recalled | Big Arrival | Q3 rounds met | Short launches | Sols with spare Struct (of ~100 logged) | Hope |
+|---|---|---|---|---|---|---|---|
+| pre-E3 HEAD (E2b) | 115 | 0 | sol 98.01 | 7 | - | - | - |
+| E3 full | 8 | 0 | no | 6 | 0 | 5 | 55..100 |
+| **E3b full, share 50%** | 8 | 0 | no | 3 | 0 | 8 | 55..100 |
+| E3b lean, 50% | 6 | 0 | no | 3 | 0 | 9 | 55..100 |
+| E3b full, 75% | 112 | 0 | sol 79.57 | 1 | 1 | 66 | 54..100 |
+| E3b full, 25% | 8 | 0 | no | 6 | 0 | 8 | 55..100 |
+| diagnostic: 50%, Struct reserve 0 | 113 | 0 | sol 77.01 | 1 | 1 | 79 | 55..100 |
+| diagnostic: 50%, Struct reserve 500 | 113 | 0 | sol 80.01 | 1 | 1 | 64 | 55..100 |
+
+"Credits earned" is not in the playtest report (the bot logs kg, not credits), so it is not tabulated. Sols with spare Struct count the bot's daily GROWTH lines with Struct free above zero.
+
+**The bar fails at the default 50%.** Rounds (3), 0 recalled and the fleet running hold; the Big Arrival does not land and the population stays 8. Why: the open-round hold falls from 100% to 50% (Struct 1,250-1,664 kg held back in the middle rounds, the yard emptied by each launch), but the 1,000 kg `GrowthReserveStructKg` stands on top of it, so Struct held almost never reaches reserve + hold + a 640 kg project (8 sols of 99). The reserve is the remaining blocker: with it at 0 or 500 (diagnostic runs, config override only, nothing changed) the Big Arrival lands (sols 77-80), but Earth's rounds then slip to 1 Q3 round in 110 sols. At a 75% share the colony grows but meets 1 round; at 25% it meets 6 rounds and does not grow (E3's result). So the share and the reserve together trade rounds for people one for one, and no point tried passes both halves of the bar. Nothing else was tuned. The levers left to the director: the Struct reserve, a smaller Q3 (T3), or a growth budget of its own.
