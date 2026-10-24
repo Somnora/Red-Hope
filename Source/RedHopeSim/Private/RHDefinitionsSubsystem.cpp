@@ -70,6 +70,46 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 			UE_LOG(LogRedHopeSim, Warning, TEXT("[RHQuotas] command-line activation of %s: %s (balance sweep)"), *QName, bOk ? TEXT("live") : TEXT("NO SUCH ROW"));
 		}
 	}
+	// Struct study (2026-10-24): -RHQuotaBill=Q3:Struct=1500[,Q3:Oxygen=900] rewrites one line of a quota row's bill, in memory, for
+	// this run only (a balance sweep: the CSV and the DataTable asset are untouched). A line the row does not bill is not added.
+	FString BillArg;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RHQuotaBill="), BillArg, /*bShouldStopOnSeparator*/ false))
+	{
+		BillArg = BillArg.Left(BillArg.Find(TEXT(" ")) == INDEX_NONE ? BillArg.Len() : BillArg.Find(TEXT(" ")));
+		TArray<FString> Items;
+		BillArg.ParseIntoArray(Items, TEXT(","));
+		for (const FString& Item : Items)
+		{
+			FString RowName, Rest, Resource, KgText;
+			if (!Item.Split(TEXT(":"), &RowName, &Rest) || !Rest.Split(TEXT("="), &Resource, &KgText))
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("[RHQuotaBill] cannot read '%s' (want Row:Resource=Kg)"), *Item);
+				continue;
+			}
+			FRHQuotaRow* Row = QuotasTable ? QuotasTable->FindRow<FRHQuotaRow>(FName(*RowName), TEXT("RHQuotaBill"), false) : nullptr;
+			bool bDone = false;
+			if (Row)
+			{
+				TArray<FString> Lines;
+				Row->Requirements.ParseIntoArray(Lines, TEXT(";"));
+				for (FString& Line : Lines)
+				{
+					FString LineRes, LineKg;
+					if (Line.Split(TEXT(":"), &LineRes, &LineKg) && LineRes.TrimStartAndEnd() == Resource)
+					{
+						Line = FString::Printf(TEXT("%s:%.0f"), *Resource, FCString::Atod(*KgText));
+						bDone = true;
+					}
+				}
+				if (bDone)
+				{
+					Row->Requirements = FString::Join(Lines, TEXT(";"));
+				}
+			}
+			UE_LOG(LogRedHopeSim, Warning, TEXT("[RHQuotaBill] command-line override %s %s = %s kg: %s (balance sweep - not the shipped bill)"),
+				*RowName, *Resource, *KgText, bDone ? *FString::Printf(TEXT("row now reads %s"), *Row->Requirements) : TEXT("NO SUCH ROW OR LINE"));
+		}
+	}
 }
 
 const FRHBuildingRow* URHDefinitionsSubsystem::GetBuilding(FName Name) const

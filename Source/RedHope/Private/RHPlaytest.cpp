@@ -155,6 +155,35 @@ namespace
 		TArray<int32> GrowthPaused;
 		int32 StructShortSols = 0, LastStructShortSol = -1;
 		double SecondForgeSol = -1.0;
+		// Struct study (2026-10-24; opt-in, never part of a byte-identical run). indlog=1 (RH_PLAYTEST_INDLOG=1) only READS the industry onto
+		// an INDUSTRY line a sol and REPORT lines: Forge time by state, robot time by task, the regolith chain, the Struct books. industry=1
+		// (RH_PLAYTEST_INDUSTRY=1) also PLAYS it, as a player who sees Struct short would: more Forges (and the power they draw), and more
+		// excavators and haulers to feed them.
+		bool bIndLog = false, bIndustry = false;
+		int32 IndLevel = 0;                                           // industry=1: Forges, their power and the fleet to feed them; industry=2: and Electrolyzers while growth is short of oxygen
+		int32 IndForgeCap = 3;                                        // indforges=N: the most Forges the program builds (the first included)
+		int32 IndExtraElectrolyzers = 0, IndLastExtraElectrolyzerSol = -100;
+		struct FIndSet
+		{
+			double Forge[6] = {};     // Forge-seconds: working, night rest (day shift), shed (no power), no regolith, switched off, ready but not started
+			double Robot[4][8] = {};  // robot-seconds by class (excavator, hauler, fabricator, other) and ERHTaskType
+			double PileFull = 0.0, PileLow = 0.0, PileSamples = 0.0; // seconds a worked regolith pile stood at its cap / under a hauler's minimum load
+			void Add(const FIndSet& O)
+			{
+				for (int32 i = 0; i < 6; ++i) { Forge[i] += O.Forge[i]; }
+				for (int32 c = 0; c < 4; ++c) { for (int32 t = 0; t < 8; ++t) { Robot[c][t] += O.Robot[c][t]; } }
+				PileFull += O.PileFull; PileLow += O.PileLow; PileSamples += O.PileSamples;
+			}
+		};
+		FIndSet IndSol, IndRun;                                       // the current sol / the completed sols of the run
+		TMap<int32, double> IndDepRemain;                             // regolith deposit -> RemainingKg at the last sol line
+		int64 IndMadeG = 0, IndUsedG = 0, IndOutG = 0;                // the Struct ledger at the last sol line
+		double IndRegolithDugKg = 0.0, IndPeakWear = 0.0;
+		int32 IndMaxForges = 0, IndStructSpareSols = 0, IndSols = 0;
+		// industry=1: what the program has ordered.
+		double IndForgeOrderSol[2] = { -1.0, -1.0 };                  // the second and third Forge
+		int32 IndForgeOrders = 0, IndForgeTries = 0, IndShortAtLastForge = 0, IndSolarOwed = 0; // the kits the Forges are owed (apart from the life support's own count, whose gate they must not trip)
+		int32 IndExcavatorsOrdered = 0, IndHaulersOrdered = 0;
 		double LastLoadW = 0.0;                   // the last whole sol's mean machine load (W)
 		double BankEmptySec = 0.0, LightsDarkSec = 0.0; // sim-seconds the bank stood empty / the grow lights were dark, over the run
 		int32 NightBanksKept = 0, RoverDeferrals = 0, NightBankShips = 0; // packs the rule asked for beyond the owed ones, rovers held to the next ship, ships it spoke on
@@ -222,6 +251,7 @@ namespace
 	};
 	TSharedPtr<FPlaytest> GPlaytest;
 	double MeanOpenFreight(const FPlaytest& P); // C6c (below): the demand a rover is bought on
+	void IndustryReport(FPlaytest& P, const URHSimWorldSubsystem* Sim, const URHAgentSubsystem* Agents); // Struct study (below): the REPORT lines
 
 	double SolNow(const URHSimClockSubsystem* C)
 	{
@@ -565,6 +595,10 @@ namespace
 						W.ProductionPerSol > 0.0 ? TEXT("PASS") : TEXT("FAIL"), P.OutpostLoadedKg > 0.0 ? TEXT("PASS") : TEXT("FAIL"), (ShipsAfter > 0 && bShipsOk) ? TEXT("PASS") : (ShipsAfter == 0 ? TEXT("no ship landed after the first load") : TEXT("FAIL")), ShipsAfter);
 				}
 			}
+		}
+		if (P.bIndLog && Sim)
+		{
+			IndustryReport(P, Sim, World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr); // Struct study (opt-in): before P goes
 		}
 		if (Sim)
 		{
@@ -938,6 +972,15 @@ namespace
 		const FLsPlan Plan = MakeLsPlan(P, Sim);
 		const int32 Electrolyzers = CountBuildings(Sim, FName("Electrolyzer"));
 		const int32 NeedElectrolyzers = FMath::CeilToInt((Plan.O2.DrawPerSol + Plan.QuotaO2PerSol) / GElectrolyzerKgPerSol);
+		// Struct study (industry=2): once Struct is no longer the wall, city growth waits on oxygen (a project wants 400 kg of it); a player who reads
+		// "short of Oxygen" on the City panel adds an Electrolyzer, up to two beyond what the people and the quota need.
+		if (P.IndLevel >= 2 && P.IndExtraElectrolyzers < 2 && SolI - P.IndLastExtraElectrolyzerSol >= 6 && Sim->GetGrowthNote(1).StartsWith(TEXT("short of Oxygen")))
+		{
+			++P.IndExtraElectrolyzers;
+			P.IndLastExtraElectrolyzerSol = SolI;
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f INDUSTRY growth is short of oxygen: Electrolyzers wanted %d beyond the %d the people and the quota need"), SolNow(C), P.IndExtraElectrolyzers, NeedElectrolyzers);
+		}
+		const int32 WantElectrolyzers = NeedElectrolyzers + P.IndExtraElectrolyzers;
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] LIFESUPPORT %d | pop %d, planning for %d | oxygen %.0f made vs %.0f + %.0f quota (%d Electrolyzer(s) of %d) | water %.0f vs %.0f | food %.1f vs %.1f (%d cells need, %d planted + %d in store + %d inbound = missing %d; %d slots on floor %d) | kits owed: %d solar, %d battery"),
 			SolI, Plan.Pop, Plan.Heads, Plan.O2.ProductionPerSol, Plan.O2.DrawPerSol, Plan.QuotaO2PerSol, Electrolyzers, NeedElectrolyzers, Plan.Water.ProductionPerSol, Plan.Water.DrawPerSol,
 			Plan.Food.ProductionPerSol, Plan.Food.DrawPerSol, Plan.NeedCells, Plan.Planted, Plan.Fundable, Plan.Inbound, Plan.Missing, P.LsGardenSlots, GGardenLevel, P.LsSolarOwed, P.LsBatteryOwed);
@@ -951,7 +994,7 @@ namespace
 
 		// Oxygen: Electrolyzers, one at a time (the previous one is built before the next is ordered), while the oxygen made does not
 		// carry the people planned for and what Earth's open quota still wants of it by its deadline.
-		if (bPowerOk && Plan.O2.ProductionPerSol < Plan.O2.DrawPerSol + Plan.QuotaO2PerSol && Electrolyzers < NeedElectrolyzers && Electrolyzers < GMaxElectrolyzers && CountBuildings(Sim, FName("Electrolyzer"), true) == 0 && SolI >= P.LsNextElectrolyzerSol)
+		if (bPowerOk && (Plan.O2.ProductionPerSol < Plan.O2.DrawPerSol + Plan.QuotaO2PerSol || WantElectrolyzers > NeedElectrolyzers) && Electrolyzers < WantElectrolyzers && Electrolyzers < GMaxElectrolyzers && CountBuildings(Sim, FName("Electrolyzer"), true) == 0 && SolI >= P.LsNextElectrolyzerSol)
 		{
 			static const FVector2D Spots[] = { FVector2D(-12, -16), FVector2D(12, -16), FVector2D(-24, -16), FVector2D(24, -16), FVector2D(-12, -26), FVector2D(12, -26), FVector2D(0, -26), FVector2D(-12, -6), FVector2D(12, -6) };
 			if (LsBuild(P, Sim, C, FName("Electrolyzer"), Spots, UE_ARRAY_COUNT(Spots), FString::Printf(TEXT("oxygen made %.0f of the %.0f kg a sol that %d people draw, plus %.0f for the open quota"), Plan.O2.ProductionPerSol, Plan.O2.DrawPerSol, Plan.Heads, Plan.QuotaO2PerSol)))
@@ -1488,6 +1531,270 @@ namespace
 		}
 	}
 
+	// --- Struct study (indlog=1 / industry=1; opt-in, never part of a byte-identical run) ---
+	int32 IndRobotClass(FName RobotClass)
+	{
+		return RobotClass == FName("Excavator") ? 0 : RobotClass == FName("Hauler") ? 1 : RobotClass == FName("Fabricator") ? 2 : 3;
+	}
+
+	int32 CountForges(const URHSimWorldSubsystem* Sim, int32* OutStanding = nullptr)
+	{
+		int32 All = 0, Standing = 0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.DefName == FName("Forge")) { ++All; Standing += B.bUnderConstruction ? 0 : 1; }
+		}
+		if (OutStanding) { *OutStanding = Standing; }
+		return All;
+	}
+
+	// What the Forges and the fleet did over this stretch of sim time (read-only: nothing here writes sim state).
+	void IndustryTally(FPlaytest& P, const URHSimWorldSubsystem* Sim, const URHAgentSubsystem* Agents, double Dt)
+	{
+		if (Dt <= 0.0)
+		{
+			return;
+		}
+		const bool bDay = Sim->IsDaylightNow();
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.DefName != FName("Forge") || B.bUnderConstruction) { continue; }
+			int32 St = 0;
+			if (B.bManualOff) { St = 4; }
+			else if (B.bDayShift && !bDay) { St = 1; }
+			else if (!B.bPowered && !B.bBatchOnH2) { St = 2; }
+			else if (B.BatchRemaining_h > 0.0) { St = 0; }
+			else
+			{
+				const double* Reg = B.InputKg.Find(FName("Regolith"));
+				const double* Ore = B.InputKg.Find(FName("Ore"));
+				St = ((Reg && *Reg >= 100.0) || (Ore && *Ore >= 100.0)) ? 5 : 3;
+			}
+			P.IndSol.Forge[St] += Dt;
+		}
+		if (Agents)
+		{
+			TArray<FRHRobotPanelRow> Rows;
+			Agents->CollectPanelRows(Rows);
+			for (const FRHRobotPanelRow& R : Rows)
+			{
+				P.IndSol.Robot[IndRobotClass(R.RobotClass)][FMath::Min<int32>(R.TaskType, 7)] += Dt;
+				P.IndPeakWear = FMath::Max(P.IndPeakWear, (double)R.Wear);
+			}
+		}
+		const URHDefinitionsSubsystem* Defs = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const double PileCap = Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0;
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.Type != FName("Regolith") || !D.bDesignated || D.RemainingKg <= 0.0 || D.DigClaims <= 0) { continue; } // a pile an excavator is on
+			P.IndSol.PileSamples += Dt;
+			if (D.PileKg >= PileCap - 1.0) { P.IndSol.PileFull += Dt; }
+			if (D.PileKg < FMath::Max(25.0, PileCap / 5.0)) { P.IndSol.PileLow += Dt; }
+		}
+	}
+
+	// One INDUSTRY line at each sol boundary (the sol that has just ended), then the sol's tallies fold into the run's.
+	void IndustryLog(FPlaytest& P, const URHSimWorldSubsystem* Sim, int32 Sol)
+	{
+		using ELeg = URHSimWorldSubsystem::ERHLedgerLeg;
+		const FPlaytest::FIndSet& S = P.IndSol;
+		int32 Standing = 0;
+		const int32 Forges = CountForges(Sim, &Standing);
+		P.IndMaxForges = FMath::Max(P.IndMaxForges, Standing);
+		double ForgeSec = 0.0;
+		for (int32 i = 0; i < 6; ++i) { ForgeSec += S.Forge[i]; }
+		const auto FPct = [&](int32 i) { return ForgeSec > 0.0 ? 100.0 * S.Forge[i] / ForgeSec : 0.0; };
+		double Hopper = 0.0, AtForge = 0.0;
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (B.DefName != FName("Forge") || B.bUnderConstruction) { continue; }
+			if (const double* R = B.InputKg.Find(FName("Regolith"))) { Hopper += *R; }
+			if (const double* O = B.OutputKg.Find(FName("Struct"))) { AtForge += *O; }
+		}
+		double Dug = 0.0;
+		FString Piles;
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.Type != FName("Regolith")) { continue; }
+			const double* Last = P.IndDepRemain.Find(D.Id);
+			Dug += (Last ? *Last : D.InitialKg) - D.RemainingKg;
+			P.IndDepRemain.Add(D.Id, D.RemainingKg);
+			if (D.bDesignated) { Piles += FString::Printf(TEXT("%s%s pile %.0f, %.1f t left"), Piles.IsEmpty() ? TEXT("") : TEXT("; "), *D.RowName.ToString(), D.PileKg, D.RemainingKg / 1000.0); }
+		}
+		P.IndRegolithDugKg += Dug;
+		const int64 Made = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Made), Used = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Used), Out = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Out);
+		const double MadeKg = (Made - P.IndMadeG) / 1000.0, UsedKg = (Used - P.IndUsedG) / 1000.0, OutKg = (Out - P.IndOutG) / 1000.0;
+		P.IndMadeG = Made; P.IndUsedG = Used; P.IndOutG = Out;
+		const auto Robots = [&](int32 Class, int32 Work, TCHAR const* WorkName) -> FString
+		{
+			double Total = 0.0;
+			for (int32 t = 0; t < 8; ++t) { Total += S.Robot[Class][t]; }
+			if (Total <= 0.0) { return FString::Printf(TEXT("%s none"), WorkName); }
+			return FString::Printf(TEXT("%s %.0f%% charge %.0f%% idle %.0f%%"), WorkName, 100.0 * S.Robot[Class][Work] / Total, 100.0 * S.Robot[Class][4] / Total, 100.0 * S.Robot[Class][0] / Total);
+		};
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] INDUSTRY %d | Forges %d standing (+%d building) | Forge time: working %.0f%% night-rest %.0f%% shed %.0f%% no-regolith %.0f%% off %.0f%% ready-idle %.0f%% | Struct made %.0f used %.0f to Earth %.0f (%.0f held at the Forges) | regolith dug %.0f kg, Forge hoppers %.0f kg; %s; pile full %.0f%% low %.0f%% | RC-E: %s | RC-H: %s | RC-F: %s"),
+			Sol, Standing, Forges - Standing, FPct(0), FPct(1), FPct(2), FPct(3), FPct(4), FPct(5), MadeKg, UsedKg, OutKg, AtForge, Dug, Hopper,
+			Piles.IsEmpty() ? TEXT("no pile worked") : *Piles, S.PileSamples > 0.0 ? 100.0 * S.PileFull / S.PileSamples : 0.0, S.PileSamples > 0.0 ? 100.0 * S.PileLow / S.PileSamples : 0.0,
+			*Robots(0, 1, TEXT("dig")), *Robots(1, 2, TEXT("haul")), *Robots(2, 3, TEXT("build")));
+		if (Sim->GetDistricts().Num() > 0 && Sim->GetGrowthAvailability(FName("Struct")).Free > 0.0) { ++P.IndStructSpareSols; }
+		++P.IndSols;
+		P.IndRun.Add(P.IndSol);
+		P.IndSol = FPlaytest::FIndSet();
+	}
+
+	void IndustryReport(FPlaytest& P, const URHSimWorldSubsystem* Sim, const URHAgentSubsystem* Agents)
+	{
+		using ELeg = URHSimWorldSubsystem::ERHLedgerLeg;
+		FPlaytest::FIndSet R = P.IndRun;
+		R.Add(P.IndSol);
+		double ForgeSec = 0.0;
+		for (int32 i = 0; i < 6; ++i) { ForgeSec += R.Forge[i]; }
+		const auto FPct = [&](int32 i) { return ForgeSec > 0.0 ? 100.0 * R.Forge[i] / ForgeSec : 0.0; };
+		int32 Standing = 0;
+		const int32 Forges = CountForges(Sim, &Standing);
+		const double Sols = FMath::Max(1.0, (double)P.IndSols);
+		const double Made = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Made) / 1000.0, Used = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Used) / 1000.0, Out = Sim->GetLedgerLifetimeG(FName("Struct"), ELeg::Out) / 1000.0;
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry: %d Forge(s) standing at the end (%d ordered in all, %d peak standing); Forge time over the run: working %.1f%%, night rest %.1f%%, shed %.1f%%, no regolith %.1f%%, off %.1f%%, ready but idle %.1f%%"),
+			Standing, Forges, P.IndMaxForges, FPct(0), FPct(1), FPct(2), FPct(3), FPct(4), FPct(5));
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry: Struct ledger over %.0f sols: made %.0f (%.1f a sol), used %.0f, sent to Earth %.0f; held at the end %.0f; sols growth had Struct spare %d"),
+			Sols, Made, Made / Sols, Used, Out, Sim->GetTotalSolid(FName("Struct")) + Sim->GetStock(FName("Struct")), P.IndStructSpareSols);
+		double PileFullPct = R.PileSamples > 0.0 ? 100.0 * R.PileFull / R.PileSamples : 0.0, PileLowPct = R.PileSamples > 0.0 ? 100.0 * R.PileLow / R.PileSamples : 0.0;
+		FString Left;
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.Type == FName("Regolith")) { Left += FString::Printf(TEXT("%s%s %.1f of %.1f t left"), Left.IsEmpty() ? TEXT("") : TEXT("; "), *D.RowName.ToString(), D.RemainingKg / 1000.0, D.InitialKg / 1000.0); }
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry: regolith dug %.0f kg (%.1f a sol); %s; the worked pile stood full %.1f%% of the time and under a haul %.1f%%"),
+			P.IndRegolithDugKg, P.IndRegolithDugKg / Sols, *Left, PileFullPct, PileLowPct);
+		static const TCHAR* ClassName[4] = { TEXT("excavators"), TEXT("haulers"), TEXT("fabricators"), TEXT("other robots") };
+		static const int32 WorkTask[4] = { 1, 2, 3, 0 };
+		static const TCHAR* WorkName[4] = { TEXT("digging"), TEXT("hauling"), TEXT("building"), TEXT("working") };
+		for (int32 c = 0; c < 3; ++c)
+		{
+			double Total = 0.0;
+			for (int32 t = 0; t < 8; ++t) { Total += R.Robot[c][t]; }
+			int32 Count = 0;
+			double WearSum = 0.0, WearMax = 0.0;
+			if (Agents)
+			{
+				TArray<FRHRobotPanelRow> Rows;
+				Agents->CollectPanelRows(Rows);
+				for (const FRHRobotPanelRow& Row : Rows)
+				{
+					if (IndRobotClass(Row.RobotClass) != c) { continue; }
+					++Count; WearSum += Row.Wear; WearMax = FMath::Max(WearMax, (double)Row.Wear);
+				}
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry: %d %s at the end (wear mean %.0f max %.0f); over the run %s %.1f%%, charging %.1f%%, idle (no task) %.1f%%"),
+				Count, ClassName[c], Count > 0 ? WearSum / Count : 0.0, WearMax, WorkName[c], Total > 0.0 ? 100.0 * R.Robot[c][WorkTask[c]] / Total : 0.0, Total > 0.0 ? 100.0 * R.Robot[c][4] / Total : 0.0, Total > 0.0 ? 100.0 * R.Robot[c][0] / Total : 0.0);
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  fleet: peak wear seen on any robot %.0f of 100 (halts at 100); robots out of charge at once (max) %d"), P.IndPeakWear, P.RunStrandedMax);
+		if (P.bIndustry)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry program: %d Forge order(s) accepted (second at sol %.2f, third at sol %.2f), %d placement search(es) found no spot; %d excavator(s) and %d hauler(s) ordered on ships"),
+				P.IndForgeOrders, P.IndForgeOrderSol[0], P.IndForgeOrderSol[1], P.IndForgeTries, P.IndExcavatorsOrdered, P.IndHaulersOrdered);
+		}
+	}
+
+	// industry=1: the nearest clear, powered spot to the regolith dig for another Forge, kept well off the road legs the bot has yet to lay.
+	bool FindForgeSpot(const URHSimWorldSubsystem* Sim, FVector2D& Out)
+	{
+		FVector2D Dig(20.0, -30.0);
+		for (const FRHDepositState& D : Sim->GetDeposits())
+		{
+			if (D.RowName == FName("Regolith_A")) { Dig = FVector2D(D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0); }
+		}
+		double Best = TNumericLimits<double>::Max();
+		for (int32 Y = -70; Y <= 20; Y += 2)
+		{
+			for (int32 X = -40; X <= 70; X += 2)
+			{
+				const FVector2D At(X, Y);
+				bool bClear = true;
+				for (const FRoadLeg& L : GRoadLegs)
+				{
+					// 5 m of footprint, the road's 3 m half strip and a metre to spare
+					if (FMath::PointDistToSegment(FVector(At.X, At.Y, 0.0), FVector(L.From.X, L.From.Y, 0.0), FVector(L.To.X, L.To.Y, 0.0)) < 9.0) { bClear = false; break; }
+				}
+				const double Dist = FVector2D::DistSquared(At, Dig);
+				FString Why;
+				if (bClear && Dist < Best && Sim->CanPlaceBuilding(FName("Forge"), FVector(X * 100.0, Y * 100.0, 0.0), Why))
+				{
+					Best = Dist;
+					Out = At;
+				}
+			}
+		}
+		return Best < TNumericLimits<double>::Max();
+	}
+
+	// industry=1, once a sol: when Struct has held the program back, the player builds more industry - a second Forge, then a third once the
+	// second stands and Struct is still short - on a clear spot (the E3 bot's second Forge went to a fixed spot a road had taken, and was
+	// refused), with the solar arrays each draws 800 W of, and the Regolith_B dig for when the first pile is spent.
+	void IndustryStep(FPlaytest& P, URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
+	{
+		int32 Standing = 0;
+		const int32 Forges = CountForges(Sim, &Standing);
+		if (Forges < 1 || Standing < 1 || Forges > Standing || Forges >= P.IndForgeCap || P.bPendingLaunch)
+		{
+			return; // the first Forge stands, and the last one ordered has been built, before another is thought of
+		}
+		const int32 Want = Forges + 1;
+		// the second Forge once Struct has held the program back 3 sols (E3's trigger); the third once it has held it back 4 more since
+		if (P.StructShortSols < (Forges == 1 ? 3 : P.IndShortAtLastForge + 4))
+		{
+			return;
+		}
+		FVector2D Spot;
+		if (!FindForgeSpot(Sim, Spot))
+		{
+			++P.IndForgeTries;
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f INDUSTRY Forge %d: no clear powered spot near the dig"), SolNow(C), Want);
+			return;
+		}
+		const FName Tok(*FString::Printf(TEXT("forge-ind-%d"), Want));
+		if (P.Issued.Contains(Tok)) { return; }
+		P.Issued.Add(Tok);
+		P.IndForgeOrderSol[Want - 2] = SolNow(C);
+		P.IndShortAtLastForge = P.StructShortSols;
+		++P.IndForgeOrders;
+		if (Forges == 1) { P.SecondForgeSol = SolNow(C); }
+		Mark(P, C, FString::Printf(TEXT("Forge %d ordered (Struct held the program back %d sols)"), Want, P.StructShortSols));
+		if (Forges == 1)
+		{
+			FRHCommand Dig; Dig.Verb = FName("Dig"); Dig.Target = FName("Regolith_B");
+			Order(Sim, C, Dig, TEXT("Dig Regolith_B"));
+		}
+		OrderBuild(Sim, C, FName("Forge"), Spot.X, Spot.Y);
+		P.IndSolarOwed += 4; // 800 W by day, about 4 arrays
+	}
+
+	// industry=1, when a ship's cargo is composed: the solar kits the Forges' 800 W each is owed (the ordinary rule sends extra kits only from
+	// the third ship, and the crew ship is the first that can) and the fleet the Forges need - an RC-E's dig (50 kg/h; an RC-E2 is two) and a
+	// hauler for each Forge. They go in ahead of the filler, so they displace Spare Parts Crates, not the standing items.
+	void IndustryCargo(FPlaytest& P, const URHSimWorldSubsystem* Sim, TArray<FName>& List, bool bKits)
+	{
+		const int32 Forges = CountForges(Sim);
+		if (!P.bIndustry || Forges < 2)
+		{
+			return;
+		}
+		const int32 DigHave = Sim->GetFleetCount(FName("RC_E")) + 2 * Sim->GetFleetCount(FName("RC_E2"));
+		const int32 HaulHave = Sim->GetFleetCount(FName("RC_H"));
+		int32 Excavators = 0, Haulers = 0;
+		if (DigHave < Forges) { Excavators = FMath::DivideAndRoundUp(Forges - DigHave, 2); }
+		if (HaulHave < Forges) { Haulers = Forges - HaulHave; }
+		const int32 Kits = bKits ? FMath::Clamp(P.IndSolarOwed, 0, 8) : 0;
+		for (int32 i = 0; i < Kits; ++i) { List.Add(FName("SolarPack")); }
+		for (int32 i = 0; i < Excavators; ++i) { List.Add(FName("AdvExcavator")); }
+		for (int32 i = 0; i < Haulers; ++i) { List.Add(FName("ExtraHauler")); }
+		P.IndSolarOwed -= Kits;
+		P.IndExcavatorsOrdered += Excavators;
+		P.IndHaulersOrdered += Haulers;
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] INDUSTRY cargo: %d Forge(s), dig %d of %d wanted, %d hauler(s) of %d wanted -> +%d excavator(s), +%d hauler(s), +%d solar kit(s) (%d still owed)"),
+			Forges, DigHave, Forges, HaulHave, Forges, Excavators, Haulers, Kits, P.IndSolarOwed);
+	}
+
 	void Tick()
 	{
 		if (!GPlaytest.IsValid())
@@ -1532,6 +1839,7 @@ namespace
 			P.StrandedMax = FMath::Max(P.StrandedMax, Stranded);
 			P.RunStrandedMax = FMath::Max(P.RunStrandedMax, Stranded);
 		}
+		if (P.bIndLog) { IndustryTally(P, Sim, Agents, Dt); } // Struct study (opt-in): read-only
 		if (P.bLiving)
 		{
 			RoverTally(P, Sim, C);
@@ -1607,6 +1915,8 @@ namespace
 					Sim->GetProductionPerSol(FName("Oxygen")), Sim->GetProductionPerSol(FName("Water")), Sim->GetProductionPerSol(FName("Food")), Sim->GetSettlerSupportRoom(),
 					Sim->FindGrowthProject(1) ? TEXT("under way") : (Sim->GetGrowthNote(1).IsEmpty() ? TEXT("-") : *Sim->GetGrowthNote(1).Left(120)));
 			}
+			if (P.bIndLog) { IndustryLog(P, Sim, C->GetSol()); }                  // Struct study (opt-in): the sol's INDUSTRY line
+			if (P.bIndustry && P.bDistricts) { IndustryStep(P, Sim, C); }         // Struct study (opt-in): more Forges when Struct is short
 			P.SolLogged = C->GetSol();
 			P.DeficitSec = P.ShedSec = P.IdleRobotSec = P.SampleSec = 0.0;
 			P.MinBankFrac = 1.0;
@@ -1794,7 +2104,7 @@ namespace
 		// Struct holds the program back on a sol when growth has no Struct free above the quota and the reserve (with districts painted).
 		if (Sim->GetDistricts().Num() > 0 && Sim->GetGrowthAvailability(FName("Struct")).Free < 0.0) { NoteStructShort(C); }
 		// Q-C (a): Struct has held the program back for 3 sols - a second Forge, with its own regolith dig (player orders only).
-		if (P.StructShortSols >= 3 && Once(TEXT("forge2")))
+		if (P.StructShortSols >= 3 && !P.bIndustry && Once(TEXT("forge2"))) // industry=1 plays the second Forge itself (IndustryStep), on a spot a road has not taken
 		{
 			P.SecondForgeSol = SolNow(C);
 			Mark(P, C, TEXT("second Forge ordered (Struct held the program back 3 sols)"));
@@ -1902,15 +2212,18 @@ namespace
 				Once(TEXT("cargo2"));
 				// The next ship is a whole quota away: a sensible director sends
 				// food-growing with the people.
+				TArray<FName> Cargo2;
 				if (P.bLeanCargo)
 				{
-					LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }); // E3 (Q-C (a)): parts on every ship
+					Cargo2 = { FName("CrewPod"), FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }; // E3 (Q-C (a)): parts on every ship
 				}
 				else
 				{
-					LoadCargo(Sim, C, { FName("CrewPod"), FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"),
-						FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }); // E3 (Q-C (a)): parts on every ship
+					Cargo2 = { FName("CrewPod"), FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"),
+						FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }; // E3 (Q-C (a)): parts on every ship
 				}
+				IndustryCargo(P, Sim, Cargo2, true); // Struct study (industry=1): nothing added otherwise
+				LoadCargo(Sim, C, Cargo2);
 			}
 		}
 		// Every ship from the third on - the last rung repeats (D1a), so there is
@@ -1999,6 +2312,7 @@ namespace
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LIVING  the cargo adds %d Cargo Rover(s): freight open (the sol's most) averaged %.1f over the last %d sols, %d rover(s) deployed, %d aboard, %d already on the way"),
 					SolNow(C), RoversNow, MeanOpenFreight(P), FMath::Min(P.FreightSamples.Num(), GFreightWindowSols), Sim->GetActiveRoverCount(), Sim->GetRoversWaitingAboard(), P.RoversInFlight - RoversNow);
 			}
+			IndustryCargo(P, Sim, Cargo3, false); // Struct study (industry=1): the Forges' fleet (this ship's kits come from the ordinary rule); nothing added otherwise
 			Cargo3.Append({ FName("LuxuryGoods"), FName("SolarPack"), FName("SolarPack") });
 			// (C6c: the banks before the extra kits - the garden's grow lights run on the battery, so a bank is worth more than an array)
 			if (!P.bLiving) { for (int32 i = 0; i < ExtraSolar; ++i) { Cargo3.Add(FName("SolarPack")); } }
@@ -2271,6 +2585,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
 			else if (Args[i].Equals(TEXT("carryover=1"), ESearchCase::IgnoreCase)) { P.bCarryOver = true; } // E2b, opt-in
+			else if (Args[i].Equals(TEXT("indlog=1"), ESearchCase::IgnoreCase)) { P.bIndLog = true; }       // Struct study, opt-in: read the industry
+			else if (Args[i].StartsWith(TEXT("industry="), ESearchCase::IgnoreCase)) { P.IndLevel = FMath::Clamp(FCString::Atoi(*Args[i].Mid(9)), 0, 2); P.bIndustry = P.IndLevel > 0; P.bIndLog = P.bIndLog || P.bIndustry; } // Struct study, opt-in: play it (and read it)
+			else if (Args[i].StartsWith(TEXT("indforges="), ESearchCase::IgnoreCase)) { P.IndForgeCap = FMath::Clamp(FCString::Atoi(*Args[i].Mid(10)), 1, 3); } // Struct study: the most Forges industry=1 builds (the program orders a second and a third)
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
 			else if (Args[i].Equals(TEXT("lifts=1"), ESearchCase::IgnoreCase)) { P.bLifts = true; }
 			else if (Args[i].Equals(TEXT("lifesupport=1"), ESearchCase::IgnoreCase)) { bLifeSupportOff = false; }

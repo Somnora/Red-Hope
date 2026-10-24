@@ -72,6 +72,16 @@
 # lost + in flight + returned by the load), with a REPORT line and an Error line per failure:
 #   RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_LIFTS=1 bash scripts/sim/rh_playtest.sh 40 d4_lifts guide full
 #
+# Struct study (opt-in, never part of a byte-identical comparison): RH_PLAYTEST_INDLOG=1 only READS the industry - an INDUSTRY line a sol
+# (Forge time by state, robot time by task, the regolith chain, the Struct books) and REPORT lines - and changes nothing else.
+# RH_PLAYTEST_INDUSTRY=1 also PLAYS it: when Struct has held the program back the player builds a second and a third Forge (on a clear
+# spot near the dig, with the solar arrays they draw) and sends for the excavators and haulers to feed them (implies the log);
+# RH_PLAYTEST_INDUSTRY=2 adds an Electrolyzer or two while city growth reports itself short of oxygen. RH_PLAYTEST_INDFORGES=<n> caps
+# the Forges (the first included; default 3):
+#   RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_INDUSTRY=1 bash scripts/sim/rh_playtest.sh 110 ind_full guide full
+# A smaller bill from Earth is a command-line override, in memory, for the run only (nothing in the CSVs moves):
+#   RH_PLAYTEST_EXTRA="-RHQuotaBill=Q3:Struct=1500"        (and e.g. -RHConfig=GrowthReserveStructKg=500,GrowthCityShareDefault=0.75)
+#
 # Checkpoints: RH_PLAYTEST_SAVE=<Slot> saves the colony at the sol limit (which
 # may be fractional, e.g. 28.35 = just after sunrise on sol 28) to
 # Saved/SaveGames/RH_<Slot>.sav (a "[Playtest] SAVED" line confirms it). The
@@ -97,7 +107,7 @@ LOG="$OUT/$LABEL.log"
 
 "$UE" "$PROJ_DIR/red_hope.uproject" /Game/RedHope/Maps/L_Slice -game -nullrhi \
   -benchmark -fps=10 -unattended -nosound -stdout ${RH_PLAYTEST_EXTRA:-} \
-  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFTS:+lifts=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK} ${RH_PLAYTEST_CARRYOVER:+carryover=1}" > "$LOG" 2>&1 &
+  "-ExecCmds=RH.Playtest $SOLS $MODE $CARGO ${RH_PLAYTEST_SAVE:-} ${RH_PLAYTEST_DISTRICTS:+districts=1} ${RH_PLAYTEST_NOGROWTH:+nogrowth=1} ${RH_PLAYTEST_LIFTS:+lifts=1} ${RH_PLAYTEST_LIFESUPPORT:+lifesupport=$RH_PLAYTEST_LIFESUPPORT} ${RH_PLAYTEST_ROADS:+roads=$RH_PLAYTEST_ROADS} ${RH_PLAYTEST_OUTPOST:+outpost=$RH_PLAYTEST_OUTPOST} ${RH_PLAYTEST_NIGHTBANK:+nightbank=$RH_PLAYTEST_NIGHTBANK} ${RH_PLAYTEST_CARRYOVER:+carryover=1} ${RH_PLAYTEST_INDLOG:+indlog=1} ${RH_PLAYTEST_INDUSTRY:+industry=$RH_PLAYTEST_INDUSTRY} ${RH_PLAYTEST_INDFORGES:+indforges=$RH_PLAYTEST_INDFORGES}" > "$LOG" 2>&1 &
 PID=$!
 
 # Wait for the game to quit itself; kill it only past the timeout.
