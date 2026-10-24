@@ -815,3 +815,131 @@ The conditions left:
 - the director's answers to Q-A, Q-B and Q-C;
 - E3b landed, which fixes the save version (v54 if it adds none);
 - the builder's per-fixture check that the standing order's new draw moves no convoy line (risk 5).
+
+---
+
+# PROFESSOR RE-REVIEW (2026-10-24)
+
+An independent adversarial re-review of the REVISION, read-only. The code was read with `git show HEAD:`. HEAD moved from `0ac908a` to `b5f5863` (E3b) during the review. E3b changes none of W, X or E, and it adds no save version, so E4 is **v54**. In G, `RollEconomyLedger` is now at G:488 (it was at 486-487). Every number checked below was recomputed with an independent integer model of R5's update; none was copied from the REVISION.
+
+Verdict: **CLEARED WITH CONDITIONS**
+
+The core holds:
+- Given the same accepted orders, the market is identical in both bands.
+- The reservation covers every clearing in play.
+- Nothing is ordered by FName index.
+- All ten required changes are in, and they are correct.
+
+What remains:
+- two director questions whose consequences are stated wrongly;
+- one double commitment with E3;
+- four specification defects that a builder would otherwise find one build at a time.
+
+## The ten required changes, checked
+
+1. **Injected rivals and Greed: fixed.**
+   - Greed is Zarya's row with `ImportLot` `SpareParts:4` (C:1116-1117). SpareParts is not in Zarya's `StoreCap`, so Greed fails R1's lots test and trades by barter, with HEAD's refusal.
+   - Meridian's lots (`SpareParts:4` and `Food:60`, RH_Rivals.csv:3) are inside its `StoreCap`, so Meridian keeps an economy.
+   - The sync covers both an injection and a load.
+2. **Division by zero: fixed.**
+   - Compost has V = 0 (RH_Resources.csv:20) and is now a malformed key.
+   - Every divisor is now one of: V > 0, `max(S + D, MinVol >= 1)`, or `max(Cap, 1)`.
+   - R2's overflow bounds check out.
+3. **Money: fixed.**
+   - X:384 is the third balance reader, beside X:277 and W:13423.
+   - With `ClearSol - O <= 1`, the clearing price is at most `q + max(1, floor(q*s/10000))`, which is at most `Hi(q)`. The same holds the other way for `Lo(q)`, so R covers the Net.
+   - `StepUplink` runs due commands in queue order (W:1065-1080), so R3(b)'s reason for not catching up at O + 1 is correct.
+   - The catch-up passes the same `SolNow` as the other band's `StepCityGrowth`, so it cannot split the bands.
+4. **Stranded convoys: fixed.**
+   - The clearing rule is now `<=`, the clearing runs with the market off, and the checked sol is seeded as E:245 seeds E1's.
+   - `StepCityGrowth` runs before `StepTrade` in both spines (W:683/685 and W:855/857), so a due convoy always clears before it can hold.
+5. **The worked examples: all reproduce exactly.**
+   - Ice: the clamp binds on sols 1-3; the step is -492 at sol 4 and -381 at sol 10; the store is full at sol 32; the floor comes at sol 37, with a pressure of +1522 there.
+   - Struct: flow -4000, store -3950, 7.54 cr at sol 10, 9.29 cr at sol 25, settling at 9.996 cr.
+   - The fallback: Ice 1.639 cr at sol 92, Struct 6.996 cr at sol 48.
+   - MX3: flow +8064, the clamp binds every sol, and Ice reaches the floor at sol 28.
+   - MX4: flow -9310, 15 full steps, settling at 2.53 V.
+6. **The fallback: fixed.** With `MarketRivalOnly`, the price depends only on the data and the sol count.
+7. **Parity: fixed.** No other band-dependent input to `RollMarket` was found.
+8. **The mutations: fixed.** Each one now has a fixture that can bite. Mutation 8 is caught by MX9's past `ClearSol`. MX6's 5-sol jump would not catch it, because that roll walks every sol.
+9. **The deviation from E1: fixed.**
+   - The tally is the market's only colony-side input.
+   - E1 is read by nothing, so nothing is counted twice against E1 or against E3's money.
+   - (Condition 2 is a double commitment of goods, not of money.)
+10. **The battery list: fixed and complete.**
+    - The only unmasked size or position lines in `Saved/baselines/battery_post_e3` and `_e3b` are CV8, DP11, EC1 (twice) and XE10.
+    - `diff_battery.py` masks only `\(\d+ bytes`.
+
+**Inertness holds:**
+- `-trade` was walked step by step, including its storm jump. The catch-up closes sols 4-11 in one call, and the jump to sol 16 clears `ClearSol` 12 before `StepTrade` runs.
+- `cr carried` and `Earth credit` appear 0 times in the logs of the six convoy suites.
+- The playtest bot never orders a convoy (P:546-556).
+
+## REQUIRED CONDITIONS
+
+1. **Restate the consequences of Q-A and Q-C.**
+   - **Q-A (a).** "50 credits a run" is true on sol 0 only. Under R5's own rules, with TRADE pressed every round trip:
+     - Ice falls to its floor and Struct climbs toward 2 V, so a run pays about 566 cr by sol 20, 761 cr by sol 40, and 827 cr from sol 60 on;
+     - that is about 19,600 cr over 110 sols (about 15,600 cr at one run every 5 sols), with no decision by the player;
+     - for scale, a ColonistTransport costs 8,000 cr, and the quota award is 1 cr a kg.
+
+     The director must be told that (a) makes TRADE a main source of income.
+   - **Q-C: what Earth pays.** Earth pays V x M - 3 cr/kg (X:165-171; RH_Config:177-178), with M at most 1.4 (W:10052-10067; RH_Config:100). At M = 1.0:
+     - Ice nets 0, so `AddExportLine` refuses it (X:201-206);
+     - Water, Struct and Oxygen are worth more on Mars than Earth pays.
+   - **Q-C: when arbitrage opens.** With the placeholder data, only an Earth-aligned colony can arbitrage:
+     - Ice and Hydrogen, when M > 1.25;
+     - Oxygen, when M > 1.375.
+
+     The margins are small: Ice at most 0.45 cr/kg; Oxygen at most 0.2 cr/kg; Hydrogen at most 1.8 cr/kg, and only until about sol 7, when Zarya's shortage lifts its price.
+   - **Q-C: the gap that is large** runs the other way: Mars pays about 10 cr for Struct (R5), and Earth pays 2 cr. Q-C should say so.
+   - **Q-C (b) needs its cost stated.** A floor at Earth's price makes the market read `GetRequisitionMultiplier`, which depends on IdentityAxis and EarthTension, both colony-side political state.
+     - That breaks R7's "the market reads only the rivals' data and accepted orders", and section 2.4.
+     - (b) would need M fixed once a sol at the threshold, and its own parity proof.
+2. **Sells must not take what is promised to Earth.**
+   - Booking (3.2 step 4) checks each sell line against `GetLaunchLoadableKg` only (X:115-118).
+   - E3 protects the open bill and the listed sales: `Spare = Loadable - BillLine - Listed` (X:217), and a launch needs `Held - Floor >= Quota + Sale` (X:303-304).
+   - So a `MarketOrder` sell booked while a manifest is open can sell kilograms already promised to Earth. A launch that was valid then becomes "Earth's cargo is short", which means a short launch, arrears, and dropped export lines.
+   - **Change:** while `AwaitingManifest`, check written-order sells against E3's Spare. Keep the standing order on HEAD's rule, or show that no battery line moves.
+3. **The sync: its cost and its measurement.**
+   - R1 runs `SyncRivalEconomies` at the top of `RollMarket`, which `StepCityGrowth` calls every step (beside G:488).
+   - Each sync re-parses four string lists per row through `ParseResourceList` (RHDefinitionsSubsystem.cpp:459-472), with heap splits and FName lookups.
+   - `-scale` allows 2 ms for 1,000 rolls with 8 rivals, about 2 µs a roll. Re-parsing on every roll cannot meet that.
+   - The const `GetMarketBlockBytes()` cannot sync either. So right after an injection it measures a different state from the one the save writes.
+   - **Change:**
+     - cache the parsed economies;
+     - re-sync only at world start, at load, and when a rivals-table generation counter changes (bumped by `Debug_InjectRival` and `RH.InjectRivals`);
+     - make `GetMarketBlockBytes()` measure the synced state.
+4. **MX8's schedule.**
+   - Storm_1 runs from sol 12.0 to 15.0 (RH_Events.csv:2), and a dust storm freezes every convoy (W:9745).
+   - The design does not name MX8's start save. If it starts at sol 0:
+     - Zarya's sol-11 convoy and Kestrel's sol-12 convoy are frozen;
+     - Kestrel's sol-14 order is refused in both twins;
+     - Kestrel's sol-12 convoy comes home at about sol 16.0, on the boundary step itself. The era twin books there (W:844) before `StepTrade` lands that convoy (W:857). The agent twin books 10 s after it lands. So one twin refuses "already out", and MX8 fails because of its fixture.
+   - Even with no storm, the boundary order (sol 16.0 + 10 s) is booked about 0.47 sol after Kestrel's sol-14 convoy comes home (about sol 15.54). That breaks the schedule's own rule, "home at least a sol before the next order".
+   - **Change:**
+     - name the start save;
+     - run MX8 in a 20-sol window with no storm, and assert it;
+     - drop Kestrel's sol-14 order, or move the boundary to sol 17 or later.
+5. **The money invariants under the harness and the repair.**
+   - (a) `Debug_ZeroCredits` (H:1458) zeroes the balance, the awarded and spent totals and `SalesPaidMcr`, but not `MarketSalesMcr` or `CreditReservedMcr`.
+     - That breaks `SalesPaid + MarketSales <= Awarded` and `Reserved <= Balance`, and R7's margin case calls it.
+     - **Change:** it zeroes `MarketSalesMcr` too, and refuses (or asserts) while anything is reserved.
+   - (b) After R3's repair cuts a convoy's reservation, its clearing can still charge its full Net.
+     - `CreditSpend` then spends credit set aside for other convoys, which leaves `Reserved > Balance`. MX6 asserts that invariant after every step.
+     - **Change:** a clearing pays at most its own R plus spendable credit, and writes off the rest with R3(c)'s Warning.
+6. **A strict parser for the economy columns.**
+   - `ParseResourceList` (RHDefinitionsSubsystem.cpp:459-472) handles bad input silently:
+     - it skips an entry with no `:`;
+     - when a key repeats, the last value wins;
+     - it reads `Ice:x` as 0.
+   - So R1's "every list parses" cannot be checked through it.
+   - **Change:** a strict parser, as `ParseOrderLines` is for orders, with these three cases added to MX0.
+
+## OBSERVATIONS (non-blocking)
+
+1. **The barter convoy's record.** Say how a barter convoy (Greed, or the market off) is recorded in `Convoys`, so that R4's "uncleared priced" rule and the hold skip it. Also say whether its return still reads `ExportLot` at the return (W:9768) or the lines booked at departure.
+2. **The transit charge.** `TakeGrowthResource` charges D4's shaft ledger (`ChargeBillPart`, G:293). So with a lift car the standing order does more than "only add credits". No convoy fixture has a lift car; add this to risk 5.
+3. **A backward clock jump.** A backward `Debug_SetSimSeconds` (as at C:1383-1385) holds a priced convoy until the clock passes `MarketCheckedSol` again. R4's "at most until the next sol threshold" assumes the clock only moves forward. No suite sends a convoy after such a jump.
+4. **Mutation 12** bites only if the MX8 colony makes a traded resource at different rates in the two bands. The builder must show that it fails.
+5. **The REVISION's own conditions.** The director's answers and risk 5's per-fixture check still stand. E3b has landed (`b5f5863`), with no save change.
