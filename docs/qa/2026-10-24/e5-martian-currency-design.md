@@ -948,3 +948,4 @@ The numbers were verified independently by the re-review (Q-B 5,215 cr; Q-C +19.
 - **Q-C (a):** the bloc's exchange desk has a 3% spread each way and at most 500 a sol each way.
 
 The re-review's conditions 1-7 are applied by the builder.
+- **Loophole (a), accepted:** a Comply redeems the marks with no spread and no cap. The political cost (every neighbour route closes and stays closed) is the price. No rule is added.
