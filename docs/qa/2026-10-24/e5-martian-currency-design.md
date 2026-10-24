@@ -802,3 +802,149 @@ The conditions left:
 - the director's answers to Q-A, Q-B and Q-C;
 - E4 built (v54). E5 takes the next free version, and the builder rebases every E4 name onto E4 as built (risk 8);
 - the playtest claim re-checked at the build's HEAD (5.2).
+
+---
+
+# PROFESSOR RE-REVIEW (2026-10-24)
+
+A short independent re-review of R1 and R5, with spot checks of R6 and risk 11. It is read-only. The code was read with `git show HEAD:` at `e07e384`, which changes no source since `4edd7fd`. Every number below comes from the reviewer's own integer model, written for this pass and not copied from the REVISION. The model implements E4 R5's update with Zarya's placeholder data, and E5's 3.2-3.3.
+
+**Verdict: CLEARED WITH CONDITIONS**
+
+R5's mechanism is sound, and R6's numbers are right. R1 fixes the storm, Influence and credits, and it now bites mutations 1-4. It does not bite mutation 5, though, and one clause of its bar fails on its own boundary order. R5 leaves out several statements a builder needs.
+
+## What holds (checked)
+
+- **R6 reproduces to the digit.**
+  - **No trade, a Defy at every demand:** 0.980, 0.961, 0.960, 0.958 and 0.949; the low is 0.916 at sol 122; then 1.009 and 1.269.
+  - **Demands ignored:** 0.849, 0.774, 0.684 and 0.537.
+  - **With the standing trade:** TradeBp is 1,655-3,311; the low is 0.961 at sol 102; then 1.027, 1.058, 1.178 and 1.442.
+  - **Q-B:**
+    - six mark runs (`ClearSol` 103-123) × 827.9 = 4,967.4 marks;
+    - the rate in force during sol 123 is 1,050 mcr;
+    - floor(4,967,400 × 1,050 / 1,000) = 5,215,770 mcr, which is **5,215 cr**.
+  - **Q-C:**
+    - (a) speculation: 16,009 marks in over sols 102-137 and back over sols 150-182 gains **+3,408.5 cr (+19.43%)**;
+    - (b): 0.961 in and 1.430 out gains +7,017.6 cr (+40.0%);
+    - the honest trader converts to 25,233.6 cr capped and 25,226.6 cr uncapped.
+  - **E4:** 17,540.35 cr by sol 99, and 827.9 cr a run.
+- **What is right in R1.**
+  - **The window.**
+    - With `WeatherCycleSols` 0, `GetActiveEvent` reads the plain sol (W:2595-2614).
+    - Sols 16-36 hold no DustStorm.
+    - Flare_1 (sol 17) is a SolarFlare. Only a DustStorm freezes a convoy (W:9745).
+  - **The live politics.**
+    - Tension is 59 at sol 16.0, so the demand comes at 17.67.
+    - The `DefyIssue` takes it from 61.1 to 59.1, and the second demand comes at 21.0.
+    - The boundary Defy takes it from 63.0 to 51.0.
+    - At sol 30.0 it is 53.4 + 25 = 78.4, so Zarya is embargoed in both twins (relation 50 or more, against Kestrel's 26 or less).
+    - The Pacify at 30.5 has 40 or more Influence against the 20 it needs.
+  - **The schedule.** Every act can run, and each rival's convoy is home at least 1.4 sols before its next order.
+  - **The mutations.**
+    - Mutations 1, 2 and 4, and R2's mutation 3, split the twins as stated.
+    - The era twin's step ending 31,230 s runs the boundary Defy (`ExecuteAt` 31,210) before the roll closing 25, because `StepUplink` (W:844) runs before `StepCityGrowth` (W:855).
+  - **The bar** compares the right market quantities, and correctly leaves out reservations.
+- **What is right in R5.**
+  - **No overdraft.** The withdrawal only pays, through `CreditPay`.
+  - **No order clears at a re-expressed price.** Every booking is refused from the Comply on, and the roll waits until no order is uncleared.
+  - **The single floor is band-exact.** It is taken over the balance plus every on-road `OwedMmk`. Owed marks move from the road into the balance at the return without changing the sum.
+  - **A save mid-withdrawal is safe.**
+    - O8's converse case excludes `bWithdrawPending`, so a mid-withdrawal file is not "repaired".
+    - `ReconcileReservations` needs nothing new, because R5 adds no reservation.
+  - **"At most two sols"** holds.
+- **Risk 11 is safe in every path.**
+  - **The value at the bound.** It is 2.8e-17 in IEEE (1 − 0.6 − 0.3 − 0.1), and the clamp keeps it at 0 or above (W:10066).
+  - **The award.** 14,000 × 2.8e-17 kg floors to 0 mcr, and `CreditPay` ignores 0 or less (W:13356).
+  - **E3's sales.** Mpm = llround(M × 1000) = 0 (X:170), so every line is refused at X:201. Nothing divides by M.
+  - **The quota ladder cannot stall.**
+    - The manifest no longer reads the award (W:13393-13429).
+    - The launch checks neither the award nor the items (X:265-312).
+  - **The deck** guards `Award > 0` (K:700).
+  - **The bot** never answers a demand, so its identity stays 0 and M stays at 0.7 or more.
+
+## REQUIRED CHANGES
+
+1. **R1: mutation 5 is not bitten, and the order meant to bite it fails the home-sol bar.**
+   - **Why the order cannot bite.**
+     - Zarya's `MemberFromSol` is 21 with or without the mutation (the issue roll, 19, + 2), so the `ClearSol` 20 order settles in credits in both twins.
+     - The rate in force during sol 20 is 1,000, so the mutation's conversion is the identity and the charges are equal.
+     - R7 O4's claim is therefore false. Only CU3's direct check kills mutation 5.
+   - **The same order comes home in different sols.**
+     - The era twin runs it on the step ending 24,030 s. `StepTrade` credits that whole 60 s step (W:9560, :9751; the clock advances before `EraStep`, C:1161-1162).
+     - So the era convoy is home at the step ending 28,770 s, sol 23.975. The agent convoy is home at about 28,810 s, sol 24.008.
+   - **Change.**
+     - Replace the order with an `Exchange ToMarks` due 10 s after the sol-20 boundary. It is refused in both twins, and accepted only in the agent twin under mutation 5.
+     - State that desk check 3 counts a rival admitted at an earlier roll, whatever its `MemberFromSol`. Otherwise check 3 masks the bite.
+     - Exempt orders booked on the era twin's boundary step from the home-sol clause. Kestrel's `ClearSol` 27 order passes it only because the era band's sums of 0.05 sol overshoot by one step: a 1-sol trip takes 21 steps.
+2. **R1: the purse sizes break R1's own "at most half the spendable" assertion.**
+   - **The desk orders.** `ToMarks 300` clears at 0.961 for about 302.8 marks, so `ToCredits 200` reserves 66% of the spendable marks.
+   - **The Kestrel mark order at 29.5** is booked at the very instant Zarya's 25.5 convoy comes home.
+     - In the era twin the convoy is home at the step ending 35,370 s, before the booking.
+     - In the agent twin it comes home on the booking step, after `StepUplink`, or later.
+     - So the spendable marks differ by Zarya's owed marks.
+   - **Change.**
+     - Use `ToMarks 500`.
+     - Size every mark reservation against the marks held without any convoy due home within a sol of the booking, or move the Kestrel order off 29.5.
+     - Add this as a third rule beside E4 R7's two.
+3. **R1: two fixture conditions that are not stated.**
+   - (a) **No credits from Earth in the window.** The end-balance bar holds only if no E2 award, launch or sale lands in sols 16-36. Section 6 lists the multiplier read at an award as band-dependent. Assert that none lands.
+   - (b) **The bloc tally counts `bMarks` orders only.** Membership is decided at booking and is band-exact; "orders to a member" is not a safe definition. At the roll closing 20, Zarya is admitted, yet the sol-20 order settles in credits.
+4. **R5: the mark purse is never emptied.**
+   - R5 replaced 1.5's list, and `MarkSpend(MarkBalanceMmk)` went with it. Nothing now debits the balance, so a later re-issue would hand back marks already redeemed.
+   - **Change.**
+     - Step 2 does `MarkSpend(MarkBalanceMmk)`.
+     - It sets every on-road `OwedMmk` to 0, and drops those convoys from the saved mark-order list.
+     - It asserts `MarkReservedMmk == 0`.
+     - CU9 checks a zero balance after the withdrawal, and that a re-issue starts from 0.
+5. **R5: step 4 leaves state live, and one path has no rate.**
+   - **What step 4 must also reset.**
+     - It sets `CurrencyOpenSol` to −1, and resets the members and the bloc tally.
+     - "Cleared" means `RateMcr` = R0.
+     - Every conversion is gated on the market issue, not on `CurrencyOpenSol` alone.
+     - Otherwise, if "cleared" is 0, a credit order after the withdrawal passes `CurrencyOpenSol ≤ ClearSol` and is charged `ceil(Net × 0 / 1000)` = 0.
+   - **An issue and a withdrawal at the same roll.**
+     - This is reachable: a `DefyIssue` followed by a Comply in one sol. `DefyIssue` leaves tension at 60 or more whenever the demand has waited 3.3 sols or more, and always under Q-A (b).
+     - Then "the rate in force during the closing sol" does not exist. Define r = R0 for this case. With r = 0, step 3 would re-express every price to V/4.
+   - **Two more things to name.**
+     - The trigger reads "no uncleared **priced** order". A barter convoy never clears, and would otherwise hold `bWithdrawPending` for ever.
+     - O8 also clears a `bWithdrawPending` that has neither a market issue nor a pending Issue entry, as a journal-reset file can have.
+6. **R4: the cut order needs a key the convoys do not have.**
+   - "Convoys and desk orders together, by `CommandId`" cannot be computed, because E4's convoy record (E4 3.5) holds a convoy `Id`, not a `CommandId`.
+   - **Change:** store the `CommandId` on the convoy, or define the order explicitly. For example: desk orders by `CommandId` descending, then convoys by `Id` descending.
+7. **R5's parity claim has no paired test.** "The bands cannot split by a milli-credit" is checked only in CU9, which runs one band.
+   - **Extend CU8 with a withdrawal:**
+     - A third demand is pending in both twins from sol 30.0 (78.4 ≥ 60), and the Pacify does not clear it.
+     - Book Zarya's last mark order 10 s after the sol-31 boundary, in place of the one at 31.5. It is home at about sol 34.975 in the era twin and about 35.008 in the agent twin.
+     - Comply at 34.5. The withdrawal roll (closing 34) then sees that convoy home in one twin and still on the road in the other.
+   - **The bar.** Hold the redeemed credits identical.
+   - **A new mutation.** "On-road `OwedMmk` left out of the total" must fail this check.
+
+## OBSERVATIONS (non-blocking)
+
+1. **The 16-sol jump.**
+   - If `cu8_start` is saved before the catch-up roll, the first roll after load adds 16 drifts to the synced 59,000.
+   - The record then reads 68.6 against a live 59.0 for the whole run.
+   - Parity is unaffected. Save after one step, or sync after the first roll.
+2. **The withdrawal is an exit with no cap and no spread.**
+   - Q-C (a)'s speculator can Comply at a demand instead of using the desk:
+     - at the sol-183 demand, 16,009 marks redeem at 1.411 for +5,049 cr;
+     - at the sol-163 demand, the gain is +3,128 cr;
+     - through the desk, it is +3,409 cr.
+   - The cost is a Comply. Put this beside Q-B for the director.
+3. **The 17,540 cr stake** assumes the first dispatch at sol 0.5. At sol 0.0 the same model gives 17,477.55, the draft's 17,478. Write the phase into the model's assumptions.
+4. **M is never exactly 0.0.** At the bound it is 2.8e-17. A test must assert the award (0 mcr) and Mpm (0), not M == 0.0.
+5. **E4's MX8 has the same hazard as change 1.** Its boundary order (16.0 + 10 s, to Kestrel) passes the home-sol bar only by the same one-step overshoot.
+6. **Re-express every slot, not only the traded ones.** An untraded slot keeps its mark integer, and would later be read as credits.
+7. **Reopening is a second acceptance edge.**
+   - An order due 10 s after the withdrawal roll's boundary is refused in the era twin, which runs it before the roll, and accepted in the agent twin.
+   - Section 6 allows this. CU9 should name the band it runs in.
+
+
+# DIRECTOR ANSWER (2026-10-24)
+
+The numbers were verified independently by the re-review (Q-B 5,215 cr; Q-C +19.4% / +40.0%).
+- **Q-A (a):** issuing the mark adds tension +10 and multiplier -0.10 while the mark exists.
+- **Q-B (a):** a Comply withdraws the mark, redeems the marks at the rate in force, and ends the penalty. The re-review's note that a Comply redeems with no spread and no cap (about +5,049 cr for a speculator, against +3,409 via the desk) was put to the director.
+- **Q-C (a):** the bloc's exchange desk has a 3% spread each way and at most 500 a sol each way.
+
+The re-review's conditions 1-7 are applied by the builder.
