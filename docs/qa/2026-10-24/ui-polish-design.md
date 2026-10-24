@@ -141,3 +141,9 @@
 2. Framing into the free band (P8) zooms out a little. The 9 px glyph floor in `section.labels` guards legibility.
 3. The frame-count waits (P1) slow the click test only on a slow machine. Recording the run time keeps that visible.
 4. Every change is in the RedHope module, so the battery cannot see it. The playtest bot (`RHPlaytest.cpp`) is not touched. The dylib hash and `cmp` are the proof that no sim behaviour moved.
+
+
+# DIRECTOR ANSWER (2026-10-24)
+
+- **L7 (a):** the accordion. Opening one foldable deck panel folds the others and scrolls it into view; the scroll bar widens from 4 to 8 px. P3 ships.
+- The optional art job Q waits for L3 (what a commuter shuttle should be) and L4 (wheels).

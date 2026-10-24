@@ -943,3 +943,13 @@ What remains:
 3. **A backward clock jump.** A backward `Debug_SetSimSeconds` (as at C:1383-1385) holds a priced convoy until the clock passes `MarketCheckedSol` again. R4's "at most until the next sol threshold" assumes the clock only moves forward. No suite sends a convoy after such a jump.
 4. **Mutation 12** bites only if the MX8 colony makes a traded resource at different rates in the two bands. The builder must show that it fails.
 5. **The REVISION's own conditions.** The director's answers and risk 5's per-fixture check still stand. E3b has landed (`b5f5863`), with no save change.
+
+
+# DIRECTOR ANSWER (2026-10-24)
+
+Answered after the re-review's corrected consequences were put to the director, and confirmed.
+- **Q-A (a):** the standing trade keeps its goods each way, settled at market prices in credits. Modelled: about 830 cr a run from about sol 60, roughly 15,600-19,600 cr over 110 sols.
+- **Q-B (a):** convoys stay timed trips: at most one per neighbour and three in all. Cargo rovers drive convoys only with the regional map (step 4).
+- **Q-C (a):** buying on Mars and selling to Earth is allowed. It is closed at neutral politics (Earth refuses Ice) and opens with small margins only for an Earth-aligned colony.
+
+The re-review's conditions 2-6 are applied by the builder.
