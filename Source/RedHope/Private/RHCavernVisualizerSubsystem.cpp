@@ -1,6 +1,7 @@
 #include "RHCavernVisualizerSubsystem.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
+#include "RHLabelTurn.h"
 #include "RHSimWorldSubsystem.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -83,9 +84,15 @@ namespace
 		}
 	};
 
-	FRotator CavernLabelRotation()
+	// The label's place at a camera quarter: CavernLabelGapCm past the box's edge nearest the camera (the screen's bottom edge), centred on it.
+	constexpr double CavernLabelGapCm = 650.0;
+
+	FVector CavernLabelAt(const FVector2D& BoxMid, const FVector2D& BoxHalf, int32 Quarter)
 	{
-		return FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator();
+		const FVector2D Up = RHLabelTurn::QuarterUp(Quarter);
+		const double HalfAlongUp = FMath::Abs(Up.X) * BoxHalf.X + FMath::Abs(Up.Y) * BoxHalf.Y;
+		const FVector2D At = BoxMid - Up * (HalfAlongUp + CavernLabelGapCm);
+		return FVector(At.X, At.Y, CavernLabelLiftCm);
 	}
 
 	uint32 CavernMixInt(uint32 H, int32 V) { return FCrc::MemCrc32(&V, sizeof(V), H); }
@@ -144,11 +151,35 @@ void URHCavernVisualizerSubsystem::ApplyMaterials(UProceduralMeshComponent* M)
 
 void URHCavernVisualizerSubsystem::ClearLabels()
 {
-	for (TWeakObjectPtr<UTextRenderComponent>& L : Labels)
+	for (FLabel& L : Labels)
 	{
-		if (UTextRenderComponent* T = L.Get()) { T->DestroyComponent(); }
+		if (UTextRenderComponent* T = L.Text.Get()) { T->DestroyComponent(); }
 	}
 	Labels.Reset();
+}
+
+void URHCavernVisualizerSubsystem::TurnLabels(int32 Quarter)
+{
+	LabelQuarter = Quarter;
+	for (FLabel& L : Labels)
+	{
+		if (UTextRenderComponent* T = L.Text.Get())
+		{
+			T->SetWorldLocationAndRotation(CavernLabelAt(L.BoxMid, L.BoxHalf, Quarter), RHLabelTurn::FlatRotation(Quarter));
+		}
+	}
+}
+
+bool URHCavernVisualizerSubsystem::GetLabelPose(int32 Index, FVector& OutAtCm, FVector& OutUp) const
+{
+	const UTextRenderComponent* T = Labels.IsValidIndex(Index) ? Labels[Index].Text.Get() : nullptr;
+	if (!T)
+	{
+		return false;
+	}
+	OutAtCm = T->GetComponentLocation();
+	OutUp = T->GetUpVector();
+	return true;
 }
 
 UTextRenderComponent* URHCavernVisualizerSubsystem::MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize)
@@ -166,7 +197,8 @@ UTextRenderComponent* URHCavernVisualizerSubsystem::MakeLabel(const FString& Tex
 	Label->SetHorizontalAlignment(EHTA_Center);
 	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Tint * 0.35f + FLinearColor(0.65f, 0.65f, 0.65f)).ToFColor(true));
-	Label->SetWorldLocationAndRotation(AtCm, CavernLabelRotation());
+	LabelQuarter = RHLabelTurn::CameraQuarter(GetWorld());
+	Label->SetWorldLocationAndRotation(AtCm, RHLabelTurn::FlatRotation(LabelQuarter));
 	return Label;
 }
 
@@ -235,9 +267,13 @@ void URHCavernVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 			{
 				Text = FString::Printf(TEXT("Cavern %d: %d cell%s left, %s"), Cv.Id, Left, Left == 1 ? TEXT("") : TEXT("s"), *Floors);
 			}
-			const FVector2D Mid = (Lo + Hi) * 0.5;
+			const FVector2D Mid = (Lo + Hi) * 0.5, Half = (Hi - Lo) * 0.5;
 			const float LabelSize = (float)FMath::Clamp(FMath::Max(Cv.GetSizeX(), Cv.GetSizeY()) * 1000.0 * 0.07, 220.0, 560.0);
-			Labels.Add(MakeLabel(Text, FLinearColor(0.20f, 0.85f, 0.95f), FVector(Mid.X, Hi.Y + 650.0, CavernLabelLiftCm), LabelSize));
+			FLabel Label;
+			Label.BoxMid = Mid;
+			Label.BoxHalf = Half;
+			Label.Text = MakeLabel(Text, FLinearColor(0.20f, 0.85f, 0.95f), CavernLabelAt(Mid, Half, RHLabelTurn::CameraQuarter(GetWorld())), LabelSize);
+			Labels.Add(Label);
 		}
 	}
 	for (int32 S = 0; S < Sections.Num(); ++S)
@@ -274,6 +310,11 @@ void URHCavernVisualizerSubsystem::Tick(float DeltaTime)
 		return;
 	}
 	if (Holder && Holder->IsHidden()) { Holder->SetActorHiddenInGame(false); }
+	// P6: the labels turn with the camera, a quarter at a time, in place.
+	if (Holder && RHLabelTurn::CameraQuarter(World) != LabelQuarter)
+	{
+		TurnLabels(RHLabelTurn::CameraQuarter(World));
+	}
 	const int32 Level = PC ? PC->GetActiveLevel() : 0;
 	// The redraw key: the cavern list's version, the floor table's (a cell carved), the viewed floor, and the shaft list.
 	uint32 Key = 0;

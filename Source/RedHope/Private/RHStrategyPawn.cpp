@@ -118,20 +118,22 @@ void ARHStrategyPawn::SetSectionView(bool bOn, float PitchDeg, float YawDeg)
 	bSectionView = bOn;
 }
 
+float ARHStrategyPawn::WidthAtZoomCm(float InZoomT) const
+{
+	// Width at the focus = 2 x Distance(z) x tan(Fov(z) / 2).
+	const float D = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, InZoomT);
+	const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, InZoomT);
+	return 2.f * D * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5f));
+}
+
 float ARHStrategyPawn::SolveZoomForWidthCm(float WidthCm) const
 {
-	// Width at the focus = 2 x Distance(z) x tan(Fov(z) / 2); both rise with z, so the width is monotone and bisection converges.
-	const auto WidthAt = [this](float Z)
-	{
-		const float D = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, Z);
-		const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, Z);
-		return 2.f * D * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5f));
-	};
+	// Both distance and FOV rise with z, so the width is monotone and bisection converges.
 	float Lo = 0.f, Hi = 1.f;
 	for (int32 I = 0; I < 30; ++I)
 	{
 		const float Mid = 0.5f * (Lo + Hi);
-		(WidthAt(Mid) < WidthCm ? Lo : Hi) = Mid;
+		(WidthAtZoomCm(Mid) < WidthCm ? Lo : Hi) = Mid;
 	}
 	return Hi;
 }

@@ -389,16 +389,18 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			return (S && S->GetShaftCount() > 1) ? EVisibility::Visible : EVisibility::Collapsed;
 		})
 		[
+			// UI polish P2: the deck's dark button, not a white tint button nobody tinted (pale text on white at D6d).
 			SNew(SButton)
-			.ButtonStyle(&RHDeck::TintButtonStyle())
+			.ButtonStyle(&RHDeck::ButtonStyle())
 			.ContentPadding(FMargin(9.f, 3.f))
+			.HAlign(HAlign_Center)
 			.OnClicked_Lambda([this]()
 			{
 				if (PC.IsValid()) { PC->FocusNextShaft(); }
 				return FReply::Handled();
 			})
 			[
-				SNew(STextBlock).Text(FText::FromString(TEXT("Next shaft"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::TextDim)
+				SNew(STextBlock).Text(FText::FromString(TEXT("Next shaft"))).Font(RHDeck::Label(9)).ColorAndOpacity(RHDeck::Text)
 			]
 		]
 	];
@@ -409,10 +411,14 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	}
 	ShaftStrip->AddSlot().AutoHeight()
 	[
-		SNew(SBox)
+		// UI polish P4: up to 11 rows, fewer when the strip has been pushed down and the command bar would be reached (GetStripLayout).
+		SAssignNew(ShaftRowsBox, SBox)
 		.MaxDesiredHeight(TAttribute<FOptionalSize>::Create(TAttribute<FOptionalSize>::FGetter::CreateLambda([this]()
 		{
-			return FOptionalSize(11.f * (ShaftRowHeight > 1.f ? ShaftRowHeight : 27.f));
+			float Top = 0.f;
+			int32 Rows = 11;
+			GetStripLayout(Top, Rows);
+			return FOptionalSize((float)Rows * (ShaftRowHeight > 1.f ? ShaftRowHeight : 27.f));
 		})))
 		[
 			SNew(SHorizontalBox)
@@ -473,17 +479,31 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 			+ SVerticalBox::Slot().AutoHeight()
 			[
+				// UI polish P2: the deck's dark button, and only the verb on it: the refusal's reason (three lines in 118 px) is the line below
+				// and the tooltip.
 				SNew(SButton)
-				.ButtonStyle(&RHDeck::TintButtonStyle())
+				.ButtonStyle(&RHDeck::ButtonStyle())
 				.ContentPadding(FMargin(7.f, 3.f))
+				.HAlign(HAlign_Center)
+				.ToolTipText(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFitLiftReason)))
 				.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleFitLift))
 				[
 					SNew(STextBlock)
 					.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFitLiftLabel)))
 					.Font(RHDeck::Label(9))
 					.AutoWrapText(true)
+					.Justification(ETextJustify::Center)
 					.ColorAndOpacity(RHDeck::Text)
 				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f, 0.f, 0.f))
+			[
+				SNew(STextBlock)
+				.Visibility(this, &SRHCommandDeck::GetFitLiftReasonVisibility)
+				.Text(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFitLiftReason)))
+				.Font(RHDeck::Label(9))
+				.AutoWrapText(true)
+				.ColorAndOpacity(RHDeck::TextDim)
 			]
 		]
 	];
@@ -735,7 +755,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		// until the signal lands (M0 spec section 8, delivered M1-c).
 		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top).Padding(10.f)
 		[
-			SNew(SVerticalBox)
+			SAssignNew(TopLeftStack, SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight()
 			[
 				BuildVitalsStrip()
@@ -842,7 +862,8 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			SNew(SBox).WidthOverride(RightColumnPx)
 			[
 				SAssignNew(RightScroll, SScrollBox)
-				.ScrollBarThickness(FVector2D(4.f, 4.f))
+				.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.RightColumn")))
+				.ScrollBarThickness(FVector2D(8.f, 8.f)) // UI polish P3: 8 px, a bar the pointer can find (4 px was a hair)
 				+ SScrollBox::Slot()
 				[
 					SNew(SVerticalBox)
@@ -861,23 +882,23 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					// Politics above crew: a pending Earth decision outranks the roster.
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						BuildPoliticsPanel()
+						FoldAnchor(EFold::Politics, BuildPoliticsPanel())
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						BuildCrewPanel()
+						FoldAnchor(EFold::Crew, BuildCrewPanel())
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						BuildCityPanel()
+						FoldAnchor(EFold::City, BuildCityPanel())
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						BuildFleetPanel()
+						FoldAnchor(EFold::Fleet, BuildFleetPanel())
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
-						BuildPowerPanel()
+						FoldAnchor(EFold::Power, BuildPowerPanel())
 					]
 					// Known Ground (director request): surveyed coverage + every
 					// discovered deposit, while Map is on. A table, so monospace.
@@ -1004,10 +1025,19 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 
-		// Shaft strip, left edge - the vertical map beside the sliced territory.
-		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Center).Padding(10.f)
+		// Shaft strip, left edge - the vertical map beside the sliced territory. UI polish P4: centred on the edge, but never under the top-left
+		// stack (the TRAFFIC legend grows with the tram lines): then it stands 8 px below it (GetStripLayout).
+		+ SOverlay::Slot().HAlign(HAlign_Left).VAlign(VAlign_Top)
+		.Padding(TAttribute<FMargin>::CreateLambda([this]()
+		{
+			float Top = 10.f;
+			int32 Rows = 11;
+			GetStripLayout(Top, Rows);
+			return FMargin(10.f, Top, 10.f, 0.f);
+		}))
 		[
-			SNew(SBorder)
+			SAssignNew(ShaftStripBorder, SBorder)
+			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.ShaftStrip")))
 			.BorderImage(RHDeck::GlassBrush())
 			.Padding(FMargin(6.f, 6.f))
 			[
@@ -1310,6 +1340,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshCavernList();
 	RefreshTramList();
 	FollowShaftScroll();
+	ApplyFoldScroll();
 	RefreshGuide();
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
@@ -2296,9 +2327,27 @@ FText SRHCommandDeck::GetFitLiftLabel() const
 	}
 	FString Why;
 	double Bill = 0.0;
-	const bool bOk = Sim->CanFitLift(PC->GetNearestShaftId(), Why, &Bill);
-	const FString Verb = FString::Printf(TEXT("Fit a lift car (%.0f kg Struct)"), Bill);
-	return FText::FromString(bOk ? Verb : FString::Printf(TEXT("%s - %s"), *Verb, *Why));
+	Sim->CanFitLift(PC->GetNearestShaftId(), Why, &Bill);
+	// UI polish P2: the verb alone; GetFitLiftReason says why it cannot be ordered.
+	return FText::FromString(FString::Printf(TEXT("Fit a lift car (%.0f kg Struct)"), Bill));
+}
+
+// UI polish P2, Gate-D placeholder copy (row S1): why a lift car cannot be fitted, the sim's own words, under the fit button and in its tooltip.
+FText SRHCommandDeck::GetFitLiftReason() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !PC.IsValid())
+	{
+		return FText::GetEmpty();
+	}
+	FString Why;
+	return Sim->CanFitLift(PC->GetNearestShaftId(), Why) ? FText::GetEmpty() : FText::FromString(Why);
+}
+
+EVisibility SRHCommandDeck::GetFitLiftReasonVisibility() const
+{
+	return GetFitLiftReason().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
 FReply SRHCommandDeck::HandleFitLift()
@@ -2949,7 +2998,8 @@ FSlateColor SRHCommandDeck::GetFloorTextColor(int32 Level) const
 	{
 		return FLinearColor(0.96f, 0.72f, 0.28f, 1.f); // D5 depth: a warm floor reads in a soft amber
 	}
-	return bReached ? FLinearColor(0.55f, 0.66f, 0.70f, 1.f) : FLinearColor(0.28f, 0.33f, 0.37f, 1.f);
+	// UI polish P2: a floor not yet reached is still dimmer than one that is, but no longer under deck.contrast's bar (0.28/0.33/0.37 on rock).
+	return bReached ? FLinearColor(0.55f, 0.66f, 0.70f, 1.f) : FLinearColor(0.45f, 0.52f, 0.56f, 1.f);
 }
 
 FReply SRHCommandDeck::HandleMap()

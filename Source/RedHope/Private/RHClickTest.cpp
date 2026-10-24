@@ -20,9 +20,13 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHStrategyPawn.h"
+#include "RHCavernVisualizerSubsystem.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHCommandDeck.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTunnelVisualizerSubsystem.h"
+#include "RHLabelTurn.h"
 #include "RHTramVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -38,11 +42,13 @@
 #include "Layout/WidgetPath.h"
 #include "Misc/Paths.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SViewport.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SSlider.h"
 #include "Types/ISlateMetaData.h"
+#include "Styling/WidgetStyle.h"
 
 namespace
 {
@@ -179,6 +185,13 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	// UI polish: a widget the deck tagged for the test (FTagMetaData, "RH.*") - an icon button has no text to find it by.
+	bool HasTag(const TSharedRef<SWidget>& Widget, const FString& Tag)
+	{
+		const TSharedPtr<FTagMetaData> Meta = Widget->GetMetaData<FTagMetaData>();
+		return Meta.IsValid() && Meta->Tag.ToString() == Tag;
 	}
 
 	TSharedPtr<SWindow> GameWindow()
@@ -326,7 +339,7 @@ namespace
 		TSet<FKey> Pressed;
 		Pressed.Add(Button);
 		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonDownEvent(nullptr, MakeEvent(Pos, Pressed, Button));
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: down (%s) at (%.0f,%.0f) handled=%d"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0);
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: down (%s) at (%.0f,%.0f) leaf=%s handled=%d"), *Button.ToString(), Pos.X, Pos.Y, *LeafAt(Pos), bHandled ? 1 : 0);
 	}
 
 	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton)
@@ -465,6 +478,11 @@ namespace
 			Push(Name, [Action](double, bool) { Action(); return true; }, GapAfter);
 		}
 
+		// UI polish P1: what the step in progress has seen, for the log line of a check that fails. A flake (a click that never arrived on a
+		// slow frame) shows as few frames and a long one; a defect shows as many frames and short ones.
+		uint64 StepFrames() const { return StepStart < 0.0 ? 0 : GFrameCounter - StepStartFrame; }
+		double StepLongestFrameMs() const { return LongestFrameSec * 1000.0; }
+
 	private:
 		bool Tick()
 		{
@@ -474,29 +492,51 @@ namespace
 				return false;
 			}
 			const double Now = FPlatformTime::Seconds();
-			if (Now < NotBefore)
+			const uint64 Frame = GFrameCounter;
+			// Every tick is a rendered frame: the gap between two of them is the frame the machine really took.
+			const double FrameSec = LastTickSec > 0.0 ? Now - LastTickSec : 0.0;
+			LastTickSec = Now;
+			// A gap ends on the wall clock AND after MinGapFrames rendered frames: on a loaded machine a 0.15 s gap can pass inside one slow
+			// frame, and the next pointer event then lands before Slate has handled the one before it.
+			if (Now < NotBefore || Frame < NotBeforeFrame)
 			{
 				return true;
 			}
 			if (StepStart < 0.0)
 			{
 				StepStart = Now;
+				StepStartFrame = Frame;
+				LongestFrameSec = 0.0;
+			}
+			else
+			{
+				LongestFrameSec = FMath::Max(LongestFrameSec, FrameSec);
 			}
 			const FStep Step = Queue[0]; // a copy: Run may Push
 			const double Elapsed = Now - StepStart;
-			if (Step.Run(Elapsed, Elapsed >= Step.Timeout))
+			// A timeout is counted in frames too: a step that polls is not given up on before it has had MinTimeoutFrames frames to see its effect.
+			const bool bLast = Elapsed >= Step.Timeout && (Step.Timeout <= 0.f || Frame - StepStartFrame >= MinTimeoutFrames);
+			if (Step.Run(Elapsed, bLast))
 			{
 				Queue.RemoveAt(0);
 				NotBefore = FPlatformTime::Seconds() + Step.GapAfter;
+				NotBeforeFrame = GFrameCounter + MinGapFrames;
 				StepStart = -1.0;
 			}
 			return true;
 		}
 
+		static constexpr uint64 MinGapFrames = 2;
+		static constexpr uint64 MinTimeoutFrames = 30;
+
 		TArray<FStep> Queue;
 		FTSTicker::FDelegateHandle Handle;
 		double NotBefore = 0.0;
+		uint64 NotBeforeFrame = 0;
 		double StepStart = -1.0;
+		uint64 StepStartFrame = 0;
+		double LastTickSec = 0.0;
+		double LongestFrameSec = 0.0;
 	};
 
 	// ---------------------------------------------------------------- one press, in three steps
@@ -506,7 +546,11 @@ namespace
 		bool bFound = false;
 		FVector2D Pos = FVector2D::ZeroVector;
 		int32 LeakBase = 0;
+		TWeakPtr<SWidget> Target; // UI polish P1: the button the locator found, so a press can follow it if the layout moves it before the click
 	};
+
+	// Set by LocateButton to the widget it found (a locator only returns a point).
+	TWeakPtr<SWidget> GLocatedButton;
 
 	// Finds where to press; false if there is nothing to press (and says why).
 	using FLocate = TFunction<bool(FVector2D&)>;
@@ -530,7 +574,7 @@ namespace
 			{
 				for (const FFoundWidget& Found : Buttons)
 				{
-					if ((Found.Widget->IsEnabled() == (Pass == 0)) && HasText(Found.Widget, Label))
+					if ((Found.Widget->IsEnabled() == (Pass == 0)) && (HasText(Found.Widget, Label) || HasTag(Found.Widget, Label)))
 					{
 						Matches.Add(Found.Widget);
 						Centres.Add(Found.Centre);
@@ -547,6 +591,7 @@ namespace
 			UE_LOG(LogRedHope, Display, TEXT("RHClick: '%s' at (%.0f,%.0f) leaf=%s reached=%s%s%s"), *Label, Centres[Nth].X, Centres[Nth].Y, *Leaf,
 				bReached ? TEXT("YES") : TEXT("NO"), Matches[Nth]->IsEnabled() ? TEXT("") : TEXT(" [disabled]"), bPressNotMove ? TEXT("") : TEXT(" (hover only)"));
 			OutPos = Centres[Nth];
+			GLocatedButton = Matches[Nth];
 			return true;
 		};
 	}
@@ -676,6 +721,32 @@ namespace
 		};
 	}
 
+	// UI polish P1: a layout that moves between the move and the click (a card appears in the shaft strip, the strip re-centres) takes the button
+	// out from under the pointer, and the click lands on its neighbour or on nothing. A press follows its button: where it stands NOW.
+	void ReAim(const TSharedRef<FPress>& State, bool bLeftDown)
+	{
+		const TSharedPtr<SWidget> Target = State->Target.Pin();
+		if (!Target.IsValid())
+		{
+			return;
+		}
+		TArray<FFoundWidget> Buttons;
+		GatherInWindow(TEXT("SButton"), Buttons);
+		for (const FFoundWidget& Found : Buttons)
+		{
+			if (&Found.Widget.Get() == Target.Get())
+			{
+				if (FVector2D::Distance(Found.Centre, State->Pos) > 1.0)
+				{
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: the target moved from (%.0f,%.0f) to (%.0f,%.0f): the pointer follows it"), State->Pos.X, State->Pos.Y, Found.Centre.X, Found.Centre.Y);
+					State->Pos = Found.Centre;
+					SendMove(State->Pos, bLeftDown);
+				}
+				return;
+			}
+		}
+	}
+
 	// Move, press, release. The press is not made if there was nothing to press.
 	TSharedRef<FPress> PushPress(const FString& Name, FLocate Locate, bool bPress = true)
 	{
@@ -683,7 +754,9 @@ namespace
 		FRunner& Runner = FRunner::Get();
 		Runner.Do(Name + TEXT(" move"), [State, Locate]()
 		{
+			GLocatedButton.Reset();
 			State->bFound = Locate(State->Pos);
+			State->Target = GLocatedButton;
 			if (State->bFound)
 			{
 				if (const ARHPlayerController* PC = GetPC())
@@ -695,8 +768,8 @@ namespace
 		}, 0.15f);
 		if (bPress)
 		{
-			Runner.Do(Name + TEXT(" down"), [State]() { if (State->bFound) { SendDown(State->Pos); } }, 0.12f);
-			Runner.Do(Name + TEXT(" up"), [State]() { if (State->bFound) { SendUp(State->Pos); } }, 0.2f);
+			Runner.Do(Name + TEXT(" down"), [State]() { if (State->bFound) { ReAim(State, false); SendDown(State->Pos); } }, 0.12f);
+			Runner.Do(Name + TEXT(" up"), [State]() { if (State->bFound) { ReAim(State, true); SendUp(State->Pos); } }, 0.2f);
 		}
 		return State;
 	}
@@ -820,8 +893,13 @@ namespace
 	// An assertion step: Effect returns "" when the effect holds, else why not. A leak (a press that moved the
 	// world-click counter) fails it too, unless the press was meant for the world. Timeout > 0 retries Effect
 	// until it holds.
+	// UI polish P1: a check that polls (Timeout > 0) waits at least this long for a state change. A click that is slow to take effect on a loaded
+	// machine used to fail a 1 s check; polling returns the moment the effect holds, so a passing run is no slower.
+	constexpr float MinPollSeconds = 3.f;
+
 	void PushCheck(const FString& Name, const TSharedPtr<FPress>& Press, TFunction<FString()> Effect, float Timeout = 0.f, float Gap = 0.3f, bool bAllowWorldClick = false)
 	{
+		const float Wait = Timeout > 0.f ? FMath::Max(Timeout, MinPollSeconds) : 0.f;
 		FRunner::Get().Push(Name + TEXT(" check"), [Name, Press, Effect, bAllowWorldClick](double, bool bLast)
 		{
 			if (Press.IsValid() && !Press->bFound)
@@ -839,9 +917,14 @@ namespace
 			{
 				Problem += FString::Printf(TEXT("%sLEAKED %d click(s) into the world"), Problem.IsEmpty() ? TEXT("") : TEXT("; "), PC->GetWorldClickCount() - Press->LeakBase);
 			}
+			if (!Problem.IsEmpty())
+			{
+				// A flake and a defect read differently here: a flake waited few frames or met one very long one.
+				Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs());
+			}
 			Report(Name, Problem.IsEmpty(), Problem);
 			return true;
-		}, Gap, Timeout);
+		}, Gap, Wait);
 	}
 
 	void PushSweep(const FString& Name)
@@ -969,6 +1052,18 @@ namespace
 		}
 	}
 
+	// UI polish P6: the same, turned to a yaw (degrees; a quarter turn is 90).
+	void FrameCameraYaw(const FVector& FocusCm, float ZoomT, float YawDeg)
+	{
+		if (ARHPlayerController* PC = GetPC())
+		{
+			if (ARHStrategyPawn* Pawn = Cast<ARHStrategyPawn>(PC->GetPawn()))
+			{
+				Pawn->SetCameraPose(FVector2D(FocusCm.X, FocusCm.Y), ZoomT, 0.f, YawDeg);
+			}
+		}
+	}
+
 	bool QueueHas(const URHSimWorldSubsystem& Sim, const TCHAR* Verb, const TCHAR* Target)
 	{
 		for (const FRHCommand& Cmd : Sim.GetUplinkQueue())
@@ -979,6 +1074,240 @@ namespace
 			}
 		}
 		return false;
+	}
+
+	// ---------------------------------------------------------------- UI polish P3, P4, P6, P8: layout and label checks
+
+	// The widget in a gathered list that carries a tag, or null.
+	const FFoundWidget* FindTagged(const TArray<FFoundWidget>& Found, const FString& Tag)
+	{
+		for (const FFoundWidget& F : Found)
+		{
+			if (HasTag(F.Widget, Tag))
+			{
+				return &F;
+			}
+		}
+		return nullptr;
+	}
+
+	bool RectsOverlap(const FVector2D& AMin, const FVector2D& AMax, const FVector2D& BMin, const FVector2D& BMax, double Tolerance = 1.0)
+	{
+		return AMin.X < BMax.X - Tolerance && AMax.X > BMin.X + Tolerance && AMin.Y < BMax.Y - Tolerance && AMax.Y > BMin.Y + Tolerance;
+	}
+
+	// A world box on the screen: the rectangle its eight corners cover, in Slate desktop space. False if any corner is behind the camera.
+	bool ProjectBox(const FBox& Box, FVector2D& OutMin, FVector2D& OutMax)
+	{
+		OutMin = FVector2D(1.0e9, 1.0e9);
+		OutMax = FVector2D(-1.0e9, -1.0e9);
+		for (int32 Corner = 0; Corner < 8; ++Corner)
+		{
+			const FVector P((Corner & 1) ? Box.Max.X : Box.Min.X, (Corner & 2) ? Box.Max.Y : Box.Min.Y, (Corner & 4) ? Box.Max.Z : Box.Min.Z);
+			FVector2D Screen;
+			if (!WorldPointToSlate(P, Screen))
+			{
+				return false;
+			}
+			OutMin = FVector2D(FMath::Min(OutMin.X, Screen.X), FMath::Min(OutMin.Y, Screen.Y));
+			OutMax = FVector2D(FMath::Max(OutMax.X, Screen.X), FMath::Max(OutMax.Y, Screen.Y));
+		}
+		return true;
+	}
+
+	// The legend of TRAFFIC and the shaft strip must not cover each other (P4); each is a tagged widget of the deck.
+	FString LegendStripProblem()
+	{
+		TArray<FFoundWidget> Boxes, Borders;
+		GatherInWindow(TEXT("SBox"), Boxes);
+		GatherInWindow(TEXT("SBorder"), Borders);
+		const FFoundWidget* Legend = FindTagged(Boxes, TEXT("RH.TrafficLegend"));
+		const FFoundWidget* Strip = FindTagged(Borders, TEXT("RH.ShaftStrip"));
+		if (!Legend) { return TEXT("the TRAFFIC legend is not on screen"); }
+		if (!Strip) { return TEXT("the shaft strip is not on screen"); }
+		if (RectsOverlap(Legend->TopLeft, Legend->TopLeft + Legend->Size, Strip->TopLeft, Strip->TopLeft + Strip->Size))
+		{
+			return FString::Printf(TEXT("the legend (%.0f,%.0f %.0fx%.0f) covers the shaft strip (%.0f,%.0f %.0fx%.0f)"), Legend->TopLeft.X, Legend->TopLeft.Y, Legend->Size.X, Legend->Size.Y,
+				Strip->TopLeft.X, Strip->TopLeft.Y, Strip->Size.X, Strip->Size.Y);
+		}
+		return FString();
+	}
+
+	// P8: every label the section draws (floors, lifts, trams, robots) lies inside the free band between the shaft strip and the right column,
+	// no two overlap, and no glyph is drawn under MinGlyphPx tall. Every label's box and size is logged.
+	constexpr double MinGlyphPx = 9.0;
+
+	void CheckSectionLabels(const FString& Name)
+	{
+		UWorld* World = FindGameWorld();
+		const URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+		TArray<FFoundWidget> Borders, Scrolls;
+		GatherInWindow(TEXT("SBorder"), Borders);
+		GatherInWindow(TEXT("SScrollBox"), Scrolls);
+		const FFoundWidget* Strip = FindTagged(Borders, TEXT("RH.ShaftStrip"));
+		const FFoundWidget* Column = FindTagged(Scrolls, TEXT("RH.RightColumn"));
+		if (!Section || !Section->IsOn() || !Strip || !Column)
+		{
+			Report(Name, false, TEXT("the section, the shaft strip or the right column is not on screen"));
+			return;
+		}
+		const double BandLeft = Strip->TopLeft.X + Strip->Size.X, BandRight = Column->TopLeft.X;
+		TArray<URHSectionVisualizerSubsystem::FLabelBox> Boxes;
+		Section->GetLabelBoxes(Boxes);
+		struct FScreenLabel { FString Text; FVector2D Min, Max; double GlyphPx; };
+		TArray<FScreenLabel> Labels;
+		TArray<FString> Problems;
+		double SmallestGlyph = 1.0e9;
+		for (const URHSectionVisualizerSubsystem::FLabelBox& B : Boxes)
+		{
+			FScreenLabel L;
+			L.Text = B.Text;
+			if (!ProjectBox(B.World, L.Min, L.Max))
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' is behind the camera"), *B.Text.Left(24)));
+				continue;
+			}
+			// The em: SizeCm tall on the plane, projected from the label's own middle.
+			FVector2D A, C;
+			const FVector Mid = B.World.GetCenter();
+			if (WorldPointToSlate(Mid, A) && WorldPointToSlate(Mid + FVector(0.0, 0.0, (double)B.SizeCm), C))
+			{
+				L.GlyphPx = FMath::Abs(C.Y - A.Y);
+			}
+			else
+			{
+				L.GlyphPx = 0.0;
+			}
+			SmallestGlyph = FMath::Min(SmallestGlyph, L.GlyphPx);
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: section label '%s' (%.0f,%.0f)-(%.0f,%.0f) glyph %.1f px%s"), *B.Text.Left(60), L.Min.X, L.Min.Y, L.Max.X, L.Max.Y, L.GlyphPx, B.bFloorLabel ? TEXT(" floor") : TEXT(""));
+			if (L.Min.X < BandLeft - 1.0 || L.Max.X > BandRight + 1.0)
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' (%.0f..%.0f) is outside the free band (%.0f..%.0f)"), *B.Text.Left(24), L.Min.X, L.Max.X, BandLeft, BandRight));
+			}
+			if (L.GlyphPx < MinGlyphPx)
+			{
+				Problems.Add(FString::Printf(TEXT("'%s' glyphs are %.1f px tall (bar %.0f)"), *B.Text.Left(24), L.GlyphPx, MinGlyphPx));
+			}
+			Labels.Add(L);
+		}
+		for (int32 I = 0; I < Labels.Num(); ++I)
+		{
+			for (int32 J = I + 1; J < Labels.Num(); ++J)
+			{
+				if (RectsOverlap(Labels[I].Min, Labels[I].Max, Labels[J].Min, Labels[J].Max))
+				{
+					Problems.Add(FString::Printf(TEXT("'%s' overlaps '%s'"), *Labels[I].Text.Left(20), *Labels[J].Text.Left(20)));
+				}
+			}
+		}
+		Report(Name, Labels.Num() > 0 && Problems.Num() == 0,
+			FString::Printf(TEXT("%d label(s) inside the free band %.0f..%.0f, none overlapping, smallest glyph %.1f px (bar %.0f)%s%s"), Labels.Num(), BandLeft, BandRight, Labels.Num() > 0 ? SmallestGlyph : 0.0, MinGlyphPx,
+				Problems.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Problems, TEXT("; "))));
+	}
+
+	// P3: City is open, Crew is folded, and the City header (its toggle) is among the visible buttons and inside the right column's rectangle.
+	FString CityOpenProblem(bool bCrewMustBeFolded)
+	{
+		const ARHPlayerController* PC = GetPC();
+		const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+		if (!Deck.IsValid()) { return TEXT("no deck"); }
+		if (!Deck->IsFoldOpen(SRHCommandDeck::EFold::City)) { return TEXT("City is not open"); }
+		if (bCrewMustBeFolded && Deck->IsFoldOpen(SRHCommandDeck::EFold::Crew)) { return TEXT("Crew is still open: opening City did not fold it"); }
+		TArray<FFoundWidget> Buttons, Scrolls;
+		GatherInWindow(TEXT("SButton"), Buttons);
+		GatherInWindow(TEXT("SScrollBox"), Scrolls);
+		const FFoundWidget* Toggle = FindTagged(Buttons, TEXT("RH.CityToggle"));
+		const FFoundWidget* Column = FindTagged(Scrolls, TEXT("RH.RightColumn"));
+		if (!Column) { return TEXT("the right column is not on screen"); }
+		if (!Toggle) { return TEXT("the City header is not in the visible part of the column (scrolled out)"); }
+		if (Toggle->TopLeft.Y < Column->TopLeft.Y - 1.0 || Toggle->TopLeft.Y + Toggle->Size.Y > Column->TopLeft.Y + Column->Size.Y + 1.0)
+		{
+			return FString::Printf(TEXT("the City header (y %.0f) is outside the column (y %.0f..%.0f)"), Toggle->TopLeft.Y, Column->TopLeft.Y, Column->TopLeft.Y + Column->Size.Y);
+		}
+		return FString();
+	}
+
+	// ---------------------------------------------------------------- the deck's contrast (UI polish P2)
+
+	// Linear luminance of a colour (Rec. 709 weights, on linear values: the colours as the deck authors them).
+	double Luminance(const FLinearColor& C)
+	{
+		return 0.2126 * C.R + 0.7152 * C.G + 0.0722 * C.B;
+	}
+
+	// The first visible text under a widget that carries a colour of its own: what it says and what colour it is drawn in.
+	bool FirstTextColour(const TSharedRef<SWidget>& Root, FString& OutText, FLinearColor& OutColour)
+	{
+		if (IsType(Root, TEXT("STextBlock")))
+		{
+			const TSharedRef<STextBlock> Block = StaticCastSharedRef<STextBlock>(Root);
+			const FSlateColor Colour = Block->GetColorAndOpacity();
+			if (!Block->GetText().IsEmpty() && Colour.IsColorSpecified())
+			{
+				OutText = Block->GetText().ToString();
+				OutColour = Colour.GetSpecifiedColor();
+				return true;
+			}
+		}
+		if (FChildren* Kids = Root->GetAllChildren())
+		{
+			for (int32 i = 0; i < Kids->Num(); ++i)
+			{
+				const TSharedRef<SWidget> Child = Kids->GetChildAt(i);
+				if (Child->GetVisibility().IsVisible() && FirstTextColour(Child, OutText, OutColour))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// Walks every visible deck button: its fill (the brush it is drawn with now, times the button's tint) against the colour of its text.
+	// Below MinContrast in linear luminance the text cannot be read (white fill, pale text: the shaft card's buttons at D6d). Every pair is
+	// logged; a button with no text, or with no fill (a flat icon button), has nothing to compare and is counted, not hidden.
+	constexpr double MinContrast = 0.4;
+
+	void CheckDeckContrast(const FString& Name)
+	{
+		TArray<FFoundWidget> Buttons;
+		GatherInWindow(TEXT("SButton"), Buttons);
+		int32 Compared = 0, NoText = 0, NoFill = 0;
+		double Worst = 1.0e9;
+		TArray<FString> Bad;
+		for (const FFoundWidget& Found : Buttons)
+		{
+			const TSharedRef<SButton> Button = StaticCastSharedRef<SButton>(Found.Widget);
+			const FSlateBrush* Brush = Button->GetBorderImage();
+			FString Text;
+			FLinearColor TextColour;
+			if (!FirstTextColour(Found.Widget, Text, TextColour))
+			{
+				++NoText;
+				continue;
+			}
+			const FLinearColor Tint = Brush ? Brush->GetTint(FWidgetStyle()) : FLinearColor::Transparent;
+			const FLinearColor Back = Button->GetBorderBackgroundColor().GetColor(FWidgetStyle());
+			if (!Brush || Brush->DrawAs == ESlateBrushDrawType::NoDrawType || Tint.A * Back.A < 0.05f)
+			{
+				++NoFill;
+				continue;
+			}
+			const FLinearColor Fill(Tint.R * Back.R, Tint.G * Back.G, Tint.B * Back.B);
+			const double FillLum = Luminance(Fill), TextLum = Luminance(TextColour);
+			const double Diff = FMath::Abs(FillLum - TextLum);
+			++Compared;
+			Worst = FMath::Min(Worst, Diff);
+			const FString Shown = Text.Left(40).Replace(TEXT("\n"), TEXT(" "));
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: contrast '%s' fill %.2f text %.2f diff %.2f%s"), *Shown, FillLum, TextLum, Diff, Diff < MinContrast ? TEXT("  ** BELOW THE BAR **") : TEXT(""));
+			if (Diff < MinContrast)
+			{
+				Bad.Add(FString::Printf(TEXT("'%s' (fill %.2f, text %.2f, diff %.2f)"), *Shown, FillLum, TextLum, Diff));
+			}
+		}
+		Report(Name, Compared > 0 && Bad.Num() == 0,
+			FString::Printf(TEXT("%d button(s) compared (worst luminance difference %.2f, bar %.1f), %d without text, %d without a fill%s%s"), Compared, Compared > 0 ? Worst : 0.0, MinContrast, NoText, NoFill,
+				Bad.Num() > 0 ? TEXT("; BELOW THE BAR: ") : TEXT(""), *FString::Join(Bad, TEXT("; "))));
 	}
 
 	void StartClickTest()
@@ -1212,6 +1541,49 @@ namespace
 			PushCheck(TEXT("traffic.off"), Off, []() { const ARHPlayerController* PC = GetPC(); return (PC && !PC->IsTrafficOverlayOn()) ? FString() : FString(TEXT("the overlay did not turn off")); }, 1.f);
 		}
 
+		// ---- the accordion (UI polish P3): opening one foldable panel folds the others and scrolls it into view. The harness opens Crew (City folds) and
+		// takes the column to its end, so City's header is on screen; a real click on City's toggle (tagged RH.CityToggle) then opens it and folds
+		// Crew, with the header inside the column. city.scroll starts from the column's top, where City's header is below the fold: opening it
+		// must bring the header into view.
+		Runner.Do(TEXT("city.setup"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::Crew, true);
+			}
+		}, 1.6f);
+		Runner.Do(TEXT("city.setup scroll"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->Debug_ScrollRight(100000.f);
+			}
+		}, 0.6f);
+		{
+			const TSharedRef<FPress> Press = PushPress(TEXT("city.open"), LocateButton(TEXT("RH.CityToggle"), 0, true));
+			PushCheck(TEXT("city.open"), Press, []() { return CityOpenProblem(/*bCrewMustBeFolded*/ true); }, 4.f);
+		}
+		Runner.Do(TEXT("city.scroll setup"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::City, false);
+				PC->GetDeck()->Debug_ScrollRight(0.f);
+			}
+		}, 1.2f);
+		Runner.Do(TEXT("city.scroll"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::City, true);
+			}
+		}, 0.1f);
+		PushCheck(TEXT("city.scroll"), nullptr, []() { return CityOpenProblem(/*bCrewMustBeFolded*/ false); }, 4.f);
+
 		// ---- the tunnel tool: arm it from the shaft strip, then drag on the floor
 		Runner.Do(TEXT("tunnel.setup"), [T]()
 		{
@@ -1299,6 +1671,90 @@ namespace
 			PushCheck(TEXT("cavern.height"), Height, []() { const ARHPlayerController* PC = GetPC(); return (PC && PC->IsCavernMode() && PC->GetCavernFloors() == 2) ? FString() : FString(TEXT("a second press did not step the cavern brush to two floors")); }, 1.f);
 		}
 
+		// ---- the labels turn with the camera (UI polish P6): the camera yaws a quarter turn; every cavern and tunnel label's letters then point up the
+		// screen (within a degree of the camera's quarter), and the cavern's label stands on the box's side nearest the camera.
+		Runner.Do(TEXT("labels.yaw setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			if (!PC)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(-1);
+			// The cavern's order may still be in the uplink's lag: the same box at once (as section.setup does), so there is a label to turn.
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (Sim && Sim->GetCaverns().Num() == 0)
+			{
+				const FVector Origin = Sim->GetShaftHeadCm();
+				int32 Id = INDEX_NONE;
+				FString Why;
+				Sim->Debug_DigCavern(-1, 1, URHSimWorldSubsystem::CmToLattice(Origin, T->CavernACm), URHSimWorldSubsystem::CmToLattice(Origin, T->CavernBCm), Id, Why);
+			}
+			// The tunnel's too (its order lags 45 sim-s, and a finished tunnel has no label): the same line, uncarved, so there is a tunnel label to turn.
+			if (Sim && Sim->GetTunnels().Num() == 0)
+			{
+				const FVector Origin = Sim->GetShaftHeadCm();
+				int32 Id = INDEX_NONE;
+				FString Why;
+				Sim->Debug_DigTunnel(-1, URHSimWorldSubsystem::CmToLattice(Origin, T->TunnelACm), URHSimWorldSubsystem::CmToLattice(Origin, T->TunnelBCm), Id, Why);
+			}
+			FrameCameraYaw((T->CavernACm + T->CavernBCm) * 0.5, 0.2f, 90.f);
+		}, 0.8f);
+		Runner.Push(TEXT("labels.yaw"), [](double, bool bLast)
+		{
+			UWorld* W = FindGameWorld();
+			const URHCavernVisualizerSubsystem* Caverns = W ? W->GetSubsystem<URHCavernVisualizerSubsystem>() : nullptr;
+			const URHTunnelVisualizerSubsystem* Tunnels = W ? W->GetSubsystem<URHTunnelVisualizerSubsystem>() : nullptr;
+			const URHSimWorldSubsystem* Sim = GetSim();
+			FString Problem;
+			const int32 Quarter = RHLabelTurn::CameraQuarter(W);
+			const FVector2D Want(0.0, 1.0); // the camera was put at yaw 90: up the screen is world +Y
+			if (!Caverns || !Tunnels || !Sim) { Problem = TEXT("no label layers"); }
+			else if (Quarter != 1) { Problem = FString::Printf(TEXT("the camera's quarter is %d, expected 1"), Quarter); }
+			else if (Caverns->GetLabelCount() < 1) { Problem = TEXT("no cavern label to check"); }
+	else if (Tunnels->GetLabelCount() < 1) { Problem = TEXT("no tunnel label to check"); }
+			int32 Checked = 0;
+			if (Problem.IsEmpty())
+			{
+				// The angle between the letters' up (flat labels: no vertical part) and the camera's up on the ground.
+				const auto UpOff = [&Want](const FVector& Up)
+				{
+					const double Flat = FMath::Abs(Up.Z) < 0.01 ? FVector2D::DotProduct(FVector2D(Up.X, Up.Y).GetSafeNormal(), Want) : 0.0;
+					return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Flat, -1.0, 1.0)));
+				};
+				for (int32 I = 0; I < Caverns->GetLabelCount() && Problem.IsEmpty(); ++I)
+				{
+					FVector At, Up;
+					if (!Caverns->GetLabelPose(I, At, Up)) { continue; }
+					++Checked;
+					if (UpOff(Up) > 1.0) { Problem = FString::Printf(TEXT("cavern label %d: its letters point (%.2f,%.2f,%.2f), %.0f degrees off the camera's up (0,1)"), I, Up.X, Up.Y, Up.Z, UpOff(Up)); }
+					// On the side of its box nearest the camera: behind the box's middle along the screen's up.
+					const FVector Head = Sim->GetShaftHeadCm();
+					double Nearest = 1.0e18, Along = 0.0;
+					for (const FRHCavern& Cv : Sim->GetCaverns())
+					{
+						const FVector2D Mid(Head.X + 0.5 * (Cv.Min.X + Cv.Max.X) * 1000.0, Head.Y + 0.5 * (Cv.Min.Y + Cv.Max.Y) * 1000.0);
+						const double Dist = FVector2D::Distance(Mid, FVector2D(At.X, At.Y));
+						if (Dist < Nearest) { Nearest = Dist; Along = FVector2D::DotProduct(FVector2D(At.X, At.Y) - Mid, Want); }
+					}
+					if (Problem.IsEmpty() && Along >= 0.0) { Problem = FString::Printf(TEXT("cavern label %d stands %.0f cm ahead of its box's middle, not on the side nearest the camera"), I, Along); }
+				}
+				for (int32 I = 0; I < Tunnels->GetLabelCount() && Problem.IsEmpty(); ++I)
+				{
+					FVector At, Up;
+					if (!Tunnels->GetLabelPose(I, At, Up)) { continue; }
+					++Checked;
+					if (UpOff(Up) > 1.0) { Problem = FString::Printf(TEXT("tunnel label %d: its letters point (%.2f,%.2f,%.2f), %.0f degrees off the camera's up (0,1)"), I, Up.X, Up.Y, Up.Z, UpOff(Up)); }
+				}
+			}
+			if (!Problem.IsEmpty() && !bLast) { return false; }
+			if (!Problem.IsEmpty()) { Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs()); }
+			Report(TEXT("labels.yaw"), Problem.IsEmpty(), Problem.IsEmpty() ? FString::Printf(TEXT("%d label(s) turned to the camera at yaw 90 (cavern %d, tunnel %d)"), Checked, Caverns ? Caverns->GetLabelCount() : 0, Tunnels ? Tunnels->GetLabelCount() : 0) : Problem);
+			return true;
+		}, 0.2f, 4.f);
+		Runner.Do(TEXT("labels.yaw done"), [T]() { FrameCamera((T->CavernACm + T->CavernBCm) * 0.5, 0.2f); }, 0.3f);
+
 		// ---- the floor-shape brush (D6b): the DISTRICT tab's Underground button steps what a press does below ground (the whole floor, then a
 		// shape 1, 2 and 3 floors tall); the district brush then drags a rectangle on the floor and transmits a PaintDistrict order with the height.
 		Runner.Do(TEXT("shape.setup"), []()
@@ -1336,6 +1792,18 @@ namespace
 				PC->BeginDistrictPaint(FName("Homes"));
 				FrameCamera((T->CavernACm + T->CavernBCm) * 0.5, 0.2f);
 			}, 0.9f);
+			// UI polish P5: with the brush armed and the pointer on the floor, the first shape on floor -1 says what it changes (and that a shape breathes
+			// the floor's air); once that shape has landed, the second drag on the same floor does not say it again.
+			const TSharedRef<FPress> HintHover = PushPress(TEXT("shape.hint hover"), [T](FVector2D& OutPos) { return LocateWorld(T->CavernACm)(OutPos); }, /*bPress*/ false);
+			PushCheck(TEXT("shape.hint"), HintHover, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const FString Hint = PC ? PC->GetHintText().ToString() : FString();
+				if (!Hint.Contains(TEXT("First shape on floor -1"))) { return FString::Printf(TEXT("the first drag's hint does not say 'First shape on floor -1': %s"), *Hint.Left(160)); }
+				if (!Hint.Contains(TEXT("commutes will now walk"))) { return FString(TEXT("the first-shape hint does not say what changes")); }
+				return Hint.Contains(TEXT("A shape breathes its floor's air.")) ? FString() : FString(TEXT("the shape hint does not say that a shape breathes the floor's air"));
+			}, 3.f);
+
 			const TSharedRef<FPress> Drag = PushDrag(TEXT("shape.drag"),
 				[T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->CavernACm)(OutPos); },
 				[T](FVector2D& OutPos) { return LocateWorld(T->CavernBCm)(OutPos); });
@@ -1351,6 +1819,36 @@ namespace
 				bShapeOrder |= PC->GetConfirmText().ToString().Contains(TEXT("a Homes shape"));
 				return bShapeOrder ? FString() : FString(TEXT("no PaintDistrict order for a one-floor shape was transmitted"));
 			}, 2.f, 0.3f, true);
+			// The second drag on the same floor: once the first shape has landed (its order lags 45 sim-s, so 8x until it does), the hint no longer
+			// carries "First shape".
+			const TSharedRef<float> ShapeSpeedBefore = MakeShared<float>(1.f);
+			Runner.Do(TEXT("shape.land"), [ShapeSpeedBefore]() { *ShapeSpeedBefore = ClockSpeed(); if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(8.f); } }, 0.2f);
+			Runner.Push(TEXT("shape.landed"), [ShapeSpeedBefore](double, bool bLast)
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				bool bShape = false;
+				if (Sim) { for (const FRHDistrict& D : Sim->GetDistricts()) { bShape |= D.IsDeep() && D.Level == -1; } }
+				if (!bShape && !bLast) { return false; }
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(*ShapeSpeedBefore > 0.f ? *ShapeSpeedBefore : 1.f); }
+				Report(TEXT("shape.landed"), bShape, bShape ? FString(TEXT("the first shape's order landed")) : FString(TEXT("the PaintDistrict order did not land")));
+				return true;
+			}, 0.2f, 40.f);
+			// (Two cells off the first shape, on ground it does not hold: over the shape itself the tip is the refusal "already part of ...".)
+			const TSharedRef<FPress> HintAgain = PushPress(TEXT("shape.again.hint hover"), [T](FVector2D& OutPos) { return LocateWorld(T->CavernBCm + FVector(0.0, 2000.0, 0.0))(OutPos); }, /*bPress*/ false);
+			PushCheck(TEXT("shape.again.hint"), HintAgain, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim) { return FString(TEXT("no player controller or sim")); }
+				bool bShape = false;
+				for (const FRHDistrict& D : Sim->GetDistricts()) { bShape |= D.IsDeep() && D.Level == -1; }
+				if (!bShape) { return FString(TEXT("the first shape has not landed yet")); }
+				const FString Hint = PC->GetHintText().ToString();
+				if (Hint.Contains(TEXT("First shape"))) { return FString::Printf(TEXT("the second drag still says 'First shape': %s"), *Hint.Left(160)); }
+	if (!Hint.StartsWith(TEXT("DISTRICT Homes SHAPE, floor -1"))) { return FString::Printf(TEXT("the second drag's hint is not a shape tip: %s"), *Hint.Left(160)); }
+				return Hint.Contains(TEXT("A shape breathes its floor's air.")) ? FString() : FString::Printf(TEXT("the second drag's hint lost its air line: %s"), *Hint.Left(160));
+			}, 25.f);
+
 			Runner.Do(TEXT("shape.done"), []()
 			{
 				if (ARHPlayerController* PC = GetPC())
@@ -1540,6 +2038,9 @@ namespace
 			PushSettle(0.5f);
 			PushSweep(TEXT("sweep.section"));
 
+			// UI polish P8: the floors' labels sit in the band between the strip and the column, apart, and legible.
+			Runner.Do(TEXT("section.labels"), []() { CheckSectionLabels(TEXT("section.labels")); }, 0.2f);
+
 			const TSharedRef<FPress> Row = PushPress(TEXT("section.row"), LocateFloorRow(-3));
 			PushCheck(TEXT("section.row"), Row, [Focus]() { return Focus() == -3 ? FString() : FString::Printf(TEXT("the focus is %d, not -3"), Focus()); }, 1.f);
 
@@ -1641,6 +2142,18 @@ namespace
 				if (!Section() || Section()->GetOverlayRefreshes() <= *Refreshes) { return FString(TEXT("the section's layers did not draw")); }
 				return (Traffic && Traffic->IsSurfaceHidden()) ? FString() : FString(TEXT("the surface traffic layers are showing in the section"));
 			}, 2.f);
+			// UI polish P4: with the legend up, it and the shaft strip do not cover each other. UI polish P8: the lift and arrow labels TRAFFIC adds are
+			// still inside the free band, apart, and legible (the frame fits again when TRAFFIC turns on).
+			Runner.Push(TEXT("layout.legend"), [](double, bool bLast)
+			{
+				FString Problem = LegendStripProblem();
+				if (!Problem.IsEmpty() && !bLast) { return false; }
+				if (!Problem.IsEmpty()) { Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs()); }
+				Report(TEXT("layout.legend"), Problem.IsEmpty(), Problem.IsEmpty() ? FString(TEXT("the TRAFFIC legend and the shaft strip do not intersect")) : Problem);
+				return true;
+			}, 0.2f, 4.f);
+			Runner.Do(TEXT("section.labels traffic"), []() { CheckSectionLabels(TEXT("section.labels.traffic")); }, 0.2f);
+
 			// D6d: the tram band. The cut is moved to the line's floor and row (the section's own setters), the overlay refreshes at 2 Hz, and the
 			// band has cells in the slab; the capsules of the floor view are hidden while the section is on (D8 R1).
 			Runner.Do(TEXT("section.tram focus"), [T]()
@@ -1656,7 +2169,9 @@ namespace
 			{
 				UWorld* W = FindGameWorld();
 				const URHTramVisualizerSubsystem* Trams = W ? W->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
-				const bool bBand = Section() && Section()->GetTramBandCells() > 0 && Section()->GetTramBandLines() == 1 && Section()->GetLegendText().Contains(TEXT("tram line"));
+				// UI polish P4: the legend is one sentence now and names only a line the cut does not show; the full text (its tooltip) still names this one.
+					const bool bBand = Section() && Section()->GetTramBandCells() > 0 && Section()->GetTramBandLines() == 1 && Section()->GetLegendFullText().Contains(TEXT("tram line"))
+						&& !Section()->GetLegendText().Contains(TEXT("tram line 1")) && Section()->GetLegendText().Len() < Section()->GetLegendFullText().Len();
 				const bool bHidden = Trams && Trams->GetShownCapsules() == 0;
 				if (!(bBand && bHidden) && !bLast) { return false; }
 				Report(TEXT("section.tram"), bBand && bHidden, FString::Printf(TEXT("the tram band has %d cell(s) on %d line(s) in the slab and is in the legend; the floor view's capsules are hidden (%d shown)"),
@@ -1714,6 +2229,31 @@ namespace
 			}, 1.f);
 			Runner.Do(TEXT("section.done"), []() { if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); } }, 0.2f);
 		}
+
+		// ---- the deck's contrast (UI polish P2): with a second shaft sunk, so the shaft card's "Next shaft" shows beside "Fit a lift car", every
+		// visible deck button must be readable: its fill against its text.
+		Runner.Do(TEXT("contrast.setup"), []()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			FString Why;
+			if (Sim->GetShaftCount() < 2)
+			{
+				const FVector Head = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), FIntPoint(8, 0));
+				int32 Id = INDEX_NONE;
+				Sim->Debug_PlaceInstant(FName("Pylon"), Head, 0);
+				Sim->Debug_SinkShaftAt(Head, 2, Id, Why);
+			}
+			Report(TEXT("contrast.setup"), Sim->GetShaftCount() >= 2, FString::Printf(TEXT("%d shaft(s) (%s)"), Sim->GetShaftCount(), *Why));
+		}, 1.0f);
+		Runner.Do(TEXT("deck.contrast"), []() { CheckDeckContrast(TEXT("deck.contrast")); }, 0.2f);
 
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()

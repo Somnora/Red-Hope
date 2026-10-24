@@ -3,6 +3,7 @@
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHMarsTerrain.h"
 #include "RHPlayerController.h"
+#include "RHLabelTurn.h"
 #include "RHSimWorldSubsystem.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -85,11 +86,6 @@ namespace
 		}
 	}
 
-	FRotator GrowthLabelRotation()
-	{
-		return FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator();
-	}
-
 	// An outline of a rectangle on a plane: four strips.
 	void GrowthOutline(FGrowthAcc& Acc, double X0, double Y0, double X1, double Y1, float Width, float Z)
 	{
@@ -161,6 +157,18 @@ void URHGrowthVisualizerSubsystem::ClearLabels()
 	Labels.Reset();
 }
 
+void URHGrowthVisualizerSubsystem::TurnLabels(int32 Quarter)
+{
+	LabelQuarter = Quarter;
+	for (TWeakObjectPtr<UTextRenderComponent>& L : Labels)
+	{
+		if (UTextRenderComponent* T = L.Get())
+		{
+			T->SetWorldRotation(RHLabelTurn::FlatRotation(Quarter));
+		}
+	}
+}
+
 UTextRenderComponent* URHGrowthVisualizerSubsystem::MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize)
 {
 	if (!Holder)
@@ -176,7 +184,8 @@ UTextRenderComponent* URHGrowthVisualizerSubsystem::MakeLabel(const FString& Tex
 	Label->SetHorizontalAlignment(EHTA_Center);
 	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Tint * 0.35f + FLinearColor(0.65f, 0.65f, 0.65f)).ToFColor(true));
-	Label->SetWorldLocationAndRotation(AtCm, GrowthLabelRotation());
+	LabelQuarter = RHLabelTurn::CameraQuarter(GetWorld());
+	Label->SetWorldLocationAndRotation(AtCm, RHLabelTurn::FlatRotation(LabelQuarter));
 	return Label;
 }
 
@@ -337,6 +346,11 @@ void URHGrowthVisualizerSubsystem::Tick(float DeltaTime)
 		return;
 	}
 	if (Holder && Holder->IsHidden()) { Holder->SetActorHiddenInGame(false); }
+	// UI polish P6: the labels turn with the camera, a quarter at a time, in place.
+	if (Holder && RHLabelTurn::CameraQuarter(World) != LabelQuarter)
+	{
+		TurnLabels(RHLabelTurn::CameraQuarter(World));
+	}
 	const int32 Level = PC ? PC->GetActiveLevel() : 0;
 	// The redraw key: the project list's version, the viewed floor (and how far it is carved: a ghost sits at its end),
 	// and every project's step along.

@@ -37,12 +37,70 @@ namespace
 	constexpr double LabelSizeCm = 300.0;
 	constexpr double ArrowMaxLenCm = 1800.0;
 	constexpr double LabelGapCm = 300.0;
+	// UI polish P8: the robots' and the trams' labels (170 cm before) are as tall as a floor's label: a frame wide enough for the lifts' labels
+	// drew them under 9 px.
+	constexpr float OverlayLabelSizeCm = 220.f;
 
 	uint32 MixU32(uint32 H, uint32 V) { return HashCombineFast(H, V); }
 
 	FString Grouped(int64 N)
 	{
 		return FText::AsNumber(N).ToString();
+	}
+
+	// UI polish P8: a floor label's size. 300 cm, but never more than 75% of the floor pitch, so the text boxes of two neighbouring floors cannot
+	// touch whatever the floor height is. (The design said 55%; a label's box measured 1.02 x its size on screen, so at the 400 cm pitch 300 cm
+	// leaves a quarter of the pitch between boxes, and 55% only made 20 floors' labels a third smaller than they were.)
+	double FloorLabelSizeCm(double FloorHeightCm)
+	{
+		return FMath::Min(LabelSizeCm, 0.75 * FloorHeightCm);
+	}
+
+	// The text of a floor's label ("SURF", or "-3 . 230 cells", warm, and under TRAFFIC "out - in"). The same string places the label and measures
+	// the room it needs. bWorstFlows puts the busiest figures on every floor, for the rock card that is built once.
+	FString FloorLabelText(const URHSimWorldSubsystem& Sim, int32 L, bool bOverlay, const TMap<int32, FIntPoint>& Flows, bool bWorstFlows)
+	{
+		FString Text;
+		if (L == 0)
+		{
+			Text = TEXT("SURF");
+		}
+		else
+		{
+			const int32 Cells = Sim.GetFloorCarvedCells(L);
+			Text = FString::Printf(TEXT("%d · %s cells"), L, *Grouped(Cells));
+			if (Sim.GetFloorWarmth(L) > 0.0) { Text += TEXT(" · warm"); }
+		}
+		if (bOverlay)
+		{
+			if (bWorstFlows)
+			{
+				Text += TEXT("  |  out 99,999 · in 99,999");
+			}
+			else if (const FIntPoint* F = Flows.Find(L))
+			{
+				if (F->X > 0 || F->Y > 0) { Text += FString::Printf(TEXT("  |  out %s · in %s"), *Grouped(F->X), *Grouped(F->Y)); }
+			}
+		}
+		return Text;
+	}
+
+	// A lift's label under TRAFFIC; the same text places it and measures it. R7: D6e's served capacity is not built, so the denominator is the
+	// nominal places and the label says so.
+	FString ShaftLabelText(const URHSimWorldSubsystem& Sim, const FRHShaft& Sh)
+	{
+		if (Sim.GetLiftCars(Sh.Id) > 0)
+		{
+			const int64 Load = Sim.GetShaftPeopleLoad(Sh.Id) + Sim.GetShaftCargoLoad(Sh.Id);
+			const int64 Cap = FMath::Max<int64>(1, Sim.GetShaftCapacityPlaces(Sh.Id));
+			return FString::Printf(TEXT("Shaft %d · %s / %s places (nominal) · wait %d s · %s commuters a sol"), Sh.Id, *Grouped(Load), *Grouped(Cap), Sim.GetTransitWaitSec(Sh.Id), *Grouped(Sim.GetCommuteShaftPeople(Sh.Id)));
+		}
+		return FString::Printf(TEXT("Shaft %d · hoist"), Sh.Id);
+	}
+
+	FString TramLabelText(int32 LineId, int32 Riders, int32 WaitSec)
+	{
+		return FString::Printf(TEXT("Tram %d · %s commuters a sol · wait %d s"), LineId, *Grouped(Riders), WaitSec);
 	}
 
 	// The category colours of a block (a building seen as a box): a hint of what it is, not a texture.
@@ -631,6 +689,11 @@ void URHSectionVisualizerSubsystem::Tick(float DeltaTime)
 	{
 		bLabelsOverlay = bTraffic;
 		PlaceLabels(*Sim);
+		// UI polish P8: TRAFFIC adds the arrows' room and the lift labels to what the frame must hold, so it is fitted again.
+		if (ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController()))
+		{
+			PC->RefitSectionToLabels();
+		}
 	}
 	if (bTraffic)
 	{
@@ -993,10 +1056,16 @@ void URHSectionVisualizerSubsystem::BuildShared(const URHSimWorldSubsystem& Sim,
 	const double BackBoundary = ((double)(PlaneRow + Rows) - 0.5) * CellCm;
 	// The backdrop: one dark rock card a row behind the last drawn row, closing every floor's slab.
 	{
-		const double ACentre = (double)(AlongMin + AlongMax) * 0.5 * CellCm;
-		const double AWidth = (double)(AlongMax - AlongMin + 1) * CellCm + 2000.0;
-		const double Height = -Bottom + 160.0;
-		AddBox(Out, RockBackdrop, BackBoundary + 150.0, ACentre, -Height * 0.5 + 40.0, 300.0, AWidth, Height);
+		// UI polish P8 (d): the card reaches under the whole label column, whatever TRAFFIC adds to it (a long label used to cross the card's edge
+		// onto the bright sand). 10 m past the extent at least, as before; the right side is as before.
+		double LeftRoom = 0.0, RightRoom = 0.0;
+		ComputeLabelRoomCm(Sim, Axis, PlaneRow, /*bOverlay*/ true, /*bWorstFlows*/ true, LeftRoom, RightRoom);
+		const double EdgeL = ((double)AlongMin + 0.5) * CellCm, EdgeR = ((double)AlongMax - 0.5) * CellCm;
+		const double ALo = EdgeL - FMath::Max(2000.0, LeftRoom + 500.0), AHi = EdgeR + 2000.0;
+		// The card stands rows behind the cut and the camera looks down a little, so it is drawn higher than the cut's own floors (about 1.2 floors
+		// at a 3-row slab): the deepest labels would be drawn on the sky. It reaches 1000 cm lower, so they stand on it.
+		const double Height = -Bottom + 160.0 + 1000.0;
+		AddBox(Out, RockBackdrop, BackBoundary + 150.0, (ALo + AHi) * 0.5, -Height * 0.5 + 40.0, 300.0, AHi - ALo, Height);
 	}
 	// The shafts in the slab: four pale posts and a back panel, a full column from the head to the depth, and the car slots.
 	for (const FRHShaft& Sh : Sim.GetShafts())
@@ -1080,36 +1149,130 @@ void URHSectionVisualizerSubsystem::PlaceLabels(const URHSimWorldSubsystem& Sim)
 	const double LabelA = EdgeA - (bLabelsOverlay ? (ArrowMaxLenCm + LabelGapCm + 500.0) : LabelGapCm);
 	const double LabelD = ((double)PlaneRow - 0.5) * CellCm;
 	const TMap<int32, FIntPoint>& Flows = FlowSums;
+	const float Size = (float)FloorLabelSizeCm(FloorH); // UI polish P8: 300 cm, within 75% of the floor pitch
 	int32 Used = 0;
 	for (int32 L = 0; L >= -DeepestSeen; --L)
 	{
-		FString Text;
+		const FString Text = FloorLabelText(Sim, L, bLabelsOverlay, Flows, /*bWorstFlows*/ false);
+		FLinearColor Colour(0.80f, 0.88f, 0.92f); // UI polish P8: brighter than 0.62/0.72/0.76, which sank into the rock card at small sizes
 		if (L == 0)
 		{
-			Text = TEXT("SURF");
+			// SURF stands above the rock card, on the crust and the sky: dark letters there (the pale ones read as a ghost on tan).
+			Colour = FLinearColor(0.16f, 0.12f, 0.08f);
 		}
-		else
-		{
-			const int32 Cells = Sim.GetFloorCarvedCells(L);
-			Text = FString::Printf(TEXT("%d · %s cells"), L, *Grouped(Cells));
-			if (Sim.GetFloorWarmth(L) > 0.0) { Text += TEXT(" · warm"); }
-		}
-		if (bLabelsOverlay)
-		{
-			if (const FIntPoint* F = Flows.Find(L))
-			{
-				if (F->X > 0 || F->Y > 0) { Text += FString::Printf(TEXT("  |  out %s · in %s"), *Grouped(F->X), *Grouped(F->Y)); }
-			}
-		}
-		FLinearColor Colour(0.62f, 0.72f, 0.76f);
-		if (L == Focus) { Colour = FLinearColor(0.35f, 1.0f, 0.88f); }
+		if (L == Focus) { Colour = L == 0 ? FLinearColor(0.0f, 0.42f, 0.38f) : FLinearColor(0.35f, 1.0f, 0.88f); }
 		else if (L < 0 && Sim.GetFloorWarmth(L) > 0.0) { Colour = FLinearColor(0.98f, 0.76f, 0.34f); }
 		const FVector2D Dd = DirDepth(Axis), Da = DirAlong(Axis);
 		const double Z = (double)L * FloorH + 160.0;
 		const FVector At(Origin.X + Dd.X * LabelD + Da.X * LabelA, Origin.Y + Dd.Y * LabelD + Da.Y * LabelA, Z);
-		TextAt(FloorLabels, Used++, Text, Colour, At, (float)LabelSizeCm, /*bRightAligned*/ true);
+		TextAt(FloorLabels, Used++, Text, Colour, At, Size, /*bRightAligned*/ true);
 	}
 	HideTexts(FloorLabels, Used);
+}
+
+float URHSectionVisualizerSubsystem::MeasureWidthCm(const FString& Text, float SizeCm)
+{
+	if (!MeasureText)
+	{
+		// Never registered or drawn: only its font metrics are read (the same ones that lay the real labels out).
+		MeasureText = NewObject<UTextRenderComponent>(this, NAME_None, RF_Transient);
+	}
+	MeasureText->SetText(FText::FromString(Text));
+	MeasureText->SetWorldSize(SizeCm);
+	return (float)MeasureText->GetTextLocalSize().Y; // local Y is the text's own horizontal axis
+}
+
+void URHSectionVisualizerSubsystem::ComputeLabelRoomCm(const URHSimWorldSubsystem& Sim, int32 InAxis, int32 InPlaneRow, bool bOverlay, bool bWorstFlows, double& OutLeftCm, double& OutRightCm)
+{
+	OutLeftCm = 0.0;
+	OutRightCm = 0.0;
+	int32 DMin = 0, DMax = 0, AMin = 0, AMax = 0;
+	if (!ComputeExtent(Sim, InAxis, DMin, DMax, AMin, AMax))
+	{
+		return;
+	}
+	// The carved extent's own edges along the plane (what PlaceLabels' EdgeA is: one cell inside AlongMin / AlongMax).
+	const double EdgeL = ((double)AMin - 0.5) * CellCm, EdgeR = ((double)AMax + 0.5) * CellCm;
+	const double FloorHeight = Sim.GetFloorHeightCm();
+	TMap<int32, FIntPoint> Flows;
+	if (bOverlay && !bWorstFlows && Sim.GetCommuteRamp() > 0.0)
+	{
+		TMap<FIntPoint, int32> Pairs;
+		SumFlows(Sim, Pairs);
+		for (const auto& P : Pairs)
+		{
+			Flows.FindOrAdd(P.Key.X).X += P.Value;
+			Flows.FindOrAdd(P.Key.Y).Y += P.Value;
+		}
+	}
+	// The floor labels, right-aligned at LabelA: they reach left of it by their own width.
+	const double LabelA = EdgeL - (bOverlay ? (ArrowMaxLenCm + LabelGapCm + 500.0) : LabelGapCm);
+	const float FloorSize = (float)FloorLabelSizeCm(FloorHeight);
+	double Leftmost = EdgeL, Rightmost = EdgeR;
+	for (int32 L = 0; L >= -Sim.GetShaftDepth(); --L)
+	{
+		Leftmost = FMath::Min(Leftmost, LabelA - (double)MeasureWidthCm(FloorLabelText(Sim, L, bOverlay, Flows, bWorstFlows), FloorSize));
+	}
+	if (bOverlay)
+	{
+		// The lift labels and the tram labels are centred on their column or line (RefreshOverlay's own placing).
+		const FVector Head0 = Sim.GetShaftHeadCm();
+		const FVector2D Da = DirAlong(InAxis);
+		for (const FRHShaft& Sh : Sim.GetShafts())
+		{
+			if (Sh.Depth < 1 || !InSlabRow(DepthOf(InAxis, Sh.Column) - InPlaneRow, SlabRows())) { continue; }
+			const double ACm = (Sh.HeadCm.X - Head0.X) * Da.X + (Sh.HeadCm.Y - Head0.Y) * Da.Y;
+			const double Half = 0.5 * (double)MeasureWidthCm(ShaftLabelText(Sim, Sh), 260.f);
+			Leftmost = FMath::Min(Leftmost, ACm - Half);
+			Rightmost = FMath::Max(Rightmost, ACm + Half);
+		}
+		for (const FRHTramLine& Line : Sim.GetTramLines())
+		{
+			const int32 Len = URHSimWorldSubsystem::GetTunnelChainLength(Line.StopA, Line.StopB);
+			int32 Drawn = 0;
+			FIntPoint MidDrawn = FIntPoint::ZeroValue;
+			for (int32 i = 0; i < Len; ++i)
+			{
+				const FIntPoint P = URHSimWorldSubsystem::GetTunnelChainPoint(Line.StopA, Line.StopB, i);
+				if (!InSlabRow(DepthOf(InAxis, P) - InPlaneRow, SlabRows())) { continue; }
+				if (Drawn == 0 || i <= Len / 2) { MidDrawn = P; }
+				++Drawn;
+			}
+			if (Drawn > 0)
+			{
+				const double ACm = (double)AlongOf(InAxis, MidDrawn) * CellCm;
+				const double Half = 0.5 * (double)MeasureWidthCm(TramLabelText(Line.Id, Sim.GetTramPeople(Line.Id), Line.WaitSec), OverlayLabelSizeCm);
+				Leftmost = FMath::Min(Leftmost, ACm - Half);
+				Rightmost = FMath::Max(Rightmost, ACm + Half);
+			}
+		}
+	}
+	OutLeftCm = EdgeL - Leftmost;
+	OutRightCm = Rightmost - EdgeR;
+}
+
+void URHSectionVisualizerSubsystem::GetLabelBoxes(TArray<FLabelBox>& Out) const
+{
+	const auto Add = [&Out](const TArray<TWeakObjectPtr<UTextRenderComponent>>& Pool, bool bFloor)
+	{
+		for (const TWeakObjectPtr<UTextRenderComponent>& Weak : Pool)
+		{
+			const UTextRenderComponent* T = Weak.Get();
+			if (!T || !T->IsVisible())
+			{
+				continue;
+			}
+			FLabelBox Box;
+			Box.Text = T->Text.ToString();
+			// The box as it is drawn (vertical alignment included), from the text's own metrics: the component's cached Bounds only move with its transform.
+			Box.World = T->CalcBounds(FTransform(T->GetRenderMatrix())).GetBox();
+			Box.SizeCm = T->WorldSize;
+			Box.bFloorLabel = bFloor;
+			Out.Add(Box);
+		}
+	};
+	Add(FloorLabels, true);
+	Add(OverlayLabels, false);
 }
 
 void URHSectionVisualizerSubsystem::UpdateCars(const URHSimWorldSubsystem& Sim, float DeltaTime)
@@ -1156,6 +1319,7 @@ void URHSectionVisualizerSubsystem::ClearOverlay()
 	TramBandLines = 0;
 	FlowSums.Reset();
 	LegendText.Reset();
+	LegendFullText.Reset();
 	if (const UWorld* World = GetWorld())
 	{
 		if (const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>()) { PlaceLabels(*Sim); }
@@ -1201,15 +1365,11 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 			{
 				AddBox(Lists, C, DCm - 25.0, BarA, -Fill * 0.5, 90.0, 140.0, Fill);
 			}
-			// R7: D6e's served capacity is not built, so the denominator is the nominal places and the label says so.
-			Text = FString::Printf(TEXT("Shaft %d · %s / %s places (nominal) · wait %d s · %s commuters a sol"), Sh.Id, *Grouped(Load), *Grouped(Cap), Wait, *Grouped(Sim.GetCommuteShaftPeople(Sh.Id)));
 			Hash = MixU32(Hash, (uint32)Load); Hash = MixU32(Hash, (uint32)Cap); Hash = MixU32(Hash, (uint32)Wait);
 		}
-		else
-		{
-			Text = FString::Printf(TEXT("Shaft %d · hoist"), Sh.Id);
-		}
-		Labels.Add({ Text, FLinearColor(0.80f, 0.90f, 0.94f), FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, 640.0), 260.f, false });
+		Text = ShaftLabelText(Sim, Sh);
+		// UI polish P8: the lift's label floats above the surface, on the sky: dark letters (the pale ones were light on tan).
+		Labels.Add({ Text, FLinearColor(0.14f, 0.11f, 0.08f), FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, 640.0), 260.f, false });
 	}
 
 	// Deep commute flows: per floor, the commuters leaving it (home) and arriving at it (work). Placed at the plane's left edge: a pair's
@@ -1275,7 +1435,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 				{
 					const double ACm = (double)AlongOf(Axis, Mid) * CellCm;
 					Labels.Add({ FString::Printf(TEXT("%d robot%s"), Count, Count == 1 ? TEXT("") : TEXT("s")), FLinearColor(1.0f, 0.70f, 0.30f),
-						FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, (double)T.Level * FloorH + 330.0), 170.f, false });
+						FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, (double)T.Level * FloorH + 330.0), OverlayLabelSizeCm, false });
 					Hash = MixU32(Hash, (uint32)(T.Id * 131 + Count));
 				}
 			}
@@ -1286,7 +1446,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 	// lift's bar) and labelled with the commuters a sol; a line outside the slab shows only in the legend.
 	TramBandCells = 0;
 	TramBandLines = 0;
-	FString TramNote;
+	FString TramNote, TramNotDrawn;
 	for (const FRHTramLine& L : Sim.GetTramLines())
 	{
 		const float W = (float)L.WaitSec / (float)FMath::Max(1, Sim.GetMaxWaitSec());
@@ -1309,18 +1469,26 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 		if (Drawn > 0)
 		{
 			const double ACm = (double)AlongOf(Axis, MidDrawn) * CellCm;
-			Labels.Add({ FString::Printf(TEXT("Tram %d · %s commuters a sol · wait %d s"), L.Id, *Grouped(Riders), L.WaitSec), C,
-				FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, Z + 330.0), 170.f, false });
+			Labels.Add({ TramLabelText(L.Id, Riders, L.WaitSec), C,
+				FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, Z + 330.0), OverlayLabelSizeCm, false });
 		}
 		TramNote += FString::Printf(TEXT(" Line %d on %d: %s a sol, wait %d s."), L.Id, L.Level, *Grouped(Riders), L.WaitSec);
+		if (Drawn == 0)
+		{
+			// UI polish P4: a line the cut does not show has no label of its own, so the short legend names it; a drawn line carries its own.
+			TramNotDrawn += FString::Printf(TEXT(" Not in this cut: tram line %d on %d, %s a sol, wait %d s."), L.Id, L.Level, *Grouped(Riders), L.WaitSec);
+		}
 		Hash = MixU32(Hash, (uint32)(L.Id * 977 + L.WaitSec * 31 + Riders));
 		Hash = MixU32(Hash, (uint32)Drawn);
 	}
 	Hash = MixU32(Hash, (uint32)Sim.GetTramLines().Num());
 
-	LegendText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places (nominal); teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s%s"),
+	LegendFullText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places (nominal); teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s%s"),
 		bRamp ? TEXT("Lift labels count commuters a sol.") : TEXT("No commuting yet."),
 		Sim.GetTramLines().Num() > 0 ? *(FString(TEXT(" A tram line is a band along its tunnel, coloured by its wait.")) + TramNote) : TEXT("")); // Gate-D placeholder copy (rows N4, N5)
+	// UI polish P4: the legend itself is one sentence (the full text above is its tooltip) so it stays short as tram lines are laid. Gate-D placeholder copy (row S4).
+	LegendText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places, teal, amber, red as the wait grows; each floor's arrows are commuters out (amber) and in (teal)%s.%s"),
+		bRamp ? TEXT("") : TEXT(" - none commuting yet"), *TramNotDrawn);
 	Hash = MixU32(Hash, (uint32)Labels.Num());
 	Hash = MixU32(Hash, bRamp ? 1u : 0u);
 	bOverlayShown = true;

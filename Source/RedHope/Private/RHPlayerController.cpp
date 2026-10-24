@@ -693,6 +693,8 @@ void ARHPlayerController::Tick(float DeltaTime)
 					}
 				}
 				FString Tip;
+				// UI polish P5: no shape holds a point on this floor yet (a const read of the districts, cached by their version).
+				const bool bFirstShape = bOk && !FloorHasDistrictShape(*Sim, ActiveLevel);
 				if (bOk)
 				{
 					const FRHDistrict* Joined = Pre.JoinId != 0 ? Sim->FindDistrict(Pre.JoinId) : nullptr;
@@ -700,6 +702,11 @@ void ARHPlayerController::Tick(float DeltaTime)
 						DistrictShapeFloors == 1 ? TEXT("") : TEXT("s"), ActiveLevel, DistrictShapeFloors == 1 ? TEXT("") : *FString::Printf(TEXT(" to %d"), ActiveLevel - DistrictShapeFloors + 1),
 						W, H, W * 10.0, H * 10.0, Pre.CellsInRect, Pre.CellsInRect == 1 ? TEXT("") : TEXT("s"), Pre.CellsNew, Pre.CellsCarved,
 						Joined ? *FString::Printf(TEXT("joins %s"), *Joined->Name) : TEXT("founds a new district"));
+					// UI polish P5, Gate-D placeholder copy (rows S2, S3): the first shape on a floor changes how that floor's people commute, and a
+					// shape breathes its floor's air; neither was said anywhere before the order was sent.
+					FString ShapeNote = bFirstShape ? FString::Printf(TEXT("First shape on floor %d: its commutes will now walk through the digs and tunnels. "), ActiveLevel) : FString();
+					ShapeNote += TEXT("A shape breathes its floor's air.");
+					Tip += TEXT("\n") + ShapeNote;
 					Tip += bDistrictDragging ? FString::Printf(TEXT("\nrelease to transmit (Δ %.0f sim-s), right-click to cancel"), Sim->GetOrderLagSeconds())
 						: FString(TEXT("\nclick on the rock or the dug floor and drag to paint a rectangle (up to 32 x 32 cells of 10 m); rock may be painted, to zone a cavern before it is dug. Right-click to finish"));
 				}
@@ -723,7 +730,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 						Cmd.LocationB = ToCm;
 						Sim->EnqueueCommand(Cmd);
 						URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
-						SetConfirm(FString::Printf(TEXT("District order transmitted: a %s shape, %lld x %lld cells on %d floor%s"), *KindName, W, H, DistrictShapeFloors, DistrictShapeFloors == 1 ? TEXT("") : TEXT("s")), FLinearColor(0.2f, 0.9f, 1.f));
+						// UI polish P5 (row S3): the floor's first shape says what it changed.
+						const FString FirstNote = bFirstShape ? FString::Printf(TEXT(" (floor %d's commutes now walk its digs)"), ActiveLevel) : FString();
+						SetConfirm(FString::Printf(TEXT("District order transmitted: a %s shape, %lld x %lld cells on %d floor%s%s"), *KindName, W, H, DistrictShapeFloors, DistrictShapeFloors == 1 ? TEXT("") : TEXT("s"), *FirstNote), FLinearColor(0.2f, 0.9f, 1.f));
 					}
 					else
 					{
@@ -2867,6 +2876,44 @@ void ARHPlayerController::PushSection()
 	}
 }
 
+bool ARHPlayerController::FloorHasDistrictShape(const URHSimWorldSubsystem& Sim, int32 Level)
+{
+	if (ShapeCacheVersion != Sim.GetDistrictsVersion() || ShapeCacheLevel != Level)
+	{
+		ShapeCacheVersion = Sim.GetDistrictsVersion();
+		ShapeCacheLevel = Level;
+		bShapeCacheHas = false;
+		for (const FRHDistrict& D : Sim.GetDistricts())
+		{
+			if (!D.IsDeep())
+			{
+				continue;
+			}
+			for (const FIntVector& P : D.Deep)
+			{
+				if (P.Z == Level)
+				{
+					bShapeCacheHas = true;
+					break;
+				}
+			}
+			if (bShapeCacheHas)
+			{
+				break;
+			}
+		}
+	}
+	return bShapeCacheHas;
+}
+
+void ARHPlayerController::RefitSectionToLabels()
+{
+	if (bSectionOn)
+	{
+		FrameSection(true);
+	}
+}
+
 void ARHPlayerController::FrameSection(bool bRefit)
 {
 	UWorld* World = GetWorld();
@@ -2881,30 +2928,47 @@ void ARHPlayerController::FrameSection(bool bRefit)
 	{
 		return;
 	}
-	// The focus sits on the cut face, at the middle of the carved extent along the plane: the width the zoom fits is the cut's own.
+	// The focus sits on the cut face. UI polish P8: the slab is framed together with the labels that hang off it (the floor labels at its left,
+	// under TRAFFIC the arrows' room and a lift label past its right) into the FREE BAND of the window, between the shaft strip and the right
+	// column, and centred in it (before, the slab was centred on the screen and a fixed six cells were left for labels, which put the floors'
+	// labels under the strip and the last lift's label under the column).
 	const FVector Origin = Sim->GetShaftHeadCm();
 	const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(SectionAxis), Da = URHSectionVisualizerSubsystem::DirAlong(SectionAxis);
 	const double DCm = ((double)SectionPlaneRow - 0.5) * 1000.0;
-	// The view stays centred on the dig; the floor labels and flow arrows left of it (PlaceLabels, RefreshOverlay) get six cells of room on
-	// each side in the fitted width, so a small dig is not pushed under the deck's right column.
-	constexpr int32 LabelRoomCells = 6;
-	const double ACm = (double)(AMin + AMax) * 0.5 * 1000.0;
+	double LeftRoomCm = 0.0, RightRoomCm = 0.0;
+	if (URHSectionVisualizerSubsystem* Section = World->GetSubsystem<URHSectionVisualizerSubsystem>())
+	{
+		Section->ComputeLabelRoomCm(*Sim, SectionAxis, SectionPlaneRow, IsTrafficOverlayOn(), /*bWorstFlows*/ false, LeftRoomCm, RightRoomCm);
+	}
+	const double ContentLoCm = ((double)AMin - 0.5) * 1000.0 - LeftRoomCm, ContentHiCm = ((double)AMax + 0.5) * 1000.0 + RightRoomCm;
+	float BandLeft = 0.14f, BandRight = 0.26f;
+	if (Deck.IsValid())
+	{
+		Deck->GetFreeBand(BandLeft, BandRight);
+	}
+	int32 ViewX = 16, ViewY = 9;
+	GetViewportSize(ViewX, ViewY);
+	const float BandWidth = FMath::Max(1.f - BandLeft - BandRight, 0.3f); // a window too narrow for any band still gets a third of it
+	float WidthCm = Cam->GetFrameWidthCm();
+	if (bRefit)
+	{
+		// R2 (c): the zoom that fits the content into the band, plus 5%, and at least the whole bored stack's height (through the viewport's
+		// aspect) and 120 m, so a small dig is not framed from a few metres away.
+		const float Aspect = ViewY > 0 ? (float)ViewX / (float)ViewY : 16.f / 9.f;
+		const float StackCm = (float)(Sim->GetShaftDepth() + 1) * (float)Sim->GetFloorHeightCm();
+		WidthCm = FMath::Max3((float)(ContentHiCm - ContentLoCm) * 1.05f / BandWidth, StackCm * 1.1f * Aspect, 12000.f);
+	}
+	// The band's middle is (BandLeft - BandRight) / 2 of the frame's width right of the screen's middle; the content's middle goes there.
+	const double ACm = 0.5 * (ContentLoCm + ContentHiCm) - 0.5 * (double)(BandLeft - BandRight) * (double)WidthCm;
 	const FVector2D Focus(Origin.X + Dd.X * DCm + Da.X * ACm, Origin.Y + Dd.Y * DCm + Da.Y * ACm);
 	if (bRefit)
 	{
-		// R2 (c): the zoom that fits the carved extent along the plane, plus 10%, into the frame's width - and at least the whole bored stack's
-		// height (through the viewport's aspect) and 120 m, so a small dig is not framed from a few metres away.
-		int32 ViewX = 16, ViewY = 9;
-		GetViewportSize(ViewX, ViewY);
-		const float Aspect = ViewY > 0 ? (float)ViewX / (float)ViewY : 16.f / 9.f;
-		const float StackCm = (float)(Sim->GetShaftDepth() + 1) * (float)Sim->GetFloorHeightCm();
-		const float WidthCm = FMath::Max3((float)(AMax - AMin + 1 + 2 * LabelRoomCells) * 1000.f * 1.1f, StackCm * 1.1f * Aspect, 12000.f);
 		FVector2D F; float Zoom = 0.f, Offset = 0.f, Yaw = 0.f;
 		Cam->GetCameraPose(F, Zoom, Offset, Yaw);
 		const float FitZoom = Cam->SolveZoomForWidthCm(WidthCm);
 		Cam->SetCameraPose(Focus, FitZoom, Offset, Yaw);
-		UE_LOG(LogRedHope, Display, TEXT("[Section] framed: axis %d, plane row %d, extent depth %d..%d along %d..%d, focus (%.0f, %.0f) floor %d, zoom %.3f for %.0f m, yaw %.0f"),
-			SectionAxis, SectionPlaneRow, DMin, DMax, AMin, AMax, Focus.X, Focus.Y, SectionFocus, FitZoom, WidthCm / 100.f, Yaw);
+		UE_LOG(LogRedHope, Display, TEXT("[Section] framed: axis %d, plane row %d, extent depth %d..%d along %d..%d, labels %.0f m left and %.0f m right, band %.2f..%.2f, focus (%.0f, %.0f) floor %d, zoom %.3f for %.0f m, yaw %.0f"),
+			SectionAxis, SectionPlaneRow, DMin, DMax, AMin, AMax, LeftRoomCm / 100.0, RightRoomCm / 100.0, BandLeft, 1.f - BandRight, Focus.X, Focus.Y, SectionFocus, FitZoom, WidthCm / 100.f, Yaw);
 	}
 	else
 	{

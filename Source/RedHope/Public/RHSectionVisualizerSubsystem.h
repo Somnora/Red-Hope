@@ -87,12 +87,29 @@ public:
 	int32 GetTramBandCells() const { return TramBandCells; }
 	int32 GetTramBandLines() const { return TramBandLines; }
 	bool IsSimplified() const { return bSimplified; }
-	// What TRAFFIC's legend adds below ground (empty while the section is off).
+	// What TRAFFIC's legend adds below ground (empty while the section is off): one sentence, and the tram lines the cut does not show (a
+	// drawn line carries its own label). UI polish P4; the long text, which names every line, is the legend's tooltip.
 	const FString& GetLegendText() const { return LegendText; }
+	const FString& GetLegendFullText() const { return LegendFullText; }
 	// Per-floor flows as the overlay last summed them: commuters leaving a floor (their home) and arriving (their work).
 	void GetFlowSums(TMap<int32, FIntPoint>& Out) const { Out = FlowSums; }
 	// The overlay's last people sums per (home floor, work floor) as an ordered list, for the click test's and the bench's checks.
 	static void SumFlows(const URHSimWorldSubsystem& Sim, TMap<FIntPoint, int32>& OutPairs);
+
+	// UI polish P8: how far the labels reach past the carved extent along the plane, in cm: LeftCm past its left edge (the floor labels, and the
+	// arrows' room under TRAFFIC), RightCm past its right edge (a lift label on the last shaft). The controller frames the slab AND these into the
+	// free band between the shaft strip and the right column. bOverlay is TRAFFIC; bWorstFlows assumes the busiest "out - in" figures on every
+	// floor (the rock card is built once and must cover them). Measures text with the engine's own font; reads only const sim accessors.
+	void ComputeLabelRoomCm(const URHSimWorldSubsystem& Sim, int32 InAxis, int32 InPlaneRow, bool bOverlay, bool bWorstFlows, double& OutLeftCm, double& OutRightCm);
+	// One drawn label for the click test's section.labels: its text, its box in the world, its size and whether it is a floor label.
+	struct FLabelBox
+	{
+		FString Text;
+		FBox World = FBox(ForceInit);
+		float SizeCm = 0.f;
+		bool bFloorLabel = false;
+	};
+	void GetLabelBoxes(TArray<FLabelBox>& Out) const;
 
 private:
 	struct FFloorCache
@@ -116,6 +133,7 @@ private:
 	// touches a few components, not every one.
 	void ApplyPool(TMap<uint32, TWeakObjectPtr<UInstancedStaticMeshComponent>>& Pool, TMap<uint32, uint32>& Sigs, const TMap<uint32, TArray<FTransform>>& Lists);
 	void ApplyAll();
+	float MeasureWidthCm(const FString& Text, float SizeCm);
 	UTextRenderComponent* TextAt(TArray<TWeakObjectPtr<UTextRenderComponent>>& Pool, int32 Index, const FString& Text, const FLinearColor& Colour, const FVector& AtCm, float Size, bool bRightAligned);
 	void HideTexts(TArray<TWeakObjectPtr<UTextRenderComponent>>& Pool, int32 FromIndex);
 	void Hide();
@@ -151,6 +169,8 @@ private:
 	// What each source last drew, by colour; ApplyAll merges them into the one palette.
 	TMap<uint32, TArray<FTransform>> StaticLists, OverlayLists, SurfaceLists;
 	static constexpr uint32 PaletteSize = 512;
+	// UI polish P8: the unplaced text component that measures a label's width (never registered, never drawn).
+	UPROPERTY() TObjectPtr<UTextRenderComponent> MeasureText;
 	TArray<TWeakObjectPtr<UTextRenderComponent>> FloorLabels;
 	TArray<TWeakObjectPtr<UTextRenderComponent>> OverlayLabels;
 	TWeakObjectPtr<UStaticMesh> Cube;
@@ -195,6 +215,7 @@ private:
 	uint32 OverlayHash = 0;
 	TMap<int32, FIntPoint> FlowSums;           // floor -> (out, in)
 	FString LegendText;
+	FString LegendFullText;
 	double NextSurfaceS = 0.0;
 	uint32 SurfaceHash = 0;
 	bool bLabelsOverlay = false;

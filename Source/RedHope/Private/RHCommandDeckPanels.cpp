@@ -28,6 +28,7 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
+#include "Types/ISlateMetaData.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Views/STableRow.h"
@@ -219,6 +220,144 @@ TSharedRef<SWidget> SRHCommandDeck::ExpandToggle(bool* bFlag)
 				.ColorAndOpacity(D::TextDim)
 			]
 		];
+}
+
+// UI polish P3: the accordion. The five foldable panels of the right column fold each other: opening one shuts the rest and scrolls it to the
+// top of the column. ExpandToggle (above) stays for the roster inside the Crew panel, which is not one of them.
+const bool* SRHCommandDeck::FoldFlag(EFold Which) const
+{
+	switch (Which)
+	{
+	case EFold::Politics: return &bPoliticsExpanded;
+	case EFold::Crew: return &bCrewExpanded;
+	case EFold::City: return &bCityExpanded;
+	case EFold::Fleet: return &bFleetExpanded;
+	default: return &bPowerExpanded;
+	}
+}
+
+TSharedRef<SWidget> SRHCommandDeck::FoldToggle(EFold Which, FName Tag)
+{
+	const bool* Flag = FoldFlag(Which);
+	return SNew(SButton)
+		.ButtonStyle(&D::FlatButtonStyle())
+		.ContentPadding(FMargin(6.f, 0.f, 0.f, 0.f))
+		.AddMetaData<FTagMetaData>(FTagMetaData(Tag))
+		.OnClicked_Lambda([this, Which, Flag]() { SetFoldOpen(Which, !*Flag); return FReply::Handled(); })
+		[
+			SNew(SBox).WidthOverride(14.f).HeightOverride(14.f)
+			[
+				SNew(SImage)
+				.Image_Lambda([Flag]() { return D::Icon(*Flag ? FName("collapse") : FName("expand")); })
+				.ColorAndOpacity(D::TextDim)
+			]
+		];
+}
+
+TSharedRef<SWidget> SRHCommandDeck::FoldAnchor(EFold Which, const TSharedRef<SWidget>& Panel)
+{
+	FoldAnchors[(int32)Which] = Panel;
+	return Panel;
+}
+
+void SRHCommandDeck::SetFoldOpen(EFold Which, bool bOpen)
+{
+	*FoldFlag(Which) = bOpen;
+	if (!bOpen)
+	{
+		return;
+	}
+	for (int32 I = 0; I < (int32)EFold::Count; ++I)
+	{
+		if ((EFold)I != Which)
+		{
+			*FoldFlag((EFold)I) = false;
+		}
+	}
+	// The scroll waits two frames, so the fold is laid out first (the offset is worked out against the new heights).
+	FoldScrollTarget = Which;
+	FoldScrollFromFrame = GFrameCounter + 2;
+	FoldScrollUntil = FPlatformTime::Seconds() + 1.0;
+}
+
+void SRHCommandDeck::ApplyFoldScroll()
+{
+	if (FoldScrollTarget == EFold::Count || GFrameCounter < FoldScrollFromFrame)
+	{
+		return;
+	}
+	if (FPlatformTime::Seconds() > FoldScrollUntil)
+	{
+		FoldScrollTarget = EFold::Count;
+		return;
+	}
+	// Asked every frame for a second: the City panel's body fills over its first refresh and the column grows under the request, and a
+	// request that has nothing left to move is a no-op. The panel's header goes to the top of the column.
+	const TSharedPtr<SWidget> Anchor = FoldAnchors[(int32)FoldScrollTarget].Pin();
+	if (Anchor.IsValid() && RightScroll.IsValid())
+	{
+		RightScroll->ScrollDescendantIntoView(Anchor, /*bAnimateScroll*/ false, EDescendantScrollDestination::TopOrLeft, 0.f);
+	}
+}
+
+// UI polish P8: where the deep view may draw (see the header).
+void SRHCommandDeck::GetFreeBand(float& OutLeft01, float& OutRight01) const
+{
+	OutLeft01 = 0.14f;
+	OutRight01 = 0.26f;
+	const FGeometry Deck = GetTickSpaceGeometry();
+	const float Width = (float)Deck.GetAbsoluteSize().X;
+	if (Width < 100.f || !ShaftStripBorder.IsValid() || !RightScroll.IsValid())
+	{
+		return;
+	}
+	const FGeometry Strip = ShaftStripBorder->GetTickSpaceGeometry();
+	const FGeometry Column = RightScroll->GetTickSpaceGeometry();
+	if (Strip.GetAbsoluteSize().X < 2.f || Column.GetAbsoluteSize().X < 2.f)
+	{
+		return;
+	}
+	const float Scale = FMath::Max(Deck.Scale, KINDA_SMALL_NUMBER);
+	const float StripRight = (float)(Strip.GetAbsolutePosition().X + Strip.GetAbsoluteSize().X - Deck.GetAbsolutePosition().X);
+	const float ColumnLeft = (float)(Column.GetAbsolutePosition().X - Deck.GetAbsolutePosition().X);
+	// The strip grows by the depth slider (16 + 3 px) once the section is on, which the geometry read before it opened does not yet include;
+	// 8 px of air on each side.
+	OutLeft01 = (StripRight + (19.f + 8.f) * Scale) / Width;
+	OutRight01 = (Width - ColumnLeft + 8.f * Scale) / Width;
+}
+
+// UI polish P4: the shaft strip's place (see the header).
+void SRHCommandDeck::GetStripLayout(float& OutTopPx, int32& OutRows) const
+{
+	constexpr int32 MaxRows = 11, MinRows = 3;
+	constexpr float Gap = 8.f;
+	constexpr float BarReserve = 62.f + 44.f + 8.f; // the command bar, the zone row that may stand on it, and air
+	OutRows = MaxRows;
+	OutTopPx = 10.f;
+	const float H = (float)GetTickSpaceGeometry().GetLocalSize().Y;
+	if (H < 200.f || !ShaftStripBorder.IsValid() || !ShaftRowsBox.IsValid() || !TopLeftStack.IsValid() || !ShaftScroll.IsValid())
+	{
+		return;
+	}
+	const float RowH = ShaftRowHeight > 1.f ? ShaftRowHeight : 27.f;
+	const float Fixed = FMath::Max(0.f, (float)(ShaftStripBorder->GetDesiredSize().Y - ShaftRowsBox->GetDesiredSize().Y)); // all but the rows
+	const int32 Wanted = FMath::Clamp(FMath::CeilToInt((float)ShaftScroll->GetDesiredSize().Y / RowH - 0.05f), 1, MaxRows);
+	const float StackBottom = 10.f + (float)TopLeftStack->GetDesiredSize().Y;
+	// Centred on the edge, but no higher than 8 px under the stack and no lower than the command bar lets it.
+	const auto Place = [&](int32 Rows)
+	{
+		const float Height = Fixed + (float)Rows * RowH;
+		return FMath::Max(StackBottom + Gap, FMath::Min((H - Height) * 0.5f, H - BarReserve - Height));
+	};
+	float Top = Place(Wanted);
+	const int32 Fit = FMath::FloorToInt((H - BarReserve - Top - Fixed) / RowH);
+	const int32 Rows = FMath::Clamp(Fit, MinRows, FMath::Max(MinRows, Wanted));
+	if (Rows < Wanted)
+	{
+		Top = Place(Rows);
+	}
+	OutRows = Rows;
+	OutTopPx = Top;
 }
 
 // --- Vitals strip (top left) ---
@@ -1027,7 +1166,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			ExpandToggle(&bCrewExpanded)
+			FoldToggle(EFold::Crew, FName("RH.CrewToggle"))
 		];
 	return SNew(SBox)
 		.Visibility(this, &SRHCommandDeck::GetCrewVisibility)
@@ -1696,7 +1835,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCityPanel()
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			ExpandToggle(&bCityExpanded)
+			FoldToggle(EFold::City, FName("RH.CityToggle"))
 		];
 	return SNew(SBox)
 		.Visibility(this, &SRHCommandDeck::GetCityVisibility)
@@ -1758,7 +1897,14 @@ TSharedRef<SWidget> SRHCommandDeck::BuildTrafficLegend()
 		return W ? W->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
 	};
 	return SNew(SBox)
+		.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.TrafficLegend")))
 		.Visibility(this, &SRHCommandDeck::GetTrafficLegendVisibility)
+		// UI polish P4: in the section the prose is one sentence; the long text, with every tram line, is here.
+		.ToolTipText_Lambda([this]()
+		{
+			const URHSectionVisualizerSubsystem* Section = (PC.IsValid() && PC->IsSectionOn() && PC->GetWorld()) ? PC->GetWorld()->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
+			return Section ? Txt(Section->GetLegendFullText()) : FText::GetEmpty();
+		})
 		[
 			D::Panel(FName("structure"), Txt(TEXT("TRAFFIC")), D::Amber,
 				SNew(SVerticalBox)
@@ -1846,7 +1992,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildFleetPanel()
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			ExpandToggle(&bFleetExpanded)
+			FoldToggle(EFold::Fleet, FName("RH.FleetToggle"))
 		];
 	return D::Panel(FName("robot"), Txt(TEXT("FLEET")), D::Teal,
 		SNew(SBox).Visibility_Lambda([this]() { return bFleetExpanded ? EVisibility::Visible : EVisibility::Collapsed; })
@@ -2223,7 +2369,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			ExpandToggle(&bPoliticsExpanded)
+			FoldToggle(EFold::Politics, FName("RH.PoliticsToggle"))
 		];
 	return SNew(SBox)
 		// Shown once a neighbor exists (the whole layer is inert on a lonely Mars).
@@ -2289,7 +2435,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			ExpandToggle(&bPowerExpanded)
+			FoldToggle(EFold::Power, FName("RH.PowerFoldToggle"))
 		];
 	return D::Panel(FName("battery"), Txt(TEXT("POWER")), D::Gold,
 		SNew(SBox).Visibility_Lambda([this]() { return bPowerExpanded ? EVisibility::Visible : EVisibility::Collapsed; })

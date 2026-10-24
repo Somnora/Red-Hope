@@ -130,10 +130,29 @@ private:
 public:
 	void Debug_SetFurnishTab(bool bOn) { RowTab = bOn ? 1 : 0; }
 	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 3); }
-	// Capture/QA (RH.DeckCity): fold the City panel open or shut.
-	// Opening it also folds the Crew and Fleet panels, so the City panel fits the right column.
-	void Debug_SetCityExpanded(bool bOn) { bCityExpanded = bOn; if (bOn) { bCrewExpanded = false; bFleetExpanded = false; } }
+	// UI polish P3: the five foldable panels of the right column (Politics, Crew, City, Fleet, Power) are an accordion. Opening one folds the others
+	// and scrolls it to the top of the column; a panel that is shut folds itself alone. The state lives here, as it always did, and is not saved.
+	enum class EFold : uint8 { Politics, Crew, City, Fleet, Power, Count };
+	void SetFoldOpen(EFold Which, bool bOpen);
+	bool IsFoldOpen(EFold Which) const { return *FoldFlag(Which); }
+	// Capture/QA (RH.DeckCity): fold the City panel open or shut. Opening it is the accordion's rule: the other panels fold, and the column
+	// scrolls the City panel into view.
+	void Debug_SetCityExpanded(bool bOn) { SetFoldOpen(EFold::City, bOn); }
+	// UI polish P8: the free band between the shaft strip and the right column, as fractions (0..1) of the deck's width: the deep view frames
+	// the slab and its labels into it. Falls back to fixed fractions before the first layout.
+	void GetFreeBand(float& OutLeft01, float& OutRight01) const;
 private:
+	const bool* FoldFlag(EFold Which) const;
+	bool* FoldFlag(EFold Which) { return const_cast<bool*>(static_cast<const SRHCommandDeck*>(this)->FoldFlag(Which)); }
+	TSharedRef<SWidget> FoldToggle(EFold Which, FName Tag);
+	TSharedRef<SWidget> FoldAnchor(EFold Which, const TSharedRef<SWidget>& Panel);
+	void ApplyFoldScroll();
+	// UI polish P4: where the shaft strip stands. Centred on the left edge, unless the top-left stack (vitals, uplink queue, TRAFFIC legend)
+	// would reach it: then it sits 8 px below that stack and its floor list drops rows to stay above the command bar.
+	void GetStripLayout(float& OutTopPx, int32& OutRows) const;
+	// UI polish P2: the shaft card's fit button says only the verb; why it cannot be ordered is a line under it and its tooltip.
+	FText GetFitLiftReason() const;
+	EVisibility GetFitLiftReasonVisibility() const;
 	// Known Ground panel (director request): surveyed coverage + every
 	// discovered deposit's type/tonnage/dig status, visible while Map is on.
 	FText GetKnownGroundText() const;
@@ -339,6 +358,16 @@ private:
 	uint32 CityVersionShown = MAX_uint32;
 	TSharedPtr<class SVerticalBox> CityDistrictList;
 	TSharedPtr<class SScrollBox> RightScroll;
+	// UI polish P3: each foldable panel's root in the column, and the scroll to its header that an opening asks for (a few frames later, once
+	// the fold has been laid out, and kept up for a second while the panel's body fills).
+	TWeakPtr<SWidget> FoldAnchors[(int32)EFold::Count];
+	EFold FoldScrollTarget = EFold::Count;
+	uint64 FoldScrollFromFrame = 0;
+	double FoldScrollUntil = 0.0;
+	// UI polish P4: the top-left stack and the shaft strip, measured for the strip's place.
+	TSharedPtr<class SWidget> TopLeftStack;
+	TSharedPtr<class SWidget> ShaftStripBorder;
+	TSharedPtr<class SWidget> ShaftRowsBox;
 	// C5b: the open growth projects (rebuilt when the sim's growth or district version moves; each row's bar reads the live project).
 	uint32 CityGrowthVersionShown = MAX_uint32, CityGrowthDistrictsShown = MAX_uint32;
 	TSharedPtr<class SVerticalBox> CityGrowthList;

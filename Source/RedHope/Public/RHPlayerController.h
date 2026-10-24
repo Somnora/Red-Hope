@@ -163,6 +163,10 @@ public:
 	void SetSectionAxis(int32 Axis);
 	// Cut here (a cavern's card): enter if needed, put the plane through the box's middle row and the focus on its bottom floor.
 	bool CutSectionAtCavern(int32 CavernId);
+	// UI polish P8: TRAFFIC changes what the frame must hold (the arrows' room, the lift labels): fit the section again, if it is on.
+	void RefitSectionToLabels();
+	// The command deck, for the click test's reads of its fold state and layout.
+	const TSharedPtr<SRHCommandDeck>& GetDeck() const { return Deck; }
 	// The deck's visible feedback channels (M1-b Gate C: GEngine debug text
 	// provably hides under the Slate deck, so the deck renders these instead).
 	// Confirm = one-shot notice with expiry (order sent, save/load result);
@@ -240,7 +244,12 @@ private:
 	void TickSection(float DeltaTime);
 	void HandleSectionClick();
 	void PushSection();                          // the mirrors: colony, section visualizer, pawn
-	void FrameSection(bool bRefit);              // the camera's focus on the cut (and, with bRefit, the zoom that fits the dig)
+	void FrameSection(bool bRefit);              // the camera's focus on the cut (and, with bRefit, the zoom that fits the dig and its labels into the free band)
+	// UI polish P5: whether any district shape already holds a point on a floor (a const read of the sim's districts, cached by their version).
+	bool FloorHasDistrictShape(const class URHSimWorldSubsystem& Sim, int32 Level);
+	uint32 ShapeCacheVersion = MAX_uint32;
+	int32 ShapeCacheLevel = MAX_int32;
+	bool bShapeCacheHas = false;
 	bool SectionPickAtCursor(int32& OutLevel, FIntPoint& OutCell) const;
 	// The furnishable cell under a ground point and the slot that centres the
 	// armed piece there; false off any room.

@@ -51,6 +51,9 @@ public:
 	void SetSectionYaw(float YawDeg) { SectionYawDeg = FMath::UnwindDegrees(YawDeg); } // a quarter turn keeps the tilt
 	// The zoom at which the frame is WidthCm wide at the focus (FOV is horizontal), solved by bisection on the distance and FOV curves.
 	float SolveZoomForWidthCm(float WidthCm) const;
+	// The forward direction of the same curve (UI polish P8): the width the frame shows at the focus at a zoom, and at the zoom now set.
+	float WidthAtZoomCm(float InZoomT) const;
+	float GetFrameWidthCm() const { return WidthAtZoomCm(ZoomT); }
 
 	// Current camera distance (cm) - pan speed scales with it so a screen-width
 	// drag covers similar ground at every register.

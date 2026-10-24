@@ -1,6 +1,7 @@
 #include "RHTunnelVisualizerSubsystem.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
+#include "RHLabelTurn.h"
 #include "RHSimWorldSubsystem.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -74,11 +75,6 @@ namespace
 		}
 	};
 
-	FRotator TunnelLabelRotation()
-	{
-		return FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator();
-	}
-
 	uint32 TunnelMixInt(uint32 H, int32 V) { return FCrc::MemCrc32(&V, sizeof(V), H); }
 }
 
@@ -142,6 +138,30 @@ void URHTunnelVisualizerSubsystem::ClearLabels()
 	Labels.Reset();
 }
 
+void URHTunnelVisualizerSubsystem::TurnLabels(int32 Quarter)
+{
+	LabelQuarter = Quarter;
+	for (TWeakObjectPtr<UTextRenderComponent>& L : Labels)
+	{
+		if (UTextRenderComponent* T = L.Get())
+		{
+			T->SetWorldRotation(RHLabelTurn::FlatRotation(Quarter));
+		}
+	}
+}
+
+bool URHTunnelVisualizerSubsystem::GetLabelPose(int32 Index, FVector& OutAtCm, FVector& OutUp) const
+{
+	const UTextRenderComponent* T = Labels.IsValidIndex(Index) ? Labels[Index].Get() : nullptr;
+	if (!T)
+	{
+		return false;
+	}
+	OutAtCm = T->GetComponentLocation();
+	OutUp = T->GetUpVector();
+	return true;
+}
+
 UTextRenderComponent* URHTunnelVisualizerSubsystem::MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize)
 {
 	if (!Holder)
@@ -157,7 +177,8 @@ UTextRenderComponent* URHTunnelVisualizerSubsystem::MakeLabel(const FString& Tex
 	Label->SetHorizontalAlignment(EHTA_Center);
 	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Tint * 0.35f + FLinearColor(0.65f, 0.65f, 0.65f)).ToFColor(true));
-	Label->SetWorldLocationAndRotation(AtCm, TunnelLabelRotation());
+	LabelQuarter = RHLabelTurn::CameraQuarter(GetWorld());
+	Label->SetWorldLocationAndRotation(AtCm, RHLabelTurn::FlatRotation(LabelQuarter));
 	return Label;
 }
 
@@ -276,6 +297,11 @@ void URHTunnelVisualizerSubsystem::Tick(float DeltaTime)
 		return;
 	}
 	if (Holder && Holder->IsHidden()) { Holder->SetActorHiddenInGame(false); }
+	// UI polish P6: the labels turn with the camera, a quarter at a time, in place.
+	if (Holder && RHLabelTurn::CameraQuarter(World) != LabelQuarter)
+	{
+		TurnLabels(RHLabelTurn::CameraQuarter(World));
+	}
 	const int32 Level = PC ? PC->GetActiveLevel() : 0;
 	// The redraw key: the tunnel list's version, the floor table's (a cell carved), the viewed floor, and what decides "stalled".
 	uint32 Key = 0;

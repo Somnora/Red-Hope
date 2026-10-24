@@ -2,6 +2,7 @@
 #include "RedHope.h"
 #include "RHMarsTerrain.h"
 #include "RHPlayerController.h"
+#include "RHLabelTurn.h"
 #include "RHSimWorldSubsystem.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -68,10 +69,11 @@ namespace
 		return FVector(X, Y, RHMarsTerrain::GroundZCm(X, Y) + Lift);
 	}
 
-	// The label's rotation the colony's flat labels use: glyph face up, glyph-up toward world +X.
-	FRotator FlatLabelRotation()
+	// Where the kind word stands under a name: below it on the screen at a camera quarter (opposite to the letters' tops).
+	FVector KindLabelAt(const FVector& NameAt, float Size, int32 Quarter)
 	{
-		return FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator();
+		const FVector2D Up = RHLabelTurn::QuarterUp(Quarter);
+		return FVector(NameAt.X - Up.X * Size * 0.95, NameAt.Y - Up.Y * Size * 0.95, NameAt.Z);
 	}
 
 	// One quad across a cell edge: from (Ax, Ay) to (Bx, By), BorderWidthCm in toward (InX, InY).
@@ -190,6 +192,28 @@ void URHDistrictVisualizerSubsystem::ClearLabels(TArray<FLabel>& Labels)
 	Labels.Reset();
 }
 
+void URHDistrictVisualizerSubsystem::TurnLabelSet(TArray<FLabel>& Labels, int32 Quarter)
+{
+	for (FLabel& L : Labels)
+	{
+		if (UTextRenderComponent* T = L.Text.Get())
+		{
+			T->SetWorldRotation(RHLabelTurn::FlatRotation(Quarter));
+		}
+		if (UTextRenderComponent* T = L.Sub.Get())
+		{
+			T->SetWorldLocationAndRotation(KindLabelAt(L.At, L.Size, Quarter), RHLabelTurn::FlatRotation(Quarter));
+		}
+	}
+}
+
+void URHDistrictVisualizerSubsystem::TurnLabels(int32 Quarter)
+{
+	LabelQuarter = Quarter;
+	TurnLabelSet(SurfaceLabels, Quarter);
+	TurnLabelSet(FloorLabels, Quarter);
+}
+
 UTextRenderComponent* URHDistrictVisualizerSubsystem::MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize)
 {
 	if (!Holder)
@@ -205,7 +229,8 @@ UTextRenderComponent* URHDistrictVisualizerSubsystem::MakeLabel(const FString& T
 	Label->SetHorizontalAlignment(EHTA_Center);
 	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Tint * 0.35f + FLinearColor(0.65f, 0.65f, 0.65f)).ToFColor(true));
-	Label->SetWorldLocationAndRotation(AtCm, FlatLabelRotation());
+	LabelQuarter = RHLabelTurn::CameraQuarter(GetWorld());
+	Label->SetWorldLocationAndRotation(AtCm, RHLabelTurn::FlatRotation(LabelQuarter));
 	Label->SetVisibility(false);
 	return Label;
 }
@@ -279,8 +304,10 @@ void URHDistrictVisualizerSubsystem::RebuildSurface(const URHSimWorldSubsystem& 
 		FLabel Label;
 		Label.DistrictId = D.Id;
 		const double LabelZ = RHMarsTerrain::GroundZCm(At.X, At.Y) + FillLiftCm + LabelLiftCm;
-		Label.Text = MakeLabel(Name, KindColor(D.Kind), FVector(At.X, At.Y, LabelZ), Size);
-		Label.Sub = MakeLabel(KindWord(D.Kind).ToUpper(), KindColor(D.Kind), FVector(At.X - Size * 0.95, At.Y, LabelZ), Size * 0.5f); // glyph-up is +X: below the name is -X
+		Label.At = FVector(At.X, At.Y, LabelZ);
+		Label.Size = Size;
+		Label.Text = MakeLabel(Name, KindColor(D.Kind), Label.At, Size);
+		Label.Sub = MakeLabel(KindWord(D.Kind).ToUpper(), KindColor(D.Kind), KindLabelAt(Label.At, Size, RHLabelTurn::CameraQuarter(GetWorld())), Size * 0.5f); // below the name on the screen
 		SurfaceLabels.Add(Label);
 	}
 	Flush(SurfaceMesh, Sections);
@@ -351,14 +378,26 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 			if (!Cells.Contains(FIntPoint(C.X, C.Y - 1))) { EdgeStrip(B, X0, Y0, X1, Y0, 0, 1, Edge); }
 			if (!Cells.Contains(FIntPoint(C.X, C.Y + 1))) { EdgeStrip(B, X0, Y1, X1, Y1, 0, -1, Edge); }
 		}
-		// The name on the point nearest the middle of the group's shape, above the room labels.
+		// The name on the point nearest the middle of the group's shape, above the room labels. UI polish P7: underground, a shape's points are its
+		// painted cells, dug or not, so the name goes to the nearest point that is DUG (a name on rock sits on the sand skirt, over nothing);
+		// when none is dug yet, the nearest point as before.
 		const double MidX = 0.5 * (Lo.X + Hi.X), MidY = 0.5 * (Lo.Y + Hi.Y);
-		FIntPoint Best = G.Points[0];
-		double BestD = TNumericLimits<double>::Max();
-		for (const FIntPoint& C : G.Points)
+		const auto Nearest = [&](bool bDugOnly, FIntPoint& OutBest)
 		{
-			const double Dist = FMath::Square(C.X - MidX) + FMath::Square(C.Y - MidY);
-			if (Dist < BestD) { BestD = Dist; Best = C; }
+			double BestD = TNumericLimits<double>::Max();
+			bool bFound = false;
+			for (const FIntPoint& C : G.Points)
+			{
+				if (bDugOnly && Sim.FindFloorCell(Level, C) == INDEX_NONE) { continue; }
+				const double Dist = FMath::Square(C.X - MidX) + FMath::Square(C.Y - MidY);
+				if (Dist < BestD) { BestD = Dist; OutBest = C; bFound = true; }
+			}
+			return bFound;
+		};
+		FIntPoint Best = G.Points[0];
+		if (!(G.bShape && Nearest(true, Best)))
+		{
+			Nearest(false, Best);
 		}
 		const double WidthCm = (Hi.Y - Lo.Y + 1) * 1000.0;
 		const float Size = (float)FMath::Clamp(0.9 * WidthCm / (0.6 * FMath::Max(8, D->Name.Len())), 120.0, 320.0);
@@ -367,8 +406,10 @@ void URHDistrictVisualizerSubsystem::RebuildFloor(const URHSimWorldSubsystem& Si
 		const double LabelX = Head.X + Best.X * 1000.0, LabelY = Head.Y + Best.Y * 1000.0;
 		const bool bBestRock = G.bShape && Sim.FindFloorCell(Level, Best) == INDEX_NONE;
 		const double LabelZ = (bBestRock ? 0.0 : Z) + FloorBorderLiftCm + 12.f;
-		Label.Text = MakeLabel(D->Name, KindColor(D->Kind), FVector(LabelX, LabelY, LabelZ), Size);
-		Label.Sub = MakeLabel(KindWord(D->Kind).ToUpper(), KindColor(D->Kind), FVector(LabelX - Size * 0.95, LabelY, LabelZ), Size * 0.5f);
+		Label.At = FVector(LabelX, LabelY, LabelZ);
+		Label.Size = Size;
+		Label.Text = MakeLabel(D->Name, KindColor(D->Kind), Label.At, Size);
+		Label.Sub = MakeLabel(KindWord(D->Kind).ToUpper(), KindColor(D->Kind), KindLabelAt(Label.At, Size, RHLabelTurn::CameraQuarter(GetWorld())), Size * 0.5f);
 		FloorLabels.Add(Label);
 	}
 	Flush(FloorMesh, Sections);
@@ -457,6 +498,11 @@ void URHDistrictVisualizerSubsystem::Tick(float DeltaTime)
 		DrawnFloorCarved = Carved;
 		DrawnFloorDistrict = FloorDistrict;
 		RebuildFloor(*Sim, Level);
+	}
+	// UI polish P6: the labels turn with the camera, a quarter at a time, in place.
+	if (RHLabelTurn::CameraQuarter(World) != LabelQuarter)
+	{
+		TurnLabels(RHLabelTurn::CameraQuarter(World));
 	}
 	if (SurfaceMesh && SurfaceMesh->IsVisible() != (Level == 0)) { SurfaceMesh->SetVisibility(Level == 0, false); }
 	if (FloorMesh && FloorMesh->IsVisible() != (Level < 0)) { FloorMesh->SetVisibility(Level < 0); }

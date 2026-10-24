@@ -48,6 +48,8 @@ private:
 		int32 DistrictId = 0;
 		TWeakObjectPtr<UTextRenderComponent> Text; // the name
 		TWeakObjectPtr<UTextRenderComponent> Sub;  // the kind, smaller, below it
+		FVector At = FVector::ZeroVector;          // UI polish P6: where the name stands; the kind sits below it at the camera's quarter
+		float Size = 0.f;
 	};
 
 	void EnsureHolder();
@@ -56,6 +58,9 @@ private:
 	void ClearLabels(TArray<FLabel>& Labels);
 	UTextRenderComponent* MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize);
 	void UpdateLabels(const URHSimWorldSubsystem& Sim, int32 Level);
+	// UI polish P6: re-aims every label at a camera quarter, in place: the name turns, the kind turns and keeps below it.
+	void TurnLabels(int32 Quarter);
+	void TurnLabelSet(TArray<FLabel>& Labels, int32 Quarter);
 	void ApplyMaterials(UProceduralMeshComponent* Mesh);
 
 	UPROPERTY() TObjectPtr<AActor> Holder;
@@ -69,4 +74,5 @@ private:
 	int32 DrawnFloorCarved = -1;
 	int32 DrawnFloorDistrict = -1;
 	bool bShowAllLabels = false;
+	int32 LabelQuarter = -1;
 };

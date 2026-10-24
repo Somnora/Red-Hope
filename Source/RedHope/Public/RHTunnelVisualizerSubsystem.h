@@ -38,16 +38,23 @@ public:
 	int32 GetDrawnGhostCells() const { return DrawnGhostCells; }
 	int32 GetDrawnStripeCells() const { return DrawnStripeCells; }
 
+	// QA (the click test's labels.yaw): where each label stands and which way the tops of its letters point, in world space.
+	int32 GetLabelCount() const { return Labels.Num(); }
+	bool GetLabelPose(int32 Index, FVector& OutAtCm, FVector& OutUp) const;
+
 private:
 	void EnsureHolder();
 	void ApplyMaterials(UProceduralMeshComponent* Mesh);
 	void Rebuild(const URHSimWorldSubsystem& Sim, int32 Level);
 	void ClearLabels();
 	UTextRenderComponent* MakeLabel(const FString& Text, const FLinearColor& Tint, const FVector& AtCm, float WorldSize);
+	// UI polish P6: re-aims every label at a camera quarter, in place (no rebuild, no new component).
+	void TurnLabels(int32 Quarter);
 
 	UPROPERTY() TObjectPtr<AActor> Holder;
 	UPROPERTY() TObjectPtr<UProceduralMeshComponent> Mesh;
 	TArray<TWeakObjectPtr<UTextRenderComponent>> Labels;
+	int32 LabelQuarter = -1;
 	uint32 DrawnKey = MAX_uint32;
 	int32 DrawnGhostCells = 0;
 	int32 DrawnStripeCells = 0;
