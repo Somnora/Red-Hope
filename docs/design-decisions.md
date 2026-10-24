@@ -1428,3 +1428,55 @@ The director's ruling, option (a), on E3's failed bar: the City / Earth share ap
 "Credits earned" is not in the playtest report (the bot logs kg, not credits), so it is not tabulated. Sols with spare Struct count the bot's daily GROWTH lines with Struct free above zero.
 
 **The bar fails at the default 50%.** Rounds (3), 0 recalled and the fleet running hold; the Big Arrival does not land and the population stays 8. Why: the open-round hold falls from 100% to 50% (Struct 1,250-1,664 kg held back in the middle rounds, the yard emptied by each launch), but the 1,000 kg `GrowthReserveStructKg` stands on top of it, so Struct held almost never reaches reserve + hold + a 640 kg project (8 sols of 99). The reserve is the remaining blocker: with it at 0 or 500 (diagnostic runs, config override only, nothing changed) the Big Arrival lands (sols 77-80), but Earth's rounds then slip to 1 Q3 round in 110 sols. At a 75% share the colony grows but meets 1 round; at 25% it meets 6 rounds and does not grow (E3's result). So the share and the reserve together trade rounds for people one for one, and no point tried passes both halves of the bar. Nothing else was tuned. The levers left to the director: the Struct reserve, a smaller Q3 (T3), or a growth budget of its own.
+
+### Playtest bot builds industry by default (director, 2026-10-24)
+
+The director's ruling on the Struct study: the playtest bot plays the industry, the study's `industry=2`, whenever districts are painted, the way it already plays the life support, the living city, the outpost and the night bank. The sim is untouched (no `RedHopeSim` change, no save change, no data change); only `RHPlaytest.cpp` and `rh_playtest.sh` move.
+
+**What the study found** (commit 93646b0; 50% City / Earth share, 110 sols, the director's bar: 0 recalled, Big Arrival by sol 110, at least 3 Q3 rounds, no robot halted). The wall in the default run is one Forge: the bot's second Forge was refused, the single Forge worked the day shift at 88% of its 150 kg/sol ceiling, regolith was not the limit (the pile sat at its cap 83% of the time), Earth took 68% of the Struct made, and growth's free Struct was below zero on 91 of 99 sols.
+
+| option | pop | Big Arrival | Q3 rounds | bar |
+|---|---|---|---|---|
+| default | 8 | none | 3 | FAIL |
+| industry=2, full | 122 | sol 81 | 7 | PASS |
+| industry=2, lean | 121 | sol 81 | 8 | PASS |
+| Q3 Struct 1,500 | 108 | sol 101 | 3 | PASS, but a threshold; fails lean, under-fed |
+| reserve 500 | 113 | sol 80 | 1 | FAIL |
+| 75% share, any option | | | 1-2 | FAIL on rounds |
+
+**50% is the balanced share.** At 75% the colony grows but meets only 1-2 Q3 rounds in every option tried (industry, the smaller Q3 bill, the lower reserve); at 25% it meets the rounds and does not grow (E3's result); 50% with industry is the one point that passes both halves of the bar, on full and lean. So the share stays at 50% and the bot's default moves to the industry instead.
+
+**What changed.**
+- `RHPlaytest.cpp`, the `RH.Playtest` argument parse: `industry` defaults to 2 whenever `districts=1` is given and no `industry=` is. Explicit `industry=0` (`RH_PLAYTEST_INDUSTRY=0`, which `rh_playtest.sh` already passes through) is the opt-out and gives the E3b bot back; `industry=1` and `indforges=N` are as the study left them. Playing the industry implies reading it (`indlog`), so the INDUSTRY line a sol and the REPORT lines (Forge time, the Struct ledger, the regolith chain, each robot class's wear, and `REPORT  fleet: peak wear seen on any robot N of 100 (halts at 100)`) are in every default run and the director's "fleet running" bar item is always measured. The start line says `the player builds industry (industry=2: ...)` when it is on. Without districts nothing changes: `industry` stays 0 and `indlog` stays off.
+- `RHPlaytest.cpp`, `RH.Playtest ... roads=0` and the other opt-outs: unchanged, but a run that wants an older bot back line for line now adds `industry=0` too (said in the `rh_playtest.sh` header).
+
+**The false report, fixed.** The bot's second Forge went to a fixed spot, (24, -14) m, that the spine road (laid at sol 6) had taken by sol 12; the sim refused it at sol 12.04 ("Footprint overlaps a road"), but the bot had already written the milestone `second Forge ordered` at sol 12.00 and the REPORT said `second Forge ordered at sol 12.00`. An order is only an order until the sim answers it (it answers on its next step, through `OnCommandRejected` or by placing the site). So:
+- `RHPlaytest.cpp`, `FPlaytest::FForgeOrder`, `NoteForgeOrder`, `NoteForgeRefused`, `ForgeOrderStep`, `ForgeOrderText`: each second or third Forge order is followed from the order to the sim's answer to the finished building. The milestones are now `second Forge order accepted (...)` at the sol the site stands, `second Forge running` when it is built, or `second Forge order refused (<the sim's reason>)` with a `FORGE` line saying nothing was built and the bot does not order it again; the REPORT lines (`earth:` and `industry program:`) say `ordered at sol S, accepted at sol A, standing since sol B` or `ordered at sol S but REFUSED at sol R (<reason>): none was built`, and count placed / accepted / refused. The bot's behaviour is untouched: it still orders, and still does not retry, exactly as before (read-only bookkeeping; the sim lines of the industry runs are identical to the HEAD runs, see below).
+- The other "ordered" report lines, checked: the industry program's "excavator(s) and hauler(s) ordered on ships" had the same mistake. The cargo list asks for them, the ship's budget refuses what does not fit (sol 29.46: `AdvExcavator refused: Over budget`, `ExtraHauler refused: Over budget`; the next ship, sol 40.55, carried them), and the old REPORT counted the asks (2 and 2) as orders. It now reports `asked of the ships` against `loaded on a manifest` (2 and 2 asked, 1 and 1 loaded; the pair that was needed), counted in `LoadCargo` when the manifest accepts the item, and the `INDUSTRY cargo` line says `asking the ship for` instead of `+N`. The roads, the life-support builds, the outpost's pylons, road stretches and drill, and the Forges of `IndustryStep` are all checked with `CanPlaceBuilding` / `CanPlaceRoad` (the sim's own tests) before they are ordered, and the Cargo Rover is held back unless it fits the ship, so those lines state an order the sim had just said it would take; none was ever refused in these runs (0 REJECTED lines in the full and lean industry runs). They are left as they were.
+- Not changed (behaviour, not report): `IndSolarOwed` is still reduced when a Solar Array kit is put on the list, whether or not the ship takes it, and a refused Forge order is never retried (the order token is spent). Neither happened in these runs.
+
+**Playtests** (`RH_PLAYTEST_DISTRICTS=1 bash scripts/sim/rh_playtest.sh 110 ind_full guide full`, and `ind_lean ... lean`; 0 sim errors, 0 rejected orders). The HEAD industry=2 runs (`RH_PLAYTEST_INDUSTRY=2`, made with the unmodified binary) are the reference:
+
+| Run | Pop at 110 | Recalled | Big Arrival | Q3 rounds met | Peak robot wear | Forges | Food made / drawn (kg a sol) |
+|---|---|---|---|---|---|---|---|
+| HEAD industry=2, full | 122 | 0 | sol 81.01 | 7 | 53 | 3 | 114.9 / 75.6 |
+| **new default, full** | 122 | 0 | sol 81.01 | 7 | 53 | 3 (second standing sol 15.91, third sol 18.79) | 114.9 / 75.6 |
+| HEAD industry=2, lean | 121 | 0 | sol 81.01 | 8 | 52 | 3 | 114.7 / 75.0 |
+| **new default, lean** | 121 | 0 | sol 81.01 | 8 | 52 | 3 | 114.7 / 75.0 |
+
+The bar passes on both: 0 recalled, the Big Arrival at sol 81 (by 110), 7 and 8 Q3 rounds (at least 3), peak wear 53 and 52 (below 100), and no robot halted or out of charge (stranded at once: 0). They reproduce the study. The report fix changes no sim behaviour: `diff` of each new run against its HEAD industry=2 run shows only wording (the start line; the `Forge 2/3 ordered` milestones replaced by `order accepted` and `running`; the `INDUSTRY cargo` verb; the `earth:` and `industry program:` REPORT lines), no number in any per-sol line.
+
+**Opt-out and no-district identity.** `RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_INDUSTRY=0 ... 110 ind0_full guide full` against `Saved/baselines/e3b_full_playtest.txt`: the same 1,243 lines except the second-Forge report, which is exactly the false report (the new run has 1,244 lines):
+- removed: `sol 12.00 MILESTONE second Forge ordered (Struct held the program back 3 sols)`
+- added: `sol 12.04 FORGE   the second Forge order at (24, -14) m was REFUSED (Footprint overlaps a road): nothing was built, and the bot does not order it again`
+- added: `sol 12.04 MILESTONE second Forge order refused (Footprint overlaps a road)`
+- replaced: `REPORT  sol  12.00  second Forge ordered (...)` by `REPORT  sol  12.04  second Forge order refused (Footprint overlaps a road)`
+- replaced: the end of the `REPORT  earth:` line, `second Forge ordered at sol 12.00`, by `second Forge ordered at sol 12.00 but REFUSED at sol 12.04 (Footprint overlaps a road): none was built`
+
+A run without districts (50 sols, guide, full) is byte-identical to the same run on the unmodified HEAD binary (`cmp` clean, 301 lines; the second Forge never triggers there, Struct held the program back 2 sols).
+
+The new playtest baseline is `Saved/baselines/ind_full_playtest.txt` (the full run above, 1,732 lines).
+
+**Battery** (`rh_battery.sh 10`): 57 runs, 0 suites not green, every run `errors=0 completed=1`. `diff_battery.py Saved/baselines/battery_post_e3b Saved/RHBattery`: 0 differing sim lines in all 57 logs (not even a timing digit moved). As expected: the bot is not in the battery and nothing in `RedHopeSim` changed.
+
+**Known gaps.** Power is short for 52% (full) and 51% (lean) of the run with machines shed 15-17%, against 47% and 17% in the default E3b run (the two extra Forges draw 800 W each by day). It is outside the bar (no robot is stranded) and is not tuned here. The balance numbers are the study's, not tuned play.

@@ -51,7 +51,7 @@
 # Ice_A, with a relay pylon where the grid's discs do not meet), orders a Cargo Rover when freight tasks are open on the road,
 # plans the garden for the Big Arrival's wave once it is in sight (free beds or Hope's streak), and fills ships with Solar Array
 # kits instead of Spare Parts Crates. ROADS and LIVING lines log it; the REPORT block lists roads, rovers, freight and the end
-# books. RH_PLAYTEST_ROADS=0 switches all of it off and gives the C6a bot back exactly (line-identical).
+# books. RH_PLAYTEST_ROADS=0 switches all of it off and gives the C6a bot back exactly (line-identical, with RH_PLAYTEST_INDUSTRY=0 too).
 #
 # Outposts (W1, distant ice): with roads on, the bot also opens the first outpost deposit (Ice_C, 720 m out): it surveys the hint the
 # guide gives once Ice_A and Ice_B are found, lays a pylon chain 70 m apart beside the road line, the road in stretches of at most 120 m
@@ -72,13 +72,17 @@
 # lost + in flight + returned by the load), with a REPORT line and an Error line per failure:
 #   RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_LIFTS=1 bash scripts/sim/rh_playtest.sh 40 d4_lifts guide full
 #
-# Struct study (opt-in, never part of a byte-identical comparison): RH_PLAYTEST_INDLOG=1 only READS the industry - an INDUSTRY line a sol
-# (Forge time by state, robot time by task, the regolith chain, the Struct books) and REPORT lines - and changes nothing else.
-# RH_PLAYTEST_INDUSTRY=1 also PLAYS it: when Struct has held the program back the player builds a second and a third Forge (on a clear
-# spot near the dig, with the solar arrays they draw) and sends for the excavators and haulers to feed them (implies the log);
-# RH_PLAYTEST_INDUSTRY=2 adds an Electrolyzer or two while city growth reports itself short of oxygen. RH_PLAYTEST_INDFORGES=<n> caps
-# the Forges (the first included; default 3):
-#   RH_PLAYTEST_DISTRICTS=1 RH_PLAYTEST_INDUSTRY=1 bash scripts/sim/rh_playtest.sh 110 ind_full guide full
+# Industry (the Struct study; the DEFAULT with districts since the director's ruling of 2026-10-24): when Struct has held the program back the
+# player builds a second and a third Forge (on a clear spot near the dig, with the solar arrays they draw), sends for the excavators and haulers to
+# feed them, and adds an Electrolyzer or two while city growth reports itself short of oxygen (industry=2). An INDUSTRY line a sol and REPORT lines
+# (Forge time by state, the Struct ledger, the fleet's wear and its peak) log it, and the REPORT says what the sim answered: a Forge order is
+# "accepted" once its site stands, "refused" if the sim rejected it. Runs without districts are unchanged.
+#   RH_PLAYTEST_INDUSTRY=0   the bot without industry: the E3b bot, line for line (apart from the lines that now report a refused order as
+#                            refused); give it together with the other opt-outs (ROADS=0, NOGROWTH=1 ...) to get their older bots back
+#   RH_PLAYTEST_INDUSTRY=1   the Forges and the fleet, without the Electrolyzers
+#   RH_PLAYTEST_INDFORGES=<n> caps the Forges (the first included; default 3)
+#   RH_PLAYTEST_INDLOG=1     only READS the industry, on a run that plays none (the log and REPORT lines, nothing else changes)
+#   RH_PLAYTEST_DISTRICTS=1 bash scripts/sim/rh_playtest.sh 110 ind_full guide full
 # A smaller bill from Earth is a command-line override, in memory, for the run only (nothing in the CSVs moves):
 #   RH_PLAYTEST_EXTRA="-RHQuotaBill=Q3:Struct=1500"        (and e.g. -RHConfig=GrowthReserveStructKg=500,GrowthCityShareDefault=0.75)
 #

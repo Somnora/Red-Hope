@@ -51,6 +51,12 @@
 // itself in stretches of at most 120 m a sol over covered nodes, the Ice Drill once its pylon stands, and a Cargo Rover on the ship
 // after the first pylon - every order under the C6c Struct rule, so it waits when Struct is short and says so. OUTPOST lines log it.
 //
+// Industry (the Struct study; the director made it the default with districts on 2026-10-24, industry=0 / RH_PLAYTEST_INDUSTRY=0 gives the E3b
+// bot back line for line): when Struct has held the program back the player builds a second and a third Forge on clear spots kept off the roads,
+// with the solar kits they draw and the excavators and haulers to feed them, and (industry=2) Electrolyzers while city growth reports itself short of
+// oxygen. An INDUSTRY line a sol and REPORT lines (Forge time, the Struct ledger, the fleet's wear) log it. The report says what the sim answered: a
+// Forge order is "accepted" once its site stands and "refused" if the sim rejected it, whatever the bot asked.
+//
 // Given a save slot, it saves the colony at the sol limit first: that is how
 // the hand-play checkpoints are made (scripts/unreal/rh_checkpoints.sh). The
 // director then loads a real game in progress, played by this bot up to that
@@ -154,13 +160,26 @@ namespace
 		TArray<TPair<FRHCommand, FString>> HeldOrders;
 		TArray<int32> GrowthPaused;
 		int32 StructShortSols = 0, LastStructShortSol = -1;
-		double SecondForgeSol = -1.0;
-		// Struct study (2026-10-24; opt-in, never part of a byte-identical run). indlog=1 (RH_PLAYTEST_INDLOG=1) only READS the industry onto
-		// an INDUSTRY line a sol and REPORT lines: Forge time by state, robot time by task, the regolith chain, the Struct books. industry=1
-		// (RH_PLAYTEST_INDUSTRY=1) also PLAYS it, as a player who sees Struct short would: more Forges (and the power they draw), and more
-		// excavators and haulers to feed them.
+		// A Forge order is only an order until the sim answers it: on its next step it refuses a bad footprint through OnCommandRejected, or it
+		// places the site. The second and third Forge are followed from the order to the answer to the finished building, so the report says
+		// what happened and not what was asked (the E3 bot's second Forge went to a spot the spine road had taken, was refused at sol 12.04,
+		// and the report still said "ordered").
+		struct FForgeOrder
+		{
+			int32 Number = 2;                   // its place among the colony's Forges: second, third
+			FVector2D SpotM = FVector2D::ZeroVector;
+			int32 ShortSols = 0;                // the sols Struct had held the program back when it was ordered
+			double OrderSol = -1.0, AcceptedSol = -1.0, RefusedSol = -1.0, BuiltSol = -1.0;
+			FString Why;                        // the sim's reason, when it refused
+		};
+		TArray<FForgeOrder> ForgeOrders;
+		// Struct study (2026-10-24), made the default with districts on (director, 2026-10-24: the Struct study's industry=2). indlog=1
+		// (RH_PLAYTEST_INDLOG=1) only READS the industry onto an INDUSTRY line a sol and REPORT lines: Forge time by state, robot time by task,
+		// the regolith chain, the Struct books, the fleet's wear. industry=1 also PLAYS it, as a player who sees Struct short would: more Forges
+		// (and the power they draw), and more excavators and haulers to feed them. industry=0 (RH_PLAYTEST_INDUSTRY=0) gives the bot back
+		// without it, line for line (the E3b bot).
 		bool bIndLog = false, bIndustry = false;
-		int32 IndLevel = 0;                                           // industry=1: Forges, their power and the fleet to feed them; industry=2: and Electrolyzers while growth is short of oxygen
+		int32 IndLevel = 0;                                           // industry=1: Forges, their power and the fleet to feed them; industry=2 (the default with districts): and Electrolyzers while growth is short of oxygen
 		int32 IndForgeCap = 3;                                        // indforges=N: the most Forges the program builds (the first included)
 		int32 IndExtraElectrolyzers = 0, IndLastExtraElectrolyzerSol = -100;
 		struct FIndSet
@@ -180,10 +199,10 @@ namespace
 		int64 IndMadeG = 0, IndUsedG = 0, IndOutG = 0;                // the Struct ledger at the last sol line
 		double IndRegolithDugKg = 0.0, IndPeakWear = 0.0;
 		int32 IndMaxForges = 0, IndStructSpareSols = 0, IndSols = 0;
-		// industry=1: what the program has ordered.
-		double IndForgeOrderSol[2] = { -1.0, -1.0 };                  // the second and third Forge
-		int32 IndForgeOrders = 0, IndForgeTries = 0, IndShortAtLastForge = 0, IndSolarOwed = 0; // the kits the Forges are owed (apart from the life support's own count, whose gate they must not trip)
-		int32 IndExcavatorsOrdered = 0, IndHaulersOrdered = 0;
+		// industry=1: what the program has asked for (the Forge orders are in ForgeOrders) and what the ships took of it.
+		int32 IndForgeTries = 0, IndShortAtLastForge = 0, IndSolarOwed = 0; // the kits the Forges are owed (apart from the life support's own count, whose gate they must not trip)
+		int32 IndExcavatorsAsked = 0, IndHaulersAsked = 0;            // put on a cargo list
+		int32 IndExcavatorsLoaded = 0, IndHaulersLoaded = 0;          // and accepted onto the manifest (the budget refuses what does not fit)
 		double LastLoadW = 0.0;                   // the last whole sol's mean machine load (W)
 		double BankEmptySec = 0.0, LightsDarkSec = 0.0; // sim-seconds the bank stood empty / the grow lights were dark, over the run
 		int32 NightBanksKept = 0, RoverDeferrals = 0, NightBankShips = 0; // packs the rule asked for beyond the owed ones, rovers held to the next ship, ships it spoke on
@@ -266,6 +285,79 @@ namespace
 			P.Milestones.Emplace(What, SolNow(C));
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f MILESTONE %s"), SolNow(C), *What);
 		}
+	}
+
+	// --- Forge orders: what the sim answered (see FPlaytest::FForgeOrder). Reading only: nothing here writes sim state. ---
+	const TCHAR* ForgeOrdinal(int32 Number)
+	{
+		return Number == 2 ? TEXT("second") : TEXT("third");
+	}
+
+	void NoteForgeOrder(FPlaytest& P, const URHSimClockSubsystem* C, int32 Number, const FVector2D& SpotM)
+	{
+		FPlaytest::FForgeOrder& O = P.ForgeOrders.AddDefaulted_GetRef();
+		O.Number = Number;
+		O.SpotM = SpotM;
+		O.ShortSols = P.StructShortSols;
+		O.OrderSol = SolNow(C);
+	}
+
+	// The sim refused a Forge: if the bot is waiting on that one, say what it meant (the REJECTED line has the sim's words).
+	void NoteForgeRefused(FPlaytest& P, const URHSimClockSubsystem* C, const FVector& LocationCm, const FString& Why)
+	{
+		for (FPlaytest::FForgeOrder& O : P.ForgeOrders)
+		{
+			if (O.AcceptedSol >= 0.0 || O.RefusedSol >= 0.0 || FVector2D::Distance(FVector2D(LocationCm.X, LocationCm.Y), O.SpotM * 100.0) > 50.0) { continue; }
+			O.RefusedSol = SolNow(C);
+			O.Why = Why;
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f FORGE   the %s Forge order at (%.0f, %.0f) m was REFUSED (%s): nothing was built, and the bot does not order it again"),
+				SolNow(C), ForgeOrdinal(O.Number), O.SpotM.X, O.SpotM.Y, *Why);
+			Mark(P, C, FString::Printf(TEXT("%s Forge order refused (%s)"), ForgeOrdinal(O.Number), *Why));
+			return;
+		}
+	}
+
+	// Each tick: an order the sim answered by placing the site is accepted, and built once the site stands.
+	void ForgeOrderStep(FPlaytest& P, const URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
+	{
+		for (FPlaytest::FForgeOrder& O : P.ForgeOrders)
+		{
+			if (O.RefusedSol >= 0.0 || O.BuiltSol >= 0.0) { continue; }
+			const FVector2D AtCm = O.SpotM * 100.0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName != FName("Forge") || B.Level != 0 || FVector2D::Distance(FVector2D(B.LocationCm.X, B.LocationCm.Y), AtCm) > 50.0) { continue; }
+				if (O.AcceptedSol < 0.0)
+				{
+					O.AcceptedSol = SolNow(C);
+					Mark(P, C, FString::Printf(TEXT("%s Forge order accepted (Struct held the program back %d sols)"), ForgeOrdinal(O.Number), O.ShortSols));
+				}
+				if (!B.bUnderConstruction)
+				{
+					O.BuiltSol = SolNow(C);
+					Mark(P, C, FString::Printf(TEXT("%s Forge running"), ForgeOrdinal(O.Number)));
+				}
+				break;
+			}
+		}
+	}
+
+	// What became of an order, for the REPORT lines.
+	FString ForgeOrderText(const FPlaytest::FForgeOrder& O)
+	{
+		if (O.RefusedSol >= 0.0)
+		{
+			return FString::Printf(TEXT("ordered at sol %.2f but REFUSED at sol %.2f (%s): none was built"), O.OrderSol, O.RefusedSol, *O.Why);
+		}
+		if (O.BuiltSol >= 0.0)
+		{
+			return FString::Printf(TEXT("ordered at sol %.2f, accepted at sol %.2f, standing since sol %.2f"), O.OrderSol, O.AcceptedSol, O.BuiltSol);
+		}
+		if (O.AcceptedSol >= 0.0)
+		{
+			return FString::Printf(TEXT("ordered at sol %.2f, accepted at sol %.2f, still under construction at the end"), O.OrderSol, O.AcceptedSol);
+		}
+		return FString::Printf(TEXT("ordered at sol %.2f, not answered by the end (held for a launch, or ordered too late)"), O.OrderSol);
 	}
 
 	// E3 (R5): while a launch waits to load, an order whose bill includes Struct waits too (life support is never held).
@@ -400,6 +492,12 @@ namespace
 			if (!OverAwardBudget(Sim, Item, Err) && Sim->AddManifestItem(Item, Err))
 			{
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f CARGO   %s"), SolNow(C), *Item.ToString());
+				if (GPlaytest.IsValid())
+				{
+					// The Forges' fleet (industry=1): counted when the manifest takes it, not when the list asks.
+					GPlaytest->IndExcavatorsLoaded += Item == FName("AdvExcavator") ? 1 : 0;
+					GPlaytest->IndHaulersLoaded += Item == FName("ExtraHauler") ? 1 : 0;
+				}
 			}
 			else
 			{
@@ -473,11 +571,13 @@ namespace
 		}
 		if (P.CrewLandedSol >= 0.0)
 		{
+			FString SecondForge = TEXT("not needed"); // what became of the order, not of the decision to place it
+			for (const FPlaytest::FForgeOrder& Fo : P.ForgeOrders) { if (Fo.Number == 2) { SecondForge = ForgeOrderText(Fo); } }
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  earth: %d launch(es) waited (%.1f sols in all, %d distinct reasons), %d short; sent to Earth Struct %.0f, Oxygen %.0f, Hydrogen %.0f, Water %.0f kg; Struct held the program back %d sol(s); second Forge %s"),
 				P.LaunchesWaited, P.LaunchWaitSols, P.LaunchWaits, P.LaunchShorts,
 				Sim ? Sim->GetLedgerLifetimeG(FName("Struct"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0, Sim ? Sim->GetLedgerLifetimeG(FName("Oxygen"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0,
 				Sim ? Sim->GetLedgerLifetimeG(FName("Hydrogen"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0, Sim ? Sim->GetLedgerLifetimeG(FName("Water"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0,
-				P.StructShortSols, P.SecondForgeSol >= 0.0 ? *FString::Printf(TEXT("ordered at sol %.2f"), P.SecondForgeSol) : TEXT("not needed"));
+				P.StructShortSols, *SecondForge);
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, immigrated %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
 				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.SettlersSeen, P.MaxUnsupported, P.MinHope, P.MaxHope,
 				P.MinFoodSols < 1.0e8 ? P.MinFoodSols : 0.0);
@@ -598,7 +698,7 @@ namespace
 		}
 		if (P.bIndLog && Sim)
 		{
-			IndustryReport(P, Sim, World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr); // Struct study (opt-in): before P goes
+			IndustryReport(P, Sim, World ? World->GetSubsystem<URHAgentSubsystem>() : nullptr); // Struct study: before P goes
 		}
 		if (Sim)
 		{
@@ -1531,7 +1631,7 @@ namespace
 		}
 	}
 
-	// --- Struct study (indlog=1 / industry=1; opt-in, never part of a byte-identical run) ---
+	// --- Struct study (indlog=1 / industry=1|2; industry=2 is the default with districts, industry=0 the opt-out; indlog alone is opt-in) ---
 	int32 IndRobotClass(FName RobotClass)
 	{
 		return RobotClass == FName("Excavator") ? 0 : RobotClass == FName("Hauler") ? 1 : RobotClass == FName("Fabricator") ? 2 : 3;
@@ -1691,8 +1791,17 @@ namespace
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  fleet: peak wear seen on any robot %.0f of 100 (halts at 100); robots out of charge at once (max) %d"), P.IndPeakWear, P.RunStrandedMax);
 		if (P.bIndustry)
 		{
-			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry program: %d Forge order(s) accepted (second at sol %.2f, third at sol %.2f), %d placement search(es) found no spot; %d excavator(s) and %d hauler(s) ordered on ships"),
-				P.IndForgeOrders, P.IndForgeOrderSol[0], P.IndForgeOrderSol[1], P.IndForgeTries, P.IndExcavatorsOrdered, P.IndHaulersOrdered);
+			// What the sim answered, not what the bot asked: a refused Forge is counted as refused, and a ship's budget refuses what does not fit.
+			int32 Accepted = 0, Refused = 0;
+			FString Orders;
+			for (const FPlaytest::FForgeOrder& Fo : P.ForgeOrders)
+			{
+				Accepted += Fo.AcceptedSol >= 0.0 ? 1 : 0;
+				Refused += Fo.RefusedSol >= 0.0 ? 1 : 0;
+				Orders += FString::Printf(TEXT("%s%s Forge %s"), Orders.IsEmpty() ? TEXT("") : TEXT("; "), ForgeOrdinal(Fo.Number), *ForgeOrderText(Fo));
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  industry program: %d Forge order(s) placed, %d accepted, %d refused (%s); %d placement search(es) found no spot; %d excavator(s) and %d hauler(s) asked of the ships, %d and %d loaded on a manifest"),
+				P.ForgeOrders.Num(), Accepted, Refused, Orders.IsEmpty() ? TEXT("none") : *Orders, P.IndForgeTries, P.IndExcavatorsAsked, P.IndHaulersAsked, P.IndExcavatorsLoaded, P.IndHaulersLoaded);
 		}
 	}
 
@@ -1755,11 +1864,8 @@ namespace
 		const FName Tok(*FString::Printf(TEXT("forge-ind-%d"), Want));
 		if (P.Issued.Contains(Tok)) { return; }
 		P.Issued.Add(Tok);
-		P.IndForgeOrderSol[Want - 2] = SolNow(C);
 		P.IndShortAtLastForge = P.StructShortSols;
-		++P.IndForgeOrders;
-		if (Forges == 1) { P.SecondForgeSol = SolNow(C); }
-		Mark(P, C, FString::Printf(TEXT("Forge %d ordered (Struct held the program back %d sols)"), Want, P.StructShortSols));
+		NoteForgeOrder(P, C, Want, Spot); // the sim answers on its next step: ForgeOrderStep marks the acceptance, the rejection hook a refusal
 		if (Forges == 1)
 		{
 			FRHCommand Dig; Dig.Verb = FName("Dig"); Dig.Target = FName("Regolith_B");
@@ -1789,9 +1895,9 @@ namespace
 		for (int32 i = 0; i < Excavators; ++i) { List.Add(FName("AdvExcavator")); }
 		for (int32 i = 0; i < Haulers; ++i) { List.Add(FName("ExtraHauler")); }
 		P.IndSolarOwed -= Kits;
-		P.IndExcavatorsOrdered += Excavators;
-		P.IndHaulersOrdered += Haulers;
-		UE_LOG(LogRedHope, Display, TEXT("[Playtest] INDUSTRY cargo: %d Forge(s), dig %d of %d wanted, %d hauler(s) of %d wanted -> +%d excavator(s), +%d hauler(s), +%d solar kit(s) (%d still owed)"),
+		P.IndExcavatorsAsked += Excavators;
+		P.IndHaulersAsked += Haulers;
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] INDUSTRY cargo: %d Forge(s), dig %d of %d wanted, %d hauler(s) of %d wanted -> asking the ship for +%d excavator(s), +%d hauler(s), +%d solar kit(s) (%d still owed; a CARGO line says if the budget refuses one)"),
 			Forges, DigHave, Forges, HaulHave, Forges, Excavators, Haulers, Kits, P.IndSolarOwed);
 	}
 
@@ -1839,7 +1945,7 @@ namespace
 			P.StrandedMax = FMath::Max(P.StrandedMax, Stranded);
 			P.RunStrandedMax = FMath::Max(P.RunStrandedMax, Stranded);
 		}
-		if (P.bIndLog) { IndustryTally(P, Sim, Agents, Dt); } // Struct study (opt-in): read-only
+		if (P.bIndLog) { IndustryTally(P, Sim, Agents, Dt); } // Struct study: read-only
 		if (P.bLiving)
 		{
 			RoverTally(P, Sim, C);
@@ -1915,8 +2021,8 @@ namespace
 					Sim->GetProductionPerSol(FName("Oxygen")), Sim->GetProductionPerSol(FName("Water")), Sim->GetProductionPerSol(FName("Food")), Sim->GetSettlerSupportRoom(),
 					Sim->FindGrowthProject(1) ? TEXT("under way") : (Sim->GetGrowthNote(1).IsEmpty() ? TEXT("-") : *Sim->GetGrowthNote(1).Left(120)));
 			}
-			if (P.bIndLog) { IndustryLog(P, Sim, C->GetSol()); }                  // Struct study (opt-in): the sol's INDUSTRY line
-			if (P.bIndustry && P.bDistricts) { IndustryStep(P, Sim, C); }         // Struct study (opt-in): more Forges when Struct is short
+			if (P.bIndLog) { IndustryLog(P, Sim, C->GetSol()); }                  // Struct study: the sol's INDUSTRY line
+			if (P.bIndustry && P.bDistricts) { IndustryStep(P, Sim, C); }         // Struct study (the default with districts): more Forges when Struct is short
 			P.SolLogged = C->GetSol();
 			P.DeficitSec = P.ShedSec = P.IdleRobotSec = P.SampleSec = 0.0;
 			P.MinBankFrac = 1.0;
@@ -1960,6 +2066,7 @@ namespace
 		}
 		if (FindBuilt(Sim, FName("ChargePad"))) { Mark(P, C, TEXT("Charging Pad running")); }
 		if (FindBuilt(Sim, FName("Forge"))) { Mark(P, C, TEXT("Forge running")); }
+		if (P.ForgeOrders.Num() > 0) { ForgeOrderStep(P, Sim, C); } // the sim's answers to the second and third Forge orders
 		if (Sim->GetTotalSolid(FName("Struct")) + Sim->GetStock(FName("Struct")) < 1.0) { Mark(P, C, TEXT("structural ran out (first time)")); }
 
 		const FRHDepositState* Ice = KnownIce(Sim);
@@ -2104,10 +2211,11 @@ namespace
 		// Struct holds the program back on a sol when growth has no Struct free above the quota and the reserve (with districts painted).
 		if (Sim->GetDistricts().Num() > 0 && Sim->GetGrowthAvailability(FName("Struct")).Free < 0.0) { NoteStructShort(C); }
 		// Q-C (a): Struct has held the program back for 3 sols - a second Forge, with its own regolith dig (player orders only).
-		if (P.StructShortSols >= 3 && !P.bIndustry && Once(TEXT("forge2"))) // industry=1 plays the second Forge itself (IndustryStep), on a spot a road has not taken
+		if (P.StructShortSols >= 3 && !P.bIndustry && Once(TEXT("forge2"))) // industry>0 plays the second Forge itself (IndustryStep), on a spot a road has not taken
 		{
-			P.SecondForgeSol = SolNow(C);
-			Mark(P, C, TEXT("second Forge ordered (Struct held the program back 3 sols)"));
+			// A fixed spot, which the spine road (laid at sol 6) had taken by sol 12: the sim refuses it at sol 12.04. The order is tracked (NoteForgeOrder),
+			// so the milestones and the report say what the sim answered; the bot still does not order another.
+			NoteForgeOrder(P, C, 2, FVector2D(24, -14));
 			FRHCommand Dig; Dig.Verb = FName("Dig"); Dig.Target = FName("Regolith_B");
 			Order(Sim, C, Dig, TEXT("Dig Regolith_B"));
 			OrderBuild(Sim, C, FName("Forge"), 24, -14);
@@ -2559,7 +2667,7 @@ namespace
 
 static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 	TEXT("RH.Playtest"),
-	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifts=1] [lifesupport=0] [roads=0] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
+	TEXT("RH.Playtest [Sols=30, may be fractional] [rush|guide] [lean|full] [SaveSlot] [districts=1] [nogrowth=1] [lifts=1] [lifesupport=0] [roads=0] [industry=0|1|2, default 2 with districts] - DEBUG: a scripted player walks the first-hour guide's path with real robots at 16x, then keeps the crew (zones a nine-cell vault, plants the garden), logs a [Playtest] timeline, saves the colony to SaveSlot if one is given, then quits. rush = every opening order at once; guide = the guide's order (pad first). Run via scripts/sim/rh_playtest.sh."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || GPlaytest.IsValid())
@@ -2580,13 +2688,13 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.bGuideOrder = Args.Num() > 1 && Args[1].Equals(TEXT("guide"), ESearchCase::IgnoreCase);
 		P.bLeanCargo = Args.Num() > 2 && Args[2].Equals(TEXT("lean"), ESearchCase::IgnoreCase);
 		// Args[3..]: a save slot and/or the options "districts=1" (C5b), "nogrowth=1", "lifesupport=0|1" (C5e), in any order.
-		bool bLifeSupportOff = false, bRoadsOff = false, bOutpostOff = false, bNightBankOff = false;
+		bool bLifeSupportOff = false, bRoadsOff = false, bOutpostOff = false, bNightBankOff = false, bIndustryGiven = false;
 		for (int32 i = 3; i < Args.Num(); ++i)
 		{
 			if (Args[i].Equals(TEXT("districts=1"), ESearchCase::IgnoreCase)) { P.bDistricts = true; }
 			else if (Args[i].Equals(TEXT("carryover=1"), ESearchCase::IgnoreCase)) { P.bCarryOver = true; } // E2b, opt-in
 			else if (Args[i].Equals(TEXT("indlog=1"), ESearchCase::IgnoreCase)) { P.bIndLog = true; }       // Struct study, opt-in: read the industry
-			else if (Args[i].StartsWith(TEXT("industry="), ESearchCase::IgnoreCase)) { P.IndLevel = FMath::Clamp(FCString::Atoi(*Args[i].Mid(9)), 0, 2); P.bIndustry = P.IndLevel > 0; P.bIndLog = P.bIndLog || P.bIndustry; } // Struct study, opt-in: play it (and read it)
+			else if (Args[i].StartsWith(TEXT("industry="), ESearchCase::IgnoreCase)) { P.IndLevel = FMath::Clamp(FCString::Atoi(*Args[i].Mid(9)), 0, 2); bIndustryGiven = true; } // Struct study: play it (and read it); industry=0 is the opt-out
 			else if (Args[i].StartsWith(TEXT("indforges="), ESearchCase::IgnoreCase)) { P.IndForgeCap = FMath::Clamp(FCString::Atoi(*Args[i].Mid(10)), 1, 3); } // Struct study: the most Forges industry=1 builds (the program orders a second and a third)
 			else if (Args[i].Equals(TEXT("nogrowth=1"), ESearchCase::IgnoreCase)) { P.bNoGrowth = true; }
 			else if (Args[i].Equals(TEXT("lifts=1"), ESearchCase::IgnoreCase)) { P.bLifts = true; }
@@ -2608,15 +2716,25 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 		P.bOutpost = P.bLiving && !bOutpostOff;
 		// Night storage before rovers, with the living city, unless nightbank=0 says not to.
 		P.bNightBank = P.bLiving && P.bLifeSupport && !bNightBankOff;
+		// Director, 2026-10-24: and the industry the Struct study found the 110-sol colony needs (industry=2: more Forges, the fleet to feed
+		// them, Electrolyzers while growth is short of oxygen) whenever districts are painted, unless industry=0 says not to (the E3b bot, line for
+		// line). Without districts nothing changes. Playing the industry also reads it (INDUSTRY lines, the fleet's wear in the REPORT block).
+		if (!bIndustryGiven && P.bDistricts) { P.IndLevel = 2; }
+		P.bIndustry = P.IndLevel > 0;
+		P.bIndLog = P.bIndLog || P.bIndustry;
 		P.LastSimSec = Clock->GetSimSecondsTotal();
 		P.SolLogged = Clock->GetSol();
 
 		TWeakObjectPtr<UWorld> WeakWorld = World;
 		auto SolOf = [WeakWorld]() { const UWorld* W = WeakWorld.Get(); const URHSimClockSubsystem* C = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr; return C ? SolNow(C) : 0.0; };
-		P.hRejected = Sim->OnCommandRejected.AddLambda([SolOf](const FRHCommand& Cmd, const FString& Reason)
+		P.hRejected = Sim->OnCommandRejected.AddLambda([SolOf, WeakWorld](const FRHCommand& Cmd, const FString& Reason)
 		{
 			if (GPlaytest.IsValid()) { ++GPlaytest->Rejections; }
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f REJECTED %s %s: %s"), SolOf(), *Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
+			// A refused Forge the bot ordered as its second or third: its report must say refused, not ordered.
+			const UWorld* W = WeakWorld.Get();
+			const URHSimClockSubsystem* ClockNow = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			if (GPlaytest.IsValid() && ClockNow && Cmd.Verb == FName("Build") && Cmd.Target == FName("Forge")) { NoteForgeRefused(*GPlaytest, ClockNow, Cmd.Location, Reason); }
 		});
 		P.hCompleted = Sim->OnBuildingCompleted.AddLambda([SolOf](const FRHBuildingInstance& B)
 		{
@@ -2681,6 +2799,6 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPlaytest(
 
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] start: up to %g sols at %.0fx, %s order, %s crew cargo%s"), P.TargetSols, URHSimClockSubsystem::EraSpeedThreshold,
 			P.bGuideOrder ? TEXT("guide") : TEXT("rush"), P.bLeanCargo ? TEXT("lean") : TEXT("full"),
-			*FString::Printf(TEXT("%s%s%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bOutpost ? TEXT(", and opens the first outpost") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.bLifts ? *FString(TEXT(", lifts on (a car on shaft 0 once -1 rates)")) : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
+			*FString::Printf(TEXT("%s%s%s%s%s%s%s%s"), P.bDistricts ? TEXT(", districts on") : TEXT(""), P.bLifeSupport ? TEXT(", the player grows the life support") : TEXT(""), P.bLiving ? TEXT(", the player plays the living city (roads, rovers)") : TEXT(""), P.bIndustry ? *FString::Printf(TEXT(", the player builds industry (industry=%d: more Forges and the fleet to feed them%s)"), P.IndLevel, P.IndLevel >= 2 ? TEXT(", Electrolyzers while growth is short of oxygen") : TEXT("")) : TEXT(""), P.bOutpost ? TEXT(", and opens the first outpost") : TEXT(""), P.bNoGrowth ? TEXT(" (growth off: the control)") : TEXT(""), P.bLifts ? *FString(TEXT(", lifts on (a car on shaft 0 once -1 rates)")) : TEXT(""), P.SaveSlot.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(", saving to '%s' at the end"), *P.SaveSlot)));
 		World->GetTimerManager().SetTimer(P.Timer, FTimerDelegate::CreateLambda([]() { Tick(); }), 0.25f, true);
 	}));
