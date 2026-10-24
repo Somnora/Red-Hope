@@ -254,7 +254,8 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 	constexpr float AgentDt = URHSimClockSubsystem::SubStepSeconds;
 	const auto EraOnce = [&]() { Clock->Debug_AdvanceSimSeconds(EraDt); Sim->EraStep((float)EraDt); };
 	const auto AgentOnce = [&]() { Clock->Debug_AdvanceSimSeconds((double)AgentDt); Sim->Debug_StepSim(AgentDt); };
-	const auto Inv = [&]() { return Sim->GetCreditBalanceMcr() == Sim->GetCreditAwardedMcr() - Sim->GetCreditSpentMcr() && Sim->GetCreditBalanceMcr() >= 0; };
+	const auto Inv = [&]() { return Sim->GetCreditBalanceMcr() == Sim->GetCreditAwardedMcr() - Sim->GetCreditSpentMcr() && Sim->GetCreditBalanceMcr() >= 0
+		&& Sim->GetSalesPaidMcr() >= 0 && Sim->GetSalesPaidMcr() <= Sim->GetCreditAwardedMcr(); }; // E3 (R7): the sales are a part of the awarded total
 	const auto Cr = [](int64 Mcr) { return URHSimWorldSubsystem::FormatCredits(Mcr); };
 	const auto Kg = [&](const TCHAR* Item) { const FRHManifestItemRow* Row = DefsSub ? DefsSub->GetManifestItem(FName(Item)) : nullptr; return Row ? (double)Row->Mass_kg : 0.0; };
 	const auto SaveFilePath = [](const TCHAR* Slot) { return FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), Slot); };
@@ -348,6 +349,10 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Expect(Q1 && Late > 0.0 && Late <= Q1->LateAward_kg * Sim->GetRequisitionMultiplier() + 1e-6 && Late < Q1->OnTimeAward_kg && Sim->GetCreditBalanceMcr() == FMath::FloorToInt64(Late * 1000.0) && Inv(),
 			FString::Printf(TEXT("CR2 Q1 met late pays the late tier: %.3f kg, %s cr"), Late, *Cr(Sim->GetCreditBalanceMcr())));
 	}
+
+	// E3 (section 4): the fixtures from here on open manifests with no cargo held (Debug_OpenManifestWithAward), so Earth does not take
+	// the bill at their launches; export lines would still load. Runtime only; set back at the end.
+	Sim->Debug_SetEarthTakesQuota(false);
 
 	// --- CR3. Lemma 1 (R1) by enumeration: on a fresh ship the credits accept exactly what HEAD's rule (M + m <= A) accepts. ---
 	{
@@ -569,12 +574,13 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->AddManifestItem(FName("SoilPallet"), Err);
 		Sim->AddManifestItem(FName("SeedVault"), Err);
 		const int32 CreditBytes = Sim->GetCreditBlockBytes();
+		const int32 ExportBytes = Sim->GetExportBlockBytes(); // E3's block follows the credit block
 		const bool bSaved = Sim->SaveColony(TEXT("creditsave"), SaveErr);
 		TArray<uint8> W;
 		const bool bRead = bSaved && FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("creditsave")));
 		uint32 Ver = 0;
 		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
-		const int32 At = W.Num() - CreditBytes;
+		const int32 At = W.Num() - ExportBytes - CreditBytes;
 		const auto Rd64 = [&](int32 Off) { int64 V = 0; if (Off >= 0 && Off + 8 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 8); } return V; };
 		const auto Rd32 = [&](int32 Off) { int32 V = 0; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
 		double Cap = 0.0;
@@ -590,9 +596,9 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Landed.Add(Rd32(Cur));
 			Cur += 4;
 		}
-		Expect(bRead && Ver == 52 && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
-			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1 && Cur == W.Num(),
-			FString::Printf(TEXT("CR9 v%u: the credit block is the last %d bytes - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, then %d capped rows by name (%s %d, %s %d), ending the file"),
+		Expect(bRead && Ver == 53 && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
+			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1 && Cur == W.Num() - ExportBytes,
+			FString::Printf(TEXT("CR9 v%u: the credit block is the %d bytes before E3's export block - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, then %d capped rows by name (%s %d, %s %d)"),
 				Ver, CreditBytes, Rd64(At), Rd64(At + 8), Rd64(At + 16), Cap, Names.Num(), Names.Num() ? *Names[0] : TEXT("?"), Landed.Num() ? Landed[0] : -1, Names.Num() > 1 ? *Names[1] : TEXT("?"), Landed.Num() > 1 ? Landed[1] : -1));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("creditsave"), Le) && Le.IsEmpty() && Sim->SaveColony(TEXT("creditsave2"), SaveErr);
@@ -621,15 +627,17 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			TArray<uint8> T;
 			T.Append(W.GetData(), At + 36);
 			const int32 First = At + 36, Second = First + 4 + Rd32(First) + 4;
-			T.Append(W.GetData() + Second, W.Num() - Second);
+			const int32 End = W.Num() - ExportBytes;
+			T.Append(W.GetData() + Second, End - Second);
 			T.Append(W.GetData() + First, Second - First);
+			T.Append(W.GetData() + End, ExportBytes);
 			FString E;
 			const bool bOk = TryBytes(TEXT("creditr4"), T, E);
 			Expect(bOk && T.Num() == W.Num() && Sim->GetManifestLanded(FName("Toolkit")) == 0 && Sim->GetManifestLanded(FName("ComputeCore")) == 0 && Sim->GetCreditBalanceMcr() == Bal && Inv(),
 				TEXT("CR9 a block whose rows are out of order resets every landing count to 0 and loads, the credit kept"));
 		}
-		{ TArray<uint8> T = W; const uint32 V51 = 51; FMemory::Memcpy(T.GetData() + 4, &V51, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
-		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/52")), FString::Printf(TEXT("CR9 a v51 file is refused (%s)"), *E)); }
+		{ TArray<uint8> T = W; const uint32 V52 = 52; FMemory::Memcpy(T.GetData() + 4, &V52, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
+		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/53")), FString::Printf(TEXT("CR9 a v52 file is refused (%s)"), *E)); }
 		// A ship in flight keeps its cap through a round trip.
 		Sim->LoadColony(TEXT("creditsave"), Le);
 		Sim->LaunchShip(Err);
@@ -637,6 +645,8 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->LoadColony(TEXT("creditinbound"), Le);
 		Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetShipMassCapKg() == 30000.0 && Inv(), TEXT("CR9 a save made with the ship in flight loads with its 30,000 kg cap"));
 	}
+
+	Sim->Debug_SetEarthTakesQuota(true);
 
 	// --- CR10. Ruling 11 and Q4a: 10 sols with a million credits granted against none - nothing outside the manifest moves. ---
 	{

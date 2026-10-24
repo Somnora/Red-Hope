@@ -144,6 +144,17 @@ namespace
 		// E2b (opt-in, outside the byte-identical runs): carryover=1 (RH_PLAYTEST_CARRYOVER=1) drops the bot's per-ship pre-check, so the
 		// sim's own rule - the credits, carry-over included, and the ship's mass cap - is the budget.
 		bool bCarryOver = false;
+		// E3 (section 5.2, R5, Q-C (a)): a launch Earth's cargo refuses waits. While it waits the player holds every order that eats Struct
+		// (life support excepted) and pauses city growth; a short launch goes as soon as its window opens. Struct holding the program back
+		// for 3 sols (an outpost leg or a launch waiting on it) brings a second Forge with its own dig.
+		bool bPendingLaunch = false;
+		FString LaunchWaitWhy;
+		int32 LaunchWaits = 0, LaunchShorts = 0, LaunchesWaited = 0;
+		double LaunchWaitStartSol = -1.0, LaunchWaitSols = 0.0;
+		TArray<TPair<FRHCommand, FString>> HeldOrders;
+		TArray<int32> GrowthPaused;
+		int32 StructShortSols = 0, LastStructShortSol = -1;
+		double SecondForgeSol = -1.0;
 		double LastLoadW = 0.0;                   // the last whole sol's mean machine load (W)
 		double BankEmptySec = 0.0, LightsDarkSec = 0.0; // sim-seconds the bank stood empty / the grow lights were dark, over the run
 		int32 NightBanksKept = 0, RoverDeferrals = 0, NightBankShips = 0; // packs the rule asked for beyond the owed ones, rovers held to the next ship, ships it spoke on
@@ -227,10 +238,36 @@ namespace
 		}
 	}
 
+	// E3 (R5): while a launch waits to load, an order whose bill includes Struct waits too (life support is never held).
+	bool EatsStruct(const FRHCommand& Cmd)
+	{
+		if (Cmd.Verb == FName("Build"))
+		{
+			return Cmd.Target != FName("Electrolyzer") && Cmd.Target != FName("WaterPlant") && Cmd.Target != FName("AirFilter");
+		}
+		return Cmd.Verb == FName("BuildRoad") || Cmd.Verb == FName("FitLift") || Cmd.Verb == FName("Furnish") || Cmd.Verb == FName("Fit") || Cmd.Verb == FName("LayTramLine");
+	}
+
 	void Order(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const FRHCommand& Cmd, const FString& Label)
 	{
+		if (GPlaytest.IsValid() && GPlaytest->bPendingLaunch && EatsStruct(Cmd))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f HOLD    %s waits for the launch"), SolNow(C), *Label);
+			GPlaytest->HeldOrders.Emplace(Cmd, Label);
+			return;
+		}
 		UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ORDER   %s"), SolNow(C), *Label);
 		Sim->EnqueueCommand(Cmd);
+	}
+
+	// Struct held the program back this sol (counted once a sol): the trigger for the second Forge (Q-C (a)).
+	void NoteStructShort(const URHSimClockSubsystem* C)
+	{
+		if (GPlaytest.IsValid() && GPlaytest->LastStructShortSol != C->GetSol())
+		{
+			GPlaytest->LastStructShortSol = C->GetSol();
+			++GPlaytest->StructShortSols;
+		}
 	}
 
 	FRHCommand Build(FName Def, float Xm, float Ym, int32 Level = 0)
@@ -311,6 +348,20 @@ namespace
 		return true;
 	}
 
+	void RecordLaunch(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C)
+	{
+		UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  manifest %.0f / %.0f kg"), SolNow(C), Sim->GetManifestMassKg(), Sim->GetAwardMassKg());
+		if (GPlaytest.IsValid())
+		{
+			TMap<FName, int32> Counts;
+			for (const FName& I : Sim->GetManifestItems()) { ++Counts.FindOrAdd(I); }
+			FString Cargo;
+			for (const TPair<FName, int32>& K : Counts) { Cargo += FString::Printf(TEXT("%s%s x%d"), Cargo.IsEmpty() ? TEXT("") : TEXT(", "), *K.Key.ToString(), K.Value); }
+			GPlaytest->RoundLaunchSol = SolNow(C);
+			GPlaytest->RoundCargo = Cargo;
+		}
+	}
+
 	void LoadCargo(URHSimWorldSubsystem* Sim, const URHSimClockSubsystem* C, const TArray<FName>& Items, FName FillItem = NAME_None)
 	{
 		for (const FName& Item : Items)
@@ -335,20 +386,18 @@ namespace
 		FString Err;
 		if (Sim->LaunchShip(Err))
 		{
-			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  manifest %.0f / %.0f kg"), SolNow(C), Sim->GetManifestMassKg(), Sim->GetAwardMassKg());
-			if (GPlaytest.IsValid())
-			{
-				TMap<FName, int32> Counts;
-				for (const FName& I : Sim->GetManifestItems()) { ++Counts.FindOrAdd(I); }
-				FString Cargo;
-				for (const TPair<FName, int32>& K : Counts) { Cargo += FString::Printf(TEXT("%s%s x%d"), Cargo.IsEmpty() ? TEXT("") : TEXT(", "), *K.Key.ToString(), K.Value); }
-				GPlaytest->RoundLaunchSol = SolNow(C);
-				GPlaytest->RoundCargo = Cargo;
-			}
+			RecordLaunch(Sim, C);
 		}
 		else
 		{
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  refused: %s"), SolNow(C), *Err);
+			if (GPlaytest.IsValid() && Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest)
+			{
+				GPlaytest->bPendingLaunch = true; // E3 (5.2): the cargo waits, and the bot retries every tick
+				GPlaytest->LaunchWaitWhy = Err;
+				GPlaytest->LaunchWaitStartSol = SolNow(C);
+				++GPlaytest->LaunchesWaited;
+			}
 		}
 	}
 
@@ -394,6 +443,11 @@ namespace
 		}
 		if (P.CrewLandedSol >= 0.0)
 		{
+			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  earth: %d launch(es) waited (%.1f sols in all, %d distinct reasons), %d short; sent to Earth Struct %.0f, Oxygen %.0f, Hydrogen %.0f, Water %.0f kg; Struct held the program back %d sol(s); second Forge %s"),
+				P.LaunchesWaited, P.LaunchWaitSols, P.LaunchWaits, P.LaunchShorts,
+				Sim ? Sim->GetLedgerLifetimeG(FName("Struct"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0, Sim ? Sim->GetLedgerLifetimeG(FName("Oxygen"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0,
+				Sim ? Sim->GetLedgerLifetimeG(FName("Hydrogen"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0, Sim ? Sim->GetLedgerLifetimeG(FName("Water"), URHSimWorldSubsystem::ERHLedgerLeg::Out) / 1000.0 : 0.0,
+				P.StructShortSols, P.SecondForgeSol >= 0.0 ? *FString::Printf(TEXT("ordered at sol %.2f"), P.SecondForgeSol) : TEXT("not needed"));
 			UE_LOG(LogRedHope, Display, TEXT("[Playtest] REPORT  crew: landed sol %.2f, pop now %d, recalled %d, born %d, immigrated %d, worst unsupported at once %d; Hope smoothed %.0f..%.0f; food low point %.0f sols of draw"),
 				P.CrewLandedSol, Sim ? Sim->GetPopulation() : 0, P.Recalled, P.Born, P.SettlersSeen, P.MaxUnsupported, P.MinHope, P.MaxHope,
 				P.MinFoodSols < 1.0e8 ? P.MinFoodSols : 0.0);
@@ -1127,7 +1181,7 @@ namespace
 			}
 			// The relay pylon rides with the first leg that needs it (a pylon is 40 Struct; it widens the territory the road crosses).
 			if (Leg.Need == ERoadNeed::Relay && !bNeedOk && FindBuilt(Sim, FName("Pylon"), &P1) && !P.Issued.Contains(FName("roadRelay"))
-				&& Av.Held - Av.QuotaBill - Committed >= 40.0 + GRoadSpareKg)
+				&& Av.Held - Av.QuotaBill - Av.Owed - Committed >= 40.0 + GRoadSpareKg)
 			{
 				P.Issued.Add(FName("roadRelay"));
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f ROADS   a relay pylon at (%.0f, %.0f) m joins the Lander's ring to the first pylon's, so the road to the fields is inside the grid's territory"), SolNow(C), GRoadRelay.X, GRoadRelay.Y);
@@ -1155,7 +1209,7 @@ namespace
 				}
 				break;
 			}
-			const double Spare = Av.Held - Av.QuotaBill - Committed - Pre.BillKg;
+			const double Spare = Av.Held - Av.QuotaBill - Av.Owed - Committed - Pre.BillKg; // E3: less what Earth takes at launch
 			if (Spare < GRoadSpareKg)
 			{
 				RoadNote(P, C, L, FString::Printf(TEXT("%.0f kg of Struct needed, %.0f held against the open quota's %.0f (spare after the leg %.0f)"), Pre.BillKg, Av.Held - Committed, Av.QuotaBill, Spare));
@@ -1190,7 +1244,7 @@ namespace
 	bool OutpostStructOk(const URHSimWorldSubsystem* Sim, double CostKg, double& OutSpare)
 	{
 		const URHSimWorldSubsystem::FRHGrowthAvailability Av = Sim->GetGrowthAvailability(FName("Struct"));
-		OutSpare = Av.Held - Av.QuotaBill - CostKg;
+		OutSpare = Av.Held - Av.QuotaBill - Av.Owed - CostKg; // E3: less what Earth takes at launch
 		return OutSpare >= GRoadSpareKg;
 	}
 
@@ -1298,6 +1352,7 @@ namespace
 				P.OutpostLastHeldSol = SolI;
 				++P.OutpostStructHeldSols;
 				P.OutpostHeldSols.Add(SolI);
+				NoteStructShort(C);
 				UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f OUTPOST waits for Struct: %s (spare after it %.0f kg, the rule keeps %.0f)"), Sol, What, SpareKg, GRoadSpareKg);
 			}
 		};
@@ -1669,6 +1724,85 @@ namespace
 			if (P.OutpostRoverDeploySol < 0.0 && P.OutpostRoverOrderSol >= 0.0 && Sim->GetActiveRoverCount() > 0) { P.OutpostRoverDeploySol = SolNow(C); Mark(P, C, TEXT("outpost rover deployed")); }
 		}
 
+		// E3 (5.2, R5, Q-C (a)): a launch that waits. Retry every tick; go short once the window opens; while it waits, Struct orders are
+		// held (Order) and city growth is paused; when it has gone, the held orders are placed and growth resumes.
+		if (P.bPendingLaunch)
+		{
+			bool bGone = Sim->GetQuotaPhase() != ERHQuotaPhase::AwaitingManifest;
+			if (!bGone)
+			{
+				if (P.GrowthPaused.Num() == 0)
+				{
+					for (const FRHDistrict& D : Sim->GetDistricts())
+					{
+						if (Sim->IsDistrictGrowthOn(D.Id) && Sim->SetDistrictGrowth(D.Id, false)) { P.GrowthPaused.Add(D.Id); }
+					}
+					if (P.GrowthPaused.Num() > 0)
+					{
+						UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f HOLD    city growth paused in %d district(s) while the ship waits to load"), SolNow(C), P.GrowthPaused.Num());
+					}
+				}
+				FString Why;
+				bool bShort = false;
+				if (Sim->CanLaunchShip(Why, bShort))
+				{
+					FString E;
+					bGone = Sim->LaunchShip(E);
+					if (bGone) { RecordLaunch(Sim, C); }
+				}
+				else if (bShort)
+				{
+					FString E;
+					bGone = Sim->LaunchShipShort(E);
+					if (bGone)
+					{
+						++P.LaunchShorts;
+						UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  short: %s"), SolNow(C), *Why);
+						RecordLaunch(Sim, C);
+					}
+				}
+				else
+				{
+					if (Why.Contains(TEXT("Struct needs"))) { NoteStructShort(C); }
+					// The reason is logged again only when the binding line changes (its kilograms move every tick).
+					int32 Semi = INDEX_NONE;
+					const FString Key = Why.FindChar(TEXT(';'), Semi) ? Why.Left(Semi) : Why;
+					int32 SemiOld = INDEX_NONE;
+					const FString KeyOld = P.LaunchWaitWhy.FindChar(TEXT(';'), SemiOld) ? P.LaunchWaitWhy.Left(SemiOld) : P.LaunchWaitWhy;
+					if (Key != KeyOld)
+					{
+						P.LaunchWaitWhy = Why;
+						++P.LaunchWaits;
+						UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f LAUNCH  waits: %s"), SolNow(C), *Why);
+					}
+				}
+			}
+			if (bGone)
+			{
+				P.bPendingLaunch = false;
+				P.LaunchWaitWhy.Reset();
+				if (P.LaunchWaitStartSol >= 0.0) { P.LaunchWaitSols += SolNow(C) - P.LaunchWaitStartSol; }
+				P.LaunchWaitStartSol = -1.0;
+				for (const int32 Id : P.GrowthPaused) { Sim->SetDistrictGrowth(Id, true); }
+				if (P.GrowthPaused.Num() > 0) { UE_LOG(LogRedHope, Display, TEXT("[Playtest] sol %.2f HOLD    city growth resumes"), SolNow(C)); }
+				P.GrowthPaused.Reset();
+				const TArray<TPair<FRHCommand, FString>> Held = MoveTemp(P.HeldOrders);
+				P.HeldOrders.Reset();
+				for (const TPair<FRHCommand, FString>& H : Held) { Order(Sim, C, H.Key, H.Value); }
+			}
+		}
+		// Struct holds the program back on a sol when growth has no Struct free above the quota and the reserve (with districts painted).
+		if (Sim->GetDistricts().Num() > 0 && Sim->GetGrowthAvailability(FName("Struct")).Free < 0.0) { NoteStructShort(C); }
+		// Q-C (a): Struct has held the program back for 3 sols - a second Forge, with its own regolith dig (player orders only).
+		if (P.StructShortSols >= 3 && Once(TEXT("forge2")))
+		{
+			P.SecondForgeSol = SolNow(C);
+			Mark(P, C, TEXT("second Forge ordered (Struct held the program back 3 sols)"));
+			FRHCommand Dig; Dig.Verb = FName("Dig"); Dig.Target = FName("Regolith_B");
+			Order(Sim, C, Dig, TEXT("Dig Regolith_B"));
+			OrderBuild(Sim, C, FName("Forge"), 24, -14);
+		}
+
 		// The first ship: power before people.
 		if (Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && !P.Issued.Contains(FName("cargo1")))
 		{
@@ -1770,12 +1904,12 @@ namespace
 				// food-growing with the people.
 				if (P.bLeanCargo)
 				{
-					LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack") });
+					LoadCargo(Sim, C, { FName("CrewPod"), FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }); // E3 (Q-C (a)): parts on every ship
 				}
 				else
 				{
 					LoadCargo(Sim, C, { FName("CrewPod"), FName("SoilPallet"), FName("SeedVault"), FName("LuxuryGoods"),
-						FName("SolarPack"), FName("SolarPack") });
+						FName("SolarPack"), FName("SolarPack"), FName("PartsCrate") }); // E3 (Q-C (a)): parts on every ship
 				}
 			}
 		}

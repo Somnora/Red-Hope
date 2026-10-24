@@ -470,7 +470,7 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 	FBusyRun BusyAgent, BusyEra;
 	{
 		const int32 BlockBytes = Sim->GetLedgerBlockBytes();
-		const int32 CreditBytes = Sim->GetCreditBlockBytes(); // E2b's block follows E1's (both sizes are fixed by tables)
+		const int32 CreditBytes = Sim->GetCreditBlockBytes() + Sim->GetExportBlockBytes(); // E2b's and E3's blocks follow E1's (all fixed by tables)
 		for (const bool bAgent : { false, true })
 		{
 			const TCHAR* Band = bAgent ? TEXT("agent") : TEXT("era");
@@ -821,7 +821,7 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 	{
 		LoadSlot(TEXT("econtwin_e1"));
 		const int32 BlockBytes = Sim->GetLedgerBlockBytes();
-		const int32 CreditBytes = Sim->GetCreditBlockBytes(); // E2b: the credit block ends the file now
+		const int32 CreditBytes = Sim->GetCreditBlockBytes() + Sim->GetExportBlockBytes(); // E2b's and E3's blocks end the file now
 		const int64 Water0 = Sim->GetLedgerLifetimeG(NWater, ELeg::Made);
 		Sim->Debug_GrantCredits(1234567); // E2b: a credit the doctored ledgers below must leave untouched
 		const int64 Credit0 = Sim->GetCreditBalanceMcr();
@@ -849,8 +849,8 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		}
 		bool bAscending = Names.Num() == 18;
 		for (int32 i = 1; i < Names.Num(); ++i) { bAscending &= Names[i - 1].Compare(Names[i], ESearchCase::CaseSensitive) < 0; }
-		Expect(bRead && Ver == 52 && Count == 18 && bAscending && Cur + 4 * 3 + 8 == W.Num() - CreditBytes,
-			FString::Printf(TEXT("EC6 the file says version %u; the E1 block is the %d bytes before the %d-byte credit block: 18 slots, names ascending (%s .. %s), then fill, head, checked sol and the unslotted loss"),
+		Expect(bRead && Ver == 53 && Count == 18 && bAscending && Cur + 4 * 3 + 8 == W.Num() - CreditBytes,
+			FString::Printf(TEXT("EC6 the file says version %u; the E1 block is the %d bytes before the %d bytes of the credit and export blocks: 18 slots, names ascending (%s .. %s), then fill, head, checked sol and the unslotted loss"),
 				Ver, BlockBytes, CreditBytes, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("econsave"), Le) && Le.IsEmpty();
@@ -867,10 +867,10 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 			return bOk;
 		};
 		{
-			TArray<uint8> T = W; const uint32 V51 = 51; FMemory::Memcpy(T.GetData() + 4, &V51, 4);
+			TArray<uint8> T = W; const uint32 V52 = 52; FMemory::Memcpy(T.GetData() + 4, &V52, 4);
 			FString E;
 			const bool bOk = TryBytes(TEXT("econr1"), T, E);
-			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/52")), FString::Printf(TEXT("EC6 a v51 file is refused (%s)"), *E));
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/53")), FString::Printf(TEXT("EC6 a v52 file is refused (%s)"), *E));
 		}
 		const int32 FoodSlot = Names.IndexOfByKey(TEXT("Food")), GlassSlot = Names.IndexOfByKey(TEXT("Glass"));
 		const int32 IceSlot = Names.IndexOfByKey(TEXT("Ice"));

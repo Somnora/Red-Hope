@@ -28,6 +28,8 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // E2 Earth credit: the -credit suite lives in RHSimCreditSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// E3 selling to Earth: the -export suite lives in RHSimExportSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -4910,8 +4912,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Q2 && Q2->SliceActive && bQ3 && Q2->DeadlineSol < Q3->DeadlineSol,
 				FString::Printf(TEXT("R0 Q2 is active and its deadline %d sits below Q3's (the (DeadlineSol, name) order Q1 < Q2 < Q3 holds)"), Q2 ? Q2->DeadlineSol : -1));
 			const double Mul = DefsSub->GetConfigScalar(FName("QuotaRepeatBillMul"), -1.0);
-			Expect(Near(Mul, 1.25, 1e-9), FString::Printf(TEXT("R0 RH_Config QuotaRepeatBillMul %.4f (expect 1.25; -1 = DT_Config never synced)"), Mul));
-			if (!bQ3 || !Q3->SliceActive || Q3->Requirements != TEXT("Struct:2500;Oxygen:1200;Hydrogen:250") || !Near(Mul, 1.25, 1e-9) || Fails > 0)
+			Expect(Near(Mul, 1.10, 1e-9), FString::Printf(TEXT("R0 RH_Config QuotaRepeatBillMul %.4f (expect 1.10 since E3's Q-C (a); -1 = DT_Config never synced)"), Mul));
+			if (!bQ3 || !Q3->SliceActive || Q3->Requirements != TEXT("Struct:2500;Oxygen:1200;Hydrogen:250") || !Near(Mul, 1.10, 1e-9) || Fails > 0)
 			{
 				Sim->OnAlert.Remove(AlertH);
 				Sim->OnShipArrived.Remove(ShipH);
@@ -4922,6 +4924,9 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				return 1;
 			}
 		}
+
+		// The repeat's mechanics are pinned at 1.25 (the ladder's numbers below); the shipped value is 1.10 since E3 (Q-C (a)), checked in R0.
+		Sim->Debug_SetQuotaRepeatBillMul(1.25);
 
 		// R1. A fresh colony: Q1, round 0, bills unscaled, Open.
 		Expect(Sim->GetActiveQuotaName() == FName("Q1") && Sim->GetQuotaRepeatRound() == 0 && Sim->GetQuotaBillScale() == 1.0
@@ -8902,6 +8907,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("citygrowth")))
 	{
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== CITY GROWTH TEST (C5b, 2026-10-19) ==="));
+		Sim->Debug_SetQuotaRepeatBillMul(1.25); // the ladder's numbers below are the repeat's mechanics at 1.25; the shipped value is 1.10 since E3 (Q-C (a))
 		int32 Fails = 0, Checks = 0;
 		const auto Expect = [&](bool bOk, const FString& What)
 		{
@@ -9228,18 +9234,21 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Steps(2);
 			// C5c moved this line: Q1 met no longer frees the stores. Between rounds growth leaves the NEXT round's bill
 			// standing - Q1's next is Q2's authored Struct 600 / Oxygen 150 (/ Hydrogen 40) - so free = held - 600 - 1000.
+			// E3: Q1's own bill is now owed to Earth until the launch, beside the share's term: free = held - 600 - 300 owed - 1000.
 			Expect(Sim->GetQuotaPhase() != ERHQuotaPhase::Open && Sim->GetGrowthAvailability(NStruct).bNextRound && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 600.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 150.0, 1e-9)
-				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 600.0 - 1000.0, 1e-6),
-				TEXT("b3 once Q1 is met its bill drops out and the next round's (Q2: Struct 600, Oxygen 150) stands in its place: free = held - 600 - 1000 (C5c; it was held - 1000 when nothing was protected between rounds)"));
+				&& Near(Sim->GetGrowthAvailability(NStruct).Owed, 300.0, 1e-9) && Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 600.0 - 300.0 - 1000.0, 1e-6),
+				TEXT("b3 once Q1 is met its bill drops out and the next round's (Q2: Struct 600, Oxygen 150) stands in its place, and Q1's own 300 is owed to Earth until the launch (E3): free = held - 600 - 300 owed - 1000 (C5c; it was held - 1000 when nothing was protected between rounds)"));
 		}
 
 		// ---------------- (b4) Between quota rounds growth leaves the NEXT round's bill standing (C5c) ----------------
 		{
+			// E3: each line topped up to the bill + the launch floor + 50 kg, unconditionally, so the launches below can load it (8 colonists:
+			// Earth leaves 160 kg of Water and 60 of Oxygen).
 			const auto MeetQuota = [&]() -> bool
 			{
 				for (const auto& L : Sim->GetQuotaProgress())
 				{
-					const double Gap = L.Value.Value + 50.0 - L.Value.Key;
+					const double Gap = L.Value.Value + Sim->GetLaunchFloorKg(L.Key) + 50.0 - L.Value.Key;
 					if (Gap > 0.0) { Sim->AddStock(L.Key, Gap); }
 				}
 				for (int32 K = 0; K < 40 && Sim->GetQuotaPhase() == ERHQuotaPhase::Open; ++K) { Land(); }
@@ -9259,19 +9268,21 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				OnlyDistricts({ 3 });
 				SetHope(80.0);
 				SetHeld(Res == NStruct ? NOx : NStruct, 1.0e6); // the other resource is never the one in the way
-				SetHeld(Res, Reserve + Bill + Project - 1.0);
-				const bool bRefused = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(*Res.ToString()) && NoteOf(3).Contains(TEXT("next quota round"));
+				const double Owed = Sim->GetGrowthAvailability(Res).Owed; // E3: what Earth takes at launch, while the manifest is open
+				SetHeld(Res, Reserve + Bill + Owed + Project - 1.0);
+				const bool bRefused = Sim->Debug_RunGrowthCheck() == 0 && !Open(3) && NoteOf(3).Contains(*Res.ToString()) && NoteOf(3).Contains(TEXT("next quota round"))
+					&& (Owed <= 0.0 || NoteOf(3).Contains(TEXT("owed to Earth at launch")));
 				const FString Why = NoteOf(3);
-				SetHeld(Res, Reserve + Bill + Project + 1.0);
+				SetHeld(Res, Reserve + Bill + Owed + Project + 1.0);
 				const bool bStarts = Sim->Debug_RunGrowthCheck() == 1 && Open(3);
-				Expect(bRefused && bStarts, FString::Printf(TEXT("b4 %s (%s): %s one kilo under reserve %.0f + the next round's bill %.0f + the project %.0f is refused ('%s'), one kilo over starts it"), Phase, Round, *Res.ToString(), Reserve, Bill, Project, *Why));
+				Expect(bRefused && bStarts, FString::Printf(TEXT("b4 %s (%s): %s one kilo under reserve %.0f + the next round's bill %.0f + %.0f owed to Earth + the project %.0f is refused ('%s'), one kilo over starts it"), Phase, Round, *Res.ToString(), Reserve, Bill, Owed, Project, *Why));
 				return bRefused && bStarts;
 			};
 
 			// Q1 met, awaiting the manifest: the next round is Q2, Struct 600 / Oxygen 150 / Hydrogen 40.
 			Expect(LoadBase(), TEXT("b4 base loaded"));
 			Sim->Debug_SetGrowthEnabled(false);
-			Expect(MeetQuota() && Sim->GetActiveQuotaName() == FName("Q1"), FString::Printf(TEXT("b4 setup: Q1 met, awaiting the manifest (phase %d)"), (int32)Sim->GetQuotaPhase()));
+			Expect(MeetQuota() && Sim->GetActiveQuotaName() == FName("Q1"), FString::Printf(TEXT("b4 setup: Q1 met with each line at the bill + the launch floor + 50 kg, awaiting the manifest (phase %d)"), (int32)Sim->GetQuotaPhase()));
 			Boundary(NStruct, 1000.0, 600.0, 640.0, TEXT("awaiting the manifest"), TEXT("Q1 -> Q2"));
 			Expect(LoadBase(), TEXT("b4 base loaded again"));
 			Sim->Debug_SetGrowthEnabled(false);
@@ -9320,15 +9331,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					Sim->Debug_SetCityShare(Sh);
 					const URHSimWorldSubsystem::FRHGrowthAvailability AS = Sim->GetGrowthAvailability(NStruct), AO = Sim->GetGrowthAvailability(NOx), AH = Sim->GetGrowthAvailability(NHyd);
 					bRung &= AS.bNextRound && Near(AS.FullBill, 4883.0, 1e-9) && Near(AS.QuotaBill, (1.0 - Sh) * 4883.0, 1e-9) && Near(AO.QuotaBill, (1.0 - Sh) * 2344.0, 1e-9) && Near(AH.QuotaBill, (1.0 - Sh) * 488.0, 1e-9)
-						&& Near(AS.Free, Held(NStruct) - (1.0 - Sh) * 4883.0 - 1000.0, 1e-6);
+						&& Near(AS.Free, Held(NStruct) - (1.0 - Sh) * 4883.0 - AS.Owed - 1000.0, 1e-6) && Near(AS.Owed, 3906.0, 1e-9);
 				}
-				Expect(bRung, TEXT("b5 Q3 round 2 met, round 3 next (4883 / 2344 / 488): the held-back bill is (1 - share) x it at share 0.5 (2441.5 / 1172 / 244), 1 (none) and 0 (all), and free follows"));
+				Expect(bRung, TEXT("b5 Q3 round 2 met, round 3 next (4883 / 2344 / 488): the held-back bill is (1 - share) x it at share 0.5 (2441.5 / 1172 / 244), 1 (none) and 0 (all), and free follows, less round 2's own 3906 owed to Earth (E3)"));
 			}
 			// With the repeat switched off the ladder ends: nothing is coming, so nothing stands.
 			Sim->Debug_SetQuotaRepeatBillMul(0.0);
 			Expect(Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest && Near(Sim->GetGrowthAvailability(NStruct).QuotaBill, 0.0, 1e-9) && Near(Sim->GetGrowthAvailability(NOx).QuotaBill, 0.0, 1e-9)
-				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - 1000.0, 1e-6),
-				TEXT("b4 the repeat knob at 0 on the last rung: the ladder ends, no bill stands, free = held - 1000"));
+				&& Near(Sim->GetGrowthAvailability(NStruct).Free, Held(NStruct) - Sim->GetGrowthAvailability(NStruct).Owed - 1000.0, 1e-6),
+				TEXT("b4 the repeat knob at 0 on the last rung: the ladder ends, no next bill stands, free = held - the round's own bill owed to Earth (E3) - 1000"));
 			Sim->Debug_SetQuotaRepeatBillMul(1.25);
 
 			// ---------------- (b5) The City / Earth share (C5d) ----------------
@@ -9348,10 +9359,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					const double Hold = 1.0 - Sh;
 					bDial &= AS.bNextRound && Near(AS.FullBill, 600.0, 1e-9) && Near(AO.FullBill, 150.0, 1e-9) && Near(AH.FullBill, 40.0, 1e-9)
 						&& Near(AS.QuotaBill, Hold * 600.0, 1e-9) && Near(AO.QuotaBill, Hold * 150.0, 1e-9) && Near(AH.QuotaBill, Hold * 40.0, 1e-9)
-						&& Near(AS.Free, Held(NStruct) - Hold * 600.0 - 1000.0, 1e-6) && Near(AO.Free, Held(NOx) - Hold * 150.0 - AO.Reserve, 1e-6);
+						&& Near(AS.Free, Held(NStruct) - Hold * 600.0 - AS.Owed - 1000.0, 1e-6) && Near(AO.Free, Held(NOx) - Hold * 150.0 - AO.Owed - AO.Reserve, 1e-6)
+						&& Near(AS.Owed, 300.0, 1e-9) && Near(AO.Owed, 50.0, 1e-9);
 					DialText += FString::Printf(TEXT(" %.0f%%->%.0f"), Sh * 100.0, AS.QuotaBill);
 				}
-				Expect(bDial, FString::Printf(TEXT("b5 between rounds the bill held for Earth is (1 - share) x the next round's, linear: Struct 600 at city share%s; Oxygen and Hydrogen the same fraction; free = held - reserve - that"), *DialText));
+				Expect(bDial, FString::Printf(TEXT("b5 between rounds the bill held for Earth is (1 - share) x the next round's, linear: Struct 600 at city share%s; Oxygen and Hydrogen the same fraction; free = held - reserve - that - Q1's own bill owed at launch (Struct 300, Oxygen 50; E3)"), *DialText));
 
 				// The boundaries. Struct: reserve 1000 + the held-back bill + the 640 project; Oxygen: reserve 60 + the held-back bill + 400.
 				const auto Pair = [&](double Share, FName Res, double Reserve, double Bill, double Project, const TCHAR* Round)
@@ -9374,7 +9386,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					OnlyDistricts({ 3 });
 					SetHope(80.0);
 					SetHeld(NOx, 1.0e6);
-					SetHeld(NStruct, 1000.0 + 300.0 + 640.0 + 1.0);
+					SetHeld(NStruct, 1000.0 + 300.0 + Sim->GetGrowthAvailability(NStruct).Owed + 640.0 + 1.0); // E3: + Q1's 300 owed at launch
 					int32 Broadcasts = 0;
 					const FDelegateHandle ShareH = Sim->OnGrowthChanged.AddLambda([&Broadcasts]() { ++Broadcasts; });
 					Sim->Debug_SetCityShare(0.0);
@@ -9384,7 +9396,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 					const int32 ByDial = Broadcasts;
 					const bool bStarts = Sim->Debug_RunGrowthCheck() == 1 && Open(3); // the start itself broadcasts too
 					Expect(bRefused0 && bStarts && ByDial == 1 && Broadcasts == 2,
-						FString::Printf(TEXT("b5 the dial is instant: %.0f kg of Struct is refused at 0%% city ('%s'), and the next check after the dial moves to 50%% starts the project (the dial broadcast once: %d)"), 1000.0 + 300.0 + 640.0 + 1.0, *Why0, ByDial));
+						FString::Printf(TEXT("b5 the dial is instant: %.0f kg of Struct is refused at 0%% city ('%s'), and the next check after the dial moves to 50%% starts the project (the dial broadcast once: %d)"), Held(NStruct), *Why0, ByDial));
 					Sim->SetCityShare(0.5); // no change: no broadcast, no log line
 					Expect(Broadcasts == 2, TEXT("b5 setting the share it already has changes nothing and broadcasts nothing"));
 					Sim->SetCityShare(1.7);
@@ -10826,13 +10838,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 52, FString::Printf(TEXT("X15 the file says version %u (expect 52)"), Ver));
+			Expect(bRead && Ver == 53, FString::Printf(TEXT("X15 the file says version %u (expect 53)"), Ver));
 			uint32 V46 = 46;
 			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv45.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/52")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/53")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
 				FString::Printf(TEXT("X15 a v46 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
@@ -12106,13 +12118,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
 			FString Le44;
 			const bool bRefused = !Sim->LoadColony(TEXT("farice_v45"), Le44);
-			Expect(bSaved && bRead && Ver == 52 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/52")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 52); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
+			Expect(bSaved && bRead && Ver == 53 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/53")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 53); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
 			Expect(bBack && Back.Id != 0 && Back.bOutpostSource && Near(Back.AmountKg, 600.0, 1e-9),
-				TEXT("F16 the v52 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
+				TEXT("F16 the v53 save loads: nine deposits with the outpost flag re-derived from the rows, and the posted outpost task back with its runtime flag"));
 			// Determinism: the same colony, run twice, makes the same loads at the same steps.
 			FRig Rd = BuildRig(true, true, true);
 			Sim->Debug_DeliverCargo(FName("CargoRover"));
@@ -12522,7 +12534,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 52 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 53 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12537,7 +12549,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{
 				TArray<uint8> Dup = Good;
 				FMemory::Memcpy(Dup.GetData() + CellsAt + 8, Good.GetData() + CellsAt, 8); // the second cell becomes the first
-				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v52 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
+				Expect(TryFile(TEXT("deepk6dup"), Dup, E1) && E1.Contains(TEXT("floor table")) && E1.Contains(TEXT("twice")), FString::Printf(TEXT("K6 a hand-made v53 file with a duplicate cell is refused and the colony untouched (%s)"), *E1));
 			}
 			{
 				TArray<uint8> Col = Good;
@@ -12566,7 +12578,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/52")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
+				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/53")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -13679,7 +13691,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/52")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/53")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
@@ -14027,7 +14039,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 ShaftCount = Rd(At);
 			int32 Cursor = At + 4;
 			for (int32 K = 0; K < ShaftCount; ++K) { const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
-			Expect(bRead && Ver == 52 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
+			Expect(bRead && Ver == 53 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
 				FString::Printf(TEXT("TN1 the file says version %u; straight after the shaft block the tunnel block reads NextTunnelId %d and 0 tunnels: 8 bytes, no lift field"), Ver, Rd(Cursor)));
 		}
 
@@ -14466,7 +14478,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{ TArray<uint8> Bad = Good; Put(Bad, TunnelAt + 4, -1);
 				Expect(TryFile(TEXT("tunnelsh11"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("tunnel count")), FString::Printf(TEXT("TN8 a negative tunnel count is refused (%s)"), *E)); }
 			{ TArray<uint8> Old = Good; const uint32 V46 = 46; FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/52")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
+				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/53")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
@@ -14690,6 +14702,11 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("credit")))
 	{
 		return RHRunCreditSuite(World, Clock, Sim);
+	}
+	// E3 selling to Earth self-test (the take at launch, the floor, sales, the cap and the plateau, the short launch, the save), fails loudly. `-export`.
+	if (FParse::Param(*Params, TEXT("export")))
+	{
+		return RHRunExportSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
@@ -14986,7 +15003,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 52, FString::Printf(TEXT("e5 the file says version %u (expect 52)"), Ver));
+			Expect(bRead && Ver == 53, FString::Printf(TEXT("e5 the file says version %u (expect 53)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -16923,6 +16940,18 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(AgentOnMs - AgentOffMs <= FMath::Max(0.05 * AgentOffMs, 0.1), FString::Printf(TEXT("budget: the ledger adds %.4f ms to an agent step at %d colonists (<= 5%% or 0.1 ms)"), AgentOnMs - AgentOffMs, People0));
 			Expect(EraOnMs - EraOffMs <= FMath::Max(0.05 * EraOffMs, 0.1), FString::Printf(TEXT("budget: the ledger adds %.4f ms to an era step at %d colonists (<= 5%% or 0.1 ms)"), EraOnMs - EraOffMs, People0));
 			Expect(RollsMs <= 2.0, FString::Printf(TEXT("budget: 1,000 ledger rolls took %.3f ms (<= 2)"), RollsMs));
+		}
+		// E3: 1,000 launch checks on the same city with its manifest open (the bill's lines against what can be loaded). Budget 5 ms.
+		{
+			const bool bOpen = Sim->GetQuotaPhase() == ERHQuotaPhase::AwaitingManifest || Sim->Debug_OpenManifestWithAward(10000.0);
+			FString Why;
+			int32 Pass = 0;
+			const double LC0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < 1000; ++K) { Pass += Sim->CanLaunchShip(Why) ? 1 : 0; }
+			const double LaunchChecksMs = (FPlatformTime::Seconds() - LC0) * 1000.0;
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE launch checks (%d colonists, %d buildings): 1,000 CanLaunchShip calls %.3f ms (%d passed; %s)"),
+				Sim->GetPopulation(), Sim->GetBuildings().Num(), LaunchChecksMs, Pass, Pass > 0 ? TEXT("loadable") : *Why.Left(120));
+			Expect(bOpen && LaunchChecksMs <= 5.0, FString::Printf(TEXT("budget: 1,000 launch checks at %d colonists took %.3f ms (<= 5)"), Sim->GetPopulation(), LaunchChecksMs));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

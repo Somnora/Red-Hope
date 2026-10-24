@@ -590,9 +590,100 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			];
 		});
 	}
+	// E3: Cargo to Earth - what the launch loads (the round's bill, owed at launch) and what the colony sells beside it, against the
+	// ship's cap. Each Mars-made resource Earth buys has a row: today's quote, the listed kg at its locked price, +100 kg and Remove.
+	Picker->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 2.f)
+	[
+		SNew(STextBlock).Font(D::Label(9)).ColorAndOpacity(D::Amber).Text(Txt(TEXT("CARGO TO EARTH")))
+	];
+	Picker->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 2.f)
+	[
+		SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true)
+		.Text_Lambda([this]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			if (!S) { return FText::GetEmpty(); }
+			TArray<TPair<FName, double>> Bill;
+			S->GetLaunchBill(Bill);
+			FString Owed;
+			for (const auto& B : Bill) { Owed += FString::Printf(TEXT("%s%s %s"), Owed.IsEmpty() ? TEXT("") : TEXT(", "), *B.Key.ToString(), *Mass(B.Value)); }
+			double Sales = 0.0;
+			for (const FRHExportLine& X : S->GetExportLines()) { Sales += (double)X.Kg; }
+			return Txt(FString::Printf(TEXT("Owed at launch: %s\nOutbound %s of the ship's %s; sales %s cr"), Owed.IsEmpty() ? TEXT("nothing") : *Owed,
+				*Mass(S->GetLaunchBillTotalKg() + Sales), *Mass(S->GetShipMassCapKg()), *URHSimWorldSubsystem::FormatCredits(S->GetExportValueMcr())));
+		})
+	];
+	if (const URHDefinitionsSubsystem* Defs = GetDefs())
+	{
+		TArray<FName> Buys;
+		Defs->ForEachResourceRow([&Buys](FName Name, const FRHResourceRow& Row) { if (Row.EarthBuys) { Buys.Add(Name); } });
+		for (const FName Res : Buys)
+		{
+			Picker->AddSlot().AutoHeight().Padding(0.f, 1.f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+					.Text_Lambda([this, Res]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						const int64 Quote = S->GetEarthPriceMcrPerKg(Res);
+						const FRHExportLine* Line = S->GetExportLines().FindByPredicate([Res](const FRHExportLine& X) { return X.Resource == Res; });
+						const FString Listed = Line ? FString::Printf(TEXT("  -  selling %s at %s cr/kg"), *Mass(Line->Kg), *URHSimWorldSubsystem::FormatCredits(Line->PriceMcrPerKg)) : FString();
+						return Txt(FString::Printf(TEXT("%s: %s%s"), *Res.ToString(),
+							Quote > 0 ? *FString::Printf(TEXT("%s cr/kg"), *URHSimWorldSubsystem::FormatCredits(Quote)) : TEXT("Earth will not buy at today's price"), *Listed));
+					})
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+				[
+					D::Button(Txt(TEXT("+100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExportAdd, Res, 100),
+						MakeAttributeLambda([this, Res]() { const URHSimWorldSubsystem* S = GetSim(); return S && S->GetEarthPriceMcrPerKg(Res) > 0; }))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+				[
+					D::Button(Txt(TEXT("Remove")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleExportRemove, Res),
+						MakeAttributeLambda([this, Res]() { const URHSimWorldSubsystem* S = GetSim(); return S && S->GetExportLines().ContainsByPredicate([Res](const FRHExportLine& X) { return X.Resource == Res; }); }))
+				]
+			];
+		}
+	}
+	// LAUNCH asks the sim's own rule and, greyed, says why; LAUNCH SHORT appears once the short window is open (Q-B (a)).
 	Picker->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
 	[
-		GuideHalo(FName("Launch"), D::Button(Txt(TEXT("LAUNCH SUPPLY SHIP")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLaunch), true, true))
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth()
+		[
+			SNew(SBox)
+			.ToolTipText_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return (S && !S->CanLaunchShip(Why)) ? Txt(Why) : FText::GetEmpty(); })
+			[
+				GuideHalo(FName("Launch"), D::Button(Txt(TEXT("LAUNCH SUPPLY SHIP")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLaunch),
+					MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return S && S->CanLaunchShip(Why); }), true))
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f, 0.f, 0.f)
+		[
+			SNew(SBox)
+			.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; bool bShort = false; return (S && !S->CanLaunchShip(Why, bShort) && bShort) ? EVisibility::Visible : EVisibility::Collapsed; })
+			.ToolTipText(Txt(TEXT("Launch with what can be loaded now: no sales ride, and the rest of the quota is added to the next round's bill.")))
+			[
+				D::Button(Txt(TEXT("LAUNCH SHORT")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleLaunchShort))
+			]
+		]
+	];
+	Picker->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+	[
+		SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+		.Text_Lambda([this]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			FString Why;
+			bool bShort = false;
+			if (!S || S->CanLaunchShip(Why, bShort)) { return Txt(TEXT("Earth collects the quota at launch.")); }
+			return Txt(bShort ? FString::Printf(TEXT("%s. A short launch is open."), *Why)
+				: FString::Printf(TEXT("%s. A short launch opens at sol %d."), *Why, S->GetShortLaunchSol()));
+		})
 	];
 	Body->AddSlot().AutoHeight()
 	[
@@ -657,6 +748,49 @@ FReply SRHCommandDeck::HandleManifestAdd(FName Item)
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	FString Error;
 	if (Sim && !Sim->AddManifestItem(Item, Error) && PC.IsValid())
+	{
+		PC->PostConfirm(Error, D::Red);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleLaunchShort()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Error;
+	if (Sim && PC.IsValid())
+	{
+		if (Sim->LaunchShipShort(Error))
+		{
+			PC->PostConfirm(TEXT("The supply ship launched short - the rest of the quota is owed next round"), D::Amber);
+		}
+		else
+		{
+			PC->PostConfirm(Error, D::Red);
+		}
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleExportAdd(FName Resource, int32 Kg)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Error;
+	if (Sim && !Sim->AddExportLine(Resource, Kg, Error) && PC.IsValid())
+	{
+		PC->PostConfirm(Error, D::Red);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleExportRemove(FName Resource)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	FString Error;
+	if (Sim && !Sim->RemoveExportLine(Resource, Error) && PC.IsValid())
 	{
 		PC->PostConfirm(Error, D::Red);
 	}

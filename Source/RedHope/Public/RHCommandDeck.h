@@ -290,6 +290,9 @@ private:
 	void RefreshRosterPanel();
 	FReply HandleManifestAdd(FName Item);
 	FReply HandleLaunch();
+	FReply HandleLaunchShort();                      // E3: a ship that cannot load the whole quota, after the window
+	FReply HandleExportAdd(FName Resource, int32 Kg); // E3: sell surplus to Earth
+	FReply HandleExportRemove(FName Resource);
 	FReply HandleSolidarity(bool bComply);
 	FReply HandleRivalVerb(FName Verb, FName Rival);
 	const class URHSimWorldSubsystem* GetSim() const;

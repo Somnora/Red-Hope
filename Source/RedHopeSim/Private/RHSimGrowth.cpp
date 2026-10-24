@@ -223,7 +223,15 @@ URHSimWorldSubsystem::FRHGrowthAvailability URHSimWorldSubsystem::GetGrowthAvail
 	{
 		A.Reserve = GrowthReserveO2Sols * (double)Colonists.Num() * ColonistO2KgPerSol; // a breathing floor: sols of everyone's draw
 	}
-	A.Free = A.Held - A.QuotaBill - A.Reserve;
+	// E3: while the manifest is open, what Earth takes at launch stands too, beside the share's term (never inside it).
+	if (QuotaPhase == ERHQuotaPhase::AwaitingManifest)
+	{
+		TArray<TPair<FName, double>> Bill;
+		GetLaunchBill(Bill);
+		for (const auto& B : Bill) { A.Owed += B.Key == Resource ? B.Value : 0.0; }
+		for (const FRHExportLine& X : ExportLines) { A.Owed += X.Resource == Resource ? (double)X.Kg : 0.0; }
+	}
+	A.Free = A.Held - A.QuotaBill - A.Owed - A.Reserve;
 	return A;
 }
 
@@ -239,9 +247,10 @@ bool URHSimWorldSubsystem::GrowthBillFits(const TMap<FName, double>& Bill, FStri
 		const FRHGrowthAvailability A = GetGrowthAvailability(Res);
 		if (Need > A.Free + GrowthBillEps)
 		{
-			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the %s - %.0f reserve)"),
+			OutWhy = FString::Printf(TEXT("short of %s: needs %.0f kg, %.0f free (%.0f held - %.0f for the %s%s - %.0f reserve)"),
 				*Res.ToString(), Need, FMath::Max(0.0, A.Free), A.Held, A.QuotaBill,
-				A.bNextRound ? *FString::Printf(TEXT("next quota round (%.0f%% of its bill, the Earth share)"), (1.0 - CityShare) * 100.0) : TEXT("open quota"), A.Reserve);
+				A.bNextRound ? *FString::Printf(TEXT("next quota round (%.0f%% of its bill, the Earth share)"), (1.0 - CityShare) * 100.0) : TEXT("open quota"),
+				A.Owed > 0.0 ? *FString::Printf(TEXT(" - %.0f owed to Earth at launch"), A.Owed) : TEXT(""), A.Reserve);
 			return false;
 		}
 	}

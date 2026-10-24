@@ -2290,6 +2290,17 @@ static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 		default:
 			break;
 		}
+		// E3: what Earth takes at launch, the sales listed and paid, and any arrears.
+		{
+			TArray<TPair<FName, double>> Bill;
+			Sim->GetLaunchBill(Bill);
+			FString Owed, Arrears;
+			for (const auto& B : Bill) { Owed += FString::Printf(TEXT(" %s %.0f"), *B.Key.ToString(), B.Value); }
+			for (const FName R : { FName("Struct"), FName("Oxygen"), FName("Hydrogen"), FName("Water") }) { if (Sim->GetQuotaArrearsKg(R) > 0) { Arrears += FString::Printf(TEXT(" %s %d"), *R.ToString(), Sim->GetQuotaArrearsKg(R)); } }
+			UE_LOG(LogRedHope, Display, TEXT("  Earth's cargo:%s%s; %d sale line(s) worth %s cr; sales paid %s cr in all%s"),
+				Owed.IsEmpty() ? TEXT(" nothing owed") : TEXT(" owed at launch"), *Owed, Sim->GetExportLines().Num(), *URHSimWorldSubsystem::FormatCredits(Sim->GetExportValueMcr()),
+				*URHSimWorldSubsystem::FormatCredits(Sim->GetSalesPaidMcr()), Arrears.IsEmpty() ? TEXT("") : *FString::Printf(TEXT("; arrears:%s"), *Arrears));
+		}
 		// E2b: the Earth credit, every status.
 		UE_LOG(LogRedHope, Display, TEXT("  Earth credit: %s cr (awarded %s, spent %s); ship mass cap %.0f kg"),
 			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditAwardedMcr()),
@@ -3075,17 +3086,49 @@ static FAutoConsoleCommandWithWorldAndArgs GRHManifest(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHLaunch(
 	TEXT("RH.Launch"),
-	TEXT("RH.Launch - confirm the manifest and launch the supply ship."),
+	TEXT("RH.Launch [short] - confirm the manifest and launch the supply ship; 'short' launches with what can be loaded once the short window is open (E3)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
 			FString Error;
-			if (!Sim->LaunchShip(Error))
+			const bool bShort = Args.Num() > 0 && Args[0].Equals(TEXT("short"), ESearchCase::IgnoreCase);
+			if (!(bShort ? Sim->LaunchShipShort(Error) : Sim->LaunchShip(Error)))
 			{
 				UE_LOG(LogRedHope, Warning, TEXT("Launch: %s"), *Error);
 			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHExport(
+	TEXT("RH.Export"),
+	TEXT("RH.Export add <Resource> <Kg> | remove <Resource> | list - sell Mars-made surplus to Earth on the open manifest (E3)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		FString Error;
+		if (Args.Num() >= 3 && Args[0].Equals(TEXT("add"), ESearchCase::IgnoreCase))
+		{
+			if (!Sim->AddExportLine(FName(*Args[1]), FCString::Atoi(*Args[2]), Error)) { UE_LOG(LogRedHope, Warning, TEXT("Export: %s"), *Error); }
+		}
+		else if (Args.Num() >= 2 && Args[0].Equals(TEXT("remove"), ESearchCase::IgnoreCase))
+		{
+			if (!Sim->RemoveExportLine(FName(*Args[1]), Error)) { UE_LOG(LogRedHope, Warning, TEXT("Export: %s"), *Error); }
+		}
+		else if (Args.Num() >= 1 && Args[0].Equals(TEXT("list"), ESearchCase::IgnoreCase))
+		{
+			for (const FRHExportLine& X : Sim->GetExportLines())
+			{
+				UE_LOG(LogRedHope, Display, TEXT("  export %s: %d kg at %s cr/kg = %s cr"), *X.Resource.ToString(), X.Kg, *URHSimWorldSubsystem::FormatCredits(X.PriceMcrPerKg), *URHSimWorldSubsystem::FormatCredits((int64)X.Kg * X.PriceMcrPerKg));
+			}
+			UE_LOG(LogRedHope, Display, TEXT("  %d line(s), %s cr in all; launch cost %s cr/kg"), Sim->GetExportLines().Num(), *URHSimWorldSubsystem::FormatCredits(Sim->GetExportValueMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetLaunchCostMcrPerKg()));
+		}
+		else
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Export add <Resource> <Kg> | remove <Resource> | list"));
 		}
 	}));
 

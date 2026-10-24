@@ -16,6 +16,7 @@ struct FRHRobotFragment;
 struct FRHRoomRow;
 struct FRHFurnitureRow;
 struct FRHBuildingRow;
+struct FRHQuotaRow;
 
 // A strategic order. Presentation can only reach the sim through these:
 // commands enter the uplink queue, wait out the signal lag, then apply at a
@@ -513,6 +514,15 @@ struct FRHManifestEffect
 	FName Target;
 	double Amount = 0.0;
 	int32 MaxStack = 0; // E2b: landed plus aboard may not pass it (0: no cap)
+};
+
+// E3: one line of surplus sold to Earth on the open manifest - at most one per resource, kept sorted by name (case-sensitive ordinal).
+// The price is locked when the line is added or changed.
+struct FRHExportLine
+{
+	FName Resource;
+	int32 Kg = 0;
+	int64 PriceMcrPerKg = 0;
 };
 
 UCLASS()
@@ -1445,11 +1455,38 @@ public:
 	// E2b harness hooks (REVISION R4), runtime only, never saved; each keeps the invariant.
 	bool Debug_OpenManifestWithAward(double Kg);    // from Open or Completed: the award, AwaitingManifest, the cap, then the real PayQuotaAward
 	void Debug_ResetManifest();                     // empties the manifest, award and cap to 0, phase Open; the credit is untouched
-	void Debug_ZeroCredits() { CreditBalanceMcr = 0; CreditAwardedMcr = 0; CreditSpentMcr = 0; }
+	void Debug_ZeroCredits() { CreditBalanceMcr = 0; CreditAwardedMcr = 0; CreditSpentMcr = 0; SalesPaidMcr = 0; } // E3 (R7): the sales too
 	void Debug_GrantCredits(int64 Mcr) { CreditPay(Mcr); }
 	void Debug_SetShipMassCapCfg(double Kg) { ShipMassCapCfgKg = Kg; }
 	void Debug_SetCreditEnabled(bool bOn) { bCreditEnabled = bOn; }
 	void Debug_PushManifestItem(FName ItemName) { ManifestItems.Add(ItemName); } // CR3: appends with no check and no log line (2,000 sequences an award)
+	// E3, selling to Earth (docs/qa/2026-10-23/e3-selling-to-earth-design.md, REVISION R1-R11; Q-A (a), Q-B (a), Q-C (a)). Met is HEAD's test;
+	// LaunchShip now LOADS the round's bill (and any export lines) and takes it out of the colony, drawn in building-Id order from uncommitted
+	// stores and then the pool, never below a life-support floor; a launch that cannot load it is refused with the reason. QuotaShortLaunchSols
+	// after the met sol a short launch may carry what can be loaded, with the shortfall owed on the next round (arrears). Sales are priced
+	// at EarthValue x Earth's political multiplier less the launch cost, in integer mcr, paid through CreditPay after the debit.
+	bool CanLaunchShip(FString& OutWhy, bool& bOutShortAllowed) const; // the one launch rule (phase, credits, the export cap, the cargo)
+	bool CanLaunchShip(FString& OutWhy) const { bool bShort = false; return CanLaunchShip(OutWhy, bShort); }
+	bool LaunchShipShort(FString& OutError);         // R1: after the window, whatever can be loaded; the rest becomes arrears
+	int32 GetShortLaunchSol() const;                 // the sol from which a short launch may go (QuotaMetSol + QuotaShortLaunchSols)
+	bool AddExportLine(FName Resource, int32 Kg, FString& OutError);
+	bool RemoveExportLine(FName Resource, FString& OutError);
+	const TArray<FRHExportLine>& GetExportLines() const { return ExportLines; }
+	int64 GetExportValueMcr() const;                 // the sum of kg x the locked price over the lines
+	int64 GetSalesPaidMcr() const { return SalesPaidMcr; }
+	int64 GetEarthPriceMcrPerKg(FName Resource) const; // today's quote: EarthValue x Mpm / 1000 - the launch cost (may be <= 0; then Earth will not buy)
+	int64 GetLaunchCostMcrPerKg() const;             // (LaunchH2GPerKg x V(Hydrogen) + LaunchO2GPerKg x V(Oxygen)) / 1000
+	bool DoesEarthBuy(FName Resource) const;         // an E1 slot whose row says EarthBuys
+	double GetLaunchFloorKg(FName Resource) const;   // Earth never takes what the colony breathes, drinks or eats: GrowthReserveO2Sols x people x the draw
+	double GetLaunchLoadableKg(FName Resource) const;// uncommitted holdings (GetGrowthHoldingsKg) less the floor
+	void GetLaunchBill(TArray<TPair<FName, double>>& Out) const; // the round's bill lines, arrears included, in load order (empty if the quota is not taken)
+	double GetLaunchBillTotalKg() const;
+	bool IsQuotaBillCapped() const;                  // the current round's scaled bill would pass the ship's cap: the plateau applies (Q-A (a))
+	int32 GetQuotaArrearsKg(FName Resource) const { const int32* N = QuotaArrearsKg.Find(Resource); return N ? *N : 0; }
+	int32 GetExportBlockBytes() const;
+	void Debug_GrantSales(int64 Mcr) { if (Mcr > 0) { CreditPay(Mcr); SalesPaidMcr += Mcr; } } // XE11: sales paid in through CreditPay, as a launch pays them
+	void Debug_SetEarthTakesQuota(bool bOn) { bEarthTakesQuota = bOn; } // runtime only: false = the bill is not loaded (nor owed); export lines still are
+	void Debug_SetRequisitionInputs(double Axis, double Tension) { IdentityAxis = FMath::Clamp(Axis, -100.0, 100.0); EarthTension = FMath::Clamp(Tension, 0.0, 100.0); }
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -2267,7 +2304,9 @@ public:
 	// bill, held back in proportion to the City / Earth share (C5d): (1 - CityShare) x the next bill. FullBill is
 	// the bill before the share (equal to QuotaBill while the quota is open). So the share is the one dial:
 	// 1 spends everything above the reserve and the open bill (C5b), 0 spares the whole next bill (C5c).
-	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, FullBill = 0.0, Reserve = 0.0, Free = 0.0; bool bNextRound = false; };
+	// E3: Owed is what Earth takes at launch while the manifest is open (the round's bill line, arrears included, plus this resource's export
+	// line); it sits beside QuotaBill, never inside it, so every C5d share figure reads as before. Free = Held - QuotaBill - Owed - Reserve.
+	struct FRHGrowthAvailability { double Held = 0.0, QuotaBill = 0.0, FullBill = 0.0, Reserve = 0.0, Free = 0.0, Owed = 0.0; bool bNextRound = false; };
 	FRHGrowthAvailability GetGrowthAvailability(FName Resource) const;
 	// The City / Earth share (C5d): a colony-wide policy value, 0..1, the player's standing choice (the City
 	// panel, RH.Growth share). It applies at once, like the growth switch, and is SAVED (v39). Default
@@ -2667,6 +2706,25 @@ private:
 	double ShipMassCapCfgKg = 30000.0; // config ShipMassCapKg
 	bool bCreditEnabled = true;        // CR2's twin only (runtime)
 	bool bLedgerBlockLost = false;     // load only: E1's block could not be measured, so the credit block after it is not read
+	bool bCreditBlockLost = false;     // load only: the same for E2's block and E3's after it
+	// E3: export lines, lifetime sales (a part of CreditAwardedMcr: 0 <= SalesPaidMcr <= CreditAwardedMcr), and the arrears a short launch
+	// leaves (one count per resource; they belong to the next round to open while a short ship is inbound or the ladder rests, to the
+	// current round while it is Open or awaiting its manifest).
+	TArray<FRHExportLine> ExportLines;
+	int64 SalesPaidMcr = 0;
+	TMap<FName, int32> QuotaArrearsKg;               // lookup only; saved per E1 slot in name order
+	bool bEarthTakesQuota = true;                    // runtime only (Debug_SetEarthTakesQuota)
+	double LaunchH2GPerKg = 50.0, LaunchO2GPerKg = 300.0; // config
+	double QuotaShortLaunchSols = 3.0;               // config
+	// The bills of a round: each line scaled by ScaleQuotaBill, or the plateau (floor(raw x cap / raw total)) once the scaled total passes the
+	// configured cap; then the arrears, when they belong to this round (a resource the row does not bill gets its own line, in slot order).
+	void GetRoundBills(const FRHQuotaRow& Row, int32 Round, bool bWithArrears, TArray<TPair<FName, double>>& Out) const;
+	bool ArrearsBelongToNextRound() const { return QuotaPhase == ERHQuotaPhase::ShipInbound || QuotaPhase == ERHQuotaPhase::Completed; }
+	struct FRHLaunchLine { FName Resource; double Quota = 0.0; double Sale = 0.0; };
+	void GetLaunchLines(TArray<FRHLaunchLine>& Out) const; // the bill (if taken) then the export lines, one entry a resource, in load order
+	void FinishLaunch(const TCHAR* EarthClause, int64 Cost);
+	void WriteExportBlock(FArchive& Ar) const;
+	void ReadExportBlock(FArchive& Ar);
 	void ExecuteCommand(const FRHCommand& Cmd);
 	void AddBuilding(FName DefName, const FVector& LocationCm, bool bInstant, int32 Level = 0, int32 SizeX = 1, int32 SizeY = 1);
 	int32 GetCropStageForKey(const FIntVector& Key) const;
@@ -3918,7 +3976,7 @@ private:
 	// +1 each time the last rung reopens. Bills scale by QuotaRepeatBillMul^round;
 	// deadline and award do not.
 	int32 QuotaRepeatRound = 0;
-	double QuotaRepeatBillMul = 1.25;   // config QuotaRepeatBillMul; <= 0 = no repeat
+	double QuotaRepeatBillMul = 1.10;   // config QuotaRepeatBillMul; <= 0 = no repeat (1.25 until E3's Q-C (a))
 	FString DescribeQuotaBills() const;
 	double PendingResearchFundingKg = 0.0;
 	FName FirstQuotaName() const;

@@ -32,6 +32,8 @@ struct REDHOPESIM_API FRHResourceRow : public FTableRowBase
 	// launch cost on top). A HabSegment's "kg" is one unit. Power, Research and Hope are 0: they have no ledger slot, and Hope is never
 	// valued. Placeholders for the director's review.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 EarthValue_mcr = 0;
+	// E3: Earth buys this resource from the colony (only Mars-made rows: the Earth-made ones would be a money pump).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool EarthBuys = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
 

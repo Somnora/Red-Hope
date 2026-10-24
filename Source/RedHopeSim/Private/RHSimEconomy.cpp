@@ -369,19 +369,22 @@ void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar)
 		Cap = ShipMassCapCfgKg;
 	}
 	ShipMassCapKg = Cap;
-	if (Ar.IsError())
+	bCreditBlockLost = bLedgerBlockLost || Ar.IsError();
+	if (bCreditBlockLost)
 	{
 		return;
 	}
+	// E3: the export block follows, so the rows are read to their end before any is judged; only a bad count or a block cut short leaves
+	// the reader lost (bCreditBlockLost), and then the export block is not read.
 	int32 Count = 0;
 	Ar << Count;
 	if (Ar.IsError() || Count < 0 || Count > 4096)
 	{
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's row count %d is invalid; every landing count starts at 0"), Count);
+		bCreditBlockLost = true;
 		return;
 	}
-	TMap<FName, int32> Read;
-	FString Prev;
+	TArray<TPair<FString, int32>> Rows;
 	for (int32 n = 0; n < Count; ++n)
 	{
 		FString Name;
@@ -390,23 +393,29 @@ void URHSimWorldSubsystem::ReadCreditBlock(FArchive& Ar)
 		if (Ar.IsError())
 		{
 			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block's counts are cut short; every landing count starts at 0"));
+			bCreditBlockLost = true;
 			return;
 		}
-		if (n > 0 && Name.Compare(Prev, ESearchCase::CaseSensitive) <= 0)
+		Rows.Emplace(Name, Landed);
+	}
+	TMap<FName, int32> Read;
+	for (int32 n = 0; n < Rows.Num(); ++n)
+	{
+		const FString& Name = Rows[n].Key;
+		if (n > 0 && Name.Compare(Rows[n - 1].Key, ESearchCase::CaseSensitive) <= 0)
 		{
-			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: manifest row %s is out of order or repeated (after %s); every landing count starts at 0"), *Name, *Prev);
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: manifest row %s is out of order or repeated (after %s); every landing count starts at 0"), *Name, *Rows[n - 1].Key);
 			return;
 		}
-		Prev = Name;
 		const FRHManifestItemRow* Row = Defs ? Defs->GetManifestItem(FName(*Name)) : nullptr;
 		if (!Row || Row->MaxStack <= 0)
 		{
 			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v52: the credit block counts %s, which is not a stack-capped manifest row; skipped"), *Name);
 			continue;
 		}
-		if (Landed > 0)
+		if (Rows[n].Value > 0)
 		{
-			Read.Add(FName(*Name), Landed);
+			Read.Add(FName(*Name), Rows[n].Value);
 		}
 	}
 	ManifestLanded = MoveTemp(Read);

@@ -33,7 +33,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 52;  // v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 53;  // v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -436,6 +436,9 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	QuotaRepeatBillMul = Defs->GetConfigScalar(FName("QuotaRepeatBillMul"), QuotaRepeatBillMul);
 	AwardMcrPerKg = Defs->GetConfigScalar(FName("AwardMcrPerKg"), AwardMcrPerKg);           // E2b
 	ShipMassCapCfgKg = Defs->GetConfigScalar(FName("ShipMassCapKg"), ShipMassCapCfgKg);      // E2b
+	LaunchH2GPerKg = Defs->GetConfigScalar(FName("LaunchH2GPerKg"), LaunchH2GPerKg);         // E3
+	LaunchO2GPerKg = Defs->GetConfigScalar(FName("LaunchO2GPerKg"), LaunchO2GPerKg);         // E3
+	QuotaShortLaunchSols = Defs->GetConfigScalar(FName("QuotaShortLaunchSols"), QuotaShortLaunchSols); // E3
 	// The goal ladder: a fresh colony opens on the first slice-active quota
 	// (Q1 today - identical to the old hard-wired behavior).
 	if (ActiveQuota.IsNone())
@@ -2306,7 +2309,7 @@ void URHSimWorldSubsystem::AdvanceQuotaLadder()
 	OnAlert.Broadcast(Msg);
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== QUOTA LADDER: %s opens (sol %d, deadline sol %d)%s ==="),
 		*Best.ToString(), QuotaOpenedSol, DueSol,
-		QuotaRepeatRound > 0 ? *FString::Printf(TEXT(" - round %d, bills x%.4g"), QuotaRepeatRound, GetQuotaBillScale()) : TEXT(""));
+		QuotaRepeatRound > 0 ? (IsQuotaBillCapped() ? *FString::Printf(TEXT(" - round %d, bills capped at one ship"), QuotaRepeatRound) : *FString::Printf(TEXT(" - round %d, bills x%.4g"), QuotaRepeatRound, GetQuotaBillScale())) : TEXT(""));
 }
 
 double URHSimWorldSubsystem::ScaleQuotaBill(double RawKg, int32 Round) const
@@ -2357,9 +2360,12 @@ void URHSimWorldSubsystem::GetNextQuotaBills(TMap<FName, double>& Out) const
 	}
 	if (const FRHQuotaRow* Next = Defs->GetQuota(Best))
 	{
-		for (const auto& Req : URHDefinitionsSubsystem::ParseResourceList(Next->Requirements))
+		// E3: through the one bill rule (the plateau and, while they belong to the next round, the arrears), so C5c's identity holds.
+		TArray<TPair<FName, double>> Bills;
+		GetRoundBills(*Next, Round, ArrearsBelongToNextRound(), Bills);
+		for (const auto& Req : Bills)
 		{
-			Out.Add(Req.Key, ScaleQuotaBill(Req.Value, Round));
+			Out.Add(Req.Key, Req.Value);
 		}
 	}
 }
@@ -12464,17 +12470,19 @@ TMap<FName, TPair<double, double>> URHSimWorldSubsystem::GetQuotaProgress() cons
 	TMap<FName, TPair<double, double>> Progress;
 	if (const FRHQuotaRow* Quota = Defs ? Defs->GetQuota(ActiveQuota) : nullptr)
 	{
-		for (const auto& Req : URHDefinitionsSubsystem::ParseResourceList(Quota->Requirements))
+		// Round 0 keeps the raw bill (bit-identical to pre-D1a); renewals scale it and round to whole kg so the shown bill is the
+		// threshold. E3: from the round whose bill would pass a ship's cap, the plateau; and the arrears of a short launch, once their round
+		// is the current one.
+		TArray<TPair<FName, double>> Bills;
+		GetRoundBills(*Quota, QuotaRepeatRound, !ArrearsBelongToNextRound(), Bills);
+		for (const auto& Req : Bills)
 		{
 			double Have = GetTotalSolid(Req.Key);
 			if (const double* Fluid = Stocks.Find(Req.Key))
 			{
 				Have += *Fluid;
 			}
-			// Round 0 keeps the raw bill (bit-identical to pre-D1a); renewals scale
-			// it and round to whole kg so the shown bill is the threshold.
-			const double Need = ScaleQuotaBill(Req.Value, QuotaRepeatRound);
-			Progress.Add(Req.Key, TPair<double, double>(Have, Need));
+			Progress.Add(Req.Key, TPair<double, double>(Have, Req.Value));
 		}
 	}
 	return Progress;
@@ -13434,32 +13442,6 @@ bool URHSimWorldSubsystem::AddManifestItem(FName ItemName, FString& OutError)
 	return true;
 }
 
-bool URHSimWorldSubsystem::LaunchShip(FString& OutError)
-{
-	if (QuotaPhase != ERHQuotaPhase::AwaitingManifest)
-	{
-		OutError = TEXT("No manifest is open");
-		return false;
-	}
-	// E2b (observation 4): prices may have been live-synced since the adds; a launch never drives the balance negative.
-	const int64 Cost = bCreditEnabled ? GetManifestCostMcr() : 0;
-	if (Cost > CreditBalanceMcr)
-	{
-		OutError = FString::Printf(TEXT("Over budget at launch: the manifest now costs %s cr against %s cr; remove or re-price items"),
-			*FormatCredits(Cost), *FormatCredits(CreditBalanceMcr));
-		return false;
-	}
-	const double TransitSols = Defs->GetConfigScalar(FName("ShipTransitSols"), 3.0);
-	ShipArrivalSimSeconds = Clock->GetSimSecondsTotal() + TransitSols * URHSimClockSubsystem::SolLengthSimSeconds;
-	ShipAlertStage = 0; // fresh countdown per launch
-	QuotaPhase = ERHQuotaPhase::ShipInbound;
-	CreditBalanceMcr -= Cost; // E2b: the only debit, and the only writer of the spent total
-	CreditSpentMcr += Cost;
-	UE_LOG(LogRedHopeSim, Display, TEXT("Ship launched: %d items, %.0f kg of a %.0f kg cap, %s cr spent, %s cr carried, arrival in %.0f sols"),
-		ManifestItems.Num(), GetManifestMassKg(), ShipMassCapKg, *FormatCredits(Cost), *FormatCredits(CreditBalanceMcr), TransitSols);
-	return true;
-}
-
 void URHSimWorldSubsystem::CompleteTask(int32 TaskId)
 {
 	Tasks.RemoveAll([TaskId](const FRHTask& T) { return T.Id == TaskId; });
@@ -14010,7 +13992,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	}
 	// E1 (save v51): the ledger, the last block of the file. Its size is fixed by the slot table, so no earlier offset moves.
 	WriteLedgerBlock(Ar);
-	WriteCreditBlock(Ar); // E2b: after E1's block, the last thing in the file
+	WriteCreditBlock(Ar); // E2b: after E1's block
+	WriteExportBlock(Ar); // E3: after E2's, the last thing in the file
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14798,6 +14781,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// E1 (save v51): the ledger. Never refused: a malformed block resets it with a Warning (R1).
 	ReadLedgerBlock(Ar);
 	ReadCreditBlock(Ar); // E2b
+	ReadExportBlock(Ar); // E3
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.
