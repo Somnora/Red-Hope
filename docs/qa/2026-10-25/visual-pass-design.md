@@ -177,3 +177,9 @@ The playtest bot (`RHPlaytest.cpp`) is not touched.
 **B. Where should a tram show its wait colour (teal, amber, red)?**
 - **(a) Recommended:** on the destination boards only, with the body in its livery and the windows warm. Matches the lifts' bars.
 - **(b):** nowhere on the floor view. The TRAMS card and the section's band already carry it.
+
+
+# DIRECTOR ANSWER (2026-10-25)
+
+- **Q-A (a):** a building under construction shows its own model rising inside the scaffold as work proceeds. This applies to every building's site, not only the solar array.
+- **Q-B (a):** the tram shows its wait colour on the destination boards only.
