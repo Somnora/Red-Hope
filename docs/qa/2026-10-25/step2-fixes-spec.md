@@ -391,3 +391,121 @@ The digging would cope. The Borers already skip a floor with nothing left (`Cav:
 # DIRECTOR ANSWER (2026-10-25)
 
 - **Refusal 5 (a):** a cavern may reach down through floors that have no rock left inside its box. A box dug through on every floor is still refused. This rides in this gate as fix 8, which lets D7 atriums form over already-dug rooms (cavern down into new rock, finish it, convert it). D7's own checks still protect rooms, beds and tunnels.
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25)
+
+A read-only maintenance pass before the build. Since this spec was written at `cd886a3`, two things have landed:
+- **E4** (`76d9cc1`, the Martian market, save v55);
+- **the director's answer** above (`31ffa6f`).
+
+E4 changed W, the header, four suites, the click test and the deck panels. It did not change the cavern, district, walk, commute, tram, transit, depth or section-visualizer sources, the deck (`RHCommandDeck.cpp`) or the player controller's tunnel tip.
+
+## Re-anchored references
+
+Every `file:line` above was mapped from `cd886a3` to HEAD through `git diff`, and the line's text compared.
+- **Unchanged: 47.** Every `Cav`, `Dist`, `Walk`, `Com`, `Tram`, `Sec` and `Depth` anchor, `RHSimTransit.cpp:369`, `RHCommandDeck.cpp:2438` / `:2567`, `RHPlayerController.cpp:1018-1021` / `.h:157`, `RHCommandDeckPanels.cpp:399` and the TM7, DD9 and CV lines in the suites.
+- **Moved, same text: 31.**
+- **Changed: none.**
+
+W anchors before E4's edits moved by +1, and those after by −169 or −170. Header anchors moved by +1 to +115.
+
+| Old | New | Line |
+|---|---|---|
+| `.h:343` | `.h:344` | `constexpr int32 MaxTunnelRecords = 4096; // every tunnel ever ordered ` |
+| `.h:371` | `.h:372` | `constexpr int32 CavernMaxSide = 8; // cells along either side of the b` |
+| `.h:376` | `.h:377` | `constexpr int32 MaxCavernRecords = 1024; // every cavern ever ordered ` |
+| `.h:654` | `.h:700` | `int32 GetColonistBedPiece(int32 ColonistId) const { return ColonistBed` |
+| `.h:1087` | `.h:1133` | `uint32 GetTramVersion() const { return TramVersion; } // up on every l` |
+| `.h:3067` | `.h:3182` | `uint32 BedAssignVersion = 1; // bumped when ColonistBedPiece is re-der` |
+| `.h:3335` | `.h:3450` | `uint32 TramVersion = 0; // up on every line laid and every load; 0 for` |
+| `.h:3506` | `.h:3621` | `TMap<int32, int32> ColonistBedPiece; // derived (RefreshJobs)` |
+| `.h:3518-3519` | `.h:3633-3634` | `bool bBedKeyValid = false;` |
+| `RHColonyVisualizerSubsystem.cpp:3589` | `RHColonyVisualizerSubsystem.cpp:3592` | `const uint32 Key = HashCombine(HashCombine(Sim->GetWarmthVersion(), (u` |
+| `W:5642` | `W:5643` | `bool URHSimWorldSubsystem::ReadFloorTable(FArchive& Ar, TArray<FRHFloo` |
+| `W:5897` | `W:5898` | `++ZoningVersion; // C1: a re-zoned cell can change who has a bed` |
+| `W:6055-6066` | `W:6056-6067` | `if (Colonists.Num() == 0 // !Defs)` |
+| `W:6072-6083` | `W:6073-6084` | `TArray<int32> ByIdOrder;` |
+| `W:6239-6255` | `W:6240-6256` | `// C6a hook (b), Lab and Workstation: a long commuter's seat counts 1 ` |
+| `W:6239` | `W:6240` | `// C6a hook (b), Lab and Workstation: a long commuter's seat counts 1 ` |
+| `W:6262-6298` | `W:6263-6299` | `// C1: who sleeps in which bed is a pure function of the roster, the f` |
+| `W:8017` | `W:8018` | `bool URHSimWorldSubsystem::CanDigTunnel(int32 Level, const FVector& AC` |
+| `W:8268` | `W:8269` | `if (Ar.IsError() // Next < 1 // Count < 0 // Count > RH::MaxTunnelReco` |
+| `W:8291` | `W:8292` | `Ar << T.Id << T.RegionId << T.Level << Ax << Ay << Bx << By << bTwo <<` |
+| `W:9469` | `W:9470` | `RefreshJobs();` |
+| `W:9471-9485` | `W:9472-9486` | `else if (Cmd.Verb == FName("Designate"))` |
+| `W:14649` | `W:14479` | `ColonistStations.Reset(); // derived by RefreshJobs: nothing from befo` |
+| `W:14681-14746` | `W:14511-14576` | `// Districts (save v37, C5a). The ground maps and the membership cache` |
+| `W:14694` | `W:14524` | `D.Lattice.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X` |
+| `W:14706` | `W:14536` | `D.Deep = MoveTemp(Shape.Points);` |
+| `W:14707` | `W:14537` | `D.Level = D.Deep[0].Z;` |
+| `W:14712` | `W:14542` | `Shape.Points.Reset();` |
+| `W:14716` | `W:14546` | `bool bBad = RHDistricts::ResolveKind(D.Kind).IsNone() // D.Id <= 0 // ` |
+| `W:14736` | `W:14566` | `UE_LOG(LogRedHopeSim, Error, TEXT("LoadColony v37: district #%d '%s' (` |
+| `W:14839-14842` | `W:14670-14673` | `++ColonistSetVersion;` |
+
+## E4 as built, against this spec
+
+E4 touches none of the eight fixes' mechanisms. These are the contact points:
+- **The battery is now 57 suites in 58 runs** (E4 added `-market`). "Done means" should read "all 58 runs".
+  - The baseline to diff against is `Saved/baselines/battery_post_e4/`.
+  - The playtest baseline `Saved/baselines/ind_full_playtest.txt` is still valid.
+  - `-scale`'s reference is `Saved/d6b_scale_1.log`.
+- **The click test is 86 of 86 at 1440x860** (E4 added `market.BUY` and `market.SEND`). Fix 6's new steps and the nit-34/36 test edits sit among the section steps, which moved by +28 lines (`section.turn base` is now `RHClickTest.cpp:2110`, `section.traffic base` `:2170`, `section.traffic.off` `:2217`).
+- **The save is v55; the gate still takes no version.** None of the eight fixes, nor nits 14 and 16, changes a byte a game writes. Nit 16's 4-byte flag read is still byte-identical: E4 left the cavern and tunnel records alone.
+- **Fix 2 and E4.** E4 neither reads nor writes the bed assignment. `-market` has no mapped floor, so it is bit-identical under fix 2 by the spec's own argument.
+- **Fix 4's legacy Error line** (the v37 loader's "malformed or overlaps another") is now `W:14566`; DD9's own counted load is unchanged at `RHSimDeepDistrictSuite.cpp:84`.
+- **Wording rows.** E4 added its rows as W1-W11 under "Rows added by E4" in `gate-d-wording.md`. This gate's new strings (fixes 3 and 5, nits 11, 18, 30 and 31) go in rows J1, I1, D144 and N1 as the spec says, or a "Rows added by the step-2 fixes" block in the same style.
+
+## Fix 8: refusal 5 exempts fully dug floors (the director's answer, written into the build)
+
+The DIRECTOR ANSWER chose (a) and put it in this gate as fix 8, but the spec has no build section for it. This is that section. It adds nothing the answer does not say.
+
+**Re-verified at HEAD.**
+- `CanDigCavern` (`Cav:305`) already counts each floor's uncarved box points, as `Here`, in its hours loop (`Cav:375-388`).
+- Refusal 7 (`Cav:389-394`) refuses a box dug on every floor.
+- Refusal 5 (`Cav:395-411`) then needs an eligible point on every floor, and `IsCavernPointEligible` (`Cav:96`) is false for any carved point.
+- The carver already skips a floor with nothing left (`FindCavernWork`, `Cav:228-232`).
+- The loader (`ReadCavernBlock`) never tests eligibility, so this is a preflight-only change.
+
+**Change, in `CanDigCavern`.**
+- Keep each floor's `Here` from the hours loop: at most `RH::CavernMaxFloors` floors, so a fixed array indexed by `Top - L`.
+- In refusal 5's loop, `continue` past a floor whose `Here` is 0.
+- Refusal 5's text is unchanged; it is now accurate, because it only speaks of floors with rock left.
+- The preview's `Cells` and hours already count only uncarved points.
+
+**Check, in CV1 (`-caverns`).**
+- **(i) The review's case.** The box (1,0) to (1,1) on floors -2 to -4, where -2 and -3 are already dug inside the box, is **allowed**.
+  - Its preview counts only -4's points.
+  - Carved out (`Debug_CarveCavernCells`), it finishes with nothing carved on -2 or -3.
+  - A Borer's work goes only to -4.
+- **(ii) The exemption is only for floors with no rock.** A box over -2 to -4 with -2 fully dug, rock with no seed on -3 and a seed on -4 is refused on **-3**, with refusal 5's text.
+- **(iii) Refusal 7 still wins on a box dug through.** A box dug on all three floors is refused with "Every point of that box is already dug". Today's line 226 has only the one-floor case.
+- **(iv) For D7.** The cavern from (i), once finished, counts as a finished cavern of three floors (`GetCavernUncarved` 0 on every floor). D7's `CanOpenAtrium` reads exactly that.
+
+**Mutation M8.** Delete the `continue`. Case (i) is refused on -2 with "touches no dig and no shaft".
+
+**Battery.** `-caverns` gains checks. No existing line moves: no CV1 line pins a fully dug floor. The lines at `RHSimCavernSuite.cpp:226-233` and `:294-299` all have rock on every floor of their box, or are all dug.
+
+**Order.** Fix 8 sits with fixes 3, 4 and 5 (the cavern preflight and the loaders), and before fix 5's range bound in the same function, so the two edits to `CanDigCavern` land together.
+
+## Save versions now
+
+HEAD is v55. This gate needs no bump. The forecast queue after it:
+1. E5, v56;
+2. E6, v57;
+3. D6e and D7, v58 and v59, in whichever order they build.
+
+Each takes the next free version at build time, and each new block is an `RHSaveFrame` frame with its own tag, written after the last frame.
+
+## Stale or contradicted text
+
+1. **The summary table and "Order and verification"** list seven fixes. With the director's answer there are eight; fix 8 is above.
+2. **"Done means"** says "all 57 runs". It is 58 now.
+3. **The "When to build" paragraph** ("build after E4 commits") is satisfied: E4 is `76d9cc1`.
+
+## Blockers and findings
+
+**Blockers: none.** Every function the eight fixes name exists at HEAD with the signature the spec assumes. Every suite case the spec extends (TM2, TM7, DC1, DD9, CV1, CV8, TN2, TN8, DD1, `section.unit`, `section.traffic`) is where the table says.
+
+**Findings: none new.**

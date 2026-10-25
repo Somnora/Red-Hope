@@ -949,3 +949,157 @@ The numbers were verified independently by the re-review (Q-B 5,215 cr; Q-C +19.
 
 The re-review's conditions 1-7 are applied by the builder.
 - **Loophole (a), accepted:** a Comply redeems the marks with no spread and no cap. The political cost (every neighbour route closes and stays closed) is the price. No rule is added.
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25)
+
+A read-only maintenance pass, so the builder starts on the code as it is. E4 is now built (`76d9cc1`, save v55). HEAD `31ffa6f` adds two docs commits after it and no source change. Nothing here changes the design or the director's answers. Where the code contradicts the text, this section says what to use instead. Short names are the doc's, plus **"M"** for `Source/RedHopeSim/Private/RHSimMarket.cpp`, the file E4 created.
+
+## Re-anchored references
+
+Every `file:line` above was mapped from `4edd7fd` to HEAD through `git diff`, and the line's text was compared.
+- **Unchanged (6):** `G:480-482`, `G:486-488`, `G:488`, `RHCheats.cpp:903-904`, `RHCheats.cpp:925` and `RH_Events.csv:2`; `G:488` is still `RollEconomyLedger(SolNow)`, with `RollMarket(SolNow)` now on `G:489`.
+- **Moved, same text:** every other anchor except those in the next bullet.
+- **Gone from W:** the convoy code. E4 moved it into M. Replacements are in the second table.
+
+| Old | New | Line |
+|---|---|---|
+| `C:1116` | `C:1118` | `FRHRivalRow Greed = *ZRow; Greed.DisplayName = TEXT("Greedy Post");` |
+| `C:1161-1162` | `C:1163-1164` | `Clock->Debug_AdvanceSimSeconds(URHSimClockSubsystem::EraStepSimSeconds` |
+| `C:1223-1300` | `C:1225-1302` | `if (FParse::Param(*Params, TEXT("solidarity")))` |
+| `C:1237` | `C:1239` | `FRHCommand Cmd; Cmd.Verb = FName("Solidarity"); Cmd.Target = FName(Cho` |
+| `C:1264` | `C:1266` | `Answer(TEXT("Defy"));` |
+| `C:1276` | `C:1278` | `Answer(TEXT("Defy"));` |
+| `C:1292` | `C:1294` | `Answer(TEXT("Comply"));` |
+| `C:1790-1792` | `C:1792-1794` | `RunSols(2.5);` |
+| `C:1797` | `C:1799` | `for (int32 i = 0; i < 20; ++i) { Sim->Debug_ShiftIdentity(+10); }` |
+| `D:496-510` | `D:592-606` | `void URHDefinitionsSubsystem::ForEachRival(TFunctionRef<void(FName, co` |
+| `D:505` | `D:601` | `if (Row->SliceActive)` |
+| `H:1489` | `H:1544` | `void Debug_SetRequisitionInputs(double Axis, double Tension) { Identit` |
+| `H:1637` | `H:1759` | `void Debug_ShiftIdentity(double Delta) { IdentityAxis = FMath::Clamp(I` |
+| `H:1638` | `H:1760` | `void Debug_AddTension(double Delta) { EarthTension = FMath::Clamp(Eart` |
+| `K:700` | `K:858` | `const int64 Award = S->GetAwardMassKg() > 0.0 ? FMath::FloorToInt64(S-` |
+| `K:2251` | `K:2459` | `return HandleRivalVerb(FName("Solidarity"), bComply ? FName("Comply") ` |
+| `P:260` | `P:382` | `Sim->EnqueueCommand(Cmd);` |
+| `RHSimExportSuite.cpp:319` | `RHSimExportSuite.cpp:320` | `bMults &= Near(Sim->GetRequisitionMultiplier(), Cols[c].Mult, 1e-12);` |
+| `W:453` | `W:454` | `EarthTension = Defs->GetConfigScalar(FName("EarthTensionStart"), Earth` |
+| `W:453-454` | `W:454-455` | `EarthTension = Defs->GetConfigScalar(FName("EarthTensionStart"), Earth` |
+| `W:454` | `W:455` | `IdentityAxis = Defs->GetConfigScalar(FName("IdentityAxisStart"), Ident` |
+| `W:634` | `W:636` | `StepEndOverride = FrameEndSeconds - (double)(Steps - 1 - i) * URHSimCl` |
+| `W:672` | `W:674` | `StepUplink();` |
+| `W:683` | `W:685` | `StepCityGrowth(SubDt); // and its districts grow, one project a sol (C` |
+| `W:685` | `W:687` | `StepTrade(SubDt); // the convoy rolls toward the neighbors` |
+| `W:686` | `W:688` | `StepEarth(SubDt); // and Earth watches Mars connect to itself` |
+| `W:844` | `W:846` | `StepUplink();` |
+| `W:855` | `W:857` | `StepCityGrowth(DtSimSeconds); // same order as the agent band (parity)` |
+| `W:857` | `W:859` | `StepTrade(DtSimSeconds); // same order as the agent band (parity)` |
+| `W:858` | `W:860` | `StepEarth(DtSimSeconds); // same order as the agent band (parity)` |
+| `W:1067` | `W:1069` | `const double Now = Clock->GetSimSecondsTotal();` |
+| `W:2595-2614` | `W:2598-2617` | `const FRHEventRow* URHSimWorldSubsystem::GetActiveEvent() const` |
+| `W:9566-9575` | `W:9502-9511` | `{` |
+| `W:9570` | `W:9506` | `if (!ResolveDilemma(Cmd.Target == FName("Comply"), Reason))` |
+| `W:9851` | `W:9674` | `bool URHSimWorldSubsystem::HasActiveRival() const` |
+| `W:9853-9856` | `W:9676-9679` | `if (DiscoveredRivals.Num() > 0)` |
+| `W:10052-10067` | `W:9875-9890` | `double URHSimWorldSubsystem::GetRequisitionMultiplier() const` |
+| `W:10066` | `W:9889` | `- RequisitionTensionPenalty * (EarthTension / 100.0);` |
+| `W:10080` | `W:9903` | `EarthTension = FMath::Clamp(EarthTension + EarthTensionDriftPerSol * D` |
+| `W:10084-10090` | `W:9907-9913` | `if (!bEarthDemandPending && EarthTension >= EarthTensionDemandThreshol` |
+| `W:10198` | `W:10021` | `Influence += InfluenceDriftPerSol * Evolved * DtSols;` |
+| `W:10220-10252` | `W:10043-10075` | `}` |
+| `W:10268` | `W:10091` | `if (Influence < PacifyInfluenceCost)` |
+| `W:10274` | `W:10097` | `Influence -= PacifyInfluenceCost;` |
+| `W:10276` | `W:10099` | `EarthTension = FMath::Clamp(EarthTension - PacifyTensionRelief, 0.0, 1` |
+| `W:10430-10444` | `W:10253-10267` | `URHSimWorldSubsystem::ERHEnding URHSimWorldSubsystem::GetProjectedEndi` |
+| `W:10475` | `W:10298` | `Defs->ForEachRival([&](FName Name, const FRHRivalRow&)` |
+| `W:10488` | `W:10311` | `IdentityAxis = FMath::Clamp(IdentityAxis - DilemmaComplyAxisShift, -10` |
+| `W:10488-10489` | `W:10311-10312` | `IdentityAxis = FMath::Clamp(IdentityAxis - DilemmaComplyAxisShift, -10` |
+| `W:10489` | `W:10312` | `EarthTension = FMath::Clamp(EarthTension - DilemmaComplyTensionDrop, 0` |
+| `W:10502` | `W:10325` | `IdentityAxis = FMath::Clamp(IdentityAxis + DilemmaDefyAxisShift, -100.` |
+| `W:10502-10503` | `W:10325-10326` | `IdentityAxis = FMath::Clamp(IdentityAxis + DilemmaDefyAxisShift, -100.` |
+| `W:10503` | `W:10326` | `EarthTension = FMath::Clamp(EarthTension - DilemmaDefyTensionDrop, 0.0` |
+| `W:10507` | `W:10330` | `Defs->ForEachRival([&](FName Name, const FRHRivalRow&)` |
+| `W:13356` | `W:13190` | `if (Mcr <= 0)` |
+| `W:13393-13429` | `W:13228-13264` | `bool URHSimWorldSubsystem::CanAddManifestItem(FName ItemName, FString&` |
+| `W:14417` | `W:14291` | `Ar << EarthTension << IdentityAxis << Demand;` |
+| `X:170` | `X:172` | `const int64 Mpm = FMath::RoundToInt64(GetRequisitionMultiplier() * 100` |
+| `X:201` | `X:203` | `if (Price <= 0)` |
+| `X:265-312` | `X:267-314` | `bool URHSimWorldSubsystem::CanLaunchShip(FString& OutWhy, bool& bOutSh` |
+
+**The convoy code, now in M** (by function, since W no longer holds it):
+
+| Old (W at `4edd7fd`) | Now | What |
+|---|---|---|
+| `W:9558-9560` (dispatch: `ConvoyRival = Cmd.Target`, `ConvoyLegSols = 0.0`) | `M:1041` `BookConvoy`, the convoy made at `M:1077-1090` | E4 R3's booking worker; both `Convoy` and `MarketOrder` reach it from `ExecuteCommand` (W:9488-9495) |
+| `W:9744-9748`, `W:9745` (a dust storm freezes the convoy) | `M:1106` `StepTrade`, the storm test at `M:1114-1115`, the freeze at `M:1131-1135` | unchanged rule, now for every convoy in `Convoys` |
+| `W:9749-9751`, `W:9751` (`ConvoyLegSols += DtSols`) | `M:1116` and `M:1136-1137` (`Active.LegSols += DtSols`) | the era band still credits a whole 60 s step, as re-review change 1 relied on |
+| `W:9794-9817` (the relation at the return) | `M:1165` `StepConvoyReturn`, the diplomatic gate at `M:1233-1250` | adds E4's goodwill floor: `Done.ValueMcr >= GoodwillMinValueMcr` (`M:1237`) |
+| `W:9810` (`Influence += InfluencePerTrade`) | `M:1245` | |
+
+## E4 as built, against what E5 assumes
+
+E5 was written on E4's REVISION names. Every name it uses exists, with the spellings below. The rows marked **use instead** change what the builder writes.
+
+| E5 says | E4 as built | What E5 must use |
+|---|---|---|
+| `RollMarket` (E4 R4) | `RollMarket(int32 SolNow)`, private, `M:509`; called at `G:489` | Same. Its per-sol loop is `M:526-552`: zero the ring head, `ClearConvoys(ClosingSol, DueUpTo)` (`M:539`), advance the ring, then `MarketProduceAndReprice` **only `if (bLive)`** (`M:545`). E5's desk clearing goes straight after `M:539`. E5's own steps (record, transitions, admissions, rate) must sit **outside** the `bLive` gate, because 3.2's record runs from sol 0 with or without a live market. |
+| "a long jump steps at most 8 times; the record walks every closed sol" (3.4) | `Passed = min(SolNow - First, MarketRing)`: the **earliest** 8 closed sols are walked, and the last pass clears everything due up to `SolNow - 1` (`M:521-530`) | **use instead:** do not put the record walk inside the `Passed` loop alone. On the last pass, add the drift for every skipped sol (3.2 allows n at once) and apply every journal entry with `ClearSol <= SolNow - 1`, as `DueUpTo` does for convoys. The rate still steps at most 8 times. |
+| E4 R3(b)'s catch-up applies to the desk (2.5) | The catch-up lives inside `BookConvoy` (`M:1046-1053`): `if (bMayPrice && ClearSol > MarketCheckedSol + 1) RollMarket(ClearSol)` | **use instead:** the `Exchange` worker makes the same call itself; nothing shares it today. |
+| `CreditSpend` (E4 R3(c)) | `CreditSpend(int64)`, **private**, `M:45`: pays `min(Mcr, CreditBalanceMcr)` (floors at the balance, not the spendable) and returns the unpaid rest; the only debit writer | Same. The spendable cap is each caller's job, as `ClearConvoy` does with its `Allowed`. `MarkSpend` should mirror it. `Debug_CreditSpend` exists for tests. |
+| `GetSpendableMcr` | public, `H:1575`: `CreditBalanceMcr - CreditReservedMcr` | Same. |
+| `CreditReservedMcr` == Σ uncleared convoys' `ReservedMcr` (E4 R3(d)) | Same invariant; recomputed at the **end of `ReadMarketBlock`** (`M:1709-1728`), cut from the highest convoy Id down | R4's `ReconcileReservations()` must **move** this recompute (and the lifetime clamp below) out of `ReadMarketBlock` to after the currency frame is read (after `W:14660`). |
+| E4's lifetime-total repair | `MarketSalesMcr` clamped to `[0, CreditAwardedMcr - SalesPaidMcr]` at the end of `ReadMarketBlock` (`M:1702-1708`) | R4 extends the sum with `DeskCreditMcr + CurrencyRedeemedMcr` and moves the clamp with the recompute. |
+| The cut order "convoys and desk orders together, by `CommandId`" (R4) | `FRHConvoy` has **no `CommandId`** (fields: Id, Rival, bReturning, LegSols, bStanding, ClearSol, bCleared, ReservedMcr, OwedMcr, ValueMcr, Lines) | **use instead** the re-review's change 6 order: desk orders by `CommandId` descending, then convoys by `Id` descending. Do not add a field to the `'RHE4'` payload. |
+| E4's `Hi(q)` and `Lo(q)` | `MktHiQuote` / `MktLoQuote` (`M:33-34`, file-local) and `GetOrderReservationMcr(Rival, Lines)` (`M:826`) | Reuse them for the mark reservation. `MktLoQuote` floors at 0; E5's `LoR` floors at 1. They are separate. |
+| `DivTrunc` | `URHSimWorldSubsystem::MarketDivTrunc` (static, `M:37`) | Same function for the rate update. |
+| The goodwill floor for a mark order reads 300 marks (R4) | `ValueMcr = BuysValue + SellsValue` at the clearing price **in the market's unit** (`M:702`), compared with `GoodwillMinValueMcr` (300,000) at `M:1237` | After the issue the market's unit is marks for **every** priced order, so `ValueMcr` is in mmk for credit orders too. See finding F1. |
+| `bMarketBlockLost`, "as E2-E4 added theirs" (section 7) | **No such flag.** `ReadMarketBlock` keeps a local `bFound` (`M:1382-1386`); a lost frame or a bad slot table starts the market at its start values with a Warning | **use instead:** E5 adds a transient member, `bMarketBlockLost`, set in the `!bFound` branch (`M:1383-1386`) and wherever the slot-table check drops the market, and cleared at the top of `ReadMarketBlock`. E1-E3 never needed one; the frames replaced them. |
+| A mark order is listed in E5's block (Id, `ReservedMmk`, `OwedMmk`); others are credit orders | `FRHConvoy` carries no currency | Same. Consistent with as built. |
+| `Debug_ZeroCredits` zeroes all four totals and refuses while reserved (R4) | Returns `bool`; refuses while anything is reserved; zeroes `MarketSalesMcr` with E2's totals | Extend it to E5's two new totals. |
+| Politics (`ClosedRoutes`, embargo, defection, sabotage) | Still HEAD's separate sets (`ClosedRoutes` `W:10302`, saved `W:13643`, loaded `W:14298-14299`). E4 added harness hooks: `Debug_CloseRoute`, `Debug_SetEmbargo`, `Debug_SetDefected`, `Debug_SetSabotage`, `Debug_ClearPolitics` | CU4's "member under embargo" can use `Debug_SetEmbargo`. E5 reads none of these sets (section 4) and must keep it that way. |
+| E4's paired run (E4 R7) | MX8 in `RHSimMarketSuite.cpp`, start save `marketmx8` | CU8 can copy MX8's harness (the era steps offset, the boundary order). |
+
+## The save now
+
+- **HEAD is v55** (`W:37`), strict. The step-2 fixes gate, next in the queue, takes no version.
+- **E5 takes the next free version at build time:** v56 if it builds next.
+- **The block is a frame.** Section 7's "straight after E4's market block, as the last thing in the file" becomes a frame of its own:
+  - add `CurrencyTag = MakeTag('R','H','E','5')` in `RHSaveFrame.h` beside `MarketTag`;
+  - write it with `RHSaveFrame::Write` straight after the `'RHE4'` write (`W:13866`);
+  - read it with `RHSaveFrame::Read` straight after `ReadMarketBlock` (`W:14660`).
+
+  A frame is found by its tag, so a lost market frame no longer hides the currency frame. Only the market-lost case needs the new flag above.
+- **Offset tests no longer need E5's size.** E1-E4's block tests find their frames by tag (`RHSaveFrame::Find`): EC1/EC6 (`RHSimEconomySuite.cpp:488`, `:837`), CR9 (`RHSimCreditSuite.cpp:591`), XE10 (`RHSimExportSuite.cpp:510`) and MX9 (`RHSimMarketSuite.cpp:80`, `:1316`). So section 5.2's "subtract `GetCurrencyBlockBytes()` too, in code" is not needed, and those checks do not move. `GetCurrencyBlockBytes()` still serves CU10's layout check.
+- **One check assumes `'RHE4'` is last.** MX1 (`RHSimMarketSuite.cpp:548-555`) compares the twins' bytes from the market frame to the end of the file. With E5's frame after it, that compare covers E5's frame too. Bound it to the market frame's own length (header + payload + footer).
+- **Lines that print a whole-file size** and so move with any new frame:
+  - CV8, DP11 and EC1's two (section 5.2's list);
+  - DC9, which E4 found the list had missed;
+  - MX1's line (`RHSimMarketSuite.cpp:565`, the file size);
+  - MX9's round-trip line (`RHSimMarketSuite.cpp:1359`).
+
+  XE10's first line does not move: it is measured against the market frame, before E5's.
+- **Checkpoints.** Re-cut Midgame and Late at the new version, as section 7 says.
+
+## Battery baseline
+
+- **Battery:** `Saved/baselines/battery_post_e4/` (58 logs: 57 suites and the baseline). If the step-2 fixes gate lands first, diff against the baseline it leaves instead.
+- **Run counts:** `rh_battery.sh` now runs 57 suites in 58 runs. E5's `-currency` makes 58 suites in 59 runs.
+- **Playtest:** `Saved/baselines/ind_full_playtest.txt` (296,489 bytes) is still valid. E4's 110-sol playtest was byte-identical to it.
+- **`-scale`:** E4 measured 1,000 `RollMarket` calls at 0.746 ms (`Saved/d6b_scale_1.log` digests unchanged). E5's budget, "0.5 ms more than E4's measured figure", is therefore **1.246 ms**.
+
+## Stale or contradicted text
+
+1. **E4's status.** Line 3 says E4 is designed and not built, and risk 8 says "E4 is not built". E4 is built (`76d9cc1`); the table above is the rebase.
+2. **The version.** Section 7: "v55 if E4 takes v54". E4 took v55, so E5 takes v56 if built next.
+3. **The block.** Section 7's placement and its `bMarketBlockLost` sentence: see "The save now".
+4. **The offset tests.** Section 5.2's offset sentence and its size-line list: see "The save now" for the corrected list.
+5. **The playtest note.** Section 5.2 says "the working tree has uncommitted edits to `RHPlaytest.cpp` from another session". The tree is clean at `31ffa6f`. The builder still re-checks the playtest at the build's HEAD.
+6. **R7 O19** ("once E4 is built, re-check every `-market` line that calls its block last") is answered here: MX1's tail compare, and the MX1 and MX9 size lines.
+7. **Section 3.4's "at most 8"** holds, but the walk must handle the skipped sols as the table says.
+
+## Blockers and findings
+
+**Blockers: none.** Every E4 name E5 needs exists, and every hook E5 reuses (`Debug_RollMarket`, `Debug_SetMarketPrice`, `Debug_SetRivalStore`, `Debug_InjectRival`, `Debug_GrantCredits`, `Debug_AddInfluence`, `Debug_SetRequisitionInputs`, `Debug_ShiftIdentity`, `Debug_AddTension`, the clock's `Debug_SetSimSeconds`) is present at HEAD.
+
+**Findings for the main session** (not fixed here):
+- **F1. The goodwill floor's unit after the issue is unstated.** E4 computes `ValueMcr` at the clearing price in the market's unit. After the issue that unit is marks, so a credit order to a rival outside the bloc would be compared in marks against a floor R4 states only for mark orders. A one-line ruling closes it: either the floor is compared in the market's unit for every order (simplest; the 300 then reads as 300 marks for all), or a credit order's `ValueMcr` is converted at the clearing rate before the compare.
+- **F2. The skipped-sol walk** (the second row of the table) is a builder trap rather than a design defect. The design's words are right; E4's loop shape makes the obvious placement wrong.

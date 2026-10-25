@@ -147,3 +147,94 @@
 
 - **L7 (a):** the accordion. Opening one foldable deck panel folds the others and scrolls it into view; the scroll bar widens from 4 to 8 px. P3 ships.
 - The optional art job Q waits for L3 (what a commuter shuttle should be) and L4 (wheels).
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25): P8 only
+
+A read-only maintenance pass over **P8 (the section's labels)**, the one item of this pass left open. P1-P8 were built in `86f23a4`. Its commit message records the open follow-up:
+
+> P8 is not finished. On the 20-floor section bench (1440x860) the floor labels are about 7.5 px, dark on the rock card, and hard to read. The `section.labels` 9 px bar holds only in the click test's smaller colony.
+
+E4 (`76d9cc1`) touched the player controller and the click test since, but nothing P8 reads. This section re-anchors P8, says what was built, explains why it falls short at depth, and proposes a fix with a verify step. The fix is a proposal for the director and the main session, not a decision.
+
+## Re-anchored references
+
+| P8 says (at `b5f5863`) | At HEAD |
+|---|---|
+| `FrameSection` (`RHPlayerController.cpp:2888-2905`) | Rewritten by `86f23a4`: `ARHPlayerController::FrameSection(bool bRefit)` at `RHPlayerController.cpp:2925`, with `RefitSectionToLabels()` at `:2917`. It reads the deck's free band at `:2955`. |
+| `PlaceLabels` (`RHSectionVisualizerSubsystem.cpp:1077-1112`) | Rewritten: `PlaceLabels` at `RHSectionVisualizerSubsystem.cpp:1146`; the floor labels' size at `:1152`, their colours at `:1157-1163`. |
+| The 300 cm text (`:37`) | Unchanged: `LabelSizeCm = 300.0` at `:37`. The overlay's labels are `OverlayLabelSizeCm = 220` (`:42`). |
+| The rock card (`:994-999`) | The backdrop now closes every floor's slab; built in `BuildShared` (`:1052`, comment at `:1057`). |
+| (new in `86f23a4`) | The deck's free band: `SRHCommandDeck::GetFreeBand` (`RHCommandDeckPanels.cpp:304`). The room per side: `ComputeLabelRoomCm` (`Sec:1185`). The label size rule: `FloorLabelSizeCm` (`Sec:54`). The click test's label boxes: `GetLabelBoxes` (`Sec:1254`). The check: `CheckSectionLabels` (`RHClickTest.cpp:1140`, bar `MinGlyphPx = 9` at `:1138`), run as `section.labels` (`:2078`) and `section.labels.traffic` (`:2191`). The bench: `RH.DeepBench` (`RHCheats.cpp:1747`). |
+
+## What was built, against the design
+
+- **(a) Fit into the free band:** built (`GetFreeBand`, `FrameSection`).
+- **(b) The room per side is the widest label:** built (`ComputeLabelRoomCm`).
+- **(c) Label size:** built as `min(300 cm, 0.75 × floor height)`, **not** the design's 0.55. The deviation is commented at `Sec:50-57`: at the 400 cm pitch, 300 cm still leaves a quarter of the pitch between boxes, and 0.55 only shrank 20 floors' labels by a third.
+- **(d) The rock card under the label column:** built.
+- **The click step with the 9 px bar:** built, and it passes in the click test's colony.
+
+## Why it falls short at 20 floors
+
+The floor labels are **world-space text of a fixed world size**. `FrameSection` zooms until the slab's whole along-plane extent, plus the label room, fits the free band. On `RH.DeepBench` (20 floors, three shafts 80 m apart) the along-plane extent is wide, so the scale falls to about 0.025 px per cm. A 300 cm label is then about 7.5 px, and the 400 cm floor pitch is only about 10 px on screen.
+
+Two consequences follow from the numbers:
+1. **A bigger world size does not help.** Labels already fill 75% of the pitch, so larger text overlaps its neighbours. Larger text also widens the label room, which zooms the camera out further.
+2. **The vertical axis has room to spare.** At that scale 20 floors take only about 200 px of an 860 px window. The horizontal extent is what binds the zoom.
+
+So the labels must leave the floor rows, or be thinned. Enlarging them alone cannot fix it.
+
+## Proposed fix (P8b): a label ladder beside the cut
+
+**1. The floor labels leave the 3D scene** and become a screen-space ladder, drawn by the deck in Slate, in the free band's left margin (right of the SHAFT strip).
+- One row per floor: SURF at the top, the deepest floor at the bottom. Each row has the label's text as today, with TRAFFIC's "out · in" on the same row.
+- **Size and contrast:** a fixed 13 px font (the deck's), so glyphs are at least 11 px tall, in `RHDeck::Text` on the deck's panel colour at 85% opacity. The contrast no longer depends on the rock's lighting. The focus floor keeps its teal and warm floors their amber.
+- **Placement:** each row's ideal Y is its floor's mid-plane projected to the screen (`ProjectWorldLocationToScreen` of `CutFacePoint`). Rows are placed in order, each at least 18 px below the one above, and the whole column is shifted up if it would pass the band's bottom. That is a one-pass, order-keeping de-overlap. 20 floors need about 360 px, against a band most of the 860 px window tall (not measured here; the verify step checks it), so every floor keeps its label. Thinning (the surface, the focus floor, the deepest, every fifth and every warm floor) starts only when the rows would not fit, at about 33 floors.
+- **Leader lines:** a 1 px line from each row's right edge to its floor's projected point on the cut face (Slate `MakeLines`, in the panel colour), so a label displaced from its floor still points at it.
+- **Recomputed** when the section refits or the camera moves (the existing `RefitSectionToLabels` path and the view keys), never per frame otherwise.
+
+**2. Framing.**
+- `FrameSection` fits the slab into the free band **minus the ladder's width**.
+- `ComputeLabelRoomCm` drops its floor-label term (the left room).
+- The right room (the last shaft's label) stays.
+- Net effect: the slab gains the pixels the world-space labels took, so the zoom does not fall.
+
+**3. The other section labels** (the shaft names on the sky, lift loads, tram bands, robot counts; 220-260 cm, so about 5.5-6.5 px at the bench's scale) get a **screen-size floor**.
+- After framing, each label's world size is `max(its size today, 11 px × cm per px)`. The cm per px comes from the section camera, and the right room is computed in px, so nothing is circular.
+- Where two such labels would then overlap, the lower-priority one hides. The order is: the focus floor's, shaft names, lift loads, tram bands, robots.
+- In the click test's small colony the floor is below today's sizes, so nothing there changes.
+
+**4. Scope.** Only `Source/RedHope` changes: the section visualizer, the deck and the player controller. No sim file, row or save field changes. This is about one session.
+
+**Why not the alternatives.**
+- **Keeping the labels in the world at a constant screen size:** the 10 px pitch still forces heavy thinning, so most floors would lose their label.
+- **Zooming in vertically:** that crops the slab horizontally, which undoes P8 (a).
+
+The ladder uses the vertical room the framing already leaves empty.
+
+## Verify step
+
+1. **The bar.** `CheckSectionLabels`' `MinGlyphPx` rises from 9 to **11** (`RHClickTest.cpp:1138`). It reads the ladder's rows, through a new const getter on the deck returning each row's rect, glyph height and leader end, beside today's world label boxes.
+2. **A deep scene for the click test**, `RH_CLICKTEST_SCENE=deepbench`, at 1440x860 and again at 1600x900. It starts a fresh colony (`RH.DeepBench` needs one), runs `RH.DeepBench 2000 trams`, and opens the section at focus -10. It then runs `section.labels` with TRAFFIC off, with TRAFFIC on, and after a Q turn. Each run asserts:
+   - **(i)** every floor from SURF to -20 has a ladder row;
+   - **(ii)** no two rows or labels overlap, and every glyph is at least 11 px;
+   - **(iii)** each leader ends within 2 px of its floor's projected mid-plane on the cut face;
+   - **(iv)** each row's text against its backing has a contrast ratio of at least 4.5:1, computed in the suite from the two colours (WCAG relative luminance);
+   - **(v)** the slab's projected box lies inside the band minus the ladder.
+3. **The existing click test** passes as before at 1440x860 (86 of 86, plus the new steps), with today's `section.labels` steps at the new bar.
+4. **Captures**, looked at and kept in `Saved/RHCapture/p8b/`: the bench section at 1440x860 and 1600x900, TRAFFIC off and on, focus -1 and -10.
+5. **Frame time.** `RH.DeepBench`'s worst rebuild is re-taken. This also refreshes the step-2 review's nit 37 figures, which predate `86f23a4`. The ladder costs nothing per frame when the view is still.
+6. **Untouched:** the battery and the 110-sol playtest (no `RedHopeSim` change; the RedHopeSim dylib hash is unchanged).
+
+## Stale or contradicted text
+
+1. **P8's "(c) Label size becomes min(300 cm, 0.55 × floor height)"** was built as 0.75, with the reason commented in the code (above).
+2. **P8's "Where" anchors** are pre-`86f23a4`; see the table.
+3. **Risk 2** ("framing into the free band zooms out a little; the 9 px glyph floor guards legibility") understated the deep case. The 9 px bar is met only in the small colony.
+
+## Blockers and findings
+
+**Blockers: none.**
+
+**Finding for the main session:** P8 is presentation-only and can ship as P8b any time. The ladder is the recommendation. Its one design choice for the director is whether a floor's label may sit up to a few rows away from its floor, with a leader line, rather than beside it.

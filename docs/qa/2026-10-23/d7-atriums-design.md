@@ -583,3 +583,197 @@ Added to section 1's table, each behind the switch:
 - **Q-A (a):** an atrium is made by converting a finished cavern: dig it with the Cavern brush, then "Open as atrium" on its card. Two steps; D6a carving is untouched.
 - **Q-B (a):** no stairs in step 2. Floors change by shaft only, D6c's walk stays one floor at a time, and no commute moves.
 - The placeholders stand (HopeAtriumMax 3 stacking with Shelter, AtriumFillPermille 1500, AtriumLeakPermille 2000, no Struct bill, no power), marked "director review".
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25)
+
+A read-only maintenance pass, so the builder starts on the code as it is. Since this design was written at `6b5653c` (D6b, v49), these have landed:
+- D6c, the deep commute (`46854bf`);
+- D8, the deep view (`f461828`);
+- D6d, trams (`19051fd`);
+- the D4 perf fix (`41ac355`);
+- the UI polish pass (`86f23a4`);
+- E1-E3b, the economy fixes (v54) and E4 (v55).
+
+Still queued: the step-2 fixes, which include **fix 8** (the director's refusal-5 answer, which this design benefits from), E5, E6 and D6e. Nothing here changes the design or the director's answers. Where the code contradicts the text, this section says what to use instead.
+
+## Re-anchored references
+
+Every `file:line` above was mapped from `6b5653c` to HEAD through `git diff`, and the line's text compared.
+- **Bare `:NNN` anchors** are read as `RHSimWorldSubsystem.cpp` (W), the doc's convention, unless the sentence names another file first and the line exists in it.
+- **Unchanged: 14** (in `RHSimCavern.cpp`, the visualizers' `:67-69` and crew `:1262`, `RHGrowth.h:20`, `RHSimClockSubsystem.h:26`, `RH_Config.csv`).
+- **Moved, same text: 109** (table).
+- **Changed: 5,** all where D6c and D6d rewrote the deep gates (second table).
+
+| Old | New | Line |
+|---|---|---|
+| `.h:376-384` | `.h:378-386` | `static_assert(CavernMaxSide <= CavernMaxSideCap && CavernMaxFloors <= ` |
+| `.h:398-415` | `.h:400-417` | `struct FRHCavern` |
+| `.h:410` | `.h:412` | `int32 GetSizeY() const { return Max.Y - Min.Y + 1; }` |
+| `.h:1038` | `.h:1173` | `double GetFloorO2RequiredKg(int32 Level) const { return GetFloorCarved` |
+| `RHCavernVisualizerSubsystem.cpp:173` | `RHCavernVisualizerSubsystem.cpp:205` | `void URHCavernVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem&` |
+| `RHColonyVisualizerSubsystem.cpp:3460-3532` | `RHColonyVisualizerSubsystem.cpp:3463-3535` | `for (int32 L = -1; L >= -Sim->GetMaxDepth(); --L)` |
+| `RHColonyVisualizerSubsystem.cpp:4359-4400` | `RHColonyVisualizerSubsystem.cpp:4381-4422` | `void URHColonyVisualizerSubsystem::ApplyCutaway()` |
+| `RHColonyVisualizerSubsystem.cpp:4359` | `RHColonyVisualizerSubsystem.cpp:4381` | `void URHColonyVisualizerSubsystem::ApplyCutaway()` |
+| `RHColonyVisualizerSubsystem.cpp:4487` | `RHColonyVisualizerSubsystem.cpp:4521` | `{` |
+| `RHSimCommute.cpp:824-825` | `RHSimCommute.cpp:957-958` | `C->HomeLevel = HomeHab != 0 ? 0 : HomeLevel;` |
+| `RHSimDistricts.cpp:136-141` | `RHSimDistricts.cpp:142-147` | `if (EnsureDistrictGeo().DeepFloor.Num() > 0)` |
+| `RHSimDistricts.cpp:179-255` | `RHSimDistricts.cpp:185-260` | `void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const` |
+| `RHSimDistricts.cpp:224` | `RHSimDistricts.cpp:229` | `const int32 N = (int32)((double)(K + 1) * ColonistsPerCell) - (int32)(` |
+| `RHSimDistricts.cpp:257-275` | `RHSimDistricts.cpp:262-280` | `}` |
+| `RHSimDistricts.cpp:277-301` | `RHSimDistricts.cpp:282-306` | `bool URHSimWorldSubsystem::IsDeepHomesFresh() const` |
+| `RHSimDistricts.cpp:303-312` | `RHSimDistricts.cpp:308-317` | `int32 URHSimWorldSubsystem::GetColonistHomeCell(int32 ColonistId) cons` |
+| `RHSimDistricts.cpp:366-380` | `RHSimDistricts.cpp:371-385` | `DistrictId = Out.OfBuilding.FindRef(C.HomeHab);` |
+| `RHSimGrowth.cpp:230` | `RHSimGrowth.cpp:239` | `bool URHSimWorldSubsystem::GrowthBillFits(const TMap<FName, double>& B` |
+| `RHSimGrowth.cpp:389-394` | `RHSimGrowth.cpp:399-404` | `bool URHSimWorldSubsystem::IsCellFreeForRoom(int32 Level, int32 Cell) ` |
+| `RHSimGrowth.cpp:394` | `RHSimGrowth.cpp:404` | `&& FindModuleOnCell(Level, Cell) == nullptr && BuildingMaskInCell(Key)` |
+| `RHSimGrowth.cpp:711` | `RHSimGrowth.cpp:730` | `Out.Bill.FindOrAdd(NAME_GrowthOxygen) += Out.Cells * O2FillKgPerCell; ` |
+| `RHSimGrowth.cpp:1442` | `RHSimGrowth.cpp:1465` | `FloorO2Kg.FindOrAdd(P.Level) += P.Bill.FindRef(NAME_GrowthOxygen);` |
+| `RHSimTransit.cpp:584-588` | `RHSimTransit.cpp:601-605` | `const int32 Dig = Info.DigOf[Ordinal];` |
+| `RHSimTransit.cpp:584` | `RHSimTransit.cpp:601` | `const int32 Dig = Info.DigOf[Ordinal];` |
+| `RHSimTransit.cpp:597-598` | `RHSimTransit.cpp:614-615` | `const int32 Own = FindCarvedCellAt(RobotLevel, RobotPos);` |
+| `RHSimTransit.cpp:598` | `RHSimTransit.cpp:615` | `return Own != INDEX_NONE && Info.DigOf.IsValidIndex(Own) && Info.DigOf` |
+| `RHSimTransit.cpp:650-690` | `RHSimTransit.cpp:667-707` | `void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<` |
+| `RHSimTransit.cpp:650-684` | `RHSimTransit.cpp:667-701` | `void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<` |
+| `RHSimTransit.cpp:718-724` | `RHSimTransit.cpp:735-741` | `for (int32 k = 0; k < 8; ++k)` |
+| `RHSimTransit.cpp:785-795` | `RHSimTransit.cpp:802-812` | `for (int32 k = 0; k < 8; ++k)` |
+| `RHSimTransit.cpp:907` | `RHSimTransit.cpp:924` | `const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDe` |
+| `RHSimTransit.cpp:959-966` | `RHSimTransit.cpp:976-983` | `for (int32 k = 0; k < 4; ++k)` |
+| `RHSimTransit.cpp:978` | `RHSimTransit.cpp:995` | `Port.Dig = Info.DigOf.IsValidIndex(Landing) ? Info.DigOf[Landing] : IN` |
+| `RHSimTransit.cpp:1103-1112` | `RHSimTransit.cpp:1120-1129` | `const int32 Ord = FindCarvedCellAt(Level, Cm);` |
+| `RHSimTransit.cpp:1111` | `RHSimTransit.cpp:1128` | `Out.Dig = Info.DigOf.IsValidIndex(Ord) ? Info.DigOf[Ord] : INDEX_NONE;` |
+| `RHSimTransit.cpp:1117` | `RHSimTransit.cpp:1134` | `++DeepOffLattice; // a robot below on no carved cell and no fitted col` |
+| `RHSimTransit.cpp:1145-1151` | `RHSimTransit.cpp:1162-1168` | `else if (Start.Kind == EEnd::Cell && End.Kind == EEnd::Cell && Start.L` |
+| `RHSimTransit.cpp:1976-1977` | `RHSimTransit.cpp:2003-2004` | `UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d has no` |
+| `RHSimTransit.cpp:1977` | `RHSimTransit.cpp:2004` | `Agents->SetRobotPosition(Handles[i], Ring);` |
+| `RHSimWorldSubsystem.cpp:2847-2950` | `RHSimWorldSubsystem.cpp:2961-3067` | `void URHSimWorldSubsystem::StepHabitability(float SubDt)` |
+| `RHSimWorldSubsystem.cpp:2914` | `RHSimWorldSubsystem.cpp:3030` | `// new cells while a healthy circulator is filling is EXPANSION, not a` |
+| `RHSimWorldSubsystem.cpp:5179-5184` | `RHSimWorldSubsystem.cpp:5315-5320` | `void URHSimWorldSubsystem::AppendCarvedCell(FRHFloor& Floor, const FIn` |
+| `RHSimWorldSubsystem.cpp:8759-8765` | `RHSimWorldSubsystem.cpp:8899-8905` | `if (Level < 0 && IsLevelConnected(Level))` |
+| `RHSimWorldSubsystem.h:286-305` | `RHSimWorldSubsystem.h:288-307` | `` |
+| `RHSimWorldSubsystem.h:3099-3101` | `RHSimWorldSubsystem.h:3568-3570` | `double O2FillKgPerCell = 100.0;` |
+| `W:200` | `W:203` | `LiftDwellSeconds = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("L` |
+| `W:251` | `W:285` | `// 1 / RoverOffRoadSpeedMul times the straight-line drain, and DriveWh` |
+| `W:371-378` | `W:405-412` | `});` |
+| `W:401` | `W:435` | `InfirmaryEvacBonusSols = Defs->GetConfigScalar(FName("InfirmaryEvacBon` |
+| `W:634-642` | `W:674-682` | `StepUplink();` |
+| `W:634` | `W:674` | `StepUplink();` |
+| `W:806-814` | `W:846-854` | `StepUplink();` |
+| `W:806` | `W:846` | `StepUplink();` |
+| `W:806-822` | `W:846-862` | `StepUplink();` |
+| `W:1145-1151` | `W:1187-1193` | `{` |
+| `W:1442` | `W:1484` | `// machine may spend. The clock has already advanced to the step's end` |
+| `W:1973-1981` | `W:2018-2026` | `{` |
+| `W:1973-1987` | `W:2018-2032` | `{` |
+| `W:2859` | `W:2974` | `const double RequiredKg = Cells * O2FillKgPerCell;` |
+| `W:2864` | `W:2979` | `const double LeakedKg = FMath::Min(FillKg, Cells * O2LeakKgPerCellPerS` |
+| `W:2872` | `W:2988` | `const double WantKg = FMath::Min(O2FillRateKgPerHour * (SubDt / 50.0),` |
+| `W:2914` | `W:3030` | `// new cells while a healthy circulator is filling is EXPANSION, not a` |
+| `W:2917` | `W:3033` | `else if (bWasRated && (!bCirculated // (FillKg < RequiredKg * 0.98 && ` |
+| `W:3669` | `W:3787` | `FloorO2Kg.FindOrAdd(Level) = Cells * O2FillKgPerCell; // fill to requi` |
+| `W:3929` | `W:4047` | `C.HomeLevel = HomeHab ? 0 : Home;` |
+| `W:4308-4315` | `W:4430-4437` | `Row = Defs ? Defs->GetRoom(GetRoomAt(Level, Cell)) : nullptr;` |
+| `W:4500-4516` | `W:4626-4642` | `// staffed (threshold-on-accumulator with reset - the StepGrowth shape` |
+| `W:4542-4545` | `W:4668-4671` | `{` |
+| `W:4549-4556` | `W:4675-4682` | `return; // pre-crew colonies: zero cost, zero divergence` |
+| `W:5209-5261` | `W:5345-5397` | `FIntPoint URHSimWorldSubsystem::CarveNextCell(int32 Level, int32 Shaft` |
+| `W:5259` | `W:5395` | `AppendCarvedCell(Floor, P);` |
+| `W:5317-5380` | `W:5453-5516` | `const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDi` |
+| `W:5335-5362` | `W:5471-5498` | `// Dig labels: a flood fill over 4-neighbours, seeded in ordinal order` |
+| `W:5363-5378` | `W:5499-5514` | `// A shaft touches a dig when one of the dig's cells lies in the 8 cel` |
+| `W:5374` | `W:5510` | `Info.Touching[Info.DigOf[O]].AddUnique(Sh.Id);` |
+| `W:5407` | `W:5543` | `const FRHDigInfo& Info = EnsureDigInfo(Level);` |
+| `W:5730` | `W:5866` | `bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex,` |
+| `W:6099-6103` | `W:6235-6239` | `if (!(JobAssignNow == JobAssignLast))` |
+| `W:6214` | `W:6350` | `int32 URHSimWorldSubsystem::FindCarvedCellAt(int32 Level, const FVecto` |
+| `W:6284-6776` | `W:6420-6912` | `URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColony` |
+| `W:6743-6749` | `W:6879-6885` | `// D5 depth (Q-A (a)): Shelter, the windows' pattern - bonus-only, cap` |
+| `W:6772-6774` | `W:6908-6910` | `Out.Total = FMath::Clamp(` |
+| `W:6773` | `W:6909` | `Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.C` |
+| `W:7150-7165` | `W:7287-7302` | `double URHSimWorldSubsystem::GetStandingO2LeakKgPerSol() const` |
+| `W:7155` | `W:7292` | `Leak += (double)GetFloorCarvedCells(Level) * O2LeakKgPerCellPerSol;` |
+| `W:7267` | `W:7404` | `int32 URHSimWorldSubsystem::RehomeResidents()` |
+| `W:7310` | `W:7447` | `Displace(Home.Value, RatedFloors.Contains(Home.Key) ? CountFloorBeds(H` |
+| `W:7338` | `W:7475` | `C.HomeLevel = Hab ? 0 : Level;` |
+| `W:7352` | `W:7489` | `++ColonistSetVersion; // beds are assigned per home: re-derive them` |
+| `W:7535-7541` | `W:7673-7679` | `for (const FRHFloor& F : FloorTable)` |
+| `W:7934-7938` | `W:8072-8076` | `if (Carved(P))` |
+| `W:7972` | `W:8110` | `OutPreview->bTwoEnded = BesideCarved(B);` |
+| `W:8052` | `W:8190` | `AppendCarvedCell(Floor, P);` |
+| `W:8664` | `W:8804` | `// Prefab stations (tiered production T1): on a carved cell or (BM-1) ` |
+| `W:8709-8720` | `W:8849-8860` | `if (Level < 0)` |
+| `W:8709` | `W:8849` | `if (Level < 0)` |
+| `W:8759-8765` | `W:8899-8905` | `if (Level < 0 && IsLevelConnected(Level))` |
+| `W:9150` | `W:9290` | `else if (Cmd.Verb == FName("DigCavern"))` |
+| `W:11363-11378` | `W:11352-11367` | `double URHSimWorldSubsystem::GetViewsHope(double* OutRaw) const` |
+| `W:11576` | `W:11565` | `bool URHSimWorldSubsystem::IsFurnishKeyValid(const FIntVector& Key, FS` |
+| `W:11785-11834` | `W:11774-11823` | `int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int` |
+| `W:11790` | `W:11779` | `return (int32)(Carved * ColonistsPerCell); // the legacy rule, exactly` |
+| `W:11801-11809` | `W:11790-11798` | `for (const TPair<FIntVector, FRHCellFurnish>& Cell : FurnishedCells)` |
+| `W:11833` | `W:11822` | `const int32 Beds = BedCells == 0 ? (int32)(Carved * ColonistsPerCell) ` |
+| `W:11834-11841` | `W:11823-11830` | `if (bVerifyCaches && !Exclude)` |
+| `W:11889-11904` | `W:11878-11893` | `int32 URHSimWorldSubsystem::GetCellBeds(const FIntVector& Key) const` |
+| `W:13043` | `W:13047` | `const FRHDigInfo& Info = EnsureDigInfo(PatientLevel);` |
+| `W:13784-13826` | `W:13910-13952` | `TArray<FRHFloor> LoadedFloors;` |
+| `W:13828` | `W:13960` | `// Tear down the live colony before applying the snapshot.` |
+
+**The five that changed:**
+
+| Old (at `6b5653c`) | At HEAD | What changed |
+|---|---|---|
+| `RHSimCommute.cpp:66-70` (`MakeCommuteKey`'s D6b block, `if (EnsureDistrictGeo().DeepFloor.Num() > 0)`) | `RHSimCommute.cpp:65-73`, `if (EnsureDistrictGeo().AnyMapped())`, holding `DeepCells`, `DeepBeds`, `DeepTunnels`, `DeepShafts` and `DeepTram` | D6c and D6d built **separate key fields**, not the single "`DeepWalk` composite" R5 and section 6 assume. |
+| `RHSimCommute.cpp:371` (`bShapeTrip ... Geo.DeepFloor`) | `RHSimCommute.cpp:336`: `const bool bAnyShape = Geo.AnyMapped();` | D6d: "a floor is mapped by a shape or by a tram line". |
+| `RHSimCommute.cpp:386` (the ungated `ShapeHomes->HomeCell.Find`) | `RHSimCommute.cpp:375` | Still reads `HomeCell` for any resident not held by a whole-floor owner, now whenever any floor is mapped. The `AtriumHomeCell` split is still needed, for the reason section 4 gives. |
+| `RHSimDistricts.cpp:190-193` (`DeriveDeepHomes`' early return, `DeepFloor.Num() == 0`) | `RHSimDistricts.cpp:196-199`: `if (!Geo.AnyMapped()) return;` | R9's "no deep floor **and** no atrium" reads "no mapped floor and no atrium" now. |
+| `RHSimDistricts.cpp:200` (the resident filter, `Geo.DeepFloor.Contains`) | `RHSimDistricts.cpp:205`: `Geo.IsMapped(C.HomeLevel)` | R9's widening applies to this line. |
+
+## D6c, D6d, D8 and the economy as built, against what D7 assumes
+
+| D7 says | As built | What D7 must use |
+|---|---|---|
+| "People (D6c, to be built) walk `FRHDeepWalk`" (sections 0 and 6, R2) | Built, in `Source/RedHopeSim/Private/RHSimDeepWalk.cpp`: `FRHWalkFloor` per floor, `BuildWalkFloor` (`:154`) labels compartments (`:200`, "components of the carved non-chain cells") and picks doors and landings (`:227-266`, the landing being the lowest-ordinal neighbour). `DeriveDeepWalk` is at `:332`, `EnsureDeepWalk` at `:350`, `IsDeepWalkFresh` at `:367`. | R2's `IsWalkOrdinal` goes into `BuildWalkFloor`'s compartment flood, its door test and its landing loop. `IsDeepWalkFresh` needs no change, since it re-derives through the same function. |
+| "`FRHCommuteKey`'s `DeepWalk` composite gains `AtriumsVersion`" (section 6, R5) | No composite exists; see the first row of the second table. **The walk network's own key** (`EnsureDeepWalk`, `RHSimDeepWalk.cpp:353`: cells, tunnels, shafts, districts, trams) does not cover open cells either. | **use instead:** add a `DeepAtriums` field (`AtriumsVersion` while an atrium exists, else 0) **both** to `MakeCommuteKey`'s `AnyMapped()` block (`RHSimCommute.cpp:65-73`) **and** to the walk network's key (`RHSimDeepWalk.cpp:353`). Without the second, a mapped floor's walk keeps compartments through a void that has just opened. R5's "if D6c is not built" branch falls away. |
+| "Mapped" means "holds a floor shape" (section 4, R8, R9) | Since D6d a tram line maps its floor too (`RHSimDistricts.cpp:201`, `GetMappedLevels`) | On a floor with a tram line and no shape, atrium home cells are in `HomeCell`, not `AtriumHomeCell`. Section 4's rule still reads right with "mapped" in its new sense; AT4's twin check should cover one such floor. |
+| The bed assignment feeds home cells and `FacingHeads`' key (`BedAssignVersion`, section 4) | The step-2 fixes' **fix 2** turns the bed assignment into a lazy keyed cache (`EnsureBedAssignments`). After it lands, `BedAssignVersion` can move on the first read after a zoning or furniture change. | `GetAtriumFacingHeads` must call `EnsureBedAssignments()` (or read through `EnsureDeepHomes()`) **before** it reads its key, as fix 2 requires of every key builder that reads `BedAssignVersion`. |
+| Converting a cavern dug down from already-dug rooms (the director's answer to refusal 5) | The step-2 fixes' **fix 8** lets a cavern's box take in floors already dug through | AT fixtures may use it: dig the hall from existing rooms downward. D7's refusal 5 still protects what is in use on the upper floors. |
+| "Cutting rock above the box is D8's section view" (R11) | D8 is built (`RHSectionVisualizerSubsystem.cpp`). `BuildFloor` (`:849`) draws a slab plate for **every carved cell** in the slab (`:889`, `:965`) and knows nothing of open cells. | **Not in the design:** see finding F2. |
+| The robot walk's three neighbour generators and the landing loop (R2) | Same functions, moved (table): `BuildLatticeNeighbours` `RHSimTransit.cpp:667`, `BuildLatticeField` `:703`, `LatticeAStar` `:757`. Since `6b5653c` the file has changed only for the D4 review fixes (`b6aaa8b`), D6d's tram loads (`19051fd`) and E1 (`a7d3036`); none touches their step predicates. | R2's single predicate covers them as written. |
+| The Hope chain ends `... + Out.Shelter` (section 4) | Still so: `W:6909-6910` (`... + Out.Views + Out.Solidarity + Out.Shelter - Out.AdjacencyPenalty ...`); no economy gate touched Hope (ruling 11) | Append `+ Out.Atrium` after `Out.Shelter`, as designed. |
+| "Save: the next free version (v52...)", "a new atrium block straight after the last block (D6e's power block)", "read before teardown, structural refusals through `OutError`" (section 2) | v52 is E2's. HEAD is v55. Every block since v54 is an `RHSaveFrame` frame at the end of the file, read **after** teardown, repairing with Warnings. `RHSaveFrame::Read` moves the reader to just after the frame it finds (`RHSaveFrame.cpp:70-90`), so a frame cannot simply be read mid-file before teardown. | See "The save now" and finding F1. |
+| The battery bar "against the previous gate's baseline (post-D6e) ... only the save-version lines plus `atriums.log`" (section 7) | The tail grows by a frame, so the whole-file size lines also move: CV8, DP11, EC1's two, DC9, MX1's (`RHSimMarketSuite.cpp:565`) and MX9's (`:1359`), plus any later gate's. `-RHCommuteAudit` still exists (`RHSimCommute.cpp:922`). | Add the size lines to section 7's bar. |
+
+## The save now
+
+- **HEAD is v55.** The forecast queue:
+  1. the step-2 fixes, no bump;
+  2. E5, v56;
+  3. E6, v57;
+  4. then D6e and D7 in build order, v58 and v59.
+
+  D7 takes the next free version at build time. Section 2's "v52" and "after D6e's power block" are stale.
+- **The block is a frame with its own tag,** written after the last frame then written (`'RHE4'` at `W:13866` today, or a later gate's). There are two ways to keep section 2's checks; see F1:
+  - **(i) Read after teardown,** like E1-E4: every structural failure (a count out of range, Ids not ascending, an Id naming no cavern, a cancelled, unfinished or one-floor cavern, R7's overlap) **drops that atrium with a Warning**, as section 2's occupancy repair already does. Mutation M8 still means "a repair turned into a refusal".
+  - **(ii) Located before teardown** with `RHSaveFrame::Find` on the file's bytes (which does not move the reader), CRC-checked, and validated into locals against the loaded caverns and floors, keeping section 2's `OutError` refusals. This needs a small non-moving read helper beside `Find`.
+
+## Battery baseline
+
+- **Battery:** `Saved/baselines/battery_post_e4/` (58 logs), or the newest baseline the gates before D7 leave (section 7 names "post-D6e", which does not exist yet). `-atriums` adds a run.
+- **Playtests:** `Saved/baselines/ind_full_playtest.txt` is the `districts=1` run (E4 compared against it with `RH_PLAYTEST_DISTRICTS=1`), and it is still valid. Section 7 also asks for the default run (districts off). No baseline for it is named in E4's record, so the builder records it at its own HEAD before changing anything and compares against that.
+- **`-scale`:** `Saved/d6b_scale_1.log`. R12's preflight budget stands.
+
+## Stale or contradicted text
+
+1. **The header's queue** ("D6c ... D6d ... D6e ... designed and queued but not built"): D6c and D6d are built, and D6e is not. R5's dependency on D6e is for the save position and the version only; with frames, D7 does not need D6e first.
+2. **Section 0's "People (D6c, to be built)"** and section 6's D6c paragraph: see the second table.
+3. **Sections 2 and 7 on the save and the bar:** see "The save now" and the last row of the second table.
+4. **R5's "If D6c is not built" branch:** D6c is built; use the `DeepAtriums` fields.
+5. **R11's presentation list** leaves out D8's section view (F2).
+
+## Blockers and findings
+
+**Blockers: none.** Every function the design and its REVISION name exists at HEAD, at the moved lines in the table, except the five gates rewritten by D6c/D6d, whose new form is given above.
+
+**Findings for the main session:**
+- **F1. The save block's semantics.** Section 2 designs a block read before teardown that refuses. The house rule since v54 is a frame at the end that repairs. Option (i) (repair: drop the bad atrium with a Warning) matches E1-E4 and D7's own occupancy repair, and a dropped atrium "loses nothing: its cells become ordinary cells". Option (ii) keeps the refusals at the cost of a small helper. This refresh recommends (i). The main session should confirm before the build, since it changes what AT9 asserts.
+- **F2. D8's section view would draw a floor across the void.** `BuildFloor` (`RHSectionVisualizerSubsystem.cpp:849`) puts a plate under every carved cell in the slab, and its rebuild key (`StructKey`) does not read `AtriumsVersion`. Under D7, an open cell must draw no plate, and the key must take `AtriumsVersion` (0 with no atrium, so the D8 digests and `RH.DeepBench` cannot move). This is a missing line in R11's presentation list, not a redesign. A click step, `section.atrium` (open an atrium, cut through it, count no plate on its open cells), proves it.
+- **F3. Two keys, not one.** The walk network's key (`RHSimDeepWalk.cpp:353`) needs `AtriumsVersion` as well as the commute key. R5 names only the commute's.

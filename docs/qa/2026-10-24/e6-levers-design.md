@@ -1202,3 +1202,165 @@ The numbers are from the R10 model, reproduced by the re-review.
 - **Q-A (a):** Earth cannot embargo a pact partner. Modelled: Zarya's trade never stops; the standing trade earns 38,238 cr by sol 200, against 22,508 with no pact.
 - **Q-B (a):** a sabotage stops the target's production for the six whole sols after the act. Zarya's Ice peaks about 34% above its floor and recovers in about 20 sols.
 - **Q-C (a):** only a betrayed partner may charge a tariff: 25% both ways for 30 sols (about 2,106 cr lost). With no betrayal there is no tariff, so E4 and E5 money is untouched.
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25)
+
+A read-only maintenance pass, so the builder starts on the code as it is. Since this design was written at `72e338a` (v53), two gates have landed:
+- **the economy fixes** (`96d2246`, v54), which put the save tail in `RHSaveFrame` frames;
+- **E4** (`76d9cc1`, v55), which moved the convoy and its refusal chain out of W.
+
+E5 is still designed only. HEAD `31ffa6f` changes no source after E4. Nothing here changes the design or the director's answers. Where the code now contradicts the text, this section says what to use instead. Short names are the doc's, plus **"M"** for `Source/RedHopeSim/Private/RHSimMarket.cpp`.
+
+## Re-anchored references
+
+Every `file:line` above was mapped from `72e338a` to HEAD through `git diff`, and the line's text compared.
+- **Unchanged (1):** `RHSimDeepCommuteSuite.cpp:712` (DC9's line; it now prints 13,408 bytes).
+- **Moved, same text:** every other anchor except the next two bullets.
+- **The version line, `W:36`,** is now `W:37`, and reads `RHSaveVersion = 55`.
+- **Gone from W:** the refusal chain, `StepTrade` and the goodwill check. Their replacements are in the second table.
+
+| Old | New | Line |
+|---|---|---|
+| `C:1223-1317` | `C:1225-1319` | `if (FParse::Param(*Params, TEXT("solidarity")))` |
+| `C:1322-1401` | `C:1324-1403` | `if (FParse::Param(*Params, TEXT("covert")))` |
+| `C:1351-1369` | `C:1353-1371` | `// relation}; the intent always drops HumanNature by the shift (-6);` |
+| `C:1408` | `C:1410` | `if (FParse::Param(*Params, TEXT("espionage")))` |
+| `C:1500-1594` | `C:1502-1596` | `if (FParse::Param(*Params, TEXT("preemptive")))` |
+| `H:1651-1652` | `H:1773-1774` | `bool IsRouteClosed(FName Rival) const { return ClosedRoutes.Contains(R` |
+| `H:1701-1702` | `H:1823-1824` | `bool IsEmbargoed(FName Rival) const { return EmbargoGrace.Contains(Riv` |
+| `H:1701-1705` | `H:1823-1827` | `bool IsEmbargoed(FName Rival) const { return EmbargoGrace.Contains(Riv` |
+| `H:1701-1703` | `H:1823-1825` | `bool IsEmbargoed(FName Rival) const { return EmbargoGrace.Contains(Riv` |
+| `H:3741` | `H:3930` | `TSet<FName> ClosedRoutes;` |
+| `H:3770` | `H:3959` | `TMap<FName, double> SabotageSols; // rival -> disruption sols remainin` |
+| `H:3782-3783` | `H:3971-3972` | `TMap<FName, double> EmbargoGrace;` |
+| `K:2003-2066` | `K:2180-2243` | `return S && (S->IsEarthDemandPending() // !S->GetEmbargoingRival().IsN` |
+| `K:2135-2202` | `K:2338-2405` | `Defs->ForEachRivalRow([&](FName RowName, const FRHRivalRow& Row)` |
+| `K:2159-2162` | `K:2362-2365` | `if (S->HasDefected(RowName)) { return Txt(TEXT("sided with Earth")); }` |
+| `RHCheats.cpp:1066-1071` | `RHCheats.cpp:1077-1082` | `const double Sab = Sim->GetSabotageRemaining(Name);` |
+| `RHSimEconomySuite.cpp:60-64` | `RHSimEconomySuite.cpp:63-67` | `const auto EraOnce = [&]()` |
+| `V:4246-4248` | `V:4249-4251` | `if (Sim->HasDefected(Name)) { State = 2; }` |
+| `W:641-686` | `W:643-688` | `if (Clock->IsEraMode())` |
+| `W:672` | `W:674` | `StepUplink();` |
+| `W:776-779` | `W:778-781` | `if (Event->Type == FName("SolarFlare"))` |
+| `W:844` | `W:846` | `StepUplink();` |
+| `W:844-858` | `W:846-860` | `StepUplink();` |
+| `W:855` | `W:857` | `StepCityGrowth(DtSimSeconds); // same order as the agent band (parity)` |
+| `W:858` | `W:860` | `StepEarth(DtSimSeconds); // same order as the agent band (parity)` |
+| `W:1065-1080` | `W:1067-1082` | `void URHSimWorldSubsystem::StepUplink()` |
+| `W:1067` | `W:1069` | `const double Now = Clock->GetSimSecondsTotal();` |
+| `W:1068-1080` | `W:1070-1082` | `for (int32 i = 0; i < UplinkQueue.Num();)` |
+| `W:9580-9610` | `W:9516-9546` | `// so timing your op for the Martian night is real. Rides the uplink.` |
+| `W:9865-9870` | `W:9688-9693` | `bool URHSimWorldSubsystem::IsNight() const` |
+| `W:9884-9902` | `W:9707-9725` | `bool URHSimWorldSubsystem::RollCovertDetected(FName Rival)` |
+| `W:9927-9955` | `W:9750-9778` | `*Row->DisplayName, Rel, Hidden, HumanNatureAxis);` |
+| `W:9969` | `W:9792` | `double URHSimWorldSubsystem::GetSabotageRemaining(FName Rival) const` |
+| `W:9971` | `W:9794` | `const double* S = SabotageSols.Find(Rival);` |
+| `W:9989-9993` | `W:9812-9816` | `return false;` |
+| `W:9996-9997` | `W:9819-9820` | `}` |
+| `W:10014-10050` | `W:9837-9873` | `bool URHSimWorldSubsystem::ResolveSabotage(FName Rival, FString& OutRe` |
+| `W:10046` | `W:9869` | `SabotageSols.FindOrAdd(Rival) = SabotageDurationSols;` |
+| `W:10070-10285` | `W:9893-10108` | `void URHSimWorldSubsystem::StepEarth(float SubDt)` |
+| `W:10099-10112` | `W:9922-9935` | `if (SabotageSols.Num() > 0)` |
+| `W:10115` | `W:9938` | `StepPreemptive(SubDt);` |
+| `W:10168` | `W:9991` | `double URHSimWorldSubsystem::GetEmbargoGrace(FName Rival) const` |
+| `W:10168-10189` | `W:9991-10012` | `double URHSimWorldSubsystem::GetEmbargoGrace(FName Rival) const` |
+| `W:10174-10189` | `W:9997-10012` | `FName URHSimWorldSubsystem::GetEmbargoingRival() const` |
+| `W:10191-10259` | `W:10014-10082` | `void URHSimWorldSubsystem::StepPreemptive(float SubDt)` |
+| `W:10201-10222` | `W:10024-10045` | `if (EmbargoGrace.Num() > 0)` |
+| `W:10201-10256` | `W:10024-10079` | `if (EmbargoGrace.Num() > 0)` |
+| `W:10228-10256` | `W:10051-10079` | `if (EarthTension >= EarthPreemptiveThreshold && EmbargoGrace.Num() == ` |
+| `W:10253` | `W:10076` | `TEXT("EARTH LEANS ON %s — under pressure from Earth, they have suspend` |
+| `W:10261-10285` | `W:10084-10108` | `bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReas` |
+| `W:10263-10275` | `W:10086-10098` | `if (!EmbargoGrace.Contains(Rival))` |
+| `W:10457-10518` | `W:10280-10341` | `bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutRe` |
+| `W:10477-10479` | `W:10300-10302` | `if (!ClosedRoutes.Contains(Name))` |
+| `W:13775-13779` | `W:13641-13645` | `// The Solidarity Dilemma (save v19).` |
+| `W:13775-13793` | `W:13641-13659` | `// The Solidarity Dilemma (save v19).` |
+| `W:13777-13793` | `W:13643-13659` | `TArray<FName> Closed = ClosedRoutes.Array();` |
+| `W:13783-13787` | `W:13649-13653` | `// The espionage economy (save v21).` |
+| `W:13789-13793` | `W:13655-13659` | `// Earth's pre-emptive pressure (save v22).` |
+| `W:14018` | `W:13888` | `if (!FFileHelper::LoadFileToArray(Bytes, *Path))` |
+| `W:14031` | `W:13901` | `if (Magic != RHSaveMagic // Version != RHSaveVersion)` |
+| `W:14420-14444` | `W:14294-14318` | `// The Solidarity Dilemma (save v19).` |
+| `W:14424` | `W:14298` | `ClosedRoutes.Empty();` |
+| `W:14424-14444` | `W:14298-14318` | `ClosedRoutes.Empty();` |
+| `W:14653` | `W:14527` | `// disagreement left here (a hand-made file) drops the shape with a Wa` |
+| `W:14786-14792` | `W:14662-14668` | `// Loads land at 1x regardless of the saved speed: give the player a c` |
+
+**The convoy code, now in M:**
+
+| Old (W at `72e338a`) | Now | What |
+|---|---|---|
+| `W:9485-9520`, `W:9502-9517`, `W:9502-9520` (the `Convoy` verb's refusal chain) | `M:851` `PlanConvoy`; the chain at `M:866-905` | One plan now serves the `Convoy` and `MarketOrder` verbs (through `BookConvoy`, `M:1041`) and the preflights `CanPlaceOrder` (`M:1027`) and `CanPlaceStandingOrder` (`M:1035`). Its order: no contact (`M:868`); already out to this rival (`M:879`); **E4's new "`%d convoys are already out`"** (`M:884`); closed (`M:887-889`); disrupted (`M:892-894`, through `GetSabotageRemaining`); defected (`M:897-899`); embargo (`M:902-904`). Then E4's lines, cargo, the spare and the money. |
+| `W:9728-9760`, `W:9745` (`StepTrade`, the storm) | `M:1106` `StepTrade`, the storm test at `M:1114-1115` | Same rule, for every convoy in `Convoys`. |
+| `W:9800-9801` (`bRelationshipIntact`) | `M:1236` | Same expression on the three sets. E4 adds the goodwill floor beside it (`M:1237`). |
+
+## E4 and the economy fixes as built, against what E6 assumes
+
+| E6 says | As built | What E6 must use |
+|---|---|---|
+| "No `Debug_` hook writes the sets" (the review's "What holds", true at `72e338a`) | **E4 added five that do** (`H:1603-1607`): `Debug_CloseRoute`, `Debug_SetEmbargo(Rival, Grace)`, `Debug_SetDefected`, `Debug_SetSabotage(Rival, Sols)` and `Debug_ClearPolitics`. `-market`'s MX11 (`RHSimMarketSuite.cpp:1606-1665`) uses them to pin the four refusal texts and a defection mid-trip. | **use instead:** add them to 1.4's migration table, rebuilt on the rule list with Origin `Harness`: a `Closed`, an `Embargo` (`LiveSols` = the grace), a `Severed`, a `Disrupted` (`LiveSols` = the sols, **no market window**, a legal R3 shape), and "remove every rule of the four blocking kinds". See finding F1. |
+| The block is checked "in the place of HEAD's checks 3-6" in the `Convoy` verb and in E4's `CanPlaceOrder` (1.3) | One site: `PlanConvoy` (`M:887-905`), after **three** earlier checks, E4's convoy count being the third | **use instead:** replace `M:887-905` with the walk's block. The precedence of the four texts is unchanged, and E4's count check stays ahead of them. |
+| `EffSol = max(ClearSol, O)`, read at booking (1.3, 3.2, R5) | `PlanConvoy(Rival, bStanding, OrderText, OutPlan, OutWhy)` has **no clearing-sol input**. `BookConvoy` computes `ClearSol` (`M:1046`) before calling it; the deck's preflights have no command time at all. | **use instead:** add an `EffSol` parameter to `PlanConvoy`. `BookConvoy` passes `max(ClearSol, MarketCheckedSol)`. The preflights pass the sol an order sent now would clear in. See finding F2. |
+| The pact's cargo cap replaces E4's `ConvoyCargoKg` (2.1) | The cap check is `M:971-974` (`ConvoyCargoKg`, config, 1,000; `GetConvoyCargoKg()`) | The pact's `PactCargoKg` goes in that one check, keyed on `EffSol`. |
+| E4 3.2 step 5's reservation, `Hi(q)` and `Lo(q)` (3.2) | `GetOrderReservationMcr(Rival, Lines)` (`M:826`) with `MktHiQuote` / `MktLoQuote` (`M:33-34`) | `HiM` / `LoM` need each line's markup, so `GetOrderReservationMcr` gains the markups (or an `EffSol` to read them from). |
+| The tariff at the clearing (3.2) | `ClearConvoy(FRHConvoy&, ClosingSol)` (`M:639`) computes `BuysValue`, `SellsValue` and `ValueMcr` (`M:702`) | The markup goes into `ClearConvoy`'s Net. `ValueMcr` (the goodwill floor's input) stays at the clearing price **before** the markup, as 2.2 has the bloc tally. |
+| The convoy record (E4 3.5) gains `EffSol` (R5) and, per the re-review's change 1, each line's booking markup | `FRHConvoy` has neither, and its fields are saved in `'RHE4'` | **use instead:** keep both in E6's own payload, by convoy Id (R5's list), and do not touch `'RHE4'`: E4's MX9 pins its layout. The re-review's observation 3 holds as built: `EffSol` is always `max(ClearSol, MarketCheckedSol)` for an uncleared convoy, so a missing entry defaults to that. The booking markups cannot be re-derived, so the list stays. |
+| The sabotage cut in E4's step 2 (the rival's store) and step 3's `Prod` (4.1) | Both inside `MarketProduceAndReprice(FRHMarket& Mk)` (`M:560`), which takes **no sol** | It gains the closing sol, to test the `Disrupted` windows. |
+| Thefts and offerings "after the convoy clearing ... and before production" (4.2, R5: also while the market is off) | `RollMarket`'s loop: `ClearConvoys` at `M:539`, then the ring advance, then `if (bLive)` production and repricing at `M:545` | Apply the pending effects between `M:544` and `M:545`, outside the `bLive` gate. |
+| Retirement "at the end of each `RollMarket` roll" (1.2) | The roll ends with E4's `RivalEconomies.RemoveAll` (`M:554-558`) | Retire after it. |
+| A long jump (R5) | `RollMarket` walks only the **earliest** `min(n, 8)` closed sols, and the last pass clears everything due up to `SolNow - 1` (`M:521-530`) | The windows and the cut are tested per pass. The pending effects follow `DueUpTo`, as convoys do. |
+| E5's journal, `CanExchange` and the bloc (2.1, R7) | Not built | Unchanged: E5's names are still design names. |
+| E4's politics state (0) | Still HEAD's four sets: `ClosedRoutes` (`H:3930`), `SabotageSols` (`H:3959`), `EmbargoGrace` and `DefectedRivals` (`H:3971-3972`); written in the v19/v21/v22 slots (`W:13641-13659`) and read at `W:14294-14318` | As the design says; the anchors are in the table above. |
+
+## The save now
+
+- **HEAD is v55** (`W:37`), strict. The step-2 fixes take no version.
+- **E6 takes the next free version at build time:** v57 if E5 builds first as v56. 7.1's chain (fixes v54, E4 v55, E5 v56, E6 v57) happens to match.
+- **The frame exists now.** 7.3's last paragraph ("if the economy-fixes gate lands a shared frame helper first...") has come true. `RHSaveFrame` (`Source/RedHopeSim/Public/RHSaveFrame.h`) has 7.3's exact shape:
+  - a 12-byte header (tag, payload bytes, CRC32);
+  - an 8-byte footer (bytes, tag);
+  - `Read` finds a frame at the reader's position, else by walking the footers back from the end.
+
+  **use instead** of the hand-written frame:
+  - add `LeversTag = MakeTag('R','H','L','6')` beside `MarketTag` (the header comment already reserves `'RHL6'` for E6);
+  - write with `RHSaveFrame::Write` after the last frame then written: `'RHE5'` if E5 has built, else `'RHE4'` at `W:13866`;
+  - read with `RHSaveFrame::Read` after the last tail reader (`W:14660`, or E5's).
+
+  7.3's "if no earlier tail block reported itself lost" clause is not needed: every frame is found by its own tag. `FormatRev` and the payload layout stay as 7.3 has them (plus R5's `EffSol` list and the booking markups).
+- **The open sol for 7.3's window clamp** is simply `MarketCheckedSol`. E4's reader already seeds it from `ProductionCheckedSol` when its frame is lost (`M:1383-1386`).
+- **Offset tests (7.5).** E1-E4's block tests find their frames by tag (`RHSaveFrame::Find`: EC1/EC6, CR9, XE10, MX9), so "subtracts `GetLeversBlockBytes()`" is not needed, and those checks do not move.
+  - MX1 (`RHSimMarketSuite.cpp:548-555`) compares from `'RHE4'` to the end of the file. If E5 has not already bounded it, bound it to the market frame's own length.
+  - **The whole-file size lines that move:** CV8, DP11, EC1's two, DC9 (R4), MX1's (`RHSimMarketSuite.cpp:565`) and MX9's round-trip line (`:1359`), plus any `-currency` line E5 adds that prints a file size.
+
+## Battery baseline
+
+- **Battery:** `Saved/baselines/battery_post_e4/` (58 logs), or whatever baseline the gates built before E6 leave. `-levers` adds a run.
+- **Every sequence 0 and R4 name holds there**, checked in its logs:
+  - `-covert`'s `COVERT sequence: CXCX`;
+  - `-espionage`'s `caught=0` then `caught=1`;
+  - `-preemptive`'s embargoes at tension 78 and 100 with grace 8, and the defection at relation 5;
+  - `-icelow`'s and `-arrivals`' embargo at 75 and defection at 5;
+  - `-solidarity`'s closed-route line.
+- **Section 0's baseline name, `battery_post_ind`,** is two baselines old. E4 recorded the convoy suites as line-identical, so the sequences carry over.
+- **Playtest:** `Saved/baselines/ind_full_playtest.txt` is still valid (E4's playtest was byte-identical). 5.2's re-check at the build's HEAD stands.
+- **`-scale`:** E4's `RollMarket` figure is 0.746 ms. E6's budget is "0.2 ms more than E5's measured figure", so it waits on E5.
+
+## Stale or contradicted text
+
+1. **The header.** It says E4 and the economy-fixes gate are designed and not built (also risk 7). Both are built. E5 is not.
+2. **Section 0's refusal chain and goodwill anchors:** see the second table. E4 inserted a third early refusal, the convoy count.
+3. **Section 0's save paragraph** (`RHSaveVersion = 53`, `W:36`; the reads at `W:14420-14444`) and 7.1's version: see "The save now".
+4. **The review's "no `Debug_` hook writes the sets":** no longer true (F1).
+5. **R4's MX11 caveat** ("under E6 the cut moves Zarya's prices and stores in that check; any MX11 line that prints a price ... moves on purpose"). MX11 as built sabotages through `Debug_SetSabotage`, not the verb, and prints and checks only refusal texts, a fill, a balance and a relation. With F1's hook (a `Disrupted` rule with no market window), **MX11 does not move.** Withdraw the caveat.
+6. **7.3's frame paragraph and 7.5's offset sentence:** see "The save now".
+7. **1.3's "who calls it"** list collapses to `PlanConvoy` for the first two entries.
+
+## Blockers and findings
+
+**Blockers: none.** E6's own new hooks (`Debug_EnqueueAt`, `Debug_SetRelation`, `Debug_AddTariff`, `Debug_RemoveRule`, `Debug_SetLeversEnabled`) do not exist yet, as designed. Every E4 hook it reuses does.
+
+**Findings for the main session** (not fixed here):
+- **F1. E4's five politics hooks must join the migration.** They write the four sets E6 deletes, and MX11 depends on them. This is a gap in 1.4's table, not a redesign: rebuild them on the rules with Origin `Harness`, as the first table says. With that, `-market` stays line-identical, which is better than R4 expected.
+- **F2. The deck's preflight needs a clearing sol to read a pact's cap and a tariff's markup.** The design keys both on `EffSol`. Neither `CanPlaceOrder` nor `CanPlaceStandingOrder` has a command time, so the deck must estimate the sol an order sent now would clear in, from the clock and the uplink lag, and say so. A preflight that disagrees with the booking at a window edge is an acceptance difference, which section 6 already allows. It needs one sentence in 1.3 so the builder does not invent a rule.

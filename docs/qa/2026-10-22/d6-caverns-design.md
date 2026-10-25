@@ -766,3 +766,91 @@ The draw rows (`LiftCarW`, `TramWPerCell`, `TransitLoadPriority`) are placeholde
 - **Q-C (a): trams carry PEOPLE ONLY. Robots do not ride trams.** D6d builds no robot tram edge in `FRHDeepNet`, no robot hold or ride on a tram, and no tram term in the robot reserve. Robots keep D4's tunnels and lifts.
 
 The MERGED DESIGN AND REVISION above already follows all three answers: its sections 1, 4, 7 and 10 assume (a). The other branches of Q-A, Q-B and Q-C are dropped from the D6 build.
+
+
+# REFRESH AT HEAD 31ffa6f (2026-10-25): D6e only
+
+A read-only maintenance pass over **D6e (lift and tram power)**, the one sub-gate of this design not yet built. It covers section 5 of the MERGED DESIGN AND REVISION, the draft's section 7 and the R6 risk. D6a-D6d, D8, the economy fixes (v54) and E4 (v55) have all landed since. Nothing here changes the design. Where the code contradicts the text, this section says what to use instead.
+
+**Which text is authoritative.** The MERGED section 5 supersedes the draft's section 7:
+- its rows are `LiftCarW` 200, `TramWPerCell` 5 and `TransitLoadPriority` 6, not the draft's 40 W, 2 W and priority 8;
+- its suite is `-transitpower`, not the draft table's `-liftpower`.
+
+None of D6e's rows or names exists at HEAD yet (`git grep` finds no `LiftCarW`, `TramWPerCell`, `TransitLoadPriority` or `transitpower`).
+
+## Re-anchored references
+
+Section 5 cites D5's uncommitted worktree, "(wt)", and older HEADs. Each anchor is found again here by function:
+
+| Section 5 says | At HEAD | Notes |
+|---|---|---|
+| `StepPower` "(wt) from `:8286`" | `W:8461` `StepPower` | |
+| `FLoadEntry` (gains `Kind` and `Index`) | `W:8473`: `{ B, WantW, Priority, CoolLevel }` | As D5 left it. |
+| The scraping gate "(wt) `:8385`" | `W:8560` (`const bool bScraping = bShedStep \|\| (CoolingEntries > 0 && ...)`) | Unchanged text. |
+| The walk gate "(wt) `:8387`" | `W:8562` (`if (bShedStep \|\| (bScraping && CoolingEntries > 0))`) | Unchanged text. |
+| D5's `Loads.Sort` comparator | `W:8566` | |
+| The `ShortMask` write (`if (!E.B) ShortMask \|= ...`) | `W:8595` | |
+| *(not cited)* `StepDepthWarmth(SubDt, ShortMask, CoolingEntries > 0)` | `W:8606` | Its third argument must **stay** cooling-only when the gates widen; Warmth reads only cooling floors. |
+| "`StepTransit` runs before `StepPower` in both spines" | `W:675` before `W:690` (agent); `W:847` before `W:862` (era) | Holds. |
+| The wait computation, `RHSimTransit.cpp:201` | **`RHSimTransit.cpp:375`**, in `RollTransit`: `ComputeTransitWaitSec(Loads[S], GetShaftCapacityPlaces(S))` | D6d restructured `RollTransit`: every load is read first, then the waits. `GetShaftServedCapacityPlaces(S)` replaces the capacity argument here only. |
+| A tram line's wait | **`RHSimTransit.cpp:384`**: `ComputeTransitWaitSec(TramLoads[i], (int64)TramPlacesPerSol)` | `TramPlacesPerSol x Served / 1000` replaces the second argument. |
+| `GetShaftCapacityPlaces`, `RHSimTransit.cpp:68-76` | `RHSimTransit.cpp:235-243` | Unchanged, as section 5 requires: TR4's figures and the robot reserve keep D4's numbers. |
+| `RequestChargeWh` takes from the bank before `GenW > LoadW` (`RHSimWorldSubsystem.cpp:12673-12679`) | `W:12821` `RequestChargeWh`; the bank test at `W:12844-12846`, then `GenW > LoadW` at `W:12849` | Holds. |
+| `-transit`'s bank pins at `RHSimTransitSuite.cpp:76`, `:82`, `:463`, `:529` (the jump at `:435`) | `:77`, `:83`, `:464`, `:530` (the jump at `:436`) | +1, from E4's version edits. |
+| `depth.log`: "only DP12 fits a car (wt `RHSimDepthSuite.cpp:870`)" | DP12 starts at `RHSimDepthSuite.cpp:860` and fits the car at `:870`; it is still the last case, and no step follows the fit | Holds. |
+
+## Who fits a car now (the inertness bar, RC 9)
+
+Section 5's inertness rests on every fixture that fits a lift car also pinning the bank. At HEAD:
+
+| Where | Fits a car | Pins the bank | Under D6e |
+|---|---|---|---|
+| `-transit` | yes | yes (`RHSimTransitSuite.cpp:77`, `:83`, `:464`, `:530`) | `Served` 1000; TP6 holds it line-identical. |
+| `-trams` (D6d) | yes | yes, every fixture (`RHSimTramSuite.cpp:17`, `:152`, `:158`) | RC 9 was built in. Line-identical. |
+| `-deepcommute` (D6c) | yes | yes (`RHSimDeepCommuteSuite.cpp:142`, `:148`) | Line-identical. |
+| `-depth` DP12 | yes (`:870`) | no step follows | Nothing moves. |
+| `-scale`'s lifts case and D6d's SCALE trams case (`RHSimCommandlet.cpp:16324`, `:16860`) | yes | no | Outside the battery; their assertions must pass at the chosen draw. |
+| The playtest bot (`RHPlaytest.cpp:932-950`) | only under `lifts=1` | no | Outside the byte-identical runs, as section 5 says. |
+| **The click test** (`RHClickTest.cpp:1973`, D8's section setup) | **yes** | **no** | **Not in section 5.** Its steps check layout and labels, not wait values, so it should stay 86 of 86; but its colony can scrape at night, so the lift labels' waits may differ. Re-run it. |
+
+## The save now
+
+- **v51 is taken** (E1's ledger). HEAD is v55. The forecast queue:
+  1. the step-2 fixes, no bump;
+  2. E5, v56;
+  3. E6, v57;
+  4. then D6e and D7 in build order (v58 / v59).
+
+  D6e takes the next free version at build time.
+- **The block must be a frame.** Section 5's "a power block after the tram block" with "structural refusals through `OutError`" was written before the economy fixes. Every block since is an `RHSaveFrame` frame (`Source/RedHopeSim/Public/RHSaveFrame.h`) at the end of the file:
+  - its own tag;
+  - written after the last frame then written (`'RHE4'` at `W:13866` today, or E5's or E6's);
+  - read after the last tail reader (`W:14660` today).
+
+  A frame is read after teardown, so it **repairs with a Warning instead of refusing**:
+  - a slot whose sol tag is below -1, whose `tag % 2` is not its slot, or whose ms is above one sol is emptied;
+  - a lost frame empties every slot.
+
+  The cost of a repair is that one sol's `Served` reads 1000, and the waits stay D4's for that sol. Putting the block mid-file, as written, would also work, but it would be the only new block since v53 outside a frame. See finding F1.
+- **The size lines** that move with any new frame: CV8, DP11, EC1's two, DC9, MX1's file size (`RHSimMarketSuite.cpp:565`) and MX9's round trip (`:1359`), plus any that E5 or E6 add.
+
+## Battery baseline
+
+- **Battery:** `Saved/baselines/battery_post_e4/` (58 logs), or the newest baseline the gates before D6e leave. `-transitpower` adds a run.
+- **The line-identical bar** (RC 9): `transit.log`, `trams.log` and `deepcommute.log`, by name. `depth.log` too (DP12).
+- **Playtest:** `Saved/baselines/ind_full_playtest.txt`. The default bot fits no car, so no transit entry is ever appended: byte-identical.
+
+## Stale or contradicted text
+
+1. **The draft's section 7 and its sub-gate table** (rows, `-liftpower`): superseded by the MERGED section 5, as above.
+2. **"Save v51"**: see "The save now".
+3. **Section 5's `RHSimTransit.cpp:201` and `:68-76`**: now `:375` and `:235-243`. The tram wait it adds goes at `:384`.
+4. **R6 / RC 9's suite list** omits the click test: see the table.
+
+## Blockers and findings
+
+**Blockers: none.**
+
+**Findings for the main session:**
+- **F1. The block's placement.** Section 5 has D6e's accumulators as a mid-file block that refuses before teardown. The house rule since v54 is a framed tail block that repairs. This refresh writes the framed form, because a lost or doctored accumulator costs at most one sol's served share. If the main session prefers the original refusal semantics, it should say so before the build.
+- **F2. The click test fits a car without pinning the bank** (`RHClickTest.cpp:1973`). Under D6e that colony's lift waits can rise after a dark sol. No current step reads a wait, so this is a re-run, not a fix. A future click step that pins a wait value would need a bank pin.
