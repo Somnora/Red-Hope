@@ -513,6 +513,62 @@ TMap<FName, double> URHDefinitionsSubsystem::ParseResourceList(const FString& Li
 	return Out;
 }
 
+bool URHDefinitionsSubsystem::ParseResourceListStrict(const FString& List, TArray<TPair<FName, int64>>& OutLines, FString& OutWhy)
+{
+	OutLines.Reset();
+	OutWhy.Reset();
+	if (List.TrimStartAndEnd().IsEmpty())
+	{
+		return true;
+	}
+	TArray<FString> Entries;
+	List.ParseIntoArray(Entries, TEXT(";"), /*bCullEmpty*/ false);
+	for (const FString& Raw : Entries)
+	{
+		const FString Entry = Raw.TrimStartAndEnd();
+		if (Entry.IsEmpty())
+		{
+			OutWhy = TEXT("an empty entry (a doubled or trailing ';')");
+			OutLines.Reset();
+			return false;
+		}
+		FString Res, Amount;
+		int32 Colons = 0;
+		for (const TCHAR Ch : Entry) { Colons += Ch == TEXT(':') ? 1 : 0; }
+		if (Colons != 1 || !Entry.Split(TEXT(":"), &Res, &Amount))
+		{
+			OutWhy = FString::Printf(TEXT("entry '%s' is not Res:kg (it needs exactly one ':')"), *Entry);
+			OutLines.Reset();
+			return false;
+		}
+		Res.TrimStartAndEndInline();
+		Amount.TrimStartAndEndInline();
+		if (Res.IsEmpty())
+		{
+			OutWhy = FString::Printf(TEXT("entry '%s' names no resource"), *Entry);
+			OutLines.Reset();
+			return false;
+		}
+		bool bDigits = Amount.Len() >= 1 && Amount.Len() <= 12;
+		for (const TCHAR Ch : Amount) { bDigits &= Ch >= TEXT('0') && Ch <= TEXT('9'); }
+		if (!bDigits)
+		{
+			OutWhy = FString::Printf(TEXT("entry '%s' is not a whole number of kg"), *Entry);
+			OutLines.Reset();
+			return false;
+		}
+		const FName Key(*Res);
+		if (OutLines.ContainsByPredicate([Key](const TPair<FName, int64>& P) { return P.Key == Key; }))
+		{
+			OutWhy = FString::Printf(TEXT("'%s' appears twice"), *Res);
+			OutLines.Reset();
+			return false;
+		}
+		OutLines.Emplace(Key, FCString::Atoi64(*Amount));
+	}
+	return true;
+}
+
 void URHDefinitionsSubsystem::Debug_InjectRoom(FName Name, const FRHRoomRow& Row)
 {
 	if (RoomsTable) { RoomsTable->AddRow(Name, Row); }
@@ -569,6 +625,7 @@ void URHDefinitionsSubsystem::Debug_InjectRival(FName Name, const FRHRivalRow& R
 		RivalsTable->RowStruct = FRHRivalRow::StaticStruct();
 	}
 	RivalsTable->AddRow(Name, Row);
+	++RivalsGeneration; // E4: the sim re-parses the economy columns
 }
 
 void URHDefinitionsSubsystem::Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row)

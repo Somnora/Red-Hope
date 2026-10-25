@@ -506,8 +506,8 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const bool bRead = FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("exportsave")));
 		uint32 Ver = 0;
 		if (bRead) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
-		int32 Frame = INDEX_NONE, Payload = 0;
-		const bool bFramed = bRead && RHSaveFrame::Find(W, RHSaveFrame::ExportTag, Frame, Payload);
+		int32 Frame = INDEX_NONE, Payload = 0, MarketFrame = INDEX_NONE, MarketPayload = 0;
+		const bool bFramed = bRead && RHSaveFrame::Find(W, RHSaveFrame::ExportTag, Frame, Payload) && RHSaveFrame::Find(W, RHSaveFrame::MarketTag, MarketFrame, MarketPayload);
 		const int32 At = Frame + RHSaveFrame::HeaderBytes;
 		const auto Rd32 = [&](int32 Off) { int32 V = 0; if (Off >= 0 && Off + 4 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 4); } return V; };
 		const auto Rd64 = [&](int32 Off) { int64 V = 0; if (Off >= 0 && Off + 8 <= W.Num()) { FMemory::Memcpy(&V, W.GetData() + Off, 8); } return V; };
@@ -526,9 +526,11 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		bool bAscending = Names.Num() == 18;
 		for (int32 i = 1; i < Names.Num(); ++i) { bAscending &= Names[i - 1].Compare(Names[i], ESearchCase::CaseSensitive) < 0; }
 		const int32 IStruct = Names.IndexOfByKey(TEXT("Struct")), IOx = Names.IndexOfByKey(TEXT("Oxygen"));
-		Expect(bFramed && Ver == 54 && Payload == Bytes && Rd64(At) == 12345 && bAscending && Cur == At + Payload && At + Payload + RHSaveFrame::FooterBytes == W.Num()
+		// E4 (v55): the export block is no longer last; the market block's frame follows it, and is the file's last.
+		Expect(bFramed && Ver == 55 && Payload == Bytes && Rd64(At) == 12345 && bAscending && Cur == At + Payload && At + Payload + RHSaveFrame::FooterBytes == MarketFrame
+			&& MarketFrame + RHSaveFrame::HeaderBytes + MarketPayload + RHSaveFrame::FooterBytes == W.Num()
 			&& IStruct != INDEX_NONE && Rd32(KgAt[IStruct]) == 900 && Rd64(PriceAt[IStruct]) == 2000 && Rd32(KgAt[IOx]) == 300,
-			FString::Printf(TEXT("XE10 v%u: the export block is the file's last frame ('RHE3', %d payload bytes) - sales 12,345 mcr, 18 slots by name (%s .. %s), Struct 900 kg at 2 cr, Oxygen 300 kg"), Ver, Payload, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
+			FString::Printf(TEXT("XE10 v%u: the export block is the %d bytes before the market block - sales 12,345 mcr, 18 slots by name (%s .. %s), Struct 900 kg at 2 cr, Oxygen 300 kg"), Ver, Payload, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
 		FString Le;
 		const bool bLoaded = Sim->LoadColony(TEXT("exportsave"), Le) && Le.IsEmpty() && Sim->SaveColony(TEXT("exportsave2"), SaveErr);
 		TArray<uint8> W2;
@@ -592,10 +594,10 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		TArray<uint8> T = WI;
 		if (KgI > 0) { Put32(T, KgI, 500); Put64(T, KgI + 4, 2000); }
 		const bool bInbound = KgI > 0 && TryBytes(TEXT("exportr5"), Sealed(T)) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetExportLines().Num() == 0;
-		{ TArray<uint8> V = W; const uint32 V53 = 53; FMemory::Memcpy(V.GetData() + 4, &V53, 4); FFileHelper::SaveArrayToFile(V, *SaveFilePath(TEXT("exportr6"))); }
+		{ TArray<uint8> V = W; const uint32 V54 = 54; FMemory::Memcpy(V.GetData() + 4, &V54, 4); FFileHelper::SaveArrayToFile(V, *SaveFilePath(TEXT("exportr6"))); }
 		FString E6;
-		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/54"));
-		Expect(bInbound && bOld, FString::Printf(TEXT("XE10 a line saved while the ship is inbound is dropped on load; a v53 file is refused (%s)"), *E6));
+		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/55"));
+		Expect(bInbound && bOld, FString::Printf(TEXT("XE10 a line saved while the ship is inbound is dropped on load; a v54 file is refused (%s)"), *E6));
 	}
 
 	// --- XE11. Ruling 11 and Q4a. ---

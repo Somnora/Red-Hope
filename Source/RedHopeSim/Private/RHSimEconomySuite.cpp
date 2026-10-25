@@ -854,7 +854,7 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		}
 		bool bAscending = Names.Num() == 18;
 		for (int32 i = 1; i < Names.Num(); ++i) { bAscending &= Names[i - 1].Compare(Names[i], ESearchCase::CaseSensitive) < 0; }
-		Expect(bFramed && Ver == 54 && (uint32)RdI(Frame) == RHSaveFrame::LedgerTag && Payload == BlockBytes && Count == 18 && bAscending && Cur + 4 * 3 + 8 == At + Payload
+		Expect(bFramed && Ver == 55 && (uint32)RdI(Frame) == RHSaveFrame::LedgerTag && Payload == BlockBytes && Count == 18 && bAscending && Cur + 4 * 3 + 8 == At + Payload
 			&& (uint32)RdI(At + Payload) == (uint32)Payload && (uint32)RdI(At + Payload + 4) == RHSaveFrame::LedgerTag && At + Payload + RHSaveFrame::FooterBytes == CreditFrame,
 			FString::Printf(TEXT("EC6 the file says version %u; the E1 block is a frame ('RHE1', %d payload bytes, its CRC, the payload, the length and tag again) straight before the credit block's: 18 slots, names ascending (%s .. %s), then fill, head, checked sol and the unslotted loss"),
 				Ver, Payload, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
@@ -875,10 +875,10 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		// A doctored block: the edit, then the frame's CRC rewritten, so the block's own checks are what judge it.
 		const auto Sealed = [](TArray<uint8> T) { RHSaveFrame::Reseal(T, RHSaveFrame::LedgerTag); return T; };
 		{
-			TArray<uint8> T = W; const uint32 V53 = 53; FMemory::Memcpy(T.GetData() + 4, &V53, 4);
+			TArray<uint8> T = W; const uint32 V54 = 54; FMemory::Memcpy(T.GetData() + 4, &V54, 4);
 			FString E;
 			const bool bOk = TryBytes(TEXT("econr1"), T, E);
-			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/54")), FString::Printf(TEXT("EC6 a v53 file is refused (%s)"), *E));
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/55")), FString::Printf(TEXT("EC6 a v54 file is refused (%s)"), *E));
 		}
 		const int32 FoodSlot = Names.IndexOfByKey(TEXT("Food")), GlassSlot = Names.IndexOfByKey(TEXT("Glass"));
 		const int32 IceSlot = Names.IndexOfByKey(TEXT("Ice")), WaterSlot = Names.IndexOfByKey(TEXT("Water"));

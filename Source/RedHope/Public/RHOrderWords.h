@@ -16,6 +16,7 @@ namespace RHOrder
 		if (Verb == FName("Pacify"))        { return TEXT("Reassure"); }
 		if (Verb == FName("Solidarity"))    { return TEXT("Answer Earth"); }
 		if (Verb == FName("Covert"))        { return TEXT("Covert op"); }
+		if (Verb == FName("MarketOrder"))   { return TEXT("Market order"); }
 		if (Verb == FName("PaintDistrict")) { return TEXT("Paint district"); }
 		if (Verb == FName("EraseDistrict")) { return TEXT("Erase district"); }
 		if (Verb == FName("RenameDistrict")) { return TEXT("Rename district"); }

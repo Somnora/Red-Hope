@@ -17,6 +17,7 @@ struct FRHRoomRow;
 struct FRHFurnitureRow;
 struct FRHBuildingRow;
 struct FRHQuotaRow;
+struct FRHRivalRow;
 
 // A strategic order. Presentation can only reach the sim through these:
 // commands enter the uplink queue, wait out the signal lag, then apply at a
@@ -523,6 +524,51 @@ struct FRHExportLine
 	FName Resource;
 	int32 Kg = 0;
 	int64 PriceMcrPerKg = 0;
+};
+
+// E4, the Martian market (docs/qa/2026-10-24/e4-martian-market-design.md: DIRECTOR ANSWER > re-review conditions 2-6 > REVISION > review > design).
+// One line of a convoy's order: the kg ordered (positive buys from the rival, negative sells to it) and the kg filled at the clearing.
+// A convoy's lines are kept sorted by resource name (case-sensitive ordinal).
+struct FRHConvoyLine
+{
+	FName Resource;
+	int32 Kg = 0;
+	int32 FilledKg = 0;
+};
+
+// One convoy out. ClearSol < 0 marks a barter convoy (a rival with no economy, or the market off): it carries no lines, is born cleared and
+// delivers the rival's ExportLot at its return, exactly as before E4. ClearSol >= 0 is a priced convoy: the sol its order clears at the end of
+// (floor(ExecuteAt / sol length)), its lines, the credit reserved for it until then, the credit it carries home (OwedMcr) and the value of
+// what filled at the clearing price (ValueMcr, the goodwill test). A convoy rebuilt from a lost block is priced, cleared and empty.
+struct FRHConvoy
+{
+	int32 Id = 0;
+	FName Rival;
+	bool bReturning = false;
+	double LegSols = 0.0;          // sols travelled on the current leg
+	bool bStanding = false;        // the rival's standing order (a bare Convoy): its ImportLot sold, its ExportLot bought
+	int32 ClearSol = -1;
+	bool bCleared = true;
+	int64 ReservedMcr = 0;
+	int64 OwedMcr = 0;
+	int64 ValueMcr = 0;
+	TArray<FRHConvoyLine> Lines;
+	bool IsPriced() const { return ClearSol >= 0; }
+};
+
+// What one clearing did: a transient record (tests and the deck read it; never saved), newest last, at most 64 kept.
+struct FRHMarketClearing
+{
+	int32 ConvoyId = 0;
+	FName Rival;
+	int32 ClosingSol = 0;          // the sol the roll closed when it cleared
+	int32 ClearSol = 0;            // the sol the order was due at the end of
+	int64 NetMcr = 0;              // buys filled x price less sells filled x price (negative: the rival owes the colony)
+	int64 PaidMcr = 0;             // what CreditSpend took now
+	int64 WrittenOffMcr = 0;       // what could not be paid (a load repair only)
+	int64 ValueMcr = 0;
+	int64 ReleasedMcr = 0;         // the reservation given back
+	TArray<FRHConvoyLine> Lines;
 };
 
 UCLASS()
@@ -1461,7 +1507,9 @@ public:
 	// E2b harness hooks (REVISION R4), runtime only, never saved; each keeps the invariant.
 	bool Debug_OpenManifestWithAward(double Kg);    // from Open or Completed: the award, AwaitingManifest, the cap, then the real PayQuotaAward
 	void Debug_ResetManifest();                     // empties the manifest, award and cap to 0, phase Open; the credit is untouched
-	void Debug_ZeroCredits() { CreditBalanceMcr = 0; CreditAwardedMcr = 0; CreditSpentMcr = 0; SalesPaidMcr = 0; } // E3 (R7): the sales too
+	// E3 (R7): the sales too; E4 (re-review 5a): the market's sales too. It refuses (false, a Warning, nothing changed) while anything is
+	// reserved, since zeroing the balance under a reservation would break CreditReservedMcr <= CreditBalanceMcr.
+	bool Debug_ZeroCredits();
 	void Debug_GrantCredits(int64 Mcr) { CreditPay(Mcr); }
 	void Debug_SetShipMassCapCfg(double Kg) { ShipMassCapCfgKg = Kg; }
 	void Debug_SetCreditEnabled(bool bOn) { bCreditEnabled = bOn; }
@@ -1494,6 +1542,69 @@ public:
 	void Debug_GrantSales(int64 Mcr) { if (Mcr > 0) { CreditPay(Mcr); SalesPaidMcr += Mcr; } } // XE11: sales paid in through CreditPay, as a launch pays them
 	void Debug_SetEarthTakesQuota(bool bOn) { bEarthTakesQuota = bOn; } // runtime only: false = the bill is not loaded (nor owed); export lines still are
 	void Debug_SetRequisitionInputs(double Axis, double Tension) { IdentityAxis = FMath::Clamp(Axis, -100.0, 100.0); EarthTension = FMath::Clamp(Tension, 0.0, 100.0); }
+
+	// --- E4, the Martian market (docs/qa/2026-10-24/e4-martian-market-design.md) ---
+	// Each rival whose row carries an economy (Produce, Consume, StoreStart and StoreCap, all whole kg) has aggregate stores that produce
+	// and consume once a sol, and the colony trades with them through ONE market per region: an integer price per resource in mcr/kg,
+	// repriced once a sol at the sol threshold (inside RollMarket, straight after RollEconomyLedger) by a step of at most MarketMaxStepBp.
+	// The price reads E4's OWN tally of what the colony sold and bought (filled at the clearings), the rivals' data flows and store fill
+	// and a pull back to the Earth value - never E1's ledger - so normal play and fast-forward price identically. Convoys carry orders;
+	// an order is booked and its convoy leaves at once, and the market clears it at the end of the sol its ExecuteAt falls in. Nothing
+	// outside the market reads a price or a rival store (ruling 11, Q4a): the sim itself does not respond to a price. Greed stays barter.
+	// SAVED (v55): a market block in its own frame ('RHE4'), the last frame in the file.
+	static constexpr int32 MarketRing = 8;           // completed sols of the colony's sold / bought tally (grams)
+	enum class ERHRivalTrade : uint8 { NoEconomy, LotsOutsideCap, Malformed, Economy }; // how a rival row trades (GetRivalTradeKind)
+	bool IsMarketLive() const;                       // bMarketEnabled and at least one rival with an economy
+	ERHRivalTrade GetRivalTradeKind(FName Rival, FString* OutWhy = nullptr) const; // Malformed names the reason; the others are legal
+	bool HasRivalEconomy(FName Rival) const { return GetRivalTradeKind(Rival) == ERHRivalTrade::Economy; }
+	bool IsMarketTraded(FName Resource, int32 RegionId = 0) const;                 // at least one economy rival there lists it in StoreCap
+	int64 GetMarketPriceMcr(FName Resource, int32 RegionId = 0) const;             // 0 with no such market or slot
+	int64 GetRivalStoreG(FName Rival, FName Resource) const;                       // grams as of the last roll; -1 with no economy entry
+	int32 GetRivalStoreKg(FName Rival, FName Resource) const;                      // whole kg (floor), -1 with no entry
+	bool GetMarketTally(FName Resource, int32 Back, int64& OutSoldG, int64& OutBoughtG, int32 RegionId = 0) const; // Back 1 = the sol just closed
+	void GetRivalTradedResources(FName Rival, TArray<FName>& Out) const;           // the keys of its StoreCap, in slot order
+	int32 GetMarketCheckedSol() const { return MarketCheckedSol; }                 // the open sol: the sol the market last rolled to
+	int32 GetMarketRegionCount() const { return Markets.Num(); }
+	int32 GetRivalEconomyCount() const;                                            // rivals with an economy, by name
+	FName GetRivalEconomyName(int32 Index) const;                                  // by name string (case-sensitive ordinal)
+	int32 GetMarketBlockBytes() const;               // the bytes the market block's payload takes in a save, measured on the SYNCED state (re-sync is lazy)
+	// Money. Balance == Awarded - Spent; 0 <= SalesPaid + MarketSales <= Awarded; Reserved == the sum of the uncleared convoys' reservations
+	// and 0 <= Reserved <= Balance. Spendable = Balance - Reserved: the manifest (CanAddManifestItem), the launch (CanLaunchShip) and the short
+	// launch (LaunchShipShort) all read it, and CreditSpend is the ONLY debit writer.
+	int64 GetCreditReservedMcr() const { return CreditReservedMcr; }
+	int64 GetSpendableMcr() const { return CreditBalanceMcr - CreditReservedMcr; }
+	int64 GetMarketSalesMcr() const { return MarketSalesMcr; }
+	// One rule for the verb, the deck and the cheat: may this written order be booked now? Text is "Res:kg;Res:kg" (positive buys, negative
+	// sells). OutReserveMcr, when given, is the order's reservation (what it may cost net, one full price step either way).
+	bool CanPlaceOrder(FName Rival, const FString& Text, FString& OutWhy, int64* OutReserveMcr = nullptr) const;
+	bool CanPlaceStandingOrder(FName Rival, FString& OutWhy) const; // the bare Convoy verb: every refusal it would give now
+	// A strict parse of an order's lines, refusing by name a sign, a zero, a fraction, a duplicate or a resource both bought and sold;
+	// the lines come back sorted by resource name. An unknown resource is refused too.
+	bool ParseOrderLines(const FString& Text, TArray<FRHConvoyLine>& OutLines, FString& OutWhy) const;
+	static FString OrderLinesText(const TArray<FRHConvoyLine>& Lines, bool bBuys);   // "Ice:500;Struct:200" (the buys, or the sells as positive kg)
+	// The reservation one order needs at today's quotes, 3.2 step 5: Hi(q) = q x (10000 + MaxStep) / 10000 + 1 on each buy, Lo(q) the same
+	// the other way less 1 (floor 0) on each sell, R = max(0, sum(buy x Hi) - sum(sell x Lo)).
+	int64 GetOrderReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines) const;
+	const TArray<FRHMarketClearing>& GetMarketClearings() const { return MarketClearings; }
+	int32 GetMaxConvoysOut() const { return MaxConvoysOut; }
+	int32 GetConvoyCargoKg() const { return ConvoyCargoKg; }
+	int32 GetMarketMaxStepBp() const { return MarketMaxStepBp; }
+	// Harness hooks (runtime only, never saved; each keeps the invariants).
+	void Debug_SetMarketEnabled(bool bOn) { bMarketEnabled = bOn; }
+	void Debug_SetMarketRivalOnly(bool bOn) { bMarketRivalOnly = bOn; }               // the fallback: price from the rivals' data and the sol count alone
+	void Debug_SetRivalStore(FName Rival, FName Resource, int64 Kg);                 // whole kg; the entry is created at its start values first
+	void Debug_SetMarketPrice(FName Resource, int64 Mcr, int32 RegionId = 0);        // clamped into the band
+	void Debug_SetMarketTally(FName Resource, int64 SoldKgPerSol, int64 BoughtKgPerSol, int32 RegionId = 0); // every ring entry, and the fill
+	void Debug_RollMarket(int32 SolNow) { RollMarket(SolNow); }                       // the whole roll: clearing, production, reprice
+	int64 Debug_CreditSpend(int64 Mcr) { return CreditSpend(Mcr); }                   // returns what could not be paid
+	void Debug_SyncRivalEconomies() { SyncRivalEconomies(false, true); }
+	static int64 MarketDivTrunc(int64 A, int64 B);   // the update's one signed division: truncates toward zero, B > 0
+	// MX11's politics, set directly (each is the state its real worker leaves; runtime fixtures only).
+	void Debug_CloseRoute(FName Rival) { ClosedRoutes.Add(Rival); }
+	void Debug_SetEmbargo(FName Rival, double GraceSols) { EmbargoGrace.Add(Rival, GraceSols); }
+	void Debug_SetDefected(FName Rival) { DefectedRivals.Add(Rival); }
+	void Debug_SetSabotage(FName Rival, double Sols) { SabotageSols.Add(Rival, Sols); }
+	void Debug_ClearPolitics() { ClosedRoutes.Reset(); EmbargoGrace.Reset(); DefectedRivals.Reset(); SabotageSols.Reset(); }
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -1620,10 +1731,14 @@ public:
 	// export lot (solids drop at the Lander for hauling, fluids join the pool)
 	// and warms the per-rival relation - the dependency the Solidarity Dilemma
 	// (Gate C) will later demand the player cut.
-	FName GetConvoyRival() const { return ConvoyRival; }
-	bool IsConvoyReturning() const { return bConvoyReturning; }
+	// E4: up to MaxConvoysOut convoys out, at most one to each rival (GetConvoys, by Id). These three read the LOWEST-Id convoy, which is
+	// exactly the one convoy of every colony that has at most one out.
+	FName GetConvoyRival() const { return Convoys.Num() > 0 ? Convoys[0].Rival : NAME_None; }
+	bool IsConvoyReturning() const { return Convoys.Num() > 0 && Convoys[0].bReturning; }
 	// Round-trip progress 0..1 (0 when idle).
-	double GetConvoyProgress() const;
+	double GetConvoyProgress() const { return Convoys.Num() > 0 ? GetConvoyProgress(Convoys[0]) : 0.0; }
+	double GetConvoyProgress(const FRHConvoy& Convoy) const;
+	const TArray<FRHConvoy>& GetConvoys() const { return Convoys; }
 	double GetRivalRelation(FName Rival) const;
 
 	// --- Earth's Shadow (M3 Gate B) ---
@@ -3702,6 +3817,77 @@ private:
 	void NoteFlow(FName Resource, ERHLedgerLeg Leg, double Kg); // ignores Kg <= 0 and a name with no slot
 	void NoteFlowMap(const TMap<FName, double>& Kg, ERHLedgerLeg Leg) { for (const auto& P : Kg) { NoteFlow(P.Key, Leg, P.Value); } }
 	void RollEconomyLedger(int32 SolNow);            // straight after RollProductionLedger, with the same SolNow
+	// E4: the market's state. RivalEconomies holds every rival row that has (or, for an uncleared convoy, had) an economy, sorted by name
+	// string (never by FName index); Markets one entry per region with an economy rival, by RegionId. Both are index-aligned with EconSlots
+	// (the slots are rebuilt at world start and at load, and both are rebuilt with them). Parsed once and cached: re-synced only at world
+	// start, at load, and when the rivals table changes (URHDefinitionsSubsystem::GetRivalsGeneration).
+	struct FRHRivalEconomy
+	{
+		FName Rival;
+		int32 RegionId = 0;
+		bool bHasEconomy = false;                    // its row has an economy now; false = kept only until its uncleared convoys clear
+		TArray<int64> ProduceG, ConsumeG, CapG;      // per E1 slot, grams a sol / grams held at most
+		TArray<int64> StoreG;                        // per E1 slot, grams held (SAVED; may stand above CapG after the colony sold it goods)
+		TArray<uint8> Trades;                        // per E1 slot: 1 when the rival lists it in StoreCap
+	};
+	struct FRHMarket
+	{
+		int32 RegionId = 0;
+		TArray<int64> PriceMcr;                      // per E1 slot (SAVED)
+		TArray<int64> RingSoldG, RingBoughtG;        // slot x MarketRing + entry (SAVED): what the colony sold / bought, as filled
+		int32 RingFill = 0, RingHead = 0;            // SAVED
+		// Derived at every sync, never saved.
+		TArray<uint8> bTraded;
+		TArray<int64> ProdSumG, ConsSumG, CapSumG;   // over this region's economy rivals
+		TArray<int64> VMcr, FloorMcr, CeilMcr;       // the Earth value and the band around it
+	};
+	// mutable: a read (a booking check, the deck, GetMarketBlockBytes) after an injection fills the cache first, so every read and the save
+	// see the SYNCED state. The sync is a pure function of the rows and the stored state, so a lazy one equals the eager one.
+	mutable TArray<FRHRivalEconomy> RivalEconomies;
+	mutable TArray<FRHMarket> Markets;
+	mutable uint32 SyncedRivalsGeneration = MAX_uint32; // MAX = never synced
+	int32 MarketCheckedSol = 0;                      // the open sol; seeded from ProductionCheckedSol like EconCheckedSol
+	int64 CreditReservedMcr = 0;                     // == the sum of the uncleared convoys' ReservedMcr
+	int64 MarketSalesMcr = 0;                        // lifetime credit a convoy brought home from market sales (a part of CreditAwardedMcr)
+	TArray<FRHMarketClearing> MarketClearings;       // transient
+	bool bMarketEnabled = true;                      // runtime only: the inert twin's switch
+	bool bMarketRivalOnly = false;                   // MarketRivalOnly (config; Debug_SetMarketRivalOnly)
+	// Config (the C++ fallbacks equal RH_Config.csv; each is clamped to its sane range on read).
+	int32 MarketWindowSols = 5, MarketMaxStepBp = 500, MarketGainPct = 20, MarketFlowWeight = 50, MarketStoreWeight = 30, MarketAnchorWeight = 50;
+	int32 MarketTargetFillBp = 5000, MarketFloorBp = 2500, MarketCeilBp = 40000;
+	int64 MarketMinVolumeG = 1000000;
+	int32 MaxConvoysOut = 3, ConvoyCargoKg = 1000;
+	int64 GoodwillMinValueMcr = 300000;
+	void InitMarket();                               // config, then the first sync (world start)
+	void SyncRivalEconomies(bool bWarn, bool bForce = false) const;
+	bool IsRivalSyncStale() const;
+	// The pure rebuild: the rows, the old stores and prices in, the new state out. bWarn logs one Warning per malformed row (world start).
+	void BuildMarketState(const TArray<FRHRivalEconomy>& OldEcon, const TArray<FRHMarket>& OldMarkets, TArray<FRHRivalEconomy>& OutEcon, TArray<FRHMarket>& OutMarkets, bool bWarn) const;
+	ERHRivalTrade EvaluateRivalRow(const FRHRivalRow& Row, FRHRivalEconomy* OutEcon, FString* OutWhy) const;
+	FRHRivalEconomy* FindRivalEconomy(FName Rival) const; // lazily synced; const because the cache is mutable
+	FRHMarket* FindMarket(int32 RegionId) const;
+	void RollMarket(int32 SolNow);                   // StepCityGrowth, straight after RollEconomyLedger, with the same SolNow
+	void MarketProduceAndReprice(FRHMarket& Market);
+	void ClearConvoys(int32 ClosingSol, int32 DueUpToSol);
+	void ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol);
+	int64 CreditSpend(int64 Mcr);                    // the only debit writer: pays min(Mcr, Balance), returns the rest
+	void WriteMarketBlock(FArchive& Ar) const;
+	void ReadMarketBlock(FArchive& Ar, const TArray<uint8>& File, FName V17Rival, bool bV17Returning, double V17LegSols);
+	void WriteMarketPayload(FArchive& Ar, const TArray<FRHRivalEconomy>& Econ, const TArray<FRHMarket>& Mkts) const;
+	// Booking: one plan for the verb, the deck and the cheat. Nothing here acts; BookConvoy commits it.
+	struct FRHBookPlan
+	{
+		bool bPriced = false;
+		bool bStanding = false;
+		TArray<FRHConvoyLine> Lines;
+		TMap<FName, double> Cost;                    // the aggregate draw: fuel + wear + every sell line, summed per resource
+		TMap<FName, double> Sells;                   // for E1's Out leg (priced) or the barter lot
+		int64 ReserveMcr = 0;
+	};
+	bool PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, FRHBookPlan& OutPlan, FString& OutWhy) const;
+	bool BookConvoy(const FRHCommand& Cmd, bool bStanding, FString& OutWhy);
+	void StepConvoyReturn(const FRHConvoy& Done);
+	int32 FindConvoyIndexFor(FName Rival) const;
 	void WriteLedgerBlock(FArchive& Ar) const;
 	void ReadLedgerBlock(FArchive& Ar, const TArray<uint8>& File); // never refuses: a bad block resets the ledger with a Warning (R1); v54: its own frame in File
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
@@ -3718,14 +3904,12 @@ private:
 	double DiscoverySeatHours = 0.0;
 	double HopeDiscoveryThreshold = 85.0;
 	void StepDiscovery(float SubDt);
-	// Rivals & trade (M3 Gate A; save v17). One active convoy at a time (fleet
-	// expansion is data once proven). ConvoyRival None = idle. Transit is a sol
-	// accumulator advanced only under clear sky (storm freezes it); at the
-	// one-way distance it flips to the return leg; at the round trip it delivers.
-	// Relations persist per rival (RivalRelations), seeded from RelationStart.
-	FName ConvoyRival;
-	bool bConvoyReturning = false;
-	double ConvoyLegSols = 0.0;         // sols travelled on the CURRENT leg
+	// Rivals & trade (M3 Gate A; save v17). E4: up to MaxConvoysOut convoys, one per rival (Convoys, by Id; none = idle). Transit is a sol
+	// accumulator per convoy advanced only under clear sky (a storm freezes every one); at the one-way distance it flips to the return leg;
+	// at the round trip it delivers. The v17 slot is still written, from the LOWEST-Id convoy. Relations persist per rival (RivalRelations),
+	// seeded from RelationStart.
+	TArray<FRHConvoy> Convoys;
+	int32 NextConvoyId = 1;
 	TMap<FName, double> RivalRelations; // rival row name -> 0..100
 	double ConvoySpeedKmPerSol = 60.0;
 	double ConvoyH2PerRun = 8.0;

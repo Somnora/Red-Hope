@@ -2110,6 +2110,14 @@ void ARHPlayerController::Debug_ScrollDeck(float OffsetPx)
 	}
 }
 
+void ARHPlayerController::Debug_DraftOrder(FName Rival, FName Resource, int32 Kg)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetOrderDraft(Rival, Resource, Kg);
+	}
+}
+
 void ARHPlayerController::BeginTunnel()
 {
 	CancelModes();

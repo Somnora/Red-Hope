@@ -199,6 +199,7 @@ public:
 	bool IsBuildDrawerOpen() const;
 	// Capture/QA (RH.DeckScroll): scroll the deck's right column to a pixel offset.
 	void Debug_ScrollDeck(float OffsetPx);
+	void Debug_DraftOrder(FName Rival, FName Resource, int32 Kg); // E4 QA/captures: set one resource's draft on a neighbor's market card
 	// Capture/QA (RH.DeckExpand): unfold every deck panel.
 	void Debug_ExpandDeck(bool bRoster);
 	// Capture/QA (RH.DeckBuild): open the deck's build drawer on a category.

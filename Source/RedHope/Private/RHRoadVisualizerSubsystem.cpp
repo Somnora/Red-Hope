@@ -66,7 +66,7 @@ namespace
 		}
 	};
 
-	FVector OnGround(double X, double Y, float Lift)
+	FVector RoadOnGround(double X, double Y, float Lift)
 	{
 		return FVector(X, Y, RHMarsTerrain::GroundZCm(X, Y) + Lift);
 	}
@@ -144,8 +144,8 @@ void URHRoadVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim)
 		const auto At = [&](double S, float Width, float Lift, FVector& OutL, FVector& OutR)
 		{
 			const FVector2D C = Pa + Dir * S;
-			OutL = OnGround(C.X + Nrm.X * Width, C.Y + Nrm.Y * Width, Lift);
-			OutR = OnGround(C.X - Nrm.X * Width, C.Y - Nrm.Y * Width, Lift);
+			OutL = RoadOnGround(C.X + Nrm.X * Width, C.Y + Nrm.Y * Width, Lift);
+			OutR = RoadOnGround(C.X - Nrm.X * Width, C.Y - Nrm.Y * Width, Lift);
 		};
 		if (E.bBuilt)
 		{
@@ -177,7 +177,7 @@ void URHRoadVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim)
 		const FIntPoint P = G.NodeCm(N, Prm);
 		if (BuiltNodes.Contains(N.Id))
 		{
-			Built.Fan(OnGround((double)P.X, (double)P.Y, BuiltLiftCm), HalfW, 14); // the joint's pad: fills the wedges between strips
+			Built.Fan(RoadOnGround((double)P.X, (double)P.Y, BuiltLiftCm), HalfW, 14); // the joint's pad: fills the wedges between strips
 		}
 	}
 	if (Built.V.Num() > 0)

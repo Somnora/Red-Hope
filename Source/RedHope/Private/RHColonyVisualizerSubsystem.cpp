@@ -1467,11 +1467,14 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	RivalMarkers.Reset();
 	RivalMarkerState.Reset();
-	if (ConvoyVisual)
+	for (auto& Pair : ConvoyVisuals)
 	{
-		ConvoyVisual->Destroy();
-		ConvoyVisual = nullptr;
+		if (Pair.Value)
+		{
+			Pair.Value->Destroy();
+		}
 	}
+	ConvoyVisuals.Reset();
 	LastRigKey = FIntVector(-999, -999, -999); // force a pit rebuild from loaded state
 	LastRigShaftKey = 0;
 	MarkPassesDirty();
@@ -4261,19 +4264,30 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 		Marker->SetActorHiddenInGame(!bSurface);
 	});
 
-	// The trade rover: drives home -> settlement -> home on the sim's own
-	// progress. Hidden when the convoy is idle (or underground view).
-	const FName Out = Sim->GetConvoyRival();
-	if (Out.IsNone())
+	// The trade rovers: one per convoy out (E4: up to MaxConvoysOut, one per rival), each driving home -> settlement -> home on the sim's own
+	// progress. A rover whose convoy is home is taken down; they are hidden in the underground view.
 	{
-		if (ConvoyVisual)
+		TSet<int32> Live;
+		for (const FRHConvoy& Convoy : Sim->GetConvoys()) { Live.Add(Convoy.Id); }
+		for (auto It = ConvoyVisuals.CreateIterator(); It; ++It)
 		{
-			ConvoyVisual->SetActorHiddenInGame(true);
+			if (!Live.Contains(It.Key()))
+			{
+				if (It.Value()) { It.Value()->Destroy(); }
+				It.RemoveCurrent();
+			}
 		}
 	}
-	else if (const FRHRivalRow* Row = Defs->GetRival(Out))
+	for (const FRHConvoy& Convoy : Sim->GetConvoys())
 	{
-		if (!ConvoyVisual)
+		const FRHRivalRow* Row = Defs->GetRival(Convoy.Rival);
+		if (!Row)
+		{
+			continue;
+		}
+		TObjectPtr<AStaticMeshActor>* FoundRover = ConvoyVisuals.Find(Convoy.Id);
+		AStaticMeshActor* Rover = FoundRover ? FoundRover->Get() : nullptr;
+		if (!Rover)
 		{
 			// REFERENCE (Robots/ConstructionDrone + Ships/ScoutSpeeder language):
 			// bone-white hull, dark tinted cab glass, six dark wheels, a hazard
@@ -4281,71 +4295,70 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 			// Root spawns at UNIFORM scale so relative children don't smear (the
 			// old absolute-space label was left behind at the spawn point while
 			// the rover drove away - all parts ride relative now).
-			ConvoyVisual = SpawnBox(FVector(0, 0, 60.f), FVector(1.f, 1.f, 1.f), BoneWhite, FLinearColor::Black);
-			if (ConvoyVisual)
+			Rover = SpawnBox(FVector(0, 0, 60.f), FVector(1.f, 1.f, 1.f), BoneWhite, FLinearColor::Black);
+			if (!Rover)
 			{
+				continue;
+			}
 #if WITH_EDITOR
-				ConvoyVisual->SetActorLabel(TEXT("Sim_Convoy"));
+			Rover->SetActorLabel(FString::Printf(TEXT("Sim_Convoy_%d"), Convoy.Id));
 #endif
-				UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-				UStaticMesh* CylMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-				UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-				const auto Part = [&](UStaticMesh* Shape, const FVector& RelCm, const FRotator& Rot, const FVector& Scale,
-					const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black)
-				{
-					if (!Shape) { return; }
-					UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(ConvoyVisual);
-					Mesh->SetupAttachment(ConvoyVisual->GetRootComponent());
-					Mesh->RegisterComponent();
-					Mesh->SetStaticMesh(Shape);
-					Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-					Mesh->SetRelativeLocationAndRotation(RelCm, Rot);
-					Mesh->SetRelativeScale3D(Scale);
-					ApplyTint(Mesh, Color, Emissive);
-				};
-				Part(CubeMesh, FVector(0, 0, 10.f), FRotator::ZeroRotator, FVector(2.6f, 1.5f, 0.9f), BoneWhite);                    // hull
-				Part(CubeMesh, FVector(108.f, 0, 42.f), FRotator(-16.f, 0, 0), FVector(0.7f, 1.25f, 0.62f),
-					FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.12f, 0.15f));                                          // cab glass
-				Part(CubeMesh, FVector(-72.f, 0, 58.f), FRotator::ZeroRotator, FVector(1.1f, 1.3f, 0.72f), DarkSlate);              // cargo pack
-				Part(CubeMesh, FVector(0, 79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);               // stripe R
-				Part(CubeMesh, FVector(0, -79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);              // stripe L
-				for (int32 W = 0; W < 6; ++W)
-				{
-					const float Wx = (W % 3 - 1) * 92.f;
-					const float Wy = (W < 3 ? 1.f : -1.f) * 82.f;
-					Part(CylMesh, FVector(Wx, Wy, -38.f), FRotator(0, 0, 90.f), FVector(0.56f, 0.56f, 0.2f), FLinearColor(0.05f, 0.05f, 0.06f));
-				}
-				Part(SphereMesh, FVector(128.f, 0, 82.f), FRotator::ZeroRotator, FVector(0.16f), HazYellow, AmberGlow);             // beacon
+			UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+			UStaticMesh* CylMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+			UStaticMesh* SphereMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+			const auto Part = [&](UStaticMesh* Shape, const FVector& RelCm, const FRotator& Rot, const FVector& Scale,
+				const FLinearColor& Color, const FLinearColor& Emissive = FLinearColor::Black)
+			{
+				if (!Shape) { return; }
+				UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(Rover);
+				Mesh->SetupAttachment(Rover->GetRootComponent());
+				Mesh->RegisterComponent();
+				Mesh->SetStaticMesh(Shape);
+				Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Mesh->SetRelativeLocationAndRotation(RelCm, Rot);
+				Mesh->SetRelativeScale3D(Scale);
+				ApplyTint(Mesh, Color, Emissive);
+			};
+			Part(CubeMesh, FVector(0, 0, 10.f), FRotator::ZeroRotator, FVector(2.6f, 1.5f, 0.9f), BoneWhite);                    // hull
+			Part(CubeMesh, FVector(108.f, 0, 42.f), FRotator(-16.f, 0, 0), FVector(0.7f, 1.25f, 0.62f),
+				FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.12f, 0.15f));                                          // cab glass
+			Part(CubeMesh, FVector(-72.f, 0, 58.f), FRotator::ZeroRotator, FVector(1.1f, 1.3f, 0.72f), DarkSlate);              // cargo pack
+			Part(CubeMesh, FVector(0, 79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);               // stripe R
+			Part(CubeMesh, FVector(0, -79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);              // stripe L
+			for (int32 W = 0; W < 6; ++W)
+			{
+				const float Wx = (W % 3 - 1) * 92.f;
+				const float Wy = (W < 3 ? 1.f : -1.f) * 82.f;
+				Part(CylMesh, FVector(Wx, Wy, -38.f), FRotator(0, 0, 90.f), FVector(0.56f, 0.56f, 0.2f), FLinearColor(0.05f, 0.05f, 0.06f));
 			}
+			Part(SphereMesh, FVector(128.f, 0, 82.f), FRotator::ZeroRotator, FVector(0.16f), HazYellow, AmberGlow);             // beacon
+			ConvoyVisuals.Add(Convoy.Id, Rover);
 		}
-		if (ConvoyVisual)
+		// Home = the Lander pad; destination = the rival's marker.
+		FVector Home(0, 0, 0);
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
-			// Home = the Lander pad; destination = the rival's marker.
-			FVector Home(0, 0, 0);
-			for (const FRHBuildingInstance& B : Sim->GetBuildings())
-			{
-				if (B.DefName == FName("Lander")) { Home = B.LocationCm; break; }
-			}
-			const FVector Dest = RivalMarkerPos(Out, Row->DistanceKm);
-			const double P = Sim->GetConvoyProgress(); // 0..1 round trip
-			const double Alpha = Sim->IsConvoyReturning()
-				? FMath::Clamp((P - 0.5) * 2.0, 0.0, 1.0)   // marker -> home
-				: FMath::Clamp(P * 2.0, 0.0, 1.0);          // home -> marker
-			const FVector From = Sim->IsConvoyReturning() ? Dest : Home;
-			const FVector To = Sim->IsConvoyReturning() ? Home : Dest;
-			// Wheels on the ground the whole road: the straight-line lerp gets
-			// its Z from the terrain under each step, not the endpoints.
-			FVector Loc = FMath::Lerp(From, To, Alpha);
-			Loc.Z = RHMarsTerrain::GroundZCm(Loc.X, Loc.Y) + 60.f;
-			ConvoyVisual->SetActorLocation(Loc);
-			// The cab leads: face the rover down its road (X+ = nose).
-			const FVector Travel = (To - From).GetSafeNormal2D();
-			if (!Travel.IsNearlyZero())
-			{
-				ConvoyVisual->SetActorRotation(Travel.Rotation());
-			}
-			ConvoyVisual->SetActorHiddenInGame(!bSurface);
+			if (B.DefName == FName("Lander")) { Home = B.LocationCm; break; }
 		}
+		const FVector Dest = RivalMarkerPos(Convoy.Rival, Row->DistanceKm);
+		const double P = Sim->GetConvoyProgress(Convoy); // 0..1 round trip
+		const double Alpha = Convoy.bReturning
+			? FMath::Clamp((P - 0.5) * 2.0, 0.0, 1.0)   // marker -> home
+			: FMath::Clamp(P * 2.0, 0.0, 1.0);          // home -> marker
+		const FVector From = Convoy.bReturning ? Dest : Home;
+		const FVector To = Convoy.bReturning ? Home : Dest;
+		// Wheels on the ground the whole road: the straight-line lerp gets
+		// its Z from the terrain under each step, not the endpoints.
+		FVector Loc = FMath::Lerp(From, To, Alpha);
+		Loc.Z = RHMarsTerrain::GroundZCm(Loc.X, Loc.Y) + 60.f;
+		Rover->SetActorLocation(Loc);
+		// The cab leads: face the rover down its road (X+ = nose).
+		const FVector Travel = (To - From).GetSafeNormal2D();
+		if (!Travel.IsNearlyZero())
+		{
+			Rover->SetActorRotation(Travel.Rotation());
+		}
+		Rover->SetActorHiddenInGame(!bSurface);
 	}
 }
 

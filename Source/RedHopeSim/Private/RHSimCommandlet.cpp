@@ -30,6 +30,8 @@ int32 RHRunEconomySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // E3 selling to Earth: the -export suite lives in RHSimExportSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// E4 the Martian market: the -market suite lives in RHSimMarketSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -10848,13 +10850,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 54, FString::Printf(TEXT("X15 the file says version %u (expect 54)"), Ver));
+			Expect(bRead && Ver == 55, FString::Printf(TEXT("X15 the file says version %u (expect 55)"), Ver));
 			uint32 V46 = 46;
 			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv45.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/54")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/55")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
 				FString::Printf(TEXT("X15 a v46 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
@@ -12128,8 +12130,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
 			FString Le44;
 			const bool bRefused = !Sim->LoadColony(TEXT("farice_v45"), Le44);
-			Expect(bSaved && bRead && Ver == 54 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/54")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 54); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
+			Expect(bSaved && bRead && Ver == 55 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/55")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 55); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
@@ -12544,7 +12546,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 54 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 55 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12588,7 +12590,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/54")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
+				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/55")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -13701,7 +13703,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/54")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/55")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
@@ -14049,7 +14051,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 ShaftCount = Rd(At);
 			int32 Cursor = At + 4;
 			for (int32 K = 0; K < ShaftCount; ++K) { const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
-			Expect(bRead && Ver == 54 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
+			Expect(bRead && Ver == 55 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
 				FString::Printf(TEXT("TN1 the file says version %u; straight after the shaft block the tunnel block reads NextTunnelId %d and 0 tunnels: 8 bytes, no lift field"), Ver, Rd(Cursor)));
 		}
 
@@ -14488,7 +14490,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{ TArray<uint8> Bad = Good; Put(Bad, TunnelAt + 4, -1);
 				Expect(TryFile(TEXT("tunnelsh11"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("tunnel count")), FString::Printf(TEXT("TN8 a negative tunnel count is refused (%s)"), *E)); }
 			{ TArray<uint8> Old = Good; const uint32 V46 = 46; FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/54")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
+				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/55")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
@@ -14717,6 +14719,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("export")))
 	{
 		return RHRunExportSuite(World, Clock, Sim);
+	}
+	// E4 the Martian market self-test (the economy columns and the strict parser, one reprice by hand, a glut and a shortage, bounded and integer by
+	// enumeration, orders and money, the standing order, the save and its repairs, ruling 11, politics, era parity), fails loudly. `-market`.
+	if (FParse::Param(*Params, TEXT("market")))
+	{
+		return RHRunMarketSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
@@ -15013,7 +15021,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 54, FString::Printf(TEXT("e5 the file says version %u (expect 54)"), Ver));
+			Expect(bRead && Ver == 55, FString::Printf(TEXT("e5 the file says version %u (expect 55)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -16962,6 +16970,49 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE launch checks (%d colonists, %d buildings): 1,000 CanLaunchShip calls %.3f ms (%d passed; %s)"),
 				Sim->GetPopulation(), Sim->GetBuildings().Num(), LaunchChecksMs, Pass, Pass > 0 ? TEXT("loadable") : *Why.Left(120));
 			Expect(bOpen && LaunchChecksMs <= 5.0, FString::Printf(TEXT("budget: 1,000 launch checks at %d colonists took %.3f ms (<= 5)"), Sim->GetPopulation(), LaunchChecksMs));
+		}
+
+		// E4: 1,000 market rolls (the clearing, eight rivals' sols and the repricing of every slot) on the same city, with 8 injected rivals each
+		// trading every resource that has an Earth value. Budget 2 ms in all. The market never trades here, so every digest above is unchanged.
+		{
+			FString Ls, Cs;
+			int32 Traded = 0;
+			DefsSub->ForEachResourceRow([&](FName N, const FRHResourceRow& Row)
+			{
+				if (Sim->HasLedgerSlot(N) && Row.EarthValue_mcr > 0)
+				{
+					Ls += FString::Printf(TEXT("%s%s:20"), Ls.IsEmpty() ? TEXT("") : TEXT(";"), *N.ToString());
+					Cs += FString::Printf(TEXT("%s%s:10"), Cs.IsEmpty() ? TEXT("") : TEXT(";"), *N.ToString());
+					++Traded;
+				}
+			});
+			FString Starts, Caps;
+			DefsSub->ForEachResourceRow([&](FName N, const FRHResourceRow& Row)
+			{
+				if (Sim->HasLedgerSlot(N) && Row.EarthValue_mcr > 0)
+				{
+					Starts += FString::Printf(TEXT("%s%s:1000"), Starts.IsEmpty() ? TEXT("") : TEXT(";"), *N.ToString());
+					Caps += FString::Printf(TEXT("%s%s:5000"), Caps.IsEmpty() ? TEXT("") : TEXT(";"), *N.ToString());
+				}
+			});
+			for (int32 K = 0; K < 8; ++K)
+			{
+				FRHRivalRow Rival;
+				Rival.DisplayName = FString::Printf(TEXT("Scale Rival %d"), K);
+				Rival.DistanceKm = 100.f + 10.f * K;
+				Rival.Produce = Ls; Rival.Consume = Cs; Rival.StoreStart = Starts; Rival.StoreCap = Caps;
+				Rival.SliceActive = true;
+				DefsSub->Debug_InjectRival(FName(*FString::Printf(TEXT("ScaleRival%d"), K)), Rival);
+			}
+			Sim->Debug_SyncRivalEconomies();
+			const int32 Economies = Sim->GetRivalEconomyCount();
+			const int64 Ice0 = Sim->GetMarketPriceMcr(FName("Ice"));
+			const double MR0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < 1000; ++K) { Sim->Debug_RollMarket(Sim->GetMarketCheckedSol() + 1); }
+			const double MarketRollsMs = (FPlatformTime::Seconds() - MR0) * 1000.0;
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE market (%d colonists, %d economy rivals trading %d slots): 1,000 RollMarket calls %.3f ms (Ice %lld -> %lld mcr)"),
+				Sim->GetPopulation(), Economies, Traded, MarketRollsMs, Ice0, Sim->GetMarketPriceMcr(FName("Ice")));
+			Expect(Economies == 10 && Traded >= 15 && MarketRollsMs <= 2.0, FString::Printf(TEXT("budget: 1,000 market rolls with %d rivals trading %d slots took %.3f ms (<= 2)"), Economies, Traded, MarketRollsMs));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

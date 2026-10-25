@@ -370,7 +370,8 @@ private:
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;
 	TMap<FName, uint8> RivalMarkerState;
-	UPROPERTY() TObjectPtr<AStaticMeshActor> ConvoyVisual;
+	// E4: one trade rover per convoy out, by convoy Id (up to MaxConvoysOut), each along its own road.
+	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> ConvoyVisuals;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> LandingPadVisual;
 	uint8 ShipBeat = 0;                // 0 away, 1 descending, 2 on the pad, 3 lifting off

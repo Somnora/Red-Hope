@@ -977,11 +977,22 @@ static FAutoConsoleCommandWithWorldAndArgs GRHInjectRivals(
 		Z.DisplayName = TEXT("Zarya Station"); Z.Nation = TEXT("Zarya Consortium");
 		Z.DistanceKm = 120.f; Z.ExportLot = TEXT("Ice:150"); Z.ImportLot = TEXT("Struct:100");
 		Z.RelationStart = 40.f; Z.SliceActive = true;
+		// E4: the economy columns, as in RH_Rivals.csv (Zarya's ice wells run full; it builds faster than it makes Struct).
+		Z.RegionId = 0;
+		Z.Produce = TEXT("Ice:400;Water:120;Oxygen:60;Struct:40;Hydrogen:10");
+		Z.Consume = TEXT("Ice:150;Water:140;Oxygen:60;Struct:120;Hydrogen:15");
+		Z.StoreStart = TEXT("Ice:12000;Water:2000;Oxygen:1500;Struct:2500;Hydrogen:300");
+		Z.StoreCap = TEXT("Ice:20000;Water:6000;Oxygen:3000;Struct:8000;Hydrogen:1000");
 		Defs->Debug_InjectRival(FName("Zarya"), Z);
 		FRHRivalRow M;
 		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
 		M.DistanceKm = 200.f; M.ExportLot = TEXT("SpareParts:4"); M.ImportLot = TEXT("Food:60");
 		M.RelationStart = 30.f; M.SliceActive = false; // dormant until scouted
+		M.RegionId = 0;
+		M.Produce = TEXT("SpareParts:2;Food:20");
+		M.Consume = TEXT("SpareParts:1;Food:60");
+		M.StoreStart = TEXT("SpareParts:40;Food:600");
+		M.StoreCap = TEXT("SpareParts:100;Food:2000");
 		Defs->Debug_InjectRival(FName("Meridian"), M);
 		UE_LOG(LogRedHope, Display, TEXT("Rivals injected (in-memory): Zarya Station active, Meridian Base dormant. The neighbors exist; RH.Trade to see them."));
 	}));
@@ -1073,6 +1084,73 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 				*Row.DisplayName, *Row.Nation, Sim->GetRivalRelation(Name), Sim->GetHiddenTension(Name),
 				*Row.ImportLot, *Row.ExportLot, Row.DistanceKm, *Flags);
 		});
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHMarket(
+	TEXT("RH.Market"),
+	TEXT("RH.Market - log the Martian market (each traded resource's price against its Earth value, the colony's tally over the window, the rivals' stores, the convoys and the credit set aside); RH.Market order <Rival> <Res:kg;Res:kg> - send a written order through the uplink (positive kg buys from the rival, negative sells to it; the convoy leaves at once and the market clears it at the end of the sol)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		if (!Sim || !Defs) { return; }
+		if (Args.Num() >= 1 && Args[0].Equals(TEXT("order"), ESearchCase::IgnoreCase))
+		{
+			if (Args.Num() < 3)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Market order <Rival> <Res:kg;Res:kg>   (positive kg buys, negative sells; e.g. RH.Market order Zarya Ice:500;Struct:-200)"));
+				return;
+			}
+			FString Text;
+			for (int32 i = 2; i < Args.Num(); ++i) { Text += (i > 2 ? TEXT(" ") : TEXT("")) + Args[i]; }
+			FString Why;
+			int64 Reserve = 0;
+			if (!Sim->CanPlaceOrder(FName(*Args[1]), Text, Why, &Reserve))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.Market] the order would be refused now: %s (it is sent anyway; the worker judges it when it lands)"), *Why);
+			}
+			FRHCommand Cmd;
+			Cmd.Verb = FName("MarketOrder");
+			Cmd.Target = FName(*Args[1]);
+			Cmd.Text = Text;
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Market] %s | open sol %d | credit %s cr, %s cr reserved for orders waiting to clear, %s cr spendable | market sales so far %s cr"),
+			Sim->IsMarketLive() ? TEXT("live") : TEXT("off or no neighbor trades"), Sim->GetMarketCheckedSol(), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetSpendableMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarketSalesMcr()));
+		for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
+		{
+			const FName Res = Sim->GetLedgerSlotName(i);
+			if (!Sim->IsMarketTraded(Res)) { continue; }
+			const FRHResourceRow* Row = Defs->GetResource(Res);
+			int64 Sold = 0, Bought = 0;
+			for (int32 Back = 1; Back <= 5; ++Back)
+			{
+				int64 S = 0, B = 0;
+				if (Sim->GetMarketTally(Res, Back, S, B)) { Sold += S; Bought += B; }
+			}
+			UE_LOG(LogRedHope, Display, TEXT("  %s: %s cr/kg (Earth value %s) | the colony sold %lld kg and bought %lld kg over the last 5 sols"), *Res.ToString(),
+				*URHSimWorldSubsystem::FormatCredits(Sim->GetMarketPriceMcr(Res)), *URHSimWorldSubsystem::FormatCredits(Row ? (int64)Row->EarthValue_mcr : 0), Sold / 1000, Bought / 1000);
+		}
+		for (int32 r = 0; r < Sim->GetRivalEconomyCount(); ++r)
+		{
+			const FName Name = Sim->GetRivalEconomyName(r);
+			TArray<FName> Traded;
+			Sim->GetRivalTradedResources(Name, Traded);
+			FString Stores;
+			for (const FName& Res : Traded) { Stores += FString::Printf(TEXT("%s%s %d kg"), Stores.IsEmpty() ? TEXT("") : TEXT(", "), *Res.ToString(), Sim->GetRivalStoreKg(Name, Res)); }
+			UE_LOG(LogRedHope, Display, TEXT("  rival %s%s holds %s"), *Name.ToString(), Sim->IsRivalAvailable(Name) ? TEXT("") : TEXT(" (not met)"), *Stores);
+		}
+		for (const FRHConvoy& C : Sim->GetConvoys())
+		{
+			const FString Buys = URHSimWorldSubsystem::OrderLinesText(C.Lines, true), Sells = URHSimWorldSubsystem::OrderLinesText(C.Lines, false);
+			UE_LOG(LogRedHope, Display, TEXT("  convoy #%d to %s: %s %.0f%%%s"), C.Id, *C.Rival.ToString(), C.bReturning ? TEXT("returning") : TEXT("outbound"), Sim->GetConvoyProgress(C) * 100.0,
+				C.IsPriced() ? *FString::Printf(TEXT(" | %s order buy %s sell %s | %s (%s cr held, %s cr owed)"), C.bStanding ? TEXT("standing") : TEXT("written"),
+					Buys.IsEmpty() ? TEXT("nothing") : *Buys, Sells.IsEmpty() ? TEXT("nothing") : *Sells, C.bCleared ? *FString::Printf(TEXT("cleared, worth %s cr"), *URHSimWorldSubsystem::FormatCredits(C.ValueMcr)) : *FString::Printf(TEXT("clears at the end of sol %d"), C.ClearSol),
+					*URHSimWorldSubsystem::FormatCredits(C.ReservedMcr), *URHSimWorldSubsystem::FormatCredits(C.OwedMcr)) : TEXT(" | barter"));
+		}
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDiscoveries(
@@ -2640,6 +2718,20 @@ static FAutoConsoleCommandWithWorldAndArgs GRHRoadGhost(
 		}
 		PC->Debug_RoadGhost(FVector(FCString::Atof(*Args[0]) * 100.f, FCString::Atof(*Args[1]) * 100.f, 0.f),
 			FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f));
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHDeckDraft(
+	TEXT("RH.DeckDraft"),
+	TEXT("RH.DeckDraft <Rival> <Resource> <Kg> - DEBUG/QA: set one resource's draft order (positive buys, negative sells) on a neighbor's market card in the command deck, for a screenshot. Sends nothing."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!PC || Args.Num() < 3)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.DeckDraft <Rival> <Resource> <Kg>"));
+			return;
+		}
+		PC->Debug_DraftOrder(FName(*Args[0]), FName(*Args[1]), FCString::Atoi(*Args[2]));
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHDeckScroll(

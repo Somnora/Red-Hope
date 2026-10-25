@@ -1541,6 +1541,34 @@ namespace
 			}, 1.f);
 		}
 
+		// ---- E4: a market order. The Earth & neighbors panel opens (it scrolls into view), the colony is given fuel and credit, a real press on the
+		// first row's Buy +100 drafts an order and a real press on SEND ORDER transmits it: a MarketOrder rides the uplink to Zarya.
+		Runner.Do(TEXT("market.setup"), []()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			if (Sim)
+			{
+				Sim->AddStock(FName("Hydrogen"), 200.0);
+				Sim->AddStock(FName("SpareParts"), 20.0);
+				Sim->Debug_GrantCredits(10000000);
+			}
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::Politics, true);
+			}
+		}, 1.6f);
+		{
+			const TSharedRef<FPress> Buy = PushPress(TEXT("market.BUY"), LocateButton(TEXT("Buy +100"), 0, true));
+			PushCheck(TEXT("market.BUY"), Buy, []() { return FString(); }, 1.f);
+			const TSharedRef<FPress> Send = PushPress(TEXT("market.SEND"), LocateButton(TEXT("SEND ORDER"), 0, true));
+			PushCheck(TEXT("market.SEND"), Send, []()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				return (Sim && QueueHas(*Sim, TEXT("MarketOrder"), TEXT("Zarya"))) ? FString() : FString(TEXT("no MarketOrder to Zarya was transmitted"));
+			}, 2.f);
+		}
+
 		// ---- the traffic overlay flips on and off
 		{
 			const TSharedRef<FPress> On = PushPress(TEXT("traffic.on"), LocateButton(TEXT("Traffic"), 0, true));

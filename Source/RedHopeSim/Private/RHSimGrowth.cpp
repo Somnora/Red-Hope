@@ -486,6 +486,7 @@ void URHSimWorldSubsystem::StepCityGrowth(float SubDt)
 	}
 	RollProductionLedger(SolNow); // C5d: the sol's production goes into the window (one compare a step otherwise)
 	RollEconomyLedger(SolNow);    // E1: the ledger rolls at the same threshold, with the same SolNow
+	RollMarket(SolNow);           // E4: the clearing, the rivals' sol and the repricing, once, on the same step in both bands
 	if (Districts.Num() == 0 && GrowthProjects.Num() == 0)
 	{
 		return; // no districts, no growth: the colony is exactly as it was

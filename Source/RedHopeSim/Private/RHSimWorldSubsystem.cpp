@@ -34,7 +34,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 54;  // v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 55;  // v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -508,6 +508,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	DisputeHopeBelow = Defs->GetConfigScalar(FName("DisputeHopeBelow"), DisputeHopeBelow);
 	FirstHarvestKg = Defs->GetConfigScalar(FName("FirstHarvestKg"), FirstHarvestKg);
 	HopeFirstHarvestMilestone = Defs->GetConfigScalar(FName("HopeFirstHarvestMilestone"), HopeFirstHarvestMilestone);
+	InitMarket(); // E4: the market's config, then the rivals' economies (parsed once here, and again only at load or when the rivals table changes)
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -9484,85 +9485,18 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			return;
 		}
 	}
-	else if (Cmd.Verb == FName("Convoy"))
+	else if (Cmd.Verb == FName("Convoy") || Cmd.Verb == FName("MarketOrder"))
 	{
-		// M3 Gate A: dispatch the rover convoy to a rival (Target = rival row).
-		// Everything is committed AT DEPARTURE - fuel, wear, and your export lot
-		// (the Borer's H2-batch discipline). The return leg delivers their goods.
-		static const FName NHydrogen(TEXT("Hydrogen")), NSpareParts(TEXT("SpareParts"));
-		const FRHRivalRow* Rival = Defs ? Defs->GetRival(Cmd.Target) : nullptr;
-		if (!Rival || !IsRivalAvailable(Cmd.Target))
+		// M3 Gate A: dispatch the rover convoy to a rival (Target = rival row). Everything is committed AT DEPARTURE - fuel, wear, and your
+		// export lot (the Borer's H2-batch discipline). E4: a bare Convoy is the rival's standing order (its ImportLot sold, its ExportLot
+		// bought, now priced; a rival with no economy keeps today's barter), and MarketOrder carries the order's lines in Text. One worker
+		// (BookConvoy) books both; the return leg delivers their goods.
+		FString Reason;
+		if (!BookConvoy(Cmd, Cmd.Verb == FName("Convoy"), Reason))
 		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No trade contact '%s'"), *Cmd.Target.ToString()));
+			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
-		if (!ConvoyRival.IsNone())
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The convoy is already out (to %s)"), *ConvoyRival.ToString()));
-			return;
-		}
-		if (ClosedRoutes.Contains(Cmd.Target))
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("The route to %s is closed - you cut ties when you complied with Earth"), *Rival->DisplayName));
-			return;
-		}
-		if (GetSabotageRemaining(Cmd.Target) > 0.0)
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s's production is disrupted (sabotage) - no trade until they recover"), *Rival->DisplayName));
-			return;
-		}
-		if (DefectedRivals.Contains(Cmd.Target))
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has sided with Earth - relations are frozen, no trade"), *Rival->DisplayName));
-			return;
-		}
-		if (EmbargoGrace.Contains(Cmd.Target))
-		{
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("%s has embargoed you under Earth pressure - reassure them first"), *Rival->DisplayName));
-			return;
-		}
-		// Build ONE aggregate cost lot - fuel + wear + your export goods, ADDING
-		// overlapping resources - so preflight and commit validate/spend the
-		// identical sum. (Adversarial review, M3 Gate A: three independent checks
-		// against the same stock could each pass while the SUM overdraws, driving
-		// a resource negative if an ImportLot ever names Hydrogen or SpareParts.
-		// Current data doesn't, but the aggregate closes the hole permanently.)
-		TMap<FName, double> Cost;
-		Cost.FindOrAdd(NHydrogen) += ConvoyH2PerRun;
-		Cost.FindOrAdd(NSpareParts) += ConvoyWearParts;
-		const TMap<FName, double> ExportGoods = RoundLotToGrams(URHDefinitionsSubsystem::ParseResourceList(Rival->ImportLot)); // E1: whole grams at the boundary
-		for (const auto& Item : ExportGoods)
-		{
-			Cost.FindOrAdd(Item.Key) += Item.Value;
-		}
-		if (!HasTradeLot(Cost))
-		{
-			// Name the first shortfall for a legible refusal.
-			FName Short = NAME_None;
-			for (const auto& Item : Cost)
-			{
-				const double Have = (Defs && Defs->IsSolidResource(Item.Key))
-					? GetTotalSolid(Item.Key) + GetStock(Item.Key) : GetStock(Item.Key);
-				if (Have + KINDA_SMALL_NUMBER < Item.Value) { Short = Item.Key; break; }
-			}
-			OnCommandRejected.Broadcast(Cmd, FString::Printf(
-				TEXT("Convoy short of %s (needs fuel %.0f H2 + %.0f parts + %s)"),
-				*Short.ToString(), ConvoyH2PerRun, ConvoyWearParts, *Rival->ImportLot));
-			return;
-		}
-		// Commit at departure - one spend of the validated aggregate.
-		SpendTradeLot(Cost);
-		// E1: the split, from its three parts (HasTradeLot passed, so each was spent in full: the one nominal record in E1, within 0.1 g a
-		// line). The fuel and the wear are Used; the rival's lot is Out.
-		NoteFlow(NHydrogen, ERHLedgerLeg::Used, RoundToGrams(ConvoyH2PerRun));
-		NoteFlow(NSpareParts, ERHLedgerLeg::Used, RoundToGrams(ConvoyWearParts));
-		NoteFlowMap(ExportGoods, ERHLedgerLeg::Out);
-		ConvoyRival = Cmd.Target;
-		bConvoyReturning = false;
-		ConvoyLegSols = 0.0;
-		RelationRef(Cmd.Target); // ensure the relation entry exists
-		UE_LOG(LogRedHopeSim, Display, TEXT("Convoy dispatched to %s (%.0f km; %s -> %s)"),
-			*Rival->DisplayName, Rival->DistanceKm, *Rival->ImportLot, *Rival->ExportLot);
 	}
 	else if (Cmd.Verb == FName("Solidarity"))
 	{
@@ -9725,119 +9659,6 @@ double URHSimWorldSubsystem::ConvoyLegSolsFor(FName Rival) const
 	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
 	const double Speed = FMath::Max(ConvoySpeedKmPerSol, KINDA_SMALL_NUMBER);
 	return Row ? Row->DistanceKm / Speed : 0.0;
-}
-
-void URHSimWorldSubsystem::StepTrade(float SubDt)
-{
-	// Idle colonies (and every pre-M3 baseline) have no convoy out - a true
-	// no-op, so the 10-sol baseline is byte-identical.
-	if (ConvoyRival.IsNone())
-	{
-		return;
-	}
-	const FRHRivalRow* Rival = Defs ? Defs->GetRival(ConvoyRival) : nullptr;
-	if (!Rival)
-	{
-		ConvoyRival = NAME_None; // the row vanished (data edit) - abort cleanly
-		return;
-	}
-	// A dust storm freezes the convoy where it sits (brief: routes disrupted by
-	// storms). The rover waits out the weather - progress simply doesn't advance.
-	const FRHEventRow* Event = GetActiveEvent();
-	if (Event && Event->Type == FName("DustStorm"))
-	{
-		return;
-	}
-	const double DtSols = SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds;
-	const double LegTime = ConvoyLegSolsFor(ConvoyRival);
-	ConvoyLegSols += DtSols;
-	if (ConvoyLegSols < LegTime)
-	{
-		return; // still en route on this leg
-	}
-	if (!bConvoyReturning)
-	{
-		// Reached the rival; turn around (carry the spillover into the return).
-		bConvoyReturning = true;
-		ConvoyLegSols -= LegTime;
-		return;
-	}
-	// Home again: deliver their export lot, warm the relation, go idle.
-	ConvoyLegSols = 0.0;
-	bConvoyReturning = false;
-	const FName Done = ConvoyRival;
-	ConvoyRival = NAME_None;
-	const TMap<FName, double> TheirLot = RoundLotToGrams(URHDefinitionsSubsystem::ParseResourceList(Rival->ExportLot)); // E1: whole grams
-	NoteFlowMap(TheirLot, ERHLedgerLeg::In); // E1: the convoy home - every line lands, at the Lander or in the pool
-	for (const auto& Item : TheirLot)
-	{
-		if (Defs && Defs->IsSolidResource(Item.Key))
-		{
-			// Drop at the trade depot (the Lander) for normal hauling.
-			bool bDropped = false;
-			for (FRHBuildingInstance& B : Buildings)
-			{
-				if (B.DefName == FName("Lander") && !B.bUnderConstruction)
-				{
-					B.OutputKg.FindOrAdd(Item.Key) += Item.Value;
-					bDropped = true;
-					break;
-				}
-			}
-			if (!bDropped) { AddStock(Item.Key, Item.Value); }
-			OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));
-		}
-		else
-		{
-			AddStock(Item.Key, Item.Value); // fluids join the pool
-		}
-	}
-	// The goods always land (paid for at dispatch - conservation), but the
-	// DIPLOMATIC upside accrues only if the relationship survived the trip. A
-	// rival that defected, embargoed you, or whose route you closed mid-route
-	// gets no relation warming (defection's lock holds), no HumanNature nudge,
-	// and no Influence - trade with a hostile party is cargo, not goodwill.
-	// (Adversarial review, M4 C+D: an in-flight convoy could otherwise warm a
-	// defected rival above its locked floor and mint Influence from hostility.)
-	const bool bRelationshipIntact = !DefectedRivals.Contains(Done)
-		&& !EmbargoGrace.Contains(Done) && !ClosedRoutes.Contains(Done);
-	if (bRelationshipIntact)
-	{
-		double& Rel = RelationRef(Done);
-		Rel = FMath::Clamp(Rel + RelationPerRun, 0.0, 100.0);
-		// Fair dealing is who you are: an honest completed trade nudges the
-		// HumanNature axis toward Evolved/Diplomatic (M4 Gate A) and earns
-		// influence (M4 Gate C - the peaceful path earns the tools of peace).
-		HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNatureFairTradeShift, -100.0, 100.0);
-		Influence += InfluencePerTrade;
-		OnAlert.Broadcast(FString::Printf(
-			TEXT("CONVOY HOME — %s delivered (%s). Relations with %s now %.0f."),
-			*Rival->DisplayName, *Rival->ExportLot, *Rival->Nation, Rel));
-	}
-	else
-	{
-		OnAlert.Broadcast(FString::Printf(
-			TEXT("CONVOY HOME — cargo from %s arrived, but the relationship soured while the rover was out. Goods only; no goodwill."),
-			*Rival->DisplayName));
-	}
-	UE_LOG(LogRedHopeSim, Display, TEXT("=== CONVOY RETURN: %s delivered %s, relation %.0f%s ==="),
-		*Rival->DisplayName, *Rival->ExportLot, GetRivalRelation(Done),
-		bRelationshipIntact ? TEXT("") : TEXT(" (soured - goods only)"));
-}
-
-double URHSimWorldSubsystem::GetConvoyProgress() const
-{
-	if (ConvoyRival.IsNone())
-	{
-		return 0.0;
-	}
-	const double LegTime = ConvoyLegSolsFor(ConvoyRival);
-	if (LegTime <= 0.0)
-	{
-		return 0.0;
-	}
-	const double Legs = (bConvoyReturning ? 1.0 : 0.0) + FMath::Clamp(ConvoyLegSols / LegTime, 0.0, 1.0);
-	return FMath::Clamp(Legs / 2.0, 0.0, 1.0);
 }
 
 double URHSimWorldSubsystem::GetRivalRelation(FName Rival) const
@@ -13434,9 +13255,9 @@ bool URHSimWorldSubsystem::CanAddManifestItem(FName ItemName, FString& OutWhy) c
 		OutWhy = FString::Printf(TEXT("Over the ship's mass cap: %.0f + %.0f > %.0f kg"), GetManifestMassKg(), Row->Mass_kg, ShipMassCapKg);
 		return false;
 	}
-	if (bCreditEnabled && GetManifestCostMcr() + GetManifestTablePriceMcr(ItemName) > CreditBalanceMcr)
+	if (bCreditEnabled && GetManifestCostMcr() + GetManifestTablePriceMcr(ItemName) > GetSpendableMcr()) // E4: credit set aside for an order is not spendable
 	{
-		OutWhy = FString::Printf(TEXT("Over budget: %s + %s > %s cr"), *FormatCredits(GetManifestCostMcr()), *FormatCredits(GetManifestTablePriceMcr(ItemName)), *FormatCredits(CreditBalanceMcr));
+		OutWhy = FString::Printf(TEXT("Over budget: %s + %s > %s cr"), *FormatCredits(GetManifestCostMcr()), *FormatCredits(GetManifestTablePriceMcr(ItemName)), *FormatCredits(GetSpendableMcr()));
 		return false;
 	}
 	return true;
@@ -13804,10 +13625,13 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	Ar << HopeGrowthStreakSols << bFirstBornAnnounced << BirthsOnMars;
 	// Discoveries (save v16).
 	Ar << DiscoveryLog << DiscoverySeatHours;
-	// Rivals & trade (save v17).
+	// Rivals & trade (save v17). E4: the slot mirrors the LOWEST-Id convoy (None / 0 / 0 when none is out), so every byte before the economy
+	// blocks is unchanged whenever at most one convoy is out; the market block is authoritative for the convoys.
 	{
-		uint8 Returning = bConvoyReturning ? 1 : 0;
-		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
+		FName SlotRival = Convoys.Num() > 0 ? Convoys[0].Rival : NAME_None;
+		uint8 Returning = (Convoys.Num() > 0 && Convoys[0].bReturning) ? 1 : 0;
+		double SlotLegSols = Convoys.Num() > 0 ? Convoys[0].LegSols : 0.0;
+		Ar << SlotRival << Returning << SlotLegSols << RivalRelations;
 	}
 	// Earth's Shadow (save v18).
 	{
@@ -14037,6 +13861,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	RHSaveFrame::Write(Ar, RHSaveFrame::LedgerTag, [this](FArchive& Block) { WriteLedgerBlock(Block); });
 	RHSaveFrame::Write(Ar, RHSaveFrame::CreditTag, [this](FArchive& Block) { WriteCreditBlock(Block); });
 	RHSaveFrame::Write(Ar, RHSaveFrame::ExportTag, [this](FArchive& Block) { WriteExportBlock(Block); });
+	// E4 (save v55): the market block, in its own frame after E3's - the last frame in the file. The rivals' economies are synced first.
+	SyncRivalEconomies(false);
+	RHSaveFrame::Write(Ar, RHSaveFrame::MarketTag, [this](FArchive& Block) { WriteMarketBlock(Block); });
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14448,12 +14275,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	// Discoveries (save v16). Array repopulates wholesale.
 	DiscoveryLog.Reset();
 	Ar << DiscoveryLog << DiscoverySeatHours;
-	// Rivals & trade (save v17).
+	// Rivals & trade (save v17). E4: the slot is only the fallback if the market block cannot be read (the block is authoritative).
+	FName LoadedConvoyRival;
+	bool bLoadedConvoyReturning = false;
+	double LoadedConvoyLegSols = 0.0;
 	{
 		uint8 Returning = 0;
 		RivalRelations.Empty();
-		Ar << ConvoyRival << Returning << ConvoyLegSols << RivalRelations;
-		bConvoyReturning = (Returning != 0);
+		Ar << LoadedConvoyRival << Returning << LoadedConvoyLegSols << RivalRelations;
+		bLoadedConvoyReturning = (Returning != 0);
 	}
 	// Earth's Shadow (save v18).
 	{
@@ -14827,6 +14657,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ReadLedgerBlock(Ar, Bytes);
 	ReadCreditBlock(Ar, Bytes); // E2b
 	ReadExportBlock(Ar, Bytes); // E3
+	ReadMarketBlock(Ar, Bytes, LoadedConvoyRival, bLoadedConvoyReturning, LoadedConvoyLegSols); // E4 (v55)
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

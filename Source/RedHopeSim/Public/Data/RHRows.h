@@ -406,6 +406,15 @@ struct REDHOPESIM_API FRHRivalRow : public FTableRowBase
 	// "Res:Kg;Res:Kg" - their goods per completed run / your goods per dispatch.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString ExportLot;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString ImportLot;
+	// E4 (the Martian market): the rival's aggregate economy. "Res:kg;..." lists of WHOLE kg, parsed by the strict parser
+	// (URHDefinitionsSubsystem::ParseResourceListStrict). An empty StoreCap means no economy: the rival trades as before (barter). The keys of
+	// StoreCap are the resources the rival trades; Produce, Consume and StoreStart may name only those, each with an Earth value above 0.
+	// RegionId is the rival's home region (0 for every row today). Placeholder values, director review.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 RegionId = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Produce;     // whole kg made each sol
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Consume;     // whole kg used each sol
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StoreStart;  // whole kg held at the start
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StoreCap;    // whole kg the stores hold; the keys are what it trades
 	// Opening relation 0..100; completed runs warm it (RelationPerRun).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float RelationStart = 30.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;

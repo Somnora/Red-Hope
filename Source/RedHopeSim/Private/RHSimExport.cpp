@@ -276,10 +276,10 @@ bool URHSimWorldSubsystem::CanLaunchShip(FString& OutWhy, bool& bOutShortAllowed
 		return false;
 	}
 	const int64 Cost = bCreditEnabled ? GetManifestCostMcr() : 0;
-	if (Cost > CreditBalanceMcr)
+	if (Cost > GetSpendableMcr()) // E4: credit set aside for an order waiting to clear is not spendable
 	{
 		OutWhy = FString::Printf(TEXT("Over budget at launch: the manifest now costs %s cr against %s cr; remove or re-price items"),
-			*FormatCredits(Cost), *FormatCredits(CreditBalanceMcr));
+			*FormatCredits(Cost), *FormatCredits(GetSpendableMcr()));
 		return false;
 	}
 	TArray<FRHLaunchLine> Lines;
@@ -321,8 +321,13 @@ bool URHSimWorldSubsystem::CanLaunchShip(FString& OutWhy, bool& bOutShortAllowed
 
 void URHSimWorldSubsystem::FinishLaunch(const TCHAR* EarthClause, int64 Cost)
 {
-	CreditBalanceMcr -= Cost; // E2b: the only debit, and the only writer of the spent total
-	CreditSpentMcr += Cost;
+	// E2b: the launch is a debit; E4: CreditSpend is the ONLY debit writer (a clearing that pays the market is the other caller), so E2's
+	// invariant keeps one writer on each side. CanLaunchShip and LaunchShipShort checked the cost against the spendable credit, so no rest.
+	const int64 Unpaid = CreditSpend(Cost);
+	if (Unpaid != 0)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Ship launched with %s cr of its cost unpaid (the balance was short)"), *FormatCredits(Unpaid));
+	}
 	const double TransitSols = Defs->GetConfigScalar(FName("ShipTransitSols"), 3.0);
 	ShipArrivalSimSeconds = Clock->GetSimSecondsTotal() + TransitSols * URHSimClockSubsystem::SolLengthSimSeconds;
 	ShipAlertStage = 0; // fresh countdown per launch
@@ -383,7 +388,7 @@ bool URHSimWorldSubsystem::LaunchShipShort(FString& OutError)
 		return LaunchShip(OutError);
 	}
 	const int64 Cost = bCreditEnabled ? GetManifestCostMcr() : 0;
-	if (QuotaPhase != ERHQuotaPhase::AwaitingManifest || Cost > CreditBalanceMcr)
+	if (QuotaPhase != ERHQuotaPhase::AwaitingManifest || Cost > GetSpendableMcr()) // E4: the third reader of the spendable credit (re-review 3a)
 	{
 		OutError = Why;
 		return false;

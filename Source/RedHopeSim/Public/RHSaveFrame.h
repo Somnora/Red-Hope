@@ -19,6 +19,7 @@ namespace RHSaveFrame
 	constexpr uint32 LedgerTag = MakeTag('R', 'H', 'E', '1'); // E1, the ledger
 	constexpr uint32 CreditTag = MakeTag('R', 'H', 'E', '2'); // E2b, Earth credit
 	constexpr uint32 ExportTag = MakeTag('R', 'H', 'E', '3'); // E3, selling to Earth
+	constexpr uint32 MarketTag = MakeTag('R', 'H', 'E', '4'); // E4, the Martian market (v55)
 	constexpr int32 HeaderBytes = 12;
 	constexpr int32 FooterBytes = 8;
 

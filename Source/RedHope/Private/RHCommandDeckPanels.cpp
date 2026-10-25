@@ -662,12 +662,24 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 	// Earth credits (this manifest's cost against the balance, the carry-over included) and the ship's mass cap. ADD asks the sim's own
 	// rule (CanAddManifestItem) and, when it is greyed, says why in its tooltip.
 	TSharedRef<SVerticalBox> Picker = SNew(SVerticalBox);
+	// E4: the bar reads the SPENDABLE credit (the balance less what is set aside for orders waiting to clear); the tooltip says how much that is.
 	Picker->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 2.f)
 	[
-		BarRow(Txt(TEXT("Credits")),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetManifestCostMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()))) : FText::GetEmpty(); }),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetCreditBalanceMcr() > 0 ? (float)((double)S->GetManifestCostMcr() / (double)S->GetCreditBalanceMcr()) : 0.f); }),
-			FSlateColor(D::Amber))
+		SNew(SBox)
+		.ToolTipText_Lambda([this]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			return (S && S->GetCreditReservedMcr() > 0)
+				? Txt(FString::Printf(TEXT("%s cr of the %s cr balance is set aside for market orders waiting to clear, so it cannot buy manifest items or fly yet."),
+					*URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr())))
+				: FText::GetEmpty();
+		})
+		[
+			BarRow(Txt(TEXT("Credits")),
+				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetManifestCostMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetSpendableMcr()))) : FText::GetEmpty(); }),
+				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetSpendableMcr() > 0 ? (float)FMath::Clamp((double)S->GetManifestCostMcr() / (double)S->GetSpendableMcr(), 0.0, 1.0) : 0.f); }),
+				FSlateColor(D::Amber))
+		]
 	];
 	Picker->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
 	[
@@ -2274,26 +2286,52 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 			return Txt(FString::Join(Lines, TEXT("\n")));
 		}), D::TextDim)
 	];
-	// The convoy, while it is out.
-	Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
-	[
-		SNew(SBox)
-		.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && !S->GetConvoyRival().IsNone()) ? EVisibility::Visible : EVisibility::Collapsed; })
-		[
-			BarRow(
-				MakeAttributeLambda([this]()
-				{
-					const URHSimWorldSubsystem* S = GetSim();
-					const URHDefinitionsSubsystem* Df = GetDefs();
-					const FRHRivalRow* Row = (S && Df) ? Df->GetRival(S->GetConvoyRival()) : nullptr;
-					return Txt(FString::Printf(TEXT("Convoy %s %s"), S && S->IsConvoyReturning() ? TEXT("returning from") : TEXT("out to"),
-						Row ? *Row->DisplayName : TEXT("")));
-				}),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S ? FString::Printf(TEXT("%.0f%%"), S->GetConvoyProgress() * 100.0) : FString()); }),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S ? (float)S->GetConvoyProgress() : 0.f); }),
-				FSlateColor(D::Sky))
-		]
-	];
+	// The convoys, while they are out (E4: up to MaxConvoysOut, by Id, each with its leg and its progress).
+	{
+		const URHSimWorldSubsystem* Sim0 = GetSim();
+		const int32 Rows = FMath::Max(1, Sim0 ? Sim0->GetMaxConvoysOut() : 3);
+		for (int32 Row = 0; Row < Rows; ++Row)
+		{
+			const auto ConvoyAt = [this, Row]() -> const FRHConvoy*
+			{
+				const URHSimWorldSubsystem* S = GetSim();
+				return (S && S->GetConvoys().IsValidIndex(Row)) ? &S->GetConvoys()[Row] : nullptr;
+			};
+			Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+			[
+				SNew(SBox)
+				.Visibility_Lambda([ConvoyAt]() { return ConvoyAt() ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						BarRow(
+							MakeAttributeLambda([this, ConvoyAt]()
+							{
+								const FRHConvoy* C = ConvoyAt();
+								const URHDefinitionsSubsystem* Df = GetDefs();
+								const FRHRivalRow* Rival = (C && Df) ? Df->GetRival(C->Rival) : nullptr;
+								if (!C) { return FText::GetEmpty(); }
+								return Txt(FString::Printf(TEXT("Convoy %s %s"), C->bReturning ? TEXT("returning from") : TEXT("out to"), Rival ? *Rival->DisplayName : *C->Rival.ToString()));
+							}),
+							MakeAttributeLambda([this, ConvoyAt]() { const URHSimWorldSubsystem* S = GetSim(); const FRHConvoy* C = ConvoyAt(); return Txt((S && C) ? FString::Printf(TEXT("%.0f%%"), S->GetConvoyProgress(*C) * 100.0) : FString()); }),
+							MakeAttributeLambda([this, ConvoyAt]() { const URHSimWorldSubsystem* S = GetSim(); const FRHConvoy* C = ConvoyAt(); return TOptional<float>((S && C) ? (float)S->GetConvoyProgress(*C) : 0.f); }),
+							FSlateColor(D::Sky))
+					]
+					// E4: a priced order waiting for the market says when it clears (a second line: the bar's own label is short).
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+					[
+						SNew(SBox)
+						.Visibility_Lambda([ConvoyAt]() { const FRHConvoy* C = ConvoyAt(); return (C && C->IsPriced() && !C->bCleared) ? EVisibility::Visible : EVisibility::Collapsed; })
+						[
+							SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+							.Text_Lambda([ConvoyAt]() { const FRHConvoy* C = ConvoyAt(); return C ? Txt(FString::Printf(TEXT("Its order clears at the end of sol %d."), C->ClearSol)) : FText::GetEmpty(); })
+						]
+					]
+				]
+			];
+		}
+	}
 	// One card per known settlement, with the four verbs.
 	if (const URHDefinitionsSubsystem* Defs = GetDefs())
 	{
@@ -2341,7 +2379,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 							SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(4.f, 4.f))
 							+ SWrapBox::Slot()
 							[
-								SNew(SBox).ToolTipText(Txt(TEXT("Send the rover convoy: costs hydrogen, spare parts and your side of the trade at departure.")))
+								SNew(SBox).ToolTipText(Txt(TEXT("Send the rover convoy with the standing trade: costs hydrogen, spare parts and your side of the trade at departure; the goods change hands at market prices, settled in credits when the market clears.")))
 								[
 									D::Button(Txt(TEXT("TRADE")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRivalVerb, FName("Convoy"), RowName))
 								]
@@ -2367,6 +2405,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 									D::Button(Txt(TEXT("SABOTAGE")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRivalVerb, FName("Sabotage"), RowName))
 								]
 							]
+						]
+						// E4: this neighbor's market - prices, what it holds, and a draft order.
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+						[
+							BuildMarketCard(RowName, Row)
 						]
 					]
 				]
@@ -2432,6 +2475,199 @@ FReply SRHCommandDeck::HandleRivalVerb(FName Verb, FName Target)
 	if (PC.IsValid())
 	{
 		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s"), *RHOrder::VerbText(Verb), *RHOrder::TargetText(GetDefs(), Target)), D::Teal);
+	}
+	return FReply::Handled();
+}
+
+// E4: a neighbor's market card. Visible while the neighbor has an economy: the prices of what it trades with what it holds as of the last roll, a
+// draft order per resource (Buy +100 / Sell +100), what the draft may cost, and SEND ORDER, which the sim's own rule (CanPlaceOrder) greys with the
+// reason in its tooltip. The convoy leaves at once; the market fills the order at the end of the sol, up to what the neighbor holds then.
+FString SRHCommandDeck::DraftOrderText(FName Rival) const
+{
+	const TMap<FName, int32>* Draft = OrderDrafts.Find(Rival);
+	if (!Draft)
+	{
+		return FString();
+	}
+	TArray<FName> Keys;
+	Draft->GetKeys(Keys);
+	Keys.Sort([](const FName& A, const FName& B) { return A.ToString().Compare(B.ToString(), ESearchCase::CaseSensitive) < 0; });
+	FString Text;
+	for (const FName& K : Keys)
+	{
+		const int32 Kg = Draft->FindRef(K);
+		if (Kg != 0)
+		{
+			Text += FString::Printf(TEXT("%s%s:%d"), Text.IsEmpty() ? TEXT("") : TEXT(";"), *K.ToString(), Kg);
+		}
+	}
+	return Text;
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRivalRow& Row)
+{
+	TArray<TPair<FName, int64>> Caps;
+	FString Why;
+	URHDefinitionsSubsystem::ParseResourceListStrict(Row.StoreCap, Caps, Why);
+	Caps.Sort([](const TPair<FName, int64>& A, const TPair<FName, int64>& B) { return A.Key.ToString().Compare(B.Key.ToString(), ESearchCase::CaseSensitive) < 0; });
+	TSharedRef<SVerticalBox> Lines = SNew(SVerticalBox);
+	Lines->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 3.f)
+	[
+		SNew(STextBlock).Font(D::Label(8)).ColorAndOpacity(D::Amber).Text(Txt(TEXT("MARKET")))
+	];
+	Lines->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 3.f)
+	[
+		SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+		.Text(Txt(TEXT("Prices are credits a kg. An order's convoy leaves at once; the market fills it at the end of the sol, up to what they hold then.")))
+	];
+	for (const TPair<FName, int64>& Cap : Caps)
+	{
+		const FName Res = Cap.Key;
+		// Two lines a resource: the price and what they hold, then the draft with its two buttons - the card is narrow, so one line wrapped.
+		Lines->AddSlot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+		[
+			SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::Text).AutoWrapText(true)
+			.Text_Lambda([this, RowName, Res]()
+			{
+				const URHSimWorldSubsystem* S = GetSim();
+				if (!S) { return FText::GetEmpty(); }
+				return Txt(FString::Printf(TEXT("%s  %s cr/kg  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res)), FMath::Max(0, S->GetRivalStoreKg(RowName, Res))));
+			})
+		];
+		Lines->AddSlot().AutoHeight().Padding(0.f, 1.f, 0.f, 0.f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+			[
+				SNew(STextBlock).Font(D::Value(9)).ColorAndOpacity(D::Amber).Justification(ETextJustify::Right)
+				.Text_Lambda([this, RowName, Res]()
+				{
+					const TMap<FName, int32>* Draft = OrderDrafts.Find(RowName);
+					const int32 Kg = Draft ? Draft->FindRef(Res) : 0;
+					return Kg == 0 ? FText::GetEmpty() : Txt(FString::Printf(TEXT("draft %+d kg"), Kg));
+				})
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: buy 100 kg more %s from them (or sell 100 kg fewer)."), *ResourceLabel(Res).ToLower())))
+				[
+					D::Button(Txt(TEXT("Buy +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderNudge, RowName, Res, 100))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
+			[
+				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: sell 100 kg more %s to them (or buy 100 kg fewer)."), *ResourceLabel(Res).ToLower())))
+				[
+					D::Button(Txt(TEXT("Sell +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderNudge, RowName, Res, -100))
+				]
+			]
+		];
+	}
+	Lines->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+	[
+		SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+		.Text_Lambda([this, RowName]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			const URHSimClockSubsystem* C = GetClock();
+			if (!S) { return FText::GetEmpty(); }
+			const FString Text = DraftOrderText(RowName);
+			if (Text.IsEmpty())
+			{
+				return Txt(TEXT("No order drafted. Buy +100 and Sell +100 build one; SEND ORDER transmits it."));
+			}
+			FString Why;
+			int64 Reserve = 0;
+			if (!S->CanPlaceOrder(RowName, Text, Why, &Reserve))
+			{
+				return Txt(FString::Printf(TEXT("Draft %s - cannot be sent: %s"), *Text, *Why));
+			}
+			const int32 Sol = C ? FMath::FloorToInt32((C->GetSimSecondsTotal() + S->GetOrderLagSeconds()) / (double)URHSimClockSubsystem::SolLengthSimSeconds) : 0;
+			return Txt(FString::Printf(TEXT("Draft %s - it may cost up to %s cr net, set aside until the market fills it at the end of sol %d."), *Text, *URHSimWorldSubsystem::FormatCredits(Reserve), Sol));
+		})
+	];
+	Lines->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+	[
+		SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth()
+		[
+			SNew(SBox)
+			.ToolTipText_Lambda([this, RowName]()
+			{
+				const URHSimWorldSubsystem* S = GetSim();
+				const FString Text = DraftOrderText(RowName);
+				FString Why;
+				return (S && Text.IsEmpty()) ? Txt(TEXT("Draft an order first.")) : ((S && !S->CanPlaceOrder(RowName, Text, Why)) ? Txt(Why) : Txt(TEXT("Send the order: the convoy leaves at once with what you sell.")));
+			})
+			[
+				D::Button(Txt(TEXT("SEND ORDER")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderSend, RowName),
+					MakeAttributeLambda([this, RowName]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						const FString Text = DraftOrderText(RowName);
+						FString Why;
+						return S && !Text.IsEmpty() && S->CanPlaceOrder(RowName, Text, Why);
+					}), true)
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().Padding(6.f, 0.f, 0.f, 0.f)
+		[
+			SNew(SBox).ToolTipText(Txt(TEXT("Empty the draft.")))
+			[
+				D::Button(Txt(TEXT("CLEAR")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderClear, RowName),
+					MakeAttributeLambda([this, RowName]() { return !DraftOrderText(RowName).IsEmpty(); }))
+			]
+		]
+	];
+	return SNew(SBox)
+		.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->HasRivalEconomy(RowName) && S->IsMarketLive()) ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			Lines
+		];
+}
+
+FReply SRHCommandDeck::HandleOrderNudge(FName Rival, FName Resource, int32 Kg)
+{
+	int32& Draft = OrderDrafts.FindOrAdd(Rival).FindOrAdd(Resource);
+	Draft = FMath::Clamp(Draft + Kg, -1000, 1000); // a convoy carries at most 1,000 kg each way (ConvoyCargoKg); the sim refuses more
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg)
+{
+	OrderDrafts.FindOrAdd(Rival).FindOrAdd(Resource) = FMath::Clamp(Kg, -1000, 1000);
+}
+
+FReply SRHCommandDeck::HandleOrderClear(FName Rival)
+{
+	OrderDrafts.Remove(Rival);
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleOrderSend(FName Rival)
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FString Text = DraftOrderText(Rival);
+	if (!Sim || Rival.IsNone() || Text.IsEmpty())
+	{
+		return FReply::Handled();
+	}
+	FString Why;
+	if (!Sim->CanPlaceOrder(Rival, Text, Why))
+	{
+		if (PC.IsValid()) { PC->PostConfirm(Why, D::Red); }
+		return FReply::Handled();
+	}
+	FRHCommand Cmd;
+	Cmd.Verb = FName("MarketOrder");
+	Cmd.Target = Rival;
+	Cmd.Text = Text;
+	Sim->EnqueueCommand(Cmd);
+	OrderDrafts.Remove(Rival);
+	if (PC.IsValid())
+	{
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s to %s"), *Text, *RHOrder::TargetText(GetDefs(), Rival)), D::Teal);
 	}
 	return FReply::Handled();
 }

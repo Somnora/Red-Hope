@@ -141,6 +141,12 @@ public:
 	const FRHRecipeRow* GetRecipe(FName Name) const;
 
 	static TMap<FName, double> ParseResourceList(const FString& List);
+	// E4: the STRICT parse of a "Res:kg;Res:kg" list of whole kg, for the rival economy columns. ParseResourceList skips an entry with no ':',
+	// lets the last value of a repeated key win and reads "Ice:x" as 0, so it cannot say that a list is well formed; this one can. An empty
+	// (or blank) list is valid and empty. Refused, with the reason in OutWhy and OutLines empty: an empty entry (";;" or a trailing ";"), an
+	// entry without exactly one ':', an empty key, a value that is not 1-12 plain digits (a sign, a fraction, an exponent, a letter), a
+	// repeated key (FName equality, which ignores case). Whitespace around a key or a value is tolerated. The lines come back in file order.
+	static bool ParseResourceListStrict(const FString& List, TArray<TPair<FName, int64>>& OutLines, FString& OutWhy);
 
 	// Construction bill of materials: CostResources when set, else the legacy
 	// single-resource CostStruct_kg. Empty map = free to build (Lander, packs).
@@ -189,6 +195,9 @@ public:
 	// (dev-only; the real asset supersedes it once imported).
 	void Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row);
 	void Debug_InjectRival(FName Name, const FRHRivalRow& Row);
+	// E4: bumped whenever the rivals table changes (Debug_InjectRival, which RH.InjectRivals also calls), so the sim re-parses the economy
+	// columns only then - at world start, at load, and on a change here - never once a roll.
+	uint32 GetRivalsGeneration() const { return RivalsGeneration; }
 	void Debug_InjectFurniture(FName Name, const FRHFurnitureRow& Row);
 
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
@@ -238,6 +247,7 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
 	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
 	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
+	uint32 RivalsGeneration = 0; // E4: bumped by Debug_InjectRival
 	UPROPERTY() TObjectPtr<UDataTable> CropsTable;
 	UPROPERTY() TObjectPtr<UDataTable> FurnitureTable;
 	UPROPERTY() TObjectPtr<UDataTable> DoorsTable;
