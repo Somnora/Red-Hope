@@ -386,3 +386,8 @@ The digging would cope. The Borers already skip a floor with nothing left (`Cav:
 - **For D7:** atriums over dug ground work. But D7 then needs a second preflight and its own reservation of cells, which is exactly what its design avoided by converting caverns. This is the most work, and it reopens D7.
 
 **Recommendation: (a).** It matches what the carver already does, keeps D7 as designed, and removes the misleading reason without extra work. If (a) or (b) is chosen, it rides in this gate as fix 8. If (c) is chosen, it goes to D7.
+
+
+# DIRECTOR ANSWER (2026-10-25)
+
+- **Refusal 5 (a):** a cavern may reach down through floors that have no rock left inside its box. A box dug through on every floor is still refused. This rides in this gate as fix 8, which lets D7 atriums form over already-dug rooms (cavern down into new rock, finish it, convert it). D7's own checks still protect rooms, beds and tunnels.
