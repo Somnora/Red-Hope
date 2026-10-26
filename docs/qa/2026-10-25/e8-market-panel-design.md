@@ -567,3 +567,10 @@ The structure is sound: a deck fold, an optional write-only sim ring, and a list
   - Q-B (b)'s "one more session".
 - **Nothing was built or run,** so no frame costs were measured.
 - **Example figures are illustrative, not modelled:** 1.058, 18,950 kg and +1,655 bp.
+
+
+# DIRECTOR ANSWER (2026-10-26)
+
+- **Q-A (b):** the 30-sol price history lives in the SIM, saved, write-only: about 5,068 B per region per save plus about 0.2 KB of slot names, in its own RHSaveFrame frame, checked against E4's state on load (review change 6). One version bump, taken when E8 builds.
+- **Q-C (a):** MARKET joins the accordion, as the director's L7 (a) rule says. Acting on a price costs about 2 extra presses.
+- Q-B is settled by the corrected numbers: a 30-glyph sparkline sits on its own line under the name and price.

@@ -639,3 +639,9 @@ HEAD's baseline:
 - Cumulative totals from E5 and E6. I checked per-run figures only: E5's 17,540 cr by sol 99 uses a different clearing schedule.
 
 I ran nothing in the repo and built nothing.
+
+
+# DIRECTOR ANSWER (2026-10-26)
+
+- **Q-A (b):** the trade depot is NOT a building in E7. The Lander keeps every depot role until step 4's regions arrive. Traded ice stays as holdings in the Lander and is never melted. No new menu button, no depot cost, no version fence for it.
+- **Q-B (b):** a region's endowment is a permille on the rivals' PRODUCTION, not on V. Modelled at Zarya: 2,000 (plentiful, 800 kg a sol) brings Ice to its floor from sol 28; 500 (scarce, 200 kg a sol) never reaches the floor, Ice sits at about 2.35-2.44 cr/kg and a run earns 574-588 cr (-29%).
