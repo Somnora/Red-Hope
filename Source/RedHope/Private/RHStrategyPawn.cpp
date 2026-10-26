@@ -1,5 +1,7 @@
 #include "RHStrategyPawn.h"
 #include "Camera/CameraComponent.h"
+#include "Engine/LocalPlayer.h"
+#include "GameFramework/PlayerController.h"
 
 ARHStrategyPawn::ARHStrategyPawn()
 {
@@ -120,10 +122,23 @@ void ARHStrategyPawn::SetSectionView(bool bOn, float PitchDeg, float YawDeg)
 
 float ARHStrategyPawn::WidthAtZoomCm(float InZoomT) const
 {
-	// Width at the focus = 2 x Distance(z) x tan(Fov(z) / 2).
+	// Width at the focus = 2 x Distance(z) x tan(Fov(z) / 2), in the viewport's aspect.
 	const float D = MinDistanceCm * FMath::Pow(MaxDistanceCm / MinDistanceCm, InZoomT);
 	const float Fov = FMath::Lerp(GroundFovDeg, OrbitalFovDeg, InZoomT);
-	return 2.f * D * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5f));
+	return 2.f * D * FMath::Tan(FMath::DegreesToRadians(Fov * 0.5f)) * ViewWidthFactor();
+}
+
+float ARHStrategyPawn::ViewWidthFactor() const
+{
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	const ULocalPlayer* Player = PC ? PC->GetLocalPlayer() : nullptr;
+	int32 ViewX = 0, ViewY = 0;
+	if (PC) { PC->GetViewportSize(ViewX, ViewY); }
+	if (!Player || Player->AspectRatioAxisConstraint != AspectRatio_MaintainYFOV || !Camera || Camera->AspectRatio <= 0.f || ViewX <= 0 || ViewY <= 0)
+	{
+		return 1.f;
+	}
+	return ((float)ViewX / (float)ViewY) / Camera->AspectRatio;
 }
 
 float ARHStrategyPawn::SolveZoomForWidthCm(float WidthCm) const

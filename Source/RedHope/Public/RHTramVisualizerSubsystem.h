@@ -39,6 +39,10 @@ public:
 	// A line's capsule as last placed (world cm), for the click test and the captures. False for an unknown line.
 	bool GetCapsuleAt(int32 LineId, FVector& OutCm, bool* bOutShown = nullptr) const;
 
+	// QA (RH.TramPose, the click test): hold the presentation clock so that a line stands a fraction of its one-way ride along its chain (0 at the first
+	// stop, 1 in the dwell at the far one); a negative fraction lets the clock run again. False for an unknown line or no sim.
+	bool Debug_PoseLine(int32 LineId, double Fraction);
+
 	// Pure (the click test runs it with no world): where a capsule is on a line of ArcCm along its chain, at ClockSec of the presentation clock
 	// with a one-way ride of RideSec and a dwell of DwellSec at each stop. 0 at the first stop, ArcCm at the far one.
 	static double ArcAt(double ClockSec, double RideSec, double DwellSec, double ArcCm);
@@ -58,5 +62,6 @@ private:
 	UPROPERTY() TObjectPtr<AActor> Holder;
 	TArray<FCar> Cars;
 	double ClockSec = 0.0;
+	bool bHoldClock = false;
 	int32 ShownCount = 0;
 };

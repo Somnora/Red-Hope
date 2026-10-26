@@ -92,6 +92,7 @@ public:
 	uint32 GetOverlayViewSeed() const { return OverlayViewSeed; }
 	uint32 GetViewHash() const { return ViewHash(); }
 	int32 GetOverlayArrowCount() const { return OverlayArrows; }
+	int32 GetOverlayLabelsHidden() const { return OverlayLabelsHidden; }
 	// D6d: the tram band as TRAFFIC last drew it - the chain cells drawn in the slab, and the lines that have any (a line outside the slab shows
 	// only in the legend).
 	int32 GetTramBandCells() const { return TramBandCells; }
@@ -106,20 +107,48 @@ public:
 	// The overlay's last people sums per (home floor, work floor) as an ordered list, for the click test's and the bench's checks.
 	static void SumFlows(const URHSimWorldSubsystem& Sim, TMap<FIntPoint, int32>& OutPairs);
 
-	// UI polish P8: how far the labels reach past the carved extent along the plane, in cm: LeftCm past its left edge (the floor labels, and the
-	// arrows' room under TRAFFIC), RightCm past its right edge (a lift label on the last shaft). The controller frames the slab AND these into the
-	// free band between the shaft strip and the right column. bOverlay is TRAFFIC; bWorstFlows assumes the busiest "out - in" figures on every
-	// floor (the rock card is built once and must cover them). Measures text with the engine's own font; reads only const sim accessors.
-	void ComputeLabelRoomCm(const URHSimWorldSubsystem& Sim, int32 InAxis, int32 InPlaneRow, bool bOverlay, bool bWorstFlows, double& OutLeftCm, double& OutRightCm);
-	// One drawn label for the click test's section.labels: its text, its box in the world, its size and whether it is a floor label.
+	// UI polish P8: how far the world labels reach past the carved extent along the plane, in cm: LeftCm past its left edge (the arrows' room under
+	// TRAFFIC, and a lift or tram label that hangs over it), RightCm past its right edge (a lift label on the last shaft). The controller frames the
+	// slab AND these into the free band between the floor ladder and the right column. bOverlay is TRAFFIC. MinSizeCm is the overlay labels'
+	// screen-size floor in cm at the frame being fitted (0: their own sizes). P8c: the floor names left the world for the deck's ladder, so they
+	// are no longer measured here. Measures text with the engine's own font; reads only const sim accessors.
+	void ComputeLabelRoomCm(const URHSimWorldSubsystem& Sim, int32 InAxis, int32 InPlaneRow, bool bOverlay, double MinSizeCm, double& OutLeftCm, double& OutRightCm);
+	// One drawn world label for the click test's section.labels: its text, its box in the world and its size.
 	struct FLabelBox
 	{
 		FString Text;
 		FBox World = FBox(ForceInit);
 		float SizeCm = 0.f;
-		bool bFloorLabel = false;
 	};
 	void GetLabelBoxes(TArray<FLabelBox>& Out) const;
+
+	// P8c (docs/qa/2026-10-25/visual-pass-design.md, section 3): the floor names are a screen-space ladder the deck draws beside the cut, one row per
+	// floor from SURF to the deepest. A row is its name ("SURF", "-3"), its count ("· 230 cells", or under TRAFFIC "· out 12 · in 3"), the name's
+	// colour (the focus floor teal, a warm floor amber, else the deck's text) and its anchor: the floor's mid-plane on the cut face, at the slab's
+	// left edge, where the row's leader ends.
+	struct FFloorRow
+	{
+		int32 Level = 0;
+		FString Name;
+		FString Count;
+		FLinearColor NameColour = FLinearColor::White;
+		FVector AnchorCm = FVector::ZeroVector;
+	};
+	// The rows as the last rebuild or overlay refresh placed them, and a version that moves only when one of them changed (the deck lays the
+	// ladder out again on a new version, a refit or a camera move, never on a still frame).
+	const TArray<FFloorRow>& GetFloorRows() const { return FloorRows; }
+	uint32 GetFloorRowsVersion() const { return FloorRowsVersion; }
+	// The rows' text for a view that is not drawn yet (the controller sizes the ladder before it frames the cut on entry): every floor's name,
+	// count and colour, with no anchor. Under TRAFFIC it sums the flows itself.
+	void ComputeFloorRows(const URHSimWorldSubsystem& Sim, int32 InFocus, bool bOverlay, TArray<FFloorRow>& Out) const;
+	// The world point a floor's row points at (its mid-plane on the cut face, at the slab's left edge), from the view as last drawn.
+	FVector FloorAnchorCm(int32 Level) const;
+	// How far left of the slab's edge the world draws something at the moment, in cm along the plane: TRAFFIC's arrows, and an overlay label that
+	// hangs over the edge (0 with TRAFFIC off). The ladder stands clear of it.
+	double GetLeftReachCm() const { return LeftReachCm; }
+	// The slab's face on the cut as last drawn: the carved extent along the plane, from the surface to under the deepest plate (the click test's
+	// "slab inside the band").
+	void GetCutFaceCorners(FVector& OutTopLeft, FVector& OutBottomRight) const;
 
 private:
 	struct FFloorCache
@@ -181,8 +210,13 @@ private:
 	static constexpr uint32 PaletteSize = 512;
 	// UI polish P8: the unplaced text component that measures a label's width (never registered, never drawn).
 	UPROPERTY() TObjectPtr<UTextRenderComponent> MeasureText;
-	TArray<TWeakObjectPtr<UTextRenderComponent>> FloorLabels;
 	TArray<TWeakObjectPtr<UTextRenderComponent>> OverlayLabels;
+	// P8c: the ladder's rows (see GetFloorRows), and the hash that says when they changed.
+	TArray<FFloorRow> FloorRows;
+	uint32 FloorRowsVersion = 0;
+	uint32 FloorRowsHash = 0;
+	// P8c (the refresh's step 3): the overlay labels' screen-size floor in cm, from the frame at the last refresh (0 before the deck is up).
+	double OverlayMinSizeCm() const;
 	TWeakObjectPtr<UStaticMesh> Cube;
 	FVector Origin = FVector::ZeroVector;     // region 0's origin (shaft 0's head), refreshed each rebuild
 	double FloorH = 400.0;
@@ -199,6 +233,9 @@ private:
 	int32 CountPlates = 0, CountWalls = 0, CountBlocks = 0, CountPips = 0, CountCars = 0;
 	int32 Rebuilds = 0;
 	double LastRebuildMs = 0.0, WorstRebuildMs = 0.0;
+	// Diagnosis (step-2 nit 37): where a rebuild's time goes. The label-room measure every BuildShared runs, and PlaceLabels (P8c: the ladder's
+	// rows), last and worst (ms).
+	double LastRoomMs = 0.0, WorstRoomMs = 0.0, LastLabelsMs = 0.0, WorstLabelsMs = 0.0;
 	int32 Rows = 3;                            // rows drawn at the last rebuild
 	int32 DeepestSeen = 0;
 
@@ -221,6 +258,8 @@ private:
 	double NextOverlayS = 0.0;
 	bool bOverlayShown = false;
 	int32 OverlayRefreshes = 0, OverlayArrows = 0, OverlayRedraws = 0;
+	double LeftReachCm = 0.0;                  // P8c: see GetLeftReachCm
+	int32 OverlayLabelsHidden = 0;            // P8c: labels the last redraw hid, because at their screen-size floor they met a label placed first
 	uint32 ViewHash() const;                   // step-2 fix 6: the cut's own state, which the overlay's boxes and labels are placed in
 	uint32 OverlayViewSeed = 0;                // the seed RefreshOverlay's hash started from at its last call
 	int32 TramBandCells = 0, TramBandLines = 0;

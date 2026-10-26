@@ -23,6 +23,7 @@
 #include "RHCavernVisualizerSubsystem.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHCommandDeck.h"
+#include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
 #include "RHTunnelVisualizerSubsystem.h"
@@ -1133,12 +1134,192 @@ namespace
 		return FString();
 	}
 
-	// P8: every label the section draws (floors, lifts, trams, robots) lies inside the free band between the shaft strip and the right column,
-	// no two overlap, and no glyph is drawn under MinGlyphPx tall. Every label's box and size is logged.
+	// P8: every world label the section draws (lifts, trams, robots) lies inside the free band between the shaft strip and the right column, no
+	// two overlap, and no glyph is drawn under MinGlyphPx tall. Every label's box and size is logged.
+	// P8c: and the floor-name ladder (FloorLadderProblems).
 	constexpr double MinGlyphPx = 9.0;
+	// P8c: WCAG contrast bars against the ladder's chip: the floor's name (in the deck's text, teal or amber) and its dim count.
+	constexpr double MinNameContrast = 7.0;
+	constexpr double MinCountContrast = 4.5;
 
+	// WCAG's relative luminance, on linear values (the colours as the deck authors them), and the ratio of two.
+	double RelLuminance(const FLinearColor& C)
+	{
+		return 0.2126 * C.R + 0.7152 * C.G + 0.0722 * C.B;
+	}
+
+	double ContrastRatio(double LumA, double LumB)
+	{
+		return (FMath::Max(LumA, LumB) + 0.05) / (FMath::Min(LumA, LumB) + 0.05);
+	}
+
+	// P8c: the floor-name ladder, as the visual-pass design's verify step asks:
+	// (i) one row for every floor from SURF to the deepest, in order; (ii) no two rows overlap, nor a row and a world label (the boxes in Labels) or
+	// the TRAFFIC legend, every row is inside the band (and, under TRAFFIC, left of the arrows' left reach), and the label face's em is at least
+	// MinGlyphPx on screen, the same measure the world labels' glyph bar uses (the capitals are logged beside it); (iii) each leader starts on its
+	// chip's right edge and ends within 2 px of its floor's mid-plane on the cut face (under TRAFFIC, of that point moved left by the arrows' left
+	// reach, where the ladder stops its leaders short of the arrows), projected here on its own; (iv) the
+	// name and the count against the chip meet MinNameContrast and MinCountContrast with the chip composited over white, the worst backdrop there
+	// is (and, logged, as deck.contrast reads a fill: opaque); (v) the slab's cut face lies inside the band less the ladder. Returns a summary.
+	FString FloorLadderProblems(const URHSectionVisualizerSubsystem& Section, double BandLeft, double BandRight, const TArray<TPair<FVector2D, FVector2D>>& Labels, TArray<FString>& Problems)
+	{
+		const ARHPlayerController* PC = GetPC();
+		const URHSimWorldSubsystem* Sim = GetSim();
+		const TSharedPtr<SRHSectionLadder> Ladder = (PC && PC->GetDeck().IsValid()) ? PC->GetDeck()->GetLadder() : TSharedPtr<SRHSectionLadder>();
+		if (!Ladder.IsValid() || !Sim)
+		{
+			Problems.Add(TEXT("no floor ladder on the deck"));
+			return FString();
+		}
+		TArray<SRHSectionLadder::FRowShot> Rows;
+		Ladder->GetRowShots(Rows);
+		const int32 Depth = Sim->GetShaftDepth();
+		// (i)
+		if (Rows.Num() != Depth + 1)
+		{
+			Problems.Add(FString::Printf(TEXT("the ladder has %d rows for SURF and %d floors"), Rows.Num(), Depth));
+		}
+		for (int32 I = 0; I < Rows.Num(); ++I)
+		{
+			if (Rows[I].Level != -I) { Problems.Add(FString::Printf(TEXT("ladder row %d is floor %d"), I, Rows[I].Level)); break; }
+		}
+		// (ii)
+		// The bar is on the em, as for the world labels above (their glyph is their em): the label face's size at Slate's 96 dpi times the deck's DPI
+		// scale. The capitals are logged beside it, honestly: FreeType draws the face at a whole number of pixels per em (the engine rounds the
+		// scaled size, FontCacheFreeType.cpp ComputeFontPixelSize), and Roboto's cap height is 1456 / 2048 of that. At 1440x860 (DPI scale 0.796)
+		// Label(10) is an em of 10.6 px drawn at 11 ppem: capitals 7.8 px, not the design's "about 9 px" (which holds at a DPI scale of 1).
+		const double EmPx = Ladder->GetEmPx();
+		const float Scale = Ladder->GetTickSpaceGeometry().Scale;
+		const int32 Ppem = FMath::RoundToInt((double)SRHSectionLadder::RowFont().Size * 96.0 / 72.0 * (double)(Scale > KINDA_SMALL_NUMBER ? Scale : 1.f));
+		const double CapPx = (double)Ppem * 1456.0 / 2048.0;
+		if (EmPx < MinGlyphPx)
+		{
+			Problems.Add(FString::Printf(TEXT("the ladder's em is %.1f px (capitals %.1f px, bar %.0f on the em)"), EmPx, CapPx, MinGlyphPx));
+		}
+		// Under TRAFFIC: where the arrows (and any label hanging left of the slab) begin, per floor, projected here on its own; no chip may reach past it.
+		int32 DMin = 0, DMax = 0, AMin = 0, AMax = 0;
+		URHSectionVisualizerSubsystem::ComputeExtent(*Sim, Section.GetAxis(), DMin, DMax, AMin, AMax);
+		const double ReachCm = Section.GetLeftReachCm();
+		const FVector2D DaR = URHSectionVisualizerSubsystem::DirAlong(Section.GetAxis());
+		const FVector ReachBack = FVector(DaR.X, DaR.Y, 0.0) * ReachCm;
+		const auto FloorEnd = [&](int32 Level, FVector2D& Out)
+		{
+			return WorldPointToSlate(Section.CutFacePoint((double)AMin - 0.5, ((double)Level + 0.5) * Sim->GetFloorHeightCm()) - ReachBack, Out);
+		};
+		double ReachLeftX = 1.0e9;
+		if (ReachCm > 0.0)
+		{
+			for (int32 L = 0; L >= -Depth; --L)
+			{
+				FVector2D P;
+				if (FloorEnd(L, P)) { ReachLeftX = FMath::Min(ReachLeftX, P.X); }
+			}
+		}
+		TArray<FFoundWidget> Boxes;
+		GatherInWindow(TEXT("SBox"), Boxes);
+		const FFoundWidget* Legend = FindTagged(Boxes, TEXT("RH.TrafficLegend"));
+		// The viewport's top and bottom in desktop space (the window's own offset included).
+		double ViewTop = -1.0e9, ViewBottom = 1.0e9;
+		if (GEngine && GEngine->GameViewport && GEngine->GameViewport->GetGameViewportWidget().IsValid())
+		{
+			const FGeometry ViewGeo = GEngine->GameViewport->GetGameViewportWidget()->GetTickSpaceGeometry();
+			ViewTop = ViewGeo.GetAbsolutePosition().Y;
+			ViewBottom = ViewTop + ViewGeo.GetAbsoluteSize().Y;
+		}
+		for (int32 I = 0; I < Rows.Num(); ++I)
+		{
+			const SRHSectionLadder::FRowShot& R = Rows[I];
+			const FVector2D Min(R.Chip.Left, R.Chip.Top), Max(R.Chip.Right, R.Chip.Bottom);
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: ladder row '%s %s' (%.0f,%.0f)-(%.0f,%.0f), leader to (%.1f,%.1f)"), *R.Name, *R.Count, Min.X, Min.Y, Max.X, Max.Y, R.LeaderTo.X, R.LeaderTo.Y);
+			if (Min.X < BandLeft - 1.0 || Max.X > BandRight + 1.0 || Min.Y < ViewTop - 1.0 || Max.Y > ViewBottom + 1.0)
+			{
+				Problems.Add(FString::Printf(TEXT("ladder row '%s' (%.0f..%.0f, %.0f..%.0f) is outside the band"), *R.Name, Min.X, Max.X, Min.Y, Max.Y));
+			}
+			for (int32 J = I + 1; J < Rows.Num(); ++J)
+			{
+				if (RectsOverlap(Min, Max, FVector2D(Rows[J].Chip.Left, Rows[J].Chip.Top), FVector2D(Rows[J].Chip.Right, Rows[J].Chip.Bottom), 0.0))
+				{
+					Problems.Add(FString::Printf(TEXT("ladder rows '%s' and '%s' overlap"), *R.Name, *Rows[J].Name));
+				}
+			}
+			for (const TPair<FVector2D, FVector2D>& L : Labels)
+			{
+				if (RectsOverlap(Min, Max, L.Key, L.Value)) { Problems.Add(FString::Printf(TEXT("ladder row '%s' overlaps a world label"), *R.Name)); }
+			}
+			if (Legend && RectsOverlap(Min, Max, Legend->TopLeft, Legend->TopLeft + Legend->Size))
+			{
+				Problems.Add(FString::Printf(TEXT("ladder row '%s' is under the TRAFFIC legend"), *R.Name));
+			}
+			if (ReachCm > 0.0 && Max.X > ReachLeftX + 1.0)
+			{
+				Problems.Add(FString::Printf(TEXT("ladder row '%s' (right edge %.0f) reaches past the arrows' left reach at %.0f"), *R.Name, Max.X, ReachLeftX));
+			}
+		}
+		// (iii)
+		double WorstLeader = 0.0;
+		for (const SRHSectionLadder::FRowShot& R : Rows)
+		{
+			FVector2D Floor;
+			if (!R.bAnchorOnScreen || !FloorEnd(R.Level, Floor))
+			{
+				Problems.Add(FString::Printf(TEXT("floor %d's mid-plane is not on screen"), R.Level));
+				continue;
+			}
+			const double Off = FVector2D::Distance(R.LeaderTo, Floor);
+			WorstLeader = FMath::Max(WorstLeader, Off);
+			if (Off > 2.0) { Problems.Add(FString::Printf(TEXT("floor %d's leader ends %.1f px from its floor"), R.Level, Off)); }
+			if (FMath::Abs(R.LeaderFrom.X - R.Chip.Right) > 1.0 || R.LeaderFrom.Y < R.Chip.Top || R.LeaderFrom.Y > R.Chip.Bottom)
+			{
+				Problems.Add(FString::Printf(TEXT("floor %d's leader does not start on its chip"), R.Level));
+			}
+		}
+		// (iv)
+		const FLinearColor Chip = SRHSectionLadder::ChipColour();
+		const double ChipOpaque = RelLuminance(Chip), ChipOverWhite = Chip.A * ChipOpaque + (1.0 - Chip.A);
+		const double CountRatio = ContrastRatio(RelLuminance(SRHSectionLadder::CountColour()), ChipOverWhite);
+		double WorstName = 1.0e9, WorstNameOpaque = 1.0e9;
+		for (const SRHSectionLadder::FRowShot& R : Rows)
+		{
+			const double Ratio = ContrastRatio(RelLuminance(R.NameColour), ChipOverWhite);
+			WorstName = FMath::Min(WorstName, Ratio);
+			WorstNameOpaque = FMath::Min(WorstNameOpaque, ContrastRatio(RelLuminance(R.NameColour), ChipOpaque));
+			if (Ratio < MinNameContrast) { Problems.Add(FString::Printf(TEXT("'%s' is %.2f:1 against its chip (bar %.1f)"), *R.Name, Ratio, MinNameContrast)); }
+		}
+		if (CountRatio < MinCountContrast) { Problems.Add(FString::Printf(TEXT("the count is %.2f:1 against its chip (bar %.1f)"), CountRatio, MinCountContrast)); }
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: ladder contrast: chip luminance %.3f opaque, %.3f over white; worst name %.2f:1 over white (%.2f:1 opaque), count %.2f:1 over white (%.2f:1 opaque)"),
+			ChipOpaque, ChipOverWhite, Rows.Num() > 0 ? WorstName : 0.0, Rows.Num() > 0 ? WorstNameOpaque : 0.0, CountRatio, ContrastRatio(RelLuminance(SRHSectionLadder::CountColour()), ChipOpaque));
+		// (v)
+		const double LadderRight = Ladder->GetColumnRightAbs();
+		FVector TL, BR;
+		Section.GetCutFaceCorners(TL, BR);
+		FVector2D SlabMin(1.0e9, 1.0e9), SlabMax(-1.0e9, -1.0e9);
+		for (const FVector& Corner : { TL, BR, FVector(TL.X, TL.Y, BR.Z), FVector(BR.X, BR.Y, TL.Z) })
+		{
+			FVector2D P;
+			if (!WorldPointToSlate(Corner, P)) { Problems.Add(TEXT("a corner of the slab is behind the camera")); continue; }
+			SlabMin = FVector2D(FMath::Min(SlabMin.X, P.X), FMath::Min(SlabMin.Y, P.Y));
+			SlabMax = FVector2D(FMath::Max(SlabMax.X, P.X), FMath::Max(SlabMax.Y, P.Y));
+		}
+		if (SlabMin.X < LadderRight - 1.0 || SlabMax.X > BandRight + 1.0 || SlabMin.Y < ViewTop - 1.0 || SlabMax.Y > ViewBottom + 1.0)
+		{
+			Problems.Add(FString::Printf(TEXT("the slab (%.0f..%.0f, %.0f..%.0f) is not inside the band less the ladder (%.0f..%.0f)"), SlabMin.X, SlabMax.X, SlabMin.Y, SlabMax.Y, LadderRight, BandRight));
+		}
+		return FString::Printf(TEXT("ladder %d rows (SURF to %d), em %.1f px (bar %.0f; drawn at %d ppem, capitals %.1f px), worst leader %.1f px off its %s, worst name %.2f:1 and count %.2f:1 over white, slab %.0f..%.0f right of the ladder at %.0f%s, %d layouts"),
+			Rows.Num(), -Depth, EmPx, MinGlyphPx, Ppem, CapPx, WorstLeader, ReachCm > 0.0 ? TEXT("floor's end left of the arrows") : TEXT("floor"), Rows.Num() > 0 ? WorstName : 0.0, CountRatio,
+			SlabMin.X, SlabMax.X, LadderRight, ReachCm > 0.0 ? *FString::Printf(TEXT(", arrows' left reach at %.0f"), ReachLeftX) : TEXT(""), Ladder->GetLayouts());
+	}
+
+	// bTraffic: the check is a TRAFFIC one (its name says so); with the overlay off it would check the TRAFFIC-off view under a TRAFFIC name, so it
+	// fails instead and says why.
 	void CheckSectionLabels(const FString& Name)
 	{
+		const bool bTraffic = Name.Contains(TEXT("traffic"));
+		const ARHPlayerController* TrafficPC = GetPC();
+		if (bTraffic && !(TrafficPC && TrafficPC->IsTrafficOverlayOn()))
+		{
+			Report(Name, false, TEXT("TRAFFIC is not on, so its labels and the ladder's TRAFFIC rows were not checked"));
+			return;
+		}
 		UWorld* World = FindGameWorld();
 		const URHSectionVisualizerSubsystem* Section = World ? World->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
 		TArray<FFoundWidget> Borders, Scrolls;
@@ -1179,7 +1360,7 @@ namespace
 				L.GlyphPx = 0.0;
 			}
 			SmallestGlyph = FMath::Min(SmallestGlyph, L.GlyphPx);
-			UE_LOG(LogRedHope, Display, TEXT("RHClick: section label '%s' (%.0f,%.0f)-(%.0f,%.0f) glyph %.1f px%s"), *B.Text.Left(60), L.Min.X, L.Min.Y, L.Max.X, L.Max.Y, L.GlyphPx, B.bFloorLabel ? TEXT(" floor") : TEXT(""));
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: section label '%s' (%.0f,%.0f)-(%.0f,%.0f) glyph %.1f px"), *B.Text.Left(60), L.Min.X, L.Min.Y, L.Max.X, L.Max.Y, L.GlyphPx);
 			if (L.Min.X < BandLeft - 1.0 || L.Max.X > BandRight + 1.0)
 			{
 				Problems.Add(FString::Printf(TEXT("'%s' (%.0f..%.0f) is outside the free band (%.0f..%.0f)"), *B.Text.Left(24), L.Min.X, L.Max.X, BandLeft, BandRight));
@@ -1200,9 +1381,13 @@ namespace
 				}
 			}
 		}
-		Report(Name, Labels.Num() > 0 && Problems.Num() == 0,
-			FString::Printf(TEXT("%d label(s) inside the free band %.0f..%.0f, none overlapping, smallest glyph %.1f px (bar %.0f)%s%s"), Labels.Num(), BandLeft, BandRight, Labels.Num() > 0 ? SmallestGlyph : 0.0, MinGlyphPx,
-				Problems.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Problems, TEXT("; "))));
+		// P8c: the floors' names are the ladder now (with TRAFFIC off there may be no world label at all).
+		TArray<TPair<FVector2D, FVector2D>> Rects;
+		for (const FScreenLabel& L : Labels) { Rects.Add(TPair<FVector2D, FVector2D>(L.Min, L.Max)); }
+		const FString Ladder = FloorLadderProblems(*Section, BandLeft, BandRight, Rects, Problems);
+		Report(Name, !Ladder.IsEmpty() && Problems.Num() == 0,
+			FString::Printf(TEXT("%d world label(s) inside the free band %.0f..%.0f, none overlapping, smallest glyph %.1f px (bar %.0f); %s%s%s"), Labels.Num(), BandLeft, BandRight, Labels.Num() > 0 ? SmallestGlyph : 0.0, MinGlyphPx,
+				*Ladder, Problems.Num() > 0 ? TEXT("; ") : TEXT(""), *FString::Join(Problems, TEXT("; "))));
 	}
 
 	// P3: City is open, Crew is folded, and the City header (its toggle) is among the visible buttons and inside the right column's rectangle.
@@ -2417,6 +2602,101 @@ namespace
 		}, 0.1f);
 	}
 
+	// P8c: the deep scene (RH_CLICKTEST_SCENE=deepbench: rh_clicktest.sh boots with no title and runs "RH.DeepBench 2000 trams" first). The
+	// 20-floor bench is where the world floor labels fell to 7.5 px, so the ladder is checked there: the section opened by its button, the cut
+	// through all three shafts at focus -10 and at -1, then TRAFFIC on, then a Q turn; section.labels' checks at each.
+	void StartDeepBenchTest()
+	{
+		FRunner& Runner = FRunner::Get();
+		GPass = 0;
+		GFail = 0;
+		const auto Section = []() -> URHSectionVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr; };
+		PushSettle(2.f);
+		Runner.Push(TEXT("deep.setup"), [](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			const bool bReady = Sim && Sim->GetShaftDepth() >= 20 && Sim->GetShaftCount() >= 3 && Sim->GetTramLines().Num() >= 2;
+			if (!bReady && !bLast) { return false; }
+			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
+			Report(TEXT("deep.setup"), bReady, FString::Printf(TEXT("the bench: %d floors, %d shafts, %d tram lines, %d colonists"), Sim ? Sim->GetShaftDepth() : -1, Sim ? Sim->GetShaftCount() : -1,
+				Sim ? Sim->GetTramLines().Num() : -1, Sim ? Sim->GetPopulation() : -1));
+			return true;
+		}, 0.5f, 30.f);
+		const TSharedRef<FPress> On = PushPress(TEXT("deep.section"), LocateButton(TEXT("Section"), 0, true));
+		PushCheck(TEXT("deep.section"), On, [Section]()
+		{
+			const ARHPlayerController* PC = GetPC();
+			return (PC && PC->IsSectionOn() && Section() && Section()->IsOn()) ? FString() : FString(TEXT("the section did not open"));
+		}, 1.f);
+		// RH.DeepBench's shafts stand on one lattice row: axis 1 cuts all three (the widest frame, the one that shrank the world labels most).
+		Runner.Do(TEXT("deep.cut"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSectionAxis(1); PC->SetSectionFocus(-10); } }, 1.5f);
+		Runner.Do(TEXT("deep.labels"), []() { CheckSectionLabels(TEXT("deep.labels")); }, 0.2f);
+		PushSettle(3.f); // the focus ride from SURF to -10 (the camera eases about 3 s), so the frames below are still
+		// The ladder is laid out on a refit, a camera move or a changed row, never on a still frame: with the sim paused and the camera at rest, a
+		// second and a half of frames lays nothing out.
+		const TSharedRef<int32> LayoutsBefore = MakeShared<int32>(0);
+		const TSharedRef<uint64> FramesBefore = MakeShared<uint64>(0);
+		const TSharedRef<float> SpeedBefore = MakeShared<float>(1.f);
+		Runner.Do(TEXT("deep.still base"), [LayoutsBefore, FramesBefore, SpeedBefore]()
+		{
+			*SpeedBefore = ClockSpeed();
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(0.f);
+				*LayoutsBefore = PC->GetDeck().IsValid() && PC->GetDeck()->GetLadder().IsValid() ? PC->GetDeck()->GetLadder()->GetLayouts() : -1;
+			}
+			*FramesBefore = GFrameCounter;
+		}, 1.5f);
+		Runner.Do(TEXT("deep.still"), [LayoutsBefore, FramesBefore, SpeedBefore]()
+		{
+			ARHPlayerController* PC = GetPC();
+			const int32 Now = PC && PC->GetDeck().IsValid() && PC->GetDeck()->GetLadder().IsValid() ? PC->GetDeck()->GetLadder()->GetLayouts() : -2;
+			Report(TEXT("deep.still"), *LayoutsBefore >= 0 && Now == *LayoutsBefore,
+				FString::Printf(TEXT("%llu still frames laid the ladder out %d time(s) (%d layouts before, %d after)"), GFrameCounter - *FramesBefore, Now - *LayoutsBefore, *LayoutsBefore, Now));
+			if (PC) { PC->SetSimSpeed(*SpeedBefore > 0.f ? *SpeedBefore : 1.f); }
+		}, 0.3f);
+		Runner.Do(TEXT("deep.focus -1"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSectionFocus(-1); } }, 1.0f);
+		Runner.Do(TEXT("deep.labels focus-1"), []() { CheckSectionLabels(TEXT("deep.labels.focus-1")); }, 0.2f);
+		Runner.Do(TEXT("deep.focus -10"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSectionFocus(-10); } }, 1.0f);
+		PushSettle(3.f); // the ride back down
+		const TSharedRef<FPress> TOn = PushPress(TEXT("deep.traffic"), LocateButton(TEXT("Traffic"), 0, true));
+		PushCheck(TEXT("deep.traffic"), TOn, []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			return (PC && PC->IsTrafficOverlayOn()) ? FString() : FString(TEXT("the overlay did not turn on"));
+		}, 2.f);
+		// Where the Traffic button cannot be reached (the 1600x900 window is clamped on a smaller display, rh_clicktest.sh's header), deep.traffic
+		// has failed above; the overlay is then turned on through the controller, said so in the log, so the ladder's TRAFFIC case is still checked.
+		Runner.Do(TEXT("deep.traffic fallback"), []()
+		{
+			ARHPlayerController* PC = GetPC();
+			if (PC && !PC->IsTrafficOverlayOn())
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("RHClick: deep.traffic: the Traffic button press did not turn the overlay on; turning it on through the controller so deep.labels.traffic* still run"));
+				PC->ToggleTrafficOverlay();
+			}
+		}, 0.5f);
+		PushSettle(1.5f); // the refit, and the overlay's 2 Hz beat at the new frame
+		Runner.Do(TEXT("deep.labels traffic"), []() { CheckSectionLabels(TEXT("deep.labels.traffic")); }, 0.2f);
+		const TSharedRef<int32> AxisBefore = MakeShared<int32>(0);
+		Runner.Do(TEXT("deep.turn base"), [AxisBefore]() { if (const ARHPlayerController* PC = GetPC()) { *AxisBefore = PC->GetSectionAxis(); } }, 0.1f);
+		const TSharedRef<FPress> Turn = PushKey(TEXT("deep.turn"), EKeys::Q);
+		PushCheck(TEXT("deep.turn"), Turn, [AxisBefore]()
+		{
+			const ARHPlayerController* PC = GetPC();
+			return (PC && PC->GetSectionAxis() == (*AxisBefore + 3) % 4) ? FString() : FString::Printf(TEXT("Q did not turn axis %d"), *AxisBefore);
+		}, 1.f);
+		PushSettle(2.f); // the quarter turn eases
+		Runner.Do(TEXT("deep.labels traffic turned"), []() { CheckSectionLabels(TEXT("deep.labels.traffic.turned")); }, 0.2f);
+		Runner.Do(TEXT("final"), []()
+		{
+			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
+			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
+			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
+		}, 0.1f);
+	}
+
 	// A label from console arguments: the words, minus a trailing integer when it picks the nth match.
 	void ParseLabel(const TArray<FString>& Args, FString& OutLabel, int32& OutNth)
 	{
@@ -2556,8 +2836,13 @@ static FAutoConsoleCommand GRHDragWorld(
 
 static FAutoConsoleCommand GRHClickTest(
 	TEXT("RH.ClickTest"),
-	TEXT("RH.ClickTest - the scripted click test: title NEW COLONY and CONTINUE, pause RESUME, a BUILD tab and card, a build click, the five speed buttons, a manifest ADD, Traffic, the Tunnel tool, and that no click leaked into the world. One 'CLICKTEST <name> PASS|FAIL' line per step, then 'CLICKTEST TOTAL'. Boot with -RHTitle (scripts/unreal/rh_clicktest.sh)."),
-	FConsoleCommandDelegate::CreateLambda([]()
+	TEXT("RH.ClickTest [deepbench] - the scripted click test: title NEW COLONY and CONTINUE, pause RESUME, a BUILD tab and card, a build click, the five speed buttons, a manifest ADD, Traffic, the Tunnel tool, and that no click leaked into the world. One 'CLICKTEST <name> PASS|FAIL' line per step, then 'CLICKTEST TOTAL'. Boot with -RHTitle (scripts/unreal/rh_clicktest.sh). 'deepbench' runs the P8c deep scene instead, on a colony RH.DeepBench built (RH_CLICKTEST_SCENE=deepbench)."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("deepbench"), ESearchCase::IgnoreCase))
+		{
+			StartDeepBenchTest();
+			return;
+		}
 		StartClickTest();
 	}));

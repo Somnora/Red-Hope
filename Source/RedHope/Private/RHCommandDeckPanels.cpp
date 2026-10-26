@@ -17,6 +17,7 @@
 #include "RHPlayerController.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -324,6 +325,12 @@ void SRHCommandDeck::GetFreeBand(float& OutLeft01, float& OutRight01) const
 	// 8 px of air on each side.
 	OutLeft01 = (StripRight + (19.f + 8.f) * Scale) / Width;
 	OutRight01 = (Width - ColumnLeft + 8.f * Scale) / Width;
+}
+
+// P8c: the ladder's em in physical pixels (see the header); before the deck is built, the face at a scale of 1.
+float SRHCommandDeck::GetLadderEmPx() const
+{
+	return Ladder.IsValid() ? Ladder->GetEmPx() : (float)SRHSectionLadder::RowFont().Size * 96.f / 72.f;
 }
 
 // UI polish P4: the shaft strip's place (see the header).

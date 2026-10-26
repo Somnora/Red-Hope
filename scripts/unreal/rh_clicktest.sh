@@ -10,6 +10,8 @@
 #                          -11 first, so shaft rows scroll out of the strip and Fit lift and Tunnel must still be reached)
 #        RH_CLICKTEST_RES  window size WxH (default 1600x900; use 1440x860 on a 1470x956-point display, where 1600x900 is clamped
 #                          and the early deck steps fail on reach - the official size on this machine, docs/qa-boot-card.md)
+#        RH_CLICKTEST_SCENE  "deepbench" (P8c): no title; boot straight into "RH.DeepBench 2000 trams" (20 floors, three shafts, two tram
+#                          lines) and run the deep view's ladder checks there (RH.ClickTest deepbench) instead of the whole test
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.
@@ -32,11 +34,21 @@ LOG="$LOGDIR/$LABEL.log"
 
 PRE="${RH_CLICKTEST_PRE:-}"
 RES="${RH_CLICKTEST_RES:-1600x900}"
+SCENE="${RH_CLICKTEST_SCENE:-}"
+TITLE_ARG="-RHTitle"
 CMDS="r.setres ${RES}w, RH.Demo, ${PRE:+$PRE, }RH.After 3 RH.ClickTest"
+if [ "$SCENE" = "deepbench" ]; then
+  # RH.DeepBench needs a fresh colony: no title and no RH.Demo.
+  TITLE_ARG=""
+  CMDS="r.setres ${RES}w, RH.DeepBench 2000 trams, ${PRE:+$PRE, }RH.After 6 RH.ClickTest deepbench"
+elif [ -n "$SCENE" ]; then
+  echo "unknown RH_CLICKTEST_SCENE '$SCENE' (known: deepbench)"
+  exit 2
+fi
 
-echo "=== click test '$LABEL' ==="
+echo "=== click test '$LABEL'${SCENE:+ (scene $SCENE)} ==="
 "$UE" "$PROJ" "$MAP" -game -windowed -resx=${RES%x*} -resy=${RES#*x} \
-  -unattended -nosound -stdout -RHTitle \
+  -unattended -nosound -stdout $TITLE_ARG \
   "-ExecCmds=$CMDS" > "$LOG" 2>&1 &
 PID=$!
 

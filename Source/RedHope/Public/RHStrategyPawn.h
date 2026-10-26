@@ -49,10 +49,15 @@ public:
 	void SetSectionView(bool bOn, float PitchDeg, float YawDeg);
 	bool IsSectionView() const { return bSectionView; }
 	void SetSectionYaw(float YawDeg) { SectionYawDeg = FMath::UnwindDegrees(YawDeg); } // a quarter turn keeps the tilt
-	// The zoom at which the frame is WidthCm wide at the focus (FOV is horizontal), solved by bisection on the distance and FOV curves.
+	// The zoom at which the frame is WidthCm wide at the focus, solved by bisection on the distance and FOV curves.
 	float SolveZoomForWidthCm(float WidthCm) const;
 	// The forward direction of the same curve (UI polish P8): the width the frame shows at the focus at a zoom, and at the zoom now set.
+	// P8c: in the viewport's own aspect (ViewWidthFactor).
 	float WidthAtZoomCm(float InZoomT) const;
+	// P8c: the engine keeps the vertical FOV (the local player's AspectRatio_MaintainYFOV, BaseEngine.ini), so the FOV the camera is given is the
+	// horizontal one only at the camera's own aspect (16:9). A narrower window sees less across, a wider one more: 2 D tan(FOV / 2) times the
+	// viewport's aspect over the camera's. 1440 x 860 sees 5.8% less than the bare formula, which framed the deep view's slab that much too wide.
+	float ViewWidthFactor() const;
 	float GetFrameWidthCm() const { return WidthAtZoomCm(ZoomT); }
 
 	// Current camera distance (cm) - pan speed scales with it so a screen-width

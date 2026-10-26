@@ -15,6 +15,7 @@
 #include "RHMarsTerrain.h"
 #include "RHGrowthVisualizerSubsystem.h"
 #include "RHSectionVisualizerSubsystem.h"
+#include "RHTramVisualizerSubsystem.h"
 #include "RHRobotMovement.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -1759,6 +1760,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 		// D6d: "RH.DeepBench N trams" digs its two tunnels 14 cells long (past TramMinCells) and lays a tram line on each; without the word
 		// the bench is D8's, tunnel for tunnel.
 		const bool bTrams = Args.Num() > 1 && Args[1].Equals(TEXT("trams"), ESearchCase::IgnoreCase);
+		// Visual pass: "RH.DeepBench N trams bend" turns the -14 tunnel into an L (ten cells out along +X, four along +Y: the same 14 points), so a tram
+		// has a corner to bend through.
+		const bool bBend = bTrams && Args.Num() > 2 && Args[2].Equals(TEXT("bend"), ESearchCase::IgnoreCase);
 		const double T0 = FPlatformTime::Seconds();
 		// 1. The five-floor city, shaft 0 at the origin, everyone housed and settled (RH.CityBench).
 		const URHSimWorldSubsystem::FRHScaleColonyReport Rep = Sim->Debug_BuildScaleColony(N);
@@ -1819,7 +1823,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 			if (const FRHFloor* F = Sim->FindFloor(L)) { for (const FIntPoint& P : F->GetCells()) { if (P.Y == 0) { MaxX = FMath::Max(MaxX, P.X); } } }
 			int32 Id = INDEX_NONE;
 			const int32 TunnelCells = bTrams ? 14 : 10;
-			if (MaxX > MIN_int32 && Sim->Debug_DigTunnel(L, FIntPoint(MaxX + 1, 0), FIntPoint(MaxX + TunnelCells, 0), Id, Why))
+			const bool bL = bBend && L == -14;
+			if (MaxX > MIN_int32 && Sim->Debug_DigTunnel(L, FIntPoint(MaxX + 1, 0), bL ? FIntPoint(MaxX + 10, 4) : FIntPoint(MaxX + TunnelCells, 0), Id, Why))
 			{
 				Sim->Debug_CarveTunnelCells(Id, TunnelCells);
 				Tunnels.Add(Id);
@@ -1933,6 +1938,24 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 
 // D8 (R8, R9 c): drive the section from the console (the bench, the captures and the smoke), and check the overlay's floor flows against an
 // independent count from the roster.
+// Visual pass: pose a tram for a capture or a check. The presentation clock is held so the line stands at the given fraction of its ride (0 first stop,
+// 1 the far stop's dwell); "off" lets it run again.
+static FAutoConsoleCommandWithWorldAndArgs GRHTramPose(
+	TEXT("RH.TramPose"),
+	TEXT("RH.TramPose <LineId> <Fraction 0..1|off> - DEBUG: hold the tram's presentation clock so the line stands at that fraction of its one-way ride (0 = the first stop, 1 = the dwell at the far one); off lets the clock run."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHTramVisualizerSubsystem* Trams = World ? World->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
+		if (!Trams || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.TramPose <LineId> <Fraction 0..1|off>"));
+			return;
+		}
+		const bool bOff = Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase);
+		const double Fraction = bOff ? -1.0 : FCString::Atod(*Args[1]);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.TramPose] line %s %s: %s"), *Args[0], *Args[1], Trams->Debug_PoseLine(FCString::Atoi(*Args[0]), Fraction) ? TEXT("held") : TEXT("no such line"));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSection(
 	TEXT("RH.Section"),
 	TEXT("RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows> - DEBUG: the deep view's section."),

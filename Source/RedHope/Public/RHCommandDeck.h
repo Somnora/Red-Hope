@@ -142,7 +142,12 @@ public:
 	// UI polish P8: the free band between the shaft strip and the right column, as fractions (0..1) of the deck's width: the deep view frames
 	// the slab and its labels into it. Falls back to fixed fractions before the first layout.
 	void GetFreeBand(float& OutLeft01, float& OutRight01) const;
+	// P8c: the deep view's floor-name ladder (RHSectionLadder.h), drawn by the deck beside the cut; the controller sizes it off the band, the
+	// section floors its world labels at its em (physical px), and the click test reads its rows.
+	const TSharedPtr<class SRHSectionLadder>& GetLadder() const { return Ladder; }
+	float GetLadderEmPx() const;
 private:
+	TSharedPtr<class SRHSectionLadder> Ladder;
 	const bool* FoldFlag(EFold Which) const;
 	bool* FoldFlag(EFold Which) { return const_cast<bool*>(static_cast<const SRHCommandDeck*>(this)->FoldFlag(Which)); }
 	TSharedRef<SWidget> FoldToggle(EFold Which, FName Tag);

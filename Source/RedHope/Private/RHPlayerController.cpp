@@ -6,6 +6,7 @@
 #include "RHMenus.h"
 #include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
@@ -2937,36 +2938,73 @@ void ARHPlayerController::FrameSection(bool bRefit)
 	{
 		return;
 	}
-	// The focus sits on the cut face. UI polish P8: the slab is framed together with the labels that hang off it (the floor labels at its left,
-	// under TRAFFIC the arrows' room and a lift label past its right) into the FREE BAND of the window, between the shaft strip and the right
-	// column, and centred in it (before, the slab was centred on the screen and a fixed six cells were left for labels, which put the floors'
-	// labels under the strip and the last lift's label under the column).
+	// The focus sits on the cut face. UI polish P8: the slab is framed together with the labels that hang off it (under TRAFFIC the arrows' room
+	// at its left and a lift label past its right) into the FREE BAND of the window, between the shaft strip and the right column, and centred in
+	// it (before, the slab was centred on the screen and a fixed six cells were left for labels, which put the floors' labels under the strip and
+	// the last lift's label under the column). P8c: the floor names are the deck's ladder at the band's left, so the band starts right of it.
 	const FVector Origin = Sim->GetShaftHeadCm();
 	const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(SectionAxis), Da = URHSectionVisualizerSubsystem::DirAlong(SectionAxis);
 	const double DCm = ((double)SectionPlaneRow - 0.5) * 1000.0;
-	double LeftRoomCm = 0.0, RightRoomCm = 0.0;
-	if (URHSectionVisualizerSubsystem* Section = World->GetSubsystem<URHSectionVisualizerSubsystem>())
-	{
-		Section->ComputeLabelRoomCm(*Sim, SectionAxis, SectionPlaneRow, IsTrafficOverlayOn(), /*bWorstFlows*/ false, LeftRoomCm, RightRoomCm);
-	}
-	const double ContentLoCm = ((double)AMin - 0.5) * 1000.0 - LeftRoomCm, ContentHiCm = ((double)AMax + 0.5) * 1000.0 + RightRoomCm;
+	URHSectionVisualizerSubsystem* Section = World->GetSubsystem<URHSectionVisualizerSubsystem>();
 	float BandLeft = 0.14f, BandRight = 0.26f;
+	float LadderEmPx = 0.f;
 	if (Deck.IsValid())
 	{
 		Deck->GetFreeBand(BandLeft, BandRight);
+		// P8c: the floor names are the deck's ladder, in the band's left margin; the slab is framed into what is left of the band. Its width is
+		// measured from the rows' text (the section has not drawn this view yet on entry).
+		if (Section && Deck->GetLadder().IsValid())
+		{
+			TArray<URHSectionVisualizerSubsystem::FFloorRow> Rows;
+			Section->ComputeFloorRows(*Sim, SectionFocus, IsTrafficOverlayOn(), Rows);
+			BandLeft += Deck->GetLadder()->GetWidth01(Rows);
+		}
+		LadderEmPx = Deck->GetLadderEmPx();
 	}
 	int32 ViewX = 16, ViewY = 9;
 	GetViewportSize(ViewX, ViewY);
 	const float BandWidth = FMath::Max(1.f - BandLeft - BandRight, 0.3f); // a window too narrow for any band still gets a third of it
 	float WidthCm = Cam->GetFrameWidthCm();
-	if (bRefit)
+	// The world labels' room, at their screen-size floor (P8c, the refresh's step 3: never under the ladder's em, in cm at the frame).
+	double LeftRoomCm = 0.0, RightRoomCm = 0.0;
+	const auto Room = [&](float FrameWidthCm)
+	{
+		if (Section)
+		{
+			const double MinSizeCm = ViewX > 0 ? (double)LadderEmPx * (double)FrameWidthCm / (double)ViewX : 0.0;
+			Section->ComputeLabelRoomCm(*Sim, SectionAxis, SectionPlaneRow, IsTrafficOverlayOn(), MinSizeCm, LeftRoomCm, RightRoomCm);
+		}
+	};
+	if (!bRefit)
+	{
+		Room(WidthCm);
+	}
+	else
 	{
 		// R2 (c): the zoom that fits the content into the band, plus 5%, and at least the whole bored stack's height (through the viewport's
-		// aspect) and 120 m, so a small dig is not framed from a few metres away.
+		// aspect) and 120 m, so a small dig is not framed from a few metres away. P8c: the labels' floor grows with the frame, so the fit runs
+		// again at the frame it found until it stops growing (it converges: a floored label is a fixed number of pixels).
 		const float Aspect = ViewY > 0 ? (float)ViewX / (float)ViewY : 16.f / 9.f;
 		const float StackCm = (float)(Sim->GetShaftDepth() + 1) * (float)Sim->GetFloorHeightCm();
-		WidthCm = FMath::Max3((float)(ContentHiCm - ContentLoCm) * 1.05f / BandWidth, StackCm * 1.1f * Aspect, 12000.f);
+		const auto Fit = [&]()
+		{
+			const double Lo = ((double)AMin - 0.5) * 1000.0 - LeftRoomCm, Hi = ((double)AMax + 0.5) * 1000.0 + RightRoomCm;
+			return FMath::Max3((float)(Hi - Lo) * 1.05f / BandWidth, StackCm * 1.1f * Aspect, 12000.f);
+		};
+		Room(0.f);
+		WidthCm = Fit();
+		for (int32 Pass = 0; Pass < 4; ++Pass)
+		{
+			Room(WidthCm);
+			const float Next = Fit();
+			if (Next <= WidthCm * 1.005f)
+			{
+				break;
+			}
+			WidthCm = Next;
+		}
 	}
+	const double ContentLoCm = ((double)AMin - 0.5) * 1000.0 - LeftRoomCm, ContentHiCm = ((double)AMax + 0.5) * 1000.0 + RightRoomCm;
 	// The band's middle is (BandLeft - BandRight) / 2 of the frame's width right of the screen's middle; the content's middle goes there.
 	const double ACm = 0.5 * (ContentLoCm + ContentHiCm) - 0.5 * (double)(BandLeft - BandRight) * (double)WidthCm;
 	const FVector2D Focus(Origin.X + Dd.X * DCm + Da.X * ACm, Origin.Y + Dd.Y * DCm + Da.Y * ACm);

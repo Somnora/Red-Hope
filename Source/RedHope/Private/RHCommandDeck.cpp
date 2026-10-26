@@ -3,6 +3,7 @@
 #include "RHDeckStyle.h"
 #include "RedHope.h"
 #include "RHPlayerController.h"
+#include "RHSectionLadder.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
@@ -624,8 +625,17 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	[
 		SNew(SOverlay)
 
+		// P8c: the deep view's floor names, a ladder beside the cut. A full-screen leaf under every panel (placed first), seen only while the
+		// section is on; it takes no hits.
+		+ SOverlay::Slot()
+		[
+			SAssignNew(Ladder, SRHSectionLadder)
+			.OwnerPC(PC)
+			.Deck(SharedThis(this))
+		]
+
 		// The in-world action card (M2 Gate D+): a full-screen canvas whose one
-		// child floats above the selected machine. Placed FIRST so it renders
+		// child floats above the selected machine. Placed before the panels so it renders
 		// beneath the fixed deck panels but above the 3D world. Its offset is
 		// driven per-Tick from the building's screen projection; Alignment
 		// (0.5, 1.0) hangs the card's bottom-centre on that point, so it sits

@@ -77,6 +77,31 @@ double URHTramVisualizerSubsystem::ArcAt(double ClockSec, double RideSec, double
 	return 0.0;
 }
 
+bool URHTramVisualizerSubsystem::Debug_PoseLine(int32 LineId, double Fraction)
+{
+	if (Fraction < 0.0)
+	{
+		bHoldClock = false;
+		return true;
+	}
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const FRHTramLine* L = Sim ? Sim->FindTramLine(LineId) : nullptr;
+	if (!L)
+	{
+		return false;
+	}
+	const int32 Len = URHSimWorldSubsystem::GetTunnelChainLength(L->StopA, L->StopB);
+	const double RideSec = (double)(Len - 1) * 1000.0 / (double)FMath::Max(1, Sim->GetTramSpeedCmPerS());
+	const double Cycle = 2.0 * (RideSec + DwellSec);
+	// Tick adds the line's own offset (Id x 7.3 s) to the clock, so take it off: the line then stands at Fraction of its ride (1 = mid-dwell at the far stop).
+	double T = (Fraction >= 1.0 ? RideSec + 0.5 * DwellSec : Fraction * RideSec) - (double)L->Id * 7.3;
+	T = FMath::Fmod(T, Cycle);
+	ClockSec = T < 0.0 ? T + Cycle : T;
+	bHoldClock = true;
+	return true;
+}
+
 void URHTramVisualizerSubsystem::Deinitialize()
 {
 	if (Holder) { Holder->Destroy(); Holder = nullptr; }
@@ -167,7 +192,10 @@ void URHTramVisualizerSubsystem::Tick(float DeltaTime)
 	const ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
 	const URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>();
 	// The presentation clock: the sim's speed up to MaxClockRate; a paused sim holds the capsules where they are.
-	ClockSec += (double)DeltaTime * FMath::Clamp((double)(Clock ? Clock->GetSpeed() : 1.f), 0.0, MaxClockRate);
+	if (!bHoldClock)
+	{
+		ClockSec += (double)DeltaTime * FMath::Clamp((double)(Clock ? Clock->GetSpeed() : 1.f), 0.0, MaxClockRate);
+	}
 	// A capsule for every line (lines are never removed; a load can drop or change them, so a missing one hides).
 	for (const FRHTramLine& L : Sim->GetTramLines())
 	{
