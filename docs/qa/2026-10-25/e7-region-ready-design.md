@@ -990,3 +990,124 @@ Reviewer note: a short, independent re-check of REVISION 2, done together with E
 5. **The authority line** (line 652) keeps "REVISION (R1-R3)". But R1's V, band and start-price asserts are replaced by section 3, and R2's committed fixture by section 10. It should read "R3 only".
 
 E7 and E8 must agree on the version and frame order. Those findings are in E8's RE-CHECK.
+
+# REVISION 3 (2026-10-26, final, after the re-check)
+
+This section applies the RE-CHECK's five remaining changes, with the orchestrator's decision on its first, and replaces REVISION 2 wherever they differ. The authority order is now: the DIRECTOR ANSWER, then this section, then REVISION 2, then REVISION (**R3 only**: R1 is replaced by REVISION 2's section 3, R2 by section 5 below, and R4 was struck by REVISION 2), then the RE-CHECK, then the INDEPENDENT REVIEW, then the LEAD REVIEW, then the design.
+
+**Code read at HEAD `798a549`** with `git show HEAD:` only. `git diff --stat 1f52e3d 798a549 -- Source scripts docs/data` is empty: the three commits since REVISION 2's read are docs, so REVISION 2's anchors are as valid at this HEAD as at `1f52e3d`; the two the RE-CHECK found wrong are corrected in section 3. Line numbers re-cited here are at `798a549`; the builder re-anchors at its own HEAD, as REVISION 2 says, because E5, E6, D6e and D7 build first. Nothing was built or run.
+
+## 1. The orchestrator's decision: the `'RHE7'` block is dropped; E7 takes no save version
+
+REVISION 2's section 8 is **struck in full**: no `'RHE7'` tag, no `DepotTag`, no frame, no payload, no load repairs, no version bump, no `GetDepotBlockBytes`, no W:37 entry. `RHSaveVersion` (W:37) and the strict check (W:13968) are not touched by E7, so a file of the gate before E7 loads under E7 exactly as it did. The design's section 7 ("Save: nothing new") is restored as written, under the Q-A (b) rule REVISION 2's section 5 already applied.
+
+**Every route and depot value is derived at runtime:**
+- the colony's depot: the building scan (REVISION 2 section 6, rule 2: HEAD's loop at M:1212 and W:9834);
+- the rivals' depots and the routes: the rival rows, walked and sorted as `BuildMarketState` walks them (M:232-233);
+- the endowment: `DT_Endowments` (REVISION 2 section 9, unchanged; data, not save);
+- `GetColonyRegionId()`: **a constant 0**, not a saved field. T2 saves its region list and makes it real; that is T2's save change, not E7's. REVISION 2 section 7's "(the saved `ColonyRegionId`, 0)" reads "(0 until T2)".
+
+**The depot binding hook is runtime-only, never saved.** `Debug_SetColonyDepot(int32 RegionId, int32 BuildingId)` (true only when the building exists and is complete; 0 clears) writes a transient member, `TMap<int32, int32> DepotBindings` (region to building Id), declared in H's private state beside `RepairClaims` (H:3330) and listed under the heading E4's hooks already sit under, "Harness hooks (runtime only, never saved; each keeps the invariants)" (H:1606). Nothing but the hook writes it, and it is cleared in two places:
+- `LoadColony`'s teardown (W:14026-14046), beside `RepairClaims.Reset(); // claim state is runtime-only` (W:14041) and the D5a latch (W:14042), so every load returns the depot to rule 2, the Lander. The suites' `Reset` helpers load a slot (`LoadSlot`, `RHSimMarketSuite.cpp:284-287`, which calls `LoadColony`), so every suite reset clears it too;
+- world start (`OnWorldBeginPlay`, W:96, where the Lander is placed at W:546), where the member is simply empty.
+
+`FindColonyDepotBuildingId(RegionId)` keeps REVISION 2 section 6's three rules; rule 1 reads `DepotBindings` instead of a saved binding and still demands, at every read, that the bound building exists and is not under construction (a demolished stockpile hands the role back to rule 2 at once). `GetColonyDepotBindingId(RegionId)` stays, as the read of that map (0 = none). `SaveColony` (W:13443) and `LoadColony` (W:13946) are not edited by E7.
+
+Since nothing in the shipped game writes a binding, rule 2 is the only live rule, as before: **the Lander, always.** RR2 and RR5 exercise rule 1 through the hook; RR6 proves the hook leaves the save untouched and does not survive a load (section 8).
+
+## 2. The battery: nothing moves
+
+With no frame and no version, **E7 changes no byte of any save file**, so:
+
+- **The size-line list does not move for E7.** None of the nine lines that print a whole file's size moves: CV8 (`RHSimCavernSuite.cpp:739`), DP11 (`RHSimDepthSuite.cpp:787`), EC1 ×2 (`RHSimEconomySuite.cpp:493`, the era and the agent band), DC9 (`RHSimDeepCommuteSuite.cpp:713`), MX1 (`RHSimMarketSuite.cpp:564`, the file and the "up to the market block" offset both), MX9 (`:1359`), and the RE-CHECK's three additions CR9 (`RHSimCreditSuite.cpp:619`; `credit.log:843`), EC6 (`RHSimEconomySuite.cpp:866`; `economy.log:5939`) and XE10 (`RHSimExportSuite.cpp:538`; `export.log:708`). Each prints `W.Num()` of a file E7 writes identically. REVISION 2's "+28 bytes" list and its `diff_battery.py` note are withdrawn; the mask (`scripts/sim/diff_battery.py:11`, `\(\d+ bytes`) is not relied on, because the expected diff of every existing log is empty.
+- **The version-line list does not move for E7.** REVISION 2 section 8's list of version literals (16 lines in 10 files at this HEAD, found by `git grep -n -E '== 55\b|"/55"' Source`; among them `RHSimMarketSuite.cpp:1316`, `:1374` and `:1380`, `RHSimCommandlet.cpp:12147`, `RHSimCreditSuite.cpp:654-655`, `RHSimEconomySuite.cpp:878-881`, `RHSimExportSuite.cpp:597-599`) moves only when `RHSaveVersion` moves. E5, E6, D6e and D7 will have moved every one of them to their own numbers before E7 builds; **E7 moves none**, and E7's own suite prints no version and no size (section 8), so no E7 line moves with any later bump either.
+- **`-market` is line-identical except nothing.** The RE-CHECK asked whether MX9's version lines still move with no version bump: **they do not.** MX9's `Ver == 55` (MX:1316) and its "MX9 v%u" text (MX:1321) read the file's bytes 4-7, which E7 leaves at `RHSaveVersion`; `V54 = 54` and "/55" (MX:1374, :1380) are the refusal of the version before, which E7 also leaves. Whatever numbers E7's predecessor left in those four lines, E7's `market.log` prints the same. MX9's `B.PayloadBytes == Sim->GetMarketBlockBytes()` (MX:1316) holds because the market payload is unchanged: `BuildMarketState`'s market part (M:274-333) is untouched, E7's one M line (the Produce grams, section 3) computes the same `int64` at 1000 permille, and `ProduceG` is not in the payload anyway (W:37's v55 note lists what is). MX1's "(N bytes)" and "up to the market block (N bytes)" (MX:564) print the same numbers, and its tail compare (MX:555) sees the same `'RHE4'` difference between its twins. E4's 47 "LoadColony v55:" Warnings are literals (M:1385, :1521, :1686 and others), and the load path's "outside" Warnings (`market.log:715-716`, `:1419-1420`) still fire, because the kept-price clamp stays struck (REVISION 2 section 2). So `market.log` is expected line-identical to the gate before E7, with no exception.
+- **XE10's end-of-file clause** (`RHSimExportSuite.cpp:530-531`: `MarketFrame + HeaderBytes + MarketPayload + FooterBytes == W.Num()`): E7 appends no frame, so E7 cannot break it and requires nothing of it. E8's RE-CHECK notes that it breaks at the first frame appended after `'RHE4'` and is that gate's fix; the builder confirms at its own HEAD, and E7 adds nothing to the question.
+- **E8.** With no `'RHE7'`, E8's REVISION 2 stands as written: E8 takes **v60** (its line 779, "E7 takes no version"), `'RHE8'` is the first frame after the last one the gate before E7 writes, and no E7 check pins any frame's position, so E8 edits nothing in E7's suite. The contradiction E8's RE-CHECK named (E7 "v60" against E8 "v60 because E7 takes no version") is resolved on E8's side of it.
+
+**The bar** returns to the design's original (section 5), tightened by REVISION 2's other changes:
+- the battery (`scripts/sim/rh_battery.sh`, `SUITES` at `:37-39`, judged on `errors=0 completed=1`) is **line-identical to the gate before E7, version lines and size lines included**, plus the new `regionready.log`;
+- the 110-sol playtest (`RH_PLAYTEST_DISTRICTS=1`) is byte-identical to `Saved/baselines/ind_full_playtest.txt`;
+- `-scale`'s digests are unchanged and its market budget line holds; no new `-scale` line;
+- the click test is unchanged;
+- the RedHopeSim dylib changes (it must); the one presentation change is V:4337-4341.
+
+REVISION 2's section 12 line "the file differs only in bytes 4-7 and the 28-byte frame" becomes: **the file is byte-identical.**
+
+## 3. The line-number fixes (RE-CHECK 2)
+
+- The Produce grams line is **M:214**, not M:217: `for (const TPair<FName, int64>& P : Produce) { OutEcon->ProduceG[EconIndex.FindChecked(P.Key)] = P.Value * 1000; }`. E7's one sim-side arithmetic change is this line's `* 1000` becoming `* Defs->GetProducePermille(Row.RegionId, P.Key)`, `int64` throughout (`P.Value` is `int64`), no division. REVISION 2's "at M:217" (its section 1 and section 4.1) reads M:214.
+- Consume is **M:215**, not M:218 (REVISION 2's section 4.1 "Consume (M:218)" and its mutation 4). It is untouched.
+- Nothing else in REVISION 2's section 4 changes: the model (4.2), the hand roll (4.3) and the range argument stand, and the RE-CHECK recomputed them.
+
+## 4. RR4's restore check: how the bytes are compared (RE-CHECK 3)
+
+`GetMarketBlockBytes()` (M:1354-1360, public at H:1584) returns a **count**, and `WriteMarketBlock` (M:1348, H:3891) is private, so a free-function suite cannot ask for the payload's bytes. **No new accessor is added.** RR4 compares saves instead, with public calls only, the recipe MX9 already uses (MX:1302-1304):
+
+1. `Sim->SaveColony(TEXT("rrmx4a"), Err)` (H:2627) from MX2's Set A state, **before** `Debug_SetEndowment(0, Ice, 500)`; then `Debug_ClearEndowments()`; then `Sim->SaveColony(TEXT("rrmx4b"), Err)`. No roll and no step between. `WriteMarketBlock` syncs first (M:1350), so each save is the **resynced** state, which is what R3 requires.
+2. `FFileHelper::LoadFileToArray` on both (`Saved/SaveGames/RH_rrmx4a.sav` and `RH_rrmx4b.sav`, through the suite's own `SaveFilePath` lambda as every suite declares it, for example `RHSimCreditSuite.cpp:262`).
+3. **The assertion:** the two files are byte-identical (`A.Num() == B.Num()` and `FMemory::Memcmp == 0`). Nothing between the saves touched saved state: the resync keeps `PriceMcr`, both rings, `RingFill` and `RingHead` (M:302-309) and every `StoreG` (M:250-253), and `ProduceG`, the one thing it recomputes, is not in the payload.
+4. **The diagnostic,** so a failure says where: `RHSaveFrame::Find(File, RHSaveFrame::MarketTag, HeaderAt, PayloadBytes)` (`RHSaveFrame.h:36`, the harness API) on each; both found, `PayloadBytes` equal in both and `== Sim->GetMarketBlockBytes()`, and `Memcmp` of the `HeaderBytes + PayloadBytes + FooterBytes` span (`RHSaveFrame.h:23-24`; the header's CRC included) is 0. If 3 fails and 4 passes, something outside the market moved; if 4 fails, the endowment hooks changed the market payload.
+5. Then, as before: every `GetRivalProduceG` back at kg × 1000, and the twin's kept values after the resync equal (the "a mid-game change rescales nothing" pin).
+
+This replaces REVISION 2 section 3's "leaves `GetMarketBlockBytes()`'s bytes identical" and RR4's "`GetMarketBlockBytes` bytes identical to before". The two slots are E7's and no other suite uses them.
+
+## 5. The one-time pre/post comparison becomes a plain `cmp` (RE-CHECK 1, with no frame)
+
+REVISION 2 section 10's step keeps its shape and loses its arithmetic: with no frame and no version, **the pre-E7 and post-E7 saves of the same colony must be identical**, and the step proves it.
+
+1. **Before the first E7 compile,** with the binary of the gate before E7 as it stands, run `-run=RHSim -market -sols=10`. MX9 saves its fixture with no E7 hook (MX:1296-1302, slot `mktmx9`), so `Saved/SaveGames/RH_mktmx9.sav` is that colony. Copy it to `Saved/baselines/regionready_pre/RH_mktmx9.sav` (untracked, beside the battery baselines). If the pre-E7 binary is already gone, fall back to REVISION 2's worktree (its steps 1, 2 and 5; never a `checkout` or `reset` in the main tree).
+2. After E7 builds, its own `-market` run leaves the same colony's save at `Saved/SaveGames/RH_mktmx9.sav`.
+3. `cmp Saved/baselines/regionready_pre/RH_mktmx9.sav Saved/SaveGames/RH_mktmx9.sav` **exits 0**: the same length, every byte equal, bytes 4-7 included. Record "identical, N bytes, version V" in E7's `design-decisions.md` entry, as the mutation runs are recorded (`design-decisions.md:1659-1661`).
+4. If `cmp` reports a difference, E7 is not inert, and the gate stops there.
+
+No fixture is committed, and a later gate that changes the format repeats nothing for E7.
+
+## 6. The authority line (RE-CHECK 5)
+
+REVISION 2's "then REVISION (R1-R3 only; R4 is struck)" is corrected to **"then REVISION (R3 only)"**, as the first paragraph of this section states. R1's asserts on V, the band and the start price are replaced by REVISION 2 section 3 (under Q-B (b) the endowment never touches V); R2's committed fixture by section 5 above; R4 by REVISION 2 section 1. R3 (every RR4 read comes after the resync; the endowment is restored at the end) stands, and section 4 above satisfies it through `WriteMarketBlock`'s own sync.
+
+## 7. Deviations to log in `docs/design-decisions.md` (replacing REVISION 2's section 14)
+
+1. **No save change and no version bump** (the design's section 7, restored). Depots, routes, the endowment and the colony region are derived from the buildings and the rows; the harness binding is runtime-only. REVISION 2's `'RHE7'` block was proposed and withdrawn at the RE-CHECK: it held no state the shipped game writes before T2 and T4, its only writer was a hook, and its singular `ColonyRegionId` is the shape T1's colony record removes. The battery bar is fully line-identical.
+2. **The depot is a role, not a building** (Q-A (b)); only the three trade-facing Lander roles move behind the depot rule, and the rest move with T1.
+3. **The endowment is a permille on production** (Q-B (b)), `ProducePermille`, applied at M:214, exact in integers with no division; the review's model, reproduced in REVISION 2 section 4, gives the numbers.
+4. **A route's length is the row's distance, verbatim,** not integer metres, until T6.
+5. **The deck and `RH.Market` read the rival's region explicitly** instead of the default 0.
+6. **No Ids on depots or routes**: display ordinals only, keyed by (colony region, rival).
+7. **The pre/post save comparison is a one-time build step**, a plain `cmp` that must report identical (section 5), not a committed fixture.
+
+## 8. Tests: `-regionready`, corrected and complete
+
+`Source/RedHopeSim/Private/RHSimRegionReadySuite.cpp`, dispatched from `RHSimCommandlet.cpp` beside `-market` (`:14829-14831`), appended to `SUITES` in `scripts/sim/rh_battery.sh:37-39`. Fails loudly; no path logs an Error on purpose. **RR3 runs first** (the FName reason, REVISION 2 section 7). Rivals are injected with the market suite's `Inject` shape (`Debug_InjectRival`); covert operations use the `-covert` suite's recipe. **No check prints a file size or a version**, so no E7 line moves with a later bump.
+
+| Check | What it pins |
+|---|---|
+| **RR0 data** | `RH_Endowments.csv` equals `DT_Endowments` row for row (one row, `R0_Ice`, 0, Ice, 1000). `GetProducePermille` answers 1000 for every (region 0..3, every E1 slot). `Debug_InjectEndowmentRow` with 0, 100,001, a negative region, an unknown resource and a repeat of (0, Ice) each log exactly one Warning and read 1000; a repeat ignores both rows. `Debug_ClearEndowments` restores 1000 everywhere. The "Definitions loaded:" line is unchanged. |
+| **RR1 inertness, exact** | For Zarya, Meridian, a barter rival (Greed's shape) and injected rows at 30 km and **33.33333 km**: `GetRouteFor` true, `RegionA` 0, `BuildingA` the Lander's Id (1), `RegionB` the row's, `Kind` 0, `LengthKm == (double)Row.DistanceKm` bit for bit, and `GetConvoyLegSols` equals `Row.DistanceKm / max(ConvoySpeedKmPerSol, KINDA_SMALL_NUMBER)` computed in the suite, bit for bit (2.0; 3.3333333333333335; 0.5555554707845052 at 33.33333 km). An unknown rival: no route, leg 0.0. `FindColonyDepotBuildingId(0)` is 1, `GetColonyDepotBindingId(0)` is 0 and `GetColonyDepotLocationCm(0)` is the Lander's `LocationCm`. Every rival's `GetRivalProduceG` equals its row's kg × 1000; every slot's anchor, floor and ceiling equal `EarthValue_mcr` × {1, 0.25, 4}. |
+| **RR2 landing follows the depot** | A stockpile placed with `Debug_PlaceInstant`, `Debug_SetColonyDepot(0, Id)` true: a standing trade's goods, a written order's filled goods and a clean covert run's loot land in that stockpile's `OutputKg`, none in the Lander's; fluids join the pool; E1's `In` legs equal a twin's that lands at the Lander; `GetColonyDepotLocationCm(0)` is the stockpile's spot. `Debug_SetColonyDepot(0, 0)` returns landing to the Lander; a binding to a missing or under-construction building is refused (false) and the rule stands; demolishing the bound stockpile returns the role to the Lander at the next read. |
+| **RR3 depots and routes** | Two rivals injected in the reverse of their name order, **the first creation of those names in the process** (`RrZeta` then `RrAlpha`): `GetDepots` reads colony first, then `Meridian, RrAlpha, RrZeta, Zarya`; `GetRoutes` the same order; `GetRivalEconomyName` (H:1583) agrees (the injected rows carry economies). A third, `aRival`, sorts **last** (ordinal: `Z` 0x5A before `a` 0x61), where a case-insensitive compare would put it first. A rival injected in region 1: its route's `RegionA` is 0 and `BuildingA` the Lander's (the colony's own depot), `RegionB` 1, its leg its row's. No record carries an Id; indices move when `aRival` is added and nothing else does. |
+| **RR4 the endowment** | From MX2's Set A Ice state (store 12,000 kg, tally 0, price 3,000): `Debug_SetEndowment(0, Ice, 500)` then one `Debug_RollMarket`: Zarya's `GetRivalProduceG` 200,000, `GetMarketProdSumG` 200,000, the store 12,050 kg, the price **2,921**; the same at 2,000: 800,000 / 800,000 / 12,650 kg / 2,850; at 43: 17,200 / 11,867 kg / 3,150 (REVISION 2 section 4.3). `Consume` (M:215, via the twin's store arithmetic), anchor, floor, ceiling and E3's Earth price for Ice unchanged throughout. `(0, Ice, 9)`: `ProduceG` **3,600**; `(0, Struct, 43)`: 1,720. A row for region 1 changes no region-0 figure. **The restore check (section 4):** save `rrmx4a`, set (0, Ice, 500), clear, save `rrmx4b`, no roll between: the two files byte-identical, and their `'RHE4'` frames (located with `RHSaveFrame::Find`) equal in `PayloadBytes` (`== GetMarketBlockBytes()`) and in every byte; every `ProduceG` back at kg × 1000. A mid-game change rescales no price or store (the kept values after the resync equal the twin's). Every read comes after the resync (R3). |
+| **RR5 era parity** | A paired 10-sol run, `Debug_SetColonyDepot` on a stockpile and `(0, Ice, 500)` set before the window in both twins: the landing building, the landed kg, every price, store and balance identical (int64 and string equality), and the digest of everything outside the market (MX1's `Digest`) identical. |
+| **RR6 the save: nothing saved, nothing kept** | A colony mid-trip (MX9's shape: two convoys out, an injected rival, a moved market) with the hook's binding on a stockpile: (i) a save with the binding set and a save with it cleared, the same colony with no step between, are byte-identical (the binding is not in the file); (ii) with the binding set again, save, load, save is byte-identical; (iii) after the load, `GetColonyDepotBindingId(0)` is 0 and `FindColonyDepotBuildingId(0)` is the Lander's Id again (the teardown clears the hook), `GetColonyRegionId()` is 0, and the routes, every rival's `ProduceG` and every slot's anchor, floor and ceiling equal their pre-save values. RR6 asserts nothing about the file's version, its size, or any frame or frame order, and prints neither. The one-time pre/post `cmp` of section 5 is recorded in the gate's entry, not run here. |
+
+**Mutations** (each built, run and restored by sha256; each must fail the check named):
+1. Landing hard-coded to the first Lander (the binding ignored): **RR2**, and RR5's landing building.
+2. The route's length kept in whole metres, the leg read from `LengthM / 1000.0`: **RR1** at 33.33333 km (0.55555 against 0.5555554707845052).
+3. Rival depots and routes in FName index order: **RR3**, the reverse-first injection (`RrZeta` before `RrAlpha`).
+4. The endowment applied to `Consume` too (M:215): **RR4**, the 500 case (the store reads 12,125 kg and the price moves differently) and the Consume pin.
+5. Production scaled in `double`, `(int64)(kg × 1000 × (Permille / 1000.0))`: **RR4** at `(0, Ice, 9)` (3,599 against 3,600 g) and `(0, Struct, 43)` (1,719 against 1,720).
+6. `RegionA` taken as the colony's depot in the rival's region (the review's defect): **RR3**, the region-1 rival (no route, or `BuildingA` 0 and a leg of 0.0).
+7. The no-row default answering 0 instead of 1000: **RR0** and **RR1** (every `ProduceG` of a resource with no row reads 0).
+8. The endowment index keyed case-insensitively or by FName index (a row for `ice`): **RR0**'s unknown-resource Warning and RR4's region-0 figures.
+9. The runtime binding not cleared in `LoadColony`'s teardown (the `DepotBindings.Reset()` line removed): **RR6** (iii), the depot after the load is the stockpile, not the Lander.
+
+REVISION 2's mutation 6 (the block written but not read back) is dropped with the block; its 7-9 are 6-8 here, and 9 is new.
+
+**`-scale`** (outside the battery): its existing market budget line (`RHSimCommandlet.cpp:17118`, 1,000 `RollMarket` calls at 10 rivals, ≤ 2.0 ms) holds; `GetRoutes` and `GetDepots` called 1,000 times at 10 rivals cost under 0.05 ms a call; every digest is identical. No new `-scale` line.
+
+**The one-time build step** (section 5): `cmp` of the pre-E7 and E7 `RH_mktmx9.sav`, identical, recorded with the byte count and the version in the `design-decisions.md` entry.
+
+## 9. What the builder builds
+
+E7 is a runtime-only seam gate with no save change. In `RedHopeSim`: two public derived records (`FRHDepot`, `FRHRoute`, beside `FRHConvoy`) and the getters of REVISION 2 section 7 less `GetDepotBlockBytes` (`GetDepots`, `GetRoutes`, `GetRouteFor`, `GetConvoyLegSols` with the private `ConvoyLegSolsFor` delegating to it, `GetColonyRegionId` returning 0, `FindColonyDepotBuildingId`, `GetColonyDepotBindingId`, `GetColonyDepotLocationCm`, the anchor, floor and ceiling getters, `GetMarketRegionIdAt`, `GetRivalRegionId`, `GetRivalProduceG`, `GetMarketProdSumG`); one depot rule (the runtime binding, else the first completed Lander in the region, else none) behind which the three trade-facing Lander roles move (convoy goods at M:1203-1219, covert loot at W:9831-9841 as E6 leaves it, the drawn start at V:4337-4341); one arithmetic change, the Produce grams at M:214 multiplied by `ProducePermille` instead of 1000; a new `FRHEndowmentRow`, `RH_Endowments.csv` with its one identity row, `DT_Endowments`, `GetProducePermille`, `ForEachEndowmentRow` and the three endowment hooks in the definitions subsystem (REVISION 2 section 9); the transient `DepotBindings` map with its `Debug_SetColonyDepot` hook, cleared in `LoadColony`'s teardown; the explicit-region reads in the deck (`RHCommandDeckPanels.cpp:2544`) and `RH.Market` (REVISION 2 section 11); and the `-regionready` suite with its nine mutations. It does **not** touch `RHSaveVersion`, `SaveColony`, `LoadColony`, `BuildMarketState`'s market part, V, the band, E3's price, any UI, or any existing suite. The bar is the battery line-identical to the gate before E7 with every version and size line in place plus `regionready.log`, the playtest byte-identical, `-scale` unchanged, the click test unchanged, and the one-time `cmp` identical; the seven deviations of section 7 go in `design-decisions.md`.
