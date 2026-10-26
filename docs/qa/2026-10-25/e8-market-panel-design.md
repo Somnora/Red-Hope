@@ -574,3 +574,251 @@ The structure is sound: a deck fold, an optional write-only sim ring, and a list
 - **Q-A (b):** the 30-sol price history lives in the SIM, saved, write-only: about 5,068 B per region per save plus about 0.2 KB of slot names, in its own RHSaveFrame frame, checked against E4's state on load (review change 6). One version bump, taken when E8 builds.
 - **Q-C (a):** MARKET joins the accordion, as the director's L7 (a) rule says. Acting on a price costs about 2 extra presses.
 - Q-B is settled by the corrected numbers: a 30-glyph sparkline sits on its own line under the name and price.
+
+# REVISION 2 (2026-10-26, after the independent review)
+
+This section replaces the design, the first REVISION and the review's own numbers wherever they differ. It applies the director's answers: **Q-A (b)** (the history lives in the sim, saved, write-only, in its own frame, checked against E4's state on load), **Q-C (a)** (MARKET joins the accordion) and Q-B as settled (the 30-glyph sparkline on its own line under the name and price).
+
+Code was read at HEAD `1f52e3d` with `git show HEAD:`. The review read `60e892a`; the step-2 fixes (`1505941`) moved H by about 14 lines, so every anchor below is re-pinned. Short names are the design's (K, D, Dh, V, T, CT, H, M) plus **W** (`Source/RedHopeSim/Private/RHSimWorldSubsystem.cpp`), **Vh** (`Source/RedHope/Public/RHColonyVisualizerSubsystem.h`) and **MX** (`Source/RedHopeSim/Private/RHSimMarketSuite.cpp`). E5, E6 and E7 are still designs: their names are design names and the builder rebases them, as E5's REFRESH did for E4. E7's director answers are in: Q-A (b), the Lander keeps every depot role; Q-B (b), the endowment is a permille on rival production. Neither changes what E8 reads.
+
+## R2-1. Discovery gates every row, sum, name and marker (review change 1, blocking)
+
+**How discovery is tracked at HEAD.**
+- `IsRivalAvailable(Rival)` is `Row && (Row->SliceActive || DiscoveredRivals.Contains(Rival))` (W:9768-9772; declared H:1823). `DiscoveredRivals` is a saved `TSet<FName>` (H:3977, the v21 slot). `IsRivalDiscovered` reads the set alone (H:1826).
+- A survey's completion calls `MaybeDiscoverSettlement(SurveyHistory.Num())` (W:13030). The worker (W:13034-13072) takes the first dormant row by `LexicalLess`, rolls `Seed = HashCombine(StrCrc32("survey"), SurveyCount x 2654435761)`, `U = (Seed % 100000) / 100000`, and reveals it when `U < DiscoveryChancePerSurvey` (0.5, H:3984). It seeds the relation, broadcasts `OnAlert` and logs `=== SETTLEMENT DISCOVERED ===`. The harness hook is `Debug_MaybeDiscoverSettlement(int32 SurveyCount)` (H:2739).
+- Meridian ships `SliceActive` FALSE (`docs/data/RH_Rivals.csv:3`) and trades `SpareParts` and `Food`; Zarya trades `Ice`, `Water`, `Oxygen`, `Struct` and `Hydrogen` (`:2`). An undiscovered rival still produces and reprices (M:565-566, "availability gates booking only"), and a market's `bTraded` counts every economy rival in its region with no availability test (M:316-330). `IsMarketTraded` reads that flag (M:397-402). So on a new colony `IsMarketTraded(Food)` and `IsMarketTraded(SpareParts)` are true while no neighbour the player knows trades them.
+- The deck's precedent: the rival card is collapsed unless `IsRivalAvailable` (K:2343); EARTH & NEIGHBORS itself is collapsed unless some row is available (K:2448-2457); the markers skip unavailable rows (V:4223-4225, "undiscovered dormant settlements stay off the map").
+
+**The rule.** A resource is **shown** in region R when at least one rival that is available, has an economy and sits in R lists it. One deck helper, `ShownMarketSlots(int32 RegionId, TArray<FName>& Out)`, walks `GetRivalEconomyCount()` / `GetRivalEconomyName(i)` (name order, H:1580-1581), keeps `IsRivalAvailable(Name) && HasRivalEconomy(Name) && Defs->GetRival(Name)->RegionId == RegionId` (`FRHRivalRow::RegionId`, `RHRows.h:413`), unions `GetRivalTradedResources(Name, ...)` (H:1577) and sorts by name string. It is part of the PRICES list's rebuild key, never a per-paint read. The ring in the sim holds every slot; the gating is in what the deck reads out of it.
+
+**Everything player-facing reads the shown list:**
+- **PRICES:** one row per shown slot: **5** on a new colony (Hydrogen, Ice, Oxygen, Struct, Water), **7** once Meridian is discovered. The header's "N prices" is the shown count.
+- **DETAIL:** only a shown slot can be selected; the default is Ice when shown, else the first shown by name. "The neighbours hold N kg" sums `GetRivalStoreKg` over the **available** economy rivals of the region, and the tooltip names only those.
+- **2.4's bloc line** lists members that are available (E5 REVISION O10: "the deck lists a member only once it is available").
+- **The region selector** lists a region only while it has an available economy rival, and is drawn only when more than one such region exists.
+- **ROUTES and the overlay:** available rivals only (REVISION defect 4 stands).
+- **OPEN ORDERS** needs no gate: a convoy can only be booked to an available rival (`PlanConvoy`'s first refusal, "No trade contact", M:868), so every convoy names a known rival. MX13 (below) still asserts it.
+- **The marker's status word** (R2-9) exists only on markers V spawned, which are available rivals.
+- The rebuild key for PRICES carries an availability bitmask over the rival rows (two rows today; `ForEachRivalRow` with `IsRivalAvailable`), since no version counter moves on a discovery.
+- Console output (`RH.Market history`, below) prints every slot: a log line is not player-facing, as E5's join line is (O10).
+
+**Click test:** `market.panel` expects the count the rule computes from the sim in the step **and** exactly 5 on the click-test colony, so a data change fails loudly; `market.discover` discovers Meridian through the hook and expects 7 (R2-5).
+
+## R2-2. The sim-side history under Q-A (b) (review change 2, blocking)
+
+**Where it lives.** In `FRHMarket` (H:3850-3860), beside E4's `PriceMcr` and the 8-sol tally, so it is per region and travels with the market's own sync:
+
+```
+// H, inside FRHMarket. SAVED (v60, the 'RHE8' frame). Written by RollMarket and by the load repairs only; no sim rule reads it.
+static constexpr int32 MarketHistSols = 30;
+TArray<int64> HistPrice;          // slot x MarketHistSols + entry: the price in force during that sol, in the market's unit then
+                                  // (mcr; mmk from E5's open sol on); -1 = unknown (a sol a long jump skipped)
+TArray<int64> HistSoldValue;      // per entry: ClearConvoy's SellsValue summed over the clearings of the pass that closed that sol (R1)
+TArray<int64> HistBoughtValue;    // per entry: its BuysValue, the same way
+TArray<int64> HistRateMcr;        // per entry, once E5 exists: RateMcr in force at the open of that sol; 0 = unissued
+TArray<uint8> HistUnit;           // per entry, once E5 exists: 0 credits, 1 marks (the market's unit during that sol)
+int32 HistFill = 0, HistHead = 0; // entries held (0..30) and the next entry to write
+int32 HistLastSol = -1;           // the sol of the newest entry; -1 = empty
+```
+The entries are **contiguous sols ending at `HistLastSol`**: the entry for sol t sits at `(HistHead - 1 - (HistLastSol - t) + 2 x 30) % 30` and is valid while `0 <= HistLastSol - t < HistFill`. Integer mcr or mmk throughout; no double enters.
+
+**The newest entry is the open sol.** After any roll `HistLastSol == MarketCheckedSol`, and the open sol's entry holds the price the roll opened it with. The deck's 30-glyph sparkline is therefore 30 ring entries (29 closed sols and the open sol), nothing live. This is why the load check in R2-6 compares the last sol written with `MarketCheckedSol`, not `MarketCheckedSol - 1` as the review wrote.
+
+**Where it is written: three points inside `RollMarket` (M:509-558), all inside the per-sol pass loop (M:526-552).** For pass i closing sol s = First + i:
+1. **At the top of the pass, before the clearing:** `HistEnsure(Mk, s)`. If `HistLastSol < s`, append entries for `HistLastSol + 1 .. s`: unknown (-1, 0, 0) for every sol but s, which takes the live `PriceMcr` (the price in force during s), the live unit and rate. This is where an empty ring starts (the first roll ever, or a ring the loader dropped). On every other roll the entry for s already exists and this is a no-op.
+2. **In the clearing** (`ClearConvoys` at M:539; `ClearConvoy` M:639-730): where `ClearConvoy` sums `SellsValue` and `BuysValue` (M:646-678) it adds them into `HistSoldValue` / `HistBoughtValue` at the entry for `ClosingSol`, in the market's unit then. That is REVISION R1: the market's own valuation. On the last pass of a jump, convoys due in skipped sols clear with that pass's `ClosingSol` (M:529-530), so their value lands in the last walked sol's entry, as R1 says.
+3. **After the reprice** (`MarketProduceAndReprice`, M:545-550) **and, once E5 exists, after E5's step 4** (the political record, the journal's transitions, admissions and the rate step, and a withdrawal's re-expression of prices: E5 3.4): `HistOpen(Mk, Next)` with `Next = (i == Passed - 1) ? SolNow : s + 1`. It appends the entry for `Next` with the post-reprice `PriceMcr`, and the unit and `RateMcr` in force for `Next`; on the last pass of a jump the skipped sols `s + 1 .. SolNow - 1` are appended as unknown first. It runs whether or not `bLive`: an off market's price is unchanged, so the entry repeats it, and the chart stays flat rather than blank.
+
+   The order matters: E5's withdrawal re-expresses prices after the reprice (E5 1.5 step 3), and E8's open-sol entry must hold the unit and number the new sol actually trades at.
+- **Long jumps:** `Passed = min(SolNow - First, MarketRing)` (M:521-522) walks at most 8 sols; the ring marks the rest unknown, as section 3 (b) says. A jump of 30 or more leaves a ring of one known entry (the open sol) and 29 unknown.
+- **The resync.** `FRHMarket` is `mutable` and rebuilt by `BuildMarketState` on every sync (M:221-335). The `bKeep` branch (M:289-305) copies `PriceMcr` and the tally when the slot counts match; it **must also copy the six `Hist*` fields** and extend the `bKeep` test to `HistPrice.Num() == N x 30` and the three value arrays to 30. Without that copy, `Debug_InjectRival` (a generation bump, M:337-355) empties the ring. The `else` branch starts the ring empty. MX15 pins this.
+- **Harness.** `Debug_SetMarketHistoryEnabled(bool)` (runtime only, never saved, like `Debug_SetMarketEnabled` at H:1607) skips all three write points; this is the review's "runtime switch, not compiled out". `Debug_SetMarketPrice` (H:1610) changes the live price mid-sol and does not touch the ring, so after it the open-sol entry and the live price differ until the next roll; no `-market` check reads both across such a call.
+
+**The frame.** `RHSaveFrame::HistoryTag = MakeTag('R','H','E','8')` in `RHSaveFrame.h` beside `MarketTag` (and E5's `'RHE5'`, E6's reserved `'RHL6'`). Written with `RHSaveFrame::Write` after the last frame then written (`'RHE4'` at W:13933 today; after E5's, E6's, D6e's and D7's frames as built), read with `RHSaveFrame::Read` after the last tail reader (`ReadMarketBlock` at W:14743 today, or E5's/E6's). Read after teardown: it repairs with a Warning and never refuses (R2-6). Payload, in order:
+- `int32 SlotCount`, then the slot names ascending as `FString` (E4's layout, M:1286-1292), so the ring's slots can be checked against the market's;
+- `int32 MarketCount`; per market in RegionId order: `int32 RegionId`, `int32 HistFill, HistHead, HistLastSol`, then `SlotCount x 30` prices (raw entry order 0..29, as E4 writes its ring, M:1304-1305), 30 sold values, 30 bought values, and once E5 exists 30 rates and 30 unit bytes.
+
+It is sized by the tables, never by history, and measured by `GetMarketHistoryBlockBytes()` on the synced state as `GetMarketBlockBytes()` is (M:1354-1360). Size for one region and 18 slots: 4,320 + 480 = 4,800 bytes of ring, 12 of fill/head/last sol, 4 of region id, 4 + 4 of counts, about 200 of slot names (18 `FString`s), 20 of frame: **about 5.05 KB; about 5.3 KB with E5's rate and unit arrays.** The review's "5,068 B plus about 0.2 KB of slot names" holds.
+
+**The complete list of const accessors E8 reads.**
+
+*Existing at HEAD, unchanged* (H:1572-1602 unless noted): `IsMarketLive`, `IsMarketTraded`, `GetMarketPriceMcr`, `GetMarketTally` (grams; Back 1 = the sol just closed, M:424-438), `GetRivalTradedResources`, `GetMarketCheckedSol`, `GetMarketRegionCount`, `GetRivalEconomyCount`, `GetRivalEconomyName`, `HasRivalEconomy`, `GetRivalStoreKg`, `GetCreditReservedMcr`, `GetSpendableMcr`, `GetMarketSalesMcr`, `OrderLinesText`, `GetMarketClearings` (transient, at most 64), `GetMaxConvoysOut`, `GetMarketMaxStepBp`; `GetConvoys`, `GetConvoyProgress(const FRHConvoy&)`, `GetRivalRelation` (H:1754-1756); `GetSalesPaidMcr`, `GetEarthPriceMcrPerKg`, `DoesEarthBuy` (H:1530-1537); `IsRouteClosed` (H:1787), `IsRivalAvailable` (H:1823), `IsRivalDiscovered` (H:1826), `IsEmbargoed`, `HasDefected`, `GetEmbargoGrace` (H:1837-1839), `GetSabotageRemaining` (H:1825); `GetActiveEvent` (H:2567; a dust storm is `Type == "DustStorm"`, M:1114-1115); `GetBuildings` (the Lander, before E7); `FormatCredits` (H:1519); the definitions' `GetRival` and `ForEachRivalRow` (`RHDefinitionsSubsystem.h:105`, `:109`) for `DisplayName`, `DistanceKm` and `RegionId` (`RHRows.h:402`, `:405`, `:413`).
+
+*New in H, all header-only or one-line const getters, beside the E4 reads:*
+```
+static constexpr int32 MarketHistSols = 30;
+int32  GetMarketHistoryFill(int32 RegionId = 0) const;          // entries held, 0..30
+int32  GetMarketHistoryLastSol(int32 RegionId = 0) const;       // the newest entry's sol (== the open sol after any roll); -1 empty
+bool   GetMarketHistory(FName Res, TArray<int64>& OutPrice, int32 RegionId = 0) const;
+       // OutPrice[k] is the price in force during sol LastSol - (Fill - 1) + k; -1 = unknown; false with no such market or slot
+bool   GetMarketHistoryValue(int32 Back, int64& OutSold, int64& OutBought, int32 RegionId = 0) const;
+       // Back 0 = the open sol (0 so far), Back 1 = the sol just closed, ... Back Fill - 1; false outside
+int64  GetMarketHistoryRateMcr(int32 Back, int32 RegionId = 0) const;   // once E5 exists; 0 = unissued
+uint8  GetMarketHistoryUnit(int32 Back, int32 RegionId = 0) const;      // once E5 exists; 0 credits, 1 marks
+bool   GetMarketBandMcr(FName Res, int64& OutFloor, int64& OutCeil, int32 RegionId = 0) const;  // FloorMcr / CeilMcr, private today (H:3859)
+double GetConvoyLegSols(FName Rival) const { return ConvoyLegSolsFor(Rival); }                  // private today (H:4045)
+int32  GetMarketHistoryBlockBytes() const;
+void   Debug_SetMarketHistoryEnabled(bool bOn);                                                   // runtime only
+```
+*E5's reads (design names; E5 design 8 declares the first four):* `GetRate`, `GetBlocMembers`, `GetMarkBalance`, `GetCurrencyBlockBytes`; and the four the review found missing, which E8 adds as header-only const reads if E5 as built lacks them: `IsCurrencyIssued()` (Earth's flag, 1.2) with `GetCurrencyIssueSol()` and `GetCurrencyOpenSol()` (the market's, 1.3), `GetRateInputsBp(int32& Trade, int32& Ident, int32& Tension)` (the last step's inputs, 3.3; the panel must never recompute them from the live axes, 3.2), `GetDeskBooked(int32 Sol, int64& ToMarks, int64& ToCredits)` (2.5 step 4's totals), `GetDeskOrders(TArray<FRHDeskOrder>&)` (7's list: Id, direction, amount, `ClearSol`, `bCleared`), and `GetMarkOrder(int32 ConvoyId, int64& ReservedMmk, int64& OwedMmk)` (7's mark orders; false for a credit convoy).
+*E6's reads (design names, E6 design 8):* `GetLineMarkupBp(Rival, Res, Dir, Sol)`, `HasLivePact(Rival)`; and `GetPactCargoKg()` for the cap figure (E6 2.1's `PactCargoKg`, 2,000) if E6 exposes it no other way.
+*E7's reads (design names, E7 2 and 9, after its review's change 5):* `GetRoutes(TArray<FRHRoute>&)` and `GetRouteFor(Rival, Out)` for `LengthKm` (keyed by the rival's name, Ids display only), `GetColonyDepotLocationCm(RegionId)` (the Lander's location under E7 Q-A (b); the origin with no depot, as V:4338). Before E7, V's own Lander rule (V:4338-4342) and `GetConvoyLegSols`.
+
+Section 6 (a), Q-A (a) and REVISION R4 are withdrawn: under either answer `Source/RedHopeSim` changes and the dylib hash moves. The director chose (b), so the sim change is the ring above plus the getters.
+
+**What the battery moves** (`Saved/baselines/battery_post_s2fix`, the lines as they print today):
+- **The version lines** (every check that prints `RHSaveVersion` or the refusal text "expected 52485331/55"), 27 at HEAD: CV8 (x2), CR9 (x2), K6 (x2), DP11 (x2), EC6 (x2), DD9 (x2), XE10 (x2), FRAMING e5, FARICE F16, SH12, TM6 (x2), MX9 (x2: "MX9 v55: the market block is a frame" and "a v54 file is refused"), TR18 (x2), X15 (x2), TN1 and TN8; plus whatever version lines E5, E6, D6e and D7 add (CU10's at least). The literal "LoadColony v55:" and "v54:" texts inside Warnings are frozen at the version that wrote them (E4's code still says v55 after E8) and do not move; E8's own Warnings say "LoadColony v60:".
+- **The whole-file size lines:** CV8 "(12059 -> 12139 bytes)", DP11 "(12087 -> 12119 bytes)", EC1 x2 "both saves are 13100 bytes", DC9 "the 13408-byte file is the same bytes", MX1 x2 "the saves (11761 bytes)" and "(11740 bytes)", MX9 "save, load, save is byte-identical (12173 bytes)"; plus any size line E5-E7 and D6e/D7 add. MX1's "up to the market block (8717 bytes)" offset does not move: the new frame comes after.
+- **The new `-market` lines** MX12-MX16 (the test list below).
+- Nothing else: `diff_battery.py` against the baseline the gate before E8 leaves shows those lines and wall-clock digits only; the pins "power: gen 50 W load 20 W" and "deposit Regolith_A: 40645 kg" hold.
+- **MX1's tail compare** (MX:548-555) requires the on/off twins to differ from the market frame to the end of the file; E8's frame differs too (the off twin's prices sit at V), so it passes either way, but E5's REFRESH bounds it to the market frame's own length, and E8 bounds it itself if that has not happened.
+- **The 110-sol playtest** (`RH_PLAYTEST_DISTRICTS=1 bash scripts/sim/rh_playtest.sh 110 e8_full guide full`) stays **byte-identical** to `Saved/baselines/ind_full_playtest.txt` (296,489 bytes) by `cmp`: the ring logs nothing in play; its only lines are load Warnings, and the playtest never loads a doctored file.
+- **Checkpoints:** the bump refuses the Midgame and Late checkpoints; re-cut them (`rh_checkpoints.sh all --force`) and load both, as E5 7 says.
+
+## R2-3. The unit before and after E5's issue (review change 3, blocking)
+
+**E5's facts, by their design names.** `RateMcr` is milli-credits per mark, 1,000 = parity (3.1). The issue sets `CurrencyIssueSol = s` and `RateMcr = CurrencyRateStartMcr` (1,000); the currency opens at `CurrencyOpenSol = s + 2` (1.3). `bCurrencyIssued` is Earth's live flag from the act's execution (1.2). From `CurrencyOpenSol` on, E4's prices are read in milli-marks per kg and **their integers do not change** (1.3). A withdrawal re-expresses every price as `clamp(Price x RateMcr / 1000, floor, ceil)` and clears the rate and the issue sol (1.5). After the open, `ValueMcr` is in the market's unit for every priced order (REFRESH F1). The purses are Credits and Marks, the rate reads "1 mark = 1.06 cr" (section 9), the units are mcr and mmk, and the mark's name is a placeholder (section 9).
+
+**E8's rule.**
+- **The unit of sol t** is marks when the mark was issued in the market and `t >= CurrencyOpenSol`, else credits. Live: `IsMarketInMarks()` (E8 adds, header-only: `CurrencyIssueSol >= 0 && MarketCheckedSol >= CurrencyOpenSol`). Per sol: the ring's `HistUnit`, written at the open-sol write (R2-2 point 3, after E5's step 4, so a withdrawal's re-expression is already in).
+- **Symbols.** Credits: `FormatCredits` and "cr/kg" (H:1519). Marks: "mk/kg", through E5's formatter if it builds one, else the same thousandths format. "mk" is Gate-D placeholder copy beside the placeholder name, in the wording block.
+- **PRICES and DETAIL label the live unit:** "cr/kg" or "mk/kg", with the sub-heading "Prices in marks since sol N" after the open sol, and "The mark opens at the end of sol N; prices still in credits" between the issue roll and the open sol.
+- **One series, in the live unit.** An entry in the other unit is converted at **its own sol's rate**: a mark entry shown in credits is `Price x HistRateMcr(t) / 1000`; a credit entry shown in marks is `Price x 1000 / HistRateMcr(t)`, and a sol with no rate (before any issue) converts at parity, 1,000. This is exact by E5's own construction: the integers do not change at the issue and the rate starts at parity, so the series is **continuous across the open sol** and shows no step; across a withdrawal the conversion is E5's own re-expression (less the band clamp), so no step there either. `MarketDivTrunc` takes every division (M:37). The 5-sol change, the sparkline's scaling and the tooltip's minimum and maximum are computed on the converted series. An unknown sol (-1) stays unknown.
+- **The band** is `V x Floor / Ceil` in the market's unit: V keeps its number read in marks (E5 1.3), so the floor and ceiling lines carry the live unit's label and no conversion.
+- **Earth's price is always credits.** "Earth pays 2.25 cr/kg", and while the market is in marks "(2.13 mk at today's rate)", `EarthMcr x 1000 / RateMcr`.
+- **The trade balance** (2.3) values each sol in the unit it traded in (`HistSoldValue` and `HistBoughtValue` are recorded in the unit then) and shows the 8-sol sums in the live unit, each sol converted at its own rate, with a second figure in credits at today's rate while in marks (E5 9's "both balances"). "Earth has paid ... so far" is credits always.
+- **OPEN ORDERS** labels each convoy's reservation and "owes you" in the order's own currency (E5 2.3 decides it at booking): `GetMarkOrder(Id, ...)` true means marks ("set aside 362 mk", "owes you 200 mk"), else credits.
+- **The exchange-rate row** (2.4) is hidden until the issue roll. From the issue roll on: "1 mark = 1.058 cr" (`GetRate() / 1000`, three decimals), the last step's sign (the ring's rate for the open sol against the sol before), a 30-glyph sparkline of `HistRateMcr` (a sol with rate 0 draws a space), and "opens at the end of sol N" until the open sol; the inputs line reads `GetRateInputsBp` (the record, never the live axes); the bloc line lists available members; the desk line reads `GetDeskBooked(MarketCheckedSol, ...)` against `DeskCapPerSol`. A withdrawal hides the row again.
+- **Before E5 builds,** the unit is credits everywhere, `HistRateMcr` and `HistUnit` are not written or saved, and the row is not built (section 7's rule).
+
+## R2-4. The price row at the corrected widths (review change 4)
+
+**The numbers.** Mono 9 renders at 12 ppem (Slate's 96 dpi); U+2581-2588 come from `DroidSansFallback.ttf` at 154/256 em = 7.22 px, so **30 glyphs are 217 px**. The panel body is **290 px**: 340 (`RightColumnPx`, D:38) less 24 of panel padding (`FMargin(12, 9, 12, 10)`, `RHDeckStyle.cpp:161`), less 18 for the sub-card's 9 a side (the rival card's, K:2345), less the 8 px scroll bar (D:866).
+
+**The row** is one flat `SButton` (tagged `RH.MarketRow.<Res>`) holding two lines:
+- **Line 1:** `ResourceIcon` (14 px) + 4 px + `ResourceLabel` in `Body(9)` (FillWidth, the short form) + the price right-aligned in `Value(9)`, "12.345 cr/kg" (about 70 px). About 200 px of 290 at the longest short label.
+- **Line 2:** the 30-glyph sparkline in Mono 9 `Sky` (217 px) + 8 px + the 5-sol change in `TextDim` `Body(8)`, "+12.3%" (about 36 px), right-aligned: 261 px of 290.
+
+A row is about 34 px tall; seven rows about 240 px. The DETAIL chart is three rows of 30 glyphs, 217 px, with the band, Earth and holdings lines under it. The whole panel is about 770 layout px open, under the ~1,014 visible at 1440x860 once the accordion scrolls it to the top.
+
+**No clipping.** The 1440x860 capture must show every row on two clean lines. If one wraps, the sparkline drops to 24 glyphs (173 px), never the text; the label gets `ETextOverflowPolicy::Ellipsis` as a last resort, with the full name in the tooltip. Risk 1 is corrected to these numbers; Q-B (a)'s "about 162 px" is withdrawn.
+
+## R2-5. The click-test steps, rewritten so each can fail (review change 5)
+
+**Mechanics.** `LocateButton` matches a visible, on-screen `SButton` by text or **tag** (`HasText` or `HasTag`, CT:570-577; `HasTag` CT:181-186), so every new button carries an `FTagMetaData` and is located by it. `Gather` keeps only widgets whose centre is inside every clip (CT:111-129), so a folded panel's rows are never found: MARKET must be open before its rows are pressed. `PushCheck` polls `Effect()` until it returns empty or the timeout passes, then reports (CT:900-928). The deck gains `Debug_` const getters so each check reads what the panel built, not the sim alone: `Debug_GetMarketRowCount()`, `Debug_GetMarketSparkGlyphs(Res)` (drawn, non-space glyphs), `Debug_GetMarketSelected()`, `Debug_GetMarketDetailText()`, `Debug_GetMarketOrdersText()`, `Debug_IsMarketRateShown()`, `Debug_GetMarketRegionButtons()`, `Debug_GetMarketRouteCount()`, `Debug_GetMarketRouteChip(Rival)`, `Debug_GetMarketChipColours(...)`, `GetOrderDraft(Rival)` (reads `OrderDrafts`, Dh:322); the trade visualizer gains `GetDrawnRouteCount()` and `GetRouteStatus(Rival)`; the controller gains `IsTradeOverlayOn()`.
+
+**The steps, in order.** The E4 block (`market.setup` at CT:1546, which opens Politics and grants fuel, parts and credit) stays where it is; the new steps sit around it, all before `traffic.on` (CT:1575).
+
+1. **`market.empty`** (before `market.setup`; the panel is shown on a new colony: Zarya is active with an economy). `Runner.Do` opens MARKET through `SetFoldOpen(EFold::Market, true)` (the harness path `city.setup` uses, CT:1589). One check, naming the first failure: `Debug_GetMarketOrdersText()` equals "No orders out"; `Debug_IsMarketRateShown()` is false; `Debug_GetMarketRegionButtons()` is 0 (one region); the Ice row's change text is empty (fewer than 6 points: the open sol is 0 or 1).
+2. **`market.setup`, `market.BUY`, `market.SEND`** as today, with **`market.BUY`'s check fixed:** `GetOrderDraft(Zarya)` has exactly one non-zero entry, it is +100, and its key is Hydrogen (the card sorts by name, K:2522, so the first "Buy +100" is Hydrogen's). The report names the key and the amount.
+3. **`market.panel`.** Press `RH.MarketToggle`. Check (1 s): `IsFoldOpen(Market)` true and Politics, Crew, City, Fleet and Power all false; `Debug_GetMarketRowCount()` equals the count R2-1's rule computes in the check from the sim (available economy rivals' traded slots) **and** equals 5. The report prints both counts.
+4. **`sweep.market`.** `PushSweep(TEXT("sweep.market"))`: a second REACH sweep with MARKET open and scrolled to the top, so the toggle and the price rows are on screen; it fails on any unreachable visible button. (`sweep.deck` at CT:1362 runs with MARKET folded and never sees them.) The region selector is not on this colony (one region) and is **not** covered by the click test; `e8_regions_00` covers it by eye.
+5. **`market.orders`.** Check: the ORDERS section has exactly `GetConvoys().Num()` rows (1 after `market.SEND`), the row names Zarya, and its state text contains "clears at the end of sol N" with N = the convoy's `ClearSol`.
+6. **`market.history`.** `Runner.Do`: record `G0 = Debug_GetMarketSparkGlyphs(Ice)` and `F0 = GetMarketHistoryFill(0)`, then one `Debug_RollMarket(GetMarketCheckedSol() + 3)`, which walks three sols in one call (M:521-522, `Passed = 3`). Check (1 s): `GetMarketHistoryFill(0) == min(30, F0 + 3)`; `GetMarketHistoryLastSol(0) == GetMarketCheckedSol()`; the open-sol entry equals `GetMarketPriceMcr(Ice)`; `Debug_GetMarketSparkGlyphs(Ice) == min(30, G0 + 3)` after the deck's per-sol rebuild. The market then runs ahead of the clock for the rest of the test, harmlessly: the sim's own `RollMarket` returns at M:514-517 until the clock passes it, and no later step reads the open sol.
+7. **`market.select`.** Press `RH.MarketRow.Struct`. Check: `Debug_GetMarketSelected() == Struct`; `Debug_GetMarketDetailText()` contains `ResourceLabel(Struct)`'s full form ("Structural Materials", `RH_Resources.csv:5`) and the exact band text built from `GetMarketBandMcr(Struct)` with `FormatCredits`.
+8. **`market.discover`.** `Runner.Do`: call `Debug_MaybeDiscoverSettlement(k)` for k = 1, 2, ... until it returns true, at most 64 times. Check: `IsRivalDiscovered(Meridian)`; `Debug_GetMarketRowCount()` equals the rule's count **and** 7; `Debug_GetMarketRouteCount()` is 2; Meridian's card is visible. A loop that never discovers fails with "no survey count up to 64 discovered Meridian".
+9. **`trade.overlay`.** Press the overlay button **by tag `RH.TradeOverlay`**, never by text: "Trade" would match each rival card's TRADE verb (K:2394) under `Equals(IgnoreCase)` (CT:174). The button's label is **Routes** / **Routes [on]**, so the player sees no clash either. Check (1 s): `IsTradeOverlayOn()` and `GetDrawnRouteCount()` equals the number of available rivals counted in the check (2 after step 8).
+10. **`trade.overlay.status`.** `Runner.Do`: `Debug_SetEmbargo(Zarya, 5.0)` (H:1618). Check (1 s, the visualizer polls at 2 Hz): `GetRouteStatus(Zarya) == Embargo`, `GetRouteStatus(Meridian) == Open`, and `Debug_GetMarketRouteChip(Zarya)` reads "embargo, 5.0 sols to reassure". Then `Runner.Do` `Debug_ClearPolitics()` (H:1621) and a second check: both Open and the chip reads "open".
+11. **`trade.overlay.off`.** Press `RH.TradeOverlay` again. Check: `!IsTradeOverlayOn()` and `GetDrawnRouteCount() == 0`.
+12. **`market.chips`.** `CheckDeckContrast` compares only `SButton`s with a filled brush (CT:1271-1306); the ROUTES chips are `SBorder`s and the price rows are flat, so it checks none of E8's widgets. This check walks `Debug_GetMarketChipColours()` (fill and text per chip) and asserts `|Luminance(fill) - Luminance(text)| >= 0.4` for each, reusing the test's `Luminance`. Section 5.7's claim is dropped.
+
+**Counting.** Twelve new reports (`trade.overlay.status` is two), `market.BUY` fixed in place. 86 at the design's HEAD becomes **98**; the builder re-counts at its own HEAD (the visual pass's uncommitted `RHClickTest.cpp` and E5-E7 may add steps) and states the total in the commit. `leak.total`'s deliberate count is unchanged. Three clean runs in a row at 1440x860 (UI polish P1).
+
+## R2-6. The ring checked against E4's state on load (review change 6)
+
+`ReadMarketHistoryBlock(FArchive&, const TArray<uint8>& File)` runs straight after `ReadMarketBlock` (W:14743) and after E5's and E6's readers once they exist, so E4's **repaired** state is final when it runs. It never refuses and logs Warnings only (no Error), as E1-E4 (M:1362-1370). In order:
+1. **Find the frame.** `RHSaveFrame::Read(Ar, File, HistoryTag, ...)`. Lost: "LoadColony v60: the market history is lost (%s); the history starts empty", every ring empty.
+2. **E4's block was lost** (E5's `bMarketBlockLost`, set in the `!bFound` branch at M:1383-1386 and where the slot table drops the market, M:1519-1524): the ring is dropped even when its own frame is intact, with "the market history is dropped: the market block it describes was lost". The prices it would describe were reset to the Earth value and the open sol re-seeded (MX9's lost-block line), so an intact ring would end at sols and prices that no longer exist.
+3. **Parse.** Slot count in 0..`MktMaxList`; names through `RHSaveFrame::ReadName`, ascending and unrepeated; market count in 0..64; per market fill in 0..30, head in 0..29, last sol >= -1 and -1 exactly when fill is 0; the arrays sized by the slot count; nothing left over. Any failure: "the market history is malformed (%s); the history starts empty".
+4. **Against E4's loaded state:** (a) the slot table equals the live `EconSlots` names exactly: E4 skips a stale slot with a Warning (M:1509-1517), but the history drops the whole ring on any difference, since a shifted slot would mislabel every price; (b) a region with no live market drops that region's ring; (c) `HistLastSol == MarketCheckedSol` (the open sol after E4's own repair, M:1695-1704), else that ring is dropped with "the history ends at sol %d but the market's open sol is %d"; (d) a known price outside its slot's band `[FloorMcr, CeilMcr]` is clamped with a Warning; (e) the open sol's entry is overwritten with the loaded `PriceMcr` of every slot, with a Warning naming each slot that differed (E4 may have clamped a price at M:1678); (f) once E5 exists: a unit of 1 on a sol before `CurrencyOpenSol`, or any unit of 1 when E5's block was lost (the currency starts unissued, E5 7), is reset to 0 with its rate, with a Warning.
+5. The ring is then assigned into the synced markets; a later resync keeps it through `bKeep` (R2-2).
+
+`Debug_SetMarketHistoryEnabled` never touches the loader.
+
+## R2-7. The frame bar, with how each number is measured (review change 7)
+
+**Instruments.**
+- `RHFrameStats` gains a fourth slot, `Market` (`RHFrameStats.h:11`, `SlotCount = 4`), wrapping two ticks in `FScope`: the deck's market rebuilds (`SRHCommandDeck::Tick` calls `RefreshMarketPanel()` beside `RefreshTramList`, D:1335-1343) and `URHTradeVisualizerSubsystem::Tick`.
+- `RH.FrameStats <Seconds> [Tag]` (`RHCheats.cpp:2086-2135`) prints per-slot averages in ms a frame (`:2081-2084`) and the slot costs of frames over 150 ms (`:2119-2122`). The `[FrameStats]` line gains "market tick %.3f" beside the section's, and **"market worst rebuild %.2f ms"**, read from a `WorstRebuildMs` on the deck's market rebuild and on the visualizer, the way the section keeps its own (`RHSectionVisualizerSubsystem.cpp:843-844`, printed at `:622`); both are reset when a window starts, and the spike lines include the market slot.
+- Each window is **15 s**, the final build, TSR as shipped, at **1440x860 and 1600x900**, the clock at 1x after a 5 s settle.
+
+**Scenes.**
+- **S1, the market scene:** NEW COLONY; `RH.CityBench 2000`; `RH.Market discover` (a new sub-command: `Debug_MaybeDiscoverSettlement` looped as R2-5 step 8); `RH.AddStock Hydrogen 200`; `RH.AddStock SpareParts 20`; `RH.Market grant 10000` (new: `Debug_GrantCredits`; no console cheat grants credit at HEAD, the click test calls the hook from C++ at CT:1554); `RH.Market order Zarya Ice:300;Struct:-100`; `RH.Market order Meridian Food:100` (one convoy to each rival, H:1748); `RH.Floor 0`. Two convoys are then out and the market is live. The sub-commands are cheat code in `RHCheats.cpp`, not sim rules.
+- **S2:** `RH.DeepBench 3000` (`RHCheats.cpp:1746`), then `RH.Floor 0`, so the overlay is drawn (it hides below ground).
+
+**Runs, in adjacent pairs** (D8's rule, `design-decisions.md:1206`: the bench drifts over minutes, so off-then-on seconds apart): for each scene and resolution, **P0** MARKET folded and the overlay off, then **P1** MARKET open (scrolled to the top, Ice selected) and the overlay on.
+
+**The bar.**
+1. P1's median and p95 are each within **1.0 ms** of P0's, in every pair (D8's leave-and-return precedent, `design-decisions.md:1215-1222`, where the noise was +0.11 and -0.19 ms).
+2. The `Market` slot averages at most **0.2 ms a frame** in P1, and the worst rebuild in any window is at most **2 ms**.
+3. The cache key for the panel's strings is `(GetMarketCheckedSol(), the region, the selected resource, a reload counter from OnColonyReloaded)`: the clearing count is dropped (it stops at 64, M:24 and M:716-719). Order and route rows rebuild on their change keys (convoy Ids and states; each route's status chip; the availability mask).
+4. A missed budget is a finding for the director, not a budget edit.
+
+## R2-8. The accordion: MARKET joins it (Q-C (a), review change 8)
+
+- `EFold` becomes `{ Politics, Crew, City, Fleet, Power, Market, Count }` (Dh:136). `FoldFlag` gains `case EFold::Market: return &bMarketExpanded;` **before** the `default:` (K:227-237): the default returns Power's flag, so a missing case would silently fold Power instead. `bMarketExpanded = false` joins the fold bools (Dh:386-387); `Debug_ExpandAll` (Dh:29) sets it too. `FoldAnchors[(int32)EFold::Count]` (Dh:374) grows by itself. The panel is wrapped in `FoldAnchor(EFold::Market, BuildMarketPanel())` straight after Politics's slot (D:885), and its header carries `FoldToggle(EFold::Market, FName("RH.MarketToggle"))` as Power's does (K:2703). `SetFoldOpen` (K:263-281) then folds the others and scrolls it into view unchanged.
+- **The trade buttons stay on EARTH & NEIGHBORS:** TRADE (K:2394), Buy +100 and Sell +100 (K:2564, K:2571), SEND ORDER (K:2613) and CLEAR (K:2627) are on each rival card. E5's desk buttons stay there too (E5 9).
+- **The press count for a look-and-act:** open MARKET (1), open EARTH & NEIGHBORS, which folds MARKET (1), the nudges (n), SEND ORDER (1), back to MARKET (1): **n + 4**, two more than if both could be open, which the director accepted ("about 2 extra presses").
+- The header summary stays readable while folded, so the price count or balance needs no press. The selected resource and the region survive a fold (deck state, unsaved). Section 1's "so the neighbours and their market sit together" now means adjacent in the column, not open together.
+
+## R2-9. The overlay as a pure listener (review change 9)
+
+`URHTradeVisualizerSubsystem` (RedHope, a `UWorldSubsystem`) reads const getters only and writes nothing to the sim. Its state is its mesh, its key and its on flag.
+- **The named edits to V** (the colony visualizer; none to the sim):
+  1. `RivalMarkerPos(FName, float)` moves above `private:` (Vh:216; it is at Vh:259) as a public const read, unchanged (V:4193-4204).
+  2. `ShowsSurface()` (Vh:238, `!bSectionMode && !IsUnderground()`) becomes a public const read. The markers hide with `!bSurface` where `bSurface = ShowsLevel(0)` (V:4216, V:4264); on the surface the two are the same test, so a ribbon is never drawn while its marker is hidden, and the section view hides both (REVISION R3).
+  3. **The marker's status word is V's.** `AddLabel` sets the text once at spawn (V:4243; a `UTextRenderComponent`, V:1334-1340). `RefreshSovereigntyVisuals` gains a per-marker word, diffed like `RivalMarkerState` (V:4247-4263) over the chip order of 2.6 (defected, closed, embargo, disrupted, storm, open), and rewrites the label to "Zarya Station · embargo" when the word changes while the trade overlay is on (V reads `URHTradeVisualizerSubsystem::IsOverlayOn()`), and back to the name alone when it turns off.
+- **The key** is a CRC over, per available rival in name order: the name, the status chip, `RivalMarkerPos`, and the depot location (`GetColonyDepotLocationCm(0)` after E7; the Lander's `LocationCm` from `GetBuildings()` before it, V:4338-4342's rule), plus `ShowsSurface()`. It is polled at **2 Hz** (TRAFFIC's `PollSeconds = 0.5`, T:22) and the mesh is rebuilt only when the key moves, never per frame.
+- **The mesh:** one `UProceduralMeshComponent`, one section per colour (`Teal` open, `Amber` embargo or disrupted, `Red` closed or sided with Earth, `Sky` storm), built as TRAFFIC's `RebuildOverlay` is (T:537-627: a strip of quads at `OverlaySampleCm`, `CreateMeshSection_LinearColor` per bin, `ClearMeshSection` when empty), 3 m wide, draped on `RHMarsTerrain::GroundZCm + 40 cm` every 10 m. About 50 quads for today's two routes (236 m and 260 m, V:4201).
+- **The switch:** `ARHPlayerController::ToggleTradeOverlay()` / `IsTradeOverlayOn()` mirror `ToggleTrafficOverlay` (`RHPlayerController.cpp:2188-2194`); the command-bar button beside Traffic (D:1177-1182) is a `DeckButton` with the tag `RH.TradeOverlay` (the helper at D:47-59 gains an optional tag), labelled **Routes** / **Routes [on]**; console `RH.Trade overlay [0|1]` beside the existing `RH.Trade` log (`RHCheats.cpp:1059`), as `RH.Traffic overlay` is (`:2749`).
+- **The legend:** `BuildTradeLegend()` in the TRAFFIC legend's slot (D:777-784), under the traffic legend when both are on: "Trade routes: teal open · amber embargo or disrupted · red closed · blue halted by a storm".
+- **Convoy rovers** stay V's (V:4288-4360).
+
+## The save version
+
+HEAD is **v55** (W:37). The queue after the visual pass: E5 **v56**, E6 **v57**, D6e and D7 **v58 and v59** in whichever order they build; E7 takes **no** version under its Q-A (b) (no building, no fence). So E8 takes **v60** if the queue builds in that order, and in every case the next free version at build time. The `RHSaveVersion` comment (W:37) gains: "v60: the market history - per region a 30-sol ring of the price in force during each sol (in the market's unit then), the value sold and bought at that sol's clearings, and (E5) the rate and unit, with its fill, head and last sol, in its own frame ('RHE8') after the last frame then written; sized by the tables (E8)". The strict check stays (W:13968-13971).
+
+## Tests (the complete list)
+
+**`-market` checks** (new, in MX after MX11; the battery's run count does not change):
+- **MX12, the ring by hand.** On MX2's fixture (`Debug_SetMarketTally`, `Debug_SetRivalStore`), after `Debug_RollMarket` of 1 sol, of 3 sols, and of a 12-sol jump: fill, head and last sol; the open sol's entry equals the live price for every slot; the walked sols' entries equal the prices MX2's reference computed; the four sols the jump skipped read -1 with 0 values; the values at each closing sol equal the sum of `GetMarketClearings()`'s fills times the price in force (the `SellsValue` / `BuysValue` split); `GetMarketHistoryValue(0)` is 0, 0 and `Back = Fill` is false; a market turned off (`Debug_SetMarketEnabled(false)`) still writes the open sol's entry, equal to the unchanged price.
+- **MX13, band-exact.** MX8's paired run (the start save `marketmx8`, 20 sols, nine orders to two rivals, MX:1690-1850): the era and agent twins' rings are equal entry for entry at every threshold (prices, values, fill, head, last sol), and the fallback twins too. Every convoy in the run names an available rival.
+- **MX14, write-only.** From `marketmx8`, twins with `Debug_SetMarketHistoryEnabled` on and off, 20 sols in each band: MX1's digest is identical; the saves are byte-identical except inside the `'RHE8'` frame (the off twin's ring is empty); after 40 sols the on twin's fill is 30 and its last sol is the open sol.
+- **MX15, the save.** The frame is `'RHE8'`, after the last frame, its payload bytes equal `GetMarketHistoryBlockBytes()`, the slot names ascending, per region fill, head and last sol then the arrays; save, load, save is byte-identical; the previous version is refused; a lost `'RHE8'` frame starts empty with a Warning while the market loads intact; a lost `'RHE4'` with an intact `'RHE8'` drops the ring with the E4-lost Warning; a doctored last sol loads with the ring dropped; a doctored slot name drops the ring; a doctored price outside the band is clamped; an open-sol entry that disagrees with the loaded prices is rewritten with a Warning naming the slot; a resync (`Debug_InjectRival`) keeps the ring; an injected region-1 rival gives two rings that move independently; no Error line is logged by any repair.
+- **MX16, mutations** (each built, run and restored by hash; each must fail the check named): (1) the values written before the clearing (MX12: a sol late); (2) the open-sol entry written before the reprice (MX12: the open sol's entry equals the closed sol's price); (3) the `bKeep` copy omitted (MX15's resync case: the ring empties); (4) the last-sol check skipped on load (MX15's doctored last sol loads); (5) the reprice reading the ring (MX14: the digests differ); (6) a jump's skipped sols filled with the last pass's price instead of -1 (MX12's jump case); (7) once E5 exists, the open-sol entry written before E5's withdrawal step (a unit and price that disagree with the re-expressed price at the withdrawal roll).
+- **`-scale`** (outside the battery): 1,000 `RollMarket` calls with the ring written: at most **0.1 ms** more than the figure measured just before E8 builds (E4 measured 0.746 ms; E5's bar is 1.246 ms). Every digest identical.
+
+**The battery.** `bash scripts/sim/rh_battery.sh 10`: `BATTERY COMPLETE: 0 suite(s) not green`, logs newer than both dylibs; `diff_battery.py` against the baseline the previous gate left shows only R2-2's version lines, size lines, the MX12-MX16 lines and wall-clock digits; both pins hold.
+
+**The playtest.** The 110-sol run byte-identical to `Saved/baselines/ind_full_playtest.txt` by `cmp`.
+
+**The click test** (`RH_CLICKTEST_RES=1440x860 bash scripts/unreal/rh_clicktest.sh`): R2-5's steps, three clean runs in a row, the total stated.
+
+**The frame check:** R2-7's pairs, both scenes, both resolutions, the `[FrameStats]` lines kept in the gate's log.
+
+**Captures** (`scripts/unreal/rh_capture.sh`, 1440x860, plus 1600x900 where marked; `Saved/RHCapture/e8/`; looked at, as `e4_card_00.png` was):
+- `e8_panel_00`: S1 run 20 sols at 60x (about 7 minutes), MARKET open: 7 rows on two clean lines each, the sparklines filled;
+- `e8_detail_00`: Ice selected, the 3-row chart, the band, Earth's price, the holdings;
+- `e8_balance_00`: the 8-sol balance after both convoys clear;
+- `e8_routes_00`: one route embargoed (`Debug_SetEmbargo` through `RH.Market embargo Zarya 5`, a cheat sub-command);
+- `e8_overlay_00` (and 1600x900): Routes on, both ribbons with Zarya's amber, rovers on the road, the legend, Zarya's label reading "· embargo";
+- `e8_overlay_section_00`: the section view (`RH.Section on`): no ribbon, no marker;
+- `e8_regions_00`: a second region through `Debug_InjectRival` with `RegionId = 1` (via `RH.InjectRivals` if it can set the field, else a cheat edit logged in the gate): the selector drawn, the rings independent;
+- `e8_rate_00`: once E5 exists, the rate row after an issue and its open sol, the series continuous across the open (E5's harness).
+
+**Wording.** Every new string goes into `docs/qa/2026-10-15/gate-d-wording.md` as "Rows added by E8", W-rows in E4's style (`:528`): the panel's headings and lines, "Routes" / "Routes [on]", "mk/kg", the chip words, the legend, the marker's status word. None is morale, sickness or evacuation wording.
+
+**Deviations to log in `docs/design-decisions.md`.**
+1. A write-only, saved 30-sol market history (v60), against the plan's "no sim or save change" (the director's Q-A (b)).
+2. The ring's newest entry is the open sol, written at the roll that opens it, so the load check is `HistLastSol == MarketCheckedSol`, not `- 1`.
+3. `market.BUY`'s empty check is fixed in this gate.
+4. The trade balance covers the market's eight sols, not thirty.
+5. The overlay button is **Routes**, not Trade, to avoid the TRADE verb.
+6. The region selector is covered by MX15 and a capture, not by the click test, until a two-region fixture exists in it.
+
+**Not resolved here.**
+- E5's, E6's and E7's accessors are design names; the builder rebases each.
+- The click-test total is 86 at the design's read; the working tree's `RHClickTest.cpp` is modified by the visual pass and uncommitted, so the builder re-counts.
+- The widths are computed from the font files and the engine, not measured; the 1440x860 capture is the measurement.
+- No console cheat grants credit at HEAD; the frame scene needs `RH.Market grant`, cheat code only.
+- Whether `RH.InjectRivals` can set `RegionId` for `e8_regions_00` is unchecked.
