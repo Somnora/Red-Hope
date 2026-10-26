@@ -1759,3 +1759,11 @@ Built from `docs/qa/2026-10-25/step2-fixes-spec.md` (its refresh at HEAD `31ffa6
 **RH.DeepBench** (nit 37, `RH.DeepBench 3000`, the section on, 1440x860, no `-RHVerifyCaches`, this shared machine): section focus -10 median 25.96 / p95 33.20 ms (budget 33 / 45), worst rebuild 10.36 ms; with TRAFFIC median 33.90 / p95 53.55 (budget 35 / 48), worst rebuild 15.42 ms (budget 8). D8's 2.58 and 3.13 ms predate the label-room measure `ComputeLabelRoomCm` that UI polish added to every `BuildShared` (nit 37, the cache of it is left): **the rebuild and TRAFFIC p95 are over their budgets, a finding for the director**. `[SectionCheck] flows: 600 cross-floor commuters in 33 floor pairs, matches=1 | PASS`, the figures D8 recorded. With `trams` the check prints FAIL on its own threshold of 500 commuters (270, matches=1). With `-RHVerifyCaches` the live smoke prints 0 `RHVERIFY` lines.
 
 **Known gaps.** With `-RHVerifyCaches` every read of the bed assignment re-derives and compares it (the spec's reading of "today's compare"), so a verify-mode live smoke is slower (the section's worst rebuild 125 ms at 3,000 colonists); frame figures are taken without it. Window (b)'s seat side (a Designate that zones a Lab changes `ColonistStations` only at the next `RefreshJobs`, which no era step runs before the boundary roll) is an era-parity risk that predates step 2; DC10 avoids it on purpose. Not committed: the director reviews and commits.
+
+### Visual pass: the director's answers (2026-10-25 and 2026-10-26)
+
+From `docs/qa/2026-10-25/visual-pass-design.md` (its "# DIRECTOR ANSWER" section):
+
+- **Q-A (a):** a building under construction shows its own model rising inside the scaffold as work proceeds. This applies to every building's site, not only the solar array.
+- **Q-B (a):** the tram shows its wait colour on the destination boards only. As built (`f922b3d`), busy is orange, not amber, because at amber the boards matched the livery's #F3C459 trim; the section view keeps amber. This deviation is put to the director.
+- **P8c label size (a):** the deep view's floor ladder stays at `RHDeck::Label(10)`, with capitals of about 7.8 px at this machine's DPI scale and a 16 px row pitch (built in `870ba2c`). Label(12) was declined.

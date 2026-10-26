@@ -183,3 +183,4 @@ The playtest bot (`RHPlaytest.cpp`) is not touched.
 
 - **Q-A (a):** a building under construction shows its own model rising inside the scaffold as work proceeds. This applies to every building's site, not only the solar array.
 - **Q-B (a):** the tram shows its wait colour on the destination boards only.
+- **P8c label size (a) (2026-10-26):** keep the ladder at `RHDeck::Label(10)`. At this machine's DPI scale (0.796) its capitals draw about 7.8 px, not the spec's "about 9 px" (the 9 px bar sits on the em, 10.6 px at 1440x860), with the 16 px minimum row pitch. Option (b), Label(12) with about 9 px capitals and an 18 px pitch, was declined.
