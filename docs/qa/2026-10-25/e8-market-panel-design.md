@@ -377,3 +377,193 @@ This section replaces the design wherever they differ.
 **R3. The overlay's visibility** reads the same predicate V uses to hide markers off the surface (V:4264), via a shared const helper in V, and adds the section view's state. A ribbon is never drawn while its marker is hidden.
 
 **R4. Section 7's one real branch** is the overlay's start point (E7's getter, or V's Lander rule). Every other dependency is an accessor E8 calls only when the section is shown, and a section is built only for a gate that exists at E8's build. The builder lists each branch it writes, with its gate.
+
+# INDEPENDENT REVIEW (2026-10-25)
+
+Reviewer note: independent professor pass. All code was read at HEAD `60e892a` with `git show HEAD:`. Short names are the design's (K, D, Dh, V, T, CT, H, M). **W** is `Source/RedHopeSim/Private/RHSimWorldSubsystem.cpp`. Font facts come from the UE 5.8 install at `/Volumes/Unreal/UE_5.8`.
+
+**Verdict:** CLEARED WITH CONDITIONS
+
+The structure is sound: a deck fold, an optional write-only sim ring, and a listener overlay. Q-A is correctly put to the director. But three defects change what the director would be told, or what the panel would show, so they must be fixed in the design before Q-A goes to the director and before the build. These are marked **blocking**. A **condition** is something the build must meet.
+
+## Required changes
+
+1. **Blocking. PRICES and DETAIL reveal undiscovered neighbours.**
+   - **Evidence.**
+     - Meridian ships `SliceActive` FALSE (`docs/data/RH_Rivals.csv:3`).
+     - `IsRivalAvailable` is "SliceActive or discovered" (W:9701-9705).
+     - A market's `bTraded` counts every economy rival in its region, with no availability test (M:316-331). `IsMarketTraded` reads that flag (M:397-402).
+     - An undiscovered rival still produces (M:565-566).
+     - So on a new colony, `IsMarketTraded` is true for Food and SpareParts, which only the hidden Meridian trades.
+   - **Where the design shows them.**
+     - 2.1 counts "7 in region 0 (Zarya's five, Meridian's two)" (design:99), and `market.panel` pins that 7 (design:218).
+     - 2.2 sums "the neighbours hold" over economy rivals and names each rival in the tooltip (design:117).
+     - 2.4 lists "Bloc: Zarya Station, Meridian Base". E5's own revision says the deck lists a member only once it is available (E5 design:754).
+     - E4's card shows a price only on an available rival's card (K:2343). The lead review's defect 4 fixed ROUTES and the overlay, but missed these.
+   - **Change.**
+     - Count only rivals with `IsRivalAvailable` in: a price row, the holdings sum, every tooltip name, the bloc line, the header's "N prices" and the region selector.
+     - `market.panel` then expects 5 rows on the click-test colony.
+     - Add one step that discovers Meridian (`Debug_MaybeDiscoverSettlement`, H:2725) and then sees 7.
+
+2. **Blocking. "No sim change" under Q-A (a) is false, and the list of accessors is incomplete.**
+   - **Evidence.**
+     - **The band.** `FloorMcr` and `CeilMcr` sit in `FRHMarket`, in the private section (`private:` at H:2763; the struct at H:3833-3843). No public getter exists: only M reads them.
+       - E7 makes V regional through the endowment (E7 design:173-178, RR4), so presentation cannot re-derive the band from `EarthValue_mcr`.
+     - **The leg.** `ConvoyLegSolsFor` is private too (H:4028), so 2.6's round trip cannot call it from RedHope.
+     - **E5's reads.** E5 declares these const reads: `GetRate`, `GetIdentityView`, `GetTensionView`, `GetBlocMembers`, `GetMarkBalance` and `GetCurrencyBlockBytes` (E5 design:416). E8 also needs four that E5 does not declare:
+       - the issued and open state;
+       - the bloc trade term (2.4's "trade +1,655 bp");
+       - the desk's booked totals for each sol (2.4's "300 of 500");
+       - the desk order list (2.5).
+   - **Change.**
+     - Add a list, "sim reads E8 adds", for example `GetMarketBandMcr(Res, Region, Floor, Ceil)`, a public leg getter, and the E5 reads above. Each is a header-only const getter.
+     - Correct section 6 (a) and Q-A (a). The battery stays line-identical and the playtest byte-identical. But `Source/RedHopeSim` does change, and the dylib hash moves.
+     - R4's "the one real branch" is wrong for the same reasons. Restate it.
+
+3. **Blocking. E5 changes the unit of every price, but E8 reads them as credits.**
+   - **Evidence.**
+     - "From `CurrencyOpenSol` on, E4's prices are read in milli-marks per kg. Their integers do not change" (E5 design:78; also :21).
+     - A withdrawal re-expresses every price as `Price × RateMcr / 1000` (E5 design:96).
+     - After the issue, `ValueMcr` is in milli-marks for every priced order (E5 design refresh, finding F1).
+     - E8 formats prices as `FormatCredits` "cr/kg" (design:102). It puts the band in cr/kg beside Earth's credit price (design:115-116), and it keeps one undifferentiated price series (section 3).
+   - **Consequences.**
+     - After the open sol, the panel labels marks as credits and compares them with Earth's credits.
+     - Take a withdrawal at E5's modelled rate of 1.44. Every sparkline and every 5-sol change then shows a +44% step that is only a change of unit.
+   - **Change.**
+     - PRICES and DETAIL read the market's unit from E5 and label it.
+     - The history records the unit for each sol. Under (b), write `HistRateMcr` at the same point as the prices, before E5's rate step (E5 3.4 step 4), and add an issued/open flag per sol.
+     - Draw the sparkline and the change in one unit.
+     - Convert each sol of the 8-sol balance at that sol's own rate.
+
+4. **Condition. The price row is about 100 px too wide.**
+   - **Evidence.**
+     - Mono 9 renders at 12 ppem: Slate's RenderDPI is 96, so 9 × 96/72 = 12 (`SlateFontInfo.h:15`, `FontCache.cpp:1342`).
+     - U+2581-2588 are not in `DroidSansMono.ttf`; its cmap has no glyph for them. They come from `DroidSansFallback.ttf` (`LegacySlateFontInfoCache.cpp:122-127`) at 154/256 em = 7.22 px.
+     - So 30 glyphs are 216.6 px, not "about 162" (design:103).
+     - The space available is about 290 px: 340, less 24 for the panel padding (`RHDeckStyle.cpp:161`), less 18 for the sub-card padding (the rival card uses 9 a side, K:2345), less the 8 px scroll bar (D:866).
+     - The row is 14 + 70 + 60 + 217 + 30 = 391 px. At 24 glyphs it is still 347 px. The design's own 336 px was already over the 316 px panel body.
+     - The check holds against HEAD: the Power chart's "gen  " plus 36 glyphs comes to 296 px, which fits that panel's 316 px.
+   - **Change.**
+     - Use two lines per resource: name, price and change; then the sparkline. Or keep one line with about 14-16 glyphs.
+     - Correct Risk 1 and Q-B (a).
+     - A 1440x860 capture must show no clipping.
+
+5. **Condition. Several click-test claims do not hold.**
+   - **(a) No sweep reaches the price rows.**
+     - `sweep.deck` runs once, at CT:1362, straight after NEW COLONY, with MARKET folded.
+     - `Gather` keeps only widgets that are visible and on screen (CT:105-130).
+     - So the price rows and the region selector are never swept. Add a sweep with MARKET open and its rows on screen.
+   - **(b) `deck.contrast` checks none of E8's new widgets.** It compares only SButtons with a filled brush (CT:1271-1295). The ROUTES chips are `SBorder`s, and flat buttons have no fill. Drop 5.7's claim, or add a chip check.
+   - **(c) "Trade" collides with each rival card's "TRADE" verb (K:2384).**
+     - `LocateButton` matches with `Equals(..., IgnoreCase)` (CT:174). So "Trade" #0 can be the convoy dispatch.
+     - A player sees the same clash. Rename the overlay button, or at least locate it by a tag.
+   - **(d) Which resource `market.BUY` checks.**
+     - "Zarya's first resource" must be the card's first row. The card sorts by name (K:2512), so that is Hydrogen, not the first slot.
+     - Safer: assert that exactly one of Zarya's draft entries moved, and by +100.
+   - **(e) No step checks an empty state.** None checks "No orders out", the rate section hidden, the selector absent, a change with fewer than 6 points, or the panel hidden with no neighbour available. Add at least "No orders out" and the hidden rate section.
+   - **(f) Counting.**
+     - `market.history` should check the change in glyphs across the three rolls, not an absolute count.
+     - State the new total. The text says "six" new steps but lists five.
+
+6. **Condition (under Q-A (b)). The ring must be checked against E4's state when it loads.**
+   - **Evidence.**
+     - A lost `'RHE4'` frame loads with prices back at the Earth value and the open sol re-seeded. See `Saved/baselines/battery_post_e4/market.log`, the MX9 line "a lost market block loads with a Warning...".
+     - E4 keeps prices only if the slot count matches (M:286).
+     - In either case an intact `'RHE8'` ring would end at prices and sols that no longer match.
+   - **Change.**
+     - Save the last sol written and the slot names, as E4's payload does (MX9's "18 slot names ascending").
+     - On load, drop the ring with a Warning in three cases: E4's block was lost (E5's `bMarketBlockLost`), the last sol written is not `MarketCheckedSol − 1`, or the slot table differs.
+     - The write-only twin must be a runtime switch, as `Debug_SetMarketEnabled` is (H:1593), not "compiled out".
+     - Section 6 (b)'s expected battery diff must include the new `-market` lines.
+
+7. **Condition. The frame bar must say how each number is measured.**
+   - **Evidence.**
+     - `RH.FrameStats` prints only per-slot averages (`RHCheats.cpp:2081-2084`). It shows slot costs only inside spike frames over 150 ms (:2119-2122).
+     - D8's worst rebuild came from the section's own `WorstRebuildMs` (`RHSectionVisualizerSubsystem.cpp:621`, :839-840).
+     - D8 saw the bench drift by +4 ms over minutes, so it measured in adjacent pairs (`design-decisions.md`, the D8 notes, item 6).
+     - "Two convoys out" needs two available rivals, since one convoy goes to each rival (H:1734). So Meridian must be discovered first, and the colony needs fuel, parts and credit.
+     - The cache key's "clearing count" stops at 64 (M:24, M:716-719).
+   - **Change.**
+     - Add worst-rebuild tracking to the deck's market rebuild and to the trade visualizer, and print it on the `[FrameStats]` line with the new slot.
+     - Run panel-on and panel-off as adjacent pairs.
+     - Write the scene recipe.
+     - Drop the clearing count from the key: the sol and a reload flag are enough.
+
+8. **Condition. The accordion separates the panel from the trade buttons.**
+   - **Evidence.**
+     - `SetFoldOpen` folds every other fold (K:263-276).
+     - Every Buy +100, Sell +100 and SEND ORDER is on a rival card inside EARTH & NEIGHBORS (K:2410-2413, K:2554-2603).
+     - So MARKET and the buttons it informs are never open together. That contradicts section 1's "so the neighbours and their market sit together".
+     - `FoldFlag`'s default case returns Power's flag (K:235). Market needs its own case and its own bool.
+   - **Change.** State this in section 1 and in Q-B, and put the choice to the director (Q-C below).
+
+9. **Condition. The overlay is not a pure listener.**
+   - **Evidence.**
+     - `RivalMarkerPos` and `ShowsLevel` are private to the colony visualizer (`RHColonyVisualizerSubsystem.h`: `private:` at :216, then :236 and :259).
+     - The marker's label is set once, when the marker spawns (V:4243).
+   - **Change.**
+     - Name the edits to V: expose `RivalMarkerPos` and the visibility predicate (R3).
+     - Either give V the label update ("Zarya Station · embargo") or drop that line.
+
+## Checked and sound
+
+- **The named getters exist, are public, and mean what the design says.** These are `IsMarketTraded`, `GetMarketPriceMcr`, `GetMarketTally` (grams; Back 1 is the sol just closed; M:424-438), `GetMarketCheckedSol`, `GetMarketRegionCount`, `GetRivalStoreKg`, `GetMarketSalesMcr`, `GetCreditReservedMcr`, `GetSpendableMcr`, `GetEarthPriceMcrPerKg` and `GetSalesPaidMcr` (H:1530-1591).
+- **Their neighbours check out too.**
+  - `GetMarketClearings` is transient and holds at most 64 (H:3852, M:24).
+  - The politics getters are at H:1773 and H:1809-1825.
+  - `GetConvoyProgress(const FRHConvoy&)` is at H:1740.
+  - `GetActiveEvent` is public (H:2553), and a dust storm freezes convoys (M:1115, M:1131).
+- **No history exists at HEAD.** E4's tally is the 8-sol `MarketRing` (H:1555, H:3837-3838). `PriceMcr` holds today's price only (H:3836), and no delegate fires at a sol roll (H:233-263). So a 30-sol history that survives a load needs a save change. Q-A is genuinely the director's, and (b) is a reasonable recommendation.
+- **Refill times:** 30 × 1,200 s (`RHSimClockSubsystem.h:26`) = 36,000 s. That is 10 h at 1x, 3.3 h at 3x, 75 min at 8x and 10 min at 60x. Correct.
+- **Ring size:** 4,320 + 480 + 240 = 5,040 B. Add 8 for the fill and head, and 20 for the frame (header 12 plus footer 8, `RHSaveFrame.h`): 5,068 B. "About 5.1 KB" holds. The 18 slots are confirmed by MX9's line in `market.log`.
+- **R1 is right.** `ClearConvoy`'s `BuysValue` and `SellsValue` use the closing sol's price before the reprice (M:639-678). So recording them reproduces E4's own valuation.
+- **Long jumps.** A jump makes at most 8 passes (M:522), and the last pass catches every due convoy (M:529-530). So (b)'s "the rest are marked unknown" matches the code.
+- **ROUTES and the overlay.**
+  - The availability filter matches the cards (K:2343) and the markers (V:4223-4225).
+  - The chip order matches the card (K:2362-2365).
+  - Round trip: 120 km at 60 km/sol (RH_Config `ConvoySpeedKmPerSol`; W:9657-9662) is 2 sols each way, 4.0 in all. Correct.
+  - The ribbons are 236 m (Zarya) and 260 m (Meridian) (V:4201). At 10 m a quad, that is about 50 quads. Correct.
+- **The claimed costs are realistic.** Rebuilds happen once a sol or when a key moves, and the TRAFFIC overlay is the precedent (T:538-627). D8's 1.0 ms paired bar was measurable, with noise of +0.11 and −0.19 ms.
+- **The accordion mechanics extend cleanly.** `FoldAnchors` is sized by `EFold::Count` (Dh:374).
+  - At 1440x860 the column's viewport is about 1,014 layout px. That is (860 − 106 × 0.768) / 0.768, with the scale 0.768 measured on `Saved/RHCapture/e4/e4_card_00.png`.
+  - The open panel, at about 770 px by my estimate, fits once it is scrolled to the top.
+- **Other checks.**
+  - `market.BUY`'s check is empty (CT:1562-1563). The fix through `OrderDrafts` (Dh:322) is the right idea.
+  - No `OnPaint`, `FSlateDrawElement` or `MakeLines` exists in `Source/RedHope`.
+  - The panel shows no wage or in-city price, so ruling 11 holds.
+
+## Director questions
+
+**Q-A (the design's question, corrected).** Where does the 30-sol price history live?
+- **(a) In presentation only, not saved.**
+  - After every load, the chart refills one point a sol: 30 × 1,200 s is 10 h at 1x, 3.3 h at 3x, 75 min at 8x and 10 min at 60x.
+  - The 5-sol change stays blank for 5 × 1,200 s: 100 min at 1x, 33 min at 3x, 12.5 min at 8x and 100 s at 60x.
+  - It is **not** "no sim change". E8 still adds const getters to H (change 2), so the dylib moves. The battery stays line-identical and the playtest byte-identical.
+- **(b) In the sim, saved, write-only.**
+  - It costs 5,068 B per region per save, plus about 0.2 KB for slot names (change 6). On MX9's 12,173-byte fixture save, that is +42%.
+  - It costs one version bump beyond E5-E7's. The version lines, the size lines and the new `-market` lines move.
+- **(c) No price history.** As written. The plan's "30-sol price history" is not delivered.
+
+**Q-B (corrected numbers).** The column option holds a 30-glyph sparkline only on its own line: 217 px of about 290. On one line with the name and price, it fits 14-16 glyphs. So 7 resources take 14 lines, or 10 after change 1.
+
+**Q-C (new). Does MARKET join the accordion? The accordion is L7 (a), the director's rule.**
+- **(a) It joins (as designed).**
+  - To act on a price, one press opens EARTH & NEIGHBORS and folds MARKET. Then come the Buy or Sell presses, then one press back.
+  - That is 2 extra presses for every look-and-act.
+- **(b) It is exempt, so both can be open.**
+  - EARTH & NEIGHBORS with one card is about 554 layout px: 425 screen px on `e4_card_00` divided by 0.768. MARKET is about 770, my estimate.
+  - Together that is about 1,320 against about 1,014 visible. So about 300 px of scrolling separates a price from its button.
+  - Each discovered neighbour adds about one card.
+  - This departs from L7 (a)'s rule that opening one fold closes the others.
+
+## Not verified
+
+- **Widths are computed, not measured.** They come from the font files and the engine source. I found no capture of the Power chart to measure against.
+- **Heights are partly estimated.** MARKET's height is my estimate from its section list. EARTH & NEIGHBORS' height is measured from one capture.
+- **E5, E6 and E7 are designs, not code.** Their accessor names and semantics may change when they are built.
+- **Not checked:**
+  - the battery line list in section 3 (CV8, DP11, EC1, DC9, MX1, MX9);
+  - the MX8 "start save" for the captures;
+  - Q-B (b)'s "one more session".
+- **Nothing was built or run,** so no frame costs were measured.
+- **Example figures are illustrative, not modelled:** 1.058, 18,950 kg and +1,655 bp.

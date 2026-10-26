@@ -371,3 +371,271 @@ They do **not** assert that a whole price path scales: E4's 1 mcr minimum step m
 **R3. RR4 reads after the resync.** After `Debug_SetEndowment`, RR4 calls a read that syncs (`GetMarketPriceMcr` does, through `FindMarket`) before asserting, and it restores the endowment to none at the end, so the next check starts from HEAD's markets.
 
 **R4. The depot card's wording under Q-A (a)** reads "Convoys unload here. Robots move the goods on to your stockpiles." It promises no timing, because a small load waits for `HaulLoadMinKg` like any output.
+
+# INDEPENDENT REVIEW (2026-10-25)
+
+Reviewer note: an independent professor pass. All code was read at HEAD `60e892a` with `git show HEAD:` only. Source at HEAD is the same as at the design's base, `6119e7d`.
+
+**Verdict: CLEARED WITH CONDITIONS**
+
+**What holds.** Under Q-A (b) the core is sound:
+- the leg time is bit-identical;
+- landing picks the same building;
+- V is the same integer;
+- nothing new has to be saved.
+
+**What does not hold:**
+- the one market change, the kept-price clamp, turns E4's `-market` suite red;
+- RR4 cannot pass as written;
+- both director questions misstate their consequences;
+- the route seam has a shape step 4 cannot use.
+
+Every item is a fix to the design's text. None needs a different architecture.
+
+## Required changes
+
+All ten are conditions; none is blocking. Conditions 3 and 4 must be fixed before the director is asked. The other eight must be fixed before the build.
+
+1. **The kept-price clamp breaks E4's MX9 check and the battery bar.**
+   - **Defect.** Section 4 clamps a kept price inside `BuildMarketState`, and the load path runs through that function:
+     - `ReadMarketBlock` builds its markets from the file with full-size arrays (M:1532-1567), so `bKeep` holds (M:286).
+     - It then calls `SyncRivalEconomies(false, true)` (M:1668).
+     - Only after that does its own clamp loop run (M:1679-1691). That loop is the only place that logs "region %d's price of %s is ... outside [...]; clamped".
+   - **Effect.** A doctored price is clamped silently first, and the Warning never fires.
+     - MX9's "price band" repair requires a Warning that contains "outside" (`RHSimMarketSuite.cpp:1443`, `:1454`), so MX9 fails.
+     - The two Warning lines at `Saved/baselines/battery_post_e4/market.log:715-716`, and their repeat at `:1419-1420`, disappear.
+   - The design's "a kept price is always inside it already" is false on the load path.
+   - **Change:** either option keeps the load path's own Warning.
+     - Drop the clamp. The next reprice clamps anyway (M:623).
+     - Or clamp only where the old market has a valid `VMcr` that differs from the new V. Markets read from a file have no `VMcr` (M:1534-1538).
+
+2. **RR4 cannot pass as written.**
+   - **Defect 1: the start price.** `Debug_SetEndowment` acts on a live market, and a resync keeps that market's prices (M:302-309).
+     - After `Debug_SetEndowment(0, Ice, 500)`, Ice still costs 3,000 mcr (or whatever it cost before). RR4 asserts a start price of 1,500.
+     - A start price of V' shows only in a fresh market (M:312).
+   - **Defect 2: the restore check.** At 43 permille, Struct's band is [53, 860] mcr, and a kept Struct price near 5,000 sits outside it.
+     - If a clamp or a roll moves that price, "back at 1000, every slot ... bit-identical to a twin" fails.
+   - **Change:**
+     - Assert the start price in a fresh market. For example, inject an economy rival into region 1 after `Debug_SetEndowment(1, Ice, 500)`.
+     - Read V, the floor and the ceiling through getters (condition 6).
+     - Run the restore check with no roll and no clamp inside the window, or in a world of its own.
+     - State what a mid-game endowment change does to a kept price: it is not rescaled.
+
+3. **Q-B (b) is modelled wrongly.**
+   - **How I checked.** I wrote an integer model of E4's update (M:560-624). It reproduces E4's own run figures: 50, 566, 761 and 827.9 cr (sols 0, 20, 40 and steady).
+   - **What the model shows.** With Zarya's Ice production at 500 permille (200 kg a sol), Ice never reaches its floor.
+     - Ice is 2.438 cr/kg at sol 60 and 2.348 at sol 100.
+     - The flow term falls from +3,793 bp to +526 / −243 bp, and Zarya's store holds near 13,200 of 20,000 kg instead of filling.
+     - A run earns 573.6 cr at sol 60 and 588.2 at sol 100. That is −29%, not 827.9.
+   - **Two claims are false:**
+     - "the price does not move at all";
+     - "it shows only once a store runs short".
+
+     Lever (b) acts at once, through E4's flow and store terms.
+   - **The worked case is inverted.** 500 on V means Ice is plentiful. 500 on production means Ice is scarce. The plentiful case under (b) is 2,000 permille (see the director questions).
+   - The lead review checked whether the store grows ("+12.5 kg a sol, so the store still grows"). It did not check the price.
+   - **Change:** restate (b) with like-for-like cases and modelled numbers, and argue the recommendation again.
+
+4. **Q-A (a) states the wrong consequences, and (a) needs a version fence.**
+   - **Where a depot's goods go.** A `TradeDepot` that is not a store sends its output to the nearest consumer with room (W:1262-1286).
+     - It sends output to a store only when `MayOverflowToStore` allows. That answers false while any machine on the level takes the resource (W:12391-12409).
+     - Water Plants take Ice (`MeltIce`, Ice:50 to Water:45, `RH_Recipes.csv`).
+     - Forges take Struct (`MakeShielding`, `MakeHabSegment`).
+   - **What HEAD does instead.** Ice that lands in the Lander's `OutputKg` is never hauled:
+     - W:1244 skips the Lander;
+     - the store-to-hopper leg reads `InputKg` only, and only for a construction shortage (W:1320-1347);
+     - W:1288-1290 records that ice sat in the Lander "for good".
+   - **So, under (a):**
+     - traded Ice becomes drinking water;
+     - Struct may fill a Forge hopper first;
+     - each landing of at least `HaulLoadMinKg` adds haul work that HEAD does not have. `HaulLoadMinKg` is max(25, 500 / 5) = 100 kg (W:108, `PilesCapacity_kg`).
+   - **Three statements are wrong:**
+     - "nothing else changes in one region" (wrong in kind);
+     - "shortens each haul ... about 150 m" (wrong in kind);
+     - R4's card text, "Robots move the goods on to your stockpiles" (wrong for Ice).
+   - **The save.** Under (a), an E7 save can hold a building that a v55 binary has no row for. This project bumps the version as a fence in that case, even when no field is added. W:37 records two such bumps:
+     - v40: "the bump is a fence";
+     - v43: "the fence keeps a v42 save from loading".
+
+     So section 7's "no version bump" holds only under Q-A (b).
+   - **Change:** restate Q-A (a) with the numbers below, fix R4, and make deviation 1 conditional on Q-A (b).
+
+5. **The route seam has a shape step 4 cannot use.**
+   - **The two depot rules disagree.**
+     - A route's `DepotA` is "the colony's depot in the rival's region" (sections 2 and 3).
+     - Landing uses `FindColonyDepotBuilding(GetColonyRegionId())`, which is in the colony's own region (section 1, item 1).
+
+     They agree only while every rival sits in region 0. T2 gives rivals home regions of their own (`territories-plan.md:47`), and T6 links depots across the map (`:51`). From then on, a convoy would leave from a depot that does not exist and land at another one.
+   - **The Ids are positions, not identities.**
+     - Rival depot Ids follow name order, and a route's Id is the rival depot's Id − 1.
+     - So a new data row renumbers every depot and route after it. A rival named "Aurora" is one example.
+     - T2's colony depots come after the rivals, so they are renumbered too.
+     - T4's second settlement, trading with Zarya, needs a second route to one rival depot. The rule "Id = depot − 1" cannot express that.
+     - "Stable across saves" holds only while the rival table does not change.
+   - **Change:**
+     - `DepotA` is the colony's depot in `GetColonyRegionId()`, the same depot landing uses.
+     - `GetRouteFor` answers true whenever the rival row exists, whatever buildings stand, as HEAD's leg does (W:9659-9661). A known rival's leg can then never become 0.
+     - `GetColonyDepotLocationCm` answers the origin when there is no depot, as V does (V:4338).
+     - Ids are display ordinals only: never saved and never used as a key.
+     - Drop "route Id = rival depot Id − 1". Key a route by (DepotA, DepotB), or by the rival's name.
+
+6. **Name the accessors and hooks the tests need.**
+   - **What the suites cannot reach.**
+     - RR1 calls `ConvoyLegSolsFor`, which is private (H:4028; the private section starts at H:2763).
+     - RR1 and RR4 read every slot's V, floor and ceiling, which live in the private `FRHMarket` (H:3836-3842).
+     - Suites are free functions (`RHRunMarketSuite`, `RHSimMarketSuite.cpp:188`), so they can reach neither.
+   - **Other needs.**
+     - E8 reads `ConvoyLegSolsFor` too (E8 design, section 2.6).
+     - RR0 checks that "a row out of range reads 1000 with one Warning". That needs a hook that injects a row, and a validation pass after world start: section 4 logs this Warning at world start only.
+   - **Change:** list the public const getters and the row hook:
+     - the leg time in sols, per rival;
+     - V, the floor and the ceiling, per slot and region.
+
+7. **Mutation 3 can survive RR3.**
+   - **Defect.** An FName's index follows the order in which the name was first created. If the forward injection runs first in the same process, the reverse case reuses those FNames. Index order then equals name order, and the mutation passes.
+   - **Change:**
+     - The reverse case must be the first to create its names.
+     - Add a pair that differs only in case, for example `aRival` against `Zarya`. This pins case-sensitive ordinal order (M:26) against FName's case-insensitive compare.
+
+8. **The endowment table's data shape.**
+   - **The key column.** UE's CSV import takes column 0 as the row name (Engine `DataTableCSV.cpp:149-150`), and every repo CSV starts with `Name` (`RH_Rivals.csv:1`). With the design's columns `RegionId, Resource, AnchorPermille`:
+     - RegionId becomes the row name;
+     - the rows of one region collide;
+     - the `RegionId` field is never filled.
+   - **An empty table.**
+     - The project's tool refuses to save a table that fills to 0 rows: "FAIL ... parsed to 0 rows, NOT saved" (`scripts/unreal/rh_sync_datatables.py:81`).
+     - `RH_CREATE` saves the empty asset when it creates it (`:49`), but every full sync after that prints FAIL for it.
+     - UE 5.8 itself accepts a CSV that holds only a header (`DataTableCSV.cpp:143-147`).
+   - **Change:**
+     - Put `Name` first (for example `R0_Ice`).
+     - Treat a duplicate (region, resource) row as a Warning, read as 1000.
+     - Either create the table with `RH_CREATE` and record the standing FAIL line, or ship one identity row at 1000.
+     - Leave the "Definitions loaded:" line unchanged (`RHDefinitionsSubsystem.cpp:30`).
+
+9. **RR6's fixture from the binary before E7.**
+   - **No fixture exists.** The repo commits no save fixture: there is no `.sav` in the tree at HEAD. Checkpoints are built into the untracked `Saved/SaveGames` (`scripts/unreal/rh_checkpoints.sh`).
+   - **What R2 would need.** A build without E7 that runs RR6's colony using no E7 hook.
+   - **A recorded fixture loses its value.** Each later format gate re-records it, and after the first re-record it proves nothing.
+   - **Change:** make the `cmp` between the saves from before and after E7 a one-time build step, recorded in `design-decisions.md` as the mutation runs are. RR6 keeps save, load, save.
+
+10. **Text fixes in the coverage.**
+    - `ClearConvoy`'s no-market fallback does have a region (`E->RegionId`, M:645-646, `:657-662`). Say whether the endowment applies there.
+    - `RH.Market` (`RHCheats.cpp:1120-1136`) has no rival to take a region from. It needs:
+      - a loop over the markets;
+      - a getter for each market's RegionId by index. Only `GetMarketRegionCount` exists (H:1567).
+    - `ClosedRoutes` is keyed by rival (M:887, `:1236`). It is a route structure that section 3 does not name.
+    - The Lander table mislabels two lines:
+      - `RHSimRovers.cpp:261-268` is a rover's fallback for a lost load;
+      - `:305-314` is the rover's deploy node.
+    - It also omits three roles based on the origin. All are non-trade and belong to T1:
+      - W:1009, the pad search from the origin;
+      - W:1866, bearings measured from the origin;
+      - W:2469, manifest robots spawning at (30 m, −30 m).
+    - The step-2 fixes, E5 and E6 all build before E7, and E6 changes `ResolveCovert` (E6 design, section 4.2). The builder must re-anchor every line number at its own HEAD and repeat the Lander search.
+
+## Checked and sound
+
+- **The leg time is bit-identical.**
+  - `DistanceKm` is a `float` (`RHRows.h:405`) and `ConvoySpeedKmPerSol` is a `double` (H:3914).
+  - `(double)` of a float is exact, so the route reproduces HEAD's W:9657-9662 exactly.
+  - Zarya's leg is 2.0 sols and Meridian's is 3.3333333333333335.
+  - Mutation 2 can fail. 33.33333 km as a float is 33.33332824707031. Kept in metres it becomes 33.333 km, so the leg reads 0.55555 instead of 0.5555554707845052.
+- **Landing under Q-A (b) picks the same building.**
+  - M:1210-1218 and W:9765-9773 both pick the first Lander that is not under construction.
+  - The Lander is placed instantly (W:546) and cannot be demolished (W:10504).
+  - Buildings stay in ascending Id order (W:10822), so "first in building order" and "lower Id" agree.
+- **The endowment arithmetic is safe.**
+  - At 1000 permille, V is exact in int64.
+  - The largest Earth value is 900,000 mcr (HabSegment). At 100,000 permille with the clamp maximum of 1,000,000 bp, the largest product is 9e13, far inside int64.
+- **Mutations 4 and 5 can fail.**
+  - Mutation 5: in `double`, 5000 × (43 / 1000.0) is 214.99999999999997, which truncates to 214.
+  - Mutation 4: E3's price is not clamped: V × Mpm / 1000 − L (`RHSimExport.cpp:167-174`), where L = 3,000 mcr (`:160-165`). At M = 1.0 Ice's Earth price is 0 mcr, and −1,500 under the mutation.
+- **Q-B (a)'s figures reproduce.**
+  - The run earns 884.15 cr against 827.9 (+56.25, +6.8%), and the floor is reached on the same sol (48).
+  - One correction: section 4 says "the whole price path scales". It scales only approximately in the integers. At sol 20 the price is 773 mcr against half of HEAD's, 769.5. The cause is the floor division at M:620. R1 already avoids asserting the path.
+- **Nothing new needs saving under Q-A (b).**
+  - `VMcr`, `FloorMcr` and `CeilMcr` are derived and never saved (H:3840-3842).
+  - The market block already writes one market per region (M:1294-1309).
+  - Gates that derive their state have shipped without a bump before (`design-decisions.md:688`, `:1149`).
+- **Era parity holds under Q-A (b).**
+  - `StepTrade` sits at the same index in both spines (W:687, W:859).
+  - Covert operations resolve through `StepUplink` in both spines.
+  - The depot is a pure scan of the buildings.
+- **The playtest cannot move.** `RHPlaytest.cpp` uses no Convoy, MarketOrder or Covert verb.
+- **All three trade-facing Lander roles are found:**
+  - convoy goods (M:1203-1219);
+  - covert loot (W:9762-9775);
+  - the convoy's drawn start (V:4337-4342).
+
+  Two neighbouring cases are not Lander roles:
+  - Earth's cargo goes to the pool (W:2456-2458), not to the Lander;
+  - outbound lots drain every building in Id order (W:9602-9634).
+- **The sim keys every market lookup by region:**
+  - the clearing (M:646);
+  - the reservation (M:830-831);
+  - the reprice (M:569);
+  - the sync (M:274-334).
+
+  Only three readers rely on the default region 0:
+  - the command deck (`RHCommandDeckPanels.cpp:2534`);
+  - `RH.Market`;
+  - `-scale` (`RHSimCommandlet.cpp:17009`).
+
+## Director questions
+
+All numbers come from my integer model of M:560-624, which reproduces E4's run figures. The model assumes:
+- the standing trade runs every 4 sols, clearing on sols 0, 4, ... 96 (25 runs);
+- Struct's price path is unchanged (steady at 9.404 cr/kg).
+
+A run's net is 100 kg of Struct sold, less 150 kg of Ice bought.
+
+**Q-A. Is the trade depot a building the player places now (a), or a role the Lander keeps (b)?**
+
+- **(a) A `TradeDepot` building.**
+  - Traded Ice is hauled to a Water Plant and melted, instead of sitting in the Lander.
+    - At HEAD's standing trade that is 150 / 4 = 37.5 kg of Ice a sol.
+    - It becomes 37.5 × 0.9 = 33.75 kg of fresh water a sol, enough for about 16.9 colonists at 2.0 kg each.
+    - Potability gains 33.75 × 0.0008 = 0.027 a sol, against a decay of 0.08 a sol.
+  - A clean covert run's loot is 150 × 0.5 = 75 kg of Ice. That is below the 100 kg haul minimum, so it waits at the depot.
+  - Struct may fill a Forge hopper first.
+  - Prices, credits and leg times are unchanged.
+  - The build adds:
+    - one menu button;
+    - a version bump as a fence (condition 4);
+    - the depot's own cost (400 kg of Struct, the design's figure).
+- **(b) The Lander keeps the role.** Nothing changes. Traded Ice stays in the Lander as holdings only. It counts toward the quota, sales and convoy lots, but it is never melted.
+
+**Q-B. What does a region's endowment change?**
+
+HEAD's baseline:
+- Ice reaches its 0.750 cr/kg floor from sol 48;
+- a run earns 827.9 cr;
+- the first 25 runs spend 4,355.40 cr on Ice.
+
+- **(a) A permille on V. At 500 (Ice plentiful):**
+  - Ice starts at 1.500 cr/kg, with a floor of 0.375 and a ceiling of 6.000;
+  - it still reaches the floor from sol 48;
+  - a run earns 884.15 cr (+56.25, +6.8%);
+  - the first 25 runs spend 2,181.45 cr on Ice (−2,173.95).
+- **(b) A permille on rivals' production.**
+  - **At 2,000 (plentiful: Zarya makes 800 kg a sol):**
+    - Ice reaches the floor from sol 28;
+    - from sol 60 a run earns 827.9 cr, as at HEAD;
+    - the first 25 runs spend 3,877.95 cr on Ice (−477.45).
+  - **At 500 (scarce: 200 kg a sol):**
+    - Ice never reaches the floor. It is 2.438 cr/kg at sol 60 and 2.348 at sol 100;
+    - a run earns 573.6 to 588.2 cr (−29%);
+    - the first 25 runs spend 9,429.45 cr on Ice (+5,074.05).
+- **(c) Both levers.** Two levers per resource for step 4's data to balance.
+
+## Not verified
+
+- The claim that the Lander is "at most about 150 m" from today's buildable flat.
+- Section 6's "era refuses construction".
+- Whether a v55 binary misbehaves when it loads a `TradeDepot` building. The fence argument rests on the project's precedent, not on a failure I traced.
+- Whether a missing DT asset makes `TryLoad` log a line in every run.
+- The `-scale` timings and the click test.
+- FName index allocation order. It is UE engine behaviour, which I did not trace in the engine source.
+- Cumulative totals from E5 and E6. I checked per-run figures only: E5's 17,540 cr by sol 99 uses a different clearing schedule.
+
+I ran nothing in the repo and built nothing.
