@@ -822,3 +822,90 @@ HEAD is **v55** (W:37). The queue after the visual pass: E5 **v56**, E6 **v57**,
 - The widths are computed from the font files and the engine, not measured; the 1440x860 capture is the measurement.
 - No console cheat grants credit at HEAD; the frame scene needs `RH.Market grant`, cheat code only.
 - Whether `RH.InjectRivals` can set `RegionId` for `e8_regions_00` is unchecked.
+
+# RE-CHECK (2026-10-26)
+
+Reviewer note: a short, independent re-check of REVISION 2, done together with E7's REVISION 2. Code was read at HEAD `3909395` with `git show HEAD:` only. Battery facts come from `Saved/baselines/battery_post_s2fix`. I built nothing and ran nothing in the repo.
+
+**Verdict: CLEARED WITH CONDITIONS**
+
+## What holds
+
+- **All nine review changes are written in.**
+- **The discovery gate is complete.** One rule, `ShownMarketSlots`, gates every part the review named:
+  - the price rows;
+  - the "N prices" header count;
+  - the holdings sum and its tooltip;
+  - the bloc line;
+  - the region selector;
+  - ROUTES and the overlay;
+  - the marker's status word.
+
+  ORDERS needs no gate, because `PlanConvoy` refuses an unknown rival (M:868). `IsRivalAvailable` short-circuits before `Defs->GetRival(Name)->RegionId` is read, so no null row is dereferenced.
+- **The ring's write points match `RollMarket`.** They are inside the pass loop (M:526-552). The clearing is the only place `ClearConvoy` runs (M:634). The value sums sit at M:668 and M:676, and the reprice at M:545-550.
+- **The accordion's fold case goes before `default:`.** That is required, because the default returns Power's flag (K:235).
+- **The overlay is a sim-side pure listener.** The edits to V are named.
+- **The version-line count is right.** There are 27 version lines in the baseline (excluding E4's 47 frozen Warnings), and the "LoadColony v55:" texts are literals (M:1385 and others).
+
+## Remaining required changes
+
+1. **Do not extend E4's `bKeep` test** (R2-2, line 634).
+   - `ReadMarketBlock` builds its markets with `PriceMcr` and the tally only (M:1534-1538, `Markets.Add` at M:1566). It then calls `SyncRivalEconomies(false, true)` at M:1668, before the history reader runs.
+   - With `HistPrice.Num() == N x 30` added to `bKeep` (M:286), every load fails `bKeep` and resets every price to V and every tally to 0. MX9's round trip would go red.
+   - **Change:** keep M:286 as it is. Copy the `Hist*` fields under a separate test (`bKeep && OldMk->HistPrice.Num() == N x 30 && ...`), else start the ring empty and sized.
+2. **An empty ring must pass the load check, and `market.history` must allow for it.**
+   - **Why the ring is empty.** `MarketCheckedSol` is seeded from `ProductionCheckedSol` (M:97), and the first roll is at sol 1 (M:516). So every save made before then has fill 0 and `HistLastSol` −1.
+   - **The load check would fire.** R2-6 4(c) (line 733) compares `HistLastSol` with `MarketCheckedSol`, so it Warns on such a load. **531 of the battery's 765 loads are at sol 0**, in 12+ suites (caverns, credit, deep, economy, export, shafts, transit, market, ...). Those Warning lines are not in R2-2's list, and any suite that asserts zero Warnings fails.
+   - **The click step would fail.** In `market.history` (line 717), if the ring is still empty (F0 = 0), `HistEnsure` writes the open sol and then three more, which is +4, not +3.
+   - **Change:** state that a ring with fill 0 and last sol −1 is valid at any open sol (4(c) applies only when fill > 0). Have `market.history` expect `F0 == 0 ? 4 : min(30, F0 + 3)` and the matching glyph count. Or seed the open sol's entry when a market is created, so the invariant always holds.
+   - Also, `HistEnsure` from −1 (line 628) appends sols 0..s. For a ring started or dropped mid-game, that is up to s writes and 29 invented "unknown" entries. Start an empty ring at s.
+3. **The "nothing else" battery claim (line 673) is false.**
+   - MX9's doctored loads trigger E8's repairs, which add Warning lines to market.log:
+     - the lost market block (MX:1385) drops the ring under R2-6 step 2;
+     - the price-band file (`mktmx9d1`, MX:1453-1454) rewrites the open-sol entry for Ice and Struct under 4(e);
+     - the slot-order file (`mktmx9d4`, MX:1465-1466) drops the ring.
+   - MX9 still passes, because its checks are `CountWarnings(x) >= 1` (MX:1443). But the expected diff must list these lines.
+4. **The version is stale.** Line 779 says "E7 takes **no** version". E7's REVISION 2, section 8, now writes `'RHE7'` and takes v60.
+   - If E7 keeps that block, E8 is **v61**. Then lines 612, 670, 730, 779 and 812 change, `'RHE8'` is written and read after `'RHE7'`, and E8 must edit E7's RR6 if it asserts `'RHE7'` is last.
+   - If E7 drops the block (E7's RE-CHECK recommends this), v60 stands as written.
+5. **The accessors must not duplicate E7's.**
+   - `GetConvoyLegSols` (line 659) is E7's (E7 REVISION 2, line 783; there `ConvoyLegSolsFor` delegates to it, the reverse of line 659). Mark it "E7 adds".
+   - Drop `GetMarketBandMcr` (line 658) and read E7's `GetMarketFloorMcr` and `GetMarketCeilMcr` (E7 line 786). Two APIs for one private field is a needless second path.
+   - The region selector (line 598) needs E7's `GetMarketRegionIdAt` (E7 line 787). Name it.
+   - Use `GetRivalRegionId` in `ShownMarketSlots`, as E7's deck read does (E7 section 11).
+   - Re-cite E7 as "REVISION 2 sections 6, 7 and 13", not "E7 2 and 9" (line 665). The "Before E7 ... `GetConvoyLegSols`" clause is moot.
+6. **Size lines.**
+   - **State the exact delta** relative to the gate before E8, not today's absolute numbers. The frame is +**5,327** bytes for a one-region file with E5's rate and unit arrays, or 5,057 without them:
+     - 4 (slot count) + 213 (18 names as `FString`, 4 + len + 1 each, M:1288-1292) + 4 (market count);
+     - then, per region: 4 + 12 + 4,320 + 240 + 240, plus E5's 240 + 30;
+     - plus 20 for the frame.
+   - **The list is incomplete.** Add CR9 (11892), EC6 (13100) and XE10 (11817). They are masked by `diff_battery.py`'s `\(\d+ bytes`, but they move.
+   - **E7's lines.** If E7 keeps its block, also move `-regionready`'s version lines.
+7. **The unit claim is overstated** (line 686).
+   - E5 steps the rate at every roll after the issue roll (E5 design:253). So at `CurrencyOpenSol` the rate is no longer parity.
+   - Converting pre-open credit entries "at their own sol's rate" then puts a step, up to two rate steps (about 4%), at the open sol. Meanwhile the price integers do not change (E5 1.3).
+   - **Change:** convert pre-open entries at parity, which is E5's own reading, or withdraw "continuous ... shows no step".
+8. **Use V's own predicate for visibility.** `ShowsSurface()` is at Vh:237, not :238, and it is not the predicate the markers use: they use `ShowsLevel(0)` (V:4216, V:4264). Expose and use the same one, so "a ribbon is never drawn while its marker is hidden" holds by construction.
+
+## Cross-consistency with E7 (the main point of this re-check)
+
+- **Regional V.** No line of E8's REVISION 2 relies on E7 making V regional.
+  - The phrase exists only in the INDEPENDENT REVIEW (line 411), which REVISION 2 supersedes.
+  - R2-3 says V keeps its number (line 687). R2-6 4(d) clamps to `[FloorMcr, CeilMcr]` as built.
+  - The band is read through a getter, not derived from `EarthValue_mcr`, which is right under Q-B (b).
+  - The one fix is change 5 above: read E7's band getters instead of declaring E8's own.
+- **The version, in build order.** E5 v56, E6 v57, D6e v58, D7 v59 (their refreshes say so: `d6-caverns-design.md:820-824`), then E7, then E8.
+  - **E7 keeps `'RHE7'`:** E7 says v60 and E8 must say **v61** (change 4).
+  - **E7 drops it (recommended):** E7 says "no version" and E8 keeps v60.
+  - Today the two documents contradict each other: E7 line 802 says v60, and E8 line 779 says v60 because "E7 takes no version".
+- **Size deltas.** E7's are relative, +28 against the gate before E7, with today's figures in brackets for identification only. E8 states none (change 6).
+  - Nothing is double-counted, but neither list is complete: both lack CR9, EC6 and XE10.
+  - Both frames come after `'RHE4'`, so MX1's "up to the market block (8717 bytes)" offset moves in neither.
+- **Accessors.** Each E7 name E8 reads has the same name and signature in E7 REVISION 2 section 7:
+  - `GetRoutes(TArray<FRHRoute>&)`;
+  - `GetRouteFor(FName, FRHRoute&)` (keyed by `FRHRoute::Rival`, with `LengthKm` a double);
+  - `GetColonyDepotLocationCm(int32 RegionId = 0)`;
+  - `GetConvoyLegSols(FName)`.
+
+  E8 redeclares `GetConvoyLegSols` and invents `GetMarketBandMcr`; both must defer to E7 (change 5). E8 does not use `GetRivalProduceG` or `GetDepots`, which is harmless. E8 should call `GetMarketRegionIdAt` and `GetRivalRegionId` by name.
+- **Frame order.** If E7 keeps its block: `'RHE8'` comes after `'RHE7'`, E8's reader runs after E7's, and E7's RR6 must not pin `'RHE7'` as last. XE10's "market frame ends the file" clause (`RHSimExportSuite.cpp:531`) was missed by E5's REFRESH. It breaks at the first frame appended after `'RHE4'`, so it will already have been fixed before E7 or E8 builds. Each builder confirms that at its own HEAD.

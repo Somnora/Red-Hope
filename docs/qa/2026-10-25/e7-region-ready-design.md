@@ -930,3 +930,63 @@ With one region, no endowment row but the identity row, and no binding:
 **`-scale`** (outside the battery): its existing market budget line (`RHSimCommandlet.cpp:17118`, 1,000 `RollMarket` calls at 10 rivals, ≤ 2.0 ms) holds; `GetRoutes` and `GetDepots` called 1,000 times at 10 rivals cost under 0.05 ms a call; every digest is identical. No new `-scale` line.
 
 **The one-time build step** (section 10): the pre-E7 worktree's `mktmx9.sav` against E7's, recorded with byte counts and both versions in the `design-decisions.md` entry.
+
+# RE-CHECK (2026-10-26)
+
+Reviewer note: a short, independent re-check of REVISION 2, done together with E8's REVISION 2. Code was read at HEAD `3909395` with `git show HEAD:` only. Source at HEAD is the same as at `1f52e3d`. I built nothing and ran nothing in the repo. The arithmetic was recomputed in a scratch Python session.
+
+**Verdict: CLEARED WITH CONDITIONS**
+
+## What holds
+
+- **All ten review changes are written in.** The director's Q-A (b) and Q-B (b) are applied throughout REVISION 2. `TradeDepot`, the fence, the card, `AnchorPermille` and "permille on V" appear only in section 1's list of struck items.
+- **The kept-price clamp is gone, and `-market` moves only where REVISION 2 says.**
+  - `BuildMarketState`'s market part (M:274-334) is untouched. The load clamp loop and its Warning (M:1678-1690, M:1686) remain the only clamp.
+  - In `-market`, only these lines read the version or the file size: MX9's `Ver == 55` (MX:1316) and its "v%u" text (:1321); `V54` and `"/55"` (:1374-1381); "(%d bytes)" (:1359); and MX1's "(%d bytes)" (:564). The battery count agrees: market.log has 49 version matches, 2 from MX9 and E4's 47 "LoadColony v55:" Warnings.
+  - Those Warnings are hard-coded literals (M:1385, :1521, :1686 and others), so they do not move.
+  - MX1's tail compare (MX:555) only needs the tail to differ somewhere, so a frame appended after `'RHE4'` that is the same in both twins does not break it.
+- **The `ProducePermille` arithmetic is exact.**
+  - `P.Value` is `int64` (M:121, M:214), so `P.Value * Permille` cannot overflow.
+  - I recomputed section 4.3 from M:579-623 and MX2's Set A Ice fixture (MX:608: store 12,000 kg, ring full of 0, price 3,000; Zarya Ice 400 / 150 / cap 20,000):
+    - **500:** ProduceG 200,000 g; store 12,050,000 g; Flow (1,000,000 − 750,000) × 10⁴ / 1,750,000 = 1,428; Fill 6,025, so Store 2,050; Pressure (71,400 + 61,500) / 100 = 1,329; Step −265; Mag 3,000 × 265 / 10⁴ = 79, so the price is **2,921**.
+    - **2,000:** 800,000 g; 12,650,000 g; Flow 6,842; Store 2,650; Pressure 4,216; Step −843, clamped to −500; price **2,850**.
+    - **1000 and 43:** 2,850 and 3,150, as written.
+  - Mutation 5's cases fail as claimed: in double, 400 × 1000 × 0.009 = 3599.9999999999995 and 40 × 1000 × 0.043 = 1719.9999999999998. Zarya's Struct Produce is 40 kg (`RH_Rivals.csv:2`).
+  - Mutation 4's 12,125 kg is right.
+- **The route seam fits T2 and T6.**
+  - T6 asks for "a length in km and a terrain class" between depots (`territories-plan.md:51`). `LengthKm` and `Kind` match that.
+  - T2's "endowment table (E7)" on the region record (`:47`) is a lookup keyed by RegionId, which `GetProducePermille` is.
+  - Keying by (colony region, rival), with no Ids, survives a new data row and gives T4 a second route to the same rival.
+  - `GetRouteFor` answers true whenever the row exists, as `ConvoyLegSolsFor` does at W:9724-9729.
+- **The save frame's numbers are right.** `HeaderBytes` is 12 and `FooterBytes` is 8 (`RHSaveFrame.h:23-24`), so 8 + 20 = 28. Read order does not matter: `Read` finds a frame by tag, first at the reader's position and then by walking back from the end (`RHSaveFrame.h:28-31`).
+
+## Remaining required changes
+
+1. **The `'RHE7'` block and its version bump are new, and no one asked for them.**
+   - **The record.** The independent review found "nothing new needs saving under Q-A (b)" (its "Checked and sound"). The director's answer says "no version fence for it".
+   - **What the block holds.** It saves `ColonyRegionId`, which is always 0, and bindings that no shipped code writes before T4. Its only writer is a `Debug_` hook, which REVISION 2 makes **saved** (line 791). That breaks the house pattern that harness hooks are runtime-only.
+   - **Why it is likely throwaway.**
+     - T1 moves every per-colony field into `FRHColony`.
+     - T2 saves the region list, and its bar speaks of "region 1" for today's map (`territories-plan.md:83`). So E7's repair "a ColonyRegionId other than 0 is set to 0" may become wrong.
+     - T4 saves settlements whose depots are buildings.
+     - A singular `ColonyRegionId` per file is the shape T1 removes.
+   - **What it costs.** A version bump that refuses every v59 save and the checkpoints, the size and version lines, the pre/post worktree step, and RR6's block checks.
+   - **Recommended: drop it.** Return to derived-only:
+     - no version;
+     - `Debug_SetColonyDepot` runtime-only;
+     - RR6 as originally written: the hook is not saved, and the file is byte-identical to the gate before E7, so section 10's step becomes a plain `cmp`;
+     - remove `GetDepotBlockBytes`, mutation 6 and the size and version lists;
+     - restore the fully line-identical bar.
+   - **If the lead keeps it,** that is a decision to record. RR6 must then not assert that `'RHE7'` is "last" (line 917), because E8 appends `'RHE8'` after it.
+   - Either way, E8's version must follow (see E8's RE-CHECK).
+2. **Anchors.** The Produce grams line is M:214, not M:217 (lines 674 and 702). Consume is M:215, not M:218 (lines 701 and 923).
+3. **RR4's restore check cannot read "`GetMarketBlockBytes()`'s bytes".**
+   - That getter returns a count (M:1354-1360), and `WriteMarketBlock` is private (H:3891).
+   - Say how the bytes are compared. Either save before and after and `memcmp` the `'RHE4'` payloads located with `RHSaveFrame::Find`, or add a public payload getter.
+4. **The size-line list is incomplete (only if any frame is kept).**
+   - Three more lines print the whole-file size: CR9 "(11892 bytes)" (`credit.log:843`), EC6 "(13100 bytes)" (`economy.log:5939`) and XE10 "(11817 bytes)" (`export.log:708`).
+   - All three are masked by `diff_battery.py`'s `\(\d+ bytes` rule, but they move.
+   - Also, XE10 asserts that the market frame ends the file (`RHSimExportSuite.cpp:530-531`, `MarketFrame + Header + MarketPayload + Footer == W.Num()`). E5's REFRESH missed this (it says "XE10's first line does not move", E5 design:1079). The builder confirms that clause has been bounded at its own HEAD before appending.
+5. **The authority line** (line 652) keeps "REVISION (R1-R3)". But R1's V, band and start-price asserts are replaced by section 3, and R2's committed fixture by section 10. It should read "R3 only".
+
+E7 and E8 must agree on the version and frame order. Those findings are in E8's RE-CHECK.
