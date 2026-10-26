@@ -108,9 +108,9 @@ void URHSimWorldSubsystem::StepDepthWarmth(float SubDt, uint32 ShortMask, bool b
 		}
 		const double Old = Held ? *Held : 0.0;
 		const double New = FMath::Clamp(Old + (bShort ? Rise : -Fall), 0.0, 1.0);
-		if (FMath::FloorToInt(Old * 10.0) != FMath::FloorToInt(New * 10.0))
+		if (FMath::FloorToInt(Old * 10.0) != FMath::FloorToInt(New * 10.0) || (Old > 0.0) != (New > 0.0))
 		{
-			++WarmthVersion; // the floor tint's key: it moves only when a floor crosses a 10% step
+			++WarmthVersion; // the floor tint's key: it moves when a floor crosses a 10% step or goes from 0 to warm (and back), which the "warm" label reads
 		}
 		if (New > 0.0)
 		{

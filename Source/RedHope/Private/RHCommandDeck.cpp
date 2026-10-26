@@ -2071,7 +2071,10 @@ FText SRHCommandDeck::GetExcavateActionLabel() const
 	const FRHRecipeRow* Carve = Defs ? Defs->GetRecipe(FName("CarveCell")) : nullptr;
 	if (Carve)
 	{
-		return FText::FromString(FString::Printf(TEXT("Excavate Cells  (%.0f h/cell)"), Carve->BatchTime_h));
+		// Nit 12: the floor's own dig time (D5 depth: past the cool line the recipe's hours x GetDigPermille), at the floor shown.
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const double Permille = (Sim && PC.IsValid()) ? (double)Sim->GetDigPermille(PC->GetShownLevel()) : 1000.0;
+		return FText::FromString(FString::Printf(TEXT("Excavate Cells  (%.0f h/cell)"), (double)Carve->BatchTime_h * Permille / 1000.0));
 	}
 	return FText::FromString(TEXT("Excavate Cells"));
 }
@@ -2435,7 +2438,7 @@ FReply SRHCommandDeck::HandleTunnel()
 		else
 		{
 			PC->BeginTunnel();
-			if (PC->GetActiveLevel() >= 0)
+			if (PC->GetShownLevel() >= 0) // nit 38b: the floor shown, which in the section is the focus (ActiveLevel is frozen there)
 			{
 				PC->PostConfirm(TEXT("Tunnel: pick a subsurface floor on the elevator first"), FLinearColor(1.f, 0.6f, 0.2f));
 			}
@@ -2564,7 +2567,7 @@ FReply SRHCommandDeck::HandleCavern()
 		else
 		{
 			PC->BeginCavern(1);
-			if (PC->GetActiveLevel() >= 0)
+			if (PC->GetShownLevel() >= 0) // nit 38b: as the Tunnel button
 			{
 				PC->PostConfirm(TEXT("Cavern: pick a subsurface floor on the elevator first"), FLinearColor(1.f, 0.6f, 0.2f));
 			}

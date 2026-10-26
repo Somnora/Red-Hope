@@ -5676,6 +5676,12 @@ bool URHSimWorldSubsystem::ReadFloorTable(FArchive& Ar, TArray<FRHFloor>& OutFlo
 				return Refuse(FString::Printf(TEXT("floor %d is listed twice"), F.Level));
 			}
 		}
+		// Nit 14: the table is written shallowest first and the warmth block reads it in that order, so a table whose levels do not strictly descend loads
+		// but is refused by its own next autosave. A game-written table always descends (FindOrAddFloor inserts in that order).
+		if (OutFloors.Num() > 0 && F.Level > OutFloors.Last().Level)
+		{
+			return Refuse(FString::Printf(TEXT("floor %d is listed after floor %d (the floors run shallowest first)"), F.Level, OutFloors.Last().Level));
+		}
 		if (NCells < 1 || (int64)NCells * 8 > (int64)Ar.TotalSize() - Ar.Tell())
 		{
 			return Refuse(FString::Printf(TEXT("floor %d lists %d cells"), F.Level, NCells));
@@ -6237,6 +6243,8 @@ void URHSimWorldSubsystem::RefreshJobs()
 		JobAssignLast = JobAssignNow;
 		++JobsVersion;
 	}
+	// Step-2 fix 2: the bed assignment of NOW, before the commute flows below are read (they key on it, and the home cells they measure read its pieces).
+	EnsureBedAssignments();
 	// C6a hook (b), Lab and Workstation: a long commuter's seat counts 1 - Ramp x (1 - CommuteWorkMul). Discovery reads
 	// LabYieldSeatSum x the skill average and fabrication reads WorkstationYieldSeatSum alone, so cutting the SEAT SUM here
 	// (and leaving the skill average uncut) cuts each exactly once. No branch is taken below the ramp or with nobody long.
@@ -6260,19 +6268,41 @@ void URHSimWorldSubsystem::RefreshJobs()
 	StaffedSeats = bLazy ? FMath::Min(StaffedSeats, NonPriorityFilled) : NonPriorityFilled;
 	LastIdleColonists = ByIdOrder.Num() - Next;
 	LastOpenSeats = NonPrioritySeats - NonPriorityFilled;
-	// C1: who sleeps in which bed is a pure function of the roster, the furniture
-	// and the zoning, so it is re-derived only when one of the three has moved
-	// (it was an every-step O(N^2) before). No furniture = no pieces, as before.
-	if (Furniture.Num() == 0)
+}
+
+const TMap<int32, int32>& URHSimWorldSubsystem::EnsureBedAssignments() const
+{
+	// C1: who sleeps in which bed is a pure function of the roster, the furniture and the zoning, so it is re-derived only when one of the three
+	// has moved (it was an every-step O(N^2) before). Step-2 fix 2 (D6b, D6c): this is the ONE place it is derived, and every reader goes through
+	// it (RefreshJobs before the commute's seat cut, the floor shapes' home cells, the keys that carry BedAssignVersion, the getters), so none
+	// of them reads the pieces of the last RefreshJobs or of another colony. No furniture, no colonist or no rows = no pieces, as before.
+	if (Furniture.Num() == 0 || Colonists.Num() == 0 || !Defs)
 	{
-		BedAssignVersion += ColonistBedPiece.IsEmpty() ? 0u : 1u;
+		BedAssignVersion += ColonistBedPiece.IsEmpty() ? 0u : 1u; // D6b: the floor shapes' home cells read the assignment
 		ColonistBedPiece.Reset();
 		bBedKeyValid = false;
+		return ColonistBedPiece;
 	}
-	else if (!bBedKeyValid || BedKeyColonists != ColonistSetVersion || BedKeyFurniture != FurnitureVersion || BedKeyZoning != ZoningVersion)
+	const auto ByIdOrderOf = [this]()
+	{
+		TArray<int32> ByIdOrder;
+		ByIdOrder.Reserve(Colonists.Num());
+		bool bByIdSorted = true;
+		for (const FRHColonist& C : Colonists)
+		{
+			bByIdSorted &= ByIdOrder.Num() == 0 || ByIdOrder.Last() <= C.Id;
+			ByIdOrder.Add(C.Id);
+		}
+		if (!bByIdSorted)
+		{
+			ByIdOrder.Sort(); // the roster is Id-ascending by construction; sorting a sorted list is a no-op
+		}
+		return ByIdOrder;
+	};
+	if (!bBedKeyValid || BedKeyColonists != ColonistSetVersion || BedKeyFurniture != FurnitureVersion || BedKeyZoning != ZoningVersion)
 	{
 		ColonistBedPiece.Reset();
-		BuildBedAssignments(ByIdOrder);
+		BuildBedAssignments(ByIdOrderOf());
 		++BedAssignVersion; // D6b: the pieces were re-derived
 		bBedKeyValid = true;
 		BedKeyColonists = ColonistSetVersion;
@@ -6284,7 +6314,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 		// The cache is about to be reused: derive the assignment again and compare.
 		const TMap<int32, int32> Reused = ColonistBedPiece;
 		ColonistBedPiece.Reset();
-		BuildBedAssignments(ByIdOrder);
+		BuildBedAssignments(ByIdOrderOf());
 		bool bSame = Reused.Num() == ColonistBedPiece.Num();
 		for (const TPair<int32, int32>& Piece : Reused)
 		{
@@ -6297,6 +6327,7 @@ void URHSimWorldSubsystem::RefreshJobs()
 				Reused.Num(), ColonistBedPiece.Num(), ColonistSetVersion, FurnitureVersion, ZoningVersion);
 		}
 	}
+	return ColonistBedPiece;
 }
 
 void URHSimWorldSubsystem::GetStationSeats(const FIntVector& Key, int32& OutFilled, int32& OutCapacity) const
@@ -8018,6 +8049,13 @@ bool URHSimWorldSubsystem::IsTunnelStalled(const FRHTunnel& T) const
 bool URHSimWorldSubsystem::CanDigTunnel(int32 Level, const FVector& ACm, const FVector& BCm, FString& OutReason, FRHTunnelPreview* OutPreview) const
 {
 	// Refusals 1-7 of the D3 design, each with a reason.
+	// Step-2 fix 3, taken first so the reason is the same whatever else is wrong with the line: every order stays on the list for ever (finished and
+	// cancelled ones too) and one save holds MaxTunnelRecords, so the order past the last would write a file that refuses to load.
+	if (Tunnels.Num() >= RH::MaxTunnelRecords)
+	{
+		OutReason = FString::Printf(TEXT("The colony has ordered %d tunnels, the most one save can hold"), Tunnels.Num());
+		return false;
+	}
 	// 1. The floor must be reached by some shaft.
 	if (Level >= 0 || Level < -MaxDepth || DeepestShaft < -Level)
 	{
@@ -8244,6 +8282,26 @@ bool URHSimWorldSubsystem::Debug_DigTunnel(int32 Level, const FIntPoint& A, cons
 	return true;
 }
 
+int32 URHSimWorldSubsystem::Debug_PadTunnelRecords(int32 N, int32 Level, const FIntPoint& A, const FIntPoint& B)
+{
+	int32 Added = 0;
+	for (; Added < N && Tunnels.Num() < RH::MaxTunnelRecords; ++Added)
+	{
+		FRHTunnel T;
+		T.Id = NextTunnelId++;
+		T.Level = Level;
+		T.A = A;
+		T.B = B;
+		T.bCancelled = true;
+		Tunnels.Add(T);
+	}
+	if (Added > 0)
+	{
+		++TunnelsVersion;
+	}
+	return Added;
+}
+
 void URHSimWorldSubsystem::WriteTunnelBlock(FArchive& Ar) const
 {
 	// Save v45, straight after the shaft block: NextTunnelId, TunnelCount, then per tunnel in Id order Id, RegionId, Level, A.X,
@@ -8288,16 +8346,20 @@ bool URHSimWorldSubsystem::ReadTunnelBlock(FArchive& Ar, const TArray<FRHFloor>&
 	{
 		FRHTunnel T;
 		int32 Ax = 0, Ay = 0, Bx = 0, By = 0;
-		bool bTwo = false, bCancel = false;
-		Ar << T.Id << T.RegionId << T.Level << Ax << Ay << Bx << By << bTwo << bCancel;
+		uint32 Two = 0, Cancel = 0; // nit 16: a UE bool is four bytes on disk, so a uint32 keeps the format and lets a value of 2 refuse here instead of logging an engine Error
+		Ar << T.Id << T.RegionId << T.Level << Ax << Ay << Bx << By << Two << Cancel;
 		if (Ar.IsError())
 		{
 			return Refuse(TEXT("the tunnel list is cut short"));
 		}
+		if (Two > 1u || Cancel > 1u)
+		{
+			return Refuse(FString::Printf(TEXT("tunnel %d has a flag of %u (two-ended) or %u (cancelled); each is 0 or 1"), T.Id, Two, Cancel));
+		}
 		T.A = FIntPoint(Ax, Ay);
 		T.B = FIntPoint(Bx, By);
-		T.bTwoEnded = bTwo;
-		T.bCancelled = bCancel;
+		T.bTwoEnded = Two != 0u;
+		T.bCancelled = Cancel != 0u;
 		if (T.Id < 1 || T.Id <= PrevId || T.Id >= Next)
 		{
 			return Refuse(FString::Printf(TEXT("tunnel ids must ascend and stay below %d, found %d after %d"), Next, T.Id, PrevId));
@@ -8549,6 +8611,7 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		LoadW += E.WantW;
 	}
 	Power.ShedCount = 0;
+	Power.ShedFloors = 0;
 	// D5 depth: "the bank is scraping". FullW is the whole load before any shed and B0 the bank at the step's start. A step scrapes
 	// when (i) it is today's shed test (B0 empty and FullW above generation) or (ii) the clamp below would fire under the full
 	// load. Shedding alone cannot drive Warmth: it sheds only on a step that starts empty, ends in surplus and refills the bank,
@@ -8587,6 +8650,10 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 				if (E.B)
 				{
 					E.B->bPowered = false;
+				}
+				else
+				{
+					++Power.ShedFloors; // a cooling entry: a floor, not a machine
 				}
 				++Power.ShedCount;
 			}
@@ -12138,7 +12205,7 @@ bool URHSimWorldSubsystem::FurnitureAllowsRezone(const FIntVector& Key, FName Ne
 	return true;
 }
 
-void URHSimWorldSubsystem::BuildBedAssignments(const TArray<int32>& ByIdOrder)
+void URHSimWorldSubsystem::BuildBedAssignments(const TArray<int32>& ByIdOrder) const
 {
 	if (Furniture.Num() == 0)
 	{
@@ -14477,6 +14544,9 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		bCommuteAlerted = false;
 		JobAssignLast.Reset();
 		ColonistStations.Reset(); // derived by RefreshJobs: nothing from before the load may answer a read until it re-runs
+		ColonistBedPiece.Reset(); // step-2 fix 2: nor the previous colony's bed pieces (their Ids can match unrelated pieces of the loaded colony)
+		bBedKeyValid = false;
+		++BedAssignVersion;
 		++JobsVersion;
 		CommuteFlows = FRHCommuteFlows();
 		CommuteMemo = FRHCommuteMemo();
@@ -14522,6 +14592,13 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 			Ar << D.Id << D.Kind << D.Name << D.RegionId << D.Level << D.Lattice << DGrowth;
 			D.bGrowth = DGrowth != 0; // v38
 			D.Lattice.Sort([](const FIntPoint& A, const FIntPoint& B) { return A.X != B.X ? A.X < B.X : A.Y < B.Y; });
+			// Step-2 fix 4: a district whose Id repeats or goes back is dropped here, BEFORE its shape attaches (the first district of an Id has taken the
+			// shape's points by MoveTemp, so a second one would read D.Deep[0] on an empty array). The deep block checked only the skeleton's own order.
+			if (Districts.Num() > 0 && D.Id <= Districts.Last().Id)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v37: district #%d repeats or goes back on the Id order; it is dropped"), D.Id);
+				continue;
+			}
 			// v49 (RC 5): the district's shape is attached BEFORE the whole-floor test below, so a Homes shape and an Industry shape on
 			// one floor are two deep districts and never meet the FloorsHeld test. The block's own cross-checks ran before teardown; a
 			// disagreement left here (a hand-made file) drops the shape with a Warning, never an Error line.
@@ -14533,6 +14610,12 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 				}
 				if (D.Level < 0 && D.Lattice.IsEmpty())
 				{
+					if (Shape.Points.IsEmpty())
+					{
+						// A guard, whatever the order: D.Deep[0] is never read on an empty array.
+						UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v49: the shape of district #%d has no points left (another district took them); no shape is attached"), D.Id);
+						break;
+					}
 					D.Deep = MoveTemp(Shape.Points);
 					D.Level = D.Deep[0].Z;
 				}

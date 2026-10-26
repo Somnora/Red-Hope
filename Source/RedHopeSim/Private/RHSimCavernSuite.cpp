@@ -18,6 +18,22 @@
 //  empty completion, a cavern of another shaft; CV4 D5's dig-time multiplier; CV5 cancel with a batch in flight; CV6 tunnel 1 and
 //  cavern 1 at once (RC 1: the two mutations); CV7 era against the agent band; CV8 the save (the layout, mid-batch against a twin, every
 //  hand-made refusal, the X >= 100 repair, a v47 file); CV9 ordinal-to-point across a save and a load.
+// Step-2 fixes in CV1: the cap of 1,024 records (3), a corner out of range and the int32 edge (5), a cavern through floors already dug out in its box (8),
+// and a box below the deepest floor (nit 18); in CV8: the cap through a save, a corner out of range in a file (5), a cancelled flag of 2 (nit 16).
+namespace
+{
+	// Counts every Error line of any category while it is attached: a structural refusal at load must come back through OutError, never as an engine
+	// Error (a hand-made flag of 2 used to log LogSerialization Error: step-2 nit 16).
+	struct FRHCavernAnyErrorCounter : public FOutputDevice
+	{
+		int32 Count = 0;
+		virtual void Serialize(const TCHAR* /*Text*/, ELogVerbosity::Type Verbosity, const FName& /*Category*/) override
+		{
+			if (Verbosity == ELogVerbosity::Error) { ++Count; }
+		}
+	};
+}
+
 int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim)
 {
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== CAVERNS TEST (D6a, 2026-10-22) ==="));
@@ -220,7 +236,9 @@ int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		Expect(!TryCavern(-1, 1, FIntPoint(1, 2), FIntPoint(9, 2), W) && W.Contains(TEXT("at most 8 x 8")) && W.Contains(TEXT("9 x 1")), FString::Printf(TEXT("CV1 (2) a side of 9 cells is over CavernMaxSide (%s)"), *W));
 		Expect(!TryCavern(-1, 1, FIntPoint(1, 2), FIntPoint(1, 10), W) && W.Contains(TEXT("1 x 9")), FString::Printf(TEXT("CV1 (2) and the other side (%s)"), *W));
 		Expect(TryCavern(-1, 3, FIntPoint(1, 1), FIntPoint(8, 8), W), FString::Printf(TEXT("CV1 (2) a box of exactly 8 x 8 on 3 floors is allowed (%s)"), *W));
-		Expect(!Sim->CanDigCavern(-1, 1, FVector(1.0e15, 0.0, 0.0), PtCm(0, 0), W) && W.Contains(TEXT("at most 8 x 8")), FString::Printf(TEXT("CV1 (2) an absurd point is a refusal, not an overflow or a huge loop (%s)"), *W));
+		// Step-2 fix 5: the corner bound is taken before the side test, so an absurd corner (a saturated lattice point) is now refused as out of range; the side test still
+		// refuses a box too wide (the 9-cell checks above).
+		Expect(!Sim->CanDigCavern(-1, 1, FVector(1.0e15, 0.0, 0.0), PtCm(0, 0), W) && W.Contains(TEXT("out of range")), FString::Printf(TEXT("CV1 (2) an absurd point is a refusal, not an overflow or a huge loop (%s)"), *W));
 		Expect(!TryCavern(-1, 1, FIntPoint(-1, -1), FIntPoint(1, 1), W) && W.Contains(TEXT("shaft stands")) && W.Contains(TEXT("(0, 0)")), FString::Printf(TEXT("CV1 (3) a box over shaft 0's column is refused (%s)"), *W));
 		Expect(!TryCavern(-6, 1, FIntPoint(0, 0), FIntPoint(1, 0), W) && W.Contains(TEXT("shaft stands")), FString::Printf(TEXT("CV1 (3) on a floor with no cell too: a column runs through every floor (%s)"), *W));
 		Expect(!TryCavern(-1, 1, FIntPoint(1, 0), FIntPoint(1, 1), W) && W.Contains(TEXT("already dug")), FString::Printf(TEXT("CV1 (7) a box whose every point is carved is refused (%s)"), *W));
@@ -301,6 +319,127 @@ int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		Expect(DigCavernNow(-1, 2, FIntPoint(31, 0), FIntPoint(32, 1), Far, Why) && DigCavernNow(-1, 1, FIntPoint(1, 0), FIntPoint(2, 1), Near0, Why)
 			&& Sim->FindCavern(Far)->ShaftId == 1 && Sim->FindCavern(Near0)->ShaftId == 0,
 			FString::Printf(TEXT("CV1 the work shaft is fixed at the order: the box by (30,1) is shaft 1's, the box by the first column is shaft 0's (%s)"), *Why));
+
+		// --- CV1, step-2 fix 3: the record cap. One save holds 1,024 records and every order stays on the list for ever, so the order past the last is refused. ---
+		{
+			Reset();
+			Sim->ExtendShaft(6, Head0);
+			Sim->ExcavateFloor(-1, 6, R, 0);
+			const int32 Padded = Sim->Debug_PadCavernRecords(RH::MaxCavernRecords - 1);
+			Expect(Padded == 1023 && Sim->GetCaverns().Num() == 1023 && Sim->GetOpenCavernCount() == 0 && Sim->GetNextCavernId() == 1024,
+				FString::Printf(TEXT("CV1 cap setup: %d cancelled one-cell records are on the list, none open, the next Id is %d"), Sim->GetCaverns().Num(), Sim->GetNextCavernId()));
+			Expect(CavernOrder(-1, 1, FIntPoint(1, 2), FIntPoint(3, 3)) && Sim->GetCaverns().Num() == RH::MaxCavernRecords && Sim->GetCaverns().Last().Id == 1024,
+				FString::Printf(TEXT("CV1 the 1,024th order is accepted (%d records)"), Sim->GetCaverns().Num()));
+			FString Wc;
+			const bool bPre = !TryCavern(-1, 1, FIntPoint(-1, 2), FIntPoint(0, 2), Wc) && Wc.Contains(TEXT("the most one save can hold")) && Wc.Contains(TEXT("1024 caverns"));
+			Expect(bPre, FString::Printf(TEXT("CV1 the preflight refuses the 1,025th with the cap reason (%s)"), *Wc));
+			const bool bOrder = !CavernOrder(-1, 1, FIntPoint(-1, 2), FIntPoint(0, 2)) && LastReject().Contains(TEXT("the most one save can hold")) && Sim->GetCaverns().Num() == RH::MaxCavernRecords && Sim->GetNextCavernId() == 1025;
+			Expect(bOrder, FString::Printf(TEXT("CV1 the order is rejected with the same reason and nothing is appended: %d records, next Id %d (%s)"), Sim->GetCaverns().Num(), Sim->GetNextCavernId(), *LastReject()));
+			FString Wd;
+			Expect(!Sim->CanDigCavern(-1, 9, PtCm(-1, 2), PtCm(0, 2), Wd) && Wd.Contains(TEXT("the most one save can hold")), FString::Printf(TEXT("CV1 the cap is taken first, whatever else is wrong with the box: a box of nine floors gets the cap's reason too (%s)"), *Wd));
+		}
+
+		// --- CV1, step-2 nit 18: a box below the deepest floor has its own reason; a legal floor no shaft reaches yet keeps "bore a shaft that deep". ---
+		{
+			Reset();
+			Sim->ExtendShaft(6, Head0);
+			Sim->ExcavateFloor(-1, 6, R, 0);
+			FString Wn;
+			Expect(!TryCavern(-19, 3, FIntPoint(1, 2), FIntPoint(2, 3), Wn) && Wn.Contains(TEXT("cannot go below floor -20")) && Wn.Contains(TEXT("-21")) && !Wn.Contains(TEXT("bore a shaft")),
+				FString::Printf(TEXT("CV1 (nit 18) a box whose deepest floor is -21 is below the deepest floor of all, -20: it says so, not 'bore a shaft that deep' (%s)"), *Wn));
+			Expect(!TryCavern(-21, 1, FIntPoint(1, 2), FIntPoint(2, 3), Wn) && Wn.Contains(TEXT("cannot go below floor -20")), FString::Printf(TEXT("CV1 (nit 18) a one-floor box on -21 (%s)"), *Wn));
+			Expect(!TryCavern(-20, 1, FIntPoint(1, 2), FIntPoint(2, 3), Wn) && Wn.Contains(TEXT("not reached - bore a shaft that deep first")) && Wn.Contains(TEXT("-20")), FString::Printf(TEXT("CV1 (nit 18) -20 itself is a floor a shaft could reach: that is still 'bore a shaft that deep' (%s)"), *Wn));
+			Rejects.Reset();
+			FRHCommand C; C.Verb = FName("DigCavern"); C.Level = -19; C.Value = 3; C.Location = PtCm(1, 2); C.LocationB = PtCm(2, 3);
+			Send(C);
+			Expect(LastReject().Contains(TEXT("cannot go below floor -20")) && Sim->GetCaverns().Num() == 0, FString::Printf(TEXT("CV1 (nit 18) the same reason comes back through the order (%s)"), *LastReject()));
+		}
+
+		// --- CV1, step-2 fix 5: a corner past the lattice bound (2^20 cells) is a refusal, and the box at the int32 edge is refused at once. ---
+		{
+			Reset();
+			Sim->ExtendShaft(6, Head0);
+			Sim->ExcavateFloor(-1, 6, R, 0);
+			FString Wr;
+			const bool bRange = !TryCavern(-1, 1, FIntPoint(1048577, 0), FIntPoint(1048577, 0), Wr) && Wr.Contains(TEXT("out of range"));
+			Expect(bRange, FString::Printf(TEXT("CV1 (5) a corner at (1,048,577, 0) is out of range (%s)"), *Wr));
+			Expect(!TryCavern(-1, 1, FIntPoint(-1048577, 0), FIntPoint(-1048577, 0), Wr) && Wr.Contains(TEXT("out of range")) && !TryCavern(-1, 1, FIntPoint(0, 1048577), FIntPoint(0, 1048577), Wr) && Wr.Contains(TEXT("out of range")),
+				TEXT("CV1 (5) and on the other sign and the other axis"));
+			Expect(!TryCavern(-1, 1, FIntPoint(1048576, 0), FIntPoint(1048576, 0), Wr) && !Wr.Contains(TEXT("out of range")) && Wr.Contains(TEXT("touches no dig")),
+				FString::Printf(TEXT("CV1 (5) the bound itself, 2^20 = 1,048,576, is in range (the box has another refusal: %s)"), *Wr));
+			if (bRange)
+			{
+				// Only when the bound held: a box from 2,147,483,640 to 2,147,483,647 has a side of 8, which passes the side test, and its loops would never end.
+				Expect(!TryCavern(-1, 1, FIntPoint(2147483640, 0), FIntPoint(2147483647, 0), Wr) && Wr.Contains(TEXT("out of range")), FString::Printf(TEXT("CV1 (5) a box at the int32 edge is refused at once (%s)"), *Wr));
+				Rejects.Reset();
+				FRHCommand C; C.Verb = FName("DigCavern"); C.Level = -1; C.Value = 1; C.Location = PtCm(2147483640, 0); C.LocationB = PtCm(2147483647, 0);
+				Send(C);
+				Expect(LastReject().Contains(TEXT("out of range")) && Sim->GetCaverns().Num() == 0, FString::Printf(TEXT("CV1 (5) and the order is rejected at the uplink, nothing appended (%s)"), *LastReject()));
+			}
+		}
+
+		// --- CV1, step-2 fix 8 (the director's answer to refusal 5): a cavern may reach down through floors with no rock left in its box. ---
+		{
+			// The fixture: shaft 0 to -6, six cells on -1 and -2 (the spiral around column (0,0): (1,0) (1,1) (0,1) (-1,1) (-1,0) (-1,-1)), ten on -3 (up to (2,0)).
+			const auto Fixture8 = [&]()
+			{
+				Reset();
+				Sim->ExtendShaft(6, Head0);
+				Sim->ExcavateFloor(-1, 6, R, 0);
+				Sim->ExcavateFloor(-2, 6, R, 0);
+				Sim->ExcavateFloor(-3, 10, R, 0);
+			};
+			Fixture8();
+			FString W8;
+			URHSimWorldSubsystem::FRHCavernPreview Pre8;
+			// (i) The review's case: (1,0) to (1,1) on -2 to -4. -2 and -3 are dug through inside the box; -4 is rock beside the column.
+			const bool bAllowed = Sim->CanDigCavern(-2, 3, PtCm(1, 0), PtCm(1, 1), W8, &Pre8);
+			Expect(bAllowed && Pre8.Cells == 2 && Pre8.Points == 6 && Pre8.Top == -2 && Pre8.Bottom == -4,
+				FString::Printf(TEXT("CV1 (8, i) the box (1,0) to (1,1) on -2 to -4 is allowed although -2 and -3 are dug through inside it: the preview counts only -4's two points (%d of %d) (%s)"), Pre8.Cells, Pre8.Points, *W8));
+			int32 Id8 = INDEX_NONE;
+			const bool bOrdered = DigCavernNow(-2, 3, FIntPoint(1, 0), FIntPoint(1, 1), Id8, Why) && Id8 == 1;
+			const FRHCavern* C8 = Sim->FindCavern(Id8);
+			Expect(bOrdered && C8 && Uncarved(Id8) == 2 && Sim->GetCavernUncarved(*C8, -2) == 0 && Sim->GetCavernUncarved(*C8, -3) == 0 && Sim->GetCavernUncarved(*C8, -4) == 2 && Sim->IsCavernOpen(*C8),
+				FString::Printf(TEXT("CV1 (8, i) it is ordered: two points uncarved, all of them on -4, and it is open (%s)"), *Why));
+			const int32 Cells2 = Sim->GetFloorCarvedCells(-2), Cells3 = Sim->GetFloorCarvedCells(-3);
+			const int32 Carved8 = Sim->Debug_CarveCavernCells(Id8, 100);
+			// (iv) For D7: once finished it is a finished cavern of three floors, nothing uncarved on any of them.
+			Expect(Carved8 == 2 && Sim->GetFloorCarvedCells(-2) == Cells2 && Sim->GetFloorCarvedCells(-3) == Cells3 && Sim->GetFloorCarvedCells(-4) == 2 && Cells(-4).Contains(FIntPoint(1, 0)) && Cells(-4).Contains(FIntPoint(1, 1)),
+				FString::Printf(TEXT("CV1 (8, i) carved out it appends two cells, both on -4; nothing is carved on -2 or -3 (%d and %d cells as before)"), Sim->GetFloorCarvedCells(-2), Sim->GetFloorCarvedCells(-3)));
+			Expect(C8 && C8->GetFloors() == 3 && Sim->GetCavernUncarved(*C8, -2) == 0 && Sim->GetCavernUncarved(*C8, -3) == 0 && Sim->GetCavernUncarved(*C8, -4) == 0 && Sim->GetCavernUncarved(*C8) == 0 && !Sim->IsCavernOpen(*C8) && Sim->GetOpenCavernCount() == 0,
+				TEXT("CV1 (8, iv) for D7: the cavern is a finished cavern of three floors, nothing uncarved on any of them"));
+			// A Borer's work goes only to -4.
+			Fixture8();
+			const int32 BorerId = Kit();
+			Expect(CavernOrder(-2, 3, FIntPoint(1, 0), FIntPoint(1, 1)) && Uncarved(1) == 2, TEXT("CV1 (8, i) with a Borer: the same cavern is ordered through the uplink"));
+			const int32 Empty0 = Sim->GetCavernBatchesEmpty();
+			bool bOnlyFour = true;
+			for (int32 K = 0; K < 200 && Uncarved(1) > 0; ++K)
+			{
+				Step();
+				bOnlyFour &= Sim->GetCavernBatchesInFlightOn(1, -2) == 0 && Sim->GetCavernBatchesInFlightOn(1, -3) == 0;
+			}
+			Steps(4);
+			Expect(bOnlyFour && Uncarved(1) == 0 && Sim->GetFloorCarvedCells(-2) == Cells2 && Sim->GetFloorCarvedCells(-3) == Cells3 && Sim->GetFloorCarvedCells(-4) == 2 && Sim->GetCavernBatchesEmpty() == Empty0 && Recipe(BorerId).IsNone(),
+				FString::Printf(TEXT("CV1 (8, i) the Borer's batches were all on -4 (none ever in flight on -2 or -3), the cavern finished, no batch completed empty (%d)"), Sim->GetCavernBatchesEmpty() - Empty0));
+			// (ii) The exemption is only for a floor with no rock: -2 dug through inside the box, rock with no seed on -3, a seed on -4.
+			Reset();
+			Sim->ExtendShaft(6, Head0);
+			Sim->ExcavateFloor(-2, 10, R, 0); // up to (2,0)
+			int32 Dug = INDEX_NONE;
+			const bool bDug = DigCavernNow(-2, 1, FIntPoint(3, 0), FIntPoint(4, 1), Dug, Why) && Sim->Debug_CarveCavernCells(Dug, 100) == 4;
+			Sim->ExcavateFloor(-3, 6, R, 0);  // the spiral's first six cells: nothing near (3,0)
+			Sim->ExcavateFloor(-4, 10, R, 0); // up to (2,0): (3,0) is eligible on -4
+			Expect(bDug && Cells(-2).Contains(FIntPoint(3, 0)) && Cells(-2).Contains(FIntPoint(4, 1)) && !Cells(-3).Contains(FIntPoint(2, 0)) && Cells(-4).Contains(FIntPoint(2, 0)),
+				TEXT("CV1 (8, ii) setup: (3,0) to (4,1) is dug on -2, there is no cell beside it on -3, and a cell (2,0) beside it on -4"));
+			Expect(!TryCavern(-2, 3, FIntPoint(3, 0), FIntPoint(4, 1), W8) && W8.Contains(TEXT("floor -3")) && W8.Contains(TEXT("touches no dig and no shaft")),
+				FString::Printf(TEXT("CV1 (8, ii) the box over -2 to -4 is refused on -3, the floor with rock and no seed, with refusal 5's text; -2 is no reason (%s)"), *W8));
+			Expect(TryCavern(-2, 1, FIntPoint(3, 0), FIntPoint(4, 1), W8) == false && W8.Contains(TEXT("already dug")), FString::Printf(TEXT("CV1 (8, ii) and -2 alone is refused as dug through (%s)"), *W8));
+			// (iii) Refusal 7 still wins on a box dug on every floor.
+			Fixture8();
+			Expect(!TryCavern(-1, 3, FIntPoint(1, 0), FIntPoint(1, 1), W8) && W8.Contains(TEXT("Every point of that box is already dug")),
+				FString::Printf(TEXT("CV1 (8, iii) a box (1,0) to (1,1) dug on all of -1, -2 and -3 is still refused as already dug (%s)"), *W8));
+		}
 	}
 
 	// --- CV2. The literal append order, the spoil, the batch time, the eligibility invariant, Plan; a full 8 x 8 x 3 box. ---
@@ -653,6 +792,51 @@ int32 RHRunCavernsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 			FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("cavr22")));
 			FString Ec;
 			Expect(Sim->LoadColony(TEXT("cavr22"), Ec) && Ec.IsEmpty() && Sim->FindCavern(1) && Sim->FindCavern(1)->bCancelled && Sim->FindCavern(1)->Min == FIntPoint(0, 0), FString::Printf(TEXT("CV8 a cancelled cavern with a column in its box loads (%s)"), *Ec));
+		}
+		// Step-2 nit 16: a cancelled flag of 2 is refused through OutError - no engine Error line - and a bool still reads as four bytes (the layout above).
+		{
+			FRHCavernAnyErrorCounter Errs;
+			GLog->AddOutputDevice(&Errs);
+			const int32 Errors0 = Errs.Count;
+			TArray<uint8> T = W2; PutI(T, R1 + 36, 2);
+			const bool bRefused = TryFile(TEXT("cavr23"), T, Err);
+			const int32 Logged = Errs.Count - Errors0;
+			GLog->RemoveOutputDevice(&Errs);
+			Expect(bRefused && Err.Contains(TEXT("cancelled flag of 2")) && Logged == 0, FString::Printf(TEXT("CV8 (nit 16) a cancelled flag of 2 is refused with no Error line of any category (%d logged) (%s)"), Logged, *Err));
+			TArray<uint8> One = W2; PutI(One, R1 + 36, 1); PutI(One, R2 + 36, 1);
+			FFileHelper::SaveArrayToFile(One, *SaveFilePath(TEXT("cavr24")));
+			FString E1b;
+			Expect(Sim->LoadColony(TEXT("cavr24"), E1b) && E1b.IsEmpty() && Sim->FindCavern(1) && Sim->FindCavern(1)->bCancelled && Sim->FindCavern(2) && Sim->FindCavern(2)->bCancelled,
+				FString::Printf(TEXT("CV8 (nit 16) and a flag of 1 still loads (%s)"), *E1b));
+		}
+		// Step-2 fix 5: a corner out of range is refused before teardown with that reason; the int32 edge is refused at once, and only if the bound held.
+		{
+			TArray<uint8> T = W2; PutI(T, R1 + 28, 1048577);
+			const bool bRange = TryFile(TEXT("cavr25"), T, Err) && Err.Contains(TEXT("out of range"));
+			Expect(bRange, FString::Printf(TEXT("CV8 (5) a corner at x 1,048,577 is refused before teardown, 'out of range' (%s)"), *Err));
+			{ TArray<uint8> Neg = W2; PutI(Neg, R1 + 20, -1048577); Expect(TryFile(TEXT("cavr26"), Neg, Err) && Err.Contains(TEXT("out of range")), FString::Printf(TEXT("CV8 (5) and a corner at x -1,048,577 (%s)"), *Err)); }
+			if (bRange)
+			{
+				TArray<uint8> Edge = W2; PutI(Edge, R1 + 20, 2147483640); PutI(Edge, R1 + 28, 2147483647);
+				Expect(TryFile(TEXT("cavr27"), Edge, Err) && Err.Contains(TEXT("out of range")), FString::Printf(TEXT("CV8 (5) a box from 2,147,483,640 to 2,147,483,647 is refused at once, not looped over (%s)"), *Err));
+				TArray<uint8> Min = W2; PutI(Min, R1 + 20, INT32_MIN);
+				Expect(TryFile(TEXT("cavr28"), Min, Err) && Err.Contains(TEXT("out of range")), FString::Printf(TEXT("CV8 (5) and a corner at INT32_MIN (%s)"), *Err));
+			}
+		}
+		// Step-2 fix 3: at the cap of 1,024 records a save loads back, and the order past it is refused, so the save after it loads too.
+		{
+			Reset();
+			Sim->ExtendShaft(6, Head0);
+			Sim->ExcavateFloor(-1, 6, R, 0);
+			const int32 Padded = Sim->Debug_PadCavernRecords(RH::MaxCavernRecords - 1);
+			Expect(Padded == 1023 && CavernOrder(-1, 1, FIntPoint(1, 2), FIntPoint(3, 3)) && Sim->GetCaverns().Num() == RH::MaxCavernRecords, FString::Printf(TEXT("CV8 (3) setup: %d records, the last a real order"), Sim->GetCaverns().Num()));
+			FString Ec;
+			Expect(Sim->SaveColony(TEXT("cavcap"), SaveErr) && Sim->LoadColony(TEXT("cavcap"), Ec) && Ec.IsEmpty() && Sim->GetCaverns().Num() == RH::MaxCavernRecords && Sim->GetNextCavernId() == 1025 && Sim->FindCavern(1024),
+				FString::Printf(TEXT("CV8 (3) a colony with 1,024 records saves and loads back with an empty error (%d records; %s)"), Sim->GetCaverns().Num(), *Ec));
+			const bool bRefused = !CavernOrder(-1, 1, FIntPoint(-1, 2), FIntPoint(0, 2)) && Sim->GetCaverns().Num() == RH::MaxCavernRecords;
+			Ec.Reset();
+			Expect(bRefused && Sim->SaveColony(TEXT("cavcap2"), SaveErr) && Sim->LoadColony(TEXT("cavcap2"), Ec) && Ec.IsEmpty() && Sim->GetCaverns().Num() == RH::MaxCavernRecords,
+				FString::Printf(TEXT("CV8 (3) the 1,025th order is refused, and the save made after it still loads (%d records; %s)"), Sim->GetCaverns().Num(), *Ec));
 		}
 		// Mid-batch: a save equals a twin that never saved.
 		{

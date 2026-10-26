@@ -504,9 +504,14 @@ int64 URHSimWorldSubsystem::WalkTramCm(const FRHWalkFloor& F, int32 CellA, int32
 		++TramWalkPruned;
 		return Base;
 	}
-	// (2) A lower bound: any walk that rides takes some line k from one end e to the other, so it costs at least the octile line from A to e, the ride,
-	//     and the octile line from the other end to B (the octile line is a norm, so no walk is shorter than the straight octile line between its ends).
-	//     When even the cheapest such bound does not beat the walk, the walk stands (an equal cost is a walk, so >= is exact).
+	// (2) A lower bound, the smaller of two, each valid for the routes it names (the octile line is a norm, so no walk is shorter than the straight
+	//     octile line between its ends, and a ride is priced below the octile line between its stops, so the walk on from a stop can beat it):
+	//     OneRide - a route that rides one line k from one end e to the other costs at least the octile line from A to e, the ride, and the octile line
+	//               from the other end to B.
+	//     TwoPlus - a route that rides two or more times uses two or more different lines (the stop search visits each stop once, so it never rides one
+	//               line twice), so it costs at least the octile line from A to its first boarding stop, the two cheapest rides on this floor, and the
+	//               octile line from its last stop to B. Only with two lines or more; a one-line floor keeps OneRide alone, so its prune count is unchanged.
+	//     When even the cheaper bound does not beat the walk, the walk stands (an equal cost is a walk, so >= is exact).
 	{
 		int64 Lower = MAX_int64;
 		for (const FRHWalkFloor::FWalkTram& Line : F.Trams)
@@ -515,6 +520,28 @@ int64 URHSimWorldSubsystem::WalkTramCm(const FRHWalkFloor& F, int32 CellA, int32
 			{
 				Lower = FMath::Min(Lower, WalkOctCm(F.Pts[CellA], F.Pts[Line.StopOrd[End]]) + Line.Cm + WalkOctCm(F.Pts[CellB], F.Pts[Line.StopOrd[1 - End]]));
 			}
+		}
+		if (K >= 2)
+		{
+			int64 NearA = MAX_int64, NearB = MAX_int64, Cheapest = MAX_int64, Next = MAX_int64;
+			for (const FRHWalkFloor::FWalkTram& Line : F.Trams)
+			{
+				for (int32 End = 0; End < 2; ++End)
+				{
+					NearA = FMath::Min(NearA, WalkOctCm(F.Pts[CellA], F.Pts[Line.StopOrd[End]]));
+					NearB = FMath::Min(NearB, WalkOctCm(F.Pts[CellB], F.Pts[Line.StopOrd[End]]));
+				}
+				if (Line.Cm < Cheapest)
+				{
+					Next = Cheapest;
+					Cheapest = Line.Cm;
+				}
+				else if (Line.Cm < Next)
+				{
+					Next = Line.Cm;
+				}
+			}
+			Lower = FMath::Min(Lower, NearA + Cheapest + Next + NearB);
 		}
 		if (Lower >= Base)
 		{

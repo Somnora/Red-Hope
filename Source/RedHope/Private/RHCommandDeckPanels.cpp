@@ -396,7 +396,17 @@ TSharedRef<SWidget> SRHCommandDeck::BuildVitalsStrip()
 					const URHSimWorldSubsystem* S = GetSim();
 					if (!S) { return FText::GetEmpty(); }
 					const FRHPowerState& P = S->GetPower();
-					if (P.ShedCount > 0) { return Txt(FString::Printf(TEXT("%d machine%s shut off"), P.ShedCount, P.ShedCount == 1 ? TEXT("") : TEXT("s"))); }
+					if (P.ShedCount > 0)
+					{
+						// Nit 11: ShedCount holds machines and cooling floors together; say which is which (gate-d-wording.md, the POWER tile row).
+						const int32 Machines = P.ShedCount - P.ShedFloors;
+						FString Said = Machines > 0 ? FString::Printf(TEXT("%d machine%s"), Machines, Machines == 1 ? TEXT("") : TEXT("s")) : FString();
+						if (P.ShedFloors > 0)
+						{
+							Said += FString::Printf(TEXT("%s%d floor%s"), Said.IsEmpty() ? TEXT("") : TEXT(" and "), P.ShedFloors, P.ShedFloors == 1 ? TEXT("") : TEXT("s"));
+						}
+						return Txt(Said + TEXT(" shut off"));
+					}
 					return Txt(FString::Printf(TEXT("battery %.0f%%"), P.BatteryCapWh > 0.0 ? 100.0 * P.BatteryWh / P.BatteryCapWh : 0.0));
 				}),
 				Always,

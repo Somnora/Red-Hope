@@ -19,10 +19,10 @@
 // The fixture is D6c's: shaft 0's dig on -1 (cells 0..11), shaft 1's dig 34 cells east (cells 12..17), a 30-cell tunnel (3,0) to (32,0) between
 // them (cells 18..47 in carve order). Its line is (30 / 2 + 29) s x 100 cm = 5,900 cm against 29,000 cm on foot.
 //  TM0 rows, caps, a fresh colony; TM1 the six refusals (and the boundaries) through the order and the preflight, the Struct bill; TM2 the edge
-//  integer, the tie, the ceiling, then a sweep of every (home, seat) pair against the oracle; TM3 riders counted by route, the ramp at 60, 61
-//  and 160; TM4 the wait is added after the route is chosen, frozen at the roll, with no oscillation; TM5 a line maps its floor; TM6 the save
-//  (the layout, the round trip, every hand-made refusal, a v49 file); TM7 the era band against the agent band; TM8 the caches, the keys, the
-//  build order and inertness.
+//  integer, the tie, the ceiling, then a sweep of every (home, seat) pair against the oracle; TM2b two lines on one floor, a route that rides both
+//  (step-2 fix 1: the pruning bound), against the oracle; TM3 riders counted by route, the ramp at 60, 61 and 160; TM4 the wait is added after the route is chosen, frozen at the roll, with no oscillation; TM5 a line maps its floor; TM6 the save
+//  (the layout, the round trip, every hand-made refusal, a v49 file); TM7 the era band against the agent band, rolling a real load (step-2 fix 7)
+//  in two loaded legs and one that never saved; TM8 the caches, the keys, the build order and inertness.
 namespace
 {
 	int64 OracleOct(const FIntPoint& A, const FIntPoint& B)
@@ -445,6 +445,79 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 		Expect(Sim->Debug_CommuteCachesFresh() && Sim->Debug_DeepWalkFresh() && Sim->GetCommuteOffNet() == 0, TEXT("TM2 the flows and the walk network are fresh, none off the net"));
 	}
 
+	// --- TM2b. Two lines on one floor: a route that rides both (step-2 fix 1). ---
+	{
+		// The review's three-dig floor (scratchpad/step2/d6d/prune.py), translated by (3, 0) so that X stands clear of shaft 0's column (0,0); the
+		// distances depend only on differences, so none of its integers change. X is the 3 x 3 dig at x 1..3, y -1..1 (a cavern beside the column); Z
+		// the dig at x 33..35, y -1..1; Y the dig at x 17..19, y 30..32. T0 (4,0)-(32,0), 29 cells, joins X to Z and takes no line; T1 (3,2)-(18,29), 43
+		// cells, and T2 (20,31)-(34,2), 44 cells, each take one: (30 + n - 1) x 100 cm = 7,200 and 7,300 cm. Each tunnel is carved to its last cell
+		// before the next is ordered, so no order crosses an open one.
+		Reset();
+		Sim->ExtendShaft(1, Head0);
+		const auto Dig3 = [&](int32 X0, int32 Y0) -> bool
+		{
+			int32 CId = INDEX_NONE;
+			FString W;
+			return Sim->Debug_DigCavern(-1, 1, FIntPoint(X0, Y0), FIntPoint(X0 + 2, Y0 + 2), CId, W) && Sim->Debug_CarveCavernCells(CId, 9) == 9;
+		};
+		bool bFloor = Dig3(1, -1);
+		const int32 T0 = DigT(FIntPoint(4, 0), FIntPoint(32, 0), 29);
+		bFloor &= T0 != INDEX_NONE && Dig3(33, -1);
+		const int32 T1 = DigT(FIntPoint(3, 2), FIntPoint(18, 29), 43);
+		bFloor &= T1 != INDEX_NONE && Dig3(17, 30);
+		const int32 T2 = DigT(FIntPoint(20, 31), FIntPoint(34, 2), 44);
+		bFloor &= T2 != INDEX_NONE && Sim->GetFloorCarvedCells(-1) == 9 + 29 + 9 + 43 + 9 + 44;
+		Expect(bFloor && T0 == 1 && T1 == 2 && T2 == 3 && Fit(0) && Lay(T1) && Lay(T2) && Sim->GetTramLines().Num() == 2 && Sim->IsFloorMapped(-1),
+			FString::Printf(TEXT("TM2b setup: three 3 x 3 digs (X, Z, Y), the unlined tunnel 1 (29 cells) between X and Z, and lines on tunnels 2 (43 cells) and 3 (44 cells): %d cells on -1, two lines, the floor mapped"), Sim->GetFloorCarvedCells(-1)));
+		const FRHTramLine& LineA = Sim->GetTramLines()[0];
+		const FRHTramLine& LineB = Sim->GetTramLines()[1];
+		const int64 EdgeA = Sim->GetTramEdgeCm(LineA), EdgeB = Sim->GetTramEdgeCm(LineB);
+		Expect(EdgeA == (30 + 43 - 1) * 100 && EdgeA == 7200 && EdgeB == (30 + 44 - 1) * 100 && EdgeB == 7300 && LineA.StopA == FIntPoint(3, 2) && LineA.StopB == FIntPoint(18, 29) && LineB.StopA == FIntPoint(20, 31) && LineB.StopB == FIntPoint(34, 2),
+			FString::Printf(TEXT("TM2b the two ride prices: (30 + 43 - 1) x 100 = 7,200 cm and (30 + 44 - 1) x 100 = 7,300 cm (%lld, %lld); line 1 runs (3,2) to (18,29), line 2 (20,31) to (34,2)"), EdgeA, EdgeB));
+		// The review's pair: X's east middle cell (3,0) to Z's west middle cell (33,0). On foot along tunnel 1: 30,000 cm. Riding both lines: out to the stop (3,2)
+		// 2,000, ride 7,200, (18,29) to (18,30) 1,000, across Y to (19,31) 1,414, onto the stop (20,31) 1,000, ride 7,300, (34,2) to (34,1) 1,000, across Z to (33,0)
+		// 1,414: 22,328 cm. The bound the one-line rule gave was the cheapest of (octile to a stop + a ride + octile from the other stop) over each line and end.
+		const int32 CellX = Ord(-1, 3, 0), CellZ = Ord(-1, 33, 0);
+		const int64 OnFoot = Sim->Debug_WalkCmNoTram(-1, CellX, CellZ), Riding = Sim->Debug_WalkCm(-1, CellX, CellZ);
+		int64 OldBound = MAX_int64;
+		for (const FRHTramLine* Line : { &LineA, &LineB })
+		{
+			const int64 Cm = Sim->GetTramEdgeCm(*Line);
+			OldBound = FMath::Min(OldBound, OracleOct(FIntPoint(3, 0), Line->StopA) + Cm + OracleOct(FIntPoint(33, 0), Line->StopB));
+			OldBound = FMath::Min(OldBound, OracleOct(FIntPoint(3, 0), Line->StopB) + Cm + OracleOct(FIntPoint(33, 0), Line->StopA));
+		}
+		Expect(CellX != INDEX_NONE && CellZ != INDEX_NONE && OnFoot == 30000 && Riding == 22328 && Sim->Debug_WalkTramLines(-1, CellX, CellZ) == 3u && OldBound == 44410 && OldBound >= OnFoot,
+			FString::Printf(TEXT("TM2b the review's pair: 30,000 cm on foot (%lld), 2,000 + 7,200 + 3,414 + 7,300 + 2,414 = 22,328 cm riding both lines (sim %lld), both lines named (mask %u); the one-line bound was %lld, which is not below the walk, so the stop search never ran"),
+				OnFoot, Riding, Sim->Debug_WalkTramLines(-1, CellX, CellZ), OldBound));
+		// The sweep: every (home, seat) pair of the floor against the independent oracle, with the two rides and without.
+		const TArray<TArray<int64>> DBoth = OracleWalk(Sim, -1, { FOracleRide{ LineA.StopA, LineA.StopB, EdgeA }, FOracleRide{ LineB.StopA, LineB.StopB, EdgeB } });
+		const TArray<TArray<int64>> DFoot = OracleWalk(Sim, -1, {});
+		const int32 Cells2 = Sim->GetFloorCarvedCells(-1);
+		const int32 Calls0 = Sim->GetTramWalkCalls(), Pruned0 = Sim->GetTramWalkPruned();
+		int32 Compared2 = 0, Wrong2 = 0, WrongFoot2 = 0, Both = 0, Rode = 0;
+		FString FirstBad2;
+		for (int32 H = 0; H < Cells2; ++H)
+		{
+			for (int32 W = 0; W < Cells2; ++W)
+			{
+				++Compared2;
+				const int64 Got = Sim->Debug_WalkCm(-1, H, W);
+				Wrong2 += Got != DBoth[H][W] ? 1 : 0;
+				WrongFoot2 += Sim->Debug_WalkCmNoTram(-1, H, W) != DFoot[H][W] ? 1 : 0;
+				const uint32 Mask = Sim->Debug_WalkTramLines(-1, H, W);
+				Both += Mask == 3u ? 1 : 0;
+				Rode += Mask != 0u ? 1 : 0;
+				if (Got != DBoth[H][W] && FirstBad2.IsEmpty()) { FirstBad2 = FString::Printf(TEXT("%d>%d got %lld oracle %lld"), H, W, Got, DBoth[H][W]); }
+			}
+		}
+		const int32 Searched = (Sim->GetTramWalkCalls() - Calls0) - (Sim->GetTramWalkPruned() - Pruned0);
+		Expect(Compared2 == Cells2 * Cells2 && Wrong2 == 0 && WrongFoot2 == 0,
+			FString::Printf(TEXT("TM2b sweep: all %d (home, seat) pairs of the %d-cell floor match the independent oracle with both lines (%d wrong) and on foot (%d wrong) %s"), Compared2, Cells2, Wrong2, WrongFoot2, *FirstBad2));
+		Expect(Both > 0 && Rode >= Both && Searched > 0,
+			FString::Printf(TEXT("TM2b the sweep is not vacuous: %d pairs ride both lines (%d ride at least one), and the stop search ran %d times where the bound did not prune"), Both, Rode, Searched));
+		Expect(Sim->Debug_CommuteCachesFresh() && Sim->Debug_DeepWalkFresh(), TEXT("TM2b the flows and the walk network are fresh"));
+	}
+
 	// --- TM3. Riders counted by route; the ramp at 60, 61 and 160. ---
 	{
 		Expect(Build(true, 1, true) && Fit(0) && Lay(1), TEXT("TM3 setup: the fixture with a car and a line"));
@@ -690,26 +763,55 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 		Expect(Sim->GetTramLines().Num() == 2 && Sim->GetTramWaitSec(1) == WaitA && Sim->IsFloorMapped(-1), TEXT("TM6 after all of that the colony is exactly as it was"));
 	}
 
-	// --- TM7. The era band against the agent band. ---
+	// --- TM7. The era band against the agent band, rolling a real load (step-2 fix 7). ---
 	{
-		Expect(Build(true, 1, true) && Fit(0) && Lay(1), TEXT("TM7 setup: the fixture with a car and a line"));
-		Sim->AddStock(FName("Food"), 6000.0); // a minute of sim time must not recall anyone: the roster stays 40
-		Sim->AddStock(FName("Water"), 600.0);
-		Sim->AddStock(FName("Oxygen"), 6000.0);
-		AddResidents(40, 1.0);
-		FullRamp();
-		for (int32 k = 0; k < 40; ++k) { SeatOnFloor(k, -1, k == 0 ? 13 : (k * 7 + 3) % 18); }
-		Sim->Debug_SetTramCapacity(5);
-		Sim->Debug_RollTransit(SolNow()); // a frozen wait to be rolled on (the threshold sol stays this sol: the step that crosses the boundary rolls)
+		// The riders sit in REAL Lab rooms, so every RefreshJobs the step runs (and the load's own) derives their seats again and the roll finds them: six
+		// Lab cells in dig B (cells 12..17), where the first six residents (the lowest Ids, who live in cells 0..5 of dig A) take the seats and ride the
+		// line. At capacity 5 places the load of 2 x 6 = 12 queues. The fixture is built twice: two loaded legs from one saved file, and a third that
+		// never saved.
+		const auto Fixture = [&]() -> bool
+		{
+			bool bOk = Build(true, 1, true) && Fit(0) && Lay(1);
+			Sim->AddStock(FName("Food"), 6000.0); // a minute of sim time must not recall anyone: the roster stays 40
+			Sim->AddStock(FName("Water"), 600.0);
+			Sim->AddStock(FName("Oxygen"), 6000.0);
+			bOk &= AddResidents(40, 1.0);
+			FullRamp();
+			for (int32 Cell = 12; Cell <= 17; ++Cell) { bOk &= Sim->DesignateRoom(-1, Cell, FName("Lab"), R); }
+			Sim->Debug_RefreshJobs();
+			Sim->Debug_SetTramCapacity(1); // a load of 12 on one place: the wait caps at 600 s, frozen to be rolled on below
+			Sim->Debug_RollTransit(SolNow()); // (the threshold sol stays this sol: the step that crosses the boundary rolls)
+			return bOk;
+		};
+		const bool bFixture = Fixture() && Sim->GetTramPeople(1) >= 3 && Sim->GetTramWaitSec(1) == Sim->GetMaxWaitSec();
+		if (!bFixture) { UE_LOG(LogRedHopeSim, Warning, TEXT("TM7 fixture: %d residents ride the line (load %lld places), the frozen wait is %d s"), Sim->GetTramPeople(1), Sim->GetTramPeopleLoad(1), Sim->GetTramWaitSec(1)); }
+		Expect(bFixture, TEXT("TM7 setup: the fixture with a car and a line"));
 		// Put the clock half a minute before a sol boundary: the next 60 s step crosses it in either band.
-		const double Boundary = (double)(SolNow() + 1) * SolLen;
-		const double Lead = Boundary - 30.0 - Clock->GetSimSecondsTotal();
-		if (Lead > 0.0) { Clock->Debug_AdvanceSimSeconds(Lead); }
+		const auto Lead30 = [&]() -> double
+		{
+			const double Boundary = (double)(SolNow() + 1) * SolLen;
+			const double Lead = Boundary - 30.0 - Clock->GetSimSecondsTotal();
+			if (Lead > 0.0) { Clock->Debug_AdvanceSimSeconds(Lead); }
+			return Boundary;
+		};
+		const double Boundary = Lead30();
 		const int32 SolBefore = SolNow();
+		const double SavedAt = Clock->GetSimSecondsTotal();
 		FString PairErr;
 		Expect(Sim->SaveColony(TEXT("trampair"), PairErr) && SolNow() == SolBefore, FString::Printf(TEXT("TM7 the colony is saved half a minute before the sol boundary (sol %d; %s)"), SolBefore, *PairErr));
-		FString Leg[2];
-		int32 Rolls[2] = { 0, 0 };
+		FString Leg[3];
+		int32 Rolls[3] = { 0, 0, 0 }, WaitAfter[3] = { 0, 0, 0 }, PeopleAfter[3] = { 0, 0, 0 };
+		int64 LoadAfter[3] = { 0, 0, 0 };
+		const auto Describe = [&](uint32 WaitV0, int32 Index)
+		{
+			const int32 Roster = Sim->GetPopulation();
+			WaitAfter[Index] = Sim->GetTramWaitSec(1);
+			PeopleAfter[Index] = Sim->GetTramPeople(1);
+			LoadAfter[Index] = Sim->GetTramPeopleLoad(1);
+			Leg[Index] = FString::Printf(TEXT("sol%d checked%d pop%d wait%d prev%d dv%u people%d load%lld walked%d |"), SolNow(), Sim->GetTransitCheckedSol(), Roster, Sim->GetTramWaitSec(1), Sim->GetTramLines()[0].PrevWaitSec,
+				Sim->GetTransitWaitVersion() - WaitV0, Sim->GetTramPeople(1), Sim->GetTramPeopleLoad(1), Sim->GetCommuteWalked());
+			for (int32 k = 0; k < Roster; ++k) { Leg[Index] += FString::Printf(TEXT(" %lld"), CommuteOf(k)); }
+		};
 		for (int32 Agent = 0; Agent < 2; ++Agent)
 		{
 			FString Le;
@@ -723,17 +825,29 @@ int32 RHRunTramSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubs
 			if (Agent) { for (int32 K = 0; K < (int32)(EraDt / (double)AgentDt); ++K) { AgentOnce(); } }
 			else { EraOnce(); }
 			Rolls[Agent] = Sim->GetTransitThresholds() - Rolls0;
-			// The step re-derives the seats from the real rooms (there are none): the hand-made seats are laid again, identically.
-			Sim->Debug_ClearColonistStations();
-			const int32 Roster = Sim->GetPopulation();
-			for (int32 k = 0; k < Roster; ++k) { SeatOnFloor(k, -1, k == 0 ? 13 : (k * 7 + 3) % 18); }
-			Leg[Agent] = FString::Printf(TEXT("sol%d checked%d pop%d wait%d prev%d dv%u people%d load%lld walked%d |"), SolNow(), Sim->GetTransitCheckedSol(), Roster, Sim->GetTramWaitSec(1), Sim->GetTramLines()[0].PrevWaitSec,
-				Sim->GetTransitWaitVersion() - WaitV0, Sim->GetTramPeople(1), Sim->GetTramPeopleLoad(1), Sim->GetCommuteWalked());
-			for (int32 k = 0; k < Roster; ++k) { Leg[Agent] += FString::Printf(TEXT(" %lld"), CommuteOf(k)); }
+			Describe(WaitV0, Agent); // the seats are the rooms' own: no hand-laid seat to put back
 		}
-		Expect(Leg[0] == Leg[1] && Rolls[0] == 1 && Rolls[1] == 1 && Leg[0].Contains(TEXT("pop40 ")) && Leg[0].Contains(TEXT("wait0 prev600")),
-			FString::Printf(TEXT("TM7 both bands roll the line once at the boundary (era %d, agent %d) and leave the same waits (600 s frozen before, 0 s after: the step's roll finds no rider left, previous 600), the same checked sol and the same 40 trips: %s [saved at %.0f s, boundary %.0f, lead %.0f]%s"), Rolls[0], Rolls[1], *Leg[0].Left(110), Boundary - 30.0, Boundary, Lead, Leg[0] == Leg[1] ? TEXT("") : *(FString(TEXT(" DIFFERENT: ")) + Leg[1].Left(110))));
+		// The third leg never saved: the same fixture, the same clock, one era step.
+		bool bThirdOk = false;
+		{
+			const bool bBuilt = Fixture();
+			const double Boundary3 = Lead30();
+			Sim->Debug_SetTramCapacity(5);
+			const int32 Rolls0 = Sim->GetTransitThresholds();
+			const uint32 WaitV0 = Sim->GetTransitWaitVersion();
+			EraOnce();
+			Rolls[2] = Sim->GetTransitThresholds() - Rolls0;
+			Describe(WaitV0, 2);
+			bThirdOk = bBuilt && Boundary3 == Boundary;
+		}
+		const int32 WantWait = Sim->ComputeTransitWaitSec(LoadAfter[0], 5);
+		Expect(Leg[0] == Leg[1] && Rolls[0] == 1 && Rolls[1] == 1 && Leg[0].Contains(TEXT("pop40 ")) && PeopleAfter[0] >= 3 && WaitAfter[0] > 0 && WaitAfter[1] > 0 && WaitAfter[0] == WantWait && WaitAfter[1] == WantWait && Leg[0].Contains(TEXT("prev600")),
+			FString::Printf(TEXT("TM7 both bands roll the line once at the boundary (era %d, agent %d) under a real load: %d riders, load %lld places on 5, so a queue forms - the wait frozen for the sol is %d s, above 0 and the figure TM4's formula gives (ceil((load - 5) x 120 / 5) = %d), the sol before's 600 s kept as previous - and leave the same checked sol and the same 40 trips: %s [saved at %.0f s, boundary %.0f]%s"),
+				Rolls[0], Rolls[1], PeopleAfter[0], LoadAfter[0], WaitAfter[0], WantWait, *Leg[0].Left(110), SavedAt, Boundary, Leg[0] == Leg[1] ? TEXT("") : *(FString(TEXT(" DIFFERENT: ")) + Leg[1].Left(110))));
 		Expect(Leg[0].Contains(FString::Printf(TEXT("sol%d "), SolBefore + 1)), FString::Printf(TEXT("TM7 the step crossed into sol %d in both bands"), SolBefore + 1));
+		Expect(bThirdOk && Rolls[2] == 1 && Leg[2] == Leg[0] && WaitAfter[2] == WantWait,
+			FString::Printf(TEXT("TM7 a third leg that never saved (the fixture rebuilt on the same clock) rolls the same: one roll (%d), the same wait (%d s), riders (%d), load (%lld) and trips as the loaded legs: %s%s"), Rolls[2], WaitAfter[2], PeopleAfter[2], LoadAfter[2], *Leg[2].Left(110),
+				Leg[2] == Leg[0] ? TEXT("") : *(FString(TEXT(" DIFFERENT")))));
 	}
 
 	// --- TM8. The caches, the keys, the build order, inertness. ---

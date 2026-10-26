@@ -143,6 +143,7 @@ URHSimWorldSubsystem::FRHDistrictMembershipKey URHSimWorldSubsystem::MakeDistric
 	{
 		// D6b (RC 6): moved only while a floor shape exists; 0 for ever otherwise.
 		Key.DeepCells = FloorCellsVersion;
+		EnsureBedAssignments(); // step-2 fix 2: the generation of the assignment of NOW, so a key is never built from the old one and derived twice
 		Key.DeepBeds = BedAssignVersion;
 	}
 	return Key;
@@ -197,6 +198,10 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 	{
 		return; // no shape and no line: no mapped floor, home cells are never built
 	}
+	// Step-2 fix 2: the bed pieces of NOW (never the last RefreshJobs' or another colony's). The call may re-derive them and bump the generation, so the key's
+	// BedAssign is stamped again after it. An unmapped colony returned above and never reaches it, so it derives exactly when it did.
+	const TMap<int32, int32>& BedPieces = EnsureBedAssignments();
+	Out.BedAssign = BedAssignVersion;
 	TArray<int32> Levels;
 	Geo.GetMappedLevels(Levels); // D6d: the floors that hold a shape or a tram line, ascending
 	TMap<int32, TArray<int32>> LevelResidents; // mapped Level -> colonist Ids
@@ -246,7 +251,7 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 			// A resident with a bed piece lives in that piece's cell (BuildBedAssignments gave pieces to the lowest Ids first;
 			// this reads its result and never re-derives it); the others, in Id order, take the legacy slots.
 			const FRHFurnitureInstance* Piece = nullptr;
-			if (const int32* PieceId = ColonistBedPiece.Find(Id))
+			if (const int32* PieceId = BedPieces.Find(Id))
 			{
 				Piece = FindFurniture(*PieceId);
 			}
@@ -604,6 +609,12 @@ bool URHSimWorldSubsystem::CanPaintDeepDistrict(FName Kind, int32 Level, int32 F
 	}
 	const FVector Origin = Shafts[0].HeadCm;
 	const FIntPoint A = CmToLattice(Origin, FromCm), B = CmToLattice(Origin, ToCm);
+	// Step-2 fix 5: a corner past the lattice bound is refused before any box loop runs (a rectangle at the int32 edge would overflow them).
+	if (!RH::IsLatticeInRange(A) || !RH::IsLatticeInRange(B))
+	{
+		OutReason = TEXT("That rectangle is out of range");
+		return false;
+	}
 	const FIntPoint Lo(FMath::Min(A.X, B.X), FMath::Min(A.Y, B.Y)), Hi(FMath::Max(A.X, B.X), FMath::Max(A.Y, B.Y));
 	const int64 W = (int64)Hi.X - Lo.X + 1, H = (int64)Hi.Y - Lo.Y + 1;
 	if (OutPreview)
@@ -780,6 +791,12 @@ bool URHSimWorldSubsystem::CanPaintDistrict(FName Kind, int32 Level, const FVect
 
 	// Surface ground: a rectangle of lattice cells.
 	const FIntPoint A = LatticeOf(FromCm), B = LatticeOf(ToCm);
+	// Step-2 fix 5: the same bound on the surface lattice (the loops below and ExecutePaintDistrict's run X <= Hi.X, ++X).
+	if (!RH::IsLatticeInRange(A) || !RH::IsLatticeInRange(B))
+	{
+		OutReason = TEXT("That rectangle is out of range");
+		return false;
+	}
 	const FIntPoint Lo(FMath::Min(A.X, B.X), FMath::Min(A.Y, B.Y)), Hi(FMath::Max(A.X, B.X), FMath::Max(A.Y, B.Y));
 	const int64 W = (int64)Hi.X - Lo.X + 1, H = (int64)Hi.Y - Lo.Y + 1;
 	if (OutPreview)

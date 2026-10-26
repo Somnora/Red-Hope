@@ -22,7 +22,8 @@
 //      the next; DC4 ShaftPeople counts each shaft ridden; DC5 off the net (no home cell, an unmapped floor) keeps the head anchor, and
 //      trips that differ only in their cells sort the same in two build orders; DC6 an unmapped floor in the same colony is byte-equal to a
 //      twin with no shape; DC7 the ramp at 60, 61 and 160; DC8 the era band against the agent band; DC9 the caches and keys (a tunnel cell
-//      that joins two digs moves the flows; the keys are 0 with no mapped floor; nothing derived is saved).
+//      that joins two digs moves the flows; the keys are 0 with no mapped floor; nothing derived is saved); DC10 the bed assignment is read at the
+//      moment of the read (step-2 fix 2): after a departure, across a zoning change at a sol boundary, and after a load that follows another colony.
 namespace
 {
 	// The octile line in integer cm (the same rule as the sim's, written again here).
@@ -718,6 +719,163 @@ int32 RHRunDeepCommuteSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWo
 		FullRamp();
 		for (int32 k = 0; k < 18; ++k) { SeatOnFloor(k, -1, k == 0 ? 13 : k); }
 		Expect(bLoaded && Sim->IsFloorMapped(-1) && CommuteOf(0) == Before0 && Before0 == 34828 && Sim->Debug_CommuteCachesFresh(), FString::Printf(TEXT("DC9 the colony loads back with its mapped floor and measures the same: %lld cm (%s)"), CommuteOf(0), *LoadErr));
+	}
+
+	// --- DC10. The bed assignment is the assignment of NOW (step-2 fix 2: D6b, D6c). ---
+	{
+		// The fixture is layout A (two unjoined digs, shaft 0's dig is cells 0..11, shaft 1's cells 12..17) with the floor mapped and the ramp full. A resident
+		// without a bed piece lives in a legacy bed: at 1 / 13 beds a cell the first legacy bed is the 13th legacy cell's, so with no bunk in dig A it falls in
+		// dig B (cell 12, or 13 when cell 3 holds a bed piece and so is not a legacy cell). Seats are Lab cells in dig A (8 and 9): a resident whose home is in
+		// dig B walks to them through two shafts (47,015 cm, over the 30,000 line), so that seat counts 1 - 0.15 (the ramp 1 x (1 - CommuteWorkMul 0.85)).
+		const double Cpc = 0.0769231;
+		const auto Zone = [&](int32 Cell, const TCHAR* Room) { return Sim->DesignateRoom(-1, Cell, FName(Room), R); };
+		const auto FurnishCot = [&](int32 Cell) -> bool
+		{
+			const FIntVector Key(-1, Cell, 0);
+			const int32 Before = Sim->GetFurniture().Num();
+			FRHCommand C;
+			C.Verb = FName("Furnish"); C.Target = FName("Cot"); C.Level = -1;
+			C.Location = Sim->GetCellCentreCm(Key);
+			C.Value = URHSimWorldSubsystem::EncodeFurnish(Cell, 0, 0);
+			Sim->Debug_AddSolidAt(LanderId, NStruct, 200.0, false);
+			const bool bOk = Send(C);
+			Sim->Debug_RefreshJobs();
+			return bOk && Sim->GetFurniture().Num() == Before + 1;
+		};
+		const auto Near = [](double A, double B) { return FMath::Abs(A - B) <= 1.0e-9; };
+		const auto Stock = [&]()
+		{
+			Sim->AddStock(FName("Food"), 6000.0); // a minute of sim time must not recall anyone
+			Sim->AddStock(FName("Water"), 600.0);
+			Sim->AddStock(FName("Oxygen"), 6000.0);
+		};
+		const auto ReSet = [&]() { Sim->Debug_SetGrowthEnabled(false); Sim->Debug_SetColonistsPerCell(Cpc); FullRamp(); };
+
+		// (a) A departure moves the bed assignment, and the step that follows must see it at once. Two residents R and S (R the lower Id); a cot in dig A's cell 3
+		// goes to R, so R is near and S (a legacy bed in dig B) is long: seat sum 1 + 0.85. R leaves; S takes the cot and is near, so the sum is 1. The step's
+		// RefreshJobs is the first after the departure: it must not read the pieces of the roster that was.
+		Expect(Build(false, 1, true) && Zone(3, TEXT("LivingQuarters")) && FurnishCot(3) && Zone(8, TEXT("Lab")) && Zone(9, TEXT("Lab")) && AddResidents(2, Cpc), TEXT("DC10 setup (a): layout A, a cot in dig A's cell 3, Labs in cells 8 and 9, two residents"));
+		FullRamp();
+		Sim->Debug_RefreshJobs();
+		const int32 ResR = ColonistAt(0), ResS = ColonistAt(1);
+		Expect(Sim->GetColonistBedPiece(ResR) != 0 && Sim->GetColonistBedPiece(ResS) == 0 && Sim->GetColonistHomeCell(ResR) == 3 && Sim->GetColonistHomeCell(ResS) == 13 && Near(Sim->GetLabYieldSeatSum(), 1.85),
+			FString::Printf(TEXT("DC10 before the departure R holds the cot (home cell %d, near) and S a legacy bed in dig B (cell %d, long): the Lab seat sum is 1 + 0.85 = %.4f"), Sim->GetColonistHomeCell(ResR), Sim->GetColonistHomeCell(ResS), Sim->GetLabYieldSeatSum()));
+		Stock();
+		FString PairErrA;
+		Expect(Sim->SaveColony(TEXT("dc10a"), PairErrA), FString::Printf(TEXT("DC10 the colony is saved for the era leg and the agent leg (%s)"), *PairErrA));
+		double SeatAtDeparture[2] = { -1.0, -1.0 }, SeatAfterStep[2] = { -1.0, -1.0 }, SeatAfterRefresh[2] = { -1.0, -1.0 };
+		int32 HomeOfS[2] = { INDEX_NONE, INDEX_NONE };
+		for (int32 Agent = 0; Agent < 2; ++Agent)
+		{
+			FString Le;
+			if (!Sim->LoadColony(TEXT("dc10a"), Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("DEEPCOMMUTE: leg load failed: %s"), *Le); ++Fails; }
+			ReSet();
+			const bool bLeft = Sim->Debug_RemoveColonist(ResR); // the departure runs one RefreshJobs of its own: the first after the roster moved
+			SeatAtDeparture[Agent] = Sim->GetLabYieldSeatSum();
+			if (Agent) { AgentOnce(); } else { EraOnce(); }
+			SeatAfterStep[Agent] = Sim->GetLabYieldSeatSum();
+			HomeOfS[Agent] = Sim->GetColonistHomeCell(ResS);
+			Sim->Debug_RefreshJobs(); // nothing has changed since the step: a cold recompute
+			SeatAfterRefresh[Agent] = Sim->GetLabYieldSeatSum();
+			if (!bLeft) { UE_LOG(LogRedHopeSim, Error, TEXT("DEEPCOMMUTE: R was not removed")); ++Fails; }
+		}
+		Expect(Near(SeatAtDeparture[0], 1.0) && Near(SeatAtDeparture[1], 1.0),
+			FString::Printf(TEXT("DC10 the RefreshJobs the departure itself runs already sees the new roster's beds: S holds the cot and is near, so the Lab seat sum is %.4f (agent leg) and %.4f (era leg) (1 for a near commuter, 0.85 for a long one)"), SeatAtDeparture[0], SeatAtDeparture[1]));
+		Expect(Near(SeatAfterStep[0], SeatAfterRefresh[0]) && Near(SeatAfterStep[1], SeatAfterRefresh[1]) && Near(SeatAfterStep[0], 1.0) && Near(SeatAfterStep[1], 1.0) && HomeOfS[0] == 3 && HomeOfS[1] == 3,
+			FString::Printf(TEXT("DC10 after R leaves and one step, S holds the cot and is near: the Lab seat sum is %.4f (agent) and %.4f (era), exactly what a cold RefreshJobs gives (%.4f, %.4f), and S's home is cell %d, %d"),
+				SeatAfterStep[0], SeatAfterStep[1], SeatAfterRefresh[0], SeatAfterRefresh[1], HomeOfS[0], HomeOfS[1]));
+		Expect(Near(SeatAfterStep[0], SeatAfterStep[1]), TEXT("DC10 the agent band and the era band leave the same seat sum after the departure"));
+
+		// (b) A zoning change at the step that crosses a sol boundary. R lives beside a cot that does not count as a bed (the Living row is switched off in
+		// memory, as the cavern suite patches CanBore), so R is a legacy resident in dig B and rides both shafts: a load of 2 places on a car of 1, a frozen
+		// wait. The saved file is made half a minute before the boundary. Then the row is on again and a Designate zones the cot's cell Living: the zoning
+		// alone moves the bed side (R takes the cot and is near, so nobody rides). The era band rolls between StepUplink and StepPopulation, the agent
+		// band rolls 300 sub-steps after a StepPopulation: both must freeze the same waits, and the true ones (0 s).
+		FRHRoomRow* LivingRow = const_cast<FRHRoomRow*>(World->GetSubsystem<URHDefinitionsSubsystem>()->GetRoom(FName("LivingQuarters")));
+		const bool bHadLiving = LivingRow && LivingRow->SliceActive;
+		Expect(Build(false, 1, true) && Fit(0) && Fit(1) && Zone(3, TEXT("LivingQuarters")) && FurnishCot(3) && Zone(8, TEXT("Lab")) && AddResidents(1, Cpc) && LivingRow, TEXT("DC10 setup (b): layout A with a car on each shaft, a cot in cell 3, a Lab in cell 8, one resident"));
+		FullRamp();
+		Stock();
+		Sim->Debug_SetTransitCapacity(1, 1);
+		const int32 ResB = ColonistAt(0);
+		Sim->Debug_RefreshJobs();
+		const bool bNearBefore = Sim->GetColonistHomeCell(ResB) == 3;
+		if (LivingRow) { LivingRow->SliceActive = false; }
+		Zone(9, TEXT("Lab")); // moves the zoning key: the cot no longer counts, the pieces and the homes re-derive
+		Sim->Debug_RefreshJobs();
+		Sim->Debug_RollTransit(SolNow());
+		const int32 WaitBefore0 = Sim->GetTransitWaitSec(0), WaitBefore1 = Sim->GetTransitWaitSec(1);
+		Expect(bNearBefore && Sim->GetColonistBedPiece(ResB) == 0 && Sim->GetColonistHomeCell(ResB) == 12 && WaitBefore0 > 0 && WaitBefore1 > 0,
+			FString::Printf(TEXT("DC10 with the Living row off the cot is no bed: R's home is cell %d in dig B and rides both shafts, so the frozen waits are %d s and %d s"), Sim->GetColonistHomeCell(ResB), WaitBefore0, WaitBefore1));
+		const double BoundaryB = (double)(SolNow() + 1) * SolLen;
+		const double LeadB = BoundaryB - 30.0 - Clock->GetSimSecondsTotal();
+		if (LeadB > 0.0) { Clock->Debug_AdvanceSimSeconds(LeadB); }
+		const int32 SolBeforeB = SolNow();
+		FString PairErrB;
+		Expect(Sim->SaveColony(TEXT("dc10b"), PairErrB) && SolNow() == SolBeforeB, FString::Printf(TEXT("DC10 the colony is saved half a minute before the sol boundary (sol %d; %s)"), SolBeforeB, *PairErrB));
+		FString LegB[2];
+		int32 WaitAfter0[2] = { -1, -1 }, WaitAfter1[2] = { -1, -1 };
+		for (int32 Agent = 0; Agent < 2; ++Agent)
+		{
+			FString Le;
+			if (!Sim->LoadColony(TEXT("dc10b"), Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("DEEPCOMMUTE: leg load failed: %s"), *Le); ++Fails; }
+			ReSet();
+			Sim->Debug_SetTransitCapacity(1, 1);
+			if (LivingRow) { LivingRow->SliceActive = true; }
+			FRHCommand C;
+			C.Verb = FName("Designate"); C.Target = FName("LivingQuarters"); C.Level = -1; C.Value = 3;
+			const double Lag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(0.0); // the order lands at the first step in both bands (the 45 s lag would put it after the agent band's boundary roll, 30 s in)
+			Sim->EnqueueCommand(C);
+			Sim->SetOrderLagSeconds(Lag0);
+			if (Agent) { for (int32 K = 0; K < (int32)(EraDt / (double)AgentDt); ++K) { AgentOnce(); } }
+			else { EraOnce(); }
+			WaitAfter0[Agent] = Sim->GetTransitWaitSec(0);
+			WaitAfter1[Agent] = Sim->GetTransitWaitSec(1);
+			LegB[Agent] = FString::Printf(TEXT("sol%d checked%d wait0 %d wait1 %d"), SolNow(), Sim->GetTransitCheckedSol(), WaitAfter0[Agent], WaitAfter1[Agent]);
+			if (LivingRow) { LivingRow->SliceActive = false; } // the next leg starts from the saved file's state
+		}
+		if (LivingRow) { LivingRow->SliceActive = bHadLiving; }
+		Expect(LegB[0] == LegB[1] && LegB[0].Contains(FString::Printf(TEXT("sol%d "), SolBeforeB + 1)) && WaitAfter0[0] == 0 && WaitAfter1[0] == 0 && WaitAfter0[1] == 0 && WaitAfter1[1] == 0,
+			FString::Printf(TEXT("DC10 the Designate lands at the boundary step and both bands freeze the same waits - the true ones, 0 s, for R lives beside the cot now: era [%s], agent [%s]"), *LegB[0], *LegB[1]));
+
+		// (c) A load that follows another colony. F has two cots (piece 1 in dig B's cell 12, piece 2 in dig A's cell 3): R, the lowest Id, takes the one in the
+		// lowest cell, piece 2, and is near. G has only piece 1, in cell 12: R is far there. Loading F after G must not read G's pieces (their Ids collide with F's):
+		// the seat sums right after each load of F are equal, and a RefreshJobs right after a load changes nothing.
+		const auto BuildColonyFile = [&](bool bTwoCots, const TCHAR* Slot) -> bool
+		{
+			bool bOk = Build(false, 1, true) && Zone(12, TEXT("LivingQuarters")) && FurnishCot(12);
+			if (bTwoCots) { bOk &= Zone(3, TEXT("LivingQuarters")) && FurnishCot(3); }
+			bOk &= Zone(8, TEXT("Lab")) && AddResidents(1, Cpc);
+			FullRamp();
+			Sim->Debug_RefreshJobs();
+			FString E;
+			return bOk && Sim->SaveColony(Slot, E);
+		};
+		const bool bF = BuildColonyFile(true, TEXT("dc10f"));
+		const double SumF0 = Sim->GetLabYieldSeatSum();
+		const bool bG = BuildColonyFile(false, TEXT("dc10g"));
+		const double SumG = Sim->GetLabYieldSeatSum();
+		Expect(bF && bG && Near(SumF0, 1.0) && Near(SumG, 0.85), FString::Printf(TEXT("DC10 setup (c): colony F (two cots, R takes the one in cell 3: seat sum %.4f) and colony G (one cot in cell 12: %.4f) are saved"), SumF0, SumG));
+		double SumF[3] = { -1.0, -1.0, -1.0 }, SumFRefresh[3] = { -1.0, -1.0, -1.0 };
+		int32 HomeF[3] = { INDEX_NONE, INDEX_NONE, INDEX_NONE };
+		const TCHAR* Order[3] = { TEXT("dc10f"), TEXT("dc10g"), TEXT("dc10f") };
+		// The loads themselves, read cold: no RefreshJobs and no setter between a load and the sum (the tuning is set once, before the first load).
+		Reset();
+		ReSet();
+		for (int32 Load = 0; Load < 3; ++Load)
+		{
+			FString Le;
+			if (!Sim->LoadColony(Order[Load], Le) || !Le.IsEmpty()) { UE_LOG(LogRedHopeSim, Error, TEXT("DEEPCOMMUTE: load failed: %s"), *Le); ++Fails; }
+			SumF[Load] = Sim->GetLabYieldSeatSum();
+			HomeF[Load] = Sim->GetColonistHomeCell(ColonistAt(0));
+			Sim->Debug_RefreshJobs();
+			SumFRefresh[Load] = Sim->GetLabYieldSeatSum();
+		}
+		Expect(Near(SumF[0], SumF[2]) && Near(SumF[0], 1.0) && Near(SumF[1], 0.85) && Near(SumF[0], SumFRefresh[0]) && Near(SumF[1], SumFRefresh[1]) && Near(SumF[2], SumFRefresh[2]) && HomeF[0] == 3 && HomeF[2] == 3 && HomeF[1] == 12,
+			FString::Printf(TEXT("DC10 loads of F, G, F: the seat sums right after each load are %.4f, %.4f, %.4f (the two loads of F alike; G's own is the far one), each equal to a RefreshJobs straight after (%.4f, %.4f, %.4f); R's home cell %d, %d, %d"),
+				SumF[0], SumF[1], SumF[2], SumFRefresh[0], SumFRefresh[1], SumFRefresh[2], HomeF[0], HomeF[1], HomeF[2]));
+		Expect(Sim->Debug_CommuteCachesFresh() && Sim->Debug_DistrictCachesFresh(), TEXT("DC10 the flows and the district caches are fresh after the loads"));
 	}
 
 	return Finish();

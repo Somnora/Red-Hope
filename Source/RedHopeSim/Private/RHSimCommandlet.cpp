@@ -8399,6 +8399,20 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(!CanPaint(NHomes, 0, 2, 0, 3, Why) && Why.Contains(TEXT("two districts")) && Why.Contains(TEXT("Gale")) && Why.Contains(TEXT("Jezero")),
 				FString::Printf(TEXT("D2 a rectangle over #1 and #2 is refused, even of their own Kind (%s)"), *Why));
 			Expect(!Paint(NHomes, 0, 2, 0, 3) && Note.Contains(TEXT("two districts")) && Sim->GetDistricts().Num() == 2, FString::Printf(TEXT("D2 the uplink refuses it too (%s)"), *Note));
+			// Step-2 fix 5: a surface paint corner past the lattice bound (2^20 cells) is refused before any loop runs, and the rectangle at the int32 edge at once.
+			{
+				const bool bRange = !CanPaint(NHomes, 1048577, 0, 1048577, 0, Why) && Why.Contains(TEXT("out of range"));
+				Expect(bRange && Sim->GetDistricts().Num() == 2, FString::Printf(TEXT("D2 (step-2 fix 5) a surface paint corner at x 1,048,577 is out of range (%s)"), *Why));
+				Expect(!CanPaint(NHomes, 0, -1048577, 0, -1048577, Why) && Why.Contains(TEXT("out of range")) && !CanPaint(NHomes, -1048577, 0, -1048577, 0, Why) && Why.Contains(TEXT("out of range")),
+					TEXT("D2 (step-2 fix 5) and on the other axis and the other sign"));
+				Expect(!CanPaint(NHomes, 1048576, 0, 1048576, 0, Why) || !Why.Contains(TEXT("out of range")), TEXT("D2 (step-2 fix 5) the bound itself, 2^20 = 1,048,576, is not out of range"));
+				if (bRange)
+				{
+					// Only when the bound held: 2,147,483,640 to 2,147,483,647 is 8 wide, and its loops would never end.
+					Expect(!CanPaint(NHomes, 2147483640, 0, 2147483647, 0, Why) && Why.Contains(TEXT("out of range")), FString::Printf(TEXT("D2 (step-2 fix 5) a rectangle at the int32 edge is refused at once (%s)"), *Why));
+					// (No order is sent here: an uplink order is one more command Id and one more era step, which would move every line this suite prints after it.)
+				}
+			}
 			// Nothing new to paint.
 			Expect(!CanPaint(NHomes, -1, -1, 1, 1, Why, &Pre) && Why.Contains(TEXT("already part of Gale")) && Pre.CellsNew == 0 && Pre.JoinId == 1, FString::Printf(TEXT("D2 painting ground a district already holds is refused (%s)"), *Why));
 			// The cap: 32 x 32 cells an order.
@@ -12596,6 +12610,41 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
 		}
 
+		// --- K6c. Step-2 nit 14: a floor table whose levels do not strictly descend loads, but its next autosave is refused (the warmth block is written in table
+		// order and read requiring descending levels). A game-written table always descends, so the reader refuses the other order before teardown. ---
+		{
+			Reset();
+			Sim->ExtendShaft(3, FVector(3000.0, 3000.0, 0.0));
+			Sim->ExcavateFloor(-1, 6, R);
+			Sim->ExcavateFloor(-2, 6, R);
+			Expect(Sim->SaveColony(TEXT("deepk6o"), SaveErr), FString::Printf(TEXT("K6c saved a colony with six cells on -1 and six on -2 (%s)"), *SaveErr));
+			TArray<uint8> Good2;
+			const bool bRead2 = FFileHelper::LoadFileToArray(Good2, *DeepPath(TEXT("deepk6o"))) && Good2.Num() > 140;
+			const auto Rd2 = [&](int32 At2) { int32 V = INDEX_NONE; if (bRead2 && At2 >= 0 && At2 + 4 <= Good2.Num()) { FMemory::Memcpy(&V, Good2.GetData() + At2, 4); } return V; };
+			const int32 FloorCount2 = Rd2(20), Level1 = Rd2(28), Cells1 = Rd2(32);
+			const int32 Plan1 = Rd2(36 + Cells1 * 8);
+			const int32 Floor2At = 36 + Cells1 * 8 + 4 + Plan1 * 8; // the second floor's region; its level is 4 bytes further
+			Expect(bRead2 && FloorCount2 == 2 && Level1 == -1 && Cells1 == 6 && Plan1 == 0 && Rd2(Floor2At + 4) == -2,
+				FString::Printf(TEXT("K6c the table lists two floors, -1 then -2 (levels %d and %d), no plan"), Level1, Rd2(Floor2At + 4)));
+			if (bRead2)
+			{
+				TArray<uint8> Swapped = Good2;
+				const int32 L2 = -2, L1b = -1;
+				FMemory::Memcpy(Swapped.GetData() + 28, &L2, 4);              // the first listed floor is -2
+				FMemory::Memcpy(Swapped.GetData() + Floor2At + 4, &L1b, 4);   // the second is -1: the levels now rise
+				FFileHelper::SaveArrayToFile(Swapped, *DeepPath(TEXT("deepk6order")));
+				const int32 PopA = Sim->GetPopulation(), BuildA = Sim->GetBuildings().Num(), CellsA = Sim->GetFloorCarvedCells(-1), CellsB = Sim->GetFloorCarvedCells(-2), DepthA = Sim->GetShaftDepth();
+				const uint32 VerA = Sim->GetFloorCellsVersion();
+				FString E7;
+				const bool bLoaded = Sim->LoadColony(TEXT("deepk6order"), E7);
+				const bool bSame = Sim->GetPopulation() == PopA && Sim->GetBuildings().Num() == BuildA && Sim->GetFloorCarvedCells(-1) == CellsA && Sim->GetFloorCarvedCells(-2) == CellsB && Sim->GetShaftDepth() == DepthA && Sim->GetFloorCellsVersion() == VerA;
+				Expect(!bLoaded && bSame && E7.Contains(TEXT("floor table")) && E7.Contains(TEXT("floor -1 is listed after floor -2")),
+					FString::Printf(TEXT("K6c a hand-made table that lists -2 before -1 is refused before teardown and the colony is untouched (%s)"), *E7));
+			}
+			FString Le2;
+			Expect(Sim->LoadColony(TEXT("deepk6o"), Le2) && Le2.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Sim->GetFloorCarvedCells(-2) == 6, FString::Printf(TEXT("K6c and the game-written table still loads (%s)"), *Le2));
+		}
+
 		// --- K6b. A room array longer than its floor is repaired on load, not refused. ---
 		{
 			Reset();
@@ -14125,6 +14174,23 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				for (int32 K = 0; K < 5 && Sim->GetUplinkQueue().Num() > 0; ++K) { Step(); }
 				Expect(bSunk && Sim->GetTunnels().Num() == 0 && LastReject().Contains(TEXT("shaft stands")), FString::Printf(TEXT("TN2 and when a shaft was sunk on its line meanwhile (%s)"), *LastReject()));
 			}
+			// Step-2 fix 3: one save holds 4,096 tunnel records and every order stays on the list for ever (finished and cancelled ones too), so the order past the
+			// last is refused, by the preflight and by the order, whatever else is wrong with the line.
+			Expect(TwoDigs(), TEXT("TN2 cap setup: two digs"));
+			{
+				const int32 Padded = Sim->Debug_PadTunnelRecords(RH::MaxTunnelRecords - 1, -1, FIntPoint(2, 1), FIntPoint(3, 1));
+				FString Wc;
+				const auto TryCap = [&](int32 Level, const FIntPoint& A, const FIntPoint& B, FString& OutWhy) { return Sim->CanDigTunnel(Level, PtCm(A.X, A.Y), PtCm(B.X, B.Y), OutWhy); };
+				Expect(Padded == 4095 && Sim->GetTunnels().Num() == 4095 && Sim->GetOpenTunnelCount() == 0 && Sim->GetNextTunnelId() == 4096 && TryCap(-1, FIntPoint(2, 0), FIntPoint(10, 0), Wc),
+					FString::Printf(TEXT("TN2 cap setup: %d cancelled records are on the list, none open, the next Id is %d, and a real line is still allowed (%s)"), Sim->GetTunnels().Num(), Sim->GetNextTunnelId(), *Wc));
+				Expect(TunnelOrder(-1, FIntPoint(2, 0), FIntPoint(10, 0)) && Sim->GetTunnels().Num() == RH::MaxTunnelRecords && Sim->GetTunnels().Last().Id == 4096,
+					FString::Printf(TEXT("TN2 the 4,096th order is accepted (%d records)"), Sim->GetTunnels().Num()));
+				const bool bPre = !TryCap(-1, FIntPoint(-2, 0), FIntPoint(-3, 0), Wc) && Wc.Contains(TEXT("the most one save can hold")) && Wc.Contains(TEXT("4096 tunnels"));
+				Expect(bPre, FString::Printf(TEXT("TN2 the preflight refuses the 4,097th with the cap reason (%s)"), *Wc));
+				const bool bOrder = !TunnelOrder(-1, FIntPoint(-2, 0), FIntPoint(-3, 0)) && LastReject().Contains(TEXT("the most one save can hold")) && Sim->GetTunnels().Num() == RH::MaxTunnelRecords && Sim->GetNextTunnelId() == 4097;
+				Expect(bOrder, FString::Printf(TEXT("TN2 the order is rejected with the same reason and nothing is appended: %d records, next Id %d (%s)"), Sim->GetTunnels().Num(), Sim->GetNextTunnelId(), *LastReject()));
+				Expect(!TryCap(-9, FIntPoint(-2, 0), FIntPoint(-3, 0), Wc) && Wc.Contains(TEXT("the most one save can hold")), FString::Printf(TEXT("TN2 the cap is taken first, whatever else is wrong with the line: a floor no shaft reaches gets the cap's reason too (%s)"), *Wc));
+			}
 		}
 
 		// --- TN3. The chain, literally: X first, then Y, both ends included. ---
@@ -14494,6 +14560,44 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
+			// Step-2 nit 16: a flag of 2 (two-ended or cancelled) is refused through OutError with no Error line of any category; a flag of 1 still loads.
+			{
+				struct FAnyErrorCounter : public FOutputDevice
+				{
+					int32 Count = 0;
+					virtual void Serialize(const TCHAR* /*Text*/, ELogVerbosity::Type Verbosity, const FName& /*Category*/) override { if (Verbosity == ELogVerbosity::Error) { ++Count; } }
+				};
+				FAnyErrorCounter Errs;
+				GLog->AddOutputDevice(&Errs);
+				int32 LoggedCancel = 0, LoggedTwo = 0;
+				bool bCancelRefused = false, bTwoRefused = false;
+				{ TArray<uint8> Bad = Good; Put(Bad, T1 + 32, 2); const int32 E0 = Errs.Count; bCancelRefused = TryFile(TEXT("tunnelsh13"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("flag")); LoggedCancel = Errs.Count - E0; }
+				FString ECancel = E;
+				{ TArray<uint8> Bad = Good; Put(Bad, T2 + 28, 2); const int32 E0 = Errs.Count; bTwoRefused = TryFile(TEXT("tunnelsh14"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("flag")); LoggedTwo = Errs.Count - E0; }
+				GLog->RemoveOutputDevice(&Errs);
+				Expect(bCancelRefused && bTwoRefused && LoggedCancel == 0 && LoggedTwo == 0,
+					FString::Printf(TEXT("TN8 (nit 16) a cancelled flag of 2 and a two-ended flag of 2 are each refused with no Error line of any category (%d and %d logged) (%s | %s)"), LoggedCancel, LoggedTwo, *ECancel, *E));
+				TArray<uint8> One = Good; Put(One, T1 + 32, 1);
+				FFileHelper::SaveArrayToFile(One, *SaveFilePath(TEXT("tunnelsh15")));
+				FString E1c;
+				Expect(Sim->LoadColony(TEXT("tunnelsh15"), E1c) && E1c.IsEmpty() && Sim->FindTunnel(1) && Sim->FindTunnel(1)->bCancelled,
+					FString::Printf(TEXT("TN8 (nit 16) and a flag of 1 still loads (%s)"), *E1c));
+			}
+			// Step-2 fix 3: at the cap of 4,096 records a save loads back, and the order past it is refused, so the save after it loads too.
+			{
+				Expect(TwoDigs(), TEXT("TN8 cap setup: two digs"));
+				const int32 Padded = Sim->Debug_PadTunnelRecords(RH::MaxTunnelRecords - 1, -1, FIntPoint(2, 1), FIntPoint(3, 1));
+				Expect(Padded == 4095 && TunnelOrder(-1, FIntPoint(2, 0), FIntPoint(10, 0)) && Sim->GetTunnels().Num() == RH::MaxTunnelRecords, FString::Printf(TEXT("TN8 (3) setup: %d records, the last a real order"), Sim->GetTunnels().Num()));
+				FString Ec;
+				Expect(Sim->SaveColony(TEXT("tunnelscap"), SaveErr) && Sim->LoadColony(TEXT("tunnelscap"), Ec) && Ec.IsEmpty() && Sim->GetTunnels().Num() == RH::MaxTunnelRecords && Sim->GetNextTunnelId() == 4097 && Sim->FindTunnel(4096),
+					FString::Printf(TEXT("TN8 (3) a colony with 4,096 records saves and loads back with an empty error (%d records; %s)"), Sim->GetTunnels().Num(), *Ec));
+				const bool bRefused = !TunnelOrder(-1, FIntPoint(-2, 0), FIntPoint(-3, 0)) && Sim->GetTunnels().Num() == RH::MaxTunnelRecords;
+				Ec.Reset();
+				Expect(bRefused && Sim->SaveColony(TEXT("tunnelscap2"), SaveErr) && Sim->LoadColony(TEXT("tunnelscap2"), Ec) && Ec.IsEmpty() && Sim->GetTunnels().Num() == RH::MaxTunnelRecords,
+					FString::Printf(TEXT("TN8 (3) the 4,097th order is refused, and the save made after it still loads (%d records; %s)"), Sim->GetTunnels().Num(), *Ec));
+			}
+			// The colony of the next steps is the one the good file made, as before.
+			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetOpenTunnelCount() == 2, FString::Printf(TEXT("TN8 the good file loads again, both tunnels open (%s)"), *Le));
 			// A cancelled tunnel's uncarved line may carry a shaft column later; the file that records it must load.
 			Expect(CancelOrder(1), TEXT("TN8 tunnel 1 is cancelled"));
 			int32 NewId = INDEX_NONE;

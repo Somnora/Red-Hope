@@ -21,7 +21,8 @@
 //  independent oracle; DD4 counts, beds and seats per shape; DD5 a whole-floor district is byte-equal with and without a shape elsewhere;
 //  DD6 DeepCells zones free cells, then carves eligible rock, the ghost equals the carve, no carved point left in Plan (RC 3); DD7 civic
 //  stays inside the shape; DD8 era against the agent band; DD9 the save (the layout, two shapes on one floor, every hand-made refusal,
-//  a v48 file); DD10 the keys (RC 6) and -RHVerifyCaches' fresh checks.
+//  a v48 file, and a district list with a duplicated Id - step-2 fix 4); DD10 the keys (RC 6) and -RHVerifyCaches' fresh checks.
+//  DD1 also holds step-2 fix 5: a paint corner past the lattice bound (2^20 cells) is refused, and the box at the int32 edge at once.
 namespace
 {
 	// Counts the Error lines LogRedHopeSim prints while it is attached: a structural refusal at load must come back through OutError and
@@ -32,6 +33,16 @@ namespace
 		virtual void Serialize(const TCHAR* /*Text*/, ELogVerbosity::Type Verbosity, const FName& Category) override
 		{
 			if (Verbosity == ELogVerbosity::Error && Category == FName(TEXT("LogRedHopeSim"))) { ++Count; }
+		}
+	};
+
+	// Keeps the Warning lines LogRedHopeSim prints while it is attached (step-2 fix 4: a repair after teardown is a Warning that names what it dropped).
+	struct FRHWarningLineCapture : public FOutputDevice
+	{
+		TArray<FString> Lines;
+		virtual void Serialize(const TCHAR* Text, ELogVerbosity::Type Verbosity, const FName& Category) override
+		{
+			if (Verbosity == ELogVerbosity::Warning && Category == FName(TEXT("LogRedHopeSim"))) { Lines.Add(Text); }
 		}
 	};
 }
@@ -290,6 +301,23 @@ int32 RHRunDeepDistrictsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSim
 		for (const FRHDistrict& D : Sim->GetDistricts()) { Points += D.Deep.Num(); }
 		Expect(Painted == 8 && Points == RH::MaxDeepPoints && Sim->GetDistricts().Num() == 8 && !CanShape(NHomes, -1, 1, 20, 20, 20, 20, Why) && Why.Contains(TEXT("most the sim keeps")) && Why.Contains(TEXT("65536")),
 			FString::Printf(TEXT("DD1 the cap: eight shapes of 8,192 points are %d, the ninth point is refused (%s)"), Points, *Why));
+	}
+
+	// --- DD1 (step-2 fix 5): a deep paint corner past the lattice bound is refused before any loop; the int32 edge is refused at once. ---
+	{
+		Reset();
+		FString Wr;
+		const bool bRange = !CanShape(NHomes, -1, 1, 1048577, 0, 1048577, 0, Wr) && Wr.Contains(TEXT("out of range"));
+		Expect(bRange && Sim->GetDistricts().Num() == 0, FString::Printf(TEXT("DD1 (5) a deep paint corner at x 1,048,577 is out of range, nothing is painted (%s)"), *Wr));
+		Expect(!CanShape(NHomes, -1, 1, 0, -1048577, 1, -1048577, Wr) && Wr.Contains(TEXT("out of range")) && !CanShape(NHomes, -1, 1, -1048577, 0, -1048577, 0, Wr) && Wr.Contains(TEXT("out of range")),
+			TEXT("DD1 (5) and on the other axis and the other sign"));
+		Expect(!CanShape(NHomes, -1, 1, 1048576, 0, 1048576, 0, Wr) || !Wr.Contains(TEXT("out of range")), TEXT("DD1 (5) the bound itself, 2^20 = 1,048,576, is not out of range"));
+		if (bRange)
+		{
+			// Only when the bound held: a rectangle from 2,147,483,640 to 2,147,483,647 is 8 wide, and its loops would never end.
+			Expect(!CanShape(NHomes, -1, 1, 2147483640, 0, 2147483647, 0, Wr) && Wr.Contains(TEXT("out of range")), FString::Printf(TEXT("DD1 (5) a rectangle at the int32 edge is refused at once (%s)"), *Wr));
+			Expect(!Shape(NHomes, -1, 1, 2147483640, 0, 2147483647, 0) && Note.Contains(TEXT("out of range")) && Sim->GetDistricts().Num() == 0, FString::Printf(TEXT("DD1 (5) and the order is rejected at the uplink, nothing painted (%s)"), *Note));
+		}
 	}
 
 	// --- DD2. The frame: an off-grid head maps a building exactly; the same point through LatticeOf would not. ---
@@ -786,6 +814,53 @@ int32 RHRunDeepDistrictsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSim
 		{ TArray<uint8> T = W; T.SetNum(At + 8); Expect(TryFile(TEXT("deepr18"), T, Err) && Err.Contains(TEXT("district count 5")), FString::Printf(TEXT("DD9 a file cut short is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W; const uint32 V48 = 48; FMemory::Memcpy(T.GetData() + 4, &V48, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("deepr19"))); FString E48; const bool bOk = Sim->LoadColony(TEXT("deepr19"), E48); Expect(!bOk && E48.Contains(TEXT("Save format mismatch")) && E48.Contains(TEXT("version 48")) && E48.Contains(TEXT("/55")), FString::Printf(TEXT("DD9 a v48 file is refused as a version error (%s)"), *E48)); }
 		Expect(DistrictDigest() == D0, TEXT("DD9 after all of that the colony is exactly as it was"));
+
+		// Step-2 fix 4: the district list of the file names Id 2 twice (district #3's Id is overwritten). The deep block checks only the skeleton's own order,
+		// so it passes before teardown; the loader must repair with a Warning that names the duplicate (never crash on the shape the first #2 already took,
+		// never print an Error line) and drop it: four districts, and #2 still holds its own shape. A record starts int32 Id, FString Kind, FString Name.
+		{
+			const FRHDistrict* D3 = Find(3);
+			const auto FStr = [](const FString& S)
+			{
+				TArray<uint8> B;
+				const int32 N = S.Len() + 1;
+				B.SetNum(4 + N);
+				FMemory::Memcpy(B.GetData(), &N, 4);
+				for (int32 i = 0; i < S.Len(); ++i) { B[4 + i] = (uint8)S[i]; }
+				B[4 + S.Len()] = 0;
+				return B;
+			};
+			TArray<uint8> Pat;
+			if (D3) { Pat = FStr(D3->Kind.ToString()); Pat.Append(FStr(D3->Name)); }
+			int32 Found = INDEX_NONE, Matches = 0;
+			for (int32 I = 4; D3 && I + Pat.Num() <= W.Num(); ++I)
+			{
+				if (FMemory::Memcmp(W.GetData() + I, Pat.GetData(), Pat.Num()) == 0) { if (Found == INDEX_NONE) { Found = I; } ++Matches; }
+			}
+			Expect(D3 && Matches == 1 && Rd(W, Found - 4) == 3 && D3->Kind == NResearch,
+				FString::Printf(TEXT("DD9 (fix 4) setup: district #3's Kind and Name are found once in the file, straight after its Id 3 (%d match(es), Id %d there, at byte %d)"), Matches, Found == INDEX_NONE ? -1 : Rd(W, Found - 4), Found));
+			if (D3 && Matches == 1 && Rd(W, Found - 4) == 3)
+			{
+				TArray<uint8> T = W;
+				PutI(T, Found - 4, 2);
+				FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("deepdup")));
+				FRHWarningLineCapture Warnings;
+				GLog->AddOutputDevice(&Warnings);
+				FString Ed;
+				const bool bLoaded = LoadCounted(TEXT("deepdup"), Ed);
+				GLog->RemoveOutputDevice(&Warnings);
+				int32 Named = 0;
+				for (const FString& Line : Warnings.Lines) { Named += Line.Contains(TEXT("district #2 repeats or goes back on the Id order; it is dropped")) ? 1 : 0; }
+				Expect(bLoaded && Ed.IsEmpty() && LoadErrorLines == 0 && Named == 1,
+					FString::Printf(TEXT("DD9 (fix 4) a district list with Id 2 twice loads (%d), with one Warning that names the duplicate (%d) and no Error line (%d) (%s)"), bLoaded ? 1 : 0, Named, LoadErrorLines, *Ed));
+				Expect(Sim->GetDistricts().Num() == 4 && Sim->GetDistricts()[0].Id == 1 && Sim->GetDistricts()[1].Id == 2 && Sim->GetDistricts()[2].Id == 4 && Sim->GetDistricts()[3].Id == 5
+					&& Find(2) && Find(2)->Kind == NIndustry && Find(2)->Deep.Num() == 2 && Find(2)->IsDeep() && Sim->GetDistrictOfFloorPoint(-1, FIntPoint(3, 3)) == 2 && Find(1) && Find(1)->Deep.Num() == 4,
+					FString::Printf(TEXT("DD9 (fix 4) four districts (#1, #2, #4, #5) are left, and #2 holds its own shape: Industry, two points, (3,3) on -1 is its own (%d districts)"), Sim->GetDistricts().Num()));
+				Expect(Sim->Debug_DistrictCachesFresh() && Sim->Debug_CommuteCachesFresh(), TEXT("DD9 (fix 4) the district caches and the commute flows are fresh after the repair"));
+			}
+			FString Back;
+			Expect(LoadCounted(TEXT("deepfile"), Back) && Back.IsEmpty() && DistrictDigest() == D0, TEXT("DD9 (fix 4) the good file still loads, all five districts"));
+		}
 
 		// A colony with two open projects holding points: the points round-trip, and a loaded colony equals a twin that never saved.
 		Reset();

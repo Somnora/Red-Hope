@@ -160,8 +160,10 @@ void URHSimWorldSubsystem::ExecuteLayTramLine(const FRHCommand& Cmd)
 	if (bFirst)
 	{
 		// Gate-D placeholder copy (row N1 of docs/qa/2026-10-15/gate-d-wording.md), said plainly.
-		const FString Alert = FString::Printf(TEXT("Tram line %d is running on tunnel %d. People ride it between its two ends; each line carries %d people a sol before a queue forms. Robots keep to the tunnels and the lifts."),
-			L.Id, L.TunnelId, TramPlacesPerSol);
+		// Each rider takes two places a sol (a line's load is 2 x its commuters x the ramp), so a line carries half its places in people. Laying a line maps its floor, so every
+		// commute there is measured by the walk from then on.
+		const FString Alert = FString::Printf(TEXT("Tram line %d is running on tunnel %d. People ride it between its two ends; each line carries %d people a sol before a queue forms. Laying a line maps its floor, so commutes there are now measured by walking. Robots keep to the tunnels and the lifts."),
+			L.Id, L.TunnelId, TramPlacesPerSol / 2);
 		OnAlert.Broadcast(Alert);
 	}
 }

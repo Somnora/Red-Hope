@@ -66,6 +66,7 @@ K.BuildingCount = Buildings.Num();
 	if (EnsureDistrictGeo().AnyMapped())
 	{
 		K.DeepCells = FloorCellsVersion; // D6b (RC 6): 0 for ever while no floor shape exists
+		EnsureBedAssignments(); // step-2 fix 2: the generation of the assignment of NOW, so a key is never built from the old one and derived twice
 		K.DeepBeds = BedAssignVersion;
 		K.DeepTunnels = TunnelsVersion;  // D6c (RC 6): the people's walk network (cells, tunnels, shafts, districts), all 0 for ever with no mapped floor
 		K.DeepShafts = ShaftsVersion;

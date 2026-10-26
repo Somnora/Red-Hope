@@ -1015,7 +1015,8 @@ void ARHPlayerController::Tick(float DeltaTime)
 				}
 				const URHDefinitionsSubsystem* DefsSub = World->GetSubsystem<URHDefinitionsSubsystem>();
 				const FRHRecipeRow* Carve = DefsSub ? DefsSub->GetRecipe(FName("CarveCell")) : nullptr;
-				const double HoursPerCell = Carve ? Carve->BatchTime_h : 3.0;
+				// Nit 12: a cell takes the floor's own dig time (D5 depth: past the cool line the recipe's hours x GetDigPermille), at the floor shown.
+				const double HoursPerCell = (Carve ? Carve->BatchTime_h : 3.0) * (double)Sim->GetDigPermille(GetShownLevel()) / 1000.0;
 				const double SpoilPerCell = Carve ? URHDefinitionsSubsystem::ParseResourceList(Carve->Outputs).FindRef(FName("Regolith")) : 1200.0;
 				FString Tip = FString::Printf(TEXT("TUNNEL floor %d: %d cell%s  ·  %.0f Borer-hours  ·  %.1f t spoil"), ActiveLevel, Pre.Cells > 0 ? Pre.Cells : Len, (Pre.Cells > 0 ? Pre.Cells : Len) == 1 ? TEXT("") : TEXT("s"),
 					(Pre.Cells > 0 ? Pre.Cells : Len) * HoursPerCell, (Pre.Cells > 0 ? Pre.Cells : Len) * SpoilPerCell / 1000.0);

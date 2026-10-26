@@ -226,6 +226,7 @@ struct REDHOPESIM_API FRHPowerState
 	UPROPERTY() double BatteryCapWh = 0.0;
 	UPROPERTY() bool bDeficit = false;
 	UPROPERTY() int32 ShedCount = 0;           // buildings (and D5 depth cooling entries) currently unpowered by shedding
+	UPROPERTY() int32 ShedFloors = 0;          // nit 11, derived and never saved: how many of ShedCount are cooling floors rather than machines (the POWER tile names both)
 	UPROPERTY() double CoolingW = 0.0;         // D5 depth: the deep floors' cooling load this step (inside LoadW; 0 with no deep floor)
 	UPROPERTY() int32 CoolingFloors = 0;       // D5 depth: how many deep floors carry a cooling load
 };
@@ -372,6 +373,11 @@ namespace RH
 	constexpr int32 CavernMaxSide = 8;        // cells along either side of the box
 	constexpr int32 CavernMaxFloors = 3;      // floors a cavern spans
 	constexpr int32 MaxOpenCaverns = 2;       // open (not cancelled, something left to carve) at once
+	// Step-2 fix 5: a lattice corner is a refusal beyond this, never an overflow. 2^20 cells is about 10,000 km of lattice, so no box of play is near it,
+	// while a box loop (X <= Max.X, ++X) and a cavern's midpoint can never reach int32's edge. Compared in int64, so INT32_MIN, a CmToLattice that
+	// saturated and a NaN that rounded to the edge are all out.
+	constexpr int32 MaxLatticeCoord = 1 << 20;
+	inline bool IsLatticeInRange(const FIntPoint& P) { return FMath::Abs((int64)P.X) <= (int64)MaxLatticeCoord && FMath::Abs((int64)P.Y) <= (int64)MaxLatticeCoord; }
 	constexpr int32 CavernMaxSideCap = 32;
 	constexpr int32 CavernMaxFloorsCap = 8;
 	constexpr int32 MaxCavernRecords = 1024;  // every cavern ever ordered stays on the list (finished and cancelled ones included)
@@ -416,6 +422,7 @@ struct FRHCavern
 	mutable bool bCounted = false;    // derived, never saved: LeftOnFloor is good for CountedAt (a FloorCellsVersion)
 	mutable uint32 CountedAt = 0;
 	mutable TArray<int32> LeftOnFloor; // uncarved box points per floor, index Top - Level
+	mutable int32 CellsCarved = 0;     // derived, never saved: cells its Borers carved since it was ordered or the colony loaded (the completion log's figure)
 };
 
 namespace RH
@@ -697,7 +704,7 @@ public:
 	bool PreviewFurnishEffect(FName Row, const FIntVector& Key, FRHFurnishPreview& Out) const;
 	// Derived each RefreshJobs, never saved: the bed / work-seat piece each
 	// colonist uses (0 = a legacy bed or seat) - what animation will target.
-	int32 GetColonistBedPiece(int32 ColonistId) const { return ColonistBedPiece.FindRef(ColonistId); }
+	int32 GetColonistBedPiece(int32 ColonistId) const { return EnsureBedAssignments().FindRef(ColonistId); } // step-2 fix 2: through the lazy cache
 	int32 GetColonistSeatPiece(int32 ColonistId) const { return ColonistSeatPiece.FindRef(ColonistId); }
 	double GetFurnitureRefundFraction() const { return FurnitureRefundFraction; }
 	double GetHopeFurnishingsMax() const { return HopeFurnishingsMax; }
@@ -930,6 +937,10 @@ public:
 	int32 Debug_CarveTunnelCells(int32 TunnelId, int32 N);
 	// Harness: the DigTunnel order without the uplink (the same preflight and the same execution). OutId is the new tunnel's Id.
 	bool Debug_DigTunnel(int32 Level, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
+	// Harness (step-2 fix 3): append N cancelled records of the same line (Level, A to B) with fresh Ids, to reach the record cap without N orders. The loader
+	// accepts them as it accepts a cancelled tunnel the game wrote (the caller picks a line that starts beside a dug cell on a floor a shaft reaches).
+	// Stops at MaxTunnelRecords; returns how many were appended.
+	int32 Debug_PadTunnelRecords(int32 N, int32 Level, const FIntPoint& A, const FIntPoint& B);
 	// Harness: growth's free-cell test (private; the -tunnels suite pins that it skips tunnel cells).
 	bool Debug_IsCellFreeForRoom(int32 Level, int32 Cell) const { return IsCellFreeForRoom(Level, Cell); }
 
@@ -975,6 +986,9 @@ public:
 	bool Debug_DigCavern(int32 Top, int32 Floors, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason);
 	// Harness: carve up to N cells of a cavern now, through the same completion a finished batch takes. Returns how many cells were appended.
 	int32 Debug_CarveCavernCells(int32 CavernId, int32 N);
+	// Harness (step-2 fix 3): append N cancelled 1 x 1 x 1 records on floor -1 at lattice (1, 0), worked from shaft 0, with fresh Ids, to reach the record cap
+	// without N orders. The loader accepts them (a cancelled cavern is never open). Stops at MaxCavernRecords; returns how many were appended.
+	int32 Debug_PadCavernRecords(int32 N);
 
 	// --- D4: transit (lifts, capacity and robots below; docs/qa/2026-10-21/d4-transit-design.md, Q-A (a), Q-B (a)) ---
 	// The gate is the colony's first fitted lift car (FitLift, Value = shaft Id). With no car every line of D3 runs: the free,
@@ -1130,7 +1144,7 @@ public:
 	const FRHTramLine* FindTramLine(int32 Id) const { for (const FRHTramLine& L : TramLines) { if (L.Id == Id) { return &L; } } return nullptr; }
 	const FRHTramLine* FindTramOnTunnel(int32 TunnelId) const { for (const FRHTramLine& L : TramLines) { if (L.TunnelId == TunnelId) { return &L; } } return nullptr; }
 	int32 GetNextTramId() const { return NextTramId; }
-	uint32 GetTramVersion() const { return TramVersion; }              // up on every line laid and every load (D8's tram band keys on it)
+	uint32 GetTramVersion() const { return TramVersion; }              // up on every line laid and on a load only when a line exists before or after it (D8's tram band keys on it)
 	// Commuters a sol on the line, as the flows count them (the people part of its load before the x 2 and the ramp): 0 at Ramp 0 and with no
 	// car. Reads the same cached flows as GetCommuteShaftPeople, so -RHVerifyCaches compares it.
 	int32 GetTramPeople(int32 LineId) const;
@@ -2355,7 +2369,7 @@ public:
 	bool IsFloorMapped(int32 Level) const;
 	int32 GetDistrictOfFloorPoint(int32 Level, const FIntPoint& P) const;
 	int32 GetColonistHomeCell(int32 ColonistId) const;
-	uint32 GetBedAssignVersion() const { return BedAssignVersion; }
+	uint32 GetBedAssignVersion() const { EnsureBedAssignments(); return BedAssignVersion; } // step-2 fix 2: the generation of the assignment a read would see now
 	// One entry per district, in the order of GetDistricts().
 	void GetDistrictCounts(TArray<FRHDistrictCounts>& Out) const;
 	// The city's demand: colony-wide Housing, Jobs, Services and Air (C5a: a readout;
@@ -3179,7 +3193,10 @@ private:
 	const FRHDeepHomes& EnsureDeepHomes() const;
 	void DeriveDeepHomes(FRHDeepHomes& Out) const;
 	bool IsDeepHomesFresh() const;
-	uint32 BedAssignVersion = 1;             // bumped when ColonistBedPiece is re-derived (RefreshJobs); derived state, never saved
+	mutable uint32 BedAssignVersion = 1;     // bumped when ColonistBedPiece is re-derived (EnsureBedAssignments); derived state, never saved
+	// Step-2 fix 2: the bed assignment is its own lazy cache, keyed (roster, furniture, zoning). Every reader goes through this call, so RefreshJobs, the
+	// floor shapes' home cells, the commute's key and the getters all see the assignment of NOW, never the last RefreshJobs' (and a load resets it).
+	const TMap<int32, int32>& EnsureBedAssignments() const;
 	const FRHDistrictGeo& EnsureDistrictGeo() const;
 	void DeriveDistrictGeo(FRHDistrictGeo& Out) const;
 	const FRHDistrictMembership& EnsureDistrictMembership() const;
@@ -3447,7 +3464,7 @@ private:
 	// D6d (trams with people). SAVED straight after the floor-shape block (save v50): NextTramId, TramCount, then the lines in Id order.
 	TArray<FRHTramLine> TramLines;
 	int32 NextTramId = 1;
-	uint32 TramVersion = 0;                  // up on every line laid and every load; 0 for ever in a colony that never lays one
+	uint32 TramVersion = 0;                  // up on every line laid, and on a load only when a line exists before or after it; 0 for ever in a colony that never lays one
 	// RH_Config rows (header defaults equal the CSV). Placeholders, director review.
 	int32 TramMinCells = 12;                 // the fewest chain points a line takes
 	int32 MaxTramLines = 8;                  // clamped to [1, RH::MaxTramLinesCap]
@@ -3618,7 +3635,7 @@ private:
 	// RebuildFurnitureCache at every change, like the hab topology.
 	struct FRHCellFurnish { int32 Beds = 0; int32 BedPieces = 0; int32 JobSeats = 0; int32 SeatPieces = 0; int32 DiningSeats = 0; uint32 Occupied = 0; TArray<int32> Ids; };
 	TMap<FIntVector, FRHCellFurnish> FurnishedCells;
-	TMap<int32, int32> ColonistBedPiece;     // derived (RefreshJobs)
+	mutable TMap<int32, int32> ColonistBedPiece; // derived (EnsureBedAssignments, read through it only)
 	TMap<int32, int32> ColonistSeatPiece;    // derived (RefreshJobs)
 	// C1 (living-city foundations): derived lookups and change counters. Nothing
 	// here is saved; every one is rebuilt on load or by the call that changes
@@ -3629,9 +3646,9 @@ private:
 	uint32 ZoningVersion = 1;                // bumped when a cell/bay is re-zoned, a hab goes, or a colony loads
 	uint32 ColonistSetVersion = 1;           // bumped when Colonists gains, loses or reloads an entry
 	// The bed assignment is a pure function of (colonist roster, furniture,
-	// zoning): RefreshJobs re-derives it only when one of the three has moved.
-	bool bBedKeyValid = false;
-	uint32 BedKeyColonists = 0, BedKeyFurniture = 0, BedKeyZoning = 0;
+	// zoning): EnsureBedAssignments re-derives it only when one of the three has moved.
+	mutable bool bBedKeyValid = false;
+	mutable uint32 BedKeyColonists = 0, BedKeyFurniture = 0, BedKeyZoning = 0;
 	// -RHVerifyCaches (command line): every keyed cache that is about to be
 	// REUSED is re-derived from scratch and compared, and a difference is a
 	// LogRedHopeSim error. The battery's safety net for "recompute only on
@@ -3657,7 +3674,7 @@ private:
 	TMap<FName, double> FurnitureRefundFor(const TSet<int32>& Ids) const;
 	double GetFurnishingsHope(double* OutRaw = nullptr) const;
 	bool FurnitureAllowsRezone(const FIntVector& Key, FName NewRoom, FString& OutReason) const;
-	void BuildBedAssignments(const TArray<int32>& ByIdOrder);
+	void BuildBedAssignments(const TArray<int32>& ByIdOrder) const; // writes only the mutable ColonistBedPiece
 	// --- Wall fittings (BM-6) ---
 	TArray<FRHWallFeature> WallFeatures;    // SAVED (v31), Id-ascending
 	int32 NextWallFeatureId = 1;            // SAVED; never reused

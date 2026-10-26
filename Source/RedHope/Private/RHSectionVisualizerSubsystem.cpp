@@ -729,6 +729,10 @@ void URHSectionVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, boo
 	FloorH = Sim.GetFloorHeightCm();
 	Rows = SlabRows();
 	DeepestSeen = Sim.GetShaftDepth();
+	if (!bPeopleOnly)
+	{
+		NextOverlayS = 0.0; // step-2 fix 6: the slab is re-baked for this cut, so the overlay redraws in the same tick, not up to 0.5 s later
+	}
 
 	int32 DMin = 0, DMax = 0, AMin = 0, AMax = 0;
 	if (ComputeExtent(Sim, Axis, DMin, DMax, AMin, AMax))
@@ -1326,6 +1330,28 @@ void URHSectionVisualizerSubsystem::ClearOverlay()
 	}
 }
 
+uint32 URHSectionVisualizerSubsystem::MixFlow(uint32 H, int32 Level, int32 Out, int32 In)
+{
+	H = MixU32(H, (uint32)Level);
+	H = MixU32(H, (uint32)Out);
+	return MixU32(H, (uint32)In);
+}
+
+uint32 URHSectionVisualizerSubsystem::ViewHash() const
+{
+	// Everything the overlay's boxes and labels are placed against (AddBox bakes world transforms with the current axis and origin): the cut and
+	// its frame. A value at a time, so no two views fold alike by arithmetic.
+	uint32 H = MixU32(0u, (uint32)Axis);
+	H = MixU32(H, (uint32)PlaneRow);
+	H = MixU32(H, (uint32)Rows);
+	H = MixU32(H, (uint32)AlongMin);
+	H = MixU32(H, (uint32)AlongMax);
+	H = MixU32(H, (uint32)DeepestSeen);
+	H = MixU32(H, (uint32)FMath::RoundToInt(Origin.X));
+	H = MixU32(H, (uint32)FMath::RoundToInt(Origin.Y));
+	return H;
+}
+
 void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& Sim)
 {
 	++OverlayRefreshes;
@@ -1334,7 +1360,8 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 	const double CutD = ((double)PlaneRow - 0.5) * CellCm;
 	const bool bEven = (Axis & 1) == 0;
 	const double HalfA = bEven ? RHElevator::CabHalfY : RHElevator::CabHalfX;
-	uint32 Hash = 0;
+	uint32 Hash = ViewHash(); // step-2 fix 6: seeded with the view, so a turn, a step, Cut here or a re-entry redraws whatever the numbers say
+	OverlayViewSeed = Hash;
 	struct FLabel { FString Text; FLinearColor Colour; FVector At; float Size; bool bRight; };
 	TArray<FLabel> Labels;
 
@@ -1412,7 +1439,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 			};
 			Arrow(F.Value.X, OutArrowColour, 110.0, true);
 			Arrow(F.Value.Y, InArrowColour, 250.0, false);
-			Hash = MixU32(Hash, (uint32)(L * 7919 + F.Value.X * 31 + F.Value.Y));
+			Hash = MixFlow(Hash, L, F.Value.X, F.Value.Y);
 		}
 	}
 
@@ -1436,7 +1463,8 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 					const double ACm = (double)AlongOf(Axis, Mid) * CellCm;
 					Labels.Add({ FString::Printf(TEXT("%d robot%s"), Count, Count == 1 ? TEXT("") : TEXT("s")), FLinearColor(1.0f, 0.70f, 0.30f),
 						FVector(Origin.X + Dd.X * CutD + Da.X * ACm, Origin.Y + Dd.Y * CutD + Da.Y * ACm, (double)T.Level * FloorH + 330.0), OverlayLabelSizeCm, false });
-					Hash = MixU32(Hash, (uint32)(T.Id * 131 + Count));
+					Hash = MixU32(Hash, (uint32)T.Id);
+					Hash = MixU32(Hash, (uint32)Count);
 				}
 			}
 		}
@@ -1478,7 +1506,9 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 			// UI polish P4: a line the cut does not show has no label of its own, so the short legend names it; a drawn line carries its own.
 			TramNotDrawn += FString::Printf(TEXT(" Not in this cut: tram line %d on %d, %s a sol, wait %d s."), L.Id, L.Level, *Grouped(Riders), L.WaitSec);
 		}
-		Hash = MixU32(Hash, (uint32)(L.Id * 977 + L.WaitSec * 31 + Riders));
+		Hash = MixU32(Hash, (uint32)L.Id);
+		Hash = MixU32(Hash, (uint32)L.WaitSec);
+		Hash = MixU32(Hash, (uint32)Riders);
 		Hash = MixU32(Hash, (uint32)Drawn);
 	}
 	Hash = MixU32(Hash, (uint32)Sim.GetTramLines().Num());
@@ -1497,6 +1527,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 		return;                                                    // the numbers did not move: nothing to redraw
 	}
 	OverlayHash = Hash;
+	++OverlayRedraws;
 	OverlayLists = MoveTemp(Lists);
 	ApplyAll();
 	int32 Used = 0;

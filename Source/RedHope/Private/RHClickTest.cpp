@@ -1938,10 +1938,14 @@ namespace
 				{
 					const int32 D = URHSectionVisualizerSubsystem::DepthOf(Axis, P), A = URHSectionVisualizerSubsystem::AlongOf(Axis, P);
 					if (URHSectionVisualizerSubsystem::PointOf(Axis, D, A) != P) { bOk = false; Why += FString::Printf(TEXT(" round trip axis %d"), Axis); }
+					// Nit 34: the slab test the code that draws and picks really calls. A point's row is its depth less the plane's: row 0 is on the cut, rows
+					// 0..Rows-1 are drawn, row -1 (in front of the cut) and row Rows (behind the slab) are not.
+					const int32 Rows = URHSectionVisualizerSubsystem::SlabRows();
 					const int32 Plane = D;
-					if (URHSectionVisualizerSubsystem::ClassifyRow(D - Plane) != 0 || URHSectionVisualizerSubsystem::ClassifyRow(D - (Plane + 1)) != -1 || URHSectionVisualizerSubsystem::ClassifyRow(D - (Plane - 1)) != 1)
+					if (!URHSectionVisualizerSubsystem::InSlabRow(D - Plane, Rows) || URHSectionVisualizerSubsystem::InSlabRow(D - (Plane + 1), Rows)
+						|| !URHSectionVisualizerSubsystem::InSlabRow(D - (Plane - (Rows - 1)), Rows) || URHSectionVisualizerSubsystem::InSlabRow(D - (Plane - Rows), Rows))
 					{
-						bOk = false; Why += FString::Printf(TEXT(" classify axis %d"), Axis);
+						bOk = false; Why += FString::Printf(TEXT(" slab rows axis %d"), Axis);
 					}
 				}
 				const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(Axis);
@@ -1951,7 +1955,12 @@ namespace
 			bOk &= URHSectionVisualizerSubsystem::SlabRows() == 3;
 			bOk &= URHSectionVisualizerSubsystem::LodBand(-10, -10) == 0 && URHSectionVisualizerSubsystem::LodBand(-11, -10) == 0 && URHSectionVisualizerSubsystem::LodBand(-12, -10) == 1
 				&& URHSectionVisualizerSubsystem::LodBand(-15, -10) == 1 && URHSectionVisualizerSubsystem::LodBand(-16, -10) == 2 && URHSectionVisualizerSubsystem::LodBand(0, -10) == 2;
-			Report(TEXT("section.unit"), bOk, FString::Printf(TEXT("slab rows %d; round trips, classification, direction and LOD bands%s"), URHSectionVisualizerSubsystem::SlabRows(), *Why));
+			// Step-2 fix 6: the overlay hash folds a floor's flow a value at a time. One more commuter out against 31 fewer in is the pair the old arithmetic
+			// fold (L * 7919 + Out * 31 + In) made the same number, which hid a change from the overlay's early return.
+			const uint32 FlowA = URHSectionVisualizerSubsystem::MixFlow(0u, -1, 2, 0), FlowB = URHSectionVisualizerSubsystem::MixFlow(0u, -1, 1, 31);
+			if (FlowA == FlowB) { bOk = false; Why += TEXT(" MixFlow(0,-1,2,0) == MixFlow(0,-1,1,31)"); }
+			if (FlowA == URHSectionVisualizerSubsystem::MixFlow(0u, -2, 2, 0) || FlowA == URHSectionVisualizerSubsystem::MixFlow(0u, -1, 0, 2)) { bOk = false; Why += TEXT(" MixFlow ignores a floor or swaps out and in"); }
+			Report(TEXT("section.unit"), bOk, FString::Printf(TEXT("slab rows %d; round trips, the slab test, direction, LOD bands and the flow fold%s"), URHSectionVisualizerSubsystem::SlabRows(), *Why));
 		}, 0.1f);
 		// ---- the tram tool (D6d): a finished 14-point tunnel on -2 and a lift car (harness calls), then the deck's Lay tram button transmits the
 		// LayTramLine order; once it lands the line stands, its capsule shows on the floor view, and the capsule's phase runs end to end.
@@ -2077,6 +2086,56 @@ namespace
 			// UI polish P8: the floors' labels sit in the band between the strip and the column, apart, and legible.
 			Runner.Do(TEXT("section.labels"), []() { CheckSectionLabels(TEXT("section.labels")); }, 0.2f);
 
+			// Nit 34 (the live half of section.unit): IsInSlab and Pick on the cut that is open now. A plate on the cut face of a floor, shifted one row at a
+			// time along the depth, is in the slab for rows 0..Rows-1 only; a ray along the depth through that plate picks its floor and its cell, and
+			// three rays that cannot hit (away from the cut, parallel to it, above ground) pick nothing.
+			Runner.Do(TEXT("section.unit.live"), [Section]()
+			{
+				const URHSectionVisualizerSubsystem* Sec = Section();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sec || !Sim || !Sec->IsOn()) { Report(TEXT("section.unit.live"), false, TEXT("the section is not on")); return; }
+				int32 Level = 0;
+				FVector Plate = FVector::ZeroVector;
+				for (int32 L = -1; L >= -Sim->GetShaftDepth() && Level == 0; --L)
+				{
+					if (Sec->LocatePlate(L, Plate)) { Level = L; }
+				}
+				if (Level == 0) { Report(TEXT("section.unit.live"), false, TEXT("no floor has a carved cell on the cut")); return; }
+				const int32 Axis0 = Sec->GetAxis(), Plane0 = Sec->GetPlaneRow(), Rows = URHSectionVisualizerSubsystem::SlabRows();
+				const FVector2D Dd = URHSectionVisualizerSubsystem::DirDepth(Axis0), Da = URHSectionVisualizerSubsystem::DirAlong(Axis0);
+				const double Cell = 1000.0; // a lattice cell, 10 m
+				const auto Shifted = [&](double DepthCells, double AlongCells) { return Plate + FVector(Dd.X * DepthCells * Cell + Da.X * AlongCells * Cell, Dd.Y * DepthCells * Cell + Da.Y * AlongCells * Cell, 0.0); };
+				FString Why;
+				// The plate stands on the cut face (depth Plane - 0.5 cells), so +0.5 is row 0, -0.5 is row -1 (in front), +Rows - 0.5 the last row, +Rows + 0.5 behind.
+				if (!Sec->IsInSlab(Shifted(0.5, 0.0))) { Why += TEXT(" row 0 is not in the slab;"); }
+				if (!Sec->IsInSlab(Shifted((double)Rows - 0.5, 0.0))) { Why += FString::Printf(TEXT(" row %d is not in the slab;"), Rows - 1); }
+				if (Sec->IsInSlab(Shifted(-0.5, 0.0))) { Why += TEXT(" row -1 (in front of the cut) is in the slab;"); }
+				if (Sec->IsInSlab(Shifted((double)Rows + 0.5, 0.0))) { Why += FString::Printf(TEXT(" row %d (behind the slab) is in the slab;"), Rows); }
+				if (Sec->IsInSlab(Shifted(0.5, 1000.0))) { Why += TEXT(" a point 1,000 cells along is in the slab;"); }
+				FVector Above = Shifted(0.5, 0.0); Above.Z = 500.0;
+				if (Sec->IsInSlab(Above)) { Why += TEXT(" a point above ground is in the slab;"); }
+				// Pick: from 5 cells in front of the cut, along the depth, through the plate.
+				int32 PickedLevel = 0;
+				FIntPoint PickedCell = FIntPoint::ZeroValue;
+				const FVector Front = Shifted(-5.0, 0.0);
+				const FVector DepthDir(Dd.X, Dd.Y, 0.0);
+				const FRHFloor* Fl = Sim->FindFloor(Level);
+				if (!Sec->Pick(Front, DepthDir, PickedLevel, PickedCell)) { Why += TEXT(" Pick found nothing through a carved plate;"); }
+				else if (PickedLevel != Level || !Fl || !Fl->GetCells().Contains(PickedCell) || URHSectionVisualizerSubsystem::DepthOf(Axis0, PickedCell) != Plane0)
+				{
+					Why += FString::Printf(TEXT(" Pick gave floor %d cell (%d,%d), expected a carved row-0 cell on floor %d;"), PickedLevel, PickedCell.X, PickedCell.Y, Level);
+				}
+				int32 NoLevel = 0;
+				FIntPoint NoCell = FIntPoint::ZeroValue;
+				if (Sec->Pick(Front, DepthDir * -1.0, NoLevel, NoCell)) { Why += TEXT(" Pick hit with the ray pointing away from the cut;"); }
+				if (Sec->Pick(Front, FVector(Da.X, Da.Y, 0.0), NoLevel, NoCell)) { Why += TEXT(" Pick hit with the ray parallel to the cut;"); }
+				FVector SkyFront = Front; SkyFront.Z = 500.0;
+				if (Sec->Pick(SkyFront, DepthDir, NoLevel, NoCell)) { Why += TEXT(" Pick hit above ground;"); }
+				Report(TEXT("section.unit.live"), Why.IsEmpty(), Why.IsEmpty()
+					? FString::Printf(TEXT("floor %d, cut row %d, %d rows: IsInSlab holds for rows 0..%d only, Pick through the plate gives cell (%d,%d), and three misses pick nothing"), Level, Plane0, Rows, Rows - 1, PickedCell.X, PickedCell.Y)
+					: Why);
+			}, 0.2f);
+
 			const TSharedRef<FPress> Row = PushPress(TEXT("section.row"), LocateFloorRow(-3));
 			PushCheck(TEXT("section.row"), Row, [Focus]() { return Focus() == -3 ? FString() : FString::Printf(TEXT("the focus is %d, not -3"), Focus()); }, 1.f);
 
@@ -2190,6 +2249,36 @@ namespace
 			}, 0.2f, 4.f);
 			Runner.Do(TEXT("section.labels traffic"), []() { CheckSectionLabels(TEXT("section.labels.traffic")); }, 0.2f);
 
+			// Step-2 fix 6: TRAFFIC's layers follow the cut. With the sim paused, so that no number can move, a quarter turn must redraw the overlay
+			// (its boxes and labels are placed against the axis and the origin), and every label must still lie in the free band. Q, then E back.
+			const TSharedRef<int32> Redraws = MakeShared<int32>(0), AxisBefore = MakeShared<int32>(0);
+			const TSharedRef<uint32> SeedBefore = MakeShared<uint32>(0);
+			const TSharedRef<float> SpeedBeforePause = MakeShared<float>(1.f);
+			Runner.Do(TEXT("section.traffic.turn pause"), [SpeedBeforePause]()
+			{
+				*SpeedBeforePause = ClockSpeed();
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(0.f); }
+			}, 0.8f);
+			Runner.Do(TEXT("section.traffic.turn base"), [Redraws, AxisBefore, SeedBefore, Section, Axis]() { *Redraws = Section() ? Section()->GetOverlayRedraws() : 0; *AxisBefore = Axis(); *SeedBefore = Section() ? Section()->GetOverlayViewSeed() : 0u; }, 0.1f);
+			const TSharedRef<FPress> TurnTraffic = PushKey(TEXT("section.traffic.turn"), EKeys::Q);
+			PushCheck(TEXT("section.traffic.turn"), TurnTraffic, [Redraws, AxisBefore, SeedBefore, Section, Axis]()
+			{
+				if (ClockSpeed() != 0.f) { return FString::Printf(TEXT("the sim is not paused (speed %.1f), so a number could have moved the overlay"), ClockSpeed()); }
+				if (Axis() != (*AxisBefore + 3) % 4) { return FString::Printf(TEXT("Q turned axis %d to %d"), *AxisBefore, Axis()); }
+				if (!Section() || Section()->GetOverlayRedraws() <= *Redraws)
+				{
+					return FString::Printf(TEXT("the cut turned with TRAFFIC on and the sim paused, but the overlay did not redraw (%d redraws, %d before)"), Section() ? Section()->GetOverlayRedraws() : -1, *Redraws);
+				}
+				// The redraw alone could be the numbers beside the view moving (a turn changes which shafts, robots and tram cells are in the slab): the hash must also have
+				// been seeded with the new view.
+				return (Section()->GetOverlayViewSeed() == Section()->GetViewHash() && Section()->GetOverlayViewSeed() != *SeedBefore) ? FString()
+					: FString::Printf(TEXT("the overlay redrew, but its hash was not seeded with the turned view (seed %08x, view %08x, before the turn %08x)"), Section()->GetOverlayViewSeed(), Section()->GetViewHash(), *SeedBefore);
+			}, 1.f);
+			Runner.Do(TEXT("section.traffic.turn labels"), []() { CheckSectionLabels(TEXT("section.labels.traffic.turned")); }, 0.2f);
+			const TSharedRef<FPress> TurnTrafficBack = PushKey(TEXT("section.traffic.turn.back"), EKeys::E);
+			PushCheck(TEXT("section.traffic.turn.back"), TurnTrafficBack, [AxisBefore, Axis]() { return Axis() == *AxisBefore ? FString() : FString::Printf(TEXT("E did not turn back to %d (%d)"), *AxisBefore, Axis()); }, 1.f);
+			Runner.Do(TEXT("section.traffic.turn unpause"), [SpeedBeforePause]() { if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(*SpeedBeforePause > 0.f ? *SpeedBeforePause : 1.f); } }, 0.3f);
+
 			// D6d: the tram band. The cut is moved to the line's floor and row (the section's own setters), the overlay refreshes at 2 Hz, and the
 			// band has cells in the slab; the capsules of the floor view are hidden while the section is on (D8 R1).
 			Runner.Do(TEXT("section.tram focus"), [T]()
@@ -2215,7 +2304,16 @@ namespace
 				return true;
 			}, 0.2f, 6.f);
 			const TSharedRef<FPress> TOff = PushPress(TEXT("section.traffic.off"), LocateButton(TEXT("Traffic [on]"), 0, true));
-			PushCheck(TEXT("section.traffic.off"), TOff, []() { const ARHPlayerController* PC = GetPC(); return (PC && !PC->IsTrafficOverlayOn()) ? FString() : FString(TEXT("the overlay did not turn off")); }, 1.f);
+			PushCheck(TEXT("section.traffic.off"), TOff, [Section]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				if (!PC || PC->IsTrafficOverlayOn()) { return FString(TEXT("the overlay did not turn off")); }
+				// Nit 36: and the section's layers cleared with it: no arrows, no tram band, no legend.
+				const URHSectionVisualizerSubsystem* Sec = Section();
+				if (!Sec) { return FString(TEXT("no section visualizer")); }
+				return (Sec->GetOverlayArrowCount() == 0 && Sec->GetTramBandCells() == 0 && Sec->GetTramBandLines() == 0 && Sec->GetLegendText().IsEmpty() && Sec->GetLegendFullText().IsEmpty()) ? FString()
+					: FString::Printf(TEXT("TRAFFIC is off but the layers did not clear: %d arrow(s), %d tram band cell(s) on %d line(s), legend %d characters"), Sec->GetOverlayArrowCount(), Sec->GetTramBandCells(), Sec->GetTramBandLines(), Sec->GetLegendText().Len());
+			}, 1.f);
 
 			Runner.Do(TEXT("section.esc.menu open"), []() { if (ARHPlayerController* PC = GetPC()) { PC->OpenPauseMenu(); } }, 0.6f);
 			const TSharedRef<FPress> EscMenu = PushKey(TEXT("section.esc.menu"), EKeys::Escape);

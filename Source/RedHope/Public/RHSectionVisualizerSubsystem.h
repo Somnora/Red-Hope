@@ -59,6 +59,9 @@ public:
 	static bool InSlabRow(int32 Row, int32 Rows) { return Row >= 0 && Row < Rows; }
 	// The draft's detail bands, measured from the focus floor: 0 = within one floor, 1 = within five, 2 = further.
 	static int32 LodBand(int32 Level, int32 InFocus);
+	// Step-2 fix 6: one floor's commuter flow folded into the overlay hash, a value at a time (the click test checks that two different flows do not
+	// fold alike: the old arithmetic fold, L * 7919 + Out * 31 + In, made one more commuter out and 31 fewer in the same number).
+	static uint32 MixFlow(uint32 H, int32 Level, int32 Out, int32 In);
 	// The carved extent over every floor and shaft column: depth and along ranges. False when nothing is carved.
 	static bool ComputeExtent(const URHSimWorldSubsystem& Sim, int32 InAxis, int32& OutDMin, int32& OutDMax, int32& OutAMin, int32& OutAMax);
 
@@ -81,6 +84,13 @@ public:
 	double GetLastRebuildMs() const { return LastRebuildMs; }
 	double GetWorstRebuildMs() const { return WorstRebuildMs; }
 	int32 GetOverlayRefreshes() const { return OverlayRefreshes; }
+	// How many times TRAFFIC's layers were actually redrawn (counted past the early return that skips an unchanged hash): the click test's proof that
+	// a turn or a step redraws the overlay at once, with the sim paused so no number moves.
+	int32 GetOverlayRedraws() const { return OverlayRedraws; }
+	// The view the overlay's hash was seeded with at its last refresh, and the view as it stands now. Whatever the numbers do, a turn or a step must move the first and
+	// bring it level with the second: the click test checks both (a hash that ignored the view could pass a turn only because the numbers beside it happened to move).
+	uint32 GetOverlayViewSeed() const { return OverlayViewSeed; }
+	uint32 GetViewHash() const { return ViewHash(); }
 	int32 GetOverlayArrowCount() const { return OverlayArrows; }
 	// D6d: the tram band as TRAFFIC last drew it - the chain cells drawn in the slab, and the lines that have any (a line outside the slab shows
 	// only in the legend).
@@ -210,7 +220,9 @@ private:
 	// TRAFFIC below ground (2 Hz) and the surface strip.
 	double NextOverlayS = 0.0;
 	bool bOverlayShown = false;
-	int32 OverlayRefreshes = 0, OverlayArrows = 0;
+	int32 OverlayRefreshes = 0, OverlayArrows = 0, OverlayRedraws = 0;
+	uint32 ViewHash() const;                   // step-2 fix 6: the cut's own state, which the overlay's boxes and labels are placed in
+	uint32 OverlayViewSeed = 0;                // the seed RefreshOverlay's hash started from at its last call
 	int32 TramBandCells = 0, TramBandLines = 0;
 	uint32 OverlayHash = 0;
 	TMap<int32, FIntPoint> FlowSums;           // floor -> (out, in)

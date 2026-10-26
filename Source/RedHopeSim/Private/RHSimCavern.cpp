@@ -261,11 +261,14 @@ void URHSimWorldSubsystem::CompleteCavernCell(int32 CavernId, int32 Level, int32
 		UE_LOG(LogRedHopeSim, Display, TEXT("Borer #%d: cavern %d has no cell left to carve on floor %d - spoil, no cell"), BorerId, CavernId, Level);
 		return;
 	}
+	++C->CellsCarved;
 	const int32 Left = GetCavernUncarved(*C);
 	if (Left == 0)
 	{
-		UE_LOG(LogRedHopeSim, Display, TEXT("Cavern %d carved cell (%d, %d) on floor %d - cavern complete (%d cells)"),
-			CavernId, P.X, P.Y, Level, C->GetSizeX() * C->GetSizeY() * C->GetFloors());
+		// Nit 20: the cells its Borers carved, beside the box's points (a box can take in points that were dug before it was ordered). The tally is
+		// derived and never saved, so after a load it counts from the load.
+		UE_LOG(LogRedHopeSim, Display, TEXT("Cavern %d carved cell (%d, %d) on floor %d - cavern complete (%d points in its box, %d cell(s) carved by its Borers since it was ordered or the colony loaded)"),
+			CavernId, P.X, P.Y, Level, C->GetSizeX() * C->GetSizeY() * C->GetFloors(), C->CellsCarved);
 	}
 	else
 	{
@@ -305,6 +308,14 @@ int32 URHSimWorldSubsystem::Debug_CarveCavernCells(int32 CavernId, int32 N)
 bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& ACm, const FVector& BCm, FString& OutReason, FRHCavernPreview* OutPreview) const
 {
 	// Refusals 1-7 of the D6 merged design, each with a reason (7 is taken before 5, so a box that is all carved says so).
+	// Step-2 fix 3, taken first so the reason is the same whatever else is wrong with the box: every order stays on the list for ever (finished and
+	// cancelled ones too, D7 reads a finished cavern's record) and one save holds MaxCavernRecords, so the order past the last would write a file
+	// that refuses to load.
+	if (Caverns.Num() >= RH::MaxCavernRecords)
+	{
+		OutReason = FString::Printf(TEXT("The colony has ordered %d caverns, the most one save can hold"), Caverns.Num());
+		return false;
+	}
 	const int64 Bottom64 = (int64)Top - (int64)Floors + 1;
 	// 1. The deepest floor must be reached by some shaft (every shaft starts at the surface, so the floors above it are reached too).
 	if (Top >= 0)
@@ -312,7 +323,13 @@ bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& 
 		OutReason = FString::Printf(TEXT("Floor %d is not reached - bore a shaft that deep first"), Top);
 		return false;
 	}
-	if (Floors >= 1 && (Bottom64 < -(int64)MaxDepth || DeepestShaft < -Bottom64))
+	if (Floors >= 1 && Bottom64 < -(int64)MaxDepth)
+	{
+		// Nit 18: no shaft can ever be bored below -MaxDepth, so "bore a shaft that deep first" would send the player after the impossible.
+		OutReason = FString::Printf(TEXT("A cavern cannot go below floor -%d (this box would reach floor %lld)"), MaxDepth, Bottom64);
+		return false;
+	}
+	if (Floors >= 1 && DeepestShaft < -Bottom64)
 	{
 		OutReason = FString::Printf(TEXT("Floor %lld is not reached - bore a shaft that deep first"), Bottom64);
 		return false;
@@ -325,6 +342,13 @@ bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& 
 	}
 	const FVector Origin = Shafts[0].HeadCm;
 	const FIntPoint A = CmToLattice(Origin, ACm), B = CmToLattice(Origin, BCm);
+	// Step-2 fix 5: a corner past the lattice bound is a refusal before any loop runs (the side test below holds in int64 but bounds nothing, and a
+	// box at the int32 edge would overflow its loops and ExecuteDigCavern's midpoint).
+	if (!RH::IsLatticeInRange(A) || !RH::IsLatticeInRange(B))
+	{
+		OutReason = TEXT("That box is out of range");
+		return false;
+	}
 	const int64 SideX = (int64)FMath::Abs((int64)B.X - A.X) + 1, SideY = (int64)FMath::Abs((int64)B.Y - A.Y) + 1;
 	if (SideX > RH::CavernMaxSide || SideY > RH::CavernMaxSide)
 	{
@@ -372,6 +396,7 @@ bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& 
 			}
 		}
 	}
+	int32 UncarvedOn[RH::CavernMaxFloors] = {}; // step-2 fix 8: each floor's uncarved box points, index Top - L (Floors <= CavernMaxFloors was checked above)
 	for (int32 L = Top; L >= Bottom; --L)
 	{
 		// The batch hours of each floor's cells, at that floor's own dig time (D5): a cavern past -5 costs more per cell.
@@ -384,6 +409,7 @@ bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& 
 				Here += (Floor && Floor->IndexOf.Contains(FIntPoint(X, Y))) ? 0 : 1;
 			}
 		}
+		UncarvedOn[Top - L] = Here;
 		Hours += (double)Here * HoursPerCell * (double)GetDigPermille(L) / 1000.0;
 	}
 	// 7. Something must be left to dig.
@@ -392,10 +418,16 @@ bool URHSimWorldSubsystem::CanDigCavern(int32 Top, int32 Floors, const FVector& 
 		OutReason = TEXT("Every point of that box is already dug");
 		return false;
 	}
-	// 5. One seed per floor: on EVERY floor some uncarved box point must be eligible. A reaching shaft's column beside the box satisfies
-	// every floor at once, because the column runs through all of them. There is no vertical rule (RC 2).
+	// 5. One seed per floor: on EVERY floor that still has rock to dig in the box, some uncarved box point must be eligible. A reaching shaft's column
+	// beside the box satisfies every floor at once, because the column runs through all of them. There is no vertical rule (RC 2). Step-2 fix 8 (the
+	// director's answer to refusal 5): a floor with no rock left inside the box needs no seed, so a cavern may reach down through floors already dug
+	// out there (the Borers skip such a floor, FindCavernWork); a box dug through on every floor was refused by 7 above.
 	for (int32 L = Top; L >= Bottom; --L)
 	{
+		if (UncarvedOn[Top - L] == 0)
+		{
+			continue;
+		}
 		bool bSeed = false;
 		for (int32 X = Min.X; X <= Max.X && !bSeed; ++X)
 		{
@@ -486,6 +518,28 @@ void URHSimWorldSubsystem::ExecuteCancelCavern(const FRHCommand& Cmd)
 		Id, GetCavernUncarved(*C), GetCavernBatchesInFlight(Id));
 }
 
+int32 URHSimWorldSubsystem::Debug_PadCavernRecords(int32 N)
+{
+	int32 Added = 0;
+	for (; Added < N && Caverns.Num() < RH::MaxCavernRecords; ++Added)
+	{
+		FRHCavern C;
+		C.Id = NextCavernId++;
+		C.Top = -1;
+		C.Bottom = -1;
+		C.Min = FIntPoint(1, 0);
+		C.Max = FIntPoint(1, 0);
+		C.ShaftId = 0;
+		C.bCancelled = true;
+		Caverns.Add(C);
+	}
+	if (Added > 0)
+	{
+		++CavernsVersion;
+	}
+	return Added;
+}
+
 bool URHSimWorldSubsystem::Debug_DigCavern(int32 Top, int32 Floors, const FIntPoint& A, const FIntPoint& B, int32& OutId, FString& OutReason)
 {
 	OutId = INDEX_NONE;
@@ -567,15 +621,19 @@ bool URHSimWorldSubsystem::ReadCavernBlock(FArchive& Ar, const TArray<FRHFloor>&
 	{
 		FRHCavern C;
 		int32 Mnx = 0, Mny = 0, Mxx = 0, Mxy = 0;
-		bool bCancel = false;
-		Ar << C.Id << C.RegionId << C.ShaftId << C.Top << C.Bottom << Mnx << Mny << Mxx << Mxy << bCancel;
+		uint32 Cancel = 0; // nit 16: a UE bool is four bytes on disk, so reading it as a uint32 keeps the format and lets a value of 2 refuse here instead of logging an engine Error
+		Ar << C.Id << C.RegionId << C.ShaftId << C.Top << C.Bottom << Mnx << Mny << Mxx << Mxy << Cancel;
 		if (Ar.IsError())
 		{
 			return Refuse(TEXT("the cavern list is cut short"));
 		}
+		if (Cancel > 1u)
+		{
+			return Refuse(FString::Printf(TEXT("cavern %d has a cancelled flag of %u (it is 0 or 1)"), C.Id, Cancel));
+		}
 		C.Min = FIntPoint(Mnx, Mny);
 		C.Max = FIntPoint(Mxx, Mxy);
-		C.bCancelled = bCancel;
+		C.bCancelled = Cancel != 0u;
 		if (C.Id < 1 || C.Id <= PrevId || C.Id >= Next)
 		{
 			return Refuse(FString::Printf(TEXT("cavern ids must ascend and stay below %d, found %d after %d"), Next, C.Id, PrevId));
@@ -593,6 +651,11 @@ bool URHSimWorldSubsystem::ReadCavernBlock(FArchive& Ar, const TArray<FRHFloor>&
 		if (!InShafts.IsValidIndex(C.ShaftId) || InShafts[C.ShaftId].Depth < -C.Bottom)
 		{
 			return Refuse(FString::Printf(TEXT("cavern %d is worked from shaft %d, which does not exist or does not reach floor %d"), C.Id, C.ShaftId, C.Bottom));
+		}
+		// Step-2 fix 5: a corner past the lattice bound is refused before any box loop runs (a hand-made box at the int32 edge never ends).
+		if (!RH::IsLatticeInRange(C.Min) || !RH::IsLatticeInRange(C.Max))
+		{
+			return Refuse(FString::Printf(TEXT("cavern %d has a corner out of range (the lattice reaches %d cells from the shaft)"), C.Id, RH::MaxLatticeCoord));
 		}
 		const int64 SideX = (int64)Mxx - Mnx + 1, SideY = (int64)Mxy - Mny + 1;
 		if (FloorCount > RH::CavernMaxFloors || SideX < 1 || SideY < 1 || SideX > RH::CavernMaxSide || SideY > RH::CavernMaxSide)
