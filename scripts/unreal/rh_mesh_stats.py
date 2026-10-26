@@ -42,6 +42,25 @@ for path in ASSETS:
     log.append("%-58s tris %6d  verts %6d  %.2f v/t  lods %d  extent %.0fx%.0fx%.0f cm"
                % (path.split(".")[-1], tris, verts, ratio, lods, ext.x * 2, ext.y * 2, ext.z * 2))
 
+    if lods > 1:
+        # (the tram, 2026-10-26: the first kit asset with LODs) each LOD's triangles and screen size
+        sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem) or unreal.StaticMeshEditorSubsystem()
+        sizes = sub.get_lod_screen_sizes(mesh)
+        log.append("      " + ", ".join("LOD%d %d tris @ %.2f" % (i, mesh.get_num_triangles(i), sizes[i] if i < len(sizes) else -1)
+                                        for i in range(lods)))
+        # Each LOD's sections: the slot each one draws and its triangles, so a reduction that drops a small slot (the tram's
+        # destination boards, which carry the line's wait colour) shows here and not only at distance in a capture.
+        for i in range(lods):
+            parts = []
+            for s in range(mesh.get_num_sections(i)):
+                slot = sub.get_lod_material_slot(mesh, i, s)
+                try:
+                    tri_idx = unreal.ProceduralMeshLibrary.get_section_from_static_mesh(mesh, i, s)[1]
+                    parts.append("s%d slot %d %d tris" % (s, slot, len(tri_idx) // 3))
+                except Exception as exc:  # the plugin's library missing: the slot alone still says whether the section survived
+                    parts.append("s%d slot %d (tris n/a: %s)" % (s, slot, exc))
+            log.append("      LOD%d sections: %s" % (i, "; ".join(parts) if parts else "none"))
+
     for i, sm in enumerate(mesh.get_editor_property("static_materials")):
         mi = sm.material_interface
         log.append("      slot %d: %s" % (i, mi.get_path_name() if mi else "<none>"))

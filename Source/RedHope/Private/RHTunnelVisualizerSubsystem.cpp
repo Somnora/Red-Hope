@@ -3,6 +3,7 @@
 #include "RHPlayerController.h"
 #include "RHLabelTurn.h"
 #include "RHSimWorldSubsystem.h"
+#include "RHRoundChain.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "GameFramework/Actor.h"
@@ -61,6 +62,17 @@ namespace
 			const FVector2D Dir = (P1 - P0).GetSafeNormal();
 			const FVector2D Side(-Dir.Y * Width * 0.5f, Dir.X * Width * 0.5f);
 			Quad(FVector(P0.X + Side.X, P0.Y + Side.Y, Z), FVector(P1.X + Side.X, P1.Y + Side.Y, Z), FVector(P1.X - Side.X, P1.Y - Side.Y, Z), FVector(P0.X - Side.X, P0.Y - Side.Y, Z));
+		}
+
+		// A ribbon along sampled path points with their unit tangents: each edge offset along its own point's normal, so a curve has no gaps
+		// or overlaps between its quads.
+		void Ribbon(const TArray<FVector2D>& Pts, const TArray<FVector2D>& Tans, float Width, float Z)
+		{
+			for (int32 K = 0; K + 1 < Pts.Num(); ++K)
+			{
+				const FVector2D S0 = FVector2D(-Tans[K].Y, Tans[K].X) * (Width * 0.5f), S1 = FVector2D(-Tans[K + 1].Y, Tans[K + 1].X) * (Width * 0.5f);
+				Quad(FVector(Pts[K] + S0, Z), FVector(Pts[K + 1] + S1, Z), FVector(Pts[K + 1] - S1, Z), FVector(Pts[K] - S0, Z));
+			}
 		}
 
 		// A dashed line: dashes of TunnelDashCm with TunnelDashGapCm between, from P0 to P1, the last one cut to fit.
@@ -193,6 +205,7 @@ void URHTunnelVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 	const double FloorZ = Level * Sim.GetFloorHeightCm();
 	const FRHFloor* Floor = Sim.FindFloor(Level);
 	const auto Centre = [&](const FIntPoint& P) { return FVector2D(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0); };
+	TArray<FVector2D> Run, RunPts, RunTans;      // a stretch of carved chain cells, and its rounded line sampled for the stripe
 	if (Level < 0 && Floor)
 	{
 		for (const FRHTunnel& T : Sim.GetTunnels())
@@ -205,6 +218,32 @@ void URHTunnelVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 			const bool bOpen = Sim.IsTunnelOpen(T);
 			const int32 Left = Sim.GetTunnelUncarved(T);
 			FVector2D Mid = FVector2D::ZeroVector;
+			// The carved stripe runs along each stretch of consecutive carved cells with its corners rounded exactly as the tram's train
+			// rides them (FRHRoundChain, RHRoundChain.h), so a train never leaves its own guide line at a corner; each cell gets a short stub
+			// so a one-cell stretch (and the ends) show a mark, except a corner cell, whose centre the rounded line passes 4 m inside.
+			const auto FlushRun = [&Sections, &Run, &RunPts, &RunTans, FloorZ]()
+			{
+				if (Run.Num() >= 2)
+				{
+					const FRHRoundChain Rounded(Run);
+					Rounded.Sample(PI / 32.0, RunPts, RunTans);
+					Sections[2].Ribbon(RunPts, RunTans, StripeWidthCm, FloorZ + StripeLiftCm);
+					for (const FVector2D& C : Run)
+					{
+						bool bCorner = false;
+						for (int32 K = 1; K + 1 < Rounded.Vertices.Num(); ++K) { bCorner |= FVector2D::Distance(Rounded.Vertices[K], C) <= 1.0; }
+						if (!bCorner)
+						{
+							Sections[2].Strip(C - FVector2D(StripeWidthCm * 0.5, 0.0), C + FVector2D(StripeWidthCm * 0.5, 0.0), StripeWidthCm, FloorZ + StripeLiftCm);
+						}
+					}
+				}
+				else if (Run.Num() == 1)
+				{
+					Sections[2].Strip(Run[0] - FVector2D(StripeWidthCm * 0.5, 0.0), Run[0] + FVector2D(StripeWidthCm * 0.5, 0.0), StripeWidthCm, FloorZ + StripeLiftCm);
+				}
+				Run.Reset();
+			};
 			for (int32 i = 0; i < Len; ++i)
 			{
 				const FIntPoint P = URHSimWorldSubsystem::GetTunnelChainPoint(T.A, T.B, i);
@@ -224,23 +263,15 @@ void URHTunnelVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 						Sections[0].Box(FVector(X0 + 60.0, Y0 + 60.0, Z), FVector(X1 - 60.0, Y1 - 60.0, Z + GhostRiseCm));
 					}
 					++DrawnGhostCells;
+					FlushRun();
 				}
-				else if (i > 0)
+				else
 				{
-					// A carved point: the stripe runs from the previous chain cell's centre to this one's, when both are carved.
-					const FIntPoint Prev = URHSimWorldSubsystem::GetTunnelChainPoint(T.A, T.B, i - 1);
-					if (Floor->FindOrdinal(Prev) != INDEX_NONE)
-					{
-						Sections[2].Strip(Centre(Prev), C, StripeWidthCm, FloorZ + StripeLiftCm);
-					}
-				}
-				if (Floor->FindOrdinal(P) != INDEX_NONE)
-				{
-					// The cell itself: a short stub so a one-cell stretch (and the ends) show a mark, and the line has no gaps at the corners.
-					Sections[2].Strip(C - FVector2D(StripeWidthCm * 0.5, 0.0), C + FVector2D(StripeWidthCm * 0.5, 0.0), StripeWidthCm, FloorZ + StripeLiftCm);
+					Run.Add(C);
 					++DrawnStripeCells;
 				}
 			}
+			FlushRun();
 			if (Left > 0)
 			{
 				Mid /= FMath::Max(1, Len);

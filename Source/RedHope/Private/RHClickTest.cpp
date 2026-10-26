@@ -28,6 +28,7 @@
 #include "RHTrafficVisualizerSubsystem.h"
 #include "RHTunnelVisualizerSubsystem.h"
 #include "RHLabelTurn.h"
+#include "RHRoundChain.h"
 #include "RHTramVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
@@ -2243,6 +2244,130 @@ namespace
 				Report(TEXT("tram.moves"), bMoved, FString::Printf(TEXT("the capsule moved %.0f m between two readings"), FVector::Dist(First, Now) / 100.0));
 				return true;
 			}, 0.2f, 6.f);
+			// Visual pass: the train fits its tunnel. Held at each stop (RH.TramPose's hook), the nose at that end is inside the chain's end cell (the
+			// capsule's centre used to stop on it, 2.5 m of capsule in rock); the train's lowest point is on the floor plane, not under it; and
+			// on an L chain like RH.DeepBench's bend (pure: the click test's tunnel is straight) the two cars' headings differ at the corner.
+			struct FFit
+			{
+				FString Why;
+				bool bOk = true;
+			};
+			const TSharedRef<FFit> Fit = MakeShared<FFit>();
+			const auto Trams = []() -> URHTramVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr; };
+			const auto Line = []() -> const FRHTramLine* { const URHSimWorldSubsystem* Sim = GetSim(); return (Sim && Sim->GetTramLines().Num() > 0) ? &Sim->GetTramLines()[0] : nullptr; };
+			// Is the nose inside the end cell at chain index I (the 10 m cell round that chain point)? Also: is the train on the floor?
+			const auto CheckStop = [Trams, Line, Fit](int32 Car, bool bFar)
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHTramLine* L = Line();
+				URHTramVisualizerSubsystem::FTrainPose Pose;
+				double LowZ = 0.0;
+				if (!Sim || !L || !Trams() || !Trams()->GetTrainPose(L->Id, Pose, LowZ))
+				{
+					Fit->bOk = false;
+					Fit->Why += TEXT(" no train to read (a kit asset missing?)");
+					return;
+				}
+				const int32 Len = URHSimWorldSubsystem::GetTunnelChainLength(L->StopA, L->StopB);
+				const FIntPoint P = URHSimWorldSubsystem::GetTunnelChainPoint(L->StopA, L->StopB, bFar ? Len - 1 : 0);
+				const FVector Head = Sim->GetShaftHeadCm();
+				const FVector2D Cell(Head.X + (double)P.X * 1000.0, Head.Y + (double)P.Y * 1000.0);
+				const FVector2D Off(Pose.Nose[Car].X - Cell.X, Pose.Nose[Car].Y - Cell.Y);
+				const bool bIn = FMath::Abs(Off.X) <= 500.0 && FMath::Abs(Off.Y) <= 500.0;
+				const double FloorZ = (double)L->Level * Sim->GetFloorHeightCm();
+				const bool bOnFloor = LowZ >= FloorZ - 0.5 && LowZ <= FloorZ + 5.0;
+				Fit->bOk &= bIn && bOnFloor;
+				Fit->Why += FString::Printf(TEXT(" %s stop: nose %.1f m from the end cell's centre (%s); lowest point %+.1f cm off the floor plane;"), bFar ? TEXT("far") : TEXT("first"),
+					Off.Size() / 100.0, bIn ? TEXT("inside") : TEXT("OUTSIDE"), LowZ - FloorZ);
+			};
+			Runner.Do(TEXT("tram.fit first"), [Trams, Line]() { if (Trams() && Line()) { Trams()->Debug_PoseLine(Line()->Id, 0.0); } }, 0.5f);
+			Runner.Do(TEXT("tram.fit far"), [Trams, Line, CheckStop]() { CheckStop(1, false); if (Trams() && Line()) { Trams()->Debug_PoseLine(Line()->Id, 1.0); } }, 0.5f);
+			Runner.Do(TEXT("tram.fit"), [Trams, Line, CheckStop, Fit]()
+			{
+				CheckStop(0, true);
+				if (Trams() && Line()) { Trams()->Debug_PoseLine(Line()->Id, -1.0); }
+				// The corner (pure), on two L chains: 10 points along +X then 4 along +Y (RH.DeepBench's bend), and 10 along +X then ONE along +Y
+				// (a legal line whose second leg is a single cell: before the end-leg setback its corner rounded at 5 m and the cars ran 45 cm into
+				// each other). The train's centre is swept over its whole run on the rounded chain, first stop to far stop (CentreArc at 0 and at
+				// the length, as Tick places it), in 25 cm steps; at every step the joint faces' centres stay 0.4-0.9 m apart (0.6 m on straight
+				// track), no joint-face corner is more than 25 cm inside the other car's footprint, and the car centres are within 3 % of a rigid
+				// pair hinged at the joint at that bend (the straight spacing x cos(bend / 2): a bent pair's centres are closer than on straight
+				// track by geometry). The sharpest frame bends 10-80 deg. At both ends the leading nose is inside the end cell (the 10 m square
+				// round the end chain point).
+				constexpr double HalfWidthCm = 130.0; // the car body's half width (rh_build_tram.py HW)
+				const auto Dir = [](double YawDeg) { return FVector2D(FMath::Cos(FMath::DegreesToRadians(YawDeg)), FMath::Sin(FMath::DegreesToRadians(YawDeg))); };
+				for (const int32 Up : { 4, 1 })
+				{
+					TArray<FVector2D> Chain;
+					for (int32 I = 0; I < 10; ++I) { Chain.Add(FVector2D(I * 1000.0, 0.0)); }
+					for (int32 I = 1; I <= Up; ++I) { Chain.Add(FVector2D(9000.0, I * 1000.0)); }
+					const FRHRoundChain Rounded(Chain);
+					URHTramVisualizerSubsystem::FTrainPose Pose;
+					URHTramVisualizerSubsystem::PoseOnRounded(Rounded, 3000.0, Pose); // straight track: the reference spacing
+					const double StraightCm = FVector2D::Distance(FVector2D(Pose.CarAt[0]), FVector2D(Pose.CarAt[1]));
+					double MaxBend = -1.0, Yaw0 = 0.0, Yaw1 = 0.0, CentresAt = 0.0, HingeAt = 0.0, GapMin = 1e9, GapMax = -1e9, Overlap = 0.0, RatioMin = 1e9, RatioMax = -1e9;
+					const double From = URHTramVisualizerSubsystem::CentreArc(0.0, Rounded.Length), To = URHTramVisualizerSubsystem::CentreArc(Rounded.Length, Rounded.Length);
+					for (double S = From; S <= To + 0.01; S += 25.0)
+					{
+						URHTramVisualizerSubsystem::PoseOnRounded(Rounded, FMath::Min(S, To), Pose);
+						FVector2D Mid[2], Fwd[2], Face[2];
+						for (int32 K = 0; K < 2; ++K)
+						{
+							Mid[K] = FVector2D(Pose.CarAt[K]);
+							Fwd[K] = Dir(Pose.CarYaw[K]);
+							Face[K] = Mid[K] - Fwd[K] * FVector2D::Distance(Mid[K], FVector2D(Pose.Nose[K]));
+						}
+						const double Bend = FMath::Abs(FMath::FindDeltaAngleDegrees(Pose.CarYaw[0], Pose.CarYaw[1] + 180.0));
+						const double Gap = FVector2D::Distance(Face[0], Face[1]);
+						const double Centres = FVector2D::Distance(Mid[0], Mid[1]);
+						const double Hinge = StraightCm * FMath::Cos(FMath::DegreesToRadians(0.5 * Bend));
+						GapMin = FMath::Min(GapMin, Gap);
+						GapMax = FMath::Max(GapMax, Gap);
+						RatioMin = FMath::Min(RatioMin, Centres / Hinge);
+						RatioMax = FMath::Max(RatioMax, Centres / Hinge);
+						// Each joint-face corner against the other car's footprint: how far inside it (0 when outside).
+						for (int32 K = 0; K < 2; ++K)
+						{
+							const int32 O = 1 - K;
+							const double OtherHalf = FVector2D::Distance(Mid[O], FVector2D(Pose.Nose[O]));
+							for (const double Side : { -1.0, 1.0 })
+							{
+								const FVector2D Corner = Face[K] + FVector2D(-Fwd[K].Y, Fwd[K].X) * (Side * HalfWidthCm);
+								const FVector2D Rel = Corner - Mid[O];
+								const double Along = FVector2D::DotProduct(Rel, Fwd[O]);
+								const double Lat = FVector2D::DotProduct(Rel, FVector2D(-Fwd[O].Y, Fwd[O].X));
+								Overlap = FMath::Max(Overlap, FMath::Min3(Along + OtherHalf, OtherHalf - Along, HalfWidthCm - FMath::Abs(Lat)));
+							}
+						}
+						if (Bend > MaxBend)
+						{
+							MaxBend = Bend;
+							Yaw0 = Pose.CarYaw[0];
+							Yaw1 = Pose.CarYaw[1] + 180.0;
+							CentresAt = Centres;
+							HingeAt = Hinge;
+						}
+					}
+					// The stops: the nose leading into each end inside that end's cell.
+					double NoseOff[2] = { 0.0, 0.0 };
+					bool bNosesIn = true;
+					for (int32 E = 0; E < 2; ++E)
+					{
+						URHTramVisualizerSubsystem::PoseOnRounded(Rounded, E == 0 ? From : To, Pose);
+						const FVector2D Off = FVector2D(Pose.Nose[E == 0 ? 1 : 0]) - (E == 0 ? Chain[0] : Chain.Last());
+						NoseOff[E] = Off.Size();
+						bNosesIn &= FMath::Abs(Off.X) <= 500.0 && FMath::Abs(Off.Y) <= 500.0;
+					}
+					const bool bBends = MaxBend > 10.0 && MaxBend < 80.0;
+					const bool bSeated = GapMin >= 40.0 && GapMax <= 90.0 && Overlap <= 25.0 && RatioMin >= 0.97 && RatioMax <= 1.03;
+					Fit->bOk &= bBends && bSeated && bNosesIn;
+					Fit->Why += FString::Printf(TEXT(" on a 9 x %d cell L (rounded %.0f m, swept stop to stop) the sharpest frame heads the cars %.0f and %.0f deg (%.0f deg apart%s); joint faces %.2f-%.2f m apart,")
+						TEXT(" corners at most %.0f cm inside the other car, car centres %.0f cm at the sharpest (hinge model %.0f; %.3f-%.3f of it over the sweep)%s; stop noses %.2f / %.2f m from the end cells' centres%s;"),
+						Up, Rounded.Length / 100.0, Yaw0, Yaw1, MaxBend, bBends ? TEXT("") : TEXT(", NOT BENDING"), GapMin / 100.0, GapMax / 100.0, FMath::Max(0.0, Overlap), CentresAt, HingeAt, RatioMin, RatioMax,
+						bSeated ? TEXT("") : TEXT(" - THE CARS DO NOT STAY SEATED"), NoseOff[0] / 100.0, NoseOff[1] / 100.0, bNosesIn ? TEXT("") : TEXT(" - A NOSE IS OUTSIDE ITS END CELL"));
+				}
+				Report(TEXT("tram.fit"), Fit->bOk, Fit->Why.TrimStart());
+			}, 0.2f);
 		}
 
 		{

@@ -1956,6 +1956,22 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTramPose(
 		UE_LOG(LogRedHope, Display, TEXT("[RH.TramPose] line %s %s: %s"), *Args[0], *Args[1], Trams->Debug_PoseLine(FCString::Atoi(*Args[0]), Fraction) ? TEXT("held") : TEXT("no such line"));
 	}));
 
+// Visual pass: show a line's destination boards in one wait colour for a capture (the boards' orange and red never show unless a line waits).
+static FAutoConsoleCommandWithWorldAndArgs GRHTramWait(
+	TEXT("RH.TramWait"),
+	TEXT("RH.TramWait <LineId> <0|1|2|off> - DEBUG: show the line's destination boards in wait class 0 calm teal, 1 busy orange or 2 long red; off follows the line's wait again."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHTramVisualizerSubsystem* Trams = World ? World->GetSubsystem<URHTramVisualizerSubsystem>() : nullptr;
+		if (!Trams || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.TramWait <LineId> <0|1|2|off>"));
+			return;
+		}
+		const int32 Class = Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? -1 : FCString::Atoi(*Args[1]);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.TramWait] line %s %s: %s"), *Args[0], *Args[1], Trams->Debug_ForceWait(FCString::Atoi(*Args[0]), Class) ? TEXT("set") : TEXT("no such train"));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSection(
 	TEXT("RH.Section"),
 	TEXT("RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows> - DEBUG: the deep view's section."),
