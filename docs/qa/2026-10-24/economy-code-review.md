@@ -232,3 +232,7 @@ All three need a doctored or corrupted file. Each slips past the R1 rule "a malf
 
 **A design observation, not a code defect:**
 - **The launch floor ignores the crew aboard.** It uses the present head count. A Colonist Transport aboard adds 20 people at landing, so a floor of 10 sols for 8 people is 2.9 sols for 28 if nothing were produced during the 3-sol transit. The director may want the floor to count the crew aboard.
+
+# DIRECTOR ANSWER (2026-10-26)
+
+- **The launch floor ignores the crew aboard: (a) leave it.** `LaunchFloorKg` keeps N = `Colonists.Num()`, the present head count, the same rule as growth's oxygen reserve. Crew aboard a Colonist Transport are not counted. No gate.

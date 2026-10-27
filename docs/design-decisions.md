@@ -1765,5 +1765,15 @@ Built from `docs/qa/2026-10-25/step2-fixes-spec.md` (its refresh at HEAD `31ffa6
 From `docs/qa/2026-10-25/visual-pass-design.md` (its "# DIRECTOR ANSWER" section):
 
 - **Q-A (a):** a building under construction shows its own model rising inside the scaffold as work proceeds. This applies to every building's site, not only the solar array.
-- **Q-B (a):** the tram shows its wait colour on the destination boards only. As built (`f922b3d`), busy is orange, not amber, because at amber the boards matched the livery's #F3C459 trim; the section view keeps amber. This deviation is put to the director.
+- **Q-B (a):** the tram shows its wait colour on the destination boards only. As built (`f922b3d`), busy is orange, not amber, because at amber the boards matched the livery's #F3C459 trim; the section view keeps amber. The director kept orange (2026-10-26).
 - **P8c label size (a):** the deep view's floor ladder stays at `RHDeck::Label(10)`, with capitals of about 7.8 px at this machine's DPI scale and a 16 px row pitch (built in `870ba2c`). Label(12) was declined.
+- **Tram follow-up 2 (a) (2026-10-26):** the floor view's pit walls can hide the far leg of an L-shaped tunnel on a deep floor. Noted; no gate.
+- **Tram follow-up 3 (a) (2026-10-26):** the tram's underground look is accepted for now and listed as polish.
+
+### Life-support launch floor: the director's answer (2026-10-26)
+
+From `docs/qa/2026-10-24/economy-code-review.md` ("The launch floor ignores the crew aboard"): **(a) leave it.** `LaunchFloorKg` keeps counting the present head count (`Colonists.Num()`), the same rule as growth's oxygen reserve. Crew still aboard a Colonist Transport are not counted. No gate.
+
+### Construction-site frame budget: the director's answer (2026-10-26)
+
+From the sites gate review (gate 7, "within 1.0 ms of before"): **(a) accept on the quiet-pair median.** Across the 8 quiet adjacent pairs the after binary measured a median of about +0.85 ms on a ~31 ms frame (about 2.7%); two quiet pairs came in at +1.52 ms, and the busy pairs swing from about -8 to +10 ms from swapping on the 8 GB machine. The sites commit states these numbers as they are. Re-measure on the other MacBook after the move as a follow-up check.
