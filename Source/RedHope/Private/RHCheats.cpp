@@ -1972,6 +1972,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTramWait(
 		UE_LOG(LogRedHope, Display, TEXT("[RH.TramWait] line %s %s: %s"), *Args[0], *Args[1], Trams->Debug_ForceWait(FCString::Atoi(*Args[0]), Class) ? TEXT("set") : TEXT("no such train"));
 	}));
 
+// Visual pass item 2: what every construction site is drawing (stage, 5 % step, crates, scaffold courses, kit instances).
+static FAutoConsoleCommandWithWorldAndArgs GRHSites(
+	TEXT("RH.Sites"),
+	TEXT("RH.Sites - READ-ONLY: log each construction site's stage (waiting for materials / fabrication), its 5 % step, crates, scaffold courses and site kit instances."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+		{
+			Viz->LogSites();
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSection(
 	TEXT("RH.Section"),
 	TEXT("RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows> - DEBUG: the deep view's section."),

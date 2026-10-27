@@ -22,6 +22,10 @@
 //      MID params: Tint, Rough.
 //   4. Enforces bUsedWithInstancedStaticMeshes on M_Graybox (without it,
 //      -game runs render ISMs with the engine DEFAULT material).
+//   4b. Authors M_RH_BuildReveal - M_RH_Master's texture inputs plus a world-Z
+//      clip (BuildCutZ) and a teal line at the cut: a construction site's own
+//      model rising (visual pass item 2). `-run=RHArt -BuildReveal` authors
+//      only this one and saves nothing else.
 //   5. Logs receipts for imported GLB models (tris, verts, color verts,
 //      bounds) - the evidence the runtime wiring scales against.
 UCLASS()

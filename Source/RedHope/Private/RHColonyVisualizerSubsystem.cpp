@@ -17,8 +17,10 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/SpotLightComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -56,6 +58,16 @@ static TAutoConsoleVariable<int32> CVarModelSetV2(
 	TEXT("rh.ModelSetV2"),
 	1,
 	TEXT("Building models: 1 = the mixed set (painted mesh where it reads better), 0 = all originals."),
+	ECVF_Default);
+
+// Construction-site A/B (visual pass item 2). `rh.SiteKit 0` draws sites as the
+// legacy slab, hazard posts and lamp sphere instead of the site kit, which is
+// also how the click test's build.site is shown to fail. Read once, when the
+// first site appears: set it before then (in -ExecCmds), not mid-session.
+static TAutoConsoleVariable<int32> CVarSiteKit(
+	TEXT("rh.SiteKit"),
+	1,
+	TEXT("Construction sites: 1 = the site kit (pad, scaffold, mast, crates; the model rises), 0 = the legacy slab and posts. Read when the first site appears."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarHabRoof(
@@ -1408,6 +1420,10 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	AuthoredPulseDepth.Reset();
 	// The lamps died with their actors above; drop the stale weak handles.
 	BuildingLights.Reset();
+	// Sites re-register as their buildings are re-added below; the kit HISMs are
+	// rebuilt from that set at the end, so no instance outlives the old colony.
+	SiteVis.Reset();
+	bSiteKitDirty = true;
 	for (AStaticMeshActor* Marker : DepositMarkers)
 	{
 		if (Marker)
@@ -1496,6 +1512,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	SpawnDepositMarkers();
 	RestoreSupplyShip(Sim);
+	RefreshSites(Sim);
 	ApplyViewLevel(); // the reloaded colony honors the elevator's floor
 	UE_LOG(LogRedHope, Display, TEXT("Colony visuals rebuilt from loaded state (%d buildings)"), Sim->GetBuildings().Num());
 }
@@ -2101,6 +2118,7 @@ void URHColonyVisualizerSubsystem::RefreshFurniture(const URHSimWorldSubsystem* 
 		if (!Comp || Vis.Sig != Sig)
 		{
 			++PropsVersion;
+			bSiteKitDirty = true; // furniture moved: a site's bays re-test their ground
 			if (Comp)
 			{
 				Comp->DestroyComponent();
@@ -2214,6 +2232,8 @@ void URHColonyVisualizerSubsystem::HandleBuildingRemoved(const FRHBuildingInstan
 	AppliedPowerState.Remove(Instance.Id);
 	AuthoredPulseDepth.Remove(Instance.Id);
 	BuildingLights.Remove(Instance.Id);
+	ForgetSite(Instance.Id); // a cancelled site's kit instances go now, not at the next poll
+	bSiteKitDirty = true;    // a neighbour's footprint freed: a site's bays may stand there again
 	HabShellVis.Remove(Instance.Id);
 	AppliedDomeCrops.Remove(Instance.Id);
 	DomeCropProps.Remove(Instance.Id);
@@ -2294,6 +2314,7 @@ FVector URHColonyVisualizerSubsystem::ScaleFor(const FRHBuildingInstance& Instan
 void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance& Instance)
 {
 	MarkPassesDirty();
+	bSiteKitDirty = true; // a new footprint: a neighbouring site's bays must not stand in it
 	UWorld* World = GetWorld();
 	if (!World || BuildingVisuals.Contains(Instance.Id))
 	{
@@ -2340,7 +2361,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// walls and rooms by RefreshHabShells - no model over the top of them.
 	const URHDefinitionsSubsystem* ShellDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
 	const FRHBuildingRow* ShellDef = ShellDefs ? ShellDefs->GetBuilding(Instance.DefName) : nullptr;
-	if (!Instance.bUnderConstruction && !(ShellDef && ShellDef->Pressurized))
+	// Visual pass item 2: a construction site loads its building's own model too, which rises inside the site kit's
+	// scaffold as fabrication proceeds (AddSite). Without the kit a site keeps the legacy foundation slab.
+	const bool bSiteKit = Instance.bUnderConstruction && EnsureSiteKit();
+	if ((!Instance.bUnderConstruction || bSiteKit) && !(ShellDef && ShellDef->Pressurized))
 	{
 		static const TMap<FName, FString> RealModelPaths = {
 			{ FName("Forge"),       FString(TEXT("/Game/RedHope/Art/Models/forge/StaticMeshes/forge.forge")) },
@@ -2460,6 +2484,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		// replacement is textured and must keep the material it shipped with.
 		bVertexColored = !bUsingV2 && VertexColoredModels.Contains(Instance.DefName);
 	}
+	float RevealHeightCm = 0.f; // a site's model: its height as drawn, for the reveal (0 = nothing to reveal)
 	if (RealModel)
 	{
 		Mesh->SetStaticMesh(RealModel);
@@ -2488,6 +2513,9 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		Actor->SetActorScale3D(FVector(S));
 		// Recenter horizontally, sit the bounds bottom on the ground.
 		Actor->SetActorLocation(Seated - FVector(MB.Origin.X, MB.Origin.Y, MB.Origin.Z - MB.BoxExtent.Z) * S);
+		// (Only the textured lineage reveals: the reveal reads M_RH_Master's texture inputs, which the vertex-colour
+		// Forge of rh.ModelSetV2 0 does not have. That site shows no model until it is finished.)
+		RevealHeightCm = (Instance.bUnderConstruction && !bVertexColored) ? 2.f * MB.BoxExtent.Z * S : 0.f;
 		// Only the vertex-color lineage (the Forge) needs its material forced;
 		// textured models keep the MI_<name> already on their slots.
 		if (bVertexColored)
@@ -2536,7 +2564,13 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	else if (DomeDef && DomeDef->DragSized)
 	{
 		ApplyTint(Actor, Instance.bUnderConstruction ? FLinearColor(0.08f, 0.08f, 0.09f) : FLinearColor(0.30f, 0.29f, 0.28f), FLinearColor::Black);
-		BuildGreenhouseDome(Actor, Instance, Seated);
+		// A site's deck is hidden under the site kit's pad (AddSite), and the dome's strut frame waits for completion:
+		// drawn from 0 % it stood finished-height on the pad, an empty cage (the 2026-10-27 review). The spec gives a
+		// greenhouse deck site the pad, scaffold and crates only; completion rebuilds the actor with the frame.
+		if (!bSiteKit)
+		{
+			BuildGreenhouseDome(Actor, Instance, Seated);
+		}
 		AppliedDomeCrops.Remove(Instance.Id); // a rebuilt shell redraws its crops
 		DomeCropProps.Remove(Instance.Id);
 	}
@@ -2544,12 +2578,13 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	{
 		BuildSilhouette(Actor, Instance.DefName, Seated, Scale);
 	}
-	else if (Instance.bUnderConstruction) // NOT plain else: a completed real
-	{                                     // model must not wear site dressing
-		// Construction site: hazard corner posts + a lit work lamp on a mast.
-		// A dim foundation slab alone reads as a finished flat deck from the
-		// strategic camera - and disappears entirely at night while the robots
-		// are still working it.
+	else if (Instance.bUnderConstruction && !bSiteKit) // NOT plain else: a completed real
+	{                                                // model must not wear site dressing
+		// The legacy construction site, kept only as the fallback for a missing
+		// site kit (visual pass item 2 draws every site from the kit): hazard
+		// corner posts + a lit work lamp on a mast. A dim foundation slab alone
+		// reads as a finished flat deck from the strategic camera - and
+		// disappears entirely at night while the robots are still working it.
 		const TCHAR* Cube = TEXT("/Engine/BasicShapes/Cube.Cube");
 		const TCHAR* Sphere = TEXT("/Engine/BasicShapes/Sphere.Sphere");
 		const float Hx = Scale.X * 50.f;
@@ -2564,6 +2599,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 			FVector(0.09f, 0.09f, 2.1f), RHCanon::DarkSlate);
 		AddAccent(Actor, Sphere, Seated + FVector(0, 0, 225.f), FRotator::ZeroRotator,
 			FVector(0.28f), RHCanon::HazYellow, FLinearColor(3.2f, 2.2f, 0.35f));
+	}
+	if (bSiteKit)
+	{
+		AddSite(Instance, Actor, Seated, RevealHeightCm);
 	}
 	// Born on whatever floor the sim says; visible only if the elevator is
 	// looking at that stratum (M1-d slice view).
@@ -2661,6 +2700,9 @@ void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInst
 	MarkPassesDirty();
 	// Foundation -> finished form: rebuild the visual outright so the full
 	// treatment (height, hue, tilt, silhouette accents) applies in one path.
+	// The site kit lets go of it first; the rebuilt actor wears the model's
+	// shipping MI (the reveal MIDs die with the old actor).
+	ForgetSite(Instance.Id);
 	if (TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(Instance.Id))
 	{
 		if (AStaticMeshActor* Actor = *Found)
@@ -2670,6 +2712,690 @@ void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInst
 		BuildingVisuals.Remove(Instance.Id);
 	}
 	HandleBuildingAdded(Instance);
+}
+
+// ---------------------------------------------------------------------------
+// Construction sites (visual pass item 2, 2026-10-26). The director, hand-play 2026-10-25: "The solar array 'in progress'
+// state looks unfinished" - every site was a dim cube slab, four hazard posts and a sphere on a stick, and waiting for
+// materials looked exactly like being built. Design: docs/qa/2026-10-25/visual-pass-design.md section 2, DIRECTOR
+// ANSWER Q-A (a): a site shows ITS OWN MODEL rising inside the scaffold, on every building.
+//
+// A site reads its stage from the sim's public const accessors only (presentation; the sim never knows):
+//   - WAITING FOR MATERIALS while any line of GetSiteBill(B) is short in B.InputKg (ApplyBuildWork's own rule, 0.5 kg):
+//     the pad, one scaffold course, and crates on the pad in proportion to what has arrived of the bill;
+//   - FABRICATION: the crates go, the model rises bottom-up to 1 - BuildRemaining_s / (BuildTime_s x GetBedCount(B)) -
+//     the sim sets BuildRemaining_s to exactly that denominator at placement (AddBuilding) and only counts it down - and
+//     the scaffold climbs a course ahead of it to the model's height (one course underground). An empty bill (the
+//     Solar Array: ImportOnly, 60 s) goes straight to fabrication. Shells, greenhouse decks and model-less buildings
+//     get pad, scaffold and crates only.
+// Both fractions are drawn in 5 % steps; nothing is written between steps.
+// The kit keeps to ground nobody else holds (the 2026-10-26 review: bays cut through a floor's storage case, cabinet
+// and barrel, and would cut into any building beside a site): the pad's curb ring is 25 cm of ground marking past the
+// footprint, and a scaffold bay or the mast stands in its slot only when no other building's footprint, prop or
+// furniture rises there and no other site's bay or mast already stands there (sites are walked in Id order);
+// underground, only when the whole slot lies on carved cells (not in the pocket's rock walls). Underground there is no
+// mast (it is 4.7 m, a floor 4 m), and the work light hangs under the ceiling. The surface work light is lit from dusk
+// to dawn only. A model with vertex colour (the legacy lineage under rh.ModelSetV2 0) has no reveal: its site shows
+// the kit alone until it is finished.
+// ---------------------------------------------------------------------------
+
+namespace RHSiteKit
+{
+	// scripts/blender/rh_build_sitekit.py's geometry contract (cm, Unreal axes: the GLB import mirrors Blender's Y).
+	const TCHAR* const MeshPaths[] = {
+		TEXT("/Game/RedHope/Art/Models2/SiteKit/RH_SitePad/StaticMeshes/RH_SitePad.RH_SitePad"),
+		TEXT("/Game/RedHope/Art/Models2/SiteKit/RH_SiteScaffold/StaticMeshes/RH_SiteScaffold.RH_SiteScaffold"),
+		TEXT("/Game/RedHope/Art/Models2/SiteKit/RH_SiteMast/StaticMeshes/RH_SiteMast.RH_SiteMast"),
+		TEXT("/Game/RedHope/Art/Models2/SiteKit/RH_SiteCrate/StaticMeshes/RH_SiteCrate.RH_SiteCrate"),
+	};
+	const TCHAR* const RevealPath = TEXT("/Game/RedHope/Art/M_RH_BuildReveal.M_RH_BuildReveal");
+	constexpr int32 Pad = 0, Bay = 1, Mast = 2, Crate = 3;
+	constexpr float CellCm = 200.f;        // a pad tile and a scaffold bay's length: one footprint cell
+	constexpr float CourseCm = 200.f;      // one scaffold course
+	constexpr float BayGapCm = 30.f;       // the bay's inner face off the pad edge: the chevron curb (25 cm) shows in it
+	constexpr float BayDepthCm = 120.f;    // a bay, inner face to outer face
+	constexpr float BayOffCm = BayGapCm + BayDepthCm * 0.5f; // a bay's centre past the pad edge
+	constexpr float MastHalfCm = 50.f;     // the mast's ballast block (0.9 m) and a little air
+	constexpr float PadTopCm = 10.f;       // the pad plates' top: the crates and the rising model stand on it
+	constexpr float CratePitchCm = 120.f;  // a 1 m crate and its 20 cm aisle
+	constexpr int32 Steps = 20;            // 5 % steps
+	constexpr int32 MaxCourses = 6;        // 12 m: over the tallest site model (the Forge's 9.2 m)
+	constexpr float LightZSurfaceCm = 500.f;
+	constexpr float LightZUnderCm = 330.f; // under a floor's 4 m ceiling
+	// Ground a bay or the mast may not stand on: anything that rises 20 cm..2.5 m off the site's own plane.
+	constexpr float TakenMinZCm = 20.f, TakenMaxZCm = 250.f;
+}
+
+bool URHColonyVisualizerSubsystem::EnsureSiteKit()
+{
+	if (SiteKitActor)
+	{
+		return true;
+	}
+	UWorld* World = GetWorld();
+	if (bSiteKitLooked || !World)
+	{
+		return false;
+	}
+	bSiteKitLooked = true;
+	if (CVarSiteKit.GetValueOnGameThread() == 0)
+	{
+		UE_LOG(LogRedHope, Display, TEXT("rh.SiteKit 0: construction sites draw the legacy slab and posts"));
+		return false;
+	}
+	UStaticMesh* Meshes[SiteKitParts] = {};
+	for (int32 P = 0; P < SiteKitParts; ++P)
+	{
+		Meshes[P] = LoadObject<UStaticMesh>(nullptr, RHSiteKit::MeshPaths[P], nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!Meshes[P])
+		{
+			UE_LOG(LogRedHope, Warning, TEXT("Site kit missing (%s) - construction sites draw the legacy slab and posts (scripts/blender/rh_build_sitekit.py, then scripts/unreal/rh_import_hs.py)"),
+				RHSiteKit::MeshPaths[P]);
+			return false;
+		}
+	}
+	SiteKitActor = World->SpawnActor<AActor>();
+	if (!SiteKitActor)
+	{
+		return false;
+	}
+	USceneComponent* Root = NewObject<USceneComponent>(SiteKitActor, TEXT("Root"));
+	Root->RegisterComponent();
+	SiteKitActor->SetRootComponent(Root);
+#if WITH_EDITOR
+	SiteKitActor->SetActorLabel(TEXT("RH_SiteKit"));
+#endif
+	static const TCHAR* const Names[SiteKitParts] = { TEXT("SitePads"), TEXT("SiteScaffold"), TEXT("SiteMasts"), TEXT("SiteCrates") };
+	SiteKitISM.Reset();
+	for (int32 P = 0; P < SiteKitParts; ++P)
+	{
+		// The kit MIs are children of M_RH_Master, which carries the ISM usage flag (the dff3b1a trap).
+		UHierarchicalInstancedStaticMeshComponent* ISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(SiteKitActor, Names[P]);
+		ISM->SetupAttachment(Root);
+		ISM->SetMobility(EComponentMobility::Movable);
+		ISM->SetStaticMesh(Meshes[P]);
+		ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		// The pad is ground marking (plates 10 cm up, curb 6 cm): its shadow is nothing to see and costs a shadow-depth
+		// pass for every tile (the frame-budget bench, 2026-10-26). Scaffold, mast and crates cast.
+		ISM->SetCastShadow(P != RHSiteKit::Pad);
+		ISM->RegisterComponent();
+		SiteKitActor->AddInstanceComponent(ISM);
+		SiteKitISM.Add(ISM);
+	}
+	return true;
+}
+
+void URHColonyVisualizerSubsystem::AddSite(const FRHBuildingInstance& Instance, AStaticMeshActor* Actor, const FVector& Seated, float ModelHeightCm)
+{
+	using namespace RHSiteKit;
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(Instance.DefName) : nullptr;
+	FRHSiteVis Site;
+	Site.DefName = Instance.DefName;
+	Site.SeatCm = Seated;
+	Site.Level = Instance.Level;
+	Site.CellsX = FMath::Max(1, Def ? Def->FootprintX : 1) * FMath::Max(1, Instance.SizeX);
+	Site.CellsY = FMath::Max(1, Def ? Def->FootprintY : 1) * FMath::Max(1, Instance.SizeY);
+	// About two crates for every three tiles: a Solar-sized pad holds four, a habitat's caps at a dozen.
+	Site.CrateSlots = FMath::Clamp(FMath::DivideAndRoundUp(Site.CellsX * Site.CellsY * 2, 3), 2, 12);
+	// The scaffold grows as tall as what is being built (to the nearest course): the model as drawn; else a shell's
+	// 3 m walls, a greenhouse's frame, or the finished stand-in's height. Underground it stays one course (the floor
+	// above is 4 m up).
+	float FinishedCm = ModelHeightCm;
+	if (FinishedCm <= 0.f)
+	{
+		FRHBuildingInstance Done = Instance;
+		Done.bUnderConstruction = false;
+		FinishedCm = (Def && Def->Pressurized) ? 300.f : ((Def && Def->DragSized) ? 400.f : ScaleFor(Done).Z * 100.f);
+	}
+	Site.FinishedCm = FinishedCm;
+	Site.FullCourses = Instance.Level < 0 ? 1 : FMath::Clamp(FMath::RoundToInt32(FinishedCm / CourseCm), 1, MaxCourses);
+	// The work light. The kit's lamps are a few pixels from the strategy camera, so after dark a site would vanish
+	// while the robots still work it (the legacy dressing's reason for its lamp sphere). A shadowless amber SPOT
+	// over the pad's centre, aimed straight down, its cone just covering the footprint's corners and its reach cut
+	// a little past them: the pool lands on the pad and the scaffold, not on the regolith round the site (the
+	// 2026-10-26 review: a point light at the corner mast turned the ground beside every site crimson). It rides the
+	// building's actor (gone at completion, hidden off its floor) and is not one of BuildingLights, which the power
+	// pass switches with bPowered.
+	if (Actor)
+	{
+		const float HalfDiagCm = 0.5f * FMath::Sqrt(FMath::Square(Site.CellsX * CellCm) + FMath::Square(Site.CellsY * CellCm));
+		const float LightZ = Instance.Level < 0 ? LightZUnderCm : LightZSurfaceCm;
+		const float OuterDeg = FMath::Clamp(FMath::RadiansToDegrees(FMath::Atan2(HalfDiagCm, LightZ)), 25.f, 72.f);
+		USpotLightComponent* Work = NewObject<USpotLightComponent>(Actor);
+		Work->SetupAttachment(Actor->GetRootComponent());
+		Work->SetMobility(EComponentMobility::Movable);
+		Work->SetAbsolute(true, true, true);
+		Work->SetIntensityUnits(ELightUnits::Candelas);
+		Work->SetIntensity(Instance.Level < 0 ? 30.f : 60.f); // a floor's lit room needs less; 60 cd outdoors at 5 m
+		Work->SetLightColor(FColor(255, 190, 110));   // the lamps' amber
+		Work->SetOuterConeAngle(OuterDeg);
+		Work->SetInnerConeAngle(OuterDeg * 0.6f);
+		Work->SetAttenuationRadius(FMath::Sqrt(FMath::Square(LightZ) + FMath::Square(HalfDiagCm + 150.f)) + 50.f);
+		Work->SetCastShadows(false);
+		// Lit from dusk to dawn on the surface (RefreshSites switches it with the sun), always underground. In full
+		// daylight a 60 cd pool does not show against the sun, and five of them were part of the frame-budget bench's
+		// cost (2026-10-27).
+		Work->SetVisibility(Instance.Level < 0 || SiteLightsDay != 1);
+		Work->RegisterComponent();
+		Work->SetWorldLocationAndRotation(Seated + FVector(0.f, 0.f, LightZ), FRotator(-90.f, 0.f, 0.f));
+		Site.WorkLight = Work;
+	}
+
+	UStaticMeshComponent* Mesh = Actor ? Actor->GetStaticMeshComponent() : nullptr;
+	if (Mesh && ModelHeightCm > 0.f)
+	{
+		static bool bWarnedReveal = false;
+		UMaterialInterface* Reveal = LoadObject<UMaterialInterface>(nullptr, RevealPath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (Reveal)
+		{
+			// The model stands ON the pad's plates while it is built (HandleBuildingAdded sat its bounds bottom on the
+			// ground; the plates are 10 cm up). Completion rebuilds the actor on the ground, where the pad was.
+			Actor->AddActorWorldOffset(FVector(0.f, 0.f, PadTopCm));
+			const float BottomZ = Seated.Z + PadTopCm;
+			// Faces closed inside the model (never seen on the finished building) show the dark interior at the cut,
+			// not their paint: the model's hidden mask, baked by scripts/blender/rh_bake_hidden.py and named for the
+			// mesh. Without one, only the back faces go dark.
+			UTexture* Hidden = Mesh->GetStaticMesh() ? LoadObject<UTexture>(nullptr, *FString::Printf(TEXT("/Game/RedHope/Art/Masks/T_%s_HiddenMask.T_%s_HiddenMask"),
+				*Mesh->GetStaticMesh()->GetName(), *Mesh->GetStaticMesh()->GetName()), nullptr, LOAD_NoWarn | LOAD_Quiet) : nullptr;
+			// Each slot's MID carries its shipping MI's look (M_RH_Master's texture inputs, by name) plus the cut.
+			static const FName Textures[] = { FName("BaseTex"), FName("MRTex"), FName("NormTex") };
+			static const FName Scalars[] = { FName("UseMRTex"), FName("UseNormTex"), FName("Metallic"), FName("Rough"), FName("AccentAmount"), FName("EmissiveFloor") };
+			for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+			{
+				UMaterialInterface* Ship = Mesh->GetMaterial(Slot);
+				UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Reveal, Mesh);
+				if (Ship)
+				{
+					for (const FName& P : Textures)
+					{
+						UTexture* Tex = nullptr;
+						if (Ship->GetTextureParameterValue(FHashedMaterialParameterInfo(P), Tex) && Tex)
+						{
+							Mid->SetTextureParameterValue(P, Tex);
+						}
+					}
+					for (const FName& P : Scalars)
+					{
+						float V = 0.f;
+						if (Ship->GetScalarParameterValue(FHashedMaterialParameterInfo(P), V))
+						{
+							Mid->SetScalarParameterValue(P, V);
+						}
+					}
+					FLinearColor Accent;
+					if (Ship->GetVectorParameterValue(FHashedMaterialParameterInfo(FName("AccentColor")), Accent))
+					{
+						Mid->SetVectorParameterValue(FName("AccentColor"), Accent);
+					}
+				}
+				if (Hidden)
+				{
+					Mid->SetTextureParameterValue(FName("HiddenMask"), Hidden);
+				}
+				Mid->SetScalarParameterValue(FName("BuildCutZ"), BottomZ);
+				Mesh->SetMaterial(Slot, Mid);
+				Site.RevealMids.Add(Mid);
+			}
+			Site.RevealBottomCm = BottomZ;
+			Site.RevealHeightCm = ModelHeightCm;
+			Site.RevealMesh = Mesh;
+		}
+		else if (!bWarnedReveal)
+		{
+			bWarnedReveal = true;
+			UE_LOG(LogRedHope, Warning, TEXT("M_RH_BuildReveal missing - site models stay hidden until finished (UnrealEditor-Cmd <proj> -run=RHArt -BuildReveal)"));
+		}
+	}
+	// The actor's own mesh (the model, or the slab / deck stand-in) hides under the kit; RefreshSites shows a model
+	// once fabrication starts. A greenhouse's strut frame and the label are children and stay.
+	if (Mesh)
+	{
+		Mesh->SetVisibility(false, /*bPropagateToChildren*/ false);
+	}
+	SiteVis.Add(Instance.Id, MoveTemp(Site));
+	bSiteKitDirty = true;
+}
+
+void URHColonyVisualizerSubsystem::ForgetSite(int32 BuildingId)
+{
+	if (SiteVis.Remove(BuildingId) > 0)
+	{
+		RebuildSiteKit();
+	}
+}
+
+void URHColonyVisualizerSubsystem::RefreshSites(const URHSimWorldSubsystem* Sim)
+{
+	if (!Sim || (SiteVis.Num() == 0 && !bSiteKitDirty))
+	{
+		return;
+	}
+	const URHDefinitionsSubsystem* Defs = GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	// The ground round a site may have changed since the kit was built: a room prop placed, swapped or hidden, furniture
+	// bought or sold, a carved tile spawned, a reload (tiles and props arrive ticks after RefreshSites first ran). Any of
+	// those moves PropsVersion or the tile count, so the bays re-test their slots.
+	if (SiteVis.Num() > 0 && (PropsVersion != SiteKitPropsVersion || TileByCell.Num() != SiteKitTileCount))
+	{
+		bSiteKitDirty = true;
+	}
+	// The surface work lights: on while the sun is under ~17 deg (the atmosphere's sun: elevation (frac - 0.25) x 360).
+	{
+		const URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+		const float SolFraction = Clock ? Clock->GetSolFraction() : 0.35f;
+		const int8 Day = FMath::Sin((SolFraction - 0.25f) * 2.f * PI) > 0.3f ? 1 : 0;
+		if (Day != SiteLightsDay)
+		{
+			SiteLightsDay = Day;
+			for (const TPair<int32, FRHSiteVis>& Pair : SiteVis)
+			{
+				if (USpotLightComponent* Work = Pair.Value.WorkLight.Get())
+				{
+					Work->SetVisibility(Pair.Value.Level < 0 || Day == 0);
+				}
+			}
+		}
+	}
+	TMap<int32, const FRHBuildingInstance*> Open;
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		if (B.bUnderConstruction)
+		{
+			Open.Add(B.Id, &B);
+		}
+	}
+	for (auto It = SiteVis.CreateIterator(); It; ++It)
+	{
+		const FRHBuildingInstance* const* Found = Open.Find(It->Key);
+		if (!Found)
+		{
+			It.RemoveCurrent(); // finished or gone (the events normally get here first)
+			bSiteKitDirty = true;
+			continue;
+		}
+		const FRHBuildingInstance& B = **Found;
+		FRHSiteVis& Site = It->Value;
+		double BillKg = 0.0, HeldKg = 0.0;
+		bool bWaiting = false;
+		for (const TPair<FName, double>& Line : Sim->GetSiteBill(B))
+		{
+			// ApplyBuildWork's own rule, exactly: a line with no delivery entry at all waits, whatever its size.
+			const double* Held = B.InputKg.Find(Line.Key);
+			BillKg += Line.Value;
+			HeldKg += Held ? FMath::Min(*Held, Line.Value) : 0.0;
+			bWaiting |= !Held || *Held + 0.5 < Line.Value;
+		}
+		const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+		const double BuildS = Def ? Def->BuildTime_s * URHSimWorldSubsystem::GetBedCount(B) : 0.0;
+		const double Fraction = bWaiting ? (BillKg > 0.0 ? HeldKg / BillKg : 0.0) : (BuildS > 0.0 ? 1.0 - B.BuildRemaining_s / BuildS : 1.0);
+		const int32 Step = FMath::Clamp(FMath::FloorToInt32(FMath::Clamp(Fraction, 0.0, 1.0) * RHSiteKit::Steps + 1.0e-6), 0, RHSiteKit::Steps);
+		if (Step == Site.Step && Site.bFabricating == !bWaiting)
+		{
+			continue; // the 5 % step has not moved: nothing to write
+		}
+		if (Site.bFabricating == bWaiting || Site.Step < 0)
+		{
+			bSiteKitDirty = true; // a new site, or fabrication began: the scaffold grows and the crates go
+		}
+		Site.bFabricating = !bWaiting;
+		Site.Step = Step;
+		const int32 Crates = bWaiting ? FMath::RoundToInt32((float)Site.CrateSlots * Step / RHSiteKit::Steps) : 0;
+		// The scaffold goes up a lift at a time, a course ahead of the cut (at least a metre above it), so a tall
+		// building's site is never an empty cage of four courses at 0 %.
+		const float BuiltCm = Site.FinishedCm * Step / RHSiteKit::Steps;
+		const int32 Courses = bWaiting ? 1 : FMath::Clamp(FMath::CeilToInt32((BuiltCm + 100.f) / RHSiteKit::CourseCm), 1, Site.FullCourses);
+		if (Crates != Site.Crates || Courses != Site.Courses)
+		{
+			Site.Crates = Crates;
+			Site.Courses = Courses;
+			bSiteKitDirty = true;
+		}
+		if (UStaticMeshComponent* Mesh = Site.RevealMesh.Get())
+		{
+			// At 0 % the cut sits on the model's bottom and every pixel clips: drawing it would only cost the masked
+			// passes (the tutorial's three Solar sites sit there). It shows from the first 5 % step.
+			Mesh->SetVisibility(Site.bFabricating && Step > 0, /*bPropagateToChildren*/ false);
+			const float CutZ = Site.RevealBottomCm + Site.RevealHeightCm * Step / RHSiteKit::Steps;
+			for (const TWeakObjectPtr<UMaterialInstanceDynamic>& Mid : Site.RevealMids)
+			{
+				if (UMaterialInstanceDynamic* M = Mid.Get())
+				{
+					M->SetScalarParameterValue(FName("BuildCutZ"), CutZ);
+				}
+			}
+		}
+	}
+	if (bSiteKitDirty)
+	{
+		RebuildSiteKit();
+	}
+}
+
+void URHColonyVisualizerSubsystem::GatherSiteGroundTaken(TArray<FBox>& OutTaken) const
+{
+	// The ground round the sites in view that is already taken, as world boxes: every other building's footprint on
+	// the same floor (the sim's reservation, whatever its model draws), and every prop or piece of furniture the floor
+	// is dressed with (the components on its carved tiles: the 2026-10-26 review's capture 04 had bays through a
+	// storage case, a cabinet and a barrel). The surface has no tiles; its buildings are footprints. The pocket's rock
+	// walls are not here: RebuildSiteKit keeps an underground slot only when every corner lies on a carved cell, and
+	// it adds each placed bay and mast so the next site's kit stays out of it.
+	using namespace RHSiteKit;
+	OutTaken.Reset();
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	TArray<FBox> Near;  // each shown site's reach (pad, gap, bay, mast) in the band a bay stands in
+	TSet<int32> Levels;
+	for (const TPair<int32, FRHSiteVis>& Pair : SiteVis)
+	{
+		const FRHSiteVis& S = Pair.Value;
+		if (!ShowsLevel(S.Level))
+		{
+			continue;
+		}
+		const FVector Reach(S.CellsX * CellCm * 0.5f + BayGapCm + BayDepthCm + 20.f, S.CellsY * CellCm * 0.5f + BayGapCm + BayDepthCm + 20.f, 0.f);
+		Near.Add(FBox(S.SeatCm - Reach + FVector(0.f, 0.f, TakenMinZCm), S.SeatCm + Reach + FVector(0.f, 0.f, TakenMaxZCm)));
+		Levels.Add(S.Level);
+	}
+	if (Near.Num() == 0)
+	{
+		return;
+	}
+	const auto IsNear = [&Near](const FBox& B)
+	{
+		for (const FBox& N : Near)
+		{
+			if (N.Intersect(B))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	{
+		if (!Levels.Contains(B.Level))
+		{
+			continue;
+		}
+		const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+		const float Hx = FMath::Max(1, Def ? Def->FootprintX : 1) * FMath::Max(1, B.SizeX) * CellCm * 0.5f;
+		const float Hy = FMath::Max(1, Def ? Def->FootprintY : 1) * FMath::Max(1, B.SizeY) * CellCm * 0.5f;
+		const double BaseZ = B.Level < 0 ? B.Level * Sim->GetFloorHeightCm() : RHMarsTerrain::GroundZCm(B.LocationCm.X, B.LocationCm.Y);
+		const FBox Foot(FVector(B.LocationCm.X - Hx, B.LocationCm.Y - Hy, BaseZ), FVector(B.LocationCm.X + Hx, B.LocationCm.Y + Hy, BaseZ + 400.0));
+		if (IsNear(Foot))
+		{
+			OutTaken.Add(Foot);
+		}
+	}
+	for (const TPair<FIntVector, TWeakObjectPtr<AStaticMeshActor>>& Pair : TileByCell)
+	{
+		const AStaticMeshActor* Tile = Pair.Value.Get();
+		if (!Tile || !Levels.Contains(Pair.Key.X))
+		{
+			continue;
+		}
+		TInlineComponentArray<UStaticMeshComponent*> Comps(Tile);
+		for (const UStaticMeshComponent* C : Comps)
+		{
+			if (!C || !C->IsRegistered() || !C->IsVisible() || !C->GetStaticMesh())
+			{
+				continue;
+			}
+			const FBox B = C->Bounds.GetBox();
+			const FVector Size = B.GetSize();
+			if (Size.X > 600.f && Size.Y > 600.f)
+			{
+				continue; // the floor slab (or a ceiling) itself, not something standing on it
+			}
+			if (IsNear(B))
+			{
+				OutTaken.Add(B);
+			}
+		}
+	}
+}
+
+void URHColonyVisualizerSubsystem::RebuildSiteKit()
+{
+	bSiteKitDirty = false;
+	if (SiteVis.Num() == 0 && !SiteKitActor)
+	{
+		return; // no site yet: nothing to draw, and rh.SiteKit stays unread until the first site appears
+	}
+	if (!EnsureSiteKit() || SiteKitISM.Num() != SiteKitParts)
+	{
+		return;
+	}
+	using namespace RHSiteKit;
+	SiteKitPropsVersion = PropsVersion;
+	SiteKitTileCount = TileByCell.Num();
+	TArray<FBox> Taken;
+	GatherSiteGroundTaken(Taken);
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	// A slot is free when no taken box overlaps its plan (2 cm of play) in the band a bay stands in, and, underground,
+	// when all four corners lie on the floor's carved cells: a bay past the pocket's edge would stand in the rock face
+	// (the sim checks only that an underground building's centre is carved).
+	const auto OnCarved = [Sim](int32 Level, const FVector& Seat, float X0, float X1, float Y0, float Y1)
+	{
+		if (Level >= 0)
+		{
+			return true;
+		}
+		for (int32 K = 0; K < 4; ++K)
+		{
+			const FVector Corner(Seat.X + ((K & 1) ? X1 - 2.f : X0 + 2.f), Seat.Y + ((K & 2) ? Y1 - 2.f : Y0 + 2.f), Seat.Z);
+			if (!Sim || Sim->FindCarvedCellAt(Level, Corner) == INDEX_NONE)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	const auto Free = [&Taken, &OnCarved](int32 Level, const FVector& Seat, float X0, float X1, float Y0, float Y1)
+	{
+		const FBox Slot(FVector(Seat.X + X0 + 2.f, Seat.Y + Y0 + 2.f, Seat.Z + TakenMinZCm), FVector(Seat.X + X1 - 2.f, Seat.Y + Y1 - 2.f, Seat.Z + TakenMaxZCm));
+		for (const FBox& T : Taken)
+		{
+			if (T.Intersect(Slot))
+			{
+				return false;
+			}
+		}
+		return OnCarved(Level, Seat, X0, X1, Y0, Y1);
+	};
+	// A placed bay or mast takes its ground for the sites after it (Id order): two sites a cell apart must not both put
+	// a bay row into the same gap (the 2026-10-27 review), nor a corner mast stand in a neighbour's bay.
+	const auto Take = [&Taken](const FVector& Seat, float X0, float X1, float Y0, float Y1)
+	{
+		Taken.Add(FBox(FVector(Seat.X + X0, Seat.Y + Y0, Seat.Z + TakenMinZCm), FVector(Seat.X + X1, Seat.Y + Y1, Seat.Z + TakenMaxZCm)));
+	};
+	TArray<FTransform> Xf[SiteKitParts];
+	TArray<int32> Ids;
+	SiteVis.GetKeys(Ids);
+	Ids.Sort(); // the same instance order every rebuild
+	for (const int32 Id : Ids)
+	{
+		FRHSiteVis& Site = SiteVis[Id];
+		int32 Before[SiteKitParts];
+		for (int32 P = 0; P < SiteKitParts; ++P)
+		{
+			Before[P] = Xf[P].Num();
+		}
+		Site.BaysLeftOut = 0;
+		Site.BaysInRock = 0;
+		Site.MastCorner = -1;
+		if (ShowsLevel(Site.Level))
+		{
+			const FVector C = Site.SeatCm;
+			const float W = Site.CellsX * CellCm, D = Site.CellsY * CellCm;
+			// Pad: a tile a cell. Each tile carries its own curb ring; an interior side hides under its neighbour.
+			for (int32 I = 0; I < Site.CellsX; ++I)
+			{
+				for (int32 J = 0; J < Site.CellsY; ++J)
+				{
+					Xf[Pad].Add(FTransform(FRotator::ZeroRotator, C + FVector(-W * 0.5f + CellCm * (I + 0.5f), -D * 0.5f + CellCm * (J + 0.5f), 0.f)));
+				}
+			}
+			// Scaffold: a bay per footprint cell along each side, its outer face (+Y at yaw 0 in Unreal) turned outward, one course
+			// while the site waits, then rising ahead of the model (RefreshSites). A bay whose ground is taken (a
+			// neighbour's footprint, an earlier site's bay or mast, a prop, furniture) or, underground, not wholly on the
+			// carved floor is left out at every course. The corners stay open.
+			struct FSlot { FVector At; float Yaw; };
+			TArray<FSlot, TInlineAllocator<64>> Slots;
+			const float In = BayGapCm, Out = BayGapCm + BayDepthCm;
+			// Each slot's plan relative to the seat: X0, X1, Y0, Y1.
+			const auto TrySlot = [&](float X0, float X1, float Y0, float Y1, const FVector& At, float Yaw)
+			{
+				if (Free(Site.Level, C, X0, X1, Y0, Y1))
+				{
+					Slots.Add({ At, Yaw });
+					Take(C, X0, X1, Y0, Y1);
+				}
+				else
+				{
+					++Site.BaysLeftOut;
+					Site.BaysInRock += OnCarved(Site.Level, C, X0, X1, Y0, Y1) ? 0 : 1;
+				}
+			};
+			for (int32 I = 0; I < Site.CellsX; ++I)
+			{
+				const float X = -W * 0.5f + CellCm * (I + 0.5f);
+				TrySlot(X - CellCm * 0.5f, X + CellCm * 0.5f, -D * 0.5f - Out, -D * 0.5f - In, FVector(X, -D * 0.5f - BayOffCm, 0.f), 180.f);
+				TrySlot(X - CellCm * 0.5f, X + CellCm * 0.5f, D * 0.5f + In, D * 0.5f + Out, FVector(X, D * 0.5f + BayOffCm, 0.f), 0.f);
+			}
+			for (int32 J = 0; J < Site.CellsY; ++J)
+			{
+				const float Y = -D * 0.5f + CellCm * (J + 0.5f);
+				TrySlot(-W * 0.5f - Out, -W * 0.5f - In, Y - CellCm * 0.5f, Y + CellCm * 0.5f, FVector(-W * 0.5f - BayOffCm, Y, 0.f), 90.f);
+				TrySlot(W * 0.5f + In, W * 0.5f + Out, Y - CellCm * 0.5f, Y + CellCm * 0.5f, FVector(W * 0.5f + BayOffCm, Y, 0.f), 270.f);
+			}
+			for (int32 Course = 0; Course < FMath::Max(1, Site.Courses); ++Course)
+			{
+				for (const FSlot& S : Slots)
+				{
+					Xf[Bay].Add(FTransform(FRotator(0.f, S.Yaw, 0.f), C + S.At + FVector(0.f, 0.f, Course * CourseCm)));
+				}
+			}
+			// The mast: surface sites only (it is 4.7 m; a floor is 4 m - underground the work light hangs from the
+			// ceiling alone). It takes the first open corner of (+X,-Y), (-X,-Y), (+X,+Y), (-X,+Y) whose ground is free,
+			// its lamps (+X) aimed at the site's centre; with no corner free a site has no mast.
+			if (Site.Level >= 0)
+			{
+				static const FIntPoint Corners[4] = { { 1, -1 }, { -1, -1 }, { 1, 1 }, { -1, 1 } };
+				for (int32 K = 0; K < 4; ++K)
+				{
+					const FVector At(Corners[K].X * (W * 0.5f + BayOffCm), Corners[K].Y * (D * 0.5f + BayOffCm), 0.f);
+					if (Free(Site.Level, C, At.X - MastHalfCm, At.X + MastHalfCm, At.Y - MastHalfCm, At.Y + MastHalfCm))
+					{
+						const float Yaw = FMath::RadiansToDegrees(FMath::Atan2(-(float)Corners[K].Y, -(float)Corners[K].X));
+						Xf[Mast].Add(FTransform(FRotator(0.f, Yaw, 0.f), C + At));
+						Take(C, At.X - MastHalfCm, At.X + MastHalfCm, At.Y - MastHalfCm, At.Y + MastHalfCm);
+						Site.MastCorner = K;
+						break;
+					}
+				}
+			}
+			// Crates: rows on a 1.2 m grid from the pad's (-X, -Y) corner, then a second layer; turned 0 / 90 / 180 / 270
+			// with a few degrees of play, so the amber and bone-white walls mix.
+			const int32 Cols = FMath::Max(1, FMath::FloorToInt32((W - 60.f) / CratePitchCm));
+			const int32 Rows = FMath::Max(1, FMath::FloorToInt32((D - 60.f) / CratePitchCm));
+			for (int32 K = 0; K < Site.Crates; ++K)
+			{
+				const int32 Layer = K / (Cols * Rows);
+				const int32 Q = K % (Cols * Rows);
+				const float Yaw = 90.f * ((K * 7) % 4) + (float)((K * 37) % 9 - 4);
+				Xf[Crate].Add(FTransform(FRotator(0.f, Yaw, 0.f), C + FVector(-W * 0.5f + 90.f + CratePitchCm * (Q % Cols),
+					-D * 0.5f + 90.f + CratePitchCm * (Q / Cols), PadTopCm + 100.f * Layer)));
+			}
+		}
+		for (int32 P = 0; P < SiteKitParts; ++P)
+		{
+			Site.Count[P] = Xf[P].Num() - Before[P];
+		}
+	}
+	for (int32 P = 0; P < SiteKitParts; ++P)
+	{
+		UHierarchicalInstancedStaticMeshComponent* ISM = SiteKitISM[P];
+		if (!ISM)
+		{
+			continue;
+		}
+		ISM->ClearInstances();
+		if (Xf[P].Num() > 0)
+		{
+			ISM->AddInstances(Xf[P], /*bShouldReturnIndices*/ false, /*bWorldSpace*/ true);
+		}
+	}
+}
+
+int32 URHColonyVisualizerSubsystem::GetSiteInstanceCount(int32 BuildingId, int32 Part) const
+{
+	const FRHSiteVis* Site = SiteVis.Find(BuildingId);
+	if (!Site || Part < -1 || Part >= SiteKitParts)
+	{
+		return 0;
+	}
+	return Part >= 0 ? Site->Count[Part] : Site->Count[0] + Site->Count[1] + Site->Count[2] + Site->Count[3];
+}
+
+int32 URHColonyVisualizerSubsystem::GetSiteKitHismInstanceCount(int32 Part) const
+{
+	int32 N = 0;
+	for (int32 P = 0; P < SiteKitISM.Num(); ++P)
+	{
+		if ((Part < 0 || Part == P) && SiteKitISM[P])
+		{
+			N += SiteKitISM[P]->GetInstanceCount();
+		}
+	}
+	return N;
+}
+
+float URHColonyVisualizerSubsystem::GetSiteRevealFraction(int32 BuildingId) const
+{
+	const FRHSiteVis* Site = SiteVis.Find(BuildingId);
+	return (Site && Site->bFabricating && Site->RevealHeightCm > 0.f) ? (float)Site->Step / RHSiteKit::Steps : -1.f;
+}
+
+bool URHColonyVisualizerSubsystem::GetSiteRevealCut(int32 BuildingId, float& OutCutZ, float& OutBottomZ, bool& bOutModelVisible) const
+{
+	const FRHSiteVis* Site = SiteVis.Find(BuildingId);
+	const UStaticMeshComponent* Mesh = Site ? Site->RevealMesh.Get() : nullptr;
+	const UMaterialInstanceDynamic* Mid = (Site && Site->RevealMids.Num() > 0) ? Site->RevealMids[0].Get() : nullptr;
+	float Cut = 0.f;
+	if (!Mesh || !Mid || !Mid->GetScalarParameterValue(FHashedMaterialParameterInfo(FName("BuildCutZ")), Cut))
+	{
+		return false;
+	}
+	OutCutZ = Cut;                     // read back from the model's own MID, not the bookkeeping step
+	OutBottomZ = Site->RevealBottomCm;
+	bOutModelVisible = Mesh->IsVisible() && Mesh->GetMaterial(0) == Mid;
+	return true;
+}
+
+void URHColonyVisualizerSubsystem::LogSites() const
+{
+	static const TCHAR* const CornerNames[4] = { TEXT("+X-Y"), TEXT("-X-Y"), TEXT("+X+Y"), TEXT("-X+Y") };
+	UE_LOG(LogRedHope, Display, TEXT("[RH.Sites] %d site(s), kit %s, HISM instances %d"), SiteVis.Num(), SiteKitActor ? TEXT("drawn") : TEXT("missing (legacy dressing)"),
+		GetSiteKitHismInstanceCount());
+	for (const TPair<int32, FRHSiteVis>& Pair : SiteVis)
+	{
+		const FRHSiteVis& S = Pair.Value;
+		const FString Stage = S.Step < 0 ? FString(TEXT("not polled yet"))
+			: FString::Printf(TEXT("%s %d%%"), S.bFabricating ? TEXT("fabrication") : TEXT("waiting for materials"), S.Step * 100 / RHSiteKit::Steps);
+		const USpotLightComponent* Work = S.WorkLight.Get();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Sites] #%d %s L%d %dx%d cells at (%.1f, %.1f) m | %s | crates %d of %d | scaffold %d of %d course(s), %d bay slot(s) left out (%d off the carved floor) | mast %s | light %s | reveal %s | instances pad %d, bay %d, mast %d, crate %d"),
+			Pair.Key, *S.DefName.ToString(), S.Level, S.CellsX, S.CellsY, S.SeatCm.X / 100.f, S.SeatCm.Y / 100.f, *Stage, FMath::Max(0, S.Crates), S.CrateSlots, FMath::Max(1, S.Courses), S.FullCourses,
+			S.BaysLeftOut, S.BaysInRock, S.MastCorner >= 0 ? CornerNames[S.MastCorner] : TEXT("none"), !Work ? TEXT("none") : (Work->IsVisible() ? TEXT("on") : TEXT("off (daylight)")),
+			S.RevealHeightCm > 0.f ? *FString::Printf(TEXT("%.0f cm model"), S.RevealHeightCm) : TEXT("none"),
+			S.Count[0], S.Count[1], S.Count[2], S.Count[3]);
+	}
 }
 
 void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason)
@@ -3047,6 +3773,7 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 		RefreshDomeCrops();
 		RefreshHabShells();
 		RefreshFurniture(Sim);
+		RefreshSites(Sim);
 		bHoverDirty = true; // the passes may have added labels
 	}
 	AnimateDoors(DeltaTime);
@@ -4186,6 +4913,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 						(TileLoc.Z + 15.f) - (MB.Origin.Z - MB.BoxExtent.Z) * S),
 				FRotator(0.f, Rand.FRandRange(0.f, 360.f), 0.f));
 			++Have;
+			bSiteKitDirty = true; // a new prop on the floor: a site's bays re-test their ground
 		}
 	}
 }
@@ -4596,6 +5324,11 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 		ShaftVisual->SetActorHiddenInGame(!ShowsUnderground());
 	}
 	PlaceExtraShaftVisuals(Sim);
+	// The site kit draws only the viewed floor's sites (one holder for every floor).
+	if (SiteVis.Num() > 0)
+	{
+		RebuildSiteKit();
+	}
 
 	RebuildSliceRig();
 }

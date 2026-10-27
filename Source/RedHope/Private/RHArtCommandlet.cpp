@@ -10,13 +10,22 @@
 #include "Materials/MaterialExpressionAppendVector.h"
 #include "Materials/MaterialExpressionComponentMask.h"
 #include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionCollectionParameter.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionDivide.h"
+#include "Materials/MaterialExpressionLinearInterpolate.h"
 #include "Materials/MaterialExpressionMultiply.h"
 #include "Materials/MaterialExpressionNormalize.h"
+#include "Materials/MaterialExpressionOneMinus.h"
+#include "Materials/MaterialExpressionSaturate.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionSubtract.h"
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
 #include "Materials/MaterialExpressionTextureSample.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionTwoSidedSign.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "Materials/MaterialExpressionVertexColor.h"
 #include "Materials/MaterialExpressionVertexNormalWS.h"
 #include "Materials/MaterialExpressionWorldPosition.h"
@@ -278,6 +287,183 @@ namespace
 		return bSaved;
 	}
 
+	// M_RH_BuildReveal (visual pass item 2, 2026-10-26): a construction site's own model rising inside its scaffold
+	// (docs/qa/2026-10-25/visual-pass-design.md section 2, DIRECTOR ANSWER Q-A (a)). It is M_RH_Master's texture inputs
+	// (BaseTex, MRTex, NormTex with UseMRTex / UseNormTex, Metallic, Rough, the accent lerp and the EmissiveFloor lift;
+	// no machine glow - a site is not running) plus a world-Z clip: the surface draws only below BuildCutZ (world cm),
+	// so the colony visualizer raises the cut with the build fraction and the model grows bottom-up. Just under the cut
+	// a thin teal line glows (CutLineCm deep, CutColor x CutGlow x MPC_Atmosphere.GlowScale - the rh.Glow dial - and
+	// only on faces that stand across the cut, not on a member lying flat in it), and the model's inside draws in
+	// InteriorColor rather than the hull's paint: the faces seen from behind, and the faces closed inside the solid,
+	// black in the model's HiddenMask (scripts/blender/rh_bake_hidden.py: never seen by the strategy camera on the
+	// finished model; the 2026-10-26 review saw a magenta slab inside the Electrolyzer and lit beige floors inside the
+	// Forge and the AirFilter at the cut). HiddenMask defaults to white (nothing hidden), so a model without one keeps
+	// only the back-face rule. Masked and two-sided; the ISM and
+	// static-lighting usage flags are set so no mesh path swaps in the default material. The visualizer puts a MID of it
+	// on each slot of a site's model, its values copied from that slot's MI_<name> by parameter name.
+	bool AuthorBuildReveal()
+	{
+		UMaterial* Mat = NewMaterialPackage(TEXT("/Game/RedHope/Art/M_RH_BuildReveal"), TEXT("M_RH_BuildReveal"));
+
+		// --- M_RH_Master's inputs, same names and defaults (rh_author_master.py).
+		auto* BaseTex = Expr<UMaterialExpressionTextureSampleParameter2D>(Mat);
+		BaseTex->ParameterName = FName("BaseTex");
+		BaseTex->Texture = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RedHope/Art/Mars_Regolith_Texture.Mars_Regolith_Texture"));
+		BaseTex->SamplerType = SAMPLERTYPE_Color;
+		auto* MRTex = Expr<UMaterialExpressionTextureSampleParameter2D>(Mat);
+		MRTex->ParameterName = FName("MRTex");
+		MRTex->Texture = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RedHope/Art/Masks/T_RH_MaskWhite.T_RH_MaskWhite"));
+		MRTex->SamplerType = SAMPLERTYPE_Masks; // T_RH_MaskWhite and every MR map are TC_MASKS (the 08-16 sweep)
+		auto* NormTex = Expr<UMaterialExpressionTextureSampleParameter2D>(Mat);
+		NormTex->ParameterName = FName("NormTex");
+		NormTex->Texture = LoadObject<UTexture2D>(nullptr, TEXT("/Engine/EngineMaterials/DefaultNormal.DefaultNormal"));
+		NormTex->SamplerType = SAMPLERTYPE_Normal;
+		const auto Scalar = [Mat](const TCHAR* Name, float Default) -> UMaterialExpressionScalarParameter*
+		{
+			auto* P = Expr<UMaterialExpressionScalarParameter>(Mat);
+			P->ParameterName = FName(Name);
+			P->DefaultValue = Default;
+			return P;
+		};
+		const auto Vector = [Mat](const TCHAR* Name, const FLinearColor& Default) -> UMaterialExpressionVectorParameter*
+		{
+			auto* P = Expr<UMaterialExpressionVectorParameter>(Mat);
+			P->ParameterName = FName(Name);
+			P->DefaultValue = Default;
+			return P;
+		};
+		const auto Lerp = [Mat](UMaterialExpression* A, int32 AOut, UMaterialExpression* B, int32 BOut, UMaterialExpression* Alpha)
+		{
+			auto* L = Expr<UMaterialExpressionLinearInterpolate>(Mat);
+			L->A.Connect(AOut, A);
+			L->B.Connect(BOut, B);
+			L->Alpha.Connect(0, Alpha);
+			return L;
+		};
+		auto* UseMR = Scalar(TEXT("UseMRTex"), 0.f);
+		auto* UseNorm = Scalar(TEXT("UseNormTex"), 0.f);
+		auto* Metallic = Scalar(TEXT("Metallic"), 0.f);
+		auto* Rough = Scalar(TEXT("Rough"), 0.75f);
+		auto* AccentColor = Vector(TEXT("AccentColor"), FLinearColor(0.5f, 0.5f, 0.5f));
+		auto* AccentAmount = Scalar(TEXT("AccentAmount"), 0.f);
+		auto* Floor = Scalar(TEXT("EmissiveFloor"), 0.08f);
+		// --- The reveal. BuildCutZ defaults far above any model, so the bare material draws whole.
+		auto* CutZ = Scalar(TEXT("BuildCutZ"), 1.0e7f);
+		auto* LineCm = Scalar(TEXT("CutLineCm"), 8.f);
+		auto* CutColor = Vector(TEXT("CutColor"), FLinearColor(0.05f, 2.2f, 1.56f)); // the teal of the kit's lit cells
+		auto* CutGlow = Scalar(TEXT("CutGlow"), 1.f);
+		auto* Interior = Vector(TEXT("InteriorColor"), FLinearColor(0.035f, 0.036f, 0.04f));
+		// The hidden-face mask: white = seen from outside, black = closed inside (the rh_hs masks' LinearGrayscale
+		// sampler, as M_RH_Master's EmissiveMask; T_RH_MaskWhiteG is the grayscale white default).
+		auto* HiddenMask = Expr<UMaterialExpressionTextureSampleParameter2D>(Mat);
+		HiddenMask->ParameterName = FName("HiddenMask");
+		HiddenMask->Texture = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RedHope/Art/Masks/T_RH_MaskWhiteG.T_RH_MaskWhiteG"));
+		HiddenMask->SamplerType = SAMPLERTYPE_LinearGrayscale;
+		if (!HiddenMask->Texture)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RHArt: T_RH_MaskWhiteG missing - M_RH_BuildReveal not authored"));
+			return false;
+		}
+
+		// Albedo = lerp(BaseTex, AccentColor, AccentAmount); the inside wears InteriorColor: back faces, and the faces
+		// the model's HiddenMask marks closed inside.
+		auto* Albedo = Lerp(BaseTex, 0, AccentColor, 0, AccentAmount);
+		auto* Facing = Expr<UMaterialExpressionTwoSidedSign>(Mat);   // +1 front, -1 back
+		auto* Front = Expr<UMaterialExpressionSaturate>(Mat);
+		Front->Input.Connect(0, Facing);
+		auto* Outside = Expr<UMaterialExpressionMultiply>(Mat);
+		Outside->A.Connect(0, Front);
+		Outside->B.Connect(1, HiddenMask);                           // R (outputs: 0 RGB, 1 R, 2 G, 3 B)
+		auto* Surface = Lerp(Interior, 0, Albedo, 0, Outside);
+		// glTF MR packing: G = roughness, B = metallic (texture sample outputs: 0 RGB, 1 R, 2 G, 3 B).
+		auto* MetalOut = Lerp(Metallic, 0, MRTex, 3, UseMR);
+		auto* RoughOut = Lerp(Rough, 0, MRTex, 2, UseMR);
+		auto* Flat = Expr<UMaterialExpressionConstant3Vector>(Mat);
+		Flat->Constant = FLinearColor(0.f, 0.f, 1.f);
+		auto* NormOut = Lerp(Flat, 0, NormTex, 0, UseNorm);
+
+		// Depth under the cut, in cm: the opacity mask (clipped at 0.5 cm) and the line's ramp.
+		auto* WPos = Expr<UMaterialExpressionWorldPosition>(Mat);
+		auto* WZ = Expr<UMaterialExpressionComponentMask>(Mat);
+		WZ->Input.Connect(0, WPos);
+		WZ->R = 0; WZ->G = 0; WZ->B = 1; WZ->A = 0;
+		auto* Depth = Expr<UMaterialExpressionSubtract>(Mat);
+		Depth->A.Connect(0, CutZ);
+		Depth->B.Connect(0, WZ);
+		auto* Ramp = Expr<UMaterialExpressionDivide>(Mat);
+		Ramp->A.Connect(0, Depth);
+		Ramp->B.Connect(0, LineCm);
+		auto* Near = Expr<UMaterialExpressionOneMinus>(Mat);
+		Near->Input.Connect(0, Ramp);
+		auto* Line = Expr<UMaterialExpressionSaturate>(Mat);
+		Line->Input.Connect(0, Near);
+		// Emissive = CutColor x CutGlow x line + surface x EmissiveFloor (the master's Mars-ambient lift).
+		auto* Glow = Expr<UMaterialExpressionMultiply>(Mat);
+		Glow->A.Connect(0, CutColor);
+		Glow->B.Connect(0, CutGlow);
+		// Only on faces standing across the cut: x saturate(2 (1 - |N.z|)), so a member lying flat at the cut height does
+		// not glow its whole length (the 2026-10-26 review's "floating teal bar" on the half-built Solar Array).
+		auto* VN = Expr<UMaterialExpressionVertexNormalWS>(Mat);
+		auto* VNZ = Expr<UMaterialExpressionComponentMask>(Mat);
+		VNZ->Input.Connect(0, VN);
+		VNZ->R = 0; VNZ->G = 0; VNZ->B = 1; VNZ->A = 0;
+		auto* VNAbs = Expr<UMaterialExpressionAbs>(Mat);
+		VNAbs->Input.Connect(0, VNZ);
+		auto* Upright = Expr<UMaterialExpressionOneMinus>(Mat);
+		Upright->Input.Connect(0, VNAbs);
+		auto* Upright2 = Expr<UMaterialExpressionMultiply>(Mat);
+		Upright2->A.Connect(0, Upright);
+		Upright2->ConstB = 2.f;
+		auto* Across = Expr<UMaterialExpressionSaturate>(Mat);
+		Across->Input.Connect(0, Upright2);
+		auto* LineAcross = Expr<UMaterialExpressionMultiply>(Mat);
+		LineAcross->A.Connect(0, Line);
+		LineAcross->B.Connect(0, Across);
+		// The rh.Glow dial (MPC_Atmosphere.GlowScale), as M_RH_Master's machine glow.
+		auto* GlowScale = Expr<UMaterialExpressionCollectionParameter>(Mat);
+		UMaterialParameterCollection* Atmos = LoadObject<UMaterialParameterCollection>(nullptr, TEXT("/Game/RedHope/Sky/MPC_Atmosphere.MPC_Atmosphere"));
+		GlowScale->Collection = Atmos;
+		GlowScale->ParameterName = FName("GlowScale");
+		GlowScale->ParameterId = Atmos ? Atmos->GetParameterId(FName("GlowScale")) : FGuid();
+		if (!Atmos || !GlowScale->ParameterId.IsValid())
+		{
+			UE_LOG(LogRedHope, Error, TEXT("RHArt: MPC_Atmosphere.GlowScale missing - M_RH_BuildReveal not authored"));
+			return false;
+		}
+		auto* GlowDial = Expr<UMaterialExpressionMultiply>(Mat);
+		GlowDial->A.Connect(0, Glow);
+		GlowDial->B.Connect(0, GlowScale);
+		auto* LineGlow = Expr<UMaterialExpressionMultiply>(Mat);
+		LineGlow->A.Connect(0, GlowDial);
+		LineGlow->B.Connect(0, LineAcross);
+		auto* Lift = Expr<UMaterialExpressionMultiply>(Mat);
+		Lift->A.Connect(0, Surface);
+		Lift->B.Connect(0, Floor);
+		auto* Emissive = Expr<UMaterialExpressionAdd>(Mat);
+		Emissive->A.Connect(0, LineGlow);
+		Emissive->B.Connect(0, Lift);
+
+		UMaterialEditorOnlyData* Data = Mat->GetEditorOnlyData();
+		Data->BaseColor.Connect(0, Surface);
+		Data->Metallic.Connect(0, MetalOut);
+		Data->Roughness.Connect(0, RoughOut);
+		Data->Normal.Connect(0, NormOut);
+		Data->EmissiveColor.Connect(0, Emissive);
+		Data->OpacityMask.Connect(0, Depth);
+		Mat->BlendMode = BLEND_Masked;
+		Mat->OpacityMaskClipValue = 0.5f;
+		Mat->TwoSided = true;
+		// (The setter, not the bUsedWith* fields: 5.8 deprecates writing them directly.)
+		Mat->SetUsageByFlag(MATUSAGE_InstancedStaticMeshes, true);
+		Mat->SetUsageByFlag(MATUSAGE_StaticLighting, true);
+		Mat->PreEditChange(nullptr);
+		Mat->PostEditChange();
+		const bool bSaved = SaveAsset(Mat);
+		UE_LOG(LogRedHope, Display, TEXT("RHArt: authored + saved M_RH_BuildReveal (%d expressions, masked two-sided, ISM + static lighting usage) %s"),
+			Mat->GetExpressionCollection().Expressions.Num(), bSaved ? TEXT("OK") : TEXT("FAILED"));
+		return bSaved;
+	}
+
 	// Receipts for imported GLB models: without painted vertex colors the
 	// vertex-color material renders black-on-white, so log the evidence.
 	void ReportModel(const TCHAR* Path)
@@ -301,6 +487,12 @@ namespace
 int32 URHArtCommandlet::Main(const FString& Params)
 {
 #if WITH_EDITOR
+	// -BuildReveal authors M_RH_BuildReveal alone: the full pass below rebuilds M_MarsSurface and M_VertexColor from
+	// scratch, which a site-kit change has no business re-saving.
+	if (FParse::Param(*Params, TEXT("BuildReveal")))
+	{
+		return AuthorBuildReveal() ? 0 : 1;
+	}
 	// Order matters: normal maps must be TC_Normalmap BEFORE the material
 	// referencing them compiles, or the sampler type mismatches.
 	FixNormalTexture(TEXT("/Game/RedHope/Art/Mars_Regolith_Texture_Normal.Mars_Regolith_Texture_Normal"));
@@ -309,6 +501,7 @@ int32 URHArtCommandlet::Main(const FString& Params)
 
 	bool bOk = AuthorMarsSurface();
 	bOk &= AuthorVertexColor();
+	bOk &= AuthorBuildReveal();
 
 	// M_Graybox (robots, buildings, scatter fallback) shipped without the ISM
 	// usage flag - -game runs swapped in the DEFAULT material. Keep enforced.

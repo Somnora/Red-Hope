@@ -32,10 +32,16 @@
 #include "RHTramVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
+#include "RHDefinitionsSubsystem.h"
+#include "Data/RHRows.h"
 #include "Containers/Ticker.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/StaticMeshActor.h"
+#include "Components/StaticMeshComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
@@ -1668,6 +1674,136 @@ namespace
 				const bool bQueued = QueueHas(*Sim, TEXT("Build"), TEXT("SolarArray")) || PC->GetConfirmText().ToString().Contains(TEXT("Order transmitted"));
 				return bQueued ? FString() : FString(TEXT("no Build order was transmitted"));
 			}, 2.f, 0.3f, true);
+		}
+
+		// ---- visual pass item 2: that Solar Array's construction site, followed to the end at 8x (the uplink's 45 s and the
+		// flat-pack's 60 s). While it is a site it draws from the site kit - a pad tile per footprint cell and at least one
+		// scaffold bay per cell along each side; two readings of its model's reveal fraction, at least a second apart,
+		// RISE (the flat-pack goes 0 to 100 % inside the window); once past 10 % the cut read back from the model's own
+		// MID stands above the model's bottom and the model is drawn wearing that MID; and once it is finished it holds
+		// no kit instance, the kit's HISMs hold exactly the other open sites' instances, and its model wears the mesh's
+		// shipping MI, not M_RH_BuildReveal. Then back to 1x for the speed tiers.
+		{
+			struct FSiteWatch
+			{
+				int32 Id = INDEX_NONE;
+				int32 Cells = 0;
+				int32 Pads = 0;
+				int32 Bays = 0;
+				float First = -1.f;
+				double FirstAt = -1.0;
+				float Second = -1.f;
+				bool bCutRead = false;   // the MID's BuildCutZ was read at a reveal of 10 % or more
+				FString CutWhy;          // what was wrong with it, if anything
+			};
+			const TSharedRef<FSiteWatch> Watch = MakeShared<FSiteWatch>();
+			Runner.Do(TEXT("build.site 8x"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(8.f); } }, 0.2f);
+			Runner.Push(TEXT("build.site"), [T, Watch](double, bool bLast)
+			{
+				UWorld* W = FindGameWorld();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const URHColonyVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+				const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+				if (!Sim || !Viz || !Defs)
+				{
+					Report(TEXT("build.site"), false, TEXT("no sim or colony visualizer"));
+					return true;
+				}
+				const FRHBuildingInstance* B = nullptr;
+				for (const FRHBuildingInstance& Each : Sim->GetBuildings())
+				{
+					if (Each.DefName == FName("SolarArray") && (Watch->Id == INDEX_NONE ? FVector::DistXY(Each.LocationCm, T->SpotCm) < 300.0 : Each.Id == Watch->Id))
+					{
+						B = &Each;
+						break;
+					}
+				}
+				if (!B || (Watch->Id == INDEX_NONE && !B->bUnderConstruction))
+				{
+					if (bLast)
+					{
+						Report(TEXT("build.site"), false, B ? TEXT("the Solar Array was finished before its site was ever seen") : TEXT("the Build order never placed a site"));
+					}
+					return bLast;
+				}
+				if (Watch->Id == INDEX_NONE)
+				{
+					const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
+					Watch->Id = B->Id;
+					Watch->Cells = Def ? FMath::Max(1, Def->FootprintX) * FMath::Max(1, Def->FootprintY) : 0;
+				}
+				if (B->bUnderConstruction)
+				{
+					Watch->Pads = FMath::Max(Watch->Pads, Viz->GetSiteInstanceCount(Watch->Id, 0));
+					Watch->Bays = FMath::Max(Watch->Bays, Viz->GetSiteInstanceCount(Watch->Id, 1));
+					const float Now = Viz->GetSiteRevealFraction(Watch->Id);
+					if (Now >= 0.f && Watch->First < 0.f)
+					{
+						Watch->First = Now;
+						Watch->FirstAt = FPlatformTime::Seconds();
+					}
+					else if (Now >= 0.f && FPlatformTime::Seconds() - Watch->FirstAt >= 1.0)
+					{
+						Watch->Second = Now; // the latest reading at least a second after the first
+					}
+					float CutZ = 0.f, BottomZ = 0.f;
+					bool bModelShown = false;
+					if (Now >= 0.10f && !Watch->bCutRead && Viz->GetSiteRevealCut(Watch->Id, CutZ, BottomZ, bModelShown))
+					{
+						Watch->bCutRead = true;
+						if (CutZ <= BottomZ + 1.f || !bModelShown)
+						{
+							Watch->CutWhy = FString::Printf(TEXT(" at %.2f the MID's cut is %.0f cm over the model's bottom and the model is %s;"),
+								Now, CutZ - BottomZ, bModelShown ? TEXT("drawn") : TEXT("hidden or not wearing the reveal MID"));
+						}
+					}
+					if (bLast)
+					{
+						Report(TEXT("build.site"), false, FString::Printf(TEXT("site #%d still under construction at the timeout (pads %d, bays %d, reveal %.2f then %.2f)"),
+							Watch->Id, Watch->Pads, Watch->Bays, Watch->First, Watch->Second));
+					}
+					return bLast;
+				}
+				// Finished: the completion rebuilt the visual.
+				const AStaticMeshActor* Actor = Viz->GetBuildingVisual(Watch->Id);
+				const UStaticMeshComponent* Comp = Actor ? Actor->GetStaticMeshComponent() : nullptr;
+				const UMaterialInterface* Worn = Comp ? Comp->GetMaterial(0) : nullptr;
+				const UMaterialInterface* Ship = (Comp && Comp->GetStaticMesh()) ? Comp->GetStaticMesh()->GetMaterial(0) : nullptr;
+				const UMaterialInstanceDynamic* WornMid = Cast<UMaterialInstanceDynamic>(Worn);
+				const bool bShipping = Ship && (Worn == Ship || (WornMid && WornMid->Parent == Ship));
+				const bool bReveal = Worn && Worn->GetMaterial() && Worn->GetMaterial()->GetName() == TEXT("M_RH_BuildReveal");
+				const int32 Left = Viz->GetSiteInstanceCount(Watch->Id);
+				// The HISMs themselves, not only the bookkeeping: they must hold exactly what the sites still open count
+				// (0 when this was the only one), so no instance of the finished site is orphaned in them.
+				int32 OthersCounted = 0;
+				for (const FRHBuildingInstance& Each : Sim->GetBuildings())
+				{
+					if (Each.bUnderConstruction)
+					{
+						OthersCounted += Viz->GetSiteInstanceCount(Each.Id);
+					}
+				}
+				const int32 InHism = Viz->GetSiteKitHismInstanceCount();
+				FString Why;
+				if (Watch->Pads != Watch->Cells || Watch->Cells == 0) { Why += FString::Printf(TEXT(" pad tiles %d, footprint cells %d;"), Watch->Pads, Watch->Cells); }
+				if (Watch->Bays < 10) { Why += FString::Printf(TEXT(" scaffold bays %d, under one a cell along each side (10);"), Watch->Bays); }
+				if (Watch->First < 0.f || Watch->Second < 0.f) { Why += FString::Printf(TEXT(" too few reveal readings (%.2f, %.2f);"), Watch->First, Watch->Second); }
+				else if (Watch->Second <= Watch->First) { Why += FString::Printf(TEXT(" the reveal did not rise, %.2f then %.2f;"), Watch->First, Watch->Second); }
+				if (!Watch->bCutRead) { Why += TEXT(" the cut was never read back from a reveal MID at 10 % or more;"); }
+				Why += Watch->CutWhy;
+				if (Left != 0) { Why += FString::Printf(TEXT(" %d kit instance(s) left after completion;"), Left); }
+				if (InHism != OthersCounted) { Why += FString::Printf(TEXT(" the kit's HISMs hold %d instance(s) but the open sites count %d;"), InHism, OthersCounted); }
+				if (!Comp || !Comp->IsVisible() || !bShipping || bReveal)
+				{
+					Why += FString::Printf(TEXT(" the finished model wears %s, not its shipping %s;"), Worn ? *Worn->GetName() : TEXT("nothing"), Ship ? *Ship->GetName() : TEXT("MI"));
+				}
+				Report(TEXT("build.site"), Why.IsEmpty(), Why.IsEmpty()
+					? FString::Printf(TEXT("site #%d: %d pad tiles, %d scaffold bays; the model rose %.2f then %.2f (its MID's cut above its bottom, drawn); finished with 0 kit instances (HISMs %d = open sites' %d), wearing %s"),
+						Watch->Id, Watch->Pads, Watch->Bays, Watch->First, Watch->Second, InHism, OthersCounted, *Ship->GetName())
+					: FString::Printf(TEXT("site #%d:%s"), Watch->Id, *Why));
+				return true;
+			}, 0.2f, 150.f);
+			Runner.Do(TEXT("build.site 1x"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); } }, 0.3f);
 		}
 
 		// ---- the five speed tiers

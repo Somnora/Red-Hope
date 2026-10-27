@@ -5,8 +5,11 @@
 #include "RHColonyVisualizerSubsystem.generated.h"
 
 class AStaticMeshActor;
+class UHierarchicalInstancedStaticMeshComponent;
 class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
 class UPointLightComponent;
+class USpotLightComponent;
 class UStaticMeshComponent;
 class UTextRenderComponent;
 class URHSimWorldSubsystem;
@@ -84,6 +87,21 @@ public:
 	// or hidden: the crew's obstacle list rebuilds only when this moves.
 	uint32 GetPropsVersion() const { return PropsVersion; }
 	int32 GetTileActorCount() const { return TileByCell.Num(); }
+	// Visual pass item 2 (construction sites, 2026-10-26): the site kit instances a building's site holds right now in
+	// the four kit HISMs - Part 0 pad tiles, 1 scaffold bays, 2 its mast, 3 crates, -1 all four. 0 for a finished
+	// building, a site on a floor out of view, or no such building. The click test's build.site reads it.
+	int32 GetSiteInstanceCount(int32 BuildingId, int32 Part = -1) const;
+	// What the kit's HISMs hold right now, all sites together (Part -1 = all four) - read off the components, not the
+	// per-site bookkeeping, so the click test can check the two agree.
+	int32 GetSiteKitHismInstanceCount(int32 Part = -1) const;
+	// A fabricating site's cut, read back from its model's own MID (BuildCutZ, world cm), the model's bottom on the pad
+	// and whether the model is drawn wearing that MID. False when the site has no model to reveal (or is no site).
+	bool GetSiteRevealCut(int32 BuildingId, float& OutCutZ, float& OutBottomZ, bool& bOutModelVisible) const;
+	// The fabrication fraction a site's own model was last revealed to (0..1, in 5 % steps), or -1 while the site waits
+	// for materials, has no model to reveal (a pressurized shell, a greenhouse deck, the Floodmast) or is not a site.
+	float GetSiteRevealFraction(int32 BuildingId) const;
+	// RH.Sites: one log line per site (stage, step, crates, courses, instances) - captures and QA pick their frames by it.
+	void LogSites() const;
 
 	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
 	// against each building's AUTHORED PulseDepth, so the art-bible mix between
@@ -257,6 +275,60 @@ private:
 	// name) at presentation distance - "they're over there", not literal km.
 	void RefreshSovereigntyVisuals();
 	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
+
+	// Visual pass item 2: construction sites (docs/qa/2026-10-25/visual-pass-design.md section 2, DIRECTOR ANSWER Q-A
+	// (a)). Every site on every floor draws from ONE holder actor with one HISM per kit part (scripts/blender/
+	// rh_build_sitekit.py: RH_SitePad, RH_SiteScaffold, RH_SiteMast, RH_SiteCrate), so all sites cost 4 draws (and each
+	// site one shadowless work light on its own actor, lit from dusk to dawn and always underground). Bays and the mast
+	// stand only on ground nothing else takes (GatherSiteGroundTaken: other buildings' footprints and a floor's props and
+	// furniture; RebuildSiteKit adds the bays and masts already placed for lower-Id sites, and underground every corner
+	// of a slot must lie on a carved cell, so no bay stands in the rock or the pocket wall). A site's
+	// own model, when it has one, rises inside the scaffold on its own actor through MIDs of M_RH_BuildReveal; completion
+	// rebuilds that actor with the shipping MI. RefreshSites runs on the pass poll (a second, or sooner on any building
+	// event) and writes a MID only when the 5 % step moves; the HISMs are rebuilt whole, and only when a site's instance
+	// set changes (a site added or gone, a crate step, the scaffold growing at fabrication, the viewed floor) or the
+	// ground round it may have (PropsVersion or the tile count moved since the last rebuild: a room prop, furniture, a
+	// carved tile, a reload). A whole
+	// rebuild is what keeps the per-site counts honest: removing one instance re-indexes the rest.
+	static constexpr int32 SiteKitParts = 4; // pad tile, scaffold bay, mast, crate (the HISM order)
+	struct FRHSiteVis
+	{
+		FName DefName;
+		FVector SeatCm = FVector::ZeroVector;  // the building's seat: footprint centre on its ground or floor plane
+		int32 Level = 0;
+		int32 CellsX = 1;                      // the footprint in 2 m cells
+		int32 CellsY = 1;
+		float FinishedCm = 0.f;                // the height being built to (the model as drawn, or the stand-in's)
+		int32 FullCourses = 1;                 // scaffold courses at the top of fabrication (one while it waits)
+		int32 Courses = 0;                     // courses drawn: one while it waits, then a course ahead of the rising cut
+		int32 CrateSlots = 2;                  // crates on the pad when the whole bill has arrived
+		int32 Crates = -1;                     // crates drawn
+		bool bFabricating = false;
+		int32 Step = -1;                       // the progress step drawn, 0..20 (5 % each): delivery while waiting, then fabrication
+		float RevealBottomCm = 0.f;            // the model's world Z span; RevealHeightCm 0 = no model to reveal
+		float RevealHeightCm = 0.f;
+		TArray<TWeakObjectPtr<UMaterialInstanceDynamic>> RevealMids;
+		TWeakObjectPtr<UStaticMeshComponent> RevealMesh;
+		int32 Count[SiteKitParts] = { 0, 0, 0, 0 }; // instances it holds now in each kit HISM (set by RebuildSiteKit)
+		int32 BaysLeftOut = 0;                 // bay slots skipped because their ground is taken (set by RebuildSiteKit)
+		int32 BaysInRock = 0;                  // of those, underground slots past the carved floor's edge
+		int32 MastCorner = -1;                 // which open corner the mast took, -1 none (underground, or none free)
+		TWeakObjectPtr<USpotLightComponent> WorkLight; // the site's work light (on its building's actor)
+	};
+	TMap<int32, FRHSiteVis> SiteVis;
+	UPROPERTY() TObjectPtr<AActor> SiteKitActor;
+	UPROPERTY() TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> SiteKitISM;
+	bool bSiteKitLooked = false;   // the kit meshes were looked up once (a missing kit warns once, then sites draw the legacy dressing)
+	bool bSiteKitDirty = false;
+	uint32 SiteKitPropsVersion = 0; // PropsVersion and TileByCell.Num() the kit was last built against: when either
+	int32 SiteKitTileCount = -1;    // moves, the ground round a site may have changed and RefreshSites rebuilds
+	int8 SiteLightsDay = -1;        // the work lights' last day / night answer (-1 = not yet pushed)
+	bool EnsureSiteKit();
+	void AddSite(const FRHBuildingInstance& Instance, AStaticMeshActor* Actor, const FVector& Seated, float ModelHeightCm);
+	void RefreshSites(const URHSimWorldSubsystem* Sim);
+	void RebuildSiteKit();
+	void GatherSiteGroundTaken(TArray<FBox>& OutTaken) const;
+	void ForgetSite(int32 BuildingId);
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
 	// Last PoweredState pushed into a building's material, so the per-frame pass
