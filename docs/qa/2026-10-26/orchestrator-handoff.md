@@ -93,13 +93,14 @@ Run each gate one at a time. After each gate, verify it yourself, commit, push, 
 | E6 | the levers | v57 | 'RHL6' | `e6-gate-wf.js` | `head`, `base: "Saved/baselines/battery_post_e5"`, `clickSteps` (from E5's last PASS log), `batteryRuns` (logs in base + 1; 60 predicted), optional `e5ScaleMs` |
 | D6e | lift and tram power | v58 | 'RHD6' | `d6e-gate-wf.js` | `head`, `base: ".../battery_post_e6"`, `clickSteps`, `batteryRuns`, optional `playtestBase` |
 | D7 | atriums | v59 | 'RHD7' | `d7-gate-wf.js` | `head`, `base: ".../battery_post_d6e"`, `clickSteps`, `batteryRuns`, `deepbenchSteps`, optional `playtestBaseline` |
-| E7 | — | none | none | not written yet | write it from `E7-brief.md` the same way |
-| E8 | — | v60 | 'RHE8' | not written yet | write it from `E8-brief.md` the same way |
+| E7 | region-ready (inert) | none | none | `e7-gate-wf.js` | `head`, `base: ".../battery_post_d7"`, `clickSteps`, `deepbenchSteps`, `batteryRuns` (logs in base + 1 for regionready.log), `saveVersion` (RHSaveVersion at HEAD, 59 in queue order), optional `playtestBase` |
+| E8 | the market panel | v60 (= prev + 1) | 'RHE8' | `e8-gate-wf.js` | `head`, `base: ".../battery_post_e7"`, `clickSteps`, `deepbenchSteps`, `batteryRuns` (logs in base; no new suite), `prevVersion` (59 in queue order), `e5Built: true` (a boolean, checked against HEAD), optional `playtestBase` |
 
 Launch each script as `Workflow({ scriptPath: "<repo>/docs/qa/2026-10-26/workflows/<gate>-gate-wf.js", args: {...} })`, passing args as a JSON object, not a string.
 - Each script stops with `{ error: 'missing args' }` if a required arg is absent.
 - Each stops and returns `needsDirector` if the builder raises a director question.
-- E6, D6e and D7 were each checked once by an independent read-only reviewer against their brief and the cross-check, and fixed. Read a script before you launch it.
+- E6, D6e, D7, E7 and E8 were each checked once by an independent read-only reviewer against their brief and the cross-check, and fixed. Read a script before you launch it.
+- E7 and E8 (written 2026-10-27) each return `needsOrchestrator` with a `stop_reason` when a precondition fails (a wrong save version, a wrong `base`, E7's S12 double run differing, E8's E5 names missing). Clear the cause, then relaunch. Their reviews added rulings 10–12 to `ORCHESTRATOR-RULINGS.md`: E8's lost-block Warning prints only when the ring held something (10); E8's MX15 asserts 'RHE8' follows its predecessor frame, never "last in the file", and a forged old file is refused with "/<new version>" (11); E7's RR0 `ice` case is `{1, 'ice', 500}` so mutation 8 can fail (12). Numbers are coerced, so `"97"` and `97` both work; E8's `e5Built` must be a real boolean.
 
 **Wording prefixes** in `docs/qa/2026-10-15/gate-d-wording.md`: E5 Y, E6 Z, D6e A (orchestrator choice), D7 L, E8 C.
 
@@ -141,7 +142,7 @@ Launch each script as `Workflow({ scriptPath: "<repo>/docs/qa/2026-10-26/workflo
   - one commit per gate, with a detailed message;
   - questions state consequences with modelled numbers.
 - **Never print the SecurityToken** in `Config/DefaultEngine.ini`. Never store or use the ElevenLabs key.
-- **Before every commit,** `git diff --cached | grep -ci SecurityToken` must print 0. Commit with `-F <msgfile>`, and end each message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- **Before every commit,** `git diff --cached | grep -ci SecurityToken` must print 0. Commit with `-F <msgfile>`, and end each message with the `Co-Authored-By` trailer the session's attribution reminder gives (`Claude Fable 5.1 <noreply@anthropic.com>` as of 2026-10-27; earlier commits carry Opus 5.5).
 - **Push as Somnora.** Never run `gh auth switch`. Then check `git rev-parse HEAD origin/main` (no `--short`).
 
 ```bash
