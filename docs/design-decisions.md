@@ -1777,3 +1777,7 @@ From `docs/qa/2026-10-24/economy-code-review.md` ("The launch floor ignores the 
 ### Construction-site frame budget: the director's answer (2026-10-26)
 
 From the sites gate review (gate 7, "within 1.0 ms of before"): **(a) accept on the quiet-pair median.** Across the 8 quiet adjacent pairs the after binary measured a median of about +0.85 ms on a ~31 ms frame (about 2.7%); two quiet pairs came in at +1.52 ms, and the busy pairs swing from about -8 to +10 ms from swapping on the 8 GB machine. The sites commit states these numbers as they are. Re-measure on the other MacBook after the move as a follow-up check.
+
+### Construction sites: the floating Solar bar, the director's answer (2026-10-27)
+
+From the sites round-2 visual review (capture `sites_after_01.png`): **(a) commit now, known issue.** The sites are committed as `76a9b4e`. At about 45-60 % the Solar Array's panel rail sits at the build cut while the hinge that holds it is unbuilt, so it shows as a floating teal bar. Follow-up, not a gate: hold the cut under the panel until the hinge is built (a per-model cut hold in `RefreshSites`).
