@@ -1915,3 +1915,9 @@ Existing suites updated: the version checks (55 to 56: 14 `Ver == 56`, 14 `"/56"
 - Balance numbers (the issue threshold, the penalty, the weights, the 2% step, the band, the 3% spread, the 500 cap, the stances) are chosen for legible arithmetic, not tuned play: awaiting the director.
 - The new wording is placeholder (`docs/qa/2026-10-15/gate-d-wording.md`, Y1-Y17 under "Rows added by E5"), and the mark's name is itself a placeholder; D44's DefyIssue clause is flagged for the Gate-D review. None of the new wording is morale, sickness or evacuation wording; no E5 path reads or writes Hope, the population, growth or Influence (CU11, CU12).
 - Not committed: the orchestrator commits.
+
+### E5's banner re-raise: the director's answer (2026-10-27)
+
+E5 is committed as `9fc2c6d`. With the placeholder numbers a DefyIssue nets -2 tension (the Defy -12, the issue +10). Earth raises its next demand at tension 60, so a DefyIssue answered at 62 or more raises the next demand in the same tick. Its `EARTH TRANSMISSION` alert then replaces D44 + Y10 on the one-slot banner; a plain Defy does the same from 72. The act's news is still in the deck's status line and the log.
+
+**(a) leave it for the balance pass, and revisit it later.** No change now. The other options were (b) queue the banner's alerts so a second waits out the first's hold, and (c) delay the re-raise to the next sol. Revisit it when the tension numbers are tuned, or in E8 (the market panel) if that touches the banner. It is on the follow-up list in `docs/qa/2026-10-26/orchestrator-handoff.md`, together with the Gate-D wording point that Y10's clause says "so tension rises" while the act nets -2.

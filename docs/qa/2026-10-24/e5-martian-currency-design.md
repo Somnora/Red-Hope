@@ -950,6 +950,7 @@ The numbers were verified independently by the re-review (Q-B 5,215 cr; Q-C +19.
 The re-review's conditions 1-7 are applied by the builder.
 - **Loophole (a), accepted:** a Comply redeems the marks with no spread and no cap. The political cost (every neighbour route closes and stays closed) is the price. No rule is added.
 
+- **The banner re-raise, after the build (2026-10-27): (a), revisit later.** With the placeholder numbers a DefyIssue nets -2 tension (the Defy -12, the issue +10). Earth raises its next demand at tension 60, so a DefyIssue answered at 62 or more raises the next demand in the same tick, and its EARTH TRANSMISSION alert replaces D44 + Y10 on the one-slot banner (a plain Defy does so from 72). The options were (a) leave it for the balance pass, (b) queue the banner's alerts, and (c) delay the re-raise to the next sol. The director chose (a) and asked for it to be revisited later; it is on the handoff's follow-up list.
 
 # REFRESH AT HEAD 31ffa6f (2026-10-25)
 

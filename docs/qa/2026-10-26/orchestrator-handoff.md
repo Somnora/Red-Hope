@@ -115,6 +115,7 @@ Launch each script as `Workflow({ scriptPath: "<repo>/docs/qa/2026-10-26/workflo
   - the pad is paler than the regolith;
   - `build.site` checks bays summed over all courses;
   - the HISM bookkeeping check only covers the empty case.
+- **E5 banner (director: (a), revisit later, 2026-10-27):** a DefyIssue at tension 62 or more re-raises Earth's demand in the same tick, and that alert replaces D44 + Y10 on the one-slot banner. Revisit it with the tension numbers or in E8; options (b) queue alerts, (c) delay the re-raise a sol. Same place: Y10 says "so tension rises" but the act nets -2 (fix at the Gate-D review).
 - **From the visual-pass design's follow-up list:**
   - shuttles are boxes;
   - convoys use engine cubes despite the rover kit.
