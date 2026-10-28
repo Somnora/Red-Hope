@@ -89,8 +89,8 @@ Run each gate one at a time. After each gate, verify it yourself, commit, push, 
 
 | Gate | What | Save | Frame | Script | Args to pass |
 |---|---|---|---|---|---|
-| E5 | the Martian currency | v56 | 'RHE5' | `e5-gate-wf.js` | `head` (short HEAD), `base: "Saved/baselines/battery_post_sites"`, `clickSteps: 92` |
-| E6 | the levers | v57 | 'RHL6' | `e6-gate-wf.js` | `head`, `base: "Saved/baselines/battery_post_e5"`, `clickSteps` (from E5's last PASS log), `batteryRuns` (logs in base + 1; 60 predicted), optional `e5ScaleMs` |
+| E5 | the Martian currency | v56 | 'RHE5' | `e5-gate-wf.js` | DONE 2026-10-27: 9fc2c6d, pushed; baseline `Saved/baselines/battery_post_e5` (59 logs); click test now 93 steps; -scale median 0.863 ms |
+| E6 | the levers | v57 | 'RHL6' | `e6-gate-wf.js` | `head`, `base: "Saved/baselines/battery_post_e5"`, `clickSteps: 93`, `batteryRuns: 60`, `e5ScaleMs: 0.863` (E6 does not coerce: pass real numbers) |
 | D6e | lift and tram power | v58 | 'RHD6' | `d6e-gate-wf.js` | `head`, `base: ".../battery_post_e6"`, `clickSteps`, `batteryRuns`, optional `playtestBase` |
 | D7 | atriums | v59 | 'RHD7' | `d7-gate-wf.js` | `head`, `base: ".../battery_post_d6e"`, `clickSteps`, `batteryRuns`, `deepbenchSteps`, optional `playtestBaseline` |
 | E7 | region-ready (inert) | none | none | `e7-gate-wf.js` | `head`, `base: ".../battery_post_d7"`, `clickSteps`, `deepbenchSteps`, `batteryRuns` (logs in base + 1 for regionready.log), `saveVersion` (RHSaveVersion at HEAD, 59 in queue order), optional `playtestBase` |
@@ -99,6 +99,7 @@ Run each gate one at a time. After each gate, verify it yourself, commit, push, 
 Launch each script as `Workflow({ scriptPath: "<repo>/docs/qa/2026-10-26/workflows/<gate>-gate-wf.js", args: {...} })`, passing args as a JSON object, not a string.
 - Each script stops with `{ error: 'missing args' }` if a required arg is absent.
 - Each stops and returns `needsDirector` if the builder raises a director question.
+- A workflow that returns `cleared: true` with an empty or short `lastReviews` did not clear. Since 00c6900 every script returns `reviewersFailed` instead when a lens returns nothing (E5's first run hit a usage limit mid-review). Resume with `resumeFromRunId`; only the missing reviewers re-run.
 - E6, D6e, D7, E7 and E8 were each checked once by an independent read-only reviewer against their brief and the cross-check, and fixed. Read a script before you launch it.
 - E7 and E8 (written 2026-10-27) each return `needsOrchestrator` with a `stop_reason` when a precondition fails (a wrong save version, a wrong `base`, E7's S12 double run differing, E8's E5 names missing). Clear the cause, then relaunch. Their reviews added rulings 10–12 to `ORCHESTRATOR-RULINGS.md`: E8's lost-block Warning prints only when the ring held something (10); E8's MX15 asserts 'RHE8' follows its predecessor frame, never "last in the file", and a forged old file is refused with "/<new version>" (11); E7's RR0 `ice` case is `{1, 'ice', 500}` so mutation 8 can fail (12). Numbers are coerced, so `"97"` and `97` both work; E8's `e5Built` must be a real boolean.
 
