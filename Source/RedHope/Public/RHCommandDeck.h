@@ -33,6 +33,7 @@ public:
 	// Capture/QA (RH.DeckScroll): scroll the right-hand column to a pixel offset (a tall city outgrows the screen).
 	void Debug_ScrollRight(float OffsetPx);
 	void Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg); // E4 QA/captures: set one resource's draft on a rival's market card (the buttons' own state)
+	void Debug_SetDeskDraft(bool bToMarks, int64 Amount);            // E5 QA/captures: the bloc desk's draft (the buttons' own state)
 	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
 	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
 	bool IsBuildDrawerOpen() const { return bBuildDrawerOpen; }
@@ -65,6 +66,9 @@ private:
 	// Transient must-not-miss banner (onset 1x snap, era refusal, ship ETA).
 	FText GetAlertText() const;
 	EVisibility GetAlertVisibility() const;
+	// E5 review: the banner wraps at the gap left of the right column (local units, from the last tick's width).
+	float GetAlertWrapAt() const;
+	float DeckLocalWidth = 0.f;
 	// Uplink queue panel (M1-c): orders in flight with countdowns; the list
 	// rebuilds only when the queue changes (ids are the change signal).
 	void RefreshUplinkPanel();
@@ -321,6 +325,18 @@ private:
 	FReply HandleExportRemove(FName Resource);
 	FReply HandleSolidarity(bool bComply);
 	FReply HandleRivalVerb(FName Verb, FName Rival);
+	// E5 (the Martian currency, minimal; E8 is the full panel): the Dilemma card's third answer (Defy, and issue), the panel's issue button,
+	// and the bloc desk's draft - a direction and whole units, nudged by To marks +100 / To credits +100 (a press against the draft's
+	// direction takes 100 off it, as the market card's Buy / Sell net), emptied by CLEAR and transmitted by SEND as an Exchange order (the
+	// sim's CanExchange greys SEND with the reason in its tooltip).
+	FReply HandleDefyIssue();
+	FReply HandleIssueCurrency();
+	bool bDeskDraftToMarks = true;
+	int64 DeskDraftAmount = 0;
+	FReply HandleDeskNudge(bool bToMarks);
+	FReply HandleDeskClear();
+	FReply HandleDeskSend();
+	TSharedRef<SWidget> BuildCurrencyBlock();
 	// E4: the draft order on a rival's card. OrderDrafts holds, per rival, the draft kg by resource (positive buys from the rival, negative
 	// sells to it); Buy +100 / Sell +100 move one resource's draft by 100 kg, CLEAR empties it, SEND ORDER transmits it as a MarketOrder
 	// through the uplink (the sim's CanPlaceOrder reads the same text, so the button is greyed with the reason in its tooltip).

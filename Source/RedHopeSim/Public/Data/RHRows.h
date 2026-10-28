@@ -415,6 +415,10 @@ struct REDHOPESIM_API FRHRivalRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Consume;     // whole kg used each sol
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StoreStart;  // whole kg held at the start
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString StoreCap;    // whole kg the stores hold; the keys are what it trades
+	// E5 (the Martian currency): the identity, in whole points, at which this rival joins the colony's bloc once the mark is issued; -1 never
+	// joins (the default for a row built without the column). The join reads the sol-close record of the identity, never the live axis.
+	// Placeholder values, director review.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 BlocStance = -1;
 	// Opening relation 0..100; completed runs warm it (RelationPerRun).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") float RelationStart = 30.f;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;

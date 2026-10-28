@@ -686,10 +686,17 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 		.ToolTipText_Lambda([this]()
 		{
 			const URHSimWorldSubsystem* S = GetSim();
-			return (S && S->GetCreditReservedMcr() > 0)
-				? Txt(FString::Printf(TEXT("%s cr of the %s cr balance is set aside for market orders waiting to clear, so it cannot buy manifest items or fly yet."),
-					*URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr())))
-				: FText::GetEmpty();
+			if (!S || S->GetCreditReservedMcr() <= 0)
+			{
+				return FText::GetEmpty();
+			}
+			// E5: a pending exchange at the bloc desk (credits to marks) is set aside here too; W4's text is unchanged when none is.
+			TArray<FRHDeskOrder> Desk;
+			S->GetDeskOrders(Desk);
+			const bool bDesk = Desk.ContainsByPredicate([](const FRHDeskOrder& D) { return D.Dir == (uint8)URHSimWorldSubsystem::ERHDeskDir::ToMarks; });
+			return Txt(FString::Printf(TEXT("%s cr of the %s cr balance is set aside for %s waiting to clear, so it cannot buy manifest items or fly yet."),
+				*URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()),
+				bDesk ? TEXT("market orders and exchanges") : TEXT("market orders")));
 		})
 		[
 			BarRow(Txt(TEXT("Credits")),
@@ -2213,7 +2220,14 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 6.f)
 				[
-					Prose(Txt(TEXT("Comply: the routes close for good and Earth eases off.\nDefy: keep faith with Mars - Earth's supply ships shrink.")), D::TextDim)
+					Prose(MakeAttributeLambda([this]()
+					{
+						// E5 review: while the mark exists a Comply also withdraws it (design 1.5), so the card says so on a third line (placeholder
+						// wording, gate-d-wording Y17); the first two lines are HEAD's, unchanged.
+						const URHSimWorldSubsystem* S = GetSim();
+						const FString Head = TEXT("Comply: the routes close for good and Earth eases off.\nDefy: keep faith with Mars - Earth's supply ships shrink.");
+						return Txt(S && S->IsCurrencyIssued() ? Head + TEXT("\nComplying also withdraws the mark: every mark is exchanged back into credits at the rate, and its bloc dissolves.") : Head);
+					}), D::TextDim)
 				]
 				+ SVerticalBox::Slot().AutoHeight()
 				[
@@ -2226,6 +2240,31 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 					[
 						D::Button(Txt(TEXT("DEFY")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSolidarity, false))
 					]
+				]
+				// E5: the third answer - the whole Defy, then the issue of a Martian currency. Greyed by the sim's own rule (CanIssueCurrency), with
+				// the reason on a dim line under it and in its tooltip. Placeholder wording (gate-d-wording Y).
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+				[
+					SNew(SBox)
+					.ToolTipText_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						FString Why;
+						if (S && !S->CanIssueCurrency(true, Why)) { return Txt(FString::Printf(TEXT("Cannot issue a currency now: %s."), *Why)); }
+						// The Defy eases tension and the issue raises it: the net is relative to a plain Defy (the issue's share read from the config).
+						return Txt(FString::Printf(TEXT("Defy Earth, then issue a Martian currency (the mark): Earth's tension ends %.0f higher than a plain Defy leaves it, and its supply ships shrink while the mark exists; neighbors whose stance you meet join its bloc and trade in marks."),
+							S ? S->GetCurrencyIssueTension() : 10.0));
+					})
+					[
+						D::Button(Txt(TEXT("DEFY, AND ISSUE A MARTIAN CURRENCY")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDefyIssue),
+							MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return S && S->CanIssueCurrency(true, Why); }))
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return (S && !S->CanIssueCurrency(true, Why)) ? EVisibility::Visible : EVisibility::Collapsed; })
+					.Text_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return (S && !S->CanIssueCurrency(true, Why)) ? Txt(FString::Printf(TEXT("Cannot issue a currency now: %s."), *Why)) : FText::GetEmpty(); })
 				]
 			]
 		]
@@ -2302,6 +2341,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 			}
 			return Txt(FString::Join(Lines, TEXT("\n")));
 		}), D::TextDim)
+	];
+	// E5: the Martian currency (the issue button before it; the balances, the rate and the bloc desk after).
+	Body->AddSlot().AutoHeight()
+	[
+		BuildCurrencyBlock()
 	];
 	// The convoys, while they are out (E4: up to MaxConvoysOut, by Id, each with its leg and its progress).
 	{
@@ -2396,7 +2440,24 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 							SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(4.f, 4.f))
 							+ SWrapBox::Slot()
 							[
-								SNew(SBox).ToolTipText(Txt(TEXT("Send the rover convoy with the standing trade: costs hydrogen, spare parts and your side of the trade at departure; the goods change hands at market prices, settled in credits when the market clears.")))
+								SNew(SBox)
+								.ToolTipText_Lambda([this, RowName]()
+								{
+									// E5: the standing trade is booked like any priced order, so it settles in the currency an order sent now would (W2's text
+									// otherwise, word for word: before the market counts in marks, and for a neighbor that trades by barter).
+									// The currency is named only while an order to this neighbor could be booked at all - the bloc line's own guard: no
+									// withdrawal pending, the route open, not defected, embargoed or disrupted. While a withdrawal is pending a priced trade is
+									// refused, and the tooltip says why (the sim's refusal, Y9).
+									const URHSimWorldSubsystem* S = GetSim();
+									const bool bPriced = S && S->HasRivalEconomy(RowName) && S->IsMarketLive();
+									const bool bOrders = S && !S->IsCurrencyWithdrawPending() && !S->IsRouteClosed(RowName) && !S->HasDefected(RowName) && !S->IsEmbargoed(RowName)
+										&& S->GetSabotageRemaining(RowName) <= 0.0;
+									const uint8 Unit = (bPriced && bOrders) ? S->GetOrderCurrencyFor(RowName, S->GetBookingSolNow()) : 0;
+									const TCHAR* Settled = Unit == 1 ? TEXT("settled in marks when the market clears")
+										: (Unit == 2 ? TEXT("settled in credits, converted from marks at the rate, when the market clears") : TEXT("settled in credits when the market clears"));
+									const FString Tip = FString::Printf(TEXT("Send the rover convoy with the standing trade: costs hydrogen, spare parts and your side of the trade at departure; the goods change hands at market prices, %s."), Settled);
+									return Txt(bPriced && S->IsCurrencyWithdrawPending() ? Tip + TEXT(" The market is closed while the mark is withdrawn.") : Tip);
+								})
 								[
 									D::Button(Txt(TEXT("TRADE")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleRivalVerb, FName("Convoy"), RowName))
 								]
@@ -2476,6 +2537,288 @@ FReply SRHCommandDeck::HandleSolidarity(bool bComply)
 	return HandleRivalVerb(FName("Solidarity"), bComply ? FName("Comply") : FName("Defy"));
 }
 
+FReply SRHCommandDeck::HandleDefyIssue()
+{
+	return HandleRivalVerb(FName("Solidarity"), FName("DefyIssue"));
+}
+
+FReply SRHCommandDeck::HandleIssueCurrency()
+{
+	return HandleRivalVerb(FName("Currency"), FName("Issue"));
+}
+
+FReply SRHCommandDeck::HandleDeskNudge(bool bToMarks)
+{
+	// One direction at a time, netted like the market card's Buy / Sell (W1): a press the same way adds 100, a press the other way takes 100
+	// off the draft, and only once it is empty starts one the other way. Whole units, at most the desk's cap (the sim refuses more).
+	const URHSimWorldSubsystem* S = GetSim();
+	const int64 Cap = S ? FMath::Max<int64>(0, S->GetDeskCapPerSol()) : 500;
+	if (DeskDraftAmount <= 0 || bToMarks == bDeskDraftToMarks)
+	{
+		bDeskDraftToMarks = bToMarks;
+		DeskDraftAmount = FMath::Min<int64>(FMath::Max<int64>(0, DeskDraftAmount) + 100, Cap);
+	}
+	else
+	{
+		DeskDraftAmount = FMath::Max<int64>(0, DeskDraftAmount - 100);
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleDeskClear()
+{
+	DeskDraftAmount = 0;
+	return FReply::Handled();
+}
+
+void SRHCommandDeck::Debug_SetDeskDraft(bool bToMarks, int64 Amount)
+{
+	bDeskDraftToMarks = bToMarks;
+	DeskDraftAmount = FMath::Max<int64>(0, Amount);
+}
+
+FReply SRHCommandDeck::HandleDeskSend()
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || DeskDraftAmount <= 0)
+	{
+		return FReply::Handled();
+	}
+	FString Why;
+	const URHSimWorldSubsystem::ERHDeskDir Dir = bDeskDraftToMarks ? URHSimWorldSubsystem::ERHDeskDir::ToMarks : URHSimWorldSubsystem::ERHDeskDir::ToCredits;
+	if (!Sim->CanExchange(Dir, DeskDraftAmount, Sim->GetBookingSolNow(), Why))
+	{
+		if (PC.IsValid()) { PC->PostConfirm(Why, D::Red); }
+		return FReply::Handled();
+	}
+	FRHCommand Cmd;
+	Cmd.Verb = FName("Exchange");
+	Cmd.Target = bDeskDraftToMarks ? FName("ToMarks") : FName("ToCredits");
+	Cmd.Value = (double)DeskDraftAmount;
+	Sim->EnqueueCommand(Cmd);
+	if (PC.IsValid())
+	{
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: exchange %lld %s"), DeskDraftAmount, bDeskDraftToMarks ? TEXT("credits to marks") : TEXT("marks to credits")), D::Teal);
+	}
+	DeskDraftAmount = 0;
+	return FReply::Handled();
+}
+
+// E5: the Martian currency in EARTH & NEIGHBORS (minimal; E8 is the full panel). Before the issue: the issue button, greyed by the sim's rule
+// with the reason on a dim line under it. From the issue on: what the mark is doing, the two balances (spendable and set aside in the tooltip),
+// the rate as of the close of the last sol with its last step (the strip shows the live axes, the rate reads the sol-close record: risk 1),
+// and the bloc's desk with its spread and cap. Placeholder wording throughout (gate-d-wording Y); the mark's name is a placeholder too.
+TSharedRef<SWidget> SRHCommandDeck::BuildCurrencyBlock()
+{
+	const auto Shown = [this]() { const URHSimWorldSubsystem* S = GetSim(); return S && (S->IsCurrencyIssued() || S->GetCurrencyIssueSol() >= 0 || S->IsCurrencyWithdrawPending()); };
+	const auto IssueReason = [this]() -> FString { const URHSimWorldSubsystem* S = GetSim(); FString Why; return (S && !S->CanIssueCurrency(false, Why)) ? Why : FString(); };
+	const auto DeskReason = [this]() -> FString
+	{
+		const URHSimWorldSubsystem* S = GetSim();
+		if (!S) { return FString(TEXT("-")); }
+		if (DeskDraftAmount <= 0) { return FString(TEXT("Draft an exchange first.")); }
+		FString Why;
+		return S->CanExchange(bDeskDraftToMarks ? URHSimWorldSubsystem::ERHDeskDir::ToMarks : URHSimWorldSubsystem::ERHDeskDir::ToCredits, DeskDraftAmount, S->GetBookingSolNow(), Why) ? FString() : Why;
+	};
+	TSharedRef<SVerticalBox> Box = SNew(SVerticalBox);
+	Box->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		SNew(SBox)
+		.Visibility_Lambda([this, Shown]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->IsMarketLive() && !Shown()) ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SBox)
+					.ToolTipText_Lambda([this, IssueReason]()
+					{
+						// The threshold and the tension from the config (placeholders awaiting the director), in both states: with the shipped data
+						// the neighbor check answers before the identity one, so a greyed button's reason alone would not name the identity it needs.
+						// The threshold sentence is added only when the reason is not the identity refusal itself (that one already names it), and it
+						// spells "neighbour" as the sim's refusal does, so one tooltip never mixes the two spellings.
+						const URHSimWorldSubsystem* S = GetSim();
+						const double Needs = S ? S->GetCurrencyIssueIdentity() : 20.0, Adds = S ? S->GetCurrencyIssueTension() : 10.0;
+						const FString Why = IssueReason();
+						if (Why.IsEmpty())
+						{
+							return Txt(FString::Printf(TEXT("Issue a Martian currency (the mark): Earth's tension rises by %.0f and its supply ships shrink while the mark exists; neighbors whose stance you meet join its bloc and trade in marks."), Adds));
+						}
+						return Why.StartsWith(TEXT("The colony does not lean Martian")) ? Txt(FString::Printf(TEXT("Cannot issue a currency now: %s."), *Why))
+							: Txt(FString::Printf(TEXT("Cannot issue a currency now: %s. It needs the colony to lean Martian (identity %+.0f or more) and a neighbour ready to join at that identity."), *Why, Needs));
+					})
+					[
+						D::Button(Txt(TEXT("ISSUE A MARTIAN CURRENCY")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleIssueCurrency),
+							MakeAttributeLambda([IssueReason]() { return IssueReason().IsEmpty(); }))
+					]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+				.Visibility_Lambda([IssueReason]() { return IssueReason().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				.Text_Lambda([IssueReason]() { const FString Why = IssueReason(); return Why.IsEmpty() ? FText::GetEmpty() : Txt(FString::Printf(TEXT("Cannot issue a currency now: %s."), *Why)); })
+			]
+		]
+	];
+	Box->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+	[
+		SNew(SBox)
+		.Visibility_Lambda([Shown]() { return Shown() ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			SNew(SBorder).BorderImage(D::TileBrush()).Padding(FMargin(9.f, 7.f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 3.f)
+				[
+					SNew(STextBlock).Font(D::Label(8)).ColorAndOpacity(D::Amber).Text(Txt(TEXT("MARTIAN CURRENCY - THE MARK")))
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Text_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						if (S->IsCurrencyWithdrawPending())
+						{
+							return Txt(TEXT("The mark is being withdrawn: the market is closed until every order has cleared, then every mark is exchanged back into credits at the rate."));
+						}
+						if (S->GetCurrencyIssueSol() < 0)
+						{
+							return Txt(TEXT("The mark is issued. The market takes it up at the end of this sol and counts in marks two sols later."));
+						}
+						return Txt(S->IsMarketInMarks() ? FString(TEXT("The market counts in marks. Bloc members trade in marks; other neighbors in credits at the rate."))
+							: FString::Printf(TEXT("The market counts in marks from the end of sol %d."), S->GetCurrencyOpenSol()));
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SBox)
+					.ToolTipText_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						return Txt(FString::Printf(TEXT("Credits: %s spendable, %s set aside for orders and exchanges waiting to clear.\nMarks: %s spendable, %s set aside."),
+							*URHSimWorldSubsystem::FormatCredits(S->GetSpendableMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()),
+							*URHSimWorldSubsystem::FormatCredits(S->GetSpendableMmk()), *URHSimWorldSubsystem::FormatCredits(S->GetMarkReservedMmk())));
+					})
+					[
+						SNew(STextBlock).Font(D::Value(9)).ColorAndOpacity(D::Text)
+						.Text_Lambda([this]()
+						{
+							const URHSimWorldSubsystem* S = GetSim();
+							return S ? Txt(FString::Printf(TEXT("Credits %s    Marks %s"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetMarkBalance())))
+								: FText::GetEmpty();
+						})
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Sky).AutoWrapText(true)
+					.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetCurrencyIssueSol() >= 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+					.Text_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						// GetRateStepNote: 2 a step is known (0 = unchanged), 1 the issue set the rate, 0 no close since the load (unknown, never "unchanged").
+						const int64 Step = S->GetLastRateStepMcr();
+						const FString Rate = URHSimWorldSubsystem::FormatCredits(S->GetRate());
+						if (S->GetRateStepNote() == 1)
+						{
+							return Txt(FString::Printf(TEXT("1 mark = %s cr  (set at the issue; its first step comes at the close of this sol)"), *Rate));
+						}
+						if (S->GetRateStepNote() != 2)
+						{
+							return Txt(FString::Printf(TEXT("1 mark = %s cr  (no close since the load)"), *Rate));
+						}
+						const FString Change = Step == 0 ? FString(TEXT("unchanged")) : FString::Printf(TEXT("%s%s"), Step > 0 ? TEXT("+") : TEXT(""), *URHSimWorldSubsystem::FormatCredits(Step));
+						return Txt(FString::Printf(TEXT("1 mark = %s cr  (%s at the close of the last sol)"), *Rate, *Change));
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Text_Lambda([this]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						int64 ToMarks = 0, ToCredits = 0;
+						const int32 Sol = S->GetBookingSolNow();
+						S->GetDeskBooked(Sol, ToMarks, ToCredits);
+						return Txt(FString::Printf(TEXT("Bloc desk: it keeps %s%% each way and takes at most %lld credits to marks and %lld marks to credits a sol (sol %d: %lld credits to marks, %lld marks to credits booked)."),
+							*URHSimWorldSubsystem::FormatCredits(S->GetDeskSpreadBp() * 10), S->GetDeskCapPerSol(), S->GetDeskCapPerSol(), Sol, ToMarks, ToCredits));
+					})
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(4.f, 4.f))
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox).ToolTipText(Txt(TEXT("Draft: exchange 100 more credits for marks (or 100 fewer marks for credits).")))
+						[
+							D::Button(Txt(TEXT("To marks +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDeskNudge, true))
+						]
+					]
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox).ToolTipText(Txt(TEXT("Draft: exchange 100 more marks for credits (or 100 fewer credits for marks).")))
+						[
+							D::Button(Txt(TEXT("To credits +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDeskNudge, false))
+						]
+					]
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox)
+						.ToolTipText_Lambda([DeskReason]() { const FString Why = DeskReason(); return Why.IsEmpty() ? Txt(TEXT("Send the exchange: the amount is set aside now and converted at the end of the sol, at the rate then, less the spread.")) : Txt(Why); })
+						[
+							D::Button(Txt(TEXT("SEND")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDeskSend),
+								MakeAttributeLambda([DeskReason]() { return DeskReason().IsEmpty(); }), true)
+						]
+					]
+					+ SWrapBox::Slot()
+					[
+						SNew(SBox).ToolTipText(Txt(TEXT("Empty the draft.")))
+						[
+							D::Button(Txt(TEXT("CLEAR")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleDeskClear),
+								MakeAttributeLambda([this]() { return DeskDraftAmount > 0; }))
+						]
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Text_Lambda([this, DeskReason]()
+					{
+						const URHSimWorldSubsystem* S = GetSim();
+						if (!S) { return FText::GetEmpty(); }
+						if (DeskDraftAmount <= 0)
+						{
+							return Txt(TEXT("No exchange drafted. To marks +100 and To credits +100 build one; SEND transmits it."));
+						}
+						const FString What = FString::Printf(TEXT("%lld %s"), DeskDraftAmount, bDeskDraftToMarks ? TEXT("credits to marks") : TEXT("marks to credits"));
+						const FString Why = DeskReason();
+						if (!Why.IsEmpty())
+						{
+							return Txt(FString::Printf(TEXT("Draft: %s - cannot be sent: %s"), *What, *Why));
+						}
+						// The estimate at today's rate (the clearing uses the rate at the end of the sol): presentation arithmetic only.
+						const int64 Rate = FMath::Max<int64>(1, S->GetRate());
+						const int64 Keep = 10000 - S->GetDeskSpreadBp();
+						const int64 Milli = DeskDraftAmount * 1000;
+						const int64 Out = bDeskDraftToMarks ? Milli * 1000 * Keep / (Rate * 10000) : Milli * Rate * Keep / (1000 * 10000);
+						return Txt(FString::Printf(TEXT("Draft: %s - about %s %s at today's rate, less the spread."), *What, *URHSimWorldSubsystem::FormatCredits(Out), bDeskDraftToMarks ? TEXT("marks") : TEXT("credits")));
+					})
+				]
+			]
+		]
+	];
+	return Box;
+}
+
 FReply SRHCommandDeck::HandleRivalVerb(FName Verb, FName Target)
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -2532,10 +2875,42 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 	[
 		SNew(STextBlock).Font(D::Label(8)).ColorAndOpacity(D::Amber).Text(Txt(TEXT("MARKET")))
 	];
+	// E5: from the market's issue on, the bloc line (the brief puts it on this card, which shows only for a neighbor with an economy while the
+	// market is live, and only once the neighbor is available: R7 O10): a member, a member from a later sol, the identity it joins at, or out
+	// of the bloc - then, only while an order to it could be booked at all (no withdrawal pending; its route open; not defected, embargoed or
+	// disrupted), what an order sent now settles in. Placeholder wording (gate-d-wording Y5).
+	Lines->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 3.f)
+	[
+		SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::Sky).AutoWrapText(true)
+		.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->GetCurrencyIssueSol() >= 0) ? EVisibility::Visible : EVisibility::Collapsed; })
+		.Text_Lambda([this, RowName]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			const URHDefinitionsSubsystem* Df = GetDefs();
+			const FRHRivalRow* R = Df ? Df->GetRival(RowName) : nullptr;
+			if (!S || !R || S->GetCurrencyIssueSol() < 0) { return FText::GetEmpty(); }
+			const int32 Sol = S->GetBookingSolNow();
+			const int32 From = S->GetBlocMemberFromSol(RowName);
+			const FString Status = From >= 0 ? (From <= Sol ? FString(TEXT("Bloc member")) : FString::Printf(TEXT("Bloc member from sol %d"), From))
+				: (R->BlocStance >= 0 ? FString::Printf(TEXT("Joins the bloc at identity %+d"), R->BlocStance) : FString(TEXT("Stays out of the bloc")));
+			const bool bOrders = !S->IsCurrencyWithdrawPending() && !S->IsRouteClosed(RowName) && !S->HasDefected(RowName) && !S->IsEmbargoed(RowName)
+				&& S->GetSabotageRemaining(RowName) <= 0.0;
+			if (!bOrders) { return Txt(Status); }
+			const uint8 Unit = S->GetOrderCurrencyFor(RowName, Sol);
+			const FString Settles = Unit == 1 ? TEXT("in marks") : (Unit == 2 ? TEXT("in credits at the rate") : TEXT("in credits"));
+			return Txt(FString::Printf(TEXT("%s  -  an order sent now settles %s"), *Status, *Settles));
+		})
+	];
 	Lines->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 3.f)
 	[
 		SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
-		.Text(Txt(TEXT("Prices are credits a kg. An order's convoy leaves at once; the market fills it at the end of the sol, up to what they hold then.")))
+		.Text_Lambda([this]()
+		{
+			// E5: from the open sol the market counts in marks (the price integers do not change at the issue).
+			const URHSimWorldSubsystem* S = GetSim();
+			return (S && S->IsMarketInMarks()) ? Txt(TEXT("Prices are marks a kg. An order's convoy leaves at once; the market fills it at the end of the sol, up to what they hold then."))
+				: Txt(TEXT("Prices are credits a kg. An order's convoy leaves at once; the market fills it at the end of the sol, up to what they hold then."));
+		})
 	];
 	for (const TPair<FName, int64>& Cap : Caps)
 	{
@@ -2548,7 +2923,8 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			{
 				const URHSimWorldSubsystem* S = GetSim();
 				if (!S) { return FText::GetEmpty(); }
-				return Txt(FString::Printf(TEXT("%s  %s cr/kg  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res)), FMath::Max(0, S->GetRivalStoreKg(RowName, Res))));
+				return Txt(FString::Printf(TEXT("%s  %s %s  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res)),
+					S->IsMarketInMarks() ? TEXT("marks/kg") : TEXT("cr/kg"), FMath::Max(0, S->GetRivalStoreKg(RowName, Res))));
 			})
 		];
 		Lines->AddSlot().AutoHeight().Padding(0.f, 1.f, 0.f, 0.f)
@@ -2595,12 +2971,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			}
 			FString Why;
 			int64 Reserve = 0;
-			if (!S->CanPlaceOrder(RowName, Text, Why, &Reserve))
+			uint8 Unit = 0;
+			if (!S->CanPlaceOrder(RowName, Text, Why, &Reserve, &Unit))
 			{
 				return Txt(FString::Printf(TEXT("Draft %s - cannot be sent: %s"), *Text, *Why));
 			}
 			const int32 Sol = C ? FMath::FloorToInt32((C->GetSimSecondsTotal() + S->GetOrderLagSeconds()) / (double)URHSimClockSubsystem::SolLengthSimSeconds) : 0;
-			return Txt(FString::Printf(TEXT("Draft %s - it may cost up to %s cr net, set aside until the market fills it at the end of sol %d."), *Text, *URHSimWorldSubsystem::FormatCredits(Reserve), Sol));
+			// E5: a bloc member's order is set aside in marks; any other after the issue in credits, converted at the rate.
+			return Txt(FString::Printf(TEXT("Draft %s - it may cost up to %s %s net, set aside until the market fills it at the end of sol %d."), *Text, *URHSimWorldSubsystem::FormatCredits(Reserve),
+				Unit == 1 ? TEXT("marks") : (Unit == 2 ? TEXT("cr (converted at the rate)") : TEXT("cr")), Sol));
 		})
 	];
 	Lines->AddSlot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)

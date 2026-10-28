@@ -34,7 +34,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 55;  // v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 56;  // v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -509,6 +509,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	FirstHarvestKg = Defs->GetConfigScalar(FName("FirstHarvestKg"), FirstHarvestKg);
 	HopeFirstHarvestMilestone = Defs->GetConfigScalar(FName("HopeFirstHarvestMilestone"), HopeFirstHarvestMilestone);
 	InitMarket(); // E4: the market's config, then the rivals' economies (parsed once here, and again only at load or when the rivals table changes)
+	InitCurrency(); // E5: the currency's config; unissued, with the political record seeded from the identity and tension just read
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -9565,12 +9566,57 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			return;
 		}
 	}
+	else if (Cmd.Verb == FName("Currency"))
+	{
+		// E5: issue a Martian currency (Target Issue), the stand-alone act: the identity must lean Martian. One rule (CanIssueCurrency) for the
+		// verb, the deck and the cheat; the market issues it at the roll that closes this order's sol.
+		FString Reason;
+		if (Cmd.Target != FName("Issue"))
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("No such currency order '%s'"), *Cmd.Target.ToString()));
+			return;
+		}
+		if (!CanIssueCurrency(false, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+		IssueCurrency(Cmd, 0, true);
+	}
+	else if (Cmd.Verb == FName("Exchange"))
+	{
+		// E5: the bloc's exchange desk (Target ToMarks or ToCredits, Value whole units of the source currency). The amount is set aside at
+		// once; the roll that closes the order's sol converts it at the rate in force, less the spread.
+		FString Reason;
+		if (!BookExchange(Cmd, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
 	else if (Cmd.Verb == FName("Solidarity"))
 	{
 		// M3 Gate C: answer Earth's demand. Target Comply = cut trade; anything
 		// else (Defy) = keep faith. Rides the uplink like every decision.
+		// E5: Target DefyIssue is the third answer: the whole Defy, then the issue, at any identity. It is checked whole before the Defy runs,
+		// so it is never half done: the demand first (HEAD's text), then the issue's own rule. One alert for the act: the Defy's, carrying the
+		// issue's news (the banner keeps only the last alert, so two in one tick would hide Gate D's D44).
 		FString Reason;
-		if (!ResolveDilemma(Cmd.Target == FName("Comply"), Reason))
+		if (Cmd.Target == FName("DefyIssue"))
+		{
+			if (!bEarthDemandPending)
+			{
+				OnCommandRejected.Broadcast(Cmd, TEXT("There is no demand to answer right now."));
+				return;
+			}
+			if (!CanIssueCurrency(true, Reason) || !ResolveDilemma(Cmd, false, Reason, true))
+			{
+				OnCommandRejected.Broadcast(Cmd, Reason);
+				return;
+			}
+			IssueCurrency(Cmd, 1, false);
+		}
+		else if (!ResolveDilemma(Cmd, Cmd.Target == FName("Comply"), Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -9612,7 +9658,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	{
 		// M4 Gate C: spend Influence to lift an Earth-ordered embargo.
 		FString Reason;
-		if (!ResolvePacify(Cmd.Target, Reason))
+		if (!ResolvePacify(Cmd, Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -9950,10 +9996,14 @@ double URHSimWorldSubsystem::GetRequisitionMultiplier() const
 	const double AxisFrac = IdentityAxis / 100.0;             // + = Martian
 	const double EarthAlign = FMath::Max(0.0, -AxisFrac);     // loyalty
 	const double MartianAlign = FMath::Max(0.0, AxisFrac);    // defiance
-	const double Mult = 1.0
+	double Mult = 1.0
 		+ RequisitionEarthBonus * EarthAlign
 		- RequisitionMartianPenalty * MartianAlign
 		- RequisitionTensionPenalty * (EarthTension / 100.0);
+	if (bCurrencyIssued)
+	{
+		Mult -= CurrencyRequisitionPenalty; // E5 (Q-A a): while the mark exists; unissued, this is HEAD's value in HEAD's order (CU1b)
+	}
 	return FMath::Clamp(Mult, 0.0, 1.0 + RequisitionEarthBonus);
 }
 
@@ -10148,7 +10198,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 	}
 }
 
-bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
+bool URHSimWorldSubsystem::ResolvePacify(const FRHCommand& Cmd, FName Rival, FString& OutReason)
 {
 	if (!EmbargoGrace.Contains(Rival))
 	{
@@ -10171,6 +10221,8 @@ bool URHSimWorldSubsystem::ResolvePacify(FName Rival, FString& OutReason)
 		Row ? *Row->DisplayName : *Rival.ToString()));
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== PACIFIED: %s (influence %.0f, tension %.0f) ==="),
 		Row ? *Row->DisplayName : *Rival.ToString(), Influence, EarthTension);
+	// E5: the political record takes the relief at the roll that closes this order's sol (silent; nothing reads it before an issue).
+	AppendJournal(Cmd, 0, ERHPoliticalAct::Pacify, false, 0, -FMath::RoundToInt64(PacifyTensionRelief * 1000.0));
 	return true;
 }
 
@@ -10344,7 +10396,7 @@ const TCHAR* URHSimWorldSubsystem::GetEndingName(ERHEnding Ending) const
 	}
 }
 
-bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
+bool URHSimWorldSubsystem::ResolveDilemma(const FRHCommand& Cmd, bool bComply, FString& OutReason, bool bIssuing)
 {
 	if (!bEarthDemandPending)
 	{
@@ -10400,10 +10452,14 @@ bool URHSimWorldSubsystem::ResolveDilemma(bool bComply, FString& OutReason)
 				Rel = FMath::Clamp(Rel + DilemmaDefyRelationBonus, 0.0, 100.0);
 			});
 		}
-		OnAlert.Broadcast(TEXT("YOU DEFIED EARTH — the settlements stand together. Hope rises, but your sponsor's supply priority is cut. Mars will have to provide."));
+		// E5: DefyIssue's Defy half keeps this text whole and adds the issue's clause, so that act raises one alert, not two in one tick.
+		const FString Defied = TEXT("YOU DEFIED EARTH — the settlements stand together. Hope rises, but your sponsor's supply priority is cut. Mars will have to provide.");
+		OnAlert.Broadcast(bIssuing ? Defied + TEXT(" ") + CurrencyIssueAlert(true) : Defied);
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SOLIDARITY: DEFIED - axis %.0f, tension %.0f, requisition x%.2f ==="),
 			IdentityAxis, EarthTension, GetRequisitionMultiplier());
 	}
+	// E5: the act enters the political journal (the identity after it, the nominal tension delta); a Comply while the mark exists withdraws it.
+	JournalDilemma(Cmd, bComply);
 	return true;
 }
 
@@ -13928,9 +13984,11 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	RHSaveFrame::Write(Ar, RHSaveFrame::LedgerTag, [this](FArchive& Block) { WriteLedgerBlock(Block); });
 	RHSaveFrame::Write(Ar, RHSaveFrame::CreditTag, [this](FArchive& Block) { WriteCreditBlock(Block); });
 	RHSaveFrame::Write(Ar, RHSaveFrame::ExportTag, [this](FArchive& Block) { WriteExportBlock(Block); });
-	// E4 (save v55): the market block, in its own frame after E3's - the last frame in the file. The rivals' economies are synced first.
+	// E4 (save v55): the market block, in its own frame after E3's. The rivals' economies are synced first.
 	SyncRivalEconomies(false);
 	RHSaveFrame::Write(Ar, RHSaveFrame::MarketTag, [this](FArchive& Block) { WriteMarketBlock(Block); });
+	// E5 (save v56): the currency block, in its own frame straight after E4's.
+	RHSaveFrame::Write(Ar, RHSaveFrame::CurrencyTag, [this](FArchive& Block) { WriteCurrencyBlock(Block); });
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14741,6 +14799,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ReadCreditBlock(Ar, Bytes); // E2b
 	ReadExportBlock(Ar, Bytes); // E3
 	ReadMarketBlock(Ar, Bytes, LoadedConvoyRival, bLoadedConvoyReturning, LoadedConvoyLegSols); // E4 (v55)
+	ReadCurrencyBlock(Ar, Bytes); // E5 (v56): the mark convoys and desk orders onto what E4 loaded; a lost market block starts it unissued
+	ReconcileReservations();      // E5: both purses' reservations and the lifetime totals, after both blocks (E4's own repair moved here)
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

@@ -1891,6 +1891,25 @@ namespace
 			}, 2.f);
 		}
 
+		// ---- E5 (an optional step): the Martian currency's issue button, in the same panel. The harness moves the colony to lean Martian
+		// (+20, the issue's threshold, where Zarya's stance is met), and a real press on ISSUE A MARTIAN CURRENCY transmits a Currency Issue order.
+		Runner.Do(TEXT("currency.setup"), []()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (Sim && Sim->GetIdentityAxis() < 20.0)
+			{
+				Sim->Debug_ShiftIdentity(20.0 - Sim->GetIdentityAxis());
+			}
+		}, 1.f);
+		{
+			const TSharedRef<FPress> Issue = PushPress(TEXT("currency.ISSUE"), LocateButton(TEXT("ISSUE A MARTIAN CURRENCY"), 0, true));
+			PushCheck(TEXT("currency.ISSUE"), Issue, []()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				return (Sim && QueueHas(*Sim, TEXT("Currency"), TEXT("Issue"))) ? FString() : FString(TEXT("no Currency Issue order was transmitted"));
+			}, 2.f);
+		}
+
 		// ---- the traffic overlay flips on and off
 		{
 			const TSharedRef<FPress> On = PushPress(TEXT("traffic.on"), LocateButton(TEXT("Traffic"), 0, true));

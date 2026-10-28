@@ -63,11 +63,18 @@ bool URHSimWorldSubsystem::Debug_ZeroCredits()
 		UE_LOG(LogRedHopeSim, Warning, TEXT("Debug_ZeroCredits refused: %s cr is reserved for convoys still waiting to clear"), *FormatCredits(CreditReservedMcr));
 		return false;
 	}
+	if (MarkReservedMmk != 0)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Debug_ZeroCredits refused: %s marks are reserved for orders still waiting to clear"), *FormatCredits(MarkReservedMmk));
+		return false;
+	}
 	CreditBalanceMcr = 0;
 	CreditAwardedMcr = 0;
 	CreditSpentMcr = 0;
 	SalesPaidMcr = 0;
 	MarketSalesMcr = 0; // E4 (re-review 5a): SalesPaid + MarketSales <= Awarded must keep holding
+	DeskCreditMcr = 0;  // E5 (R4): and so must the desk's and the withdrawals' parts of it
+	CurrencyRedeemedMcr = 0;
 	return true;
 }
 
@@ -511,8 +518,10 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 	// A threshold on the monotone clock, called straight after RollEconomyLedger with the same SolNow, so both bands roll on the same step.
 	// Once for each sol the threshold closes (a long jump closes several, at most MarketRing of them are repriced): 1 the clearing of every
 	// booked order due at or before the closing sol, by convoy Id, at the prices in force during that sol, its fills written into that
-	// sol's ring entry; 2 the rivals produce and consume; 3 every traded slot reprices. The market off still clears and keeps the tally; it
-	// skips only 2 and 3 (R4), so a priced convoy out when the harness turns the market off is never stranded.
+	// sol's ring entry, then E5's desk orders, by Id, at the rate in force; 2 the rivals produce and consume; 3 every traded slot reprices;
+	// 4 E5's steps, outside the live gate (the record runs from sol 0 in every colony): the political record, the issue and the withdrawal,
+	// the bloc's admissions, the rate. The market off still clears and keeps the tally; it skips only 2 and 3 (R4), so a priced convoy out
+	// when the harness turns the market off is never stranded.
 	if (SolNow <= MarketCheckedSol)
 	{
 		return;
@@ -536,11 +545,22 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 				Mk.RingBoughtG[s * MarketRing + Mk.RingHead] = 0;
 			}
 		}
+		if (bCurrencyEnabled)
+		{
+			BlocSoldMmk[BlocHead] = 0; // E5: the bloc tally keeps E4's ring discipline
+			BlocBoughtMmk[BlocHead] = 0;
+		}
 		ClearConvoys(ClosingSol, DueUpTo);
+		ClearDeskOrders(ClosingSol, DueUpTo); // E5: after the convoys, by Id
 		for (FRHMarket& Mk : Markets)
 		{
 			Mk.RingHead = (Mk.RingHead + 1) % MarketRing;
 			Mk.RingFill = FMath::Min(Mk.RingFill + 1, MarketRing);
+		}
+		if (bCurrencyEnabled)
+		{
+			BlocHead = (BlocHead + 1) % BlocRing;
+			BlocFill = FMath::Min(BlocFill + 1, BlocRing);
 		}
 		if (bLive)
 		{
@@ -548,6 +568,12 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 			{
 				MarketProduceAndReprice(Mk);
 			}
+		}
+		if (bCurrencyEnabled)
+		{
+			// E5, outside the live gate. On the last pass the record also walks the sols a long jump skips (it adds their drifts and applies
+			// every entry due up to SolNow - 1, as DueUpTo does for convoys); the rate still steps at most once a pass.
+			StepCurrencyPass(ClosingSol, DueUpTo);
 		}
 	}
 	// An entry kept only for an uncleared convoy goes once nothing waits on it.
@@ -678,28 +704,61 @@ void URHSimWorldSubsystem::ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol)
 		}
 	}
 	const int64 Net = BuysValue - SellsValue;
-	const int64 Reserved = Convoy.ReservedMcr;
+	// E5: the order's currency was fixed at booking from its clearing sol, which is this roll's closing sol. A bloc member's order (bMarks)
+	// settles in marks with no conversion; after the market's issue any other order is a credit order whose Net (in the market's unit, marks)
+	// converts at the rate in force during the closing sol, a charge rounded up and a payment down. Before the open sol every order is E4's.
+	const bool bMarks = Convoy.bMarks;
+	const bool bConverted = !bMarks && IsConvertingAt(ClosingSol);
+	const int64 Rate = (bMarks || bConverted) ? RateMcr : 0;
+	const int64 Settled = bMarks ? Net : (bConverted ? (Net > 0 ? ConvertChargeMcr(Net, Rate) : -ConvertOwedMcr(-Net, Rate)) : Net);
+	const int64 Reserved = bMarks ? Convoy.ReservedMmk : Convoy.ReservedMcr;
 	int64 Paid = 0;
-	if (Net > 0)
+	if (Settled > 0)
 	{
 		// A clearing pays at most its own reservation plus the spendable credit (re-review 5b): what is set aside for other convoys is
 		// never touched. The rest, which only a load repair can leave, is written off with a Warning and the rival takes the loss.
-		const int64 Allowed = MktMax64(0, CreditBalanceMcr - (CreditReservedMcr - Reserved));
-		const int64 Pay = MktMin64(Net, Allowed);
-		Paid = Pay - CreditSpend(Pay);
+		// E5: a mark order the same way in marks (R4).
+		const int64 Allowed = bMarks ? MktMax64(0, MarkBalanceMmk - (MarkReservedMmk - Reserved)) : MktMax64(0, CreditBalanceMcr - (CreditReservedMcr - Reserved));
+		const int64 Pay = MktMin64(Settled, Allowed);
+		Paid = Pay - (bMarks ? MarkSpend(Pay) : CreditSpend(Pay));
 	}
-	else if (Net < 0)
+	else if (Settled < 0)
 	{
-		Convoy.OwedMcr = -Net; // carried home, paid through CreditPay at the return
+		if (bMarks)
+		{
+			Convoy.OwedMmk = -Settled; // E5: carried home, paid through MarkPay at the return
+		}
+		else
+		{
+			Convoy.OwedMcr = -Settled; // carried home, paid through CreditPay at the return
+		}
 	}
-	const int64 WrittenOff = Net > 0 ? Net - Paid : 0;
+	const int64 WrittenOff = Settled > 0 ? Settled - Paid : 0;
 	if (WrittenOff > 0)
 	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("Order #%d to %s: %s cr could not be paid; %s writes it off"), Convoy.Id, *Convoy.Rival.ToString(), *FormatCredits(WrittenOff), *Convoy.Rival.ToString());
+		if (bMarks)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Order #%d to %s: %s marks could not be paid; %s writes them off"), Convoy.Id, *Convoy.Rival.ToString(), *FormatCredits(WrittenOff), *Convoy.Rival.ToString());
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Order #%d to %s: %s cr could not be paid; %s writes it off"), Convoy.Id, *Convoy.Rival.ToString(), *FormatCredits(WrittenOff), *Convoy.Rival.ToString());
+		}
 	}
-	CreditReservedMcr = MktMax64(0, CreditReservedMcr - Reserved);
-	Convoy.ReservedMcr = 0;
-	Convoy.ValueMcr = BuysValue + SellsValue;
+	if (bMarks)
+	{
+		MarkReservedMmk = MktMax64(0, MarkReservedMmk - Reserved);
+		Convoy.ReservedMmk = 0;
+		// E5: only a bloc member's mark order enters the bloc tally (re-review 3b), at the clearing price, in the closing sol's entry.
+		BlocSoldMmk[BlocHead] += SellsValue;
+		BlocBoughtMmk[BlocHead] += BuysValue;
+	}
+	else
+	{
+		CreditReservedMcr = MktMax64(0, CreditReservedMcr - Reserved);
+		Convoy.ReservedMcr = 0;
+	}
+	Convoy.ValueMcr = BuysValue + SellsValue; // in the market's unit for every order (E5: the goodwill floor is read in it too)
 	Convoy.bCleared = true;
 	FRHMarketClearing Rec;
 	Rec.ConvoyId = Convoy.Id;
@@ -712,6 +771,9 @@ void URHSimWorldSubsystem::ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol)
 	Rec.ValueMcr = Convoy.ValueMcr;
 	Rec.ReleasedMcr = Reserved;
 	Rec.Lines = Convoy.Lines;
+	Rec.Currency = bMarks ? 1 : (bConverted ? 2 : 0);
+	Rec.RateMcr = Rate;
+	Rec.SettledMcr = Settled;
 	MarketClearings.Add(MoveTemp(Rec));
 	if (MarketClearings.Num() > MktMaxClearingsKept)
 	{
@@ -722,8 +784,21 @@ void URHSimWorldSubsystem::ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol)
 		TArray<FRHConvoyLine> Bought, Sold;
 		for (const FRHConvoyLine& L : Convoy.Lines) { (L.Kg > 0 ? Bought : Sold).Add(L); }
 		const FString BoughtText = OrderLinesText(Bought, true), SoldText = OrderLinesText(Sold, false);
-		UE_LOG(LogRedHopeSim, Display, TEXT("Order #%d to %s clears: bought %s, sold %s at %s cr net"), Convoy.Id, *Convoy.Rival.ToString(),
-			BoughtText.IsEmpty() ? TEXT("nothing") : *BoughtText, SoldText.IsEmpty() ? TEXT("nothing") : *SoldText, *FormatCredits(Net));
+		if (bMarks)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Order #%d to %s clears: bought %s, sold %s at %s marks net"), Convoy.Id, *Convoy.Rival.ToString(),
+				BoughtText.IsEmpty() ? TEXT("nothing") : *BoughtText, SoldText.IsEmpty() ? TEXT("nothing") : *SoldText, *FormatCredits(Net));
+		}
+		else if (bConverted)
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Order #%d to %s clears: bought %s, sold %s at %s marks net, %s cr at %s cr a mark"), Convoy.Id, *Convoy.Rival.ToString(),
+				BoughtText.IsEmpty() ? TEXT("nothing") : *BoughtText, SoldText.IsEmpty() ? TEXT("nothing") : *SoldText, *FormatCredits(Net), *FormatCredits(Settled), *FormatCredits(Rate));
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Display, TEXT("Order #%d to %s clears: bought %s, sold %s at %s cr net"), Convoy.Id, *Convoy.Rival.ToString(),
+				BoughtText.IsEmpty() ? TEXT("nothing") : *BoughtText, SoldText.IsEmpty() ? TEXT("nothing") : *SoldText, *FormatCredits(Net));
+		}
 	}
 }
 
@@ -848,7 +923,7 @@ int64 URHSimWorldSubsystem::GetOrderReservationMcr(FName Rival, const TArray<FRH
 	return MktMax64(0, BuyMcr - SellMcr);
 }
 
-bool URHSimWorldSubsystem::PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, FRHBookPlan& OutPlan, FString& OutWhy) const
+bool URHSimWorldSubsystem::PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, int32 EffSol, FRHBookPlan& OutPlan, FString& OutWhy) const
 {
 	// One rule for the verb, the deck and the cheat. HEAD's refusals keep their texts and their order (no contact, already out, the closed
 	// route, sabotage, defection, embargo, the lot); the new ones follow: the other convoys out, the lines, the cargo, the loadable lot, the
@@ -902,6 +977,13 @@ bool URHSimWorldSubsystem::PlanConvoy(FName RivalName, bool bStanding, const FSt
 	if (EmbargoGrace.Contains(RivalName))
 	{
 		OutWhy = FString::Printf(TEXT("%s has embargoed you under Earth pressure - reassure them first"), *Rival->DisplayName);
+		return false;
+	}
+	// E5 (R5): from a Comply that withdrew the mark until the withdrawal roll, no priced order is booked (a barter convoy never clears, so it
+	// is still allowed). Straight after the political refusals (E6's walk keeps it there).
+	if (bPriced && bWithdrawPending)
+	{
+		OutWhy = TEXT("The market is closed while the mark is withdrawn");
 		return false;
 	}
 	OutPlan.bPriced = bPriced;
@@ -1015,7 +1097,23 @@ bool URHSimWorldSubsystem::PlanConvoy(FName RivalName, bool bStanding, const FSt
 			}
 		}
 	}
-	OutPlan.ReserveMcr = GetOrderReservationMcr(RivalName, OutPlan.Lines);
+	// E5: the order's currency, fixed here from its clearing sol (2.3): a member's order in marks (E4's reservation, read in milli-marks,
+	// against the spendable marks); any other order after the market's issue in credits converted at the rate (the reservation covers a full
+	// rate step as well as a full price step); before the open sol E4's order, exactly.
+	const uint8 Currency = GetOrderCurrencyFor(RivalName, EffSol);
+	OutPlan.bMarks = Currency == 1;
+	OutPlan.bConverted = Currency == 2;
+	if (OutPlan.bMarks)
+	{
+		OutPlan.ReserveMmk = GetOrderReservationMcr(RivalName, OutPlan.Lines);
+		if (OutPlan.ReserveMmk > GetSpendableMmk())
+		{
+			OutWhy = FString::Printf(TEXT("The order may cost up to %s marks net; %s marks are spendable"), *FormatCredits(OutPlan.ReserveMmk), *FormatCredits(GetSpendableMmk()));
+			return false;
+		}
+		return true;
+	}
+	OutPlan.ReserveMcr = OutPlan.bConverted ? GetConvertedReservationMcr(RivalName, OutPlan.Lines, RateMcr) : GetOrderReservationMcr(RivalName, OutPlan.Lines);
 	if (OutPlan.ReserveMcr > GetSpendableMcr())
 	{
 		OutWhy = FString::Printf(TEXT("The order may cost up to %s cr net; %s cr is spendable"), *FormatCredits(OutPlan.ReserveMcr), *FormatCredits(GetSpendableMcr()));
@@ -1024,18 +1122,19 @@ bool URHSimWorldSubsystem::PlanConvoy(FName RivalName, bool bStanding, const FSt
 	return true;
 }
 
-bool URHSimWorldSubsystem::CanPlaceOrder(FName Rival, const FString& Text, FString& OutWhy, int64* OutReserveMcr) const
+bool URHSimWorldSubsystem::CanPlaceOrder(FName Rival, const FString& Text, FString& OutWhy, int64* OutReserveMcr, uint8* OutCurrency) const
 {
 	FRHBookPlan Plan;
-	const bool bOk = PlanConvoy(Rival, false, Text, Plan, OutWhy);
-	if (OutReserveMcr) { *OutReserveMcr = bOk ? Plan.ReserveMcr : 0; }
+	const bool bOk = PlanConvoy(Rival, false, Text, GetBookingSolNow(), Plan, OutWhy);
+	if (OutReserveMcr) { *OutReserveMcr = bOk ? (Plan.bMarks ? Plan.ReserveMmk : Plan.ReserveMcr) : 0; }
+	if (OutCurrency) { *OutCurrency = Plan.bMarks ? 1 : (Plan.bConverted ? 2 : 0); }
 	return bOk;
 }
 
 bool URHSimWorldSubsystem::CanPlaceStandingOrder(FName Rival, FString& OutWhy) const
 {
 	FRHBookPlan Plan;
-	return PlanConvoy(Rival, true, FString(), Plan, OutWhy);
+	return PlanConvoy(Rival, true, FString(), GetBookingSolNow(), Plan, OutWhy);
 }
 
 bool URHSimWorldSubsystem::BookConvoy(const FRHCommand& Cmd, bool bStanding, FString& OutWhy)
@@ -1052,8 +1151,10 @@ bool URHSimWorldSubsystem::BookConvoy(const FRHCommand& Cmd, bool bStanding, FSt
 	{
 		RollMarket(ClearSol);
 	}
+	// E5: the sol the order clears in decides its currency, read AFTER the catch-up (a late booking clears at the open sol's roll).
+	const int32 EffSol = FMath::Max(ClearSol, MarketCheckedSol);
 	FRHBookPlan Plan;
-	if (!PlanConvoy(Cmd.Target, bStanding, Cmd.Text, Plan, OutWhy))
+	if (!PlanConvoy(Cmd.Target, bStanding, Cmd.Text, EffSol, Plan, OutWhy))
 	{
 		return false;
 	}
@@ -1082,9 +1183,18 @@ bool URHSimWorldSubsystem::BookConvoy(const FRHCommand& Cmd, bool bStanding, FSt
 	{
 		Convoy.ClearSol = ClearSol;
 		Convoy.bCleared = false;
-		Convoy.ReservedMcr = Plan.ReserveMcr;
 		Convoy.Lines = Plan.Lines;
-		CreditReservedMcr += Plan.ReserveMcr;
+		if (Plan.bMarks)
+		{
+			Convoy.bMarks = true; // E5: a bloc member's order, its reservation in marks
+			Convoy.ReservedMmk = Plan.ReserveMmk;
+			MarkReservedMmk += Plan.ReserveMmk;
+		}
+		else
+		{
+			Convoy.ReservedMcr = Plan.ReserveMcr;
+			CreditReservedMcr += Plan.ReserveMcr;
+		}
 	}
 	Convoys.Add(Convoy);
 	RelationRef(Cmd.Target); // ensure the relation entry exists
@@ -1120,10 +1230,11 @@ void URHSimWorldSubsystem::StepTrade(float SubDt)
 		const FRHRivalRow* Rival = Defs ? Defs->GetRival(Active.Rival) : nullptr;
 		if (!Rival)
 		{
-			// The row vanished (data edit) - abort cleanly, and give back what was set aside for its order.
+			// The row vanished (data edit) - abort cleanly, and give back what was set aside for its order (E5: in either purse).
 			if (Active.IsPriced() && !Active.bCleared)
 			{
 				CreditReservedMcr = MktMax64(0, CreditReservedMcr - Active.ReservedMcr);
+				MarkReservedMmk = MktMax64(0, MarkReservedMmk - Active.ReservedMmk);
 			}
 			Convoys.RemoveAt(i);
 			continue;
@@ -1230,6 +1341,10 @@ void URHSimWorldSubsystem::StepConvoyReturn(const FRHConvoy& Done)
 		CreditPay(Done.OwedMcr);
 		MarketSalesMcr += Done.OwedMcr;
 	}
+	if (Done.OwedMmk > 0)
+	{
+		MarkPay(Done.OwedMmk); // E5: a bloc member pays in marks (a withdrawal on the road has already redeemed them, and set this to 0)
+	}
 	// The goods always land (paid for at dispatch - conservation), but the DIPLOMATIC upside accrues only if the relationship survived the
 	// trip (M4 C+D's adversarial fix), and, for a written order, only if what filled was worth GoodwillMinValueMcr: ten one-kilogram orders
 	// must not farm ten runs' goodwill. The standing order keeps today's rule unconditionally (its value at the floor prices is 237.5 cr).
@@ -1279,7 +1394,7 @@ double URHSimWorldSubsystem::GetConvoyProgress(const FRHConvoy& Convoy) const
 
 void URHSimWorldSubsystem::WriteMarketPayload(FArchive& Ar, const TArray<FRHRivalEconomy>& Econ, const TArray<FRHMarket>& Mkts) const
 {
-	// v55. Inside E4's frame ('RHE4'), the last frame in the file. The slot table once (the count, then the names ascending: the E1 slots by
+	// v55. Inside E4's frame ('RHE4'), followed by E5's 'RHE5' (v56). The slot table once (the count, then the names ascending: the E1 slots by
 	// name); then per region in Id order: RegionId and per slot the price and the 8 + 8 ring entries, then the ring's fill and head; the open
 	// sol; the rivals with an economy (their count, then per rival in name order its name and the store of every slot, 0 where it trades
 	// nothing); the lifetime market sales and the reserved credit; then NextConvoyId and the convoys by Id. The market and rival parts are
@@ -1365,9 +1480,11 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	// authoritative for the convoys; the v17 slot is only the fallback when the block cannot be read, and then it comes home EMPTY (O7): nothing
 	// is delivered that was not bought. Repairs, each with a Warning (no Error is ever logged): a slot table out of order drops the market and
 	// the rivals' stores to their start values; a price outside [0.25 V, 4 V] is clamped; a ring index out of range resets that tally; a store
-	// below 0 is 0 (above its cap is legal); an unknown rival is skipped; the sales total is clamped into [0, Awarded - SalesPaid]; a convoy
-	// naming a rival with no economy, an untraded resource or a malformed line is dropped; the reserved credit is the sum of the uncleared
-	// convoys' reservations, cut from the highest Id down until it fits the balance; an open sol ahead of C5d's is C5d's.
+	// below 0 is 0 (above its cap is legal); an unknown rival is skipped; a convoy naming a rival with no economy, an untraded resource or a
+	// malformed line is dropped; an open sol ahead of C5d's is C5d's. E5 (R4) moved two repairs, with their texts, conditions and order, to
+	// ReconcileReservations, which runs after the currency block: the sales total clamped into [0, Awarded - SalesPaid] and the reserved
+	// credit set to the sum of the reservations (now the desk's too), cut from the highest Id down until it fits the balance. This reader
+	// leaves what they need: what the block said, whether it parsed, every convoy Id it held, and why it started at its start values.
 	RivalEconomies.Reset();
 	Markets.Reset();
 	Convoys.Reset();
@@ -1377,11 +1494,18 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	MarketSalesMcr = 0;
 	MarketCheckedSol = ProductionCheckedSol;
 	SyncedRivalsGeneration = MAX_uint32;
+	MarketBlockLoss = ERHMarketBlockLoss::None;
+	bMarketBlockLost = false;
+	bMarketParsed = false;
+	ReadMarketSalesMcr = 0;
+	ReadMarketReservedMcr = 0;
+	ReadMarketConvoyIds.Reset();
 	TArray<uint8> Payload;
 	FString Why;
 	bool bFound = RHSaveFrame::Read(Ar, File, RHSaveFrame::MarketTag, Payload, Why);
 	if (!bFound)
 	{
+		MarketBlockLoss = ERHMarketBlockLoss::Lost;
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: the market block is lost (%s); the market starts at its start values"), *Why);
 	}
 	const int32 N = EconSlots.Num();
@@ -1478,11 +1602,14 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 		bParsed = bOk;
 		if (!bParsed)
 		{
+			MarketBlockLoss = ERHMarketBlockLoss::Malformed;
 			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: the market block is malformed (%s); the market starts at its start values"), *Why);
 		}
 	}
+	bMarketParsed = bParsed;
 	if (!bParsed)
 	{
+		bMarketBlockLost = true; // E5: the currency block then starts unissued
 		SyncRivalEconomies(false, true); // the start values: prices at the Earth value, stores at StoreStart, an empty tally
 		if (!V17Rival.IsNone())
 		{
@@ -1523,6 +1650,8 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	}
 	if (bSlotsBad)
 	{
+		MarketBlockLoss = ERHMarketBlockLoss::SlotsReset;
+		bMarketBlockLost = true;
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: the market block's slot names are out of order or repeated; the market and the rival stores start at their start values"));
 		ReadMarkets.Reset();
 		ReadRivals.Reset();
@@ -1567,6 +1696,8 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	}
 	if (!bRegionsOk)
 	{
+		MarketBlockLoss = ERHMarketBlockLoss::RegionsRepeated;
+		bMarketBlockLost = true;
 		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: a region repeats in the market block; the market starts at its start values"));
 		Markets.Reset();
 	}
@@ -1601,6 +1732,7 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	TSet<FName> Named;
 	for (const FReadConvoy& Rc : ReadConvoys)
 	{
+		ReadMarketConvoyIds.Add(Rc.Id); // E5: a mark order whose convoy this drops is dropped silently (cross-check item 2)
 		FRHConvoy C;
 		C.Id = Rc.Id;
 		C.Rival = FName(*Rc.Rival);
@@ -1699,31 +1831,7 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	{
 		MarketCheckedSol = ReadChecked;
 	}
-	// The lifetime market sales: a part of the awarded total, beside the sales paid for the quota's sales.
-	const int64 SalesMax = MktMax64(0, CreditAwardedMcr - SalesPaidMcr);
-	if (ReadSales < 0 || ReadSales > SalesMax)
-	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: lifetime market sales of %lld mcr are outside [0, %lld]; clamped"), ReadSales, SalesMax);
-	}
-	MarketSalesMcr = MktClamp64(ReadSales, 0, SalesMax);
-	// The reservations: the counter is the sum over the uncleared convoys, cut from the highest Id down until it fits the balance.
-	int64 Sum = 0;
-	for (const FRHConvoy& C : Convoys) { Sum += (C.IsPriced() && !C.bCleared) ? C.ReservedMcr : 0; }
-	for (int32 c = Convoys.Num() - 1; c >= 0 && Sum > CreditBalanceMcr; --c)
-	{
-		FRHConvoy& C = Convoys[c];
-		if (C.IsPriced() && !C.bCleared && C.ReservedMcr > 0)
-		{
-			const int64 Cut = MktMin64(C.ReservedMcr, Sum - CreditBalanceMcr);
-			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: the reservations (%s cr) pass the balance (%s cr); convoy #%d's is cut by %s cr"),
-				*FormatCredits(Sum), *FormatCredits(CreditBalanceMcr), C.Id, *FormatCredits(Cut));
-			C.ReservedMcr -= Cut;
-			Sum -= Cut;
-		}
-	}
-	if (ReadReserved != Sum)
-	{
-		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v55: the reserved credit %lld mcr disagrees with the convoys' %lld mcr; set to the convoys'"), ReadReserved, Sum);
-	}
-	CreditReservedMcr = Sum;
+	// The lifetime market sales and the reserved credit are repaired in ReconcileReservations (E5 R4), after the currency block.
+	ReadMarketSalesMcr = ReadSales;
+	ReadMarketReservedMcr = ReadReserved;
 }

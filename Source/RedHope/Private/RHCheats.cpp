@@ -911,20 +911,124 @@ static FAutoConsoleCommandWithWorldAndArgs GRHEarth(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHSolidarity(
 	TEXT("RH.Solidarity"),
-	TEXT("RH.Solidarity <comply|defy> - answer Earth's pending demand (comply = cut trade / defy = keep faith with the settlements). Rides the uplink."),
+	TEXT("RH.Solidarity <comply|defy|defyissue> - answer Earth's pending demand (comply = cut trade / defy = keep faith with the settlements / defyissue = defy, and issue a Martian currency). Rides the uplink."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World || Args.Num() < 1)
 		{
-			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Solidarity <comply|defy>"));
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Solidarity <comply|defy|defyissue>"));
 			return;
 		}
 		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
 		{
 			FRHCommand Cmd;
 			Cmd.Verb = FName("Solidarity");
-			Cmd.Target = Args[0].Equals(TEXT("comply"), ESearchCase::IgnoreCase) ? FName("Comply") : FName("Defy");
+			Cmd.Target = Args[0].Equals(TEXT("comply"), ESearchCase::IgnoreCase) ? FName("Comply")
+				: (Args[0].Equals(TEXT("defyissue"), ESearchCase::IgnoreCase) ? FName("DefyIssue") : FName("Defy"));
+			if (Cmd.Target == FName("DefyIssue"))
+			{
+				FString Why;
+				if (!Sim->CanIssueCurrency(true, Why))
+				{
+					UE_LOG(LogRedHope, Warning, TEXT("[RH.Solidarity] the mark could not be issued now: %s (sent anyway; the worker judges it when it lands)"), *Why);
+				}
+			}
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+// E5 (the Martian currency): the issue, the status and the bloc's exchange desk. Every order rides the uplink; the worker re-checks it.
+static FAutoConsoleCommandWithWorldAndArgs GRHCurrency(
+	TEXT("RH.Currency"),
+	TEXT("RH.Currency [status] | issue | desk <tomarks|tocredits> <amount> | grant <credits> <marks> | deskdraft <tomarks|tocredits> <amount> - log the Martian currency (Earth's flag, the market's issue and open sols, the rate, the political record, the bloc, both purses, the desk); issue the mark (the identity must lean Martian); or send an exchange through the bloc's desk (whole credits to marks, or whole marks to credits). DEBUG/QA: grant puts whole credits and marks in the purses (captures); deskdraft sets the deck's desk draft without sending it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		if (!Sim) { return; }
+		const FString Sub = Args.Num() > 0 ? Args[0].ToLower() : FString(TEXT("status"));
+		if (Sub == TEXT("issue"))
+		{
+			FString Why;
+			if (!Sim->CanIssueCurrency(false, Why))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.Currency] the mark would not be issued now: %s (sent anyway; the worker judges it when it lands)"), *Why);
+			}
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Currency");
+			Cmd.Target = FName("Issue");
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		if (Sub == TEXT("grant"))
+		{
+			// DEBUG/QA only (captures): whole units through the purses' own income writers.
+			const int64 Credits = Args.Num() > 1 ? FCString::Atoi64(*Args[1]) : 0, Marks = Args.Num() > 2 ? FCString::Atoi64(*Args[2]) : 0;
+			if (Credits > 0) { Sim->Debug_GrantCredits(Credits * 1000); }
+			if (Marks > 0) { Sim->Debug_GrantMarks(Marks * 1000); }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Currency] granted %lld credits and %lld marks (debug)"), FMath::Max<int64>(0, Credits), FMath::Max<int64>(0, Marks));
+			return;
+		}
+		if (Sub == TEXT("deskdraft"))
+		{
+			ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
+			if (PC && Args.Num() >= 3)
+			{
+				PC->Debug_DeskDraft(Args[1].Equals(TEXT("tomarks"), ESearchCase::IgnoreCase), FCString::Atoi64(*Args[2]));
+			}
+			return;
+		}
+		if (Sub == TEXT("desk"))
+		{
+			const bool bToMarks = Args.Num() >= 2 && Args[1].Equals(TEXT("tomarks"), ESearchCase::IgnoreCase);
+			const bool bToCredits = Args.Num() >= 2 && Args[1].Equals(TEXT("tocredits"), ESearchCase::IgnoreCase);
+			if (Args.Num() < 3 || (!bToMarks && !bToCredits))
+			{
+				UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Currency desk <tomarks|tocredits> <amount>   (whole credits to marks, or whole marks to credits)"));
+				return;
+			}
+			const int64 Amount = FCString::Atoi64(*Args[2]);
+			FString Why;
+			if (!Sim->CanExchange(bToMarks ? URHSimWorldSubsystem::ERHDeskDir::ToMarks : URHSimWorldSubsystem::ERHDeskDir::ToCredits, Amount, Sim->GetBookingSolNow(), Why))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.Currency] the exchange would be refused now: %s (sent anyway; the worker judges it when it lands)"), *Why);
+			}
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Exchange");
+			Cmd.Target = bToMarks ? FName("ToMarks") : FName("ToCredits");
+			Cmd.Value = (double)Amount;
+			Sim->EnqueueCommand(Cmd);
+			return;
+		}
+		FString Why;
+		const bool bCan = Sim->CanIssueCurrency(false, Why);
+		// The last step is known only once a close has run since the load (GetRateStepNote); with no market issue there is no step to name (the
+		// rate is the start rate, and a withdrawal also resets the note).
+		const FString Step = Sim->GetCurrencyIssueSol() < 0 ? FString(TEXT("the market has not issued the mark"))
+			: (Sim->GetRateStepNote() == 2 ? FString::Printf(TEXT("last step %+lld mcr"), Sim->GetLastRateStepMcr())
+			: (Sim->GetRateStepNote() == 1 ? FString(TEXT("set by the issue, no step yet")) : FString(TEXT("no close since the load"))));
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Currency] the mark: %s | market issue sol %d, counts in marks from sol %d | rate %s cr a mark (%s) | record: identity %s, tension %s, %d act(s) pending | issue now: %s"),
+			Sim->IsCurrencyIssued() ? TEXT("issued") : (Sim->IsCurrencyWithdrawPending() ? TEXT("being withdrawn") : TEXT("not issued")),
+			Sim->GetCurrencyIssueSol(), Sim->GetCurrencyOpenSol(), *URHSimWorldSubsystem::FormatCredits(Sim->GetRate()), *Step,
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetIdentityView()), *URHSimWorldSubsystem::FormatCredits(Sim->GetTensionView()), Sim->GetPoliticalJournal().Num(),
+			bCan ? TEXT("allowed") : *Why);
+		UE_LOG(LogRedHope, Display, TEXT("  credits %s (%s reserved) | marks %s (%s reserved, %s spendable) | desk paid in %s cr, withdrawals redeemed %s cr"),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditReservedMcr()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetMarkBalance()), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarkReservedMmk()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetSpendableMmk()), *URHSimWorldSubsystem::FormatCredits(Sim->GetDeskCreditMcr()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetCurrencyRedeemedMcr()));
+		TArray<TPair<FName, int32>> Members;
+		Sim->GetBlocMembers(Members);
+		for (const TPair<FName, int32>& M : Members)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  bloc member %s: in marks from sol %d"), *M.Key.ToString(), M.Value);
+		}
+		TArray<FRHDeskOrder> Desk;
+		Sim->GetDeskOrders(Desk);
+		for (const FRHDeskOrder& D : Desk)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  desk #%d: %s %s, clears at the end of sol %d"), D.Id, *URHSimWorldSubsystem::FormatCredits(D.Amount),
+				D.Dir == (uint8)URHSimWorldSubsystem::ERHDeskDir::ToMarks ? TEXT("cr to marks") : TEXT("marks to credits"), D.ClearSol);
 		}
 	}));
 
@@ -984,6 +1088,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHInjectRivals(
 		Z.Consume = TEXT("Ice:150;Water:140;Oxygen:60;Struct:120;Hydrogen:15");
 		Z.StoreStart = TEXT("Ice:12000;Water:2000;Oxygen:1500;Struct:2500;Hydrogen:300");
 		Z.StoreCap = TEXT("Ice:20000;Water:6000;Oxygen:3000;Struct:8000;Hydrogen:1000");
+		Z.BlocStance = 20; // E5: joins the mark at identity +20 (RH_Rivals.csv)
 		Defs->Debug_InjectRival(FName("Zarya"), Z);
 		FRHRivalRow M;
 		M.DisplayName = TEXT("Meridian Base"); M.Nation = TEXT("Meridian Compact");
@@ -994,6 +1099,7 @@ static FAutoConsoleCommandWithWorldAndArgs GRHInjectRivals(
 		M.Consume = TEXT("SpareParts:1;Food:60");
 		M.StoreStart = TEXT("SpareParts:40;Food:600");
 		M.StoreCap = TEXT("SpareParts:100;Food:2000");
+		M.BlocStance = 40; // E5: joins the mark at identity +40
 		Defs->Debug_InjectRival(FName("Meridian"), M);
 		UE_LOG(LogRedHope, Display, TEXT("Rivals injected (in-memory): Zarya Station active, Meridian Base dormant. The neighbors exist; RH.Trade to see them."));
 	}));

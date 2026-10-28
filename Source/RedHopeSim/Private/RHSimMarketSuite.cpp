@@ -552,7 +552,13 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			const FTwin Off = Run(bAgent, false, false, bAgent ? TEXT("mktmx1_a0") : TEXT("mktmx1_e0"));
 			const int32 OnAt = BytesToMarket(On), OffAt = BytesToMarket(Off);
 			const bool bSame = OnAt > 0 && OnAt == OffAt && FMemory::Memcmp(On.Bytes.GetData(), Off.Bytes.GetData(), OnAt) == 0;
-			const bool bFrameDiffers = bSame && On.Bytes.Num() == Off.Bytes.Num() && FMemory::Memcmp(On.Bytes.GetData() + OnAt, Off.Bytes.GetData() + OnAt, On.Bytes.Num() - OnAt) != 0;
+			// E5 (v56): the market frame is no longer the file's last ('RHE5' follows it), so the compare is bounded to the frame's own bytes.
+			int32 OnFrame = INDEX_NONE, OnPayload = 0, OffFrame = INDEX_NONE, OffPayload = 0;
+			RHSaveFrame::Find(On.Bytes, RHSaveFrame::MarketTag, OnFrame, OnPayload);
+			RHSaveFrame::Find(Off.Bytes, RHSaveFrame::MarketTag, OffFrame, OffPayload);
+			const int32 FrameLen = RHSaveFrame::HeaderBytes + OnPayload + RHSaveFrame::FooterBytes;
+			const bool bFrameDiffers = bSame && On.Bytes.Num() == Off.Bytes.Num() && OnFrame == OnAt && OffFrame == OffAt && OnPayload == OffPayload && OnAt + FrameLen <= On.Bytes.Num()
+				&& FMemory::Memcmp(On.Bytes.GetData() + OnAt, Off.Bytes.GetData() + OnAt, FrameLen) != 0;
 			ExpectSeq({
 			[&]() { return On.Digest == Off.Digest; },
 			[&]() { return On.Digest.Len() > 300; },
@@ -1313,7 +1319,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const int32 ZaryaAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Zarya"); });
 		const int32 MeridianAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Meridian"); });
 		const int64 Reserved0 = Sim->GetCreditReservedMcr(), Bal0 = Sim->GetCreditBalanceMcr();
-		const bool bShape = bParsed && Ver == 55 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
+		const bool bShape = bParsed && Ver == 56 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
 			&& B.Convoys[0].Id == 1 && B.Convoys[0].Rival == TEXT("Zarya") && B.Convoys[0].Cleared == 1 && B.Convoys[0].Lines.Num() == 2 && B.Convoys[0].Lines[0].Filled == 300
 			&& B.Convoys[1].Id == 2 && B.Convoys[1].Rival == TEXT("MxKes") && B.Convoys[1].Cleared == 0 && B.Convoys[1].ClearSol == 1 && B.Convoys[1].Held > 0 && B.Reserved == Reserved0 && B.Convoys[1].Held == Reserved0
 			&& B.Checked == 1 && B.Markets[0].Fill == 1 && IceSlot != INDEX_NONE && B.Markets[0].Price[IceSlot] == Sim->GetMarketPriceMcr(NIce) && ZaryaAt != INDEX_NONE && B.Rivals[ZaryaAt].Store[IceSlot] == Sim->GetRivalStoreG(NZarya, NIce);
@@ -1377,7 +1383,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			ExpectSeq({
 			[&]() { return !bOk; },
 			[&]() { return E.Contains(TEXT("Save format mismatch")); },
-			[&]() { return E.Contains(TEXT("/55")); },
+			[&]() { return E.Contains(TEXT("/56")); },
 			}, FString::Printf(TEXT("MX9 a v54 file is refused (%s)"), *E));
 		}
 		// A lost market block: the frame's tag destroyed.

@@ -8,8 +8,8 @@
 //   Payload  written by its own archive, read by its own reader, which can never run past it
 //   Footer   uint32 PayloadBytes, uint32 Tag
 // A reader looks for its frame where the outer reader stands, then by walking the frames back from the end of the file (each footer names
-// the header before it), so a lost or misaligned block cannot take the others with it. E6's levers block is meant to reuse it ('RHL6',
-// docs/qa/2026-10-24/e6-levers-design.md section 7.3).
+// the header before it), so a lost or misaligned block cannot take the others with it. E5's currency block uses it ('RHE5', v56, written
+// after 'RHE4'); E6's levers block is meant to reuse it ('RHL6', docs/qa/2026-10-24/e6-levers-design.md section 7.3).
 namespace RHSaveFrame
 {
 	constexpr uint32 MakeTag(char A, char B, char C, char D)
@@ -20,6 +20,7 @@ namespace RHSaveFrame
 	constexpr uint32 CreditTag = MakeTag('R', 'H', 'E', '2'); // E2b, Earth credit
 	constexpr uint32 ExportTag = MakeTag('R', 'H', 'E', '3'); // E3, selling to Earth
 	constexpr uint32 MarketTag = MakeTag('R', 'H', 'E', '4'); // E4, the Martian market (v55)
+	constexpr uint32 CurrencyTag = MakeTag('R', 'H', 'E', '5'); // E5, the Martian currency (v56)
 	constexpr int32 HeaderBytes = 12;
 	constexpr int32 FooterBytes = 8;
 

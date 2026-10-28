@@ -2120,6 +2120,14 @@ void ARHPlayerController::Debug_DraftOrder(FName Rival, FName Resource, int32 Kg
 	}
 }
 
+void ARHPlayerController::Debug_DeskDraft(bool bToMarks, int64 Amount)
+{
+	if (Deck.IsValid())
+	{
+		Deck->Debug_SetDeskDraft(bToMarks, Amount);
+	}
+}
+
 void ARHPlayerController::BeginTunnel()
 {
 	CancelModes();

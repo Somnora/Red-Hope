@@ -560,6 +560,12 @@ struct FRHConvoy
 	int64 OwedMcr = 0;
 	int64 ValueMcr = 0;
 	TArray<FRHConvoyLine> Lines;
+	// E5: a bloc member's order settles in marks (decided at booking from its clearing sol). Its reservation and what it carries home are
+	// milli-marks; ReservedMcr and OwedMcr stay 0, so E4's block and its repairs never see it. Not written by E4's block: the 'RHE5' frame
+	// lists every mark convoy by Id with these two amounts.
+	bool bMarks = false;
+	int64 ReservedMmk = 0;
+	int64 OwedMmk = 0;
 	bool IsPriced() const { return ClearSol >= 0; }
 };
 
@@ -576,6 +582,63 @@ struct FRHMarketClearing
 	int64 ValueMcr = 0;
 	int64 ReleasedMcr = 0;         // the reservation given back
 	TArray<FRHConvoyLine> Lines;
+	// E5: the currency the order settled in - 0 credits (E4's order), 1 marks (a bloc member's: NetMcr, PaidMcr, WrittenOffMcr and ReleasedMcr
+	// are milli-marks), 2 credits converted at RateMcr (NetMcr and ValueMcr are in the market's unit, marks; PaidMcr, WrittenOffMcr and
+	// ReleasedMcr are milli-credits) - and SettledMcr, what it settled for in its own currency: the charge (> 0) or what the rival owes (< 0).
+	uint8 Currency = 0;
+	int64 RateMcr = 0;
+	int64 SettledMcr = 0;
+};
+
+// E5, the Martian currency (docs/qa/2026-10-24/e5-martian-currency-design.md: DIRECTOR ANSWER Q-A (a), Q-B (a), Q-C (a) > the queue's
+// orchestrator rulings and cross-check > the E5 build brief > PROFESSOR RE-REVIEW conditions 1-7 > REVISION R1-R7 > review > design).
+// One entry of the political journal: what one act does to the sol-close record of the politics, keyed by the act's OWN ExecuteAt (never the
+// step that ran it), so the record is identical in both bands. ClearSol = floor(ExecuteAt / sol length); the journal is kept in (ExecuteAt,
+// CommandId, Sub) order and an entry is applied at the roll that closes its ClearSol, then removed. Kind is URHSimWorldSubsystem::ERHPoliticalAct.
+struct FRHPoliticalEntry
+{
+	int32 ClearSol = 0;
+	double ExecuteAt = 0.0;
+	int32 CommandId = 0;
+	int32 Sub = 0;                 // 0, or 1 for the second half of one order (DefyIssue's issue, a Comply's withdrawal)
+	uint8 Kind = 0;
+	bool bHasIdentity = false;     // a Defy or a Comply sets the identity record to the live value after the act
+	int64 IdentityMilli = 0;
+	int64 TensionDeltaMilli = 0;   // the nominal delta: a Defy -12000, a Comply -45000, a Pacify -20000, the issue +10000 (the config x 1000)
+};
+
+// A rival in the colony's bloc: its orders clearing in MemberFromSol or later settle in marks. Kept sorted by name string (case-sensitive
+// ordinal), never by FName index. A member leaves only when the bloc dissolves at the withdrawal.
+struct FRHBlocMember
+{
+	FName Rival;
+	int32 MemberFromSol = 0;
+};
+
+// What one desk clearing did: a transient record (tests and the deck read it; never saved), newest last, at most 64 kept. Amount and Paid are
+// milli-units of the source currency, Payout of the other; RateMcr is the rate it cleared at.
+struct FRHDeskClearing
+{
+	int32 Id = 0;
+	uint8 Dir = 0;
+	int64 Amount = 0;
+	int64 Paid = 0;
+	int64 Payout = 0;
+	int64 RateMcr = 0;
+	int32 ClearSol = 0;
+	int32 ClosingSol = 0;
+};
+
+// One order at the bloc's exchange desk (the Exchange verb). Id is its uplink CommandId; Dir is URHSimWorldSubsystem::ERHDeskDir; Amount is
+// the milli-units of the source currency (credits for ToMarks, marks for ToCredits), reserved in the source purse until the roll that closes
+// ClearSol (the sol it was booked to clear in) converts it at the rate in force, less the spread. A cleared order is removed at once.
+struct FRHDeskOrder
+{
+	int32 Id = 0;
+	uint8 Dir = 0;
+	int64 Amount = 0;
+	int32 ClearSol = 0;
+	bool bCleared = false;
 };
 
 UCLASS()
@@ -1565,7 +1628,7 @@ public:
 	// and a pull back to the Earth value - never E1's ledger - so normal play and fast-forward price identically. Convoys carry orders;
 	// an order is booked and its convoy leaves at once, and the market clears it at the end of the sol its ExecuteAt falls in. Nothing
 	// outside the market reads a price or a rival store (ruling 11, Q4a): the sim itself does not respond to a price. Greed stays barter.
-	// SAVED (v55): a market block in its own frame ('RHE4'), the last frame in the file.
+	// SAVED (v55): a market block in its own frame ('RHE4'); E5's 'RHE5' follows it (v56).
 	static constexpr int32 MarketRing = 8;           // completed sols of the colony's sold / bought tally (grams)
 	enum class ERHRivalTrade : uint8 { NoEconomy, LotsOutsideCap, Malformed, Economy }; // how a rival row trades (GetRivalTradeKind)
 	bool IsMarketLive() const;                       // bMarketEnabled and at least one rival with an economy
@@ -1582,15 +1645,18 @@ public:
 	int32 GetRivalEconomyCount() const;                                            // rivals with an economy, by name
 	FName GetRivalEconomyName(int32 Index) const;                                  // by name string (case-sensitive ordinal)
 	int32 GetMarketBlockBytes() const;               // the bytes the market block's payload takes in a save, measured on the SYNCED state (re-sync is lazy)
-	// Money. Balance == Awarded - Spent; 0 <= SalesPaid + MarketSales <= Awarded; Reserved == the sum of the uncleared convoys' reservations
-	// and 0 <= Reserved <= Balance. Spendable = Balance - Reserved: the manifest (CanAddManifestItem), the launch (CanLaunchShip) and the short
-	// launch (LaunchShipShort) all read it, and CreditSpend is the ONLY debit writer.
+	// Money. Balance == Awarded - Spent; 0 <= SalesPaid + MarketSales (+ E5's DeskCredit + CurrencyRedeemed) <= Awarded; Reserved == the sum of
+	// the uncleared credit convoys' reservations (+ E5's pending ToMarks desk amounts) and 0 <= Reserved <= Balance. Spendable = Balance -
+	// Reserved: the manifest (CanAddManifestItem), the launch (CanLaunchShip) and the short launch (LaunchShipShort) all read it, and
+	// CreditSpend is the ONLY debit writer.
 	int64 GetCreditReservedMcr() const { return CreditReservedMcr; }
 	int64 GetSpendableMcr() const { return CreditBalanceMcr - CreditReservedMcr; }
 	int64 GetMarketSalesMcr() const { return MarketSalesMcr; }
 	// One rule for the verb, the deck and the cheat: may this written order be booked now? Text is "Res:kg;Res:kg" (positive buys, negative
 	// sells). OutReserveMcr, when given, is the order's reservation (what it may cost net, one full price step either way).
-	bool CanPlaceOrder(FName Rival, const FString& Text, FString& OutWhy, int64* OutReserveMcr = nullptr) const;
+	// E5: the preview reads the order's currency from the sol an order sent now would clear in (GetBookingSolNow); OutCurrency, when given, is
+	// GetOrderCurrencyFor's answer, and OutReserveMcr is then milli-marks for a mark order (1).
+	bool CanPlaceOrder(FName Rival, const FString& Text, FString& OutWhy, int64* OutReserveMcr = nullptr, uint8* OutCurrency = nullptr) const;
 	bool CanPlaceStandingOrder(FName Rival, FString& OutWhy) const; // the bare Convoy verb: every refusal it would give now
 	// A strict parse of an order's lines, refusing by name a sign, a zero, a fraction, a duplicate or a resource both bought and sold;
 	// the lines come back sorted by resource name. An unknown resource is refused too.
@@ -1619,6 +1685,84 @@ public:
 	void Debug_SetDefected(FName Rival) { DefectedRivals.Add(Rival); }
 	void Debug_SetSabotage(FName Rival, double Sols) { SabotageSols.Add(Rival, Sols); }
 	void Debug_ClearPolitics() { ClosedRoutes.Reset(); EmbargoGrace.Reset(); DefectedRivals.Reset(); SabotageSols.Reset(); }
+
+	// --- E5, the Martian currency (docs/qa/2026-10-24/e5-martian-currency-design.md; RHSimCurrency.cpp) ---
+	// The colony can issue a Martian currency (placeholder name: the mark) as a political act: an uplink order, Currency Issue (the identity
+	// leans Martian: at least CurrencyIssueIdentity), or Solidarity DefyIssue (a Defy, then the issue, at any identity). Earth reacts at the act:
+	// tension +CurrencyIssueTension and the requisition multiplier -CurrencyRequisitionPenalty while the mark exists (bCurrencyIssued). The
+	// market issues it at the roll that closes the act's sol s (CurrencyIssueSol = s) and counts in marks from CurrencyOpenSol = s + 2; rivals
+	// join the bloc when the RECORD of the identity reaches their BlocStance (members' orders clear in marks, the others' in credits converted at
+	// the rate); the rate (milli-credits per mark) steps once a sol, at most CurrencyMaxStepBp, from the bloc trade balance, the record of the
+	// identity and of Earth tension, and a pull back to the start. The record is a sol-close account of the politics kept from sol 0 by a
+	// journal keyed by each act's ExecuteAt, so the rate never reads the live axes and is identical in both bands. A Comply withdraws the mark:
+	// the market closes, then at the first roll with no order uncleared every mark is redeemed at the rate in force (no spread, no cap: Q-B a,
+	// the loophole accepted) and every price is re-expressed in credits. Integer money only. Nothing here reads or writes Hope, the population,
+	// growth or Influence. SAVED (v56): the 'RHE5' frame, written after 'RHE4'.
+	enum class ERHPoliticalAct : uint8 { Defy, Comply, Pacify, Issue, Withdraw };
+	enum class ERHDeskDir : uint8 { ToMarks, ToCredits };
+	// Why E4's block started the market at its start values at the last load (cross-check item 3; E8 words its own drop from it).
+	enum class ERHMarketBlockLoss : uint8 { None, Lost, Malformed, SlotsReset, RegionsRepeated };
+	// One rule for the verb, the deck and the cheat. bDefyIssue: the third answer (the demand is the worker's own first check).
+	bool CanIssueCurrency(bool bDefyIssue, FString& OutWhy) const;
+	// The desk (Q-C a). Amount is whole units of the source currency; EffSol is the sol the order clears in (GetBookingSolNow for a preview).
+	bool CanExchange(ERHDeskDir Dir, int64 Amount, int32 EffSol, FString& OutWhy) const;
+	// The clearing sol an order sent now would get: floor((now + the order lag) / sol), at least the open sol (the deck's and the cheats' preview).
+	int32 GetBookingSolNow() const;
+	// What an order to Rival clearing in EffSol settles in: 0 credits (E4's order), 1 marks (a member from that sol), 2 credits converted.
+	uint8 GetOrderCurrencyFor(FName Rival, int32 EffSol) const;
+	bool IsCurrencyIssued() const { return bCurrencyIssued; }         // Earth's view: from the issue act's execution until a Comply
+	bool IsCurrencyWithdrawPending() const { return bWithdrawPending; }
+	int32 GetCurrencyIssueSol() const { return CurrencyIssueSol; }    // the market's: -1 = none
+	int32 GetCurrencyOpenSol() const { return CurrencyOpenSol; }
+	bool IsMarketInMarks() const { return CurrencyIssueSol >= 0 && MarketCheckedSol >= CurrencyOpenSol; } // the open sol's orders count in marks
+	int64 GetRate() const { return RateMcr; }                        // milli-credits per mark, the rate in force during the open sol
+	int64 GetLastRateStepMcr() const { return LastRateStepMcr; }     // the last roll's step (transient: 0 after a load, the issue or a withdrawal)
+	// What GetLastRateStepMcr means (transient): 0 no close seen since the world started or the colony loaded (the step is unknown, not 0),
+	// 1 the issue set the rate at the last close (no step yet), 2 the last close stepped the rate by GetLastRateStepMcr (0 = unchanged).
+	uint8 GetRateStepNote() const { return RateStepNote; }
+	double GetCurrencyIssueIdentity() const { return CurrencyIssueIdentity; } // the stand-alone issue's threshold (the deck's tooltip)
+	double GetCurrencyIssueTension() const { return CurrencyIssueTension; }   // the tension the issue adds
+	// The rate's inputs at the close of the last sol, from the record and the bloc tally (never the live axes): what the last step read.
+	bool GetRateInputsBp(int32& OutTrade, int32& OutIdent, int32& OutTension) const;
+	int64 GetIdentityView() const { return IdentityViewMilli; }      // the sol-close record, x 1000
+	int64 GetTensionView() const { return TensionViewMilli; }
+	const TArray<FRHPoliticalEntry>& GetPoliticalJournal() const { return Journal; }
+	void GetBlocMembers(TArray<TPair<FName, int32>>& Out) const;     // (rival, MemberFromSol) by name string
+	int32 GetBlocMemberFromSol(FName Rival) const;                   // -1 when not a member
+	bool GetBlocTally(int32 Back, int64& OutSoldMmk, int64& OutBoughtMmk) const; // Back 1 = the sol just closed
+	// The purses. Credits are E2's; marks are new: Balance == Earned - Spent, 0 <= Reserved <= Balance, MarkPay / MarkSpend the only writers.
+	int64 GetMarkBalance() const { return MarkBalanceMmk; }
+	int64 GetMarkEarnedMmk() const { return MarkEarnedMmk; }
+	int64 GetMarkSpentMmk() const { return MarkSpentMmk; }
+	int64 GetMarkReservedMmk() const { return MarkReservedMmk; }
+	int64 GetSpendableMmk() const { return MarkBalanceMmk - MarkReservedMmk; }
+	int64 GetDeskCreditMcr() const { return DeskCreditMcr; }         // lifetime credit the desk paid in (a part of CreditAwardedMcr)
+	int64 GetCurrencyRedeemedMcr() const { return CurrencyRedeemedMcr; } // lifetime credit the withdrawals paid in (a part of CreditAwardedMcr)
+	bool GetDeskBooked(int32 Sol, int64& OutToMarks, int64& OutToCredits) const; // whole units booked to clear in Sol, each way
+	void GetDeskOrders(TArray<FRHDeskOrder>& Out) const { Out = DeskOrders; }
+	bool GetMarkOrder(int32 ConvoyId, int64& OutReservedMmk, int64& OutOwedMmk) const; // false for a credit convoy
+	// A converted credit order's reservation (2.4): one full price step and one full rate step each way, rounded against the colony.
+	int64 GetConvertedReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, int64 Rate) const;
+	int64 GetDeskSpreadBp() const { return DeskSpreadBp; }
+	int64 GetDeskCapPerSol() const { return DeskCapPerSol; }
+	int32 GetCurrencyBlockBytes() const;             // the 'RHE5' payload's bytes for the live state (sized by history: never a constant)
+	ERHMarketBlockLoss GetMarketBlockLoss() const { return MarketBlockLoss; }
+	bool IsMarketBlockLost() const { return bMarketBlockLost; }      // transient: the last load started E4's market at its start values
+	bool IsCurrencyBlockLost() const { return bCurrencyBlockLost; }  // transient: the last load could not use the 'RHE5' frame
+	const TArray<FRHDeskClearing>& GetDeskClearings() const { return DeskClearings; }
+	// The 16 config rows as the sim holds them (after their clamps), and the clamp each is read through (CU0).
+	void GetCurrencyConfig(TArray<TPair<FName, double>>& Out) const;
+	static double CurrencyConfigClamp(FName Row, double Raw);
+	// Harness hooks (runtime only, never saved). Off turns off ALL of E5: the record, the journal, the bloc, the rate and both issue acts.
+	void Debug_SetCurrencyEnabled(bool bOn) { bCurrencyEnabled = bOn; }
+	void Debug_SyncPoliticalView();                  // the record := the live identity and tension, x 1000, rounded
+	void Debug_SetRate(int64 Mcr);                   // clamped into the band
+	void Debug_SetBlocTally(int64 SoldMmkPerSol, int64 BoughtMmkPerSol); // every ring entry, and the fill
+	void Debug_GrantMarks(int64 Mmk) { MarkPay(Mmk); }
+	void Debug_StepRate() { StepRate(); }           // one rate step from the live state of the record and the tally (CU2)
+	void Debug_DiscoverRival(FName Rival) { DiscoveredRivals.Add(Rival); } // as a survey would (CU9's discovered member)
+	int32 GetNextCommandId() const { return NextCommandId; }
+	void Debug_SetNextCommandId(int32 Id) { NextCommandId = Id; } // CU10: a fresh process's counter, before a load
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -1782,8 +1926,10 @@ public:
 	// relations + colonist morale rise, but Earth's requisitions stay slashed by
 	// your Martian axis and tension barely drops, so the next demand comes
 	// sooner). ALL player-facing wording is Gate-D framing-review placeholder.
-	// Returns false (with reason) if no demand is pending.
-	bool ResolveDilemma(bool bComply, FString& OutReason);
+	// Returns false (with reason) if no demand is pending. E5: the uplink order that answers is passed in (its ExecuteAt and CommandId key the
+	// political journal; E6 reads its clearing sol too), and a Comply while the mark exists withdraws it. bIssuing (DefyIssue's Defy half):
+	// the Defy's alert carries the issue's news too, so the act shows one banner (the banner keeps only the last alert).
+	bool ResolveDilemma(const FRHCommand& Cmd, bool bComply, FString& OutReason, bool bIssuing = false);
 	bool IsRouteClosed(FName Rival) const { return ClosedRoutes.Contains(Rival); }
 	int32 GetClosedRouteCount() const { return ClosedRoutes.Num(); }
 	// The lasting morale swing from recent choices (fades toward 0); folds into
@@ -1840,8 +1986,8 @@ public:
 	// The rival currently embargoing you (None if none) - the deck's "who to pacify".
 	FName GetEmbargoingRival() const;
 	// Pacify an embargoing rival (the uplink verb's worker): spend Influence, the
-	// colony ignores Earth. Returns false (with reason) on cost/target failure.
-	bool ResolvePacify(FName Rival, FString& OutReason);
+	// colony ignores Earth. Returns false (with reason) on cost/target failure. E5: the order is passed in for the political journal.
+	bool ResolvePacify(const FRHCommand& Cmd, FName Rival, FString& OutReason);
 
 	// --- Dynamic crises + the endings framework (M4 Gate D, the finale) ---
 	// Once the late game is live, crises fire on a cadence; WHICH one is gated by
@@ -3864,7 +4010,7 @@ private:
 	mutable TArray<FRHMarket> Markets;
 	mutable uint32 SyncedRivalsGeneration = MAX_uint32; // MAX = never synced
 	int32 MarketCheckedSol = 0;                      // the open sol; seeded from ProductionCheckedSol like EconCheckedSol
-	int64 CreditReservedMcr = 0;                     // == the sum of the uncleared convoys' ReservedMcr
+	int64 CreditReservedMcr = 0;                     // == the sum of the uncleared convoys' ReservedMcr (+ E5: the pending ToMarks desk amounts)
 	int64 MarketSalesMcr = 0;                        // lifetime credit a convoy brought home from market sales (a part of CreditAwardedMcr)
 	TArray<FRHMarketClearing> MarketClearings;       // transient
 	bool bMarketEnabled = true;                      // runtime only: the inert twin's switch
@@ -3900,11 +4046,82 @@ private:
 		TMap<FName, double> Cost;                    // the aggregate draw: fuel + wear + every sell line, summed per resource
 		TMap<FName, double> Sells;                   // for E1's Out leg (priced) or the barter lot
 		int64 ReserveMcr = 0;
+		// E5, decided from the order's clearing sol: a bloc member's order settles in marks (ReserveMmk, ReserveMcr 0); after the market's
+		// issue any other priced order is a credit order converted at the rate (ReserveMcr carries the rate margin).
+		bool bMarks = false;
+		bool bConverted = false;
+		int64 ReserveMmk = 0;
 	};
-	bool PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, FRHBookPlan& OutPlan, FString& OutWhy) const;
+	// EffSol (E5) is the sol the order clears in: max(floor(ExecuteAt / sol), MarketCheckedSol) for a booking, GetBookingSolNow() for a preview.
+	bool PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, int32 EffSol, FRHBookPlan& OutPlan, FString& OutWhy) const;
 	bool BookConvoy(const FRHCommand& Cmd, bool bStanding, FString& OutWhy);
 	void StepConvoyReturn(const FRHConvoy& Done);
 	int32 FindConvoyIndexFor(FName Rival) const;
+	// E5, the Martian currency: its state (SAVED in the 'RHE5' frame, v56, unless marked transient).
+	bool bCurrencyIssued = false;                    // Earth's view: true from the issue act's execution until a Comply
+	int32 CurrencyIssueSol = -1;                     // the market's issue: the sol whose roll applied the issue (-1 none)
+	int32 CurrencyOpenSol = -1;                      // CurrencyIssueSol + 2: orders clearing in it or later count in marks (-1 none)
+	bool bWithdrawPending = false;                   // a Comply withdrew the mark; the market is closed until the withdrawal roll
+	int32 WithdrawClearSol = -1;                     // the Comply's sol: the withdrawal runs at the first roll at or after it with nothing uncleared
+	int64 RateMcr = 1000;                            // milli-credits per mark, the rate in force during the open sol
+	int64 IdentityViewMilli = 0;                     // the record of the identity axis x 1000, as of the last sol closed
+	int64 TensionViewMilli = 0;                      // the record of Earth tension x 1000, 0..100000
+	TArray<FRHPoliticalEntry> Journal;               // the acts not yet applied, in (ExecuteAt, CommandId, Sub) order
+	static constexpr int32 BlocRing = 8;
+	int64 BlocSoldMmk[BlocRing] = {};                // the value of the colony's filled sells to the bloc (bMarks orders only), per completed sol
+	int64 BlocBoughtMmk[BlocRing] = {};
+	int32 BlocFill = 0, BlocHead = 0;
+	int64 MarkBalanceMmk = 0, MarkEarnedMmk = 0, MarkSpentMmk = 0, MarkReservedMmk = 0;
+	int64 DeskCreditMcr = 0;                         // lifetime credit the desk paid in
+	int64 CurrencyRedeemedMcr = 0;                   // lifetime credit the withdrawals paid in
+	TArray<FRHBlocMember> BlocMembers;               // by name string
+	TArray<FRHDeskOrder> DeskOrders;                 // pending, by Id
+	TArray<FRHDeskClearing> DeskClearings;           // transient
+	bool bCurrencyEnabled = true;                    // transient: the harness switch (Debug_SetCurrencyEnabled)
+	int64 LastRateStepMcr = 0;                       // transient: the last step, for the deck's sign
+	uint8 RateStepNote = 0;                          // transient: what LastRateStepMcr means (GetRateStepNote)
+	// Transient, set by ReadMarketBlock for ReadCurrencyBlock and ReconcileReservations (and E8): why the market block started at its start
+	// values, what it said about the lifetime sales and the reservation, and the Id of every convoy it held (loaded or dropped).
+	ERHMarketBlockLoss MarketBlockLoss = ERHMarketBlockLoss::None;
+	bool bMarketBlockLost = false;
+	bool bCurrencyBlockLost = false;
+	bool bMarketParsed = true;
+	int64 ReadMarketSalesMcr = 0, ReadMarketReservedMcr = 0;
+	TSet<int32> ReadMarketConvoyIds;
+	bool bCurrencyParsed = false;                    // transient: the 'RHE5' frame was read and applied at the last load
+	int64 ReadCurrencyReservedMmk = 0;               // transient: what it said the reserved marks were
+	// Config (the C++ fallbacks equal RH_Config.csv; each is clamped to its sane range on read).
+	double CurrencyIssueIdentity = 20.0, CurrencyIssueTension = 10.0, CurrencyRequisitionPenalty = 0.10;
+	int64 CurrencyRateStartMcr = 1000;
+	int32 CurrencyWindowSols = 5;
+	int64 CurrencyMinVolumeMmk = 5000000;
+	int32 CurrencyTradeWeight = 40, CurrencyIdentityWeight = 30, CurrencyTensionWeight = 30, CurrencyAnchorWeight = 50, CurrencyGainPct = 20;
+	int32 CurrencyMaxStepBp = 200, CurrencyFloorBp = 2500, CurrencyCeilBp = 40000;
+	int64 DeskSpreadBp = 300, DeskCapPerSol = 500;
+	void InitCurrency();                             // config, then a fresh, unissued state with the record seeded from the live axes (world start)
+	void ResetCurrencyState();                       // the saved state to its start values, the record seeded from the live axes
+	int64 MarkSpend(int64 Mmk);                      // the only mark debit writer: pays min(Mmk, Balance), returns the rest
+	void MarkPay(int64 Mmk);                         // the only mark income writer
+	int64 RateFloorMcr() const;
+	int64 RateCeilMcr() const;
+	bool IsConvertingAt(int32 Sol) const { return CurrencyIssueSol >= 0 && CurrencyOpenSol <= Sol; }
+	int64 ConvertChargeMcr(int64 NetMmk, int64 Rate) const;  // ceil(Net x r / 1000): a charge rounds against the colony
+	int64 ConvertOwedMcr(int64 NetMmk, int64 Rate) const;    // floor(Net x r / 1000): a payment rounds against the colony
+	void AppendJournal(const FRHCommand& Cmd, int32 Sub, ERHPoliticalAct Kind, bool bHasIdentity, int64 IdentityMilli, int64 TensionDeltaMilli);
+	void JournalDilemma(const FRHCommand& Cmd, bool bComply); // ResolveDilemma's act: the Defy or Comply entry, and a Comply's withdrawal
+	void IssueCurrency(const FRHCommand& Cmd, int32 Sub, bool bAlert); // the act's live half: tension, the flag, the alert (bAlert), the journal
+	static FString CurrencyIssueAlert(bool bAfterDefy); // the issue's alert, or the clause the Defy's alert carries for DefyIssue
+	bool BookExchange(const FRHCommand& Cmd, FString& OutWhy);
+	void ClearDeskOrders(int32 ClosingSol, int32 DueUpToSol);
+	void StepCurrencyPass(int32 ClosingSol, int32 LastClosedSol); // RollMarket's E5 steps for one pass: record, transitions, admissions, rate
+	bool StepPoliticalRecord(int32 ClosingSol, int32 LastClosedSol); // true when an Issue entry was applied
+	bool IsWithdrawalDue(int32 SolClosed) const;
+	void RunWithdrawal(int32 SolClosed);
+	void AdmitBlocMembers(int32 SolClosed);
+	void StepRate();
+	void WriteCurrencyBlock(FArchive& Ar) const;
+	void ReadCurrencyBlock(FArchive& Ar, const TArray<uint8>& File);
+	void ReconcileReservations();                    // after the currency block: both purses' reservations, the lifetime totals, the flags
 	void WriteLedgerBlock(FArchive& Ar) const;
 	void ReadLedgerBlock(FArchive& Ar, const TArray<uint8>& File); // never refuses: a bad block resets the ledger with a Warning (R1); v54: its own frame in File
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home

@@ -831,10 +831,15 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				.Padding(FMargin(16.f, 7.f))
 				.Visibility(this, &SRHCommandDeck::GetAlertVisibility)
 				[
+					// E5 review: an alert longer than the gap left of the right column wraps onto more lines, centred, instead of running under
+					// the column and off both edges (the DefyIssue alert is Gate D's D44 and the issue's clause, about 270 characters). A shorter
+					// alert is one line, as before.
 					SNew(STextBlock)
 					.Text(this, &SRHCommandDeck::GetAlertText)
 					.Font(RHDeck::Label(12))
 					.ColorAndOpacity(FLinearColor(1.f, 0.9f, 0.55f))
+					.WrapTextAt_Lambda([this]() { return GetAlertWrapAt(); })
+					.Justification(ETextJustify::Center)
 				]
 			]
 			// Reward toast (alive pass): a quiet one-line cheer under the banners.
@@ -1314,6 +1319,13 @@ EVisibility SRHCommandDeck::GetAlertVisibility() const
 	return GetAlertText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
+float SRHCommandDeck::GetAlertWrapAt() const
+{
+	// The alert's pill is centred; it must end before the right column (RightColumnPx wide, 10 from the edge) with a 24-unit gap, and its own
+	// padding is 16 a side. In local units, so it holds at any window size or DPI scale. 0 (no wrap) until the first tick has a width.
+	return DeckLocalWidth > 0.f ? FMath::Max(360.f, DeckLocalWidth - 2.f * (RightColumnPx + 10.f + 24.f) - 32.f) : 0.f;
+}
+
 void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	// Tutorial beats (alive pass): plain-language basics on a fresh session,
@@ -1342,6 +1354,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	}
 
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+	DeckLocalWidth = AllottedGeometry.GetLocalSize().X; // the alert banner's wrap width reads it
 	RefreshUplinkPanel();
 	RefreshFleetPanel();
 	RefreshRosterPanel();
