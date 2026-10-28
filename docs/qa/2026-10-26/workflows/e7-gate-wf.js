@@ -168,6 +168,7 @@ for (let round = 0; round < 4; round++) {
   const blocking = reviews.flatMap(r => r.findings.filter(f => f.severity === 'blocking').map(f => ({ lens: r.lens, ...f })))
   history.push({ round, reviews: reviews.map(r => ({ lens: r.lens, verdict: r.verdict, findings: r.findings.map(f => f.severity + ': ' + f.title) })) })
   log(`round ${round}: ${blocking.length} blocking`)
+  if (reviews.length < LENSES.length) { const missing = LENSES.map(l => l.key).filter(k => !reviews.some(r => r.lens === k)); log(`round ${round}: reviewer(s) returned nothing: ${missing.join(', ')}; NOT cleared`); return { final: report, history, cleared: false, reviewersFailed: missing, failedRound: round } }
   if (blocking.length === 0) { return { final: report, history, cleared: true, lastReviews: reviews } }
   if (round === 3) { return { final: report, history, cleared: false, unresolved: blocking } }
   phase('Fix')
