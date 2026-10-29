@@ -2084,3 +2084,7 @@ Existing suites updated: the version checks (56 to 57: `Ver == 57`, `"/57"` and 
 - Balance numbers (the relation gate, the costs, the cargo cap, the 25% for 30 sols, the 6-sol cut, the 9,000 bp ceiling) are chosen for legible arithmetic, not tuned play: awaiting the director.
 - The new wording is placeholder (`docs/qa/2026-10-15/gate-d-wording.md`, Z1-Z11 under "Rows added by E6"); "pact" is itself a placeholder. None of it is morale, sickness or evacuation wording, nothing in E6 reads or writes Hope, the population or growth (LV10), and nothing is combat.
 - Not committed: the orchestrator commits.
+
+### T1 (the colony record): the director's answer (2026-10-28)
+
+From `docs/qa/2026-10-28/t1-colony-design.md` (its DIRECTOR QUESTION; review in `t1-review-r1.md`): **(a) one gate, no save change.** T1 moves each colony's state into its own record (`FRHColony`) so a second settlement can exist later; nothing changes on screen. The save format and version stay as they are, so current saves and both checkpoints keep loading. The plan's "list of one colony" in the save moves to T4. Every battery line stays identical apart from wall-clock timing, plus a new `colony.log`, and every captured save stays byte-identical. Not built yet: T1 follows E8 and the idle robots, after a refresh of the design at E8's HEAD.
