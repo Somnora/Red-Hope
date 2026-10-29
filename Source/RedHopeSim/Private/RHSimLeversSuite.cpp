@@ -1700,7 +1700,7 @@ int32 RHRunLeversSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		RHSaveFrame::Find(W, RHSaveFrame::LedgerTag, LedgerAt, LedgerBytes);
 		TSet<uint8> Kinds;
 		for (const FLevSuiteBlock::FRule& R : B.Rules) { Kinds.Add(R.Kind); }
-		const bool bShape = bParsed && Ver == 57 && B.FormatRev == 1 && CurAt != INDEX_NONE && CurAt + RHSaveFrame::HeaderBytes + CurBytes + RHSaveFrame::FooterBytes == B.FrameAt
+		const bool bShape = bParsed && Ver == 58 && B.FormatRev == 1 && CurAt != INDEX_NONE && CurAt + RHSaveFrame::HeaderBytes + CurBytes + RHSaveFrame::FooterBytes == B.FrameAt
 			&& B.PayloadBytes == Sim->GetLeversBlockBytes() && Kinds.Num() == 6 && B.Effects.Num() == 3 && B.Terms.Num() == 1 && B.Terms[0].ConvoyId == LvDConvoy && B.Terms[0].Markups == TArray<int32>({ 1500 })
 			&& B.Rules.ContainsByPredicate([](const FLevSuiteBlock::FRule& R) { return R.Kind == 6 && R.Res == TEXT("Ice"); })
 			&& B.Rules.ContainsByPredicate([](const FLevSuiteBlock::FRule& R) { return R.Kind == 6 && R.Res == TEXT("*") && R.Party == TEXT("LvC") && R.Dir == 3 && R.Markup == 700; })
@@ -2017,7 +2017,7 @@ int32 RHRunLeversSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			FMemory::Memcpy(T.GetData() + 4, &V56, 4);
 			FString E;
 			const bool bOk = TryBytes(TEXT("lv9v"), T, E);
-			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/57")), FString::Printf(TEXT("LV9 the previous version is refused (%s)"), *E));
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/58")), FString::Printf(TEXT("LV9 the previous version is refused (%s)"), *E));
 		}
 		RetireAll();
 	}

@@ -6,6 +6,8 @@
 #include "RHAgentFragments.h"
 #include "RHRobotMovement.h"
 #include "Algo/Reverse.h"
+#include "RHSaveFrame.h"
+#include "Serialization/MemoryReader.h"
 
 // D4 (going deep, gate 4): transit - lifts, capacity and robots below (docs/qa/2026-10-21/d4-transit-design.md, the
 // REVISION and the director's answers Q-A (a), Q-B (a)). The gate is the colony's first fitted lift car: with none, every
@@ -252,6 +254,126 @@ int32 URHSimWorldSubsystem::ComputeTransitWaitSec(int64 Load, int64 Cap) const
 	return (int32)FMath::Min<int64>(Wait, (int64)MaxWaitSec);
 }
 
+// --- D6e: lift and tram power (the short-ms rings, the served share, the served capacity) ---
+
+namespace
+{
+	constexpr int32 TransitShortMsCap = 1200000; // one sol of ms: a slot never holds more (SP3)
+
+	// A ring's ms for SolPrev: 0 before sol 0 (C++'s -1 % 2 is -1, never a slot) and when the slot holds another sol.
+	int32 TransitShortMsOf(const int32 (&Sol)[2], const int32 (&Ms)[2], int32 SolPrev)
+	{
+		if (SolPrev < 0)
+		{
+			return 0;
+		}
+		const int32 Slot = SolPrev % 2;
+		return Sol[Slot] == SolPrev ? Ms[Slot] : 0;
+	}
+
+	// A lift's served capacity: the hoist's at Served 0, the cars' at 1000, in int64. At 1000 this is Nominal exactly.
+	int64 TransitServedLiftPlaces(int64 Hoist, int64 Nominal, int32 Served)
+	{
+		return Hoist + (Nominal - Hoist) * (int64)Served / 1000;
+	}
+}
+
+void URHSimWorldSubsystem::NoteTransitShortMs(uint8 Kind, int32 Index, float SubDt, double StepEndS)
+{
+	// The ChargeTransit pattern on a 2-slot ring: a slot holding an older sol is reset first; one holding a later sol is a write two sols late.
+	int32* Sol = nullptr;
+	int32* Ms = nullptr;
+	if (Kind == 2 && TransitLedgers.IsValidIndex(Index))
+	{
+		Sol = TransitLedgers[Index].ShortSol;
+		Ms = TransitLedgers[Index].ShortMs;
+	}
+	else if (Kind == 3)
+	{
+		for (FRHTramLine& Line : TramLines)
+		{
+			if (Line.Id == Index)
+			{
+				Sol = Line.ShortSol;
+				Ms = Line.ShortMs;
+				break;
+			}
+		}
+	}
+	const int32 StepSol = TransitSolOf(StepEndS);
+	if (!Sol || StepSol < 0)
+	{
+		return;
+	}
+	const int32 Slot = StepSol % 2;
+	if (Sol[Slot] < StepSol)
+	{
+		Sol[Slot] = StepSol;
+		Ms[Slot] = 0;
+	}
+	if (Sol[Slot] != StepSol)
+	{
+		// No writer can stamp one (the stamp is the step's end, sim time); say so.
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Transit power: a short step of %s %d stamped sol %d found its slot holding sol %d - dropped"),
+			Kind == 2 ? TEXT("shaft") : TEXT("tram line"), Index, StepSol, Sol[Slot]);
+		return;
+	}
+	Ms[Slot] = (int32)FMath::Min<int64>((int64)Ms[Slot] + FMath::RoundToInt64((double)SubDt * 1000.0), (int64)TransitShortMsCap);
+}
+
+int32 URHSimWorldSubsystem::ServedPermilleAt(uint8 Kind, int32 Index, int32 SolPrev) const
+{
+	int32 ShortMs = 0;
+	if (Kind == 2 && TransitLedgers.IsValidIndex(Index))
+	{
+		ShortMs = TransitShortMsOf(TransitLedgers[Index].ShortSol, TransitLedgers[Index].ShortMs, SolPrev);
+	}
+	else if (Kind == 3)
+	{
+		if (const FRHTramLine* Line = FindTramLine(Index))
+		{
+			ShortMs = TransitShortMsOf(Line->ShortSol, Line->ShortMs, SolPrev);
+		}
+	}
+	return 1000 - FMath::Min(1000, ShortMs / 1200);
+}
+
+int32 URHSimWorldSubsystem::GetShaftServedPermille(int32 ShaftId) const
+{
+	return GetLiftCars(ShaftId) > 0 ? ServedPermilleAt(2, ShaftId, TransitCheckedSol - 1) : 1000;
+}
+
+int64 URHSimWorldSubsystem::GetShaftServedCapacityPlaces(int32 ShaftId) const
+{
+	const int32 Cars = GetLiftCars(ShaftId);
+	if (Cars <= 0)
+	{
+		return GetShaftCapacityPlaces(ShaftId); // the hoist (0 for a shaft that does not exist)
+	}
+	return TransitServedLiftPlaces((int64)HoistPlacesPerSol, GetShaftCapacityPlaces(ShaftId), GetShaftServedPermille(ShaftId));
+}
+
+int32 URHSimWorldSubsystem::GetTramServedPermille(int32 LineId) const
+{
+	return FindTramLine(LineId) ? ServedPermilleAt(3, LineId, TransitCheckedSol - 1) : 1000;
+}
+
+int64 URHSimWorldSubsystem::GetTramServedCapacityPlaces(int32 LineId) const
+{
+	// SP1: at least 1 place, so a dark sol never reads as an empty line (ComputeTransitWaitSec returns 0 for a capacity of 0).
+	return FMath::Max<int64>(1, (int64)TramPlacesPerSol * GetTramServedPermille(LineId) / 1000);
+}
+
+int32 URHSimWorldSubsystem::Debug_GetTransitShortMs(int32 Kind, int32 Id, int32 Sol) const
+{
+	if (Kind == 2 && TransitLedgers.IsValidIndex(Id))
+	{
+		return TransitShortMsOf(TransitLedgers[Id].ShortSol, TransitLedgers[Id].ShortMs, Sol);
+	}
+	const FRHTramLine* Line = Kind == 3 ? FindTramLine(Id) : nullptr;
+	return Line ? TransitShortMsOf(Line->ShortSol, Line->ShortMs, Sol) : 0;
+}
+
 int64 URHSimWorldSubsystem::GetCargoPlaces(double Kg) const
 {
 	const int64 Whole = FMath::Max<int64>(0, FMath::RoundToInt64(Kg));
@@ -368,20 +490,24 @@ void URHSimWorldSubsystem::RollTransit(int32 SolNow)
 	{
 		TramLoads[i] = GetTramPeopleLoad(TramLines[i].Id);
 	}
+	// D6e: each capacity is the one the previous sol's power served (its ring's slot for SolNow - 1, complete: StepTransit runs before StepPower).
+	// A shaft with no car is the hoist; at Served 1000 every capacity is D4's / D6d's exactly.
+	const int32 SolPrev = SolNow - 1;
 	bool bChanged = false;
 	for (int32 S = 0; S < TransitLedgers.Num(); ++S)
 	{
 		FRHTransitLedger& L = TransitLedgers[S];
-		const int32 Wait = ComputeTransitWaitSec(Loads[S], GetShaftCapacityPlaces(S));
+		const int64 Cap = GetLiftCars(S) > 0 ? TransitServedLiftPlaces((int64)HoistPlacesPerSol, GetShaftCapacityPlaces(S), ServedPermilleAt(2, S, SolPrev)) : GetShaftCapacityPlaces(S);
+		const int32 Wait = ComputeTransitWaitSec(Loads[S], Cap);
 		bChanged |= Wait != L.WaitSec;
 		L.PrevWaitSec = L.WaitSec;
 		L.WaitSec = Wait;
 	}
-	// D6d: then the lines', in ascending line Id: the same wait formula against TramPlacesPerSol.
+	// D6d: then the lines', in ascending line Id: the same wait formula against TramPlacesPerSol (D6e: the share of it power served, at least 1).
 	for (int32 i = 0; i < TramLines.Num(); ++i)
 	{
 		FRHTramLine& Line = TramLines[i];
-		const int32 Wait = ComputeTransitWaitSec(TramLoads[i], (int64)TramPlacesPerSol);
+		const int32 Wait = ComputeTransitWaitSec(TramLoads[i], FMath::Max<int64>(1, (int64)TramPlacesPerSol * ServedPermilleAt(3, Line.Id, SolPrev) / 1000));
 		bChanged |= Wait != Line.WaitSec;
 		Line.PrevWaitSec = Line.WaitSec;
 		Line.WaitSec = Wait;
@@ -1945,6 +2071,139 @@ void URHSimWorldSubsystem::InstallTransit(const FRHLoadedTransit& In)
 		++TransitWaitVersion;
 	}
 	ResetRobotTransitRuntime();
+}
+
+// --- Save v58 (D6e): the transit power block, in its own frame ('RHD6') straight after E6's 'RHL6' ---
+
+void URHSimWorldSubsystem::WriteTransitPowerBlock(FArchive& Ar) const
+{
+	// Count, then one entry per fitted shaft in Id order and then one per tram line in Id order: Kind (2 a lift, 3 a line), Id and the ring's
+	// two slots as (sol tag, ms), an int32 each - 24 bytes an entry. The default colony writes Count 0: 4 bytes. Ms is clamped at one sol here
+	// as well (SP3), so a slot never reads back as a repair.
+	struct FEntry { int32 Kind = 0, Id = 0; const int32* Sol = nullptr; const int32* Ms = nullptr; };
+	static const int32 EmptySol[2] = { -1, -1 }, EmptyMs[2] = { 0, 0 };
+	TArray<FEntry> Entries;
+	for (const FRHShaft& Sh : Shafts)
+	{
+		if (Sh.LiftCars > 0)
+		{
+			const bool bLedger = TransitLedgers.IsValidIndex(Sh.Id);
+			Entries.Add({ 2, Sh.Id, bLedger ? TransitLedgers[Sh.Id].ShortSol : EmptySol, bLedger ? TransitLedgers[Sh.Id].ShortMs : EmptyMs });
+		}
+	}
+	for (const FRHTramLine& Line : TramLines)
+	{
+		Entries.Add({ 3, Line.Id, Line.ShortSol, Line.ShortMs });
+	}
+	int32 Count = Entries.Num();
+	Ar << Count;
+	for (const FEntry& E : Entries)
+	{
+		int32 Kind = E.Kind, Id = E.Id;
+		Ar << Kind << Id;
+		for (int32 k = 0; k < 2; ++k)
+		{
+			int32 Sol = E.Sol[k], Ms = FMath::Clamp(E.Ms[k], 0, TransitShortMsCap);
+			Ar << Sol << Ms;
+		}
+	}
+}
+
+void URHSimWorldSubsystem::ReadTransitPowerBlock(FArchive& Ar, const TArray<uint8>& File)
+{
+	// Read after teardown and after E6's block, once the shafts, their cars and the lines are installed, so it repairs with a Warning and never
+	// refuses: every ring starts empty; a lost or malformed frame leaves them so; an entry this colony cannot hold is dropped; a slot that
+	// cannot belong to its ring is emptied. A repair costs at most one sol's served share (an empty slot reads Served 1000).
+	for (FRHTransitLedger& L : TransitLedgers)
+	{
+		L.ShortSol[0] = L.ShortSol[1] = -1;
+		L.ShortMs[0] = L.ShortMs[1] = 0;
+	}
+	for (FRHTramLine& Line : TramLines)
+	{
+		Line.ShortSol[0] = Line.ShortSol[1] = -1;
+		Line.ShortMs[0] = Line.ShortMs[1] = 0;
+	}
+	TArray<uint8> Payload;
+	FString Why;
+	if (!RHSaveFrame::Read(Ar, File, RHSaveFrame::TransitPowerTag, Payload, Why))
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: the transit power block is lost (%s); every lift's and tram line's power record starts empty"), *Why);
+		return;
+	}
+	FMemoryReader In(Payload);
+	int32 Count = 0;
+	In << Count;
+	// The compile-time caps, not the MaxShafts row (the brief's "MaxShafts + MaxTramLinesCap"): a colony whose MaxShafts row was lowered after it
+	// sank its shafts keeps its rings. The exact-size test below still binds, and an entry naming a shaft the colony lacks is dropped.
+	const int32 MaxCount = RH::MaxShaftsCap + RH::MaxTramLinesCap;
+	if (In.IsError() || Count < 0 || Count > MaxCount || (int64)Count * 24 + 4 != (int64)Payload.Num())
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: the transit power block counts %d entries in %d bytes (0..%d entries of 24 bytes after the count); every power record starts empty"),
+			Count, Payload.Num(), MaxCount);
+		return;
+	}
+	TSet<int32> SeenShafts, SeenLines;
+	for (int32 n = 0; n < Count; ++n)
+	{
+		int32 Kind = 0, Id = 0, Sol[2] = { -1, -1 }, Ms[2] = { 0, 0 };
+		In << Kind << Id << Sol[0] << Ms[0] << Sol[1] << Ms[1];
+		int32* RingSol = nullptr;
+		int32* RingMs = nullptr;
+		bool bRepeat = false;
+		if (Kind == 2)
+		{
+			if (!Shafts.IsValidIndex(Id) || !TransitLedgers.IsValidIndex(Id))
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: a transit power entry names shaft %d, which the colony does not have; dropped"), Id);
+				continue;
+			}
+			if (Shafts[Id].LiftCars <= 0)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: a transit power entry names shaft %d, which has no lift car; dropped"), Id);
+				continue;
+			}
+			SeenShafts.Add(Id, &bRepeat);
+			RingSol = TransitLedgers[Id].ShortSol;
+			RingMs = TransitLedgers[Id].ShortMs;
+		}
+		else if (Kind == 3)
+		{
+			FRHTramLine* Line = TramLines.FindByPredicate([Id](const FRHTramLine& L) { return L.Id == Id; });
+			if (!Line)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: a transit power entry names tram line %d, which the colony does not have; dropped"), Id);
+				continue;
+			}
+			SeenLines.Add(Id, &bRepeat);
+			RingSol = Line->ShortSol;
+			RingMs = Line->ShortMs;
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: a transit power entry of kind %d (2 is a lift, 3 a tram line) is dropped"), Kind);
+			continue;
+		}
+		const TCHAR* What = Kind == 2 ? TEXT("shaft") : TEXT("tram line");
+		if (bRepeat)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: the transit power block names %s %d twice; the repeat is dropped"), What, Id);
+			continue;
+		}
+		for (int32 k = 0; k < 2; ++k)
+		{
+			// Tag -1 is an empty slot (exempt from the parity test). A tag can never pass the threshold sol + 1 (StepTransit rolls before StepPower).
+			if (Sol[k] < -1 || (Sol[k] >= 0 && Sol[k] % 2 != k) || Sol[k] > TransitCheckedSol + 1 || Ms[k] < 0 || Ms[k] > TransitShortMsCap)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v58: %s %d's power slot %d holds sol %d and %d ms (a slot holds the sols of its own parity up to the threshold sol %d + 1, and 0..%d ms); emptied"),
+					What, Id, k, Sol[k], Ms[k], TransitCheckedSol, TransitShortMsCap);
+				Sol[k] = -1;
+				Ms[k] = 0;
+			}
+			RingSol[k] = Sol[k];
+			RingMs[k] = Ms[k];
+		}
+	}
 }
 
 void URHSimWorldSubsystem::ResetRobotTransitRuntime()

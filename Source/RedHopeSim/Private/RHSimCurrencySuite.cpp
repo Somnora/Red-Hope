@@ -1739,7 +1739,7 @@ int32 RHRunCurrencySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorld
 		const bool bMarket = RHSaveFrame::Find(W, RHSaveFrame::MarketTag, MarketAt, MarketPayload);
 		bool bJournalAsc = B.Journal.Num() >= 2;
 		for (int32 j = 1; j < B.Journal.Num(); ++j) { bJournalAsc &= B.Journal[j - 1].ExecuteAt < B.Journal[j].ExecuteAt || (B.Journal[j - 1].ExecuteAt == B.Journal[j].ExecuteAt && B.Journal[j - 1].CommandId < B.Journal[j].CommandId); }
-		const bool bShape = bParsed && Ver == 57 && bMarket && MarketAt + RHSaveFrame::HeaderBytes + MarketPayload + RHSaveFrame::FooterBytes == B.FrameAt && B.PayloadBytes == Bytes
+		const bool bShape = bParsed && Ver == 58 && bMarket && MarketAt + RHSaveFrame::HeaderBytes + MarketPayload + RHSaveFrame::FooterBytes == B.FrameAt && B.PayloadBytes == Bytes
 			&& B.Issued == 1 && B.IssueSol >= 0 && B.OpenSol == B.IssueSol + 2 && B.Members.Num() == 2 && B.Members[0].Name == TEXT("CuIn") && B.Members[1].Name == TEXT("Zarya")
 			&& B.Marks.Num() == 1 && B.Marks[0].Held > 0 && B.Desks.Num() == 1 && B.Desks[0].Amount == 100000 && bJournalAsc && B.Journal.Num() == 2
 			&& B.Reserved == Sim->GetMarkReservedMmk() && B.Balance == Sim->GetMarkBalance();
@@ -1783,7 +1783,7 @@ int32 RHRunCurrencySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorld
 			ExpectSeq({
 				[&]() { return !bOk; },
 				[&]() { return E.Contains(TEXT("Save format mismatch")); },
-				[&]() { return E.Contains(TEXT("/57")); },
+				[&]() { return E.Contains(TEXT("/58")); },
 				}, FString::Printf(TEXT("CU10 a v55 file is refused (%s)"), *E));
 		}
 		const auto Doctor = [&](const TCHAR* Slot, const TArray<uint8>& Base, const TCHAR* Warning, TFunctionRef<bool()> Check) -> bool

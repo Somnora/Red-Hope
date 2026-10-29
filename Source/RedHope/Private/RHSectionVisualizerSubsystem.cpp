@@ -117,15 +117,15 @@ namespace
 		else if (L < 0 && Sim.GetFloorWarmth(L) > 0.0) { Out.NameColour = RHDeck::Amber; }
 	}
 
-	// A lift's label under TRAFFIC; the same text places it and measures it. R7: D6e's served capacity is not built, so the denominator is the
-	// nominal places and the label says so.
+	// A lift's label under TRAFFIC; the same text places it and measures it. R7: the denominator is D6e's served capacity, the places the
+	// lift's power served last sol (the hoist's after a dark sol, the cars' when it was never short), so "nominal" is gone (gate-d row M6).
 	FString ShaftLabelText(const URHSimWorldSubsystem& Sim, const FRHShaft& Sh)
 	{
 		if (Sim.GetLiftCars(Sh.Id) > 0)
 		{
 			const int64 Load = Sim.GetShaftPeopleLoad(Sh.Id) + Sim.GetShaftCargoLoad(Sh.Id);
-			const int64 Cap = FMath::Max<int64>(1, Sim.GetShaftCapacityPlaces(Sh.Id));
-			return FString::Printf(TEXT("Shaft %d · %s / %s places (nominal) · wait %d s · %s commuters a sol"), Sh.Id, *Grouped(Load), *Grouped(Cap), Sim.GetTransitWaitSec(Sh.Id), *Grouped(Sim.GetCommuteShaftPeople(Sh.Id)));
+			const int64 Cap = FMath::Max<int64>(1, Sim.GetShaftServedCapacityPlaces(Sh.Id));
+			return FString::Printf(TEXT("Shaft %d · %s / %s places · wait %d s · %s commuters a sol"), Sh.Id, *Grouped(Load), *Grouped(Cap), Sim.GetTransitWaitSec(Sh.Id), *Grouped(Sim.GetCommuteShaftPeople(Sh.Id)));
 		}
 		return FString::Printf(TEXT("Shaft %d · hoist"), Sh.Id);
 	}
@@ -1461,7 +1461,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 		if (Sim.GetLiftCars(Sh.Id) > 0)
 		{
 			const int64 Load = Sim.GetShaftPeopleLoad(Sh.Id) + Sim.GetShaftCargoLoad(Sh.Id);
-			const int64 Cap = FMath::Max<int64>(1, Sim.GetShaftCapacityPlaces(Sh.Id));
+			const int64 Cap = FMath::Max<int64>(1, Sim.GetShaftServedCapacityPlaces(Sh.Id)); // D6e (R7): the bar fills against the served places
 			const int32 Wait = Sim.GetTransitWaitSec(Sh.Id);
 			const int32 MaxWait = FMath::Max(1, Sim.GetMaxWaitSec());
 			const float W = (float)Wait / (float)MaxWait;
@@ -1597,7 +1597,7 @@ void URHSectionVisualizerSubsystem::RefreshOverlay(const URHSimWorldSubsystem& S
 	}
 	Hash = MixU32(Hash, (uint32)Sim.GetTramLines().Num());
 
-	LegendFullText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places (nominal); teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s%s"),
+	LegendFullText = FString::Printf(TEXT("Below ground: a lift's bar is its load against its places; teal, amber, red as the wait grows. At the left, each floor's arrows: amber out to work, teal in (placed by the lifts, not per lift). %s%s"),
 		bRamp ? TEXT("Lift labels count commuters a sol.") : TEXT("No commuting yet."),
 		Sim.GetTramLines().Num() > 0 ? *(FString(TEXT(" A tram line is a band along its tunnel, coloured by its wait.")) + TramNote) : TEXT("")); // Gate-D placeholder copy (rows N4, N5)
 	// UI polish P4: the legend itself is one sentence (the full text above is its tooltip) so it stays short as tram lines are laid. Gate-D placeholder copy (row S4).

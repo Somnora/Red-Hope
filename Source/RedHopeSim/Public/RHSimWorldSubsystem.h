@@ -225,7 +225,7 @@ struct REDHOPESIM_API FRHPowerState
 	UPROPERTY() double BatteryWh = 0.0;
 	UPROPERTY() double BatteryCapWh = 0.0;
 	UPROPERTY() bool bDeficit = false;
-	UPROPERTY() int32 ShedCount = 0;           // buildings (and D5 depth cooling entries) currently unpowered by shedding
+	UPROPERTY() int32 ShedCount = 0;           // buildings (and D5 depth cooling entries, D6e lifts and tram lines) currently unpowered by shedding
 	UPROPERTY() int32 ShedFloors = 0;          // nit 11, derived and never saved: how many of ShedCount are cooling floors rather than machines (the POWER tile names both)
 	UPROPERTY() double CoolingW = 0.0;         // D5 depth: the deep floors' cooling load this step (inside LoadW; 0 with no deep floor)
 	UPROPERTY() int32 CoolingFloors = 0;       // D5 depth: how many deep floors carry a cooling load
@@ -445,6 +445,11 @@ struct FRHTransitLedger
 	int32 Places[3] = { 0, 0, 0 };
 	int32 WaitSec = 0;
 	int32 PrevWaitSec = 0;
+	// D6e (lift power): the ms of each sol this shaft's lift sat in the shed part of StepPower's walk, in a 2-slot ring keyed by the sol (slot
+	// sol % 2, -1 = empty). Runtime here: the transit block writes the fields above by name, so these never change its bytes; the 'RHD6' frame
+	// saves them (v58).
+	int32 ShortSol[2] = { -1, -1 };
+	int32 ShortMs[2] = { 0, 0 };
 };
 
 namespace RH
@@ -469,6 +474,10 @@ struct FRHTramLine
 	FIntPoint StopB = FIntPoint::ZeroValue;
 	int32 WaitSec = 0;
 	int32 PrevWaitSec = 0;
+	// D6e (tram power): the line's short ms per sol, the lift ledger's 2-slot ring (runtime here; the tram block writes the fields above by
+	// name, and the 'RHD6' frame saves these, v58).
+	int32 ShortSol[2] = { -1, -1 };
+	int32 ShortMs[2] = { 0, 0 };
 };
 
 // D4: what a deep route costs, beside its planner cost: the walking (lattice and surface cm, all at base speed), the rides'
@@ -1149,6 +1158,19 @@ public:
 	static double GetTransitRobotLagSeconds();
 	// Capacity a sol in places (a place is one person, or LiftKgPerPlace of cargo): the hoist's, or cars x a car's.
 	int64 GetShaftCapacityPlaces(int32 ShaftId) const;
+	// --- D6e: lift and tram power (docs/qa/2026-10-22/d6-caverns-design.md MERGED section 5 and its REFRESH; D8 R7) ---
+	// A fitted lift and a tram line are loads on the grid (LiftCarW a car, TramWPerCell a chain point, at TransitLoadPriority). The ms a sol
+	// each sat in the shed part of StepPower's walk set the next sol's served share, Served = 1000 - min(1000, ShortMs / 1200) permille, and
+	// the served share sets only the wait's capacity: Hoist + (Cars x LiftPlacesPerSol - Hoist) x Served / 1000 for a lift, TramPlacesPerSol
+	// x Served / 1000 (at least 1) for a line. GetShaftCapacityPlaces, the robots' reserve, ride speed, ratings and arrivals never read it.
+	// The getters read the sol before TransitCheckedSol: after a roll, the share the frozen wait used.
+	int32 GetShaftServedPermille(int32 ShaftId) const;
+	int64 GetShaftServedCapacityPlaces(int32 ShaftId) const;   // HoistPlacesPerSol for a shaft with no car; GetShaftCapacityPlaces at 1000 (D8's lift bar)
+	int32 GetTramServedPermille(int32 LineId) const;
+	int64 GetTramServedCapacityPlaces(int32 LineId) const;     // TramPlacesPerSol x Served / 1000, at least 1
+	int32 GetLiftCarW() const { return LiftCarW; }
+	int32 GetTramWPerCell() const { return TramWPerCell; }
+	int32 GetTransitLoadPriority() const { return TransitLoadPriority; }
 	// The load the next roll would count for a shaft right now: the people part from the flows (ramp-scaled) and the cargo
 	// of the sol before last. For readouts (the shaft card); the roll computes it itself.
 	int64 GetShaftPeopleLoad(int32 ShaftId) const;
@@ -1266,6 +1288,10 @@ public:
 	void Debug_ChargeTransit(int32 ShaftId, int32 Places, double Stamp) { ChargeTransit(ShaftId, Places, 0, Stamp); }
 	// The FitLift order without the uplink (the same preflight and execution). False with the reason.
 	bool Debug_FitLift(int32 ShaftId, FString& OutReason);
+	// D6e harness: a ring's ms for a sol (Kind 2 a shaft by Id, 3 a tram line by Id; 0 when the slot holds another sol or none), and the
+	// three power rows for a fixture (TP1's equal-priority case). Never a switch that turns transit power off: -transit holds by its bank pin.
+	int32 Debug_GetTransitShortMs(int32 Kind, int32 Id, int32 Sol) const;
+	void Debug_SetTransitPowerRows(int32 LiftW, int32 TramW, int32 Priority) { LiftCarW = FMath::Max(0, LiftW); TramWPerCell = FMath::Max(0, TramW); TransitLoadPriority = Priority; }
 	// Capacity rows for a test fixture (0 keeps a row).
 	void Debug_SetTransitCapacity(int32 HoistPlaces, int32 LiftPlaces) { if (HoistPlaces > 0) { HoistPlacesPerSol = HoistPlaces; } if (LiftPlaces > 0) { LiftPlacesPerSol = LiftPlaces; } }
 	void Debug_SetFirstLiftFitStructKg(double Kg) { FirstLiftFitStructKg = FMath::Max(0.0, Kg); }
@@ -3652,6 +3678,10 @@ private:
 	int32 DigPermillePerDeepFloor = 150;
 	int32 CoolMilliWPerCellPerDeepFloor = 1000;
 	int32 CoolingLoadPriority = 7;
+	// D6e (lift and tram power). Rows (header defaults equal the CSV; placeholders, director review). Saved: the 'RHD6' frame only (v58).
+	int32 LiftCarW = 200;                  // W a fitted car
+	int32 TramWPerCell = 5;                // W a tram line's chain point
+	int32 TransitLoadPriority = 6;         // unclamped, like CoolingLoadPriority
 	double HeatRiseSols = 1.0;
 	double HeatFallSols = 0.5;
 	double HopeWarmMax = 5.0;
@@ -3757,6 +3787,12 @@ private:
 	void StepTransit();                      // the sol threshold, both bands, straight after StepUplink
 	void RollTransit(int32 SolNow);
 	void ChargeTransit(int32 ShaftId, int64 Places, int64 Kg, double Stamp);
+	// D6e: a lift (Kind 2, shaft Id) or tram line (Kind 3, line Id) in the shed part of a power step adds RoundToInt64(SubDt x 1000) ms to its
+	// ring's slot for the sol StepEndS falls in (clamped at one sol, 1,200,000).
+	void NoteTransitShortMs(uint8 Kind, int32 Index, float SubDt, double StepEndS);
+	int32 ServedPermilleAt(uint8 Kind, int32 Index, int32 SolPrev) const; // 1000 - min(1000, the ring's ms for SolPrev / 1200)
+	void WriteTransitPowerBlock(FArchive& Ar) const;
+	void ReadTransitPowerBlock(FArchive& Ar, const TArray<uint8>& File);
 	double TakeRobotStamp();                 // the robot stamp for a ledger write (the fallback is counted)
 	double PeekRobotStamp() const { return RobotStepEndSeconds >= 0.0 ? RobotStepEndSeconds : GetStepEndSeconds(); }
 	int32 ServingShaftOfSite(const FRHSiteRef& Site, int32 OtherLevel) const; // the shaft GetApproachPoint's head belongs to

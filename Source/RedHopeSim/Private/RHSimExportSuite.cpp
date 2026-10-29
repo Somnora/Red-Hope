@@ -529,7 +529,7 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const int32 IStruct = Names.IndexOfByKey(TEXT("Struct")), IOx = Names.IndexOfByKey(TEXT("Oxygen"));
 		// E4 (v55): the export block is no longer last; the market block's frame follows it. E5 (v56): and E5's currency frame follows that (found by
 		// its tag: every later frame is checked as following its predecessor, never as ending the file - the queue's cross-check, item 1).
-		Expect(bFramed && Ver == 57 && Payload == Bytes && Rd64(At) == 12345 && bAscending && Cur == At + Payload && At + Payload + RHSaveFrame::FooterBytes == MarketFrame
+		Expect(bFramed && Ver == 58 && Payload == Bytes && Rd64(At) == 12345 && bAscending && Cur == At + Payload && At + Payload + RHSaveFrame::FooterBytes == MarketFrame
 			&& MarketFrame + RHSaveFrame::HeaderBytes + MarketPayload + RHSaveFrame::FooterBytes == CurrencyFrame
 			&& IStruct != INDEX_NONE && Rd32(KgAt[IStruct]) == 900 && Rd64(PriceAt[IStruct]) == 2000 && Rd32(KgAt[IOx]) == 300,
 			FString::Printf(TEXT("XE10 v%u: the export block is the %d bytes before the market block - sales 12,345 mcr, 18 slots by name (%s .. %s), Struct 900 kg at 2 cr, Oxygen 300 kg"), Ver, Payload, Names.Num() ? *Names[0] : TEXT("?"), Names.Num() ? *Names.Last() : TEXT("?")));
@@ -598,7 +598,7 @@ int32 RHRunExportSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const bool bInbound = KgI > 0 && TryBytes(TEXT("exportr5"), Sealed(T)) && Sim->GetQuotaPhase() == ERHQuotaPhase::ShipInbound && Sim->GetExportLines().Num() == 0;
 		{ TArray<uint8> V = W; const uint32 V54 = 54; FMemory::Memcpy(V.GetData() + 4, &V54, 4); FFileHelper::SaveArrayToFile(V, *SaveFilePath(TEXT("exportr6"))); }
 		FString E6;
-		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/57"));
+		const bool bOld = !Sim->LoadColony(TEXT("exportr6"), E6) && E6.Contains(TEXT("/58"));
 		Expect(bInbound && bOld, FString::Printf(TEXT("XE10 a line saved while the ship is inbound is dropped on load; a v54 file is refused (%s)"), *E6));
 	}
 

@@ -34,7 +34,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 57;  // v57: the levers - a levers block in its own frame ('RHL6', written straight after E5's 'RHE5'): FormatRev 1, NextRuleId, the trade rules by Id (Id, kind, origin, the rival's name, the resource's name or "*" for every resource, direction, markup in bp, the market window's two sols, the live timer, the live flag), the pending market effects of covert acts in (ClearSol, CommandId, sub) order (clear sol, CommandId, sub, kind, rival, resource, grams), the lifetime tariff totals (mcr, mmk), and the terms of every uncleared priced convoy by convoy Id (the sol it clears in and each line's booking markup); sized by history, never a constant; the v19 / v21 / v22 slots keep their layout and are written as a mirror of the rules (the Closed names, each rival's largest live disruption, each embargo's grace, the Severed names), so a lost frame rebuilds the rules from them (E6); v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 58;  // v58: transit power - a transit power block in its own frame ('RHD6', written straight after E6's 'RHL6'): the count, then one entry per fitted shaft in Id order and one per tram line in Id order (kind 2 a lift or 3 a line, the Id, and the two slots of its short-ms ring as sol tag and ms, clamped at one sol); the default colony writes 4 bytes (count 0); read after E6's reader and repaired with Warnings, never refused (D6e); v57: the levers - a levers block in its own frame ('RHL6', written straight after E5's 'RHE5'): FormatRev 1, NextRuleId, the trade rules by Id (Id, kind, origin, the rival's name, the resource's name or "*" for every resource, direction, markup in bp, the market window's two sols, the live timer, the live flag), the pending market effects of covert acts in (ClearSol, CommandId, sub) order (clear sol, CommandId, sub, kind, rival, resource, grams), the lifetime tariff totals (mcr, mmk), and the terms of every uncleared priced convoy by convoy Id (the sol it clears in and each line's booking markup); sized by history, never a constant; the v19 / v21 / v22 slots keep their layout and are written as a mirror of the rules (the Closed names, each rival's largest live disruption, each embargo's grace, the Severed names), so a lost frame rebuilds the rules from them (E6); v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -243,6 +243,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		{
 			TramPlacesPerSol = PlacesRow;
 		}
+	}
+	{
+		// D6e (lift and tram power; header defaults equal the CSV, placeholders for director review). The draws are clamped non-negative; the
+		// priority is unclamped, like CoolingLoadPriority.
+		LiftCarW = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("LiftCarW"), LiftCarW));
+		TramWPerCell = FMath::Max(0, (int32)Defs->GetConfigScalar(FName("TramWPerCell"), TramWPerCell));
+		TransitLoadPriority = (int32)Defs->GetConfigScalar(FName("TransitLoadPriority"), TransitLoadPriority);
 	}
 	WearDegradeThreshold = (float)Defs->GetConfigScalar(FName("WearDegradeThreshold"), WearDegradeThreshold);
 	WearHaltThreshold = (float)Defs->GetConfigScalar(FName("WearHaltThreshold"), WearHaltThreshold);
@@ -8534,7 +8541,8 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 
 	// Pass 1: generation, storage, and each building's wanted draw.
 	// D5 depth: a deep floor's cooling is one more entry with B == nullptr (CoolLevel names the floor).
-	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; int32 CoolLevel = 0; };
+	// D6e: Kind says what an entry is (0 a building, 1 a floor's cooling, 2 a fitted shaft's lift, 3 a tram line); Index the shaft or line Id.
+	struct FLoadEntry { FRHBuildingInstance* B = nullptr; double WantW = 0.0; int32 Priority = 0; int32 CoolLevel = 0; uint8 Kind = 0; int32 Index = 0; };
 	TArray<FLoadEntry> Loads;
 	double GenW = 0.0, CapWh = 0.0;
 	for (FRHBuildingInstance& B : Buildings)
@@ -8595,9 +8603,41 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 		E.WantW = (double)MilliW / 1000.0;
 		E.Priority = CoolingLoadPriority;
 		E.CoolLevel = Floor.Level;
+		E.Kind = 1;
 		Loads.Add(E);
 		++CoolingEntries;
 		CoolingW += E.WantW;
+	}
+	// D6e: with a lift car, one entry per fitted shaft (ascending Id: Cars x LiftCarW), then one per tram line (ascending Id: chain points x
+	// TramWPerCell), after every cooling entry. With no car nothing is appended and everything below is D5's code.
+	int32 TransitEntries = 0;
+	const int32 BaseEntries = Loads.Num(); // D6e: the buildings and the cooling entries; the lift and tram entries follow
+	if (bHasTransit)
+	{
+		for (const FRHShaft& Sh : Shafts)
+		{
+			if (Sh.LiftCars <= 0)
+			{
+				continue;
+			}
+			FLoadEntry E;
+			E.WantW = (double)((int64)Sh.LiftCars * (int64)LiftCarW);
+			E.Priority = TransitLoadPriority;
+			E.Kind = 2;
+			E.Index = Sh.Id;
+			Loads.Add(E);
+			++TransitEntries;
+		}
+		for (const FRHTramLine& Line : TramLines)
+		{
+			FLoadEntry E;
+			E.WantW = (double)((int64)GetTunnelChainLength(Line.StopA, Line.StopB) * (int64)TramWPerCell);
+			E.Priority = TransitLoadPriority;
+			E.Kind = 3;
+			E.Index = Line.Id;
+			Loads.Add(E);
+			++TransitEntries;
+		}
 	}
 
 	// Pass 2: shedding. While the bank holds charge every load is served;
@@ -8619,28 +8659,53 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	// load. Shedding alone cannot drive Warmth: it sheds only on a step that starts empty, ends in surplus and refills the bank,
 	// so the next step serves everything - the shed flag alternates, the bank's emptiness does not. The short floors are the
 	// cooling entries in the shed prefix of the priority walk over the FULL load, run whether or not this step actually sheds.
+	// D6e [RC 7]: a lift or a tram line opens the scraping test too (a colony with lifts and no deep floor scrapes like one with cooling), and
+	// its entries in that prefix are short. Warmth still reads cooling alone (StepDepthWarmth's third argument).
 	const double FullW = LoadW;
 	const double B0 = Power.BatteryWh;
 	const bool bShedStep = B0 <= 0.0 && LoadW > GenW;
-	const bool bScraping = bShedStep || (CoolingEntries > 0 && B0 + (GenW - FullW) * (SubDt / 50.0) < 0.0);
+	const bool bScraping = bShedStep || ((CoolingEntries + TransitEntries) > 0 && B0 + (GenW - FullW) * (SubDt / 50.0) < 0.0);
 	uint32 ShortMask = 0;
-	if (bShedStep || (bScraping && CoolingEntries > 0))
+	if (bShedStep || (bScraping && (CoolingEntries + TransitEntries) > 0))
 	{
-		// Priority ascending; then buildings before cooling; then the deeper floor first. For two buildings this is the old
-		// comparator, so a colony with no cooling entry sorts exactly as before.
+		// Priority ascending; then buildings before cooling; then the deeper floor first. For two buildings this is the old comparator, so a
+		// colony with no lift or tram entry sorts exactly as before.
+		// D6e: the lift and tram entries are taken out before the sort and merged back after it, so the buildings and the cooling are sorted as
+		// the same array D5 sorted. The sort is not stable and equal-priority buildings tie, so sorting the longer array would reorder them
+		// (which of two AirFilters sheds first) with or without any draw. Merged at their priority, after every entry of equal or lower
+		// priority (buildings, cooling, lifts, trams among equals), lifts by shaft Id, then trams by line Id.
+		TArray<FLoadEntry> TransitLoads;
+		if (TransitEntries > 0)
+		{
+			TransitLoads.Append(Loads.GetData() + BaseEntries, TransitEntries);
+			Loads.RemoveAt(BaseEntries, TransitEntries, EAllowShrinking::No);
+			TransitLoads.Sort([](const FLoadEntry& A, const FLoadEntry& B)
+			{
+				return A.Kind != B.Kind ? A.Kind < B.Kind : A.Index < B.Index;
+			});
+		}
 		Loads.Sort([](const FLoadEntry& A, const FLoadEntry& B)
 		{
 			if (A.Priority != B.Priority)
 			{
 				return A.Priority < B.Priority;
 			}
-			const bool bACool = A.B == nullptr, bBCool = B.B == nullptr;
+			const bool bACool = A.Kind == 1, bBCool = B.Kind == 1;
 			if (bACool != bBCool)
 			{
 				return !bACool;
 			}
 			return bACool && A.CoolLevel < B.CoolLevel;
 		});
+		if (TransitLoads.Num() > 0)
+		{
+			int32 At = 0;
+			while (At < Loads.Num() && Loads[At].Priority <= TransitLoadPriority)
+			{
+				++At;
+			}
+			Loads.Insert(TransitLoads, At);
+		}
 		for (FLoadEntry& E : Loads)
 		{
 			if (LoadW <= GenW)
@@ -8653,15 +8718,19 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 				{
 					E.B->bPowered = false;
 				}
-				else
+				else if (E.Kind == 1)
 				{
-					++Power.ShedFloors; // a cooling entry: a floor, not a machine
+					++Power.ShedFloors; // a cooling entry: a floor, not a machine (D6e: a lift or a line counts in ShedCount only, SP2)
 				}
 				++Power.ShedCount;
 			}
-			if (!E.B)
+			if (E.Kind == 1)
 			{
 				ShortMask |= 1u << (uint32)(-E.CoolLevel);
+			}
+			else if (E.Kind >= 2)
+			{
+				NoteTransitShortMs(E.Kind, E.Index, SubDt, StepEndS); // D6e: this sol's short ms on the lift's or line's ring
 			}
 			LoadW -= E.WantW;
 		}
@@ -14075,6 +14144,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	// E6 (save v57): the levers block - the trade rules, the pending market effects, the tariff totals, the orders' terms - in its own frame
 	// straight after E5's.
 	RHSaveFrame::Write(Ar, RHSaveFrame::LeversTag, [this](FArchive& Block) { WriteLeversBlock(Block); });
+	// D6e (save v58): the transit power block - each fitted lift's and tram line's short-ms ring - in its own frame straight after E6's.
+	RHSaveFrame::Write(Ar, RHSaveFrame::TransitPowerTag, [this](FArchive& Block) { WriteTransitPowerBlock(Block); });
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14881,6 +14952,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ReadCurrencyBlock(Ar, Bytes); // E5 (v56): the mark convoys and desk orders onto what E4 loaded; a lost market block starts it unissued
 	ReconcileReservations();      // E5: both purses' reservations and the lifetime totals, after both blocks (E4's own repair moved here)
 	ReadLeversBlock(Ar, Bytes, MirrorClosed, MirrorSabotage, MirrorEmbargo, MirrorDefected); // E6 (v57): the rules (or the mirror's), then the orders' terms
+	ReadTransitPowerBlock(Ar, Bytes); // D6e (v58): the lifts' and lines' short-ms rings, onto the shafts, cars and lines installed above
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.
