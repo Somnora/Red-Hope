@@ -202,9 +202,15 @@ int64 URHSimWorldSubsystem::ConvertOwedMcr(int64 NetMmk, int64 Rate) const
 
 int64 URHSimWorldSubsystem::GetConvertedReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, int64 Rate) const
 {
+	return GetConvertedReservationMcr(Rival, Lines, Rate, TArray<int32>());
+}
+
+int64 URHSimWorldSubsystem::GetConvertedReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, int64 Rate, const TArray<int32>& MarkupBp) const
+{
 	// 2.4: R = max(0, ceil(sum(buy kg x Hi(q)) x HiR(r) / 1000) - floor(sum(sell kg x Lo(q)) x LoR(r) / 1000)). The clearing price lies in
 	// [Lo(q), Hi(q)] and the clearing rate in [LoR(r), HiR(r)] (a booking never sees a clearing more than one roll ahead, and each steps once a
-	// roll), and ceil(a - b) <= ceil(a) - floor(b), so R covers the rounded-up charge.
+	// roll), and ceil(a - b) <= ceil(a) - floor(b), so R covers the rounded-up charge. E6 (D21): a line's markup m enters the price step first,
+	// HiM = Hi + ceil(Hi x m / 10000) and LoM = max(0, Lo - ceil(Lo x m / 10000)), and the rate step applies to the marked-up sums.
 	const FRHRivalEconomy* E = FindRivalEconomy(Rival);
 	const FRHMarket* Mk = E ? FindMarket(E->RegionId) : nullptr;
 	if (!Mk)
@@ -212,16 +218,26 @@ int64 URHSimWorldSubsystem::GetConvertedReservationMcr(FName Rival, const TArray
 		return 0;
 	}
 	int64 BuyMmk = 0, SellMmk = 0;
-	for (const FRHConvoyLine& L : Lines)
+	for (int32 l = 0; l < Lines.Num(); ++l)
 	{
+		const FRHConvoyLine& L = Lines[l];
 		const int32* SlotPtr = EconIndex.Find(L.Resource);
 		if (!SlotPtr || !Mk->PriceMcr.IsValidIndex(*SlotPtr))
 		{
 			continue;
 		}
 		const int64 Quote = Mk->PriceMcr[*SlotPtr];
-		if (L.Kg > 0) { BuyMmk += (int64)L.Kg * CurHiQuote(Quote, MarketMaxStepBp); }
-		else { SellMmk += -(int64)L.Kg * CurLoQuote(Quote, MarketMaxStepBp); }
+		const int32 M = MarkupBp.IsValidIndex(l) ? MarkupBp[l] : 0;
+		if (L.Kg > 0)
+		{
+			const int64 Hi = CurHiQuote(Quote, MarketMaxStepBp);
+			BuyMmk += (int64)L.Kg * (Hi + MarketTariffMcr(Hi, M));
+		}
+		else
+		{
+			const int64 Lo = CurLoQuote(Quote, MarketMaxStepBp);
+			SellMmk += -(int64)L.Kg * CurMax64(0, Lo - MarketTariffMcr(Lo, M));
+		}
 	}
 	const int64 HiR = Rate * (10000 + CurrencyMaxStepBp) / 10000 + 1;
 	const int64 LoR = CurMax64(1, Rate * (10000 - CurrencyMaxStepBp) / 10000 - 1);
@@ -378,7 +394,7 @@ bool URHSimWorldSubsystem::CanIssueCurrency(bool bDefyIssue, FString& OutWhy) co
 	bool bPartner = false;
 	for (const FRHRivalEconomy& E : RivalEconomies)
 	{
-		if (!E.bHasEconomy || ClosedRoutes.Contains(E.Rival))
+		if (!E.bHasEconomy || IsRouteClosed(E.Rival)) // E6: a Closed rule
 		{
 			continue;
 		}
@@ -500,10 +516,11 @@ bool URHSimWorldSubsystem::CanExchange(ERHDeskDir Dir, int64 Amount, int32 EffSo
 		OutWhy = TEXT("The market is closed while the mark is withdrawn");
 		return false;
 	}
+	// E6 (R7): check 3 reads only the Closed, Severed and Embargo rules from the list - a sabotaged member still serves the desk, as E5 has it.
 	bool bPartner = false;
 	for (const FRHBlocMember& M : BlocMembers)
 	{
-		bPartner |= IsRivalAvailable(M.Rival) && !ClosedRoutes.Contains(M.Rival) && !DefectedRivals.Contains(M.Rival) && !EmbargoGrace.Contains(M.Rival);
+		bPartner |= IsRivalAvailable(M.Rival) && !IsRouteClosed(M.Rival) && !HasDefected(M.Rival) && !IsEmbargoed(M.Rival);
 	}
 	if (!bPartner)
 	{
@@ -1090,7 +1107,7 @@ void URHSimWorldSubsystem::ReadCurrencyBlock(FArchive& Ar, const TArray<uint8>& 
 	for (int32 j = 0; j < ReadJournal.Num() && JournalBad.IsEmpty(); ++j)
 	{
 		const FRHPoliticalEntry& E = ReadJournal[j];
-		if (!FMath::IsFinite(E.ExecuteAt) || E.ExecuteAt < 0.0 || E.ClearSol < 0 || E.Sub < 0 || E.Sub > 1 || E.Kind > (uint8)ERHPoliticalAct::Withdraw
+		if (!FMath::IsFinite(E.ExecuteAt) || E.ExecuteAt < 0.0 || E.ClearSol < 0 || E.Sub < 0 || E.Sub > 1 || E.Kind > (uint8)ERHPoliticalAct::PactBreak // E6's two acts
 			|| CurAbs64(E.IdentityMilli) > CurViewMax || CurAbs64(E.TensionDeltaMilli) > CurViewMax)
 		{
 			JournalBad = FString::Printf(TEXT("entry %d is not an act the record can apply"), j);

@@ -325,6 +325,9 @@ private:
 	FReply HandleExportRemove(FName Resource);
 	FReply HandleSolidarity(bool bComply);
 	FReply HandleRivalVerb(FName Verb, FName Rival);
+	// E6 (the levers, minimal; E8 is the full panel): a rival card's SIGN / BREAK - a Treaty order with Text Sign or Break (HandleRivalVerb
+	// sets no Text). The sim's CanSignPact greys SIGN with the reason in its tooltip.
+	FReply HandleTreaty(FName Rival, bool bSign);
 	// E5 (the Martian currency, minimal; E8 is the full panel): the Dilemma card's third answer (Defy, and issue), the panel's issue button,
 	// and the bloc desk's draft - a direction and whole units, nudged by To marks +100 / To credits +100 (a press against the draft's
 	// direction takes 100 off it, as the market card's Buy / Sell net), emptied by CLEAR and transmitted by SEND as an Exchange order (the

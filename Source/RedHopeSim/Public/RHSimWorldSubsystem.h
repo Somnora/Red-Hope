@@ -588,6 +588,13 @@ struct FRHMarketClearing
 	uint8 Currency = 0;
 	int64 RateMcr = 0;
 	int64 SettledMcr = 0;
+	// E6: the sol the order's markups were read at (its stored EffSol), the markup each line cleared at and the one it was booked at (both
+	// indexed like Lines), and the tariff the clearing charged, in the market's unit (marks for a mark or converted order, credits before).
+	// NetMcr and SettledMcr include it; ValueMcr does not (the goodwill floor's input stays at the clearing price).
+	int32 EffSol = 0;
+	TArray<int32> LineMarkupBp;
+	TArray<int32> BookedMarkupBp;
+	int64 TariffMcr = 0;
 };
 
 // E5, the Martian currency (docs/qa/2026-10-24/e5-martian-currency-design.md: DIRECTOR ANSWER Q-A (a), Q-B (a), Q-C (a) > the queue's
@@ -639,6 +646,74 @@ struct FRHDeskOrder
 	int64 Amount = 0;
 	int32 ClearSol = 0;
 	bool bCleared = false;
+};
+
+// E6, the levers (docs/qa/2026-10-24/e6-levers-design.md: DIRECTOR ANSWER Q-A (a), Q-B (a), Q-C (a) > the queue's orchestrator rulings and
+// cross-check > the E6 build brief > REFRESH > REVISION R1-R10 > re-review > review > design). Every rule about who may trade with whom, and at
+// what markup, is one entry in one list ordered by Id. The four blocking kinds' values are their refusal precedence (HEAD's check order).
+enum class ERHTradeRuleKind : uint8 { Closed = 1, Disrupted = 2, Severed = 3, Embargo = 4, Pact = 5, Tariff = 6 };
+enum class ERHTradeRuleOrigin : uint8 { Comply = 1, Sabotage = 2, Defection = 3, EarthPressure = 4, Signed = 5, Betrayal = 6, Harness = 7 };
+
+// One rule. Ids are assigned at act executions and live events from NextRuleId (saved), never reused, never at a retirement; a rule is never
+// updated in place to extend it (a repeated sabotage appends). The market window [FromSol, UntilSol) is exact and keyed by the act's own sol:
+// none is (-1, -1), closed is 0 <= From < Until (an ended pact may be empty, From == Until), open-ended is From >= 0 with Until -1. LiveSols and
+// bLive are the live part (what may be booked now, HEAD's timing and arithmetic); the market never reads them, or an Id.
+struct FRHTradeRule
+{
+	int32 Id = 0;
+	ERHTradeRuleKind Kind = ERHTradeRuleKind::Closed;
+	ERHTradeRuleOrigin Origin = ERHTradeRuleOrigin::Harness;
+	FName Party;                   // the neighbour (a rivals row), saved as its name string
+	int32 ResSlot = -1;            // a tariff's E1 slot, or -1 for every resource (saved as the slot's name, "*" for every resource)
+	uint8 Dir = 3;                 // a tariff's direction: 1 on what the colony buys, 2 on what it sells, 3 both
+	int32 MarkupBp = 0;            // a tariff's markup, 0 .. TariffMaxBp (never negative: no rule pays the colony)
+	int32 FromSol = -1;
+	int32 UntilSol = -1;
+	double LiveSols = 0.0;         // an embargo's grace, a disruption's downtime (sols)
+	bool bLive = true;             // it refuses (a block) or protects (a pact) now; a tariff has no live part
+	bool HasWindow() const { return FromSol >= 0; }
+	bool Covers(int32 Sol) const { return FromSol >= 0 && Sol >= FromSol && (UntilSol < 0 || Sol < UntilSol); }
+};
+
+// A pending market effect of a covert act, keyed by the act's own ExecuteAt sol (ClearSol) and applied at the roll that closes it, after the
+// convoy and desk clearing and before production, in (ClearSol, CommandId, Sub) order: a clean theft takes min(grams, store) from a rival's
+// store, a peace offering adds to it. Sub is the slot order within one act. Neither enters any tally.
+enum class ERHMarketEffectKind : uint8 { Theft = 1, Offering = 2 };
+struct FRHMarketEffect
+{
+	int32 ClearSol = 0;
+	int32 CommandId = 0;
+	int32 Sub = 0;
+	ERHMarketEffectKind Kind = ERHMarketEffectKind::Theft;
+	FName Party;
+	int32 Slot = 0;
+	int64 Grams = 0;
+};
+
+// An uncleared priced convoy's terms, recorded at booking: the sol it clears in (EffSol = max(ClearSol, the open sol), the sol its markups are
+// read at, at the booking and at the clearing alike) and the markup each line was booked at, indexed like the convoy's Lines. The clearing
+// charges the markup recomputed at EffSol; the booking markups are kept only so a test can see that the two agree. Saved in E6's frame, by
+// convoy Id, never in E4's.
+struct FRHConvoyTerms
+{
+	int32 ConvoyId = 0;
+	int32 EffSol = 0;
+	TArray<int32> LineMarkupBp;
+};
+
+// What one roll did through E6 (transient records: tests and the deck read them; never saved, newest last, the newest 64 to 128 kept): a market effect
+// applied (with the grams that actually moved: a theft takes at most what the store holds), and a rival's production cut.
+struct FRHMarketEffectApplied
+{
+	int32 ClosingSol = 0;
+	FRHMarketEffect Effect;
+	int64 MovedG = 0;
+};
+struct FRHProductionCut
+{
+	int32 ClosingSol = 0;
+	FName Rival;
+	int32 CutPct = 0;
 };
 
 UCLASS()
@@ -1424,6 +1499,7 @@ public:
 	int32 GetLedgerSlotCount() const { return EconSlots.Num(); }
 	FName GetLedgerSlotName(int32 Slot) const { return EconSlots.IsValidIndex(Slot) ? EconSlots[Slot].Name : NAME_None; }
 	bool HasLedgerSlot(FName Resource) const { return EconIndex.Contains(Resource); }
+	int32 GetLedgerSlotIndex(FName Resource) const { const int32* S = EconIndex.Find(Resource); return S ? *S : INDEX_NONE; } // E6: a market effect's slot (tests)
 	int64 GetLedgerLifetimeG(FName Resource, ERHLedgerLeg Leg) const;
 	double GetLedgerOpenKg(FName Resource, ERHLedgerLeg Leg) const;
 	int64 GetLedgerRingG(FName Resource, ERHLedgerLeg Leg, int32 Back) const; // Back 1 = the sol just completed, up to LedgerRing
@@ -1663,8 +1739,10 @@ public:
 	bool ParseOrderLines(const FString& Text, TArray<FRHConvoyLine>& OutLines, FString& OutWhy) const;
 	static FString OrderLinesText(const TArray<FRHConvoyLine>& Lines, bool bBuys);   // "Ice:500;Struct:200" (the buys, or the sells as positive kg)
 	// The reservation one order needs at today's quotes, 3.2 step 5: Hi(q) = q x (10000 + MaxStep) / 10000 + 1 on each buy, Lo(q) the same
-	// the other way less 1 (floor 0) on each sell, R = max(0, sum(buy x Hi) - sum(sell x Lo)).
+	// the other way less 1 (floor 0) on each sell, R = max(0, sum(buy x Hi) - sum(sell x Lo)). E6 (D21): with each line's markup m (bp, indexed
+	// like Lines), HiM = Hi + DivCeil(Hi x m, 10000) and LoM = max(0, Lo - DivCeil(Lo x m, 10000)); the two-argument form is markup 0, E4's.
 	int64 GetOrderReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines) const;
+	int64 GetOrderReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, const TArray<int32>& MarkupBp) const;
 	const TArray<FRHMarketClearing>& GetMarketClearings() const { return MarketClearings; }
 	int32 GetMaxConvoysOut() const { return MaxConvoysOut; }
 	int32 GetConvoyCargoKg() const { return ConvoyCargoKg; }
@@ -1679,12 +1757,19 @@ public:
 	int64 Debug_CreditSpend(int64 Mcr) { return CreditSpend(Mcr); }                   // returns what could not be paid
 	void Debug_SyncRivalEconomies() { SyncRivalEconomies(false, true); }
 	static int64 MarketDivTrunc(int64 A, int64 B);   // the update's one signed division: truncates toward zero, B > 0
-	// MX11's politics, set directly (each is the state its real worker leaves; runtime fixtures only).
-	void Debug_CloseRoute(FName Rival) { ClosedRoutes.Add(Rival); }
-	void Debug_SetEmbargo(FName Rival, double GraceSols) { EmbargoGrace.Add(Rival, GraceSols); }
-	void Debug_SetDefected(FName Rival) { DefectedRivals.Add(Rival); }
-	void Debug_SetSabotage(FName Rival, double Sols) { SabotageSols.Add(Rival, Sols); }
-	void Debug_ClearPolitics() { ClosedRoutes.Reset(); EmbargoGrace.Reset(); DefectedRivals.Reset(); SabotageSols.Reset(); }
+	// E6 (D21): a filled line's money under a markup m (bp, 0 <= m < 10000), every rounding against the colony. The tariff is ceil(value x m /
+	// 10000); a buy costs its value plus it, a sell receives its value less it - never more than its value (no rule pays the colony).
+	static int64 MarketTariffMcr(int64 Value, int32 MarkupBp);
+	static int64 MarketLineSettleMcr(int64 Value, int32 MarkupBp, bool bBuy);
+	// MX11's politics, set directly (each is the state its real worker leaves; runtime fixtures only). E6 (REFRESH F1): rebuilt on the rule
+	// list with Origin Harness - a Closed rule (if none), the one Embargo added or updated in place (LiveSols = the grace; none beside a Severed),
+	// a Severed rule (if none; it replaces an Embargo, as a defection does), a Disrupted rule appended with NO market window, and every rule of
+	// the four blocking kinds removed. RHSimLevers.cpp.
+	void Debug_CloseRoute(FName Rival);
+	void Debug_SetEmbargo(FName Rival, double GraceSols);
+	void Debug_SetDefected(FName Rival);
+	void Debug_SetSabotage(FName Rival, double Sols);
+	void Debug_ClearPolitics();
 
 	// --- E5, the Martian currency (docs/qa/2026-10-24/e5-martian-currency-design.md; RHSimCurrency.cpp) ---
 	// The colony can issue a Martian currency (placeholder name: the mark) as a political act: an uplink order, Currency Issue (the identity
@@ -1698,7 +1783,8 @@ public:
 	// the market closes, then at the first roll with no order uncleared every mark is redeemed at the rate in force (no spread, no cap: Q-B a,
 	// the loophole accepted) and every price is re-expressed in credits. Integer money only. Nothing here reads or writes Hope, the population,
 	// growth or Influence. SAVED (v56): the 'RHE5' frame, written after 'RHE4'.
-	enum class ERHPoliticalAct : uint8 { Defy, Comply, Pacify, Issue, Withdraw };
+	// E6 adds two acts to the journal: a pact signed (+PactTension x 1000) and a pact the colony breaks (-PactBreakTension x 1000).
+	enum class ERHPoliticalAct : uint8 { Defy, Comply, Pacify, Issue, Withdraw, PactSign, PactBreak };
 	enum class ERHDeskDir : uint8 { ToMarks, ToCredits };
 	// Why E4's block started the market at its start values at the last load (cross-check item 3; E8 words its own drop from it).
 	enum class ERHMarketBlockLoss : uint8 { None, Lost, Malformed, SlotsReset, RegionsRepeated };
@@ -1741,8 +1827,10 @@ public:
 	bool GetDeskBooked(int32 Sol, int64& OutToMarks, int64& OutToCredits) const; // whole units booked to clear in Sol, each way
 	void GetDeskOrders(TArray<FRHDeskOrder>& Out) const { Out = DeskOrders; }
 	bool GetMarkOrder(int32 ConvoyId, int64& OutReservedMmk, int64& OutOwedMmk) const; // false for a credit convoy
-	// A converted credit order's reservation (2.4): one full price step and one full rate step each way, rounded against the colony.
+	// A converted credit order's reservation (2.4): one full price step and one full rate step each way, rounded against the colony. E6: the
+	// four-argument form carries each line's markup into the price step first (HiM / LoM, as GetOrderReservationMcr).
 	int64 GetConvertedReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, int64 Rate) const;
+	int64 GetConvertedReservationMcr(FName Rival, const TArray<FRHConvoyLine>& Lines, int64 Rate, const TArray<int32>& MarkupBp) const;
 	int64 GetDeskSpreadBp() const { return DeskSpreadBp; }
 	int64 GetDeskCapPerSol() const { return DeskCapPerSol; }
 	int32 GetCurrencyBlockBytes() const;             // the 'RHE5' payload's bytes for the live state (sized by history: never a constant)
@@ -1763,6 +1851,78 @@ public:
 	void Debug_DiscoverRival(FName Rival) { DiscoveredRivals.Add(Rival); } // as a survey would (CU9's discovered member)
 	int32 GetNextCommandId() const { return NextCommandId; }
 	void Debug_SetNextCommandId(int32 Id) { NextCommandId = Id; } // CU10: a fresh process's counter, before a load
+
+	// --- E6, the levers (docs/qa/2026-10-24/e6-levers-design.md; RHSimLevers.cpp) ---
+	// Who may trade with whom, and at what markup, is one list of rules ordered by Id (FRHTradeRule). HEAD's four political sets are its first
+	// four kinds - a route closed by a Comply, a neighbour disrupted by sabotage, a neighbour that sided with Earth, a neighbour embargoing the
+	// colony under Earth's pressure - with HEAD's timing, arithmetic and texts; two kinds are new: a pact (the Treaty verb: a bigger convoy, and
+	// Earth cannot turn the partner, Q-A (a)) and a tariff (only a betrayed partner charges one, Q-C (a)). Covert acts now move prices through
+	// E4's own update and nothing else: a sabotage stops the target's production for the six whole sols after the act (Q-B (a)), a clean theft
+	// comes out of the victim's store and a peace offering goes into it. Every market-facing effect is keyed by the act's OWN sol, so prices are
+	// identical in both bands. Integer money; nothing here reads or writes Hope, the population or growth. SAVED (v57): the 'RHL6' frame,
+	// written after 'RHE5'; the v19 / v21 / v22 slots are written from the rules as a mirror.
+	// One walk of the whole list, in Id order: the block (the lowest live blocking kind naming the rival, then the lowest Id; BlockKind 0 = none),
+	// each line's markup (the sum over the tariffs naming the rival whose resource and direction cover the line and whose window covers EffSol,
+	// clamped to [0, TariffMaxBp]; 0 with the levers off) and whether a pact's window covers EffSol.
+	struct FRHTradeVerdict
+	{
+		uint8 BlockKind = 0;
+		int32 BlockId = 0;
+		bool bPact = false;
+		TArray<int32> LineMarkupBp;
+	};
+	void EvaluateTradeRules(FName Rival, int32 EffSol, const TArray<FRHConvoyLine>& Lines, FRHTradeVerdict& Out) const;
+	static FString TradeBlockText(uint8 BlockKind, const FString& DisplayName); // HEAD's four refusal texts, by kind
+	// One rule for the verb, the deck and the cheat, in this order: contact, the switch, no live pact already, no live block, the relation, the
+	// Influence, no betrayal tariff still running.
+	bool CanSignPact(FName Rival, FString& OutWhy) const;
+	bool CanBreakPact(FName Rival, FString& OutWhy) const;
+	bool HasLivePact(FName Rival) const;
+	int32 GetLivePactFromSol(FName Rival) const;     // the live pact's first sol, -1 with none
+	int32 GetLivePactSignedSol(FName Rival) const;   // the sol the live pact was signed in (its window opens two sols later), -1 with none
+	static FString FormatPercentBp(int32 Bp);        // a markup as an exact percentage: 2500 "25%", 2550 "25.5%", 2505 "25.05%"
+	int32 GetPactCargoKg() const { return PactCargoKg; }
+	// The pact's terms for the deck's words (the config, after its clamps).
+	double GetPactInfluenceCost() const { return PactInfluenceCost; }
+	double GetPactTension() const { return PactTension; }
+	double GetPactHumanNatureShift() const { return PactHumanNatureShift; }
+	double GetPactBreakHumanNatureShift() const { return PactBreakHumanNatureShift; }
+	double GetPactBreakRelationHit() const { return PactBreakRelationHit; }
+	double GetPactBreakTension() const { return PactBreakTension; }
+	int32 GetPactBetrayalTariffBp() const { return PactBetrayalTariffBp; }
+	int32 GetPactBetrayalTariffSols() const { return PactBetrayalTariffSols; }
+	const TArray<FRHTradeRule>& GetTradeRules() const { return TradeRules; }
+	int32 GetNextRuleId() const { return NextRuleId; }
+	const TArray<FRHMarketEffect>& GetPendingMarketEffects() const { return PendingMarketEffects; }
+	int32 GetLineMarkupBp(FName Rival, FName Resource, uint8 Dir, int32 Sol) const; // Dir 1 a buy, 2 a sell
+	int32 GetRivalCutPct(FName Rival, int32 Sol) const; // SabotageCutPct while a Disrupted window covers Sol, else 0
+	int32 GetSabotageCutPct() const { return SabotageCutPct; } // the config's cut (after its clamp), for the card's words
+	int32 GetOrderCargoCapKg(FName Rival) const;     // the cap PlanConvoy applies to an order sent now (PactCargoKg under a pact's window, else ConvoyCargoKg)
+	bool GetConvoyTerms(int32 ConvoyId, FRHConvoyTerms& Out) const;
+	const TArray<FRHMarketEffectApplied>& GetMarketEffectsApplied() const { return MarketEffectsApplied; }
+	const TArray<FRHProductionCut>& GetProductionCuts() const { return ProductionCuts; }
+	bool GetBetrayalTariff(FName Rival, int32& OutBp, int32& OutUntilSol, int32* OutFromSol = nullptr) const; // the running betrayal tariff (the card)
+	int32 GetDisruptionUntilSol(FName Rival) const;  // the latest Disrupted window's end that is still ahead, -1 with none (the card)
+	bool GetDisruptionWindow(FName Rival, int32& OutFromSol, int32& OutUntilSol) const; // the windows still ahead as one span (the card)
+	int32 GetLeversBlockBytes() const;               // the 'RHL6' payload's bytes for the live state (sized by history: never a constant)
+	int64 GetTariffPaidMcr() const { return TariffPaidMcr; }
+	int64 GetTariffPaidMmk() const { return TariffPaidMmk; }
+	bool IsLeversEnabled() const { return bLeversEnabled; }
+	bool IsLeversBlockLost() const { return bLeversBlockLost; } // transient: the last load rebuilt the rules from the mid-file mirror
+	// The 13 config rows as the sim holds them (after their clamps), and the clamp each is read through (LV0).
+	void GetLeversConfig(TArray<TPair<FName, double>>& Out) const;
+	static double LeversConfigClamp(FName Row, double Raw);
+	// Harness hooks (runtime only, never saved). Off: the Treaty verb is refused, no theft or offering is recorded, a Disrupted rule gets no
+	// window and every markup reads 0; the migration itself is not switchable (it is today's behaviour).
+	void Debug_SetLeversEnabled(bool bOn) { bLeversEnabled = bOn; }
+	void Debug_AddTariff(FName Rival, FName Resource, uint8 Dir, int32 Bp, int32 FromSol, int32 UntilSol); // Resource None = every resource
+	void Debug_EnqueueAt(FRHCommand Cmd, double ExecuteAt); // EnqueueCommand's Id and IssuedAt, an explicit ExecuteAt, appended unsorted
+	void Debug_SetRelation(FName Rival, double Value);
+	bool Debug_RemoveRule(int32 Id);                 // test only: no player path removes a Closed or Severed rule
+	int32 Debug_AddTradeRule(const FRHTradeRule& Rule); // test only (LV3, LV9, -scale): a copy appended with the next Id, which it returns
+	void Debug_AddMarketEffect(const FRHMarketEffect& Effect); // test only (LV9, -scale): inserted in (ClearSol, CommandId, Sub) order
+	void Debug_SetTariffConfig(double TariffMax, double BetrayalBp); // test only (LV0): the two tariff rows through their clamps and the cross-row rule
+	void Debug_InitLeversWith(const TMap<FName, double>& Rows); // test only (LV0): InitLevers itself, these rows read in place of the config's (empty: the authored config); an empty list
 
 	// --- Rooms & the Hope index (M2 Gate B) ---
 	// Carved cells take room FUNCTIONS (zoning, free - construction costs are a
@@ -1930,8 +2090,8 @@ public:
 	// political journal; E6 reads its clearing sol too), and a Comply while the mark exists withdraws it. bIssuing (DefyIssue's Defy half):
 	// the Defy's alert carries the issue's news too, so the act shows one banner (the banner keeps only the last alert).
 	bool ResolveDilemma(const FRHCommand& Cmd, bool bComply, FString& OutReason, bool bIssuing = false);
-	bool IsRouteClosed(FName Rival) const { return ClosedRoutes.Contains(Rival); }
-	int32 GetClosedRouteCount() const { return ClosedRoutes.Num(); }
+	bool IsRouteClosed(FName Rival) const;           // E6: a Closed rule names it
+	int32 GetClosedRouteCount() const;               // E6: the Closed rules
 	// The lasting morale swing from recent choices (fades toward 0); folds into
 	// the Hope index. Signed: negative after Comply, positive after Defy.
 	double GetSolidarityHope() const { return SolidarityHope; }
@@ -1948,9 +2108,12 @@ public:
 	// craters, an incident). No live RNG - the seed is (rival, attempt#).
 	double GetHumanNatureAxis() const { return HumanNatureAxis; }
 	double GetHiddenTension(FName Rival) const;
+	int32 GetCovertAttempts() const { return CovertAttempts; } // E6: the roll's saved counter (a test reads which attempt an op takes)
 	// Resolve a covert requisition against a rival (the uplink verb's worker).
-	// Returns false (with reason) if the rival isn't a valid target.
-	bool ResolveCovert(FName Rival, FString& OutReason);
+	// Returns false (with reason) if the rival isn't a valid target. E6: the
+	// executing order is passed in (its ExecuteAt keys a theft's market effect
+	// and a betrayal's windows; its CommandId orders the effects).
+	bool ResolveCovert(const FRHCommand& Cmd, FName Rival, FString& OutReason);
 	// True while the sun is down (folds Module 2's night visibility into covert
 	// detection). Deterministic from the sol clock.
 	bool IsNight() const;
@@ -1963,8 +2126,8 @@ public:
 	// gated like a covert op; a hostile act - HumanNature toward Destructive).
 	// Discovery: a survey may uncover a DORMANT settlement, unlocking it for
 	// trade/diplomacy. All deterministic, no combat.
-	bool ResolveLaunder(FName Rival, FString& OutReason);
-	bool ResolveSabotage(FName Rival, FString& OutReason);
+	bool ResolveLaunder(const FRHCommand& Cmd, FName Rival, FString& OutReason);   // E6: the order keys the offering's market effect
+	bool ResolveSabotage(const FRHCommand& Cmd, FName Rival, FString& OutReason);  // E6: the order keys the disruption's market window
 	// A rival is available to interact with if it ships active OR was discovered.
 	bool IsRivalAvailable(FName Rival) const;
 	// Sols of sabotage disruption remaining on a rival (0 = operating normally).
@@ -1980,8 +2143,8 @@ public:
 	// Solidarity Dilemma (Earth demanding YOU cut trade) and pitched higher =
 	// an escalation. All player-facing wording is Gate-D framing-review placeholder.
 	double GetInfluence() const { return Influence; }
-	bool IsEmbargoed(FName Rival) const { return EmbargoGrace.Contains(Rival); }
-	bool HasDefected(FName Rival) const { return DefectedRivals.Contains(Rival); }
+	bool IsEmbargoed(FName Rival) const;             // E6: an Embargo rule names it
+	bool HasDefected(FName Rival) const;             // E6: a Severed rule names it
 	double GetEmbargoGrace(FName Rival) const;
 	// The rival currently embargoing you (None if none) - the deck's "who to pacify".
 	FName GetEmbargoingRival() const;
@@ -4030,7 +4193,8 @@ private:
 	FRHRivalEconomy* FindRivalEconomy(FName Rival) const; // lazily synced; const because the cache is mutable
 	FRHMarket* FindMarket(int32 RegionId) const;
 	void RollMarket(int32 SolNow);                   // StepCityGrowth, straight after RollEconomyLedger, with the same SolNow
-	void MarketProduceAndReprice(FRHMarket& Market);
+	// E6: the sol closed, and the rivals whose sabotage window covers it (their production is cut this sol).
+	void MarketProduceAndReprice(FRHMarket& Market, int32 ClosingSol, TArrayView<const FName> CutRivals);
 	void ClearConvoys(int32 ClosingSol, int32 DueUpToSol);
 	void ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol);
 	int64 CreditSpend(int64 Mcr);                    // the only debit writer: pays min(Mcr, Balance), returns the rest
@@ -4051,6 +4215,11 @@ private:
 		bool bMarks = false;
 		bool bConverted = false;
 		int64 ReserveMmk = 0;
+		// E6: the sol the walk was read at, each line's booking markup (BookConvoy records both in the convoy's terms), and whether a pact's
+		// window covers it (the cargo cap is PactCargoKg).
+		int32 EffSol = -1;
+		TArray<int32> LineMarkupBp;
+		bool bPact = false;
 	};
 	// EffSol (E5) is the sol the order clears in: max(floor(ExecuteAt / sol), MarketCheckedSol) for a booking, GetBookingSolNow() for a preview.
 	bool PlanConvoy(FName RivalName, bool bStanding, const FString& OrderText, int32 EffSol, FRHBookPlan& OutPlan, FString& OutWhy) const;
@@ -4122,6 +4291,58 @@ private:
 	void WriteCurrencyBlock(FArchive& Ar) const;
 	void ReadCurrencyBlock(FArchive& Ar, const TArray<uint8>& File);
 	void ReconcileReservations();                    // after the currency block: both purses' reservations, the lifetime totals, the flags
+	// E6, the levers: its state (SAVED in the 'RHL6' frame, v57, unless marked transient; the v19 / v21 / v22 slots mirror the rules).
+	TArray<FRHTradeRule> TradeRules;                 // ascending by Id; appends only add at the end
+	int32 NextRuleId = 1;
+	TArray<FRHMarketEffect> PendingMarketEffects;    // in (ClearSol, CommandId, Sub) order
+	TArray<FRHConvoyTerms> ConvoyTerms;              // by convoy Id: one per uncleared priced convoy, dropped at its clearing
+	int64 TariffPaidMcr = 0;                         // lifetime markup paid or forgone on orders cleared before the market counts in marks
+	int64 TariffPaidMmk = 0;                         // ... on orders cleared while it counts in marks, in the market's unit (panel only)
+	bool bLeversEnabled = true;                      // transient: the harness switch (Debug_SetLeversEnabled), never saved
+	bool bLeversBlockLost = false;                   // transient: the last load could not use the 'RHL6' frame
+	TArray<FRHMarketEffectApplied> MarketEffectsApplied; // transient
+	TArray<FRHProductionCut> ProductionCuts;         // transient
+	// Config (the C++ fallbacks equal RH_Config.csv; each is clamped to its sane range on read).
+	double PactMinRelation = 50.0, PactInfluenceCost = 15.0, PactTension = 5.0, PactHumanNatureShift = 3.0;
+	int32 PactCargoKg = 2000;
+	double PactBreakRelationHit = 25.0, PactBreakHumanNatureShift = 10.0, PactBreakTension = 5.0;
+	int32 PactBetrayalTariffBp = 2500, PactBetrayalTariffSols = 30, TariffMaxBp = 9000, SabotageMarketSols = 6, SabotageCutPct = 100;
+	void InitLevers();                               // config, then an empty list (world start)
+	void InitLeversFrom(const TMap<FName, double>* Rows); // InitLevers' body: Rows, when given, read in place of the config's rows
+	void ClampBetrayalTariffToMax();                 // the config's one cross-row rule: PactBetrayalTariffBp <= TariffMaxBp
+	FRHTradeRule& AppendTradeRule(ERHTradeRuleKind Kind, ERHTradeRuleOrigin Origin, FName Party); // the next Id, at the end
+	const FRHTradeRule* FindTradeRule(ERHTradeRuleKind Kind, FName Party) const; // the lowest-Id rule of that kind naming the rival
+	FRHTradeRule* FindLivePact(FName Party);
+	void EndPact(FRHTradeRule& Pact, int32 ActSol); // bLive false, UntilSol = max(ActSol + 2, FromSol) (re-review O2)
+	int32 AppendBetrayalTariff(FName Rival, int32 ActSol); // every resource, both ways, PactBetrayalTariffBp (at most TariffMaxBp, which it returns), [ActSol + 2, ActSol + 2 + Sols)
+	void BreakPactByPartner(FName Rival, int32 ActSol); // a caught covert op or sabotage against a live partner (D20)
+	bool ResolveTreaty(const FRHCommand& Cmd, FString& OutReason);
+	void RecordMarketEffects(const FRHCommand& Cmd, FName Rival, ERHMarketEffectKind Kind, const TMap<FName, double>& Goods);
+	void ApplyMarketEffects(int32 ClosingSol, int32 DueUpToSol); // RollMarket, per pass, before production and outside the live gate
+	void RetireTradeRules();                         // RollMarket, after everything else
+	// D10 / R3 / re-review O2: does it retire at a roll leaving OpenSol open. Defined here, inline: RollMarket tests every rule once a call (-scale's
+	// 60 rules), and its own translation unit cannot inline a call into RHSimLevers.cpp. Closed, Severed and Embargo never retire (an Embargo leaves
+	// only by Pacify or by hardening into Severed).
+	static bool TradeRuleRetiresAt(const FRHTradeRule& R, int32 OpenSol)
+	{
+		switch (R.Kind)
+		{
+		case ERHTradeRuleKind::Disrupted: return !R.bLive && (!R.HasWindow() || (R.UntilSol >= 0 && R.UntilSol <= OpenSol));
+		case ERHTradeRuleKind::Pact:      return !R.bLive && R.UntilSol >= 0 && (R.UntilSol <= OpenSol || R.UntilSol == R.FromSol);
+		case ERHTradeRuleKind::Tariff:    return R.UntilSol >= 0 && R.UntilSol <= OpenSol;
+		default:                          return false;
+		}
+	}
+	const FRHConvoyTerms* FindConvoyTerms(int32 ConvoyId) const;
+	void DropConvoyTerms(int32 ConvoyId);
+	void WriteLeversBlock(FArchive& Ar) const;
+	// After E5's reader: the rules from the frame, or rebuilt from the mid-file mirror when the frame is lost; then the terms of every
+	// uncleared priced convoy (a missing entry clears at max(ClearSol, the open sol), re-review O3).
+	void ReadLeversBlock(FArchive& Ar, const TArray<uint8>& File, const TArray<FName>& MirrorClosed, const TMap<FName, double>& MirrorSabotage,
+		const TMap<FName, double>& MirrorEmbargo, const TArray<FName>& MirrorDefected);
+	// The v19 / v21 / v22 slots, projected from the rules (D31): the Closed names and the Severed names sorted with LexicalLess, each rival's
+	// largest live disruption in the order of its first live Disrupted rule, each Embargo's grace in Id order.
+	void ProjectPoliticalMirror(TArray<FName>& OutClosed, TMap<FName, double>& OutSabotage, TMap<FName, double>& OutEmbargo, TArray<FName>& OutDefected) const;
 	void WriteLedgerBlock(FArchive& Ar) const;
 	void ReadLedgerBlock(FArchive& Ar, const TArray<uint8>& File); // never refuses: a bad block resets the ledger with a Warning (R1); v54: its own frame in File
 	double MoveHomeIntervalSols = 1.0;               // 0 = nobody moves home
@@ -4160,8 +4381,8 @@ private:
 	double RequisitionMartianPenalty = 0.6;
 	double RequisitionTensionPenalty = 0.3;
 	// The Solidarity Dilemma (M3 Gate C; save v19). Closed routes refuse new
-	// convoys; SolidarityHope is a fading morale shock folded into the index.
-	TSet<FName> ClosedRoutes;
+	// convoys (E6: Closed rules in TradeRules); SolidarityHope is a fading
+	// morale shock folded into the index.
 	double SolidarityHope = 0.0;
 	double DilemmaComplyAxisShift = 20.0;
 	double DilemmaDefyAxisShift = 20.0;
@@ -4188,9 +4409,9 @@ private:
 	double CovertHiddenTensionCaught = 25.0;
 	double CovertRelationHitCaught = 30.0;
 	double& HiddenTensionRef(FName Rival) { return HiddenTensions.FindOrAdd(Rival); }
-	// The espionage economy (M4 Gate B; save v21). Sabotage timers per rival;
-	// the set of dormant rivals a survey has uncovered.
-	TMap<FName, double> SabotageSols;   // rival -> disruption sols remaining
+	// The espionage economy (M4 Gate B; save v21). Sabotage timers (E6: the
+	// live timers of Disrupted rules in TradeRules); the set of dormant rivals a
+	// survey has uncovered.
 	TSet<FName> DiscoveredRivals;
 	double LaunderHiddenDrop = 20.0;
 	double LaunderRelationBonus = 4.0;
@@ -4199,11 +4420,10 @@ private:
 	double SabotageDurationSols = 6.0;
 	double SabotageHiddenTension = 20.0;
 	double DiscoveryChancePerSurvey = 0.5;
-	// Earth's pre-emptive pressure (M4 Gate C; save v22). EmbargoGrace: rival ->
-	// sols left to pacify before defection; DefectedRivals: locked-hostile.
-	// Influence: the diplomatic soft currency.
-	TMap<FName, double> EmbargoGrace;
-	TSet<FName> DefectedRivals;
+	// Earth's pre-emptive pressure (M4 Gate C; save v22). An embargo's grace
+	// (sols left to pacify before defection) and a defection (locked-hostile)
+	// are E6's Embargo and Severed rules in TradeRules. Influence: the
+	// diplomatic soft currency.
 	double Influence = 0.0;
 	double InfluencePerTrade = 3.0;
 	double InfluencePerLaunder = 2.0;

@@ -22,6 +22,7 @@ namespace RHOrder
 		if (Verb == FName("RenameDistrict")) { return TEXT("Rename district"); }
 		if (Verb == FName("Currency"))      { return TEXT("Issue"); } // E5 (PLACEHOLDER, gate-d-wording Y7): "Issue a Martian currency (the mark)"
 		if (Verb == FName("Exchange"))      { return TEXT("Bloc exchange"); }
+		if (Verb == FName("Treaty"))        { return TEXT("Pact"); } // E6 (PLACEHOLDER, gate-d-wording Z4): the pact's sign or break
 		return Verb.ToString();
 	}
 

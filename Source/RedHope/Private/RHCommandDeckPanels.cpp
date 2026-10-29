@@ -2435,6 +2435,121 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 							.AutoWrapText(true)
 							.Text(Txt(FString::Printf(TEXT("%.0f km away  -  trades %s for your %s"), Row.DistanceKm, *LotWords(Row.ExportLot), *LotWords(Row.ImportLot))))
 						]
+						// E6 (minimal; E8 is the full panel): the pact - its state, and SIGN (the sim's CanSignPact greys it, with the reason on a dim
+						// line under the row and in its tooltip, as E5's issue button does) or BREAK (its cost in the tooltip) - then any tariff this
+						// neighbour charges and a sabotage's production window. The windows are half-open, so a line names the last sol it covers
+						// (Until - 1), and while a window has not opened yet (its first sol past the market's open sol) the line names its first sol
+						// too, so a term that is coming never reads as one in force. Placeholder wording (gate-d-wording Z1-Z3).
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+							[
+								SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+								.Text_Lambda([this, RowName]()
+								{
+									const URHSimWorldSubsystem* S = GetSim();
+									if (!S) { return FText::GetEmpty(); }
+									// The sol it was signed in (always one already reached); its bigger convoys start two sols later, named until then.
+									const int32 Since = S->GetLivePactSignedSol(RowName);
+									if (Since < 0)
+									{
+										return Txt(FString::Printf(TEXT("Sign a pact (%.0f Influence)"), S->GetPactInfluenceCost()));
+									}
+									const int32 Terms = S->GetLivePactFromSol(RowName);
+									return Terms > S->GetMarketCheckedSol()
+										? Txt(FString::Printf(TEXT("Pact since sol %d (bigger convoys from sol %d)"), Since, Terms))
+										: Txt(FString::Printf(TEXT("Pact since sol %d"), Since));
+								})
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+							[
+								SNew(SBox)
+								.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); return (S && !S->HasLivePact(RowName)) ? EVisibility::Visible : EVisibility::Collapsed; })
+								.ToolTipText_Lambda([this, RowName]()
+								{
+									const URHSimWorldSubsystem* S = GetSim();
+									if (!S) { return FText::GetEmpty(); }
+									FString Why;
+									if (!S->CanSignPact(RowName, Why)) { return Txt(FString::Printf(TEXT("Cannot sign a pact now: %s."), *Why)); }
+									return Txt(FString::Printf(TEXT("Sign a pact: it costs %.0f Influence, Earth's tension rises by %.0f and your conduct counts it as diplomacy (+%.0f). Earth cannot turn them against you once it lands, and from two sols after it lands your convoys to them carry up to %d kg each way."),
+										S->GetPactInfluenceCost(), S->GetPactTension(), S->GetPactHumanNatureShift(), S->GetPactCargoKg()));
+								})
+								[
+									D::Button(Txt(TEXT("SIGN")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTreaty, RowName, true),
+										MakeAttributeLambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return S && S->CanSignPact(RowName, Why); }))
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+							[
+								SNew(SBox)
+								.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->HasLivePact(RowName)) ? EVisibility::Visible : EVisibility::Collapsed; })
+								.ToolTipText_Lambda([this, RowName, Row]()
+								{
+									const URHSimWorldSubsystem* S = GetSim();
+									if (!S) { return FText::GetEmpty(); }
+									return Txt(FString::Printf(TEXT("Break the pact: your standing with them falls by %.0f, your conduct counts it as a betrayal (-%.0f) and Earth's tension eases by %.0f. From two sols after it lands, for %d sols, %s charges %s on every trade with you."),
+										S->GetPactBreakRelationHit(), S->GetPactBreakHumanNatureShift(), S->GetPactBreakTension(), S->GetPactBetrayalTariffSols(), *Row.DisplayName,
+										*URHSimWorldSubsystem::FormatPercentBp(S->GetPactBetrayalTariffBp())));
+								})
+								[
+									D::Button(Txt(TEXT("BREAK")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTreaty, RowName, false))
+								]
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+						[
+							SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+							.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); FString Why; return (S && !S->HasLivePact(RowName) && !S->CanSignPact(RowName, Why)) ? EVisibility::Visible : EVisibility::Collapsed; })
+							.Text_Lambda([this, RowName]()
+							{
+								const URHSimWorldSubsystem* S = GetSim();
+								FString Why;
+								return (S && !S->HasLivePact(RowName) && !S->CanSignPact(RowName, Why)) ? Txt(FString::Printf(TEXT("Cannot sign a pact now: %s."), *Why)) : FText::GetEmpty();
+							})
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+						[
+							SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::Amber).AutoWrapText(true)
+							.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); int32 Bp = 0, Until = -1; return (S && S->GetBetrayalTariff(RowName, Bp, Until)) ? EVisibility::Visible : EVisibility::Collapsed; })
+							.Text_Lambda([this, RowName]()
+							{
+								const URHSimWorldSubsystem* S = GetSim();
+								int32 Bp = 0, Until = -1, From = -1;
+								if (!S || !S->GetBetrayalTariff(RowName, Bp, Until, &From))
+								{
+									return FText::GetEmpty();
+								}
+								return From > S->GetMarketCheckedSol()
+									? Txt(FString::Printf(TEXT("Tariff %s from sol %d until sol %d"), *URHSimWorldSubsystem::FormatPercentBp(Bp), From, Until - 1))
+									: Txt(FString::Printf(TEXT("Tariff %s until sol %d"), *URHSimWorldSubsystem::FormatPercentBp(Bp), Until - 1));
+							})
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+						[
+							SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+							// The cut is the config's SabotageCutPct (100 by Q-B a: "stopped"; any other value is named as a cut, and 0 - or the
+							// harness's levers off - cuts nothing, so no line).
+							.Visibility_Lambda([this, RowName]()
+							{
+								const URHSimWorldSubsystem* S = GetSim();
+								return (S && S->HasRivalEconomy(RowName) && S->IsLeversEnabled() && S->GetSabotageCutPct() > 0 && S->GetDisruptionUntilSol(RowName) >= 0) ? EVisibility::Visible : EVisibility::Collapsed;
+							})
+							.Text_Lambda([this, RowName]()
+							{
+								const URHSimWorldSubsystem* S = GetSim();
+								int32 From = -1, Until = -1;
+								if (!S || !S->GetDisruptionWindow(RowName, From, Until))
+								{
+									return FText::GetEmpty();
+								}
+								const int32 Pct = S->GetSabotageCutPct();
+								const FString What = Pct >= 100 ? FString(TEXT("Production stopped")) : FString::Printf(TEXT("Production cut %d%%"), Pct);
+								return From > S->GetMarketCheckedSol()
+									? Txt(FString::Printf(TEXT("%s from sol %d until sol %d"), *What, From, Until - 1))
+									: Txt(FString::Printf(TEXT("%s until sol %d"), *What, Until - 1));
+							})
+						]
 						+ SVerticalBox::Slot().AutoHeight()
 						[
 							SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(4.f, 4.f))
@@ -2839,6 +2954,27 @@ FReply SRHCommandDeck::HandleRivalVerb(FName Verb, FName Target)
 	return FReply::Handled();
 }
 
+FReply SRHCommandDeck::HandleTreaty(FName Rival, bool bSign)
+{
+	// E6: the Treaty verb carries Sign or Break in its Text (the sim reads it case-insensitively); the worker judges it when it lands.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Rival.IsNone())
+	{
+		return FReply::Handled();
+	}
+	FRHCommand Cmd;
+	Cmd.Verb = FName("Treaty");
+	Cmd.Target = Rival;
+	Cmd.Text = bSign ? TEXT("Sign") : TEXT("Break");
+	Sim->EnqueueCommand(Cmd);
+	if (PC.IsValid())
+	{
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s (%s)"), *RHOrder::VerbText(Cmd.Verb), *RHOrder::TargetText(GetDefs(), Rival), bSign ? TEXT("sign") : TEXT("break")), D::Teal);
+	}
+	return FReply::Handled();
+}
+
 // E4: a neighbor's market card. Visible while the neighbor has an economy: the prices of what it trades with what it holds as of the last roll, a
 // draft order per resource (Buy +100 / Sell +100), what the draft may cost, and SEND ORDER, which the sim's own rule (CanPlaceOrder) greys with the
 // reason in its tooltip. The convoy leaves at once; the market fills the order at the end of the sol, up to what the neighbor holds then.
@@ -3024,14 +3160,21 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 
 FReply SRHCommandDeck::HandleOrderNudge(FName Rival, FName Resource, int32 Kg)
 {
+	// A convoy carries at most ConvoyCargoKg each way (1,000), a pact partner's PactCargoKg (E6: 2,000, for an order clearing in the pact's
+	// window); the sim refuses more, so a draft is held to the sim's own cap for an order sent now (GetOrderCargoCapKg: the pact's window at
+	// the sol that order would clear in - not the pact's live flag, which opens two sols before the window and closes two sols before it ends).
+	const URHSimWorldSubsystem* S = GetSim();
+	const int32 Cap = S ? S->GetOrderCargoCapKg(Rival) : 1000;
 	int32& Draft = OrderDrafts.FindOrAdd(Rival).FindOrAdd(Resource);
-	Draft = FMath::Clamp(Draft + Kg, -1000, 1000); // a convoy carries at most 1,000 kg each way (ConvoyCargoKg); the sim refuses more
+	Draft = FMath::Clamp(Draft + Kg, -Cap, Cap);
 	return FReply::Handled();
 }
 
 void SRHCommandDeck::Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg)
 {
-	OrderDrafts.FindOrAdd(Rival).FindOrAdd(Resource) = FMath::Clamp(Kg, -1000, 1000);
+	const URHSimWorldSubsystem* S = GetSim();
+	const int32 Cap = S ? S->GetOrderCargoCapKg(Rival) : 1000;
+	OrderDrafts.FindOrAdd(Rival).FindOrAdd(Resource) = FMath::Clamp(Kg, -Cap, Cap);
 }
 
 FReply SRHCommandDeck::HandleOrderClear(FName Rival)

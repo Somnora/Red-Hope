@@ -1910,6 +1910,39 @@ namespace
 			}, 2.f);
 		}
 
+		// ---- E6: a pact, in the same panel. The harness makes Zarya trust the colony (relation 60) and gives it the Influence a pact costs, so
+		// the sim's CanSignPact passes and SIGN is live on Zarya's card; a real press on it transmits a Treaty order with Text Sign.
+		Runner.Do(TEXT("pact.setup"), []()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (Sim)
+			{
+				Sim->Debug_SetRelation(FName("Zarya"), 60.0);
+				Sim->Debug_AddInfluence(FMath::Max(0.0, Sim->GetPactInfluenceCost() + 5.0 - Sim->GetInfluence()));
+			}
+		}, 1.f);
+		{
+			const TSharedRef<FPress> Sign = PushPress(TEXT("pact.SIGN"), LocateButton(TEXT("SIGN"), 0, true));
+			PushCheck(TEXT("pact.SIGN"), Sign, []()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim)
+				{
+					return FString(TEXT("no sim"));
+				}
+				for (const FRHCommand& Cmd : Sim->GetUplinkQueue())
+				{
+					if (Cmd.Verb == FName("Treaty") && Cmd.Target == FName("Zarya") && Cmd.Text == TEXT("Sign"))
+					{
+						return FString();
+					}
+				}
+				FString Why;
+				Sim->CanSignPact(FName("Zarya"), Why);
+				return FString::Printf(TEXT("no Treaty Sign to Zarya was transmitted (CanSignPact: '%s')"), *Why);
+			}, 2.f);
+		}
+
 		// ---- the traffic overlay flips on and off
 		{
 			const TSharedRef<FPress> On = PushPress(TEXT("traffic.on"), LocateButton(TEXT("Traffic"), 0, true));

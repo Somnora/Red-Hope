@@ -768,7 +768,7 @@ int32 RHRunDeepDistrictsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSim
 			for (int32 k = 0; k < 22 && bAll; ++k) { bAll &= Rd(W, I + 4 * k) == Pattern[k]; }
 			if (bAll) { At = I; }
 		}
-		Expect(bRead && Ver == 56 && At != INDEX_NONE && Rd(W, At - 8) == 1 && Rd(W, At - 4) == 0, FString::Printf(TEXT("DD9 the file says version %u; the floor-shape block starts at byte %d, straight after the cavern block (NextCavernId 1, 0 caverns)"), Ver, At));
+		Expect(bRead && Ver == 57 && At != INDEX_NONE && Rd(W, At - 8) == 1 && Rd(W, At - 4) == 0, FString::Printf(TEXT("DD9 the file says version %u; the floor-shape block starts at byte %d, straight after the cavern block (NextCavernId 1, 0 caverns)"), Ver, At));
 		if (!bRead || At == INDEX_NONE) { return Finish(); }
 		// A, B and C: counts 4, 2 and 2 points; the 5 skeleton records come first (12 bytes each), then the shape count.
 		Expect(Rd(W, At + 64) == 3 && Rd(W, At + 68) == 1 && Rd(W, At + 72) == 4 && Rd(W, At + 76) == 1 && Rd(W, At + 80) == 0 && Rd(W, At + 84) == -1 && Rd(W, At + 124) == 2 && Rd(W, At + 128) == 2 && Rd(W, At + 156) == 3 && Rd(W, At + 160) == 2
@@ -812,7 +812,7 @@ int32 RHRunDeepDistrictsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSim
 		{ TArray<uint8> T = W; PutI(T, At + 164 + 12 + 8, -4); Expect(TryFile(TEXT("deepr16"), T, Err) && Err.Contains(TEXT("held whole")), FString::Printf(TEXT("DD9 a level held whole that also holds a shape's point is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W; PutI(T, At + 4 + 12 * 2 + 4, -3); Expect(TryFile(TEXT("deepr17"), T, Err) && Err.Contains(TEXT("starts on floor -2")), FString::Printf(TEXT("DD9 a shape that does not start where its district says is refused (%s)"), *Err)); }
 		{ TArray<uint8> T = W; T.SetNum(At + 8); Expect(TryFile(TEXT("deepr18"), T, Err) && Err.Contains(TEXT("district count 5")), FString::Printf(TEXT("DD9 a file cut short is refused (%s)"), *Err)); }
-		{ TArray<uint8> T = W; const uint32 V48 = 48; FMemory::Memcpy(T.GetData() + 4, &V48, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("deepr19"))); FString E48; const bool bOk = Sim->LoadColony(TEXT("deepr19"), E48); Expect(!bOk && E48.Contains(TEXT("Save format mismatch")) && E48.Contains(TEXT("version 48")) && E48.Contains(TEXT("/56")), FString::Printf(TEXT("DD9 a v48 file is refused as a version error (%s)"), *E48)); }
+		{ TArray<uint8> T = W; const uint32 V48 = 48; FMemory::Memcpy(T.GetData() + 4, &V48, 4); FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("deepr19"))); FString E48; const bool bOk = Sim->LoadColony(TEXT("deepr19"), E48); Expect(!bOk && E48.Contains(TEXT("Save format mismatch")) && E48.Contains(TEXT("version 48")) && E48.Contains(TEXT("/57")), FString::Printf(TEXT("DD9 a v48 file is refused as a version error (%s)"), *E48)); }
 		Expect(DistrictDigest() == D0, TEXT("DD9 after all of that the colony is exactly as it was"));
 
 		// Step-2 fix 4: the district list of the file names Id 2 twice (district #3's Id is overwritten). The deep block checks only the skeleton's own order,

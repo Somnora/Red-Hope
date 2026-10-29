@@ -1136,6 +1136,74 @@ static FAutoConsoleCommandWithWorldAndArgs GRHPacify(
 		}
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHTreaty(
+	TEXT("RH.Treaty"),
+	TEXT("RH.Treaty <RivalName> sign|break - sign a pact with a neighbour (Influence, Earth's displeasure; bigger convoys, and Earth cannot turn them against you) or break one (they charge a tariff for a while). Rides the uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World || Args.Num() < 2 || !(Args[1].Equals(TEXT("sign"), ESearchCase::IgnoreCase) || Args[1].Equals(TEXT("break"), ESearchCase::IgnoreCase)))
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Treaty <RivalName> sign|break"));
+			return;
+		}
+		if (URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			const bool bSign = Args[1].Equals(TEXT("sign"), ESearchCase::IgnoreCase);
+			FString Why;
+			if (bSign ? !Sim->CanSignPact(FName(*Args[0]), Why) : !Sim->CanBreakPact(FName(*Args[0]), Why))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.Treaty] the pact would be refused now: %s (sent anyway; the worker judges it when it lands)"), *Why);
+			}
+			FRHCommand Cmd; Cmd.Verb = FName("Treaty"); Cmd.Target = FName(*Args[0]); Cmd.Text = bSign ? TEXT("Sign") : TEXT("Break");
+			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHLevers(
+	TEXT("RH.Levers"),
+	TEXT("RH.Levers [trust <RivalName>] - log the trade rules (closed routes, disruptions, defections, embargoes, pacts and tariffs, by Id, with their market windows and live timers), the pending market effects of covert acts, and the lifetime tariff totals. trust (DEBUG/QA, for captures) sets that neighbour's relation to 60 and tops Influence up to the pact's cost + 5."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* MutSim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!MutSim) { return; }
+		if (Args.Num() >= 2 && Args[0].Equals(TEXT("trust"), ESearchCase::IgnoreCase))
+		{
+			// The click test's pact setup, for captures: relation 60 (the pact needs 50) and Influence at the pact's cost + 5.
+			const FName Rival(*Args[1]);
+			if (!MutSim->IsRivalAvailable(Rival))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("[RH.Levers] no settlement '%s'"), *Args[1]);
+				return;
+			}
+			MutSim->Debug_SetRelation(Rival, 60.0);
+			MutSim->Debug_AddInfluence(FMath::Max(0.0, MutSim->GetPactInfluenceCost() + 5.0 - MutSim->GetInfluence()));
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Levers] %s's relation set to %.0f and Influence to %.0f (debug)"), *Rival.ToString(), MutSim->GetRivalRelation(Rival), MutSim->GetInfluence());
+			return;
+		}
+		const URHSimWorldSubsystem* Sim = MutSim;
+		static const TCHAR* Kinds[] = { TEXT("?"), TEXT("closed"), TEXT("disrupted"), TEXT("severed"), TEXT("embargo"), TEXT("pact"), TEXT("tariff") };
+		static const TCHAR* Origins[] = { TEXT("?"), TEXT("comply"), TEXT("sabotage"), TEXT("defection"), TEXT("earth pressure"), TEXT("signed"), TEXT("betrayal"), TEXT("harness") };
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Levers] %d trade rule(s), next Id %d | the market's open sol %d | tariff paid %s cr, %s marks | levers %s"),
+			Sim->GetTradeRules().Num(), Sim->GetNextRuleId(), Sim->GetMarketCheckedSol(), *URHSimWorldSubsystem::FormatCredits(Sim->GetTariffPaidMcr()),
+			*URHSimWorldSubsystem::FormatCredits(Sim->GetTariffPaidMmk()), Sim->IsLeversEnabled() ? TEXT("on") : TEXT("off"));
+		for (const FRHTradeRule& R : Sim->GetTradeRules())
+		{
+			const int32 K = (int32)R.Kind, O = (int32)R.Origin;
+			const FString Window = !R.HasWindow() ? FString(TEXT("no window")) : (R.UntilSol < 0 ? FString::Printf(TEXT("[%d, open)"), R.FromSol) : FString::Printf(TEXT("[%d, %d)"), R.FromSol, R.UntilSol));
+			const FString Res = R.ResSlot < 0 ? FString(TEXT("every resource")) : Sim->GetLedgerSlotName(R.ResSlot).ToString();
+			// A tariff has no live part (its flag is always false): it has ended only once its window is behind the open sol.
+			const bool bEnded = R.Kind == ERHTradeRuleKind::Tariff ? (R.UntilSol >= 0 && R.UntilSol <= Sim->GetMarketCheckedSol()) : !R.bLive;
+			UE_LOG(LogRedHope, Display, TEXT("  #%d %s %s (%s)%s %s%s%s"), R.Id, K >= 1 && K <= 6 ? Kinds[K] : Kinds[0], *R.Party.ToString(), O >= 1 && O <= 7 ? Origins[O] : Origins[0],
+				R.Kind == ERHTradeRuleKind::Tariff ? *FString::Printf(TEXT(" %d bp on %s%s"), R.MarkupBp, *Res, R.Dir == 1 ? TEXT(" buys") : (R.Dir == 2 ? TEXT(" sells") : TEXT(""))) : TEXT(""),
+				*Window, R.LiveSols > 0.0 ? *FString::Printf(TEXT(", %.2f sols live"), R.LiveSols) : TEXT(""), bEnded ? TEXT(", ended") : TEXT(""));
+		}
+		for (const FRHMarketEffect& E : Sim->GetPendingMarketEffects())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("  pending: %s %lld g of %s %s %s at the end of sol %d (order %d, %d)"), E.Kind == ERHMarketEffectKind::Theft ? TEXT("theft:") : TEXT("offering:"),
+				E.Grams, *Sim->GetLedgerSlotName(E.Slot).ToString(), E.Kind == ERHMarketEffectKind::Theft ? TEXT("out of") : TEXT("into"), *E.Party.ToString(), E.ClearSol, E.CommandId, E.Sub);
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHLaunder(
 	TEXT("RH.Launder"),
 	TEXT("RH.Launder <RivalName> - make amends to a rival (return goods to defuse hidden tension). Rides the uplink."),

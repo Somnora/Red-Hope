@@ -34,7 +34,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 56;  // v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 57;  // v57: the levers - a levers block in its own frame ('RHL6', written straight after E5's 'RHE5'): FormatRev 1, NextRuleId, the trade rules by Id (Id, kind, origin, the rival's name, the resource's name or "*" for every resource, direction, markup in bp, the market window's two sols, the live timer, the live flag), the pending market effects of covert acts in (ClearSol, CommandId, sub) order (clear sol, CommandId, sub, kind, rival, resource, grams), the lifetime tariff totals (mcr, mmk), and the terms of every uncleared priced convoy by convoy Id (the sol it clears in and each line's booking markup); sized by history, never a constant; the v19 / v21 / v22 slots keep their layout and are written as a mirror of the rules (the Closed names, each rival's largest live disruption, each embargo's grace, the Severed names), so a lost frame rebuilds the rules from them (E6); v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -510,6 +510,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	HopeFirstHarvestMilestone = Defs->GetConfigScalar(FName("HopeFirstHarvestMilestone"), HopeFirstHarvestMilestone);
 	InitMarket(); // E4: the market's config, then the rivals' economies (parsed once here, and again only at load or when the rivals table changes)
 	InitCurrency(); // E5: the currency's config; unissued, with the political record seeded from the identity and tension just read
+	InitLevers();   // E6: the levers' config; no trade rule, no pending effect, no terms
 	HopeSmoothed = HopeBase; // a fresh colony opens at baseline mood
 	if (Clock)
 	{
@@ -9628,7 +9629,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		// Resolves at execution - the day/night of THIS moment shapes detection,
 		// so timing your op for the Martian night is real. Rides the uplink.
 		FString Reason;
-		if (!ResolveCovert(Cmd.Target, Reason))
+		if (!ResolveCovert(Cmd, Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -9638,7 +9639,7 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	{
 		// M4 Gate B: make amends to a rival, defusing HiddenTension.
 		FString Reason;
-		if (!ResolveLaunder(Cmd.Target, Reason))
+		if (!ResolveLaunder(Cmd, Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -9648,7 +9649,18 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	{
 		// M4 Gate B: a covert blackout that disrupts a rival's trade.
 		FString Reason;
-		if (!ResolveSabotage(Cmd.Target, Reason))
+		if (!ResolveSabotage(Cmd, Cmd.Target, Reason))
+		{
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
+	}
+	else if (Cmd.Verb == FName("Treaty"))
+	{
+		// E6: a pact with a neighbour (Target the rival, Text Sign or Break, any case). One rule (CanSignPact / CanBreakPact) for the verb,
+		// the deck and the cheat; the pact's terms start two sols after the order's own sol.
+		FString Reason;
+		if (!ResolveTreaty(Cmd, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
@@ -9838,7 +9850,7 @@ bool URHSimWorldSubsystem::RollCovertDetected(FName Rival)
 	return U < P;
 }
 
-bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
+bool URHSimWorldSubsystem::ResolveCovert(const FRHCommand& Cmd, FName Rival, FString& OutReason)
 {
 	if (!IsRivalAvailable(Rival))
 	{
@@ -9861,6 +9873,8 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 			*Row->DisplayName, *Row->Nation));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT CAUGHT: %s (relation %.0f, hidden %.0f, humanNature %.0f) ==="),
 			*Row->DisplayName, Rel, Hidden, HumanNatureAxis);
+		// E6 (D20): a partner that catches the colony spying ends the pact from its side, with the betrayal tariff.
+		BreakPactByPartner(Rival, FMath::FloorToInt32(Cmd.ExecuteAtSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds));
 	}
 	else
 	{
@@ -9868,9 +9882,11 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 		// Lander for hauling, fluids join the pool - like a delivery, unpaid).
 		Hidden = FMath::Clamp(Hidden + CovertHiddenTensionClean, 0.0, 100.0);
 		FString Stolen;
+		TMap<FName, double> Loot; // E6: what the rival loses, at the roll closing this order's sol
 		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Row->ExportLot))
 		{
 			const double Amount = RoundToGrams(Item.Value * CovertLotFraction); // E1: whole grams at the boundary
+			Loot.FindOrAdd(Item.Key) += Amount;
 			NoteFlow(Item.Key, ERHLedgerLeg::In, Amount); // E1: the covert loot lands like a delivery
 			if (Defs && Defs->IsSolidResource(Item.Key))
 			{
@@ -9898,17 +9914,31 @@ bool URHSimWorldSubsystem::ResolveCovert(FName Rival, FString& OutReason)
 			*Row->DisplayName, *Stolen));
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== COVERT CLEAN: %s took %s (hidden %.0f, humanNature %.0f) ==="),
 			*Row->DisplayName, *Stolen, Hidden, HumanNatureAxis);
+		// E6 (4.2): the loot now comes out of the victim's store (a rival with an economy, the levers on), at the roll closing this order's
+		// own sol, after that roll's clearing. A caught op takes nothing, so it records nothing; no roll is added (CXCX is untouched).
+		RecordMarketEffects(Cmd, Rival, ERHMarketEffectKind::Theft, Loot);
 	}
 	return true;
 }
 
 double URHSimWorldSubsystem::GetSabotageRemaining(FName Rival) const
 {
-	const double* S = SabotageSols.Find(Rival);
-	return S ? *S : 0.0;
+	// E6: the largest live timer among the rival's live Disrupted rules (a repeated sabotage appends a rule, and the newest, at its full
+	// duration, is the largest - HEAD's reset, double for double), or 0.
+	bool bAny = false;
+	double Most = 0.0;
+	for (const FRHTradeRule& R : TradeRules)
+	{
+		if (R.Kind == ERHTradeRuleKind::Disrupted && R.bLive && R.Party == Rival)
+		{
+			Most = bAny ? FMath::Max(Most, R.LiveSols) : R.LiveSols;
+			bAny = true;
+		}
+	}
+	return bAny ? Most : 0.0;
 }
 
-bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
+bool URHSimWorldSubsystem::ResolveLaunder(const FRHCommand& Cmd, FName Rival, FString& OutReason)
 {
 	// Launder: return goods to a rival to DEFUSE the HiddenTension you built - a
 	// peace offering that costs their ImportLot (what they want from you), warms
@@ -9933,6 +9963,7 @@ bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
 	TMap<FName, double> Spent;
 	SpendTradeLot(Offering, &Spent);
 	NoteFlowMap(Spent, ERHLedgerLeg::Out); // E1: the peace offering leaves for the rival
+	RecordMarketEffects(Cmd, Rival, ERHMarketEffectKind::Offering, Spent); // E6 (4.3): and now lands in its store, at the roll closing this order's sol
 	double& Hidden = HiddenTensionRef(Rival);
 	Hidden = FMath::Clamp(Hidden - LaunderHiddenDrop, 0.0, 100.0);
 	double& Rel = RelationRef(Rival);
@@ -9947,7 +9978,7 @@ bool URHSimWorldSubsystem::ResolveLaunder(FName Rival, FString& OutReason)
 	return true;
 }
 
-bool URHSimWorldSubsystem::ResolveSabotage(FName Rival, FString& OutReason)
+bool URHSimWorldSubsystem::ResolveSabotage(const FRHCommand& Cmd, FName Rival, FString& OutReason)
 {
 	// Sabotage: a covert blackout that disrupts a rival's trade/production for a
 	// period (SabotageDurationSols). Detection-gated like a requisition; a
@@ -9978,10 +10009,23 @@ bool URHSimWorldSubsystem::ResolveSabotage(FName Rival, FString& OutReason)
 			TEXT("SABOTAGE LANDS — %s's production goes dark. They will be offline for a time, and no one saw your hand."),
 			*Row->DisplayName));
 	}
-	// The blackout lands whether or not you were seen (you still hit them).
-	SabotageSols.FindOrAdd(Rival) = SabotageDurationSols;
+	// The blackout lands whether or not you were seen (you still hit them). E6: a NEW Disrupted rule (a repeat appends, never resets one in
+	// place, so every Id an act assigns is the same in both bands): its live timer is HEAD's (it refuses trade for SabotageDurationSols), and
+	// its market window, keyed by this order's own sol c, stops the rival's production at the rolls closing c + 1 .. c + D (Q-B a).
+	const int32 ActSol = FMath::FloorToInt32(Cmd.ExecuteAtSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+	FRHTradeRule& Disruption = AppendTradeRule(ERHTradeRuleKind::Disrupted, ERHTradeRuleOrigin::Sabotage, Rival);
+	Disruption.LiveSols = SabotageDurationSols;
+	if (bLeversEnabled)
+	{
+		Disruption.FromSol = ActSol + 1;
+		Disruption.UntilSol = ActSol + 1 + SabotageMarketSols;
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("=== SABOTAGE: %s offline %.0f sols (caught=%d, hidden %.0f, humanNature %.0f) ==="),
 		*Row->DisplayName, SabotageDurationSols, (int32)bCaught, Hidden, HumanNatureAxis);
+	if (bCaught)
+	{
+		BreakPactByPartner(Rival, ActSol); // E6 (D20): a partner that traces the blackout ends the pact, with the betrayal tariff
+	}
 	return true;
 }
 
@@ -10035,18 +10079,28 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 		if (FMath::Abs(SolidarityHope) < 0.01) { SolidarityHope = 0.0; }
 	}
 	// Sabotage blackouts count down (linear, parity-safe); a rival recovers when
-	// the timer hits zero. Iterate a snapshot so we can drop expired entries.
-	if (SabotageSols.Num() > 0)
+	// the timer hits zero. E6: each live Disrupted rule in Id order, HEAD's
+	// arithmetic statement for statement (the same DtSols, at this point, tested
+	// <= 0.0); an ended rule keeps its market window until it retires, and the
+	// rival recovers when its LAST live disruption ends (one alert, as HEAD's
+	// single timer gave).
+	for (FRHTradeRule& R : TradeRules)
 	{
-		for (auto It = SabotageSols.CreateIterator(); It; ++It)
+		if (R.Kind != ERHTradeRuleKind::Disrupted || !R.bLive)
 		{
-			It.Value() -= DtSols;
-			if (It.Value() <= 0.0)
+			continue;
+		}
+		R.LiveSols -= DtSols;
+		if (R.LiveSols <= 0.0)
+		{
+			R.bLive = false;
+			R.LiveSols = 0.0;
+			const FName Party = R.Party;
+			if (!TradeRules.ContainsByPredicate([Party](const FRHTradeRule& X) { return X.Kind == ERHTradeRuleKind::Disrupted && X.bLive && X.Party == Party; }))
 			{
-				const FRHRivalRow* Row = Defs ? Defs->GetRival(It.Key()) : nullptr;
+				const FRHRivalRow* Row = Defs ? Defs->GetRival(Party) : nullptr;
 				OnAlert.Broadcast(FString::Printf(TEXT("RECOVERED — %s's systems are back online."),
-					Row ? *Row->DisplayName : *It.Key().ToString()));
-				It.RemoveCurrent();
+					Row ? *Row->DisplayName : *Party.ToString()));
 			}
 		}
 	}
@@ -10107,22 +10161,27 @@ void URHSimWorldSubsystem::StepEarth(float SubDt)
 
 double URHSimWorldSubsystem::GetEmbargoGrace(FName Rival) const
 {
-	const double* G = EmbargoGrace.Find(Rival);
-	return G ? *G : 0.0;
+	const FRHTradeRule* G = FindTradeRule(ERHTradeRuleKind::Embargo, Rival); // E6: the one Embargo rule's live timer
+	return G ? G->LiveSols : 0.0;
 }
 
 FName URHSimWorldSubsystem::GetEmbargoingRival() const
 {
 	// The soonest-to-defect embargoing rival (deterministic: least grace, then
-	// name), so the deck names one clear target to pacify.
+	// name), so the deck names one clear target to pacify. E6: over the Embargo
+	// rules; the tie-break is HEAD's LexicalLess.
 	FName Best = NAME_None;
 	double BestGrace = TNumericLimits<double>::Max();
-	for (const auto& Pair : EmbargoGrace)
+	for (const FRHTradeRule& R : TradeRules)
 	{
-		if (Pair.Value < BestGrace || (Pair.Value == BestGrace && (Best.IsNone() || Pair.Key.LexicalLess(Best))))
+		if (R.Kind != ERHTradeRuleKind::Embargo)
 		{
-			BestGrace = Pair.Value;
-			Best = Pair.Key;
+			continue;
+		}
+		if (R.LiveSols < BestGrace || (R.LiveSols == BestGrace && (Best.IsNone() || R.Party.LexicalLess(Best))))
+		{
+			BestGrace = R.LiveSols;
+			Best = R.Party;
 		}
 	}
 	return Best;
@@ -10137,17 +10196,21 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 	const double Evolved = FMath::Max(0.0, HumanNatureAxis / 100.0);
 	Influence += InfluenceDriftPerSol * Evolved * DtSols;
 
-	// Embargo grace timers count down; expiry hardens into a DEFECTION.
-	if (EmbargoGrace.Num() > 0)
+	// Embargo grace timers count down; expiry hardens into a DEFECTION. E6: each
+	// Embargo rule in Id order, HEAD's arithmetic; at <= 0 the rule becomes a
+	// Severed rule IN PLACE (its Id kept), then HEAD's floor, alert and log line.
+	for (FRHTradeRule& Embargo : TradeRules)
 	{
-		for (auto It = EmbargoGrace.CreateIterator(); It; ++It)
+		if (Embargo.Kind == ERHTradeRuleKind::Embargo)
 		{
-			It.Value() -= DtSols;
-			if (It.Value() <= 0.0)
+			Embargo.LiveSols -= DtSols;
+			if (Embargo.LiveSols <= 0.0)
 			{
-				const FName Name = It.Key();
-				It.RemoveCurrent();
-				DefectedRivals.Add(Name);
+				const FName Name = Embargo.Party;
+				Embargo.Kind = ERHTradeRuleKind::Severed;
+				Embargo.Origin = ERHTradeRuleOrigin::Defection;
+				Embargo.LiveSols = 0.0;
+				Embargo.bLive = true;
 				double& Rel = RelationRef(Name);
 				Rel = FMath::Min(Rel, DefectRelationFloor);
 				const FRHRivalRow* Row = Defs ? Defs->GetRival(Name) : nullptr;
@@ -10165,7 +10228,10 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 	// (available, not closed, not already defected). Deterministic pick: highest
 	// public relation - Earth leans hardest on your closest friend (the betrayal
 	// hurts most, and matches the "trusting ally" moral trap of the covert layer).
-	if (EarthTension >= EarthPreemptiveThreshold && EmbargoGrace.Num() == 0)
+	// E6: "nobody embargoed" is no Embargo rule; closed and defected are read from
+	// the rules; and Earth cannot turn a live pact partner (Q-A a): it leans on
+	// the next eligible neighbour, or on nobody. The pick and tie-break are HEAD's.
+	if (EarthTension >= EarthPreemptiveThreshold && !TradeRules.ContainsByPredicate([](const FRHTradeRule& R) { return R.Kind == ERHTradeRuleKind::Embargo; }))
 	{
 		FName Target = NAME_None;
 		double BestRel = -1.0;
@@ -10173,7 +10239,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 		{
 			Defs->ForEachRivalRow([&](FName Name, const FRHRivalRow&)
 			{
-				if (!IsRivalAvailable(Name) || ClosedRoutes.Contains(Name) || DefectedRivals.Contains(Name))
+				if (!IsRivalAvailable(Name) || IsRouteClosed(Name) || HasDefected(Name) || HasLivePact(Name))
 				{
 					return;
 				}
@@ -10187,7 +10253,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 		}
 		if (!Target.IsNone())
 		{
-			EmbargoGrace.Add(Target, EmbargoGraceSols);
+			AppendTradeRule(ERHTradeRuleKind::Embargo, ERHTradeRuleOrigin::EarthPressure, Target).LiveSols = EmbargoGraceSols;
 			const FRHRivalRow* Row = Defs->GetRival(Target);
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("EARTH LEANS ON %s — under pressure from Earth, they have suspended trade with you. Reassure them within %.0f sols or they side with Earth."),
@@ -10200,7 +10266,7 @@ void URHSimWorldSubsystem::StepPreemptive(float SubDt)
 
 bool URHSimWorldSubsystem::ResolvePacify(const FRHCommand& Cmd, FName Rival, FString& OutReason)
 {
-	if (!EmbargoGrace.Contains(Rival))
+	if (!IsEmbargoed(Rival)) // E6: an Embargo rule names it
 	{
 		OutReason = FString::Printf(TEXT("%s is not under an Earth embargo to lift"), *Rival.ToString());
 		return false;
@@ -10212,7 +10278,7 @@ bool URHSimWorldSubsystem::ResolvePacify(const FRHCommand& Cmd, FName Rival, FSt
 		return false;
 	}
 	Influence -= PacifyInfluenceCost;
-	EmbargoGrace.Remove(Rival);
+	TradeRules.RemoveAll([Rival](const FRHTradeRule& R) { return R.Kind == ERHTradeRuleKind::Embargo && R.Party == Rival; }); // E6: the rule goes
 	EarthTension = FMath::Clamp(EarthTension - PacifyTensionRelief, 0.0, 100.0);
 	HumanNatureAxis = FMath::Clamp(HumanNatureAxis + HumanNaturePacifyShift, -100.0, 100.0);
 	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
@@ -10412,18 +10478,37 @@ bool URHSimWorldSubsystem::ResolveDilemma(const FRHCommand& Cmd, bool bComply, F
 		// loop, say); relations crater; identity swings Earth-ward; the demand
 		// is satisfied so tension falls hard; the colony grieves a shrunken world.
 		int32 Closed = 0;
+		TArray<FName> NewlyClosed;
 		if (Defs)
 		{
 			Defs->ForEachRival([&](FName Name, const FRHRivalRow&)
 			{
-				if (!ClosedRoutes.Contains(Name))
+				if (!IsRouteClosed(Name))
 				{
-					ClosedRoutes.Add(Name);
+					NewlyClosed.Add(Name);
 					double& Rel = RelationRef(Name);
 					Rel = FMath::Clamp(Rel - DilemmaRelationHit, 0.0, 100.0);
 					++Closed;
 				}
 			});
+		}
+		// E6 (1.4): one Closed rule per route closed now, appended in name-string order (a case-sensitive ordinal compare - never FName index
+		// or the table's order), so the rules' Ids and the saved bytes do not depend on how the rows were made. A live pact with one of them
+		// ends at this order's sol + 2, with no tariff and no extra cost (D20); a discovered dormant neighbour's route stays open, and its pact.
+		NewlyClosed.Sort([](const FName& A, const FName& B) { return A.ToString().Compare(B.ToString(), ESearchCase::CaseSensitive) < 0; });
+		const int32 ActSol = FMath::FloorToInt32(Cmd.ExecuteAtSimSeconds / (double)URHSimClockSubsystem::SolLengthSimSeconds);
+		for (const FName& Name : NewlyClosed)
+		{
+			AppendTradeRule(ERHTradeRuleKind::Closed, ERHTradeRuleOrigin::Comply, Name);
+		}
+		for (const FName& Name : NewlyClosed)
+		{
+			if (FRHTradeRule* Pact = FindLivePact(Name))
+			{
+				EndPact(*Pact, ActSol);
+				const FRHRivalRow* Row = Defs ? Defs->GetRival(Name) : nullptr;
+				UE_LOG(LogRedHopeSim, Display, TEXT("=== PACT ENDED: %s (the route is closed) ==="), Row ? *Row->DisplayName : *Name.ToString());
+			}
 		}
 		// A convoy already committed to a now-closed rival still comes home
 		// (the goods were paid for); only NEW dispatches are refused.
@@ -13761,26 +13846,24 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 		uint8 Demand = bEarthDemandPending ? 1 : 0;
 		Ar << EarthTension << IdentityAxis << Demand;
 	}
+	// E6 (v57, D31): the v19 / v21 / v22 slots keep their layout byte for byte and are written as a MIRROR projected from the trade rules (the
+	// Closed and Severed names sorted with LexicalLess, each rival's largest live disruption, each embargo's grace), so every byte before the tail
+	// is as before and a lost 'RHL6' frame never reopens a closed route, ends a disruption or forgives a defection (7.2).
+	TArray<FName> MirrorClosed, MirrorDefected;
+	TMap<FName, double> MirrorSabotage, MirrorEmbargo;
+	ProjectPoliticalMirror(MirrorClosed, MirrorSabotage, MirrorEmbargo, MirrorDefected);
 	// The Solidarity Dilemma (save v19).
-	{
-		TArray<FName> Closed = ClosedRoutes.Array();
-		Closed.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
-		Ar << Closed << SolidarityHope;
-	}
+	Ar << MirrorClosed << SolidarityHope;
 	// The covert layer (save v20).
 	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
 	// The espionage economy (save v21).
 	{
 		TArray<FName> Discovered = DiscoveredRivals.Array();
 		Discovered.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
-		Ar << SabotageSols << Discovered;
+		Ar << MirrorSabotage << Discovered;
 	}
 	// Earth's pre-emptive pressure (save v22).
-	{
-		TArray<FName> Defected = DefectedRivals.Array();
-		Defected.Sort([](const FName& A, const FName& B){ return A.LexicalLess(B); });
-		Ar << EmbargoGrace << Defected << Influence;
-	}
+	Ar << MirrorEmbargo << MirrorDefected << Influence;
 	// Dynamic crises + endings (save v23).
 	{
 		uint8 Crisis = (uint8)ActiveCrisis, Ever = bEverHadCrew ? 1 : 0, Declared = bEndingDeclared ? 1 : 0;
@@ -13989,6 +14072,9 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	RHSaveFrame::Write(Ar, RHSaveFrame::MarketTag, [this](FArchive& Block) { WriteMarketBlock(Block); });
 	// E5 (save v56): the currency block, in its own frame straight after E4's.
 	RHSaveFrame::Write(Ar, RHSaveFrame::CurrencyTag, [this](FArchive& Block) { WriteCurrencyBlock(Block); });
+	// E6 (save v57): the levers block - the trade rules, the pending market effects, the tariff totals, the orders' terms - in its own frame
+	// straight after E5's.
+	RHSaveFrame::Write(Ar, RHSaveFrame::LeversTag, [this](FArchive& Block) { WriteLeversBlock(Block); });
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14416,32 +14502,25 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 		Ar << EarthTension << IdentityAxis << Demand;
 		bEarthDemandPending = (Demand != 0);
 	}
+	// E6 (v57): the v19 / v21 / v22 slots are a mirror of the trade rules. They are read into these function-scope temporaries (hoisted out of
+	// their old scopes, as LoadedConvoyRival is) and no live state is filled from them here: ReadLeversBlock builds the rules at the tail, from
+	// the 'RHL6' frame, or from this mirror when the frame is lost. Nothing between here and the tail reads a rule.
+	TArray<FName> MirrorClosed, MirrorDefected;
+	TMap<FName, double> MirrorSabotage, MirrorEmbargo;
 	// The Solidarity Dilemma (save v19).
-	{
-		TArray<FName> Closed;
-		Ar << Closed << SolidarityHope;
-		ClosedRoutes.Empty();
-		ClosedRoutes.Append(Closed);
-	}
+	Ar << MirrorClosed << SolidarityHope;
 	// The covert layer (save v20). Map repopulates wholesale.
 	HiddenTensions.Empty();
 	Ar << HiddenTensions << HumanNatureAxis << CovertAttempts;
 	// The espionage economy (save v21).
 	{
 		TArray<FName> Discovered;
-		SabotageSols.Empty();
-		Ar << SabotageSols << Discovered;
+		Ar << MirrorSabotage << Discovered;
 		DiscoveredRivals.Empty();
 		DiscoveredRivals.Append(Discovered);
 	}
 	// Earth's pre-emptive pressure (save v22).
-	{
-		TArray<FName> Defected;
-		EmbargoGrace.Empty();
-		Ar << EmbargoGrace << Defected << Influence;
-		DefectedRivals.Empty();
-		DefectedRivals.Append(Defected);
-	}
+	Ar << MirrorEmbargo << MirrorDefected << Influence;
 	// Dynamic crises + endings (save v23).
 	{
 		uint8 Crisis = 0, Ever = 0, Declared = 0;
@@ -14801,6 +14880,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ReadMarketBlock(Ar, Bytes, LoadedConvoyRival, bLoadedConvoyReturning, LoadedConvoyLegSols); // E4 (v55)
 	ReadCurrencyBlock(Ar, Bytes); // E5 (v56): the mark convoys and desk orders onto what E4 loaded; a lost market block starts it unissued
 	ReconcileReservations();      // E5: both purses' reservations and the lifetime totals, after both blocks (E4's own repair moved here)
+	ReadLeversBlock(Ar, Bytes, MirrorClosed, MirrorSabotage, MirrorEmbargo, MirrorDefected); // E6 (v57): the rules (or the mirror's), then the orders' terms
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.

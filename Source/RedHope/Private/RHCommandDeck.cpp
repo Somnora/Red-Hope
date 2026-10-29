@@ -1506,6 +1506,11 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		{
 			Label = FString::Printf(TEXT("Rename district #%d: %s"), (int32)C.Value, *C.Text);
 		}
+		else if (C.Verb == FName("Treaty"))
+		{
+			// E6: a Sign and a Break carry their act only in Text, so the label names it: "Pact Zarya Station (break)" (PLACEHOLDER, gate-d-wording Z4).
+			Label += FString::Printf(TEXT(" (%s)"), *C.Text.ToLower());
+		}
 		if (C.Verb == FName("Demolish"))
 		{
 			// BM-3: "Demolish Forge #7", not the raw target slot.
