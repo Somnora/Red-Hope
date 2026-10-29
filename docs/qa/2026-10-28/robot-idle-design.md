@@ -87,3 +87,8 @@ Real docking in the sim (option (b)); the stacking of several docked robots on a
 - **(a) After 20 s of waiting (recommended).** Each idle robot spends about half its idle time inspecting; in the playtest colony, about 1 robot is out inspecting at any moment and about 1 is waiting at the pad. Closest to "busy work in downtime".
 - **(b) After 60 s.** About a quarter of idle time inspecting; about 0.5 robots out at once.
 - **(c) After 3 min.** About a tenth of idle time; an inspection is a rare sight, and the ring at the pad is the main change.
+
+# DIRECTOR ANSWER (2026-10-29)
+
+- **Q-A (a):** idle robots wait in a loose ring well clear of the pad, about 2.5 m out from the pad's edge, facing outward; 8 spots, then 12 further out. Never on the pad, and not tight to its edge, so the ring does not read as a charging queue.
+- **Q-B (a):** a waiting robot goes off to inspect after **20 s** of waiting (`InspectWaitS = 20` sim seconds, placeholder): about half of its idle time inspecting, about 1 robot out and 1 waiting at the pad in the playtest colony.

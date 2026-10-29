@@ -2085,6 +2085,15 @@ Existing suites updated: the version checks (56 to 57: `Ver == 57`, `"/57"` and 
 - The new wording is placeholder (`docs/qa/2026-10-15/gate-d-wording.md`, Z1-Z11 under "Rows added by E6"); "pact" is itself a placeholder. None of it is morale, sickness or evacuation wording, nothing in E6 reads or writes Hope, the population or growth (LV10), and nothing is combat.
 - Not committed: the orchestrator commits.
 
+### Idle robots: the design and the director's answers (2026-10-29)
+
+The design is in `docs/qa/2026-10-28/robot-idle-design.md` (DESIGN, written at `4e9a360` while D7 builds; display only under the 2026-10-28 answer (a)). An idle surface walker waits around the pad the sim would dock it at (`FindNearestChargePad` from its sim position); with no working pad it keeps the Lander rank. Now and then it inspects a building within 20 m of the pad, playing Operate for 6 s, chosen by robot index and trip count. Underground robots and rovers are unchanged. Nothing under `Source/RedHopeSim` or `docs/data` changes.
+
+- **Q-A (a):** a loose ring well clear of the pad, about 2.5 m out from its edge, facing outward (8 spots, then 12). The options not taken were (b) a row on one side of the pad and (c) the pad's edge, both of which read more like a charging queue.
+- **Q-B (a):** a waiting robot inspects after 20 s of waiting (placeholder): about half its idle time, about 1 robot out at once in the playtest colony. Not taken: (b) 60 s, (c) 3 min.
+
+Not built yet: after E8, from a brief and a gate script.
+
 ### T1 (the colony record): the director's answer (2026-10-28)
 
 From `docs/qa/2026-10-28/t1-colony-design.md` (its DIRECTOR QUESTION; review in `t1-review-r1.md`): **(a) one gate, no save change.** T1 moves each colony's state into its own record (`FRHColony`) so a second settlement can exist later; nothing changes on screen. The save format and version stay as they are, so current saves and both checkpoints keep loading. The plan's "list of one colony" in the save moves to T4. Every battery line stays identical apart from wall-clock timing, plus a new `colony.log`, and every captured save stays byte-identical. Not built yet: T1 follows E8 and the idle robots, after a refresh of the design at E8's HEAD.
