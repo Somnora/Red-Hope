@@ -410,3 +410,11 @@ All of these belong to later gates: travel (T8), borders and claims (T7), convoy
 **Recorded, not asked** (say if you want either changed):
 - **The terrain's per-region seeds wait for T8** (section 5). The plan put them in T2, but nothing can show another region's ground until T8's travel. Doing them now costs about half a session.
 - **The eight region names are neutral placeholders** for the wording review, which may prefer real Martian place names.
+
+# DIRECTOR ANSWER (2026-10-29)
+
+- **Q-A (a): the rivals live in their own regions on the map; their trade moves at T5.** Zarya in Frost Crater, 120 km out, and Meridian in Amber Shelf, 200 km out (shown once discovered), on their markers' bearings and at exactly their routes' lengths. The rival rows' `RegionId` (the market a rival trades in, since E4) stays 0, so the one market, the battery and every save are unchanged. T5 moves each rival's trade into its home region, with section 1's costs modelled for the director first. Not taken: (b) the split now; (c) the rivals kept in the colony's region on the map.
+- **Q-B (a): the full regional map in the free band** (section 4): the Map button beside Traffic and Routes or the M key, Esc to close, the eight regions as named discs about 90 px across at 1440x860, the known rivals' lines with "km · sols", "No known settlement" elsewhere, a card per region, the colony running behind it. Not taken: (b) a seventh deck fold; (c) no map until T8.
+- **The calls recorded without asking stand,** since the director answered without changing them: the terrain's per-region seeds wait for T8 (section 5), and the eight region names are placeholders for the Gate-D wording review.
+
+This design is final. It is refreshed at T1's HEAD before any build (the refresh blocks on any E7, E8 or T1 name it cannot find), and T2 is built after T1, from a brief and a gate script.
