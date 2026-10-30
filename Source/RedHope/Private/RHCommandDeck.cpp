@@ -33,6 +33,66 @@
 namespace
 {
 	const FLinearColor ReadoutFg(0.75f, 0.87f, 0.92f, 1.f);
+
+	// D7: one atrium card's live lines, read at most twice a second (the preflight is cheap, but no card line runs it every paint): whether the
+	// open is refused and why (the S1 reason line under the button, the L7 tip), the air headroom of each of its floors (L11), and the hovered
+	// tip's preview (L8: the facing heads need a derivation of home cells, so only while the tip shows).
+	struct FAtriumCardState
+	{
+		double NextS = -1.0, NextTipS = -1.0;
+		bool bOk = false;
+		FString Why, Headroom, Tip;
+
+		void Poll(const URHSimWorldSubsystem& S, int32 Id, int32 Top, int32 Bottom, bool bAtrium)
+		{
+			const double Now = FPlatformTime::Seconds();
+			if (Now < NextS)
+			{
+				return;
+			}
+			NextS = Now + 0.5;
+			Why.Reset();
+			bOk = bAtrium || S.CanOpenAtrium(Id, Why);
+			// Every floor of the box, the hall last: after the open for a cavern that is not yet an atrium (on each floor above the hall the cells
+			// it would newly open, refusal 9's own count: a box that takes in an atrium's open cells counts them once; the hall's figure does not
+			// change), as it stands for an atrium.
+			Headroom = TEXT("air headroom"); // L11
+			for (int32 L = Top; L >= Bottom; --L)
+			{
+				const int32 Head = bAtrium ? S.GetFloorAirHeadroomCells(L) : S.GetFloorAirHeadroomCellsWith(L, S.GetAtriumNewOpenCells(Id, L));
+				Headroom += FString::Printf(TEXT("\n%d: %d cell%s%s"), L, Head, (Head == 1 || Head == -1) ? TEXT("") : TEXT("s"), L == Bottom ? TEXT(" (hall)") : TEXT(""));
+			}
+		}
+
+		FString TipText(const URHSimWorldSubsystem& S, int32 Id)
+		{
+			const double Now = FPlatformTime::Seconds();
+			if (Now < NextTipS)
+			{
+				return Tip;
+			}
+			NextTipS = Now + 0.5;
+			FString W;
+			URHSimWorldSubsystem::FRHAtriumPreview Pre;
+			if (!S.CanOpenAtrium(Id, W, &Pre))
+			{
+				Tip = FString::Printf(TEXT("Not yet: %s"), *W); // L7
+				return Tip;
+			}
+			Tip = RHOrder::AtriumPreviewText(Pre.OpenCells.Num(), Pre.PremiumKg, Pre.ExtraLeakKgPerSol, Pre.FacingHeads); // L8
+			return Tip;
+		}
+	};
+	// D7: an OpenAtrium or CloseAtrium order for this cavern is still in the uplink; a second press would queue a duplicate that the sim refuses at
+	// execute ("already an atrium" / "is not an atrium"), so the card holds the press and says so.
+	bool AtriumOrderInFlight(const URHSimWorldSubsystem& S, int32 CavernId)
+	{
+		return S.GetUplinkQueue().ContainsByPredicate([CavernId](const FRHCommand& C)
+			{
+				return (C.Verb == FName("OpenAtrium") || C.Verb == FName("CloseAtrium")) && (int32)C.Value == CavernId;
+			});
+	}
+
 	// The right column is pinned to this width (director fix): a right-anchored
 	// column whose width followed its content shoved every panel leftward each
 	// time a line grew. Fixed width holds the left edge still.
@@ -561,9 +621,18 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			]
 		]
 	];
+	// D7 review: a floor can list several finished caverns, each with its atrium card (about 118 px while refused), so the list scrolls past
+	// 240 px instead of pushing the strip into the command bar (a list that fits is laid out as before, with no scroll bar).
 	ShaftStrip->AddSlot().AutoHeight()
 	[
-		SAssignNew(CavernList, SVerticalBox)
+		SNew(SBox).MaxDesiredHeight(240.f)
+		[
+			SNew(SScrollBox).Orientation(Orient_Vertical).ScrollBarThickness(FVector2D(5.f, 5.f))
+			+ SScrollBox::Slot()
+			[
+				SAssignNew(CavernList, SVerticalBox)
+			]
+		]
 	];
 	// D6d: the tram card - the viewed floor's lines and a Lay tram button per finished tunnel (RefreshTramList).
 	ShaftStrip->AddSlot().AutoHeight()
@@ -1505,6 +1574,11 @@ void SRHCommandDeck::RefreshUplinkPanel()
 		else if (C.Verb == FName("RenameDistrict"))
 		{
 			Label = FString::Printf(TEXT("Rename district #%d: %s"), (int32)C.Value, *C.Text);
+		}
+		else if (C.Verb == FName("OpenAtrium") || C.Verb == FName("CloseAtrium"))
+		{
+			// D7: "Open atrium #4", the cavern's number as its card shows it (L1), so two atrium orders in flight can be told apart (L21).
+			Label = FString::Printf(TEXT("%s #%d"), *RHOrder::VerbText(C.Verb), (int32)C.Value);
 		}
 		else if (C.Verb == FName("Treaty"))
 		{
@@ -2619,11 +2693,43 @@ FReply SRHCommandDeck::HandleCancelCavern(int32 CavernId)
 	return FReply::Handled();
 }
 
+FReply SRHCommandDeck::HandleAtrium(int32 CavernId, bool bOpen)
+{
+	// D7: Open as atrium / Close the atrium (Value = the cavern Id, uplink; the order runs its preflight again at execute). A refusal is said
+	// before anything is sent. All copy is a Gate-D placeholder (gate-d-wording.md, prefix L).
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || !PC.IsValid())
+	{
+		return FReply::Handled();
+	}
+	PC->SetAtriumGhost(INDEX_NONE);
+	if (AtriumOrderInFlight(*Sim, CavernId))
+	{
+		PC->PostConfirm(FString::Printf(TEXT("The atrium order for cavern %d is already in flight: it lands with the uplink"), CavernId), FLinearColor(1.f, 0.6f, 0.2f)); // L23
+		return FReply::Handled();
+	}
+	FString Why;
+	if (bOpen && !Sim->CanOpenAtrium(CavernId, Why))
+	{
+		PC->PostConfirm(FString::Printf(TEXT("Atrium not opened: %s"), *Why), FLinearColor(1.f, 0.6f, 0.2f)); // L3
+		return FReply::Handled();
+	}
+	FRHCommand Cmd;
+	Cmd.Verb = bOpen ? FName("OpenAtrium") : FName("CloseAtrium");
+	Cmd.Value = CavernId;
+	Sim->EnqueueCommand(Cmd);
+	PC->PostConfirm(bOpen ? FString::Printf(TEXT("Atrium order transmitted: cavern %d opens over its hall"), CavernId)                   // L4
+		: FString::Printf(TEXT("Close order transmitted: cavern %d's floors close over the hall again"), CavernId), FLinearColor(0.2f, 0.9f, 1.f)); // L5
+	return FReply::Handled();
+}
+
 void SRHCommandDeck::RefreshCavernList()
 {
 	// The viewed floor's open caverns (any whose box includes the floor), rebuilt only when the list, a carved cell or the viewed floor
-	// changes (the key); the rows' own text reads live. Finished and cancelled caverns are not listed: a finished one is a hall, a
-	// cancelled one is a label on the floor.
+	// changes (the key); the rows' own text reads live. A cancelled cavern is not listed (it is a label on the floor); a finished one is listed
+	// in the section (D8: Cut here) and, D7 (P5), in the floor view when it is two or more floors tall (its "Open as atrium" / "Close the
+	// atrium" card); a finished one-floor cavern is a hall and is not listed in the floor view.
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	if (!Sim || !CavernList.IsValid())
@@ -2638,12 +2744,24 @@ void SRHCommandDeck::RefreshCavernList()
 	const uint32 Cells = Sim->GetFloorCellsVersion(), Shafts = Sim->GetShaftsVersion();
 	Key = FCrc::MemCrc32(&Cells, sizeof(Cells), Key);
 	Key = FCrc::MemCrc32(&Shafts, sizeof(Shafts), Key);
+	if (Sim->GetAtriums().Num() > 0)
+	{
+		const uint32 Atriums = Sim->GetAtriumsVersion(); // D7: only while an atrium exists, so the key is today's in a colony with none
+		Key = FCrc::MemCrc32(&Atriums, sizeof(Atriums), Key);
+	}
 	if (Key == CavernListKey)
 	{
 		return;
 	}
 	CavernListKey = Key;
 	CavernList->ClearChildren();
+	// D7: a button destroyed under the cursor never sends OnUnhovered, so a ghost the card's hover put up is let go with the list it was drawn
+	// from (RH.AtriumGhost's own ghost is left alone).
+	if (bAtriumGhostFromCard && PC.IsValid())
+	{
+		PC->SetAtriumGhost(INDEX_NONE);
+	}
+	bAtriumGhostFromCard = false;
 	if (Level >= 0)
 	{
 		return;
@@ -2652,7 +2770,9 @@ void SRHCommandDeck::RefreshCavernList()
 	for (const FRHCavern& Cv : Sim->GetCaverns())
 	{
 		const bool bOpen = Sim->IsCavernOpen(Cv);
-		if (!Cv.ContainsLevel(Level) || (!bOpen && !(bSection && !Cv.bCancelled)))
+		// D7 (P5): in the floor view a finished cavern of two or more floors is listed too, so "Open as atrium" has a card to sit on.
+		const bool bAtriumCard = !bSection && !bOpen && !Cv.bCancelled && Cv.GetFloors() >= 2;
+		if (!Cv.ContainsLevel(Level) || (!bOpen && !(bSection && !Cv.bCancelled) && !bAtriumCard))
 		{
 			continue;
 		}
@@ -2682,10 +2802,93 @@ void SRHCommandDeck::RefreshCavernList()
 			];
 		if (!bOpen)
 		{
+			const bool bAtrium = Sim->IsAtrium(Id);
 			CavernList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 1.f))
 			[
-				SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d  %s"), Id, *Floors))).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim)
+				SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("#%d  %s%s"), Id, *Floors, bAtrium ? TEXT("  atrium") : TEXT("")))).Font(RHDeck::Label(8)) // L1
+				.ColorAndOpacity(bAtrium ? FSlateColor(FLinearColor(1.f, 0.86f, 0.55f)) : RHDeck::TextDim)
 			];
+			if (bAtriumCard)
+			{
+				// D7: the card's button; while the open is refused, the reason on a dim line under it (UI polish S1, the shaft card's pattern) and in
+				// the tip; else the tip's preview (the premium, the extra leak, the heads that would face this atrium); and the air headroom of every
+				// floor of the box. The lines are polled twice a second (FAtriumCardState). Hovering "Open as atrium" draws the ghost on the floor.
+				const TWeakObjectPtr<ARHPlayerController> WeakPC = PC;
+				const int32 Top = Cv.Top, Bottom = Cv.Bottom;
+				const TSharedRef<FAtriumCardState> Card = MakeShared<FAtriumCardState>();
+				const auto SimOf = [](const TWeakObjectPtr<ARHPlayerController>& W) -> const URHSimWorldSubsystem*
+				{
+					const UWorld* World = W.IsValid() ? W->GetWorld() : nullptr;
+					return World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+				};
+				CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+				[
+					SNew(SButton)
+					.ButtonStyle(&RHDeck::TintButtonStyle())
+					.ButtonColorAndOpacity(FSlateColor(bAtrium ? FLinearColor(0.20f, 0.14f, 0.05f, 0.95f) : FLinearColor(0.24f, 0.18f, 0.06f, 0.95f)))
+					.ContentPadding(FMargin(5.f, 2.f))
+					.ToolTipText_Lambda([WeakPC, Id, bAtrium, Card, SimOf]()
+					{
+						const URHSimWorldSubsystem* S = SimOf(WeakPC);
+						if (!S)
+						{
+							return FText::GetEmpty();
+						}
+						if (bAtrium)
+						{
+							return FText::FromString(FString::Printf(TEXT("Close the atrium over cavern %d: its floors are whole again. Nothing is refunded; the extra air leaks away at the normal rate."), Id)); // L6
+						}
+						return FText::FromString(Card->TipText(*S, Id)); // L7 / L8
+					})
+					.OnHovered_Lambda([this, WeakPC, Id, bAtrium]() { if (WeakPC.IsValid() && !bAtrium) { WeakPC->SetAtriumGhost(Id); bAtriumGhostFromCard = true; } })
+					.OnUnhovered_Lambda([this, WeakPC]() { if (WeakPC.IsValid() && bAtriumGhostFromCard) { WeakPC->SetAtriumGhost(INDEX_NONE); } bAtriumGhostFromCard = false; })
+					.OnClicked(FOnClicked::CreateSP(this, &SRHCommandDeck::HandleAtrium, Id, !bAtrium))
+					[
+						SNew(STextBlock).Font(RHDeck::Label(8)).Justification(ETextJustify::Center).ColorAndOpacity(RHDeck::Text)
+						.Text_Lambda([WeakPC, Id, bAtrium, SimOf]()
+						{
+							const URHSimWorldSubsystem* S = SimOf(WeakPC);
+							if (S && AtriumOrderInFlight(*S, Id))
+							{
+								return FText::FromString(TEXT("Atrium order in flight")); // L24
+							}
+							return FText::FromString(bAtrium ? TEXT("Close the atrium") : TEXT("Open as atrium")); // L9, L10
+						})
+					]
+				];
+				if (!bAtrium)
+				{
+					// The shaft card's width (its own reason line's box), so a long reason wraps instead of widening the strip.
+					CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f))
+					[
+						SNew(SBox).WidthOverride(118.f)
+						.Visibility_Lambda([WeakPC, Id, Top, Bottom, Card, SimOf]()
+						{
+							const URHSimWorldSubsystem* S = SimOf(WeakPC);
+							if (S) { Card->Poll(*S, Id, Top, Bottom, false); }
+							return (S && !Card->bOk) ? EVisibility::Visible : EVisibility::Collapsed;
+						})
+						[
+							SNew(STextBlock).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim).AutoWrapText(true)
+							.Text_Lambda([Card]() { return FText::FromString(Card->Why); }) // the L2 reason (S1)
+						]
+					];
+				}
+				CavernList->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 1.f))
+				[
+					SNew(STextBlock).Font(RHDeck::Label(8)).ColorAndOpacity(RHDeck::TextDim).Justification(ETextJustify::Center)
+					.Text_Lambda([WeakPC, Id, Top, Bottom, bAtrium, Card, SimOf]()
+					{
+						const URHSimWorldSubsystem* S = SimOf(WeakPC);
+						if (!S)
+						{
+							return FText::GetEmpty();
+						}
+						Card->Poll(*S, Id, Top, Bottom, bAtrium);
+						return FText::FromString(Card->Headroom); // L11
+					})
+				];
+			}
 			CavernList->AddSlot().AutoHeight().Padding(FMargin(0.f, 1.f)) [ CutHere ];
 			continue;
 		}
@@ -3306,6 +3509,11 @@ FReply SRHCommandDeck::HandleCardGotIt()
 		CardQueue.RemoveAt(0);
 	}
 	return FReply::Handled();
+}
+
+void SRHCommandDeck::Debug_ClearTipCards()
+{
+	CardQueue.Reset(); // every queued card, a milestone's too (captures: GOT IT on each), and nothing remembered
 }
 
 FReply SRHCommandDeck::HandleCardSkipAll()

@@ -163,6 +163,9 @@ public:
 	void SetSectionAxis(int32 Axis);
 	// Cut here (a cavern's card): enter if needed, put the plane through the box's middle row and the focus on its bottom floor.
 	bool CutSectionAtCavern(int32 CavernId);
+	// D7: the cavern whose "Open as atrium" ghost the floor view draws (the card's button while hovered, or RH.AtriumGhost); INDEX_NONE for none.
+	void SetAtriumGhost(int32 CavernId) { AtriumGhostId = CavernId; }
+	int32 GetAtriumGhost() const { return AtriumGhostId; }
 	// UI polish P8: TRAFFIC changes what the frame must hold (the arrows' room, the lift labels): fit the section again, if it is on.
 	void RefitSectionToLabels();
 	// The command deck, for the click test's reads of its fold state and layout.
@@ -333,6 +336,7 @@ private:
 	// Cavern brush state (D6a): bCavernBrush is only read while bTunnelMode is set.
 	bool bCavernBrush = false;
 	int32 CavernFloors = 1;
+	int32 AtriumGhostId = INDEX_NONE;            // D7: the card's ghost (presentation only)
 	// Demolish Road state (C6b).
 	bool bRoadDemolishMode = false;
 	bool bRoadDemolishForced = false;

@@ -157,6 +157,9 @@ namespace
 	const FLinearColor FrameColour(0.20f, 0.85f, 0.95f);
 	const FLinearColor TunnelColour(0.95f, 0.50f, 0.10f);
 	const FLinearColor FurnitureColour(0.62f, 0.54f, 0.42f);
+	const FLinearColor RailColour(0.98f, 0.92f, 0.82f);      // D7: an atrium's railing, warm off-white
+	const FLinearColor LightColumnColour(1.00f, 0.90f, 0.62f); // D7: the light column's emissive outline (R3's fallback for the additive box)
+	const FLinearColor FacingColour(0.85f, 0.66f, 0.30f);    // D7: the faint warm edge of a cell facing an atrium
 	const FLinearColor CalmColour(0.15f, 0.75f, 0.70f);
 	const FLinearColor BusyColour(0.95f, 0.65f, 0.15f);
 	const FLinearColor LongColour(0.92f, 0.22f, 0.16f);
@@ -608,7 +611,8 @@ bool URHSectionVisualizerSubsystem::Pick(const FVector& RayOrigin, const FVector
 	for (int32 R = 0; R < Rows; ++R)
 	{
 		const FIntPoint P = PointOf(Axis, PlaneRow + R, Column);
-		bool bCarved = Sim->FindFloorCell(Level, P) != INDEX_NONE;
+		const int32 PickOrd = Sim->FindFloorCell(Level, P);
+		bool bCarved = PickOrd != INDEX_NONE && !(Sim->GetAtriums().Num() > 0 && Sim->IsCellOpen(Level, PickOrd)); // D7: the void is not a floor to pick
 		for (const FRHShaft& Sh : Sim->GetShafts())
 		{
 			bCarved |= (Sh.Column == P && Sim->ShaftReaches(Sh.Id, Level));
@@ -623,6 +627,24 @@ bool URHSectionVisualizerSubsystem::Pick(const FVector& RayOrigin, const FVector
 	return false;
 }
 
+int32 URHSectionVisualizerSubsystem::GetFloorPlates(int32 Level) const
+{
+	const FFloorCache* F = Floors.Find(Level);
+	return F ? F->Plates : 0;
+}
+
+int32 URHSectionVisualizerSubsystem::GetFloorRails(int32 Level) const
+{
+	const FFloorCache* F = Floors.Find(Level);
+	return F ? F->Rails : 0;
+}
+
+int32 URHSectionVisualizerSubsystem::GetFloorFacingEdges(int32 Level) const
+{
+	const FFloorCache* F = Floors.Find(Level);
+	return F ? F->Facing : 0;
+}
+
 bool URHSectionVisualizerSubsystem::LocatePlate(int32 Level, FVector& OutWorldCm) const
 {
 	const UWorld* World = GetWorld();
@@ -633,11 +655,12 @@ bool URHSectionVisualizerSubsystem::LocatePlate(int32 Level, FVector& OutWorldCm
 		return false;
 	}
 	TArray<int32> Alongs;
-	for (const FIntPoint& P : F->GetCells())
+	const TArray<FIntPoint>& Cells = F->GetCells();
+	for (int32 I = 0; I < Cells.Num(); ++I)
 	{
-		if (DepthOf(Axis, P) == PlaneRow)
+		if (DepthOf(Axis, Cells[I]) == PlaneRow && !(Sim->GetAtriums().Num() > 0 && Sim->IsCellOpen(Level, I))) // D7: never a plate over the void
 		{
-			Alongs.Add(AlongOf(Axis, P));
+			Alongs.Add(AlongOf(Axis, Cells[I]));
 		}
 	}
 	if (Alongs.IsEmpty())
@@ -698,6 +721,10 @@ void URHSectionVisualizerSubsystem::Tick(float DeltaTime)
 	Struct = MixU32(Struct, (uint32)PlaneRow);
 	Struct = MixU32(Struct, (uint32)SlabRows());
 	Struct = MixU32(Struct, (uint32)Sim->GetShaftDepth());
+	if (Sim->GetAtriums().Num() > 0)
+	{
+		Struct = MixU32(Struct, Sim->GetAtriumsVersion()); // D7: only while an atrium exists, so the key, RH.DeepBench and D8's digests are untouched without one
+	}
 	// Who lives and works where: in a live city of thousands these move every few seconds, and they only change the full-detail floors'
 	// pips and furniture, so they redraw those floors alone, at most once a second.
 	uint32 People = MixU32(Sim->GetJobsVersion(), Sim->GetBedAssignVersion());
@@ -839,8 +866,13 @@ void URHSectionVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, boo
 
 	TMap<uint32, TArray<FTransform>> Lists;
 	CountPlates = CountWalls = CountBlocks = CountPips = 0;
+	CountVoids = CountLightColumns = CountRails = CountFacingEdges = 0;
 	for (const auto& Pair : Floors)
 	{
+		CountVoids += Pair.Value.Voids;
+		CountLightColumns += Pair.Value.Lights;
+		CountRails += Pair.Value.Rails;
+		CountFacingEdges += Pair.Value.Facing;
 		for (const auto& Boxes : Pair.Value.Boxes)
 		{
 			Lists.FindOrAdd(Boxes.Key).Append(Boxes.Value);
@@ -892,6 +924,10 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 	Out.Band = Band;
 	Out.Boxes.Reset();
 	Out.Plates = Out.Walls = Out.Blocks = Out.Pips = 0;
+	Out.Voids = 0;
+	Out.Lights = 0;
+	Out.Rails = Out.Facing = 0;
+	const bool bAtriums = Sim.GetAtriums().Num() > 0; // D7: every atrium branch below tests it first
 	const UWorld* World = GetWorld();
 	const URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
 	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
@@ -949,6 +985,10 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 				{
 					Cell = Sim.GetColonistHomeCell(Id);
 				}
+				else if (bAtriums && Sim.GetColonistAtriumHomeCell(Id) != INDEX_NONE)
+				{
+					Cell = Sim.GetColonistAtriumHomeCell(Id); // D7: an atrium floor's derived home cell, never an open one
+				}
 				else if (const FRHFurnitureInstance* Piece = Sim.FindFurniture(Sim.GetColonistBedPiece(Id)))
 				{
 					Cell = (Piece->Key.Z == 0 && Piece->Key.X == Level) ? Piece->Key.Y : (int32)INDEX_NONE;
@@ -956,6 +996,10 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 				else if (Floor && Floor->GetCells().Num() > 0)
 				{
 					Cell = FMath::Min(Index++, Floor->GetCells().Num() - 1);
+					while (bAtriums && Sim.IsCellOpen(Level, Cell) && Index < Floor->GetCells().Num())
+					{
+						Cell = Index++; // D7: the carve-order fallback passes over open cells
+					}
 				}
 				if (Cell != INDEX_NONE) { PipsAt.FindOrAdd(Cell) += 1; }
 			}
@@ -977,6 +1021,27 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 		if (!InSlabRow(Row, Rows)) { return; }
 		const double DCm = (double)D * CellCm, ACm = (double)A * CellCm;
 		const bool bShaft = Ordinal == INDEX_NONE;
+		if (bAtriums && !bShaft && Sim.IsCellOpen(Level, Ordinal))
+		{
+			// D7: an open cell is the void - no plate, no cut-face band, no wall, no furniture block, no pip. Where it meets a floor cell that is
+			// not open, the railing: a warm off-white bar along that edge at hand height.
+			++Out.Voids;
+			if (Band < 2)
+			{
+				for (const FIntPoint Step : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+				{
+					const int32 O = Floor ? Floor->FindOrdinal(PointOf(Axis, D + Step.X, A + Step.Y)) : (int32)INDEX_NONE;
+					if (O == INDEX_NONE || Sim.IsCellOpen(Level, O))
+					{
+						continue;
+					}
+					const double ED = DCm + (double)Step.X * (CellCm * 0.5 - 30.0), EA = ACm + (double)Step.Y * (CellCm * 0.5 - 30.0);
+					AddBox(Out.Boxes, RailColour, ED, EA, PlateTopZ + 100.0, Step.X != 0 ? 60.0 : CellCm - 40.0, Step.X != 0 ? CellCm - 40.0 : 60.0, 60.0);
+					++Out.Rails;
+				}
+			}
+			return;
+		}
 		// The colour: a room's accent over the dug dirt, the district's hue as a wash, the tunnel's orange; far floors read Warmth and depth.
 		FLinearColor Base(0.26f, 0.26f, 0.28f);
 		if (Band < 2 && !bShaft && Colony)
@@ -1004,6 +1069,18 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 		const FLinearColor Plate = Colony ? URHColonyVisualizerSubsystem::DepthWarmTint(Sim, Base, Level) : Base;
 		AddBox(Out.Boxes, Plate, DCm, ACm, PlateTopZ - PlateThickCm * 0.5, CellCm - 40.0, CellCm - 40.0, PlateThickCm);
 		++Out.Plates;
+		if (bAtriums && !bShaft && Band < 2 && Sim.IsCellFacing(Level, Ordinal))
+		{
+			// D7 (D8 section 3: "a faint warm edge"): a thin warm frame on the plate's rim, four slips 70 cm wide just above its top; the plate
+			// inside keeps its room or district hue.
+			const FLinearColor Edge = FMath::Lerp(Plate, FacingColour, 0.75f);
+			const double Side = CellCm - 40.0, Rim = 70.0, Off = Side * 0.5 - Rim * 0.5;
+			AddBox(Out.Boxes, Edge, DCm - Off, ACm, PlateTopZ + 3.0, Rim, Side, 6.0);
+			AddBox(Out.Boxes, Edge, DCm + Off, ACm, PlateTopZ + 3.0, Rim, Side, 6.0);
+			AddBox(Out.Boxes, Edge, DCm, ACm - Off, PlateTopZ + 3.0, Side - 2.0 * Rim, Rim, 6.0);
+			AddBox(Out.Boxes, Edge, DCm, ACm + Off, PlateTopZ + 3.0, Side - 2.0 * Rim, Rim, 6.0);
+			++Out.Facing;
+		}
 		if (Row == 0)
 		{
 			// The cut face: a darker band down the plate's edge on the camera's side.
@@ -1062,6 +1139,36 @@ void URHSectionVisualizerSubsystem::BuildFloor(const URHSimWorldSubsystem& Sim, 
 	for (const FIntPoint& P : ShaftCols)
 	{
 		EmitCell(P, INDEX_NONE);
+	}
+
+	// D7: each atrium's light column, as R3's fallback (an emissive outline, not a translucent box): two warm posts at the box's along-edges on
+	// its first drawn row, one floor tall on every floor of the box, and a beam across at the top floor's ceiling. Hidden with the section.
+	if (bAtriums && Band < 2)
+	{
+		for (const FRHAtrium& At : Sim.GetAtriums())
+		{
+			const FRHCavern* Cv = Sim.FindCavern(At.CavernId);
+			if (!Cv || !Cv->ContainsLevel(Level))
+			{
+				continue;
+			}
+			const int32 D0 = FMath::Min(DepthOf(Axis, Cv->Min), DepthOf(Axis, Cv->Max)), D1 = FMath::Max(DepthOf(Axis, Cv->Min), DepthOf(Axis, Cv->Max));
+			const int32 A0 = FMath::Min(AlongOf(Axis, Cv->Min), AlongOf(Axis, Cv->Max)), A1 = FMath::Max(AlongOf(Axis, Cv->Min), AlongOf(Axis, Cv->Max));
+			int32 Row = INDEX_NONE;
+			for (int32 Dd = D0; Dd <= D1 && Row == INDEX_NONE; ++Dd) { if (InSlabRow(Dd - PlaneRow, Rows)) { Row = Dd; } }
+			if (Row == INDEX_NONE)
+			{
+				continue;
+			}
+			const double DCm = (double)Row * CellCm, Lo = ((double)A0 - 0.5) * CellCm + 30.0, Hi = ((double)A1 + 0.5) * CellCm - 30.0;
+			AddBox(Out.Boxes, LightColumnColour, DCm, Lo + 80.0, PlateTopZ + FloorH * 0.5, 160.0, 160.0, FloorH);
+			AddBox(Out.Boxes, LightColumnColour, DCm, Hi - 80.0, PlateTopZ + FloorH * 0.5, 160.0, 160.0, FloorH);
+			if (Level == Cv->Top)
+			{
+				AddBox(Out.Boxes, LightColumnColour, DCm, (Lo + Hi) * 0.5, PlateTopZ + FloorH - 80.0, 160.0, Hi - Lo, 120.0);
+			}
+			++Out.Lights;
+		}
 	}
 
 	// Buildings as footprint-sized blocks by category.

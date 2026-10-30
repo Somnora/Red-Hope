@@ -34,7 +34,7 @@ namespace
 	// v3 (M1-b Gate B): task TargetCm (survey), deposit bDiscovered.
 	// v4 (M1-b close): survey history (the player's map survives loads).
 	constexpr uint32 RHSaveMagic = 0x52485331;   // 'RHS1'
-	constexpr uint32 RHSaveVersion = 58;  // v58: transit power - a transit power block in its own frame ('RHD6', written straight after E6's 'RHL6'): the count, then one entry per fitted shaft in Id order and one per tram line in Id order (kind 2 a lift or 3 a line, the Id, and the two slots of its short-ms ring as sol tag and ms, clamped at one sol); the default colony writes 4 bytes (count 0); read after E6's reader and repaired with Warnings, never refused (D6e); v57: the levers - a levers block in its own frame ('RHL6', written straight after E5's 'RHE5'): FormatRev 1, NextRuleId, the trade rules by Id (Id, kind, origin, the rival's name, the resource's name or "*" for every resource, direction, markup in bp, the market window's two sols, the live timer, the live flag), the pending market effects of covert acts in (ClearSol, CommandId, sub) order (clear sol, CommandId, sub, kind, rival, resource, grams), the lifetime tariff totals (mcr, mmk), and the terms of every uncleared priced convoy by convoy Id (the sol it clears in and each line's booking markup); sized by history, never a constant; the v19 / v21 / v22 slots keep their layout and are written as a mirror of the rules (the Closed names, each rival's largest live disruption, each embargo's grace, the Severed names), so a lost frame rebuilds the rules from them (E6); v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
+	constexpr uint32 RHSaveVersion = 59;  // v59: atriums - an atrium block in its own frame ('RHD7', written straight after D6e's 'RHD6'): the count, then each CavernId ascending (an int32 each); the default colony writes 4 bytes (count 0); read early (after teardown, once the floors and caverns are installed and before the robots' load repair) by a read that does not move the file position, and again at the tail after D6e's reader, which consumes the frame and installs it only if the early read found none; every structural failure drops with a Warning, never refused, and an atrium with an occupied open cell loads closed (D7); v58: transit power - a transit power block in its own frame ('RHD6', written straight after E6's 'RHL6'): the count, then one entry per fitted shaft in Id order and one per tram line in Id order (kind 2 a lift or 3 a line, the Id, and the two slots of its short-ms ring as sol tag and ms, clamped at one sol); the default colony writes 4 bytes (count 0); read after E6's reader and repaired with Warnings, never refused (D6e); v57: the levers - a levers block in its own frame ('RHL6', written straight after E5's 'RHE5'): FormatRev 1, NextRuleId, the trade rules by Id (Id, kind, origin, the rival's name, the resource's name or "*" for every resource, direction, markup in bp, the market window's two sols, the live timer, the live flag), the pending market effects of covert acts in (ClearSol, CommandId, sub) order (clear sol, CommandId, sub, kind, rival, resource, grams), the lifetime tariff totals (mcr, mmk), and the terms of every uncleared priced convoy by convoy Id (the sol it clears in and each line's booking markup); sized by history, never a constant; the v19 / v21 / v22 slots keep their layout and are written as a mirror of the rules (the Closed names, each rival's largest live disruption, each embargo's grace, the Severed names), so a lost frame rebuilds the rules from them (E6); v56: the Martian currency - a currency block in its own frame ('RHE5', written straight after E4's 'RHE4'): Earth's issued flag, the market's issue and open sols (-1 none), the withdrawal flag and its sol, the rate in milli-credits per mark; the sol-close record of the identity and the tension (x 1000) and the pending political journal in (ExecuteAt, CommandId, sub) order (clear sol, ExecuteAt, CommandId, sub, kind, has-identity, identity, tension delta); the bloc tally (8 sold, 8 bought, fill, head, milli-marks); the mark balance, earned, spent and reserved, the desk's and the withdrawals' lifetime credit; the bloc members by name string with the sol each joins from; the mark convoys by convoy Id (their reserved and owed milli-marks; E4's block keeps every convoy and its credit amounts); the pending desk orders by Id (direction, milli-amount, clear sol, cleared); sized by history, never a constant (E5); v55: the Martian market - a market block in its own frame ('RHE4', the last frame in the file), after E3's: the slot table once (the count and the names ascending), then per region in Id order its prices and its 8-sol tally of grams sold and bought and the ring's fill and head, the open sol, the rivals with an economy (name, then the store of every slot in grams), the lifetime market sales and the reserved credit, NextConvoyId and the convoys by Id (id, rival, returning, leg, standing, clear sol, cleared, reserved, owed and filled value in mcr, then the order's lines); the v17 convoy slot is still written, from the lowest-Id convoy; its tables are sized by the data, its convoy list by history (E4); v54: the economy fixes - E1's ledger, E2's credit and E3's export blocks each sit in their own frame at the end of the file (the tag, the payload's bytes and its CRC32, the payload, then the bytes and the tag again; RHSaveFrame.h), so a block that misreads cannot shift the next; the credit block ends with the price each manifest item was locked at when it was added, in manifest order (docs/qa/2026-10-24/economy-code-review.md findings 1-3); v53: selling to Earth - an export block straight after the credit block, the last thing in the file (the lifetime sales in milli-credits, the slot count, then per E1 slot in name order its name, the export line's kg and locked price, and the quota arrears a short launch left); its size depends only on the resource table (E3); v52: Earth credit - a credit block straight after the ledger block, the last thing in the file (the balance, the awarded and spent totals in milli-credits, the ship's mass cap, then the count of stack-capped manifest rows and per row in name order its name and landings); its size depends only on the manifest table (E2b); v51: the ledger - a block at the very end of the file (the slot count, then per resource slot in name order its name and, per leg Made/Used/In/Out, the open kg, the lifetime grams and an 8-sol ring of grams; then the ring fill, head, the sol it rolled at and the unslotted haul loss); its size depends only on the resource table (E1); v50: trams with people - a tram block (NextTramId, the count, then per line Id, region, floor, tunnel Id, the two stop lattice points and the frozen and previous waits; the default colony writes 8 bytes) is written straight after the deep block (D6d); v49: floor shapes - a deep block (the district skeleton: every district's Id, Level and class; then every deep district's Id and sorted points; then every growth project's points, as lattice points on its floor; the default colony writes 12 bytes) is written straight after the cavern block, and a district may hold deep points (FRHDistrict::Deep, region 0's underground frame) instead of a whole floor (D6b); v48: caverns - a cavern block (NextCavernId, the count, then per cavern Id, region, work shaft, top and bottom floor, the two lattice corners and the cancelled flag; the default colony writes 8 bytes) is written straight after the warmth block, and a work record with X >= 100 is a cavern batch (X = 100 + the floor's depth, Y = the cavern Id) (D6a); v47: depth - a warmth block (the count, then per warm floor its region, level and Warmth; only a floor with Warmth > 0 is written, so the default colony writes 4 bytes) is written straight after the transit block (D5 depth); v46: transit - a transit block (the fitted lift cars per shaft, the threshold sol, one cargo ledger per shaft with its three sol slots and its frozen waits) is written straight after the tunnel block, and every robot record now carries its real floor (the Level slot, written from Z) (D4); v45: tunnels - a tunnel block (NextTunnelId, the count, then per tunnel Id, region, floor, the two lattice end points, two-ended and cancelled flags) is written straight after the shaft block; a work record with X 2 or 3 is a tunnel batch (D3); v44: more shafts - the shaft list (Id, region, depth, bore target, anchoring Borer, head or column, carve queue) is written straight after the floor table and replaces the single depth / head / bore target / carve queue; the old slot keeps the spoil pile and the in-flight work (D2); v43: outpost ice rows (no new field; the fence keeps a v42 save from loading without them); v42: the Mars-born recalled to orbit wait there, a short list of (Id, name) written straight after the colonists and restored on load; they come home on a later supply ship (F2b); v41: floors become places - the floor table (region, level, the carved lattice cells in carve order, the painted plan) replaces the per-level carved count and is written straight after the header, so a bad table is refused before the live colony is touched; no key, room, order or growth field changes (D1); v40: cargo rovers and commuting add NO saved field (a rover saves as any robot, an undeployed one in ImportStock["RC_R"], a freight task as any haul; every commute, flow, freight and path cache is derived) - the bump is a fence: a v39 binary must refuse a save that can hold RC_R robots, ImportStock["RC_R"] and Haul tasks over 200 kg (C6a); v39: the City / Earth share and the production ledger - the open sol's tally, the ring of the last completed sols, the sol it last rolled at (C5d); v38: city growth - the open projects (district, kind, target, bill, total and remaining sols), the round-robin cursor, the last sol checked, and each district's growth switch (C5b); v37: districts - the district list (Id, Kind, Name, RegionId, Level, lattice) and the next district Id; every queued order's CommandId and Text (a RenameDistrict's new name), so a loaded order keeps its own handle instead of Id 0 (C5a); v36: roads - the road graph (nodes, edges, build progress, next ids), the BuildRoad order's second end point on queued commands, a road edge in a task's site (C4); v35: arrivals at scale - the Big Arrival streak and flag, the move-home accumulator, the settler count (C2b); v34: shared rationing - per-home departure accumulators, the deficit, the Mars-born flag (C2a); v33: per-machine day shift (D5a); v32: quota repeat round (D1a); v31: wall fittings (BM-6); v30: furniture (BM-4); v29: surface habitats (HomeHab inline; per-hab O2, rated habs, bay rooms); v28: drag-sized buildings (greenhouse dome beds); v27: staffing - seat priority (Assign), lazy-fill state; v26: crops + climate + ducts (greenhouse agriculture); v25 goal ladder + endings + funding; v24 alive pass
 
 	FString SaveSlotToPath(const FString& Slot)
 	{
@@ -148,6 +148,13 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		}
 		HopeWarmMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeWarmMax"), HopeWarmMax));
 		HopeShelterMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeShelterMax"), HopeShelterMax));
+	}
+	{
+		// D7 (atriums; header defaults equal the CSV, placeholders for director review). The Hope cap is clamped non-negative (bonus-only); an
+		// open cell needs at least the air of an ordinary cell and leaks at least as fast, so the premium is never negative.
+		HopeAtriumMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeAtriumMax"), HopeAtriumMax));
+		AtriumFillPermille = FMath::Max(1000, (int32)Defs->GetConfigScalar(FName("AtriumFillPermille"), AtriumFillPermille));
+		AtriumLeakPermille = FMath::Max(1000, (int32)Defs->GetConfigScalar(FName("AtriumLeakPermille"), AtriumLeakPermille));
 	}
 	{
 		const int32 Row = (int32)Defs->GetConfigScalar(FName("MaxShafts"), 4.0);
@@ -2980,12 +2987,14 @@ void URHSimWorldSubsystem::StepHabitability(float SubDt)
 		{
 			continue;
 		}
-		const double RequiredKg = Cells * O2FillKgPerCell;
+		// D7: both through the floor's air helpers, which evaluate exactly these expressions on a floor with no open cell (the atrium premium is
+		// a branch taken only when the floor has open cells). The leak stays (Cells x Leak) x (SubDt / Sol).
+		const double RequiredKg = GetFloorO2RequiredKg(Level);
 		double& FillKg = FloorO2Kg.FindOrAdd(Level);
 
 		// Pressurized volume leaks - always. The standing tax of living in
 		// what you dug; abandonment drains loudly instead of holding forever.
-		const double LeakedKg = FMath::Min(FillKg, Cells * O2LeakKgPerCellPerSol * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
+		const double LeakedKg = FMath::Min(FillKg, GetFloorO2LeakKgPerSol(Level) * (SubDt / (double)URHSimClockSubsystem::SolLengthSimSeconds));
 		FillKg -= LeakedKg;
 		LedgerFloorLeakKg += LeakedKg; // E1: Used Oxygen, recorded once after the floors
 
@@ -3793,7 +3802,7 @@ void URHSimWorldSubsystem::Debug_ForceRateFloor(int32 Level)
 			Level, Cells, MinLivableCells, (int32)IsFloorCirculated(Level));
 		return;
 	}
-	FloorO2Kg.FindOrAdd(Level) = Cells * O2FillKgPerCell; // fill to required
+	FloorO2Kg.FindOrAdd(Level) = GetFloorO2RequiredKg(Level); // fill to required (D7: the atrium premium included on a floor with open cells)
 	RatedFloors.Add(Level);
 	FloorsNotedSmall.Remove(Level);
 	UE_LOG(LogRedHopeSim, Display, TEXT("Debug_ForceRateFloor: floor %d certified (%d cells)"), Level, Cells);
@@ -5462,7 +5471,8 @@ void URHSimWorldSubsystem::RebuildShaftDerived()
 const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int32 Level) const
 {
 	FRHDigInfo& Info = DigCache.FindOrAdd(Level);
-	if (Info.bValid && Info.CellsVersion == FloorCellsVersion && Info.ShaftsVer == ShaftsVersion)
+	const uint32 AtriumKey = Atriums.Num() > 0 ? AtriumsVersion : 0; // D7 (R1): 0 for ever with no atrium, so DigLabelRuns cannot move
+	if (Info.bValid && Info.CellsVersion == FloorCellsVersion && Info.ShaftsVer == ShaftsVersion && Info.Atriums == AtriumKey)
 	{
 		return Info;
 	}
@@ -5470,6 +5480,7 @@ const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int3
 	Info.bValid = true;
 	Info.CellsVersion = FloorCellsVersion;
 	Info.ShaftsVer = ShaftsVersion;
+	Info.Atriums = AtriumKey;
 	Info.DigOf.Reset();
 	Info.Touching.Reset();
 	const FRHFloor* Floor = FindFloor(Level);
@@ -5478,13 +5489,16 @@ const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int3
 		return Info;
 	}
 	// Dig labels: a flood fill over 4-neighbours, seeded in ordinal order, so the labelling is a pure function of the cells.
+	// D7 (R1): while an atrium exists the flood runs over non-open cells only, and an open cell keeps DigOf = INDEX_NONE (in no dig).
 	const int32 NCells = Floor->Cells.Num();
 	Info.DigOf.Init(INDEX_NONE, NCells);
+	const TArray<uint8>* Open = AtriumKey ? GetAtriumFlags(Level) : nullptr;
+	const auto IsOpen = [Open](int32 O) { return Open && Open->IsValidIndex(O) && ((*Open)[O] & 1) != 0; };
 	int32 Digs = 0;
 	TArray<int32> Stack;
 	for (int32 Seed = 0; Seed < NCells; ++Seed)
 	{
-		if (Info.DigOf[Seed] != INDEX_NONE)
+		if (Info.DigOf[Seed] != INDEX_NONE || IsOpen(Seed))
 		{
 			continue;
 		}
@@ -5496,7 +5510,7 @@ const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int3
 			for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
 			{
 				const int32 O = Floor->FindOrdinal(Cur + D);
-				if (O != INDEX_NONE && Info.DigOf[O] == INDEX_NONE)
+				if (O != INDEX_NONE && Info.DigOf[O] == INDEX_NONE && !IsOpen(O))
 				{
 					Info.DigOf[O] = Digs;
 					Stack.Add(O);
@@ -5514,7 +5528,7 @@ const URHSimWorldSubsystem::FRHDigInfo& URHSimWorldSubsystem::EnsureDigInfo(int3
 			for (int32 Dx = -1; Dx <= 1; ++Dx)
 			{
 				const int32 O = (Dx || Dy) ? Floor->FindOrdinal(Sh.Column + FIntPoint(Dx, Dy)) : (int32)INDEX_NONE;
-				if (O != INDEX_NONE)
+				if (O != INDEX_NONE && Info.DigOf[O] != INDEX_NONE) // D7: an open cell is in no dig (always labelled with no atrium)
 				{
 					Info.Touching[Info.DigOf[O]].AddUnique(Sh.Id);
 				}
@@ -5550,7 +5564,7 @@ int32 URHSimWorldSubsystem::ServingShaft(int32 Level, const FIntPoint& P) const
 	if (Ordinal != INDEX_NONE)
 	{
 		const FRHDigInfo& Info = EnsureDigInfo(Level);
-		if (Info.DigOf.IsValidIndex(Ordinal))
+		if (Info.DigOf.IsValidIndex(Ordinal) && Info.DigOf[Ordinal] != INDEX_NONE) // D7: an open cell is in no dig - rule 2 has nothing to keep
 		{
 			const TArray<int32>& Touch = Info.Touching[Info.DigOf[Ordinal]];
 			TArray<int32> Kept;
@@ -5898,6 +5912,11 @@ bool URHSimWorldSubsystem::DesignateRoom(int32 Level, int32 CellIndex, FName Roo
 	if (!RoomName.IsNone() && FindModuleOnCell(Level, CellIndex))
 	{
 		OutReason = TEXT("A station module sits on this cell - remove it to zone the cell");
+		return false;
+	}
+	if (!RoomName.IsNone() && Atriums.Num() > 0 && IsCellOpen(Level, CellIndex))
+	{
+		OutReason = TEXT("That cell is open to the atrium below: pick a cell off the void, or close the atrium first"); // D7: no room on an open cell (planted cells follow rooms)
 		return false;
 	}
 	if (!FurnitureAllowsRezone(FIntVector(Level, CellIndex, 0), RoomName, OutReason))
@@ -6923,6 +6942,13 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		Out.DeepResidents = GetDeepResidents();
 		Out.Shelter = HopeShelterMax * (double)Out.DeepResidents / (double)Pop;
 	}
+	// D7 (atriums): homes and seats facing an atrium, each head once - bonus-only and capped by construction. Skipped, and +0.0, while no
+	// atrium exists, so Total is bit-identical there; it is the last addend, straight after Shelter, and stacks with it.
+	if (Pop > 0 && Atriums.Num() > 0)
+	{
+		Out.FacingHeads = GetAtriumFacingHeads();
+		Out.Atrium = HopeAtriumMax * (double)Out.FacingHeads / (double)Pop;
+	}
 	// D5 depth (Q-B (a)): a warm floor costs its residents Hope - and only Hope, it never touches the rating, air, beds, arrivals or
 	// recall directly. Floors are summed in floor-table order (shallowest first). +0.0 while no floor has Warmth > 0.
 	if (Pop > 0 && FloorWarmth.Num() > 0)
@@ -6946,7 +6972,7 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 		Out.WarmPenalty = HopeWarmMax * FMath::Min(1.0, Weighted / (double)Pop);
 	}
 	Out.Total = FMath::Clamp(
-		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity + Out.Shelter
+		Out.Base + Out.Housing + Out.Rooms + Out.Jobs + Out.Milestones + Out.Comforts + Out.Furnishings + Out.Views + Out.Solidarity + Out.Shelter + Out.Atrium
 		- Out.AdjacencyPenalty - Out.UnsupportedPenalty - Out.WaterPenalty - Out.FoodPenalty - Out.CrisisPenalty - Out.CommutePenalty - Out.WarmPenalty, 0.0, 100.0);
 	return Out;
 }
@@ -7329,7 +7355,7 @@ double URHSimWorldSubsystem::GetStandingO2LeakKgPerSol() const
 	double Leak = 0.0;
 	for (const int32 Level : RatedFloors)
 	{
-		Leak += (double)GetFloorCarvedCells(Level) * O2LeakKgPerCellPerSol;
+		Leak += GetFloorO2LeakKgPerSol(Level); // D7: (double)Cells x Leak, plus the atrium premium only on a floor with open cells
 	}
 	for (const FRHHabNetCache& Net : HabNets)
 	{
@@ -8090,9 +8116,10 @@ bool URHSimWorldSubsystem::CanDigTunnel(int32 Level, const FVector& ACm, const F
 	const auto Carved = [&](const FIntPoint& P) { return Floor && Floor->IndexOf.Contains(P); };
 	const auto BesideCarved = [&](const FIntPoint& P)
 	{
+		// D7 (R9): a foothold is a carved NON-open cell (an open cell is still carved, so Carved() keeps answering "already dug").
 		for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
 		{
-			if (Carved(P + D)) { return true; }
+			if (Carved(P + D) && (Atriums.Num() == 0 || !IsPointOpen(Level, P + D))) { return true; }
 		}
 		return false;
 	};
@@ -8840,6 +8867,13 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 		OutReason = FString::Printf(TEXT("Unknown building '%s'"), *DefName.ToString());
 		return false;
 	}
+	// D7 (R6): no building of any kind over the void - every footprint cell is tested, for every underground building before any other test
+	// (a queued Build order is checked again at execute, so it is refused with the same reason). Inert with no atrium.
+	if (Level < 0 && Atriums.Num() > 0 && FootprintTouchesOpen(Def, LocationCm, Level, SizeX, SizeY, [this, Level](const FIntPoint& P) { return IsPointOpen(Level, P); }))
+	{
+		OutReason = TEXT("That spot is open to the atrium below: build off the void, or close the atrium first");
+		return false;
+	}
 	// W1: no melting near a FOUND outpost. Its ice comes home raw, so an ice-consuming building (today only
 	// the Water Plant) refuses to stand within OutpostMeltMinCm of one. Undiscovered rows are not checked, so
 	// the refusal leaks nothing; routing (FindOutpostDestination) is what guarantees a plant built before the
@@ -9432,6 +9466,14 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 	else if (Cmd.Verb == FName("CancelCavern"))
 	{
 		ExecuteCancelCavern(Cmd);
+	}
+	else if (Cmd.Verb == FName("OpenAtrium"))
+	{
+		ExecuteOpenAtrium(Cmd); // D7: rejects through OnCommandRejected itself
+	}
+	else if (Cmd.Verb == FName("CloseAtrium"))
+	{
+		ExecuteCloseAtrium(Cmd);
 	}
 	else if (Cmd.Verb == FName("LayTramLine"))
 	{
@@ -11959,6 +12001,13 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 	{
 		return false;
 	}
+	if (Key.Z == 0 && Atriums.Num() > 0 && IsCellOpen(Key.X, Key.Y))
+	{
+		// D7: no furniture on an open cell. Here, not in IsFurnishKeyValid, which the load also uses: a hand-made file's piece on an open cell
+		// closes that atrium (the occupancy repair) instead of losing the piece.
+		OutReason = TEXT("That cell is open to the atrium below: pick a cell off the void, or close the atrium first");
+		return false;
+	}
 	const FRHRoomRow* Room = Defs->GetRoom(GetCellRoom(Key));
 	if (!Room || !Room->SliceActive)
 	{
@@ -12050,9 +12099,21 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 
 int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int32>* Exclude) const
 {
+	return CountFloorBedsImpl(Level, Exclude, 0);
+}
+
+int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen) const
+{
 	const int32 Carved = GetFloorCarvedCells(Level);
+	// D7 (R9): an open cell holds no bed, at both exits. Open is 0 with no atrium (and no what-if), and then both exits are the exact
+	// expressions they were; the open branch is taken only when Open > 0. ExtraOpen is refusal 6's what-if (P9): the box cells that would open.
+	const int32 Open = GetFloorOpenCells(Level) + ExtraOpen;
 	if (Furniture.Num() == 0)
 	{
+		if (Open > 0)
+		{
+			return (int32)((Carved - Open) * ColonistsPerCell);
+		}
 		return (int32)(Carved * ColonistsPerCell); // the legacy rule, exactly
 	}
 	// Every carved cell holds the legacy beds, except a Living cell with bed
@@ -12096,11 +12157,19 @@ int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int32>* Exclu
 			Sum += P.Value; // an integer sum: order-free
 		}
 	}
-	const int32 Beds = BedCells == 0 ? (int32)(Carved * ColonistsPerCell) : (int32)((Carved - BedCells) * ColonistsPerCell) + Sum;
+	int32 Beds = 0;
+	if (Open > 0)
+	{
+		Beds = BedCells == 0 ? (int32)((Carved - Open) * ColonistsPerCell) : (int32)((Carved - Open - BedCells) * ColonistsPerCell) + Sum;
+	}
+	else
+	{
+		Beds = BedCells == 0 ? (int32)(Carved * ColonistsPerCell) : (int32)((Carved - BedCells) * ColonistsPerCell) + Sum;
+	}
 	if (bVerifyCaches && !Exclude)
 	{
 		const TSet<int32> Nothing;
-		const int32 PerPiece = CountFloorBeds(Level, &Nothing); // the original per-piece count
+		const int32 PerPiece = CountFloorBedsImpl(Level, &Nothing, ExtraOpen); // the original per-piece count
 		if (PerPiece != Beds)
 		{
 			UE_LOG(LogRedHopeSim, Error, TEXT("RHVERIFY: floor %d bed count %d from the cell tallies, %d counting piece by piece"), Level, Beds, PerPiece);
@@ -12154,6 +12223,10 @@ int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TS
 
 int32 URHSimWorldSubsystem::GetCellBeds(const FIntVector& Key) const
 {
+	if (Key.Z == 0 && Atriums.Num() > 0 && IsCellOpen(Key.X, Key.Y))
+	{
+		return 0; // D7 (R9): an open cell holds no bed
+	}
 	if (Key.Z != 0 && !IsLivingKey(Key))
 	{
 		return 0; // a bay houses only as Living Quarters
@@ -13322,7 +13395,9 @@ bool URHSimWorldSubsystem::TryClaimRepair(FMassEntityHandle Self, FMassEntityHan
 				{
 					const int32 Ord = FindCarvedCellAt(PatientLevel, PosCm);
 					const FRHDigInfo& Info = EnsureDigInfo(PatientLevel);
-					if (Ord == INDEX_NONE || !Info.DigOf.IsValidIndex(Ord) || !EnsureDeepNet().FittedDigs.Contains(FIntPoint(PatientLevel, Info.DigOf[Ord])))
+					// The label is read before EnsureDeepNet(): a deep-net rebuild can add to DigCache and move the entry Info refers to.
+					const int32 PatientDig = (Ord != INDEX_NONE && Info.DigOf.IsValidIndex(Ord)) ? Info.DigOf[Ord] : (int32)INDEX_NONE;
+					if (Ord == INDEX_NONE || !Info.DigOf.IsValidIndex(Ord) || !EnsureDeepNet().FittedDigs.Contains(FIntPoint(PatientLevel, PatientDig)))
 					{
 						return;
 					}
@@ -14146,6 +14221,8 @@ bool URHSimWorldSubsystem::SaveColony(const FString& Slot, FString& OutError)
 	RHSaveFrame::Write(Ar, RHSaveFrame::LeversTag, [this](FArchive& Block) { WriteLeversBlock(Block); });
 	// D6e (save v58): the transit power block - each fitted lift's and tram line's short-ms ring - in its own frame straight after E6's.
 	RHSaveFrame::Write(Ar, RHSaveFrame::TransitPowerTag, [this](FArchive& Block) { WriteTransitPowerBlock(Block); });
+	// D7 (save v59): the atrium list - the count, then each CavernId ascending - in its own frame straight after D6e's.
+	RHSaveFrame::Write(Ar, RHSaveFrame::AtriumTag, [this](FArchive& Block) { WriteAtriumBlock(Block); });
 
 	const FString Path = SaveSlotToPath(Slot);
 	if (!FFileHelper::SaveArrayToFile(Bytes, *Path))
@@ -14244,6 +14321,15 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	{
 		Agents->DespawnAllRobots();
 	}
+	// D7: the atrium list goes with the colony; it comes back from its frame below (the early read). AtriumsVersion moves at this load only if the
+	// list was or becomes non-empty (the TramVersion pattern), so it stays 0 for ever in a colony that never opens one.
+	const bool bHadAtriums = Atriums.Num() > 0;
+	Atriums.Reset();
+	InvalidateAtriumCaches();
+	AtriumBedMemo.Reset();
+	AtriumWalkMemo.Reset();
+	bAtriumPeekOk = false;
+	AtriumLoadPath = 0;
 	Buildings.Reset();
 	Deposits.Reset();
 	Tasks.Reset();
@@ -14402,6 +14488,25 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	}
 	InstallTransit(LoadedTransit); // D4: the cars onto the shafts just installed, the threshold sol and the ledgers
 	InstallWarmth(LoadedWarmth);   // D5 depth: each floor's Warmth (a level at or above the cut-off is repaired with a Warning)
+	{
+		// D7 (option (i), the early read): the atrium frame, found by the walk back from the end of the file WITHOUT moving the reader (the main
+		// body is still read from here), validated against the floors and caverns just installed, before RepairLoadedRobots judges the robots:
+		// a robot on an open cell must see it open. A failure here prints nothing; the tail read below is the fallback and says what was lost.
+		const int64 At = Ar.Tell();
+		TArray<uint8> AtriumPayload;
+		FString AtriumWhy;
+		bAtriumPeekOk = RHSaveFrame::Read(Ar, Bytes, RHSaveFrame::AtriumTag, AtriumPayload, AtriumWhy);
+		Ar.Seek(At);
+		if (bAtriumPeekOk)
+		{
+			InstallAtriumPayload(AtriumPayload);
+		}
+		if (bHadAtriums || Atriums.Num() > 0)
+		{
+			++AtriumsVersion;
+		}
+		InvalidateAtriumCaches();
+	}
 	// Warning repairs (they need the buildings, which are loaded by now): a BorerId that names no Borer becomes 0, and a
 	// Borer that anchors two shafts keeps the lower Id.
 	{
@@ -14953,6 +15058,36 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ReconcileReservations();      // E5: both purses' reservations and the lifetime totals, after both blocks (E4's own repair moved here)
 	ReadLeversBlock(Ar, Bytes, MirrorClosed, MirrorSabotage, MirrorEmbargo, MirrorDefected); // E6 (v57): the rules (or the mirror's), then the orders' terms
 	ReadTransitPowerBlock(Ar, Bytes); // D6e (v58): the lifts' and lines' short-ms rings, onto the shafts, cars and lines installed above
+	{
+		// D7 (v59, cross-check item 4): the atrium frame at the tail position, by the normal forward read, which consumes it (so a later frame's
+		// forward read stands on its own header). When the early read installed the list this only consumes the frame: no second validation,
+		// install, Warning or robot remap, so each structural failure prints exactly one Warning on either path. When the early read failed and
+		// this one succeeds, the list is installed here and the robots on open cells are remapped now. "Lost" only when both fail.
+		TArray<uint8> AtriumPayload;
+		FString AtriumWhy;
+		const bool bTail = RHSaveFrame::Read(Ar, Bytes, RHSaveFrame::AtriumTag, AtriumPayload, AtriumWhy);
+		if (bAtriumPeekOk)
+		{
+			AtriumLoadPath = 1;
+		}
+		else if (bTail)
+		{
+			AtriumLoadPath = 2;
+			InstallAtriumPayload(AtriumPayload);
+			if (Atriums.Num() > 0)
+			{
+				++AtriumsVersion;
+				InvalidateAtriumCaches();
+				RemapRobotsOffOpenCells(Respawned, RespawnedLevels);
+			}
+		}
+		else
+		{
+			AtriumLoadPath = 3;
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v59: the atrium block is lost (%s); no atrium is open"), *AtriumWhy);
+		}
+		bAtriumPeekOk = false;
+	}
 
 	// Loads land at 1x regardless of the saved speed: give the player a calm
 	// frame before they choose a tier again.
@@ -14966,6 +15101,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	++ZoningVersion;
 	bBedKeyValid = false;
 	RefreshJobs(); // derived, never saved - rebuilt from the loaded roster + rooms
+	RepairAtriumOccupancy(); // D7: rooms, furniture, buildings, stations, tunnels and growth are loaded; an occupied open cell closes its atrium (Warning)
 
 	// Transient edge state re-derives from the loaded clock: a mid-storm load
 	// must not re-announce "onset", and the ship countdown picks up mid-run.

@@ -80,6 +80,18 @@ public:
 	// RH.FrameStats: "plates 1,912, walls ...".
 	FString DescribeCounts() const;
 	int32 GetPlateCount() const { return CountPlates; }
+	// D7 (the click test's section.cut.atrium): the open cells in the drawn slab, each drawn as nothing but its railing, and the light columns.
+	int32 GetVoidCount() const { return CountVoids; }
+	int32 GetLightColumnCount() const { return CountLightColumns; }
+	// D7: the railing bars (one per edge where an open cell of the slab meets a floor cell that is not open) and the facing edges (one warm rim per
+	// facing cell of the slab), drawn at bands 0-1; RH.AtriumStatus prints them and section.cut.atrium checks them against the sim.
+	int32 GetRailCount() const { return CountRails; }
+	int32 GetFacingEdgeCount() const { return CountFacingEdges; }
+	int32 GetFloorRails(int32 Level) const;
+	int32 GetFloorFacingEdges(int32 Level) const;
+	// D7 (section.cut.atrium): the plates one floor drew at its last rebuild (0 for a floor not drawn), so a check can count plates on a floor
+	// with the atrium open and closed and compare the difference with the open cells in the slab, counted from the sim.
+	int32 GetFloorPlates(int32 Level) const;
 	int32 GetRebuilds() const { return Rebuilds; }
 	double GetLastRebuildMs() const { return LastRebuildMs; }
 	double GetWorstRebuildMs() const { return WorstRebuildMs; }
@@ -156,6 +168,10 @@ private:
 		int32 Band = -99;
 		TMap<uint32, TArray<FTransform>> Boxes;   // colour key -> world transforms (unit cube scaled)
 		int32 Plates = 0, Walls = 0, Blocks = 0, Pips = 0;
+		int32 Lights = 0;                           // D7: light-column segments drawn on this floor
+		int32 Voids = 0;                            // D7: open cells of an atrium in the slab (no plate, band, wall, block or pip drawn)
+		int32 Rails = 0;                            // D7: railing bars (an open cell's edge on a floor cell that is not open)
+		int32 Facing = 0;                           // D7: facing cells drawn with a warm rim
 	};
 	struct FCarSlot
 	{
@@ -231,6 +247,7 @@ private:
 	int32 AlongMin = 0, AlongMax = 0;         // the carved extent along the plane (cells), +- one, for IsInSlab and the framing of the labels
 	int32 DepthMin = 0, DepthMax = 0;
 	int32 CountPlates = 0, CountWalls = 0, CountBlocks = 0, CountPips = 0, CountCars = 0;
+	int32 CountVoids = 0, CountLightColumns = 0, CountRails = 0, CountFacingEdges = 0;
 	int32 Rebuilds = 0;
 	double LastRebuildMs = 0.0, WorstRebuildMs = 0.0;
 	// Diagnosis (step-2 nit 37): where a rebuild's time goes. The label-room measure every BuildShared runs, and PlaceLabels (P8c: the ladder's

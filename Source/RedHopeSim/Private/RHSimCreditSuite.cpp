@@ -606,7 +606,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Cur += 4;
 		}
 		const int32 PricesAt = Cur; // v54: the item count, then each item's locked price in manifest order
-		Expect(bFramed && Ver == 58 && Payload == CreditBytes && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
+		Expect(bFramed && Ver == 59 && Payload == CreditBytes && Rd64(At) == Sim->GetCreditBalanceMcr() && Rd64(At + 8) == Sim->GetCreditAwardedMcr() && Rd64(At + 16) == 0 && Cap == 30000.0
 			&& Names.Num() == 2 && Names[0] == TEXT("ComputeCore") && Names[1] == TEXT("Toolkit") && Landed[0] == 1 && Landed[1] == 1
 			&& Rd32(PricesAt) == 2 && Rd64(PricesAt + 4) == 1000000 && Rd64(PricesAt + 12) == 200000 && PricesAt + 20 == At + Payload && At + Payload + RHSaveFrame::FooterBytes == ExportFrame,
 			FString::Printf(TEXT("CR9 v%u: the credit block is a frame ('RHE2', %d payload bytes) straight before E3's - balance %lld, awarded %lld, spent %lld mcr, cap %.0f kg, %d capped rows by name (%s %d, %s %d), then 2 locked prices (%lld, %lld mcr)"),
@@ -652,7 +652,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				TEXT("CR9 a block whose rows are out of order resets every landing count to 0 and loads, the credit and the locked prices kept"));
 		}
 		{ TArray<uint8> T = W; const uint32 V54 = 54; FMemory::Memcpy(T.GetData() + 4, &V54, 4); FString E; const bool bOk = TryBytes(TEXT("creditr5"), T, E);
-		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/58")), FString::Printf(TEXT("CR9 a v54 file is refused (%s)"), *E)); }
+		  Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/59")), FString::Printf(TEXT("CR9 a v54 file is refused (%s)"), *E)); }
 		// v54, finding 2: a balance of ~1e18 (the old bug's size) is not a real one: all three totals are set to 0, never kept.
 		{ TArray<uint8> T = W; Put64(T, At, 0x7530000000000000LL); Put64(T, At + 8, 0x7530000000000000LL); FString E; const bool bOk = TryBytes(TEXT("creditr6"), Sealed(T), E);
 		  Expect(bOk && Sim->GetCreditBalanceMcr() == 0 && Sim->GetCreditAwardedMcr() == 0 && Sim->GetCreditSpentMcr() == 0 && Inv(),

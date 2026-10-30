@@ -145,6 +145,8 @@ URHSimWorldSubsystem::FRHDistrictMembershipKey URHSimWorldSubsystem::MakeDistric
 		Key.DeepCells = FloorCellsVersion;
 		EnsureBedAssignments(); // step-2 fix 2: the generation of the assignment of NOW, so a key is never built from the old one and derived twice
 		Key.DeepBeds = BedAssignVersion;
+		// D7 (R5): an atrium opened or closed on a mapped floor moves HomeCell (its slots skip open cells). 0 while no atrium exists.
+		Key.Atriums = Atriums.Num() > 0 ? AtriumsVersion : 0;
 	}
 	return Key;
 }
@@ -193,10 +195,12 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 	Out.FloorCells = FloorCellsVersion;
 	Out.Districts = DistrictsVersion;
 	Out.BedAssign = BedAssignVersion;
+	Out.Atriums = Atriums.Num() > 0 ? AtriumsVersion : 0;
 	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
-	if (!Geo.AnyMapped())
+	const bool bAtriums = Atriums.Num() > 0; // D7: the switch - every atrium branch below tests it first
+	if (!Geo.AnyMapped() && !bAtriums)
 	{
-		return; // no shape and no line: no mapped floor, home cells are never built
+		return; // no shape, no line and no atrium: no mapped floor, home cells are never built
 	}
 	// Step-2 fix 2: the bed pieces of NOW (never the last RefreshJobs' or another colony's). The call may re-derive them and bump the generation, so the key's
 	// BedAssign is stamped again after it. An unmapped colony returned above and never reaches it, so it derives exactly when it did.
@@ -204,27 +208,46 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 	Out.BedAssign = BedAssignVersion;
 	TArray<int32> Levels;
 	Geo.GetMappedLevels(Levels); // D6d: the floors that hold a shape or a tram line, ascending
-	TMap<int32, TArray<int32>> LevelResidents; // mapped Level -> colonist Ids
+	TArray<int32> AtriumLevels;
+	if (bAtriums)
+	{
+		// D7 (section 4): every floor of every atrium's box too (upper and hall floors), as the ascending union with the mapped floors.
+		GetAtriumLevels(AtriumLevels);
+		for (const int32 L : AtriumLevels)
+		{
+			Levels.AddUnique(L);
+		}
+		Levels.Sort();
+	}
+	TMap<int32, TArray<int32>> LevelResidents; // mapped (or, D7, atrium) Level -> colonist Ids
 	for (const FRHColonist& C : Colonists)
 	{
-		if (C.HomeHab == 0 && C.HomeLevel < 0 && Geo.IsMapped(C.HomeLevel))
+		if (C.HomeHab == 0 && C.HomeLevel < 0 && (Geo.IsMapped(C.HomeLevel) || (bAtriums && AtriumLevels.Contains(C.HomeLevel))))
 		{
 			LevelResidents.FindOrAdd(C.HomeLevel).Add(C.Id);
 		}
 	}
 	for (const int32 Level : Levels)
 	{
+		// D7 (R8): a mapped floor keeps its home cells in HomeCell (they change when its cells open); an atrium floor that is not mapped writes
+		// AtriumHomeCell, never HomeCell, so HomeCell keeps exactly D6b's contents there.
+		const bool bMapped = Geo.IsMapped(Level);
+		const TArray<uint8>* Open = bAtriums ? GetAtriumFlags(Level) : nullptr;
 		// The beds of every carved cell, by the CountFloorBeds rule: a Living cell with bed pieces holds exactly its beds; every other
 		// cell holds legacy beds. The k-th such cell (ordinal order) offers floor((k+1) x CPC) - floor(k x CPC) of them, so the floor's
 		// total is (int32)(m x CPC) at any ColonistsPerCell, the figure CountFloorBeds gives.
 		const int32 Carved = GetFloorCarvedCells(Level);
-		TArray<int32>& Beds = Out.CellBeds.Add(Level);
+		TArray<int32>& Beds = bMapped ? Out.CellBeds.Add(Level) : Out.AtriumCellBeds.Add(Level);
 		Beds.Init(0, Carved);
 		TArray<int32> Slots; // one entry per legacy bed: the ordinal of its cell, ascending
 		int32 K = 0;
 		for (int32 i = 0; i < Carved; ++i)
 		{
 			const FIntVector Key(Level, i, 0);
+			if (Open && Open->IsValidIndex(i) && ((*Open)[i] & 1) != 0)
+			{
+				continue; // D7: an open cell holds no bed and no slot, and k does not advance, so the slots total the new CountFloorBeds
+			}
 			const FRHCellFurnish* CF = FurnishedCells.Find(Key);
 			if (CF && CF->BedPieces > 0 && IsLivingKey(Key))
 			{
@@ -245,6 +268,7 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 			continue;
 		}
 		Ids->Sort();
+		TMap<int32, int32>& HomeOut = bMapped ? Out.HomeCell : Out.AtriumHomeCell;
 		int32 NextSlot = 0;
 		for (const int32 Id : *Ids)
 		{
@@ -257,11 +281,11 @@ void URHSimWorldSubsystem::DeriveDeepHomes(FRHDeepHomes& Out) const
 			}
 			if (Piece && Piece->Key.Z == 0 && Piece->Key.X == Level)
 			{
-				Out.HomeCell.Add(Id, Piece->Key.Y);
+				HomeOut.Add(Id, Piece->Key.Y);
 			}
 			else if (Slots.IsValidIndex(NextSlot))
 			{
-				Out.HomeCell.Add(Id, Slots[NextSlot++]);
+				HomeOut.Add(Id, Slots[NextSlot++]);
 			}
 		}
 	}
@@ -271,7 +295,7 @@ const URHSimWorldSubsystem::FRHDeepHomes& URHSimWorldSubsystem::EnsureDeepHomes(
 {
 	const FRHDeepHomes& H = DeepHomes;
 	const bool bFresh = H.bValid && H.Colonists == ColonistSetVersion && H.Furniture == FurnitureVersion && H.Zoning == ZoningVersion
-		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion;
+		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion && H.Atriums == (Atriums.Num() > 0 ? AtriumsVersion : 0);
 	if (!bFresh)
 	{
 		DeriveDeepHomes(DeepHomes);
@@ -289,7 +313,7 @@ bool URHSimWorldSubsystem::IsDeepHomesFresh() const
 	// True unless the cache is being REUSED (its key still matches) while a fresh derivation differs.
 	const FRHDeepHomes& H = DeepHomes;
 	if (!(H.bValid && H.Colonists == ColonistSetVersion && H.Furniture == FurnitureVersion && H.Zoning == ZoningVersion
-		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion))
+		&& H.FloorCells == FloorCellsVersion && H.Districts == DistrictsVersion && H.BedAssign == BedAssignVersion && H.Atriums == (Atriums.Num() > 0 ? AtriumsVersion : 0)))
 	{
 		return true; // a cache whose key has moved reads as fresh: it rebuilds on its next read
 	}
@@ -298,6 +322,19 @@ bool URHSimWorldSubsystem::IsDeepHomesFresh() const
 	if (!SameMap(Fresh.HomeCell, H.HomeCell) || Fresh.CellBeds.Num() != H.CellBeds.Num())
 	{
 		return false;
+	}
+	// D7 (R9): the atrium floors' home cells and beds are compared as well.
+	if (!SameMap(Fresh.AtriumHomeCell, H.AtriumHomeCell) || Fresh.AtriumCellBeds.Num() != H.AtriumCellBeds.Num())
+	{
+		return false;
+	}
+	for (const TPair<int32, TArray<int32>>& P : Fresh.AtriumCellBeds)
+	{
+		const TArray<int32>* Other = H.AtriumCellBeds.Find(P.Key);
+		if (!Other || !(*Other == P.Value))
+		{
+			return false;
+		}
 	}
 	for (const TPair<int32, TArray<int32>>& P : Fresh.CellBeds) // a boolean AND over every entry
 	{

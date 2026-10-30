@@ -725,6 +725,10 @@ bool URHSimWorldSubsystem::IsRouteReachable(int32 RobotLevel, const FVector& Rob
 		return false;
 	}
 	const int32 Dig = Info.DigOf[Ordinal];
+	if (Dig == INDEX_NONE)
+	{
+		return false; // D7 (R1): a site on an open cell is in no dig (none can stand there; a guard, never reached in play)
+	}
 	if (EnsureDeepNet().FittedDigs.Contains(FIntPoint(SiteLevel, Dig)))
 	{
 		return true;
@@ -737,8 +741,14 @@ bool URHSimWorldSubsystem::IsRouteReachable(int32 RobotLevel, const FVector& Rob
 		{
 			return DeepNet.Portals[Col].Dig == Dig;
 		}
-		const int32 Own = FindCarvedCellAt(RobotLevel, RobotPos);
-		return Own != INDEX_NONE && Info.DigOf.IsValidIndex(Own) && Info.DigOf[Own] == Dig;
+		int32 Own = FindCarvedCellAt(RobotLevel, RobotPos);
+		if (Own != INDEX_NONE && Atriums.Num() > 0 && IsCellOpen(RobotLevel, Own) && !FindNearestWalkCell(RobotLevel, Own, Own))
+		{
+			return false; // D7: an open own cell maps as Resolve maps it; an all-void dig reaches nothing
+		}
+		// Info is fetched again: EnsureDeepNet() above can add to DigCache and move the entry the first reference named (the labels are equal).
+		const FRHDigInfo& OwnInfo = EnsureDigInfo(SiteLevel);
+		return Own != INDEX_NONE && OwnInfo.DigOf.IsValidIndex(Own) && OwnInfo.DigOf[Own] == Dig;
 	}
 	return false;
 }
@@ -804,13 +814,22 @@ void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<int32>& Ou
 	}
 	FTransitFlatIndex Index;
 	Index.Build(Floor, GridScratch);
+	// D7 (R2): IsWalkOrdinal - while an atrium exists an open cell is absent: no step into it or out of it, and it is no orthogonal for a
+	// diagonal. With no atrium Open is null and every row is today's.
+	const TArray<uint8>* Open = GetAtriumFlags(Level);
+	const auto IsOpenOrd = [Open](int32 O) { return Open && Open->IsValidIndex(O) && ((*Open)[O] & 1) != 0; };
+	const auto WalkOrd = [&IsOpenOrd](int32 O) { return (O != INDEX_NONE && !IsOpenOrd(O)) ? O : (int32)INDEX_NONE; };
 	for (int32 c = 0; c < N; ++c)
 	{
 		const FIntPoint Cur = Floor->Cells[c];
 		int32* Row = &Out[c * 8];
+		if (IsOpenOrd(c))
+		{
+			continue; // an open cell steps nowhere
+		}
 		for (int32 k = 0; k < 4; ++k)
 		{
-			Row[k] = Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y);
+			Row[k] = WalkOrd(Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y));
 		}
 		// Steps 4..7 are (+1,+1), (-1,+1), (+1,-1), (-1,-1): the orthogonal cells they need are (X step, 0) and (0, Y step), i.e. steps
 		// 0/1 by the X sign and 2/3 by the Y sign.
@@ -820,7 +839,7 @@ void URHSimWorldSubsystem::BuildLatticeNeighbours(int32 Level, TArray<int32>& Ou
 			const int32 YOrth = TransitSteps[k].Y > 0 ? Row[2] : Row[3];
 			if (XOrth != INDEX_NONE && YOrth != INDEX_NONE)
 			{
-				Row[k] = Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y);
+				Row[k] = WalkOrd(Index.Find(Cur.X + TransitSteps[k].X, Cur.Y + TransitSteps[k].Y));
 			}
 		}
 	}
@@ -860,8 +879,10 @@ void URHSimWorldSubsystem::BuildLatticeField(int32 Level, int32 Root, TArray<int
 		const FIntPoint Cur = Floor->Cells[Top.Node];
 		for (int32 k = 0; k < 8; ++k)
 		{
-			int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
-			if (O != INDEX_NONE && k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
+			// D7 (R2): through IsWalkOrdinal (an open cell is absent; the same as FindOrdinal with no atrium).
+			const auto WalkAt = [this, Floor](const FIntPoint& P) { const int32 W = Floor->FindOrdinal(P); return (W != INDEX_NONE && IsWalkOrdinal(*Floor, W)) ? W : (int32)INDEX_NONE; };
+			int32 O = WalkAt(Cur + TransitSteps[k]);
+			if (O != INDEX_NONE && k >= 4 && (WalkAt(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || WalkAt(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
 			{
 				O = INDEX_NONE;
 			}
@@ -890,6 +911,10 @@ bool URHSimWorldSubsystem::LatticeAStar(int32 Level, int32 From, int32 To, TArra
 	if (!Floor || !Floor->Cells.IsValidIndex(From) || !Floor->Cells.IsValidIndex(To))
 	{
 		return false;
+	}
+	if (!IsWalkOrdinal(*Floor, From) || !IsWalkOrdinal(*Floor, To))
+	{
+		return false; // D7 (R2): never from or to an open cell (Resolve maps a robot off one first)
 	}
 	if (From == To)
 	{
@@ -927,12 +952,14 @@ bool URHSimWorldSubsystem::LatticeAStar(int32 Level, int32 From, int32 To, TArra
 		}
 		for (int32 k = 0; k < 8; ++k)
 		{
-			const int32 O = Floor->FindOrdinal(Cur + TransitSteps[k]);
+			// D7 (R2): the direct same-dig leg steps through IsWalkOrdinal too, so two ring cells on opposite sides walk round the void.
+			const auto WalkAt = [this, Floor](const FIntPoint& P) { const int32 W = Floor->FindOrdinal(P); return (W != INDEX_NONE && IsWalkOrdinal(*Floor, W)) ? W : (int32)INDEX_NONE; };
+			const int32 O = WalkAt(Cur + TransitSteps[k]);
 			if (O == INDEX_NONE)
 			{
 				continue;
 			}
-			if (k >= 4 && (Floor->FindOrdinal(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || Floor->FindOrdinal(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
+			if (k >= 4 && (WalkAt(Cur + FIntPoint(TransitSteps[k].X, 0)) == INDEX_NONE || WalkAt(Cur + FIntPoint(0, TransitSteps[k].Y)) == INDEX_NONE))
 			{
 				continue;
 			}
@@ -1050,7 +1077,9 @@ void URHSimWorldSubsystem::AppendSurfaceLegs(FRHRobotRoadPath& Path, const FVect
 const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() const
 {
 	FRHDeepNet& N = DeepNet;
-	if (N.bValid && N.Cells == FloorCellsVersion && N.ShaftsV == ShaftsVersion && N.Lift == LiftVersion && N.Built == RoadGraph.BuiltVersion && N.TunnelsV == TunnelsVersion)
+	const uint32 AtriumKey = Atriums.Num() > 0 ? AtriumsVersion : 0; // D7: 0 for ever with no atrium, so DeepNetBuilds cannot move
+	if (N.bValid && N.Cells == FloorCellsVersion && N.ShaftsV == ShaftsVersion && N.Lift == LiftVersion && N.Built == RoadGraph.BuiltVersion && N.TunnelsV == TunnelsVersion
+		&& N.Atriums == AtriumKey)
 	{
 		return N;
 	}
@@ -1070,6 +1099,7 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 	N.Lift = LiftVersion;
 	N.Built = RoadGraph.BuiltVersion;
 	N.TunnelsV = TunnelsVersion;
+	N.Atriums = AtriumKey;
 	TMap<int32, TArray<int32>> NeighboursOf; // level -> its step table, shared by every landing on it
 	TArray<int32> GridScratch;                // the flat floor index, reused floor after floor
 	TArray<FTransitHeapItem> FieldHeap;       // the field search's heap, reused landing after landing
@@ -1102,7 +1132,7 @@ const URHSimWorldSubsystem::FRHDeepNet& URHSimWorldSubsystem::EnsureDeepNet() co
 			for (int32 k = 0; k < 4; ++k)
 			{
 				const int32 O = Floor->FindOrdinal(Sh.Column + TransitSteps[k]);
-				if (O != INDEX_NONE && (Landing == INDEX_NONE || O < Landing))
+				if (O != INDEX_NONE && IsWalkOrdinal(*Floor, O) && (Landing == INDEX_NONE || O < Landing)) // D7: never an open cell
 				{
 					Landing = O;
 				}
@@ -1243,8 +1273,14 @@ bool URHSimWorldSubsystem::PlanDeepRoute(int32 FromLevel, const FVector& FromCm,
 			Out.Dig = Net.Portals[Col].Dig;
 			return true;
 		}
-		const int32 Ord = FindCarvedCellAt(Level, Cm);
+		int32 Ord = FindCarvedCellAt(Level, Cm);
 		if (Ord == INDEX_NONE)
+		{
+			return false;
+		}
+		// D7 (P2): a position on an open cell stands on the nearest non-open cell, found through the open cells (distance, then the lowest
+		// ordinal; on a rim cell, R3's lowest-ordinal non-open 4-neighbour). None (an all-void dig): off the lattice, as a cell in rock is.
+		if (Atriums.Num() > 0 && IsCellOpen(Level, Ord) && !FindNearestWalkCell(Level, Ord, Ord))
 		{
 			return false;
 		}
@@ -1706,7 +1742,8 @@ float URHSimWorldSubsystem::DeepReserveAt(FMassEntityHandle Entity, const FRHRob
 	}
 	FRHReserveMemo* Memo = Spot != 0 ? &ReserveMemos.FindOrAdd(Entity) : nullptr;
 	if (Memo && Memo->bValid && Memo->Level == Level && Memo->Spot == Spot && Memo->PadId == PadId && Memo->RobotSol == RobotSol
-		&& Memo->Cells == FloorCellsVersion && Memo->ShaftsV == ShaftsVersion && Memo->Lift == LiftVersion && Memo->Built == RoadGraph.BuiltVersion && Memo->TunnelsV == TunnelsVersion)
+		&& Memo->Cells == FloorCellsVersion && Memo->ShaftsV == ShaftsVersion && Memo->Lift == LiftVersion && Memo->Built == RoadGraph.BuiltVersion && Memo->TunnelsV == TunnelsVersion
+		&& Memo->Atriums == (Atriums.Num() > 0 ? AtriumsVersion : 0)) // D7 (P4): the deep net's key, so a reserve is never priced on a pre-open route
 	{
 		return Memo->Wh;
 	}
@@ -1734,6 +1771,7 @@ float URHSimWorldSubsystem::DeepReserveAt(FMassEntityHandle Entity, const FRHRob
 		Memo->Lift = LiftVersion;
 		Memo->Built = RoadGraph.BuiltVersion;
 		Memo->TunnelsV = TunnelsVersion;
+		Memo->Atriums = Atriums.Num() > 0 ? AtriumsVersion : 0;
 		Memo->Wh = Wh;
 	}
 	return Wh;
@@ -2246,11 +2284,19 @@ void URHSimWorldSubsystem::RepairLoadedRobots(const TArray<FMassEntityHandle>& H
 			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d stands on a fitted column (saved mid-ride) - kept"), i, Level);
 			continue;
 		}
-		const int32 Ord = bHasTransit ? FindCarvedCellAt(Level, Pos) : INDEX_NONE;
+		int32 Ord = bHasTransit ? FindCarvedCellAt(Level, Pos) : INDEX_NONE;
+		bool bOnOpenCell = false;
+		if (Ord != INDEX_NONE && Atriums.Num() > 0 && IsCellOpen(Level, Ord))
+		{
+			Ord = INDEX_NONE; // D7 (R3): an open cell is not a cell here - the robot is repaired like any robot off the lattice
+			bOnOpenCell = true;
+		}
 		if (Ord != INDEX_NONE)
 		{
+			// The dig label is read before EnsureDeepNet(): a deep-net rebuild can add to DigCache and move the entry Info refers to.
 			const FRHDigInfo& Info = EnsureDigInfo(Level);
-			if (Info.DigOf.IsValidIndex(Ord) && EnsureDeepNet().FittedDigs.Contains(FIntPoint(Level, Info.DigOf[Ord])))
+			const int32 Dig = Info.DigOf.IsValidIndex(Ord) ? Info.DigOf[Ord] : (int32)INDEX_NONE;
+			if (Info.DigOf.IsValidIndex(Ord) && EnsureDeepNet().FittedDigs.Contains(FIntPoint(Level, Dig)))
 			{
 				UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d stands in a dig a fitted lift reaches - kept"), i, Level);
 				continue;
@@ -2259,7 +2305,14 @@ void URHSimWorldSubsystem::RepairLoadedRobots(const TArray<FMassEntityHandle>& H
 		// Rock, an unfitted dig, or no lift at all: the surface deploy ring (SpawnStartingFleet's).
 		const float Angle = i * 0.8f;
 		const FVector Ring(-800.f + 250.f * i, -600.f + 150.f * FMath::Sin(Angle), RH::RobotZOffsetCm);
-		UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d has no fitted lift reaching it - moved to the surface deploy ring"), i, Level);
+		if (bOnOpenCell)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d stands on a cell open to an atrium - moved to the surface deploy ring"), i, Level); // D7
+		}
+		else
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Load: robot %d on floor %d has no fitted lift reaching it - moved to the surface deploy ring"), i, Level);
+		}
 		Agents->SetRobotPosition(Handles[i], Ring);
 	}
 }

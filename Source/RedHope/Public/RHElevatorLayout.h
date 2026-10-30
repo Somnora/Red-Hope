@@ -89,19 +89,15 @@ namespace RHElevator
 		return T1 - T0 > 1.0e-4;
 	}
 
-	// Corner waypoints that take a walk From -> To around the cab instead of
-	// through it (director 2026-07-17: "characters phase through the side").
-	// Empty when the straight line is already clear. Tries one corner, then two
-	// adjacent corners, and keeps the shortest clear path.
-	inline TArray<FVector> RouteAroundCab(const FVector& HeadCm, const FVector& From, const FVector& To)
+	// Corner waypoints that take a walk From -> To around a rectangle (Block) by the corners of a larger one (Ring) instead of through it. Empty
+	// when the straight line is already clear. Tries one corner, then two adjacent corners, and keeps the shortest clear path.
+	inline TArray<FVector> RouteAroundRect(const FRect2D& Block, const FRect2D& Ring, const FVector& From, const FVector& To)
 	{
 		TArray<FVector> Out;
-		const FRect2D Block = CabRect(HeadCm, WalkMargin);
 		if (!SegmentHitsRect(From, To, Block))
 		{
 			return Out;
 		}
-		const FRect2D Ring = CabRect(HeadCm, WalkMargin + 35.f);
 		const double Z = To.Z;
 		const FVector C[4] = {
 			FVector(Ring.MinX, Ring.MinY, Z), FVector(Ring.MaxX, Ring.MinY, Z),
@@ -133,5 +129,12 @@ namespace RHElevator
 			}
 		}
 		return Out;
+	}
+
+	// The cab (director 2026-07-17: "characters phase through the side"): its rectangle with the walk margin, routed round by corners 35 cm
+	// further out.
+	inline TArray<FVector> RouteAroundCab(const FVector& HeadCm, const FVector& From, const FVector& To)
+	{
+		return RouteAroundRect(CabRect(HeadCm, WalkMargin), CabRect(HeadCm, WalkMargin + 35.f), From, To);
 	}
 }

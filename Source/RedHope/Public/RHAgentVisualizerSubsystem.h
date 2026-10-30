@@ -59,6 +59,8 @@ public:
 	void SetSectionMode(bool bOn);
 	const TArray<FVector>& GetSectionDrawnCm() const { return SectionDrawnCm; }
 	int32 GetSectionDrawnCount() const { return SectionDrawnCm.Num(); }
+	// D7 (QA, RH.AtriumStatus): robots drawn this frame on a floor below the view, through an atrium (0 with none).
+	int32 GetShownThroughAtrium() const { return ShownThroughAtrium; }
 	int32 GetTrackedCount() const { return Tracked.Num(); } // RH.DeepBench's line: robots the visualizer follows
 
 private:
@@ -141,6 +143,7 @@ private:
 	int32 ViewLevel = 0;
 	bool bSectionMode = false;
 	TArray<FVector> SectionDrawnCm;
+	int32 ShownThroughAtrium = 0;
 	// D4: a cab box around each robot riding a lift car, pooled (hidden when unused). Presentation only.
 	TArray<TWeakObjectPtr<UStaticMeshComponent>> CabBoxes;
 	UStaticMeshComponent* GetCabBox(int32 Index);

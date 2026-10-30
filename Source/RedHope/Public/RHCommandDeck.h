@@ -30,6 +30,9 @@ public:
 	// The settings menu's "Guide and tips" switch.
 	bool AreTipsOn() const { return !bTipsOff; }
 	void SetTipsOn(bool bOn) { SetTipsOff(!bOn); }
+	// Captures (RH.ClearTips): lets go of every card now queued (tips and milestones), as GOT IT on each would, without turning tips off
+	// (nothing is remembered).
+	void Debug_ClearTipCards();
 	// Capture/QA (RH.DeckScroll): scroll the right-hand column to a pixel offset (a tall city outgrows the screen).
 	void Debug_ScrollRight(float OffsetPx);
 	void Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg); // E4 QA/captures: set one resource's draft on a rival's market card (the buttons' own state)
@@ -225,6 +228,8 @@ private:
 	FText GetCavernLabel() const;
 	FReply HandleCavern();
 	FReply HandleCancelCavern(int32 CavernId);
+	FReply HandleAtrium(int32 CavernId, bool bOpen); // D7: Open as atrium / Close the atrium (uplink orders)
+	bool bAtriumGhostFromCard = false;               // D7: the ghost is up because a card button is hovered (cleared with the list)
 	void RefreshCavernList();
 	TSharedPtr<class SVerticalBox> CavernList;
 	uint32 CavernListKey = MAX_uint32;

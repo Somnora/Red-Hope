@@ -425,6 +425,17 @@ struct FRHCavern
 	mutable int32 CellsCarved = 0;     // derived, never saved: cells its Borers carved since it was ordered or the colony loaded (the completion log's figure)
 };
 
+// D7 (atriums; docs/qa/2026-10-23/d7-atriums-design.md, director answer Q-A (a)): a finished cavern of two or more floors opened into one
+// tall hall. The record is the cavern's Id only: the box, its floors and region are the cavern's. On every floor of the box but the deepest
+// (the upper floors, Top .. Bottom + 1) the box cells are OPEN: still carved, still in FRHFloor::Cells at their ordinals, but no slab, no
+// room, no bed and no step. The deepest floor's box cells are the hall floor, ordinary cells under the open volume. Saved in its own frame
+// ('RHD7', v59) as the ascending list of cavern Ids; the open flag itself is derived (FRHAtriumCells), never saved.
+struct FRHAtrium
+{
+	int32 CavernId = 0;
+	bool operator==(const FRHAtrium& O) const { return CavernId == O.CavernId; }
+};
+
 namespace RH
 {
 	// D4: caps shared by the config clamps and the save's refusals, so a save made under any row value loads.
@@ -1109,7 +1120,8 @@ public:
 	int32 GetCavernBatchesLanded() const { return CavernBatchesLanded; }
 	int32 GetCavernBatchesEmpty() const { return CavernBatchesEmpty; }
 	// The horizontal eligibility rule (RC 2): an UNCARVED, non-column point of Level that is 4-adjacent to a carved cell of Level or to the
-	// column of a shaft that reaches Level. Cells are never removed, so a point that is eligible once stays eligible.
+	// column of a shaft that reaches Level. Cells are never removed, so a point that is eligible once stays eligible - except that, while an
+	// atrium exists, the carved neighbour must not be open (D7's foothold rule): a point beside open cells only is not eligible.
 	bool IsCavernPointEligible(int32 Level, const FIntPoint& P) const;
 	// The point a Borer carves next on one floor of a cavern: the eligible box point lowest by (X, then Y). False when none is left.
 	bool FindCavernPoint(const FRHCavern& C, int32 Level, FIntPoint& OutPoint) const;
@@ -1136,6 +1148,103 @@ public:
 	// Harness (step-2 fix 3): append N cancelled 1 x 1 x 1 records on floor -1 at lattice (1, 0), worked from shaft 0, with fresh Ids, to reach the record cap
 	// without N orders. The loader accepts them (a cancelled cavern is never open). Stops at MaxCavernRecords; returns how many were appended.
 	int32 Debug_PadCavernRecords(int32 N);
+
+	// --- D7: atriums (docs/qa/2026-10-23/d7-atriums-design.md, REVISION R1-R12; director answers Q-A (a), Q-B (a)) ---
+	// An atrium converts a finished cavern of 2 or 3 floors (OpenAtrium, Value = cavern Id; CloseAtrium undoes it). No cell is ever removed,
+	// moved or reordered: an open cell is a derived flag. Every new branch tests Atriums.Num() > 0 (or a floor's open count) first, so with no
+	// atrium every existing expression is evaluated exactly as before and every new key field is 0.
+	const TArray<FRHAtrium>& GetAtriums() const { return Atriums; }   // ascending CavernId, at most one a cavern
+	uint32 GetAtriumsVersion() const { return AtriumsVersion; }        // up on every open, close and load that holds or held one
+	bool IsAtrium(int32 CavernId) const;
+	// The open flag (bit 0) and the facing flag (bit 1) of a cell, through the derived cache (built only while an atrium exists).
+	bool IsCellOpen(int32 Level, int32 Ordinal) const;
+	bool IsPointOpen(int32 Level, const FIntPoint& P) const;
+	bool IsCellFacing(int32 Level, int32 Ordinal) const;
+	int32 GetFloorOpenCells(int32 Level) const;                        // O_L: the open cells of a floor (0 with no atrium)
+	// R2: the one step predicate - carved and, while an atrium exists, not open. Every robot and people neighbour generator uses it.
+	bool IsWalkOrdinal(const FRHFloor& Floor, int32 Ordinal) const { return Floor.Cells.IsValidIndex(Ordinal) && (Atriums.Num() == 0 || !IsCellOpen(Floor.Level, Ordinal)); }
+	// Heads whose home cell or seat faces an atrium, each counted once (cached; 0 with no atrium).
+	int32 GetAtriumFacingHeads() const;
+	struct FRHAtriumFloorPreview
+	{
+		int32 Level = 0;
+		int32 OpenCells = 0;       // the cells that would open on this floor (0 on the hall floor)
+		double PremiumKg = 0.0;    // this floor's share of the premium fill
+		double ExtraLeakKgPerSol = 0.0;
+		int32 HeadroomCells = 0;   // the cell-equivalents the floor's circulation can still carry after the open (refusal 9's margin)
+	};
+	struct FRHAtriumPreview
+	{
+		int32 CavernId = 0;
+		int32 Top = 0, Bottom = 0;
+		FIntPoint Min = FIntPoint::ZeroValue, Max = FIntPoint::ZeroValue;
+		double PremiumKg = 0.0;          // the up-front bill: every upper floor's O_L x O2FillKgPerCell x (AtriumFillPermille - 1000) / 1000
+		double ExtraLeakKgPerSol = 0.0;  // every upper floor's O_L x O2LeakKgPerCellPerSol x (AtriumLeakPermille - 1000) / 1000
+		TArray<FIntVector> OpenCells;    // (Level, X, Y) of every cell that would open, floors top down, (X, then Y) within
+		TArray<FIntVector> FacingRing;   // (Level, X, Y) of every carved cell outside the box that would face it
+		int32 FacingHeads = 0;           // homes and seats that would face it (each head once)
+		TArray<FRHAtriumFloorPreview> Floors; // top down, the hall floor last
+	};
+	// The OpenAtrium preflight: refusals 1-10 (REVISION, "The refusals, in full") in order, with the reason; run when queued and again at execute.
+	bool CanOpenAtrium(int32 CavernId, FString& OutReason, FRHAtriumPreview* OutPreview = nullptr) const;
+	// Harness: the OpenAtrium / CloseAtrium orders without the uplink (the same preflight and the same execution).
+	bool Debug_OpenAtrium(int32 CavernId, FString& OutReason);
+	bool Debug_CloseAtrium(int32 CavernId, FString& OutReason);
+	// Harness: the facing count's rebuilds and the open-flag cache's builds since start (transient, never reset by a load), and the facing
+	// count's reuses (a read answered from the cache: AT11 counts the reads its unchanged window makes).
+	int32 Debug_GetAtriumFacingBuilds() const { return AtriumFacingBuilds; }
+	int32 Debug_GetAtriumFacingReuses() const { return AtriumFacingReuses; }
+	// Harness: the preflight memos' reuses since start (R12: refusal 6's bed count per floor and refusal 7's walk test), so a case shows that a
+	// second preflight with nothing changed reuses them (and, under -RHVerifyCaches, compares each with a fresh derivation).
+	int32 Debug_GetAtriumBedMemoReuses() const { return AtriumBedMemoReuses; }
+	int32 Debug_GetAtriumWalkMemoReuses() const { return AtriumWalkMemoReuses; }
+	int32 Debug_GetAtriumCellBuilds() const { return AtriumCellBuilds; }
+	bool Debug_IsAtriumCacheBuilt() const { return AtriumCells.bValid; }
+	bool Debug_IsAtriumFacingBuilt() const { return AtriumFacing.bValid; }
+	// Harness: the key fields D7 adds to the existing caches (each 0 with no atrium): dig labels, deep net, deep homes, membership, commute, walk,
+	// the robots' charge reserve memos.
+	void Debug_AtriumKeyFields(TArray<uint32>& Out) const;
+	// Harness: the derived home cell of a resident of an atrium floor that is not mapped (INDEX_NONE otherwise), and the open-aware what-if bed count.
+	int32 GetColonistAtriumHomeCell(int32 ColonistId) const;
+	int32 Debug_CountFloorBedsOpen(int32 Level, int32 ExtraOpen) const { return CountFloorBedsWith(Level, ExtraOpen); }
+	// Harness: the frame size of the atrium block's payload (4 + 4 a record).
+	int32 GetAtriumBlockBytes() const { return 4 + 4 * Atriums.Num(); }
+	double GetHopeAtriumMax() const { return HopeAtriumMax; }
+	int32 GetAtriumFillPermille() const { return AtriumFillPermille; }
+	int32 GetAtriumLeakPermille() const { return AtriumLeakPermille; }
+	// The most one floor's circulation pushes in a sol (refusal 9's ceiling), and a floor's air headroom in cell-equivalents against it (the card),
+	// as it stands or with ExtraOpen more of its cells open (a cavern that is not yet an atrium: its box on each floor above the hall).
+	double GetFloorAirCeilingKgPerSol() const;
+	int32 GetFloorAirHeadroomCells(int32 Level) const;
+	int32 GetFloorAirHeadroomCellsWith(int32 Level, int32 ExtraOpen) const;
+	// The cells floor Level of cavern CavernId's box would newly open as an atrium, as refusals 6, 8 and 9 count them (every box point on an
+	// upper floor, less those already open to an atrium whose box the box meets); 0 on the hall floor, off the box, or for an atrium.
+	int32 GetAtriumNewOpenCells(int32 CavernId, int32 Level) const;
+	// The overlay's soft glow (presentation): the cells of a floor that face an atrium and hold a facing head's home or seat (the facing count's
+	// rule), ascending; and its redraw key, every input of the facing count (0 with no atrium, never per frame).
+	void GetAtriumFacingCells(int32 Level, TArray<int32>& OutOrdinals) const;
+	uint32 GetAtriumFacingKey() const;
+	// Harness: the result of the last tail read of the atrium frame at load (0 none, 1 the early read installed the list, 2 the early read failed
+	// and the tail read installed it, 3 both failed).
+	int32 Debug_GetAtriumLoadPath() const { return AtriumLoadPath; }
+	// Harness: the atrium caches against a fresh derivation (the open and facing flags, the facing count), as -RHVerifyCaches compares them.
+	bool Debug_AtriumCachesFresh() const;
+	// Harness (-atriums, -scale): a stock moved directly (the suites' oxygen for the premium bill); -RHVerifyCaches switched for a case;
+	// the per-floor circulation row (-scale's atrium block only, run last: its 20-floor colony's floors are far past one floor's ceiling).
+	void Debug_AddStock(FName Resource, double Kg) { AddStock(Resource, Kg); }
+	void Debug_SetVerifyCaches(bool bOn) { bVerifyCaches = bOn; }
+	void Debug_SetO2FillRateKgPerHour(double V) { O2FillRateKgPerHour = FMath::Max(0.0, V); }
+	// Harness (-atriums AT1 refusal 5, AT9's occupancy repair): append an open growth project as it stands (no bill, no checks); put a station key
+	// at the front of the seat order as the Assign order would (no room check).
+	void Debug_AddGrowthProject(const FRHGrowthProject& P) { GrowthProjects.Add(P); }
+	void Debug_AddSeatPriority(const FIntVector& Key) { SeatPriority.Remove(Key); SeatPriority.Insert(Key, 0); }
+	// Harness (-atriums AT0, AT8, AT10): a cell's dig label (INDEX_NONE for an open cell or none), how many robots hold a charge reserve memo, and
+	// the per-floor circulation row as it stands (AT10 turns it off for a window and back).
+	int32 Debug_GetDigOf(int32 Level, int32 Ordinal) const { const FRHDigInfo& I = EnsureDigInfo(Level); return I.DigOf.IsValidIndex(Ordinal) ? I.DigOf[Ordinal] : (int32)INDEX_NONE; }
+	int32 Debug_GetReserveMemoCount() const { return ReserveMemos.Num(); }
+	double Debug_GetO2FillRateKgPerHour() const { return O2FillRateKgPerHour; }
+	// Harness (-atriums AT4, mutation M7): the derived HomeCell map itself (GetColonistHomeCell answers only on a mapped floor).
+	const TMap<int32, int32>& Debug_GetDeepHomeCells() const { return EnsureDeepHomes().HomeCell; }
 
 	// --- D4: transit (lifts, capacity and robots below; docs/qa/2026-10-21/d4-transit-design.md, Q-A (a), Q-B (a)) ---
 	// The gate is the colony's first fitted lift car (FitLift, Value = shaft Id). With no car every line of D3 runs: the free,
@@ -1348,7 +1457,10 @@ public:
 	// powered CirculatesAir station on the floor) before it rates Livable.
 	// Dig wide without the ISRU to match and it stays a spacesuit-only void.
 	double GetFloorO2Kg(int32 Level) const { const double* V = FloorO2Kg.Find(Level); return V ? *V : 0.0; }
-	double GetFloorO2RequiredKg(int32 Level) const { return GetFloorCarvedCells(Level) * O2FillKgPerCell; }
+	// D7: Cells x O2FillKgPerCell, then ONLY on a floor with open cells the atrium premium (the branch is skipped, never added as 0).
+	double GetFloorO2RequiredKg(int32 Level) const;
+	// D7: Cells x O2LeakKgPerCellPerSol, then only on a floor with open cells the atrium premium; the callers multiply by their own dt / sol.
+	double GetFloorO2LeakKgPerSol(int32 Level) const;
 	bool IsFloorCirculated(int32 Level) const;
 	bool IsFloorRated(int32 Level) const { return RatedFloors.Contains(Level); }
 	// Director ruling (2026-07-07f): a habitat must be at least this many
@@ -1992,6 +2104,10 @@ public:
 		// after Solidarity. +0.0 while no floor past the line has cells (x + 0.0 == x).
 		double Shelter = 0;
 		int32 DeepResidents = 0;
+		// D7 (atriums): HopeAtriumMax x FacingHeads / Population, bonus-only and capped by construction (each head counts once, however
+		// many atriums, floors or roles it faces); the LAST addend, straight after Shelter. +0.0 while no atrium exists (x + 0.0 == x).
+		double Atrium = 0;
+		int32 FacingHeads = 0;
 		// C6a: Ramp x HopeCommuteMax x min(1, HopeCommuteSteepness x LongCommuters / Population); stored positive,
 		// the LAST term of the subtraction. +0.0 whenever the population ramp is closed or nobody is long, so Total is
 		// bit-identical to v39 there (x - 0.0 == x).
@@ -3290,12 +3406,13 @@ private:
 		uint32 DeepCells = 0, DeepBeds = 0;  // D6b (RC 6): the floor shapes' district rows move with a carve and with the bed assignment; 0 for ever with no shape
 		uint32 DeepTunnels = 0, DeepShafts = 0; // D6c (RC 6): the people's walk network also moves with a tunnel order and a shaft (separate fields, so no two bumps collide); 0 for ever with no mapped floor
 		uint32 DeepTram = 0;                 // D6d (RC 6): and with a tram line laid (TramVersion); 0 for ever with no mapped floor
+		uint32 DeepAtriums = 0;              // D7: and with an atrium opened or closed (AtriumsVersion) while one exists; 0 for ever with no mapped floor or no atrium
 		bool operator==(const FRHCommuteKey& O) const
 		{
 			return Districts == O.Districts && Colonists == O.Colonists && Zoning == O.Zoning && Furniture == O.Furniture && Jobs == O.Jobs
 				&& Built == O.Built && Cfg == O.Cfg && Shaft == O.Shaft && ShaftReach == O.ShaftReach && BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding
 				&& Lift == O.Lift && TransitWait == O.TransitWait && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds
-				&& DeepTunnels == O.DeepTunnels && DeepShafts == O.DeepShafts && DeepTram == O.DeepTram;
+				&& DeepTunnels == O.DeepTunnels && DeepShafts == O.DeepShafts && DeepTram == O.DeepTram && DeepAtriums == O.DeepAtriums;
 		}
 	};
 	// The position memo (C4): one Dijkstra per source POSITION, the K nearest built nodes per position, and the
@@ -3426,6 +3543,7 @@ private:
 	{
 		bool bValid = false;
 		uint32 Cells = 0, Tunnels = 0, Shafts = 0, Districts = 0, Tram = 0;
+		uint32 Atriums = 0;                    // D7: AtriumsVersion while an atrium exists, else 0 (an open cell is in no compartment)
 		TMap<int32, FRHWalkFloor> Floors;      // mapped Level -> its network; lookups only, never iterated
 		// Trips remembered while the cars, the built roads and the commute tuning stand as they were (a pure function of those and the network;
 		// it dies with the network). Lookups only; dropped when it passes 65,536 trips.
@@ -3499,10 +3617,13 @@ private:
 		// D6b (RC 6): both 0 for ever while no deep district exists, so no rebuild count of the C5 caches can move. With one, a carve
 		// re-derives the legacy bed fill (DeepCells = FloorCellsVersion) and a changed bed assignment re-derives the piece cells (DeepBeds).
 		uint32 DeepCells = 0, DeepBeds = 0;
+		// D7 (R5): AtriumsVersion while a deep district AND an atrium exist, else 0: an open or closed atrium on a mapped floor moves HomeCell.
+		uint32 Atriums = 0;
 		bool operator==(const FRHDistrictMembershipKey& O) const
 		{
 			return Districts == O.Districts && Zoning == O.Zoning && Colonists == O.Colonists && Furniture == O.Furniture
-				&& BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds;
+				&& BuildingCount == O.BuildingCount && NextBuilding == O.NextBuilding && DeepCells == O.DeepCells && DeepBeds == O.DeepBeds
+				&& Atriums == O.Atriums;
 		}
 	};
 	struct FRHDistrictMembership
@@ -3521,8 +3642,13 @@ private:
 	{
 		bool bValid = false;
 		uint32 Colonists = 0, Furniture = 0, Zoning = 0, FloorCells = 0, Districts = 0, BedAssign = 0;
+		uint32 Atriums = 0;                       // D7: AtriumsVersion while an atrium exists, else 0
 		TMap<int32, int32> HomeCell;              // colonist Id -> ordinal on their home floor (only those with one)
 		TMap<int32, TArray<int32>> CellBeds;      // mapped Level -> the beds of each carved cell, by ordinal
+		// D7: the same for an atrium floor that is NOT mapped (a mapped atrium floor stays in HomeCell / CellBeds). HomeCell keeps exactly
+		// D6b's contents for every unmapped floor, so the commute's district rows (which read HomeCell) see nothing new.
+		TMap<int32, int32> AtriumHomeCell;
+		TMap<int32, TArray<int32>> AtriumCellBeds;
 	};
 	mutable FRHDeepHomes DeepHomes;
 	const FRHDeepHomes& EnsureDeepHomes() const;
@@ -3738,6 +3864,69 @@ private:
 	void CompleteCavernCell(int32 CavernId, int32 Level, int32 BorerId);
 	const FRHTunnel* FindLiveTunnelOnFloorPoint(int32 Level, const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) tunnel on Level whose UNCARVED chain holds P
 	const FRHCavern* FindLiveCavernOnFloorPoint(int32 Level, const FIntPoint& P, int32 ExceptId = 0) const; // an open (or batch-in-flight) cavern whose box holds P, uncarved on Level
+	// D7 (atriums). Saved in its own frame ('RHD7', v59, after D6e's 'RHD6'): the count, then each CavernId ascending.
+	TArray<FRHAtrium> Atriums;
+	uint32 AtriumsVersion = 0;
+	double HopeAtriumMax = 3.0;            // config HopeAtriumMax (placeholder, director review): stacks with Shelter
+	int32 AtriumFillPermille = 1500;       // config AtriumFillPermille (placeholder, director review): an open cell needs 1.5 cells of air
+	int32 AtriumLeakPermille = 2000;       // config AtriumLeakPermille (placeholder, director review): an open cell leaks twice as fast
+	// The open and facing flags (derived, never saved; keyed AtriumsVersion and FloorCellsVersion; built only while an atrium exists).
+	struct FRHAtriumCells
+	{
+		bool bValid = false;
+		uint32 Atriums = 0, Cells = 0;
+		TMap<int32, TArray<uint8>> Flags;  // Level -> per ordinal: bit 0 Open, bit 1 Faces
+		TMap<int32, int32> OpenCount;      // Level -> its open cells
+		bool operator==(const FRHAtriumCells& O) const;
+	};
+	mutable FRHAtriumCells AtriumCells;
+	mutable int32 AtriumCellBuilds = 0;
+	const FRHAtriumCells& EnsureAtriumCells() const;
+	void DeriveAtriumCells(FRHAtriumCells& Out) const;
+	// The facing count (derived, never saved): every input of the home cells plus the stations.
+	struct FRHAtriumFacing
+	{
+		bool bValid = false;
+		uint32 Atriums = 0, Cells = 0, Colonists = 0, Furniture = 0, Zoning = 0, Districts = 0, BedAssign = 0, Jobs = 0;
+		int32 Heads = 0;
+	};
+	mutable FRHAtriumFacing AtriumFacing;
+	mutable int32 AtriumFacingBuilds = 0;
+	mutable int32 AtriumFacingReuses = 0;
+	mutable int32 AtriumBedMemoReuses = 0;  // R12's memos reused (harness counters, never saved)
+	mutable int32 AtriumWalkMemoReuses = 0;
+	int32 DeriveAtriumFacingHeads() const;
+	void GetAtriumLevels(TArray<int32>& Out) const; // every floor of every atrium's box, ascending
+	int32 CountFloorBedsWith(int32 Level, int32 ExtraOpen) const; // CountFloorBeds with ExtraOpen more cells open than the floor has now (P9)
+	int32 CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen) const; // CountFloorBeds' one formula (both exits)
+	const TArray<uint8>* GetAtriumFlags(int32 Level) const; // the floor's flag bytes (bit 0 open, bit 1 faces); null with no atrium or none there
+	int32 CountFacingHeadsWith(const FRHAtriumCells& Cells, const FRHDeepHomes& Homes) const;
+	bool FindAtriumOccupant(const FRHCavern& C, int32& OutLevel, int32& OutOrdinal, FString& OutWhat) const; // refusal 5 and the occupancy repair
+	bool AtriumWalkTest(const FRHCavern& C, FString& OutWhy) const; // refusal 7 (memoized in CanOpenAtrium, R12)
+	int32 FindAtriumMeeting(const FRHCavern& C) const; // refusal 10's test: the first atrium whose box meets C's, else INDEX_NONE
+	int32 CountAtriumNewOpen(const FRHCavern& C, int32 Level, bool bMeetsAtrium) const; // the box cells Level would newly open (refusals 6, 8, 9)
+	void DeriveAtriumCellsWith(FRHAtriumCells& Out, int32 ExtraCavernId) const;                      // the preview: the list plus one cavern
+	void DeriveDeepHomesWith(FRHDeepHomes& Out, const FRHAtriumCells& Cells, int32 ExtraCavernId) const;
+	bool FootprintTouchesOpen(const FRHBuildingRow* Def, const FVector& LocationCm, int32 Level, int32 SizeX, int32 SizeY, const TFunctionRef<bool(const FIntPoint&)>& IsOpenAt) const;
+	void ExecuteOpenAtrium(const FRHCommand& Cmd);
+	void ExecuteCloseAtrium(const FRHCommand& Cmd);
+	void InvalidateAtriumCaches();
+	void WriteAtriumBlock(FArchive& Ar) const;
+	// Validates a payload against the installed caverns and floors; every structural failure drops with one Warning (option (i)).
+	void InstallAtriumPayload(const TArray<uint8>& Payload);
+	void RepairAtriumOccupancy();                 // after RefreshJobs: an atrium with an occupied open cell is dropped with a Warning
+	void RemapRobotsOffOpenCells(const TArray<FMassEntityHandle>& Handles, const TArray<int32>& Levels); // the tail fallback's robot remap
+	bool FindNearestWalkCell(int32 Level, int32 FromOrdinal, int32& OutOrdinal) const; // Resolve's BFS through open cells (P2)
+	// R12: the preflight's what-if bed count of a floor (ExtraOpen box cells open) and its walk test of a cavern, each reused while its inputs stand
+	// (derived, never saved). The bed count's key is (FurnitureVersion, ZoningVersion, AtriumsVersion) and, since the count also reads the floor's
+	// cells and ColonistsPerCell, FloorCellsVersion and BedAssignVersion (the CPC harness bumps it); the walk test's is the floor table, the atrium
+	// list and the shafts.
+	struct FRHAtriumBedMemo { uint32 Furniture = 0, Zoning = 0, Atriums = 0, Cells = 0, BedAssign = 0; int32 ExtraOpen = 0, Beds = 0; };
+	mutable TMap<int32, FRHAtriumBedMemo> AtriumBedMemo;
+	struct FRHAtriumWalkMemo { uint32 Cells = 0, Atriums = 0, Shafts = 0; bool bOk = true; FString Reason; };
+	mutable TMap<int32, FRHAtriumWalkMemo> AtriumWalkMemo;
+	int32 AtriumLoadPath = 0;
+	bool bAtriumPeekOk = false;                    // transient between the early read and the tail read of one load
 	const FRHCavern* FindLiveCavernOnColumn(const FIntPoint& Column) const; // an unfinished cavern whose box holds the column (a column spans every floor)
 	void WriteCavernBlock(FArchive& Ar) const;
 	bool ReadCavernBlock(FArchive& Ar, const TArray<FRHFloor>& Floors, const TArray<FRHShaft>& InShafts, const TArray<FRHTunnel>& InTunnels, TArray<FRHCavern>& OutCaverns, int32& OutNextId, FString& OutError) const;
@@ -3848,6 +4037,7 @@ private:
 	{
 		bool bValid = false;
 		uint32 Cells = 0, ShaftsV = 0, Lift = 0, Built = 0, TunnelsV = 0;
+		uint32 Atriums = 0;                  // D7: AtriumsVersion while an atrium exists, else 0 (an open cell is no node and no landing)
 		TArray<FRHDeepPortal> Portals;       // shaft ascending, then floor 0, -1, -2, ...
 		TMap<FIntPoint, int32> PortalAt;     // (shaft, level) -> portal index; lookups only
 		TArray<int32> Heads;                 // portal indices of the heads, ascending
@@ -3871,7 +4061,7 @@ private:
 	FVector FloorCellXY(int32 Level, int32 Ordinal) const;
 	float DeepReserveAt(FMassEntityHandle Entity, const FRHRobotFragment& Robot, int32 Level, const FVector& PosCm, int32 PadId, const FVector& PadCm) const;
 	TMap<FMassEntityHandle, FRHHandoffHold> HandoffHolds; // lookups only, never iterated
-	struct FRHReserveMemo { bool bValid = false; int32 Level = 0, Spot = 0, PadId = 0, RobotSol = 0; uint32 Cells = 0, ShaftsV = 0, Lift = 0, Built = 0, TunnelsV = 0; float Wh = 0.f; };
+	struct FRHReserveMemo { bool bValid = false; int32 Level = 0, Spot = 0, PadId = 0, RobotSol = 0; uint32 Cells = 0, ShaftsV = 0, Lift = 0, Built = 0, TunnelsV = 0, Atriums = 0; float Wh = 0.f; };
 	mutable TMap<FMassEntityHandle, FRHReserveMemo> ReserveMemos; // lookups only, never iterated
 	mutable int32 DeepPlanRuns = 0;
 	mutable int32 DeepOffLattice = 0;
@@ -3888,6 +4078,7 @@ private:
 	{
 		bool bValid = false;
 		uint32 CellsVersion = 0, ShaftsVer = 0;
+		uint32 Atriums = 0;                // D7 (R1): AtriumsVersion while an atrium exists, else 0; an open cell then has no label (INDEX_NONE)
 		TArray<int32> DigOf;               // ordinal -> dig label
 		TArray<TArray<int32>> Touching;    // dig label -> ascending shaft Ids that touch it
 	};

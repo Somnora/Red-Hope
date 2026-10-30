@@ -122,6 +122,15 @@ public:
 	FLinearColor RoomTint(FName RoomRowName) const;
 	static FLinearColor DepthWarmTint(const class URHSimWorldSubsystem& Sim, const FLinearColor& Base, int32 Level);
 
+	// D7 (D8's rule, R1): a floor's things below the view show when they stand in the box of an atrium whose floors include the view, on a
+	// cell that is not open (the hall floor, at its real depth): ShowsLevel(L) || (!bSectionMode && InAtriumBelowView(L, P)). Never in the
+	// section; false for ever with no atrium. Public: the robot layer (the agent visualizer) uses the same rule.
+	bool InAtriumBelowView(int32 L, const FIntPoint& P) const;
+	// D7 (QA: the click test's atrium.close, RH.AtriumStatus): carve tiles on an open cell that are drawn (the void's rule says 0), and the
+	// tiles of the floors below the view shown through an atrium at the last application of the view.
+	int32 CountVisibleOpenTiles() const;
+	int32 GetAtriumShownTiles() const { return AtriumShownTiles; }
+
 private:
 	// C3: the per-frame passes (dome crops, habitat shells, furnishings, room
 	// tiles, clutter) re-run when the sim says something changed - an order, a
@@ -252,6 +261,15 @@ private:
 	bool IsUnderground() const { return ViewLevel < 0; }
 	// D8: the visibility rules go through these three. With the section off they are today's expressions exactly.
 	bool ShowsLevel(int32 L) const { return !bSectionMode && L == ViewLevel; }
+	// D7: a carve tile's rule - its floor shows and it is not open, or it shows through an atrium from above.
+	bool ShowsCell(int32 L, int32 Ordinal) const;
+	// D7: the carve tiles shown through atriums below the view, darkened a step a floor down (each MID's own tint kept, with the darkened value
+	// written, to restore it only while nothing else has written that MID since).
+	void ApplyAtriumView();
+	uint32 AppliedAtriumsVersion = 0;
+	int32 AtriumShownTiles = 0;
+	bool bAtriumViewDirty = false; // D7: new tiles, or the room or depth pass re-tinted, while an atrium exists: the atrium view goes on again
+	mutable TMap<TWeakObjectPtr<class UMaterialInstanceDynamic>, TPair<FLinearColor, FLinearColor>> AtriumDimBase; // MID -> (its own tint, the darkened one written)
 	bool ShowsSurface() const { return !bSectionMode && !IsUnderground(); }
 	bool ShowsUnderground() const { return !bSectionMode && IsUnderground(); }
 

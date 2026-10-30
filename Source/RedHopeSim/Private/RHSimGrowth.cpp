@@ -402,7 +402,8 @@ bool URHSimWorldSubsystem::IsCellFreeForRoom(int32 Level, int32 Cell) const
 	// D3 (O1): growth never zones a tunnel's cell (the line would turn into a row of rooms); the player still may. Inert with no tunnel.
 	return Cell >= 0 && Cell < GetFloorCarvedCells(Level) && GetRoomAt(Level, Cell).IsNone() && GetCellFurniture(Key) == 0
 		&& FindModuleOnCell(Level, Cell) == nullptr && BuildingMaskInCell(Key) == 0u
-		&& (Tunnels.Num() == 0 || !IsTunnelChainCell(Level, GetFloorCell(Level, Cell)));
+		&& (Tunnels.Num() == 0 || !IsTunnelChainCell(Level, GetFloorCell(Level, Cell)))
+		&& (Atriums.Num() == 0 || !IsCellOpen(Level, Cell)); // D7: growth and civic never pick an open cell. Inert with no atrium.
 }
 
 bool URHSimWorldSubsystem::IsBayFreeForRoom(int32 HabId, int32 Bay) const

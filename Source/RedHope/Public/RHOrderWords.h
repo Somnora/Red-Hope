@@ -23,7 +23,20 @@ namespace RHOrder
 		if (Verb == FName("Currency"))      { return TEXT("Issue"); } // E5 (PLACEHOLDER, gate-d-wording Y7): "Issue a Martian currency (the mark)"
 		if (Verb == FName("Exchange"))      { return TEXT("Bloc exchange"); }
 		if (Verb == FName("Treaty"))        { return TEXT("Pact"); } // E6 (PLACEHOLDER, gate-d-wording Z4): the pact's sign or break
+		if (Verb == FName("OpenAtrium"))    { return TEXT("Open atrium"); }  // D7 (PLACEHOLDER, gate-d-wording L21)
+		if (Verb == FName("CloseAtrium"))   { return TEXT("Close atrium"); } // D7 (PLACEHOLDER, gate-d-wording L21)
 		return Verb.ToString();
+	}
+
+	// D7 (PLACEHOLDER, gate-d-wording L8): the "Open as atrium" tip's preview, the one formatter for the card's tip and RH.AtriumGhost's confirm
+	// line. The count is the homes and seats that would face THIS atrium (each head once); none has its own form.
+	inline FString AtriumPreviewText(int32 OpenCells, double PremiumKg, double ExtraLeakKgPerSol, int32 FacingHeads)
+	{
+		const FString Facing = FacingHeads <= 0 ? FString(TEXT("No home or seat would face it yet."))
+			: FacingHeads == 1 ? FString(TEXT("1 home or seat would face it."))
+			: FString::Printf(TEXT("%d homes and seats would face it."), FacingHeads);
+		return FString::Printf(TEXT("Open the floors above the hall into one tall space: %d cell%s open. %.0f kg of oxygen fills the new volume now, and it leaks %.0f kg more a sol. %s"),
+			OpenCells, OpenCells == 1 ? TEXT("") : TEXT("s"), PremiumKg, ExtraLeakKgPerSol, *Facing);
 	}
 
 	// A settlement's DisplayName instead of its row name; E5's targets in words; any other target is shown as it is.

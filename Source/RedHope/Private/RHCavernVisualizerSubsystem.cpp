@@ -5,6 +5,7 @@
 #include "RHSimWorldSubsystem.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
+#include "Components/PointLightComponent.h"
 #include "GameFramework/Actor.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/Crc.h"
@@ -18,7 +19,8 @@ namespace
 	constexpr float CavernBoxWidthCm = 46.f;     // the solid box outline's width
 	constexpr float CavernLabelLiftCm = 260.f;
 
-	// Sections: 0 the ghost fill, 1 the dashed outline of an uncarved cell, 2 the solid outline of the box.
+	// Sections: 0 the ghost fill, 1 the dashed outline of an uncarved cell, 2 the solid outline of the box; D7: 3 an atrium's railing, 4 the cells
+	// an "Open as atrium" ghost would open, 5 the ring that would face it.
 	struct FCavernAcc
 	{
 		TArray<FVector> V;
@@ -119,6 +121,62 @@ void URHCavernVisualizerSubsystem::EnsureHolder()
 	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Mesh->SetCastShadow(false);
 	ApplyMaterials(Mesh);
+	// D7: the overlay's soft glow on the facing homes and seats, its own mesh with its own key (the facing count's inputs and the floor), so a
+	// seat or bed that moves redraws a handful of cells, never the cavern layer.
+	GlowMesh = NewObject<UProceduralMeshComponent>(Holder, TEXT("AtriumGlow"));
+	GlowMesh->SetupAttachment(Mesh);
+	GlowMesh->RegisterComponent();
+	GlowMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	GlowMesh->SetCastShadow(false);
+	if (UMaterialInterface* Glass = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_DomeGlass.M_DomeGlass")))
+	{
+		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Glass, GlowMesh);
+		Mid->SetVectorParameterValue(FName("Tint"), FLinearColor(1.00f, 0.80f, 0.46f)); // soft warm gold, fainter than the ghost's ring
+		Mid->SetScalarParameterValue(FName("Opacity"), 0.20f);
+		Mid->SetScalarParameterValue(FName("Roughness"), 0.9f);
+		Mid->SetScalarParameterValue(FName("Specular"), 0.f);
+		Mid->SetScalarParameterValue(FName("Glow"), 0.55f);
+		GlowMesh->SetMaterial(0, Mid);
+	}
+}
+
+void URHCavernVisualizerSubsystem::RebuildGlow(const URHSimWorldSubsystem& Sim, int32 Level)
+{
+	// D7 (design section 8, "facing homes and seats glow softly in the overlay"): on the viewed floor, a soft fill on each cell that faces an
+	// atrium and holds a facing head's home or seat (URHSimWorldSubsystem::GetAtriumFacingCells, the facing count's rule).
+	DrawnGlowCells = 0;
+	if (!GlowMesh)
+	{
+		return;
+	}
+	TArray<int32> Cells;
+	if (Level < 0)
+	{
+		Sim.GetAtriumFacingCells(Level, Cells);
+	}
+	const FRHFloor* Floor = Sim.FindFloor(Level);
+	FCavernAcc Acc;
+	const FVector Head = Sim.GetShaftHeadCm();
+	const double FloorZ = Level * Sim.GetFloorHeightCm();
+	for (const int32 O : Cells)
+	{
+		if (!Floor || !Floor->GetCells().IsValidIndex(O))
+		{
+			continue;
+		}
+		const FIntPoint P = Floor->GetCells()[O];
+		const FVector2D M(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0);
+		Acc.Box(FVector(M.X - 420.0, M.Y - 420.0, FloorZ + 4.0), FVector(M.X + 420.0, M.Y + 420.0, FloorZ + 10.0));
+		++DrawnGlowCells;
+	}
+	if (Acc.V.Num() > 0)
+	{
+		GlowMesh->CreateMeshSection_LinearColor(0, Acc.V, Acc.I, Acc.N, Acc.UV, Acc.C, Acc.T, false);
+	}
+	else
+	{
+		GlowMesh->ClearMeshSection(0);
+	}
 }
 
 void URHCavernVisualizerSubsystem::ApplyMaterials(UProceduralMeshComponent* M)
@@ -132,12 +190,15 @@ void URHCavernVisualizerSubsystem::ApplyMaterials(UProceduralMeshComponent* M)
 		return;
 	}
 	struct FLook { FLinearColor Tint; float Opacity; float Glow; };
-	const FLook Looks[3] = {
+	const FLook Looks[6] = {
 		{ FLinearColor(0.20f, 0.85f, 0.95f), 0.13f, 0.35f },
 		{ FLinearColor(0.20f, 0.85f, 0.95f), 0.95f, 1.5f },
 		{ FLinearColor(0.35f, 0.90f, 0.95f), 0.70f, 1.0f },
+		{ FLinearColor(1.00f, 0.93f, 0.82f), 0.92f, 1.2f },  // D7: the railing, warm off-white
+		{ FLinearColor(1.00f, 0.38f, 0.14f), 0.46f, 1.0f },  // D7: the ghost's cells that would open (red-orange, apart from the ring's gold)
+		{ FLinearColor(1.00f, 0.82f, 0.35f), 0.30f, 0.7f },  // D7: the ghost's facing ring, soft gold
 	};
-	for (int32 S = 0; S < 3; ++S)
+	for (int32 S = 0; S < 6; ++S)
 	{
 		UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(Base, M);
 		Mid->SetVectorParameterValue(FName("Tint"), Looks[S].Tint);
@@ -205,10 +266,16 @@ UTextRenderComponent* URHCavernVisualizerSubsystem::MakeLabel(const FString& Tex
 void URHCavernVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int32 Level)
 {
 	TArray<FCavernAcc> Sections;
-	Sections.SetNum(3);
+	Sections.SetNum(6);
 	ClearLabels();
 	DrawnGhostCells = 0;
 	DrawnBoxes = 0;
+	DrawnRailings = DrawnGhostOpen = DrawnGhostRing = 0;
+	for (const TWeakObjectPtr<UPointLightComponent>& L : AtriumLights)
+	{
+		if (UPointLightComponent* C = L.Get()) { C->DestroyComponent(); }
+	}
+	AtriumLights.Reset();
 	const FVector Head = Sim.GetShaftHeadCm();
 	const double FloorZ = Level * Sim.GetFloorHeightCm();
 	const FRHFloor* Floor = Sim.FindFloor(Level);
@@ -275,6 +342,61 @@ void URHCavernVisualizerSubsystem::Rebuild(const URHSimWorldSubsystem& Sim, int3
 			Label.Text = MakeLabel(Text, FLinearColor(0.20f, 0.85f, 0.95f), CavernLabelAt(Mid, Half, RHLabelTurn::CameraQuarter(GetWorld())), LabelSize);
 			Labels.Add(Label);
 		}
+		// D7: each atrium whose floors include this one. On a floor above its hall, a railing round the void (two rails, at the floor and at
+		// hand height); on any of its floors, its light at the top floor's ceiling, over the box's middle (placeholder intensity, art pass).
+		for (const FRHAtrium& A : Sim.GetAtriums())
+		{
+			const FRHCavern* Cv = Sim.FindCavern(A.CavernId);
+			if (!Cv || !Cv->ContainsLevel(Level))
+			{
+				continue;
+			}
+			const FVector2D Lo = Centre(Cv->Min) - FVector2D(500.0, 500.0), Hi = Centre(Cv->Max) + FVector2D(500.0, 500.0);
+			if (Level > Cv->Bottom)
+			{
+				Sections[3].Outline(Lo, Hi, 26.f, (float)FloorZ + 8.f);
+				Sections[3].Outline(Lo, Hi, 18.f, (float)FloorZ + 105.f);
+				++DrawnRailings;
+			}
+			if (Holder)
+			{
+				UPointLightComponent* Light = NewObject<UPointLightComponent>(Holder);
+				Light->SetupAttachment(Holder->GetRootComponent());
+				Light->SetMobility(EComponentMobility::Movable);
+				Light->SetAbsolute(true, true, true);
+				Light->SetIntensityUnits(ELightUnits::Candelas);
+				Light->SetIntensity(1800.f);
+				Light->SetLightColor(FLinearColor(1.0f, 0.88f, 0.70f));
+				Light->SetAttenuationRadius((float)((Cv->Top - Cv->Bottom + 1) * Sim.GetFloorHeightCm() + 1500.0));
+				Light->SetCastShadows(false);
+				Light->RegisterComponent();
+				const FVector2D Mid = (Lo + Hi) * 0.5;
+				Light->SetWorldLocation(FVector(Mid.X, Mid.Y, (double)Cv->Top * Sim.GetFloorHeightCm() + Sim.GetFloorHeightCm() - 60.0));
+				AtriumLights.Add(Light);
+			}
+		}
+		// D7: the card's ghost - the cells that would open on this floor, tinted, and the ring that would face it, in soft gold.
+		const ARHPlayerController* GhostPC = Cast<ARHPlayerController>(GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr);
+		const int32 Ghost = GhostPC ? GhostPC->GetAtriumGhost() : INDEX_NONE;
+		URHSimWorldSubsystem::FRHAtriumPreview Pre;
+		FString Why;
+		if (Ghost != INDEX_NONE && Sim.CanOpenAtrium(Ghost, Why, &Pre))
+		{
+			for (const FIntVector& C : Pre.OpenCells)
+			{
+				if (C.X != Level) { continue; }
+				const FVector2D M = Centre(FIntPoint(C.Y, C.Z));
+				Sections[4].Box(FVector(M.X - 430.0, M.Y - 430.0, FloorZ + 6.0), FVector(M.X + 430.0, M.Y + 430.0, FloorZ + 40.0));
+				++DrawnGhostOpen;
+			}
+			for (const FIntVector& C : Pre.FacingRing)
+			{
+				if (C.X != Level) { continue; }
+				const FVector2D M = Centre(FIntPoint(C.Y, C.Z));
+				Sections[5].Box(FVector(M.X - 430.0, M.Y - 430.0, FloorZ + 6.0), FVector(M.X + 430.0, M.Y + 430.0, FloorZ + 30.0));
+				++DrawnGhostRing;
+			}
+		}
 	}
 	for (int32 S = 0; S < Sections.Num(); ++S)
 	{
@@ -322,6 +444,33 @@ void URHCavernVisualizerSubsystem::Tick(float DeltaTime)
 	Key = CavernMixInt(Key, (int32)Sim->GetFloorCellsVersion());
 	Key = CavernMixInt(Key, (int32)Sim->GetShaftsVersion());
 	Key = CavernMixInt(Key, Level);
+	if (Sim->GetAtriums().Num() > 0)
+	{
+		Key = CavernMixInt(Key, (int32)Sim->GetAtriumsVersion()); // D7: only while an atrium exists, so a colony with none keys as before
+	}
+	if (PC && PC->GetAtriumGhost() != INDEX_NONE)
+	{
+		// D7: the card's ghost, while it shows - redrawn twice a second, so it follows the open flipping between accepted and refused (a room
+		// zoned, a bed placed, the store) while the button is hovered.
+		Key = CavernMixInt(Key, 1000000 + PC->GetAtriumGhost());
+		Key = CavernMixInt(Key, (int32)(FPlatformTime::Seconds() * 2.0));
+	}
+	// D7: the facing glow, keyed on the facing count's inputs and the floor (never per frame); nothing at all while no atrium exists and none
+	// was ever drawn.
+	if (Sim->GetAtriums().Num() > 0 || GlowKey != MAX_uint32)
+	{
+		const uint32 Glow = CavernMixInt(Sim->GetAtriumFacingKey(), Level);
+		if (Glow != GlowKey)
+		{
+			EnsureHolder();
+			GlowKey = Glow;
+			if (Holder)
+			{
+				RebuildGlow(*Sim, Level);
+				GlowMesh->SetVisibility(Level < 0 && DrawnGlowCells > 0);
+			}
+		}
+	}
 	if (Key == DrawnKey)
 	{
 		return;

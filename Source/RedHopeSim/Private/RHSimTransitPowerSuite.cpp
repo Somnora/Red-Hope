@@ -584,7 +584,7 @@ int32 RHRunTransitPowerSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimW
 			int32 LAt = INDEX_NONE, LBytes = 0, DAt = INDEX_NONE, DBytes = 0;
 			const bool bL = RHSaveFrame::Find(Def, RHSaveFrame::LeversTag, LAt, LBytes);
 			const bool bD = RHSaveFrame::Find(Def, RHSaveFrame::TransitPowerTag, DAt, DBytes);
-			Expect(bL && bD && Ver == 58 && LAt + RHSaveFrame::HeaderBytes + LBytes + RHSaveFrame::FooterBytes == DAt && DBytes == 4 && Rd(Def, DAt + RHSaveFrame::HeaderBytes) == 0,
+			Expect(bL && bD && Ver == 59 && LAt + RHSaveFrame::HeaderBytes + LBytes + RHSaveFrame::FooterBytes == DAt && DBytes == 4 && Rd(Def, DAt + RHSaveFrame::HeaderBytes) == 0,
 				FString::Printf(TEXT("TP5 (b) v%u: 'RHD6' sits straight after 'RHL6''s footer (found by tag), and the default colony's payload is %d bytes: Count %d"), Ver, DBytes, bD ? Rd(Def, DAt + RHSaveFrame::HeaderBytes) : -1));
 		}
 		// (c) A colony with a car on shaft 0, no car on shaft 1 and a line, its rings filled by four empty-bank power steps in one sol and two in the
@@ -632,7 +632,7 @@ int32 RHRunTransitPowerSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimW
 			FMemory::Memcpy(T.GetData() + 4, &V57, 4);
 			FString E;
 			const bool bOk = TryBytes(TEXT("tpv57"), T, E);
-			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/58")), FString::Printf(TEXT("TP5 (d) the previous version is refused (%s)"), *E));
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/59")), FString::Printf(TEXT("TP5 (d) the previous version is refused (%s)"), *E));
 		}
 		// (e) Doctored, resealed copies: each loads with one Warning and no Error, and repairs only what it must.
 		{

@@ -8,6 +8,7 @@
 #include "RHPlayerController.h"
 #include "RHStrategyPawn.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHCavernVisualizerSubsystem.h"
 #include "RHCrewVisualizerSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
@@ -20,6 +21,8 @@
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHOrderWords.h"
+#include "RHCommandDeck.h"
 #include "Data/RHRows.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -707,6 +710,190 @@ static FAutoConsoleCommandWithWorldAndArgs GRHCancelCavern(
 			Cmd.Verb = FName("CancelCavern");
 			Cmd.Value = FCString::Atod(*Args[0]);
 			Sim->EnqueueCommand(Cmd);
+		}
+	}));
+
+// D7: the atrium orders (uplink; Value = the cavern Id), and the card's ghost held for a screenshot.
+static FAutoConsoleCommandWithWorldAndArgs GRHOpenAtrium(
+	TEXT("RH.OpenAtrium"),
+	TEXT("RH.OpenAtrium <CavernId> [now] - open a finished cavern of two or more floors as an atrium (uplink: the preflight runs at execute). 'now' is a DEBUG harness open, no uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.OpenAtrium <CavernId> [now]"));
+			return;
+		}
+		const int32 Id = FCString::Atoi(*Args[0]);
+		FString Why;
+		if (Args.Num() > 1 && Args[1] == TEXT("now"))
+		{
+			const bool bOk = Sim->Debug_OpenAtrium(Id, Why);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.OpenAtrium] cavern %d: %s"), Id, bOk ? TEXT("open") : *Why);
+			return;
+		}
+		if (!Sim->CanOpenAtrium(Id, Why))
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.OpenAtrium] cavern %d refused: %s"), Id, *Why);
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("OpenAtrium");
+		Cmd.Value = Id;
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHCloseAtrium(
+	TEXT("RH.CloseAtrium"),
+	TEXT("RH.CloseAtrium <CavernId> [now] - close an atrium (uplink): its floors are whole again, nothing refunded. 'now' is a DEBUG harness close."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 1)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.CloseAtrium <CavernId> [now]"));
+			return;
+		}
+		const int32 Id = FCString::Atoi(*Args[0]);
+		if (Args.Num() > 1 && Args[1] == TEXT("now"))
+		{
+			FString Why;
+			const bool bOk = Sim->Debug_CloseAtrium(Id, Why);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.CloseAtrium] cavern %d: %s"), Id, bOk ? TEXT("closed") : *Why);
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("CloseAtrium");
+		Cmd.Value = Id;
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAtriumGhost(
+	TEXT("RH.AtriumGhost"),
+	TEXT("RH.AtriumGhost [CavernId] - DEBUG: hold the card's 'Open as atrium' ghost for a cavern (as if the button were hovered) for a screenshot; no argument clears it."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr)
+		{
+			const int32 Id = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : INDEX_NONE;
+			PC->SetAtriumGhost(Id);
+			// The card's tip (L8) on the confirm line, so a screenshot shows what the hovered button says.
+			const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+			URHSimWorldSubsystem::FRHAtriumPreview Pre;
+			FString Why;
+			if (Sim && Id != INDEX_NONE)
+			{
+				const bool bOk = Sim->CanOpenAtrium(Id, Why, &Pre);
+				const int32 Open = Pre.OpenCells.Num();
+				PC->PostConfirm(bOk ? RHOrder::AtriumPreviewText(Open, Pre.PremiumKg, Pre.ExtraLeakKgPerSol, Pre.FacingHeads) // L8, the card's own formatter
+					: FString::Printf(TEXT("Not yet: %s"), *Why), FLinearColor(1.f, 0.82f, 0.35f));
+				// The ring is drawn on the viewed floor only (the cavern visualizer's rule), so say how many of its cells that floor holds.
+				const int32 Viewed = PC->GetActiveLevel();
+				int32 OnViewed = 0;
+				for (const FIntVector& RingCell : Pre.FacingRing) { OnViewed += RingCell.X == Viewed ? 1 : 0; }
+				UE_LOG(LogRedHope, Display, TEXT("[RH.AtriumGhost] cavern %d: %s (%d cells to open, %d facing-ring cells, %d of them on the viewed floor %d, %d heads)"), Id, bOk ? TEXT("would open") : *Why, Open,
+					Pre.FacingRing.Num(), OnViewed, Viewed, Pre.FacingHeads);
+			}
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAtriumDress(
+	TEXT("RH.AtriumDress"),
+	TEXT("RH.AtriumDress <CavernId> [hall|block|unblock] - DEBUG (captures, look-dev): 'hall' (default) dresses an atrium's hall for a look-down frame: its box cells zoned Workstation, an Air Filter on its middle cell (the bank filled and the hall rated by harness, then a jobs pass, so the seats fill and face the hall) and two Haulers stood on it; 'block' zones the first box cell of the floor above the hall Living Quarters (the open is refused: refusal 5), 'unblock' clears it. Harness calls, no uplink."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const FRHCavern* Cv = (Sim && Args.Num() > 0) ? Sim->FindCavern(FCString::Atoi(*Args[0])) : nullptr;
+		if (!Cv || Cv->GetFloors() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.AtriumDress <CavernId of a finished cavern of two or more floors> [hall|block|unblock]"));
+			return;
+		}
+		const FString Mode = Args.Num() > 1 ? Args[1] : FString(TEXT("hall"));
+		const FVector Head = Sim->GetShaftHeadCm();
+		FString Why;
+		if (Mode == TEXT("block") || Mode == TEXT("unblock"))
+		{
+			const int32 O = Sim->FindFloorCell(Cv->Bottom + 1, Cv->Min);
+			const bool bOk = O != INDEX_NONE && Sim->DesignateRoom(Cv->Bottom + 1, O, Mode == TEXT("block") ? FName("LivingQuarters") : FName(NAME_None), Why);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.AtriumDress] cavern %d: floor %d cell %d %s (%s)"), Cv->Id, Cv->Bottom + 1, O, Mode == TEXT("block") ? TEXT("zoned Living Quarters") : TEXT("cleared"), bOk ? TEXT("ok") : *Why);
+			return;
+		}
+		const int32 Hall = Cv->Bottom;
+		int32 Zoned = 0;
+		TArray<int32> Cells;
+		for (int32 Y = Cv->Min.Y; Y <= Cv->Max.Y; ++Y)
+		{
+			for (int32 X = Cv->Min.X; X <= Cv->Max.X; ++X)
+			{
+				const int32 O = Sim->FindFloorCell(Hall, FIntPoint(X, Y));
+				if (O == INDEX_NONE)
+				{
+					continue;
+				}
+				Cells.Add(O);
+				Zoned += Sim->DesignateRoom(Hall, O, FName("Workstation"), Why) ? 1 : 0;
+			}
+		}
+		// An Air Filter on the hall's middle cell (a circulator: with the bank filled it keeps the hall rated, so its seats count), the hall
+		// rated by harness, then a jobs pass, so the new seats take workers now (a designation alone waits for the next one).
+		const FIntPoint Mid((Cv->Min.X + Cv->Max.X) / 2, (Cv->Min.Y + Cv->Max.Y) / 2);
+		Sim->Debug_PlaceInstant(FName("AirFilter"), URHSimWorldSubsystem::LatticeToCm(Head, Mid), Hall);
+		Sim->Debug_SetBatteryWh(1.0e9);
+		Sim->Debug_ForceRateFloor(Hall);
+		Sim->Debug_RefreshJobs();
+		int32 Robots = 0;
+		if (URHAgentSubsystem* AgentSys = World->GetSubsystem<URHAgentSubsystem>())
+		{
+			TArray<FRHRoverState> Hs;
+			AgentSys->CollectRobotsOfClass(FName("Hauler"), Hs);
+			for (int32 i = 0; i < Hs.Num() && Robots < 2; ++i)
+			{
+				FVector At = URHSimWorldSubsystem::LatticeToCm(Head, FIntPoint(Cv->Min.X + 1 + 3 * Robots, Cv->Max.Y - 1));
+				At.Z = Hall * Sim->GetFloorHeightCm() + RH::RobotZOffsetCm;
+				Robots += AgentSys->SetRobotPosition(Hs[i].Entity, At) ? 1 : 0;
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.AtriumDress] cavern %d: %d hall cell(s) of floor %d zoned Workstation, an Air Filter on (%d,%d), %d Hauler(s) stood on the hall, %d head(s) facing"), Cv->Id, Zoned, Hall, Mid.X, Mid.Y, Robots, Sim->GetAtriumFacingHeads());
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHClearTips(
+	TEXT("RH.ClearTips"),
+	TEXT("RH.ClearTips - DEBUG (captures): let go of every card now queued (tips and milestones), as GOT IT on each would, without turning tips off (nothing is remembered)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* World)
+	{
+		const ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (PC && PC->GetDeck().IsValid())
+		{
+			PC->GetDeck()->Debug_ClearTipCards();
+		}
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHAtriumStatus(
+	TEXT("RH.AtriumStatus"),
+	TEXT("RH.AtriumStatus - DEBUG: one line on the atrium view of the viewed floor: atriums, open tiles drawn (the void's rule: 0), tiles shown from above, robots shown from above, facing cells glowing, railings, lights and facing heads; in the section, a second line on its atrium layers as last drawn: void cells, railing bars, facing rims and light-column segments."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>&, UWorld* World)
+	{
+		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		const URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+		const URHAgentVisualizerSubsystem* AgentsVis = World ? World->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+		const URHCavernVisualizerSubsystem* Caverns = World ? World->GetSubsystem<URHCavernVisualizerSubsystem>() : nullptr;
+		const ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!Sim || !Colony)
+		{
+			return;
+		}
+		UE_LOG(LogRedHope, Display, TEXT("[RH.AtriumStatus] floor %d: %d atrium(s) (v%u), %d open tile(s) drawn, %d tile(s) shown from above, %d robot(s) shown from above, %d facing cell(s) glowing, %d railing(s), %d light(s), %d facing head(s)"),
+			PC ? PC->GetActiveLevel() : 0, Sim->GetAtriums().Num(), Sim->GetAtriumsVersion(), Colony->CountVisibleOpenTiles(), Colony->GetAtriumShownTiles(),
+			AgentsVis ? AgentsVis->GetShownThroughAtrium() : 0, Caverns ? Caverns->GetDrawnGlowCells() : 0, Caverns ? Caverns->GetDrawnRailings() : 0,
+			Caverns ? Caverns->GetAtriumLightCount() : 0, Sim->GetAtriumFacingHeads());
+		// The section's atrium layers as last drawn (D8 section 3): the void's cells, the railing bars, the facing rims and the light column.
+		const URHSectionVisualizerSubsystem* Section = World->GetSubsystem<URHSectionVisualizerSubsystem>();
+		if (Section && PC && PC->IsSectionOn())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("[RH.AtriumStatus] section axis %d plane %d focus %d: %d void cell(s), %d railing bar(s), %d facing rim(s), %d light-column segment(s)"),
+				PC->GetSectionAxis(), PC->GetSectionPlaneRow(), PC->GetSectionFocus(), Section->GetVoidCount(), Section->GetRailCount(), Section->GetFacingEdgeCount(), Section->GetLightColumnCount());
 		}
 	}));
 
@@ -2027,6 +2214,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 				}
 			}
 		}
+		// 6b. D7 (D8 R8): the cavern opens as an atrium. Harness: the floors here are far past one floor's circulation ceiling (refusal 9; about
+		// 290 cells on each of -8..-10: shaft 0's 210-cell spiral, the two 10-cell landings and the box), so the bench raises that row and puts the
+		// premium's oxygen in the store first.
+		bool bAtrium = false;
+		FString AtriumWhy;
+		if (CavernId != INDEX_NONE)
+		{
+			Sim->Debug_SetO2FillRateKgPerHour(200.0);
+			Sim->Debug_AddStock(FName("Oxygen"), 100000.0);
+			bAtrium = Sim->Debug_OpenAtrium(CavernId, AtriumWhy);
+			if (!bAtrium) { UE_LOG(LogRedHope, Warning, TEXT("RH.DeepBench: the cavern did not open as an atrium: %s"), *AtriumWhy); }
+		}
 		// 7a. Work below -5: 70 Workstation cells on each deep floor (ordinals 100..169 of shaft 0's spiral). Seats fill in colonist Id order
 		// whatever the floor, so most of them go to people who live on another floor, and the city's 330-odd seats on -1..-5 are not enough
 		// on their own for the flows check's 500 cross-floor commuters.
@@ -2075,8 +2274,8 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDeepBench(
 		const TWeakObjectPtr<UWorld> WeakWorld(World);
 		UE_LOG(LogRedHope, Display, TEXT("[DeepBench] the city: %d seats, zoned living %d / seat %d / garden %d / other %d, %d station orders, %d refused"),
 			Rep.SeatsTotal, Rep.ZonedLiving, Rep.ZonedSeat, Rep.ZonedGarden, Rep.ZonedOther, Rep.StationOrders, Rep.Rejected);
-		const FString Summary = FString::Printf(TEXT("shafts %d (columns (0, 0), (8, 0), (-8, 0); cut them all with RH.Section on 1), cars %d, tunnels %d, cavern %d at (%d, %d) on -8..-10, %d colonists re-homed below -%d, %d Workstation cells zoned below -%d, robots %d spawned"),
-			ShaftIds.Num(), Cars, Tunnels.Num(), CavernId, CavA.X, CavA.Y, Moved, Built, Zoned, Built, Robots.Num());
+		const FString Summary = FString::Printf(TEXT("shafts %d (columns (0, 0), (8, 0), (-8, 0); cut them all with RH.Section on 1), cars %d, tunnels %d, cavern %d at (%d, %d) on -8..-10%s, %d colonists re-homed below -%d, %d Workstation cells zoned below -%d, robots %d spawned"),
+			ShaftIds.Num(), Cars, Tunnels.Num(), CavernId, CavA.X, CavA.Y, bAtrium ? TEXT(" (an atrium)") : TEXT(""), Moved, Built, Zoned, Built, Robots.Num());
 		const int32 RobotsSpawned = Robots.Num();
 		TSharedRef<int32> Tries = MakeShared<int32>(0);
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakWorld, Tries, Built, Summary, RobotsSpawned, T0](float)

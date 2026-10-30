@@ -1259,7 +1259,14 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 	FVector Candidate = FVector::ZeroVector;
 	for (int32 Try = 0; Try < 8; ++Try)
 	{
-		const FIntPoint Cell = Sim->GetFloorCell(Level, FMath::RandRange(0, Carved - 1));
+		int32 Pick = FMath::RandRange(0, Carved - 1);
+		// D7: nobody is drawn standing in the air. An open cell of an atrium is drawn again (rejection: uniform over the cells that are not open,
+		// so the wanderers do not pile onto the one cell after the void's ordinal run); after 8 open draws, the next cell that is not open. With
+		// no atrium neither loop runs, so the random stream is today's.
+		const bool bAtriums = Sim->GetAtriums().Num() > 0;
+		for (int32 Roll = 0; bAtriums && Roll < 8 && Sim->IsCellOpen(Level, Pick); ++Roll) { Pick = FMath::RandRange(0, Carved - 1); }
+		for (int32 Step = 0; bAtriums && Step < Carved && Sim->IsCellOpen(Level, Pick); ++Step) { Pick = (Pick + 1) % Carved; }
+		const FIntPoint Cell = Sim->GetFloorCell(Level, Pick);
 		Candidate = FVector(
 			Head.X + Cell.X * 1000.0 + FMath::FRandRange(-330.f, 330.f),
 			Head.Y + Cell.Y * 1000.0 + FMath::FRandRange(-330.f, 330.f),
@@ -1272,6 +1279,43 @@ FVector URHCrewVisualizerSubsystem::WanderPointCm(int32 Level) const
 		}
 	}
 	return Candidate;
+}
+
+void URHCrewVisualizerSubsystem::AroundVoids(int32 Level, const FVector& From, const FVector& To, TArray<FVector>& Out) const
+{
+	Out.Reset();
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Level >= 0 || Sim->GetAtriums().Num() == 0)
+	{
+		return;
+	}
+	const FVector Head = Sim->GetShaftHeadCm();
+	for (const FRHAtrium& At : Sim->GetAtriums())
+	{
+		const FRHCavern* Cv = Sim->FindCavern(At.CavernId);
+		if (!Cv || Level > Cv->Top || Level <= Cv->Bottom)
+		{
+			continue; // the hall floor and every other floor keep their floor
+		}
+		// The void: the box's cells, 10 cm in from their outer edges (a walk along the ring's cells does not touch it); the corners 250 cm out.
+		const double X0 = Head.X + ((double)Cv->Min.X - 0.5) * 1000.0, X1 = Head.X + ((double)Cv->Max.X + 0.5) * 1000.0;
+		const double Y0 = Head.Y + ((double)Cv->Min.Y - 0.5) * 1000.0, Y1 = Head.Y + ((double)Cv->Max.Y + 0.5) * 1000.0;
+		const RHElevator::FRect2D Block = { (float)(X0 + 10.0), (float)(Y0 + 10.0), (float)(X1 - 10.0), (float)(Y1 - 10.0) };
+		const RHElevator::FRect2D Ring = { (float)(X0 - 250.0), (float)(Y0 - 250.0), (float)(X1 + 250.0), (float)(Y1 + 250.0) };
+		// The first leg of the walk so far that crosses this void gets its corners.
+		for (int32 k = 0; k <= Out.Num(); ++k)
+		{
+			const FVector A = k == 0 ? From : Out[k - 1];
+			const FVector B = k == Out.Num() ? To : Out[k];
+			const TArray<FVector> Corners = RHElevator::RouteAroundRect(Block, Ring, A, B);
+			if (Corners.Num() > 0)
+			{
+				Out.Insert(Corners, k);
+				break;
+			}
+		}
+	}
 }
 
 void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
@@ -1354,7 +1398,21 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 		V.WaypointActs.Reset();
 		if (Level != 0)
 		{
-			V.Waypoints = RHElevator::RouteAroundCab(Sim->GetShaftHeadCm(), From, To);
+			// D7 (R11): a walk whose line crosses an atrium's void on this floor goes round it by the box's ring corners, and each leg goes round
+			// the cab as before. With no void in the way the walk is the cab's route alone, as it always was.
+			TArray<FVector> Legs;
+			AroundVoids(Level, From, To, Legs);
+			FVector LegFrom = From;
+			Legs.Add(To);
+			for (int32 k = 0; k < Legs.Num(); ++k)
+			{
+				V.Waypoints.Append(RHElevator::RouteAroundCab(Sim->GetShaftHeadCm(), LegFrom, Legs[k]));
+				if (k + 1 < Legs.Num())
+				{
+					V.Waypoints.Add(Legs[k]);
+				}
+				LegFrom = Legs[k];
+			}
 			V.WaypointActs.SetNumZeroed(V.Waypoints.Num());
 		}
 		else
@@ -2746,6 +2804,18 @@ void URHCrewVisualizerSubsystem::CrowdDecide(FCrowdFigure& F, const FRHColonist*
 	}
 	F.Target = To;
 	F.bMoving = FVector::Dist2D(F.Pos, To) > 5.f;
+	// D7 (R11): round an atrium's void by its ring corners, not across it (none with no atrium: the walk is the straight line it always was).
+	F.NumVia = 0;
+	if (F.bMoving && Sim->GetAtriums().Num() > 0)
+	{
+		TArray<FVector> Corners;
+		AroundVoids(F.Level, F.Pos, To, Corners);
+		for (int32 k = 0; k < Corners.Num() && k < 4; ++k)
+		{
+			F.Via[k] = Corners[k];
+			F.NumVia = (uint8)(k + 1);
+		}
+	}
 }
 
 void URHCrewVisualizerSubsystem::TickCrowd(float DeltaTime, float Pace, double Now, int32 ViewLevel)
@@ -2787,9 +2857,16 @@ void URHCrewVisualizerSubsystem::TickCrowd(float DeltaTime, float Pace, double N
 			{
 				if (F.bMoving)
 				{
-					const FVector Delta(F.Target.X - F.Pos.X, F.Target.Y - F.Pos.Y, 0.f);
+					const FVector Goal = F.NumVia > 0 ? F.Via[0] : F.Target; // D7: a corner round a void first
+					const FVector Delta(Goal.X - F.Pos.X, Goal.Y - F.Pos.Y, 0.f);
 					const float Dist = Delta.Size2D();
-					if (Dist <= Step)
+					if (Dist <= Step && F.NumVia > 0)
+					{
+						F.Pos = FVector(Goal.X, Goal.Y, F.Pos.Z);
+						for (int32 k = 1; k < F.NumVia; ++k) { F.Via[k - 1] = F.Via[k]; }
+						--F.NumVia;
+					}
+					else if (Dist <= Step)
 					{
 						F.Pos = FVector(F.Target.X, F.Target.Y, F.Pos.Z);
 						F.bMoving = false;

@@ -10,7 +10,8 @@
 // A reader looks for its frame where the outer reader stands, then by walking the frames back from the end of the file (each footer names
 // the header before it), so a lost or misaligned block cannot take the others with it. E5's currency block uses it ('RHE5', v56, written
 // after 'RHE4'); E6's levers block reuses it ('RHL6', v57, written after 'RHE5'; docs/qa/2026-10-24/e6-levers-design.md section 7.3); D6e's
-// transit power block too ('RHD6', v58, written after 'RHL6': the lifts' and the lines' short-ms rings).
+// transit power block too ('RHD6', v58, written after 'RHL6': the lifts' and the lines' short-ms rings); D7's atrium block too ('RHD7', v59,
+// written after 'RHD6': the atrium list; read early by a read that does not move the reader, and again at the tail, which consumes it).
 namespace RHSaveFrame
 {
 	constexpr uint32 MakeTag(char A, char B, char C, char D)
@@ -24,6 +25,7 @@ namespace RHSaveFrame
 	constexpr uint32 CurrencyTag = MakeTag('R', 'H', 'E', '5'); // E5, the Martian currency (v56)
 	constexpr uint32 LeversTag = MakeTag('R', 'H', 'L', '6'); // E6, the levers (v57)
 	constexpr uint32 TransitPowerTag = MakeTag('R', 'H', 'D', '6'); // D6e, lift and tram power (v58)
+	constexpr uint32 AtriumTag = MakeTag('R', 'H', 'D', '7'); // D7, atriums (v59)
 	constexpr int32 HeaderBytes = 12;
 	constexpr int32 FooterBytes = 8;
 

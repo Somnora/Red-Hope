@@ -891,7 +891,68 @@ namespace
 		FVector CavernBCm = FVector::ZeroVector;
 		int32 ManifestBase = 0;
 		int32 TramTunnelId = INDEX_NONE; // D6d: the tunnel tram.setup digs on -2
+		int32 AtriumCavernId = INDEX_NONE; // D7: the finished cavern the atrium steps open and close
+		// D7: section.cut.atrium's counts with the atrium open (the top floor's plates, the open cells of the slab from the sim, the light
+		// columns, the plane and focus), and atrium.close's after the atrium colony is saved and loaded on its top floor.
+		int32 AtriumCutPlates = -1, AtriumCutOpenInSlab = 0, AtriumCutLights = 0, AtriumCutPlane = INDEX_NONE, AtriumCutFocus = 0;
+		// D7: the section's railing bars on the top floor and its facing rims on every floor of the box, as drawn and as counted from the sim.
+		int32 AtriumCutRails = -1, AtriumCutRailsWant = 0, AtriumCutFacing = -1, AtriumCutFacingWant = 0, AtriumCutAxis = -1;
+		bool bAtriumReloaded = false;
+		int32 AtriumReloadOpenDrawn = -1, AtriumReloadShownBelow = 0;
 	};
+
+	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
+	// cavern.setup and section.setup make theirs), opened as an atrium when bOpen. The first box that passes every refusal is kept.
+	bool EnsureClickAtrium(FTest* T, bool bOpen)
+	{
+		URHSimWorldSubsystem* Sim = GetSim();
+		if (!Sim)
+		{
+			return false;
+		}
+		FString Why;
+		if (T->AtriumCavernId == INDEX_NONE)
+		{
+			if (Sim->GetShaftDepth(0) < 6)
+			{
+				Sim->Debug_ExtendShaftOf(0, 6);
+			}
+			Sim->Debug_AddStock(FName("Oxygen"), 100000.0);
+			const FIntPoint Boxes[4][2] = { { FIntPoint(1, -1), FIntPoint(3, 1) }, { FIntPoint(-3, -1), FIntPoint(-1, 1) }, { FIntPoint(-1, 1), FIntPoint(1, 3) }, { FIntPoint(-1, -3), FIntPoint(1, -1) } };
+			for (int32 K = 0; K < 4 && T->AtriumCavernId == INDEX_NONE; ++K)
+			{
+				int32 Id = INDEX_NONE;
+				if (Sim->Debug_DigCavern(-4, 2, Boxes[K][0], Boxes[K][1], Id, Why))
+				{
+					Sim->Debug_CarveCavernCells(Id, 18);
+					if (K == 0)
+					{
+						// The first box, (1,-1) to (3,1) east of the column: floor cells round it on both floors, so the section's railing and facing
+						// rims have cells to stand on whatever the cut's axis: the column's first spiral ring outside the box ((0,1) and (0,-1) face
+						// it, the three at x = -1 do not), then a corridor (0,2), (1,2), (2,2), (3,2) along its north side ((0,2) touches it only
+						// diagonally). Each cell is carved beside the last, and every one keeps a floor neighbour on the way to the column, so the
+						// open never splits the dig and the column keeps solid landings.
+						for (int32 L = -4; L >= -5; --L)
+						{
+							for (const FIntPoint& P : { FIntPoint(0, 1), FIntPoint(-1, 1), FIntPoint(-1, 0), FIntPoint(-1, -1), FIntPoint(0, -1), FIntPoint(0, 2), FIntPoint(1, 2), FIntPoint(2, 2), FIntPoint(3, 2) })
+							{
+								Sim->CarveLatticePoint(L, P);
+							}
+						}
+					}
+					if (Sim->CanOpenAtrium(Id, Why)) { T->AtriumCavernId = Id; }
+				}
+			}
+		}
+		if (T->AtriumCavernId == INDEX_NONE)
+		{
+			Report(TEXT("atrium.setup"), false, FString::Printf(TEXT("no cavern beside the column on -4..-5 opens as an atrium (%s)"), *Why));
+			return false;
+		}
+		if (bOpen && !Sim->IsAtrium(T->AtriumCavernId)) { Sim->Debug_OpenAtrium(T->AtriumCavernId, Why); }
+		if (!bOpen && Sim->IsAtrium(T->AtriumCavernId)) { Sim->Debug_CloseAtrium(T->AtriumCavernId, Why); }
+		return Sim->IsAtrium(T->AtriumCavernId) == bOpen;
+	}
 
 	FString QuickSavePath()
 	{
@@ -1475,7 +1536,21 @@ namespace
 			FLinearColor TextColour;
 			if (!FirstTextColour(Found.Widget, Text, TextColour))
 			{
+				// Named in the log (D7 review: the count moved 5 -> 6 at E6 / D7 and nobody could say which): where it is laid out, what it holds
+				// (its first text even in an unset colour, else its first child's type), its tag, and the widget types above it.
 				++NoText;
+				const TSharedPtr<FTagMetaData> Meta = Found.Widget->GetMetaData<FTagMetaData>();
+				FChildren* Kids = Found.Widget->GetAllChildren();
+				const FString Inside = FirstText(Found.Widget).Left(40).Replace(TEXT("\n"), TEXT(" "));
+				FString Above;
+				TSharedPtr<SWidget> Up = Found.Widget->GetParentWidget();
+				for (int32 Depth = 0; Up.IsValid() && Depth < 4; ++Depth, Up = Up->GetParentWidget())
+				{
+					Above += FString::Printf(TEXT("%s%s"), Depth ? TEXT(" < ") : TEXT(""), *Up->GetType().ToString());
+				}
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: contrast (no text) #%d at (%.0f, %.0f) %.0f x %.0f px: text '%s', child %s, tag '%s', above %s"), NoText,
+					Found.TopLeft.X, Found.TopLeft.Y, Found.Size.X, Found.Size.Y, *Inside,
+					(Kids && Kids->Num() > 0) ? *Kids->GetChildAt(0)->GetType().ToString() : TEXT("(none)"), Meta.IsValid() ? *Meta->Tag.ToString() : TEXT(""), *Above);
 				continue;
 			}
 			const FLinearColor Tint = Brush ? Brush->GetTint(FWidgetStyle()) : FLinearColor::Transparent;
@@ -2851,7 +2926,90 @@ namespace
 				return (!PC->IsSectionOn() && PC->GetActiveLevel() == -2) ? FString() : FString::Printf(TEXT("after the dive the section is %s and the floor %d"), PC->IsSectionOn() ? TEXT("on") : TEXT("off"), PC->GetActiveLevel());
 			}, 1.f, 0.3f, true);
 
-			// section.cut.atrium waits for D7 (Q-C (a)): D7's build adds it with GetAtriums().
+			// D7 (D8 R9's section.cut.atrium): an atrium on -4..-5 (harness), the section opened on its top floor, Cut here on its row: the plane is
+			// through the box's middle row, the focus its hall floor, and the slab draws its open cells as a void (no plate) with the light column.
+			PushKey(TEXT("section.cut.atrium open"), EKeys::V);
+			Runner.Do(TEXT("section.cut.atrium setup"), [T]()
+			{
+				ARHPlayerController* PC = GetPC();
+				if (PC && EnsureClickAtrium(&T.Get(), true)) { PC->SetSectionFocus(-4); }
+			}, 0.8f);
+			const TSharedRef<FPress> CutAtrium = PushPress(TEXT("section.cut.atrium"), LocateButton(TEXT("Cut here"), 0, true));
+			// With the cut made through the open atrium, the top floor's plates and the light columns are read and the open cells of that floor
+			// in the drawn slab are counted from the sim; then the harness closes the atrium and the check reads the floor's plates again: it
+			// must draw exactly one more plate for each of those open cells, so no plate stood on one (a count independent of the void's own).
+			Runner.Do(TEXT("section.cut.atrium count"), [T, Section]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHCavern* Cv = Sim ? Sim->FindCavern(T->AtriumCavernId) : nullptr;
+				if (!PC || !Cv || !Section())
+				{
+					return;
+				}
+				T->AtriumCutPlates = Section()->GetFloorPlates(Cv->Top);
+				T->AtriumCutLights = Section()->GetLightColumnCount();
+				T->AtriumCutPlane = PC->GetSectionPlaneRow();
+				T->AtriumCutFocus = PC->GetSectionFocus();
+				T->AtriumCutOpenInSlab = 0;
+				const int32 Rows = URHSectionVisualizerSubsystem::SlabRows();
+				for (int32 i = 0; i < Sim->GetFloorCarvedCells(Cv->Top); ++i)
+				{
+					const int32 Row = URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), Sim->GetFloorCell(Cv->Top, i)) - PC->GetSectionPlaneRow();
+					T->AtriumCutOpenInSlab += (Sim->IsCellOpen(Cv->Top, i) && URHSectionVisualizerSubsystem::InSlabRow(Row, Rows)) ? 1 : 0;
+				}
+				// The railing and the facing rims, from the sim: a bar for each edge where an open cell of the slab meets a floor cell that is not
+				// open (on the top floor, the only open one here), and a rim on each facing cell of the slab on every floor of the box drawn in
+				// detail (bands 0-1).
+				T->AtriumCutAxis = PC->GetSectionAxis();
+				T->AtriumCutRails = Section()->GetFloorRails(Cv->Top);
+				T->AtriumCutRailsWant = 0;
+				T->AtriumCutFacing = 0;
+				T->AtriumCutFacingWant = 0;
+				for (int32 L = Cv->Top; L >= Cv->Bottom; --L)
+				{
+					T->AtriumCutFacing += Section()->GetFloorFacingEdges(L);
+					const bool bDetail = URHSectionVisualizerSubsystem::LodBand(L, PC->GetSectionFocus()) < 2;
+					for (int32 i = 0; i < Sim->GetFloorCarvedCells(L); ++i)
+					{
+						const FIntPoint P = Sim->GetFloorCell(L, i);
+						if (!bDetail || !URHSectionVisualizerSubsystem::InSlabRow(URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), P) - PC->GetSectionPlaneRow(), Rows))
+						{
+							continue;
+						}
+						T->AtriumCutFacingWant += Sim->IsCellFacing(L, i) ? 1 : 0;
+						if (L == Cv->Top && Sim->IsCellOpen(L, i))
+						{
+							for (const FIntPoint D : { FIntPoint(1, 0), FIntPoint(-1, 0), FIntPoint(0, 1), FIntPoint(0, -1) })
+							{
+								const int32 N = Sim->FindFloorCell(L, P + D);
+								T->AtriumCutRailsWant += (N != INDEX_NONE && !Sim->IsCellOpen(L, N)) ? 1 : 0;
+							}
+						}
+					}
+				}
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: section.cut.atrium axis %d plane %d: %d railing bar(s) drawn on %d (%d from the sim), %d facing rim(s) on %d..%d (%d from the sim), %d open cell(s) in the slab"),
+					T->AtriumCutAxis, T->AtriumCutPlane, T->AtriumCutRails, Cv->Top, T->AtriumCutRailsWant, T->AtriumCutFacing, Cv->Top, Cv->Bottom, T->AtriumCutFacingWant, T->AtriumCutOpenInSlab);
+				EnsureClickAtrium(&T.Get(), false);
+			}, 0.3f);
+			PushCheck(TEXT("section.cut.atrium"), CutAtrium, [T, Section]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHCavern* Cv = Sim ? Sim->FindCavern(T->AtriumCavernId) : nullptr;
+				if (!PC || !Cv || !Section()) { return FString(TEXT("no section or cavern")); }
+				const int32 D0 = URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), Cv->Min), D1 = URHSectionVisualizerSubsystem::DepthOf(PC->GetSectionAxis(), Cv->Max);
+				const int32 Want = (FMath::Min(D0, D1) + FMath::Max(D0, D1)) / 2;
+				const int32 Closed = Section()->GetFloorPlates(Cv->Top);
+				return (PC->IsSectionOn() && T->AtriumCutPlane == Want && T->AtriumCutFocus == Cv->Bottom && URHSectionVisualizerSubsystem::LodBand(Cv->Top, Cv->Bottom) < 2 && T->AtriumCutOpenInSlab > 0
+					&& T->AtriumCutPlates >= 0 && Closed - T->AtriumCutPlates == T->AtriumCutOpenInSlab && T->AtriumCutLights > 0 && !Sim->IsAtrium(Cv->Id)
+					&& T->AtriumCutRailsWant > 0 && T->AtriumCutRails == T->AtriumCutRailsWant && T->AtriumCutFacingWant > 0 && T->AtriumCutFacing == T->AtriumCutFacingWant)
+					? FString() : FString::Printf(TEXT("plane %d (want %d), focus %d (want %d); floor %d drew %d plates with the atrium open and %d closed, for %d open cells in the slab (want the difference equal); %d light-column segments; axis %d: %d railing bar(s) drawn (%d from the sim, want equal and > 0), %d facing rim(s) drawn (%d from the sim, want equal and > 0)"),
+						T->AtriumCutPlane, Want, T->AtriumCutFocus, Cv->Bottom, Cv->Top, T->AtriumCutPlates, Closed, T->AtriumCutOpenInSlab, T->AtriumCutLights,
+						T->AtriumCutAxis, T->AtriumCutRails, T->AtriumCutRailsWant, T->AtriumCutFacing, T->AtriumCutFacingWant);
+			}, 1.2f);
+			PushKey(TEXT("section.cut.atrium close"), EKeys::V);
+			PushSettle(0.5f);
 			PushKey(TEXT("section.arm open"), EKeys::V);
 			const TSharedRef<FPress> Arm = PushPress(TEXT("section.arm"), LocateButton(TEXT("Tunnel"), 0, true));
 			PushCheck(TEXT("section.arm"), Arm, []()
@@ -2861,6 +3019,83 @@ namespace
 			}, 1.f);
 			Runner.Do(TEXT("section.done"), []() { if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); } }, 0.2f);
 		}
+
+		// ---- D7 atriums: the card's buttons in the floor view. The atrium section.cut.atrium opened (harness) is on -4..-5; on its top floor the
+		// cavern's row shows "Close the atrium", which sends CloseAtrium; then (the order landed, or the harness closes it) "Open as atrium" sends
+		// OpenAtrium. Deck presses only: no click reaches the world.
+		Runner.Do(TEXT("atrium.close setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			if (PC && EnsureClickAtrium(&T.Get(), true))
+			{
+				PC->CancelModes();
+				PC->SetActiveLevel(-4);
+			}
+		}, 0.8f);
+		// The atrium colony is saved and loaded with the view on its top floor: the load respawns every carve tile after it applies the view, and
+		// the tiles must come back under the atrium rule (no open cell's tile drawn, the hall's box cells shown below).
+		Runner.Do(TEXT("atrium.close reload"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			FString Error;
+			T->bAtriumReloaded = Sim && Sim->SaveColony(TEXT("clickatrium"), Error) && Sim->LoadColony(TEXT("clickatrium"), Error) && Sim->IsAtrium(T->AtriumCavernId);
+			IFileManager::Get().Delete(*(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_clickatrium.sav")));
+		}, 1.5f);
+		Runner.Do(TEXT("atrium.close count"), [T]()
+		{
+			const UWorld* World = GetPC() ? GetPC()->GetWorld() : nullptr;
+			const URHColonyVisualizerSubsystem* Colony = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+			T->AtriumReloadOpenDrawn = Colony ? Colony->CountVisibleOpenTiles() : -1;
+			T->AtriumReloadShownBelow = Colony ? Colony->GetAtriumShownTiles() : 0;
+		}, 0.2f);
+		{
+			const TSharedRef<FPress> CloseA = PushPress(TEXT("atrium.close"), LocateButton(TEXT("Close the atrium"), 0, true));
+			PushCheck(TEXT("atrium.close"), CloseA, [T]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim) { return FString(TEXT("no sim")); }
+				const bool bSent = QueueHas(*Sim, TEXT("CloseAtrium"), nullptr) || !Sim->IsAtrium(T->AtriumCavernId);
+				return (bSent && T->bAtriumReloaded && T->AtriumReloadOpenDrawn == 0 && T->AtriumReloadShownBelow > 0) ? FString()
+					: FString::Printf(TEXT("close order %s; after a save and load on the top floor %d open-cell tile(s) drawn (want 0), %d tile(s) shown below (want > 0), reloaded %d"),
+						bSent ? TEXT("sent") : TEXT("NOT sent"), T->AtriumReloadOpenDrawn, T->AtriumReloadShownBelow, T->bAtriumReloaded ? 1 : 0);
+			}, 1.f);
+		}
+		Runner.Do(TEXT("atrium.open setup"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				// The harness closes it now instead of waiting out the lag: the queued CloseAtrium orders are cancelled through the uplink's own API.
+				TArray<int32> Queued;
+				for (const FRHCommand& C : Sim->GetUplinkQueue()) { if (C.Verb == FName("CloseAtrium")) { Queued.Add(C.CommandId); } }
+				for (const int32 Id : Queued) { Sim->CancelUplinkCommand(Id); }
+			}
+			EnsureClickAtrium(&T.Get(), false);
+		}, 0.8f);
+		{
+			const TSharedRef<FPress> OpenA = PushPress(TEXT("atrium.open"), LocateButton(TEXT("Open as atrium"), 0, true));
+			// While the order is in flight the same button reads "Atrium order in flight" (L24), and a second press on it is held: the L23 confirm
+			// line, and still one order in the uplink. (The order executes 45 sim-s after it is sent; this press follows within a second.)
+			const TSharedRef<FPress> Again = PushPress(TEXT("atrium.open again"), LocateButton(TEXT("Atrium order in flight"), 0, true));
+			PushCheck(TEXT("atrium.open"), OpenA, [T, Again]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim) { return FString(TEXT("no sim")); }
+				const ARHPlayerController* PC = GetPC();
+				int32 Orders = 0;
+				for (const FRHCommand& C : Sim->GetUplinkQueue()) { Orders += (C.Verb == FName("OpenAtrium") && (int32)C.Value == T->AtriumCavernId) ? 1 : 0; }
+				const FString Confirm = PC ? PC->GetConfirmText().ToString() : FString();
+				const bool bHeld = Again->bFound && Confirm.Contains(TEXT("is already in flight")) && (Orders == 1 || (Orders == 0 && Sim->IsAtrium(T->AtriumCavernId)));
+				if (bHeld && PC && PC->GetAtriumGhost() == INDEX_NONE)
+				{
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: atrium.open: %d OpenAtrium order(s) for cavern %d in flight; the button read \"Atrium order in flight\" and a second press was held: \"%s\""),
+						Orders, T->AtriumCavernId, *Confirm);
+					return FString();
+				}
+				return FString::Printf(TEXT("%d OpenAtrium order(s) for cavern %d in flight (want 1), the in-flight button %s, confirm \"%s\", ghost %d (want none)"), Orders, T->AtriumCavernId,
+					Again->bFound ? TEXT("found") : TEXT("NOT found"), *Confirm, PC ? PC->GetAtriumGhost() : -2);
+			}, 1.f);
+		}
+		Runner.Do(TEXT("atrium.done"), []() { if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->SetActiveLevel(-1); } }, 0.3f);
 
 		// ---- the deck's contrast (UI polish P2): with a second shaft sunk, so the shaft card's "Next shaft" shows beside "Fit a lift car", every
 		// visible deck button must be readable: its fill against its text.

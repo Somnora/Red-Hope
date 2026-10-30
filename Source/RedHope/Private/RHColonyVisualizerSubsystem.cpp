@@ -1474,6 +1474,9 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	PropsHiddenForFurniture.Reset();
 	LightByCell.Reset();          // cell lights died with their tiles too
 	ClutterSpawnedPerLevel.Reset(); // clutter died with its tiles: re-accumulates
+	AtriumDimBase.Reset();        // D7: the darkened tints died with their tiles; the respawn applies the view again
+	AtriumShownTiles = 0;
+	bAtriumViewDirty = false;
 	for (auto& Pair : RivalMarkers)
 	{
 		if (Pair.Value)
@@ -2605,8 +2608,12 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		AddSite(Instance, Actor, Seated, RevealHeightCm);
 	}
 	// Born on whatever floor the sim says; visible only if the elevator is
-	// looking at that stratum (M1-d slice view).
-	Actor->SetActorHiddenInGame(!ShowsLevel(Instance.Level));
+	// looking at that stratum (M1-d slice view). D7: or through an atrium from above (D8's rule; never tested with no atrium).
+	{
+		const URHSimWorldSubsystem* AtriumSim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const bool bBelow = AtriumSim && AtriumSim->GetAtriums().Num() > 0 && InAtriumBelowView(Instance.Level, URHSimWorldSubsystem::CmToLattice(AtriumSim->GetShaftHeadCm(), Instance.LocationCm));
+		Actor->SetActorHiddenInGame(!(ShowsLevel(Instance.Level) || bBelow));
+	}
 	// The Floodmast exists only to light the place. It carries a real point
 	// light rather than an emissive fake, so it actually throws light onto the
 	// regolith and the hulls around it - which is the entire point of building
@@ -3738,6 +3745,12 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	// The supply ship's beat: down ahead of the arrival, a sol on the pad, gone.
 	UpdateSupplyShip(Sim);
+	// D7: an atrium opened, closed or loaded re-applies the view (the void, the floors below it); never with no atrium (the version stays 0).
+	if (Sim->GetAtriumsVersion() != AppliedAtriumsVersion)
+	{
+		AppliedAtriumsVersion = Sim->GetAtriumsVersion();
+		ApplyViewLevel();
+	}
 	// Dig sites follow the dig: a cheap state-keyed rebuild, twice a second.
 	if (FPlatformTime::Seconds() >= NextDepositRefreshRealSeconds)
 	{
@@ -4255,7 +4268,17 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 #if WITH_EDITOR
 			Tile->SetActorLabel(FString::Printf(TEXT("Sim_Carve_%d_%d"), L, Have));
 #endif
-			Tile->SetActorHiddenInGame(!ShowsLevel(L));
+			// D7: a tile is born under the atrium rule (an open cell of the viewed floor hidden, a box cell below the view shown) - after a load
+			// every tile is respawned here, after the view was applied. The darkening follows at the end of this pass.
+			if (Sim->GetAtriums().Num() > 0)
+			{
+				Tile->SetActorHiddenInGame(!ShowsCell(L, Have));
+				bAtriumViewDirty = true;
+			}
+			else
+			{
+				Tile->SetActorHiddenInGame(!ShowsLevel(L));
+			}
 			CarveTileVisuals.Add(Tile);
 			TileByCell.Add(FIntVector(L, Have, 0), Tile);
 			++Have;
@@ -4265,6 +4288,13 @@ void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
 
 	RefreshRoomVisuals();
 	RefreshDepthTint(Sim);
+	// D7: new tiles, or the room and depth passes' new tints on tiles shown from above: the void and the floors below it are applied again
+	// (the darkening on top of the tints those passes just wrote). Never with no atrium and none drawn.
+	if (bAtriumViewDirty)
+	{
+		bAtriumViewDirty = false;
+		ApplyAtriumView();
+	}
 
 	// The pit itself (skirt + walls) tracks the carved shape; key-checked, so
 	// this is a no-op except on the frame something actually changed.
@@ -4322,6 +4352,7 @@ void URHColonyVisualizerSubsystem::RefreshDepthTint(const URHSimWorldSubsystem* 
 		return;
 	}
 	DepthTintKey = Key;
+	bAtriumViewDirty |= Sim->GetAtriums().Num() > 0 || AtriumDimBase.Num() > 0; // D7: the darkening goes back on top of the new tints
 	for (auto It = DepthTintBase.CreateIterator(); It; ++It)
 	{
 		if (!It.Key().IsValid())
@@ -4625,6 +4656,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			continue; // steady state: zero work
 		}
 		AppliedRoomTint.Add(Pair.Key, Room);
+		bAtriumViewDirty |= Sim->GetAtriums().Num() > 0; // D7: a new surface (a new material) under a tile the atrium view may darken
 		// Undesignated cells read as bare industrial deck plating - carved and
 		// built, awaiting assignment (the regolith-dirt look read as "unfinished
 		// floor" on the director's screen, 2026-07-09). A designated room lays
@@ -5266,15 +5298,19 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 			continue;
 		}
 		int32 BLevel = 0;
+		FVector BLoc = FVector::ZeroVector;
 		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
 			if (B.Id == Pair.Key)
 			{
 				BLevel = B.Level;
+				BLoc = B.LocationCm;
 				break;
 			}
 		}
-		Pair.Value->SetActorHiddenInGame(!ShowsLevel(BLevel));
+		// D7: a building on the hall floor of an atrium shows from the floors above it (inert with no atrium).
+		const bool bBelow = Sim->GetAtriums().Num() > 0 && InAtriumBelowView(BLevel, URHSimWorldSubsystem::CmToLattice(Sim->GetShaftHeadCm(), BLoc));
+		Pair.Value->SetActorHiddenInGame(!(ShowsLevel(BLevel) || bBelow));
 	}
 	// The underground fill light rides the elevator: it hovers over whichever
 	// floor is open. (Its owner, the shaft column, is hidden at SURF, which
@@ -5317,6 +5353,8 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 			Tile->SetActorHiddenInGame(!ShowsLevel(TileLevel));
 		}
 	}
+	// D7: the void and the floors below it (a no-op with no atrium and none ever drawn).
+	ApplyAtriumView();
 	// The shaft column belongs to the underground read; at SURF the intact
 	// ground covers it, so hide it to avoid poking through the surface.
 	if (ShaftVisual)
@@ -5331,6 +5369,102 @@ void URHColonyVisualizerSubsystem::ApplyViewLevel()
 	}
 
 	RebuildSliceRig();
+}
+
+bool URHColonyVisualizerSubsystem::InAtriumBelowView(int32 L, const FIntPoint& P) const
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (bSectionMode || !Sim || Sim->GetAtriums().Num() == 0 || L >= ViewLevel)
+	{
+		return false;
+	}
+	for (const FRHAtrium& A : Sim->GetAtriums())
+	{
+		const FRHCavern* C = Sim->FindCavern(A.CavernId);
+		if (C && C->ContainsLevel(ViewLevel) && L >= C->Bottom && C->ContainsPoint(P))
+		{
+			return !Sim->IsPointOpen(L, P);
+		}
+	}
+	return false;
+}
+
+bool URHColonyVisualizerSubsystem::ShowsCell(int32 L, int32 Ordinal) const
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Sim->GetAtriums().Num() == 0 || Ordinal < 0)
+	{
+		return ShowsLevel(L);
+	}
+	if (ShowsLevel(L))
+	{
+		return !Sim->IsCellOpen(L, Ordinal); // the void: no slab (the tile's lamp is hidden with it)
+	}
+	return InAtriumBelowView(L, Sim->GetFloorCell(L, Ordinal));
+}
+
+void URHColonyVisualizerSubsystem::ApplyAtriumView()
+{
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || (Sim->GetAtriums().Num() == 0 && AtriumDimBase.Num() == 0 && AtriumShownTiles == 0))
+	{
+		return;
+	}
+	// Put back every tint darkened last time - only where it still holds the darkened value this pass wrote: a room or depth pass that has
+	// written its own tint since (or a new material) is the new undarkened base and is left as it is. Then hide the open tiles of the viewed
+	// floor and show (darker a step a floor down) the tiles of the floors below that stand in an atrium's box under the view.
+	for (const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, TPair<FLinearColor, FLinearColor>>& P : AtriumDimBase)
+	{
+		FLinearColor Now;
+		UMaterialInstanceDynamic* Mid = P.Key.Get();
+		if (Mid && Mid->GetVectorParameterValue(FName("Tint"), Now) && Now == P.Value.Value)
+		{
+			Mid->SetVectorParameterValue(FName("Tint"), P.Value.Key);
+		}
+	}
+	AtriumDimBase.Reset();
+	AtriumShownTiles = 0;
+	for (const auto& Pair : TileByCell)
+	{
+		AStaticMeshActor* Tile = Pair.Value.Get();
+		if (!Tile || Pair.Key.Y < 0)
+		{
+			continue;
+		}
+		const int32 L = Pair.Key.X;
+		const bool bShow = ShowsCell(L, Pair.Key.Y);
+		Tile->SetActorHiddenInGame(!bShow);
+		if (bShow && !ShowsLevel(L))
+		{
+			++AtriumShownTiles;
+			UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Tile->GetStaticMeshComponent()->GetMaterial(0));
+			FLinearColor Base;
+			if (Mid && Mid->GetVectorParameterValue(FName("Tint"), Base))
+			{
+				const float Dim = FMath::Pow(0.62f, (float)(ViewLevel - L));
+				const FLinearColor Darker(Base.R * Dim, Base.G * Dim, Base.B * Dim, Base.A);
+				AtriumDimBase.Add(Mid, TPair<FLinearColor, FLinearColor>(Base, Darker));
+				Mid->SetVectorParameterValue(FName("Tint"), Darker);
+			}
+		}
+	}
+}
+
+int32 URHColonyVisualizerSubsystem::CountVisibleOpenTiles() const
+{
+	// QA (the click test's atrium.close, RH.AtriumStatus): carve tiles standing on an open cell that are drawn. 0 is the void's rule.
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (!Sim || Sim->GetAtriums().Num() == 0)
+	{
+		return 0;
+	}
+	int32 N = 0;
+	for (const auto& Pair : TileByCell)
+	{
+		const AStaticMeshActor* Tile = Pair.Value.Get();
+		N += (Tile && Pair.Key.Y >= 0 && !Tile->IsHidden() && Sim->IsCellOpen(Pair.Key.X, Pair.Key.Y)) ? 1 : 0;
+	}
+	return N;
 }
 
 void URHColonyVisualizerSubsystem::EnsureSliceRig()

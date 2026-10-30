@@ -38,6 +38,8 @@ int32 RHRunCurrencySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorld
 int32 RHRunLeversSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // D6e lift and tram power: the -transitpower suite lives in RHSimTransitPowerSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunTransitPowerSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// D7 atriums: the -atriums suite lives in RHSimAtriumSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -10870,13 +10872,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *Path1) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 58, FString::Printf(TEXT("X15 the file says version %u (expect 58)"), Ver));
+			Expect(bRead && Ver == 59, FString::Printf(TEXT("X15 the file says version %u (expect 59)"), Ver));
 			uint32 V46 = 46;
 			if (bRead) { FMemory::Memcpy(Bytes.GetData() + 4, &V46, 4); }
 			FFileHelper::SaveArrayToFile(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_trafficv45.sav")));
 			FString Le39;
 			const int32 PopBefore = Sim->GetPopulation();
-			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/58")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
+			Expect(!Sim->LoadColony(TEXT("trafficv45"), Le39) && Le39.Contains(TEXT("Save format mismatch")) && Le39.Contains(TEXT("/59")) && Sim->GetImportStock(NRoverRow) == 1 && Sim->GetPopulation() == PopBefore,
 				FString::Printf(TEXT("X15 a v46 save is refused and the live colony untouched (%s)"), *Le39));
 			Sim->Debug_DeliverCargo(FName("CargoRover")); // a second one aboard, then load the first save back
 			FString Lerr;
@@ -12150,8 +12152,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 BuildingsBefore = Sim->GetBuildings().Num(), DepositsBefore = Sim->GetDeposits().Num(), TasksBefore = Sim->GetTasks().Num();
 			FString Le44;
 			const bool bRefused = !Sim->LoadColony(TEXT("farice_v45"), Le44);
-			Expect(bSaved && bRead && Ver == 58 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/58")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
-				FString::Printf(TEXT("F16 the file says version %u (expect 58); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
+			Expect(bSaved && bRead && Ver == 59 && bRefused && Le44.Contains(TEXT("Save format mismatch")) && Le44.Contains(TEXT("/59")) && Sim->GetBuildings().Num() == BuildingsBefore && Sim->GetDeposits().Num() == DepositsBefore && Sim->GetTasks().Num() == TasksBefore,
+				FString::Printf(TEXT("F16 the file says version %u (expect 59); a v46 save is refused and the live colony untouched (%s)"), Ver, *Le44));
 			FString Lg;
 			const bool bBack = Sim->LoadColony(TEXT("farice_ver"), Lg) && Lg.IsEmpty() && Sim->GetDeposits().Num() == 9 && Sim->GetDeposits()[8].bOutpost && Sim->GetDeposits()[6].RowName == FName("Ice_C") && Sim->GetTasks().Num() == TasksBefore;
 			const FRHTask Back = OpenTask(Rg.Drill);
@@ -12566,7 +12568,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			if (bRead) { FMemory::Memcpy(&Ver, Good.GetData() + 4, 4); }
 			int32 FloorCount = 0, Region = 0, Level0 = 0, NCells = 0;
 			if (bRead) { FMemory::Memcpy(&FloorCount, Good.GetData() + 20, 4); FMemory::Memcpy(&Region, Good.GetData() + 24, 4); FMemory::Memcpy(&Level0, Good.GetData() + 28, 4); FMemory::Memcpy(&NCells, Good.GetData() + 32, 4); }
-			Expect(bRead && Ver == 58 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
+			Expect(bRead && Ver == 59 && FloorCount == 1 && Region == 0 && Level0 == -1 && NCells == 6, FString::Printf(TEXT("K6 the file says version %u, and straight after the header: %d floor, region %d, level %d, %d cells"), Ver, FloorCount, Region, Level0, NCells));
 			const int32 CellsAt = 36, PlanAt = 36 + NCells * 8 + 4;
 			const auto TryFile = [&](const TCHAR* Slot, const TArray<uint8>& Bytes, FString& OutErr)
 			{
@@ -12610,7 +12612,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/58")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
+				Expect(TryFile(TEXT("deepk6v44"), Old, E6) && E6.Contains(TEXT("Save format mismatch")) && E6.Contains(TEXT("/59")), FString::Printf(TEXT("K6 a v46 file is refused and the colony untouched (%s)"), *E6));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("deepk6"), Le) && Le.IsEmpty() && Sim->GetFloorCarvedCells(-1) == 6 && Snap(-1).Plan.Num() == 2, FString::Printf(TEXT("K6 and the good file still loads (%s)"), *Le));
@@ -13758,7 +13760,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				TArray<uint8> Old = Good;
 				const uint32 V46 = 46;
 				FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/58")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
+				Expect(TryFile(TEXT("shaftsh7"), Old, E7) && E7.Contains(TEXT("Save format mismatch")) && E7.Contains(TEXT("/59")), FString::Printf(TEXT("SH12 the previous version is refused (%s)"), *E7));
 			}
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("shaftsgood"), Le) && Le.IsEmpty() && Sim->GetShaftCount() == 3 && Sim->GetShaft(2).Column == FIntPoint(0, 30) && Sim->GetCarveQueued(-1, 1) == 2 && Sim->GetShaft(1).HeadCm == Head1,
@@ -14106,7 +14108,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 ShaftCount = Rd(At);
 			int32 Cursor = At + 4;
 			for (int32 K = 0; K < ShaftCount; ++K) { const int32 Head = K == 0 ? 24 : 8; const int32 NQ = Rd(Cursor + 20 + Head); Cursor += 20 + Head + 4 + NQ * 8; }
-			Expect(bRead && Ver == 58 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
+			Expect(bRead && Ver == 59 && ShaftCount == 1 && Rd(Cursor) == 1 && Rd(Cursor + 4) == 0,
 				FString::Printf(TEXT("TN1 the file says version %u; straight after the shaft block the tunnel block reads NextTunnelId %d and 0 tunnels: 8 bytes, no lift field"), Ver, Rd(Cursor)));
 		}
 
@@ -14562,7 +14564,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			{ TArray<uint8> Bad = Good; Put(Bad, TunnelAt + 4, -1);
 				Expect(TryFile(TEXT("tunnelsh11"), Bad, E) && E.Contains(TEXT("tunnel list")) && E.Contains(TEXT("tunnel count")), FString::Printf(TEXT("TN8 a negative tunnel count is refused (%s)"), *E)); }
 			{ TArray<uint8> Old = Good; const uint32 V46 = 46; FMemory::Memcpy(Old.GetData() + 4, &V46, 4);
-				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/58")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
+				Expect(TryFile(TEXT("tunnelsh12"), Old, E) && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/59")), FString::Printf(TEXT("TN8 the previous version is refused (%s)"), *E)); }
 			FString Le;
 			Expect(Sim->LoadColony(TEXT("tunnelsgood"), Le) && Le.IsEmpty() && Sim->GetTunnels().Num() == 2 && Sim->GetNextTunnelId() == 3 && Sim->GetOpenTunnelCount() == 2 && Sim->FindTunnel(2)->A == FIntPoint(-2, 0),
 				FString::Printf(TEXT("TN8 and the good file still loads, both tunnels intact (%s)"), *Le));
@@ -14854,6 +14856,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("transitpower")))
 	{
 		return RHRunTransitPowerSuite(World, Clock, Sim);
+	}
+	// D7 atriums self-test (the rows and the switch, every refusal, the critical rule, the open set, the consumers, facing, the Hope term, air,
+	// walking, the save and its repairs, era parity, the caches, close, a shape beside an atrium), fails loudly. `-atriums` (no other switch
+	// is spelled so; FParse::Param matches a whole switch).
+	if (FParse::Param(*Params, TEXT("atriums")))
+	{
+		return RHRunAtriumsSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))
@@ -15150,7 +15159,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			uint32 Ver = 0;
 			const bool bRead = FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_framing_orbit.sav"))) && Bytes.Num() > 16;
 			if (bRead) { FMemory::Memcpy(&Ver, Bytes.GetData() + 4, 4); }
-			Expect(bRead && Ver == 58, FString::Printf(TEXT("e5 the file says version %u (expect 58)"), Ver));
+			Expect(bRead && Ver == 59, FString::Printf(TEXT("e5 the file says version %u (expect 59)"), Ver));
 			Sim->Debug_AddColonists(1);
 			Expect(Sim->LoadColony(TEXT("framing_orbit"), Err) && Err.IsEmpty() && Sim->GetPopulation() == 0 && Sim->GetRecalledMarsBorn().Num() == 2 && Sim->GetRecalledMarsBorn()[0].Id == 4 && Sim->GetRecalledMarsBorn()[0].Name == Before.FindRef(4)
 				&& Sim->GetRecalledMarsBorn()[1].Id == 3 && Sim->GetRecalledMarsBorn()[1].Name == Before.FindRef(3),
@@ -17215,6 +17224,124 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				Sim->GetPopulation(), Rules0, Effects0, Sim->GetPendingMarketEffects().Num(), LeversRollsMs, IceStore0, Sim->GetRivalStoreG(FName("ScaleRival0"), FName("Ice")));
 			Expect(Rules0 == 60 && Effects0 == 20 && Sim->GetPendingMarketEffects().Num() == 0 && Sim->GetTradeRules().Num() == 60 && LeversRollsMs <= CurrencyRollsMs + 0.2,
 				FString::Printf(TEXT("budget: 1,000 market rolls with %d trade rules and %d pending effects took %.3f ms (<= E5's %.3f + 0.2); every effect applied, no rule retired"), Rules0, Effects0, LeversRollsMs, CurrencyRollsMs));
+		}
+
+		// D7: atriums at scale, run last so no number above moves. The 20-floor colony as the D6a block saved it (four shafts to -20, four finished
+		// 8 x 8 x 3 caverns on -1..-3, one beside each shaft, 5,000+ colonists, transit on), every floor mapped as the D6c block maps it (so the
+		// people's walk has twenty floors to build), and the four caverns opened as atriums, one per shaft. Harness: the per-floor circulation row
+		// is raised, because each of these floors already holds about 1,100 cells, far past what one floor's circulation replaces at the row
+		// (refusal 9's ceiling, 240 cell-equivalents), and the oxygen for the four premium fills is put in the store. Here: 2,000 accepted
+		// preflights of the fourth atrium, then after the last open: the cold open and facing flags, the cold facing count, a warm Hope read, a
+		// cold deep net and a cold people walk. Wall clock.
+		{
+			FString AtLoadErr;
+			const bool bAtLoaded = Sim->LoadColony(TEXT("scalecaverns"), AtLoadErr);
+			// The harness air, bank and oxygen go in BEFORE the first step. That does not keep every floor rated: thirteen floors (-6..-15 and
+			// -18..-20) and one surface network hold no circulating Air Filter in the saved colony, so the first habitability step drops their
+			// rating whatever the air (14 LOST HABITABILITY lines, the same that follow D6c's block's load of this file). Separately, 309
+			// residents are evacuated for short rations before the first open: 54 from each of -1..-5, whose floors keep their rating, and 3 from
+			// each of the thirteen. The block measures that colony (about 4,840 colonists), not the saved one.
+			Sim->Debug_SetO2FillRateKgPerHour(200.0);
+			Sim->Debug_AddStock(NOxygen, 1.0e6);
+			Sim->Debug_SetBatteryWh(1.0e9);
+			for (const FRHDistrict& Old : TArray<FRHDistrict>(Sim->GetDistricts()))
+			{
+				if (Old.IsFloor())
+				{
+					FRHCommand Erase;
+					Erase.Verb = FName("EraseDistrict");
+					Erase.Value = (double)Old.Id;
+					Sim->EnqueueCommand(Erase);
+				}
+			}
+			EraStepOnce();
+			for (int32 Order = 0; Order < 3; ++Order)
+			{
+				FRHCommand Paint;
+				Paint.Verb = FName("PaintDistrict");
+				Paint.Target = FName("Homes");
+				Paint.Level = -(1 + Order * 8);
+				Paint.Value = Order < 2 ? 8.0 : 4.0;
+				Paint.Location = URHSimWorldSubsystem::LatticeToCm(Sim->GetShaftHeadCm(), FIntPoint(300 + Order * 4, 300));
+				Paint.LocationB = Paint.Location;
+				Sim->EnqueueCommand(Paint);
+			}
+			for (int32 K = 0; K < 10 && Sim->GetUplinkQueue().Num() > 0; ++K) { EraStepOnce(); }
+			int32 AtMapped = 0;
+			for (int32 L = 1; L <= 20; ++L) { AtMapped += Sim->IsFloorMapped(-L) ? 1 : 0; }
+			Sim->Debug_SetBatteryWh(1.0e9);
+			TArray<int32> CavernIds;
+			for (const FRHCavern& Cv : Sim->GetCaverns()) { CavernIds.Add(Cv.Id); }
+			FString AtWhy;
+			bool bOpened = CavernIds.Num() == 4;
+			for (int32 K = 0; K < 3 && bOpened; ++K) { bOpened &= Sim->Debug_OpenAtrium(CavernIds[K], AtWhy); }
+			// 2,000 accepted preflights of the fourth (the full box: refusals 1-10, the beds what-if and the walk test on two floors of about
+			// 1,100 cells each). No preview: the card asks for one once, not 2,000 times.
+			double AtPreMs = 0.0;
+			int32 AtAccepted = 0;
+			if (bOpened)
+			{
+				const double P0 = FPlatformTime::Seconds();
+				for (int32 K = 0; K < 2000; ++K)
+				{
+					FString Why2;
+					AtAccepted += Sim->CanOpenAtrium(CavernIds[3], Why2) ? 1 : 0;
+				}
+				AtPreMs = (FPlatformTime::Seconds() - P0) * 1000.0;
+				bOpened &= Sim->Debug_OpenAtrium(CavernIds[3], AtWhy);
+			}
+			// 400 colonists take a seat on a hall cell (their stations move: the facing count is cold as well), so heads face.
+			int32 Seated = 0;
+			for (const FRHColonist& Col : TArray<FRHColonist>(Sim->GetColonists()))
+			{
+				const FRHCavern* Cv = CavernIds.Num() == 4 ? Sim->FindCavern(CavernIds[Seated % 4]) : nullptr;
+				const int32 Hall = Cv ? Sim->FindFloorCell(-3, Cv->Min + FIntPoint((Seated / 4) % 8, (Seated / 32) % 8)) : (int32)INDEX_NONE;
+				if (Seated >= 400 || Hall == INDEX_NONE)
+				{
+					break;
+				}
+				Sim->Debug_SetColonistStation(Col.Id, FIntVector(-3, Hall, 0));
+				++Seated;
+			}
+			// After the last open every atrium cache is cold.
+			const int32 CellBuilds0 = Sim->Debug_GetAtriumCellBuilds();
+			const double F0 = FPlatformTime::Seconds();
+			const bool bFirstOpen = Sim->IsCellOpen(-1, 0);
+			const double FlagsMs = (FPlatformTime::Seconds() - F0) * 1000.0;
+			// The people's walk and the deep net next, before a Hope read (its commute would build the walk first).
+			const int32 WalkBuilds0 = Sim->GetDeepWalkBuilds();
+			const double K0 = FPlatformTime::Seconds();
+			const int32 AtLanding = Sim->Debug_WalkLanding(-1, 0);
+			const double AtWalkMs = (FPlatformTime::Seconds() - K0) * 1000.0;
+			const int32 NetBuilds0 = Sim->GetDeepNetBuilds();
+			TArray<FIntVector> AtPortals;
+			const double N0 = FPlatformTime::Seconds();
+			Sim->Debug_GetPortals(AtPortals);
+			const double AtNetMs = (FPlatformTime::Seconds() - N0) * 1000.0;
+			const double H0 = FPlatformTime::Seconds();
+			const int32 Facing = Sim->GetAtriumFacingHeads();
+			const double FacingMs = (FPlatformTime::Seconds() - H0) * 1000.0;
+			double HopeSink = 0.0;
+			Sim->GetColonyHope();
+			const double W0 = FPlatformTime::Seconds();
+			for (int32 K = 0; K < HopeReps; ++K) { HopeSink += Sim->GetColonyHope().Total; }
+			const double WarmHopeMs = (FPlatformTime::Seconds() - W0) * 1000.0 / HopeReps;
+			const URHSimWorldSubsystem::FRHHopeBreakdown AtHope = Sim->GetColonyHope();
+			int32 OpenSum = 0;
+			for (int32 L = 1; L <= 3; ++L) { OpenSum += Sim->GetFloorOpenCells(-L); }
+			Expect(bAtLoaded && AtLoadErr.IsEmpty() && AtMapped == 20 && bOpened && Sim->GetAtriums().Num() == 4 && OpenSum == 4 * 64 * 2 && Sim->GetFloorOpenCells(-3) == 0 && !bFirstOpen
+				&& Seated == 400 && Facing >= 400 && AtHope.FacingHeads == Facing && AtHope.Atrium > 0.0 && Sim->GetDeepNetBuilds() - NetBuilds0 == 1 && Sim->GetDeepWalkBuilds() - WalkBuilds0 == 1 && AtLanding != INDEX_NONE
+				&& Sim->Debug_AtriumCachesFresh() && Sim->Debug_GetAtriumCellBuilds() - CellBuilds0 == 1,
+				FString::Printf(TEXT("atriums: the 20-floor colony (%d colonists, %d floors mapped) opens four 8 x 8 x 3 atriums, one per shaft: %d cells open on -1 and -2, none on the hall floor -3; %d heads face one (Hope +%.4f); the deep net and the walk rebuild once, the caches are fresh (%s %s)"),
+					Sim->GetPopulation(), AtMapped, OpenSum, Facing, AtHope.Atrium, *AtLoadErr, *AtWhy));
+			UE_LOG(LogRedHopeSim, Display, TEXT("SCALE atriums (4 atriums of 8 x 8 x 3 on the 20-floor colony, %d colonists, %d portals): 2,000 accepted preflights %.3f ms (%d accepted) | cold open and facing flags %.4f ms | cold facing count %.4f ms (%d heads) | warm Hope read %.4f ms (sink %.3f) | cold deep net %.4f ms | cold people walk %.3f ms"),
+				Sim->GetPopulation(), AtPortals.Num(), AtPreMs, AtAccepted, FlagsMs, FacingMs, Facing, WarmHopeMs, HopeSink, AtNetMs, AtWalkMs);
+			Expect(AtAccepted == 2000 && AtPreMs <= 100.0, FString::Printf(TEXT("budget: 2,000 accepted atrium preflights took %.3f ms (<= 100; %d accepted)"), AtPreMs, AtAccepted));
+			Expect(FlagsMs <= 1.0, FString::Printf(TEXT("budget: the cold open and facing flags of four atriums took %.4f ms (<= 1)"), FlagsMs));
+			Expect(FacingMs <= 2.0, FString::Printf(TEXT("budget: a cold facing count over %d colonists took %.4f ms (<= 2)"), Sim->GetPopulation(), FacingMs));
+			Expect(WarmHopeMs <= 0.5, FString::Printf(TEXT("budget: a warm GetColonyHope with four atriums took %.4f ms (<= 0.5, the existing Hope budget)"), WarmHopeMs));
+			Expect(AtNetMs <= 3.0, FString::Printf(TEXT("budget: a cold deep net with four atriums took %.4f ms (<= 3)"), AtNetMs));
+			Expect(AtWalkMs <= 5.0, FString::Printf(TEXT("budget: a cold people walk over twenty mapped floors with four atriums took %.3f ms (<= 5)"), AtWalkMs));
 		}
 
 		UE_LOG(LogRedHopeSim, Display, TEXT("=== SCALE TEST END: %d failure(s) ==="), Fails);

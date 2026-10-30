@@ -12,6 +12,7 @@
 #include "RHRobotMovement.h"
 #include "RHElevatorLayout.h"
 #include "RHSectionVisualizerSubsystem.h"
+#include "RHColonyVisualizerSubsystem.h"
 #include "Animation/AnimSequence.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -1139,6 +1140,12 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	// D8: the section's slab test (null while the section subsystem has never run); the drawn positions restart each frame.
 	const URHSectionVisualizerSubsystem* Section = bSectionMode ? GetWorld()->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr;
 	if (bSectionMode) { SectionDrawnCm.Reset(); }
+	// D7 (brief 2.8, D8's rule): a robot on a floor below the view shows through an atrium whose floors include the view when it stands in the
+	// box, off the void - the colony visualizer's InAtriumBelowView, the one rule the tiles and buildings use. Never in the section, and the test
+	// is never made with no atrium.
+	const URHColonyVisualizerSubsystem* AtriumView = (bLifts && !bSectionMode && LiftSim->GetAtriums().Num() > 0) ? GetWorld()->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	const FVector AtriumHead = AtriumView ? LiftSim->GetShaftHeadCm() : FVector::ZeroVector;
+	ShownThroughAtrium = 0;
 	const double LiftFloorH = LiftSim ? LiftSim->GetFloorHeightCm() : 400.0;
 	TMap<FIntPoint, int32> QueueRank; // (shaft, level) -> riders already queued there this frame
 	int32 CabsUsed = 0;
@@ -1319,9 +1326,18 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		// entity, face travel, swap Walk/Idle on the speed threshold. The clip
 		// carries the gait, so the procedural Bob is skipped.
 		// D4: drawn only on its own floor (every robot is on the surface with no lift car).
-		const bool bOnView = bSectionMode
+		bool bOnView = bSectionMode
 			? (bLifts && Section && Section->IsInSlab(Pos)) // D8 R6: robots in front of the plane, beyond the slab or on the surface are hidden
 			: (bLifts ? LiftSim->LevelOfZ(Pos.Z) == ViewLevel : !bSliceHidden);
+		if (!bOnView && AtriumView)
+		{
+			const int32 RobotLevel = LiftSim->LevelOfZ(Pos.Z);
+			if (RobotLevel < ViewLevel && AtriumView->InAtriumBelowView(RobotLevel, URHSimWorldSubsystem::CmToLattice(AtriumHead, Pos)))
+			{
+				bOnView = true;
+				++ShownThroughAtrium;
+			}
+		}
 		if (bSectionMode && bOnView) { SectionDrawnCm.Add(Pos); }
 		if (bInCab && bOnView)
 		{

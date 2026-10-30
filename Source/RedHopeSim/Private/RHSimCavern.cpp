@@ -103,9 +103,9 @@ bool URHSimWorldSubsystem::IsCavernPointEligible(int32 Level, const FIntPoint& P
 	for (const FIntPoint& D : Neighbours4)
 	{
 		const FIntPoint Q = P + D;
-		if (Floor && Floor->IndexOf.Contains(Q))
+		if (Floor && Floor->IndexOf.Contains(Q) && (Atriums.Num() == 0 || !IsPointOpen(Level, Q)))
 		{
-			return true;
+			return true; // D7: a foothold is a carved NON-open cell (this also covers D6b growth's eligibility); inert with no atrium
 		}
 		if (ShaftColumns.Contains(Q))
 		{

@@ -71,6 +71,7 @@ K.BuildingCount = Buildings.Num();
 		K.DeepTunnels = TunnelsVersion;  // D6c (RC 6): the people's walk network (cells, tunnels, shafts, districts), all 0 for ever with no mapped floor
 		K.DeepShafts = ShaftsVersion;
 		K.DeepTram = TramVersion;        // D6d (RC 6): and the tram lines (a line maps its floor); 0 for ever with no mapped floor
+		K.DeepAtriums = Atriums.Num() > 0 ? AtriumsVersion : 0; // D7: an atrium moves a mapped floor's home cells and its walk; 0 with none
 	}
 	return K;
 }

@@ -183,8 +183,10 @@ private:
 		float Scale = 1.f;           // build height / the mesh's fitted height
 		bool bMoving = false;
 		bool bDetail = false;        // drawn with the full static mesh (else the cheap primitive figure)
+		uint8 NumVia = 0;            // D7: corner points still to pass on the way to Target (round an atrium's void), 0 with no atrium
 		FVector Pos = FVector::ZeroVector;
 		FVector Target = FVector::ZeroVector;
+		FVector Via[4] = { FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector };
 		float YawDeg = 0.f;
 		double NextDecideS = 0.0;    // world seconds
 		// Cached posts (a bed's side, the desk's chair), re-derived when the
@@ -331,6 +333,10 @@ private:
 	// A random point inside a random carved cell of the given floor - the
 	// canonical spiral layout the colony visualizer lays tiles with.
 	FVector WanderPointCm(int32 Level) const;
+	// D7 (R11, "nobody is drawn standing in the air"): the corner points that take a straight walk From -> To on an underground floor round
+	// every atrium void open on that floor (the box's rectangle, routed by corners 250 cm outside it, in the ring), in walking order. Empty with
+	// no atrium, on a floor no void opens, or when the line is clear.
+	void AroundVoids(int32 Level, const FVector& From, const FVector& To, TArray<FVector>& Out) const;
 	// Furniture positions per level, rebuilt each Tick from the colony
 	// visualizer's furnished props. Presentation-side only: the SIM has no
 	// furniture concept and stays untouched - this is about where figures

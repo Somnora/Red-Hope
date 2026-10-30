@@ -1093,6 +1093,14 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 				// D5 depth, Gate-D framing PLACEHOLDER (V11): the shelter bonus for living past the cool line.
 				Parts.Add(FString::Printf(TEXT("Deep homes: shelter from the sky, +%.1f Hope (%d of %d people live past floor -%d)."), H.Shelter, H.DeepResidents, S->GetPopulation(), S->GetDepthCostFromFloor()));
 			}
+			if (S->GetAtriums().Num() > 0)
+			{
+				// D7, Gate-D framing PLACEHOLDER (L12): homes and seats beside a tall hall; bonus-only, so nobody is short for not facing one. The Hope
+				// part shows only while the term reads at least +0.1 (as the commute and Shelter lines show only while theirs is nonzero).
+				const bool bHope = H.FacingHeads > 0 && H.Atrium >= 0.05;
+				Parts.Add(FString::Printf(TEXT("Atriums: %d, facing %d of %d people%s."), S->GetAtriums().Num(), H.FacingHeads, S->GetPopulation(),
+					bHope ? *FString::Printf(TEXT(" (+%.1f Hope for light and space)"), H.Atrium) : TEXT("")));
+			}
 			if (H.WarmPenalty > 0.0)
 			{
 				// D5 depth, Gate-D framing PLACEHOLDER (V11): warmth costs mood only, and says what brings it back.

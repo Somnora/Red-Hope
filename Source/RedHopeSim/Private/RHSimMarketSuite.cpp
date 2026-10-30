@@ -1319,7 +1319,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const int32 ZaryaAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Zarya"); });
 		const int32 MeridianAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Meridian"); });
 		const int64 Reserved0 = Sim->GetCreditReservedMcr(), Bal0 = Sim->GetCreditBalanceMcr();
-		const bool bShape = bParsed && Ver == 58 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
+		const bool bShape = bParsed && Ver == 59 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
 			&& B.Convoys[0].Id == 1 && B.Convoys[0].Rival == TEXT("Zarya") && B.Convoys[0].Cleared == 1 && B.Convoys[0].Lines.Num() == 2 && B.Convoys[0].Lines[0].Filled == 300
 			&& B.Convoys[1].Id == 2 && B.Convoys[1].Rival == TEXT("MxKes") && B.Convoys[1].Cleared == 0 && B.Convoys[1].ClearSol == 1 && B.Convoys[1].Held > 0 && B.Reserved == Reserved0 && B.Convoys[1].Held == Reserved0
 			&& B.Checked == 1 && B.Markets[0].Fill == 1 && IceSlot != INDEX_NONE && B.Markets[0].Price[IceSlot] == Sim->GetMarketPriceMcr(NIce) && ZaryaAt != INDEX_NONE && B.Rivals[ZaryaAt].Store[IceSlot] == Sim->GetRivalStoreG(NZarya, NIce);
@@ -1383,7 +1383,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			ExpectSeq({
 			[&]() { return !bOk; },
 			[&]() { return E.Contains(TEXT("Save format mismatch")); },
-			[&]() { return E.Contains(TEXT("/58")); },
+			[&]() { return E.Contains(TEXT("/59")); },
 			}, FString::Printf(TEXT("MX9 a v54 file is refused (%s)"), *E));
 		}
 		// A lost market block: the frame's tag destroyed.

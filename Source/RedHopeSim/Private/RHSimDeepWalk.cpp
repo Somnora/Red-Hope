@@ -197,13 +197,16 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 			}
 		}
 	}
+	// D7 (R2): an open cell is in no compartment, is never a door and never a landing (IsWalkOrdinal). Null with no atrium.
+	const TArray<uint8>* Open = GetAtriumFlags(Level);
+	const auto IsOpen = [Open](int32 O) { return Open && Open->IsValidIndex(O) && ((*Open)[O] & 1) != 0; };
 	// Compartments: components of the carved non-chain cells, labelled in the order of their lowest ordinal.
 	Out.CompOf.Init(INDEX_NONE, N);
 	int32 NumComps = 0;
 	TArray<int32> Stack;
 	for (int32 c = 0; c < N; ++c)
 	{
-		if (Chain[c] || Out.CompOf[c] != INDEX_NONE)
+		if (Chain[c] || Out.CompOf[c] != INDEX_NONE || IsOpen(c))
 		{
 			continue;
 		}
@@ -215,7 +218,7 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 			for (int32 k = 0; k < 4; ++k)
 			{
 				const int32 O = Nbr[Cur * 4 + k];
-				if (O != INDEX_NONE && !Chain[O] && Out.CompOf[O] == INDEX_NONE)
+				if (O != INDEX_NONE && !Chain[O] && Out.CompOf[O] == INDEX_NONE && !IsOpen(O))
 				{
 					Out.CompOf[O] = NumComps;
 					Stack.Add(O);
@@ -229,6 +232,10 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 	IsNode.Init(0, N);
 	for (int32 c = 0; c < N; ++c)
 	{
+		if (IsOpen(c))
+		{
+			continue;
+		}
 		if (Chain[c])
 		{
 			IsNode[c] = 1;
@@ -254,7 +261,7 @@ void URHSimWorldSubsystem::BuildWalkFloor(int32 Level, FRHWalkFloor& Out) const
 		for (int32 k = 0; k < 4; ++k)
 		{
 			const int32 O = Index.Find(Shafts[S].Column.X + WalkSteps[k].X, Shafts[S].Column.Y + WalkSteps[k].Y);
-			if (O != INDEX_NONE && (Landing == INDEX_NONE || O < Landing))
+			if (O != INDEX_NONE && !IsOpen(O) && (Landing == INDEX_NONE || O < Landing))
 			{
 				Landing = O;
 			}
@@ -338,6 +345,7 @@ void URHSimWorldSubsystem::DeriveDeepWalk(FRHDeepWalk& Out) const
 	Out.Shafts = ShaftsVersion;
 	Out.Districts = DistrictsVersion;
 	Out.Tram = TramVersion;
+	Out.Atriums = Atriums.Num() > 0 ? AtriumsVersion : 0;
 	const FRHDistrictGeo& Geo = EnsureDistrictGeo();
 	TArray<int32> Levels;
 	Geo.GetMappedLevels(Levels); // D6d: the floors that hold a shape or a tram line, ascending
@@ -350,7 +358,8 @@ void URHSimWorldSubsystem::DeriveDeepWalk(FRHDeepWalk& Out) const
 const URHSimWorldSubsystem::FRHDeepWalk& URHSimWorldSubsystem::EnsureDeepWalk() const
 {
 	FRHDeepWalk& N = DeepWalk;
-	const bool bFresh = N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion;
+	const bool bFresh = N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion
+		&& N.Atriums == (Atriums.Num() > 0 ? AtriumsVersion : 0); // D7 (F3, P8): the network's own key
 	if (!bFresh)
 	{
 		++DeepWalkBuilds;
@@ -369,7 +378,8 @@ bool URHSimWorldSubsystem::IsDeepWalkFresh() const
 	// True unless the cache is being REUSED (its key still matches) while a fresh derivation differs. The lazily computed chain-cell fields
 	// are left out of the compare: they are filled on demand and are a pure function of the rest.
 	const FRHDeepWalk& N = DeepWalk;
-	if (!(N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion))
+	if (!(N.bValid && N.Cells == FloorCellsVersion && N.Tunnels == TunnelsVersion && N.Shafts == ShaftsVersion && N.Districts == DistrictsVersion && N.Tram == TramVersion
+		&& N.Atriums == (Atriums.Num() > 0 ? AtriumsVersion : 0)))
 	{
 		return true; // a cache whose key has moved reads as fresh: it rebuilds on its next read
 	}
@@ -447,6 +457,10 @@ int64 URHSimWorldSubsystem::WalkCm(const FRHWalkFloor& F, int32 CellA, int32 Cel
 		return 0;
 	}
 	const int32 CompA = F.CompOf[CellA], CompB = F.CompOf[CellB];
+	if ((CompA < 0 && F.NodeOf[CellA] == INDEX_NONE) || (CompB < 0 && F.NodeOf[CellB] == INDEX_NONE))
+	{
+		return MAX_int64; // D7 (P14): an open cell is in no compartment and no node - no walk reaches it (never NodeOf[INDEX_NONE])
+	}
 	if (CompA >= 0 && CompA == CompB)
 	{
 		return WalkOctCm(F.Pts[CellA], F.Pts[CellB]); // one compartment: the octile line
