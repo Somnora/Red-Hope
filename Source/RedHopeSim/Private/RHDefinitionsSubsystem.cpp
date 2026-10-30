@@ -25,6 +25,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	FurnitureTable = Cast<UDataTable>(FurnitureTablePath.TryLoad()); // absent = no furnishing layer
 	DoorsTable = Cast<UDataTable>(DoorsTablePath.TryLoad()); // absent = no wall fittings
 	CompartmentsTable = Cast<UDataTable>(CompartmentsTablePath.TryLoad()); // absent = no sealed-habitat rate
+	EndowmentsTable = Cast<UDataTable>(EndowmentsTablePath.TryLoad()); // E7: absent = every permille 1000
 	SolarCurveTable = Cast<UCurveTable>(SolarCurvePath.TryLoad());
 
 	UE_LOG(LogRedHopeSim, Log, TEXT("Definitions loaded: buildings=%d robots=%d recipes=%d deposits=%d quotas=%d config=%d events=%d rooms=%d solarCurve=%s"),
@@ -37,6 +38,7 @@ void URHDefinitionsSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		EventsTable ? EventsTable->GetRowMap().Num() : 0,
 		RoomsTable ? RoomsTable->GetRowMap().Num() : 0,
 		SolarCurveTable ? TEXT("ok") : TEXT("MISSING"));
+	RebuildEndowmentIndex(/*bWarn*/ true); // E7: not counted on the line above
 
 	// Balance sweeps (2026-10-15): a playtest can run "the world where X is
 	// different" without editing the CSVs or the DataTables. Both flags act
@@ -626,6 +628,143 @@ void URHDefinitionsSubsystem::Debug_InjectRival(FName Name, const FRHRivalRow& R
 	}
 	RivalsTable->AddRow(Name, Row);
 	++RivalsGeneration; // E4: the sim re-parses the economy columns
+}
+
+// --- E7: the endowment ---------------------------------------------------------------------------------------------------------------------
+
+bool URHDefinitionsSubsystem::IsResourceRowKey(FName Resource) const
+{
+	if (!ResourcesTable || Resource.IsNone())
+	{
+		return false;
+	}
+	const FString Want = Resource.ToString();
+	for (const auto& Pair : ResourcesTable->GetRowMap())
+	{
+		if (Pair.Key.ToString().Equals(Want, ESearchCase::CaseSensitive))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void URHDefinitionsSubsystem::RebuildEndowmentIndex(bool bWarn)
+{
+	EndowmentIndex.Reset();
+	// Every row, the asset's in its table order and then the injected ones in injection order; a bad row is dropped with one Warning.
+	struct FCandidate { FName Name; TPair<int32, FName> Key; int32 Permille = 1000; };
+	TArray<FCandidate> Valid;
+	const auto Consider = [&](FName Name, const FRHEndowmentRow& Row)
+	{
+		FString Why;
+		if (Row.ProducePermille < 1 || Row.ProducePermille > 100000)
+		{
+			Why = FString::Printf(TEXT("ProducePermille %d is outside 1..100000"), Row.ProducePermille);
+		}
+		else if (Row.RegionId < 0)
+		{
+			Why = FString::Printf(TEXT("RegionId %d is below 0"), Row.RegionId);
+		}
+		else if (!IsResourceRowKey(Row.Resource))
+		{
+			Why = FString::Printf(TEXT("Resource '%s' is no resource row (the name is compared case-sensitively)"), *Row.Resource.ToString());
+		}
+		if (!Why.IsEmpty())
+		{
+			if (bWarn) { UE_LOG(LogRedHopeSim, Warning, TEXT("Endowment row %s: %s; it reads as 1000"), *Name.ToString(), *Why); }
+			return;
+		}
+		Valid.Add({ Name, TPair<int32, FName>(Row.RegionId, Row.Resource), Row.ProducePermille });
+	};
+	if (EndowmentsTable)
+	{
+		for (const auto& Pair : EndowmentsTable->GetRowMap())
+		{
+			Consider(Pair.Key, *reinterpret_cast<const FRHEndowmentRow*>(Pair.Value));
+		}
+	}
+	for (const TPair<FName, FRHEndowmentRow>& Injected : InjectedEndowments)
+	{
+		Consider(Injected.Key, Injected.Value);
+	}
+	// A (RegionId, Resource) pair that repeats: every row of it is ignored, with one Warning naming the pair.
+	TMap<TPair<int32, FName>, int32> Seen;
+	for (const FCandidate& C : Valid)
+	{
+		int32& Count = Seen.FindOrAdd(C.Key);
+		if (++Count == 2 && bWarn)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("Endowment rows repeat the pair (region %d, %s) (row %s); every row of it is ignored and it reads as 1000"),
+				C.Key.Key, *C.Key.Value.ToString(), *C.Name.ToString());
+		}
+	}
+	for (const FCandidate& C : Valid)
+	{
+		if (Seen.FindChecked(C.Key) == 1)
+		{
+			EndowmentIndex.Add(C.Key, C.Permille);
+		}
+	}
+}
+
+int32 URHDefinitionsSubsystem::GetProducePermille(int32 RegionId, FName Resource) const
+{
+	const TPair<int32, FName> Key(RegionId, Resource);
+	if (const int32* Override = EndowmentOverrides.Find(Key))
+	{
+		return *Override; // the harness's, before the table
+	}
+	const int32* Permille = EndowmentIndex.Find(Key);
+	return Permille ? *Permille : 1000;
+}
+
+void URHDefinitionsSubsystem::ForEachEndowmentRow(TFunctionRef<void(FName, const FRHEndowmentRow&)> Fn) const
+{
+	if (!EndowmentsTable)
+	{
+		return;
+	}
+	for (const auto& Pair : EndowmentsTable->GetRowMap())
+	{
+		Fn(Pair.Key, *reinterpret_cast<const FRHEndowmentRow*>(Pair.Value));
+	}
+}
+
+bool URHDefinitionsSubsystem::Debug_SetEndowment(int32 RegionId, FName Resource, int32 Permille)
+{
+	if (Permille < 1 || Permille > 100000 || RegionId < 0 || !IsResourceRowKey(Resource))
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("Debug_SetEndowment(%d, %s, %d) refused: a permille in 1..100000, a region from 0 and a resource row's exact name"),
+			RegionId, *Resource.ToString(), Permille);
+		return false;
+	}
+	EndowmentOverrides.Add(TPair<int32, FName>(RegionId, Resource), Permille);
+	RebuildEndowmentIndex(/*bWarn*/ true);
+	++RivalsGeneration; // the sim re-derives every rival's production
+	return true;
+}
+
+void URHDefinitionsSubsystem::Debug_InjectEndowmentRow(FName Name, const FRHEndowmentRow& Row)
+{
+	if (TPair<FName, FRHEndowmentRow>* Same = InjectedEndowments.FindByPredicate([Name](const TPair<FName, FRHEndowmentRow>& P) { return P.Key == Name; }))
+	{
+		Same->Value = Row;
+	}
+	else
+	{
+		InjectedEndowments.Emplace(Name, Row);
+	}
+	RebuildEndowmentIndex(/*bWarn*/ true);
+	++RivalsGeneration;
+}
+
+void URHDefinitionsSubsystem::Debug_ClearEndowments()
+{
+	InjectedEndowments.Reset();
+	EndowmentOverrides.Reset();
+	RebuildEndowmentIndex(/*bWarn*/ true);
+	++RivalsGeneration;
 }
 
 void URHDefinitionsSubsystem::Debug_InjectDiscovery(FName Name, const FRHDiscoveryRow& Row)

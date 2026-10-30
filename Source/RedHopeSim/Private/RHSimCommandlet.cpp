@@ -40,6 +40,8 @@ int32 RHRunLeversSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 int32 RHRunTransitPowerSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // D7 atriums: the -atriums suite lives in RHSimAtriumSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// E7 region-ready: the -regionready suite lives in RHSimRegionReadySuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunRegionReadySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -14837,6 +14839,12 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("market")))
 	{
 		return RHRunMarketSuite(World, Clock, Sim);
+	}
+	// E7 region-ready self-test (depots and routes in name order, the endowment data, inertness exact to the bit, landing follows the depot,
+	// the endowment by hand, era parity, nothing saved and nothing kept), fails loudly. `-regionready`.
+	if (FParse::Param(*Params, TEXT("regionready")))
+	{
+		return RHRunRegionReadySuite(World, Clock, Sim);
 	}
 	// E5 the Martian currency self-test (the data, inertness, the rate by hand and by enumeration, issuing, joining, settlement, the desk, the
 	// political record, era parity with a withdrawal, the withdrawal, the save and its repairs, ruling 11, politics untouched), fails loudly. `-currency`.

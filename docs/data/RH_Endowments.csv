@@ -1,0 +1,2 @@
+Name,RegionId,Resource,ProducePermille,Notes
+R0_Ice,0,Ice,1000,"E7 (region-ready): the identity row - region 0 makes Ice at the rate its rival rows say. 1000 = the row as written; 2000 doubles a region's output of a resource, 500 halves it. Step 4's regions add rows. Placeholder, director review."

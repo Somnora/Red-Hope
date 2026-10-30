@@ -200,6 +200,22 @@ public:
 	uint32 GetRivalsGeneration() const { return RivalsGeneration; }
 	void Debug_InjectFurniture(FName Name, const FRHFurnitureRow& Row);
 
+	// E7 (region-ready, Q-B (b)): a region's endowment, a permille on the rivals' production of one resource there (DT_Endowments; an absent
+	// table, or a (region, resource) with no valid row, reads 1000 = the rows as written). The sim multiplies a rival's Produce kg by it in
+	// integers (RHSimMarket.cpp, EvaluateRivalRow); nothing else reads it. The index is built at Initialize and on every hook, one Warning per
+	// bad row (FRHEndowmentRow's rules); a harness override (Debug_SetEndowment) is consulted before it.
+	int32 GetProducePermille(int32 RegionId, FName Resource) const;
+	// The DT asset's rows only, in the table's own order: never an injected row or an override (RR0 compares the asset with the CSV).
+	void ForEachEndowmentRow(TFunctionRef<void(FName, const FRHEndowmentRow&)> Fn) const;
+	// Harness hooks (runtime only; the loaded asset is never touched). Each rebuilds the index with warnings on and bumps RivalsGeneration, so
+	// the sim re-derives every rival's production on its next read. Debug_SetEndowment writes an override for one pair, consulted before the
+	// table index and exempt from the duplicate rule; it is range-checked (false, with a Warning, for a permille outside 1..100,000, a region
+	// below 0 or a resource that is no resource row). Debug_InjectEndowmentRow adds a raw row under the table's full validation (a row of the
+	// same name replaces it). Debug_ClearEndowments drops every override and every injected row.
+	bool Debug_SetEndowment(int32 RegionId, FName Resource, int32 Permille);
+	void Debug_InjectEndowmentRow(FName Name, const FRHEndowmentRow& Row);
+	void Debug_ClearEndowments();
+
 	// Solar diurnal factor for a 0..1 sol fraction (CT_SolarDiurnal/SolarOutput).
 	float EvalSolarCurve(float SolFraction) const;
 
@@ -229,6 +245,7 @@ private:
 	UPROPERTY(Config) FSoftObjectPath RoomsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rooms.DT_Rooms"));
 	UPROPERTY(Config) FSoftObjectPath DiscoveriesTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Discoveries.DT_Discoveries"));
 	UPROPERTY(Config) FSoftObjectPath RivalsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Rivals.DT_Rivals"));
+	UPROPERTY(Config) FSoftObjectPath EndowmentsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Endowments.DT_Endowments"));
 	UPROPERTY(Config) FSoftObjectPath CropsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Crops.DT_Crops"));
 	UPROPERTY(Config) FSoftObjectPath FurnitureTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Furniture.DT_Furniture"));
 	UPROPERTY(Config) FSoftObjectPath DoorsTablePath = FSoftObjectPath(TEXT("/Game/RedHope/Data/DT_Doors.DT_Doors"));
@@ -247,7 +264,15 @@ private:
 	UPROPERTY() TObjectPtr<UDataTable> RoomsTable;
 	UPROPERTY() TObjectPtr<UDataTable> DiscoveriesTable;
 	UPROPERTY() TObjectPtr<UDataTable> RivalsTable;
-	uint32 RivalsGeneration = 0; // E4: bumped by Debug_InjectRival
+	uint32 RivalsGeneration = 0; // E4: bumped by Debug_InjectRival (E7: and by every endowment hook)
+	// E7: the endowment table, the harness's injected rows (kept here, never AddRow'd into the asset) and overrides, and the index of the
+	// valid rows by (RegionId, Resource).
+	UPROPERTY() TObjectPtr<UDataTable> EndowmentsTable;
+	TArray<TPair<FName, FRHEndowmentRow>> InjectedEndowments;
+	TMap<TPair<int32, FName>, int32> EndowmentOverrides;
+	TMap<TPair<int32, FName>, int32> EndowmentIndex;
+	void RebuildEndowmentIndex(bool bWarn);
+	bool IsResourceRowKey(FName Resource) const; // a resource row's key, compared case-sensitively (FName equality ignores case)
 	UPROPERTY() TObjectPtr<UDataTable> CropsTable;
 	UPROPERTY() TObjectPtr<UDataTable> FurnitureTable;
 	UPROPERTY() TObjectPtr<UDataTable> DoorsTable;

@@ -456,3 +456,19 @@ struct REDHOPESIM_API FRHFurnitureRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") bool SliceActive = false;
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
 };
+
+// E7 (region-ready; docs/qa/2026-10-25/e7-region-ready-design.md, DIRECTOR ANSWER Q-B (b)): a region's endowment, a permille on the rivals'
+// PRODUCTION of one resource there (never on the Earth value, the band or any price). 1000 = the rows as written, 2000 doubles a region's
+// output of the resource, 500 halves it; a (region, resource) with no valid row reads 1000. One Warning per bad row, which then reads 1000:
+// ProducePermille outside 1..100,000, RegionId below 0, a Resource that is no resource row (compared case-sensitively), or a (RegionId,
+// Resource) pair that repeats (both rows are ignored). Placeholder values, director review.
+USTRUCT(BlueprintType)
+struct REDHOPESIM_API FRHEndowmentRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 RegionId = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FName Resource;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") int32 ProducePermille = 1000;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "RH") FString Notes;
+};

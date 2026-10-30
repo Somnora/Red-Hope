@@ -1482,19 +1482,26 @@ static FAutoConsoleCommandWithWorldAndArgs GRHMarket(
 		UE_LOG(LogRedHope, Display, TEXT("[RH.Market] %s | open sol %d | credit %s cr, %s cr reserved for orders waiting to clear, %s cr spendable | market sales so far %s cr"),
 			Sim->IsMarketLive() ? TEXT("live") : TEXT("off or no neighbor trades"), Sim->GetMarketCheckedSol(), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()),
 			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetSpendableMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarketSalesMcr()));
-		for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
+		// E7: one block per market region, each read with its own region; the "region N" line prints only when there is more than one, so
+		// one region prints the lines it always did.
+		for (int32 m = 0; m < Sim->GetMarketRegionCount(); ++m)
 		{
-			const FName Res = Sim->GetLedgerSlotName(i);
-			if (!Sim->IsMarketTraded(Res)) { continue; }
-			const FRHResourceRow* Row = Defs->GetResource(Res);
-			int64 Sold = 0, Bought = 0;
-			for (int32 Back = 1; Back <= 5; ++Back)
+			const int32 Region = Sim->GetMarketRegionIdAt(m);
+			if (Sim->GetMarketRegionCount() > 1) { UE_LOG(LogRedHope, Display, TEXT("  region %d"), Region); }
+			for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
 			{
-				int64 S = 0, B = 0;
-				if (Sim->GetMarketTally(Res, Back, S, B)) { Sold += S; Bought += B; }
+				const FName Res = Sim->GetLedgerSlotName(i);
+				if (!Sim->IsMarketTraded(Res, Region)) { continue; }
+				const FRHResourceRow* Row = Defs->GetResource(Res);
+				int64 Sold = 0, Bought = 0;
+				for (int32 Back = 1; Back <= 5; ++Back)
+				{
+					int64 S = 0, B = 0;
+					if (Sim->GetMarketTally(Res, Back, S, B, Region)) { Sold += S; Bought += B; }
+				}
+				UE_LOG(LogRedHope, Display, TEXT("  %s: %s cr/kg (Earth value %s) | the colony sold %lld kg and bought %lld kg over the last 5 sols"), *Res.ToString(),
+					*URHSimWorldSubsystem::FormatCredits(Sim->GetMarketPriceMcr(Res, Region)), *URHSimWorldSubsystem::FormatCredits(Row ? (int64)Row->EarthValue_mcr : 0), Sold / 1000, Bought / 1000);
 			}
-			UE_LOG(LogRedHope, Display, TEXT("  %s: %s cr/kg (Earth value %s) | the colony sold %lld kg and bought %lld kg over the last 5 sols"), *Res.ToString(),
-				*URHSimWorldSubsystem::FormatCredits(Sim->GetMarketPriceMcr(Res)), *URHSimWorldSubsystem::FormatCredits(Row ? (int64)Row->EarthValue_mcr : 0), Sold / 1000, Bought / 1000);
 		}
 		for (int32 r = 0; r < Sim->GetRivalEconomyCount(); ++r)
 		{

@@ -3067,7 +3067,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			{
 				const URHSimWorldSubsystem* S = GetSim();
 				if (!S) { return FText::GetEmpty(); }
-				return Txt(FString::Printf(TEXT("%s  %s %s  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res)),
+				return Txt(FString::Printf(TEXT("%s  %s %s  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res, S->GetRivalRegionId(RowName))),
 					S->IsMarketInMarks() ? TEXT("marks/kg") : TEXT("cr/kg"), FMath::Max(0, S->GetRivalStoreKg(RowName, Res))));
 			})
 		];

@@ -233,7 +233,8 @@ URHSimWorldSubsystem::ERHRivalTrade URHSimWorldSubsystem::EvaluateRivalRow(const
 		OutEcon->StoreG.Init(0, N);
 		OutEcon->Trades.Init(0, N);
 		for (const TPair<FName, int64>& C : Cap) { const int32 SlotIndex = EconIndex.FindChecked(C.Key); OutEcon->Trades[SlotIndex] = 1; OutEcon->CapG[SlotIndex] = C.Value * 1000; }
-		for (const TPair<FName, int64>& P : Produce) { OutEcon->ProduceG[EconIndex.FindChecked(P.Key)] = P.Value * 1000; }
+		// E7 (Q-B (b)): the region's endowment, a permille on production (1000 = the row as written), exact in integers with no division.
+		for (const TPair<FName, int64>& P : Produce) { OutEcon->ProduceG[EconIndex.FindChecked(P.Key)] = P.Value * (int64)Defs->GetProducePermille(Row.RegionId, P.Key); }
 		for (const TPair<FName, int64>& P : Consume) { OutEcon->ConsumeG[EconIndex.FindChecked(P.Key)] = P.Value * 1000; }
 		for (const TPair<FName, int64>& P : Start) { OutEcon->StoreG[EconIndex.FindChecked(P.Key)] = P.Value * 1000; }
 	}
@@ -486,6 +487,48 @@ FName URHSimWorldSubsystem::GetRivalEconomyName(int32 Index) const
 		if (E.bHasEconomy && At++ == Index) { return E.Rival; }
 	}
 	return NAME_None;
+}
+
+// E7: the band and the sums, as the sync derived them (each read syncs first, so a read after an injection or an endowment hook is fresh).
+int64 URHSimWorldSubsystem::GetMarketAnchorMcr(FName Resource, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	return (Mk && SlotPtr && Mk->VMcr.IsValidIndex(*SlotPtr)) ? Mk->VMcr[*SlotPtr] : 0;
+}
+
+int64 URHSimWorldSubsystem::GetMarketFloorMcr(FName Resource, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	return (Mk && SlotPtr && Mk->FloorMcr.IsValidIndex(*SlotPtr)) ? Mk->FloorMcr[*SlotPtr] : 0;
+}
+
+int64 URHSimWorldSubsystem::GetMarketCeilMcr(FName Resource, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	return (Mk && SlotPtr && Mk->CeilMcr.IsValidIndex(*SlotPtr)) ? Mk->CeilMcr[*SlotPtr] : 0;
+}
+
+int32 URHSimWorldSubsystem::GetMarketRegionIdAt(int32 Index) const
+{
+	SyncRivalEconomies(false);
+	return Markets.IsValidIndex(Index) ? Markets[Index].RegionId : -1;
+}
+
+int64 URHSimWorldSubsystem::GetRivalProduceG(FName Rival, FName Resource) const
+{
+	const FRHRivalEconomy* E = FindRivalEconomy(Rival);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	return (E && SlotPtr && E->ProduceG.IsValidIndex(*SlotPtr)) ? E->ProduceG[*SlotPtr] : -1;
+}
+
+int64 URHSimWorldSubsystem::GetMarketProdSumG(FName Resource, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	return (Mk && SlotPtr && Mk->ProdSumG.IsValidIndex(*SlotPtr)) ? Mk->ProdSumG[*SlotPtr] : 0;
 }
 
 // --- Harness hooks -------------------------------------------------------------------------------------------------------------------------
@@ -1435,21 +1478,19 @@ void URHSimWorldSubsystem::StepConvoyReturn(const FRHConvoy& Done)
 		Delivered = (Done.bStanding && bInFull) ? Rival->ExportLot : OrderLinesText(Filled, true);
 		if (Delivered.IsEmpty()) { Delivered = TEXT("nothing"); }
 	}
-	NoteFlowMap(TheirLot, ERHLedgerLeg::In); // E1: the convoy home - every line lands, at the Lander or in the pool
+	NoteFlowMap(TheirLot, ERHLedgerLeg::In); // E1: the convoy home - every line lands, at the depot (the Lander) or in the pool
+	// E7: the colony's depot, by the one depot rule (the Lander unless the harness binds another building; 0 = none, the pool takes it).
+	const int32 DepotId = FindColonyDepotBuildingId(GetColonyRegionId());
 	for (const auto& Item : TheirLot)
 	{
 		if (Defs && Defs->IsSolidResource(Item.Key))
 		{
 			// Drop at the trade depot (the Lander) for normal hauling.
 			bool bDropped = false;
-			for (FRHBuildingInstance& B : Buildings)
+			if (FRHBuildingInstance* Depot = DepotId != 0 ? FindBuilding(DepotId) : nullptr)
 			{
-				if (B.DefName == FName("Lander") && !B.bUnderConstruction)
-				{
-					B.OutputKg.FindOrAdd(Item.Key) += Item.Value;
-					bDropped = true;
-					break;
-				}
+				Depot->OutputKg.FindOrAdd(Item.Key) += Item.Value;
+				bDropped = true;
 			}
 			if (!bDropped) { AddStock(Item.Key, Item.Value); }
 			OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));

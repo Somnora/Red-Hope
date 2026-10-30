@@ -617,6 +617,26 @@ struct FRHMarketClearing
 	int64 TariffMcr = 0;
 };
 
+// E7, region-ready (docs/qa/2026-10-25/e7-region-ready-design.md: DIRECTOR ANSWER Q-A (b), Q-B (b) > REVISION 3 > REVISION 2): a depot and
+// a route are derived records, rebuilt on every call (GetDepots, GetRoutes) and never saved or cached. They carry no Id: an index into the
+// filled array is a display ordinal only. A route is keyed by (the colony's region, the rival). The colony's depot is a role the Lander
+// keeps (Q-A (b)); a rival's depot has no building until T5.
+struct FRHDepot
+{
+	int32 RegionId = 0;      // the region the depot stands in
+	FName Owner;             // NAME_None = the colony; else the rival row's name
+	int32 BuildingId = 0;    // the colony's: the depot building's Id (the Lander's today; 0 = no depot standing); a rival's: 0 (off-map until T5)
+};
+struct FRHRoute
+{
+	FName Rival;             // the key, with RegionA
+	int32 RegionA = 0;       // the colony's end: GetColonyRegionId(), the same depot landing uses
+	int32 BuildingA = 0;     // that depot's building (0 = no depot standing)
+	int32 RegionB = 0;       // the rival's end: its row's RegionId
+	double LengthKm = 0.0;   // (double) the row's DistanceKm, verbatim (never whole metres); T6: the map distance between the two depots
+	uint8 Kind = 0;          // 0 = abstract (a length from data)
+};
+
 // E5, the Martian currency (docs/qa/2026-10-24/e5-martian-currency-design.md: DIRECTOR ANSWER Q-A (a), Q-B (a), Q-C (a) > the queue's
 // orchestrator rulings and cross-check > the E5 build brief > PROFESSOR RE-REVIEW conditions 1-7 > REVISION R1-R7 > review > design).
 // One entry of the political journal: what one act does to the sol-close record of the politics, keyed by the act's OWN ExecuteAt (never the
@@ -1859,6 +1879,14 @@ public:
 	int32 GetRivalEconomyCount() const;                                            // rivals with an economy, by name
 	FName GetRivalEconomyName(int32 Index) const;                                  // by name string (case-sensitive ordinal)
 	int32 GetMarketBlockBytes() const;               // the bytes the market block's payload takes in a save, measured on the SYNCED state (re-sync is lazy)
+	// E7: the market's own figures, read through FindMarket / FindRivalEconomy (so each syncs first). The anchor is the Earth value V; the
+	// floor and ceiling are the band around it. 0 with no such market or slot; GetRivalProduceG is -1 with no economy entry.
+	int64 GetMarketAnchorMcr(FName Resource, int32 RegionId = 0) const;
+	int64 GetMarketFloorMcr(FName Resource, int32 RegionId = 0) const;
+	int64 GetMarketCeilMcr(FName Resource, int32 RegionId = 0) const;
+	int32 GetMarketRegionIdAt(int32 Index) const;                                  // the Index-th market's RegionId (RegionId order); -1 out of range
+	int64 GetRivalProduceG(FName Rival, FName Resource) const;                     // grams a sol, the endowment applied; -1 with no economy entry
+	int64 GetMarketProdSumG(FName Resource, int32 RegionId = 0) const;             // over the region's economy rivals; 0 with no market or slot
 	// Money. Balance == Awarded - Spent; 0 <= SalesPaid + MarketSales (+ E5's DeskCredit + CurrencyRedeemed) <= Awarded; Reserved == the sum of
 	// the uncleared credit convoys' reservations (+ E5's pending ToMarks desk amounts) and 0 <= Reserved <= Balance. Spendable = Balance -
 	// Reserved: the manifest (CanAddManifestItem), the launch (CanLaunchShip) and the short launch (LaunchShipShort) all read it, and
@@ -1894,6 +1922,10 @@ public:
 	void Debug_RollMarket(int32 SolNow) { RollMarket(SolNow); }                       // the whole roll: clearing, production, reprice
 	int64 Debug_CreditSpend(int64 Mcr) { return CreditSpend(Mcr); }                   // returns what could not be paid
 	void Debug_SyncRivalEconomies() { SyncRivalEconomies(false, true); }
+	// E7: binds region RegionId's colony depot to a building (rule 1 of FindColonyDepotBuildingId). True only when the building exists and
+	// is complete, or when BuildingId is 0 (which clears the binding); any RegionId but 0 is refused until T2. Runtime only: never saved,
+	// and every load's teardown clears it.
+	bool Debug_SetColonyDepot(int32 RegionId, int32 BuildingId);
 	static int64 MarketDivTrunc(int64 A, int64 B);   // the update's one signed division: truncates toward zero, B > 0
 	// E6 (D21): a filled line's money under a markup m (bp, 0 <= m < 10000), every rounding against the colony. The tariff is ceil(value x m /
 	// 10000); a buy costs its value plus it, a sell receives its value less it - never more than its value (no rule pays the colony).
@@ -2200,6 +2232,20 @@ public:
 	double GetConvoyProgress(const FRHConvoy& Convoy) const;
 	const TArray<FRHConvoy>& GetConvoys() const { return Convoys; }
 	double GetRivalRelation(FName Rival) const;
+	// E7, region-ready (RHSimRegion.cpp): depots and routes, derived on every call, never saved. One depot rule for the three trade-facing
+	// Lander roles (a convoy's goods landing, a covert run's loot, the convoy's drawn start): the runtime binding (Debug_SetColonyDepot) if
+	// its building exists and is complete, else the first complete Lander in the region in list order, else 0 (no depot: landing falls back
+	// to the pool). Every other Lander role stays where it is until T1.
+	double GetConvoyLegSols(FName Rival) const;                     // one leg in sols: the route's length / the convoy speed; 0.0 for an unknown row
+	bool GetRouteFor(FName Rival, FRHRoute& Out) const;             // true whenever the rival row exists
+	void GetRoutes(TArray<FRHRoute>& Out) const;                    // one per rival row (barter and dormant ones included), by name string
+	void GetDepots(TArray<FRHDepot>& Out) const;                    // the colony's first, then one per rival row by name string
+	int32 GetColonyRegionId() const { return 0; }                   // a constant until T2
+	int32 GetBuildingRegionId(const FRHBuildingInstance& /*B*/) const { return 0; } // every building stands in region 0 until T2
+	int32 FindColonyDepotBuildingId(int32 RegionId = 0) const;      // 0 = no depot
+	int32 GetColonyDepotBindingId(int32 RegionId = 0) const;        // the runtime binding; 0 = none
+	FVector GetColonyDepotLocationCm(int32 RegionId = 0) const;     // the depot building's LocationCm; FVector::ZeroVector with no depot
+	int32 GetRivalRegionId(FName Rival) const;                      // the row's RegionId; 0 with no row
 
 	// --- Earth's Shadow (M3 Gate B) ---
 	// Earth tension (0..100) rises while you have neighbors and gates a demand
@@ -3789,6 +3835,7 @@ private:
 	// Runtime claim state - never serialized; load resets it and robots
 	// re-claim from fragments/board.
 	TSet<FMassEntityHandle> RepairClaims;
+	TMap<int32, int32> DepotBindings; // E7: region -> the colony depot's building (Debug_SetColonyDepot); runtime only, never saved, cleared at load
 	TMap<int32, TArray<FMassEntityHandle>> PadQueues;
 	TArray<FRHSurveyRecord> SurveyHistory; // serialized (save v4)
 	int32 NextCommandId = 1;               // uplink handles (each order's own; saved with the queue, v37; a load raises this past the loaded ones)
@@ -4705,7 +4752,7 @@ private:
 	bool HasActiveRival() const; // any available rival => the layer is live
 	// Ensure a rival's relation entry exists (lazy seed from RelationStart).
 	double& RelationRef(FName Rival);
-	// One-way transit time for a rival, in sols.
+	// One-way transit time for a rival, in sols (E7: GetConvoyLegSols, the route's length).
 	double ConvoyLegSolsFor(FName Rival) const;
 	// Trade-lot accounting: does the colony hold this "Res:Kg;..." lot (solids
 	// across building stores + pool; fluids from the pool)? And spend it,

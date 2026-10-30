@@ -5094,12 +5094,8 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 			Part(SphereMesh, FVector(128.f, 0, 82.f), FRotator::ZeroRotator, FVector(0.16f), HazYellow, AmberGlow);             // beacon
 			ConvoyVisuals.Add(Convoy.Id, Rover);
 		}
-		// Home = the Lander pad; destination = the rival's marker.
-		FVector Home(0, 0, 0);
-		for (const FRHBuildingInstance& B : Sim->GetBuildings())
-		{
-			if (B.DefName == FName("Lander")) { Home = B.LocationCm; break; }
-		}
+		// Home = the Lander pad (E7: the colony's depot, by the sim's one depot rule; the origin with none); destination = the rival's marker.
+		const FVector Home = Sim->GetColonyDepotLocationCm(Sim->GetColonyRegionId());
 		const FVector Dest = RivalMarkerPos(Convoy.Rival, Row->DistanceKm);
 		const double P = Sim->GetConvoyProgress(Convoy); // 0..1 round trip
 		const double Alpha = Convoy.bReturning

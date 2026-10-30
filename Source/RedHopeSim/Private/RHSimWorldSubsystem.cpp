@@ -9892,9 +9892,7 @@ double& URHSimWorldSubsystem::RelationRef(FName Rival)
 
 double URHSimWorldSubsystem::ConvoyLegSolsFor(FName Rival) const
 {
-	const FRHRivalRow* Row = Defs ? Defs->GetRival(Rival) : nullptr;
-	const double Speed = FMath::Max(ConvoySpeedKmPerSol, KINDA_SMALL_NUMBER);
-	return Row ? Row->DistanceKm / Speed : 0.0;
+	return GetConvoyLegSols(Rival); // E7: the route's length, the same double
 }
 
 double URHSimWorldSubsystem::GetRivalRelation(FName Rival) const
@@ -9990,7 +9988,8 @@ bool URHSimWorldSubsystem::ResolveCovert(const FRHCommand& Cmd, FName Rival, FSt
 	else
 	{
 		// Clean: take a fraction of their export goods (solids drop at the
-		// Lander for hauling, fluids join the pool - like a delivery, unpaid).
+		// colony's depot, the Lander, for hauling; fluids join the pool - like
+		// a delivery, unpaid).
 		Hidden = FMath::Clamp(Hidden + CovertHiddenTensionClean, 0.0, 100.0);
 		FString Stolen;
 		TMap<FName, double> Loot; // E6: what the rival loses, at the roll closing this order's sol
@@ -10001,15 +10000,13 @@ bool URHSimWorldSubsystem::ResolveCovert(const FRHCommand& Cmd, FName Rival, FSt
 			NoteFlow(Item.Key, ERHLedgerLeg::In, Amount); // E1: the covert loot lands like a delivery
 			if (Defs && Defs->IsSolidResource(Item.Key))
 			{
+				// E7: the depot rule (the Lander unless the harness binds another building); no depot falls back to the pool, as before.
 				bool bDropped = false;
-				for (FRHBuildingInstance& B : Buildings)
+				const int32 DepotId = FindColonyDepotBuildingId(GetColonyRegionId());
+				if (FRHBuildingInstance* Depot = DepotId != 0 ? FindBuilding(DepotId) : nullptr)
 				{
-					if (B.DefName == FName("Lander") && !B.bUnderConstruction)
-					{
-						B.OutputKg.FindOrAdd(Item.Key) += Amount;
-						bDropped = true;
-						break;
-					}
+					Depot->OutputKg.FindOrAdd(Item.Key) += Amount;
+					bDropped = true;
 				}
 				if (!bDropped) { AddStock(Item.Key, Amount); }
 				OnStockChanged.Broadcast(Item.Key, GetTotalSolid(Item.Key));
@@ -14341,6 +14338,7 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	ManifestPricesMcr.Reset(); // v54: the credit block, read after teardown, brings them back
 	FleetCounts.Reset();
 	RepairClaims.Reset();  // claim state is runtime-only; robots re-claim
+	DepotBindings.Reset(); // E7: the harness depot binding is runtime-only
 	LastBlackoutNight = -1; // D5a runtime latch: re-seen within a step if the blackout continues
 	PadQueues.Reset();
 	SurveyHistory.Reset();
