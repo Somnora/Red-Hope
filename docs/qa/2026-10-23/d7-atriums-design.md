@@ -777,3 +777,11 @@ Every `file:line` above was mapped from `6b5653c` to HEAD through `git diff`, an
 - **F1. The save block's semantics.** Section 2 designs a block read before teardown that refuses. The house rule since v54 is a frame at the end that repairs. Option (i) (repair: drop the bad atrium with a Warning) matches E1-E4 and D7's own occupancy repair, and a dropped atrium "loses nothing: its cells become ordinary cells". Option (ii) keeps the refusals at the cost of a small helper. This refresh recommends (i). The main session should confirm before the build, since it changes what AT9 asserts.
 - **F2. D8's section view would draw a floor across the void.** `BuildFloor` (`RHSectionVisualizerSubsystem.cpp:849`) puts a plate under every carved cell in the slab, and its rebuild key (`StructKey`) does not read `AtriumsVersion`. Under D7, an open cell must draw no plate, and the key must take `AtriumsVersion` (0 with no atrium, so the D8 digests and `RH.DeepBench` cannot move). This is a missing line in R11's presentation list, not a redesign. A click step, `section.atrium` (open an atrium, cut through it, count no plate on its open cells), proves it.
 - **F3. Two keys, not one.** The walk network's key (`RHSimDeepWalk.cpp:353`) needs `AtriumsVersion` as well as the commute key. R5 names only the commute's.
+
+
+# DIRECTOR ANSWER (2026-10-29): -scale under load
+
+From the builder's director question at the gate (brief 2.11: a missed budget is a director finding), asked as the orchestrator's question S:
+
+- **(a) Accept the quiet-rerun rule for D7.** In the first fix round, the two `-scale` runs that started while another session loaded the machine (load 5.75 and about 6) missed four wall-clock budgets: D5's StepPower 0.0581 ms (0.05), D6c's two cold commutes 10.136 and 10.376 ms (10), and D7's own cold deep net with four atriums 3.098 ms (3). Every run started under a load of 5 passed every budget (nine runs). On the final binary the budgets D7 does not own time as before D7 (commutes 8.43 ms before, 8.37 - 8.45 ms after; StepPower 0.0417 ms before, 0.0407 - 0.0412 ms after), and D7's cold deep net with atriums measures 2.47 - 2.61 ms against 3.
+- D7's `-scale` is judged on runs started under a load of 5 with no Unreal process running, as D6d's and E1's gates settled their own loaded misses. No budget changes.
