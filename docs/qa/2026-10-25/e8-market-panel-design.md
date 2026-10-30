@@ -1082,3 +1082,11 @@ The orchestrator's question L (2026-10-29, asked while D7 builds): how should R2
 - Not taken: (b) every pair strictly, which would likely stop E8 on noise; (c) the in-process `Market` slot budgets alone, which measure the panel's processing time, not the graphics card's work drawing the Routes overlay.
 
 This answer outranks R2-7, REVISION 3's frame check and the brief's item 14. The operational rules (when the load is read, the fallback if the editor alone holds it at 5 or more, the 45-minute bound for each scene and resolution) are ruling 18 in `docs/qa/2026-10-26/preflight/ORCHESTRATOR-RULINGS.md`; `docs/qa/2026-10-26/workflows/e8-gate-wf.js` item 9 and its gate lens apply them.
+
+
+# DIRECTOR ANSWER (2026-10-29): -scale runs under load
+
+Asked as the orchestrator's question R, after D7's loaded `-scale` misses (`docs/qa/2026-10-23/d7-atriums-design.md`, DIRECTOR ANSWER (2026-10-29), question S), so that a run slowed by load does not stop the overnight E7 and E8 gates:
+
+- **(a) The quiet-rerun rule covers E7's and E8's `-scale` runs.** A `-scale` budget counts only on a run started when `uptime`'s 1-minute load is under 5 and no other Unreal process (UnrealEditor, UnrealEditor-Cmd, CrashReportClient, ShaderCompileWorker) and no build or test script is running. A miss on a run that did not meet that is reported with its log, its load and its cause, and the run is repeated: it is not a director question, and no budget changes. A miss on a run that did meet it is still a director finding.
+- Orchestrator ruling 22 carries it into the gate scripts. E8's frame bar keeps ruling 18.
