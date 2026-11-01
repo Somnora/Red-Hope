@@ -2132,6 +2132,18 @@ From E8's fix round 1 (run `wf_7dde779a-1f2`), which ran the whole gate on its f
 - **Rule (f) (a): kept as written.** CU10's d9 and d10 keep a unit-1 open-sol entry until the next roll; the panel converts each entry by its own unit.
 - **Zarya (a): the Routes overlay is seated on the visible surface.** Zarya's marker (236 m out at 64 degrees, on `RHMarsTerrain::GroundZCm`) lies under the scenery's raised plateau, so its ribbon vanished about 105 m out and its "· embargo" label could not be seen. The ribbons, settlement markers and labels keep their bearing and distance; the brief's "RivalMarkerPos unchanged" is overridden for the height only.
 
+### E8's frame check and rebuild passes: the director's answers (2026-11-01)
+
+These come from E8's fix round 3 (run `wf_37efc219-c0e`, fingerprint `902961c6...`). They are logged in `docs/qa/2026-10-25/e8-market-panel-design.md`, DIRECTOR ANSWER (2026-11-01), with orchestrator ruling 25.
+- **A (b): a control re-check of S1 1600x900, no code change.**
+  - The miss: S1 1600x900's four counted pairs missed the p95 bar, with a median of +1.67 ms against 1.0.
+  - The cause: in every S1 session, pair 4's MARKET-open window holds the sol-0 autosave of the 2000-colonist colony and the orders' clearing.
+  - The control: it repeats the session with that window closed. If the stall remains, the pair is excused, and a fresh S1 1600x900 check decides without it. If not, E8 goes back for panel work.
+- **B (b): accept the rebuild passes above 2 ms seen outside the counted windows, and profile them as a follow-up.**
+  - The counted windows' worst pass is 1.72 ms.
+  - Outside them, the roll's first slice reached up to 18.6 ms and Earth's line sat in a 4.72-4.92 ms cluster, both on a loaded machine.
+  - The follow-up: Unreal Insights on a quiet machine.
+
 ### D6e lift and tram power: what it settles, and where it deviated (2026-10-28, not yet committed)
 
 Built from `docs/qa/2026-10-26/preflight/D6e-brief.md` on E6's source (`7adc7ee`, save v57). The tree sits on `01f5299`, the docs-only T1 commit made while D6e was being built (`git diff 7adc7ee 01f5299 -- Source docs/data Content scripts` is empty), so D6e commits on `01f5299`. The order of authority, in the queue's order: the DIRECTOR ANSWERs (`docs/qa/2026-10-22/d6-caverns-design.md` Q-A (a), Q-B (a), **Q-C (a): trams carry people only** - no robot tram edge, hold, ride or reserve term; `docs/qa/2026-10-23/d8-deep-view-design.md` **Q-C (a) with R7**: the served-capacity bar ships inside D6e) > `ORCHESTRATOR-RULINGS.md` (1, 3, 6, 7, 8, 9) > `CROSS-CHECK.md` section 6 (items 1, 14, 15) > the brief > the REFRESH AT 31ffa6f > MERGED section 5. Superseded and not built: the draft's section 7 (40 W, 2 W, priority 8, `-liftpower`) and "Save v51" with `OutError` refusals.

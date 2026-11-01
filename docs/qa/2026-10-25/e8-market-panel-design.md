@@ -1101,3 +1101,27 @@ Asked by the orchestrator on 2026-10-31 from E8's fix round 1 (run `wf_7dde779a-
 - **Zarya (a): seat the Routes overlay on the visible surface, in E8.** Zarya's settlement marker (V's `RivalMarkerPos`, 236 m out at 64 degrees, seated on `RHMarsTerrain::GroundZCm`) lies under the scenery's raised plateau, so Zarya's amber ribbon disappears into the plateau edge about 105 m from the depot and its "· embargo" label cannot be seen (`Saved/RHCapture/e8/e8_overlay_00.png`, `e8_zarya_ridge_00.png`, `e8_zarya_plateau_00.png`). Fix round 2 seats the route ribbons, the settlement markers and their labels on the visible surface, keeping each marker's bearing and distance; the brief's "RivalMarkerPos unchanged" is overridden for the height only. The captures re-run anyway. Not taken: (b) a visual follow-up.
 
 This answer outranks REVISION 3, the E8 brief and ruling 18 where they differ.
+
+# DIRECTOR ANSWER (2026-11-01): E8's frame check and rebuild passes
+
+Asked by the orchestrator on 2026-11-01 from E8's fix round 3 (run `wf_37efc219-c0e`, which ended needing the director). Fix round 3 ran the whole gate on its final binary (fingerprint `902961c66c0c48cdddfaa29baf550f998c14f7136e9d0d25bffdac397a65b499`):
+- the battery 63/63 green, with 0 unexplained diff lines against `battery_post_e7`;
+- `-market` 82 checks with 0 failures;
+- the playtest byte-identical;
+- the click test 109/109 three times, and deepbench 9/9.
+
+The orchestrator re-checked all of it from disk, looked at the 17 captures, and read fix round 3's code, which no lens reviewed.
+
+- **A (b): a control re-check of S1 1600x900, no code change.**
+  - **The miss.** Over its four counted pairs S1 1600x900 missed the p95 bar: the median p95 delta was +1.67 ms against 1.0, and the median-frame delta +0.25.
+  - **What the orchestrator found.** The session schedule is fixed, so in every S1 session pair 4's P1 window (MARKET open) holds the sol-0 -> 1 autosave of the 2000-colonist colony and both orders' clearing. The max frames there were 474, 1491 and 2627 ms.
+  - **The control.** It runs the same session with pair 4 kept closed. If the closed window stalls too, the stall is the simulation's, and the autosave pair is excused (orchestrator ruling 25). A then passes on a fresh S1 1600x900 frame check judged without that pair. The decision rule was fixed before the control ran. If the closed window does not stall, the cost is the panel's and E8 goes to (c).
+  - **Not taken:** (a) accept on fix round 3's evidence; (c) more panel work and a new full gate.
+- **B (b): accept, and profile as a follow-up.** In the frame check's counted windows the worst pass was 1.72 ms, under the 2 ms bar. Larger passes appeared outside those windows:
+  - In the capture sessions (60x and 8x, on a loaded, swapping machine), the roll's first rows slice reached 18.6 ms and was above 2 ms in 36 of 164 rolls.
+  - Earth's line took 4.72-4.92 ms in 26 of 444 passes.
+  - One uncounted frame window (S1 1440x860 pair 4, load 38) held a 34.55 ms text pass.
+
+  The follow-up: profile the roll's first slice and Earth's line on a quiet machine with Unreal Insights. Not taken: (a) accept without a follow-up; (c) hold E8 for that work and a new full gate.
+
+This answer outranks ruling 24 (1)'s "never a chosen subset" for the autosave pair only, as ruling 25 states.
