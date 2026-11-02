@@ -2826,3 +2826,4 @@ Logged in `docs/qa/2026-10-31/bm7-move-design.md`, DIRECTOR ANSWER (2026-11-02).
 - **`bm7r1_click1600`** failed under a load spike (4.89 at the start, 14.68 mid-run) on two dropped presses in steps older than BM-7, and no BM-7 step ran. The same dropped-press signature is in 19 of 132 main-scene runs made before BM-7.
 - **`bm7r1_click1600b`** passed 114/0 from a quiet start.
 - **The answer: (a).** `bm7r1_click1600b` counts as BM-7's 1600x900 run, and `bm7r1_click1600` stays on the record as an environment failure. Not taken: (b) one more 1600x900 run; (c) hold BM-7 for a harness fix. Ruling 26 applies the same rule to later gates.
+- **Ruling 26 kept** (the director, later on 2026-11-02: "keep ruling 26"): it holds for later gates, the idle robots first.

@@ -383,3 +383,5 @@ Asked by the orchestrator on 2026-11-02 after fix round 1 (run `wf_57b13afc-1fc`
 **The answer: (a).** `bm7r1_click1600b` counts as the gate's 1600x900 run, and `bm7r1_click1600` stays on the record as an environment failure. The same reasoning covers round 0's `bm7_click3`, which needs no ruling for the gate because round 1's own named pair passed. Not taken: (b) one more 1600x900 run at a quieter time, counted only if it passed; (c) hold BM-7 until the harness's dropped press is fixed in its own gate.
 
 Ruling 26 applies the same rule to later gates. The harness fix stays a follow-up.
+
+**Confirmed (2026-11-02, later the same day):** asked whether ruling 26 should stay BM-7-only, the director said "keep ruling 26". It holds for later gates, the idle robots first.
