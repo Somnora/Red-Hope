@@ -2632,3 +2632,27 @@ Built from `docs/qa/2026-10-25/e8-market-panel-design.md` on E7's source (`e0600
   - **Pair 4 with MARKET open** held the same autosave: max 160.04 ms, p95 31.38 ms, the same as the closed control. Fix round 3's 474-2,627 ms stalls in that window came from the loaded, swapping machine; on a quiet machine the autosave costs one ~160 ms frame, open or closed.
   - The rule's branch for a control that does not stall sent E8 to more panel work. It assumed the open window would still stall on a quiet machine, and it did not, so it went back to the director, who answered **(a)** (`docs/qa/2026-10-25/e8-market-panel-design.md`, DIRECTOR ANSWER (2026-11-01, second)).
 - **Capture nits for a later pass:** `e8_panel_full_00` shows the engine's "Preparing Animation Sequences (1)" text at top left, and the sub-heading says "since sol 2" where DETAIL says "from sol 2".
+
+### Director answer, 2026-10-31: a free Move order for furnishings and wall fittings (gate BM-7, after E8)
+The director asked whether placed furnishings, vents and lifts can be moved after placing, and whether walls can be extended. At `9f0c971` nothing can be moved:
+- Furnishings and fittings sell back for 75% (ruling 5a).
+- Modules and machines demolish for 50% salvage.
+- Lifts and shafts are fixed once boring starts.
+- Vents are decoration.
+- Walls are derived (2026-10-15, decision 3); rooms grow by adding modules or excavating cells.
+
+The director's answer is: **"add a free move order as a gate after E8"**:
+1. One `Move` order picks up a furnishing or a wall fitting (window, door, airlock) and places it anywhere a new one of its kind could go.
+2. It is free: no spend and no refund, and it is allowed at zero stock.
+3. It rides the uplink and lands like any order.
+4. Modules, machines, lifts, shafts and vents stay out of scope.
+
+The orchestrator's design (`docs/qa/2026-10-31/bm7-move-design.md`):
+- no save version (the Id rides in `FRHCommand.LocationB.X`);
+- the piece keeps its Id;
+- the 2026-10-16 bed guard is judged on the end state;
+- a "Move" button beside each "Sell" on the Furnish and Walls palettes;
+- a new `-moves` suite (battery 64 runs);
+- five new click steps.
+
+The gate goes ahead of the idle robots, T1 and T2. Launch: answer (a), 2026-10-31: start it automatically once E8 is verified and pushed (E8: `8cda69f`, 2026-11-01). It still stops on any director question, failed check or precondition stop.
