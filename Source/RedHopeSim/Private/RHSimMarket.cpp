@@ -307,6 +307,10 @@ void URHSimWorldSubsystem::BuildMarketState(const TArray<FRHRivalEconomy>& OldEc
 		Mk.RegionId = Region;
 		const FRHMarket* OldMk = OldMarkets.FindByPredicate([Region](const FRHMarket& X) { return X.RegionId == Region; });
 		const bool bKeep = OldMk && OldMk->PriceMcr.Num() == N && OldMk->RingSoldG.Num() == N * MarketRing && OldMk->RingBoughtG.Num() == N * MarketRing;
+		// E8 (R3-1): the history is kept under its own test, after E4's (which it never joins): a market E4 builds at a load holds prices and a
+		// tally but no ring yet, so it keeps its prices here and starts an empty ring that the history's reader then fills.
+		const bool bKeepHist = bKeep && OldMk->HistPrice.Num() == N * MarketHistSols && OldMk->HistSoldValue.Num() == MarketHistSols
+			&& OldMk->HistBoughtValue.Num() == MarketHistSols && OldMk->HistRateMcr.Num() == MarketHistSols && OldMk->HistUnit.Num() == MarketHistSols;
 		Mk.VMcr.Init(0, N);
 		Mk.FloorMcr.Init(0, N);
 		Mk.CeilMcr.Init(0, N);
@@ -329,12 +333,28 @@ void URHSimWorldSubsystem::BuildMarketState(const TArray<FRHRivalEconomy>& OldEc
 			Mk.RingBoughtG = OldMk->RingBoughtG;
 			Mk.RingFill = OldMk->RingFill;
 			Mk.RingHead = OldMk->RingHead;
+			if (bKeepHist)
+			{
+				Mk.HistPrice = OldMk->HistPrice;
+				Mk.HistSoldValue = OldMk->HistSoldValue;
+				Mk.HistBoughtValue = OldMk->HistBoughtValue;
+				Mk.HistRateMcr = OldMk->HistRateMcr;
+				Mk.HistUnit = OldMk->HistUnit;
+				Mk.HistFill = OldMk->HistFill;
+				Mk.HistHead = OldMk->HistHead;
+				Mk.HistLastSol = OldMk->HistLastSol;
+			}
+			else
+			{
+				HistInitEmpty(Mk, N);
+			}
 		}
 		else
 		{
 			Mk.PriceMcr = Mk.VMcr; // a market starts at the Earth value
 			Mk.RingSoldG.Init(0, N * MarketRing);
 			Mk.RingBoughtG.Init(0, N * MarketRing);
+			HistInitEmpty(Mk, N);
 		}
 		for (const FRHRivalEconomy& E : OutEcon)
 		{
@@ -550,6 +570,12 @@ void URHSimWorldSubsystem::Debug_SetMarketPrice(FName Resource, int64 Mcr, int32
 	if (Mk && SlotPtr && Mk->PriceMcr.IsValidIndex(*SlotPtr))
 	{
 		Mk->PriceMcr[*SlotPtr] = MktClamp64(Mcr, Mk->FloorMcr[*SlotPtr], Mk->CeilMcr[*SlotPtr]);
+		// E8 (R3-3): the open sol's history entry follows the price, so every file the harness saves keeps "the open sol's entry is the live
+		// price" and its load warns nothing.
+		if (Mk->HistFill > 0 && Mk->HistPrice.Num() == Mk->PriceMcr.Num() * MarketHistSols)
+		{
+			Mk->HistPrice[*SlotPtr * MarketHistSols + (Mk->HistHead - 1 + MarketHistSols) % MarketHistSols] = Mk->PriceMcr[*SlotPtr];
+		}
 	}
 }
 
@@ -582,7 +608,9 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 	// when the harness turns the market off is never stranded. E6, in the cross-check's order: each clearing charges its markups (read at the
 	// order's stored EffSol); after the ring advance every pending theft or offering due by the pass lands in its rival's store, outside the
 	// live gate; production reads the sabotage windows covering the closing sol; and after the last pass the rules whose windows are behind
-	// the open sol retire, last of all.
+	// the open sol retire, last of all. E8 writes its history at three points of each pass, none of which any step reads: the closing sol's
+	// entry at the top (a no-op unless the ring is empty or lags), the clearings' values into it, and after E5's steps the new open sol's
+	// entry (the sols a long jump skipped go in as unknown first).
 	if (SolNow <= MarketCheckedSol)
 	{
 		return;
@@ -610,6 +638,10 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 		const int32 ClosingSol = First + i;
 		// The last pass catches every due convoy, whatever its ClearSol (a jump of more than a ring's worth skips sols, never a clearing).
 		const int32 DueUpTo = (i == Passed - 1) ? SolNow - 1 : ClosingSol;
+		if (bMarketHistoryEnabled)
+		{
+			for (FRHMarket& Mk : Markets) { HistEnsure(Mk, ClosingSol); } // E8: the entry the clearing below writes its values into
+		}
 		for (FRHMarket& Mk : Markets)
 		{
 			for (int32 s = 0; s < N; ++s)
@@ -653,6 +685,13 @@ void URHSimWorldSubsystem::RollMarket(int32 SolNow)
 			// E5, outside the live gate. On the last pass the record also walks the sols a long jump skips (it adds their drifts and applies
 			// every entry due up to SolNow - 1, as DueUpTo does for convoys); the rate still steps at most once a pass.
 			StepCurrencyPass(ClosingSol, DueUpTo);
+		}
+		if (bMarketHistoryEnabled)
+		{
+			// E8: the sol this pass opens, at its prices after the reprice and E5's withdrawal re-expression, in the unit and at the rate it trades
+			// in; written whether or not the market is live (an off market's entry repeats its price). The last pass opens SolNow.
+			const int32 Next = (i == Passed - 1) ? SolNow : ClosingSol + 1;
+			for (FRHMarket& Mk : Markets) { HistOpen(Mk, Next); }
 		}
 	}
 	// An entry kept only for an uncleared convoy goes once nothing waits on it.
@@ -831,6 +870,18 @@ void URHSimWorldSubsystem::ClearConvoy(FRHConvoy& Convoy, int32 ClosingSol)
 			BuysCost += MarketLineSettleMcr(Value, MarkupBp, true); // its value plus the markup
 			Tariff += MarketTariffMcr(Value, MarkupBp);
 			if (Mk) { Mk->RingBoughtG[SlotIndex * MarketRing + Mk->RingHead] += Fill * 1000; }
+		}
+	}
+	// E8: the clearing's values go into the history entry of the closing sol (HistEnsure made it at the top of this pass), before any markup, in
+	// the market's unit then, as the tally's grams are.
+	if (Mk && bMarketHistoryEnabled && Mk->HistFill > 0 && Mk->HistSoldValue.Num() == MarketHistSols)
+	{
+		const int32 Back = Mk->HistLastSol - ClosingSol;
+		if (Back >= 0 && Back < Mk->HistFill)
+		{
+			const int32 Entry = (Mk->HistHead - 1 - Back + 2 * MarketHistSols) % MarketHistSols;
+			Mk->HistSoldValue[Entry] += SellsValue;
+			Mk->HistBoughtValue[Entry] += BuysValue;
 		}
 	}
 	// With no markup every cost and receipt is its value, so Net is E4's to the milli-unit.
@@ -2000,4 +2051,411 @@ void URHSimWorldSubsystem::ReadMarketBlock(FArchive& Ar, const TArray<uint8>& Fi
 	// The lifetime market sales and the reserved credit are repaired in ReconcileReservations (E5 R4), after the currency block.
 	ReadMarketSalesMcr = ReadSales;
 	ReadMarketReservedMcr = ReadReserved;
+}
+
+// --- E8: the 30-sol history (save v60, the 'RHE8' frame) -------------------------------------------------------------------------------------
+// Per region a ring of the last MarketHistSols sols: the price in force during each sol in the market's unit then, the values the colony sold
+// and bought at that sol's clearings (pre-markup), and E5's rate and unit. Written only: RollMarket's three points, Debug_SetMarketPrice and
+// the load repairs write it, and no rule, price, digest or in-play log line reads it (MX14 is the proof). Its newest entry is the open sol.
+
+namespace
+{
+	constexpr int32 MktHistSols = URHSimWorldSubsystem::MarketHistSols;
+	constexpr int32 MktHistMaxRegions = 64;
+	// The ring entry Back sols behind the newest (Back 0 = the newest).
+	int32 MktHistEntry(int32 Head, int32 Back) { return (Head - 1 - Back + 2 * MktHistSols) % MktHistSols; }
+}
+
+void URHSimWorldSubsystem::HistInitEmpty(FRHMarket& Mk, int32 N)
+{
+	Mk.HistPrice.Init(-1, N * MktHistSols);
+	Mk.HistSoldValue.Init(0, MktHistSols);
+	Mk.HistBoughtValue.Init(0, MktHistSols);
+	Mk.HistRateMcr.Init(0, MktHistSols);
+	Mk.HistUnit.Init(0, MktHistSols);
+	Mk.HistFill = 0;
+	Mk.HistHead = 0;
+	Mk.HistLastSol = -1;
+}
+
+void URHSimWorldSubsystem::HistAppend(FRHMarket& Mk, int32 Sol, bool bKnown) const
+{
+	// One entry at the head. A known sol takes the live prices and E5's unit and rate for that sol (the unit is marks from the open sol on,
+	// while the mark is issued in the market); an unknown one is -1 with nothing traded and no rate. Values start at 0: the clearing adds them.
+	const int32 N = Mk.PriceMcr.Num();
+	const int32 E = Mk.HistHead;
+	for (int32 s = 0; s < N; ++s)
+	{
+		Mk.HistPrice[s * MktHistSols + E] = bKnown ? Mk.PriceMcr[s] : -1;
+	}
+	Mk.HistSoldValue[E] = 0;
+	Mk.HistBoughtValue[E] = 0;
+	const bool bIssued = bKnown && CurrencyIssueSol >= 0;
+	Mk.HistRateMcr[E] = bIssued ? RateMcr : 0;
+	Mk.HistUnit[E] = (bIssued && Sol >= CurrencyOpenSol) ? 1 : 0;
+	Mk.HistHead = (Mk.HistHead + 1) % MktHistSols;
+	Mk.HistFill = FMath::Min(Mk.HistFill + 1, MktHistSols);
+	Mk.HistLastSol = Sol;
+}
+
+void URHSimWorldSubsystem::HistEnsure(FRHMarket& Mk, int32 Sol) const
+{
+	// The top of the pass closing Sol (R3-2). An empty ring starts AT Sol, never at 0..Sol (no invented unknown entries); a ring that lags
+	// (only the harness switch lets one) gets the sols it missed as unknown, then Sol live. Otherwise the entry for Sol is already there.
+	if (Mk.HistPrice.Num() != Mk.PriceMcr.Num() * MktHistSols)
+	{
+		HistInitEmpty(Mk, Mk.PriceMcr.Num());
+	}
+	if (Mk.HistFill == 0)
+	{
+		HistAppend(Mk, Sol, true);
+		return;
+	}
+	if (Mk.HistLastSol < Sol)
+	{
+		for (int32 t = FMath::Max(Mk.HistLastSol + 1, Sol - (MktHistSols - 1)); t < Sol; ++t)
+		{
+			HistAppend(Mk, t, false);
+		}
+		HistAppend(Mk, Sol, true);
+	}
+}
+
+void URHSimWorldSubsystem::HistOpen(FRHMarket& Mk, int32 OpenSol) const
+{
+	// After a pass's clearing: the sols a long jump skips (the ring's last sol + 1 .. OpenSol - 1, only on its last pass; HistEnsure has left the
+	// ring ending at the closing sol) go in as unknown, at most a ring's worth, then the open sol with the prices, unit and rate it opens with.
+	if (Mk.HistPrice.Num() != Mk.PriceMcr.Num() * MktHistSols)
+	{
+		HistInitEmpty(Mk, Mk.PriceMcr.Num());
+	}
+	// An empty ring starts at the sol it is first written (R3-2: never invented unknown entries before it), so it starts at the open sol here.
+	const int32 From = Mk.HistFill > 0 ? Mk.HistLastSol + 1 : OpenSol;
+	for (int32 t = FMath::Max(From, OpenSol - (MktHistSols - 1)); t < OpenSol; ++t)
+	{
+		HistAppend(Mk, t, false);
+	}
+	HistAppend(Mk, OpenSol, true);
+}
+
+void URHSimWorldSubsystem::Debug_SetMarketHistoryEnabled(bool bOn)
+{
+	// Off empties every ring (brief B1), so a twin run with it off saves an empty ring that loads with no Warning; on starts each ring again at
+	// the next roll's closing sol.
+	bMarketHistoryEnabled = bOn;
+	if (!bOn)
+	{
+		SyncRivalEconomies(false);
+		for (FRHMarket& Mk : Markets) { HistInitEmpty(Mk, EconSlots.Num()); }
+	}
+}
+
+int32 URHSimWorldSubsystem::GetMarketHistoryFill(int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	return Mk ? Mk->HistFill : 0;
+}
+
+int32 URHSimWorldSubsystem::Debug_GetMarketHistoryHead(int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	return Mk ? Mk->HistHead : 0;
+}
+
+int32 URHSimWorldSubsystem::GetMarketHistoryLastSol(int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	return Mk ? Mk->HistLastSol : -1;
+}
+
+bool URHSimWorldSubsystem::GetMarketHistory(FName Resource, TArray<int64>& OutPrice, int32 RegionId) const
+{
+	OutPrice.Reset();
+	const FRHMarket* Mk = FindMarket(RegionId);
+	const int32* SlotPtr = EconIndex.Find(Resource);
+	if (!Mk || !SlotPtr || Mk->HistPrice.Num() != Mk->PriceMcr.Num() * MktHistSols || !Mk->PriceMcr.IsValidIndex(*SlotPtr))
+	{
+		return false;
+	}
+	for (int32 k = 0; k < Mk->HistFill; ++k)
+	{
+		OutPrice.Add(Mk->HistPrice[*SlotPtr * MktHistSols + MktHistEntry(Mk->HistHead, Mk->HistFill - 1 - k)]);
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::GetMarketHistoryValue(int32 Back, int64& OutSoldValue, int64& OutBoughtValue, int32 RegionId) const
+{
+	OutSoldValue = 0;
+	OutBoughtValue = 0;
+	const FRHMarket* Mk = FindMarket(RegionId);
+	if (!Mk || Back < 0 || Back >= Mk->HistFill || Mk->HistSoldValue.Num() != MktHistSols)
+	{
+		return false;
+	}
+	const int32 E = MktHistEntry(Mk->HistHead, Back);
+	OutSoldValue = Mk->HistSoldValue[E];
+	OutBoughtValue = Mk->HistBoughtValue[E];
+	return true;
+}
+
+int64 URHSimWorldSubsystem::GetMarketHistoryRateMcr(int32 Back, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	return (Mk && Back >= 0 && Back < Mk->HistFill && Mk->HistRateMcr.Num() == MktHistSols) ? Mk->HistRateMcr[MktHistEntry(Mk->HistHead, Back)] : 0;
+}
+
+uint8 URHSimWorldSubsystem::GetMarketHistoryUnit(int32 Back, int32 RegionId) const
+{
+	const FRHMarket* Mk = FindMarket(RegionId);
+	return (Mk && Back >= 0 && Back < Mk->HistFill && Mk->HistUnit.Num() == MktHistSols) ? Mk->HistUnit[MktHistEntry(Mk->HistHead, Back)] : 0;
+}
+
+void URHSimWorldSubsystem::WriteMarketHistoryBlock(FArchive& Ar) const
+{
+	// v60. Inside E8's frame ('RHE8'), after every other frame. The slot table once (the count, then the names ascending, as E4's block writes
+	// it); the market count; then per region in Id order: RegionId, fill, head and last sol, then every slot's 30 prices in raw entry order,
+	// the 30 sold and 30 bought values, the 30 rates and the 30 unit bytes. Sized by the tables, never by history: 4 + the names + 4, then
+	// 5,086 bytes a region with E4's 18 slots (16 + 18 x 240 + 3 x 240 + 30).
+	SyncRivalEconomies(false); // the block always carries the synced state
+	int32 SlotCount = EconSlots.Num();
+	Ar << SlotCount;
+	for (const FRHEconSlot& S : EconSlots)
+	{
+		FString Name = S.Name.ToString();
+		Ar << Name;
+	}
+	int32 MarketCount = Markets.Num();
+	Ar << MarketCount;
+	for (const FRHMarket& Mk : Markets)
+	{
+		const bool bSized = Mk.HistPrice.Num() == SlotCount * MktHistSols && Mk.HistSoldValue.Num() == MktHistSols && Mk.HistBoughtValue.Num() == MktHistSols
+			&& Mk.HistRateMcr.Num() == MktHistSols && Mk.HistUnit.Num() == MktHistSols;
+		int32 Region = Mk.RegionId, Fill = bSized ? Mk.HistFill : 0, Head = bSized ? Mk.HistHead : 0, Last = bSized ? Mk.HistLastSol : -1;
+		Ar << Region << Fill << Head << Last;
+		for (int32 k = 0; k < SlotCount * MktHistSols; ++k) { int64 P = bSized ? Mk.HistPrice[k] : -1; Ar << P; }
+		for (int32 e = 0; e < MktHistSols; ++e) { int64 V = bSized ? Mk.HistSoldValue[e] : 0; Ar << V; }
+		for (int32 e = 0; e < MktHistSols; ++e) { int64 V = bSized ? Mk.HistBoughtValue[e] : 0; Ar << V; }
+		for (int32 e = 0; e < MktHistSols; ++e) { int64 R = bSized ? Mk.HistRateMcr[e] : 0; Ar << R; }
+		for (int32 e = 0; e < MktHistSols; ++e) { uint8 U = bSized ? Mk.HistUnit[e] : 0; Ar << U; }
+	}
+}
+
+int32 URHSimWorldSubsystem::GetMarketHistoryBlockBytes() const
+{
+	TArray<uint8> Bytes;
+	FMemoryWriter Ar(Bytes, /*bIsPersistent*/ true);
+	WriteMarketHistoryBlock(Ar);
+	return Bytes.Num();
+}
+
+void URHSimWorldSubsystem::ReadMarketHistoryBlock(FArchive& Ar, const TArray<uint8>& File)
+{
+	// Read after the last tail reader, so E4's (and E5's) repaired state is final: it repairs with Warnings and never refuses, and never logs
+	// an Error (R2-6 as REVISION 3 restates it). Every ring starts empty. In order: find the frame; parse it with its bounds (a failure starts
+	// every ring empty); when E4's block started the market at its start values the rings describe prices that no longer exist and are dropped,
+	// with a Warning only for a ring that held something (ruling 10); then against E4's loaded state: (a) the slot table must be the market's,
+	// (b) a region with no market drops its ring, (c) a non-empty ring must end at the market's open sol, (d) a known price outside its band is
+	// clamped, (e) the open sol's entry is the loaded price, (f) a sol in marks before the mark's open sol, or any when E5's block was lost,
+	// reads in credits. An empty ring (fill 0, last sol -1) is valid at any open sol and logs nothing. Each ring is assigned into the synced
+	// market by RegionId. No text here may contain "the market block is lost" (MX9 counts that substring in E4's line exactly).
+	const int32 N = EconSlots.Num();
+	SyncRivalEconomies(false);
+	for (FRHMarket& Mk : Markets) { HistInitEmpty(Mk, N); }
+	TArray<uint8> Payload;
+	FString Why;
+	if (!RHSaveFrame::Read(Ar, File, RHSaveFrame::HistoryTag, Payload, Why))
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history is lost (%s); the history starts empty"), *Why);
+		return;
+	}
+	struct FReadHist
+	{
+		int32 Region = 0, Fill = 0, Head = 0, Last = -1;
+		TArray<int64> Price, Sold, Bought, Rate;
+		TArray<uint8> Unit;
+	};
+	TArray<FString> FileSlots;
+	TArray<FReadHist> Rings;
+	FMemoryReader In(Payload);
+	const auto Cut = [&]() { return In.IsError(); };
+	int32 SlotCount = 0;
+	In << SlotCount;
+	bool bOk = !Cut() && SlotCount >= 0 && SlotCount <= MktMaxList;
+	Why = bOk ? FString() : FString::Printf(TEXT("slot count %d"), SlotCount);
+	for (int32 k = 0; bOk && k < SlotCount; ++k)
+	{
+		FString Name;
+		bOk = RHSaveFrame::ReadName(In, Name);
+		if (!bOk && Why.IsEmpty())
+		{
+			// ReadName fails only by setting the reader's error (a length of 0, over 256, or past the payload), so the reason is named here, not
+			// left to the generic "the block is cut short".
+			Why = FString::Printf(TEXT("slot name %d cannot be read"), k);
+		}
+		if (bOk && k > 0 && Name.Compare(FileSlots.Last(), ESearchCase::CaseSensitive) <= 0)
+		{
+			bOk = false;
+			Why = FString::Printf(TEXT("slot name %s is out of order or repeated"), *Name);
+		}
+		FileSlots.Add(Name);
+	}
+	int32 MarketCount = 0;
+	if (bOk) { In << MarketCount; bOk = !Cut() && MarketCount >= 0 && MarketCount <= MktHistMaxRegions; if (!bOk) { Why = FString::Printf(TEXT("region count %d"), MarketCount); } }
+	for (int32 m = 0; bOk && m < MarketCount; ++m)
+	{
+		FReadHist R;
+		In << R.Region << R.Fill << R.Head << R.Last;
+		// A ring's oldest entry is a sol >= 0 (Last - (Fill - 1)): no writer starts one before sol 0.
+		const bool bFields = R.Fill >= 0 && R.Fill <= MktHistSols && R.Head >= 0 && R.Head < MktHistSols && (R.Fill == 0 ? R.Last == -1 : R.Last >= R.Fill - 1);
+		const bool bOrder = m == 0 || R.Region > Rings.Last().Region;
+		bOk = !Cut() && bFields && bOrder;
+		if (!bOk && !Cut())
+		{
+			Why = !bFields ? FString::Printf(TEXT("region %d: fill %d, head %d, last sol %d"), R.Region, R.Fill, R.Head, R.Last)
+				: FString::Printf(TEXT("region %d is out of order or repeated"), R.Region);
+		}
+		const int64 PriceCount = (int64)SlotCount * MktHistSols;
+		if (bOk && In.TotalSize() - In.Tell() < PriceCount * 8 + MktHistSols * (3 * 8 + 1))
+		{
+			bOk = false; // the arrays cannot fit what is left: nothing is allocated for them
+		}
+		for (int64 k = 0; bOk && k < PriceCount; ++k) { int64 P = 0; In << P; R.Price.Add(P); bOk = !Cut() && P >= -1; }
+		for (int32 e = 0; bOk && e < MktHistSols; ++e) { int64 V = 0; In << V; R.Sold.Add(V); bOk = !Cut() && V >= 0; }
+		for (int32 e = 0; bOk && e < MktHistSols; ++e) { int64 V = 0; In << V; R.Bought.Add(V); bOk = !Cut() && V >= 0; }
+		for (int32 e = 0; bOk && e < MktHistSols; ++e) { int64 V = 0; In << V; R.Rate.Add(V); bOk = !Cut() && V >= 0; }
+		for (int32 e = 0; bOk && e < MktHistSols; ++e) { uint8 U = 0; In << U; R.Unit.Add(U); bOk = !Cut() && U <= 1; }
+		if (!bOk && Why.IsEmpty())
+		{
+			Why = FString::Printf(TEXT("region %d's arrays are cut short or hold a value out of range"), R.Region);
+		}
+		Rings.Add(MoveTemp(R));
+	}
+	if (bOk && In.Tell() != In.TotalSize())
+	{
+		bOk = false;
+		Why = FString::Printf(TEXT("%lld bytes are left over"), In.TotalSize() - In.Tell());
+	}
+	if (!bOk)
+	{
+		UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history is malformed (%s); the history starts empty"), Why.IsEmpty() ? TEXT("the block is cut short") : *Why);
+		return;
+	}
+	// E4's block started the market at its start values (cross-check item 3): an intact ring would end at sols and prices that no longer exist.
+	if (MarketBlockLoss != ERHMarketBlockLoss::None)
+	{
+		const bool bSlots = MarketBlockLoss == ERHMarketBlockLoss::SlotsReset || MarketBlockLoss == ERHMarketBlockLoss::RegionsRepeated;
+		for (const FReadHist& R : Rings)
+		{
+			if (R.Fill > 0)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history is dropped: %s (region %d)"),
+					bSlots ? TEXT("its market block's slot table was reset") : TEXT("its market block was lost"), R.Region);
+			}
+		}
+		return;
+	}
+	// (a) The slot table, exactly: a shifted slot would mislabel every price, so any difference drops every ring.
+	FString SlotsWhy;
+	if (FileSlots.Num() != N)
+	{
+		SlotsWhy = FString::Printf(TEXT("%d slots, the market %d"), FileSlots.Num(), N);
+	}
+	for (int32 k = 0; SlotsWhy.IsEmpty() && k < N; ++k)
+	{
+		if (!FileSlots[k].Equals(EconSlots[k].Name.ToString(), ESearchCase::CaseSensitive))
+		{
+			SlotsWhy = FString::Printf(TEXT("slot %d is %s, the market's %s"), k, *FileSlots[k], *EconSlots[k].Name.ToString());
+		}
+	}
+	if (!SlotsWhy.IsEmpty())
+	{
+		if (Rings.ContainsByPredicate([](const FReadHist& R) { return R.Fill > 0; }))
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history is dropped: its slot table is not the market's (%s)"), *SlotsWhy);
+		}
+		return;
+	}
+	for (FReadHist& R : Rings)
+	{
+		FRHMarket* Mk = Markets.FindByPredicate([&R](const FRHMarket& X) { return X.RegionId == R.Region; });
+		// (b) No market trades in its region now.
+		if (!Mk)
+		{
+			if (R.Fill > 0)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history of region %d is dropped: no market trades there now"), R.Region);
+			}
+			continue;
+		}
+		if (R.Fill == 0)
+		{
+			continue; // empty and valid at any open sol: the market's ring is already empty
+		}
+		// (c) The newest entry is the open sol after any roll.
+		if (R.Last != MarketCheckedSol)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history of region %d is dropped: the history ends at sol %d but the market's open sol is %d"),
+				R.Region, R.Last, MarketCheckedSol);
+			continue;
+		}
+		// (d) A known price outside its slot's band is clamped (the unknown -1 stays unknown); only the entries the ring holds are read.
+		for (int32 s = 0; s < N; ++s)
+		{
+			int32 Clamped = 0;
+			for (int32 Back = 0; Back < R.Fill; ++Back)
+			{
+				int64& P = R.Price[s * MktHistSols + MktHistEntry(R.Head, Back)];
+				if (P >= 0 && (P < Mk->FloorMcr[s] || P > Mk->CeilMcr[s]))
+				{
+					P = MktClamp64(P, Mk->FloorMcr[s], Mk->CeilMcr[s]);
+					++Clamped;
+				}
+			}
+			if (Clamped > 0)
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history of region %d held %d price(s) of %s outside [%lld, %lld]; clamped"),
+					R.Region, Clamped, *EconSlots[s].Name.ToString(), Mk->FloorMcr[s], Mk->CeilMcr[s]);
+			}
+		}
+		// (e) The open sol's entry is the loaded price (E4 may have clamped one).
+		const int32 OpenEntry = MktHistEntry(R.Head, 0);
+		for (int32 s = 0; s < N; ++s)
+		{
+			int64& P = R.Price[s * MktHistSols + OpenEntry];
+			if (P != Mk->PriceMcr[s])
+			{
+				UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history of region %d is repaired: its history entry for the open sol %d held %s at %lld mcr but the loaded price is %lld; rewritten"),
+					R.Region, R.Last, *EconSlots[s].Name.ToString(), P, Mk->PriceMcr[s]);
+				P = Mk->PriceMcr[s];
+			}
+		}
+		// (f) A sol counted in marks before the mark's open sol, or any sol in marks when E5's block was lost (the mark starts unissued), reads in
+		// credits: its unit and rate are reset.
+		int32 UnitsReset = 0;
+		for (int32 Back = 0; Back < R.Fill; ++Back)
+		{
+			const int32 E = MktHistEntry(R.Head, Back);
+			const int32 Sol = R.Last - Back;
+			if (R.Unit[E] == 1 && (bCurrencyBlockLost || (CurrencyOpenSol >= 0 && Sol < CurrencyOpenSol)))
+			{
+				R.Unit[E] = 0;
+				R.Rate[E] = 0;
+				++UnitsReset;
+			}
+		}
+		if (UnitsReset > 0)
+		{
+			UE_LOG(LogRedHopeSim, Warning, TEXT("LoadColony v60: the market history of region %d is repaired: %d sol(s) held in marks %s; they read in credits"),
+				R.Region, UnitsReset, bCurrencyBlockLost ? TEXT("but the currency block could not be read") : *FString::Printf(TEXT("before the mark's open sol %d"), CurrencyOpenSol));
+		}
+		Mk->HistPrice = MoveTemp(R.Price);
+		Mk->HistSoldValue = MoveTemp(R.Sold);
+		Mk->HistBoughtValue = MoveTemp(R.Bought);
+		Mk->HistRateMcr = MoveTemp(R.Rate);
+		Mk->HistUnit = MoveTemp(R.Unit);
+		Mk->HistFill = R.Fill;
+		Mk->HistHead = R.Head;
+		Mk->HistLastSol = R.Last;
+	}
 }

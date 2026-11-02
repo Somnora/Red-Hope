@@ -26,6 +26,7 @@
 #include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTradeVisualizerSubsystem.h"
 #include "RHTunnelVisualizerSubsystem.h"
 #include "RHLabelTurn.h"
 #include "RHRoundChain.h"
@@ -996,6 +997,56 @@ namespace
 		}, Gap, Wait);
 	}
 
+	// E8: PushCheck whose report says what the check saw, passing or not (Effect fills OutSaid on every poll and returns the problem, empty
+	// when the state holds), so a passing line can name the key and amount, or the two counts it compared.
+	void PushCheckSays(const FString& Name, const TSharedPtr<FPress>& Press, TFunction<FString(FString&)> Effect, float Timeout = 0.f, float Gap = 0.3f)
+	{
+		const float Wait = Timeout > 0.f ? FMath::Max(Timeout, MinPollSeconds) : 0.f;
+		FRunner::Get().Push(Name + TEXT(" check"), [Name, Press, Effect](double, bool bLast)
+		{
+			if (Press.IsValid() && !Press->bFound)
+			{
+				Report(Name, false, TEXT("the target was not found"));
+				return true;
+			}
+			FString Said;
+			FString Problem = Effect(Said);
+			if (!Problem.IsEmpty() && !bLast)
+			{
+				return false;
+			}
+			const ARHPlayerController* PC = GetPC();
+			if (Press.IsValid() && PC && PC->GetWorldClickCount() != Press->LeakBase)
+			{
+				Problem += FString::Printf(TEXT("%sLEAKED %d click(s) into the world"), Problem.IsEmpty() ? TEXT("") : TEXT("; "), PC->GetWorldClickCount() - Press->LeakBase);
+			}
+			if (!Problem.IsEmpty())
+			{
+				Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs());
+			}
+			Report(Name, Problem.IsEmpty(), Problem.IsEmpty() ? Said : Problem + TEXT(" | ") + Said);
+			return true;
+		}, Gap, Wait);
+	}
+
+	// E8: the rule the MARKET panel's PRICES follow (R2-1), computed here from the sim alone: the slots an available rival with an economy
+	// in region 0 trades.
+	int32 MarketRuleCount(const URHSimWorldSubsystem& Sim)
+	{
+		TArray<FName> Shown, Traded;
+		for (int32 r = 0; r < Sim.GetRivalEconomyCount(); ++r)
+		{
+			const FName Name = Sim.GetRivalEconomyName(r);
+			if (!Sim.IsRivalAvailable(Name) || !Sim.HasRivalEconomy(Name) || Sim.GetRivalRegionId(Name) != 0)
+			{
+				continue;
+			}
+			Sim.GetRivalTradedResources(Name, Traded);
+			for (const FName& Res : Traded) { Shown.AddUnique(Res); }
+		}
+		return Shown.Num();
+	}
+
 	void PushSweep(const FString& Name)
 	{
 		FRunner::Get().Do(Name + TEXT(" sweep"), [Name]()
@@ -1938,6 +1989,38 @@ namespace
 			}, 1.f);
 		}
 
+		// ---- E8: the MARKET panel on a new colony (docs/qa/2026-10-25/e8-market-panel-design.md, R2-5 as REVISION 3 restates it). The harness
+		// opens it through the accordion; with no order out, no mark and one region, the orders read "No orders out", the rate is hidden, no
+		// region button is drawn and Ice's 5-sol change is empty (fewer than six sols held). Every E8 check reads what the panel built.
+		Runner.Do(TEXT("market.empty setup"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::Market, true);
+			}
+		}, 1.f);
+		PushCheck(TEXT("market.empty"), nullptr, []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : nullptr;
+			if (!Deck.IsValid()) { return FString(TEXT("no deck")); }
+			if (!Deck->IsFoldOpen(SRHCommandDeck::EFold::Market)) { return FString(TEXT("MARKET is not open")); }
+			// Rebuild (a): the fold built nothing while it was shut and builds once as it opens; read from a panel that was built (5 PRICES rows,
+			// Ice's among them), so the empty rate, region and change below are the built panel's, not the deck's defaults.
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim || Deck->Debug_GetMarketRowCount() != MarketRuleCount(*Sim) || Deck->Debug_GetMarketRowCount() != 5 || !Deck->Debug_HasMarketRow(FName("Ice")))
+			{
+				return FString::Printf(TEXT("PRICES was not built on opening: %d row(s) (the rule's %d, expected 5), Ice's row %s"), Deck->Debug_GetMarketRowCount(), Sim ? MarketRuleCount(*Sim) : -1,
+					Deck->Debug_HasMarketRow(FName("Ice")) ? TEXT("made") : TEXT("missing"));
+			}
+			if (Deck->Debug_GetMarketOrdersText() != TEXT("No orders out")) { return FString::Printf(TEXT("the orders read '%s', not 'No orders out'"), *Deck->Debug_GetMarketOrdersText()); }
+			if (Deck->Debug_IsMarketRateShown()) { return FString(TEXT("the exchange rate is shown with no mark")); }
+			if (Deck->Debug_GetMarketRegionButtons() != 0) { return FString::Printf(TEXT("%d region button(s) with one region"), Deck->Debug_GetMarketRegionButtons()); }
+			if (!Deck->Debug_GetMarketChangeText(FName("Ice")).IsEmpty()) { return FString::Printf(TEXT("Ice's change reads '%s' with %d sol(s) held"), *Deck->Debug_GetMarketChangeText(FName("Ice")), GetSim() ? GetSim()->GetMarketHistoryFill() : -1); }
+			return FString();
+		}, 1.f);
+
 		// ---- E4: a market order. The Earth & neighbors panel opens (it scrolls into view), the colony is given fuel and credit, a real press on the
 		// first row's Buy +100 drafts an order and a real press on SEND ORDER transmits it: a MarketOrder rides the uplink to Zarya.
 		Runner.Do(TEXT("market.setup"), []()
@@ -1957,7 +2040,22 @@ namespace
 		}, 1.6f);
 		{
 			const TSharedRef<FPress> Buy = PushPress(TEXT("market.BUY"), LocateButton(TEXT("Buy +100"), 0, true));
-			PushCheck(TEXT("market.BUY"), Buy, []() { return FString(); }, 1.f);
+			// E8: the check had no effect to test; now it reads the draft the press made. The card sorts by name, so the first Buy +100 is
+			// Zarya's Hydrogen: exactly one non-zero entry, +100.
+			PushCheckSays(TEXT("market.BUY"), Buy, [](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const TMap<FName, int32> Draft = (PC && PC->GetDeck().IsValid()) ? PC->GetDeck()->GetOrderDraft(FName("Zarya")) : TMap<FName, int32>();
+				TArray<FString> Lines;
+				FName Key;
+				int32 Kg = 0;
+				for (const TPair<FName, int32>& D : Draft)
+				{
+					if (D.Value != 0) { Lines.Add(FString::Printf(TEXT("%s %+d"), *D.Key.ToString(), D.Value)); Key = D.Key; Kg = D.Value; }
+				}
+				Said = FString::Printf(TEXT("Zarya's draft: %s"), Lines.Num() > 0 ? *FString::Join(Lines, TEXT(", ")) : TEXT("empty"));
+				return (Lines.Num() == 1 && Key == FName("Hydrogen") && Kg == 100) ? FString() : FString(TEXT("the draft is not exactly Hydrogen +100"));
+			}, 1.f);
 			const TSharedRef<FPress> Send = PushPress(TEXT("market.SEND"), LocateButton(TEXT("SEND ORDER"), 0, true));
 			PushCheck(TEXT("market.SEND"), Send, []()
 			{
@@ -2016,6 +2114,204 @@ namespace
 				Sim->CanSignPact(FName("Zarya"), Why);
 				return FString::Printf(TEXT("no Treaty Sign to Zarya was transmitted (CanSignPact: '%s')"), *Why);
 			}, 2.f);
+		}
+
+		// ---- E8: the MARKET panel and the Routes overlay (R2-5, steps 3-12). The harness folds Politics and scrolls MARKET's header to the
+		// top of the column; a real press on its toggle (RH.MarketToggle) opens it and folds the other five.
+		{
+			struct FMarketCT { int32 F0 = 0, G0 = 0, Rows0 = 0, Sets0 = 0; uint64 Tag0 = 0; };
+			const TSharedRef<FMarketCT> M = MakeShared<FMarketCT>();
+			const auto Deck = []() -> TSharedPtr<SRHCommandDeck> { const ARHPlayerController* PC = GetPC(); return PC ? PC->GetDeck() : nullptr; };
+			const auto Trade = []() -> const URHTradeVisualizerSubsystem* { const ARHPlayerController* PC = GetPC(); return (PC && PC->GetWorld()) ? PC->GetWorld()->GetSubsystem<URHTradeVisualizerSubsystem>() : nullptr; };
+			Runner.Do(TEXT("market.panel setup"), [Deck]()
+			{
+				if (const TSharedPtr<SRHCommandDeck> D = Deck())
+				{
+					D->SetFoldOpen(SRHCommandDeck::EFold::Politics, false);
+					D->Debug_ScrollFoldIntoView(SRHCommandDeck::EFold::Market);
+				}
+			}, 1.2f);
+			const TSharedRef<FPress> Open = PushPress(TEXT("market.panel"), LocateButton(TEXT("RH.MarketToggle"), 0, true));
+			PushCheckSays(TEXT("market.panel"), Open, [Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!D.IsValid() || !Sim) { return FString(TEXT("no deck or sim")); }
+				using EF = SRHCommandDeck::EFold;
+				const int32 Rule = MarketRuleCount(*Sim), Rows = D->Debug_GetMarketRowCount();
+				Said = FString::Printf(TEXT("MARKET open, the other five folded; %d price row(s), the rule's count %d (expected 5)"), Rows, Rule);
+				const bool bOthersShut = !D->IsFoldOpen(EF::Politics) && !D->IsFoldOpen(EF::Crew) && !D->IsFoldOpen(EF::City) && !D->IsFoldOpen(EF::Fleet) && !D->IsFoldOpen(EF::Power);
+				if (!D->IsFoldOpen(EF::Market) || !bOthersShut) { return FString(TEXT("the accordion did not open MARKET alone")); }
+				return (Rows == Rule && Rows == 5) ? FString() : FString(TEXT("the row count is not the rule's 5"));
+			}, 1.f);
+			// A second REACH sweep with MARKET open and scrolled to the top: the toggle and every price row must be reachable.
+			Runner.Do(TEXT("sweep.market settle"), []() {}, 1.2f);
+			PushSweep(TEXT("sweep.market"));
+			// The order market.SEND transmitted rides the uplink: the harness runs the clock at 60x until its convoy is booked, then 1x.
+			FRunner::Get().Push(TEXT("market.orders setup"), [](double, bool bLast)
+			{
+				ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const bool bBooked = Sim && Sim->GetConvoys().Num() > 0;
+				if (PC) { PC->SetSimSpeed(bBooked || bLast ? 1.f : 60.f); }
+				return bBooked || bLast;
+			}, 0.5f, 8.f);
+			PushCheckSays(TEXT("market.orders"), nullptr, [Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!D.IsValid() || !Sim) { return FString(TEXT("no deck or sim")); }
+				const FString Text = D->Debug_GetMarketOrdersText();
+				Said = Text.Replace(TEXT("\n"), TEXT(" / "));
+				if (Sim->GetConvoys().Num() != 1) { return FString::Printf(TEXT("%d convoys out, expected 1"), Sim->GetConvoys().Num()); }
+				const FRHConvoy& C = Sim->GetConvoys()[0];
+				TArray<FString> Rows;
+				Text.ParseIntoArray(Rows, TEXT("#"), true);
+				const FString Want = FString::Printf(TEXT("clears at the end of sol %d"), C.ClearSol);
+				return (Rows.Num() == Sim->GetConvoys().Num() && Text.Contains(TEXT("Zarya")) && Text.Contains(Want)) ? FString() : FString::Printf(TEXT("the orders do not show one row to Zarya that %s"), *Want);
+			}, 2.f);
+			// Three sols in one roll: an empty ring gains the closing sol and three opened sols, a started one three.
+			Runner.Do(TEXT("market.history setup"), [M, Deck]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				if (!Sim || !D.IsValid()) { return; }
+				M->F0 = Sim->GetMarketHistoryFill(0);
+				M->G0 = D->Debug_GetMarketSparkGlyphs(FName("Ice"));
+				M->Tag0 = D->Debug_GetMarketRowTag(FName("Ice"));
+				M->Sets0 = D->Debug_GetMarketPricesRowSets();
+				Sim->Debug_RollMarket(Sim->GetMarketCheckedSol() + 3);
+			}, 0.3f);
+			PushCheckSays(TEXT("market.history"), nullptr, [M, Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!D.IsValid() || !Sim) { return FString(TEXT("no deck or sim")); }
+				const int32 WantFill = M->F0 == 0 ? 4 : FMath::Min(30, M->F0 + 3), WantGlyphs = M->G0 == 0 ? 4 : FMath::Min(30, M->G0 + 3);
+				TArray<int64> Ice;
+				Sim->GetMarketHistory(FName("Ice"), Ice);
+				const int64 OpenIce = Ice.Num() > 0 ? Ice.Last() : -9;
+				// Rebuild (a): the roll moves PRICES' values only, so PRICES made no row set across it (its own counter, which the orders' and
+				// routes' row sets do not move) and Ice's row is the same row object, its sparkline rewritten in place.
+				const int32 SetsMade = D->Debug_GetMarketPricesRowSets() - M->Sets0;
+				const bool bKept = M->Tag0 != 0 && D->Debug_GetMarketRowTag(FName("Ice")) == M->Tag0 && SetsMade == 0;
+				Said = FString::Printf(TEXT("F0 %d -> fill %d (want %d), G0 %d -> %d glyphs (want %d), last sol %d at the open sol %d, Ice's open-sol entry %lld against %lld mcr; Ice's row %s"),
+					M->F0, Sim->GetMarketHistoryFill(0), WantFill, M->G0, D->Debug_GetMarketSparkGlyphs(FName("Ice")), WantGlyphs, Sim->GetMarketHistoryLastSol(0), Sim->GetMarketCheckedSol(), OpenIce, Sim->GetMarketPriceMcr(FName("Ice")),
+					bKept ? TEXT("kept, its texts rewritten in place") : TEXT("made again"));
+				Said += FString::Printf(TEXT(" (%d PRICES row set(s) made across the roll)"), SetsMade);
+				return (Sim->GetMarketHistoryFill(0) == WantFill && D->Debug_GetMarketSparkGlyphs(FName("Ice")) == WantGlyphs && Sim->GetMarketHistoryLastSol(0) == Sim->GetMarketCheckedSol()
+					&& OpenIce == Sim->GetMarketPriceMcr(FName("Ice")) && bKept) ? FString() : FString(TEXT("the history or its sparkline did not move as expected, or Ice's row was made again"));
+			}, 1.f);
+			// A real press on Struct's row selects it: the detail names it in full and carries its band from E7's getters.
+			const TSharedRef<FPress> Select = PushPress(TEXT("market.select"), LocateButton(TEXT("RH.MarketRow.Struct"), 0, true));
+			PushCheckSays(TEXT("market.select"), Select, [Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!D.IsValid() || !Sim) { return FString(TEXT("no deck or sim")); }
+				const FName NS("Struct");
+				const FString Floor = FString::Printf(TEXT("Floor %s"), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarketFloorMcr(NS))), Ceil = FString::Printf(TEXT("ceiling %s"), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarketCeilMcr(NS)));
+				const FString Detail = D->Debug_GetMarketDetailText();
+				Said = FString::Printf(TEXT("selected %s; the detail: %s"), *D->Debug_GetMarketSelected().ToString(), *Detail.Replace(TEXT("\n"), TEXT(" / ")));
+				return (D->Debug_GetMarketSelected() == NS && Detail.Contains(TEXT("Structural Materials")) && Detail.Contains(Floor) && Detail.Contains(Ceil)) ? FString()
+					: FString::Printf(TEXT("Struct is not selected with '%s' and '%s' in its detail"), *Floor, *Ceil);
+			}, 1.f);
+			// Meridian discovered through the survey hook: two more rows, a second route, and its card's visibility attribute is Visible (EARTH &
+			// NEIGHBORS is folded, so the card is not on screen: m5).
+			Runner.Do(TEXT("market.discover setup"), []()
+			{
+				if (URHSimWorldSubsystem* Sim = GetSim())
+				{
+					for (int32 K = 1; K <= 64 && !Sim->IsRivalDiscovered(FName("Meridian")); ++K) { Sim->Debug_MaybeDiscoverSettlement(K); }
+				}
+			}, 0.5f);
+			PushCheckSays(TEXT("market.discover"), nullptr, [Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!D.IsValid() || !Sim) { return FString(TEXT("no deck or sim")); }
+				const FName NM("Meridian");
+				const int32 Rule = MarketRuleCount(*Sim), Rows = D->Debug_GetMarketRowCount();
+				Said = FString::Printf(TEXT("Meridian discovered %d, available %d; %d price row(s), the rule's count %d (expected 7); %d route(s); its card %s"), Sim->IsRivalDiscovered(NM) ? 1 : 0,
+					Sim->IsRivalAvailable(NM) ? 1 : 0, Rows, Rule, D->Debug_GetMarketRouteCount(), D->Debug_GetRivalCardVisibility(NM) == EVisibility::Visible ? TEXT("Visible") : TEXT("not Visible"));
+				if (!Sim->IsRivalDiscovered(NM)) { return FString(TEXT("no survey count up to 64 discovered Meridian")); }
+				return (Rows == Rule && Rows == 7 && D->Debug_GetMarketRouteCount() == 2 && D->Debug_GetRivalCardVisibility(NM) == EVisibility::Visible && Sim->IsRivalAvailable(NM)) ? FString()
+					: FString(TEXT("the panel does not show Meridian's two slots and route, or its card is hidden"));
+			}, 1.f);
+			// The Routes overlay, pressed by its tag (never by text: "Trade" is the cards' verb): one ribbon per available rival.
+			const TSharedRef<FPress> RoutesOn = PushPress(TEXT("trade.overlay"), LocateButton(TEXT("RH.TradeOverlay"), 0, true));
+			PushCheckSays(TEXT("trade.overlay"), RoutesOn, [Trade](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const URHTradeVisualizerSubsystem* TradeVis = Trade();
+				const URHColonyVisualizerSubsystem* Colony = (PC && PC->GetWorld()) ? PC->GetWorld()->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+				if (!PC || !Sim || !TradeVis) { return FString(TEXT("no controller, sim or trade visualizer")); }
+				TArray<FRHRoute> Routes;
+				Sim->GetRoutes(Routes);
+				int32 Available = 0;
+				for (const FRHRoute& R : Routes) { Available += Sim->IsRivalAvailable(R.Rival) ? 1 : 0; }
+				Said = FString::Printf(TEXT("on %d, %d route(s) drawn of %d available; ShowsSurfaceLevel %d"), PC->IsTradeOverlayOn() ? 1 : 0, TradeVis->GetDrawnRouteCount(), Available, Colony && Colony->ShowsSurfaceLevel() ? 1 : 0);
+				return (PC->IsTradeOverlayOn() && TradeVis->GetDrawnRouteCount() == Available && Available == 2) ? FString() : FString(TEXT("the overlay is not on with both routes drawn"));
+			}, 1.f);
+			// Zarya embargoes: its ribbon and chip turn to the embargo within a poll; then the politics clear and both are open again.
+			Runner.Do(TEXT("trade.overlay.status embargo"), []() { if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->Debug_SetEmbargo(FName("Zarya"), 5.0); } }, 0.2f);
+			PushCheckSays(TEXT("trade.overlay.status"), nullptr, [Deck, Trade](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHTradeVisualizerSubsystem* TradeVis = Trade();
+				if (!D.IsValid() || !TradeVis) { return FString(TEXT("no deck or trade visualizer")); }
+				Said = FString::Printf(TEXT("%d ribbon(s) drawn; Zarya %s, Meridian %s; Zarya's chip '%s'"), TradeVis->GetDrawnRouteCount(), URHTradeVisualizerSubsystem::RouteStatusWord(TradeVis->GetRouteStatus(FName("Zarya"))),
+					URHTradeVisualizerSubsystem::RouteStatusWord(TradeVis->GetRouteStatus(FName("Meridian"))), *D->Debug_GetMarketRouteChip(FName("Zarya")));
+				// GetRouteStatus reads Open for a rival with no ribbon: both ribbons must be drawn for "Meridian open" to mean anything.
+				return (TradeVis->GetDrawnRouteCount() == 2 && TradeVis->GetRouteStatus(FName("Zarya")) == ERHRouteStatus::Embargo && TradeVis->GetRouteStatus(FName("Meridian")) == ERHRouteStatus::Open
+					&& D->Debug_GetMarketRouteChip(FName("Zarya")) == TEXT("embargo, 5.0 sols to reassure")) ? FString() : FString(TEXT("the embargo is not on Zarya's ribbon and chip alone, with both ribbons drawn"));
+			}, 1.f);
+			Runner.Do(TEXT("trade.overlay.status clear"), []() { if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->Debug_ClearPolitics(); } }, 0.2f);
+			PushCheckSays(TEXT("trade.overlay.status"), nullptr, [Deck, Trade](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				const URHTradeVisualizerSubsystem* TradeVis = Trade();
+				if (!D.IsValid() || !TradeVis) { return FString(TEXT("no deck or trade visualizer")); }
+				Said = FString::Printf(TEXT("%d ribbon(s) drawn; Zarya %s, Meridian %s; Zarya's chip '%s'"), TradeVis->GetDrawnRouteCount(), URHTradeVisualizerSubsystem::RouteStatusWord(TradeVis->GetRouteStatus(FName("Zarya"))),
+					URHTradeVisualizerSubsystem::RouteStatusWord(TradeVis->GetRouteStatus(FName("Meridian"))), *D->Debug_GetMarketRouteChip(FName("Zarya")));
+				return (TradeVis->GetDrawnRouteCount() == 2 && TradeVis->GetRouteStatus(FName("Zarya")) == ERHRouteStatus::Open && TradeVis->GetRouteStatus(FName("Meridian")) == ERHRouteStatus::Open
+					&& D->Debug_GetMarketRouteChip(FName("Zarya")) == TEXT("open")) ? FString() : FString(TEXT("the routes are not both open again, with both ribbons drawn"));
+			}, 1.f);
+			const TSharedRef<FPress> RoutesOff = PushPress(TEXT("trade.overlay.off"), LocateButton(TEXT("RH.TradeOverlay"), 0, true));
+			PushCheckSays(TEXT("trade.overlay.off"), RoutesOff, [Trade](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHTradeVisualizerSubsystem* TradeVis = Trade();
+				if (!PC || !TradeVis) { return FString(TEXT("no controller or trade visualizer")); }
+				Said = FString::Printf(TEXT("on %d, %d route(s) drawn"), PC->IsTradeOverlayOn() ? 1 : 0, TradeVis->GetDrawnRouteCount());
+				return (!PC->IsTradeOverlayOn() && TradeVis->GetDrawnRouteCount() == 0) ? FString() : FString(TEXT("the overlay did not turn off"));
+			}, 1.f);
+			// The ROUTES chips are tinted borders, which deck.contrast does not see: each chip's fill against its text, by the same bar.
+			PushCheckSays(TEXT("market.chips"), nullptr, [Deck](FString& Said)
+			{
+				const TSharedPtr<SRHCommandDeck> D = Deck();
+				if (!D.IsValid()) { return FString(TEXT("no deck")); }
+				TArray<TPair<FLinearColor, FLinearColor>> Chips;
+				D->Debug_GetMarketChipColours(Chips);
+				double Worst = 1.0e9;
+				for (const TPair<FLinearColor, FLinearColor>& C : Chips) { Worst = FMath::Min(Worst, FMath::Abs(Luminance(C.Key) - Luminance(C.Value))); }
+				// The chips shown now are both open (teal); every other status colour a chip can take is measured against the same ink too.
+				double WorstAny = Worst;
+				FString WorstStatus = TEXT("open");
+				if (Chips.Num() > 0)
+				{
+					const ERHRouteStatus All[] = { ERHRouteStatus::Open, ERHRouteStatus::Storm, ERHRouteStatus::Disrupted, ERHRouteStatus::Embargo, ERHRouteStatus::Closed, ERHRouteStatus::Defected };
+					for (const ERHRouteStatus St : All)
+					{
+						const double Diff = FMath::Abs(Luminance(URHTradeVisualizerSubsystem::RouteStatusColor(St)) - Luminance(Chips[0].Value));
+						if (Diff < WorstAny) { WorstAny = Diff; WorstStatus = URHTradeVisualizerSubsystem::RouteStatusWord(St); }
+					}
+				}
+				Said = FString::Printf(TEXT("%d chip(s), worst luminance difference %.2f; over every status colour %.2f (%s) (bar %.1f)"), Chips.Num(), Chips.Num() > 0 ? Worst : 0.0,
+					Chips.Num() > 0 ? WorstAny : 0.0, *WorstStatus, MinContrast);
+				return (Chips.Num() > 0 && Worst >= MinContrast && WorstAny >= MinContrast) ? FString() : FString(TEXT("a chip, or a status colour a chip can take, is below the contrast bar"));
+			}, 1.f);
 		}
 
 		// ---- the traffic overlay flips on and off

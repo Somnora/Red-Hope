@@ -1272,7 +1272,7 @@ int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 		const bool bA = RHSaveFrame::Find(File, RHSaveFrame::AtriumTag, AAt, ABytes);
 		int32 Count = -1, First = -1;
 		if (bA && ABytes >= 8) { FMemory::Memcpy(&Count, File.GetData() + AAt + 12, 4); FMemory::Memcpy(&First, File.GetData() + AAt + 16, 4); }
-		Expect(bD && bA && Ver == 59 && DAt + RHSaveFrame::HeaderBytes + DBytes + RHSaveFrame::FooterBytes == AAt && ABytes == 8 && Count == 1 && First == C1,
+		Expect(bD && bA && Ver == 60 && DAt + RHSaveFrame::HeaderBytes + DBytes + RHSaveFrame::FooterBytes == AAt && ABytes == 8 && Count == 1 && First == C1,
 			FString::Printf(TEXT("AT9 v%u: 'RHD7' FOLLOWS 'RHD6' (found by tag, never \"the last frame\"); its payload is the count %d and cavern %d (%d bytes; a colony with none writes 4)"), Ver, Count, First, ABytes));
 		// Every structural failure drops with exactly one Warning and no Error (option (i)). KeepId is the atrium the load keeps (ascending Ids:
 		// the later, lower Id is dropped; of two that overlap, the higher Id). Every doctored copy is resealed by the house helper
@@ -1405,7 +1405,7 @@ int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 			FFileHelper::SaveArrayToFile(T, *SaveFilePath(TEXT("atr9v58")));
 			FString E58;
 			const bool bLoaded = Sim->LoadColony(TEXT("atr9v58"), E58);
-			Expect(!bLoaded && E58.Contains(TEXT("Save format mismatch")) && E58.Contains(TEXT("/59")), FString::Printf(TEXT("AT9 the previous version is refused (%s)"), *E58));
+			Expect(!bLoaded && E58.Contains(TEXT("Save format mismatch")) && E58.Contains(TEXT("/60")), FString::Printf(TEXT("AT9 the previous version is refused (%s)"), *E58));
 		}
 	}
 

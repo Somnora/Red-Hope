@@ -72,6 +72,9 @@ public:
 	// The traffic overlay (C6b): heat on the road strips, a legend on the deck; lives beside the survey map.
 	void ToggleTrafficOverlay();
 	bool IsTrafficOverlayOn() const;
+	// E8: the Routes overlay (URHTradeVisualizerSubsystem): each available rival's route coloured by its status; beside Traffic.
+	void ToggleTradeOverlay();
+	bool IsTradeOverlayOn() const;
 	// District paint mode (C5a): pick a Kind on the deck's DISTRICT tab (or the City panel). On the
 	// surface press anchors a corner of a lattice rectangle (10 m cells, at most 32 x 32), drag sizes
 	// it under a ghost that shows the sim's own preflight - the cells it adds, the district it joins,

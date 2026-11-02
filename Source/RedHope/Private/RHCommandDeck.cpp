@@ -105,17 +105,24 @@ namespace
 
 	// Every deck button clicks (2026-10-14: the game had no sound); the deck
 	// style carries the click as its pressed sound.
-	TSharedRef<SWidget> DeckButton(const TAttribute<FText>& Label, const FOnClicked& OnClicked)
+	// E8: an optional tag (FTagMetaData) lets the click test find a button by its tag, not its text (the Routes button: "Trade" would
+	// collide with a rival card's TRADE verb).
+	TSharedRef<SWidget> DeckButton(const TAttribute<FText>& Label, const FOnClicked& OnClicked, FName Tag = NAME_None)
 	{
-		return SNew(SBox).Padding(FMargin(2.f, 0.f))
-		[
-			SNew(SButton)
+		TSharedRef<SButton> Button = SNew(SButton)
 			.ButtonStyle(&RHDeck::ButtonStyle())
 			.OnClicked(OnClicked)
 			.ContentPadding(FMargin(9.f, 5.f))
 			[
 				SNew(STextBlock).Text(Label).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
-			]
+			];
+		if (!Tag.IsNone())
+		{
+			Button->AddMetadata<FTagMetaData>(MakeShared<FTagMetaData>(Tag));
+		}
+		return SNew(SBox).Padding(FMargin(2.f, 0.f))
+		[
+			Button
 		];
 	}
 
@@ -861,6 +868,15 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					BuildTrafficLegend()
 				]
 			]
+			// E8: the Routes legend under it, while the overlay is on and the markers show (m6). The visibility sits on the slot's own widget, so a
+			// hidden legend adds no slot padding to the stack (a collapsed child alone would leave the 8 px above it).
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+			[
+				SNew(SBox).WidthOverride(300.f).Visibility(this, &SRHCommandDeck::GetTradeLegendVisibility)
+				[
+					BuildTradeLegend()
+				]
+			]
 		]
 
 		// World-pressure banner (M1-c): the sky has agency now. The alert
@@ -967,6 +983,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
 						FoldAnchor(EFold::Politics, BuildPoliticsPanel())
+					]
+					// E8: MARKET straight after EARTH & NEIGHBORS, so the neighbours and their market sit together in the column.
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+					[
+						FoldAnchor(EFold::Market, BuildMarketPanel())
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
 					[
@@ -1264,6 +1285,12 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetTrafficLabel)),
 							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTraffic))
 					]
+					// E8: the Routes overlay beside it (found by its tag, RH.TradeOverlay).
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetTradeLabel)),
+							FOnClicked::CreateSP(this, &SRHCommandDeck::HandleTrade), FName("RH.TradeOverlay"))
+					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						DeckButton(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateSP(this, &SRHCommandDeck::GetFleetHoldLabel)),
@@ -1431,6 +1458,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	RefreshTunnelList();
 	RefreshCavernList();
 	RefreshTramList();
+	RefreshMarketPanel(); // E8: rebuilt only when one of its keys moves
 	FollowShaftScroll();
 	ApplyFoldScroll();
 	RefreshGuide();

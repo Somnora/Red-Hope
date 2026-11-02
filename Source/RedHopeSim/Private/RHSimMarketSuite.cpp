@@ -16,8 +16,11 @@
 //  MX0 the data, the strict parser, the malformed rows; MX1 inertness (the switch, and every rival inactive); MX2 one reprice by hand and the
 //  rival order; MX3 a glut; MX4 a shortage; MX5 bounded and integer by enumeration; MX6 orders, money and the three readers of spendable
 //  credit; MX7 the standing order and goodwill; MX9 the save and every load repair; MX10 ruling 11; MX11 politics; MX8 era parity (the
-//  paired run, the boundary fixture, the fallback twin and the margin case), last because it injects a rival of its own. MX12 is the
-//  mutation list, run by hand and recorded in design-decisions.
+//  paired run, the boundary fixture, the fallback twin and the margin case), last because it injects a rival of its own. E4's mutation list
+//  (hand-run) is recorded in design-decisions.
+// E8 (docs/qa/2026-10-25/e8-market-panel-design.md, REVISION 3) adds the 30-sol history's checks: MX12 the ring by hand and MX15 the save,
+//  after MX11; MX13 band-exactness inside MX8's paired run and MX14 write-only at the end of MX8's block (they need its start save and its
+//  injected Kestrel). MX16 is E8's mutation list, run by hand and recorded in design-decisions.
 // Every expected number below that is not plain arithmetic was computed by a separate integer model of the update, written from the spec's
 // own rules (R5) and not from the C++; the model reproduces the re-review's worked examples (Ice's floor at sol 37, Struct settling at 9.996 cr).
 // Debug_SetMarketTally fills every ring entry and a roll then overwrites the closing sol's entry with its own fills (0 here), so a window of
@@ -183,6 +186,74 @@ namespace
 		uint32 Next() { State = State * 6364136223846793005ULL + 1442695040888963407ULL; return (uint32)(State >> 33); }
 		int64 Range(int64 Lo, int64 Hi) { return Lo + (int64)(Next() % (uint32)(Hi - Lo + 1)); }
 	};
+
+	// E8: the history block ('RHE8'), read straight off a save's bytes with every field's offset, so MX12 and MX15 can check the layout and
+	// doctor one field before resealing the frame.
+	struct FMktHistBlock
+	{
+		bool bOk = false;
+		int32 FrameAt = INDEX_NONE, PayloadAt = 0, PayloadBytes = 0;
+		TArray<FString> Slots;
+		TArray<int32> SlotNameAt;
+		struct FRing
+		{
+			int32 Region = 0, Fill = 0, Head = 0, Last = -1;
+			int32 RegionAt = 0, FillAt = 0, HeadAt = 0, LastAt = 0, PriceAt = 0, SoldAt = 0, BoughtAt = 0, RateAt = 0, UnitAt = 0;
+			TArray<int64> Price, Sold, Bought, Rate;
+			TArray<uint8> Unit;
+		};
+		TArray<FRing> Rings;
+	};
+
+	bool MktHistParse(const TArray<uint8>& W, FMktHistBlock& B)
+	{
+		B = FMktHistBlock();
+		int32 Frame = INDEX_NONE, Bytes = 0;
+		if (!RHSaveFrame::Find(W, RHSaveFrame::HistoryTag, Frame, Bytes))
+		{
+			return false;
+		}
+		constexpr int32 HN = URHSimWorldSubsystem::MarketHistSols;
+		B.FrameAt = Frame;
+		B.PayloadAt = Frame + RHSaveFrame::HeaderBytes;
+		B.PayloadBytes = Bytes;
+		const int32 End = B.PayloadAt + Bytes;
+		int32 Cur = B.PayloadAt;
+		bool bShort = false;
+		const auto R32 = [&]() { int32 V = 0; if (Cur + 4 <= End) { FMemory::Memcpy(&V, W.GetData() + Cur, 4); } else { bShort = true; } Cur += 4; return V; };
+		const auto R64 = [&]() { int64 V = 0; if (Cur + 8 <= End) { FMemory::Memcpy(&V, W.GetData() + Cur, 8); } else { bShort = true; } Cur += 8; return V; };
+		const auto R8 = [&]() { uint8 V = 0; if (Cur + 1 <= End) { V = W[Cur]; } else { bShort = true; } Cur += 1; return V; };
+		const int32 SlotCount = R32();
+		for (int32 k = 0; k < SlotCount && !bShort; ++k)
+		{
+			const int32 Len = R32();
+			B.SlotNameAt.Add(Cur);
+			if (Len > 0 && Cur + Len <= End) { B.Slots.Add(FString(ANSI_TO_TCHAR((const ANSICHAR*)(W.GetData() + Cur)))); } else { bShort = true; }
+			Cur += FMath::Max(0, Len);
+		}
+		const int32 RingCount = R32();
+		for (int32 m = 0; m < RingCount && !bShort; ++m)
+		{
+			FMktHistBlock::FRing R;
+			R.RegionAt = Cur; R.Region = R32();
+			R.FillAt = Cur; R.Fill = R32();
+			R.HeadAt = Cur; R.Head = R32();
+			R.LastAt = Cur; R.Last = R32();
+			R.PriceAt = Cur;
+			for (int32 k = 0; k < SlotCount * HN && !bShort; ++k) { R.Price.Add(R64()); }
+			R.SoldAt = Cur;
+			for (int32 e = 0; e < HN; ++e) { R.Sold.Add(R64()); }
+			R.BoughtAt = Cur;
+			for (int32 e = 0; e < HN; ++e) { R.Bought.Add(R64()); }
+			R.RateAt = Cur;
+			for (int32 e = 0; e < HN; ++e) { R.Rate.Add(R64()); }
+			R.UnitAt = Cur;
+			for (int32 e = 0; e < HN; ++e) { R.Unit.Add(R8()); }
+			B.Rings.Add(MoveTemp(R));
+		}
+		B.bOk = !bShort && Cur == End;
+		return B.bOk;
+	}
 }
 
 int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim)
@@ -290,6 +361,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->Debug_SetEarthTakesQuota(true);
 		Sim->Debug_SetMarketEnabled(true);
 		Sim->Debug_SetMarketRivalOnly(false);
+		Sim->Debug_SetMarketHistoryEnabled(true); // E8: the history's switch is runtime only
 		Sim->Debug_ClearPolitics();
 		Rejects.Reset();
 		return bOk;
@@ -1319,7 +1391,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		const int32 ZaryaAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Zarya"); });
 		const int32 MeridianAt = B.Rivals.IndexOfByPredicate([](const FMktSuiteBlock::FRivalRec& R) { return R.Name == TEXT("Meridian"); });
 		const int64 Reserved0 = Sim->GetCreditReservedMcr(), Bal0 = Sim->GetCreditBalanceMcr();
-		const bool bShape = bParsed && Ver == 59 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
+		const bool bShape = bParsed && Ver == 60 && B.PayloadBytes == Sim->GetMarketBlockBytes() && bSlotsAsc && bRivalsAsc && B.Markets.Num() == 1 && B.Convoys.Num() == 2 && B.Next == 3
 			&& B.Convoys[0].Id == 1 && B.Convoys[0].Rival == TEXT("Zarya") && B.Convoys[0].Cleared == 1 && B.Convoys[0].Lines.Num() == 2 && B.Convoys[0].Lines[0].Filled == 300
 			&& B.Convoys[1].Id == 2 && B.Convoys[1].Rival == TEXT("MxKes") && B.Convoys[1].Cleared == 0 && B.Convoys[1].ClearSol == 1 && B.Convoys[1].Held > 0 && B.Reserved == Reserved0 && B.Convoys[1].Held == Reserved0
 			&& B.Checked == 1 && B.Markets[0].Fill == 1 && IceSlot != INDEX_NONE && B.Markets[0].Price[IceSlot] == Sim->GetMarketPriceMcr(NIce) && ZaryaAt != INDEX_NONE && B.Rivals[ZaryaAt].Store[IceSlot] == Sim->GetRivalStoreG(NZarya, NIce);
@@ -1383,7 +1455,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			ExpectSeq({
 			[&]() { return !bOk; },
 			[&]() { return E.Contains(TEXT("Save format mismatch")); },
-			[&]() { return E.Contains(TEXT("/59")); },
+			[&]() { return E.Contains(TEXT("/60")); },
 			}, FString::Printf(TEXT("MX9 a v54 file is refused (%s)"), *E));
 		}
 		// A lost market block: the frame's tag destroyed.
@@ -1666,6 +1738,513 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		Sim->Debug_ClearPolitics();
 	}
 
+
+	// --- MX12 (E8). The 30-sol history by hand (docs/qa/2026-10-25/e8-market-panel-design.md, REVISION 3): (a) a fresh colony's ring is empty
+	// and its sol-0 save loads with no E8 Warning and round-trips byte-identical; (b) MX2's set A rolled 1 sol, 3 sols, then a 12-sol jump,
+	// against a twin rolled one sol at a time (its first sol is MX2's own reference), then the market off and the price hook; the values of a
+	// clearing under a tariff (before the markup); (c) E5's issue, its open sol and a withdrawal. Nothing here is read by a rule. ---
+	const int32 HistN = URHSimWorldSubsystem::MarketHistSols;
+	// The ring's price of Res in force during Sol, region Region (-9 when the ring holds no such sol).
+	const auto RingAt = [&](FName Res, int32 Sol, int32 Region) -> int64
+	{
+		TArray<int64> P;
+		if (!Sim->GetMarketHistory(Res, P, Region)) { return -9; }
+		const int32 K = P.Num() - 1 - (Sim->GetMarketHistoryLastSol(Region) - Sol);
+		return P.IsValidIndex(K) ? P[K] : -9;
+	};
+	// Every slot's open-sol entry equals its live price.
+	const auto OpenIsLive = [&](int32 Region) -> bool
+	{
+		bool bAll = Sim->GetMarketHistoryLastSol(Region) == Sim->GetMarketCheckedSol();
+		for (int32 i = 0; bAll && i < Sim->GetLedgerSlotCount(); ++i)
+		{
+			const FName Res = Sim->GetLedgerSlotName(i);
+			bAll &= RingAt(Res, Sim->GetMarketCheckedSol(), Region) == Sim->GetMarketPriceMcr(Res, Region);
+		}
+		return bAll;
+	};
+	const auto LivePrices = [&]() { TMap<FName, int64> P; for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i) { P.Add(Sim->GetLedgerSlotName(i), Sim->GetMarketPriceMcr(Sim->GetLedgerSlotName(i))); } return P; };
+	const auto RingSolIs = [&](int32 Sol, const TMap<FName, int64>& Want) -> bool
+	{
+		bool bAll = Want.Num() > 0;
+		for (const TPair<FName, int64>& W : Want) { bAll &= RingAt(W.Key, Sol, 0) == W.Value; }
+		return bAll;
+	};
+	const auto E8Lines = [&]() { return Capture.CountWarnings(TEXT("LoadColony v60")); };
+	{
+		// (a) Empty.
+		Reset();
+		TArray<uint8> WE, WE2;
+		FMktHistBlock HE;
+		const bool bSavedE = Sim->SaveColony(TEXT("mktmx12e"), SaveErr) && FFileHelper::LoadFileToArray(WE, *SaveFilePath(TEXT("mktmx12e"))) && MktHistParse(WE, HE);
+		bool bAllUnknown = HE.Rings.Num() == 1;
+		for (const FMktHistBlock::FRing& R : HE.Rings) { for (const int64 P : R.Price) { bAllUnknown &= P == -1; } }
+		int64 SoldE = 1, BoughtE = 1;
+		const bool bNoValue = !Sim->GetMarketHistoryValue(0, SoldE, BoughtE);
+		Capture.Clear();
+		FString LE;
+		const bool bLoadedE = Sim->LoadColony(TEXT("mktmx12e"), LE) && LE.IsEmpty();
+		const int32 WarnE = E8Lines(), ErrE = Capture.NumErrors();
+		const bool bResavedE = Sim->SaveColony(TEXT("mktmx12e2"), SaveErr) && FFileHelper::LoadFileToArray(WE2, *SaveFilePath(TEXT("mktmx12e2")));
+		ExpectSeq({
+			[&]() { return Sim->GetMarketHistoryFill() == 0 && Sim->GetMarketHistoryLastSol() == -1; },
+			[&]() { return bSavedE && Clock->GetSol() == 0 && Sim->GetMarketCheckedSol() == 0 && HE.Rings.Num() == 1 && HE.Rings[0].Fill == 0 && HE.Rings[0].Head == 0 && HE.Rings[0].Last == -1; },
+			[&]() { return bAllUnknown && HE.Rings[0].Price.Num() == Sim->GetLedgerSlotCount() * HistN; },
+			[&]() { return bNoValue && SoldE == 0 && BoughtE == 0; },
+			[&]() { return bLoadedE && WarnE == 0 && ErrE == 0; },
+			[&]() { return bResavedE && WE2 == WE; },
+			},
+			FString::Printf(TEXT("MX12 (a) a fresh colony's history is empty: fill 0, last sol -1, all %d prices -1 in its 'RHE8' frame, GetMarketHistoryValue(0) false; its sol-%d save loads with no E8 Warning (%d) and saves byte-identical (%d bytes)"),
+				HE.Rings.Num() > 0 ? HE.Rings[0].Price.Num() : 0, Clock->GetSol(), WarnE, WE.Num()));
+	}
+	{
+		// (b) MX2's set A (its stores, tallies and prices; one roll gives MX2's Want), rolled sol by sol in a twin for the reference.
+		struct FMx12Row { const TCHAR* Res; int64 StoreKg, SoldKg, BoughtKg, Price, Want; };
+		const FMx12Row SetA12[] = {
+			{ TEXT("Ice"), 12000, 0, 0, 3000, 2850 }, { TEXT("Water"), 2000, 0, 0, 4000, 4112 }, { TEXT("Oxygen"), 1500, 0, 0, 7985, 7986 }, { TEXT("Struct"), 0, 0, 0, 20000, 19000 },
+			{ TEXT("Hydrogen"), 1000, 2000, 0, 3000, 3000 }, { TEXT("Food"), 600, 0, 500, 20000, 21000 }, { TEXT("SpareParts"), 40, 0, 0, 800000, 760000 } };
+		const auto Fixture12 = [&]()
+		{
+			Reset();
+			for (const FMx12Row& F : SetA12)
+			{
+				const FName Res(F.Res), Owner = (Res == NFood || Res == NParts) ? NMeridian : NZarya;
+				Sim->Debug_SetRivalStore(Owner, Res, F.StoreKg);
+				Sim->Debug_SetMarketTally(Res, F.SoldKg, F.BoughtKg);
+				Sim->Debug_SetMarketPrice(Res, F.Price);
+			}
+		};
+		Fixture12();
+		// The twin rolls with the history switched off (B1: its ring stays empty), so the reference never passes through the code under test;
+		// Fixture12's Reset turns the history back on for the run itself.
+		Sim->Debug_SetMarketHistoryEnabled(false);
+		const int32 C0 = Sim->GetMarketCheckedSol();
+		TArray<TMap<FName, int64>> Ref;
+		Ref.Add(LivePrices());
+		for (int32 K = 1; K <= 12; ++K) { RollNext(); Ref.Add(LivePrices()); }
+		const bool bTwinOff = Sim->GetMarketHistoryFill() == 0;
+		bool bMx2 = bTwinOff;
+		for (const FMx12Row& F : SetA12) { bMx2 &= Ref[1].FindRef(FName(F.Res)) == F.Want; }
+		// The run itself.
+		Fixture12();
+		RollNext();
+		const bool bOne = Sim->GetMarketHistoryFill() == 2 && Sim->Debug_GetMarketHistoryHead() == 2 && Sim->GetMarketHistoryLastSol() == C0 + 1 && RingSolIs(C0, Ref[0]) && RingSolIs(C0 + 1, Ref[1]) && OpenIsLive(0);
+		Sim->Debug_RollMarket(C0 + 4);
+		const bool bThree = Sim->GetMarketHistoryFill() == 5 && Sim->Debug_GetMarketHistoryHead() == 5 && Sim->GetMarketHistoryLastSol() == C0 + 4 && RingSolIs(C0 + 2, Ref[2]) && RingSolIs(C0 + 3, Ref[3]) && RingSolIs(C0 + 4, Ref[4]) && OpenIsLive(0);
+		Sim->Debug_RollMarket(C0 + 16); // a 12-sol jump: eight passes (closing C0 + 4 .. C0 + 11), then C0 + 12 .. C0 + 15 skipped, then C0 + 16 opened
+		bool bWalked = true;
+		for (int32 K = 5; K <= 11; ++K) { bWalked &= RingSolIs(C0 + K, Ref[K]); }
+		bool bSkipped = true;
+		for (int32 Sol = C0 + 12; Sol <= C0 + 15; ++Sol)
+		{
+			int64 Sv = -1, Bv = -1;
+			const int32 Back = Sim->GetMarketHistoryLastSol() - Sol;
+			bSkipped &= Sim->GetMarketHistoryValue(Back, Sv, Bv) && Sv == 0 && Bv == 0;
+			for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i) { bSkipped &= RingAt(Sim->GetLedgerSlotName(i), Sol, 0) == -1; }
+		}
+		const bool bJump = Sim->GetMarketHistoryFill() == 17 && Sim->Debug_GetMarketHistoryHead() == 17 && Sim->GetMarketHistoryLastSol() == C0 + 16 && RingSolIs(C0 + 16, Ref[12]) && OpenIsLive(0);
+		int64 S0 = -1, B0 = -1, SF = 0, BF = 0;
+		const bool bBack0 = Sim->GetMarketHistoryValue(0, S0, B0) && S0 == 0 && B0 == 0;
+		const int32 BackChecked = Sim->GetMarketHistoryFill(); // the Back = Fill read, printed as checked (the market-off roll below moves the fill)
+		const bool bBackFill = !Sim->GetMarketHistoryValue(BackChecked, SF, BF);
+		// The market off: no reprice, and the open sol's entry is still written, the unchanged price.
+		const TMap<FName, int64> BeforeOff = LivePrices();
+		Sim->Debug_SetMarketEnabled(false);
+		RollNext();
+		const bool bOff = Sim->GetMarketHistoryFill() == 18 && LivePrices().OrderIndependentCompareEqual(BeforeOff) && RingSolIs(C0 + 17, BeforeOff) && OpenIsLive(0);
+		Sim->Debug_SetMarketEnabled(true);
+		// The price hook writes the open sol's entry.
+		const int64 Floor = Sim->GetMarketFloorMcr(NIce);
+		Sim->Debug_SetMarketPrice(NIce, Floor);
+		const bool bHook = Floor > 0 && RingAt(NIce, Sim->GetMarketCheckedSol(), 0) == Floor && Sim->GetMarketPriceMcr(NIce) == Floor;
+		ExpectSeq({
+			[&]() { return bMx2; },
+			[&]() { return bOne; },
+			[&]() { return bThree; },
+			[&]() { return bWalked; },
+			[&]() { return bSkipped; },
+			[&]() { return bJump; },
+			[&]() { return bBack0 && bBackFill; },
+			[&]() { return bOff; },
+			[&]() { return bHook; },
+			},
+			FString::Printf(TEXT("MX12 (b) MX2's set A from an empty ring at sol %d: one roll leaves fill 2 (the closing sol at the hook's prices and the open sol at MX2's reference: Ice %s, Struct %s), three more fill 5, a 12-sol jump walks eight passes and leaves fill 17 with its four skipped sols -1 and 0 values; every walked sol equals the twin rolled one sol at a time with the history off (its ring left empty), the open sol's entry is the live price after each roll, GetMarketHistoryValue(0) is (0, 0) and Back %d is false; the market off still writes the open sol, unchanged; Debug_SetMarketPrice(Ice, floor %s) writes the open sol's entry"),
+				C0, *Cr(Ref[1].FindRef(NIce)), *Cr(Ref[1].FindRef(NStruct)), BackChecked, *Cr(Floor)));
+	}
+	{
+		// (b) The values: an order selling Ice and buying Struct under a 15% tariff on Zarya's Ice, rolled until it clears. The closing sol's
+		// entry holds the clearing's fills times the price in force during that sol (the live price before the roll), before the markup.
+		Reset();
+		Provision(20000000);
+		Sim->AddStock(NStruct, 0.0);
+		const int32 Open0 = Sim->GetMarketCheckedSol();
+		Sim->Debug_AddTariff(NZarya, NIce, 3, 1500, Open0, Open0 + 20);
+		const bool bBooked = Order(NZarya, TEXT("Ice:-200;Struct:100"));
+		bool bValued = false, bSeen = false;
+		int64 WantSold = 0, WantBought = 0, GotSold = -1, GotBought = -1, Tariff = 0, ValueRec = -1;
+		int32 ClosingSeen = -1;
+		for (int32 K = 0; K < 6 && !bSeen; ++K)
+		{
+			const TMap<FName, int64> Before = LivePrices();
+			const int32 Kept = Sim->GetMarketClearings().Num();
+			RollNext();
+			if (Sim->GetMarketClearings().Num() > Kept)
+			{
+				bSeen = true;
+				const FRHMarketClearing& Rec = Sim->GetMarketClearings().Last();
+				for (const FRHConvoyLine& L : Rec.Lines) { (L.Kg < 0 ? WantSold : WantBought) += (int64)L.FilledKg * Before.FindRef(L.Resource); }
+				ClosingSeen = Rec.ClosingSol;
+				Tariff = Rec.TariffMcr;
+				ValueRec = Rec.ValueMcr;
+				bValued = Sim->GetMarketHistoryValue(Sim->GetMarketHistoryLastSol() - Rec.ClosingSol, GotSold, GotBought) && RingSolIs(Rec.ClosingSol, Before);
+			}
+		}
+		ExpectSeq({
+			[&]() { return bBooked && bSeen; },
+			[&]() { return bValued; },
+			[&]() { return WantSold > 0 && WantBought > 0 && GotSold == WantSold && GotBought == WantBought; },
+			[&]() { return ValueRec == WantSold + WantBought && Tariff > 0; },
+			},
+			FString::Printf(TEXT("MX12 (b) a clearing's values go into its closing sol's entry (sol %d): sold %s and bought %s cr, each fill times the price in force during that sol, before the markup (the clearing charged a %s cr tariff; its value is %s cr)"),
+				ClosingSeen, *Cr(GotSold), *Cr(GotBought), *Cr(Tariff), *Cr(ValueRec)));
+	}
+	{
+		// (c) E5: the mark issued through the real uplink (the issue roll, then the roll that opens it), then withdrawn by a Comply at a rate of
+		// 1.5 cr a mark. The open sol's entry carries the unit and the rate it trades in; at the withdrawal roll it holds the re-expressed prices
+		// in credits (unit 0, no rate), so it is written after E5's step, never before (mutation 7). The figures are literals from a separate
+		// integer model, never E5's own getters: the issue roll trades at CurrencyRateStartMcr 1,000; the open sol at 1,017 (E5's first rate
+		// step on this fixture); the withdrawal roll first reprices Struct as E4 does (5,512 mmk + 5,512 x 500 / 10,000 = 5,787, the 5% step),
+		// then E5 re-expresses it at the rate in force, 1,500 (Debug_SetRate; the rate step skips the withdrawal roll): 5,787 x 1,500 / 1,000
+		// = 8,680 mcr, in the market and in the open sol's entry.
+		Reset();
+		Provision(20000000);
+		Sim->Debug_SetRequisitionInputs(40.0, Sim->GetEarthTension());
+		Sim->Debug_SyncPoliticalView();
+		{ FRHCommand C; C.Verb = FName("Currency"); C.Target = FName("Issue"); Sim->EnqueueCommand(C); EraOnce(); }
+		RollNext();
+		const int32 IssueSol = Sim->GetCurrencyIssueSol();
+		const bool bIssueRoll = IssueSol >= 0 && Sim->GetMarketHistoryUnit(0) == 0 && Sim->GetMarketHistoryRateMcr(0) == 1000;
+		RollNext();
+		const bool bOpen = Sim->IsMarketInMarks() && Sim->GetMarketHistoryUnit(0) == 1 && Sim->GetMarketHistoryRateMcr(0) == 1017 && Sim->GetMarketHistoryUnit(1) == 0 && OpenIsLive(0);
+		Sim->Debug_SetRequisitionInputs(Sim->GetIdentityAxis(), 65.0);
+		EraOnce();
+		const bool bDemand = Sim->IsEarthDemandPending();
+		{ FRHCommand C; C.Verb = FName("Solidarity"); C.Target = FName("Comply"); Sim->EnqueueCommand(C); EraOnce(); }
+		Sim->Debug_SetRate(1500);
+		const TMap<FName, int64> InMarks = LivePrices();
+		RollNext();
+		const bool bWithdrawn = Sim->GetCurrencyIssueSol() == -1 && !Sim->IsCurrencyWithdrawPending();
+		const int64 StructOpen = RingAt(NStruct, Sim->GetMarketHistoryLastSol(), 0);
+		const bool bReexpressed = InMarks.FindRef(NStruct) == 5512 && Sim->GetMarketPriceMcr(NStruct) == 8680 && StructOpen == 8680;
+		const bool bAfter = Sim->GetMarketHistoryUnit(0) == 0 && Sim->GetMarketHistoryRateMcr(0) == 0 && OpenIsLive(0) && Sim->GetMarketHistoryUnit(1) == 1;
+		ExpectSeq({
+			[&]() { return bIssueRoll; },
+			[&]() { return bOpen; },
+			[&]() { return bDemand && bWithdrawn; },
+			[&]() { return bReexpressed; },
+			[&]() { return bAfter; },
+			},
+			FString::Printf(TEXT("MX12 (c) E5's mark issued at sol %d: the issue roll's open sol is in credits at the start rate 1.000, the next is in marks (unit 1, the rate %s, want 1.017); a Comply withdraws it at 1.5 cr a mark and the withdrawal roll's open-sol entry holds the re-expressed prices in credits (unit 0, no rate): Struct %s mk repriced to 5.787, then x 1.5 = %s cr in the market and %s in the entry (want 8.680), the sol before still in marks"),
+				IssueSol, *Cr(Sim->GetMarketHistoryRateMcr(1)), *Cr(InMarks.FindRef(NStruct)), *Cr(Sim->GetMarketPriceMcr(NStruct)), *Cr(StructOpen)));
+	}
+
+	// --- MX15 (E8). The save: 'RHE8' sits straight after the footer of D7's 'RHD7', the frame written before it (found by tag; never "the last
+	// frame"), with payload GetMarketHistoryBlockBytes() (5,307 bytes for one region: 221 + 5,086); the slot names ascending; per region fill,
+	// head, last sol, then the arrays; save, load, save is byte-identical; the previous version refused with "/60"; every load repair on a
+	// doctored, resealed file (Warnings only, none an Error, none containing "the market block is lost"); the price hook's round trip; a resync
+	// keeping the ring through bKeepHist; and a second region's ring moving on its own. ---
+	{
+		// Before a fixture's save: the clock brought up to the market's open sol by one real step ending there, so the load does not repair an
+		// open sol ahead of C5d's (E4's own rule) - RollNext runs the market ahead of the clock.
+		const auto SyncClock15 = [&]()
+		{
+			const double To = (double)Sim->GetMarketCheckedSol() * SolLen;
+			if (Clock->GetSimSecondsTotal() < To)
+			{
+				Clock->Debug_SetSimSeconds(To - EraDt);
+				EraOnce();
+			}
+		};
+		int32 BadWording = 0, Errors15 = 0;
+		const auto Try15 = [&](const TCHAR* Slot, const TArray<uint8>& T, FString& OutErr) -> bool
+		{
+			FFileHelper::SaveArrayToFile(T, *SaveFilePath(Slot));
+			Capture.Clear();
+			FString E;
+			const bool bOk = Sim->LoadColony(Slot, E);
+			OutErr = E;
+			Capture.NumWarnings(); // pumps the log thread before the list is read
+			for (const FString& Wn : Capture.Warnings) { BadWording += (Wn.Contains(TEXT("LoadColony v60")) && Wn.Contains(TEXT("the market block is lost"))) ? 1 : 0; }
+			Errors15 += Capture.NumErrors();
+			return bOk && E.IsEmpty();
+		};
+		const auto Put32H = [](TArray<uint8>& T, int32 Off, int32 V) { FMemory::Memcpy(T.GetData() + Off, &V, 4); };
+		const auto Put64H = [](TArray<uint8>& T, int32 Off, int64 V) { FMemory::Memcpy(T.GetData() + Off, &V, 8); };
+		const auto SealedH = [](TArray<uint8> T) { RHSaveFrame::Reseal(T, RHSaveFrame::HistoryTag); return T; };
+		Reset();
+		Provision(20000000);
+		const bool bOrder = Order(NZarya, TEXT("Ice:100"));
+		RollNext();
+		RollNext();
+		RollNext();
+		SyncClock15();
+		const int32 Open15 = Sim->GetMarketCheckedSol();
+		const int32 Fill15 = Sim->GetMarketHistoryFill();
+		const int32 HistBytes = Sim->GetMarketHistoryBlockBytes();
+		TArray<uint8> W;
+		const TMap<FName, int64> Saved15 = LivePrices(); // every slot's live price as the fixture is saved (MX15's resync compares against these)
+		Expect(bOrder && Sim->SaveColony(TEXT("mktmx15"), SaveErr) && FFileHelper::LoadFileToArray(W, *SaveFilePath(TEXT("mktmx15"))),
+			FString::Printf(TEXT("MX15 the fixture is saved: an order to Zarya cleared, the market rolled three sols and the clock brought to its open sol %d, the ring holding %d sols (%s)"), Open15, Fill15, *SaveErr));
+		uint32 Ver = 0;
+		if (W.Num() > 8) { FMemory::Memcpy(&Ver, W.GetData() + 4, 4); }
+		FMktHistBlock H;
+		const bool bParsed = MktHistParse(W, H);
+		int32 AtriumAt = INDEX_NONE, AtriumBytes = 0, MarketAt = INDEX_NONE, MarketBytes = 0;
+		const bool bAtrium = RHSaveFrame::Find(W, RHSaveFrame::AtriumTag, AtriumAt, AtriumBytes);
+		RHSaveFrame::Find(W, RHSaveFrame::MarketTag, MarketAt, MarketBytes);
+		bool bSlotsAsc = H.Slots.Num() == Sim->GetLedgerSlotCount();
+		for (int32 k = 1; k < H.Slots.Num(); ++k) { bSlotsAsc &= H.Slots[k - 1].Compare(H.Slots[k], ESearchCase::CaseSensitive) < 0; }
+		// The arrays in raw entry order, against the getters (oldest first): slot s's entry e is the price of sol Last - ((Head - 1 - e + 60) % 30).
+		bool bArrays = bParsed && H.Rings.Num() == 1;
+		if (bArrays)
+		{
+			const FMktHistBlock::FRing& R = H.Rings[0];
+			for (int32 i = 0; bArrays && i < H.Slots.Num(); ++i)
+			{
+				TArray<int64> P;
+				bArrays &= Sim->GetMarketHistory(FName(*H.Slots[i]), P) && P.Num() == R.Fill;
+				for (int32 k = 0; bArrays && k < R.Fill; ++k) { bArrays &= R.Price[i * HistN + (R.Head - R.Fill + k + 2 * HistN) % HistN] == P[k]; }
+			}
+			for (int32 Back = 0; bArrays && Back < R.Fill; ++Back)
+			{
+				int64 Sv = 0, Bv = 0;
+				const int32 E = (R.Head - 1 - Back + 2 * HistN) % HistN;
+				bArrays &= Sim->GetMarketHistoryValue(Back, Sv, Bv) && R.Sold[E] == Sv && R.Bought[E] == Bv && R.Rate[E] == Sim->GetMarketHistoryRateMcr(Back) && R.Unit[E] == Sim->GetMarketHistoryUnit(Back);
+			}
+		}
+		bool bValues = false;
+		for (const int64 V : (H.Rings.Num() > 0 ? H.Rings[0].Bought : TArray<int64>())) { bValues |= V > 0; }
+		ExpectSeq({
+			[&]() { return bParsed && bAtrium && Ver == 60; },
+			[&]() { return AtriumAt + RHSaveFrame::HeaderBytes + AtriumBytes + RHSaveFrame::FooterBytes == H.FrameAt; },
+			[&]() { return H.PayloadBytes == HistBytes && HistBytes == 5307; },
+			[&]() { return bSlotsAsc; },
+			[&]() { return H.Rings.Num() == 1 && H.Rings[0].Region == 0 && H.Rings[0].Fill == Fill15 && H.Rings[0].Last == Open15 && H.Rings[0].Head == Fill15 % HistN; },
+			[&]() { return bArrays && bValues; },
+			},
+			FString::Printf(TEXT("MX15 v%u: 'RHE8' sits straight after 'RHD7''s footer (found by tag, never \"the last frame\"), its payload GetMarketHistoryBlockBytes() (%d bytes: 221 + 5,086 for one region): %d slot names ascending (%s .. %s), then region 0's fill %d, head %d, last sol %d (the open sol) and its arrays in raw entry order, a clearing's bought value among them"),
+				Ver, H.PayloadBytes, H.Slots.Num(), H.Slots.Num() > 0 ? *H.Slots[0] : TEXT("?"), H.Slots.Num() > 0 ? *H.Slots.Last() : TEXT("?"),
+				H.Rings.Num() > 0 ? H.Rings[0].Fill : -1, H.Rings.Num() > 0 ? H.Rings[0].Head : -1, H.Rings.Num() > 0 ? H.Rings[0].Last : -1));
+		// Save, load, save.
+		{
+			FString E;
+			TArray<uint8> W2;
+			const bool bOk = Try15(TEXT("mktmx15rt"), W, E) && Capture.NumWarnings() == 0 && Sim->SaveColony(TEXT("mktmx15rt2"), SaveErr) && FFileHelper::LoadFileToArray(W2, *SaveFilePath(TEXT("mktmx15rt2")));
+			Expect(bOk && W2 == W && Sim->GetMarketHistoryFill() == Fill15, FString::Printf(TEXT("MX15 save, load, save is byte-identical (%d bytes) with no Warning, the ring loaded whole (fill %d)"), W.Num(), Sim->GetMarketHistoryFill()));
+		}
+		// The previous version.
+		{
+			TArray<uint8> T = W;
+			const uint32 Prev = 59;
+			FMemory::Memcpy(T.GetData() + 4, &Prev, 4);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15v59"), T, E);
+			Expect(!bOk && E.Contains(TEXT("Save format mismatch")) && E.Contains(TEXT("/60")), FString::Printf(TEXT("MX15 a v59 file is refused (%s)"), *E));
+		}
+		const int32 IceSlot = H.Slots.IndexOfByKey(TEXT("Ice")), StructSlot = H.Slots.IndexOfByKey(TEXT("Struct"));
+		const int64 IcePrice = Sim->GetMarketPriceMcr(NIce);
+		const auto Count15 = [&](const TCHAR* Needle) { return Capture.CountWarnings(Needle); };
+		// A lost 'RHE8' (its tag destroyed, as MX9 destroys E4's): every ring starts empty with one Warning, the market loads intact, and D7's
+		// tail read (cross-check item 4) keeps the atriums silent though the walk from the end is broken.
+		{
+			TArray<uint8> T = W; Put32H(T, H.FrameAt, 0);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15l8"), T, E);
+			ExpectSeq({
+				[&]() { return bOk && Capture.NumWarnings() == 1 && Count15(TEXT("LoadColony v60: the market history is lost")) == 1; },
+				[&]() { return Sim->GetMarketHistoryFill() == 0 && Sim->GetMarketHistoryLastSol() == -1; },
+				[&]() { return Sim->GetMarketPriceMcr(NIce) == IcePrice && Sim->GetMarketCheckedSol() == Open15 && Sim->GetMarketBlockLoss() == URHSimWorldSubsystem::ERHMarketBlockLoss::None; },
+				}, FString::Printf(TEXT("MX15 a lost 'RHE8' (its tag destroyed) starts the history empty with exactly one Warning while the market loads intact (Ice %s cr/kg, open sol %d)"), *Cr(IcePrice), Sim->GetMarketCheckedSol()));
+		}
+		// A lost 'RHE4' with an intact, non-empty 'RHE8': the ring describes prices that no longer exist and is dropped (ruling 10: it held some).
+		{
+			TArray<uint8> T = W; Put32H(T, MarketAt, 0);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15l4"), T, E);
+			Expect(bOk && Count15(TEXT("LoadColony v60: the market history is dropped: its market block was lost (region 0)")) == 1 && Sim->GetMarketHistoryFill() == 0,
+				TEXT("MX15 a lost 'RHE4' with an intact 'RHE8' drops the ring: \"the market history is dropped: its market block was lost (region 0)\""));
+		}
+		// A slot table E4 resets (its first name made to sort last): dropped with the slot table's wording.
+		{
+			TArray<uint8> T = W; T[MarketAt + RHSaveFrame::HeaderBytes + 8] = 'z'; RHSaveFrame::Reseal(T, RHSaveFrame::MarketTag);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15sr"), T, E);
+			Expect(bOk && Count15(TEXT("LoadColony v60: the market history is dropped: its market block's slot table was reset (region 0)")) == 1 && Sim->GetMarketHistoryFill() == 0
+				&& Sim->GetMarketBlockLoss() == URHSimWorldSubsystem::ERHMarketBlockLoss::SlotsReset,
+				TEXT("MX15 a slot table E4 resets drops the ring: \"the market history is dropped: its market block's slot table was reset (region 0)\""));
+		}
+		// The doctored rings, each resealed: a last sol behind the open sol; fill 0 with last sol 5; fill 3 with last sol -1; a slot name.
+		const FMktHistBlock::FRing& R0 = H.Rings.Num() > 0 ? H.Rings[0] : FMktHistBlock::FRing();
+		{
+			// A sol ahead of the open sol: one behind it would put this fill's oldest entry before sol 0, which the reader's parse bound now
+			// refuses as malformed (fix round 2), so check (c) is reached from ahead.
+			TArray<uint8> T = W; Put32H(T, R0.LastAt, Open15 + 1);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15ls"), SealedH(T), E);
+			Expect(bOk && Count15(*FString::Printf(TEXT("the history ends at sol %d but the market's open sol is %d"), Open15 + 1, Open15)) == 1 && Sim->GetMarketHistoryFill() == 0,
+				FString::Printf(TEXT("MX15 a doctored last sol (%d, the open sol %d) drops the ring with its Warning"), Open15 + 1, Open15));
+		}
+		{
+			// The parse bound (fix round 2): a last sol whose fill reaches back before sol 0 is malformed.
+			TArray<uint8> T = W; Put32H(T, R0.LastAt, Fill15 - 2);
+			FString E;
+			const bool bOk = Fill15 >= 2 && Try15(TEXT("mktmx15lb"), SealedH(T), E);
+			Expect(bOk && Count15(*FString::Printf(TEXT("the market history is malformed (region 0: fill %d, head %d, last sol %d)"), Fill15, R0.Head, Fill15 - 2)) == 1 && Sim->GetMarketHistoryFill() == 0,
+				FString::Printf(TEXT("MX15 fill %d with last sol %d (its oldest entry would be sol -1) is malformed and dropped"), Fill15, Fill15 - 2));
+		}
+		{
+			TArray<uint8> A = W; Put32H(A, R0.FillAt, 0); Put32H(A, R0.LastAt, 5);
+			TArray<uint8> B = W; Put32H(B, R0.FillAt, 3); Put32H(B, R0.LastAt, -1);
+			FString E;
+			const bool bA = Try15(TEXT("mktmx15m1"), SealedH(A), E) && Count15(TEXT("the market history is malformed (region 0: fill 0, head")) == 1 && Sim->GetMarketHistoryFill() == 0;
+			const bool bB = Try15(TEXT("mktmx15m2"), SealedH(B), E) && Count15(TEXT("the market history is malformed (region 0: fill 3, head")) == 1 && Sim->GetMarketHistoryFill() == 0;
+			Expect(bA && bB, TEXT("MX15 fill 0 with last sol 5, and fill 3 with last sol -1, are malformed: each ring is dropped with \"the market history is malformed\""));
+		}
+		{
+			TArray<uint8> T = W;
+			const int32 LastName = H.SlotNameAt.Num() > 0 ? H.SlotNameAt.Last() : 0;
+			const int32 LastLen = H.Slots.Num() > 0 ? H.Slots.Last().Len() : 0;
+			T[LastName + LastLen - 1] = 'z'; // the last name stays last: still ascending, no longer the market's
+			FString E;
+			const bool bOk = LastLen > 0 && Try15(TEXT("mktmx15sn"), SealedH(T), E);
+			Expect(bOk && Count15(TEXT("LoadColony v60: the market history is dropped: its slot table is not the market's")) == 1 && Sim->GetMarketHistoryFill() == 0,
+				FString::Printf(TEXT("MX15 a doctored slot name (%s's last letter made z) drops the ring"), H.Slots.Num() > 0 ? *H.Slots.Last() : TEXT("?")));
+		}
+		{
+			// A slot name whose length cannot be read (300 characters, over ReadName's 256): malformed, the reason naming the slot (fix round 3).
+			TArray<uint8> T = W;
+			const int32 FirstName = H.SlotNameAt.Num() > 0 ? H.SlotNameAt[0] : 0;
+			if (FirstName >= 4) { Put32H(T, FirstName - 4, 300); }
+			FString E;
+			const bool bOk = FirstName >= 4 && Try15(TEXT("mktmx15nl"), SealedH(T), E);
+			Expect(bOk && Count15(TEXT("LoadColony v60: the market history is malformed (slot name 0 cannot be read); the history starts empty")) == 1 && Sim->GetMarketHistoryFill() == 0,
+				TEXT("MX15 a slot name's length doctored to 300 is malformed: \"the market history is malformed (slot name 0 cannot be read)\", the ring dropped"));
+		}
+		// A price outside the band (Ice, the sol before the open sol, at 1 mcr) is clamped; an open-sol entry that disagrees (Struct + 1 mcr) is
+		// rewritten, naming the slot.
+		{
+			TArray<uint8> T = W;
+			const int32 EBack1 = (R0.Head - 2 + 2 * HistN) % HistN, EOpen = (R0.Head - 1 + 2 * HistN) % HistN;
+			Put64H(T, R0.PriceAt + (IceSlot * HistN + EBack1) * 8, 1);
+			const int64 StructOpen = StructSlot >= 0 ? R0.Price[StructSlot * HistN + EOpen] : 0;
+			Put64H(T, R0.PriceAt + (StructSlot * HistN + EOpen) * 8, StructOpen + 1);
+			FString E;
+			const bool bOk = IceSlot >= 0 && StructSlot >= 0 && Try15(TEXT("mktmx15pr"), SealedH(T), E);
+			const int64 Floor = Sim->GetMarketFloorMcr(NIce);
+			ExpectSeq({
+				[&]() { return bOk && Capture.NumWarnings() == 2; },
+				[&]() { return Count15(*FString::Printf(TEXT("held 1 price(s) of Ice outside [%lld, %lld]; clamped"), Floor, Sim->GetMarketCeilMcr(NIce))) == 1; },
+				[&]() { return Count15(*FString::Printf(TEXT("its history entry for the open sol %d held Struct at %lld mcr but the loaded price is %lld; rewritten"), Open15, StructOpen + 1, StructOpen)) == 1; },
+				[&]() { return RingAt(NIce, Open15 - 1, 0) == Floor && RingAt(NStruct, Open15, 0) == StructOpen && Sim->GetMarketHistoryFill() == Fill15; },
+				}, FString::Printf(TEXT("MX15 a doctored price outside the band (Ice at 1 mcr, sol %d) is clamped to the floor %s with a Warning, and an open-sol entry that disagrees with the loaded price (Struct %s) is rewritten with a Warning naming it; the ring is kept"),
+					Open15 - 1, *Cr(Floor), *Cr(StructOpen + 1)));
+		}
+		// The price hook keeps the open sol's entry in step: after Debug_SetMarketPrice(Ice, floor) save, load, save is byte-identical with no Warning.
+		{
+			LoadSlot(TEXT("mktmx15"));
+			Sim->Debug_SetMarketPrice(NIce, Sim->GetMarketFloorMcr(NIce));
+			TArray<uint8> P1, P2;
+			Sim->SaveColony(TEXT("mktmx15h1"), SaveErr);
+			FFileHelper::LoadFileToArray(P1, *SaveFilePath(TEXT("mktmx15h1")));
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15h1b"), P1, E) && Capture.NumWarnings() == 0 && Sim->SaveColony(TEXT("mktmx15h2"), SaveErr) && FFileHelper::LoadFileToArray(P2, *SaveFilePath(TEXT("mktmx15h2")));
+			Expect(bOk && P1 == P2 && RingAt(NIce, Open15, 0) == Sim->GetMarketFloorMcr(NIce), TEXT("MX15 after Debug_SetMarketPrice(Ice, floor) the open sol's entry reads the floor, and save, load, save is byte-identical with no Warning"));
+		}
+		// A resync (an injected rival bumps the rivals' generation) keeps the ring through bKeepHist, and the prices as saved.
+		{
+			LoadSlot(TEXT("mktmx15"));
+			TArray<int64> Before, After;
+			Sim->GetMarketHistory(NIce, Before);
+			Inject(FName("MxHist"), 45.0, TEXT("Ice:20"), TEXT("Ice:5"), TEXT("Ice:300"), TEXT("Ice:3000"), TEXT(""), TEXT(""), 0);
+			Sim->Debug_SyncRivalEconomies();
+			Sim->GetMarketHistory(NIce, After);
+			Expect(Before.Num() == Fill15 && After == Before && Sim->GetMarketHistoryFill() == Fill15 && Sim->GetMarketHistoryLastSol() == Open15
+				&& Saved15.Num() == Sim->GetLedgerSlotCount() && LivePrices().OrderIndependentCompareEqual(Saved15),
+				FString::Printf(TEXT("MX15 a resync (MxHist injected into region 0) keeps the ring through bKeepHist (fill %d, last sol %d, every Ice entry) and the prices as saved, every slot against its price recorded before the save (Struct %s, saved %s)"),
+					Sim->GetMarketHistoryFill(), Sim->GetMarketHistoryLastSol(), *Cr(Sim->GetMarketPriceMcr(NStruct)), *Cr(Saved15.FindRef(NStruct))));
+		}
+		// A second region (MxAur injected into region 1): its ring starts at the next roll's closing sol and moves on its own; both rings save
+		// and load (221 + 2 x 5,086 bytes).
+		{
+			LoadSlot(TEXT("mktmx15"));
+			Inject(FName("MxAur"), 60.0, TEXT("Ice:30"), TEXT("Ice:10"), TEXT("Ice:500"), TEXT("Ice:4000"), TEXT(""), TEXT(""), 1);
+			Sim->Debug_SyncRivalEconomies();
+			const bool bTwo = Sim->GetMarketRegionCount() == 2 && Sim->GetMarketRegionIdAt(1) == 1 && Sim->GetMarketHistoryFill(1) == 0;
+			RollNext();
+			const bool bStarted = Sim->GetMarketHistoryFill(1) == 2 && Sim->GetMarketHistoryLastSol(1) == Open15 + 1 && Sim->GetMarketHistoryFill(0) == FMath::Min(HistN, Fill15 + 1) && OpenIsLive(0) && OpenIsLive(1);
+			const int64 Open0Ice = RingAt(NIce, Open15 + 1, 0);
+			const int64 Floor1 = Sim->GetMarketFloorMcr(NIce, 1);
+			Sim->Debug_SetMarketPrice(NIce, Floor1, 1);
+			const bool bApart = RingAt(NIce, Open15 + 1, 1) == Floor1 && RingAt(NIce, Open15 + 1, 0) == Open0Ice;
+			SyncClock15();
+			const int32 TwoBytes = Sim->GetMarketHistoryBlockBytes();
+			TArray<uint8> T2;
+			Sim->SaveColony(TEXT("mktmx15r1"), SaveErr);
+			FFileHelper::LoadFileToArray(T2, *SaveFilePath(TEXT("mktmx15r1")));
+			FString E;
+			const bool bLoaded = Try15(TEXT("mktmx15r1b"), T2, E) && Capture.NumWarnings() == 0 && Sim->GetMarketHistoryFill(1) == 2 && Sim->GetMarketHistoryFill(0) == FMath::Min(HistN, Fill15 + 1)
+				&& RingAt(NIce, Open15 + 1, 1) == Floor1;
+			ExpectSeq({
+				[&]() { return bTwo && bStarted; },
+				[&]() { return bApart; },
+				[&]() { return TwoBytes == 221 + 2 * 5086; },
+				[&]() { return bLoaded; },
+				}, FString::Printf(TEXT("MX15 an injected region-1 rival (Inject(..., 1)) gives a second ring that starts at the next roll's closing sol (fill 2) while region 0's goes on (fill %d); the price hook moves region 1's open-sol entry alone; both save (%d payload bytes) and load with no Warning"),
+					Sim->GetMarketHistoryFill(0), TwoBytes));
+			RetireAll();
+		}
+		// Load repair (b), which had no check (the review's minor): a ring for a region where no market trades now is dropped with its Warning.
+		{
+			TArray<uint8> T = W; Put32H(T, R0.RegionAt, 5);
+			FString E;
+			const bool bOk = Try15(TEXT("mktmx15nr"), SealedH(T), E);
+			Expect(bOk && Count15(TEXT("LoadColony v60: the market history of region 5 is dropped: no market trades there now")) == 1 && Sim->GetMarketHistoryFill() == 0,
+				TEXT("MX15 a ring doctored to region 5, where no market trades, is dropped: \"the market history of region 5 is dropped: no market trades there now\""));
+		}
+		// Load repair (f) before the mark's open sol, which had no count (the review's minor; only the lost-'RHE5' branch had): on MX12 (c)'s
+		// issue, the sol before the open sol doctored to marks reads in credits again with its Warning; the open sol stays in marks.
+		{
+			Reset();
+			Provision(20000000);
+			Sim->Debug_SetRequisitionInputs(40.0, Sim->GetEarthTension());
+			Sim->Debug_SyncPoliticalView();
+			{ FRHCommand C; C.Verb = FName("Currency"); C.Target = FName("Issue"); Sim->EnqueueCommand(C); EraOnce(); }
+			RollNext();
+			RollNext();
+			SyncClock15();
+			const int32 OpenSolF = Sim->GetCurrencyOpenSol();
+			TArray<uint8> WF;
+			FMktHistBlock HF;
+			const bool bSavedF = Sim->IsMarketInMarks() && Sim->GetMarketHistoryFill() >= 2 && Sim->GetMarketHistoryUnit(1) == 0 && Sim->GetMarketHistoryLastSol() - 1 < OpenSolF
+				&& Sim->SaveColony(TEXT("mktmx15f"), SaveErr) && FFileHelper::LoadFileToArray(WF, *SaveFilePath(TEXT("mktmx15f"))) && MktHistParse(WF, HF) && HF.Rings.Num() == 1;
+			bool bRepaired = false;
+			if (bSavedF)
+			{
+				const FMktHistBlock::FRing& RF = HF.Rings[0];
+				const int32 E1 = (RF.Head - 2 + 2 * HistN) % HistN; // Back 1: the sol before the open sol, in credits
+				TArray<uint8> T = WF;
+				T[RF.UnitAt + E1] = 1;
+				Put64H(T, RF.RateAt + 8 * E1, 1000);
+				FString E;
+				bRepaired = Try15(TEXT("mktmx15fu"), SealedH(T), E)
+					&& Count15(*FString::Printf(TEXT("LoadColony v60: the market history of region 0 is repaired: 1 sol(s) held in marks before the mark's open sol %d; they read in credits"), OpenSolF)) == 1
+					&& Sim->GetMarketHistoryUnit(1) == 0 && Sim->GetMarketHistoryRateMcr(1) == 0 && Sim->GetMarketHistoryUnit(0) == 1;
+			}
+			Expect(bSavedF && bRepaired, FString::Printf(TEXT("MX15 a sol held in marks before the mark's open sol %d (the sol before it doctored to unit 1, rate 1.000) reads in credits again with its Warning (unit 0, no rate), the open sol still in marks"), OpenSolF));
+		}
+		Expect(BadWording == 0 && Errors15 == 0, FString::Printf(TEXT("MX15 no E8 Warning carries E4's lost-block wording (%d) and no load above logged an Error (%d)"), BadWording, Errors15));
+	}
+
 	// --- MX8. Era parity, last (it injects a rival of its own). The start save: the default colony provisioned, Kestrel (a 30 km neighbor with
 	// a 1-sol round trip, making 100 kg of Ice a sol) beside Zarya, the clock at sol 20.0 by the real roll - a 20-sol window [20, 40) with no
 	// storm (Storm_1 ends at sol 15; Flare_1 at sol 17 freezes nothing). Both bands run the same scripted orders through EnqueueCommand at the
@@ -1713,7 +2292,30 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			int64 Balance = 0, Reserved = 0, BoundaryFill = -1, MarginPrice = 0, RegolithMadeG = 0;
 			int32 Booked = 0, Refused = 0, Rolls = 0;
 			bool bHalfOk = true, bDiscoveredSame = true;
+			FString Ring;                 // E8 (MX13): region 0's history at every threshold
+			bool bAvailable = true;       // E8 (MX13): every convoy booked names an available rival
 		};
+		// E8 (MX13): region 0's history as text - fill, head and last sol, every slot's prices oldest first, and per sol (newest first) its
+		// sold and bought values, its rate and its unit.
+		const auto HistDigest = [&]() -> FString
+		{
+			FString D = FString::Printf(TEXT("[sol %d fill %d head %d last %d"), Sim->GetMarketCheckedSol(), Sim->GetMarketHistoryFill(), Sim->Debug_GetMarketHistoryHead(), Sim->GetMarketHistoryLastSol());
+			for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
+			{
+				TArray<int64> P;
+				Sim->GetMarketHistory(Sim->GetLedgerSlotName(i), P);
+				D += TEXT(" |");
+				for (const int64 V : P) { D += FString::Printf(TEXT(" %lld"), V); }
+			}
+			for (int32 Back = 0; Back < Sim->GetMarketHistoryFill(); ++Back)
+			{
+				int64 Sv = 0, Bv = 0;
+				Sim->GetMarketHistoryValue(Back, Sv, Bv);
+				D += FString::Printf(TEXT(" v%lld/%lld/%lld/%u"), Sv, Bv, Sim->GetMarketHistoryRateMcr(Back), (uint32)Sim->GetMarketHistoryUnit(Back));
+			}
+			return D + TEXT("]\n");
+		};
+		bool bHistOffRun = false; // E8 (MX14): the run's history switch, set after the start save loads
 		const double WindowStart = 20.0 * SolLen;
 		const auto AtSol = [&](double Sol) { return WindowStart + Sol * SolLen; };
 		const double BoundaryB = AtSol(16.0); // the sol-36 boundary
@@ -1724,6 +2326,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		{
 			LoadSlot(TEXT("marketmx8"));
 			Sim->Debug_SetMarketRivalOnly(bRivalOnly);
+			Sim->Debug_SetMarketHistoryEnabled(!bHistOffRun);
 			FRun O;
 			int32 NextSend = 0, NextEvt = 0, Cleared = Sim->GetMarketClearings().Num(), Refused = 0;
 			int32 LastChecked = Sim->GetMarketCheckedSol();
@@ -1759,6 +2362,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 						if (!PrevIds.Contains(C.Id))
 						{
 							++O.Booked;
+							O.bAvailable &= Sim->IsRivalAvailable(C.Rival);
 							O.Books += FString::Printf(TEXT("#%d %s clear %d; "), C.Id, *C.Rival.ToString(), C.ClearSol);
 							O.bHalfOk &= C.ReservedMcr * 2 <= Sim->GetSpendableMcr() + C.ReservedMcr; // at most half the spendable credit (before it was set aside)
 						}
@@ -1779,6 +2383,7 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 					O.PriceOnly += FString::Printf(TEXT("[sol %d"), LastChecked);
 					for (const FName R : TracedRes) { O.Prices += FString::Printf(TEXT(" %s=%lld"), *R.ToString(), Sim->GetMarketPriceMcr(R)); O.PriceOnly += FString::Printf(TEXT(" %s=%lld"), *R.ToString(), Sim->GetMarketPriceMcr(R)); }
 					O.PriceOnly += TEXT("]\n");
+					O.Ring += HistDigest();
 					for (const FName R : { NIce, NWater, NOx, NStruct, NHyd }) { O.Prices += FString::Printf(TEXT(" Z.%s=%lld"), *R.ToString(), Sim->GetRivalStoreG(NZarya, R)); }
 					for (const FName R : { NParts, NFood }) { O.Prices += FString::Printf(TEXT(" M.%s=%lld"), *R.ToString(), Sim->GetRivalStoreG(NMeridian, R)); }
 					O.Prices += FString::Printf(TEXT(" K.Ice=%lld K.Regolith=%lld]\n"), Sim->GetRivalStoreG(NKestrel, NIce), Sim->GetRivalStoreG(NKestrel, NRegolith));
@@ -1869,6 +2474,17 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			[&]() { return EraOnly.Prices != EraMain.Prices; },
 			},
 			FString::Printf(TEXT("MX8 the fallback twin (MarketRivalOnly) is held to the same bar: the same nine orders, thresholds, fills and returns identical in both bands (%d rolls); its prices follow the rivals' data alone, so they differ from the main run's"), EraOnly.Rolls));
+		// E8 (MX13): the history is band-exact. Every value it holds is fixed at a roll (E4's band-exactness), so the paired runs' rings are equal
+		// entry for entry at every threshold, in the main twins and in the fallback twins.
+		ExpectSeq({
+			[&]() { return EraMain.Ring.Len() > 0 && EraMain.Ring == AgentMain.Ring; },
+			[&]() { return EraOnly.Ring == AgentOnly.Ring; },
+			[&]() { return EraOnly.Ring != EraMain.Ring; },
+			[&]() { return EraMain.bAvailable && AgentMain.bAvailable && EraOnly.bAvailable && AgentOnly.bAvailable; },
+			},
+			FString::Printf(TEXT("MX13 the history is band-exact: at every one of the %d thresholds the era and agent twins' rings are equal entry for entry (every slot's prices, each sol's values, rate and unit, fill, head and last sol: %d chars), and so are the fallback twins' (%d chars); every convoy either run booked names an available rival"),
+				EraMain.Rolls, EraMain.Ring.Len(), EraOnly.Ring.Len()));
+		if (EraMain.Ring != AgentMain.Ring) { Info(FString::Printf(TEXT("MX13 ring diff: %s"), *FirstDiff(EraMain.Ring, AgentMain.Ring))); }
 		// The margin case. One boundary order buys Zarya's Struct, whose price rises at the sol-21 roll; the spendable credit is set between the
 		// reservation quoted before that roll (the era band books there) and the one quoted after it (the agent band books there), so one band
 		// books the order and the other refuses it. (A probe rolls once from the start save to read both quotes.)
@@ -1923,6 +2539,56 @@ int32 RHRunMarketSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			[&]() { return E.MarginPrice == A.MarginPrice; },
 			},
 					FString::Printf(TEXT("MX8 the margin case (fallback twins): with %s cr spendable one band books and the other refuses (era %d, agent %d), yet the fallback twins' prices stay identical at every threshold (Struct %lld mcr at the end)"), *Cr(S), E.Booked, A.Booked, E.MarginPrice));
+			}
+		}
+		// --- MX14 (E8). Write-only: from 'marketmx8', the main schedule run with the history switch on and off, 20 sols in each band. Nothing
+		// outside the ring moves: MX1's digest, every threshold's prices, stores and clearings, and every byte of the save outside the 'RHE8'
+		// frame are identical. The off twin's ring is empty (the switch empties it, brief B1) and its save loads with no E8 Warning; the on
+		// twin's ring is full at sol 40, its newest entry the open sol.
+		{
+			struct FHistTwin { FString Digest; FRun Run; TArray<uint8> Bytes; int32 Fill = 0, Last = 0, Open = 0; };
+			const auto HistTwin = [&](bool bAgent, bool bOff, const TCHAR* Slot) -> FHistTwin
+			{
+				bHistOffRun = bOff;
+				FHistTwin T;
+				T.Run = RunWindow(bAgent, false, Main, MainEvt, 20.0);
+				bHistOffRun = false;
+				T.Digest = Digest();
+				T.Fill = Sim->GetMarketHistoryFill();
+				T.Last = Sim->GetMarketHistoryLastSol();
+				T.Open = Sim->GetMarketCheckedSol();
+				FString Err14;
+				Sim->SaveColony(Slot, Err14);
+				FFileHelper::LoadFileToArray(T.Bytes, *SaveFilePath(Slot));
+				return T;
+			};
+			for (const bool bAgent : { false, true })
+			{
+				const FHistTwin On = HistTwin(bAgent, false, bAgent ? TEXT("mktmx14_a1") : TEXT("mktmx14_e1"));
+				const FHistTwin Off = HistTwin(bAgent, true, bAgent ? TEXT("mktmx14_a0") : TEXT("mktmx14_e0"));
+				int32 OnAt = INDEX_NONE, OnPayload = 0, OffAt = INDEX_NONE, OffPayload = 0;
+				const bool bFound = RHSaveFrame::Find(On.Bytes, RHSaveFrame::HistoryTag, OnAt, OnPayload) && RHSaveFrame::Find(Off.Bytes, RHSaveFrame::HistoryTag, OffAt, OffPayload);
+				const int32 FrameEnd = OnAt + RHSaveFrame::HeaderBytes + OnPayload + RHSaveFrame::FooterBytes;
+				const bool bOutside = bFound && On.Bytes.Num() == Off.Bytes.Num() && OnAt == OffAt && OnPayload == OffPayload && FrameEnd <= On.Bytes.Num()
+					&& FMemory::Memcmp(On.Bytes.GetData(), Off.Bytes.GetData(), OnAt) == 0
+					&& FMemory::Memcmp(On.Bytes.GetData() + FrameEnd, Off.Bytes.GetData() + FrameEnd, On.Bytes.Num() - FrameEnd) == 0;
+				const bool bInside = bOutside && FMemory::Memcmp(On.Bytes.GetData() + OnAt, Off.Bytes.GetData() + OnAt, FrameEnd - OnAt) != 0;
+				Capture.Clear();
+				FString LoadErr14;
+				const bool bOffLoads = Sim->LoadColony(bAgent ? TEXT("mktmx14_a0") : TEXT("mktmx14_e0"), LoadErr14) && LoadErr14.IsEmpty();
+				const int32 OffE8 = Capture.CountWarnings(TEXT("LoadColony v60")), OffErrors = Capture.NumErrors();
+				ExpectSeq({
+					[&]() { return On.Digest == Off.Digest && On.Digest.Len() > 300; },
+					[&]() { return On.Run.Prices == Off.Run.Prices && On.Run.Clearings == Off.Run.Clearings && On.Run.Balance == Off.Run.Balance && On.Run.Booked == 9; },
+					[&]() { return bOutside; },
+					[&]() { return bInside; },
+					[&]() { return Off.Fill == 0 && Off.Last == -1 && Off.Run.Ring.Contains(TEXT("fill 0 head 0 last -1")); },
+					[&]() { return bOffLoads && OffE8 == 0 && OffErrors == 0 && Sim->GetMarketHistoryFill() == 0; },
+					[&]() { return On.Fill == 30 && On.Last == On.Open && On.Open == 40; },
+					},
+					FString::Printf(TEXT("MX14 %s band, the main schedule from 'marketmx8' with the history on and off (20 sols): MX1's digest (%d chars), every threshold's prices, stores and clearings and the end balance are identical, and the saves (%d bytes) are byte-identical outside the 'RHE8' frame (%d payload bytes at byte %d); the off twin's ring is empty and its save loads with no E8 Warning (%d); the on twin's ring holds %d sols ending at the open sol %d"),
+						bAgent ? TEXT("agent") : TEXT("era"), On.Digest.Len(), On.Bytes.Num(), OnPayload, OnAt, OffE8, On.Fill, On.Last));
+				if (On.Run.Prices != Off.Run.Prices) { Info(FString::Printf(TEXT("MX14 price diff: %s"), *FirstDiff(On.Run.Prices, Off.Run.Prices))); }
 			}
 		}
 		RetireAll();

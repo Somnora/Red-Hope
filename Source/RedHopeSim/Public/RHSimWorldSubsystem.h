@@ -1887,6 +1887,21 @@ public:
 	int32 GetMarketRegionIdAt(int32 Index) const;                                  // the Index-th market's RegionId (RegionId order); -1 out of range
 	int64 GetRivalProduceG(FName Rival, FName Resource) const;                     // grams a sol, the endowment applied; -1 with no economy entry
 	int64 GetMarketProdSumG(FName Resource, int32 RegionId = 0) const;             // over the region's economy rivals; 0 with no market or slot
+	// E8, the market's 30-sol history (docs/qa/2026-10-25/e8-market-panel-design.md, REVISION 3). Per region a ring of the last 30 sols: the
+	// price in force during each sol (in the market's unit then: mcr, or mmk while the market counts in marks), the value the colony sold and
+	// bought at that sol's clearings (before any markup, as E4's tally), and the rate and unit E5 had in force. The newest entry is the open
+	// sol (after any roll its sol is GetMarketCheckedSol()); a sol a long jump skipped is unknown (price -1). WRITE-ONLY: written by RollMarket,
+	// Debug_SetMarketPrice and the load repairs, and no sim rule, price, digest or log line in play reads it. SAVED (v60): the 'RHE8' frame.
+	static constexpr int32 MarketHistSols = 30;
+	int32 GetMarketHistoryFill(int32 RegionId = 0) const;                          // entries held, 0..30
+	int32 GetMarketHistoryLastSol(int32 RegionId = 0) const;                       // the newest entry's sol (the open sol after any roll); -1 empty
+	// OutPrice[k] is the price in force during sol LastSol - (Fill - 1) + k (oldest first; -1 = unknown); false with no such market or slot.
+	bool GetMarketHistory(FName Resource, TArray<int64>& OutPrice, int32 RegionId = 0) const;
+	// Back 0 is the open sol (nothing has cleared in it: 0, 0), Back 1 the sol just closed, ... Back Fill - 1; false outside.
+	bool GetMarketHistoryValue(int32 Back, int64& OutSoldValue, int64& OutBoughtValue, int32 RegionId = 0) const;
+	int64 GetMarketHistoryRateMcr(int32 Back, int32 RegionId = 0) const;          // E5's rate in force during that sol; 0 = unissued (or outside)
+	uint8 GetMarketHistoryUnit(int32 Back, int32 RegionId = 0) const;             // 0 credits, 1 marks (0 outside)
+	int32 GetMarketHistoryBlockBytes() const;        // the 'RHE8' payload's bytes, measured on the SYNCED state (sized by the tables)
 	// Money. Balance == Awarded - Spent; 0 <= SalesPaid + MarketSales (+ E5's DeskCredit + CurrencyRedeemed) <= Awarded; Reserved == the sum of
 	// the uncleared credit convoys' reservations (+ E5's pending ToMarks desk amounts) and 0 <= Reserved <= Balance. Spendable = Balance -
 	// Reserved: the manifest (CanAddManifestItem), the launch (CanLaunchShip) and the short launch (LaunchShipShort) all read it, and
@@ -1922,6 +1937,11 @@ public:
 	void Debug_RollMarket(int32 SolNow) { RollMarket(SolNow); }                       // the whole roll: clearing, production, reprice
 	int64 Debug_CreditSpend(int64 Mcr) { return CreditSpend(Mcr); }                   // returns what could not be paid
 	void Debug_SyncRivalEconomies() { SyncRivalEconomies(false, true); }
+	// E8: the history's switch (runtime only, never saved; true at world start and after every harness load). Off empties every ring and skips
+	// every write until it is on again; the next roll then starts each ring at its closing sol. It never touches the loader.
+	void Debug_SetMarketHistoryEnabled(bool bOn);
+	bool IsMarketHistoryEnabled() const { return bMarketHistoryEnabled; }
+	int32 Debug_GetMarketHistoryHead(int32 RegionId = 0) const;                    // the ring's next entry to write (MX12, MX13); 0 with no market
 	// E7: binds region RegionId's colony depot to a building (rule 1 of FindColonyDepotBuildingId). True only when the building exists and
 	// is complete, or when BuildingId is 0 (which clears the binding); any RegionId but 0 is refused until T2. Runtime only: never saved,
 	// and every load's teardown clears it.
@@ -4436,6 +4456,16 @@ private:
 		TArray<int64> PriceMcr;                      // per E1 slot (SAVED)
 		TArray<int64> RingSoldG, RingBoughtG;        // slot x MarketRing + entry (SAVED): what the colony sold / bought, as filled
 		int32 RingFill = 0, RingHead = 0;            // SAVED
+		// E8: the 30-sol history. SAVED (v60, the 'RHE8' frame; not E4's block). Written by RollMarket, Debug_SetMarketPrice and the load
+		// repairs only; no sim rule reads it. Entries are contiguous sols ending at HistLastSol: the entry for sol t is at
+		// (HistHead - 1 - (HistLastSol - t) + 2 x MarketHistSols) % MarketHistSols while 0 <= HistLastSol - t < HistFill. Always sized
+		// (HistInitEmpty), never absent; integer mcr / mmk only.
+		TArray<int64> HistPrice;                     // slot x MarketHistSols + entry: the price in force during that sol, in the unit then; -1 unknown
+		TArray<int64> HistSoldValue, HistBoughtValue; // per entry: the clearings' SellsValue / BuysValue in that sol's pass (pre-markup)
+		TArray<int64> HistRateMcr;                   // per entry: E5's rate in force during that sol; 0 = unissued
+		TArray<uint8> HistUnit;                      // per entry: 0 credits, 1 marks
+		int32 HistFill = 0, HistHead = 0;            // entries held (0..30) and the next entry to write
+		int32 HistLastSol = -1;                      // the newest entry's sol; -1 = empty
 		// Derived at every sync, never saved.
 		TArray<uint8> bTraded;
 		TArray<int64> ProdSumG, ConsSumG, CapSumG;   // over this region's economy rivals
@@ -4475,6 +4505,16 @@ private:
 	void WriteMarketBlock(FArchive& Ar) const;
 	void ReadMarketBlock(FArchive& Ar, const TArray<uint8>& File, FName V17Rival, bool bV17Returning, double V17LegSols);
 	void WriteMarketPayload(FArchive& Ar, const TArray<FRHRivalEconomy>& Econ, const TArray<FRHMarket>& Mkts) const;
+	// E8: the history (RHSimMarket.cpp). HistInitEmpty sizes an empty ring for N slots; HistAppend writes one entry at the head (Known: the live
+	// prices, unit and rate; else unknown); HistEnsure (the top of the pass closing Sol) starts an empty ring at Sol or fills a lag; HistOpen
+	// (after the reprice and E5's steps) appends the sols a jump skipped after the ring's last sol as unknown, then the new open sol.
+	static void HistInitEmpty(FRHMarket& Mk, int32 N);
+	void HistAppend(FRHMarket& Mk, int32 Sol, bool bKnown) const;
+	void HistEnsure(FRHMarket& Mk, int32 Sol) const;
+	void HistOpen(FRHMarket& Mk, int32 OpenSol) const;
+	void WriteMarketHistoryBlock(FArchive& Ar) const;
+	void ReadMarketHistoryBlock(FArchive& Ar, const TArray<uint8>& File);
+	bool bMarketHistoryEnabled = true;               // runtime only (Debug_SetMarketHistoryEnabled); never saved
 	// Booking: one plan for the verb, the deck and the cheat. Nothing here acts; BookConvoy commits it.
 	struct FRHBookPlan
 	{

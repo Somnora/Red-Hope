@@ -258,6 +258,59 @@ namespace
 		}
 	}
 
+	// ---- E8 (Zarya (a)): the scenery's solid meshes as triangles bucketed on a 10 m grid over the 1.2 km square round the colony's centre,
+	// so SceneryTopZCm can read the highest mesh over a point (a vertical line meets each triangle at most once; the topmost is the surface
+	// a camera above sees). Rebuilt with the scenery.
+	struct FTopGrid
+	{
+		static constexpr double HalfCm = 60000.0;
+		static constexpr double CellCm = 1000.0;
+		static constexpr int32 Cells = 120;
+		TArray<FVector> Tri;          // three vertices per triangle
+		TArray<TArray<int32>> Bucket; // Cells x Cells, row-major in Y
+		int32 Generation = 0;
+	};
+
+	FTopGrid& TopGrid()
+	{
+		static FTopGrid Grid;
+		return Grid;
+	}
+
+	void TopGridAdd(const FAcc& Acc)
+	{
+		FTopGrid& G = TopGrid();
+		for (int32 i = 0; i + 2 < Acc.I.Num(); i += 3)
+		{
+			const FVector& A = Acc.V[Acc.I[i]];
+			const FVector& B = Acc.V[Acc.I[i + 1]];
+			const FVector& C = Acc.V[Acc.I[i + 2]];
+			const double MinX = FMath::Min3(A.X, B.X, C.X), MaxX = FMath::Max3(A.X, B.X, C.X);
+			const double MinY = FMath::Min3(A.Y, B.Y, C.Y), MaxY = FMath::Max3(A.Y, B.Y, C.Y);
+			if (MaxX < -FTopGrid::HalfCm || MinX > FTopGrid::HalfCm || MaxY < -FTopGrid::HalfCm || MinY > FTopGrid::HalfCm)
+			{
+				continue;
+			}
+			if (FMath::Abs((B.X - A.X) * (C.Y - A.Y) - (C.X - A.X) * (B.Y - A.Y)) < 1.0)
+			{
+				continue; // seen edge-on from above: it covers no ground
+			}
+			const int32 T = G.Tri.Num() / 3;
+			G.Tri.Add(A);
+			G.Tri.Add(B);
+			G.Tri.Add(C);
+			const auto CellOf = [](double V) { return FMath::Clamp(FMath::FloorToInt32((V + FTopGrid::HalfCm) / FTopGrid::CellCm), 0, FTopGrid::Cells - 1); };
+			const int32 X0 = CellOf(MinX), X1 = CellOf(MaxX), Y0 = CellOf(MinY), Y1 = CellOf(MaxY);
+			for (int32 Cy = Y0; Cy <= Y1; ++Cy)
+			{
+				for (int32 Cx = X0; Cx <= X1; ++Cx)
+				{
+					G.Bucket[Cy * FTopGrid::Cells + Cx].Add(T);
+				}
+			}
+		}
+	}
+
 	// ---- The ground sheet: a radial fan (dense where the camera lives,
 	// coarse at the horizon) displaced by the height field. It dips 24 cm
 	// below z=0 across the buildable flat so the level's authored MarsGround
@@ -378,6 +431,10 @@ void BuildScenery(AActor& Rig)
 
 	FAcc GroundBase, GroundPatch, Boulders, Pebbles, NearPeaks, MidPeaks, FarPeaks, Mesas;
 	PeakOutlines().Reset();
+	FTopGrid& Top = TopGrid();
+	Top.Tri.Reset();
+	Top.Bucket.Reset();
+	Top.Bucket.SetNum(FTopGrid::Cells * FTopGrid::Cells);
 
 	AppendGround(GroundBase, GroundPatch);
 
@@ -515,6 +572,16 @@ void BuildScenery(AActor& Rig)
 		}
 	}
 
+	// E8 (Zarya (a)): the solid meshes' triangles for SceneryTopZCm (pebbles left out).
+	TopGridAdd(Boulders);
+	TopGridAdd(NearPeaks);
+	TopGridAdd(MidPeaks);
+	TopGridAdd(FarPeaks);
+	TopGridAdd(Mesas);
+	++Top.Generation;
+	UE_LOG(LogRedHope, Display, TEXT("Mars scenery: %d solid-mesh triangles within %.0f m of the centre for the visible surface (generation %d)"),
+		Top.Tri.Num() / 3, FTopGrid::HalfCm / 100.0, Top.Generation);
+
 	// Assemble: three components (shadow policy matches the old rig - only
 	// near features pay for shadow casting), one section per tint.
 	const auto NewPMC = [&](const TCHAR* Name, bool bShadow) -> UProceduralMeshComponent*
@@ -648,6 +715,42 @@ float SceneryGroundZCm(double X, double Y)
 	const FVector A = Vert(J, K), B = Vert(J, K + 1), C = Vert(J + 1, K + 1), Dv = Vert(J + 1, K);
 	const float Z = PlaneZ(A, B, C, bInside);
 	return bInside ? Z : PlaneZ(A, C, Dv, bInside);
+}
+
+float SceneryTopZCm(double XCm, double YCm)
+{
+	float Z = FMath::Max(GroundZCm(XCm, YCm), SceneryGroundZCm(XCm, YCm));
+	const FTopGrid& G = TopGrid();
+	if (G.Bucket.Num() != FTopGrid::Cells * FTopGrid::Cells)
+	{
+		return Z; // the scenery is not built yet
+	}
+	const int32 Cx = FMath::FloorToInt32((XCm + FTopGrid::HalfCm) / FTopGrid::CellCm);
+	const int32 Cy = FMath::FloorToInt32((YCm + FTopGrid::HalfCm) / FTopGrid::CellCm);
+	if (Cx < 0 || Cy < 0 || Cx >= FTopGrid::Cells || Cy >= FTopGrid::Cells)
+	{
+		return Z;
+	}
+	for (const int32 T : G.Bucket[Cy * FTopGrid::Cells + Cx])
+	{
+		const FVector& A = G.Tri[3 * T];
+		const FVector& B = G.Tri[3 * T + 1];
+		const FVector& C = G.Tri[3 * T + 2];
+		const double D = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
+		const double L0 = ((B.Y - C.Y) * (XCm - C.X) + (C.X - B.X) * (YCm - C.Y)) / D;
+		const double L1 = ((C.Y - A.Y) * (XCm - C.X) + (A.X - C.X) * (YCm - C.Y)) / D;
+		const double L2 = 1.0 - L0 - L1;
+		if (L0 >= 0.0 && L1 >= 0.0 && L2 >= 0.0)
+		{
+			Z = FMath::Max(Z, (float)(L0 * A.Z + L1 * B.Z + L2 * C.Z));
+		}
+	}
+	return Z;
+}
+
+int32 GetSceneryGeneration()
+{
+	return TopGrid().Generation;
 }
 
 void AppendRock(TArray<FVector>& V, TArray<int32>& I, TArray<FVector>& N, const FVector& CenterCm, const FVector& RadiiCm, float YawDeg, uint32 Seed)

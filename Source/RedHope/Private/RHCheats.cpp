@@ -21,6 +21,7 @@
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTradeVisualizerSubsystem.h"
 #include "RHOrderWords.h"
 #include "RHCommandDeck.h"
 #include "Data/RHRows.h"
@@ -139,9 +140,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTerrainProbe(
 				DrawnLo = FMath::Min(DrawnLo, Dr); DrawnHi = FMath::Max(DrawnHi, Dr);
 			}
 		}
-		UE_LOG(LogRedHope, Display, TEXT("[RH.TerrainProbe] (%.0f, %.0f) m r %.0f m: field z %.2f m at the centre, %.2f..%.2f m over the disc (rise %.2f m, spread %.2f m); drawn lattice %.2f..%.2f m (spread %.2f m); nearest peak or mesa base %.0f m away (negative = inside)"),
+		UE_LOG(LogRedHope, Display, TEXT("[RH.TerrainProbe] (%.0f, %.0f) m r %.0f m: field z %.2f m at the centre, %.2f..%.2f m over the disc (rise %.2f m, spread %.2f m); drawn lattice %.2f..%.2f m (spread %.2f m); nearest peak or mesa base %.0f m away (negative = inside); the visible surface (E8: ground, lattice and the scenery's meshes) %.2f m at the centre"),
 			Xcm / 100.0, Ycm / 100.0, Rcm / 100.0, Centre / 100.f, Lo / 100.f, Hi / 100.f, (Hi - Centre) / 100.f, (Hi - Lo) / 100.f, DrawnLo / 100.f, DrawnHi / 100.f, (DrawnHi - DrawnLo) / 100.f,
-			RHMarsTerrain::SceneryClearanceCm(Xcm, Ycm) / 100.f);
+			RHMarsTerrain::SceneryClearanceCm(Xcm, Ycm) / 100.f, RHMarsTerrain::SceneryTopZCm(Xcm, Ycm) / 100.f);
 	}));
 
 static FAutoConsoleCommandWithWorldAndArgs GRHCamRobot(
@@ -1419,10 +1420,39 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSabotage(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 	TEXT("RH.Trade"),
-	TEXT("RH.Trade - log the trade state: rivals, relations, and the convoy's status."),
+	TEXT("RH.Trade - log the trade state: rivals, relations, and the convoy's status. RH.Trade overlay [0|1] - E8: switch the Routes overlay (each known neighbour's route, coloured by its status) on or off; no argument toggles. RH.Trade markers - E8 (read-only): each known settlement marker's place and the height it is seated at."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
+		if (Args.Num() >= 1 && Args[0].Equals(TEXT("overlay"), ESearchCase::IgnoreCase))
+		{
+			if (URHTradeVisualizerSubsystem* Trade = World->GetSubsystem<URHTradeVisualizerSubsystem>())
+			{
+				Trade->SetOverlayOn(Args.Num() > 1 ? FCString::Atoi(*Args[1]) != 0 : !Trade->IsOverlayOn());
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Trade] Routes overlay %s"), Trade->IsOverlayOn() ? TEXT("on") : TEXT("off"));
+			}
+			return;
+		}
+		if (Args.Num() >= 1 && Args[0].Equals(TEXT("markers"), ESearchCase::IgnoreCase))
+		{
+			// E8 (Zarya (a), READ-ONLY): where each known settlement's marker stands - its bearing and distance, the height field there, the
+			// height it is seated at (the visible surface over its footprint) - and how far its route's ribbon rose above the height field.
+			const URHSimWorldSubsystem* Sm = World->GetSubsystem<URHSimWorldSubsystem>();
+			const URHDefinitionsSubsystem* Df = World->GetSubsystem<URHDefinitionsSubsystem>();
+			const URHColonyVisualizerSubsystem* Colony = World->GetSubsystem<URHColonyVisualizerSubsystem>();
+			const URHTradeVisualizerSubsystem* Trade = World->GetSubsystem<URHTradeVisualizerSubsystem>();
+			if (!Sm || !Df || !Colony) { return; }
+			Df->ForEachRivalRow([&](FName Name, const FRHRivalRow& Row)
+			{
+				if (!Sm->IsRivalAvailable(Name)) { return; }
+				const FVector P = Colony->RivalMarkerPos(Name, Row.DistanceKm);
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Trade] marker %s at (%.1f, %.1f) m, bearing %.0f deg, %.1f m out: height field %.2f m, seated at %.2f m (+%.2f m); its ribbon rose up to %.2f m over the height field"),
+					*Name.ToString(), P.X / 100.0, P.Y / 100.0, FMath::RadiansToDegrees(FMath::Atan2(P.Y, P.X)) < 0.0 ? FMath::RadiansToDegrees(FMath::Atan2(P.Y, P.X)) + 360.0 : FMath::RadiansToDegrees(FMath::Atan2(P.Y, P.X)),
+					FVector2D(P.X, P.Y).Size() / 100.0, RHMarsTerrain::GroundZCm(P.X, P.Y) / 100.f, P.Z / 100.0, (P.Z - RHMarsTerrain::GroundZCm(P.X, P.Y)) / 100.0,
+					Trade ? Trade->GetRibbonMaxRiseCm(Name) / 100.f : 0.f);
+			});
+			return;
+		}
 		const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
 		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
 		if (!Sim || !Defs) { return; }
@@ -1450,13 +1480,125 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTrade(
 
 static FAutoConsoleCommandWithWorldAndArgs GRHMarket(
 	TEXT("RH.Market"),
-	TEXT("RH.Market - log the Martian market (each traded resource's price against its Earth value, the colony's tally over the window, the rivals' stores, the convoys and the credit set aside); RH.Market order <Rival> <Res:kg;Res:kg> - send a written order through the uplink (positive kg buys from the rival, negative sells to it; the convoy leaves at once and the market clears it at the end of the sol)."),
+	TEXT("RH.Market - log the Martian market (each traded resource's price against its Earth value, the colony's tally over the window, the rivals' stores, the convoys and the credit set aside); RH.Market order <Rival> <Res:kg;Res:kg> - send a written order through the uplink (positive kg buys from the rival, negative sells to it; the convoy leaves at once and the market clears it at the end of the sol). E8 (DEBUG, cheat code only): discover (survey counts 1..64 until a dormant settlement is found), grant <credits>, embargo <Rival> <sols>, close <Rival>, defect <Rival>, clear (the harness politics: a closed route, a defection, every blocking rule cleared), inject-region <Name> <RegionId> (Zarya's row under a new name in that region), panel <0|1> [Resource] (fold MARKET open or shut, and select a resource), history (log each region's 30-sol price history), texts (log the PRICES sub-heading, the DETAIL head, the selected row's tooltip and the credit caption as drawn, and whether their \"marks from sol N\" agree)."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (!World) { return; }
 		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
-		const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
+		URHDefinitionsSubsystem* DefsRw = World->GetSubsystem<URHDefinitionsSubsystem>();
+		const URHDefinitionsSubsystem* Defs = DefsRw;
 		if (!Sim || !Defs) { return; }
+		const FString Sub = Args.Num() >= 1 ? Args[0].ToLower() : FString();
+		if (Sub == TEXT("discover"))
+		{
+			// E8: the click test's discovery, as a cheat: a survey's roll at counts 1..64 until one finds the first dormant settlement.
+			int32 Found = 0;
+			for (int32 K = 1; K <= 64 && Found == 0; ++K) { Found = Sim->Debug_MaybeDiscoverSettlement(K) ? K : 0; }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] discover: %s"), Found > 0 ? *FString::Printf(TEXT("a settlement found at survey count %d"), Found) : TEXT("no survey count up to 64 found one"));
+			return;
+		}
+		if (Sub == TEXT("grant"))
+		{
+			const int64 Credits = Args.Num() > 1 ? FCString::Atoi64(*Args[1]) : 0;
+			Sim->Debug_GrantCredits(FMath::Max<int64>(0, Credits) * 1000);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] granted %lld cr (balance %s cr)"), FMath::Max<int64>(0, Credits), *URHSimWorldSubsystem::FormatCredits(Sim->GetCreditBalanceMcr()));
+			return;
+		}
+		if (Sub == TEXT("embargo"))
+		{
+			if (Args.Num() < 3) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Market embargo <Rival> <sols>")); return; }
+			Sim->Debug_SetEmbargo(FName(*Args[1]), FCString::Atod(*Args[2]));
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] %s embargoes the colony, %.1f sols to reassure"), *Args[1], Sim->GetEmbargoGrace(FName(*Args[1])));
+			return;
+		}
+		if (Sub == TEXT("close") || Sub == TEXT("defect") || Sub == TEXT("clear"))
+		{
+			// E8 (captures: the Routes overlay's red bin): MX11's harness politics, as the click test sets them - a Closed rule, a defection, or
+			// every blocking rule cleared (Debug_ClearPolitics).
+			if (Sub != TEXT("clear") && Args.Num() < 2) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Market close|defect <Rival> | RH.Market clear")); return; }
+			if (Sub == TEXT("close")) { Sim->Debug_CloseRoute(FName(*Args[1])); }
+			else if (Sub == TEXT("defect")) { Sim->Debug_SetDefected(FName(*Args[1])); }
+			else { Sim->Debug_ClearPolitics(); }
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] %s%s%s"), *Sub, Args.Num() > 1 ? TEXT(" ") : TEXT(""), Args.Num() > 1 ? *Args[1] : TEXT(""));
+			return;
+		}
+		if (Sub == TEXT("inject-region"))
+		{
+			// E8 (R3-7): RH.InjectRivals pins RegionId 0, so a second market region needs this: Zarya's row under a new name, in that region.
+			const FRHRivalRow* Zarya = Defs->GetRival(FName("Zarya"));
+			if (Args.Num() < 3 || !Zarya || !DefsRw) { UE_LOG(LogRedHope, Error, TEXT("Usage: RH.Market inject-region <Name> <RegionId> (needs Zarya's row)")); return; }
+			FRHRivalRow Row = *Zarya;
+			Row.DisplayName = Args[1];
+			Row.RegionId = FCString::Atoi(*Args[2]);
+			Row.SliceActive = true;
+			DefsRw->Debug_InjectRival(FName(*Args[1]), Row);
+			Sim->Debug_SyncRivalEconomies();
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] %s injected in region %d: %d market region(s)"), *Args[1], Row.RegionId, Sim->GetMarketRegionCount());
+			return;
+		}
+		if (Sub == TEXT("panel"))
+		{
+			// E8 (captures and the frame check): fold the MARKET panel open (the accordion folds the rest and scrolls it to the top) or shut, and
+			// optionally select a resource for its detail.
+			ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
+			if (PC && PC->GetDeck().IsValid())
+			{
+				PC->GetDeck()->SetFoldOpen(SRHCommandDeck::EFold::Market, Args.Num() < 2 || FCString::Atoi(*Args[1]) != 0);
+				if (Args.Num() >= 3) { PC->GetDeck()->Debug_SetMarketSelected(FName(*Args[2])); }
+			}
+			return;
+		}
+		if (Sub == TEXT("texts"))
+		{
+			// E8 fix round 3 (QA, the late-marks check): the PRICES sub-heading, the DETAIL head, the selected row's tooltip and the credit
+			// view's caption as drawn (region 0), and whether they agree: while in marks each names the mark's open sol (E5), and a caption
+			// claiming a change of unit appears exactly when the window holds a sol before the open sol.
+			ARHPlayerController* PC = Cast<ARHPlayerController>(World->GetFirstPlayerController());
+			if (!PC || !PC->GetDeck().IsValid()) { return; }
+			const TSharedPtr<SRHCommandDeck> Deck = PC->GetDeck();
+			const FName Sel = Deck->Debug_GetMarketSelected();
+			const FString Unit = Deck->Debug_GetMarketUnitText(), Detail = Deck->Debug_GetMarketDetailText(), Tip = Deck->Debug_GetMarketRowTip(Sel), Caption = Deck->Debug_GetMarketCreditCaption();
+			FString DetailHead, DetailTail;
+			if (!Detail.Split(TEXT("\n"), &DetailHead, &DetailTail)) { DetailHead = Detail; }
+			const int32 Fill = Sim->GetMarketHistoryFill(), Last = Sim->GetMarketHistoryLastSol();
+			const int32 First = Fill > 0 ? Last - (Fill - 1) : -1;
+			FString Verdict = TEXT("n/a (the market is not in marks)");
+			if (Sim->IsMarketInMarks())
+			{
+				const int32 Open = Sim->GetCurrencyOpenSol();
+				const FString Want = FString::Printf(TEXT("(marks from sol %d)"), Open);
+				const bool bStepHeld = Fill > 0 && Open > First && Open <= Last;
+				const bool bUnit = Unit.Contains(FString::Printf(TEXT("Prices in marks since sol %d"), Open));
+				const bool bHead = DetailHead.Contains(Want), bTip = Tip.Contains(Want);
+				const bool bCaption = bStepHeld ? Caption == FString::Printf(TEXT("in credits: the unit changed at sol %d"), Open) : Caption.IsEmpty();
+				Verdict = (bUnit && bHead && bTip && bCaption) ? FString::Printf(TEXT("yes (each names the open sol %d; the window %s the step, the caption %s)"), Open, bStepHeld ? TEXT("holds") : TEXT("does not hold"), Caption.IsEmpty() ? TEXT("absent") : TEXT("names it"))
+					: FString::Printf(TEXT("NO (sub-heading %d, DETAIL head %d, tooltip %d, caption %d)"), bUnit ? 1 : 0, bHead ? 1 : 0, bTip ? 1 : 0, bCaption ? 1 : 0);
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[RH.Market] texts at the open sol %d (the mark's open sol %d; the window sols %d..%d, %d held): sub-heading '%s' | DETAIL head '%s' | %s's tooltip '%s' | credit caption '%s' | agree: %s"),
+				Sim->GetMarketCheckedSol(), Sim->GetCurrencyOpenSol(), First, Last, Fill, *Unit.Replace(TEXT("\n"), TEXT(" / ")), *DetailHead, *Sel.ToString(), *Tip.Replace(TEXT("\n"), TEXT(" / ")),
+				*Caption, *Verdict);
+			return;
+		}
+		if (Sub == TEXT("history"))
+		{
+			// E8: log only (console output is not discovery-gated, as E5's join line is not).
+			for (int32 m = 0; m < Sim->GetMarketRegionCount(); ++m)
+			{
+				const int32 Region = Sim->GetMarketRegionIdAt(m);
+				UE_LOG(LogRedHope, Display, TEXT("[RH.Market] history, region %d: %d sols, the newest sol %d"), Region, Sim->GetMarketHistoryFill(Region), Sim->GetMarketHistoryLastSol(Region));
+				for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
+				{
+					const FName Res = Sim->GetLedgerSlotName(i);
+					if (!Sim->IsMarketTraded(Res, Region)) { continue; }
+					TArray<int64> Prices;
+					Sim->GetMarketHistory(Res, Prices, Region);
+					FString Line;
+					for (const int64 P : Prices) { Line += P < 0 ? FString(TEXT(" ?")) : TEXT(" ") + URHSimWorldSubsystem::FormatCredits(P); }
+					UE_LOG(LogRedHope, Display, TEXT("  %s:%s"), *Res.ToString(), *Line);
+				}
+			}
+			return;
+		}
 		if (Args.Num() >= 1 && Args[0].Equals(TEXT("order"), ESearchCase::IgnoreCase))
 		{
 			if (Args.Num() < 3)
@@ -2469,7 +2611,7 @@ namespace
 		double StartS = 0.0;
 		double LastS = 0.0;
 		TArray<float> FrameMs;
-		double SlotMs[RHFrameStats::SlotCount] = { 0.0, 0.0, 0.0 };
+		double SlotMs[RHFrameStats::SlotCount] = { 0.0, 0.0, 0.0, 0.0 };
 		double GameMs = 0.0, RenderMs = 0.0, GpuMs = 0.0; // engine's own per-frame thread timers, summed
 		int32 Frames = 0;
 		FString Tag;
@@ -2509,10 +2651,12 @@ namespace
 			if (const URHSectionVisualizerSubsystem* Section = W->GetSubsystem<URHSectionVisualizerSubsystem>()) { SectionCounts = Section->DescribeCounts(); }
 			if (const URHAgentVisualizerSubsystem* Agents = W->GetSubsystem<URHAgentVisualizerSubsystem>()) { RobotsDrawn = Agents->GetSectionDrawnCount(); }
 		}
-		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s window %.1f s, %d frames | frame ms: avg %.2f, median %.2f, p95 %.2f, max %.2f (median %.1f fps) | population %d, view floor %d | crew: %s, %d full figures tracked, %d figure actors (%d skeletal, %d pooled), %d crowd records (%d drawn on the viewed floor, %d of them in full mesh detail), tier swaps in the window: %d promotions / %d demotions | colony: %d building actors, %d tile actors | game-thread ms/frame: crew tick %.3f, colony tick %.3f, section tick %.3f | section: %s, robots drawn %d | engine threads ms/frame: game %.1f, render %.1f, GPU %.1f"),
+		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] %s window %.1f s, %d frames | frame ms: avg %.2f, median %.2f, p95 %.2f, max %.2f (median %.1f fps) | population %d, view floor %d | crew: %s, %d full figures tracked, %d figure actors (%d skeletal, %d pooled), %d crowd records (%d drawn on the viewed floor, %d of them in full mesh detail), tier swaps in the window: %d promotions / %d demotions | colony: %d building actors, %d tile actors | game-thread ms/frame: crew tick %.3f, colony tick %.3f, section tick %.3f, market tick %.3f | market worst rebuild %.2f ms | market rebuilds in the window: %d row, %d text, %d overlay, %.3f ms in all | section: %s, robots drawn %d | engine threads ms/frame: game %.1f, render %.1f, GPU %.1f"),
 			*Run.Tag, Run.Seconds, N, Sum / N, Med, P95, Sorted.Last(), Med > 0.f ? 1000.f / Med : 0.f, Pop, ViewLevel,
 			bTier ? TEXT("crowd mode") : TEXT("all full"), TrackedN, Actors, Skel, Pooled, CrowdAll, Crowd, CrowdDet, Promos, Demos, BuildActors, TileActors,
-			Run.SlotMs[RHFrameStats::Crew] / N, Run.SlotMs[RHFrameStats::Colony] / N, Run.SlotMs[RHFrameStats::Section] / N, *SectionCounts, RobotsDrawn, Run.GameMs / N, Run.RenderMs / N, Run.GpuMs / N);
+			Run.SlotMs[RHFrameStats::Crew] / N, Run.SlotMs[RHFrameStats::Colony] / N, Run.SlotMs[RHFrameStats::Section] / N, Run.SlotMs[RHFrameStats::Market] / N,
+			RHFrameStats::GMarketWorstRebuildMs, RHFrameStats::GMarketRowRebuilds, RHFrameStats::GMarketTextUpdates, RHFrameStats::GMarketOverlayRebuilds, RHFrameStats::GMarketRebuildTotalMs,
+			*SectionCounts, RobotsDrawn, Run.GameMs / N, Run.RenderMs / N, Run.GpuMs / N);
 	}
 }
 
@@ -2540,6 +2684,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFrameStats(
 			Run->StartDemotions = C0.Demotions;
 		}
 		for (double& S : RHFrameStats::GSlotSeconds) { S = 0.0; }
+		RHFrameStats::GMarketWorstRebuildMs = 0.0; // E8: the window's worst market rebuild, and its rebuilds by kind
+		RHFrameStats::GMarketRowRebuilds = RHFrameStats::GMarketTextUpdates = RHFrameStats::GMarketOverlayRebuilds = 0;
+		RHFrameStats::GMarketRebuildTotalMs = 0.0;
 		GFrameStatsRun = Run;
 		UE_LOG(LogRedHope, Display, TEXT("[FrameStats] sampling %.1f s"), Run->Seconds);
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Run](float)
@@ -2549,8 +2696,9 @@ static FAutoConsoleCommandWithWorldAndArgs GRHFrameStats(
 			Run->LastS = Now;
 			if (Run->FrameMs.Last() > 150.f && Run->Spikes.Num() < 8)
 			{
-				Run->Spikes.Add(FString::Printf(TEXT("+%.1fs %.0f ms (crew %.1f, colony %.1f, section %.1f)"), Now - Run->StartS, Run->FrameMs.Last(),
-					RHFrameStats::GSlotSeconds[RHFrameStats::Crew] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Colony] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Section] * 1000.0));
+				Run->Spikes.Add(FString::Printf(TEXT("+%.1fs %.0f ms (crew %.1f, colony %.1f, section %.1f, market %.1f)"), Now - Run->StartS, Run->FrameMs.Last(),
+					RHFrameStats::GSlotSeconds[RHFrameStats::Crew] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Colony] * 1000.0, RHFrameStats::GSlotSeconds[RHFrameStats::Section] * 1000.0,
+					RHFrameStats::GSlotSeconds[RHFrameStats::Market] * 1000.0));
 			}
 			for (int32 S = 0; S < RHFrameStats::SlotCount; ++S)
 			{

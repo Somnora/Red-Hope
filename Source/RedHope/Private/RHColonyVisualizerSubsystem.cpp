@@ -23,6 +23,7 @@
 #include "Components/SpotLightComponent.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/TextRenderComponent.h"
+#include "RHTradeVisualizerSubsystem.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
 #include "Misc/Crc.h"
@@ -1343,7 +1344,7 @@ void URHColonyVisualizerSubsystem::BuildSilhouette(AStaticMeshActor* Actor, FNam
 	}
 }
 
-void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const
+void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm, bool bOnVisibleSurface) const
 {
 	if (!Actor)
 	{
@@ -1368,9 +1369,15 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 	// combo faced the text into the ground and read backwards + upside down.
 	const FVector AL = Actor->GetActorLocation();
 	// Ride the scenery relief (12 cm above THE GROUND, not above z=0): far
-	// deposit/rival labels would otherwise bury under rolling terrain.
+	// deposit/rival labels would otherwise bury under rolling terrain. E8
+	// (Zarya (a)): a settlement marker's label rides the VISIBLE surface, its
+	// marker's, so a plateau never buries the name and its status word; a
+	// label lying 4.8 m south of a marker on a slope is lifted to the marker's
+	// own seat if that is higher, so it never hides under the hall's edge.
+	const float LabelZ = bOnVisibleSurface ? FMath::Max(RHMarsTerrain::SceneryTopZCm(AL.X - SouthOffsetCm, AL.Y), (float)(AL.Z - 50.0 * Actor->GetActorScale3D().Z)) // the hall's base: a 1 m engine cube scaled
+		: RHMarsTerrain::GroundZCm(AL.X - SouthOffsetCm, AL.Y);
 	Label->SetWorldLocationAndRotation(
-		FVector(AL.X - SouthOffsetCm, AL.Y, RHMarsTerrain::GroundZCm(AL.X - SouthOffsetCm, AL.Y) + 12.f),
+		FVector(AL.X - SouthOffsetCm, AL.Y, LabelZ + 12.f),
 		FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 }
 
@@ -1486,6 +1493,7 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	}
 	RivalMarkers.Reset();
 	RivalMarkerState.Reset();
+	RivalMarkerWord.Reset();
 	for (auto& Pair : ConvoyVisuals)
 	{
 		if (Pair.Value)
@@ -4960,7 +4968,17 @@ FVector URHColonyVisualizerSubsystem::RivalMarkerPos(FName Rival, float Distance
 	const double AngleRad = FMath::DegreesToRadians((double)(Hash % 360u));
 	const double RadiusCm = 20000.0 + FMath::Clamp(DistanceKm, 0.f, 400.f) * 30.0; // 200 m + 0.3 m/km
 	const double X = FMath::Cos(AngleRad) * RadiusCm, Y = FMath::Sin(AngleRad) * RadiusCm;
-	return FVector(X, Y, RHMarsTerrain::GroundZCm(X, Y)); // seated on the scenery relief
+	// E8 (the director's Zarya (a), 2026-10-31): seated on the VISIBLE surface, not the height field alone - the highest of the drawn ground
+	// and the scenery's solid meshes over the compound's footprint (its centre and eight points 4.5 m out, which take in the 7 x 5 m hall and
+	// its dome), so a raised plateau or a peak's flank never stands over it (Zarya's marker, 236 m out at 64 degrees, lay under one). The
+	// bearing and the distance are unchanged: only the height moved.
+	float Z = RHMarsTerrain::SceneryTopZCm(X, Y);
+	for (int32 k = 0; k < 8; ++k)
+	{
+		const double A = k * PI / 4.0;
+		Z = FMath::Max(Z, RHMarsTerrain::SceneryTopZCm(X + FMath::Cos(A) * 450.0, Y + FMath::Sin(A) * 450.0));
+	}
+	return FVector(X, Y, Z);
 }
 
 void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
@@ -5000,9 +5018,10 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 #endif
 			AddAccent(Marker, TEXT("/Engine/BasicShapes/Sphere.Sphere"), Pos + FVector(-250.f, 200.f, 220.f),
 				FRotator::ZeroRotator, FVector(2.6f, 2.6f, 1.8f), DarkSlate, TealGlow * 0.2f);
-			AddLabel(Marker, Row.DisplayName, BoneWhite, 480.f);
+			AddLabel(Marker, Row.DisplayName, BoneWhite, 480.f, true); // E8 (Zarya (a)): on the visible surface, as the marker
 			RivalMarkers.Add(Name, Marker);
 			RivalMarkerState.Add(Name, 255); // force the first tint pass
+			RivalMarkerWord.Add(Name, 0);    // spawned with the bare name
 		}
 		// Diplomatic state -> tint (defected outranks embargo outranks sabotage).
 		uint8 State = 0;
@@ -5019,6 +5038,20 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 			case 2:  ApplyTint(Marker, FLinearColor(0.42f, 0.07f, 0.05f), FLinearColor(1.2f, 0.1f, 0.05f)); break; // defected: hostile red
 			case 3:  ApplyTint(Marker, DarkSlate, FLinearColor::Black); break;        // sabotaged: gone dark
 			default: ApplyTint(Marker, BoneWhite, TealGlow * 0.08f); break;           // normal: a living neighbor
+			}
+		}
+		// E8: while the Routes overlay is on, the label carries the route's status word in the MARKET panel's chip order ("Zarya Station ·
+		// embargo"); off, the bare name again. Diffed like the tint, so the steady state writes nothing.
+		const URHTradeVisualizerSubsystem* Trade = World->GetSubsystem<URHTradeVisualizerSubsystem>();
+		const ERHRouteStatus Status = URHTradeVisualizerSubsystem::RouteStatusOf(*Sim, Name);
+		const uint8 Word = (Trade && Trade->IsOverlayOn()) ? (uint8)(1 + (uint8)Status) : 0;
+		uint8& WordShown = RivalMarkerWord.FindOrAdd(Name);
+		if (WordShown != Word)
+		{
+			WordShown = Word;
+			if (UTextRenderComponent* Label = Marker->FindComponentByClass<UTextRenderComponent>())
+			{
+				Label->SetText(FText::FromString(Word == 0 ? Row.DisplayName : FString::Printf(TEXT("%s · %s"), *Row.DisplayName, URHTradeVisualizerSubsystem::RouteStatusWord(Status))));
 			}
 		}
 		Marker->SetActorHiddenInGame(!bSurface);
@@ -5104,9 +5137,11 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 		const FVector From = Convoy.bReturning ? Dest : Home;
 		const FVector To = Convoy.bReturning ? Home : Dest;
 		// Wheels on the ground the whole road: the straight-line lerp gets
-		// its Z from the terrain under each step, not the endpoints.
+		// its Z from the terrain under each step, not the endpoints. E8 (Zarya
+		// (a)): the visible surface, as its route's ribbon, so the rover never
+		// drives inside a plateau its ribbon now runs over.
 		FVector Loc = FMath::Lerp(From, To, Alpha);
-		Loc.Z = RHMarsTerrain::GroundZCm(Loc.X, Loc.Y) + 60.f;
+		Loc.Z = RHMarsTerrain::SceneryTopZCm(Loc.X, Loc.Y) + 60.f;
 		Rover->SetActorLocation(Loc);
 		// The cab leads: face the rover down its road (X+ = nose).
 		const FVector Travel = (To - From).GetSafeNormal2D();

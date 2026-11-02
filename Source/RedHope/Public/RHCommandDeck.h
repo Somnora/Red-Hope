@@ -26,7 +26,7 @@ public:
 	void Construct(const FArguments& InArgs);
 	// Capture/QA: unfold every collapsible panel (RH.DeckExpand); the roster
 	// only with "roster", it is tall enough to push the rest off screen.
-	void Debug_ExpandAll(bool bRoster) { bFleetExpanded = bCrewExpanded = bPoliticsExpanded = bPowerExpanded = true; bRosterExpanded = bRoster; }
+	void Debug_ExpandAll(bool bRoster) { bFleetExpanded = bCrewExpanded = bPoliticsExpanded = bPowerExpanded = bMarketExpanded = true; bRosterExpanded = bRoster; }
 	// The settings menu's "Guide and tips" switch.
 	bool AreTipsOn() const { return !bTipsOff; }
 	void SetTipsOn(bool bOn) { SetTipsOff(!bOn); }
@@ -37,6 +37,33 @@ public:
 	void Debug_ScrollRight(float OffsetPx);
 	void Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg); // E4 QA/captures: set one resource's draft on a rival's market card (the buttons' own state)
 	void Debug_SetDeskDraft(bool bToMarks, int64 Amount);            // E5 QA/captures: the bloc desk's draft (the buttons' own state)
+	// E8 QA (the click test): what the MARKET panel built - its own cached rows and strings, never the sim.
+	int32 Debug_GetMarketRowCount() const { return MarketShown.Num(); }
+	int32 Debug_GetMarketSparkGlyphs(FName Resource) const { return MarketSparkGlyphs.FindRef(Resource); } // drawn, non-space glyphs
+	FString Debug_GetMarketChangeText(FName Resource) const { return MarketChangeText.FindRef(Resource); }
+	FName Debug_GetMarketSelected() const { return MarketSelected; }
+	FString Debug_GetMarketDetailText() const // the DETAIL text as drawn: its head, Earth's line and the holdings and tally
+	{
+		return MarketDetailText.ToString() + (MarketDetailEarth.IsEmpty() ? FString() : TEXT("\n") + MarketDetailEarth.ToString()) + (MarketDetailRest.IsEmpty() ? FString() : TEXT("\n") + MarketDetailRest.ToString());
+	}
+	FString Debug_GetMarketOrdersText() const;                     // the rows as drawn now (a convoy's percent read live, as its row reads it)
+	int32 Debug_GetMarketRowRebuilds() const { return MarketRowRebuilds; }
+	int32 Debug_GetMarketPricesRowSets() const { return MarketPricesRowSets; } // PRICES' row sets made (its rows cleared and made again), alone
+	FString Debug_GetMarketUnitText() const { return MarketUnitText.ToString(); }       // the PRICES sub-heading as drawn
+	FString Debug_GetMarketCreditCaption() const { return MarketCreditCaption.ToString(); } // DETAIL's credit-view caption (empty: no credit view)
+	FString Debug_GetMarketRowTip(FName Resource) const { const TSharedRef<FMarketPriceRowText>* R = MarketPriceRows.Find(Resource); return R ? R->Get().Tip.ToString() : FString(); }
+	bool Debug_HasMarketRow(FName Resource) const { return MarketPriceRows.Contains(Resource); } // a PRICES row was made for it
+	uint64 Debug_GetMarketRowTag(FName Resource) const { const TSharedRef<FMarketPriceRowText>* R = MarketPriceRows.Find(Resource); return R ? (uint64)(UPTRINT)&R->Get() : 0; } // which row object: kept or made again
+	int32 Debug_GetMarketTextUpdates() const { return MarketTextUpdates; }
+	bool Debug_IsMarketRateShown() const { return bMarketRateShown; }
+	int32 Debug_GetMarketRegionButtons() const { return MarketRegionButtons; }
+	int32 Debug_GetMarketRouteCount() const { return MarketRouteChips.Num(); }
+	FString Debug_GetMarketRouteChip(FName Rival) const { return MarketRouteChips.FindRef(Rival); }
+	void Debug_GetMarketChipColours(TArray<TPair<FLinearColor, FLinearColor>>& Out) const { Out = MarketChipColours; } // (fill, text) per chip
+	double Debug_GetMarketWorstRebuildMs() const { return MarketWorstRebuildMs; }
+	TMap<FName, int32> GetOrderDraft(FName Rival) const { return OrderDrafts.FindRef(Rival); } // a rival card's draft, kg by resource
+	EVisibility Debug_GetRivalCardVisibility(FName Rival) const;   // E8 (m5): a rival card's visibility attribute, on screen or not
+	void Debug_SetMarketSelected(FName Resource) { MarketSelected = Resource; } // E8 captures and the frame check (RH.Market panel)
 	// Capture/QA: open the build drawer on a category (RH.DeckBuild).
 	void Debug_OpenBuild(FName Category) { SelectedBuildCategory = Category; bBuildDrawerOpen = true; }
 	bool IsBuildDrawerOpen() const { return bBuildDrawerOpen; }
@@ -138,14 +165,17 @@ private:
 public:
 	void Debug_SetFurnishTab(bool bOn) { RowTab = bOn ? 1 : 0; }
 	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 3); }
-	// UI polish P3: the five foldable panels of the right column (Politics, Crew, City, Fleet, Power) are an accordion. Opening one folds the others
-	// and scrolls it to the top of the column; a panel that is shut folds itself alone. The state lives here, as it always did, and is not saved.
-	enum class EFold : uint8 { Politics, Crew, City, Fleet, Power, Count };
+	// UI polish P3: the foldable panels of the right column (Politics, Crew, City, Fleet, Power, and E8's Market) are an accordion. Opening one
+	// folds the others and scrolls it to the top of the column; a panel that is shut folds itself alone. The state lives here, as it always did,
+	// and is not saved. E8 (Q-C (a)): MARKET joins it as the sixth; Count stays the "no scroll" sentinel.
+	enum class EFold : uint8 { Politics, Crew, City, Fleet, Power, Market, Count };
 	void SetFoldOpen(EFold Which, bool bOpen);
 	bool IsFoldOpen(EFold Which) const { return *FoldFlag(Which); }
 	// Capture/QA (RH.DeckCity): fold the City panel open or shut. Opening it is the accordion's rule: the other panels fold, and the column
 	// scrolls the City panel into view.
 	void Debug_SetCityExpanded(bool bOn) { SetFoldOpen(EFold::City, bOn); }
+	// E8 QA: scroll a fold's header to the top of the column without opening it (the click test reaches MARKET's toggle this way).
+	void Debug_ScrollFoldIntoView(EFold Which);
 	// UI polish P8: the free band between the shaft strip and the right column, as fractions (0..1) of the deck's width: the deep view frames
 	// the slab and its labels into it. Falls back to fixed fractions before the first layout.
 	void GetFreeBand(float& OutLeft01, float& OutRight01) const;
@@ -189,6 +219,12 @@ private:
 	FText GetTrafficLabel() const;
 	TSharedRef<SWidget> BuildTrafficLegend();
 	EVisibility GetTrafficLegendVisibility() const;
+	// E8: the Routes overlay's button (beside Traffic, tagged RH.TradeOverlay) and its legend (under TRAFFIC's, while the overlay is on and
+	// the markers show).
+	FReply HandleTrade();
+	FText GetTradeLabel() const;
+	TSharedRef<SWidget> BuildTradeLegend();
+	EVisibility GetTradeLegendVisibility() const;
 	// Sims-style categorized build menu (M2 Gate D+ UX, part 2): a row of
 	// category tabs; picking one shows only that category's buildings. Category
 	// comes from the DataTable (FRHBuildingRow.Category), with a code-derived
@@ -354,6 +390,71 @@ private:
 	FReply HandleOrderClear(FName Rival);
 	FReply HandleOrderSend(FName Rival);
 	TSharedRef<SWidget> BuildMarketCard(FName RowName, const struct FRHRivalRow& Row);
+	TMap<FName, TSharedPtr<class SBox>> RivalCardBoxes;              // E8: each rival card's root on EARTH & NEIGHBORS (Debug_GetRivalCardVisibility)
+	// E8: the MARKET panel (RHCommandDeckPanels.cpp; docs/qa/2026-10-25/e8-market-panel-design.md, REVISION 3, and the director's Rebuild (a),
+	// 2026-10-31). RefreshMarketPanel (from Tick) does nothing while MARKET is folded but keep the header's one-line summary; it builds once
+	// when the fold opens. Each section has two keys: its ROW SET (re-creates its widgets: a convoy booked or gone, a slot or route shown or
+	// hidden, the region or the selection, a load, the fold opening) and its VALUES (rewrites the cached texts its kept widgets read through
+	// bound lambdas, no widget made). A convoy's progress is read by its row's own lambda, never by a key. A paint reads the cached FTexts.
+	TSharedRef<SWidget> BuildMarketPanel();
+	void RefreshMarketPanel();
+	void HandleMarketReloaded();
+	void ShownMarketSlots(int32 RegionId, TArray<FName>& Out) const; // R2-1: the slots an available economy rival in RegionId trades
+	static constexpr int32 MarketSparkWidth = 30;                  // Q-B: a 30-glyph sparkline on its own line
+	// One PRICES row's texts, one OPEN ORDERS row's and one ROUTES row's: each row's widgets keep a reference and read them by lambda.
+	struct FMarketPriceRowText { FText Price, Spark, Change, Tip; };
+	struct FMarketOrderRowText
+	{
+		int32 ConvoyId = INDEX_NONE;                              // INDEX_NONE: a desk order (its line is Head alone)
+		FText Head, Extra, StateFixed;
+		bool bProgress = false, bPriced = false;                  // on the road: the state is "on the road, N%" with the live percent
+		int32 ClearSol = -1;
+		int32 ShownPct = -1;                                      // the percent CachedState was made with (-1 none yet)
+		FText CachedState;
+	};
+	struct FMarketRouteRowText { FName Rival; FText Line, Chip, Terms; FLinearColor ChipFill = FLinearColor::White; };
+	FText MarketOrderStateText(FMarketOrderRowText& Row) const;     // the row's state line now (a progress row re-made only when its percent moves)
+	// PRICES' value parts, each rewritten only when its own inputs move: the rows and the unit's sub-heading, DETAIL's chart and texts (with
+	// a roll, these and every part below), DETAIL's Earth line alone (Earth's quote moves with the requisition multiplier between rolls),
+	// TRADE BALANCE (the lifetime totals) and EXCHANGE RATE (the desk's totals today).
+	enum EMarketPart : uint8 { MarketPartRows = 1, MarketPartDetail = 2, MarketPartBalance = 4, MarketPartRate = 8, MarketPartEarth = 16, MarketPartAll = 31 };
+	void FillMarketPrices(const class URHSimWorldSubsystem& S, const class URHDefinitionsSubsystem& Df, uint8 Parts, int32 RowFrom = 0, int32 RowTo = MAX_int32);
+	// Values that move without a row-set change are rewritten a slice a pass (two price rows, or one other part), so no frame carries a whole
+	// roll's rewrite: the parts still to do, and the next price row.
+	uint8 MarketPendingParts = 0;
+	int32 MarketPendingRow = 0;
+	static constexpr int32 MarketRowsPerSlice = 2;
+	void FillMarketOrders(const class URHSimWorldSubsystem& S, const class URHDefinitionsSubsystem& Df);
+	void FillMarketRoutes(const class URHSimWorldSubsystem& S, const class URHDefinitionsSubsystem& Df);
+	void UpdateMarketSummary(const class URHSimWorldSubsystem& S, const class URHDefinitionsSubsystem& Df, bool bFolded);
+	bool bMarketExpanded = false;
+	int32 MarketRegion = 0;
+	FName MarketSelected;
+	int32 MarketReloads = 0;
+	uint32 MarketPricesSetKey = 0, MarketOrdersSetKey = 0, MarketRoutesSetKey = 0;  // the row sets
+	uint32 MarketPricesKey = 0, MarketOrdersKey = 0, MarketRoutesKey = 0;           // the values
+	uint32 MarketDetailKey = 0, MarketLifetimeKey = 0, MarketDeskKey = 0;          // PRICES' parts beyond its rows
+	uint32 MarketSummaryKey = 0;
+	bool bMarketKeysValid = false, bMarketSummaryValid = false, bMarketOrdersBuilt = false;
+	FName MarketRowsSelected;                                      // the selection DETAIL was last written for (the rows draw the selection's gold by lambda)
+	TSharedPtr<class SVerticalBox> MarketRowsBox, MarketOrdersBox, MarketRoutesBox;
+	TSharedPtr<class SHorizontalBox> MarketRegionBox;
+	FText MarketSummary, MarketUnitText, MarketDetailChart, MarketCreditChart, MarketCreditCaption, MarketDetailText, MarketDetailEarth, MarketDetailRest, MarketHoldersTip, MarketBalanceText, MarketRateHead, MarketRateChart, MarketRateText;
+	bool bMarketRateShown = false;
+	int64 MarketBalanceMcr = MIN_int64;                            // the 8-sol balance in the live unit; MIN_int64 = nothing traded
+	int32 MarketOrdersCount = 0;
+	TArray<FName> MarketShown;
+	TMap<FName, TSharedRef<FMarketPriceRowText>> MarketPriceRows;
+	TArray<TSharedRef<FMarketOrderRowText>> MarketOrderRows;
+	TArray<TSharedRef<FMarketRouteRowText>> MarketRouteRows;
+	TMap<FName, int32> MarketSparkGlyphs;
+	TMap<FName, FString> MarketChangeText;
+	int32 MarketRegionButtons = 0;
+	TMap<FName, FString> MarketRouteChips;
+	TArray<TPair<FLinearColor, FLinearColor>> MarketChipColours;
+	double MarketWorstRebuildMs = 0.0;
+	int32 MarketRowRebuilds = 0, MarketTextUpdates = 0;             // QA and [FrameStats]: passes that re-created rows, and passes that only rewrote texts
+	int32 MarketPricesRowSets = 0;                                  // QA (market.history): PRICES' own row sets made, never the orders' or routes'
 	const class URHSimWorldSubsystem* GetSim() const;
 	const class URHSimClockSubsystem* GetClock() const;
 	const class URHDefinitionsSubsystem* GetDefs() const;

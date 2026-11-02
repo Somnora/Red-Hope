@@ -27,6 +27,17 @@ namespace RHMarsTerrain
 	// player sees instead of folding through it.
 	REDHOPE_API float SceneryGroundZCm(double XCm, double YCm);
 
+	// E8 (the director's Zarya (a), 2026-10-31): the height (cm) of the VISIBLE surface at a world XY (cm) - the highest of the logical
+	// ground (GroundZCm), the drawn ground lattice (SceneryGroundZCm) and the scenery's solid meshes standing there: the boulders, the near,
+	// mid and far peaks, the hero massif's foothills and the mesas (pebbles are left out: they stand lower than anything seated here is
+	// lifted). The meshes are read within 600 m of the colony's centre, where every settlement marker and trade route lies; beyond that,
+	// and before BuildScenery has run, it is the higher of the two grounds. The Routes overlay's ribbons, the settlement markers and the
+	// trade rovers sit on this, so a raised plateau never buries them.
+	REDHOPE_API float SceneryTopZCm(double XCm, double YCm);
+
+	// Counts BuildScenery's runs (0 before the first), so a cache of SceneryTopZCm heights knows when to sample again.
+	REDHOPE_API int32 GetSceneryGeneration();
+
 	// W1: the distance (cm) from a point to the nearest peak, massif or mesa base outline the scenery drew,
 	// negative when the point is inside one; the largest value when none is built (before BuildScenery has
 	// run). The height field does not contain these meshes, so a deposit site is checked against this.

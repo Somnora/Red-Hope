@@ -205,7 +205,8 @@ private:
 	// asset). Returns false when the material/texture assets are absent so the
 	// caller can fall back to the flat ApplyTint look.
 	bool ApplySurface(UStaticMeshComponent* Mesh, const TCHAR* TexPath, float TileCm, const FLinearColor& Tint, float Rough = 0.95f) const;
-	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm) const;
+	// bOnVisibleSurface (E8, Zarya (a)): seat the label on RHMarsTerrain::SceneryTopZCm (a settlement marker's) rather than the height field.
+	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm, bool bOnVisibleSurface = false) const;
 	// Silhouette pass (director: "no boring rectangles"): each family gets a
 	// distinct primitive-composed form per the reference sheet. World-space
 	// accents (buildings never move), added only once construction ends.
@@ -239,6 +240,12 @@ private:
 	void UpdateShaftVisuals();
 	void ApplyViewLevel();
 	AStaticMeshActor* SpawnBox(const FVector& CenterCm, const FVector& ScaleM, const FLinearColor& Body, const FLinearColor& Emissive) const;
+
+public:
+	// E8 (R2-9, R3-6): the Routes overlay reads where each rival's marker stands, and the markers' own visibility predicate (ShowsLevel(0), the
+	// test RefreshSovereigntyVisuals hides them with), so a ribbon is drawn exactly when its marker is. ShowsSurface stays private.
+	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
+	bool ShowsSurfaceLevel() const { return ShowsLevel(0); }
 
 private:
 	// The pit rig (v2): two instanced-mesh layers rebuilt whenever the pit's
@@ -292,7 +299,6 @@ private:
 	// tick; markers sit at a deterministic bearing (a content hash of the rival
 	// name) at presentation distance - "they're over there", not literal km.
 	void RefreshSovereigntyVisuals();
-	FVector RivalMarkerPos(FName Rival, float DistanceKm) const;
 
 	// Visual pass item 2: construction sites (docs/qa/2026-10-25/visual-pass-design.md section 2, DIRECTOR ANSWER Q-A
 	// (a)). Every site on every floor draws from ONE holder actor with one HISM per kit part (scripts/blender/
@@ -460,6 +466,7 @@ private:
 	// (0 normal / 1 embargoed / 2 defected / 3 sabotaged), and the trade rover.
 	UPROPERTY() TMap<FName, TObjectPtr<AStaticMeshActor>> RivalMarkers;
 	TMap<FName, uint8> RivalMarkerState;
+	TMap<FName, uint8> RivalMarkerWord; // E8: the status word on the marker's label (0 the bare name; 1 + ERHRouteStatus while Routes is on)
 	// E4: one trade rover per convoy out, by convoy Id (up to MaxConvoysOut), each along its own road.
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> ConvoyVisuals;
 	UPROPERTY() TObjectPtr<AStaticMeshActor> ShipVisual;

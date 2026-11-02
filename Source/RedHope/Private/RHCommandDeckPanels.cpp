@@ -12,11 +12,15 @@
 // director's Gate-D framing review (prevention-framed, abstract, never graphic).
 
 #include "RHCommandDeck.h"
+#include "RedHope.h"
 #include "RHOrderWords.h"
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTradeVisualizerSubsystem.h"
+#include "RHColonyVisualizerSubsystem.h"
+#include "RHFrameStats.h"
 #include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
@@ -41,6 +45,7 @@
 #include "Widgets/SNullWidget.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
+#include "HAL/IConsoleManager.h"
 
 namespace D = RHDeck;
 
@@ -223,7 +228,7 @@ TSharedRef<SWidget> SRHCommandDeck::ExpandToggle(bool* bFlag)
 		];
 }
 
-// UI polish P3: the accordion. The five foldable panels of the right column fold each other: opening one shuts the rest and scrolls it to the
+// UI polish P3: the accordion. The foldable panels of the right column (five, and E8's MARKET the sixth) fold each other: opening one shuts the rest and scrolls it to the
 // top of the column. ExpandToggle (above) stays for the roster inside the Crew panel, which is not one of them.
 const bool* SRHCommandDeck::FoldFlag(EFold Which) const
 {
@@ -233,6 +238,7 @@ const bool* SRHCommandDeck::FoldFlag(EFold Which) const
 	case EFold::Crew: return &bCrewExpanded;
 	case EFold::City: return &bCityExpanded;
 	case EFold::Fleet: return &bFleetExpanded;
+	case EFold::Market: return &bMarketExpanded; // E8: before default, which is Power's
 	default: return &bPowerExpanded;
 	}
 }
@@ -276,6 +282,14 @@ void SRHCommandDeck::SetFoldOpen(EFold Which, bool bOpen)
 		}
 	}
 	// The scroll waits two frames, so the fold is laid out first (the offset is worked out against the new heights).
+	FoldScrollTarget = Which;
+	FoldScrollFromFrame = GFrameCounter + 2;
+	FoldScrollUntil = FPlatformTime::Seconds() + 1.0;
+}
+
+void SRHCommandDeck::Debug_ScrollFoldIntoView(EFold Which)
+{
+	// E8 QA: SetFoldOpen's scroll request without the fold (the header goes to the top of the column two frames on).
 	FoldScrollTarget = Which;
 	FoldScrollFromFrame = GFrameCounter + 2;
 	FoldScrollUntil = FPlatformTime::Seconds() + 1.0;
@@ -2408,7 +2422,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 		{
 			Body->AddSlot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
 			[
-				SNew(SBox)
+				SAssignNew(RivalCardBoxes.FindOrAdd(RowName), SBox)
 				.Visibility_Lambda([this, RowName]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->IsRivalAvailable(RowName)) ? EVisibility::Visible : EVisibility::Collapsed; })
 				[
 					SNew(SBorder).BorderImage(D::TileBrush()).Padding(FMargin(9.f, 7.f))
@@ -3831,5 +3845,1234 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 					+ SHorizontalBox::Slot().AutoWidth()[Detail]
 				]
 			]
+		];
+}
+
+// --- E8: the MARKET panel (docs/qa/2026-10-25/e8-market-panel-design.md, REVISION 3; director answers Q-A (b), Q-B, Q-C (a)) ---------------
+// The sixth fold of the right column's accordion, straight after EARTH & NEIGHBORS. It reads const getters only, and everything it shows is
+// gated by discovery: a resource is shown when an AVAILABLE rival with an economy in the shown region trades it, and ROUTES lists available
+// rivals only, so an undiscovered settlement's name, slots, holdings and route never appear. Its strings are built once when their key moves
+// (the open sol, the region, the selection, a load, the availability mask, the shown prices; the orders' and routes' own change keys), never
+// per paint, inside RHFrameStats' Market slot. Buying and selling stay on each rival's card (EARTH & NEIGHBORS). Every word is Gate-D
+// placeholder copy (gate-d-wording.md, "Rows added by E8").
+
+namespace
+{
+	// The ring's price series in the live unit: each entry converted at its own sol's rate (parity before any issue), -1 kept unknown (R2-3,
+	// R3-5). Credits and marks share the price integers at the issue, so the marks view has no step at the open sol; the credit view of a mark
+	// sol has one, which the panel labels instead of smoothing.
+	int64 MarketToUnit(int64 Price, uint8 FromUnit, int64 RateMcr, uint8 ToUnit)
+	{
+		if (Price < 0 || FromUnit == ToUnit)
+		{
+			return Price;
+		}
+		const int64 Rate = RateMcr > 0 ? RateMcr : 1000;
+		return FromUnit == 1 ? URHSimWorldSubsystem::MarketDivTrunc(Price * Rate, 1000) : URHSimWorldSubsystem::MarketDivTrunc(Price * 1000, Rate);
+	}
+
+	// A one-row sparkline of the last Width values, newest at the right, scaled between the window's own minimum and maximum (a flat series
+	// draws mid-row); an unknown sol is a space. U+2581..U+2588, as the power chart.
+	FString MarketSpark(const TArray<int64>& Vals, int32 Width, int32& OutGlyphs)
+	{
+		OutGlyphs = 0;
+		const int32 From = FMath::Max(0, Vals.Num() - Width);
+		int64 Lo = MAX_int64, Hi = MIN_int64;
+		for (int32 k = From; k < Vals.Num(); ++k) { if (Vals[k] >= 0) { Lo = FMath::Min(Lo, Vals[k]); Hi = FMath::Max(Hi, Vals[k]); } }
+		FString Row;
+		for (int32 k = Vals.Num() - From; k < Width; ++k) { Row.AppendChar(TEXT(' ')); }
+		for (int32 k = From; k < Vals.Num(); ++k)
+		{
+			if (Vals[k] < 0) { Row.AppendChar(TEXT(' ')); continue; }
+			const int32 Lvl = Hi > Lo ? (int32)FMath::Clamp((Vals[k] - Lo) * 7 / (Hi - Lo), (int64)0, (int64)7) : 3;
+			Row.AppendChar((TCHAR)(0x2581 + Lvl));
+			++OutGlyphs;
+		}
+		return Row;
+	}
+
+	// The detail's three-row block chart of the same window (24 levels), as GetPowerChartText builds its rows.
+	FString MarketChart3(const TArray<int64>& Vals, int32 Width)
+	{
+		const int32 From = FMath::Max(0, Vals.Num() - Width);
+		int64 Lo = MAX_int64, Hi = MIN_int64;
+		for (int32 k = From; k < Vals.Num(); ++k) { if (Vals[k] >= 0) { Lo = FMath::Min(Lo, Vals[k]); Hi = FMath::Max(Hi, Vals[k]); } }
+		FString Rows[3];
+		for (int32 r = 0; r < 3; ++r)
+		{
+			for (int32 k = Vals.Num() - From; k < Width; ++k) { Rows[r].AppendChar(TEXT(' ')); }
+		}
+		for (int32 k = From; k < Vals.Num(); ++k)
+		{
+			const int32 Lvl = Vals[k] < 0 ? -1 : (Hi > Lo ? (int32)FMath::Clamp((Vals[k] - Lo) * 23 / (Hi - Lo), (int64)0, (int64)23) : 11);
+			for (int32 r = 0; r < 3; ++r)
+			{
+				const int32 Seg = Lvl - 8 * r;
+				Rows[r].AppendChar(Lvl < 0 || Seg < 0 ? TEXT(' ') : (TCHAR)(0x2581 + FMath::Min(7, Seg)));
+			}
+		}
+		return Rows[2] + TEXT("\n") + Rows[1] + TEXT("\n") + Rows[0];
+	}
+
+	// Whole kilograms grouped by thousands ("12,950"), as FText::AsNumber prints them in English, without the culture machinery: DETAIL's
+	// five numbers cost about 1.3-2.2 ms a pass through FText::AsNumber on this Mac (the round-2 probe), most of a slice's budget.
+	FString MarketGrouped(int64 V)
+	{
+		const bool bNeg = V < 0;
+		FString Digits = FString::Printf(TEXT("%lld"), bNeg ? -V : V);
+		FString Out;
+		for (int32 k = 0; k < Digits.Len(); ++k)
+		{
+			if (k > 0 && (Digits.Len() - k) % 3 == 0) { Out.AppendChar(TEXT(',')); }
+			Out.AppendChar(Digits[k]);
+		}
+		return bNeg ? TEXT("-") + Out : Out;
+	}
+
+	FString MarketSigned(int64 Mcr)
+	{
+		return (Mcr > 0 ? TEXT("+") : Mcr < 0 ? TEXT("-") : TEXT("")) + URHSimWorldSubsystem::FormatCredits(Mcr < 0 ? -Mcr : Mcr);
+	}
+
+	// A route's chip text: the status word, with the timers the card's verbs wait on (Gate-D placeholder copy).
+	FString MarketChipText(const URHSimWorldSubsystem& S, FName Rival, ERHRouteStatus Status)
+	{
+		switch (Status)
+		{
+		case ERHRouteStatus::Embargo: return FString::Printf(TEXT("embargo, %.1f sols to reassure"), S.GetEmbargoGrace(Rival));
+		case ERHRouteStatus::Disrupted: return FString::Printf(TEXT("disrupted, %.1f sols"), S.GetSabotageRemaining(Rival));
+		case ERHRouteStatus::Storm: return TEXT("storm: convoys halted");
+		default: return URHTradeVisualizerSubsystem::RouteStatusWord(Status);
+		}
+	}
+
+	const FLinearColor MarketChipInk(0.02f, 0.03f, 0.04f, 1.f); // a chip's text: dark on the status colour
+
+	// QA: log each MARKET refresh pass that did work, by section, with its cost (off by default; Rebuild (a)'s per-rebuild cost).
+	int32 GRHMarketLogRebuilds = 0;
+	FAutoConsoleVariableRef CVarRHMarketLogRebuilds(TEXT("RH.Market.LogRebuilds"), GRHMarketLogRebuilds,
+		TEXT("E8 QA: 1 logs each MARKET panel refresh pass that did work - which sections re-created rows or rewrote texts - and its cost in ms."));
+}
+
+void SRHCommandDeck::ShownMarketSlots(int32 RegionId, TArray<FName>& Out) const
+{
+	// R2-1: the slots an available rival with an economy in RegionId trades, by name string. Never Defs->GetRival(...)->RegionId: E7's getter.
+	Out.Reset();
+	const URHSimWorldSubsystem* S = GetSim();
+	if (!S)
+	{
+		return;
+	}
+	TArray<FName> Traded;
+	for (int32 r = 0; r < S->GetRivalEconomyCount(); ++r)
+	{
+		const FName Name = S->GetRivalEconomyName(r);
+		if (!S->IsRivalAvailable(Name) || !S->HasRivalEconomy(Name) || S->GetRivalRegionId(Name) != RegionId)
+		{
+			continue;
+		}
+		S->GetRivalTradedResources(Name, Traded);
+		for (const FName& Res : Traded) { Out.AddUnique(Res); }
+	}
+	Out.Sort([](const FName& A, const FName& B) { return A.ToString().Compare(B.ToString(), ESearchCase::CaseSensitive) < 0; });
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildMarketPanel()
+{
+	if (const UWorld* WorldForBind = PC.IsValid() ? PC->GetWorld() : nullptr)
+	{
+		if (URHSimWorldSubsystem* SimForBind = WorldForBind->GetSubsystem<URHSimWorldSubsystem>())
+		{
+			// A load rebuilds every string (its open sol and prices may match the live ones).
+			SimForBind->OnColonyReloaded.AddSP(this, &SRHCommandDeck::HandleMarketReloaded);
+		}
+	}
+	const auto Section = [](const TCHAR* Heading, const TSharedRef<SWidget>& Content) -> TSharedRef<SWidget>
+	{
+		return SNew(SBorder).BorderImage(D::TileBrush()).Padding(FMargin(9.f))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+				[
+					SNew(STextBlock).Text(Txt(Heading)).Font(D::Label(8)).ColorAndOpacity(D::Amber)
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					Content
+				]
+			];
+	};
+	const FSlateFontInfo Mono = FCoreStyle::GetDefaultFontStyle("Mono", 9);
+	TSharedRef<SVerticalBox> Body = SNew(SVerticalBox)
+		// The region selector: only with more than one region holding an available economy rival.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+		[
+			SAssignNew(MarketRegionBox, SHorizontalBox)
+			.Visibility_Lambda([this]() { return MarketRegionButtons > 1 ? EVisibility::Visible : EVisibility::Collapsed; })
+		]
+		+ SVerticalBox::Slot().AutoHeight()
+		[
+			Section(TEXT("PRICES"),
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 0.f, 0.f, 4.f)
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+					.Text_Lambda([this]() { return MarketUnitText; })
+					.Visibility_Lambda([this]() { return MarketUnitText.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SAssignNew(MarketRowsBox, SVerticalBox)
+				])
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			Section(TEXT("DETAIL"),
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Font(Mono).ColorAndOpacity(D::Sky).Text_Lambda([this]() { return MarketDetailChart; })
+					.Visibility_Lambda([this]() { return MarketDetailChart.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(Mono).ColorAndOpacity(D::TextDim).Text_Lambda([this]() { return MarketCreditChart; })
+					.Visibility_Lambda([this]() { return MarketCreditChart.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).Text_Lambda([this]() { return MarketCreditCaption; })
+					.Visibility_Lambda([this]() { return MarketCreditCaption.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true).Text_Lambda([this]() { return MarketDetailText; })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true).Text_Lambda([this]() { return MarketDetailEarth; })
+					.Visibility_Lambda([this]() { return MarketDetailEarth.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true).Text_Lambda([this]() { return MarketDetailRest; })
+					.ToolTipText_Lambda([this]() { return MarketHoldersTip; })
+					.Visibility_Lambda([this]() { return MarketDetailRest.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				])
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			Section(TEXT("TRADE BALANCE"),
+				SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true).Text_Lambda([this]() { return MarketBalanceText; }))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			SNew(SBox).Visibility_Lambda([this]() { return bMarketRateShown ? EVisibility::Visible : EVisibility::Collapsed; })
+			[
+				Section(TEXT("EXCHANGE RATE"),
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Font(D::Value(9)).ColorAndOpacity(D::Text).Text_Lambda([this]() { return MarketRateHead; })
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Font(Mono).ColorAndOpacity(D::Sky).Text_Lambda([this]() { return MarketRateChart; })
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+					[
+						SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true).Text_Lambda([this]() { return MarketRateText; })
+					])
+			]
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			Section(TEXT("OPEN ORDERS"), SAssignNew(MarketOrdersBox, SVerticalBox))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 8.f, 0.f, 0.f)
+		[
+			Section(TEXT("ROUTES"), SAssignNew(MarketRoutesBox, SVerticalBox))
+		];
+	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Font(D::Label(10)).ColorAndOpacity(D::TextDim).Text_Lambda([this]() { return MarketSummary; })
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			FoldToggle(EFold::Market, FName("RH.MarketToggle"))
+		];
+	return SNew(SBox)
+		// Shown while the market is live and some neighbor is known (EARTH & NEIGHBORS' rule).
+		.Visibility_Lambda([this]()
+		{
+			const URHSimWorldSubsystem* S = GetSim();
+			const URHDefinitionsSubsystem* Df = GetDefs();
+			bool bAny = false;
+			if (S && Df && S->IsMarketLive())
+			{
+				Df->ForEachRivalRow([&](FName R, const FRHRivalRow&) { bAny |= S->IsRivalAvailable(R); });
+			}
+			return bAny ? EVisibility::Visible : EVisibility::Collapsed;
+		})
+		[
+			D::Panel(FName("trade"), Txt(TEXT("MARKET")), D::Gold,
+				SNew(SBox).Visibility_Lambda([this]() { return bMarketExpanded ? EVisibility::Visible : EVisibility::Collapsed; })[Body],
+				Summary)
+		];
+}
+
+EVisibility SRHCommandDeck::Debug_GetRivalCardVisibility(FName Rival) const
+{
+	// The attribute evaluated now: a card inside the folded panel is not in the tree Slate updates, so its cached visibility can be stale.
+	const TSharedPtr<SBox>* Box = RivalCardBoxes.Find(Rival);
+	if (!Box || !Box->IsValid())
+	{
+		return EVisibility::Collapsed;
+	}
+	return AccessWidgetVisibilityAttribute(Box->ToSharedRef()).Get(); // the bound lambda, called now
+}
+
+void SRHCommandDeck::HandleMarketReloaded()
+{
+	++MarketReloads;
+}
+
+namespace
+{
+	// The regions with an available economy rival, in RegionId order (the selector is drawn with more than one).
+	void MarketRegionsOf(const URHSimWorldSubsystem& S, TArray<int32>& Out)
+	{
+		Out.Reset();
+		for (int32 m = 0; m < S.GetMarketRegionCount(); ++m)
+		{
+			const int32 Region = S.GetMarketRegionIdAt(m);
+			for (int32 r = 0; r < S.GetRivalEconomyCount(); ++r)
+			{
+				const FName Name = S.GetRivalEconomyName(r);
+				if (S.IsRivalAvailable(Name) && S.HasRivalEconomy(Name) && S.GetRivalRegionId(Name) == Region) { Out.AddUnique(Region); break; }
+			}
+		}
+	}
+
+	// Which rival rows are available, one bit each (discovery and injection move it).
+	uint32 MarketAvailMask(const URHSimWorldSubsystem& S, const URHDefinitionsSubsystem& Df)
+	{
+		uint32 AvailBits = 0, Bit = 0;
+		Df.ForEachRivalRow([&](FName R, const FRHRivalRow&) { AvailBits |= (S.IsRivalAvailable(R) ? 1u : 0u) << (Bit++ % 32u); });
+		return AvailBits;
+	}
+
+	// TRADE BALANCE's figures: the ring's last 8 closed sols, each converted at its own rate into the live unit (R2-3).
+	void MarketBalanceOf(const URHSimWorldSubsystem& S, int32 Region, uint8 LiveUnit, int64& OutSold, int64& OutBought)
+	{
+		OutSold = OutBought = 0;
+		const int32 RingFill = S.GetMarketHistoryFill(Region);
+		for (int32 Back = 1; Back <= URHSimWorldSubsystem::MarketRing && Back < RingFill; ++Back)
+		{
+			int64 Sv = 0, Bv = 0;
+			S.GetMarketHistoryValue(Back, Sv, Bv, Region);
+			const uint8 U = S.GetMarketHistoryUnit(Back, Region);
+			const int64 Rate = S.GetMarketHistoryRateMcr(Back, Region);
+			OutSold += MarketToUnit(Sv, U, Rate, LiveUnit);
+			OutBought += MarketToUnit(Bv, U, Rate, LiveUnit);
+		}
+	}
+}
+
+FText SRHCommandDeck::MarketOrderStateText(FMarketOrderRowText& Row) const
+{
+	// Rebuild (a): a convoy on the road shows its progress through this, called by its row's own lambda (as its progress bar reads it),
+	// so the percent never moves a key. The line is made again only when the whole percent moves.
+	if (!Row.bProgress)
+	{
+		return Row.StateFixed;
+	}
+	const URHSimWorldSubsystem* Sm = GetSim();
+	const int32 Id = Row.ConvoyId;
+	const FRHConvoy* Cv = Sm ? Sm->GetConvoys().FindByPredicate([Id](const FRHConvoy& X) { return X.Id == Id; }) : nullptr;
+	const int32 Pct = Cv ? (int32)(Sm->GetConvoyProgress(*Cv) * 100.0) : 0;
+	if (Pct != Row.ShownPct)
+	{
+		Row.ShownPct = Pct;
+		Row.CachedState = Txt(Row.bPriced ? FString::Printf(TEXT("on the road, %d%% · clears at the end of sol %d"), Pct, Row.ClearSol)
+			: FString::Printf(TEXT("on the road, %d%%"), Pct));
+	}
+	return Row.CachedState;
+}
+
+FString SRHCommandDeck::Debug_GetMarketOrdersText() const
+{
+	// What OPEN ORDERS draws now (empty before it was ever built): each row's head, its state line as its lambda reads it, and its extra line.
+	if (!bMarketOrdersBuilt)
+	{
+		return FString();
+	}
+	if (MarketOrderRows.Num() == 0)
+	{
+		return TEXT("No orders out");
+	}
+	TArray<FString> Lines;
+	for (const TSharedRef<FMarketOrderRowText>& R : MarketOrderRows)
+	{
+		if (R->ConvoyId == INDEX_NONE)
+		{
+			Lines.Add(R->Head.ToString());
+			continue;
+		}
+		const FString Extra = R->Extra.ToString();
+		Lines.Add(R->Head.ToString() + TEXT("\n") + MarketOrderStateText(*R).ToString() + (Extra.IsEmpty() ? FString() : TEXT("\n") + Extra));
+	}
+	return FString::Join(Lines, TEXT("\n"));
+}
+
+void SRHCommandDeck::UpdateMarketSummary(const URHSimWorldSubsystem& S, const URHDefinitionsSubsystem& Df, bool bFolded)
+{
+	// The header's one line (R2-8), the first that applies: orders out, the 8-sol balance, the shown prices. It stays readable while MARKET is
+	// folded, so it has its own key of a few counts and is made again only when one moves.
+	const bool bMarks = S.IsMarketInMarks();
+	uint32 SumKey = HashCombine(GetTypeHash(S.GetConvoys().Num()), GetTypeHash(S.GetMarketCheckedSol()));
+	SumKey = HashCombine(SumKey, HashCombine(GetTypeHash(S.GetMarketHistoryFill(MarketRegion)), GetTypeHash(S.GetMarketHistoryLastSol(MarketRegion))));
+	SumKey = HashCombine(SumKey, HashCombine(GetTypeHash(MarketAvailMask(S, Df)), GetTypeHash(MarketRegion)));
+	SumKey = HashCombine(SumKey, HashCombine(GetTypeHash(bMarks), GetTypeHash(MarketReloads)));
+	SumKey = HashCombine(SumKey, GetTypeHash(bFolded ? -1 : MarketShown.Num()));
+	if (bMarketSummaryValid && SumKey == MarketSummaryKey)
+	{
+		return;
+	}
+	MarketSummaryKey = SumKey;
+	bMarketSummaryValid = true;
+	MarketOrdersCount = S.GetConvoys().Num();
+	int64 SoldV = 0, BoughtV = 0;
+	MarketBalanceOf(S, MarketRegion, bMarks ? 1 : 0, SoldV, BoughtV);
+	MarketBalanceMcr = (SoldV != 0 || BoughtV != 0) ? SoldV - BoughtV : MIN_int64;
+	int32 PriceCount = MarketShown.Num();
+	if (bFolded)
+	{
+		TArray<FName> Shown;
+		ShownMarketSlots(MarketRegion, Shown);
+		PriceCount = Shown.Num();
+	}
+	if (MarketOrdersCount > 0)
+	{
+		MarketSummary = Txt(FString::Printf(TEXT("%d ORDER%s OUT"), MarketOrdersCount, MarketOrdersCount == 1 ? TEXT("") : TEXT("S")));
+	}
+	else if (MarketBalanceMcr != MIN_int64)
+	{
+		MarketSummary = Txt(FString::Printf(TEXT("BALANCE %s %s / 8 SOLS"), *MarketSigned(MarketBalanceMcr), bMarks ? TEXT("MK") : TEXT("CR")));
+	}
+	else
+	{
+		MarketSummary = Txt(FString::Printf(TEXT("%d PRICES"), PriceCount));
+	}
+}
+
+void SRHCommandDeck::RefreshMarketPanel()
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHDefinitionsSubsystem* Df = GetDefs();
+	if (!S || !Df || !MarketRowsBox.IsValid())
+	{
+		return;
+	}
+	RHFrameStats::FScope StatScope(RHFrameStats::Market);
+	TArray<int32> Regions;
+	MarketRegionsOf(*S, Regions);
+	if (Regions.Num() > 0 && !Regions.Contains(MarketRegion))
+	{
+		MarketRegion = Regions[0];
+	}
+	if (!bMarketExpanded)
+	{
+		// Rebuild (a), the director's answer of 2026-10-31: folded, the panel builds and rewrites nothing. Its keys are dropped, so it builds
+		// once when the fold opens; only the header's summary is kept current (above), from its own few counts.
+		bMarketKeysValid = false;
+		UpdateMarketSummary(*S, *Df, true);
+		return;
+	}
+	const uint32 Mask = MarketAvailMask(*S, *Df);
+	// PRICES' row set: the region and the regions drawn, a load, the availability mask (the shown slots follow from these). The selection is
+	// not in it (fix round 3): the rows draw their gold through lambdas, so a new selection rewrites DETAIL alone, in the pass that sees it.
+	uint32 PricesSet = HashCombine(GetTypeHash(MarketRegion), GetTypeHash(MarketReloads));
+	PricesSet = HashCombine(PricesSet, HashCombine(Mask, GetTypeHash(Regions.Num())));
+	for (const int32 R : Regions) { PricesSet = HashCombine(PricesSet, GetTypeHash(R)); }
+	const bool bPricesRows = !bMarketKeysValid || PricesSet != MarketPricesSetKey;
+	if (bPricesRows)
+	{
+		ShownMarketSlots(MarketRegion, MarketShown);
+	}
+	if (!MarketShown.Contains(MarketSelected))
+	{
+		// A cheat may name a slot that is not shown: Ice, else the first row.
+		MarketSelected = MarketShown.Contains(FName("Ice")) ? FName("Ice") : (MarketShown.Num() > 0 ? MarketShown[0] : NAME_None);
+	}
+	const uint8 SelectParts = (!bPricesRows && MarketSelected != MarketRowsSelected) ? (uint8)(MarketPartDetail | MarketPartEarth) : (uint8)0;
+	// PRICES' values: its rows' key (the open sol, the history, the currency, the shown prices: a roll moves it, and with it every part), and
+	// three parts that move between rolls, each rewritten alone: Earth's quote for the selection (DETAIL; the requisition multiplier), the
+	// lifetime totals (TRADE BALANCE; a launch, a convoy home) and the desk's totals today (EXCHANGE RATE; a desk order booked mid-sol).
+	uint32 Key = HashCombine(GetTypeHash(S->GetMarketCheckedSol()), GetTypeHash(S->GetMarketHistoryFill(MarketRegion)));
+	Key = HashCombine(Key, GetTypeHash(S->GetMarketHistoryLastSol(MarketRegion)));
+	Key = HashCombine(Key, HashCombine(GetTypeHash(S->GetCurrencyIssueSol()), GetTypeHash(S->GetCurrencyOpenSol())));
+	Key = HashCombine(Key, HashCombine(GetTypeHash(S->GetRate()), GetTypeHash(S->IsMarketInMarks())));
+	for (const FName& Res : MarketShown) { Key = HashCombine(Key, GetTypeHash(S->GetMarketPriceMcr(Res, MarketRegion))); }
+	const uint32 DetailKey = MarketSelected.IsNone() ? 0u : GetTypeHash(S->GetEarthPriceMcrPerKg(MarketSelected));
+	const uint32 LifetimeKey = HashCombine(GetTypeHash(S->GetSalesPaidMcr()), GetTypeHash(S->GetMarketSalesMcr()));
+	uint32 DeskKey = 0;
+	{
+		int64 DeskToMarks = 0, DeskToCredits = 0;
+		S->GetDeskBooked(S->GetMarketCheckedSol(), DeskToMarks, DeskToCredits);
+		DeskKey = HashCombine(GetTypeHash(DeskToMarks), GetTypeHash(DeskToCredits));
+	}
+	// OPEN ORDERS' row set: each convoy and desk order by Id. Its values: each convoy's state, money, clearing sol, pact and markup, and each
+	// desk order's terms. The progress percent is in neither: the row's lambdas read it.
+	TArray<FRHDeskOrder> Desk;
+	S->GetDeskOrders(Desk);
+	uint32 OrdersSet = HashCombine(GetTypeHash(S->GetConvoys().Num()), GetTypeHash(Desk.Num()));
+	uint32 OrdersKey = GetTypeHash(S->GetPactCargoKg());
+	{
+		FRHConvoyTerms Terms;
+		for (const FRHConvoy& C : S->GetConvoys())
+		{
+			OrdersSet = HashCombine(OrdersSet, GetTypeHash(C.Id));
+			OrdersKey = HashCombine(OrdersKey, HashCombine(GetTypeHash((int32)C.bCleared | ((int32)C.bReturning << 1) | ((int32)C.IsPriced() << 2) | ((int32)C.bStanding << 3)), GetTypeHash(C.ClearSol)));
+			OrdersKey = HashCombine(OrdersKey, HashCombine(GetTypeHash(C.OwedMcr), GetTypeHash(C.ReservedMcr)));
+			int64 HeldMmk = 0, OwedMmk = 0;
+			const bool bMarkOrder = S->GetMarkOrder(C.Id, HeldMmk, OwedMmk);
+			OrdersKey = HashCombine(OrdersKey, HashCombine(GetTypeHash(bMarkOrder), HashCombine(GetTypeHash(HeldMmk), GetTypeHash(OwedMmk))));
+			OrdersKey = HashCombine(OrdersKey, GetTypeHash(S->HasLivePact(C.Rival)));
+			if (S->GetConvoyTerms(C.Id, Terms)) { for (const int32 Bp : Terms.LineMarkupBp) { OrdersKey = HashCombine(OrdersKey, GetTypeHash(Bp)); } }
+		}
+	}
+	for (const FRHDeskOrder& O : Desk)
+	{
+		OrdersSet = HashCombine(OrdersSet, GetTypeHash(O.Id));
+		OrdersKey = HashCombine(OrdersKey, HashCombine(GetTypeHash(O.ClearSol), HashCombine(GetTypeHash(O.Amount), GetTypeHash(O.Dir))));
+	}
+	// ROUTES' row set: the available rivals (the mask) and a load. Its values: each available rival's status and the timers its chip reads, to
+	// a tenth of a sol, its pact and its betrayal tariff ("N% tariff until sol U" ends when the open sol reaches U, which moves nothing else).
+	const uint32 RoutesSet = HashCombine(Mask, GetTypeHash(MarketReloads));
+	uint32 RoutesKey = GetTypeHash(S->GetPactCargoKg());
+	Df->ForEachRivalRow([&](FName R, const FRHRivalRow&)
+	{
+		if (!S->IsRivalAvailable(R)) { return; }
+		const ERHRouteStatus St = URHTradeVisualizerSubsystem::RouteStatusOf(*S, R);
+		RoutesKey = HashCombine(RoutesKey, HashCombine(GetTypeHash((uint8)St), GetTypeHash((int32)(S->GetEmbargoGrace(R) * 10.0))));
+		RoutesKey = HashCombine(RoutesKey, HashCombine(GetTypeHash((int32)(S->GetSabotageRemaining(R) * 10.0)), GetTypeHash(S->HasLivePact(R))));
+		int32 TariffBp = 0, TariffUntil = -1;
+		const bool bTariff = S->GetBetrayalTariff(R, TariffBp, TariffUntil);
+		RoutesKey = HashCombine(RoutesKey, HashCombine(GetTypeHash(bTariff ? TariffBp : -1), GetTypeHash(bTariff ? TariffUntil : -1)));
+	});
+	uint8 PriceParts = (bPricesRows || Key != MarketPricesKey) ? (uint8)MarketPartAll : (uint8)0;
+	if (PriceParts == 0)
+	{
+		PriceParts |= DetailKey != MarketDetailKey ? (uint8)MarketPartEarth : (uint8)0;
+		PriceParts |= LifetimeKey != MarketLifetimeKey ? (uint8)MarketPartBalance : (uint8)0;
+		PriceParts |= DeskKey != MarketDeskKey ? (uint8)MarketPartRate : (uint8)0;
+	}
+	if (bPricesRows)
+	{
+		MarketPendingParts = 0; // made and filled whole this pass
+	}
+	else if (PriceParts != 0)
+	{
+		if (PriceParts & MarketPartRows) { MarketPendingRow = 0; }
+		MarketPendingParts |= PriceParts;
+	}
+	MarketPendingParts &= (uint8)~SelectParts; // a new selection's DETAIL is written whole below, this pass
+	const bool bPricesVals = bPricesRows || MarketPendingParts != 0 || SelectParts != 0;
+	const bool bOrdersRows = !bMarketKeysValid || OrdersSet != MarketOrdersSetKey;
+	const bool bOrdersVals = bOrdersRows || OrdersKey != MarketOrdersKey;
+	const bool bRoutesRows = !bMarketKeysValid || RoutesSet != MarketRoutesSetKey;
+	const bool bRoutesVals = bRoutesRows || RoutesKey != MarketRoutesKey;
+	if (!bPricesVals && !bOrdersVals && !bRoutesVals)
+	{
+		UpdateMarketSummary(*S, *Df, false);
+		return;
+	}
+	const double T0 = FPlatformTime::Seconds();
+	MarketPricesSetKey = PricesSet;
+	MarketRowsSelected = MarketSelected;
+	MarketPricesKey = Key;
+	MarketDetailKey = DetailKey;
+	MarketLifetimeKey = LifetimeKey;
+	MarketDeskKey = DeskKey;
+	MarketOrdersSetKey = OrdersSet;
+	MarketOrdersKey = OrdersKey;
+	MarketRoutesSetKey = RoutesSet;
+	MarketRoutesKey = RoutesKey;
+	bMarketKeysValid = true;
+	if (bPricesRows)
+	{
+		// The region selector.
+		MarketRegionBox->ClearChildren();
+		MarketRegionButtons = Regions.Num() > 1 ? Regions.Num() : 0;
+		for (int32 i = 0; MarketRegionButtons > 0 && i < Regions.Num(); ++i)
+		{
+			const int32 Region = Regions[i];
+			MarketRegionBox->AddSlot().AutoWidth().Padding(0.f, 0.f, 4.f, 0.f)
+			[
+				SNew(SButton).ButtonStyle(&D::FlatButtonStyle()).ContentPadding(FMargin(6.f, 2.f))
+				.AddMetaData<FTagMetaData>(FTagMetaData(FName(*FString::Printf(TEXT("RH.MarketRegion.%d"), Region))))
+				.OnClicked_Lambda([this, Region]() { MarketRegion = Region; return FReply::Handled(); })
+				[
+					SNew(STextBlock).Text(Txt(FString::Printf(TEXT("Region %d"), Region))).Font(D::Label(9))
+					.ColorAndOpacity(Region == MarketRegion ? D::Gold : D::TextDim)
+				]
+			];
+		}
+		// PRICES: one two-line row per shown slot (Q-B): the icon, the short label and the price; then the 30-glyph sparkline and the 5-sol
+		// change. The texts are the row's own, rewritten in place by FillMarketPrices.
+		MarketRowsBox->ClearChildren();
+		MarketPriceRows.Reset();
+		++MarketPricesRowSets;
+		for (const FName& Res : MarketShown)
+		{
+			const TSharedRef<FMarketPriceRowText> R = MakeShared<FMarketPriceRowText>();
+			MarketPriceRows.Add(Res, R);
+			// The selected row is drawn in gold, read live: a new selection re-creates nothing.
+			const auto SelColour = [this, Res](const FLinearColor& Other) { return FSlateColor(Res == MarketSelected ? D::Gold : Other); };
+			MarketRowsBox->AddSlot().AutoHeight().Padding(0.f, 1.f)
+			[
+				SNew(SButton).ButtonStyle(&D::FlatButtonStyle()).ContentPadding(FMargin(2.f, 2.f))
+				.AddMetaData<FTagMetaData>(FTagMetaData(FName(*FString::Printf(TEXT("RH.MarketRow.%s"), *Res.ToString()))))
+				.ToolTipText_Lambda([R]() { return R->Tip; })
+				.OnClicked_Lambda([this, Res]() { MarketSelected = Res; return FReply::Handled(); })
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 4.f, 0.f)
+						[
+							D::IconImage(ResourceIcon(Res), TAttribute<FSlateColor>::CreateLambda([SelColour]() { return SelColour(D::TextDim); }), 14.f)
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).Text(Txt(ResourceLabel(Res))).Font(D::Body(9)).ColorAndOpacity_Lambda([SelColour]() { return SelColour(D::Text); })
+						]
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).Text_Lambda([R]() { return R->Price; }).Font(D::Value(9)).ColorAndOpacity_Lambda([SelColour]() { return SelColour(D::Text); })
+						]
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+						[
+							SNew(STextBlock).Text_Lambda([R]() { return R->Spark; }).Font(FCoreStyle::GetDefaultFontStyle("Mono", 9)).ColorAndOpacity(D::Sky)
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.f).HAlign(HAlign_Right).VAlign(VAlign_Center).Padding(8.f, 0.f, 0.f, 0.f)
+						[
+							SNew(STextBlock).Text_Lambda([R]() { return R->Change; }).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+						]
+					]
+				]
+			];
+		}
+	}
+	const double TPrices = FPlatformTime::Seconds();
+	FString PricesDid = TEXT("-");
+	if (bPricesRows)
+	{
+		FillMarketPrices(*S, *Df, MarketPartAll);
+		PricesDid = TEXT("rows made, every text");
+	}
+	else if (SelectParts != 0)
+	{
+		// A new selection: DETAIL and its Earth line, whole, this pass (the rows' gold follows by their lambdas); a slice waits for the next.
+		FillMarketPrices(*S, *Df, SelectParts);
+		PricesDid = TEXT("selection: DETAIL");
+	}
+	else if (MarketPendingParts != 0)
+	{
+		// One slice a pass (Rebuild (a)): MarketRowsPerSlice price rows, or one other part, the rest on the next passes.
+		if (MarketPendingParts & MarketPartRows)
+		{
+			const int32 RowEnd = MarketPendingRow + MarketRowsPerSlice;
+			FillMarketPrices(*S, *Df, MarketPartRows, MarketPendingRow, RowEnd);
+			PricesDid = FString::Printf(TEXT("rows %d-%d"), MarketPendingRow, FMath::Min(RowEnd, MarketShown.Num()) - 1);
+			MarketPendingRow = RowEnd;
+			if (MarketPendingRow >= MarketShown.Num()) { MarketPendingParts &= (uint8)~MarketPartRows; }
+		}
+		else
+		{
+			const uint8 Next = (uint8)(MarketPendingParts & (0u - (uint32)MarketPendingParts)); // the lowest part still to do
+			FillMarketPrices(*S, *Df, Next);
+			PricesDid = FString::Printf(TEXT("part 0x%x"), Next);
+			MarketPendingParts &= (uint8)~Next;
+		}
+	}
+	const double TOrders = FPlatformTime::Seconds();
+	if (bOrdersRows)
+	{
+		// OPEN ORDERS: every convoy by Id, then the desk's orders; "No orders out" with none.
+		MarketOrdersBox->ClearChildren();
+		MarketOrderRows.Reset();
+		bMarketOrdersBuilt = true;
+		for (const FRHConvoy& C : S->GetConvoys())
+		{
+			const TSharedRef<FMarketOrderRowText> R = MakeShared<FMarketOrderRowText>();
+			R->ConvoyId = C.Id;
+			MarketOrderRows.Add(R);
+			const int32 Id = C.Id;
+			MarketOrdersBox->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text_Lambda([R]() { return R->Head; }).Font(D::Value(9)).ColorAndOpacity(D::Text).AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text_Lambda([this, R]() { return MarketOrderStateText(*R); }).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text_Lambda([R]() { return R->Extra; }).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+					.Visibility_Lambda([R]() { return R->Extra.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 2.f, 0.f, 0.f)
+				[
+					D::Bar(MakeAttributeLambda([this, Id]() -> TOptional<float>
+					{
+						const URHSimWorldSubsystem* Sm = GetSim();
+						const FRHConvoy* Cv = Sm ? Sm->GetConvoys().FindByPredicate([Id](const FRHConvoy& X) { return X.Id == Id; }) : nullptr;
+						return Cv ? (float)Sm->GetConvoyProgress(*Cv) : 0.f;
+					}), FSlateColor(D::Sky), 4.f)
+				]
+			];
+		}
+		for (const FRHDeskOrder& O : Desk)
+		{
+			const TSharedRef<FMarketOrderRowText> R = MakeShared<FMarketOrderRowText>();
+			MarketOrderRows.Add(R);
+			MarketOrdersBox->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+			[
+				SNew(STextBlock).Text_Lambda([R]() { return R->Head; }).Font(D::Body(8)).ColorAndOpacity(D::Text)
+			];
+		}
+		if (MarketOrderRows.Num() == 0)
+		{
+			MarketOrdersBox->AddSlot().AutoHeight()[SNew(STextBlock).Text(Txt(TEXT("No orders out"))).Font(D::Body(9)).ColorAndOpacity(D::TextDim)];
+		}
+	}
+	if (bOrdersVals)
+	{
+		FillMarketOrders(*S, *Df);
+	}
+	const double TRoutes = FPlatformTime::Seconds();
+	if (bRoutesRows)
+	{
+		// ROUTES: each available rival's route (E7's GetRoutes, by name string): its length and round trip, its chip and its terms.
+		MarketRoutesBox->ClearChildren();
+		MarketRouteRows.Reset();
+		TArray<FRHRoute> Routes;
+		S->GetRoutes(Routes);
+		for (const FRHRoute& Route : Routes)
+		{
+			const FRHRivalRow* Row = Df->GetRival(Route.Rival);
+			if (!Row || !S->IsRivalAvailable(Route.Rival))
+			{
+				continue;
+			}
+			const TSharedRef<FMarketRouteRowText> R = MakeShared<FMarketRouteRowText>();
+			R->Rival = Route.Rival;
+			R->Line = Txt(FString::Printf(TEXT("%s · %.0f km · round trip %.1f sols"), *Row->DisplayName, Route.LengthKm, 2.0 * S->GetConvoyLegSols(Route.Rival)));
+			MarketRouteRows.Add(R);
+			MarketRoutesBox->AddSlot().AutoHeight().Padding(0.f, 0.f, 0.f, 6.f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true).Text_Lambda([R]() { return R->Line; })
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Left).Padding(0.f, 2.f, 0.f, 0.f)
+				[
+					SNew(SBorder).BorderImage(D::RoundedWhite()).Padding(FMargin(6.f, 1.f))
+					.BorderBackgroundColor_Lambda([R]() { return FSlateColor(R->ChipFill); })
+					.AddMetaData<FTagMetaData>(FTagMetaData(FName(*FString::Printf(TEXT("RH.RouteChip.%s"), *Route.Rival.ToString()))))
+					[
+						SNew(STextBlock).Text_Lambda([R]() { return R->Chip; }).Font(D::Label(8)).ColorAndOpacity(MarketChipInk)
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(STextBlock).Text_Lambda([R]() { return R->Terms; }).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+					.Visibility_Lambda([R]() { return R->Terms.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible; })
+				]
+			];
+		}
+	}
+	if (bRoutesVals)
+	{
+		FillMarketRoutes(*S, *Df);
+	}
+	UpdateMarketSummary(*S, *Df, false);
+	// Each pass that did work is one "rebuild" for the frame bar: a pass that re-created any rows, or one that only rewrote texts.
+	const double Ms = (FPlatformTime::Seconds() - T0) * 1000.0;
+	MarketWorstRebuildMs = FMath::Max(MarketWorstRebuildMs, Ms);
+	RHFrameStats::GMarketWorstRebuildMs = FMath::Max(RHFrameStats::GMarketWorstRebuildMs, Ms);
+	RHFrameStats::GMarketRebuildTotalMs += Ms;
+	if (bPricesRows || bOrdersRows || bRoutesRows)
+	{
+		++MarketRowRebuilds;
+		++RHFrameStats::GMarketRowRebuilds;
+	}
+	else
+	{
+		++MarketTextUpdates;
+		++RHFrameStats::GMarketTextUpdates;
+	}
+	if (GRHMarketLogRebuilds != 0)
+	{
+		// QA (RH.Market.LogRebuilds 1): each pass's sections, what each did, and its cost, so the per-rebuild cost can be read pass by pass.
+		UE_LOG(LogRedHope, Display, TEXT("[Market] rebuild %.3f ms: prices %s (%.3f ms), orders %s (%.3f ms), routes %s (%.3f ms)"), Ms,
+			*PricesDid, (TOrders - TPrices) * 1000.0,
+			bOrdersRows ? TEXT("rows+texts") : (bOrdersVals ? TEXT("texts") : TEXT("-")), (TRoutes - TOrders) * 1000.0,
+			bRoutesRows ? TEXT("rows+texts") : (bRoutesVals ? TEXT("texts") : TEXT("-")), (FPlatformTime::Seconds() - TRoutes) * 1000.0);
+	}
+}
+
+void SRHCommandDeck::FillMarketPrices(const URHSimWorldSubsystem& S, const URHDefinitionsSubsystem& Df, uint8 Parts, int32 RowFrom, int32 RowTo)
+{
+	// Rewrites, in place (no widget is made here), the parts named: the PRICES rows' texts and the unit's sub-heading, the DETAIL texts, the
+	// TRADE BALANCE text and the EXCHANGE RATE texts.
+	const bool bMarks = S.IsMarketInMarks();
+	const uint8 LiveUnit = bMarks ? 1 : 0;
+	const FString UnitKg = bMarks ? TEXT("mk/kg") : TEXT("cr/kg");
+	const FString Unit = bMarks ? TEXT("mk") : TEXT("cr");
+	const int32 RingFill = S.GetMarketHistoryFill(MarketRegion);
+	const int32 RingLastSol = S.GetMarketHistoryLastSol(MarketRegion);
+	// R3-5's "marks from sol N" (fix round 3). While the market counts in marks, N is the mark's open sol (E5), never the window's oldest marks
+	// entry: once the ring has held 30 marks sols that entry is a later sol (the review's open sol + 31). After a withdrawal, N is the era's
+	// first marks sol only while the window still holds the sol before it; otherwise the label says where the era ended ("marks before sol M",
+	// M the first sol back in credits). OpenStepSol is the sol of a credits-to-marks step the window holds (both a sol before it and a marks
+	// sol), -1 none: only then does the credit view draw, with its "the unit changed at sol N" caption.
+	const int32 WindowFirstSol = RingFill > 0 ? RingLastSol - (RingFill - 1) : -1;
+	int32 OldestMarksSol = -1, NewestMarksSol = -1;
+	for (int32 Back = RingFill - 1; Back >= 0; --Back)
+	{
+		if (S.GetMarketHistoryUnit(Back, MarketRegion) == 1)
+		{
+			OldestMarksSol = OldestMarksSol < 0 ? RingLastSol - Back : OldestMarksSol;
+			NewestMarksSol = RingLastSol - Back;
+		}
+	}
+	FString MarksNote;
+	int32 OpenStepSol = -1;
+	if (bMarks)
+	{
+		const int32 OpenSol = S.GetCurrencyOpenSol();
+		MarksNote = FString::Printf(TEXT("marks from sol %d"), OpenSol);
+		OpenStepSol = (RingFill > 0 && OpenSol > WindowFirstSol && OpenSol <= RingLastSol) ? OpenSol : -1;
+	}
+	else if (OldestMarksSol >= 0)
+	{
+		const bool bEraStartHeld = OldestMarksSol > WindowFirstSol;
+		MarksNote = bEraStartHeld ? FString::Printf(TEXT("marks from sol %d"), OldestMarksSol) : FString::Printf(TEXT("marks before sol %d"), NewestMarksSol + 1);
+	}
+	const uint8 NewestUnit = RingFill > 0 ? S.GetMarketHistoryUnit(0, MarketRegion) : LiveUnit;
+	const auto Series = [&](FName Res, uint8 ToUnit, TArray<int64>& Out, bool& bOutUnitChange)
+	{
+		TArray<int64> Raw;
+		S.GetMarketHistory(Res, Raw, MarketRegion);
+		Out.Reset();
+		bOutUnitChange = false;
+		for (int32 k = 0; k < Raw.Num(); ++k)
+		{
+			const int32 Back = Raw.Num() - 1 - k;
+			const uint8 U = S.GetMarketHistoryUnit(Back, MarketRegion);
+			Out.Add(MarketToUnit(Raw[k], U, S.GetMarketHistoryRateMcr(Back, MarketRegion), ToUnit));
+			bOutUnitChange |= Back <= 5 && U != NewestUnit;
+		}
+	};
+	// R3-5's label, placed so line 2 stays one clean line: a change whose 5-sol window spans the mark's open sol or a withdrawal is marked
+	// with an asterisk, and the sub-heading and the row's tooltip say "(unit changed)" in full. The window's units are the region's, so
+	// whether it spans a change of unit is one answer for every row (the sub-heading's note needs six sols held, as a change does).
+	// Broken after "(unit changed):", so the note never wraps mid-phrase at the column's width (the review's e8_rate_00).
+	const FString UnitNote = FString::Printf(TEXT("* (unit changed):\nthe 5-sol change spans the mark's %s"), NewestUnit == 1 ? TEXT("open sol") : TEXT("withdrawal"));
+	bool bWindowUnitChange = false;
+	for (int32 Back = 0; Back <= 5 && Back < RingFill; ++Back) { bWindowUnitChange |= S.GetMarketHistoryUnit(Back, MarketRegion) != NewestUnit; }
+	if (Parts & MarketPartRows)
+	{
+		if (RowFrom == 0)
+		{
+			MarketSparkGlyphs.Reset();
+			MarketChangeText.Reset();
+		}
+		for (int32 RowAt = FMath::Max(0, RowFrom); RowAt < FMath::Min(RowTo, MarketShown.Num()); ++RowAt)
+		{
+			const FName& Res = MarketShown[RowAt];
+			const TSharedRef<FMarketPriceRowText>* Found = MarketPriceRows.Find(Res);
+			if (!Found)
+			{
+				continue;
+			}
+			FMarketPriceRowText& R = Found->Get();
+			TArray<int64> Vals;
+			bool bUnitChange = false;
+			Series(Res, LiveUnit, Vals, bUnitChange);
+			int32 Glyphs = 0;
+			const FString Spark = MarketSpark(Vals, MarketSparkWidth, Glyphs);
+			FString Change;
+			const bool bChange = Vals.Num() >= 6 && Vals.Last() >= 0 && Vals[Vals.Num() - 6] > 0;
+			if (bChange)
+			{
+				double Pct = (double)(Vals.Last() - Vals[Vals.Num() - 6]) * 100.0 / (double)Vals[Vals.Num() - 6];
+				Pct = FMath::Abs(Pct) < 0.05 ? 0.0 : Pct; // a change that rounds to zero prints "+0.0%", never "-0.0%"
+				Change = FMath::Abs(Pct) >= 99.95 ? FString::Printf(TEXT("%+.0f%%"), Pct) : FString::Printf(TEXT("%+.1f%%"), Pct); // three digits drop the decimal: the slot is ~36 px
+				if (bUnitChange) { Change += TEXT("*"); }
+			}
+			MarketSparkGlyphs.Add(Res, Glyphs);
+			MarketChangeText.Add(Res, Change);
+			int64 Lo = MAX_int64, Hi = 0;
+			for (const int64 V : Vals) { if (V >= 0) { Lo = FMath::Min(Lo, V); Hi = FMath::Max(Hi, V); } }
+			// The oldest held entry (the price 29 sols ago once the ring is full): the first known value, Vals' last entry being the open sol.
+			int32 OldestAt = INDEX_NONE;
+			for (int32 v = 0; v < Vals.Num() && OldestAt == INDEX_NONE; ++v) { if (Vals[v] >= 0) { OldestAt = v; } }
+			const FString Oldest = OldestAt == INDEX_NONE ? FString() : FString::Printf(TEXT(", %s %d sols ago"), *URHSimWorldSubsystem::FormatCredits(Vals[OldestAt]), Vals.Num() - 1 - OldestAt);
+			FString Tip = FString::Printf(TEXT("%s: %s %s today%s; over the last %d sols %s to %s; the band %s to %s"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)), *UnitKg,
+				*Oldest, Vals.Num(), *URHSimWorldSubsystem::FormatCredits(Lo == MAX_int64 ? 0 : Lo), *URHSimWorldSubsystem::FormatCredits(Hi),
+				*URHSimWorldSubsystem::FormatCredits(S.GetMarketFloorMcr(Res, MarketRegion)), *URHSimWorldSubsystem::FormatCredits(S.GetMarketCeilMcr(Res, MarketRegion)));
+			if (!MarksNote.IsEmpty()) { Tip += FString::Printf(TEXT(" (%s)"), *MarksNote); }
+			if (bChange && bUnitChange) { Tip += TEXT("\n") + UnitNote; }
+			R.Price = Txt(URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)) + TEXT(" ") + UnitKg);
+			R.Spark = Txt(Spark);
+			R.Change = Txt(Change);
+			R.Tip = Txt(Tip);
+		}
+		// The unit's sub-heading (R2-3, R3-5), and R3-5's "(unit changed)" note while the rows carry the asterisk (with the last slice).
+		FString UnitLine;
+		if (bMarks)
+		{
+			UnitLine = FString::Printf(TEXT("Prices in marks since sol %d"), S.GetCurrencyOpenSol());
+		}
+		else if (S.GetCurrencyIssueSol() >= 0)
+		{
+			UnitLine = FString::Printf(TEXT("Orders clearing at the end of sol %d or later count in marks; prices still in credits"), S.GetCurrencyOpenSol());
+		}
+		else if (!MarksNote.IsEmpty())
+		{
+			UnitLine = FString::Printf(TEXT("Prices in credits again; %s"), *MarksNote);
+		}
+		if (bWindowUnitChange && RingFill >= 6)
+		{
+			UnitLine += (UnitLine.IsEmpty() ? FString() : FString(TEXT("\n"))) + UnitNote;
+		}
+		if (RowTo >= MarketShown.Num())
+		{
+			MarketUnitText = UnitLine.IsEmpty() ? FText::GetEmpty() : Txt(UnitLine);
+		}
+	}
+	if (Parts & MarketPartDetail)
+	{
+		// DETAIL: the selected resource.
+		if (!MarketSelected.IsNone())
+		{
+			const FName Res = MarketSelected;
+			TArray<int64> Vals;
+			bool bUnitChange = false;
+			Series(Res, LiveUnit, Vals, bUnitChange);
+			// The 3-row chart is collapsed while the window holds no known sol (three rows of spaces would only leave a blank band).
+			int32 Known = 0;
+			for (const int64 V : Vals) { Known += V >= 0 ? 1 : 0; }
+			MarketDetailChart = Known > 0 ? Txt(MarketChart3(Vals, MarketSparkWidth)) : FText::GetEmpty();
+			// While the market counts in marks and the window holds the open sol's step (a sol before it and a marks sol), the credit view too:
+			// each mark sol at its own rate, so its step at the open sol is a change of unit. Once the open sol has left the window there is no
+			// step in the chart, so neither the view nor a caption claiming one is drawn. The sparkline is mono; its caption is a body line of its own.
+			MarketCreditChart = FText::GetEmpty();
+			MarketCreditCaption = FText::GetEmpty();
+			if (bMarks && OpenStepSol >= 0)
+			{
+				TArray<int64> InCredits;
+				Series(Res, 0, InCredits, bUnitChange);
+				int32 Unused = 0;
+				MarketCreditChart = Txt(MarketSpark(InCredits, MarketSparkWidth, Unused));
+				MarketCreditCaption = Txt(FString::Printf(TEXT("in credits: the unit changed at sol %d"), OpenStepSol));
+			}
+			const FRHResourceRow* Row = Df.GetResource(Res);
+			FString Text = FString::Printf(TEXT("%s, %s"), Row ? *Row->DisplayName : *Res.ToString(), *UnitKg);
+			if (!MarksNote.IsEmpty()) { Text += FString::Printf(TEXT(" (%s)"), *MarksNote); }
+			Text += FString::Printf(TEXT("\nFloor %s · today %s · ceiling %s %s"), *URHSimWorldSubsystem::FormatCredits(S.GetMarketFloorMcr(Res, MarketRegion)),
+				*URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)), *URHSimWorldSubsystem::FormatCredits(S.GetMarketCeilMcr(Res, MarketRegion)), *UnitKg);
+			MarketDetailText = Txt(Text);
+			// The holdings and the tally (Earth's line, between them, is its own part below).
+			Text.Reset();
+			int64 HeldKg = 0;
+			FString Holders;
+			for (int32 r = 0; r < S.GetRivalEconomyCount(); ++r)
+			{
+				const FName Name = S.GetRivalEconomyName(r);
+				const int32 Kg = S.GetRivalStoreKg(Name, Res);
+				if (!S.IsRivalAvailable(Name) || !S.HasRivalEconomy(Name) || S.GetRivalRegionId(Name) != MarketRegion || Kg < 0) { continue; }
+				HeldKg += Kg;
+				const FRHRivalRow* RivalRow = Df.GetRival(Name);
+				Holders += FString::Printf(TEXT("%s%s %s kg"), Holders.IsEmpty() ? TEXT("") : TEXT(", "), RivalRow ? *RivalRow->DisplayName : *Name.ToString(), *MarketGrouped(Kg));
+			}
+			Text += FString::Printf(TEXT("The neighbours hold %s kg"), *MarketGrouped(HeldKg));
+			MarketHoldersTip = Txt(Holders);
+			int64 SoldG = 0, BoughtG = 0;
+			for (int32 Back = 1; Back <= URHSimWorldSubsystem::MarketRing; ++Back)
+			{
+				int64 Sg = 0, Bg = 0;
+				if (S.GetMarketTally(Res, Back, Sg, Bg, MarketRegion)) { SoldG += Sg; BoughtG += Bg; }
+			}
+			Text += FString::Printf(TEXT("\nYou sold %s kg and bought %s kg in the last 8 sols"), *MarketGrouped(SoldG / 1000), *MarketGrouped(BoughtG / 1000));
+			MarketDetailRest = Txt(Text);
+		}
+		else
+		{
+			MarketDetailChart = FText::GetEmpty();
+			MarketCreditChart = FText::GetEmpty();
+			MarketCreditCaption = FText::GetEmpty();
+			MarketDetailText = Txt(TEXT("No neighbour you know trades in this market yet."));
+			MarketDetailRest = FText::GetEmpty();
+			MarketHoldersTip = FText::GetEmpty();
+		}
+	}
+	if (Parts & MarketPartEarth)
+	{
+		// DETAIL's Earth line: Earth's quote for the selected resource, the one DETAIL figure that moves between rolls (the requisition multiplier),
+		// so it is its own text and its own part: a quote that moves rewrites this line alone.
+		FString EarthLine;
+		if (!MarketSelected.IsNone())
+		{
+			const int64 Earth = S.GetEarthPriceMcrPerKg(MarketSelected);
+			if (S.DoesEarthBuy(MarketSelected) && Earth > 0)
+			{
+				EarthLine = FString::Printf(TEXT("Earth pays %s cr/kg"), *URHSimWorldSubsystem::FormatCredits(Earth));
+				if (bMarks && S.GetRate() > 0) { EarthLine += FString::Printf(TEXT(" (%s mk at today's rate)"), *URHSimWorldSubsystem::FormatCredits(URHSimWorldSubsystem::MarketDivTrunc(Earth * 1000, S.GetRate()))); }
+			}
+			else
+			{
+				EarthLine = TEXT("Earth does not buy it");
+			}
+		}
+		MarketDetailEarth = EarthLine.IsEmpty() ? FText::GetEmpty() : Txt(EarthLine);
+	}
+	if (Parts & MarketPartBalance)
+	{
+		// TRADE BALANCE: the ring's last 8 closed sols, each converted at its own rate into the live unit (R2-3). Two lines by design: at the
+		// column's 290 px the one-line form wrapped mid-phrase (the review's probe capture); in marks the credit figure is its own line.
+		int64 SoldV = 0, BoughtV = 0;
+		MarketBalanceOf(S, MarketRegion, LiveUnit, SoldV, BoughtV);
+		FString Balance = FString::Printf(TEXT("Sold to neighbours %s %s · bought %s %s\nBalance %s %s over the last 8 sols"), *URHSimWorldSubsystem::FormatCredits(SoldV), *Unit,
+			*URHSimWorldSubsystem::FormatCredits(BoughtV), *Unit, *MarketSigned(SoldV - BoughtV), *Unit);
+		if (bMarks && S.GetRate() > 0)
+		{
+			const int64 SoldCr = URHSimWorldSubsystem::MarketDivTrunc(SoldV * S.GetRate(), 1000);
+			const int64 BoughtCr = URHSimWorldSubsystem::MarketDivTrunc(BoughtV * S.GetRate(), 1000);
+			Balance += FString::Printf(TEXT("\n(%s cr at today's rate)"), *MarketSigned(SoldCr - BoughtCr));
+		}
+		Balance += FString::Printf(TEXT("\nEarth has paid %s cr for exports so far\nMarket sales so far: %s cr"), *URHSimWorldSubsystem::FormatCredits(S.GetSalesPaidMcr()), *URHSimWorldSubsystem::FormatCredits(S.GetMarketSalesMcr()));
+		MarketBalanceText = Txt(Balance);
+	}
+	if (Parts & MarketPartRate)
+	{
+		// EXCHANGE RATE: from the market's issue until a withdrawal (E5).
+		bMarketRateShown = S.GetCurrencyIssueSol() >= 0;
+		if (bMarketRateShown)
+		{
+			const int64 Prev = RingFill > 1 ? S.GetMarketHistoryRateMcr(1, MarketRegion) : 0;
+			const int64 Now = S.GetRate();
+			MarketRateHead = Txt(FString::Printf(TEXT("1 mark = %s cr%s"), *URHSimWorldSubsystem::FormatCredits(Now),
+				Prev <= 0 ? TEXT("") : (Now > Prev ? TEXT("  (up)") : (Now < Prev ? TEXT("  (down)") : TEXT("  (unchanged)")))));
+			TArray<int64> Rates;
+			for (int32 Back = RingFill - 1; Back >= 0; --Back) { const int64 Rt = S.GetMarketHistoryRateMcr(Back, MarketRegion); Rates.Add(Rt > 0 ? Rt : -1); }
+			int32 Unused = 0;
+			MarketRateChart = Txt(MarketSpark(Rates, MarketSparkWidth, Unused));
+			FString RateLines = bMarks ? FString::Printf(TEXT("marks from sol %d"), S.GetCurrencyOpenSol())
+				: FString::Printf(TEXT("orders clearing at the end of sol %d or later count in marks"), S.GetCurrencyOpenSol());
+			int32 TradeBp = 0, IdentBp = 0, TensionBp = 0;
+			if (S.GetRateInputsBp(TradeBp, IdentBp, TensionBp))
+			{
+				// Broken before "Earth tension", so the line never wraps mid-phrase at the column's width.
+				RateLines += FString::Printf(TEXT("\nAt the close of sol %d: trade %+d bp, identity %+d bp,\nEarth tension %+d bp"), S.GetMarketCheckedSol() - 1, TradeBp, IdentBp, TensionBp);
+			}
+			TArray<TPair<FName, int32>> Members;
+			S.GetBlocMembers(Members);
+			FString Bloc;
+			for (const TPair<FName, int32>& M : Members)
+			{
+				if (!S.IsRivalAvailable(M.Key)) { continue; } // E5 O10: a member is listed once it is known
+				const FRHRivalRow* MemberRow = Df.GetRival(M.Key);
+				Bloc += FString::Printf(TEXT("%s%s"), Bloc.IsEmpty() ? TEXT("") : TEXT(", "), MemberRow ? *MemberRow->DisplayName : *M.Key.ToString());
+			}
+			RateLines += FString::Printf(TEXT("\nBloc: %s"), Bloc.IsEmpty() ? TEXT("no member yet") : *Bloc);
+			int64 ToMarks = 0, ToCredits = 0;
+			S.GetDeskBooked(S.GetMarketCheckedSol(), ToMarks, ToCredits);
+			RateLines += FString::Printf(TEXT("\nDesk today: %lld of %lld to marks, %lld of %lld to credits"), ToMarks, S.GetDeskCapPerSol(), ToCredits, S.GetDeskCapPerSol());
+			MarketRateText = Txt(RateLines);
+		}
+	}
+}
+
+void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDefinitionsSubsystem& Df)
+{
+	// Rewrites each OPEN ORDERS row's head, state and extra line in place. Rows were made for the same convoys and desk orders, in the same
+	// order (the row set's key), and each convoy row is matched by its Id.
+	const TArray<FRHConvoy>& Convoys = S.GetConvoys();
+	TArray<FRHDeskOrder> DeskOrders;
+	S.GetDeskOrders(DeskOrders);
+	for (int32 i = 0; i < MarketOrderRows.Num(); ++i)
+	{
+		FMarketOrderRowText& R = MarketOrderRows[i].Get();
+		if (i >= Convoys.Num())
+		{
+			const int32 d = i - Convoys.Num();
+			if (!DeskOrders.IsValidIndex(d)) { continue; }
+			const FRHDeskOrder& O = DeskOrders[d];
+			const bool bToMarks = O.Dir == (uint8)URHSimWorldSubsystem::ERHDeskDir::ToMarks;
+			R.Head = Txt(FString::Printf(TEXT("Desk: %s %s to %s, clears at the end of sol %d"), *URHSimWorldSubsystem::FormatCredits(O.Amount), bToMarks ? TEXT("cr") : TEXT("mk"),
+				bToMarks ? TEXT("marks") : TEXT("credits"), O.ClearSol));
+			continue;
+		}
+		const FRHConvoy& C = Convoys[i];
+		if (C.Id != R.ConvoyId) { continue; }
+		const FRHRivalRow* Row = Df.GetRival(C.Rival);
+		const FString Name = Row ? Row->DisplayName : C.Rival.ToString();
+		FString Head = FString::Printf(TEXT("#%d %s"), C.Id, *Name);
+		if (!C.IsPriced())
+		{
+			// A barter convoy carries the rival's lots (E4: it gives the ImportLot and brings the ExportLot home). The design's 2.5 form names what
+			// comes home first: Zarya's "barter: Ice 150 for Struct 100" (its ExportLot Ice:150 for its ImportLot Struct:100).
+			const auto LotShort = [](const FString& Lot)
+			{
+				TArray<FString> Out;
+				for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Lot)) { Out.Add(FString::Printf(TEXT("%s %.0f"), *Item.Key.ToString(), Item.Value)); }
+				return FString::Join(Out, TEXT(", "));
+			};
+			const FString Give = Row ? LotShort(Row->ImportLot) : FString(), Take = Row ? LotShort(Row->ExportLot) : FString();
+			Head += (Give.IsEmpty() || Take.IsEmpty()) ? FString(TEXT(" · barter")) : FString::Printf(TEXT(" · barter: %s for %s"), *Take, *Give);
+		}
+		else
+		{
+			// Each line as the player reads it (the resource's label and its kg, as the barter line), never the console's "Ice:100;SpareParts:2".
+			const auto LinesShort = [&C](bool bBuys)
+			{
+				TArray<FString> Out;
+				for (const FRHConvoyLine& L : C.Lines)
+				{
+					if (L.Kg != 0 && (L.Kg > 0) == bBuys) { Out.Add(FString::Printf(TEXT("%s %d"), *ResourceLabel(L.Resource), FMath::Abs(L.Kg))); }
+				}
+				return FString::Join(Out, TEXT(", "));
+			};
+			const FString Buys = LinesShort(true), Sells = LinesShort(false);
+			if (!Buys.IsEmpty()) { Head += FString::Printf(TEXT(" · buy %s"), *Buys); }
+			if (!Sells.IsEmpty()) { Head += FString::Printf(TEXT(" · sell %s"), *Sells); }
+			if (C.bStanding) { Head += TEXT(" · standing trade"); }
+		}
+		int64 HeldMmk = 0, OwedMmk = 0;
+		const bool bMarkOrder = S.GetMarkOrder(C.Id, HeldMmk, OwedMmk);
+		const TCHAR* OrderUnit = bMarkOrder ? TEXT("mk") : TEXT("cr");
+		const int64 Owed = bMarkOrder ? OwedMmk : C.OwedMcr;
+		R.bProgress = false;
+		R.bPriced = C.IsPriced();
+		R.ClearSol = C.ClearSol;
+		R.ShownPct = -1; // the progress line is made again on its next read
+		if (C.bReturning)
+		{
+			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("coming home, owes you %s %s"), *URHSimWorldSubsystem::FormatCredits(Owed), OrderUnit) : FString(TEXT("coming home")));
+		}
+		else if (C.IsPriced() && C.bCleared)
+		{
+			// "cleared" alone when nothing is owed (a buy-only convoy), as "coming home" drops a zero.
+			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("cleared: owes you %s %s"), *URHSimWorldSubsystem::FormatCredits(Owed), OrderUnit) : FString(TEXT("cleared")));
+		}
+		else
+		{
+			R.bProgress = true; // "on the road, N%" (and its clearing sol when priced), N read live
+			R.StateFixed = FText::GetEmpty();
+		}
+		FString Extra;
+		if (C.IsPriced() && !C.bCleared)
+		{
+			Extra = FString::Printf(TEXT("%s %s set aside"), *URHSimWorldSubsystem::FormatCredits(bMarkOrder ? HeldMmk : C.ReservedMcr), OrderUnit);
+			FRHConvoyTerms Terms;
+			int32 Markup = 0;
+			if (S.GetConvoyTerms(C.Id, Terms)) { for (const int32 Bp : Terms.LineMarkupBp) { Markup = FMath::Max(Markup, Bp); } }
+			if (Markup > 0) { Extra += FString::Printf(TEXT(" · %d%% tariff"), Markup / 100); }
+			if (S.HasLivePact(C.Rival)) { Extra += FString::Printf(TEXT(" · pact: %d kg cap"), S.GetPactCargoKg()); }
+		}
+		R.Head = Txt(Head);
+		R.Extra = Extra.IsEmpty() ? FText::GetEmpty() : Txt(Extra);
+	}
+}
+
+void SRHCommandDeck::FillMarketRoutes(const URHSimWorldSubsystem& S, const URHDefinitionsSubsystem& Df)
+{
+	// Rewrites each ROUTES row's chip (its word and timers, and its colour) and its terms in place.
+	MarketRouteChips.Reset();
+	MarketChipColours.Reset();
+	for (const TSharedRef<FMarketRouteRowText>& Ref : MarketRouteRows)
+	{
+		FMarketRouteRowText& R = Ref.Get();
+		const ERHRouteStatus Status = URHTradeVisualizerSubsystem::RouteStatusOf(S, R.Rival);
+		const FString Chip = MarketChipText(S, R.Rival, Status);
+		R.ChipFill = URHTradeVisualizerSubsystem::RouteStatusColor(Status);
+		R.Chip = Txt(Chip);
+		MarketRouteChips.Add(R.Rival, Chip);
+		MarketChipColours.Emplace(R.ChipFill, MarketChipInk);
+		FString Terms;
+		if (S.HasLivePact(R.Rival)) { Terms = FString::Printf(TEXT("pact: %d kg cap"), S.GetPactCargoKg()); }
+		int32 Bp = 0, Until = -1;
+		if (S.GetBetrayalTariff(R.Rival, Bp, Until)) { Terms += FString::Printf(TEXT("%s%d%% tariff until sol %d"), Terms.IsEmpty() ? TEXT("") : TEXT(" · "), Bp / 100, Until); }
+		R.Terms = Terms.IsEmpty() ? FText::GetEmpty() : Txt(Terms);
+	}
+}
+
+EVisibility SRHCommandDeck::GetTradeLegendVisibility() const
+{
+	// m6 (a builder deviation): shown while the Routes overlay is on AND the markers show (ShowsSurfaceLevel), so the section view, where the
+	// ribbons are hidden, never gets a legend that would only push the shaft strip down under the P8c ladder.
+	const UWorld* W = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Colony = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	return (PC.IsValid() && PC->IsTradeOverlayOn() && Colony && Colony->ShowsSurfaceLevel()) ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+FText SRHCommandDeck::GetTradeLabel() const
+{
+	return FText::FromString(PC.IsValid() && PC->IsTradeOverlayOn() ? TEXT("Routes [on]") : TEXT("Routes"));
+}
+
+FReply SRHCommandDeck::HandleTrade()
+{
+	if (PC.IsValid())
+	{
+		PC->ToggleTradeOverlay();
+	}
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildTradeLegend()
+{
+	// E8: the Routes overlay's legend, under TRAFFIC's (Gate-D placeholder copy).
+	const auto Swatch = [](ERHRouteStatus St) -> TSharedRef<SWidget>
+	{
+		return SNew(SBox).WidthOverride(10.f).HeightOverride(10.f)
+			[
+				SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(URHTradeVisualizerSubsystem::RouteStatusColor(St))
+			];
+	};
+	// Its visibility is on the stack's slot widget (RHCommandDeck.cpp), so a hidden legend takes no padding either.
+	return SNew(SBox)
+		.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.TradeLegend")))
+		[
+			D::Panel(FName("trade"), Txt(TEXT("ROUTES")), D::Teal,
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 3.f, 0.f)[Swatch(ERHRouteStatus::Open)]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 3.f, 0.f)[Swatch(ERHRouteStatus::Embargo)]
+					+ SHorizontalBox::Slot().AutoWidth().Padding(0.f, 0.f, 3.f, 0.f)[Swatch(ERHRouteStatus::Closed)]
+					+ SHorizontalBox::Slot().AutoWidth()[Swatch(ERHRouteStatus::Storm)]
+				]
+				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
+				[
+					// Broken by hand so no colour's phrase wraps mid-phrase at the legend's 300 px.
+					Prose(Txt(TEXT("Trade routes: teal open ·\namber embargo or disrupted · red closed ·\nblue halted by a storm")), D::TextDim, 9)
+				])
 		];
 }

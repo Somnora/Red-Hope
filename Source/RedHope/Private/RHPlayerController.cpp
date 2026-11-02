@@ -10,6 +10,7 @@
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
+#include "RHTradeVisualizerSubsystem.h"
 #include "RHAudioSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
@@ -2206,6 +2207,20 @@ bool ARHPlayerController::IsTrafficOverlayOn() const
 {
 	const URHTrafficVisualizerSubsystem* Traffic = GetWorld() ? GetWorld()->GetSubsystem<URHTrafficVisualizerSubsystem>() : nullptr;
 	return Traffic && Traffic->IsOverlayOn();
+}
+
+void ARHPlayerController::ToggleTradeOverlay()
+{
+	if (URHTradeVisualizerSubsystem* Trade = GetWorld() ? GetWorld()->GetSubsystem<URHTradeVisualizerSubsystem>() : nullptr)
+	{
+		Trade->SetOverlayOn(!Trade->IsOverlayOn());
+	}
+}
+
+bool ARHPlayerController::IsTradeOverlayOn() const
+{
+	const URHTradeVisualizerSubsystem* Trade = GetWorld() ? GetWorld()->GetSubsystem<URHTradeVisualizerSubsystem>() : nullptr;
+	return Trade && Trade->IsOverlayOn();
 }
 
 void ARHPlayerController::BeginDistrictPaint(FName Kind)
