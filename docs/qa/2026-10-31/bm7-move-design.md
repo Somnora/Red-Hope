@@ -371,3 +371,15 @@ The main click test's TOTAL rises by exactly 5. The deepbench scene is unchanged
 - The section view's structure key reads `GetPropsVersion()`.
 - A v60 binary rejects a queued Move as unknown.
 - Home-cell re-derivation is listed in 1.9.
+
+# DIRECTOR ANSWER (2026-11-02): BM-7's 1600x900 click run
+
+Asked by the orchestrator on 2026-11-02 after fix round 1 (run `wf_57b13afc-1fc`; work folder `/Volumes/Unreal/red_hope/wip-backups/bm7-work/r1/`). Round 1 changed nothing outside `docs/` and rebuilt nothing; the fingerprint stayed `e936bf770f832ccd1b6e5e6d446691c0245e8f6b07f0d9d0acefc423aa77cce8`.
+
+- **`bm7r1_click1600`** (1600x900, 12:31; 1-minute load 4.89 at the start and 14.68 mid-run; frames up to 1,013 ms) failed with no verdict at the 450 s limit. Two presses in steps older than BM-7 were dropped: `build.card` ('Solar Array') and `section.on` ('Section'). In both, the down and the up were handled at the same point and the button did nothing. Two drags moved OnClick by 0, and the section steps then failed in a cascade. No BM-7 step ran.
+- **The same signature** (a press whose down and up are both handled at one point, then a failing first check) is in 46 presses in 22 logs from 2026-10-24 to 10-31, all on binaries built before BM-7: 19 of 132 main-scene runs (`r1/diag/scan_untaken2.py`, `r1/diag/untaken_presses.out`). The cause is in Slate. `SButton::OnMouseButtonUp` runs `OnClicked` only while the button is hovered and holds capture, and any window activation releases capture. BM-7's diff touches none of the press path.
+- **`bm7r1_click1600b`** (12:56; loads 3.75 / 4.66) passed 114/0, with the five move steps and `leak.total` 11 of 11. The counted 1440x860 pair (`bm7r1_click1`, `bm7r1_click2`) passed 114/0, and `bm7r1_deepbench` 9/0.
+
+**The answer: (a).** `bm7r1_click1600b` counts as the gate's 1600x900 run, and `bm7r1_click1600` stays on the record as an environment failure. The same reasoning covers round 0's `bm7_click3`, which needs no ruling for the gate because round 1's own named pair passed. Not taken: (b) one more 1600x900 run at a quieter time, counted only if it passed; (c) hold BM-7 until the harness's dropped press is fixed in its own gate.
+
+Ruling 26 applies the same rule to later gates. The harness fix stays a follow-up.
