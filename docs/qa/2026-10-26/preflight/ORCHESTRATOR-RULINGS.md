@@ -41,3 +41,4 @@ Read-only pre-flight of E5, E6, D6e, D7, E7 and E8 at HEAD `d842dd0`: one planne
       - a fresh S1 1600x900 frame check under rulings 18 and 24 decides A without pair 4.
     - **If it does not stall.** Nothing is excused.
     - **Later gates.** Frame checks place their windows clear of a sol boundary instead.
+    - **Outcome** (2026-11-01, DIRECTOR ANSWER (2026-11-01, second), answer (a)). The control did not stall: its P1_4 max frame was 160.60 ms and its p95 31.34 ms, against P0_4's 31.59. Nothing was excused. A passed on a fresh S1 1600x900 check with all five pairs counted (medians +0.02 / -0.02 ms). The excuse never applied; the "Later gates" line stands.

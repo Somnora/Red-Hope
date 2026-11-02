@@ -2144,6 +2144,13 @@ These come from E8's fix round 3 (run `wf_37efc219-c0e`, fingerprint `902961c6..
   - Outside them, the roll's first slice reached up to 18.6 ms and Earth's line sat in a 4.72-4.92 ms cluster, both on a loaded machine.
   - The follow-up: Unreal Insights on a quiet machine.
 
+### E8's control re-check: the director's answer (2026-11-01, second)
+
+Logged in `docs/qa/2026-10-25/e8-market-panel-design.md`, DIRECTOR ANSWER (2026-11-01, second). No code changed; the fingerprint stayed `902961c6...`.
+- **The control** (S1 1600x900, pair 4 kept closed, a quiet start) held the autosave at max 160.60 ms and p95 31.34 ms, against its P0 window's 31.59. That is not a stall, so ruling 25 never applied.
+- **The fresh S1 1600x900 check** counted all five pairs: medians **+0.02 / -0.02 ms** against 1.0, worst P1 rebuild 0.41 ms, Market slot at most 0.011 ms, P0 0.00. Pair 4 with MARKET open held the same autosave at 160.04 / 31.38 ms.
+- **The answer: (a).** A passes on the fresh check. The rule's literal branch (a control that does not stall sends E8 to more panel work) assumed the open window would still stall on a quiet machine, and it did not. Not taken: (b) re-run S1 1440x860 first; (c) more panel work and a new full gate.
+
 ### D6e lift and tram power: what it settles, and where it deviated (2026-10-28, not yet committed)
 
 Built from `docs/qa/2026-10-26/preflight/D6e-brief.md` on E6's source (`7adc7ee`, save v57). The tree sits on `01f5299`, the docs-only T1 commit made while D6e was being built (`git diff 7adc7ee 01f5299 -- Source docs/data Content scripts` is empty), so D6e commits on `01f5299`. The order of authority, in the queue's order: the DIRECTOR ANSWERs (`docs/qa/2026-10-22/d6-caverns-design.md` Q-A (a), Q-B (a), **Q-C (a): trams carry people only** - no robot tram edge, hold, ride or reserve term; `docs/qa/2026-10-23/d8-deep-view-design.md` **Q-C (a) with R7**: the served-capacity bar ships inside D6e) > `ORCHESTRATOR-RULINGS.md` (1, 3, 6, 7, 8, 9) > `CROSS-CHECK.md` section 6 (items 1, 14, 15) > the brief > the REFRESH AT 31ffa6f > MERGED section 5. Superseded and not built: the draft's section 7 (40 W, 2 W, priority 8, `-liftpower`) and "Save v51" with `OutError` refusals.

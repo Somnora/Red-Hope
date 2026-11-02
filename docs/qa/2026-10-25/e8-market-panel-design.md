@@ -1125,3 +1125,20 @@ The orchestrator re-checked all of it from disk, looked at the 17 captures, and 
   The follow-up: profile the roll's first slice and Earth's line on a quiet machine with Unreal Insights. Not taken: (a) accept without a follow-up; (c) hold E8 for that work and a new full gate.
 
 This answer outranks ruling 24 (1)'s "never a chosen subset" for the autosave pair only, as ruling 25 states.
+
+# DIRECTOR ANSWER (2026-11-01, second): E8's control re-check
+
+Asked by the orchestrator on 2026-11-01 after the control re-check that answer A (b) ordered. Nothing was rebuilt: the fingerprint was `902961c66c0c48cdddfaa29baf550f998c14f7136e9d0d25bffdac397a65b499` before and after the sessions. Scripts, logs and reports: `/Volumes/Unreal/red_hope/wip-backups/e8-r2/r4ctl/`.
+
+- **The control** (`c1`, S1 1600x900, pair 4 kept closed; start load 2.53). Its P1_4 window held the sol-0 -> 1 autosave: max frame 160.60 ms, p95 31.34 ms against P0_4's 31.59. That is not a stall under ruling 25 (300 ms, or P0_4's p95 + 15 ms), so nothing was excused and ruling 25 never applied.
+- **The fresh check** (`h1`, S1 1600x900; start load 2.35; all five pairs counted, each under load 2.6):
+  - median-frame deltas +0.02, +0.01, +0.02, -0.08, +0.49 ms;
+  - p95 deltas -0.03, +0.05, -0.06, -0.02, +0.54 ms;
+  - **medians over every counted pair +0.02 / -0.02 ms**, against 1.0 (ruling 24 (1));
+  - the hard bars: worst P1 rebuild 0.41 ms (bar 2), Market slot at most 0.011 ms a frame (bar 0.2), every P0 window 0.00.
+- **Pair 4 with MARKET open** held the same autosave: max 160.04 ms, p95 31.38 ms, the same as the closed control. Fix round 3's 474-2,627 ms stalls in that window came from the loaded, swapping machine; on a quiet machine the autosave costs one ~160 ms frame, open or closed.
+- **Why it came back to the director.** The decision rule, fixed before the sessions, said a control that does not stall puts the cost on the panel and sends E8 to (c). That branch assumed the open window would still stall on a quiet machine. It did not.
+
+**The answer: (a). A passes on the fresh check**, which meets ruling 24 with every pair counted and no pair excused. E8 is committed on fingerprint `902961c6...`. Not taken: (b) re-run S1 1440x860 on the quiet machine first (it had passed at +0.07 / +0.15); (c) more panel work and a new full gate.
+
+B (b)'s follow-up stands: profile the roll's first PRICES slice and Earth's line on a quiet machine with Unreal Insights.
