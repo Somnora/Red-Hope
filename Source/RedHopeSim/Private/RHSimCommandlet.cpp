@@ -42,6 +42,8 @@ int32 RHRunTransitPowerSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimW
 int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // E7 region-ready: the -regionready suite lives in RHSimRegionReadySuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunRegionReadySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// BM-7 moving: the -moves suite lives in RHSimMoveSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunMovesSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -14871,6 +14873,13 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("atriums")))
 	{
 		return RHRunAtriumsSuite(World, Clock, Sim);
+	}
+	// BM-7 moving self-test (a free Move order for furnishings and wall fittings: the fixture, a move within a habitat, in place, far moves,
+	// every destination refusal against Furnish's, the end-state bed guard, seats, in transit both ways, fittings, a queued Move across a save,
+	// a bad order, determinism), fails loudly. `-moves`.
+	if (FParse::Param(*Params, TEXT("moves")))
+	{
+		return RHRunMovesSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))

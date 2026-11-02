@@ -920,6 +920,35 @@ public:
 	const FRHWallFeature* FindWallFeatureOnEdge(const FIntVector& Edge) const;
 	bool CanPlaceWallFeature(FName Row, const FIntVector& Edge, FString& OutReason, bool bCheckQueued = true) const;
 	bool CanSellWallFeature(int32 Id, FString& OutReason, TMap<FName, double>* OutRefund = nullptr) const;
+	// --- Move (BM-7, 2026-10-31; docs/qa/2026-10-31/bm7-move-design.md) ---
+	// A free Move order picks up a placed furnishing or wall fitting and puts it down anywhere a NEW one of its row could
+	// go. It rides the uplink and lands after OrderLagSeconds like every order, and spends and refunds nothing (no stock,
+	// Lander bin or ledger change; allowed at zero stock). The piece keeps its Id and its place in Furniture /
+	// WallFeatures: it is mutated in place, never removed and re-added. The order fits FRHCommand's saved fields, so
+	// nothing new is saved: a furnishing Move is Target "Furniture" with Level, Location and Value exactly as a Furnish
+	// order for the destination carries them; a fitting Move is Target "WallFeature", Level 0, Location a point in the
+	// bay and Value the side, as a Fit order; LocationB.X = the piece's Id in both. (A v60 binary rejects a queued Move
+	// as an unknown order.)
+	// The preflights: the ghost and the suite call them, ExecuteCommand again with bCheckQueued false. Every rule of
+	// CanPlaceFurniture / CanPlaceWallFeature applies with its texts, except the cost check, and the moving piece never
+	// collides with itself; a furnishing's bed guard is judged on the end state of both places it touches.
+	bool CanMoveFurniture(int32 Id, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued = true) const;
+	bool CanMoveWallFeature(int32 Id, const FIntVector& Edge, FString& OutReason, bool bCheckQueued = true) const;
+	// The move checks' first refusals, without a destination (the UI's pick): the piece stands and, with bCheckQueued, no
+	// Move or Sell of it is in transit.
+	bool CanPickUpFurniture(int32 Id, FString& OutReason, bool bCheckQueued = true) const;
+	bool CanPickUpWallFeature(int32 Id, FString& OutReason, bool bCheckQueued = true) const;
+	// The places a furnishing move's bed guard judges (ruling 2026-10-16 on the end state): S, the sleeping place the
+	// piece leaves (its habitat building, or its floor), then D, the one it joins, when it is another. Before = the beds
+	// today, After = the beds with the piece at (Key, Slot, Rot); the guard refuses a place where After < Before and
+	// After < Residents. Empty when there is no such piece.
+	struct FRHMoveBedPlace { int32 HabId = 0; int32 Level = 0; int32 Before = 0; int32 After = 0; int32 Residents = 0; };
+	void GetMoveBedPlaces(int32 Id, const FIntVector& Key, int32 Slot, int32 Rot, TArray<FRHMoveBedPlace>& Out) const;
+	// A Move order's piece Id (LocationB.X, a whole positive number), or 0 when Cmd is not a Move of a furnishing or a fitting.
+	static int32 GetMovePieceId(const FRHCommand& Cmd);
+	// Read-only (the -moves suite): a move issues no Id.
+	int32 GetNextFurnitureId() const { return NextFurnitureId; }
+	int32 GetNextWallFeatureId() const { return NextWallFeatureId; }
 	// A habitat network's doorways and how many carry a door; sealed = all,
 	// and at least one.
 	void GetHabNetworkDoorways(int32 HabId, int32& OutDoorways, int32& OutDoored) const;
@@ -3965,7 +3994,8 @@ private:
 	int32 DeriveAtriumFacingHeads() const;
 	void GetAtriumLevels(TArray<int32>& Out) const; // every floor of every atrium's box, ascending
 	int32 CountFloorBedsWith(int32 Level, int32 ExtraOpen) const; // CountFloorBeds with ExtraOpen more cells open than the floor has now (P9)
-	int32 CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen) const; // CountFloorBeds' one formula (both exits)
+	// CountFloorBeds' one formula (both exits). Moved (BM-7): the same count with that piece standing at Moved's key instead of its own.
+	int32 CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen, const FRHFurnitureInstance* Moved = nullptr) const;
 	const TArray<uint8>* GetAtriumFlags(int32 Level) const; // the floor's flag bytes (bit 0 open, bit 1 faces); null with no atrium or none there
 	int32 CountFacingHeadsWith(const FRHAtriumCells& Cells, const FRHDeepHomes& Homes) const;
 	bool FindAtriumOccupant(const FRHCavern& C, int32& OutLevel, int32& OutOrdinal, FString& OutWhat) const; // refusal 5 and the occupancy repair
@@ -4269,8 +4299,15 @@ private:
 	// building (by Id) covering any sub-cell of Probe.
 	uint32 BuildingMaskInCell(const FIntVector& Key, uint32 Probe = 0, const FRHBuildingInstance** OutFirst = nullptr) const;
 	int32 CountFloorBeds(int32 Level, const TSet<int32>* Exclude) const;
-	int32 CountHabBeds(int32 HabId, int32 ExcludeBay = INDEX_NONE, const TSet<int32>* Exclude = nullptr) const;
+	// Moved (BM-7): the same count with that piece standing at Moved's key instead of its own (a move's end state).
+	int32 CountHabBeds(int32 HabId, int32 ExcludeBay = INDEX_NONE, const TSet<int32>* Exclude = nullptr, const FRHFurnitureInstance* Moved = nullptr) const;
 	bool BedGuardAllowsRemoval(const FIntVector& Key, const TSet<int32>& Ids, FString& OutReason) const;
+	// BM-7: CanPlaceFurniture's rules, in its order and with its texts. MovingId != 0 is a Move of that piece: it never
+	// collides with itself (the overlap and in-transit loops skip it), and the add-only bed guard is left to the move's
+	// end-state guard. CanPlaceFurniture is this with MovingId 0.
+	bool CheckFurnitureSpot(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued, bool bCheckCost, int32 MovingId) const;
+	// BM-7: true when an order for the piece (a Move, or a Sell that takes it) is in the uplink.
+	bool HasFurnitureOrderInTransit(const FRHFurnitureInstance& F) const;
 	bool ResolveFurnishOrderKey(const FRHCommand& Cmd, FIntVector& OutKey) const;
 	void AddFurniture(FName Row, const FIntVector& Key, int32 Slot, int32 Rot);
 	void RemoveFurniture(const TSet<int32>& Ids, TMap<FName, double>* OutRefund);
@@ -4285,6 +4322,9 @@ private:
 	double SealedLeakMul = 1.0;             // DT_Compartments SealedBay LeakMul (active row), else 1
 	TMap<FIntVector, int32> FeatureByEdge;  // derived lookup (edge -> Id)
 	void RebuildWallFeatureIndex();
+	// BM-7: CanPlaceWallFeature's rules, in its order and with its texts; bCheckCost false skips the stock check (a move),
+	// and the in-transit loop skips a queued Move of MovingId. CanPlaceWallFeature is this with the cost and MovingId 0.
+	bool CheckWallFeatureEdge(FName RowName, const FIntVector& Edge, FString& OutReason, bool bCheckQueued, bool bCheckCost, int32 MovingId) const;
 	int32 WallBayIndex(int32 HabId, const FIntPoint& Point) const;
 	bool IsNetSealed(const FRHHabNetCache& N) const;
 	double GetMemberWindowLeakPerSol(int32 HabId) const;

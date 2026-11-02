@@ -2088,6 +2088,89 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSellFitting(
 		Sim->EnqueueCommand(Cmd);
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHMovePiece(
+	TEXT("RH.MovePiece"),
+	TEXT("RH.MovePiece <Id> <Level> <Cell|Xm Ym> <Slot> [Rot] - BM-7: order a free move of a furnishing (uplink), its destination as RH.Furnish takes it. Underground: the cell index; surface: a point in the habitat bay."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.MovePiece <Id> <Level> <Cell|Xm Ym> <Slot> [Rot]"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Move");
+		Cmd.Target = FName("Furniture");
+		Cmd.LocationB = FVector(FCString::Atod(*Args[0]), 0.0, 0.0);
+		Cmd.Level = FCString::Atoi(*Args[1]);
+		if (Cmd.Level == 0)
+		{
+			if (Args.Num() < 5)
+			{
+				UE_LOG(LogRedHope, Error, TEXT("Usage (surface): RH.MovePiece <Id> 0 <Xm> <Ym> <Slot> [Rot]"));
+				return;
+			}
+			Cmd.Location = FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f);
+			Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(0, FCString::Atoi(*Args[4]), Args.Num() > 5 ? FCString::Atoi(*Args[5]) : 0);
+		}
+		else
+		{
+			Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(FCString::Atoi(*Args[2]), FCString::Atoi(*Args[3]), Args.Num() > 4 ? FCString::Atoi(*Args[4]) : 0);
+		}
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHMoveFitting(
+	TEXT("RH.MoveFitting"),
+	TEXT("RH.MoveFitting <Id> <Xm> <Ym> <Side 0..3 = +X,-X,+Y,-Y> - BM-7: order a free move of a window, door or airlock into the wall of the habitat bay at that point (uplink)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		if (!Sim || Args.Num() < 4)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.MoveFitting <Id> <Xm> <Ym> <Side 0..3>"));
+			return;
+		}
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Move");
+		Cmd.Target = FName("WallFeature");
+		Cmd.LocationB = FVector(FCString::Atod(*Args[0]), 0.0, 0.0);
+		Cmd.Level = 0;
+		Cmd.Location = FVector(FCString::Atof(*Args[1]) * 100.f, FCString::Atof(*Args[2]) * 100.f, 0.f);
+		Cmd.Value = FCString::Atoi(*Args[3]);
+		Sim->EnqueueCommand(Cmd);
+	}));
+
+static FAutoConsoleCommandWithWorldAndArgs GRHBeginMove(
+	TEXT("RH.BeginMove"),
+	TEXT("RH.BeginMove [piece|fitting <Id> [Xm Ym]] | put - BM-7: arm Move mode (the deck's Move button); with a piece or fitting Id, hold it, and with a point (captures) draw its ghost there instead of at the cursor; 'put' clicks Move mode at that point (the UI's own click: the Move order)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		ARHPlayerController* PC = World ? Cast<ARHPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!PC)
+		{
+			return;
+		}
+		if (Args.Num() == 1 && Args[0] == TEXT("put"))
+		{
+			PC->Debug_MoveClickAtGhost();
+			UE_LOG(LogRedHope, Display, TEXT("[RH.BeginMove] put: %s"), *PC->GetConfirmText().ToString());
+			return;
+		}
+		if (Args.Num() < 2)
+		{
+			PC->BeginMove();
+			return;
+		}
+		const int32 Kind = Args[0] == TEXT("fitting") ? 2 : 1;
+		const bool bAt = Args.Num() >= 4;
+		const FVector At = bAt ? FVector(FCString::Atof(*Args[2]) * 100.f, FCString::Atof(*Args[3]) * 100.f, 0.f) : FVector::ZeroVector;
+		PC->Debug_HoldForMove(Kind, FCString::Atoi(*Args[1]), bAt, At);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.BeginMove] holding %s #%d%s"), Kind == 2 ? TEXT("fitting") : TEXT("piece"), PC->GetMoveId(),
+			bAt ? *FString::Printf(TEXT(", its ghost at (%.1f, %.1f) m"), At.X / 100.f, At.Y / 100.f) : TEXT(""));
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHDeckWalls(
 	TEXT("RH.DeckWalls"),
 	TEXT("RH.DeckWalls [Row] - DEBUG: show the deck's WALLS tab (captures); with a row, arm Fit mode on it."),

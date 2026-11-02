@@ -1184,17 +1184,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 		{
 			FString Why;
 			const bool bOk = Sim->CanPlaceFurniture(FurnishRow, Key, Slot, FurnishRot, Why);
-			FVector FC;
-			FVector2D FH;
-			Sim->GetFurnitureFootprintCm(FurnishRow, Key, Slot, FurnishRot, FC, FH);
-			const FVector CC = Sim->GetCellCentreCm(Key);
-			const float Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
-			const FColor Col = bOk ? FColor::Emerald : FColor::Red;
-			DrawDebugBox(World, FVector(CC.X, CC.Y, Z + 30.f), FVector(500.f, 500.f, 30.f), FColor(70, 110, 110), false, -1.f, 0, 3.f);
-			DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), Col, false, -1.f, 0, 8.f);
-			const FVector Facing = FRotator(0.f, 90.f * FurnishRot, 0.f).RotateVector(FVector(0.f, -1.f, 0.f));
-			const FVector Mid(FC.X, FC.Y, Z + 125.f);
-			DrawDebugDirectionalArrow(World, Mid, Mid + Facing * (FMath::Min(FH.X, FH.Y) - 15.f), 60.f, Col, false, -1.f, 0, 6.f);
+			DrawFurnishGhost(World, *Sim, FurnishRow, Key, Slot, FurnishRot, bOk);
 			FString Cost;
 			for (const auto& L : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
 			{
@@ -1244,16 +1234,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 		{
 			FString Why;
 			const bool bOk = Sim->CanPlaceWallFeature(FitRow, Edge, Why);
-			const FVector WM = Sim->GetWallEdgeMidCm(Edge);
-			const FVector Along = Edge.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
-			const FColor Col = bOk ? FColor::Emerald : FColor::Red;
-			DrawDebugLine(World, WM - Along * 480.f + FVector(0, 0, 160.f), WM + Along * 480.f + FVector(0, 0, 160.f), Col, false, -1.f, 0, 14.f);
-			FVector ChC;
-			FVector2D ChH;
-			if (Row->Kind == FName("Airlock") && Sim->GetAirlockChamberRect(Edge, ChC, ChH))
-			{
-				DrawDebugBox(World, ChC + FVector(0, 0, 120.f), FVector(ChH.X, ChH.Y, 120.f), Col, false, -1.f, 0, 5.f);
-			}
+			DrawFitGhost(World, *Sim, Row->Kind, Edge, bOk);
 			FString Cost;
 			for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Row))
 			{
@@ -1342,6 +1323,10 @@ void ARHPlayerController::Tick(float DeltaTime)
 			HintColor = FLinearColor(0.7f, 0.7f, 0.7f);
 		}
 	}
+	else if (bMoveMode)
+	{
+		TickMove(World, *Sim, Defs); // BM-7
+	}
 
 	// In-flight build orders (director finding, M1-d hand-play): the signal-lag
 	// window left the player blind - "I can't see where I just placed it".
@@ -1351,6 +1336,54 @@ void ARHPlayerController::Tick(float DeltaTime)
 	{
 		for (const FRHCommand& C : Sim->GetUplinkQueue())
 		{
+			if (C.Verb == FName("Move"))
+			{
+				// BM-7: a Move in transit: its destination as a Furnish or Fit in transit is drawn (cyan, with its countdown), and the
+				// spot it leaves in the move colour.
+				const FColor MoveCol(180, 120, 255); // DEFAULT violet (placeholder)
+				const int32 MId = URHSimWorldSubsystem::GetMovePieceId(C);
+				const double MEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
+				const FRHFurnitureInstance* MF = C.Target == FName("Furniture") ? Sim->FindFurniture(MId) : nullptr;
+				const FRHWallFeature* MW = C.Target == FName("WallFeature") ? Sim->FindWallFeature(MId) : nullptr;
+				if (MF)
+				{
+					const float MZ = ActiveLevel * (float)Sim->GetFloorHeightCm();
+					int32 MCell = 0, MSlot = 0, MRot = 0;
+					URHSimWorldSubsystem::DecodeFurnish(C.Value, MCell, MSlot, MRot);
+					FIntVector MKey(C.Level, MCell, 0);
+					FVector MC;
+					FVector2D MH;
+					if (C.Level == ActiveLevel && (C.Level != 0 || Sim->ResolveFurnitureKey(0, C.Location, MKey)) && Sim->GetFurnitureFootprintCm(MF->Row, MKey, MSlot, MRot, MC, MH))
+					{
+						DrawDebugBox(World, FVector(MC.X, MC.Y, MZ + 60.f), FVector(MH.X - 10.f, MH.Y - 10.f, 60.f), FColor(60, 200, 220), false, -1.f, 0, 4.f);
+						DrawDebugString(World, FVector(MC.X, MC.Y, MZ + 220.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *MF->Row.ToString(), MEta),
+							nullptr, FColor(120, 230, 255), 0.f, true, 1.1f);
+					}
+					if ((MF->Key.Z == 0 ? MF->Key.X : 0) == ActiveLevel && Sim->GetFurnitureFootprintCm(MF->Row, MF->Key, MF->Slot, MF->Rot, MC, MH))
+					{
+						DrawDebugBox(World, FVector(MC.X, MC.Y, MZ + 60.f), FVector(MH.X - 10.f, MH.Y - 10.f, 60.f), MoveCol, false, -1.f, 0, 4.f);
+					}
+				}
+				else if (MW && ActiveLevel == 0)
+				{
+					FIntVector MEdge;
+					const auto WallLine = [&](const FIntVector& E, const FColor& Col)
+					{
+						const FVector WM = Sim->GetWallEdgeMidCm(E);
+						const FVector Along = E.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+						DrawDebugLine(World, WM - Along * 470.f + FVector(0, 0, 150.f), WM + Along * 470.f + FVector(0, 0, 150.f), Col, false, -1.f, 0, 8.f);
+						return WM;
+					};
+					if (Sim->ResolveWallEdge(C.Location, (int32)C.Value, MEdge))
+					{
+						const FVector WM = WallLine(MEdge, FColor(60, 200, 220));
+						DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *MW->Row.ToString(), MEta),
+							nullptr, FColor(120, 230, 255), 0.f, true, 1.1f);
+					}
+					WallLine(MW->Edge, MoveCol);
+				}
+				continue;
+			}
 			if ((C.Verb == FName("Fit") || (C.Verb == FName("Sell") && C.Target == FName("WallFeature"))) && ActiveLevel == 0)
 			{
 				// BM-6: a fitting in transit (cyan) or being sold (amber).
@@ -1524,7 +1557,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 	{
 		FVector HoverGround = FVector::ZeroVector;
 		const bool bToolArmed = !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bTunnelMode || bDistrictMode || bDigMode || bSurveyMode
-			|| bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode;
+			|| bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || bMoveMode;
 		Traffic->SetHoverGround(HoverGround, Traffic->IsOverlayOn() && ActiveLevel == 0 && !bToolArmed && CursorToGround(HoverGround));
 	}
 
@@ -1863,6 +1896,10 @@ void ARHPlayerController::OnClick()
 			}
 		}
 	}
+	else if (bMoveMode)
+	{
+		ClickMove(Ground); // BM-7: a pick, or a Move order; the mode stays armed
+	}
 	else if (bDigMode)
 	{
 		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
@@ -1949,7 +1986,7 @@ void ARHPlayerController::OnCancel()
 
 bool ARHPlayerController::HasActiveMode() const
 {
-	return !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bTunnelMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
+	return !PendingBuildDef.IsNone() || bRoadMode || bRoadDemolishMode || bTunnelMode || bDistrictMode || bDigMode || bSurveyMode || bExcavateMode || bZoneMode || bFurnishMode || bSellMode || bFitMode || bMoveMode || SelectedBuildingId != 0 || HasSelectedCell() || HasSelectedBay();
 }
 
 bool ARHPlayerController::ShouldShowTitle() const
@@ -2278,6 +2315,7 @@ void ARHPlayerController::BeginPlacement(FName BuildingDef)
 	bFurnishMode = false;
 	bSellMode = false;
 	bFitMode = false;
+	ClearMoveMode();
 	PendingBuildDef = BuildingDef;
 }
 
@@ -2293,6 +2331,7 @@ void ARHPlayerController::BeginDigDesignation()
 	bSurveyMode = false;
 	bFurnishMode = false;
 	bSellMode = false;
+	ClearMoveMode();
 	bDigMode = true;
 }
 
@@ -2309,6 +2348,7 @@ void ARHPlayerController::BeginSurveyDesignation()
 	bExcavateMode = false;
 	bFurnishMode = false;
 	bSellMode = false;
+	ClearMoveMode();
 	bSurveyMode = true;
 }
 
@@ -2333,6 +2373,281 @@ void ARHPlayerController::BeginFit(FName Row)
 	SelectedBuildingId = 0;
 	bFitMode = true;
 	FitRow = Row;
+}
+
+void ARHPlayerController::BeginMove()
+{
+	CancelModes();
+	SelectedBuildingId = 0;
+	bMoveMode = true;
+}
+
+void ARHPlayerController::ClearMoveMode()
+{
+	bMoveMode = false;
+	MoveKind = ERHMoveHold::None;
+	MoveId = 0;
+	bMoveGhostForced = false;
+}
+
+void ARHPlayerController::Debug_HoldForMove(int32 Kind, int32 Id, bool bForce, const FVector& GroundCm)
+{
+	BeginMove();
+	MoveKind = Kind == 1 ? ERHMoveHold::Furnishing : (Kind == 2 ? ERHMoveHold::Fitting : ERHMoveHold::None);
+	MoveId = MoveKind == ERHMoveHold::None ? 0 : Id;
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	if (const FRHFurnitureInstance* F = (Sim && MoveKind == ERHMoveHold::Furnishing) ? Sim->FindFurniture(Id) : nullptr)
+	{
+		FurnishRot = F->Rot;
+	}
+	bMoveGhostForced = bForce;
+	MoveGhostCm = GroundCm;
+}
+
+bool ARHPlayerController::MoveCursorGround(FVector& OutCm) const
+{
+	if (bMoveGhostForced)
+	{
+		OutCm = MoveGhostCm;
+		return true;
+	}
+	return CursorToGround(OutCm);
+}
+
+void ARHPlayerController::DrawFurnishGhost(UWorld* World, const URHSimWorldSubsystem& Sim, FName Row, const FIntVector& Key, int32 Slot, int32 Rot, bool bOk) const
+{
+	FVector FC;
+	FVector2D FH;
+	Sim.GetFurnitureFootprintCm(Row, Key, Slot, Rot, FC, FH);
+	const FVector CC = Sim.GetCellCentreCm(Key);
+	const float Z = ActiveLevel * (float)Sim.GetFloorHeightCm();
+	const FColor Col = bOk ? FColor::Emerald : FColor::Red;
+	DrawDebugBox(World, FVector(CC.X, CC.Y, Z + 30.f), FVector(500.f, 500.f, 30.f), FColor(70, 110, 110), false, -1.f, 0, 3.f);
+	DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), Col, false, -1.f, 0, 8.f);
+	const FVector Facing = FRotator(0.f, 90.f * Rot, 0.f).RotateVector(FVector(0.f, -1.f, 0.f));
+	const FVector Mid(FC.X, FC.Y, Z + 125.f);
+	DrawDebugDirectionalArrow(World, Mid, Mid + Facing * (FMath::Min(FH.X, FH.Y) - 15.f), 60.f, Col, false, -1.f, 0, 6.f);
+}
+
+void ARHPlayerController::DrawFitGhost(UWorld* World, const URHSimWorldSubsystem& Sim, FName Kind, const FIntVector& Edge, bool bOk) const
+{
+	const FVector WM = Sim.GetWallEdgeMidCm(Edge);
+	const FVector Along = Edge.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+	const FColor Col = bOk ? FColor::Emerald : FColor::Red;
+	DrawDebugLine(World, WM - Along * 480.f + FVector(0, 0, 160.f), WM + Along * 480.f + FVector(0, 0, 160.f), Col, false, -1.f, 0, 14.f);
+	FVector ChC;
+	FVector2D ChH;
+	if (Kind == FName("Airlock") && Sim.GetAirlockChamberRect(Edge, ChC, ChH))
+	{
+		DrawDebugBox(World, ChC + FVector(0, 0, 120.f), FVector(ChH.X, ChH.Y, 120.f), Col, false, -1.f, 0, 5.f);
+	}
+}
+
+void ARHPlayerController::TickMove(UWorld* World, const URHSimWorldSubsystem& Sim, const URHDefinitionsSubsystem* Defs)
+{
+	// BM-7. Nothing held: the piece a click would pick up (Sell's rule), outlined in the move colour. A piece held: its
+	// ghost from the Furnish / Fit code, its own spot outlined in the move colour, and the move check's answer as the hint.
+	// All the words are PLACEHOLDER (gate-d-wording B11-B13).
+	const FColor MoveCol(180, 120, 255); // DEFAULT violet (placeholder)
+	const FLinearColor Ok(0.3f, 1.f, 0.6f), No(1.f, 0.4f, 0.3f), Dim(0.7f, 0.7f, 0.7f);
+	const FRHFurnitureInstance* HeldF = MoveKind == ERHMoveHold::Furnishing ? Sim.FindFurniture(MoveId) : nullptr;
+	const FRHWallFeature* HeldW = MoveKind == ERHMoveHold::Fitting ? Sim.FindWallFeature(MoveId) : nullptr;
+	if (MoveKind != ERHMoveHold::None && !HeldF && !HeldW)
+	{
+		MoveKind = ERHMoveHold::None; // the piece is gone (sold, or its habitat demolished): the hand is empty again
+		MoveId = 0;
+	}
+	FVector Ground;
+	const bool bGround = MoveCursorGround(Ground);
+	const float Z = ActiveLevel * (float)Sim.GetFloorHeightCm();
+	const auto OutlineWall = [&](const FIntVector& E)
+	{
+		const FVector WM = Sim.GetWallEdgeMidCm(E);
+		const FVector Along = E.Z == 0 ? FVector(0.f, 1.f, 0.f) : FVector(1.f, 0.f, 0.f);
+		DrawDebugLine(World, WM - Along * 480.f + FVector(0, 0, 160.f), WM + Along * 480.f + FVector(0, 0, 160.f), MoveCol, false, -1.f, 0, 14.f);
+	};
+	if (HeldF)
+	{
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(HeldF->Row) : nullptr;
+		const FString Name = Row ? Row->DisplayName : HeldF->Row.ToString();
+		FVector FC;
+		FVector2D FH;
+		if ((HeldF->Key.Z == 0 ? HeldF->Key.X : 0) == ActiveLevel && Sim.GetFurnitureFootprintCm(HeldF->Row, HeldF->Key, HeldF->Slot, HeldF->Rot, FC, FH))
+		{
+			DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 4.f, FH.Y - 4.f, 60.f), MoveCol, false, -1.f, 0, 8.f);
+		}
+		FIntVector Key;
+		int32 Slot = 0;
+		if (bGround && ComputeFurnishSpotFor(HeldF->Row, FurnishRot, Ground, Key, Slot))
+		{
+			FString Why;
+			const bool bOk = Sim.CanMoveFurniture(MoveId, Key, Slot, FurnishRot, Why);
+			DrawFurnishGhost(World, Sim, HeldF->Row, Key, Slot, FurnishRot, bOk);
+			HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to put it down here, T to turn, right-click to finish"), *Name, MoveId)
+				: FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, MoveId, *Why);
+			HintColor = bOk ? Ok : No;
+		}
+		else
+		{
+			HintText = FString::Printf(TEXT("MOVE %s #%d: hover a zoned room - a carved cell, or a habitat bay at the surface"), *Name, MoveId);
+			HintColor = Dim;
+		}
+		return;
+	}
+	if (HeldW)
+	{
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(HeldW->Row) : nullptr;
+		const FString Name = Row ? Row->DisplayName : HeldW->Row.ToString();
+		if (ActiveLevel == 0)
+		{
+			OutlineWall(HeldW->Edge);
+		}
+		FIntVector Edge;
+		int32 Dir = 0;
+		if (bGround && ActiveLevel == 0 && ComputeFitEdge(Ground, Edge, Dir))
+		{
+			FString Why;
+			const bool bOk = Sim.CanMoveWallFeature(MoveId, Edge, Why);
+			DrawFitGhost(World, Sim, Row ? Row->Kind : NAME_None, Edge, bOk);
+			HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to put it in this wall, right-click to finish"), *Name, MoveId)
+				: FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, MoveId, *Why);
+			HintColor = bOk ? Ok : No;
+		}
+		else
+		{
+			HintText = FString::Printf(TEXT("MOVE %s #%d: hover a surface habitat bay - its nearest wall lights up"), *Name, MoveId);
+			HintColor = Dim;
+		}
+		return;
+	}
+	const FRHFurnitureInstance* Hit = bGround ? FindFurnitureAt(Ground) : nullptr;
+	FIntVector WEdge;
+	int32 WDir = 0;
+	const FRHWallFeature* WHit = (!Hit && bGround && ComputeFitEdge(Ground, WEdge, WDir)) ? Sim.FindWallFeatureOnEdge(WEdge) : nullptr;
+	FString Why;
+	if (Hit)
+	{
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(Hit->Row) : nullptr;
+		const bool bOk = Sim.CanPickUpFurniture(Hit->Id, Why);
+		FVector FC;
+		FVector2D FH;
+		Sim.GetFurnitureFootprintCm(Hit->Row, Hit->Key, Hit->Slot, Hit->Rot, FC, FH);
+		DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), bOk ? MoveCol : FColor::Red, false, -1.f, 0, 8.f);
+		const FString Name = Row ? Row->DisplayName : Hit->Row.ToString();
+		HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to pick it up, right-click to finish"), *Name, Hit->Id) : FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, Hit->Id, *Why);
+		HintColor = bOk ? Ok : No;
+	}
+	else if (WHit)
+	{
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(WHit->Row) : nullptr;
+		const bool bOk = Sim.CanPickUpWallFeature(WHit->Id, Why);
+		OutlineWall(WHit->Edge);
+		const FString Name = Row ? Row->DisplayName : WHit->Row.ToString();
+		HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to pick it up, right-click to finish"), *Name, WHit->Id) : FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, WHit->Id, *Why);
+		HintColor = bOk ? Ok : No;
+	}
+	else
+	{
+		HintText = TEXT("MOVE: hover a furnishing, or a window, door or airlock at the surface, and click to pick it up");
+		HintColor = Dim;
+	}
+}
+
+void ARHPlayerController::ClickMove(const FVector& GroundCm)
+{
+	UWorld* World = GetWorld();
+	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim)
+	{
+		return;
+	}
+	FString Why;
+	if (MoveKind == ERHMoveHold::Furnishing && !Sim->FindFurniture(MoveId))
+	{
+		MoveKind = ERHMoveHold::None; // gone since it was picked up
+	}
+	if (MoveKind == ERHMoveHold::Fitting && !Sim->FindWallFeature(MoveId))
+	{
+		MoveKind = ERHMoveHold::None;
+	}
+	if (MoveKind == ERHMoveHold::None)
+	{
+		// The pick, by Sell's rule: a furnishing under the cursor first; else, at the surface, the fitting on the nearest wall.
+		MoveId = 0;
+		const FRHFurnitureInstance* Hit = FindFurnitureAt(GroundCm);
+		FIntVector Edge;
+		int32 Dir = 0;
+		const FRHWallFeature* WHit = (!Hit && ActiveLevel == 0 && ComputeFitEdge(GroundCm, Edge, Dir)) ? Sim->FindWallFeatureOnEdge(Edge) : nullptr;
+		if (Hit && Sim->CanPickUpFurniture(Hit->Id, Why))
+		{
+			MoveKind = ERHMoveHold::Furnishing;
+			MoveId = Hit->Id;
+			FurnishRot = Hit->Rot; // it turns from where it stands
+		}
+		else if (WHit && Sim->CanPickUpWallFeature(WHit->Id, Why))
+		{
+			MoveKind = ERHMoveHold::Fitting;
+			MoveId = WHit->Id;
+		}
+		else if (Hit || WHit)
+		{
+			URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+			SetConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+		}
+		return;
+	}
+	FRHCommand Cmd;
+	Cmd.Verb = FName("Move");
+	Cmd.LocationB = FVector((double)MoveId, 0.0, 0.0); // the piece's Id rides in LocationB.X (no save change)
+	FString Name;
+	bool bOk = false;
+	if (MoveKind == ERHMoveHold::Furnishing)
+	{
+		const FRHFurnitureInstance* F = Sim->FindFurniture(MoveId);
+		FIntVector Key;
+		int32 Slot = 0;
+		if (!ComputeFurnishSpotFor(F->Row, FurnishRot, GroundCm, Key, Slot))
+		{
+			return; // off any room: the hint already says so
+		}
+		bOk = Sim->CanMoveFurniture(MoveId, Key, Slot, FurnishRot, Why);
+		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F->Row) : nullptr;
+		Name = Row ? Row->DisplayName : F->Row.ToString();
+		Cmd.Target = FName("Furniture");
+		Cmd.Level = ActiveLevel;
+		Cmd.Location = GroundCm; // a bay is found by location, as a Furnish order's is
+		Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Z == 0 ? Key.Y : 0, Slot, FurnishRot);
+	}
+	else
+	{
+		const FRHWallFeature* W = Sim->FindWallFeature(MoveId);
+		FIntVector Edge;
+		int32 Dir = 0;
+		if (ActiveLevel != 0 || !ComputeFitEdge(GroundCm, Edge, Dir))
+		{
+			return;
+		}
+		bOk = Sim->CanMoveWallFeature(MoveId, Edge, Why);
+		const FRHDoorRow* Row = Defs ? Defs->GetDoor(W->Row) : nullptr;
+		Name = Row ? Row->DisplayName : W->Row.ToString();
+		Cmd.Target = FName("WallFeature");
+		Cmd.Level = 0;
+		Cmd.Location = GroundCm; // a point in the bay, as a Fit order's
+		Cmd.Value = Dir;
+	}
+	if (!bOk)
+	{
+		URHAudioSubsystem::Cue(GetWorld(), FName("Error"));
+		SetConfirm(Why, FLinearColor(1.f, 0.4f, 0.3f));
+		return;
+	}
+	Sim->EnqueueCommand(Cmd);
+	URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
+	SetConfirm(FString::Printf(TEXT("Move order transmitted: %s #%d"), *Name, MoveId), FLinearColor(0.2f, 0.9f, 1.f)); // PLACEHOLDER (gate-d-wording B2)
+	MoveKind = ERHMoveHold::None; // the hand is empty; the mode stays armed for the next pick
+	MoveId = 0;
 }
 
 void ARHPlayerController::Debug_ShowWallsTab()
@@ -2383,7 +2698,7 @@ void ARHPlayerController::Debug_ShowFurnishTab()
 
 void ARHPlayerController::OnRotate()
 {
-	if (bFurnishMode)
+	if (bFurnishMode || (bMoveMode && MoveKind == ERHMoveHold::Furnishing)) // BM-7: a held furnishing turns as a new one does
 	{
 		FurnishRot = (FurnishRot + 1) & 3;
 	}
@@ -2391,15 +2706,20 @@ void ARHPlayerController::OnRotate()
 
 bool ARHPlayerController::ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const
 {
+	return ComputeFurnishSpotFor(FurnishRow, FurnishRot, GroundCm, OutKey, OutSlot);
+}
+
+bool ARHPlayerController::ComputeFurnishSpotFor(FName RowName, int32 Rot, const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const
+{
 	const UWorld* World = GetWorld();
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
-	const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(FurnishRow) : nullptr;
+	const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(RowName) : nullptr;
 	if (!Sim || !Row || !Sim->ResolveFurnitureKey(ActiveLevel, GroundCm, OutKey))
 	{
 		return false;
 	}
-	const FIntPoint Size = URHSimWorldSubsystem::GetFurnitureSize(*Row, FurnishRot);
+	const FIntPoint Size = URHSimWorldSubsystem::GetFurnitureSize(*Row, Rot);
 	const FVector CC = Sim->GetCellCentreCm(OutKey);
 	OutSlot = URHSimWorldSubsystem::AnchorSlotFor(FVector2D(GroundCm.X - (CC.X - 500.0), GroundCm.Y - (CC.Y - 500.0)), Size.X, Size.Y);
 	return true;
@@ -2437,6 +2757,7 @@ void ARHPlayerController::BeginExcavateDesignation()
 	PendingBuildDef = NAME_None;
 	bFurnishMode = false;
 	bSellMode = false;
+	ClearMoveMode();
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = true;
@@ -2457,6 +2778,7 @@ void ARHPlayerController::BeginZoneDesignation(FName Room)
 	bFurnishMode = false;
 	bSellMode = false;
 	bFitMode = false;
+	ClearMoveMode();
 	bDigMode = false;
 	bSurveyMode = false;
 	bExcavateMode = false;
@@ -2596,7 +2918,7 @@ void ARHPlayerController::FocusNextShaft()
 void ARHPlayerController::CancelModes()
 {
 	// With no mode active, cancel means "dismiss the inspection card".
-	if (PendingBuildDef.IsNone() && !bRoadMode && !bRoadDemolishMode && !bTunnelMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode)
+	if (PendingBuildDef.IsNone() && !bRoadMode && !bRoadDemolishMode && !bTunnelMode && !bDistrictMode && !bDigMode && !bSurveyMode && !bExcavateMode && !bZoneMode && !bFurnishMode && !bSellMode && !bFitMode && !bMoveMode)
 	{
 		SelectedBuildingId = 0;
 		SelectedCellLevel = 0;
@@ -2629,6 +2951,7 @@ void ARHPlayerController::CancelModes()
 	bSellMode = false;
 	bFitMode = false;
 	FitRow = NAME_None;
+	ClearMoveMode(); // BM-7: the mode and its hold
 	HintText.Reset();
 }
 

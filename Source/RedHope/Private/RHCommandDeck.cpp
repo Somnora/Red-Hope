@@ -343,6 +343,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						DeckButton(FText::FromString(TEXT("Sell")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSellFurniture))
 					];
+					// BM-7: pick up a placed piece and put it somewhere else, free (PLACEHOLDER, gate-d-wording B1).
+					FurnishPalette->AddSlot().AutoWidth()
+					[
+						DeckButton(FText::FromString(TEXT("Move")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleMove))
+					];
 				}
 			}
 			// BM-6: windows, doors and airlocks, with their price.
@@ -370,6 +375,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					WallsPalette->AddSlot().AutoWidth()
 					[
 						DeckButton(FText::FromString(TEXT("Sell")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSellFurniture))
+					];
+					// BM-7: the same Move tool picks up a window, door or airlock (PLACEHOLDER, gate-d-wording B1).
+					WallsPalette->AddSlot().AutoWidth()
+					[
+						DeckButton(FText::FromString(TEXT("Move")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleMove))
 					];
 				}
 			}
@@ -1583,6 +1593,17 @@ void SRHCommandDeck::RefreshUplinkPanel()
 			const FRHFurnitureInstance* SF = C.Target == FName("Furniture") ? Sim->FindFurniture((int32)C.Value) : nullptr;
 			Label = SF ? FString::Printf(TEXT("Sell %s #%d"), *SF->Row.ToString(), SF->Id) : FString(TEXT("Sell a room's furniture"));
 		}
+		else if (C.Verb == FName("Move"))
+		{
+			// BM-7: "Move Cot #3" / "Move Window #2"; "Move a furnishing" / "Move a fitting" once the piece is gone (PLACEHOLDER, gate-d-wording B8-B10).
+			const int32 MId = URHSimWorldSubsystem::GetMovePieceId(C);
+			const bool bFitting = C.Target == FName("WallFeature");
+			const FRHFurnitureInstance* MF = bFitting ? nullptr : Sim->FindFurniture(MId);
+			const FRHWallFeature* MW = bFitting ? Sim->FindWallFeature(MId) : nullptr;
+			Label = MF ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *MF->Row.ToString(), MF->Id)
+				: MW ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *MW->Row.ToString(), MW->Id)
+				: FString(bFitting ? TEXT("Move a fitting") : TEXT("Move a furnishing"));
+		}
 		if (C.Verb == FName("BuildRoad"))
 		{
 			// C4: "Road 120 m" (the straight line between its two ends), not a bare verb.
@@ -2377,6 +2398,15 @@ FReply SRHCommandDeck::HandleSellFurniture()
 	if (PC.IsValid())
 	{
 		PC->BeginSellFurniture();
+	}
+	return FReply::Handled();
+}
+
+FReply SRHCommandDeck::HandleMove()
+{
+	if (PC.IsValid())
+	{
+		PC->BeginMove(); // BM-7
 	}
 	return FReply::Handled();
 }

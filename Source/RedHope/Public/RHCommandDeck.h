@@ -153,6 +153,7 @@ private:
 	// Furnish mode (BM-5): the zone row's FURNISH tab holds the catalogue.
 	FReply HandleFurnish(FName Row);
 	FReply HandleSellFurniture();
+	FReply HandleMove(); // BM-7: the Furnish and Walls palettes' "Move" (Move mode)
 	// BM-6: the WALLS tab - windows, doors, airlocks.
 	FReply HandleFit(FName Row);
 	// C5a: the DISTRICT tab - a Kind arms the controller's district paint mode (the City panel's

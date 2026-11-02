@@ -115,6 +115,21 @@ public:
 	void BeginFit(FName Row);
 	bool IsFitMode() const { return bFitMode; }
 	void Debug_ShowWallsTab();
+	// Move mode (BM-7): the deck's "Move" button beside each "Sell" arms it. A click picks up a furnishing (or, at the
+	// surface, the fitting on the nearest wall) by Sell's own rule; the cursor then carries the piece's ghost from the
+	// Furnish / Fit code (T turns a furnishing) with its own spot outlined in the move colour, and a click transmits a
+	// free Move order and lets go, the mode staying armed for the next pick. The hold is an Id, looked up on each use.
+	// A floor change keeps it, so a piece can be carried to another floor.
+	void BeginMove();
+	bool IsMoveMode() const { return bMoveMode; }
+	int32 GetMoveKind() const { return (int32)MoveKind; } // 0 nothing held, 1 a furnishing, 2 a fitting
+	int32 GetMoveId() const { return MoveId; }
+	int32 GetMoveRot() const { return FurnishRot; }      // the held furnishing's turn (the rotate key's)
+	// Capture/QA (RH.BeginMove): arm Move mode holding a piece (Kind 1 a furnishing, 2 a fitting); with bForce its ghost
+	// stands at GroundCm instead of the cursor.
+	void Debug_HoldForMove(int32 Kind, int32 Id, bool bForce, const FVector& GroundCm);
+	// Capture/QA (RH.BeginMove put): Move mode's own click at the forced ghost point (a pick, or the Move order).
+	void Debug_MoveClickAtGhost() { if (bMoveMode && bMoveGhostForced) { ClickMove(MoveGhostCm); } }
 	// Capture/QA (RH.DeckDistrict): show the deck's DISTRICT tab; RH.DeckCity folds the City panel.
 	void Debug_ShowDistrictTab();
 	void Debug_SetCityExpanded(bool bOn);
@@ -262,7 +277,18 @@ private:
 	// The furnishable cell under a ground point and the slot that centres the
 	// armed piece there; false off any room.
 	bool ComputeFurnishSpot(const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
+	// The same for a given row and turn (BM-7: the held piece's).
+	bool ComputeFurnishSpotFor(FName Row, int32 Rot, const FVector& GroundCm, FIntVector& OutKey, int32& OutSlot) const;
 	const struct FRHFurnitureInstance* FindFurnitureAt(const FVector& GroundCm) const;
+	// The Furnish ghost (BM-5): the cell's outline, the piece's footprint (green when bOk, else red) and its facing arrow;
+	// the Fit ghost (BM-6): the lit wall and an airlock's chamber. Furnish, Fit and Move mode draw with them.
+	void DrawFurnishGhost(UWorld* World, const class URHSimWorldSubsystem& Sim, FName Row, const FIntVector& Key, int32 Slot, int32 Rot, bool bOk) const;
+	void DrawFitGhost(UWorld* World, const class URHSimWorldSubsystem& Sim, FName Kind, const FIntVector& Edge, bool bOk) const;
+	// BM-7: Move mode's frame (the ghost, the outlines, the hint) and its click (a pick, or a Move order).
+	void TickMove(UWorld* World, const class URHSimWorldSubsystem& Sim, const class URHDefinitionsSubsystem* Defs);
+	void ClickMove(const FVector& GroundCm);
+	bool MoveCursorGround(FVector& OutCm) const; // RH.BeginMove's forced point, else the cursor's
+	void ClearMoveMode();
 	// The wall of the surface bay under a point nearest to it (and its side).
 	bool ComputeFitEdge(const FVector& GroundCm, FIntVector& OutEdge, int32& OutDir) const;
 	// Cursor ray intersected with the ground plane (Z=0), snapped to the 2 m grid.
@@ -362,6 +388,13 @@ private:
 	bool bSellMode = false;
 	bool bFitMode = false;
 	FName FitRow;
+	// Move state (BM-7): the held piece by kind and Id (MoveId 0 while nothing is held).
+	enum class ERHMoveHold : uint8 { None = 0, Furnishing = 1, Fitting = 2 };
+	bool bMoveMode = false;
+	ERHMoveHold MoveKind = ERHMoveHold::None;
+	int32 MoveId = 0;
+	bool bMoveGhostForced = false;
+	FVector MoveGhostCm = FVector::ZeroVector;
 	// The carved cell (spiral index) under a world point on the given floor,
 	// or INDEX_NONE. The zoning click's inverse of the sim's SpiralCell.
 	int32 FindCellAt(const FVector& GroundCm, int32 Level) const;

@@ -9608,6 +9608,73 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		Ids.Add((int32)Cmd.Value);
 		RemoveWallFeatures(Ids, nullptr);
 	}
+	else if (Cmd.Verb == FName("Move"))
+	{
+		// BM-7: pick up a furnishing (Target "Furniture") or a wall fitting (Target "WallFeature"), LocationB.X = its Id, and
+		// put it down where the order's Furnish / Fit fields say - free, instant once the order lands. The piece is mutated
+		// in place (its Id and its place in the array stay), so every derivation ordered by Id is untouched; everything
+		// derived from where it stands re-derives as after any furnishing or fitting change. No spend, no refund, no air.
+		FString Reason;
+		const int32 Id = GetMovePieceId(Cmd);
+		if (Id == 0)
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("Move needs a furnishing or a fitting")); // PLACEHOLDER (gate-d-wording B6)
+			return;
+		}
+		if (Cmd.Target == FName("Furniture"))
+		{
+			FIntVector Key = FIntVector::ZeroValue;
+			int32 Cell = 0, Slot = 0, Rot = 0;
+			DecodeFurnish(Cmd.Value, Cell, Slot, Rot);
+			if (FindFurniture(Id) && !ResolveFurnishOrderKey(Cmd, Key))
+			{
+				OnCommandRejected.Broadcast(Cmd, TEXT("No room there to furnish"));
+				return;
+			}
+			if (!CanMoveFurniture(Id, Key, Slot, Rot, Reason, /*bCheckQueued*/ false)) // a missing piece first: "already gone"
+			{
+				OnCommandRejected.Broadcast(Cmd, Reason);
+				return;
+			}
+			FRHFurnitureInstance& F = *Furniture.FindByPredicate([Id](const FRHFurnitureInstance& P) { return P.Id == Id; });
+			const FIntVector OldKey = F.Key;
+			const int32 OldSlot = F.Slot, OldRot = F.Rot;
+			F.Key = Key;
+			F.Slot = Slot;
+			F.Rot = Rot & 3;
+			RebuildFurnitureCache();
+			UE_LOG(LogRedHopeSim, Display, TEXT("Moved %s #%d from (%d, %d, %d) slot %d rot %d to (%d, %d, %d) slot %d rot %d"), *F.Row.ToString(), Id,
+				OldKey.X, OldKey.Y, OldKey.Z, OldSlot, OldRot, Key.X, Key.Y, Key.Z, F.Slot, F.Rot);
+			OnFurnitureChanged.Broadcast(OldKey);
+			if (Key != OldKey)
+			{
+				OnFurnitureChanged.Broadcast(Key);
+			}
+			RefreshJobs();
+		}
+		else
+		{
+			FIntVector Edge = FIntVector::ZeroValue;
+			if (FindWallFeature(Id) && !ResolveWallEdge(Cmd.Location, (int32)Cmd.Value, Edge))
+			{
+				OnCommandRejected.Broadcast(Cmd, TEXT("No habitat wall there"));
+				return;
+			}
+			if (!CanMoveWallFeature(Id, Edge, Reason, /*bCheckQueued*/ false))
+			{
+				OnCommandRejected.Broadcast(Cmd, Reason);
+				return;
+			}
+			FRHWallFeature& W = *WallFeatures.FindByPredicate([Id](const FRHWallFeature& P) { return P.Id == Id; });
+			const FIntVector OldEdge = W.Edge;
+			W.Edge = Edge;
+			RebuildWallFeatureIndex();
+			UE_LOG(LogRedHopeSim, Display, TEXT("Moved %s #%d from wall (%d, %d, %d) to wall (%d, %d, %d)"), *W.Row.ToString(), Id,
+				OldEdge.X, OldEdge.Y, OldEdge.Z, Edge.X, Edge.Y, Edge.Z);
+			OnWallFeatureChanged.Broadcast(OldEdge);
+			OnWallFeatureChanged.Broadcast(Edge);
+		}
+	}
 	else if (Cmd.Verb == FName("Sell"))
 	{
 		// BM-4: sell one furnishing (Target "Furniture", Value = Id) or a whole
@@ -11380,6 +11447,11 @@ void URHSimWorldSubsystem::RebuildWallFeatureIndex()
 
 bool URHSimWorldSubsystem::CanPlaceWallFeature(FName RowName, const FIntVector& Edge, FString& OutReason, bool bCheckQueued) const
 {
+	return CheckWallFeatureEdge(RowName, Edge, OutReason, bCheckQueued, /*bCheckCost*/ true, /*MovingId*/ 0);
+}
+
+bool URHSimWorldSubsystem::CheckWallFeatureEdge(FName RowName, const FIntVector& Edge, FString& OutReason, bool bCheckQueued, bool bCheckCost, int32 MovingId) const
+{
 	if (!Defs || !Defs->HasWallCatalogue())
 	{
 		OutReason = TEXT("No windows or doors catalogue");
@@ -11430,8 +11502,10 @@ bool URHSimWorldSubsystem::CanPlaceWallFeature(FName RowName, const FIntVector& 
 	{
 		for (const FRHCommand& Q : UplinkQueue)
 		{
+			// BM-7: a queued Move of another fitting heads for its edge as a Fit does (it carries the Fit's Location and side).
+			const int32 QMove = Q.Target == FName("WallFeature") ? GetMovePieceId(Q) : 0;
 			FIntVector QEdge;
-			if (Q.Verb == FName("Fit") && ResolveWallEdge(Q.Location, (int32)Q.Value, QEdge) && QEdge == Edge)
+			if ((Q.Verb == FName("Fit") || (QMove != 0 && QMove != MovingId)) && ResolveWallEdge(Q.Location, (int32)Q.Value, QEdge) && QEdge == Edge)
 			{
 				OutReason = TEXT("A fitting is already in transit for that wall");
 				return false;
@@ -11453,6 +11527,10 @@ bool URHSimWorldSubsystem::CanPlaceWallFeature(FName RowName, const FIntVector& 
 				return false;
 			}
 		}
+	}
+	if (!bCheckCost)
+	{
+		return true; // BM-7: a move is free
 	}
 	for (const auto& Line : URHDefinitionsSubsystem::GetDoorCost(*Row))
 	{
@@ -11498,6 +11576,44 @@ bool URHSimWorldSubsystem::CanSellWallFeature(int32 Id, FString& OutReason, TMap
 		*OutRefund = WallFeatureRefundFor(Ids);
 	}
 	return true;
+}
+
+bool URHSimWorldSubsystem::CanPickUpWallFeature(int32 Id, FString& OutReason, bool bCheckQueued) const
+{
+	if (!FindWallFeature(Id))
+	{
+		OutReason = FString::Printf(TEXT("No fitting #%d - it is already gone"), Id);
+		return false;
+	}
+	if (bCheckQueued)
+	{
+		for (const FRHCommand& Q : UplinkQueue)
+		{
+			if (Q.Target == FName("WallFeature") && (GetMovePieceId(Q) == Id || (Q.Verb == FName("Sell") && (int32)Q.Value == Id)))
+			{
+				OutReason = TEXT("That piece already has an order in transit"); // PLACEHOLDER (gate-d-wording B4)
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool URHSimWorldSubsystem::CanMoveWallFeature(int32 Id, const FIntVector& Edge, FString& OutReason, bool bCheckQueued) const
+{
+	// BM-7: anywhere a new fitting of its row could go, by CanPlaceWallFeature's rules and texts, without the cost.
+	if (!CanPickUpWallFeature(Id, OutReason, bCheckQueued)) // a missing piece first, then one with an order in transit
+	{
+		return false;
+	}
+	const FRHWallFeature* W = FindWallFeature(Id);
+	if (W->Edge == Edge)
+	{
+		OutReason = TEXT("It is already there"); // PLACEHOLDER (gate-d-wording B3)
+		return false;
+	}
+	const FName Row = W->Row;
+	return CheckWallFeatureEdge(Row, Edge, OutReason, bCheckQueued, /*bCheckCost*/ false, Id);
 }
 
 void URHSimWorldSubsystem::AddWallFeature(FName RowName, const FIntVector& Edge)
@@ -11978,6 +12094,11 @@ uint32 URHSimWorldSubsystem::BuildingMaskInCell(const FIntVector& Key, uint32 Pr
 
 bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued, bool bCheckCost) const
 {
+	return CheckFurnitureSpot(RowName, Key, Slot, Rot, OutReason, bCheckQueued, bCheckCost, /*MovingId*/ 0);
+}
+
+bool URHSimWorldSubsystem::CheckFurnitureSpot(FName RowName, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued, bool bCheckCost, int32 MovingId) const
+{
 	if (!Defs || !Defs->HasFurnitureCatalogue())
 	{
 		OutReason = TEXT("No furniture catalogue");
@@ -12027,7 +12148,7 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 	{
 		for (const int32 Id : CF->Ids)
 		{
-			const FRHFurnitureInstance* F = FindFurniture(Id);
+			const FRHFurnitureInstance* F = Id != MovingId ? FindFurniture(Id) : nullptr; // BM-7: a moving piece never collides with itself
 			const FRHFurnitureRow* FR = F ? Defs->GetFurniture(F->Row) : nullptr;
 			if (FR && (FurnitureMask(F->Slot, GetFurnitureSize(*FR, F->Rot)) & Mask))
 			{
@@ -12040,7 +12161,11 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 	{
 		for (const FRHCommand& Q : UplinkQueue)
 		{
-			const FRHFurnitureRow* QRow = Q.Verb == FName("Furnish") ? Defs->GetFurniture(Q.Target) : nullptr;
+			// BM-7: a queued Move of another piece takes its destination as a Furnish of that piece's row would (the same
+			// Level, Location and Value); a Move of the piece being placed is skipped.
+			const int32 QMove = Q.Target == FName("Furniture") ? GetMovePieceId(Q) : 0;
+			const FRHFurnitureInstance* QPiece = (QMove != 0 && QMove != MovingId) ? FindFurniture(QMove) : nullptr;
+			const FRHFurnitureRow* QRow = Q.Verb == FName("Furnish") ? Defs->GetFurniture(Q.Target) : (QPiece ? Defs->GetFurniture(QPiece->Row) : nullptr);
 			FIntVector QKey;
 			if (!QRow || !ResolveFurnishOrderKey(Q, QKey) || QKey != Key)
 			{
@@ -12064,8 +12189,9 @@ bool URHSimWorldSubsystem::CanPlaceFurniture(FName RowName, const FIntVector& Ke
 	}
 	// Bed guard (ruling 2026-10-16): furnishing a surface Living bay may not
 	// take beds from the habitat's sleepers - its first non-bed piece ends the
-	// legacy beds, and a smaller bed replaces them.
-	if (Key.Z != 0 && IsLivingKey(Key))
+	// legacy beds, and a smaller bed replaces them. (A move is judged on its end
+	// state instead, in CanMoveFurniture: BM-7.)
+	if (MovingId == 0 && Key.Z != 0 && IsLivingKey(Key))
 	{
 		FRHFurnishPreview P;
 		if (PreviewFurnishEffect(RowName, Key, P) && P.BedsAfter < P.BedsBefore)
@@ -12099,7 +12225,7 @@ int32 URHSimWorldSubsystem::CountFloorBeds(int32 Level, const TSet<int32>* Exclu
 	return CountFloorBedsImpl(Level, Exclude, 0);
 }
 
-int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen) const
+int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* Exclude, int32 ExtraOpen, const FRHFurnitureInstance* Moved) const
 {
 	const int32 Carved = GetFloorCarvedCells(Level);
 	// D7 (R9): an open cell holds no bed, at both exits. Open is 0 with no atrium (and no what-if), and then both exits are the exact
@@ -12116,7 +12242,7 @@ int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* E
 	// Every carved cell holds the legacy beds, except a Living cell with bed
 	// pieces, which holds exactly its beds.
 	int32 BedCells = 0, Sum = 0;
-	if (!Exclude)
+	if (!Exclude && !Moved)
 	{
 		// C1: read off the per-cell tallies RebuildFurnitureCache keeps (a cell's
 		// Beds is the capacity of its bed pieces) - one entry per furnished cell,
@@ -12134,11 +12260,13 @@ int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* E
 	}
 	else
 	{
-		// What-if (a sale preview): the same count with some pieces taken away.
+		// What-if (a sale preview): the same count with some pieces taken away. BM-7: or with the moved piece standing
+		// at Moved's key (its own entry is passed over and Moved counted in its place).
 		TMap<int32, int32> CellBeds;
-		for (const FRHFurnitureInstance& F : Furniture)
+		for (const FRHFurnitureInstance& F0 : Furniture)
 		{
-			if (F.Key.Z != 0 || F.Key.X != Level || Exclude->Contains(F.Id))
+			const FRHFurnitureInstance& F = (Moved && F0.Id == Moved->Id) ? *Moved : F0;
+			if (F.Key.Z != 0 || F.Key.X != Level || (Exclude && Exclude->Contains(F.Id)))
 			{
 				continue;
 			}
@@ -12163,7 +12291,7 @@ int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* E
 	{
 		Beds = BedCells == 0 ? (int32)(Carved * ColonistsPerCell) : (int32)((Carved - BedCells) * ColonistsPerCell) + Sum;
 	}
-	if (bVerifyCaches && !Exclude)
+	if (bVerifyCaches && !Exclude && !Moved)
 	{
 		const TSet<int32> Nothing;
 		const int32 PerPiece = CountFloorBedsImpl(Level, &Nothing, ExtraOpen); // the original per-piece count
@@ -12175,7 +12303,7 @@ int32 URHSimWorldSubsystem::CountFloorBedsImpl(int32 Level, const TSet<int32>* E
 	return Beds;
 }
 
-int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TSet<int32>* Exclude) const
+int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TSet<int32>* Exclude, const FRHFurnitureInstance* Moved) const
 {
 	const FRHHabMemberCache* M = HabMembers.Find(HabId);
 	const FRHBuildingInstance* B = M ? nullptr : FindBuildingById(HabId);
@@ -12197,13 +12325,23 @@ int32 URHSimWorldSubsystem::CountHabBeds(int32 HabId, int32 ExcludeBay, const TS
 		{
 			for (const int32 Id : CF->Ids)
 			{
-				const FRHFurnitureInstance* F = (Exclude && Exclude->Contains(Id)) ? nullptr : FindFurniture(Id);
+				// BM-7: the moved piece is counted where Moved stands, below, not here.
+				const FRHFurnitureInstance* F = ((Exclude && Exclude->Contains(Id)) || (Moved && Moved->Id == Id)) ? nullptr : FindFurniture(Id);
 				const FRHFurnitureRow* Row = (F && Defs) ? Defs->GetFurniture(F->Row) : nullptr;
 				bAny |= F != nullptr;
 				if (Row && Row->Provides == NAME_FurnBed)
 				{
 					Beds += Row->Capacity;
 				}
+			}
+		}
+		if (Moved && Moved->Key == Key)
+		{
+			const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(Moved->Row) : nullptr;
+			bAny = true;
+			if (Row && Row->Provides == NAME_FurnBed)
+			{
+				Beds += Row->Capacity;
 			}
 		}
 		if (bAny)
@@ -12410,6 +12548,134 @@ bool URHSimWorldSubsystem::CanSellCell(const FIntVector& Key, FString& OutReason
 	if (OutRefund)
 	{
 		*OutRefund = FurnitureRefundFor(Ids);
+	}
+	return true;
+}
+
+int32 URHSimWorldSubsystem::GetMovePieceId(const FRHCommand& Cmd)
+{
+	// BM-7: the Id rides in LocationB.X (a double holds every int32 exactly); anything but a whole positive number is no piece.
+	const double X = Cmd.LocationB.X;
+	if (Cmd.Verb != FName("Move") || (Cmd.Target != FName("Furniture") && Cmd.Target != FName("WallFeature")) || !(X >= 1.0) || X > (double)MAX_int32 || X != FMath::FloorToDouble(X))
+	{
+		return 0;
+	}
+	return (int32)X;
+}
+
+bool URHSimWorldSubsystem::HasFurnitureOrderInTransit(const FRHFurnitureInstance& F) const
+{
+	for (const FRHCommand& Q : UplinkQueue)
+	{
+		if (Q.Target == FName("Furniture") && (GetMovePieceId(Q) == F.Id || (Q.Verb == FName("Sell") && (int32)Q.Value == F.Id)))
+		{
+			return true;
+		}
+		if (Q.Verb == FName("Sell") && Q.Target == FName("Cell"))
+		{
+			// A whole room's sale takes the piece too (the cell as ExecuteCommand's Sell finds it).
+			int32 H = 0, Bay = INDEX_NONE;
+			if (Q.Level == 0 ? (FindBayAt(Q.Location, H, Bay) && FIntVector(0, Bay, H) == F.Key) : FIntVector(Q.Level, (int32)Q.Value, 0) == F.Key)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::CanPickUpFurniture(int32 Id, FString& OutReason, bool bCheckQueued) const
+{
+	const FRHFurnitureInstance* F = FindFurniture(Id);
+	if (!F)
+	{
+		OutReason = FString::Printf(TEXT("No furnishing #%d - it is already gone"), Id);
+		return false;
+	}
+	if (bCheckQueued && HasFurnitureOrderInTransit(*F))
+	{
+		OutReason = TEXT("That piece already has an order in transit"); // PLACEHOLDER (gate-d-wording B4)
+		return false;
+	}
+	return true;
+}
+
+void URHSimWorldSubsystem::GetMoveBedPlaces(int32 Id, const FIntVector& Key, int32 Slot, int32 Rot, TArray<FRHMoveBedPlace>& Out) const
+{
+	Out.Reset();
+	const FRHFurnitureInstance* F = FindFurniture(Id);
+	if (!F)
+	{
+		return;
+	}
+	// The piece as it would stand: the counters take it as an override ("this Id is here instead"), so After comes from
+	// the same code as Before - each place by building or floor, as GetHabResidents and BedGuardAllowsRemoval count.
+	FRHFurnitureInstance To = *F;
+	To.Key = Key;
+	To.Slot = Slot;
+	To.Rot = Rot & 3;
+	const auto Judge = [&](const FIntVector& At)
+	{
+		FRHMoveBedPlace P;
+		if (At.Z != 0)
+		{
+			P.HabId = At.Z;
+			P.Residents = GetHabResidents(At.Z);
+			P.Before = CountHabBeds(At.Z);
+			P.After = CountHabBeds(At.Z, INDEX_NONE, nullptr, &To);
+		}
+		else
+		{
+			P.Level = At.X;
+			for (const FRHColonist& Col : Colonists)
+			{
+				P.Residents += (Col.HomeHab == 0 && Col.HomeLevel == At.X) ? 1 : 0;
+			}
+			P.Before = CountFloorBeds(At.X, nullptr);
+			P.After = CountFloorBedsImpl(At.X, nullptr, 0, &To);
+		}
+		Out.Add(P);
+	};
+	const FIntVector From = F->Key;
+	Judge(From); // S
+	const bool bSamePlace = From.Z != 0 ? Key.Z == From.Z : (Key.Z == 0 && Key.X == From.X);
+	if (!bSamePlace)
+	{
+		Judge(Key); // D
+	}
+}
+
+bool URHSimWorldSubsystem::CanMoveFurniture(int32 Id, const FIntVector& Key, int32 Slot, int32 Rot, FString& OutReason, bool bCheckQueued) const
+{
+	// BM-7: anywhere a new piece of its row could go (CanPlaceFurniture's rules and texts), without the cost, never
+	// colliding with itself, and judged by the bed guard on the end state.
+	if (!CanPickUpFurniture(Id, OutReason, bCheckQueued)) // a missing piece first, then one with an order in transit
+	{
+		return false;
+	}
+	const FRHFurnitureInstance* F = FindFurniture(Id);
+	if (F->Key == Key && F->Slot == Slot && F->Rot == Rot)
+	{
+		OutReason = TEXT("It is already there"); // PLACEHOLDER (gate-d-wording B3)
+		return false;
+	}
+	const FName Row = F->Row;
+	if (!CheckFurnitureSpot(Row, Key, Slot, Rot, OutReason, bCheckQueued, /*bCheckCost*/ false, Id))
+	{
+		return false;
+	}
+	// The bed guard (ruling 2026-10-16) on the end state: it replaces both the add-only guard (Furnish) and the remove-only
+	// one (Sell), which can disagree on a move. A non-bed piece moved into a bare Living bay ends that bay's legacy beds;
+	// the last piece moved out of a furnished Living bay brings them back. S first, then D.
+	TArray<FRHMoveBedPlace> Places;
+	GetMoveBedPlaces(Id, Key, Slot, Rot, Places);
+	for (const FRHMoveBedPlace& P : Places)
+	{
+		if (P.After < P.Before && P.After < P.Residents)
+		{
+			OutReason = FString::Printf(TEXT("%d resident(s) sleep here - moving this would leave someone without a bed"), P.Residents); // PLACEHOLDER (gate-d-wording B5)
+			return false;
+		}
 	}
 	return true;
 }

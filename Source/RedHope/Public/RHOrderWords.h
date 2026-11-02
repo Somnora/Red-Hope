@@ -25,6 +25,7 @@ namespace RHOrder
 		if (Verb == FName("Treaty"))        { return TEXT("Pact"); } // E6 (PLACEHOLDER, gate-d-wording Z4): the pact's sign or break
 		if (Verb == FName("OpenAtrium"))    { return TEXT("Open atrium"); }  // D7 (PLACEHOLDER, gate-d-wording L21)
 		if (Verb == FName("CloseAtrium"))   { return TEXT("Close atrium"); } // D7 (PLACEHOLDER, gate-d-wording L21)
+		if (Verb == FName("Move"))          { return TEXT("Move"); }         // BM-7 (PLACEHOLDER, gate-d-wording B8): a furnishing's or a fitting's free move
 		return Verb.ToString();
 	}
 

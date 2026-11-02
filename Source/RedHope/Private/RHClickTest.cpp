@@ -900,6 +900,11 @@ namespace
 		int32 AtriumCutRails = -1, AtriumCutRailsWant = 0, AtriumCutFacing = -1, AtriumCutFacingWant = 0, AtriumCutAxis = -1;
 		bool bAtriumReloaded = false;
 		int32 AtriumReloadOpenDrawn = -1, AtriumReloadShownBelow = 0;
+		// BM-7: move.setup's two-bay Living habitat, its Bunk Bed and Window, the two bays' centres, and the uplink lag it put aside.
+		int32 MoveHab = 0, MoveBed = 0, MoveWindow = 0;
+		FVector MoveBay0Cm = FVector::ZeroVector, MoveBay1Cm = FVector::ZeroVector;
+		double MoveLag0 = 45.0;
+		int32 MoveCount0 = 0; // the furniture count before move.place
 	};
 
 	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
@@ -3417,6 +3422,159 @@ namespace
 			Report(TEXT("contrast.setup"), Sim->GetShaftCount() >= 2, FString::Printf(TEXT("%d shaft(s) (%s)"), Sim->GetShaftCount(), *Why));
 		}, 1.0f);
 		Runner.Do(TEXT("deck.contrast"), []() { CheckDeckContrast(TEXT("deck.contrast")); }, 0.2f);
+
+		// ---- BM-7 moving (docs/qa/2026-10-31/bm7-move-design.md, section 4): the Furnish palette's Move picks up a bed and puts it down
+		// in the other bay, then turns it in place; the Walls palette's Move carries a window to another outside wall. A two-bay Living
+		// habitat with a Bunk Bed and a Window is laid out by harness calls (move.setup reports only on failure, as atrium.setup does), and
+		// the uplink's lag is cut to 1 s for these steps and put back after move.fitting. Every deliberate world click counts in
+		// ExpectedWorld, as build.place's does; the deck presses, the rotate key and the intermediate clicks have no check of their own.
+		Runner.Do(TEXT("move.setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			UWorld* World = PC ? PC->GetWorld() : nullptr;
+			const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const FRHBuildingRow* HabDef = Defs ? Defs->GetBuilding(FName("HabModule")) : nullptr;
+			if (!PC || !Sim || !HabDef)
+			{
+				Report(TEXT("move.setup"), false, TEXT("no player controller, sim or Habitat row"));
+				return;
+			}
+			PC->CancelModes();
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			PC->SetSimSpeed(1.f);
+			Sim->Debug_AddStock(FName("Glass"), 200.0);
+			Sim->Debug_AddStock(FName("Shielding"), 1000.0);
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName("Lander")) { Sim->Debug_AddSolidAt(B.Id, FName("Struct"), 2000.0, false); }
+			}
+			// A two-bay habitat on the bay grid, searched outward from the colony: the first spot the sim would take, with every wall outside.
+			FString Why;
+			for (int32 Ring = 3; Ring <= 12 && T->MoveHab == 0; ++Ring)
+			{
+				for (int32 Dx = -Ring; Dx <= Ring && T->MoveHab == 0; ++Dx)
+				{
+					for (int32 Dy = -Ring; Dy <= Ring && T->MoveHab == 0; ++Dy)
+					{
+						if (FMath::Max(FMath::Abs(Dx), FMath::Abs(Dy)) != Ring)
+						{
+							continue;
+						}
+						const FVector At = URHSimWorldSubsystem::SnapToBayGrid(HabDef, FVector(Dx * 1000.0 - 500.0, Dy * 1000.0, 0.0), 2, 1);
+						if (!Sim->CanPlaceBuildingSized(FName("HabModule"), At, Why, 0, 2, 1, /*bCheckMaterials*/ false))
+						{
+							continue;
+						}
+						Sim->Debug_PlaceInstant(FName("HabModule"), At, 0, 2, 1);
+						for (const FRHBuildingInstance& B : Sim->GetBuildings()) { if (B.DefName == FName("HabModule")) { T->MoveHab = FMath::Max(T->MoveHab, B.Id); } }
+					}
+				}
+			}
+			FString R;
+			const FIntVector Bay0(0, 0, T->MoveHab), Bay1(0, 1, T->MoveHab);
+			const bool bZoned = T->MoveHab != 0 && Sim->DesignateBay(T->MoveHab, 0, FName("LivingQuarters"), R) && Sim->DesignateBay(T->MoveHab, 1, FName("LivingQuarters"), R);
+			T->MoveBay0Cm = Sim->GetCellCentreCm(Bay0);
+			T->MoveBay1Cm = Sim->GetCellCentreCm(Bay1);
+			FIntVector N0, N1;
+			const bool bWalls = bZoned && Sim->ResolveWallEdge(T->MoveBay0Cm, 2, N0) && Sim->ResolveWallEdge(T->MoveBay1Cm, 2, N1)
+				&& Sim->ClassifyWallEdge(N0) == URHSimWorldSubsystem::ERHWallEdge::Exterior && Sim->ClassifyWallEdge(N1) == URHSimWorldSubsystem::ERHWallEdge::Exterior;
+			if (!bWalls)
+			{
+				Report(TEXT("move.setup"), false, FString::Printf(TEXT("no two-bay Living habitat with outside north walls could be laid out (habitat #%d: %s)"), T->MoveHab, *Why));
+				return;
+			}
+			// The bed in the middle of bay 0 and the window in its north wall, through the uplink (1 s for these steps).
+			T->MoveLag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(1.0);
+			FRHCommand Bed; Bed.Verb = FName("Furnish"); Bed.Target = FName("BunkBed"); Bed.Level = 0; Bed.Location = T->MoveBay0Cm;
+			Bed.Value = URHSimWorldSubsystem::EncodeFurnish(0, 5, 0);
+			Sim->EnqueueCommand(Bed);
+			FRHCommand Win; Win.Verb = FName("Fit"); Win.Target = FName("Window"); Win.Level = 0; Win.Location = T->MoveBay0Cm; Win.Value = 2;
+			Sim->EnqueueCommand(Win);
+			FrameCamera(0.5 * (T->MoveBay0Cm + T->MoveBay1Cm), 0.2f);
+			PC->Debug_ShowFurnishTab();
+		}, 0.5f);
+		Runner.Push(TEXT("move.setup land"), [T](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim || T->MoveHab == 0) { return true; }
+			for (const FRHFurnitureInstance& F : Sim->GetFurniture()) { if (F.Key.Z == T->MoveHab && F.Row == FName("BunkBed")) { T->MoveBed = F.Id; } }
+			FIntVector N0;
+			Sim->ResolveWallEdge(T->MoveBay0Cm, 2, N0);
+			const FRHWallFeature* W = Sim->FindWallFeatureOnEdge(N0);
+			T->MoveWindow = W ? W->Id : 0;
+			if ((T->MoveBed == 0 || T->MoveWindow == 0) && !bLast) { return false; }
+			if (T->MoveBed == 0 || T->MoveWindow == 0)
+			{
+				Report(TEXT("move.setup"), false, FString::Printf(TEXT("the harness's Bunk Bed (#%d) or Window (#%d) never landed in habitat #%d"), T->MoveBed, T->MoveWindow, T->MoveHab));
+			}
+			return true;
+		}, 0.5f, 15.f);
+		{
+			const TSharedRef<FPress> Tool = PushPress(TEXT("move.tool"), LocateButton(TEXT("Move"), 0, true));
+			PushCheck(TEXT("move.tool"), Tool, []()
+			{
+				const ARHPlayerController* PC = GetPC();
+				return (PC && PC->IsMoveMode() && PC->GetMoveKind() == 0 && PC->GetMoveId() == 0) ? FString()
+					: FString::Printf(TEXT("Move mode %s, holding kind %d #%d (want armed, nothing held)"), (PC && PC->IsMoveMode()) ? TEXT("armed") : TEXT("NOT armed"), PC ? PC->GetMoveKind() : -1, PC ? PC->GetMoveId() : -1);
+			}, 1.f);
+			const TSharedRef<FPress> Pick = PushPress(TEXT("move.pick"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay0Cm)(OutPos); });
+			PushCheck(TEXT("move.pick"), Pick, [T]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHFurnitureInstance* F = Sim ? Sim->FindFurniture(T->MoveBed) : nullptr;
+				const FString Hint = PC ? PC->GetHintText().ToString() : FString();
+				return (PC && F && PC->GetMoveKind() == 1 && PC->GetMoveId() == T->MoveBed && Hint.Contains(TEXT("Bunk Bed")) && Hint.Contains(FString::Printf(TEXT("#%d"), T->MoveBed))) ? FString()
+					: FString::Printf(TEXT("holding kind %d #%d (want 1 #%d), the ghost's hint \"%s\""), PC ? PC->GetMoveKind() : -1, PC ? PC->GetMoveId() : -1, T->MoveBed, *Hint);
+			}, 1.f, 0.3f, true);
+			const TSharedRef<FString> Confirm = MakeShared<FString>();
+			Runner.Do(TEXT("move.place count"), [T]() { if (const URHSimWorldSubsystem* Sim = GetSim()) { T->MoveCount0 = Sim->GetFurniture().Num(); } }, 0.1f);
+			const TSharedRef<FPress> Put = PushPress(TEXT("move.place"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay1Cm)(OutPos); });
+			Runner.Do(TEXT("move.place confirm"), [Confirm]() { if (const ARHPlayerController* PC = GetPC()) { *Confirm = PC->GetConfirmText().ToString(); } }, 0.1f);
+			PushCheck(TEXT("move.place"), Put, [T, Confirm]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHFurnitureInstance* F = Sim ? Sim->FindFurniture(T->MoveBed) : nullptr;
+				const int32 Count = Sim ? Sim->GetFurniture().Num() : -1;
+				const bool bLanded = F && F->Key == FIntVector(0, 1, T->MoveHab) && F->Slot == 5 && F->Rot == 0 && Count == T->MoveCount0;
+				return (Confirm->Contains(TEXT("Move order transmitted")) && bLanded) ? FString()
+					: FString::Printf(TEXT("confirm \"%s\"; Bunk Bed #%d at (%d, %d, %d) slot %d rot %d (want bay 1 of #%d, slot 5, rot 0); %d furnishing(s), %d before"), **Confirm, T->MoveBed,
+						F ? F->Key.X : 0, F ? F->Key.Y : 0, F ? F->Key.Z : 0, F ? F->Slot : -1, F ? F->Rot : -1, T->MoveHab, Count, T->MoveCount0);
+			}, 8.f, 0.3f, true);
+			PushPress(TEXT("move.rotate pick"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay1Cm)(OutPos); });
+			PushKey(TEXT("move.rotate key"), EKeys::T);
+			const TSharedRef<FPress> Turn = PushPress(TEXT("move.rotate"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay1Cm)(OutPos); });
+			PushCheck(TEXT("move.rotate"), Turn, [T]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHFurnitureInstance* F = Sim ? Sim->FindFurniture(T->MoveBed) : nullptr;
+				return (F && F->Key == FIntVector(0, 1, T->MoveHab) && F->Slot == 5 && F->Rot == 1) ? FString()
+					: FString::Printf(TEXT("Bunk Bed #%d at slot %d rot %d (want slot 5, rot 1)"), T->MoveBed, F ? F->Slot : -1, F ? F->Rot : -1);
+			}, 8.f, 0.3f, true);
+		}
+		Runner.Do(TEXT("move.fitting tab"), []() { if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->Debug_ShowWallsTab(); } }, 0.6f);
+		{
+			PushPress(TEXT("move.fitting tool"), LocateButton(TEXT("Move"), 0, true));
+			PushPress(TEXT("move.fitting pick"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay0Cm + FVector(0.0, 400.0, 0.0))(OutPos); });
+			const TSharedRef<FPress> Wall = PushPress(TEXT("move.fitting"), [T](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(T->MoveBay1Cm + FVector(0.0, 400.0, 0.0))(OutPos); });
+			PushCheck(TEXT("move.fitting"), Wall, [T]()
+			{
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const FRHWallFeature* W = Sim ? Sim->FindWallFeature(T->MoveWindow) : nullptr;
+				FIntVector N1 = FIntVector::ZeroValue;
+				if (Sim) { Sim->ResolveWallEdge(T->MoveBay1Cm, 2, N1); }
+				return (W && W->Edge == N1 && Sim->GetWallFeatures().Num() > 0) ? FString()
+					: FString::Printf(TEXT("Window #%d stands on (%d, %d, %d) (want bay 1's north wall (%d, %d, %d))"), T->MoveWindow, W ? W->Edge.X : 0, W ? W->Edge.Y : 0, W ? W->Edge.Z : 0, N1.X, N1.Y, N1.Z);
+			}, 8.f, 0.3f, true);
+		}
+		Runner.Do(TEXT("move.done"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->SetOrderLagSeconds(T->MoveLag0); }
+			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
+		}, 0.3f);
 
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
