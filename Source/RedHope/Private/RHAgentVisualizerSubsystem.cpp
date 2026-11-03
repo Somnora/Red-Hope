@@ -102,13 +102,13 @@ namespace
 static TAutoConsoleVariable<int32> CVarRobotRouting(
 	TEXT("rh.RobotRouting"),
 	1,
-	TEXT("1 = robots are drawn walking around building footprints (synced to the sim's straight-line progress), easing in and out, and parking beside the Lander when idle (alive pass 2); 0 = drawn exactly at the sim position."),
+	TEXT("1 = robots are drawn walking around building footprints (synced to the sim's straight-line progress), easing in and out, and, when idle, waiting in a ring round their Charging Pad and inspecting nearby buildings (beside the Lander with no working pad) (alive pass 2, idle robots); 0 = drawn exactly at the sim position."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarRobotRouteLog(
 	TEXT("rh.RobotRouteLog"),
 	0,
-	TEXT("DEBUG: every 2 s, log how many robots stand inside a building footprint that is not their own trip's (drawn vs sim position), how far the drawn figure is from the sim, and how many are parked."),
+	TEXT("DEBUG: every 2 s, log how many robots stand inside a building footprint that is not their own trip's (drawn vs sim position), how far the drawn figure is from the sim, how many are parked, how many idle robots are drawn waiting at a pad, at the Lander rank and inspecting, and the median of this subsystem's own Tick time since the last line."),
 	ECVF_Default);
 
 namespace
@@ -116,6 +116,18 @@ namespace
 	constexpr float RobotClearanceCm = 90.f;  // footprint growth: the robot's body + a margin
 	constexpr float ParkAfterIdleS = 6.f;     // sim seconds idle before a robot goes to park
 	constexpr float FreeWalkCmS = 150.f;      // parking / catch-up walk speed at 1x
+	// Idle robots look busy (robot-idle-design.md, DIRECTOR ANSWER 2026-10-29: Q-A (a), Q-B (a)).
+	constexpr float InspectWaitS = 20.f;      // sim seconds a robot waits at its slot before it inspects (placeholder, director review)
+	constexpr float InspectWorkS = 6.f;       // sim seconds of Operate at the building
+	constexpr float IdleRingOutCm = 250.f;    // the first ring stands this far beyond the pad's edge and a robot's clearance
+	constexpr float IdleRingStepCm = 220.f;   // the second ring, further out
+	constexpr float InspectRadiusCm = 2000.f; // a building whose centre is this near the pad is inspected
+	constexpr float IdleArriveCm = 30.f;      // at its slot (or the building) within this
+	// Round 1 (presentation review): no figure waits at a slot this near a robot docked at the pad, so the docked (charging) robot never
+	// reads as the head of a line of waiting figures; a waiting figure whose slot a docking robot comes this near moves to another slot.
+	constexpr float IdleDockClearCm = 500.f;
+	const FName ChargePadName(TEXT("ChargePad"));
+	const FName LanderName(TEXT("Lander"));
 
 	float PathLength(const TArray<FVector>& Path)
 	{
@@ -365,6 +377,395 @@ FVector URHAgentVisualizerSubsystem::ParkSlotCm(int32 Index) const
 	return FVector(Lander.X - Half.X - 400.0, Lander.Y, 0.0);
 }
 
+void URHAgentVisualizerSubsystem::RefreshIdlePads()
+{
+	UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	const TArray<FRHBuildingInstance>& Buildings = Sim->GetBuildings();
+	// What the cache depends on: the building count, every surface pad's state (built, switched on) and which surface buildings are
+	// still sites. A change rebuilds it at once; otherwise once a second of real time.
+	uint32 Key = GetTypeHash(Buildings.Num());
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level != 0)
+		{
+			continue;
+		}
+		if (B.DefName == ChargePadName)
+		{
+			Key = HashCombine(Key, HashCombine(GetTypeHash(B.Id), (B.bUnderConstruction ? 1u : 0u) | (B.bManualOff ? 2u : 0u) | 4u));
+		}
+		else if (B.bUnderConstruction)
+		{
+			Key = HashCombine(Key, GetTypeHash(B.Id));
+		}
+	}
+	const double Now = FPlatformTime::Seconds();
+	if (Key == IdlePadsKey && Now < NextIdlePadsS)
+	{
+		return;
+	}
+	IdlePadsKey = Key;
+	NextIdlePadsS = Now + 1.0;
+	++IdlePadsSerial;
+	IdlePads.Reset();
+	const FRHBuildingInstance* Lander = Buildings.FindByPredicate([](const FRHBuildingInstance& B) { return B.DefName == LanderName && B.Level == 0; });
+	for (const FRHBuildingInstance& Pad : Buildings)
+	{
+		// The pads FindNearestChargePad docks a surface robot at: finished, switched on, on the surface.
+		if (Pad.DefName != ChargePadName || Pad.Level != 0 || Pad.bUnderConstruction || Pad.bManualOff)
+		{
+			continue;
+		}
+		FIdlePad& P = IdlePads.Add(Pad.Id);
+		const FVector2D C(Pad.LocationCm.X, Pad.LocationCm.Y);
+		const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(Defs->GetBuilding(Pad.DefName), Pad.SizeX, Pad.SizeY);
+		P.CentreCm = FVector(C.X, C.Y, 0.0);
+		P.HalfCm = (float)FMath::Max(Half.X, Half.Y);
+		P.RingCm = P.HalfCm + RobotClearanceCm + IdleRingOutCm;
+		// Slot 0 sits on the side facing the Lander and the first ring's 8 go round 45 degrees apart; the second ring's 12 go round 30
+		// degrees apart from half a step on, so its figures stand between the first ring's. A slot inside a footprint is skipped.
+		const FVector2D ToLander = Lander ? FVector2D(Lander->LocationCm.X, Lander->LocationCm.Y) - C : FVector2D(-1.0, 0.0);
+		const double A0 = ToLander.IsNearlyZero() ? PI : FMath::Atan2(ToLander.Y, ToLander.X);
+		for (int32 k = 0; k < 20; ++k)
+		{
+			const bool bFirst = k < 8;
+			const double R = bFirst ? P.RingCm : P.RingCm + IdleRingStepCm;
+			const double A = bFirst ? A0 + k * (2.0 * PI / 8.0) : A0 + (k - 8 + 0.5) * (2.0 * PI / 12.0);
+			const FVector2D At = C + FVector2D(FMath::Cos(A), FMath::Sin(A)) * R;
+			bool bOpen = true;
+			for (const FBox2D& O : Obstacles)
+			{
+				if (O.IsInside(At))
+				{
+					bOpen = false;
+					break;
+				}
+			}
+			P.Slots.Add(FVector(At.X, At.Y, 0.0));
+			P.SlotOpen.Add(bOpen);
+		}
+		// The buildings to inspect, ascending Id: finished surface buildings other than the pad whose centre is within 20 m. A figure
+		// stands at the point of the footprint's clearance box nearest the pad (beside the building, not in it); a building whose point
+		// falls inside any footprint's box (another building's, or the pad's own) is left out, and RH.IdleRobots lists it as dropped.
+		TArray<int32> Near;
+		for (int32 b = 0; b < Buildings.Num(); ++b)
+		{
+			const FRHBuildingInstance& B = Buildings[b];
+			if (B.Level == 0 && !B.bUnderConstruction && B.Id != Pad.Id && FVector::DistXY(B.LocationCm, Pad.LocationCm) <= InspectRadiusCm)
+			{
+				Near.Add(b);
+			}
+		}
+		Near.Sort([&Buildings](int32 L, int32 R) { return Buildings[L].Id < Buildings[R].Id; });
+		for (const int32 b : Near)
+		{
+			const FRHBuildingInstance& B = Buildings[b];
+			const FVector2D BC(B.LocationCm.X, B.LocationCm.Y);
+			const FVector2D BHalf = URHSimWorldSubsystem::GetFootprintHalfCm(Defs->GetBuilding(B.DefName), B.SizeX, B.SizeY)
+				+ FVector2D(RobotClearanceCm, RobotClearanceCm);
+			const FBox2D Box(BC - BHalf, BC + BHalf);
+			// (Round 1: no separate test for a box holding the pad's centre; its nearest point is then the centre itself, which lies inside
+			// the pad's own box below, so the building is dropped there with the rest.)
+			const FVector2D At(FMath::Clamp(C.X, Box.Min.X, Box.Max.X), FMath::Clamp(C.Y, Box.Min.Y, Box.Max.Y));
+			bool bClear = true;
+			for (const FBox2D& O : Obstacles)
+			{
+				if (O.IsInside(At))
+				{
+					bClear = false;
+					break;
+				}
+			}
+			if (bClear)
+			{
+				P.Inspect.Add(B.Id);
+				P.InspectAtCm.Add(FVector(At.X, At.Y, 0.0));
+				P.InspectFaceCm.Add(FVector(BC.X, BC.Y, 0.0));
+			}
+			else
+			{
+				P.InspectDropped.Add(B.Id);
+			}
+		}
+	}
+}
+
+bool URHAgentVisualizerSubsystem::FIdlePad::NearDock(int32 Slot) const
+{
+	if (!Slots.IsValidIndex(Slot))
+	{
+		return false;
+	}
+	for (const FVector& D : DockedCm)
+	{
+		if (FVector::Dist2D(D, Slots[Slot]) < IdleDockClearCm)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void URHAgentVisualizerSubsystem::GatherDocked(const FMassEntityManager& EntityManager)
+{
+	// The robots docked at a cached pad: the sim's Charge task past its drive (Phase 1, at the pad, in its queue), at the sim position where
+	// the sim stopped it (ArriveDistCm short of the pad's centre, on the side it came from). Read only; every tick, so a robot that docks or
+	// leaves moves the waiting figures at once.
+	for (TPair<int32, FIdlePad>& P : IdlePads)
+	{
+		P.Value.DockedCm.Reset();
+	}
+	if (IdlePads.Num() == 0)
+	{
+		return;
+	}
+	for (int32 i = 0; i < Tracked.Num(); ++i)
+	{
+		if (!EntityManager.IsEntityValid(Tracked[i]))
+		{
+			continue;
+		}
+		const FRHTaskFragment* Task = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
+		if (!Task || Task->TaskType != (uint8)ERHTaskType::Charge || Task->Phase == 0)
+		{
+			continue;
+		}
+		if (FIdlePad* Pad = IdlePads.Find(Task->DigDepositId))
+		{
+			Pad->DockedCm.Add(EntityManager.GetFragmentDataChecked<FTransformFragment>(Tracked[i]).GetTransform().GetLocation());
+		}
+	}
+}
+
+void URHAgentVisualizerSubsystem::ResetIdle(FRobotTrip& T)
+{
+	T.IdleTick = 0;
+	T.IdleShow = 0;
+	T.PadChoiceSerial = 0;
+	T.IdlePadId = 0;
+	T.IdleSlot = INDEX_NONE;
+	T.bRingFull = false;
+	T.IdlePhase = 0;
+	T.bAtSlot = false;
+	T.IdleWaitS = 0.0;
+	T.IdleWaitForS = 0.0;
+	T.InspectCount = 0;
+	T.InspectId = 0;
+	T.InspectS = 0.0;
+	T.bIdleFace = false;
+	T.bInspecting = false;
+}
+
+void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FVector& SimPos)
+{
+	// A figure walking to or standing at its slot (not one away inspecting: it is checked when it walks back) makes way when a robot docks
+	// within IdleDockClearCm of that slot: it chooses again at once, as if its slot were built over.
+	const auto MakesWay = [&T](const FIdlePad* Pad)
+	{
+		return Pad && T.IdleSlot != INDEX_NONE && (T.IdlePhase == 0 || T.IdlePhase == 3) && Pad->NearDock(T.IdleSlot);
+	};
+	if (T.PadChoiceSerial == IdlePadsSerial && !MakesWay(T.IdlePadId != 0 ? IdlePads.Find(T.IdlePadId) : nullptr))
+	{
+		return; // chosen against this cache already
+	}
+	T.PadChoiceSerial = IdlePadsSerial;
+	T.IdleRankCm = ParkSlotCm(i);
+	// The pad the sim would dock it at, from where its last job ended. The Lander (no working pad) is not in the cache: the rank.
+	const URHSimWorldSubsystem* Sim = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	int32 PadId = 0;
+	FVector PadCm = FVector::ZeroVector;
+	if (!Sim || !Sim->FindNearestChargePad(SimPos, PadId, PadCm, 0) || !IdlePads.Contains(PadId))
+	{
+		PadId = 0;
+	}
+	const FIdlePad* Pad = PadId != 0 ? IdlePads.Find(PadId) : nullptr;
+	if (Pad && PadId == T.IdlePadId && T.IdleSlot != INDEX_NONE && Pad->SlotOpen[T.IdleSlot] && !MakesWay(Pad))
+	{
+		// The same pad and slot: an inspection whose building is gone from the list ends, and the figure walks back.
+		if ((T.IdlePhase == 1 || T.IdlePhase == 2) && !Pad->Inspect.Contains(T.InspectId))
+		{
+			T.IdlePhase = 3;
+			T.bFree = false;
+		}
+		return;
+	}
+	// A new pad (or none), its slot built over or beside a docked robot, or a full ring last time: the lowest open slot no other waiting
+	// figure holds (one drawn idle on this tick or the last) and no docked robot stands within IdleDockClearCm of, and a first wait staggered
+	// by the robot's index so the waiting robots do not all leave together (InspectWaitS once it has inspected). When the choice really
+	// changes (another pad, or another slot) the walk there is planned afresh (bFree off), so a new slot near the last walk's goal is still
+	// reached. Round 2: the same choice again (the Lander rank again, or the same pad's ring still full: a figure in the rank meets this on
+	// every once-a-second cache rebuild) keeps its walk, so its goal, ParkSlotCm(i), is replanned only by FreeWalkTo's 100 cm rule (design
+	// point 6).
+	const int32 OldPadId = T.IdlePadId;
+	const int32 OldSlot = T.IdleSlot;
+	T.IdlePadId = PadId;
+	T.IdleSlot = INDEX_NONE;
+	T.bRingFull = false;
+	T.IdlePhase = 0;
+	T.bAtSlot = false;
+	T.IdleWaitS = 0.0;
+	T.IdleWaitForS = T.InspectCount > 0 ? (double)InspectWaitS : InspectWaitS + (double)((i * 7) % (int32)InspectWaitS);
+	if (!Pad)
+	{
+		if (OldPadId != 0 && OldSlot != INDEX_NONE)
+		{
+			T.bFree = false; // from a ring slot (or an inspection) to the rank: a new walk
+		}
+		return;
+	}
+	TArray<bool> Held;
+	Held.Init(false, Pad->Slots.Num());
+	for (int32 j = 0; j < Trips.Num(); ++j)
+	{
+		const FRobotTrip& O = Trips[j];
+		if (j != i && O.IdleTick != 0 && O.IdleTick + 1 >= TickSerial && O.IdlePadId == PadId && Held.IsValidIndex(O.IdleSlot))
+		{
+			Held[O.IdleSlot] = true;
+		}
+	}
+	for (int32 k = 0; k < Pad->Slots.Num(); ++k)
+	{
+		if (Pad->SlotOpen[k] && !Held[k] && !Pad->NearDock(k))
+		{
+			T.IdleSlot = k;
+			break;
+		}
+	}
+	T.bRingFull = T.IdleSlot == INDEX_NONE;
+	// A slot (new, or this pad again after the rank) is a new walk. A full ring again sends the figure to the rank it was already walking
+	// to, and a full ring after a slot elsewhere is a walk from that slot to the rank: new only in the second case.
+	if (T.IdleSlot != INDEX_NONE ? (PadId != OldPadId || T.IdleSlot != OldSlot) : (OldPadId != 0 && OldSlot != INDEX_NONE))
+	{
+		T.bFree = false;
+	}
+}
+
+bool URHAgentVisualizerSubsystem::GetIdleDebug(int32 Index, FIdleDebug& Out) const
+{
+	Out = FIdleDebug();
+	if (!Trips.IsValidIndex(Index))
+	{
+		return false;
+	}
+	const FRobotTrip& T = Trips[Index];
+	Out.DrawnCm = T.DrawCm;
+	Out.RankCm = ParkSlotCm(Index);
+	if (T.WalkTick != TickSerial || TickSerial == 0)
+	{
+		return true; // not drawn by AdvanceDrawn on the last tick: a rover, riding, below or on a road leg
+	}
+	Out.Show = T.IdleTick == TickSerial ? (EIdleShow)T.IdleShow : EIdleShow::Busy;
+	if (Out.Show == EIdleShow::Busy)
+	{
+		return true;
+	}
+	Out.GoalCm = T.IdleGoalCm;
+	Out.bRingFull = T.bRingFull;
+	const FIdlePad* Pad = (T.IdlePadId != 0 && T.IdleSlot != INDEX_NONE) ? IdlePads.Find(T.IdlePadId) : nullptr;
+	if (!Pad)
+	{
+		return true;
+	}
+	Out.PadId = T.IdlePadId;
+	Out.Slot = T.IdleSlot;
+	Out.bAtSlot = T.IdlePhase == 0 && T.bAtSlot;
+	Out.PadCm = Pad->CentreCm;
+	Out.PadHalfCm = Pad->HalfCm;
+	Out.ClearCm = Pad->HalfCm + RobotClearanceCm;
+	Out.RingCm = Pad->RingCm;
+	Out.SlotCm = Pad->Slots[T.IdleSlot];
+	Out.InspectId = (T.IdlePhase == 1 || T.IdlePhase == 2) ? T.InspectId : 0;
+	Out.NextInspectS = (T.IdlePhase == 0 && Pad->Inspect.Num() > 0) ? (float)FMath::Max(T.IdleWaitForS - T.IdleWaitS, 0.0) : -1.f;
+	Out.bInspecting = T.bInspecting;
+	Out.InspectLeftS = T.IdlePhase == 2 ? (float)FMath::Max(InspectWorkS - T.InspectS, 0.0) : 0.f;
+	return true;
+}
+
+void URHAgentVisualizerSubsystem::LogIdleRobots() const
+{
+	if (CVarRobotRouting.GetValueOnGameThread() == 0)
+	{
+		UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] routing off (rh.RobotRouting 0): every robot is drawn at its sim position; no ring, no inspection, no pad cache"));
+		return;
+	}
+	TArray<int32> PadIds;
+	IdlePads.GetKeys(PadIds);
+	PadIds.Sort();
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d working surface pad(s) in the cache (serial %u)"), PadIds.Num(), IdlePadsSerial);
+	for (const int32 Id : PadIds)
+	{
+		const FIdlePad& P = IdlePads.FindChecked(Id);
+		int32 Open = 0;
+		TArray<FString> NearDocked;
+		for (int32 k = 0; k < P.SlotOpen.Num(); ++k)
+		{
+			Open += P.SlotOpen[k] ? 1 : 0;
+			if (P.SlotOpen[k] && P.NearDock(k)) { NearDocked.Add(FString::FromInt(k)); }
+		}
+		TArray<FString> Names, Dropped, Docked;
+		for (const int32 B : P.Inspect) { Names.Add(FString::Printf(TEXT("#%d"), B)); }
+		for (const int32 B : P.InspectDropped) { Dropped.Add(FString::Printf(TEXT("#%d"), B)); }
+		for (const FVector& D : P.DockedCm) { Docked.Add(FString::Printf(TEXT("(%.1f, %.1f)"), D.X / 100.0, D.Y / 100.0)); }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots]   pad #%d at (%.1f, %.1f) m: rings %.0f and %.0f cm, %d of %d slot(s) open, %d robot(s) docked%s (slot(s) within %.0f cm of one: %s), %d building(s) to inspect (%s), %d in range dropped (%s)"),
+			Id, P.CentreCm.X / 100.0, P.CentreCm.Y / 100.0, P.RingCm, P.RingCm + IdleRingStepCm, Open, P.SlotOpen.Num(), P.DockedCm.Num(),
+			Docked.Num() ? *(TEXT(" at ") + FString::Join(Docked, TEXT(" ")) + TEXT(" m")) : TEXT(""), IdleDockClearCm,
+			NearDocked.Num() ? *FString::Join(NearDocked, TEXT(" ")) : TEXT("none"), P.Inspect.Num(), *FString::Join(Names, TEXT(" ")),
+			P.InspectDropped.Num(), P.InspectDropped.Num() ? *FString::Join(Dropped, TEXT(" ")) : TEXT("none"));
+	}
+	int32 Walkers = 0, Busy = 0, AtPad = 0, Rank = 0, Full = 0, Inspecting = 0;
+	for (int32 i = 0; i < Trips.Num(); ++i)
+	{
+		FIdleDebug D;
+		if (!GetIdleDebug(i, D) || D.Show == EIdleShow::NotWalker)
+		{
+			continue;
+		}
+		++Walkers;
+		const FString At = FString::Printf(TEXT("drawn at (%.1f, %.1f) m"), D.DrawnCm.X / 100.0, D.DrawnCm.Y / 100.0);
+		switch (D.Show)
+		{
+		case EIdleShow::AtPad:
+		{
+			++AtPad;
+			const FRobotTrip& T = Trips[i];
+			const TCHAR* Where = T.IdlePhase == 3 ? TEXT("walking back to it") : (D.bAtSlot ? TEXT("at it") : TEXT("walking to it"));
+			const FString Next = D.NextInspectS < 0.f
+				? FString(T.IdlePhase == 3 ? TEXT("the wait starts at the slot") : TEXT("never (nothing to inspect)"))
+				: FString::Printf(TEXT("%.0f s%s"), D.NextInspectS, D.bAtSlot ? TEXT("") : TEXT(" of waiting once there"));
+			// Facing: the figure's heading against the bearing out from the pad's centre through its slot (equal once it has turned).
+			const float Out = FMath::RadiansToDegrees(FMath::Atan2(D.SlotCm.Y - D.PadCm.Y, D.SlotCm.X - D.PadCm.X));
+			const float Facing = FacingYawDeg.IsValidIndex(i) ? FacingYawDeg[i] : 0.f;
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d waiting at pad #%d slot %d (%s, %.0f cm from its centre), %s, facing %.0f deg (outward %.0f, off by %.0f); next inspection: %s"),
+				i, D.PadId, D.Slot, Where, FVector::Dist2D(D.DrawnCm, D.PadCm), *At, Facing, Out, FMath::Abs(FMath::FindDeltaAngleDegrees(Facing, Out)), *Next);
+			break;
+		}
+		case EIdleShow::LanderRank:
+			++Rank;
+			Full += D.bRingFull ? 1 : 0;
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d Lander rank (%s), %s; next inspection: none"),
+				i, D.bRingFull ? *FString::Printf(TEXT("pad #%d's ring has no free slot clear of a docked robot"), Trips[i].IdlePadId) : TEXT("no working pad"), *At);
+			break;
+		case EIdleShow::Inspecting:
+			++Inspecting;
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d inspecting building #%d for pad #%d slot %d (%s), %s"),
+				i, D.InspectId, D.PadId, D.Slot, D.bInspecting ? *FString::Printf(TEXT("Operate, %.0f s left"), D.InspectLeftS) : TEXT("walking to it"), *At);
+			break;
+		default:
+			++Busy;
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d busy, %s"), i, *At);
+			break;
+		}
+	}
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d surface walker(s): %d busy, %d waiting at a pad, %d at the Lander rank (%d from a full ring), %d inspecting"),
+		Walkers, Busy, AtPad, Rank, Full, Inspecting);
+}
+
 bool URHAgentVisualizerSubsystem::IsRoverIndex(int32 i) const
 {
 	return RoverVis.IsValidIndex(i) && RoverVis[i].Body.IsValid();
@@ -549,6 +950,12 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 	{
 		T.IdleS += DeltaTime * Pace;
 	}
+	if (T.IdleS <= ParkAfterIdleS && T.IdleTick != 0)
+	{
+		// A job arrives (or the sim moves it): the slot is freed and the wait and any inspection end; the branches below take over
+		// from wherever the figure stands.
+		ResetIdle(T);
+	}
 	auto FreeWalkTo = [&](const FVector& Goal)
 	{
 		if (!T.bFree || FVector::Dist2D(Goal, T.FreeGoalCm) > 100.f)
@@ -669,8 +1076,97 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 	else if (T.IdleS > ParkAfterIdleS && !IsRoverIndex(i))
 	{
 		T.bTrip = false;
-		Desired = FreeWalkTo(ParkSlotCm(i));
+		// Idle robots look busy (display only): wait in the ring round the pad the sim would dock it at, facing out, and now and then
+		// inspect a building near that pad; with no working pad, or a full ring, the Lander's rank as before.
+		if (T.IdleTick == 0 || T.IdleTick + 1 < TickSerial)
+		{
+			ResetIdle(T); // a new idle spell: nothing is held from an earlier one
+		}
+		ChooseIdlePad(i, T, SimPos);
+		T.IdleTick = TickSerial;
+		T.bIdleFace = false;
+		T.bInspecting = false;
 		MaxSpeed = FreeWalkCmS * 1.5f * Pace;
+		const FIdlePad* Pad = (T.IdlePadId != 0 && T.IdleSlot != INDEX_NONE) ? IdlePads.Find(T.IdlePadId) : nullptr;
+		if (!Pad)
+		{
+			T.IdleShow = (uint8)EIdleShow::LanderRank;
+			T.IdleGoalCm = T.IdleRankCm;
+		}
+		else
+		{
+			const FVector SlotCm = Pad->Slots[T.IdleSlot];
+			const double SimDt = (double)DeltaTime * Pace;
+			// The round: wait at the slot, walk to a building, Operate there, walk back; every wait and the work are sim-paced.
+			if (T.IdlePhase == 1 && FVector::Dist2D(T.DrawCm, T.InspectAtCm) <= IdleArriveCm)
+			{
+				T.IdlePhase = 2;
+				T.InspectS = 0.0;
+			}
+			if (T.IdlePhase == 2 && T.InspectS >= InspectWorkS)
+			{
+				T.IdlePhase = 3;
+				++T.InspectCount;
+				T.bFree = false; // a new walk, planned from where it stands
+			}
+			if (T.IdlePhase == 3 && FVector::Dist2D(T.DrawCm, SlotCm) <= IdleArriveCm)
+			{
+				T.IdlePhase = 0;
+				T.bAtSlot = true;
+				T.IdleWaitS = 0.0;
+				T.IdleWaitForS = InspectWaitS;
+			}
+			if (T.IdlePhase == 0)
+			{
+				T.bAtSlot = T.bAtSlot || FVector::Dist2D(T.DrawCm, SlotCm) <= IdleArriveCm;
+				if (T.bAtSlot)
+				{
+					T.IdleWaitS += SimDt;
+					if (T.IdleWaitS >= T.IdleWaitForS && Pad->Inspect.Num() > 0)
+					{
+						// The building: keyed on the robot's index and how many it has inspected, never a random draw.
+						const int32 Pick = (i + T.InspectCount) % Pad->Inspect.Num();
+						T.IdlePhase = 1;
+						T.InspectId = Pad->Inspect[Pick];
+						T.InspectAtCm = Pad->InspectAtCm[Pick];
+						T.InspectFaceCm = Pad->InspectFaceCm[Pick];
+						T.bFree = false;
+					}
+				}
+			}
+			if (T.IdlePhase == 0)
+			{
+				T.IdleShow = (uint8)EIdleShow::AtPad;
+				T.IdleGoalCm = SlotCm;
+				if (T.bAtSlot)
+				{
+					// Facing out, away from the pad's centre.
+					T.bIdleFace = true;
+					T.IdleYawDeg = FMath::RadiansToDegrees(FMath::Atan2(SlotCm.Y - Pad->CentreCm.Y, SlotCm.X - Pad->CentreCm.X));
+				}
+			}
+			else if (T.IdlePhase == 3)
+			{
+				T.IdleShow = (uint8)EIdleShow::AtPad;
+				T.IdleGoalCm = SlotCm;
+				MaxSpeed = FreeWalkCmS * Pace;
+			}
+			else
+			{
+				T.IdleShow = (uint8)EIdleShow::Inspecting;
+				T.IdleGoalCm = T.InspectAtCm;
+				MaxSpeed = FreeWalkCmS * Pace;
+				if (T.IdlePhase == 2)
+				{
+					// At the building: face its centre and play Operate (Tick's clip choice) for InspectWorkS.
+					T.bIdleFace = true;
+					T.IdleYawDeg = FMath::RadiansToDegrees(FMath::Atan2(T.InspectFaceCm.Y - T.DrawCm.Y, T.InspectFaceCm.X - T.DrawCm.X));
+					T.bInspecting = true;
+					T.InspectS += SimDt;
+				}
+			}
+		}
+		Desired = FreeWalkTo(T.IdleGoalCm);
 	}
 	const FVector Step = FVector(Desired.X - T.DrawCm.X, Desired.Y - T.DrawCm.Y, 0.f).GetClampedToMaxSize(MaxSpeed * DeltaTime);
 	T.DrawCm = FVector(T.DrawCm.X + Step.X, T.DrawCm.Y + Step.Y, SimPos.Z);
@@ -692,6 +1188,11 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 {
 	Tracked.Reset();
 	Trips.Reset();
+	// Idle robots: the pad cache is rebuilt from the reloaded colony on the first tick (NextIdlePadsS 0 is always due), whatever it held.
+	IdlePads.Reset();
+	IdlePadsKey = 0;
+	NextIdlePadsS = 0.0;
+	RouteLogTickMs.Reset(); // round 2: a reload starts the tick timer's samples afresh
 	SimLastPosCm.Reset();
 	LastPosCm.Reset();
 	FacingYawDeg.Reset();
@@ -1118,6 +1619,8 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	{
 		return;
 	}
+	// rh.RobotRouteLog: the body's own duration, from here to the end, joins the next log line's median.
+	const double TickStartS = FPlatformTime::Seconds();
 	UMassEntitySubsystem* MassSubsystem = GetWorld()->GetSubsystem<UMassEntitySubsystem>();
 	if (!MassSubsystem)
 	{
@@ -1133,6 +1636,14 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	}
 
 	RebuildObstacles();
+	++TickSerial;
+	// Idle robots: with rh.RobotRouting 0 every figure is drawn at its sim position, so neither the pad cache nor the docked robots are kept.
+	const bool bIdleRouting = CVarRobotRouting.GetValueOnGameThread() != 0;
+	if (bIdleRouting)
+	{
+		RefreshIdlePads();
+		GatherDocked(EntityManager);
+	}
 	// D4: robots below and riding are drawn where the sim has them (the surface detour planner knows no floors); a rider is
 	// lifted along its column by the ride's progress, and riders holding for a car queue beside the column.
 	const URHSimWorldSubsystem* LiftSim = GetWorld()->GetSubsystem<URHSimWorldSubsystem>();
@@ -1151,6 +1662,7 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	int32 CabsUsed = 0;
 	const bool bRouteLog = CVarRobotRouteLog.GetValueOnGameThread() != 0 && GetWorld()->GetTimeSeconds() >= NextRouteLogS;
 	int32 LogN = 0, LogDrawnIn = 0, LogSimIn = 0, LogParked = 0;
+	int32 LogAtPad = 0, LogAtRank = 0, LogInspecting = 0; // idle robots: waiting at a pad, at the Lander rank, inspecting
 	float LogGapSum = 0.f, LogGapMax = 0.f;
 	for (int32 i = 0; i < Tracked.Num(); ++i)
 	{
@@ -1234,6 +1746,10 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		else
 		{
 			Pos = AdvanceDrawn(i, SimPos, SimSpeed, DriveTask, DeltaTime);
+			if (Trips.IsValidIndex(i) && bIdleRouting)
+			{
+				Trips[i].WalkTick = TickSerial; // a surface walker drawn by its walk on this tick (RH.IdleRobots); none with routing off
+			}
 		}
 		if (bRouteLog)
 		{
@@ -1257,6 +1773,11 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 			LogDrawnIn += Inside(Pos) ? 1 : 0;
 			LogSimIn += Inside(SimPos) ? 1 : 0;
 			LogParked += (Trips.IsValidIndex(i) && Trips[i].bFree && Trips[i].IdleS > ParkAfterIdleS) ? 1 : 0;
+			// A surface walker drawn idle on this tick (AdvanceDrawn's last branch): what it is drawn doing.
+			const uint8 Shown = (Trips.IsValidIndex(i) && Trips[i].IdleTick == TickSerial) ? Trips[i].IdleShow : 0;
+			LogAtPad += Shown == (uint8)EIdleShow::AtPad ? 1 : 0;
+			LogAtRank += Shown == (uint8)EIdleShow::LanderRank ? 1 : 0;
+			LogInspecting += Shown == (uint8)EIdleShow::Inspecting ? 1 : 0;
 			const float Gap = (float)FVector::Dist2D(Pos, SimPos);
 			LogGapSum += Gap;
 			LogGapMax = FMath::Max(LogGapMax, Gap);
@@ -1279,6 +1800,13 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 			const float TargetYaw = FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X));
 			const float Gap = FMath::Abs(FMath::FindDeltaAngleDegrees(FacingYawDeg[i], TargetYaw));
 			FacingYawDeg[i] = FMath::FixedTurn(FacingYawDeg[i], TargetYaw, FMath::Clamp(Gap * 5.f, 40.f, 420.f) * DeltaTime);
+		}
+		else if (Trips.IsValidIndex(i) && Trips[i].IdleTick == TickSerial && Trips[i].bIdleFace)
+		{
+			// Idle robots look busy: a figure standing at its slot turns to face away from its pad, one at a building to face the
+			// building, at the same turn rate (a stationary figure otherwise keeps its last facing).
+			const float IdleGap = FMath::Abs(FMath::FindDeltaAngleDegrees(FacingYawDeg[i], Trips[i].IdleYawDeg));
+			FacingYawDeg[i] = FMath::FixedTurn(FacingYawDeg[i], Trips[i].IdleYawDeg, FMath::Clamp(IdleGap * 5.f, 40.f, 420.f) * DeltaTime);
 		}
 		if (!IsRoverIndex(i) && CVarRoverTurnLog.GetValueOnGameThread() != 0 && Speed > 30.f)
 		{
@@ -1418,6 +1946,15 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 						}
 					}
 				}
+				// Idle robots look busy: a figure inspecting a building plays Operate there. The sim's task, whenever it has one, wins.
+				if (WantClip == FName("Idle") && Trips.IsValidIndex(i) && Trips[i].IdleTick == TickSerial && Trips[i].bInspecting)
+				{
+					const FRHTaskFragment* Own = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
+					if (!Own || Own->TaskType == 0)
+					{
+						WantClip = FName("Operate");
+					}
+				}
 				if (WantClip != PlayingClip[i])
 				{
 					if (UAnimSequence* Clip = LoadObject<UAnimSequence>(nullptr, *RobotClipPath(WantClip)))
@@ -1493,9 +2030,16 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	if (bRouteLog)
 	{
 		NextRouteLogS = GetWorld()->GetTimeSeconds() + 2.0;
-		UE_LOG(LogRedHope, Display, TEXT("[RobotRoute] %d robots: %d drawn inside a footprint not theirs, %d sim inside one; drawn-sim gap mean %.0f cm max %.0f cm; %d parked (routing %s)"),
+		// The median of this subsystem's own Tick durations since the last line (about 2 s of frames).
+		TArray<double> Sorted = RouteLogTickMs;
+		Sorted.Sort();
+		const int32 Mid = Sorted.Num() / 2;
+		const double MedianMs = Sorted.Num() == 0 ? 0.0 : ((Sorted.Num() % 2) ? Sorted[Mid] : 0.5 * (Sorted[Mid - 1] + Sorted[Mid]));
+		UE_LOG(LogRedHope, Display, TEXT("[RobotRoute] %d robots: %d drawn inside a footprint not theirs, %d sim inside one; drawn-sim gap mean %.0f cm max %.0f cm; %d parked (routing %s); idle: %d waiting at a pad, %d at the Lander rank, %d inspecting; tick median %.3f ms over %d frame(s)"),
 			LogN, LogDrawnIn, LogSimIn, LogN ? LogGapSum / LogN : 0.f, LogGapMax, LogParked,
-			CVarRobotRouting.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"));
+			CVarRobotRouting.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"),
+			LogAtPad, LogAtRank, LogInspecting, MedianMs, Sorted.Num());
+		RouteLogTickMs.Reset();
 	}
 	for (int32 P = 0; P < (int32)EPart::COUNT; ++P)
 	{
@@ -1503,5 +2047,13 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		{
 			Parts[P]->BatchUpdateInstancesTransforms(0, Out[P], /*bWorldSpace*/ true, /*bMarkRenderStateDirty*/ true, /*bTeleport*/ true);
 		}
+	}
+	if (CVarRobotRouteLog.GetValueOnGameThread() == 0)
+	{
+		RouteLogTickMs.Reset(); // round 2: samples from before the log was switched off never join a later line's median
+	}
+	else if (RouteLogTickMs.Num() < 4096)
+	{
+		RouteLogTickMs.Add((FPlatformTime::Seconds() - TickStartS) * 1000.0);
 	}
 }

@@ -11,6 +11,7 @@ class UInstancedStaticMeshComponent;
 class USkeletalMeshComponent;
 class UStaticMeshComponent;
 struct FRHTaskFragment;
+struct FMassEntityManager;
 
 // Scaffold presentation for sim agents: instanced meshes, transforms copied
 // from Mass fragments each frame. Deliberately dumb - it proves the seam (sim
@@ -62,6 +63,37 @@ public:
 	// D7 (QA, RH.AtriumStatus): robots drawn this frame on a floor below the view, through an atrium (0 with none).
 	int32 GetShownThroughAtrium() const { return ShownThroughAtrium; }
 	int32 GetTrackedCount() const { return Tracked.Num(); } // RH.DeepBench's line: robots the visualizer follows
+
+	// Idle robots look busy (display only; docs/qa/2026-10-28/robot-idle-brief.md). What one tracked robot was drawn doing on the last
+	// tick, for RH.IdleRobots and the click test's robots.idle: a surface walker (one AdvanceDrawn draws) busy, waiting in the ring round
+	// a Charging Pad (walking to its slot, standing at it, or walking back), standing in the Lander's rank, or inspecting a building.
+	enum class EIdleShow : uint8
+	{
+		NotWalker = 0, Busy, AtPad, LanderRank, Inspecting
+	};
+	struct FIdleDebug
+	{
+		EIdleShow Show = EIdleShow::NotWalker;
+		int32 PadId = 0;                      // the pad it waits at (0: none)
+		int32 Slot = INDEX_NONE;              // its slot in that pad's ring: 0-7 the first ring, 8-19 the second
+		bool bRingFull = false;               // its pad's ring had no open slot, so it stands in the Lander's rank
+		bool bAtSlot = false;                 // it has reached its slot (the wait before an inspection runs)
+		FVector PadCm = FVector::ZeroVector;  // the pad's centre
+		float PadHalfCm = 0.f;                // the larger half-axis of the pad's footprint
+		float ClearCm = 0.f;                  // PadHalfCm plus a robot's clearance: no waiting figure stands nearer the centre
+		float RingCm = 0.f;                   // the first ring's radius (the second is 220 cm further out)
+		FVector SlotCm = FVector::ZeroVector;
+		FVector GoalCm = FVector::ZeroVector; // where its idle walk heads on this tick
+		FVector RankCm = FVector::ZeroVector; // its slot in the Lander's rank (ParkSlotCm)
+		FVector DrawnCm = FVector::ZeroVector;
+		int32 InspectId = 0;                  // the building it is inspecting
+		float NextInspectS = -1.f;            // sim seconds of waiting at its slot before it next inspects (-1: none to inspect, or away)
+		float InspectLeftS = 0.f;             // sim seconds of Operate left at the building
+		bool bInspecting = false;             // standing at the building playing Operate
+	};
+	bool GetIdleDebug(int32 Index, FIdleDebug& Out) const;
+	// RH.IdleRobots (READ-ONLY): one line per surface walker and one per working pad in the cache.
+	void LogIdleRobots() const;
 
 private:
 	void EnsureMeshComponent();
@@ -154,7 +186,8 @@ private:
 	// detour around building footprints, at the same progress fraction, so
 	// it never cuts through a building and still arrives on time. Starts and
 	// stops are eased, turns are smoothed, and a robot left idle walks to a
-	// parking slot beside the Lander until its next task.
+	// slot in the ring round its Charging Pad (beside the Lander with no
+	// working pad) until its next task, inspecting nearby buildings meanwhile.
 	struct FRobotTrip
 	{
 		bool bInit = false;
@@ -181,10 +214,64 @@ private:
 		TArray<FVector> FreePath;
 		float FreeLenCm = 0.f;
 		float FreeDoneCm = 0.f;
+		// Idle robots look busy (display only): the pad this idle figure waits at (0: the Lander's rank) and its slot in that pad's
+		// ring, chosen from the sim position against IdlePads; the inspection round; and what Tick reads, valid only on the tick in
+		// IdleTick (a figure drawn some other way since - riding, below, on a road leg - holds nothing).
+		uint32 WalkTick = 0;                        // the last tick AdvanceDrawn drew it (a surface walker)
+		uint32 IdleTick = 0;                        // the last tick it was drawn idle
+		uint8 IdleShow = 0;                         // EIdleShow on that tick
+		uint32 PadChoiceSerial = 0;                 // the pad cache (IdlePadsSerial) it last chose against
+		int32 IdlePadId = 0;
+		int32 IdleSlot = INDEX_NONE;
+		bool bRingFull = false;
+		FVector IdleRankCm = FVector::ZeroVector;   // ParkSlotCm, chosen with the pad
+		FVector IdleGoalCm = FVector::ZeroVector;   // where its idle walk heads
+		uint8 IdlePhase = 0;                        // 0 to or at its slot, 1 walking to a building, 2 at the building, 3 walking back
+		bool bAtSlot = false;
+		double IdleWaitS = 0.0;                     // sim-paced seconds stood at its slot
+		double IdleWaitForS = 0.0;                  // the wait before its next inspection
+		int32 InspectCount = 0;                     // inspections since it went idle
+		int32 InspectId = 0;
+		FVector InspectAtCm = FVector::ZeroVector;  // where it stands to inspect
+		FVector InspectFaceCm = FVector::ZeroVector; // the building's centre, which it faces
+		double InspectS = 0.0;                      // sim-paced seconds of Operate so far
+		bool bIdleFace = false;                     // standing at its slot or the building: Tick turns it to IdleYawDeg
+		float IdleYawDeg = 0.f;
+		bool bInspecting = false;                   // at the building: Tick plays Operate
 	};
 	TArray<FRobotTrip> Trips;
+	uint32 TickSerial = 0; // this subsystem's ticks: what a figure was drawn doing on the last one
+	// Idle robots look busy: the working surface Charging Pads (the ones FindNearestChargePad docks at), each with its ring of 20 waiting
+	// slots and the buildings near it to inspect. Rebuilt once a second of real time, or at once when the building count, a surface pad's
+	// state or the set of surface sites changes; a rebuild bumps IdlePadsSerial and every waiting figure chooses its pad again.
+	struct FIdlePad
+	{
+		FVector CentreCm = FVector::ZeroVector;
+		float HalfCm = 0.f;
+		float RingCm = 0.f;
+		TArray<FVector> Slots;         // the first ring's 8, then the second ring's 12
+		TArray<bool> SlotOpen;         // false: inside a footprint, skipped
+		TArray<int32> Inspect;         // the buildings near it, ascending Id
+		TArray<FVector> InspectAtCm;   // where a figure stands to inspect each
+		TArray<FVector> InspectFaceCm; // each one's centre
+		TArray<int32> InspectDropped;  // in range, but left out: the point beside it falls inside a footprint's box (RH.IdleRobots)
+		// Where the robots docked at this pad stand (the sim's Charge task, docked: its sim position), refreshed every tick: no figure waits
+		// at a slot within IdleDockClearCm of one, so a waiting figure never stands in line behind the charging robot.
+		TArray<FVector> DockedCm;
+		bool NearDock(int32 Slot) const;
+	};
+	TMap<int32, FIdlePad> IdlePads;
+	uint32 IdlePadsKey = 0;
+	uint32 IdlePadsSerial = 0;
+	double NextIdlePadsS = 0.0;
+	void RefreshIdlePads();
+	void GatherDocked(const FMassEntityManager& EntityManager);
+	void ChooseIdlePad(int32 i, FRobotTrip& T, const FVector& SimPos);
+	static void ResetIdle(FRobotTrip& T);
 	TArray<FVector> SimLastPosCm; // the sim's position last frame (its own speed)
 	double NextRouteLogS = 0.0;   // rh.RobotRouteLog's next report
+	// Idle robots (gate tool): this subsystem's own Tick durations (ms) since the last rh.RobotRouteLog line, for that line's median.
+	TArray<double> RouteLogTickMs;
 	// Surface building footprints (expanded by a robot's clearance), rebuilt
 	// each tick; robots route around them.
 	TArray<FBox2D> Obstacles;
@@ -194,7 +281,7 @@ private:
 	// the trip's own building and are walked into. Straight when clear.
 	void PlanRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPath) const;
 	bool SegmentBlocked(const FVector2D& A, const FVector2D& B, const TArray<int32>& Candidates) const;
-	// The Nth parking slot beside the Lander (clear of footprints).
+	// The Nth parking slot beside the Lander (clear of footprints): the Lander's rank, for an idle robot with no working pad.
 	FVector ParkSlotCm(int32 Index) const;
 	// The figure's drawn position this frame (advances its trip state).
 	FVector AdvanceDrawn(int32 i, const FVector& SimPosCm, float SimSpeedCmS, const FRHTaskFragment* Task, float DeltaTime);

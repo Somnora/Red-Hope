@@ -20,6 +20,7 @@
 #include "RedHope.h"
 #include "RHPlayerController.h"
 #include "RHStrategyPawn.h"
+#include "RHAgentVisualizerSubsystem.h"
 #include "RHCavernVisualizerSubsystem.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHCommandDeck.h"
@@ -905,6 +906,43 @@ namespace
 		FVector MoveBay0Cm = FVector::ZeroVector, MoveBay1Cm = FVector::ZeroVector;
 		double MoveLag0 = 45.0;
 		int32 MoveCount0 = 0; // the furniture count before move.place
+		// Idle robots: the Charging Pad robots.idle setup places and the distances the test works out for it ON ITS OWN, from the placed
+		// pad's footprint and the brief's numbers (R1 = PadHalf + 90 + 250, the floor PadHalf + 90), never from the visualizer; the robot
+		// it watches and its trail, to tell when it stands still; every figure at the pad, for the floor (below); and what each part of the
+		// step saw (Why: what went wrong).
+		int32 IdlePad = 0;
+		FVector IdlePadCm = FVector::ZeroVector;
+		FVector2D IdlePadBoxCm = FVector2D::ZeroVector; // the pad's footprint half-axes plus 90: its clearance box, as the test works it out
+		double IdlePadHalfCm = 0.0, IdleR1Cm = 0.0, IdleFloorCm = 0.0;
+		double IdleSim0 = 0.0;                      // the sim clock when the step began (for a timeout's line)
+		int32 IdleRobot = INDEX_NONE;
+		double IdleFirstCm = 0.0;                   // where the watched figure was first seen waiting at the pad
+		TArray<TPair<double, FVector>> IdleTrail;   // (wall s, drawn) for the last 2 s
+		double IdleWatch0 = 0.0;                    // the sim clock when the watched figure stood still
+		int32 IdleInspected = 0;                    // the building the watched figure went to inspect during the watch (0: none)
+		// Round 2: the floor holds for EVERY figure drawn waiting at or inspecting for the harness's pad, polled every frame through the wait and
+		// the watch from its first sighting outside the pad's clearance box (one first seen inside it is walking off the pad: not tracked until
+		// it has been seen away from the pad). A leg runs from where a figure was when its goal was set to that goal; a leg whose straight line
+		// passes inside the floor had to go round the pad, and at least one such leg must be walked to its end while tracked, or the floor
+		// was not exercised and the step fails.
+		struct FIdleFig
+		{
+			bool bTracked = false;
+			FVector LastCm = FVector::ZeroVector;    // drawn on the last poll: the segment since is measured, not just the point
+			FVector GoalCm = FVector::ZeroVector;    // its leg's goal
+			FVector LegFromCm = FVector::ZeroVector; // where the leg began (first sight, or where it stood when its goal changed)
+			double NearestCm = 1.0e9;                // nearest the pad's centre since its first sighting
+			double LegNearestCm = 1.0e9;             // on this leg
+			double LegLineCm = 1.0e9;                // the leg's straight line, at its nearest the pad's centre
+			bool bLegDone = false;                   // the leg was walked to its goal while tracked
+		};
+		TMap<int32, FIdleFig> IdleFigs;
+		TSet<int32> IdleOnPad;                      // seen first inside the pad's clearance box on this sighting (walking off it)
+		double IdleAllNearestCm = 1.0e9;
+		int32 IdleAllNearestRobot = INDEX_NONE;
+		int32 IdleLegs = 0, IdleRoundLegs = 0, IdleRoundCut = 0, IdleLongGaps = 0;
+		FString IdleRoundSaid;                      // the first leg round the pad walked to its end
+		FString IdleWhy, IdleSaid, IdleWatchSaid;
 	};
 
 	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
@@ -3574,6 +3612,475 @@ namespace
 		{
 			if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->SetOrderLagSeconds(T->MoveLag0); }
 			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
+		}, 0.3f);
+
+		// ---- idle robots look busy (docs/qa/2026-10-28/robot-idle-brief.md, section 3). The scene has no Charging Pad, so robots.idle setup
+		// places one by harness call (Debug_PlaceInstant, as move.setup lays out its habitat: no world click) at the first spot outward from the
+		// Lander where the sim takes a pad AND whose band (below) is clear of every robot's Lander rank slot by 100 cm, so a figure standing in
+		// the rank can never pass for one in the ring. It holds the fleet, so robots finish their tasks and claim nothing new. The test works out
+		// R1 = PadHalf + RobotClearanceCm (90) + 250 and the floor PadHalf + 90 itself, PadHalf being the larger half-axis of the placed pad's
+		// footprint (URHSimWorldSubsystem::GetFootprintHalfCm on the ChargePad row at the pad's size), and measures every distance from the
+		// sim's pad location. Then, at 3x and bounded: the lowest-index surface robot drawn waiting at the new pad is watched: once its figure
+		// stands still (every position polled in the last 1.5 s, one of them a second old or more, within 5 cm) it must stand within
+		// [R1 - 60, R1 + 280] cm of the centre and over 100 cm from its own Lander rank slot, and the visualizer's own ring must be R1. The watch
+		// then follows it through one inspection round where one comes in time. Round 2: the floor holds for EVERY figure drawn waiting at or
+		// inspecting for the pad, polled every frame from its first sighting outside the pad's clearance box through the wait and the watch, and
+		// at least one leg whose straight line passes inside the floor (a walk that must go round the pad) must be walked to its end while
+		// tracked, or the step fails with 'floor not exercised'. The pad is selected with Debug_SelectBuilding (not a world click) and the deck's
+		// Switch OFF pressed (HandlePowerToggle, no uplink lag): the watched robot's goal must become its Lander rank slot (ParkSlotCm); Switch ON
+		// must make its ring slot its goal again. Every part reports into the one robots.idle line; the fleet is released, the pad left switched
+		// on and the speed put back at the end. Bounds (wall time): wait 50 s, watch 45 s, each goal check 15 s.
+		Runner.Do(TEXT("robots.idle setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const URHAgentVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+			const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			const FRHBuildingRow* PadRow = Defs ? Defs->GetBuilding(FName("ChargePad")) : nullptr;
+			if (!PC || !Sim || !Viz || !PadRow)
+			{
+				T->IdleWhy += TEXT(" no player controller, sim, agent visualizer or ChargePad row;");
+				return;
+			}
+			T->IdleSim0 = Clock ? Clock->GetSimSecondsTotal() : 0.0;
+			PC->CancelModes();
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			FVector Lander = FVector::ZeroVector;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName("Lander")) { Lander = FVector(B.LocationCm.X, B.LocationCm.Y, 0.0); break; }
+			}
+			// Every tracked robot's Lander rank slot, as the rank stands now (a pad 920 cm or more from each leaves the rank where it is).
+			TArray<FVector> Rank;
+			for (int32 i = 0; i < Viz->GetTrackedCount(); ++i)
+			{
+				URHAgentVisualizerSubsystem::FIdleDebug D;
+				if (Viz->GetIdleDebug(i, D)) { Rank.Add(D.RankCm); }
+			}
+			const FVector2D RowHalf = URHSimWorldSubsystem::GetFootprintHalfCm(PadRow, 1, 1);
+			const double KeepCm = FMath::Max(RowHalf.X, RowHalf.Y) + 90.0 + 250.0 + 280.0 + 100.0;
+			FString Why;
+			bool bSpot = false;
+			for (int32 Ring = 1; Ring <= 8 && !bSpot; ++Ring)
+			{
+				for (int32 Dx = -Ring; Dx <= Ring && !bSpot; ++Dx)
+				{
+					for (int32 Dy = -Ring; Dy <= Ring && !bSpot; ++Dy)
+					{
+						if (FMath::Max(FMath::Abs(Dx), FMath::Abs(Dy)) != Ring)
+						{
+							continue;
+						}
+						const FVector At = Lander + FVector(Dx * 1000.0, Dy * 1000.0, 0.0);
+						bool bClearOfRank = true;
+						for (const FVector& R : Rank)
+						{
+							bClearOfRank = bClearOfRank && FVector::Dist2D(At, R) >= KeepCm;
+						}
+						if (bClearOfRank && Sim->CanPlaceBuildingSized(FName("ChargePad"), At, Why, 0, 1, 1, /*bCheckMaterials*/ false))
+						{
+							T->IdlePadCm = At;
+							bSpot = true;
+						}
+					}
+				}
+			}
+			if (!bSpot)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" no spot near the Lander takes a Charging Pad %.0f cm clear of the Lander rank (%s);"), KeepCm, *Why);
+				return;
+			}
+			Sim->Debug_PlaceInstant(FName("ChargePad"), T->IdlePadCm, 0);
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName("ChargePad") && FVector::DistXY(B.LocationCm, T->IdlePadCm) < 1.0)
+				{
+					T->IdlePad = B.Id;
+					T->IdlePadCm = FVector(B.LocationCm.X, B.LocationCm.Y, 0.0);
+					const FVector2D Half = URHSimWorldSubsystem::GetFootprintHalfCm(PadRow, B.SizeX, B.SizeY);
+					T->IdlePadHalfCm = FMath::Max(Half.X, Half.Y);
+					T->IdlePadBoxCm = Half + FVector2D(90.0, 90.0);
+				}
+			}
+			if (T->IdlePad == 0)
+			{
+				T->IdleWhy += TEXT(" the harness's Charging Pad was not placed;");
+				return;
+			}
+			T->IdleR1Cm = T->IdlePadHalfCm + 90.0 + 250.0;
+			T->IdleFloorCm = T->IdlePadHalfCm + 90.0;
+			Sim->SetFleetHold(true);
+			PC->SetSimSpeed(3.f);
+			FrameCamera(T->IdlePadCm, 0.2f);
+		}, 0.5f);
+		// Round 2: one poll of EVERY figure drawn waiting at or inspecting for the harness's pad (every frame through the wait and the watch). The
+		// floor is measured on the segment from a figure's last polled position to this one (a segment over 200 cm, after a long frame, counts
+		// its end point only, so a hitch never fails a correct walk); each leg's straight line from where it began to its goal says whether it
+		// had to go round the pad, and a leg is walked when the figure comes within 50 cm of its goal while tracked.
+		const auto IdleTrackAll = [T]()
+		{
+			UWorld* W = FindGameWorld();
+			const URHAgentVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+			if (!Viz || T->IdlePad == 0)
+			{
+				return;
+			}
+			const FVector C = T->IdlePadCm;
+			const auto LineCm = [&C](const FVector& A, const FVector& B) { return (double)FMath::PointDistToSegment(C, A, B); };
+			const auto CloseLeg = [T](FTest::FIdleFig& F)
+			{
+				T->IdleRoundCut += (F.LegLineCm < T->IdleFloorCm && !F.bLegDone) ? 1 : 0;
+			};
+			for (int32 i = 0; i < Viz->GetTrackedCount(); ++i)
+			{
+				URHAgentVisualizerSubsystem::FIdleDebug D;
+				const bool bHere = Viz->GetIdleDebug(i, D) && D.PadId == T->IdlePad
+					&& (D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad || D.Show == URHAgentVisualizerSubsystem::EIdleShow::Inspecting);
+				FTest::FIdleFig* F = T->IdleFigs.Find(i);
+				if (!bHere)
+				{
+					if (F && F->bTracked)
+					{
+						CloseLeg(*F);
+						F->bTracked = false;
+					}
+					T->IdleOnPad.Remove(i);
+					continue;
+				}
+				const FVector P(D.DrawnCm.X, D.DrawnCm.Y, 0.0);
+				const double Dist = FVector::Dist2D(P, C);
+				bool bNewLeg = false;
+				if (!F || !F->bTracked)
+				{
+					if (T->IdleOnPad.Contains(i))
+					{
+						continue;
+					}
+					if (FMath::Abs(P.X - C.X) < T->IdlePadBoxCm.X && FMath::Abs(P.Y - C.Y) < T->IdlePadBoxCm.Y)
+					{
+						T->IdleOnPad.Add(i); // walking off the pad (it stood on it when it went idle): not a figure coming to the ring
+						continue;
+					}
+					if (!F)
+					{
+						F = &T->IdleFigs.Add(i);
+					}
+					F->bTracked = true;
+					F->LastCm = P;
+					F->NearestCm = FMath::Min(F->NearestCm, Dist);
+					bNewLeg = true;
+				}
+				else
+				{
+					const double Seg = FVector::Dist2D(F->LastCm, P);
+					const double Near = Seg <= 200.0 ? LineCm(F->LastCm, P) : Dist;
+					T->IdleLongGaps += Seg > 200.0 ? 1 : 0;
+					F->NearestCm = FMath::Min(F->NearestCm, Near);
+					F->LegNearestCm = FMath::Min(F->LegNearestCm, Near);
+					F->LastCm = P;
+					if (FVector::Dist2D(FVector(D.GoalCm.X, D.GoalCm.Y, 0.0), F->GoalCm) > 1.0)
+					{
+						CloseLeg(*F);
+						bNewLeg = true;
+					}
+				}
+				if (bNewLeg)
+				{
+					F->GoalCm = FVector(D.GoalCm.X, D.GoalCm.Y, 0.0);
+					F->LegFromCm = P;
+					F->LegLineCm = LineCm(P, F->GoalCm);
+					F->LegNearestCm = Dist;
+					F->bLegDone = false;
+					++T->IdleLegs;
+					UE_LOG(LogRedHope, Display, TEXT("RHClickTest: robots.idle leg %d: robot %d (%s, slot %d) from (%.1f, %.1f) m, %.0f cm from the pad's centre, to (%.1f, %.1f) m; its straight line passes %.0f cm from the centre (%s)"),
+						T->IdleLegs, i, D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad ? TEXT("waiting") : TEXT("inspecting"), D.Slot, P.X / 100.0, P.Y / 100.0, Dist,
+						F->GoalCm.X / 100.0, F->GoalCm.Y / 100.0, F->LegLineCm, F->LegLineCm < T->IdleFloorCm ? TEXT("inside the floor: it must go round the pad") : TEXT("clear of the floor"));
+				}
+				if (!F->bLegDone && FVector::Dist2D(P, F->GoalCm) <= 50.0)
+				{
+					F->bLegDone = true;
+					const bool bRound = F->LegLineCm < T->IdleFloorCm;
+					if (bRound)
+					{
+						++T->IdleRoundLegs;
+						if (T->IdleRoundSaid.IsEmpty())
+						{
+							T->IdleRoundSaid = FString::Printf(TEXT("robot %d from (%.1f, %.1f) to (%.1f, %.1f) m, straight line %.0f cm from the centre, walked round it no nearer than %.0f cm"),
+								i, F->LegFromCm.X / 100.0, F->LegFromCm.Y / 100.0, F->GoalCm.X / 100.0, F->GoalCm.Y / 100.0, F->LegLineCm, F->LegNearestCm);
+						}
+					}
+					UE_LOG(LogRedHope, Display, TEXT("RHClickTest: robots.idle leg: robot %d reached (%.1f, %.1f) m%s, nearest the pad's centre on the leg %.0f cm"),
+						i, F->GoalCm.X / 100.0, F->GoalCm.Y / 100.0, bRound ? TEXT(" round the pad") : TEXT(""), F->LegNearestCm);
+				}
+				if (F->NearestCm < T->IdleAllNearestCm)
+				{
+					T->IdleAllNearestCm = F->NearestCm;
+					T->IdleAllNearestRobot = i;
+				}
+			}
+		};
+		// What the step has had when a bounded wait ends: sim seconds since setup, frames, the longest frame.
+		const auto IdlePaced = [T]()
+		{
+			UWorld* W = FindGameWorld();
+			const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			return FString::Printf(TEXT(" [%.1f sim s since setup, waited %llu frames, longest frame %.0f ms]"),
+				Clock ? Clock->GetSimSecondsTotal() - T->IdleSim0 : -1.0, FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs());
+		};
+		Runner.Push(TEXT("robots.idle wait"), [T, IdleTrackAll, IdlePaced](double, bool bLast)
+		{
+			UWorld* W = FindGameWorld();
+			const URHAgentVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+			if (!Viz || T->IdlePad == 0)
+			{
+				T->IdleWhy += Viz ? TEXT("") : TEXT(" no agent visualizer;");
+				return true;
+			}
+			IdleTrackAll();
+			const double Now = FPlatformTime::Seconds();
+			if (T->IdleRobot == INDEX_NONE)
+			{
+				// The lowest-index robot drawn waiting at the harness's pad (walking to its slot or standing at it), tracked from a first sighting
+				// outside the pad's clearance box.
+				for (int32 i = 0; i < Viz->GetTrackedCount() && T->IdleRobot == INDEX_NONE; ++i)
+				{
+					URHAgentVisualizerSubsystem::FIdleDebug D;
+					const FTest::FIdleFig* F = T->IdleFigs.Find(i);
+					if (F && F->bTracked && Viz->GetIdleDebug(i, D) && D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad && D.PadId == T->IdlePad)
+					{
+						T->IdleRobot = i;
+						T->IdleFirstCm = FVector::Dist2D(F->LegFromCm, T->IdlePadCm);
+						T->IdleTrail.Reset();
+					}
+				}
+				if (T->IdleRobot == INDEX_NONE)
+				{
+					if (bLast)
+					{
+						T->IdleWhy += FString::Printf(TEXT(" no surface robot was drawn waiting at pad #%d within the wait (%d first seen inside its clearance box)%s;"),
+							T->IdlePad, T->IdleOnPad.Num(), *IdlePaced());
+					}
+					return bLast;
+				}
+			}
+			URHAgentVisualizerSubsystem::FIdleDebug D;
+			Viz->GetIdleDebug(T->IdleRobot, D);
+			if (D.Show != URHAgentVisualizerSubsystem::EIdleShow::AtPad || D.PadId != T->IdlePad)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" robot %d stopped being drawn waiting at pad #%d (shown %d at pad #%d) before it stood still, %.0f cm from the pad's centre%s;"),
+					T->IdleRobot, T->IdlePad, (int32)D.Show, D.PadId, FVector::Dist2D(D.DrawnCm, T->IdlePadCm), *IdlePaced());
+				return true;
+			}
+			// Standing still: under 5 cm from every position polled in the last 1.5 s, one of them polled at least a second ago.
+			T->IdleTrail.Add(TPair<double, FVector>(Now, D.DrawnCm));
+			T->IdleTrail.RemoveAll([Now](const TPair<double, FVector>& E) { return E.Key < Now - 2.0; });
+			bool bOld = false, bStill = true;
+			for (const TPair<double, FVector>& E : T->IdleTrail)
+			{
+				if (E.Key < Now - 1.5)
+				{
+					continue;
+				}
+				const bool bNear = FVector::Dist2D(E.Value, D.DrawnCm) < 5.0;
+				bStill = bStill && bNear;
+				bOld = bOld || (bNear && E.Key <= Now - 1.0);
+			}
+			if (!(bOld && bStill))
+			{
+				if (bLast)
+				{
+					T->IdleWhy += FString::Printf(TEXT(" robot %d never stood still at pad #%d within the wait (last drawn %.0f cm from the centre, slot %d)%s;"),
+						T->IdleRobot, T->IdlePad, FVector::Dist2D(D.DrawnCm, T->IdlePadCm), D.Slot, *IdlePaced());
+				}
+				return bLast;
+			}
+			// It stands still: the test's own band and rank margin, and the visualizer's ring against the test's R1 (the floor is judged for
+			// every figure at the end of the watch).
+			const double Dist = FVector::Dist2D(D.DrawnCm, T->IdlePadCm);
+			const double Lo = T->IdleR1Cm - 60.0, Hi = T->IdleR1Cm + 220.0 + 60.0;
+			const double FromRank = FVector::Dist2D(D.DrawnCm, D.RankCm);
+			const FTest::FIdleFig* F = T->IdleFigs.Find(T->IdleRobot);
+			T->IdleSaid = FString::Printf(TEXT("pad #%d at (%.1f, %.1f) m, PadHalf %.0f cm: R1 %.0f, band %.0f-%.0f, floor %.0f cm (the test's own); robot %d first seen waiting there %.0f cm from its centre, stood still at %.0f cm (slot %d; the visualizer's ring %.0f cm), %.0f cm from its Lander rank slot, nearest on the way %.0f cm"),
+				T->IdlePad, T->IdlePadCm.X / 100.0, T->IdlePadCm.Y / 100.0, T->IdlePadHalfCm, T->IdleR1Cm, Lo, Hi, T->IdleFloorCm, T->IdleRobot, T->IdleFirstCm, Dist, D.Slot, D.RingCm, FromRank,
+				F ? F->NearestCm : -1.0);
+			if (FMath::Abs((double)D.RingCm - T->IdleR1Cm) > 1.0)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" the visualizer's first ring is %.0f cm, not R1 %.0f cm;"), D.RingCm, T->IdleR1Cm);
+			}
+			if (Dist < Lo || Dist > Hi)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" robot %d stands %.0f cm from the pad's centre, outside %.0f-%.0f cm;"), T->IdleRobot, Dist, Lo, Hi);
+			}
+			if (FromRank <= 100.0)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" robot %d stands %.0f cm from its Lander rank slot (over 100 wanted);"), T->IdleRobot, FromRank);
+			}
+			UWorld* CW = FindGameWorld();
+			const URHSimClockSubsystem* Clock = CW ? CW->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			T->IdleWatch0 = Clock ? Clock->GetSimSecondsTotal() : 0.0;
+			return true;
+		}, 0.2f, 50.f);
+		Runner.Push(TEXT("robots.idle watch"), [T, IdleTrackAll](double Elapsed, bool bLast)
+		{
+			// The same figure on, through its wait at the slot and one inspection round (to a building and back) where one comes within the
+			// watch; and every figure at the pad, until a leg round the pad has been walked to its end and none is under way. A task (fleet
+			// held: a charge) ends the watched figure's part; the Lander rank or another pad while the pad is on fails it.
+			UWorld* W = FindGameWorld();
+			const URHAgentVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+			const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Viz || T->IdleRobot == INDEX_NONE || !T->IdleWhy.IsEmpty())
+			{
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); }
+				return true; // the wait already said why
+			}
+			IdleTrackAll();
+			URHAgentVisualizerSubsystem::FIdleDebug D;
+			Viz->GetIdleDebug(T->IdleRobot, D);
+			const double SimS = Clock ? Clock->GetSimSecondsTotal() - T->IdleWatch0 : 0.0;
+			if (T->IdleWatchSaid.IsEmpty())
+			{
+				const bool bRound = D.PadId == T->IdlePad
+					&& (D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad || D.Show == URHAgentVisualizerSubsystem::EIdleShow::Inspecting);
+				if (!bRound)
+				{
+					if (D.Show == URHAgentVisualizerSubsystem::EIdleShow::Busy)
+					{
+						T->IdleWatchSaid = FString::Printf(TEXT("robot %d watched %.0f sim s at the pad until it was given a task (its watch ends there)"), T->IdleRobot, SimS);
+					}
+					else
+					{
+						T->IdleWatchSaid = FString::Printf(TEXT("robot %d watched %.0f sim s at the pad"), T->IdleRobot, SimS);
+						T->IdleWhy += FString::Printf(TEXT(" robot %d left pad #%d's ring during the watch with the pad %s: shown %s at pad #%d;"), T->IdleRobot, T->IdlePad,
+							(Sim && Sim->IsManualOff(T->IdlePad)) ? TEXT("off") : TEXT("on"),
+							D.Show == URHAgentVisualizerSubsystem::EIdleShow::LanderRank ? TEXT("at the Lander rank") : *FString::Printf(TEXT("%d"), (int32)D.Show), D.PadId);
+					}
+				}
+				else
+				{
+					if (D.Show == URHAgentVisualizerSubsystem::EIdleShow::Inspecting && T->IdleInspected == 0)
+					{
+						T->IdleInspected = D.InspectId;
+					}
+					if (T->IdleInspected != 0 && D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad && D.bAtSlot)
+					{
+						T->IdleWatchSaid = FString::Printf(TEXT("robot %d watched %.0f sim s: its wait, building #%d inspected and back at slot %d"), T->IdleRobot, SimS, T->IdleInspected, D.Slot);
+					}
+					else if (T->IdleInspected == 0 && D.bAtSlot && D.NextInspectS < 0.f && Elapsed >= 2.0)
+					{
+						T->IdleWatchSaid = FString::Printf(TEXT("robot %d watched %.0f sim s at its slot (nothing near the pad to inspect)"), T->IdleRobot, SimS);
+					}
+				}
+			}
+			bool bRoundOpen = false;
+			for (const TPair<int32, FTest::FIdleFig>& E : T->IdleFigs)
+			{
+				bRoundOpen = bRoundOpen || (E.Value.bTracked && !E.Value.bLegDone && E.Value.LegLineCm < T->IdleFloorCm);
+			}
+			if (!bLast && !(T->IdleWatchSaid.Len() > 0 && T->IdleRoundLegs > 0 && !bRoundOpen))
+			{
+				return false;
+			}
+			if (T->IdleWatchSaid.IsEmpty())
+			{
+				T->IdleWatchSaid = FString::Printf(TEXT("robot %d watched %.0f sim s (%s when the watch ended)"), T->IdleRobot, SimS,
+					T->IdleInspected != 0 ? *FString::Printf(TEXT("still on its round to building #%d"), T->IdleInspected) : TEXT("no inspection had begun"));
+			}
+			if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); }
+			if (T->IdleAllNearestCm < T->IdleFloorCm)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" robot %d came %.0f cm from the pad's centre (never under the floor, %.0f cm, for any figure at the pad);"),
+					T->IdleAllNearestRobot, T->IdleAllNearestCm, T->IdleFloorCm);
+			}
+			if (T->IdleRoundLegs == 0)
+			{
+				T->IdleWhy += FString::Printf(TEXT(" floor not exercised: of %d leg(s) tracked, none whose straight line passes inside %.0f cm of the centre was walked to its end (%d such leg(s) cut short, %s);"),
+					T->IdleLegs, T->IdleFloorCm, T->IdleRoundCut, bRoundOpen ? TEXT("one still under way when the watch ended") : TEXT("none under way"));
+			}
+			T->IdleSaid += FString::Printf(TEXT("; %s; the floor over every figure at the pad: %d tracked, %d leg(s), %d round the pad walked to the end (first: %s), nearest %.0f cm (robot %d)%s"),
+				*T->IdleWatchSaid, T->IdleFigs.Num(), T->IdleLegs, T->IdleRoundLegs, T->IdleRoundSaid.IsEmpty() ? TEXT("none") : *T->IdleRoundSaid, T->IdleAllNearestCm, T->IdleAllNearestRobot,
+				T->IdleLongGaps > 0 ? *FString::Printf(TEXT(" (%d poll(s) over 200 cm apart judged by their end point)"), T->IdleLongGaps) : TEXT(""));
+			return true;
+		}, 0.2f, 45.f);
+		Runner.Do(TEXT("robots.idle select"), [T]()
+		{
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->Debug_SelectBuilding(T->IdlePad);
+				FrameCamera(T->IdlePadCm, 0.2f);
+			}
+		}, 0.8f);
+		{
+			// The goal check after each press: the pad's switch, then the watched robot's goal (rank slot when off, its ring slot when on).
+			const auto GoalCheck = [T](const TSharedRef<FPress>& Press, bool bOff, const TCHAR* Label)
+			{
+				return [T, Press, bOff, Label](double, bool bLast)
+				{
+					UWorld* W = FindGameWorld();
+					const URHAgentVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr;
+					const URHSimWorldSubsystem* Sim = GetSim();
+					const ARHPlayerController* PC = GetPC();
+					if (!Press->bFound)
+					{
+						T->IdleWhy += FString::Printf(TEXT(" %s was not found on the pad's card;"), Label);
+						return true;
+					}
+					if (T->IdleRobot == INDEX_NONE || !Viz || !Sim)
+					{
+						return true; // the wait already said why
+					}
+					URHAgentVisualizerSubsystem::FIdleDebug D;
+					Viz->GetIdleDebug(T->IdleRobot, D);
+					const bool bSwitched = Sim->IsManualOff(T->IdlePad) == bOff;
+					const bool bGoal = bOff
+						? (D.Show == URHAgentVisualizerSubsystem::EIdleShow::LanderRank && FVector::Dist2D(D.GoalCm, D.RankCm) < 1.0)
+						: (D.Show == URHAgentVisualizerSubsystem::EIdleShow::AtPad && D.PadId == T->IdlePad && FVector::Dist2D(D.GoalCm, D.SlotCm) < 1.0);
+					if (!(bSwitched && bGoal) && !bLast)
+					{
+						return false;
+					}
+					if (PC && PC->GetWorldClickCount() != Press->LeakBase)
+					{
+						T->IdleWhy += FString::Printf(TEXT(" %s LEAKED %d click(s) into the world;"), Label, PC->GetWorldClickCount() - Press->LeakBase);
+					}
+					if (bSwitched && bGoal)
+					{
+						T->IdleSaid += FString::Printf(TEXT("; after %s its goal is (%.1f, %.1f) m, %s"), Label, D.GoalCm.X / 100.0, D.GoalCm.Y / 100.0,
+							bOff ? TEXT("its Lander rank slot") : *FString::Printf(TEXT("slot %d of pad #%d"), D.Slot, D.PadId));
+					}
+					else
+					{
+						T->IdleWhy += FString::Printf(TEXT(" after %s the pad is %s and robot %d is drawn %d at pad #%d with its goal (%.1f, %.1f) m (rank slot (%.1f, %.1f) m, ring slot (%.1f, %.1f) m);"),
+							Label, Sim->IsManualOff(T->IdlePad) ? TEXT("off") : TEXT("on"), T->IdleRobot, (int32)D.Show, D.PadId, D.GoalCm.X / 100.0, D.GoalCm.Y / 100.0,
+							D.RankCm.X / 100.0, D.RankCm.Y / 100.0, D.SlotCm.X / 100.0, D.SlotCm.Y / 100.0);
+					}
+					return true;
+				};
+			};
+			const TSharedRef<FPress> Off = PushPress(TEXT("robots.idle off"), LocateButton(TEXT("Switch OFF"), 0, true));
+			Runner.Push(TEXT("robots.idle off goal"), GoalCheck(Off, true, TEXT("Switch OFF")), 0.3f, 15.f);
+			const TSharedRef<FPress> On = PushPress(TEXT("robots.idle on"), LocateButton(TEXT("Switch ON"), 0, true));
+			Runner.Push(TEXT("robots.idle on goal"), GoalCheck(On, false, TEXT("Switch ON")), 0.3f, 15.f);
+		}
+		Runner.Do(TEXT("robots.idle"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->SetFleetHold(false);
+				if (T->IdlePad != 0 && Sim->IsManualOff(T->IdlePad))
+				{
+					Sim->SetManualPower(T->IdlePad, true); // a failed Switch ON never leaves the pad off for a later step
+				}
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->Debug_SelectBuilding(0);
+				PC->SetSimSpeed(1.f);
+			}
+			Report(TEXT("robots.idle"), T->IdleWhy.IsEmpty(), T->IdleWhy.IsEmpty() ? T->IdleSaid : T->IdleWhy + TEXT(" | ") + T->IdleSaid);
 		}, 0.3f);
 
 		// ---- the verdict

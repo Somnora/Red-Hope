@@ -2589,6 +2589,18 @@ static FAutoConsoleCommandWithWorldAndArgs GRHSites(
 		}
 	}));
 
+// Idle robots look busy (docs/qa/2026-10-28/robot-idle-brief.md): what every surface robot is drawn doing while idle.
+static FAutoConsoleCommandWithWorldAndArgs GRHIdleRobots(
+	TEXT("RH.IdleRobots"),
+	TEXT("RH.IdleRobots - READ-ONLY: log each surface robot's idle state as last drawn (busy / waiting at pad #Id slot k / Lander rank / inspecting building #Id) with the sim seconds to its next inspection, and each working pad's ring and the buildings it inspects."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (const URHAgentVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHAgentVisualizerSubsystem>() : nullptr)
+		{
+			Viz->LogIdleRobots();
+		}
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHSection(
 	TEXT("RH.Section"),
 	TEXT("RH.Section <on [axis]|off|focus N|axis K|plane R|cut CavernId|check flows> - DEBUG: the deep view's section."),
