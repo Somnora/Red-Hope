@@ -886,6 +886,7 @@ public:
 	int32 GetColonistSeatPiece(int32 ColonistId) const { return ColonistSeatPiece.FindRef(ColonistId); }
 	double GetFurnitureRefundFraction() const { return FurnitureRefundFraction; }
 	double GetHopeFurnishingsMax() const { return HopeFurnishingsMax; }
+	double GetHopeMilestonesMax() const { return HopeMilestonesMax; } // balance pass 1 (B): the Milestones line's cap (the suites read it)
 	// The Hope weights (D3a): the suites derive their expectations from these
 	// instead of hard-coding the tuning.
 	double GetHopeHousingMax() const { return HopeHousingMax; }
@@ -2174,6 +2175,7 @@ public:
 	// No sim state; effects (work speed, growth) wire up in later gates after the framing review.
 	struct FRHHopeBreakdown
 	{
+		// Milestones (balance pass 1, B): the vault, first-born, first-harvest and discovery terms summed, then capped at HopeMilestonesMax.
 		double Base = 0, Housing = 0, Rooms = 0, Jobs = 0, Milestones = 0, Comforts = 0;
 		double Furnishings = 0; // BM-4: bonus-only, capped (HopeFurnishingsMax)
 		double Views = 0;       // BM-6: windows in rated habitats, bonus-only, capped (HopeViewsMax)
@@ -4398,6 +4400,7 @@ private:
 	double RoomServesResidents = 25.0;    // one room of a type covers this many residents
 	double ComfortRefPop = 8.0;           // Furnishings and Views sums are per resident, at this crew size
 	double HopeVaultMilestone = 5.0;
+	double HopeMilestonesMax = 15.0;      // config HopeMilestonesMax (balance pass 1, B): the summed Milestones line's cap
 	// Hope-drives-the-colony state (save v13). HopeSmoothed low-passes the
 	// instantaneous index; HopeBand is the hysteresis band it currently sits in
 	// (saved so save/load is exact-equivalent even mid-gap). Both run in BOTH
@@ -4431,7 +4434,7 @@ private:
 	// max(1, N / BirthRefPop) x dt, so N <= BirthRefPop is exactly as it always was.
 	double BirthRefPop = 25.0;
 	int32 ColonistTransportColonists = 20;           // colonists per Colonist Transport cargo item
-	double ColonistTransportFoodKgPerColonist = 50.0; // provisions landed with each colonist
+	double ColonistTransportFoodKgPerColonist = 25.0; // provisions landed with each colonist (balance pass 1, A: was 50)
 	double ImmigrationHopeMin = 75.0;                // smoothed Hope a landing needs to draw settlers
 	double ImmigrationHopeFloor = 70.0;              // the Hope at which the draw is zero
 	double ImmigrationBase = 4.0;                    // settlers at full draw for a small colony
@@ -4730,7 +4733,7 @@ private:
 	double IdentityAxis = 0.0;
 	bool bEarthDemandPending = false;
 	double EarthTensionDriftPerSol = 0.6;
-	double EarthTensionDemandThreshold = 60.0;
+	double EarthTensionDemandThreshold = 45.0; // balance pass 1 (D): was 60
 	double RequisitionEarthBonus = 0.4;
 	double RequisitionMartianPenalty = 0.6;
 	double RequisitionTensionPenalty = 0.3;

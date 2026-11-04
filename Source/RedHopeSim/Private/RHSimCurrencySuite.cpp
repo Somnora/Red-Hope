@@ -782,12 +782,12 @@ int32 RHRunCurrencySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorld
 		Sim->Debug_ClearPolitics();
 	}
 	{
-		// DefyIssue against a plain Defy from one state (tension 61.1, identity 0, a demand pending).
+		// DefyIssue against a plain Defy from one state (tension 46.1 - the demand line 45 + 1.1, as 61.1 was at 60 before balance pass 1 - identity 0, a demand pending).
 		Reset();
-		Sim->Debug_SetRequisitionInputs(0.0, 61.1);
+		Sim->Debug_SetRequisitionInputs(0.0, 46.1);
 		EraOnce();
 		Sim->Debug_SyncPoliticalView();
-		Expect(Sim->IsEarthDemandPending() && Sim->SaveColony(TEXT("cu3demand"), SaveErr), TEXT("CU3 the twins' start: a demand pending at tension 61.1, identity 0, saved"));
+		Expect(Sim->IsEarthDemandPending() && Sim->SaveColony(TEXT("cu3demand"), SaveErr), TEXT("CU3 the twins' start: a demand pending at tension 46.1, identity 0, saved"));
 		struct FSnap { double Id = 0, Ten = 0, Mult = 0, Rel = 0, Hope = 0, Hn = 0, Inf = 0; bool bIssued = false; TArray<FRHPoliticalEntry> Journal; int32 IssueLines = 0, DefyLines = 0; TArray<FString> Alerts; };
 		const auto Answer = [&](FName Target) -> FSnap
 		{

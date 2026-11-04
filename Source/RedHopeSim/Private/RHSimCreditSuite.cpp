@@ -216,7 +216,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Expect(Free0 < 4 && Sim->GetPopulation() == Pop0 && Sim->GetStock(FName("Food")) == Food0 && Alerts.Num() == 2 && Alerts[0] == PodText && Alerts[1] == TransportText,
 				FString::Printf(TEXT("CR1 with %d beds free a Crew Pod and a Colonist Transport stay aboard: no colonist, no food, and HEAD's two alerts word for word"), Free0));
 		}
-		// The crew blocks with beds: +4 with 200 kg of food, +20 with 1,000 kg.
+		// The crew blocks with beds: +4 with 200 kg of food, +20 with 500 kg (balance pass 1, A).
 		{
 			Reset();
 			FString R;
@@ -234,10 +234,10 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			const int32 Pop1 = Sim->GetPopulation();
 			const double Food1 = Sim->GetStock(FName("Food"));
 			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
-			Expect(Free0 >= 24 && Pop1 == Pop0 + 4 && Food1 - Food0 == 200.0 && Sim->GetPopulation() == Pop1 + 20 && Sim->GetStock(FName("Food")) - Food1 == 1000.0 && Alerts.Num() == 2
+			Expect(Free0 >= 24 && Pop1 == Pop0 + 4 && Food1 - Food0 == 200.0 && Sim->GetPopulation() == Pop1 + 20 && Sim->GetStock(FName("Food")) - Food1 == 500.0 && Alerts.Num() == 2
 				&& Alerts[0] == TEXT("THE CREW HAS LANDED — 4 colonists disembark into the vault, with 200 kg of provisions.")
-				&& Alerts[1] == TEXT("A COLONIST TRANSPORT HAS LANDED — 20 colonists disembark into the vault, with 1000 kg of provisions."),
-				FString::Printf(TEXT("CR1 with %d beds free a Crew Pod lands 4 colonists and 200 kg of Food, a Colonist Transport 20 and 1,000 kg, with HEAD's alerts"), Free0));
+				&& Alerts[1] == TEXT("A COLONIST TRANSPORT HAS LANDED — 20 colonists disembark into the vault, with 500 kg of provisions."),
+				FString::Printf(TEXT("CR1 with %d beds free a Crew Pod lands 4 colonists and 200 kg of Food, a Colonist Transport 20 and 500 kg, with HEAD's alerts"), Free0));
 		}
 		// A name with no row lands as nothing.
 		{

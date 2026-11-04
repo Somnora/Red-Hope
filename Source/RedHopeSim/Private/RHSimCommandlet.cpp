@@ -1017,18 +1017,36 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// the post-furnishing baseline (brine rewards Water). C2a: the window now
 		// finishes the fourth row (750 seat-hours in all; about 830 are in, a margin
 		// of a sol of lab time), so all four are found and nothing is next.
-		RunSols(6.0);
+		// Balance pass 1 (B): the same 120 steps RunSols(6.0) takes, with the Milestones line and the uncapped sum (the vault 5 + the
+		// found rows' bonus) sampled after each one, so the cap check below sees the whole window. GetColonyHope is a pure derived read
+		// (StepHope already reads it every step): sampling moves no sim number.
+		double MsLinePeak = 0.0, MsUncappedPeak = 0.0;
+		const int32 MsSteps = (int32)(6.0 * StepsPerSolH);
+		for (int32 MsStep = 0; MsStep < MsSteps; ++MsStep)
+		{
+			Step();
+			MsLinePeak = FMath::Max(MsLinePeak, Sim->GetColonyHope().Milestones);
+			MsUncappedPeak = FMath::Max(MsUncappedPeak, 5.0 + LogBonusSum());
+		}
 		{
 			const double StructGained = Sim->GetStock(FName("Struct")) - Struct0;
 			const int32 Ceramics = Sim->HasDiscovered(FName("RegolithCeramics")) ? 1 : 0;
 			Expect(Sim->GetDiscoveryLog().Num() >= 1 && LogIsAuthoredPrefix() && Near(StructGained, 100.0 * Ceramics, 1e-9)
-				&& Near(Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum(), 1e-9),
-				FString::Printf(TEXT("DS5 second window: found=%d [%s] next=%s (%.3f of the way) struct +%.0f (expect 100 x ceramics found = %d) milestones=%.1f (expect 5 + the found rows' bonus = %.1f)"),
+				&& Near(Sim->GetColonyHope().Milestones, FMath::Min(5.0 + LogBonusSum(), Sim->GetHopeMilestonesMax()), 1e-9),
+				FString::Printf(TEXT("DS5 second window: found=%d [%s] next=%s (%.3f of the way) struct +%.0f (expect 100 x ceramics found = %d) milestones=%.1f (expect min(5 + the found rows' bonus %.1f, the cap %.1f) = %.1f)"),
 					Sim->GetDiscoveryLog().Num(), *LogText(), *Sim->GetNextDiscovery().ToString(), Sim->GetDiscoveryProgress(), StructGained, Ceramics * 100,
-					Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum()));
+					Sim->GetColonyHope().Milestones, 5.0 + LogBonusSum(), Sim->GetHopeMilestonesMax(), FMath::Min(5.0 + LogBonusSum(), Sim->GetHopeMilestonesMax())));
 			Expect(Sim->GetDiscoveryLog().Num() == 4 && Sim->GetNextDiscovery().IsNone() && Near(StructGained, 100.0, 1e-9),
 				FString::Printf(TEXT("DS5 pin: all four found, nothing next, Struct +%.0f (found=%d next=%s)"),
 					StructGained, Sim->GetDiscoveryLog().Num(), *Sim->GetNextDiscovery().ToString()));
+			// Balance pass 1 (B, D3a's first option): the cap over the whole window. The vault 5 and the four rows' 15 sum to 20; the line
+			// never reads more than HopeMilestonesMax, and the sim's cap is the synced DT_Config row (no override, no C++ fallback).
+			const double MsCapDt = DefsSub->GetConfigTableScalar(FName("HopeMilestonesMax"), -1.0);
+			const double MsLineEnd = Sim->GetColonyHope().Milestones, MsUncappedEnd = 5.0 + LogBonusSum();
+			Expect(Near(MsCapDt, 15.0, 1e-9) && Near(Sim->GetHopeMilestonesMax(), MsCapDt, 1e-9) && MsUncappedPeak > MsCapDt && MsLinePeak <= MsCapDt
+				&& Near(MsLineEnd, FMath::Min(MsUncappedEnd, MsCapDt), 1e-9),
+				FString::Printf(TEXT("DS5 cap (balance pass 1): over the window's %d steps the Milestones line peaked at %.1f, never over HopeMilestonesMax %.1f (DT_Config %.1f), while the uncapped sum (the vault 5 + the found rows' bonus) peaked at %.1f; at the end the line is %.1f = min(%.1f, %.1f) (DT/CSV)"),
+					MsSteps, MsLinePeak, Sim->GetHopeMilestonesMax(), MsCapDt, MsUncappedPeak, MsLineEnd, MsUncappedEnd, MsCapDt));
 		}
 
 		// DS6. Save v16 round-trip: the log and the partial progress survive.
@@ -1197,7 +1215,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH drift: tension=%.1f (expect ~6.0 = 0.6 x 10) demand=%d (expect 0)"),
 			Sim->GetEarthTension(), (int32)Sim->IsEarthDemandPending());
 
-		// 3) DEMAND generated once tension crosses 60: jump it up.
+		// 3) DEMAND generated once tension crosses EarthTensionDemandThreshold (45 since balance pass 1; it was 60): jump it up.
 		Sim->Debug_AddTension(55.0); // -> ~61
 		RunSols(0.2);
 		UE_LOG(LogRedHopeSim, Display, TEXT("EARTH demand: tension=%.0f demand=%d (expect >=60, 1)"),
@@ -1288,7 +1306,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// tension eases only a little, requisitions stay slashed by the axis.
 		const double Hope0 = Sim->GetColonyHope().Total;
 		Answer(TEXT("Defy"));
-		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID defy: axis=%+.0f relation=%.0f pending=%d hope %.1f->%.1f mult=%.2f (expect +20, 45, 0, up, <1)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID defy: axis=%+.0f relation=%.0f pending=%d hope %.1f->%.1f mult=%.2f (expect +20, 45, 1 - tension 55 is at or over the demand line 45, so a new demand follows at once (balance pass 1), up, <1)"),
 			Sim->GetIdentityAxis(), Sim->GetRivalRelation(FName("Zarya")), (int32)Sim->IsEarthDemandPending(),
 			Hope0, Sim->GetColonyHope().Total, Sim->GetRequisitionMultiplier());
 
@@ -1297,14 +1315,14 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		RunSols(10.0);
 		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID shock fades: %.2f -> %.2f (expect toward 0)"), Solid1, Sim->GetSolidarityHope());
 
-		// Raise a second demand for the Comply branch.
+		// Raise tension for the Comply branch (under balance pass 1's 45 the Defy already re-armed the demand; the +65 still drives the embargo).
 		Sim->Debug_AddTension(65.0);
 		RunSols(0.2);
 
 		// 3) COMPLY: route to Zarya CLOSES, relation craters, axis swings back
 		// Earth-ward, tension relieved hard, morale grief (negative shock).
 		Answer(TEXT("Comply"));
-		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID comply: closed=%d relation=%.0f axis=%+.0f tension=%.0f (expect 1, 5, 0, 55 = 100 clamped - 45 relief, below re-demand)"),
+		UE_LOG(LogRedHopeSim, Display, TEXT("SOLID comply: closed=%d relation=%.0f axis=%+.0f tension=%.0f (expect 1, 5, 0, 55 = 100 clamped - 45 relief; at or over the demand line 45, so a new demand follows (balance pass 1))"),
 			Sim->GetClosedRouteCount(), Sim->GetRivalRelation(FName("Zarya")),
 			Sim->GetIdentityAxis(), Sim->GetEarthTension());
 
@@ -6433,7 +6451,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 		// synced DataTables alone (no override, no C++ fallback), so a DT that
 		// drifted from the CSV fails here and not silently.
 		const TPair<const TCHAR*, double> Pins[] = {
-			{ TEXT("ColonistTransportColonists"), 20.0 }, { TEXT("ColonistTransportFoodKgPerColonist"), 50.0 }, { TEXT("BirthRefPop"), 25.0 },
+			{ TEXT("ColonistTransportColonists"), 20.0 }, { TEXT("ColonistTransportFoodKgPerColonist"), 25.0 }, { TEXT("BirthRefPop"), 25.0 },
 			{ TEXT("ImmigrationHopeMin"), 75.0 }, { TEXT("ImmigrationHopeFloor"), 70.0 }, { TEXT("ImmigrationBase"), 4.0 },
 			{ TEXT("ImmigrationPerCapita"), 0.2 }, { TEXT("ImmigrationCapPerShip"), 50.0 }, { TEXT("BigArrivalHopeMin"), 75.0 },
 			{ TEXT("BigArrivalStreakSols"), 20.0 }, { TEXT("BigArrivalFreeBeds"), 100.0 }, { TEXT("BigArrivalColonists"), 100.0 },
@@ -6447,7 +6465,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			PinText += FString::Printf(TEXT(" %s=%g"), Pin.Key, Got);
 		}
 		Expect(bPins, FString::Printf(TEXT("P0 DT_Config pins:%s"), *PinText));
-		Expect(Sim->GetColonistTransportColonists() == 20 && Near(Sim->GetColonistTransportFoodKgPerColonist(), 50.0, 1e-9) && Near(Sim->GetBirthRefPop(), 25.0, 1e-9)
+		Expect(Sim->GetColonistTransportColonists() == 20 && Near(Sim->GetColonistTransportFoodKgPerColonist(), 25.0, 1e-9) && Near(Sim->GetBirthRefPop(), 25.0, 1e-9)
 			&& Near(Sim->GetImmigrationHopeMin(), 75.0, 1e-9) && Near(Sim->GetImmigrationHopeFloor(), 70.0, 1e-9) && Near(Sim->GetImmigrationBase(), 4.0, 1e-9)
 			&& Near(Sim->GetImmigrationPerCapita(), 0.2, 1e-9) && Sim->GetImmigrationCapPerShip() == 50 && Near(Sim->GetBigArrivalHopeMin(), 75.0, 1e-9)
 			&& Near(Sim->GetBigArrivalStreakSolsNeeded(), 20.0, 1e-9) && Sim->GetBigArrivalFreeBeds() == 100 && Sim->GetBigArrivalColonists() == 100
@@ -6665,7 +6683,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			FString::Printf(TEXT("f %d births in a city, %d birth alerts (a city's births are a rate: a banner on every tenth, never one per child)"), Births41, CountAlerts(TEXT("A CHILD")) + CountAlerts(TEXT("THE COLONY GROWS"))));
 		Sim->Debug_SetHopeGates(101.0, 101.0);
 
-		// (a) The Colonist Transport. Twenty colonists and fifty kilos of food each; it
+		// (a) The Colonist Transport. Twenty colonists and twenty-five kilos of food each (balance pass 1, A); it
 		// lands whole or not at all.
 		{
 			const bool bFree20 = SetFree(20);
@@ -6674,10 +6692,10 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const int32 PopA = Sim->GetPopulation(), TopId = MaxColonistId();
 			const double FoodA = Sim->GetStock(NFood);
 			Sim->Debug_DeliverCargo(FName("ColonistTransport"));
-			Expect(Sim->GetPopulation() == PopA + 20 && Sim->GetFreeHousing() == 0 && Near(Sim->GetStock(NFood) - FoodA, 1000.0, 1e-6) && NewcomersFine(TopId, 20) && NoFloorOverBeds(),
-				FString::Printf(TEXT("a 20 beds free of 20 needed: the transport lands - population %d -> %d, +%.0f kg Food (20 x 50), all housed on rated floors, none Mars-born"),
+			Expect(Sim->GetPopulation() == PopA + 20 && Sim->GetFreeHousing() == 0 && Near(Sim->GetStock(NFood) - FoodA, 500.0, 1e-6) && NewcomersFine(TopId, 20) && NoFloorOverBeds(),
+				FString::Printf(TEXT("a 20 beds free of 20 needed: the transport lands - population %d -> %d, +%.0f kg Food (20 x 25), all housed on rated floors, none Mars-born"),
 					PopA, Sim->GetPopulation(), Sim->GetStock(NFood) - FoodA));
-			Expect(Alerts.Num() == 1 && CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")) == 1 && Alerts[0].Contains(TEXT("20 colonists")) && Alerts[0].Contains(TEXT("1000 kg")),
+			Expect(Alerts.Num() == 1 && CountAlerts(TEXT("A COLONIST TRANSPORT HAS LANDED")) == 1 && Alerts[0].Contains(TEXT("20 colonists")) && Alerts[0].Contains(TEXT("500 kg")),
 				FString::Printf(TEXT("f the landing is one alert, not one per colonist: %d alert(s), \"%s\""), Alerts.Num(), Alerts.Num() ? *Alerts[0] : TEXT("-")));
 			// No beds at all.
 			Alerts.Reset();
@@ -6881,8 +6899,8 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const double FoodDrawn = PopPre * Sim->GetColonistFoodKgPerSol() * DtSols;
 			Expect(Sim->IsBigArrivalDone() && Sim->GetPopulation() == PopPre + 100 && NewcomersFine(TopPre, 100) && NoFloorOverBeds(),
 				FString::Printf(TEXT("d the beds appear and the Big Arrival lands: population %d -> %d, 100 settlers housed on rated floors, none Mars-born"), PopPre, Sim->GetPopulation()));
-			Expect(Near(Sim->GetStock(NFood), 100000.0 - FoodDrawn + 5000.0, 1e-6) && Sim->GetImmigrantsTotal() == TotalPre,
-				FString::Printf(TEXT("d with their food: %.3f kg (expect 100000 - %.3f eaten by the %d already here + 5000 for the hundred = %.3f)"), Sim->GetStock(NFood), FoodDrawn, PopPre, 100000.0 - FoodDrawn + 5000.0));
+			Expect(Near(Sim->GetStock(NFood), 100000.0 - FoodDrawn + 2500.0, 1e-6) && Sim->GetImmigrantsTotal() == TotalPre,
+				FString::Printf(TEXT("d with their food: %.3f kg (expect 100000 - %.3f eaten by the %d already here + 2500 for the hundred = %.3f)"), Sim->GetStock(NFood), FoodDrawn, PopPre, 100000.0 - FoodDrawn + 2500.0));
 			Expect(Alerts.Num() == 2 && CountAlerts(TEXT("THE BIG ARRIVAL")) == 1 && CountAlerts(TEXT("THE CEO HAS ANNOUNCED HE WILL COME")) == 1,
 				FString::Printf(TEXT("f two alerts for a hundred people, one for the arrival and one for the CEO: %d alert(s), %d + %d"), Alerts.Num(), CountAlerts(TEXT("THE BIG ARRIVAL")), CountAlerts(TEXT("THE CEO HAS ANNOUNCED"))));
 			const double StreakAtFire = Sim->GetBigArrivalStreakSols();
@@ -7287,7 +7305,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("h0 the wave's food leg counts the %.0f kg it lands with beside the %.0f kg stored (%.0f), against %.2f kg a sol drawn at %d people"), WaveFoodH, 1000.0, Sup.FoodLeg.StockKg, Sup.FoodLeg.DrawPerSol, Sup.People));
 
 			// h1. The old lean state, replayed: sol 85, a colony of 8, oxygen made at 30 kg a sol, 1,510 kg in the pool, 159 kg of
-			// food (the wave brings 5,000 more), water in the tens of thousands. The wave would draw 81 kg of oxygen a sol.
+			// food (the wave brings 2,500 more), water in the tens of thousands. The wave would draw 81 kg of oxygen a sol.
 			// C5c's stock checks passed it (and it ran out of air by sol 108); the production check refuses it.
 			Expect(LoadSmall(8, false), TEXT("h1 setup: a colony of 8, the floors unrated (no standing leak: the draw is the people's alone)"));
 			Sim->Debug_SetProductionPerSol(NOxygen, 30.0);
@@ -14933,7 +14951,7 @@ int32 URHSimCommandlet::Main(const FString& Params)
 			const FRHManifestItemRow* Pod = DefsSub ? DefsSub->GetManifestItem(FName("CrewPod")) : nullptr;
 			const FRHManifestItemRow* Transport = DefsSub ? DefsSub->GetManifestItem(FName("ColonistTransport")) : nullptr;
 			Expect(Pod && Pod->Effect == TEXT("+4 colonists into certified housing; +200 kg Food; stays aboard, safe, if no beds")
-				&& Transport && Transport->Effect == TEXT("+20 colonists into certified housing; +1000 kg Food (50 kg each); everyone stays aboard, safe, if the beds are not free"),
+				&& Transport && Transport->Effect == TEXT("+20 colonists into certified housing; +500 kg Food (25 kg each); everyone stays aboard, safe, if the beds are not free"),
 				TEXT("a3 D82 and D136: the Crew Pod and Colonist Transport Effect copy says they stay aboard, safe (DT/CSV)"));
 		}
 

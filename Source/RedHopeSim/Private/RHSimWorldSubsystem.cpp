@@ -375,6 +375,7 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	RoomServesResidents = FMath::Max(1.0, Defs->GetConfigScalar(FName("RoomServesResidents"), RoomServesResidents));
 	ComfortRefPop = FMath::Max(0.0, Defs->GetConfigScalar(FName("ComfortRefPop"), ComfortRefPop));
 	HopeVaultMilestone = Defs->GetConfigScalar(FName("HopeVaultMilestone"), HopeVaultMilestone);
+	HopeMilestonesMax = FMath::Max(0.0, Defs->GetConfigScalar(FName("HopeMilestonesMax"), HopeMilestonesMax)); // balance pass 1 (B): clamped at 0, like HopeFurnishingsMax
 	GardenSoilKgPerCell = Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), GardenSoilKgPerCell);
 	GardenSeedsKgPerCell = Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), GardenSeedsKgPerCell);
 	GardenFoodKgPerSolPerCell = Defs->GetConfigScalar(FName("GardenFoodKgPerSolPerCell"), GardenFoodKgPerSolPerCell);
@@ -2536,7 +2537,7 @@ void URHSimWorldSubsystem::ApplyManifestItemEffect(FName ItemName)
 		{
 			// C2b: the crew pod at scale. The same rule - colonists disembark only into
 			// certified housing, and the WHOLE transport stays aboard if the beds are
-			// not there - with fifty kilos of provisions for every colonist it carries.
+			// not there - with ColonistTransportFoodKgPerColonist (25 kg since balance pass 1) of provisions for every colonist it carries.
 			const double FoodKg = ColonistTransportFoodKgPerColonist * ColonistTransportColonists;
 			if (GetFreeHousing() >= ColonistTransportColonists)
 			{
@@ -6504,6 +6505,9 @@ URHSimWorldSubsystem::FRHHopeBreakdown URHSimWorldSubsystem::GetColonyHope() con
 			Out.Milestones += Row->HopeBonus;
 		}
 	}
+	// Balance pass 1 (B, 2026-11-04; D3a's first option): the summed Milestones line is capped, like Furnishings and Views. Each
+	// milestone still lifts Hope when it lands until the line reaches HopeMilestonesMax; the seven milestone values are unchanged.
+	Out.Milestones = FMath::Min(Out.Milestones, HopeMilestonesMax);
 
 	const int32 Pop = Colonists.Num();
 	// C2b: the Housing term's denominator is GetHousingComfortCapacity, the one helper
