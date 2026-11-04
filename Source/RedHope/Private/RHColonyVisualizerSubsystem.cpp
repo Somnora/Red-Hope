@@ -2779,6 +2779,21 @@ namespace RHSiteKit
 	constexpr float LightZUnderCm = 330.f; // under a floor's 4 m ceiling
 	// Ground a bay or the mast may not stand on: anything that rises 20 cm..2.5 m off the site's own plane.
 	constexpr float TakenMinZCm = 20.f, TakenMaxZCm = 250.f;
+	// Per-model cut holds (the director's answer of 2026-10-27, docs/qa/2026-10-25/visual-pass-design.md, DIRECTOR ANSWER): a model
+	// with a part that comes into the cut before what holds it up is built keeps its cut under that part until the support is in.
+	// Keyed by the static mesh's name (as the hidden masks, T_<Mesh>_HiddenMask), in 5 % steps of the model's drawn height: a step
+	// after HoldStep and before ReleaseStep draws HoldStep's cut. Measured on the imported source meshes (floating-piece scan,
+	// 2026-11-03).
+	struct FCutHold { const TCHAR* Mesh; int32 HoldStep; int32 ReleaseStep; };
+	const FCutHold CutHolds[] = {
+		// The Solar Array: its two panels' bottom rail enters the cut at 46.6 % of the height and the panels join the mast-top
+		// hinge at 64.6 % and 65.2 %. Steps 10-13 (50-65 %) draw the 45 % cut; 70 % shows the panels and the hinge together.
+		{ TEXT("SolarPanel"), 9, 14 },
+		// The Battery Bank: the tubes under its two overhanging ends (7.6-12.9 % of the height) join the body's underside at 13 %.
+		// Step 2 (10 %) draws the 5 % cut.
+		{ TEXT("BatteryBank"), 1, 3 },
+	};
+	static_assert(Steps == 20, "CutHolds are written in 5 % steps");
 }
 
 bool URHColonyVisualizerSubsystem::EnsureSiteKit()
@@ -2955,6 +2970,18 @@ void URHColonyVisualizerSubsystem::AddSite(const FRHBuildingInstance& Instance, 
 			Site.RevealBottomCm = BottomZ;
 			Site.RevealHeightCm = ModelHeightCm;
 			Site.RevealMesh = Mesh;
+			// A per-model cut hold (RHSiteKit::CutHolds), by the mesh's name.
+			if (const UStaticMesh* Model = Mesh->GetStaticMesh())
+			{
+				for (const FCutHold& Hold : CutHolds)
+				{
+					if (Model->GetName() == Hold.Mesh)
+					{
+						Site.CutHoldStep = Hold.HoldStep;
+						Site.CutReleaseStep = Hold.ReleaseStep;
+					}
+				}
+			}
 		}
 		else if (!bWarnedReveal)
 		{
@@ -3043,7 +3070,13 @@ void URHColonyVisualizerSubsystem::RefreshSites(const URHSimWorldSubsystem* Sim)
 		const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
 		const double BuildS = Def ? Def->BuildTime_s * URHSimWorldSubsystem::GetBedCount(B) : 0.0;
 		const double Fraction = bWaiting ? (BillKg > 0.0 ? HeldKg / BillKg : 0.0) : (BuildS > 0.0 ? 1.0 - B.BuildRemaining_s / BuildS : 1.0);
-		const int32 Step = FMath::Clamp(FMath::FloorToInt32(FMath::Clamp(Fraction, 0.0, 1.0) * RHSiteKit::Steps + 1.0e-6), 0, RHSiteKit::Steps);
+		int32 Step = FMath::Clamp(FMath::FloorToInt32(FMath::Clamp(Fraction, 0.0, 1.0) * RHSiteKit::Steps + 1.0e-6), 0, RHSiteKit::Steps);
+		if (Site.PoseStep >= 0)
+		{
+			// RH.SitePose (a capture's pose, presentation only): drawn as fabrication at the posed step, whatever the sim's progress.
+			bWaiting = false;
+			Step = Site.PoseStep;
+		}
 		if (Step == Site.Step && Site.bFabricating == !bWaiting)
 		{
 			continue; // the 5 % step has not moved: nothing to write
@@ -3070,7 +3103,9 @@ void URHColonyVisualizerSubsystem::RefreshSites(const URHSimWorldSubsystem* Sim)
 			// At 0 % the cut sits on the model's bottom and every pixel clips: drawing it would only cost the masked
 			// passes (the tutorial's three Solar sites sit there). It shows from the first 5 % step.
 			Mesh->SetVisibility(Site.bFabricating && Step > 0, /*bPropagateToChildren*/ false);
-			const float CutZ = Site.RevealBottomCm + Site.RevealHeightCm * Step / RHSiteKit::Steps;
+			// A per-model cut hold (RHSiteKit::CutHolds): the cut waits under a part whose support is not built yet.
+			const int32 CutStep = (Step > Site.CutHoldStep && Step < Site.CutReleaseStep) ? Site.CutHoldStep : Step;
+			const float CutZ = Site.RevealBottomCm + Site.RevealHeightCm * CutStep / RHSiteKit::Steps;
 			for (const TWeakObjectPtr<UMaterialInstanceDynamic>& Mid : Site.RevealMids)
 			{
 				if (UMaterialInstanceDynamic* M = Mid.Get())
@@ -3403,14 +3438,41 @@ void URHColonyVisualizerSubsystem::LogSites() const
 	{
 		const FRHSiteVis& S = Pair.Value;
 		const FString Stage = S.Step < 0 ? FString(TEXT("not polled yet"))
-			: FString::Printf(TEXT("%s %d%%"), S.bFabricating ? TEXT("fabrication") : TEXT("waiting for materials"), S.Step * 100 / RHSiteKit::Steps);
+			: FString::Printf(TEXT("%s %d%%%s"), S.bFabricating ? TEXT("fabrication") : TEXT("waiting for materials"), S.Step * 100 / RHSiteKit::Steps,
+				S.PoseStep >= 0 ? TEXT(" (posed)") : TEXT(""));
+		// The cut as drawn, read back from the model's own MID (GetSiteRevealCut), while the model is drawn; "(held)" when the cut as drawn
+		// is under the step (a per-model cut hold keeps it lower).
+		FString Reveal = S.RevealHeightCm > 0.f ? FString::Printf(TEXT("%.0f cm model"), S.RevealHeightCm) : FString(TEXT("none"));
+		float CutZ = 0.f, BottomZ = 0.f;
+		bool bDrawn = false;
+		if (S.RevealHeightCm > 0.f && S.bFabricating && GetSiteRevealCut(Pair.Key, CutZ, BottomZ, bDrawn))
+		{
+			const int32 CutPct = FMath::RoundToInt32(100.f * (CutZ - BottomZ) / S.RevealHeightCm);
+			Reveal += FString::Printf(TEXT(", cut %d%%%s"), CutPct, CutPct < S.Step * 100 / RHSiteKit::Steps ? TEXT(" (held)") : TEXT(""));
+		}
 		const USpotLightComponent* Work = S.WorkLight.Get();
 		UE_LOG(LogRedHope, Display, TEXT("[RH.Sites] #%d %s L%d %dx%d cells at (%.1f, %.1f) m | %s | crates %d of %d | scaffold %d of %d course(s), %d bay slot(s) left out (%d off the carved floor) | mast %s | light %s | reveal %s | instances pad %d, bay %d, mast %d, crate %d"),
 			Pair.Key, *S.DefName.ToString(), S.Level, S.CellsX, S.CellsY, S.SeatCm.X / 100.f, S.SeatCm.Y / 100.f, *Stage, FMath::Max(0, S.Crates), S.CrateSlots, FMath::Max(1, S.Courses), S.FullCourses,
 			S.BaysLeftOut, S.BaysInRock, S.MastCorner >= 0 ? CornerNames[S.MastCorner] : TEXT("none"), !Work ? TEXT("none") : (Work->IsVisible() ? TEXT("on") : TEXT("off (daylight)")),
-			S.RevealHeightCm > 0.f ? *FString::Printf(TEXT("%.0f cm model"), S.RevealHeightCm) : TEXT("none"),
+			*Reveal,
 			S.Count[0], S.Count[1], S.Count[2], S.Count[3]);
 	}
+}
+
+bool URHColonyVisualizerSubsystem::Debug_PoseSite(int32 BuildingId, int32 Percent)
+{
+	const int32 Pose = Percent < 0 ? -1 : FMath::Clamp(Percent * RHSiteKit::Steps / 100, 0, RHSiteKit::Steps);
+	bool bAny = false;
+	for (TPair<int32, FRHSiteVis>& Pair : SiteVis)
+	{
+		if (BuildingId < 0 || Pair.Key == BuildingId)
+		{
+			Pair.Value.PoseStep = Pose;
+			bAny = true;
+		}
+	}
+	bPassesDirty = true; // RefreshSites draws it on the next tick, not the next poll
+	return bAny;
 }
 
 void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, const FString& Reason)
@@ -3470,6 +3532,13 @@ namespace
 	constexpr double ShipStaySols = 1.0;        // on the pad, then it leaves
 	const TCHAR* SupplyShipPath = TEXT("/Game/RedHope/Art/Models2/SupplyShip/SupplyShip/StaticMeshes/SupplyShip.SupplyShip");
 	const TCHAR* LandingPadPath = TEXT("/Game/RedHope/Art/Models2/LandingPad/LandingPad/StaticMeshes/LandingPad.LandingPad");
+	// P2 M2: the trade convoy's rover is the colony's own cargo rover kit, the mesh RHAgentVisualizerSubsystem draws a road rover with
+	// (its RoverMeshPath): scripts/blender/rh_build_rover.py, true scale 5.0 x 2.5 x 2.4 m, pivot on the tyre soles, front at +X.
+	const TCHAR* ConvoyRoverPath = TEXT("/Game/RedHope/Art/Models2/Rover/Rover/StaticMeshes/Rover.Rover");
+	const FName ConvoyKitTag(TEXT("RH.ConvoyKit"));
+	constexpr float ConvoyFrontAxleCm = 128.75f; // the kit's front axle ahead of its pivot (AXLES +1.40 m, recentred by -0.1125 m)
+	constexpr float ConvoyRearAxleCm = 161.25f;  // its rear axle behind the pivot (AXLES -1.50 m)
+	constexpr float ConvoyMaxPitchDeg = 30.f;    // steeper ground than this lifts one end rather than tilting further
 }
 
 void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
@@ -5058,7 +5127,8 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 	});
 
 	// The trade rovers: one per convoy out (E4: up to MaxConvoysOut, one per rival), each driving home -> settlement -> home on the sim's own
-	// progress. A rover whose convoy is home is taken down; they are hidden in the underground view.
+	// progress. A rover whose convoy is home is taken down; they are hidden in the underground view. P2 M2: drawn with the colony's cargo rover
+	// kit (the primitive rover only with the art missing).
 	{
 		TSet<int32> Live;
 		for (const FRHConvoy& Convoy : Sim->GetConvoys()) { Live.Add(Convoy.Id); }
@@ -5082,16 +5152,40 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 		AStaticMeshActor* Rover = FoundRover ? FoundRover->Get() : nullptr;
 		if (!Rover)
 		{
-			// REFERENCE (Robots/ConstructionDrone + Ships/ScoutSpeeder language):
-			// bone-white hull, dark tinted cab glass, six dark wheels, a hazard
-			// stripe, an amber running beacon, and the cargo pack on the back.
-			// Root spawns at UNIFORM scale so relative children don't smear (the
-			// old absolute-space label was left behind at the spawn point while
-			// the rover drove away - all parts ride relative now).
-			Rover = SpawnBox(FVector(0, 0, 60.f), FVector(1.f, 1.f, 1.f), BoneWhite, FLinearColor::Black);
-			if (!Rover)
+			// P2 M2: the colony's cargo rover kit (ConvoyRoverPath) at true scale on its own material, lit as a road rover is (PoweredState 1),
+			// with the convoy's amber running beacon round the kit's beacon lens and its cargo pack on the kit's empty bed. Missing art keeps
+			// the primitive rover below, so the beat still plays.
+			UStaticMesh* Kit = LoadObject<UStaticMesh>(nullptr, ConvoyRoverPath);
+			if (Kit)
 			{
-				continue;
+				Rover = World->SpawnActor<AStaticMeshActor>(FVector::ZeroVector, FRotator::ZeroRotator);
+				if (!Rover)
+				{
+					continue;
+				}
+				UStaticMeshComponent* Body = Rover->GetStaticMeshComponent();
+				Body->SetMobility(EComponentMobility::Movable);
+				Body->SetStaticMesh(Kit);
+				Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				if (UMaterialInstanceDynamic* Mid = Body->CreateAndSetMaterialInstanceDynamic(0))
+				{
+					Mid->SetScalarParameterValue(FName("PoweredState"), 1.f);
+				}
+				Rover->Tags.Add(ConvoyKitTag);
+			}
+			else
+			{
+				// REFERENCE (Robots/ConstructionDrone + Ships/ScoutSpeeder language):
+				// bone-white hull, dark tinted cab glass, six dark wheels, a hazard
+				// stripe, an amber running beacon, and the cargo pack on the back.
+				// Root spawns at UNIFORM scale so relative children don't smear (the
+				// old absolute-space label was left behind at the spawn point while
+				// the rover drove away - all parts ride relative now).
+				Rover = SpawnBox(FVector(0, 0, 60.f), FVector(1.f, 1.f, 1.f), BoneWhite, FLinearColor::Black);
+				if (!Rover)
+				{
+					continue;
+				}
 			}
 #if WITH_EDITOR
 			Rover->SetActorLabel(FString::Printf(TEXT("Sim_Convoy_%d"), Convoy.Id));
@@ -5112,19 +5206,31 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 				Mesh->SetRelativeScale3D(Scale);
 				ApplyTint(Mesh, Color, Emissive);
 			};
-			Part(CubeMesh, FVector(0, 0, 10.f), FRotator::ZeroRotator, FVector(2.6f, 1.5f, 0.9f), BoneWhite);                    // hull
-			Part(CubeMesh, FVector(108.f, 0, 42.f), FRotator(-16.f, 0, 0), FVector(0.7f, 1.25f, 0.62f),
-				FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.12f, 0.15f));                                          // cab glass
-			Part(CubeMesh, FVector(-72.f, 0, 58.f), FRotator::ZeroRotator, FVector(1.1f, 1.3f, 0.72f), DarkSlate);              // cargo pack
-			Part(CubeMesh, FVector(0, 79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);               // stripe R
-			Part(CubeMesh, FVector(0, -79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);              // stripe L
-			for (int32 W = 0; W < 6; ++W)
+			if (Kit)
 			{
-				const float Wx = (W % 3 - 1) * 92.f;
-				const float Wy = (W < 3 ? 1.f : -1.f) * 82.f;
-				Part(CylMesh, FVector(Wx, Wy, -38.f), FRotator(0, 0, 90.f), FVector(0.56f, 0.56f, 0.2f), FLinearColor(0.05f, 0.05f, 0.06f));
+				// The pack on the bed (floor top 88.8 cm; centred at a road rover's BedCentreCm), the beacon round the kit's own lens on the
+				// cab roof (rh_build_rover.py beacon_lens: Blender (CX0 + 0.28, +0.55) m, 1.73-1.86 m up; UE (114.75, -55) cm).
+				Part(CubeMesh, FVector(-82.f, 0.f, 126.f), FRotator::ZeroRotator, FVector(1.1f, 1.3f, 0.72f), DarkSlate);       // cargo pack
+				Part(SphereMesh, FVector(115.f, -55.f, 182.f), FRotator::ZeroRotator, FVector(0.18f), HazYellow, AmberGlow);    // beacon
 			}
-			Part(SphereMesh, FVector(128.f, 0, 82.f), FRotator::ZeroRotator, FVector(0.16f), HazYellow, AmberGlow);             // beacon
+			else
+			{
+				Part(CubeMesh, FVector(0, 0, 10.f), FRotator::ZeroRotator, FVector(2.6f, 1.5f, 0.9f), BoneWhite);                    // hull
+				Part(CubeMesh, FVector(108.f, 0, 42.f), FRotator(-16.f, 0, 0), FVector(0.7f, 1.25f, 0.62f),
+					FLinearColor(0.03f, 0.05f, 0.07f), FLinearColor(0.05f, 0.12f, 0.15f));                                          // cab glass
+				Part(CubeMesh, FVector(-72.f, 0, 58.f), FRotator::ZeroRotator, FVector(1.1f, 1.3f, 0.72f), DarkSlate);              // cargo pack
+				Part(CubeMesh, FVector(0, 79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);               // stripe R
+				Part(CubeMesh, FVector(0, -79.f, 4.f), FRotator::ZeroRotator, FVector(2.45f, 0.05f, 0.2f), HazYellow);              // stripe L
+				for (int32 W = 0; W < 6; ++W)
+				{
+					const float Wx = (W % 3 - 1) * 92.f;
+					const float Wy = (W < 3 ? 1.f : -1.f) * 82.f;
+					Part(CylMesh, FVector(Wx, Wy, -38.f), FRotator(0, 0, 90.f), FVector(0.56f, 0.56f, 0.2f), FLinearColor(0.05f, 0.05f, 0.06f));
+				}
+				Part(SphereMesh, FVector(128.f, 0, 82.f), FRotator::ZeroRotator, FVector(0.16f), HazYellow, AmberGlow);             // beacon
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Convoy] #%d to %s drawn as %s"), Convoy.Id, *Convoy.Rival.ToString(),
+				Kit ? TEXT("the cargo rover kit (Rover, true scale)") : TEXT("the primitive rover (no Rover kit)"));
 			ConvoyVisuals.Add(Convoy.Id, Rover);
 		}
 		// Home = the Lander pad (E7: the colony's depot, by the sim's one depot rule; the origin with none); destination = the rival's marker.
@@ -5141,13 +5247,40 @@ void URHColonyVisualizerSubsystem::RefreshSovereigntyVisuals()
 		// (a)): the visible surface, as its route's ribbon, so the rover never
 		// drives inside a plateau its ribbon now runs over.
 		FVector Loc = FMath::Lerp(From, To, Alpha);
-		Loc.Z = RHMarsTerrain::SceneryTopZCm(Loc.X, Loc.Y) + 60.f;
-		Rover->SetActorLocation(Loc);
-		// The cab leads: face the rover down its road (X+ = nose).
 		const FVector Travel = (To - From).GetSafeNormal2D();
-		if (!Travel.IsNearlyZero())
+		if (Rover->ActorHasTag(ConvoyKitTag))
 		{
-			Rover->SetActorRotation(Travel.Rotation());
+			if (Travel.IsNearlyZero())
+			{
+				// P2 M2: no heading to take: the kit sits level on its soles (its pivot), keeping its last yaw.
+				Loc.Z = RHMarsTerrain::SceneryTopZCm(Loc.X, Loc.Y);
+				Rover->SetActorLocationAndRotation(Loc, FRotator(0.f, Rover->GetActorRotation().Yaw, 0.f));
+			}
+			else
+			{
+				// P2 M2: the kit's pivot is on its tyre soles. It stands on the visible surface under its front and rear axles, pitched to them
+				// (at most ConvoyMaxPitchDeg), and is lifted so neither axle nor its middle sinks into that surface.
+				const float Zf = RHMarsTerrain::SceneryTopZCm(Loc.X + Travel.X * ConvoyFrontAxleCm, Loc.Y + Travel.Y * ConvoyFrontAxleCm);
+				const float Zr = RHMarsTerrain::SceneryTopZCm(Loc.X - Travel.X * ConvoyRearAxleCm, Loc.Y - Travel.Y * ConvoyRearAxleCm);
+				const float Zc = RHMarsTerrain::SceneryTopZCm(Loc.X, Loc.Y);
+				const float PitchDeg = FMath::Clamp(FMath::RadiansToDegrees(FMath::Atan2(Zf - Zr, ConvoyFrontAxleCm + ConvoyRearAxleCm)),
+					-ConvoyMaxPitchDeg, ConvoyMaxPitchDeg);
+				const float TanPitch = FMath::Tan(FMath::DegreesToRadians(PitchDeg));
+				Loc.Z = FMath::Max3(Zc, Zf - ConvoyFrontAxleCm * TanPitch, Zr + ConvoyRearAxleCm * TanPitch);
+				// The cab leads, as a road rover's does (rh.RoverYawOffsetDeg calibrates the kit's import axis for both).
+				static const auto* RoverYawOff = IConsoleManager::Get().FindTConsoleVariableDataFloat(TEXT("rh.RoverYawOffsetDeg"));
+				Rover->SetActorLocationAndRotation(Loc, FRotator(PitchDeg, Travel.Rotation().Yaw + (RoverYawOff ? RoverYawOff->GetValueOnGameThread() : 0.f), 0.f));
+			}
+		}
+		else
+		{
+			Loc.Z = RHMarsTerrain::SceneryTopZCm(Loc.X, Loc.Y) + 60.f;
+			Rover->SetActorLocation(Loc);
+			// The cab leads: face the rover down its road (X+ = nose).
+			if (!Travel.IsNearlyZero())
+			{
+				Rover->SetActorRotation(Travel.Rotation());
+			}
 		}
 		Rover->SetActorHiddenInGame(!bSurface);
 	}

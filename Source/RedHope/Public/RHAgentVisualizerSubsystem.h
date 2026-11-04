@@ -66,10 +66,11 @@ public:
 
 	// Idle robots look busy (display only; docs/qa/2026-10-28/robot-idle-brief.md). What one tracked robot was drawn doing on the last
 	// tick, for RH.IdleRobots and the click test's robots.idle: a surface walker (one AdvanceDrawn draws) busy, waiting in the ring round
-	// a Charging Pad (walking to its slot, standing at it, or walking back), standing in the Lander's rank, or inspecting a building.
+	// a Charging Pad (walking to its slot, standing at it, or walking back), standing in the Lander's rank, or inspecting a building;
+	// P2 W2: or staying put (no working pad, and not its Lander rank slot, within reach of its sim position).
 	enum class EIdleShow : uint8
 	{
-		NotWalker = 0, Busy, AtPad, LanderRank, Inspecting
+		NotWalker = 0, Busy, AtPad, LanderRank, Inspecting, StayPut
 	};
 	struct FIdleDebug
 	{
@@ -90,10 +91,23 @@ public:
 		float NextInspectS = -1.f;            // sim seconds of waiting at its slot before it next inspects (-1: none to inspect, or away)
 		float InspectLeftS = 0.f;             // sim seconds of Operate left at the building
 		bool bInspecting = false;             // standing at the building playing Operate
+		// P2 (the walks design).
+		FVector SimCm = FVector::ZeroVector;  // its sim position, for every tracked robot (its pad, its rank and their reach are chosen from it)
+		float KeepOutCm = 0.f;                // ruling 28: its pad's keep-out radius: no idle walk at that pad comes nearer its centre (0: no pad)
+		float DrawnRadiusCm = 0.f;            // that pad's drawn radius (the larger horizontal half-extent of its model's bounds, as fitted)
+		int32 InspectStand = INDEX_NONE;      // W3: which of its building's stand points it heads for or stands at (0: the one nearest the pad)
 	};
 	bool GetIdleDebug(int32 Index, FIdleDebug& Out) const;
 	// RH.IdleRobots (READ-ONLY): one line per surface walker and one per working pad in the cache.
 	void LogIdleRobots() const;
+	// P2 (ruling 28; RH.IdleRobots, the click test): a finished surface Charging Pad's keep-out radius (0: no such pad), and its drawn radius
+	// into *OutDrawnRadiusCm when given.
+	float GetPadKeepOutCm(int32 PadId, float* OutDrawnRadiusCm = nullptr) const;
+	// The drawn positions of the robots docked at a finished surface pad on the last tick (every idle walk keeps DockKeepCm from each); their count.
+	int32 GetPadDockedDrawnCm(int32 PadId, TArray<FVector>& Out) const;
+	// P2 W3 (the click test): a cached pad's ring slot: where it stands, whether a figure may take it, and the lower pad whose open slot stands
+	// within IdleApartCm of it (0: none). False when the pad is not in the cache or has no such slot.
+	bool GetIdlePadSlot(int32 PadId, int32 Slot, FVector& OutCm, bool& bOutOpen, int32& OutNearSlotOfPad) const;
 
 private:
 	void EnsureMeshComponent();
@@ -122,7 +136,7 @@ private:
 	// One small regolith-lump component per skeletal robot (professor-gated
 	// 2026-08-18): visible while the robot's FRHTaskFragment carries CargoKg,
 	// scaled by load fraction. Read from the PUBLIC Mass fragments - no sim
-	// accessor, no sim recompile.
+	// accessor, no sim recompile. P2 M1: attached to the walker's chest bone, its front face on the figure's back.
 	TArray<TWeakObjectPtr<UStaticMeshComponent>> CargoLumps;
 	bool bUseSkeletal = false;
 	// C6b: a cargo rover (RobotClass Rover, the RC_R row) is a truck, not a walker: one static mesh (the
@@ -238,12 +252,24 @@ private:
 		bool bIdleFace = false;                     // standing at its slot or the building: Tick turns it to IdleYawDeg
 		float IdleYawDeg = 0.f;
 		bool bInspecting = false;                   // at the building: Tick plays Operate
+		// P2 W2: no working pad, and not its Lander rank slot, within IdleReachCm of its sim position: it stands where it is drawn.
+		bool bStayPut = false;
+		// P2 (ruling 28): the task in hand arrived while the figure was drawn in a pad's round (a slot held): the task's walks (its trip, or the
+		// walk over to where it begins) keep off the pads until the task ends.
+		bool bKeepOff = false;
+		bool bFreeKeptOff = false;       // its free walk (FreePath) was planned round the keep-outs
+		uint32 KeepOffSerial = 0;        // the KeepOutSerial its kept-off walk or trip was last planned or checked against
+		float TripDoneCm = 0.f;          // how far along its off-road trip path it is drawn (what is left of a kept-off trip is checked from here)
+		int32 InspectStand = INDEX_NONE; // P2 W3: which stand point of its building it took (an index into that building's own)
 	};
 	TArray<FRobotTrip> Trips;
 	uint32 TickSerial = 0; // this subsystem's ticks: what a figure was drawn doing on the last one
 	// Idle robots look busy: the working surface Charging Pads (the ones FindNearestChargePad docks at), each with its ring of 20 waiting
-	// slots and the buildings near it to inspect. Rebuilt once a second of real time, or at once when the building count, a surface pad's
-	// state or the set of surface sites changes; a rebuild bumps IdlePadsSerial and every waiting figure chooses its pad again.
+	// slots and the buildings near it to inspect. Rebuilt only when its key changes (P2; IdlePadsKey: a surface building placed, removed or
+	// finished, or a Charging Pad switched off or on) and on the first tick after a load; a rebuild bumps IdlePadsSerial and every waiting
+	// figure chooses its pad again. Everything it holds is derived from that key (the surface buildings, their Defs rows, constants, and the
+	// Charging Pad model asset's bounds, read once with LoadObject (P2 W1's drawn radius)): nothing may be added to it that depends on a
+	// robot's position, a cvar or another visualizer's actors, or it goes stale.
 	struct FIdlePad
 	{
 		FVector CentreCm = FVector::ZeroVector;
@@ -258,20 +284,77 @@ private:
 		// Where the robots docked at this pad stand (the sim's Charge task, docked: its sim position), refreshed every tick: no figure waits
 		// at a slot within IdleDockClearCm of one, so a waiting figure never stands in line behind the charging robot.
 		TArray<FVector> DockedCm;
+		// P2 (ruling 28): its keep-out, as in KeepOuts (GetIdleDebug and RH.IdleRobots read it here).
+		float KeepOutCm = 0.f;
+		float DrawnRadiusCm = 0.f;
+		TArray<int32> SlotKeptOutBy;     // per slot: the pad whose keep-out holds it (0: none), so it is closed
+		TArray<int32> SlotNearSlotOf;    // P2 W3: per slot: the lower pad whose open slot stands within IdleApartCm of it (0: none), so it is closed
+		// P2 W3: per building in Inspect, its stand points StandCm[StandStart[b], StandStart[b + 1]); the first is InspectAtCm[b].
+		TArray<FVector> StandCm;
+		TArray<int32> StandStart;        // Inspect.Num() + 1 entries
 		bool NearDock(int32 Slot) const;
 	};
 	TMap<int32, FIdlePad> IdlePads;
-	uint32 IdlePadsKey = 0;
-	uint32 IdlePadsSerial = 0;
-	double NextIdlePadsS = 0.0;
+	TArray<uint64> IdlePadsKey;   // the key the cache was built from: one IdlePadKeyEntry per surface building, in the sim's order
+	bool bIdlePadsBuilt = false;  // false before the first build and after a load (ResetTracking): the next tick rebuilds whatever the key
+	uint32 IdlePadsSerial = 0;    // bumped by every rebuild (RH.IdleRobots prints it)
+	double NextIdleRetryS = 0.0;  // the next once-a-second tick (real time): a figure sent to the rank by a full ring looks again on it
+	bool bIdleRetryDue = false;   // this tick is one (RefreshIdlePads sets it, ChooseIdlePad reads it)
+	// Developer counters (P2; RH.IdleRobots and rh.RobotRouteLog's line; never reset): ChooseIdlePad's runs past its early-out, by what
+	// sent the figure through.
+	struct FIdleChoiceRuns
+	{
+		uint32 NewSpell = 0;      // the first choice of an idle spell
+		uint32 AfterRebuild = 0;  // the cache was rebuilt since the figure last chose
+		uint32 MakingWay = 0;     // a robot docked within IdleDockClearCm of its slot
+		uint32 FullRingRetry = 0; // its pad's ring had no free slot: the once-a-second look
+		uint32 Total() const { return NewSpell + AfterRebuild + MakingWay + FullRingRetry; }
+	};
+	FIdleChoiceRuns IdleChoiceRuns;
 	void RefreshIdlePads();
 	void GatherDocked(const FMassEntityManager& EntityManager);
 	void ChooseIdlePad(int32 i, FRobotTrip& T, const FVector& SimPos);
 	static void ResetIdle(FRobotTrip& T);
+	// P2 (ruling 28): the keep-out round every FINISHED surface Charging Pad (switched on or off), and round every robot drawn docked at one.
+	struct FIdleKeepOut
+	{
+		int32 PadId = 0;
+		bool bOff = false;
+		FVector2D CentreCm = FVector2D::ZeroVector;
+		float DrawnRadiusCm = 0.f;
+		float KeepOutCm = 0.f;
+	};
+	struct FDockDisc
+	{
+		int32 PadId = 0;
+		int32 Index = INDEX_NONE;             // the docked robot's tracked index
+		FVector2D DrawnCm = FVector2D::ZeroVector;
+	};
+	TArray<FIdleKeepOut> KeepOuts;   // rebuilt with the pad cache, in the sim's building order
+	TArray<FDockDisc> DockDiscs;     // the docked robots KeepOutBoxes was last built round
+	TArray<FDockDisc> DockNow;       // this tick's (GatherDocked)
+	TArray<FBox2D> KeepOutBoxes;     // three per disc (pads, then docked robots), appended to Obstacles only for one kept-off PlanRoute call
+	uint32 KeepOutSerial = 0;        // moves only when KeepOutBoxes changes; never reset, so a walk planned before a load can never match a later one
+	float PadModelHalfCm = -1.f;     // the Charging Pad model's larger horizontal half-extent, from its own bounds (-1: not read yet; 0: no model)
+	// Developer evidence for RH.IdleRobots since the last load: kept-off plans, start exits, plans boxed in (today's route instead), frames an idle
+	// walk held at the leash (W2) and inspections ended there, the keep-out serial's moves on a docking change, and the nearest a kept-off plan
+	// came to a pad's centre and to a docked robot.
+	int32 KeptOffPlans = 0, KeptOffExits = 0, KeptOffFallbacks = 0, IdleLeashFrames = 0, IdleLeashInspectEnds = 0, DockSerialBumps = 0;
+	float KeptOffNearestPadCm = TNumericLimits<float>::Max();
+	float KeptOffNearestDockCm = TNumericLimits<float>::Max();
+	void RebuildKeepOutBoxes();
+	void PlanKeptOff(const FVector& From, const FVector& To, TArray<FVector>& OutPath);
+	bool KeptOffClear(const TArray<FVector>& Path, float DoneCm) const;
+	bool AnyBoxBlocks(const FVector& A, const FVector& B) const;
+	int32 InPadKeepOut(const FVector2D& P, int32 ExceptPadId) const;  // the pad whose keep-out holds P (0: none)
+	bool InDockDisc(const FVector2D& P) const;
+	int32 FreeStand(const FIdlePad& Pad, int32 Building, int32 Self) const; // P2 W3
 	TArray<FVector> SimLastPosCm; // the sim's position last frame (its own speed)
 	double NextRouteLogS = 0.0;   // rh.RobotRouteLog's next report
 	// Idle robots (gate tool): this subsystem's own Tick durations (ms) since the last rh.RobotRouteLog line, for that line's median.
 	TArray<double> RouteLogTickMs;
+	FIdleChoiceRuns RouteLogChoicesAt; // P2: IdleChoiceRuns at the last rh.RobotRouteLog line, or on the last tick with the log off
+	uint32 RouteLogSerialAt = 0;       // IdlePadsSerial at the same moment
 	// Surface building footprints (expanded by a robot's clearance), rebuilt
 	// each tick; robots route around them.
 	TArray<FBox2D> Obstacles;

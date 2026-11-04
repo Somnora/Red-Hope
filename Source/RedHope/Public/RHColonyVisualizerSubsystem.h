@@ -98,10 +98,15 @@ public:
 	// and whether the model is drawn wearing that MID. False when the site has no model to reveal (or is no site).
 	bool GetSiteRevealCut(int32 BuildingId, float& OutCutZ, float& OutBottomZ, bool& bOutModelVisible) const;
 	// The fabrication fraction a site's own model was last revealed to (0..1, in 5 % steps), or -1 while the site waits
-	// for materials, has no model to reveal (a pressurized shell, a greenhouse deck, the Floodmast) or is not a site.
+	// for materials, has no model to reveal (a pressurized shell, a greenhouse deck, the Floodmast) or is not a site
+	// (the step the site is drawn at; a per-model cut hold can keep the model's cut lower, which GetSiteRevealCut reads).
 	float GetSiteRevealFraction(int32 BuildingId) const;
-	// RH.Sites: one log line per site (stage, step, crates, courses, instances) - captures and QA pick their frames by it.
+	// RH.Sites: one log line per site (stage, step, the drawn cut, crates, courses, instances) - captures and QA pick their frames by it.
 	void LogSites() const;
+	// RH.SitePose (captures): draw site BuildingId (-1 = every site) as fabrication at Percent, rounded down to a 5 % step, instead
+	// of the sim's progress; Percent < 0 follows the sim again. Presentation only: the sim's progress and completion are untouched.
+	// False when no site matched.
+	bool Debug_PoseSite(int32 BuildingId, int32 Percent);
 
 	// Live tuning of the ambient emissive throb (QA verdict 4). Scale is applied
 	// against each building's AUTHORED PulseDepth, so the art-bible mix between
@@ -331,6 +336,9 @@ private:
 		int32 Step = -1;                       // the progress step drawn, 0..20 (5 % each): delivery while waiting, then fabrication
 		float RevealBottomCm = 0.f;            // the model's world Z span; RevealHeightCm 0 = no model to reveal
 		float RevealHeightCm = 0.f;
+		int32 CutHoldStep = -1;                // a per-model cut hold (RHSiteKit::CutHolds): a step after CutHoldStep and before
+		int32 CutReleaseStep = -1;             // CutReleaseStep draws CutHoldStep's cut (-1 / -1: no hold)
+		int32 PoseStep = -1;                   // RH.SitePose: the step drawn instead of the sim's, as fabrication (-1 follows the sim)
 		TArray<TWeakObjectPtr<UMaterialInstanceDynamic>> RevealMids;
 		TWeakObjectPtr<UStaticMeshComponent> RevealMesh;
 		int32 Count[SiteKitParts] = { 0, 0, 0, 0 }; // instances it holds now in each kit HISM (set by RebuildSiteKit)

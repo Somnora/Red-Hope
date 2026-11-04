@@ -1582,7 +1582,11 @@ static FAutoConsoleCommandWithWorldAndArgs GRHMarket(
 		if (Sub == TEXT("history"))
 		{
 			// E8: log only (console output is not discovery-gated, as E5's join line is not).
-			for (int32 m = 0; m < Sim->GetMarketRegionCount(); ++m)
+			// E7 review: GetMarketRegionCount() is Markets.Num() as last synced and does not sync; GetMarketRegionIdAt syncs first
+			// (SyncRivalEconomies), so it is called for that before the count bounds the loop. Nothing in the loop bumps the rivals generation.
+			(void)Sim->GetMarketRegionIdAt(0);
+			const int32 Regions = Sim->GetMarketRegionCount();
+			for (int32 m = 0; m < Regions; ++m)
 			{
 				const int32 Region = Sim->GetMarketRegionIdAt(m);
 				UE_LOG(LogRedHope, Display, TEXT("[RH.Market] history, region %d: %d sols, the newest sol %d"), Region, Sim->GetMarketHistoryFill(Region), Sim->GetMarketHistoryLastSol(Region));
@@ -1626,10 +1630,14 @@ static FAutoConsoleCommandWithWorldAndArgs GRHMarket(
 			*URHSimWorldSubsystem::FormatCredits(Sim->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetSpendableMcr()), *URHSimWorldSubsystem::FormatCredits(Sim->GetMarketSalesMcr()));
 		// E7: one block per market region, each read with its own region; the "region N" line prints only when there is more than one, so
 		// one region prints the lines it always did.
-		for (int32 m = 0; m < Sim->GetMarketRegionCount(); ++m)
+		// E7 review: GetMarketRegionCount() is Markets.Num() as last synced and does not sync; GetMarketRegionIdAt syncs first
+		// (SyncRivalEconomies), so it is called for that before the count bounds the loop. Nothing in the loop bumps the rivals generation.
+		(void)Sim->GetMarketRegionIdAt(0);
+		const int32 Regions = Sim->GetMarketRegionCount();
+		for (int32 m = 0; m < Regions; ++m)
 		{
 			const int32 Region = Sim->GetMarketRegionIdAt(m);
-			if (Sim->GetMarketRegionCount() > 1) { UE_LOG(LogRedHope, Display, TEXT("  region %d"), Region); }
+			if (Regions > 1) { UE_LOG(LogRedHope, Display, TEXT("  region %d"), Region); }
 			for (int32 i = 0; i < Sim->GetLedgerSlotCount(); ++i)
 			{
 				const FName Res = Sim->GetLedgerSlotName(i);
@@ -2580,13 +2588,31 @@ static FAutoConsoleCommandWithWorldAndArgs GRHTramWait(
 // Visual pass item 2: what every construction site is drawing (stage, 5 % step, crates, scaffold courses, kit instances).
 static FAutoConsoleCommandWithWorldAndArgs GRHSites(
 	TEXT("RH.Sites"),
-	TEXT("RH.Sites - READ-ONLY: log each construction site's stage (waiting for materials / fabrication), its 5 % step, crates, scaffold courses and site kit instances."),
+	TEXT("RH.Sites - READ-ONLY: log each construction site's stage (waiting for materials / fabrication), its 5 % step, the model's cut as drawn (held when a per-model cut hold keeps it lower), crates, scaffold courses and site kit instances."),
 	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 	{
 		if (const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
 		{
 			Viz->LogSites();
 		}
+	}));
+
+// Sites follow-up (the cut hold's capture): pose a construction site, as RH.TramPose poses a tram. The visualizer draws the site at
+// that fabrication percent instead of the sim's; the sim is not touched.
+static FAutoConsoleCommandWithWorldAndArgs GRHSitePose(
+	TEXT("RH.SitePose"),
+	TEXT("RH.SitePose <BuildingId|all> <Percent 0..100|off> - DEBUG: draw the construction site (or every site) as fabrication at that percent, in 5 % steps, instead of its real progress; off follows the sim again. Presentation only."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+		if (!Viz || Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.SitePose <BuildingId|all> <Percent 0..100|off>"));
+			return;
+		}
+		const int32 Id = Args[0].Equals(TEXT("all"), ESearchCase::IgnoreCase) ? -1 : FCString::Atoi(*Args[0]);
+		const int32 Percent = Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? -1 : FMath::Clamp(FCString::Atoi(*Args[1]), 0, 100);
+		UE_LOG(LogRedHope, Display, TEXT("[RH.SitePose] %s %s: %s"), *Args[0], *Args[1], Viz->Debug_PoseSite(Id, Percent) ? TEXT("posed") : TEXT("no such site"));
 	}));
 
 // Idle robots look busy (docs/qa/2026-10-28/robot-idle-brief.md): what every surface robot is drawn doing while idle.

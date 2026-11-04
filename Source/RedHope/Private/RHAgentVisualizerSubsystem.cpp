@@ -36,6 +36,13 @@ namespace
 		const FString S = Suffix.ToString();
 		return FString::Printf(TEXT("/Game/RedHope/Art/RobotAnim/RH_Walker_robot/SkeletalMeshes/RH_Walker_robot%s.RH_Walker_robot%s"), *S, *S);
 	}
+	// P2 M1: the cargo lump rides the walker's chest bone. RH_Walker_robot's reference skeleton (RH_Walker_robot_Skeleton) leaves every
+	// torso bone unrotated, so the bone's X is the figure's side, Y its front and Z up, and puts the chest at (0, 100.37, 43.97) mesh cm;
+	// the back's surface on the spine column, 30-50 cm up the mesh, is near Y 86; the soles are at Z -99.61. Mesh cm: the walker's scale
+	// (x0.9026 for its 180 cm) applies to them through the attachment.
+	const FName LumpBone(TEXT("chest"));
+	constexpr float LumpFrontYCm = -14.4f; // the lump's front face, behind the chest bone: on the back (mesh Y 86)
+	constexpr float LumpDropCm = -4.0f;    // its centre, below the chest bone: mesh Z 40, 126 cm above the soles at x0.9026
 }
 
 static TAutoConsoleVariable<float> CVarRobotStrideCm(
@@ -108,7 +115,7 @@ static TAutoConsoleVariable<int32> CVarRobotRouting(
 static TAutoConsoleVariable<int32> CVarRobotRouteLog(
 	TEXT("rh.RobotRouteLog"),
 	0,
-	TEXT("DEBUG: every 2 s, log how many robots stand inside a building footprint that is not their own trip's (drawn vs sim position), how far the drawn figure is from the sim, how many are parked, how many idle robots are drawn waiting at a pad, at the Lander rank and inspecting, and the median of this subsystem's own Tick time since the last line."),
+	TEXT("DEBUG: every 2 s, log how many robots stand inside a building footprint that is not their own trip's (drawn vs sim position), how far the drawn figure is from the sim, how many are parked, how many idle robots are drawn waiting at a pad, at the Lander rank and inspecting, and the median of this subsystem's own Tick time since the last line. Each line also gives how many times the idle pad cache was rebuilt, and how many pad choices the idle figures made, since the last line."),
 	ECVF_Default);
 
 namespace
@@ -128,6 +135,30 @@ namespace
 	constexpr float IdleDockClearCm = 500.f;
 	const FName ChargePadName(TEXT("ChargePad"));
 	const FName LanderName(TEXT("Lander"));
+	// P2: one surface building's entry in the idle pad cache's key: its Id, bit 0 a construction site, bit 1 a Charging Pad switched off.
+	// A building's kind, place, size and floor never change once it is placed (URHSimWorldSubsystem::AddBuilding), so its Id stands for all four.
+	uint64 IdlePadKeyEntry(const FRHBuildingInstance& B)
+	{
+		return ((uint64)(uint32)B.Id << 2) | (B.bUnderConstruction ? 1u : 0u) | ((B.bManualOff && B.DefName == ChargePadName) ? 2u : 0u);
+	}
+	// P2, ruling 28 (docs/qa/2026-10-26/preflight/ORCHESTRATOR-RULINGS.md): walking figures keep off a charging pad (display only).
+	// KeepOutCm = the pad's drawn radius + KeepOutOverDrawnCm, never under PadHalf + RobotClearanceCm + KeepOutOverClearCm (350 cm for the 2x2 pad).
+	constexpr float KeepOutOverDrawnCm = 100.f;
+	constexpr float KeepOutOverClearCm = 60.f;
+	constexpr float DockKeepCm = 150.f;          // and at least this from a robot drawn docked at a pad
+	constexpr float KeepRouteMarginCm = 25.f;    // routes are planned this far outside both (a figure lagging its path cuts a corner a few cm)
+	constexpr float DockDriftCm = 25.f;          // a docked robot drawn this far from where the walks were planned round it: they are checked again
+	// The Charging Pad's model as the colony visualizer draws it (RHColonyVisualizerSubsystem.cpp, ModelPathsV2): its bounds, fitted as the
+	// visualizer fits them, give the pad's drawn radius.
+	const TCHAR* ChargePadModelPath = TEXT("/Game/RedHope/Art/Models2/ChargePad/ChargePad/StaticMeshes/ChargePad.ChargePad");
+	// P2 W2: an idle figure walks to a pad (its centre) or to its Lander rank slot only within IdleReachCm of its sim position, and an idle walk
+	// never carries it more than IdleLeashCm from it (AdvanceDrawn snaps a figure drawn more than 8000 cm from its sim position back to it).
+	constexpr float IdleReachCm = 5000.f;
+	constexpr float IdleLeashCm = 7500.f;
+	// P2 W3: a building's stand points stand InspectSpreadCm apart along its clearance box; no two inspecting figures' stand points, and no two
+	// pads' open ring slots, stand nearer each other than IdleApartCm.
+	constexpr float InspectSpreadCm = 150.f;
+	constexpr float IdleApartCm = 100.f;
 
 	float PathLength(const TArray<FVector>& Path)
 	{
@@ -191,6 +222,55 @@ namespace
 			}
 		}
 		return true;
+	}
+
+	// P2 (ruling 28): a keep-out disc of radius R as three axis boxes centred on it, half-extents (R, R/sqrt3), (R sqrt(2/3), R sqrt(2/3)) and
+	// (R/sqrt3, R). Their union holds the disc, its outline stays within R sqrt(4/3) = 1.155 R of the centre, and PlanRoute (unchanged) routes
+	// round boxes: a path that enters none of the three (as SegmentHitsBox insets them, 1 cm) stays at least R - 1.4 cm from the centre.
+	constexpr double DiscSide = 0.57735026918962576; // 1 / sqrt(3)
+	constexpr double DiscMid = 0.81649658092772603;  // sqrt(2 / 3)
+	void AddDiscBoxes(TArray<FBox2D>& Out, const FVector2D& C, double R)
+	{
+		Out.Add(FBox2D(C - FVector2D(R, R * DiscSide), C + FVector2D(R, R * DiscSide)));
+		Out.Add(FBox2D(C - FVector2D(R * DiscMid, R * DiscMid), C + FVector2D(R * DiscMid, R * DiscMid)));
+		Out.Add(FBox2D(C - FVector2D(R * DiscSide, R), C + FVector2D(R * DiscSide, R)));
+	}
+	// Inside one of the three (strictly, as FBox2D::IsInside).
+	bool InDiscBoxes(const FVector2D& P, const FVector2D& C, double R)
+	{
+		const double Dx = FMath::Abs(P.X - C.X), Dy = FMath::Abs(P.Y - C.Y);
+		return (Dx < R && Dy < R * DiscSide) || (Dx < R * DiscMid && Dy < R * DiscMid) || (Dx < R * DiscSide && Dy < R);
+	}
+	// How far the ray from the disc's centre along the unit U runs before it leaves the last of its three boxes (each holds the centre and is
+	// convex, so the ray leaves the union at the largest of the three exits).
+	double DiscExitCm(const FVector2D& U, double R)
+	{
+		const auto Leave = [&U](double Hx, double Hy)
+		{
+			const double Tx = FMath::Abs(U.X) > UE_KINDA_SMALL_NUMBER ? Hx / FMath::Abs(U.X) : TNumericLimits<double>::Max();
+			const double Ty = FMath::Abs(U.Y) > UE_KINDA_SMALL_NUMBER ? Hy / FMath::Abs(U.Y) : TNumericLimits<double>::Max();
+			return FMath::Min(Tx, Ty);
+		};
+		return FMath::Max3(Leave(R, R * DiscSide), Leave(R * DiscMid, R * DiscMid), Leave(R * DiscSide, R));
+	}
+	// P2 W3: a point on a box's outline as its distance S along it, counter-clockwise from Min (bottom, right, top, left), and back (S wraps).
+	double OutlineS(const FBox2D& Box, const FVector2D& P)
+	{
+		const double W = Box.Max.X - Box.Min.X, H = Box.Max.Y - Box.Min.Y;
+		if (P.Y <= Box.Min.Y) { return P.X - Box.Min.X; }
+		if (P.X >= Box.Max.X) { return W + (P.Y - Box.Min.Y); }
+		if (P.Y >= Box.Max.Y) { return W + H + (Box.Max.X - P.X); }
+		return 2.0 * W + H + (Box.Max.Y - P.Y);
+	}
+	FVector2D OutlineAt(const FBox2D& Box, double S)
+	{
+		const double W = Box.Max.X - Box.Min.X, H = Box.Max.Y - Box.Min.Y, L = 2.0 * (W + H);
+		S = FMath::Fmod(S, L);
+		if (S < 0.0) { S += L; }
+		if (S < W) { return FVector2D(Box.Min.X + S, Box.Min.Y); }
+		if (S < W + H) { return FVector2D(Box.Max.X, Box.Min.Y + (S - W)); }
+		if (S < 2.0 * W + H) { return FVector2D(Box.Max.X - (S - W - H), Box.Max.Y); }
+		return FVector2D(Box.Min.X, Box.Max.Y - (S - 2.0 * W - H));
 	}
 }
 
@@ -332,6 +412,152 @@ void URHAgentVisualizerSubsystem::PlanRoute(const FVector& From, const FVector& 
 	OutPath.Add(To);
 }
 
+void URHAgentVisualizerSubsystem::PlanKeptOff(const FVector& From, const FVector& To, TArray<FVector>& OutPath)
+{
+	// P2 (ruling 28): PlanRoute (unchanged) over the footprints and the keep-outs together: KeepOutBoxes are appended to Obstacles for this one
+	// call. A box holding the goal is dropped by PlanRoute, as for any trip's own building: so the robot docking at a pad, and a figure whose job
+	// site is the pad (or a docked robot it goes to), walk in.
+	++KeptOffPlans;
+	// A start inside a keep-out: the robot leaving the mast it charged at (exempt by the ruling), or a figure a robot docked beside. It walks
+	// straight out first, along the ray from that disc's centre to 10 cm past its boxes (at most twice, for overlapping discs), unless a
+	// footprint's box is in the way; then it is routed from there.
+	FVector Start = From;
+	TArray<FVector, TInlineAllocator<2>> Exits;
+	for (int32 Step = 0; Step < 2; ++Step)
+	{
+		const FVector2D S2(Start.X, Start.Y);
+		FVector2D DiscC = FVector2D::ZeroVector;
+		double DiscR = 0.0;
+		bool bHeld = false;
+		for (const FIdleKeepOut& KO : KeepOuts)
+		{
+			if (!bHeld && InDiscBoxes(S2, KO.CentreCm, KO.KeepOutCm + KeepRouteMarginCm))
+			{
+				DiscC = KO.CentreCm;
+				DiscR = KO.KeepOutCm + KeepRouteMarginCm;
+				bHeld = true;
+			}
+		}
+		for (const FDockDisc& Disc : DockDiscs)
+		{
+			if (!bHeld && InDiscBoxes(S2, Disc.DrawnCm, DockKeepCm + KeepRouteMarginCm + DockDriftCm))
+			{
+				DiscC = Disc.DrawnCm;
+				DiscR = DockKeepCm + KeepRouteMarginCm + DockDriftCm;
+				bHeld = true;
+			}
+		}
+		if (!bHeld)
+		{
+			break;
+		}
+		FVector2D U = S2 - DiscC;
+		if (U.IsNearlyZero())
+		{
+			U = FVector2D(To.X, To.Y) - DiscC; // drawn on the disc's centre (a robot that docked by road): out towards its goal
+		}
+		if (U.IsNearlyZero())
+		{
+			U = FVector2D(-1.0, 0.0);
+		}
+		U.Normalize();
+		const FVector2D E2 = DiscC + U * (DiscExitCm(U, DiscR) + 10.0);
+		const FVector E(E2.X, E2.Y, From.Z);
+		// Only footprints are in Obstacles here: the exit point must not stand in one, and the straight walk out must not cross one.
+		bool bExitInBox = false;
+		for (const FBox2D& O : Obstacles)
+		{
+			bExitInBox = bExitInBox || O.IsInside(E2);
+		}
+		if (bExitInBox || AnyBoxBlocks(Start, E))
+		{
+			break;
+		}
+		Exits.Add(E);
+		Start = E;
+		++KeptOffExits;
+	}
+	const int32 Bare = Obstacles.Num();
+	Obstacles.Append(KeepOutBoxes);
+	PlanRoute(Start, To, OutPath);
+	const bool bBoxedIn = OutPath.Num() == 2 && AnyBoxBlocks(Start, To); // PlanRoute's straight answer when no way round exists
+	Obstacles.SetNum(Bare, EAllowShrinking::No);
+	if (bBoxedIn)
+	{
+		// The keep-outs and the footprints close the goal in: today's route (the footprints only), counted for RH.IdleRobots.
+		++KeptOffFallbacks;
+		PlanRoute(From, To, OutPath);
+		return;
+	}
+	// Developer evidence (RH.IdleRobots): the nearest the planned route comes to a pad's centre and to a docked robot, from its last exit on,
+	// leaving out a disc that holds its start or its goal (those legs are exempt or walk in).
+	const FVector2D Start2(Start.X, Start.Y), Goal2(To.X, To.Y);
+	for (int32 k = 1; k < OutPath.Num(); ++k)
+	{
+		const FVector SegA(OutPath[k - 1].X, OutPath[k - 1].Y, 0.0), SegB(OutPath[k].X, OutPath[k].Y, 0.0);
+		for (const FIdleKeepOut& KO : KeepOuts)
+		{
+			const double R = KO.KeepOutCm + KeepRouteMarginCm;
+			if (!InDiscBoxes(Start2, KO.CentreCm, R) && !InDiscBoxes(Goal2, KO.CentreCm, R))
+			{
+				KeptOffNearestPadCm = FMath::Min(KeptOffNearestPadCm, (float)FMath::PointDistToSegment(FVector(KO.CentreCm.X, KO.CentreCm.Y, 0.0), SegA, SegB));
+			}
+		}
+		for (const FDockDisc& Disc : DockDiscs)
+		{
+			const double R = DockKeepCm + KeepRouteMarginCm + DockDriftCm;
+			if (!InDiscBoxes(Start2, Disc.DrawnCm, R) && !InDiscBoxes(Goal2, Disc.DrawnCm, R))
+			{
+				KeptOffNearestDockCm = FMath::Min(KeptOffNearestDockCm, (float)FMath::PointDistToSegment(FVector(Disc.DrawnCm.X, Disc.DrawnCm.Y, 0.0), SegA, SegB));
+			}
+		}
+	}
+	if (Exits.Num() > 0)
+	{
+		OutPath.Insert(From, 0);       // From, then each exit, then the route from the last exit (OutPath[0] was that exit)
+		if (Exits.Num() == 2)
+		{
+			OutPath.Insert(Exits[0], 1);
+		}
+	}
+}
+
+bool URHAgentVisualizerSubsystem::KeptOffClear(const TArray<FVector>& Path, float DoneCm) const
+{
+	// P2 (ruling 28): what is left of a kept-off path, from its point at arc length DoneCm: true while none of it passes inside a keep-out box
+	// (one holding where the figure is now, or the path's end, excepted, as PlanRoute excepts them). Read once per KeepOutSerial change.
+	if (Path.Num() < 2)
+	{
+		return true;
+	}
+	const FVector NowCm = PointAlong(Path, DoneCm);
+	const FVector2D Now2(NowCm.X, NowCm.Y), End2(Path.Last().X, Path.Last().Y);
+	int32 k = 1;
+	for (float Acc = 0.f; k < Path.Num(); ++k)
+	{
+		const float Seg = (float)FVector::Dist2D(Path[k - 1], Path[k]);
+		if (Acc + Seg >= DoneCm)
+		{
+			break;
+		}
+		Acc += Seg;
+	}
+	FVector2D From2 = Now2;
+	for (; k < Path.Num(); ++k)
+	{
+		const FVector2D To2(Path[k].X, Path[k].Y);
+		for (const FBox2D& Box : KeepOutBoxes)
+		{
+			if (!Box.IsInside(Now2) && !Box.IsInside(End2) && SegmentHitsBox(From2, To2, Box))
+			{
+				return false;
+			}
+		}
+		From2 = To2;
+	}
+	return true;
+}
+
 FVector URHAgentVisualizerSubsystem::ParkSlotCm(int32 Index) const
 {
 	UWorld* World = GetWorld();
@@ -369,6 +595,11 @@ FVector URHAgentVisualizerSubsystem::ParkSlotCm(int32 Index) const
 				break;
 			}
 		}
+		// P2 (ruling 28): nor inside a pad's keep-out (a leg from a ring slot to the rank could not keep off that pad).
+		if (bFree && InPadKeepOut(P, 0) != 0)
+		{
+			bFree = false;
+		}
 		if (bFree)
 		{
 			return FVector(P.X, P.Y, 0.0);
@@ -379,6 +610,7 @@ FVector URHAgentVisualizerSubsystem::ParkSlotCm(int32 Index) const
 
 void URHAgentVisualizerSubsystem::RefreshIdlePads()
 {
+	bIdleRetryDue = false;
 	UWorld* World = GetWorld();
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
@@ -387,34 +619,88 @@ void URHAgentVisualizerSubsystem::RefreshIdlePads()
 		return;
 	}
 	const TArray<FRHBuildingInstance>& Buildings = Sim->GetBuildings();
-	// What the cache depends on: the building count, every surface pad's state (built, switched on) and which surface buildings are
-	// still sites. A change rebuilds it at once; otherwise once a second of real time.
-	uint32 Key = GetTypeHash(Buildings.Num());
-	for (const FRHBuildingInstance& B : Buildings)
+	// P2: once a second of real time a figure sent to the Lander rank by a full ring looks again (ChooseIdlePad); nothing is rebuilt then.
+	const double Now = FPlatformTime::Seconds();
+	if (Now >= NextIdleRetryS)
 	{
-		if (B.Level != 0)
+		NextIdleRetryS = Now + 1.0;
+		bIdleRetryDue = true;
+	}
+	// The key (P2): one IdlePadKeyEntry per surface building, in the sim's order (Buildings is Id-ascending and a removal keeps the order):
+	// its Id, whether it is a site, and for a Charging Pad whether it is switched off. That is everything the cache and a figure's pad choice
+	// read: the pads FindNearestChargePad docks a surface robot at (finished, switched on, Level 0), every surface footprint (Obstacles: the
+	// open slots, the stand points and ParkSlotCm's rank), the Lander, and which surface buildings are finished (the inspection lists).
+	// Compared in place on every tick, with no allocation; the cache is rebuilt, and IdlePadsSerial bumped, only when the key differs, and on
+	// the first tick after a load (bIdlePadsBuilt).
+	bool bSame = bIdlePadsBuilt;
+	int32 NumSurface = 0;
+	for (int32 b = 0; bSame && b < Buildings.Num(); ++b)
+	{
+		if (Buildings[b].Level == 0)
 		{
-			continue;
-		}
-		if (B.DefName == ChargePadName)
-		{
-			Key = HashCombine(Key, HashCombine(GetTypeHash(B.Id), (B.bUnderConstruction ? 1u : 0u) | (B.bManualOff ? 2u : 0u) | 4u));
-		}
-		else if (B.bUnderConstruction)
-		{
-			Key = HashCombine(Key, GetTypeHash(B.Id));
+			bSame = IdlePadsKey.IsValidIndex(NumSurface) && IdlePadsKey[NumSurface] == IdlePadKeyEntry(Buildings[b]);
+			++NumSurface;
 		}
 	}
-	const double Now = FPlatformTime::Seconds();
-	if (Key == IdlePadsKey && Now < NextIdlePadsS)
+	if (bSame && NumSurface == IdlePadsKey.Num())
 	{
 		return;
 	}
-	IdlePadsKey = Key;
-	NextIdlePadsS = Now + 1.0;
+	IdlePadsKey.Reset();
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level == 0)
+		{
+			IdlePadsKey.Add(IdlePadKeyEntry(B));
+		}
+	}
+	bIdlePadsBuilt = true;
 	++IdlePadsSerial;
 	IdlePads.Reset();
 	const FRHBuildingInstance* Lander = Buildings.FindByPredicate([](const FRHBuildingInstance& B) { return B.DefName == LanderName && B.Level == 0; });
+	// P2 (ruling 28): the keep-out round every FINISHED surface Charging Pad, switched on or off (a leg from a ring slot to the Lander rank after
+	// Switch OFF keeps off that pad too). KeepOutCm = the pad's drawn radius + KeepOutOverDrawnCm, never under PadHalf + RobotClearanceCm +
+	// KeepOutOverClearCm. The drawn radius is the larger horizontal half-extent of the bounds of the model the colony visualizer draws for the pad,
+	// fitted as it fits it (URHColonyVisualizerSubsystem::HandleBuildingAdded: the larger horizontal extent scaled to min(FootprintX, FootprintY)
+	// x 2 m, centred on the pad, not turned): 198 cm x 400 / 396 = 200 cm for the 2x2 row, so KeepOutCm 350 cm. Read from the asset, once, never
+	// from a spawned actor, so it never depends on the actor existing yet; with no model the visualizer draws the footprint's box (ScaleFor):
+	// its larger half-axis. KeepOutSerial moves only when a keep-out really changes.
+	TArray<FIdleKeepOut> NewKeepOuts;
+	for (const FRHBuildingInstance& KB : Buildings)
+	{
+		if (KB.DefName != ChargePadName || KB.Level != 0 || KB.bUnderConstruction)
+		{
+			continue;
+		}
+		if (PadModelHalfCm < 0.f)
+		{
+			const UStaticMesh* PadModel = LoadObject<UStaticMesh>(nullptr, ChargePadModelPath);
+			PadModelHalfCm = PadModel ? (float)FMath::Max(PadModel->GetBounds().BoxExtent.X, PadModel->GetBounds().BoxExtent.Y) : 0.f;
+		}
+		const FRHBuildingRow* KDef = Defs->GetBuilding(KB.DefName);
+		const FVector2D KHalf = URHSimWorldSubsystem::GetFootprintHalfCm(KDef, KB.SizeX, KB.SizeY);
+		const float FitCm = (float)FMath::Min(FMath::Max(1, KDef ? KDef->FootprintX : 1), FMath::Max(1, KDef ? KDef->FootprintY : 1)) * 200.f;
+		FIdleKeepOut& KO = NewKeepOuts.AddDefaulted_GetRef();
+		KO.PadId = KB.Id;
+		KO.bOff = KB.bManualOff;
+		KO.CentreCm = FVector2D(KB.LocationCm.X, KB.LocationCm.Y);
+		KO.DrawnRadiusCm = PadModelHalfCm > 0.f
+			? PadModelHalfCm * (FitCm / FMath::Max(2.f * PadModelHalfCm, 1.f))
+			: (float)FMath::Max(KHalf.X, KHalf.Y);
+		KO.KeepOutCm = FMath::Max(KO.DrawnRadiusCm + KeepOutOverDrawnCm, (float)FMath::Max(KHalf.X, KHalf.Y) + RobotClearanceCm + KeepOutOverClearCm);
+	}
+	bool bSameKeepOuts = NewKeepOuts.Num() == KeepOuts.Num();
+	for (int32 k = 0; bSameKeepOuts && k < NewKeepOuts.Num(); ++k)
+	{
+		bSameKeepOuts = NewKeepOuts[k].PadId == KeepOuts[k].PadId && NewKeepOuts[k].CentreCm.Equals(KeepOuts[k].CentreCm, 0.5)
+			&& FMath::IsNearlyEqual(NewKeepOuts[k].KeepOutCm, KeepOuts[k].KeepOutCm, 0.5f);
+	}
+	KeepOuts = MoveTemp(NewKeepOuts); // bOff and the drawn radius are refreshed either way (RH.IdleRobots reads them)
+	if (!bSameKeepOuts)
+	{
+		++KeepOutSerial;
+		RebuildKeepOutBoxes();
+	}
 	for (const FRHBuildingInstance& Pad : Buildings)
 	{
 		// The pads FindNearestChargePad docks a surface robot at: finished, switched on, on the surface.
@@ -428,6 +714,9 @@ void URHAgentVisualizerSubsystem::RefreshIdlePads()
 		P.CentreCm = FVector(C.X, C.Y, 0.0);
 		P.HalfCm = (float)FMath::Max(Half.X, Half.Y);
 		P.RingCm = P.HalfCm + RobotClearanceCm + IdleRingOutCm;
+		P.KeepOutCm = GetPadKeepOutCm(Pad.Id, &P.DrawnRadiusCm); // P2 (ruling 28)
+		P.SlotKeptOutBy.Init(0, 20);
+		P.SlotNearSlotOf.Init(0, 20);
 		// Slot 0 sits on the side facing the Lander and the first ring's 8 go round 45 degrees apart; the second ring's 12 go round 30
 		// degrees apart from half a step on, so its figures stand between the first ring's. A slot inside a footprint is skipped.
 		const FVector2D ToLander = Lander ? FVector2D(Lander->LocationCm.X, Lander->LocationCm.Y) - C : FVector2D(-1.0, 0.0);
@@ -447,6 +736,10 @@ void URHAgentVisualizerSubsystem::RefreshIdlePads()
 					break;
 				}
 			}
+			// P2 (ruling 28): nor inside another pad's keep-out (a leg to it could not keep off that pad). A pad's own keep-out never holds its own
+			// slots: they stand at RingCm (540 cm) and beyond, its routed boxes reach at most 1.155 x 375 = 433 cm.
+			P.SlotKeptOutBy[k] = InPadKeepOut(At, Pad.Id);
+			bOpen = bOpen && P.SlotKeptOutBy[k] == 0;
 			P.Slots.Add(FVector(At.X, At.Y, 0.0));
 			P.SlotOpen.Add(bOpen);
 		}
@@ -482,15 +775,63 @@ void URHAgentVisualizerSubsystem::RefreshIdlePads()
 					break;
 				}
 			}
+			// P2 (ruling 28): nor inside a pad's keep-out, this pad's own included (the walk there and back could not keep off it): such a building is
+			// dropped and listed like one whose point falls in a footprint's box.
+			bClear = bClear && InPadKeepOut(At, 0) == 0;
 			if (bClear)
 			{
 				P.Inspect.Add(B.Id);
 				P.InspectAtCm.Add(FVector(At.X, At.Y, 0.0));
 				P.InspectFaceCm.Add(FVector(BC.X, BC.Y, 0.0));
+				// P2 W3: the building's stand points: the nearest the pad first (InspectAtCm), then InspectSpreadCm and twice that either way along
+				// its clearance box (round a corner where an edge ends), each kept only where the first may stand (outside every footprint's box and
+				// every pad's keep-out) and within InspectRadiusCm of this pad's centre (so W2's reach holds).
+				P.StandStart.Add(P.StandCm.Num());
+				P.StandCm.Add(FVector(At.X, At.Y, 0.0));
+				const double S0 = OutlineS(Box, At);
+				for (const double Steps : { 1.0, -1.0, 2.0, -2.0 })
+				{
+					const FVector2D Q = OutlineAt(Box, S0 + Steps * InspectSpreadCm);
+					bool bQ = FVector2D::Distance(Q, C) <= InspectRadiusCm && InPadKeepOut(Q, 0) == 0;
+					for (int32 o = 0; bQ && o < Obstacles.Num(); ++o)
+					{
+						bQ = !Obstacles[o].IsInside(Q);
+					}
+					if (bQ)
+					{
+						P.StandCm.Add(FVector(Q.X, Q.Y, 0.0));
+					}
+				}
 			}
 			else
 			{
 				P.InspectDropped.Add(B.Id);
+			}
+		}
+		P.StandStart.Add(P.StandCm.Num()); // P2 W3: the end of the last building's stand points
+	}
+	// P2 W3: two pads' rings: a slot within IdleApartCm of an open slot of a pad with a lower Id is closed (the lower pad keeps it), so no two
+	// waiting figures of two pads stand at one point. Lower pads first, so each one's open set is final before a higher one is tested against it.
+	TArray<int32> PadOrder;
+	IdlePads.GetKeys(PadOrder);
+	PadOrder.Sort();
+	for (int32 a = 1; a < PadOrder.Num(); ++a)
+	{
+		FIdlePad& Upper = IdlePads.FindChecked(PadOrder[a]);
+		for (int32 k = 0; k < Upper.Slots.Num(); ++k)
+		{
+			for (int32 b = 0; b < a && Upper.SlotOpen[k]; ++b)
+			{
+				const FIdlePad& Lower = IdlePads.FindChecked(PadOrder[b]);
+				for (int32 m = 0; m < Lower.Slots.Num(); ++m)
+				{
+					if (Lower.SlotOpen[m] && FVector::Dist2D(Lower.Slots[m], Upper.Slots[k]) < IdleApartCm)
+					{
+						Upper.SlotOpen[k] = false;
+						Upper.SlotNearSlotOf[k] = PadOrder[b];
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -512,6 +853,85 @@ bool URHAgentVisualizerSubsystem::FIdlePad::NearDock(int32 Slot) const
 	return false;
 }
 
+void URHAgentVisualizerSubsystem::RebuildKeepOutBoxes()
+{
+	// P2 (ruling 28): three boxes per keep-out disc (AddDiscBoxes), routed KeepRouteMarginCm outside it; a docked robot's also DockDriftCm.
+	KeepOutBoxes.Reset();
+	for (const FIdleKeepOut& KO : KeepOuts)
+	{
+		AddDiscBoxes(KeepOutBoxes, KO.CentreCm, KO.KeepOutCm + KeepRouteMarginCm);
+	}
+	for (const FDockDisc& Disc : DockDiscs)
+	{
+		AddDiscBoxes(KeepOutBoxes, Disc.DrawnCm, DockKeepCm + KeepRouteMarginCm + DockDriftCm);
+	}
+}
+
+int32 URHAgentVisualizerSubsystem::InPadKeepOut(const FVector2D& P, int32 ExceptPadId) const
+{
+	for (const FIdleKeepOut& KO : KeepOuts)
+	{
+		if (KO.PadId != ExceptPadId && InDiscBoxes(P, KO.CentreCm, KO.KeepOutCm + KeepRouteMarginCm))
+		{
+			return KO.PadId;
+		}
+	}
+	return 0;
+}
+
+bool URHAgentVisualizerSubsystem::InDockDisc(const FVector2D& P) const
+{
+	for (const FDockDisc& Disc : DockDiscs)
+	{
+		if (InDiscBoxes(P, Disc.DrawnCm, DockKeepCm + KeepRouteMarginCm + DockDriftCm))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHAgentVisualizerSubsystem::AnyBoxBlocks(const FVector& A, const FVector& B) const
+{
+	// PlanRoute's own test of a straight leg, over every box now in Obstacles: one holding either end is the leg's own and does not block.
+	const FVector2D A2(A.X, A.Y), B2(B.X, B.Y);
+	for (const FBox2D& O : Obstacles)
+	{
+		if (!O.IsInside(A2) && !O.IsInside(B2) && SegmentHitsBox(A2, B2, O))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+float URHAgentVisualizerSubsystem::GetPadKeepOutCm(int32 PadId, float* OutDrawnRadiusCm) const
+{
+	for (const FIdleKeepOut& KO : KeepOuts)
+	{
+		if (KO.PadId == PadId)
+		{
+			if (OutDrawnRadiusCm) { *OutDrawnRadiusCm = KO.DrawnRadiusCm; }
+			return KO.KeepOutCm;
+		}
+	}
+	if (OutDrawnRadiusCm) { *OutDrawnRadiusCm = 0.f; }
+	return 0.f;
+}
+
+int32 URHAgentVisualizerSubsystem::GetPadDockedDrawnCm(int32 PadId, TArray<FVector>& Out) const
+{
+	Out.Reset();
+	for (const FDockDisc& Disc : DockNow)
+	{
+		if (Disc.PadId == PadId)
+		{
+			Out.Add(FVector(Disc.DrawnCm.X, Disc.DrawnCm.Y, 0.0));
+		}
+	}
+	return Out.Num();
+}
+
 void URHAgentVisualizerSubsystem::GatherDocked(const FMassEntityManager& EntityManager)
 {
 	// The robots docked at a cached pad: the sim's Charge task past its drive (Phase 1, at the pad, in its queue), at the sim position where
@@ -521,25 +941,63 @@ void URHAgentVisualizerSubsystem::GatherDocked(const FMassEntityManager& EntityM
 	{
 		P.Value.DockedCm.Reset();
 	}
-	if (IdlePads.Num() == 0)
+	DockNow.Reset();
+	if (IdlePads.Num() > 0 || KeepOuts.Num() > 0)
 	{
-		return;
+		for (int32 i = 0; i < Tracked.Num(); ++i)
+		{
+			if (!EntityManager.IsEntityValid(Tracked[i]))
+			{
+				continue;
+			}
+			const FRHTaskFragment* Task = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
+			if (!Task || Task->TaskType != (uint8)ERHTaskType::Charge || Task->Phase == 0)
+			{
+				continue;
+			}
+			const FVector DockSimCm = EntityManager.GetFragmentDataChecked<FTransformFragment>(Tracked[i]).GetTransform().GetLocation();
+			if (FIdlePad* Pad = IdlePads.Find(Task->DigDepositId))
+			{
+				Pad->DockedCm.Add(DockSimCm);
+			}
+			// P2 (ruling 28): a robot docked at any finished surface pad (on or off) is a disc every idle walk keeps DockKeepCm from, at its DRAWN
+			// position on the last tick. A rover, and a walker on a road trip (RoverVis[i].Drive.bTrip: AdvanceRover draws it), is driven the rest
+			// of the way in to the pad's centre (AdvanceRover), so its disc stands at that centre from the start: inside the pad's own routed
+			// keep-out it never shapes a route, and the drive-in moves no KeepOutSerial. A walker that walked in is at its drawn figure (it settles
+			// within about a second of docking); else its sim position.
+			const int32 DockPadId = Task->DigDepositId;
+			if (const FIdleKeepOut* DockKO = KeepOuts.FindByPredicate([DockPadId](const FIdleKeepOut& KO) { return KO.PadId == DockPadId; }))
+			{
+				FVector2D DockDrawn(DockSimCm.X, DockSimCm.Y);
+				if (IsRoverIndex(i) || (RoverVis.IsValidIndex(i) && RoverVis[i].Drive.bTrip))
+				{
+					DockDrawn = DockKO->CentreCm;
+				}
+				else if (Trips.IsValidIndex(i) && Trips[i].bInit)
+				{
+					DockDrawn = FVector2D(Trips[i].DrawCm.X, Trips[i].DrawCm.Y);
+				}
+				FDockDisc& Disc = DockNow.AddDefaulted_GetRef();
+				Disc.PadId = DockPadId;
+				Disc.Index = i;
+				Disc.DrawnCm = DockDrawn;
+			}
+		}
 	}
-	for (int32 i = 0; i < Tracked.Num(); ++i)
+	// P2: the walks round them are checked again (KeepOutSerial) only when a robot docks or leaves, or a docked robot's drawn position has moved
+	// more than DockDriftCm from where they were planned round it (it settles within about a second of docking).
+	bool bSameDocks = DockNow.Num() == DockDiscs.Num();
+	for (int32 k = 0; bSameDocks && k < DockNow.Num(); ++k)
 	{
-		if (!EntityManager.IsEntityValid(Tracked[i]))
-		{
-			continue;
-		}
-		const FRHTaskFragment* Task = EntityManager.GetFragmentDataPtr<FRHTaskFragment>(Tracked[i]);
-		if (!Task || Task->TaskType != (uint8)ERHTaskType::Charge || Task->Phase == 0)
-		{
-			continue;
-		}
-		if (FIdlePad* Pad = IdlePads.Find(Task->DigDepositId))
-		{
-			Pad->DockedCm.Add(EntityManager.GetFragmentDataChecked<FTransformFragment>(Tracked[i]).GetTransform().GetLocation());
-		}
+		bSameDocks = DockNow[k].PadId == DockDiscs[k].PadId && DockNow[k].Index == DockDiscs[k].Index
+			&& FVector2D::Distance(DockNow[k].DrawnCm, DockDiscs[k].DrawnCm) <= DockDriftCm;
+	}
+	if (!bSameDocks)
+	{
+		DockDiscs = DockNow;
+		++KeepOutSerial;
+		++DockSerialBumps;
+		RebuildKeepOutBoxes();
 	}
 }
 
@@ -560,6 +1018,8 @@ void URHAgentVisualizerSubsystem::ResetIdle(FRobotTrip& T)
 	T.InspectS = 0.0;
 	T.bIdleFace = false;
 	T.bInspecting = false;
+	T.bStayPut = false;
+	T.InspectStand = INDEX_NONE;
 }
 
 void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FVector& SimPos)
@@ -570,9 +1030,32 @@ void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FV
 	{
 		return Pad && T.IdleSlot != INDEX_NONE && (T.IdlePhase == 0 || T.IdlePhase == 3) && Pad->NearDock(T.IdleSlot);
 	};
-	if (T.PadChoiceSerial == IdlePadsSerial && !MakesWay(T.IdlePadId != 0 ? IdlePads.Find(T.IdlePadId) : nullptr))
+	// P2: the cache is rebuilt only when its key changes, so a figure sent to the Lander rank by a full ring (bRingFull: no slot free of another
+	// waiting figure and clear of a docked robot) looks again on the once-a-second tick instead (bIdleRetryDue), as every figure did before: a
+	// slot freed by a figure taking a job, or by a docked robot leaving, is taken within a second.
+	const bool bChosen = T.PadChoiceSerial == IdlePadsSerial;
+	const bool bMakeWay = bChosen && MakesWay(T.IdlePadId != 0 ? IdlePads.Find(T.IdlePadId) : nullptr);
+	const bool bRetry = bChosen && T.bRingFull && bIdleRetryDue;
+	if (bChosen && !bMakeWay && !bRetry)
 	{
 		return; // chosen against this cache already
+	}
+	// Developer counters (RH.IdleRobots, rh.RobotRouteLog): what sent the figure through.
+	if (T.PadChoiceSerial == 0)
+	{
+		++IdleChoiceRuns.NewSpell;
+	}
+	else if (!bChosen)
+	{
+		++IdleChoiceRuns.AfterRebuild;
+	}
+	else if (bMakeWay)
+	{
+		++IdleChoiceRuns.MakingWay;
+	}
+	else
+	{
+		++IdleChoiceRuns.FullRingRetry;
 	}
 	T.PadChoiceSerial = IdlePadsSerial;
 	T.IdleRankCm = ParkSlotCm(i);
@@ -584,14 +1067,32 @@ void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FV
 	{
 		PadId = 0;
 	}
+	// P2 W2: only a pad whose centre is within IdleReachCm of the sim position (its ring within IdleReachCm + 760 cm, its stand points within
+	// IdleReachCm + InspectRadiusCm). AdvanceDrawn snaps a figure drawn more than 8000 cm from its sim position back to it, so a walk to a pad
+	// about 80 m away looped (walk, snap back, wait ParkAfterIdleS, walk again). FindNearestChargePad returns the nearest pad: if it is out of
+	// reach, every pad is. (The Lander rank is bounded below.)
+	if (PadId != 0 && FVector::Dist2D(SimPos, PadCm) > IdleReachCm)
+	{
+		PadId = 0;
+	}
 	const FIdlePad* Pad = PadId != 0 ? IdlePads.Find(PadId) : nullptr;
 	if (Pad && PadId == T.IdlePadId && T.IdleSlot != INDEX_NONE && Pad->SlotOpen[T.IdleSlot] && !MakesWay(Pad))
 	{
-		// The same pad and slot: an inspection whose building is gone from the list ends, and the figure walks back.
-		if ((T.IdlePhase == 1 || T.IdlePhase == 2) && !Pad->Inspect.Contains(T.InspectId))
+		// The same pad and slot: an inspection whose building is gone from the list (or, P2 W3, whose stand point is no longer one of that
+		// building's after the rebuild) ends, and the figure walks back.
+		if (T.IdlePhase == 1 || T.IdlePhase == 2)
 		{
-			T.IdlePhase = 3;
-			T.bFree = false;
+			const int32 b = Pad->Inspect.IndexOfByKey(T.InspectId);
+			bool bStillThere = false;
+			for (int32 s = b != INDEX_NONE ? Pad->StandStart[b] : 0; b != INDEX_NONE && s < Pad->StandStart[b + 1]; ++s)
+			{
+				bStillThere = bStillThere || FVector::Dist2D(Pad->StandCm[s], T.InspectAtCm) < 1.0;
+			}
+			if (!bStillThere)
+			{
+				T.IdlePhase = 3;
+				T.bFree = false;
+			}
 		}
 		return;
 	}
@@ -600,10 +1101,11 @@ void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FV
 	// by the robot's index so the waiting robots do not all leave together (InspectWaitS once it has inspected). When the choice really
 	// changes (another pad, or another slot) the walk there is planned afresh (bFree off), so a new slot near the last walk's goal is still
 	// reached. Round 2: the same choice again (the Lander rank again, or the same pad's ring still full: a figure in the rank meets this on
-	// every once-a-second cache rebuild) keeps its walk, so its goal, ParkSlotCm(i), is replanned only by FreeWalkTo's 100 cm rule (design
-	// point 6).
+	// every cache rebuild, and one sent there by a full ring on its once-a-second look, P2) keeps its walk, so its goal, ParkSlotCm(i), is
+	// replanned only by FreeWalkTo's 100 cm rule (design point 6).
 	const int32 OldPadId = T.IdlePadId;
 	const int32 OldSlot = T.IdleSlot;
+	const bool bWasStayPut = T.bStayPut;
 	T.IdlePadId = PadId;
 	T.IdleSlot = INDEX_NONE;
 	T.bRingFull = false;
@@ -613,9 +1115,11 @@ void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FV
 	T.IdleWaitForS = T.InspectCount > 0 ? (double)InspectWaitS : InspectWaitS + (double)((i * 7) % (int32)InspectWaitS);
 	if (!Pad)
 	{
-		if (OldPadId != 0 && OldSlot != INDEX_NONE)
+		// P2 W2: the Lander rank only within IdleReachCm of the sim position too; else the figure stays where it stands (no walk).
+		T.bStayPut = FVector::Dist2D(SimPos, T.IdleRankCm) > IdleReachCm;
+		if ((OldPadId != 0 && OldSlot != INDEX_NONE) || T.bStayPut != bWasStayPut)
 		{
-			T.bFree = false; // from a ring slot (or an inspection) to the rank: a new walk
+			T.bFree = false; // from a ring slot (or an inspection) to the rank, or between the rank and staying put: a new walk (or none)
 		}
 		return;
 	}
@@ -638,12 +1142,38 @@ void URHAgentVisualizerSubsystem::ChooseIdlePad(int32 i, FRobotTrip& T, const FV
 		}
 	}
 	T.bRingFull = T.IdleSlot == INDEX_NONE;
+	// P2 W2: a full ring sends the figure to the rank only within reach too.
+	T.bStayPut = T.bRingFull && FVector::Dist2D(SimPos, T.IdleRankCm) > IdleReachCm;
 	// A slot (new, or this pad again after the rank) is a new walk. A full ring again sends the figure to the rank it was already walking
-	// to, and a full ring after a slot elsewhere is a walk from that slot to the rank: new only in the second case.
-	if (T.IdleSlot != INDEX_NONE ? (PadId != OldPadId || T.IdleSlot != OldSlot) : (OldPadId != 0 && OldSlot != INDEX_NONE))
+	// to, and a full ring after a slot elsewhere is a walk from that slot to the rank: new only in the second case (or between the rank and
+	// staying put).
+	if (T.IdleSlot != INDEX_NONE ? (PadId != OldPadId || T.IdleSlot != OldSlot) : ((OldPadId != 0 && OldSlot != INDEX_NONE) || T.bStayPut != bWasStayPut))
 	{
 		T.bFree = false;
 	}
+}
+
+int32 URHAgentVisualizerSubsystem::FreeStand(const FIdlePad& Pad, int32 Building, int32 Self) const
+{
+	// P2 W3: the first of a building's stand points that no other figure drawn idle on this tick or the last heads for or stands at (IdlePhase
+	// 1 or 2, its InspectAtCm within IdleApartCm: a figure of any pad, so two pads' figures never share one either) and, ruling 28, none inside a
+	// docked robot's disc. INDEX_NONE: none free. Held the way ChooseIdlePad holds slots (IdleTick).
+	for (int32 s = Pad.StandStart[Building]; s < Pad.StandStart[Building + 1]; ++s)
+	{
+		const FVector& Cand = Pad.StandCm[s];
+		bool bFree = !InDockDisc(FVector2D(Cand.X, Cand.Y));
+		for (int32 j = 0; bFree && j < Trips.Num(); ++j)
+		{
+			const FRobotTrip& O = Trips[j];
+			bFree = j == Self || O.IdleTick == 0 || O.IdleTick + 1 < TickSerial || (O.IdlePhase != 1 && O.IdlePhase != 2)
+				|| FVector::Dist2D(O.InspectAtCm, Cand) >= IdleApartCm;
+		}
+		if (bFree)
+		{
+			return s;
+		}
+	}
+	return INDEX_NONE;
 }
 
 bool URHAgentVisualizerSubsystem::GetIdleDebug(int32 Index, FIdleDebug& Out) const
@@ -656,6 +1186,15 @@ bool URHAgentVisualizerSubsystem::GetIdleDebug(int32 Index, FIdleDebug& Out) con
 	const FRobotTrip& T = Trips[Index];
 	Out.DrawnCm = T.DrawCm;
 	Out.RankCm = ParkSlotCm(Index);
+	// P2: its sim position, for every tracked robot (the click test places its far pads from these; RH.IdleRobots prints a figure's reach).
+	if (const UMassEntitySubsystem* Mass = GetWorld() ? GetWorld()->GetSubsystem<UMassEntitySubsystem>() : nullptr)
+	{
+		const FMassEntityManager& EM = Mass->GetEntityManager();
+		if (Tracked.IsValidIndex(Index) && EM.IsEntityValid(Tracked[Index]))
+		{
+			Out.SimCm = EM.GetFragmentDataChecked<FTransformFragment>(Tracked[Index]).GetTransform().GetLocation();
+		}
+	}
 	if (T.WalkTick != TickSerial || TickSerial == 0)
 	{
 		return true; // not drawn by AdvanceDrawn on the last tick: a rover, riding, below or on a road leg
@@ -679,11 +1218,30 @@ bool URHAgentVisualizerSubsystem::GetIdleDebug(int32 Index, FIdleDebug& Out) con
 	Out.PadHalfCm = Pad->HalfCm;
 	Out.ClearCm = Pad->HalfCm + RobotClearanceCm;
 	Out.RingCm = Pad->RingCm;
+	Out.KeepOutCm = Pad->KeepOutCm;         // P2 (ruling 28)
+	Out.DrawnRadiusCm = Pad->DrawnRadiusCm;
 	Out.SlotCm = Pad->Slots[T.IdleSlot];
 	Out.InspectId = (T.IdlePhase == 1 || T.IdlePhase == 2) ? T.InspectId : 0;
+	Out.InspectStand = (T.IdlePhase == 1 || T.IdlePhase == 2) ? T.InspectStand : INDEX_NONE;
 	Out.NextInspectS = (T.IdlePhase == 0 && Pad->Inspect.Num() > 0) ? (float)FMath::Max(T.IdleWaitForS - T.IdleWaitS, 0.0) : -1.f;
 	Out.bInspecting = T.bInspecting;
 	Out.InspectLeftS = T.IdlePhase == 2 ? (float)FMath::Max(InspectWorkS - T.InspectS, 0.0) : 0.f;
+	return true;
+}
+
+bool URHAgentVisualizerSubsystem::GetIdlePadSlot(int32 PadId, int32 Slot, FVector& OutCm, bool& bOutOpen, int32& OutNearSlotOfPad) const
+{
+	OutCm = FVector::ZeroVector;
+	bOutOpen = false;
+	OutNearSlotOfPad = 0;
+	const FIdlePad* Pad = IdlePads.Find(PadId);
+	if (!Pad || !Pad->Slots.IsValidIndex(Slot))
+	{
+		return false;
+	}
+	OutCm = Pad->Slots[Slot];
+	bOutOpen = Pad->SlotOpen[Slot];
+	OutNearSlotOfPad = Pad->SlotNearSlotOf.IsValidIndex(Slot) ? Pad->SlotNearSlotOf[Slot] : 0;
 	return true;
 }
 
@@ -697,7 +1255,9 @@ void URHAgentVisualizerSubsystem::LogIdleRobots() const
 	TArray<int32> PadIds;
 	IdlePads.GetKeys(PadIds);
 	PadIds.Sort();
-	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d working surface pad(s) in the cache (serial %u)"), PadIds.Num(), IdlePadsSerial);
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d working surface pad(s) in the cache (serial %u, keyed on %d surface building(s)); pad choices so far: %u (%u new idle spell, %u after a rebuild, %u making way, %u full ring once a second)"),
+		PadIds.Num(), IdlePadsSerial, IdlePadsKey.Num(), IdleChoiceRuns.Total(), IdleChoiceRuns.NewSpell, IdleChoiceRuns.AfterRebuild,
+		IdleChoiceRuns.MakingWay, IdleChoiceRuns.FullRingRetry);
 	for (const int32 Id : PadIds)
 	{
 		const FIdlePad& P = IdlePads.FindChecked(Id);
@@ -717,8 +1277,24 @@ void URHAgentVisualizerSubsystem::LogIdleRobots() const
 			Docked.Num() ? *(TEXT(" at ") + FString::Join(Docked, TEXT(" ")) + TEXT(" m")) : TEXT(""), IdleDockClearCm,
 			NearDocked.Num() ? *FString::Join(NearDocked, TEXT(" ")) : TEXT("none"), P.Inspect.Num(), *FString::Join(Names, TEXT(" ")),
 			P.InspectDropped.Num(), P.InspectDropped.Num() ? *FString::Join(Dropped, TEXT(" ")) : TEXT("none"));
+		// P2: the pad's keep-out (ruling 28), the slots closed by another pad (its keep-out, or W3's ring rule), its stand points (W3).
+		TArray<FString> Discs, KeptOut, NearSlot;
+		for (const FDockDisc& Disc : DockNow) { if (Disc.PadId == Id) { Discs.Add(FString::Printf(TEXT("(%.1f, %.1f)"), Disc.DrawnCm.X / 100.0, Disc.DrawnCm.Y / 100.0)); } }
+		for (int32 k = 0; k < P.SlotKeptOutBy.Num(); ++k) { if (P.SlotKeptOutBy[k] != 0) { KeptOut.Add(FString::Printf(TEXT("%d (pad #%d)"), k, P.SlotKeptOutBy[k])); } }
+		for (int32 k = 0; k < P.SlotNearSlotOf.Num(); ++k) { if (P.SlotNearSlotOf[k] != 0) { NearSlot.Add(FString::Printf(TEXT("%d (by pad #%d)"), k, P.SlotNearSlotOf[k])); } }
+		UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots]   pad #%d keep-out %.0f cm (drawn radius %.0f cm from %s, + %.0f; never under %.0f), routed at %.0f cm; %d robot(s) drawn docked%s, kept %.0f cm off (routed at %.0f); slot(s) closed inside a keep-out: %s; near a lower pad's slot: %s; %d stand point(s) for its %d building(s)"),
+			Id, P.KeepOutCm, P.DrawnRadiusCm, PadModelHalfCm > 0.f ? TEXT("its model's bounds, fitted") : TEXT("its footprint's box (no model)"), KeepOutOverDrawnCm,
+			P.HalfCm + RobotClearanceCm + KeepOutOverClearCm, P.KeepOutCm + KeepRouteMarginCm, Discs.Num(),
+			Discs.Num() ? *(TEXT(" at ") + FString::Join(Discs, TEXT(" ")) + TEXT(" m")) : TEXT(""), DockKeepCm, DockKeepCm + KeepRouteMarginCm + DockDriftCm,
+			KeptOut.Num() ? *FString::Join(KeptOut, TEXT(", ")) : TEXT("none"), NearSlot.Num() ? *FString::Join(NearSlot, TEXT(", ")) : TEXT("none"),
+			P.StandCm.Num(), P.Inspect.Num());
 	}
-	int32 Walkers = 0, Busy = 0, AtPad = 0, Rank = 0, Full = 0, Inspecting = 0;
+	int32 OffPads = 0;
+	for (const FIdleKeepOut& KO : KeepOuts) { OffPads += KO.bOff ? 1 : 0; }
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] keep-outs (ruling 28): %d finished surface pad(s) (%d switched off), %d docked robot(s), serial %u (%d move(s) since the last load on a docking change); since the last load %d kept-off plan(s), %d start exit(s), %d boxed in (today's route), %d frame(s) an idle walk held at the leash (%.0f m; %d inspection(s) ended there); the plans came no nearer than %.0f cm to a pad's centre and %.0f cm to a docked robot"),
+		KeepOuts.Num(), OffPads, DockNow.Num(), KeepOutSerial, DockSerialBumps, KeptOffPlans, KeptOffExits, KeptOffFallbacks, IdleLeashFrames, IdleLeashCm / 100.f,
+		IdleLeashInspectEnds, KeptOffNearestPadCm < TNumericLimits<float>::Max() ? KeptOffNearestPadCm : -1.f, KeptOffNearestDockCm < TNumericLimits<float>::Max() ? KeptOffNearestDockCm : -1.f);
+	int32 Walkers = 0, Busy = 0, AtPad = 0, Rank = 0, Full = 0, Inspecting = 0, Stay = 0;
 	for (int32 i = 0; i < Trips.Num(); ++i)
 	{
 		FIdleDebug D;
@@ -749,12 +1325,18 @@ void URHAgentVisualizerSubsystem::LogIdleRobots() const
 			++Rank;
 			Full += D.bRingFull ? 1 : 0;
 			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d Lander rank (%s), %s; next inspection: none"),
-				i, D.bRingFull ? *FString::Printf(TEXT("pad #%d's ring has no free slot clear of a docked robot"), Trips[i].IdlePadId) : TEXT("no working pad"), *At);
+				i, *(D.bRingFull ? FString::Printf(TEXT("pad #%d's ring has no free slot clear of a docked robot"), Trips[i].IdlePadId)
+					: FString::Printf(TEXT("no working pad within %.0f m of its sim position"), IdleReachCm / 100.f)), *At);
 			break;
 		case EIdleShow::Inspecting:
 			++Inspecting;
-			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d inspecting building #%d for pad #%d slot %d (%s), %s"),
-				i, D.InspectId, D.PadId, D.Slot, D.bInspecting ? *FString::Printf(TEXT("Operate, %.0f s left"), D.InspectLeftS) : TEXT("walking to it"), *At);
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d inspecting building #%d for pad #%d slot %d (%s), stand point %d, %s"),
+				i, D.InspectId, D.PadId, D.Slot, D.bInspecting ? *FString::Printf(TEXT("Operate, %.0f s left"), D.InspectLeftS) : TEXT("walking to it"), D.InspectStand, *At);
+			break;
+		case EIdleShow::StayPut:
+			++Stay;
+			UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] #%d staying put: no working pad and not its Lander rank slot within %.0f m of its sim position (%.1f, %.1f) m (the rank slot %.0f m away), %s"),
+				i, IdleReachCm / 100.f, D.SimCm.X / 100.0, D.SimCm.Y / 100.0, FVector::Dist2D(D.SimCm, D.RankCm) / 100.0, *At);
 			break;
 		default:
 			++Busy;
@@ -762,8 +1344,42 @@ void URHAgentVisualizerSubsystem::LogIdleRobots() const
 			break;
 		}
 	}
-	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d surface walker(s): %d busy, %d waiting at a pad, %d at the Lander rank (%d from a full ring), %d inspecting"),
-		Walkers, Busy, AtPad, Rank, Full, Inspecting);
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] %d surface walker(s): %d busy, %d waiting at a pad, %d at the Lander rank (%d from a full ring), %d inspecting, %d staying put"),
+		Walkers, Busy, AtPad, Rank, Full, Inspecting, Stay);
+	// P2 M1 (developer read-out; it also records the deferred M1b and M1c): where each surface walker's body, reference soles and cargo
+	// lump are drawn against the spot it is drawn at. RH_Walker_robot at HEAD: the pelvis 91 cm from the spot, the soles 34 cm up.
+	int32 Figures = 0, Lumps = 0;
+	float PelvisFar = 0.f, SolesLo = 1.e9f, SolesHi = -1.e9f, LumpFar = 0.f, LumpLo = 1.e9f, LumpHi = -1.e9f;
+	for (int32 i = 0; i < SkelBodies.Num(); ++i)
+	{
+		const USkeletalMeshComponent* Skel = SkelBodies[i];
+		if (!Skel || !Skel->IsVisible() || TickSerial == 0 || !Trips.IsValidIndex(i) || Trips[i].WalkTick != TickSerial || !FeetLiftCm.IsValidIndex(i))
+		{
+			continue; // a surface walker AdvanceDrawn drew on the last tick, on view
+		}
+		++Figures;
+		const FVector Spot = Trips[i].DrawCm;
+		const FVector Pelvis = Skel->GetSocketLocation(FName("pelvis"));
+		PelvisFar = FMath::Max(PelvisFar, (float)FVector::Dist2D(Pelvis, Spot));
+		const float SolesZ = (float)Skel->GetComponentLocation().Z - FeetLiftCm[i]; // the reference pose's soles
+		const float Up = SolesZ - RHMarsTerrain::GroundZCm(Spot.X, Spot.Y);
+		SolesLo = FMath::Min(SolesLo, Up);
+		SolesHi = FMath::Max(SolesHi, Up);
+		const UStaticMeshComponent* Lump = CargoLumps.IsValidIndex(i) ? CargoLumps[i].Get() : nullptr;
+		if (Lump && Lump->IsVisible())
+		{
+			++Lumps;
+			const FVector L = Lump->GetComponentLocation();
+			LumpFar = FMath::Max(LumpFar, (float)FVector::Dist2D(L, Pelvis));
+			LumpLo = FMath::Min(LumpLo, (float)L.Z - SolesZ);
+			LumpHi = FMath::Max(LumpHi, (float)L.Z - SolesZ);
+		}
+	}
+	UE_LOG(LogRedHope, Display, TEXT("[RH.IdleRobots] figures: %d surface walker(s) on view%s; %d cargo lump(s) shown%s"),
+		Figures,
+		Figures ? *FString::Printf(TEXT(", the farthest pelvis %.0f cm from its drawn spot, reference soles %.0f to %.0f cm above the ground"), PelvisFar, SolesLo, SolesHi) : TEXT(""),
+		Lumps,
+		Lumps ? *FString::Printf(TEXT(", the farthest %.0f cm across from its walker's pelvis, centres %.0f to %.0f cm above their walkers' soles"), LumpFar, LumpLo, LumpHi) : TEXT(""));
 }
 
 bool URHAgentVisualizerSubsystem::IsRoverIndex(int32 i) const
@@ -953,16 +1569,42 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 	if (T.IdleS <= ParkAfterIdleS && T.IdleTick != 0)
 	{
 		// A job arrives (or the sim moves it): the slot is freed and the wait and any inspection end; the branches below take over
-		// from wherever the figure stands.
+		// from wherever the figure stands. P2 (ruling 28): a task that arrives while the figure is drawn in a pad's round (a slot held, drawn idle
+		// on this tick or the last) is "a job walk that starts from a ring slot": the task's walks keep off the pads until it ends.
+		T.bKeepOff = bTask && T.IdlePadId != 0 && T.IdleSlot != INDEX_NONE && T.IdleTick + 1 >= TickSerial;
 		ResetIdle(T);
 	}
-	auto FreeWalkTo = [&](const FVector& Goal)
+	if (!bTask)
 	{
-		if (!T.bFree || FVector::Dist2D(Goal, T.FreeGoalCm) > 100.f)
+		T.bKeepOff = false; // the task is over (or there was none)
+	}
+	auto FreeWalkTo = [&](const FVector& Goal, bool bKeptOff)
+	{
+		// P2 (ruling 28): a kept-off walk under way when the keep-outs changed (a robot docked or left, a docked robot settled, a pad's keep-out
+		// changed) is checked once per change, and planned again from where the figure stands only if what is left of it now passes inside one.
+		if (bKeptOff && T.bFree && T.bFreeKeptOff && T.KeepOffSerial != KeepOutSerial)
+		{
+			T.KeepOffSerial = KeepOutSerial;
+			if (T.FreeDoneCm < T.FreeLenCm && !KeptOffClear(T.FreePath, T.FreeDoneCm))
+			{
+				T.bFree = false;
+			}
+		}
+		// Planned when the goal moves more than 100 cm (unchanged), when it was planned the other way (kept off or not), or as above.
+		if (!T.bFree || FVector::Dist2D(Goal, T.FreeGoalCm) > 100.f || bKeptOff != T.bFreeKeptOff)
 		{
 			T.bFree = true;
 			T.FreeGoalCm = Goal;
-			PlanRoute(T.DrawCm, Goal, T.FreePath);
+			T.bFreeKeptOff = bKeptOff;
+			if (bKeptOff)
+			{
+				PlanKeptOff(T.DrawCm, Goal, T.FreePath);
+				T.KeepOffSerial = KeepOutSerial;
+			}
+			else
+			{
+				PlanRoute(T.DrawCm, Goal, T.FreePath);
+			}
 			T.FreeLenCm = PathLength(T.FreePath);
 			T.FreeDoneCm = 0.f;
 		}
@@ -1034,6 +1676,16 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 		}
 		else
 		{
+			// P2 (ruling 28): a kept-off trip is checked once per keep-out change, and planned again from where the figure is drawn only if what
+			// is left of it passes inside a keep-out (planning again restarts the eased progress from there, as a target change does).
+			if (T.bTrip && !T.bRoadTrip && T.bKeepOff && T.KeepOffSerial != KeepOutSerial)
+			{
+				T.KeepOffSerial = KeepOutSerial;
+				if (!KeptOffClear(T.Path, T.TripDoneCm))
+				{
+					T.bTrip = false;
+				}
+			}
 			if (!T.bTrip || T.bRoadTrip || FVector::Dist2D(Target, T.TripTargetCm) > 150.f)
 			{
 				T.bTrip = true;
@@ -1041,14 +1693,25 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 				T.bRoadTrip = false;
 				T.TripTargetCm = Target;
 				T.SimStartDistCm = FMath::Max((float)FVector::Dist2D(SimPos, Target), 1.f);
-				PlanRoute(T.DrawCm, Target, T.Path);
+				// Ruling 28: a job walk that starts from a ring slot keeps off the pads; the target's own pad (the Charge task's) or a docked robot
+				// it goes to holds the trip's end, so PlanRoute drops that disc and the figure walks in.
+				if (T.bKeepOff)
+				{
+					PlanKeptOff(T.DrawCm, Target, T.Path);
+					T.KeepOffSerial = KeepOutSerial;
+				}
+				else
+				{
+					PlanRoute(T.DrawCm, Target, T.Path);
+				}
 				T.PathLenCm = PathLength(T.Path);
 			}
 			const float S = FMath::Clamp(1.f - (float)FVector::Dist2D(SimPos, T.TripTargetCm) / T.SimStartDistCm, 0.f, 1.f);
 			// Ease in and out: slower off the mark and into the stop, quicker in
 			// the middle - the same arrival time.
 			const float Eased = S - 0.22f * FMath::Sin(2.f * PI * S) / (2.f * PI);
-			Desired = PointAlong(T.Path, Eased * T.PathLenCm);
+			T.TripDoneCm = Eased * T.PathLenCm;
+			Desired = PointAlong(T.Path, T.TripDoneCm);
 			T.LastSyncedCm = Desired;
 		}
 	}
@@ -1069,7 +1732,7 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 		else
 		{
 			T.bTrip = false;
-			Desired = FreeWalkTo(SimPos);
+			Desired = FreeWalkTo(SimPos, T.bKeepOff);
 			MaxSpeed = FreeWalkCmS * 1.5f * Pace;
 		}
 	}
@@ -1088,7 +1751,15 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 		T.bInspecting = false;
 		MaxSpeed = FreeWalkCmS * 1.5f * Pace;
 		const FIdlePad* Pad = (T.IdlePadId != 0 && T.IdleSlot != INDEX_NONE) ? IdlePads.Find(T.IdlePadId) : nullptr;
-		if (!Pad)
+		bool bStand = false;
+		if (!Pad && T.bStayPut)
+		{
+			// P2 W2: no working pad, and not its Lander rank slot, within IdleReachCm of its sim position: it stands where it is drawn.
+			T.IdleShow = (uint8)EIdleShow::StayPut;
+			T.IdleGoalCm = T.DrawCm;
+			bStand = true;
+		}
+		else if (!Pad)
 		{
 			T.IdleShow = (uint8)EIdleShow::LanderRank;
 			T.IdleGoalCm = T.IdleRankCm;
@@ -1097,6 +1768,13 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 		{
 			const FVector SlotCm = Pad->Slots[T.IdleSlot];
 			const double SimDt = (double)DeltaTime * Pace;
+			// P2 (ruling 28): a robot drawn docked beside its stand point since it set out (the keep-outs changed): that inspection ends and it walks
+			// back, so the walk there never ends beside the docked robot.
+			if (T.IdlePhase == 1 && T.KeepOffSerial != KeepOutSerial && InDockDisc(FVector2D(T.InspectAtCm.X, T.InspectAtCm.Y)))
+			{
+				T.IdlePhase = 3;
+				T.bFree = false;
+			}
 			// The round: wait at the slot, walk to a building, Operate there, walk back; every wait and the work are sim-paced.
 			if (T.IdlePhase == 1 && FVector::Dist2D(T.DrawCm, T.InspectAtCm) <= IdleArriveCm)
 			{
@@ -1124,13 +1802,29 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 					T.IdleWaitS += SimDt;
 					if (T.IdleWaitS >= T.IdleWaitForS && Pad->Inspect.Num() > 0)
 					{
-						// The building: keyed on the robot's index and how many it has inspected, never a random draw.
-						const int32 Pick = (i + T.InspectCount) % Pad->Inspect.Num();
-						T.IdlePhase = 1;
-						T.InspectId = Pad->Inspect[Pick];
-						T.InspectAtCm = Pad->InspectAtCm[Pick];
-						T.InspectFaceCm = Pad->InspectFaceCm[Pick];
-						T.bFree = false;
+						// The building: keyed on the robot's index and how many it has inspected, never a random draw. P2 W3: at that building's first free
+						// stand point (FreeStand); a building with none free gives way to the next in the list, and with none free anywhere the wait starts
+						// again. With nobody else inspecting this is today's pick: building (i + InspectCount) % N, its stand point 0 (InspectAtCm).
+						const int32 N = Pad->Inspect.Num();
+						for (int32 Try = 0; Try < N && T.IdlePhase == 0; ++Try)
+						{
+							const int32 Pick = (i + T.InspectCount + Try) % N;
+							const int32 Stand = FreeStand(*Pad, Pick, i);
+							if (Stand != INDEX_NONE)
+							{
+								T.IdlePhase = 1;
+								T.InspectId = Pad->Inspect[Pick];
+								T.InspectStand = Stand - Pad->StandStart[Pick];
+								T.InspectAtCm = Pad->StandCm[Stand];
+								T.InspectFaceCm = Pad->InspectFaceCm[Pick];
+								T.bFree = false;
+							}
+						}
+						if (T.IdlePhase == 0)
+						{
+							T.IdleWaitS = 0.0;
+							T.IdleWaitForS = InspectWaitS;
+						}
 					}
 				}
 			}
@@ -1166,7 +1860,32 @@ FVector URHAgentVisualizerSubsystem::AdvanceDrawn(int32 i, const FVector& SimPos
 				}
 			}
 		}
-		Desired = FreeWalkTo(T.IdleGoalCm);
+		// P2 (ruling 28): every idle leg (to its slot, between slots, out to a building and back, to the rank) is planned round the keep-outs.
+		if (bStand)
+		{
+			Desired = T.DrawCm;
+		}
+		else
+		{
+			Desired = FreeWalkTo(T.IdleGoalCm, true);
+			// P2 W2: an idle walk never takes the figure further out than IdleLeashCm from its sim position (past 8000 cm AdvanceDrawn would snap
+			// it back and the walk would loop). Only a step that ends beyond the leash AND further out than the figure is drawn is held: this
+			// frame's progress is taken back and the figure stands. A figure already beyond it (a spell that began out there) always walks back
+			// in. An inspection walk held at the leash ends, and the figure walks back to its slot.
+			const double LeashNowCm = FVector::Dist2D(Desired, SimPos);
+			if (LeashNowCm > IdleLeashCm && LeashNowCm > FVector::Dist2D(T.DrawCm, SimPos))
+			{
+				T.FreeDoneCm = FMath::Max(0.f, T.FreeDoneCm - FreeWalkCmS * Pace * DeltaTime);
+				Desired = T.DrawCm;
+				++IdleLeashFrames;
+				if (T.IdlePhase == 1)
+				{
+					T.IdlePhase = 3;
+					T.bFree = false;
+					++IdleLeashInspectEnds;
+				}
+			}
+		}
 	}
 	const FVector Step = FVector(Desired.X - T.DrawCm.X, Desired.Y - T.DrawCm.Y, 0.f).GetClampedToMaxSize(MaxSpeed * DeltaTime);
 	T.DrawCm = FVector(T.DrawCm.X + Step.X, T.DrawCm.Y + Step.Y, SimPos.Z);
@@ -1188,10 +1907,22 @@ void URHAgentVisualizerSubsystem::ResetTracking()
 {
 	Tracked.Reset();
 	Trips.Reset();
-	// Idle robots: the pad cache is rebuilt from the reloaded colony on the first tick (NextIdlePadsS 0 is always due), whatever it held.
+	// Idle robots: the pad cache is emptied and rebuilt from the reloaded colony on the first tick (bIdlePadsBuilt false), whatever its key:
+	// a reload of the same colony leaves the key as it was, and the emptied cache must still be refilled (P2). IdlePadsKey is left as it is
+	// (the rebuild overwrites it). The full ring's once-a-second look restarts; IdlePadsSerial and the choice counters run on.
 	IdlePads.Reset();
-	IdlePadsKey = 0;
-	NextIdlePadsS = 0.0;
+	bIdlePadsBuilt = false;
+	NextIdleRetryS = 0.0;
+	bIdleRetryDue = false;
+	// P2 (ruling 28): the keep-outs and the docked robots are rebuilt from the reloaded colony on the first tick too (both then differ from these
+	// empty lists whenever a pad or a docked robot exists, so KeepOutSerial moves and the boxes are rebuilt). KeepOutSerial itself only moves
+	// forward; PadModelHalfCm is the asset's and stays.
+	KeepOuts.Reset();
+	DockDiscs.Reset();
+	DockNow.Reset();
+	KeepOutBoxes.Reset();
+	KeptOffPlans = KeptOffExits = KeptOffFallbacks = IdleLeashFrames = IdleLeashInspectEnds = DockSerialBumps = 0;
+	KeptOffNearestPadCm = KeptOffNearestDockCm = TNumericLimits<float>::Max();
 	RouteLogTickMs.Reset(); // round 2: a reload starts the tick timer's samples afresh
 	SimLastPosCm.Reset();
 	LastPosCm.Reset();
@@ -1325,12 +2056,19 @@ void URHAgentVisualizerSubsystem::TrackEntities(const TArray<FMassEntityHandle>&
 			FeetLiftCm.Add((WB.BoxExtent.Z - WB.Origin.Z) * WalkerScale);
 			// The cargo lump: what a hauling robot is CARRYING, finally
 			// visible. Hidden until the task fragment says CargoKg > 0.
+			// P2 M1: it rides the chest bone (location and rotation relative to the bone, so the walker's pivot, scale, facing and every clip
+			// carry it); its scale stays absolute, in world cm, as before.
 			UStaticMeshComponent* Lump = NewObject<UStaticMeshComponent>(Holder);
 			Lump->RegisterComponent();
 			Holder->AddInstanceComponent(Lump);
 			Lump->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
 			Lump->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Lump->SetAbsolute(true, true, true);
+			Lump->SetAbsolute(false, false, true);
+			if (!Skel->DoesSocketExist(LumpBone))
+			{
+				UE_LOG(LogRedHope, Warning, TEXT("Cargo lump: the walker mesh has no '%s' bone; the lump rides the walker's pivot"), *LumpBone.ToString());
+			}
+			Lump->AttachToComponent(Skel, FAttachmentTransformRules::KeepRelativeTransform, LumpBone);
 			if (UMaterialInterface* LumpBase = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_Graybox.M_Graybox")))
 			{
 				UMaterialInstanceDynamic* Mid = UMaterialInstanceDynamic::Create(LumpBase, Lump);
@@ -1909,14 +2647,17 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 						}
 						if (bShow)
 						{
+							// P2 M1: the lump rides the chest bone (attached in TrackEntities), so the figure's pivot, scale, facing and clip carry it;
+							// only its size follows the load, and its centre steps back with its depth so its front face stays on the back.
 							const float Frac = FMath::Clamp(Cargo / FMath::Max(Robot ? Robot->CargoCapKg : 100.f, 1.f), 0.f, 1.f);
-							const FVector Back = FRotator(0.f, FacingYawDeg[i], 0.f).Vector() * -30.f;
-							Lump->SetWorldLocationAndRotation(
-								FVector(Pos.X + Back.X, Pos.Y + Back.Y,
-									Pos.Z + TerrainZ + (FeetLiftCm.IsValidIndex(i) ? FeetLiftCm[i] : 0.f) - Plant + 118.f),
-								FRotator(0.f, FacingYawDeg[i] + 12.f, 0.f));
 							const float LS = 0.24f + 0.20f * Frac;
-							Lump->SetWorldScale3D(FVector(LS, LS * 1.25f, LS * 0.7f));
+							const FVector WantScale(LS * 1.25f, LS, LS * 0.7f); // across the back (the bone's X), its depth (Y), its height
+							if (!Lump->GetComponentScale().Equals(WantScale, 1.e-3f))
+							{
+								const float MeshPerCm = 1.f / FMath::Max((float)Skel->GetComponentScale().Y, 0.01f);
+								Lump->SetRelativeLocation(FVector(0.f, LumpFrontYCm - LS * 50.f * MeshPerCm, LumpDropCm));
+								Lump->SetWorldScale3D(WantScale);
+							}
 						}
 					}
 				}
@@ -2035,11 +2776,15 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 		Sorted.Sort();
 		const int32 Mid = Sorted.Num() / 2;
 		const double MedianMs = Sorted.Num() == 0 ? 0.0 : ((Sorted.Num() % 2) ? Sorted[Mid] : 0.5 * (Sorted[Mid - 1] + Sorted[Mid]));
-		UE_LOG(LogRedHope, Display, TEXT("[RobotRoute] %d robots: %d drawn inside a footprint not theirs, %d sim inside one; drawn-sim gap mean %.0f cm max %.0f cm; %d parked (routing %s); idle: %d waiting at a pad, %d at the Lander rank, %d inspecting; tick median %.3f ms over %d frame(s)"),
+		// P2: the idle pad cache since the last line: its rebuilds, and the pad choices made (and how many a rebuild sent through).
+		UE_LOG(LogRedHope, Display, TEXT("[RobotRoute] %d robots: %d drawn inside a footprint not theirs, %d sim inside one; drawn-sim gap mean %.0f cm max %.0f cm; %d parked (routing %s); idle: %d waiting at a pad, %d at the Lander rank, %d inspecting; tick median %.3f ms over %d frame(s); pad cache: %u rebuild(s), %u pad choice(s) (%u after a rebuild)"),
 			LogN, LogDrawnIn, LogSimIn, LogN ? LogGapSum / LogN : 0.f, LogGapMax, LogParked,
 			CVarRobotRouting.GetValueOnGameThread() != 0 ? TEXT("on") : TEXT("off"),
-			LogAtPad, LogAtRank, LogInspecting, MedianMs, Sorted.Num());
+			LogAtPad, LogAtRank, LogInspecting, MedianMs, Sorted.Num(),
+			IdlePadsSerial - RouteLogSerialAt, IdleChoiceRuns.Total() - RouteLogChoicesAt.Total(), IdleChoiceRuns.AfterRebuild - RouteLogChoicesAt.AfterRebuild);
 		RouteLogTickMs.Reset();
+		RouteLogSerialAt = IdlePadsSerial;
+		RouteLogChoicesAt = IdleChoiceRuns;
 	}
 	for (int32 P = 0; P < (int32)EPart::COUNT; ++P)
 	{
@@ -2051,6 +2796,8 @@ void URHAgentVisualizerSubsystem::Tick(float DeltaTime)
 	if (CVarRobotRouteLog.GetValueOnGameThread() == 0)
 	{
 		RouteLogTickMs.Reset(); // round 2: samples from before the log was switched off never join a later line's median
+		RouteLogSerialAt = IdlePadsSerial; // P2: nor do the pad cache's rebuilds and pad choices
+		RouteLogChoicesAt = IdleChoiceRuns;
 	}
 	else if (RouteLogTickMs.Num() < 4096)
 	{
