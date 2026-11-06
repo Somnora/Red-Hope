@@ -18,6 +18,7 @@
 #include "RHElevatorLayout.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHFrameStats.h"
+#include "RHPowerLook.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
 
@@ -265,6 +266,42 @@ URHCrewVisualizerSubsystem::FFigureCounts URHCrewVisualizerSubsystem::GetFigureC
 		}
 	}
 	return Out;
+}
+
+bool URHCrewVisualizerSubsystem::Debug_GetCrewBeat(int32 ColonistId, FString& OutActivity, FName& OutClip, FVector& OutTargetCm, FVector& OutAtCm) const
+{
+	const FCrewVisual* V = Tracked.Find(ColonistId);
+	const AActor* Actor = V ? V->Actor.Get() : nullptr;
+	if (!Actor)
+	{
+		return false;
+	}
+	OutActivity = V->Activity;
+	OutClip = V->CurrentClip;
+	OutTargetCm = V->Waypoints.Num() > 0 ? V->Waypoints.Last() : V->TargetCm; // where the walk ends, not the next corner
+	OutAtCm = Actor->GetActorLocation();
+	return true;
+}
+
+FName URHCrewVisualizerSubsystem::GetShownPost(const URHSimWorldSubsystem& Sim, int32 ColonistId) const
+{
+	// G1 r3: GetColonistJob is rebuilt every step with the station set (RefreshJobs lists a prefab station only on a step it is served),
+	// so a colonist whose post a rationed module takes on its served steps had a post that alternated at the step rate, and the work clip
+	// (WorkBench / WorkLab) and the bench rhythm that read it every frame restarted with it (the flash probe's uncounted g1_r3_dev_flash1:
+	// 108 clip changes of figures working at the same post, the closest two 0.03 s apart). Held as the Crew panel's roster row holds it
+	// (SRHCommandDeck::GetRosterPostLine, the same key): the highest post (Lab, Workstation, Garden, none) seen inside the colony's hold
+	// while it rations, else the post itself, latched through the power helper's floor.
+	static const FName NLab(TEXT("Lab")), NWorkstation(TEXT("Workstation")), NGarden(TEXT("Garden"));
+	const FName Live = Sim.GetColonistJob(ColonistId);
+	const uint32 Code = Live == NLab ? 3u : (Live == NWorkstation ? 2u : (Live == NGarden ? 1u : (Live.IsNone() ? 0u : 4u)));
+	const UWorld* World = GetWorld();
+	const URHPowerLookSubsystem* Look = World ? World->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+	if (Code == 4u || !Look)
+	{
+		return Live;
+	}
+	const uint32 Shown = Look->LatchWorst(URHPowerLookSubsystem::MakeKey('O', (uint32)ColonistId), Code);
+	return Shown == 3u ? NLab : (Shown == 2u ? NWorkstation : (Shown == 1u ? NGarden : FName(NAME_None)));
 }
 
 bool URHCrewVisualizerSubsystem::Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const
@@ -1866,7 +1903,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 			}
 			else if (Vis->Activity == TEXT("working"))
 			{
-				const FName Job = Sim->GetColonistJob(C.Id);
+				const FName Job = GetShownPost(*Sim, C.Id); // G1 r3: the post held, not this step's (it alternated with a rationed module)
 				WantClip = (Job == FName("Workstation")) ? FName("WorkBench") : FName("WorkLab");
 			}
 			if (WantClip != Vis->CurrentClip)
@@ -2233,7 +2270,7 @@ void URHCrewVisualizerSubsystem::Tick(float DeltaTime)
 				BodyZ += 5.f * FMath::Abs(FMath::Sin(Stride));
 				BodySway = FRotator(2.5f, 0.f, 2.0f * FMath::Sin(Stride));
 			}
-			else if (!Sim->GetColonistJob(C.Id).IsNone() && Pace > 0.f
+			else if (!GetShownPost(*Sim, C.Id).IsNone() && Pace > 0.f // G1 r3: the post held
 				&& FVector::Dist2D(Actor->GetActorLocation(), Vis->TargetCm) < 60.f)
 			{
 				BodyZ += 4.f * FMath::Sin((float)AnimClockS * 2.2f + Phase); // at-the-bench work rhythm

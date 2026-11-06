@@ -5,6 +5,7 @@
 #include "RHDistricts.h"
 
 class ARHPlayerController;
+class URHPowerLookSubsystem;
 class ITableRow;
 class STableViewBase;
 template <typename ItemType> class SListView;
@@ -37,6 +38,44 @@ public:
 	void Debug_ScrollRight(float OffsetPx);
 	void Debug_SetOrderDraft(FName Rival, FName Resource, int32 Kg); // E4 QA/captures: set one resource's draft on a rival's market card (the buttons' own state)
 	void Debug_SetDeskDraft(bool bToMarks, int64 Amount);            // E5 QA/captures: the bloc desk's draft (the buttons' own state)
+	// G1 (2026-11-04), nothing flashes: what the POWER tile, the power fold header, the build menu's spare-watts line, the selected
+	// card's status and station lines, the Earth tension bar and the 60x button show. The widgets call these same functions, so the
+	// flash probe and the click checks read exactly what is drawn. Power state comes from the shared helper (URHPowerLookSubsystem),
+	// never the per-step shed flag.
+	FText GetPowerTileValueText() const;
+	FSlateColor GetPowerTileValueColour() const;
+	FText GetPowerTileSubText() const;
+	FSlateColor GetPowerTileSubColour() const;
+	TOptional<float> GetPowerTileBarFrac() const;
+	FSlateColor GetPowerTileBarColour() const;
+	FText GetPowerFoldHeaderText() const;
+	FText GetSpareWattsText(FName Def) const;
+	FSlateColor GetSpareWattsColour(FName Def) const;
+	FSlateColor GetTensionColour() const;
+	void GetTensionMarks(double& OutDemand, double& OutEmbargo) const { OutDemand = TensionDemandAt; OutEmbargo = TensionEmbargoAt; }
+	FText GetTensionNoteText() const;
+	FString GetCardStatusLine(int32 BuildingId) const;   // no leading newline; empty for a site or an unknown Id
+	FString GetCardStationLine(int32 BuildingId) const;  // the INFIRMARY / IDLE / SEATS line, no leading newline; empty if none
+	// G1 r3: the zoned station cell's (or bay's) card lines - SEATS or NOT STAFFED, then its place in the order - as the card prints them
+	// (held and latched like a module's seats), no leading newline and no dismiss line.
+	FString GetCellStationLine(const FIntVector& Key) const;
+	FString Debug_GetInspectText() const;                // G1 r3 QA (the flash probe): the selected card's whole text, as it draws it
+	// G1 r3: what the Crew panel and the City panel show of the per-step station set (RefreshJobs), held over a rationed seat module's
+	// steps (LatchServed): a roster row's right-hand text, the research line's staffed-Lab test and the research bar's visibility. The
+	// widgets call these same functions.
+	FString GetRosterPostLine(int32 ColonistId) const;
+	bool IsLabSeatStaffedShown() const;
+	bool IsResearchBarShown() const;
+	const FRHCityDemand& Debug_GetCityDemandShown() const { return CityDemand; } // G1 r3 QA: the City panel's demand as it shows it
+	bool IsSixtyRefusedShown(FString* OutWhy = nullptr) const; // CanEnterEraMode, polled at most four times a real second, latched
+	// G1 r1: the Crew panel's food, garden and layout lines (each empty when the panel shows none), as the panel prints them. The
+	// garden's grow lights and the layout's circulation follow per-step reads, so the producing count and the clash count come through
+	// the power helper (held over the flip, latched). The panel passes its own Hope breakdown's food penalty and clashing pairs.
+	FString GetCrewFoodLine(bool bFoodPenalty) const;
+	FString GetCrewGardenLine() const;
+	FString GetCrewLayoutLine(int32 OffendedPairs) const;
+	FString Debug_GetGuideText() const;                  // the guide's shown stage | title | body, as its panel draws them
+	const URHPowerLookSubsystem* GetPowerLook() const;
 	// E8 QA (the click test): what the MARKET panel built - its own cached rows and strings, never the sim.
 	int32 Debug_GetMarketRowCount() const { return MarketShown.Num(); }
 	int32 Debug_GetMarketSparkGlyphs(FName Resource) const { return MarketSparkGlyphs.FindRef(Resource); } // drawn, non-space glyphs
@@ -459,6 +498,25 @@ private:
 	const class URHSimWorldSubsystem* GetSim() const;
 	const class URHSimClockSubsystem* GetClock() const;
 	const class URHDefinitionsSubsystem* GetDefs() const;
+	// G1: the Earth tension bar's thresholds, read from config when the Politics panel is built (EarthTensionDemandThreshold,
+	// EarthPreemptiveThreshold), and the 60x button's refusal poll.
+	double TensionDemandAt = 45.0;
+	double TensionEmbargoAt = 75.0;
+	mutable double SixtyPollAtS = 0.0;
+	mutable bool bSixtyRefused = false;
+	mutable FString SixtyWhy;
+	// G1: a keyed boolean through the power helper's latch (the value itself when there is no helper).
+	bool LatchHeld(uint8 Kind, uint32 Value, bool bWant) const;
+	// G1 r3: a value read from what RefreshJobs rebuilds every step (a station's seats, a colonist's post, the colony's filled and total
+	// seats, a staffed Lab). RefreshJobs lists a prefab station only on a step GetProvidedRoom(B, true) returns it, which reads that step's
+	// bPowered, so while the colony rations these follow the shed flag. Encoded so that higher is the served steps' view, the value is the
+	// highest seen inside the colony's hold while it rations, else itself, latched through the floor (URHPowerLookSubsystem::LatchWorst).
+	uint32 LatchServed(uint8 Kind, uint32 Value, uint32 Want) const;
+	// G1 r3: the City panel's colony seat counts as last refreshed (the sim's, unheld); RefreshCityPanel writes them into CityDemand
+	// through LatchServed every frame the panel is open.
+	int32 CityFilledRaw = 0;
+	int32 CityTotalRaw = 0;
+	uint8 GetPowerTileState() const; // G1: the POWER tile's latched state (0 rationing, 1 short, 2 surplus)
 
 	// --- The first-hour guide (RHCommandDeckGuide.cpp) ---
 	// A live "next step" panel atop the right column: the first unfinished

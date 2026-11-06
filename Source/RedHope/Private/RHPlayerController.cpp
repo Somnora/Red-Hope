@@ -2985,7 +2985,14 @@ void ARHPlayerController::SetSimSpeed(float Tier)
 	{
 		if (Tier > 0.f)
 		{
-			LastNonZeroSpeed = Tier;
+			// G1 (N4, GFC-14): a refused 60x is never remembered, so Space resumes the speed the player actually had.
+			FString Why;
+			const URHSimWorldSubsystem* Sim = GetWorld()->GetSubsystem<URHSimWorldSubsystem>();
+			const bool bRefusedEra = Tier > URHSimClockSubsystem::EraSpeedThreshold && Sim && !Sim->CanEnterEraMode(Why);
+			if (!bRefusedEra)
+			{
+				LastNonZeroSpeed = Tier;
+			}
 		}
 		Clock->SetSpeed(Tier);
 	}

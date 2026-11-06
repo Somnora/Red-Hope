@@ -3,10 +3,23 @@
 # the crew phase can be played by hand without the 3.5 hours at 1x it takes to
 # reach it. The RH.Playtest bot plays each game from a fresh start (live
 # robots, player orders only, the guide's order) and saves it at the sol
-# limit; rh_sandbox.sh midgame | late then loads the save in a normal window.
+# limit; rh_sandbox.sh early | vault | midgame | late then loads the save in a normal window.
 #
-#   bash scripts/unreal/rh_checkpoints.sh [midgame|late|all=all] [--force]
+#   bash scripts/unreal/rh_checkpoints.sh [early|vault|midgame|late|all=all] [--force]
 #
+# early    RH_Early.sav    sol 4.70, guide mode, full cargo (G1, 2026-11-04): the first dry
+#          night a new player meets, saved 60 sim-s before the 4.75 sunset. In the run
+#          that made the Late save (checkpoint_Late.txt) the bank first empties during
+#          sol 4: the SOL 4 line (:43, sums sol 3) reads bank-min 57%, the SOL 5 line
+#          (:47, sums sol 4) short 98% shed 0% bank-min 0%, the SOL 6 line (:60, sums
+#          sol 5) shed 45%. The night 4.75-5.25 is the first the colony enters already
+#          scraping. (The playtest samples the shed flag every 16 steps at -fps=10 and
+#          16x, an even count, so a two-step alternation can read shed 0%: bank-min is
+#          the reliable sign.)
+# vault    RH_Vault.sav    sol 9.35, guide mode, full cargo (G1): the guide's THE VAULT
+#          steps live on a dry night. Same run: the floor -1 Air Filter is built at
+#          9.26 (:86), sol 9 sheds (the SOL 10 line, :88, shed 21%), sunset is 9.75 and
+#          floor -1 is rated at 10.11 (:89).
 # midgame  RH_Midgame.sav  sol 28.35, just after sunrise, lean cargo (the
 #          crew ship brought the Crew Pod alone). Four crew in the vault, no
 #          garden yet, Q3 nearly met and the ship's manifest still empty: the
@@ -67,12 +80,16 @@ make_checkpoint() {
 
 STATUS=0
 case "$WHICH" in
+early)   make_checkpoint Early 4.70 full || STATUS=1 ;;
+vault)   make_checkpoint Vault 9.35 full || STATUS=1 ;;
 midgame) make_checkpoint Midgame 28.35 lean || STATUS=1 ;;
 late)    make_checkpoint Late 62.35 full || STATUS=1 ;;
 all)
+  make_checkpoint Early 4.70 full || STATUS=1
+  make_checkpoint Vault 9.35 full || STATUS=1
   make_checkpoint Midgame 28.35 lean || STATUS=1
   make_checkpoint Late 62.35 full || STATUS=1
   ;;
-*) echo "usage: rh_checkpoints.sh [midgame|late|all] [--force]"; exit 2 ;;
+*) echo "usage: rh_checkpoints.sh [early|vault|midgame|late|all] [--force]"; exit 2 ;;
 esac
 exit $STATUS

@@ -141,6 +141,8 @@ public:
 	void CancelModes();
 	void SetSimSpeed(float Tier);
 	void TogglePause();
+	// G1 (N4): the speed Space resumes (a refused 60x is never stored).
+	float GetResumeSpeed() const { return LastNonZeroSpeed; }
 	void QuickSave();
 	void QuickLoad();
 	FName GetPendingBuildDef() const { return PendingBuildDef; }

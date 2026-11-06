@@ -23,7 +23,11 @@
 #include "RHAgentVisualizerSubsystem.h"
 #include "RHCavernVisualizerSubsystem.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHCrewVisualizerSubsystem.h"
 #include "RHCommandDeck.h"
+#include "RHDeckStyle.h"
+#include "RHPowerLook.h"
+#include "RHAudioSubsystem.h"
 #include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHTrafficVisualizerSubsystem.h"
@@ -51,7 +55,10 @@
 #include "Input/Events.h"
 #include "Layout/WidgetPath.h"
 #include "Misc/Paths.h"
+#include "Misc/App.h"
+#include "Misc/CoreDelegates.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/IToolTip.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SViewport.h"
 #include "Widgets/SWindow.h"
@@ -435,6 +442,7 @@ namespace
 
 	int32 GPass = 0;
 	int32 GFail = 0;
+	double GFlashT0 = 0.0; // G1: the flash probe's start (its lines give times from it)
 
 	void Report(const FString& Name, bool bOk, const FString& Why)
 	{
@@ -963,6 +971,14 @@ namespace
 		TSet<int32> IdlePairKeys;
 		double IdlePairNearestCm = 1.0e9;
 		FString IdlePairSaid;
+		// G1 (2026-11-04): earth.tension's tension to restore; the 60x steps' order lag to restore, the Stockpile site they stand up, the
+		// "60x unavailable" alerts counted while they run (and the handle that counts them), and the clock between speed.space's two presses.
+		double Tension0 = 0.0;
+		double SixtyLag0 = 45.0;
+		FString SixtySite;
+		int32 SixtyRefusals = 0;
+		FDelegateHandle SixtyAlertHandle;
+		float SpaceMid = -1.f;
 	};
 
 	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
@@ -1125,8 +1141,8 @@ namespace
 		}, 0.2f);
 	}
 
-	// The first spot where a SolarArray may stand, searched outward from the colony.
-	bool FindBuildSpot(const URHSimWorldSubsystem& Sim, FVector& Out, FString& OutWhy)
+	// The first spot where a SolarArray (or DefName, G1) may stand, searched outward from the colony.
+	bool FindBuildSpot(const URHSimWorldSubsystem& Sim, FVector& Out, FString& OutWhy, FName DefName = FName("SolarArray"))
 	{
 		for (int32 Ring = 1; Ring <= 14; ++Ring)
 		{
@@ -1140,7 +1156,7 @@ namespace
 					}
 					const FVector Spot(Dx * 1000.0, Dy * 1000.0, 0.0);
 					FString Why;
-					if (Sim.CanPlaceBuilding(FName("SolarArray"), Spot, Why, 0))
+					if (Sim.CanPlaceBuilding(DefName, Spot, Why, 0))
 					{
 						Out = Spot;
 						return true;
@@ -4352,6 +4368,211 @@ namespace
 			Report(TEXT("robots.idle"), T->IdleWhy.IsEmpty(), T->IdleWhy.IsEmpty() ? T->IdleSaid : T->IdleWhy + TEXT(" | ") + T->IdleSaid);
 		}, 0.3f);
 
+		// ---- G1 (2026-11-04): the Earth tension bar's colours follow the sim's thresholds; the 60x tier dims while the sim refuses the era
+		// band, with the reason as its tooltip; and Space never resumes a refused 60x. Just before the verdict, so no older step sees their
+		// effects (the Stockpile site they stand up is harmless: leak.total counts world clicks, and these steps make none).
+		Runner.Do(TEXT("earth.tension"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!PC || !Sim || !Defs || !Deck.IsValid())
+			{
+				Report(TEXT("earth.tension"), false, TEXT("no player controller, sim, definitions or deck"));
+				return;
+			}
+			// Paused, so no demand or embargo fires while the tension is moved; never on an exact threshold (45.0 written through
+			// Debug_AddTension can land at 44.9999...).
+			PC->SetSimSpeed(0.f);
+			T->Tension0 = Sim->GetEarthTension();
+			const double Samples[8] = { 30.0, 44.5, 45.5, 50.0, 70.0, 74.5, 75.5, 80.0 };
+			const TCHAR* Want[8] = { TEXT("calm"), TEXT("calm"), TEXT("amber"), TEXT("amber"), TEXT("amber"), TEXT("amber"), TEXT("red"), TEXT("red") };
+			FString Said, Why;
+			for (int32 i = 0; i < 8; ++i)
+			{
+				Sim->Debug_AddTension(Samples[i] - Sim->GetEarthTension());
+				const FLinearColor C = Deck->GetTensionColour().GetSpecifiedColor();
+				const TCHAR* Got = C.Equals(RHDeck::Red) ? TEXT("red") : (C.Equals(RHDeck::Amber) ? TEXT("amber") : (C.Equals(RHDeck::Teal) ? TEXT("calm") : TEXT("other")));
+				Said += FString::Printf(TEXT("%s%g %s"), i > 0 ? TEXT(", ") : TEXT(""), Samples[i], Got);
+				if (FCString::Strcmp(Got, Want[i]) != 0)
+				{
+					Why += FString::Printf(TEXT(" %g reads %s, expected %s;"), Samples[i], Got, Want[i]);
+				}
+			}
+			double MarkDemand = 0.0, MarkEmbargo = 0.0;
+			Deck->GetTensionMarks(MarkDemand, MarkEmbargo);
+			const double CfgDemand = Defs->GetConfigScalar(FName("EarthTensionDemandThreshold"), -1.0);
+			const double CfgEmbargo = Defs->GetConfigScalar(FName("EarthPreemptiveThreshold"), -1.0);
+			const FString Note = Deck->GetTensionNoteText().ToString();
+			if (MarkDemand != CfgDemand || MarkEmbargo != CfgEmbargo)
+			{
+				Why += FString::Printf(TEXT(" marks at %g and %g, config %g and %g;"), MarkDemand, MarkEmbargo, CfgDemand, CfgEmbargo);
+			}
+			if (!Note.Contains(FString::Printf(TEXT("%.0f"), CfgDemand)) || !Note.Contains(FString::Printf(TEXT("%.0f"), CfgEmbargo)))
+			{
+				Why += FString::Printf(TEXT(" the line '%s' does not name both thresholds;"), *Note);
+			}
+			Sim->Debug_AddTension(T->Tension0 - Sim->GetEarthTension());
+			PC->SetSimSpeed(1.f);
+			Report(TEXT("earth.tension"), Why.IsEmpty(), Why.IsEmpty()
+				? FString::Printf(TEXT("%s (config: demand %g, embargo %g); marks at %g and %g; '%s'"), *Said, CfgDemand, CfgEmbargo, MarkDemand, MarkEmbargo, *Note)
+				: Why + TEXT(" | ") + Said);
+		}, 0.3f);
+		Runner.Do(TEXT("speed.60x dim setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return;
+			}
+			// 3x, the uplink lag at 1 s (as move.setup), every "60x unavailable" alert counted, and a Stockpile ordered at the first free spot.
+			PC->SetSimSpeed(3.f);
+			T->SixtyLag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(1.0);
+			T->SixtyRefusals = 0;
+			T->SixtyAlertHandle = Sim->OnAlert.AddLambda([T](const FString& Message)
+			{
+				if (Message.StartsWith(TEXT("60x unavailable")))
+				{
+					++T->SixtyRefusals;
+				}
+			});
+			FVector Spot = FVector::ZeroVector;
+			FString Why;
+			if (FindBuildSpot(*Sim, Spot, Why, FName("Stockpile")))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Build");
+				Cmd.Target = FName("Stockpile");
+				Cmd.Level = 0;
+				Cmd.Location = Spot;
+				Sim->EnqueueCommand(Cmd);
+				T->SixtySite = FString::Printf(TEXT("a Stockpile ordered at (%.0f, %.0f) m"), Spot.X / 100.0, Spot.Y / 100.0);
+			}
+			else
+			{
+				T->SixtySite = FString::Printf(TEXT("no spot for a Stockpile (%s)"), *Why);
+			}
+		}, 0.2f);
+		{
+			const TSharedRef<double> SiteSeenAt = MakeShared<double>(-1.0);
+			Runner.Push(TEXT("speed.60x dim"), [T, SiteSeenAt](double Elapsed, bool bLast)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				FString Site;
+				if (Sim)
+				{
+					for (const FRHBuildingInstance& B : Sim->GetBuildings())
+					{
+						if (B.bUnderConstruction)
+						{
+							Site = FString::Printf(TEXT("%s #%d"), *B.DefName.ToString(), B.Id);
+						}
+					}
+				}
+				// A site stands, then 0.3 s more (the button's poll), and up to the power helper's floor more while the dim's latch waits
+				// out a change it made inside the floor (G1 r1: the dim is latched).
+				if (!Site.IsEmpty() && *SiteSeenAt < 0.0)
+				{
+					*SiteSeenAt = Elapsed;
+				}
+				if (!bLast && (*SiteSeenAt < 0.0 || Elapsed - *SiteSeenAt < 0.3))
+				{
+					return false;
+				}
+				FString Why;
+				const bool bDim = Deck.IsValid() && Deck->IsSixtyRefusedShown(&Why);
+				if (!bLast && !bDim && Elapsed - *SiteSeenAt < 0.3 + URHPowerLookSubsystem::FloorRealS + 0.3)
+				{
+					return false;
+				}
+				FString Tip;
+				bool bTip = false;
+				TArray<FFoundWidget> Buttons;
+				GatherInWindow(TEXT("SButton"), Buttons);
+				for (const FFoundWidget& Found : Buttons)
+				{
+					if (HasText(Found.Widget, TEXT("60x")))
+					{
+						const TSharedPtr<IToolTip> ToolTip = Found.Widget->GetToolTip();
+						bTip = ToolTip.IsValid() && !ToolTip->IsEmpty();
+						if (bTip)
+						{
+							const TSharedRef<SWidget> TipWidget = ToolTip->AsWidget();
+							Tip = FirstText(TipWidget);
+						}
+						break;
+					}
+				}
+				FString Problem;
+				if (Site.IsEmpty())
+				{
+					Problem += FString::Printf(TEXT(" no site stood within the wait (%s);"), *T->SixtySite);
+				}
+				if (!bDim)
+				{
+					Problem += TEXT(" the 60x tier is not shown refused;");
+				}
+				if (!Why.Contains(TEXT("construction in progress")))
+				{
+					Problem += FString::Printf(TEXT(" the reason is '%s';"), *Why);
+				}
+				if (!bTip)
+				{
+					Problem += TEXT(" the 60x button has no tooltip;");
+				}
+				Report(TEXT("speed.60x dim"), Problem.IsEmpty(), FString::Printf(TEXT("%s%s%s, the site %s; 60x shown refused: %s, reason '%s'; tooltip '%s'"),
+					*Problem, Problem.IsEmpty() ? TEXT("") : TEXT(" | "), *T->SixtySite, *Site, bDim ? TEXT("yes") : TEXT("no"), *Why, *Tip));
+				return true;
+			}, 0.3f, 10.f);
+		}
+		{
+			const TSharedRef<FPress> Sixty = PushPress(TEXT("speed.60x refused"), LocateButton(TEXT("60x"), 0, true));
+			// The press is refused: the clock holds 3x and the sim says so once. (What Space then resumes is speed.space's clause; this line
+			// only reports it.)
+			PushCheckSays(TEXT("speed.60x refused"), Sixty, [T](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				if (!PC) { return FString(TEXT("no player controller")); }
+				Said = FString::Printf(TEXT("clock %.0fx, %d '60x unavailable' alert(s), Space would resume %.0fx"), ClockSpeed(), T->SixtyRefusals, PC->GetResumeSpeed());
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 3.f)) { return FString::Printf(TEXT("clock speed %.1f, expected 3 (the sim holds the agent speed)"), ClockSpeed()); }
+				if (T->SixtyRefusals != 1) { return FString::Printf(TEXT("%d '60x unavailable' alert(s), expected 1"), T->SixtyRefusals); }
+				return FString();
+			}, 1.f);
+		}
+		{
+			const TSharedRef<FPress> Pause = PushKey(TEXT("speed.space pause"), EKeys::SpaceBar);
+			Runner.Do(TEXT("speed.space mid"), [T]() { T->SpaceMid = ClockSpeed(); }, 0.3f);
+			PushKey(TEXT("speed.space resume"), EKeys::SpaceBar);
+			PushCheck(TEXT("speed.space"), Pause, [T]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				if (!PC) { return FString(TEXT("no player controller")); }
+				if (T->SpaceMid != 0.f) { return FString::Printf(TEXT("the first Space left the clock at %.1f, expected 0"), T->SpaceMid); }
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 3.f)) { return FString::Printf(TEXT("the second Space resumed %.1fx, expected 3x"), ClockSpeed()); }
+				if (T->SixtyRefusals != 1) { return FString::Printf(TEXT("%d '60x unavailable' alert(s), expected still 1"), T->SixtyRefusals); }
+				if (!FMath::IsNearlyEqual(PC->GetResumeSpeed(), 3.f)) { return FString::Printf(TEXT("resume speed %.0fx, expected 3x"), PC->GetResumeSpeed()); }
+				return FString();
+			}, 1.f);
+		}
+		Runner.Do(TEXT("speed.space cleanup"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->SetOrderLagSeconds(T->SixtyLag0);
+				Sim->OnAlert.Remove(T->SixtyAlertHandle);
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
+		}, 0.3f);
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -4469,6 +4690,1541 @@ namespace
 		Runner.Do(TEXT("final"), []()
 		{
 			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
+			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
+			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
+		}, 0.1f);
+	}
+
+	// ---------------------------------------------------------------- G1 (2026-11-04): the flash probe (RH.ClickTest flash)
+	//
+	// "Nothing flashes, day or night." The scene loads the Early, Vault and Late checkpoint slots (rh_checkpoints.sh) with the sim's own
+	// load, drains the bank on a night, and plays it at 1x, 3x, 8x and 60x (60x only when the sim agrees within 10 s, else 8x over the
+	// same sim span). Every frame, on every floor whatever the view, it samples what the player can see change: each building's
+	// applied look, glow and lamp, its hum, its card status line (and station and habitat lines), each room light, the POWER tile, the
+	// power fold header, the guide panel and the build menu's spare-watts line. R1: an element that changes twice less than 3 real s
+	// apart fails; R2: a light, emissive scalar or bar that moves more than 12 % of its range in one frame fails. A text changes when it
+	// differs with every run of digits masked (a number ticking is not a change, a sign flipping is) or its colour does; a light,
+	// scalar or bar changes when it starts moving after 0.25 s at rest or reverses (one fade is one change). The histories reset at a
+	// load, a view change and a selection change, and nothing in the 2 real s after one is counted. It samples at the END of each frame
+	// (FCoreDelegates::OnEndFrame), after the power helper's tick and the deck's paint, and dates what it sees with the frame's own time
+	// (FApp::GetCurrentTime), the clock the helper's latches stamp their changes with: a gap it measures is the gap the player saw.
+
+	FString MaskDigits(const FString& In)
+	{
+		FString Out;
+		Out.Reserve(In.Len());
+		for (int32 i = 0; i < In.Len(); ++i)
+		{
+			if (FChar::IsDigit(In[i]))
+			{
+				Out.AppendChar(TEXT('#'));
+				while (i + 1 < In.Len() && (FChar::IsDigit(In[i + 1]) || In[i + 1] == TEXT('.') || In[i + 1] == TEXT(',')))
+				{
+					++i;
+				}
+			}
+			else
+			{
+				Out.AppendChar(In[i]);
+			}
+		}
+		return Out;
+	}
+
+	FString ColourName(const FSlateColor& C)
+	{
+		const FLinearColor L = C.GetSpecifiedColor();
+		if (L.Equals(RHDeck::Red)) { return TEXT("red"); }
+		if (L.Equals(RHDeck::Amber)) { return TEXT("amber"); }
+		if (L.Equals(RHDeck::Green)) { return TEXT("green"); }
+		if (L.Equals(RHDeck::Teal)) { return TEXT("teal"); }
+		if (L.Equals(RHDeck::TextDim)) { return TEXT("dim"); }
+		return L.ToString();
+	}
+
+	const TCHAR* LookName(uint8 Look)
+	{
+		switch ((ERHPowerLook)Look)
+		{
+		case ERHPowerLook::Powered: return TEXT("Powered");
+		case ERHPowerLook::Rationed: return TEXT("Rationed");
+		case ERHPowerLook::Unserved: return TEXT("Unserved");
+		case ERHPowerLook::Off: return TEXT("Off");
+		case ERHPowerLook::Site: return TEXT("Site");
+		default: return TEXT("?");
+		}
+	}
+
+	struct FFlashElem
+	{
+		bool bContinuous = false;
+		FString Text;               // a discrete element's shown state
+		double Value = 0.0;         // a continuous element's value
+		double Range = 1.0;         // and its full range (R2)
+		int32 Dir = 0;              // its last direction of movement
+		double LastMoveS = -1.0;    // when it last moved
+		bool bRested = false;       // a sample at rest since it last moved
+		double LastChangeS = -1.0;  // the last counted change
+		FString LastChangeSaid;
+	};
+
+	struct FFlashBucket
+	{
+		int32 Frames = 0;
+		TSet<FString> Elements;
+		double Closest = 1.0e9;
+		FString ClosestSaid;
+		double LargestStepPct = 0.0;
+		FString LargestSaid;
+		int32 Violations = 0;
+		TArray<FString> ViolationSaid;
+		TSet<int32> Speeds;          // clock speeds seen
+		TSet<int32> DrySpeeds;       // clock speeds seen while the bank was drained (under 1 % of its capacity)
+		int32 ShedFlips = 0;         // frames whose shed flag differed from the frame before, on the dry stretch
+		TSet<int32> RationedIds;     // non-exempt buildings seen Rationed
+		TArray<FString> ExemptBad;   // exempt buildings seen anything but Powered (not a site, not switched off)
+		TSet<int32> ExemptBadIds;
+		int32 LampSamples = 0;
+		TArray<FString> LampBad;     // a lamp on a Solar Array, Stockpile, Charging Pad or Pylon
+		TSet<int32> LampBadIds;
+		int32 RoomSamples = 0;
+		TArray<FString> HintTexts;   // the guide's THE VAULT texts seen (masked)
+		FString GuideAtNight;        // the guide when the drained night's segment started
+		FString Sixty;               // "ran" or why it was refused
+		bool bSixtyRan = false;
+		TArray<int32> Returned;      // non-exempt buildings back to Powered by day
+		TArray<FString> Problems;    // a missing slot, a failed load, a segment that never reached its sol
+		double NumClosest = 1.0e9;   // R3: the closest two reversals of one number (s), for the line
+		FString NumClosestSaid;
+		int32 NumReversals = 0;      // R3: counted reversals of any number
+		int32 GrowFlips = 0;         // frames whose grow-light flag differed from the frame before (information: a garden scrape)
+		TMap<FString, int32> ChangeCounts; // G1 r2: counted changes per element (information: how often, not only how close)
+		int32 SignedZeros = 0;       // G1 r2: frames with a signed zero ('-0 W', '+0 W' on the tile) or a zero short ('0 W SHORT', 'grid is 0 W short')
+		FString SignedZeroSaid;
+		int32 RedCascades = 0;       // G1 r2: the tile's value colour amber -> red -> green inside two floors (information)
+		FString RedCascadeSaid;
+	};
+
+	// R3 (G1 r1): one text's numbers, frame to frame.
+	struct FFlashNum
+	{
+		FString Masked;             // the text with its digits masked: a change of kind starts its numbers again (R1 counts the change)
+		TArray<double> Values;      // its numbers last frame
+		TArray<double> Steps;       // each one's rounding step (5 before a '%', else 1)
+		TArray<int32> Dir;          // each one's last move larger than its step (+1 / -1; 0 none yet)
+		TArray<double> MoveS;       // that move's time
+		TArray<double> FromV;       // and the value it left
+		TArray<double> RevS;        // its last reversal's time
+	};
+
+	// G1 r3: flash.lab's own record. A station line is sampled UNMASKED (a seat number that moves is a change), with the sim's own pair
+	// beside it (did the case happen at all?), its shape checked every frame.
+	struct FFlashLabSeat
+	{
+		FString Name;                    // the element's name: 'lab line #40 LabModule' or 'lab cell (-1,7)'
+		bool bModule = false;
+		int32 Id = 0;                    // a module's building Id
+		FIntVector Key = FIntVector::ZeroValue;
+		uint32 LivePair = MAX_uint32;    // the sim's (filled, capacity) on the last frame
+		int32 LiveChanges = 0;           // frames on the dry stretch whose sim pair differed from the frame before
+		FString LastLine;
+	};
+	struct FFlashLabCrew
+	{
+		bool bSeen = false;
+		FString Activity;
+		FName Clip;
+		FName Job;
+		FVector Target = FVector::ZeroVector;
+		bool bAtPost = false;
+		int32 JobChanges = 0;            // the sim's post, frame to frame (information: it alternates with the station set)
+		int32 TargetChanges = 0;         // where the figure's walk ends (set at its beats)
+		double LastTargetS = -1.0, ClosestTargetS = 1.0e9;
+		int32 WorkClipChanges = 0;       // its clip, while it works at its post with the same target on both frames
+		double LastWorkClipS = -1.0, ClosestWorkClipS = 1.0e9;
+		bool bAtModule = false;          // seated at one of the step's Lab Modules on some dry frame
+		FString LastTargetSaid, ClosestTargetSaid, LastClipSaid, ClosestClipSaid;
+	};
+	struct FFlashLab
+	{
+		bool bLabFull = false, bBrine = false, bRated = false;
+		int32 ModuleA = 0, ModuleB = 0;  // A is selected; both are assigned staff first, B newest (so first)
+		FString Placed;
+		TArray<FFlashLabSeat> Seats;
+		int32 ZeroZero = 0;              // 'SEATS: 0 of 0' on any frame
+		FString ZeroZeroSaid;
+		int32 Garbled = 0;               // a signed, garbled or impossible figure
+		FString GarbledSaid;
+		int32 SeatsWhileRationed = 0;    // frames module A's line read SEATS while its look was Rationed
+		int32 CardFrames = 0, CardMissing = 0; // the selected card's own text did not carry the selected station's line
+		FString CardMissingSaid;
+		TSet<int32> NightDrySpeeds;      // clock speeds seen drained after sunset
+		int32 SelectedCell = INDEX_NONE;
+		TMap<int32, FFlashLabCrew> Crew; // colonist Id -> its figure, on the dry stretch
+		int32 CrewFrames = 0;
+		int32 LiveFilled = -1;           // the sim's colonists at a post last frame
+		int32 LiveFilledChanges = 0;     // frames on the dry stretch whose count differed from the frame before
+		FString LastCity;                // the City panel's Jobs figures as last sampled
+	};
+
+	struct FFlashProbe
+	{
+		bool bArmed = false;
+		TSharedPtr<FFlashLab> Lab;       // G1 r3: flash.lab's record, from its setup on
+		FString Bucket = TEXT("setup");
+		double QuietUntilS = 0.0;
+		TMap<FString, FFlashElem> Elems;
+		TMap<FString, FFlashBucket> Buckets;
+		bool bPrevShed = false;
+		bool bPrevShedSeen = false;
+		double PrevSampleS = 0.0;
+		TMap<int32, uint8> PrevLook;
+		TMap<FString, FFlashNum> Nums; // R3's histories: reset at a load only, and counted from the first frame after it
+		bool bPrevGrowDark = false;
+		bool bPrevGrowSeen = false;
+		FString TileCol, TileColWas; // G1 r2: the tile's value colour and the one before it, with when each was taken
+		double TileColAt = -1.0, TileColWasAt = -1.0;
+		FDelegateHandle EndFrame;
+
+		// A load, a view change or a selection change: forget every element; count nothing for 2 real s.
+		void Reset()
+		{
+			Elems.Reset();
+			PrevLook.Reset();
+			TileCol.Reset();
+			TileColWas.Reset();
+			TileColAt = TileColWasAt = -1.0;
+			bPrevShedSeen = false;
+			QuietUntilS = FApp::GetCurrentTime() + 2.0;
+		}
+		FFlashBucket& Now() { return Buckets.FindOrAdd(Bucket); }
+	};
+
+	void FlashChange(FFlashBucket& Bk, FFlashElem& E, const FString& Name, double NowS, const FString& Said)
+	{
+		++Bk.ChangeCounts.FindOrAdd(Name);
+		if (E.LastChangeS >= 0.0)
+		{
+			const double Gap = NowS - E.LastChangeS;
+			if (Gap < Bk.Closest)
+			{
+				Bk.Closest = Gap;
+				Bk.ClosestSaid = FString::Printf(TEXT("%s (%s, then %s)"), *Name, *E.LastChangeSaid, *Said);
+			}
+			if (Gap < 3.0)
+			{
+				++Bk.Violations;
+				if (Bk.ViolationSaid.Num() < 8)
+				{
+					Bk.ViolationSaid.Add(FString::Printf(TEXT("R1 %s changed twice %.2f s apart (%s, then %s)"), *Name, Gap, *E.LastChangeSaid, *Said));
+				}
+			}
+		}
+		E.LastChangeS = NowS;
+		E.LastChangeSaid = Said;
+	}
+
+	void FlashDiscrete(FFlashProbe& P, FFlashBucket& Bk, const FString& Name, const FString& Value, double NowS, bool bCount)
+	{
+		Bk.Elements.Add(Name);
+		FFlashElem* E = P.Elems.Find(Name);
+		if (!E)
+		{
+			E = &P.Elems.Add(Name);
+			E->Text = Value; // first sight is not a change
+			return;
+		}
+		if (E->Text == Value)
+		{
+			return;
+		}
+		const FString Was = E->Text;
+		E->Text = Value;
+		if (bCount)
+		{
+			FlashChange(Bk, *E, Name, NowS, FString::Printf(TEXT("'%s' -> '%s' at %.2f s"), *Was.Left(60), *Value.Left(60), NowS - GFlashT0));
+		}
+	}
+
+	// "At rest" is a rate, not a per-frame step: a value moving slower than 0.3 % of its range per second (dt clamped to 0.1 s, as the
+	// power helper integrates its fades) is resting. A per-frame threshold read a slow, steady glide (the bank bar charging at 60x) as
+	// resting on short frames and moving on long ones, so frame-time jitter alone made "starts" out of one glide.
+	void FlashContinuous(FFlashProbe& P, FFlashBucket& Bk, const FString& Name, double Value, double Range, double NowS, double FrameDt, bool bCount)
+	{
+		Bk.Elements.Add(Name);
+		FFlashElem* E = P.Elems.Find(Name);
+		if (!E)
+		{
+			E = &P.Elems.Add(Name);
+			E->bContinuous = true;
+			E->Value = Value;
+			E->Range = FMath::Max(Range, 1e-6);
+			return;
+		}
+		E->Range = FMath::Max(Range, 1e-6);
+		const double Delta = Value - E->Value;
+		E->Value = Value;
+		if (FMath::Abs(Delta) <= 0.003 * E->Range * FrameDt)
+		{
+			E->bRested = true;
+			return;
+		}
+		const int32 Dir = Delta > 0.0 ? 1 : -1;
+		const bool bStart = E->Dir == 0 || Dir != E->Dir || (E->bRested && NowS - E->LastMoveS >= 0.25);
+		E->Dir = Dir;
+		E->LastMoveS = NowS;
+		E->bRested = false;
+		if (!bCount)
+		{
+			return;
+		}
+		const double Pct = 100.0 * FMath::Abs(Delta) / E->Range;
+		if (Pct > Bk.LargestStepPct)
+		{
+			Bk.LargestStepPct = Pct;
+			Bk.LargestSaid = FString::Printf(TEXT("%s %.3f -> %.3f of %.3f"), *Name, Value - Delta, Value, E->Range);
+		}
+		if (Pct > 12.0)
+		{
+			++Bk.Violations;
+			if (Bk.ViolationSaid.Num() < 8)
+			{
+				Bk.ViolationSaid.Add(FString::Printf(TEXT("R2 %s moved %.1f %% of its range in one frame (%.3f -> %.3f of %.3f) at %.2f s"), *Name, Pct, Value - Delta, Value, E->Range, NowS - GFlashT0));
+			}
+		}
+		if (bStart)
+		{
+			FlashChange(Bk, *E, Name, NowS, FString::Printf(TEXT("%s %.3f at %.2f s"), Dir > 0 ? TEXT("up") : TEXT("down"), Value, NowS - GFlashT0));
+		}
+	}
+
+	// R3 (G1 r1): the numbers a text shows, unmasked. A run of digits (with '.' and ',' inside) is one number, negative when a '-'
+	// touches its first digit; a number followed (after spaces) by '%' has a rounding step of 5, any other 1.
+	void FlashParseNumbers(const FString& In, TArray<double>& OutValues, TArray<double>& OutSteps)
+	{
+		OutValues.Reset();
+		OutSteps.Reset();
+		for (int32 i = 0; i < In.Len(); ++i)
+		{
+			if (!FChar::IsDigit(In[i]))
+			{
+				continue;
+			}
+			const int32 Start = i;
+			while (i + 1 < In.Len() && (FChar::IsDigit(In[i + 1]) || In[i + 1] == TEXT('.') || In[i + 1] == TEXT(',')))
+			{
+				++i;
+			}
+			double V = FCString::Atod(*In.Mid(Start, i - Start + 1).Replace(TEXT(","), TEXT("")));
+			if (Start > 0 && In[Start - 1] == TEXT('-'))
+			{
+				V = -V;
+			}
+			int32 j = i + 1;
+			while (j < In.Len() && In[j] == TEXT(' '))
+			{
+				++j;
+			}
+			OutValues.Add(V);
+			OutSteps.Add(j < In.Len() && In[j] == TEXT('%') ? 5.0 : 1.0);
+		}
+	}
+
+	// R3: a number shown on screen fails when it goes back (a move larger than its rounding step, then a move the other way that lands
+	// within a step of the value it left) less than the power helper's floor after leaving it: an A-B-A, the signature of a readout
+	// built from a per-step value while the shed flag alternates. Counted from the first frame after a load (no quiet time); the power
+	// readouts only while the colony rations (the sim's own IsColonyRationing or the shown latch: the only time the shed flag
+	// alternates), the Crew lines always. Reversals that do not go back are counted for the line (information), never failed: at 60x the
+	// means move with the morning's generation and the batches' starts by tens of watts and points a step (g1_r1_dev_flash1).
+	void FlashNumbers(FFlashProbe& P, FFlashBucket& Bk, const FString& Name, const FString& Text, double NowS, bool bCount)
+	{
+		TArray<double> V, St;
+		FlashParseNumbers(Text, V, St);
+		FFlashNum& N = P.Nums.FindOrAdd(Name);
+		const FString Masked = MaskDigits(Text);
+		if (V.Num() != N.Values.Num() || Masked != N.Masked)
+		{
+			// First sight, or the text changed its kind (R1 counts that): its numbers start again.
+			N.Masked = Masked;
+			N.Values = V;
+			N.Steps = St;
+			N.Dir.Init(0, V.Num());
+			N.MoveS.Init(-1.0, V.Num());
+			N.FromV = V;
+			N.RevS.Init(-1.0, V.Num());
+			return;
+		}
+		for (int32 i = 0; i < V.Num(); ++i)
+		{
+			const double D = V[i] - N.Values[i];
+			const double StepV = FMath::Max(N.Steps[i], St[i]);
+			if (FMath::Abs(D) > StepV + 1e-9)
+			{
+				const int32 Dir = D > 0.0 ? 1 : -1;
+				if (N.Dir[i] != 0 && Dir != N.Dir[i])
+				{
+					const bool bABA = N.MoveS[i] >= 0.0 && NowS - N.MoveS[i] < URHPowerLookSubsystem::FloorRealS && FMath::Abs(V[i] - N.FromV[i]) <= StepV + 1e-9;
+					if (bCount)
+					{
+						++Bk.NumReversals;
+						if (N.RevS[i] >= 0.0 && NowS - N.RevS[i] < Bk.NumClosest)
+						{
+							Bk.NumClosest = NowS - N.RevS[i];
+							Bk.NumClosestSaid = FString::Printf(TEXT("%s number %d (%g -> %g -> %g at %.2f s)"), *Name, i + 1, N.FromV[i], N.Values[i], V[i], NowS - GFlashT0);
+						}
+						if (bABA)
+						{
+							++Bk.Violations;
+							if (Bk.ViolationSaid.Num() < 8)
+							{
+								Bk.ViolationSaid.Add(FString::Printf(TEXT("R3 %s number %d went back inside the floor: %g -> %g at %.2f s, -> %g at %.2f s ('%s')"), *Name, i + 1,
+									N.FromV[i], N.Values[i], N.MoveS[i] - GFlashT0, V[i], NowS - GFlashT0, *Text.Left(60)));
+							}
+						}
+					}
+					N.RevS[i] = NowS;
+				}
+				N.Dir[i] = Dir;
+				N.MoveS[i] = NowS;
+				N.FromV[i] = N.Values[i];
+			}
+			N.Values[i] = V[i];
+		}
+	}
+
+	// G1 r3: a station line as the card prints it (a module's: '<ROOM> IDLE - needs power and a livable floor', or 'SEATS: f of c staffed
+	// (xY.YY each)' with an optional 'ASSIGNED: #r in the staff order'; a cell's: 'SEATS: f of c staffed' or 'NOT STAFFED - ...', then its
+	// order line), or why not: a signed figure, a garbled one, more filled than seats. 'SEATS: 0 of 0' is counted on its own.
+	bool FlashSeatLineOk(const FString& Line, bool bModule, FString& OutWhy)
+	{
+		for (int32 i = 1; i < Line.Len(); ++i)
+		{
+			if (FChar::IsDigit(Line[i]) && (Line[i - 1] == TEXT('-') || Line[i - 1] == TEXT('+')))
+			{
+				OutWhy = TEXT("a signed figure");
+				return false;
+			}
+		}
+		TArray<FString> Parts;
+		Line.ParseIntoArray(Parts, TEXT("\n"), false);
+		if (Parts.Num() < 1 || Parts.Num() > 2)
+		{
+			OutWhy = FString::Printf(TEXT("%d line(s)"), Parts.Num());
+			return false;
+		}
+		const auto ReadInt = [](const FString& S, int32& At, int32& Out)
+		{
+			const int32 Start = At;
+			while (At < S.Len() && FChar::IsDigit(S[At]))
+			{
+				++At;
+			}
+			if (At == Start || At - Start > 4)
+			{
+				return false;
+			}
+			Out = FCString::Atoi(*S.Mid(Start, At - Start));
+			return true;
+		};
+		const auto Expect = [](const FString& S, int32& At, const TCHAR* Lit)
+		{
+			const int32 N = FCString::Strlen(Lit);
+			if (!S.Mid(At, N).Equals(Lit, ESearchCase::CaseSensitive))
+			{
+				return false;
+			}
+			At += N;
+			return true;
+		};
+		const FString& First = Parts[0];
+		if (First.StartsWith(TEXT("SEATS: ")))
+		{
+			int32 At = 7, Filled = -1, Seats = -1, Whole = -1, Frac = -1;
+			bool bOk = ReadInt(First, At, Filled) && Expect(First, At, TEXT(" of ")) && ReadInt(First, At, Seats) && Expect(First, At, TEXT(" staffed"));
+			if (bOk && bModule)
+			{
+				bOk = Expect(First, At, TEXT(" (x")) && ReadInt(First, At, Whole) && Expect(First, At, TEXT(".")) && ReadInt(First, At, Frac) && Expect(First, At, TEXT(" each)"));
+			}
+			if (!bOk || At != First.Len())
+			{
+				OutWhy = FString::Printf(TEXT("a garbled seats line '%s'"), *First);
+				return false;
+			}
+			if (Filled > Seats)
+			{
+				OutWhy = FString::Printf(TEXT("%d filled of %d seats"), Filled, Seats);
+				return false;
+			}
+		}
+		else
+		{
+			const bool bKnown = bModule ? First.EndsWith(TEXT(" IDLE - needs power and a livable floor")) : First == TEXT("NOT STAFFED - the floor is not rated livable yet");
+			bool bDigit = false;
+			for (int32 i = 0; i < First.Len(); ++i)
+			{
+				bDigit |= FChar::IsDigit(First[i]);
+			}
+			if (!bKnown || bDigit)
+			{
+				OutWhy = FString::Printf(TEXT("an unknown first line '%s'"), *First);
+				return false;
+			}
+		}
+		if (Parts.Num() == 2)
+		{
+			const FString& Second = Parts[1];
+			int32 At = 11, Rank = -1;
+			const bool bAssigned = Second.StartsWith(TEXT("ASSIGNED: #")) && ReadInt(Second, At, Rank) && Expect(Second, At, TEXT(" in the staff order")) && At == Second.Len() && Rank >= 1;
+			const bool bOrder = !bModule && (Second == TEXT("staffed after every underground seat") || Second == TEXT("staffed in dig order (shallow floors first)"));
+			if (!bAssigned && !bOrder)
+			{
+				OutWhy = FString::Printf(TEXT("a garbled order line '%s'"), *Second);
+				return false;
+			}
+			if (bModule && !First.StartsWith(TEXT("SEATS: ")))
+			{
+				OutWhy = TEXT("an order line under IDLE");
+				return false;
+			}
+		}
+		else if (!bModule)
+		{
+			OutWhy = TEXT("a cell line with no order line");
+			return false;
+		}
+		return true;
+	}
+
+	// G1 r3: flash.lab's samples, every frame of its bucket: each module's and each zoned cell's station line unmasked (R1 counts any
+	// change of it, a moving number included), its shape, 'SEATS: 0 of 0', the sim's own pair beside it, the selected card's own text,
+	// and on the dry stretch each crew figure (information: does a post that alternates move what the figure shows?).
+	void FlashSampleLab(FFlashProbe& P, FFlashBucket& Bk, const SRHCommandDeck& Deck, const URHSimWorldSubsystem& Sim, const URHPowerLookSubsystem& Look,
+		const ARHPlayerController& PC, UWorld* W, double NowS, bool bCount, bool bDry, bool bDay, int32 Speed)
+	{
+		FFlashLab& L = *P.Lab;
+		if (bDry && !bDay)
+		{
+			L.NightDrySpeeds.Add(Speed);
+		}
+		for (FFlashLabSeat& S : L.Seats)
+		{
+			const FString Line = S.bModule ? Deck.GetCardStationLine(S.Id) : Deck.GetCellStationLine(S.Key);
+			S.LastLine = Line;
+			FlashDiscrete(P, Bk, S.Name, Line, NowS, bCount);
+			int32 Filled = 0, Seats = 0;
+			Sim.GetStationSeats(S.Key, Filled, Seats);
+			const uint32 Live = ((uint32)FMath::Clamp(Seats, 0, 255) << 8) | (uint32)FMath::Clamp(Filled, 0, 255);
+			if (bDry && S.LivePair != MAX_uint32 && Live != S.LivePair)
+			{
+				++S.LiveChanges;
+			}
+			S.LivePair = Live;
+			if (Line.Contains(TEXT("SEATS: 0 of 0")))
+			{
+				++L.ZeroZero;
+				if (L.ZeroZeroSaid.IsEmpty())
+				{
+					L.ZeroZeroSaid = FString::Printf(TEXT("%s '%s' at %.2f s"), *S.Name, *Line.Replace(TEXT("\n"), TEXT(" / ")), NowS - GFlashT0);
+				}
+			}
+			FString Why;
+			if (!Line.IsEmpty() && !FlashSeatLineOk(Line, S.bModule, Why))
+			{
+				++L.Garbled;
+				if (L.GarbledSaid.IsEmpty())
+				{
+					L.GarbledSaid = FString::Printf(TEXT("%s: %s at %.2f s"), *S.Name, *Why, NowS - GFlashT0);
+				}
+			}
+			if (Line.IsEmpty())
+			{
+				++L.Garbled;
+				if (L.GarbledSaid.IsEmpty())
+				{
+					L.GarbledSaid = FString::Printf(TEXT("%s: no line at %.2f s"), *S.Name, NowS - GFlashT0);
+				}
+			}
+			if (S.bModule && S.Id == L.ModuleA && Line.StartsWith(TEXT("SEATS: ")) && Look.GetLook(S.Id) == ERHPowerLook::Rationed)
+			{
+				++L.SeatsWhileRationed;
+			}
+		}
+		// F3: the other readers of the per-step station set the deck shows - each colonist's roster post, the Crew panel's research line
+		// test and research bar, the City panel's Jobs figures - unmasked too, with the sim's own filled-seat count beside them.
+		int32 LiveFilled = 0;
+		for (const FRHColonist& C : Sim.GetColonists())
+		{
+			LiveFilled += Sim.GetColonistJob(C.Id).IsNone() ? 0 : 1;
+			FlashDiscrete(P, Bk, FString::Printf(TEXT("lab roster #%d"), C.Id), Deck.GetRosterPostLine(C.Id), NowS, bCount);
+		}
+		if (bDry && L.LiveFilled >= 0 && LiveFilled != L.LiveFilled)
+		{
+			++L.LiveFilledChanges;
+		}
+		L.LiveFilled = LiveFilled;
+		FlashDiscrete(P, Bk, TEXT("lab research line"), Deck.IsLabSeatStaffedShown() ? TEXT("a Lab seat staffed") : TEXT("no Lab seat staffed"), NowS, bCount);
+		FlashDiscrete(P, Bk, TEXT("lab research bar"), Deck.IsResearchBarShown() ? TEXT("shown") : TEXT("hidden"), NowS, bCount);
+		const FRHCityDemand& Dm = Deck.Debug_GetCityDemandShown();
+		L.LastCity = FString::Printf(TEXT("Jobs: %d of %d have a post, %d seats, %d awaiting, %d short, level %.3f"), Dm.FilledSeats, Dm.Population, Dm.TotalSeats, Dm.Unemployed, Dm.SeatsShort, Dm.Jobs);
+		FlashDiscrete(P, Bk, TEXT("lab city jobs"), L.LastCity, NowS, bCount);
+		// The selected card draws the same line (GetInspectText calls the same function).
+		FString Want;
+		if (PC.GetSelectedBuildingId() != 0 && PC.GetSelectedBuildingId() == L.ModuleA)
+		{
+			Want = Deck.GetCardStationLine(L.ModuleA);
+		}
+		else if (PC.GetSelectedBuildingId() == 0 && L.SelectedCell != INDEX_NONE)
+		{
+			Want = Deck.GetCellStationLine(FIntVector(-1, L.SelectedCell, 0));
+		}
+		if (!Want.IsEmpty())
+		{
+			++L.CardFrames;
+			const FString Card = Deck.Debug_GetInspectText();
+			if (!Card.Contains(Want))
+			{
+				++L.CardMissing;
+				if (L.CardMissingSaid.IsEmpty())
+				{
+					L.CardMissingSaid = FString::Printf(TEXT("'%s' not in '%s' at %.2f s"), *Want.Replace(TEXT("\n"), TEXT(" / ")), *Card.Left(160).Replace(TEXT("\n"), TEXT(" / ")), NowS - GFlashT0);
+				}
+			}
+		}
+		// The crew (information): the figures' beats, clips and targets on the dry stretch.
+		const URHCrewVisualizerSubsystem* CrewVis = W ? W->GetSubsystem<URHCrewVisualizerSubsystem>() : nullptr;
+		if (!CrewVis || !bDry)
+		{
+			return;
+		}
+		++L.CrewFrames;
+		for (const FRHColonist& C : Sim.GetColonists())
+		{
+			FString Activity;
+			FName Clip;
+			FVector Target, At;
+			if (!CrewVis->Debug_GetCrewBeat(C.Id, Activity, Clip, Target, At))
+			{
+				continue;
+			}
+			FFlashLabCrew& T = L.Crew.FindOrAdd(C.Id);
+			const FName Job = Sim.GetColonistJob(C.Id);
+			const bool bAtPost = FVector::Dist2D(At, Target) < 60.0;
+			FIntVector Station;
+			T.bAtModule |= Sim.GetColonistStation(C.Id, Station) && Station.Y == INDEX_NONE && (Station.Z == L.ModuleA || Station.Z == L.ModuleB);
+			if (T.bSeen)
+			{
+				T.JobChanges += Job != T.Job ? 1 : 0;
+				if (!Target.Equals(T.Target, 1.0))
+				{
+					const FString Said = FString::Printf(TEXT("#%d %s (%s) -> %s (%s) at %.2f s"), C.Id, *T.Target.ToCompactString(), *T.Activity, *Target.ToCompactString(), *Activity, NowS - GFlashT0);
+					if (T.LastTargetS >= 0.0 && NowS - T.LastTargetS < T.ClosestTargetS)
+					{
+						T.ClosestTargetS = NowS - T.LastTargetS;
+						T.ClosestTargetSaid = T.LastTargetSaid + TEXT(", then ") + Said;
+					}
+					T.LastTargetS = NowS;
+					T.LastTargetSaid = Said;
+					++T.TargetChanges;
+				}
+				else if (Clip != T.Clip && Activity == TEXT("working") && T.Activity == TEXT("working") && bAtPost && T.bAtPost)
+				{
+					const FString Said = FString::Printf(TEXT("#%d %s -> %s (post %s) at %.2f s"), C.Id, *T.Clip.ToString(), *Clip.ToString(), *Job.ToString(), NowS - GFlashT0);
+					if (T.LastWorkClipS >= 0.0 && NowS - T.LastWorkClipS < T.ClosestWorkClipS)
+					{
+						T.ClosestWorkClipS = NowS - T.LastWorkClipS;
+						T.ClosestClipSaid = T.LastClipSaid + TEXT(", then ") + Said;
+					}
+					T.LastWorkClipS = NowS;
+					T.LastClipSaid = Said;
+					++T.WorkClipChanges;
+				}
+			}
+			T.bSeen = true;
+			T.Activity = Activity;
+			T.Clip = Clip;
+			T.Job = Job;
+			T.Target = Target;
+			T.bAtPost = bAtPost;
+		}
+	}
+
+	// One frame's samples (the core ticker, every frame while armed).
+	void FlashSample(FFlashProbe& P)
+	{
+		UWorld* W = FindGameWorld();
+		ARHPlayerController* PC = GetPC();
+		URHSimWorldSubsystem* Sim = GetSim();
+		const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+		const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+		const URHColonyVisualizerSubsystem* Colony = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+		const URHAudioSubsystem* Audio = W ? W->GetSubsystem<URHAudioSubsystem>() : nullptr;
+		const URHPowerLookSubsystem* Look = W ? W->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+		const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+		if (!P.bArmed || !Sim || !Clock || !Defs || !Colony || !Look || !Deck.IsValid())
+		{
+			return;
+		}
+		const double NowS = FApp::GetCurrentTime(); // the frame's time: the clock the helper's latches stamp their changes with
+		const double FrameDt = P.PrevSampleS > 0.0 ? FMath::Clamp(NowS - P.PrevSampleS, 1e-3, 0.1) : 1.0 / 30.0;
+		P.PrevSampleS = NowS;
+		const bool bCount = NowS >= P.QuietUntilS;
+		FFlashBucket& Bk = P.Now();
+		++Bk.Frames;
+		const int32 Speed = FMath::RoundToInt(Clock->GetSpeed());
+		Bk.Speeds.Add(Speed);
+		const FRHPowerState& Pw = Sim->GetPower();
+		const bool bDry = Pw.BatteryCapWh > 0.0 && Pw.BatteryWh < 0.01 * Pw.BatteryCapWh;
+		const bool bShed = Pw.ShedCount > 0;
+		if (bDry)
+		{
+			Bk.DrySpeeds.Add(Speed);
+			if (P.bPrevShedSeen && bShed != P.bPrevShed)
+			{
+				++Bk.ShedFlips;
+			}
+		}
+		P.bPrevShed = bShed;
+		P.bPrevShedSeen = true;
+		const bool bGrowDark = Sim->AreGrowLightsDark();
+		Bk.GrowFlips += P.bPrevGrowSeen && bGrowDark != P.bPrevGrowDark ? 1 : 0;
+		P.bPrevGrowDark = bGrowDark;
+		P.bPrevGrowSeen = true;
+		const bool bNumCount = Look->IsRationingNow(); // R3's gate for the power readouts
+		const bool bDay = Sim->IsDaylightNow();
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			const FRHBuildingRow* Def = Defs->GetBuilding(B.DefName);
+			// The probe's own copy of the exemption rule (the brief's 1.3), never the helper's: the helper is what is under test.
+			const bool bExempt = B.DefName == FName("Lander") || B.DefName == FName("BatteryBank") || B.DefName == FName("Pylon")
+				|| (Def && Def->PowerDraw_W <= 0.f && Def->PowerIdle_W <= 0.f);
+			uint8 Applied = 0;
+			float Powered = 0.f, Lamp = 0.f, LampFull = 0.f;
+			if (Colony->Debug_GetPowerApplied(B.Id, Applied, Powered, Lamp, LampFull))
+			{
+				FlashDiscrete(P, Bk, FString::Printf(TEXT("look #%d %s"), B.Id, *B.DefName.ToString()), LookName(Applied), NowS, bCount);
+				FlashContinuous(P, Bk, FString::Printf(TEXT("glow #%d %s"), B.Id, *B.DefName.ToString()), Powered, 1.0, NowS, FrameDt, bCount);
+				if (LampFull > 0.f)
+				{
+					FlashContinuous(P, Bk, FString::Printf(TEXT("lamp #%d %s"), B.Id, *B.DefName.ToString()), Lamp, LampFull, NowS, FrameDt, bCount);
+					++Bk.LampSamples;
+					const bool bNoLampDef = B.DefName == FName("SolarArray") || B.DefName == FName("Stockpile") || B.DefName == FName("ChargePad") || B.DefName == FName("Pylon");
+					if (bNoLampDef && !Bk.LampBadIds.Contains(B.Id))
+					{
+						Bk.LampBadIds.Add(B.Id);
+						Bk.LampBad.Add(FString::Printf(TEXT("%s #%d has a %.0f cd lamp"), *B.DefName.ToString(), B.Id, LampFull));
+					}
+				}
+				if (bExempt && !B.bUnderConstruction && !B.bManualOff && Applied != (uint8)ERHPowerLook::Powered && !Bk.ExemptBadIds.Contains(B.Id))
+				{
+					Bk.ExemptBadIds.Add(B.Id);
+					Bk.ExemptBad.Add(FString::Printf(TEXT("%s #%d read %s"), *B.DefName.ToString(), B.Id, LookName(Applied)));
+				}
+				if (!bExempt && Applied == (uint8)ERHPowerLook::Rationed)
+				{
+					Bk.RationedIds.Add(B.Id);
+				}
+				if (!bExempt && bDay && Applied == (uint8)ERHPowerLook::Powered)
+				{
+					const uint8* Was = P.PrevLook.Find(B.Id);
+					if (Was && (*Was == (uint8)ERHPowerLook::Rationed || *Was == (uint8)ERHPowerLook::Unserved))
+					{
+						Bk.Returned.AddUnique(B.Id);
+					}
+				}
+				P.PrevLook.Add(B.Id, Applied);
+			}
+			if (Audio)
+			{
+				const float Hum = Audio->Debug_GetMachineTarget(B.Id);
+				if (Hum >= 0.f)
+				{
+					FlashDiscrete(P, Bk, FString::Printf(TEXT("hum #%d %s"), B.Id, *B.DefName.ToString()), Hum > 0.f ? TEXT("on") : TEXT("off"), NowS, bCount);
+				}
+			}
+			const FString CardName = FString::Printf(TEXT("card #%d %s"), B.Id, *B.DefName.ToString());
+			const FString Card = Deck->GetCardStatusLine(B.Id);
+			FlashDiscrete(P, Bk, CardName, MaskDigits(Card), NowS, bCount);
+			FlashNumbers(P, Bk, CardName, Card, NowS, bNumCount);
+			const FString Station = Deck->GetCardStationLine(B.Id);
+			const FString StationName = FString::Printf(TEXT("station #%d %s"), B.Id, *B.DefName.ToString());
+			if (!Station.IsEmpty() || P.Elems.Contains(StationName))
+			{
+				FlashDiscrete(P, Bk, StationName, MaskDigits(Station), NowS, bCount);
+			}
+			if (Def && Def->Pressurized && !B.bUnderConstruction)
+			{
+				// The hab card's circulation line, through the same latched call the card makes.
+				const bool bAir = Look->LatchBool(URHPowerLookSubsystem::MakeKey('H', (uint32)B.Id), Sim->IsHabNetworkCirculatedHeld(B.Id));
+				FlashDiscrete(P, Bk, FString::Printf(TEXT("hab #%d %s"), B.Id, *B.DefName.ToString()), bAir ? TEXT("circulated") : TEXT("no air circulation"), NowS, bCount);
+			}
+		}
+		Colony->Debug_ForEachRoomLight([&](const FIntVector& Cell, float Cd, float FullCd)
+		{
+			FlashContinuous(P, Bk, FString::Printf(TEXT("room (%d,%d,%d)"), Cell.X, Cell.Y, Cell.Z), Cd, FullCd, NowS, FrameDt, bCount);
+			++Bk.RoomSamples;
+		});
+		const FString TileValue = Deck->GetPowerTileValueText().ToString();
+		const FString TileSub = Deck->GetPowerTileSubText().ToString();
+		const FString Header = Deck->GetPowerFoldHeaderText().ToString();
+		FlashDiscrete(P, Bk, TEXT("tile value"), MaskDigits(TileValue), NowS, bCount);
+		FlashNumbers(P, Bk, TEXT("tile value"), TileValue, NowS, bNumCount);
+		const FString TileCol = ColourName(Deck->GetPowerTileValueColour());
+		FlashDiscrete(P, Bk, TEXT("tile value colour"), TileCol, NowS, bCount);
+		if (TileCol != P.TileCol)
+		{
+			// G1 r2: amber -> red -> green inside two floors is round 1's false 'short' at the end of rationing (information).
+			if (bCount && P.TileColWas == TEXT("amber") && P.TileCol == TEXT("red") && TileCol == TEXT("green") && NowS - P.TileColWasAt <= 2.0 * URHPowerLookSubsystem::FloorRealS + 0.5)
+			{
+				++Bk.RedCascades;
+				if (Bk.RedCascadeSaid.IsEmpty())
+				{
+					Bk.RedCascadeSaid = FString::Printf(TEXT(" (first: amber at %.2f s, red at %.2f s, green at %.2f s)"), P.TileColWasAt - GFlashT0, P.TileColAt - GFlashT0, NowS - GFlashT0);
+				}
+			}
+			P.TileColWas = P.TileCol;
+			P.TileColWasAt = P.TileColAt;
+			P.TileCol = TileCol;
+			P.TileColAt = NowS;
+		}
+		FlashDiscrete(P, Bk, TEXT("tile sub"), MaskDigits(TileSub), NowS, bCount);
+		FlashNumbers(P, Bk, TEXT("tile sub"), TileSub, NowS, bNumCount);
+		FlashDiscrete(P, Bk, TEXT("tile sub colour"), ColourName(Deck->GetPowerTileSubColour()), NowS, bCount);
+		FlashContinuous(P, Bk, TEXT("tile bar"), Deck->GetPowerTileBarFrac().Get(0.f), 1.0, NowS, FrameDt, bCount);
+		FlashDiscrete(P, Bk, TEXT("tile bar colour"), ColourName(Deck->GetPowerTileBarColour()), NowS, bCount);
+		FlashDiscrete(P, Bk, TEXT("fold header"), MaskDigits(Header), NowS, bCount);
+		FlashNumbers(P, Bk, TEXT("fold header"), Header, NowS, bNumCount);
+		const FString GuideRaw = Deck->Debug_GetGuideText();
+		const FString Guide = MaskDigits(GuideRaw);
+		FlashDiscrete(P, Bk, TEXT("guide"), Guide, NowS, bCount);
+		// G1 r2: never a signed zero on the tile, never a zero short in the header or the vault hint.
+		if (TileValue.StartsWith(TEXT("-0 ")) || TileValue.StartsWith(TEXT("+0 ")) || Header.Contains(TEXT(" 0 W SHORT")) || GuideRaw.Contains(TEXT("grid is 0 W short")))
+		{
+			++Bk.SignedZeros;
+			if (Bk.SignedZeroSaid.IsEmpty())
+			{
+				Bk.SignedZeroSaid = FString::Printf(TEXT("'%s' / '%s' / '%s' at %.2f s"), *TileValue, *Header.Left(60), *GuideRaw.Right(80), NowS - GFlashT0);
+			}
+		}
+		FlashNumbers(P, Bk, TEXT("guide"), GuideRaw, NowS, bNumCount);
+		if (Guide.Contains(TEXT("THE VAULT")))
+		{
+			Bk.HintTexts.AddUnique(Guide);
+		}
+		const FName Hum50(TEXT("HumidityRegulator"));
+		const FString Spare = Deck->GetSpareWattsText(Hum50).ToString();
+		FlashDiscrete(P, Bk, TEXT("spare watts"), MaskDigits(Spare), NowS, bCount);
+		FlashNumbers(P, Bk, TEXT("spare watts"), Spare, NowS, bNumCount);
+		FlashDiscrete(P, Bk, TEXT("spare watts colour"), ColourName(Deck->GetSpareWattsColour(Hum50)), NowS, bCount);
+		// G1 r1: the Crew panel's food, garden and layout lines (the grow lights and the circulation follow per-step reads), through the
+		// deck's own accessors with the sim's Hope breakdown as the panel passes it. Sampled only while the colony has crew.
+		if (Sim->GetPopulation() > 0)
+		{
+			const URHSimWorldSubsystem::FRHHopeBreakdown H = Sim->GetColonyHope();
+			const FString CrewFood = Deck->GetCrewFoodLine(H.FoodPenalty > 0.0);
+			const FString CrewGarden = Deck->GetCrewGardenLine();
+			const FString CrewLayout = Deck->GetCrewLayoutLine(H.OffendedPairs);
+			FlashDiscrete(P, Bk, TEXT("crew food"), MaskDigits(CrewFood), NowS, bCount);
+			FlashNumbers(P, Bk, TEXT("crew food"), CrewFood, NowS, true);
+			FlashDiscrete(P, Bk, TEXT("crew garden"), MaskDigits(CrewGarden), NowS, bCount);
+			FlashNumbers(P, Bk, TEXT("crew garden"), CrewGarden, NowS, true);
+			FlashDiscrete(P, Bk, TEXT("crew layout"), MaskDigits(CrewLayout), NowS, bCount);
+			FlashNumbers(P, Bk, TEXT("crew layout"), CrewLayout, NowS, true);
+		}
+		// G1 r3: flash.lab's own samples (its station lines unmasked, the crew).
+		if (P.Lab.IsValid() && P.Bucket == TEXT("lab") && PC)
+		{
+			FlashSampleLab(P, Bk, *Deck, *Sim, *Look, *PC, W, NowS, bCount, bDry, bDay, Speed);
+		}
+	}
+
+	double FlashSol()
+	{
+		UWorld* W = FindGameWorld();
+		const URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+		return Clock ? Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds : -1.0;
+	}
+
+	// Load a checkpoint slot with the sim's own load (never the quicksave or RH_Hand66.sav), select its first Water Plant, reset.
+	void PushFlashLoad(const TSharedRef<FFlashProbe>& P, const FString& Slot, const FString& Bucket)
+	{
+		FRunner::Get().Do(FString::Printf(TEXT("flash.load %s"), *Slot), [P, Slot, Bucket]()
+		{
+			P->Bucket = Bucket;
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			if (!Sim || !PC)
+			{
+				P->Now().Problems.Add(TEXT("no sim or player controller"));
+				return;
+			}
+			FString Err;
+			if (!Sim->LoadColony(Slot, Err))
+			{
+				P->Now().Problems.Add(FString::Printf(TEXT("could not load '%s': %s"), *Slot, *Err));
+			}
+			PC->SetActiveLevel(0);
+			int32 First = 0;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.DefName == FName("WaterPlant") && !B.bUnderConstruction && (First == 0 || B.Id < First))
+				{
+					First = B.Id;
+				}
+			}
+			PC->Debug_SelectBuilding(First);
+			P->Reset();
+			P->Nums.Reset(); // R3 starts again with the loaded colony, counted from its first frame
+			P->bPrevGrowSeen = false;
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] loaded '%s' at sol %.3f; selected Water Plant #%d"), *Slot, FlashSol(), First);
+		}, 0.f);
+	}
+
+	// Run at Speed for Seconds of real time, or (UntilSol > 0) until the clock reaches UntilSol. AtStart runs first (a drain, a view).
+	void PushFlashSegment(const TSharedRef<FFlashProbe>& P, const FString& Name, float Speed, double Seconds, double UntilSol, TFunction<void()> AtStart = TFunction<void()>())
+	{
+		const TSharedRef<bool> bStarted = MakeShared<bool>(false);
+		FRunner::Get().Push(Name, [P, Name, Speed, Seconds, UntilSol, AtStart, bStarted](double Elapsed, bool)
+		{
+			if (!*bStarted)
+			{
+				*bStarted = true;
+				if (AtStart)
+				{
+					AtStart();
+				}
+				if (ARHPlayerController* PC = GetPC())
+				{
+					PC->SetSimSpeed(Speed);
+				}
+				UE_LOG(LogRedHope, Display, TEXT("[Flash] %s: %.0fx from sol %.3f"), *Name, Speed, FlashSol());
+			}
+			if (UntilSol > 0.0)
+			{
+				if (FlashSol() >= UntilSol)
+				{
+					return true;
+				}
+				if (Elapsed > 400.0)
+				{
+					P->Now().Problems.Add(FString::Printf(TEXT("%s never reached sol %.3f (at %.3f)"), *Name, UntilSol, FlashSol()));
+					return true;
+				}
+				return false;
+			}
+			return Elapsed >= Seconds;
+		}, 0.f, 0.f);
+	}
+
+	// 60x until UntilSol when the sim agrees within 10 s at 8x; otherwise 8x over the same sim span, and why. G1 r2: with bExact, 60x
+	// stops one era step (0.05 sol) short of UntilSol and 8x runs the rest, so the segment ends at UntilSol and not up to an era step past
+	// it (round 1's drains landed after the sunsets they were meant to precede).
+	void PushFlashSixty(const TSharedRef<FFlashProbe>& P, const FString& Name, double UntilSol, bool bExact = false)
+	{
+		const TSharedRef<int32> Phase = MakeShared<int32>(0);
+		const TSharedRef<double> PollFrom = MakeShared<double>(0.0);
+		FRunner::Get().Push(Name, [P, Name, UntilSol, bExact, Phase, PollFrom](double Elapsed, bool)
+		{
+			ARHPlayerController* PC = GetPC();
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!PC || !Sim)
+			{
+				return true;
+			}
+			if (*Phase == 0)
+			{
+				*Phase = 1;
+				*PollFrom = Elapsed;
+				PC->SetSimSpeed(8.f);
+			}
+			if (*Phase == 1)
+			{
+				FString Why;
+				if (Sim->CanEnterEraMode(Why))
+				{
+					PC->SetSimSpeed(60.f);
+					*Phase = 2;
+					P->Now().bSixtyRan = true;
+					P->Now().Sixty += FString::Printf(TEXT("%s60x from sol %.3f"), P->Now().Sixty.IsEmpty() ? TEXT("") : TEXT("; "), FlashSol());
+					UE_LOG(LogRedHope, Display, TEXT("[Flash] %s: 60x from sol %.3f"), *Name, FlashSol());
+				}
+				else if (Elapsed - *PollFrom >= 10.0)
+				{
+					*Phase = 2;
+					P->Now().Sixty += FString::Printf(TEXT("%s8x from sol %.3f (60x refused: %s)"), P->Now().Sixty.IsEmpty() ? TEXT("") : TEXT("; "), FlashSol(), *Why);
+					UE_LOG(LogRedHope, Display, TEXT("[Flash] %s: 60x refused (%s); 8x from sol %.3f"), *Name, *Why, FlashSol());
+				}
+			}
+			if (bExact && *Phase == 2 && FlashSol() >= UntilSol - URHSimClockSubsystem::EraStepSimSeconds / URHSimClockSubsystem::SolLengthSimSeconds)
+			{
+				*Phase = 3;
+				PC->SetSimSpeed(8.f);
+				UE_LOG(LogRedHope, Display, TEXT("[Flash] %s: 8x from sol %.3f to sol %.3f"), *Name, FlashSol(), UntilSol);
+			}
+			if (FlashSol() >= UntilSol)
+			{
+				return true;
+			}
+			if (Elapsed > 400.0)
+			{
+				P->Now().Problems.Add(FString::Printf(TEXT("%s never reached sol %.3f (at %.3f)"), *Name, UntilSol, FlashSol()));
+				return true;
+			}
+			return false;
+		}, 0.f, 0.f);
+	}
+
+	void PushFlashDrain(const TSharedRef<FFlashProbe>& P, const FString& Name, float Speed, double Seconds, bool bNoteGuide)
+	{
+		PushFlashSegment(P, Name, Speed, Seconds, 0.0, [P, bNoteGuide]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->Debug_SetBatteryWh(0.0);
+			}
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (bNoteGuide && Deck.IsValid())
+			{
+				P->Now().GuideAtNight = Deck->Debug_GetGuideText();
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] drained the bank at sol %.3f"), FlashSol());
+		});
+	}
+
+	void PushFlashView(const TSharedRef<FFlashProbe>& P, int32 Level, const FString& Bucket)
+	{
+		FRunner::Get().Do(FString::Printf(TEXT("flash.view %d"), Level), [P, Level, Bucket]()
+		{
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetActiveLevel(Level);
+			}
+			P->Bucket = Bucket;
+			P->Reset();
+		}, 0.f);
+	}
+
+	FString FlashKinds(const FFlashBucket& Bk)
+	{
+		TMap<FString, int32> Kinds;
+		Kinds.Add(TEXT("hab"), 0);     // G1 r1: the switched lines no slot may have, reported even at 0
+		Kinds.Add(TEXT("station"), 0);
+		for (const FString& E : Bk.Elements)
+		{
+			FString Kind, Rest;
+			if (!E.Split(TEXT(" "), &Kind, &Rest))
+			{
+				Kind = E;
+			}
+			if (Kind == TEXT("tile") || Kind == TEXT("fold") || Kind == TEXT("spare") || Kind == TEXT("crew"))
+			{
+				Kind = E;
+			}
+			++Kinds.FindOrAdd(Kind);
+		}
+		Kinds.KeySort([](const FString& A, const FString& B) { return A < B; });
+		TArray<FString> Out;
+		for (const TPair<FString, int32>& K : Kinds)
+		{
+			Out.Add(FString::Printf(TEXT("%s %d"), *K.Key, K.Value));
+		}
+		return FString::Join(Out, TEXT(", "));
+	}
+
+	FString FlashSpeeds(const TSet<int32>& Speeds)
+	{
+		TArray<int32> S = Speeds.Array();
+		S.Sort();
+		TArray<FString> Out;
+		for (const int32 V : S)
+		{
+			Out.Add(FString::Printf(TEXT("%dx"), V));
+		}
+		return Out.Num() > 0 ? FString::Join(Out, TEXT(" ")) : FString(TEXT("none"));
+	}
+
+	// One step's line: R1 and R2 over its samples, the premises it owns, and its own clauses.
+	void ReportFlash(const TSharedRef<FFlashProbe>& P, const FString& Step, const FString& Bucket, bool bSlotPremises, const FString& ExtraWhy, const FString& ExtraSaid)
+	{
+		FFlashBucket& Bk = P->Buckets.FindOrAdd(Bucket);
+		FString Why = ExtraWhy;
+		for (const FString& Problem : Bk.Problems)
+		{
+			Why += TEXT(" ") + Problem + TEXT(";");
+		}
+		if (Bk.Frames < 30)
+		{
+			Why += FString::Printf(TEXT(" only %d frame(s) sampled;"), Bk.Frames);
+		}
+		if (Bk.Violations > 0)
+		{
+			Why += FString::Printf(TEXT(" %d violation(s): %s;"), Bk.Violations, *FString::Join(Bk.ViolationSaid, TEXT("; ")));
+		}
+		if (bSlotPremises && Bk.ShedFlips < 10)
+		{
+			Why += FString::Printf(TEXT(" premise (a): the shed flag changed only %d time(s) on the dry stretch;"), Bk.ShedFlips);
+		}
+		if (bSlotPremises && Bk.RationedIds.Num() == 0)
+		{
+			Why += TEXT(" premise (b): no building showed Rationed;");
+		}
+		if (Bk.ExemptBad.Num() > 0)
+		{
+			Why += FString::Printf(TEXT(" premise (c): %s;"), *FString::Join(Bk.ExemptBad, TEXT(", ")));
+		}
+		if (Bk.SignedZeros > 0)
+		{
+			Why += FString::Printf(TEXT(" a signed or zero watts figure on %d frame(s), first %s;"), Bk.SignedZeros, *Bk.SignedZeroSaid);
+		}
+		// G1 r2: how often elements changed, not only how close (a change paced at the floor passes R1; its count shows a sustained one).
+		FString MostName;
+		int32 MostCount = 0;
+		for (const TPair<FString, int32>& C : Bk.ChangeCounts)
+		{
+			if (C.Value > MostCount || (C.Value == MostCount && C.Key < MostName))
+			{
+				MostCount = C.Value;
+				MostName = C.Key;
+			}
+		}
+		const FString CountsSaid = (MostCount > 0
+			? FString::Printf(TEXT("; changes counted: %d element(s) changed, the most changes of one element %d (%s)"), Bk.ChangeCounts.Num(), MostCount, *MostName)
+			: FString(TEXT("; changes counted: none")))
+			+ FString::Printf(TEXT("; signed zeros ('-0 W', '+0 W', '0 W SHORT', 'grid is 0 W short'): %d; the tile's amber -> red -> green inside two floors: %d (information)%s"),
+				Bk.SignedZeros, Bk.RedCascades, *Bk.RedCascadeSaid);
+		const FString Said = FString::Printf(TEXT("%d frames; elements: %s; the closest two changes of one element %s%s%s; R3: %d reversal(s) of a shown number (none went back inside the floor unless listed above), the closest two reversals of one number %s%s%s; the largest per-frame light step %.1f %%%s%s; speeds %s (dry stretch %s); shed flag changes on the dry stretch %d; grow-light flag changes %d; Rationed on %d building(s); exempt buildings Powered in every sample: %s; 60x: %s%s"),
+			Bk.Frames, *FlashKinds(Bk), Bk.Closest < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), Bk.Closest) : TEXT("none (no element changed twice)"), Bk.ClosestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.ClosestSaid,
+			Bk.NumReversals, Bk.NumClosest < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), Bk.NumClosest) : TEXT("none"), Bk.NumClosestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.NumClosestSaid,
+			Bk.LargestStepPct, Bk.LargestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.LargestSaid, *FlashSpeeds(Bk.Speeds), *FlashSpeeds(Bk.DrySpeeds), Bk.ShedFlips, Bk.GrowFlips,
+			Bk.RationedIds.Num(), Bk.ExemptBad.Num() == 0 ? TEXT("yes") : TEXT("NO"), Bk.Sixty.IsEmpty() ? TEXT("not asked here") : *Bk.Sixty, *ExtraSaid);
+		Report(Step, Why.IsEmpty(), (Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said) + CountsSaid);
+	}
+
+	void StartFlashTest()
+	{
+		FRunner& Runner = FRunner::Get();
+		GPass = 0;
+		GFail = 0;
+		const TSharedRef<FFlashProbe> P = MakeShared<FFlashProbe>();
+		PushSettle(2.f);
+		// G1 r2: the Crew layout line's hold (URHPowerLookSubsystem::LatchWorst, which 'Layout: %d pair%s of rooms clash.' reads) on the
+		// fresh world, outside rationing, under its own key: a count that drops must pass at the floor (3.2 s) at 1x and while paused,
+		// never wait out the colony's hold (round 1 held a fixed clash for 50 sim-s at 1x and for ever while paused). Reported in
+		// flash.setup's line; no step of its own.
+		struct FWorstCheck { int32 Stage = 0; double T0 = 0.0, TStage = 0.0, TDrop1 = -1.0, TRise = -1.0, TDrop2 = -1.0, SimAt = 0.0; uint32 Drop1 = 9, Rise = 9, Drop2 = 9; bool bRationing = false, bSimStill = false; };
+		const TSharedRef<FWorstCheck> WC = MakeShared<FWorstCheck>();
+		Runner.Push(TEXT("flash.layout hold"), [WC](double, bool)
+		{
+			UWorld* W = FindGameWorld();
+			const URHPowerLookSubsystem* Look = W ? W->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+			const URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			if (!Look || !Sim || !PC)
+			{
+				return true; // flash.setup reports the missing subsystem
+			}
+			const uint64 WorstKey = URHPowerLookSubsystem::MakeKey('Z', 0x51A7u);
+			const double NowT = FApp::GetCurrentTime(); // the latch's own clock
+			WC->bRationing |= Look->IsRationingNow();
+			switch (WC->Stage)
+			{
+			case 0:
+				PC->SetSimSpeed(1.f);
+				WC->T0 = WC->TStage = NowT;
+				Look->LatchWorst(WorstKey, 2u); // first sight: 2
+				WC->Stage = 1;
+				return false;
+			case 1: // 1x: 2 for half a second, then 0 until 4 s after the first sight
+			{
+				const bool bDrop = NowT - WC->T0 >= 0.5;
+				const uint32 WorstShown = Look->LatchWorst(WorstKey, bDrop ? 0u : 2u);
+				if (bDrop && WorstShown == 0u && WC->TDrop1 < 0.0) { WC->TDrop1 = NowT - WC->T0; }
+				if (NowT - WC->T0 >= 4.0)
+				{
+					WC->Drop1 = WorstShown;
+					PC->SetSimSpeed(0.f);
+					WC->TStage = NowT;
+					WC->Stage = 2;
+				}
+				return false;
+			}
+			case 2: // paused: 3 for 4 s
+			{
+				const uint32 WorstShown = Look->LatchWorst(WorstKey, 3u);
+				if (WorstShown == 3u && WC->TRise < 0.0) { WC->TRise = NowT - WC->T0; WC->SimAt = Sim->GetShedColony().LastStepEndS; }
+				if (NowT - WC->TStage >= 4.0)
+				{
+					WC->Rise = WorstShown;
+					WC->TStage = NowT;
+					WC->Stage = 3;
+				}
+				return false;
+			}
+			default: // paused: 0 until 4 s more
+			{
+				const uint32 WorstShown = Look->LatchWorst(WorstKey, 0u);
+				if (WorstShown == 0u && WC->TDrop2 < 0.0) { WC->TDrop2 = NowT - WC->T0; }
+				if (NowT - WC->TStage >= 4.0)
+				{
+					WC->Drop2 = WorstShown;
+					WC->bSimStill = WC->TRise >= 0.0 && Sim->GetShedColony().LastStepEndS == WC->SimAt;
+					PC->SetSimSpeed(1.f);
+					return true;
+				}
+				return false;
+			}
+			}
+		}, 0.2f, 0.f);
+		Runner.Do(TEXT("flash.setup"), [P, WC]()
+		{
+			UWorld* W = FindGameWorld();
+			const ARHPlayerController* PC = GetPC();
+			FString Why;
+			for (const TCHAR* Slot : { TEXT("Early"), TEXT("Vault"), TEXT("Late") })
+			{
+				const FString Path = FPaths::ProjectSavedDir() / TEXT("SaveGames") / FString::Printf(TEXT("RH_%s.sav"), Slot);
+				if (!IFileManager::Get().FileExists(*Path))
+				{
+					Why += FString::Printf(TEXT(" no %s (bash scripts/unreal/rh_checkpoints.sh %s);"), *Path, *FString(Slot).ToLower());
+				}
+			}
+			if (!GetSim()) { Why += TEXT(" no sim;"); }
+			if (!W || !W->GetSubsystem<URHPowerLookSubsystem>()) { Why += TEXT(" no power look helper;"); }
+			if (!PC || !PC->GetDeck().IsValid()) { Why += TEXT(" no command deck;"); }
+			if (!W || !W->GetSubsystem<URHColonyVisualizerSubsystem>()) { Why += TEXT(" no colony visualizer;"); }
+			if (!W || !W->GetSubsystem<URHAudioSubsystem>()) { Why += TEXT(" no audio subsystem;"); }
+			const FString Worst = FString::Printf(TEXT("the layout line's hold (LatchWorst, its own key) outside rationing: 2 -> %u at 1x, shown 0 from %.2f s; paused (the sim clock %s): -> %u from %.2f s, then -> %u from %.2f s"),
+				WC->Drop1, WC->TDrop1, WC->bSimStill ? TEXT("still") : TEXT("MOVED"), WC->Rise, WC->TRise, WC->Drop2, WC->TDrop2);
+			if (WC->bRationing || WC->Drop1 != 0u || WC->Rise != 3u || WC->Drop2 != 0u || !WC->bSimStill)
+			{
+				Why += FString::Printf(TEXT(" %s%s;"), *Worst, WC->bRationing ? TEXT(" (the fresh colony rationed: no conclusion)") : TEXT(""));
+			}
+			Report(TEXT("flash.setup"), Why.IsEmpty(), Why.IsEmpty() ? FString(TEXT("RH_Early.sav, RH_Vault.sav and RH_Late.sav present; sim, power look helper, deck, colony visualizer and audio subsystem up; ")) + Worst : Why);
+			GFlashT0 = FApp::GetCurrentTime();
+			P->bArmed = true;
+			P->EndFrame = FCoreDelegates::OnEndFrame.AddLambda([P]() { FlashSample(*P); });
+		}, 0.f);
+
+		// ---- Early (sol 4.70): the first dry night a new player meets
+		PushFlashLoad(P, TEXT("Early"), TEXT("early"));
+		PushFlashSegment(P, TEXT("flash.early load"), 1.f, 3.0, 0.0);
+		PushFlashDrain(P, TEXT("flash.early 1x"), 1.f, 15.0, false);
+		PushFlashSegment(P, TEXT("flash.early 3x"), 3.f, 15.0, 0.0);
+		PushFlashSegment(P, TEXT("flash.early 8x"), 8.f, 30.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.early 60x"), 5.50);
+		PushFlashSegment(P, TEXT("flash.early morning"), 1.f, 10.0, 0.0);
+		Runner.Do(TEXT("flash.early"), [P]()
+		{
+			const FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("early"));
+			FString Why;
+			for (const int32 S : { 1, 3, 8 })
+			{
+				if (!Bk.DrySpeeds.Contains(S)) { Why += FString::Printf(TEXT(" the dry stretch was not sampled at %dx;"), S); }
+			}
+			ReportFlash(P, TEXT("flash.early"), TEXT("early"), true, Why, FString::Printf(TEXT("; the dry stretch sampled at %s"), *FlashSpeeds(Bk.DrySpeeds)));
+		}, 0.f);
+
+		// ---- Vault (sol 9.35): the guide's vault steps live through the dry night to the rating
+		PushFlashLoad(P, TEXT("Vault"), TEXT("vault"));
+		PushFlashSegment(P, TEXT("flash.vault load"), 1.f, 3.0, 0.0);
+		PushFlashSegment(P, TEXT("flash.vault 1x"), 1.f, 10.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.vault 60x to dusk"), 9.72, true);
+		PushFlashDrain(P, TEXT("flash.vault dusk 1x"), 1.f, 10.0, true);
+		PushFlashView(P, -1, TEXT("vault"));
+		PushFlashSegment(P, TEXT("flash.vault floor -1 3x"), 3.f, 20.0, 0.0);
+		PushFlashView(P, 0, TEXT("vault"));
+		// G1 r2: 8x past the rating and through the 10.25 sunrise (an agent-speed sunrise on the drained bank), then 60x.
+		PushFlashSegment(P, TEXT("flash.vault 8x to the rating and the sunrise"), 8.f, 0.0, 10.35);
+		PushFlashSixty(P, TEXT("flash.vault 60x"), 10.50);
+		PushFlashSegment(P, TEXT("flash.vault 1x end"), 1.f, 5.0, 0.0);
+		Runner.Do(TEXT("flash.vault"), [P]()
+		{
+			const FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("vault"));
+			FString Why;
+			if (!Bk.GuideAtNight.Contains(TEXT("THE VAULT")))
+			{
+				Why += FString::Printf(TEXT(" the guide did not show THE VAULT at the night's start ('%s');"), *Bk.GuideAtNight.Left(120));
+			}
+			ReportFlash(P, TEXT("flash.vault"), TEXT("vault"), true, Why, FString::Printf(TEXT("; the guide at the night's start: '%s'; the vault texts seen (masked): %s"),
+				*MaskDigits(Bk.GuideAtNight).Left(160), *FString::Join(Bk.HintTexts, TEXT(" || "))));
+		}, 0.f);
+
+		// ---- Late (sol 62.35): the surface through a drained night and the morning after, and floor -1 on that night
+		PushFlashLoad(P, TEXT("Late"), TEXT("late.surface"));
+		PushFlashSegment(P, TEXT("flash.late load"), 1.f, 3.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.late 60x to dusk"), 62.717, true);
+		PushFlashDrain(P, TEXT("flash.late dusk 1x"), 1.f, 20.0, false);
+		PushFlashSegment(P, TEXT("flash.late 3x"), 3.f, 20.0, 0.0);
+		PushFlashView(P, -1, TEXT("late.floor"));
+		PushFlashSegment(P, TEXT("flash.late floor -1 3x"), 3.f, 20.0, 0.0);
+		PushFlashView(P, 0, TEXT("late.surface"));
+		PushFlashSegment(P, TEXT("flash.late 8x"), 8.f, 30.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.late 60x"), 63.67);
+		PushFlashSegment(P, TEXT("flash.late morning"), 1.f, 10.0, 0.0);
+		Runner.Do(TEXT("flash.late.surface"), [P]()
+		{
+			const FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("late.surface"));
+			FString Why;
+			if (Bk.LampSamples == 0)
+			{
+				Why += TEXT(" no lamp was sampled;");
+			}
+			if (Bk.LampBad.Num() > 0)
+			{
+				Why += FString::Printf(TEXT(" lamps on panels, pads, stockpiles or pylons: %s;"), *FString::Join(Bk.LampBad, TEXT(", ")));
+			}
+			// 60x ran on at least one slot.
+			FString Every;
+			bool bRan = false;
+			for (const TCHAR* B : { TEXT("early"), TEXT("vault"), TEXT("late.surface") })
+			{
+				const FFlashBucket& S = P->Buckets.FindOrAdd(B);
+				bRan |= S.bSixtyRan;
+				Every += FString::Printf(TEXT(" %s: %s;"), B, S.Sixty.IsEmpty() ? TEXT("not asked") : *S.Sixty);
+			}
+			if (!bRan)
+			{
+				Why += FString::Printf(TEXT(" 60x ran on no slot:%s"), *Every);
+			}
+			TArray<FString> Back;
+			if (const URHSimWorldSubsystem* Sim = GetSim())
+			{
+				for (const int32 Id : Bk.Returned)
+				{
+					for (const FRHBuildingInstance& B : Sim->GetBuildings())
+					{
+						if (B.Id == Id) { Back.Add(FString::Printf(TEXT("%s #%d"), *B.DefName.ToString(), Id)); }
+					}
+				}
+			}
+			ReportFlash(P, TEXT("flash.late.surface"), TEXT("late.surface"), true, Why,
+				FString::Printf(TEXT("; lamps sampled %d, none on a panel, pad, stockpile or pylon: %s; 60x by slot:%s back to Powered by day (information): %s"),
+					Bk.LampSamples, Bk.LampBad.Num() == 0 ? TEXT("yes") : TEXT("NO"), *Every, Back.Num() > 0 ? *FString::Join(Back, TEXT(", ")) : TEXT("none")));
+		}, 0.f);
+		Runner.Do(TEXT("flash.late.floor"), [P]()
+		{
+			const FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("late.floor"));
+			ReportFlash(P, TEXT("flash.late.floor"), TEXT("late.floor"), false, Bk.RoomSamples > 0 ? FString() : FString(TEXT(" no room light was sampled;")),
+				FString::Printf(TEXT("; room light samples %d"), Bk.RoomSamples));
+		}, 0.f);
+
+		// ---- G1 r3 (Late, sol 62.35): a staffed Lab Module rationed on a drained night. The Full Laboratory (LabFull) unlocks with the
+		// SubsurfaceBrine discovery (RHSimWorldSubsystem's ActivateRoomRow, re-applied when a save loads); the Late slot's own run found it at
+		// sol 51.27. RefreshJobs lists a prefab station only on a step GetProvidedRoom(B, true) returns it, which reads that step's bPowered,
+		// so a rationed module's seats ('SEATS: 2 of 2' and '0 of 0') and the colonists it takes follow the shed flag. Two Lab Modules go on
+		// floor -1 by the harness call the scenes already use (Debug_PlaceInstant: finished at once, no new sim hook), both assigned staff
+		// first (Debug_AddSeatPriority, the Assign order's effect without the uplink's wait), so on their served steps they take four of the
+		// six colonists and two Garden cells go short, and on their cut steps the cells fill again: the modules' lines and the cells' lines
+		// both have something to follow. Module A is selected. Its station line and every zoned cell's line are sampled UNMASKED every frame
+		// (R1 counts any change, a seat number included), at 1x and 3x from a dusk drain and at 8x, 1x and 3x on the night after it, then
+		// with the Garden cell whose seats moved most selected. Fails on R1, on any 'SEATS: 0 of 0', on a signed or garbled figure, on a
+		// card that does not draw the line, and when the case did not happen (the module never read SEATS while Rationed; its own or no
+		// cell's sim pair alternated). The crew figures are sampled as information.
+		PushFlashLoad(P, TEXT("Late"), TEXT("lab"));
+		PushFlashView(P, -1, TEXT("lab"));
+		Runner.Do(TEXT("flash.lab setup"), [P]()
+		{
+			P->Lab = MakeShared<FFlashLab>();
+			FFlashLab& L = *P->Lab;
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Sim || !PC || !Defs)
+			{
+				P->Now().Problems.Add(TEXT("no sim, player controller or definitions"));
+				return;
+			}
+			const FRHRoomRow* LabFull = Defs->GetRoom(FName("LabFull"));
+			L.bLabFull = LabFull && LabFull->SliceActive;
+			L.bBrine = Sim->GetDiscoveryLog().Contains(FName("SubsurfaceBrine"));
+			L.bRated = Sim->IsFloorRated(-1);
+			// The first two carved cells of floor -1 that hold no work station.
+			const int32 Carved = Sim->GetFloorCarvedCells(-1);
+			TArray<int32> Spots;
+			for (int32 i = 0; i < Carved; ++i)
+			{
+				const FName Room = Sim->GetRoomAt(-1, i);
+				const FRHRoomRow* Row = Room.IsNone() ? nullptr : Defs->GetRoom(Room);
+				const bool bSeat = Row && Row->SliceActive && URHSimWorldSubsystem::IsSeatFunction(Row->Function);
+				if (bSeat)
+				{
+					FFlashLabSeat& Cell = L.Seats.AddDefaulted_GetRef();
+					Cell.Name = FString::Printf(TEXT("lab cell (-1,%d) %s"), i, *Room.ToString());
+					Cell.Key = FIntVector(-1, i, 0);
+				}
+				else if (Spots.Num() < 2)
+				{
+					Spots.Add(i);
+				}
+			}
+			for (const int32 Cell : Spots)
+			{
+				const FVector At = Sim->GetCellCentreCm(FIntVector(-1, Cell, 0));
+				Sim->Debug_PlaceInstant(FName("LabModule"), At, -1);
+				const FRHBuildingInstance& B = Sim->GetBuildings().Last();
+				if (B.DefName != FName("LabModule"))
+				{
+					continue;
+				}
+				(L.ModuleA == 0 ? L.ModuleA : L.ModuleB) = B.Id;
+				Sim->Debug_AddSeatPriority(FIntVector(B.Level, INDEX_NONE, B.Id));
+				FFlashLabSeat& Module = L.Seats.AddDefaulted_GetRef();
+				Module.Name = FString::Printf(TEXT("lab line #%d LabModule"), B.Id);
+				Module.bModule = true;
+				Module.Id = B.Id;
+				Module.Key = FIntVector(B.Level, INDEX_NONE, B.Id);
+				L.Placed += FString::Printf(TEXT("%sLabModule #%d on floor -1 cell %d (%.0f, %.0f) m"), L.Placed.IsEmpty() ? TEXT("") : TEXT(", "), B.Id, Cell, At.X / 100.0, At.Y / 100.0);
+			}
+			if (L.ModuleA != 0)
+			{
+				PC->Debug_SelectBuilding(L.ModuleA);
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] lab: Full Laboratory %s, SubsurfaceBrine %s, floor -1 %s; placed %s; assigned staff first #%d then #%d (so #%d first); selected #%d; %d zoned seat cell(s) on floor -1"),
+				L.bLabFull ? TEXT("slice-active") : TEXT("NOT slice-active"), L.bBrine ? TEXT("found") : TEXT("not found"), L.bRated ? TEXT("rated") : TEXT("NOT rated"),
+				L.Placed.IsEmpty() ? TEXT("nothing") : *L.Placed, L.ModuleA, L.ModuleB, L.ModuleB, L.ModuleA, L.Seats.Num() - (L.ModuleA != 0 ? 1 : 0) - (L.ModuleB != 0 ? 1 : 0));
+		}, 0.f);
+		PushFlashSegment(P, TEXT("flash.lab staffed by day"), 1.f, 4.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.lab 60x to dusk"), 62.70, true);
+		PushFlashDrain(P, TEXT("flash.lab dusk 1x"), 1.f, 20.0, false);
+		PushFlashSegment(P, TEXT("flash.lab dusk 3x"), 3.f, 15.0, 0.0);
+		PushFlashDrain(P, TEXT("flash.lab night 8x"), 8.f, 15.0, false);
+		PushFlashDrain(P, TEXT("flash.lab night 1x"), 1.f, 12.0, false);
+		PushFlashSegment(P, TEXT("flash.lab night 3x"), 3.f, 12.0, 0.0);
+		Runner.Do(TEXT("flash.lab select cell"), [P]()
+		{
+			// The zoned cell whose sim pair moved most on the dry stretch so far: its own card, selected (GetInspectText's cell branch).
+			ARHPlayerController* PC = GetPC();
+			if (!P->Lab.IsValid() || !PC)
+			{
+				return;
+			}
+			FFlashLab& L = *P->Lab;
+			int32 Best = INDEX_NONE, Most = -1;
+			for (const FFlashLabSeat& S : L.Seats)
+			{
+				if (!S.bModule && S.LiveChanges > Most)
+				{
+					Best = S.Key.Y;
+					Most = S.LiveChanges;
+				}
+			}
+			if (Best != INDEX_NONE)
+			{
+				PC->Debug_SelectCell(-1, Best);
+				L.SelectedCell = Best;
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] lab: selected cell %d on floor -1 (its sim pair changed %d time(s) so far)"), Best, Most);
+		}, 0.f);
+		PushFlashSegment(P, TEXT("flash.lab cell 1x"), 1.f, 8.0, 0.0);
+		PushFlashSegment(P, TEXT("flash.lab cell 3x"), 3.f, 8.0, 0.0);
+		Runner.Do(TEXT("flash.lab"), [P]()
+		{
+			const FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("lab"));
+			FString Why, Lines, Crew;
+			if (!P->Lab.IsValid())
+			{
+				ReportFlash(P, TEXT("flash.lab"), TEXT("lab"), true, TEXT(" its setup never ran;"), FString());
+				return;
+			}
+			const FFlashLab& L = *P->Lab;
+			if (!L.bLabFull)
+			{
+				Why += TEXT(" the Full Laboratory (LabFull) is not slice-active on the Late slot;");
+			}
+			if (!L.bRated)
+			{
+				Why += TEXT(" floor -1 is not rated;");
+			}
+			if (L.ModuleA == 0 || L.ModuleB == 0)
+			{
+				Why += FString::Printf(TEXT(" the two Lab Modules were not placed (%s);"), L.Placed.IsEmpty() ? TEXT("nothing") : *L.Placed);
+			}
+			for (const int32 S : { 1, 3, 8 })
+			{
+				if (!L.NightDrySpeeds.Contains(S))
+				{
+					Why += FString::Printf(TEXT(" the drained night was not sampled at %dx;"), S);
+				}
+			}
+			if (L.ZeroZero > 0)
+			{
+				Why += FString::Printf(TEXT(" 'SEATS: 0 of 0' on %d frame(s), first %s;"), L.ZeroZero, *L.ZeroZeroSaid);
+			}
+			if (L.Garbled > 0)
+			{
+				Why += FString::Printf(TEXT(" a signed or garbled station line on %d frame(s), first %s;"), L.Garbled, *L.GarbledSaid);
+			}
+			if (L.CardFrames == 0 || L.CardMissing > 0)
+			{
+				Why += FString::Printf(TEXT(" the selected card drew another line on %d of %d frame(s)%s%s;"), L.CardMissing, L.CardFrames, L.CardMissingSaid.IsEmpty() ? TEXT("") : TEXT(", first "), *L.CardMissingSaid);
+			}
+			if (L.SeatsWhileRationed == 0)
+			{
+				Why += TEXT(" the Lab Module never read SEATS while its look was Rationed (the case did not happen);");
+			}
+			int32 ModuleLive = 0, CellLive = 0;
+			for (const FFlashLabSeat& S : L.Seats)
+			{
+				if (S.bModule && S.Id == L.ModuleA)
+				{
+					ModuleLive = S.LiveChanges;
+				}
+				else if (!S.bModule)
+				{
+					CellLive = FMath::Max(CellLive, S.LiveChanges);
+				}
+				Lines += FString::Printf(TEXT("%s%s: the sim's pair changed %d time(s) on the dry stretch, the line %d time(s), last '%s'"), Lines.IsEmpty() ? TEXT("") : TEXT("; "), *S.Name,
+					S.LiveChanges, Bk.ChangeCounts.FindRef(S.Name), *S.LastLine.Replace(TEXT("\n"), TEXT(" / ")));
+			}
+			if (ModuleLive < 10)
+			{
+				Why += FString::Printf(TEXT(" the Lab Module's own seats changed only %d time(s) on the dry stretch (the case did not happen);"), ModuleLive);
+			}
+			if (CellLive < 10)
+			{
+				Why += FString::Printf(TEXT(" no zoned cell's seats changed more than %d time(s) on the dry stretch (the cell case did not happen);"), CellLive);
+			}
+			int32 CrewJobs = 0, CrewTargets = 0, CrewClips = 0, AtModule = 0;
+			double ClosestTarget = 1.0e9, ClosestClip = 1.0e9;
+			FString ClosestTargetSaid, ClosestClipSaid;
+			for (const TPair<int32, FFlashLabCrew>& C : L.Crew)
+			{
+				CrewJobs += C.Value.JobChanges;
+				CrewTargets += C.Value.TargetChanges;
+				CrewClips += C.Value.WorkClipChanges;
+				AtModule += C.Value.bAtModule ? 1 : 0;
+				if (C.Value.ClosestTargetS < ClosestTarget)
+				{
+					ClosestTarget = C.Value.ClosestTargetS;
+					ClosestTargetSaid = C.Value.ClosestTargetSaid;
+				}
+				if (C.Value.ClosestWorkClipS < ClosestClip)
+				{
+					ClosestClip = C.Value.ClosestWorkClipS;
+					ClosestClipSaid = C.Value.ClosestClipSaid;
+				}
+			}
+			Crew = FString::Printf(TEXT("; the colony's staffed seats in the sim changed %d time(s) on the dry stretch; the Crew and City panels: roster posts changed %d time(s) in all, the research line %d, the research bar %d, the Jobs figures %d (last '%s'); crew (information, %d figure(s), %d of them seated at a Lab Module on some dry frame, over %d dry frame(s)): their posts in the sim changed %d time(s) frame to frame; their destinations (where a walk ends, set at a beat) %d time(s) (closest two of one figure %s%s%s); their clips while working at the same post %d time(s) (closest two %s%s%s)"),
+				L.LiveFilledChanges, [&Bk]() { int32 N = 0; for (const TPair<FString, int32>& C : Bk.ChangeCounts) { N += C.Key.StartsWith(TEXT("lab roster #")) ? C.Value : 0; } return N; }(),
+				Bk.ChangeCounts.FindRef(TEXT("lab research line")), Bk.ChangeCounts.FindRef(TEXT("lab research bar")), Bk.ChangeCounts.FindRef(TEXT("lab city jobs")), *L.LastCity,
+				L.Crew.Num(), AtModule, L.CrewFrames, CrewJobs, CrewTargets, ClosestTarget < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), ClosestTarget) : TEXT("none"),
+				ClosestTargetSaid.IsEmpty() ? TEXT("") : TEXT(": "), *ClosestTargetSaid,
+				CrewClips, ClosestClip < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), ClosestClip) : TEXT("none"), ClosestClipSaid.IsEmpty() ? TEXT("") : TEXT(": "), *ClosestClipSaid);
+			ReportFlash(P, TEXT("flash.lab"), TEXT("lab"), true, Why, FString::Printf(TEXT("; Full Laboratory %s (SubsurfaceBrine %s); %s; the drained night sampled at %s; the Lab Module read SEATS while Rationed on %d frame(s); 'SEATS: 0 of 0' frames %d; signed or garbled %d; the selected card drew its station's line on %d of %d frame(s) (cell %d selected last); lines: %s%s"),
+				L.bLabFull ? TEXT("slice-active") : TEXT("NOT slice-active"), L.bBrine ? TEXT("found") : TEXT("not found"), *L.Placed, *FlashSpeeds(L.NightDrySpeeds), L.SeatsWhileRationed, L.ZeroZero, L.Garbled,
+				L.CardFrames - L.CardMissing, L.CardFrames, L.SelectedCell, *Lines, *Crew));
+		}, 0.f);
+
+		Runner.Do(TEXT("final"), [P]()
+		{
+			P->bArmed = false;
+			FCoreDelegates::OnEndFrame.Remove(P->EndFrame);
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
 			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
@@ -4614,12 +6370,17 @@ static FAutoConsoleCommand GRHDragWorld(
 
 static FAutoConsoleCommand GRHClickTest(
 	TEXT("RH.ClickTest"),
-	TEXT("RH.ClickTest [deepbench] - the scripted click test: title NEW COLONY and CONTINUE, pause RESUME, a BUILD tab and card, a build click, the five speed buttons, a manifest ADD, Traffic, the Tunnel tool, and that no click leaked into the world. One 'CLICKTEST <name> PASS|FAIL' line per step, then 'CLICKTEST TOTAL'. Boot with -RHTitle (scripts/unreal/rh_clicktest.sh). 'deepbench' runs the P8c deep scene instead, on a colony RH.DeepBench built (RH_CLICKTEST_SCENE=deepbench)."),
+	TEXT("RH.ClickTest [deepbench|flash] - the scripted click test: title NEW COLONY and CONTINUE, pause RESUME, a BUILD tab and card, a build click, the five speed buttons, a manifest ADD, Traffic, the Tunnel tool, and that no click leaked into the world. One 'CLICKTEST <name> PASS|FAIL' line per step, then 'CLICKTEST TOTAL'. Boot with -RHTitle (scripts/unreal/rh_clicktest.sh). 'deepbench' runs the P8c deep scene instead, on a colony RH.DeepBench built (RH_CLICKTEST_SCENE=deepbench); 'flash' runs G1's flash probe on the Early, Vault and Late checkpoint slots (RH_CLICKTEST_SCENE=flash)."),
 	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
 	{
 		if (Args.Num() > 0 && Args[0].Equals(TEXT("deepbench"), ESearchCase::IgnoreCase))
 		{
 			StartDeepBenchTest();
+			return;
+		}
+		if (Args.Num() > 0 && Args[0].Equals(TEXT("flash"), ESearchCase::IgnoreCase))
+		{
+			StartFlashTest();
 			return;
 		}
 		StartClickTest();

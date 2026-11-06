@@ -5598,6 +5598,416 @@ int32 URHSimCommandlet::Main(const FString& Params)
 				FString::Printf(TEXT("DS10 a v32-stamped save is refused (read %d, refused %d); the live flags are untouched"), bRead ? 1 : 0, bRefused ? 1 : 0));
 		}
 
+		// DS11. G1 (2026-11-04): the shed observer, the runtime-only record the presentation reads so a rationed machine reads steady and
+		// dim instead of following the shed flag, which alternates every step while the bank scrapes empty (photosensitivity: nothing may
+		// flash). It runs a drained night, a pinned-empty stretch, sunrise, a daytime storm, the morning after and the era band, and checks
+		// the hold rule per transition (G1 r1, the bound the rule really has): a release to Powered only a full hold after the last cut, an
+		// Unserved only a full hold after the last service, and every stay in Rationed at least a hold less one step. Leaving Powered at a
+		// cut and leaving Unserved at a service are not held in the sim (the edges phase shows each one step apart); on screen the power
+		// helper's 3.2 s floor holds them. It also checks the served shares steady in the era band, the hold raised at a speed-up mid-scrape,
+		// a speed-up over unserved loads that reopens no evidence (G1 r2), the observer empty after a save and load, and the sim digest
+		// identical with the observer on and off (nothing in the sim reads it). Runs last, so DS0-DS10 are unchanged. At its start the
+		// clock is at the dusk of sol 13 (DS10's load), inside Storm_1.
+		{
+			Sim->SetManualPower(A, true);
+			Sim->SetManualPower(P, true);
+			Sim->SetManualPower(M, true); // the Forge stays on its day shift; the Electrolyzer (shift off) runs grid batches all night
+			using FG1Hold = URHSimWorldSubsystem::ERHShedHold;
+			// The test's own record of each watched load, from B.bPowered after every step and the hold computed from the step length (a cut's
+			// hold still in force at a longer step is raised to that step's hold), never the observer's stored times.
+			// G1 r2: a service's hold and the watch are raised the same way while still in force (never once over).
+			struct FG1Own { double CutS = -1.0, CutHoldS = 0.0, ServedS = -1.0, ServedHoldS = 0.0, FirstS = 0.0, WatchHoldS = 0.0; int64 SeenStep = -10; };
+			struct FG1Change { int32 Id = 0; double AtS = 0.0; FG1Hold Hold = FG1Hold::Powered; double DtS = 0.0; FG1Own Own; };
+			TArray<FG1Change> G1Changes;
+			TMap<int32, FG1Hold> G1Last;
+			TMap<int32, FG1Own> G1Own;
+			int64 G1StepNo = 0;
+			double G1PrevEndS = -1.0;
+			int32 G1Flips = 0;
+			bool bG1PrevShed = Sim->GetPower().ShedCount > 0;
+			// After every step: the test's own record, then each watched building's hold against its last reading (start: Powered), and the
+			// shed flag's flips.
+			const auto G1Note = [&](double G1Dt)
+			{
+				const double G1End = Clock->GetSimSecondsTotal();
+				const bool bG1Shed = Sim->GetPower().ShedCount > 0;
+				G1Flips += bG1Shed != bG1PrevShed ? 1 : 0;
+				bG1PrevShed = bG1Shed;
+				++G1StepNo;
+				const int64 G1ObsSteps = Sim->GetShedColony().Steps;
+				for (const FRHBuildingInstance& G1B : Sim->GetBuildings())
+				{
+					const URHSimWorldSubsystem::FRHShedSeen* G1Seen = Sim->FindShedSeen(G1B.Id);
+					if (!G1Seen || G1Seen->LastSeenStep != G1ObsSteps - 1)
+					{
+						continue; // not in this step's load list
+					}
+					FG1Own& G1O = G1Own.FindOrAdd(G1B.Id);
+					const double G1StepHold = URHSimWorldSubsystem::ShedHoldFor(G1Dt);
+					if (G1O.ServedS >= 0.0 && G1PrevEndS - G1O.ServedS < G1O.ServedHoldS)
+					{
+						G1O.ServedHoldS = FMath::Max(G1O.ServedHoldS, G1StepHold);
+					}
+					if (G1O.SeenStep != G1StepNo - 1)
+					{
+						G1O.FirstS = G1End; // first sight, or back after a step it missed
+						G1O.WatchHoldS = G1StepHold;
+					}
+					else
+					{
+						if (G1O.CutS >= 0.0 && G1PrevEndS - G1O.CutS < G1O.CutHoldS)
+						{
+							G1O.CutHoldS = FMath::Max(G1O.CutHoldS, G1StepHold);
+						}
+						if (G1PrevEndS - G1O.FirstS < G1O.WatchHoldS)
+						{
+							G1O.WatchHoldS = FMath::Max(G1O.WatchHoldS, G1StepHold);
+						}
+					}
+					G1O.SeenStep = G1StepNo;
+					if (G1B.bPowered) { G1O.ServedS = G1End; G1O.ServedHoldS = URHSimWorldSubsystem::ShedHoldFor(G1Dt); }
+					else { G1O.CutS = G1End; G1O.CutHoldS = URHSimWorldSubsystem::ShedHoldFor(G1Dt); }
+				}
+				G1PrevEndS = G1End;
+				for (const FRHBuildingInstance& G1B : Sim->GetBuildings())
+				{
+					if (!Sim->FindShedSeen(G1B.Id))
+					{
+						continue;
+					}
+					const FG1Hold G1Now = Sim->GetShedHold(G1B.Id);
+					FG1Hold& G1Prev = G1Last.FindOrAdd(G1B.Id, FG1Hold::Powered);
+					if (G1Now != G1Prev)
+					{
+						const FG1Own* G1O = G1Own.Find(G1B.Id);
+						G1Changes.Add(FG1Change{ G1B.Id, G1End, G1Now, G1Dt, G1O ? *G1O : FG1Own() });
+						G1Prev = G1Now;
+					}
+				}
+			};
+			// One step: the bank set first when asked (0 pins it empty, 1e9 pins it full), else left free.
+			const auto G1StepBank = [&](double G1Dt, double G1BankWh)
+			{
+				if (G1BankWh >= 0.0) { Sim->Debug_SetBatteryWh(G1BankWh); }
+				Step(G1Dt, false);
+				G1Note(G1Dt);
+			};
+			const auto G1Step = [&](double G1Dt, bool bG1PinEmpty) { G1StepBank(G1Dt, bG1PinEmpty ? 0.0 : -1.0); };
+			const auto G1Is = [&](int32 G1Id, FG1Hold G1Want) { return Sim->GetShedHold(G1Id) == G1Want; };
+			const auto G1ChangedIn = [&](int32 G1Id, double G1From, double G1To)
+			{
+				int32 G1N = 0;
+				for (const FG1Change& G1C : G1Changes) { G1N += (G1C.Id == G1Id && G1C.AtS > G1From + 1e-6 && G1C.AtS <= G1To + 1e-6) ? 1 : 0; }
+				return G1N;
+			};
+
+			// N1: night 14, the bank drained once at dusk, 300 steps of 1 s: the natural scrape (every step alternates).
+			const int32 G1Night = Sim->GetNightIndexNow();
+			Sim->Debug_SetBatteryWh(0.0);
+			for (int32 G1i = 0; G1i < 300; ++G1i) { G1Step(1.0, false); }
+			const int32 G1FlipsN1 = G1Flips;
+			const bool bG1C1 = G1FlipsN1 >= 100;
+			const bool bG1C2 = G1Is(E, FG1Hold::Rationed) && G1Is(F, FG1Hold::Rationed) && G1Is(M, FG1Hold::Rationed) && G1Is(LanderId, FG1Hold::Rationed)
+				&& G1Is(K, FG1Hold::Rationed) && G1Is(A, FG1Hold::Powered) && G1Is(P, FG1Hold::Powered);
+
+			// N2: 150 s with the bank pinned empty: every step sheds the same prefix, so the Electrolyzer goes unserved. G1 r2: the
+			// Electrolyzer is switched off for the first step (back after a step it missed: its watch starts again while its last service
+			// runs out), then 89 steps of 1 s, then ONE step of 60 s with the bank still pinned. A hold already over is never raised, so no
+			// load unserved at 1 s reads Rationed again at the speed-up (round 1 read every one Rationed again for 120 sim-s with no
+			// service, then Unserved: the service and the watch were measured against the era band's 240 s).
+			const double G1N2From = Clock->GetSimSecondsTotal();
+			Sim->SetManualPower(E, false);
+			G1Step(1.0, true);
+			Sim->SetManualPower(E, true);
+			for (int32 G1i = 0; G1i < 89; ++G1i) { G1Step(1.0, true); }
+			const int32 G1N2Changes0 = G1Changes.Num();
+			G1Step(60.0, true);
+			const int32 G1N2SpeedUpChanges = G1Changes.Num() - G1N2Changes0;
+			const bool bG1N2EUnserved = G1Is(E, FG1Hold::Unserved);
+			const bool bG1N2Others = G1Is(F, FG1Hold::Unserved) && G1Is(M, FG1Hold::Unserved) && G1Is(LanderId, FG1Hold::Unserved) && G1Is(K, FG1Hold::Unserved)
+				&& G1Is(A, FG1Hold::Powered) && G1Is(P, FG1Hold::Powered);
+			const double G1N2To = Clock->GetSimSecondsTotal();
+			int32 G1EUnserved = 0, G1EOther = 0;
+			double G1EUnservedAfterS = -1.0, G1EUnservedBackS = -1.0;
+			for (const FG1Change& G1C : G1Changes)
+			{
+				if (G1C.Id != E || G1C.AtS <= G1N2From + 1e-6 || G1C.AtS > G1N2To + 1e-6)
+				{
+					continue;
+				}
+				if (G1C.Hold == FG1Hold::Unserved) { ++G1EUnserved; G1EUnservedAfterS = G1C.AtS - G1C.Own.ServedS; G1EUnservedBackS = G1C.AtS - G1C.Own.FirstS; }
+				else { ++G1EOther; }
+			}
+			const bool bG1C3 = G1EUnserved == 1 && G1EOther == 0 && G1EUnservedAfterS >= URHSimWorldSubsystem::ShedHoldWindowS - 1e-6
+				&& G1EUnservedBackS >= URHSimWorldSubsystem::ShedHoldWindowS - 1e-6;
+			const bool bG1C14 = G1N2SpeedUpChanges == 0 && bG1N2EUnserved && bG1N2Others && Near(G1N2To - G1N2From, 150.0, 1e-6);
+
+			// N3: 150 steps of 1 s on the free bank, to sunrise.
+			for (int32 G1i = 0; G1i < 150; ++G1i) { G1Step(1.0, false); }
+			const double G1Sunrise = Clock->GetSimSecondsTotal();
+			const bool bG1AtSunrise = Near(G1Sunrise - FMath::FloorToDouble(G1Sunrise / SolL) * SolL, 0.25 * SolL, 1e-6);
+			const bool bG1EN3 = G1Is(E, FG1Hold::Rationed);
+
+			// D1: the storm day, 600 steps of 1 s to dusk (generation under the day load all day, so the bank scrapes all day).
+			const double G1Dust = Sim->GetDustFactorNow();
+			int32 G1RationSteps = 0;
+			bool bG1EUnservedD1 = false;
+			for (int32 G1i = 0; G1i < 600; ++G1i)
+			{
+				G1Step(1.0, false);
+				G1RationSteps += Sim->IsColonyRationing() ? 1 : 0;
+				bG1EUnservedD1 |= G1Is(E, FG1Hold::Unserved);
+			}
+			const double G1D1To = Clock->GetSimSecondsTotal();
+			bool bG1SunriseQuiet = true;
+			for (const FG1Change& G1C : G1Changes) { bG1SunriseQuiet &= !Near(G1C.AtS, G1Sunrise, 1e-6) && !Near(G1C.AtS, G1Sunrise + 1.0, 1e-6); }
+			const bool bG1C4 = bG1AtSunrise && bG1SunriseQuiet && bG1EN3;
+			const bool bG1C5 = G1Dust < 1.0 && G1ChangedIn(F, G1Sunrise, G1D1To) == 0 && G1Is(F, FG1Hold::Rationed) && !bG1EUnservedD1 && G1RationSteps == 600;
+
+			// D2: the night, the storm's end and the morning after under full sun, 1200 steps of 1 s to the next dusk.
+			for (int32 G1i = 0; G1i < 1200; ++G1i) { G1Step(1.0, false); }
+			int32 G1Watched = 0;
+			bool bG1AllPowered = true;
+			for (const FRHBuildingInstance& G1B : Sim->GetBuildings())
+			{
+				if (Sim->FindShedSeen(G1B.Id))
+				{
+					++G1Watched;
+					bG1AllPowered &= G1Is(G1B.Id, FG1Hold::Powered);
+				}
+			}
+			const bool bG1C7 = G1Watched > 0 && bG1AllPowered;
+
+			// E: the era band, the bank drained once, 8 steps of 60 s (a shed step banks the step's surplus, the next spends it). The served
+			// shares (the Electrolyzer's and the colony's) must not alternate with the shed flag: they count whole shed cycles, so after each
+			// step they only settle (no move of more than 0.02 reverses the one before it).
+			const double G1EraFrom = Clock->GetSimSecondsTotal();
+			const int32 G1FlipsBeforeEra = G1Flips;
+			TArray<double> G1EShare, G1ColShare;
+			Sim->Debug_SetBatteryWh(0.0);
+			for (int32 G1i = 0; G1i < 8; ++G1i)
+			{
+				G1Step(60.0, false);
+				const URHSimWorldSubsystem::FRHShedSeen* G1ESeen = Sim->FindShedSeen(E);
+				G1EShare.Add(G1ESeen ? G1ESeen->ServedMean : -1.0);
+				G1ColShare.Add(Sim->GetShedColony().ServedMean);
+			}
+			const int32 G1EraFlips = G1Flips - G1FlipsBeforeEra;
+			const URHSimWorldSubsystem::FRHShedColony& G1Col = Sim->GetShedColony();
+			bool bG1Stamped = true;
+			for (const FRHBuildingInstance& G1B : Sim->GetBuildings())
+			{
+				if (const URHSimWorldSubsystem::FRHShedSeen* G1Seen = Sim->FindShedSeen(G1B.Id))
+				{
+					bG1Stamped &= G1Seen->LastSeenStep == G1Col.Steps - 1;
+				}
+			}
+			const double G1EraHold = URHSimWorldSubsystem::ShedHoldFor(60.0);
+			const bool bG1EEra = G1Is(E, FG1Hold::Rationed);
+			const bool bG1C8 = G1EraFlips >= 4 && G1Col.LastStepDtS == 60.0 && G1EraHold == 240.0 && bG1Stamped && bG1EEra;
+			const auto G1Reversals = [](const TArray<double>& G1Series)
+			{
+				int32 G1Rev = 0, G1Dir = 0;
+				for (int32 G1i = 1; G1i < G1Series.Num(); ++G1i)
+				{
+					const double G1Move = G1Series[G1i] - G1Series[G1i - 1];
+					if (FMath::Abs(G1Move) > 0.02)
+					{
+						const int32 G1Sign = G1Move > 0.0 ? 1 : -1;
+						G1Rev += (G1Dir != 0 && G1Sign != G1Dir) ? 1 : 0;
+						G1Dir = G1Sign;
+					}
+				}
+				return G1Rev;
+			};
+			const int32 G1ShareRev = G1Reversals(G1EShare) + G1Reversals(G1ColShare);
+			const bool bG1C13 = G1EShare.Num() == 8 && G1EShare.Last() >= 0.0 && G1ShareRev == 0;
+
+			// S: a save and a load: the observer is runtime only, so the loaded colony starts with it empty.
+			const int32 G1EntriesBefore = Sim->GetShedSeenCount();
+			FString G1Err;
+			const bool bG1Saved = Sim->SaveColony(TEXT("g1shedtest"), G1Err);
+			const bool bG1Loaded = bG1Saved && Sim->LoadColony(TEXT("g1shedtest"), G1Err);
+			const int32 G1EntriesAfter = Sim->GetShedSeenCount();
+			const int64 G1StepsAfter = Sim->GetShedColony().Steps;
+			const bool bG1C9 = bG1Loaded && G1EntriesBefore == 15 && G1EntriesAfter == 0 && G1StepsAfter == 0 && G1Is(E, FG1Hold::Powered) && !Sim->IsColonyRationing();
+
+			// T: the twin from that load, 60 drained steps of 1 s with the observer on and off: the same sim digest (the F2 pattern).
+			const auto G1Digest = [&]() -> uint32
+			{
+				uint32 G1Hash = 2166136261u;
+				const auto G1Mix = [&G1Hash](double G1Val) { uint64 G1Bits = 0; FMemory::Memcpy(&G1Bits, &G1Val, 8); G1Hash = (G1Hash ^ (uint32)G1Bits) * 16777619u; G1Hash = (G1Hash ^ (uint32)(G1Bits >> 32)) * 16777619u; };
+				for (const FRHBuildingInstance& G1B : Sim->GetBuildings())
+				{
+					G1Mix(G1B.Id); G1Mix(G1B.bPowered ? 1.0 : 0.0); G1Mix(G1B.BatchRemaining_h);
+					for (const auto& G1In : G1B.InputKg) { G1Mix(G1In.Value); }
+					for (const auto& G1Out : G1B.OutputKg) { G1Mix(G1Out.Value); }
+				}
+				const FRHPowerState& G1Pw = Sim->GetPower();
+				G1Mix(G1Pw.GenW); G1Mix(G1Pw.LoadW); G1Mix(G1Pw.BatteryWh); G1Mix(G1Pw.ShedCount); G1Mix(G1Pw.ShedFloors);
+				for (const TCHAR* G1Res : { TEXT("Water"), TEXT("Oxygen"), TEXT("Hydrogen"), TEXT("Food") }) { G1Mix(Sim->GetStock(FName(G1Res))); }
+				for (const TCHAR* G1Res : { TEXT("Struct"), TEXT("Regolith") }) { G1Mix(Sim->GetTotalSolid(FName(G1Res))); }
+				G1Mix(Sim->GetLastBlackoutNight());
+				G1Mix(Clock->GetSimSecondsTotal());
+				return G1Hash;
+			};
+			const auto G1Twin = [&](bool bG1On, int32& OutG1Entries) -> uint32
+			{
+				FString G1TwinErr;
+				Sim->LoadColony(TEXT("g1shedtest"), G1TwinErr);
+				Sim->Debug_SetShedObserver(bG1On);
+				Sim->Debug_SetBatteryWh(0.0);
+				for (int32 G1i = 0; G1i < 60; ++G1i) { Step(1.0, false); }
+				OutG1Entries = Sim->GetShedSeenCount();
+				return G1Digest();
+			};
+			int32 G1OnEntries = 0, G1OffEntries = 0;
+			const uint32 G1DigestOn = G1Twin(true, G1OnEntries);
+			const uint32 G1DigestOff = G1Twin(false, G1OffEntries);
+			Sim->Debug_SetShedObserver(true);
+			const bool bG1C10 = G1DigestOn == G1DigestOff && G1OnEntries == 15 && G1OffEntries == 0;
+
+			// X (G1 r1): the edges, from the twin's end (the observer just switched back on, so empty; the test's records start again).
+			// Steps of 1 s to the dusk of sol 16, one step with the bank pinned full (and more until the Electrolyzer reads Powered), then
+			// the Electrolyzer driven through every transition with the bank pinned: empty until it reads Unserved, full for one step,
+			// empty until Unserved again, full until Powered (its first served step reads Rationed again), empty for one step. X and Y
+			// end before sol 17 (its autosave and Flare_1).
+			G1Last.Reset();
+			G1Own.Reset();
+			const double G1XDusk = (FMath::FloorToDouble(Clock->GetSimSecondsTotal() / SolL) + 0.75) * SolL;
+			while (Clock->GetSimSecondsTotal() < G1XDusk - 1e-6) { G1Step(1.0, false); }
+			const int32 G1XSol = (int32)FMath::FloorToDouble(Clock->GetSimSecondsTotal() / SolL);
+			const auto G1XUntil = [&](double G1BankWh, FG1Hold G1Want)
+			{
+				for (int32 G1i = 0; G1i < 70 && !G1Is(E, G1Want); ++G1i) { G1StepBank(1.0, G1BankWh); }
+			};
+			G1StepBank(1.0, 1.0e9);
+			G1XUntil(1.0e9, FG1Hold::Powered);
+			const bool bG1XPowered = G1Is(E, FG1Hold::Powered);
+			const double G1XFrom = Clock->GetSimSecondsTotal();
+			G1XUntil(0.0, FG1Hold::Unserved);
+			G1StepBank(1.0, 1.0e9);
+			G1XUntil(0.0, FG1Hold::Unserved);
+			G1XUntil(1.0e9, FG1Hold::Powered);
+			G1StepBank(1.0, 0.0);
+			TArray<double> G1XAt;
+			FString G1XSeq;
+			for (const FG1Change& G1C : G1Changes)
+			{
+				if (G1C.Id == E && G1C.AtS > G1XFrom + 1e-6)
+				{
+					G1XAt.Add(G1C.AtS);
+					G1XSeq += G1C.Hold == FG1Hold::Powered ? TEXT("P") : (G1C.Hold == FG1Hold::Rationed ? TEXT("R") : TEXT("U"));
+				}
+			}
+			double G1XGap[6] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };
+			for (int32 G1i = 1; G1i < G1XAt.Num() && G1i <= 6; ++G1i) { G1XGap[G1i - 1] = G1XAt[G1i] - G1XAt[G1i - 1]; }
+			const double G1XHold = URHSimWorldSubsystem::ShedHoldWindowS;
+			const bool bG1C11 = bG1XPowered && G1XSeq == TEXT("RURURPR") && Near(G1XAt[0] - G1XFrom, 1.0, 1e-6)
+				&& Near(G1XGap[0], G1XHold - 1.0, 1e-6) && Near(G1XGap[1], 1.0, 1e-6) && Near(G1XGap[2], G1XHold, 1e-6)
+				&& Near(G1XGap[3], 1.0, 1e-6) && Near(G1XGap[4], G1XHold - 1.0, 1e-6) && Near(G1XGap[5], 1.0, 1e-6);
+
+			// Y (G1 r1): a speed-up mid-scrape. The bank drained once, 10 steps of 1 s, then 1 s steps until the last one cut the
+			// Electrolyzer; then 1 Wh in the bank so the first 60 s step serves it, and a second 60 s step (cut). A cut's hold still in force
+			// is raised to the era band's, so no load is released for one era step only to be cut on the next, and rationing never lapses.
+			Sim->Debug_SetBatteryWh(0.0);
+			const double G1YFrom = Clock->GetSimSecondsTotal();
+			const int32 G1YChanges0 = G1Changes.Num();
+			int32 G1YSteps = 0, G1YRation = 0;
+			for (int32 G1i = 0; G1i < 10; ++G1i) { G1Step(1.0, false); ++G1YSteps; G1YRation += Sim->IsColonyRationing() ? 1 : 0; }
+			for (int32 G1i = 0; G1i < 3 && Find(E) && Find(E)->bPowered; ++G1i) { G1Step(1.0, false); ++G1YSteps; G1YRation += Sim->IsColonyRationing() ? 1 : 0; }
+			const bool bG1YLastCut = Find(E) && !Find(E)->bPowered;
+			bool bG1YFirstServed = false;
+			for (int32 G1i = 0; G1i < 2; ++G1i)
+			{
+				G1StepBank(60.0, G1i == 0 ? 1.0 : -1.0);
+				++G1YSteps;
+				G1YRation += Sim->IsColonyRationing() ? 1 : 0;
+				bG1YFirstServed |= G1i == 0 && Find(E) && Find(E)->bPowered;
+			}
+			int32 G1YChanges = 0;
+			for (int32 G1k = G1YChanges0; G1k < G1Changes.Num(); ++G1k) { G1YChanges += G1Changes[G1k].AtS > G1YFrom + 1e-6 ? 1 : 0; }
+			const bool bG1C12 = bG1YLastCut && bG1YFirstServed && G1YChanges == 0 && G1YRation == G1YSteps && G1Is(E, FG1Hold::Rationed)
+				&& Clock->GetSimSecondsTotal() < (G1XSol + 1) * SolL - 1e-6;
+
+			// The hold rule over every recorded change, against the test's own record: a release to Powered at least the cut's hold after the
+			// last cut; an Unserved at least the service's hold after the last service and the watch's hold after it was first watched (G1 r2:
+			// each hold as the test's record raised it while still in force, never the band's at the change); a stay in Rationed at least a
+			// hold less one step. The transitions out of Powered (at a cut) and out of Unserved (at a service) are reported, not bounded.
+			double G1Closest = 1.0e12, G1ClosestRelease = 1.0e12, G1ClosestUnserved = 1.0e12, G1ShortRation = 1.0e12, G1ShortRationEra = 1.0e12;
+			double G1ClosestLeaveP = 1.0e12, G1ClosestLeaveU = 1.0e12;
+			bool bG1Released = true, bG1UnservedHeld = true, bG1RationHeld = true;
+			for (int32 G1k = 0; G1k < G1Changes.Num(); ++G1k)
+			{
+				const FG1Change& G1C = G1Changes[G1k];
+				if (G1C.Hold == FG1Hold::Powered)
+				{
+					G1ClosestRelease = FMath::Min(G1ClosestRelease, G1C.AtS - G1C.Own.CutS);
+					bG1Released &= G1C.Own.CutS >= 0.0 && G1C.AtS - G1C.Own.CutS >= G1C.Own.CutHoldS - 1e-6;
+				}
+				else if (G1C.Hold == FG1Hold::Unserved)
+				{
+					const double G1SinceServed = G1C.Own.ServedS >= 0.0 ? G1C.AtS - G1C.Own.ServedS : 1.0e12;
+					G1ClosestUnserved = FMath::Min(G1ClosestUnserved, G1SinceServed);
+					bG1UnservedHeld &= G1SinceServed >= G1C.Own.ServedHoldS - 1e-6 && G1C.AtS - G1C.Own.FirstS >= G1C.Own.WatchHoldS - 1e-6;
+				}
+				for (int32 G1j = G1k - 1; G1j >= 0; --G1j)
+				{
+					const FG1Change& G1W = G1Changes[G1j];
+					if (G1W.Id != G1C.Id)
+					{
+						continue;
+					}
+					const double G1Gap = G1C.AtS - G1W.AtS;
+					G1Closest = FMath::Min(G1Closest, G1Gap);
+					if (G1W.Hold == FG1Hold::Rationed)
+					{
+						const double G1Bound = URHSimWorldSubsystem::ShedHoldFor(G1W.DtS) - G1W.DtS;
+						if (G1W.DtS > 1.5) { G1ShortRationEra = FMath::Min(G1ShortRationEra, G1Gap); }
+						else { G1ShortRation = FMath::Min(G1ShortRation, G1Gap); }
+						bG1RationHeld &= G1Gap >= G1Bound - 1e-6;
+					}
+					else if (G1C.Hold == FG1Hold::Rationed && G1W.Hold == FG1Hold::Powered)
+					{
+						G1ClosestLeaveP = FMath::Min(G1ClosestLeaveP, G1Gap);
+					}
+					else if (G1C.Hold == FG1Hold::Rationed && G1W.Hold == FG1Hold::Unserved)
+					{
+						G1ClosestLeaveU = FMath::Min(G1ClosestLeaveU, G1Gap);
+					}
+					break;
+				}
+			}
+			const bool bG1C6 = bG1Released && bG1UnservedHeld && bG1RationHeld;
+			const auto G1Num = [](double G1V) { return G1V >= 1.0e11 ? FString(TEXT("none")) : FString::Printf(TEXT("%.0f s"), G1V); };
+
+			const bool bG1Clauses[] = { bG1C1, bG1C2, bG1C3, bG1C4, bG1C5, bG1C6, bG1C7, bG1C8, bG1C9, bG1C10, bG1C11, bG1C12, bG1C13, bG1C14 };
+			FString G1Flags;
+			bool bG1All = true;
+			for (const bool bG1Ok : bG1Clauses) { G1Flags += bG1Ok ? TEXT("1") : TEXT("0"); bG1All &= bG1Ok; }
+			Expect(bG1All,
+				FString::Printf(TEXT("DS11 shed observer (G1): night %d drained once at dusk, 300 steps of 1 s: the shed flag flipped %d times; then Electrolyzer, Forge, Lab, Lander and bank Rationed, Air Filter and pad Powered; ")
+					TEXT("pinned empty 150 s (the Electrolyzer off for the first step, then 89 steps of 1 s and one of 60 s): the Electrolyzer Unserved %d time(s), %.0f s after its last service and %.0f s after its return; ")
+					TEXT("the 60 s step over the unserved loads: %d hold change(s), Electrolyzer, Forge, Lab, Lander and bank %s, Air Filter and pad %s; free again: %s; no change at sunrise (sol %.2f); ")
+					TEXT("the storm day (dust %.2f): the Forge Rationed throughout, rationing on %d/600 steps; every load Powered by the dusk of sol %d (hold %.0f s); %d loads watched; ")
+					TEXT("era band: 8 steps of 60 s, %d flips, every load stamped at the last step, hold %.0f s, the Electrolyzer %s, its served share %.2f and the colony's %.2f, settling (%d reversal(s) of a move over 0.02 across the 8 steps); ")
+					TEXT("after save and load the observer holds %d entries and %lld steps (%d before); the twin from that load: digest %08x with the observer on (%d entries) = %08x with it off (%d entries); ")
+					TEXT("edges at the dusk of sol %d, the Electrolyzer from Powered with the bank pinned (%s): Rationed at its first cut, Unserved %.0f s later, Rationed %.0f s later at one served step, Unserved %.0f s after that service, Rationed %.0f s later when the bank is freed, Powered %.0f s after that (a hold after its last cut), Rationed %.0f s after that release; ")
+					TEXT("1 s to 60 s mid-scrape (last 1 s step %s, first 60 s step %s): %d hold change(s), rationing on %d/%d steps; ")
+					TEXT("over %d hold changes: every release at least the cut's hold after its last cut (closest %s), every Unserved at least its service's hold after its last service and its watch's hold after its first sight (closest %s), every stay in Rationed at least a hold less one step (shortest %s; era band %s); ")
+					TEXT("leaving Powered at a cut and leaving Unserved at a service are not held in the sim (closest %s and %s; the 3.2 s floor holds them on screen); the closest two of one load %s apart [clauses %s]"),
+					G1Night, G1FlipsN1, G1EUnserved, G1EUnservedAfterS, G1EUnservedBackS,
+					G1N2SpeedUpChanges, (bG1N2EUnserved && bG1N2Others) ? TEXT("Unserved") : TEXT("NOT all Unserved"), (bG1N2EUnserved && bG1N2Others) ? TEXT("Powered") : TEXT("(see above)"),
+					bG1EN3 ? TEXT("Rationed") : TEXT("NOT Rationed"), G1Sunrise / SolL,
+					G1Dust, G1RationSteps, (int32)FMath::FloorToDouble((G1EraFrom - 1.0) / SolL), URHSimWorldSubsystem::ShedHoldWindowS, G1Watched,
+					G1EraFlips, G1EraHold, bG1EEra ? TEXT("Rationed") : TEXT("NOT Rationed"), G1EShare.Num() > 0 ? G1EShare.Last() : -1.0, G1ColShare.Num() > 0 ? G1ColShare.Last() : -1.0, G1ShareRev,
+					G1EntriesAfter, (long long)G1StepsAfter, G1EntriesBefore, G1DigestOn, G1OnEntries, G1DigestOff, G1OffEntries,
+					G1XSol, *G1XSeq, G1XGap[0], G1XGap[1], G1XGap[2], G1XGap[3], G1XGap[4], G1XGap[5],
+					bG1YLastCut ? TEXT("cut") : TEXT("NOT cut"), bG1YFirstServed ? TEXT("served") : TEXT("NOT served"), G1YChanges, G1YRation, G1YSteps,
+					G1Changes.Num(), *G1Num(G1ClosestRelease), *G1Num(G1ClosestUnserved), *G1Num(G1ShortRation), *G1Num(G1ShortRationEra),
+					*G1Num(G1ClosestLeaveP), *G1Num(G1ClosestLeaveU), *G1Num(G1Closest), *G1Flags));
+		}
+
 		return Finish();
 	}
 

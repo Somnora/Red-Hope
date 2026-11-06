@@ -2628,6 +2628,54 @@ public:
 	// rest of THAT night instead of reading the shed flag, which flips every sim
 	// step while the bank scrapes empty (photosensitivity: nothing may flash).
 	int32 GetLastBlackoutNight() const { return LastBlackoutNight; }
+	// G1 (2026-11-04), the shed observer. After its shed walk StepPower records, for each building in that step's load list, the step end it
+	// was last cut and last served and the hold each earns (ShedHoldFor of that step's length), and for the colony the last step a load
+	// that draws was cut and running means over one sol-hour of the shortfall (the wanted load less generation, never below 0) and of the
+	// served share of the wanted load. G1 r1: every mean's time constant is the step's hold (ShedHoldFor: one sol-hour in the agent band,
+	// four era steps in the era band), and the served shares (each building's and the colony's) count whole shed cycles, from the step
+	// after one cut to the next, so a share that alternates every step reads steady at any step length (a per-step sol-hour mean of the
+	// alternation swung by 50 points every 60 s era step, once a real second at 60x). G1 r2: a hold in force when the step length grows
+	// (a cut's, a service's, and the watch a building needs before it can read Unserved) is raised to the longer step's hold; a hold
+	// already over is never raised, so a speed-up never reopens evidence that has run out. Runtime only: read by no sim rule, never
+	// saved, empty after LoadColony (beside LastBlackoutNight) and in a new world. Presentation reads it through these getters, so a rationed machine reads steady and dim instead of following the shed flag,
+	// which alternates every step while the bank scrapes empty (photosensitivity: nothing may flash).
+	enum class ERHShedHold : uint8 { Powered = 0, Rationed = 1, Unserved = 2 };
+	struct FRHShedSeen
+	{
+		bool bSeen = false;
+		int64 LastSeenStep = 0;                              // the observer's step count when last watched
+		double FirstSeenS = 0.0;                             // watched since (again after a step it missed)
+		double LastCutS = -1.0, LastCutHoldS = 0.0;          // its last cut step's end, and the hold that cut earns
+		double LastServedS = -1.0, LastServedHoldS = 0.0;    // its last served step's end, and the hold that service earns
+		double WatchHoldS = 0.0;                             // G1 r2: how long it must be watched (from FirstSeenS) before it can read Unserved
+		double ServedMean = 1.0;                             // the share of its time it was served, running mean over one hold of whole shed cycles
+		double CycleS = 0.0, CycleServedS = 0.0;             // the open shed cycle (from the step after its last cut): its length and its served time
+		bool bMeanSet = false;                               // a whole cycle has closed since it was first watched
+	};
+	struct FRHShedColony
+	{
+		int64 Steps = 0;                                     // steps watched since the load or the new world
+		double LastStepEndS = -1.0, LastStepDtS = 0.0;
+		double LastShedS = -1.0, LastShedHoldS = 0.0;        // the last step a load that draws was cut
+		double ShortWMean = 0.0;                             // G1 r2: max(0, the wanted load - GenW) (W), running mean over one hold
+		double ServedMean = 1.0;                             // served / wanted load, running mean over one hold of whole shed cycles (1 with no load)
+		double CycleS = 0.0, CycleWantWs = 0.0, CycleServedWs = 0.0; // the open shed cycle (from the step after the last real shed): length, wanted and served W x s
+		bool bMeanSet = false;                               // a whole cycle has closed since the load or the new world
+	};
+	static constexpr double ShedHoldWindowS = 50.0;          // one sol-hour (G1 placeholder)
+	static double ShedHoldFor(double StepDtS) { return FMath::Max(ShedHoldWindowS, 4.0 * StepDtS); } // 50 s agent band, 240 s era band
+	ERHShedHold GetShedHold(int32 BuildingId) const;         // Powered when never watched (no evidence of a cut); a record not watched on the
+	                                                         // last step (switched off, a site) never reads Unserved (G1 r2)
+	const FRHShedSeen* FindShedSeen(int32 BuildingId) const { return ShedSeen.Find(BuildingId); }
+	const FRHShedColony& GetShedColony() const { return ShedColony; }
+	int32 GetShedSeenCount() const { return ShedSeen.Num(); }
+	bool IsColonyRationing() const;                          // a load that draws was cut inside its hold
+	// The held twins of IsFloorCirculated, IsFloorSealedButSmall, IsHabNetworkCirculated and GetProvidedRoom(B, true): each with "the
+	// hold is not Unserved" (and not switched off, not a site) in place of this step's bPowered. Presentation only.
+	bool IsFloorCirculatedHeld(int32 Level) const;
+	bool IsFloorSealedButSmallHeld(int32 Level) const;
+	bool IsHabNetworkCirculatedHeld(int32 HabId) const;
+	const FRHRoomRow* GetProvidedRoomHeld(const FRHBuildingInstance& B) const;
 	// The share of [T0, T1] (sim seconds) inside the day-shift window, 0..1.
 	// Pure and wrap-safe; public so the -dayshift suite can pin it.
 	double GetDaylightFraction(double T0, double T1) const;
@@ -3203,6 +3251,7 @@ public:
 	// Harness: force the banked energy (grow-light blackout tests). Clamped to
 	// the current capacity by the next StepPower.
 	void Debug_SetBatteryWh(double Wh) { Power.BatteryWh = FMath::Max(0.0, Wh); }
+	void Debug_SetShedObserver(bool bOn) { bShedObserverOn = bOn; } // harness (DS11's twin): off, StepPower records nothing
 	// Harness (D1a): flip the ladder-repeat knob mid-run (0 = off, the legacy
 	// Completed rest state after the last ship).
 	void Debug_SetQuotaRepeatBillMul(double Mul) { QuotaRepeatBillMul = Mul; }
@@ -3862,6 +3911,9 @@ private:
 	bool IsDaylightAt(double T) const;
 	int32 NightIndexAt(double T) const;
 	int32 LastBlackoutNight = -1; // D5a runtime latch, see GetLastBlackoutNight
+	TMap<int32, FRHShedSeen> ShedSeen;   // G1 shed observer: runtime only, never saved, reset in LoadColony
+	FRHShedColony ShedColony;
+	bool bShedObserverOn = true;         // harness only (Debug_SetShedObserver)
 	double LanderDockRateW = 100.0; // RH_Config LanderDockRate_W
 	// Fleet reality (M1-b): DT_Config rows.
 	float WearDegradeThreshold = 50.f;

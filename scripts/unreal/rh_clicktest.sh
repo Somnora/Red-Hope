@@ -12,6 +12,11 @@
 #                          and the early deck steps fail on reach - the official size on this machine, docs/qa-boot-card.md)
 #        RH_CLICKTEST_SCENE  "deepbench" (P8c): no title; boot straight into "RH.DeepBench 2000 trams" (20 floors, three shafts, two tram
 #                          lines) and run the deep view's ladder checks there (RH.ClickTest deepbench) instead of the whole test
+#                          "flash" (G1, 2026-11-04): no title; a fresh world, then RH.ClickTest flash loads the Early, Vault and Late
+#                          checkpoint slots (rh_checkpoints.sh early|vault|late) and runs the flash probe: every frame it samples
+#                          the building looks, lamps, room lights, hum, POWER tile, fold header, card, guide and spare-watts line on a
+#                          drained night and fails any element that changes twice inside 3 real seconds or a light that jumps
+#                          (5 steps; give it a 1200 s timeout)
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.
@@ -41,8 +46,12 @@ if [ "$SCENE" = "deepbench" ]; then
   # RH.DeepBench needs a fresh colony: no title and no RH.Demo.
   TITLE_ARG=""
   CMDS="r.setres ${RES}w, RH.DeepBench 2000 trams, ${PRE:+$PRE, }RH.After 6 RH.ClickTest deepbench"
+elif [ "$SCENE" = "flash" ]; then
+  # G1: a fresh world (no title, no RH.Demo); the scene loads its checkpoint slots itself.
+  TITLE_ARG=""
+  CMDS="r.setres ${RES}w, ${PRE:+$PRE, }RH.After 6 RH.ClickTest flash"
 elif [ -n "$SCENE" ]; then
-  echo "unknown RH_CLICKTEST_SCENE '$SCENE' (known: deepbench)"
+  echo "unknown RH_CLICKTEST_SCENE '$SCENE' (known: deepbench, flash)"
   exit 2
 fi
 

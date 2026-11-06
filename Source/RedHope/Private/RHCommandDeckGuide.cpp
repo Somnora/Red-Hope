@@ -24,6 +24,7 @@
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
 #include "RHAudioSubsystem.h"
+#include "RHPowerLook.h"
 #include "RHSimWorldSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
@@ -51,6 +52,8 @@ namespace
 		// -1 = none). The shed flag alternates every sim step while the bank
 		// scrapes empty, so interrupts key on this, never on the flag.
 		int32 BlackoutNight = -1;
+		// G1: the shared power helper (held, latched power state), null without one: the hints then read the sim as before.
+		const URHPowerLookSubsystem* Look = nullptr;
 	};
 
 	// Buildings of a type placed so far (under construction counts: the order
@@ -309,11 +312,11 @@ namespace
 
 			// --- The vault: a floor people can live on ---
 			{ TEXT("THE VAULT"), TEXT("Build the Borer"),
-				Fixed(TEXT("The surface is no place to live. BUILD > Boring > The Borer digs down through the rock, burning hydrogen while it works.")),
+				Fixed(TEXT("The surface is no place to live. BUILD > Boring > The Borer digs down through the rock. It burns hydrogen from the tanks when the colony has some, and runs on grid power when it has none.")),
 				[](const FGuideCtx& C) { return CountOf(C, FName("Borer")) >= 1; },
 				NoBar(), FName("Borer"), NAME_None },
 			{ TEXT("THE VAULT"), TEXT("Sink the shaft"),
-				Fixed(TEXT("Click the Borer to open its card, then Bore > -1. It needs hydrogen in the tanks from the Electrolyzer.")),
+				Fixed(TEXT("Click the Borer to open its card, then Bore > -1. With hydrogen in the tanks (the Electrolyzer makes it) the Borer digs on its own fuel; without it, it draws its power from the grid.")),
 				[](const FGuideCtx& C) { return C.Sim->GetShaftDepth() >= 1; },
 				NoBar(), NAME_None, FName("Bore") },
 			{ TEXT("THE VAULT"), TEXT("Carve out a floor"),
@@ -339,25 +342,44 @@ namespace
 			{ TEXT("THE VAULT"), TEXT("Make it livable"),
 				[](const FGuideCtx& C)
 				{
-					// Name the real blocker, in the order the rating checks them.
+					// Name the real blocker, in the order the rating checks them. G1: the circulation and the grid read the held state
+					// and the running mean, never this step's shed flag (the Air Filter is rationed on a dry night), and the hint's kind is
+					// latched as one, so it never changes twice inside the power helper's floor.
 					const int32 L = VaultFloor(C);
-					if (C.Sim->IsFloorSealedButSmall(L))
-					{
-						return FString::Printf(TEXT("Floor %d holds air but is too small to live in - carve it out to at least %d cells."), L, C.Sim->GetMinLivableCells());
-					}
 					const double Have = C.Sim->GetFloorO2Kg(L), Need = C.Sim->GetFloorO2RequiredKg(L);
-					if (Have + 0.5 < Need)
+					const FRHPowerState& P = C.Sim->GetPower();
+					const double NetW = C.Look ? C.Look->GetNetW() : P.GenW - P.LoadW;
+					uint8 Kind = 4; // 0 sealed but small, 1 filling, 2 the filter not running on a short grid, 3 no working filter, 4 ready
+					if (C.Look ? C.Sim->IsFloorSealedButSmallHeld(L) : C.Sim->IsFloorSealedButSmall(L))
 					{
+						Kind = 0;
+					}
+					else if (Have + 0.5 < Need)
+					{
+						Kind = 1;
+					}
+					else if (C.Look ? !C.Look->IsFloorCirculatedShown(L) : !C.Sim->IsFloorCirculated(L))
+					{
+						// G1 r2: the shown net's kind (the rationing shortfall, rounded up, so never "0 W short" while it shows).
+						Kind = (C.Look ? (C.Look->IsNetMeanShown() || NetW < -0.5) : (P.ShedCount > 0 || P.GenW + 0.5 < P.LoadW)) ? 2 : 3;
+					}
+					if (C.Look)
+					{
+						Kind = (uint8)C.Look->LatchValue(URHPowerLookSubsystem::MakeKey('V', (uint32)L), Kind);
+					}
+					switch (Kind)
+					{
+					case 0:
+						return FString::Printf(TEXT("Floor %d holds air but is too small to live in - carve it out to at least %d cells."), L, C.Sim->GetMinLivableCells());
+					case 1:
 						return FString::Printf(TEXT("Floor %d is filling with air: %s of %s oxygen. Keep the Electrolyzer powered."), L, *Kg(Have), *Kg(Need));
+					case 2:
+						return FString::Printf(TEXT("The air is in, but the Air Filter on floor %d is not running - the grid is %.0f W short. Add solar or switch something off."), L, FMath::Max(0.0, -NetW));
+					case 3:
+						return FString::Printf(TEXT("The air is in, but floor %d needs a working Air Filtration Station to circulate it."), L);
+					default:
+						return FString::Printf(TEXT("Floor %d is ready - certifying it now."), L);
 					}
-					if (!C.Sim->IsFloorCirculated(L))
-					{
-						const FRHPowerState& P = C.Sim->GetPower();
-						return P.ShedCount > 0 || P.GenW + 0.5 < P.LoadW
-							? FString::Printf(TEXT("The air is in, but the Air Filter on floor %d is not running - the grid is %.0f W short. Add solar or switch something off."), L, FMath::Max(0.0, P.LoadW - P.GenW))
-							: FString::Printf(TEXT("The air is in, but floor %d needs a working Air Filtration Station to circulate it."), L);
-					}
-					return FString::Printf(TEXT("Floor %d is ready - certifying it now."), L);
 				},
 				[](const FGuideCtx& C) { return AnyFloorRated(C); },
 				[](const FGuideCtx& C)
@@ -390,7 +412,8 @@ namespace
 					const int32 Pop = C.Sim->GetPopulation();
 					const double Draw = Pop * C.Sim->GetColonistFoodKgPerSol();
 					const double Runway = C.Sim->GetFoodRunwaySols();
-					const double Grown = C.Sim->GetProducingCellCount() * C.Sim->GetGardenFoodKgPerSolPerCell();
+					// G1 r1: the producing count as the power helper shows it (held over the grow lights' per-step flip, latched).
+					const double Grown = (C.Look ? C.Look->GetProducingCellsShown() : C.Sim->GetProducingCellCount()) * C.Sim->GetGardenFoodKgPerSolPerCell();
 					if (Pop > 0 && Grown < Draw && Runway < 40.0)
 					{
 						return C.Sim->GetPlantedCellCount() > 0
@@ -433,7 +456,8 @@ namespace
 					const double Runway = C.Sim->GetFoodRunwaySols();
 					const int32 N = FMath::Max(1, FMath::FloorToInt(Runway)); // same rounding as the alert
 					const double Draw = C.Sim->GetPopulation() * C.Sim->GetColonistFoodKgPerSol();
-					const double Grown = C.Sim->GetProducingCellCount() * C.Sim->GetGardenFoodKgPerSolPerCell();
+					// G1 r1: the producing count as the power helper shows it (held over the grow lights' per-step flip, latched).
+					const double Grown = (C.Look ? C.Look->GetProducingCellsShown() : C.Sim->GetProducingCellCount()) * C.Sim->GetGardenFoodKgPerSolPerCell();
 					if (C.Sim->GetPlantedCellCount() > 0 && Grown >= Draw)
 					{
 						return FString::Printf(TEXT("Food in store is down to about %d sol%s at today's draw, but the garden grows %.1f kg a sol against %.1f eaten - it is refilling. Keep the grow-lights powered."),
@@ -564,7 +588,7 @@ void SRHCommandDeck::RefreshGuide()
 	{
 		return;
 	}
-	const FGuideCtx C{ Sim, Defs, Sim->GetLastBlackoutNight() };
+	const FGuideCtx C{ Sim, Defs, Sim->GetLastBlackoutNight(), GetPowerLook() };
 	const TArray<FGuideStep>& S = Steps();
 	int32 Now = S.Num() - 1;
 	for (int32 i = GuideHighWater; i < S.Num(); ++i)
@@ -624,6 +648,23 @@ void SRHCommandDeck::RefreshGuide()
 		}
 	}
 	GuideInterrupt = Int;
+}
+
+FString SRHCommandDeck::Debug_GetGuideText() const
+{
+	// G1, the flash probe: the shown step's stage, title and body joined by " | ", by the code path of BuildGuidePanel's lambdas.
+	if (bTipsOff || GuideStep < 0)
+	{
+		return FString();
+	}
+	const FGuideStep* S = ShownStep(GuideInterrupt, GuideStep);
+	const URHSimWorldSubsystem* Sim = GetSim();
+	if (!S || !Sim)
+	{
+		return FString();
+	}
+	const FGuideCtx C{ Sim, GetDefs(), Sim->GetLastBlackoutNight(), GetPowerLook() };
+	return FString::Printf(TEXT("NEXT STEP  -  %s | %s | %s"), S->Stage, S->Title, *S->Body(C));
 }
 
 FName SRHCommandDeck::GetGuideBuildDef() const
@@ -717,7 +758,7 @@ void SRHCommandDeck::SetTipsOff(bool bOff)
 TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 {
 	auto Step = [this]() -> const FGuideStep* { return ShownStep(GuideInterrupt, GuideStep); };
-	auto Ctx = [this]() { const URHSimWorldSubsystem* S = GetSim(); return FGuideCtx{ S, GetDefs(), S ? S->GetLastBlackoutNight() : -1 }; };
+	auto Ctx = [this]() { const URHSimWorldSubsystem* S = GetSim(); return FGuideCtx{ S, GetDefs(), S ? S->GetLastBlackoutNight() : -1, GetPowerLook() }; };
 
 	TSharedRef<SWidget> Header = SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 7.f, 0.f)

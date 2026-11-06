@@ -2,6 +2,8 @@
 #include "RedHope.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHElevatorLayout.h"
+#include "RHFrameStats.h"
+#include "RHPowerLook.h"
 #include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
 #include "Components/AudioComponent.h"
@@ -293,10 +295,12 @@ void URHAudioSubsystem::TickAmbience(float DeltaTime, bool bUnderground, bool bS
 
 void URHAudioSubsystem::TickMachines(float DeltaTime, int32 ViewLevel, double FloorH)
 {
+	RHFrameStats::FPowerLookScope PowerScope; // G1 frame check: the power readers' per-frame cost
 	UWorld* World = GetWorld();
 	const URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
 	const double Now = World->GetTimeSeconds();
 	const float Sfx = Vol(CVarAudioSFX);
+	const URHPowerLookSubsystem* PowerLook = World->GetSubsystem<URHPowerLookSubsystem>();
 	if (Now >= NextMachineSync)
 	{
 		NextMachineSync = Now + 0.25;
@@ -327,14 +331,18 @@ void URHAudioSubsystem::TickMachines(float DeltaTime, int32 ViewLevel, double Fl
 					C->AttenuationOverrides.FalloffDistance = 6000.f;
 				}
 			}
-			// Working = full, idle = a murmur, off / shed / building / another
-			// floor = silent.
-			const bool bRunning = B.bPowered && !B.bManualOff && !B.bUnderConstruction;
+			// Working = full, idle = a murmur, off / unserved / building / another
+			// floor = silent. G1 (2026-11-04): it reads the held look, never the
+			// per-step shed flag (which alternates every step while the bank
+			// scrapes empty): a rationed machine hums lower, steadily.
+			const ERHPowerLook Look = PowerLook ? PowerLook->GetLook(B.Id) : (B.bPowered ? ERHPowerLook::Powered : ERHPowerLook::Unserved);
+			const bool bRunning = (Look == ERHPowerLook::Powered || Look == ERHPowerLook::Rationed) && !B.bManualOff && !B.bUnderConstruction;
 			// D5a: a day-shift machine resting at night murmurs - its batch is paused.
 			const bool bBatch = (B.BatchRemaining_h > 0.0 || !B.ActiveRecipe.IsNone()) && !(B.bDayShift && !Sim->IsDaylightNow());
 			float Target = !bRunning || B.Level != ViewLevel ? 0.f : (bBatch || B.DefName == FName("AirFilter")
 				|| B.DefName == FName("BatteryBank") || B.DefName == FName("ComputeModule") || B.DefName == FName("Lander")
 				|| B.DefName == FName("HumidityRegulator") ? 1.f : 0.35f);
+			Target *= Look == ERHPowerLook::Rationed ? 0.6f : 1.f; // placeholder: the rationed hum
 			MachineVolume.FindOrAdd(B.Id) = Target;
 		}
 		for (auto It = MachineLoops.CreateIterator(); It; ++It)

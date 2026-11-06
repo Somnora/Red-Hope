@@ -9,6 +9,7 @@
 #include "RHCrewVisualizerSubsystem.h"
 #include "RHElevatorLayout.h"
 #include "RHFrameStats.h"
+#include "RHPowerLook.h"
 #include "RHMarsTerrain.h"
 #include "EngineUtils.h"
 #include "Engine/StaticMeshActor.h"
@@ -1384,6 +1385,7 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
+	RHFrameStats::EnsurePowerLookLogger(); // G1: the frame check's [PowerLook] sampler (rh.PowerLookLog), registered once
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
 	{
 		AddedHandle = Sim->OnBuildingAdded.AddUObject(this, &URHColonyVisualizerSubsystem::HandleBuildingAdded);
@@ -1421,12 +1423,13 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 		}
 	}
 	BuildingVisuals.Reset();
-	AppliedPowerState.Reset();
+	AppliedPower.Reset();
 	// Ids are reused across a colony reload, so a remembered depth could be
 	// attributed to a different building def entirely.
 	AuthoredPulseDepth.Reset();
 	// The lamps died with their actors above; drop the stale weak handles.
 	BuildingLights.Reset();
+	BuildingLampFull.Reset();
 	// Sites re-register as their buildings are re-added below; the kit HISMs are
 	// rebuilt from that set at the end, so no instance outlives the old colony.
 	SiteVis.Reset();
@@ -2240,9 +2243,10 @@ void URHColonyVisualizerSubsystem::HandleBuildingRemoved(const FRHBuildingInstan
 		Actor->Destroy();
 	}
 	BuildingVisuals.Remove(Instance.Id);
-	AppliedPowerState.Remove(Instance.Id);
+	AppliedPower.Remove(Instance.Id);
 	AuthoredPulseDepth.Remove(Instance.Id);
 	BuildingLights.Remove(Instance.Id);
+	BuildingLampFull.Remove(Instance.Id);
 	ForgetSite(Instance.Id); // a cancelled site's kit instances go now, not at the next poll
 	bSiteKitDirty = true;    // a neighbour's footprint freed: a site's bays may stand there again
 	HabShellVis.Remove(Instance.Id);
@@ -2625,7 +2629,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// The Floodmast exists only to light the place. It carries a real point
 	// light rather than an emissive fake, so it actually throws light onto the
 	// regolith and the hulls around it - which is the entire point of building
-	// one. Intensity rides bPowered through the power pass below.
+	// one. Its intensity reads the held look (G1) through the power pass below.
 	// EVERY powered building gets a small lamp tinted to its own authored accent,
 	// not just the Floodmast. Reason, from the 2026-08-17 fidelity pass: at the
 	// distances this camera actually occupies (29 m closest, 216 m at the default
@@ -2645,10 +2649,15 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 	// against its 26, shadowless like every other lamp here. This is a lit
 	// window, not a floodlight - the mast stays the thing that lights the yard.
 	// Under-construction shells stay dark, which keeps "finished" legible at
-	// night, and the whole set rides bPowered through the existing power pass
-	// below, so a brownout still darkens the colony.
+	// night, and the whole set reads the held look (G1) through the existing
+	// power pass below, so a rationed colony dims and an unserved one darkens.
+	// G1 (SCR-7): no lamp pool on a panel, a pad or a stockpile either - they
+	// have no interior to light, and each Solar Array sat in an orange pool.
 	const bool bWantsLamp = !Instance.bUnderConstruction
-		&& Instance.DefName != FName("Pylon");       // a bare mast has no interior to light
+		&& Instance.DefName != FName("Pylon")        // a bare mast has no interior to light
+		&& Instance.DefName != FName("SolarArray")
+		&& Instance.DefName != FName("Stockpile")
+		&& Instance.DefName != FName("ChargePad");
 	if (bWantsLamp && Instance.DefName != FName("Floodmast"))
 	{
 		UPointLightComponent* Win = NewObject<UPointLightComponent>(Actor);
@@ -2676,6 +2685,7 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		// also the read that carries at 216 m - a pool on the regolith.
 		Win->SetWorldLocation(Seated + FVector(0, 0, 55.f));
 		BuildingLights.Add(Instance.Id, Win);
+		BuildingLampFull.Add(Instance.Id, 21.f); // G1: the full intensity the held glow scales
 	}
 	if (!Instance.bUnderConstruction && Instance.DefName == FName("Floodmast"))
 	{
@@ -2696,12 +2706,13 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		Lamp->RegisterComponent();
 		Lamp->SetWorldLocation(Seated + FVector(0, 0, 620.f));
 		BuildingLights.Add(Instance.Id, Lamp);
+		BuildingLampFull.Add(Instance.Id, 90.f); // G1: the full intensity the held glow scales
 	}
 
 	BuildingVisuals.Add(Instance.Id, Actor);
 	// A fresh visual has no material state pushed into it yet; forget any answer
 	// remembered for this Id so the next power pass re-applies from scratch.
-	AppliedPowerState.Remove(Instance.Id);
+	AppliedPower.Remove(Instance.Id);
 	// Same reason, and it matters more than it looks: an under-construction
 	// building wears M_Graybox, which has no PulseDepth at all, so a pulse read
 	// taken then caches 0. Completion rebuilds the visual under this same Id
@@ -2886,7 +2897,7 @@ void URHColonyVisualizerSubsystem::AddSite(const FRHBuildingInstance& Instance, 
 	// a little past them: the pool lands on the pad and the scaffold, not on the regolith round the site (the
 	// 2026-10-26 review: a point light at the corner mast turned the ground beside every site crimson). It rides the
 	// building's actor (gone at completion, hidden off its floor) and is not one of BuildingLights, which the power
-	// pass switches with bPowered.
+	// pass dims with the held look (G1).
 	if (Actor)
 	{
 		const float HalfDiagCm = 0.5f * FMath::Sqrt(FMath::Square(Site.CellsX * CellCm) + FMath::Square(Site.CellsY * CellCm));
@@ -3868,66 +3879,81 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 	}
 	AnimateDoors(DeltaTime);
 
-	// Is it working? A machine that has been shed by the power priority, or
-	// switched off by the player, goes dark; a running one keeps its glow. The
-	// sim already decides this per building (FRHBuildingInstance::bPowered), so
-	// the visual is a pure readout - state-diffed, because writing a material
-	// parameter every frame for every building would be waste. Only meshes
-	// wearing the M_RH_Master family carry PoweredState; on anything else the
-	// parameter simply does not exist and the write is a no-op.
-	for (const FRHBuildingInstance& B : Sim->GetBuildings())
+	// Is it working? G1 (2026-11-04): the glow, the lamps and the floodlights read the held look (URHPowerLookSubsystem), never the
+	// per-step shed flag, which alternates every step while the bank scrapes empty (photosensitivity: nothing may flash). A rationed
+	// machine runs on the steps it is served, so it reads steady and dim (RationedGlow); an unserved one, or one switched off, fades
+	// dark; each fades over about a second. Only a value that moved touches a material or a lamp. Only meshes wearing the M_RH_Master
+	// family carry PoweredState; on anything else the parameter simply does not exist and the write is a no-op.
 	{
-		// 3 = a powered Charging Pad with a robot on it: same "running" look,
-		// plus brighter, breathing rings (see below).
-		const bool bPadInUse = B.DefName == FName("ChargePad") && B.bPowered && !B.bUnderConstruction && Sim->GetPadDockedCount(B.Id) > 0;
-		const uint8 Want = B.bUnderConstruction ? 2 : (bPadInUse ? 3 : (B.bPowered ? 1 : 0));
-		if (const uint8* Applied = AppliedPowerState.Find(B.Id))
+		RHFrameStats::FPowerLookScope PowerScope; // G1 frame check: the power readers' per-frame cost
+		const URHPowerLookSubsystem* PowerLook = World->GetSubsystem<URHPowerLookSubsystem>();
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
 		{
-			if (*Applied == Want)
+			// A site keeps its own path: dark, no lamp.
+			const uint8 Look = B.bUnderConstruction ? (uint8)ERHPowerLook::Site : (PowerLook ? (uint8)PowerLook->GetLook(B.Id) : (uint8)ERHPowerLook::Powered);
+			const float Glow = B.bUnderConstruction ? 0.f : (PowerLook ? PowerLook->GetGlow(B.Id) : 1.f);
+			// The Charging Pad's rings breathe while a robot charges on a pad that runs (powered or rationed).
+			const bool bPadInUse = B.DefName == FName("ChargePad") && !B.bUnderConstruction
+				&& (Look == (uint8)ERHPowerLook::Powered || Look == (uint8)ERHPowerLook::Rationed) && Sim->GetPadDockedCount(B.Id) > 0;
+			FRHAppliedPower* Applied = AppliedPower.Find(B.Id);
+			const bool bGlowMoved = !Applied || FMath::Abs(Applied->Powered - Glow) > 0.002f || Applied->Look != Look;
+			const bool bPadMoved = !Applied || Applied->bPadInUse != bPadInUse;
+			const float* LampFull = BuildingLampFull.Find(B.Id);
+			const float LampWant = LampFull ? *LampFull * Glow : 0.f;
+			const bool bLampMoved = LampFull && (!Applied || FMath::Abs(Applied->Lamp - LampWant) > 0.05f || (Applied->Lamp > 0.001f) != (LampWant > 0.001f));
+			if (Applied && !bGlowMoved && !bPadMoved && !bLampMoved)
 			{
 				continue;
 			}
-		}
-		TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(B.Id);
-		if (!Found || !*Found)
-		{
-			continue;
-		}
-		UStaticMeshComponent* Mesh = (*Found)->GetStaticMeshComponent();
-		if (!Mesh)
-		{
-			continue;
-		}
-		UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
-		if (!Mid)
-		{
-			Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
-		}
-		// Record the attempt whether or not it produced a MID. A mesh whose
-		// slot 0 is empty makes CreateAndSetMaterialInstanceDynamic return null
-		// AND log a warning, so leaving the entry unrecorded would retry - and
-		// log - every frame forever. HandleBuildingAdded clears the entry when
-		// the visual is rebuilt, so a genuine retry still happens then.
-		AppliedPowerState.Add(B.Id, Want);
-		if (Mid)
-		{
-			Mid->SetScalarParameterValue(FName("PoweredState"), (Want == 1 || Want == 3) ? 1.f : 0.f);
-			if (B.DefName == FName("ChargePad"))
+			TObjectPtr<AStaticMeshActor>* Found = BuildingVisuals.Find(B.Id);
+			if (!Found || !*Found)
+			{
+				continue;
+			}
+			UStaticMeshComponent* Mesh = (*Found)->GetStaticMeshComponent();
+			if (!Mesh)
+			{
+				continue;
+			}
+			UMaterialInstanceDynamic* Mid = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+			if (!Mid)
+			{
+				Mid = Mesh->CreateAndSetMaterialInstanceDynamic(0);
+			}
+			// Record the attempt whether or not it produced a MID. A mesh whose
+			// slot 0 is empty makes CreateAndSetMaterialInstanceDynamic return null
+			// AND log a warning, so leaving the entry unrecorded would retry - and
+			// log - every frame forever. HandleBuildingAdded clears the entry when
+			// the visual is rebuilt, so a genuine retry still happens then.
+			FRHAppliedPower& Rec = AppliedPower.FindOrAdd(B.Id);
+			if (Mid && bGlowMoved)
+			{
+				Mid->SetScalarParameterValue(FName("PoweredState"), Glow);
+			}
+			if (Mid && bPadMoved && B.DefName == FName("ChargePad"))
 			{
 				// The rings idle low and come up, breathing, while a robot charges.
-				Mid->SetScalarParameterValue(FName("EmissiveAmount"), Want == 3 ? 0.4f : 0.05f);
-				Mid->SetScalarParameterValue(FName("PulseDepth"), Want == 3 ? 0.35f : 0.f);
+				Mid->SetScalarParameterValue(FName("EmissiveAmount"), bPadInUse ? 0.4f : 0.05f);
+				Mid->SetScalarParameterValue(FName("PulseDepth"), bPadInUse ? 0.35f : 0.f);
 				Mid->SetScalarParameterValue(FName("PulseSpeed"), 1.2f);
 			}
-		}
-		// A Floodmast on a shed breaker goes dark with everything else.
-		// (Named FoundLamp, not Found: this scope already has a `Found` for the
-		// building visual, and the build is -Werror,-Wshadow.)
-		if (const TWeakObjectPtr<UPointLightComponent>* FoundLamp = BuildingLights.Find(B.Id))
-		{
-			if (UPointLightComponent* Lamp = FoundLamp->Get())
+			Rec.Look = Look;
+			Rec.Powered = Glow;
+			Rec.bPadInUse = bPadInUse;
+			// A lamp (a lit window, or a Floodmast) reads the same held glow: steady dim while rationed, dark once unserved.
+			// (Named FoundLamp, not Found: this scope already has a `Found` for the
+			// building visual, and the build is -Werror,-Wshadow.)
+			if (bLampMoved)
 			{
-				Lamp->SetVisibility(Want == 1 || Want == 3);
+				if (const TWeakObjectPtr<UPointLightComponent>* FoundLamp = BuildingLights.Find(B.Id))
+				{
+					if (UPointLightComponent* Lamp = FoundLamp->Get())
+					{
+						Lamp->SetIntensity(LampWant);
+						Lamp->SetVisibility(LampWant > 0.001f);
+					}
+				}
+				Rec.Lamp = LampWant;
 			}
 		}
 	}
@@ -4669,6 +4695,39 @@ FString URHColonyVisualizerSubsystem::RoomPropPath(FName Room) const
 	return FString();
 }
 
+bool URHColonyVisualizerSubsystem::Debug_GetPowerApplied(int32 Id, uint8& OutLook, float& OutPowered, float& OutLamp, float& OutLampFull) const
+{
+	const FRHAppliedPower* Applied = AppliedPower.Find(Id);
+	if (!Applied)
+	{
+		return false;
+	}
+	OutLook = Applied->Look;
+	OutPowered = Applied->Powered;
+	OutLamp = 0.f;
+	OutLampFull = BuildingLampFull.FindRef(Id);
+	if (const TWeakObjectPtr<UPointLightComponent>* FoundLamp = BuildingLights.Find(Id))
+	{
+		if (const UPointLightComponent* Lamp = FoundLamp->Get())
+		{
+			OutLamp = Lamp->IsVisible() ? Lamp->Intensity : 0.f;
+		}
+	}
+	return true;
+}
+
+void URHColonyVisualizerSubsystem::Debug_ForEachRoomLight(TFunctionRef<void(const FIntVector&, float, float)> Fn) const
+{
+	for (const auto& LPair : LightByCell)
+	{
+		if (const UPointLightComponent* Light = LPair.Value.Get())
+		{
+			const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
+			Fn(LPair.Key, Light->Intensity, 120.f * RoomMul);
+		}
+	}
+}
+
 void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 {
 	UWorld* World = GetWorld();
@@ -4909,39 +4968,40 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 		}
 	}
 
-	// The lights track the sim EVERY tick (the loop above early-outs per cell
+	// The lights track the colony EVERY tick (the loop above early-outs per cell
 	// on steady state): full while that floor's circulator runs on a healthy
-	// grid, dimmed hard in a brownout/shedding, dark when circulation is down.
-	// Light is a readout of colony health, not decoration.
-	const FRHPowerState& Power = Sim->GetPower();
-	const float GridMul = (Power.bDeficit || Power.ShedCount > 0) ? 0.30f : 1.0f;
-	constexpr float BaseCandela = 120.f;
-	// C3: only a change of the inputs - the grid's state, which floors circulate,
-	// which lights exist, a room's brightness multiplier - touches the lights.
-	uint32 LightKey = HashCombine((uint32)(GridMul < 1.f ? 1 : 0), (uint32)LightByCell.Num());
-	LightKey = HashCombine(LightKey, LightMulVersion);
-	uint32 CirculationMask = 0;
-	for (int32 L = 0; L <= Sim->GetMaxDepth(); ++L)
+	// grid, dimmed hard while the grid is rationing, dark when circulation is
+	// down. Light is a readout of colony health, not decoration. G1 (2026-11-04):
+	// both inputs are the held, latched ones (URHPowerLookSubsystem), faded over
+	// about a second, never the per-step shed flag or IsFloorCirculated, which
+	// alternate every step while the bank scrapes empty (nothing may flash).
 	{
-		CirculationMask |= Sim->IsFloorCirculated(-L) ? (1u << FMath::Min(L, 31)) : 0u;
-	}
-	LightKey = HashCombine(LightKey, CirculationMask);
-	if (!bLightKeyValid || LightKey != AppliedLightKey)
-	{
-		bLightKeyValid = true;
-		AppliedLightKey = LightKey;
-		for (auto& LPair : LightByCell)
+		RHFrameStats::FPowerLookScope PowerScope; // G1 frame check: the power readers' per-frame cost
+		const URHPowerLookSubsystem* PowerLook = World->GetSubsystem<URHPowerLookSubsystem>();
+		constexpr float BaseCandela = 120.f;
+		// C3: only a change of the inputs - a floor's faded light, which lights
+		// exist, a room's brightness multiplier - touches the lights. The fade
+		// lives in the helper, so the loop runs only while a level is moving.
+		uint32 LightKey = HashCombine(PowerLook ? PowerLook->GetFloorLightKey() : 0u, (uint32)LightByCell.Num());
+		LightKey = HashCombine(LightKey, LightMulVersion);
+		if (!bLightKeyValid || LightKey != AppliedLightKey)
 		{
-			UPointLightComponent* Light = LPair.Value.Get();
-			if (!Light)
+			bLightKeyValid = true;
+			AppliedLightKey = LightKey;
+			for (auto& LPair : LightByCell)
 			{
-				continue;
-			}
-			const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
-			const float Want = Sim->IsFloorCirculated(LPair.Key.X) ? BaseCandela * GridMul * RoomMul : 0.f;
-			if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.5f))
-			{
-				Light->SetIntensity(Want);
+				UPointLightComponent* Light = LPair.Value.Get();
+				if (!Light)
+				{
+					continue;
+				}
+				const float RoomMul = LightMulByCell.FindRef(LPair.Key) > 0.f ? LightMulByCell.FindRef(LPair.Key) : 1.f;
+				const float Level = PowerLook ? PowerLook->GetFloorLight(LPair.Key.X) : (Sim->IsFloorCirculated(LPair.Key.X) ? 1.f : 0.f);
+				const float Want = BaseCandela * RoomMul * Level;
+				if (!FMath::IsNearlyEqual(Light->Intensity, Want, 0.05f))
+				{
+					Light->SetIntensity(Want);
+				}
 			}
 		}
 	}

@@ -3034,6 +3034,21 @@ static FAutoConsoleCommandWithWorldAndArgs GRHDemo(
 			"Run RH.SetSpeed 3 to let it certify and the crew move in."));
 	}));
 
+static FAutoConsoleCommandWithWorldAndArgs GRHDrain(
+	TEXT("RH.Drain"),
+	TEXT("RH.Drain - DEBUG (G1): empty the battery bank now (Debug_SetBatteryWh(0)); the grid then scrapes on its own wherever the load beats generation (the flash probe, captures, the frame check)."),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+	{
+		if (!World) { return; }
+		URHSimWorldSubsystem* Sim = World->GetSubsystem<URHSimWorldSubsystem>();
+		const URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>();
+		if (!Sim || !Clock) { return; }
+		Sim->Debug_SetBatteryWh(0.0);
+		const FRHPowerState& P = Sim->GetPower();
+		UE_LOG(LogRedHope, Display, TEXT("[RH.Drain] bank emptied at sol %.3f (gen %.0f W, load %.0f W)"),
+			Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds, P.GenW, P.LoadW);
+	}));
+
 static FAutoConsoleCommandWithWorldAndArgs GRHStatus(
 	TEXT("RH.Status"),
 	TEXT("RH.Status - log colony power, economy, tasks, quota, and uplink."),

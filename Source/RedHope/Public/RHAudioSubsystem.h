@@ -54,6 +54,13 @@ public:
 	// For Slate buttons, which play their click without a world.
 	static USoundBase* UIClickSound();
 
+	// G1 (2026-11-04), the flash probe (developer): a machine loop's target volume (0..1 before the SFX dial), -1 if it has none.
+	float Debug_GetMachineTarget(int32 BuildingId) const
+	{
+		const float* V = MachineVolume.Find(BuildingId);
+		return V ? *V : -1.f;
+	}
+
 private:
 	USoundBase* LoadSound(const TCHAR* Category, const TCHAR* Name) const;
 	UAudioComponent* MakeBed(USoundBase* Sound);

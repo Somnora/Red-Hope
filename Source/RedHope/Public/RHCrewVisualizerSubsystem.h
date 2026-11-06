@@ -13,6 +13,7 @@ class USkeletalMeshComponent;
 class UStaticMeshComponent;
 struct FRHColonist;
 struct FRHBuildingInstance;
+class URHSimWorldSubsystem;
 class UTextRenderComponent;
 
 // Presentation mirror of the crew (M2 Gate A2): one small suited figure per
@@ -165,6 +166,9 @@ public:
 	// a fixed point and hoping someone walks through it. False when the index
 	// is past the roster or that figure no longer exists.
 	bool Debug_GetCrewLocation(int32 Index, FVector& OutLocationCm) const;
+	// G1 r3 QA (the flash probe): a full figure as drawn this frame - what it is doing, its clip, where it is heading and where it
+	// stands. False when the colonist has no full figure (a crowd instance, or none yet).
+	bool Debug_GetCrewBeat(int32 ColonistId, FString& OutActivity, FName& OutClip, FVector& OutTargetCm, FVector& OutAtCm) const;
 	// RH.FrameStats: what the crew mirror is made of right now.
 	struct FFigureCounts { int32 Actors = 0; int32 Skeletal = 0; int32 Pooled = 0; int32 CrowdInstances = 0; int32 CrowdRecords = 0; int32 CrowdDetail = 0; int32 Promotions = 0; int32 Demotions = 0; int32 Tracked = 0; bool bTiered = false; };
 	FFigureCounts GetFigureCounts() const;
@@ -364,6 +368,9 @@ private:
 	FVector HabSpotCm(int32 HomeHab, FName RoomRowName, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
 	// BM-2: the seat at a colonist's actual station (bay or in-bay module).
 	FVector StationSpotCm(int32 ColonistId, int32 SeatSeed, float* OutFaceYawDeg = nullptr);
+	// G1 r3: a colonist's post as the figures show it (the work clip and the bench rhythm read it every frame): GetColonistJob held over a
+	// rationed seat module's steps through the power helper, on the key the Crew panel's roster row uses, so a figure and its row agree.
+	FName GetShownPost(const URHSimWorldSubsystem& Sim, int32 ColonistId) const;
 	// Director 2026-10-16: on the surface, people walk through doorways and
 	// airlocks. Routes a surface walk From -> To into waypoints + acts.
 	void SurfaceRoute(const FVector& From, const FVector& To, TArray<FVector>& OutPts, TArray<uint8>& OutActs) const;

@@ -72,6 +72,11 @@ public:
 	void SetSectionMode(bool bOn, int32 Focus);
 	bool IsSectionMode() const { return bSectionMode; }
 	int32 GetSectionFocus() const { return SectionFocus; }
+	// G1 (2026-11-04), the flash probe (developer): what the power pass last applied to a building - its look (an ERHPowerLook), the
+	// PoweredState glow, the lamp's candelas while it is visible (else 0) and its full candelas (0 when it has no lamp) - and each room
+	// light with its current and full candelas (120 x the room's multiplier). False when nothing was applied to that Id yet.
+	bool Debug_GetPowerApplied(int32 Id, uint8& OutLook, float& OutPowered, float& OutLamp, float& OutLampFull) const;
+	void Debug_ForEachRoomLight(TFunctionRef<void(const FIntVector&, float /*Cd*/, float /*FullCd*/)> Fn) const;
 	// Alive pass 2: where a placed furnishing actually stands - its logical
 	// centre (with a seat's pull-up applied) on the floor, its yaw (90 x Rot:
 	// the catalogue's front faces -Y at yaw 0) and the drawn mesh's half
@@ -363,10 +368,10 @@ private:
 	void ForgetSite(int32 BuildingId);
 
 	UPROPERTY() TMap<int32, TObjectPtr<AStaticMeshActor>> BuildingVisuals;
-	// Last PoweredState pushed into a building's material, so the per-frame pass
-	// only touches a MID when the sim actually changed the answer.
-	// 0 = dark (shed or switched off), 1 = running, 2 = under construction.
-	TMap<int32, uint8> AppliedPowerState;
+	// What the per-frame power pass last pushed into a building's material and lamp, so it only touches a MID or a light when the
+	// value moved. It reads the held look (G1): Look is an ERHPowerLook, Powered the faded glow (0..1), Lamp the lamp's candelas.
+	struct FRHAppliedPower { uint8 Look = 255; float Powered = -1.f; float Lamp = -1.f; bool bPadInUse = false; };
+	TMap<int32, FRHAppliedPower> AppliedPower;
 	// Each building's PulseDepth as the art pass authored it, captured the first
 	// time RH.Pulse touches it - the MID's own value stops being the authored
 	// one after the first scale, so scaling off it would compound.
@@ -441,9 +446,10 @@ private:
 	TArray<FIntPoint> WallVentDir;
 	FVector PitCenterCm = FVector::ZeroVector;
 	uint8 AppliedCutawayKey = 0xFF;
-	// Buildings that carry a real light (Floodmast). Intensity rides bPowered,
-	// so a brownout darkens the city the player lit.
+	// Buildings that carry a real light (a lit window, or a Floodmast). Their intensity reads the held look (G1),
+	// so a rationed colony dims and an unserved one darkens the city the player lit.
 	TMap<int32, TWeakObjectPtr<UPointLightComponent>> BuildingLights;
+	TMap<int32, float> BuildingLampFull; // G1: each lamp's full intensity (21 cd a window, 90 a Floodmast), removed with the lamp
 	// Lived-in accumulation: crates/drums/lockers appear over time on populated
 	// floors (count grows with residents + sols; components ride tile actors so
 	// lifecycle and floor-cut hiding come free). Per-floor spawned count.

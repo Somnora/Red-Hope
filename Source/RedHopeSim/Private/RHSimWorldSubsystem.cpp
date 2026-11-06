@@ -2975,6 +2975,56 @@ bool URHSimWorldSubsystem::IsFloorCirculated(int32 Level) const
 	return false;
 }
 
+URHSimWorldSubsystem::ERHShedHold URHSimWorldSubsystem::GetShedHold(int32 BuildingId) const
+{
+	// G1: release comes only after a full hold of service; Unserved only after a whole hold watched with no service.
+	const FRHShedSeen* Seen = ShedSeen.Find(BuildingId);
+	if (!Seen)
+	{
+		return ERHShedHold::Powered;
+	}
+	const double Now = ShedColony.LastStepEndS;
+	if (!(Seen->LastCutS >= 0.0 && Now - Seen->LastCutS < Seen->LastCutHoldS))
+	{
+		return ERHShedHold::Powered;
+	}
+	// G1 r2: a record not watched on the last step (switched off, a site) reads its first-sight answer, Rationed: its evidence starts
+	// again on the step it is back, so a machine switched on inside its cut hold never shows a stale Unserved for one step, then Rationed.
+	if (Seen->LastSeenStep != ShedColony.Steps - 1)
+	{
+		return ERHShedHold::Rationed;
+	}
+	// G1 r2: the service and the watch are measured against their own stored holds, never this band's. The observer raises a hold still in
+	// force when the step length grows (an agent-band service just before the first era-band cut counts for 240 s, so that cut reads
+	// Rationed, never Unserved), and never raises one already over: a speed-up into 60x over an unserved load does not reopen evidence
+	// that has run out (round 1 read it Rationed again for an era step or two with no service, then Unserved).
+	const bool bServed = Seen->LastServedS >= 0.0 && Now - Seen->LastServedS < Seen->LastServedHoldS;
+	const bool bWatched = Now - Seen->FirstSeenS >= Seen->WatchHoldS;
+	return (bServed || !bWatched) ? ERHShedHold::Rationed : ERHShedHold::Unserved;
+}
+
+bool URHSimWorldSubsystem::IsColonyRationing() const
+{
+	return ShedColony.LastShedS >= 0.0 && ShedColony.LastStepEndS - ShedColony.LastShedS < ShedColony.LastShedHoldS;
+}
+
+bool URHSimWorldSubsystem::IsFloorCirculatedHeld(int32 Level) const
+{
+	// G1: IsFloorCirculated with the held state in place of this step's bPowered (presentation only; the rating rule keeps the live read).
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.Level == Level && !B.bUnderConstruction && !B.bManualOff && GetShedHold(B.Id) != ERHShedHold::Unserved)
+		{
+			const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+			if (Def && Def->CirculatesAir)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 void URHSimWorldSubsystem::StepHabitability(float SubDt)
 {
 	static const FName NOxygen(TEXT("Oxygen"));
@@ -3637,6 +3687,25 @@ bool URHSimWorldSubsystem::IsHabNetworkCirculated(int32 HabId) const
 	return N && IsNetCirculated(*N);
 }
 
+bool URHSimWorldSubsystem::IsHabNetworkCirculatedHeld(int32 HabId) const
+{
+	// G1: IsNetCirculated with the held state in place of this step's bPowered (presentation only).
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	if (!N)
+	{
+		return false;
+	}
+	for (const int32 Index : N->Circulators)
+	{
+		if (Buildings.IsValidIndex(Index) && !Buildings[Index].bManualOff && !Buildings[Index].bUnderConstruction
+			&& GetShedHold(Buildings[Index].Id) != ERHShedHold::Unserved)
+		{
+			return true;
+		}
+	}
+	return IsNetShaftLinked(*N);
+}
+
 bool URHSimWorldSubsystem::IsHabNetworkSealedButSmall(int32 HabId) const
 {
 	const FRHHabNetCache* N = FindHabNet(HabId);
@@ -3720,6 +3789,15 @@ bool URHSimWorldSubsystem::IsFloorSealedButSmall(int32 Level) const
 	const int32 Cells = GetFloorCarvedCells(Level);
 	return Cells > 0 && Cells < MinLivableCells && !IsFloorRated(Level)
 		&& IsFloorCirculated(Level)
+		&& GetFloorO2Kg(Level) >= GetFloorO2RequiredKg(Level) - KINDA_SMALL_NUMBER;
+}
+
+bool URHSimWorldSubsystem::IsFloorSealedButSmallHeld(int32 Level) const
+{
+	// G1: IsFloorSealedButSmall over the held circulation (presentation only).
+	const int32 Cells = GetFloorCarvedCells(Level);
+	return Cells > 0 && Cells < MinLivableCells && !IsFloorRated(Level)
+		&& IsFloorCirculatedHeld(Level)
 		&& GetFloorO2Kg(Level) >= GetFloorO2RequiredKg(Level) - KINDA_SMALL_NUMBER;
 }
 
@@ -6395,6 +6473,27 @@ const FRHRoomRow* URHSimWorldSubsystem::GetProvidedRoom(const FRHBuildingInstanc
 	return Row;
 }
 
+const FRHRoomRow* URHSimWorldSubsystem::GetProvidedRoomHeld(const FRHBuildingInstance& B) const
+{
+	// G1: GetProvidedRoom(B, true) with the held state in place of this step's bPowered (presentation only).
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	if (!Def || Def->Pressurized || Def->ProvidesRoom.IsNone())
+	{
+		return nullptr;
+	}
+	const FRHRoomRow* Row = Defs->GetRoom(Def->ProvidesRoom);
+	if (!Row || !Row->SliceActive)
+	{
+		return nullptr;
+	}
+	if (B.bUnderConstruction || B.bManualOff || GetShedHold(B.Id) == ERHShedHold::Unserved)
+	{
+		return nullptr;
+	}
+	const bool bRatedHere = B.Level < 0 ? RatedFloors.Contains(B.Level) : IsLocationInRatedHab(B.LocationCm);
+	return bRatedHere ? Row : nullptr;
+}
+
 const FRHBuildingInstance* URHSimWorldSubsystem::FindModuleOnCell(int32 Level, int32 Cell) const
 {
 	for (const FRHBuildingInstance& B : Buildings)
@@ -8697,6 +8796,7 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	const bool bShedStep = B0 <= 0.0 && LoadW > GenW;
 	const bool bScraping = bShedStep || ((CoolingEntries + TransitEntries) > 0 && B0 + (GenW - FullW) * (SubDt / 50.0) < 0.0);
 	uint32 ShortMask = 0;
+	bool bRealShed = false; // G1: a load that draws was cut this step (the observer's colony record)
 	if (bShedStep || (bScraping && (CoolingEntries + TransitEntries) > 0))
 	{
 		// Priority ascending; then buildings before cooling; then the deeper floor first. For two buildings this is the old comparator, so a
@@ -8754,6 +8854,7 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 					++Power.ShedFloors; // a cooling entry: a floor, not a machine (D6e: a lift or a line counts in ShedCount only, SP2)
 				}
 				++Power.ShedCount;
+				bRealShed |= E.WantW > 0.0;
 			}
 			if (E.Kind == 1)
 			{
@@ -8787,6 +8888,115 @@ void URHSimWorldSubsystem::StepPower(float SubDt)
 	if (Power.ShedCount > 0 && !IsDaylightAt(StepEndS))
 	{
 		LastBlackoutNight = NightIndexAt(StepEndS);
+	}
+
+	// G1 (2026-11-04): the shed observer (see GetShedHold). Runtime only; nothing in the sim reads it.
+	if (bShedObserverOn)
+	{
+		// G1 r1: every running mean's time constant is the step's hold, ShedHoldFor(dt): one sol-hour (50 s) in the agent band as the
+		// brief has it, four era steps (240 s) in the era band, where a sol-hour mean is shorter than one 60 s step (a = 0.70) and followed
+		// each step's value. The served shares count whole shed cycles: a cycle runs from the step after a cut (for the colony, a real
+		// shed) to the next cut, and each closed cycle moves the mean by 1 - exp(-cycle length / the hold); the first cycle after the
+		// load sets it outright. A load cut on every other step therefore reads a steady half at any step length, where a per-step mean of
+		// the alternation swung between about 23 % and 77 % once a real second at 60x.
+		const double ObsHoldS = ShedHoldFor((double)SubDt);
+		const double ObsAlpha = 1.0 - FMath::Exp(-(double)SubDt / ObsHoldS);
+		const auto ObsCycleEnds = [](bool bObsCut) { return bObsCut; };
+		for (const FLoadEntry& E : Loads)
+		{
+			if (!E.B)
+			{
+				continue;
+			}
+			FRHShedSeen& Seen = ShedSeen.FindOrAdd(E.B->Id);
+			const double Got = E.B->bPowered ? 1.0 : 0.0;
+			bool bObsFirst = false;
+			// G1 r2: a service whose hold is still in force at the last step's end is measured in this step's band (the same rule as a
+			// cut's, below): an agent-band service just before the first era-band cut still makes that cut Rationed. A hold already over is
+			// never raised. Applied before this step's own service or cut is noted.
+			if (Seen.bSeen && Seen.LastServedS >= 0.0 && ShedColony.LastStepEndS - Seen.LastServedS < Seen.LastServedHoldS)
+			{
+				Seen.LastServedHoldS = FMath::Max(Seen.LastServedHoldS, ObsHoldS);
+			}
+			if (!Seen.bSeen || Seen.LastSeenStep != ShedColony.Steps - 1)
+			{
+				Seen.FirstSeenS = StepEndS; // first sight, or back after a step it missed: its evidence starts again
+				Seen.WatchHoldS = ObsHoldS; // G1 r2: watched a whole hold of this step's band before it can read Unserved
+				Seen.CycleS = Seen.CycleServedS = 0.0; // its next cycle opens after this step; a share it has keeps (back after a miss)
+				if (!Seen.bSeen)
+				{
+					Seen.ServedMean = 1.0;
+					Seen.bMeanSet = false;
+				}
+				Seen.bSeen = true;
+				bObsFirst = true;
+			}
+			else
+			{
+				if (Seen.LastCutS >= 0.0 && ShedColony.LastStepEndS - Seen.LastCutS < Seen.LastCutHoldS)
+				{
+					// A cut's hold still in force when the step length changes is measured in this step's band (as a service's is,
+					// above): a speed-up into the era band never releases a rationed machine for one era step only for the next
+					// step's cut to take it back. A hold already over is never re-held.
+					Seen.LastCutHoldS = FMath::Max(Seen.LastCutHoldS, ObsHoldS);
+				}
+				if (ShedColony.LastStepEndS - Seen.FirstSeenS < Seen.WatchHoldS)
+				{
+					// G1 r2: a watch not yet met is raised the same way; one already met never is (it stays met).
+					Seen.WatchHoldS = FMath::Max(Seen.WatchHoldS, ObsHoldS);
+				}
+			}
+			Seen.LastSeenStep = ShedColony.Steps;
+			if (E.B->bPowered) { Seen.LastServedS = StepEndS; Seen.LastServedHoldS = ObsHoldS; }
+			else { Seen.LastCutS = StepEndS; Seen.LastCutHoldS = ObsHoldS; }
+			if (!bObsFirst)
+			{
+				Seen.CycleS += (double)SubDt;
+				Seen.CycleServedS += Got * (double)SubDt;
+				if (ObsCycleEnds(!E.B->bPowered))
+				{
+					const double ObsShare = Seen.CycleServedS / Seen.CycleS;
+					Seen.ServedMean += (Seen.bMeanSet ? 1.0 - FMath::Exp(-Seen.CycleS / ObsHoldS) : 1.0) * (ObsShare - Seen.ServedMean);
+					Seen.bMeanSet = true;
+					Seen.CycleS = Seen.CycleServedS = 0.0;
+				}
+			}
+		}
+		// G1 r2: the shortfall (the wanted load less generation, never below 0), not the signed net: while the colony rations it stays
+		// above 0 for the whole hold after its last real shed (that step was short), where the signed net's mean crossed 0 in a sunrise and
+		// the screen read "0 W SHORT". G1 r1: it starts again at a rationing episode's first step (a real shed while the colony was not
+		// rationing), as at the load's first step: a mean carried over from a 60x afternoon read the first dry steps at 1x wrong.
+		const double ObsShortW = FMath::Max(0.0, FullW - GenW);
+		const bool bObsWasRationing = ShedColony.LastShedS >= 0.0 && ShedColony.LastStepEndS - ShedColony.LastShedS < ShedColony.LastShedHoldS;
+		if (ShedColony.Steps == 0 || (bRealShed && !bObsWasRationing))
+		{
+			ShedColony.ShortWMean = ObsShortW;
+		}
+		else
+		{
+			ShedColony.ShortWMean += ObsAlpha * (ObsShortW - ShedColony.ShortWMean);
+		}
+		if (ShedColony.Steps > 0) // the colony's first cycle opens after the load's first step
+		{
+			ShedColony.CycleS += (double)SubDt;
+			ShedColony.CycleWantWs += FullW * (double)SubDt;
+			ShedColony.CycleServedWs += LoadW * (double)SubDt; // LoadW is the served load here (FullW on a step that did not shed)
+			if (ObsCycleEnds(bRealShed))
+			{
+				const double ObsShare = ShedColony.CycleWantWs > 0.0 ? ShedColony.CycleServedWs / ShedColony.CycleWantWs : 1.0;
+				ShedColony.ServedMean += (ShedColony.bMeanSet ? 1.0 - FMath::Exp(-ShedColony.CycleS / ObsHoldS) : 1.0) * (ObsShare - ShedColony.ServedMean);
+				ShedColony.bMeanSet = true;
+				ShedColony.CycleS = ShedColony.CycleWantWs = ShedColony.CycleServedWs = 0.0;
+			}
+		}
+		if (bRealShed) { ShedColony.LastShedS = StepEndS; ShedColony.LastShedHoldS = ObsHoldS; }
+		else if (ShedColony.LastShedS >= 0.0 && ShedColony.LastStepEndS - ShedColony.LastShedS < ShedColony.LastShedHoldS)
+		{
+			ShedColony.LastShedHoldS = FMath::Max(ShedColony.LastShedHoldS, ObsHoldS); // the same rule for the colony's rationing
+		}
+		ShedColony.LastStepEndS = StepEndS;
+		ShedColony.LastStepDtS = (double)SubDt;
+		++ShedColony.Steps;
 	}
 
 	// Strip-chart ring: one sample per sol-hour, last 3 sols (72 entries).
@@ -14612,6 +14822,8 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	RepairClaims.Reset();  // claim state is runtime-only; robots re-claim
 	DepotBindings.Reset(); // E7: the harness depot binding is runtime-only
 	LastBlackoutNight = -1; // D5a runtime latch: re-seen within a step if the blackout continues
+	ShedSeen.Reset();                 // G1 shed observer: runtime only, starts empty with the loaded colony
+	ShedColony = FRHShedColony();
 	PadQueues.Reset();
 	SurveyHistory.Reset();
 	bFleetDeployed = true; // robots respawn explicitly below

@@ -30,4 +30,17 @@ namespace RHFrameStats
 		ESlot Slot;
 		double T0;
 	};
+
+	// G1 (2026-11-04), the frame check: game-thread seconds spent this frame in the power readers (the colony visualizer's power pass and
+	// room lights, the machine hum, and the shared power look's own tick). A core-ticker sampler moves it into a per-frame list and zeroes
+	// it every frame; while rh.PowerLookLog is 1 it logs "[PowerLook] tick median ... ms" every 2 real seconds.
+	REDHOPE_API extern double GPowerLookSeconds;
+	struct FPowerLookScope
+	{
+		double T0;
+		FPowerLookScope() : T0(FPlatformTime::Seconds()) {}
+		~FPowerLookScope() { GPowerLookSeconds += FPlatformTime::Seconds() - T0; }
+	};
+	// Registers that sampler once (the colony visualizer's OnWorldBeginPlay calls it).
+	REDHOPE_API void EnsurePowerLookLogger();
 }

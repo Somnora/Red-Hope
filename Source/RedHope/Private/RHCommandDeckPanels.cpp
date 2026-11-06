@@ -21,6 +21,7 @@
 #include "RHTradeVisualizerSubsystem.h"
 #include "RHColonyVisualizerSubsystem.h"
 #include "RHFrameStats.h"
+#include "RHPowerLook.h"
 #include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHAgentSubsystem.h"
@@ -31,6 +32,8 @@
 #include "Data/RHRows.h"
 #include "Engine/World.h"
 #include "Styling/CoreStyle.h"
+#include "Fonts/FontMeasure.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Types/ISlateMetaData.h"
@@ -127,7 +130,8 @@ namespace
 		const TAttribute<FText>& Value, const TAttribute<FSlateColor>& ValueColor, const TAttribute<FText>& Sub,
 		const TAttribute<EVisibility>& Visibility,
 		const TAttribute<TOptional<float>>& BarFrac = TAttribute<TOptional<float>>(),
-		const TAttribute<FSlateColor>& BarColor = FSlateColor(D::Teal), float Width = 104.f)
+		const TAttribute<FSlateColor>& BarColor = FSlateColor(D::Teal), float Width = 104.f,
+		const TAttribute<FSlateColor>& SubColor = FSlateColor(D::TextDim))
 	{
 		TSharedRef<SWidget> BarWidget = BarFrac.IsSet() || BarFrac.IsBound()
 			? D::Bar(BarFrac, BarColor, 4.f)
@@ -155,7 +159,7 @@ namespace
 				]
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(STextBlock).Text(Sub).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
+					SNew(STextBlock).Text(Sub).Font(D::Body(8)).ColorAndOpacity(SubColor)
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 4.f, 0.f, 0.f)
 				[
@@ -210,6 +214,206 @@ const URHDefinitionsSubsystem* SRHCommandDeck::GetDefs() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	return World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+}
+
+// --- G1 (2026-11-04), nothing flashes: the power readouts, all through the shared power helper (URHPowerLookSubsystem) ---
+// While rationing is shown (a load that draws was cut inside its hold) the tile, the fold header and the spare-watts line read the
+// observer's running means over one sol-hour, steady and amber; otherwise the live numbers, with every colour and every line's kind
+// latched so none changes twice inside the helper's real-time floor. G1 r1: every number reads the means whenever the sim rations
+// (URHPowerLookSubsystem::IsRationingNow), also in the floor's wait before rationing shows, so none is ever built from the per-step
+// GenW / LoadW pair while the shed flag alternates. G1 r2: the tile's and the fold header's rationing state is the shown net's kind
+// (URHPowerLookSubsystem::IsNetMeanShown), so the state, its number and its colour change together, and a figure that rounds to 0
+// prints as "0 W" with no sign. Placeholder copy (director review).
+
+namespace
+{
+	// A watts figure with its sign, or "0 W" with none when it rounds to zero (G1 r2: never a signed zero such as "-0 W").
+	FString SignedWatts(double W)
+	{
+		const double R = FMath::RoundToDouble(W);
+		return R == 0.0 ? FString(TEXT("0 W")) : FString::Printf(TEXT("%+.0f W"), R);
+	}
+
+	// The colony's served share as the tile and the fold header print it: to the nearest 5, never 100 while rationing is shown (the
+	// running mean starts near 1 at the onset), and latched through the power helper's floor (one key for both, so they agree).
+	double ShownServedPct(const URHPowerLookSubsystem* Look)
+	{
+		const uint32 Pct = (uint32)FMath::Min(FMath::RoundToInt((Look ? Look->GetServedShare() : 1.0) * 20.0) * 5, 95);
+		return (double)(Look ? Look->LatchValue(URHPowerLookSubsystem::MakeKey('P', 0u), Pct) : Pct);
+	}
+}
+
+uint8 SRHCommandDeck::GetPowerTileState() const
+{
+	// The tile's one shown state, latched as one so its value, colour and sub line change together and never twice inside the
+	// helper's floor: 0 rationing (amber, the running means), 1 short (red), 2 surplus (green).
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	// G1 r2: rationing exactly while the shown net is the rationing shortfall (its latched kind), and short or surplus by the shown live
+	// net: both change together in the helper, so when rationing ends the tile goes from amber straight to the live net's colour, never
+	// through a red 'short' read from the last rationing figure (round 1: amber, red, green one floor apart at every release).
+	const double Net = Look ? Look->GetNetW() : (S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0);
+	const uint8 Want = (Look && Look->IsNetMeanShown()) ? 0 : (Net < -0.5 ? 1 : 2);
+	return Look ? (uint8)Look->LatchValue(URHPowerLookSubsystem::MakeKey('T', 0u), Want) : Want;
+}
+
+FText SRHCommandDeck::GetPowerTileValueText() const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	if (!S)
+	{
+		return FText::GetEmpty();
+	}
+	// The sign follows the latched state (a guard: the helper changes the net and its kind together, so they agree): a value on the
+	// other side of zero reads "0 W". G1 r2: the rationing figure is the running shortfall rounded up, never 0 while it shows.
+	const uint8 State = GetPowerTileState();
+	const double Net = Look ? Look->GetNetW() : S->GetPower().GenW - S->GetPower().LoadW;
+	return Txt(SignedWatts(State == 2 ? FMath::Max(Net, 0.0) : FMath::Min(Net, 0.0)));
+}
+
+FSlateColor SRHCommandDeck::GetPowerTileValueColour() const
+{
+	const uint8 State = GetPowerTileState();
+	return FSlateColor(State == 0 ? D::Amber : (State == 1 ? D::Red : D::Green));
+}
+
+FText SRHCommandDeck::GetPowerTileSubText() const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	if (!S)
+	{
+		return FText::GetEmpty();
+	}
+	if (GetPowerTileState() == 0)
+	{
+		// The served share of the wanted power over the last sol-hour, to the nearest 5 (O1).
+		return Txt(FString::Printf(TEXT("rationing %.0f%%"), ShownServedPct(Look)));
+	}
+	// G1 r1: the bar's own shown fraction (0 while the sim rations, glided between floor-spaced targets), never the per-step bank.
+	const FRHPowerState& P = S->GetPower();
+	return Txt(FString::Printf(TEXT("battery %.0f%%"), Look ? 100.0 * Look->GetBankFrac() : (P.BatteryCapWh > 0.0 ? 100.0 * P.BatteryWh / P.BatteryCapWh : 0.0)));
+}
+
+FSlateColor SRHCommandDeck::GetPowerTileSubColour() const
+{
+	return FSlateColor(GetPowerTileState() == 0 ? D::Amber : D::TextDim);
+}
+
+TOptional<float> SRHCommandDeck::GetPowerTileBarFrac() const
+{
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	if (Look)
+	{
+		return TOptional<float>(Look->GetBankFrac());
+	}
+	const URHSimWorldSubsystem* S = GetSim();
+	const double Cap = S ? S->GetPower().BatteryCapWh : 0.0;
+	return TOptional<float>(Cap > 0.0 ? (float)(S->GetPower().BatteryWh / Cap) : 0.f);
+}
+
+FSlateColor SRHCommandDeck::GetPowerTileBarColour() const
+{
+	// Red while rationing is shown (the bank holds nothing it keeps) or under a fifth, else teal: one latched colour.
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const bool bRed = (Look && Look->IsRationingShown()) || GetPowerTileBarFrac().Get(0.f) < 0.2f;
+	return FSlateColor(LatchHeld('B', 0u, bRed) ? D::Red : D::Teal);
+}
+
+FText SRHCommandDeck::GetPowerFoldHeaderText() const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	if (!S)
+	{
+		return FText::GetEmpty();
+	}
+	// G1 r2: rationing exactly while the tile is (the shown net's kind), its short the running shortfall rounded up (never 0 W).
+	if (Look && Look->IsNetMeanShown())
+	{
+		return Txt(FString::Printf(TEXT("RATIONING  -  %.0f W SHORT  -  %.0f%% SERVED"), FMath::Max(0.0, -Look->GetNetW()), ShownServedPct(Look)));
+	}
+	// G1 r2: MAKING and USING from one take: the generation and the net the helper took at the same instant (USING = MAKING less the
+	// net, HEAD's live load at that instant), at most once per floor, so neither drifts with the sun and snaps back. Round 1 printed the
+	// live generation less a held net, which climbed by hundreds of watts on a 60x morning and dropped back every 3.2 s.
+	const FRHPowerState& P = S->GetPower();
+	const double MakingW = Look ? Look->GetNetGenW() : P.GenW;
+	return Txt(FString::Printf(TEXT("MAKING %.0f W  -  USING %.0f W"), MakingW, Look ? FMath::Max(0.0, MakingW - Look->GetNetW()) : P.LoadW));
+}
+
+FText SRHCommandDeck::GetSpareWattsText(FName Def) const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const double Spare = Look ? Look->GetNetW() : (S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0); // the mean while the sim rations (G1 r1)
+	return Txt(FString::Printf(TEXT("Your grid has %.0f W to spare right now."), FMath::Max(0.0, Spare)));
+}
+
+FSlateColor SRHCommandDeck::GetSpareWattsColour(FName Def) const
+{
+	const URHSimWorldSubsystem* S = GetSim();
+	const URHDefinitionsSubsystem* Df = GetDefs();
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const FRHBuildingRow* R = Df ? Df->GetBuilding(Def) : nullptr;
+	const double Spare = Look ? Look->GetNetW() : (S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0); // the mean while the sim rations (G1 r1)
+	return FSlateColor(LatchHeld('W', GetTypeHash(Def), R && Spare < R->PowerDraw_W) ? D::Red : D::Green);
+}
+
+FString SRHCommandDeck::GetCrewFoodLine(bool bFoodPenalty) const
+{
+	// D4a, Gate-D framing PLACEHOLDER. Same floor as the FOOD RUNNING LOW alert. G1 r1: the branch by the producing count as shown.
+	const URHSimWorldSubsystem* S = GetSim();
+	if (!S || !bFoodPenalty)
+	{
+		return FString();
+	}
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const int32 FoodSols = FMath::Max(1, FMath::FloorToInt(S->GetFoodRunwaySols()));
+	const int32 Producing = Look ? Look->GetProducingCellsShown() : S->GetProducingCellCount();
+	const double FoodNet = Producing * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
+	return S->GetPlantedCellCount() > 0 && FoodNet >= 0.0
+		? FString::Printf(TEXT("Food: about %d sol%s in store - the garden is refilling it."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s"))
+		: FString::Printf(TEXT("Food: about %d sol%s in store - a thin larder lowers Hope. Grow more: zone Gardening Station cells."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s"));
+}
+
+FString SRHCommandDeck::GetCrewGardenLine() const
+{
+	// G1 r1: the grow lights take the bank's watt-hours all or nothing each step, so while it scrapes they (and the producing count)
+	// flip every step; the line reads the helper's held, latched pair instead.
+	const URHSimWorldSubsystem* S = GetSim();
+	if (!S || S->GetPlantedCellCount() <= 0)
+	{
+		return FString();
+	}
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const int32 Producing = Look ? Look->GetProducingCellsShown() : S->GetProducingCellCount();
+	const bool bDark = Look ? Look->AreGrowLightsDarkShown() : S->AreGrowLightsDark();
+	const double Net = Producing * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
+	return FString::Printf(TEXT("Garden: %d of %d plots growing, %+.1f kg food a sol%s."), Producing, S->GetPlantedCellCount(), Net, bDark ? TEXT(" - grow-lights dark") : TEXT(""));
+}
+
+FString SRHCommandDeck::GetCrewLayoutLine(int32 OffendedPairs) const
+{
+	// G1 r1: the clash count reads this step's floor circulation (an Air Filter rationed on alternate steps can change it every step),
+	// so the line shows the worst count seen inside the colony's hold, latched through the helper's floor.
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	const uint32 Want = (uint32)FMath::Max(0, OffendedPairs);
+	const int32 Pairs = (int32)(Look ? Look->LatchWorst(URHPowerLookSubsystem::MakeKey('L', 0u), Want) : Want);
+	return Pairs > 0 ? FString::Printf(TEXT("Layout: %d pair%s of rooms clash."), Pairs, Pairs == 1 ? TEXT("") : TEXT("s")) : FString();
+}
+
+FSlateColor SRHCommandDeck::GetTensionColour() const
+{
+	// G1 (N2): calm below the demand threshold, amber from it, red from the embargo pressure threshold (both from config).
+	const URHSimWorldSubsystem* S = GetSim();
+	const double T = S ? S->GetEarthTension() : 0.0;
+	return FSlateColor(T >= TensionEmbargoAt ? D::Red : (T >= TensionDemandAt ? D::Amber : D::Teal));
+}
+
+FText SRHCommandDeck::GetTensionNoteText() const
+{
+	return Txt(FString::Printf(TEXT("From %.0f Earth sends a demand; from %.0f it presses a settlement to embargo you."), TensionDemandAt, TensionEmbargoAt));
 }
 
 TSharedRef<SWidget> SRHCommandDeck::ExpandToggle(bool* bFlag)
@@ -406,33 +610,19 @@ TSharedRef<SWidget> SRHCommandDeck::BuildVitalsStrip()
 				MakeAttributeLambda([this]() { const URHSimClockSubsystem* C = GetClock(); return TOptional<float>(C ? C->GetSolFraction() : 0.f); }),
 				FSlateColor(D::Amber))
 		]
-		// Power: net flow, the bank as the bar, shedding called out.
+		// Power: net flow, the bank as the bar, rationing called out. G1: every part reads the shared power helper through the deck's
+		// accessors (the held, latched state and the running means), never the per-step shed flag.
 		+ SHorizontalBox::Slot().AutoWidth()
 		[
 			Tile(FName("power"), D::Gold, TEXT("POWER"),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); if (!S) { return FText::GetEmpty(); } const FRHPowerState& P = S->GetPower(); return Txt(FString::Printf(TEXT("%+.0f W"), P.GenW - P.LoadW)); }),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return FSlateColor((S && S->GetPower().GenW + 0.5 < S->GetPower().LoadW) ? D::Red : D::Green); }),
-				MakeAttributeLambda([this]()
-				{
-					const URHSimWorldSubsystem* S = GetSim();
-					if (!S) { return FText::GetEmpty(); }
-					const FRHPowerState& P = S->GetPower();
-					if (P.ShedCount > 0)
-					{
-						// Nit 11: ShedCount holds machines and cooling floors together; say which is which (gate-d-wording.md, the POWER tile row).
-						const int32 Machines = P.ShedCount - P.ShedFloors;
-						FString Said = Machines > 0 ? FString::Printf(TEXT("%d machine%s"), Machines, Machines == 1 ? TEXT("") : TEXT("s")) : FString();
-						if (P.ShedFloors > 0)
-						{
-							Said += FString::Printf(TEXT("%s%d floor%s"), Said.IsEmpty() ? TEXT("") : TEXT(" and "), P.ShedFloors, P.ShedFloors == 1 ? TEXT("") : TEXT("s"));
-						}
-						return Txt(Said + TEXT(" shut off"));
-					}
-					return Txt(FString::Printf(TEXT("battery %.0f%%"), P.BatteryCapWh > 0.0 ? 100.0 * P.BatteryWh / P.BatteryCapWh : 0.0));
-				}),
+				MakeAttributeLambda([this]() { return GetPowerTileValueText(); }),
+				MakeAttributeLambda([this]() { return GetPowerTileValueColour(); }),
+				MakeAttributeLambda([this]() { return GetPowerTileSubText(); }),
 				Always,
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); const double Cap = S ? S->GetPower().BatteryCapWh : 0.0; return TOptional<float>(Cap > 0.0 ? (float)(S->GetPower().BatteryWh / Cap) : 0.f); }),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); const double Cap = S ? S->GetPower().BatteryCapWh : 0.0; return FSlateColor((Cap > 0.0 && S->GetPower().BatteryWh / Cap < 0.2) ? D::Red : D::Teal); }))
+				MakeAttributeLambda([this]() { return GetPowerTileBarFrac(); }),
+				MakeAttributeLambda([this]() { return GetPowerTileBarColour(); }),
+				104.f,
+				MakeAttributeLambda([this]() { return GetPowerTileSubColour(); }))
 		]
 		+ SHorizontalBox::Slot().AutoWidth()
 		[
@@ -1073,28 +1263,26 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			{
 				Parts.Add(FString::Printf(TEXT("Water is only %.0f%% drinkable."), S->GetWaterPotability() * 100.0));
 			}
-			if (H.FoodPenalty > 0.0)
+			// G1 r1: the food and garden lines through the deck's accessors (the producing count and the grow lights as the power helper
+			// shows them, never this step's flip).
+			const FString FoodLine = GetCrewFoodLine(H.FoodPenalty > 0.0);
+			if (!FoodLine.IsEmpty())
 			{
-				// D4a, Gate-D framing PLACEHOLDER. Same floor as the FOOD RUNNING LOW alert.
-				const int32 FoodSols = FMath::Max(1, FMath::FloorToInt(S->GetFoodRunwaySols()));
-				const double FoodNet = S->GetProducingCellCount() * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
-				Parts.Add(S->GetPlantedCellCount() > 0 && FoodNet >= 0.0
-					? FString::Printf(TEXT("Food: about %d sol%s in store - the garden is refilling it."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s"))
-					: FString::Printf(TEXT("Food: about %d sol%s in store - a thin larder lowers Hope. Grow more: zone Gardening Station cells."), FoodSols, FoodSols == 1 ? TEXT("") : TEXT("s")));
+				Parts.Add(FoodLine);
 			}
-			if (S->GetPlantedCellCount() > 0)
+			const FString GardenLine = GetCrewGardenLine();
+			if (!GardenLine.IsEmpty())
 			{
-				const double Net = S->GetProducingCellCount() * S->GetGardenFoodKgPerSolPerCell() - S->GetPopulation() * S->GetColonistFoodKgPerSol();
-				Parts.Add(FString::Printf(TEXT("Garden: %d of %d plots growing, %+.1f kg food a sol%s."),
-					S->GetProducingCellCount(), S->GetPlantedCellCount(), Net, S->AreGrowLightsDark() ? TEXT(" - grow-lights dark") : TEXT("")));
+				Parts.Add(GardenLine);
 			}
 			if (H.Comforts > 0.0)
 			{
 				Parts.Add(FString::Printf(TEXT("Comforts reach %d of %d crew."), S->GetComfortsSuppliedCount(), S->GetPopulation()));
 			}
-			if (H.OffendedPairs > 0)
+			const FString LayoutLine = GetCrewLayoutLine(H.OffendedPairs); // G1 r1: the count reads this step's circulation, so it is held
+			if (!LayoutLine.IsEmpty())
 			{
-				Parts.Add(FString::Printf(TEXT("Layout: %d pair%s of rooms clash."), H.OffendedPairs, H.OffendedPairs == 1 ? TEXT("") : TEXT("s")));
+				Parts.Add(LayoutLine);
 			}
 			if (H.CommutePenalty > 0.0)
 			{
@@ -1127,7 +1315,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 			}
 			// D3a, Gate-D framing PLACEHOLDERS (inventory D29). The research gate and
 			// the FLOURISHING edge sit above where rooms and jobs alone reach.
-			if (S->GetLabYieldSeatSum() > 0.0 && !S->GetNextDiscovery().IsNone() && S->GetHopeSmoothed() < S->GetHopeDiscoveryThreshold())
+			if (IsLabSeatStaffedShown() && !S->GetNextDiscovery().IsNone() && S->GetHopeSmoothed() < S->GetHopeDiscoveryThreshold()) // G1 r3: held
 			{
 				Parts.Add(FString::Printf(TEXT("Labs research once Hope holds %.0f."), S->GetHopeDiscoveryThreshold()));
 			}
@@ -1161,7 +1349,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCrewPanel()
 	Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 	[
 		SNew(SBox)
-		.Visibility_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return (S && S->IsResearchAccruing()) ? EVisibility::Visible : EVisibility::Collapsed; })
+		.Visibility_Lambda([this]() { return IsResearchBarShown() ? EVisibility::Visible : EVisibility::Collapsed; }) // G1 r3: held
 		[
 			BarRow(Txt(TEXT("Research - next discovery")),
 				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S ? FString::Printf(TEXT("%.0f%%"), S->GetDiscoveryProgress() * 100.0) : FString()); }),
@@ -1276,22 +1464,7 @@ TSharedRef<ITableRow> SRHCommandDeck::GenerateRosterRow(TSharedPtr<int32> Item, 
 			+ SHorizontalBox::Slot().AutoWidth()
 			[
 				SNew(STextBlock).Font(D::Body(9))
-				.Text_Lambda([this, Id]()
-				{
-					const URHSimWorldSubsystem* S = GetSim();
-					const FRHColonist* C = S ? S->FindColonist(Id) : nullptr;
-					if (!C) { return FText::GetEmpty(); }
-					if (!C->bSupported)
-					{
-						// Placeholder wording (Gate-D framing review). C2a: the shortage is
-						// shared, so the line shows the ration the home gets, not a countdown.
-						return Txt(FString::Printf(TEXT("short rations - %.0f%% of full"), S->GetColonistRation(*C) * 100.0));
-					}
-					const FName Job = S->GetColonistJob(C->Id);
-					const FString Home = C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C->HomeLevel));
-					return Txt(FString::Printf(TEXT("%s%s%s"), *Home,
-						Job.IsNone() ? TEXT("") : TEXT("  -  "), Job.IsNone() ? TEXT("") : *Job.ToString().ToLower()));
-				})
+				.Text_Lambda([this, Id]() { return Txt(GetRosterPostLine(Id)); }) // G1 r3: the post held (GetRosterPostLine)
 				.ColorAndOpacity_Lambda([this, Id]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
@@ -1300,6 +1473,47 @@ TSharedRef<ITableRow> SRHCommandDeck::GenerateRosterRow(TSharedPtr<int32> Item, 
 				})
 			]
 		];
+}
+
+bool SRHCommandDeck::IsLabSeatStaffedShown() const
+{
+	// G1 r3: LabYieldSeatSum (a staffed Lab seat) is rebuilt every step with the station set, so a Lab Module that holds the colony's only
+	// staffed Lab seats and is rationed made the Crew panel's research line come and go with the shed flag. Held like the seats.
+	const URHSimWorldSubsystem* S = GetSim();
+	return S && LatchServed('Y', 0u, S->GetLabYieldSeatSum() > 0.0 ? 1u : 0u) != 0u;
+}
+
+bool SRHCommandDeck::IsResearchBarShown() const
+{
+	// G1 r3: IsResearchAccruing asks for a colonist at a Lab seat on this step (the per-step station set), so the Crew panel's research bar
+	// came and went with a rationed Lab Module's steps when it held the only Lab seats. Held like the seats.
+	const URHSimWorldSubsystem* S = GetSim();
+	return S && LatchServed('A', 0u, S->IsResearchAccruing() ? 1u : 0u) != 0u;
+}
+
+FString SRHCommandDeck::GetRosterPostLine(int32 ColonistId) const
+{
+	// A roster row's right-hand text: short rations, else the home and the post.
+	const URHSimWorldSubsystem* S = GetSim();
+	const FRHColonist* C = S ? S->FindColonist(ColonistId) : nullptr;
+	if (!C) { return FString(); }
+	if (!C->bSupported)
+	{
+		// Placeholder wording (Gate-D framing review). C2a: the shortage is
+		// shared, so the line shows the ration the home gets, not a countdown.
+		return FString::Printf(TEXT("short rations - %.0f%% of full"), S->GetColonistRation(*C) * 100.0);
+	}
+	// G1 r3: a colonist's post is rebuilt every step with the station set, so one seated at a rationed module read 'lab' and no
+	// post (or another post) on alternate steps. Held: the highest post (Lab, Workstation, Garden, none, in that order) seen
+	// inside the colony's hold while it rations, else the post itself, latched through the floor.
+	static const FName NLab(TEXT("Lab")), NWorkstation(TEXT("Workstation")), NGarden(TEXT("Garden"));
+	const FName LiveJob = S->GetColonistJob(C->Id);
+	const uint32 JobCode = LiveJob == NLab ? 3u : (LiveJob == NWorkstation ? 2u : (LiveJob == NGarden ? 1u : (LiveJob.IsNone() ? 0u : 4u)));
+	const uint32 JobShown = JobCode == 4u ? 4u : LatchServed('O', (uint32)C->Id, JobCode);
+	const FName Job = JobShown == 4u ? LiveJob : (JobShown == 3u ? NLab : (JobShown == 2u ? NWorkstation : (JobShown == 1u ? NGarden : FName(NAME_None))));
+	const FString Home = C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C->HomeLevel));
+	return FString::Printf(TEXT("%s%s%s"), *Home,
+		Job.IsNone() ? TEXT("") : TEXT("  -  "), Job.IsNone() ? TEXT("") : *Job.ToString().ToLower());
 }
 
 void SRHCommandDeck::RefreshRosterPanel()
@@ -1393,6 +1607,8 @@ void SRHCommandDeck::RefreshCityPanel()
 	{
 		CityRefreshedAt = Now;
 		CityDemand = Sim->GetCityDemand();
+		CityFilledRaw = CityDemand.FilledSeats;
+		CityTotalRaw = CityDemand.TotalSeats;
 		TArray<FRHDistrictCounts> Counts;
 		Sim->GetDistrictCounts(Counts);
 		CityCounts.Reset();
@@ -1438,6 +1654,19 @@ void SRHCommandDeck::RefreshCityPanel()
 				}
 			}
 		}
+	}
+	// G1 r3: the Jobs row reads FilledSeats (ColonistJobs) and TotalSeats (StationCapacity), which RefreshJobs rebuilds every step from the
+	// per-step station set, so while a seat module was rationed they followed the shed flag at the refresh's pace ('Jobs: 4 of 6 residents
+	// have a work post' and '6 of 6' a refresh apart). Every frame the panel is open: the highest pair seen inside the colony's hold while
+	// it rations (the served steps' view, the module's seats as its card counts them), else the refreshed pair, latched through the floor;
+	// the other Jobs figures follow from that pair as GetCityDemand derives them. Ints written in place: nothing allocated.
+	{
+		const uint32 SeatsHeld = LatchServed('G', 0u, ((uint32)FMath::Clamp(CityTotalRaw, 0, 65535) << 16) | (uint32)FMath::Clamp(CityFilledRaw, 0, 65535));
+		CityDemand.TotalSeats = (int32)(SeatsHeld >> 16);
+		CityDemand.FilledSeats = (int32)(SeatsHeld & 0xFFFFu);
+		CityDemand.Unemployed = FMath::Max(0, CityDemand.Population - CityDemand.FilledSeats);
+		CityDemand.SeatsShort = FMath::Max(0, CityDemand.Population - CityDemand.TotalSeats);
+		CityDemand.Jobs = CityDemand.Population > 0 ? (double)CityDemand.Unemployed / (double)CityDemand.Population : 0.0;
 	}
 	// C5b: the growth list - one bar a project; a bar reads its project live, so only a start, a finish or a refund rebuilds it.
 	if (CityGrowthList.IsValid() && (Sim->GetGrowthVersion() != CityGrowthVersionShown || Sim->GetDistrictsVersion() != CityGrowthDistrictsShown))
@@ -1577,11 +1806,14 @@ void SRHCommandDeck::RefreshCityPanel()
 				.Text_Lambda([this, Id, Kind, Level, bShape, ShapeBottom]()
 				{
 					const FRHDistrictCounts* C = CityCounts.Find(Id);
+					// G1 r3: a district's seats sum StationCapacity, which lists a seat module only on the steps it is served: held like the
+					// Jobs row (the highest inside the colony's hold while it rations, latched through the floor).
+					const int32 SeatsShown = C ? (int32)LatchServed('D', (uint32)Id, (uint32)FMath::Max(0, C->Seats)) : 0;
 					const FString Where = bShape
 						? FString::Printf(TEXT("shape on floor%s %d%s, %d cell%s dug"), ShapeBottom == Level ? TEXT("") : TEXT("s"), Level, ShapeBottom == Level ? TEXT("") : *FString::Printf(TEXT(" to %d"), ShapeBottom), C ? C->Cells : 0, PluralS(C ? C->Cells : 0))
 						: (Level < 0 ? FString::Printf(TEXT("floor %d"), Level) : FString::Printf(TEXT("%d cell%s"), C ? C->Cells : 0, PluralS(C ? C->Cells : 0)));
 					return Txt(FString::Printf(TEXT("%s  -  %s  -  %d resident%s  -  %d bed%s  -  %d seat%s"), *URHDistrictVisualizerSubsystem::KindWord(Kind), *Where,
-						C ? C->Residents : 0, PluralS(C ? C->Residents : 0), C ? C->Beds : 0, PluralS(C ? C->Beds : 0), C ? C->Seats : 0, PluralS(C ? C->Seats : 0)));
+						C ? C->Residents : 0, PluralS(C ? C->Residents : 0), C ? C->Beds : 0, PluralS(C ? C->Beds : 0), SeatsShown, PluralS(SeatsShown)));
 				})
 			]
 			// C5b: Homes and Civic districts grow by themselves; this line says what they are doing, and the chip is the switch.
@@ -2324,14 +2556,59 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 			]
 		]
 	];
-	// The standing numbers.
-	Body->AddSlot().AutoHeight()
-	[
-		BarRow(Txt(TEXT("Earth tension")),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S ? FString::Printf(TEXT("%.0f"), S->GetEarthTension()) : FString()); }),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S ? (float)(S->GetEarthTension() / 100.0) : 0.f); }),
-			MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return FSlateColor(S && S->GetEarthTension() > 60.0 ? D::Red : D::Amber); }))
-	];
+	// The standing numbers. G1 (N2): the tension bar's colours follow the sim's own thresholds, read from config here (the demand
+	// from EarthTensionDemandThreshold, the embargo pressure from EarthPreemptiveThreshold), with a tick mark at each and one dim line.
+	if (const URHDefinitionsSubsystem* Df = GetDefs())
+	{
+		TensionDemandAt = Df->GetConfigScalar(FName("EarthTensionDemandThreshold"), 45.0);
+		TensionEmbargoAt = Df->GetConfigScalar(FName("EarthPreemptiveThreshold"), 75.0);
+	}
+	{
+		const float DemandF = (float)FMath::Clamp(TensionDemandAt / 100.0, 0.0, 1.0);
+		const float EmbargoF = (float)FMath::Clamp(TensionEmbargoAt / 100.0, (double)DemandF, 1.0);
+		const FLinearColor MarkColour = D::TextDim;
+		Body->AddSlot().AutoHeight()
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.f)
+				[
+					SNew(STextBlock).Text(Txt(TEXT("Earth tension"))).Font(D::Body(9)).ColorAndOpacity(D::Text)
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(STextBlock).Font(D::Value(9)).ColorAndOpacity(D::TextDim)
+					.Text_Lambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return Txt(S ? FString::Printf(TEXT("%.0f"), S->GetEarthTension()) : FString()); })
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				SNew(SOverlay)
+				+ SOverlay::Slot()
+				[
+					D::Bar(MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S ? (float)(S->GetEarthTension() / 100.0) : 0.f); }),
+						MakeAttributeLambda([this]() { return GetTensionColour(); }), 5.f)
+				]
+				+ SOverlay::Slot()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(DemandF) [ SNew(SSpacer) ]
+					// A square brush: the rounded one (corner 6) drew nothing at 2 x 5 (seen in the after captures).
+					+ SHorizontalBox::Slot().AutoWidth() [ SNew(SBox).WidthOverride(2.f).HeightOverride(5.f) [ SNew(SImage).Image(FCoreStyle::Get().GetBrush("WhiteBrush")).ColorAndOpacity(MarkColour) ] ]
+					+ SHorizontalBox::Slot().FillWidth(EmbargoF - DemandF) [ SNew(SSpacer) ]
+					+ SHorizontalBox::Slot().AutoWidth() [ SNew(SBox).WidthOverride(2.f).HeightOverride(5.f) [ SNew(SImage).Image(FCoreStyle::Get().GetBrush("WhiteBrush")).ColorAndOpacity(MarkColour) ] ]
+					+ SHorizontalBox::Slot().FillWidth(1.f - EmbargoF) [ SNew(SSpacer) ]
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
+			[
+				SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
+				.Text_Lambda([this]() { return GetTensionNoteText(); })
+			]
+		];
+	}
 	Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 	[
 		Prose(MakeAttributeLambda([this]()
@@ -3237,17 +3514,25 @@ FReply SRHCommandDeck::HandleOrderSend(FName Rival)
 
 TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 {
+	// G1: the RATIONING header is longer than MAKING / USING and would run over the panel's title on one line. While it shows,
+	// it wraps at the width of "RATIONING  -  0000 W SHORT  -  " (with the two spaces the line keeps before its break) in its own
+	// font, so it breaks after the second dash: "RATIONING - N W SHORT -" over "M% SERVED" (a short of five digits breaks before
+	// SHORT). MAKING / USING keeps HEAD's one unwrapped line.
+	// A fixed wrap width, not AutoWrapText: an auto-wrapped text in an auto-width slot keeps the narrowest width it was given.
+	const FSlateFontInfo HeaderFont = D::Label(10);
+	const float RationingWrapAt = FSlateApplication::IsInitialized()
+		? (float)FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(FString(TEXT("RATIONING  -  0000 W SHORT  -  ")), HeaderFont).X + 3.f
+		: 0.f;
 	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			SNew(STextBlock).Font(D::Label(10)).ColorAndOpacity(D::TextDim)
-			.Text_Lambda([this]()
+			SNew(STextBlock).Font(HeaderFont).ColorAndOpacity(D::TextDim).Justification(ETextJustify::Right)
+			.WrapTextAt_Lambda([this, RationingWrapAt]()
 			{
-				const URHSimWorldSubsystem* S = GetSim();
-				if (!S) { return FText::GetEmpty(); }
-				const FRHPowerState& P = S->GetPower();
-				return Txt(FString::Printf(TEXT("MAKING %.0f W  -  USING %.0f W"), P.GenW, P.LoadW));
+				const URHPowerLookSubsystem* Look = GetPowerLook();
+				return (Look && Look->IsNetMeanShown()) ? RationingWrapAt : 0.f;
 			})
+			.Text_Lambda([this]() { return GetPowerFoldHeaderText(); })
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
@@ -3764,19 +4049,8 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 		[
 			SNew(STextBlock).Font(D::Value(9)).AutoWrapText(true)
 			.Visibility_Lambda([DetailRow]() { const FRHBuildingRow* R = DetailRow(); return (R && R->PowerDraw_W > 0.f) ? EVisibility::Visible : EVisibility::Collapsed; })
-			.Text_Lambda([this]()
-			{
-				const URHSimWorldSubsystem* S = GetSim();
-				const double Spare = S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0;
-				return Txt(FString::Printf(TEXT("Your grid has %.0f W to spare right now."), FMath::Max(0.0, Spare)));
-			})
-			.ColorAndOpacity_Lambda([this, DetailRow]()
-			{
-				const URHSimWorldSubsystem* S = GetSim();
-				const FRHBuildingRow* R = DetailRow();
-				const double Spare = S ? S->GetPower().GenW - S->GetPower().LoadW : 0.0;
-				return FSlateColor((R && Spare < R->PowerDraw_W) ? D::Red : D::Green);
-			})
+			.Text_Lambda([this]() { return GetSpareWattsText(GetDetailBuildDef()); })
+			.ColorAndOpacity_Lambda([this]() { return GetSpareWattsColour(GetDetailBuildDef()); })
 		]
 		// Live: the bill, and whether the colony can pay it.
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)

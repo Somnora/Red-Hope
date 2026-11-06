@@ -1,4 +1,5 @@
 #include "RHCommandDeck.h"
+#include "RHPowerLook.h"
 #include "RHOrderWords.h"
 #include "RHDeckStyle.h"
 #include "RedHope.h"
@@ -673,8 +674,20 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			})
 			.ContentPadding(FMargin(9.f, 5.f))
 			.OnClicked(Tier <= 0.f ? FOnClicked::CreateSP(this, &SRHCommandDeck::HandlePause) : FOnClicked::CreateSP(this, &SRHCommandDeck::HandleSpeed, Tier))
+			// G1 (N4): the 60x tier dims while the sim refuses the era band and says why; it stays pressable (the press is still
+			// refused by the sim, with its banner).
+			.ToolTipText_Lambda([this, Tier]()
+			{
+				FString Why;
+				return (Tier > URHSimClockSubsystem::EraSpeedThreshold && IsSixtyRefusedShown(&Why))
+					? FText::FromString(FString::Printf(TEXT("60x unavailable: %s"), *Why)) : FText::GetEmpty();
+			})
 			[
-				SNew(STextBlock).Text(FText::FromString(Label)).Font(RHDeck::Label(10)).ColorAndOpacity(RHDeck::Text)
+				SNew(STextBlock).Text(FText::FromString(Label)).Font(RHDeck::Label(10))
+				.ColorAndOpacity_Lambda([this, Tier]()
+				{
+					return (Tier > URHSimClockSubsystem::EraSpeedThreshold && IsSixtyRefusedShown()) ? FSlateColor(RHDeck::TextDim) : FSlateColor(RHDeck::Text);
+				})
 			]
 		];
 	};
@@ -1735,6 +1748,221 @@ EVisibility SRHCommandDeck::GetCrewVisibility() const
 	return (Sim && (Sim->GetPopulation() > 0 || Sim->IsColonyQuiet())) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
+const URHPowerLookSubsystem* SRHCommandDeck::GetPowerLook() const
+{
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	return World ? World->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+}
+
+bool SRHCommandDeck::LatchHeld(uint8 Kind, uint32 Value, bool bWant) const
+{
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	return Look ? Look->LatchBool(URHPowerLookSubsystem::MakeKey(Kind, Value), bWant) : bWant;
+}
+
+uint32 SRHCommandDeck::LatchServed(uint8 Kind, uint32 Value, uint32 Want) const
+{
+	// G1 r3: URHPowerLookSubsystem::LatchWorst keeps the HIGHEST value seen inside the colony's hold while the colony rations (else the
+	// value itself) and latches it through the floor: its storage, its hold and its floor, with the readers encoding what they show so
+	// that higher is the served steps' view.
+	const URHPowerLookSubsystem* Look = GetPowerLook();
+	return Look ? Look->LatchWorst(URHPowerLookSubsystem::MakeKey(Kind, Value), Want) : Want;
+}
+
+FString SRHCommandDeck::GetCardStatusLine(int32 BuildingId) const
+{
+	// G1 (2026-11-04): the selected card's status by the held look (URHPowerLookSubsystem), never this step's shed flag, which
+	// alternates every step while the bank scrapes empty. Placeholder copy (director review).
+	const URHSimWorldSubsystem* Sim = GetSim();
+	const URHPowerLookSubsystem* PowerLook = GetPowerLook();
+	if (!Sim)
+	{
+		return FString();
+	}
+	const FRHBuildingInstance* B = nullptr;
+	for (const FRHBuildingInstance& Candidate : Sim->GetBuildings())
+	{
+		if (Candidate.Id == BuildingId)
+		{
+			B = &Candidate;
+			break;
+		}
+	}
+	if (!B || B->bUnderConstruction)
+	{
+		return FString();
+	}
+	// The line's kind - switched off, resting, or the look - latched as one (a player's switch applies at once), so the line never changes
+	// twice inside the helper's floor because the look and the sun moved at different times.
+	// D5a: a day-shift machine reads RESTING by night (resting reads no power), whatever its look.
+	// G1 r1: the Rationed line's percent is latched with its kind (one value), so the number too changes at most once per floor.
+	const ERHPowerLook Look0 = PowerLook ? PowerLook->GetLook(B->Id) : (B->bPowered ? ERHPowerLook::Powered : ERHPowerLook::Unserved);
+	const uint8 KindOff = 10, KindResting = 11;
+	const uint8 Want = B->bManualOff ? KindOff : (Sim->IsDayShiftResting(B->Id) ? KindResting : (uint8)Look0);
+	const URHSimWorldSubsystem::FRHShedSeen* Seen = Sim->FindShedSeen(B->Id);
+	const uint32 WantPct = Want == (uint8)ERHPowerLook::Rationed ? (uint32)FMath::Clamp(FMath::RoundToInt((Seen ? Seen->ServedMean : 0.5) * 10.0) * 10, 10, 90) : 0u;
+	const uint32 Shown = PowerLook ? PowerLook->LatchValue(URHPowerLookSubsystem::MakeKey('C', (uint32)B->Id), (uint32)Want | (WantPct << 8), KindOff) : ((uint32)Want | (WantPct << 8));
+	const uint8 Kind = (uint8)(Shown & 0xFFu);
+	if (Kind == KindOff)
+	{
+		return TEXT("SWITCHED OFF (manual) - zero draw, batches frozen");
+	}
+	if (Kind == KindResting)
+	{
+		return TEXT("DAY SHIFT - resting until sunrise (idle draw, batch paused)");
+	}
+	const ERHPowerLook Look = (ERHPowerLook)Kind;
+	if (Look == ERHPowerLook::Rationed)
+	{
+		return FString::Printf(TEXT("RATIONED - running about %d%% of the time (the grid is short; it runs on the steps it is served)"), (int32)(Shown >> 8));
+	}
+	if (Look == ERHPowerLook::Unserved)
+	{
+		return TEXT("SHED - unpowered (grid deficit; lowest-priority loads drop first)");
+	}
+	return TEXT("ONLINE");
+}
+
+namespace
+{
+	// G1 r3: a station's (filled, capacity) pair packed so that a higher value is a served step's view: the capacity (0 when the
+	// station is not in this step's set) above the filled seats, eight bits each.
+	uint32 PackSeats(int32 Filled, int32 Capacity)
+	{
+		return ((uint32)FMath::Clamp(Capacity, 0, 255) << 8) | (uint32)FMath::Clamp(Filled, 0, 255);
+	}
+}
+
+FString SRHCommandDeck::GetCardStationLine(int32 BuildingId) const
+{
+	// Prefab stations (T4): seats, or why the module is idle. G1: "online" is the held state, latched (GetProvidedRoomHeld). G1 r3: the
+	// seats and the order too, and the whole line as one latched value.
+	const URHSimWorldSubsystem* Sim = GetSim();
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	if (!Sim || !Defs)
+	{
+		return FString();
+	}
+	const FRHBuildingInstance* B = nullptr;
+	for (const FRHBuildingInstance& Candidate : Sim->GetBuildings())
+	{
+		if (Candidate.Id == BuildingId)
+		{
+			B = &Candidate;
+			break;
+		}
+	}
+	const FRHRoomRow* Provided = B ? Sim->GetProvidedRoom(*B, /*bRequireOnline*/ false) : nullptr;
+	const FRHBuildingRow* Def = B ? Defs->GetBuilding(B->DefName) : nullptr;
+	if (!Provided || (Def && Def->DragSized))
+	{
+		return FString();
+	}
+	const bool bOnlineWant = Sim->GetProvidedRoomHeld(*B) != nullptr;
+	if (Provided->Function == FName("Infirmary"))
+	{
+		return LatchHeld('S', (uint32)B->Id, bOnlineWant)
+			? FString(TEXT("INFIRMARY ONLINE - one extra sol to restore rations"))
+			: FString(TEXT("INFIRMARY IDLE - needs power and a livable floor"));
+	}
+	// G1 r3: the seats. StationFilled and StationCapacity are rebuilt every step by RefreshJobs, which lists a module only while
+	// GetProvidedRoom(B, true) returns it, and that reads this step's bPowered: a module on alternate service read 'n of m' and '0 of 0'
+	// on alternate steps under a held ONLINE (and moved colonists between seats). While the colony rations the pair is the highest seen
+	// inside its hold (LatchServed: a served step's, capacity first), else the live pair. The rank reads the player's order (SeatPriority
+	// moves only on the Assign order, a zoning change and a demolition), never a step.
+	const FIntVector StationKey(B->Level, INDEX_NONE, B->Id);
+	int32 Filled = 0, Capacity = 0;
+	Sim->GetStationSeats(StationKey, Filled, Capacity);
+	const uint32 Seats = LatchServed('Q', (uint32)B->Id, PackSeats(Filled, Capacity));
+	const int32 Rank = Sim->GetSeatPriorityRank(StationKey);
+	// The line - idle, or online with its seats and its place in the order - is ONE latched value, so it changes at most once per
+	// FloorRealS whichever of its inputs moved (bit 31 online, bits 16-21 the rank + 1, bits 0-15 the seats).
+	const uint32 Want = bOnlineWant ? ((1u << 31) | ((uint32)FMath::Clamp(Rank + 1, 0, 63) << 16) | (Seats & 0xFFFFu)) : 0u;
+	const URHPowerLookSubsystem* PowerLook = GetPowerLook();
+	const uint32 Shown = PowerLook ? PowerLook->LatchValue(URHPowerLookSubsystem::MakeKey('S', (uint32)B->Id), Want) : Want;
+	if ((Shown >> 31) == 0u)
+	{
+		return FString::Printf(TEXT("%s IDLE - needs power and a livable floor"), *Provided->DisplayName.ToUpper());
+	}
+	int32 FilledShown = (int32)(Shown & 0xFFu);
+	int32 CapacityShown = (int32)((Shown >> 8) & 0xFFu);
+	if (CapacityShown == 0)
+	{
+		// Shown online with no served step seen yet (a module just finished, or first asked on a cut step): its own seats from the room
+		// row, none filled - never '0 of 0'.
+		CapacityShown = FMath::Max(1, Provided->SeatCount);
+		FilledShown = 0;
+	}
+	FString Line = FString::Printf(TEXT("SEATS: %d of %d staffed (x%.2f each)"), FilledShown, CapacityShown, Provided->YieldMul);
+	const int32 RankShown = (int32)((Shown >> 16) & 0x3Fu) - 1;
+	if (RankShown >= 0)
+	{
+		Line += FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), RankShown + 1);
+	}
+	return Line;
+}
+
+FString SRHCommandDeck::GetCellStationLine(const FIntVector& Key) const
+{
+	// A zoned work station cell (T4) or bay (BM-1): its seats and its place in the order. G1 r3: StationCapacity lists the cell only on a
+	// step its floor (or habitat network) is rated, and StationFilled moves with the per-step station set (a rationed module ahead of it
+	// in the order takes its colonists on the steps it is served), so the pair - its capacity 0 being 'NOT STAFFED' - is held like a
+	// module's (LatchServed), and the line with its rank is one latched value.
+	const URHSimWorldSubsystem* Sim = GetSim();
+	if (!Sim)
+	{
+		return FString();
+	}
+	const uint32 KeyHash = HashCombine(GetTypeHash(Key), 0x63656c6cu);
+	int32 Filled = 0, Capacity = 0;
+	Sim->GetStationSeats(Key, Filled, Capacity);
+	const uint32 Seats = LatchServed('J', KeyHash, PackSeats(Filled, Capacity));
+	const int32 Rank = Sim->GetSeatPriorityRank(Key);
+	const uint32 Want = ((uint32)FMath::Clamp(Rank + 1, 0, 63) << 16) | (Seats & 0xFFFFu);
+	const URHPowerLookSubsystem* PowerLook = GetPowerLook();
+	const uint32 Shown = PowerLook ? PowerLook->LatchValue(URHPowerLookSubsystem::MakeKey('K', KeyHash), Want) : Want;
+	const int32 FilledShown = (int32)(Shown & 0xFFu);
+	const int32 CapacityShown = (int32)((Shown >> 8) & 0xFFu);
+	const int32 RankShown = (int32)((Shown >> 16) & 0x3Fu) - 1;
+	FString Text = CapacityShown > 0
+		? FString::Printf(TEXT("SEATS: %d of %d staffed"), FilledShown, CapacityShown)
+		: FString(TEXT("NOT STAFFED - the floor is not rated livable yet"));
+	Text += RankShown >= 0
+		? FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), RankShown + 1)
+		: (Key.X == 0 ? FString(TEXT("\nstaffed after every underground seat")) : FString(TEXT("\nstaffed in dig order (shallow floors first)")));
+	return Text;
+}
+
+FString SRHCommandDeck::Debug_GetInspectText() const
+{
+	return GetInspectText().ToString();
+}
+
+bool SRHCommandDeck::IsSixtyRefusedShown(FString* OutWhy) const
+{
+	// G1 (N4): the sim's own era test, re-read at most four times a real second (the button's colour and tooltip ask every paint).
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS >= SixtyPollAtS)
+	{
+		SixtyPollAtS = NowS + 0.25;
+		const URHSimWorldSubsystem* Sim = GetSim();
+		FString Why;
+		bSixtyRefused = Sim && !Sim->CanEnterEraMode(Why);
+		if (bSixtyRefused)
+		{
+			SixtyWhy = Why; // the last refusal's words, kept while the latch below still shows it refused
+		}
+	}
+	// G1 r1: the dim and the tooltip follow the poll through the power helper's floor like every other shown state, so a refusal that
+	// comes and goes (a maintenance call, a survey) never changes the button more than once per FloorRealS.
+	const bool bShown = LatchHeld('X', 0u, bSixtyRefused);
+	if (OutWhy)
+	{
+		*OutWhy = bShown ? SixtyWhy : FString();
+	}
+	return bShown;
+}
+
 FText SRHCommandDeck::GetInspectText() const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
@@ -1745,16 +1973,8 @@ FText SRHCommandDeck::GetInspectText() const
 	const bool bStation = GetSelectedStationKey(StationKey);
 	if (Sim && Defs && Id == 0 && bStation)
 	{
-		// A zoned work station cell (T4): its seats and its place in the order.
-		int32 Filled = 0, Capacity = 0;
-		Sim->GetStationSeats(StationKey, Filled, Capacity);
-		FString Text = Capacity > 0
-			? FString::Printf(TEXT("SEATS: %d of %d staffed"), Filled, Capacity)
-			: FString(TEXT("NOT STAFFED - the floor is not rated livable yet"));
-		const int32 Rank = Sim->GetSeatPriorityRank(StationKey);
-		Text += Rank >= 0
-			? FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), Rank + 1)
-			: (StationKey.X == 0 ? FString(TEXT("\nstaffed after every underground seat")) : FString(TEXT("\nstaffed in dig order (shallow floors first)")));
+		// A zoned work station cell (T4): its seats and its place in the order. G1 r3: held and latched (GetCellStationLine).
+		FString Text = GetCellStationLine(StationKey);
 		Text += TEXT("\n(right-click or click ground to dismiss)");
 		return FText::FromString(Text);
 	}
@@ -1800,18 +2020,13 @@ FText SRHCommandDeck::GetInspectText() const
 	}
 	else
 	{
-		if (B->bManualOff)
-		{
-			Text += TEXT("\nSWITCHED OFF (manual) - zero draw, batches frozen");
-		}
-		else
+		// G1: the status line reads the held look (GetCardStatusLine), never this step's shed flag.
+		Text += TEXT("\n") + GetCardStatusLine(B->Id);
+		if (!B->bManualOff)
 		{
 			// D5a (placeholder copy, director review): a day-shift machine reads
 			// RESTING by night, and says what its shift is by day.
-			const bool bResting = B->bPowered && Sim->IsDayShiftResting(B->Id);
-			Text += !B->bPowered ? TEXT("\nSHED - unpowered (grid deficit; lowest-priority loads drop first)")
-				: (bResting ? TEXT("\nDAY SHIFT - resting until sunrise (idle draw, batch paused)") : TEXT("\nONLINE"));
-			if (B->bDayShift && !bResting)
+			if (B->bDayShift && !Sim->IsDayShiftResting(B->Id))
 			{
 				Text += TEXT("\nDAY SHIFT - works while the sun is up, rests at night");
 			}
@@ -1828,7 +2043,7 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\nRATED LIVABLE");
 			}
-			else if (!Sim->IsHabNetworkCirculated(B->Id))
+			else if (!LatchHeld('H', (uint32)B->Id, Sim->IsHabNetworkCirculatedHeld(B->Id))) // G1: the held circulation, latched
 			{
 				Text += TEXT("\nNOT LIVABLE - no air circulation: set an Air Filtration Station inside a bay");
 			}
@@ -1848,9 +2063,8 @@ FText SRHCommandDeck::GetInspectText() const
 			}
 		}
 		// Prefab stations (T4): seats, or why the module is idle.
-		if (const FRHRoomRow* Provided = Sim->GetProvidedRoom(*B, /*bRequireOnline*/ false))
+		if (Sim->GetProvidedRoom(*B, /*bRequireOnline*/ false))
 		{
-			const bool bOnline = Sim->GetProvidedRoom(*B, /*bRequireOnline*/ true) != nullptr;
 			if (Def && Def->DragSized)
 			{
 				const int32 Beds = URHSimWorldSubsystem::GetBedCount(*B);
@@ -1866,26 +2080,10 @@ FText SRHCommandDeck::GetInspectText() const
 				}
 				Text += TEXT("\ngrows by daylight - no grow-light power");
 			}
-			else if (Provided->Function == FName("Infirmary"))
-			{
-				Text += bOnline
-					? FString(TEXT("\nINFIRMARY ONLINE - one extra sol to restore rations"))
-					: FString(TEXT("\nINFIRMARY IDLE - needs power and a livable floor"));
-			}
-			else if (!bOnline)
-			{
-				Text += FString::Printf(TEXT("\n%s IDLE - needs power and a livable floor"), *Provided->DisplayName.ToUpper());
-			}
 			else
 			{
-				int32 Filled = 0, Capacity = 0;
-				Sim->GetStationSeats(FIntVector(B->Level, INDEX_NONE, B->Id), Filled, Capacity);
-				Text += FString::Printf(TEXT("\nSEATS: %d of %d staffed (x%.2f each)"), Filled, Capacity, Provided->YieldMul);
-				const int32 Rank = Sim->GetSeatPriorityRank(FIntVector(B->Level, INDEX_NONE, B->Id));
-				if (Rank >= 0)
-				{
-					Text += FString::Printf(TEXT("\nASSIGNED: #%d in the staff order"), Rank + 1);
-				}
+				// G1: the station's line reads the held state (GetCardStationLine), never this step's shed flag.
+				Text += TEXT("\n") + GetCardStationLine(B->Id);
 			}
 		}
 		if (B->BatchRemaining_h > 0.0)
@@ -1958,7 +2156,7 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\n  RATED LIVABLE");
 			}
-			else if (Sim->IsFloorSealedButSmall(B->Level))
+			else if (LatchHeld('F', (uint32)B->Level, Sim->IsFloorSealedButSmallHeld(B->Level))) // G1: the held circulation, latched
 			{
 				Text += FString::Printf(TEXT("\n  SEALED - carve %d more cell(s) to certify a habitat"), MinCells - Cells);
 			}

@@ -9,6 +9,8 @@
 #   bash scripts/unreal/rh_sandbox.sh opening      # a NEW GAME from sol 0 - no showcase colony, the guide from step 1
 #   bash scripts/unreal/rh_sandbox.sh midgame      # a real game at sol 28 (lean cargo): the next ship and the ice are yours
 #   bash scripts/unreal/rh_sandbox.sh late         # a real game at sol 62 (full cargo): Ice_B worked, round 5 of the ladder
+#   bash scripts/unreal/rh_sandbox.sh early        # a real game at sol 4.70 (full cargo): the first dry night, 60 sim-s before sunset (G1)
+#   bash scripts/unreal/rh_sandbox.sh vault        # a real game at sol 9.35 (full cargo): the guide's vault hint on its dry night (G1)
 #   LOW=1 bash scripts/unreal/rh_sandbox.sh        # 1280x720 + 30fps cap for a busy machine
 #   SOUND=1 bash scripts/unreal/rh_sandbox.sh      # with sound and the score (the listening test)
 #
@@ -53,13 +55,19 @@ opening)
   TITLE=""
   CMDS="r.setres ${RESX}x${RESY}w$EXTRA"
   ;;
-midgame|late)
-  # The crew-phase checkpoints (2026-10-17): games the RH.Playtest bot played
-  # from a fresh start and saved. rh_checkpoints.sh re-makes the save first if
-  # the code or data changed since it was made (a few minutes, once). It is
-  # loaded two seconds in, once the fresh colony and every visualizer are up;
-  # the save carries the bot's 16x, so the speed comes back to 1x after it.
-  SLOT="Midgame"; [ "$PRESET" = "late" ] && SLOT="Late"
+midgame|late|early|vault)
+  # The crew-phase checkpoints (2026-10-17), and G1's two early ones (2026-11-04):
+  # games the RH.Playtest bot played from a fresh start and saved. rh_checkpoints.sh
+  # re-makes the save first if the code or data changed since it was made (a few
+  # minutes, once). It is loaded two seconds in, once the fresh colony and every
+  # visualizer are up; the save carries the bot's 16x, so the speed comes back to
+  # 1x after it.
+  case "$PRESET" in
+  midgame) SLOT="Midgame" ;;
+  late)    SLOT="Late" ;;
+  early)   SLOT="Early" ;;
+  vault)   SLOT="Vault" ;;
+  esac
   bash "$PROJ_DIR/scripts/unreal/rh_checkpoints.sh" "$PRESET" || { echo "no checkpoint - not booting"; exit 1; }
   CMDS="r.setres ${RESX}x${RESY}w, RH.After 2 RH.Load $SLOT, RH.After 2.5 RH.SetSpeed 1, RH.After 3 RH.Floor 0, RH.After 3.5 RH.Cam 35 35 0.5$EXTRA"
   ;;
