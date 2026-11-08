@@ -3814,7 +3814,7 @@ Each answered a question G2a's workflows returned. None changes a rule beyond th
 - **Fix round 2's closing step, "A"** (2026-11-07 about 03:24 EST): `g2a_r2_mut_hyst`, spoiled by a person's mouse (121/4, TOUCHED), gets one counted re-run under a new label on the same frozen pair (`g2a_r2_mut_hyst2`, exact), then the review (workflow wf_838ff2c8-ef0). The orchestrator applied the same rule to fix round 3's mutations: a touched mutation run that is not exact may get one quiet re-run under a new label, named before it starts (`g2a_r3_mut_names2`).
 - **Fix round 3, "b"** (2026-11-07 about 15:15 EST): fix the review's two blocking findings now (the floor-row press inside the lost-hover protection; a cleared station bay's card closes) with the two wording misses (room display names; "Clear zone"), re-run the gate, review once (workflow wf_7039ee30-e99).
 - **Fix round 3's main-run bar, "A"** (2026-11-08 about 00:15 EST): `g2a_r3_click1` failed `cavern.drag` (124/1) while Universal Control input from another device changed the shown floor, with no ruling 26 signature. It stays on the record, not counted; one counted re-run on the same pair, `g2a_r3_click4` (125/0, untouched), takes its slot (workflow wf_7839aeac-7a6).
-- **Open:** Gate-D's wording review (A: hold it until the first outside build, recommended; B: review now) is still unanswered.
+- **Gate-D** was answered A on 2026-11-08 (about 00:55 EST): see "Director answer, 2026-11-08: Gate-D wording review held until the first outside build" below.
 
 ### Gate 2a's last review (round 3, 2026-11-08)
 
