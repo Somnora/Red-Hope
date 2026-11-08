@@ -3828,3 +3828,11 @@ Workflow wf_7839aeac-7a6 ran `g2a_r3_click4`, then the five read-only lenses onc
 - Stale comments: `FPress::Label` (`RHClickTest.cpp`) after F1, and `GetActionCardTitle` (`RHCommandDeck.cpp`) after round 3 (spec, code).
 - Tests: `check_mut.py`'s EXACT verdict cannot tell which `words.sample` clause failed (drop, credits and floor all fail `words.sample`); the "Clear zone" branch and the re-zone case have no failing proof, and the refused-clear notice is never read.
 - Gate records: F5's `g2a_r2_mut_hyst2` pmset correction places the Universal Control assertion after the section steps, though they ran inside it; P4's scanner totals leave out `g2a_r3_click4` (disclosed); the Machine bullet understates peak swap (about 85-88 percent during click4); the time `g2a_r3_click4` was named in notes.md was corrected by hand; an UnrealTraceServer left over from one run keeps writing to that run's log during the next, so log file times mislead sequence checks.
+
+### Director answer, 2026-11-08: Gate-D wording review held until the first outside build
+
+Asked on 2026-11-06 and repeated in later reports (A: hold the review until before the first build anyone outside the project plays, recommended; B: review now). James's bare "A" replies on 2026-11-06 (about 18:47), 2026-11-07 (about 03:24) and 2026-11-08 (about 00:15) answered other questions; this one names Gate-D.
+
+- **Gate-D A** (2026-11-08 about 00:55 EST, "Gate-D A"): the framing review of all placeholder wording waits until before the first outside build. It covers every row added since the 2026-10-21 final review (G1's O1-O7, G2a's PW rows, every later gate's PLACEHOLDER rows) and the 126 `RH_Config.csv` rows tagged "Placeholder, director review".
+- **Until then:** every new or changed player-facing string is marked PLACEHOLDER and listed in `docs/qa/2026-10-15/gate-d-wording.md`; wellbeing wording stays prevention-framed; nothing ships before the review (the mental-health directive). Line answers given before then (the G1 wording card's O1 B, O3 B, O7 B, POWER C, built in G2b) are placeholders too and return to the review. Gates whose design asks for James's presentation review under the directive (D19, D20, D22) still get it at their own gate.
+- Logged also at the top of `docs/qa/2026-10-15/gate-d-wording.md`.
