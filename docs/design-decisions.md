@@ -3469,7 +3469,7 @@ James's answers of 2026-11-04 ("all A, go on gate 1": D1-D8 and D21 all A, `livi
   - **(r2) The fold header's `MAKING` and `USING` move at most once per 3.2 real s** outside rationing (one take with the net), where HEAD's ticked every frame.
   - **(r2) For the orchestrator:** the rulings round 1 asked for stand (proof bar 1 per transition; the means' time constant and whole-cycle shares; R3 as an A-B-A inside the floor), plus round 2's shortfall mean in place of the net mean (the deviations). The frame check's 45-minute bound is read by a counted pair's first window, as in rounds 0 and 1 (the reviewers' minor; round 2's numbers below).
 
-### Gate 2a, plain words: what it settles, and where it chose (2026-11, not yet committed)
+### Gate 2a, plain words: what it settles, and where it chose (2026-11-06 to 2026-11-08)
 
 James's go of 2026-11-06 about 07:15 EST, verbatim "A, go on G2a" (option A of the spec's G2-Q1: two parts, each with its own go) authorises Part A only: items A0-A8 of `/Volumes/Unreal/red_hope/wip-backups/g2/g2-spec.md` section 3, under its section 2 rules, section 5's out-of-scope list and section 6's Part A proof bar. Not Part B (the alert queue, the LOG fold, golden cards, the deck lines for the engine's debug text, 60x when clear, Space after an auto-drop), not G3-G16, the colony seed, T1, balance pass 2, the sim seat hold (G7), and not retiring ruling 26. Built from the brief `/Volumes/Unreal/red_hope/wip-backups/g2/g2a-brief.md` at HEAD `9e7a367` (save v60) under the orchestrator's rulings 7, 22, 23 and 26 as the builder prompt restates it; the clickfix plan `/Volumes/Unreal/red_hope/wip-backups/clickfix/clickfix-plan.md` for A0; G1's Follow-ups (the (r3) review) for A1. Why (the living-colony design's 2.2 and 2.3): internal names on screen (`ChargePad`, `Build IceDrill`, `batch -> ...`, `SpoilChemicals`), refusal reasons with ids (`Stockpile #11`), no construction stage, three-decimal credits, an unsigned floor and `(s)` plurals, the dropped press of ruling 26, and G1's two `flash.lab` test gaps. Work folder: `/Volumes/Unreal/red_hope/wip-backups/g2/work-g2a` (`r0/notes.md`, `r1/notes.md`, `r2/notes.md` and `r3/notes.md` the run-by-run notes of round 0 and fix rounds 1-3, `runs.log` every run's quiet-start record, `final/` the frozen final pair and sources (round 3's; round 2's in `final_r2/`, round 1's in `final_r1/`), `cap/` the capture kit, `checks/` the taught scanners). Fix round 2 (James's "A" of 2026-11-06 about 18:47 EST, after review round 1) fixes the null target in the rejection notice and the press that loses its hover, and re-runs the gate (its notes are marked (r2)). Fix round 3 (James's "b" of 2026-11-07 about 15:15 EST, after round 2's review) covers the floor-row press, closes the cleared-room station card, names rooms by their rows and a clear as `Clear zone`, takes four small items, and re-runs the gate (its notes are marked (r3); its gate section is the gate of record).
 - **What it settles, item by item (anchors at the final source).**
@@ -3778,3 +3778,53 @@ James's go of 2026-11-06 about 07:15 EST, verbatim "A, go on G2a" (option A of t
     - The tests lens: round 2's P4 bullet counts "round 2's 23 click logs" from a scan taken before `g2a_r2_mut_hyst2` (24 now); round 2's bullet is left as written (carried over), and round 3's own scanner pass is in its gate section.
     - The presentation lens: round 2's only frame of the notice shows a refusal no player can get (`REJECTED Dig tunnel: Floor 0 is not reached - bore a shaft that deep first`, from `RH.DigTunnel 0 ...`; the tunnel tool anchors only below the surface), and PW9 lists it beside the reachable forms; mark it cheat-only in PW9 and the captures note, or make a frame of the normal-play refusal.
 
+
+### Director answers, 2026-11-06: G2 in two parts, and the robot operator (D9 A, D10 A)
+
+Logged twice, as the handoff asks: here and in `/Volumes/Unreal/red_hope/wip-backups/living-colony/living-colony-design.md` section 8.1. Committed with the G2a handoff, because nothing is committed while a gate runs.
+
+- **G2-Q1 A** (about 07:15 EST, "A, go on G2a"): gate 2 runs as two parts, each with its own go, commit and hand check. G2a "Plain words" (`/Volumes/Unreal/red_hope/wip-backups/g2/g2-spec.md` section 3) went first, launched as workflow wf_16ed9c36-9c3. G2b "Messages that stay on screen" (section 4) needs its own go. The same message was the go for G2a only.
+- **D9 A** (about 11:00 EST, "D9 A, D10 A"): a robot operator is a dedicated Operator robot (RC-O) in the starting fleet, using the existing walker and Operate clip. A load repair grants one to v60 saves. When no RC-O is working (none yet, one halted by wear until the Maintenance robot reaches it, or one out of charge away from a pad), any idle robot can operate the Borer at a reduced rate (placeholder 0.6), so the vault never waits for a ship.
+- **D10 A** (same message): only the Borer stops without an operator. Every other machine runs at today's rate, and an operator makes it faster. Nothing can spiral and the balance holds.
+- **What it settles for G7** ("A robot runs the Borer", living-colony design section 4): its data rows follow D9 A (an RC-O row in `RH_Robots.csv`, an OperatorBot row in `RH_ManifestItems.csv`, a DataTable sync); its tests include `-borerop` with the idle-robot fallback. G7 still waits on G4, James's accepted balance baseline (D7 A) and his go.
+
+### Director answers, 2026-11-06: walking (W1 A, W2 A)
+
+Also in `/Volumes/Unreal/red_hope/wip-backups/living-colony/living-colony-design.md` section 8.2, with the code reading behind them.
+
+- **James's report** (about 15:15 EST, watching a G2a flash run): robots' feet move too fast for their stride and do not keep up with their pace; crew strides are fine but they sometimes walk with their legs too far apart; figures still walk through objects.
+- **W1 A** (about 15:35 EST, "W1 A, W2 A"): a new presentation-only gate, GW "Walking that looks right", right after G2b and before G3. Robots get a long low-gravity lope matched to their sim speeds; crew walk with their feet under them (the walk re-baked for the 20 crew models); crew outside walk round buildings, sites and machines; figures stop passing through each other. The Borer entrance stays with G3 (D4 A) and robots inside the Borer with G8. No sim change. James judges the look on captures before the commit.
+- **W2 A** (same message): the robots' sim speeds stay as they are (`docs/data/RH_Robots.csv`, 2.5 to 7 m/s).
+
+### Director answers, 2026-11-06: G1's placeholder lines (O1 B, O3 B, O7 B, POWER C)
+
+From the vault note "G1 wording card" (/Users/jamesmcshane/Desktop/obsidian-vault/the-eye/Projects/red_hope/progress/G1 wording card.md). Built in G2b; the brief addendum is `/Volumes/Unreal/red_hope/wip-backups/g2/g2b-addendum-g1-wording.md`.
+
+- **O1 B** (about 15:45 EST, "O1 B, O3 B, O7 B, POWER C"): the POWER tile reads "70% served" instead of "rationing 70%".
+- **O3 B**: a rationed machine's card reads "RATIONED - running about 70% of the time (not enough power for everything)".
+- **O7 B**: the Earth panel reads "At 45 tension Earth makes a demand. At 75 it pushes a neighbour to embargo you."
+- **POWER C**: no served percentage until the share has settled, then the number; the tile and the header agree. While settling the tile reads "rationing" and the header's second line "MEASURING" (orchestrator's placeholder; James may override).
+- O2, O4, O5 and O6 stay as they are. All of these remain placeholder wording until the Gate-D review.
+
+### Director answers, 2026-11-06 to 2026-11-08: closing G2a
+
+Each answered a question G2a's workflows returned. None changes a rule beyond the round it names.
+
+- **Fix round 2, "A"** (2026-11-06 about 18:47 EST): fix the "None" target and make the click harness survive a press that loses its hover, then re-run the gate on a quiet Mac and review once (workflow wf_a50e3085-92b).
+- **Fix round 2's closing step, "A"** (2026-11-07 about 03:24 EST): `g2a_r2_mut_hyst`, spoiled by a person's mouse (121/4, TOUCHED), gets one counted re-run under a new label on the same frozen pair (`g2a_r2_mut_hyst2`, exact), then the review (workflow wf_838ff2c8-ef0). The orchestrator applied the same rule to fix round 3's mutations: a touched mutation run that is not exact may get one quiet re-run under a new label, named before it starts (`g2a_r3_mut_names2`).
+- **Fix round 3, "b"** (2026-11-07 about 15:15 EST): fix the review's two blocking findings now (the floor-row press inside the lost-hover protection; a cleared station bay's card closes) with the two wording misses (room display names; "Clear zone"), re-run the gate, review once (workflow wf_7039ee30-e99).
+- **Fix round 3's main-run bar, "A"** (2026-11-08 about 00:15 EST): `g2a_r3_click1` failed `cavern.drag` (124/1) while Universal Control input from another device changed the shown floor, with no ruling 26 signature. It stays on the record, not counted; one counted re-run on the same pair, `g2a_r3_click4` (125/0, untouched), takes its slot (workflow wf_7839aeac-7a6).
+- **Open:** Gate-D's wording review (A: hold it until the first outside build, recommended; B: review now) is still unanswered.
+
+### Gate 2a's last review (round 3, 2026-11-08)
+
+Workflow wf_7839aeac-7a6 ran `g2a_r3_click4`, then the five read-only lenses once: spec, code, tests, gate and presentation PASS, 0 blocking. The orchestrator then ran `/Volumes/Unreal/red_hope/wip-backups/g2/commit-g2a/verify.sh` (fingerprint 365c7bf4, prefix g2a_r3, the counted names run `g2a_r3_mut_names2`): 0 failures. Full reviews: `/Volumes/Unreal/red_hope/wip-backups/g2/fix3/r3-reviews.json`. The minors, for G2b unless noted:
+
+- On the frame a Clear or re-zone lands, the station card paints once with round 2's fallback title before it closes. The controller ticks (TG_PrePhysics) before the sim's tickable world subsystem runs the queued order, so the room rule sees the old room for one frame. The entry's "no longer reached in play" overstates; fix by dropping the selection on the sim's room change or in the deck's getters (four lenses).
+- The cell half of the room rule (`RHPlayerController.cpp`, the selected-cell test) has no check; `g2a_mut_drop` exercises only the bay (four lenses).
+- The zoning confirm and hint still print room keys ("Zoning transmitted: %s on habitat bay %d"), now unlike the uplink row; HAB-10, present at HEAD (spec, presentation).
+- QuickLoad clears the building selection but not the bay or cell selection; present at HEAD (code).
+- The floor-row press's capture retry does not check that the row is still under the pointer (code).
+- Stale comments: `FPress::Label` (`RHClickTest.cpp`) after F1, and `GetActionCardTitle` (`RHCommandDeck.cpp`) after round 3 (spec, code).
+- Tests: `check_mut.py`'s EXACT verdict cannot tell which `words.sample` clause failed (drop, credits and floor all fail `words.sample`); the "Clear zone" branch and the re-zone case have no failing proof, and the refused-clear notice is never read.
+- Gate records: F5's `g2a_r2_mut_hyst2` pmset correction places the Universal Control assertion after the section steps, though they ran inside it; P4's scanner totals leave out `g2a_r3_click4` (disclosed); the Machine bullet understates peak swap (about 85-88 percent during click4); the time `g2a_r3_click4` was named in notes.md was corrected by hand; an UnrealTraceServer left over from one run keeps writing to that run's log during the next, so log file times mislead sequence checks.
