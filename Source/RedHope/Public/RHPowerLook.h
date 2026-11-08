@@ -102,6 +102,7 @@ public:
 	// cleared while paused). Either way latched through the floor (G1 r1).
 	uint32 LatchWorst(uint64 Key, uint32 Want) const;
 	static uint64 MakeKey(uint8 Kind, uint32 Value) { return ((uint64)Kind << 32) | (uint64)Value; }
+	bool Debug_HasLatch(uint64 Key) const { return BoolLatches.Contains(Key) || Worsts.Contains(Key); } // G2a flash.lab.cold: is the key alive (not yet pruned)
 
 private:
 	struct FLookState

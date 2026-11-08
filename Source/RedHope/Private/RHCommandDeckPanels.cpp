@@ -54,15 +54,11 @@ namespace D = RHDeck;
 
 namespace
 {
-	FString ResourceLabel(FName R)
+	// G2a: the deck's short resource label (RHOrder::ResourceShort: "Structural", "Spare parts", "Habitat segments", else the CSV display
+	// name; never the raw key, which showed "SpoilChemicals" on the market rows).
+	FString ResourceLabel(const URHDefinitionsSubsystem* Defs, FName R)
 	{
-		static const TMap<FName, FString> Names = {
-			{ FName("Struct"), TEXT("Structural") },
-			{ FName("SpareParts"), TEXT("Spare parts") },
-			{ FName("HabSegment"), TEXT("Habitat segments") },
-		};
-		const FString* N = Names.Find(R);
-		return N ? *N : R.ToString();
+		return RHOrder::ResourceShort(Defs, R);
 	}
 
 	FName ResourceIcon(FName R)
@@ -114,12 +110,12 @@ namespace
 	FText Txt(const FString& S) { return FText::FromString(S); }
 
 	// "Ice:150;Struct:100" (the data's lot format) -> "150 kg ice, 100 kg structural".
-	FString LotWords(const FString& Lot)
+	FString LotWords(const URHDefinitionsSubsystem* Defs, const FString& Lot)
 	{
 		TArray<FString> Out;
 		for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Lot))
 		{
-			Out.Add(FString::Printf(TEXT("%.0f kg %s"), Item.Value, *ResourceLabel(Item.Key).ToLower()));
+			Out.Add(FString::Printf(TEXT("%.0f kg %s"), Item.Value, *ResourceLabel(Defs, Item.Key).ToLower()));
 		}
 		return FString::Join(Out, TEXT(", "));
 	}
@@ -332,7 +328,7 @@ FText SRHCommandDeck::GetPowerFoldHeaderText() const
 	// G1 r2: rationing exactly while the tile is (the shown net's kind), its short the running shortfall rounded up (never 0 W).
 	if (Look && Look->IsNetMeanShown())
 	{
-		return Txt(FString::Printf(TEXT("RATIONING  -  %.0f W SHORT  -  %.0f%% SERVED"), FMath::Max(0.0, -Look->GetNetW()), ShownServedPct(Look)));
+		return Txt(FString::Printf(TEXT("RATIONING  -  %.0f W SHORT\n%.0f%% SERVED"), FMath::Max(0.0, -Look->GetNetW()), ShownServedPct(Look))); // G2a (A8, PLACEHOLDER, gate-d-wording PW20): two explicit lines, never a wrap
 	}
 	// G1 r2: MAKING and USING from one take: the generation and the net the helper took at the same instant (USING = MAKING less the
 	// net, HEAD's live load at that instant), at most once per floor, so neither drifts with the sun and snaps back. Round 1 printed the
@@ -871,7 +867,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			})
 			[
 				BarRow(
-					MakeAttributeLambda([Line]() { FName R; double H, N; return Line(R, H, N) ? Txt(ResourceLabel(R)) : FText::GetEmpty(); }),
+					MakeAttributeLambda([this, Line]() { FName R; double H, N; return Line(R, H, N) ? Txt(ResourceLabel(GetDefs(), R)) : FText::GetEmpty(); }),
 					MakeAttributeLambda([Line]() { FName R; double H, N; return Line(R, H, N) ? Txt(FString::Printf(TEXT("%s / %s"), *Mass(FMath::Min(H, N)), *Mass(N))) : FText::GetEmpty(); }),
 					MakeAttributeLambda([Line]() { FName R; double H, N; return TOptional<float>(Line(R, H, N) && N > 0.0 ? (float)FMath::Clamp(H / N, 0.0, 1.0) : 0.f); }),
 					MakeAttributeLambda([Line]() { FName R; double H, N; return FSlateColor(Line(R, H, N) && H >= N ? D::Green : D::Amber); }))
@@ -899,12 +895,12 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			S->GetDeskOrders(Desk);
 			const bool bDesk = Desk.ContainsByPredicate([](const FRHDeskOrder& D) { return D.Dir == (uint8)URHSimWorldSubsystem::ERHDeskDir::ToMarks; });
 			return Txt(FString::Printf(TEXT("%s cr of the %s cr balance is set aside for %s waiting to clear, so it cannot buy manifest items or fly yet."),
-				*URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()),
+				*RHOrder::CreditsText(S->GetCreditReservedMcr()), *RHOrder::CreditsText(S->GetCreditBalanceMcr()),
 				bDesk ? TEXT("market orders and exchanges") : TEXT("market orders")));
 		})
 		[
 			BarRow(Txt(TEXT("Credits")),
-				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetManifestCostMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetSpendableMcr()))) : FText::GetEmpty(); }),
+				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return S ? Txt(FString::Printf(TEXT("%s / %s cr"), *RHOrder::CreditsText(S->GetManifestCostMcr()), *RHOrder::CreditsText(S->GetSpendableMcr()))) : FText::GetEmpty(); }),
 				MakeAttributeLambda([this]() { const URHSimWorldSubsystem* S = GetSim(); return TOptional<float>(S && S->GetSpendableMcr() > 0 ? (float)FMath::Clamp((double)S->GetManifestCostMcr() / (double)S->GetSpendableMcr(), 0.0, 1.0) : 0.f); }),
 				FSlateColor(D::Amber))
 		]
@@ -945,7 +941,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 					+ SVerticalBox::Slot().AutoHeight()
 					[
 						SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim).AutoWrapText(true)
-						.Text(Txt(FString::Printf(TEXT("%s  -  %s cr  -  %s"), *Mass(ItemKg), *URHSimWorldSubsystem::FormatCredits(Row.Price_mcr), *Row.Effect)))
+						.Text(Txt(FString::Printf(TEXT("%s  -  %s cr  -  %s"), *Mass(ItemKg), *RHOrder::CreditsText(Row.Price_mcr), *Row.Effect)))
 					]
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.f, 0.f, 0.f, 0.f)
@@ -992,11 +988,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 			TArray<TPair<FName, double>> Bill;
 			S->GetLaunchBill(Bill);
 			FString Owed;
-			for (const auto& B : Bill) { Owed += FString::Printf(TEXT("%s%s %s"), Owed.IsEmpty() ? TEXT("") : TEXT(", "), *B.Key.ToString(), *Mass(B.Value)); }
+			for (const auto& B : Bill) { Owed += FString::Printf(TEXT("%s%s %s"), Owed.IsEmpty() ? TEXT("") : TEXT(", "), *RHOrder::ResourceName(GetDefs(), B.Key), *Mass(B.Value)); }
 			double Sales = 0.0;
 			for (const FRHExportLine& X : S->GetExportLines()) { Sales += (double)X.Kg; }
 			return Txt(FString::Printf(TEXT("Owed at launch: %s\nOutbound %s of the ship's %s; sales %s cr"), Owed.IsEmpty() ? TEXT("nothing") : *Owed,
-				*Mass(S->GetLaunchBillTotalKg() + Sales), *Mass(S->GetShipMassCapKg()), *URHSimWorldSubsystem::FormatCredits(S->GetExportValueMcr())));
+				*Mass(S->GetLaunchBillTotalKg() + Sales), *Mass(S->GetShipMassCapKg()), *RHOrder::CreditsText(S->GetExportValueMcr())));
 		})
 	];
 	if (const URHDefinitionsSubsystem* Defs = GetDefs())
@@ -1018,7 +1014,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 						const int64 Quote = S->GetEarthPriceMcrPerKg(Res);
 						const FRHExportLine* Line = S->GetExportLines().FindByPredicate([Res](const FRHExportLine& X) { return X.Resource == Res; });
 						const FString Listed = Line ? FString::Printf(TEXT("  -  selling %s at %s cr/kg"), *Mass(Line->Kg), *URHSimWorldSubsystem::FormatCredits(Line->PriceMcrPerKg)) : FString();
-						return Txt(FString::Printf(TEXT("%s: %s%s"), *Res.ToString(),
+						return Txt(FString::Printf(TEXT("%s: %s%s"), *RHOrder::ResourceName(GetDefs(), Res),
 							Quote > 0 ? *FString::Printf(TEXT("%s cr/kg"), *URHSimWorldSubsystem::FormatCredits(Quote)) : TEXT("Earth will not buy at today's price"), *Listed));
 					})
 				]
@@ -1079,15 +1075,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildObjectivePanel()
 	Body->AddSlot().AutoHeight().Padding(0.f, 6.f, 0.f, 0.f)
 	[
 		SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::TextDim)
-		.Text_Lambda([this]()
-		{
-			const URHSimWorldSubsystem* S = GetSim();
-			if (!S) { return FText::GetEmpty(); }
-			const int64 Award = S->GetAwardMassKg() > 0.0 ? FMath::FloorToInt64(S->GetAwardMassKg() * S->GetAwardMcrPerKg()) : 0;
-			return Txt(Award > 0
-				? FString::Printf(TEXT("Earth credit: %s cr (this round's award %s cr)"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(Award))
-				: FString::Printf(TEXT("Earth credit: %s cr"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr())));
-		})
+		.Text_Lambda([this]() { return Txt(GetEarthCreditLine()); })
 	];
 
 	// The Phase 1 exit, permanent once earned.
@@ -1491,6 +1479,27 @@ bool SRHCommandDeck::IsResearchBarShown() const
 	return S && LatchServed('A', 0u, S->IsResearchAccruing() ? 1u : 0u) != 0u;
 }
 
+FString SRHCommandDeck::GetRosterHomeText(int32 ColonistId) const
+{
+	// G2a (A7, PLACEHOLDER, gate-d-wording PW18): the floor reads one way everywhere, signed ("floor -1" for the first floor down, as the crew
+	// lines say it); HEAD printed its absolute value.
+	const URHSimWorldSubsystem* S = GetSim();
+	const FRHColonist* C = S ? S->FindColonist(ColonistId) : nullptr;
+	if (!C) { return FString(); }
+	return C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), C->HomeLevel);
+}
+
+FString SRHCommandDeck::GetEarthCreditLine() const
+{
+	// E2b: the balance, and this round's award once a quota is met. G2a (A7, PLACEHOLDER, gate-d-wording PW17): whole credits.
+	const URHSimWorldSubsystem* S = GetSim();
+	if (!S) { return FString(); }
+	const int64 Award = S->GetAwardMassKg() > 0.0 ? FMath::FloorToInt64(S->GetAwardMassKg() * S->GetAwardMcrPerKg()) : 0;
+	return Award > 0
+		? FString::Printf(TEXT("Earth credit: %s cr (this round's award %s cr)"), *RHOrder::CreditsText(S->GetCreditBalanceMcr()), *RHOrder::CreditsText(Award))
+		: FString::Printf(TEXT("Earth credit: %s cr"), *RHOrder::CreditsText(S->GetCreditBalanceMcr()));
+}
+
 FString SRHCommandDeck::GetRosterPostLine(int32 ColonistId) const
 {
 	// A roster row's right-hand text: short rations, else the home and the post.
@@ -1511,7 +1520,7 @@ FString SRHCommandDeck::GetRosterPostLine(int32 ColonistId) const
 	const uint32 JobCode = LiveJob == NLab ? 3u : (LiveJob == NWorkstation ? 2u : (LiveJob == NGarden ? 1u : (LiveJob.IsNone() ? 0u : 4u)));
 	const uint32 JobShown = JobCode == 4u ? 4u : LatchServed('O', (uint32)C->Id, JobCode);
 	const FName Job = JobShown == 4u ? LiveJob : (JobShown == 3u ? NLab : (JobShown == 2u ? NWorkstation : (JobShown == 1u ? NGarden : FName(NAME_None))));
-	const FString Home = C->HomeHab != 0 ? FString(TEXT("surface habitat")) : FString::Printf(TEXT("floor %d"), FMath::Abs(C->HomeLevel));
+	const FString Home = GetRosterHomeText(C->Id);
 	return FString::Printf(TEXT("%s%s%s"), *Home,
 		Job.IsNone() ? TEXT("") : TEXT("  -  "), Job.IsNone() ? TEXT("") : *Job.ToString().ToLower());
 }
@@ -2732,7 +2741,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPoliticsPanel()
 						[
 							SNew(STextBlock).Font(D::Body(8)).ColorAndOpacity(D::TextDim)
 							.AutoWrapText(true)
-							.Text(Txt(FString::Printf(TEXT("%.0f km away  -  trades %s for your %s"), Row.DistanceKm, *LotWords(Row.ExportLot), *LotWords(Row.ImportLot))))
+							.Text(Txt(FString::Printf(TEXT("%.0f km away  -  trades %s for your %s"), Row.DistanceKm, *LotWords(GetDefs(), Row.ExportLot), *LotWords(GetDefs(), Row.ImportLot))))
 						]
 						// E6 (minimal; E8 is the full panel): the pact - its state, and SIGN (the sim's CanSignPact greys it, with the reason on a dim
 						// line under the row and in its tooltip, as E5's issue button does) or BREAK (its cost in the tooltip) - then any tariff this
@@ -3117,15 +3126,15 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCurrencyBlock()
 						const URHSimWorldSubsystem* S = GetSim();
 						if (!S) { return FText::GetEmpty(); }
 						return Txt(FString::Printf(TEXT("Credits: %s spendable, %s set aside for orders and exchanges waiting to clear.\nMarks: %s spendable, %s set aside."),
-							*URHSimWorldSubsystem::FormatCredits(S->GetSpendableMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetCreditReservedMcr()),
-							*URHSimWorldSubsystem::FormatCredits(S->GetSpendableMmk()), *URHSimWorldSubsystem::FormatCredits(S->GetMarkReservedMmk())));
+							*RHOrder::CreditsText(S->GetSpendableMcr()), *RHOrder::CreditsText(S->GetCreditReservedMcr()),
+							*RHOrder::CreditsText(S->GetSpendableMmk()), *RHOrder::CreditsText(S->GetMarkReservedMmk())));
 					})
 					[
 						SNew(STextBlock).Font(D::Value(9)).ColorAndOpacity(D::Text)
 						.Text_Lambda([this]()
 						{
 							const URHSimWorldSubsystem* S = GetSim();
-							return S ? Txt(FString::Printf(TEXT("Credits %s    Marks %s"), *URHSimWorldSubsystem::FormatCredits(S->GetCreditBalanceMcr()), *URHSimWorldSubsystem::FormatCredits(S->GetMarkBalance())))
+							return S ? Txt(FString::Printf(TEXT("Credits %s    Marks %s"), *RHOrder::CreditsText(S->GetCreditBalanceMcr()), *RHOrder::CreditsText(S->GetMarkBalance())))
 								: FText::GetEmpty();
 						})
 					]
@@ -3224,7 +3233,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCurrencyBlock()
 						const int64 Keep = 10000 - S->GetDeskSpreadBp();
 						const int64 Milli = DeskDraftAmount * 1000;
 						const int64 Out = bDeskDraftToMarks ? Milli * 1000 * Keep / (Rate * 10000) : Milli * Rate * Keep / (1000 * 10000);
-						return Txt(FString::Printf(TEXT("Draft: %s - about %s %s at today's rate, less the spread."), *What, *URHSimWorldSubsystem::FormatCredits(Out), bDeskDraftToMarks ? TEXT("marks") : TEXT("credits")));
+						return Txt(FString::Printf(TEXT("Draft: %s - about %s %s at today's rate, less the spread."), *What, *RHOrder::CreditsText(Out), bDeskDraftToMarks ? TEXT("marks") : TEXT("credits")));
 					})
 				]
 			]
@@ -3248,7 +3257,7 @@ FReply SRHCommandDeck::HandleRivalVerb(FName Verb, FName Target)
 	Sim->EnqueueCommand(Cmd);
 	if (PC.IsValid())
 	{
-		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s"), *RHOrder::VerbText(Verb), *RHOrder::TargetText(GetDefs(), Target)), D::Teal);
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s"), *RHOrder::OrderText(GetDefs(), Verb, Target)), D::Teal); // G2a r2: through OrderText (PW24)
 	}
 	return FReply::Handled();
 }
@@ -3269,7 +3278,7 @@ FReply SRHCommandDeck::HandleTreaty(FName Rival, bool bSign)
 	Sim->EnqueueCommand(Cmd);
 	if (PC.IsValid())
 	{
-		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s %s (%s)"), *RHOrder::VerbText(Cmd.Verb), *RHOrder::TargetText(GetDefs(), Rival), bSign ? TEXT("sign") : TEXT("break")), D::Teal);
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s (%s)"), *RHOrder::OrderText(GetDefs(), Cmd.Verb, Rival), bSign ? TEXT("sign") : TEXT("break")), D::Teal); // G2a r2: through OrderText (PW24)
 	}
 	return FReply::Handled();
 }
@@ -3297,6 +3306,49 @@ FString SRHCommandDeck::DraftOrderText(FName Rival) const
 		}
 	}
 	return Text;
+}
+
+// G2a r1 (PLACEHOLDER, gate-d-wording PW21): the draft as the player reads it on the card and in the SEND confirm, "buy 100 kg Hydrogen and
+// sell 100 kg Ice" (the buys, then the sells, each in DraftOrderText's order, every resource by its display name), never the console's order
+// form "Hydrogen:100;Ice:-100", which DraftOrderText keeps for the command and for CanPlaceOrder. Text is DraftOrderText(Rival): the words are
+// made again only when it changes (the card's line is read every frame), and the reference stays good until the next call.
+const FString& SRHCommandDeck::DraftOrderWords(FName Rival, const FString& Text) const
+{
+	TPair<FString, FString>& Cached = DraftWordsCache.FindOrAdd(Rival);
+	if (Cached.Key.Equals(Text, ESearchCase::CaseSensitive))
+	{
+		return Cached.Value;
+	}
+	Cached.Key = Text;
+	Cached.Value.Reset();
+	const TMap<FName, int32>* Draft = OrderDrafts.Find(Rival);
+	if (!Draft)
+	{
+		return Cached.Value;
+	}
+	TArray<FName> Keys;
+	Draft->GetKeys(Keys);
+	Keys.Sort([](const FName& A, const FName& B) { return A.ToString().Compare(B.ToString(), ESearchCase::CaseSensitive) < 0; });
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	TArray<FString> Buys, Sells;
+	for (const FName& K : Keys)
+	{
+		const int32 Kg = Draft->FindRef(K);
+		if (Kg != 0)
+		{
+			(Kg > 0 ? Buys : Sells).Add(FString::Printf(TEXT("%d kg %s"), FMath::Abs(Kg), *RHOrder::ResourceName(Defs, K)));
+		}
+	}
+	FString& Words = Cached.Value;
+	if (Buys.Num() > 0)
+	{
+		Words = TEXT("buy ") + FString::Join(Buys, TEXT(", "));
+	}
+	if (Sells.Num() > 0)
+	{
+		Words += (Words.IsEmpty() ? TEXT("sell ") : TEXT(" and sell ")) + FString::Join(Sells, TEXT(", "));
+	}
+	return Words;
 }
 
 TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRivalRow& Row)
@@ -3358,7 +3410,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			{
 				const URHSimWorldSubsystem* S = GetSim();
 				if (!S) { return FText::GetEmpty(); }
-				return Txt(FString::Printf(TEXT("%s  %s %s  (they hold %d kg)"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res, S->GetRivalRegionId(RowName))),
+				return Txt(FString::Printf(TEXT("%s  %s %s  (they hold %d kg)"), *ResourceLabel(GetDefs(), Res), *URHSimWorldSubsystem::FormatCredits(S->GetMarketPriceMcr(Res, S->GetRivalRegionId(RowName))),
 					S->IsMarketInMarks() ? TEXT("marks/kg") : TEXT("cr/kg"), FMath::Max(0, S->GetRivalStoreKg(RowName, Res))));
 			})
 		];
@@ -3377,14 +3429,14 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			]
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
 			[
-				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: buy 100 kg more %s from them (or sell 100 kg fewer)."), *ResourceLabel(Res).ToLower())))
+				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: buy 100 kg more %s from them (or sell 100 kg fewer)."), *ResourceLabel(GetDefs(), Res).ToLower())))
 				[
 					D::Button(Txt(TEXT("Buy +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderNudge, RowName, Res, 100))
 				]
 			]
 			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.f, 0.f, 0.f, 0.f)
 			[
-				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: sell 100 kg more %s to them (or buy 100 kg fewer)."), *ResourceLabel(Res).ToLower())))
+				SNew(SBox).ToolTipText(Txt(FString::Printf(TEXT("Draft: sell 100 kg more %s to them (or buy 100 kg fewer)."), *ResourceLabel(GetDefs(), Res).ToLower())))
 				[
 					D::Button(Txt(TEXT("Sell +100")), FOnClicked::CreateSP(this, &SRHCommandDeck::HandleOrderNudge, RowName, Res, -100))
 				]
@@ -3409,11 +3461,11 @@ TSharedRef<SWidget> SRHCommandDeck::BuildMarketCard(FName RowName, const FRHRiva
 			uint8 Unit = 0;
 			if (!S->CanPlaceOrder(RowName, Text, Why, &Reserve, &Unit))
 			{
-				return Txt(FString::Printf(TEXT("Draft %s - cannot be sent: %s"), *Text, *Why));
+				return Txt(FString::Printf(TEXT("Draft: %s - cannot be sent: %s"), *DraftOrderWords(RowName, Text), *Why)); // G2a r1 (PW21): in words
 			}
 			const int32 Sol = C ? FMath::FloorToInt32((C->GetSimSecondsTotal() + S->GetOrderLagSeconds()) / (double)URHSimClockSubsystem::SolLengthSimSeconds) : 0;
 			// E5: a bloc member's order is set aside in marks; any other after the issue in credits, converted at the rate.
-			return Txt(FString::Printf(TEXT("Draft %s - it may cost up to %s %s net, set aside until the market fills it at the end of sol %d."), *Text, *URHSimWorldSubsystem::FormatCredits(Reserve),
+			return Txt(FString::Printf(TEXT("Draft: %s - it may cost up to %s %s net, set aside until the market fills it at the end of sol %d."), *DraftOrderWords(RowName, Text), *RHOrder::CreditsText(Reserve),
 				Unit == 1 ? TEXT("marks") : (Unit == 2 ? TEXT("cr (converted at the rate)") : TEXT("cr")), Sol));
 		})
 	];
@@ -3502,10 +3554,12 @@ FReply SRHCommandDeck::HandleOrderSend(FName Rival)
 	Cmd.Target = Rival;
 	Cmd.Text = Text;
 	Sim->EnqueueCommand(Cmd);
+	const FString Words = DraftOrderWords(Rival, Text); // read before the draft is cleared (a copy)
 	OrderDrafts.Remove(Rival);
 	if (PC.IsValid())
 	{
-		PC->PostConfirm(FString::Printf(TEXT("Order transmitted: %s to %s"), *Text, *RHOrder::TargetText(GetDefs(), Rival)), D::Teal);
+		// G2a r1 (PLACEHOLDER, gate-d-wording PW21): the order in words, not the console's form ("Order transmitted: Hydrogen:100 to Zarya Station").
+		PC->PostConfirm(FString::Printf(TEXT("Order transmitted to %s: %s"), *RHOrder::TargetText(GetDefs(), Rival), *Words), D::Teal);
 	}
 	return FReply::Handled();
 }
@@ -3514,24 +3568,14 @@ FReply SRHCommandDeck::HandleOrderSend(FName Rival)
 
 TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 {
-	// G1: the RATIONING header is longer than MAKING / USING and would run over the panel's title on one line. While it shows,
-	// it wraps at the width of "RATIONING  -  0000 W SHORT  -  " (with the two spaces the line keeps before its break) in its own
-	// font, so it breaks after the second dash: "RATIONING - N W SHORT -" over "M% SERVED" (a short of five digits breaks before
-	// SHORT). MAKING / USING keeps HEAD's one unwrapped line.
-	// A fixed wrap width, not AutoWrapText: an auto-wrapped text in an auto-width slot keeps the narrowest width it was given.
+	// G1: the RATIONING header is longer than MAKING / USING and would run over the panel's title on one line. G2a (A8): it is two
+	// explicit lines, "RATIONING  -  N W SHORT" over "M% SERVED" (GetPowerFoldHeaderText), so no line ends in a dash and no wrap width
+	// is measured; MAKING / USING keeps HEAD's one line.
 	const FSlateFontInfo HeaderFont = D::Label(10);
-	const float RationingWrapAt = FSlateApplication::IsInitialized()
-		? (float)FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(FString(TEXT("RATIONING  -  0000 W SHORT  -  ")), HeaderFont).X + 3.f
-		: 0.f;
 	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
 			SNew(STextBlock).Font(HeaderFont).ColorAndOpacity(D::TextDim).Justification(ETextJustify::Right)
-			.WrapTextAt_Lambda([this, RationingWrapAt]()
-			{
-				const URHPowerLookSubsystem* Look = GetPowerLook();
-				return (Look && Look->IsNetMeanShown()) ? RationingWrapAt : 0.f;
-			})
 			.Text_Lambda([this]() { return GetPowerFoldHeaderText(); })
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
@@ -3559,7 +3603,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildPowerPanel()
 				.Text_Lambda([this]()
 				{
 					const URHSimWorldSubsystem* S = GetSim();
-					return Txt(FString::Printf(TEXT("DAY SHIFT: %d machine(s) resting until sunrise"), S ? S->GetDayShiftRestingCount() : 0));
+					return Txt(FString::Printf(TEXT("DAY SHIFT: %s resting until sunrise"), *RHOrder::Plural(S ? S->GetDayShiftRestingCount() : 0, TEXT("machine"), TEXT("machines"))));
 				})
 			]
 			// D5 depth (placeholder copy, director review): what the deep floors ask of the grid, and which are running warm.
@@ -3668,7 +3712,7 @@ FString SRHCommandDeck::BuildCostLine(FName DefName, bool& bOutShort) const
 		// count them rather than weigh them.
 		Parts.Add(C.Key == FName("HabSegment")
 			? FString::Printf(TEXT("%.0f habitat segment%s"), C.Value, FMath::IsNearlyEqual(C.Value, 1.0) ? TEXT("") : TEXT("s"))
-			: FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(C.Key).ToLower()));
+			: FString::Printf(TEXT("%s %s"), *Mass(C.Value), *ResourceLabel(GetDefs(), C.Key).ToLower()));
 	}
 	// Drag-sized: the line is one bay's (a habitat module) or one bed's (the
 	// greenhouse dome) bill. The prefab Habitat is a fixed shell: its whole bill.
@@ -3858,7 +3902,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCard(FName DefName)
 	{
 		return SNullWidget::NullWidget;
 	}
-	const FString Name = Row->DisplayName.IsEmpty() ? DefName.ToString() : Row->DisplayName;
+	const FString Name = RHOrder::BuildingTitle(Defs, DefName);
 	const bool bImport = Row->ImportOnly;
 	FString PowerShort, PowerLong;
 	FLinearColor PowerColor;
@@ -3976,7 +4020,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildBuildDrawer()
 				if (IsRoadDetail()) { return Txt(TEXT("Road")); }
 				if (IsRoadDemolishDetail()) { return Txt(TEXT("Demolish Road")); }
 				const FRHBuildingRow* R = DetailRow();
-				return R ? Txt(R->DisplayName.IsEmpty() ? GetDetailBuildDef().ToString() : R->DisplayName) : FText::GetEmpty();
+				return R ? Txt(RHOrder::BuildingTitle(GetDefs(), GetDetailBuildDef())) : FText::GetEmpty();
 			})
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 3.f, 0.f, 0.f)
@@ -4205,7 +4249,7 @@ namespace
 
 	FString MarketSigned(int64 Mcr)
 	{
-		return (Mcr > 0 ? TEXT("+") : Mcr < 0 ? TEXT("-") : TEXT("")) + URHSimWorldSubsystem::FormatCredits(Mcr < 0 ? -Mcr : Mcr);
+		return (Mcr > 0 ? TEXT("+") : Mcr < 0 ? TEXT("-") : TEXT("")) + RHOrder::CreditsText(Mcr < 0 ? -Mcr : Mcr);
 	}
 
 	// A route's chip text: the status word, with the timers the card's verbs wait on (Gate-D placeholder copy).
@@ -4722,7 +4766,7 @@ void SRHCommandDeck::RefreshMarketPanel()
 						]
 						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
 						[
-							SNew(STextBlock).Text(Txt(ResourceLabel(Res))).Font(D::Body(9)).ColorAndOpacity_Lambda([SelColour]() { return SelColour(D::Text); })
+							SNew(STextBlock).Text(Txt(ResourceLabel(Df, Res))).Font(D::Body(9)).ColorAndOpacity_Lambda([SelColour]() { return SelColour(D::Text); })
 						]
 						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 						[
@@ -5006,7 +5050,7 @@ void SRHCommandDeck::FillMarketPrices(const URHSimWorldSubsystem& S, const URHDe
 			int32 OldestAt = INDEX_NONE;
 			for (int32 v = 0; v < Vals.Num() && OldestAt == INDEX_NONE; ++v) { if (Vals[v] >= 0) { OldestAt = v; } }
 			const FString Oldest = OldestAt == INDEX_NONE ? FString() : FString::Printf(TEXT(", %s %d sols ago"), *URHSimWorldSubsystem::FormatCredits(Vals[OldestAt]), Vals.Num() - 1 - OldestAt);
-			FString Tip = FString::Printf(TEXT("%s: %s %s today%s; over the last %d sols %s to %s; the band %s to %s"), *ResourceLabel(Res), *URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)), *UnitKg,
+			FString Tip = FString::Printf(TEXT("%s: %s %s today%s; over the last %d sols %s to %s; the band %s to %s"), *ResourceLabel(&Df, Res), *URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)), *UnitKg,
 				*Oldest, Vals.Num(), *URHSimWorldSubsystem::FormatCredits(Lo == MAX_int64 ? 0 : Lo), *URHSimWorldSubsystem::FormatCredits(Hi),
 				*URHSimWorldSubsystem::FormatCredits(S.GetMarketFloorMcr(Res, MarketRegion)), *URHSimWorldSubsystem::FormatCredits(S.GetMarketCeilMcr(Res, MarketRegion)));
 			if (!MarksNote.IsEmpty()) { Tip += FString::Printf(TEXT(" (%s)"), *MarksNote); }
@@ -5065,8 +5109,7 @@ void SRHCommandDeck::FillMarketPrices(const URHSimWorldSubsystem& S, const URHDe
 				MarketCreditChart = Txt(MarketSpark(InCredits, MarketSparkWidth, Unused));
 				MarketCreditCaption = Txt(FString::Printf(TEXT("in credits: the unit changed at sol %d"), OpenStepSol));
 			}
-			const FRHResourceRow* Row = Df.GetResource(Res);
-			FString Text = FString::Printf(TEXT("%s, %s"), Row ? *Row->DisplayName : *Res.ToString(), *UnitKg);
+			FString Text = FString::Printf(TEXT("%s, %s"), *RHOrder::ResourceName(&Df, Res), *UnitKg);
 			if (!MarksNote.IsEmpty()) { Text += FString::Printf(TEXT(" (%s)"), *MarksNote); }
 			Text += FString::Printf(TEXT("\nFloor %s · today %s · ceiling %s %s"), *URHSimWorldSubsystem::FormatCredits(S.GetMarketFloorMcr(Res, MarketRegion)),
 				*URHSimWorldSubsystem::FormatCredits(S.GetMarketPriceMcr(Res, MarketRegion)), *URHSimWorldSubsystem::FormatCredits(S.GetMarketCeilMcr(Res, MarketRegion)), *UnitKg);
@@ -5131,15 +5174,15 @@ void SRHCommandDeck::FillMarketPrices(const URHSimWorldSubsystem& S, const URHDe
 		// column's 290 px the one-line form wrapped mid-phrase (the review's probe capture); in marks the credit figure is its own line.
 		int64 SoldV = 0, BoughtV = 0;
 		MarketBalanceOf(S, MarketRegion, LiveUnit, SoldV, BoughtV);
-		FString Balance = FString::Printf(TEXT("Sold to neighbours %s %s · bought %s %s\nBalance %s %s over the last 8 sols"), *URHSimWorldSubsystem::FormatCredits(SoldV), *Unit,
-			*URHSimWorldSubsystem::FormatCredits(BoughtV), *Unit, *MarketSigned(SoldV - BoughtV), *Unit);
+		FString Balance = FString::Printf(TEXT("Sold to neighbours %s %s · bought %s %s\nBalance %s %s over the last 8 sols"), *RHOrder::CreditsText(SoldV), *Unit,
+			*RHOrder::CreditsText(BoughtV), *Unit, *MarketSigned(SoldV - BoughtV), *Unit);
 		if (bMarks && S.GetRate() > 0)
 		{
 			const int64 SoldCr = URHSimWorldSubsystem::MarketDivTrunc(SoldV * S.GetRate(), 1000);
 			const int64 BoughtCr = URHSimWorldSubsystem::MarketDivTrunc(BoughtV * S.GetRate(), 1000);
 			Balance += FString::Printf(TEXT("\n(%s cr at today's rate)"), *MarketSigned(SoldCr - BoughtCr));
 		}
-		Balance += FString::Printf(TEXT("\nEarth has paid %s cr for exports so far\nMarket sales so far: %s cr"), *URHSimWorldSubsystem::FormatCredits(S.GetSalesPaidMcr()), *URHSimWorldSubsystem::FormatCredits(S.GetMarketSalesMcr()));
+		Balance += FString::Printf(TEXT("\nEarth has paid %s cr for exports so far\nMarket sales so far: %s cr"), *RHOrder::CreditsText(S.GetSalesPaidMcr()), *RHOrder::CreditsText(S.GetMarketSalesMcr()));
 		MarketBalanceText = Txt(Balance);
 	}
 	if (Parts & MarketPartRate)
@@ -5198,7 +5241,7 @@ void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDe
 			if (!DeskOrders.IsValidIndex(d)) { continue; }
 			const FRHDeskOrder& O = DeskOrders[d];
 			const bool bToMarks = O.Dir == (uint8)URHSimWorldSubsystem::ERHDeskDir::ToMarks;
-			R.Head = Txt(FString::Printf(TEXT("Desk: %s %s to %s, clears at the end of sol %d"), *URHSimWorldSubsystem::FormatCredits(O.Amount), bToMarks ? TEXT("cr") : TEXT("mk"),
+			R.Head = Txt(FString::Printf(TEXT("Desk: %s %s to %s, clears at the end of sol %d"), *RHOrder::CreditsText(O.Amount), bToMarks ? TEXT("cr") : TEXT("mk"),
 				bToMarks ? TEXT("marks") : TEXT("credits"), O.ClearSol));
 			continue;
 		}
@@ -5211,10 +5254,10 @@ void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDe
 		{
 			// A barter convoy carries the rival's lots (E4: it gives the ImportLot and brings the ExportLot home). The design's 2.5 form names what
 			// comes home first: Zarya's "barter: Ice 150 for Struct 100" (its ExportLot Ice:150 for its ImportLot Struct:100).
-			const auto LotShort = [](const FString& Lot)
+			const auto LotShort = [&Df](const FString& Lot)
 			{
 				TArray<FString> Out;
-				for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Lot)) { Out.Add(FString::Printf(TEXT("%s %.0f"), *Item.Key.ToString(), Item.Value)); }
+				for (const auto& Item : URHDefinitionsSubsystem::ParseResourceList(Lot)) { Out.Add(FString::Printf(TEXT("%s %.0f"), *RHOrder::ResourceName(&Df, Item.Key), Item.Value)); }
 				return FString::Join(Out, TEXT(", "));
 			};
 			const FString Give = Row ? LotShort(Row->ImportLot) : FString(), Take = Row ? LotShort(Row->ExportLot) : FString();
@@ -5223,12 +5266,12 @@ void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDe
 		else
 		{
 			// Each line as the player reads it (the resource's label and its kg, as the barter line), never the console's "Ice:100;SpareParts:2".
-			const auto LinesShort = [&C](bool bBuys)
+			const auto LinesShort = [&C, &Df](bool bBuys)
 			{
 				TArray<FString> Out;
 				for (const FRHConvoyLine& L : C.Lines)
 				{
-					if (L.Kg != 0 && (L.Kg > 0) == bBuys) { Out.Add(FString::Printf(TEXT("%s %d"), *ResourceLabel(L.Resource), FMath::Abs(L.Kg))); }
+					if (L.Kg != 0 && (L.Kg > 0) == bBuys) { Out.Add(FString::Printf(TEXT("%s %d"), *ResourceLabel(&Df, L.Resource), FMath::Abs(L.Kg))); }
 				}
 				return FString::Join(Out, TEXT(", "));
 			};
@@ -5247,12 +5290,12 @@ void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDe
 		R.ShownPct = -1; // the progress line is made again on its next read
 		if (C.bReturning)
 		{
-			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("coming home, owes you %s %s"), *URHSimWorldSubsystem::FormatCredits(Owed), OrderUnit) : FString(TEXT("coming home")));
+			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("coming home, owes you %s %s"), *RHOrder::CreditsText(Owed), OrderUnit) : FString(TEXT("coming home")));
 		}
 		else if (C.IsPriced() && C.bCleared)
 		{
 			// "cleared" alone when nothing is owed (a buy-only convoy), as "coming home" drops a zero.
-			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("cleared: owes you %s %s"), *URHSimWorldSubsystem::FormatCredits(Owed), OrderUnit) : FString(TEXT("cleared")));
+			R.StateFixed = Txt(Owed > 0 ? FString::Printf(TEXT("cleared: owes you %s %s"), *RHOrder::CreditsText(Owed), OrderUnit) : FString(TEXT("cleared")));
 		}
 		else
 		{
@@ -5262,7 +5305,7 @@ void SRHCommandDeck::FillMarketOrders(const URHSimWorldSubsystem& S, const URHDe
 		FString Extra;
 		if (C.IsPriced() && !C.bCleared)
 		{
-			Extra = FString::Printf(TEXT("%s %s set aside"), *URHSimWorldSubsystem::FormatCredits(bMarkOrder ? HeldMmk : C.ReservedMcr), OrderUnit);
+			Extra = FString::Printf(TEXT("%s %s set aside"), *RHOrder::CreditsText(bMarkOrder ? HeldMmk : C.ReservedMcr), OrderUnit);
 			FRHConvoyTerms Terms;
 			int32 Markup = 0;
 			if (S.GetConvoyTerms(C.Id, Terms)) { for (const int32 Bp : Terms.LineMarkupBp) { Markup = FMath::Max(Markup, Bp); } }

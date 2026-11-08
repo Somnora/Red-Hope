@@ -20,6 +20,7 @@
 // the sim's actual rules (coverage, charging, survey, bore, carve, rating).
 
 #include "RHCommandDeck.h"
+#include "RHOrderWords.h"
 #include "RedHope.h"
 #include "RHDeckStyle.h"
 #include "RHPlayerController.h"
@@ -285,7 +286,7 @@ namespace
 						if (L.Value.Key + 0.5 < L.Value.Value)
 						{
 							Short.Add(FString::Printf(TEXT("%s %s"), *Kg(L.Value.Value - L.Value.Key),
-								L.Key == FName("Struct") ? TEXT("structural") : *L.Key.ToString().ToLower()));
+								*RHOrder::ResourceShort(C.Defs, L.Key).ToLower()));
 						}
 					}
 					return Short.Num() > 0
@@ -312,7 +313,7 @@ namespace
 
 			// --- The vault: a floor people can live on ---
 			{ TEXT("THE VAULT"), TEXT("Build the Borer"),
-				Fixed(TEXT("The surface is no place to live. BUILD > Boring > The Borer digs down through the rock. It burns hydrogen from the tanks when the colony has some, and runs on grid power when it has none.")),
+				Fixed(TEXT("The surface is no place to live. BUILD > Underground > The Borer digs down through the rock. It burns hydrogen from the tanks when the colony has some, and runs on grid power when it has none.")),
 				[](const FGuideCtx& C) { return CountOf(C, FName("Borer")) >= 1; },
 				NoBar(), FName("Borer"), NAME_None },
 			{ TEXT("THE VAULT"), TEXT("Sink the shaft"),
@@ -491,7 +492,7 @@ namespace
 				[](const FGuideCtx& C)
 				{
 					const FRHDepositState* Low = LowIce(C);
-					const FString Name = Low ? Low->RowName.ToString() : FString(TEXT("The ice"));
+					const FString Name = Low ? RHOrder::DepositName(C.Defs, *Low) : FString(TEXT("The ice"));
 					const double Left = Low ? Low->RemainingKg / 1000.0 : 0.0;
 					for (const FRHDepositState& Dp : C.Sim->GetDeposits())
 					{
@@ -518,8 +519,8 @@ namespace
 					const FRHDepositState* Low = LowIce(C);
 					const FRHDepositState* Fresh = HealthyIce(C);
 					return FString::Printf(TEXT("%s: %.0f t of ice, outside the grid. BUILD > Logistics > Grid Pylon - each links to the grid within 80 m and powers 40 m around itself. Chain them out to it (%s has about %.0f t left)."),
-						Fresh ? *Fresh->RowName.ToString() : TEXT("The new ice"), Fresh ? Fresh->RemainingKg / 1000.0 : 0.0,
-						Low ? *Low->RowName.ToString() : TEXT("the first deposit"), Low ? Low->RemainingKg / 1000.0 : 0.0);
+						Fresh ? *RHOrder::DepositName(C.Defs, *Fresh) : TEXT("The new ice"), Fresh ? Fresh->RemainingKg / 1000.0 : 0.0,
+						Low ? *RHOrder::DepositName(C.Defs, *Low) : TEXT("the first deposit"), Low ? Low->RemainingKg / 1000.0 : 0.0);
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 1; },
 				NoBar(), FName("Pylon"), NAME_None },
@@ -533,10 +534,10 @@ namespace
 					if (Fresh && Fresh->bOutpost)
 					{
 						// W1 (Gate-D placeholder, row G6): replaces the hauled-like-the-first-drill's sentence, which is false here.
-						return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Outpost ice comes home by road and cargo rover, never by hauler."), *Fresh->RowName.ToString());
+						return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Outpost ice comes home by road and cargo rover, never by hauler."), *RHOrder::DepositName(C.Defs, *Fresh));
 					}
 					return FString::Printf(TEXT("BUILD > Production > Ice Drill, placed on %s. Its ice is hauled to the Water Plant like the first drill's."),
-						Fresh ? *Fresh->RowName.ToString() : TEXT("the new ice"));
+						Fresh ? *RHOrder::DepositName(C.Defs, *Fresh) : TEXT("the new ice"));
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 2; },
 				NoBar(), FName("IceDrill"), NAME_None },
@@ -545,7 +546,7 @@ namespace
 				{
 					const FRHDepositState* Fresh = HealthyIce(C);
 					return FString::Printf(TEXT("%s's ice is a long haul from the Water Plant. BUILD > Production > Water Plant beside the new drill, inside the grid - water is shared colony-wide, so it melts where it is drilled."),
-						Fresh ? *Fresh->RowName.ToString() : TEXT("The new ice"));
+						Fresh ? *RHOrder::DepositName(C.Defs, *Fresh) : TEXT("The new ice"));
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 3; },
 				NoBar(), FName("WaterPlant"), NAME_None },
@@ -556,7 +557,7 @@ namespace
 					int32 OutpostId = 0;
 					C.Sim->GetIceExpansionStage(&OutpostId);
 					FString Name(TEXT("The outpost"));
-					for (const FRHDepositState& Dp : C.Sim->GetDeposits()) { if (Dp.Id == OutpostId) { Name = Dp.RowName.ToString(); } }
+					for (const FRHDepositState& Dp : C.Sim->GetDeposits()) { if (Dp.Id == OutpostId) { Name = RHOrder::DepositName(C.Defs, Dp); } }
 					return FString::Printf(TEXT("%s's ice comes home raw. BUILD > Logistics > Road from the colony's roads to within 30 m of the drill, and to a Water Plant at least 300 m from it."), *Name);
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetIceExpansionStage() != 4; },

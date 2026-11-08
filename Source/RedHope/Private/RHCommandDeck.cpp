@@ -360,7 +360,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					FString Price;
 					for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Fitting.Value))
 					{
-						Price += FString::Printf(TEXT(" %.0f%s"), L.Value, L.Key == FName("Struct") ? TEXT("") : *FString::Printf(TEXT(" %s"), *L.Key.ToString()));
+						Price += FString::Printf(TEXT(" %.0f%s"), L.Value, L.Key == FName("Struct") ? TEXT("") : *FString::Printf(TEXT(" %s"), *RHOrder::ResourceName(Defs, L.Key)));
 					}
 					WallsPalette->AddSlot().AutoWidth()
 					[
@@ -1577,6 +1577,7 @@ void SRHCommandDeck::RefreshUplinkPanel()
 	}
 	UplinkIdsShown = Ids;
 	UplinkList->ClearChildren();
+	UplinkLabelsShown.Reset();
 	if (Ids.Num() == 0)
 	{
 		return;
@@ -1591,20 +1592,18 @@ void SRHCommandDeck::RefreshUplinkPanel()
 	{
 		const int32 Id = C.CommandId;
 		const URHDefinitionsSubsystem* LabelDefs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
-		FString Label = C.Target.IsNone()
-			? RHOrder::VerbText(C.Verb)
-			: FString::Printf(TEXT("%s %s"), *RHOrder::VerbText(C.Verb), *RHOrder::TargetText(LabelDefs, C.Target));
+		FString Label = RHOrder::OrderText(LabelDefs, C.Verb, C.Target); // G2a r2: a targetless order reads as its verb alone (PW24)
 		if (C.Verb == FName("Sell") && C.Target == FName("WallFeature"))
 		{
 			// BM-6: "Sell Window #3".
 			const FRHWallFeature* SW = Sim->FindWallFeature((int32)C.Value);
-			Label = SW ? FString::Printf(TEXT("Sell %s #%d"), *SW->Row.ToString(), SW->Id) : FString(TEXT("Sell a fitting"));
+			Label = SW ? FString::Printf(TEXT("Sell %s #%d"), *RHOrder::FittingName(LabelDefs, SW->Row), SW->Id) : FString(TEXT("Sell a fitting"));
 		}
 		else if (C.Verb == FName("Sell"))
 		{
 			// BM-5: "Sell Cot #3" / "Sell a room's furniture".
 			const FRHFurnitureInstance* SF = C.Target == FName("Furniture") ? Sim->FindFurniture((int32)C.Value) : nullptr;
-			Label = SF ? FString::Printf(TEXT("Sell %s #%d"), *SF->Row.ToString(), SF->Id) : FString(TEXT("Sell a room's furniture"));
+			Label = SF ? FString::Printf(TEXT("Sell %s #%d"), *RHOrder::FurnitureName(LabelDefs, SF->Row), SF->Id) : FString(TEXT("Sell a room's furniture"));
 		}
 		else if (C.Verb == FName("Move"))
 		{
@@ -1613,8 +1612,8 @@ void SRHCommandDeck::RefreshUplinkPanel()
 			const bool bFitting = C.Target == FName("WallFeature");
 			const FRHFurnitureInstance* MF = bFitting ? nullptr : Sim->FindFurniture(MId);
 			const FRHWallFeature* MW = bFitting ? Sim->FindWallFeature(MId) : nullptr;
-			Label = MF ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *MF->Row.ToString(), MF->Id)
-				: MW ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *MW->Row.ToString(), MW->Id)
+			Label = MF ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *RHOrder::FurnitureName(LabelDefs, MF->Row), MF->Id)
+				: MW ? FString::Printf(TEXT("%s %s #%d"), *RHOrder::VerbText(C.Verb), *RHOrder::FittingName(LabelDefs, MW->Row), MW->Id)
 				: FString(bFitting ? TEXT("Move a fitting") : TEXT("Move a furnishing"));
 		}
 		if (C.Verb == FName("BuildRoad"))
@@ -1652,8 +1651,9 @@ void SRHCommandDeck::RefreshUplinkPanel()
 			// BM-3: "Demolish Forge #7", not the raw target slot.
 			const int32 BId = (int32)C.Value;
 			const FRHBuildingInstance* Doomed = Sim->GetBuildings().FindByPredicate([BId](const FRHBuildingInstance& X) { return X.Id == BId; });
-			Label = Doomed ? FString::Printf(TEXT("Demolish %s #%d"), *Doomed->DefName.ToString(), BId) : FString::Printf(TEXT("Demolish #%d"), BId);
+			Label = Doomed ? FString::Printf(TEXT("Demolish %s #%d"), *RHOrder::BuildingName(LabelDefs, Doomed->DefName), BId) : FString::Printf(TEXT("Demolish #%d"), BId);
 		}
+		UplinkLabelsShown.Add(Label);
 		UplinkList->AddSlot().AutoHeight().Padding(FMargin(0.f, 2.f))
 		[
 			SNew(SHorizontalBox)
@@ -1938,6 +1938,85 @@ FString SRHCommandDeck::Debug_GetInspectText() const
 	return GetInspectText().ToString();
 }
 
+FString SRHCommandDeck::Debug_GetUplinkText() const
+{
+	// G2a QA (names.uplink): the uplink rows' labels as the panel built them (each row prints its label and its live countdown).
+	return FString::Join(UplinkLabelsShown, TEXT(" | "));
+}
+
+bool SRHCommandDeck::IsSiteBuilderShown(int32 BuildingId) const
+{
+	// G2a (A6): is a Fabricator at work on this site (a Build task to it, claimed)? The task board is re-read at most four times a real
+	// second (as the 60x poll), and only for the open site's card.
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS >= SiteStagePollAtS || BuildingId != SiteStagePollId)
+	{
+		SiteStagePollAtS = NowS + 0.25;
+		SiteStagePollId = BuildingId;
+		bSiteBuilderShown = false;
+		if (const URHSimWorldSubsystem* Sim = GetSim())
+		{
+			for (const FRHTask& T : Sim->GetTasks())
+			{
+				if (T.Type == ERHTaskType::Build && T.To.BuildingId == BuildingId && T.ClaimedBy.IsValid())
+				{
+					bSiteBuilderShown = true;
+					break;
+				}
+			}
+		}
+	}
+	return bSiteBuilderShown;
+}
+
+FString SRHCommandDeck::GetSiteStageLine(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const
+{
+	// G2a (A6, PLACEHOLDER, gate-d-wording PW16): a site's stage, from existing sim reads only: waiting for materials (the first bill line
+	// still short, by ApplyBuildWork's own 0.5 kg rule), waiting for a builder (no Build task to it is claimed), or building with its
+	// progress. The kind and the named resource are ONE latched value ('U', through the power helper's floor), so the line never changes
+	// twice inside FloorRealS; the percent ticks live (a number ticking is not a change).
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	uint32 Kind = 3u, Index = 0u;
+	uint32 Pos = 0u;
+	TArray<FName, TInlineAllocator<8>> Keys;
+	for (const TPair<FName, double>& Line : Bill)
+	{
+		Keys.Add(Line.Key);
+		const double* Delivered = B.InputKg.Find(Line.Key);
+		if (Kind == 3u && (Delivered ? *Delivered : 0.0) + 0.5 < Line.Value)
+		{
+			Kind = 1u;
+			Index = Pos;
+		}
+		++Pos;
+	}
+	if (Kind == 3u && !IsSiteBuilderShown(B.Id))
+	{
+		Kind = 2u;
+	}
+	const URHPowerLookSubsystem* PowerLook = GetPowerLook();
+	const uint32 Want = Kind | (Index << 8);
+	const uint32 Shown = PowerLook ? PowerLook->LatchValue(URHPowerLookSubsystem::MakeKey('U', (uint32)B.Id), Want) : Want;
+	const uint32 ShownKind = Shown & 0xFFu;
+	const int32 ShownIndex = (int32)(Shown >> 8);
+	if (ShownKind == 1u)
+	{
+		// G2a r2 (PLACEHOLDER, gate-d-wording PW16): the shown index is this bill's own (the latch is per building and a bill keeps its
+		// lines); one it no longer holds names no material (never "needs more None").
+		return Keys.IsValidIndex(ShownIndex)
+			? FString::Printf(TEXT("WAITING FOR MATERIALS - needs more %s"), *RHOrder::ResourceName(Defs, Keys[ShownIndex]))
+			: FString(TEXT("WAITING FOR MATERIALS"));
+	}
+	if (ShownKind == 2u)
+	{
+		return TEXT("WAITING FOR A BUILDER - no Fabricator has taken the job");
+	}
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	const double Total = FMath::Max(1.0, (double)(Def ? Def->BuildTime_s : 0.f) * (double)URHSimWorldSubsystem::GetBedCount(B));
+	const int32 Pct = FMath::Clamp(FMath::FloorToInt(100.0 * (1.0 - B.BuildRemaining_s / Total)), 0, 99);
+	return FString::Printf(TEXT("BUILDING - %d%% done"), Pct);
+}
+
 bool SRHCommandDeck::IsSixtyRefusedShown(FString* OutWhy) const
 {
 	// G1 (N4): the sim's own era test, re-read at most four times a real second (the button's colour and tooltip ask every paint).
@@ -2005,16 +2084,19 @@ FText SRHCommandDeck::GetInspectText() const
 	if (B->bUnderConstruction)
 	{
 		Text += FString::Printf(TEXT("\nUNDER CONSTRUCTION - %.0f s fabrication left"), B->BuildRemaining_s);
+		// G2a (A6): the site's stage under its title line, from the same bill the cost lines read.
+		const TMap<FName, double> Bill = Sim->GetSiteBill(*B);
+		Text += TEXT("\n") + GetSiteStageLine(*B, Bill);
 		if (Def)
 		{
 			// Level-taxed bill (Gate B): a surface site's card shows its
 			// Shielding line; the same def underground shows none.
-			for (const auto& Cost : Sim->GetSiteBill(*B))
+			for (const auto& Cost : Bill)
 			{
 				const double* Delivered = B->InputKg.Find(Cost.Key);
 				const double Have = Delivered ? *Delivered : 0.0;
 				Text += FString::Printf(TEXT("\n  material %s: %.0f / %.0f kg%s"),
-					*Cost.Key.ToString(), Have, Cost.Value, Have + 0.5 < Cost.Value ? TEXT("  (hauling)") : TEXT(""));
+					*RHOrder::ResourceName(Defs, Cost.Key), Have, Cost.Value, Have + 0.5 < Cost.Value ? TEXT("  (hauling)") : TEXT(""));
 			}
 		}
 	}
@@ -2038,7 +2120,7 @@ FText SRHCommandDeck::GetInspectText() const
 			const int32 NetBays = Sim->GetHabNetworkBays(B->Id);
 			const double O2 = Sim->GetHabNetworkO2Kg(B->Id), O2Req = Sim->GetHabNetworkO2RequiredKg(B->Id);
 			const FIntPoint ShellBays = Sim->GetBayGrid(*B); // BM-1b: a fixed prefab's bays come from its footprint
-			Text += FString::Printf(TEXT("\nHABITAT: %d bay(s) here, %d in its network"), ShellBays.X * ShellBays.Y, NetBays);
+			Text += FString::Printf(TEXT("\nHABITAT: %s here, %d in its network"), *RHOrder::Plural(ShellBays.X * ShellBays.Y, TEXT("bay"), TEXT("bays")), NetBays);
 			if (Sim->IsHabRated(B->Id))
 			{
 				Text += TEXT("\nRATED LIVABLE");
@@ -2055,8 +2137,8 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\nNOT LIVABLE YET - filling with oxygen");
 			}
-			Text += FString::Printf(TEXT("\nair %.0f / %.0f kg  ·  %d bed(s), %d resident(s)"), O2, O2Req,
-				Sim->GetHabBeds(B->Id), Sim->GetHabResidents(B->Id));
+			Text += FString::Printf(TEXT("\nair %.0f / %.0f kg  ·  %s, %s"), O2, O2Req,
+				*RHOrder::Plural(Sim->GetHabBeds(B->Id), TEXT("bed"), TEXT("beds")), *RHOrder::Plural(Sim->GetHabResidents(B->Id), TEXT("resident"), TEXT("residents")));
 			if (!Sim->HasVaultRating())
 			{
 				Text += TEXT("\ncrew move in once the underground vault is certified");
@@ -2088,7 +2170,7 @@ FText SRHCommandDeck::GetInspectText() const
 		}
 		if (B->BatchRemaining_h > 0.0)
 		{
-			Text += FString::Printf(TEXT("\nbatch -> %s: %.2f h left%s"), *B->ActiveRecipe.ToString(), B->BatchRemaining_h,
+			Text += FString::Printf(TEXT("\nbatch: %s, %.2f h left%s"), *RHOrder::RecipeText(Defs, B->ActiveRecipe), B->BatchRemaining_h,
 				Sim->IsDayShiftResting(B->Id) ? TEXT(" (paused until sunrise)") : TEXT(""));
 		}
 		else if (Def && (Def->PowerDraw_W > 0.f || Def->RequiresDeposit))
@@ -2120,7 +2202,7 @@ FText SRHCommandDeck::GetInspectText() const
 				const int32 Carved = Sim->GetFloorCarvedCells(L);
 				if (Queued > 0 || Carved > 0)
 				{
-					Text += FString::Printf(TEXT("\n  floor %d: %d cell(s) carved%s"), L, Carved,
+					Text += FString::Printf(TEXT("\n  floor %d: %s carved%s"), L, *RHOrder::Plural(Carved, TEXT("cell"), TEXT("cells")),
 						Queued > 0 ? *FString::Printf(TEXT(", %d queued"), Queued) : TEXT(""));
 				}
 			}
@@ -2158,11 +2240,11 @@ FText SRHCommandDeck::GetInspectText() const
 			}
 			else if (LatchHeld('F', (uint32)B->Level, Sim->IsFloorSealedButSmallHeld(B->Level))) // G1: the held circulation, latched
 			{
-				Text += FString::Printf(TEXT("\n  SEALED - carve %d more cell(s) to certify a habitat"), MinCells - Cells);
+				Text += FString::Printf(TEXT("\n  SEALED - carve %d more %s to certify a habitat"), MinCells - Cells, RHOrder::PluralWord(MinCells - Cells, TEXT("cell"), TEXT("cells")));
 			}
 			else if (Cells < MinCells)
 			{
-				Text += FString::Printf(TEXT("\n  below habitat minimum (%d more cell(s), then pressurize)"), MinCells - Cells);
+				Text += FString::Printf(TEXT("\n  below habitat minimum (%d more %s, then pressurize)"), MinCells - Cells, RHOrder::PluralWord(MinCells - Cells, TEXT("cell"), TEXT("cells")));
 			}
 			else
 			{
@@ -2206,7 +2288,7 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			if (D.Id == B->AttachedDepositId)
 			{
-				Text += FString::Printf(TEXT("\ndeposit %s: %.0f t left%s"), *D.RowName.ToString(), D.RemainingKg / 1000.0,
+				Text += FString::Printf(TEXT("\ndeposit %s: %.0f t left%s"), *RHOrder::DepositName(Defs, D), D.RemainingKg / 1000.0,
 					Sim->IsIceDepositLow(D) ? TEXT(" - RUNNING LOW") : TEXT(""));
 				break;
 			}
@@ -2218,14 +2300,14 @@ FText SRHCommandDeck::GetInspectText() const
 	{
 		if (In.Value >= 0.5 && !B->bUnderConstruction)
 		{
-			Hopper += FString::Printf(TEXT("\n  in  %s: %.0f kg"), *In.Key.ToString(), In.Value);
+			Hopper += FString::Printf(TEXT("\n  in  %s: %.0f kg"), *RHOrder::ResourceName(Defs, In.Key), In.Value);
 		}
 	}
 	for (const auto& Out : B->OutputKg)
 	{
 		if (Out.Value >= 0.5)
 		{
-			Hopper += FString::Printf(TEXT("\n  out %s: %.0f kg (awaiting haul)"), *Out.Key.ToString(), Out.Value);
+			Hopper += FString::Printf(TEXT("\n  out %s: %.0f kg (awaiting haul)"), *RHOrder::ResourceName(Defs, Out.Key), Out.Value);
 		}
 	}
 	if (!Hopper.IsEmpty())
@@ -2372,8 +2454,13 @@ FText SRHCommandDeck::GetActionCardTitle() const
 		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 		const FName Room = Sim ? Sim->GetBayRoom(PC->GetSelectedBayHab(), PC->GetSelectedBay()) : NAME_None;
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(Room) : nullptr;
-		return FText::FromString(FString::Printf(TEXT("%s - surface habitat\nA work station. Colonists take its seats after the underground's; assigning staff puts it first."),
-			Row ? *Row->DisplayName : *Room.ToString()));
+		// G2a r2 (PLACEHOLDER, gate-d-wording PW24): a bay whose room was cleared while it stayed selected (the selection checks only that the
+		// habitat stands) names no room, never "None - surface habitat"; the room key stays the missing-row fallback (rooms are out of scope).
+		// (No string beyond HEAD's: the key is turned into one only when the row is missing, as before; an empty FString allocates nothing.)
+		const FString RoomKey = (Row || Room.IsNone()) ? FString() : Room.ToString();
+		const TCHAR* RoomName = Row ? *Row->DisplayName : *RoomKey;
+		return FText::FromString(FString::Printf(TEXT("%s%ssurface habitat\nA work station. Colonists take its seats after the underground's; assigning staff puts it first."),
+			RoomName, *RoomName ? TEXT(" - ") : TEXT("")));
 	}
 	if (!B && PC.IsValid() && PC->HasSelectedCell())
 	{
@@ -2382,14 +2469,17 @@ FText SRHCommandDeck::GetActionCardTitle() const
 		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 		const FName Room = Sim ? Sim->GetRoomAt(PC->GetSelectedCellLevel(), PC->GetSelectedCellIndex()) : NAME_None;
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(Room) : nullptr;
-		return FText::FromString(FString::Printf(TEXT("%s - floor %d\nA work station. Colonists take its seats in dig order; assigning staff puts it first."),
-			Row ? *Row->DisplayName : *Room.ToString(), PC->GetSelectedCellLevel()));
+		// G2a r2 (PW24): the same for a station cell whose room was cleared while it stayed selected.
+		const FString RoomKey = (Row || Room.IsNone()) ? FString() : Room.ToString();
+		const TCHAR* RoomName = Row ? *Row->DisplayName : *RoomKey;
+		return FText::FromString(FString::Printf(TEXT("%s%sfloor %d\nA work station. Colonists take its seats in dig order; assigning staff puts it first."),
+			RoomName, *RoomName ? TEXT(" - ") : TEXT(""), PC->GetSelectedCellLevel()));
 	}
 	if (!B)
 	{
 		return FText::GetEmpty();
 	}
-	FString Name = (Def && !Def->DisplayName.IsEmpty()) ? Def->DisplayName : B->DefName.ToString();
+	FString Name = RHOrder::BuildingTitle(GetDefs(), B->DefName);
 	FString Text = Name;
 	// The director-authored "what is this / how to use it" (blank until the DT
 	// re-sync lands the Blurb column; the card still works without it).
@@ -2473,8 +2563,8 @@ FText SRHCommandDeck::GetKnownGroundText() const
 		{
 			Status += TEXT("  LOW");
 		}
-		Text += FString::Printf(TEXT("\n%-11s %-8s %6.0f t at (%.0f, %.0f) m%s"),
-			*D.RowName.ToString(), *D.Type.ToString(), D.RemainingKg / 1000.0,
+		Text += FString::Printf(TEXT("\n%-14s %6.0f t at (%.0f, %.0f) m%s"),
+			*RHOrder::DepositName(GetDefs(), D), D.RemainingKg / 1000.0,
 			D.LocationCm.X / 100.f, D.LocationCm.Y / 100.f, *Status);
 	}
 	if (Known == 0)
@@ -2540,6 +2630,10 @@ FSlateColor SRHCommandDeck::GetCategoryTabColor(FName Category) const
 
 FText SRHCommandDeck::GetCategoryLabel(FName Category) const
 {
+	if (Category == FName("Boring"))
+	{
+		return FText::FromString(TEXT("Underground")); // G2a (A3, PLACEHOLDER, gate-d-wording PW13): the key stays "Boring" (the icon and the section colour key on it)
+	}
 	// Space out CamelCase folder names for display ("LifeSupport" -> "Life
 	// Support") without needing a separate label column.
 	const FString Raw = Category.ToString();
@@ -3595,12 +3689,12 @@ FText SRHCommandDeck::GetDemolishNote() const
 	FString Line, Kit;
 	for (const auto& L : Salvage)
 	{
-		if (const FRHBuildingRow* KitDef = Defs->GetBuilding(L.Key))
+		if (Defs->GetBuilding(L.Key))
 		{
-			Kit = FString::Printf(TEXT("the %s kit"), *KitDef->DisplayName);
+			Kit = FString::Printf(TEXT("the %s kit"), *RHOrder::BuildingName(Defs, L.Key)); // G2a r1: running text after "the" (never "the The ... kit")
 			continue;
 		}
-		Line += FString::Printf(TEXT("%s%.0f kg %s"), Line.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+		Line += FString::Printf(TEXT("%s%.0f kg %s"), Line.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *RHOrder::ResourceName(Defs, L.Key));
 	}
 	if (!Kit.IsEmpty())
 	{
@@ -3620,7 +3714,9 @@ FReply SRHCommandDeck::HandleDemolish()
 		return FReply::Handled();
 	}
 	const int32 Id = B->Id;
-	const FString Name = Def && !Def->DisplayName.IsEmpty() ? Def->DisplayName : B->DefName.ToString();
+	// G2a r1 (PLACEHOLDER, gate-d-wording PW22): running text, so the name drops a leading "The" ("Click again to demolish the Forge", never
+	// "the The Forge"); the transmitted line names it the same way, as the uplink row does ("Demolish Forge #7").
+	const FString Name = RHOrder::BuildingName(GetDefs(), B->DefName);
 	FString Why;
 	if (!Sim->CanDemolishBuilding(Id, Why))
 	{
@@ -3815,7 +3911,7 @@ void SRHCommandDeck::HandleStockChanged(FName Resource, double Total)
 		PushCard(TEXT("RARE MATERIALS"), *Line, /*bGolden*/ true);
 		return;
 	}
-	ToastLine = FString::Printf(TEXT("+ first %s banked"), *Resource.ToString());
+	ToastLine = FString::Printf(TEXT("+ first %s banked"), *RHOrder::ResourceName(GetDefs(), Resource)); // G2a (PLACEHOLDER, gate-d-wording PW7)
 	ToastUntil = Now + 6.0;
 	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Notify"));
 }

@@ -668,7 +668,7 @@ void URHSimWorldSubsystem::Tick(float DeltaTime)
 			const float Restore = FMath::Max(1.f, Clock->GetLastAgentSpeed());
 			Clock->SetSpeed(Restore);
 			UE_LOG(LogRedHopeSim, Display, TEXT("ERA REFUSED: %s - holding %.0fx"), *Why, Restore);
-			OnAlert.Broadcast(FString::Printf(TEXT("60x unavailable: %s — holding %.0fx"), *Why, Restore));
+			OnAlert.Broadcast(FString::Printf(TEXT("60x unavailable: %s (staying at %.0fx)"), *Why, Restore)); // G2a (PLACEHOLDER, gate-d-wording PW15)
 			return;
 		}
 	}
@@ -750,7 +750,12 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	{
 		if (B.bUnderConstruction)
 		{
-			OutReason = FString::Printf(TEXT("construction in progress (%s #%d)"), *B.DefName.ToString(), B.Id);
+			// G2a (A5, PLACEHOLDER, gate-d-wording PW14): plain words, the site's display name with a leading "The " dropped, no id (the
+			// deck's 60x tooltip and the banner show this reason).
+			const FRHBuildingRow* SiteDef = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+			FString SiteName = (SiteDef && !SiteDef->DisplayName.IsEmpty()) ? SiteDef->DisplayName : FName::NameToDisplayString(B.DefName.ToString(), false);
+			SiteName.RemoveFromStart(TEXT("The "));
+			OutReason = FString::Printf(TEXT("the %s is still being built"), *SiteName);
 			return false;
 		}
 	}
@@ -761,13 +766,13 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	{
 		if (!E.bBuilt)
 		{
-			OutReason = FString::Printf(TEXT("road construction in progress (edge #%d)"), E.Id);
+			OutReason = TEXT("a road is still being built"); // G2a (PW14): -roads R12 asks for "road" in it
 			return false;
 		}
 	}
 	if (QuotaPhase == ERHQuotaPhase::ShipInbound)
 	{
-		OutReason = TEXT("supply ship inbound");
+		OutReason = TEXT("a supply ship is on its way in"); // G2a (PW14)
 		return false;
 	}
 	// Field operations are agent-fidelity by definition: a scout mid-drive or
@@ -775,14 +780,14 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	// board task - the claim set is its ledger.)
 	if (RepairClaims.Num() > 0)
 	{
-		OutReason = TEXT("maintenance call in progress");
+		OutReason = TEXT("a robot is out on a repair call"); // G2a (PW14)
 		return false;
 	}
 	for (const FRHTask& T : Tasks)
 	{
 		if (T.Type == ERHTaskType::Survey)
 		{
-			OutReason = TEXT("survey in progress");
+			OutReason = TEXT("a scout is out on a survey"); // G2a (PW14)
 			return false;
 		}
 	}
@@ -794,7 +799,7 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	{
 		if (Event->Type == FName("SolarFlare"))
 		{
-			OutReason = TEXT("SolarFlare in progress");
+			OutReason = TEXT("a solar flare is under way"); // G2a (PW14)
 			return false;
 		}
 	}
@@ -827,7 +832,7 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 		});
 		if (bImminent)
 		{
-			OutReason = FString::Printf(TEXT("%s imminent"), *ImminentType.ToString());
+			OutReason = FString::Printf(TEXT("a %s is about to begin"), *FName::NameToDisplayString(ImminentType.ToString(), false).ToLower()); // G2a (PW14): "a dust storm"
 			return false;
 		}
 	}

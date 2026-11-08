@@ -6,6 +6,7 @@
 
 class ARHPlayerController;
 class URHPowerLookSubsystem;
+struct FRHBuildingInstance;
 class ITableRow;
 class STableViewBase;
 template <typename ItemType> class SListView;
@@ -64,6 +65,15 @@ public:
 	// steps (LatchServed): a roster row's right-hand text, the research line's staffed-Lab test and the research bar's visibility. The
 	// widgets call these same functions.
 	FString GetRosterPostLine(int32 ColonistId) const;
+	// G2a (A7): the roster row's home, "surface habitat" or the floor signed ("floor -1"); the Earth credit readout in whole credits (the
+	// OBJECTIVE panel's line); (A6) a site's stage line under its card's title; (QA) the uplink rows' labels as the panel built them, ' | '
+	// between rows. The widgets call these same functions.
+	FString GetRosterHomeText(int32 ColonistId) const;
+	FString GetEarthCreditLine() const;
+	FString GetSiteStageLine(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const;
+	FString Debug_GetUplinkText() const;
+	// G2a (A3): a build category's tab label (public for the click test's words.sample; the Borer's "Boring" reads "Underground").
+	FText GetCategoryLabel(FName Category) const;
 	bool IsLabSeatStaffedShown() const;
 	bool IsResearchBarShown() const;
 	const FRHCityDemand& Debug_GetCityDemandShown() const { return CityDemand; } // G1 r3 QA: the City panel's demand as it shows it
@@ -270,7 +280,6 @@ private:
 	// comes from the DataTable (FRHBuildingRow.Category), with a code-derived
 	// fallback so the menu works before the DT re-sync lands the column.
 	FReply HandleSelectCategory(FName Category);
-	FText GetCategoryLabel(FName Category) const;
 	FSlateColor GetCategoryTabColor(FName Category) const;
 	EVisibility GetBuildCatVisibility(FName Category) const;
 	FReply HandleDig();
@@ -426,6 +435,10 @@ private:
 	// through the uplink (the sim's CanPlaceOrder reads the same text, so the button is greyed with the reason in its tooltip).
 	TMap<FName, TMap<FName, int32>> OrderDrafts;
 	FString DraftOrderText(FName Rival) const;       // "Res:kg;Res:kg" in resource-name order, empty with nothing drafted
+	// G2a r1: the same draft in words for the screen ("buy 100 kg Hydrogen and sell 100 kg Ice"), from DraftOrderText's form; cached per rival
+	// (DraftWordsCache: the form and its words) so the card's per-frame line formats the words only when the draft changes.
+	const FString& DraftOrderWords(FName Rival, const FString& Text) const;
+	mutable TMap<FName, TPair<FString, FString>> DraftWordsCache;
 	FReply HandleOrderNudge(FName Rival, FName Resource, int32 Kg);
 	FReply HandleOrderClear(FName Rival);
 	FReply HandleOrderSend(FName Rival);
@@ -505,6 +518,11 @@ private:
 	mutable double SixtyPollAtS = 0.0;
 	mutable bool bSixtyRefused = false;
 	mutable FString SixtyWhy;
+	// G2a (A6): the open site card's builder poll (a claimed Build task to it), at most four times a real second.
+	mutable double SiteStagePollAtS = 0.0;
+	mutable int32 SiteStagePollId = 0;
+	mutable bool bSiteBuilderShown = false;
+	bool IsSiteBuilderShown(int32 BuildingId) const;
 	// G1: a keyed boolean through the power helper's latch (the value itself when there is no helper).
 	bool LatchHeld(uint8 Kind, uint32 Value, bool bWant) const;
 	// G1 r3: a value read from what RefreshJobs rebuilds every step (a station's seats, a colonist's post, the colony's filled and total
@@ -608,6 +626,7 @@ private:
 	// Uplink panel state: rebuilt when the queue's id set changes.
 	TSharedPtr<class SVerticalBox> UplinkList;
 	TArray<int32> UplinkIdsShown;
+	TArray<FString> UplinkLabelsShown; // G2a QA: each row's label as built (Debug_GetUplinkText)
 	// In-world action card position (local slate units) + on-screen flag, both
 	// refreshed in Tick from the selected building's screen projection.
 	FVector2D ActionCardPos = FVector2D::ZeroVector;

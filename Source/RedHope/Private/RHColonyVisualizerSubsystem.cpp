@@ -28,6 +28,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
 #include "Misc/Crc.h"
+#include "Misc/App.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
 
@@ -719,6 +720,7 @@ void URHColonyVisualizerSubsystem::RefreshHabShells()
 				FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 			Label->SetText(FText::FromString(Row ? Row->DisplayName : I.Room.ToString()));
 			Label->SetTextRenderColor((RoomTint(I.Room) * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
+			StyleLabel(Label);
 			Vis.Parts.Add(Label);
 			const FString PropPath = RoomPropPath(I.Room);
 			if (UStaticMesh* PropMesh = PropPath.IsEmpty() ? nullptr : LoadObject<UStaticMesh>(nullptr, *PropPath))
@@ -1362,6 +1364,8 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 	Label->SetHorizontalAlignment(EHTA_Center);
 	Label->SetVerticalAlignment(EVRTA_TextCenter);
 	Label->SetTextRenderColor((Color * 0.4f + FLinearColor(0.6f, 0.6f, 0.6f)).ToFColor(true));
+	StyleLabel(Label);
+	Label->ComponentTags.Add(FName("RH.NameLabel")); // G2a (A4): the actor's own name, anchored at the actor for the hover
 	// Lie flat on the ground, glyph face pointing UP (+Z) so the top-down camera
 	// reads the front of the text, not the mirrored back; glyph-up toward world
 	// +X reads upright at the default north-looking camera heading (confirmed in
@@ -1382,9 +1386,22 @@ void URHColonyVisualizerSubsystem::AddLabel(AStaticMeshActor* Actor, const FStri
 		FRotationMatrix::MakeFromXZ(FVector::UpVector, FVector::ForwardVector).Rotator());
 }
 
+void URHColonyVisualizerSubsystem::StyleLabel(UTextRenderComponent* Label) const
+{
+	if (Label)
+	{
+		if (LabelMaterial)
+		{
+			Label->SetTextMaterial(LabelMaterial);
+		}
+		Label->SetCastShadow(false);
+	}
+}
+
 void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
+	LabelMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_RH_TextUnlit.M_RH_TextUnlit"));
 	RHFrameStats::EnsurePowerLookLogger(); // G1: the frame check's [PowerLook] sampler (rh.PowerLookLog), registered once
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
 	{
@@ -1512,7 +1529,8 @@ void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 	bLightKeyValid = false;
 	HoverLabels.Reset();
 	HoverGrid.Reset();
-	HoverLit.Reset();
+	HoverShownLabel.Reset();
+	HoverShownKey = 0;
 
 	UWorld* World = GetWorld();
 	URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -1779,7 +1797,7 @@ void URHColonyVisualizerSubsystem::SpawnDepositMarker(const FRHDepositState& D)
 	const URHDefinitionsSubsystem* Defs = World->GetSubsystem<URHDefinitionsSubsystem>();
 	const FRHDepositShape Shape = MakeDepositShape(D, Defs ? Defs->GetConfigScalar(FName("PilesCapacity_kg"), 500.0) : 500.0);
 	// W1: an outpost is drilled, never dug (Gate-D placeholder copy, row G9).
-	AddLabel(Actor, D.bOutpost ? FString(TEXT("Outpost ice deposit")) : D.Type.ToString() + TEXT(" deposit"), DepColor, Shape.R + 260.f);
+	AddLabel(Actor, RHOrder::DepositName(Defs, D), DepColor, Shape.R + 260.f); // G2a (D5 A, PLACEHOLDER, gate-d-wording PW2): "Regolith A", "Outpost ice C"
 	UE_LOG(LogRedHope, Display, TEXT("Dig site: %s (%s) at (%.0f, %.0f) m, %.1f m across, %s"), *D.RowName.ToString(), *D.Type.ToString(),
 		D.LocationCm.X / 100.0, D.LocationCm.Y / 100.0, Shape.R / 50.f, Shape.bWorked ? TEXT("worked") : TEXT("untouched"));
 	// Surface furniture: born hidden if the player is currently underground
@@ -2026,8 +2044,8 @@ void URHColonyVisualizerSubsystem::HandleDepositDiscovered(const FRHDepositState
 {
 	// The go-look payoff: the marker appears the moment the scout reports.
 	SpawnDepositMarker(D);
-	LastNotice = FString::Printf(TEXT("Survey found a %s deposit - %.0f t"),
-		*D.Type.ToString().ToLower(), D.RemainingKg / 1000.0);
+	LastNotice = FString::Printf(TEXT("Survey found %s - %.0f t"), // G2a (PLACEHOLDER, gate-d-wording PW3)
+		*RHOrder::DepositName(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, D), D.RemainingKg / 1000.0);
 	LastNoticeRealSeconds = FPlatformTime::Seconds();
 }
 
@@ -2566,8 +2584,8 @@ void URHColonyVisualizerSubsystem::HandleBuildingAdded(const FRHBuildingInstance
 		// clobber it back to gray-box.
 		ApplyTint(Actor, Instance.bUnderConstruction ? Body * 0.3f : Body, FLinearColor::Black);
 	}
-	AddLabel(Actor, Instance.DefName.ToString(), Tint, Scale.X * 50.f + 260.f);
 	const URHDefinitionsSubsystem* DomeDefs = World->GetSubsystem<URHDefinitionsSubsystem>();
+	AddLabel(Actor, RHOrder::BuildingTitle(DomeDefs, Instance.DefName), Tint, Scale.X * 50.f + 260.f); // G2a (PLACEHOLDER, gate-d-wording PW1)
 	const FRHBuildingRow* DomeDef = DomeDefs ? DomeDefs->GetBuilding(Instance.DefName) : nullptr;
 	if (DomeDef && DomeDef->Pressurized)
 	{
@@ -3490,8 +3508,10 @@ void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, 
 {
 	UE_LOG(LogRedHope, Warning, TEXT("ORDER REJECTED: %s %s - %s"),
 		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
-	LastNotice = FString::Printf(TEXT("REJECTED %s %s: %s"),
-		*RHOrder::VerbText(Cmd.Verb), *RHOrder::TargetText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Cmd.Target), *Reason);
+	// G2a r2 (PLACEHOLDER, gate-d-wording PW9, PW24): the order in words; one with no target reads as its verb alone ("REJECTED Dig tunnel:
+	// ...", never "REJECTED Dig tunnel None: ..."). The log line above keeps the sim's names.
+	LastNotice = FString::Printf(TEXT("REJECTED %s: %s"),
+		*RHOrder::OrderText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Cmd.Verb, Cmd.Target), *Reason);
 	LastNoticeRealSeconds = FPlatformTime::Seconds();
 }
 
@@ -4065,21 +4085,29 @@ void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 
 void URHColonyVisualizerSubsystem::RebuildHoverRegistry()
 {
-	// Every tile's room label (radius 6 m round the tile) and every text
-	// component on every building actor (8 m round the actor), bucketed by XY in
-	// 10 m cells so a cursor query touches the 3 x 3 cells around it. Floors
-	// share XY, exactly as the old scan compared XY only; the floor cut hides the
-	// labels of every floor but the viewed one.
+	// Every tile's room label (radius 6 m round the tile), every building's name label (8 m round the actor) and every other text on a
+	// building actor (a habitat bay's room label: 6 m round its own point, G2a), bucketed by XY in 10 m cells so a cursor query touches the
+	// 3 x 3 cells around it. Floors share XY, exactly as the old scan compared XY only; the floor cut hides the labels (and their owners) of
+	// every floor but the viewed one. G2a: each entry keeps a fixed key (the tie-break) and its rest height (the shown label is lifted).
 	bHoverDirty = false;
+	if (UTextRenderComponent* Shown = HoverShownLabel.Get())
+	{
+		// Back to its rest before the registry reads the rest heights; the key is kept, so the same label is shown again this frame and
+		// no change is counted.
+		const FVector At = Shown->GetComponentLocation();
+		Shown->SetWorldLocation(FVector(At.X, At.Y, HoverShownRestZ));
+	}
+	HoverShownLabel.Reset();
 	HoverLabels.Reset();
 	HoverGrid.Reset();
-	HoverLit.Reset();
-	const auto Add = [this](UTextRenderComponent* L, const FVector& At, float Radius)
+	const auto Add = [this](UTextRenderComponent* L, const FVector& At, float Radius, uint64 Key)
 	{
 		FHoverLabel E;
 		E.Label = L;
 		E.Pos = FVector2D(At.X, At.Y);
 		E.RadiusCm = Radius;
+		E.Key = Key;
+		E.RestZ = (float)L->GetComponentLocation().Z;
 		const int64 Cx = (int64)FMath::FloorToInt(At.X / 1000.f) & 0xFFFFFF;
 		const int64 Cy = (int64)FMath::FloorToInt(At.Y / 1000.f) & 0xFFFFFF;
 		HoverGrid.FindOrAdd((Cx << 24) | Cy).Add(HoverLabels.Num());
@@ -4092,7 +4120,8 @@ void URHColonyVisualizerSubsystem::RebuildHoverRegistry()
 		{
 			if (UTextRenderComponent* L = Tile->FindComponentByClass<UTextRenderComponent>())
 			{
-				Add(L, Tile->GetActorLocation(), 600.f);
+				const uint64 Cell = ((uint64)(TP.Key.X & 0xFFFFF) << 40) | ((uint64)(TP.Key.Y & 0xFFFFF) << 20) | (uint64)(TP.Key.Z & 0xFFFFF);
+				Add(L, Tile->GetActorLocation(), 600.f, (1ull << 62) | Cell);
 			}
 		}
 	}
@@ -4100,11 +4129,14 @@ void URHColonyVisualizerSubsystem::RebuildHoverRegistry()
 	{
 		if (AStaticMeshActor* B = BP.Value)
 		{
-			TArray<UTextRenderComponent*> Texts;
+			TInlineComponentArray<UTextRenderComponent*> Texts;
 			B->GetComponents(Texts);
-			for (UTextRenderComponent* L : Texts)
+			for (int32 i = 0; i < Texts.Num(); ++i)
 			{
-				Add(L, B->GetActorLocation(), 800.f);
+				UTextRenderComponent* L = Texts[i];
+				const bool bName = L->ComponentHasTag(FName("RH.NameLabel"));
+				const uint64 Key = ((uint64)(uint32)BP.Key << 8) | (uint64)(i & 0xFF);
+				Add(L, bName ? B->GetActorLocation() : L->GetComponentLocation(), bName ? 800.f : 600.f, Key);
 			}
 		}
 	}
@@ -4112,11 +4144,19 @@ void URHColonyVisualizerSubsystem::RebuildHoverRegistry()
 
 void URHColonyVisualizerSubsystem::UpdateHoverLabels(const FVector& CursorCm)
 {
+	// G2a (A4): one label, the nearest to the cursor's ground point among the labels whose owner is drawn (the floor cut hides other
+	// floors' tiles and buildings), with a fixed tie-break by key. The shown one stays while it is still a candidate and the nearest is not
+	// nearer by more than HoverHysteresisCm, or while the cursor rests and it changed less than FloorRealS ago (nothing flashes). No
+	// allocation here: the walk and the distance test are HEAD's; the show, hide and lift run only when the shown label changes.
 	if (bHoverDirty)
 	{
 		RebuildHoverRegistry();
 	}
-	TArray<int32> Lit;
+	const FVector2D Cursor(CursorCm.X, CursorCm.Y);
+	const bool bRests = FVector2D::DistSquared(Cursor, HoverCursorWas) < 1.0; // moved under 1 cm since the last frame
+	HoverCursorWas = Cursor;
+	int32 Best = INDEX_NONE, Kept = INDEX_NONE;
+	double BestD2 = 0.0, KeptD2 = 0.0;
 	if (CursorCm.X < 1.0e11)
 	{
 		const int32 Cx0 = FMath::FloorToInt(CursorCm.X / 1000.f);
@@ -4131,30 +4171,128 @@ void URHColonyVisualizerSubsystem::UpdateHoverLabels(const FVector& CursorCm)
 					for (const int32 I : *Bucket)
 					{
 						const FHoverLabel& E = HoverLabels[I];
-						if (FVector2D::Distance(E.Pos, FVector2D(CursorCm.X, CursorCm.Y)) < E.RadiusCm)
+						const UTextRenderComponent* L = E.Label.Get();
+						const AActor* Owner = L ? L->GetOwner() : nullptr;
+						if (!Owner || Owner->IsHidden())
 						{
-							Lit.Add(I);
+							continue;
+						}
+						const double D2 = FVector2D::DistSquared(E.Pos, Cursor);
+						if (D2 >= (double)E.RadiusCm * (double)E.RadiusCm)
+						{
+							continue;
+						}
+						if (E.Key == HoverShownKey)
+						{
+							Kept = I;
+							KeptD2 = D2;
+						}
+						if (Best == INDEX_NONE || D2 < BestD2 || (D2 == BestD2 && E.Key < HoverLabels[Best].Key))
+						{
+							Best = I;
+							BestD2 = D2;
 						}
 					}
 				}
 			}
 		}
 	}
-	for (const int32 I : HoverLit)
+	int32 Want = Best;
+	if (Kept != INDEX_NONE && Best != Kept)
 	{
-		if (!Lit.Contains(I))
+		const bool bNotMuchNearer = FMath::Sqrt(KeptD2) - FMath::Sqrt(BestD2) <= HoverHysteresisCm;
+		const bool bResting = bRests && FApp::GetCurrentTime() - HoverShownAtS < URHPowerLookSubsystem::FloorRealS;
+		if (bNotMuchNearer || bResting)
 		{
-			if (UTextRenderComponent* L = HoverLabels[I].Label.Get()) { L->SetVisibility(false); }
+			Want = Kept;
 		}
 	}
-	for (const int32 I : Lit)
+	UTextRenderComponent* WantLabel = Want != INDEX_NONE ? HoverLabels[Want].Label.Get() : nullptr;
+	if (!WantLabel)
 	{
-		if (!HoverLit.Contains(I))
+		HoverShownKey = 0; // G2a r1: forget the key too (a rebuild leaves the key with no label shown; a kept key would win the hysteresis later)
+	}
+	if (WantLabel == HoverShownLabel.Get())
+	{
+		return;
+	}
+	if (UTextRenderComponent* Old = HoverShownLabel.Get())
+	{
+		const FVector At = Old->GetComponentLocation();
+		Old->SetWorldLocation(FVector(At.X, At.Y, HoverShownRestZ));
+		Old->SetVisibility(false);
+	}
+	HoverShownLabel.Reset();
+	if (!WantLabel)
+	{
+		return;
+	}
+	const FHoverLabel& E = HoverLabels[Want];
+	if (E.Key != HoverShownKey)
+	{
+		HoverShownAtS = FApp::GetCurrentTime();
+	}
+	HoverShownKey = E.Key;
+	HoverShownRestZ = E.RestZ;
+	HoverShownLabel = WantLabel;
+	// Lifted above its neighbours' meshes: the highest top of the drawn, non-text primitives of every drawn owner in the 5 x 5 cells
+	// around it (the label's own owner included), + HoverLiftCm. Once per change, never per frame.
+	double Top = E.RestZ;
+	const int32 Lx0 = FMath::FloorToInt(E.Pos.X / 1000.f);
+	const int32 Ly0 = FMath::FloorToInt(E.Pos.Y / 1000.f);
+	for (int32 Dx = -2; Dx <= 2; ++Dx)
+	{
+		for (int32 Dy = -2; Dy <= 2; ++Dy)
 		{
-			if (UTextRenderComponent* L = HoverLabels[I].Label.Get()) { L->SetVisibility(true); }
+			const int64 Key = (((int64)(Lx0 + Dx) & 0xFFFFFF) << 24) | ((int64)(Ly0 + Dy) & 0xFFFFFF);
+			if (const TArray<int32>* Bucket = HoverGrid.Find(Key))
+			{
+				for (const int32 I : *Bucket)
+				{
+					const UTextRenderComponent* L = HoverLabels[I].Label.Get();
+					const AActor* Owner = L ? L->GetOwner() : nullptr;
+					if (!Owner || Owner->IsHidden())
+					{
+						continue;
+					}
+					TInlineComponentArray<UPrimitiveComponent*> Prims(Owner);
+					for (const UPrimitiveComponent* Prim : Prims)
+					{
+						if (Prim && Prim->IsVisible() && !Prim->IsA<UTextRenderComponent>())
+						{
+							Top = FMath::Max(Top, Prim->Bounds.Origin.Z + Prim->Bounds.BoxExtent.Z);
+						}
+					}
+				}
+			}
 		}
 	}
-	HoverLit = MoveTemp(Lit);
+	const FVector At = WantLabel->GetComponentLocation();
+	WantLabel->SetWorldLocation(FVector(At.X, At.Y, Top + HoverLiftCm));
+	WantLabel->SetVisibility(true);
+}
+
+
+int32 URHColonyVisualizerSubsystem::Debug_GetHoverShown(TArray<FString>& OutTexts, TArray<FVector>& OutAt, TArray<FString>& OutMaterials, FVector2D& OutCursorCm) const
+{
+	OutTexts.Reset();
+	OutAt.Reset();
+	OutMaterials.Reset();
+	OutCursorCm = HoverCursorWas;
+	for (const FHoverLabel& E : HoverLabels)
+	{
+		const UTextRenderComponent* L = E.Label.Get();
+		const AActor* Owner = L ? L->GetOwner() : nullptr;
+		if (!Owner || Owner->IsHidden() || !L->IsVisible())
+		{
+			continue;
+		}
+		OutTexts.Add(L->Text.ToString());
+		OutAt.Add(L->GetComponentLocation());
+		const UMaterialInterface* M = L->GetMaterial(0);
+		OutMaterials.Add(M ? M->GetName() : FString(TEXT("none")));
+	}
+	return OutTexts.Num();
 }
 
 void URHColonyVisualizerSubsystem::UpdateShaftVisuals()
@@ -4822,6 +4960,7 @@ void URHColonyVisualizerSubsystem::RefreshRoomVisuals()
 			Label->SetWorldSize(150.f);
 			Label->SetHorizontalAlignment(EHTA_Center);
 			Label->SetVerticalAlignment(EVRTA_TextCenter);
+			StyleLabel(Label);
 			// 25, not 14: the tile is a 0.3 m box whose top face is at +15, so
 			// a glyph plane at +14 sat one centimetre INSIDE the deck and was
 			// depth-occluded from every camera above it (audit 2026-08-14).

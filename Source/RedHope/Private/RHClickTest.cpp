@@ -12,6 +12,22 @@
 //   RH.ClickWorld <Xm> <Ym>       press the ground point (the active floor), for the build and tunnel tools
 //   RH.DragWorld <X0m> <Y0m> <X1m> <Y1m>
 //   RH.ClickTest                  the scripted run: one "CLICKTEST <name> PASS|FAIL <why>" per step, then a total
+//   RH.ClickTest.DropPress <label>[|<label>...]   TEST HOOK (G2a): the next press of each named button loses its capture after its down
+//   RH.ClickTest.DropHover <label>[|<label>...]   TEST HOOK (G2a r2): the next press of each named button loses its hover after its down
+//
+// G2a (A0, the dropped press, ruling 26): any window activation makes Slate release all pointer capture, and a button pressed across
+// frames then never clicks. PushPress checks at the release that the located button still holds its press; if not, it presses again
+// with the down and the up in ONE runner action ("RHClick: press dropped ... pressing again"), counts it (CLICKTEST RETRIES n before
+// the TOTAL), and every "RHClick: up" line says capture=0|1.
+// G2a r2 (the lost hover): a button that kept its capture can still lose its hover between the down and the up (any pointer move Slate
+// sees, a real mouse over the window among them), and SButton then clicks nothing on the release. PushPress re-places the pointer on the
+// button just before every release; a press found holding its capture but not hovered is pressed again in the same action ("RHClick:
+// press lost its hover ... pressing again"), counted in the same RETRIES; every "RHClick: up" line also says hover=0|1 (- for no button).
+// G2a r3: the shaft strip's floor rows are buttons too (LocateFloorRow records its button, label "floor row <level>"), so every press of
+// an SButton in this file goes through a located button. The presses with no button are by design: a text (RH.ClickText, panel titles),
+// a viewport point (RH.ClickAt, the menu backdrops), the world (RH.ClickWorld, the build and move clicks, the section plate), a slider
+// point (SSlider sets its value on the down and while it holds the capture; its release tests no hover), drags, keys and other buttons'
+// drags.
 //
 // Commands queue and run one step at a time on the core ticker, so -ExecCmds can chain them. This is the
 // presentation module; the sim boundary is untouched.
@@ -40,6 +56,7 @@
 #include "RHSimWorldSubsystem.h"
 #include "RHDefinitionsSubsystem.h"
 #include "Data/RHRows.h"
+#include "RHOrderWords.h"
 #include "Containers/Ticker.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
@@ -47,6 +64,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextRenderComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
@@ -352,18 +370,33 @@ namespace
 
 	void SendDown(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton)
 	{
+		// G2a (A0, diagnosis only): G1's g1_click2 failed 81 of 119 with leaf=none after another window covered the game. Say so at a press
+		// when this app is not the active one or its active top-level window is not the game's.
+		FSlateApplication& App = FSlateApplication::Get();
+		const TSharedPtr<SWindow> Active = App.GetActiveTopLevelWindow();
+		if (!App.IsActive() || Active != GameWindow())
+		{
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: not frontmost at this press (app active=%d, active window '%s')"), App.IsActive() ? 1 : 0,
+				Active.IsValid() ? *Active->GetTitle().ToString() : TEXT("none"));
+		}
 		PlaceVirtualCursor(Pos);
 		TSet<FKey> Pressed;
 		Pressed.Add(Button);
-		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonDownEvent(nullptr, MakeEvent(Pos, Pressed, Button));
+		const bool bHandled = App.ProcessMouseButtonDownEvent(nullptr, MakeEvent(Pos, Pressed, Button));
 		UE_LOG(LogRedHope, Display, TEXT("RHClick: down (%s) at (%.0f,%.0f) leaf=%s handled=%d"), *Button.ToString(), Pos.X, Pos.Y, *LeafAt(Pos), bHandled ? 1 : 0);
 	}
 
-	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton)
+	// G2a (A0, F2): the release says whether the pressed button still held the mouse capture just before it (a located press: that button's own
+	// capture; any other press: whether anything holds it). G2a r2: and whether the pressed button was hovered just before it (hover=0|1; '-'
+	// for a press with no located button): SButton clicks a release only while it is hovered too, so a failed check after capture=1 hover=1
+	// is a real failure, and capture=1 hover=0 is a lost hover the harness did not catch.
+	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton, const TSharedPtr<SWidget>& Pressed = nullptr)
 	{
 		PlaceVirtualCursor(Pos);
+		const int32 Capture = Pressed.IsValid() ? (Pressed->HasMouseCapture() ? 1 : 0) : (FSlateApplication::Get().HasAnyMouseCaptor() ? 1 : 0);
+		const TCHAR* Hover = Pressed.IsValid() ? (Pressed->IsHovered() ? TEXT("1") : TEXT("0")) : TEXT("-");
 		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonUpEvent(MakeEvent(Pos, TSet<FKey>(), Button));
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: up (%s) at (%.0f,%.0f) handled=%d"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0);
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: up (%s) at (%.0f,%.0f) handled=%d capture=%d hover=%s"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0, Capture, Hover);
 	}
 
 	// D8 (R9 a): a key down (with Shift held around it when asked) through Slate, as a keyboard would send it, into the game viewport.
@@ -442,6 +475,45 @@ namespace
 
 	int32 GPass = 0;
 	int32 GFail = 0;
+	// G2a (A0): presses pressed again after a lost capture (F1/F4), the test hook's fires, and the labels it is armed for (RH.ClickTest.DropPress:
+	// never cleared by a scene start, so RH_CLICKTEST_PRE arms them before the scene).
+	int32 GPressRetries = 0;
+	int32 GDropHooks = 0;
+	TArray<FString> GDropPressLabels;
+	// G2a r2 (the lost hover): the retries of a press that lost its hover (also counted in GPressRetries), the hover hook's fires, and the
+	// labels it is armed for (RH.ClickTest.DropHover; as GDropPressLabels, never cleared by a scene start).
+	int32 GHoverRetries = 0;
+	int32 GHoverHooks = 0;
+	TArray<FString> GDropHoverLabels;
+
+	// G2a (A0, F4): the retries before each scene's TOTAL (whose format scripts grep, unchanged), and any armed label never pressed.
+	void LogRetries()
+	{
+		// G2a r2: the two kinds of retry, on a line of its own (the RETRIES line keeps its form; scripts grep it).
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: retries by kind: capture %d, hover %d"), GPressRetries - GHoverRetries, GHoverRetries);
+		UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RETRIES %d"), GPressRetries);
+		if (GDropPressLabels.Num() > 0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: %d label(s) armed but never pressed: %s"), GDropPressLabels.Num(), *FString::Join(GDropPressLabels, TEXT(", ")));
+		}
+		if (GDropHoverLabels.Num() > 0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: %d hover label(s) armed but never pressed: %s"), GDropHoverLabels.Num(), *FString::Join(GDropHoverLabels, TEXT(", ")));
+		}
+	}
+
+	// G2a (A0, F5, diagnosis only): log the app's activation changes, so a log shows whether a drop lines up with a switch of apps.
+	void EnsureActivationLog()
+	{
+		static FDelegateHandle Handle;
+		if (!Handle.IsValid() && FSlateApplication::IsInitialized())
+		{
+			Handle = FSlateApplication::Get().OnApplicationActivationStateChanged().AddLambda([](const bool bActive)
+			{
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: app active=%d"), bActive ? 1 : 0);
+			});
+		}
+	}
 	double GFlashT0 = 0.0; // G1: the flash probe's start (its lines give times from it)
 
 	void Report(const FString& Name, bool bOk, const FString& Why)
@@ -565,10 +637,14 @@ namespace
 		FVector2D Pos = FVector2D::ZeroVector;
 		int32 LeakBase = 0;
 		TWeakPtr<SWidget> Target; // UI polish P1: the button the locator found, so a press can follow it if the layout moves it before the click
+		FString Label;            // G2a (A0): the label LocateButton matched (empty for other locators): RH.ClickTest.DropPress names a press by it
 	};
 
-	// Set by LocateButton to the widget it found (a locator only returns a point).
+	// Set by LocateButton to the widget it found (a locator only returns a point), and (G2a) to the label it matched. G2a r3: LocateFloorRow
+	// sets both too (its label "floor row <level>"); every other locator presses a point with no button (a text, the viewport, the world, a
+	// slider), and PushPress resets both before each locate.
 	TWeakPtr<SWidget> GLocatedButton;
+	FString GLocatedLabel;
 
 	// Finds where to press; false if there is nothing to press (and says why).
 	using FLocate = TFunction<bool(FVector2D&)>;
@@ -610,6 +686,7 @@ namespace
 				bReached ? TEXT("YES") : TEXT("NO"), Matches[Nth]->IsEnabled() ? TEXT("") : TEXT(" [disabled]"), bPressNotMove ? TEXT("") : TEXT(" (hover only)"));
 			OutPos = Centres[Nth];
 			GLocatedButton = Matches[Nth];
+			GLocatedLabel = Label;
 			return true;
 		};
 	}
@@ -695,6 +772,11 @@ namespace
 	}
 
 	// D8: a floor's row in the shaft strip ("-3 ▦8 ●..." starts with the level).
+	// G2a r3 (F1, the floor-row press): the row is an SButton (DownAndUp, OnClicked HandleFloor, RHCommandDeck.cpp), so its press is a
+	// located button press like LocateButton's: the button is recorded (GLocatedButton), and PushPress's capture retry (HoldsPress), its
+	// lost-hover retry (LostHover), the re-place before the release, ReAim and the up line's capture= and hover= all cover it (before round 3
+	// it was pressed as a bare point: hover=-, no retry). Its label, for the test hooks only, is "floor row <level>": no other press carries
+	// it, so RH.ClickTest.DropPress and RH.ClickTest.DropHover leave it alone unless armed with exactly that label.
 	FLocate LocateFloorRow(int32 Level)
 	{
 		return [Level](FVector2D& OutPos)
@@ -708,6 +790,8 @@ namespace
 				if (Text == Want || Text.StartsWith(Want + TEXT(" ")))
 				{
 					OutPos = Found.Centre;
+					GLocatedButton = Found.Widget;
+					GLocatedLabel = FString::Printf(TEXT("floor row %d"), Level);
 					UE_LOG(LogRedHope, Display, TEXT("RHClick: floor row '%s' at (%.0f,%.0f) leaf=%s"), *Text, OutPos.X, OutPos.Y, *LeafAt(OutPos));
 					return true;
 				}
@@ -765,6 +849,59 @@ namespace
 		}
 	}
 
+	// G2a (A0, the clickfix plan's F1): test what SButton::OnMouseButtonUp tests: a DownAndUp button clicks on the release only while it
+	// holds the mouse capture (a lost capture also Release()s it). Do NOT use IsPressed(): it is also true while a button is merely drawn
+	// pressed (AppearPressed), which would hide a drop. A MouseDown or MouseUp button never needs the capture, and a PreciseClick button never
+	// takes it (UE 5.8 SButton::OnMouseButtonDown: "do not capture the pointer for precise taps or clicks"), so a capture loss cannot drop
+	// either and neither is retried (G2a r1: the plan read PreciseClick as needing the capture; a retry there would click twice). SButton::GetClickMethodFromInputType is protected in UE 5.8 (SButton.h), so it is read through a
+	// pointer to member taken in a local subclass (the subclass is never made).
+	struct FButtonClickMethod : public SButton
+	{
+		static TEnumAsByte<EButtonClickMethod::Type> Of(const SButton& Button, const FPointerEvent& Event)
+		{
+			TEnumAsByte<EButtonClickMethod::Type> (SButton::*Method)(const FPointerEvent&) const = &FButtonClickMethod::GetClickMethodFromInputType;
+			return (Button.*Method)(Event);
+		}
+	};
+
+	bool HoldsPress(const TSharedRef<FPress>& State)
+	{
+		const TSharedPtr<SWidget> Target = State->Target.Pin();
+		if (!Target.IsValid() || Target->GetType() != FName(TEXT("SButton")))
+		{
+			return true; // not a located button: nothing to check
+		}
+		const SButton& Button = static_cast<const SButton&>(*Target);
+		const EButtonClickMethod::Type Method = FButtonClickMethod::Of(Button, MakeEvent(State->Pos, TSet<FKey>(), EKeys::LeftMouseButton));
+		if (Method == EButtonClickMethod::MouseDown || Method == EButtonClickMethod::MouseUp || Method == EButtonClickMethod::PreciseClick)
+		{
+			return true;
+		}
+		return Button.HasMouseCapture();
+	}
+
+	// G2a r2 (the lost hover, James's "A" of 2026-11-06): SButton::OnMouseButtonUp (UE 5.8) clicks a DownAndUp button only while it holds the
+	// capture AND IsHovered(). Any pointer move Slate sees between our down and our up (a real mouse over the game window among them) sends the
+	// captor its OnMouseLeave: the button keeps its capture and its press but loses its hover, and the release clicks nothing (round 1's
+	// g2a_r1_deepbench 'Section' and g2a_r1_mut_sixtyid 'Close the atrium': up capture=1, no click). The same buttons HoldsPress tests (a
+	// located SButton whose click method needs the capture); true when it holds the capture but is not hovered. A MouseDown button clicked at
+	// its down, and MouseUp and PreciseClick ones are left as HoldsPress leaves them, so no button that took its click is ever pressed again.
+	bool LostHover(const TSharedRef<FPress>& State)
+	{
+		const TSharedPtr<SWidget> Target = State->Target.Pin();
+		if (!Target.IsValid() || Target->GetType() != FName(TEXT("SButton")))
+		{
+			return false;
+		}
+		const SButton& Button = static_cast<const SButton&>(*Target);
+		const EButtonClickMethod::Type Method = FButtonClickMethod::Of(Button, MakeEvent(State->Pos, TSet<FKey>(), EKeys::LeftMouseButton));
+		if (Method == EButtonClickMethod::MouseDown || Method == EButtonClickMethod::MouseUp || Method == EButtonClickMethod::PreciseClick)
+		{
+			return false;
+		}
+		return Button.HasMouseCapture() && !Button.IsHovered();
+	}
+
 	// Move, press, release. The press is not made if there was nothing to press.
 	TSharedRef<FPress> PushPress(const FString& Name, FLocate Locate, bool bPress = true)
 	{
@@ -773,8 +910,10 @@ namespace
 		Runner.Do(Name + TEXT(" move"), [State, Locate]()
 		{
 			GLocatedButton.Reset();
+			GLocatedLabel.Reset();
 			State->bFound = Locate(State->Pos);
 			State->Target = GLocatedButton;
+			State->Label = GLocatedLabel;
 			if (State->bFound)
 			{
 				if (const ARHPlayerController* PC = GetPC())
@@ -786,8 +925,91 @@ namespace
 		}, 0.15f);
 		if (bPress)
 		{
-			Runner.Do(Name + TEXT(" down"), [State]() { if (State->bFound) { ReAim(State, false); SendDown(State->Pos); } }, 0.12f);
-			Runner.Do(Name + TEXT(" up"), [State]() { if (State->bFound) { ReAim(State, true); SendUp(State->Pos); } }, 0.2f);
+			Runner.Do(Name + TEXT(" down"), [State]()
+			{
+				if (!State->bFound) { return; }
+				ReAim(State, false);
+				SendDown(State->Pos);
+				// G2a (A0, F3): the test hook - lose the capture right after the down, as a window activation does.
+				const int32 Armed = State->Label.IsEmpty() ? INDEX_NONE
+					: GDropPressLabels.IndexOfByPredicate([&State](const FString& L) { return L.Equals(State->Label, ESearchCase::IgnoreCase); });
+				if (Armed != INDEX_NONE)
+				{
+					GDropPressLabels.RemoveAt(Armed);
+					++GDropHooks;
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: all pointer capture released after the down of '%s'"), *State->Label);
+					FSlateApplication::Get().ReleaseAllPointerCapture();
+				}
+				// G2a r2: the hover hook - move the pointer off the button right after the down, as a real pointer move would (the button keeps
+				// its capture and its press, and loses its hover): half a button above its top edge (below its bottom edge at the window's top).
+				const int32 ArmedHover = State->Label.IsEmpty() ? INDEX_NONE
+					: GDropHoverLabels.IndexOfByPredicate([&State](const FString& L) { return L.Equals(State->Label, ESearchCase::IgnoreCase); });
+				if (ArmedHover != INDEX_NONE)
+				{
+					GDropHoverLabels.RemoveAt(ArmedHover);
+					++GHoverHooks;
+					const TSharedPtr<SWidget> Pressed = State->Target.Pin();
+					FVector2D Off = State->Pos;
+					if (Pressed.IsValid())
+					{
+						const FGeometry Geo = Pressed->GetTickSpaceGeometry();
+						const FVector2D TopLeft = FVector2D(Geo.GetAbsolutePosition());
+						const FVector2D Extent = FVector2D(Geo.GetAbsoluteSize());
+						Off.Y = TopLeft.Y - 0.5 * Extent.Y - 8.0;
+						if (Off.Y < 1.0)
+						{
+							Off.Y = TopLeft.Y + 1.5 * Extent.Y + 8.0;
+						}
+					}
+					SendMove(Off, true);
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: the pointer moved off '%s' after its down, to (%.0f,%.0f) leaf=%s (hovered=%d capture=%d)"), *State->Label,
+						Off.X, Off.Y, *LeafAt(Off), (Pressed.IsValid() && Pressed->IsHovered()) ? 1 : 0, (Pressed.IsValid() && Pressed->HasMouseCapture()) ? 1 : 0);
+				}
+			}, 0.12f);
+			Runner.Do(Name + TEXT(" up"), [State]()
+			{
+				if (!State->bFound) { return; }
+				ReAim(State, true);
+				// G2a (A0, F1): a press that lost its capture is pressed again, the down and the up in this one action, where no OS event can be
+				// pumped between them.
+				if (!HoldsPress(State))
+				{
+					++GPressRetries;
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: press dropped (the button lost its press before the release); pressing again, down and up in one frame"));
+					SendDown(State->Pos);
+					if (!HoldsPress(State))
+					{
+						UE_LOG(LogRedHope, Error, TEXT("RHClick: the second press was not taken either"));
+					}
+				}
+				// G2a r2 (b): a press that kept its capture but lost its hover is a dropped press too: the pointer goes back on the button and it
+				// is pressed again, in this one action, in this order. The move comes first, while the button still holds the capture: Slate then
+				// sends the captor its OnMouseEnter (once the capture is gone it would not, for ReleaseCapture records the captor's path as the
+				// last path under the pointer: g2a_r2_dev2). Then the held press is let go (its hover stays): a down on a button that still holds
+				// the capture makes Slate release that capture before it sets the new one (FSlateUser::SetPointerCaptor), and OnMouseCaptureLost
+				// Release()s it, so it would hold the capture but not the press (g2a_r2_dev1: up handled=0). Then the fresh down. (c) Nothing here
+				// runs after our release, so a button is never pressed twice once its click landed (a DownAndUp button clicks only on the release).
+				else if (LostHover(State))
+				{
+					++GPressRetries;
+					++GHoverRetries;
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: press lost its hover (the button kept its capture, the pointer had left it) on '%s'; pressing again, down and up in one frame"), *State->Label);
+					SendMove(State->Pos, true);
+					FSlateApplication::Get().ReleaseAllPointerCapture();
+					SendDown(State->Pos);
+					if (LostHover(State))
+					{
+						UE_LOG(LogRedHope, Error, TEXT("RHClick: the press again did not get its hover back either"));
+					}
+				}
+				// G2a r2 (a): just before every release of a located button, the pointer is re-placed on its centre through the same synthetic move
+				// the press used, so Slate's hover is current when the up is processed (no OS event is pumped inside this action).
+				if (State->Target.IsValid())
+				{
+					SendMove(State->Pos, true);
+				}
+				SendUp(State->Pos, EKeys::LeftMouseButton, State->Target.Pin());
+			}, 0.2f);
 		}
 		return State;
 	}
@@ -886,6 +1108,42 @@ namespace
 
 	// ---------------------------------------------------------------- the scripted test
 
+	// G2a: an internal name on screen - a CamelCase token ([A-Z][a-z]+[A-Z], "ChargePad", "SpoilChemicals").
+	bool HasCamelToken(const FString& Text)
+	{
+		for (int32 i = 0; i + 2 < Text.Len(); ++i)
+		{
+			if (!FChar::IsUpper(Text[i]) || !FChar::IsLower(Text[i + 1]))
+			{
+				continue;
+			}
+			int32 j = i + 1;
+			while (j < Text.Len() && FChar::IsLower(Text[j]))
+			{
+				++j;
+			}
+			if (j < Text.Len() && FChar::IsUpper(Text[j]))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// G2a: hover.one's record of one resting point.
+	struct FG2HoverPoint
+	{
+		int32 Frames = 0;
+		int32 NotOne = 0;
+		FString NotOneSaid;
+		TArray<FString> Texts;
+		FString BadMat;
+		double MinLift = 1.0e9;
+		FVector2D CursorCm = FVector2D::ZeroVector;
+		int32 Off = 0;            // frames whose hover pass did not use the test's point (the pointer moved by something else): reported, never judged
+		FString OffSaid;
+	};
+
 	struct FTest
 	{
 		int32 ExpectedWorld = 0;   // world clicks the script makes on purpose
@@ -979,6 +1237,45 @@ namespace
 		int32 SixtyRefusals = 0;
 		FDelegateHandle SixtyAlertHandle;
 		float SpaceMid = -1.f;
+		// G2a (2026-11): harness.droppress's counts before its press; the lag the word checks put aside, names.uplink's orders, the site
+		// words.sixty and site.stage stand up with the stages seen and every card read's internal-name test; hover.one's two buildings and
+		// its three resting points.
+		int32 G2Retries0 = 0, G2Hooks0 = 0;
+		double G2Lag0 = 45.0;
+		TArray<int32> G2Uplink;
+		// G2a r2: harness.droppress's hover half (the hover retries and hook fires before it, the clock after its press, its report), and
+		// names.uplink's targetless refused order (when it was sent, whether it was, and the sim's own reason before sending it).
+		int32 G2HoverRetries0 = 0, G2HoverHooks0 = 0;
+		float G2HoverClock = -1.f;
+		FString G2HoverSaid;
+		double G2RejectAt = 0.0;
+		bool bG2RejectSent = false;
+		FString G2RejectWhy;
+		int32 G2SiteId = 0;
+		FVector G2SiteCm = FVector::ZeroVector;
+		FString G2SiteSaid, G2StageWhy;
+		TArray<FString> G2Stages;
+		int32 G2CardReads = 0, G2CardBad = 0;
+		FString G2CardBadSaid;
+		void G2CardRead(const FString& Card)
+		{
+			++G2CardReads;
+			if ((Card.Contains(TEXT("_")) || HasCamelToken(Card)) && G2CardBad++ == 0)
+			{
+				G2CardBadSaid = Card.Replace(TEXT("\n"), TEXT(" / ")).Left(200);
+			}
+		}
+		FVector G2HoverA = FVector::ZeroVector, G2HoverB = FVector::ZeroVector;
+		int32 G2HoverIdA = 0, G2HoverIdB = 0;
+		FString G2HoverWhy;
+		FG2HoverPoint G2Hover[3];
+		// G2a r3 (the cleared room): words.sample's station bay (its habitat, the bay's centre), whether it stayed selected and what its card
+		// read before the clear, whether the clear was sent and when it landed (real s), and the selection and card after it landed.
+		int32 G2ClearHab = 0;
+		FVector G2ClearBayCm = FVector::ZeroVector;
+		FString G2ClearWhy, G2ClearBefore, G2ClearAfter;
+		bool bG2ClearHeld = false, bG2ClearSent = false, bG2ClearShownAfter = false;
+		double G2ClearLandedAt = -1.0;
 	};
 
 	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
@@ -1713,6 +2010,11 @@ namespace
 		const TSharedRef<FTest> T = MakeShared<FTest>();
 		GPass = 0;
 		GFail = 0;
+		GPressRetries = 0;
+		GDropHooks = 0;
+		GHoverRetries = 0;
+		GHoverHooks = 0;
+		EnsureActivationLog();
 		const float MenuEdgeX = 0.97f; // right of every menu's content: only the backdrop is there
 
 		// ---- setup
@@ -4518,7 +4820,7 @@ namespace
 				{
 					Problem += TEXT(" the 60x tier is not shown refused;");
 				}
-				if (!Why.Contains(TEXT("construction in progress")))
+				if (!Why.Contains(TEXT("is still being built"))) // G2a: the sim's reason in plain words (was "construction in progress")
 				{
 					Problem += FString::Printf(TEXT(" the reason is '%s';"), *Why);
 				}
@@ -4573,6 +4875,904 @@ namespace
 			}
 		}, 0.3f);
 
+		// ---- G2a (2026-11, plain words): the harness's own dropped-press self-test, then the words on screen. Just before the verdict, so no
+		// older step sees their effects (the two buildings hover.one places and the site words.sixty stands up are harmless: leak.total counts
+		// world clicks, and these steps make none; every queued order is cancelled and every lag, hold and selection restored).
+		// G2a r2: two dropped presses, one of each kind. First '8x' with the hover hook (the pointer leaves the button after the down; the button
+		// keeps its capture), then '3x' with the capture hook (as round 0 and 1). Each must be retried once and take: the clock at 8x after the
+		// first, at 3x after the second. The hover press goes first so the capture press's up is the last press before the step's check (the
+		// taught scanners file a press against the first CLICKTEST line after it).
+		Runner.Do(TEXT("harness.droppress setup"), [T]()
+		{
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
+			T->G2Retries0 = GPressRetries;
+			T->G2Hooks0 = GDropHooks;
+			T->G2HoverRetries0 = GHoverRetries;
+			T->G2HoverHooks0 = GHoverHooks;
+			T->G2HoverClock = -1.f;
+			T->G2HoverSaid.Reset();
+			GDropHoverLabels.Add(TEXT("8x"));
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook (hover) armed for %s"), *FString::Join(GDropHoverLabels, TEXT(", ")));
+		}, 0.3f);
+		{
+			const TSharedRef<FPress> Hover = PushPress(TEXT("harness.droppress hover"), LocateButton(TEXT("8x"), 0, true));
+			FRunner::Get().Push(TEXT("harness.droppress hover read"), [T, Hover](double, bool bLast)
+			{
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 8.f) && !bLast)
+				{
+					return false;
+				}
+				T->G2HoverClock = ClockSpeed();
+				const ARHPlayerController* PC = GetPC();
+				const int32 Leaked = (PC && Hover->bFound) ? PC->GetWorldClickCount() - Hover->LeakBase : 0;
+				T->G2HoverSaid = FString::Printf(TEXT("the hover press: '8x' %s, clock %.0fx, hover retries %d -> %d, the hover hook fired %d -> %d%s"),
+					Hover->bFound ? TEXT("found") : TEXT("NOT FOUND"), T->G2HoverClock, T->G2HoverRetries0, GHoverRetries, T->G2HoverHooks0, GHoverHooks,
+					Leaked != 0 ? *FString::Printf(TEXT(", LEAKED %d click(s) into the world"), Leaked) : TEXT(""));
+				GDropPressLabels.Add(TEXT("3x"));
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook armed for %s"), *FString::Join(GDropPressLabels, TEXT(", ")));
+				return true;
+			}, 0.3f, 1.f);
+			const TSharedRef<FPress> Press = PushPress(TEXT("harness.droppress"), LocateButton(TEXT("3x"), 0, true));
+			PushCheckSays(TEXT("harness.droppress"), Press, [T](FString& Said)
+			{
+				Said = FString::Printf(TEXT("clock %.0fx; retries %d -> %d, the hook fired %d -> %d; %s"), ClockSpeed(), T->G2Retries0, GPressRetries, T->G2Hooks0, GDropHooks, *T->G2HoverSaid);
+				if (T->G2HoverSaid.Contains(TEXT("NOT FOUND")) || T->G2HoverSaid.Contains(TEXT("LEAKED"))) { return FString(TEXT("the hover press was not found or leaked into the world")); }
+				if (GHoverHooks != T->G2HoverHooks0 + 1) { return FString::Printf(TEXT("the hover hook fired %d time(s), expected 1"), GHoverHooks - T->G2HoverHooks0); }
+				if (GHoverRetries != T->G2HoverRetries0 + 1) { return FString::Printf(TEXT("the press that lost its hover was retried %d time(s), expected 1"), GHoverRetries - T->G2HoverRetries0); }
+				if (!FMath::IsNearlyEqual(T->G2HoverClock, 8.f)) { return FString::Printf(TEXT("after the press that lost its hover the clock read %.1f, expected 8 (the retried press did not take)"), T->G2HoverClock); }
+				if (GDropHooks != T->G2Hooks0 + 1) { return FString::Printf(TEXT("the test hook fired %d time(s), expected 1"), GDropHooks - T->G2Hooks0); }
+				if (GPressRetries != T->G2Retries0 + 2) { return FString::Printf(TEXT("the presses were retried %d time(s), expected 2 (one lost hover, one lost capture)"), GPressRetries - T->G2Retries0); }
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 3.f)) { return FString::Printf(TEXT("clock speed %.1f, expected 3 (the retried press did not take)"), ClockSpeed()); }
+				return FString();
+			}, 1.f);
+		}
+		Runner.Do(TEXT("harness.droppress cleanup"), []() { if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); } }, 0.3f);
+		// names.uplink: orders of every kind A2 names, held in the uplink (45 s lag), read back as the panel lists them: display names only.
+		Runner.Do(TEXT("names.uplink setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim)
+			{
+				return;
+			}
+			T->G2Lag0 = Sim->GetOrderLagSeconds();
+			// G2a r2 (the null target): first a targetless order the sim refuses, sent at no lag so it lands on the next step: the test's own
+			// tunnel line on floor -1 again (tunnel.drag ordered it and labels.yaw dug it at once if that order had not landed), which the sim
+			// refuses on arrival (the line crosses the open tunnel, or its first point is dug already: the sim's own preflight says which). The
+			// check below reads the rejection notice the deck shows for it.
+			T->G2RejectAt = FPlatformTime::Seconds();
+			T->bG2RejectSent = false;
+			T->G2RejectWhy.Reset();
+			if (T->TunnelACm != T->TunnelBCm && !Sim->CanDigTunnel(-1, T->TunnelACm, T->TunnelBCm, T->G2RejectWhy))
+			{
+				Sim->SetOrderLagSeconds(0.0);
+				FRHCommand Dig;
+				Dig.Verb = FName("DigTunnel");
+				Dig.Level = -1;
+				Dig.Location = T->TunnelACm;
+				Dig.LocationB = T->TunnelBCm;
+				Sim->EnqueueCommand(Dig);
+				T->bG2RejectSent = true;
+			}
+			Sim->SetOrderLagSeconds(45.0);
+			TSet<int32> Before;
+			for (const FRHCommand& C : Sim->GetUplinkQueue()) { Before.Add(C.CommandId); }
+			T->G2Uplink.Reset();
+			const auto Order = [Sim](FName Verb, FName Target, double Value, int32 Level, const FVector& At)
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = Verb;
+				Cmd.Target = Target;
+				Cmd.Value = Value;
+				Cmd.Level = Level;
+				Cmd.Location = At;
+				Sim->EnqueueCommand(Cmd);
+			};
+			FVector Spot = FVector::ZeroVector;
+			FString Why;
+			if (FindBuildSpot(*Sim, Spot, Why, FName("ChargePad"))) { Order(FName("Build"), FName("ChargePad"), 0.0, 0, Spot); }
+			if (FindBuildSpot(*Sim, Spot, Why, FName("BatteryBank"))) { Order(FName("Build"), FName("BatteryBank"), 0.0, 0, Spot); }
+			const int32 PadId = T->IdlePad;
+			if (const FRHBuildingInstance* Pad = Sim->GetBuildings().FindByPredicate([PadId](const FRHBuildingInstance& B) { return B.Id == PadId; }))
+			{
+				Order(FName("Demolish"), FName("Building"), (double)Pad->Id, Pad->Level, Pad->LocationCm);
+			}
+			Order(FName("Dig"), FName("Regolith_A"), 0.0, 0, FVector::ZeroVector);
+			if (T->MoveBed != 0 && Sim->FindFurniture(T->MoveBed))
+			{
+				Order(FName("Sell"), FName("Furniture"), (double)T->MoveBed, 0, FVector::ZeroVector);
+			}
+			// G2a r1: the Move, Furnish, Fit and Sell-fitting rows too (a Move carries its piece's Id in LocationB.X, GetMovePieceId); none
+			// of these is ever executed (all are cancelled 3 s later, at a 45 s lag).
+			const auto MoveOrder = [Sim](FName Target, int32 PieceId)
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Move");
+				Cmd.Target = Target;
+				Cmd.LocationB = FVector((double)PieceId, 0.0, 0.0);
+				Sim->EnqueueCommand(Cmd);
+			};
+			if (T->MoveBed != 0 && Sim->FindFurniture(T->MoveBed))
+			{
+				MoveOrder(FName("Furniture"), T->MoveBed);
+			}
+			Order(FName("Furnish"), FName("BunkBed"), 0.0, 0, FVector::ZeroVector);
+			if (const FRHWallFeature* Win = T->MoveWindow != 0 ? Sim->FindWallFeature(T->MoveWindow) : nullptr)
+			{
+				Order(FName("Sell"), FName("WallFeature"), (double)Win->Id, 0, FVector::ZeroVector);
+				MoveOrder(FName("WallFeature"), Win->Id);
+				Order(FName("Fit"), Win->Row, 0.0, 0, FVector::ZeroVector);
+			}
+			// G2a r1: two of the sim's two-word verbs (VerbText maps them; an unmapped one is spaced out, never a CamelCase key).
+			Order(FName("SinkShaft"), NAME_None, 0.0, 0, FVector::ZeroVector);
+			Order(FName("FitLift"), NAME_None, 0.0, 0, FVector::ZeroVector);
+			// G2a r3 (room names, a cleared zone): Designate orders whose room key is not its display name (the Lounge's row key is
+			// "Smoking"; the palette's Laboratory is "Lab"), and a clear (a Designate with no target); like the rest, never executed.
+			Order(FName("Designate"), FName("Smoking"), 0.0, 0, FVector::ZeroVector);
+			Order(FName("Designate"), FName("Lab"), 0.0, 0, FVector::ZeroVector);
+			Order(FName("Designate"), NAME_None, 0.0, 0, FVector::ZeroVector);
+			for (const FRHCommand& C : Sim->GetUplinkQueue())
+			{
+				if (!Before.Contains(C.CommandId)) { T->G2Uplink.Add(C.CommandId); }
+			}
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: names.uplink: %d order(s) queued at a 45 s lag (Charging Pad pad #%d, Bunk Bed #%d, fitting #%d)"), T->G2Uplink.Num(), T->IdlePad, T->MoveBed, T->MoveWindow);
+		}, 0.3f);
+		PushCheckSays(TEXT("names.uplink"), nullptr, [T](FString& Said)
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			const URHSimWorldSubsystem* Sim = GetSim();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Deck.IsValid() || !Sim || !Defs) { return FString(TEXT("no deck, sim or definitions")); }
+			// The test's own expected rows, from the CSV names (a leading "The " dropped in running text).
+			const auto Name = [Defs](FName Def) { const FRHBuildingRow* R = Defs->GetBuilding(Def); FString N = R ? R->DisplayName : FString(); N.RemoveFromStart(TEXT("The ")); return N; };
+			const FRHFurnitureRow* Bed = Defs->GetFurniture(FName("BunkBed"));
+			TArray<FString> Want = { TEXT("Build ") + Name(FName("ChargePad")), TEXT("Build ") + Name(FName("BatteryBank")),
+				FString::Printf(TEXT("Demolish %s #%d"), *Name(FName("ChargePad")), T->IdlePad), TEXT("Dig Regolith A") };
+			if (T->MoveBed != 0 && Sim->FindFurniture(T->MoveBed))
+			{
+				Want.Add(FString::Printf(TEXT("Sell %s #%d"), Bed ? *Bed->DisplayName : TEXT("?"), T->MoveBed));
+				Want.Add(FString::Printf(TEXT("Move %s #%d"), Bed ? *Bed->DisplayName : TEXT("?"), T->MoveBed));
+			}
+			Want.Add(FString::Printf(TEXT("Furnish %s"), Bed ? *Bed->DisplayName : TEXT("?")));
+			const FRHWallFeature* Win = T->MoveWindow != 0 ? Sim->FindWallFeature(T->MoveWindow) : nullptr;
+			const FRHDoorRow* WinRow = Win ? Defs->GetDoor(Win->Row) : nullptr;
+			if (Win)
+			{
+				const FString WinName = WinRow ? WinRow->DisplayName : FString(TEXT("?"));
+				Want.Add(FString::Printf(TEXT("Sell %s #%d"), *WinName, Win->Id));
+				Want.Add(FString::Printf(TEXT("Move %s #%d"), *WinName, Win->Id));
+				Want.Add(FString::Printf(TEXT("Fit %s"), *WinName));
+			}
+			Want.Add(TEXT("Sink shaft"));
+			Want.Add(TEXT("Fit lift car"));
+			// G2a r3: a room by its row's display name, from the CSV ("Designate Lounge", "Designate Laboratory"), and the clear as "Clear zone".
+			const FRHRoomRow* Lounge = Defs->GetRoom(FName("Smoking"));
+			const FRHRoomRow* LabRoom = Defs->GetRoom(FName("Lab"));
+			Want.Add(TEXT("Designate ") + (Lounge ? Lounge->DisplayName : FString(TEXT("?"))));
+			Want.Add(TEXT("Designate ") + (LabRoom ? LabRoom->DisplayName : FString(TEXT("?"))));
+			Want.Add(TEXT("Clear zone"));
+			const FString Text = Deck->Debug_GetUplinkText();
+			// G2a r2: the targetless order's refusal as the notice line shows it (fresh: set after the setup sent the order).
+			const URHColonyVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+			const FString Notice = Viz ? Viz->GetNoticeText().ToString() : FString();
+			const bool bFresh = Viz && Viz->Debug_GetNoticeRealSeconds() >= T->G2RejectAt && !Notice.IsEmpty();
+			Said = FString::Printf(TEXT("%d order(s) queued; the list: '%s'; the targetless refusal: '%s'%s (the sim's preflight: '%s')"), T->G2Uplink.Num(), *Text,
+				*Notice, bFresh ? TEXT("") : TEXT(" [no notice since the order]"), *T->G2RejectWhy);
+			FString Problem;
+			if (!T->bG2RejectSent)
+			{
+				Problem += FString::Printf(TEXT(" the test's tunnel line would not be refused ('%s'), so no targetless order was sent;"), *T->G2RejectWhy);
+			}
+			else if (!bFresh)
+			{
+				Problem += TEXT(" no rejection notice since the targetless order was sent;");
+			}
+			else
+			{
+				// PASS iff it starts "REJECTED ", holds no "None" and no double space, and its verb and target part (up to the reason's ": ")
+				// holds no underscore and no CamelCase token and reads the verb alone.
+				const int32 Colon = Notice.Find(TEXT(": "));
+				const FString Head = Notice.Mid(9, Colon == INDEX_NONE ? MAX_int32 : FMath::Max(0, Colon - 9));
+				if (!Notice.StartsWith(TEXT("REJECTED "), ESearchCase::CaseSensitive)) { Problem += TEXT(" the notice does not start 'REJECTED ';"); }
+				if (Notice.Contains(TEXT("None"), ESearchCase::CaseSensitive)) { Problem += TEXT(" the notice holds 'None';"); }
+				if (Notice.Contains(TEXT("  "))) { Problem += TEXT(" the notice holds a double space;"); }
+				if (Head.Contains(TEXT("_")) || HasCamelToken(Head)) { Problem += FString::Printf(TEXT(" its verb and target '%s' hold an internal name;"), *Head); }
+				if (!Head.Equals(TEXT("Dig tunnel"), ESearchCase::CaseSensitive)) { Problem += FString::Printf(TEXT(" its verb and target read '%s', expected 'Dig tunnel' (no target);"), *Head); }
+			}
+			TArray<FString> Rows;
+			Text.ParseIntoArray(Rows, TEXT(" | "), true);
+			for (const FString& W0 : Want)
+			{
+				if (!Rows.ContainsByPredicate([&W0](const FString& R) { return R.StartsWith(W0); }))
+				{
+					Problem += FString::Printf(TEXT(" no row '%s';"), *W0);
+				}
+			}
+			for (const FString& R : Rows)
+			{
+				if (R.Contains(TEXT("_")) || HasCamelToken(R) || R.Contains(TEXT("None"), ESearchCase::CaseSensitive))
+				{
+					Problem += FString::Printf(TEXT(" the row '%s' holds an internal name;"), *R);
+				}
+				// G2a r3: a room key or a bare verb where the room's name or "Clear zone" belongs.
+				if (R.Equals(TEXT("Designate"), ESearchCase::CaseSensitive) || R.StartsWith(TEXT("Designate Smoking"), ESearchCase::CaseSensitive)
+					|| R.Equals(TEXT("Designate Lab"), ESearchCase::CaseSensitive) || R.StartsWith(TEXT("Designate Lab "), ESearchCase::CaseSensitive))
+				{
+					Problem += FString::Printf(TEXT(" the row '%s' is a room key or a bare verb;"), *R);
+				}
+			}
+			if (!Lounge || !LabRoom || Lounge->DisplayName.IsEmpty() || LabRoom->DisplayName.IsEmpty() || Lounge->DisplayName == TEXT("Smoking") || LabRoom->DisplayName == TEXT("Lab"))
+			{
+				Problem += TEXT(" the Lounge's or the Laboratory's row is missing or reads as its key (nothing to tell apart);");
+			}
+			if (T->MoveBed == 0 || !Sim->FindFurniture(T->MoveBed))
+			{
+				Problem += TEXT(" move.setup's Bunk Bed is gone (no Sell or Move row to read);");
+			}
+			if (!Win)
+			{
+				Problem += TEXT(" move.setup's fitting is gone (no Sell, Move or Fit row of a fitting to read);");
+			}
+			return Problem;
+		}, 3.f);
+		Runner.Do(TEXT("names.uplink cleanup"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				for (const int32 Id : T->G2Uplink) { Sim->CancelUplinkCommand(Id); }
+				Sim->SetOrderLagSeconds(T->G2Lag0);
+			}
+			T->G2Uplink.Reset();
+		}, 0.3f);
+		// words.sixty and site.stage share a site: a Charging Pad ordered at a 1 s lag with the fleet held, so it stands waiting for its
+		// materials; its card is read until its stage line names the first short material, then every material is delivered by the harness
+		// and the card is read until it waits for a builder.
+		Runner.Do(TEXT("words.sixty setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim)
+			{
+				return;
+			}
+			T->G2Lag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(1.0);
+			Sim->SetFleetHold(true);
+			T->G2SiteId = 0;
+			T->G2Stages.Reset();
+			T->G2StageWhy.Reset();
+			FString Why;
+			if (FindBuildSpot(*Sim, T->G2SiteCm, Why, FName("ChargePad")))
+			{
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Build");
+				Cmd.Target = FName("ChargePad");
+				Cmd.Level = 0;
+				Cmd.Location = T->G2SiteCm;
+				Sim->EnqueueCommand(Cmd);
+				T->G2SiteSaid = FString::Printf(TEXT("a Charging Pad ordered at (%.0f, %.0f) m"), T->G2SiteCm.X / 100.0, T->G2SiteCm.Y / 100.0);
+			}
+			else
+			{
+				T->G2SiteSaid = FString::Printf(TEXT("no spot for a Charging Pad (%s)"), *Why);
+			}
+		}, 0.2f);
+		{
+			const TSharedRef<int32> Phase = MakeShared<int32>(0);
+			const TSharedRef<double> PhaseAt = MakeShared<double>(0.0);
+			Runner.Push(TEXT("words.sixty site"), [T, Phase, PhaseAt](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				UWorld* W = FindGameWorld();
+				const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+				if (!Sim || !PC || !Deck.IsValid() || !Defs)
+				{
+					T->G2StageWhy += TEXT(" no sim, controller, deck or definitions;");
+					return true;
+				}
+				const int32 SiteId = T->G2SiteId;
+				const FRHBuildingInstance* Site = nullptr;
+				for (const FRHBuildingInstance& B : Sim->GetBuildings())
+				{
+					if ((SiteId != 0 && B.Id == SiteId) || (SiteId == 0 && B.bUnderConstruction && B.DefName == FName("ChargePad") && FVector::Dist2D(B.LocationCm, T->G2SiteCm) < 300.0))
+					{
+						Site = &B;
+						break;
+					}
+				}
+				if (!Site)
+				{
+					if (bLast) { T->G2StageWhy += FString::Printf(TEXT(" no site stood (%s);"), *T->G2SiteSaid); return true; }
+					return false;
+				}
+				if (T->G2SiteId == 0)
+				{
+					T->G2SiteId = Site->Id;
+					PC->Debug_SelectBuilding(Site->Id);
+				}
+				const FString Card = Deck->Debug_GetInspectText();
+				T->G2CardRead(Card);
+				// The test's own first short line, in GetSiteBill's order, by ApplyBuildWork's 0.5 kg rule.
+				const TMap<FName, double> Bill = Sim->GetSiteBill(*Site);
+				FName Short;
+				for (const TPair<FName, double>& L : Bill)
+				{
+					const double* Have = Site->InputKg.Find(L.Key);
+					if ((Have ? *Have : 0.0) + 0.5 < L.Value) { Short = L.Key; break; }
+				}
+				if (*Phase == 0)
+				{
+					const FRHResourceRow* Row = Short.IsNone() ? nullptr : Defs->GetResource(Short);
+					const FString Want = FString::Printf(TEXT("WAITING FOR MATERIALS - needs more %s"), Row ? *Row->DisplayName : *Short.ToString());
+					if (!Short.IsNone() && Card.Contains(Want))
+					{
+						T->G2Stages.Add(Want);
+						// G2a r1: the card's own material line names the same resource by its CSV name ("material Structural Materials: ...").
+						const FString WantMaterial = FString::Printf(TEXT("material %s: "), Row ? *Row->DisplayName : *Short.ToString());
+						if (!Card.Contains(WantMaterial))
+						{
+							T->G2StageWhy += FString::Printf(TEXT(" the card has no line '%s...' (card: '%s');"), *WantMaterial, *Card.Replace(TEXT("\n"), TEXT(" / ")));
+						}
+						for (const TPair<FName, double>& L : Bill)
+						{
+							const double* Have = Site->InputKg.Find(L.Key);
+							Sim->Debug_AddSolidAt(Site->Id, L.Key, L.Value - (Have ? *Have : 0.0) + 1.0, false);
+						}
+						*Phase = 1;
+						*PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed > 10.0) { T->G2StageWhy += FString::Printf(TEXT(" the card never read '%s' (card: '%s');"), *Want, *Card.Replace(TEXT("\n"), TEXT(" / "))); return true; }
+					return false;
+				}
+				const FString Want = TEXT("WAITING FOR A BUILDER - no Fabricator has taken the job");
+				if (Card.Contains(Want))
+				{
+					T->G2Stages.Add(Want);
+					return true;
+				}
+				if (bLast || Elapsed - *PhaseAt > 6.0) { T->G2StageWhy += FString::Printf(TEXT(" the card never read '%s' within 6 s of the delivery (card: '%s');"), *Want, *Card.Replace(TEXT("\n"), TEXT(" / "))); return true; }
+				return false;
+			}, 0.3f, 25.f);
+		}
+		PushCheckSays(TEXT("words.sixty"), nullptr, [T](FString& Said)
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			const URHSimWorldSubsystem* Sim = GetSim();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Deck.IsValid() || !Sim || !Defs) { return FString(TEXT("no deck, sim or definitions")); }
+			// The test's own reason: the first site in GetBuildings() order, by its CSV name with a leading "The " dropped.
+			FString First;
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.bUnderConstruction)
+				{
+					const FRHBuildingRow* R = Defs->GetBuilding(B.DefName);
+					First = R ? R->DisplayName : FString();
+					First.RemoveFromStart(TEXT("The "));
+					break;
+				}
+			}
+			const FString Want = FString::Printf(TEXT("the %s is still being built"), *First);
+			FString Why;
+			const bool bDim = Deck->IsSixtyRefusedShown(&Why);
+			FString Tip;
+			TArray<FFoundWidget> Buttons;
+			GatherInWindow(TEXT("SButton"), Buttons);
+			for (const FFoundWidget& Found : Buttons)
+			{
+				if (HasText(Found.Widget, TEXT("60x")))
+				{
+					const TSharedPtr<IToolTip> ToolTip = Found.Widget->GetToolTip();
+					if (ToolTip.IsValid() && !ToolTip->IsEmpty())
+					{
+						Tip = FirstText(ToolTip->AsWidget());
+					}
+					break;
+				}
+			}
+			Said = FString::Printf(TEXT("%s; 60x shown refused: %s, reason '%s' (expected '%s'); tooltip '%s'"), *T->G2SiteSaid, bDim ? TEXT("yes") : TEXT("no"), *Why, *Want, *Tip);
+			FString Problem;
+			if (First.IsEmpty()) { Problem += TEXT(" no site stands;"); }
+			if (!bDim) { Problem += TEXT(" the 60x tier is not shown refused;"); }
+			if (Why != Want) { Problem += TEXT(" the reason is not the expected words;"); }
+			if (Tip != TEXT("60x unavailable: ") + Why) { Problem += TEXT(" the tooltip is not '60x unavailable: ' and the reason;"); }
+			bool bDigit = false;
+			for (const TCHAR Ch : Why) { bDigit |= FChar::IsDigit(Ch); }
+			if (Why.Contains(TEXT("#")) || bDigit || Why.Contains(TEXT("_")) || HasCamelToken(Why)) { Problem += TEXT(" the reason holds an id, a digit, an underscore or an internal name;"); }
+			return Problem;
+		}, 2.f);
+		{
+			const TSharedRef<double> Base = MakeShared<double>(-1.0);
+			// G2a r1: the percent is judged only where formulas differ: from 10% to 90% of the test's own reading. Every read there must
+			// show N within 1 of it, and at least two reads must show N rising (the line reads 0% on its first frame, when a Fabricator has
+			// only claimed the task, so a percent stuck at 0 passed round 0's first-match rule).
+			const TSharedRef<TArray<FString>> PctSeen = MakeShared<TArray<FString>>();
+			const TSharedRef<int32> PctLast = MakeShared<int32>(-1);
+			const TSharedRef<int32> PctOff = MakeShared<int32>(0);
+			const TSharedRef<FString> PctOffSaid = MakeShared<FString>();
+			Runner.Push(TEXT("site.stage"), [T, Base, PctSeen, PctLast, PctOff, PctOffSaid](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				UWorld* W = FindGameWorld();
+				const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+				if (!Sim || !PC || !Deck.IsValid() || !Defs)
+				{
+					Report(TEXT("site.stage"), false, TEXT("no sim, controller, deck or definitions"));
+					return true;
+				}
+				if (*Base < 0.0)
+				{
+					*Base = Elapsed;
+					Sim->SetFleetHold(false);
+					PC->SetSimSpeed(8.f);
+				}
+				const int32 SiteId = T->G2SiteId;
+				const FRHBuildingInstance* Site = Sim->GetBuildings().FindByPredicate([SiteId](const FRHBuildingInstance& B) { return B.Id == SiteId; });
+				FString Seen;
+				if (Site && Site->bUnderConstruction)
+				{
+					const FString Card = Deck->Debug_GetInspectText();
+					T->G2CardRead(Card);
+					const FRHBuildingRow* Def = Defs->GetBuilding(Site->DefName);
+					const double Total = FMath::Max(1.0, (double)(Def ? Def->BuildTime_s : 0.f) * (double)URHSimWorldSubsystem::GetBedCount(*Site));
+					const double Own = 100.0 * (1.0 - Site->BuildRemaining_s / Total);
+					int32 At = Card.Find(TEXT("BUILDING - "));
+					if (At != INDEX_NONE && T->G2Stages.Num() == 2 && Card.Mid(At).Contains(TEXT("% done")) && Own >= 10.0 && Own <= 90.0)
+					{
+						const int32 Shown = FCString::Atoi(*Card.Mid(At + 11, 4));
+						if (FMath::Abs((double)Shown - Own) > 1.0)
+						{
+							if ((*PctOff)++ == 0) { *PctOffSaid = FString::Printf(TEXT("'BUILDING - %d%% done' against the test's own %.1f at %.2f s"), Shown, Own, Elapsed); }
+						}
+						else if (Shown > *PctLast)
+						{
+							PctSeen->Add(FString::Printf(TEXT("%d%% (own %.1f)"), Shown, Own));
+							*PctLast = Shown;
+							if (PctSeen->Num() >= 2)
+							{
+								T->G2Stages.Add(FString::Printf(TEXT("BUILDING - %s"), *FString::Join(*PctSeen, TEXT(", then "))));
+							}
+						}
+					}
+				}
+				const bool bBuilding = T->G2Stages.Num() >= 3;
+				if (!bBuilding && !bLast && (Site && Site->bUnderConstruction))
+				{
+					return false;
+				}
+				FString Problem = T->G2StageWhy;
+				if (T->G2Stages.Num() < 3 || !T->G2Stages[0].StartsWith(TEXT("WAITING FOR MATERIALS")) || !T->G2Stages[1].StartsWith(TEXT("WAITING FOR A BUILDER")) || !T->G2Stages[2].StartsWith(TEXT("BUILDING - ")))
+				{
+					Problem += FString::Printf(TEXT(" the three stage lines were not all seen in order (site %s);"), Site ? (Site->bUnderConstruction ? TEXT("still a site") : TEXT("finished")) : TEXT("gone"));
+				}
+				if (*PctOff > 0)
+				{
+					Problem += FString::Printf(TEXT(" %d read(s) from 10%% to 90%% showed a percent more than 1 off the test's own, first %s;"), *PctOff, **PctOffSaid);
+				}
+				if (T->G2CardBad > 0)
+				{
+					Problem += FString::Printf(TEXT(" %d card read(s) held an underscore or an internal name, first '%s';"), T->G2CardBad, *T->G2CardBadSaid);
+				}
+				Report(TEXT("site.stage"), Problem.IsEmpty(), FString::Printf(TEXT("%s%s%s; site #%d; stages seen: %s; %d card read(s)"), *Problem, Problem.IsEmpty() ? TEXT("") : TEXT(" | "),
+					*T->G2SiteSaid, T->G2SiteId, *FString::Join(T->G2Stages, TEXT(" -> ")), T->G2CardReads));
+				return true;
+			}, 0.3f, 90.f);
+		}
+		Runner.Do(TEXT("site.stage cleanup"), [T]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->SetFleetHold(false);
+				Sim->SetOrderLagSeconds(T->G2Lag0);
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+				PC->Debug_SelectBuilding(0);
+			}
+		}, 0.3f);
+		// hover.one: a Battery Bank and a Charging Pad 10 m apart, placed finished in open ground (no other building within 12 m); the
+		// pointer rests 3 m from A toward B, 3 m from B toward A, then by the midpoint 20 cm toward A, and every frame for 4 s the shown labels
+		// are read. G2a r1: at that last point A is nearer by 40 cm, under the 50 cm hysteresis, so B's label (shown at the point before) must
+		// stay: the hysteresis is checked (g2a_mut_hyst removes it). Round 0's exact midpoint could not tell (the two were level).
+		Runner.Do(TEXT("hover.one setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			if (!Sim || !PC)
+			{
+				T->G2HoverWhy = TEXT(" no sim or controller;");
+				return;
+			}
+			PC->SetActiveLevel(0);
+			PC->Debug_SelectBuilding(0);
+			const auto Clear = [Sim](const FVector& Spot)
+			{
+				for (const FRHBuildingInstance& B : Sim->GetBuildings())
+				{
+					if (B.Level == 0 && FVector::Dist2D(B.LocationCm, Spot) < 1200.0) { return false; }
+				}
+				return true;
+			};
+			const FVector Dirs[4] = { FVector(1000.0, 0.0, 0.0), FVector(-1000.0, 0.0, 0.0), FVector(0.0, 1000.0, 0.0), FVector(0.0, -1000.0, 0.0) };
+			bool bFound = false;
+			FString Why;
+			for (int32 Ring = 1; Ring <= 14 && !bFound; ++Ring)
+			{
+				for (int32 Dx = -Ring; Dx <= Ring && !bFound; ++Dx)
+				{
+					for (int32 Dy = -Ring; Dy <= Ring && !bFound; ++Dy)
+					{
+						if (FMath::Max(FMath::Abs(Dx), FMath::Abs(Dy)) != Ring) { continue; }
+						const FVector A(Dx * 1000.0, Dy * 1000.0, 0.0);
+						if (!Sim->CanPlaceBuilding(FName("BatteryBank"), A, Why, 0) || !Clear(A)) { continue; }
+						for (const FVector& Dir : Dirs)
+						{
+							const FVector B = A + Dir;
+							if (Sim->CanPlaceBuilding(FName("ChargePad"), B, Why, 0) && Clear(B))
+							{
+								T->G2HoverA = A;
+								T->G2HoverB = B;
+								bFound = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+			if (!bFound)
+			{
+				T->G2HoverWhy = FString::Printf(TEXT(" no Battery Bank spot with a Charging Pad spot 10 m away clear of other buildings in 14 rings (last: %s);"), *Why);
+				return;
+			}
+			Sim->Debug_PlaceInstant(FName("BatteryBank"), T->G2HoverA, 0);
+			T->G2HoverIdA = Sim->GetBuildings().Last().Id;
+			Sim->Debug_PlaceInstant(FName("ChargePad"), T->G2HoverB, 0);
+			T->G2HoverIdB = Sim->GetBuildings().Last().Id;
+			FrameCamera((T->G2HoverA + T->G2HoverB) * 0.5, 0.15f);
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: hover.one: Battery Bank #%d at (%.0f, %.0f) m, Charging Pad #%d at (%.0f, %.0f) m"), T->G2HoverIdA, T->G2HoverA.X / 100.0, T->G2HoverA.Y / 100.0,
+				T->G2HoverIdB, T->G2HoverB.X / 100.0, T->G2HoverB.Y / 100.0);
+		}, 1.5f);
+		for (int32 Point = 0; Point < 3; ++Point)
+		{
+			const TCHAR* PointName = Point == 0 ? TEXT("near A") : (Point == 1 ? TEXT("near B") : TEXT("by the midpoint"));
+			const auto Where = [T, Point]() { const FVector AB = T->G2HoverB - T->G2HoverA; return Point == 0 ? T->G2HoverA + AB * 0.3 : (Point == 1 ? T->G2HoverB - AB * 0.3 : T->G2HoverA + AB * 0.48); };
+			PushPress(FString::Printf(TEXT("hover.one %s"), PointName), [Where](FVector2D& OutPos) { return LocateWorld(Where())(OutPos); }, /*bPress*/ false);
+			Runner.Push(FString::Printf(TEXT("hover.one %s sample"), PointName), [T, Point, PointName, Where](double Elapsed, bool)
+			{
+				UWorld* W = FindGameWorld();
+				const URHColonyVisualizerSubsystem* Viz = W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+				const URHSimWorldSubsystem* Sim = GetSim();
+				const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+				if (!Viz || !Sim || !Defs || T->G2HoverIdA == 0)
+				{
+					return true;
+				}
+				if (Elapsed < 0.5)
+				{
+					return false;
+				}
+				TArray<FString> Texts;
+				TArray<FVector> At;
+				TArray<FString> Mats;
+				FVector2D Cursor;
+				const int32 N = Viz->Debug_GetHoverShown(Texts, At, Mats, Cursor);
+				FG2HoverPoint& R = T->G2Hover[Point];
+				++R.Frames;
+				R.CursorCm = Cursor;
+				// The pointer the hover pass reads can be moved by events the harness does not make (a real mouse over this window, which covers
+				// nearly the whole display: g2a_mut_credits' attempt-1 run saw it). A frame counts only when the hover pass used the test's point
+				// (its cursor ground point within 1 m of it); every frame then puts the pointer back on the point for the next one.
+				const FVector Target = Where();
+				FVector2D Back;
+				if (WorldToSlate(Target, Back))
+				{
+					SendMove(Back, false);
+				}
+				if (FVector2D::Distance(Cursor, FVector2D(Target.X, Target.Y)) > 100.0)
+				{
+					if (R.Off++ == 0) { R.OffSaid = FString::Printf(TEXT("the hover pass's cursor at (%.1f, %.1f) m at %.2f s"), Cursor.X / 100.0, Cursor.Y / 100.0, Elapsed); }
+					return Elapsed >= 4.5;
+				}
+				if (N != 1)
+				{
+					if (R.NotOne++ == 0) { R.NotOneSaid = FString::Printf(TEXT("%d label(s) '%s' at %.2f s"), N, *FString::Join(Texts, TEXT("', '")), Elapsed); }
+				}
+				for (int32 i = 0; i < N; ++i)
+				{
+					R.Texts.AddUnique(Texts[i]);
+					if (!Mats[i].Contains(TEXT("M_RH_TextUnlit")) && R.BadMat.IsEmpty()) { R.BadMat = FString::Printf(TEXT("'%s' wears %s"), *Texts[i], *Mats[i]); }
+					// The lift, by the test's own reading: the label's owner by its text (A's or B's name), and every building actor within 15 m of
+					// that anchor, through GetBuildingVisual: the highest top of its drawn, non-text primitives.
+					const FRHBuildingRow* RowA = Defs->GetBuilding(FName("BatteryBank"));
+					const FVector Anchor = (RowA && Texts[i] == RowA->DisplayName) ? T->G2HoverA : T->G2HoverB;
+					double Top = -1.0e9;
+					for (const FRHBuildingInstance& B : Sim->GetBuildings())
+					{
+						const AStaticMeshActor* Actor = B.Level == 0 && FVector::Dist2D(B.LocationCm, Anchor) < 1500.0 ? Viz->GetBuildingVisual(B.Id) : nullptr;
+						if (!Actor || Actor->IsHidden()) { continue; }
+						TInlineComponentArray<UPrimitiveComponent*> Prims(Actor);
+						for (const UPrimitiveComponent* Prim : Prims)
+						{
+							if (Prim && Prim->IsVisible() && !Prim->IsA<UTextRenderComponent>()) { Top = FMath::Max(Top, Prim->Bounds.Origin.Z + Prim->Bounds.BoxExtent.Z); }
+						}
+					}
+					R.MinLift = FMath::Min(R.MinLift, At[i].Z - Top);
+				}
+				return Elapsed >= 4.5;
+			}, 0.2f, 0.f);
+		}
+		Runner.Do(TEXT("hover.one"), [T]()
+		{
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const FRHBuildingRow* RowA = Defs ? Defs->GetBuilding(FName("BatteryBank")) : nullptr;
+			const FRHBuildingRow* RowB = Defs ? Defs->GetBuilding(FName("ChargePad")) : nullptr;
+			const FString NameA = RowA ? RowA->DisplayName : FString(TEXT("?")), NameB = RowB ? RowB->DisplayName : FString(TEXT("?"));
+			FString Problem = T->G2HoverWhy, Said;
+			const TCHAR* Names[3] = { TEXT("near A"), TEXT("near B"), TEXT("by the midpoint (20 cm toward A)") };
+			for (int32 Point = 0; Point < 3; ++Point)
+			{
+				const FG2HoverPoint& R = T->G2Hover[Point];
+				Said += FString::Printf(TEXT("%s%s: %d frame(s), %d off the point%s, cursor (%.1f, %.1f) m, shown '%s', lifted at least %.0f cm above its neighbours%s%s"), Point > 0 ? TEXT("; ") : TEXT(""), Names[Point], R.Frames,
+					R.Off, R.OffSaid.IsEmpty() ? TEXT("") : *(TEXT(" (first: ") + R.OffSaid + TEXT(")")),
+					R.CursorCm.X / 100.0, R.CursorCm.Y / 100.0, *FString::Join(R.Texts, TEXT("', '")), R.MinLift, R.NotOne > 0 ? *FString::Printf(TEXT(", not one label on %d frame(s), first %s"), R.NotOne, *R.NotOneSaid) : TEXT(""),
+					R.BadMat.IsEmpty() ? TEXT("") : *(TEXT(", ") + R.BadMat));
+				if (R.Frames - R.Off < 30) { Problem += FString::Printf(TEXT(" %s: only %d frame(s) on the point;"), Names[Point], R.Frames - R.Off); continue; }
+				if (R.NotOne > 0) { Problem += FString::Printf(TEXT(" %s: not exactly one label on %d frame(s);"), Names[Point], R.NotOne); }
+				if (R.Texts.Num() != 1) { Problem += FString::Printf(TEXT(" %s: %d different labels shown;"), Names[Point], R.Texts.Num()); }
+				if (Point == 0 && (R.Texts.Num() != 1 || R.Texts[0] != NameA)) { Problem += FString::Printf(TEXT(" near A the label is not '%s';"), *NameA); }
+				if (Point == 1 && (R.Texts.Num() != 1 || R.Texts[0] != NameB)) { Problem += FString::Printf(TEXT(" near B the label is not '%s';"), *NameB); }
+				if (Point == 2 && (R.Texts.Num() != 1 || R.Texts[0] != NameB)) { Problem += FString::Printf(TEXT(" by the midpoint the label is not '%s', the one shown at the point before (A is nearer by only 40 cm: the hysteresis keeps B);"), *NameB); }
+				if (!R.BadMat.IsEmpty()) { Problem += FString::Printf(TEXT(" %s: %s, not M_RH_TextUnlit;"), Names[Point], *R.BadMat); }
+				if (R.MinLift < 29.0) { Problem += FString::Printf(TEXT(" %s: the label sits only %.0f cm above its neighbours' meshes;"), Names[Point], R.MinLift); }
+			}
+			Report(TEXT("hover.one"), Problem.IsEmpty(), Problem.IsEmpty() ? Said : Problem + TEXT(" | ") + Said);
+		}, 0.3f);
+		// G2a r3 (the cleared room, F2; words.sample reports it): a station bay selected, its room cleared by a Designate order at no lag, as
+		// the zone tool's Clear sends it; once the order lands the controller tick's room rule must drop the selection, so the station card
+		// closes instead of reading "surface habitat ... NOT STAFFED ... Assign staff here first" over a bay that is no longer a station. The
+		// bay is the test's own: a two-bay habitat placed finished in open ground (no building within 25 m, so it joins no other network),
+		// bay 0 zoned Workstation by the sim's own DesignateBay, as move.setup zones its bays.
+		Runner.Do(TEXT("words.sample cleared room setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			const FRHBuildingRow* HabDef = Defs ? Defs->GetBuilding(FName("HabModule")) : nullptr;
+			T->G2ClearHab = 0;
+			T->G2ClearWhy.Reset();
+			if (!Sim || !PC || !HabDef)
+			{
+				T->G2ClearWhy = TEXT(" cleared room: no sim, controller or Habitat row;");
+				return;
+			}
+			PC->SetActiveLevel(0);
+			PC->SetSimSpeed(1.f);
+			PC->Debug_SelectBuilding(0);
+			const auto Open = [Sim](const FVector& Spot)
+			{
+				for (const FRHBuildingInstance& B : Sim->GetBuildings())
+				{
+					if (B.Level == 0 && FVector::Dist2D(B.LocationCm, Spot) < 2500.0) { return false; }
+				}
+				return true;
+			};
+			FString Why;
+			for (int32 Ring = 3; Ring <= 14 && T->G2ClearHab == 0; ++Ring)
+			{
+				for (int32 Dx = -Ring; Dx <= Ring && T->G2ClearHab == 0; ++Dx)
+				{
+					for (int32 Dy = -Ring; Dy <= Ring && T->G2ClearHab == 0; ++Dy)
+					{
+						if (FMath::Max(FMath::Abs(Dx), FMath::Abs(Dy)) != Ring) { continue; }
+						const FVector At = URHSimWorldSubsystem::SnapToBayGrid(HabDef, FVector(Dx * 1000.0 - 500.0, Dy * 1000.0, 0.0), 2, 1);
+						if (!Open(At) || !Sim->CanPlaceBuildingSized(FName("HabModule"), At, Why, 0, 2, 1, /*bCheckMaterials*/ false)) { continue; }
+						Sim->Debug_PlaceInstant(FName("HabModule"), At, 0, 2, 1);
+						T->G2ClearHab = Sim->GetBuildings().Last().Id;
+					}
+				}
+			}
+			FString R;
+			if (T->G2ClearHab == 0)
+			{
+				T->G2ClearWhy = FString::Printf(TEXT(" cleared room: no open spot for a two-bay habitat in 14 rings (last: %s);"), *Why);
+				return;
+			}
+			if (!Sim->DesignateBay(T->G2ClearHab, 0, FName("Workstation"), R))
+			{
+				T->G2ClearWhy = FString::Printf(TEXT(" cleared room: bay 0 of habitat #%d could not be zoned Workstation (%s);"), T->G2ClearHab, *R);
+				return;
+			}
+			T->G2ClearBayCm = Sim->GetCellCentreCm(FIntVector(0, 0, T->G2ClearHab));
+			PC->Debug_SelectBay(T->G2ClearHab, 0);
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: words.sample: habitat #%d placed, bay 0 zoned Workstation at (%.0f, %.0f) m and selected"), T->G2ClearHab,
+				T->G2ClearBayCm.X / 100.0, T->G2ClearBayCm.Y / 100.0);
+		}, 0.5f);
+		Runner.Do(TEXT("words.sample cleared room clear"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			T->bG2ClearSent = false;
+			T->G2ClearLandedAt = -1.0;
+			if (!Sim || !PC || !Deck.IsValid() || T->G2ClearHab == 0)
+			{
+				return;
+			}
+			// The station bay as the player leaves it, half a second (several controller ticks) after the selection: still selected, its card
+			// a station card. Then the clear at no lag.
+			T->bG2ClearHeld = PC->HasSelectedBay() && PC->GetSelectedBayHab() == T->G2ClearHab && PC->GetSelectedBay() == 0;
+			T->G2ClearBefore = Deck->Debug_GetInspectText();
+			const double Lag = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(0.0);
+			FRHCommand Clear;
+			Clear.Verb = FName("Designate");
+			Clear.Target = NAME_None;
+			Clear.Level = 0;
+			Clear.Location = T->G2ClearBayCm;
+			Sim->EnqueueCommand(Clear);
+			Sim->SetOrderLagSeconds(Lag);
+			T->bG2ClearSent = true;
+		}, 0.f);
+		Runner.Push(TEXT("words.sample cleared room landed"), [T](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !PC || !Deck.IsValid() || !T->bG2ClearSent)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds();
+			if (T->G2ClearLandedAt < 0.0 && Sim->GetBayRoom(T->G2ClearHab, 0).IsNone())
+			{
+				T->G2ClearLandedAt = Now;
+			}
+			// Half a real second after the order landed (several controller ticks): the selection and the card as the player sees them.
+			if ((T->G2ClearLandedAt >= 0.0 && Now - T->G2ClearLandedAt >= 0.5) || bLast)
+			{
+				T->bG2ClearShownAfter = PC->GetSelectedBuildingId() != 0 || PC->HasSelectedCell() || PC->HasSelectedBay(); // the deck's GetInspectVisibility rule
+				T->G2ClearAfter = Deck->Debug_GetInspectText();
+				return true;
+			}
+			return false;
+		}, 0.2f, 8.f);
+		// words.sample: a sample of A7's and A3's words, each against the test's own reading: the Earth credit line in whole credits, a
+		// colonist's home floor signed, the habitat card's counts in agreeing plurals, and the Borer's build tab named Underground.
+		Runner.Do(TEXT("words.sample"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !PC || !Deck.IsValid())
+			{
+				Report(TEXT("words.sample"), false, TEXT("no sim, controller or deck"));
+				return;
+			}
+			FString Problem, Said;
+			// (credits) 0.567 cr more, so the balance has thousandths to round; the award form as the panel picks it.
+			Sim->Debug_GrantCredits(567);
+			const auto Whole = [](int64 Milli) { return Milli >= 0 ? (Milli + 500) / 1000 : (Milli - 500) / 1000; };
+			const int64 Award = Sim->GetAwardMassKg() > 0.0 ? FMath::FloorToInt64(Sim->GetAwardMassKg() * Sim->GetAwardMcrPerKg()) : 0;
+			const FString WantCredit = Award > 0
+				? FString::Printf(TEXT("Earth credit: %lld cr (this round's award %lld cr)"), Whole(Sim->GetCreditBalanceMcr()), Whole(Award))
+				: FString::Printf(TEXT("Earth credit: %lld cr"), Whole(Sim->GetCreditBalanceMcr()));
+			const FString Credit = Deck->GetEarthCreditLine();
+			Said += FString::Printf(TEXT("credits: '%s' (balance %lld mcr; expected '%s')"), *Credit, Sim->GetCreditBalanceMcr(), *WantCredit);
+			if (Credit != WantCredit || Credit.Contains(TEXT(".")))
+			{
+				Problem += TEXT(" credits: the Earth credit line is not whole credits as expected;");
+			}
+			// (floor) the first colonist housed on a floor underground.
+			const FRHColonist* Under = Sim->GetColonists().FindByPredicate([](const FRHColonist& C) { return C.HomeHab == 0 && C.HomeLevel < 0; });
+			if (!Under)
+			{
+				Problem += TEXT(" floor: no colonist lives on a floor underground;");
+				Said += TEXT("; floor: none underground");
+			}
+			else
+			{
+				const FString Home = Deck->GetRosterHomeText(Under->Id);
+				const FString WantHome = FString::Printf(TEXT("floor %d"), Under->HomeLevel);
+				Said += FString::Printf(TEXT("; floor: colonist #%d (HomeLevel %d) reads '%s'"), Under->Id, Under->HomeLevel, *Home);
+				if (Home != WantHome)
+				{
+					Problem += FString::Printf(TEXT(" floor: '%s', expected '%s';"), *Home, *WantHome);
+				}
+			}
+			// (plurals) move.setup's two-bay habitat: no "(s)", and every "<n> bay|bed|resident|cell" agrees in number.
+			const int32 Was = PC->GetSelectedBuildingId();
+			PC->Debug_SelectBuilding(T->MoveHab);
+			const FString Card = T->MoveHab != 0 ? Deck->Debug_GetInspectText() : FString();
+			PC->Debug_SelectBuilding(Was);
+			TArray<FString> Words;
+			Card.ParseIntoArrayWS(Words);
+			int32 Counted = 0;
+			FString Disagree;
+			TArray<FString> CountsRead; // G2a r1: every counted "<n> <noun>", in the report
+			for (int32 i = 0; i + 1 < Words.Num(); ++i)
+			{
+				if (!Words[i].IsNumeric() || Words[i].Contains(TEXT(".")))
+				{
+					continue;
+				}
+				FString Noun = Words[i + 1];
+				while (Noun.Len() > 0 && !FChar::IsAlpha(Noun[Noun.Len() - 1])) { Noun.LeftChopInline(1); }
+				const bool bMany = Noun.EndsWith(TEXT("s"));
+				const FString Base = bMany ? Noun.LeftChop(1) : Noun;
+				if (Base == TEXT("bay") || Base == TEXT("bed") || Base == TEXT("resident") || Base == TEXT("cell"))
+				{
+					++Counted;
+					CountsRead.Add(Words[i] + TEXT(" ") + Noun);
+					if (bMany != (FCString::Atoi(*Words[i]) != 1)) { Disagree += FString::Printf(TEXT(" '%s %s'"), *Words[i], *Noun); }
+				}
+			}
+			// G2a r1: the helper itself at 0, 1 and 2 (the card may hold no count of one), against the test's own words.
+			const FString Helper = FString::Printf(TEXT("%s, %s, %s, %s / %s"), *RHOrder::Plural(0, TEXT("bay"), TEXT("bays")), *RHOrder::Plural(1, TEXT("bay"), TEXT("bays")),
+				*RHOrder::Plural(2, TEXT("bay"), TEXT("bays")), RHOrder::PluralWord(1, TEXT("cell"), TEXT("cells")), RHOrder::PluralWord(2, TEXT("cell"), TEXT("cells")));
+			Said += FString::Printf(TEXT("; plurals: habitat #%d's card, %d count(s) read (%s)%s; the helper reads '%s'"), T->MoveHab, Counted, *FString::Join(CountsRead, TEXT(", ")),
+				Disagree.IsEmpty() ? TEXT(", all agree") : *(TEXT(", disagreeing:") + Disagree), *Helper);
+			if (Helper != TEXT("0 bays, 1 bay, 2 bays, cell / cells")) { Problem += FString::Printf(TEXT(" plurals: the helper reads '%s', expected '0 bays, 1 bay, 2 bays, cell / cells';"), *Helper); }
+			if (T->MoveHab == 0 || Card.IsEmpty()) { Problem += TEXT(" plurals: move.setup's habitat is gone;"); }
+			if (Card.Contains(TEXT("(s)"))) { Problem += TEXT(" plurals: the card holds '(s)';"); }
+			if (!Disagree.IsEmpty()) { Problem += FString::Printf(TEXT(" plurals: a count and its noun disagree:%s;"), *Disagree); }
+			if (Counted < 2) { Problem += FString::Printf(TEXT(" plurals: only %d count(s) read;"), Counted); }
+			// (A3) the Borer's category reads Underground on the build bar, and nothing reads Boring.
+			const FString Cat = Deck->GetCategoryLabel(FName("Boring")).ToString();
+			TArray<FFoundWidget> Buttons;
+			GatherInWindow(TEXT("SButton"), Buttons);
+			int32 Under0 = 0, Boring = 0;
+			for (const FFoundWidget& Found : Buttons)
+			{
+				Under0 += HasText(Found.Widget, TEXT("Underground")) ? 1 : 0;
+				Boring += HasText(Found.Widget, TEXT("Boring")) ? 1 : 0;
+			}
+			Said += FString::Printf(TEXT("; the Borer's tab: '%s', %d visible button(s) read Underground, %d read Boring"), *Cat, Under0, Boring);
+			if (Cat != TEXT("Underground") || Under0 == 0 || Boring > 0) { Problem += TEXT(" the Borer's tab does not read Underground;"); }
+			// G2a r3 (the cleared room): the station bay the steps above selected and cleared. Before the clear it is held selected with its
+			// station card; half a second after the order landed nothing is selected (no inspect card shown) and the card reads nothing.
+			// g2a_mut_drop (the tick's room rule removed) keeps the selection, and the card reads "NOT STAFFED ..." over the cleared bay.
+			Said += FString::Printf(TEXT("; cleared room: habitat #%d bay 0 %s before the clear (card '%s'); the clear %s; after it the card is %s ('%s')"), T->G2ClearHab,
+				T->bG2ClearHeld ? TEXT("held selected") : TEXT("NOT held selected"), *T->G2ClearBefore.Replace(TEXT("\n"), TEXT(" / ")).Left(160),
+				!T->bG2ClearSent ? TEXT("was not sent") : (T->G2ClearLandedAt < 0.0 ? TEXT("never landed") : TEXT("landed")),
+				T->bG2ClearShownAfter ? TEXT("SHOWN") : TEXT("closed"), *T->G2ClearAfter.Replace(TEXT("\n"), TEXT(" / ")).Left(160));
+			if (!T->G2ClearWhy.IsEmpty())
+			{
+				Problem += T->G2ClearWhy;
+			}
+			else if (!T->bG2ClearHeld || T->G2ClearBefore.IsEmpty())
+			{
+				Problem += TEXT(" cleared room: the station bay was not held selected with its station card before the clear;");
+			}
+			else if (!T->bG2ClearSent || T->G2ClearLandedAt < 0.0)
+			{
+				Problem += TEXT(" cleared room: the clear never landed;");
+			}
+			else
+			{
+				if (T->bG2ClearShownAfter) { Problem += TEXT(" cleared room: the inspect card is still shown after the clear landed;"); }
+				if (!T->G2ClearAfter.IsEmpty()) { Problem += TEXT(" cleared room: the card still reads as a station card after the clear landed;"); }
+			}
+			if (PC->HasSelectedBay())
+			{
+				PC->Debug_SelectBay(0, INDEX_NONE); // leave nothing selected for the verdict
+			}
+			Report(TEXT("words.sample"), Problem.IsEmpty(), Problem.IsEmpty() ? Said : Problem + TEXT(" | ") + Said);
+		}, 0.3f);
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -4596,6 +5796,7 @@ namespace
 				IFileManager::Get().Move(*QuickSavePath(), *(QuickSavePath() + TEXT(".clicktest")), true, true);
 			}
 			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+			LogRetries();
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
 		}, 0.1f);
@@ -4609,6 +5810,11 @@ namespace
 		FRunner& Runner = FRunner::Get();
 		GPass = 0;
 		GFail = 0;
+		GPressRetries = 0;
+		GDropHooks = 0;
+		GHoverRetries = 0;
+		GHoverHooks = 0;
+		EnsureActivationLog();
 		const auto Section = []() -> URHSectionVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr; };
 		PushSettle(2.f);
 		Runner.Push(TEXT("deep.setup"), [](double, bool bLast)
@@ -4691,6 +5897,7 @@ namespace
 		{
 			if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); PC->CancelModes(); }
 			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+			LogRetries();
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
 		}, 0.1f);
@@ -4829,6 +6036,30 @@ namespace
 		uint32 LivePair = MAX_uint32;    // the sim's (filled, capacity) on the last frame
 		int32 LiveChanges = 0;           // frames on the dry stretch whose sim pair differed from the frame before
 		FString LastLine;
+		// G2a (A1): the line on the dry stretch, its last two values and when each was first shown (the A-B-A rule).
+		bool bDrySeen = false, bDryPrevPrev = false;
+		FString DryPrev, DryPrevPrev;
+		double DryPrevS = 0.0, DryPrevPrevS = 0.0;
+		int32 DryChanges = 0;
+	};
+	// G2a (A1): flash.lab.cold's record of one click on a cold Lab Module.
+	struct FFlashCold
+	{
+		int32 Id = 0;
+		int32 Stage = 0;                 // 0 waiting for its keys to be pruned, 1 waiting for a cut and Rationed frame, 2 clicked and sampling
+		double WaitFrom = -1.0;
+		uint64 WaitFrame = 0;
+		bool bKeysAtClick = false, bRationedAtClick = false, bCutAtClick = false;
+		double KeysWaitS = 0.0;
+		uint64 KeysWaitFrames = 0;
+		double ClickS = 0.0, ClickSol = 0.0;
+		int32 ClickSpeed = 0;
+		int32 Frames = 0, ZeroZero = 0, Garbled = 0, CardMissing = 0, StationChanges = 0, StatusChanges = 0, R1 = 0;
+		FString GarbledSaid, Why;
+		TArray<FString> First, Changes;
+		bool bStationSeen = false, bStatusSeen = false;
+		FString LastStation, LastStatus;
+		double LastStationAt = -1.0, LastStatusAt = -1.0;
 	};
 	struct FFlashLabCrew
 	{
@@ -4866,6 +6097,15 @@ namespace
 		int32 LiveFilled = -1;           // the sim's colonists at a post last frame
 		int32 LiveFilledChanges = 0;     // frames on the dry stretch whose count differed from the frame before
 		FString LastCity;                // the City panel's Jobs figures as last sampled
+		// G2a (A1): the dry stretch (from flash.lab's dusk drain to its report), its A-B-A count, module A's changes while Rationed, the cold
+		// modules flash.lab.cold leaves out of the sampling, and its two clicks.
+		bool bDryStretch = false;
+		int32 Aba = 0;
+		FString AbaSaid;
+		int32 ModuleARationedChanges = 0;
+		FString ModuleARationedSaid;
+		TSet<int32> ColdIds;
+		FFlashCold Cold[2];
 	};
 
 	struct FFlashProbe
@@ -5212,6 +6452,47 @@ namespace
 			const FString Line = S.bModule ? Deck.GetCardStationLine(S.Id) : Deck.GetCellStationLine(S.Key);
 			S.LastLine = Line;
 			FlashDiscrete(P, Bk, S.Name, Line, NowS, bCount);
+			// G2a (A1, G1 follow-up 1): on the dry stretch (from flash.lab's dusk drain to its report), every frame whatever bCount says, a
+			// line that goes back to the value it showed two changes before is an A-B-A (the hold-only gap: the served pair and the cut pair
+			// alternating through the floor); module A's line may change at most once on frames where its look is Rationed. Values shown before
+			// the drain do not count.
+			if (L.bDryStretch)
+			{
+				if (!S.bDrySeen)
+				{
+					S.bDrySeen = true;
+					S.DryPrev = Line;
+					S.DryPrevS = NowS;
+				}
+				else if (Line != S.DryPrev)
+				{
+					++S.DryChanges;
+					if (S.bDryPrevPrev && Line == S.DryPrevPrev)
+					{
+						if (L.Aba++ == 0)
+						{
+							L.AbaSaid = FString::Printf(TEXT("%s '%s' at %.2f s, '%s' at %.2f s, '%s' at %.2f s"), *S.Name, *S.DryPrevPrev.Replace(TEXT("\n"), TEXT(" / ")), S.DryPrevPrevS - GFlashT0,
+								*S.DryPrev.Replace(TEXT("\n"), TEXT(" / ")), S.DryPrevS - GFlashT0, *Line.Replace(TEXT("\n"), TEXT(" / ")), NowS - GFlashT0);
+						}
+					}
+					if (S.bModule && S.Id == L.ModuleA && Look.GetLook(S.Id) == ERHPowerLook::Rationed)
+					{
+						if (L.ModuleARationedChanges++ == 0)
+						{
+							L.ModuleARationedSaid = FString::Printf(TEXT("'%s' -> '%s' at %.2f s"), *S.DryPrev.Replace(TEXT("\n"), TEXT(" / ")), *Line.Replace(TEXT("\n"), TEXT(" / ")), NowS - GFlashT0);
+						}
+						else if (L.ModuleARationedChanges == 2)
+						{
+							L.ModuleARationedSaid += FString::Printf(TEXT(", then '%s' -> '%s' at %.2f s"), *S.DryPrev.Replace(TEXT("\n"), TEXT(" / ")), *Line.Replace(TEXT("\n"), TEXT(" / ")), NowS - GFlashT0);
+						}
+					}
+					S.DryPrevPrev = S.DryPrev;
+					S.DryPrevPrevS = S.DryPrevS;
+					S.bDryPrevPrev = true;
+					S.DryPrev = Line;
+					S.DryPrevS = NowS;
+				}
+			}
 			int32 Filled = 0, Seats = 0;
 			Sim.GetStationSeats(S.Key, Filled, Seats);
 			const uint32 Live = ((uint32)FMath::Clamp(Seats, 0, 255) << 8) | (uint32)FMath::Clamp(Filled, 0, 255);
@@ -5441,6 +6722,10 @@ namespace
 				{
 					FlashDiscrete(P, Bk, FString::Printf(TEXT("hum #%d %s"), B.Id, *B.DefName.ToString()), Hum > 0.f ? TEXT("on") : TEXT("off"), NowS, bCount);
 				}
+			}
+			if (P.Lab.IsValid() && P.Lab->ColdIds.Contains(B.Id))
+			{
+				continue; // G2a (A1): flash.lab.cold keeps these modules' card keys unread, so the power helper prunes them
 			}
 			const FString CardName = FString::Printf(TEXT("card #%d %s"), B.Id, *B.DefName.ToString());
 			const FString Card = Deck->GetCardStatusLine(B.Id);
@@ -5806,6 +7091,11 @@ namespace
 		FRunner& Runner = FRunner::Get();
 		GPass = 0;
 		GFail = 0;
+		GPressRetries = 0;
+		GDropHooks = 0;
+		GHoverRetries = 0;
+		GHoverHooks = 0;
+		EnsureActivationLog();
 		const TSharedRef<FFlashProbe> P = MakeShared<FFlashProbe>();
 		PushSettle(2.f);
 		// G1 r2: the Crew layout line's hold (URHPowerLookSubsystem::LatchWorst, which 'Layout: %d pair%s of rooms clash.' reads) on the
@@ -6087,6 +7377,7 @@ namespace
 		}, 0.f);
 		PushFlashSegment(P, TEXT("flash.lab staffed by day"), 1.f, 4.0, 0.0);
 		PushFlashSixty(P, TEXT("flash.lab 60x to dusk"), 62.70, true);
+		Runner.Do(TEXT("flash.lab dry stretch"), [P]() { if (P->Lab.IsValid()) { P->Lab->bDryStretch = true; } }, 0.f); // G2a (A1): the A-B-A rule's stretch starts at this drain
 		PushFlashDrain(P, TEXT("flash.lab dusk 1x"), 1.f, 20.0, false);
 		PushFlashSegment(P, TEXT("flash.lab dusk 3x"), 3.f, 15.0, 0.0);
 		PushFlashDrain(P, TEXT("flash.lab night 8x"), 8.f, 15.0, false);
@@ -6164,6 +7455,15 @@ namespace
 			{
 				Why += TEXT(" the Lab Module never read SEATS while its look was Rationed (the case did not happen);");
 			}
+			// G2a (A1, G1 follow-up 1): the hold-only gap.
+			if (L.Aba > 0)
+			{
+				Why += FString::Printf(TEXT(" A-B-A of a lab station line on the dry stretch %d time(s), first %s;"), L.Aba, *L.AbaSaid);
+			}
+			if (L.ModuleARationedChanges > 1)
+			{
+				Why += FString::Printf(TEXT(" module A's line changed %d times while Rationed (%s);"), L.ModuleARationedChanges, *L.ModuleARationedSaid);
+			}
 			int32 ModuleLive = 0, CellLive = 0;
 			for (const FFlashLabSeat& S : L.Seats)
 			{
@@ -6212,9 +7512,175 @@ namespace
 				L.Crew.Num(), AtModule, L.CrewFrames, CrewJobs, CrewTargets, ClosestTarget < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), ClosestTarget) : TEXT("none"),
 				ClosestTargetSaid.IsEmpty() ? TEXT("") : TEXT(": "), *ClosestTargetSaid,
 				CrewClips, ClosestClip < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), ClosestClip) : TEXT("none"), ClosestClipSaid.IsEmpty() ? TEXT("") : TEXT(": "), *ClosestClipSaid);
-			ReportFlash(P, TEXT("flash.lab"), TEXT("lab"), true, Why, FString::Printf(TEXT("; Full Laboratory %s (SubsurfaceBrine %s); %s; the drained night sampled at %s; the Lab Module read SEATS while Rationed on %d frame(s); 'SEATS: 0 of 0' frames %d; signed or garbled %d; the selected card drew its station's line on %d of %d frame(s) (cell %d selected last); lines: %s%s"),
+			ReportFlash(P, TEXT("flash.lab"), TEXT("lab"), true, Why, FString::Printf(TEXT("; Full Laboratory %s (SubsurfaceBrine %s); %s; the drained night sampled at %s; the Lab Module read SEATS while Rationed on %d frame(s); 'SEATS: 0 of 0' frames %d; signed or garbled %d; the selected card drew its station's line on %d of %d frame(s) (cell %d selected last); A-B-A on the dry stretch: %d%s; module A's line changed %d time(s) while Rationed%s; lines: %s%s"),
 				L.bLabFull ? TEXT("slice-active") : TEXT("NOT slice-active"), L.bBrine ? TEXT("found") : TEXT("not found"), *L.Placed, *FlashSpeeds(L.NightDrySpeeds), L.SeatsWhileRationed, L.ZeroZero, L.Garbled,
-				L.CardFrames - L.CardMissing, L.CardFrames, L.SelectedCell, *Lines, *Crew));
+				L.CardFrames - L.CardMissing, L.CardFrames, L.SelectedCell, L.Aba, L.AbaSaid.IsEmpty() ? TEXT("") : *(TEXT(" (first ") + L.AbaSaid + TEXT(")")),
+				L.ModuleARationedChanges, L.ModuleARationedSaid.IsEmpty() ? TEXT("") : *(TEXT(" (") + L.ModuleARationedSaid + TEXT(")")), *Lines, *Crew));
+		}, 0.f);
+
+		// G2a (A1): flash.lab.cold, after flash.lab's report, still on the Late slot's drained night (about sol 62.84; sunrise 63.25). A Lab
+		// Module kept out of the sampling past the power helper's prune (60 unseen frames, once a second) is clicked on a frame where it is
+		// cut and Rationed (the worst case), at 1x and then the other at 8x, and its card is sampled every frame for 12 real s.
+		Runner.Do(TEXT("flash.lab.cold setup"), [P]()
+		{
+			P->Bucket = TEXT("lab.cold");
+			P->Reset();
+			if (!P->Lab.IsValid())
+			{
+				P->Now().Problems.Add(TEXT("flash.lab's setup never ran"));
+				return;
+			}
+			FFlashLab& L = *P->Lab;
+			L.ColdIds.Reset();
+			L.ColdIds.Add(L.ModuleA);
+			L.ColdIds.Add(L.ModuleB);
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->Debug_SelectBuilding(0);
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] lab.cold: Lab Modules #%d and #%d left out of the sampling from sol %.3f"), L.ModuleA, L.ModuleB, FlashSol());
+		}, 0.f);
+		PushFlashDrain(P, TEXT("flash.lab.cold drain 1x"), 1.f, 2.0, false);
+		for (int32 Click = 0; Click < 2; ++Click)
+		{
+			if (Click == 1)
+			{
+				Runner.Do(TEXT("flash.lab.cold 8x"), []()
+				{
+					if (ARHPlayerController* PC = GetPC())
+					{
+						PC->Debug_SelectBuilding(0);
+						PC->SetSimSpeed(8.f);
+					}
+				}, 0.f);
+			}
+			Runner.Push(FString::Printf(TEXT("flash.lab.cold click %d"), Click + 1), [P, Click](double Elapsed, bool)
+			{
+				UWorld* W = FindGameWorld();
+				const URHPowerLookSubsystem* Look = W ? W->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+				const URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!P->Lab.IsValid() || !Look || !Sim || !PC || !Deck.IsValid())
+				{
+					return true;
+				}
+				FFlashLab& L = *P->Lab;
+				FFlashCold& C = L.Cold[Click];
+				const int32 Id = Click == 0 ? L.ModuleA : L.ModuleB;
+				const double NowS = FApp::GetCurrentTime();
+				C.Id = Id;
+				const FRHBuildingInstance* B = Sim->GetBuildings().FindByPredicate([Id](const FRHBuildingInstance& X) { return X.Id == Id; });
+				if (!B)
+				{
+					C.Why += TEXT(" the module is gone;");
+					return true;
+				}
+				const uint64 Keys[3] = { URHPowerLookSubsystem::MakeKey('C', (uint32)Id), URHPowerLookSubsystem::MakeKey('S', (uint32)Id), URHPowerLookSubsystem::MakeKey('Q', (uint32)Id) };
+				const bool bKeys = Look->Debug_HasLatch(Keys[0]) || Look->Debug_HasLatch(Keys[1]) || Look->Debug_HasLatch(Keys[2]);
+				if (C.Stage == 0)
+				{
+					// Wait (up to 15 s) until the helper holds none of its card's keys: pruned, cold.
+					if (C.WaitFrom < 0.0) { C.WaitFrom = Elapsed; C.WaitFrame = GFrameCounter; }
+					if (!bKeys || Elapsed - C.WaitFrom >= 15.0)
+					{
+						C.bKeysAtClick = bKeys;
+						C.KeysWaitS = Elapsed - C.WaitFrom;
+						C.KeysWaitFrames = GFrameCounter - C.WaitFrame;
+						C.Stage = 1;
+						C.WaitFrom = Elapsed;
+					}
+					return false;
+				}
+				if (C.Stage == 1)
+				{
+					// Then (up to 10 s) a frame where it is cut this step and its look is Rationed: click it (select it, as flash.lab selects module A).
+					const bool bRationed = Look->GetLook(Id) == ERHPowerLook::Rationed;
+					if ((!B->bPowered && bRationed) || Elapsed - C.WaitFrom >= 10.0)
+					{
+						C.bKeysAtClick |= bKeys;
+						C.bRationedAtClick = bRationed;
+						C.bCutAtClick = !B->bPowered;
+						C.ClickS = NowS;
+						C.ClickSol = FlashSol();
+						C.ClickSpeed = FMath::RoundToInt(ClockSpeed());
+						PC->Debug_SelectBuilding(Id);
+						C.Stage = 2;
+						UE_LOG(LogRedHope, Display, TEXT("[Flash] lab.cold: clicked Lab Module #%d at %dx, sol %.3f, %s, %s; its keys %s (waited %.2f s, %llu frames)"), Id, C.ClickSpeed, C.ClickSol,
+							C.bCutAtClick ? TEXT("cut") : TEXT("served"), bRationed ? TEXT("Rationed") : TEXT("NOT Rationed"), C.bKeysAtClick ? TEXT("STILL HELD") : TEXT("pruned"), C.KeysWaitS, C.KeysWaitFrames);
+					}
+					return false;
+				}
+				// Sampled every frame for 12 real s from the click (the frame's own time, as the probe dates what it sees).
+				const FString Station = Deck->GetCardStationLine(Id);
+				const FString Status = MaskDigits(Deck->GetCardStatusLine(Id));
+				const FString Card = Deck->Debug_GetInspectText();
+				const double Since = NowS - C.ClickS;
+				++C.Frames;
+				if (C.First.Num() < 3)
+				{
+					C.First.Add(FString::Printf(TEXT("%.2f s '%s' / '%s'"), Since, *Station.Replace(TEXT("\n"), TEXT(" / ")), *Status));
+				}
+				if (Station.Contains(TEXT("SEATS: 0 of 0"))) { ++C.ZeroZero; }
+				FString Why;
+				if (Station.IsEmpty() || !FlashSeatLineOk(Station, true, Why))
+				{
+					if (C.Garbled++ == 0) { C.GarbledSaid = Station.IsEmpty() ? FString(TEXT("no line")) : Why; }
+				}
+				if (!Station.IsEmpty() && !Card.Contains(Station)) { ++C.CardMissing; }
+				const auto Track = [&C, Since](bool& bSeen, FString& Last, double& LastAt, int32& Changes, const FString& Now, const TCHAR* What)
+				{
+					if (!bSeen)
+					{
+						bSeen = true; // first sight is not a change
+						Last = Now;
+						return;
+					}
+					if (Now == Last)
+					{
+						return;
+					}
+					++Changes;
+					C.Changes.Add(FString::Printf(TEXT("%s '%s' -> '%s' at %.2f s"), What, *Last.Replace(TEXT("\n"), TEXT(" / ")), *Now.Replace(TEXT("\n"), TEXT(" / ")), Since));
+					if (LastAt >= 0.0 && Since - LastAt < 3.0)
+					{
+						++C.R1; // R1: two changes of one line under 3.0 real s
+					}
+					Last = Now;
+					LastAt = Since;
+				};
+				Track(C.bStationSeen, C.LastStation, C.LastStationAt, C.StationChanges, Station, TEXT("station"));
+				Track(C.bStatusSeen, C.LastStatus, C.LastStatusAt, C.StatusChanges, Status, TEXT("status"));
+				return Since >= 12.0;
+			}, 0.f, 0.f);
+		}
+		Runner.Do(TEXT("flash.lab.cold"), [P]()
+		{
+			FString Why, Said;
+			if (!P->Lab.IsValid())
+			{
+				ReportFlash(P, TEXT("flash.lab.cold"), TEXT("lab.cold"), true, TEXT(" flash.lab's setup never ran;"), FString());
+				return;
+			}
+			const FFlashLab& L = *P->Lab;
+			for (int32 Click = 0; Click < 2; ++Click)
+			{
+				const FFlashCold& C = L.Cold[Click];
+				const FString Who = FString::Printf(TEXT("click %d (#%d)"), Click + 1, C.Id);
+				Why += C.Why.IsEmpty() ? FString() : Who + TEXT(":") + C.Why;
+				if (C.Stage < 2) { Why += FString::Printf(TEXT(" %s never clicked;"), *Who); continue; }
+				if (C.bKeysAtClick) { Why += FString::Printf(TEXT(" %s: its keys were still held when it clicked;"), *Who); }
+				if (!C.bRationedAtClick) { Why += FString::Printf(TEXT(" %s: its look was not Rationed at the click;"), *Who); }
+				if (C.ZeroZero > 0) { Why += FString::Printf(TEXT(" %s: 'SEATS: 0 of 0' on %d frame(s);"), *Who, C.ZeroZero); }
+				if (C.Garbled > 0) { Why += FString::Printf(TEXT(" %s: a garbled or empty station line on %d frame(s) (%s);"), *Who, C.Garbled, *C.GarbledSaid); }
+				if (C.Frames == 0 || C.CardMissing > 0) { Why += FString::Printf(TEXT(" %s: the card did not carry the station line on %d of %d frame(s);"), *Who, C.CardMissing, C.Frames); }
+				if (C.StationChanges > 1) { Why += FString::Printf(TEXT(" %s: the station line changed %d times after the click;"), *Who, C.StationChanges); }
+				if (C.R1 > 0) { Why += FString::Printf(TEXT(" %s: R1, a line changed twice under 3.0 s (%d time(s));"), *Who, C.R1); }
+				Said += FString::Printf(TEXT("; %s at %dx, sol %.3f, %s at the click, %s, its keys %s after %.2f s (%llu frames); %d frame(s) in 12 s; first frames: %s; changes: %s"),
+					*Who, C.ClickSpeed, C.ClickSol, C.bCutAtClick ? TEXT("cut") : TEXT("served"), C.bRationedAtClick ? TEXT("Rationed") : TEXT("not Rationed"), C.bKeysAtClick ? TEXT("held") : TEXT("pruned"),
+					C.KeysWaitS, C.KeysWaitFrames, C.Frames, *FString::Join(C.First, TEXT(", ")), C.Changes.Num() > 0 ? *FString::Join(C.Changes, TEXT(", ")) : TEXT("none"));
+			}
+			ReportFlash(P, TEXT("flash.lab.cold"), TEXT("lab.cold"), true, Why, Said);
 		}, 0.f);
 
 		Runner.Do(TEXT("final"), [P]()
@@ -6226,6 +7692,7 @@ namespace
 				PC->SetSimSpeed(1.f);
 			}
 			FSlateApplication::Get().UsePlatformCursorForCursorUser(true);
+			LogRetries();
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST TOTAL pass=%d fail=%d"), GPass, GFail);
 			UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RESULT %s"), GFail == 0 ? TEXT("PASS") : TEXT("FAIL"));
 		}, 0.1f);
@@ -6282,6 +7749,42 @@ static FAutoConsoleCommand GRHHover(
 		int32 Nth;
 		ParseLabel(Args, Label, Nth);
 		PushPress(Label, LocateButton(Label, Nth, false), /*bPress*/ false);
+	}));
+
+static FAutoConsoleCommand GRHClickTestDropPress(
+	TEXT("RH.ClickTest.DropPress"),
+	TEXT("RH.ClickTest.DropPress <label>[|<label>...] - TEST HOOK (G2a, the dropped press): on the next press of each named button the harness releases all pointer capture right after the down, as a window activation does; the press must be retried. '|' separates labels (-ExecCmds splits on commas); each call adds its labels."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		TArray<FString> Labels;
+		FString::Join(Args, TEXT(" ")).ParseIntoArray(Labels, TEXT("|"), true);
+		for (FString& L : Labels)
+		{
+			L.TrimStartAndEndInline();
+			if (!L.IsEmpty())
+			{
+				GDropPressLabels.Add(L);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook armed for %s"), *FString::Join(GDropPressLabels, TEXT(", ")));
+	}));
+
+static FAutoConsoleCommand GRHClickTestDropHover(
+	TEXT("RH.ClickTest.DropHover"),
+	TEXT("RH.ClickTest.DropHover <label>[|<label>...] - TEST HOOK (G2a r2, the lost hover): on the next press of each named button the harness moves the pointer off the button right after the down, as a real pointer move does (the button keeps its capture and loses its hover); the press must be retried. '|' separates labels (-ExecCmds splits on commas); each call adds its labels."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		TArray<FString> Labels;
+		FString::Join(Args, TEXT(" ")).ParseIntoArray(Labels, TEXT("|"), true);
+		for (FString& L : Labels)
+		{
+			L.TrimStartAndEndInline();
+			if (!L.IsEmpty())
+			{
+				GDropHoverLabels.Add(L);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook (hover) armed for %s"), *FString::Join(GDropHoverLabels, TEXT(", ")));
 	}));
 
 static FAutoConsoleCommand GRHClickSweep(

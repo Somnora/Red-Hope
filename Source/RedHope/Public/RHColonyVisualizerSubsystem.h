@@ -8,6 +8,7 @@ class AStaticMeshActor;
 class UHierarchicalInstancedStaticMeshComponent;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
+class UMaterialInterface;
 class UPointLightComponent;
 class USpotLightComponent;
 class UStaticMeshComponent;
@@ -43,6 +44,9 @@ public:
 	// listens on the sim's rejection seam; the deck polls this rather than
 	// wiring its own delegate (debug messages hide under the Slate overlay).
 	FText GetNoticeText() const;
+	// G2a r2 QA (names.uplink, developer): when the notice was last set (FPlatformTime seconds), so a check can tell its own order's refusal
+	// from an older notice.
+	double Debug_GetNoticeRealSeconds() const { return LastNoticeRealSeconds; }
 	// Banner-weight alert (era refusal, event onset, ship countdown) - the
 	// must-not-miss channel the director asked for. Empty once stale.
 	FText GetAlertText() const;
@@ -76,6 +80,9 @@ public:
 	// PoweredState glow, the lamp's candelas while it is visible (else 0) and its full candelas (0 when it has no lamp) - and each room
 	// light with its current and full candelas (120 x the room's multiplier). False when nothing was applied to that Id yet.
 	bool Debug_GetPowerApplied(int32 Id, uint8& OutLook, float& OutPowered, float& OutLamp, float& OutLampFull) const;
+	// G2a QA (hover.one): every hover label now drawn (visible, its owner drawn): its text, world location and material's name, and the
+	// cursor's ground point the hover pass last used. Returns the count.
+	int32 Debug_GetHoverShown(TArray<FString>& OutTexts, TArray<FVector>& OutAt, TArray<FString>& OutMaterials, FVector2D& OutCursorCm) const;
 	void Debug_ForEachRoomLight(TFunctionRef<void(const FIntVector&, float /*Cd*/, float /*FullCd*/)> Fn) const;
 	// Alive pass 2: where a placed furnishing actually stands - its logical
 	// centre (with a seat's pull-up applied) on the floor, its yaw (90 x Rot:
@@ -162,10 +169,18 @@ private:
 	// Hover labels (director 2026-07-10): a registry of every tile and building
 	// label with a position, bucketed in a grid; the cursor asks the grid for
 	// what is near it and only labels that change state are touched.
-	struct FHoverLabel { TWeakObjectPtr<UTextRenderComponent> Label; FVector2D Pos = FVector2D::ZeroVector; float RadiusCm = 0.f; };
+	// G2a (A4): only the label nearest the cursor shows. Each entry keeps a fixed key (a building's Id << 8 | its text's index; a tile's
+	// 1 << 62 | its packed cell), the tie-break, and its rest height; the shown one is lifted above its neighbours' meshes.
+	struct FHoverLabel { TWeakObjectPtr<UTextRenderComponent> Label; FVector2D Pos = FVector2D::ZeroVector; float RadiusCm = 0.f; uint64 Key = 0; float RestZ = 0.f; };
 	TArray<FHoverLabel> HoverLabels;
 	TMap<int64, TArray<int32>> HoverGrid;
-	TArray<int32> HoverLit;
+	TWeakObjectPtr<UTextRenderComponent> HoverShownLabel;
+	uint64 HoverShownKey = 0;
+	float HoverShownRestZ = 0.f;
+	double HoverShownAtS = -1.0e9;
+	FVector2D HoverCursorWas = FVector2D(1.0e12, 1.0e12);
+	static constexpr double HoverHysteresisCm = 50.0; // placeholder: a nearer label replaces the shown one only when nearer by more than this
+	static constexpr double HoverLiftCm = 30.0;       // placeholder: the shown label clears its neighbours' highest mesh top by this
 	bool bHoverDirty = true;
 	void RebuildHoverRegistry();
 	void UpdateHoverLabels(const FVector& CursorCm);
@@ -217,6 +232,10 @@ private:
 	bool ApplySurface(UStaticMeshComponent* Mesh, const TCHAR* TexPath, float TileCm, const FLinearColor& Tint, float Rough = 0.95f) const;
 	// bOnVisibleSurface (E8, Zarya (a)): seat the label on RHMarsTerrain::SceneryTopZCm (a settlement marker's) rather than the height field.
 	void AddLabel(AStaticMeshActor* Actor, const FString& Text, const FLinearColor& Color, float SouthOffsetCm, bool bOnVisibleSurface = false) const;
+	// G2a (A4): every colony label wears the project's unlit text material (/Game/RedHope/Art/M_RH_TextUnlit, the section labels'), so it
+	// reads the same at night; loaded once at begin play (null keeps the engine's default).
+	UPROPERTY() TObjectPtr<UMaterialInterface> LabelMaterial;
+	void StyleLabel(UTextRenderComponent* Label) const;
 	// Silhouette pass (director: "no boring rectangles"): each family gets a
 	// distinct primitive-composed form per the reference sheet. World-space
 	// accents (buildings never move), added only once construction ends.

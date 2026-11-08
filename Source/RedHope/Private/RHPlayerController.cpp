@@ -1,4 +1,5 @@
 #include "RHPlayerController.h"
+#include "RHOrderWords.h"
 #include "RedHope.h"
 #include "RHStrategyPawn.h"
 #include "RHMarsTerrain.h"
@@ -401,8 +402,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 			// On-placement tooltip (M2 Gate D+ UX part 3): what this thing IS
 			// and everything it will COST, before the click commits anything.
-			FString Tip = FString::Printf(TEXT("PLACING %s"),
-				Def && !Def->DisplayName.IsEmpty() ? *Def->DisplayName : *PendingBuildDef.ToString());
+			FString Tip = FString::Printf(TEXT("PLACING %s"), *RHOrder::BuildingTitle(Defs, PendingBuildDef));
 			const int32 Beds = Size.X * Size.Y;
 			if (bSized)
 			{
@@ -421,7 +421,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, ActiveLevel))
 				{
 					Bill += FString::Printf(TEXT("%s%.0f kg %s"), Bill.IsEmpty() ? TEXT("") : TEXT(" + "),
-						Cost.Value * Beds, *Cost.Key.ToString());
+						Cost.Value * Beds, *RHOrder::ResourceName(Defs, Cost.Key));
 				}
 				Tip += FString::Printf(TEXT("\ncost: %s  ·  %.0f s build"),
 					Bill.IsEmpty() ? TEXT("free (flat-pack)") : *Bill, Def->BuildTime_s * Beds);
@@ -478,7 +478,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 					Sim->EnqueueCommand(Cmd);
 					URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
 					SetConfirm(FString::Printf(TEXT("Order transmitted: %s, %d x %d beds at (%.0f, %.0f) m"),
-						Def && !Def->DisplayName.IsEmpty() ? *Def->DisplayName : *PendingBuildDef.ToString(),
+						*RHOrder::BuildingTitle(Defs, PendingBuildDef),
 						Size.X, Size.Y, At.X / 100.f, At.Y / 100.f), FLinearColor(0.2f, 0.9f, 1.f));
 					CancelModes();
 				}
@@ -868,7 +868,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				DrawDebugCircle(World, Dep->LocationCm + FVector(0, 0, 40.f), 1200.f,
 					48, FColor::Yellow, false, -1.f, 0, 10.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
 				HintText = FString::Printf(TEXT("DIG: %s (%.0f t left) - click to transmit, right-click to cancel"),
-					*Dep->RowName.ToString(), Dep->RemainingKg / 1000.0);
+					*RHOrder::DepositName(Defs, *Dep), Dep->RemainingKg / 1000.0);
 				HintColor = FLinearColor::Yellow;
 			}
 			else
@@ -1081,8 +1081,8 @@ void ARHPlayerController::Tick(float DeltaTime)
 				DrawDebugBox(World, Center + FVector(0, 0, 60.f),
 					FVector(CellsX * CellCm * 0.5f, CellsY * CellCm * 0.5f, 60.f), Color, false, -1.f, 0, 10.f);
 				HintText = bFloorOk
-					? FString::Printf(TEXT("EXCAVATE floor %d: %d cell(s) ~ %.1f t spoil - release to transmit"),
-						ActiveLevel, Cells, Cells * 1.2f)
+					? FString::Printf(TEXT("EXCAVATE floor %d: %s ~ %.1f t spoil - release to transmit"),
+						ActiveLevel, *RHOrder::Plural(Cells, TEXT("cell"), TEXT("cells")), Cells * 1.2f)
 					: FString::Printf(TEXT("EXCAVATE floor %d: not reached - bore the shaft deeper first"), ActiveLevel);
 				HintColor = FLinearColor(Color);
 
@@ -1100,7 +1100,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 						Cmd.Location = Center;
 						if (Serving > 0) { Cmd.Target = FName(*FString::Printf(TEXT("Shaft%d"), Serving)); }
 						Sim->EnqueueCommand(Cmd);
-						SetConfirm(FString::Printf(TEXT("Excavation transmitted: %d cell(s) on floor %d"), Cells, ActiveLevel),
+						SetConfirm(FString::Printf(TEXT("Excavation transmitted: %s on floor %d"), *RHOrder::Plural(Cells, TEXT("cell"), TEXT("cells")), ActiveLevel),
 							FLinearColor(0.2f, 0.9f, 1.f));
 						CancelModes();
 					}
@@ -1188,7 +1188,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			FString Cost;
 			for (const auto& L : URHDefinitionsSubsystem::GetFurnitureCost(*Row))
 			{
-				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *RHOrder::ResourceName(Defs, L.Key));
 			}
 			if (bOk)
 			{
@@ -1238,7 +1238,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			FString Cost;
 			for (const auto& L : URHDefinitionsSubsystem::GetDoorCost(*Row))
 			{
-				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+				Cost += FString::Printf(TEXT("%s%.0f %s"), Cost.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *RHOrder::ResourceName(Defs, L.Key));
 			}
 			if (bOk)
 			{
@@ -1280,14 +1280,12 @@ void ARHPlayerController::Tick(float DeltaTime)
 		FVector Ground;
 		const bool bGround = CursorToGround(Ground);
 		const FRHFurnitureInstance* Hit = bGround ? FindFurnitureAt(Ground) : nullptr;
-		const FRHFurnitureRow* HitRow = (Hit && Defs) ? Defs->GetFurniture(Hit->Row) : nullptr;
 		FIntVector WEdge;
 		int32 WDir = 0;
 		const FRHWallFeature* WHit = (!Hit && bGround && ComputeFitEdge(Ground, WEdge, WDir)) ? Sim->FindWallFeatureOnEdge(WEdge) : nullptr;
 		if (WHit)
 		{
 			// BM-6: a fitting on the hovered bay's nearest wall.
-			const FRHDoorRow* WRow = Defs ? Defs->GetDoor(WHit->Row) : nullptr;
 			TMap<FName, double> Refund;
 			FString Why;
 			Sim->CanSellWallFeature(WHit->Id, Why, &Refund);
@@ -1297,9 +1295,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 			FString Back;
 			for (const auto& L : Refund)
 			{
-				Back += FString::Printf(TEXT("%s%.1f %s"), Back.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *L.Key.ToString());
+				Back += FString::Printf(TEXT("%s%.1f %s"), Back.IsEmpty() ? TEXT("") : TEXT(", "), L.Value, *RHOrder::ResourceName(Defs, L.Key));
 			}
-			HintText = FString::Printf(TEXT("SELL %s #%d: %s back - click to transmit, right-click to finish"), WRow ? *WRow->DisplayName : *WHit->Row.ToString(), WHit->Id, *Back);
+			HintText = FString::Printf(TEXT("SELL %s #%d: %s back - click to transmit, right-click to finish"), *RHOrder::FittingName(Defs, WHit->Row), WHit->Id, *Back);
 			HintColor = FLinearColor(1.f, 0.62f, 0.2f);
 		}
 		else if (Hit)
@@ -1312,7 +1310,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			Sim->GetFurnitureFootprintCm(Hit->Row, Hit->Key, Hit->Slot, Hit->Rot, FC, FH);
 			const float Z = ActiveLevel * (float)Sim->GetFloorHeightCm();
 			DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), bOk ? FColor(255, 150, 40) : FColor::Red, false, -1.f, 0, 8.f);
-			const FString Name = HitRow ? HitRow->DisplayName : Hit->Row.ToString();
+			const FString Name = RHOrder::FurnitureName(Defs, Hit->Row);
 			HintText = bOk ? FString::Printf(TEXT("SELL %s #%d: %.0f Struct back to the Lander - click to transmit, right-click to finish"), *Name, Hit->Id, Refund.FindRef(FName("Struct")))
 				: FString::Printf(TEXT("SELL %s #%d: %s"), *Name, Hit->Id, *Why);
 			HintColor = bOk ? FLinearColor(1.f, 0.62f, 0.2f) : FLinearColor(1.f, 0.4f, 0.3f);
@@ -1356,7 +1354,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 					if (C.Level == ActiveLevel && (C.Level != 0 || Sim->ResolveFurnitureKey(0, C.Location, MKey)) && Sim->GetFurnitureFootprintCm(MF->Row, MKey, MSlot, MRot, MC, MH))
 					{
 						DrawDebugBox(World, FVector(MC.X, MC.Y, MZ + 60.f), FVector(MH.X - 10.f, MH.Y - 10.f, 60.f), FColor(60, 200, 220), false, -1.f, 0, 4.f);
-						DrawDebugString(World, FVector(MC.X, MC.Y, MZ + 220.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *MF->Row.ToString(), MEta),
+						DrawDebugString(World, FVector(MC.X, MC.Y, MZ + 220.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *RHOrder::FurnitureName(Defs, MF->Row), MEta),
 							nullptr, FColor(120, 230, 255), 0.f, true, 1.1f);
 					}
 					if ((MF->Key.Z == 0 ? MF->Key.X : 0) == ActiveLevel && Sim->GetFurnitureFootprintCm(MF->Row, MF->Key, MF->Slot, MF->Rot, MC, MH))
@@ -1377,7 +1375,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 					if (Sim->ResolveWallEdge(C.Location, (int32)C.Value, MEdge))
 					{
 						const FVector WM = WallLine(MEdge, FColor(60, 200, 220));
-						DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *MW->Row.ToString(), MEta),
+						DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("Move %s  \u0394 %.0fs"), *RHOrder::FittingName(Defs, MW->Row), MEta),
 							nullptr, FColor(120, 230, 255), 0.f, true, 1.1f);
 					}
 					WallLine(MW->Edge, MoveCol);
@@ -1406,7 +1404,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 					DrawDebugLine(World, WM - Along * 470.f + FVector(0, 0, 150.f), WM + Along * 470.f + FVector(0, 0, 150.f),
 						bSell ? FColor(255, 150, 40) : FColor(60, 200, 220), false, -1.f, 0, 8.f);
 					const double FEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
-					DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("%s  \u0394 %.0fs"), bSell ? TEXT("Sell fitting") : *C.Target.ToString(), FEta),
+					DrawDebugString(World, WM + FVector(0, 0, 330.f), FString::Printf(TEXT("%s  \u0394 %.0fs"), bSell ? TEXT("Sell fitting") : *RHOrder::FittingName(Defs, C.Target), FEta),
 						nullptr, bSell ? FColor(255, 180, 90) : FColor(120, 230, 255), 0.f, true, 1.1f);
 				}
 				continue;
@@ -1451,7 +1449,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 						bSell ? FColor(255, 150, 40) : FColor(60, 200, 220), false, -1.f, 0, 4.f);
 					const double GEta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
 					DrawDebugString(World, FVector(GC.X, GC.Y, GZ + 220.f), FString::Printf(TEXT("%s %s  \u0394 %.0fs"),
-						bSell ? TEXT("Sell") : TEXT("Furnish"), *GRow.ToString(), GEta), nullptr, bSell ? FColor(255, 180, 90) : FColor(120, 230, 255), 0.f, true, 1.1f);
+						bSell ? TEXT("Sell") : TEXT("Furnish"), *RHOrder::FurnitureName(Defs, GRow), GEta), nullptr, bSell ? FColor(255, 180, 90) : FColor(120, 230, 255), 0.f, true, 1.1f);
 				}
 				continue;
 			}
@@ -1522,7 +1520,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				FColor(60, 200, 220), false, -1.f, 0, 4.f);
 			const double Eta = FMath::Max(0.0, C.ExecuteAtSimSeconds - Clock->GetSimSecondsTotal());
 			DrawDebugString(World, Spot + FVector(0, 0, 300.f),
-				FString::Printf(TEXT("%s  Δ %.0fs"), *C.Target.ToString(), Eta),
+				FString::Printf(TEXT("%s  Δ %.0fs"), *RHOrder::BuildingName(Defs, C.Target), Eta),
 				nullptr, FColor(120, 230, 255), 0.f, true, 1.2f);
 		}
 	}
@@ -1561,13 +1559,18 @@ void ARHPlayerController::Tick(float DeltaTime)
 		Traffic->SetHoverGround(HoverGround, Traffic->IsOverlayOn() && ActiveLevel == 0 && !bToolArmed && CursorToGround(HoverGround));
 	}
 
-	// The inspected station bay (BM-2): an emerald frame; leaving the surface drops it.
+	// The inspected station bay (BM-2): an emerald frame; leaving the surface drops it. G2a r3 (the cleared room): so does a room that no
+	// longer passes the rule that selected the bay (OnClick: a slice-active seat-function room), so a Clear or a re-zone that lands closes
+	// the station card instead of leaving it open over a bay that is no longer a station (GetActionCardTitle's round 2 guard stays as a
+	// fallback). Display only: two map lookups a tick while a bay is selected, no loop of its own, nothing allocated.
 	if (HasSelectedBay())
 	{
+		const FRHRoomRow* BayRow = Defs->GetRoom(Sim->GetBayRoom(SelectedBayHab, SelectedBay));
+		const bool bBayStation = BayRow && BayRow->SliceActive && URHSimWorldSubsystem::IsSeatFunction(BayRow->Function);
 		bool bFound = false;
 		for (const FRHBuildingInstance& HB : Sim->GetBuildings())
 		{
-			if (HB.Id == SelectedBayHab && ActiveLevel == 0)
+			if (bBayStation && HB.Id == SelectedBayHab && ActiveLevel == 0)
 			{
 				const FVector C = Sim->GetBayCentreCm(HB, SelectedBay);
 				DrawDebugBox(World, C + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
@@ -1580,10 +1583,12 @@ void ARHPlayerController::Tick(float DeltaTime)
 			SelectedBay = INDEX_NONE;
 		}
 	}
-	// The inspected station cell: an emerald frame; a floor change drops it.
+	// The inspected station cell: an emerald frame; a floor change drops it. G2a r3 (the cleared room): so does a room that no longer passes
+	// the rule that selected the cell (OnClick: Lab, Workstation or Garden, IsSeatFunction's three), as for a bay above.
 	if (HasSelectedCell())
 	{
-		if (SelectedCellLevel != ActiveLevel)
+		const FRHRoomRow* CellRow = SelectedCellLevel == ActiveLevel ? Defs->GetRoom(Sim->GetRoomAt(SelectedCellLevel, SelectedCellIndex)) : nullptr;
+		if (!CellRow || !URHSimWorldSubsystem::IsSeatFunction(CellRow->Function))
 		{
 			SelectedCellLevel = 0;
 			SelectedCellIndex = INDEX_NONE;
@@ -1667,7 +1672,7 @@ void ARHPlayerController::OnClick()
 			Cmd.Level = ActiveLevel;
 			Sim->EnqueueCommand(Cmd);
 			SetConfirm(FString::Printf(TEXT("Order transmitted: %s at (%.0f, %.0f) m%s"),
-				*PendingBuildDef.ToString(), Ground.X / 100.f, Ground.Y / 100.f,
+				*RHOrder::BuildingName(ClickDefs, PendingBuildDef), Ground.X / 100.f, Ground.Y / 100.f,
 				ActiveLevel < 0 ? *FString::Printf(TEXT(" floor %d"), ActiveLevel) : TEXT("")), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
@@ -1818,8 +1823,7 @@ void ARHPlayerController::OnClick()
 				Cmd.Value = URHSimWorldSubsystem::EncodeFurnish(Key.Z == 0 ? Key.Y : 0, Slot, FurnishRot);
 				Sim->EnqueueCommand(Cmd);
 				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
-				const FRHFurnitureRow* Row = ClickDefs ? ClickDefs->GetFurniture(FurnishRow) : nullptr;
-				SetConfirm(FString::Printf(TEXT("Furnish order transmitted: %s"), Row ? *Row->DisplayName : *FurnishRow.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
+				SetConfirm(FString::Printf(TEXT("Furnish order transmitted: %s"), *RHOrder::FurnitureName(ClickDefs, FurnishRow)), FLinearColor(0.2f, 0.9f, 1.f));
 			}
 			else
 			{
@@ -1846,8 +1850,7 @@ void ARHPlayerController::OnClick()
 				Cmd.Value = Dir;
 				Sim->EnqueueCommand(Cmd);
 				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
-				const FRHDoorRow* Row = ClickDefs ? ClickDefs->GetDoor(FitRow) : nullptr;
-				SetConfirm(FString::Printf(TEXT("Fit order transmitted: %s"), Row ? *Row->DisplayName : *FitRow.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
+				SetConfirm(FString::Printf(TEXT("Fit order transmitted: %s"), *RHOrder::FittingName(ClickDefs, FitRow)), FLinearColor(0.2f, 0.9f, 1.f));
 			}
 			else
 			{
@@ -1870,7 +1873,7 @@ void ARHPlayerController::OnClick()
 			Cmd.Value = WHit->Id;
 			Sim->EnqueueCommand(Cmd);
 			URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
-			SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *WHit->Row.ToString(), WHit->Id), FLinearColor(1.f, 0.62f, 0.2f));
+			SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *RHOrder::FittingName(ClickDefs, WHit->Row), WHit->Id), FLinearColor(1.f, 0.62f, 0.2f));
 		}
 	}
 	else if (bSellMode)
@@ -1887,7 +1890,7 @@ void ARHPlayerController::OnClick()
 				Cmd.Level = ActiveLevel;
 				Sim->EnqueueCommand(Cmd);
 				URHAudioSubsystem::Cue(GetWorld(), FName("Confirm"));
-				SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *Hit->Row.ToString(), Hit->Id), FLinearColor(1.f, 0.62f, 0.2f));
+				SetConfirm(FString::Printf(TEXT("Sell order transmitted: %s #%d"), *RHOrder::FurnitureName(ClickDefs, Hit->Row), Hit->Id), FLinearColor(1.f, 0.62f, 0.2f));
 			}
 			else
 			{
@@ -1908,7 +1911,7 @@ void ARHPlayerController::OnClick()
 			Cmd.Verb = FName("Dig");
 			Cmd.Target = Dep->RowName;
 			Sim->EnqueueCommand(Cmd);
-			SetConfirm(FString::Printf(TEXT("Dig designation transmitted: %s"), *Dep->RowName.ToString()), FLinearColor(0.2f, 0.9f, 1.f));
+			SetConfirm(FString::Printf(TEXT("Dig designation transmitted: %s"), *RHOrder::DepositName(ClickDefs, *Dep)), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
 	}
@@ -2469,8 +2472,7 @@ void ARHPlayerController::TickMove(UWorld* World, const URHSimWorldSubsystem& Si
 	};
 	if (HeldF)
 	{
-		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(HeldF->Row) : nullptr;
-		const FString Name = Row ? Row->DisplayName : HeldF->Row.ToString();
+		const FString Name = RHOrder::FurnitureName(Defs, HeldF->Row);
 		FVector FC;
 		FVector2D FH;
 		if ((HeldF->Key.Z == 0 ? HeldF->Key.X : 0) == ActiveLevel && Sim.GetFurnitureFootprintCm(HeldF->Row, HeldF->Key, HeldF->Slot, HeldF->Rot, FC, FH))
@@ -2498,7 +2500,7 @@ void ARHPlayerController::TickMove(UWorld* World, const URHSimWorldSubsystem& Si
 	if (HeldW)
 	{
 		const FRHDoorRow* Row = Defs ? Defs->GetDoor(HeldW->Row) : nullptr;
-		const FString Name = Row ? Row->DisplayName : HeldW->Row.ToString();
+		const FString Name = RHOrder::FittingName(Defs, HeldW->Row);
 		if (ActiveLevel == 0)
 		{
 			OutlineWall(HeldW->Edge);
@@ -2528,22 +2530,20 @@ void ARHPlayerController::TickMove(UWorld* World, const URHSimWorldSubsystem& Si
 	FString Why;
 	if (Hit)
 	{
-		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(Hit->Row) : nullptr;
 		const bool bOk = Sim.CanPickUpFurniture(Hit->Id, Why);
 		FVector FC;
 		FVector2D FH;
 		Sim.GetFurnitureFootprintCm(Hit->Row, Hit->Key, Hit->Slot, Hit->Rot, FC, FH);
 		DrawDebugBox(World, FVector(FC.X, FC.Y, Z + 60.f), FVector(FH.X - 8.f, FH.Y - 8.f, 60.f), bOk ? MoveCol : FColor::Red, false, -1.f, 0, 8.f);
-		const FString Name = Row ? Row->DisplayName : Hit->Row.ToString();
+		const FString Name = RHOrder::FurnitureName(Defs, Hit->Row);
 		HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to pick it up, right-click to finish"), *Name, Hit->Id) : FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, Hit->Id, *Why);
 		HintColor = bOk ? Ok : No;
 	}
 	else if (WHit)
 	{
-		const FRHDoorRow* Row = Defs ? Defs->GetDoor(WHit->Row) : nullptr;
 		const bool bOk = Sim.CanPickUpWallFeature(WHit->Id, Why);
 		OutlineWall(WHit->Edge);
-		const FString Name = Row ? Row->DisplayName : WHit->Row.ToString();
+		const FString Name = RHOrder::FittingName(Defs, WHit->Row);
 		HintText = bOk ? FString::Printf(TEXT("MOVE %s #%d - click to pick it up, right-click to finish"), *Name, WHit->Id) : FString::Printf(TEXT("MOVE %s #%d: %s"), *Name, WHit->Id, *Why);
 		HintColor = bOk ? Ok : No;
 	}
@@ -2613,8 +2613,7 @@ void ARHPlayerController::ClickMove(const FVector& GroundCm)
 			return; // off any room: the hint already says so
 		}
 		bOk = Sim->CanMoveFurniture(MoveId, Key, Slot, FurnishRot, Why);
-		const FRHFurnitureRow* Row = Defs ? Defs->GetFurniture(F->Row) : nullptr;
-		Name = Row ? Row->DisplayName : F->Row.ToString();
+		Name = RHOrder::FurnitureName(Defs, F->Row);
 		Cmd.Target = FName("Furniture");
 		Cmd.Level = ActiveLevel;
 		Cmd.Location = GroundCm; // a bay is found by location, as a Furnish order's is
@@ -2630,8 +2629,7 @@ void ARHPlayerController::ClickMove(const FVector& GroundCm)
 			return;
 		}
 		bOk = Sim->CanMoveWallFeature(MoveId, Edge, Why);
-		const FRHDoorRow* Row = Defs ? Defs->GetDoor(W->Row) : nullptr;
-		Name = Row ? Row->DisplayName : W->Row.ToString();
+		Name = RHOrder::FittingName(Defs, W->Row);
 		Cmd.Target = FName("WallFeature");
 		Cmd.Level = 0;
 		Cmd.Location = GroundCm; // a point in the bay, as a Fit order's
