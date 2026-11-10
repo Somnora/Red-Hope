@@ -9,7 +9,8 @@
 #        RH_CLICKTEST_PRE  console commands run before RH.ClickTest, comma-separated (D5 depth: "RH.BoreNow 14" bores the colony past
 #                          -11 first, so shaft rows scroll out of the strip and Fit lift and Tunnel must still be reached); G2a: the
 #                          test hook RH.ClickTest.DropPress takes '|' between its labels, never commas (-ExecCmds splits on commas):
-#                          RH_CLICKTEST_PRE="RH.ClickTest.DropPress 8x|SEND ORDER|RESUME|CONTINUE"
+#                          RH_CLICKTEST_PRE="RH.ClickTest.DropPress 8x|SEND ORDER|RESUME|CONTINUE"; G2b: RH.ClickTest.DropDrag arms a drag
+#                          the same way (labels by '|': a slider's tag, RightMouseButton, MiddleMouseButton)
 #        RH_CLICKTEST_RES  window size WxH (default 1600x900; use 1440x860 on a 1470x956-point display, where 1600x900 is clamped
 #                          and the early deck steps fail on reach - the official size on this machine, docs/qa-boot-card.md)
 #        RH_CLICKTEST_SCENE  "deepbench" (P8c): no title; boot straight into "RH.DeepBench 2000 trams" (20 floors, three shafts, two tram
@@ -18,7 +19,7 @@
 #                          checkpoint slots (rh_checkpoints.sh early|vault|late) and runs the flash probe: every frame it samples
 #                          the building looks, lamps, room lights, hum, POWER tile, fold header, card, guide and spare-watts line on a
 #                          drained night and fails any element that changes twice inside 3 real seconds or a light that jumps
-#                          (7 steps since G2a; give it a 1200 s timeout)
+#                          (10 steps since G2b: flash.alerts, flash.power and flash.power.restart; give it a 1200 s timeout)
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.

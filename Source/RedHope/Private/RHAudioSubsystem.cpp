@@ -427,7 +427,8 @@ void URHAudioSubsystem::TickEvents()
 		}
 	}
 	const int32 Colonists = Sim->GetColonists().Num();
-	const bool bAlert = Colony && !Colony->GetAlertText().IsEmpty();
+	// G2b (B1): the alert cue reads the queue: a line admitted to a banner row bumps its serial (a merged repeat does not).
+	const uint32 AlertSerial = Colony ? Colony->GetAlertSerial() : 0u;
 	if (bEventsPrimed)
 	{
 		for (int32 Id : PrevUnderConstruction)
@@ -442,15 +443,15 @@ void URHAudioSubsystem::TickEvents()
 		{
 			PlayCue(FName("Arrival"));
 		}
-		if (bAlert && !bPrevAlert)
+		if (AlertSerial != PrevAlertSerial)
 		{
-			PlayCue(FName("Alert"));
+			PlayCue(FName("Alert")); // at most once a tick, however many lines were admitted
 		}
 	}
 	bEventsPrimed = true; // the first tick only learns the state (a loaded save is not news)
 	PrevUnderConstruction = MoveTemp(Building);
 	PrevColonists = Colonists;
-	bPrevAlert = bAlert;
+	PrevAlertSerial = AlertSerial;
 }
 
 void URHAudioSubsystem::TickMusic(int32 Phase)

@@ -99,7 +99,7 @@ private:
 	bool bEventsPrimed = false;
 	int32 PrevColonists = 0;
 	TSet<int32> PrevUnderConstruction;
-	bool bPrevAlert = false;
+	uint32 PrevAlertSerial = 0; // G2b (B1): the alert queue's admission serial at the last tick
 	TMap<FName, double> LastCueAt;
 	int32 MusicPhase = -1;
 	int32 MusicTrack = 0;

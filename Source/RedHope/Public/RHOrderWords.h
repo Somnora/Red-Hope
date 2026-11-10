@@ -242,4 +242,45 @@ namespace RHOrder
 		if (Doing.IsEmpty() && What.IsEmpty()) { return TEXT("Order"); }
 		return Doing.IsEmpty() ? What : What.IsEmpty() ? Doing : Doing + TEXT(" ") + What;
 	}
+
+	// G2b (B4, PLACEHOLDER, gate-d-wording MS5): a manifest item's CSV DisplayName ("Solar Array Flat-Pack"), else the key spaced out; None
+	// names nothing (as the G2a helpers guard it).
+	inline FString ManifestItemName(const URHDefinitionsSubsystem* Defs, FName Item)
+	{
+		if (Item.IsNone()) { return FString(); }
+		const FRHManifestItemRow* Row = Defs ? Defs->GetManifestItem(Item) : nullptr;
+		return (Row && !Row->DisplayName.IsEmpty()) ? Row->DisplayName : SpacedName(Item);
+	}
+
+	// G2b (B4, PLACEHOLDER, gate-d-wording MS5): what a supply ship landed, for the deck line. Equal items are grouped in manifest order (the
+	// order each first appears: "Solar Array Flat-Pack x2"); at most three groups are named, then " and N more" (N the items not named);
+	// "Supply ship landed: <names>." or, with nothing aboard, "Supply ship landed with an empty hold." Built once per landing.
+	inline FString LandingText(const URHDefinitionsSubsystem* Defs, const TArray<FName>& Items)
+	{
+		if (Items.Num() == 0) { return TEXT("Supply ship landed with an empty hold."); }
+		TArray<TPair<FName, int32>> Groups;
+		for (const FName& Item : Items)
+		{
+			TPair<FName, int32>* Found = Groups.FindByPredicate([&Item](const TPair<FName, int32>& G) { return G.Key == Item; });
+			if (Found) { ++Found->Value; } else { Groups.Emplace(Item, 1); }
+		}
+		constexpr int32 MaxNamed = 3;
+		FString Names;
+		int32 NotNamed = 0;
+		for (int32 i = 0; i < Groups.Num(); ++i)
+		{
+			if (i >= MaxNamed)
+			{
+				NotNamed += Groups[i].Value;
+				continue;
+			}
+			const FString Name = ManifestItemName(Defs, Groups[i].Key);
+			Names += (i > 0 ? TEXT(", ") : TEXT("")) + (Groups[i].Value > 1 ? FString::Printf(TEXT("%s x%d"), *Name, Groups[i].Value) : Name);
+		}
+		if (NotNamed > 0)
+		{
+			Names += FString::Printf(TEXT(" and %d more"), NotNamed);
+		}
+		return FString::Printf(TEXT("Supply ship landed: %s."), *Names);
+	}
 }

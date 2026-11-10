@@ -7,6 +7,7 @@
 #include "RHMenus.h"
 #include "Misc/CommandLine.h"
 #include "RHColonyVisualizerSubsystem.h"
+#include "RHPowerLook.h"
 #include "RHSectionLadder.h"
 #include "RHSectionVisualizerSubsystem.h"
 #include "RHDistrictVisualizerSubsystem.h"
@@ -64,6 +65,11 @@ void ARHPlayerController::BeginPlay()
 			OpenMenuScreen((uint8)SRHMenus::EScreen::Title);
 		}
 	}
+	// G2b (B8.4): every load clears every selection and the 60x wish (bound after the deck, so the deck's own reload lambda keeps its order).
+	if (URHSimWorldSubsystem* SimForBind = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
+	{
+		ColonyReloadedHandle = SimForBind->OnColonyReloaded.AddUObject(this, &ARHPlayerController::HandleColonyReloaded);
+	}
 
 	FInputModeGameAndUI Mode;
 	Mode.SetHideCursorDuringCapture(false);
@@ -73,6 +79,11 @@ void ARHPlayerController::BeginPlay()
 
 void ARHPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (URHSimWorldSubsystem* SimForBind = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr)
+	{
+		SimForBind->OnColonyReloaded.Remove(ColonyReloadedHandle);
+	}
+	ColonyReloadedHandle.Reset();
 	if (Deck.IsValid() && GEngine && GEngine->GameViewport)
 	{
 		GEngine->GameViewport->RemoveViewportWidgetContent(Deck.ToSharedRef());
@@ -338,6 +349,55 @@ void ARHPlayerController::Tick(float DeltaTime)
 	if (!Sim || !Defs)
 	{
 		return;
+	}
+
+	// G2b (B5): Space after the sim's own auto-drop resumes the agent speed the sim restored (the G1 (r2) follow-up: the sim dropped out of
+	// the era band while the resume speed still says 60x), and a 60x the player asked for engages once the era band is clear ("60x when
+	// clear"). Before the section view's early return, so both hold there too. O(1); no wish without a deck (a windowless run), and the
+	// playtest bot drives the clock itself, never this.
+	// r1: the wish never reads CanEnterEraMode itself: it engages only on the first frame after one of the deck's polls (at most four a real
+	// second) that read clear, while the deck's latched answer shows clear too, so nothing runs or allocates per frame and the engage sees
+	// the sim's answer from after its last step. The clock never flips faster than the floor: no engage within FloorRealS of the last
+	// engage or of the clock leaving the era band (a refusal too brief for any poll to see). And the sim's own event onset, which snaps the
+	// clock to 1x (director ruling: real time to batten down; the player may re-speed at will), cancels the wish: 60x comes back only on
+	// the player's own press.
+	if (URHSimClockSubsystem* Clock = World->GetSubsystem<URHSimClockSubsystem>())
+	{
+		const double NowS = FPlatformTime::Seconds();
+		const bool bEraNow = Clock->IsEraMode();
+		const bool bAgentRunning = Clock->GetSpeed() > 0.f && !bEraNow;
+		CorrectResumeSpeed(*Clock);
+		if (bClockWasEra && !bEraNow)
+		{
+			SixtyQuietUntilS = NowS + URHPowerLookSubsystem::FloorRealS;
+		}
+		bClockWasEra = bEraNow;
+		if (bSixtyArmed)
+		{
+			const bool bEventNow = Sim->GetActiveEvent() != nullptr; // the deck's event line reads the same each frame
+			if (bEventNow && !bWishEventSeen)
+			{
+				bSixtyArmed = false; // the onset's 1x snap stands
+			}
+			bWishEventSeen = bEventNow;
+		}
+		if (bSixtyArmed && bAgentRunning && Deck.IsValid() && !IsMenuOpen() && NowS >= SixtyQuietUntilS)
+		{
+			const bool bShownRefused = Deck->IsSixtyRefusedShown(); // the latched poll (it may poll now)
+			if (!bShownRefused && Deck->GetSixtyPollSerial() != SixtyPollSeen && !Deck->IsSixtyRefusedPolled())
+			{
+				Clock->SetSpeed(SixtyWishTier);
+				LastNonZeroSpeed = SixtyWishTier;
+				SixtyQuietUntilS = NowS + URHPowerLookSubsystem::FloorRealS;
+				if (URHColonyVisualizerSubsystem* Viz = World->GetSubsystem<URHColonyVisualizerSubsystem>())
+				{
+					// G2b (PLACEHOLDER, gate-d-wording MS6): "60x resumed". r2 (G2B-Q1 A): through the queue's own name for the line, which sends
+					// the refusal it answers away (URHColonyVisualizerSubsystem::ReplaceSixtyLines).
+					Viz->PostDeckLine(URHColonyVisualizerSubsystem::SixtyResumedLine);
+				}
+			}
+		}
+		SixtyPollSeen = Deck.IsValid() ? Deck->GetSixtyPollSerial() : 0u;
 	}
 
 	// The hint is recomputed every frame a mode is live; the deck renders it.
@@ -1125,7 +1185,8 @@ void ARHPlayerController::Tick(float DeltaTime)
 		FVector Ground;
 		if (CursorToGround(Ground))
 		{
-			const FString RoomLabel = ZoneRoom.IsNone() ? TEXT("CLEAR") : ZoneRoom.ToString().ToUpper();
+			// G2b (B8.3, PLACEHOLDER gate-d-wording MS11): the room row's display name, not its key ("ZONE LABORATORY", never "ZONE LAB").
+			const FString RoomLabel = ZoneRoom.IsNone() ? TEXT("CLEAR") : RHOrder::TargetText(Defs, ZoneRoom).ToUpper();
 			int32 BayHab = 0, Bay = INDEX_NONE;
 			if (ActiveLevel == 0 && Sim->FindBayAt(Ground, BayHab, Bay))
 			{
@@ -1140,7 +1201,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 				}
 				const FName Current = Sim->GetBayRoom(BayHab, Bay);
 				HintText = FString::Printf(TEXT("ZONE %s: habitat bay%s - click to transmit, right-click to finish"), *RoomLabel,
-					Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *Current.ToString()));
+					Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *RHOrder::TargetText(Defs, Current))); // G2b (B8.3, MS11): the room's name
 				HintColor = FLinearColor(0.3f, 1.f, 0.6f);
 			}
 			else if (ActiveLevel == 0)
@@ -1161,7 +1222,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 					const FName Current = Sim->GetRoomAt(ActiveLevel, Cell);
 					HintText = FString::Printf(TEXT("ZONE %s: cell %d%s - click to transmit, right-click to finish"),
 						*RoomLabel, Cell,
-						Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *Current.ToString()));
+						Current.IsNone() ? TEXT("") : *FString::Printf(TEXT(" (now %s)"), *RHOrder::TargetText(Defs, Current))); // G2b (B8.3, MS11)
 					HintColor = FLinearColor(0.3f, 1.f, 0.6f);
 				}
 				else
@@ -1559,47 +1620,40 @@ void ARHPlayerController::Tick(float DeltaTime)
 		Traffic->SetHoverGround(HoverGround, Traffic->IsOverlayOn() && ActiveLevel == 0 && !bToolArmed && CursorToGround(HoverGround));
 	}
 
-	// The inspected station bay (BM-2): an emerald frame; leaving the surface drops it. G2a r3 (the cleared room): so does a room that no
-	// longer passes the rule that selected the bay (OnClick: a slice-active seat-function room), so a Clear or a re-zone that lands closes
-	// the station card instead of leaving it open over a bay that is no longer a station (GetActionCardTitle's round 2 guard stays as a
-	// fallback). Display only: two map lookups a tick while a bay is selected, no loop of its own, nothing allocated.
-	if (HasSelectedBay())
+	// The inspected station bay (BM-2): an emerald frame. G2a r3 (the cleared room); G2b (B8.1/B8.2): the selection lives exactly while it
+	// passes IsSelectedBayLive (on the surface, a slice-active seat-function room: the rule OnClick selects by), so leaving the surface, a
+	// Clear or a re-zone drops it here; the deck's card getters read the same rule (HasLiveSelectedBay), so on the frame such an order lands
+	// (the sim ticks after this tick and before Slate paints) the card is already closed. Display only: two map lookups a tick while a bay is
+	// selected; the loop only draws the frame, it no longer decides.
+	if (HasSelectedBay() && !IsSelectedBayLive())
 	{
-		const FRHRoomRow* BayRow = Defs->GetRoom(Sim->GetBayRoom(SelectedBayHab, SelectedBay));
-		const bool bBayStation = BayRow && BayRow->SliceActive && URHSimWorldSubsystem::IsSeatFunction(BayRow->Function);
-		bool bFound = false;
+		SelectedBayHab = 0;
+		SelectedBay = INDEX_NONE;
+	}
+	else if (HasSelectedBay())
+	{
 		for (const FRHBuildingInstance& HB : Sim->GetBuildings())
 		{
-			if (bBayStation && HB.Id == SelectedBayHab && ActiveLevel == 0)
+			if (HB.Id == SelectedBayHab)
 			{
 				const FVector C = Sim->GetBayCentreCm(HB, SelectedBay);
 				DrawDebugBox(World, C + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
-				bFound = true;
 			}
 		}
-		if (!bFound)
-		{
-			SelectedBayHab = 0;
-			SelectedBay = INDEX_NONE;
-		}
 	}
-	// The inspected station cell: an emerald frame; a floor change drops it. G2a r3 (the cleared room): so does a room that no longer passes
-	// the rule that selected the cell (OnClick: Lab, Workstation or Garden, IsSeatFunction's three), as for a bay above.
-	if (HasSelectedCell())
+	// The inspected station cell: an emerald frame. G2a r3; G2b (B8.2): the cell's half of the shared rule (IsSelectedCellLive: its floor
+	// is the active one and its room has a seat function, OnClick's Lab, Workstation or Garden), read by the deck's getters too.
+	if (HasSelectedCell() && !IsSelectedCellLive())
 	{
-		const FRHRoomRow* CellRow = SelectedCellLevel == ActiveLevel ? Defs->GetRoom(Sim->GetRoomAt(SelectedCellLevel, SelectedCellIndex)) : nullptr;
-		if (!CellRow || !URHSimWorldSubsystem::IsSeatFunction(CellRow->Function))
-		{
-			SelectedCellLevel = 0;
-			SelectedCellIndex = INDEX_NONE;
-		}
-		else
-		{
-			const FVector Head = Sim->GetShaftHeadCm();
-			const FIntPoint P = Sim->GetFloorCell(ActiveLevel, SelectedCellIndex);
-			const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, ActiveLevel * Sim->GetFloorHeightCm());
-			DrawDebugBox(World, Center + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
-		}
+		SelectedCellLevel = 0;
+		SelectedCellIndex = INDEX_NONE;
+	}
+	else if (HasSelectedCell())
+	{
+		const FVector Head = Sim->GetShaftHeadCm();
+		const FIntPoint P = Sim->GetFloorCell(ActiveLevel, SelectedCellIndex);
+		const FVector Center(Head.X + P.X * 1000.0, Head.Y + P.Y * 1000.0, ActiveLevel * Sim->GetFloorHeightCm());
+		DrawDebugBox(World, Center + FVector(0, 0, 90.f), FVector(500.f, 500.f, 90.f), FColor::Emerald, false, -1.f, 0, 6.f);
 	}
 
 	// Selection highlight: a steady cyan frame on the inspected building.
@@ -1790,8 +1844,8 @@ void ARHPlayerController::OnClick()
 			Cmd.Level = 0;
 			Cmd.Location = Ground;
 			Sim->EnqueueCommand(Cmd);
-			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on habitat bay %d"),
-				ZoneRoom.IsNone() ? TEXT("clear") : *ZoneRoom.ToString(), Bay), FLinearColor(0.2f, 0.9f, 1.f));
+			const FString RoomName = ZoneRoom.IsNone() ? FString(TEXT("clear")) : RHOrder::TargetText(ClickDefs, ZoneRoom); // G2b (B8.3, MS11): the room's name
+			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on habitat bay %d"), *RoomName, Bay), FLinearColor(0.2f, 0.9f, 1.f));
 		}
 		else if (Cell != INDEX_NONE)
 		{
@@ -1801,8 +1855,8 @@ void ARHPlayerController::OnClick()
 			Cmd.Level = ActiveLevel;
 			Cmd.Value = Cell;
 			Sim->EnqueueCommand(Cmd);
-			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on floor %d cell %d"),
-				ZoneRoom.IsNone() ? TEXT("clear") : *ZoneRoom.ToString(), ActiveLevel, Cell), FLinearColor(0.2f, 0.9f, 1.f));
+			const FString RoomName = ZoneRoom.IsNone() ? FString(TEXT("clear")) : RHOrder::TargetText(ClickDefs, ZoneRoom); // G2b (B8.3, MS11)
+			SetConfirm(FString::Printf(TEXT("Zoning transmitted: %s on floor %d cell %d"), *RoomName, ActiveLevel, Cell), FLinearColor(0.2f, 0.9f, 1.f));
 		}
 	}
 	else if (bFurnishMode)
@@ -2979,6 +3033,15 @@ void ARHPlayerController::SetSimSpeed(float Tier)
 	{
 		return; // the speed keys wait for the menu to close
 	}
+	// G2b (B5): a player 60x press arms "60x when clear" (the tick engages it once the era band is clear); any other speed press cancels it.
+	bSixtyArmed = Tier > URHSimClockSubsystem::EraSpeedThreshold;
+	if (bSixtyArmed)
+	{
+		SixtyWishTier = Tier;
+		// r1: an event already under way when the player asks is no onset (the steady storm may be skipped: ruling 2026-07-07b).
+		const URHSimWorldSubsystem* SimNow = GetWorld() ? GetWorld()->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+		bWishEventSeen = SimNow && SimNow->GetActiveEvent() != nullptr;
+	}
 	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
 	{
 		if (Tier > 0.f)
@@ -3002,10 +3065,75 @@ void ARHPlayerController::TogglePause()
 	{
 		return;
 	}
+	bSixtyArmed = false; // G2b (B5): a pause (or the resume) cancels the 60x wish
 	if (URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
 	{
+		// r1: the resume speed is corrected here as well as in the tick: a Space on the frame after the sim's own drop (input runs before
+		// the tick) would otherwise pause with the resume speed still 60x and ask for 60x again on the next Space.
+		CorrectResumeSpeed(*Clock);
 		Clock->SetSpeed(Clock->GetSpeed() > 0.f ? 0.f : LastNonZeroSpeed);
 	}
+}
+
+void ARHPlayerController::CorrectResumeSpeed(const URHSimClockSubsystem& Clock)
+{
+	// G2b (B5): the clock runs in the agent band while the resume speed says 60x: the sim dropped out of the era band (a refusal), so Space
+	// resumes the agent speed it restored. (A developer RH.SetSpeed below 60 after a 60x press reads the same way.)
+	if (Clock.GetSpeed() > 0.f && !Clock.IsEraMode() && LastNonZeroSpeed > URHSimClockSubsystem::EraSpeedThreshold)
+	{
+		LastNonZeroSpeed = FMath::Max(1.f, Clock.GetLastAgentSpeed());
+	}
+}
+
+bool ARHPlayerController::IsSixtyWishPending() const
+{
+	const URHSimClockSubsystem* Clock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	return bSixtyArmed && Clock && Clock->GetSpeed() > 0.f && !Clock->IsEraMode();
+}
+
+bool ARHPlayerController::IsSelectedBayLive() const
+{
+	// G2b (B8.1): the tick's bay rule without its loop: the surface is shown and the bay's room is a slice-active seat-function room (a
+	// removed habitat's GetBayRoom is None, so it reads no room). Two map lookups (GetBayRoom is O(1) for a built habitat).
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs || ActiveLevel != 0)
+	{
+		return false;
+	}
+	const FRHRoomRow* Row = Defs->GetRoom(Sim->GetBayRoom(SelectedBayHab, SelectedBay));
+	return Row && Row->SliceActive && URHSimWorldSubsystem::IsSeatFunction(Row->Function);
+}
+
+bool ARHPlayerController::IsSelectedCellLive() const
+{
+	// G2b (B8.2): the tick's cell rule: the cell's floor is the active one and its room has a seat function (OnClick's Lab, Workstation or
+	// Garden). Two map lookups.
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+	if (!Sim || !Defs || SelectedCellLevel != ActiveLevel)
+	{
+		return false;
+	}
+	const FRHRoomRow* Row = Defs->GetRoom(Sim->GetRoomAt(SelectedCellLevel, SelectedCellIndex));
+	return Row && URHSimWorldSubsystem::IsSeatFunction(Row->Function);
+}
+
+void ARHPlayerController::HandleColonyReloaded()
+{
+	// G2b (B8.4): every load path (QuickLoad's CONTINUE, RH.Load, the click and flash scenes' loads) runs this inside LoadColony: no card
+	// from the old colony stays open (ids and bays may not survive), and the 60x wish and the resume speed start over (the loaded clock
+	// runs 1x, LoadColony's own SetSpeed).
+	SelectedBuildingId = 0;
+	SelectedBayHab = 0;
+	SelectedBay = INDEX_NONE;
+	SelectedCellLevel = 0;
+	SelectedCellIndex = INDEX_NONE;
+	bSixtyArmed = false;
+	LastNonZeroSpeed = 1.f;
+	bClockWasEra = false; // the loaded clock runs 1x
 }
 
 void ARHPlayerController::QuickSave()

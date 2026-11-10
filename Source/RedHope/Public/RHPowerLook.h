@@ -82,6 +82,21 @@ public:
 	double GetNetGenW() const;
 	// The colony's running served share of the wanted load (0..1), counted over whole shed cycles (steady at any step length).
 	double GetServedShare() const;
+	// G2b (B6, POWER C; the residual a PLACEHOLDER): whether that share has settled in the rationing spell shown now: its running mean holds
+	// at most ServedSettleResidual of cycles closed before the spell's first shed (the mean's own memory, never a timer). Worked out once a
+	// frame in Tick. r2: it follows the SHOWN spell, not the sim's episode: sticky while the sim rations or anything still shows rationing,
+	// through a sim episode that ends and begins again meanwhile; it starts over at the first shed after nothing shows rationing (see
+	// Tick). The tile and the fold header print no number until it holds.
+	static constexpr double ServedSettleResidual = 0.05;
+	bool IsServedSettled() const { return bServedSettled; }
+	void Debug_GetServedEpisode(bool& bOutOn, double& OutOnsetS, double& OutMaxHoldS, bool& bOutSettled) const
+	{
+		bOutOn = bEpisodeOn;
+		OutOnsetS = EpisodeOnsetS;
+		OutMaxHoldS = EpisodeMaxHoldS;
+		bOutSettled = bServedSettled;
+	}
+	bool Debug_IsServedSpellOn() const { return bSpellOn; } // developer (flash.power.restart): the shown spell the settled state follows
 	// The bank bar: 0 while IsRationingNow (the bank holds nothing it keeps), else BatteryWh / BatteryCapWh, re-targeted at most once
 	// per FloorRealS and glided to linearly over FloorRealS (a bank that steps once a real second at 60x reads as one steady glide).
 	float GetBankFrac() const { return BankFrac; }
@@ -174,4 +189,10 @@ private:
 	double GardenChangedAtS = 0.0;
 	double GardenDarkAtSimS = -1.0e12;
 	int32 GardenDarkProducing = 0;
+	// G2b (B6): the sim's rationing episode as the settle rule follows it (onset in sim seconds, the largest hold seen in it).
+	bool bEpisodeOn = false;   // the sim rations now (its episode)
+	bool bSpellOn = false;     // r2: the shown rationing spell: from the sim's first shed until nothing shows rationing any more
+	bool bServedSettled = false;
+	double EpisodeOnsetS = 0.0;
+	double EpisodeMaxHoldS = 0.0;
 };

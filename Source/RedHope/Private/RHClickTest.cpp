@@ -14,6 +14,9 @@
 //   RH.ClickTest                  the scripted run: one "CLICKTEST <name> PASS|FAIL <why>" per step, then a total
 //   RH.ClickTest.DropPress <label>[|<label>...]   TEST HOOK (G2a): the next press of each named button loses its capture after its down
 //   RH.ClickTest.DropHover <label>[|<label>...]   TEST HOOK (G2a r2): the next press of each named button loses its hover after its down
+//   RH.ClickTest.DropDrag <label>[|<label>...]    TEST HOOK (G2b): the next drag of each named label (a slider's tag, RightMouseButton,
+//                                                 MiddleMouseButton) loses all pointer capture after its down
+//   RH.ClickTest.BigArrival                       TEST HOOK (G2b): the Big Arrival as the presentation receives it (no sim rule runs)
 //
 // G2a (A0, the dropped press, ruling 26): any window activation makes Slate release all pointer capture, and a button pressed across
 // frames then never clicks. PushPress checks at the release that the located button still holds its press; if not, it presses again
@@ -26,8 +29,13 @@
 // G2a r3: the shaft strip's floor rows are buttons too (LocateFloorRow records its button, label "floor row <level>"), so every press of
 // an SButton in this file goes through a located button. The presses with no button are by design: a text (RH.ClickText, panel titles),
 // a viewport point (RH.ClickAt, the menu backdrops), the world (RH.ClickWorld, the build and move clicks, the section plate), a slider
-// point (SSlider sets its value on the down and while it holds the capture; its release tests no hover), drags, keys and other buttons'
-// drags.
+// point (SSlider sets its value on the down and while it holds the capture; its release tests no hover; G2b: LocateTagged records the
+// slider, so its press is re-placed and logs capture= and drift=, and is never pressed again), keys, and drags. G2b (B7): every drag
+// (PushDrag, PushButtonDrag) re-places the pointer before each leg and before the release and logs capture= and drift= on its up line; a
+// widget drag (the slider) or a button drag that held the capture after its down but not before its release is dragged again once ("drag
+// lost its capture ... dragging again", counted in RETRIES and the kind line's drag); a world drag is never dragged again (its check names
+// a drift instead). Every up line says drift=0|1: whether the pointer stood where the harness put it just before the re-place (1 is input
+// the harness did not make: a person's mouse, Universal Control). Before any press again the button must still be under its point.
 //
 // Commands queue and run one step at a time on the core ticker, so -ExecCmds can chain them. This is the
 // presentation module; the sim boundary is untouched.
@@ -390,13 +398,36 @@ namespace
 	// capture; any other press: whether anything holds it). G2a r2: and whether the pressed button was hovered just before it (hover=0|1; '-'
 	// for a press with no located button): SButton clicks a release only while it is hovered too, so a failed check after capture=1 hover=1
 	// is a real failure, and capture=1 hover=0 is a lost hover the harness did not catch.
-	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton, const TSharedPtr<SWidget>& Pressed = nullptr)
+	// G2b (B7): and whether the pointer stood where the harness last put it just before the press's or drag's own re-place (drift=0|1; '-'
+	// when not measured): drift=1 is input the harness did not make (a person's mouse, Universal Control). Every older field and substring
+	// is unchanged, so the scanners' capture= and hover= readers still match.
+	void SendUp(const FVector2D& Pos, FKey Button = EKeys::LeftMouseButton, const TSharedPtr<SWidget>& Pressed = nullptr, int32 Drift = -1)
 	{
 		PlaceVirtualCursor(Pos);
 		const int32 Capture = Pressed.IsValid() ? (Pressed->HasMouseCapture() ? 1 : 0) : (FSlateApplication::Get().HasAnyMouseCaptor() ? 1 : 0);
 		const TCHAR* Hover = Pressed.IsValid() ? (Pressed->IsHovered() ? TEXT("1") : TEXT("0")) : TEXT("-");
 		const bool bHandled = FSlateApplication::Get().ProcessMouseButtonUpEvent(MakeEvent(Pos, TSet<FKey>(), Button));
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: up (%s) at (%.0f,%.0f) handled=%d capture=%d hover=%s"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0, Capture, Hover);
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: up (%s) at (%.0f,%.0f) handled=%d capture=%d hover=%s drift=%s"), *Button.ToString(), Pos.X, Pos.Y, bHandled ? 1 : 0, Capture, Hover,
+			Drift < 0 ? TEXT("-") : (Drift > 0 ? TEXT("1") : TEXT("0")));
+	}
+
+	// G2b (B7): where the cursor user's pointer stands now: Slate's own position for it (FSlateApplication::GetCursorPos reads the cursor
+	// user's cursor, the faux one PlaceVirtualCursor swaps in). r1: a real mouse moves Slate's hover at once (each OS move is processed at
+	// the OS position), but Slate swaps the platform cursor back only after more than three such moves since the last swap (UE 5.8
+	// SlateApplication.cpp, PlatformMouseMovementEvents), so up to three real moves after each switch to the faux cursor read drift=0 here.
+	// drift=1 is therefore a sure sign of input the harness did not make, and drift=0 is not proof that none came (the scanners' pmset
+	// reading is the other witness).
+	FVector2D CursorNow()
+	{
+		return FVector2D(FSlateApplication::Get().GetCursorPos());
+	}
+
+	// G2b (B7): the pointer stands more than 1 px from where the harness last put it, on either axis (per axis, not the distance: the faux
+	// cursor's position is whole pixels, so a harness point with fractions on both axes reads up to 1 px off on each).
+	bool PointerDrifted(FVector2D& OutAt)
+	{
+		OutAt = CursorNow();
+		return FMath::Abs(OutAt.X - GLastPointer.X) > 1.0 || FMath::Abs(OutAt.Y - GLastPointer.Y) > 1.0;
 	}
 
 	// D8 (R9 a): a key down (with Shift held around it when asked) through Slate, as a keyboard would send it, into the game viewport.
@@ -485,13 +516,22 @@ namespace
 	int32 GHoverRetries = 0;
 	int32 GHoverHooks = 0;
 	TArray<FString> GDropHoverLabels;
+	// G2b (B7): the drags dragged again after a lost capture (also counted in GPressRetries), the drag hook's fires, and the labels it is
+	// armed for (RH.ClickTest.DropDrag; as GDropPressLabels, never cleared by a scene start).
+	int32 GDragRetries = 0;
+	int32 GDropDragHooks = 0;
+	TArray<FString> GDropDragLabels;
 
 	// G2a (A0, F4): the retries before each scene's TOTAL (whose format scripts grep, unchanged), and any armed label never pressed.
 	void LogRetries()
 	{
-		// G2a r2: the two kinds of retry, on a line of its own (the RETRIES line keeps its form; scripts grep it).
-		UE_LOG(LogRedHope, Display, TEXT("RHClick: retries by kind: capture %d, hover %d"), GPressRetries - GHoverRetries, GHoverRetries);
+		// G2a r2: the two kinds of retry, on a line of its own (the RETRIES line keeps its form; scripts grep it). G2b (B7): and the drags.
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: retries by kind: capture %d, hover %d, drag %d"), GPressRetries - GHoverRetries - GDragRetries, GHoverRetries, GDragRetries);
 		UE_LOG(LogRedHope, Display, TEXT("CLICKTEST RETRIES %d"), GPressRetries);
+		if (GDropDragLabels.Num() > 0)
+		{
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: %d drag label(s) armed but never dragged: %s"), GDropDragLabels.Num(), *FString::Join(GDropDragLabels, TEXT(", ")));
+		}
 		if (GDropPressLabels.Num() > 0)
 		{
 			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: %d label(s) armed but never pressed: %s"), GDropPressLabels.Num(), *FString::Join(GDropPressLabels, TEXT(", ")));
@@ -637,7 +677,12 @@ namespace
 		FVector2D Pos = FVector2D::ZeroVector;
 		int32 LeakBase = 0;
 		TWeakPtr<SWidget> Target; // UI polish P1: the button the locator found, so a press can follow it if the layout moves it before the click
-		FString Label;            // G2a (A0): the label LocateButton matched (empty for other locators): RH.ClickTest.DropPress names a press by it
+		// G2a (A0); G2b (B8.7): the label the locator recorded - LocateButton's text or tag, LocateFloorRow's "floor row <level>", LocateTagged's
+		// tag; a drag's label (its first locator's), the button's key for PushButtonDrag ("RightMouseButton"); empty for a text, a viewport
+		// point or the world. RH.ClickTest.DropPress, DropHover and DropDrag name a press or a drag by it.
+		FString Label;
+		bool bDrift = false;          // G2b (B7): the pointer was found away from where the harness put it (input the harness did not make)
+		bool bCapturedAtDown = false; // G2b (B7): a drag's widget (or, for a button drag, anything) held the capture right after its down
 	};
 
 	// Set by LocateButton to the widget it found (a locator only returns a point), and (G2a) to the label it matched. G2a r3: LocateFloorRow
@@ -764,6 +809,10 @@ namespace
 				const double At = FMath::Clamp((double)Fraction * Long, 2.0, Long - 2.0);
 				OutPos = bVertical ? FVector2D(Found.Centre.X, Found.TopLeft.Y + At) : FVector2D(Found.TopLeft.X + At, Found.Centre.Y);
 				UE_LOG(LogRedHope, Display, TEXT("RHClick: <%s> at %.2f -> (%.0f,%.0f) leaf=%s"), *Tag, Fraction, OutPos.X, OutPos.Y, *LeafAt(OutPos));
+				// G2b (B7.1): recorded like a button (label = the tag), so a drag knows a widget drag from a world drag and the slider press gets
+				// the re-place, capture= and drift= (SSlider is no SButton: HoldsPress and LostHover leave it alone, so it is never pressed again).
+				GLocatedButton = Found.Widget;
+				GLocatedLabel = Tag;
 				return true;
 			}
 			UE_LOG(LogRedHope, Error, TEXT("RHClick: no visible widget tagged %s"), *Tag);
@@ -792,7 +841,11 @@ namespace
 					OutPos = Found.Centre;
 					GLocatedButton = Found.Widget;
 					GLocatedLabel = FString::Printf(TEXT("floor row %d"), Level);
-					UE_LOG(LogRedHope, Display, TEXT("RHClick: floor row '%s' at (%.0f,%.0f) leaf=%s"), *Text, OutPos.X, OutPos.Y, *LeafAt(OutPos));
+					// G2b (B7.4): LocateButton's line form, reached= included, so the taught scanner reads this press like any other.
+					FString Leaf;
+					const bool bReached = ReachesAt(OutPos, Found.Widget, Leaf);
+					UE_LOG(LogRedHope, Display, TEXT("RHClick: '%s' at (%.0f,%.0f) leaf=%s reached=%s (row '%s')"), *GLocatedLabel, OutPos.X, OutPos.Y, *Leaf,
+						bReached ? TEXT("YES") : TEXT("NO"), *Text);
 					return true;
 				}
 			}
@@ -902,6 +955,31 @@ namespace
 		return Button.HasMouseCapture() && !Button.IsHovered();
 	}
 
+	// G2b (B7.2, B7.4): before any press again, the pressed widget must still be what the mouse would get at its point (a press with no
+	// target has nothing to check). A widget gone from under the pointer is never pressed again (its neighbour would take the click).
+	bool StillUnderPointer(const TSharedRef<FPress>& State)
+	{
+		const TSharedPtr<SWidget> Target = State->Target.Pin();
+		if (!Target.IsValid())
+		{
+			return true;
+		}
+		FString Leaf;
+		return ReachesAt(State->Pos, Target.ToSharedRef(), Leaf);
+	}
+
+	// G2b (B7): read the drift just before a re-place; a moved pointer is noted on the press (its up line and a failing check say so).
+	void ReadDrift(const TSharedRef<FPress>& State, const TCHAR* What)
+	{
+		FVector2D At;
+		if (PointerDrifted(At))
+		{
+			State->bDrift = true;
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: the pointer stood at (%.0f,%.0f), not at (%.0f,%.0f) where the harness put it, before the %s of '%s' (input the harness did not make)"),
+				At.X, At.Y, GLastPointer.X, GLastPointer.Y, What, *State->Label);
+		}
+	}
+
 	// Move, press, release. The press is not made if there was nothing to press.
 	TSharedRef<FPress> PushPress(const FString& Name, FLocate Locate, bool bPress = true)
 	{
@@ -969,17 +1047,25 @@ namespace
 			Runner.Do(Name + TEXT(" up"), [State]()
 			{
 				if (!State->bFound) { return; }
+				ReadDrift(State, TEXT("release")); // G2b (B7): before ReAim's and the release's re-place
 				ReAim(State, true);
 				// G2a (A0, F1): a press that lost its capture is pressed again, the down and the up in this one action, where no OS event can be
-				// pumped between them.
+				// pumped between them. G2b (B7.4): only while the button is still what the mouse gets at its point.
 				if (!HoldsPress(State))
 				{
 					++GPressRetries;
 					UE_LOG(LogRedHope, Display, TEXT("RHClick: press dropped (the button lost its press before the release); pressing again, down and up in one frame"));
-					SendDown(State->Pos);
-					if (!HoldsPress(State))
+					if (!StillUnderPointer(State))
 					{
-						UE_LOG(LogRedHope, Error, TEXT("RHClick: the second press was not taken either"));
+						UE_LOG(LogRedHope, Error, TEXT("RHClick: '%s' is no longer under the pointer; not pressing again"), *State->Label);
+					}
+					else
+					{
+						SendDown(State->Pos);
+						if (!HoldsPress(State))
+						{
+							UE_LOG(LogRedHope, Error, TEXT("RHClick: the second press was not taken either"));
+						}
 					}
 				}
 				// G2a r2 (b): a press that kept its capture but lost its hover is a dropped press too: the pointer goes back on the button and it
@@ -989,17 +1075,35 @@ namespace
 				// the capture makes Slate release that capture before it sets the new one (FSlateUser::SetPointerCaptor), and OnMouseCaptureLost
 				// Release()s it, so it would hold the capture but not the press (g2a_r2_dev1: up handled=0). Then the fresh down. (c) Nothing here
 				// runs after our release, so a button is never pressed twice once its click landed (a DownAndUp button clicks only on the release).
+				// G2b (B7.2): the retry checks its own steps. The button must still be under its point; after the re-move it must be hovered (else
+				// no release and no fresh down: an Error says so); after the fresh down it must hold the press and its hover (a down it never took,
+				// capture=0, is caught here).
 				else if (LostHover(State))
 				{
 					++GPressRetries;
 					++GHoverRetries;
 					UE_LOG(LogRedHope, Display, TEXT("RHClick: press lost its hover (the button kept its capture, the pointer had left it) on '%s'; pressing again, down and up in one frame"), *State->Label);
-					SendMove(State->Pos, true);
-					FSlateApplication::Get().ReleaseAllPointerCapture();
-					SendDown(State->Pos);
-					if (LostHover(State))
+					const TSharedPtr<SWidget> Target = State->Target.Pin();
+					if (!StillUnderPointer(State))
 					{
-						UE_LOG(LogRedHope, Error, TEXT("RHClick: the press again did not get its hover back either"));
+						UE_LOG(LogRedHope, Error, TEXT("RHClick: '%s' is no longer under the pointer; not pressing again"), *State->Label);
+					}
+					else
+					{
+						SendMove(State->Pos, true);
+						if (!Target.IsValid() || !Target->IsHovered())
+						{
+							UE_LOG(LogRedHope, Error, TEXT("RHClick: the re-move did not give '%s' its hover back; not pressing again"), *State->Label);
+						}
+						else
+						{
+							FSlateApplication::Get().ReleaseAllPointerCapture();
+							SendDown(State->Pos);
+							if (!HoldsPress(State) || LostHover(State))
+							{
+								UE_LOG(LogRedHope, Error, TEXT("RHClick: the press again was not taken (capture=%d hover=%d)"), Target->HasMouseCapture() ? 1 : 0, Target->IsHovered() ? 1 : 0);
+							}
+						}
 					}
 				}
 				// G2a r2 (a): just before every release of a located button, the pointer is re-placed on its centre through the same synthetic move
@@ -1008,12 +1112,46 @@ namespace
 				{
 					SendMove(State->Pos, true);
 				}
-				SendUp(State->Pos, EKeys::LeftMouseButton, State->Target.Pin());
+				SendUp(State->Pos, EKeys::LeftMouseButton, State->Target.Pin(), State->bDrift ? 1 : 0);
 			}, 0.2f);
 		}
 		return State;
 	}
 
+	// G2b (B7.1): the drag test hook - all pointer capture released right after the down of a drag whose label is armed (RH.ClickTest.DropDrag).
+	void DropDragHook(const TSharedRef<FPress>& State)
+	{
+		const int32 Armed = State->Label.IsEmpty() ? INDEX_NONE
+			: GDropDragLabels.IndexOfByPredicate([&State](const FString& L) { return L.Equals(State->Label, ESearchCase::IgnoreCase); });
+		if (Armed != INDEX_NONE)
+		{
+			GDropDragLabels.RemoveAt(Armed);
+			++GDropDragHooks;
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: all pointer capture released after the down of drag '%s'"), *State->Label);
+			FSlateApplication::Get().ReleaseAllPointerCapture();
+		}
+	}
+
+	// G2b (B7): a drag's leg or release reads the drift, then re-places the pointer where the harness means it (a synthetic move to that
+	// point, the button held), so Slate's pointer is current before the leg's own move or the release.
+	void DragReplace(const TSharedRef<FPress>& State, const FVector2D& Expected, bool bButtonHeld)
+	{
+		FVector2D At;
+		if (PointerDrifted(At))
+		{
+			State->bDrift = true;
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s': the pointer stood at (%.0f,%.0f), not at (%.0f,%.0f) where the harness put it (input the harness did not make); re-placed"),
+				State->Label.IsEmpty() ? TEXT("world") : *State->Label, At.X, At.Y, GLastPointer.X, GLastPointer.Y);
+		}
+		SendMove(Expected, bButtonHeld);
+	}
+
+	// G2b (B7.1): a drag re-places the pointer before each leg and before the release, logs capture= and drift= on its up line, and a WIDGET
+	// drag (its first locator recorded a widget: the section slider) that held the capture after its down but not before its release is
+	// dragged again once - down, the four legs and the up in this one runner action ("drag lost its capture ... dragging again", counted in
+	// CLICKTEST RETRIES and the kind line's drag). Hover is not a trigger: SSlider and the viewport take their value under the capture and
+	// test no hover on the release (UE 5.8 SSlider::OnMouseButtonUp). A WORLD drag (no widget: the viewport) is never dragged again (the world
+	// may have changed under it); a drifted one fails its check with the drift named.
 	TSharedRef<FPress> PushDrag(const FString& Name, FLocate LocateA, FLocate LocateB)
 	{
 		const TSharedRef<FPress> State = MakeShared<FPress>();
@@ -1022,7 +1160,12 @@ namespace
 		FRunner& Runner = FRunner::Get();
 		Runner.Do(Name + TEXT(" move"), [State, End, bHaveEnd, LocateA, LocateB]()
 		{
+			GLocatedButton.Reset();
+			GLocatedLabel.Reset();
 			State->bFound = LocateA(State->Pos);
+			// The drag's widget and label are its first locator's (read before LocateB, which would overwrite them).
+			State->Target = GLocatedButton;
+			State->Label = GLocatedLabel;
 			*bHaveEnd = LocateB(*End);
 			State->bFound = State->bFound && *bHaveEnd;
 			if (State->bFound)
@@ -1031,21 +1174,56 @@ namespace
 				{
 					State->LeakBase = PC->GetWorldClickCount();
 				}
+				const TSharedPtr<SWidget> W = State->Target.Pin();
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s' from (%.0f,%.0f) to (%.0f,%.0f) (%s)"), State->Label.IsEmpty() ? TEXT("world") : *State->Label,
+					State->Pos.X, State->Pos.Y, End->X, End->Y, W.IsValid() ? *FString::Printf(TEXT("widget %s"), *W->GetTypeAsString()) : TEXT("world"));
 				SendMove(State->Pos, false);
 			}
 		}, 0.15f);
-		Runner.Do(Name + TEXT(" down"), [State]() { if (State->bFound) { SendDown(State->Pos); } }, 0.2f);
+		Runner.Do(Name + TEXT(" down"), [State]()
+		{
+			if (!State->bFound) { return; }
+			SendDown(State->Pos);
+			const TSharedPtr<SWidget> W = State->Target.Pin();
+			State->bCapturedAtDown = W.IsValid() ? W->HasMouseCapture() : FSlateApplication::Get().HasAnyMouseCaptor();
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s' down capture=%d"), State->Label.IsEmpty() ? TEXT("world") : *State->Label, State->bCapturedAtDown ? 1 : 0);
+			DropDragHook(State);
+		}, 0.2f);
 		for (int32 Leg = 1; Leg <= 4; ++Leg)
 		{
 			Runner.Do(Name + TEXT(" drag"), [State, End, Leg]()
 			{
 				if (State->bFound)
 				{
+					DragReplace(State, FMath::Lerp(State->Pos, *End, (Leg - 1) / 4.0), true);
 					SendMove(FMath::Lerp(State->Pos, *End, Leg / 4.0), true);
 				}
 			}, 0.15f);
 		}
-		Runner.Do(Name + TEXT(" up"), [State, End]() { if (State->bFound) { SendUp(*End); } }, 0.3f);
+		Runner.Do(Name + TEXT(" up"), [State, End]()
+		{
+			if (!State->bFound) { return; }
+			DragReplace(State, *End, true);
+			const TSharedPtr<SWidget> W = State->Target.Pin();
+			if (W.IsValid() && State->bCapturedAtDown && !W->HasMouseCapture())
+			{
+				++GPressRetries;
+				++GDragRetries;
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: drag lost its capture (the %s no longer held the pointer before the release) on '%s'; dragging again, down, moves and up in one frame"),
+					*W->GetTypeAsString(), *State->Label);
+				SendMove(State->Pos, false);
+				SendDown(State->Pos);
+				for (int32 Leg = 1; Leg <= 4; ++Leg)
+				{
+					SendMove(FMath::Lerp(State->Pos, *End, Leg / 4.0), true);
+				}
+				if (!W->HasMouseCapture())
+				{
+					UE_LOG(LogRedHope, Error, TEXT("RHClick: the drag again did not take the capture either"));
+				}
+			}
+			SendUp(*End, EKeys::LeftMouseButton, W, State->bDrift ? 1 : 0);
+		}, 0.3f);
 		return State;
 	}
 
@@ -1067,11 +1245,20 @@ namespace
 		return State;
 	}
 
-	// D8 (R9 a): a drag with another mouse button (RMB, MMB) from the viewport's centre, DX pixels to the right.
+	// D8 (R9 a): a drag with another mouse button (RMB, MMB) from the viewport's centre, DX pixels to the right. G2b (B7.1): labelled by the
+	// button's key; each leg and the release read the drift and re-place first (HEAD's own move: the faux cursor, no button in the pressed
+	// set); one that held the capture after its down but not before its release is dragged again once (down, legs and up in one action).
 	TSharedRef<FPress> PushButtonDrag(const FString& Name, FKey Button, float DX)
 	{
 		const TSharedRef<FPress> State = MakeShared<FPress>();
+		State->Label = Button.ToString();
 		FRunner& Runner = FRunner::Get();
+		const auto MoveTo = [](const FVector2D& To)
+		{
+			PlaceVirtualCursor(To);
+			FSlateApplication::Get().ProcessMouseMoveEvent(MakeEvent(To, TSet<FKey>(), FKey()));
+			GLastPointer = To;
+		};
 		Runner.Do(Name + TEXT(" down"), [State, Button]()
 		{
 			State->bFound = LocateFraction(0.5f, 0.5f)(State->Pos);
@@ -1080,22 +1267,60 @@ namespace
 				if (const ARHPlayerController* PC = GetPC()) { State->LeakBase = PC->GetWorldClickCount(); }
 				SendMove(State->Pos, false);
 				SendDown(State->Pos, Button);
+				State->bCapturedAtDown = FSlateApplication::Get().HasAnyMouseCaptor();
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s' down capture=%d"), *State->Label, State->bCapturedAtDown ? 1 : 0);
+				DropDragHook(State);
 			}
 		}, 0.15f);
 		for (int32 Leg = 1; Leg <= 4; ++Leg)
 		{
-			Runner.Do(Name + TEXT(" drag"), [State, DX, Leg]()
+			Runner.Do(Name + TEXT(" drag"), [State, DX, Leg, MoveTo]()
 			{
 				if (State->bFound)
 				{
-					const FVector2D To = State->Pos + FVector2D(DX * Leg / 4.0, 0.0);
-					PlaceVirtualCursor(To);
-					FSlateApplication::Get().ProcessMouseMoveEvent(MakeEvent(To, TSet<FKey>(), FKey()));
-					GLastPointer = To;
+					FVector2D At;
+					if (PointerDrifted(At))
+					{
+						State->bDrift = true;
+						UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s': the pointer stood at (%.0f,%.0f), not at (%.0f,%.0f) where the harness put it (input the harness did not make); re-placed"),
+							*State->Label, At.X, At.Y, GLastPointer.X, GLastPointer.Y);
+					}
+					MoveTo(State->Pos + FVector2D(DX * (Leg - 1) / 4.0, 0.0));
+					MoveTo(State->Pos + FVector2D(DX * Leg / 4.0, 0.0));
 				}
 			}, 0.1f);
 		}
-		Runner.Do(Name + TEXT(" up"), [State, Button, DX]() { if (State->bFound) { SendUp(State->Pos + FVector2D(DX, 0.0), Button); } }, 0.3f);
+		Runner.Do(Name + TEXT(" up"), [State, Button, DX, MoveTo]()
+		{
+			if (!State->bFound) { return; }
+			const FVector2D End = State->Pos + FVector2D(DX, 0.0);
+			FVector2D At;
+			if (PointerDrifted(At))
+			{
+				State->bDrift = true;
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: drag '%s': the pointer stood at (%.0f,%.0f), not at (%.0f,%.0f) where the harness put it (input the harness did not make); re-placed"),
+					*State->Label, At.X, At.Y, GLastPointer.X, GLastPointer.Y);
+			}
+			MoveTo(End);
+			if (State->bCapturedAtDown && !FSlateApplication::Get().HasAnyMouseCaptor())
+			{
+				++GPressRetries;
+				++GDragRetries;
+				UE_LOG(LogRedHope, Display, TEXT("RHClick: drag lost its capture (the viewport no longer held the pointer before the release) on '%s'; dragging again, down, moves and up in one frame"),
+					*State->Label);
+				SendMove(State->Pos, false);
+				SendDown(State->Pos, Button);
+				for (int32 Leg = 1; Leg <= 4; ++Leg)
+				{
+					MoveTo(State->Pos + FVector2D(DX * Leg / 4.0, 0.0));
+				}
+				if (!FSlateApplication::Get().HasAnyMouseCaptor())
+				{
+					UE_LOG(LogRedHope, Error, TEXT("RHClick: the drag again did not take the capture either"));
+				}
+			}
+			SendUp(End, Button, nullptr, State->bDrift ? 1 : 0);
+		}, 0.3f);
 		return State;
 	}
 
@@ -1276,7 +1501,118 @@ namespace
 		FString G2ClearWhy, G2ClearBefore, G2ClearAfter;
 		bool bG2ClearHeld = false, bG2ClearSent = false, bG2ClearShownAfter = false;
 		double G2ClearLandedAt = -1.0;
+		// G2b (2026-11, messages that stay on screen): the 23 checks' shared state (r1: 20 + alerts.hold, cards.crew, speed.wish.onset) - the counters' bases, the test's own lines, the order
+		// lag and fleet to restore, the 60x checks' site and alert counter, the E5 check's alert record.
+		int32 G2bRetries0 = 0, G2bHover0 = 0, G2bDrag0 = 0, G2bDropHooks0 = 0, G2bHoverHooks0 = 0, G2bDragHooks0 = 0;
+		FString G2bWhy, G2bSaid;
+		TArray<FString> G2bLines;
+		uint32 G2bLogSerial0 = 0;
+		FString G2bArrivalLine, G2bLandingLine, G2bQuotaLine, G2bRejected, G2bHint, G2bConfirm;
+		double G2bLag0 = 0.0;
+		int32 G2bSiteId = 0, G2bCell = INDEX_NONE, G2bSixtyAlerts = 0, G2bSixtyBase = 0;
+		FVector G2bSpotCm = FVector::ZeroVector;
+		FDelegateHandle G2bAlertHandle;
+		bool bG2bClear = false;
+		float G2bClockA = -1.f, G2bClockB = -1.f;
+		bool bG2bWishA = false, bG2bWishB = false;
+		TArray<TPair<FString, uint64>> G2bE5Alerts;
+		int32 G2bFocus0 = 0;
+		double G2bNotice0 = 0.0;
+		// log.fold lists the lines the earlier checks saw posted: speed.wish's "60x resumed" and cards.arrival's card line come from the code
+		// under test, so a defect there fails its own check, never log.fold as well (round 0: g2b_mut_wish failed both).
+		int32 G2bResumedPosted = 0;
+		bool bG2bCardLogged = false;
+		// r1: alerts.e5 reads the first demand's entry before the Defy (its id and count), and whether the re-raised demand reached the queue
+		// (that entry's count up by one, or a second EARTH TRANSMISSION row) on a frame that shows the Defy line too.
+		uint32 G2bE5DemandId = 0;
+		int32 G2bE5DemandCount = 0;
 	};
+
+	// G2b: the brief's own numbers (1.3), which the checks judge by. Never the constants of the code under test (URHColonyVisualizerSubsystem::
+	// AlertMinHoldS and the rest): a mutation of one would move the check's bar with it (round 0: g2b_mut_hold1 passed 145/0 that way).
+	constexpr double G2bMinHoldS = 6.0;          // a shown line keeps its row at least this long while a line waits
+	constexpr double G2bFullHoldS = 15.0;        // r1: a shown line keeps its row this long while nothing waits
+	constexpr int32 G2bRowsMax = 3;              // rows shown at once
+	constexpr int32 G2bLogCap = 200;             // LOG lines held
+	constexpr double G2bSettleResidual = 0.05;   // flash.power: no number while the test's residual is above this
+
+	// G2b: the alert queue and the LOG (the colony visualizer), for the checks.
+	URHColonyVisualizerSubsystem* GetViz()
+	{
+		UWorld* W = FindGameWorld();
+		return W ? W->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	}
+
+	// G2b: whether the alert queue holds a line now, shown (as drawn, with or without its merge count) or waiting; the entry's id when it does.
+	bool G2bQueueHolds(const URHColonyVisualizerSubsystem& Viz, const FString& Line, uint32* OutId = nullptr, bool* bOutShown = nullptr)
+	{
+		TArray<uint32> Ids;
+		TArray<FString> Texts;
+		TArray<float> Opacity;
+		TArray<int32> Counts;
+		Viz.Debug_GetAlertRows(Ids, Texts, Opacity, Counts);
+		for (int32 i = 0; i < Ids.Num(); ++i)
+		{
+			if (Texts[i] == Line || Texts[i].StartsWith(Line + TEXT(" (x")))
+			{
+				if (OutId) { *OutId = Ids[i]; }
+				if (bOutShown) { *bOutShown = true; }
+				return true;
+			}
+		}
+		Viz.Debug_GetAlertWaiting(Ids, Texts);
+		for (int32 i = 0; i < Ids.Num(); ++i)
+		{
+			if (Texts[i] == Line)
+			{
+				if (OutId) { *OutId = Ids[i]; }
+				if (bOutShown) { *bOutShown = false; }
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// G2b: how many of the LOG's lines added since a serial end with the line (a LOG line is "sol N: <line>").
+	int32 G2bLogCount(const URHColonyVisualizerSubsystem& Viz, uint32 Serial0, const FString& Line)
+	{
+		const int32 Added = FMath::Min((int32)(Viz.GetLogSerial() - Serial0), Viz.GetLogCount());
+		int32 N = 0;
+		for (int32 i = 0; i < Added; ++i)
+		{
+			const FString& L = Viz.GetLogLine(i);
+			N += (L.EndsWith(TEXT(": ") + Line) && L.StartsWith(TEXT("sol "))) ? 1 : 0;
+		}
+		return N;
+	}
+
+	// G2b: the Stockpile site standing at a spot (0 when none).
+	const FRHBuildingInstance* G2bSiteAt(const URHSimWorldSubsystem& Sim, const FVector& Spot)
+	{
+		for (const FRHBuildingInstance& B : Sim.GetBuildings())
+		{
+			if (B.bUnderConstruction && B.DefName == FName("Stockpile") && FVector::Dist2D(B.LocationCm, Spot) < 300.0)
+			{
+				return &B;
+			}
+		}
+		return nullptr;
+	}
+
+	// G2b: a site's demolish order at no lag, as the deck's HandleDemolish sends it (Demolish, Building, the Id, its level and place).
+	void G2bDemolish(URHSimWorldSubsystem& Sim, const FRHBuildingInstance& B)
+	{
+		const double Lag0 = Sim.GetOrderLagSeconds();
+		Sim.SetOrderLagSeconds(0.0);
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Demolish");
+		Cmd.Target = FName("Building");
+		Cmd.Value = B.Id;
+		Cmd.Level = B.Level;
+		Cmd.Location = B.LocationCm;
+		Sim.EnqueueCommand(Cmd);
+		Sim.SetOrderLagSeconds(Lag0);
+	}
 
 	// D7: a finished two-floor cavern beside shaft 0's column on -4..-5 that the atrium preflight accepts, made by harness calls (as
 	// cavern.setup and section.setup make theirs), opened as an atrium when bOpen. The first box that passes every refusal is kept.
@@ -1336,6 +1672,23 @@ namespace
 		return FPaths::ProjectSavedDir() / TEXT("SaveGames") / TEXT("RH_quick.sav");
 	}
 
+	// G2b (B3, the test hook; no sim code): the Big Arrival as the presentation receives it - IsBigArrivalDone set (an existing public debug
+	// setter) and the sim's two OnAlert lines in one step, in the sim's order, their words copied from StepBigArrival (test text, not new
+	// copy). No settler is added and no sim rule runs: the sim lands the arrival only from StepBigArrival (20 sols of smoothed Hope, 100
+	// free beds and the support legs), which no existing path can make happen inside a click step.
+	void FireBigArrivalForTest(URHSimWorldSubsystem* Sim)
+	{
+		if (!Sim)
+		{
+			return;
+		}
+		Sim->Debug_SetBigArrivalDone(true);
+		const int32 N = Sim->GetBigArrivalColonists();
+		Sim->OnAlert.Broadcast(FString::Printf(TEXT("THE BIG ARRIVAL \u2014 %d settlers land at once: the colony held its Hope long enough to be trusted with a city. They bring %.0f kg of provisions."),
+			N, N * Sim->GetColonistTransportFoodKgPerColonist()));
+		Sim->OnAlert.Broadcast(TEXT("THE CEO HAS ANNOUNCED HE WILL COME TO MARS WITH THE NEXT WAVE."));
+	}
+
 	// An assertion step: Effect returns "" when the effect holds, else why not. A leak (a press that moved the
 	// world-click counter) fails it too, unless the press was meant for the world. Timeout > 0 retries Effect
 	// until it holds.
@@ -1367,6 +1720,10 @@ namespace
 			{
 				// A flake and a defect read differently here: a flake waited few frames or met one very long one.
 				Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs());
+				if (Press.IsValid() && Press->bDrift)
+				{
+					Problem += TEXT("; the pointer drifted during the press or drag (input the harness did not make: a person's mouse or Universal Control)"); // G2b (B7)
+				}
 			}
 			Report(Name, Problem.IsEmpty(), Problem);
 			return true;
@@ -1399,6 +1756,10 @@ namespace
 			if (!Problem.IsEmpty())
 			{
 				Problem += FString::Printf(TEXT(" [waited %llu frames, longest frame %.0f ms]"), FRunner::Get().StepFrames(), FRunner::Get().StepLongestFrameMs());
+				if (Press.IsValid() && Press->bDrift)
+				{
+					Problem += TEXT("; the pointer drifted during the press or drag (input the harness did not make: a person's mouse or Universal Control)"); // G2b (B7)
+				}
 			}
 			Report(Name, Problem.IsEmpty(), Problem.IsEmpty() ? Said : Problem + TEXT(" | ") + Said);
 			return true;
@@ -2004,6 +2365,159 @@ namespace
 				Bad.Num() > 0 ? TEXT("; BELOW THE BAR: ") : TEXT(""), *FString::Join(Bad, TEXT("; "))));
 	}
 
+	// G2b: a Stockpile site ordered at the first free spot (the 60x and stage checks), with the uplink lag given; the spot, or why not.
+	bool G2bOrderStockpile(URHSimWorldSubsystem& Sim, double Lag, FVector& OutSpot, FString& OutWhy)
+	{
+		if (!FindBuildSpot(Sim, OutSpot, OutWhy, FName("Stockpile")))
+		{
+			return false;
+		}
+		const double Lag0 = Sim.GetOrderLagSeconds();
+		Sim.SetOrderLagSeconds(Lag);
+		FRHCommand Cmd;
+		Cmd.Verb = FName("Build");
+		Cmd.Target = FName("Stockpile");
+		Cmd.Level = 0;
+		Cmd.Location = OutSpot;
+		Sim.EnqueueCommand(Cmd);
+		Sim.SetOrderLagSeconds(Lag0);
+		return true;
+	}
+
+	// G2b: the main-scene checks' own sampling records (alerts.three, alerts.merge, cards.arrival, card.close and cell.rule, comms.fixed, the
+	// 60x wish checks, cards.load and load.selection).
+	struct FG2bAlertWatch
+	{
+		double T0 = 0.0;
+		TArray<uint32> Ids;               // the four test lines' entry ids, in firing order (0 until seen)
+		TMap<uint32, double> First, Last; // when each entry was first and last seen visible (opacity > 0.01), s after the burst
+		int32 MaxRows = 0, Frames = 0;
+		bool bThreeWithFourWaiting = false, bOrderSeen = false;
+		FString OrderBad;
+		double FourAdmitted = -1.0, FirstLeft = -1.0;
+		// r2 (alerts.four, read from the same frames): when each entry's opacity first fell (it began to leave), its opacity last frame, the
+		// lines waiting on the frame line one began to leave, and whether line four was seen beside lines two and three at full opacity.
+		TMap<uint32, double> Leave;
+		TMap<uint32, float> LastOp;
+		int32 WaitingAtOneLeave = -1;
+		bool bFourBesideTwoThree = false;
+		bool bLaterOrderSeen = false; // four, three, two top to bottom, all at full opacity (newest on top after the hand-over)
+	};
+	struct FG2bMergeWatch
+	{
+		static FString Line() { return TEXT("G2b test alert merge"); }
+		TArray<uint32> Ids; // every entry id that held the line
+		int32 Gaps = 0;     // frames the queue did not hold it
+	};
+	struct FG2bArrivalWatch
+	{
+		double T0 = 0.0, CardAt = -1.0;
+		int32 MaxCards = 0, Rows = 0;
+		bool bTogether = false, bOrder = false;
+		FString LastTitles;
+	};
+	struct FG2bCardClose
+	{
+		bool bSent = false, bShownBefore = false;
+		FString TitleBefore, BadSaid;
+		double LandedAt = -1.0, GoneAt = -1.0;
+		uint64 LandedFrame = 0;
+		int32 Frames = 0, Bad = 0;
+	};
+	struct FG2bComms
+	{
+		bool bFound[2] = { false, false };
+		FVector2D TopLeft[2] = { FVector2D::ZeroVector, FVector2D::ZeroVector };
+		FVector2D Size[2] = { FVector2D::ZeroVector, FVector2D::ZeroVector };
+		double ColumnTop[2] = { -1.0e9, -1.0e9 };
+		// The comms panel (its SBorder, tagged RH.Comms) and the right column's scroll box (RH.RightColumn), as laid out now.
+		void Read(int32 K)
+		{
+			TArray<FFoundWidget> Borders, Scrolls;
+			GatherInWindow(TEXT("SBorder"), Borders);
+			GatherInWindow(TEXT("SScrollBox"), Scrolls);
+			const FFoundWidget* Comms = FindTagged(Borders, TEXT("RH.Comms"));
+			const FFoundWidget* Column = FindTagged(Scrolls, TEXT("RH.RightColumn"));
+			bFound[K] = Comms != nullptr;
+			if (Comms)
+			{
+				TopLeft[K] = Comms->TopLeft;
+				Size[K] = Comms->Size;
+			}
+			ColumnTop[K] = Column ? Column->TopLeft.Y : -1.0e9;
+		}
+	};
+	struct FG2bWish
+	{
+		double StartS = -1.0, T0 = -1.0, T60 = -1.0; // the fill, the test's first clear reading, the first frame at 60x (or, cancel: not 1x)
+		float ClockAfterPress = -1.f;
+		int32 AlertsAfterPress = 0;
+		bool bEarly = false, bArmed = false;
+		FString LastWhy, Said;
+	};
+	struct FG2bLoadWatch
+	{
+		bool bLoaded = false, bArrival = false;
+		int32 Pop = 0, MaxCards = 0;
+		FString Err, Titles, Newest;
+		bool bHeld[2] = { false, false };
+		bool bClear[2] = { false, false };
+		FString Read[2];
+		// r1 (cards.load): the save, what the deck recorded before the load (the live colony put before the moment), the loaded colony's moment
+		bool bSaved = false, bWatchRead = false, bWatchedArrivalBefore = true, bArrivalLoaded = false;
+	};
+	// r1: alerts.hold's record: line one's entry (first and last seen visible, the first frame its opacity fell), line two's firing and first
+	// sight, the rows held when it came, and whether both were shown together.
+	struct FG2bHoldWatch
+	{
+		static FString One() { return TEXT("G2b test hold one"); }
+		static FString Two() { return TEXT("G2b test hold two"); }
+		double T0 = 0.0, OneFirst = -1.0, OneLast = -1.0, OneLeave = -1.0, OneGone = -1.0, TwoAt = -1.0, TwoFirst = -1.0;
+		float OneOp = 0.f;
+		int32 RowsAtTwo = -1, Frames = 0;
+		bool bTogether = false;
+	};
+	// r2: alerts.replace's record (the two 60x lines replacing each other, driven through the queue's own entry points): the stage, when
+	// each line was fired, first seen, began to leave and was gone (s after the first refusal), and what must never be seen.
+	struct FG2bReplaceWatch
+	{
+		static FString RefusalOne() { return TEXT("60x unavailable: G2b test refusal one (staying at 8x)"); }
+		static FString RefusalTwo() { return TEXT("60x unavailable: G2b test refusal two (staying at 8x)"); }
+		static FString Resumed() { return TEXT("60x resumed"); } // the brief's words (MS6), the test's own copy
+		int32 Stage = 0, Frames = 0, Both = 0, RowsNotOne = 0, ResumedRowsAfterSecondPost = 0, TwoCountEnd = 0, WaitingEnd = -1;
+		double T0 = 0.0, OneFirst = -1.0, OneLeave = -1.0, OneGone = -1.0, PostAt = -1.0, ResFirst = -1.0, ResFull = -1.0, ResLeave = -1.0, ResGone = -1.0;
+		double TwoAt = -1.0, TwoFirst = -1.0, TwoLeave = -1.0, Post2At = -1.0, RepeatAt = -1.0, EndAt = -1.0;
+		float OneOp = 0.f, ResOp = 0.f, TwoOp = 0.f;
+		uint32 ResId = 0, TwoId = 0;
+		FString BothSaid, RowsSaid, TwoShownEnd;
+	};
+	// r2: alerts.sixty's record, read in speed.wish's own frames (a real engage): the rows when "60x resumed" was posted and after.
+	struct FG2bSixtyRows
+	{
+		double PostAt = -1.0, RefusalGone = -1.0, ResumedFirst = -1.0, ResumedFull = -1.0, RowChangeAt = -1.0e9;
+		int32 Frames = 0, FullLate = 0, Both = 0, RowsBefore = -1, RowsPrev = -1, RowsEnd = -1, RowDir = 0, RowReversals = 0, RefusalRowsAtPost = 0;
+		bool bRefusalFullBefore = false, bRefusalFullPrev = false;
+		FString FullLateSaid, BothSaid, ReversalSaid, RefusalText;
+	};
+	// r1: cards.crew's record.
+	struct FG2bCrewWatch
+	{
+		int32 Pop0 = 0, Removed = 0, PopQuiet = -1, Housed = 0, Pop1 = 0, Crew = 0;
+		bool bQuiet = false, bRead = false, bWatchedCrew = false;
+		FString Titles;
+	};
+	// r1: speed.wish.onset's record.
+	struct FG2bOnsetWatch
+	{
+		FString Why, PressWhy, LastWhy, AboveSaid;
+		double StormSol = -1.0, OnsetAt = -1.0, ClearAt = -1.0, FirstAbove1 = -1.0;
+		float ClockArmed = -1.f, ClockAtOnset = -1.f, MaxBefore = 0.f, ClockAfterPress = -1.f;
+		bool bRefusedAtPress = false, bArmed = false, bPendingAfter = false;
+		int32 Refusals = 0, Onsets = 0, RefusedAfterClear = 0, Resumed = -1;
+		uint32 LogSerial0 = 0;
+		FDelegateHandle Handle;
+	};
+
 	void StartClickTest()
 	{
 		FRunner& Runner = FRunner::Get();
@@ -2014,6 +2528,8 @@ namespace
 		GDropHooks = 0;
 		GHoverRetries = 0;
 		GHoverHooks = 0;
+		GDragRetries = 0;   // G2b (B7)
+		GDropDragHooks = 0;
 		EnsureActivationLog();
 		const float MenuEdgeX = 0.97f; // right of every menu's content: only the backdrop is there
 
@@ -5773,6 +6289,2138 @@ namespace
 			Report(TEXT("words.sample"), Problem.IsEmpty(), Problem.IsEmpty() ? Said : Problem + TEXT(" | ") + Said);
 		}, 0.3f);
 
+		// ---- G2b (2026-11, messages that stay on screen): the drag harness's two self-tests, the alert queue, the golden cards, the deck lines,
+		// the words, the live card rule, the zoning names, the refused clear, the comms, the stage index, the 60x wish and Space after an
+		// auto-drop, the load rules, the LOG fold and the E5 case. Just before the verdict (alerts.e5 last: it loads Early), so no older step
+		// sees their effects; every lag, hold, selection, fold and speed each one changes is restored by its own cleanup. The alert checks
+		// pause the colony while they fire their own lines (the queue runs on real time), so no alert of the colony's own joins them.
+
+		// harness.dropdrag (B7.1): the section slider dragged end to end with the drag hook armed: the harness must drag it again (one drag
+		// retry, the hook fired once) and the drag must land (the focus at the slider's far end).
+		Runner.Do(TEXT("harness.dropdrag setup"), [T]()
+		{
+			ARHPlayerController* PC = GetPC();
+			if (!PC)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			if (!PC->IsSectionOn())
+			{
+				PC->ToggleSection();
+			}
+			T->G2bRetries0 = GPressRetries;
+			T->G2bDrag0 = GDragRetries;
+			T->G2bDragHooks0 = GDropDragHooks;
+			GDropDragLabels.Add(TEXT("RH.SectionSlider"));
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook (drag) armed for %s"), *FString::Join(GDropDragLabels, TEXT(", ")));
+		}, 1.0f);
+		Runner.Do(TEXT("harness.dropdrag focus"), [T]() { const ARHPlayerController* PC = GetPC(); T->G2bFocus0 = PC ? PC->GetSectionFocus() : 999; }, 0.1f);
+		{
+			const TSharedRef<FPress> Drag = PushDrag(TEXT("harness.dropdrag"), LocateTagged(TEXT("RH.SectionSlider"), 0.f), LocateTagged(TEXT("RH.SectionSlider"), 1.f));
+			PushCheckSays(TEXT("harness.dropdrag"), Drag, [T](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const URHSimWorldSubsystem* Sim = GetSim();
+				if (!PC || !Sim) { return FString(TEXT("no player controller or sim")); }
+				const int32 Want = -Sim->GetShaftDepth();
+				Said = FString::Printf(TEXT("focus %d before the drag, %d after it (want %d, the slider's far end); drag retries %+d, drag hooks fired %+d, retries in all %+d"),
+					T->G2bFocus0, PC->GetSectionFocus(), Want, GDragRetries - T->G2bDrag0, GDropDragHooks - T->G2bDragHooks0, GPressRetries - T->G2bRetries0);
+				if (T->G2bFocus0 == Want) { return FString(TEXT("premise: the focus already stood at the slider's far end before the drag")); }
+				if (PC->GetSectionFocus() != Want) { return FString::Printf(TEXT("the focus is %d, not %d: the drag did not land"), PC->GetSectionFocus(), Want); }
+				if (GDropDragHooks - T->G2bDragHooks0 != 1) { return FString(TEXT("the drag hook did not fire exactly once")); }
+				if (GDragRetries - T->G2bDrag0 != 1) { return FString::Printf(TEXT("%d drag retr(ies), expected 1"), GDragRetries - T->G2bDrag0); }
+				return FString();
+			}, 1.f);
+		}
+		Runner.Do(TEXT("harness.dropdrag cleanup"), []()
+		{
+			if (ARHPlayerController* PC = GetPC())
+			{
+				if (PC->IsSectionOn())
+				{
+					PC->ToggleSection();
+				}
+				PC->SetActiveLevel(0);
+			}
+		}, 0.5f);
+
+		// harness.dropboth (B7.3): one press with both hooks armed. The capture hook drops the press, the hover hook moves the pointer off: the
+		// capture retry presses again (a fresh down sends the button no hover), so only the re-place before the release gives it its hover back.
+		Runner.Do(TEXT("harness.dropboth setup"), [T]()
+		{
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(3.f);
+			}
+			T->G2bRetries0 = GPressRetries;
+			T->G2bHover0 = GHoverRetries;
+			T->G2bDropHooks0 = GDropHooks;
+			T->G2bHoverHooks0 = GHoverHooks;
+			GDropPressLabels.Add(TEXT("1x"));
+			GDropHoverLabels.Add(TEXT("1x"));
+			UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook armed for %s; hover hook armed for %s"), *FString::Join(GDropPressLabels, TEXT(", ")), *FString::Join(GDropHoverLabels, TEXT(", ")));
+		}, 0.3f);
+		{
+			const TSharedRef<FPress> Both = PushPress(TEXT("harness.dropboth"), LocateButton(TEXT("1x"), 0, true));
+			PushCheckSays(TEXT("harness.dropboth"), Both, [T](FString& Said)
+			{
+				const int32 Retries = GPressRetries - T->G2bRetries0, Hover = GHoverRetries - T->G2bHover0;
+				Said = FString::Printf(TEXT("clock %.0fx (want 1x); retries %+d (hover %+d); hooks fired: capture %+d, hover %+d (the up line's hover= is in the log)"), ClockSpeed(), Retries, Hover,
+					GDropHooks - T->G2bDropHooks0, GHoverHooks - T->G2bHoverHooks0);
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 1.f)) { return FString::Printf(TEXT("the clock reads %.1f, not 1: the press never clicked"), ClockSpeed()); }
+				if (Retries != 1) { return FString::Printf(TEXT("%d retr(ies), expected 1 (the capture retry)"), Retries); }
+				if (Hover != 0) { return FString::Printf(TEXT("%d hover retr(ies), expected 0"), Hover); }
+				if (GDropHooks - T->G2bDropHooks0 != 1 || GHoverHooks - T->G2bHoverHooks0 != 1) { return FString(TEXT("the two hooks did not each fire once")); }
+				return FString();
+			}, 1.f);
+		}
+
+		// alerts.three (B1): four lines in one step. Three show at once, newest on top; the fourth waits; while it waits each shown line keeps
+		// its row at least AlertMinHoldS (6 s); the fourth is admitted once one of them has left; the LOG keeps all four.
+		// r2: the same frames, read on until lines two and three have gone, also feed alerts.four (below): one line waits, so only line one
+		// gives its row up early.
+		const TSharedRef<FG2bAlertWatch> AW = MakeShared<FG2bAlertWatch>();
+		Runner.Do(TEXT("alerts.three setup"), [T, AW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(0.f);
+			}
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			T->G2bLines = { TEXT("G2b test alert one"), TEXT("G2b test alert two"), TEXT("G2b test alert three"), TEXT("G2b test alert four") };
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			AW->Ids.Init(0u, 4);
+			AW->T0 = FPlatformTime::Seconds();
+			for (const FString& Line : T->G2bLines)
+			{
+				Sim->OnAlert.Broadcast(Line);
+			}
+		}, 0.f);
+		Runner.Push(TEXT("alerts.three sample"), [T, AW](double, bool bLast)
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz || AW->Ids.Num() != 4)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds() - AW->T0;
+			++AW->Frames;
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			AW->MaxRows = FMath::Max(AW->MaxRows, N);
+			bool bShown[4] = { false, false, false, false };
+			for (int32 i = 0; i < N; ++i)
+			{
+				const int32 Line = T->G2bLines.IndexOfByKey(Texts[i]);
+				if (Line == INDEX_NONE)
+				{
+					continue;
+				}
+				AW->Ids[Line] = Ids[i];
+				bShown[Line] = true;
+				if (Op[i] > 0.01f)
+				{
+					if (!AW->First.Contains(Ids[i]))
+					{
+						AW->First.Add(Ids[i], Now);
+					}
+					AW->Last.Add(Ids[i], Now);
+				}
+				// r2 (alerts.four): the first frame this entry's opacity fell is when it began to leave.
+				if (!AW->Leave.Contains(Ids[i]) && AW->First.Contains(Ids[i]) && Op[i] < AW->LastOp.FindRef(Ids[i]) - 1e-4f)
+				{
+					AW->Leave.Add(Ids[i], Now);
+					if (Line == 0)
+					{
+						AW->WaitingAtOneLeave = Viz->GetAlertWaitingCount();
+					}
+				}
+				AW->LastOp.Add(Ids[i], Op[i]);
+			}
+			// r2 (alerts.four): line four in its row beside lines two and three, both still at full opacity.
+			if (bShown[3] && bShown[1] && bShown[2] && AW->LastOp.FindRef(AW->Ids[1]) >= 0.999f && AW->LastOp.FindRef(AW->Ids[2]) >= 0.999f && AW->LastOp.FindRef(AW->Ids[3]) > 0.01f)
+			{
+				AW->bFourBesideTwoThree = true;
+			}
+			TArray<uint32> WIds;
+			TArray<FString> WTexts;
+			Viz->Debug_GetAlertWaiting(WIds, WTexts);
+			if (bShown[0] && bShown[1] && bShown[2] && WTexts.Num() == 1 && WTexts[0] == T->G2bLines[3])
+			{
+				AW->bThreeWithFourWaiting = true;
+			}
+			if (N == 3 && Op[0] >= 0.999f && Op[1] >= 0.999f && Op[2] >= 0.999f)
+			{
+				const FString R0 = Viz->GetAlertRowText(0).ToString(), R1 = Viz->GetAlertRowText(1).ToString(), R2 = Viz->GetAlertRowText(2).ToString();
+				// r2: any three of the four lines at full opacity must read newest on top (the later line above the earlier). Under the r2 hold
+				// rule a second trio stands at full opacity (four, three, two, once line four has taken line one's row); rounds 0 and 1 never
+				// showed one, so their rule called every trio but the first out of order.
+				const int32 I0 = T->G2bLines.IndexOfByKey(R0), I1 = T->G2bLines.IndexOfByKey(R1), I2 = T->G2bLines.IndexOfByKey(R2);
+				if (R0 == T->G2bLines[2] && R1 == T->G2bLines[1] && R2 == T->G2bLines[0])
+				{
+					AW->bOrderSeen = true;
+				}
+				else if (AW->OrderBad.IsEmpty() && I0 != INDEX_NONE && I1 != INDEX_NONE && I2 != INDEX_NONE && !(I0 > I1 && I1 > I2))
+				{
+					AW->OrderBad = FString::Printf(TEXT("rows top to bottom '%s', '%s', '%s' at %.2f s"), *R0, *R1, *R2, Now);
+				}
+				AW->bLaterOrderSeen |= R0 == T->G2bLines[3] && R1 == T->G2bLines[2] && R2 == T->G2bLines[1];
+			}
+			for (int32 Line = 0; Line < 3 && AW->FirstLeft < 0.0; ++Line)
+			{
+				if (AW->Ids[Line] != 0 && !bShown[Line])
+				{
+					AW->FirstLeft = Now;
+				}
+			}
+			if (bShown[3] && AW->FourAdmitted < 0.0)
+			{
+				AW->FourAdmitted = Now;
+			}
+			const double* F4 = AW->Ids[3] != 0 ? AW->First.Find(AW->Ids[3]) : nullptr;
+			const double* L4 = AW->Ids[3] != 0 ? AW->Last.Find(AW->Ids[3]) : nullptr;
+			// r2: read on until lines two and three have left their rows (their full hold, about 15.5 s), for alerts.four.
+			const bool bTwoThreeGone = AW->Ids[1] != 0 && AW->Ids[2] != 0 && !bShown[1] && !bShown[2];
+			return bLast || (F4 && L4 && *L4 - *F4 >= 1.0 && bTwoThreeGone);
+		}, 0.f, 19.f);
+		Runner.Do(TEXT("alerts.three"), [T, AW]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz || AW->Ids.Num() != 4)
+			{
+				Report(TEXT("alerts.three"), false, TEXT("no colony visualizer or sim"));
+				return;
+			}
+			FString Why;
+			TArray<FString> Held;
+			for (int32 Line = 0; Line < 4; ++Line)
+			{
+				const double* F = AW->Ids[Line] != 0 ? AW->First.Find(AW->Ids[Line]) : nullptr;
+				const double* L = AW->Ids[Line] != 0 ? AW->Last.Find(AW->Ids[Line]) : nullptr;
+				const double Visible = (F && L) ? *L - *F : -1.0;
+				Held.Add(FString::Printf(TEXT("'%s' visible %.2f s from %.2f s"), *T->G2bLines[Line], Visible, F ? *F : -1.0));
+				if (!F)
+				{
+					Why += FString::Printf(TEXT(" '%s' was never shown;"), *T->G2bLines[Line]);
+				}
+				else if (Line < 3 && Visible < G2bMinHoldS)
+				{
+					Why += FString::Printf(TEXT(" '%s' stayed visible only %.2f s (at least %.1f while a line waits);"), *T->G2bLines[Line], Visible, G2bMinHoldS);
+				}
+			}
+			if (AW->MaxRows > G2bRowsMax) { Why += FString::Printf(TEXT(" %d rows on one frame (at most 3);"), AW->MaxRows); }
+			if (!AW->bThreeWithFourWaiting) { Why += TEXT(" no frame showed lines one to three with four waiting;"); }
+			if (AW->FourAdmitted < 0.0 || AW->FourAdmitted > 7.5) { Why += FString::Printf(TEXT(" line four was admitted at %.2f s (want within 7.5 s of the burst);"), AW->FourAdmitted); }
+			if (AW->FirstLeft < 0.0 || AW->FourAdmitted < AW->FirstLeft) { Why += FString::Printf(TEXT(" line four was admitted (%.2f s) before any of the first three left (%.2f s);"), AW->FourAdmitted, AW->FirstLeft); }
+			if (!AW->bOrderSeen) { Why += TEXT(" no frame with three rows at full opacity read newest on top;"); }
+			if (!AW->OrderBad.IsEmpty()) { Why += FString::Printf(TEXT(" out of order: %s;"), *AW->OrderBad); }
+			const int32 Logged = (int32)(Viz->GetLogSerial() - T->G2bLogSerial0);
+			if (Logged != 4) { Why += FString::Printf(TEXT(" the LOG gained %d line(s), expected 4;"), Logged); }
+			const FString Said = FString::Printf(TEXT("%d frames; at most %d rows; one to three shown with four waiting: %s; four admitted at %.2f s, the first of one to three gone at %.2f s; newest on top: %s; %s; the LOG gained %d"),
+				AW->Frames, AW->MaxRows, AW->bThreeWithFourWaiting ? TEXT("yes") : TEXT("no"), AW->FourAdmitted, AW->FirstLeft, AW->bOrderSeen ? TEXT("yes") : TEXT("no"), *FString::Join(Held, TEXT(", ")), Logged);
+			Report(TEXT("alerts.three"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// alerts.four (B1, r2; alerts.three's frames): the hold rule. Four lines in one step and three rows: ONE line waits, so only ONE shown
+		// line (the oldest, line one) gives its row up before its full hold; line four takes that row beside lines two and three, which keep
+		// their rows AlertFullHoldS (they begin to leave 14.5 to 16.5 s after they were first seen). (Rounds 0 and 1 sent all three away at
+		// 6 s for the one waiting line.) When line one leaves is alerts.three's subject (at least 6 s, line four in by 7.5 s).
+		Runner.Do(TEXT("alerts.four"), [T, AW]()
+		{
+			if (AW->Ids.Num() != 4)
+			{
+				Report(TEXT("alerts.four"), false, TEXT("no colony visualizer or sim"));
+				return;
+			}
+			double LeftAfter[3] = { -1.0, -1.0, -1.0 };
+			for (int32 Line = 0; Line < 3; ++Line)
+			{
+				const double* F = AW->Ids[Line] != 0 ? AW->First.Find(AW->Ids[Line]) : nullptr;
+				const double* L = AW->Ids[Line] != 0 ? AW->Leave.Find(AW->Ids[Line]) : nullptr;
+				LeftAfter[Line] = (F && L) ? *L - *F : -1.0;
+			}
+			FString Why;
+			if (!AW->bThreeWithFourWaiting) { Why += TEXT(" premise: no frame showed lines one to three with four waiting;"); }
+			if (LeftAfter[0] < 0.0) { Why += TEXT(" line one never began to leave;"); }
+			else if (LeftAfter[0] >= G2bFullHoldS - 0.5) { Why += FString::Printf(TEXT(" line one kept its row %.2f s: it did not give it up for the waiting line;"), LeftAfter[0]); }
+			else if (AW->WaitingAtOneLeave != 1) { Why += FString::Printf(TEXT(" premise: %d line(s) waited when line one began to leave (want 1);"), AW->WaitingAtOneLeave); }
+			for (int32 Line = 1; Line < 3; ++Line)
+			{
+				if (LeftAfter[Line] < 0.0) { Why += FString::Printf(TEXT(" '%s' never began to leave within the sample;"), *T->G2bLines[Line]); }
+				else if (LeftAfter[Line] < G2bFullHoldS - 0.5 || LeftAfter[Line] > G2bFullHoldS + 1.5)
+				{
+					Why += FString::Printf(TEXT(" '%s' began to leave %.2f s after it was first seen (want %.1f to %.1f: one line waited, and line one's row was enough);"),
+						*T->G2bLines[Line], LeftAfter[Line], G2bFullHoldS - 0.5, G2bFullHoldS + 1.5);
+				}
+			}
+			if (!AW->bFourBesideTwoThree) { Why += TEXT(" line four was never shown beside lines two and three at full opacity;"); }
+			else if (!AW->bLaterOrderSeen) { Why += TEXT(" no frame with four, three and two at full opacity read newest on top;"); }
+			const FString Said = FString::Printf(TEXT("%d line(s) waited when line one began to leave, %.2f s after it was first seen; lines two and three began to leave %.2f s and %.2f s after they were first seen (their full hold); line four shown beside two and three: %s, on top of them: %s"),
+				AW->WaitingAtOneLeave, LeftAfter[0], LeftAfter[1], LeftAfter[2], AW->bFourBesideTwoThree ? TEXT("yes") : TEXT("no"), AW->bLaterOrderSeen ? TEXT("yes") : TEXT("no"));
+			Report(TEXT("alerts.four"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.f);
+
+		// alerts.merge (B1): a line and its repeat 0.5 s later are one entry (the same id throughout, never removed and added again) with its
+		// count; the LOG keeps both arrivals.
+		const TSharedRef<FG2bMergeWatch> MW = MakeShared<FG2bMergeWatch>();
+		Runner.Do(TEXT("alerts.merge setup"), [T, MW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			Sim->OnAlert.Broadcast(FG2bMergeWatch::Line());
+		}, 0.f);
+		for (int32 Pass = 0; Pass < 2; ++Pass)
+		{
+			Runner.Push(Pass == 0 ? TEXT("alerts.merge first") : TEXT("alerts.merge after"), [MW](double Elapsed, bool)
+			{
+				const URHColonyVisualizerSubsystem* Viz = GetViz();
+				uint32 Id = 0;
+				if (Viz && G2bQueueHolds(*Viz, FG2bMergeWatch::Line(), &Id))
+				{
+					MW->Ids.AddUnique(Id);
+				}
+				else
+				{
+					++MW->Gaps;
+				}
+				return Elapsed >= 0.5;
+			}, 0.f, 0.f);
+			if (Pass == 0)
+			{
+				Runner.Do(TEXT("alerts.merge again"), []() { if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->OnAlert.Broadcast(FG2bMergeWatch::Line()); } }, 0.f);
+			}
+		}
+		Runner.Do(TEXT("alerts.merge"), [T, MW]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz)
+			{
+				Report(TEXT("alerts.merge"), false, TEXT("no colony visualizer"));
+				return;
+			}
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			int32 Entries = 0, Count = 0;
+			FString Shown;
+			for (int32 i = 0; i < N; ++i)
+			{
+				if (Texts[i] == FG2bMergeWatch::Line() || Texts[i].StartsWith(FG2bMergeWatch::Line() + TEXT(" (x")))
+				{
+					++Entries;
+					Count = Cn[i];
+					Shown = Texts[i];
+				}
+			}
+			TArray<uint32> WIds;
+			TArray<FString> WTexts;
+			Viz->Debug_GetAlertWaiting(WIds, WTexts);
+			Entries += WTexts.FilterByPredicate([](const FString& W) { return W == FG2bMergeWatch::Line(); }).Num();
+			const int32 Logged = G2bLogCount(*Viz, T->G2bLogSerial0, FG2bMergeWatch::Line());
+			const FString Want = FG2bMergeWatch::Line() + TEXT(" (x2)");
+			FString Why;
+			if (Entries != 1) { Why += FString::Printf(TEXT(" %d entries hold the line, expected 1;"), Entries); }
+			if (MW->Ids.Num() != 1) { Why += FString::Printf(TEXT(" the line was held by %d different entries (removed and added again);"), MW->Ids.Num()); }
+			if (MW->Gaps > 0) { Why += FString::Printf(TEXT(" the line was missing from the queue on %d frame(s);"), MW->Gaps); }
+			if (Count != 2) { Why += FString::Printf(TEXT(" its count is %d, expected 2;"), Count); }
+			if (Shown != Want) { Why += FString::Printf(TEXT(" it reads '%s', expected '%s';"), *Shown, *Want); }
+			if (Logged != 2) { Why += FString::Printf(TEXT(" the LOG holds %d arrival(s) of it, expected 2;"), Logged); }
+			const FString Said = FString::Printf(TEXT("one entry (id %u) through both arrivals: %s; shown '%s', count %d; the LOG holds both arrivals: %s"), MW->Ids.Num() > 0 ? MW->Ids[0] : 0u,
+				MW->Ids.Num() == 1 && MW->Gaps == 0 ? TEXT("yes") : TEXT("no"), *Shown, Count, Logged == 2 ? TEXT("yes") : TEXT("no"));
+			Report(TEXT("alerts.merge"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// alerts.hold (B1, r1): a line shown while nothing waits keeps its row AlertFullHoldS (15 s), even when a second line arrives while a
+		// row is free: line one alone, line two 7.5 s later (a row free), and line one starts to leave 14.5 to 16.5 s after it was first seen,
+		// shown with line two meanwhile. (Round 0 counted the new line as waiting before it took its free row, which cut line one to 6 s.)
+		const TSharedRef<FG2bHoldWatch> HW = MakeShared<FG2bHoldWatch>();
+		Runner.Do(TEXT("alerts.hold setup"), [HW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(0.f);
+			}
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			HW->T0 = FPlatformTime::Seconds();
+			Sim->OnAlert.Broadcast(FG2bHoldWatch::One());
+		}, 0.f);
+		Runner.Push(TEXT("alerts.hold sample"), [HW](double, bool bLast)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !Viz)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds() - HW->T0;
+			++HW->Frames;
+			if (HW->TwoAt < 0.0 && Now >= 7.5)
+			{
+				HW->TwoAt = Now;
+				HW->RowsAtTwo = Viz->GetAlertRowCount();
+				Sim->OnAlert.Broadcast(FG2bHoldWatch::Two());
+			}
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			bool bOne = false, bTwo = false;
+			for (int32 i = 0; i < N; ++i)
+			{
+				if (Texts[i] == FG2bHoldWatch::One())
+				{
+					bOne = true;
+					if (Op[i] > 0.01f)
+					{
+						HW->OneFirst = HW->OneFirst < 0.0 ? Now : HW->OneFirst;
+						HW->OneLast = Now;
+					}
+					if (HW->OneLeave < 0.0 && HW->OneFirst >= 0.0 && Op[i] < HW->OneOp - 1e-4f)
+					{
+						HW->OneLeave = Now;
+					}
+					HW->OneOp = Op[i];
+				}
+				else if (Texts[i] == FG2bHoldWatch::Two() && Op[i] > 0.01f)
+				{
+					bTwo = true;
+					HW->TwoFirst = HW->TwoFirst < 0.0 ? Now : HW->TwoFirst;
+				}
+			}
+			HW->bTogether |= bOne && bTwo && HW->OneOp > 0.01f;
+			if (HW->OneFirst >= 0.0 && !bOne && HW->OneGone < 0.0)
+			{
+				HW->OneGone = Now;
+			}
+			return bLast || HW->OneGone >= 0.0;
+		}, 0.f, 22.f);
+		Runner.Do(TEXT("alerts.hold"), [HW]()
+		{
+			FString Why;
+			const double Leave = (HW->OneLeave >= 0.0 && HW->OneFirst >= 0.0) ? HW->OneLeave - HW->OneFirst : -1.0;
+			if (HW->OneFirst < 0.0) { Why += TEXT(" line one was never shown;"); }
+			if (HW->TwoAt < 0.0) { Why += TEXT(" line two was never fired;"); }
+			else if (HW->RowsAtTwo < 0 || HW->RowsAtTwo >= G2bRowsMax) { Why += FString::Printf(TEXT(" premise: %d row(s) held when line two came, so none was free;"), HW->RowsAtTwo); }
+			if (HW->TwoAt >= 0.0 && (HW->TwoFirst < 0.0 || HW->TwoFirst - HW->TwoAt > 0.5)) { Why += FString::Printf(TEXT(" line two did not take its free row at once (first seen %.2f s after it came);"), HW->TwoFirst >= 0.0 ? HW->TwoFirst - HW->TwoAt : -1.0); }
+			if (Leave < 0.0) { Why += TEXT(" line one never began to leave within 22 s;"); }
+			else if (Leave < G2bFullHoldS - 0.5 || Leave > G2bFullHoldS + 1.5) { Why += FString::Printf(TEXT(" line one began to leave %.2f s after it was first seen (want %.1f to %.1f: nothing waited for a row);"), Leave, G2bFullHoldS - 0.5, G2bFullHoldS + 1.5); }
+			if (!HW->bTogether) { Why += TEXT(" the two lines were never shown together;"); }
+			const FString Said = FString::Printf(TEXT("%d frames; line one first seen at %.2f s, began to leave %.2f s later, gone at %.2f s; line two came at %.2f s with %d row(s) held and was first seen %.2f s later; shown together: %s"),
+				HW->Frames, HW->OneFirst, Leave, HW->OneGone, HW->TwoAt, HW->RowsAtTwo, HW->TwoFirst >= 0.0 && HW->TwoAt >= 0.0 ? HW->TwoFirst - HW->TwoAt : -1.0, HW->bTogether ? TEXT("yes") : TEXT("no"));
+			Report(TEXT("alerts.hold"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// alerts.replace (B1 and B5, r2; James's answer G2B-Q1 A): the two 60x lines replace each other, driven through the queue's own entry
+		// points with the clock paused (no wish runs here). (a) A refusal shown 1 s, then "60x resumed": the refusal has been on screen under
+		// one floor, so it stays until it has (it begins to leave 3.0 to 3.8 s after it was first seen, never sooner: R1 reads a line that
+		// appears and leaves inside 3 s as a blink) and "60x resumed" takes its row when it has gone. (b) "60x resumed" shown 3.5 s, then a
+		// second refusal: "60x resumed" begins to leave at once and the refusal takes its row. (c) That refusal shown 0.7 s, "60x resumed"
+		// again, and 0.3 s later the same refusal again: the waiting "60x resumed" is dropped, never shown, and the refusal stays, counted
+		// twice. Throughout, the two kinds never hold rows together and the banner holds exactly one row.
+		const TSharedRef<FG2bReplaceWatch> RW = MakeShared<FG2bReplaceWatch>();
+		Runner.Do(TEXT("alerts.replace setup"), [RW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(0.f);
+			}
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			RW->T0 = FPlatformTime::Seconds();
+			Sim->OnAlert.Broadcast(FG2bReplaceWatch::RefusalOne());
+			RW->Stage = 1;
+		}, 0.f);
+		Runner.Push(TEXT("alerts.replace sample"), [RW](double, bool bLast)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !Viz || RW->Stage == 0)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds() - RW->T0;
+			++RW->Frames;
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			bool bOne = false, bRes = false, bTwo = false;
+			float OneOp = 0.f, ResOp = 0.f, TwoOp = 0.f;
+			for (int32 i = 0; i < N; ++i)
+			{
+				if (Texts[i] == FG2bReplaceWatch::RefusalOne())
+				{
+					bOne = true;
+					OneOp = Op[i];
+				}
+				else if (Texts[i] == FG2bReplaceWatch::Resumed())
+				{
+					bRes = true;
+					ResOp = Op[i];
+				}
+				else if (Texts[i] == FG2bReplaceWatch::RefusalTwo() || Texts[i].StartsWith(FG2bReplaceWatch::RefusalTwo() + TEXT(" (x")))
+				{
+					bTwo = true;
+					TwoOp = Op[i];
+					RW->TwoCountEnd = Cn[i];
+					RW->TwoShownEnd = Texts[i];
+				}
+			}
+			if ((bOne || bTwo) && bRes && RW->Both++ == 0)
+			{
+				RW->BothSaid = FString::Printf(TEXT("at %.2f s"), Now);
+			}
+			if (RW->OneFirst >= 0.0 && N != 1 && RW->RowsNotOne++ == 0)
+			{
+				RW->RowsSaid = FString::Printf(TEXT("%d row(s) at %.2f s"), N, Now);
+			}
+			if (bOne)
+			{
+				if (OneOp > 0.01f && RW->OneFirst < 0.0) { RW->OneFirst = Now; }
+				if (RW->OneLeave < 0.0 && RW->OneFirst >= 0.0 && OneOp < RW->OneOp - 1e-4f) { RW->OneLeave = Now; }
+				RW->OneOp = OneOp;
+			}
+			else if (RW->OneFirst >= 0.0 && RW->OneGone < 0.0)
+			{
+				RW->OneGone = Now;
+			}
+			if (bRes)
+			{
+				if (RW->Post2At < 0.0)
+				{
+					if (ResOp > 0.01f && RW->ResFirst < 0.0) { RW->ResFirst = Now; }
+					if (ResOp >= 0.999f && RW->ResFull < 0.0) { RW->ResFull = Now; }
+					if (RW->ResLeave < 0.0 && RW->ResFirst >= 0.0 && ResOp < RW->ResOp - 1e-4f) { RW->ResLeave = Now; }
+					RW->ResOp = ResOp;
+				}
+				else
+				{
+					++RW->ResumedRowsAfterSecondPost;
+				}
+			}
+			else if (RW->ResFirst >= 0.0 && RW->ResGone < 0.0)
+			{
+				RW->ResGone = Now;
+			}
+			if (bTwo)
+			{
+				if (TwoOp > 0.01f && RW->TwoFirst < 0.0) { RW->TwoFirst = Now; }
+				if (RW->TwoLeave < 0.0 && RW->TwoFirst >= 0.0 && TwoOp < RW->TwoOp - 1e-4f) { RW->TwoLeave = Now; }
+				RW->TwoOp = TwoOp;
+			}
+			switch (RW->Stage)
+			{
+			case 1: // (a) the refusal shown 1 s: "60x resumed"
+				if (RW->OneFirst >= 0.0 && Now - RW->OneFirst >= 1.0)
+				{
+					RW->PostAt = Now;
+					Viz->PostDeckLine(FG2bReplaceWatch::Resumed());
+					RW->Stage = 2;
+				}
+				break;
+			case 2: // (b) "60x resumed" shown 3.5 s: a second refusal
+				if (RW->ResFull >= 0.0 && Now - RW->ResFirst >= 3.5)
+				{
+					RW->TwoAt = Now;
+					Sim->OnAlert.Broadcast(FG2bReplaceWatch::RefusalTwo());
+					RW->Stage = 3;
+				}
+				break;
+			case 3: // (c) that refusal shown 0.7 s: "60x resumed" again
+				if (RW->TwoFirst >= 0.0 && Now - RW->TwoFirst >= 0.7)
+				{
+					RW->Post2At = Now;
+					Viz->PostDeckLine(FG2bReplaceWatch::Resumed());
+					RW->Stage = 4;
+				}
+				break;
+			case 4: // and 0.3 s later the same refusal again
+				if (Now - RW->Post2At >= 0.3)
+				{
+					RW->RepeatAt = Now;
+					Sim->OnAlert.Broadcast(FG2bReplaceWatch::RefusalTwo());
+					RW->Stage = 5;
+				}
+				break;
+			case 5: // read on past the floor the replaced refusal would have left at
+				if (Now - RW->RepeatAt >= 3.5)
+				{
+					RW->EndAt = Now;
+					RW->WaitingEnd = Viz->GetAlertWaitingCount();
+					RW->Stage = 6;
+				}
+				break;
+			default:
+				break;
+			}
+			return bLast || RW->Stage == 6;
+		}, 0.f, 24.f);
+		Runner.Do(TEXT("alerts.replace"), [RW]()
+		{
+			FString Why;
+			const double OneHeld = (RW->OneLeave >= 0.0 && RW->OneFirst >= 0.0) ? RW->OneLeave - RW->OneFirst : -1.0;
+			const double ResLeft = (RW->ResLeave >= 0.0 && RW->TwoAt >= 0.0) ? RW->ResLeave - RW->TwoAt : -1.0;
+			if (RW->Stage == 0) { Why += TEXT(" no colony visualizer or sim;"); }
+			if (RW->OneFirst < 0.0) { Why += TEXT(" (a) the first refusal was never shown;"); }
+			if (RW->PostAt < 0.0) { Why += TEXT(" (a) '60x resumed' was never posted;"); }
+			else
+			{
+				if (OneHeld < 0.0) { Why += TEXT(" (a) the refusal never began to leave after '60x resumed' was posted;"); }
+				else if (OneHeld < 3.0) { Why += FString::Printf(TEXT(" (a) the refusal began to leave %.2f s after it was first seen: a line that appears and leaves inside 3 s (R1);"), OneHeld); }
+				else if (OneHeld > 3.8) { Why += FString::Printf(TEXT(" (a) the refusal began to leave %.2f s after it was first seen (want 3.0 to 3.8: one floor, not its hold);"), OneHeld); }
+				if (RW->ResFirst < 0.0) { Why += TEXT(" (a) '60x resumed' was never shown;"); }
+				else if (RW->OneGone < 0.0 || RW->ResFirst < RW->OneGone - 1e-3) { Why += FString::Printf(TEXT(" (a) '60x resumed' was shown (%.2f s) before the refusal had gone (%.2f s);"), RW->ResFirst, RW->OneGone); }
+				else if (RW->ResFirst - RW->OneGone > 0.5) { Why += FString::Printf(TEXT(" (a) '60x resumed' took %.2f s to follow the refusal;"), RW->ResFirst - RW->OneGone); }
+			}
+			if (RW->TwoAt < 0.0) { Why += TEXT(" (b) the second refusal was never fired ('60x resumed' was not shown 3.5 s);"); }
+			else
+			{
+				if (ResLeft < 0.0 || ResLeft > 0.5) { Why += FString::Printf(TEXT(" (b) '60x resumed' began to leave %.2f s after the refusal came (want at once: within 0.5 s);"), ResLeft); }
+				if (RW->TwoFirst < 0.0) { Why += TEXT(" (b) the second refusal was never shown;"); }
+				else if (RW->ResGone < 0.0 || RW->TwoFirst < RW->ResGone - 1e-3) { Why += FString::Printf(TEXT(" (b) the refusal was shown (%.2f s) before '60x resumed' had gone (%.2f s);"), RW->TwoFirst, RW->ResGone); }
+			}
+			if (RW->RepeatAt < 0.0 || RW->EndAt < 0.0) { Why += FString::Printf(TEXT(" (c) never reached (the stages stopped at %d);"), RW->Stage); }
+			else
+			{
+				if (RW->ResumedRowsAfterSecondPost > 0) { Why += FString::Printf(TEXT(" (c) the waiting '60x resumed' held a row on %d frame(s) although the refusal came again;"), RW->ResumedRowsAfterSecondPost); }
+				if (RW->TwoLeave >= 0.0) { Why += FString::Printf(TEXT(" (c) the refusal began to leave at %.2f s although it was live again;"), RW->TwoLeave); }
+				if (RW->TwoCountEnd != 2 || RW->TwoShownEnd != FG2bReplaceWatch::RefusalTwo() + TEXT(" (x2)")) { Why += FString::Printf(TEXT(" (c) the refusal reads '%s' (count %d), expected its repeat merged, (x2);"), *RW->TwoShownEnd, RW->TwoCountEnd); }
+				if (RW->WaitingEnd != 0) { Why += FString::Printf(TEXT(" (c) %d line(s) still waiting at the end;"), RW->WaitingEnd); }
+			}
+			if (RW->Both > 0) { Why += FString::Printf(TEXT(" the two 60x kinds held rows together on %d frame(s), first %s;"), RW->Both, *RW->BothSaid); }
+			if (RW->RowsNotOne > 0) { Why += FString::Printf(TEXT(" the banner did not hold exactly one row on %d frame(s), first %s;"), RW->RowsNotOne, *RW->RowsSaid); }
+			const FString Said = FString::Printf(TEXT("%d frames; (a) the refusal first seen at %.2f s, '60x resumed' posted at %.2f s, the refusal began to leave %.2f s after it was first seen and had gone at %.2f s, '60x resumed' first seen at %.2f s; (b) the second refusal came at %.2f s, '60x resumed' began to leave %.2f s later and had gone at %.2f s, the refusal first seen at %.2f s; (c) '60x resumed' posted again at %.2f s and the refusal again at %.2f s: it reads '%s', never began to leave: %s, '60x resumed' rows after: %d; the two kinds together on %d frame(s); one row throughout: %s"),
+				RW->Frames, RW->OneFirst, RW->PostAt, OneHeld, RW->OneGone, RW->ResFirst, RW->TwoAt, ResLeft, RW->ResGone, RW->TwoFirst, RW->Post2At, RW->RepeatAt, *RW->TwoShownEnd,
+				RW->TwoLeave < 0.0 ? TEXT("yes") : TEXT("no"), RW->ResumedRowsAfterSecondPost, RW->Both, RW->RowsNotOne == 0 ? TEXT("yes") : TEXT("no"));
+			if (URHColonyVisualizerSubsystem* Viz = GetViz())
+			{
+				Viz->Debug_ClearAlerts();
+			}
+			Report(TEXT("alerts.replace"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// cards.arrival (B3, B1): the Big Arrival as the presentation receives it (the test hook: the flag and the sim's two lines in one step).
+		// Within 0.5 s the first card is the golden THE BIG ARRIVAL card, exactly one; both lines show together, the arrival line admitted first
+		// (the CEO line on top).
+		const TSharedRef<FG2bArrivalWatch> ARW = MakeShared<FG2bArrivalWatch>();
+		Runner.Do(TEXT("cards.arrival setup"), []()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHSimWorldSubsystem* Sim = GetSim();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !Viz || !Deck.IsValid())
+			{
+				return;
+			}
+			Deck->Debug_ClearTipCards();
+			Viz->Debug_ClearAlerts();
+			Sim->Debug_SetBigArrivalDone(false);
+		}, 0.5f);
+		Runner.Do(TEXT("cards.arrival fire"), [T, ARW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			const int32 N = Sim->GetBigArrivalColonists();
+			T->G2bArrivalLine = FString::Printf(TEXT("THE BIG ARRIVAL \u2014 %d settlers land at once: the colony held its Hope long enough to be trusted with a city. They bring %.0f kg of provisions."),
+				N, N * Sim->GetColonistTransportFoodKgPerColonist());
+			ARW->T0 = FPlatformTime::Seconds();
+			FireBigArrivalForTest(Sim);
+		}, 0.f);
+		Runner.Push(TEXT("cards.arrival sample"), [T, ARW](double Elapsed, bool)
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Deck.IsValid() || !Viz)
+			{
+				return true;
+			}
+			const FString Titles = Deck->Debug_GetCardTitles();
+			TArray<FString> Each;
+			Titles.ParseIntoArray(Each, TEXT(" | "), true);
+			const int32 Arrivals = Each.FilterByPredicate([](const FString& C) { return C == TEXT("*THE BIG ARRIVAL"); }).Num();
+			ARW->MaxCards = FMath::Max(ARW->MaxCards, Arrivals);
+			if (ARW->CardAt < 0.0 && Each.Num() > 0 && Each[0] == TEXT("*THE BIG ARRIVAL"))
+			{
+				ARW->CardAt = FPlatformTime::Seconds() - ARW->T0;
+			}
+			ARW->LastTitles = Titles;
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			const int32 Ceo = Texts.IndexOfByKey(FString(TEXT("THE CEO HAS ANNOUNCED HE WILL COME TO MARS WITH THE NEXT WAVE.")));
+			const int32 Arrival = Texts.IndexOfByKey(T->G2bArrivalLine);
+			if (Ceo != INDEX_NONE && Arrival != INDEX_NONE)
+			{
+				ARW->bTogether = true;
+				// Newest first: the CEO line above the arrival line, and the arrival line admitted first (its id the lower).
+				ARW->bOrder |= Ceo < Arrival && Ids[Arrival] < Ids[Ceo];
+			}
+			ARW->Rows = N;
+			return Elapsed >= 2.0;
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("cards.arrival"), [T, ARW]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			const FString CardLine = TEXT("THE BIG ARRIVAL: The settlers have landed. The colony held its Hope long enough to be trusted with a city.");
+			const int32 Logged = Viz ? G2bLogCount(*Viz, T->G2bLogSerial0, CardLine) : 0;
+			FString Why;
+			if (ARW->CardAt < 0.0 || ARW->CardAt > 0.5) { Why += FString::Printf(TEXT(" the golden THE BIG ARRIVAL card was first in the queue at %.2f s (want within 0.5 s);"), ARW->CardAt); }
+			if (ARW->MaxCards != 1) { Why += FString::Printf(TEXT(" %d THE BIG ARRIVAL card(s), expected exactly one;"), ARW->MaxCards); }
+			if (Logged != 1) { Why += TEXT(" the card's title and body are not in the LOG (MS3's words);"); }
+			T->bG2bCardLogged = Logged == 1;
+			if (!ARW->bTogether) { Why += TEXT(" the arrival line and the CEO line were never shown together;"); }
+			else if (!ARW->bOrder) { Why += TEXT(" the CEO line was never on top of the arrival line with the arrival line admitted first;"); }
+			const FString Said = FString::Printf(TEXT("card first at %.2f s; cards: '%s'; both lines together: %s, CEO on top and arrival first: %s; the LOG holds the card: %s"),
+				ARW->CardAt, *ARW->LastTitles, ARW->bTogether ? TEXT("yes") : TEXT("no"), ARW->bOrder ? TEXT("yes") : TEXT("no"), Logged == 1 ? TEXT("yes") : TEXT("no"));
+			Report(TEXT("cards.arrival"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// deck.lines (B4): the quota and the landing as deck lines (the queue and the LOG), the landing naming its items by their CSV display
+		// names; neither holds a console command, an underscore or a CamelCase token. (The engine's debug text is gone: a static grep, the gate's.)
+		Runner.Do(TEXT("deck.lines fire"), [T]()
+		{
+			T->G2bWhy.Reset();
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Sim || !Viz || !Defs)
+			{
+				return;
+			}
+			const auto Name = [Defs](const TCHAR* Key)
+			{
+				const FRHManifestItemRow* Row = Defs->GetManifestItem(FName(Key));
+				return Row ? Row->DisplayName : FString(Key);
+			};
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			// r1: the award in credits, as the game pays it (1 cr a kg: RH_Config AwardMcrPerKg 1000, the premise below), never its kg.
+			T->G2bQuotaLine = TEXT("CEO: quota met on sol 7. Earth pays 1234 cr. Compose the supply ship's manifest on the OBJECTIVE panel.");
+			T->G2bWhy = FMath::IsNearlyEqual(Sim->GetAwardMcrPerKg(), 1000.0) ? FString() : FString::Printf(TEXT(" premise: AwardMcrPerKg is %.1f, not 1000 (1 cr a kg);"), Sim->GetAwardMcrPerKg());
+			T->G2bLandingLine = FString::Printf(TEXT("Supply ship landed: %s x2, %s, %s and 1 more."), *Name(TEXT("SolarPack")), *Name(TEXT("PartsCrate")), *Name(TEXT("SoilPallet")));
+			Sim->OnQuotaMet.Broadcast(7, 1234.0);
+			Sim->OnShipArrived.Broadcast(TArray<FName>({ FName("SolarPack"), FName("SolarPack"), FName("PartsCrate"), FName("SoilPallet"), FName("SeedVault") }));
+		}, 0.3f);
+		Runner.Do(TEXT("deck.lines"), [T]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz)
+			{
+				Report(TEXT("deck.lines"), false, TEXT("no colony visualizer"));
+				return;
+			}
+			FString Why = T->G2bWhy;
+			for (const FString* Line : { &T->G2bQuotaLine, &T->G2bLandingLine })
+			{
+				if (!G2bQueueHolds(*Viz, *Line)) { Why += FString::Printf(TEXT(" the queue does not hold '%s';"), **Line); }
+				const int32 Logged = G2bLogCount(*Viz, T->G2bLogSerial0, *Line);
+				if (Logged != 1) { Why += FString::Printf(TEXT(" the LOG holds '%s' %d time(s), expected once;"), **Line, Logged); }
+				if (Line->Contains(TEXT("RH.")) || Line->Contains(TEXT("_")) || HasCamelToken(*Line)) { Why += FString::Printf(TEXT(" '%s' holds an internal name;"), **Line); }
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f); // the alert checks are done: the colony runs again
+			}
+			Report(TEXT("deck.lines"), Why.IsEmpty(), FString::Printf(TEXT("%s%s'%s' and '%s' in the queue and the LOG"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), *T->G2bQuotaLine, *T->G2bLandingLine));
+		}, 0.2f);
+
+		// words.g1 (B6, O7): the Earth panel's line under the tension bar, word for word, its numbers from config.
+		Runner.Do(TEXT("words.g1"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			UWorld* W = FindGameWorld();
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Deck.IsValid() || !Defs)
+			{
+				Report(TEXT("words.g1"), false, TEXT("no deck or definitions"));
+				return;
+			}
+			const double CfgDemand = Defs->GetConfigScalar(FName("EarthTensionDemandThreshold"), -1.0);
+			const double CfgEmbargo = Defs->GetConfigScalar(FName("EarthPreemptiveThreshold"), -1.0);
+			const FString Want = FString::Printf(TEXT("At %.0f tension Earth makes a demand. At %.0f it pushes a neighbour to embargo you."), CfgDemand, CfgEmbargo);
+			const FString Note = Deck->GetTensionNoteText().ToString();
+			double MarkDemand = 0.0, MarkEmbargo = 0.0;
+			Deck->GetTensionMarks(MarkDemand, MarkEmbargo);
+			FString Why;
+			if (Note != Want) { Why += FString::Printf(TEXT(" the line reads '%s', expected '%s';"), *Note, *Want); }
+			if (MarkDemand != CfgDemand || MarkEmbargo != CfgEmbargo) { Why += FString::Printf(TEXT(" the marks are %g and %g, config %g and %g;"), MarkDemand, MarkEmbargo, CfgDemand, CfgEmbargo); }
+			Report(TEXT("words.g1"), Why.IsEmpty(), FString::Printf(TEXT("%s%s'%s' (config: demand %g, embargo %g)"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), *Note, CfgDemand, CfgEmbargo));
+		}, 0.2f);
+
+		// zoning.words (B8.3): the zone tool's hint over a habitat bay and its confirm name the rooms by their display names. On words.sample's
+		// habitat, bay 0 zoned Living Quarters; the Laboratory tool hovers it, then presses it (one world click on purpose). The zoning order is
+		// held in the uplink (a 30 s lag) and cancelled after.
+		Runner.Do(TEXT("zoning.words setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			T->G2bWhy.Reset();
+			if (!Sim || !PC || T->G2ClearHab == 0)
+			{
+				T->G2bWhy = TEXT(" no sim, controller or words.sample habitat;");
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			PC->Debug_SelectBay(0, INDEX_NONE);
+			FString R;
+			if (!Sim->DesignateBay(T->G2ClearHab, 0, FName("LivingQuarters"), R))
+			{
+				T->G2bWhy = FString::Printf(TEXT(" bay 0 of habitat #%d could not be zoned Living Quarters (%s);"), T->G2ClearHab, *R);
+			}
+			T->G2bLag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(30.0);
+			FrameCamera(T->G2ClearBayCm, 0.2f);
+			PC->BeginZoneDesignation(FName("Lab"));
+		}, 0.6f);
+		PushPress(TEXT("zoning.words hover"), [T](FVector2D& Out) { return LocateWorld(T->G2ClearBayCm)(Out); }, /*bPress*/ false);
+		PushSettle(0.2f);
+		Runner.Do(TEXT("zoning.words hint"), [T]() { if (const ARHPlayerController* PC = GetPC()) { T->G2bHint = PC->GetHintText().ToString(); } }, 0.f);
+		{
+			const TSharedRef<FPress> Zone = PushPress(TEXT("zoning.words"), [T](FVector2D& Out)
+			{
+				if (LocateWorld(T->G2ClearBayCm)(Out))
+				{
+					++T->ExpectedWorld; // the zoning press is a world click on purpose
+					return true;
+				}
+				return false;
+			});
+			Runner.Do(TEXT("zoning.words"), [T, Zone]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				FString Why = T->G2bWhy;
+				T->G2bConfirm = PC ? PC->GetConfirmText().ToString() : FString();
+				const FString WantHint = TEXT("ZONE LABORATORY: habitat bay (now Living Quarters) - click to transmit, right-click to finish");
+				const FString WantConfirm = TEXT("Zoning transmitted: Laboratory on habitat bay 0");
+				if (!Zone->bFound) { Why += TEXT(" the bay was not on screen;"); }
+				if (T->G2bHint != WantHint) { Why += FString::Printf(TEXT(" the hint reads '%s', expected '%s';"), *T->G2bHint, *WantHint); }
+				if (T->G2bConfirm != WantConfirm) { Why += FString::Printf(TEXT(" the confirm reads '%s', expected '%s';"), *T->G2bConfirm, *WantConfirm); }
+				int32 Cancelled = 0;
+				if (PC)
+				{
+					PC->CancelModes();
+				}
+				if (Sim)
+				{
+					TArray<int32> Ids;
+					for (const FRHCommand& Cmd : Sim->GetUplinkQueue())
+					{
+						if (Cmd.Verb == FName("Designate") && Cmd.Target == FName("Lab")) { Ids.Add(Cmd.CommandId); }
+					}
+					for (const int32 Id : Ids) { Cancelled += Sim->CancelUplinkCommand(Id) ? 1 : 0; }
+					Sim->SetOrderLagSeconds(T->G2bLag0);
+				}
+				Report(TEXT("zoning.words"), Why.IsEmpty(), FString::Printf(TEXT("%s%shint '%s'; confirm '%s'; %d zoning order(s) cancelled"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), *T->G2bHint, *T->G2bConfirm, Cancelled));
+			}, 0.3f);
+		}
+
+		// card.close (B8.1, B8.5): a selected station bay's card closes on the very frame its re-zone (to Living Quarters) or its Clear lands,
+		// sampled every frame from the landing (the deck reads the controller's live rule; the sim ticks after the controller and before Slate
+		// paints), and the selection is gone within 0.5 s.
+		TArray<TSharedRef<FG2bCardClose>> CardClose = { MakeShared<FG2bCardClose>(), MakeShared<FG2bCardClose>() };
+		for (int32 Phase = 0; Phase < 2; ++Phase)
+		{
+			const TSharedRef<FG2bCardClose> C = CardClose[Phase];
+			Runner.Do(Phase == 0 ? TEXT("card.close rezone setup") : TEXT("card.close clear setup"), [T]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				if (!Sim || !PC || T->G2ClearHab == 0)
+				{
+					return;
+				}
+				PC->CancelModes();
+				PC->SetActiveLevel(0);
+				FString R;
+				Sim->DesignateBay(T->G2ClearHab, 1, FName("Workstation"), R);
+				PC->Debug_SelectBay(T->G2ClearHab, 1);
+			}, 0.5f);
+			// The order is sent by the sampling step itself, on its first call, so every frame after the send is sampled (the runner waits at
+			// least two frames between steps: an order sent in a step of its own could land inside that gap, unsampled; round 0, the third
+			// run's g2b_mut_sameframe).
+			Runner.Push(Phase == 0 ? TEXT("card.close rezone sample") : TEXT("card.close clear sample"), [T, C, Phase](double, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				const ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !Deck.IsValid() || T->G2ClearHab == 0)
+				{
+					return true;
+				}
+				if (!C->bSent)
+				{
+					FString SentBody;
+					C->bShownBefore = Deck->Debug_GetCardShown(C->TitleBefore, SentBody);
+					const double Lag0 = Sim->GetOrderLagSeconds();
+					Sim->SetOrderLagSeconds(0.0);
+					FRHCommand Cmd;
+					Cmd.Verb = FName("Designate");
+					Cmd.Target = Phase == 0 ? FName("LivingQuarters") : FName(NAME_None);
+					Cmd.Level = 0;
+					Cmd.Location = Sim->GetCellCentreCm(FIntVector(0, 1, T->G2ClearHab));
+					Sim->EnqueueCommand(Cmd);
+					Sim->SetOrderLagSeconds(Lag0);
+					C->bSent = true;
+					return false;
+				}
+				const double Now = FPlatformTime::Seconds();
+				if (C->LandedAt < 0.0 && Sim->GetBayRoom(T->G2ClearHab, 1) != FName("Workstation"))
+				{
+					C->LandedAt = Now;
+					C->LandedFrame = GFrameCounter;
+				}
+				if (C->LandedAt < 0.0)
+				{
+					return bLast;
+				}
+				++C->Frames;
+				FString Title, Body;
+				if (Deck->Debug_GetCardShown(Title, Body) && C->Bad++ == 0)
+				{
+					C->BadSaid = FString::Printf(TEXT("frame +%llu after the landing showed the card '%s' / '%s'"), GFrameCounter - C->LandedFrame,
+						*Title.Replace(TEXT("\n"), TEXT(" / ")).Left(120), *Body.Replace(TEXT("\n"), TEXT(" / ")).Left(160));
+				}
+				if (C->GoneAt < 0.0 && !PC->HasSelectedBay())
+				{
+					C->GoneAt = Now - C->LandedAt;
+				}
+				return bLast || Now - C->LandedAt >= 0.6;
+			}, 0.2f, 8.f);
+		}
+		Runner.Do(TEXT("card.close"), [CardClose]()
+		{
+			FString Why, Said;
+			for (int32 Phase = 0; Phase < 2; ++Phase)
+			{
+				const FG2bCardClose& C = *CardClose[Phase];
+				const TCHAR* What = Phase == 0 ? TEXT("re-zone") : TEXT("clear");
+				Said += FString::Printf(TEXT("%s%s: the card before '%s' (%s); landed %s; %d frame(s) sampled from the landing, the card shown on %d; the selection gone %.2f s after"),
+					Phase == 0 ? TEXT("") : TEXT("; "), What, *C.TitleBefore.Replace(TEXT("\n"), TEXT(" / ")).Left(60), C.bShownBefore ? TEXT("shown") : TEXT("NOT shown"),
+					C.LandedAt >= 0.0 ? TEXT("yes") : TEXT("never"), C.Frames, C.Bad, C.GoneAt);
+				if (!C.bShownBefore || !C.TitleBefore.StartsWith(TEXT("Workstation - surface habitat"))) { Why += FString::Printf(TEXT(" %s: the station card was not shown before the order;"), What); }
+				if (C.LandedAt < 0.0) { Why += FString::Printf(TEXT(" %s: the order never landed;"), What); continue; }
+				if (C.Bad > 0) { Why += FString::Printf(TEXT(" %s: %s;"), What, *C.BadSaid); }
+				if (C.GoneAt < 0.0 || C.GoneAt > 0.5) { Why += FString::Printf(TEXT(" %s: the selection was not gone within 0.5 s;"), What); }
+			}
+			Report(TEXT("card.close"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// cell.rule (B8.2): a selected Workstation cell on floor -1 (RH.Demo's zoning) whose room is cleared: from the landing frame on the card
+		// is not shown, and the selection drops within 0.5 s.
+		const TSharedRef<FG2bCardClose> CellC = MakeShared<FG2bCardClose>();
+		Runner.Do(TEXT("cell.rule setup"), [T]()
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			T->G2bCell = INDEX_NONE;
+			if (!Sim || !PC)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(-1);
+			for (int32 i = 0; i < Sim->GetFloorCarvedCells(-1) && T->G2bCell == INDEX_NONE; ++i)
+			{
+				if (Sim->GetRoomAt(-1, i) == FName("Workstation")) { T->G2bCell = i; }
+			}
+			if (T->G2bCell != INDEX_NONE)
+			{
+				PC->Debug_SelectCell(-1, T->G2bCell);
+			}
+		}, 0.5f);
+		// As card.close: the sampling step sends the order on its first call, so the landing frame is always sampled.
+		Runner.Push(TEXT("cell.rule sample"), [T, CellC](double, bool bLast)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !Deck.IsValid() || T->G2bCell == INDEX_NONE)
+			{
+				return true;
+			}
+			if (!CellC->bSent)
+			{
+				FString SentBody;
+				CellC->bShownBefore = Deck->Debug_GetCardShown(CellC->TitleBefore, SentBody);
+				const double Lag0 = Sim->GetOrderLagSeconds();
+				Sim->SetOrderLagSeconds(0.0);
+				FRHCommand Cmd;
+				Cmd.Verb = FName("Designate");
+				Cmd.Target = NAME_None;
+				Cmd.Level = -1;
+				Cmd.Value = T->G2bCell;
+				Sim->EnqueueCommand(Cmd);
+				Sim->SetOrderLagSeconds(Lag0);
+				CellC->bSent = true;
+				return false;
+			}
+			const double Now = FPlatformTime::Seconds();
+			if (CellC->LandedAt < 0.0 && Sim->GetRoomAt(-1, T->G2bCell) != FName("Workstation"))
+			{
+				CellC->LandedAt = Now;
+				CellC->LandedFrame = GFrameCounter;
+			}
+			if (CellC->LandedAt < 0.0)
+			{
+				return bLast;
+			}
+			++CellC->Frames;
+			FString Title, Body;
+			if (Deck->Debug_GetCardShown(Title, Body) && CellC->Bad++ == 0)
+			{
+				CellC->BadSaid = FString::Printf(TEXT("frame +%llu after the landing showed the card '%s' / '%s'"), GFrameCounter - CellC->LandedFrame,
+					*Title.Replace(TEXT("\n"), TEXT(" / ")).Left(120), *Body.Replace(TEXT("\n"), TEXT(" / ")).Left(160));
+			}
+			if (CellC->GoneAt < 0.0 && !PC->HasSelectedCell())
+			{
+				CellC->GoneAt = Now - CellC->LandedAt;
+			}
+			return bLast || Now - CellC->LandedAt >= 0.6;
+		}, 0.2f, 8.f);
+		Runner.Do(TEXT("cell.rule"), [T, CellC]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			FString Why;
+			if (T->G2bCell == INDEX_NONE) { Why += TEXT(" no Workstation cell on floor -1;"); }
+			else
+			{
+				if (!CellC->bShownBefore) { Why += TEXT(" the station card was not shown before the clear;"); }
+				if (CellC->LandedAt < 0.0) { Why += TEXT(" the clear never landed;"); }
+				else
+				{
+					if (CellC->Bad > 0) { Why += FString::Printf(TEXT(" %s;"), *CellC->BadSaid); }
+					if (CellC->GoneAt < 0.0 || CellC->GoneAt > 0.5) { Why += TEXT(" the selection was not gone within 0.5 s;"); }
+				}
+			}
+			const FString Said = FString::Printf(TEXT("floor -1 cell %d: the card before '%s'; %d frame(s) sampled from the landing, the card shown on %d; the selection gone %.2f s after"),
+				T->G2bCell, *CellC->TitleBefore.Replace(TEXT("\n"), TEXT(" / ")).Left(60), CellC->Frames, CellC->Bad, CellC->GoneAt);
+			if (Sim && T->G2bCell != INDEX_NONE)
+			{
+				FString R;
+				Sim->DesignateRoom(-1, T->G2bCell, FName("Workstation"), R); // RH.Demo's zoning back
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetActiveLevel(0);
+			}
+			Report(TEXT("cell.rule"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
+		// clear.refused (B8.5): a Clear where no habitat bay stands is refused; its notice names the order in words ("REJECTED Clear zone: ...",
+		// the sim's own reason), and the LOG holds it with its sol.
+		Runner.Do(TEXT("clear.refused send"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			T->G2bNotice0 = Viz->Debug_GetNoticeRealSeconds();
+			const double Lag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(0.0);
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Designate");
+			Cmd.Target = NAME_None;
+			Cmd.Level = 0;
+			Cmd.Location = FVector(900000.0, 900000.0, 0.0);
+			Cmd.Value = -1;
+			Sim->EnqueueCommand(Cmd);
+			Sim->SetOrderLagSeconds(Lag0);
+		}, 0.f);
+		Runner.Push(TEXT("clear.refused"), [T](double, bool bLast)
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz)
+			{
+				Report(TEXT("clear.refused"), false, TEXT("no colony visualizer"));
+				return true;
+			}
+			if (Viz->Debug_GetNoticeRealSeconds() == T->G2bNotice0 && !bLast)
+			{
+				return false;
+			}
+			T->G2bRejected = Viz->GetNoticeText().ToString();
+			bool bLogged = false;
+			for (int32 i = 0; i < FMath::Min(8, Viz->GetLogCount()) && !bLogged; ++i)
+			{
+				bLogged = Viz->GetLogLine(i).StartsWith(TEXT("sol ")) && Viz->GetLogLine(i).EndsWith(TEXT(": ") + T->G2bRejected);
+			}
+			FString Why;
+			if (Viz->Debug_GetNoticeRealSeconds() == T->G2bNotice0) { Why += TEXT(" no notice within 5 s;"); }
+			if (!T->G2bRejected.StartsWith(TEXT("REJECTED Clear zone: "))) { Why += FString::Printf(TEXT(" the notice reads '%s';"), *T->G2bRejected); }
+			if (!bLogged) { Why += TEXT(" the LOG's newest lines do not hold the notice with its sol;"); }
+			Report(TEXT("clear.refused"), Why.IsEmpty(), FString::Printf(TEXT("%s%s'%s', and in the LOG: %s"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), *T->G2bRejected, bLogged ? TEXT("yes") : TEXT("no")));
+			return true;
+		}, 0.2f, 5.f);
+
+		// comms.fixed (B2): with that notice still shown, the comms panel stands above the right column's scroll box and does not move when a
+		// fold opens (the fold scroll runs 1 s).
+		const TSharedRef<FG2bComms> CF = MakeShared<FG2bComms>();
+		Runner.Do(TEXT("comms.fixed setup"), [CF]()
+		{
+			CF->Read(0);
+			const ARHPlayerController* PC = GetPC();
+			if (const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>())
+			{
+				Deck->SetFoldOpen(SRHCommandDeck::EFold::Power, true);
+			}
+		}, 1.3f);
+		Runner.Do(TEXT("comms.fixed"), [CF]()
+		{
+			CF->Read(1);
+			FString Why;
+			if (!CF->bFound[0] || !CF->bFound[1]) { Why += FString::Printf(TEXT(" the comms panel was not on screen (before: %s, after: %s);"), CF->bFound[0] ? TEXT("yes") : TEXT("no"), CF->bFound[1] ? TEXT("yes") : TEXT("no")); }
+			else
+			{
+				// The panel's place is its top-left: its height follows its lines (an order's confirm expires on its own clock, and the panel
+				// shrinks by a line), so a size change is reported, never judged.
+				const FVector2D Move = CF->TopLeft[1] - CF->TopLeft[0];
+				if (FMath::Abs(Move.X) > 1.0 || FMath::Abs(Move.Y) > 1.0)
+				{
+					Why += FString::Printf(TEXT(" the comms panel moved by (%.1f, %.1f) when the POWER fold opened;"), Move.X, Move.Y);
+				}
+				for (int32 K = 0; K < 2; ++K)
+				{
+					if (CF->ColumnTop[K] < -1.0e8 || CF->TopLeft[K].Y + CF->Size[K].Y > CF->ColumnTop[K] + 0.5)
+					{
+						Why += FString::Printf(TEXT(" %s: the comms panel's bottom (%.1f) is below the scroll box's top (%.1f);"), K == 0 ? TEXT("before") : TEXT("after"), CF->TopLeft[K].Y + CF->Size[K].Y, CF->ColumnTop[K]);
+					}
+				}
+			}
+			const FString Said = FString::Printf(TEXT("comms at (%.0f, %.0f) %.0f x %.0f before, (%.0f, %.0f) %.0f x %.0f after the fold opened; the scroll box's top %.0f / %.0f"),
+				CF->TopLeft[0].X, CF->TopLeft[0].Y, CF->Size[0].X, CF->Size[0].Y, CF->TopLeft[1].X, CF->TopLeft[1].Y, CF->Size[1].X, CF->Size[1].Y, CF->ColumnTop[0], CF->ColumnTop[1]);
+			const ARHPlayerController* PC = GetPC();
+			if (const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>())
+			{
+				Deck->SetFoldOpen(SRHCommandDeck::EFold::Power, false);
+			}
+			Report(TEXT("comms.fixed"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
+		// stage.index (B8.6): a site's stage latch holding an index its bill does not have (a one-line bill, index 7) names no material: the bare
+		// stage, never another line's resource.
+		Runner.Do(TEXT("stage.index setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			T->G2bWhy.Reset();
+			T->G2bSiteId = 0;
+			if (!Sim)
+			{
+				return;
+			}
+			Sim->SetFleetHold(true);
+			FString Why;
+			if (!G2bOrderStockpile(*Sim, 0.0, T->G2bSpotCm, Why))
+			{
+				T->G2bWhy = FString::Printf(TEXT(" no spot for a Stockpile (%s);"), *Why);
+			}
+		}, 0.2f);
+		Runner.Push(TEXT("stage.index site"), [T](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			const FRHBuildingInstance* Site = Sim ? G2bSiteAt(*Sim, T->G2bSpotCm) : nullptr;
+			if (Site)
+			{
+				T->G2bSiteId = Site->Id;
+				return true;
+			}
+			return bLast || !T->G2bWhy.IsEmpty();
+		}, 0.f, 10.f);
+		Runner.Do(TEXT("stage.index"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			const URHPowerLookSubsystem* Look = Deck.IsValid() ? Deck->GetPowerLook() : nullptr;
+			const FRHBuildingInstance* Site = Sim ? G2bSiteAt(*Sim, T->G2bSpotCm) : nullptr;
+			FString Why = T->G2bWhy, Line;
+			int32 Lines = 0;
+			if (!Site || !Look || !Deck.IsValid())
+			{
+				Why += TEXT(" no Stockpile site, power helper or deck;");
+			}
+			else
+			{
+				// First sight of the site's key: adopted at once (the latch's rule), so the deck's own read this frame shows index 7.
+				Look->LatchValue(URHPowerLookSubsystem::MakeKey('U', (uint32)Site->Id), 1u | (7u << 8));
+				const TMap<FName, double> Bill = Sim->GetSiteBill(*Site);
+				Lines = Bill.Num();
+				Line = Deck->GetSiteStageLine(*Site, Bill);
+				if (Line != TEXT("WAITING FOR MATERIALS")) { Why += FString::Printf(TEXT(" the stage line reads '%s', expected 'WAITING FOR MATERIALS';"), *Line); }
+				G2bDemolish(*Sim, *Site);
+			}
+			if (Sim)
+			{
+				Sim->SetFleetHold(false);
+			}
+			Report(TEXT("stage.index"), Why.IsEmpty(), FString::Printf(TEXT("%s%ssite #%d, a %d-line bill, the latch at index 7: '%s'"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), T->G2bSiteId, Lines, *Line));
+		}, 0.5f);
+
+		// speed.drop.space (B5): a 60x the player engaged, dropped by the sim's own tick (a site goes up): Space pauses (the wish is gone with
+		// it) and Space resumes the agent speed the sim restored (8x), never 60x; one "60x unavailable" alert, the sim's own.
+		Runner.Do(TEXT("speed.drop.space setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			T->G2bWhy.Reset();
+			T->bG2bClear = false;
+			if (!Sim || !PC)
+			{
+				return;
+			}
+			Sim->SetFleetHold(false);
+			PC->SetSimSpeed(8.f);
+			T->G2bSixtyAlerts = 0;
+			T->G2bAlertHandle = Sim->OnAlert.AddLambda([T](const FString& Message)
+			{
+				if (Message.StartsWith(TEXT("60x unavailable")))
+				{
+					++T->G2bSixtyAlerts;
+				}
+			});
+		}, 0.2f);
+		Runner.Push(TEXT("speed.drop.space clear"), [T](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			FString Why;
+			if (Sim && Sim->CanEnterEraMode(Why))
+			{
+				T->bG2bClear = true;
+				return true;
+			}
+			if (bLast)
+			{
+				T->G2bWhy = FString::Printf(TEXT(" the era band never cleared in 60 s at 8x (last: %s);"), *Why);
+			}
+			return bLast;
+		}, 0.f, 60.f);
+		Runner.Do(TEXT("speed.drop.space base"), [T]() { T->G2bSixtyBase = T->G2bSixtyAlerts; }, 0.f);
+		{
+			PushPress(TEXT("speed.drop.space 60x"), LocateButton(TEXT("60x"), 0, true));
+			Runner.Do(TEXT("speed.drop.space site"), [T]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				T->G2bClockA = ClockSpeed();
+				if (!Sim)
+				{
+					return;
+				}
+				Sim->SetFleetHold(true);
+				T->G2bLag0 = Sim->GetOrderLagSeconds();
+				FString Why;
+				if (!G2bOrderStockpile(*Sim, 1.0, T->G2bSpotCm, Why))
+				{
+					T->G2bWhy += FString::Printf(TEXT(" no spot for a Stockpile (%s);"), *Why);
+				}
+			}, 0.f);
+			Runner.Push(TEXT("speed.drop.space drop"), [](double, bool bLast) { return bLast || ClockSpeed() < 59.f; }, 0.3f, 20.f);
+			const TSharedRef<FPress> Pause = PushKey(TEXT("speed.drop.space pause"), EKeys::SpaceBar);
+			Runner.Do(TEXT("speed.drop.space mid"), [T]()
+			{
+				T->G2bClockB = ClockSpeed();
+				const ARHPlayerController* PC = GetPC();
+				T->bG2bWishA = PC && PC->IsSixtyWishPending();
+			}, 0.3f);
+			PushKey(TEXT("speed.drop.space resume"), EKeys::SpaceBar);
+			PushCheckSays(TEXT("speed.drop.space"), Pause, [T](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				if (!PC) { return FString(TEXT("no player controller")); }
+				const int32 Alerts = T->G2bSixtyAlerts - T->G2bSixtyBase;
+				Said = FString::Printf(TEXT("the 60x press read %.0fx; after the sim's own drop Space paused at %.0fx (wish pending: %s) and resumed %.0fx; %d '60x unavailable' alert(s) since the press; resume speed %.0fx; wish pending now: %s"),
+					T->G2bClockA, T->G2bClockB, T->bG2bWishA ? TEXT("yes") : TEXT("no"), ClockSpeed(), Alerts, PC->GetResumeSpeed(), PC->IsSixtyWishPending() ? TEXT("yes") : TEXT("no"));
+				if (!T->G2bWhy.IsEmpty()) { return T->G2bWhy; }
+				if (!FMath::IsNearlyEqual(T->G2bClockA, 60.f)) { return FString::Printf(TEXT("premise: the 60x press did not engage 60x (the clock read %.1f)"), T->G2bClockA); }
+				if (T->G2bClockB != 0.f) { return FString::Printf(TEXT("the first Space left the clock at %.1f, expected 0"), T->G2bClockB); }
+				if (!FMath::IsNearlyEqual(ClockSpeed(), 8.f)) { return FString::Printf(TEXT("the second Space resumed %.1fx, expected 8x (the agent speed the sim restored)"), ClockSpeed()); }
+				if (Alerts != 1) { return FString::Printf(TEXT("%d '60x unavailable' alert(s) since the press, expected 1 (the sim's own drop)"), Alerts); }
+				if (!FMath::IsNearlyEqual(PC->GetResumeSpeed(), 8.f)) { return FString::Printf(TEXT("resume speed %.0fx, expected 8x"), PC->GetResumeSpeed()); }
+				if (T->bG2bWishA || PC->IsSixtyWishPending()) { return FString(TEXT("the 60x wish is still pending after a pause")); }
+				return FString();
+			}, 1.f);
+		}
+
+		// speed.wish (B5): a 60x press refused by the standing site arms "60x when clear": once the site is done and the test's own
+		// CanEnterEraMode first passes (T0), the clock reads 60 within 3.7 s (the deck's 0.25 s poll, its 3.2 s latch, two frames), never before
+		// T0; one "60x resumed" line; no further refusal.
+		const TSharedRef<FG2bWish> WS = MakeShared<FG2bWish>();
+		const TSharedRef<FG2bSixtyRows> SR = MakeShared<FG2bSixtyRows>(); // r2: alerts.sixty reads the banner's rows in the same frames
+		Runner.Do(TEXT("speed.wish setup"), [T]()
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const FRHBuildingInstance* Site = Sim ? G2bSiteAt(*Sim, T->G2bSpotCm) : nullptr;
+			T->G2bSiteId = Site ? Site->Id : 0;
+			if (PC)
+			{
+				PC->SetSimSpeed(8.f);
+			}
+			T->G2bSixtyBase = T->G2bSixtyAlerts;
+		}, 0.3f);
+		PushPress(TEXT("speed.wish 60x"), LocateButton(TEXT("60x"), 0, true));
+		Runner.Do(TEXT("speed.wish fill"), [T, WS]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			WS->ClockAfterPress = ClockSpeed();
+			WS->AlertsAfterPress = T->G2bSixtyAlerts - T->G2bSixtyBase;
+			const ARHPlayerController* PC = GetPC();
+			WS->bArmed = PC && PC->IsSixtyWishPending();
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			WS->StartS = FPlatformTime::Seconds();
+			Sim->SetFleetHold(false);
+			for (const FRHBuildingInstance& B : Sim->GetBuildings())
+			{
+				if (B.Id == T->G2bSiteId && B.bUnderConstruction)
+				{
+					for (const TPair<FName, double>& L : Sim->GetSiteBill(B))
+					{
+						const double* Have = B.InputKg.Find(L.Key);
+						Sim->Debug_AddSolidAt(B.Id, L.Key, L.Value - (Have ? *Have : 0.0) + 1.0, false);
+					}
+					break;
+				}
+			}
+		}, 0.f);
+		Runner.Push(TEXT("speed.wish sample"), [T, WS, SR](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds();
+			FString Why;
+			if (Sim->CanEnterEraMode(Why) && WS->T0 < 0.0)
+			{
+				WS->T0 = Now;
+			}
+			WS->LastWhy = Why;
+			if (ClockSpeed() >= 59.f)
+			{
+				WS->bEarly |= WS->T0 < 0.0;
+				if (WS->T60 < 0.0)
+				{
+					WS->T60 = Now;
+				}
+			}
+			// r2 (alerts.sixty): the banner's rows around the engage, every frame: the refusal row before "60x resumed" is posted (its LOG
+			// line), then how long a refusal row stays at full opacity, whether the two ever hold rows together, when "60x resumed" shows,
+			// and the row count (never one way and back the other inside 3 s).
+			if (const URHColonyVisualizerSubsystem* Viz = GetViz())
+			{
+				++SR->Frames;
+				TArray<uint32> Ids;
+				TArray<FString> Texts;
+				TArray<float> Op;
+				TArray<int32> Cn;
+				const int32 N = Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+				bool bRefusal = false, bRefusalFull = false, bResumed = false;
+				float ResOp = 0.f;
+				for (int32 i = 0; i < N; ++i)
+				{
+					if (Texts[i].StartsWith(TEXT("60x unavailable")))
+					{
+						bRefusal = true;
+						bRefusalFull |= Op[i] >= 0.999f;
+						SR->RefusalText = Texts[i];
+					}
+					else if (Texts[i] == TEXT("60x resumed"))
+					{
+						bResumed = true;
+						ResOp = Op[i];
+					}
+				}
+				if (SR->PostAt < 0.0 && G2bLogCount(*Viz, T->G2bLogSerial0, TEXT("60x resumed")) > 0)
+				{
+					SR->PostAt = Now;
+					SR->bRefusalFullBefore = SR->bRefusalFullPrev;
+					SR->RowsBefore = SR->RowsPrev;
+				}
+				if (SR->PostAt >= 0.0)
+				{
+					const double Since = Now - SR->PostAt;
+					if (bRefusalFull && Since > 0.5 && SR->FullLate++ == 0)
+					{
+						SR->FullLateSaid = FString::Printf(TEXT("'%s' %.2f s after the post"), *SR->RefusalText, Since);
+					}
+					if (bRefusal && bResumed && SR->Both++ == 0)
+					{
+						SR->BothSaid = FString::Printf(TEXT("%.2f s after the post"), Since);
+					}
+					if (!bRefusal && SR->RefusalGone < 0.0) { SR->RefusalGone = Since; }
+					if (bResumed && ResOp > 0.01f && SR->ResumedFirst < 0.0) { SR->ResumedFirst = Since; }
+					if (bResumed && ResOp >= 0.999f && SR->ResumedFull < 0.0) { SR->ResumedFull = Since; }
+					if (SR->RowsPrev >= 0 && N != SR->RowsPrev)
+					{
+						const int32 Dir = N > SR->RowsPrev ? 1 : -1;
+						if (SR->RowDir != 0 && Dir != SR->RowDir && Now - SR->RowChangeAt < 3.0 && SR->RowReversals++ == 0)
+						{
+							SR->ReversalSaid = FString::Printf(TEXT("%d to %d row(s) %.2f s after going the other way"), SR->RowsPrev, N, Now - SR->RowChangeAt);
+						}
+						SR->RowDir = Dir;
+						SR->RowChangeAt = Now;
+					}
+					SR->RowsEnd = N;
+				}
+				SR->bRefusalFullPrev = bRefusalFull;
+				SR->RowsPrev = N;
+			}
+			// r2: read on until "60x resumed" stands at full opacity (the refusal's fade out, then its own fade in), 4 s at most.
+			return bLast || (WS->T60 >= 0.0 && ((SR->ResumedFull >= 0.0 && Now - WS->T60 >= 1.2) || Now - WS->T60 >= 4.0));
+		}, 0.f, 60.f);
+		Runner.Do(TEXT("speed.wish"), [T, WS]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			ARHPlayerController* PC = GetPC();
+			const int32 Resumed = Viz ? G2bLogCount(*Viz, T->G2bLogSerial0, TEXT("60x resumed")) : -1;
+			T->G2bResumedPosted = Resumed;
+			const int32 Alerts = T->G2bSixtyAlerts - T->G2bSixtyBase;
+			const double Lag = (WS->T0 >= 0.0 && WS->T60 >= 0.0) ? WS->T60 - WS->T0 : -1.0;
+			FString Why;
+			if (T->G2bSiteId == 0) { Why += TEXT(" no site stood from speed.drop.space;"); }
+			if (!FMath::IsNearlyEqual(WS->ClockAfterPress, 8.f) || WS->AlertsAfterPress != 1) { Why += FString::Printf(TEXT(" premise: the 60x press was not refused (clock %.1f, %d alert(s));"), WS->ClockAfterPress, WS->AlertsAfterPress); }
+			if (!WS->bArmed) { Why += TEXT(" the refused 60x press did not arm the wish;"); }
+			if (WS->T0 < 0.0) { Why += FString::Printf(TEXT(" the era band never cleared (last: %s);"), *WS->LastWhy); }
+			if (WS->bEarly) { Why += TEXT(" the clock read 60 before the era band was clear;"); }
+			if (WS->T60 < 0.0) { Why += TEXT(" 60x never engaged;"); }
+			else if (Lag > 3.7) { Why += FString::Printf(TEXT(" 60x engaged %.2f s after the band cleared (at most 3.7);"), Lag); }
+			if (Resumed != 1) { Why += FString::Printf(TEXT(" %d '60x resumed' line(s), expected 1;"), Resumed); }
+			if (Alerts != 1) { Why += FString::Printf(TEXT(" %d '60x unavailable' alert(s) since the press, expected 1 (the press's own);"), Alerts); }
+			if (!PC || !FMath::IsNearlyEqual(PC->GetResumeSpeed(), 60.f)) { Why += FString::Printf(TEXT(" resume speed %.0fx, expected 60x;"), PC ? PC->GetResumeSpeed() : 0.f); }
+			const FString Said = FString::Printf(TEXT("the press refused at %.0fx (wish armed: %s); the band clear at +%.2f s, 60x at +%.2f s (%.2f s later); %d '60x resumed' line(s); %d alert(s) since the press; resume speed %.0fx"),
+				WS->ClockAfterPress, WS->bArmed ? TEXT("yes") : TEXT("no"), WS->T0 >= 0.0 ? WS->T0 - WS->StartS : -1.0, WS->T60 >= 0.0 ? WS->T60 - WS->StartS : -1.0, Lag, Resumed, Alerts, PC ? PC->GetResumeSpeed() : 0.f);
+			if (PC)
+			{
+				PC->SetSimSpeed(8.f); // cancels the wish
+			}
+			Report(TEXT("speed.wish"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
+		// alerts.sixty (B1 and B5, r2; James's answer G2B-Q1 A; speed.wish's frames, a real engage): when the wish engages, the refusal it
+		// answers leaves. The "60x unavailable" row at full opacity on the frame before "60x resumed" is posted begins its fade at once (it
+		// is never at full opacity more than its 0.5 s fade after the post) and leaves its row; "60x resumed" then takes that row and reaches
+		// full opacity; the two never hold rows together, and the row count never goes one way and back the other inside 3 s. (Round 1: the
+		// refusal stood at full opacity under "60x resumed" for the rest of its 15 s hold.)
+		Runner.Do(TEXT("alerts.sixty"), [SR]()
+		{
+			FString Why;
+			if (SR->PostAt < 0.0) { Why += TEXT(" premise: no '60x resumed' line was posted in speed.wish's frames (no engage to judge);"); }
+			else
+			{
+				if (!SR->bRefusalFullBefore) { Why += TEXT(" premise: no '60x unavailable' row was at full opacity on the frame before '60x resumed' was posted;"); }
+				if (SR->FullLate > 0) { Why += FString::Printf(TEXT(" a '60x unavailable' row was still at full opacity more than 0.5 s (its fade) after '60x resumed' was posted, on %d frame(s), first %s;"), SR->FullLate, *SR->FullLateSaid); }
+				if (SR->RefusalGone < 0.0) { Why += TEXT(" the '60x unavailable' row never left its row;"); }
+				if (SR->Both > 0) { Why += FString::Printf(TEXT(" '60x resumed' and a '60x unavailable' row held rows together on %d frame(s), first %s;"), SR->Both, *SR->BothSaid); }
+				if (SR->ResumedFirst < 0.0) { Why += TEXT(" '60x resumed' was never shown;"); }
+				else if (SR->ResumedFull < 0.0) { Why += TEXT(" '60x resumed' never reached full opacity;"); }
+				if (SR->RowReversals > 0) { Why += FString::Printf(TEXT(" the banner's row count went one way and back inside 3 s (%s);"), *SR->ReversalSaid); }
+			}
+			const FString Said = FString::Printf(TEXT("%d frames; '%s' at full opacity when '60x resumed' was posted: %s; it had left its row %.2f s after the post; '60x resumed' first seen %.2f s and at full opacity %.2f s after its post; the two together on %d frame(s); %d row(s) before the post, %d at the end"),
+				SR->Frames, *SR->RefusalText, SR->bRefusalFullBefore ? TEXT("yes") : TEXT("no"), SR->RefusalGone, SR->ResumedFirst, SR->ResumedFull, SR->Both, SR->RowsBefore, SR->RowsEnd);
+			Report(TEXT("alerts.sixty"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.f);
+
+		// speed.wish.cancel (B5): a refused 60x press arms the wish; a 1x press (a player's) cancels it, so when the site goes the clock stays 1x
+		// and no "60x resumed" line is posted.
+		const TSharedRef<FG2bWish> WC = MakeShared<FG2bWish>();
+		Runner.Do(TEXT("speed.wish.cancel setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			T->G2bWhy.Reset();
+			if (!Sim || !Viz)
+			{
+				return;
+			}
+			Sim->SetFleetHold(true);
+			T->G2bLogSerial0 = Viz->GetLogSerial();
+			FString Why;
+			if (!G2bOrderStockpile(*Sim, 1.0, T->G2bSpotCm, Why))
+			{
+				T->G2bWhy = FString::Printf(TEXT(" no spot for a Stockpile (%s);"), *Why);
+			}
+		}, 0.2f);
+		Runner.Push(TEXT("speed.wish.cancel site"), [T](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			return bLast || !T->G2bWhy.IsEmpty() || (Sim && G2bSiteAt(*Sim, T->G2bSpotCm));
+		}, 0.3f, 10.f);
+		PushPress(TEXT("speed.wish.cancel 60x"), LocateButton(TEXT("60x"), 0, true));
+		Runner.Do(TEXT("speed.wish.cancel armed"), [T]() { const ARHPlayerController* PC = GetPC(); T->bG2bWishA = PC && PC->IsSixtyWishPending(); }, 0.2f);
+		PushPress(TEXT("speed.wish.cancel 1x"), LocateButton(TEXT("1x"), 0, true));
+		Runner.Do(TEXT("speed.wish.cancel demolish"), [T, WC]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			T->bG2bWishB = PC && PC->IsSixtyWishPending();
+			WC->ClockAfterPress = ClockSpeed();
+			const FRHBuildingInstance* Site = Sim ? G2bSiteAt(*Sim, T->G2bSpotCm) : nullptr;
+			if (Site)
+			{
+				G2bDemolish(*Sim, *Site);
+			}
+		}, 0.f);
+		Runner.Push(TEXT("speed.wish.cancel sample"), [WC](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim)
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds();
+			FString Why;
+			if (Sim->CanEnterEraMode(Why) && WC->T0 < 0.0)
+			{
+				WC->T0 = Now;
+			}
+			WC->LastWhy = Why;
+			if (!FMath::IsNearlyEqual(ClockSpeed(), 1.f) && WC->T60 < 0.0)
+			{
+				WC->T60 = Now; // here: the first frame the clock read other than 1x
+				WC->Said = FString::Printf(TEXT("%.1fx"), ClockSpeed());
+			}
+			return bLast || (WC->T0 >= 0.0 && Now - WC->T0 >= 2.5);
+		}, 0.f, 15.f);
+		Runner.Do(TEXT("speed.wish.cancel"), [T, WC]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			ARHPlayerController* PC = GetPC();
+			const int32 Resumed = Viz ? G2bLogCount(*Viz, T->G2bLogSerial0, TEXT("60x resumed")) : -1;
+			FString Why = T->G2bWhy;
+			if (!T->bG2bWishA) { Why += TEXT(" premise: the refused 60x press did not arm the wish;"); }
+			if (T->bG2bWishB) { Why += TEXT(" the 1x press did not cancel the wish;"); }
+			if (!FMath::IsNearlyEqual(WC->ClockAfterPress, 1.f)) { Why += FString::Printf(TEXT(" the 1x press left the clock at %.1f;"), WC->ClockAfterPress); }
+			if (WC->T0 < 0.0) { Why += FString::Printf(TEXT(" the era band never cleared (last: %s);"), *WC->LastWhy); }
+			if (WC->T60 >= 0.0) { Why += FString::Printf(TEXT(" the clock read %s after the 1x press;"), *WC->Said); }
+			if (Resumed != 0) { Why += FString::Printf(TEXT(" %d '60x resumed' line(s), expected none;"), Resumed); }
+			if (PC && PC->IsSixtyWishPending()) { Why += TEXT(" the wish is pending;"); }
+			const FString Said = FString::Printf(TEXT("wish armed by the refused press: %s, after the 1x press: %s; the clock 1x throughout: %s; the band clear: %s; %d '60x resumed' line(s)"),
+				T->bG2bWishA ? TEXT("yes") : TEXT("no"), T->bG2bWishB ? TEXT("yes") : TEXT("no"), WC->T60 < 0.0 ? TEXT("yes") : TEXT("no"), WC->T0 >= 0.0 ? TEXT("yes") : TEXT("no"), Resumed);
+			if (Sim)
+			{
+				Sim->SetFleetHold(false);
+				Sim->SetOrderLagSeconds(T->G2bLag0);
+				Sim->OnAlert.Remove(T->G2bAlertHandle);
+			}
+			if (PC)
+			{
+				PC->SetSimSpeed(1.f);
+			}
+			Report(TEXT("speed.wish.cancel"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
+		// cards.load (B3, r1): a load never fires a card for a moment that already happened. The colony from cards.arrival (its crew landed, the
+		// Big Arrival done) is saved; the live colony is then put before the moment (the Big Arrival not done) and the deck records that; the
+		// save is loaded (the Big Arrival done): no card is queued in the 4 s after, and the LOG's newest line is the load's. (Round 0 loaded
+		// the very colony the deck had recorded, so no watch could flip and the check could not fail.)
+		const TSharedRef<FG2bLoadWatch> LW = MakeShared<FG2bLoadWatch>();
+		Runner.Do(TEXT("cards.load save"), [LW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !PC || !Deck.IsValid())
+			{
+				return;
+			}
+			PC->SetSimSpeed(0.f); // paused from here: no step of the colony's own can queue a card or move a moment meanwhile
+			Deck->Debug_ClearTipCards();
+			LW->bArrival = Sim->IsBigArrivalDone();
+			LW->Pop = Sim->GetPopulation();
+			FString Err;
+			LW->bSaved = Sim->SaveColony(TEXT("clickg2b"), Err);
+			LW->Err = Err;
+			Sim->Debug_SetBigArrivalDone(false); // the live colony before the moment; the deck records it on its next ticks
+		}, 0.6f);
+		Runner.Do(TEXT("cards.load setup"), [LW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !PC || !Deck.IsValid() || !Viz)
+			{
+				return;
+			}
+			bool bCrew = false, bBorn = false;
+			LW->bWatchRead = Deck->Debug_GetWatchedMoments(bCrew, bBorn, LW->bWatchedArrivalBefore);
+			FString Err;
+			LW->bLoaded = LW->bSaved && Sim->LoadColony(TEXT("clickg2b"), Err);
+			if (!Err.IsEmpty())
+			{
+				LW->Err = Err;
+			}
+			LW->bArrivalLoaded = Sim->IsBigArrivalDone();
+			PC->SetSimSpeed(0.f); // paused for the sample (the load runs 1x)
+			LW->Newest = Viz->GetLogLine(0);
+		}, 0.f);
+		Runner.Push(TEXT("cards.load sample"), [LW](double Elapsed, bool)
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (Deck.IsValid() && Deck->Debug_GetCardCount() > LW->MaxCards)
+			{
+				LW->MaxCards = Deck->Debug_GetCardCount();
+				LW->Titles = Deck->Debug_GetCardTitles();
+			}
+			return Elapsed >= 4.0;
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("cards.load"), [LW]()
+		{
+			FString Why;
+			if (!LW->bLoaded) { Why += FString::Printf(TEXT(" the save or the load failed (%s);"), *LW->Err); }
+			if (LW->Pop <= 0 || !LW->bArrival) { Why += FString::Printf(TEXT(" premise: the colony had %d colonist(s) and the Big Arrival %s;"), LW->Pop, LW->bArrival ? TEXT("done") : TEXT("not done")); }
+			if (!LW->bWatchRead || LW->bWatchedArrivalBefore) { Why += TEXT(" premise: the deck had not recorded the live colony's Big Arrival as not done before the load;"); }
+			if (LW->bLoaded && !LW->bArrivalLoaded) { Why += TEXT(" premise: the loaded colony's Big Arrival is not done;"); }
+			if (LW->MaxCards > 0) { Why += FString::Printf(TEXT(" %d card(s) queued after the load: '%s';"), LW->MaxCards, *LW->Titles); }
+			if (!LW->Newest.StartsWith(TEXT("loaded sol "))) { Why += FString::Printf(TEXT(" the LOG's newest line after the load is '%s';"), *LW->Newest); }
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
+			Report(TEXT("cards.load"), Why.IsEmpty(), FString::Printf(TEXT("%s%sthe colony (%d colonists, the Big Arrival %s) saved as clickg2b; the live colony's Big Arrival set not done and recorded so by the deck: %s; loaded (the Big Arrival %s); %d card(s) in the 4 s after; the LOG's newest line '%s'"),
+				*Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), LW->Pop, LW->bArrival ? TEXT("done") : TEXT("not done"), LW->bWatchRead && !LW->bWatchedArrivalBefore ? TEXT("yes") : TEXT("no"),
+				LW->bArrivalLoaded ? TEXT("done") : TEXT("not done"), LW->MaxCards, *LW->Newest));
+		}, 0.2f);
+
+		// cards.crew (B3, r1): THE FIRST CREW is the colony's first crew ever, so a quiet colony (everyone recalled) whose people come home gets
+		// no card. On the colony cards.load loaded (its crew landed), paused: every colonist removed (the recall's departure,
+		// Debug_RemoveColonist), the deck records the quiet colony, then one colonist housed (Debug_AddColonists, as a returning ship houses
+		// them): no THE FIRST CREW card in the 3 s after. load.selection's load brings the saved colony back.
+		const TSharedRef<FG2bCrewWatch> CW = MakeShared<FG2bCrewWatch>();
+		Runner.Do(TEXT("cards.crew recall"), [CW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !PC || !Deck.IsValid())
+			{
+				return;
+			}
+			PC->SetSimSpeed(0.f); // paused: no step announces the quiet colony or lands anyone meanwhile
+			Deck->Debug_ClearTipCards();
+			CW->Pop0 = Sim->GetPopulation();
+			TArray<int32> Ids;
+			for (const FRHColonist& C : Sim->GetColonists())
+			{
+				Ids.Add(C.Id);
+			}
+			for (const int32 Id : Ids)
+			{
+				CW->Removed += Sim->Debug_RemoveColonist(Id) ? 1 : 0;
+			}
+			CW->PopQuiet = Sim->GetPopulation();
+			CW->bQuiet = Sim->IsColonyQuiet();
+		}, 0.6f);
+		Runner.Do(TEXT("cards.crew return"), [CW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !Deck.IsValid())
+			{
+				return;
+			}
+			bool bBorn = false, bArrival = false;
+			CW->bRead = Deck->Debug_GetWatchedMoments(CW->bWatchedCrew, bBorn, bArrival);
+			CW->Housed = Sim->Debug_AddColonists(1);
+			CW->Pop1 = Sim->GetPopulation();
+		}, 0.f);
+		Runner.Push(TEXT("cards.crew sample"), [CW](double Elapsed, bool)
+		{
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (Deck.IsValid())
+			{
+				const FString Titles = Deck->Debug_GetCardTitles();
+				TArray<FString> Each;
+				Titles.ParseIntoArray(Each, TEXT(" | "), true);
+				const int32 Crew = Each.FilterByPredicate([](const FString& C) { return C == TEXT("*THE FIRST CREW"); }).Num();
+				if (Crew > CW->Crew || CW->Titles.IsEmpty())
+				{
+					CW->Crew = FMath::Max(CW->Crew, Crew);
+					CW->Titles = Titles;
+				}
+			}
+			return Elapsed >= 3.0;
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("cards.crew"), [CW]()
+		{
+			FString Why;
+			if (CW->Pop0 <= 0 || CW->Removed != CW->Pop0 || CW->PopQuiet != 0 || !CW->bQuiet) { Why += FString::Printf(TEXT(" premise: %d colonist(s), %d removed, %d left, the colony quiet: %s;"), CW->Pop0, CW->Removed, CW->PopQuiet, CW->bQuiet ? TEXT("yes") : TEXT("no")); }
+			if (CW->Housed < 1 || CW->Pop1 < 1) { Why += FString::Printf(TEXT(" premise: no colonist came home (%d housed, %d now);"), CW->Housed, CW->Pop1); }
+			if (CW->Crew > 0) { Why += FString::Printf(TEXT(" %d THE FIRST CREW card(s) when the quiet colony's people came home: '%s';"), CW->Crew, *CW->Titles); }
+			const FString Said = FString::Printf(TEXT("%d colonist(s) removed (the colony quiet: %s; the deck read it, its crew watch %s), %d housed again; THE FIRST CREW cards in the 3 s after: %d; cards '%s'"),
+				CW->Removed, CW->bQuiet ? TEXT("yes") : TEXT("no"), CW->bRead ? (CW->bWatchedCrew ? TEXT("true") : TEXT("false")) : TEXT("unread"), CW->Housed, CW->Crew, *CW->Titles);
+			Report(TEXT("cards.crew"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.2f);
+
+		// load.selection (B8.4): a load leaves nothing selected and no card open, from a selected station bay and from a selected Lab cell.
+		const TSharedRef<FG2bLoadWatch> LS = MakeShared<FG2bLoadWatch>();
+		Runner.Do(TEXT("load.selection bay"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			if (!Sim || !PC || T->G2ClearHab == 0)
+			{
+				return;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			FString R;
+			Sim->DesignateBay(T->G2ClearHab, 1, FName("Workstation"), R);
+			PC->Debug_SelectBay(T->G2ClearHab, 1);
+		}, 0.3f);
+		for (int32 Phase = 0; Phase < 2; ++Phase)
+		{
+			Runner.Do(Phase == 0 ? TEXT("load.selection bay load") : TEXT("load.selection cell load"), [T, LS, Phase]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Deck.IsValid())
+				{
+					return;
+				}
+				LS->bHeld[Phase] = Phase == 0 ? PC->HasSelectedBay() : PC->HasSelectedCell();
+				FString Err;
+				const bool bLoaded = Sim->LoadColony(TEXT("clickg2b"), Err);
+				FString Title, Body;
+				const bool bCard = Deck->Debug_GetCardShown(Title, Body);
+				LS->bClear[Phase] = bLoaded && PC->GetSelectedBuildingId() == 0 && !PC->HasSelectedBay() && !PC->HasSelectedCell() && !bCard;
+				LS->Read[Phase] = FString::Printf(TEXT("%s: load %s; then building %d, bay %s, cell %s, card %s"), Phase == 0 ? TEXT("bay") : TEXT("cell"), bLoaded ? TEXT("ok") : *Err,
+					PC->GetSelectedBuildingId(), PC->HasSelectedBay() ? TEXT("selected") : TEXT("none"), PC->HasSelectedCell() ? TEXT("selected") : TEXT("none"), bCard ? TEXT("SHOWN") : TEXT("closed"));
+				if (Phase == 0)
+				{
+					// Then a Lab cell on floor -1 (RH.Demo's zoning).
+					PC->SetActiveLevel(-1);
+					T->G2bCell = INDEX_NONE;
+					for (int32 i = 0; i < Sim->GetFloorCarvedCells(-1) && T->G2bCell == INDEX_NONE; ++i)
+					{
+						if (Sim->GetRoomAt(-1, i) == FName("Lab")) { T->G2bCell = i; }
+					}
+					if (T->G2bCell != INDEX_NONE)
+					{
+						PC->Debug_SelectCell(-1, T->G2bCell);
+					}
+				}
+			}, 0.3f);
+		}
+		Runner.Do(TEXT("load.selection"), [T, LS]()
+		{
+			FString Why;
+			for (int32 Phase = 0; Phase < 2; ++Phase)
+			{
+				if (!LS->bHeld[Phase]) { Why += FString::Printf(TEXT(" premise: the %s was not held selected before its load;"), Phase == 0 ? TEXT("bay") : TEXT("cell")); }
+				if (!LS->bClear[Phase]) { Why += FString::Printf(TEXT(" %s;"), *LS->Read[Phase]); }
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetActiveLevel(0);
+				PC->SetSimSpeed(1.f);
+			}
+			Report(TEXT("load.selection"), Why.IsEmpty(), FString::Printf(TEXT("%s%s%s; %s (Lab cell %d)"), *Why, Why.IsEmpty() ? TEXT("") : TEXT(" | "), *LS->Read[0], *LS->Read[1], T->G2bCell));
+		}, 0.2f);
+
+		// log.fold (B2): the LOG fold opened by its own button: it alone is open, and it lists this gate's own lines newest first (other lines
+		// may sit between), at most LogCap.
+		Runner.Do(TEXT("log.fold setup"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>())
+			{
+				Deck->Debug_ScrollFoldIntoView(SRHCommandDeck::EFold::Log); // its header to the top of the column, so the button is on screen
+			}
+		}, 1.3f);
+		{
+			const TSharedRef<FPress> Fold = PushPress(TEXT("log.fold"), LocateButton(TEXT("RH.LogToggle"), 0, true));
+			PushCheckSays(TEXT("log.fold"), Fold, [T](FString& Said)
+			{
+				const ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Deck.IsValid()) { return FString(TEXT("no deck")); }
+				using EF = SRHCommandDeck::EFold;
+				FString Why;
+				if (!Deck->IsFoldOpen(EF::Log)) { Why += TEXT(" the LOG fold is not open;"); }
+				for (const EF Other : { EF::Politics, EF::Crew, EF::City, EF::Fleet, EF::Power, EF::Market })
+				{
+					if (Deck->IsFoldOpen(Other)) { Why += FString::Printf(TEXT(" fold %d is open too;"), (int32)Other); }
+				}
+				TArray<FString> Lines;
+				Deck->Debug_GetLogText().ParseIntoArray(Lines, TEXT("\n"), true);
+				// Newest first: the loads of load.selection (2) and cards.load, speed.wish's 60x resumed, clear.refused's notice, deck.lines'
+				// landing and quota lines, cards.arrival's card, the CEO line and the arrival line, the merge line twice, the four alerts.
+				// The two lines the code under test posts in other checks (speed.wish's "60x resumed", cards.arrival's card) are listed when
+				// those checks saw them posted; their absence is those checks' failure.
+				struct FWant { FString Text; bool bPrefix; };
+				TArray<FWant> Wants = { { TEXT("loaded sol "), true }, { TEXT("loaded sol "), true }, { TEXT("loaded sol "), true } };
+				if (T->G2bResumedPosted > 0) { Wants.Add({ TEXT("60x resumed"), false }); }
+				Wants.Append({ { T->G2bRejected, false }, { T->G2bLandingLine, false }, { T->G2bQuotaLine, false } });
+				if (T->bG2bCardLogged) { Wants.Add({ TEXT("THE BIG ARRIVAL: The settlers have landed. The colony held its Hope long enough to be trusted with a city."), false }); }
+				Wants.Append({ { TEXT("THE CEO HAS ANNOUNCED HE WILL COME TO MARS WITH THE NEXT WAVE."), false }, { T->G2bArrivalLine, false },
+					{ FG2bMergeWatch::Line(), false }, { FG2bMergeWatch::Line(), false },
+					{ TEXT("G2b test alert four"), false }, { TEXT("G2b test alert three"), false }, { TEXT("G2b test alert two"), false }, { TEXT("G2b test alert one"), false } });
+				int32 At = 0, Found = 0;
+				for (const FWant& Want : Wants)
+				{
+					while (At < Lines.Num() && !(Want.bPrefix ? Lines[At].StartsWith(Want.Text) : (!Want.Text.IsEmpty() && Lines[At].EndsWith(TEXT(": ") + Want.Text))))
+					{
+						++At;
+					}
+					if (At >= Lines.Num())
+					{
+						Why += FString::Printf(TEXT(" '%s' not found in order (after %d of %d);"), *Want.Text.Left(60), Found, Wants.Num());
+						break;
+					}
+					++Found;
+					++At;
+				}
+				if (Lines.Num() > G2bLogCap) { Why += FString::Printf(TEXT(" %d lines (at most %d);"), Lines.Num(), G2bLogCap); }
+				Said = FString::Printf(TEXT("the LOG open alone: %s; %d line(s); this gate's %d lines found in order: %d%s%s; newest '%s'"), Deck->IsFoldOpen(EF::Log) ? TEXT("yes") : TEXT("no"), Lines.Num(), Wants.Num(), Found,
+					T->G2bResumedPosted > 0 ? TEXT("") : TEXT(" (speed.wish posted no '60x resumed': not listed)"), T->bG2bCardLogged ? TEXT("") : TEXT(" (cards.arrival logged no card: not listed)"),
+					Lines.Num() > 0 ? *Lines[0] : TEXT(""));
+				return Why;
+			}, 1.f);
+		}
+		Runner.Do(TEXT("log.fold cleanup"), []()
+		{
+			const ARHPlayerController* PC = GetPC();
+			if (const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>())
+			{
+				Deck->SetFoldOpen(SRHCommandDeck::EFold::Log, false);
+			}
+		}, 0.3f);
+
+		// alerts.e5 (B1, the E5 case; last: it loads Early). A DefyIssue at tension 62 re-raises Earth's demand in the same tick: the Defy line
+		// and the demand both arrive on one frame, and the queue then shows them together (the demand merged into the first one or not).
+		Runner.Do(TEXT("alerts.e5 setup"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			T->G2bWhy.Reset();
+			T->G2bE5Alerts.Reset();
+			if (!Sim || !PC || !Viz)
+			{
+				T->G2bWhy = TEXT(" no sim, controller or colony visualizer;");
+				return;
+			}
+			FString Err;
+			if (!Sim->LoadColony(TEXT("Early"), Err))
+			{
+				T->G2bWhy = FString::Printf(TEXT(" could not load Early (%s);"), *Err);
+				return;
+			}
+			PC->SetSimSpeed(1.f);
+			Viz->Debug_ClearAlerts();
+			Sim->Debug_ShiftIdentity(20.0 - Sim->GetIdentityAxis());
+			Sim->Debug_AddTension(62.0 - Sim->GetEarthTension());
+			T->G2bAlertHandle = Sim->OnAlert.AddLambda([T](const FString& Message) { T->G2bE5Alerts.Add(TPair<FString, uint64>(Message, GFrameCounter)); });
+		}, 0.2f);
+		Runner.Push(TEXT("alerts.e5 demand"), [](double, bool bLast) { const URHSimWorldSubsystem* Sim = GetSim(); return bLast || !Sim || Sim->IsEarthDemandPending(); }, 0.2f, 5.f);
+		Runner.Do(TEXT("alerts.e5 defy"), [T]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim)
+			{
+				return;
+			}
+			// r1: the first demand's entry before the Defy (in a row or waiting), so the sample can tell the re-raised demand reached the queue.
+			T->G2bE5DemandId = 0;
+			T->G2bE5DemandCount = 0;
+			if (const URHColonyVisualizerSubsystem* Viz = GetViz())
+			{
+				TArray<uint32> Ids;
+				TArray<FString> Texts;
+				TArray<float> Op;
+				TArray<int32> Cn;
+				Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+				for (int32 i = 0; i < Ids.Num() && T->G2bE5DemandId == 0; ++i)
+				{
+					if (Texts[i].StartsWith(TEXT("EARTH TRANSMISSION"))) { T->G2bE5DemandId = Ids[i]; T->G2bE5DemandCount = Cn[i]; }
+				}
+			}
+			FString Why;
+			if (!Sim->CanIssueCurrency(true, Why))
+			{
+				T->G2bWhy += FString::Printf(TEXT(" the order was refused: %s;"), *Why);
+			}
+			const double Lag0 = Sim->GetOrderLagSeconds();
+			Sim->SetOrderLagSeconds(0.0);
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Solidarity");
+			Cmd.Target = FName("DefyIssue");
+			Sim->EnqueueCommand(Cmd);
+			Sim->SetOrderLagSeconds(Lag0);
+		}, 0.f);
+		Runner.Push(TEXT("alerts.e5 issued"), [](double, bool bLast) { const URHSimWorldSubsystem* Sim = GetSim(); return bLast || !Sim || Sim->IsCurrencyIssued(); }, 0.f, 5.f);
+		const TSharedRef<bool> bE5Together = MakeShared<bool>(false);
+		Runner.Push(TEXT("alerts.e5 sample"), [T, bE5Together](double Elapsed, bool)
+		{
+			if (const URHColonyVisualizerSubsystem* Viz = GetViz())
+			{
+				TArray<uint32> Ids;
+				TArray<FString> Texts;
+				TArray<float> Op;
+				TArray<int32> Cn;
+				Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+				const bool bDefy = Texts.ContainsByPredicate([](const FString& L) { return L.StartsWith(TEXT("YOU DEFIED EARTH")); });
+				// r1: the re-raised demand itself, not the first one alone: the first demand's entry counted once more (merged), or a second
+				// EARTH TRANSMISSION row.
+				bool bReRaised = false;
+				for (int32 i = 0; i < Ids.Num(); ++i)
+				{
+					if (!Texts[i].StartsWith(TEXT("EARTH TRANSMISSION")))
+					{
+						continue;
+					}
+					bReRaised |= Ids[i] == T->G2bE5DemandId ? Cn[i] >= T->G2bE5DemandCount + 1 : true;
+				}
+				*bE5Together |= bDefy && bReRaised && T->G2bE5DemandId != 0;
+			}
+			return Elapsed >= 1.5;
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("alerts.e5"), [T, bE5Together]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			FString Why = T->G2bWhy;
+			uint64 DefyFrame = 0;
+			for (const TPair<FString, uint64>& A : T->G2bE5Alerts)
+			{
+				if (A.Key.Contains(TEXT("YOU DEFIED EARTH"))) { DefyFrame = A.Value; break; }
+			}
+			const bool bSameFrame = DefyFrame != 0 && T->G2bE5Alerts.ContainsByPredicate([DefyFrame](const TPair<FString, uint64>& A) { return A.Value == DefyFrame && A.Key.Contains(TEXT("EARTH TRANSMISSION")); });
+			if (!Sim || !Sim->IsCurrencyIssued()) { Why += TEXT(" the mark was not issued;"); }
+			if (DefyFrame == 0) { Why += TEXT(" no 'YOU DEFIED EARTH' alert;"); }
+			else if (!bSameFrame) { Why += TEXT(" the re-raised demand did not arrive on the Defy line's frame;"); }
+			if (T->G2bE5DemandId == 0) { Why += TEXT(" premise: no EARTH TRANSMISSION row before the Defy;"); }
+			if (!*bE5Together) { Why += TEXT(" the queue never showed the Defy line with the re-raised demand (the first demand's entry counted again, or a second EARTH TRANSMISSION row);"); }
+			TArray<FString> Seen;
+			for (const TPair<FString, uint64>& A : T->G2bE5Alerts)
+			{
+				Seen.Add(FString::Printf(TEXT("frame %llu '%s'"), A.Value, *A.Key.Left(40)));
+			}
+			if (Sim)
+			{
+				Sim->OnAlert.Remove(T->G2bAlertHandle);
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
+			const FString Said = FString::Printf(TEXT("Early at tension 62, identity +20; the alerts: %s; the Defy line and the demand on one frame: %s; the first demand's entry #%u (count %d before the Defy); the Defy line shown with the re-raised demand: %s"),
+				*FString::Join(Seen, TEXT(", ")), bSameFrame ? TEXT("yes") : TEXT("no"), T->G2bE5DemandId, T->G2bE5DemandCount, *bE5Together ? TEXT("yes") : TEXT("no"));
+			Report(TEXT("alerts.e5"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
+		// speed.wish.onset (B5, r1; last of all: it loads clickg2b and moves its clock). The sim's event onset snaps the clock to 1x (director
+		// ruling: the player gets real time to batten down; they may re-speed at will), and it cancels a 60x wish armed before it, so 60x comes
+		// back only on the player's own press. The saved click colony, its clock put 25 sim-s before the first dust storm (inside the era
+		// band's one-step onset horizon), at 8x; a 60x press, refused (the storm is about to begin), arms the wish; the onset: for 6 s after it
+		// the clock reads at most 1x and no "60x resumed" is posted, while the test's own CanEnterEraMode reads clear from within 2 s of the
+		// onset to the end (so a wish left armed would have engaged: the deck's poll and latch take at most 3.7 s); then a player 60x press
+		// engages 60x (the steady storm may be skipped, ruling 2026-07-07b).
+		const TSharedRef<FG2bOnsetWatch> OW = MakeShared<FG2bOnsetWatch>();
+		Runner.Do(TEXT("speed.wish.onset setup"), [OW]()
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			UWorld* W = FindGameWorld();
+			URHSimClockSubsystem* Clock = W ? W->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+			if (!Sim || !PC || !Viz || !Clock || !Defs)
+			{
+				OW->Why = TEXT(" no sim, controller, colony visualizer, clock or definitions;");
+				return;
+			}
+			FString Err;
+			if (!Sim->LoadColony(TEXT("clickg2b"), Err))
+			{
+				OW->Why = FString::Printf(TEXT(" could not load clickg2b (%s);"), *Err);
+				return;
+			}
+			double StormSol = -1.0;
+			Defs->ForEachEvent([&StormSol](FName, const FRHEventRow& Row)
+			{
+				if (Row.Type == FName("DustStorm") && (StormSol < 0.0 || Row.StartSol < StormSol))
+				{
+					StormSol = Row.StartSol;
+				}
+			});
+			const double OnsetS = StormSol * URHSimClockSubsystem::SolLengthSimSeconds;
+			OW->StormSol = StormSol;
+			if (StormSol <= 0.0 || Clock->GetSimSecondsTotal() >= OnsetS - 25.0)
+			{
+				OW->Why = FString::Printf(TEXT(" premise: no dust storm ahead (first at sol %.2f, the colony at sol %.2f);"), StormSol, Clock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds);
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			PC->SetSimSpeed(8.f);
+			Clock->Debug_SetSimSeconds(OnsetS - 25.0); // about 3 real s at 8x, inside the 60 sim-s onset horizon
+			OW->LogSerial0 = Viz->GetLogSerial();
+			// The onset is the sim's own (its StepEventEdges snaps the clock, then broadcasts the line): timed here, not by GetActiveEvent,
+			// which reads the clock's frame end and can turn true a frame before the sim's step reaches the onset (the first dev run).
+			OW->Handle = Sim->OnAlert.AddLambda([OW](const FString& Message)
+			{
+				OW->Refusals += Message.StartsWith(TEXT("60x unavailable")) ? 1 : 0;
+				if (Message.StartsWith(TEXT("DUST STORM ONSET")))
+				{
+					++OW->Onsets;
+					if (OW->OnsetAt < 0.0)
+					{
+						OW->OnsetAt = FPlatformTime::Seconds();
+						OW->ClockAtOnset = ClockSpeed();
+					}
+				}
+			});
+		}, 0.5f);
+		Runner.Do(TEXT("speed.wish.onset 60x"), [OW]()
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			if (!Sim || !PC || !OW->Why.IsEmpty())
+			{
+				return;
+			}
+			FString Why;
+			OW->bRefusedAtPress = !Sim->CanEnterEraMode(Why);
+			OW->PressWhy = Why;
+			PC->SetSimSpeed(60.f); // the player's press (the 60x button's own call)
+		}, 0.5f);
+		Runner.Do(TEXT("speed.wish.onset armed"), [OW]()
+		{
+			const ARHPlayerController* PC = GetPC();
+			OW->ClockArmed = ClockSpeed();
+			OW->bArmed = PC && PC->IsSixtyWishPending();
+		}, 0.f);
+		Runner.Push(TEXT("speed.wish.onset sample"), [OW](double, bool bLast)
+		{
+			const URHSimWorldSubsystem* Sim = GetSim();
+			if (!Sim || !OW->Why.IsEmpty())
+			{
+				return true;
+			}
+			const double Now = FPlatformTime::Seconds();
+			const float Speed = ClockSpeed();
+			if (OW->OnsetAt < 0.0)
+			{
+				OW->MaxBefore = FMath::Max(OW->MaxBefore, Speed);
+				return bLast;
+			}
+			FString Why;
+			if (Sim->CanEnterEraMode(Why))
+			{
+				OW->ClearAt = OW->ClearAt < 0.0 ? Now : OW->ClearAt;
+			}
+			else
+			{
+				OW->LastWhy = Why;
+				OW->RefusedAfterClear += OW->ClearAt >= 0.0 ? 1 : 0;
+			}
+			if (Speed > 1.01f && OW->FirstAbove1 < 0.0)
+			{
+				OW->FirstAbove1 = Now - OW->OnsetAt;
+				OW->AboveSaid = FString::Printf(TEXT("%.1fx"), Speed);
+			}
+			return bLast || Now - OW->OnsetAt >= 6.0;
+		}, 0.f, 20.f);
+		Runner.Do(TEXT("speed.wish.onset press"), [OW]()
+		{
+			ARHPlayerController* PC = GetPC();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			OW->bPendingAfter = PC && PC->IsSixtyWishPending();
+			OW->Resumed = Viz ? G2bLogCount(*Viz, OW->LogSerial0, TEXT("60x resumed")) : -1;
+			if (PC && OW->Why.IsEmpty())
+			{
+				PC->SetSimSpeed(60.f); // the player's own press after the onset: the steady storm may be skipped
+			}
+		}, 0.5f);
+		Runner.Do(TEXT("speed.wish.onset"), [OW]()
+		{
+			OW->ClockAfterPress = ClockSpeed();
+			FString Why = OW->Why;
+			if (Why.IsEmpty())
+			{
+				if (!OW->bRefusedAtPress || !OW->PressWhy.Contains(TEXT("dust storm"))) { Why += FString::Printf(TEXT(" premise: the 60x press was not refused for the coming storm ('%s');"), *OW->PressWhy); }
+				if (!OW->bArmed || !FMath::IsNearlyEqual(OW->ClockArmed, 8.f)) { Why += FString::Printf(TEXT(" premise: the refused press left the clock at %.1f with the wish %s;"), OW->ClockArmed, OW->bArmed ? TEXT("armed") : TEXT("not armed")); }
+				if (OW->MaxBefore > 8.01f) { Why += FString::Printf(TEXT(" the clock read %.1f before the onset;"), OW->MaxBefore); }
+				if (OW->OnsetAt < 0.0) { Why += TEXT(" no onset within 20 s;"); }
+				else
+				{
+					if (OW->ClockAtOnset > 1.01f) { Why += FString::Printf(TEXT(" premise: the onset did not snap the clock to 1x (it read %.1f);"), OW->ClockAtOnset); }
+					if (OW->ClearAt < 0.0 || OW->ClearAt - OW->OnsetAt > 2.0 || OW->RefusedAfterClear > 0) { Why += FString::Printf(TEXT(" premise: the era band was not clear from within 2 s of the onset to the end (clear at %.2f s, refused on %d frame(s) after, last '%s');"), OW->ClearAt >= 0.0 ? OW->ClearAt - OW->OnsetAt : -1.0, OW->RefusedAfterClear, *OW->LastWhy); }
+					if (OW->FirstAbove1 >= 0.0) { Why += FString::Printf(TEXT(" the clock read %s %.2f s after the onset: the wish undid the onset's 1x;"), *OW->AboveSaid, OW->FirstAbove1); }
+				}
+				if (OW->Resumed != 0) { Why += FString::Printf(TEXT(" %d '60x resumed' line(s) after the press;"), OW->Resumed); }
+				if (OW->bPendingAfter) { Why += TEXT(" the wish was still pending 6 s after the onset;"); }
+				if (!FMath::IsNearlyEqual(OW->ClockAfterPress, 60.f)) { Why += FString::Printf(TEXT(" a player 60x press in the storm left the clock at %.1f (the steady storm may be skipped);"), OW->ClockAfterPress); }
+			}
+			const FString Said = FString::Printf(TEXT("first storm at sol %.2f; the 60x press refused ('%s'), the clock %.0fx with the wish %s; the onset: the clock %.1fx (%d onset alert(s)), the band clear %.2f s after it; the clock above 1x after the onset: %s; %d '60x resumed' line(s); wish pending 6 s after: %s; a 60x press then read %.0fx"),
+				OW->StormSol, *OW->PressWhy, OW->ClockArmed, OW->bArmed ? TEXT("armed") : TEXT("not armed"), OW->ClockAtOnset, OW->Onsets, OW->ClearAt >= 0.0 && OW->OnsetAt >= 0.0 ? OW->ClearAt - OW->OnsetAt : -1.0,
+				OW->FirstAbove1 >= 0.0 ? *FString::Printf(TEXT("%s at %.2f s"), *OW->AboveSaid, OW->FirstAbove1) : TEXT("never"), OW->Resumed, OW->bPendingAfter ? TEXT("yes") : TEXT("no"), OW->ClockAfterPress);
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->OnAlert.Remove(OW->Handle);
+			}
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(1.f);
+			}
+			Report(TEXT("speed.wish.onset"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+		}, 0.3f);
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -5814,6 +8462,8 @@ namespace
 		GDropHooks = 0;
 		GHoverRetries = 0;
 		GHoverHooks = 0;
+		GDragRetries = 0;   // G2b (B7)
+		GDropDragHooks = 0;
 		EnsureActivationLog();
 		const auto Section = []() -> URHSectionVisualizerSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHSectionVisualizerSubsystem>() : nullptr; };
 		PushSettle(2.f);
@@ -6108,10 +8758,66 @@ namespace
 		FFlashCold Cold[2];
 	};
 
+	// G2b (B1, B2): flash.alerts' own record: the alert entries by id (their fades and texts), the LOG's lines by id, the step's own firings.
+	struct FG2bFlashAlerts
+	{
+		int32 Stage = 0;
+		int32 Fired = 0;                   // lines fired through OnAlert (repeats too)
+		TArray<FString> Lines;             // the distinct lines, in firing order
+		TSet<FString> ShownTexts;          // every line seen in a row (its words, without a merge count)
+		TMap<uint32, bool> Falling;        // an entry whose opacity has begun to fall
+		TMap<uint32, float> LastOpacity;
+		TMap<uint32, FString> MaskedText;  // an entry's masked words last frame
+		TMap<uint32, int32> TextChanges;   // how often each entry's masked words changed
+		TMap<uint32, FString> LogText;     // a LOG line's text by its id
+		uint32 LogSerial0 = 0;
+		int32 MaxRows = 0, Frames = 0, Reversals = 0, LogChanged = 0, FadeFrames8x = 0;
+		FString ReversalSaid, LogSaid;
+		uint32 OneId = 0;                  // line one's entry (its first firing, merged at t 0.5)
+		double RepeatAt = -1.0;            // when the repeat came (s into the step)
+		bool bOneThereAtRepeat = false;    // still in a row (leaving) when the t 7.0 repeat came
+		uint32 RepeatId = 0;               // the entry the t 7.0 repeat went to
+		int32 OneCountAfterRepeat = 0;
+		TMap<uint32, float> PrevFrame;     // r1: the entries seen last frame and their opacity (an entry's first and last frame for R2)
+		int32 StackChanges = 0;            // r1: changes in the rows the banner lays out
+		// r2: the laid-out row count last frame, the way it last changed (+1 up, -1 down) and when, and the closest two changes.
+		int32 LaidPrev = -1, StackDir = 0;
+		double StackChangeS = -1.0e9, StackClosest = 1.0e9;
+	};
+
+	// G2b (B6, POWER C): flash.power's own record: the tile and the fold header against the test's own residual (onset = the last step's end
+	// before the sim rationed, the earliest it can be; hold = the largest ShedHoldFor seen in the episode), and the RATIONED card lines.
+	struct FG2bFlashPower
+	{
+		bool bAfterDrain = false;
+		double PrevEndS = -1.0, OnsetS = -1.0, MaxHoldS = 0.0, Residual = 1.0;
+		int32 Frames = 0, Disagree = 0, Early = 0, ToNumber = 0, Back = 0, RationedLines = 0, BadRationed = 0;
+		bool bLastNumber = false, bLastSeen = false, bNumberEver = false;
+		bool bShownLast = false; // r2: the tile or the header showed a rationing form on the last sample
+		double FirstNumberResidual = -1.0, FirstNumberSol = -1.0;
+		FString DisagreeSaid, EarlySaid, BackSaid, BadRationedSaid, FirstNumberSaid;
+	};
+
+	// G2b r2 (B6): flash.power.restart's own record. A settled rationing spell (flash.power's) whose sim episode ends and begins again while
+	// the header still reads RATIONING: the number must stay on the tile and the header. Stage: 0 before; 1 generation covers the load (the
+	// sheds stop), waiting for the shown net's next take; 2 waiting 1.75 s after that take; 3 one shed (no generation, an empty bank);
+	// 4 covered again, waiting for the sim's hold to end; 5 the sim stopped rationing and the cover and the bank were taken away on that
+	// frame, waiting for it to ration again; 6 it rations again, 6 s read; 7 done.
+	struct FG2bFlashRestart
+	{
+		int32 Stage = 0, Frames = 0, Disagree = 0, BackFrames = 0, NotShownFrames = 0, FramesAfter = 0, NumberFramesAfter = 0;
+		double CoverS = -1.0, TakeS = -1.0, PulseS = -1.0, ShedBefore = -1.0, EndS = -1.0, RestartS = -1.0, AgainS = -1.0, DoneS = -1.0;
+		bool bHeaderRationingAtEnd = false, bSettledAtEnd = false, bSpellAtEnd = false;
+		FString Problem, DisagreeSaid, BackSaid, NotShownSaid, HeaderFirstPrev, TileAtCover, TileAtEnd, HeaderAtEnd, TileLast, HeaderLast;
+	};
+
 	struct FFlashProbe
 	{
 		bool bArmed = false;
 		TSharedPtr<FFlashLab> Lab;       // G1 r3: flash.lab's record, from its setup on
+		TSharedPtr<FG2bFlashAlerts> G2bAlerts; // G2b: flash.alerts' record, while it runs
+		TSharedPtr<FG2bFlashPower> G2bPower;   // G2b: flash.power's record, while it runs
+		TSharedPtr<FG2bFlashRestart> G2bRestart; // G2b r2: flash.power.restart's record, while it runs
 		FString Bucket = TEXT("setup");
 		double QuietUntilS = 0.0;
 		TMap<FString, FFlashElem> Elems;
@@ -6631,6 +9337,278 @@ namespace
 	}
 
 	// One frame's samples (the core ticker, every frame while armed).
+	double FlashSol();
+
+	// G2b (B1, B2): flash.alerts' per-frame sample. Each shown entry by id: its opacity (continuous, range 1: R2's per-frame step, a fade's
+	// start as one change for R1) and its masked words (discrete); a rise after its fall began; the row count; every LOG line added by id
+	// (its text must never change). Into a bucket of its own ("alerts.q"), so the colony's other elements never judge the queue.
+	void FlashSampleAlerts(FFlashProbe& P, FG2bFlashAlerts& A, const URHColonyVisualizerSubsystem& Viz, const SRHCommandDeck& Deck, double NowS, double FrameDt, int32 Speed)
+	{
+		FFlashBucket& Bk = P.Buckets.FindOrAdd(TEXT("alerts.q"));
+		++A.Frames;
+		++Bk.Frames;
+		TArray<uint32> Ids;
+		TArray<FString> Texts;
+		TArray<float> Op;
+		TArray<int32> Cn;
+		const int32 N = Viz.Debug_GetAlertRows(Ids, Texts, Op, Cn);
+		A.MaxRows = FMath::Max(A.MaxRows, N);
+		// r1: the rows the banner lays out (the row widgets' own visibility): a row collapsed on the frame the queue turns over (a line
+		// removed, the next admitted at opacity 0) and laid out again on the next makes the toast under the banner jump. r2: judged by two
+		// rules of its own. (s1) Every row an entry holds is laid out, on every frame (the collapse itself). (s2) The row count never goes
+		// one way and back the other inside 3 s (a blink of the stack: 3 -> 1 -> 3, or a row added and taken away). Round 1 put the count
+		// under the generic R1 (any two changes inside 3 s), on the premise that the drain's changes are 6 s and more apart. Under the r2
+		// hold rule that premise is false: two lines admitted half a second apart (seven and eight here) keep their full hold and so leave
+		// half a second apart, the stack draining 3 -> 2 -> 1 one way, which is two lines each fading once, not a blink.
+		const int32 Laid = Deck.Debug_GetAlertRowsLaidOut();
+		if (Laid != N)
+		{
+			++Bk.Violations;
+			if (Bk.ViolationSaid.Num() < 8)
+			{
+				Bk.ViolationSaid.Add(FString::Printf(TEXT("the banner laid out %d row(s) while the queue held %d at %.2f s"), Laid, N, NowS - GFlashT0));
+			}
+		}
+		if (A.LaidPrev >= 0 && Laid != A.LaidPrev)
+		{
+			++A.StackChanges;
+			const int32 Dir = Laid > A.LaidPrev ? 1 : -1;
+			const double Gap = NowS - A.StackChangeS;
+			A.StackClosest = FMath::Min(A.StackClosest, Gap);
+			if (A.StackDir != 0 && Dir != A.StackDir && Gap < 3.0)
+			{
+				++Bk.Violations;
+				if (Bk.ViolationSaid.Num() < 8)
+				{
+					Bk.ViolationSaid.Add(FString::Printf(TEXT("R1 the banner's laid-out rows went from %d to %d at %.2f s, %.2f s after going the other way"), A.LaidPrev, Laid, NowS - GFlashT0, Gap));
+				}
+			}
+			A.StackDir = Dir;
+			A.StackChangeS = NowS;
+		}
+		A.LaidPrev = Laid;
+		// r1: R2 at an entry's first and last frame, which the per-entry fade sample cannot see (its first sight is no change, and a removed
+		// entry is never sampled again): an entry first seen above 12 % popped in; one gone while it read above 12 % last frame vanished.
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (!A.PrevFrame.Contains(Ids[i]) && !A.LastOpacity.Contains(Ids[i]) && Op[i] > 0.12f)
+			{
+				++Bk.Violations;
+				if (Bk.ViolationSaid.Num() < 8)
+				{
+					Bk.ViolationSaid.Add(FString::Printf(TEXT("R2 alert #%u appeared at opacity %.3f on its first frame at %.2f s"), Ids[i], Op[i], NowS - GFlashT0));
+				}
+			}
+		}
+		for (const TPair<uint32, float>& Prev : A.PrevFrame)
+		{
+			if (!Ids.Contains(Prev.Key) && Prev.Value > 0.12f)
+			{
+				++Bk.Violations;
+				if (Bk.ViolationSaid.Num() < 8)
+				{
+					Bk.ViolationSaid.Add(FString::Printf(TEXT("R2 alert #%u vanished from opacity %.3f in one frame at %.2f s"), Prev.Key, Prev.Value, NowS - GFlashT0));
+				}
+			}
+		}
+		A.PrevFrame.Reset();
+		for (int32 i = 0; i < N; ++i)
+		{
+			A.PrevFrame.Add(Ids[i], Op[i]);
+		}
+		bool bFading = false;
+		for (int32 i = 0; i < N; ++i)
+		{
+			const uint32 Id = Ids[i];
+			FString Words = Texts[i];
+			const int32 Count = Words.Find(TEXT(" (x"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			if (Cn[i] > 1 && Count != INDEX_NONE)
+			{
+				Words.LeftInline(Count);
+			}
+			A.ShownTexts.Add(Words);
+			const FString Name = FString::Printf(TEXT("alert #%u"), Id);
+			FlashContinuous(P, Bk, Name + TEXT(" opacity"), Op[i], 1.0, NowS, FrameDt, true);
+			const FString Masked = MaskDigits(Texts[i]);
+			FlashDiscrete(P, Bk, Name + TEXT(" words"), Masked, NowS, true);
+			if (const float* Was = A.LastOpacity.Find(Id))
+			{
+				if (Op[i] < *Was - 1e-4f)
+				{
+					A.Falling.Add(Id, true);
+				}
+				else if (Op[i] > *Was + 1e-4f && A.Falling.FindRef(Id))
+				{
+					if (A.Reversals++ == 0)
+					{
+						A.ReversalSaid = FString::Printf(TEXT("%s rose from %.2f to %.2f after its fade out began, at %.2f s"), *Name, *Was, Op[i], NowS - GFlashT0);
+					}
+				}
+			}
+			A.LastOpacity.Add(Id, Op[i]);
+			if (const FString* WasWords = A.MaskedText.Find(Id))
+			{
+				if (*WasWords != Masked)
+				{
+					++A.TextChanges.FindOrAdd(Id);
+				}
+			}
+			A.MaskedText.Add(Id, Masked);
+			bFading |= Op[i] > 0.f && Op[i] < 1.f;
+		}
+		if (bFading && Speed == 8)
+		{
+			++A.FadeFrames8x;
+		}
+		const int32 Added = FMath::Min((int32)(Viz.GetLogSerial() - A.LogSerial0), Viz.GetLogCount());
+		for (int32 i = 0; i < Added; ++i)
+		{
+			const uint32 LineId = Viz.Debug_GetLogLineId(i);
+			const FString& Line = Viz.GetLogLine(i);
+			if (const FString* Was = A.LogText.Find(LineId))
+			{
+				if (*Was != Line && A.LogChanged++ == 0)
+				{
+					A.LogSaid = FString::Printf(TEXT("LOG line %u '%s' became '%s'"), LineId, **Was, *Line);
+				}
+			}
+			else
+			{
+				A.LogText.Add(LineId, Line);
+			}
+		}
+	}
+
+	// G2b (B6, POWER C): flash.power's per-frame sample: the tile's sub line and the fold header (one latched value: they must agree), the
+	// test's own residual (a number on either while it is above ServedSettleResidual fails), the changes from the no-number form to a number
+	// and back after the drain, and every RATIONED card line (masked, MS9's words).
+	// r2: the test's residual follows the SHOWN rationing spell, as the settled state now does: its onset is the first shed after nothing
+	// showed rationing (the tile or the header in a rationing form on the last sample, the shown net's kind, or the rationing latch), so a
+	// sim episode that ends and begins again while rationing is still shown keeps the onset. (flash.power's own drain has one episode.)
+	void FlashSamplePower(FG2bFlashPower& F, const SRHCommandDeck& Deck, const URHSimWorldSubsystem& Sim, const URHPowerLookSubsystem& Look)
+	{
+		++F.Frames;
+		const URHSimWorldSubsystem::FRHShedColony& C = Sim.GetShedColony();
+		const bool bRationing = Sim.IsColonyRationing();
+		if (!bRationing)
+		{
+			F.PrevEndS = C.LastStepEndS;
+			if (!F.bShownLast && !Look.IsNetMeanShown() && !Look.IsRationingShown())
+			{
+				F.OnsetS = -1.0; // the residual of the spell that ended stays (its number may still show inside the display's floor)
+			}
+		}
+		else
+		{
+			if (F.OnsetS < 0.0)
+			{
+				F.OnsetS = F.PrevEndS >= 0.0 ? F.PrevEndS : C.LastShedS;
+				F.MaxHoldS = 0.0;
+				F.Residual = 1.0;
+			}
+			F.MaxHoldS = FMath::Max(F.MaxHoldS, URHSimWorldSubsystem::ShedHoldFor(C.LastStepDtS));
+			const double Closed = (C.LastStepEndS - F.OnsetS) - C.CycleS;
+			F.Residual = (Closed > 0.0 && F.MaxHoldS > 0.0) ? FMath::Exp(-Closed / F.MaxHoldS) : 1.0;
+		}
+		const FString Tile = Deck.GetPowerTileSubText().ToString();
+		const FString Header = Deck.GetPowerFoldHeaderText().ToString();
+		FString First, Second;
+		Header.Split(TEXT("\n"), &First, &Second);
+		const bool bTileMeasuring = Tile == TEXT("rationing");
+		const bool bTileNumber = Tile.EndsWith(TEXT("% served"));
+		const bool bHeaderNumber = Second.EndsWith(TEXT("% SERVED"));
+		F.bShownLast = bTileMeasuring || bTileNumber || First.StartsWith(TEXT("RATIONING")); // r2: a rationing form on screen in this sample
+		const double Sol = FlashSol();
+		if ((bTileMeasuring && Second != TEXT("MEASURING")) || (bTileNumber && (!bHeaderNumber || Tile.LeftChop(8) != Second.LeftChop(8))))
+		{
+			if (F.Disagree++ == 0)
+			{
+				F.DisagreeSaid = FString::Printf(TEXT("the tile '%s' and the header '%s' at sol %.3f"), *Tile, *Header.Replace(TEXT("\n"), TEXT(" / ")), Sol);
+			}
+		}
+		const bool bNumber = bTileNumber || bHeaderNumber;
+		if (bNumber && F.Residual > G2bSettleResidual && F.Early++ == 0)
+		{
+			F.EarlySaid = FString::Printf(TEXT("'%s' / '%s' at sol %.3f with the residual at %.3f"), *Tile, *Second, Sol, F.Residual);
+		}
+		if (bNumber && !F.bNumberEver)
+		{
+			F.FirstNumberResidual = F.Residual;
+			F.FirstNumberSol = Sol;
+			F.FirstNumberSaid = FString::Printf(TEXT("'%s' / '%s'"), *Tile, *Second);
+		}
+		F.bNumberEver |= bNumber;
+		if (bTileMeasuring || bTileNumber)
+		{
+			if (F.bLastSeen && F.bAfterDrain)
+			{
+				F.ToNumber += (!F.bLastNumber && bTileNumber) ? 1 : 0;
+				if (F.bLastNumber && bTileMeasuring && F.Back++ == 0)
+				{
+					F.BackSaid = FString::Printf(TEXT("back to '%s' at sol %.3f"), *Tile, Sol);
+				}
+			}
+			F.bLastNumber = bTileNumber;
+			F.bLastSeen = true;
+		}
+		for (const FRHBuildingInstance& B : Sim.GetBuildings())
+		{
+			const FString Line = Deck.GetCardStatusLine(B.Id);
+			if (!Line.StartsWith(TEXT("RATIONED")))
+			{
+				continue;
+			}
+			++F.RationedLines;
+			if (MaskDigits(Line) != TEXT("RATIONED - running about #% of the time (not enough power for everything)") && F.BadRationed++ == 0)
+			{
+				F.BadRationedSaid = FString::Printf(TEXT("#%d %s: '%s'"), B.Id, *B.DefName.ToString(), *Line);
+			}
+		}
+	}
+
+	// G2b r2 (B6): flash.power.restart's per-frame sample, from the cover on: the tile's sub line and the fold header. From the frame the
+	// sim's rationing ends, neither may read the no-number form (the number fell back), and they must agree; on every frame the header
+	// must still read RATIONING (the premise: the shown spell spans the gap between the sim's two episodes).
+	void FlashSampleRestart(FG2bFlashRestart& F, const SRHCommandDeck& Deck, const URHSimWorldSubsystem& Sim)
+	{
+		if (F.Stage < 1 || F.Stage > 6)
+		{
+			return;
+		}
+		++F.Frames;
+		const FString Tile = Deck.GetPowerTileSubText().ToString();
+		const FString Header = Deck.GetPowerFoldHeaderText().ToString();
+		FString First, Second;
+		Header.Split(TEXT("\n"), &First, &Second);
+		const bool bTileMeasuring = Tile == TEXT("rationing");
+		const bool bTileNumber = Tile.EndsWith(TEXT("% served"));
+		const bool bHeaderNumber = Second.EndsWith(TEXT("% SERVED"));
+		const bool bHeaderRationing = First.StartsWith(TEXT("RATIONING"));
+		const double Sol = FlashSol();
+		F.TileLast = Tile;
+		F.HeaderLast = Header.Replace(TEXT("\n"), TEXT(" / "));
+		if ((bTileMeasuring && Second != TEXT("MEASURING")) || (bTileNumber && (!bHeaderNumber || Tile.LeftChop(8) != Second.LeftChop(8))))
+		{
+			if (F.Disagree++ == 0)
+			{
+				F.DisagreeSaid = FString::Printf(TEXT("the tile '%s' and the header '%s' at sol %.3f"), *Tile, *F.HeaderLast, Sol);
+			}
+		}
+		if (!bHeaderRationing && F.NotShownFrames++ == 0)
+		{
+			F.NotShownSaid = FString::Printf(TEXT("the header '%s' (tile '%s') at sol %.3f, stage %d"), *F.HeaderLast, *Tile, Sol, F.Stage);
+		}
+		if (F.Stage >= 5)
+		{
+			++F.FramesAfter;
+			F.NumberFramesAfter += (bTileNumber && bHeaderNumber) ? 1 : 0;
+			if ((bTileMeasuring || Second == TEXT("MEASURING")) && F.BackFrames++ == 0)
+			{
+				F.BackSaid = FString::Printf(TEXT("'%s' / '%s' at sol %.3f, %.2f s after the sim's rationing ended"), *Tile, *Second, Sol, FApp::GetCurrentTime() - F.RestartS);
+			}
+		}
+	}
+
 	void FlashSample(FFlashProbe& P)
 	{
 		UWorld* W = FindGameWorld();
@@ -6820,6 +9798,19 @@ namespace
 		if (P.Lab.IsValid() && P.Bucket == TEXT("lab") && PC)
 		{
 			FlashSampleLab(P, Bk, *Deck, *Sim, *Look, *PC, W, NowS, bCount, bDry, bDay, Speed);
+		}
+		// G2b: flash.alerts' and flash.power's own samples, each only in its bucket.
+		if (P.G2bAlerts.IsValid() && P.Bucket == TEXT("alerts"))
+		{
+			FlashSampleAlerts(P, *P.G2bAlerts, *Colony, *Deck, NowS, FrameDt, Speed);
+		}
+		if (P.G2bPower.IsValid() && P.Bucket == TEXT("power"))
+		{
+			FlashSamplePower(*P.G2bPower, *Deck, *Sim, *Look);
+		}
+		if (P.G2bRestart.IsValid() && P.Bucket == TEXT("power.restart"))
+		{
+			FlashSampleRestart(*P.G2bRestart, *Deck, *Sim);
 		}
 	}
 
@@ -7095,6 +10086,8 @@ namespace
 		GDropHooks = 0;
 		GHoverRetries = 0;
 		GHoverHooks = 0;
+		GDragRetries = 0;   // G2b (B7)
+		GDropDragHooks = 0;
 		EnsureActivationLog();
 		const TSharedRef<FFlashProbe> P = MakeShared<FFlashProbe>();
 		PushSettle(2.f);
@@ -7683,6 +10676,381 @@ namespace
 			ReportFlash(P, TEXT("flash.lab.cold"), TEXT("lab.cold"), true, Why, Said);
 		}, 0.f);
 
+		// ---- G2b (2026-11): flash.alerts (B1, B2) - the alert queue and the LOG under fast firing, on whatever slot flash.lab.cold left
+		// (Late): four lines in one frame, a repeat of line one at 0.5 s, two more at 1.0 s, 8x from 2.0 s, line one again while its entry is
+		// leaving (the first frame its fade out is seen, from 6.0 s, at 7.0 s at the latest: the repeat must be a new entry), three more at
+		// 8.0 s; then every frame until the queue is empty. r1: also the rows the banner lays out and R2 at each entry's first and last
+		// frame. r2: the laid-out rows by their own two rules (every row an entry holds is laid out; the count never goes one way and back
+		// the other inside 3 s: see FlashSampleAlerts), since under the r2 hold rule lines seven and eight leave half a second apart at
+		// their full hold (the hand trace is in the docs entry).
+		const TSharedRef<FG2bFlashAlerts> FA = MakeShared<FG2bFlashAlerts>();
+		Runner.Do(TEXT("flash.alerts setup"), [P, FA]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			P->Bucket = TEXT("alerts");
+			P->Reset();
+			if (!PC || !Viz || !Deck.IsValid())
+			{
+				P->Buckets.FindOrAdd(TEXT("alerts.q")).Problems.Add(TEXT("no player controller, colony visualizer or deck"));
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			Deck->SetFoldOpen(SRHCommandDeck::EFold::Log, true);
+			PC->SetSimSpeed(1.f);
+			FA->LogSerial0 = Viz->GetLogSerial();
+			FA->Lines = { TEXT("G2b flash alert one"), TEXT("G2b flash alert two"), TEXT("G2b flash alert three"), TEXT("G2b flash alert four"), TEXT("G2b flash alert five"),
+				TEXT("G2b flash alert six"), TEXT("G2b flash alert seven"), TEXT("G2b flash alert eight"), TEXT("G2b flash alert nine") };
+			P->G2bAlerts = FA;
+		}, 0.5f);
+		Runner.Push(TEXT("flash.alerts fire"), [FA](double Elapsed, bool)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !PC || !Viz || FA->Lines.Num() != 9)
+			{
+				return true;
+			}
+			const auto Fire = [&Sim, &FA](int32 Line)
+			{
+				Sim->OnAlert.Broadcast(FA->Lines[Line]);
+				++FA->Fired;
+			};
+			switch (FA->Stage)
+			{
+			case 0:
+				for (int32 Line = 0; Line < 4; ++Line) { Fire(Line); }
+				UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.alerts: four lines at %.2f s"), FApp::GetCurrentTime() - GFlashT0);
+				FA->Stage = 1;
+				return false;
+			case 1:
+			{
+				if (Elapsed < 0.5) { return false; }
+				Fire(0);
+				uint32 Id = 0;
+				G2bQueueHolds(*Viz, FA->Lines[0], &Id);
+				FA->OneId = Id; // line one's entry, merged now
+				FA->Stage = 2;
+				return false;
+			}
+			case 2:
+				if (Elapsed < 1.0) { return false; }
+				Fire(4);
+				Fire(5);
+				FA->Stage = 3;
+				return false;
+			case 3:
+				if (Elapsed < 2.0) { return false; }
+				PC->SetSimSpeed(8.f);
+				FA->Stage = 4;
+				return false;
+			case 4:
+			{
+				// Line one's repeat comes while its entry is leaving: on the first frame the sampler saw its opacity fall (from 6.0 s: its
+				// minimum hold, from its merge at 0.5 s, ends at 6.5 s while lines wait), at 7.0 s at the latest.
+				if (Elapsed < 6.0 || (Elapsed < 7.0 && !(FA->OneId != 0 && FA->Falling.FindRef(FA->OneId)))) { return false; }
+				uint32 Id = 0;
+				bool bShown = false;
+				FA->bOneThereAtRepeat = G2bQueueHolds(*Viz, FA->Lines[0], &Id, &bShown) && bShown && Id == FA->OneId;
+				FA->RepeatAt = Elapsed;
+				Fire(0);
+				// Where the repeat went: line one's leaving entry keeps its count (2), and a new entry holds the line.
+				TArray<uint32> Ids;
+				TArray<FString> Texts;
+				TArray<float> Op;
+				TArray<int32> Cn;
+				Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+				for (int32 i = 0; i < Ids.Num(); ++i)
+				{
+					if (Ids[i] == FA->OneId) { FA->OneCountAfterRepeat = Cn[i]; }
+					else if (Texts[i] == FA->Lines[0]) { FA->RepeatId = Ids[i]; }
+				}
+				Viz->Debug_GetAlertWaiting(Ids, Texts);
+				for (int32 i = 0; i < Ids.Num(); ++i)
+				{
+					if (Texts[i] == FA->Lines[0] && Ids[i] != FA->OneId) { FA->RepeatId = Ids[i]; }
+				}
+				FA->Stage = 5;
+				return false;
+			}
+			default:
+				if (Elapsed < 8.0) { return false; }
+				Fire(6);
+				Fire(7);
+				Fire(8);
+				return true;
+			}
+		}, 0.f, 0.f);
+		Runner.Push(TEXT("flash.alerts drain"), [P](double Elapsed, bool)
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Viz)
+			{
+				return true;
+			}
+			if (Viz->GetAlertRowCount() == 0 && Viz->GetAlertWaitingCount() == 0)
+			{
+				return true;
+			}
+			if (Elapsed > 45.0)
+			{
+				P->Buckets.FindOrAdd(TEXT("alerts.q")).Problems.Add(TEXT("the queue was not empty 45 s after the last firing"));
+				return true;
+			}
+			return false;
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("flash.alerts"), [P, FA]()
+		{
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			FFlashBucket& Bk = P->Buckets.FindOrAdd(TEXT("alerts.q"));
+			FString Why;
+			for (const FString& Problem : Bk.Problems) { Why += TEXT(" ") + Problem + TEXT(";"); }
+			if (Bk.Violations > 0) { Why += FString::Printf(TEXT(" %d violation(s): %s;"), Bk.Violations, *FString::Join(Bk.ViolationSaid, TEXT("; "))); }
+			if (FA->Reversals > 0) { Why += FString::Printf(TEXT(" %d fade reversal(s), first: %s;"), FA->Reversals, *FA->ReversalSaid); }
+			int32 MostWords = 0;
+			for (const TPair<uint32, int32>& C : FA->TextChanges) { MostWords = FMath::Max(MostWords, C.Value); }
+			if (MostWords > 1) { Why += FString::Printf(TEXT(" an entry's words changed %d times (once at most: its merge count);"), MostWords); }
+			if (FA->MaxRows > G2bRowsMax) { Why += FString::Printf(TEXT(" %d rows on one frame;"), FA->MaxRows); }
+			for (const FString& Line : FA->Lines)
+			{
+				if (!FA->ShownTexts.Contains(Line)) { Why += FString::Printf(TEXT(" '%s' was never shown;"), *Line); }
+			}
+			if (!FA->bOneThereAtRepeat) { Why += TEXT(" premise: line one's entry was not in a row (leaving) when its repeat came;"); }
+			if (FA->OneCountAfterRepeat > 2 || (FA->RepeatId == 0 && FA->Fired >= 9)) { Why += FString::Printf(TEXT(" line one's t 7.0 repeat was merged into its leaving entry (count %d, no new entry);"), FA->OneCountAfterRepeat); }
+			if (FA->LogChanged > 0) { Why += FString::Printf(TEXT(" %d LOG line(s) changed: %s;"), FA->LogChanged, *FA->LogSaid); }
+			int32 Logged = 0, Other = 0;
+			if (Viz)
+			{
+				const int32 Added = FMath::Min((int32)(Viz->GetLogSerial() - FA->LogSerial0), Viz->GetLogCount());
+				for (int32 i = 0; i < Added; ++i)
+				{
+					const FString& L = Viz->GetLogLine(i);
+					const bool bOurs = FA->Lines.ContainsByPredicate([&L](const FString& Line) { return L.EndsWith(TEXT(": ") + Line); });
+					Logged += bOurs ? 1 : 0;
+					Other += bOurs ? 0 : 1;
+				}
+			}
+			if (Logged != FA->Fired) { Why += FString::Printf(TEXT(" the LOG holds %d of the %d lines fired;"), Logged, FA->Fired); }
+			if (FA->FadeFrames8x == 0) { Why += TEXT(" premise: no frame of a fade was sampled at 8x;"); }
+			const FString Said = FString::Printf(TEXT("%d frames; %d entries; at most %d rows; the banner's laid-out rows changed %d time(s), the closest two %s apart, none back the other way inside 3 s; the largest per-frame opacity step %.1f %%%s%s; the closest two changes of one element %s%s%s; line one merged at 0.5 s (its words changed %d time(s)); at %.2f s (its entry %s) the repeat went to %s; %d line(s) fired, %d in the LOG (and %d of the colony's own); %d fade frame(s) at 8x"),
+				FA->Frames, FA->LastOpacity.Num(), FA->MaxRows, FA->StackChanges, FA->StackClosest < 1.0e8 ? *FString::Printf(TEXT("%.2f s"), FA->StackClosest) : TEXT("no two"),
+				Bk.LargestStepPct, Bk.LargestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.LargestSaid,
+				Bk.Closest < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), Bk.Closest) : TEXT("none"), Bk.ClosestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.ClosestSaid,
+				FA->OneId != 0 ? FA->TextChanges.FindRef(FA->OneId) : -1, FA->RepeatAt, FA->bOneThereAtRepeat ? TEXT("still leaving") : TEXT("gone"),
+				FA->RepeatId != 0 ? *FString::Printf(TEXT("a new entry #%u"), FA->RepeatId) : TEXT("no new entry"), FA->Fired, Logged, Other, FA->FadeFrames8x);
+			Report(TEXT("flash.alerts"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+			P->G2bAlerts.Reset();
+			const ARHPlayerController* PC = GetPC();
+			if (const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>())
+			{
+				Deck->SetFoldOpen(SRHCommandDeck::EFold::Log, false);
+			}
+		}, 0.f);
+
+		// ---- G2b (2026-11): flash.power (B6, POWER C) - the Late slot's dusk drained at 8x: the tile and the header show no number while the
+		// served share settles (MEASURING), then the same number on both, once; never a number before the test's own residual is 5 % or less.
+		const TSharedRef<FG2bFlashPower> FP = MakeShared<FG2bFlashPower>();
+		Runner.Do(TEXT("flash.power arm"), [P, FP]() { P->G2bPower = FP; }, 0.f);
+		PushFlashLoad(P, TEXT("Late"), TEXT("power"));
+		PushFlashSegment(P, TEXT("flash.power load"), 1.f, 3.0, 0.0);
+		PushFlashSixty(P, TEXT("flash.power 60x to dusk"), 62.80, true);
+		Runner.Do(TEXT("flash.power drain mark"), [FP]() { FP->bAfterDrain = true; }, 0.f);
+		PushFlashDrain(P, TEXT("flash.power 8x"), 8.f, 40.0, false);
+		PushFlashSegment(P, TEXT("flash.power 1x end"), 1.f, 5.0, 0.0);
+		Runner.Do(TEXT("flash.power"), [P, FP]()
+		{
+			FString Why;
+			if (FP->Disagree > 0) { Why += FString::Printf(TEXT(" the tile and the header disagreed on %d frame(s), first %s;"), FP->Disagree, *FP->DisagreeSaid); }
+			if (FP->Early > 0) { Why += FString::Printf(TEXT(" a number while the residual was above %.2f on %d frame(s), first %s;"), G2bSettleResidual, FP->Early, *FP->EarlySaid); }
+			if (FP->ToNumber > 1) { Why += FString::Printf(TEXT(" %d changes from the no-number form to a number after the drain (one at most);"), FP->ToNumber); }
+			if (FP->Back > 0) { Why += FString::Printf(TEXT(" %d change(s) back to the no-number form, first %s;"), FP->Back, *FP->BackSaid); }
+			if (!FP->bNumberEver) { Why += TEXT(" premise: no number was ever shown (the share never settled in the segment);"); }
+			if (FP->RationedLines == 0) { Why += TEXT(" premise: no RATIONED card line was seen;"); }
+			if (FP->BadRationed > 0) { Why += FString::Printf(TEXT(" %d RATIONED card line(s) in other words, first %s;"), FP->BadRationed, *FP->BadRationedSaid); }
+			const FString Said = FString::Printf(TEXT("; flash.power: %d frame(s) of the tile and the header; the first number %s at sol %.3f with the residual at %.3f; no-number to number after the drain: %d; back: %d; RATIONED card lines: %d sampled, all in MS9's words: %s"),
+				FP->Frames, *FP->FirstNumberSaid, FP->FirstNumberSol, FP->FirstNumberResidual, FP->ToNumber, FP->Back, FP->RationedLines, FP->BadRationed == 0 ? TEXT("yes") : TEXT("no"));
+			ReportFlash(P, TEXT("flash.power"), TEXT("power"), true, Why, Said);
+			P->G2bPower.Reset();
+		}, 0.f);
+
+		// ---- G2b r2 (2026-11): flash.power.restart (B6) - the settled number through a sim rationing episode that ends and begins again
+		// while rationing is still shown (supply nearing demand: sparse sheds). From flash.power's settled night, at 8x: generation is made
+		// to cover the load (the sim's existing harness source, Debug_SetExtraGenW), so the sheds stop while the sim still rations for one
+		// hold. The shown net's takes are then one floor apart (its shortfall falls every step); 1.75 s after the first take seen, one shed
+		// (no generation and an empty bank for a step) restarts the hold, so it ends about 8.0 s after that take: between the takes 6.4 and
+		// 9.6 s after it, where no take is due and the shown kind cannot leave rationing. On the frame the sim stops rationing the cover and
+		// the bank are taken away: the next step sheds, a new sim episode inside the same shown spell. Then 6 s more. The header must read
+		// RATIONING on every frame (the premise), and from the frame the sim stopped the tile and the header must keep their number (never
+		// 'rationing' / 'MEASURING') and agree. (Rounds 0 and 1 started measuring again at every sim onset, at once.)
+		const TSharedRef<FG2bFlashRestart> FR = MakeShared<FG2bFlashRestart>();
+		Runner.Do(TEXT("flash.power.restart setup"), [P, FR]()
+		{
+			P->Bucket = TEXT("power.restart");
+			P->Reset();
+			P->G2bRestart = FR;
+			if (ARHPlayerController* PC = GetPC())
+			{
+				PC->SetSimSpeed(8.f);
+			}
+			UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.power.restart: 8x from sol %.3f"), FlashSol());
+		}, 0.f);
+		Runner.Push(TEXT("flash.power.restart run"), [FR](double Elapsed, bool)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			const ARHPlayerController* PC = GetPC();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			UWorld* W = FindGameWorld();
+			const URHPowerLookSubsystem* Look = W ? W->GetSubsystem<URHPowerLookSubsystem>() : nullptr;
+			if (!Sim || !Deck.IsValid() || !Look)
+			{
+				FR->Problem = TEXT("no sim, deck or power helper");
+				FR->Stage = 7;
+				return true;
+			}
+			const double NowS = FApp::GetCurrentTime();
+			const URHSimWorldSubsystem::FRHShedColony& C = Sim->GetShedColony();
+			const FString Tile = Deck->GetPowerTileSubText().ToString();
+			const FString Header = Deck->GetPowerFoldHeaderText().ToString();
+			FString HFirst, HSecond;
+			Header.Split(TEXT("\n"), &HFirst, &HSecond);
+			const bool bTake = !FR->HeaderFirstPrev.IsEmpty() && HFirst != FR->HeaderFirstPrev; // the shown shortfall moved: a take of the net
+			FR->HeaderFirstPrev = HFirst;
+			const auto Abort = [&FR, Sim](const FString& Why)
+			{
+				FR->Problem = Why;
+				FR->Stage = 7;
+				Sim->Debug_SetExtraGenW(0.0);
+				return true;
+			};
+			switch (FR->Stage)
+			{
+			case 0:
+				if (Elapsed < 2.5)
+				{
+					return false;
+				}
+				if (!Tile.EndsWith(TEXT("% served")) || !Sim->IsColonyRationing())
+				{
+					return Abort(FString::Printf(TEXT("premise: no settled number to start from (the tile reads '%s', the sim %s)"), *Tile, Sim->IsColonyRationing() ? TEXT("rations") : TEXT("does not ration")));
+				}
+				FR->TileAtCover = Tile;
+				Sim->Debug_SetExtraGenW(1.0e6);
+				FR->CoverS = NowS;
+				FR->Stage = 1;
+				UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.power.restart: generation covers the load from sol %.3f (the tile '%s', the header '%s')"), FlashSol(), *Tile, *Header.Replace(TEXT("\n"), TEXT(" / ")));
+				return false;
+			case 1:
+				if (bTake)
+				{
+					FR->TakeS = NowS;
+					FR->Stage = 2;
+				}
+				else if (NowS - FR->CoverS > 10.0)
+				{
+					return Abort(TEXT("premise: the header's shortfall did not move in the 10 s after generation covered the load (no take to time the gap by)"));
+				}
+				return false;
+			case 2:
+				if (NowS - FR->TakeS >= 1.75)
+				{
+					FR->ShedBefore = C.LastShedS;
+					Sim->Debug_SetExtraGenW(0.0);
+					Sim->Debug_SetBatteryWh(0.0);
+					FR->PulseS = NowS;
+					FR->Stage = 3;
+				}
+				return false;
+			case 3:
+				if (C.LastShedS > FR->ShedBefore)
+				{
+					Sim->Debug_SetExtraGenW(1.0e6);
+					FR->Stage = 4;
+					UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.power.restart: one shed at sol %.3f, %.2f s after the take; covered again"), FlashSol(), NowS - FR->TakeS);
+				}
+				else
+				{
+					Sim->Debug_SetBatteryWh(0.0);
+					if (NowS - FR->PulseS > 3.0)
+					{
+						return Abort(TEXT("premise: no shed in 3 s with no generation and an empty bank"));
+					}
+				}
+				return false;
+			case 4:
+				if (!Sim->IsColonyRationing())
+				{
+					FR->EndS = NowS;
+					FR->TileAtEnd = Tile;
+					FR->HeaderAtEnd = Header.Replace(TEXT("\n"), TEXT(" / "));
+					FR->bHeaderRationingAtEnd = HFirst.StartsWith(TEXT("RATIONING"));
+					FR->bSettledAtEnd = Look->IsServedSettled();
+					FR->bSpellAtEnd = Look->Debug_IsServedSpellOn();
+					Sim->Debug_SetExtraGenW(0.0);
+					Sim->Debug_SetBatteryWh(0.0);
+					FR->RestartS = NowS;
+					FR->Stage = 5;
+					UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.power.restart: the sim stopped rationing at sol %.3f, %.2f s after the take (the tile '%s', the header '%s'); the cover and the bank taken away"),
+						FlashSol(), NowS - FR->TakeS, *Tile, *FR->HeaderAtEnd);
+				}
+				else if (NowS - FR->PulseS > 20.0)
+				{
+					return Abort(TEXT("premise: the sim still rationed 20 s after its last shed (its hold never ended)"));
+				}
+				return false;
+			case 5:
+				if (Sim->IsColonyRationing())
+				{
+					FR->AgainS = NowS;
+					FR->Stage = 6;
+					UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.power.restart: the sim rations again at sol %.3f, %.2f s after it stopped"), FlashSol(), NowS - FR->RestartS);
+				}
+				else
+				{
+					Sim->Debug_SetBatteryWh(0.0);
+					if (NowS - FR->RestartS > 5.0)
+					{
+						return Abort(TEXT("premise: the sim did not ration again within 5 s of losing the cover and the bank"));
+					}
+				}
+				return false;
+			case 6:
+				if (NowS - FR->AgainS >= 6.0)
+				{
+					FR->DoneS = NowS;
+					FR->Stage = 7;
+					return true;
+				}
+				return false;
+			default:
+				return true;
+			}
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("flash.power.restart"), [P, FR]()
+		{
+			if (URHSimWorldSubsystem* Sim = GetSim())
+			{
+				Sim->Debug_SetExtraGenW(0.0);
+			}
+			FString Why;
+			if (!FR->Problem.IsEmpty()) { Why += TEXT(" ") + FR->Problem + TEXT(";"); }
+			else
+			{
+				if (!FR->bHeaderRationingAtEnd) { Why += FString::Printf(TEXT(" premise: the header did not read RATIONING on the frame the sim stopped rationing ('%s');"), *FR->HeaderAtEnd); }
+				if (FR->NotShownFrames > 0) { Why += FString::Printf(TEXT(" premise: the header left the rationing form on %d frame(s) (the shown spell did not span the gap), first %s;"), FR->NotShownFrames, *FR->NotShownSaid); }
+				if (FR->BackFrames > 0) { Why += FString::Printf(TEXT(" the number fell back to the no-number form on %d frame(s) after the sim's rationing ended and began again, first %s;"), FR->BackFrames, *FR->BackSaid); }
+				if (FR->FramesAfter == 0 || FR->NumberFramesAfter != FR->FramesAfter) { Why += FString::Printf(TEXT(" a number stood on both the tile and the header on %d of the %d frame(s) from the sim's stop on;"), FR->NumberFramesAfter, FR->FramesAfter); }
+				if (FR->Disagree > 0) { Why += FString::Printf(TEXT(" the tile and the header disagreed on %d frame(s), first %s;"), FR->Disagree, *FR->DisagreeSaid); }
+			}
+			const FString Said = FString::Printf(TEXT("; flash.power.restart: covered with the tile at '%s'; the first take %.2f s later, one shed %.2f s after it, the sim's rationing ended %.2f s after it (the tile '%s', the header '%s'; the helper's spell on: %s, settled: %s) and began again %.2f s later; from its end on %d frame(s), a number on both the tile and the header on %d, the no-number form on %d; the header not RATIONING on %d of %d frame(s); the last frame '%s' / '%s'"),
+				*FR->TileAtCover, FR->TakeS >= 0.0 ? FR->TakeS - FR->CoverS : -1.0, FR->PulseS >= 0.0 ? FR->PulseS - FR->TakeS : -1.0, FR->EndS >= 0.0 ? FR->EndS - FR->TakeS : -1.0, *FR->TileAtEnd, *FR->HeaderAtEnd,
+				FR->bSpellAtEnd ? TEXT("yes") : TEXT("no"), FR->bSettledAtEnd ? TEXT("yes") : TEXT("no"), FR->AgainS >= 0.0 ? FR->AgainS - FR->RestartS : -1.0,
+				FR->FramesAfter, FR->NumberFramesAfter, FR->BackFrames, FR->NotShownFrames, FR->Frames, *FR->TileLast, *FR->HeaderLast);
+			ReportFlash(P, TEXT("flash.power.restart"), TEXT("power.restart"), false, Why, Said);
+			P->G2bRestart.Reset();
+		}, 0.f);
+
 		Runner.Do(TEXT("final"), [P]()
 		{
 			P->bArmed = false;
@@ -7785,6 +11153,33 @@ static FAutoConsoleCommand GRHClickTestDropHover(
 			}
 		}
 		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook (hover) armed for %s"), *FString::Join(GDropHoverLabels, TEXT(", ")));
+	}));
+
+static FAutoConsoleCommand GRHClickTestDropDrag(
+	TEXT("RH.ClickTest.DropDrag"),
+	TEXT("RH.ClickTest.DropDrag <label>[|<label>...] - TEST HOOK (G2b, B7): on the next drag of each named label (a slider's tag, RightMouseButton, MiddleMouseButton) the harness releases all pointer capture right after the down; the drag must be dragged again. '|' separates labels; each call adds its labels."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		TArray<FString> Labels;
+		FString::Join(Args, TEXT(" ")).ParseIntoArray(Labels, TEXT("|"), true);
+		for (FString& L : Labels)
+		{
+			L.TrimStartAndEndInline();
+			if (!L.IsEmpty())
+			{
+				GDropDragLabels.Add(L);
+			}
+		}
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook (drag) armed for %s"), *FString::Join(GDropDragLabels, TEXT(", ")));
+	}));
+
+static FAutoConsoleCommand GRHClickTestBigArrival(
+	TEXT("RH.ClickTest.BigArrival"),
+	TEXT("RH.ClickTest.BigArrival - TEST HOOK (G2b, B3): the Big Arrival as the presentation receives it (IsBigArrivalDone set, the sim's two alerts in one step); no settlers are added and no sim rule runs."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>&)
+	{
+		FireBigArrivalForTest(GetSim());
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: the Big Arrival fired for the presentation (no sim rule ran)"));
 	}));
 
 static FAutoConsoleCommand GRHClickSweep(

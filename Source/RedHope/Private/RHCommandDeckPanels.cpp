@@ -230,12 +230,21 @@ namespace
 		return R == 0.0 ? FString(TEXT("0 W")) : FString::Printf(TEXT("%+.0f W"), R);
 	}
 
-	// The colony's served share as the tile and the fold header print it: to the nearest 5, never 100 while rationing is shown (the
-	// running mean starts near 1 at the onset), and latched through the power helper's floor (one key for both, so they agree).
-	double ShownServedPct(const URHPowerLookSubsystem* Look)
+	// The colony's served share as the tile and the fold header print it: to the nearest 5, never 100 while rationing is shown, and
+	// latched through the power helper's floor (one key for both, so they agree). G2b (B6, POWER C, PLACEHOLDER MS7/MS8): or -1 while it
+	// settles (the helper's IsServedSettled: the running mean holds at most 5 % of cycles from before the shown rationing spell, so the
+	// onset no longer shows the mean's near-100 start). One latched value for both ('P'): the measuring sentinel or the number.
+	// r2: every change of it waits out the floor, the change back to the sentinel too (rounds 0 and 1 passed the sentinel as the latch's
+	// at-once value, so a number could give way to MEASURING and return inside one floor); the helper keeps the settled state through the
+	// whole shown spell, so the number gives way to MEASURING only at a new spell. A spell's first reading is the key's first sight (or a
+	// key last changed a spell ago), so MEASURING still shows from the start.
+	int32 ShownServedPct(const URHPowerLookSubsystem* Look)
 	{
+		constexpr uint32 Measuring = 1000u;
 		const uint32 Pct = (uint32)FMath::Min(FMath::RoundToInt((Look ? Look->GetServedShare() : 1.0) * 20.0) * 5, 95);
-		return (double)(Look ? Look->LatchValue(URHPowerLookSubsystem::MakeKey('P', 0u), Pct) : Pct);
+		const uint32 Want = (Look && Look->IsServedSettled()) ? Pct : Measuring;
+		const uint32 Shown = Look ? Look->LatchValue(URHPowerLookSubsystem::MakeKey('P', 0u), Want) : Want;
+		return Shown == Measuring ? -1 : (int32)Shown;
 	}
 }
 
@@ -284,8 +293,10 @@ FText SRHCommandDeck::GetPowerTileSubText() const
 	}
 	if (GetPowerTileState() == 0)
 	{
-		// The served share of the wanted power over the last sol-hour, to the nearest 5 (O1).
-		return Txt(FString::Printf(TEXT("rationing %.0f%%"), ShownServedPct(Look)));
+		// The served share of the wanted power over the last sol-hour, to the nearest 5. G2b (B6, O1 B and POWER C; PLACEHOLDER, gate-d-wording
+		// MS7): "rationing" while the share settles, then "N% served", the fold header's words.
+		const int32 Pct = ShownServedPct(Look);
+		return Txt(Pct < 0 ? FString(TEXT("rationing")) : FString::Printf(TEXT("%d%% served"), Pct));
 	}
 	// G1 r1: the bar's own shown fraction (0 while the sim rations, glided between floor-spaced targets), never the per-step bank.
 	const FRHPowerState& P = S->GetPower();
@@ -328,7 +339,11 @@ FText SRHCommandDeck::GetPowerFoldHeaderText() const
 	// G1 r2: rationing exactly while the tile is (the shown net's kind), its short the running shortfall rounded up (never 0 W).
 	if (Look && Look->IsNetMeanShown())
 	{
-		return Txt(FString::Printf(TEXT("RATIONING  -  %.0f W SHORT\n%.0f%% SERVED"), FMath::Max(0.0, -Look->GetNetW()), ShownServedPct(Look))); // G2a (A8, PLACEHOLDER, gate-d-wording PW20): two explicit lines, never a wrap
+		// G2a (A8, PLACEHOLDER, gate-d-wording PW20): two explicit lines, never a wrap. G2b (B6, POWER C; PLACEHOLDER, gate-d-wording MS8): the
+		// second line reads MEASURING while the share settles, then N% SERVED (the tile's N: one latched value).
+		const int32 Pct = ShownServedPct(Look);
+		return Txt(FString::Printf(TEXT("RATIONING  -  %.0f W SHORT\n%s"), FMath::Max(0.0, -Look->GetNetW()),
+			Pct < 0 ? TEXT("MEASURING") : *FString::Printf(TEXT("%d%% SERVED"), Pct)));
 	}
 	// G1 r2: MAKING and USING from one take: the generation and the net the helper took at the same instant (USING = MAKING less the
 	// net, HEAD's live load at that instant), at most once per floor, so neither drifts with the sun and snaps back. Round 1 printed the
@@ -409,7 +424,8 @@ FSlateColor SRHCommandDeck::GetTensionColour() const
 
 FText SRHCommandDeck::GetTensionNoteText() const
 {
-	return Txt(FString::Printf(TEXT("From %.0f Earth sends a demand; from %.0f it presses a settlement to embargo you."), TensionDemandAt, TensionEmbargoAt));
+	// G2b (B6, O7 B; PLACEHOLDER, gate-d-wording MS10, an Earth/Program line): both numbers still read from config.
+	return Txt(FString::Printf(TEXT("At %.0f tension Earth makes a demand. At %.0f it pushes a neighbour to embargo you."), TensionDemandAt, TensionEmbargoAt));
 }
 
 TSharedRef<SWidget> SRHCommandDeck::ExpandToggle(bool* bFlag)
@@ -439,6 +455,7 @@ const bool* SRHCommandDeck::FoldFlag(EFold Which) const
 	case EFold::City: return &bCityExpanded;
 	case EFold::Fleet: return &bFleetExpanded;
 	case EFold::Market: return &bMarketExpanded; // E8: before default, which is Power's
+	case EFold::Log: return &bLogExpanded;       // G2b (B2)
 	default: return &bPowerExpanded;
 	}
 }
@@ -776,6 +793,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCommsPanel()
 		})
 		[
 			SNew(SBorder).BorderImage(D::GlassBrush()).Padding(FMargin(12.f, 8.f))
+			.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.Comms"))) // G2b (B2): the comms.fixed check finds the panel by it
 			[
 				SNew(SVerticalBox)
 				+ SVerticalBox::Slot().AutoHeight()
@@ -792,6 +810,46 @@ TSharedRef<SWidget> SRHCommandDeck::BuildCommsPanel()
 				]
 			]
 		];
+}
+
+// --- G2b (B2): the LOG, the session's alerts, notices, cards and deck lines, newest first (folded by default) ---
+
+const FText& SRHCommandDeck::GetLogText() const
+{
+	// Rebuilt only when the visualizer's LOG serial moves (a line added), never per frame: the lines joined newest first.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	const uint32 Serial = Viz ? Viz->GetLogSerial() : 0u;
+	if (Serial != LogSerialShown)
+	{
+		LogSerialShown = Serial;
+		FString Joined;
+		for (int32 i = 0; Viz && i < Viz->GetLogCount(); ++i)
+		{
+			Joined += i > 0 ? TEXT("\n") : TEXT("");
+			Joined += Viz->GetLogLine(i);
+		}
+		LogTextShown = Txt(Joined);
+	}
+	return LogTextShown;
+}
+
+TSharedRef<SWidget> SRHCommandDeck::BuildLogPanel()
+{
+	// The POWER fold's pattern: a header with its fold toggle (tagged RH.LogToggle), a body shown while the fold is open. Title PLACEHOLDER
+	// (gate-d-wording MS2). r1: the sol icon (its lines are "sol N: ..."), not the warning triangle: the LOG holds cheers, tips and cards too.
+	TSharedRef<SWidget> Summary = SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			FoldToggle(EFold::Log, FName("RH.LogToggle"))
+		];
+	return D::Panel(FName("sol"), Txt(TEXT("LOG")), D::TextDim,
+		SNew(SBox).Visibility_Lambda([this]() { return bLogExpanded ? EVisibility::Visible : EVisibility::Collapsed; })
+		[
+			SNew(STextBlock).Font(D::Body(9)).ColorAndOpacity(D::Text).AutoWrapText(true)
+			.Text_Lambda([this]() { return GetLogText(); })
+		],
+		Summary);
 }
 
 // --- Objective: Earth's quota, then the supply-ship manifest ---

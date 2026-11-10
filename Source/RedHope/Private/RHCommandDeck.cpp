@@ -154,6 +154,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	// existing stores don't all cheer at once).
 	GConfig->GetBool(TEXT("RedHope"), TEXT("TipsOff"), bTipsOff, GGameIni);
 	StockGraceUntil = FSlateApplication::Get().GetCurrentTime() + 3.0;
+	WatchGraceUntil = StockGraceUntil; // G2b (B3): the moment watches take the same boot grace (a loaded colony's moments never cheer)
 	if (const UWorld* WorldForBind = PC.IsValid() ? PC->GetWorld() : nullptr)
 	{
 		if (URHSimWorldSubsystem* SimForBind = WorldForBind->GetSubsystem<URHSimWorldSubsystem>())
@@ -166,6 +167,13 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 				{
 					// A loaded colony's stores must not all cheer: re-arm the grace.
 					Self->StockGraceUntil = FSlateApplication::Get().GetCurrentTime() + 3.0;
+					// G2b (B3, r1): nor its moments that already happened: the watches record the loaded colony's facts now, so the next
+					// reading compares the loaded colony with itself (never the old colony's facts, however late the deck next ticks).
+					if (const URHSimWorldSubsystem* Loaded = Self->GetSim())
+					{
+						Self->ReadMomentFacts(*Loaded, Self->bWatchedCrewEver, Self->bWatchedFirstBorn, Self->bWatchedArrival);
+						Self->bWatchesRead = true;
+					}
 					// The guide re-reads the loaded colony from step 1 (silently).
 					Self->GuideHighWater = 0;
 					Self->GuideStep = -1;
@@ -720,6 +728,42 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		return false;
 	};
 
+	// G2b (B1): the alert banner's rows, built once (nothing is rebuilt per frame): AlertRowsMax fixed slots, row 0 (the newest line) on top,
+	// 4 px apart. Each row reads the visualizer's queue: its cached text and its opacity (the fade), on its background and its words alike.
+	// A row never takes a click (HitTestInvisible while shown): three rows can stand three times HEAD's pill tall at the top centre, and
+	// nothing in a row is pressable. With no row shown the box collapses, so the toast under it sits where it did.
+	// r1: a row is laid out while an entry holds it, from its admission frame (at opacity 0) to its removal, never collapsed for its opacity:
+	// the queue removes a leaving line and admits a waiting one on the same frame, and a row collapsed at opacity 0 made the stack (and the
+	// toast under it) one row shorter for that one frame. The stack's height now changes at most once per turnover, never back and forth.
+	TSharedRef<SVerticalBox> AlertRowsBox = SNew(SVerticalBox)
+		.Visibility_Lambda([this]() { return GetAlertRowCount() > 0 ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed; });
+	AlertRowsBoxWidget = AlertRowsBox;
+	AlertRowWidgets.Reset();
+	for (int32 Row = 0; Row < URHColonyVisualizerSubsystem::AlertRowsMax; ++Row)
+	{
+		TSharedPtr<SBorder> RowBorder;
+		AlertRowsBox->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, Row == 0 ? 0.f : 4.f, 0.f, 0.f))
+		[
+			SAssignNew(RowBorder, SBorder)
+			.BorderImage(RHDeck::RoundedWhite())
+			.BorderBackgroundColor_Lambda([this, Row]() { return FSlateColor(FLinearColor(0.2f, 0.12f, 0.02f, 0.95f * GetAlertRowOpacity(Row))); })
+			.Padding(FMargin(16.f, 7.f))
+			.Visibility_Lambda([this, Row]() { return Row < GetAlertRowCount() ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
+			[
+				// E5 review: an alert longer than the gap left of the right column wraps onto more lines, centred, instead of running under
+				// the column and off both edges (the DefyIssue alert is Gate D's D44 and the issue's clause, about 270 characters). A shorter
+				// alert is one line, as before.
+				SNew(STextBlock)
+				.Text_Lambda([this, Row]() { return GetAlertRowText(Row); })
+				.Font(RHDeck::Label(12))
+				.ColorAndOpacity_Lambda([this, Row]() { return FSlateColor(FLinearColor(1.f, 0.9f, 0.55f, GetAlertRowOpacity(Row))); })
+				.WrapTextAt_Lambda([this]() { return GetAlertWrapAt(); })
+				.Justification(ETextJustify::Center)
+			]
+		];
+		AlertRowWidgets.Add(RowBorder);
+	}
+
 	ChildSlot
 	[
 		SNew(SOverlay)
@@ -931,24 +975,10 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					]
 				]
 			]
+			// G2b (B1): the alert queue's rows (built above), in the slot HEAD's one pill held.
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
 			[
-				SNew(SBorder)
-				.BorderImage(RHDeck::RoundedWhite())
-				.BorderBackgroundColor(FLinearColor(0.2f, 0.12f, 0.02f, 0.95f))
-				.Padding(FMargin(16.f, 7.f))
-				.Visibility(this, &SRHCommandDeck::GetAlertVisibility)
-				[
-					// E5 review: an alert longer than the gap left of the right column wraps onto more lines, centred, instead of running under
-					// the column and off both edges (the DefyIssue alert is Gate D's D44 and the issue's clause, about 270 characters). A shorter
-					// alert is one line, as before.
-					SNew(STextBlock)
-					.Text(this, &SRHCommandDeck::GetAlertText)
-					.Font(RHDeck::Label(12))
-					.ColorAndOpacity(FLinearColor(1.f, 0.9f, 0.55f))
-					.WrapTextAt_Lambda([this]() { return GetAlertWrapAt(); })
-					.Justification(ETextJustify::Center)
-				]
+				AlertRowsBox
 			]
 			// Reward toast (alive pass): a quiet one-line cheer under the banners.
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 6.f, 0.f, 0.f))
@@ -984,6 +1014,15 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		[
 			SNew(SBox).WidthOverride(RightColumnPx)
 			[
+				// G2b (B2, UI-8): the comms lines sit out of the scroll box, in a fixed slot above it, so opening a fold never scrolls them out
+				// of view. The scroll box keeps its tag and fills the rest of the column.
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+				[
+					BuildCommsPanel()
+				]
+				+ SVerticalBox::Slot().FillHeight(1.f)
+				[
 				SAssignNew(RightScroll, SScrollBox)
 				.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.RightColumn")))
 				.ScrollBarThickness(FVector2D(8.f, 8.f)) // UI polish P3: 8 px, a bar the pointer can find (4 px was a hair)
@@ -993,10 +1032,6 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
 					[
 						BuildGuidePanel()
-					]
-					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 8.f))
-					[
-						BuildCommsPanel()
 					]
 					+ SVerticalBox::Slot().AutoHeight()
 					[
@@ -1028,6 +1063,11 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 					[
 						FoldAnchor(EFold::Power, BuildPowerPanel())
 					]
+					// G2b (B2): the LOG, the session's alerts, notices, cards and deck lines, newest first (folded by default).
+					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
+					[
+						FoldAnchor(EFold::Log, BuildLogPanel())
+					]
 					// Known Ground (director request): surveyed coverage + every
 					// discovered deposit, while Map is on. A table, so monospace.
 					+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 8.f, 0.f, 0.f))
@@ -1042,6 +1082,7 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 								.ColorAndOpacity(RHDeck::Text))
 						]
 					]
+				]
 				]
 			]
 		]
@@ -1426,16 +1467,41 @@ EVisibility SRHCommandDeck::GetEventVisibility() const
 	return GetEventText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
-FText SRHCommandDeck::GetAlertText() const
+const FText& SRHCommandDeck::GetAlertRowText(int32 Row) const
+{
+	// G2b (B1): a row's line as the visualizer cached it (at its admission and at each merge), never built here.
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	return Viz ? Viz->GetAlertRowText(Row) : FText::GetEmpty();
+}
+
+float SRHCommandDeck::GetAlertRowOpacity(int32 Row) const
 {
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
-	return Viz ? Viz->GetAlertText() : FText::GetEmpty();
+	return Viz ? Viz->GetAlertRowOpacity(Row) : 0.f;
 }
 
-EVisibility SRHCommandDeck::GetAlertVisibility() const
+int32 SRHCommandDeck::GetAlertRowCount() const
 {
-	return GetAlertText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
+	const URHColonyVisualizerSubsystem* Viz = World ? World->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr;
+	return Viz ? Viz->GetAlertRowCount() : 0;
+}
+
+int32 SRHCommandDeck::Debug_GetAlertRowsLaidOut() const
+{
+	// The row widgets' own visibility attributes, evaluated now (the layout rule itself, not a copy of it).
+	if (!AlertRowsBoxWidget.IsValid() || AlertRowsBoxWidget->GetVisibility() == EVisibility::Collapsed)
+	{
+		return 0;
+	}
+	int32 Laid = 0;
+	for (const TSharedPtr<SWidget>& W : AlertRowWidgets)
+	{
+		Laid += (W.IsValid() && W->GetVisibility() != EVisibility::Collapsed) ? 1 : 0;
+	}
+	return Laid;
 }
 
 float SRHCommandDeck::GetAlertWrapAt() const
@@ -1485,6 +1551,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	FollowShaftScroll();
 	ApplyFoldScroll();
 	RefreshGuide();
+	RefreshMomentWatches(); // G2b (B3): three O(1) reads a tick
 
 	// Position the in-world action card above the selected machine (M2 Gate D+).
 	// Project the building's world point (lifted above its roof) to screen, then
@@ -1494,7 +1561,9 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 	const int32 Id = PC.IsValid() ? PC->GetSelectedBuildingId() : 0;
 	const UWorld* World = PC.IsValid() ? PC->GetWorld() : nullptr;
 	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
-	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedBay())
+	// G2b (B8.1): the card's place follows the live selection rule the controller's tick applies (IsSelectedBayLive / IsSelectedCellLive), so
+	// on the frame a Clear or a re-zone lands (the sim ticks after the controller and before Slate paints) no card is placed or drawn.
+	if (Id == 0 && Sim && PC.IsValid() && PC->HasLiveSelectedBay())
 	{
 		for (const FRHBuildingInstance& HB : Sim->GetBuildings())
 		{
@@ -1508,7 +1577,7 @@ void SRHCommandDeck::Tick(const FGeometry& AllottedGeometry, const double InCurr
 			}
 		}
 	}
-	if (Id == 0 && Sim && PC.IsValid() && PC->HasSelectedCell())
+	if (Id == 0 && Sim && PC.IsValid() && PC->HasLiveSelectedCell())
 	{
 		const FVector Head = Sim->GetShaftHeadCm();
 		const FIntPoint P = Sim->GetFloorCell(PC->GetSelectedCellLevel(), PC->GetSelectedCellIndex());
@@ -1814,7 +1883,7 @@ FString SRHCommandDeck::GetCardStatusLine(int32 BuildingId) const
 	const ERHPowerLook Look = (ERHPowerLook)Kind;
 	if (Look == ERHPowerLook::Rationed)
 	{
-		return FString::Printf(TEXT("RATIONED - running about %d%% of the time (the grid is short; it runs on the steps it is served)"), (int32)(Shown >> 8));
+		return FString::Printf(TEXT("RATIONED - running about %d%% of the time (not enough power for everything)"), (int32)(Shown >> 8)); // G2b (B6, O3 B; PLACEHOLDER, gate-d-wording MS9)
 	}
 	if (Look == ERHPowerLook::Unserved)
 	{
@@ -1938,6 +2007,33 @@ FString SRHCommandDeck::Debug_GetInspectText() const
 	return GetInspectText().ToString();
 }
 
+bool SRHCommandDeck::Debug_GetCardShown(FString& OutTitle, FString& OutBody) const
+{
+	// G2b QA (card.close, cell.rule): the in-world card as drawn now - whether its visibility shows it, its title and its body.
+	const bool bShown = GetInspectVisibility() == EVisibility::Visible;
+	OutTitle = bShown ? GetActionCardTitle().ToString() : FString();
+	OutBody = bShown ? GetInspectText().ToString() : FString();
+	return bShown;
+}
+
+FString SRHCommandDeck::Debug_GetCardTitles() const
+{
+	// G2b QA (cards.*): the info-card queue, first card first, a golden card marked '*'.
+	FString Out;
+	for (int32 i = 0; i < CardQueue.Num(); ++i)
+	{
+		Out += i > 0 ? TEXT(" | ") : TEXT("");
+		Out += CardQueue[i].bGolden ? TEXT("*") : TEXT("");
+		Out += CardQueue[i].Title;
+	}
+	return Out;
+}
+
+FString SRHCommandDeck::Debug_GetLogText() const
+{
+	return GetLogText().ToString(); // G2b QA (log.fold): the LOG fold's text as drawn
+}
+
 FString SRHCommandDeck::Debug_GetUplinkText() const
 {
 	// G2a QA (names.uplink): the uplink rows' labels as the panel built them (each row prints its label and its live countdown).
@@ -2024,6 +2120,7 @@ bool SRHCommandDeck::IsSixtyRefusedShown(FString* OutWhy) const
 	if (NowS >= SixtyPollAtS)
 	{
 		SixtyPollAtS = NowS + 0.25;
+		++SixtyPollSerial; // G2b (r1): the 60x wish engages only on the frame after a poll that read clear
 		const URHSimWorldSubsystem* Sim = GetSim();
 		FString Why;
 		bSixtyRefused = Sim && !Sim->CanEnterEraMode(Why);
@@ -2321,7 +2418,8 @@ FText SRHCommandDeck::GetInspectText() const
 
 EVisibility SRHCommandDeck::GetInspectVisibility() const
 {
-	return (PC.IsValid() && (PC->GetSelectedBuildingId() != 0 || PC->HasSelectedCell() || PC->HasSelectedBay())) ? EVisibility::Visible : EVisibility::Collapsed;
+	// G2b (B8.1): a bay or cell counts only while it passes the live rule (the controller's tick applies the same one).
+	return (PC.IsValid() && (PC->GetSelectedBuildingId() != 0 || PC->HasLiveSelectedCell() || PC->HasLiveSelectedBay())) ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 bool SRHCommandDeck::GetSelectedStationKey(FIntVector& OutKey) const
@@ -2334,12 +2432,12 @@ bool SRHCommandDeck::GetSelectedStationKey(FIntVector& OutKey) const
 	}
 	if (PC->GetSelectedBuildingId() == 0)
 	{
-		if (PC->HasSelectedBay())
+		if (PC->HasLiveSelectedBay()) // G2b (B8.1): the live rule
 		{
 			OutKey = FIntVector(0, PC->GetSelectedBay(), PC->GetSelectedBayHab());
 			return true;
 		}
-		if (!PC->HasSelectedCell())
+		if (!PC->HasLiveSelectedCell())
 		{
 			return false;
 		}
@@ -2447,22 +2545,24 @@ FText SRHCommandDeck::GetActionCardTitle() const
 {
 	const FRHBuildingRow* Def = nullptr;
 	const FRHBuildingInstance* B = FindSelected(PC, Def);
-	if (!B && PC.IsValid() && PC->HasSelectedBay())
+	if (!B && PC.IsValid() && PC->HasLiveSelectedBay())
 	{
 		const UWorld* World = PC->GetWorld();
 		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
 		const URHDefinitionsSubsystem* Defs = World ? World->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 		const FName Room = Sim ? Sim->GetBayRoom(PC->GetSelectedBayHab(), PC->GetSelectedBay()) : NAME_None;
 		const FRHRoomRow* Row = Defs ? Defs->GetRoom(Room) : nullptr;
-		// G2a r2 (PLACEHOLDER, gate-d-wording PW24): a bay whose room was cleared while it stayed selected (the selection checks only that the
-		// habitat stands) names no room, never "None - surface habitat"; the room key stays the missing-row fallback (rooms are out of scope).
-		// (No string beyond HEAD's: the key is turned into one only when the row is missing, as before; an empty FString allocates nothing.)
+		// G2a r2 (PLACEHOLDER, gate-d-wording PW24); G2b (B8.7): the controller's tick and this card read one live rule (IsSelectedBayLive,
+		// IsSelectedCellLive: a slice-active seat-function room, on the surface for a bay), so a bay or cell whose room stops being a station is
+		// never painted, not even on the frame its Clear or re-zone lands. The row-missing fallback stays for a room key the table lacks: the
+		// key itself, never "None - surface habitat". (No string beyond HEAD's: the key is turned into one only when the row is missing, as
+		// before; an empty FString allocates nothing.)
 		const FString RoomKey = (Row || Room.IsNone()) ? FString() : Room.ToString();
 		const TCHAR* RoomName = Row ? *Row->DisplayName : *RoomKey;
 		return FText::FromString(FString::Printf(TEXT("%s%ssurface habitat\nA work station. Colonists take its seats after the underground's; assigning staff puts it first."),
 			RoomName, *RoomName ? TEXT(" - ") : TEXT("")));
 	}
-	if (!B && PC.IsValid() && PC->HasSelectedCell())
+	if (!B && PC.IsValid() && PC->HasLiveSelectedCell())
 	{
 		const UWorld* World = PC->GetWorld();
 		const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
@@ -3824,6 +3924,11 @@ FReply SRHCommandDeck::HandleLoad()
 void SRHCommandDeck::PushCard(const FString& Title, const FString& Body, bool bGolden)
 {
 	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, bGolden ? FName("Milestone") : FName("CardOpen"));
+	// G2b (B2, PLACEHOLDER gate-d-wording MS2): every card also goes to the LOG, "<TITLE>: <body>".
+	if (URHColonyVisualizerSubsystem* Viz = PC.IsValid() && PC->GetWorld() ? PC->GetWorld()->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+	{
+		Viz->AppendLog(URHColonyVisualizerSubsystem::ERHLogKind::Card, Title + TEXT(": ") + Body);
+	}
 	FInfoCard Card;
 	Card.Title = Title;
 	Card.Body = Body;
@@ -3911,9 +4016,72 @@ void SRHCommandDeck::HandleStockChanged(FName Resource, double Total)
 		PushCard(TEXT("RARE MATERIALS"), *Line, /*bGolden*/ true);
 		return;
 	}
-	ToastLine = FString::Printf(TEXT("+ first %s banked"), *RHOrder::ResourceName(GetDefs(), Resource)); // G2a (PLACEHOLDER, gate-d-wording PW7)
-	ToastUntil = Now + 6.0;
+	SetToast(FString::Printf(TEXT("+ first %s banked"), *RHOrder::ResourceName(GetDefs(), Resource)), 6.0); // G2a (PLACEHOLDER, gate-d-wording PW7); G2b: the LOG keeps it
 	URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Notify"));
+}
+
+void SRHCommandDeck::SetToast(const FString& Line, double HoldS)
+{
+	// G2b (B2): the one toast setter (the stock toast above, the guide's two "Done: ..." toasts): the line, its hold, and the LOG.
+	ToastLine = Line;
+	ToastUntil = FSlateApplication::Get().GetCurrentTime() + HoldS;
+	if (URHColonyVisualizerSubsystem* Viz = PC.IsValid() && PC->GetWorld() ? PC->GetWorld()->GetSubsystem<URHColonyVisualizerSubsystem>() : nullptr)
+	{
+		Viz->AppendLog(URHColonyVisualizerSubsystem::ERHLogKind::DeckLine, Line);
+	}
+}
+
+void SRHCommandDeck::ReadMomentFacts(const URHSimWorldSubsystem& S, bool& bOutCrewEver, bool& bOutBorn, bool& bOutArrival) const
+{
+	// G2b (r1): three facts that never go back in a colony's life (each saved by the sim): it has had a crew (a colonist now, or the quiet
+	// colony, IsColonyQuiet: it had a crew and everyone is recalled), its first Mars birth was announced, its Big Arrival is done.
+	bOutCrewEver = S.GetPopulation() > 0 || S.IsColonyQuiet();
+	bOutBorn = S.HasFirstBorn();
+	bOutArrival = S.IsBigArrivalDone();
+}
+
+void SRHCommandDeck::RefreshMomentWatches()
+{
+	// G2b (B3, PLACEHOLDER gate-d-wording MS3; birth and arrival wording flagged for James's review): golden cards for three moments, from
+	// game-side watches (never a new sim OnMilestone broadcast: -surfacehab counts milestones): the first crew (r1: the colony's first crew
+	// ever, not the population leaving 0, which a recalled colony's returning Mars-born would repeat), the first child born on Mars
+	// (HasFirstBorn) and the Big Arrival (IsBigArrivalDone). O(1) reads a tick. The first reading after the deck's construction, and every
+	// reading inside the boot grace (WatchGraceUntil, 3 s), records and never fires; a load records the loaded colony in the reload handler.
+	const URHSimWorldSubsystem* S = GetSim();
+	if (!S)
+	{
+		return;
+	}
+	bool bCrewEver = false, bBorn = false, bArrival = false;
+	ReadMomentFacts(*S, bCrewEver, bBorn, bArrival);
+	const bool bFire = bWatchesRead && FSlateApplication::Get().GetCurrentTime() >= WatchGraceUntil;
+	if (bFire && !bWatchedCrewEver && bCrewEver)
+	{
+		PushCard(TEXT("THE FIRST CREW"), TEXT("The first colonists have landed on Mars. Red Hope is a home now, not only a worksite."), /*bGolden*/ true);
+	}
+	if (bFire && !bWatchedFirstBorn && bBorn)
+	{
+		// The newest Mars-born colonist names the card (a loop only on the one tick it fires).
+		const FRHColonist* Newest = nullptr;
+		for (const FRHColonist& C : S->GetColonists())
+		{
+			if (C.bMarsBorn && (!Newest || C.Id > Newest->Id))
+			{
+				Newest = &C;
+			}
+		}
+		PushCard(TEXT("BORN ON MARS"), (Newest && !Newest->Name.IsEmpty())
+			? FString::Printf(TEXT("%s is the first person born on Mars."), *Newest->Name)
+			: FString(TEXT("The first person born on Mars has arrived.")), /*bGolden*/ true);
+	}
+	if (bFire && !bWatchedArrival && bArrival)
+	{
+		PushCard(TEXT("THE BIG ARRIVAL"), TEXT("The settlers have landed. The colony held its Hope long enough to be trusted with a city."), /*bGolden*/ true);
+	}
+	bWatchesRead = true;
+	bWatchedCrewEver = bCrewEver;
+	bWatchedFirstBorn = bBorn;
+	bWatchedArrival = bArrival;
 }
 
 FText SRHCommandDeck::GetToastText() const

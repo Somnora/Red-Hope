@@ -143,6 +143,11 @@ public:
 	void TogglePause();
 	// G1 (N4): the speed Space resumes (a refused 60x is never stored).
 	float GetResumeSpeed() const { return LastNonZeroSpeed; }
+	// G2b (B5): "60x when clear": the player's last speed press asked for the era band and it is not engaged now (the clock runs in the
+	// agent band); the tick engages it on the first frame after one of the deck's polls read the era band clear, while the deck's latched
+	// answer shows clear too and the quiet window (FloorRealS after the last engage or after the clock left the era band) has passed. It
+	// never reads CanEnterEraMode itself (r1).
+	bool IsSixtyWishPending() const;
 	void QuickSave();
 	void QuickLoad();
 	FName GetPendingBuildDef() const { return PendingBuildDef; }
@@ -242,6 +247,14 @@ public:
 	int32 GetSelectedCellLevel() const { return SelectedCellLevel; }
 	int32 GetSelectedCellIndex() const { return SelectedCellIndex; }
 	void Debug_SelectCell(int32 Level, int32 Cell) { SelectedBuildingId = 0; SelectedCellLevel = Level; SelectedCellIndex = Cell; }
+	// G2b (B8.1/B8.2): the one live-selection rule, read by the tick (which drops a dead selection) and by the deck's card getters (so on
+	// the frame a Clear or re-zone lands the card is already closed). A bay lives while the surface is shown and its room is a slice-active
+	// seat-function room (a removed habitat's bay reads no room); a cell while its floor is the active one and its room has a seat
+	// function. Const, two map lookups, no loop.
+	bool IsSelectedBayLive() const;
+	bool IsSelectedCellLive() const;
+	bool HasLiveSelectedBay() const { return HasSelectedBay() && IsSelectedBayLive(); }
+	bool HasLiveSelectedCell() const { return HasSelectedCell() && IsSelectedCellLive(); }
 	// Debug/help: select a building by id (RH.Select) - raises its in-world
 	// action card without hunting for the gray-box footprint with the cursor.
 	void Debug_SelectBuilding(int32 Id) { SelectedBuildingId = Id; }
@@ -424,5 +437,20 @@ private:
 	FString HintText;
 	FLinearColor HintColor = FLinearColor::White;
 	float LastNonZeroSpeed = 1.f;
+	// G2b (B5): the 60x wish - armed by a player press above the agent band, cancelled by any other player speed press, a pause or a load;
+	// the tier it asked for. Never saved.
+	bool bSixtyArmed = false;
+	float SixtyWishTier = 60.f;
+	// G2b (r1, B5): the wish's reads, all O(1): the deck's poll serial seen last frame (an engage needs a fresh poll that read clear), no
+	// engage before SixtyQuietUntilS (FloorRealS after the last engage or after the clock left the era band), the era band last frame, and
+	// whether an event was under way at the last look while armed (its onset cancels the wish).
+	uint32 SixtyPollSeen = 0;
+	double SixtyQuietUntilS = 0.0;
+	bool bClockWasEra = false;
+	bool bWishEventSeen = false;
+	void CorrectResumeSpeed(const class URHSimClockSubsystem& Clock);
+	// G2b (B8.4): every load clears every selection (and the wish).
+	FDelegateHandle ColonyReloadedHandle;
+	void HandleColonyReloaded();
 	float RmbDragPx = 0.f; // accumulated right-drag distance: click-vs-drag disambiguation
 };

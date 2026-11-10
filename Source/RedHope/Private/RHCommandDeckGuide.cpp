@@ -604,8 +604,7 @@ void SRHCommandDeck::RefreshGuide()
 	// evaluation (fresh boot, loaded save) skips ahead silently.
 	if (GuideStep >= 0 && Now > GuideStep && !bTipsOff)
 	{
-		ToastLine = FString::Printf(TEXT("Done: %s"), S[Now - 1].Title);
-		ToastUntil = FSlateApplication::Get().GetCurrentTime() + 4.0;
+		SetToast(FString::Printf(TEXT("Done: %s"), S[Now - 1].Title), 4.0); // G2b (B2): the deck's one toast setter, so the LOG keeps it
 		URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Confirm"));
 	}
 	if (Now != GuideStep)
@@ -635,8 +634,7 @@ void SRHCommandDeck::RefreshGuide()
 		if (GuideStep >= 0 && GuideInterrupt != INDEX_NONE && (Int == INDEX_NONE || Int > GuideInterrupt) && !bTipsOff
 			&& !(Interrupts()[GuideInterrupt].Order == FName("DayShift") && Sim->IsDaylightNow()))
 		{
-			ToastLine = FString::Printf(TEXT("Done: %s"), Interrupts()[GuideInterrupt].Title);
-			ToastUntil = FSlateApplication::Get().GetCurrentTime() + 4.0;
+			SetToast(FString::Printf(TEXT("Done: %s"), Interrupts()[GuideInterrupt].Title), 4.0); // G2b (B2): the LOG keeps it
 			URHAudioSubsystem::Cue(PC.IsValid() ? PC->GetWorld() : nullptr, FName("Confirm"));
 		}
 		if (Int != INDEX_NONE)

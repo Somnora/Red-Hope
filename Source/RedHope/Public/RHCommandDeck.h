@@ -72,12 +72,33 @@ public:
 	FString GetEarthCreditLine() const;
 	FString GetSiteStageLine(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const;
 	FString Debug_GetUplinkText() const;
+	// G2b QA (the click test): whether the in-world station or building card is drawn now, with its title and body as drawn (card.close and
+	// cell.rule read it every frame); the info-card queue's count and titles (' | ' between, a golden card marked '*'); the LOG fold's text.
+	bool Debug_GetCardShown(FString& OutTitle, FString& OutBody) const;
+	int32 Debug_GetCardCount() const { return CardQueue.Num(); }
+	FString Debug_GetCardTitles() const;
+	FString Debug_GetLogText() const;
 	// G2a (A3): a build category's tab label (public for the click test's words.sample; the Borer's "Boring" reads "Underground").
 	FText GetCategoryLabel(FName Category) const;
 	bool IsLabSeatStaffedShown() const;
 	bool IsResearchBarShown() const;
 	const FRHCityDemand& Debug_GetCityDemandShown() const { return CityDemand; } // G1 r3 QA: the City panel's demand as it shows it
 	bool IsSixtyRefusedShown(FString* OutWhy = nullptr) const; // CanEnterEraMode, polled at most four times a real second, latched
+	// G2b (r1, B5): the 60x wish reads the same poll, never a live CanEnterEraMode of its own: the poll's raw (unlatched) answer and a
+	// serial that counts the polls, so the controller engages only on the frame after a poll that read clear.
+	bool IsSixtyRefusedPolled() const { return bSixtyRefused; }
+	uint32 GetSixtyPollSerial() const { return SixtyPollSerial; }
+	// G2b (r1, B1): the alert banner as laid out now: the rows the layout gives a slot (0 when the box is collapsed), read from the row
+	// widgets' own visibility (the click test's flash.alerts samples it every frame).
+	int32 Debug_GetAlertRowsLaidOut() const;
+	// G2b (r1, B3): what the moment watches last recorded (false when nothing is read yet), for cards.load and cards.crew.
+	bool Debug_GetWatchedMoments(bool& bOutCrewEver, bool& bOutBorn, bool& bOutArrival) const
+	{
+		bOutCrewEver = bWatchedCrewEver;
+		bOutBorn = bWatchedFirstBorn;
+		bOutArrival = bWatchedArrival;
+		return bWatchesRead;
+	}
 	// G1 r1: the Crew panel's food, garden and layout lines (each empty when the panel shows none), as the panel prints them. The
 	// garden's grow lights and the layout's circulation follow per-step reads, so the producing count and the clash count come through
 	// the power helper (held over the flip, latched). The panel passes its own Hope breakdown's food penalty and clashing pairs.
@@ -142,9 +163,13 @@ private:
 	FText GetEventText() const;
 	FSlateColor GetEventColor() const;
 	EVisibility GetEventVisibility() const;
-	// Transient must-not-miss banner (onset 1x snap, era refusal, ship ETA).
-	FText GetAlertText() const;
-	EVisibility GetAlertVisibility() const;
+	// Transient must-not-miss banner (onset 1x snap, era refusal, ship ETA). G2b (B1): three rows, newest on top, each reading the
+	// visualizer's queue (its cached text and its fade): no FText is built per frame.
+	const FText& GetAlertRowText(int32 Row) const;
+	float GetAlertRowOpacity(int32 Row) const;
+	int32 GetAlertRowCount() const; // G2b (r1): the rows the queue holds (a row is laid out from its admission frame, at any opacity)
+	TSharedPtr<class SVerticalBox> AlertRowsBoxWidget;     // G2b (r1): the banner box and its rows, for Debug_GetAlertRowsLaidOut
+	TArray<TSharedPtr<class SWidget>> AlertRowWidgets;
 	// E5 review: the banner wraps at the gap left of the right column (local units, from the last tick's width).
 	float GetAlertWrapAt() const;
 	float DeckLocalWidth = 0.f;
@@ -217,8 +242,8 @@ public:
 	void Debug_SetRowTab(int32 Tab) { RowTab = FMath::Clamp(Tab, 0, 3); }
 	// UI polish P3: the foldable panels of the right column (Politics, Crew, City, Fleet, Power, and E8's Market) are an accordion. Opening one
 	// folds the others and scrolls it to the top of the column; a panel that is shut folds itself alone. The state lives here, as it always did,
-	// and is not saved. E8 (Q-C (a)): MARKET joins it as the sixth; Count stays the "no scroll" sentinel.
-	enum class EFold : uint8 { Politics, Crew, City, Fleet, Power, Market, Count };
+	// and is not saved. E8 (Q-C (a)): MARKET joins it as the sixth; Count stays the "no scroll" sentinel. G2b (B2): the LOG the seventh.
+	enum class EFold : uint8 { Politics, Crew, City, Fleet, Power, Market, Log, Count };
 	void SetFoldOpen(EFold Which, bool bOpen);
 	bool IsFoldOpen(EFold Which) const { return *FoldFlag(Which); }
 	// Capture/QA (RH.DeckCity): fold the City panel open or shut. Opening it is the accordion's rule: the other panels fold, and the column
@@ -392,6 +417,12 @@ private:
 	TSharedRef<SWidget> BuildPowerPanel();
 	TSharedRef<SWidget> BuildHelpPanel();
 	TSharedRef<SWidget> BuildCommsPanel();
+	// G2b (B2): the LOG fold (the session's alerts, notices, cards and deck lines, newest first). Its text is cached and rebuilt only when
+	// the visualizer's LOG serial moves.
+	TSharedRef<SWidget> BuildLogPanel();
+	const FText& GetLogText() const;
+	mutable FText LogTextShown;
+	mutable uint32 LogSerialShown = MAX_uint32;
 	TSharedRef<SWidget> ExpandToggle(bool* bFlag);
 	void RefreshFleetPanel();
 	// The build menu (interface pass step 2): category tabs on the command bar
@@ -518,6 +549,7 @@ private:
 	mutable double SixtyPollAtS = 0.0;
 	mutable bool bSixtyRefused = false;
 	mutable FString SixtyWhy;
+	mutable uint32 SixtyPollSerial = 0; // G2b (r1): counts the polls (the 60x wish engages only after a fresh one)
 	// G2a (A6): the open site card's builder poll (a claimed Build task to it), at most four times a real second.
 	mutable double SiteStagePollAtS = 0.0;
 	mutable int32 SiteStagePollId = 0;
@@ -592,6 +624,7 @@ private:
 	bool bRosterExpanded = false;
 	bool bPoliticsExpanded = false;
 	bool bPowerExpanded = false;
+	bool bLogExpanded = false; // G2b (B2): the LOG fold
 	// Fleet rows, refreshed each Tick from the agent snapshot; the list widget
 	// rebuilds only when membership changes (rows read by index).
 	// C6b: a cargo rover's row also knows its load and whether it is on a road trip (its status line).
@@ -623,6 +656,21 @@ private:
 	double StockGraceUntil = 0.0; // boot/reload grace: existing stocks don't toast
 	FString ToastLine;
 	double ToastUntil = 0.0;
+	// G2b (B2): the one toast setter (the stock toast and the guide's two): the toast line, its hold, and the LOG.
+	void SetToast(const FString& Line, double HoldS);
+	// G2b (B3): golden cards from three game-side watches (the first crew, the first Mars birth, the Big Arrival), read each tick. During
+	// the boot grace after the deck's construction each reading is recorded and never fires; every load records the loaded colony's facts
+	// at once (r1: in the reload handler, so no card ever fires for a loaded colony's moment that already happened, however late the deck
+	// next ticks); afterwards a false-to-true change fires one card.
+	void RefreshMomentWatches();
+	double WatchGraceUntil = 0.0;
+	bool bWatchesRead = false;  // G2b (r1): false until the first reading (the deck's construction); every load records the loaded colony
+	bool bWatchedCrewEver = false;
+	bool bWatchedFirstBorn = false;
+	bool bWatchedArrival = false;
+	// G2b (r1): the three watched facts as the sim holds them now. The crew watch reads "the colony has ever had a crew" (a colonist now, or
+	// the quiet colony: everyone recalled), never the population leaving 0, which a recalled colony does again when its people come home.
+	void ReadMomentFacts(const class URHSimWorldSubsystem& S, bool& bOutCrewEver, bool& bOutBorn, bool& bOutArrival) const;
 	// Uplink panel state: rebuilt when the queue's id set changes.
 	TSharedPtr<class SVerticalBox> UplinkList;
 	TArray<int32> UplinkIdsShown;

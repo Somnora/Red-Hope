@@ -1401,6 +1401,10 @@ void URHColonyVisualizerSubsystem::StyleLabel(UTextRenderComponent* Label) const
 void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
+	// G2b (B1, B2): the alert queue's and the LOG's storage, once, so neither allocates per frame (a line's own text is its only allocation).
+	AlertRows.Reserve(AlertRowsMax);
+	AlertWaiting.Reserve(AlertWaitMax + 1);
+	LogRing.SetNum(LogCap);
 	LabelMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/RedHope/Art/M_RH_TextUnlit.M_RH_TextUnlit"));
 	RHFrameStats::EnsurePowerLookLogger(); // G1: the frame check's [PowerLook] sampler (rh.PowerLookLog), registered once
 	if (URHSimWorldSubsystem* Sim = InWorld.GetSubsystem<URHSimWorldSubsystem>())
@@ -1431,6 +1435,12 @@ void URHColonyVisualizerSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 void URHColonyVisualizerSubsystem::HandleColonyReloaded()
 {
+	// G2b (B2, PLACEHOLDER gate-d-wording MS2): the LOG notes the load and keeps its lines (it is the session's, never saved); the alert queue
+	// keeps its lines too (HEAD's one slot did).
+	if (const URHSimClockSubsystem* LoadedClock = GetWorld() ? GetWorld()->GetSubsystem<URHSimClockSubsystem>() : nullptr)
+	{
+		AppendLog(ERHLogKind::Load, FString::Printf(TEXT("loaded sol %d"), LoadedClock->GetSol()));
+	}
 	// Everything visual is disposable; the sim state walk rebuilds it all.
 	for (auto& Pair : BuildingVisuals)
 	{
@@ -2034,9 +2044,8 @@ void URHColonyVisualizerSubsystem::HandleSurveyCompleted(const FRHSurveyRecord& 
 	// voice or the player reads a quiet survey as a broken one.
 	if (Record.FoundCount == 0)
 	{
-		LastNotice = FString::Printf(TEXT("SURVEY complete at (%.0f, %.0f) m: no deposits within %.0f m"),
-			Record.PointCm.X / 100.f, Record.PointCm.Y / 100.f, Record.RadiusM);
-		LastNoticeRealSeconds = FPlatformTime::Seconds();
+		SetNotice(FString::Printf(TEXT("SURVEY complete at (%.0f, %.0f) m: no deposits within %.0f m"),
+			Record.PointCm.X / 100.f, Record.PointCm.Y / 100.f, Record.RadiusM)); // G2b (B2): through the one notice setter, so the LOG keeps it
 	}
 }
 
@@ -2044,9 +2053,8 @@ void URHColonyVisualizerSubsystem::HandleDepositDiscovered(const FRHDepositState
 {
 	// The go-look payoff: the marker appears the moment the scout reports.
 	SpawnDepositMarker(D);
-	LastNotice = FString::Printf(TEXT("Survey found %s - %.0f t"), // G2a (PLACEHOLDER, gate-d-wording PW3)
-		*RHOrder::DepositName(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, D), D.RemainingKg / 1000.0);
-	LastNoticeRealSeconds = FPlatformTime::Seconds();
+	SetNotice(FString::Printf(TEXT("Survey found %s - %.0f t"), // G2a (PLACEHOLDER, gate-d-wording PW3); G2b (B2): the LOG keeps it too
+		*RHOrder::DepositName(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, D), D.RemainingKg / 1000.0));
 }
 
 void URHColonyVisualizerSubsystem::Deinitialize()
@@ -3510,9 +3518,18 @@ void URHColonyVisualizerSubsystem::HandleCommandRejected(const FRHCommand& Cmd, 
 		*Cmd.Verb.ToString(), *Cmd.Target.ToString(), *Reason);
 	// G2a r2 (PLACEHOLDER, gate-d-wording PW9, PW24): the order in words; one with no target reads as its verb alone ("REJECTED Dig tunnel:
 	// ...", never "REJECTED Dig tunnel None: ..."). The log line above keeps the sim's names.
-	LastNotice = FString::Printf(TEXT("REJECTED %s: %s"),
-		*RHOrder::OrderText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Cmd.Verb, Cmd.Target), *Reason);
+	// G2b (B2): through the one notice setter, so the LOG keeps it (text unchanged).
+	SetNotice(FString::Printf(TEXT("REJECTED %s: %s"),
+		*RHOrder::OrderText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Cmd.Verb, Cmd.Target), *Reason));
+}
+
+void URHColonyVisualizerSubsystem::SetNotice(const FString& Text)
+{
+	// G2b (B2): the one notice setter (an order's rejection, a survey's empty result, a discovery): the notice line as before (its words and
+	// its 12 s hold unchanged), and the LOG.
+	LastNotice = Text;
 	LastNoticeRealSeconds = FPlatformTime::Seconds();
+	AppendLog(ERHLogKind::Notice, Text);
 }
 
 FText URHColonyVisualizerSubsystem::GetNoticeText() const
@@ -3529,28 +3546,277 @@ FText URHColonyVisualizerSubsystem::GetNoticeText() const
 
 void URHColonyVisualizerSubsystem::HandleAlert(const FString& Alert)
 {
-	LastAlert = Alert;
-	LastAlertRealSeconds = FPlatformTime::Seconds();
+	// G2b (B1, B2): every alert (each arrival, repeats too) goes to the LOG and to the queue. Before G2b one slot held the last alert, so a
+	// second alert in the same step replaced the first (the Big Arrival line by the CEO's, E5's DefyIssue line by the re-raised demand).
+	AppendLog(ERHLogKind::Alert, Alert);
+	PushAlertLine(Alert);
 }
 
-FText URHColonyVisualizerSubsystem::GetAlertText() const
+void URHColonyVisualizerSubsystem::PostDeckLine(const FString& Line)
 {
-	// Longer hold than the notice line: these are the batten-down moments.
-	constexpr double AlertHoldSeconds = 15.0;
-	if (FPlatformTime::Seconds() - LastAlertRealSeconds > AlertHoldSeconds)
+	// G2b (B4, B5): a line the presentation says itself (the quota, the landing, 60x resumed): the queue and the LOG, like an alert.
+	AppendLog(ERHLogKind::DeckLine, Line);
+	PushAlertLine(Line);
+}
+
+FText URHColonyVisualizerSubsystem::MakeAlertShown(const FString& Text, int32 Count)
+{
+	// G2b (PLACEHOLDER, gate-d-wording MS1): a merged repeat carries its count. Built at admission and at each merge, never per frame.
+	return FText::FromString(Count > 1 ? FString::Printf(TEXT("%s (x%d)"), *Text, Count) : Text);
+}
+
+void URHColonyVisualizerSubsystem::PushAlertLine(const FString& Line)
+{
+	// G2b (B1): a repeat (exactly equal text) merges into a shown line that is not leaving (its count up, held again from now) or into a
+	// waiting line; a repeat of a leaving line is a new entry, so no fade ever reverses (the flash rule R1 would read a reversal as a
+	// change). Anything else waits its turn, FIFO. r2: a 60x line first sends the other kind's lines away (ReplaceSixtyLines); a line
+	// marked replaced is on its way out, so a repeat of it is a new entry too.
+	const double Now = FPlatformTime::Seconds();
+	const uint8 Kind = SixtyKind(Line);
+	if (Kind != 0)
 	{
-		return FText::GetEmpty();
+		ReplaceSixtyLines(Kind);
 	}
-	return FText::FromString(LastAlert);
+	for (FRHAlertEntry& E : AlertRows)
+	{
+		if (!E.bLeaving && !E.bReplaced && E.Text == Line)
+		{
+			++E.Count;
+			E.Shown = MakeAlertShown(E.Text, E.Count);
+			E.HeldFromS = Now;
+			return;
+		}
+	}
+	for (FRHAlertEntry& E : AlertWaiting)
+	{
+		if (E.Text == Line)
+		{
+			++E.Count; // its shown text is built when it is admitted
+			return;
+		}
+	}
+	FRHAlertEntry& New = AlertWaiting.AddDefaulted_GetRef();
+	New.Id = NextAlertId++;
+	New.Text = Line;
+	New.Sixty = Kind;
+	if (AlertWaiting.Num() > AlertWaitMax)
+	{
+		AlertWaiting.RemoveAt(0, EAllowShrinking::No);
+		UE_LOG(LogRedHope, Display, TEXT("Alert queue: the oldest waiting line left the banner (it is in the LOG)"));
+	}
+}
+
+uint8 URHColonyVisualizerSubsystem::SixtyKind(const FString& Line)
+{
+	return Line.StartsWith(SixtyRefusedPrefix, ESearchCase::CaseSensitive) ? 1 : (Line.Equals(SixtyResumedLine, ESearchCase::CaseSensitive) ? 2 : 0);
+}
+
+void URHColonyVisualizerSubsystem::ReplaceSixtyLines(uint8 Kind)
+{
+	// G2b r2 (James's answer G2B-Q1 A, 2026-11-09): the two 60x lines replace each other, so the banner never says "60x resumed" over a
+	// refusal that is no longer true, or a refusal under a "60x resumed" that no longer is. When one arrives (Kind), every waiting line of
+	// the other kind is dropped (it never showed; the LOG has it), and every shown line of the other kind that is not already leaving is
+	// marked replaced: TickAlerts starts its one normal fade out whatever its hold (so it may leave before AlertMinHoldS), as soon as it
+	// has been shown one floor, and the arriving line takes its row once it is gone (AdmitWaitingAlerts). A shown line of the arriving
+	// kind that was marked is live again: the line that replaced it was still waiting (it is dropped here) and its fade had not begun,
+	// so nothing reverses.
+	for (int32 i = AlertWaiting.Num() - 1; i >= 0; --i)
+	{
+		if (AlertWaiting[i].Sixty != 0 && AlertWaiting[i].Sixty != Kind)
+		{
+			AlertWaiting.RemoveAt(i, EAllowShrinking::No);
+		}
+	}
+	for (FRHAlertEntry& E : AlertRows)
+	{
+		if (E.Sixty != 0 && !E.bLeaving)
+		{
+			E.bReplaced = E.Sixty != Kind;
+		}
+	}
+}
+
+void URHColonyVisualizerSubsystem::TickAlerts(float DeltaTime)
+{
+	// G2b (B1): once a frame, real time, in this order. (1) A leaving line's opacity falls; at 0 it is removed and frees its row. (2) THE
+	// HOLD RULE, stated once (r2): a shown line starts to leave (its fade starts on the next frame) once it has been held AlertFullHoldS,
+	// from its admission or its last repeat. It may leave sooner, after AlertMinHoldS, only for a waiting line that has no row now and none
+	// coming: RowsForWaiting counts the rows free now and the rows being freed (lines leaving, replaced, or starting to leave on this
+	// frame), and walking the shown lines oldest first, a line leaves early only while more lines wait than that count, which goes up by
+	// one with each line sent. So on any frame at most (lines waiting - rows free or being freed) lines start to leave before their full
+	// hold: four alerts in one step send only the first away at AlertMinHoldS, and the other two keep AlertFullHoldS. (Rounds 0 and 1
+	// chose one hold for every shown line on a frame: a line arriving while a row was free, then a line about to take a leaving line's
+	// row, then three lines reaching AlertMinHoldS together for one waiting line, each sent away lines that nothing waited for.) A 60x
+	// line the other kind replaced (r2, ReplaceSixtyLines) leaves whatever its hold once it has been shown one floor (FloorRealS: the
+	// flash rule R1 reads a line that appears and leaves inside 3 s as a blink), at once when it already has. (3) While a row is free,
+	// the oldest waiting line takes it at opacity 0 (it starts to rise on the next frame). The opacity moves at most
+	// min(dt, 0.05) / AlertFadeS a frame (10 %), never back the other way. No allocation: the arrays are reserved and RemoveAt never
+	// shrinks them.
+	const double Now = FPlatformTime::Seconds();
+	const float Step = FMath::Min(DeltaTime, 0.05f) / AlertFadeS;
+	for (int32 i = AlertRows.Num() - 1; i >= 0; --i)
+	{
+		FRHAlertEntry& E = AlertRows[i];
+		if (!E.bLeaving)
+		{
+			continue;
+		}
+		E.Opacity = FMath::Max(0.f, E.Opacity - Step);
+		if (E.Opacity <= 0.f)
+		{
+			AlertRows.RemoveAt(i, EAllowShrinking::No);
+		}
+	}
+	int32 RowsForWaiting = AlertRowsMax - AlertRows.Num(); // the rows free now (a line that arrived since the last frame takes one below)
+	for (const FRHAlertEntry& E : AlertRows)
+	{
+		RowsForWaiting += (E.bLeaving || E.bReplaced) ? 1 : 0; // the rows being freed
+	}
+	for (FRHAlertEntry& E : AlertRows)
+	{
+		// What leaves whatever waits: a replaced 60x line past its floor (counted above), and a line at its full hold.
+		if (E.bLeaving)
+		{
+			continue;
+		}
+		if (E.bReplaced)
+		{
+			E.bLeaving = Now - E.AdmittedAtS >= URHPowerLookSubsystem::FloorRealS;
+		}
+		else if (Now - E.HeldFromS >= AlertFullHoldS)
+		{
+			E.bLeaving = true;
+			++RowsForWaiting;
+		}
+	}
+	for (FRHAlertEntry& E : AlertRows) // oldest admitted first
+	{
+		if (E.bLeaving)
+		{
+			continue;
+		}
+		if (!E.bReplaced && AlertWaiting.Num() > RowsForWaiting && Now - E.HeldFromS >= AlertMinHoldS)
+		{
+			E.bLeaving = true;
+			++RowsForWaiting;
+			continue;
+		}
+		E.Opacity = FMath::Min(1.f, E.Opacity + Step);
+	}
+	AdmitWaitingAlerts(Now);
+}
+
+void URHColonyVisualizerSubsystem::AdmitWaitingAlerts(double Now)
+{
+	while (AlertRows.Num() < AlertRowsMax && AlertWaiting.Num() > 0)
+	{
+		// r2 (G2B-Q1 A): a 60x line takes the row of the 60x line it replaces. It waits while a line of the other kind still holds a row
+		// (that line is leaving, or replaced and about to), so the two never show together and the stack's row count never goes up and
+		// back down inside one fade. Lines behind it wait their turn (FIFO); the hold rule counts the free row they will take.
+		const uint8 Kind = AlertWaiting[0].Sixty;
+		if (Kind != 0 && AlertRows.ContainsByPredicate([Kind](const FRHAlertEntry& E) { return E.Sixty != 0 && E.Sixty != Kind; }))
+		{
+			break;
+		}
+		FRHAlertEntry& In = AlertRows.Add_GetRef(MoveTemp(AlertWaiting[0]));
+		AlertWaiting.RemoveAt(0, EAllowShrinking::No);
+		In.AdmittedAtS = Now;
+		In.HeldFromS = Now;
+		In.Opacity = 0.f;
+		In.bLeaving = false;
+		In.bReplaced = false;
+		In.Shown = MakeAlertShown(In.Text, In.Count);
+		++AlertSerial;
+	}
+}
+
+const FText& URHColonyVisualizerSubsystem::GetAlertRowText(int32 Row) const
+{
+	// Row 0 is the most recently admitted line (the top row).
+	const int32 i = AlertRows.Num() - 1 - Row;
+	return AlertRows.IsValidIndex(i) ? AlertRows[i].Shown : FText::GetEmpty();
+}
+
+float URHColonyVisualizerSubsystem::GetAlertRowOpacity(int32 Row) const
+{
+	const int32 i = AlertRows.Num() - 1 - Row;
+	return AlertRows.IsValidIndex(i) ? AlertRows[i].Opacity : 0.f;
+}
+
+int32 URHColonyVisualizerSubsystem::Debug_GetAlertRows(TArray<uint32>& OutIds, TArray<FString>& OutTexts, TArray<float>& OutOpacity, TArray<int32>& OutCounts) const
+{
+	OutIds.Reset();
+	OutTexts.Reset();
+	OutOpacity.Reset();
+	OutCounts.Reset();
+	for (int32 i = AlertRows.Num() - 1; i >= 0; --i)
+	{
+		const FRHAlertEntry& E = AlertRows[i];
+		OutIds.Add(E.Id);
+		OutTexts.Add(E.Shown.ToString());
+		OutOpacity.Add(E.Opacity);
+		OutCounts.Add(E.Count);
+	}
+	return AlertRows.Num();
+}
+
+int32 URHColonyVisualizerSubsystem::Debug_GetAlertWaiting(TArray<uint32>& OutIds, TArray<FString>& OutTexts) const
+{
+	OutIds.Reset();
+	OutTexts.Reset();
+	for (const FRHAlertEntry& E : AlertWaiting)
+	{
+		OutIds.Add(E.Id);
+		OutTexts.Add(E.Text);
+	}
+	return AlertWaiting.Num();
+}
+
+void URHColonyVisualizerSubsystem::Debug_ClearAlerts()
+{
+	AlertRows.Reset();
+	AlertWaiting.Reset();
+}
+
+void URHColonyVisualizerSubsystem::AppendLog(ERHLogKind Kind, const FString& Text)
+{
+	// G2b (B2, PLACEHOLDER gate-d-wording MS2): "sol N: <line>"; a load's line is its own ("loaded sol N"). A ring of LogCap lines: the
+	// oldest goes when it is full. Never saved.
+	if (LogRing.Num() != LogCap)
+	{
+		LogRing.SetNum(LogCap); // a line before OnWorldBeginPlay (none in play)
+	}
+	const UWorld* World = GetWorld();
+	const URHSimClockSubsystem* Clock = World ? World->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+	FRHLogLine& L = LogRing[LogHead];
+	L.Id = NextLogId++;
+	L.Text = Kind == ERHLogKind::Load ? Text : FString::Printf(TEXT("sol %d: %s"), Clock ? Clock->GetSol() : 0, *Text);
+	LogHead = (LogHead + 1) % LogCap;
+	LogCount = FMath::Min(LogCount + 1, LogCap);
+	++LogSerial;
+}
+
+const FString& URHColonyVisualizerSubsystem::GetLogLine(int32 NewestFirst) const
+{
+	static const FString None;
+	return (NewestFirst >= 0 && NewestFirst < LogCount) ? LogRing[(LogHead - 1 - NewestFirst + LogCap) % LogCap].Text : None;
+}
+
+uint32 URHColonyVisualizerSubsystem::Debug_GetLogLineId(int32 NewestFirst) const
+{
+	return (NewestFirst >= 0 && NewestFirst < LogCount) ? LogRing[(LogHead - 1 - NewestFirst + LogCap) % LogCap].Id : 0u;
 }
 
 void URHColonyVisualizerSubsystem::HandleQuotaMet(int32 Sol, double AwardKg)
 {
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 12.f, FColor::Green,
-			FString::Printf(TEXT("CEO TRANSMISSION: Quota met (Sol %d). Ship authorized: %.0f kg. RH.Manifest / RH.Launch"), Sol, AwardKg));
-	}
+	// G2b (B4, PLACEHOLDER, gate-d-wording MS4, an Earth/Program line): a deck line through the queue and the LOG, in place of the engine's
+	// debug text (which hid under the Slate overlay and named the console commands). r1: the award in what the game pays, credits (E2b:
+	// floor(award kg x AwardMcrPerKg), the figure the Earth panel's "this round's award" line prints), never the award's kg, which the
+	// OBJECTIVE panel never shows (its ship mass limit is ShipMassCapKg).
+	const UWorld* World = GetWorld();
+	const URHSimWorldSubsystem* Sim = World ? World->GetSubsystem<URHSimWorldSubsystem>() : nullptr;
+	const int64 AwardMcr = Sim ? FMath::FloorToInt64(AwardKg * Sim->GetAwardMcrPerKg()) : 0;
+	PostDeckLine(FString::Printf(TEXT("CEO: quota met on sol %d. Earth pays %s cr. Compose the supply ship's manifest on the OBJECTIVE panel."), Sol, *RHOrder::CreditsText(AwardMcr)));
 }
 
 namespace
@@ -3585,11 +3851,9 @@ void URHColonyVisualizerSubsystem::HandleShipArrived(const TArray<FName>& Items)
 		SpawnSupplyShip(true);
 		ShipLandedSimSeconds = Clock ? Clock->GetSimSecondsTotal() : 0.0;
 	}
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 15.f, FColor::Cyan,
-			FString::Printf(TEXT("SUPPLY SHIP LANDED: %d items transferred. The Program continues."), Items.Num()));
-	}
+	// G2b (B4, PLACEHOLDER, gate-d-wording MS5, an Earth/Program line): what landed, by display name, as a deck line (the queue and the LOG)
+	// in place of the engine's debug text.
+	PostDeckLine(RHOrder::LandingText(GetWorld() ? GetWorld()->GetSubsystem<URHDefinitionsSubsystem>() : nullptr, Items));
 }
 
 void URHColonyVisualizerSubsystem::EnsureLandingPad()
@@ -3832,6 +4096,7 @@ void URHColonyVisualizerSubsystem::RestoreSupplyShip(const URHSimWorldSubsystem*
 void URHColonyVisualizerSubsystem::Tick(float DeltaTime)
 {
 	RHFrameStats::FScope StatScope(RHFrameStats::Colony);
+	TickAlerts(DeltaTime); // G2b (B1): first, before any early return, so the banner fades whatever else this frame skips
 	UWorld* World = GetWorld();
 	if (!World)
 	{

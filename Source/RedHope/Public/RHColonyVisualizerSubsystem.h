@@ -42,14 +42,54 @@ public:
 
 	// Last order-rejection notice, empty once stale. The visualizer already
 	// listens on the sim's rejection seam; the deck polls this rather than
-	// wiring its own delegate (debug messages hide under the Slate overlay).
+	// wiring its own delegate. G2b (B4): nothing here uses the engine's
+	// on-screen debug text any more (it hid under the Slate overlay): the
+	// alert queue below and the LOG carry what it did (the quota and landing
+	// lines are deck lines).
 	FText GetNoticeText() const;
 	// G2a r2 QA (names.uplink, developer): when the notice was last set (FPlatformTime seconds), so a check can tell its own order's refusal
 	// from an older notice.
 	double Debug_GetNoticeRealSeconds() const { return LastNoticeRealSeconds; }
-	// Banner-weight alert (era refusal, event onset, ship countdown) - the
-	// must-not-miss channel the director asked for. Empty once stale.
-	FText GetAlertText() const;
+	// G2b (B1, PLACEHOLDER numbers): the alert queue, replacing the one slot (banner-weight alerts: era refusals, event onsets, the ship's
+	// countdown, the must-not-miss channel the director asked for). Up to AlertRowsMax lines show at once, newest on top; each fades in and
+	// out over AlertFadeS and never blinks; a repeat merges with a count. Real seconds.
+	// THE HOLD RULE (r2, stated once; TickAlerts applies it): a shown line keeps its row AlertFullHoldS (HEAD's hold). It gives the row up
+	// sooner, after AlertMinHoldS, only for a waiting line that has no row now and none coming: on any frame, at most as many shown lines
+	// start to leave early as lines wait beyond the rows that are free or being freed, the oldest first. So of four alerts in one step
+	// only the first leaves at AlertMinHoldS (the fourth takes its row) and the other two keep AlertFullHoldS.
+	// THE 60x PAIR (r2, James's answer G2B-Q1 A): the sim's "60x unavailable" line and the wish's "60x resumed" replace each other
+	// (ReplaceSixtyLines): the line still shown fades out once and the new one takes its row.
+	// Every alert and deck line also goes to the LOG (B2). Readers: the deck's three rows and the audio cue.
+	static constexpr int32 AlertRowsMax = 3;
+	static constexpr double AlertFullHoldS = 15.0;
+	static constexpr double AlertMinHoldS = 6.0;
+	static constexpr float AlertFadeS = 0.5f;
+	static constexpr int32 AlertWaitMax = 32;
+	// r2: the two 60x lines. The refusal is the sim's (its prefix is one of the strings code may branch on, unchanged); the wish's line
+	// (PLACEHOLDER, gate-d-wording MS6) is posted by the controller through this name, so the pair's rule and the line cannot drift apart.
+	static constexpr const TCHAR* SixtyRefusedPrefix = TEXT("60x unavailable");
+	static constexpr const TCHAR* SixtyResumedLine = TEXT("60x resumed");
+	void PostDeckLine(const FString& Line);                 // a deck line (B4, B5): the queue and the LOG, like an alert
+	int32 GetAlertRowCount() const { return AlertRows.Num(); } // rows shown now, 0..AlertRowsMax
+	const FText& GetAlertRowText(int32 Row) const;           // Row 0 = newest; empty when none; cached at admission and merge
+	float GetAlertRowOpacity(int32 Row) const;               // 0..1, faded; 0 when none
+	uint32 GetAlertSerial() const { return AlertSerial; }   // bumped when a line is admitted to a row (never on a merge)
+	int32 GetAlertWaitingCount() const { return AlertWaiting.Num(); }
+	// G2b (B2): the session's LOG, a ring of LogCap lines (PLACEHOLDER), newest first; never saved; a load adds "loaded sol N" and keeps
+	// the list. Alerts, notices, cards, deck lines and toasts; not the player's own order confirms.
+	enum class ERHLogKind : uint8 { Alert, Notice, Card, DeckLine, Load };
+	static constexpr int32 LogCap = 200;
+	void AppendLog(ERHLogKind Kind, const FString& Text);
+	uint32 GetLogSerial() const { return LogSerial; }
+	int32 GetLogCount() const { return LogCount; }
+	const FString& GetLogLine(int32 NewestFirst) const;
+	uint32 Debug_GetLogLineId(int32 NewestFirst) const;     // developer: a line's id, for the flash probe
+	// developer (click and flash checks): every entry shown now (id, text as drawn, opacity, count), newest first; returns the count. And
+	// a clean start for a check (shown and waiting lines go; the LOG keeps them).
+	int32 Debug_GetAlertRows(TArray<uint32>& OutIds, TArray<FString>& OutTexts, TArray<float>& OutOpacity, TArray<int32>& OutCounts) const;
+	void Debug_ClearAlerts();
+	// developer (alerts.merge, flash.alerts): every waiting entry's id and text, oldest first; returns the count.
+	int32 Debug_GetAlertWaiting(TArray<uint32>& OutIds, TArray<FString>& OutTexts) const;
 	// A building's main visual actor (the build menu's thumbnail capture,
 	// RH.Thumbs); null if it has none yet.
 	AStaticMeshActor* GetBuildingVisual(int32 BuildingId) const
@@ -546,6 +586,43 @@ private:
 	FDelegateHandle RemovedHandle;
 	FString LastNotice;
 	double LastNoticeRealSeconds = -1.0e9;
-	FString LastAlert;
-	double LastAlertRealSeconds = -1.0e9;
+	// G2b (B1): the alert queue. A shown entry is admitted (fades in), held, then leaves (fades out) and frees its row; nothing reverses a
+	// fade. Text is the line, Count its merged repeats, Shown the text as drawn (cached at admission and at each merge: no per-frame FText).
+	// r2: Sixty is which 60x line it is (0 neither, 1 the sim's refusal, 2 the wish's "60x resumed"; worked out once, when the line
+	// arrives), and bReplaced marks a shown 60x line the other kind has replaced: it leaves whatever its hold (TickAlerts).
+	struct FRHAlertEntry
+	{
+		uint32 Id = 0;
+		FString Text;
+		int32 Count = 1;
+		FText Shown;
+		double AdmittedAtS = -1.0;
+		double HeldFromS = -1.0;
+		float Opacity = 0.f;
+		bool bLeaving = false;
+		uint8 Sixty = 0;
+		bool bReplaced = false;
+	};
+	TArray<FRHAlertEntry> AlertRows;     // shown, oldest admitted first (reserved AlertRowsMax once)
+	TArray<FRHAlertEntry> AlertWaiting;  // FIFO (reserved AlertWaitMax + 1 once)
+	uint32 AlertSerial = 0;
+	uint32 NextAlertId = 1;
+	// G2b (B2): the LOG ring. LogHead is the next slot to write; LogCount the lines held (at most LogCap).
+	struct FRHLogLine
+	{
+		uint32 Id = 0;
+		FString Text;
+	};
+	TArray<FRHLogLine> LogRing;          // LogCap slots once (OnWorldBeginPlay)
+	int32 LogHead = 0;
+	int32 LogCount = 0;
+	uint32 LogSerial = 0;
+	uint32 NextLogId = 1;
+	void SetNotice(const FString& Text);     // the one notice setter: LastNotice, its time, and the LOG
+	void PushAlertLine(const FString& Line); // HandleAlert and PostDeckLine
+	void TickAlerts(float DeltaTime);
+	void AdmitWaitingAlerts(double Now); // G2b (r1): while a row is free, the oldest waiting line takes it at opacity 0
+	static uint8 SixtyKind(const FString& Line); // r2: 1 the sim's "60x unavailable" line, 2 the wish's "60x resumed", 0 any other line
+	void ReplaceSixtyLines(uint8 Kind);          // r2 (G2B-Q1 A): a 60x line of Kind arrives: the other kind's lines go
+	static FText MakeAlertShown(const FString& Text, int32 Count);
 };

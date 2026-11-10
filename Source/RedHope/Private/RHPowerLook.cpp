@@ -65,6 +65,11 @@ void URHPowerLookSubsystem::ResetAll()
 	GardenChangedAtS = 0.0;
 	GardenDarkAtSimS = -1.0e12;
 	GardenDarkProducing = 0;
+	bEpisodeOn = false;
+	bSpellOn = false;
+	bServedSettled = false;
+	EpisodeOnsetS = 0.0;
+	EpisodeMaxHoldS = 0.0;
 }
 
 bool URHPowerLookSubsystem::IsExempt(FName DefName, const FRHBuildingRow* Def)
@@ -177,6 +182,39 @@ void URHPowerLookSubsystem::Tick(float DeltaTime)
 		else
 		{
 			Latch(bRationShown, RationChangedAtS, Want, NowS, false);
+		}
+	}
+
+	// 3a. G2b (B6, POWER C): the colony's served share is "settled" once its running mean holds at most ServedSettleResidual of cycles
+	// closed before the rationing began (the mean's own memory, never a timer: the mean moves by 1 - exp(-cycle / hold) at each closed
+	// cycle, so cycles closed before the onset weigh at most exp(-closed time since the onset / hold)). Onset: LastShedS on the first
+	// frame the sim rations (the latest it can be, so this errs late); the hold: the largest ShedHoldFor seen since.
+	// r2: it follows the SHOWN rationing spell, never the sim's episode. The spell begins at the sim's first shed and lasts while the sim
+	// rations or anything still shows rationing (the rationing latch, the shown net's kind, or a reader that printed the served share on
+	// the last frame: the tile's own state latch can hold its rationing state a floor longer). A sim episode that ends and begins again
+	// inside the spell keeps the onset and the settled state: the weight of the cycles closed before the first onset only shrinks, and the
+	// number on screen must not fall back to MEASURING while the header still reads RATIONING (rounds 0 and 1 started over at every sim
+	// onset). Measuring starts again only at the first shed after nothing shows rationing any more. O(1).
+	{
+		const URHSimWorldSubsystem::FRHShedColony& Colony = Sim->GetShedColony();
+		const bool bSimRations = Sim->IsColonyRationing();
+		const FBoolLatch* ServedKey = BoolLatches.Find(MakeKey('P', 0u));
+		const bool bShown = bRationShown != 0 || (bNetShownSet && NetKindShown != 0) || (ServedKey && Frame - ServedKey->SeenFrame <= 1);
+		const bool bOnset = bSimRations && !bEpisodeOn; // the sim's episode begins on this frame
+		bEpisodeOn = bSimRations;
+		if (bOnset && !bSpellOn)
+		{
+			// A new spell: measure from this onset.
+			bServedSettled = false;
+			EpisodeOnsetS = Colony.LastShedS;
+			EpisodeMaxHoldS = 0.0;
+		}
+		bSpellOn = bSimRations || (bSpellOn && bShown);
+		if (bSimRations)
+		{
+			EpisodeMaxHoldS = FMath::Max(EpisodeMaxHoldS, URHSimWorldSubsystem::ShedHoldFor(Colony.LastStepDtS));
+			const double ClosedS = (Colony.LastStepEndS - EpisodeOnsetS) - Colony.CycleS;
+			bServedSettled |= ClosedS > 0.0 && EpisodeMaxHoldS > 0.0 && FMath::Exp(-ClosedS / EpisodeMaxHoldS) <= ServedSettleResidual;
 		}
 	}
 
