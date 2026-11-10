@@ -4244,3 +4244,14 @@ The fix James chose (G2B-Q2 A), for C0a: give the toast a place that does not de
 - Wording notes not yet in the Gate-D rows: the new quota line and the sim's renewal line speak for the CEO in two voices; a merged refusal ends in two brackets back to back ("(staying at 8x) (x2)"); the zoning confirm prints the bay's zero-based index (presentation; for the Gate-D list).
 - The manifest that the new CEO line points to still prints internal names ("+1 deployable SolarArray", "+10 SpareParts"). The text is the effect column of `docs/data/RH_ManifestItems.csv`, the same at HEAD and outside this gate's scope; it was on no list until now (presentation).
 - The pause menu keeps the 60x wish (deviation 43). James was told on 2026-11-10; no check either way.
+
+### Director answer, 2026-11-09: C0-Q5, C0 in two parts (A)
+
+James answered C0-Q5 on 2026-11-09 about 12:45 EST ("C0-Q5 A"), after G2b's first review round had sent it back with ten blocking findings (seven distinct problems). C0 runs as two parts, each with its own go, proof and commit, like G2:
+
+- **C0a, the building fixes** (C0-1 to C0-7, C0-9, C0-10's 2-bay rule, C0-11, C0-12): a sim gate, committed once its proof passes and James has looked at its captures. Its battery baseline is G2b's.
+- **C0b, the roofs** (C0-8a, C0-8b, C0-8c and the prefab drawn as the HabitatDome model): presentation only, the sim untouched, run right after C0a is committed. C0-8a (roofs on by default) waits for C0b, because turning on today's flat lid alone would show floor tiles with room labels through them.
+
+Why: "I cant build buildings" gets fixed and committed without waiting on James's verdict on the roof's look. The spec's rule 5 now reads one commit per part. Spec and script: `/Volumes/Unreal/red_hope/wip-backups/c0/c0-spec.md`, `/Volumes/Unreal/red_hope/wip-backups/c0/c0-wf.js` (part 'a', then part 'b').
+
+Added 2026-11-10: on James's answers G2B-R3 A and G2B-Q2 A, C0a also carries G2b's one open finding, the reward toast's fixed place with its flash step and mutation ("Gate 2b's last review", above). That item is display only; the rest of C0a is unchanged.
