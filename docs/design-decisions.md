@@ -4255,3 +4255,17 @@ James answered C0-Q5 on 2026-11-09 about 12:45 EST ("C0-Q5 A"), after G2b's firs
 Why: "I cant build buildings" gets fixed and committed without waiting on James's verdict on the roof's look. The spec's rule 5 now reads one commit per part. Spec and script: `/Volumes/Unreal/red_hope/wip-backups/c0/c0-spec.md`, `/Volumes/Unreal/red_hope/wip-backups/c0/c0-wf.js` (part 'a', then part 'b').
 
 Added 2026-11-10: on James's answers G2B-R3 A and G2B-Q2 A, C0a also carries G2b's one open finding, the reward toast's fixed place with its flash step and mutation ("Gate 2b's last review", above). That item is display only; the rest of C0a is unchanged.
+
+### Director answers, 2026-11-10: the lighting gate and C1 (LT-Q1 to LT-Q3 and C1-Q1 to C1-Q4, all A)
+
+On 2026-11-09 about 13:47 EST James asked for lighting: "I would like to be able to add lighting for interior and exterior. at night its hard to see outside, and adding floor lamps and street lights would be a nice touch. also the daylight affects the undergroud areas which doesnt make any sense." The orchestrator put three questions (LT-Q1 to LT-Q3) and, with the C1 spec, four more (C1-Q1 to C1-Q4), recommending A for each, and listed them again on 2026-11-10 after G2b's commit ("LT-Q1 to LT-Q3 and C1-Q1 to C1-Q4: A is recommended for each"). James answered on 2026-11-10 about 11:03 EST: "lets go with your reccommended changes". The orchestrator reads that as A for all seven; it is not a go for any gate.
+
+- **LT-Q1 A, where the lighting gate goes:** its own presentation gate, LT, right after C0b (the roofs) and before GW. The order is now C0a, C0b, LT, GW, C1 to C4, then G3 to G16.
+- **LT-Q2 A, how underground floors are lit (this answers the living-colony design's D6 as A):** a soft, steady light underground, the same at every hour, with no sun and no sun shadows; the colony's lamps set the mood. The item moves from G9 into LT.
+- **LT-Q3 A, who places the lamps:** the game draws them. Street lights along roads and paths and at airlocks and pads, floor lamps in lived-in rooms, and a night brightness floor that keeps the outdoor colony readable from the main camera. Display only: no sim, data or save change. Every lamp keeps G1's steady-light rule.
+- **C1-Q1 A, disputes in the life feed:** kept off LIFE until James's wording review; the amber plate stays as today.
+- **C1-Q2 A, how much of Hope to show:** the two hidden terms (a crisis, Earth's solidarity) while they are nonzero, plus one steady line and arrow when Hope is heading down or up, naming the biggest cause.
+- **C1-Q3 A, babies until the children gate:** words only: no walking figure for a Mars-born colonist, LIFE leaves out lines that name one, and their card says "Born on Mars" and where they live.
+- **C1-Q4 A, picking a person:** both a roster row and a click on the figure open the card; the roster is the sure path.
+
+Specs: `/Volumes/Unreal/red_hope/wip-backups/lt/lt-spec.md` (written after these answers) and `/Volumes/Unreal/red_hope/wip-backups/c1/c1-spec.md`. Docs only. Still open from G2b: whether the Esc pause menu cancels a pending 60x wish (deviation 43; the orchestrator recommends that it does, as Space's pause already does); the 3.2 s floor on G2B-Q1 A stands.
