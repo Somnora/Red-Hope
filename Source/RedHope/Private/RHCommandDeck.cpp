@@ -98,6 +98,9 @@ namespace
 	// column whose width followed its content shoved every panel leftward each
 	// time a line grew. Fixed width holds the left edge still.
 	constexpr float RightColumnPx = 340.f;
+	// C0-13 (PLACEHOLDER): the reward toast's slot at the top of the top-centre column. Always laid out at this height, so nothing the
+	// alert rows or the event banner do can move the toast (its pill is about 27 tall and sits centred in the slot).
+	constexpr float ToastSlotPx = 32.f;
 
 	FSlateFontInfo DeckFont(int32 Size)
 	{
@@ -731,10 +734,12 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 	// G2b (B1): the alert banner's rows, built once (nothing is rebuilt per frame): AlertRowsMax fixed slots, row 0 (the newest line) on top,
 	// 4 px apart. Each row reads the visualizer's queue: its cached text and its opacity (the fade), on its background and its words alike.
 	// A row never takes a click (HitTestInvisible while shown): three rows can stand three times HEAD's pill tall at the top centre, and
-	// nothing in a row is pressable. With no row shown the box collapses, so the toast under it sits where it did.
+	// nothing in a row is pressable. With no row shown the box collapses.
 	// r1: a row is laid out while an entry holds it, from its admission frame (at opacity 0) to its removal, never collapsed for its opacity:
-	// the queue removes a leaving line and admits a waiting one on the same frame, and a row collapsed at opacity 0 made the stack (and the
-	// toast under it) one row shorter for that one frame. The stack's height now changes at most once per turnover, never back and forth.
+	// the queue removes a leaving line and admits a waiting one on the same frame, and a row collapsed at opacity 0 made the stack one row
+	// shorter for that one frame.
+	// C0-13 (G2B-R3 A): the reward toast no longer sits under these rows. It has the first slot of the column, at a fixed height, so the
+	// stack's row count (which can go one way and back inside 3 s in ordinary play) moves nothing outside the rows themselves.
 	TSharedRef<SVerticalBox> AlertRowsBox = SNew(SVerticalBox)
 		.Visibility_Lambda([this]() { return GetAlertRowCount() > 0 ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed; });
 	AlertRowsBoxWidget = AlertRowsBox;
@@ -953,9 +958,44 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Top).Padding(FMargin(0.f, 100.f, 0.f, 0.f))
 		[
 			SNew(SVerticalBox)
+			// C0-13 (PLACEHOLDER; the toast's fixed place, G2B-R3 A): the reward toast (alive pass: a quiet one-line cheer) has the FIRST
+			// slot of this column, a box of ToastSlotPx that is always laid out (its pill is Hidden, never Collapsed, while no toast shows:
+			// GetToastVisibility), so its place does not depend on the event banner or on how many alert rows stand under it, and the
+			// banner and the rows do not move when a toast comes or goes. It cannot cover a row or the banner (it is above them in the
+			// same column), and it stays clear of the right column: one line, centred, cut with an ellipsis at the alerts' own wrap width.
+			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+			[
+				SAssignNew(ToastBoxWidget, SBox)
+				.HeightOverride(ToastSlotPx)
+				.MaxDesiredWidth_Lambda([this]() { const float WrapAt = GetAlertWrapAt(); return WrapAt > 0.f ? FOptionalSize(WrapAt + 32.f) : FOptionalSize(); })
+				.VAlign(VAlign_Center)
+				[
+					SAssignNew(ToastBorderWidget, SBorder)
+					.AddMetaData<FTagMetaData>(FTagMetaData(TEXT("RH.Toast")))
+					.BorderImage(RHDeck::RoundedWhite())
+					.BorderBackgroundColor(FLinearColor(0.10f, 0.09f, 0.02f, 0.88f))
+					.Padding(FMargin(14.f, 6.f))
+					.Visibility(this, &SRHCommandDeck::GetToastVisibility)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 7.f, 0.f))
+						[
+							RHDeck::IconImage(FName("hope"), FSlateColor(RHDeck::Gold), 14.f)
+						]
+						+ SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(this, &SRHCommandDeck::GetToastText)
+							.Font(RHDeck::Label(12))
+							.ColorAndOpacity(RHDeck::Gold)
+							.OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+						]
+					]
+				]
+			]
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
 			[
-				SNew(SBorder)
+				SAssignNew(EventBannerWidget, SBorder)
 				.BorderImage(RHDeck::RoundedWhite())
 				.BorderBackgroundColor(FLinearColor(0.12f, 0.06f, 0.01f, 0.92f))
 				.Padding(FMargin(18.f, 7.f))
@@ -979,29 +1019,6 @@ void SRHCommandDeck::Construct(const FArguments& InArgs)
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 4.f, 0.f, 0.f))
 			[
 				AlertRowsBox
-			]
-			// Reward toast (alive pass): a quiet one-line cheer under the banners.
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(FMargin(0.f, 6.f, 0.f, 0.f))
-			[
-				SNew(SBorder)
-				.BorderImage(RHDeck::RoundedWhite())
-				.BorderBackgroundColor(FLinearColor(0.10f, 0.09f, 0.02f, 0.88f))
-				.Padding(FMargin(14.f, 6.f))
-				.Visibility(this, &SRHCommandDeck::GetToastVisibility)
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(FMargin(0.f, 0.f, 7.f, 0.f))
-					[
-						RHDeck::IconImage(FName("hope"), FSlateColor(RHDeck::Gold), 14.f)
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-					[
-						SNew(STextBlock)
-						.Text(this, &SRHCommandDeck::GetToastText)
-						.Font(RHDeck::Label(12))
-						.ColorAndOpacity(RHDeck::Gold)
-					]
-				]
 			]
 		]
 
@@ -1502,6 +1519,50 @@ int32 SRHCommandDeck::Debug_GetAlertRowsLaidOut() const
 		Laid += (W.IsValid() && W->GetVisibility() != EVisibility::Collapsed) ? 1 : 0;
 	}
 	return Laid;
+}
+
+bool SRHCommandDeck::Debug_GetToastPlace(FVector2D& OutCentreTop, FVector2D& OutSize, bool& bOutShown, FSlateRect* OutAbsRect) const
+{
+	// C0-13 QA: the toast's pill as last painted. Its absolute rectangle, and in the deck's own local space its centre X, its top Y and
+	// its size (a moved window changes the first, never the second).
+	bOutShown = GetToastVisibility() == EVisibility::Visible;
+	OutCentreTop = FVector2D::ZeroVector;
+	OutSize = FVector2D::ZeroVector;
+	if (!ToastBorderWidget.IsValid())
+	{
+		return false;
+	}
+	const FSlateRect Abs = ToastBorderWidget->GetCachedGeometry().GetLayoutBoundingRect();
+	if (OutAbsRect)
+	{
+		*OutAbsRect = Abs;
+	}
+	const FVector2D TopLeft(GetCachedGeometry().AbsoluteToLocal(FVector2D(Abs.Left, Abs.Top)));
+	const FVector2D BottomRight(GetCachedGeometry().AbsoluteToLocal(FVector2D(Abs.Right, Abs.Bottom)));
+	OutSize = BottomRight - TopLeft;
+	OutCentreTop = FVector2D((TopLeft.X + BottomRight.X) * 0.5, TopLeft.Y);
+	return OutSize.X > 0.0 && OutSize.Y > 0.0;
+}
+
+bool SRHCommandDeck::Debug_GetAlertRowRect(int32 Row, FSlateRect& OutAbsRect) const
+{
+	if (!AlertRowsBoxWidget.IsValid() || AlertRowsBoxWidget->GetVisibility() == EVisibility::Collapsed
+		|| !AlertRowWidgets.IsValidIndex(Row) || !AlertRowWidgets[Row].IsValid() || AlertRowWidgets[Row]->GetVisibility() == EVisibility::Collapsed)
+	{
+		return false;
+	}
+	OutAbsRect = AlertRowWidgets[Row]->GetCachedGeometry().GetLayoutBoundingRect();
+	return OutAbsRect.GetSize().X > 0.f && OutAbsRect.GetSize().Y > 0.f;
+}
+
+bool SRHCommandDeck::Debug_GetEventBannerRect(FSlateRect& OutAbsRect) const
+{
+	if (!EventBannerWidget.IsValid() || EventBannerWidget->GetVisibility() == EVisibility::Collapsed)
+	{
+		return false;
+	}
+	OutAbsRect = EventBannerWidget->GetCachedGeometry().GetLayoutBoundingRect();
+	return OutAbsRect.GetSize().X > 0.f && OutAbsRect.GetSize().Y > 0.f;
 }
 
 float SRHCommandDeck::GetAlertWrapAt() const
@@ -2065,36 +2126,186 @@ bool SRHCommandDeck::IsSiteBuilderShown(int32 BuildingId) const
 	return bSiteBuilderShown;
 }
 
+void SRHCommandDeck::RefreshSiteCard(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const
+{
+	// C0-6: the open site's card reads the sim's own rules (URHSimWorldSubsystem::GetSiteLineState, IsSiteWaitingForShell,
+	// IsSiteWaitingForLink, the task board), at most four times a real second and only for the open site (the IsSiteBuilderShown
+	// idiom). The array is reused: no allocation once it has its lines.
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS < SiteCardPollAtS && B.Id == SiteCardPollId)
+	{
+		return;
+	}
+	SiteCardPollAtS = NowS + 0.25;
+	if (B.Id != SiteCardPollId)
+	{
+		// Round 1: another site's card: its lines keep no source words from the last one.
+		for (FSiteCardLine& Old : SiteCardLines)
+		{
+			Old.Source.Reset();
+		}
+	}
+	SiteCardPollId = B.Id;
+	SiteCardShortIndex = INDEX_NONE;
+	SiteCardWaitKind = 0u;
+	SiteCardWaitId = 0;
+	SiteCardBuilderAtId = 0;
+	SiteCardLines.SetNum(Bill.Num(), EAllowShrinking::No);
+	const URHSimWorldSubsystem* Sim = GetSim();
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	if (!Sim || !Defs)
+	{
+		return;
+	}
+	int32 Index = 0;
+	for (const TPair<FName, double>& Line : Bill)
+	{
+		FSiteCardLine& Out = SiteCardLines[Index];
+		Out.Want = 0u; // the source words stay as last read: the latched kind may still show them for its floor (round 1)
+		URHSimWorldSubsystem::FRHSiteLineState State;
+		if (Sim->GetSiteLineState(B.Id, Line.Key, State))
+		{
+			uint32 Suffix = 0u;
+			if (State.bShort)
+			{
+				// "(hauling)" only while a hauler has the load's task; else whether the delivery leg has anything to take.
+				// Round 1: "in store" means the line's own material in a store (InStoreKg); regolith that will be packed is said as
+				// regolith; with some paid and no more in a store the words are "none left in store" (what is on the site is not in store).
+				Suffix = State.bHaulClaimed ? 1u
+					: State.InStoreKg > 0.0 ? 2u
+					: (State.bRegolithRoute && State.RegolithToPackKg > 0.0) ? 4u
+					: State.PaidKg > 0.0 ? 5u : 3u;
+				Out.Source = RHOrder::SourceText(Defs, Sim, Line.Key, State.bRegolithRoute, /*bWithCounts*/ false);
+				if (SiteCardShortIndex == INDEX_NONE)
+				{
+					SiteCardShortIndex = Index;
+				}
+			}
+			Out.Want = Suffix | (State.RegolithKg > 0.0 ? 0x10u : 0u);
+		}
+		++Index;
+	}
+	if (Sim->IsSiteWaitingForShell(B))
+	{
+		SiteCardWaitKind = 4u;
+		SiteCardWaitId = Sim->GetSiteWaitsOnId(B);
+	}
+	else if (Sim->IsSiteWaitingForLink(B))
+	{
+		SiteCardWaitKind = 5u;
+		SiteCardWaitId = Sim->GetSiteWaitsOnId(B);
+	}
+	// The site the only Fabricator is at: exactly one Fabricator in the fleet, and exactly one Build task to another site claimed.
+	int32 Fabricators = 0;
+	Defs->ForEachRobot([&](FName Name, const FRHRobotRow& Row)
+	{
+		if (Row.RobotClass == FName("Fabricator"))
+		{
+			Fabricators += Sim->GetFleetCount(Name);
+		}
+	});
+	if (Fabricators == 1)
+	{
+		int32 Claimed = 0, At = 0;
+		for (const FRHTask& T : Sim->GetTasks())
+		{
+			if (T.Type == ERHTaskType::Build && T.ClaimedBy.IsValid() && T.To.BuildingId != B.Id)
+			{
+				++Claimed;
+				At = T.To.BuildingId; // 0 for a road edge: no site to name
+			}
+		}
+		SiteCardBuilderAtId = Claimed == 1 ? At : 0;
+	}
+}
+
+bool SRHCommandDeck::IsCardOffDeposit(const FRHBuildingInstance& B) const
+{
+	// C0-5: an extractor that stands on no deposit of its kind (an old save, S3's drill). Asked only for a row that needs a deposit,
+	// at most four times a real second.
+	const URHDefinitionsSubsystem* Defs = GetDefs();
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
+	if (!Def || !Def->RequiresDeposit)
+	{
+		return false;
+	}
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS >= CardOffDepositPollAtS || B.Id != CardOffDepositPollId)
+	{
+		CardOffDepositPollAtS = NowS + 0.25;
+		CardOffDepositPollId = B.Id;
+		const URHSimWorldSubsystem* Sim = GetSim();
+		bCardOffDeposit = Sim && Sim->IsExtractorOffDeposit(B.Id);
+	}
+	return bCardOffDeposit;
+}
+
 FString SRHCommandDeck::GetSiteStageLine(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const
 {
 	// G2a (A6, PLACEHOLDER, gate-d-wording PW16): a site's stage, from existing sim reads only: waiting for materials (the first bill line
 	// still short, by ApplyBuildWork's own 0.5 kg rule), waiting for a builder (no Build task to it is claimed), or building with its
 	// progress. The kind and the named resource are ONE latched value ('U', through the power helper's floor), so the line never changes
 	// twice inside FloorRealS; the percent ticks live (a number ticking is not a change).
+	// C0-6 (PLACEHOLDER, gate-d-wording BF6, BF7): the kinds, in this order: 4 waiting for its shell, 5 waiting for its link, 1 waiting
+	// for materials (the first short line by the sim's own IsSiteLineShort, so regolith packed on the Shielding line counts), 2 waiting
+	// for a builder, 3 building. What a kind names (the short line's index, the site waited on, the site the only Fabricator is at) is
+	// part of the same latched value, so the line still changes at most once per FloorRealS whatever moved.
 	const URHDefinitionsSubsystem* Defs = GetDefs();
+	const URHSimWorldSubsystem* Sim = GetSim();
+	RefreshSiteCard(B, Bill);
 	uint32 Kind = 3u, Index = 0u;
-	uint32 Pos = 0u;
 	TArray<FName, TInlineAllocator<8>> Keys;
 	for (const TPair<FName, double>& Line : Bill)
 	{
 		Keys.Add(Line.Key);
-		const double* Delivered = B.InputKg.Find(Line.Key);
-		if (Kind == 3u && (Delivered ? *Delivered : 0.0) + 0.5 < Line.Value)
-		{
-			Kind = 1u;
-			Index = Pos;
-		}
-		++Pos;
 	}
-	if (Kind == 3u && !IsSiteBuilderShown(B.Id))
+	if (SiteCardWaitKind != 0u)
+	{
+		Kind = SiteCardWaitKind;
+		Index = (uint32)SiteCardWaitId;
+	}
+	else if (SiteCardShortIndex != INDEX_NONE)
+	{
+		Kind = 1u;
+		Index = (uint32)SiteCardShortIndex;
+	}
+	else if (!IsSiteBuilderShown(B.Id))
 	{
 		Kind = 2u;
+		Index = (uint32)SiteCardBuilderAtId;
 	}
 	const URHPowerLookSubsystem* PowerLook = GetPowerLook();
 	const uint32 Want = Kind | (Index << 8);
 	const uint32 Shown = PowerLook ? PowerLook->LatchValue(URHPowerLookSubsystem::MakeKey('U', (uint32)B.Id), Want) : Want;
 	const uint32 ShownKind = Shown & 0xFFu;
 	const int32 ShownIndex = (int32)(Shown >> 8);
+	// The display name of a building by Id, a leading "The " dropped; empty when it is gone.
+	const auto NameOfId = [&](int32 Id) -> FString
+	{
+		if (Sim && Id > 0)
+		{
+			for (const FRHBuildingInstance& Other : Sim->GetBuildings())
+			{
+				if (Other.Id == Id)
+				{
+					return RHOrder::BuildingName(Defs, Other.DefName);
+				}
+			}
+		}
+		return FString();
+	};
+	if (ShownKind == 4u)
+	{
+		const FString Shell = NameOfId(ShownIndex);
+		return Shell.IsEmpty() ? FString(TEXT("WAITING FOR ITS SHELL"))
+			: FString::Printf(TEXT("WAITING FOR ITS SHELL - the %s around it is still being built"), *Shell);
+	}
+	if (ShownKind == 5u)
+	{
+		const FString Link = NameOfId(ShownIndex);
+		return Link.IsEmpty() ? FString(TEXT("WAITING FOR ITS LINK - no grid node stands within its link range"))
+			: FString::Printf(TEXT("WAITING FOR ITS LINK - the %s it links to is still being built"), *Link);
+	}
 	if (ShownKind == 1u)
 	{
 		// G2a r2 (PLACEHOLDER, gate-d-wording PW16): the shown index is this bill's own (the latch is per building and a bill keeps its
@@ -2105,7 +2316,10 @@ FString SRHCommandDeck::GetSiteStageLine(const FRHBuildingInstance& B, const TMa
 	}
 	if (ShownKind == 2u)
 	{
-		return TEXT("WAITING FOR A BUILDER - no Fabricator has taken the job");
+		// C0-6: with one Fabricator in the fleet and it at another site, say where; else the G2a line.
+		const FString At = NameOfId(ShownIndex);
+		return At.IsEmpty() ? FString(TEXT("WAITING FOR A BUILDER - no Fabricator has taken the job"))
+			: FString::Printf(TEXT("WAITING FOR A BUILDER - the Fabricator is at the %s"), *At);
 	}
 	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
 	const double Total = FMath::Max(1.0, (double)(Def ? Def->BuildTime_s : 0.f) * (double)URHSimWorldSubsystem::GetBedCount(B));
@@ -2188,13 +2402,32 @@ FText SRHCommandDeck::GetInspectText() const
 		{
 			// Level-taxed bill (Gate B): a surface site's card shows its
 			// Shielding line; the same def underground shows none.
+			// C0-6 (PLACEHOLDER, gate-d-wording BF8): each line shows what is paid toward it (the sim's GetSiteLinePaidKg: regolith
+			// packed on the Shielding line counts at the ratio) and says the truth about where the rest is: "(hauling)" only while a
+			// hauler has the load, "(in store, waiting for a hauler)", "(regolith to pack, waiting for a hauler)", or "(none in store)" /
+			// "(none left in store)" with where it comes from on the line under it. One latched kind a line ('M'), read by the poll above.
+			static const TCHAR* const SuffixWords[] = { TEXT(""), TEXT("  (hauling)"), TEXT("  (in store, waiting for a hauler)"), TEXT("  (none in store)"),
+				TEXT("  (regolith to pack, waiting for a hauler)"), TEXT("  (none left in store)"), TEXT(""), TEXT("") };
+			const URHPowerLookSubsystem* SiteLook = GetPowerLook();
+			int32 LineIndex = 0;
 			for (const auto& Cost : Bill)
 			{
-				const double* Delivered = B->InputKg.Find(Cost.Key);
-				const double Have = Delivered ? *Delivered : 0.0;
-				Text += FString::Printf(TEXT("\n  material %s: %.0f / %.0f kg%s"),
-					*RHOrder::ResourceName(Defs, Cost.Key), Have, Cost.Value, Have + 0.5 < Cost.Value ? TEXT("  (hauling)") : TEXT(""));
+				const double Have = Sim->GetSiteLinePaidKg(*B, Cost.Key);
+				const uint32 Want = SiteCardLines.IsValidIndex(LineIndex) ? SiteCardLines[LineIndex].Want : 0u;
+				const uint32 Shown = SiteLook ? SiteLook->LatchValue(URHPowerLookSubsystem::MakeKey('M', (uint32)B->Id * 8u + (uint32)LineIndex), Want) : Want;
+				Text += FString::Printf(TEXT("\n  material %s: %.0f / %.0f kg%s%s"),
+					*RHOrder::ResourceName(Defs, Cost.Key), Have, Cost.Value, (Shown & 0x10u) != 0u ? TEXT("  (packed regolith)") : TEXT(""), SuffixWords[Shown & 7u]);
+				if (((Shown & 7u) == 3u || (Shown & 7u) == 5u) && SiteCardLines.IsValidIndex(LineIndex) && !SiteCardLines[LineIndex].Source.IsEmpty())
+				{
+					Text += TEXT("\n    ") + SiteCardLines[LineIndex].Source;
+				}
+				++LineIndex;
 			}
+		}
+		if (IsCardOffDeposit(*B))
+		{
+			// C0-5 (PLACEHOLDER, gate-d-wording BF11): a site that can never produce says so, and that cancelling it costs nothing.
+			Text += FString::Printf(TEXT("\nOFF ITS DEPOSIT - this %s will never produce. Cancel the site: everything delivered comes back."), *RHOrder::BuildingName(Defs, B->DefName));
 		}
 	}
 	else
@@ -2226,9 +2459,9 @@ FText SRHCommandDeck::GetInspectText() const
 			{
 				Text += TEXT("\nNOT LIVABLE - no air circulation: set an Air Filtration Station inside a bay");
 			}
-			else if (NetBays < Sim->GetMinLivableCells())
+			else if (NetBays < Sim->GetHabNetMinBays(B->Id)) // C0-10: a network made only of prefabs is livable at its own bays
 			{
-				Text += FString::Printf(TEXT("\nNOT LIVABLE - %d of %d bays: join more modules or corridors"), NetBays, Sim->GetMinLivableCells());
+				Text += FString::Printf(TEXT("\nNOT LIVABLE - %d of %d bays: join more modules or corridors"), NetBays, Sim->GetHabNetMinBays(B->Id));
 			}
 			else
 			{
@@ -2256,6 +2489,10 @@ FText SRHCommandDeck::GetInspectText() const
 						Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), 200.0),
 						Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), 250.0),
 						Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), 50.0));
+					// C0-6 (PLACEHOLDER, gate-d-wording BF10): the dome plants from the Glass in store (S5b: it took all 1000 kg unwarned).
+					const double GlassKg = RHOrder::InStoreKg(Sim, FName("Glass"), B->Level);
+					const int32 GlassBeds = FMath::FloorToInt32(GlassKg / FMath::Max(1.0, Defs->GetConfigScalar(FName("GreenhouseGlassKgPerCell"), 200.0)));
+					Text += FString::Printf(TEXT("\n  glass in store: %.0f kg (enough for %d more %s)"), GlassKg, GlassBeds, RHOrder::PluralWord(GlassBeds, TEXT("bed"), TEXT("beds")));
 				}
 				Text += TEXT("\ngrows by daylight - no grow-light power");
 			}
@@ -2273,6 +2510,13 @@ FText SRHCommandDeck::GetInspectText() const
 		else if (Def && (Def->PowerDraw_W > 0.f || Def->RequiresDeposit))
 		{
 			Text += TEXT("\nno batch running");
+		}
+		if (IsCardOffDeposit(*B))
+		{
+			// C0-5 (PLACEHOLDER, gate-d-wording BF11): an extractor standing off its deposit (an old save; today's placement refuses it)
+			// says it will never produce and what demolishing it returns (the sim's SalvageFraction, not a literal).
+			Text += FString::Printf(TEXT("\nOFF ITS DEPOSIT - this %s will never produce. Demolish it: %.0f %% of its materials come back."),
+				*RHOrder::BuildingName(Defs, B->DefName), Sim->GetSalvageFraction() * 100.0);
 		}
 		// M1-d: the Borer's card reads its standing orders - the shaft's
 		// progress against the ordered depth, per-floor carve state, and the
@@ -4092,5 +4336,9 @@ FText SRHCommandDeck::GetToastText() const
 
 EVisibility SRHCommandDeck::GetToastVisibility() const
 {
-	return GetToastText().IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible;
+	// C0-13: Hidden, never Collapsed, while no toast shows. The toast's slot is an SBox of ToastSlotPx, and an SBox whose child is
+	// Collapsed has no desired size at all (SBox::ComputeDesiredSize), whatever its height override: the slot would close, and the event
+	// banner and every alert row under it would step ToastSlotPx up when a toast went and down when the next one came. A Hidden child
+	// keeps the slot's size and paints nothing.
+	return GetToastText().IsEmpty() ? EVisibility::Hidden : EVisibility::Visible;
 }

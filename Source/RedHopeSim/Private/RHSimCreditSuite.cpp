@@ -65,7 +65,8 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		{ TEXT("BatteryPack"), ERHManifestVerb::Kit, TEXT("BatteryBank"), 1 }, { TEXT("AdvExcavator"), ERHManifestVerb::Robot, TEXT("RC_E2"), 1 },
 		{ TEXT("ExtraHauler"), ERHManifestVerb::Robot, TEXT("RC_H"), 1 }, { TEXT("CargoRover"), ERHManifestVerb::RoverAboard, TEXT("RC_R"), 1 },
 		{ TEXT("Toolkit"), ERHManifestVerb::FabSpeed, nullptr, 0.15 }, { TEXT("ComputeCore"), ERHManifestVerb::OrderLag, TEXT("OrderLagTier2_s"), 8.0 },
-		{ TEXT("CrewPod"), ERHManifestVerb::Crew, TEXT("Pod"), 0 }, { TEXT("ColonistTransport"), ERHManifestVerb::Crew, TEXT("Transport"), 0 } };
+		{ TEXT("CrewPod"), ERHManifestVerb::Crew, TEXT("Pod"), 0 }, { TEXT("ColonistTransport"), ERHManifestVerb::Crew, TEXT("Transport"), 0 },
+		{ TEXT("ExtraFabricator"), ERHManifestVerb::Robot, TEXT("RC_F"), 1 } }; // C0-7 (2026-11-10): the 15th row, the ExtraHauler pattern
 
 	// --- CR0. The data. ---
 	{
@@ -80,7 +81,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				if (Sim->FindManifestEffect(N)) { ++Resolved; } else { Bad += N.ToString() + TEXT(" (unresolved) "); }
 			});
 		}
-		Expect(Active == 14 && Resolved == 14 && Sim->GetManifestEffectWarnings() == 0,
+		Expect(Active == 15 && Resolved == 15 && Sim->GetManifestEffectWarnings() == 0,
 			FString::Printf(TEXT("CR0 all %d active manifest rows resolve to a known verb and a target of the kind it needs; %d Warnings at world start %s"), Active, Sim->GetManifestEffectWarnings(), *Bad));
 		for (const FHeadRow& H : Head)
 		{
@@ -89,7 +90,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			Matched += bOk ? 1 : 0;
 			if (!bOk) { Bad += FString::Printf(TEXT("%s; "), H.Row); }
 		}
-		Expect(Matched == 14, FString::Printf(TEXT("CR0 each row's verb and target are HEAD's branch, and Amount is HEAD's literal bit for bit (the Toolkit's 0.15 is the double literal 0.15) - %d of 14 %s"), Matched, *Bad));
+		Expect(Matched == 15, FString::Printf(TEXT("CR0 each row's verb and target are HEAD's branch, and Amount is HEAD's literal bit for bit (the Toolkit's 0.15 is the double literal 0.15) - %d of 15 %s"), Matched, *Bad));
 		bool bCrewOk = true;
 		for (const TCHAR* Crew : { TEXT("CrewPod"), TEXT("ColonistTransport") })
 		{
@@ -134,7 +135,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				else { Bad += Cells[CName] + TEXT(" (CSV differs) "); }
 			}
 		}
-		Expect(bCsv && CsvRows == 14 && CsvSame == 14, FString::Printf(TEXT("CR0 the CSV's Verb, Target and Amount equal the live DT on all %d rows %s"), CsvSame, *Bad));
+		Expect(bCsv && CsvRows == 15 && CsvSame == 15, FString::Printf(TEXT("CR0 the CSV's Verb, Target and Amount equal the live DT on all %d rows %s"), CsvSame, *Bad));
 	}
 
 	// --- CR1. The verbs: one fixture per active row on a fresh colony, against HEAD's deltas. ---
@@ -171,7 +172,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 				FString::Printf(TEXT("CR1 two Solar Packs, a Battery Pack and a Cargo Rover: SolarArray +2, BatteryBank +1, RC_R +1 waiting aboard (no road to land on); ImportStock's keys in HEAD's order: %s"), *Order));
 		}
 		// Robots: one of the row's kind, tracked in the fleet ledger.
-		for (const TCHAR* Item : { TEXT("AdvExcavator"), TEXT("ExtraHauler") })
+		for (const TCHAR* Item : { TEXT("AdvExcavator"), TEXT("ExtraHauler"), TEXT("ExtraFabricator") })
 		{
 			Reset();
 			const FName RobotRow = Sim->FindManifestEffect(FName(Item)) ? Sim->FindManifestEffect(FName(Item))->Target : NAME_None;
@@ -299,7 +300,7 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 		for (const auto& D : Discoveries) { FundingSum += (D.Value && D.Value->SliceActive) ? D.Value->FundingKg : 0.0; }
 		const double Mcr = DefsSub ? DefsSub->GetConfigTableScalar(FName("AwardMcrPerKg"), -1.0) : -1.0;
 		const double Cap = DefsSub ? DefsSub->GetConfigTableScalar(FName("ShipMassCapKg"), -1.0) : -1.0;
-		Expect(Rows == 14 && Priced == 14 && Capped == 14 && Mcr == 1000.0 && Cap == 30000.0 && Sim->GetAwardMcrPerKg() == 1000.0 && Sim->GetShipMassCapCfgKg() == 30000.0
+		Expect(Rows == 15 && Priced == 15 && Capped == 15 && Mcr == 1000.0 && Cap == 30000.0 && Sim->GetAwardMcrPerKg() == 1000.0 && Sim->GetShipMassCapCfgKg() == 30000.0
 			&& Cap >= 14000.0 * 1.4 + FundingSum,
 			FString::Printf(TEXT("CR0 every active row's Price_mcr is 1,000 x Mass_kg; MaxStack is 4 for the Toolkit, 1 for the Compute Core, 0 for the rest; AwardMcrPerKg %.0f and ShipMassCapKg %.0f (DT_Config), the cap above the largest award 14,000 x 1.4 + %.0f of funding = %.0f kg"),
 				Mcr, Cap, FundingSum, 14000.0 * 1.4 + FundingSum));
@@ -390,8 +391,8 @@ int32 RHRunCreditSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSu
 			}
 		}
 		Info(FString::Printf(TEXT("CR3 the margin awards: %.17g, %.17g, %.17g, %.17g (each one ulp from a whole kg)"), Awards[6], Awards[7], Awards[8], Awards[9]));
-		Expect(Mismatch == 0 && Negative == 0 && Pool.Num() == 12 && Awards[6] < 10000.0 && Awards[7] < 9999.0 && Awards[8] > 13207.0 && Awards[9] > 8380.0,
-			FString::Printf(TEXT("CR3 %lld add decisions over 2,000 seeded sequences on each of %d awards (the margins nextafter(10000, 0), nextafter(9999, 0), nextafter(13207, +inf), nextafter(8380, +inf) included), drawn from the 12 uncapped rows: HEAD's rule and the credits agree on every one, and no manifest costs more than its balance %s"),
+		Expect(Mismatch == 0 && Negative == 0 && Pool.Num() == 13 && Awards[6] < 10000.0 && Awards[7] < 9999.0 && Awards[8] > 13207.0 && Awards[9] > 8380.0,
+			FString::Printf(TEXT("CR3 %lld add decisions over 2,000 seeded sequences on each of %d awards (the margins nextafter(10000, 0), nextafter(9999, 0), nextafter(13207, +inf), nextafter(8380, +inf) included), drawn from the 13 uncapped rows: HEAD's rule and the credits agree on every one, and no manifest costs more than its balance %s"),
 				Decisions, (int32)UE_ARRAY_COUNT(Awards), *Bad));
 		// The margins, mass by mass: a manifest of exactly X - 200 kg, then a 200 kg Seed Vault, for every hundred near the award.
 		int32 Cases = 0, Agree = 0;

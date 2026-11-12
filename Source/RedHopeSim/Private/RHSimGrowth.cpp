@@ -1048,7 +1048,17 @@ bool URHSimWorldSubsystem::PlanSurfaceHomes(const FRHDistrict& D, FRHGrowthProje
 		return false;
 	}
 	const FRHDistrictMembership& Members = EnsureDistrictMembership();
-	FString Why;
+	// C0-6: the reason kept is the real cause, not the last network the planner looked at: the FIRST rated network's reason (it is the
+	// one the planner could have extended); only when no network of the district is rated, the first unrated one's.
+	FString RatedWhy, UnratedWhy;
+	const auto Keep = [&](bool bRated, FString&& Text)
+	{
+		FString& Slot = bRated ? RatedWhy : UnratedWhy;
+		if (Slot.IsEmpty())
+		{
+			Slot = MoveTemp(Text);
+		}
+	};
 	bool bAnyNetwork = false;
 	for (const FRHHabNetCache& Net : HabNets) // ascending root
 	{
@@ -1064,20 +1074,20 @@ bool URHSimWorldSubsystem::PlanSurfaceHomes(const FRHDistrict& D, FRHGrowthProje
 		bAnyNetwork = true;
 		if (!IsNetRated(Net))
 		{
-			Why = FString::Printf(TEXT("habitat #%d is not rated yet"), Net.Root);
+			Keep(false, FString::Printf(TEXT("habitat #%d is not rated yet"), Net.Root));
 			continue;
 		}
 		if (IsNetSealed(Net))
 		{
 			// A new module opens doorways with no door in them: the network would stop being sealed.
-			Why = FString::Printf(TEXT("habitat #%d is door-sealed - a new module would open new doorways, so it is not extended"), Net.Root);
+			Keep(true, FString::Printf(TEXT("habitat #%d is door-sealed - a new module would open new doorways, so it is not extended"), Net.Root));
 			continue;
 		}
 		FIntPoint Anchor, Size;
 		FString SiteWhy;
 		if (!FindSurfaceModuleSite(D, Net, Anchor, Size, SiteWhy))
 		{
-			Why = FString::Printf(TEXT("habitat #%d has no room to grow: %s"), Net.Root, *SiteWhy);
+			Keep(true, FString::Printf(TEXT("habitat #%d has no room to grow: %s"), Net.Root, *SiteWhy));
 			continue;
 		}
 		TArray<FName> Bunks;
@@ -1096,7 +1106,7 @@ bool URHSimWorldSubsystem::PlanSurfaceHomes(const FRHDistrict& D, FRHGrowthProje
 		Out.TotalSols = GrowthModuleSols;
 		return true;
 	}
-	OutWhy = bAnyNetwork ? Why : FString(TEXT("no habitat of the district to extend - the player founds habitats, the city grows them"));
+	OutWhy = bAnyNetwork ? (RatedWhy.IsEmpty() ? UnratedWhy : RatedWhy) : FString(TEXT("no habitat of the district to extend - the player founds habitats, the city grows them"));
 	return false;
 }
 

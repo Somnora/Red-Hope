@@ -2773,7 +2773,8 @@ void URHColonyVisualizerSubsystem::HandleBuildingCompleted(const FRHBuildingInst
 // ANSWER Q-A (a): a site shows ITS OWN MODEL rising inside the scaffold, on every building.
 //
 // A site reads its stage from the sim's public const accessors only (presentation; the sim never knows):
-//   - WAITING FOR MATERIALS while any line of GetSiteBill(B) is short in B.InputKg (ApplyBuildWork's own rule, 0.5 kg):
+//   - WAITING FOR MATERIALS while any line of GetSiteBill(B) is short in B.InputKg (ApplyBuildWork's own rule, 0.5 kg; since C0a the
+//     sim's IsSiteReady: IsSiteLineShort for each line, and not waiting for its shell or its link):
 //     the pad, one scaffold course, and crates on the pad in proportion to what has arrived of the bill;
 //   - FABRICATION: the crates go, the model rises bottom-up to 1 - BuildRemaining_s / (BuildTime_s x GetBedCount(B)) -
 //     the sim sets BuildRemaining_s to exactly that denominator at placement (AddBuilding) and only counts it down - and
@@ -3098,12 +3099,14 @@ void URHColonyVisualizerSubsystem::RefreshSites(const URHSimWorldSubsystem* Sim)
 		bool bWaiting = false;
 		for (const TPair<FName, double>& Line : Sim->GetSiteBill(B))
 		{
-			// ApplyBuildWork's own rule, exactly: a line with no delivery entry at all waits, whatever its size.
-			const double* Held = B.InputKg.Find(Line.Key);
+			// ApplyBuildWork's own rule, exactly, read from the sim (C0a: IsSiteLineShort and GetSiteLinePaidKg, so regolith packed on
+			// the surface Shielding line counts as the sim counts it): a line with no delivery at all waits, whatever its size.
 			BillKg += Line.Value;
-			HeldKg += Held ? FMath::Min(*Held, Line.Value) : 0.0;
-			bWaiting |= !Held || *Held + 0.5 < Line.Value;
+			HeldKg += FMath::Min(Sim->GetSiteLinePaidKg(B, Line.Key), Line.Value);
+			bWaiting |= Sim->IsSiteLineShort(B, Line.Key, Line.Value);
 		}
+		// C0-11, C0-4: a site waiting for its shell or its link has not started fabrication either (the sim's IsSiteReady).
+		bWaiting |= Sim->IsSiteWaitingForShell(B) || Sim->IsSiteWaitingForLink(B);
 		const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
 		const double BuildS = Def ? Def->BuildTime_s * URHSimWorldSubsystem::GetBedCount(B) : 0.0;
 		const double Fraction = bWaiting ? (BillKg > 0.0 ? HeldKg / BillKg : 0.0) : (BuildS > 0.0 ? 1.0 - B.BuildRemaining_s / BuildS : 1.0);

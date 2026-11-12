@@ -78,4 +78,7 @@ struct REDHOPESIM_API FRHTaskFragment : public FMassFragment
 	float CargoKg = 0.f;
 	// Repair only: the worn robot this maintenance unit is driving to.
 	FMassEntityHandle RepairTarget;
+	// C0-1, C0-2: sim seconds stood by at a site short of materials or at a full pile; runtime, never saved
+	// (URHSimWorldSubsystem::StepBuildAtSite and StepDigAtPile advance and reset it).
+	float StandbyS = 0.f;
 };

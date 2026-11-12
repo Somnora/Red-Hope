@@ -230,13 +230,14 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 				Task.Phase = 1;
 			}
 		}
-		else if (Sim->IsDepositWorkable(Task.DigDepositId))
+		else
 		{
-			DrawW = Robot.DrawWorkW;
+			// C0-2: the one step both brains share (URHSimWorldSubsystem::StepDigAtPile): dig while the pile has room, stand by at
+			// idle draw at a full pile, and after DigFullHoldS of that move to another designated deposit with room when there is one.
 			// WorkRate = kg/sol-hour; sol-hour = 50 sim-s.
-			Sim->DigDeposit(Task.DigDepositId, Robot.WorkRate * (DeltaTime / 50.f) * WearMul);
+			const URHSimWorldSubsystem::ERHDigStep DigStep = Sim->StepDigAtPile(Transform.GetLocation(), Level, Task, DeltaTime, Robot.WorkRate * (DeltaTime / 50.f) * WearMul);
+			DrawW = DigStep == URHSimWorldSubsystem::ERHDigStep::Working ? Robot.DrawWorkW : Robot.DrawIdleW;
 		}
-		// else: pile full - stand by at idle draw until haulers clear it.
 		break;
 	}
 
@@ -302,16 +303,11 @@ EStateTreeRunStatus FRHWorkTask::Tick(FStateTreeExecutionContext& Context, const
 		}
 		else
 		{
-			DrawW = Robot.DrawWorkW;
-			// C4: a road edge is labour only (its own slot, never the site id).
-			const bool bDone = Task.RoadEdgeId > 0
-				? Sim->ApplyRoadWork(Task.RoadEdgeId, DeltaTime * Robot.WorkRate * WearMul)
-				: Sim->ApplyBuildWork(Task.DigDepositId, DeltaTime * Robot.WorkRate * WearMul, Level);
-			if (bDone)
-			{
-				Sim->CompleteTask(Task.TaskId);
-				Task = FRHTaskFragment();
-			}
+			// C0-1: the one step both brains share (URHSimWorldSubsystem::StepBuildAtSite; it completes the task and resets the
+			// fragment itself): fabricate a ready site to the end, stand by at IDLE draw at a site short of materials (so no wear:
+			// wear follows a draw above idle, below), and after BuildSwapCheckS of that move to a ready site when there is one.
+			const URHSimWorldSubsystem::ERHBuildStep BuildStep = Sim->StepBuildAtSite(Entity, Transform.GetLocation(), Level, Task, DeltaTime, DeltaTime * Robot.WorkRate * WearMul);
+			DrawW = URHSimWorldSubsystem::BuildStepDrawsWork(BuildStep) ? Robot.DrawWorkW : Robot.DrawIdleW;
 		}
 		break;
 	}

@@ -203,6 +203,8 @@ public:
 	FLinearColor GetConfirmColor() const { return ConfirmColor; }
 	FText GetHintText() const;
 	FLinearColor GetHintColor() const { return HintColor; }
+	// C0a QA (c0.ghost): the placement ghost as last drawn: its tip and whether it was green. False when nothing is being placed.
+	bool Debug_GetGhost(bool& bOutOk, FString& OutTip) const;
 	// Deck-originated orders (manifest, launch, politics buttons) report
 	// through the same confirm line as the controller's own.
 	void PostConfirm(const FString& Text, const FLinearColor& Color) { SetConfirm(Text, Color); }
@@ -436,6 +438,15 @@ private:
 	double ConfirmRealSeconds = -1.0e9;
 	FString HintText;
 	FLinearColor HintColor = FLinearColor::White;
+	// C0-6: the ghost tip's two added lines (the chain line for a bill line with nothing on hand, the dome's Glass line), rebuilt at
+	// most four times a real second and kept by (row, beds, floor); and the ghost's colour as last drawn (Debug_GetGhost).
+	FString GhostNoteText;
+	double GhostNotePollAtS = 0.0;
+	FName GhostNoteDef;
+	int32 GhostNoteBeds = 0;
+	int32 GhostNoteLevel = 0;
+	bool bGhostOkShown = false;
+	const FString& GetGhostNote(const class URHSimWorldSubsystem& Sim, const class URHDefinitionsSubsystem& Defs, const struct FRHBuildingRow& Def, FName DefName, int32 Beds, int32 Level, bool bDome);
 	float LastNonZeroSpeed = 1.f;
 	// G2b (B5): the 60x wish - armed by a player press above the agent band, cancelled by any other player speed press, a pause or a load;
 	// the tier it asked for. Never saved.

@@ -13,6 +13,7 @@ class URHSimClockSubsystem;
 class URHAgentSubsystem;
 struct FRHRobotRow;
 struct FRHRobotFragment;
+struct FRHTaskFragment; // C0a: StepBuildAtSite and StepDigAtPile take the robot's own fragment
 struct FRHRoomRow;
 struct FRHFurnitureRow;
 struct FRHBuildingRow;
@@ -3102,6 +3103,84 @@ public:
 	bool ApplyBuildWork(int32 BuildingId, double Seconds, int32 RobotLevel = 0); // true when completed (D4: RobotLevel counts builds finished below)
 	void CompleteTask(int32 TaskId);
 	void AbandonTask(int32 TaskId);
+
+	// --- C0a "Building that finishes" (2026-11-10; docs/design-decisions.md, "C0a, building that finishes") ---
+	// PLACEHOLDER numbers (director review), each kept in code where its rule runs, all sim seconds, none saved:
+	// a Fabricator standing by at a site that is not ready looks for a ready site once per BuildSwapCheckS of standby (C0-1);
+	// an excavator standing by at a full pile looks for another deposit once per DigFullHoldS of standby (C0-2);
+	// the set of stalled sites the 60x rule skips is re-read once the step end is EraStallReadS past the last read (C0-12).
+	static constexpr double BuildSwapCheckS = 5.0;
+	static constexpr double DigFullHoldS = 10.0;
+	static constexpr double EraStallReadS = 10.0;
+	// C0-3 (RH_Config ShieldingRegolithPerKg, PLACEHOLDER 2.0): kg of Regolith that pay 1 kg of a site's surface Shielding line; 0 = off.
+	double GetShieldingRegolithPerKg() const { return ShieldingRegolithPerKg; }
+	// What counts toward one line of a site's bill: the kg of that resource on site and, for the surface Shielding line
+	// (a site at Level >= 0 whose row has SurfaceShielding_kg > 0, with the ratio above 0), the Regolith on site over the ratio.
+	double GetSiteLinePaidKg(const FRHBuildingInstance& Site, FName Line) const;
+	// ApplyBuildWork's own rule, stated once: a line is short while what is paid is more than 0.5 kg under the bill, and a line
+	// nothing has ever been delivered for is short whatever its size.
+	bool IsSiteLineShort(const FRHBuildingInstance& Site, FName Line, double NeedKg) const;
+	bool IsSurfaceShieldingLine(const FRHBuildingInstance& Site, FName Line) const;
+	// A site a Fabricator can work now: under construction, no bill line short, not waiting for its shell (C0-11) or its link (C0-4).
+	bool IsSiteReady(const FRHBuildingInstance& Site) const;
+	bool IsSitePartBuilt(const FRHBuildingInstance& Site) const;
+	// C0-4: a pylon-like site (CoverageRadius_m and LinkRange_m above 0) on the surface with no FINISHED node within its own link range.
+	bool IsSiteWaitingForLink(const FRHBuildingInstance& Site) const;
+	// C0-11: an Interior site on the surface wholly inside a bay of a Pressurized building that is still under construction.
+	bool IsSiteWaitingForShell(const FRHBuildingInstance& Site) const;
+	// The site a waiting site waits on (for the card's words): the shell site around it, or the nearest pylon-like site within its
+	// link range (ties to the lower Id); 0 when it waits on nothing or nothing is there.
+	int32 GetSiteWaitsOnId(const FRHBuildingInstance& Site) const;
+	// Regolith the site-delivery leg may pack into a surface Shielding line: in stores (a finished Stockpile or Lander on a linked
+	// level), in any finished building's OutputKg, and on discovered piles of Regolith on that level. Never a machine's hopper.
+	double GetRegolithToPackKg(int32 Level) const;
+	// The first short line of the site's bill, in bill order (INDEX_NONE when none is short).
+	int32 GetSiteBlockerLine(const FRHBuildingInstance& Site, FName& OutLine) const;
+	// One bill line of a site as the deck's card and the stalled-site read see it (C0-6, C0-12).
+	struct FRHSiteLineState
+	{
+		double NeedKg = 0.0;      // the bill's kg
+		double PaidKg = 0.0;      // GetSiteLinePaidKg
+		double RegolithKg = 0.0;  // Regolith on site (the surface Shielding line only)
+		double InStoreKg = 0.0;   // what the site-delivery leg could take: the line's own resource in a finished building on a linked level
+		double RegolithToPackKg = 0.0; // the surface Shielding line only: GetRegolithToPackKg over the ratio (Shielding-equivalent kg)
+		bool bShort = false;
+		bool bHaulClaimed = false; // a Haul task to this site for this line (or for Regolith, on the Shielding line) is claimed
+		bool bHaulPosted = false;  // such a task exists
+		bool bProducer = false;    // HasProducerFor(Line)
+		bool bRegolithRoute = false; // the surface Shielding line with the ratio above 0
+	};
+	bool GetSiteLineState(int32 SiteId, FName Line, FRHSiteLineState& Out) const;
+
+	// C0-1: one sub-step of a Fabricator that has arrived at its site (Phase 1). BOTH brains call this, so the rule exists once.
+	// Working: fabrication progressed. StandingBy: the site is not ready (idle draw, no wear). Done: finished, the task completed and
+	// the fragment reset. Swapped: after BuildSwapCheckS of standby a ready (or part-built) unclaimed site was found; the old claim is
+	// given back and the fragment holds the new task at Phase 0. A Fabricator on a ready site never looks elsewhere.
+	enum class ERHBuildStep : uint8 { Working, StandingBy, Done, Swapped };
+	static bool BuildStepDrawsWork(ERHBuildStep S) { return S == ERHBuildStep::Working || S == ERHBuildStep::Done; }
+	ERHBuildStep StepBuildAtSite(FMassEntityHandle Robot, const FVector& RobotPosCm, int32 RobotLevel, FRHTaskFragment& Task, float Seconds, float WorkSeconds);
+	// C0-2: one sub-step of an excavator that has arrived at its deposit (Phase 1). Working: dug. StandingBy: the pile is full.
+	// Released: the deposit is spent or no longer designated (the claim given back, the fragment reset). Swapped: after DigFullHoldS at
+	// a full pile another designated deposit with room was found; the claim moves and the fragment targets it at Phase 0. With nowhere
+	// else to dig the claim is kept.
+	enum class ERHDigStep : uint8 { Working, StandingBy, Released, Swapped };
+	ERHDigStep StepDigAtPile(const FVector& RobotPosCm, int32 RobotLevel, FRHTaskFragment& Task, float Seconds, double DigKg);
+	// C0-5: the deposit kinds an extractor row draws (the outputs of its runnable recipes with no inputs), and the deposit it stands on.
+	bool GetExtractorDepositTypes(FName DefName, TArray<FName>& Out) const;
+	const FRHDepositState* FindExtractorDeposit(FName DefName, const FVector& LocationCm, int32 Level) const;
+	// A RequiresDeposit building with no deposit, or attached to one of the wrong kind (an old save, a debug placement).
+	bool IsExtractorOffDeposit(int32 BuildingId) const;
+	// C0-10: the bays a habitat's network needs to be rated: its own bay count (capped at MinLivableCells) when every member is a
+	// prefab shell (a Pressurized row that is not DragSized), MinLivableCells otherwise.
+	static bool IsPrefabShell(const FRHBuildingRow* Def);
+	int32 GetHabNetMinBays(int32 HabId) const;
+	// The two halves of GetHousingCapacity (their sum, unchanged in value): beds on rated floors, and beds in rated surface networks
+	// once the vault is certified.
+	int32 GetVaultBeds() const;
+	int32 GetSurfaceBeds() const;
+	// C0-12 harness: how many times the stalled-site set was re-read, and whether a site is in it.
+	int32 Debug_GetStallReads() const { return StallReads; }
+	bool IsSiteStalled(int32 BuildingId) const { return StalledSites.Contains(BuildingId); }
 	// Charging: the nearest completed, switched-on Charging Pad on the
 	// robot's floor. With none, the Lander is the emergency dock (2026-10-15
 	// playtest fix: robots recharge only by docking, builders take the nearest
@@ -3894,6 +3973,30 @@ private:
 	double OrderLagSeconds = 45.0;
 	double PileCapKg = 500.0;
 	double HaulLoadMinKg = 100.0;
+	// C0-3 (RH_Config ShieldingRegolithPerKg; the header default equals the CSV value). PLACEHOLDER, director review.
+	double ShieldingRegolithPerKg = 2.0;
+	// C0a runtime state, never saved (each is rebuilt or zero after LoadColony):
+	// C0-12: the sites CanEnterEraMode skips (every short line has nothing in store, nothing hauled and nothing able to make it),
+	// rebuilt by RefreshStalledSites once per EraStallReadS of sim time; LastStallReadS < 0 forces the next step to read.
+	TSet<int32> StalledSites;
+	double LastStallReadS = -1.0;
+	int32 StallReads = 0;
+	void RefreshStalledSites();
+	// C0-2: the resources open sites are short of (the keys of ComputeConstructionShortage, as StepTaskBoard built it this sub-step).
+	TSet<FName> DigNeeded;
+	// C0-11: Pressurized Build orders refused at execute (snapped centre, half extent, row, reason), newest last, at most 8; words only.
+	struct FRHRefusedShell { FVector CentreCm = FVector::ZeroVector; FVector2D HalfCm = FVector2D::ZeroVector; FName DefName; FString Reason; };
+	TArray<FRHRefusedShell> RefusedShells;
+	// C0-11: a queued Pressurized Build order on Level one of whose bays wholly holds a machine of MachineDef at LocationCm.
+	bool FindQueuedShellBay(const FRHBuildingRow* MachineDef, const FVector& LocationCm, int32 Level, int32 ExceptCommandId = 0) const;
+	// C0-11: a Pressurized building on the surface (a site counts) one of whose bays wholly holds the machine.
+	const FRHBuildingInstance* FindShellAround(const FRHBuildingRow* MachineDef, const FVector& LocationCm) const;
+	// C0-3: is a Haul task to this site carrying this resource open (posted or claimed)?
+	bool HasOpenHaulTo(int32 SiteId, FName Resource, bool* bOutClaimed = nullptr) const;
+	// C0-1 / C0-2: the one candidate walk each claim and each swap shares (the reach rule and the key exist once).
+	// MaxTier 2: every unclaimed Build task (tier 0 part-built, 1 ready or a road edge, 2 the rest); MaxTier 1: tiers 0 and 1 only.
+	FRHTask* PickBuildTask(const FVector& RobotPosCm, int32 RobotLevel, int32 MaxTier);
+	int32 PickDigDeposit(const FVector& RobotPosCm, int32 RobotLevel, int32 ExcludeId) const;
 	float ChargeSeekFraction = 0.25f;
 	float ChargeResumeFraction = 0.9f;
 	// D5a day shift, RH_Config (header defaults equal the CSV values).
@@ -4299,6 +4402,7 @@ private:
 	TMap<int32, FRHHabMemberCache> HabMembers;  // lookup only, NEVER iterated
 	void RebuildHabTopology();
 	const FRHHabNetCache* FindHabNet(int32 HabId) const;
+	int32 GetNetMinBays(const FRHHabNetCache& N) const; // C0-10
 	// City growth (C5b): the planners that read the networks.
 	bool CheckSurfaceModuleSite(int32 DistrictId, const FRHHabNetCache& Net, const FIntPoint& Anchor, const FIntPoint& Size, const TMap<FIntPoint, int32>& SiteCells, FString& OutWhy) const;
 	bool FindSurfaceModuleSite(const FRHDistrict& District, const FRHHabNetCache& Net, FIntPoint& OutAnchor, FIntPoint& OutSize, FString& OutWhy) const;

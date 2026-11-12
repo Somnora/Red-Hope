@@ -19,7 +19,7 @@
 #                          checkpoint slots (rh_checkpoints.sh early|vault|late) and runs the flash probe: every frame it samples
 #                          the building looks, lamps, room lights, hum, POWER tile, fold header, card, guide and spare-watts line on a
 #                          drained night and fails any element that changes twice inside 3 real seconds or a light that jumps
-#                          (10 steps since G2b: flash.alerts, flash.power and flash.power.restart; give it a 1200 s timeout)
+#                          (11 steps since C0a: G2b's flash.alerts, flash.power and flash.power.restart, and C0a's flash.toast; give it a 1200 s timeout)
 # Exit:  0 only when the run printed "CLICKTEST RESULT PASS" (a missing verdict, a hang or any FAIL is non-zero).
 #
 # Run it after every UI commit and at every gate (docs/qa-boot-card.md). One Unreal process at a time.

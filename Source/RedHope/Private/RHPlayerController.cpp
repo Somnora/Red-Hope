@@ -493,6 +493,9 @@ void ARHPlayerController::Tick(float DeltaTime)
 						Defs->GetConfigScalar(FName("GardenSoilKgPerCell"), 250.0),
 						Defs->GetConfigScalar(FName("GardenSeedsKgPerCell"), 50.0));
 				}
+				// C0-6 (PLACEHOLDER, gate-d-wording BF9): the chain line for a bill line with nothing on hand, and the dome's Glass line.
+				// Built at most four times a real second and kept by (row, beds, floor), never per frame; the order is still allowed.
+				Tip += GetGhostNote(*Sim, *Defs, *Def, PendingBuildDef, Beds, ActiveLevel, bSized && !bPress);
 				if (Def->PowerDraw_W > 0.f)
 				{
 					Tip += FString::Printf(TEXT("  ·  draws %.0f W"), Def->PowerDraw_W);
@@ -522,6 +525,7 @@ void ARHPlayerController::Tick(float DeltaTime)
 			}
 			HintText = Tip;
 			HintColor = FLinearColor(Color);
+			bGhostOkShown = bOk; // C0a QA (Debug_GetGhost): the ghost's colour beside its tip
 			// Release ends a size drag: transmit when the ghost is green,
 			// else buzz and drop back to aiming (the mode stays armed).
 			if (bSized && bBuildDragging && !IsInputKeyDown(EKeys::LeftMouseButton))
@@ -927,8 +931,12 @@ void ARHPlayerController::Tick(float DeltaTime)
 			{
 				DrawDebugCircle(World, Dep->LocationCm + FVector(0, 0, 40.f), 1200.f,
 					48, FColor::Yellow, false, -1.f, 0, 10.f, FVector(1, 0, 0), FVector(0, 1, 0), false);
-				HintText = FString::Printf(TEXT("DIG: %s (%.0f t left) - click to transmit, right-click to cancel"),
-					*RHOrder::DepositName(Defs, *Dep), Dep->RemainingKg / 1000.0);
+				// C0-2 (PLACEHOLDER, gate-d-wording BF12): a deposit that is being dug reads "STOP DIGGING HERE": the same tool cancels
+				// the designation (there is no deposit card to put the order on).
+				HintText = Dep->bDesignated
+					? FString::Printf(TEXT("STOP DIGGING HERE: %s - click to stop, its pile stays; right-click to cancel"), *RHOrder::DepositName(Defs, *Dep))
+					: FString::Printf(TEXT("DIG: %s (%.0f t left) - click to transmit, right-click to cancel"),
+						*RHOrder::DepositName(Defs, *Dep), Dep->RemainingKg / 1000.0);
 				HintColor = FLinearColor::Yellow;
 			}
 			else
@@ -1961,11 +1969,15 @@ void ARHPlayerController::OnClick()
 	{
 		if (const FRHDepositState* Dep = Sim->FindDepositNear(Ground, DigClickRadiusCm, ActiveLevel))
 		{
+			// C0-2 (PLACEHOLDER, gate-d-wording BF12): on a deposit that is being dug the tool sends StopDig (the designation goes, the
+			// pile stays); on any other, Dig as before.
+			const bool bStop = Dep->bDesignated;
 			FRHCommand Cmd;
-			Cmd.Verb = FName("Dig");
+			Cmd.Verb = bStop ? FName("StopDig") : FName("Dig");
 			Cmd.Target = Dep->RowName;
 			Sim->EnqueueCommand(Cmd);
-			SetConfirm(FString::Printf(TEXT("Dig designation transmitted: %s"), *RHOrder::DepositName(ClickDefs, *Dep)), FLinearColor(0.2f, 0.9f, 1.f));
+			SetConfirm(bStop ? FString::Printf(TEXT("Stop digging transmitted: %s"), *RHOrder::DepositName(ClickDefs, *Dep))
+				: FString::Printf(TEXT("Dig designation transmitted: %s"), *RHOrder::DepositName(ClickDefs, *Dep)), FLinearColor(0.2f, 0.9f, 1.f));
 			CancelModes();
 		}
 	}
@@ -3198,6 +3210,57 @@ FText ARHPlayerController::GetConfirmText() const
 FText ARHPlayerController::GetHintText() const
 {
 	return FText::FromString(HintText);
+}
+
+const FString& ARHPlayerController::GetGhostNote(const URHSimWorldSubsystem& Sim, const URHDefinitionsSubsystem& Defs, const FRHBuildingRow& Def, FName DefName, int32 Beds, int32 Level, bool bDome)
+{
+	// C0-6 (PLACEHOLDER, gate-d-wording BF9): what the ghost adds under its cost line. For each line of the bill at this floor with
+	// nothing in store (RHOrder::InStoreKg): "<Material>: none in store; <where it comes from>", the chain with a "(0 kg ...)" beside each input the
+	// colony holds none of; on the surface Shielding line with regolith to pack, "it will be packed from regolith". For a dome: the Glass
+	// it will plant from. The order is still allowed: the sim decides that, unchanged. Rebuilt at most four times a real second.
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS < GhostNotePollAtS && DefName == GhostNoteDef && Beds == GhostNoteBeds && Level == GhostNoteLevel)
+	{
+		return GhostNoteText;
+	}
+	GhostNotePollAtS = NowS + 0.25;
+	GhostNoteDef = DefName;
+	GhostNoteBeds = Beds;
+	GhostNoteLevel = Level;
+	GhostNoteText.Reset();
+	if (!Def.ImportOnly)
+	{
+		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(Def, Level))
+		{
+			// Round 1: "in store" is RHOrder::InStoreKg (a store, never a site's hopper), the card's own meaning.
+			if (RHOrder::InStoreKg(&Sim, Cost.Key, Level) > 0.0)
+			{
+				continue;
+			}
+			const bool bRegolithRoute = Cost.Key == FName("Shielding") && Level >= 0 && Def.SurfaceShielding_kg > 0.f && Sim.GetShieldingRegolithPerKg() > 0.0;
+			GhostNoteText += (bRegolithRoute && Sim.GetRegolithToPackKg(Level) > 0.0)
+				? FString::Printf(TEXT("\n%s: none in store; it will be packed from regolith"), *RHOrder::ResourceName(&Defs, Cost.Key))
+				: FString::Printf(TEXT("\n%s: none in store; %s"), *RHOrder::ResourceName(&Defs, Cost.Key), *RHOrder::SourceText(&Defs, &Sim, Cost.Key, bRegolithRoute, /*bWithCounts*/ true));
+		}
+	}
+	if (bDome)
+	{
+		const double GlassKg = RHOrder::InStoreKg(&Sim, FName("Glass"), Level);
+		const int32 GlassBeds = FMath::FloorToInt32(GlassKg / FMath::Max(1.0, Defs.GetConfigScalar(FName("GreenhouseGlassKgPerCell"), 200.0)));
+		GhostNoteText += FString::Printf(TEXT("\nplants from the Glass in store: %.0f kg now (%d %s worth)"), GlassKg, GlassBeds, GlassBeds == 1 ? TEXT("bed's") : TEXT("beds'"));
+	}
+	return GhostNoteText;
+}
+
+bool ARHPlayerController::Debug_GetGhost(bool& bOutOk, FString& OutTip) const
+{
+	if (PendingBuildDef.IsNone())
+	{
+		return false;
+	}
+	bOutOk = bGhostOkShown;
+	OutTip = HintText;
+	return true;
 }
 
 int32 ARHPlayerController::FindBuildingAt(const FVector& GroundCm) const

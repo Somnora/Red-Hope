@@ -91,6 +91,13 @@ public:
 	// G2b (r1, B1): the alert banner as laid out now: the rows the layout gives a slot (0 when the box is collapsed), read from the row
 	// widgets' own visibility (the click test's flash.alerts samples it every frame).
 	int32 Debug_GetAlertRowsLaidOut() const;
+	// C0-13 QA (flash.toast): the reward toast's place as last painted, in the deck's local space (the centre X and top Y of its pill, and
+	// its size), whether it is shown now, and its absolute rectangle beside an alert row's and the event banner's (each false while that
+	// widget is not laid out). Debug_SetToast is the test's way to raise a toast (the setter every toast uses).
+	bool Debug_GetToastPlace(FVector2D& OutCentreTop, FVector2D& OutSize, bool& bOutShown, FSlateRect* OutAbsRect = nullptr) const;
+	bool Debug_GetAlertRowRect(int32 Row, FSlateRect& OutAbsRect) const;
+	bool Debug_GetEventBannerRect(FSlateRect& OutAbsRect) const;
+	void Debug_SetToast(const FString& Line, double HoldS) { SetToast(Line, HoldS); }
 	// G2b (r1, B3): what the moment watches last recorded (false when nothing is read yet), for cards.load and cards.crew.
 	bool Debug_GetWatchedMoments(bool& bOutCrewEver, bool& bOutBorn, bool& bOutArrival) const
 	{
@@ -170,6 +177,8 @@ private:
 	int32 GetAlertRowCount() const; // G2b (r1): the rows the queue holds (a row is laid out from its admission frame, at any opacity)
 	TSharedPtr<class SVerticalBox> AlertRowsBoxWidget;     // G2b (r1): the banner box and its rows, for Debug_GetAlertRowsLaidOut
 	TArray<TSharedPtr<class SWidget>> AlertRowWidgets;
+	// C0-13: the toast's fixed slot (always laid out), the toast's pill inside it and the event banner, for the three getters above.
+	TSharedPtr<class SWidget> ToastBoxWidget, ToastBorderWidget, EventBannerWidget;
 	// E5 review: the banner wraps at the gap left of the right column (local units, from the last tick's width).
 	float GetAlertWrapAt() const;
 	float DeckLocalWidth = 0.f;
@@ -555,6 +564,29 @@ private:
 	mutable int32 SiteStagePollId = 0;
 	mutable bool bSiteBuilderShown = false;
 	bool IsSiteBuilderShown(int32 BuildingId) const;
+	// C0-6: the open site's card, re-read from the sim at most four times a real second (the same idiom): each bill line's wanted
+	// suffix (0 none, 1 hauling, 2 in store waiting for a hauler, 3 none in store, 4 regolith to pack waiting for a hauler, 5 none
+	// left in store (some is paid); bit 4: regolith is packed on it) with its source words (kept while the latched kind shows them)
+	// words, the first short line, what the site waits on (its shell or its link: the kind and that site's Id) and the site the only
+	// Fabricator is at. Every shown value still goes through the power helper's latch at paint.
+	struct FSiteCardLine { uint32 Want = 0u; FString Source; };
+	mutable TArray<FSiteCardLine> SiteCardLines;
+	mutable double SiteCardPollAtS = 0.0;
+	mutable int32 SiteCardPollId = 0;
+	mutable int32 SiteCardShortIndex = INDEX_NONE;
+	mutable uint32 SiteCardWaitKind = 0u; // 0, 4 its shell, 5 its link
+	mutable int32 SiteCardWaitId = 0;
+	mutable int32 SiteCardBuilderAtId = 0;
+	void RefreshSiteCard(const FRHBuildingInstance& B, const TMap<FName, double>& Bill) const;
+	// C0-9: the guide's quota note (a quota is open and asks for Structural Materials), polled at most four times a real second.
+	mutable double GuideQuotaPollAtS = 0.0;
+	mutable bool bGuideQuotaStructOpen = false;
+	bool IsGuideQuotaStructOpen() const;
+	// C0-5: is the open card's extractor off its deposit (the same poll idiom; a row that needs no deposit never asks the sim).
+	mutable double CardOffDepositPollAtS = 0.0;
+	mutable int32 CardOffDepositPollId = 0;
+	mutable bool bCardOffDeposit = false;
+	bool IsCardOffDeposit(const FRHBuildingInstance& B) const;
 	// G1: a keyed boolean through the power helper's latch (the value itself when there is no helper).
 	bool LatchHeld(uint8 Kind, uint32 Value, bool bWant) const;
 	// G1 r3: a value read from what RefreshJobs rebuilds every step (a station's seats, a colonist's post, the colony's filled and total

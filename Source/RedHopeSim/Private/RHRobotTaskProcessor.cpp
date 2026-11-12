@@ -237,13 +237,13 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 							Task.Phase = 1;
 						}
 					}
-					else if (Sim->IsDepositWorkable(Task.DigDepositId))
+					else
 					{
-						DrawW = Robot.DrawWorkW;
+						// C0-2: the one step both brains share (URHSimWorldSubsystem::StepDigAtPile), as in the StateTree brain.
 						// WorkRate = kg/sol-hour; sol-hour = 50 sim-s.
-						Sim->DigDeposit(Task.DigDepositId, Robot.WorkRate * (SubDt / 50.f));
+						const URHSimWorldSubsystem::ERHDigStep DigStep = Sim->StepDigAtPile(Transform.GetLocation(), Level, Task, SubDt, Robot.WorkRate * (SubDt / 50.f));
+						DrawW = DigStep == URHSimWorldSubsystem::ERHDigStep::Working ? Robot.DrawWorkW : Robot.DrawIdleW;
 					}
-					// else: pile full - stand by at idle draw until haulers clear it.
 					break;
 				}
 
@@ -316,16 +316,9 @@ void URHRobotTaskProcessor::Execute(FMassEntityManager& EntityManager, FMassExec
 					}
 					else
 					{
-						DrawW = Robot.DrawWorkW;
-						// C4: a road edge is labour only (its own slot, never the site id).
-						const bool bDone = Task.RoadEdgeId > 0
-							? Sim->ApplyRoadWork(Task.RoadEdgeId, SubDt * Robot.WorkRate)
-							: Sim->ApplyBuildWork(Task.DigDepositId, SubDt * Robot.WorkRate, Level);
-						if (bDone)
-						{
-							Sim->CompleteTask(Task.TaskId);
-							Task = FRHTaskFragment();
-						}
+						// C0-1: the one step both brains share (URHSimWorldSubsystem::StepBuildAtSite), as in the StateTree brain.
+						const URHSimWorldSubsystem::ERHBuildStep BuildStep = Sim->StepBuildAtSite(Entity, Transform.GetLocation(), Level, Task, SubDt, SubDt * Robot.WorkRate);
+						DrawW = URHSimWorldSubsystem::BuildStepDrawsWork(BuildStep) ? Robot.DrawWorkW : Robot.DrawIdleW;
 					}
 					break;
 				}

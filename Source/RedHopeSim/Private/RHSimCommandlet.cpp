@@ -44,6 +44,8 @@ int32 RHRunAtriumsSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldS
 int32 RHRunRegionReadySuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 // BM-7 moving: the -moves suite lives in RHSimMoveSuite.cpp (it destroys the world and returns the suite's status).
 int32 RHRunMovesSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
+// C0a building that finishes: the -building suite lives in RHSimBuildingSuite.cpp (it destroys the world and returns the suite's status).
+int32 RHRunBuildingSuite(UWorld* World, URHSimClockSubsystem* Clock, URHSimWorldSubsystem* Sim);
 
 // Headless balance runner: the standing-order proof that the sim needs no
 // presentation. Boots a bare Game world (subsystems and all), era-integrates
@@ -15308,6 +15310,15 @@ int32 URHSimCommandlet::Main(const FString& Params)
 	if (FParse::Param(*Params, TEXT("moves")))
 	{
 		return RHRunMovesSuite(World, Clock, Sim);
+	}
+
+	// C0a "Building that finishes" self-test (the Fabricator's ready-first claim, its return to a part-built site, the swap from a starved
+	// site and the idle draw; the dig skip, the full-pile swap, the dig ranking and StopDig; regolith-paid Shielding; pylon chains; the
+	// extractor's deposit; the prefab network; a machine into a shell in flight; the stalled set; the ExtraFabricator row; the sim's
+	// words), fails loudly. `-building`.
+	if (FParse::Param(*Params, TEXT("building")))
+	{
+		return RHRunBuildingSuite(World, Clock, Sim);
 	}
 
 	if (FParse::Param(*Params, TEXT("framing")))

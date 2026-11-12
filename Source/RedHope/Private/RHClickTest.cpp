@@ -17,6 +17,9 @@
 //   RH.ClickTest.DropDrag <label>[|<label>...]    TEST HOOK (G2b): the next drag of each named label (a slider's tag, RightMouseButton,
 //                                                 MiddleMouseButton) loses all pointer capture after its down
 //   RH.ClickTest.BigArrival                       TEST HOOK (G2b): the Big Arrival as the presentation receives it (no sim rule runs)
+//   RH.ClickTest.Toast <seconds> <words>          TEST HOOK (C0a): raise the reward toast with these words for that long (the deck's one setter)
+//   RH.ClickTest.Alert <words>                    TEST HOOK (C0a): one alert line through the sim's OnAlert, as flash.alerts fires its lines
+//   RH.HoverWorld <Xm> <Ym>                       TEST HOOK (C0a): the pointer over the ground point, no press (RH.ClickWorld's projection)
 //
 // G2a (A0, the dropped press, ruling 26): any window activation makes Slate release all pointer capture, and a button pressed across
 // frames then never clicks. PushPress checks at the release that the located button still holds its press; if not, it presses again
@@ -36,6 +39,10 @@
 // lost its capture ... dragging again", counted in RETRIES and the kind line's drag); a world drag is never dragged again (its check names
 // a drift instead). Every up line says drift=0|1: whether the pointer stood where the harness put it just before the re-place (1 is input
 // the harness did not make: a person's mouse, Universal Control). Before any press again the button must still be under its point.
+//
+// C0a (2026-11-10, "Building that finishes"): the main scene is 159 steps (8 new, last before the verdict: c0.ghost, c0.card, c0.builder,
+// c0.stall, c0.dig, c0.drillcard, c0.guide, c0.lastword, each on a colony it loads itself; give it a 720 s timeout) and the flash scene 11
+// (flash.toast, after flash.alerts: the reward toast's place on every frame while the alert rows come and go).
 //
 // Commands queue and run one step at a time on the core ticker, so -ExecCmds can chain them. This is the
 // presentation module; the sim boundary is untouched.
@@ -62,10 +69,12 @@
 #include "RHTramVisualizerSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHSimWorldSubsystem.h"
+#include "RHAgentSubsystem.h" // C0a: the Fabricator's charge and task (c0.builder)
 #include "RHDefinitionsSubsystem.h"
 #include "Data/RHRows.h"
 #include "RHOrderWords.h"
 #include "Containers/Ticker.h"
+#include <initializer_list>
 #include "Camera/PlayerCameraManager.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -2516,6 +2525,25 @@ namespace
 		int32 Refusals = 0, Onsets = 0, RefusedAfterClear = 0, Resumed = -1;
 		uint32 LogSerial0 = 0;
 		FDelegateHandle Handle;
+	};
+
+	// C0a (2026-11-10): one of the eight "building that finishes" steps of the main scene in progress: what went wrong (empty: it holds),
+	// what it saw, its phase and the ids and spots it made.
+	struct FC0Main
+	{
+		FString Why, Said;
+		int32 Phase = 0, Armed = -1;
+		double PhaseAt = 0.0, At = 0.0, AlertAt = -1.0, ClearAt = -1.0, PressAt = -1.0;
+		int32 SiteA = 0, SiteB = 0, Other = 0, Forge = 0, Lander = 0, Hab = 0;
+		FVector SpotA = FVector::ZeroVector, SpotB = FVector::ZeroVector, RegCm = FVector::ZeroVector, OreCm = FVector::ZeroVector;
+		FName RegRow, OreRow;
+		double NotClaimedSince = -1.0;
+		int32 Refusals = 0, Resumed = 0, RejectsSeen = 0, VaultBeds = 0, SurfaceBeds = 0;
+		float ClockAtAlert = -1.f, ClockMaxAfter = 0.f, ClockAtPress = -1.f;
+		FString AlertText, RejectText, OtherRefusals, Seen0, Seen1, Seen2, Seen3, Seen4;
+		bool bHeld = false, bQuotaStruct = false, bWaited = false;
+		float FabChargeAtLoad = -1.f; // c0.builder: the Fabricator's charge in the slot, before the hook fills it
+		FDelegateHandle AlertHandle, RejectHandle;
 	};
 
 	void StartClickTest()
@@ -5336,7 +5364,9 @@ namespace
 				{
 					Problem += TEXT(" the 60x tier is not shown refused;");
 				}
-				if (!Why.Contains(TEXT("is still being built"))) // G2a: the sim's reason in plain words (was "construction in progress")
+				// G2a: the sim's reason in plain words (was "construction in progress"). C0-6: a site still short of a bill line reads
+				// "the <site> is waiting for <material>"; one that is ready or being worked keeps "is still being built".
+				if (!Why.Contains(TEXT("is still being built")) && !Why.Contains(TEXT("is waiting for ")))
 				{
 					Problem += FString::Printf(TEXT(" the reason is '%s';"), *Why);
 				}
@@ -5704,7 +5734,7 @@ namespace
 				}
 				if (!Site)
 				{
-					if (bLast) { T->G2StageWhy += FString::Printf(TEXT(" no site stood (%s);"), *T->G2SiteSaid); return true; }
+					if (bLast) { T->G2StageWhy += FString::Printf(TEXT(" no site stood (%s);"), *T->G2SiteSaid); Sim->SetFleetHold(false); return true; }
 					return false;
 				}
 				if (T->G2SiteId == 0)
@@ -5735,6 +5765,9 @@ namespace
 						{
 							T->G2StageWhy += FString::Printf(TEXT(" the card has no line '%s...' (card: '%s');"), *WantMaterial, *Card.Replace(TEXT("\n"), TEXT(" / ")));
 						}
+						// C0a: the fleet is held from the delivery until the builder line is read, so the stage cannot be skipped (since C0-1 a
+						// Fabricator standing by at a starved site moves to a ready one within BuildSwapCheckS, inside the line's own floor).
+						Sim->SetFleetHold(true);
 						for (const TPair<FName, double>& L : Bill)
 						{
 							const double* Have = Site->InputKg.Find(L.Key);
@@ -5747,13 +5780,21 @@ namespace
 					if (bLast || Elapsed > 10.0) { T->G2StageWhy += FString::Printf(TEXT(" the card never read '%s' (card: '%s');"), *Want, *Card.Replace(TEXT("\n"), TEXT(" / "))); return true; }
 					return false;
 				}
-				const FString Want = TEXT("WAITING FOR A BUILDER - no Fabricator has taken the job");
+				// C0-6: the builder line is "no Fabricator has taken the job" or, with the only Fabricator at another site, "the Fabricator is
+				// at the <site>": any line with this start is the stage (c0.builder holds the second form).
+				const FString Want = TEXT("WAITING FOR A BUILDER - ");
 				if (Card.Contains(Want))
 				{
 					T->G2Stages.Add(Want);
+					Sim->SetFleetHold(false);
 					return true;
 				}
-				if (bLast || Elapsed - *PhaseAt > 6.0) { T->G2StageWhy += FString::Printf(TEXT(" the card never read '%s' within 6 s of the delivery (card: '%s');"), *Want, *Card.Replace(TEXT("\n"), TEXT(" / "))); return true; }
+				if (bLast || Elapsed - *PhaseAt > 6.0)
+				{
+					T->G2StageWhy += FString::Printf(TEXT(" the card never read '%s...' within 6 s of the delivery (card: '%s');"), *Want, *Card.Replace(TEXT("\n"), TEXT(" / ")));
+					Sim->SetFleetHold(false);
+					return true;
+				}
 				return false;
 			}, 0.3f, 25.f);
 		}
@@ -5765,8 +5806,10 @@ namespace
 			UWorld* W = FindGameWorld();
 			const URHDefinitionsSubsystem* Defs = W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
 			if (!Deck.IsValid() || !Sim || !Defs) { return FString(TEXT("no deck, sim or definitions")); }
-			// The test's own reason: the first site in GetBuildings() order, by its CSV name with a leading "The " dropped.
-			FString First;
+			// The test's own reason: the first site in GetBuildings() order, by its CSV name with a leading "The " dropped. C0-6: which form
+			// applies is the test's own read too: the first line of its bill still short by ApplyBuildWork's 0.5 kg rule names the material
+			// ("is waiting for <material>"), else "is still being built".
+			FString First, ShortName;
 			for (const FRHBuildingInstance& B : Sim->GetBuildings())
 			{
 				if (B.bUnderConstruction)
@@ -5774,10 +5817,20 @@ namespace
 					const FRHBuildingRow* R = Defs->GetBuilding(B.DefName);
 					First = R ? R->DisplayName : FString();
 					First.RemoveFromStart(TEXT("The "));
+					for (const TPair<FName, double>& L : Sim->GetSiteBill(B))
+					{
+						const double* Have = B.InputKg.Find(L.Key);
+						if ((Have ? *Have : 0.0) + 0.5 < L.Value)
+						{
+							const FRHResourceRow* Res = Defs->GetResource(L.Key);
+							ShortName = Res ? Res->DisplayName : L.Key.ToString();
+							break;
+						}
+					}
 					break;
 				}
 			}
-			const FString Want = FString::Printf(TEXT("the %s is still being built"), *First);
+			const FString Want = ShortName.IsEmpty() ? FString::Printf(TEXT("the %s is still being built"), *First) : FString::Printf(TEXT("the %s is waiting for %s"), *First, *ShortName);
 			FString Why;
 			const bool bDim = Deck->IsSixtyRefusedShown(&Why);
 			FString Tip;
@@ -8421,6 +8474,1075 @@ namespace
 			Report(TEXT("speed.wish.onset"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
 		}, 0.3f);
 
+		// ---- C0a (2026-11-10) "Building that finishes": eight steps, last of all, each on a colony it loads itself with the sim's own load
+		// (as alerts.e5 does), so no older step sees them. Every wait on the sim is bounded and names what it waited for. c0.ghost,
+		// c0.ghost and c0.card share one load of Early; c0.builder loads its own; c0.stall, c0.dig and c0.drillcard a third; c0.guide and
+		// c0.lastword each load Vault.
+		const auto C0Load = [](const TCHAR* Slot, float Speed, double Lag, FString& Why) -> bool
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			if (!Sim || !PC || !Viz || !PC->GetDeck().IsValid())
+			{
+				Why += TEXT(" no sim, controller, deck or colony visualizer;");
+				return false;
+			}
+			FString Err;
+			if (!Sim->LoadColony(Slot, Err))
+			{
+				Why += FString::Printf(TEXT(" could not load %s (%s);"), Slot, *Err);
+				return false;
+			}
+			PC->CancelModes();
+			PC->SetActiveLevel(0);
+			PC->Debug_SelectBuilding(0);
+			PC->GetDeck()->Debug_ClearTipCards();
+			Sim->SetFleetHold(false);
+			Sim->SetOrderLagSeconds(Lag);
+			PC->SetSimSpeed(Speed);
+			Viz->Debug_ClearAlerts();
+			return true;
+		};
+		// The selected card as the deck draws it: does it hold this exact line (leading spaces aside), and the line under it?
+		const auto C0CardLine = [](const FString& Card, const FString& Line, FString* OutNext = nullptr) -> bool
+		{
+			TArray<FString> Lines;
+			Card.ParseIntoArrayLines(Lines, false);
+			for (int32 i = 0; i < Lines.Num(); ++i)
+			{
+				if (Lines[i].TrimStart() == Line)
+				{
+					if (OutNext) { *OutNext = Lines.IsValidIndex(i + 1) ? Lines[i + 1].TrimStart() : FString(); }
+					return true;
+				}
+			}
+			return false;
+		};
+		const auto C0CardLineStarting = [](const FString& Card, const FString& Start) -> FString
+		{
+			TArray<FString> Lines;
+			Card.ParseIntoArrayLines(Lines, false);
+			for (const FString& L : Lines)
+			{
+				if (L.TrimStart().StartsWith(Start)) { return L.TrimStart(); }
+			}
+			return FString();
+		};
+		const auto C0Flat = [](const FString& Text) { return Text.Replace(TEXT("\n"), TEXT(" / ")); };
+		const auto C0SiteAt = [](const URHSimWorldSubsystem& Sim, FName Def, const FVector& AtCm) -> const FRHBuildingInstance*
+		{
+			for (const FRHBuildingInstance& B : Sim.GetBuildings())
+			{
+				if (B.DefName == Def && B.bUnderConstruction && FVector::Dist2D(B.LocationCm, AtCm) < 600.0) { return &B; }
+			}
+			return nullptr;
+		};
+		const auto C0Build = [](URHSimWorldSubsystem& Sim, FName Def, const FVector& AtCm, int32 SX = 1, int32 SY = 1)
+		{
+			FRHCommand Cmd;
+			Cmd.Verb = FName("Build");
+			Cmd.Target = Def;
+			Cmd.Location = AtCm;
+			Cmd.Level = 0;
+			Cmd.Value = (SX > 1 || SY > 1) ? URHSimWorldSubsystem::EncodeBuildSize(SX, SY) : 0.0;
+			Sim.EnqueueCommand(Cmd);
+		};
+		// A legal spot for a row from a short list of candidates (the sim's own placement test; materials included unless told not to).
+		const auto C0Spot = [](const URHSimWorldSubsystem& Sim, const URHDefinitionsSubsystem& Defs, FName Def, int32 SX, int32 SY, std::initializer_list<FVector> Candidates, FVector& OutCm, FString& OutWhy, bool bMaterials = true) -> bool
+		{
+			const FRHBuildingRow* Row = Defs.GetBuilding(Def);
+			for (const FVector& Cand : Candidates)
+			{
+				const FVector At = (Row && Row->Pressurized) ? URHSimWorldSubsystem::SnapToBayGrid(Row, Cand, SX, SY) : Cand;
+				if (Sim.CanPlaceBuildingSized(Def, At, OutWhy, 0, SX, SY, bMaterials))
+				{
+					OutCm = At;
+					return true;
+				}
+			}
+			return false;
+		};
+		const auto C0Defs = []() -> const URHDefinitionsSubsystem* { UWorld* W = FindGameWorld(); return W ? W->GetSubsystem<URHDefinitionsSubsystem>() : nullptr; };
+		// Is this text drawn in the game window now (a text block whose words are exactly these)? Quiet: a poll, not a locate.
+		const auto C0TextShown = [](const FString& Label)
+		{
+			TArray<FFoundWidget> Texts;
+			GatherInWindow(TEXT("STextBlock"), Texts);
+			for (const FFoundWidget& Found : Texts)
+			{
+				if (HasText(Found.Widget, Label)) { return true; }
+			}
+			return false;
+		};
+
+		// c0.ghost (C0-6): the ghost's chain line and the dome's Glass line. Early, lag 1 s, 1x; the pointer over the middle of the view.
+		{
+			const TSharedRef<FC0Main> G = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.ghost setup"), [G, C0Load]()
+			{
+				if (C0Load(TEXT("Early"), 1.f, 1.0, G->Why))
+				{
+					FrameCamera(FVector(-1500.0, 1500.0, 0.0), 0.3f);
+				}
+			}, 0.6f);
+			PushPress(TEXT("c0.ghost hover"), LocateFraction(0.5f, 0.5f), /*bPress*/ false);
+			Runner.Push(TEXT("c0.ghost read"), [G, C0Defs, C0Flat, C0Spot, C0Build, C0SiteAt](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				if (!Sim || !PC || !Defs || !G->Why.IsEmpty() || G->Phase >= 4)
+				{
+					return true;
+				}
+				// The test's own read of "in store" (round 1): the pool plus finished buildings; a site's hopper is not a store.
+				const auto Store = [Sim](FName R)
+				{
+					double Kg = Sim->GetStock(R);
+					for (const FRHBuildingInstance& B : Sim->GetBuildings())
+					{
+						if (!B.bUnderConstruction) { Kg += B.InputKg.FindRef(R) + B.OutputKg.FindRef(R); }
+					}
+					return Kg;
+				};
+				static const TCHAR* const Rows[] = { TEXT("HabModule"), TEXT("GreenhouseDome"), TEXT("Stockpile"), TEXT("Habitat") };
+				if (G->Phase == 3 && G->SiteB == 0)
+				{
+					// Round 1: material that is only on a site is not in store. A prefab Habitat site is ordered and 1 kg of Habitat Segment
+					// put in its hopper (the colony then holds 1 kg, no store holds any); the ghost of a second prefab must still say so.
+					const FName NSeg(TEXT("HabSegment"));
+					if (!G->bHeld)
+					{
+						FString Why;
+						if (Sim->GetTotalSolid(NSeg) + Sim->GetStock(NSeg) > 0.0 || !C0Spot(*Sim, *Defs, FName("Habitat"), 1, 1, { FVector(2000.0, 3500.0, 0.0), FVector(-2000.0, 2500.0, 0.0), FVector(3000.0, 2500.0, 0.0), FVector(3000.0, -2500.0, 0.0) }, G->SpotB, Why))
+						{
+							G->Why += FString::Printf(TEXT(" premise: no spot for a prefab Habitat on Early, or segments are held (%s);"), *Why);
+							return true;
+						}
+						C0Build(*Sim, FName("Habitat"), G->SpotB);
+						G->bHeld = true;
+						G->PhaseAt = Elapsed;
+						return false;
+					}
+					const FRHBuildingInstance* Site = C0SiteAt(*Sim, FName("Habitat"), G->SpotB);
+					if (!Site)
+					{
+						if (bLast || Elapsed - G->PhaseAt > 8.0) { G->Why += TEXT(" the prefab Habitat order never landed as a site;"); return true; }
+						return false;
+					}
+					G->SiteB = Site->Id;
+					Sim->Debug_AddSolidAt(G->SiteB, NSeg, 1.0, false);
+					return false;
+				}
+				if (G->Armed != G->Phase)
+				{
+					PC->BeginPlacement(FName(Rows[G->Phase]));
+					G->Armed = G->Phase;
+					G->PhaseAt = Elapsed;
+					return false;
+				}
+				bool bGreen = false;
+				FString Tip;
+				const bool bGhost = PC->Debug_GetGhost(bGreen, Tip) && PC->GetPendingBuildDef() == FName(Rows[G->Phase]) && Tip.StartsWith(TEXT("PLACING "));
+				const bool bGiveUp = bLast || Elapsed - G->PhaseAt > 4.0;
+				if (G->Phase == 0)
+				{
+					// The test's own read: no Shielding held anywhere, regolith to pack above 0.
+					const double Shield = Sim->GetTotalSolid(FName("Shielding")) + Sim->GetStock(FName("Shielding")), Pack = Sim->GetRegolithToPackKg(0);
+					const FString Want = RHOrder::ResourceName(Defs, FName("Shielding")) + TEXT(": none in store; it will be packed from regolith");
+					if (Shield > 0.0 || Pack <= 0.0) { G->Why += FString::Printf(TEXT(" premise: Early holds %.0f kg Shielding and %.0f kg of regolith to pack;"), Shield, Pack); return true; }
+					if (bGhost && Tip.Contains(TEXT("\n") + Want)) { G->Seen0 = Want; ++G->Phase; Sim->AddStock(FName("Glass"), 450.0); return false; }
+					if (bGiveUp) { G->Why += FString::Printf(TEXT(" the Habitat Bay ghost's tip never held '%s' (tip: '%s');"), *Want, *C0Flat(Tip)); return true; }
+					return false;
+				}
+				if (G->Phase == 1)
+				{
+					// Round 1: 450 kg of Glass was put in the pool when the Habitat Bay's line was read, so the figure is not 0.
+					const double Glass = Store(FName("Glass"));
+					const FString Want = FString::Printf(TEXT("plants from the Glass in store: %.0f kg now"), Glass);
+					if (Glass < 450.0) { G->Why += FString::Printf(TEXT(" premise: the pool holds %.0f kg of Glass after 450 kg was added;"), Glass); return true; }
+					if (bGhost && Tip.Contains(TEXT("\n") + Want)) { G->Seen1 = Want; ++G->Phase; Sim->AddStock(FName("Glass"), -450.0); return false; }
+					if (bGiveUp) { Sim->AddStock(FName("Glass"), -450.0); }
+					if (bGiveUp) { G->Why += FString::Printf(TEXT(" the Greenhouse Dome ghost's tip never held '%s' (tip: '%s');"), *Want, *C0Flat(Tip)); return true; }
+					return false;
+				}
+				if (G->Phase == 2)
+				{
+					const double Struct = Store(FName("Struct"));
+					if (Struct <= 0.0) { G->Why += TEXT(" premise: Early holds no Structural Materials in a store;"); return true; }
+					if (bGhost && Elapsed - G->PhaseAt > 0.6)
+					{
+						if (Tip.Contains(TEXT("none in store"))) { G->Why += FString::Printf(TEXT(" the Stockpile Pad ghost's tip holds a 'none in store' line with %.0f kg Struct in store (tip: '%s');"), Struct, *C0Flat(Tip)); return true; }
+						G->Seen2 = FString::Printf(TEXT("%.0f kg Struct in store"), Struct);
+						++G->Phase;
+						return false;
+					}
+					if (bGiveUp) { G->Why += FString::Printf(TEXT(" no Stockpile Pad ghost was drawn (tip: '%s');"), *C0Flat(Tip)); return true; }
+					return false;
+				}
+				// Phase 3 (round 1): the second prefab's ghost while the only Habitat Segment the colony holds is on site #SiteB.
+				const FName NSeg(TEXT("HabSegment"));
+				const double SegHeld = Sim->GetTotalSolid(NSeg) + Sim->GetStock(NSeg), SegStore = Store(NSeg);
+				const FString Want = RHOrder::ResourceName(Defs, NSeg) + TEXT(": none in store; made at the ");
+				// Leaving: the hopper as it was and the site demolished, so c0.card's own prefab reads no segment anywhere and no second site.
+				const auto Tidy = [Sim, G, NSeg]()
+				{
+					Sim->Debug_AddSolidAt(G->SiteB, NSeg, -1.0, false);
+					FRHCommand Demo;
+					Demo.Verb = FName("Demolish");
+					Demo.Target = FName("Building");
+					Demo.Value = (double)G->SiteB;
+					Sim->EnqueueCommand(Demo);
+				};
+				if (SegHeld <= 0.0 || SegStore > 0.0) { Tidy(); G->Why += FString::Printf(TEXT(" premise: the colony holds %.0f kg of Habitat Segment and its stores %.0f kg (want 1 on the site and 0 in store);"), SegHeld, SegStore); return true; }
+				if (bGhost && Tip.Contains(TEXT("\n") + Want))
+				{
+					G->Seen3 = FString::Printf(TEXT("'%s...' with %.0f kg on site #%d and %.0f kg in store"), *Want, SegHeld, G->SiteB, SegStore);
+					Tidy();
+					++G->Phase;
+					return true;
+				}
+				if (bGiveUp) { Tidy(); G->Why += FString::Printf(TEXT(" with 1 kg of Habitat Segment on a site and none in store the prefab Habitat ghost's tip never held '%s' (tip: '%s');"), *Want, *C0Flat(Tip)); return true; }
+				return false;
+			}, 0.2f, 30.f);
+			Runner.Do(TEXT("c0.ghost"), [G]()
+			{
+				if (ARHPlayerController* PC = GetPC()) { PC->CancelModes(); }
+				const FString Said = FString::Printf(TEXT("Early, placing a Habitat Bay: the tip holds '%s'; a Greenhouse Dome: '%s'; a Stockpile Pad (%s): no 'none in store' line; a prefab Habitat: %s"), *G->Seen0, *G->Seen1, *G->Seen2, *G->Seen3);
+				Report(TEXT("c0.ghost"), G->Why.IsEmpty(), G->Why.IsEmpty() ? Said : G->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.card (C0-6, C0-3): the site card's material lines tell the truth. The fleet held, a 1 x 1 Habitat Bay ordered: both lines
+		// read "(in store, waiting for a hauler)" (regolith stands on the pile); 100 kg of Regolith put on the site: the Shielding line
+		// reads 50 / 50 kg (packed regolith); the hold released at 8x: the Struct line reads "(hauling)" on a poll where the test's own
+		// read says a hauler has the load, and never while the test has read no claim for 3.5 s; then a prefab Habitat: its segment line
+		// reads "(none in store)" with where segments come from under it.
+		{
+			const TSharedRef<FC0Main> K = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.card setup"), [K, C0Defs, C0Spot, C0Build]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				if (!Sim || !PC || !Defs) { K->Why += TEXT(" no sim, controller or definitions;"); return; }
+				Sim->SetFleetHold(true);
+				PC->SetSimSpeed(1.f);
+				FString Why;
+				if (!C0Spot(*Sim, *Defs, FName("HabModule"), 1, 1, { FVector(2000.0, 2000.0, 0.0), FVector(3000.0, 2000.0, 0.0), FVector(2000.0, 3000.0, 0.0), FVector(-2000.0, 2000.0, 0.0) }, K->SpotA, Why))
+				{
+					K->Why += FString::Printf(TEXT(" premise: no spot for a 1 x 1 Habitat Bay on Early (%s);"), *Why);
+					return;
+				}
+				C0Build(*Sim, FName("HabModule"), K->SpotA);
+			}, 0.3f);
+			Runner.Push(TEXT("c0.card read"), [K, C0Defs, C0Spot, C0Build, C0SiteAt, C0CardLine, C0CardLineStarting, C0Flat](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Defs || !Deck.IsValid() || !K->Why.IsEmpty())
+				{
+					return true;
+				}
+				const FName NStruct(TEXT("Struct")), NShield(TEXT("Shielding")), NSeg(TEXT("HabSegment"));
+				const FString StructName = RHOrder::ResourceName(Defs, NStruct), ShieldName = RHOrder::ResourceName(Defs, NShield), SegName = RHOrder::ResourceName(Defs, NSeg);
+				const FString Card = Deck->Debug_GetInspectText();
+				if (K->Phase == 0)
+				{
+					const FRHBuildingInstance* Site = C0SiteAt(*Sim, FName("HabModule"), K->SpotA);
+					if (!Site)
+					{
+						if (bLast || Elapsed > 8.0) { K->Why += TEXT(" the Habitat Bay order never landed as a site;"); return true; }
+						return false;
+					}
+					K->SiteA = Site->Id;
+					PC->Debug_SelectBuilding(Site->Id);
+					K->Phase = 1;
+					K->PhaseAt = Elapsed;
+					return false;
+				}
+				if (K->Phase == 1)
+				{
+					URHSimWorldSubsystem::FRHSiteLineState Sh, St;
+					const bool bRead = Sim->GetSiteLineState(K->SiteA, NShield, Sh) && Sim->GetSiteLineState(K->SiteA, NStruct, St);
+					const FString WantSh = FString::Printf(TEXT("material %s: 0 / 50 kg  (regolith to pack, waiting for a hauler)"), *ShieldName);
+					const FString WantSt = FString::Printf(TEXT("material %s: 0 / 200 kg  (in store, waiting for a hauler)"), *StructName);
+					if (bRead && C0CardLine(Card, WantSh) && C0CardLine(Card, WantSt))
+					{
+						// The test's own read of why: the regolith on the piles, the Struct in a store, no hauler on either.
+						if (!(Sh.bShort && !Sh.bHaulClaimed && Sh.InStoreKg <= 0.0 && Sh.RegolithToPackKg > 0.0) || !(St.bShort && !St.bHaulClaimed && St.InStoreKg > 0.0))
+						{
+							K->Why += FString::Printf(TEXT(" premise: the test's own read does not say 'no Shielding in store, regolith to pack, Struct in store, neither claimed' (Shielding: %.0f kg in store, %.0f kg-equivalent of regolith to pack, claimed %d; Struct: %.0f kg in store, claimed %d);"),
+								Sh.InStoreKg, Sh.RegolithToPackKg, (int32)Sh.bHaulClaimed, St.InStoreKg, (int32)St.bHaulClaimed);
+							return true;
+						}
+						K->Seen0 = WantSh;
+						Sim->Debug_AddSolidAt(K->SiteA, FName("Regolith"), 100.0, false);
+						K->Phase = 2;
+						K->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed - K->PhaseAt > 5.0) { K->Why += FString::Printf(TEXT(" within 5 s the card never held '%s' and '%s' (card: '%s');"), *WantSh, *WantSt, *C0Flat(Card)); return true; }
+					return false;
+				}
+				if (K->Phase == 2)
+				{
+					const FString Want = FString::Printf(TEXT("material %s: 50 / 50 kg  (packed regolith)"), *ShieldName);
+					if (C0CardLine(Card, Want))
+					{
+						K->Seen1 = Want;
+						Sim->SetFleetHold(false);
+						PC->SetSimSpeed(8.f);
+						K->Phase = 3;
+						K->PhaseAt = Elapsed;
+						K->NotClaimedSince = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed - K->PhaseAt > 4.0) { K->Why += FString::Printf(TEXT(" within 4 s of 100 kg of Regolith landing the card never held '%s' (card: '%s');"), *Want, *C0Flat(Card)); return true; }
+					return false;
+				}
+				if (K->Phase == 3)
+				{
+					URHSimWorldSubsystem::FRHSiteLineState St;
+					const bool bRead = Sim->GetSiteLineState(K->SiteA, NStruct, St);
+					const FString Line = C0CardLineStarting(Card, FString::Printf(TEXT("material %s: "), *StructName));
+					const bool bShownHauling = Line.EndsWith(TEXT("  (hauling)"));
+					const bool bClaimed = bRead && St.bShort && St.bHaulClaimed;
+					if (bClaimed)
+					{
+						K->NotClaimedSince = -1.0;
+					}
+					else if (K->NotClaimedSince < 0.0)
+					{
+						K->NotClaimedSince = Elapsed;
+					}
+					if (bShownHauling && !bClaimed && K->NotClaimedSince >= 0.0 && Elapsed - K->NotClaimedSince > 3.5)
+					{
+						K->Why += FString::Printf(TEXT(" the Struct line read '(hauling)' %.1f s after the test last read a hauler on it ('%s');"), Elapsed - K->NotClaimedSince, *Line);
+						return true;
+					}
+					if (bShownHauling && bClaimed)
+					{
+						K->Seen2 = Line;
+						PC->SetSimSpeed(1.f);
+						// The second site: a prefab Habitat, whose segments nothing holds.
+						FString Why;
+						if (Sim->GetTotalSolid(NSeg) + Sim->GetStock(NSeg) > 0.0 || !C0Spot(*Sim, *Defs, FName("Habitat"), 1, 1, { FVector(3000.0, 2500.0, 0.0), FVector(2000.0, 3500.0, 0.0), FVector(-2000.0, 2500.0, 0.0), FVector(3000.0, -2500.0, 0.0) }, K->SpotB, Why))
+						{
+							K->Why += FString::Printf(TEXT(" premise: no spot for a prefab Habitat on Early, or segments are held (%s);"), *Why);
+							return true;
+						}
+						C0Build(*Sim, FName("Habitat"), K->SpotB);
+						K->Phase = 4;
+						K->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed - K->PhaseAt > 20.0)
+					{
+						K->Why += FString::Printf(TEXT(" within 20 s at 8x of the hold's release the Struct line never read '(hauling)' while the test read a hauler on it (the line: '%s'; the test's read: short %d, posted %d, claimed %d);"),
+							*Line, bRead ? (int32)St.bShort : -1, bRead ? (int32)St.bHaulPosted : -1, bRead ? (int32)St.bHaulClaimed : -1);
+						return true;
+					}
+					return false;
+				}
+				// Phase 4: the prefab's card.
+				const FRHBuildingInstance* Site = K->SiteB != 0 ? nullptr : C0SiteAt(*Sim, FName("Habitat"), K->SpotB);
+				if (K->SiteB == 0)
+				{
+					if (!Site)
+					{
+						if (bLast || Elapsed - K->PhaseAt > 8.0) { K->Why += TEXT(" the prefab Habitat order never landed as a site;"); return true; }
+						return false;
+					}
+					K->SiteB = Site->Id;
+					PC->Debug_SelectBuilding(Site->Id);
+					K->PhaseAt = Elapsed;
+					return false;
+				}
+				const FString WantUnder = FString::Printf(TEXT("made at the %s from %s and %s"), *RHOrder::BuildingName(Defs, FName("Forge")), *StructName, *ShieldName);
+				FString Under;
+				if (K->Phase == 5)
+				{
+					// Round 1: 1 kg of Habitat Segment is on the site now and no store holds any: "none left in store", the source still under it.
+					const FString WantLeft = FString::Printf(TEXT("material %s: 1 / 2 kg  (none left in store)"), *SegName);
+					if (C0CardLine(Card, WantLeft, &Under) && Under == WantUnder)
+					{
+						URHSimWorldSubsystem::FRHSiteLineState Sg;
+						if (!Sim->GetSiteLineState(K->SiteB, NSeg, Sg) || !Sg.bShort || Sg.PaidKg <= 0.0 || Sg.InStoreKg > 0.0 || Sg.bHaulPosted)
+						{
+							K->Why += TEXT(" premise: the test's own read does not say the segments are part paid and short with none in store and no haul;");
+						}
+						K->Seen4 = WantLeft + TEXT(" / ") + Under;
+						K->Phase = 6;
+						return true;
+					}
+					if (bLast || Elapsed - K->PhaseAt > 8.0) { K->Why += FString::Printf(TEXT(" within 8 s of 1 kg of Habitat Segment landing on the site the prefab's card never held '%s' with '%s' under it (card: '%s');"), *WantLeft, *WantUnder, *C0Flat(Card)); return true; }
+					return false;
+				}
+				const FString Want = FString::Printf(TEXT("material %s: 0 / 2 kg  (none in store)"), *SegName);
+				if (C0CardLine(Card, Want, &Under) && Under == WantUnder)
+				{
+					URHSimWorldSubsystem::FRHSiteLineState Sg;
+					if (!Sim->GetSiteLineState(K->SiteB, NSeg, Sg) || !Sg.bShort || Sg.InStoreKg > 0.0 || Sg.bHaulPosted)
+					{
+						K->Why += TEXT(" premise: the test's own read does not say the segments are short with none in store and no haul;");
+						return true;
+					}
+					K->Seen3 = Want + TEXT(" / ") + Under;
+					Sim->Debug_AddSolidAt(K->SiteB, NSeg, 1.0, false);
+					K->Phase = 5;
+					K->PhaseAt = Elapsed;
+					return false;
+				}
+				if (bLast || Elapsed - K->PhaseAt > 5.0) { K->Why += FString::Printf(TEXT(" within 5 s the prefab's card never held '%s' with '%s' under it (card: '%s');"), *Want, *WantUnder, *C0Flat(Card)); return true; }
+				return false;
+			}, 0.2f, 85.f);
+			Runner.Do(TEXT("c0.card"), [K]()
+			{
+				if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->SetFleetHold(false); }
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); }
+				const FString Said = FString::Printf(TEXT("Early, the fleet held, Habitat Bay site #%d: '%s'; 100 kg Regolith on site: '%s'; the hold released: '%s' with a hauler on the load; prefab Habitat site #%d: '%s'; 1 kg of segment on it: '%s'"),
+					K->SiteA, *K->Seen0, *K->Seen1, *K->Seen2, K->SiteB, *K->Seen3, *K->Seen4);
+				Report(TEXT("c0.card"), K->Why.IsEmpty(), K->Why.IsEmpty() ? Said : K->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.builder (C0-6): where the only Fabricator is. The fleet held, two Stockpile Pads ordered and their bills put on site; the
+		// hold released; when exactly one of them is claimed the other's card reads "WAITING FOR A BUILDER - the Fabricator is at the
+		// Stockpile Pad"; when the first is finished and the second claimed it reads "BUILDING - N% done".
+		{
+			const TSharedRef<FC0Main> B = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.builder setup"), [B, C0Load, C0Defs, C0Spot, C0Build]()
+			{
+				// Its own load of Early: c0.card's Habitat Bay is ready by now (its regolith and Struct on site) and the only Fabricator
+				// keeps a ready site to the end (C0-1), 300 sim-s of fabrication, so on the shared colony no pad is claimed inside the bound.
+				if (!C0Load(TEXT("Early"), 1.f, 1.0, B->Why)) { return; }
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				if (!Sim || !PC || !Defs) { B->Why += TEXT(" no sim, controller or definitions;"); return; }
+				Sim->SetFleetHold(true);
+				PC->SetSimSpeed(1.f);
+				int32 Fabricators = 0;
+				Defs->ForEachRobot([&](FName Name, const FRHRobotRow& Row) { if (Row.RobotClass == FName("Fabricator")) { Fabricators += Sim->GetFleetCount(Name); } });
+				if (Fabricators != 1) { B->Why += FString::Printf(TEXT(" premise: Early's fleet has %d Fabricator(s), not one;"), Fabricators); return; }
+				// A HOOK, named in the report: the Fabricator's battery is set full (Debug_SetChargeFrac), so a charge break (which gives
+				// the site back, as the charge path does) cannot fall inside the two pads' 120 sim-s of fabrication. The slot's own
+				// charge is read first and reported.
+				if (URHAgentSubsystem* Agents = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHAgentSubsystem>() : nullptr)
+				{
+					TArray<FRHRobotPanelRow> Rows;
+					Agents->CollectPanelRows(Rows);
+					for (const FRHRobotPanelRow& Row : Rows)
+					{
+						if (Row.RobotClass == FName("Fabricator")) { B->FabChargeAtLoad = Row.ChargeFrac; }
+					}
+					Agents->Debug_SetChargeFrac(FName("Fabricator"), 1.f);
+				}
+				else { B->Why += TEXT(" no agent subsystem;"); return; }
+				FString Why;
+				if (!C0Spot(*Sim, *Defs, FName("Stockpile"), 1, 1, { FVector(-800.0, -2700.0, 0.0), FVector(-1600.0, -1800.0, 0.0), FVector(0.0, -2400.0, 0.0), FVector(-2400.0, -800.0, 0.0) }, B->SpotA, Why))
+				{
+					B->Why += FString::Printf(TEXT(" premise: no spot for the first Stockpile Pad (%s);"), *Why);
+					return;
+				}
+				C0Build(*Sim, FName("Stockpile"), B->SpotA);
+				// The second: the first candidate that is legal with the first order in flight.
+				if (!C0Spot(*Sim, *Defs, FName("Stockpile"), 1, 1, { FVector(-1600.0, -1800.0, 0.0), FVector(0.0, -2400.0, 0.0), FVector(-2400.0, -800.0, 0.0), FVector(-800.0, 1800.0, 0.0), FVector(800.0, 1800.0, 0.0) }, B->SpotB, Why))
+				{
+					B->Why += FString::Printf(TEXT(" premise: no spot for the second Stockpile Pad (%s);"), *Why);
+					return;
+				}
+				C0Build(*Sim, FName("Stockpile"), B->SpotB);
+			}, 0.3f);
+			Runner.Push(TEXT("c0.builder read"), [B, C0SiteAt, C0CardLineStarting, C0Flat](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Deck.IsValid() || !B->Why.IsEmpty())
+				{
+					return true;
+				}
+				const auto ClaimedTo = [Sim](int32 SiteId)
+				{
+					for (const FRHTask& Task : Sim->GetTasks())
+					{
+						if (Task.Type == ERHTaskType::Build && Task.To.BuildingId == SiteId && Task.ClaimedBy.IsValid()) { return true; }
+					}
+					return false;
+				};
+				// For a failure's report: what the Fabricator is doing (its task type and charge) and which Build tasks are claimed.
+				const auto FabSaid = [Sim]()
+				{
+					FString Out;
+					if (const URHAgentSubsystem* Agents = Sim->GetWorld() ? Sim->GetWorld()->GetSubsystem<URHAgentSubsystem>() : nullptr)
+					{
+						TArray<FRHRobotPanelRow> Rows;
+						Agents->CollectPanelRows(Rows);
+						for (const FRHRobotPanelRow& Row : Rows)
+						{
+							if (Row.RobotClass == FName("Fabricator")) { Out += FString::Printf(TEXT("the Fabricator's task type %d (3 Build, 4 Charge), charge %.0f %%;"), (int32)Row.TaskType, Row.ChargeFrac * 100.f); }
+						}
+					}
+					Out += TEXT(" claimed Build tasks:");
+					bool bAny = false;
+					for (const FRHTask& Task : Sim->GetTasks())
+					{
+						if (Task.Type == ERHTaskType::Build && Task.ClaimedBy.IsValid()) { Out += FString::Printf(TEXT(" #%d"), Task.To.BuildingId); bAny = true; }
+					}
+					return bAny ? Out : Out + TEXT(" none");
+				};
+				if (B->Phase == 0)
+				{
+					const FRHBuildingInstance* P1 = C0SiteAt(*Sim, FName("Stockpile"), B->SpotA);
+					const FRHBuildingInstance* P2 = C0SiteAt(*Sim, FName("Stockpile"), B->SpotB);
+					if (!P1 || !P2 || P1 == P2)
+					{
+						if (bLast || Elapsed > 8.0) { B->Why += TEXT(" the two Stockpile Pad orders did not both land as sites;"); return true; }
+						return false;
+					}
+					B->SiteA = P1->Id;
+					B->SiteB = P2->Id;
+					for (const FRHBuildingInstance* Pad : { P1, P2 })
+					{
+						for (const TPair<FName, double>& L : Sim->GetSiteBill(*Pad))
+						{
+							Sim->Debug_AddSolidAt(Pad->Id, L.Key, L.Value - Pad->InputKg.FindRef(L.Key), false);
+						}
+					}
+					Sim->SetFleetHold(false);
+					PC->SetSimSpeed(8.f);
+					B->Phase = 1;
+					B->PhaseAt = Elapsed;
+					return false;
+				}
+				if (B->Phase == 1)
+				{
+					const bool bA = ClaimedTo(B->SiteA), bB = ClaimedTo(B->SiteB);
+					if (bA != bB)
+					{
+						B->Other = bA ? B->SiteB : B->SiteA;
+						PC->Debug_SelectBuilding(B->Other);
+						B->Phase = 2;
+						B->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed - B->PhaseAt > 20.0)
+					{
+						B->Why += FString::Printf(TEXT(" within 20 s at 8x of the hold's release the Fabricator claimed %s of the two ready pads (%s);"), bA ? TEXT("both") : TEXT("neither"), *FabSaid());
+						return true;
+					}
+					return false;
+				}
+				const FString Card = Deck->Debug_GetInspectText();
+				const int32 First = B->Other == B->SiteA ? B->SiteB : B->SiteA;
+				if (B->Phase == 2)
+				{
+					const FString Want = TEXT("WAITING FOR A BUILDER - the Fabricator is at the Stockpile Pad");
+					const FString Line = C0CardLineStarting(Card, TEXT("WAITING FOR A BUILDER"));
+					if (Line == Want) { B->Seen0 = Line; B->Phase = 3; B->PhaseAt = Elapsed; return false; }
+					if (bLast || Elapsed - B->PhaseAt > 6.0 || !ClaimedTo(First))
+					{
+						B->Why += FString::Printf(TEXT(" with the only Fabricator on pad #%d the other's card did not read '%s' (card: '%s'%s);"), First, *Want, *C0Flat(Card), ClaimedTo(First) ? TEXT("") : TEXT("; the first pad was done before the line was read"));
+						return true;
+					}
+					return false;
+				}
+				const FString Line = C0CardLineStarting(Card, TEXT("BUILDING - "));
+				if (!Line.IsEmpty() && Line.EndsWith(TEXT("% done")) && ClaimedTo(B->Other))
+				{
+					B->Seen1 = Line;
+					B->Phase = 4;
+					return true;
+				}
+				if (bLast || Elapsed - B->PhaseAt > 40.0) { B->Why += FString::Printf(TEXT(" within 40 s the second pad's card never read 'BUILDING - N%% done' with the Fabricator on it (card: '%s'; %s);"), *C0Flat(Card), *FabSaid()); return true; }
+				return false;
+			}, 0.2f, 85.f);
+			Runner.Do(TEXT("c0.builder"), [B]()
+			{
+				if (URHSimWorldSubsystem* Sim = GetSim()) { Sim->SetFleetHold(false); }
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); PC->Debug_SelectBuilding(0); }
+				const FString Said = FString::Printf(TEXT("Early (one Fabricator, its battery %.0f %% in the slot and set full by a hook), two ready Stockpile Pads #%d and #%d: with one claimed the other (#%d) read '%s'; with the first done and it claimed, '%s'"), B->FabChargeAtLoad * 100.f, B->SiteA, B->SiteB, B->Other, *B->Seen0, *B->Seen1);
+				Report(TEXT("c0.builder"), B->Why.IsEmpty(), B->Why.IsEmpty() ? Said : B->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.stall (C0-12): a site nothing can supply does not hold 60x, and the era band drops back the moment its material appears.
+		// Early again (the sites above can progress and would hold 60x themselves), lag 1 s, 8x. A prefab Habitat is ordered: 60x is
+		// refused for it while the Forge stands. The Forge is demolished by a Demolish order; once the test's own CanEnterEraMode reads
+		// clear, a 60x press engages 60x; 2 Habitat Segments are put in the Lander: the sim's own refusal alert arrives (the moment is
+		// timed by that alert), the clock is back at the agent speed, and for 4.0 s it never reads above 16 and no "60x resumed" is posted.
+		{
+			const TSharedRef<FC0Main> S = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.stall setup"), [S, C0Load, C0Defs, C0Spot, C0Build]()
+			{
+				if (!C0Load(TEXT("Early"), 8.f, 1.0, S->Why)) { return; }
+				URHSimWorldSubsystem* Sim = GetSim();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				if (!Defs) { S->Why += TEXT(" no definitions;"); return; }
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+				{
+					if (Bd.DefName == FName("Forge") && !Bd.bUnderConstruction && S->Forge == 0) { S->Forge = Bd.Id; }
+					if (Bd.DefName == FName("Lander")) { S->Lander = Bd.Id; }
+					if (Bd.bUnderConstruction) { S->Why += TEXT(" premise: the loaded Early already holds a site;"); }
+				}
+				FString Why;
+				if (S->Forge == 0 || S->Lander == 0 || !C0Spot(*Sim, *Defs, FName("Habitat"), 1, 1, { FVector(3000.0, 2500.0, 0.0), FVector(2000.0, 3500.0, 0.0), FVector(-2000.0, 2500.0, 0.0), FVector(3000.0, -2500.0, 0.0) }, S->SpotA, Why))
+				{
+					S->Why += FString::Printf(TEXT(" premise: no Forge, no Lander or no spot for a prefab Habitat on Early (%s);"), *Why);
+					return;
+				}
+				S->AlertHandle = Sim->OnAlert.AddLambda([S](const FString& Message)
+				{
+					if (Message.StartsWith(TEXT("60x unavailable")) && S->PressAt >= 0.0)
+					{
+						++S->Refusals;
+						if (S->AlertAt < 0.0 && S->At > 0.0) { S->AlertAt = FPlatformTime::Seconds(); S->AlertText = Message; }
+					}
+				});
+				S->RejectHandle = Sim->OnCommandRejected.AddLambda([S](const FRHCommand& Cmd, const FString& Reason) { ++S->RejectsSeen; S->RejectText = Cmd.Verb.ToString() + TEXT(": ") + Reason; });
+				C0Build(*Sim, FName("Habitat"), S->SpotA);
+			}, 0.3f);
+			Runner.Push(TEXT("c0.stall clear"), [S, C0SiteAt](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim || !S->Why.IsEmpty())
+				{
+					return true;
+				}
+				FString Why;
+				const bool bClear = Sim->CanEnterEraMode(Why);
+				if (S->Phase == 0)
+				{
+					const FRHBuildingInstance* Site = C0SiteAt(*Sim, FName("Habitat"), S->SpotA);
+					if (!Site)
+					{
+						if (bLast || Elapsed > 6.0 || S->RejectsSeen > 0) { S->Why += FString::Printf(TEXT(" the prefab Habitat order never landed as a site (%s);"), *S->RejectText); return true; }
+						return false;
+					}
+					S->SiteA = Site->Id;
+					S->Seen0 = Why;
+					S->bHeld = !bClear && Why == TEXT("the Habitat is waiting for Habitat Segment");
+					if (!S->bHeld) { S->Why += FString::Printf(TEXT(" premise: with the Forge standing the site did not hold 60x with its reason (clear %d, '%s');"), (int32)bClear, *Why); return true; }
+					FRHCommand Demo;
+					Demo.Verb = FName("Demolish");
+					Demo.Target = FName("Building");
+					Demo.Value = (double)S->Forge;
+					Sim->EnqueueCommand(Demo);
+					S->Phase = 1;
+					S->PhaseAt = Elapsed;
+					return false;
+				}
+				bool bForge = false, bSite = false;
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+				{
+					bForge |= Bd.Id == S->Forge;
+					bSite |= Bd.Id == S->SiteA && Bd.bUnderConstruction;
+				}
+				if (S->RejectsSeen > 0) { S->Why += FString::Printf(TEXT(" STOP: the sim refused an order (%s): Early's Forge was not demolished;"), *S->RejectText); return true; }
+				if (!bForge && bClear && bSite)
+				{
+					S->ClearAt = Elapsed - S->PhaseAt;
+					return true;
+				}
+				if (!bForge && !bClear && !S->OtherRefusals.Contains(Why)) { S->OtherRefusals += (S->OtherRefusals.IsEmpty() ? TEXT("") : TEXT(", ")) + Why; }
+				if (bLast || Elapsed - S->PhaseAt > 30.0)
+				{
+					S->Why += FString::Printf(TEXT(" premise: within 30 s of the Demolish order the era band was not clear with the site still under construction (Forge %s, site %s, refusals seen: %s);"),
+						bForge ? TEXT("standing") : TEXT("gone"), bSite ? TEXT("a site") : TEXT("gone"), *S->OtherRefusals);
+					return true;
+				}
+				return false;
+			}, 0.2f, 45.f);
+			Runner.Do(TEXT("c0.stall arm"), [S]() { S->PressAt = FPlatformTime::Seconds(); }, 0.f);
+			PushPress(TEXT("c0.stall 60x"), LocateButton(TEXT("60x"), 0, true));
+			Runner.Push(TEXT("c0.stall watch"), [S](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				const URHColonyVisualizerSubsystem* Viz = GetViz();
+				if (!Sim || !Viz || !S->Why.IsEmpty())
+				{
+					return true;
+				}
+				const float Clock = ClockSpeed();
+				if (S->Phase == 1)
+				{
+					// The press took: the clock reads 60. Then the segments appear.
+					if (FMath::IsNearlyEqual(Clock, 60.f))
+					{
+						S->ClockAtPress = Clock;
+						if (S->Refusals > 0) { S->Why += FString::Printf(TEXT(" %d refusal alert(s) before the segments appeared;"), S->Refusals); return true; }
+						Sim->Debug_AddSolidAt(S->Lander, FName("HabSegment"), 2.0, false);
+						S->At = FPlatformTime::Seconds();
+						S->Phase = 2;
+						return false;
+					}
+					if (bLast || Elapsed > 4.0) { S->Why += FString::Printf(TEXT(" the 60x press left the clock at %.0fx (the era band read clear %.1f s after the Demolish order);"), Clock, S->ClearAt); return true; }
+					return false;
+				}
+				const double Now = FPlatformTime::Seconds();
+				if (S->Phase == 2)
+				{
+					if (S->AlertAt >= 0.0)
+					{
+						S->ClockAtAlert = Clock; // the first poll after the alert: that frame's end
+						S->Phase = 3;
+						return false;
+					}
+					if (bLast || Now - S->At > 3.0) { S->Why += FString::Printf(TEXT(" no '60x unavailable' alert within 3 s of the segments appearing (clock %.0fx);"), Clock); return true; }
+					return false;
+				}
+				S->ClockMaxAfter = FMath::Max(S->ClockMaxAfter, Clock);
+				TArray<uint32> Ids;
+				TArray<FString> Texts;
+				TArray<float> Op;
+				TArray<int32> Cn;
+				Viz->Debug_GetAlertRows(Ids, Texts, Op, Cn);
+				for (const FString& Row : Texts) { S->Resumed += Row == URHColonyVisualizerSubsystem::SixtyResumedLine ? 1 : 0; }
+				Viz->Debug_GetAlertWaiting(Ids, Texts);
+				for (const FString& Row : Texts) { S->Resumed += Row == URHColonyVisualizerSubsystem::SixtyResumedLine ? 1 : 0; }
+				return bLast || Now - S->AlertAt >= 4.0;
+			}, 0.f, 16.f);
+			Runner.Do(TEXT("c0.stall"), [S]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				FString Why = S->Why;
+				const FString Want = TEXT("60x unavailable: the Habitat is waiting for Habitat Segment (staying at 8x)");
+				if (Why.IsEmpty())
+				{
+					if (S->AlertText != Want) { Why += FString::Printf(TEXT(" the alert read '%s', expected '%s';"), *S->AlertText, *Want); }
+					if (S->AlertAt - S->At > 3.0) { Why += FString::Printf(TEXT(" the alert came %.2f s after the segments appeared;"), S->AlertAt - S->At); }
+					if (!FMath::IsNearlyEqual(S->ClockAtAlert, 8.f)) { Why += FString::Printf(TEXT(" at the alert's frame end the clock read %.0fx, not the restored 8x;"), S->ClockAtAlert); }
+					if (S->ClockMaxAfter > 16.f) { Why += FString::Printf(TEXT(" the clock read %.0fx inside 4.0 s of the alert;"), S->ClockMaxAfter); }
+					if (S->Resumed > 0) { Why += FString::Printf(TEXT(" a '60x resumed' line was in the queue on %d poll(s) inside 4.0 s of the alert;"), S->Resumed); }
+					if (S->Refusals != 1) { Why += FString::Printf(TEXT(" %d refusal alert(s) since the press, not one;"), S->Refusals); }
+				}
+				if (Sim)
+				{
+					Sim->OnAlert.Remove(S->AlertHandle);
+					Sim->OnCommandRejected.Remove(S->RejectHandle);
+				}
+				if (ARHPlayerController* PC = GetPC()) { PC->SetSimSpeed(1.f); }
+				const FString Said = FString::Printf(TEXT("Early at 8x, prefab Habitat site #%d: with the Forge standing 60x was refused '%s'; the Forge demolished, the era band read clear %.1f s later with the site still a site (other refusals waited out: %s); a 60x press: the clock %.0fx; 2 Habitat Segments in the Lander: '%s' %.2f s later, the clock %.0fx at that frame's end and at most %.0fx for the next 4.0 s, %d '60x resumed' line(s), %d refusal alert(s) since the press"),
+					S->SiteA, *S->Seen0, S->ClearAt, S->OtherRefusals.IsEmpty() ? TEXT("none") : *S->OtherRefusals, S->ClockAtPress, *S->AlertText, S->AlertAt >= 0.0 ? S->AlertAt - S->At : -1.0, S->ClockAtAlert, S->ClockMaxAfter, S->Resumed, S->Refusals);
+				Report(TEXT("c0.stall"), Why.IsEmpty(), Why.IsEmpty() ? Said : Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.dig (C0-2): "Stop digging here" is the Dig tool on a deposit that is being dug. On the colony c0.stall left (Early: Regolith A
+		// designated, Ore A not), at 1x with the usual 45 s lag so the order is read in the uplink before it lands.
+		{
+			const TSharedRef<FC0Main> D = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.dig setup"), [D]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				if (!Sim || !PC) { D->Why += TEXT(" no sim or controller;"); return; }
+				PC->SetSimSpeed(1.f);
+				PC->CancelModes();
+				PC->Debug_SelectBuilding(0);
+				Sim->SetOrderLagSeconds(45.0);
+				bool bRegDug = false, bOreDug = true;
+				for (const FRHDepositState& Dp : Sim->GetDeposits())
+				{
+					if (Dp.RowName == FName("Regolith_A")) { D->RegCm = Dp.LocationCm; D->RegRow = Dp.RowName; bRegDug = Dp.bDesignated && Dp.bDiscovered; }
+					if (Dp.RowName == FName("Ore_A")) { D->OreCm = Dp.LocationCm; D->OreRow = Dp.RowName; bOreDug = Dp.bDesignated || !Dp.bDiscovered; }
+				}
+				if (!bRegDug || bOreDug) { D->Why += FString::Printf(TEXT(" premise: on Early Regolith A is %s and Ore A is %s;"), bRegDug ? TEXT("being dug") : TEXT("not being dug"), bOreDug ? TEXT("being dug or unknown") : TEXT("not being dug")); }
+				FrameCamera(D->RegCm, 0.3f);
+			}, 0.5f);
+			PushPress(TEXT("c0.dig tool"), LocateButton(TEXT("Dig Site"), 0, true));
+			PushPress(TEXT("c0.dig hover"), [D](FVector2D& OutPos) { return LocateWorld(D->RegCm)(OutPos); }, /*bPress*/ false);
+			Runner.Do(TEXT("c0.dig hint"), [D]()
+			{
+				const ARHPlayerController* PC = GetPC();
+				D->Seen0 = PC ? PC->GetHintText().ToString() : FString();
+				if (!PC || !PC->IsDigMode()) { D->Why += TEXT(" the Dig Site press did not arm the Dig tool;"); }
+				else if (!D->Seen0.StartsWith(TEXT("STOP DIGGING HERE: "))) { D->Why += FString::Printf(TEXT(" over Regolith A the hint read '%s', not 'STOP DIGGING HERE: ...';"), *D->Seen0); }
+			}, 0.2f);
+			PushPress(TEXT("c0.dig click"), [T, D](FVector2D& OutPos) { ++T->ExpectedWorld; return LocateWorld(D->RegCm)(OutPos); });
+			Runner.Do(TEXT("c0.dig order"), [D]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				const ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Deck.IsValid()) { return; }
+				const FRHCommand* Newest = Sim->GetUplinkQueue().Num() > 0 ? &Sim->GetUplinkQueue().Last() : nullptr;
+				D->Seen1 = Newest ? Newest->Verb.ToString() + TEXT(" ") + Newest->Target.ToString() : FString(TEXT("(no order)"));
+				D->Seen2 = PC->GetConfirmText().ToString();
+				D->Seen3 = Deck->Debug_GetUplinkText();
+				if (!Newest || Newest->Verb != FName("StopDig") || Newest->Target != D->RegRow) { D->Why += FString::Printf(TEXT(" the click on a deposit being dug queued '%s', not StopDig Regolith_A;"), *D->Seen1); }
+				if (!D->Seen2.StartsWith(TEXT("Stop digging transmitted: "))) { D->Why += FString::Printf(TEXT(" the confirm read '%s';"), *D->Seen2); }
+				if (!D->Seen3.Contains(TEXT("Stop digging "))) { D->Why += FString::Printf(TEXT(" the uplink rows read '%s';"), *D->Seen3); }
+				if (Newest && Newest->Verb == FName("StopDig")) { Sim->CancelUplinkCommand(Newest->CommandId); } // the landing is building.stopdig's
+				FrameCamera(D->OreCm, 0.3f);
+			}, 0.5f);
+			PushPress(TEXT("c0.dig tool again"), LocateButton(TEXT("Dig Site"), 0, true));
+			PushPress(TEXT("c0.dig hover ore"), [D](FVector2D& OutPos) { return LocateWorld(D->OreCm)(OutPos); }, /*bPress*/ false);
+			Runner.Do(TEXT("c0.dig"), [D]()
+			{
+				ARHPlayerController* PC = GetPC();
+				const FString Hint = PC ? PC->GetHintText().ToString() : FString();
+				if (!Hint.StartsWith(TEXT("DIG: "))) { D->Why += FString::Printf(TEXT(" over Ore A (not being dug) the hint read '%s', not 'DIG: ...';"), *Hint); }
+				if (PC) { PC->CancelModes(); }
+				FrameCamera(FVector::ZeroVector, 0.45f);
+				const FString Said = FString::Printf(TEXT("the Dig tool over Regolith A (being dug): '%s'; the click queued '%s', confirm '%s', uplink '%s' (cancelled: the landing is building.stopdig's); over Ore A: '%s'"),
+					*D->Seen0, *D->Seen1, *D->Seen2, *D->Seen3, *Hint);
+				Report(TEXT("c0.dig"), D->Why.IsEmpty(), D->Why.IsEmpty() ? Said : D->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.drillcard (C0-5): an Ice Drill standing off its deposit (a state an old save holds: S3's #19; placed here by the debug path,
+		// since today's placement refuses it) says so on its card; Early's own drill on Ice A does not.
+		{
+			const TSharedRef<FC0Main> I = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.drillcard setup"), [I]()
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				if (!Sim || !PC) { I->Why += TEXT(" no sim or controller;"); return; }
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+				{
+					if (Bd.DefName == FName("IceDrill") && !Bd.bUnderConstruction && Bd.AttachedDepositId != 0 && !Sim->IsExtractorOffDeposit(Bd.Id)) { I->SiteB = Bd.Id; }
+				}
+				Sim->Debug_PlaceInstant(FName("IceDrill"), FVector(-1300.0, -1600.0, 0.0)); // S3's spot: covered, no deposit within 12 m
+				for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+				{
+					if (Bd.DefName == FName("IceDrill") && FVector::Dist2D(Bd.LocationCm, FVector(-1300.0, -1600.0, 0.0)) < 1.0) { I->SiteA = Bd.Id; }
+				}
+				if (I->SiteA == 0 || I->SiteB == 0 || !Sim->IsExtractorOffDeposit(I->SiteA))
+				{
+					I->Why += FString::Printf(TEXT(" premise: the drill placed off the ice is #%d, Early's own drill on its ice is #%d;"), I->SiteA, I->SiteB);
+					return;
+				}
+				PC->Debug_SelectBuilding(I->SiteA);
+			}, 0.3f);
+			Runner.Push(TEXT("c0.drillcard read"), [I, C0CardLine, C0Flat](double Elapsed, bool bLast)
+			{
+				ARHPlayerController* PC = GetPC();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!PC || !Deck.IsValid() || !I->Why.IsEmpty())
+				{
+					return true;
+				}
+				const FString Card = Deck->Debug_GetInspectText();
+				if (I->Phase == 0)
+				{
+					const FString Want = TEXT("OFF ITS DEPOSIT - this Ice Drill will never produce. Demolish it: 50 % of its materials come back.");
+					if (C0CardLine(Card, Want))
+					{
+						I->Seen0 = Want;
+						PC->Debug_SelectBuilding(I->SiteB);
+						I->Phase = 1;
+						I->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed > 4.0) { I->Why += FString::Printf(TEXT(" the off-deposit drill's card never held '%s' (card: '%s');"), *Want, *C0Flat(Card)); return true; }
+					return false;
+				}
+				if (Elapsed - I->PhaseAt < 1.0)
+				{
+					return false; // the card's own poll (four times a second) has read the other drill
+				}
+				I->Seen1 = C0Flat(Card).Left(80);
+				if (Card.IsEmpty() || Card.Contains(TEXT("OFF ITS DEPOSIT"))) { I->Why += FString::Printf(TEXT(" the card of the drill on its ice reads '%s';"), *C0Flat(Card)); }
+				return true;
+			}, 0.2f, 8.f);
+			Runner.Do(TEXT("c0.drillcard"), [I]()
+			{
+				if (ARHPlayerController* PC = GetPC()) { PC->Debug_SelectBuilding(0); }
+				const FString Said = FString::Printf(TEXT("an Ice Drill placed off the ice (#%d): '%s'; Early's own drill on its ice (#%d): no such line ('%s...')"), I->SiteA, *I->Seen0, I->SiteB, *I->Seen1);
+				Report(TEXT("c0.drillcard"), I->Why.IsEmpty(), I->Why.IsEmpty() ? Said : I->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.guide (C0-9): the guide offers the surface after the vault. Vault, with floor -1 rated (by the debug path if the slot's vault
+		// is not rated yet: a hook, named in the docs entry): "THE SURFACE | Build on the surface", 18 / 20, the quota note exactly when a
+		// quota with a Struct line is open; a Habitat Bay ordered: "Bring the first crew" with the vault's beds and no surface clause; a
+		// rated habitat with a Living bay placed by hooks: the surface clause, and the two halves sum to the housing capacity.
+		{
+			const TSharedRef<FC0Main> U = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.guide setup"), [U, C0Load]()
+			{
+				if (!C0Load(TEXT("Vault"), 1.f, 1.0, U->Why)) { return; }
+				URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim->IsFloorRated(-1)) { Sim->Debug_ForceRateFloor(-1); U->bWaited = true; }
+				Sim->Debug_SetVaultRated(true);
+				if (Sim->GetPopulation() > 0) { U->Why += TEXT(" premise: the Vault slot already has a crew;"); }
+			}, 0.5f);
+			Runner.Push(TEXT("c0.guide read"), [U, C0Defs, C0Spot, C0Build, C0SiteAt, C0TextShown](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Defs || !Deck.IsValid() || !U->Why.IsEmpty())
+				{
+					return true;
+				}
+				const FString Guide = Deck->Debug_GetGuideText();
+				const int32 VaultBeds = Sim->GetVaultBeds(), SurfaceBeds = Sim->GetSurfaceBeds();
+				const FString VaultSays = FString::Printf(TEXT("Your vault has %d bed%s"), VaultBeds, VaultBeds == 1 ? TEXT("") : TEXT("s"));
+				if (U->Phase == 0)
+				{
+					const FString Start = TEXT("NEXT STEP  -  THE SURFACE | Build on the surface | ");
+					if (Guide.StartsWith(Start) && C0TextShown(TEXT("18 / 20")))
+					{
+						// The quota note, exactly when the test's own read says a quota with a Struct line is open.
+						U->bQuotaStruct = Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaProgress().Contains(FName("Struct"));
+						const bool bNote = Guide.EndsWith(TEXT(" Sites take Structural Materials from the same store the quota counts."));
+						if (bNote != U->bQuotaStruct) { U->Why += FString::Printf(TEXT(" the quota note is %s while a quota with a Struct line is %s (guide: '%s');"), bNote ? TEXT("shown") : TEXT("not shown"), U->bQuotaStruct ? TEXT("open") : TEXT("not open"), *Guide); return true; }
+						U->Seen0 = Guide.Left(Start.Len() + 40);
+						FString Why;
+						if (!C0Spot(*Sim, *Defs, FName("HabModule"), 1, 1, { FVector(2000.0, 2000.0, 0.0), FVector(3000.0, 2000.0, 0.0), FVector(2000.0, 3000.0, 0.0), FVector(-2000.0, 2000.0, 0.0), FVector(-2000.0, -2000.0, 0.0), FVector(2000.0, -2000.0, 0.0) }, U->SpotA, Why))
+						{
+							U->Why += FString::Printf(TEXT(" premise: no spot for a 1 x 1 Habitat Bay on Vault (%s);"), *Why);
+							return true;
+						}
+						C0Build(*Sim, FName("HabModule"), U->SpotA);
+						U->Phase = 1;
+						U->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed > 6.0) { U->Why += FString::Printf(TEXT(" with the vault rated the guide did not read '%s...' at 18 / 20 (guide: '%s');"), *Start, *Guide); return true; }
+					return false;
+				}
+				if (U->Phase == 1)
+				{
+					const FString Start = TEXT("NEXT STEP  -  THE CREW | Bring the first crew | ") + VaultSays + TEXT(". ");
+					if (C0SiteAt(*Sim, FName("HabModule"), U->SpotA) && Guide.StartsWith(Start) && !Guide.Contains(TEXT("surface habitats")))
+					{
+						U->VaultBeds = VaultBeds;
+						U->Seen1 = Guide.Left(Start.Len());
+						// A rated 2 x 2 Habitat Bay with Living bays, by hooks: the shell, a filter in its first bay, its air, two bays zoned.
+						FString Why;
+						if (!C0Spot(*Sim, *Defs, FName("HabModule"), 2, 2, { FVector(-2500.0, 2500.0, 0.0), FVector(-2500.0, -2500.0, 0.0), FVector(2500.0, -2500.0, 0.0), FVector(4500.0, 2500.0, 0.0), FVector(-4500.0, 2500.0, 0.0) }, U->SpotB, Why, /*bMaterials*/ false))
+						{
+							U->Why += FString::Printf(TEXT(" premise: no spot for a 2 x 2 Habitat Bay on Vault (%s);"), *Why);
+							return true;
+						}
+						Sim->Debug_PlaceInstant(FName("HabModule"), U->SpotB, 0, 2, 2);
+						for (const FRHBuildingInstance& Bd : Sim->GetBuildings())
+						{
+							if (Bd.DefName == FName("HabModule") && !Bd.bUnderConstruction && FVector::Dist2D(Bd.LocationCm, U->SpotB) < 1.0) { U->Hab = Bd.Id; }
+						}
+						const FRHBuildingInstance* Hab = Sim->GetBuildings().FindByPredicate([U](const FRHBuildingInstance& Bd) { return Bd.Id == U->Hab; });
+						if (!Hab) { U->Why += TEXT(" the 2 x 2 Habitat Bay was not placed;"); return true; }
+						Sim->Debug_PlaceInstant(FName("AirFilter"), Sim->GetBayCentreCm(*Hab, 0));
+						FString R;
+						Sim->DesignateBay(U->Hab, 2, FName("LivingQuarters"), R);
+						Sim->DesignateBay(U->Hab, 3, FName("LivingQuarters"), R);
+						U->Phase = 2;
+						U->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed - U->PhaseAt > 8.0) { U->Why += FString::Printf(TEXT(" with a Habitat Bay site placed the guide did not read '%s' with no surface clause (guide: '%s');"), *Start, *Guide); return true; }
+					return false;
+				}
+				// Phase 2: the habitat rates (its air and the bank kept up by hooks), then the surface clause.
+				Sim->Debug_SetBatteryWh(1.0e9);
+				Sim->Debug_SetHabO2Kg(U->Hab, Sim->GetHabNetworkO2RequiredKg(U->Hab));
+				const FString Start = FString::Printf(TEXT("NEXT STEP  -  THE CREW | Bring the first crew | %s and your surface habitats have %d more. "), *VaultSays, SurfaceBeds);
+				if (Sim->IsHabRated(U->Hab) && SurfaceBeds > 0 && Guide.StartsWith(Start))
+				{
+					U->SurfaceBeds = SurfaceBeds;
+					U->Seen2 = Guide.Left(Start.Len());
+					if (VaultBeds != U->VaultBeds || Sim->GetHousingCapacity() != VaultBeds + SurfaceBeds)
+					{
+						U->Why += FString::Printf(TEXT(" the vault's %d beds and the surface's %d do not sum to the housing capacity %d (the vault read %d before);"), VaultBeds, SurfaceBeds, Sim->GetHousingCapacity(), U->VaultBeds);
+					}
+					U->Phase = 3;
+					return true;
+				}
+				if (bLast || Elapsed - U->PhaseAt > 15.0)
+				{
+					U->Why += FString::Printf(TEXT(" with a habitat placed by hooks (rated %d, %d surface bed(s)) the guide did not read '%s' (guide: '%s');"), (int32)Sim->IsHabRated(U->Hab), SurfaceBeds, *Start, *Guide);
+					return true;
+				}
+				return false;
+			}, 0.2f, 40.f);
+			Runner.Do(TEXT("c0.guide"), [U]()
+			{
+				const FString Said = FString::Printf(TEXT("Vault, floor -1 rated%s: '%s...' at 18 / 20, the quota note %s (a quota with a Struct line %s); a Habitat Bay site: '%s'; a rated habitat placed by hooks: '%s' (%d + %d = the housing capacity)"),
+					U->bWaited ? TEXT(" by the debug path") : TEXT(""), *U->Seen0, U->bQuotaStruct ? TEXT("shown") : TEXT("not shown"), U->bQuotaStruct ? TEXT("is open") : TEXT("is not open"), *U->Seen1, *U->Seen2, U->VaultBeds, U->SurfaceBeds);
+				Report(TEXT("c0.guide"), U->Why.IsEmpty(), U->Why.IsEmpty() ? Said : U->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
+		// c0.lastword (C0-9): the last step ends with the offer of the surface while nothing is built there. Vault again, rated the same
+		// way, food in store (a hook, so the step's food warning does not take the body) and one colonist: "Keep them well" ends "Next:
+		// build on the surface ..."; a Habitat Bay placed: it ends "That's the first hour ...".
+		{
+			const TSharedRef<FC0Main> L = MakeShared<FC0Main>();
+			Runner.Do(TEXT("c0.lastword setup"), [L, C0Load]()
+			{
+				if (!C0Load(TEXT("Vault"), 1.f, 1.0, L->Why)) { return; }
+				URHSimWorldSubsystem* Sim = GetSim();
+				if (!Sim->IsFloorRated(-1)) { Sim->Debug_ForceRateFloor(-1); }
+				Sim->Debug_SetVaultRated(true);
+				Sim->AddStock(FName("Food"), 2000.0);
+				const int32 Housed = Sim->Debug_AddColonists(1);
+				if (Housed != 1) { L->Why += FString::Printf(TEXT(" premise: %d colonist(s) housed in the rated vault, not one;"), Housed); }
+			}, 0.5f);
+			Runner.Push(TEXT("c0.lastword read"), [L, C0Defs, C0Spot](double Elapsed, bool bLast)
+			{
+				URHSimWorldSubsystem* Sim = GetSim();
+				ARHPlayerController* PC = GetPC();
+				const URHDefinitionsSubsystem* Defs = C0Defs();
+				const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+				if (!Sim || !PC || !Defs || !Deck.IsValid() || !L->Why.IsEmpty())
+				{
+					return true;
+				}
+				const FString Guide = Deck->Debug_GetGuideText();
+				const FString Start = TEXT("NEXT STEP  -  THE CREW | Keep them well | ");
+				const bool bWarning = Guide.Contains(TEXT("Food runs out")) || Guide.Contains(TEXT("water is going stale"));
+				if (L->Phase == 0)
+				{
+					const FString End = TEXT("Next: build on the surface - BUILD > Habitat > Habitat Bay.");
+					if (Guide.StartsWith(Start) && Guide.EndsWith(End))
+					{
+						L->Seen0 = End;
+						FString Why;
+						if (!C0Spot(*Sim, *Defs, FName("HabModule"), 1, 1, { FVector(2000.0, 2000.0, 0.0), FVector(3000.0, 2000.0, 0.0), FVector(2000.0, 3000.0, 0.0), FVector(-2000.0, 2000.0, 0.0), FVector(-2000.0, -2000.0, 0.0), FVector(2000.0, -2000.0, 0.0) }, L->SpotA, Why, /*bMaterials*/ false))
+						{
+							L->Why += FString::Printf(TEXT(" premise: no spot for a Habitat Bay on Vault (%s);"), *Why);
+							return true;
+						}
+						Sim->Debug_PlaceInstant(FName("HabModule"), L->SpotA);
+						L->Phase = 1;
+						L->PhaseAt = Elapsed;
+						return false;
+					}
+					if (bLast || Elapsed > 8.0)
+					{
+						L->Why += bWarning ? FString::Printf(TEXT(" premise: the body took a food or water warning (guide: '%s');"), *Guide)
+							: FString::Printf(TEXT(" with one colonist and no surface shell the guide did not read '%s' ending '%s' (guide: '%s');"), *Start, *End, *Guide);
+						return true;
+					}
+					return false;
+				}
+				const FString End = TEXT("That's the first hour - hide this guide any time.");
+				if (Guide.StartsWith(Start) && Guide.EndsWith(End))
+				{
+					L->Seen1 = End;
+					L->Phase = 2;
+					return true;
+				}
+				if (bLast || Elapsed - L->PhaseAt > 6.0) { L->Why += FString::Printf(TEXT(" with a Habitat Bay standing the last step did not end '%s' (guide: '%s');"), *End, *Guide); return true; }
+				return false;
+			}, 0.2f, 20.f);
+			Runner.Do(TEXT("c0.lastword"), [L]()
+			{
+				const FString Said = FString::Printf(TEXT("Vault rated, food in store, one colonist: 'Keep them well' ends '%s'; with a Habitat Bay standing it ends '%s'"), *L->Seen0, *L->Seen1);
+				Report(TEXT("c0.lastword"), L->Why.IsEmpty(), L->Why.IsEmpty() ? Said : L->Why + TEXT(" | ") + Said);
+			}, 0.3f);
+		}
+
 		// ---- the verdict
 		Runner.Do(TEXT("final"), [T]()
 		{
@@ -8758,6 +9880,42 @@ namespace
 		FFlashCold Cold[2];
 	};
 
+	// C0-13: flash.toast's own record. The toast's place on every frame it is shown (its centre X, top Y and height in the deck's local
+	// space, against the first frame's), its rectangle against every laid-out alert row's, the event banner's and the right column's
+	// left edge, the laid-out row counts seen and how often the stack went one way and back inside 3 s (a premise: the step must make
+	// the product do what the open finding described).
+	struct FC0FlashToast
+	{
+		int32 Stage = 0, Frames = 0, ShownFrames = 0, NotShownFrames = 0, NotPaintedFrames = 0, Moved = 0, Overlaps = 0, PastColumn = 0;
+		bool bFirst = false;
+		FVector2D FirstCentreTop = FVector2D::ZeroVector;
+		double FirstHeight = 0.0, FirstWidth = 0.0, WidestToast = 0.0, ColumnLeft = -1.0, MinRowHeight = 1.0e9, MaxRowHeight = 0.0;
+		FString MovedSaid, OverlapSaid, ColumnSaid;
+		bool RowsSeen[4] = { false, false, false, false };
+		int32 LaidPrev = -1, StackDir = 0, Reversals = 0, BannerFrames = 0;
+		// c0a_b: the event banner's own stage (the first pass's banner clause read no frame: no event stands on the Late colony). The frames
+		// the banner was laid out on, the most alert rows beside it, the frames among them on which the toast was off its first place, when
+		// the stage began, and the toast's right edge in absolute pixels (the unit the right column's left edge is read in).
+		int32 BannerRowsMax = 0, BannerMoved = 0;
+		double BannerAt = -1.0, MaxAbsRight = 0.0, StormFromSol = 0.0, StormToSol = 0.0;
+		// c0a_c: the slot stays open when the toast goes. The long toast leaves on its own hold at ToastEndsAt (seconds from T0; the frames
+		// within 0.25 s of it are not judged either way). On every frame the event banner is laid out, its top and the first laid-out alert
+		// row's top (absolute px) are kept apart for the frames with the toast ([0]) and the frames after it has gone ([1]): the rule is that
+		// both sets hold one value, so nothing under the slot moves when a toast comes or goes.
+		double ToastEndsAt = -1.0;
+		int32 ShownAfterEnd = 0;
+		int32 BanN[2] = { 0, 0 }, RowN[2] = { 0, 0 };
+		double BanTopMin[2] = { 1.0e9, 1.0e9 }, BanTopMax[2] = { -1.0e9, -1.0e9 }, RowTopMin[2] = { 1.0e9, 1.0e9 }, RowTopMax[2] = { -1.0e9, -1.0e9 };
+		double StackChangeS = -1.0e9;
+		TArray<FString> ReversalGaps;
+		// The fade case: line C's entry, its opacity last frame, and whether it has begun to fall.
+		uint32 FadeId = 0;
+		float FadeLast = -1.f;
+		bool bFadeFalling = false;
+		double T0 = -1.0, FiredDAt = -1.0;
+		FString Problem;
+	};
+
 	// G2b (B1, B2): flash.alerts' own record: the alert entries by id (their fades and texts), the LOG's lines by id, the step's own firings.
 	struct FG2bFlashAlerts
 	{
@@ -8783,6 +9941,7 @@ namespace
 		// r2: the laid-out row count last frame, the way it last changed (+1 up, -1 down) and when, and the closest two changes.
 		int32 LaidPrev = -1, StackDir = 0;
 		double StackChangeS = -1.0e9, StackClosest = 1.0e9;
+		int32 StackReversals = 0;          // C0-13: times the laid-out rows went one way and back inside 3 s (information, no longer judged)
 	};
 
 	// G2b (B6, POWER C): flash.power's own record: the tile and the fold header against the test's own residual (onset = the last step's end
@@ -8818,6 +9977,7 @@ namespace
 		TSharedPtr<FG2bFlashAlerts> G2bAlerts; // G2b: flash.alerts' record, while it runs
 		TSharedPtr<FG2bFlashPower> G2bPower;   // G2b: flash.power's record, while it runs
 		TSharedPtr<FG2bFlashRestart> G2bRestart; // G2b r2: flash.power.restart's record, while it runs
+		TSharedPtr<FC0FlashToast> C0Toast;       // C0-13: flash.toast's record, while it runs
 		FString Bucket = TEXT("setup");
 		double QuietUntilS = 0.0;
 		TMap<FString, FFlashElem> Elems;
@@ -9354,12 +10514,15 @@ namespace
 		const int32 N = Viz.Debug_GetAlertRows(Ids, Texts, Op, Cn);
 		A.MaxRows = FMath::Max(A.MaxRows, N);
 		// r1: the rows the banner lays out (the row widgets' own visibility): a row collapsed on the frame the queue turns over (a line
-		// removed, the next admitted at opacity 0) and laid out again on the next makes the toast under the banner jump. r2: judged by two
-		// rules of its own. (s1) Every row an entry holds is laid out, on every frame (the collapse itself). (s2) The row count never goes
-		// one way and back the other inside 3 s (a blink of the stack: 3 -> 1 -> 3, or a row added and taken away). Round 1 put the count
-		// under the generic R1 (any two changes inside 3 s), on the premise that the drain's changes are 6 s and more apart. Under the r2
-		// hold rule that premise is false: two lines admitted half a second apart (seven and eight here) keep their full hold and so leave
-		// half a second apart, the stack draining 3 -> 2 -> 1 one way, which is two lines each fading once, not a blink.
+		// removed, the next admitted at opacity 0) and laid out again on the next made the stack one row shorter for that frame. (s1) Every
+		// row an entry holds is laid out, on every frame.
+		// C0-13 (G2B-R3 A, 2026-11-10): rule s2 of round 2 ("the row count never goes one way and back the other inside 3 s") is no longer
+		// a violation. Nothing in the product enforced it: in ordinary play a lone line, a second line 13 s later and the first leaving at
+		// 15.5 s give 1 -> 2 -> 1 rows inside 2.5 s, and this step passed only because its own firings kept the stack full. What the product
+		// guarantees instead, and what is judged: each line fades in once, keeps its hold and fades out once (the entries' rules below);
+		// every row an entry holds is laid out (s1); and the reward toast's place is the same on every frame whatever the row count, which
+		// is flash.toast's rule, with the toast in a fixed slot above the rows. The reversals and the closest gap are still counted and
+		// printed, as information.
 		const int32 Laid = Deck.Debug_GetAlertRowsLaidOut();
 		if (Laid != N)
 		{
@@ -9377,11 +10540,7 @@ namespace
 			A.StackClosest = FMath::Min(A.StackClosest, Gap);
 			if (A.StackDir != 0 && Dir != A.StackDir && Gap < 3.0)
 			{
-				++Bk.Violations;
-				if (Bk.ViolationSaid.Num() < 8)
-				{
-					Bk.ViolationSaid.Add(FString::Printf(TEXT("R1 the banner's laid-out rows went from %d to %d at %.2f s, %.2f s after going the other way"), A.LaidPrev, Laid, NowS - GFlashT0, Gap));
-				}
+				++A.StackReversals; // C0-13: information only (see the note above); flash.toast holds the rule that matters
 			}
 			A.StackDir = Dir;
 			A.StackChangeS = NowS;
@@ -9609,6 +10768,143 @@ namespace
 		}
 	}
 
+	// C0-13: flash.toast's per-frame sample (its own bucket, "toast"). The rule: on every frame the toast is shown its centre X and top Y
+	// equal the first frame's to 0.5 px and its height equals the first frame's; its rectangle meets no laid-out alert row's and not the
+	// event banner's; its right edge is left of the right column. The rest are premises the step reports.
+	void FlashSampleToast(FC0FlashToast& A, const URHColonyVisualizerSubsystem& Viz, const SRHCommandDeck& Deck, double NowS)
+	{
+		++A.Frames;
+		FVector2D CentreTop, Size;
+		bool bShown = false;
+		FSlateRect Abs;
+		const bool bPainted = Deck.Debug_GetToastPlace(CentreTop, Size, bShown, &Abs);
+		const int32 Laid = Deck.Debug_GetAlertRowsLaidOut();
+		if (Laid >= 0 && Laid <= 3)
+		{
+			A.RowsSeen[Laid] = true;
+		}
+		if (A.LaidPrev >= 0 && Laid != A.LaidPrev)
+		{
+			const int32 Dir = Laid > A.LaidPrev ? 1 : -1;
+			const double Gap = NowS - A.StackChangeS;
+			if (A.StackDir != 0 && Dir != A.StackDir && Gap < 3.0)
+			{
+				++A.Reversals;
+				A.ReversalGaps.Add(FString::Printf(TEXT("%d -> %d at %.2f s, %.2f s after going the other way"), A.LaidPrev, Laid, NowS - A.T0, Gap));
+			}
+			A.StackDir = Dir;
+			A.StackChangeS = NowS;
+		}
+		A.LaidPrev = Laid;
+		// The fade case's trigger: line C's entry has begun to fall.
+		if (A.FadeId != 0)
+		{
+			TArray<uint32> Ids;
+			TArray<FString> Texts;
+			TArray<float> Op;
+			TArray<int32> Cn;
+			Viz.Debug_GetAlertRows(Ids, Texts, Op, Cn);
+			for (int32 i = 0; i < Ids.Num(); ++i)
+			{
+				if (Ids[i] == A.FadeId)
+				{
+					A.bFadeFalling |= A.FadeLast >= 0.f && Op[i] < A.FadeLast - 1.e-4f;
+					A.FadeLast = Op[i];
+				}
+			}
+		}
+		// c0a_c: the banner's top and the first laid-out row's top, with the toast and after it has gone (see the record).
+		const double SinceT0 = NowS - A.T0;
+		const bool bBeforeEnd = A.ToastEndsAt < 0.0 || SinceT0 < A.ToastEndsAt - 0.25;
+		const bool bAfterEnd = A.ToastEndsAt >= 0.0 && SinceT0 > A.ToastEndsAt + 0.25;
+		{
+			FSlateRect BannerNow;
+			const int32 Set = (bShown && bPainted && bBeforeEnd) ? 0 : (!bShown && bAfterEnd) ? 1 : -1;
+			if (Set >= 0 && Deck.Debug_GetEventBannerRect(BannerNow))
+			{
+				++A.BanN[Set];
+				A.BanTopMin[Set] = FMath::Min(A.BanTopMin[Set], (double)BannerNow.Top);
+				A.BanTopMax[Set] = FMath::Max(A.BanTopMax[Set], (double)BannerNow.Top);
+				for (int32 Row = 0; Row < 3; ++Row)
+				{
+					FSlateRect RowNow;
+					if (Deck.Debug_GetAlertRowRect(Row, RowNow))
+					{
+						++A.RowN[Set];
+						A.RowTopMin[Set] = FMath::Min(A.RowTopMin[Set], (double)RowNow.Top);
+						A.RowTopMax[Set] = FMath::Max(A.RowTopMax[Set], (double)RowNow.Top);
+						break; // the first laid-out row only
+					}
+				}
+			}
+		}
+		if (!bShown)
+		{
+			A.NotShownFrames += bBeforeEnd ? 1 : 0; // after its own hold the toast is meant to be gone
+			return;
+		}
+		A.ShownAfterEnd += bAfterEnd ? 1 : 0;
+		if (!bPainted)
+		{
+			++A.NotPaintedFrames; // shown but not yet painted (its first frame): no geometry to judge
+			return;
+		}
+		++A.ShownFrames;
+		A.WidestToast = FMath::Max(A.WidestToast, Size.X);
+		A.MaxAbsRight = FMath::Max(A.MaxAbsRight, (double)Abs.Right);
+		bool bOffPlace = false;
+		if (!A.bFirst)
+		{
+			A.bFirst = true;
+			A.FirstCentreTop = CentreTop;
+			A.FirstHeight = Size.Y;
+			A.FirstWidth = Size.X;
+		}
+		else if (FMath::Abs(CentreTop.X - A.FirstCentreTop.X) > 0.5 || FMath::Abs(CentreTop.Y - A.FirstCentreTop.Y) > 0.5 || FMath::Abs(Size.Y - A.FirstHeight) > 0.5)
+		{
+			bOffPlace = true;
+			++A.Moved;
+			if (A.MovedSaid.IsEmpty())
+			{
+				A.MovedSaid = FString::Printf(TEXT("at %.2f s with %d row(s): centre X %.1f, top %.1f, height %.1f (first frame %.1f, %.1f, %.1f)"),
+					NowS - A.T0, Laid, CentreTop.X, CentreTop.Y, Size.Y, A.FirstCentreTop.X, A.FirstCentreTop.Y, A.FirstHeight);
+			}
+		}
+		const auto Meets = [&Abs](const FSlateRect& R) { return Abs.Left < R.Right && R.Left < Abs.Right && Abs.Top < R.Bottom && R.Top < Abs.Bottom; };
+		for (int32 Row = 0; Row < 3; ++Row)
+		{
+			FSlateRect RowRect;
+			if (Deck.Debug_GetAlertRowRect(Row, RowRect))
+			{
+				const double H = RowRect.Bottom - RowRect.Top;
+				A.MinRowHeight = FMath::Min(A.MinRowHeight, H);
+				A.MaxRowHeight = FMath::Max(A.MaxRowHeight, H);
+				if (Meets(RowRect))
+				{
+					++A.Overlaps;
+					if (A.OverlapSaid.IsEmpty()) { A.OverlapSaid = FString::Printf(TEXT("alert row %d at %.2f s"), Row, NowS - A.T0); }
+				}
+			}
+		}
+		FSlateRect Banner;
+		if (Deck.Debug_GetEventBannerRect(Banner))
+		{
+			++A.BannerFrames;
+			A.BannerRowsMax = FMath::Max(A.BannerRowsMax, Laid);
+			A.BannerMoved += bOffPlace ? 1 : 0;
+			if (Meets(Banner))
+			{
+				++A.Overlaps;
+				if (A.OverlapSaid.IsEmpty()) { A.OverlapSaid = FString::Printf(TEXT("the event banner at %.2f s"), NowS - A.T0); }
+			}
+		}
+		if (A.ColumnLeft >= 0.0 && Abs.Right >= A.ColumnLeft)
+		{
+			++A.PastColumn;
+			if (A.ColumnSaid.IsEmpty()) { A.ColumnSaid = FString::Printf(TEXT("right edge %.0f against the column's left edge %.0f at %.2f s"), Abs.Right, A.ColumnLeft, NowS - A.T0); }
+		}
+	}
+
 	void FlashSample(FFlashProbe& P)
 	{
 		UWorld* W = FindGameWorld();
@@ -9811,6 +11107,10 @@ namespace
 		if (P.G2bRestart.IsValid() && P.Bucket == TEXT("power.restart"))
 		{
 			FlashSampleRestart(*P.G2bRestart, *Deck, *Sim);
+		}
+		if (P.C0Toast.IsValid() && P.Bucket == TEXT("toast") && P.C0Toast->T0 >= 0.0)
+		{
+			FlashSampleToast(*P.C0Toast, *Colony, *Deck, NowS);
 		}
 	}
 
@@ -10680,9 +11980,10 @@ namespace
 		// (Late): four lines in one frame, a repeat of line one at 0.5 s, two more at 1.0 s, 8x from 2.0 s, line one again while its entry is
 		// leaving (the first frame its fade out is seen, from 6.0 s, at 7.0 s at the latest: the repeat must be a new entry), three more at
 		// 8.0 s; then every frame until the queue is empty. r1: also the rows the banner lays out and R2 at each entry's first and last
-		// frame. r2: the laid-out rows by their own two rules (every row an entry holds is laid out; the count never goes one way and back
-		// the other inside 3 s: see FlashSampleAlerts), since under the r2 hold rule lines seven and eight leave half a second apart at
-		// their full hold (the hand trace is in the docs entry).
+		// frame. r2: the laid-out rows by their own rule (every row an entry holds is laid out: see FlashSampleAlerts), since under the r2
+		// hold rule lines seven and eight leave half a second apart at their full hold (the hand trace is in the docs entry). C0a
+		// (C0-13): the row count going one way and back inside 3 s is information only here now (nothing in the product forbids it);
+		// what the player was promised is the toast's fixed place, which flash.toast holds.
 		const TSharedRef<FG2bFlashAlerts> FA = MakeShared<FG2bFlashAlerts>();
 		Runner.Do(TEXT("flash.alerts setup"), [P, FA]()
 		{
@@ -10834,8 +12135,8 @@ namespace
 			}
 			if (Logged != FA->Fired) { Why += FString::Printf(TEXT(" the LOG holds %d of the %d lines fired;"), Logged, FA->Fired); }
 			if (FA->FadeFrames8x == 0) { Why += TEXT(" premise: no frame of a fade was sampled at 8x;"); }
-			const FString Said = FString::Printf(TEXT("%d frames; %d entries; at most %d rows; the banner's laid-out rows changed %d time(s), the closest two %s apart, none back the other way inside 3 s; the largest per-frame opacity step %.1f %%%s%s; the closest two changes of one element %s%s%s; line one merged at 0.5 s (its words changed %d time(s)); at %.2f s (its entry %s) the repeat went to %s; %d line(s) fired, %d in the LOG (and %d of the colony's own); %d fade frame(s) at 8x"),
-				FA->Frames, FA->LastOpacity.Num(), FA->MaxRows, FA->StackChanges, FA->StackClosest < 1.0e8 ? *FString::Printf(TEXT("%.2f s"), FA->StackClosest) : TEXT("no two"),
+			const FString Said = FString::Printf(TEXT("%d frames; %d entries; at most %d rows; the banner's laid-out rows changed %d time(s), the closest two %s apart, %d time(s) one way and back inside 3 s (information since C0-13: the toast's place is flash.toast's rule); the largest per-frame opacity step %.1f %%%s%s; the closest two changes of one element %s%s%s; line one merged at 0.5 s (its words changed %d time(s)); at %.2f s (its entry %s) the repeat went to %s; %d line(s) fired, %d in the LOG (and %d of the colony's own); %d fade frame(s) at 8x"),
+				FA->Frames, FA->LastOpacity.Num(), FA->MaxRows, FA->StackChanges, FA->StackClosest < 1.0e8 ? *FString::Printf(TEXT("%.2f s"), FA->StackClosest) : TEXT("no two"), FA->StackReversals,
 				Bk.LargestStepPct, Bk.LargestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.LargestSaid,
 				Bk.Closest < 1.0e8 ? *FString::Printf(TEXT("%.2f s apart"), Bk.Closest) : TEXT("none"), Bk.ClosestSaid.IsEmpty() ? TEXT("") : TEXT(" - "), *Bk.ClosestSaid,
 				FA->OneId != 0 ? FA->TextChanges.FindRef(FA->OneId) : -1, FA->RepeatAt, FA->bOneThereAtRepeat ? TEXT("still leaving") : TEXT("gone"),
@@ -10847,6 +12148,206 @@ namespace
 			{
 				Deck->SetFoldOpen(SRHCommandDeck::EFold::Log, false);
 			}
+		}, 0.f);
+
+		// ---- C0a (2026-11-10): flash.toast (C0-13) - the reward toast keeps its place whatever the alert rows do. On the colony
+		// flash.alerts left (Late), 1x, the queue cleared, a bucket of its own; the toast raised first (120 s), then, in real seconds from
+		// the arming: 1.0 line A alone (rows 0 -> 1); 14.0 line B (1 -> 2), A leaving on its full hold half a second and more later (2 -> 1
+		// inside 3 s of the stack growing: the open finding's own trace); 31.0 line C alone; line D on the first frame C's opacity is seen
+		// to fall, at 46.4 at the latest (1 -> 2, then C removed: 2 -> 1 inside half a second); 63.0 a second toast of 200 characters and
+		// three lines in one frame, one of them 270 characters (it wraps): 3 rows, drained by 81.0. NOT saturated: the stack is 0, 1 or 2
+		// rows for the first minute. c0a_b: 81.0 THE EVENT BANNER. The banner is laid out only while the sim has an active event, and the
+		// Late colony (sol 62) is past the authored schedule's one storm (sols 12 to 15, the cycle knob off), so the first pass's banner
+		// clause read no frame. The step now sets the colony's clock into that storm at the same time of day (Debug_SetSimSeconds, the hook
+		// speed.wish.onset uses; flash.power loads Late afresh after this step): the banner is laid out from the next paint and the sim's
+		// own onset fires its alert line beside it, as a storm's onset does in play. Choreography only: no bound of the rule changed.
+		// c0a_c: 90.0 THE TOAST GOES. One more line (H) at 90.0; the long toast leaves on its own 30 s hold at about 93.0, the way every
+		// toast does, with the banner and at least one row standing; the end at 97.0. The added rule: the event banner's top and the first
+		// laid-out alert row's top are the same (0.5 px) on the frames with the toast and on the frames after it has gone (the slot stays
+		// open; a pill that collapsed would close it and the banner and rows would step up). The rule and the premises are
+		// FlashSampleToast's and the report's below.
+		const TSharedRef<FC0FlashToast> FT = MakeShared<FC0FlashToast>();
+		Runner.Do(TEXT("flash.toast setup"), [P, FT]()
+		{
+			ARHPlayerController* PC = GetPC();
+			URHColonyVisualizerSubsystem* Viz = GetViz();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			P->Bucket = TEXT("toast");
+			P->Reset();
+			if (!PC || !Viz || !Deck.IsValid())
+			{
+				FT->Problem = TEXT(" no player controller, colony visualizer or deck;");
+				return;
+			}
+			Viz->Debug_ClearAlerts();
+			PC->SetSimSpeed(1.f);
+			Deck->Debug_SetToast(TEXT("C0 flash toast"), 120.0);
+			TArray<FFoundWidget> Scrolls;
+			GatherInWindow(TEXT("SScrollBox"), Scrolls);
+			if (const FFoundWidget* Column = FindTagged(Scrolls, TEXT("RH.RightColumn")))
+			{
+				FT->ColumnLeft = Column->TopLeft.X;
+			}
+			P->C0Toast = FT;
+		}, 0.5f);
+		Runner.Push(TEXT("flash.toast fire"), [FT](double, bool)
+		{
+			URHSimWorldSubsystem* Sim = GetSim();
+			ARHPlayerController* PC = GetPC();
+			const URHColonyVisualizerSubsystem* Viz = GetViz();
+			const TSharedPtr<SRHCommandDeck> Deck = PC ? PC->GetDeck() : TSharedPtr<SRHCommandDeck>();
+			if (!Sim || !Viz || !Deck.IsValid() || !FT->Problem.IsEmpty())
+			{
+				return true;
+			}
+			if (FT->T0 < 0.0)
+			{
+				FT->T0 = FApp::GetCurrentTime(); // the sampler's clock; it samples from the next frame
+				return false;
+			}
+			const double E = FApp::GetCurrentTime() - FT->T0;
+			switch (FT->Stage)
+			{
+			case 0:
+				if (E < 1.0) { return false; }
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line A"));
+				FT->Stage = 1;
+				return false;
+			case 1:
+				if (E < 14.0) { return false; }
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line B"));
+				FT->Stage = 2;
+				return false;
+			case 2:
+			{
+				if (E < 31.0) { return false; }
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line C"));
+				uint32 Id = 0;
+				G2bQueueHolds(*Viz, TEXT("C0 flash toast line C"), &Id);
+				FT->FadeId = Id;
+				FT->FadeLast = -1.f;
+				FT->bFadeFalling = false;
+				FT->Stage = 3;
+				return false;
+			}
+			case 3:
+				// Line D arrives during line C's fade: on the first frame the sampler saw C's opacity fall, at 46.4 s at the latest.
+				if (E < 44.0 || (E < 46.4 && !FT->bFadeFalling)) { return false; }
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line D"));
+				FT->FiredDAt = E;
+				FT->FadeId = 0;
+				FT->Stage = 4;
+				return false;
+			case 4:
+			{
+				if (E < 63.0) { return false; }
+				// A second, long toast replaces the first; three lines in one frame, one of them long enough to wrap.
+				FString LongToast = TEXT("C0 flash toast, the long one:");
+				while (LongToast.Len() < 200) { LongToast += TEXT(" a reward line that runs on"); }
+				Deck->Debug_SetToast(LongToast.Left(200), 30.0); // c0a_b: held through the banner stage (was 19 s, to the old end at 81.0)
+				FT->ToastEndsAt = E + 30.0;                      // c0a_c: it leaves on this hold, the way every toast does
+				FString LongLine = TEXT("C0 flash toast line E, the long one:");
+				while (LongLine.Len() < 270) { LongLine += TEXT(" an alert that has to wrap"); }
+				Sim->OnAlert.Broadcast(LongLine.Left(270));
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line F"));
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line G"));
+				FT->Stage = 5;
+				return false;
+			}
+			case 5:
+			{
+				if (E < 81.0) { return false; }
+				// The event banner: the colony's clock set into the first authored dust storm, at the same time of day.
+				UWorld* FlashWorld = FindGameWorld();
+				URHSimClockSubsystem* SimClock = FlashWorld ? FlashWorld->GetSubsystem<URHSimClockSubsystem>() : nullptr;
+				const URHDefinitionsSubsystem* EventDefs = FlashWorld ? FlashWorld->GetSubsystem<URHDefinitionsSubsystem>() : nullptr;
+				double StormSol = -1.0, StormLen = 0.0;
+				if (EventDefs)
+				{
+					EventDefs->ForEachEvent([&StormSol, &StormLen](FName, const FRHEventRow& Row)
+					{
+						if (Row.Type == FName("DustStorm") && (StormSol < 0.0 || Row.StartSol < StormSol))
+						{
+							StormSol = Row.StartSol;
+							StormLen = Row.DurationSols;
+						}
+					});
+				}
+				if (!SimClock || StormSol < 0.0 || StormLen <= 0.0)
+				{
+					FT->Problem = TEXT(" premise: no clock or no dust storm in the events table (the event banner cannot be laid out);");
+					return true;
+				}
+				const double SolNow = SimClock->GetSimSecondsTotal() / URHSimClockSubsystem::SolLengthSimSeconds;
+				double Target = FMath::FloorToDouble(StormSol) + 1.0 + FMath::Fmod(SolNow, 1.0); // the same time of day, inside the storm
+				if (Target < StormSol + 0.02 || Target > StormSol + StormLen - 0.02)
+				{
+					Target = StormSol + 0.5 * StormLen;
+				}
+				SimClock->Debug_SetSimSeconds(Target * URHSimClockSubsystem::SolLengthSimSeconds);
+				FT->BannerAt = E;
+				FT->StormFromSol = StormSol;
+				FT->StormToSol = StormSol + StormLen;
+				UE_LOG(LogRedHope, Display, TEXT("[Flash] flash.toast: the clock set from sol %.3f to sol %.3f (the dust storm of sols %.1f to %.1f) at %.2f s"), SolNow, Target, StormSol, StormSol + StormLen, E);
+				FT->Stage = 6;
+				return false;
+			}
+			case 6:
+				// c0a_c: one more line, so a row stands under the banner while the long toast goes on its own hold (about 93.0).
+				if (E < 90.0) { return false; }
+				Sim->OnAlert.Broadcast(TEXT("C0 flash toast line H"));
+				FT->Stage = 7;
+				return false;
+			default:
+				return E >= 97.0;
+			}
+		}, 0.f, 0.f);
+		Runner.Do(TEXT("flash.toast"), [P, FT]()
+		{
+			P->C0Toast.Reset();
+			FString Why = FT->Problem;
+			if (FT->Moved > 0) { Why += FString::Printf(TEXT(" the toast moved or changed height on %d frame(s), first %s;"), FT->Moved, *FT->MovedSaid); }
+			if (FT->Overlaps > 0) { Why += FString::Printf(TEXT(" the toast's rectangle met %s (%d frame(s));"), *FT->OverlapSaid, FT->Overlaps); }
+			if (FT->PastColumn > 0) { Why += FString::Printf(TEXT(" the toast reached the right column on %d frame(s): %s;"), FT->PastColumn, *FT->ColumnSaid); }
+			// Premises: each a failure if not reached.
+			if (FT->ColumnLeft < 0.0) { Why += TEXT(" premise: the right column was not found;"); }
+			if (FT->NotShownFrames > 0) { Why += FString::Printf(TEXT(" premise: the toast was not shown on %d sampled frame(s);"), FT->NotShownFrames); }
+			if (FT->ShownFrames < 300 || FT->NotPaintedFrames > 5) { Why += FString::Printf(TEXT(" premise: the toast's place was read on only %d frame(s) (%d shown but not painted);"), FT->ShownFrames, FT->NotPaintedFrames); }
+			for (int32 Rows = 0; Rows <= 3; ++Rows)
+			{
+				if (!FT->RowsSeen[Rows]) { Why += FString::Printf(TEXT(" premise: no frame with %d laid-out row(s);"), Rows); }
+			}
+			if (FT->Reversals < 2) { Why += FString::Printf(TEXT(" premise: the stack went one way and back inside 3.0 s only %d time(s) (the 13 s case and the fade case);"), FT->Reversals); }
+			if (FT->WidestToast < FT->FirstWidth + 40.0) { Why += FString::Printf(TEXT(" premise: the long toast was never on screen (widest %.0f, the first %.0f);"), FT->WidestToast, FT->FirstWidth); }
+			if (FT->MaxRowHeight < 1.5 * FT->MinRowHeight) { Why += FString::Printf(TEXT(" premise: no wrapped alert row was on screen (rows %.0f to %.0f tall);"), FT->MinRowHeight, FT->MaxRowHeight); }
+			if (FT->BannerFrames < 60) { Why += FString::Printf(TEXT(" premise: the event banner was laid out beside the toast on only %d frame(s) (the banner clause read too little; the stage began %.2f s in);"), FT->BannerFrames, FT->BannerAt); }
+			// c0a_c: nothing under the slot moves when the toast goes (the banner's top and the first laid-out row's top, with it and after it).
+			if (FT->ShownAfterEnd > 0) { Why += FString::Printf(TEXT(" premise: the toast was still shown on %d frame(s) after its hold ended %.2f s in;"), FT->ShownAfterEnd, FT->ToastEndsAt); }
+			if (FT->BanN[0] < 30 || FT->BanN[1] < 30 || FT->RowN[0] < 30 || FT->RowN[1] < 30)
+			{
+				Why += FString::Printf(TEXT(" premise: the banner's and the first row's tops were read on too few frames with the toast (%d, %d) or after it had gone (%d, %d): 30 of each are needed;"), FT->BanN[0], FT->RowN[0], FT->BanN[1], FT->RowN[1]);
+			}
+			else
+			{
+				const double BanLo = FMath::Min(FT->BanTopMin[0], FT->BanTopMin[1]), BanHi = FMath::Max(FT->BanTopMax[0], FT->BanTopMax[1]);
+				const double RowLo = FMath::Min(FT->RowTopMin[0], FT->RowTopMin[1]), RowHi = FMath::Max(FT->RowTopMax[0], FT->RowTopMax[1]);
+				if (BanHi - BanLo > 0.5)
+				{
+					Why += FString::Printf(TEXT(" the event banner moved when the toast went: its top %.1f to %.1f px with the toast, %.1f to %.1f px after it;"), FT->BanTopMin[0], FT->BanTopMax[0], FT->BanTopMin[1], FT->BanTopMax[1]);
+				}
+				if (RowHi - RowLo > 0.5)
+				{
+					Why += FString::Printf(TEXT(" the first alert row moved when the toast went: its top %.1f to %.1f px with the toast, %.1f to %.1f px after it;"), FT->RowTopMin[0], FT->RowTopMax[0], FT->RowTopMin[1], FT->RowTopMax[1]);
+				}
+			}
+			const FString Said = FString::Printf(TEXT("%d frames, the toast's place read on %d (%d not painted yet, %d not shown); its centre X %.1f, top %.1f, height %.1f in the deck's space on every one; rows seen: 0 %s, 1 %s, 2 %s, 3 %s; the stack went one way and back inside 3.0 s %d time(s): %s; line D fired %.2f s in; the toast %.0f to %.0f wide in the deck's units (the long one cut with an ellipsis); its right edge at most %.0f px against the right column's left edge at %.0f px (both in the window's absolute pixels); alert rows %.0f to %.0f tall (the wrapped one); the event banner laid out beside the toast on %d frame(s) from %.2f s in (the colony's clock set into the dust storm of sols %.0f to %.0f; at most %d alert row(s) beside it; the toast off its first place on %d of those frames); overlaps %d"),
+				FT->Frames, FT->ShownFrames, FT->NotPaintedFrames, FT->NotShownFrames, FT->FirstCentreTop.X, FT->FirstCentreTop.Y, FT->FirstHeight,
+				FT->RowsSeen[0] ? TEXT("yes") : TEXT("no"), FT->RowsSeen[1] ? TEXT("yes") : TEXT("no"), FT->RowsSeen[2] ? TEXT("yes") : TEXT("no"), FT->RowsSeen[3] ? TEXT("yes") : TEXT("no"),
+				FT->Reversals, FT->ReversalGaps.Num() > 0 ? *FString::Join(FT->ReversalGaps, TEXT("; ")) : TEXT("none"), FT->FiredDAt, FT->FirstWidth, FT->WidestToast, FT->MaxAbsRight, FT->ColumnLeft,
+				FT->MinRowHeight < 1.0e8 ? FT->MinRowHeight : 0.0, FT->MaxRowHeight, FT->BannerFrames, FT->BannerAt, FT->StormFromSol, FT->StormToSol, FT->BannerRowsMax, FT->BannerMoved, FT->Overlaps);
+			const FString SaidGone = FString::Printf(TEXT("; the toast went on its own hold %.2f s in: under the banner the banner's top read %.1f px on %d frame(s) with the toast and %.1f px on %d after it, the first alert row's top %.1f px on %d and %.1f px on %d"),
+				FT->ToastEndsAt, FT->BanTopMin[0], FT->BanN[0], FT->BanTopMin[1], FT->BanN[1], FT->RowTopMin[0], FT->RowN[0], FT->RowTopMin[1], FT->RowN[1]);
+			Report(TEXT("flash.toast"), Why.IsEmpty(), Why.IsEmpty() ? Said + SaidGone : Why + TEXT(" | ") + Said + SaidGone);
 		}, 0.f);
 
 		// ---- G2b (2026-11): flash.power (B6, POWER C) - the Late slot's dusk drained at 8x: the tile and the header show no number while the
@@ -11180,6 +12681,51 @@ static FAutoConsoleCommand GRHClickTestBigArrival(
 	{
 		FireBigArrivalForTest(GetSim());
 		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: the Big Arrival fired for the presentation (no sim rule ran)"));
+	}));
+
+static FAutoConsoleCommand GRHClickTestToast(
+	TEXT("RH.ClickTest.Toast"),
+	TEXT("RH.ClickTest.Toast <seconds> <words> - TEST HOOK (C0a, C0-13): raise the reward toast with these words for that many seconds, through the deck's one toast setter (the LOG keeps it, as it keeps every toast). Test text, not player text."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		const ARHPlayerController* PC = GetPC();
+		if (Args.Num() < 2 || !PC || !PC->GetDeck().IsValid())
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ClickTest.Toast <seconds> <words>"));
+			return;
+		}
+		TArray<FString> Words = Args;
+		Words.RemoveAt(0);
+		PC->GetDeck()->Debug_SetToast(FString::Join(Words, TEXT(" ")), FCString::Atod(*Args[0]));
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: a toast raised for %s s"), *Args[0]);
+	}));
+
+static FAutoConsoleCommand GRHClickTestAlert(
+	TEXT("RH.ClickTest.Alert"),
+	TEXT("RH.ClickTest.Alert <words> - TEST HOOK (C0a, C0-13): one alert line through the sim's OnAlert, as flash.alerts fires its lines; no sim rule runs. Test text, not player text."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		URHSimWorldSubsystem* Sim = GetSim();
+		if (Args.Num() < 1 || !Sim)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.ClickTest.Alert <words>"));
+			return;
+		}
+		Sim->OnAlert.Broadcast(FString::Join(Args, TEXT(" ")));
+		UE_LOG(LogRedHope, Display, TEXT("RHClick: test hook: an alert line fired for the presentation (no sim rule ran)"));
+	}));
+
+static FAutoConsoleCommand GRHHoverWorld(
+	TEXT("RH.HoverWorld"),
+	TEXT("RH.HoverWorld <Xm> <Ym> - TEST HOOK (C0a): move the pointer over the ground point (on the active floor), no press: where a placement ghost or a tool's hint is read. RH.ClickWorld's projection; aim the camera at it first (RH.Cam)."),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		if (Args.Num() < 2)
+		{
+			UE_LOG(LogRedHope, Error, TEXT("Usage: RH.HoverWorld <Xm> <Ym>"));
+			return;
+		}
+		PushPress(TEXT("HoverWorld"), LocateWorld(FVector(FCString::Atod(*Args[0]) * 100.0, FCString::Atod(*Args[1]) * 100.0, 0.0)), /*bPress*/ false);
 	}));
 
 static FAutoConsoleCommand GRHClickSweep(

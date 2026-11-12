@@ -55,7 +55,32 @@ namespace
 		int32 BlackoutNight = -1;
 		// G1: the shared power helper (held, latched power state), null without one: the hints then read the sim as before.
 		const URHPowerLookSubsystem* Look = nullptr;
+		// C0-9: a quota is open and it asks for Structural Materials (the deck's poll, SRHCommandDeck::IsGuideQuotaStructOpen, at most
+		// four times a real second); set where a body is drawn, false for the chain's own Done reads (none of them asks).
+		bool bQuotaStructOpen = false;
 	};
+
+	// C0-9: surface habitat shells placed so far (a row that is Pressurized; a site counts: placing the order is the player's part).
+	int32 SurfaceShells(const FGuideCtx& C)
+	{
+		int32 N = 0;
+		for (const FRHBuildingInstance& B : C.Sim->GetBuildings())
+		{
+			const FRHBuildingRow* Row = (B.Level == 0 && C.Defs) ? C.Defs->GetBuilding(B.DefName) : nullptr;
+			N += (Row && Row->Pressurized) ? 1 : 0;
+		}
+		return N;
+	}
+
+	// C0-9 (PLACEHOLDER, gate-d-wording BF16): while a quota that asks for Structural Materials is open, a step that points at a
+	// building paid in Struct says that its site draws on the same store (S3: the quota's Structural went from 210 to 25 of 300 kg
+	// seconds after the orders landed). Words only, no figure.
+	const TCHAR* QuotaNote(const FGuideCtx& C, FName BuildDef)
+	{
+		const FRHBuildingRow* Row = (C.bQuotaStructOpen && C.Defs && !BuildDef.IsNone()) ? C.Defs->GetBuilding(BuildDef) : nullptr;
+		const bool bCostsStruct = Row && !Row->ImportOnly && (Row->CostResources.IsEmpty() ? Row->CostStruct_kg > 0.f : Row->CostResources.Contains(TEXT("Struct:")));
+		return bCostsStruct ? TEXT(" Sites take Structural Materials from the same store the quota counts.") : TEXT("");
+	}
 
 	// Buildings of a type placed so far (under construction counts: the order
 	// is the player's part), optionally only those below ground.
@@ -391,6 +416,15 @@ namespace
 				},
 				NAME_None, NAME_None },
 
+			// --- The surface (C0-9, MC3 A; PLACEHOLDER, gate-d-wording BF13) ---
+			// Straight after the vault is rated the guide offers the surface. Done when a surface habitat shell exists (a site counts)
+			// or the first crew has landed: a player who never builds up still reaches "Bring the first crew". A view of the current
+			// state, like every step: it shows again after a load of a save in that state.
+			{ TEXT("THE SURFACE"), TEXT("Build on the surface"),
+				Fixed(TEXT("Your vault is rated. Now build up: BUILD > Habitat > Habitat Bay, dragged out inside the grid's reach. Its Radiation Shielding can be packed from regolith, so the dig piles pay for it. Set an Air Filtration Station inside to make it livable.")),
+				[](const FGuideCtx& C) { return SurfaceShells(C) >= 1 || C.Sim->GetPopulation() > 0; },
+				NoBar(), FName("HabModule"), NAME_None },
+
 			// --- The crew ---
 			// Soil and seeds ride with the people (crew-phase playtest, 2026-10-15):
 			// there is always a next ship (the ladder repeats, D1a), but it is a
@@ -399,8 +433,12 @@ namespace
 			{ TEXT("THE CREW"), TEXT("Bring the first crew"),
 				[](const FGuideCtx& C)
 				{
-					return FString::Printf(TEXT("Your vault has %d bed%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: a garden is how they will eat, and each later ship is a whole quota away. Meet the next quota to earn it."),
-						C.Sim->GetHousingCapacity(), C.Sim->GetHousingCapacity() == 1 ? TEXT("") : TEXT("s"));
+					// C0-9 (PLACEHOLDER, gate-d-wording BF14; a line about homes, flagged for James's wording pass): the vault's beds are the
+					// vault's (it counted every bed, the surface's among them), and the surface's are named beside them when there are any.
+					const int32 VaultBeds = C.Sim->GetVaultBeds(), SurfaceBeds = C.Sim->GetSurfaceBeds();
+					const FString Surface = SurfaceBeds > 0 ? FString::Printf(TEXT(" and your surface habitats have %d more"), SurfaceBeds) : FString();
+					return FString::Printf(TEXT("Your vault has %d bed%s%s. On the next supply ship send a Crew Pod - and an Earth Soil Pallet and a Seed Vault: a garden is how they will eat, and each later ship is a whole quota away. Meet the next quota to earn it."),
+						VaultBeds, VaultBeds == 1 ? TEXT("") : TEXT("s"), *Surface);
 				},
 				[](const FGuideCtx& C) { return C.Sim->GetPopulation() > 0; },
 				NoBar(), NAME_None, FName("Launch") },
@@ -425,7 +463,10 @@ namespace
 					{
 						return FString(TEXT("The water is going stale from recycling. Fresh ice-melt restores it: if the Ice Drill's deposit is spent, survey for more ice and drill it."));
 					}
-					return FString(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets the colony's work pace. That's the first hour - hide this guide any time."));
+					// C0-9 (PLACEHOLDER, gate-d-wording BF15): the last step ends with the offer of the surface while nothing is built up
+					// there ("the first hour" is not over while a next thing to do exists); with a surface shell it ends as before.
+					return FString::Printf(TEXT("People need oxygen, water and food every sol. Underground, the ZONE row assigns rooms - Living Quarters, a Gardening Station for food, a Lab and a Workstation for work. Hope, top left, sets the colony's work pace. %s"),
+						SurfaceShells(C) == 0 ? TEXT("Next: build on the surface - BUILD > Habitat > Habitat Bay.") : TEXT("That's the first hour - hide this guide any time."));
 				},
 				[](const FGuideCtx&) { return false; },
 				NoBar(), NAME_None, NAME_None },
@@ -570,6 +611,12 @@ namespace
 		return S;
 	}
 
+	// C0-9: a step's body as drawn: its own words, then the quota note when it applies (written once, for the panel and the probe).
+	FString GuideBody(const FGuideStep& S, const FGuideCtx& C)
+	{
+		return S.Body(C) + QuotaNote(C, S.BuildDef);
+	}
+
 	// What the panel and the deck lights show: a live interrupt, else the chain.
 	const FGuideStep* ShownStep(int32 Interrupt, int32 Step)
 	{
@@ -649,6 +696,20 @@ void SRHCommandDeck::RefreshGuide()
 	GuideInterrupt = Int;
 }
 
+bool SRHCommandDeck::IsGuideQuotaStructOpen() const
+{
+	// C0-9: is a quota open that asks for Structural Materials? The sim's own quota read, at most four times a real second (the guide's
+	// body asks every paint).
+	const double NowS = FPlatformTime::Seconds();
+	if (NowS >= GuideQuotaPollAtS)
+	{
+		GuideQuotaPollAtS = NowS + 0.25;
+		const URHSimWorldSubsystem* Sim = GetSim();
+		bGuideQuotaStructOpen = Sim && Sim->GetQuotaPhase() == ERHQuotaPhase::Open && Sim->GetQuotaProgress().Contains(FName("Struct"));
+	}
+	return bGuideQuotaStructOpen;
+}
+
 FString SRHCommandDeck::Debug_GetGuideText() const
 {
 	// G1, the flash probe: the shown step's stage, title and body joined by " | ", by the code path of BuildGuidePanel's lambdas.
@@ -662,8 +723,8 @@ FString SRHCommandDeck::Debug_GetGuideText() const
 	{
 		return FString();
 	}
-	const FGuideCtx C{ Sim, GetDefs(), Sim->GetLastBlackoutNight(), GetPowerLook() };
-	return FString::Printf(TEXT("NEXT STEP  -  %s | %s | %s"), S->Stage, S->Title, *S->Body(C));
+	const FGuideCtx C{ Sim, GetDefs(), Sim->GetLastBlackoutNight(), GetPowerLook(), IsGuideQuotaStructOpen() };
+	return FString::Printf(TEXT("NEXT STEP  -  %s | %s | %s"), S->Stage, S->Title, *GuideBody(*S, C));
 }
 
 FName SRHCommandDeck::GetGuideBuildDef() const
@@ -757,7 +818,7 @@ void SRHCommandDeck::SetTipsOff(bool bOff)
 TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 {
 	auto Step = [this]() -> const FGuideStep* { return ShownStep(GuideInterrupt, GuideStep); };
-	auto Ctx = [this]() { const URHSimWorldSubsystem* S = GetSim(); return FGuideCtx{ S, GetDefs(), S ? S->GetLastBlackoutNight() : -1, GetPowerLook() }; };
+	auto Ctx = [this]() { const URHSimWorldSubsystem* S = GetSim(); return FGuideCtx{ S, GetDefs(), S ? S->GetLastBlackoutNight() : -1, GetPowerLook(), IsGuideQuotaStructOpen() }; };
 
 	TSharedRef<SWidget> Header = SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.f, 0.f, 7.f, 0.f)
@@ -805,7 +866,7 @@ TSharedRef<SWidget> SRHCommandDeck::BuildGuidePanel()
 					{
 						const FGuideStep* S = Step();
 						const FGuideCtx C = Ctx();
-						return FText::FromString((S && C.Sim) ? S->Body(C) : FString());
+						return FText::FromString((S && C.Sim) ? GuideBody(*S, C) : FString());
 					})
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.f, 7.f, 0.f, 0.f)

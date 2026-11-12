@@ -3,6 +3,7 @@
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimClockSubsystem.h"
 #include "RHAgentSubsystem.h"
+#include "RHAgentFragments.h" // C0a: FRHTaskFragment (StepBuildAtSite, StepDigAtPile)
 #include "RHSaveFrame.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -18,6 +19,11 @@ namespace
 	const FName NAME_Struct(TEXT("Struct"));
 	const FName NAME_Lander(TEXT("Lander"));
 	const FName NAME_Stockpile(TEXT("Stockpile"));
+	// C0a: the two resources of the surface Shielding line (C0-3), and the marker an interior machine's Build order carries when it
+	// was ordered into a shell still in flight (C0-11; FRHCommand::Text, saved since v37 and empty on every other Build).
+	const FName NAME_C0Shielding(TEXT("Shielding"));
+	const FName NAME_C0Regolith(TEXT("Regolith"));
+	const TCHAR* const C0IntoShell = TEXT("IntoShell");
 	const FName NAME_FurnBed(TEXT("Bed"));
 	const FName NAME_FurnJobSeat(TEXT("JobSeat"));
 	const FName NAME_FurnDiningSeat(TEXT("DiningSeat"));
@@ -106,6 +112,8 @@ void URHSimWorldSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	OrderLagSeconds = Defs->GetConfigScalar(FName("OrderLagTier0_s"), OrderLagSeconds);
 	PileCapKg = Defs->GetConfigScalar(FName("PilesCapacity_kg"), PileCapKg);
 	HaulLoadMinKg = FMath::Max(25.0, PileCapKg / 5.0);
+	// C0-3 (PLACEHOLDER 2.0, director review): kg of Regolith per kg of a site's surface Shielding line; 0 turns the route off.
+	ShieldingRegolithPerKg = FMath::Max(0.0, Defs->GetConfigScalar(FName("ShieldingRegolithPerKg"), ShieldingRegolithPerKg));
 	ChargeSeekFraction = (float)Defs->GetConfigScalar(FName("ChargeSeekFraction"), ChargeSeekFraction);
 	ChargeResumeFraction = (float)Defs->GetConfigScalar(FName("ChargeResumeFraction"), ChargeResumeFraction);
 	// D5a: the day shift's working window (sol fractions) and the A/B master
@@ -689,6 +697,7 @@ void URHSimWorldSubsystem::StepSim(float SubDt)
 	// arc advances, power settles.
 	StepEventEdges();
 	StepUplink();
+	RefreshStalledSites(); // C0-12: at most once per EraStallReadS of sim time, the same index in both bands
 	StepTransit(); // D4: the sol threshold of the shafts' waits, at the same index in both bands (returns at once with no lift car)
 	StepTaskBoard(SubDt);
 	StepProduction(SubDt);
@@ -750,11 +759,26 @@ bool URHSimWorldSubsystem::CanEnterEraMode(FString& OutReason) const
 	{
 		if (B.bUnderConstruction)
 		{
+			// C0-12: a site nothing can supply (StalledSites, re-read once per EraStallReadS) does not hold 60x: it cannot progress in
+			// either band. C0-11 / C0-4: nor does a site waiting for its shell or its link; the site it waits on is judged on its own.
+			if (StalledSites.Contains(B.Id) || IsSiteWaitingForShell(B) || IsSiteWaitingForLink(B))
+			{
+				continue;
+			}
 			// G2a (A5, PLACEHOLDER, gate-d-wording PW14): plain words, the site's display name with a leading "The " dropped, no id (the
 			// deck's 60x tooltip and the banner show this reason).
 			const FRHBuildingRow* SiteDef = Defs ? Defs->GetBuilding(B.DefName) : nullptr;
 			FString SiteName = (SiteDef && !SiteDef->DisplayName.IsEmpty()) ? SiteDef->DisplayName : FName::NameToDisplayString(B.DefName.ToString(), false);
 			SiteName.RemoveFromStart(TEXT("The "));
+			// C0-6 (PLACEHOLDER, gate-d-wording BF2): while a bill line is short the reason names it; a ready or worked site keeps the old words.
+			FName ShortLine;
+			if (GetSiteBlockerLine(B, ShortLine) != INDEX_NONE)
+			{
+				const FRHResourceRow* ResRow = Defs ? Defs->GetResource(ShortLine) : nullptr;
+				OutReason = FString::Printf(TEXT("the %s is waiting for %s"), *SiteName,
+					(ResRow && !ResRow->DisplayName.IsEmpty()) ? *ResRow->DisplayName : *ShortLine.ToString());
+				return false;
+			}
 			OutReason = FString::Printf(TEXT("the %s is still being built"), *SiteName);
 			return false;
 		}
@@ -866,6 +890,7 @@ void URHSimWorldSubsystem::EraStep(float DtSimSeconds)
 	// at 1 sim-minute. Only dig/haul need the abstract stand-in (agents park).
 	StepEventEdges(); // storm END mid-era alerts; onsets can't occur here (imminent check drops first)
 	StepUplink();
+	RefreshStalledSites(); // C0-12: the same index as the agent band
 	StepTransit(); // D4: the same index as the agent band (parity)
 	EraLogistics(DtSimSeconds);
 	StepProduction(DtSimSeconds);
@@ -1345,6 +1370,12 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 	// construction shortage so steady-state logistics never grow this leg.
 	{
 		const TMap<FName, double> ShortageKg = ComputeConstructionShortage();
+		// C0-2: what the open sites are short of, for TryClaimDig's ranking (the map this step already builds; no new walk).
+		DigNeeded.Reset();
+		for (const auto& ShortLine : ShortageKg)
+		{
+			DigNeeded.Add(ShortLine.Key);
+		}
 		const auto OutputsShort = [&ShortageKg](const FRHRecipeRow& Row)
 		{
 			for (const auto& Out : URHDefinitionsSubsystem::ParseResourceList(Row.Outputs))
@@ -1433,8 +1464,8 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 		}
 		for (const auto& Cost : GetSiteBill(Site))
 		{
-			const double* Delivered = Site.InputKg.Find(Cost.Key);
-			const double NeedKg = Cost.Value - (Delivered ? *Delivered : 0.0);
+			// C0-3: what is paid counts the Regolith on site at the ratio, on the surface Shielding line.
+			const double NeedKg = Cost.Value - GetSiteLinePaidKg(Site, Cost.Key);
 			if (NeedKg <= 0.0)
 			{
 				continue;
@@ -1470,6 +1501,78 @@ void URHSimWorldSubsystem::StepTaskBoard(float SubDt)
 					T.To = To;
 					T.Resource = Cost.Key;
 					SetHaulAmount(T, FMath::Min(NeedKg, 200.0), RoverLoadKg(NeedKg, -1.0));
+					Tasks.Add(T);
+				}
+			}
+			// C0-3: no Shielding in any store: the surface Shielding line is packed from Regolith at ShieldingRegolithPerKg. Forge-made
+			// Shielding goes first whenever a source holds it (above). ONE regolith haul to a site at a time. The source, first found:
+			// a finished Stockpile or Lander on a linked level holding Regolith (lowest Id), any other finished building's Regolith
+			// OUTPUT (the Borer's spoil; lowest Id), then the nearest discovered pile of Regolith on the site's level (ties to the lower
+			// Id). Never a machine's hopper: the Forge's feed is not a store.
+			if (SourceId == 0 && IsSurfaceShieldingLine(Site, Cost.Key) && !HasOpenHaulTo(Site.Id, NAME_C0Regolith))
+			{
+				const double WantKg = NeedKg * ShieldingRegolithPerKg;
+				FRHSiteRef From;
+				double AvailableKg = 0.0;
+				for (const FRHBuildingInstance& S : Buildings)
+				{
+					if (S.bUnderConstruction || S.Id == Site.Id || !AreLevelsLinked(S.Level, Site.Level) || (S.DefName != NAME_Stockpile && S.DefName != NAME_Lander))
+					{
+						continue;
+					}
+					const double HeldKg = S.InputKg.FindRef(NAME_C0Regolith) + S.OutputKg.FindRef(NAME_C0Regolith);
+					if (HeldKg > 0.0 && (From.BuildingId == 0 || S.Id < From.BuildingId))
+					{
+						From.BuildingId = S.Id;
+						AvailableKg = HeldKg;
+					}
+				}
+				if (!From.IsValid())
+				{
+					for (const FRHBuildingInstance& S : Buildings)
+					{
+						if (S.bUnderConstruction || S.Id == Site.Id || !AreLevelsLinked(S.Level, Site.Level))
+						{
+							continue;
+						}
+						const double OutKg = S.OutputKg.FindRef(NAME_C0Regolith);
+						if (OutKg > 0.0 && (From.BuildingId == 0 || S.Id < From.BuildingId))
+						{
+							From.BuildingId = S.Id;
+							AvailableKg = OutKg;
+						}
+					}
+				}
+				if (!From.IsValid())
+				{
+					double BestDistCm = 0.0;
+					for (const FRHDepositState& D : Deposits)
+					{
+						if (D.Level != Site.Level || !D.bDiscovered || D.bOutpost || D.Type != NAME_C0Regolith || D.PileKg <= 0.0)
+						{
+							continue;
+						}
+						const double DistCm = FVector::DistXY(D.LocationCm, Site.LocationCm);
+						if (From.DepositId == 0 || DistCm < BestDistCm || (DistCm == BestDistCm && D.Id < From.DepositId))
+						{
+							From.DepositId = D.Id;
+							BestDistCm = DistCm;
+							AvailableKg = D.PileKg;
+						}
+					}
+				}
+				if (From.IsValid())
+				{
+					FRHSiteRef To; To.BuildingId = Site.Id;
+					FRHTask T;
+					T.Id = NextTaskId++;
+					T.Type = ERHTaskType::Haul;
+					T.From = From;
+					T.To = To;
+					T.Resource = NAME_C0Regolith;
+					// The load is what the line still needs, what the source holds and a hauler's 200 kg (a rover's hold when it is freight).
+					const double LoadKg = FMath::Min(WantKg, AvailableKg);
+					SetHaulAmount(T, FMath::Min(LoadKg, 200.0), RoverLoadKg(LoadKg, -1.0));
 					Tasks.Add(T);
 				}
 			}
@@ -2854,9 +2957,13 @@ TMap<FName, double> URHSimWorldSubsystem::ComputeConstructionShortage() const
 		{
 			const double* D = Site.InputKg.Find(Cost.Key);
 			const double Delivered = D ? *D : 0.0;
-			if (Cost.Value > Delivered)
+			// C0-3: the need is what is not yet paid (the Regolith on site counts on the surface Shielding line), so once the regolith
+			// has landed the Forge is no longer told to make Shielding for this site. DeliveredKg stays the real kg of the resource
+			// held at sites (it corrects GetTotalSolid below, which counts site hoppers).
+			const double Paid = GetSiteLinePaidKg(Site, Cost.Key);
+			if (Cost.Value > Paid)
 			{
-				NeedKg.FindOrAdd(Cost.Key) += Cost.Value - Delivered;
+				NeedKg.FindOrAdd(Cost.Key) += Cost.Value - Paid;
 			}
 			DeliveredKg.FindOrAdd(Cost.Key) += Delivered;
 		}
@@ -3210,7 +3317,8 @@ void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
 			}
 		}
 		const bool bWas = IsNetRated(N);
-		const bool bBig = N.Bays >= MinLivableCells;
+		const int32 MinBays = GetNetMinBays(N); // C0-10: a network made only of prefabs is livable at its own bays
+		const bool bBig = N.Bays >= MinBays;
 		if (!bWas && bCirc && bFull && bBig)
 		{
 			int32 Beds = 0;
@@ -3256,8 +3364,8 @@ void URHSimWorldSubsystem::StepHabNetworks(float SubDt)
 			HabNetsNotedSmall.Add(N.Root);
 			OnAlert.Broadcast(FString::Printf(
 				TEXT("SURFACE HABITAT SEALED — %d of %d bays. Add %d more to certify it a livable habitat."),
-				N.Bays, MinLivableCells, MinLivableCells - N.Bays));
-			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d SEALED but under habitat minimum (%d/%d bays) ==="), N.Root, N.Bays, MinLivableCells);
+				N.Bays, MinBays, MinBays - N.Bays));
+			UE_LOG(LogRedHopeSim, Display, TEXT("=== HAB NETWORK #%d SEALED but under habitat minimum (%d/%d bays) ==="), N.Root, N.Bays, MinBays);
 		}
 		else if (!bSealedSmall && !bWas)
 		{
@@ -3714,7 +3822,7 @@ bool URHSimWorldSubsystem::IsHabNetworkCirculatedHeld(int32 HabId) const
 bool URHSimWorldSubsystem::IsHabNetworkSealedButSmall(int32 HabId) const
 {
 	const FRHHabNetCache* N = FindHabNet(HabId);
-	if (!N || IsNetRated(*N) || N->Bays >= MinLivableCells || !IsNetCirculated(*N))
+	if (!N || IsNetRated(*N) || N->Bays >= GetNetMinBays(*N) || !IsNetCirculated(*N))
 	{
 		return false;
 	}
@@ -3808,11 +3916,22 @@ bool URHSimWorldSubsystem::IsFloorSealedButSmallHeld(int32 Level) const
 
 int32 URHSimWorldSubsystem::GetHousingCapacity() const
 {
+	return GetVaultBeds() + GetSurfaceBeds(); // C0a: the two halves, the same sum as before
+}
+
+int32 URHSimWorldSubsystem::GetVaultBeds() const
+{
 	int32 Beds = 0;
 	for (const int32 Level : RatedFloors)
 	{
 		Beds += CountFloorBeds(Level, nullptr); // BM-4: the legacy rule unless beds are placed
 	}
+	return Beds;
+}
+
+int32 URHSimWorldSubsystem::GetSurfaceBeds() const
+{
+	int32 Beds = 0;
 	// BM-1: Living bays of rated surface habitat networks - open to crew only
 	// once the Phase-1 vault is certified (director, 2026-10-16: crew still
 	// need the vault; the surface habitat is expansion, not a shortcut).
@@ -9022,6 +9141,17 @@ void URHSimWorldSubsystem::EnqueueCommand(FRHCommand Command)
 	Command.CommandId = NextCommandId++;
 	Command.IssuedAtSimSeconds = Clock ? Clock->GetSimSecondsTotal() : 0.0;
 	Command.ExecuteAtSimSeconds = Command.IssuedAtSimSeconds + OrderLagSeconds;
+	// C0-11: an interior machine ordered into a shell that is still in flight carries "ordered into a shell" in the order itself (the
+	// Text field, saved since v37), so that it is refused if it lands with no shell under it instead of being built standing alone
+	// (a surface machine ordered on open ground stays legal, -surfacehab S3f).
+	if (Command.Verb == FName("Build") && Command.Level == 0 && Defs)
+	{
+		const FRHBuildingRow* MachineDef = Defs->GetBuilding(Command.Target);
+		if (MachineDef && MachineDef->Interior && !FindShellAround(MachineDef, Command.Location) && FindQueuedShellBay(MachineDef, Command.Location, Command.Level))
+		{
+			Command.Text = C0IntoShell;
+		}
+	}
 	UE_LOG(LogRedHopeSim, Display, TEXT("Uplink: '%s %s' transmitted, executes in %.0f sim-s"),
 		*Command.Verb.ToString(), *Command.Target.ToString(), OrderLagSeconds);
 	UplinkQueue.Add(MoveTemp(Command));
@@ -9213,6 +9343,12 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 					}
 				}
 			}
+			// C0-11: a shell still in flight counts (BayHab stays 0: the one-station-a-bay and zoned-bay tests need a standing shell
+			// and are made again when the order lands, with the shell a site).
+			if (!bInBay && Def->Interior && Level == 0 && FindQueuedShellBay(Def, LocationCm, Level))
+			{
+				bInBay = true;
+			}
 			if (!bInBay)
 			{
 				OutReason = TEXT("Station modules go on a dug floor or inside a habitat bay - ride down with the SHAFT strip first");
@@ -9260,7 +9396,7 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 				return false;
 			}
 		}
-		else
+		else if (BayHab != 0)
 		{
 			// One station per bay, never in a fixed-room shell (a corridor).
 			const FRHBuildingInstance* HabB = FindBuildingById(BayHab);
@@ -9299,10 +9435,22 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 		double NearestNodeCm = TNumericLimits<double>::Max();
 		for (const FRHBuildingInstance& B : Buildings)
 		{
-			const FRHBuildingRow* NodeDef = (B.bUnderConstruction || B.Level != Level) ? nullptr : Defs->GetBuilding(B.DefName);
-			if (NodeDef && NodeDef->CoverageRadius_m > 0.f)
+			const FRHBuildingRow* NodeDef = B.Level != Level ? nullptr : Defs->GetBuilding(B.DefName);
+			// C0-4: a pylon-like SITE counts as a node for linking another pylon-like row (this branch), never for anyone's coverage:
+			// a chain ordered in one go is accepted. Every other site is skipped, as before.
+			if (NodeDef && NodeDef->CoverageRadius_m > 0.f && (!B.bUnderConstruction || NodeDef->LinkRange_m > 0.f))
 			{
 				NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(B.LocationCm, LocationCm));
+			}
+		}
+		// C0-4: and a pylon-like Build order still in the uplink queue on this level, at the spot it was ordered for (the ghost is
+		// green for the next pylon of a chain while the first is still in flight).
+		for (const FRHCommand& C : UplinkQueue)
+		{
+			const FRHBuildingRow* QDef = (C.Verb == FName("Build") && C.Level == Level) ? Defs->GetBuilding(C.Target) : nullptr;
+			if (QDef && QDef->CoverageRadius_m > 0.f && QDef->LinkRange_m > 0.f)
+			{
+				NearestNodeCm = FMath::Min(NearestNodeCm, (double)FVector::DistXY(C.Location, LocationCm));
 			}
 		}
 		if (NearestNodeCm > Def->LinkRange_m * 100.0)
@@ -9343,6 +9491,7 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 					break;
 				}
 			}
+			bInBay = bInBay || FindQueuedShellBay(Def, LocationCm, Level); // C0-11: or inside a shell still in flight
 		}
 		if (!bInBay)
 		{
@@ -9419,6 +9568,37 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 			if (FMath::Abs(QLoc.X - OverlapLoc.X) < HalfX + QHalf.X
 				&& FMath::Abs(QLoc.Y - OverlapLoc.Y) < HalfY + QHalf.Y)
 			{
+				// C0-11: an interior machine may be ordered into a shell still in flight when it sits wholly inside one of that
+				// shell's bays; and the mirror, the shell's own landing check lets through the machine ordered into it that is still
+				// in the queue behind it (S5b run 1: that check refused both shells).
+				if (Level == 0)
+				{
+					int32 QBay = INDEX_NONE;
+					if (Def->Interior && QDef->Pressurized)
+					{
+						FRHBuildingInstance QShell;
+						QShell.DefName = C.Target;
+						QShell.SizeX = QSize.X;
+						QShell.SizeY = QSize.Y;
+						QShell.LocationCm = QLoc;
+						if (IsWhollyInBay(QShell, LocationCm, FVector2D(HalfX, HalfY), QBay))
+						{
+							continue;
+						}
+					}
+					if (Def->Pressurized && QDef->Interior && C.Text == C0IntoShell)
+					{
+						FRHBuildingInstance ThisShell;
+						ThisShell.DefName = DefName;
+						ThisShell.SizeX = SizeX;
+						ThisShell.SizeY = SizeY;
+						ThisShell.LocationCm = OverlapLoc;
+						if (IsWhollyInBay(ThisShell, C.Location, QHalf, QBay))
+						{
+							continue;
+						}
+					}
+				}
 				OutReason = FString::Printf(TEXT("%s order already in transit for that spot"), *C.Target.ToString());
 				return false;
 			}
@@ -9464,6 +9644,23 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 			}
 		}
 	}
+	// C0-5 (G3's rule; PLACEHOLDER words, gate-d-wording BF1): an extractor is refused when no discovered deposit of the kind it draws
+	// lies within 12 m. The last site rule, so every older refusal keeps its place; an undiscovered deposit is not found, so the
+	// words leak nothing.
+	if (Def->RequiresDeposit && !FindExtractorDeposit(DefName, LocationCm, Level))
+	{
+		TArray<FName> Kinds;
+		GetExtractorDepositTypes(DefName, Kinds);
+		const FRHResourceRow* KindRow = Kinds.Num() > 0 ? Defs->GetResource(Kinds[0]) : nullptr;
+		const FString KindName = (KindRow && !KindRow->DisplayName.IsEmpty()) ? KindRow->DisplayName.ToLower()
+			: Kinds.Num() > 0 ? Kinds[0].ToString().ToLower() : FString();
+		const FString What = Def->DisplayName.IsEmpty() ? FName::NameToDisplayString(DefName.ToString(), false) : Def->DisplayName;
+		const TCHAR First = What.IsEmpty() ? TEXT('x') : FChar::ToLower(What[0]);
+		const bool bVowel = First == TEXT('a') || First == TEXT('e') || First == TEXT('i') || First == TEXT('o') || First == TEXT('u');
+		OutReason = KindName.IsEmpty() ? FString::Printf(TEXT("%s %s must stand on a surveyed deposit"), bVowel ? TEXT("An") : TEXT("A"), *What)
+			: FString::Printf(TEXT("%s %s must stand on a surveyed %s deposit"), bVowel ? TEXT("An") : TEXT("A"), *What, *KindName);
+		return false;
+	}
 	if (!bCheckMaterials)
 	{
 		// C5b: the bill is already paid (growth takes it whole at the start); the site rules above are all that is left.
@@ -9488,7 +9685,12 @@ bool URHSimWorldSubsystem::CanPlaceBuildingSized(FName DefName, const FVector& L
 		for (const auto& Cost : URHDefinitionsSubsystem::GetBuildCostFor(*Def, Level))
 		{
 			const double Need = Cost.Value * SizeX * SizeY;
-			const double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
+			double Available = GetTotalSolid(Cost.Key) + GetStock(Cost.Key);
+			// C0-3: the surface Shielding line can be packed from the Regolith in stores and on the piles, at the ratio.
+			if (Cost.Key == NAME_C0Shielding && Level >= 0 && Def->SurfaceShielding_kg > 0.f && ShieldingRegolithPerKg > 0.0)
+			{
+				Available += GetRegolithToPackKg(Level) / ShieldingRegolithPerKg;
+			}
 			if (Available < Need && !HasProducerFor(Cost.Key))
 			{
 				OutReason = FString::Printf(TEXT("Insufficient %s (%.0f needed, %.0f on hand, no producer online)"),
@@ -9527,8 +9729,42 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		FString Reason;
 		const FRHBuildingRow* SizedDef = Defs ? Defs->GetBuilding(Cmd.Target) : nullptr;
 		const FIntPoint Size = (SizedDef && SizedDef->DragSized) ? DecodeBuildSize(Cmd.Value) : FIntPoint(1, 1);
+		// C0-11 (PLACEHOLDER words, gate-d-wording BF5): a machine ordered into a shell in flight that lands with no shell under it (a
+		// site counts) is refused, never built standing alone. The shell's own refusal reason is kept in runtime memory for the words
+		// only; after a load the refusal still happens, with the plain reason.
+		if (Cmd.Text == C0IntoShell && SizedDef && SizedDef->Interior && !FindShellAround(SizedDef, Cmd.Location))
+		{
+			Reason = TEXT("No habitat shell here: the shell it was ordered into never landed");
+			for (int32 i = RefusedShells.Num() - 1; i >= 0; --i)
+			{
+				const FRHRefusedShell& R = RefusedShells[i];
+				if (FMath::Abs(Cmd.Location.X - R.CentreCm.X) <= R.HalfCm.X && FMath::Abs(Cmd.Location.Y - R.CentreCm.Y) <= R.HalfCm.Y)
+				{
+					const FRHBuildingRow* ShellDef = Defs->GetBuilding(R.DefName);
+					Reason = FString::Printf(TEXT("No habitat shell here: its %s order was refused (%s)"),
+						(ShellDef && !ShellDef->DisplayName.IsEmpty()) ? *ShellDef->DisplayName : *R.DefName.ToString(), *R.Reason);
+					break;
+				}
+			}
+			OnCommandRejected.Broadcast(Cmd, Reason);
+			return;
+		}
 		if (!CanPlaceBuildingSized(Cmd.Target, Cmd.Location, Reason, Cmd.Level, Size.X, Size.Y))
 		{
+			if (SizedDef && SizedDef->Pressurized && Cmd.Level == 0)
+			{
+				// C0-11: remembered (at most 8, the oldest dropped; runtime only) so a machine ordered into this shell can say why.
+				FRHRefusedShell R;
+				R.CentreCm = SnapToBayGrid(SizedDef, Cmd.Location, Size.X, Size.Y);
+				R.HalfCm = GetFootprintHalfCm(SizedDef, Size.X, Size.Y);
+				R.DefName = Cmd.Target;
+				R.Reason = Reason;
+				if (RefusedShells.Num() >= 8)
+				{
+					RefusedShells.RemoveAt(0);
+				}
+				RefusedShells.Add(MoveTemp(R));
+			}
 			OnCommandRejected.Broadcast(Cmd, Reason);
 			return;
 		}
@@ -9570,6 +9806,34 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown deposit '%s'"), *Cmd.Target.ToString()));
 			return;
 		}
+	}
+	else if (Cmd.Verb == FName("StopDig"))
+	{
+		// C0-2 (PLACEHOLDER words, gate-d-wording BF4): a dig designation can be cancelled. Only the designation goes: the pile stays
+		// (the pile leg never tests the designation), and each excavator on the deposit gives its claim back on its own next sub-step
+		// through IsDepositSpent, as at a spent deposit. DigClaims is not zeroed here: an excavator's own release would then take a
+		// later claimant's count.
+		FRHDepositState* Found = nullptr;
+		for (FRHDepositState& D : Deposits)
+		{
+			if (D.RowName == Cmd.Target && D.bDiscovered)
+			{
+				Found = &D;
+				break;
+			}
+		}
+		if (!Found)
+		{
+			OnCommandRejected.Broadcast(Cmd, FString::Printf(TEXT("Unknown deposit '%s'"), *Cmd.Target.ToString()));
+			return;
+		}
+		if (!Found->bDesignated)
+		{
+			OnCommandRejected.Broadcast(Cmd, TEXT("That deposit is not being dug"));
+			return;
+		}
+		Found->bDesignated = false;
+		UE_LOG(LogRedHopeSim, Display, TEXT("Dig designation cancelled: %s (%.0f kg left on its pile)"), *Found->RowName.ToString(), Found->PileKg);
 	}
 	else if (Cmd.Verb == FName("Survey"))
 	{
@@ -9945,6 +10209,13 @@ void URHSimWorldSubsystem::ExecuteCommand(const FRHCommand& Cmd)
 		FString Reason;
 		int32 H = 0, Bay = INDEX_NONE;
 		const bool bBay = Cmd.Level == 0 && FindBayAt(Cmd.Location, H, Bay);
+		if (Cmd.Level == 0 && !bBay)
+		{
+			// C0-6 (PLACEHOLDER words, gate-d-wording BF3): a surface spot with no habitat bay says so in surface words (it read
+			// "Cell 0 on floor 0 is not carved yet"). A floor below keeps the cell path and its words.
+			OnCommandRejected.Broadcast(Cmd, TEXT("No habitat bay there: zone a bay inside a surface habitat"));
+			return;
+		}
 		if (bBay ? !DesignateBay(H, Bay, Cmd.Target, Reason) : !DesignateRoom(Cmd.Level, (int32)Cmd.Value, Cmd.Target, Reason))
 		{
 			OnCommandRejected.Broadcast(Cmd, Reason);
@@ -10989,13 +11260,10 @@ void URHSimWorldSubsystem::AddBuilding(FName DefName, const FVector& LocationCm,
 	// has not surveyed, even by console coordinates.
 	if (Def && Def->RequiresDeposit)
 	{
-		for (const FRHDepositState& D : Deposits)
+		// C0-5: the nearest discovered deposit of the kind this extractor draws (it took the first discovered deposit of any kind).
+		if (const FRHDepositState* Under = FindExtractorDeposit(DefName, LocationCm, Level))
 		{
-			if (D.Level == Level && D.bDiscovered && FVector::DistXY(D.LocationCm, LocationCm) <= 1200.0)
-			{
-				Instance.AttachedDepositId = D.Id;
-				break;
-			}
+			Instance.AttachedDepositId = Under->Id;
 		}
 		if (Instance.AttachedDepositId == 0)
 		{
@@ -11200,16 +11468,21 @@ bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMa
 			++Pieces;
 		}
 		TArray<int32> Bays, Homes;
-		TArray<bool> Air;
+		TArray<bool> Air, PrefabOnly;
 		Bays.SetNumZeroed(Pieces);
 		Homes.SetNumZeroed(Pieces);
 		Air.Init(false, Pieces);
+		PrefabOnly.Init(true, Pieces); // C0-10: each piece's minimum by its own members
 		for (const int32 M : Rest)
 		{
 			const FRHHabMemberCache& MC = HabMembers.FindChecked(M);
 			const int32 P = PieceOf.FindChecked(M);
 			Bays[P] += MC.NX * MC.NY;
 			const FRHBuildingInstance* MB = FindBuildingById(M);
+			if (!MB || !IsPrefabShell(Defs->GetBuilding(MB->DefName)))
+			{
+				PrefabOnly[P] = false;
+			}
 			for (int32 Bay = 0; MB && RatedFloors.Contains(-1) && Bay < MC.NX * MC.NY; ++Bay)
 			{
 				if (IsBayNearShaftHead(GetBayCentreCm(*MB, Bay)))
@@ -11235,9 +11508,10 @@ bool URHSimWorldSubsystem::CanDemolishBuilding(int32 Id, FString& OutReason, TMa
 		}
 		for (int32 P = 0; P < Pieces; ++P)
 		{
-			if (Homes[P] > 0 && Bays[P] < MinLivableCells)
+			const int32 PieceMinBays = PrefabOnly[P] ? FMath::Min(MinLivableCells, Bays[P]) : MinLivableCells;
+			if (Homes[P] > 0 && Bays[P] < PieceMinBays)
 			{
-				OutReason = FString::Printf(TEXT("Demolishing this would leave %d resident(s) in a habitat under the %d-bay minimum"), Homes[P], MinLivableCells);
+				OutReason = FString::Printf(TEXT("Demolishing this would leave %d resident(s) in a habitat under the %d-bay minimum"), Homes[P], PieceMinBays);
 				return false;
 			}
 			if (Homes[P] > 0 && !Air[P])
@@ -13266,25 +13540,83 @@ int32 URHSimWorldSubsystem::TryClaimDig(const FVector& RobotPosCm, int32 RobotLe
 	{
 		return 0; // storm discipline: held fleets claim nothing new
 	}
-	int32 BestId = 0;
-	double BestDist = TNumericLimits<double>::Max();
-	for (FRHDepositState& D : Deposits)
-	{
-		if (D.Level == RobotLevel && D.bDesignated && !D.bOutpost && D.RemainingKg > 0.0 && D.DigClaims < 2)
-		{
-			const double Dist = FVector::DistXY(D.LocationCm, RobotPosCm);
-			if (Dist < BestDist)
-			{
-				BestDist = Dist;
-				BestId = D.Id;
-			}
-		}
-	}
+	const int32 BestId = PickDigDeposit(RobotPosCm, RobotLevel, 0);
 	if (BestId != 0)
 	{
 		FindDeposit(BestId)->DigClaims++;
 	}
 	return BestId;
+}
+
+int32 URHSimWorldSubsystem::PickDigDeposit(const FVector& RobotPosCm, int32 RobotLevel, int32 ExcludeId) const
+{
+	// C0-2: a designated deposit with mass left, a free claim and ROOM ON ITS PILE (a pile at the cap is skipped: S3's two excavators
+	// held the full Regolith_A pile for 9.5 sols while Ore_A, designated, was never dug). A deposit whose material the open sites are
+	// short of (DigNeeded) ranks first; nearest within a rank; ties keep the deposit order.
+	int32 BestId = 0;
+	int32 BestRank = MAX_int32;
+	double BestDist = TNumericLimits<double>::Max();
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Id != ExcludeId && D.Level == RobotLevel && D.bDesignated && !D.bOutpost && D.RemainingKg > 0.0 && D.DigClaims < 2
+			&& D.PileKg < PileCapKg)
+		{
+			const int32 Rank = DigNeeded.Contains(D.Type) ? 0 : 1;
+			const double Dist = FVector::DistXY(D.LocationCm, RobotPosCm);
+			if (Rank < BestRank || (Rank == BestRank && Dist < BestDist))
+			{
+				BestRank = Rank;
+				BestDist = Dist;
+				BestId = D.Id;
+			}
+		}
+	}
+	return BestId;
+}
+
+URHSimWorldSubsystem::ERHDigStep URHSimWorldSubsystem::StepDigAtPile(const FVector& RobotPosCm, int32 RobotLevel, FRHTaskFragment& Task, float Seconds, double DigKg)
+{
+	if (IsDepositSpent(Task.DigDepositId))
+	{
+		ReleaseDigClaim(Task.DigDepositId);
+		Task = FRHTaskFragment();
+		return ERHDigStep::Released;
+	}
+	if (IsDepositWorkable(Task.DigDepositId))
+	{
+		Task.StandbyS = 0.f;
+		DigDeposit(Task.DigDepositId, DigKg);
+		return ERHDigStep::Working;
+	}
+	// The pile is full: stand by at idle draw. After DigFullHoldS of it (sim seconds, counted here; the 1 ms tolerance is far under a
+	// sub-step, so float sums of 0.1 never move a look by a sub-step) look once for another designated deposit with room, then once
+	// per further DigFullHoldS. With nowhere else to dig the claim is kept: the excavator digs here again when the haulers clear room.
+	Task.StandbyS += Seconds;
+	if ((double)Task.StandbyS + 1.e-3 < DigFullHoldS)
+	{
+		return ERHDigStep::StandingBy;
+	}
+	Task.StandbyS = 0.f;
+	if (bFleetHold)
+	{
+		return ERHDigStep::StandingBy; // storm discipline: held fleets claim nothing new
+	}
+	const int32 NextId = PickDigDeposit(RobotPosCm, RobotLevel, Task.DigDepositId);
+	if (NextId == 0)
+	{
+		return ERHDigStep::StandingBy;
+	}
+	const FRHDepositState* Old = FindDeposit(Task.DigDepositId);
+	FRHDepositState* Next = FindDeposit(NextId);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Dig swap: excavator leaves %s (pile full) for %s"),
+		Old ? *Old->RowName.ToString() : TEXT("?"), *Next->RowName.ToString());
+	ReleaseDigClaim(Task.DigDepositId);
+	Next->DigClaims++;
+	Task.DigDepositId = NextId;
+	FRHSiteRef Site; Site.DepositId = NextId;
+	Task.TargetCm = GetSiteLocation(Site);
+	Task.Phase = 0;
+	return ERHDigStep::Swapped;
 }
 
 bool URHSimWorldSubsystem::TryClaimHaul(FMassEntityHandle Robot, const FVector& RobotPosCm, FRHTask& OutTask, int32 RobotLevel)
@@ -13488,61 +13820,133 @@ bool URHSimWorldSubsystem::TryClaimBuild(FMassEntityHandle Robot, const FVector&
 	{
 		return false;
 	}
-	FRHTask* Best = nullptr;
-	double BestDist = TNumericLimits<double>::Max();
-	if (bHasTransit)
-	{
-		// D4 (REVISION item 1, O9): a robot below claims a site only when it can reach it; a surface robot keeps the linked
-		// floors (an unreachable site is worked from the surface head). One key for every candidate: DistXY to the robot's
-		// target + floors apart x LiftPlanCm; ties go to task order.
-		for (FRHTask& T : Tasks)
-		{
-			if (T.Type != ERHTaskType::Build || T.ClaimedBy.IsValid())
-			{
-				continue;
-			}
-			if (RobotLevel < 0 ? !IsRouteReachable(RobotLevel, RobotPosCm, T.To) : !AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
-			{
-				continue;
-			}
-			int32 TargetLevel = 0;
-			const FVector Target = GetRobotTarget(T.To, RobotLevel, RobotPosCm, TargetLevel);
-			const double Key = FVector::DistXY(Target, RobotPosCm) + (double)FMath::Abs(RobotLevel - TargetLevel) * (double)LiftPlanCm;
-			if (Key < BestDist)
-			{
-				BestDist = Key;
-				Best = &T;
-			}
-		}
-		if (Best)
-		{
-			Best->ClaimedBy = Robot;
-			OutTask = *Best;
-			return true;
-		}
-		return false;
-	}
-	for (FRHTask& T : Tasks)
-	{
-		// Cross-level claims allowed when the trunk links the floors: the
-		// fabricator works the shaft head, the lift carries the work (M1-d).
-		if (T.Type == ERHTaskType::Build && !T.ClaimedBy.IsValid() && AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
-		{
-			const double Dist = FVector::DistXY(GetApproachPoint(T.To, RobotLevel), RobotPosCm);
-			if (Dist < BestDist)
-			{
-				BestDist = Dist;
-				Best = &T;
-			}
-		}
-	}
-	if (Best)
+	if (FRHTask* Best = PickBuildTask(RobotPosCm, RobotLevel, 2))
 	{
 		Best->ClaimedBy = Robot;
 		OutTask = *Best;
 		return true;
 	}
 	return false;
+}
+
+FRHTask* URHSimWorldSubsystem::PickBuildTask(const FVector& RobotPosCm, int32 RobotLevel, int32 MaxTier)
+{
+	// C0-1: every unclaimed Build task this robot may take gets a tier before its distance key: 0 a part-built site (a Fabricator
+	// back from a charge returns to it first; S5b: the commons left at 80 % for the whole dome), 1 a ready site (its whole bill on
+	// site) or a road edge (labour only), 2 the rest. The lower tier wins; within a tier the key and the tie rule are the ones
+	// TryClaimBuild always had. The reach rule lives here once, for the claim and for StepBuildAtSite's swap.
+	FRHTask* Best = nullptr;
+	int32 BestRank = MAX_int32;
+	double BestDist = TNumericLimits<double>::Max();
+	for (FRHTask& T : Tasks)
+	{
+		if (T.Type != ERHTaskType::Build || T.ClaimedBy.IsValid())
+		{
+			continue;
+		}
+		double Key = 0.0;
+		if (bHasTransit)
+		{
+			// D4 (REVISION item 1, O9): a robot below claims a site only when it can reach it; a surface robot keeps the linked
+			// floors (an unreachable site is worked from the surface head). One key for every candidate: DistXY to the robot's
+			// target + floors apart x LiftPlanCm; ties go to task order.
+			if (RobotLevel < 0 ? !IsRouteReachable(RobotLevel, RobotPosCm, T.To) : !AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
+			{
+				continue;
+			}
+			int32 TargetLevel = 0;
+			const FVector Target = GetRobotTarget(T.To, RobotLevel, RobotPosCm, TargetLevel);
+			Key = FVector::DistXY(Target, RobotPosCm) + (double)FMath::Abs(RobotLevel - TargetLevel) * (double)LiftPlanCm;
+		}
+		else
+		{
+			// Cross-level claims allowed when the trunk links the floors: the
+			// fabricator works the shaft head, the lift carries the work (M1-d).
+			if (!AreLevelsLinked(GetSiteLevel(T.To), RobotLevel))
+			{
+				continue;
+			}
+			Key = FVector::DistXY(GetApproachPoint(T.To, RobotLevel), RobotPosCm);
+		}
+		int32 Tier = 1; // a road edge has no bill: ready by definition
+		if (T.To.RoadEdgeId <= 0)
+		{
+			const FRHBuildingInstance* Site = FindBuildingById(T.To.BuildingId);
+			Tier = !Site ? 2 : IsSitePartBuilt(*Site) ? 0 : IsSiteReady(*Site) ? 1 : 2;
+		}
+		if (Tier > MaxTier)
+		{
+			continue;
+		}
+		// The candidates are compared by their tier first, then by the key.
+		const int32 Rank = Tier;
+		if (Rank < BestRank || (Rank == BestRank && Key < BestDist))
+		{
+			BestRank = Rank;
+			BestDist = Key;
+			Best = &T;
+		}
+	}
+	return Best;
+}
+
+URHSimWorldSubsystem::ERHBuildStep URHSimWorldSubsystem::StepBuildAtSite(FMassEntityHandle Robot, const FVector& RobotPosCm, int32 RobotLevel, FRHTaskFragment& Task, float Seconds, float WorkSeconds)
+{
+	// C4: a road edge is labour only (its own slot, never the site id).
+	if (Task.RoadEdgeId > 0)
+	{
+		if (ApplyRoadWork(Task.RoadEdgeId, WorkSeconds))
+		{
+			CompleteTask(Task.TaskId);
+			Task = FRHTaskFragment();
+			return ERHBuildStep::Done;
+		}
+		return ERHBuildStep::Working;
+	}
+	const FRHBuildingInstance* Site = FindBuildingById(Task.DigDepositId);
+	// Ready, or gone, or finished by someone else (ApplyBuildWork then says done).
+	const bool bReady = !Site || !Site->bUnderConstruction || IsSiteReady(*Site);
+	if (bReady && ApplyBuildWork(Task.DigDepositId, WorkSeconds, RobotLevel))
+	{
+		CompleteTask(Task.TaskId);
+		Task = FRHTaskFragment();
+		return ERHBuildStep::Done;
+	}
+	// A Fabricator on a ready site never looks elsewhere: once it starts fabricating it keeps the site to the end.
+	if (bReady)
+	{
+		Task.StandbyS = 0.f;
+		return ERHBuildStep::Working;
+	}
+	// Not ready: stand by at idle draw. After BuildSwapCheckS of it (sim seconds, counted here; the 1 ms tolerance is far under a
+	// sub-step, so float sums of 0.1 never move a look by a sub-step) look once for a site a Fabricator can work now.
+	Task.StandbyS += Seconds;
+	if ((double)Task.StandbyS + 1.e-3 < BuildSwapCheckS)
+	{
+		return ERHBuildStep::StandingBy;
+	}
+	Task.StandbyS = 0.f;
+	if (bFleetHold)
+	{
+		return ERHBuildStep::StandingBy; // storm discipline: held fleets claim nothing new
+	}
+	FRHTask* Next = PickBuildTask(RobotPosCm, RobotLevel, 1);
+	if (!Next)
+	{
+		return ERHBuildStep::StandingBy;
+	}
+	const FRHBuildingInstance* To = FindBuildingById(Next->To.BuildingId);
+	UE_LOG(LogRedHopeSim, Display, TEXT("Build swap: Fabricator leaves %s #%d (not ready) for %s #%d"),
+		*Site->DefName.ToString(), Site->Id, To ? *To->DefName.ToString() : TEXT("road edge"), To ? To->Id : Next->To.RoadEdgeId);
+	AbandonTask(Task.TaskId);
+	Next->ClaimedBy = Robot;
+	const FRHSiteRef NextTo = Next->To;
+	Task.TaskId = Next->Id;
+	Task.DigDepositId = NextTo.BuildingId; // reused slot: construction site id
+	Task.RoadEdgeId = NextTo.RoadEdgeId;
+	Task.TargetCm = GetRobotTarget(NextTo, RobotLevel, RobotPosCm, Task.TargetLevel);
+	Task.Phase = 0;
+	return ERHBuildStep::Swapped;
 }
 
 bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds, int32 RobotLevel)
@@ -13556,13 +13960,9 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds, int3
 	// bringing it; multi-resource since M1-a; Level-taxed since M1-d Gate B).
 	const FRHBuildingRow* Def = Defs->GetBuilding(B->DefName);
 	const TMap<FName, double> Cost = Def ? GetSiteBill(*B) : TMap<FName, double>();
-	for (const auto& Line : Cost)
+	if (!IsSiteReady(*B))
 	{
-		const double* Delivered = B->InputKg.Find(Line.Key);
-		if (!Delivered || *Delivered + 0.5 < Line.Value)
-		{
-			return false; // standing by for materials; no work progress
-		}
+		return false; // standing by for materials (C0a: or for its shell or its link); no work progress
 	}
 	// Station tiers (Gate A): staffed workstation-line seats speed construction
 	// alongside the Toolkit multiplier. Zero pop or an unarmed bonus knob
@@ -13579,8 +13979,24 @@ bool URHSimWorldSubsystem::ApplyBuildWork(int32 BuildingId, double Seconds, int3
 			double& Held = B->InputKg.FindOrAdd(Line.Key);
 			const double HeldBeforeKg = Held; // E1: held before minus held after (the clamp makes it min(held, bill))
 			Held = FMath::Max(0.0, Held - Line.Value);
-			NoteFlow(Line.Key, ERHLedgerLeg::Used, HeldBeforeKg - Held);
+			const double UsedKg = HeldBeforeKg - Held;
+			NoteFlow(Line.Key, ERHLedgerLeg::Used, UsedKg);
 			OnStockChanged.Broadcast(Line.Key, GetTotalSolid(Line.Key));
+			// C0-3: what the Shielding on site did not cover of the surface Shielding line is paid from the Regolith on site, at the
+			// ratio (forge-made Shielding is used first).
+			if (UsedKg < Line.Value && IsSurfaceShieldingLine(*B, Line.Key))
+			{
+				if (double* HeldRegolith = B->InputKg.Find(NAME_C0Regolith))
+				{
+					const double UsedRegolithKg = FMath::Min(*HeldRegolith, (Line.Value - UsedKg) * ShieldingRegolithPerKg);
+					if (UsedRegolithKg > 0.0)
+					{
+						*HeldRegolith -= UsedRegolithKg;
+						NoteFlow(NAME_C0Regolith, ERHLedgerLeg::Used, UsedRegolithKg);
+						OnStockChanged.Broadcast(NAME_C0Regolith, GetTotalSolid(NAME_C0Regolith));
+					}
+				}
+			}
 		}
 		if (Def)
 		{
@@ -14150,6 +14566,434 @@ void URHSimWorldSubsystem::AbandonTask(int32 TaskId)
 	{
 		T->ClaimedBy = FMassEntityHandle();
 	}
+}
+
+// --- C0a "Building that finishes" (2026-11-10): the rules every item reads, each stated once ---
+
+bool URHSimWorldSubsystem::IsSurfaceShieldingLine(const FRHBuildingInstance& Site, FName Line) const
+{
+	if (Line != NAME_C0Shielding || Site.Level < 0 || ShieldingRegolithPerKg <= 0.0)
+	{
+		return false;
+	}
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(Site.DefName) : nullptr;
+	return Def && Def->SurfaceShielding_kg > 0.f;
+}
+
+double URHSimWorldSubsystem::GetSiteLinePaidKg(const FRHBuildingInstance& Site, FName Line) const
+{
+	double PaidKg = Site.InputKg.FindRef(Line);
+	if (IsSurfaceShieldingLine(Site, Line))
+	{
+		PaidKg += Site.InputKg.FindRef(NAME_C0Regolith) / ShieldingRegolithPerKg;
+	}
+	return PaidKg;
+}
+
+bool URHSimWorldSubsystem::IsSiteLineShort(const FRHBuildingInstance& Site, FName Line, double NeedKg) const
+{
+	// ApplyBuildWork's rule since M1-a: a line nothing was ever delivered for is short whatever its size; else short while what is
+	// paid is more than 0.5 kg under the bill.
+	const bool bAnyDelivered = Site.InputKg.Contains(Line) || (IsSurfaceShieldingLine(Site, Line) && Site.InputKg.Contains(NAME_C0Regolith));
+	return !bAnyDelivered || GetSiteLinePaidKg(Site, Line) + 0.5 < NeedKg;
+}
+
+int32 URHSimWorldSubsystem::GetSiteBlockerLine(const FRHBuildingInstance& Site, FName& OutLine) const
+{
+	int32 Index = 0;
+	for (const auto& Line : GetSiteBill(Site))
+	{
+		if (IsSiteLineShort(Site, Line.Key, Line.Value))
+		{
+			OutLine = Line.Key;
+			return Index;
+		}
+		++Index;
+	}
+	return INDEX_NONE;
+}
+
+bool URHSimWorldSubsystem::IsSiteWaitingForLink(const FRHBuildingInstance& Site) const
+{
+	// C0-4: a chain builds outward from the grid. A pylon-like site on the surface is not ready until a FINISHED node stands within
+	// its own link range, so a finished pylon is never linked only through a site.
+	const FRHBuildingRow* Def = (Site.bUnderConstruction && Site.Level >= 0 && Defs) ? Defs->GetBuilding(Site.DefName) : nullptr;
+	if (!Def || Def->CoverageRadius_m <= 0.f || Def->LinkRange_m <= 0.f)
+	{
+		return false;
+	}
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.bUnderConstruction || B.Level != Site.Level)
+		{
+			continue;
+		}
+		const FRHBuildingRow* NodeDef = Defs->GetBuilding(B.DefName);
+		if (NodeDef && NodeDef->CoverageRadius_m > 0.f && FVector::DistXY(B.LocationCm, Site.LocationCm) <= Def->LinkRange_m * 100.0)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+const FRHBuildingInstance* URHSimWorldSubsystem::FindShellAround(const FRHBuildingRow* MachineDef, const FVector& LocationCm) const
+{
+	const FVector2D Half = GetFootprintHalfCm(MachineDef, 1, 1);
+	for (const FRHBuildingInstance& H : Buildings)
+	{
+		const FRHBuildingRow* HDef = (H.Level == 0 && Defs) ? Defs->GetBuilding(H.DefName) : nullptr;
+		int32 Bay = INDEX_NONE;
+		if (HDef && HDef->Pressurized && IsWhollyInBay(H, LocationCm, Half, Bay))
+		{
+			return &H;
+		}
+	}
+	return nullptr;
+}
+
+bool URHSimWorldSubsystem::IsSiteWaitingForShell(const FRHBuildingInstance& Site) const
+{
+	// C0-11: an interior machine ordered into a shell waits for the shell to stand.
+	const FRHBuildingRow* Def = (Site.bUnderConstruction && Site.Level == 0 && Defs) ? Defs->GetBuilding(Site.DefName) : nullptr;
+	if (!Def || !Def->Interior)
+	{
+		return false;
+	}
+	const FRHBuildingInstance* Shell = FindShellAround(Def, Site.LocationCm);
+	return Shell && Shell->bUnderConstruction;
+}
+
+int32 URHSimWorldSubsystem::GetSiteWaitsOnId(const FRHBuildingInstance& Site) const
+{
+	const FRHBuildingRow* Def = Defs ? Defs->GetBuilding(Site.DefName) : nullptr;
+	if (!Def)
+	{
+		return 0;
+	}
+	if (IsSiteWaitingForShell(Site))
+	{
+		const FRHBuildingInstance* Shell = FindShellAround(Def, Site.LocationCm);
+		return Shell ? Shell->Id : 0;
+	}
+	if (IsSiteWaitingForLink(Site))
+	{
+		int32 BestId = 0;
+		double BestDist = 0.0;
+		for (const FRHBuildingInstance& B : Buildings)
+		{
+			const FRHBuildingRow* NodeDef = (B.bUnderConstruction && B.Level == Site.Level && B.Id != Site.Id) ? Defs->GetBuilding(B.DefName) : nullptr;
+			if (!NodeDef || NodeDef->CoverageRadius_m <= 0.f || NodeDef->LinkRange_m <= 0.f)
+			{
+				continue;
+			}
+			const double Dist = FVector::DistXY(B.LocationCm, Site.LocationCm);
+			if (Dist <= Def->LinkRange_m * 100.0 && (BestId == 0 || Dist < BestDist))
+			{
+				BestId = B.Id;
+				BestDist = Dist;
+			}
+		}
+		return BestId;
+	}
+	return 0;
+}
+
+bool URHSimWorldSubsystem::FindQueuedShellBay(const FRHBuildingRow* MachineDef, const FVector& LocationCm, int32 Level, int32 ExceptCommandId) const
+{
+	if (!MachineDef || !Defs)
+	{
+		return false;
+	}
+	const FVector2D Half = GetFootprintHalfCm(MachineDef, 1, 1);
+	for (const FRHCommand& C : UplinkQueue)
+	{
+		if (C.Verb != FName("Build") || C.Level != Level || (ExceptCommandId != 0 && C.CommandId == ExceptCommandId))
+		{
+			continue;
+		}
+		const FRHBuildingRow* QDef = Defs->GetBuilding(C.Target);
+		if (!QDef || !QDef->Pressurized)
+		{
+			continue;
+		}
+		// The shell as AddBuilding will place it: the row, the decoded size, snapped to the bay grid.
+		const FIntPoint QSize = QDef->DragSized ? DecodeBuildSize(C.Value) : FIntPoint(1, 1);
+		FRHBuildingInstance QShell;
+		QShell.DefName = C.Target;
+		QShell.Level = Level;
+		QShell.SizeX = QSize.X;
+		QShell.SizeY = QSize.Y;
+		QShell.LocationCm = SnapToBayGrid(QDef, C.Location, QSize.X, QSize.Y);
+		int32 Bay = INDEX_NONE;
+		if (IsWhollyInBay(QShell, LocationCm, Half, Bay))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool URHSimWorldSubsystem::IsSiteReady(const FRHBuildingInstance& Site) const
+{
+	if (!Site.bUnderConstruction)
+	{
+		return false;
+	}
+	for (const auto& Line : GetSiteBill(Site))
+	{
+		if (IsSiteLineShort(Site, Line.Key, Line.Value))
+		{
+			return false;
+		}
+	}
+	return !IsSiteWaitingForShell(Site) && !IsSiteWaitingForLink(Site);
+}
+
+bool URHSimWorldSubsystem::IsSitePartBuilt(const FRHBuildingInstance& Site) const
+{
+	const FRHBuildingRow* Def = (Site.bUnderConstruction && Defs) ? Defs->GetBuilding(Site.DefName) : nullptr;
+	return Def && Site.BuildRemaining_s < Def->BuildTime_s * GetBedCount(Site) - KINDA_SMALL_NUMBER;
+}
+
+double URHSimWorldSubsystem::GetRegolithToPackKg(int32 Level) const
+{
+	double Kg = 0.0;
+	for (const FRHBuildingInstance& B : Buildings)
+	{
+		if (B.bUnderConstruction || !AreLevelsLinked(B.Level, Level))
+		{
+			continue;
+		}
+		if (B.DefName == NAME_Stockpile || B.DefName == NAME_Lander)
+		{
+			Kg += B.InputKg.FindRef(NAME_C0Regolith); // a store's held stock; never a machine's hopper
+		}
+		Kg += B.OutputKg.FindRef(NAME_C0Regolith);    // any finished building's output (the Borer's spoil)
+	}
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Level == Level && D.bDiscovered && !D.bOutpost && D.Type == NAME_C0Regolith)
+		{
+			Kg += D.PileKg;
+		}
+	}
+	return Kg;
+}
+
+bool URHSimWorldSubsystem::HasOpenHaulTo(int32 SiteId, FName Resource, bool* bOutClaimed) const
+{
+	bool bFound = false;
+	for (const FRHTask& T : Tasks)
+	{
+		if (T.Type == ERHTaskType::Haul && T.To.BuildingId == SiteId && T.Resource == Resource)
+		{
+			bFound = true;
+			if (bOutClaimed && T.ClaimedBy.IsValid())
+			{
+				*bOutClaimed = true;
+			}
+		}
+	}
+	return bFound;
+}
+
+bool URHSimWorldSubsystem::GetSiteLineState(int32 SiteId, FName Line, FRHSiteLineState& Out) const
+{
+	const FRHBuildingInstance* Site = FindBuildingById(SiteId);
+	if (!Site || !Site->bUnderConstruction)
+	{
+		return false;
+	}
+	const TMap<FName, double> Bill = GetSiteBill(*Site);
+	const double* NeedKg = Bill.Find(Line);
+	if (!NeedKg)
+	{
+		return false;
+	}
+	Out = FRHSiteLineState();
+	Out.NeedKg = *NeedKg;
+	Out.PaidKg = GetSiteLinePaidKg(*Site, Line);
+	Out.bRegolithRoute = IsSurfaceShieldingLine(*Site, Line);
+	Out.RegolithKg = Out.bRegolithRoute ? Site->InputKg.FindRef(NAME_C0Regolith) : 0.0;
+	Out.bShort = IsSiteLineShort(*Site, Line, Out.NeedKg);
+	// What the site-delivery leg could take: the line's own resource in a finished building on a linked level (its source search).
+	for (const FRHBuildingInstance& S : Buildings)
+	{
+		if (!S.bUnderConstruction && S.Id != Site->Id && AreLevelsLinked(S.Level, Site->Level))
+		{
+			Out.InStoreKg += S.InputKg.FindRef(Line) + S.OutputKg.FindRef(Line);
+		}
+	}
+	bool bClaimed = false;
+	Out.bHaulPosted = HasOpenHaulTo(SiteId, Line, &bClaimed);
+	if (Out.bRegolithRoute)
+	{
+		Out.RegolithToPackKg = GetRegolithToPackKg(Site->Level) / ShieldingRegolithPerKg;
+		Out.bHaulPosted = HasOpenHaulTo(SiteId, NAME_C0Regolith, &bClaimed) || Out.bHaulPosted;
+	}
+	Out.bHaulClaimed = bClaimed;
+	Out.bProducer = HasProducerFor(Line);
+	return true;
+}
+
+void URHSimWorldSubsystem::RefreshStalledSites()
+{
+	// C0-12 (EraStallReadS, PLACEHOLDER): a read at most once per EraStallReadS of sim time (every era step in the era band, every
+	// 100th sub-step in the agent band), never on the wall clock; LastStallReadS < 0 (boot, a load) reads on the next step.
+	// (The microsecond of tolerance is for the clock's own float sums: a hundred sub-steps of 0.1 s must count as 10 s.)
+	const double NowS = GetStepEndSeconds();
+	if (LastStallReadS >= 0.0 && NowS - LastStallReadS < EraStallReadS - 1.e-6)
+	{
+		return;
+	}
+	LastStallReadS = NowS;
+	++StallReads;
+	StalledSites.Reset();
+	for (const FRHBuildingInstance& Site : Buildings)
+	{
+		if (!Site.bUnderConstruction || IsSiteWaitingForShell(Site) || IsSiteWaitingForLink(Site))
+		{
+			continue;
+		}
+		// Stalled: a short line, and EVERY short line has none in a store, no haul on its way, nothing able to make it (no finished
+		// building has a recipe that outputs it: true in both bands) and, on the surface Shielding line, no regolith to pack and no
+		// designated regolith deposit with mass left. Such a site cannot progress in either band until a ship, a trade, a refund or
+		// a new producer (a site itself) puts the material in a store, where the next read finds it.
+		bool bAnyShort = false;
+		bool bAllStalled = true;
+		for (const auto& Line : GetSiteBill(Site))
+		{
+			FRHSiteLineState State;
+			if (!GetSiteLineState(Site.Id, Line.Key, State) || !State.bShort)
+			{
+				continue;
+			}
+			bAnyShort = true;
+			bool bComing = State.InStoreKg > 0.0 || State.bHaulPosted || State.bProducer;
+			if (!bComing && State.bRegolithRoute)
+			{
+				bComing = State.RegolithToPackKg > 0.0;
+				for (const FRHDepositState& D : Deposits)
+				{
+					if (!bComing && D.Level == Site.Level && D.bDiscovered && !D.bOutpost && D.Type == NAME_C0Regolith && D.bDesignated && D.RemainingKg > 0.0)
+					{
+						bComing = true;
+					}
+				}
+			}
+			if (bComing)
+			{
+				bAllStalled = false;
+				break;
+			}
+		}
+		if (bAnyShort && bAllStalled)
+		{
+			StalledSites.Add(Site.Id);
+		}
+	}
+}
+
+bool URHSimWorldSubsystem::GetExtractorDepositTypes(FName DefName, TArray<FName>& Out) const
+{
+	// The kinds an extractor draws: the outputs of its runnable recipes with no inputs (today DrillIce: Ice).
+	Out.Reset();
+	if (!Defs)
+	{
+		return false;
+	}
+	TArray<const FRHRecipeRow*> Seen;
+	for (int32 Guard = 0; Guard < 8; ++Guard)
+	{
+		const FRHRecipeRow* Row = Defs->FindRunnableRecipe(DefName,
+			[](const TMap<FName, double>& Inputs) { return Inputs.Num() == 0; },
+			[&Seen](const FRHRecipeRow& Candidate) { return !Seen.Contains(&Candidate); });
+		if (!Row)
+		{
+			break;
+		}
+		Seen.Add(Row);
+		for (const auto& Made : URHDefinitionsSubsystem::ParseResourceList(Row->Outputs))
+		{
+			Out.AddUnique(Made.Key);
+		}
+	}
+	return Out.Num() > 0;
+}
+
+const FRHDepositState* URHSimWorldSubsystem::FindExtractorDeposit(FName DefName, const FVector& LocationCm, int32 Level) const
+{
+	// The nearest discovered deposit on the level within 12 m whose kind this extractor draws; ties to the lower Id. A row with no
+	// input-free recipe (none today) keeps the old rule: any discovered deposit.
+	TArray<FName> Kinds;
+	GetExtractorDepositTypes(DefName, Kinds);
+	const FRHDepositState* Best = nullptr;
+	double BestDist = 0.0;
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Level != Level || !D.bDiscovered || (Kinds.Num() > 0 && !Kinds.Contains(D.Type)))
+		{
+			continue;
+		}
+		const double Dist = FVector::DistXY(D.LocationCm, LocationCm);
+		if (Dist <= 1200.0 && (!Best || Dist < BestDist || (Dist == BestDist && D.Id < Best->Id)))
+		{
+			Best = &D;
+			BestDist = Dist;
+		}
+	}
+	return Best;
+}
+
+bool URHSimWorldSubsystem::IsExtractorOffDeposit(int32 BuildingId) const
+{
+	const FRHBuildingInstance* B = FindBuildingById(BuildingId);
+	const FRHBuildingRow* Def = (B && Defs) ? Defs->GetBuilding(B->DefName) : nullptr;
+	if (!Def || !Def->RequiresDeposit)
+	{
+		return false;
+	}
+	if (B->AttachedDepositId == 0)
+	{
+		return true;
+	}
+	TArray<FName> Kinds;
+	GetExtractorDepositTypes(B->DefName, Kinds);
+	for (const FRHDepositState& D : Deposits)
+	{
+		if (D.Id == B->AttachedDepositId)
+		{
+			return Kinds.Num() > 0 && !Kinds.Contains(D.Type);
+		}
+	}
+	return true; // attached to a deposit that no longer exists
+}
+
+bool URHSimWorldSubsystem::IsPrefabShell(const FRHBuildingRow* Def)
+{
+	return Def && Def->Pressurized && !Def->DragSized; // data, never a name compare (today only Habitat)
+}
+
+int32 URHSimWorldSubsystem::GetNetMinBays(const FRHHabNetCache& N) const
+{
+	// C0-10 (C0-Q4 A): a network made only of prefabs is livable at its own bays; one that also holds a Habitat Bay or a corridor
+	// keeps the minimum shared with floors.
+	for (const int32 Id : N.Members)
+	{
+		const FRHBuildingInstance* B = FindBuildingById(Id);
+		if (!B || !IsPrefabShell(Defs ? Defs->GetBuilding(B->DefName) : nullptr))
+		{
+			return MinLivableCells;
+		}
+	}
+	return N.Members.Num() > 0 ? FMath::Min(MinLivableCells, N.Bays) : MinLivableCells;
+}
+
+int32 URHSimWorldSubsystem::GetHabNetMinBays(int32 HabId) const
+{
+	const FRHHabNetCache* N = FindHabNet(HabId);
+	return N ? GetNetMinBays(*N) : MinLivableCells;
 }
 
 // --- helpers ---
@@ -14828,6 +15672,10 @@ bool URHSimWorldSubsystem::LoadColony(const FString& Slot, FString& OutError)
 	DepotBindings.Reset(); // E7: the harness depot binding is runtime-only
 	LastBlackoutNight = -1; // D5a runtime latch: re-seen within a step if the blackout continues
 	ShedSeen.Reset();                 // G1 shed observer: runtime only, starts empty with the loaded colony
+	StalledSites.Reset();             // C0-12: runtime only; the first step after the load re-reads (until then every site holds 60x)
+	LastStallReadS = -1.0;
+	DigNeeded.Reset();                // C0-2: rebuilt by the first task-board step
+	RefusedShells.Reset();            // C0-11: words only
 	ShedColony = FRHShedColony();
 	PadQueues.Reset();
 	SurveyHistory.Reset();

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "RHDefinitionsSubsystem.h"
 #include "RHSimTypes.h"
+#include "RHSimWorldSubsystem.h"
 #include "Data/RHRows.h"
 
 // D74 (Gate-D framing review, 2026-10-21): the words the player reads for an order. The sim's verbs stay
@@ -32,6 +33,7 @@ namespace RHOrder
 		if (Verb == FName("OpenAtrium"))    { return TEXT("Open atrium"); }  // D7 (PLACEHOLDER, gate-d-wording L21)
 		if (Verb == FName("CloseAtrium"))   { return TEXT("Close atrium"); } // D7 (PLACEHOLDER, gate-d-wording L21)
 		if (Verb == FName("Move"))          { return TEXT("Move"); }         // BM-7 (PLACEHOLDER, gate-d-wording B8): a furnishing's or a fitting's free move
+		if (Verb == FName("StopDig"))       { return TEXT("Stop digging"); } // C0-2 (PLACEHOLDER, gate-d-wording BF12): "Stop digging Regolith A"
 		// G2a fix round 1 (PLACEHOLDER, gate-d-wording PW23): the sim's two-word verbs read as words on the uplink list and in the rejection
 		// notice ("SinkShaft" showed as is); any verb not mapped here is spaced out, never shown as a CamelCase key.
 		if (Verb == FName("SinkShaft"))     { return TEXT("Sink shaft"); }
@@ -241,6 +243,69 @@ namespace RHOrder
 		const FString What = TargetText(Defs, Target);
 		if (Doing.IsEmpty() && What.IsEmpty()) { return TEXT("Order"); }
 		return Doing.IsEmpty() ? What : What.IsEmpty() ? Doing : Doing + TEXT(" ") + What;
+	}
+
+	// C0-6 (round 1): the ONE meaning of "in store" on every C0a line (the site card's suffix, the ghost's chain line, the dome's
+	// Glass lines): what could be taken from a store now, that is the colony's pool plus what finished buildings on a level linked to
+	// Level hold. Material already delivered to a site is on that site, not in store. The sim's FRHSiteLineState::InStoreKg, which the
+	// card's suffix reads, counts the finished buildings the same way (its delivery leg cannot take from the pool).
+	inline double InStoreKg(const URHSimWorldSubsystem* Sim, FName Resource, int32 Level)
+	{
+		if (!Sim)
+		{
+			return 0.0;
+		}
+		double Kg = Sim->GetStock(Resource);
+		for (const FRHBuildingInstance& B : Sim->GetBuildings())
+		{
+			if (!B.bUnderConstruction && Sim->AreLevelsLinked(B.Level, Level))
+			{
+				Kg += B.InputKg.FindRef(Resource) + B.OutputKg.FindRef(Resource);
+			}
+		}
+		return Kg;
+	}
+
+	// C0-6 (PLACEHOLDER, gate-d-wording BF8, BF9): where a material comes from, for a site line with none in store and for the ghost's
+	// chain line. "made at the Forge from Structural Materials and Ore" when some live building row has a live recipe that makes it (the
+	// first such row in table order; the building's name with a leading "The " dropped; the recipe's inputs by display name), else "comes
+	// by supply ship"; then ", or packed from regolith" on the surface Shielding line. With bWithCounts (the ghost) an input the colony
+	// holds none of is followed by " (0 kg <name>)".
+	inline FString SourceText(const URHDefinitionsSubsystem* Defs, const URHSimWorldSubsystem* Sim, FName Resource, bool bRegolithRoute, bool bWithCounts)
+	{
+		FString Out;
+		if (Defs)
+		{
+			Defs->ForEachBuilding([&](FName Name, const FRHBuildingRow& Row)
+			{
+				const FRHRecipeRow* Recipe = (Out.IsEmpty() && Row.SliceActive) ? Defs->FindRecipeByOutput(Name, Resource) : nullptr;
+				if (!Recipe)
+				{
+					return;
+				}
+				TArray<FString> From;
+				for (const TPair<FName, double>& In : URHDefinitionsSubsystem::ParseResourceList(Recipe->Inputs))
+				{
+					FString Part = ResourceName(Defs, In.Key);
+					if (bWithCounts && Sim && Sim->GetTotalSolid(In.Key) + Sim->GetStock(In.Key) <= 0.0)
+					{
+						Part += FString::Printf(TEXT(" (0 kg %s)"), *ResourceName(Defs, In.Key));
+					}
+					From.Add(MoveTemp(Part));
+				}
+				Out = From.Num() > 0 ? FString::Printf(TEXT("made at the %s from %s"), *BuildingName(Defs, Name), *FString::Join(From, TEXT(" and ")))
+					: FString::Printf(TEXT("made at the %s"), *BuildingName(Defs, Name));
+			});
+		}
+		if (Out.IsEmpty())
+		{
+			Out = TEXT("comes by supply ship");
+		}
+		if (bRegolithRoute)
+		{
+			Out += TEXT(", or packed from regolith");
+		}
+		return Out;
 	}
 
 	// G2b (B4, PLACEHOLDER, gate-d-wording MS5): a manifest item's CSV DisplayName ("Solar Array Flat-Pack"), else the key spaced out; None
